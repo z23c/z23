@@ -397,64 +397,64 @@ static ztoml_err ztoml__pair(ztoml *t, ztoml_ev *ev) {
   return ZTOML_OK;
 }
 
-ztoml_err ztoml_next(ztoml *t, ztoml_ev *ev) {
-  if (t == NULL || ev == NULL) return ZTOML_ERR_ARG;
-  memset(ev, 0, sizeof(*ev));
-  if (t->err != ZTOML_OK) return t->err;
-
-  /* Continuation of a pair: the value follows the '='. */
-  if (t->pair_pending) {
-    ztoml_err e;
-    t->pair_pending = 0;
-    e = ztoml__value(t, ev);
-    if (e == ZTOML_OK && t->arr_depth > 0 && ev->kind == ZTOML_EV_VALUE)
-      t->arr_after_value[t->arr_depth - 1] = 1;
-    return e;
-  }
-
-  /* Inside an array: separators, elements, close. Newlines allowed. */
-  if (t->arr_depth > 0) {
-    for (;;) {
-      char c;
-      if (t->pos >= t->len)
-        return ztoml__fail(t, ZTOML_ERR_SYNTAX, t->len); /* unclosed [ */
-      c = t->doc[t->pos];
-      if (c == '\n') {
-        t->pos++;
-        t->line++;
-        continue;
-      }
-      if (c == ',') {
-        if (!t->arr_after_value[t->arr_depth - 1])
-          return ztoml__fail(t, ZTOML_ERR_SYNTAX, t->pos);
-        t->pos++;
-        t->arr_after_value[t->arr_depth - 1] = 0;
-        t->arr_first[t->arr_depth - 1] = 0;
-        continue;
-      }
-      if (c == ']') {
-        t->pos++;
-        t->arr_depth--;
-        if (t->arr_depth > 0)
-          t->arr_after_value[t->arr_depth - 1] = 1; /* nested done */
-        ev->kind = ZTOML_EV_ARR_CLOSE;
-        return ZTOML_OK;
-      }
-      if (ztoml__ws(c) || c == '#') {
-        ztoml__skip_inline(t);
-        continue;
-      }
-      if (t->arr_after_value[t->arr_depth - 1])
-        return ztoml__fail(t, ZTOML_ERR_SYNTAX, t->pos); /* missing , */
-      {
-        ztoml_err e = ztoml__value(t, ev);
-        if (e == ZTOML_OK && ev->kind == ZTOML_EV_VALUE)
-          t->arr_after_value[t->arr_depth - 1] = 1;
-        return e;
-      }
+/* Inside an array: separators, elements, close. Newlines allowed. */
+static ztoml_err ztoml__array_next(ztoml *t, ztoml_ev *ev) {
+  for (;;) {
+    char c;
+    if (t->pos >= t->len)
+      return ztoml__fail(t, ZTOML_ERR_SYNTAX, t->len); /* unclosed [ */
+    c = t->doc[t->pos];
+    if (c == '\n') {
+      t->pos++;
+      t->line++;
+      continue;
+    }
+    if (c == ',') {
+      if (!t->arr_after_value[t->arr_depth - 1])
+        return ztoml__fail(t, ZTOML_ERR_SYNTAX, t->pos);
+      t->pos++;
+      t->arr_after_value[t->arr_depth - 1] = 0;
+      t->arr_first[t->arr_depth - 1] = 0;
+      continue;
+    }
+    if (c == ']') {
+      t->pos++;
+      t->arr_depth--;
+      if (t->arr_depth > 0)
+        t->arr_after_value[t->arr_depth - 1] = 1; /* nested done */
+      ev->kind = ZTOML_EV_ARR_CLOSE;
+      return ZTOML_OK;
+    }
+    if (ztoml__ws(c) || c == '#') {
+      ztoml__skip_inline(t);
+      continue;
+    }
+    if (t->arr_after_value[t->arr_depth - 1])
+      return ztoml__fail(t, ZTOML_ERR_SYNTAX, t->pos); /* missing , */
+    {
+      ztoml_err e = ztoml__value(t, ev);
+      if (e == ZTOML_OK && ev->kind == ZTOML_EV_VALUE)
+        t->arr_after_value[t->arr_depth - 1] = 1;
+      return e;
     }
   }
+}
 
+static int ztoml__line_start(const ztoml *t) {
+  size_t scan = t->pos;
+  while (scan > 0) {
+    char pc = t->doc[scan - 1];
+    if (pc == '\n') break;
+    if (ztoml__ws(pc)) {
+      scan--;
+      continue;
+    }
+    return 0;
+  }
+  return 1;
+}
+
+static ztoml_err ztoml__top_next(ztoml *t, ztoml_ev *ev) {
   /* Top level. */
   for (;;) {
     char c;
@@ -478,24 +478,30 @@ ztoml_err ztoml_next(ztoml *t, ztoml_ev *ev) {
       /* Bare keys only at line start: TOML pair per line. We accept
        * leniently: a pair may follow ws after a newline only. Enforce
        * by checking previous non-ws char was newline or doc start. */
-      size_t scan = t->pos;
-      int line_start = 1;
-      while (scan > 0) {
-        char pc = t->doc[scan - 1];
-        if (pc == '\n') break;
-        if (ztoml__ws(pc)) {
-          scan--;
-          continue;
-        }
-        line_start = 0;
-        break;
-      }
-      if (!line_start)
+      if (!ztoml__line_start(t))
         return ztoml__fail(t, ZTOML_ERR_SYNTAX, t->pos);
       return ztoml__pair(t, ev);
     }
     return ztoml__fail(t, ZTOML_ERR_SYNTAX, t->pos);
   }
+}
+
+ztoml_err ztoml_next(ztoml *t, ztoml_ev *ev) {
+  if (t == NULL || ev == NULL) return ZTOML_ERR_ARG;
+  memset(ev, 0, sizeof(*ev));
+  if (t->err != ZTOML_OK) return t->err;
+
+  /* Continuation of a pair: the value follows the '='. */
+  if (t->pair_pending) {
+    ztoml_err e;
+    t->pair_pending = 0;
+    e = ztoml__value(t, ev);
+    if (e == ZTOML_OK && t->arr_depth > 0 && ev->kind == ZTOML_EV_VALUE)
+      t->arr_after_value[t->arr_depth - 1] = 1;
+    return e;
+  }
+  if (t->arr_depth > 0) return ztoml__array_next(t, ev);
+  return ztoml__top_next(t, ev);
 }
 
 /* ---- string decoding ------------------------------------------------------ */
@@ -538,6 +544,43 @@ static size_t ztoml__emit_cp(uint32_t cp, char *dst, size_t cap,
   return len;
 }
 
+static size_t ztoml__emit_char(char c, char *dst, size_t cap, size_t out) {
+  if (dst != NULL && out + 1 < cap) dst[out] = c;
+  return out + 1;
+}
+
+static size_t ztoml__unicode(const char *ptr, size_t len, size_t *i,
+                              int ndigits, char *dst, size_t cap, size_t out) {
+  uint32_t cp = 0;
+  int k;
+  if (*i + (size_t)ndigits > len) return SIZE_MAX;
+  for (k = 0; k < ndigits; k++) {
+    int v = ztoml__hexval(ptr[*i + (size_t)k]);
+    if (v < 0) return SIZE_MAX;
+    cp = (cp << 4) | (uint32_t)v;
+  }
+  *i += (size_t)ndigits;
+  if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+    return SIZE_MAX; /* lone surrogate / out of range */
+  return ztoml__emit_cp(cp, dst, cap, out);
+}
+
+static size_t ztoml__escape(char c, const char *ptr, size_t len, size_t *i,
+                           char *dst, size_t cap, size_t out) {
+  switch (c) {
+  case '"': case '\\': return ztoml__emit_char(c, dst, cap, out);
+  case 'b': return ztoml__emit_char('\b', dst, cap, out);
+  case 't': return ztoml__emit_char('\t', dst, cap, out);
+  case 'n': return ztoml__emit_char('\n', dst, cap, out);
+  case 'f': return ztoml__emit_char('\f', dst, cap, out);
+  case 'r': return ztoml__emit_char('\r', dst, cap, out);
+  case 'u': case 'U':
+    return ztoml__unicode(ptr, len, i, c == 'u' ? 4 : 8, dst, cap, out);
+  default:
+    return SIZE_MAX; /* unknown escape */
+  }
+}
+
 size_t ztoml_str_decode(const char *ptr, size_t len, char *dst,
                         size_t cap) {
   size_t i = 0, out = 0;
@@ -545,44 +588,15 @@ size_t ztoml_str_decode(const char *ptr, size_t len, char *dst,
   while (i < len) {
     char c = ptr[i];
     if (c != '\\') {
-      if (dst != NULL && out + 1 < cap) dst[out] = c;
-      out++;
+      out = ztoml__emit_char(c, dst, cap, out);
       i++;
       continue;
     }
     i++;
     if (i >= len) return SIZE_MAX;
     c = ptr[i++];
-    switch (c) {
-    case '"': case '\\': {
-      if (dst != NULL && out + 1 < cap) dst[out] = c;
-      out++;
-      break;
-    }
-    case 'b': if (dst != NULL && out + 1 < cap) dst[out] = '\b'; out++; break;
-    case 't': if (dst != NULL && out + 1 < cap) dst[out] = '\t'; out++; break;
-    case 'n': if (dst != NULL && out + 1 < cap) dst[out] = '\n'; out++; break;
-    case 'f': if (dst != NULL && out + 1 < cap) dst[out] = '\f'; out++; break;
-    case 'r': if (dst != NULL && out + 1 < cap) dst[out] = '\r'; out++; break;
-    case 'u': case 'U': {
-      int ndigits = c == 'u' ? 4 : 8;
-      uint32_t cp = 0;
-      int k;
-      if (i + (size_t)ndigits > len) return SIZE_MAX;
-      for (k = 0; k < ndigits; k++) {
-        int v = ztoml__hexval(ptr[i + (size_t)k]);
-        if (v < 0) return SIZE_MAX;
-        cp = (cp << 4) | (uint32_t)v;
-      }
-      i += (size_t)ndigits;
-      if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
-        return SIZE_MAX; /* lone surrogate / out of range */
-      out = ztoml__emit_cp(cp, dst, cap, out);
-      break;
-    }
-    default:
-      return SIZE_MAX; /* unknown escape */
-    }
+    out = ztoml__escape(c, ptr, len, &i, dst, cap, out);
+    if (out == SIZE_MAX) return SIZE_MAX;
   }
   if (dst != NULL && cap > 0) dst[out < cap ? out : cap - 1] = '\0';
   return out;

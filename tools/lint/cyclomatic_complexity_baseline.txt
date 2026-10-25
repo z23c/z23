@@ -489,8 +489,6 @@ contexts/commons/packages/ztemplate/src/ztemplate.c:ztemplate_parse:30
 contexts/commons/packages/ztemplate/tests/test_ztemplate.c:ref_render:17
 contexts/commons/packages/ztime/src/ztime.c:ztime_parse_n:43
 contexts/commons/packages/ztoml/app/main.c:main:22
-contexts/commons/packages/ztoml/src/ztoml.c:ztoml_next:32
-contexts/commons/packages/ztoml/src/ztoml.c:ztoml_str_decode:39
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
 contexts/commons/packages/ztrie/tests/test_ztrie.c:test_stress_vs_model:16
