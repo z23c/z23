@@ -741,16 +741,71 @@ static bool npe_bind_codeindex(const char *root,
     return true;
 }
 
-void zcl_native_handle_presentation_ecosystem(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static bool npe_arguments_present(const struct zcl_command_request *request,
+                                  const struct zcl_command_reply *reply)
 {
-    if (!request || !reply)
-        return;
+    return request && reply;
+}
+
+static bool npe_output_invalid(const struct zcl_command_request *request,
+                               const char **parsed_output)
+{
     const struct json_value *output_value =
         request->input ? json_get(request->input, "output") : NULL;
     const char *output = json_get_str(output_value);
-    if (output_value && (!output || (strcmp(output, "native") != 0 &&
-                                    strcmp(output, "text") != 0))) {
+    *parsed_output = output;
+    return output_value && (!output || (strcmp(output, "native") != 0 &&
+                                        strcmp(output, "text") != 0));
+}
+
+static bool npe_output_is_text(const char *output)
+{
+    return output && strcmp(output, "text") == 0;
+}
+
+static bool npe_run_window_pages(
+    const struct science_ecosystem_snapshot *snap, struct npe_visual *visual,
+    char *error, size_t error_size)
+{
+    struct zcl_present_window_pages_v1 pages = {
+        .struct_size = sizeof(pages),
+        .abi_version = ZCL_PRESENT_ABI_V1,
+        .pages = visual->pages,
+        .page_count = NPE_PAGES,
+    };
+    if (snap->growth_present && visual->hover_items) {
+        struct zcl_present_window_hover_v1 hover = {
+            .struct_size = sizeof(hover),
+            .abi_version = ZCL_PRESENT_ABI_V1,
+            .plot_left = NPE_PLOT_LEFT,
+            .plot_top = NPE_PLOT_TOP,
+            .plot_right = NPE_PLOT_RIGHT,
+            .plot_bottom = NPE_PLOT_BOTTOM,
+            .items = visual->hover_items,
+            .item_count = (uint32_t)snap->growth.day_count,
+        };
+        return zcl_present_window_run_pages_first_hover_v1(
+            &pages, &hover, error, error_size);
+    }
+    struct zcl_present_window_event_v1 event;
+    return zcl_present_window_run_pages_actions_v1(
+        &pages, 0, NULL, NULL, &event, error, error_size);
+}
+
+static bool npe_reply_when_shown(struct zcl_command_reply *reply,
+                                 const struct science_ecosystem_snapshot *snap,
+                                 const char *plain_text, bool shown)
+{
+    return shown && npe_reply_snapshot(reply, snap, plain_text, true);
+}
+
+void zcl_native_handle_presentation_ecosystem(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!npe_arguments_present(request, reply))
+        return;
+    const char *output = NULL;
+    if (npe_output_invalid(request, &output)) {
         npe_fail(reply, "INVALID_OUTPUT",
                  "output must be exactly native or text");
         return;
@@ -786,7 +841,7 @@ void zcl_native_handle_presentation_ecosystem(
                  "deterministic ecosystem text did not fit");
         return;
     }
-    if (output && strcmp(output, "text") == 0) {
+    if (npe_output_is_text(output)) {
         bool ok = npe_reply_snapshot(reply, snap, plain_text, false);
         free(snap);
         if (!ok)
@@ -803,32 +858,8 @@ void zcl_native_handle_presentation_ecosystem(
                  "native ecosystem allocation or rendering failed");
         return;
     }
-    struct zcl_present_window_pages_v1 pages = {
-        .struct_size = sizeof(pages),
-        .abi_version = ZCL_PRESENT_ABI_V1,
-        .pages = visual.pages,
-        .page_count = NPE_PAGES,
-    };
-    bool shown;
-    if (snap->growth_present && visual.hover_items) {
-        struct zcl_present_window_hover_v1 hover = {
-            .struct_size = sizeof(hover),
-            .abi_version = ZCL_PRESENT_ABI_V1,
-            .plot_left = NPE_PLOT_LEFT,
-            .plot_top = NPE_PLOT_TOP,
-            .plot_right = NPE_PLOT_RIGHT,
-            .plot_bottom = NPE_PLOT_BOTTOM,
-            .items = visual.hover_items,
-            .item_count = (uint32_t)snap->growth.day_count,
-        };
-        shown = zcl_present_window_run_pages_first_hover_v1(
-            &pages, &hover, error, sizeof(error));
-    } else {
-        struct zcl_present_window_event_v1 event;
-        shown = zcl_present_window_run_pages_actions_v1(
-            &pages, 0, NULL, NULL, &event, error, sizeof(error));
-    }
-    bool ok = shown && npe_reply_snapshot(reply, snap, plain_text, true);
+    bool shown = npe_run_window_pages(snap, &visual, error, sizeof(error));
+    bool ok = npe_reply_when_shown(reply, snap, plain_text, shown);
     npe_visual_free(&visual);
     free(snap);
     if (!shown)
