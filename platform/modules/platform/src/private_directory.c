@@ -66,6 +66,29 @@ bool platform_private_directory_ensure(const char *path)
     return ok;
 }
 
+static bool private_directory_create_with_attributes(
+    const wchar_t *wide, SECURITY_ATTRIBUTES *attributes)
+{
+    if (!CreateDirectoryW(wide, attributes)) {
+        DWORD error = GetLastError();
+        errno = error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS
+                    ? EEXIST : error == ERROR_ACCESS_DENIED ? EACCES : EIO;
+        return false;
+    }
+    return true;
+}
+
+static bool private_directory_reopen_validated(
+    const wchar_t *wide, HANDLE *directory)
+{
+    *directory = CreateFileW(wide, READ_CONTROL | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    return *directory != INVALID_HANDLE_VALUE &&
+           platform_private_acl_validate_handle(*directory, true);
+}
+
 bool platform_private_directory_create(const char *path)
 {
     wchar_t wide[32768];
@@ -82,20 +105,9 @@ bool platform_private_directory_create(const char *path)
         .lpSecurityDescriptor = platform_private_acl_descriptor(&acl),
         .bInheritHandle = FALSE};
     errno = 0;  /* see the errno note in platform_private_directory_ensure */
-    if (ok && !CreateDirectoryW(wide, &attributes)) {
-        DWORD error = GetLastError();
-        errno = error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS
-                    ? EEXIST : error == ERROR_ACCESS_DENIED ? EACCES : EIO;
-        ok = false;
-    }
+    ok = private_directory_create_with_attributes(wide, &attributes);
     HANDLE directory = INVALID_HANDLE_VALUE;
-    if (ok)
-        directory = CreateFileW(wide, READ_CONTROL | FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    ok = ok && directory != INVALID_HANDLE_VALUE &&
-         platform_private_acl_validate_handle(directory, true);
+    if (ok) ok = private_directory_reopen_validated(wide, &directory);
     if (!ok && errno == 0) errno = EACCES;
     if (!ok && directory != INVALID_HANDLE_VALUE) RemoveDirectoryW(wide);
     if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
