@@ -74,12 +74,12 @@ static sqlite3 *export_open_pinned_snapshot(
     return snap;
 }
 
-bool consensus_state_snapshot_export_from_progress_snapshot(
+/* Reject a missing request or an expected height/hash the exporter cannot
+ * prove. Fills *result and returns false; a usable request returns true. */
+static bool export_progress_request_accepted(
     const struct consensus_state_snapshot_export_request *request,
     struct consensus_state_export_result *result)
 {
-    if (result)
-        memset(result, 0, sizeof(*result));
     if (!request)
         return consensus_export_fail(result, CONSENSUS_EXPORT_REFUSED,
                                      "NULL request");
@@ -88,6 +88,44 @@ bool consensus_state_snapshot_export_from_progress_snapshot(
         !zcl_bytes_any_set(request->expected_block_hash, 32))
         return consensus_export_fail(result, CONSENSUS_EXPORT_REFUSED,
                                      "invalid expected source height/hash");
+    return true;
+}
+
+/* Close the staging binding and free it unless close abandoned the
+ * descriptor (that binding stays leaked on purpose). Not used when open
+ * fails before the binding owns a descriptor: that path only frees. */
+static void export_release_bound_output(
+    struct consensus_export_output_binding *output)
+{
+    consensus_export_output_close(output);
+    if (!output->abandon_on_close)
+        free(output);
+}
+
+/* End the pinned read transaction. A failed COMMIT after a successful prove
+ * is a store error and is rolled back; a failed ROLLBACK leaves the prove
+ * failure in *result. Returns the prove outcome after that close. */
+static bool export_finish_pinned_read_tx(
+    sqlite3 *snap, bool ok, struct consensus_state_export_result *result)
+{
+    const char *finish = ok ? "COMMIT" : "ROLLBACK";
+    if (sqlite3_exec(snap, finish, NULL, NULL, NULL) != SQLITE_OK && ok) {
+        (void)consensus_export_fail(result, CONSENSUS_EXPORT_STORE_ERROR,
+                                    "snapshot read transaction close failed");
+        sqlite3_exec(snap, "ROLLBACK", NULL, NULL, NULL);
+        return false;
+    }
+    return ok;
+}
+
+bool consensus_state_snapshot_export_from_progress_snapshot(
+    const struct consensus_state_snapshot_export_request *request,
+    struct consensus_state_export_result *result)
+{
+    if (result)
+        memset(result, 0, sizeof(*result));
+    if (!export_progress_request_accepted(request, result))
+        return false;
 
     struct consensus_export_output_binding *output = zcl_calloc(
         1, sizeof(*output), "consensus_export_output_binding");
@@ -103,9 +141,7 @@ bool consensus_state_snapshot_export_from_progress_snapshot(
 
     sqlite3 *snap = export_open_pinned_snapshot(result);
     if (!snap) {
-        consensus_export_output_close(output);
-        if (!output->abandon_on_close)
-            free(output);
+        export_release_bound_output(output);
         return false;
     }
 
@@ -119,27 +155,17 @@ bool consensus_state_snapshot_export_from_progress_snapshot(
      * spans the whole proof + copy for a consistent view; the reducer writes
      * concurrently on the primary handle without contention. */
     bool ok = consensus_export_prove_write(snap, request, output, &manifest, result);
-    const char *finish = ok ? "COMMIT" : "ROLLBACK";
-    if (sqlite3_exec(snap, finish, NULL, NULL, NULL) != SQLITE_OK && ok) {
-        (void)consensus_export_fail(result, CONSENSUS_EXPORT_STORE_ERROR,
-                                    "snapshot read transaction close failed");
-        ok = false;
-        sqlite3_exec(snap, "ROLLBACK", NULL, NULL, NULL);
-    }
+    ok = export_finish_pinned_read_tx(snap, ok, result);
     sqlite3_close(snap);
 
     if (ok)
         ok = consensus_export_finalize_temp(output, &manifest,
                                             request->cancel_requested, result);
     if (!ok) {
-        consensus_export_output_close(output);
-        if (!output->abandon_on_close)
-            free(output);
+        export_release_bound_output(output);
         return false;
     }
     consensus_export_fill_success(&manifest, result);
-    consensus_export_output_close(output);
-    if (!output->abandon_on_close)
-        free(output);
+    export_release_bound_output(output);
     return true;
 }
