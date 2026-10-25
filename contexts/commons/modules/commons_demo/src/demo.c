@@ -11,12 +11,20 @@
 #include <stdio.h>
 #include <string.h>
 
-bool commons_demo_render(const char *input, char *out, size_t out_capacity)
+static bool commons_demo_fields_valid(const struct json_value *name_value,
+                                      const struct json_value *count_value)
 {
-    if (!input || !out || out_capacity == 0)
+    if (!name_value || name_value->type != JSON_STR ||
+        !count_value || count_value->type != JSON_INT ||
+        count_value->val.i < 0 || count_value->val.i > UINT32_MAX)
         return false;
-    out[0] = '\0';
+    return true;
+}
 
+static bool commons_demo_parse_fields(const char *input, char *stable_name,
+                                      size_t *out_name_len,
+                                      uint32_t *out_count)
+{
     struct json_value document;
     json_init(&document);
     size_t input_len = strlen(input);
@@ -27,9 +35,7 @@ bool commons_demo_render(const char *input, char *out, size_t out_capacity)
     }
     const struct json_value *name_value = json_get(&document, "name");
     const struct json_value *count_value = json_get(&document, "count");
-    if (!name_value || name_value->type != JSON_STR ||
-        !count_value || count_value->type != JSON_INT ||
-        count_value->val.i < 0 || count_value->val.i > UINT32_MAX) {
+    if (!commons_demo_fields_valid(name_value, count_value)) {
         json_free(&document);
         return false;
     }
@@ -39,10 +45,24 @@ bool commons_demo_render(const char *input, char *out, size_t out_capacity)
         json_free(&document);
         return false;
     }
-    char stable_name[64];
     memcpy(stable_name, name, name_len + 1u);
-    uint32_t count = (uint32_t)count_value->val.i;
+    *out_name_len = name_len;
+    *out_count = (uint32_t)count_value->val.i;
     json_free(&document);
+    return true;
+}
+
+bool commons_demo_render(const char *input, char *out, size_t out_capacity)
+{
+    if (!input || !out || out_capacity == 0)
+        return false;
+    out[0] = '\0';
+
+    char stable_name[64];
+    size_t name_len = 0;
+    uint32_t count = 0;
+    if (!commons_demo_parse_fields(input, stable_name, &name_len, &count))
+        return false;
 
     uint8_t wire[4u + 2u + 63u];
     struct zcl_codec_writer writer;
