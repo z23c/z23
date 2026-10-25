@@ -119,19 +119,10 @@ static void vipub_fail_fresh_intent(struct wallet_rpc_context *ctx,
             VAULT_INTENT_FAILED, NULL, error_code, now);
 }
 
-static bool vipub_persist_fresh_commit(struct wallet_rpc_context *ctx,
-                                       const uint8_t id[32],
-                                       struct wallet_tx *wtx, int64_t now,
-                                       struct json_value *result,
-                                       struct zcl_result *r)
+static struct zcl_result vipub_persist_fresh_commit(
+    struct wallet_rpc_context *ctx, struct wallet_tx *wtx)
 {
-    *r = wallet_persist_commit_before_relay(ctx, wtx);
-    if (r->ok)
-        return true;
-    (void)vault_intent_set_state(ctx->node_db, id,
-        VAULT_INTENT_FAILED, NULL, "PERSISTENCE_FAILED", now);
-    vipub_error(result, "PERSISTENCE_FAILED", r->message);
-    return false;
+    return wallet_persist_commit_before_relay(ctx, wtx);
 }
 
 static bool vipub_sapling_reservation_failed(struct wallet_rpc_context *ctx,
@@ -200,8 +191,15 @@ bool vault_intent_publish_prepared(struct wallet_rpc_context *ctx,
         if (already_durable)
             LOG_INFO("vault_intent",
                      "restored exact durable transaction to mempool");
-        else if (!vipub_persist_fresh_commit(ctx, id, wtx, now, result, &r))
-            return false;
+        else {
+            r = vipub_persist_fresh_commit(ctx, wtx);
+            if (!r.ok) {
+                (void)vault_intent_set_state(ctx->node_db, id,
+                    VAULT_INTENT_FAILED, NULL, "PERSISTENCE_FAILED", now);
+                vipub_error(result, "PERSISTENCE_FAILED", r.message);
+                return false;
+            }
+        }
     }
 
     /* A prepared Sapling spend is not publishable until its nullifiers are
