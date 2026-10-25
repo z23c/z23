@@ -53,6 +53,43 @@ static bool input_hex32(const struct json_value *in, const char *key,
     return hex && strlen(hex) == 64 && zcl_hex_decode_lower(hex, out, 32);
 }
 
+static const char *mesh_status_begin_failure_message(
+    enum boot_mesh_status_begin_result result)
+{
+    static const struct {
+        enum boot_mesh_status_begin_result result;
+        const char *message;
+    } rows[] = {
+        {MESH_STATUS_BEGIN_NOT_PAIRED,
+         "no local pairing record authorizes that peer"},
+        {MESH_STATUS_BEGIN_REVOKED, "the pairing is revoked"},
+        {MESH_STATUS_BEGIN_EXPIRED, "the pairing has expired"},
+        {MESH_STATUS_BEGIN_PEER_NOT_CONNECTED,
+         "the paired peer has no established Noise session and "
+         "no current direct route is available"},
+        {MESH_STATUS_BEGIN_ROUTE_PENDING,
+         "a bounded direct route is still being acquired"},
+        {MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH,
+         "the direct endpoint presented the wrong Noise identity"},
+        {MESH_STATUS_BEGIN_ROUTE_DOWNGRADE,
+         "the direct endpoint completed a plaintext handshake"},
+        {MESH_STATUS_BEGIN_NOISE_DISABLED,
+         "the Noise transport is disabled on this node"},
+        {MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE,
+         "this node's filed ZID delegation is unavailable"},
+        {MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE,
+         "the paired peer has no unique active ZID delegation "
+         "bound to this Noise session"},
+        {MESH_STATUS_BEGIN_BUSY, "the bounded pending-request table is full"},
+        {MESH_STATUS_BEGIN_SEND_FAILED,
+         "the peer send queue refused the request frame"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        if (rows[i].result == result)
+            return rows[i].message;
+    return "the mesh status lane is unavailable";
+}
+
 static bool rpc_mesh_status_request(const struct json_value *params, bool help,
                                     struct json_value *result)
 {
@@ -72,50 +109,7 @@ static bool rpc_mesh_status_request(const struct json_value *params, bool help,
     enum boot_mesh_status_begin_result began =
         boot_mesh_status_begin(pairing_id, request_id);
     if (began != MESH_STATUS_BEGIN_OK) {
-        const char *message;
-        switch (began) {
-        case MESH_STATUS_BEGIN_NOT_PAIRED:
-            message = "no local pairing record authorizes that peer";
-            break;
-        case MESH_STATUS_BEGIN_REVOKED:
-            message = "the pairing is revoked";
-            break;
-        case MESH_STATUS_BEGIN_EXPIRED:
-            message = "the pairing has expired";
-            break;
-        case MESH_STATUS_BEGIN_PEER_NOT_CONNECTED:
-            message = "the paired peer has no established Noise session and "
-                      "no current direct route is available";
-            break;
-        case MESH_STATUS_BEGIN_ROUTE_PENDING:
-            message = "a bounded direct route is still being acquired";
-            break;
-        case MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH:
-            message = "the direct endpoint presented the wrong Noise identity";
-            break;
-        case MESH_STATUS_BEGIN_ROUTE_DOWNGRADE:
-            message = "the direct endpoint completed a plaintext handshake";
-            break;
-        case MESH_STATUS_BEGIN_NOISE_DISABLED:
-            message = "the Noise transport is disabled on this node";
-            break;
-        case MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE:
-            message = "this node's filed ZID delegation is unavailable";
-            break;
-        case MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE:
-            message = "the paired peer has no unique active ZID delegation "
-                      "bound to this Noise session";
-            break;
-        case MESH_STATUS_BEGIN_BUSY:
-            message = "the bounded pending-request table is full";
-            break;
-        case MESH_STATUS_BEGIN_SEND_FAILED:
-            message = "the peer send queue refused the request frame";
-            break;
-        default:
-            message = "the mesh status lane is unavailable";
-            break;
-        }
+        const char *message = mesh_status_begin_failure_message(began);
         rpc_error(result, boot_mesh_status_begin_result_string(began),
                   message);
         return true;
