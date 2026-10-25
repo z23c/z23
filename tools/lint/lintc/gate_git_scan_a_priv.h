@@ -13,6 +13,8 @@
 #include <regex.h>
 #include <stdio.h>
 
+int nak_filesystem_selftest(void);
+
 /* check-equihash-params: path filter, regex setup, file load, line scan. */
 int eqp_keep_path(const char *path);
 int eqp_comp(regex_t *lit, regex_t *claim, regex_t *qual);

@@ -547,11 +547,14 @@ static int nak_has(const char *s, size_t n, const char *needle)
 }
 static int nak_match(const regex_t *re, const char *line, size_t n);
 struct nak_acc { regex_t *re; FILE *hits; int nfiles, nhits; };
-
+static int nak_open_error(const char *path)
+{
+    return errno == ENOENT ? 0 : die("z23-lint: cannot open API-key input: %s\n", path);
+}
 static int nak_scan_file(const char *path, struct nak_acc *a)
 {
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    if (!f) return nak_open_error(path);
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
@@ -836,6 +839,7 @@ int check_no_api_keys_selftest(void)
     regfree(&re);
     if (rc)
         return rc;
+    bad |= nak_filesystem_selftest();
     return st_ok(bad, "check_no_api_keys selftest: OK\n");
 }
 

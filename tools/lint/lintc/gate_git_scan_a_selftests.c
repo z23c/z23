@@ -111,3 +111,51 @@ int check_equihash_params_selftest(void)
         return frc;
     return st_ok(bad, "check_equihash_params selftest: OK\n");
 }
+
+/* Exercise the real entrypoint in a child: the scan floor must not hide an
+ * open failure, and a refusal must never print the clean verdict. */
+static int nak_case(const char *exe, const char *path, int want)
+{
+    char quoted[8192], cmd[16384], output[4096];
+    int code = -1;
+    if (sh_single_quote(path, quoted, sizeof quoted)
+        || ovf(snprintf(cmd, sizeof cmd,
+            "ZCL_API_KEY_SCAN_FILES=%s %s check-no-api-keys 2>&1",
+            quoted, exe), sizeof cmd)) return 2;
+    int rc = capture_cmd(cmd, output, sizeof output, &code);
+    if (rc || code != want) return 1;
+    bool clean = strstr(output, "0 violation(s)") != NULL;
+    if (clean != (want == 0)) return 1;
+    if (want == 2 && (!strstr(output, path)
+        || !strstr(output, "cannot open API-key input"))) return 1;
+    return 0;
+}
+
+static int nak_paths(const char *dir, char *path, char *child, char *missing,
+                     char *quoted, size_t cap)
+{
+    char exe[4096];
+    return ovf(snprintf(path, 256, "%s/input.c", dir), 256)
+        || ovf(snprintf(child, 256, "%s/child.c", path), 256)
+        || ovf(snprintf(missing, 256, "%s/missing.c", dir), 256)
+        || lint_self_exe(exe, sizeof exe)
+        || sh_single_quote(exe, quoted, cap);
+}
+
+int nak_filesystem_selftest(void)
+{
+    char dir[] = "./test-tmp/nak-open.XXXXXX";
+    char path[256], child[256], missing[256], quoted[8192];
+    if (mkdir("./test-tmp", 0755) != 0 && errno != EEXIST) return 2;
+    if (!mkdtemp(dir)) return 2;
+    int rc = nak_paths(dir, path, child, missing, quoted, sizeof quoted);
+    if (!rc) rc = csr_write(path, "s" "k-" "abcdefghijklmnopqrst\n");
+    if (!rc) rc = nak_case(quoted, path, 1);
+    if (!rc) rc = csr_write(path, "ordinary text\n");
+    if (!rc) rc = nak_case(quoted, path, 0);
+    if (!rc) rc = nak_case(quoted, missing, 0);
+    if (!rc) rc = nak_case(quoted, child, 2);
+    if (unlink(path) != 0 && errno != ENOENT && !rc) rc = 2;
+    if (rmdir(dir) != 0 && !rc) rc = 2;
+    return rc;
+}
