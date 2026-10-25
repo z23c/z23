@@ -293,6 +293,75 @@ void script_verify_pool_shutdown(void)
     pthread_mutex_unlock(&g_sv_pool_lock);
 }
 
+static void sv_parallel_build_jobs(const struct block *blk,
+                                   const struct sv_resolvers *r,
+                                   struct precomputed_tx_data *txdata_arr,
+                                   struct sv_job *jobs)
+{
+    /* Build phase — SERIAL: precompute per-tx data + resolve prevouts in
+     * (tx, vin) order so any in-order resolver dependency is preserved. */
+    size_t k = 0;
+    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
+        const struct transaction *tx = &blk->vtx[ti];
+        if (transaction_is_coinbase(tx))
+            continue;
+        int64_t precompute_started = platform_time_monotonic_us();
+        precompute_tx_data(tx, &txdata_arr[ti]);
+        reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                                         RPF_TX_PRECOMPUTE_US,
+                                  (uint64_t)(platform_time_monotonic_us() -
+                                             precompute_started));
+        for (size_t vi = 0; vi < tx->num_vin; vi++) {
+            struct sv_job *job = &jobs[k++];
+            job->tx = tx;
+            job->txid = tx->hash;
+            job->vi = (unsigned int)vi;
+            job->ti = (int)ti;
+            tx_out_set_null(&job->prev);
+            if (sv_resolve(r, &tx->vin[vi].prevout, &job->prev)) {
+                job->prevout_ok = true;
+                job->txdata = &txdata_arr[ti];
+            } else {
+                job->prevout_ok = false;
+            }
+        }
+    }
+}
+
+static void sv_parallel_reduce(const struct block *blk, struct sv_job *jobs,
+                               size_t n_inputs, int height,
+                               struct script_verify_summary *out)
+{
+    /* Reduce phase — SERIAL, in original order: reproduce the serial verdict,
+     * first-failure, and reached-input counts exactly. */
+    int64_t reduce_started = platform_time_monotonic_us();
+    bool stopped = false;
+    for (size_t i = 0; i < n_inputs && !stopped; i++) {
+        struct sv_job *job = &jobs[i];
+        if (!job->prevout_ok) {
+            out->tx_count = (size_t)job->ti + 1;
+            sv_write_prevout_unresolved(out, &job->txid, job->vi, height);
+            stopped = true;
+            break;
+        }
+        out->input_count++;
+        if (job->verified) {
+            out->inputs_verified++;
+            continue;
+        }
+        out->inputs_failed++;
+        out->tx_count = (size_t)job->ti + 1;
+        sv_write_script_invalid(out, &job->txid, job->vi, job->serror, height);
+        stopped = true;
+    }
+    if (!stopped)
+        out->tx_count = blk->num_vtx;  /* clean sweep touched every tx */
+    reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                                     RPF_ORDERED_REDUCTION_US,
+                              (uint64_t)(platform_time_monotonic_us() -
+                                         reduce_started));
+}
+
 /* Returns false if it could not run in parallel (alloc/pool failure); the
  * caller then falls back to the verdict-identical serial sweep. */
 static bool sv_parallel(const struct block *blk, int height, uint32_t flags,
@@ -334,34 +403,7 @@ static bool sv_parallel(const struct block *blk, int height, uint32_t flags,
                               blk->num_vtx * sizeof(*txdata_arr) +
                               n_inputs * sizeof(*jobs));
 
-    /* Build phase — SERIAL: precompute per-tx data + resolve prevouts in
-     * (tx, vin) order so any in-order resolver dependency is preserved. */
-    size_t k = 0;
-    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
-        const struct transaction *tx = &blk->vtx[ti];
-        if (transaction_is_coinbase(tx))
-            continue;
-        int64_t precompute_started = platform_time_monotonic_us();
-        precompute_tx_data(tx, &txdata_arr[ti]);
-        reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                         RPF_TX_PRECOMPUTE_US,
-                                  (uint64_t)(platform_time_monotonic_us() -
-                                             precompute_started));
-        for (size_t vi = 0; vi < tx->num_vin; vi++) {
-            struct sv_job *job = &jobs[k++];
-            job->tx = tx;
-            job->txid = tx->hash;
-            job->vi = (unsigned int)vi;
-            job->ti = (int)ti;
-            tx_out_set_null(&job->prev);
-            if (sv_resolve(r, &tx->vin[vi].prevout, &job->prev)) {
-                job->prevout_ok = true;
-                job->txdata = &txdata_arr[ti];
-            } else {
-                job->prevout_ok = false;
-            }
-        }
-    }
+    sv_parallel_build_jobs(blk, r, txdata_arr, jobs);
 
     struct sv_ctx ctx = { .flags = flags, .branch_id = branch_id };
     uint64_t wake_us = 0, wait_us = 0;
@@ -372,34 +414,7 @@ static bool sv_parallel(const struct block *blk, int height, uint32_t flags,
     reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
                                      RPF_WORKER_WAIT_US, wait_us);
 
-    /* Reduce phase — SERIAL, in original order: reproduce the serial verdict,
-     * first-failure, and reached-input counts exactly. */
-    int64_t reduce_started = platform_time_monotonic_us();
-    bool stopped = false;
-    for (size_t i = 0; i < n_inputs && !stopped; i++) {
-        struct sv_job *job = &jobs[i];
-        if (!job->prevout_ok) {
-            out->tx_count = (size_t)job->ti + 1;
-            sv_write_prevout_unresolved(out, &job->txid, job->vi, height);
-            stopped = true;
-            break;
-        }
-        out->input_count++;
-        if (job->verified) {
-            out->inputs_verified++;
-            continue;
-        }
-        out->inputs_failed++;
-        out->tx_count = (size_t)job->ti + 1;
-        sv_write_script_invalid(out, &job->txid, job->vi, job->serror, height);
-        stopped = true;
-    }
-    if (!stopped)
-        out->tx_count = blk->num_vtx;  /* clean sweep touched every tx */
-    reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                     RPF_ORDERED_REDUCTION_US,
-                              (uint64_t)(platform_time_monotonic_us() -
-                                         reduce_started));
+    sv_parallel_reduce(blk, jobs, n_inputs, height, out);
 
     free(txdata_arr);
     free(jobs);
