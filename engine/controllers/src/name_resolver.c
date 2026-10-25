@@ -19,21 +19,27 @@
 
 /* ── Target-type parsing ────────────────────────────────────────── */
 
+static bool znam_type_name_is_either(const char *s, const char *a,
+                                     const char *b)
+{
+    return strcmp(s, a) == 0 || strcmp(s, b) == 0;
+}
+
 uint8_t znam_type_from_name(const char *s)
 {
     if (!s || !s[0]) return 0;
     if (strcmp(s, "onion") == 0) return ZNAM_TYPE_ONION;
-    if (strcmp(s, "zaddr") == 0 || strcmp(s, "z-address") == 0)
+    if (znam_type_name_is_either(s, "zaddr", "z-address"))
         return ZNAM_TYPE_ZADDR;
-    if (strcmp(s, "taddr") == 0 || strcmp(s, "t-address") == 0)
+    if (znam_type_name_is_either(s, "taddr", "t-address"))
         return ZNAM_TYPE_TADDR;
-    if (strcmp(s, "btc") == 0 || strcmp(s, "bitcoin") == 0)
+    if (znam_type_name_is_either(s, "btc", "bitcoin"))
         return ZNAM_TYPE_BTC;
-    if (strcmp(s, "ltc") == 0 || strcmp(s, "litecoin") == 0)
+    if (znam_type_name_is_either(s, "ltc", "litecoin"))
         return ZNAM_TYPE_LTC;
-    if (strcmp(s, "doge") == 0 || strcmp(s, "dogecoin") == 0)
+    if (znam_type_name_is_either(s, "doge", "dogecoin"))
         return ZNAM_TYPE_DOGE;
-    if (strcmp(s, "content") == 0 || strcmp(s, "content-hash") == 0)
+    if (znam_type_name_is_either(s, "content", "content-hash"))
         return ZNAM_TYPE_CONTENT;
     return 0;
 }
