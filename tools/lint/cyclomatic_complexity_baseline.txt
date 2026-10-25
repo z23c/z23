@@ -694,7 +694,6 @@ contexts/wallet/controllers/src/vault_intent_reconcile.c:vault_intent_refresh_st
 contexts/wallet/controllers/src/vault_intent_reconcile.c:vi_shielded_chain_evidence:28
 contexts/wallet/controllers/src/wallet_controller.c:rpc_listunspent:23
 contexts/wallet/controllers/src/wallet_controller_history.c:rpc_listtransactions:18
-contexts/wallet/controllers/src/wallet_controller_keys.c:wallet_direct_getnewaddresses:32
 contexts/wallet/controllers/src/wallet_controller_multisig.c:rpc_sendmany:20
 contexts/wallet/controllers/src/wallet_diagnostic_audit.c:rpc_walletaudit:24
 contexts/wallet/controllers/src/wallet_diagnostic_health.c:rpc_getwalletaccounting:35

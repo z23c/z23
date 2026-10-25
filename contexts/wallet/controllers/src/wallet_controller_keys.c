@@ -319,6 +319,157 @@ bool rpc_importaddress(const struct json_value *params, bool help,
     json_push_kv_real(result, "balance", (double)bal / 1e8);
     return true;
 }
+
+/* Reject a batch request the durable-address contract cannot serve: no
+ * output buffer, a zero or oversized count, or nowhere to write a refusal. */
+static bool wallet_direct_batch_args_invalid(
+    char (*addresses)[WALLET_DIRECT_ADDRESS_MAX], size_t count,
+    char *err_out, size_t err_max)
+{
+    return !addresses || count == 0 ||
+        count > WALLET_DIRECT_ADDRESS_BATCH_MAX || !err_out || err_max == 0;
+}
+
+/* An address may only be created when the wallet database is present and
+ * open — never from RAM alone. */
+static bool wallet_direct_backend_unavailable(struct wallet_rpc_context *ctx)
+{
+    return !ctx->wallet_db || !ctx->wallet_db->open;
+}
+
+/* A legacy (non-HD) wallet draws receive addresses from the keypool, so an
+ * empty persisted pool must be topped up before any address is minted. */
+static bool wallet_direct_keypool_needs_topup(struct wallet_rpc_context *ctx,
+                                              bool direct_generated)
+{
+    return !direct_generated &&
+        wallet_key_pool_persisted_size(ctx->wallet) == 0;
+}
+
+/* Flush the just-topped-up keypool so no unpersisted address can be handed
+ * out. With no database there is nothing to flush; `flush_out` receives the
+ * flush result. */
+static bool wallet_direct_topup_flush_ok(struct wallet_rpc_context *ctx,
+                                         struct zcl_result *flush_out)
+{
+    if (!ctx->wallet_db)
+        return true;
+    *flush_out = wallet_flush_from_context(ctx);
+    return flush_out->ok;
+}
+
+/* Undo a partial directly generated batch: drop the keys already added. */
+static void wallet_direct_remove_generated_keys(struct wallet_rpc_context *ctx,
+                                                const struct key_id *generated,
+                                                size_t generated_count)
+{
+    for (size_t i = 0; i < generated_count; i++)
+        (void)wallet_remove_key(ctx->wallet, &generated[i]);
+}
+
+/* Draw `count` receive addresses from the keypool, recording the key id
+ * behind each one. On the first miss, report the partial count through
+ * `*generated_count`, refuse into `err_out` and undo the keys a directly
+ * generating wallet already produced. Returns true once the whole batch is
+ * drawn. */
+static bool wallet_direct_generate_addresses(
+    struct wallet_rpc_context *ctx,
+    char (*addresses)[WALLET_DIRECT_ADDRESS_MAX], size_t count,
+    struct key_id *generated, size_t *generated_count,
+    bool direct_generated, char *err_out, size_t err_max)
+{
+    size_t drawn = 0;
+    for (; drawn < count; drawn++) {
+        if (wallet_get_new_address_with_key_id(
+                ctx->wallet, addresses[drawn], WALLET_DIRECT_ADDRESS_MAX,
+                &generated[drawn]))
+            continue;
+        *generated_count = drawn;
+        (void)snprintf(err_out, err_max,
+                       "durable keypool ran out after %zu of %zu addresses",
+                       drawn, count);
+        if (direct_generated)
+            wallet_direct_remove_generated_keys(ctx, generated, drawn);
+        return false;
+    }
+    *generated_count = drawn;
+    return true;
+}
+
+/* Write one freshly generated key as an encrypted row, then prove it is on
+ * disk by reading it back. `wr_out` receives the write result, including the
+ * refusal used when the key disappeared from the keystore. Returns true only
+ * when the key is durable. */
+static bool wallet_direct_write_and_verify_key(
+    struct wallet_rpc_context *ctx, const struct key_id *kid,
+    struct pubkey *pk, struct zcl_result *wr_out)
+{
+    struct privkey key;
+    privkey_init(&key);
+    bool have = keystore_get_key(
+            &ctx->wallet->keystore, kid, &key) &&
+        keystore_get_pubkey(&ctx->wallet->keystore, kid, pk);
+    *wr_out = have
+        ? wallet_sqlite_write_key_r(ctx->wallet_db, pk, &key)
+        : ZCL_ERR(-1, "generated key disappeared before persistence");
+    bool verified = wr_out->ok && wallet_readback_key(
+        ctx->wallet_db, pk, &key);
+    memory_cleanse(key.vch, sizeof(key.vch));
+    return verified;
+}
+
+/* Remove the generated keys that never became durable, starting at
+ * `first_unpersisted`. Returns how many keys were removed. */
+static size_t wallet_direct_remove_unpersisted_suffix(
+    struct wallet_rpc_context *ctx, const struct key_id *generated,
+    size_t first_unpersisted, size_t generated_count)
+{
+    size_t removed = 0;
+    for (size_t j = first_unpersisted; j < generated_count; j++)
+        removed += wallet_remove_key(ctx->wallet, &generated[j]) ? 1 : 0;
+    return removed;
+}
+
+/* Persist each key of a directly generated batch as its own encrypted row,
+ * verifying every row by readback. Returns true when the whole batch is
+ * durable. On the first failure the unpersisted suffix is removed from
+ * memory and `*failed_at`, `*removed` and `*wr_out` describe the failure so
+ * the caller can refuse and log it. */
+static bool wallet_direct_persist_generated_keys(
+    struct wallet_rpc_context *ctx,
+    const struct key_id *generated, size_t generated_count,
+    bool direct_generated, size_t *failed_at, size_t *removed,
+    struct zcl_result *wr_out)
+{
+    if (!ctx->wallet_db || !direct_generated)
+        return true;
+    for (size_t i = 0; i < generated_count; i++) {
+        struct pubkey pk;
+        if (wallet_direct_write_and_verify_key(ctx, &generated[i], &pk,
+                                               wr_out))
+            continue;
+        *failed_at = i + 1;
+        *removed = wallet_direct_remove_unpersisted_suffix(
+            ctx, generated, i + (wr_out->ok ? 1 : 0), generated_count);
+        return false;
+    }
+    return true;
+}
+
+/* A legacy batch consumes pre-persisted keys, so the reduced pool must be
+ * flushed before any address is returned. `flush_out` receives the flush
+ * result. Returns true when the reduced pool is durable or there was
+ * nothing to flush. */
+static bool wallet_direct_persist_keypool_consumption(
+    struct wallet_rpc_context *ctx, bool direct_generated,
+    struct zcl_result *flush_out)
+{
+    if (!ctx->wallet_db || direct_generated)
+        return true;
+    *flush_out = wallet_flush_from_context(ctx);
+    return flush_out->ok;
+}
+
 /* Mint a receive address that is DURABLE before it is handed out, writing the
  * refusal into `err_out` instead of an RPC result so both the RPC and the
  * direct C API can share it. The durability discipline is the whole point of
@@ -330,8 +481,7 @@ bool wallet_direct_getnewaddresses(
 {
     struct wallet_rpc_context *ctx = wallet_ctx();
 
-    if (!addresses || count == 0 ||
-        count > WALLET_DIRECT_ADDRESS_BATCH_MAX || !err_out || err_max == 0)
+    if (wallet_direct_batch_args_invalid(addresses, count, err_out, err_max))
         return false;
     memset(addresses, 0, count * WALLET_DIRECT_ADDRESS_MAX);
     err_out[0] = '\0';
@@ -340,7 +490,7 @@ bool wallet_direct_getnewaddresses(
         (void)snprintf(err_out, err_max, "Wallet not loaded");
         LOG_FAIL("wallet", "new_durable_address: wallet not loaded");
     }
-    if (!ctx->wallet_db || !ctx->wallet_db->open) {
+    if (wallet_direct_backend_unavailable(ctx)) {
         (void)snprintf(err_out, err_max,
             "wallet durability backend unavailable; address not created");
         LOG_FAIL("wallet",
@@ -348,25 +498,22 @@ bool wallet_direct_getnewaddresses(
     }
 
     bool direct_generated = wallet_has_hd(ctx->wallet);
-    if (!direct_generated &&
-        wallet_key_pool_persisted_size(ctx->wallet) == 0) {
+    if (wallet_direct_keypool_needs_topup(ctx, direct_generated)) {
         if (!wallet_top_up_key_pool(ctx->wallet, DEFAULT_KEYPOOL_SIZE)) {
             (void)snprintf(err_out, err_max, "keypool top-up failed");
             LOG_FAIL("wallet", "new_durable_address: keypool top-up failed");
         }
         int64_t pool_generation =
             wallet_key_pool_generation_ceiling(ctx->wallet);
-        if (ctx->wallet_db) {
-            struct zcl_result topup_flush = wallet_flush_from_context(ctx);
-            if (!topup_flush.ok) {
-                (void)snprintf(err_out, err_max,
-                    "wallet persistence failed. No unpersisted keypool "
-                    "address was returned.");
-                LOG_FAIL("wallet",
-                         "new_durable_address: keypool durability failed "
-                         "(code=%d): %s",
-                         topup_flush.code, topup_flush.message);
-            }
+        struct zcl_result topup_flush;
+        if (!wallet_direct_topup_flush_ok(ctx, &topup_flush)) {
+            (void)snprintf(err_out, err_max,
+                "wallet persistence failed. No unpersisted keypool "
+                "address was returned.");
+            LOG_FAIL("wallet",
+                     "new_durable_address: keypool durability failed "
+                     "(code=%d): %s",
+                     topup_flush.code, topup_flush.message);
         }
         wallet_key_pool_mark_persisted_through(
             ctx->wallet, pool_generation);
@@ -374,18 +521,9 @@ bool wallet_direct_getnewaddresses(
 
     struct key_id generated[WALLET_DIRECT_ADDRESS_BATCH_MAX];
     size_t generated_count = 0;
-    for (; generated_count < count; generated_count++) {
-        if (wallet_get_new_address_with_key_id(
-                ctx->wallet, addresses[generated_count],
-                WALLET_DIRECT_ADDRESS_MAX, &generated[generated_count]))
-            continue;
-        (void)snprintf(err_out, err_max,
-                       "durable keypool ran out after %zu of %zu addresses",
-                       generated_count, count);
-        if (direct_generated) {
-            for (size_t i = 0; i < generated_count; i++)
-                (void)wallet_remove_key(ctx->wallet, &generated[i]);
-        }
+    if (!wallet_direct_generate_addresses(ctx, addresses, count, generated,
+                                          &generated_count, direct_generated,
+                                          err_out, err_max)) {
         memset(addresses, 0, count * WALLET_DIRECT_ADDRESS_MAX);
         LOG_FAIL("wallet",
                  "new_durable_addresses: keypool ran out at %zu/%zu",
@@ -398,53 +536,38 @@ bool wallet_direct_getnewaddresses(
      * Each row write is encrypted and read back. On failure, keep any already
      * durable keys as harmless unused receive keys and remove only the exact
      * unpersisted suffix from memory. */
-    if (ctx->wallet_db && direct_generated) {
-        for (size_t i = 0; i < generated_count; i++) {
-            struct privkey key;
-            struct pubkey pk;
-            privkey_init(&key);
-            bool have = keystore_get_key(
-                    &ctx->wallet->keystore, &generated[i], &key) &&
-                keystore_get_pubkey(
-                    &ctx->wallet->keystore, &generated[i], &pk);
-            struct zcl_result wr = have
-                ? wallet_sqlite_write_key_r(ctx->wallet_db, &pk, &key)
-                : ZCL_ERR(-1, "generated key disappeared before persistence");
-            bool verified = wr.ok && wallet_readback_key(
-                ctx->wallet_db, &pk, &key);
-            memory_cleanse(key.vch, sizeof(key.vch));
-            if (verified)
-                continue;
-            size_t removed = 0;
-            for (size_t j = i + (wr.ok ? 1 : 0); j < generated_count; j++)
-                removed += wallet_remove_key(
-                    ctx->wallet, &generated[j]) ? 1 : 0;
-            memset(addresses, 0, count * WALLET_DIRECT_ADDRESS_MAX);
-            (void)snprintf(err_out, err_max,
-                "incremental key persistence failed at %zu of %zu",
-                i + 1, generated_count);
-            LOG_FAIL("wallet",
-                     "new_durable_addresses: incremental persist failed "
-                     "at=%zu/%zu removed_unpersisted=%zu code=%d: %s",
-                     i + 1, generated_count, removed, wr.code, wr.message);
-        }
+    size_t failed_at = 0;
+    size_t removed = 0;
+    struct zcl_result persist_wr;
+    if (!wallet_direct_persist_generated_keys(ctx, generated,
+                                              generated_count,
+                                              direct_generated, &failed_at,
+                                              &removed, &persist_wr)) {
+        memset(addresses, 0, count * WALLET_DIRECT_ADDRESS_MAX);
+        (void)snprintf(err_out, err_max,
+            "incremental key persistence failed at %zu of %zu",
+            failed_at, generated_count);
+        LOG_FAIL("wallet",
+                 "new_durable_addresses: incremental persist failed "
+                 "at=%zu/%zu removed_unpersisted=%zu code=%d: %s",
+                 failed_at, generated_count, removed, persist_wr.code,
+                 persist_wr.message);
     }
 
     /* A legacy address consumes a pre-persisted key. The private key was
      * already durable, but its removal from the unused pool is new state: if
      * that membership survives a restart the same address can be handed out
      * twice. Persist the reduced pool before returning any address. */
-    if (ctx->wallet_db && !direct_generated) {
-        struct zcl_result pool_flush = wallet_flush_from_context(ctx);
-        if (!pool_flush.ok) {
-            memset(addresses, 0, count * WALLET_DIRECT_ADDRESS_MAX);
-            (void)snprintf(err_out, err_max,
-                           "keypool consumption persistence failed");
-            LOG_FAIL("wallet",
-                     "new_durable_addresses: keypool consumption flush "
-                     "failed code=%d: %s",
-                     pool_flush.code, pool_flush.message);
-        }
+    struct zcl_result pool_flush;
+    if (!wallet_direct_persist_keypool_consumption(ctx, direct_generated,
+                                                   &pool_flush)) {
+        memset(addresses, 0, count * WALLET_DIRECT_ADDRESS_MAX);
+        (void)snprintf(err_out, err_max,
+                       "keypool consumption persistence failed");
+        LOG_FAIL("wallet",
+                 "new_durable_addresses: keypool consumption flush "
+                 "failed code=%d: %s",
+                 pool_flush.code, pool_flush.message);
     }
 
     /* Success: one coalesced backup trigger for the whole durable batch. */
