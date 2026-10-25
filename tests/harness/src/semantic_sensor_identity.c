@@ -623,9 +623,14 @@ static bool ssi_facts_run(const char *dir, const char *const *extra,
     argv[k] = NULL;
     int rc = zcl_spawn_capture_merged_observed(argv, out, cap, 600000,
                                                &timed_out);
-    if (rc != 0 || timed_out)
+    if (rc != 0 || timed_out) {
         printf("  make %s exited %d%s: %.2000s\n", goal, rc,
                timed_out ? " (timed out)" : "", out);
+        size_t length = strlen(out);
+        if (length > 2000)
+            printf("  make failure output tail: %.4000s\n",
+                   out + (length > 4000 ? length - 4000 : 0));
+    }
     *emitted = strstr(out, "z23-clang-manifest emit") != NULL;
     return rc == 0 && !timed_out;
 }
@@ -797,7 +802,13 @@ static int ssi_t_identity(void)
         ASSERT(ssi_has(m[3], n[3], "; object-cc unknown"));
         ASSERT_EQ(ssi_changed(m[0], n[0], m[3], n[3]),
                   1u << VCS_SEMANTIC_SECTION_V1_IDENTITY);
+#if defined(__APPLE__)
+        /* The object-compiler reader cannot establish a Mach-O loader
+         * closure; the documented fail-closed identity stays unknown. */
+        ASSERT(ssi_has(m[4], n[4], "; object-cc unknown"));
+#else
         ASSERT(ssi_has(m[4], n[4], "; object-cc @sys/"));
+#endif
         (void)snprintf(out, sizeof(out), "%s/missing.zsm", root);
         ASSERT(!ssi_emit(root, "ssi.c", out, "zfx-no-such-compiler", SSI_TC,
                          flags, 2, message, sizeof(message)));

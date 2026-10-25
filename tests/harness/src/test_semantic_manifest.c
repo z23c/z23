@@ -2123,6 +2123,29 @@ static int smt_t_root_failed_read(void)
     return failures;
 }
 
+static int smt_t_warm_paths(void)
+{
+    int failures = 0;
+    char dir[] = "test-tmp/semantic_warm_paths_XXXXXX";
+    char message[4096] = "";
+    bool timed_out = false, created = false;
+    TEST_CASE("semantic_sensor: resource paths preserve containment and missing shadows") {
+        ASSERT(mkdtemp(dir) != NULL);
+        created = true;
+        const char *argv[] = {"build/bin/z23-clang-manifest-warm-fixture", dir, NULL};
+        int rc = zcl_spawn_capture_merged_observed(argv, message, sizeof(message),
+                                                   60000, &timed_out);
+        if (rc != 0)
+            printf("%s", message);
+        ASSERT(!timed_out);
+        ASSERT_EQ(rc, 0);
+        ASSERT_STR_EQ(message, "warm-path fixture: PASS\n");
+    } TEST_END
+    if (created && test_rm_rf_recursive(dir) != 0)
+        failures++;
+    return failures;
+}
+
 int test_semantic_sensor(void)
 {
     int failures = 0;
@@ -2134,6 +2157,7 @@ int test_semantic_sensor(void)
         return 0;
     }
     failures += smt_t_root_failed_read();
+    failures += smt_t_warm_paths();
     failures += smt_t_diff_operands();
     failures += smt_t_max_records();
     failures += smt_t_section_limits();

@@ -1,5 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Compiler-API-free binding of a warm semantic-sensor TU to the tree: file digests, include probes, shadow candidates and main-file identity. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "clang_manifest_core.h"
 
 #include "base/safe_alloc.h"
@@ -21,8 +24,14 @@
  * and the shadow candidates of every include no LOOKUPS record covers
  * (before it). Contract: docs/work/SEMANTIC_MANIFEST.md, "Warm session". */
 
-struct cm_bind {
+struct cm_host_paths {
     const char *root;
+    char resource[PATH_MAX];
+    size_t resource_len;
+};
+
+struct cm_bind {
+    const struct cm_host_paths *paths;
     char *why;
     size_t why_len;
     bool failed;
@@ -47,17 +56,99 @@ static bool cm_bind_fail(struct cm_bind *b, const char *fmt, ...)
  * FILES and IDENTITY carry): "." is root, "@sys/x" is "/x", anything else
  * is root-relative. Texts are (pointer, length) as the enumerators give
  * them. False when out is too small. */
-static bool cm_host_path(const char *root, const char *p, size_t n, char *out,
-                         size_t cap)
+static bool cm_resource_suffix(const char *p, size_t n)
+{
+    if (n == 0)
+        return true;
+    if (n < 8 || memcmp(p, "/include", 8) != 0 ||
+        (n > 8 && p[8] != '/'))
+        return false;
+    for (size_t at = 1; at < n;) {
+        size_t end = at;
+        while (end < n && p[end] != '/')
+            end++;
+        size_t len = end - at;
+        if (len == 0 || (len == 1 && p[at] == '.') ||
+            (len == 2 && p[at] == '.' && p[at + 1] == '.'))
+            return false;
+        at = end + 1;
+    }
+    return p[n - 1] != '/';
+}
+
+static bool cm_resource_contained(const struct cm_host_paths *paths,
+                                   const char *resolved)
+{
+    size_t n = strlen(resolved);
+    return n > paths->resource_len &&
+           memcmp(resolved, paths->resource, paths->resource_len) == 0 &&
+           cm_resource_suffix(resolved + paths->resource_len,
+                              n - paths->resource_len);
+}
+
+/* Resolve each existing component so even a dangling or escaping symlink
+ * cannot masquerade as a missing shadow directory. After the first genuinely
+ * missing component, the already validated lexical suffix stays missing. */
+static bool cm_resource_host(const struct cm_host_paths *paths,
+                              const char *suffix, size_t n, char *out, size_t cap)
+{
+    char current[PATH_MAX], resolved[PATH_MAX];
+    if (!paths->resource_len || !cm_resource_suffix(suffix, n))
+        return false;
+    (void)snprintf(current, sizeof(current), "%s", paths->resource);
+    for (size_t at = 0; at < n;) {
+        size_t end = at + 1;
+        while (end < n && suffix[end] != '/')
+            end++;
+        size_t used = strlen(current);
+        if (used + end - at >= sizeof(current))
+            return false;
+        memcpy(current + used, suffix + at, end - at);
+        current[used + end - at] = '\0';
+        struct stat st;
+        if (lstat(current, &st) != 0) {
+            if (errno != ENOENT)
+                return false;
+            int w = snprintf(out, cap, "%s%.*s", current, (int)(n - end), suffix + end);
+            return w >= 0 && (size_t)w < cap;
+        }
+        if (realpath(current, resolved) == NULL || !cm_resource_contained(paths, resolved))
+            return false;
+        (void)snprintf(current, sizeof(current), "%s", resolved);
+        at = end;
+    }
+    int w = snprintf(out, cap, "%s", current);
+    return w >= 0 && (size_t)w < cap;
+}
+
+static bool cm_ordinary_host(const char *root, const char *p, size_t n,
+                             char *out, size_t cap)
 {
     int w;
-    if (n >= 4 && memcmp(p, "@sys", 4) == 0)
-        w = snprintf(out, cap, "/%.*s", (int)(n > 5 ? n - 5 : 0), p + 5);
+    if (n == 4 && memcmp(p, "@sys", 4) == 0)
+        w = snprintf(out, cap, "/");
+    else if (n >= 5 && memcmp(p, "@sys/", 5) == 0)
+        w = snprintf(out, cap, "/%.*s", (int)(n - 5), p + 5);
     else if (n == 1 && p[0] == '.')
         w = snprintf(out, cap, "%s", root);
     else
         w = snprintf(out, cap, "%s/%.*s", root, (int)n, p);
     return w >= 0 && (size_t)w < cap;
+}
+
+static bool cm_host_path(const struct cm_host_paths *paths,
+                         const char *p, size_t n, char *out,
+                         size_t cap)
+{
+    static const char resource[] = "@sys/clang-resource";
+    const size_t prefix = sizeof(resource) - 1;
+    if (n >= PATH_MAX || memchr(p, '\0', n) != NULL)
+        return false;
+    if (n >= prefix && memcmp(p, resource, prefix) == 0 &&
+        (n == prefix || p[prefix] == '/')) {
+        return cm_resource_host(paths, p + prefix, n - prefix, out, cap);
+    }
+    return cm_ordinary_host(paths->root, p, n, out, cap);
 }
 
 static bool cm_bind_file_cb(void *ctx, const struct vcs_semantic_fields_v1 *f)
@@ -69,7 +160,7 @@ static bool cm_bind_file_cb(void *ctx, const struct vcs_semantic_fields_v1 *f)
         return cm_bind_fail(b, "a FILES record is malformed");
     if (f->num[0] == VCS_SEMANTIC_ORIGIN_V1_MAIN)
         return true;
-    if (!cm_host_path(b->root, f->text[0], f->text_len[0], path,
+    if (!cm_host_path(b->paths, f->text[0], f->text_len[0], path,
                       sizeof(path)) ||
         !cm_stream_sha3(fopen(path, "rb"), now) ||
         memcmp(now, f->digest[0], 32) != 0)
@@ -314,7 +405,10 @@ bool cm_warm_lookups_agree(const uint8_t *prev, size_t prev_len,
 bool cm_warm_bound(const char *root, const uint8_t *m, size_t n, char *why,
                    size_t why_len)
 {
-    struct cm_bind b = {.root = root, .why = why, .why_len = why_len};
+    struct cm_host_paths paths = {.root = root};
+    struct cm_bind b = {.paths = &paths, .why = why, .why_len = why_len};
+    if (!cm_host_resource_root(paths.resource, &paths.resource_len))
+        return cm_bind_fail(&b, "compiler-resource-directory-unavailable");
     struct cm_lset s = {0};
     bool ok = vcs_semantic_section_v1_each(m, n, VCS_SEMANTIC_SECTION_V1_FILES,
                                            cm_bind_file_cb, &b) &&
@@ -357,7 +451,7 @@ struct cm_sdir {
 };
 
 struct cm_shadow {
-    const char *root;
+    const struct cm_host_paths *paths;
     struct cm_sdir *dirs;
     size_t ndirs, cap;
     char *out;
@@ -437,7 +531,7 @@ static bool cm_sdir_read(struct cm_shadow *s, struct cm_sdir *d)
     bool ok = true;
     if (d->state != 0)
         return true;
-    if (!cm_host_path(s->root, d->dir, d->len, d->host, sizeof(d->host)))
+    if (!cm_host_path(s->paths, d->dir, d->len, d->host, sizeof(d->host)))
         return false;
     dp = opendir(d->host);
     d->state = dp == NULL ? 2 : 1;
@@ -572,7 +666,10 @@ static void cm_shadow_free(struct cm_shadow *s)
 bool cm_warm_shadows(const char *root, const uint8_t *m, size_t n, char **out,
                      size_t *out_len)
 {
-    struct cm_shadow s = {.root = root};
+    struct cm_host_paths paths = {.root = root};
+    if (!cm_host_resource_root(paths.resource, &paths.resource_len))
+        return false;
+    struct cm_shadow s = {.paths = &paths};
     bool ok = vcs_semantic_manifest_v1_each(m, n, cm_shadow_ident_cb, &s) &&
               !s.bad &&
               vcs_semantic_section_v1_each(m, n, VCS_SEMANTIC_SECTION_V1_FILES,

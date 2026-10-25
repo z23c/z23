@@ -46,6 +46,14 @@ static bool smwd_stream_sha3(FILE *fp, uint8_t out[32])
     return false;
 }
 
+static bool smwd_resource_root(char out[PATH_MAX], size_t *len)
+{
+    out[0] = '\0';
+    *len = 0;
+    fprintf(stderr, "shadow-directory fixture: unexpected resource lookup\n");
+    return false;
+}
+
 /* Observe the actual sorting call without letting the defective version
  * crash in strcmp(NULL, ...). A NULL entry becomes an assertion failure. */
 static void smwd_qsort(void *base, size_t count, size_t size,
@@ -64,9 +72,11 @@ static void smwd_qsort(void *base, size_t count, size_t size,
 #define cm_grow smwd_grow
 #define cm_strdup smwd_strdup
 #define cm_stream_sha3 smwd_stream_sha3
+#define cm_host_resource_root smwd_resource_root
 #define qsort smwd_qsort
 #include "../../../tools/sensors/clang_manifest_warm.c"
 #undef qsort
+#undef cm_host_resource_root
 #undef cm_stream_sha3
 #undef cm_strdup
 #undef cm_grow
@@ -98,7 +108,8 @@ static int smwd_directory_case(void)
     char root[1024] = {0};
     char *names[2] = {NULL, NULL};
     struct cm_sdir dir = {.dir = ".", .len = 1, .names = names, .cap = 2};
-    struct cm_shadow shadow = {.root = root};
+    struct cm_host_paths paths = {.root = root};
+    struct cm_shadow shadow = {.paths = &paths};
     smwd_duplicates = 0;
     smwd_sort_null = false;
     TEST_CASE("semantic_manifest: refused directory name is excluded from sorting") {

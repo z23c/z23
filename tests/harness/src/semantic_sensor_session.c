@@ -67,6 +67,10 @@
 
 extern char **environ;
 
+static char g_sss_system_root[PATH_MAX];
+static char g_sss_system_flag[PATH_MAX + 8];
+static char g_sss_child_home[PATH_MAX + 5];
+
 static const char k_sss_header[] =
     "#ifndef FX_H\n"
     "#define FX_H\n"
@@ -78,6 +82,7 @@ static const char k_sss_header[] =
 static const char k_sss_main[] =
     "#include \"fx.h\"\n"
     "#include <stdint.h>\n"
+    "#include <fx_system.h>\n"
     "#define FX_LOCAL 2\n"
     "int fx_sum(const struct fx_pair *p) { return p->a + p->b; }\n"
     "int fx_run(int v)\n"
@@ -228,64 +233,60 @@ static bool sss_shadow_beside(const char *root)
                      "int fx_sum(const struct fx_pair *p);\n#endif\n");
 }
 
-/* A leaf system header that the base TU read only through another system
- * header: no LOOKUPS record covers its include. */
-struct sss_leaf {
-    char path[PATH_MAX];
-    char *body;
+/* A deterministic system-header include: -isystem classifies the includer
+ * as system, so its nested include has no LOOKUPS witness. Shadow tracking
+ * must still discover a new earlier header. Do not depend on SDK contents
+ * or try to invert the compiler-resource virtual namespace. */
+struct sss_system_witness {
+    bool system_leaf;
+    bool leaf_lookup;
 };
 
-/* The host path of a system file's manifest path: "@sys/x" is "/x". */
-static bool sss_sys_path(const char *p, size_t n, char *out, size_t cap)
+static bool sss_system_file_cb(void *ctx,
+                                const struct vcs_semantic_fields_v1 *f)
 {
-    int w;
-    if (n < 5 || memcmp(p, "@sys/", 5) != 0)
-        return false;
-    w = snprintf(out, cap, "/%.*s", (int)(n - 5), p + 5);
-    return w > 0 && (size_t)w < cap;
-}
-
-static bool sss_leaf_cb(void *ctx, const struct vcs_semantic_fields_v1 *f)
-{
-    struct sss_leaf *l = ctx;
-    size_t n = 0;
-    if (l->body != NULL || f->ntext < 1 || f->nnum < 1 ||
-        f->num[0] != VCS_SEMANTIC_ORIGIN_V1_SYSTEM ||
-        !sss_sys_path(f->text[0], f->text_len[0], l->path, sizeof(l->path)) ||
-        !sss_read(l->path, &l->body, &n))
-        return true;
-    if (n == 0 || strstr(l->body, "include") != NULL) {
-        free(l->body);
-        l->body = NULL;
-    }
+    struct sss_system_witness *w = ctx;
+    static const char path[] = "/fx_system_leaf.h";
+    if (f->ntext >= 1 && f->nnum >= 1 &&
+        f->text_len[0] >= sizeof(path) - 1 &&
+        memcmp(f->text[0] + f->text_len[0] - (sizeof(path) - 1),
+               path, sizeof(path) - 1) == 0 &&
+        f->num[0] == VCS_SEMANTIC_ORIGIN_V1_SYSTEM)
+        w->system_leaf = true;
     return true;
 }
 
-/* A copy of that header in inc/a, the first angled dir, under every tail of
- * its path, so whichever relative name the system header spelled now finds
- * the copy first. A cold parse reads the copy; a reused preamble would not. */
+static bool sss_system_lookup_cb(void *ctx,
+                                  const struct vcs_semantic_fields_v1 *f)
+{
+    struct sss_system_witness *w = ctx;
+    static const char name[] = "fx_system_leaf.h";
+    if (f->ntext >= 2 && f->text_len[1] == sizeof(name) - 1 &&
+        memcmp(f->text[1], name, sizeof(name) - 1) == 0)
+        w->leaf_lookup = true;
+    return true;
+}
+
 static bool sss_system_shadow(const char *root)
 {
-    struct sss_leaf l = {0};
-    char base[PATH_MAX], rel[PATH_MAX], *m = NULL;
+    struct sss_system_witness w = {0};
+    char base[PATH_MAX], *m = NULL;
     size_t n = 0;
-    bool ok;
     (void)snprintf(base, sizeof(base), "%s/base.cold.bin", root);
-    ok = sss_read(base, &m, &n) &&
-         vcs_semantic_section_v1_each((const uint8_t *)m, n,
-                                      VCS_SEMANTIC_SECTION_V1_FILES,
-                                      sss_leaf_cb, &l) &&
-         l.body != NULL;
+    bool ok = sss_read(base, &m, &n) &&
+        vcs_semantic_section_v1_each((const uint8_t *)m, n,
+                                     VCS_SEMANTIC_SECTION_V1_FILES,
+                                     sss_system_file_cb, &w) &&
+        vcs_semantic_section_v1_each((const uint8_t *)m, n,
+                                     VCS_SEMANTIC_SECTION_V1_LOOKUPS,
+                                     sss_system_lookup_cb, &w) &&
+        w.system_leaf && !w.leaf_lookup;
     free(m);
     if (!ok)
-        printf("FAIL no leaf system header in %s\n", base);
-    for (const char *s = strchr(l.path + 1, '/'); ok && s != NULL;
-         s = strchr(s + 1, '/')) {
-        (void)snprintf(rel, sizeof(rel), "inc/a/%s", s + 1);
-        ok = sss_write(root, rel, l.body);
-    }
-    free(l.body);
-    return ok;
+        printf("FAIL nested system include lacks its FILES/no-LOOKUPS witness in %s\n",
+               base);
+    return ok && sss_write(root, "inc/a/fx_system_leaf.h",
+                            "typedef int fx_system_int;\n");
 }
 
 static bool sss_body_again(const char *root)
@@ -370,17 +371,20 @@ static const struct sss_step k_sss_attr_steps[] = {
 /* ── the sensor: cold emits and one session process ─────────────────────── */
 
 struct sss_argv {
-    const char *items[8];
+    const char *items[9]; /* base (5), system dir, extra flag, two case flags */
     size_t n;
 };
 
 static void sss_argv(struct sss_argv *a, bool extra)
 {
-    static const char *const base[] = {"-std=c23", "-Iinc/a", "-Iinc/b",
-                                       "-DFX_MODE=1"};
+    /* Keep the builtin stdint.h and controlled system-header fixture, with
+     * no hosted SDK's unrelated unbound probes in reparse acceptance. */
+    static const char *const base[] = {"-std=c23", "-ffreestanding",
+                                       "-Iinc/a", "-Iinc/b", "-DFX_MODE=1"};
     a->n = 0;
     for (size_t k = 0; k < sizeof(base) / sizeof(base[0]); k++)
         a->items[a->n++] = base[k];
+    a->items[a->n++] = g_sss_system_flag;
     if (extra)
         a->items[a->n++] = "-DFX_EXTRA=1";
 }
@@ -388,11 +392,13 @@ static void sss_argv(struct sss_argv *a, bool extra)
 static bool sss_cold(const char *sensor, const char *root, const char *out,
                      const struct sss_argv *a)
 {
-    const char *argv[24];
+    const char *argv[26];
     char buf[4096];
     bool timed_out = false;
     size_t k = 0;
     int rc;
+    argv[k++] = "env";
+    argv[k++] = g_sss_child_home;
     const char *head[] = {sensor, "emit", "--root", root, "--source",
                           "src/main.c", "--out", out, "--facts", "--"};
     for (size_t i = 0; i < sizeof(head) / sizeof(head[0]); i++)
@@ -414,9 +420,11 @@ static int sss_cold_cc(const char *sensor, const char *root, const char *out,
                        const char *cc, const char *tc,
                        const struct sss_argv *a, char *message, size_t cap)
 {
-    const char *argv[28];
+    const char *argv[30];
     bool timed_out = false;
     size_t k = 0;
+    argv[k++] = "env";
+    argv[k++] = g_sss_child_home;
     const char *head[] = {sensor, "emit", "--root", root, "--source",
                           "src/main.c", "--out", out, "--facts"};
     for (size_t i = 0; i < sizeof(head) / sizeof(head[0]); i++)
@@ -444,21 +452,24 @@ struct sss_proc {
     size_t have;
 };
 
-/* The environment for the session: the caller's, minus any inherited fault
- * flag, plus the fault flag when inject is set. Built before fork. */
+/* Only sensor children use the fixture project as HOME. Its sibling system
+ * fixture stays outside both root and home, regardless of the host checkout
+ * location. Parent environment and production home guard remain unchanged. */
 static char **sss_env(bool inject)
 {
     size_t n = 0, w = 0;
     char **env;
     while (environ[n] != NULL)
         n++;
-    env = calloc(n + 2, sizeof(char *));
+    env = calloc(n + 3, sizeof(char *));
     if (env == NULL)
         return NULL;
     for (size_t k = 0; k < n; k++) {
-        if (strncmp(environ[k], SSS_INJECT "=", sizeof(SSS_INJECT)) != 0)
+        if (strncmp(environ[k], SSS_INJECT "=", sizeof(SSS_INJECT)) != 0 &&
+            strncmp(environ[k], "HOME=", 5) != 0)
             env[w++] = environ[k];
     }
+    env[w++] = g_sss_child_home;
     if (inject)
         env[w++] = SSS_INJECT "=1";
     return env;
@@ -721,9 +732,15 @@ static bool sss_run_step(struct sss_ctx *c, struct sss_proc *p,
     }
     tu = tu != NULL ? tu : s->tu;
     why = why != NULL ? why : s->why;
-    return sss_is(reply, "tu", tu) &&
+    bool ok = sss_is(reply, "tu", tu) &&
            (why[0] == '\0' || sss_starts(reply, "reason", why)) &&
            sss_cold(c->sensor, c->root, cold, &a) && sss_same(warm, cold);
+    if (ok) {
+        printf("\n  semantic_sensor: %s step %s equals cold\n", c->root,
+               s->name);
+        (void)fflush(stdout);
+    }
+    return ok;
 }
 
 static bool sss_step_as(struct sss_ctx *c, struct sss_proc *p, size_t k,
@@ -871,6 +888,11 @@ static int sss_t_attrs(struct sss_ctx *c, bool verify)
     struct sss_proc p = {0};
     char reply[SSS_REPLY_MAX], log[PATH_MAX];
     bool started = false;
+    /* Alias attributes are an ELF semantic fixture; Darwin rejects them
+     * before extraction. Both cold and session parses use the same explicit
+     * target, with resource stdint types independent of a target SDK. */
+    c->extra[0] = "--target=x86_64-unknown-linux-gnu";
+    c->extra[1] = "-ffreestanding";
     TEST_CASE(verify ? "semantic_sensor: session --verify-cold equals cold on "
                        "attribute and alias refs"
                      : "semantic_sensor: qualified warm reparses keep attribute "
@@ -898,6 +920,8 @@ static int sss_t_attrs(struct sss_ctx *c, bool verify)
     } TEST_END
     if (started)
         (void)sss_finish(&p, reply, sizeof(reply));
+    c->extra[0] = NULL;
+    c->extra[1] = NULL;
     return failures;
 }
 
@@ -1209,6 +1233,9 @@ static int sss_t_untrackable(struct sss_ctx *c)
     TEST_CASE("semantic_sensor: a response file is refused, and a -fmodules "
               "argv recreates the TU on every emit") {
         ASSERT(sss_fresh(c, "untrackable"));
+        /* Exercise argv invalidation without importing toolchain header
+         * modules: this fixture uses none of stdint.h's declarations. */
+        ASSERT(sss_edit(c->root, "src/main.c", "#include <stdint.h>\n", ""));
         (void)snprintf(log, sizeof(log), "%s/untrackable.err", c->dir);
         ASSERT(sss_start(&p, c->sensor, false, false, log));
         started = true;
@@ -1216,6 +1243,7 @@ static int sss_t_untrackable(struct sss_ctx *c)
         c->extra[0] = "-fmodules";
         c->extra[1] = "-fmodules-cache-path=mc";
         ASSERT(sss_run_step(c, &p, &mod, NULL, NULL, reply, sizeof(reply)));
+        ASSERT(sss_is(reply, "verify", "equal"));
         ASSERT(sss_run_step(c, &p, &mod_again, NULL, NULL, reply,
                             sizeof(reply)));
         ASSERT(sss_is(reply, "verify", "equal"));
@@ -1894,11 +1922,30 @@ int semantic_sensor_session_cases(void)
     int failures = sss_t_reply_checks() + sss_t_reply_strings() +
                    sss_t_record_checks();
     struct sss_ctx c = {0};
+    /* A sibling of the fixture project, outside its child-only HOME:
+     * FILES must still classify these inputs as SYSTEM. */
+    if (test_mkdtemp(g_sss_system_root, sizeof(g_sss_system_root),
+                     "semsensor_system") == NULL) {
+        printf("FAIL semantic_sensor session: no system fixture dir\n");
+        return failures + 1;
+    }
+    (void)snprintf(g_sss_system_flag, sizeof(g_sss_system_flag),
+                   "-isystem%s", g_sss_system_root);
+    if (!sss_write(g_sss_system_root, "fx_system.h",
+                    "#include <fx_system_leaf.h>\n") ||
+        !sss_write(g_sss_system_root, "fx_system_leaf.h",
+                    "typedef int fx_system_int;\n")) {
+        printf("FAIL semantic_sensor session: cannot write system fixture\n");
+        (void)test_rm_rf_recursive(g_sss_system_root);
+        return failures + 1;
+    }
     if (realpath(SSS_SENSOR, c.sensor) == NULL ||
         test_mkdtemp(c.dir, sizeof(c.dir), "semsensor_session") == NULL) {
         printf("FAIL semantic_sensor session: no sensor path or temp dir\n");
+        (void)test_rm_rf_recursive(g_sss_system_root);
         return 1;
     }
+    (void)snprintf(g_sss_child_home, sizeof(g_sss_child_home), "HOME=%s", c.dir);
     failures += sss_t_verified(&c);
     failures += sss_t_qualified(&c);
     failures += sss_t_injected(&c);
@@ -1915,5 +1962,6 @@ int semantic_sensor_session_cases(void)
     failures += sss_t_input_errors(&c);
     failures += sss_t_protocol(&c);
     (void)test_rm_rf_recursive(c.dir);
+    (void)test_rm_rf_recursive(g_sss_system_root);
     return failures;
 }

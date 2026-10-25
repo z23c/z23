@@ -199,6 +199,8 @@ struct cm_identity {
 /* Enter root (chdir), resolve $HOME (refused when unset, relative or
  * unresolvable), create the builder. */
 bool cm_core_init(struct cm_core *c, const char *root);
+/* Resolve the build-selected resource authority; empty when not configured. */
+bool cm_host_resource_root(char out[PATH_MAX], size_t *len);
 void cm_core_free(struct cm_core *c);
 bool cm_fail(struct cm_core *c, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));

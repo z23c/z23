@@ -99,6 +99,22 @@ bool cm_read_file(const char *path, uint8_t **out, size_t *len)
     return ok;
 }
 
+bool cm_host_resource_root(char out[PATH_MAX], size_t *len)
+{
+    out[0] = '\0';
+    *len = 0;
+#if defined(CM_HOST_RESOURCE_DIR)
+    struct stat st;
+    if (realpath(CM_HOST_RESOURCE_DIR, out) == NULL ||
+        strcmp(out, "/") == 0 || stat(out, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        out[0] = '\0';
+        return false;
+    }
+    *len = strlen(out);
+#endif
+    return true;
+}
+
 bool cm_core_init(struct cm_core *c, const char *root)
 {
     const char *home = getenv("HOME");
@@ -115,16 +131,8 @@ bool cm_core_init(struct cm_core *c, const char *root)
                                     : home[0] != '/' ? "not absolute"
                                                      : "does not resolve");
     c->home_len = strlen(c->home);
-    c->host_resource_root_len = 0;
-#if defined(CM_HOST_RESOURCE_DIR)
-    struct stat resource_stat;
-    if (realpath(CM_HOST_RESOURCE_DIR, c->host_resource_root) == NULL ||
-        strcmp(c->host_resource_root, "/") == 0 ||
-        stat(c->host_resource_root, &resource_stat) != 0 ||
-        !S_ISDIR(resource_stat.st_mode))
+    if (!cm_host_resource_root(c->host_resource_root, &c->host_resource_root_len))
         return cm_fail(c, "build-selected compiler resource directory does not resolve");
-    c->host_resource_root_len = strlen(c->host_resource_root);
-#endif
     c->b = vcs_semantic_builder_v1_new();
     return c->b != NULL || cm_fail(c, "cannot create the manifest builder");
 }

@@ -7994,7 +7994,17 @@ CLANG_MANIFEST_SRCS := tools/sensors/clang_manifest.c \
 	tools/sensors/clang_manifest_session.c \
 	tools/sensors/clang_manifest_tokens.c \
 	$(CLANG_MANIFEST_CORE_SRCS)
-clang-manifest: $(BIN_DIR)/z23-clang-manifest $(BIN_DIR)/z23-clang-manifest-root-fixture
+clang-manifest: $(BIN_DIR)/z23-clang-manifest $(BIN_DIR)/z23-clang-manifest-root-fixture $(BIN_DIR)/z23-clang-manifest-warm-fixture
+$(BIN_DIR)/z23-clang-manifest-warm-fixture: $(CLANG_MANIFEST_CORE_SRCS) $(CLANG_MANIFEST_CORE_HDRS) tests/fixtures/semantic_sensor/warm_paths.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -DCM_HOST_RESOURCE_DIR='"resource"' -Itools/sensors \
+	    -Icontexts/commons/modules/vcs/include -Iplatform/modules/platform/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/sha3/include -Iplatform/modules/support/include -Ivendor/include \
+	    -o $@ tests/fixtures/semantic_sensor/warm_paths.c \
+	    $(filter-out tools/sensors/clang_manifest_warm.c,$(CLANG_MANIFEST_CORE_SRCS)) $(HARDEN_LDFLAGS)
 $(BIN_DIR)/z23-clang-manifest-root-fixture: CLANG_MANIFEST_SRCS := \
 	$(filter-out tools/sensors/clang_manifest.c,$(CLANG_MANIFEST_SRCS)) \
 	tests/fixtures/semantic_sensor/root_failed_read.c
