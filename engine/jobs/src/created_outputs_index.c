@@ -297,6 +297,29 @@ static sqlite3_stmt *created_outputs_get_bounded_stmt(sqlite3 *db,
     return st;
 }
 
+static void created_outputs_get_bounded_apply_row(sqlite3_stmt *st,
+                                                  int64_t *value_out,
+                                                  uint8_t *script_out,
+                                                  size_t script_cap,
+                                                  size_t *script_len_out,
+                                                  int *height_out)
+{
+    if (value_out)
+        *value_out = (int64_t)sqlite3_column_int64(st, 0);
+    const void *blob = sqlite3_column_blob(st, 1);
+    int blen = sqlite3_column_bytes(st, 1);
+    size_t n = (blen < 0) ? 0 : (size_t)blen;
+    if (script_len_out)
+        *script_len_out = n;
+    if (script_out && script_cap) {
+        size_t copy = n < script_cap ? n : script_cap;
+        if (blob && copy)
+            memcpy(script_out, blob, copy);
+    }
+    if (height_out)
+        *height_out = sqlite3_column_int(st, 2);
+}
+
 bool created_outputs_index_get_bounded(sqlite3 *db, const uint8_t txid[32],
                                        uint32_t vout, int min_height,
                                        int max_height, int64_t *value_out,
@@ -321,20 +344,9 @@ bool created_outputs_index_get_bounded(sqlite3 *db, const uint8_t txid[32],
     bool found = false;
     int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
     if (rc == SQLITE_ROW) {
-        if (value_out)
-            *value_out = (int64_t)sqlite3_column_int64(st, 0);
-        const void *blob = sqlite3_column_blob(st, 1);
-        int blen = sqlite3_column_bytes(st, 1);
-        size_t n = (blen < 0) ? 0 : (size_t)blen;
-        if (script_len_out)
-            *script_len_out = n;
-        if (script_out && script_cap) {
-            size_t copy = n < script_cap ? n : script_cap;
-            if (blob && copy)
-                memcpy(script_out, blob, copy);
-        }
-        if (height_out)
-            *height_out = sqlite3_column_int(st, 2);
+        created_outputs_get_bounded_apply_row(st, value_out, script_out,
+                                              script_cap, script_len_out,
+                                              height_out);
         found = true;
     } else if (rc != SQLITE_DONE) {
         LOG_WARN("created_outputs",

@@ -1325,7 +1325,6 @@ engine/jobs/src/address_index.c:address_index_put_block:19
 engine/jobs/src/address_index.c:address_index_query_appearances:18
 engine/jobs/src/body_fetch_stage.c:body_fetch_exact_authority_locked:35
 engine/jobs/src/body_persist_stage.c:step_persist:24
-engine/jobs/src/created_outputs_index.c:created_outputs_index_get_bounded:17
 engine/jobs/src/header_admit_forward_rewind.c:header_admit_forward_rewind_target:16
 engine/jobs/src/header_admit_stage.c:rewind_cursor_if_active_chain_reorged:22
 engine/jobs/src/header_admit_stage.c:step_admit:21
