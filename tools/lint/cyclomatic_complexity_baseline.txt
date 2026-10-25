@@ -709,7 +709,6 @@ contexts/wallet/modules/wallet/src/wallet_sqlite_key_crypto.c:wallet_sqlite_key_
 contexts/wallet/modules/wallet/src/wallet_sqlite_key_crypto.c:wallet_sqlite_migrate_transparent_keys_r:19
 contexts/wallet/modules/wallet/src/wallet_sqlite_key_crypto.c:wallet_sqlite_scrub_plaintext_r:18
 contexts/wallet/modules/wallet/src/wallet_sqlite_key_crypto.c:wkey_scrub_transparent:22
-contexts/wallet/modules/wallet/src/wallet_sqlite_support.c:wallet_sqlite_reset_all_statements:23
 contexts/wallet/modules/zid/src/zendp.c:zendp_valid:19
 contexts/wallet/services/src/wallet_backup_crypto.c:wallet_backup_decrypt_file:17
 contexts/wallet/services/src/wallet_backup_crypto.c:wbs_write_file_atomic:20
