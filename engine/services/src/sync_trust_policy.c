@@ -151,18 +151,51 @@ static const char *export_denial(const struct sync_evidence *e)
     return NULL;
 }
 
+/* Reason SERVE/RECEIVE is withheld; NULL when the serve grant
+ * S || (proven && !X) holds. */
+static const char *serve_denial(const char *proven_why,
+                                const char *self_why,
+                                const char *export_why)
+{
+    const bool proven = proven_why == NULL;
+    const bool S = self_why == NULL;
+    const bool X = export_why == NULL;
+
+    if (S || (proven && !X))
+        return NULL;
+    /* Serve is withheld either because the proven base is incomplete or —
+     * in the export-only posture (proven && X && !S) — because the tip is
+     * not self-derived. */
+    return proven ? "state_not_self_derived" : proven_why;
+}
+
+/* Fill every denial slot with one reason token; a NULL `why` is a no-op. */
+static void set_all_denial_reasons(struct sync_capability_denials *why,
+                                   const char *reason)
+{
+    if (!why)
+        return;
+    for (int i = 0; i < SYNC_CAP_BIT_COUNT; i++)
+        why->reason[i] = reason;
+}
+
+/* Bit index = trailing-zero position of the single-bit cap. */
+static int cap_bit_index(enum sync_capability cap)
+{
+    int idx = 0;
+    for (uint32_t v = (uint32_t)cap; v > 1u; v >>= 1)
+        idx++;
+    return idx;
+}
+
 uint32_t sync_capabilities_from_evidence(const struct sync_evidence *e,
                                          struct sync_capability_denials *why)
 {
-    if (why)
-        for (int i = 0; i < SYNC_CAP_BIT_COUNT; i++)
-            why->reason[i] = NULL;
+    set_all_denial_reasons(why, NULL);
 
     if (!e) {
         /* Fail closed: every capability denied for a stable, named reason. */
-        if (why)
-            for (int i = 0; i < SYNC_CAP_BIT_COUNT; i++)
-                why->reason[i] = "no_evidence";
+        set_all_denial_reasons(why, "no_evidence");
         return SYNC_CAP_NONE;
     }
 
@@ -170,18 +203,10 @@ uint32_t sync_capabilities_from_evidence(const struct sync_evidence *e,
     const char *self_why = self_derived_denial(e);
     const char *export_why = export_denial(e);
     const char *dir_why = directory_influence_denial(e);
-    const bool proven = proven_why == NULL;
     const bool S = self_why == NULL;
     const bool X = export_why == NULL;
-
-    const bool serve = S || (proven && !X);
-    const char *serve_why = NULL;
-    if (!serve) {
-        /* Serve is withheld either because the proven base is incomplete or —
-         * in the export-only posture (proven && X && !S) — because the tip is
-         * not self-derived. */
-        serve_why = proven ? "state_not_self_derived" : proven_why;
-    }
+    const char *serve_why = serve_denial(proven_why, self_why, export_why);
+    const bool serve = serve_why == NULL;
 
     uint32_t mask = SYNC_CAP_NONE;
     struct {
@@ -199,10 +224,7 @@ uint32_t sync_capabilities_from_evidence(const struct sync_evidence *e,
     };
 
     for (size_t i = 0; i < sizeof(bits) / sizeof(bits[0]); i++) {
-        /* Bit index = trailing-zero position of the single-bit cap. */
-        int idx = 0;
-        for (uint32_t v = (uint32_t)bits[i].cap; v > 1u; v >>= 1)
-            idx++;
+        int idx = cap_bit_index(bits[i].cap);
         if (bits[i].granted) {
             mask |= (uint32_t)bits[i].cap;
             if (why && idx < SYNC_CAP_BIT_COUNT)
