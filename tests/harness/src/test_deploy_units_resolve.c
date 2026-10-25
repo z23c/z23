@@ -24,7 +24,6 @@
 
 enum {
     DU_TRACKED_CAP = 1 << 20,
-    DU_MAX_TRACKED = 4096,
     DU_FILE_CAP = 16 << 20,
     DU_LOGICAL_CAP = 4096,
     DU_MAX_TOKENS = 1024,
@@ -41,8 +40,6 @@ static const char k_du_bin_dir[] = "$(BIN_DIR)/";
 
 struct du_ctx {
     char *tracked_buf;
-    const char *tracked[DU_MAX_TRACKED];
-    size_t n_tracked;
     char *makefile;
     size_t units;
     int failures;
@@ -137,34 +134,37 @@ static bool du_capture_git(char *out, size_t cap)
  * the worktree but is not tracked does not exist for a deployed unit. */
 static bool du_load_tracked(struct du_ctx *c)
 {
-    char *p;
-
     c->tracked_buf = malloc(DU_TRACKED_CAP);
     if (!c->tracked_buf)
         return false;
     if (!du_capture_git(c->tracked_buf, DU_TRACKED_CAP))
         return false;
-    p = c->tracked_buf;
-    while (*p) {
-        char *nl;
-
-        if (c->n_tracked >= DU_MAX_TRACKED)
-            return false;
-        c->tracked[c->n_tracked++] = p;
-        nl = strchr(p, '\n');
-        if (!nl)
-            break;
-        *nl = '\0';
-        p = nl + 1;
-    }
-    return c->n_tracked > 0;
+    return c->tracked_buf[0] != '\0';
 }
 
+/* Length of the newline-terminated line at p (the whole rest when unterminated). */
+static size_t du_line_len(const char *p)
+{
+    const char *nl = strchr(p, '\n');
+
+    return nl ? (size_t)(nl - p) : strlen(p);
+}
+
+/* Scans the captured listing in place, so the tracked tree has no entry cap. */
 static bool du_is_tracked(const struct du_ctx *c, const char *rel)
 {
-    for (size_t i = 0; i < c->n_tracked; i++)
-        if (strcmp(c->tracked[i], rel) == 0)
+    const char *p = c->tracked_buf;
+    size_t n = strlen(rel);
+
+    while (*p) {
+        size_t len = du_line_len(p);
+
+        if (len == n && memcmp(p, rel, n) == 0)
             return true;
+        p += len;
+        if (*p == '\n')
+            p++;
+    }
     return false;
 }
 
@@ -476,9 +476,24 @@ static void du_check_file(struct du_ctx *c, const char *unit)
 
 static void du_check_all(struct du_ctx *c)
 {
-    for (size_t i = 0; i < c->n_tracked; i++)
-        if (du_is_unit(c->tracked[i]))
-            du_check_file(c, c->tracked[i]);
+    const char *p = c->tracked_buf;
+
+    while (*p) {
+        size_t len = du_line_len(p);
+        char path[DU_PATH_CAP];
+
+        if (len >= sizeof path) {
+            du_fail(c, "git ls-files", 0, "tracked path too long", "");
+        } else {
+            memcpy(path, p, len);
+            path[len] = '\0';
+            if (du_is_unit(path))
+                du_check_file(c, path);
+        }
+        p += len;
+        if (*p == '\n')
+            p++;
+    }
 }
 
 int test_deploy_units_resolve(void)
@@ -488,6 +503,7 @@ int test_deploy_units_resolve(void)
 
     if (!du_load_tracked(&ctx)) {
         fprintf(stderr, "deploy_units_resolve: git ls-files unavailable\n");
+        free(ctx.tracked_buf);
         return 1;
     }
     if (!du_read_file("Makefile", &ctx.makefile, &mk_len)) {
