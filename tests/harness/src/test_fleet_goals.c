@@ -336,6 +336,71 @@ static int fgl_case_files(const char *root)
     return failures;
 }
 
+struct fgl_inventory_line {
+    const char *name;
+    char first, fill;
+    size_t padding;
+    const char *tail;
+    int entries;
+};
+
+static int fgl_inventory_line_one(const char *root,
+                                   const struct fgl_inventory_line *c)
+{
+    int failures = 0;
+    char path[600], text[4096], expected[64];
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    (void)snprintf(path, sizeof(path), "%s/inventory_lines.txt", root);
+    o.bash_allowlist = path;
+    TEST("D8: inventory entries follow physical lines, not read chunks") {
+        printf("  inventory case: %s\n", c->name);
+        size_t tail = strlen(c->tail);
+        size_t bytes = 1 + c->padding + tail;
+        ASSERT(bytes <= sizeof(text));
+        text[0] = c->first;
+        memset(text + 1, c->fill, c->padding);
+        memcpy(text + 1 + c->padding, c->tail, tail);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        bool wrote = fwrite(text, 1, bytes, f) == bytes;
+        int closed = fclose(f);
+        ASSERT(wrote && closed == 0);
+        struct zcl_goal_result r = zcl_goals_measure(&o, "D8");
+        (void)snprintf(expected, sizeof(expected), "%d shell script(s)", c->entries);
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, expected));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_inventory_lines(const char *root)
+{
+    static const struct fgl_inventory_line cases[] = {
+        {"long comment then two entries", '#', 'x', 1499,
+         "\ntools/a.sh\ntools/b.sh\n", 2},
+        {"1023-byte comment boundary", '#', 'x', 1022,
+         "\ntools/a.sh\ntools/b.sh\n", 2},
+        {"1024-byte comment boundary", '#', 'x', 1023,
+         "\ntools/a.sh\ntools/b.sh\n", 2},
+        {"long single entry with newline", 'a', 'a', 1499, ".sh\n", 1},
+        {"1023-byte entry boundary", 'a', 'a', 1022, "\n", 1},
+        {"1024-byte entry boundary", 'a', 'a', 1023, "\n", 1},
+        {"long single entry at EOF", 'a', 'a', 1499, ".sh", 1},
+        {"long whitespace prefix before comment", ' ', ' ', 1499,
+         "# comment\ntools/a.sh\ntools/b.sh\n", 2},
+        {"CR prefix ignored and CRLF entry counted", '\r', 'x', 5,
+         "\ntools/a.sh\r\n \t\n", 1},
+        {"NUL prefix ignored through newline", '\0', 'x', 5,
+         "\ntools/a.sh\n", 1},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        failures += fgl_inventory_line_one(root, &cases[i]);
+    return failures;
+}
+
 static int fgl_case_claims(const char *root)
 {
     int failures = 0;
@@ -1415,6 +1480,7 @@ int test_fleet_goals(void)
     failures += fgl_case_d7_unmeasured(root);
     failures += fgl_case_d7_grade(root);
     failures += fgl_case_files(root);
+    failures += fgl_case_inventory_lines(root);
     failures += fgl_case_claims(root);
     failures += fgl_case_claims_read_error(root);
     failures += fgl_case_receipt_c3(root);

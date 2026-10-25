@@ -1205,14 +1205,21 @@ static struct zcl_goal_result gr_g13(const struct zcl_goals_options *o)
 
 static int64_t gr_count_entries(const char *path)
 {
-    char line[1024];
+    bool first = true;
+    int ch;
     int64_t n = 0;
     FILE *fp = fopen(path, "r");
     if (!fp)
         return -1;
-    while (fgets(line, sizeof(line), fp)) {
-        const char *p = line + strspn(line, " \t");
-        n += *p != '#' && *p != '\n' && *p != '\r' && *p != '\0';
+    while ((ch = fgetc(fp)) != EOF) {
+        if (ch == '\n') {
+            first = true;
+            continue;
+        }
+        if (!first || ch == ' ' || ch == '\t')
+            continue;
+        n += ch != '#' && ch != '\r' && ch != '\0';
+        first = false;
     }
     (void)fclose(fp);
     return n;
