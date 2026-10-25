@@ -163,6 +163,87 @@ static bool content_show(const struct metaverse_adapter_ctx *ctx,
     return true;
 }
 
+/* Prove and project one accepted blob. False means it could not be rendered. */
+static bool content_list_render_blob(const struct metaverse_adapter_ctx *ctx,
+                                     struct mv_manifest_read *m,
+                                     struct metaverse_property_view *view,
+                                     uint64_t *verify_bytes_left,
+                                     uint32_t *verify_operations_left)
+{
+    struct metaverse_property_id id;
+
+    if (metaverse_property_id_make(METAVERSE_KIND_CONTENT, m->root, &id) &&
+        metaverse_view_begin(view, &id)) {
+        uint64_t bytes_used = 0;
+        uint32_t operations_used = 0;
+
+        mv_manifest_verify_possession(
+            ctx->zcode_dir, m, *verify_bytes_left,
+            *verify_operations_left, &bytes_used, &operations_used);
+        *verify_bytes_left -= bytes_used;
+        *verify_operations_left -= operations_used;
+        content_fill(view, m);
+        return true;
+    }
+    return false;
+}
+
+/* One scanned name. A failed read is not freed; every accepted manifest is. */
+static void content_list_scan_name(const struct metaverse_adapter_ctx *ctx,
+                                   const char *name,
+                                   struct metaverse_property_view *out,
+                                   size_t out_cap,
+                                   size_t *written,
+                                   size_t *matched,
+                                   uint64_t *verify_bytes_left,
+                                   uint32_t *verify_operations_left,
+                                   struct metaverse_adapter_list_report *report)
+{
+    struct mv_manifest_read m;
+    enum mv_manifest_read_status read_status;
+
+    read_status = mv_manifest_read(ctx->zcode_dir, name, &m);
+    if (read_status != MV_MANIFEST_READ_OK) {
+        report->integrity_gap_count++;
+        if (report->integrity_reason[0] == '\0')
+            snprintf(report->integrity_reason,
+                     sizeof(report->integrity_reason),
+                     "manifest %.64s became %s during enumeration",
+                     name, mv_manifest_read_status_name(read_status));
+        return;
+    }
+    if (!m.root_matches_name) {
+        report->integrity_gap_count++;
+        if (report->integrity_reason[0] == '\0')
+            snprintf(report->integrity_reason,
+                     sizeof(report->integrity_reason),
+                     "manifest %.64s re-derives a different root",
+                     name);
+        mv_manifest_free(&m);
+        return;
+    }
+    if (!mv_manifest_is_blob(&m.manifest)) {
+        mv_manifest_free(&m);
+        return;
+    }
+    (*matched)++;
+    if (*written >= out_cap) {
+        mv_manifest_free(&m);
+        return; /* keep counting: `total` must be the real inventory */
+    }
+    if (content_list_render_blob(ctx, &m, &out[*written],
+                                 verify_bytes_left, verify_operations_left))
+        (*written)++;
+    else {
+        report->integrity_gap_count++;
+        if (report->integrity_reason[0] == '\0')
+            snprintf(report->integrity_reason,
+                     sizeof(report->integrity_reason),
+                     "valid blob %.64s could not be rendered", name);
+    }
+    mv_manifest_free(&m);
+}
+
 static size_t content_list(const struct metaverse_adapter_ctx *ctx,
                            struct metaverse_property_view *out,
                            size_t out_cap,
@@ -202,61 +283,10 @@ static size_t content_list(const struct metaverse_adapter_ctx *ctx,
         return 0;
     }
 
-    for (size_t i = 0; i < scanned; i++) {
-        struct mv_manifest_read m;
-        struct metaverse_property_id id;
-        enum mv_manifest_read_status read_status;
-
-        read_status = mv_manifest_read(ctx->zcode_dir, names[i], &m);
-        if (read_status != MV_MANIFEST_READ_OK) {
-            report->integrity_gap_count++;
-            if (report->integrity_reason[0] == '\0')
-                snprintf(report->integrity_reason,
-                         sizeof(report->integrity_reason),
-                         "manifest %.64s became %s during enumeration",
-                         names[i], mv_manifest_read_status_name(read_status));
-            continue;
-        }
-        if (!m.root_matches_name) {
-            report->integrity_gap_count++;
-            if (report->integrity_reason[0] == '\0')
-                snprintf(report->integrity_reason,
-                         sizeof(report->integrity_reason),
-                         "manifest %.64s re-derives a different root",
-                         names[i]);
-            mv_manifest_free(&m);
-            continue;
-        }
-        if (!mv_manifest_is_blob(&m.manifest)) {
-            mv_manifest_free(&m);
-            continue;
-        }
-        matched++;
-        if (written >= out_cap) {
-            mv_manifest_free(&m);
-            continue; /* keep counting: `total` must be the real inventory */
-        }
-        if (metaverse_property_id_make(METAVERSE_KIND_CONTENT, m.root, &id) &&
-            metaverse_view_begin(&out[written], &id)) {
-            uint64_t bytes_used = 0;
-            uint32_t operations_used = 0;
-
-            mv_manifest_verify_possession(
-                ctx->zcode_dir, &m, verify_bytes_left,
-                verify_operations_left, &bytes_used, &operations_used);
-            verify_bytes_left -= bytes_used;
-            verify_operations_left -= operations_used;
-            content_fill(&out[written], &m);
-            written++;
-        } else {
-            report->integrity_gap_count++;
-            if (report->integrity_reason[0] == '\0')
-                snprintf(report->integrity_reason,
-                         sizeof(report->integrity_reason),
-                         "valid blob %.64s could not be rendered", names[i]);
-        }
-        mv_manifest_free(&m);
-    }
+    for (size_t i = 0; i < scanned; i++)
+        content_list_scan_name(ctx, names[i], out, out_cap, &written,
+                               &matched, &verify_bytes_left,
+                               &verify_operations_left, report);
     free(names);
 
     report->total = matched;

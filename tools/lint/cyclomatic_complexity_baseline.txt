@@ -106,7 +106,6 @@ cognition/services/src/zcode_retrieval_profile_evolution_service.c:zcode_retriev
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18
 contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21
 contexts/commons/modules/commons_demo/src/demo.c:commons_demo_render:20
-contexts/commons/modules/metaverse/src/adapter_content.c:content_list:19
 contexts/commons/modules/metaverse/src/adapter_zcode.c:zcode_fill:30
 contexts/commons/modules/metaverse/src/adapter_zcode.c:zcode_list:20
 contexts/commons/modules/metaverse/src/character_sheet_text.c:character_seed_format:25
