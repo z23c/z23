@@ -10,7 +10,7 @@
  *   - reducer_frontier_compute_hstar (the provable tip + served_floor), and
  *   - stage_rederive_range (THE universal, LCC-safe, served-floor-preserving
  *     re-derive primitive; NOT modified here).
- * The escalate-once fallback names a typed blocker rather than looping. */
+ * The escalate-on-once fallback names a typed blocker rather than looping. */
 
 #include "jobs/rewind_driver.h"
 
@@ -55,17 +55,79 @@ static void escalate_named_blocker(const char *blocker_id,
     blocker_name_dependency(blocker_id, "rewind_driver", reason_text);
 }
 
-bool rewind_to_nearest_self_verified_base(int32_t at_or_below,
-                                          const char *reason,
-                                          const char *escalate_tag,
-                                          struct rewind_driver_result *out)
+/* Zero the caller's optional result record up front and seed the not-yet-known
+ * heights with -1, so a call that fails early never reports stale fields. */
+static void rewind_result_reset(struct rewind_driver_result *out)
 {
     if (out) {
         memset(out, 0, sizeof(*out));
         out->base_height = -1;
         out->hstar = -1;
     }
-    const char *why = reason ? reason : "rewind_driver";
+}
+
+/* Record the recomputed provable tip in the caller's optional result. */
+static void rewind_result_set_hstar(struct rewind_driver_result *out,
+                                    int32_t hstar)
+{
+    if (out)
+        out->hstar = hstar;
+}
+
+/* Flag the optional result: recovery escalated to the named blocker. */
+static void rewind_result_mark_escalated(struct rewind_driver_result *out)
+{
+    if (out)
+        out->escalated = true;
+}
+
+/* Flag the optional result: clean no-op, nothing to re-derive. */
+static void rewind_result_mark_nothing(struct rewind_driver_result *out)
+{
+    if (out)
+        out->nothing = true;
+}
+
+/* Fall back to the driver's own name when the caller passes no reason tag. */
+static const char *rewind_reason_or_default(const char *reason)
+{
+    return reason ? reason : "rewind_driver";
+}
+
+/* H* + served_floor from the durable reducer authority. served_floor is
+ * read for observability + the served-floor invariant: stage_rederive_range
+ * NEVER deletes tip_finalize_log rows, so the publicly served floor survives
+ * a rewind even below it (only the cursor is rewound and re-advances). */
+static bool rewind_hstar_with_floor(sqlite3 *db, int32_t *hstar,
+                                    int32_t *served_floor)
+{
+    progress_store_tx_lock();
+    bool have_hstar = reducer_frontier_compute_hstar(db, hstar, served_floor);
+    progress_store_tx_unlock();
+    return have_hstar && *hstar >= 0;
+}
+
+/* Ceiling for base selection: never above H* (nothing above the provable
+ * tip is a rewind base), and never above the caller's divergence height. */
+static int32_t rewind_base_ceiling(int32_t at_or_below, int32_t hstar)
+{
+    return at_or_below < hstar ? at_or_below : hstar;
+}
+
+/* A re-derive that refused (LCC: applied height lacks an inverse delta) or
+ * simply did not commit must escalate to the named blocker, not pass. */
+static bool rederive_was_refused(const struct stage_rederive_range_result *rr)
+{
+    return rr->refused_no_inverse || !rr->ok;
+}
+
+bool rewind_to_nearest_self_verified_base(int32_t at_or_below,
+                                          const char *reason,
+                                          const char *escalate_tag,
+                                          struct rewind_driver_result *out)
+{
+    rewind_result_reset(out);
+    const char *why = rewind_reason_or_default(reason);
 
     char blocker_id[BLOCKER_ID_MAX];
     build_blocker_id(blocker_id, sizeof(blocker_id), escalate_tag);
@@ -81,27 +143,17 @@ bool rewind_to_nearest_self_verified_base(int32_t at_or_below,
      * never dereferences a NULL ms (accepted for API symmetry). */
     struct main_state *ms = sync_monitor_main_state();
 
-    /* H* + served_floor from the durable reducer authority. served_floor is
-     * read for observability + the served-floor invariant: stage_rederive_range
-     * NEVER deletes tip_finalize_log rows, so the publicly served floor survives
-     * a rewind even below it (only the cursor is rewound and re-advances). */
-    progress_store_tx_lock();
     int32_t hstar = -1;
     int32_t served_floor = -1;
-    bool have_hstar = reducer_frontier_compute_hstar(db, &hstar, &served_floor);
-    progress_store_tx_unlock();
-    if (!have_hstar || hstar < 0) {
+    if (!rewind_hstar_with_floor(db, &hstar, &served_floor)) {
         LOG_WARN("rewind_driver",
                  "[rewind_driver] %s: H* recompute failed — cannot locate a "
                  "re-derive window", why);
         return false;  // raw-return-ok:logged-above
     }
-    if (out)
-        out->hstar = hstar;
+    rewind_result_set_hstar(out, hstar);
 
-    /* Ceiling for base selection: never above H* (nothing above the provable
-     * tip is a rewind base), and never above the caller's divergence height. */
-    int32_t ceiling = at_or_below < hstar ? at_or_below : hstar;
+    int32_t ceiling = rewind_base_ceiling(at_or_below, hstar);
 
     struct reducer_frontier_rewind_base base;
     if (!reducer_frontier_nearest_self_verified_base(ceiling, &base)) {
@@ -118,8 +170,7 @@ bool rewind_to_nearest_self_verified_base(int32_t at_or_below,
                  "[rewind_driver] %s: no self-verified base <= %d — escalated "
                  "(named blocker %s)", why, (int)ceiling,
                  blocker_id);
-        if (out)
-            out->escalated = true;
+        rewind_result_mark_escalated(out);
         return true;
     }
 
@@ -138,8 +189,7 @@ bool rewind_to_nearest_self_verified_base(int32_t at_or_below,
                  "[rewind_driver] %s: nearest self-verified base %s@%d already "
                  "at/above H*=%d — no rewind needed", why, base.kind,
                  (int)base.height, (int)hstar);
-        if (out)
-            out->nothing = true;
+        rewind_result_mark_nothing(out);
         return true;
     }
 
@@ -156,7 +206,7 @@ bool rewind_to_nearest_self_verified_base(int32_t at_or_below,
         return false;  // raw-return-ok:logged-above
     }
 
-    if (rr.refused_no_inverse || !rr.ok) {
+    if (rederive_was_refused(&rr)) {
         char reason_text[BLOCKER_REASON_MAX];
         snprintf(reason_text, sizeof(reason_text),
                  "%s: re-derive [%d,%d] above base %s refused (%s) — needs "
@@ -174,8 +224,7 @@ bool rewind_to_nearest_self_verified_base(int32_t at_or_below,
                  "ok=%d — escalated (named blocker %s)", why, base.kind,
                  (int)base.height, (int)rr.refused_no_inverse, (int)rr.ok,
                  blocker_id);
-        if (out)
-            out->escalated = true;
+        rewind_result_mark_escalated(out);
         return true;
     }
 
