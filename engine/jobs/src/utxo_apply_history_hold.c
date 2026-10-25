@@ -96,6 +96,58 @@ bool utxo_apply_history_hold_active(void)
     return active;  // raw-return-ok:state-query-can-be-inactive
 }
 
+static bool history_hold_hash_bound(bool has_hash, const struct uint256 *hash,
+                                    const struct uint256 *block_hash)
+{
+    return has_hash && hash && uint256_eq(hash, block_hash);
+}
+
+static bool history_hold_upstream_hashless(bool proof_has_hash,
+                                           const struct uint256 *proof_hash,
+                                           bool script_has_hash,
+                                           const struct uint256 *script_hash)
+{
+    return !proof_has_hash || !proof_hash || !script_has_hash || !script_hash;
+}
+
+static const char *history_hold_gap_blocker_id(int kind)
+{
+    return kind == 1 ? UTXO_APPLY_NF_GAP_BLOCKER_ID
+                     : UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID;
+}
+
+static bool history_hold_block_changed_should_park(
+    int height, int kind, const struct uint256 *block_hash,
+    bool proof_has_hash, const struct uint256 *proof_hash,
+    bool script_has_hash, const struct uint256 *script_hash)
+{
+    /* Height-keyed rows are not authority for a new branch. Keep parking
+     * until both upstream stages bind their receipts to the selected
+     * hash; only then clear the old memo and permit one full reread. */
+    bool proof_bound = history_hold_hash_bound(proof_has_hash, proof_hash,
+                                               block_hash);
+    bool script_bound = history_hold_hash_bound(script_has_hash, script_hash,
+                                                block_hash);
+    if (proof_bound && script_bound) {
+        utxo_apply_history_hold_clear();
+        return false;
+    }
+    const char *causal_id = history_hold_gap_blocker_id(kind);
+    if (blocker_exists(causal_id))
+        return true;
+    /* A present foreign hash is handled by the unconditional typed
+     * mismatch gate in step_apply. A hashless legacy receipt cannot prove
+     * authority for the replacement branch, so keep the cursor parked
+     * here under an explicit dependency blocker. */
+    if (history_hold_upstream_hashless(proof_has_hash, proof_hash,
+                                       script_has_hash, script_hash)) {
+        stale_upstream_hash_blocker_set(height);
+        return true;
+    }
+    blocker_clear(UTXO_APPLY_STALE_UPSTREAM_HASH_BLOCKER_ID);
+    return false;
+}
+
 bool utxo_apply_history_hold_should_park(
     sqlite3 *db, int height, const struct uint256 *block_hash,
     bool proof_has_hash, const struct uint256 *proof_hash,
@@ -106,36 +158,12 @@ bool utxo_apply_history_hold_should_park(
     int kind = 0;
     enum utxo_apply_history_hold_state state = utxo_apply_history_hold_check(
         db, height, block_hash, &kind);
-    if (state == UTXO_HISTORY_HOLD_BLOCK_CHANGED) {
-        /* Height-keyed rows are not authority for a new branch. Keep parking
-         * until both upstream stages bind their receipts to the selected
-         * hash; only then clear the old memo and permit one full reread. */
-        bool proof_bound = proof_has_hash && proof_hash &&
-                           uint256_eq(proof_hash, block_hash);
-        bool script_bound = script_has_hash && script_hash &&
-                            uint256_eq(script_hash, block_hash);
-        if (proof_bound && script_bound) {
-            utxo_apply_history_hold_clear();
-            return false;
-        }
-        const char *causal_id = kind == 1 ? UTXO_APPLY_NF_GAP_BLOCKER_ID
-                                         : UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID;
-        if (blocker_exists(causal_id))
-            return true;
-        /* A present foreign hash is handled by the unconditional typed
-         * mismatch gate in step_apply. A hashless legacy receipt cannot prove
-         * authority for the replacement branch, so keep the cursor parked
-         * here under an explicit dependency blocker. */
-        if (!proof_has_hash || !proof_hash || !script_has_hash || !script_hash) {
-            stale_upstream_hash_blocker_set(height);
-            return true;
-        }
-        blocker_clear(UTXO_APPLY_STALE_UPSTREAM_HASH_BLOCKER_ID);
-        return false;
-    }
+    if (state == UTXO_HISTORY_HOLD_BLOCK_CHANGED)
+        return history_hold_block_changed_should_park(
+            height, kind, block_hash, proof_has_hash, proof_hash,
+            script_has_hash, script_hash);
     if (state == UTXO_HISTORY_HOLD_MATCHES) {
-        const char *id = kind == 1 ? UTXO_APPLY_NF_GAP_BLOCKER_ID
-                                   : UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID;
+        const char *id = history_hold_gap_blocker_id(kind);
         if (blocker_exists(id))
             return true;
         utxo_apply_history_hold_clear();
