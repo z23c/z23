@@ -346,6 +346,39 @@ static bool cg_pv_row_at(sqlite3 *db, int height, int *out_ok,
     return found;
 }
 
+/* Row-verdict predicates over the (ok, status) pairs fetched by
+ * cg_log_row_at / cg_pv_row_at: they carry the short-circuit shape out
+ * of the case bodies so the test function stays flat. The CG_CHECK
+ * messages and their printfs stay in the test function. */
+
+/* The gate-closed shape: an ok=1 row whose status is "verified". */
+static bool cg_row_verified(int ok, const char *status)
+{
+    return ok == 1 && strcmp(status, "verified") == 0;
+}
+
+/* The fail-closed shape: an ok=0 row with the expected reject status. */
+static bool cg_row_rejected_as(int ok, const char *status, const char *reason)
+{
+    return ok == 0 && strcmp(status, reason) == 0;
+}
+
+/* The "clean" case's sweep: every height from 1 up must have a row that
+ * reads ok=1/"verified". Keeps walking after a miss exactly like the
+ * inlined loop it replaces (same rows fetched, same order). */
+static bool cg_all_rows_verified(void)
+{
+    bool all_verified = true;
+    for (int h = 1; h < CG_CHAIN_LEN; h++) {
+        int ok = -1; char status[64];
+        if (!cg_log_row_at(progress_store_db(), h, &ok, status,
+                           sizeof(status)) ||
+            ok != 1 || strcmp(status, "verified") != 0)
+            all_verified = false;
+    }
+    return all_verified;
+}
+
 /* Serialize the stage dump and look for an exact "key":value token —
  * the only exported surface for g_contextual_reject_total. */
 static bool cg_dump_has(const char *needle)
@@ -461,6 +494,14 @@ static bool cg_make_rule_block(struct block *b, int height,
     return true;
 }
 
+/* Rule-level verdict: contextual_check_block returned !ok with exactly
+ * the expected reject_reason string. */
+static bool cg_rejected_with_reason(bool ok, const char *reject_reason,
+                                    const char *want)
+{
+    return !ok && strcmp(reject_reason, want) == 0;
+}
+
 int test_script_validate_contextual_gate(void);
 int test_script_validate_contextual_gate(void)
 {
@@ -487,7 +528,7 @@ int test_script_validate_contextual_gate(void)
                  cg_log_row_at(progress_store_db(), CG_GATE_H, &ok, status,
                                sizeof(status)));
         CG_CHECK("unseeded: gate closed -> verified",
-                 ok == 1 && strcmp(status, "verified") == 0);
+                 cg_row_verified(ok, status));
         CG_CHECK("unseeded: counter 0",
                  cg_dump_has("\"contextual_reject_total\":0"));
         cg_teardown(dir, &ms, &sc);
@@ -509,7 +550,7 @@ int test_script_validate_contextual_gate(void)
         cg_log_row_at(progress_store_db(), CG_GATE_H, &ok, status,
                       sizeof(status));
         CG_CHECK("far_tip: gate closed -> verified",
-                 ok == 1 && strcmp(status, "verified") == 0);
+                 cg_row_verified(ok, status));
         CG_CHECK("far_tip: counter 0",
                  cg_dump_has("\"contextual_reject_total\":0"));
         cg_teardown(dir, &ms, &sc);
@@ -541,7 +582,7 @@ int test_script_validate_contextual_gate(void)
         cg_log_row_at(progress_store_db(), CG_GATE_H + 1, &ok, status,
                       sizeof(status));
         CG_CHECK("bip34: gate-eligible neighbour verified",
-                 ok == 1 && strcmp(status, "verified") == 0);
+                 cg_row_verified(ok, status));
         CG_CHECK("bip34: VALID_SCRIPTS set on neighbour",
                  (sc.blocks[CG_GATE_H + 1].nStatus & BLOCK_VALID_MASK)
                      == (unsigned)BLOCK_VALID_SCRIPTS);
@@ -592,7 +633,7 @@ int test_script_validate_contextual_gate(void)
         cg_log_row_at(progress_store_db(), CG_GATE_H, &ok, status,
                       sizeof(status));
         CG_CHECK("header_time: accepted (verified)",
-                 ok == 1 && strcmp(status, "verified") == 0);
+                 cg_row_verified(ok, status));
         CG_CHECK("header_time: counter 0",
                  cg_dump_has("\"contextual_reject_total\":0"));
         cg_teardown(dir, &ms, &sc);
@@ -610,15 +651,7 @@ int test_script_validate_contextual_gate(void)
                  script_validate_stage_drain(100) == CG_CHAIN_LEN);
         CG_CHECK("clean: counter 0",
                  cg_dump_has("\"contextual_reject_total\":0"));
-        bool all_verified = true;
-        for (int h = 1; h < CG_CHAIN_LEN; h++) {
-            int ok = -1; char status[64];
-            if (!cg_log_row_at(progress_store_db(), h, &ok, status,
-                               sizeof(status)) ||
-                ok != 1 || strcmp(status, "verified") != 0)
-                all_verified = false;
-        }
-        CG_CHECK("clean: all rows verified", all_verified);
+        CG_CHECK("clean: all rows verified", cg_all_rows_verified());
         CG_CHECK("clean: VALID_SCRIPTS set at gate height",
                  (sc.blocks[CG_GATE_H].nStatus & BLOCK_VALID_MASK)
                      == (unsigned)BLOCK_VALID_SCRIPTS);
@@ -648,7 +681,7 @@ int test_script_validate_contextual_gate(void)
         cg_log_row_at(progress_store_db(), CG_GATE_H, &ok, status,
                       sizeof(status));
         CG_CHECK("sparse_tail: gate skipped -> verified",
-                 ok == 1 && strcmp(status, "verified") == 0);
+                 cg_row_verified(ok, status));
         CG_CHECK("sparse_tail: counter 0",
                  cg_dump_has("\"contextual_reject_total\":0"));
         cg_teardown(dir, &ms, &sc);
@@ -673,7 +706,7 @@ int test_script_validate_contextual_gate(void)
         cg_log_row_at(progress_store_db(), CG_GATE_H, &ok, status,
                       sizeof(status));
         CG_CHECK("cascade: contextual reject row ok=0",
-                 ok == 0 && strcmp(status, "bad-cb-height") == 0);
+                 cg_row_rejected_as(ok, status, "bad-cb-height"));
         CG_CHECK("cascade: proof stage init", proof_validate_stage_init(&ms));
         proof_validate_stage_set_reader(cg_fake_reader, &sc);
         CG_CHECK("cascade: proof drains all (no FATAL, no stall)",
@@ -685,7 +718,7 @@ int test_script_validate_contextual_gate(void)
         cg_pv_row_at(progress_store_db(), CG_GATE_H, &ok, status,
                      sizeof(status));
         CG_CHECK("cascade: proof row upstream_failed ok=0",
-                 ok == 0 && strcmp(status, "upstream_failed") == 0);
+                 cg_row_rejected_as(ok, status, "upstream_failed"));
         proof_validate_stage_shutdown();
         cg_teardown(dir, &ms, &sc);
     }
@@ -711,8 +744,8 @@ int test_script_validate_contextual_gate(void)
         validation_state_init(&st);
         bool ok = contextual_check_block(&b, &st, p, &prev, false);
         CG_CHECK("ibd: is_ibd=false rejects tx-overwinter-not-active",
-                 !ok && strcmp(st.reject_reason,
-                               "tx-overwinter-not-active") == 0);
+                 cg_rejected_with_reason(ok, st.reject_reason,
+                                         "tx-overwinter-not-active"));
 
         validation_state_init(&st);
         ok = contextual_check_block(&b, &st, p, &prev, true);
@@ -737,7 +770,8 @@ int test_script_validate_contextual_gate(void)
         validation_state_init(&st);
         bool ok = contextual_check_block(&b, &st, p, &prev, true);
         CG_CHECK("ibd_bip34: rejects bad-cb-height under IBD",
-                 !ok && strcmp(st.reject_reason, "bad-cb-height") == 0);
+                 cg_rejected_with_reason(ok, st.reject_reason,
+                                         "bad-cb-height"));
         block_free(&b);
     }
 
@@ -759,7 +793,8 @@ int test_script_validate_contextual_gate(void)
         validation_state_init(&st);
         bool ok = contextual_check_block(&b, &st, p, &prev, true);
         CG_CHECK("ibd_final: rejects bad-txns-nonfinal under IBD",
-                 !ok && strcmp(st.reject_reason, "bad-txns-nonfinal") == 0);
+                 cg_rejected_with_reason(ok, st.reject_reason,
+                                         "bad-txns-nonfinal"));
         block_free(&b);
     }
 

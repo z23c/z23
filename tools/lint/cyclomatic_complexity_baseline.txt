@@ -2239,7 +2239,6 @@ tests/harness/src/test_sapling_crypto.c:test_sapling_crypto:188
 tests/harness/src/test_sapling_prover_rng_determinism.c:test_sapling_prover_rng_determinism:28
 tests/harness/src/test_sapling_tree.c:test_sapling_tree:27
 tests/harness/src/test_scan_util.c:test_scan_util:23
-tests/harness/src/test_script_validate_contextual_gate.c:test_script_validate_contextual_gate:16
 tests/harness/src/test_script_validate_stage.c:test_script_validate_stage:29
 tests/harness/src/test_sd_notify.c:test_sd_notify_platform_arm:61
 tests/harness/src/test_seal_kv.c:test_seal_kv:30
