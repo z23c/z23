@@ -469,32 +469,22 @@ fi
 
 # The receipt-helper selftest above does not exercise the X11 exemption.
 # Run its focused failure regressions in the normal Linux verdict dimension.
-if [[ "$BUILD_ONLY" == 0 && "$GATE_HOST_OS" == Linux ]]; then
-    if x11_selftest="$(tools/lint/selftest_standalone_tools_x11.sh 2>&1)"; then
-        printf '%s\n' "$x11_selftest"
-    else
-        printf '%s\n' "$x11_selftest" >&2
-        failed+=("X11 runtime qualification selftest")
-        violations=$((violations + 1))
-    fi
-fi
+# It is hermetic (private fixture repo, private temp dir), so it runs BESIDE the
+# tool build below instead of ahead of it; its verdict is collected after the
+# build and a missing or failed child is a violation, never a pass.
+x11_pid=""; x11_log=$(mktemp)
+trap 'rm -f "$build_log" "$x11_log"' EXIT
+[[ "$BUILD_ONLY" == 0 && "$GATE_HOST_OS" == Linux ]] &&
+    { tools/lint/selftest_standalone_tools_x11.sh >"$x11_log" 2>&1 & x11_pid=$!; }
 
-# Parallelism. MEASURED, not guessed: this one gate was 191 s of a 199 s lint
-# wall on a 32-core host (the other 136 gates finished inside its shadow), and
-# it is cold on every push that touches the Makefile or a shared lib source.
-# The targets are independent single-TU links, so the work scales with -j. Half
-# the host, capped, leaves room for the lint driver's own workers running
-# alongside. Override with ZCL_TOOLS_LINK_JOBS=<n>.
-#
-# ZCL_HOST_JOBS is exported by the Makefile and is the processors this build
-# may ACTUALLY run on -- the affinity mask, 28 inside this project's build
-# grant on a 32-processor host. The `nproc` arm is the same question asked
-# directly, for a run of this gate outside make; it is a fallback, not a
-# second source of truth.
+# Parallelism. This one gate sets the lint wall (the other gates finish inside
+# its shadow) and the targets are independent single-TU links, so it takes the
+# whole grant: ZCL_HOST_JOBS (Makefile-exported affinity mask; the host CPU count is
+# only the fallback outside make), clamped 4..32. Override with ZCL_TOOLS_LINK_JOBS=<n>.
 tl_nproc="${ZCL_HOST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
-tl_jobs="${ZCL_TOOLS_LINK_JOBS:-$(( tl_nproc / 2 ))}"
+tl_jobs="${ZCL_TOOLS_LINK_JOBS:-$tl_nproc}"
 if [ "$tl_jobs" -lt 4 ];  then tl_jobs=4;  fi
-if [ "$tl_jobs" -gt 16 ]; then tl_jobs=16; fi
+if [ "$tl_jobs" -gt 32 ]; then tl_jobs=32; fi
 
 if ! make -k -j"$tl_jobs" --no-print-directory "${targets[@]}" >"$build_log" 2>&1; then
     # Keep going through independent targets in one parse. Make names failed
@@ -524,6 +514,14 @@ if [ "$BUILD_ONLY" -eq 1 ]; then
     fi
     echo "[check_standalone_tools_link] build-only: ${#targets[@]} tool target(s) built"
     exit 0
+fi
+
+if [[ -n "$x11_pid" ]]; then
+    if wait "$x11_pid"; then cat "$x11_log"; else
+        cat "$x11_log" >&2
+        failed+=("X11 runtime qualification selftest")
+        violations=$((violations + 1))
+    fi
 fi
 
 if (( violations > 0 )); then

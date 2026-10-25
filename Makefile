@@ -15488,7 +15488,7 @@ ZCL_DEFAULT_JOBS = $(if $(filter -j%,$(MAKEFLAGS)),,-j$(ZCL_HOST_JOBS))
 # either count -- so lint is critical-path bound, not worker bound. Make that
 # gate faster before touching this number. The 3/4 keeps headroom for real
 # work: check-standalone-tools-link forks its OWN make underneath one of these
-# workers (ZCL_TOOLS_LINK_JOBS, half the host), so the peak process count is
+# workers (ZCL_TOOLS_LINK_JOBS, the whole grant), so the peak process count is
 # this number plus that one. The [8, 24] clamp predates this measurement and
 # is not binding inside a 28-processor grant (it yields 21). Override with
 # ZCL_LINT_JOBS=<n>.
