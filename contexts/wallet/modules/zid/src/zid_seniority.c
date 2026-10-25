@@ -108,6 +108,111 @@ static int cmp_by_relay_id(const void *va, const void *vb)
     return memcmp(a->relay_id, b->relay_id, 32);
 }
 
+static void fill_raw_seniority(const struct zid_relay_registration *relays,
+                               size_t n, int32_t tip_height,
+                               struct zid_seniority_weight *out)
+{
+    /* Pass 1 — raw seniority, in input order. */
+    for (size_t i = 0; i < n; i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        memcpy(out[i].relay_id, relays[i].relay_id, 32);
+        out[i].seniority =
+            zid_seniority_score(relays[i].registration_height, tip_height);
+        out[i].multiplier = 1.0;
+    }
+}
+
+static int32_t count_owner_rank(const struct zid_relay_registration *relays,
+                                size_t n,
+                                const struct zid_seniority_weight *out,
+                                size_t i)
+{
+    int32_t rank = 0;
+
+    /* An unknown owner is its own owner. Pooling unknowns would let one
+     * actor evade the cap simply by withholding the owner field — the
+     * cheapest possible bypass — so they are never merged. */
+    if (!owner_is_unknown(relays[i].owner_id)) {
+        for (size_t j = 0; j < n && rank < ZID_SENIORITY_MAX_RELAYS_PER_OWNER;
+             j++) {
+            if (j == i)
+                continue;
+            if (memcmp(relays[j].owner_id, relays[i].owner_id, 32) != 0)
+                continue;
+            if (outranks(out[j].seniority, out[j].relay_id, j,
+                         out[i].seniority, out[i].relay_id, i))
+                rank++;
+        }
+    }
+    return rank;
+}
+
+static double owner_capped_mass(double seniority, bool over_owner_quota,
+                                int32_t rank)
+{
+    double mass = seniority;
+    if (over_owner_quota) {
+        mass = 0.0;
+    } else {
+        /* decay^rank by repeated multiply — rank is at most 3, and a
+         * loop keeps this exact instead of going through pow(). */
+        for (int32_t k = 0; k < rank; k++)
+            mass *= ZID_SENIORITY_OWNER_DECAY;
+    }
+    return mass;
+}
+
+static void apply_owner_cap(const struct zid_relay_registration *relays,
+                            size_t n, struct zid_seniority_weight *out)
+{
+    /* Pass 2 — the per-owner cap, still in input order.
+     *
+     * owner_rank is counted directly rather than by sorting into owner
+     * groups: this module allocates nothing, and a sort would need scratch
+     * to carry owner_id (which is an input field, not an output one). The
+     * inner loop stops the moment the rank reaches the quota, because
+     * everything at or past the quota gets the same answer — zero mass —
+     * so counting further would change nothing. n is bounded by
+     * ZID_SENIORITY_MAX_RELAYS and this runs once per ranking epoch. */
+    for (size_t i = 0; i < n; i++) {
+        int32_t rank = count_owner_rank(relays, n, out, i);
+
+        out[i].owner_rank = rank;
+        out[i].over_owner_quota = rank >= ZID_SENIORITY_MAX_RELAYS_PER_OWNER;
+        out[i].mass = owner_capped_mass(out[i].seniority,
+                                        out[i].over_owner_quota, rank);
+    }
+}
+
+static double drawn_multiplier(zid_seniority_draw_fn draw, void *draw_ctx,
+                               const uint8_t relay_id[32], double mass)
+{
+    double w = mass * ZID_SENIORITY_MASS_SCALE;
+    if (!(w > 0.0))
+        return 1.0;             /* fresh / over quota: baseline 1.0 */
+
+    uint64_t d = 0;
+    if (!draw(draw_ctx, relay_id, &d))
+        return 1.0;             /* no draw: baseline 1.0, never excluded */
+
+    /* Uniform in (0, 1] — the +1 keeps u away from exactly 0, where
+     * pow() would be a zero raised to a positive power rather than a
+     * legitimate smallest draw. */
+    double u = ((double)d + 1.0) / ZID_SENIORITY_DRAW_SPAN;
+
+    /* Efraimidis-Spirakis weighted-sampling key. Larger w pushes the
+     * key toward 1; w near 0 collapses it to 0. Per-client because u
+     * is, globally proportional to w because the key is. */
+    double key = pow(u, 1.0 / w);
+    if (isnan(key) || key < 0.0) key = 0.0;
+    if (key > 1.0) key = 1.0;
+
+    double mult = 1.0 + (ZID_SENIORITY_MAX_MULT - 1.0) * key;
+    if (mult < 1.0) mult = 1.0;
+    if (mult > ZID_SENIORITY_MAX_MULT) mult = ZID_SENIORITY_MAX_MULT;
+    return mult;
+}
+
 int zid_seniority_rank(const struct zid_relay_registration *relays, size_t n,
                        int32_t tip_height,
                        zid_seniority_draw_fn draw, void *draw_ctx,
@@ -129,88 +234,16 @@ int zid_seniority_rank(const struct zid_relay_registration *relays, size_t n,
     if (out_cap < n)
         LOG_ERR("zid_seniority", "rank: out_cap=%zu < n=%zu", out_cap, n);
 
-    /* Pass 1 — raw seniority, in input order. */
-    for (size_t i = 0; i < n; i++) {
-        memset(&out[i], 0, sizeof(out[i]));
-        memcpy(out[i].relay_id, relays[i].relay_id, 32);
-        out[i].seniority =
-            zid_seniority_score(relays[i].registration_height, tip_height);
-        out[i].multiplier = 1.0;
-    }
-
-    /* Pass 2 — the per-owner cap, still in input order.
-     *
-     * owner_rank is counted directly rather than by sorting into owner
-     * groups: this module allocates nothing, and a sort would need scratch
-     * to carry owner_id (which is an input field, not an output one). The
-     * inner loop stops the moment the rank reaches the quota, because
-     * everything at or past the quota gets the same answer — zero mass —
-     * so counting further would change nothing. n is bounded by
-     * ZID_SENIORITY_MAX_RELAYS and this runs once per ranking epoch. */
-    for (size_t i = 0; i < n; i++) {
-        int32_t rank = 0;
-
-        /* An unknown owner is its own owner. Pooling unknowns would let one
-         * actor evade the cap simply by withholding the owner field — the
-         * cheapest possible bypass — so they are never merged. */
-        if (!owner_is_unknown(relays[i].owner_id)) {
-            for (size_t j = 0; j < n && rank < ZID_SENIORITY_MAX_RELAYS_PER_OWNER;
-                 j++) {
-                if (j == i)
-                    continue;
-                if (memcmp(relays[j].owner_id, relays[i].owner_id, 32) != 0)
-                    continue;
-                if (outranks(out[j].seniority, out[j].relay_id, j,
-                             out[i].seniority, out[i].relay_id, i))
-                    rank++;
-            }
-        }
-
-        out[i].owner_rank = rank;
-        out[i].over_owner_quota = rank >= ZID_SENIORITY_MAX_RELAYS_PER_OWNER;
-
-        double mass = out[i].seniority;
-        if (out[i].over_owner_quota) {
-            mass = 0.0;
-        } else {
-            /* decay^rank by repeated multiply — rank is at most 3, and a
-             * loop keeps this exact instead of going through pow(). */
-            for (int32_t k = 0; k < rank; k++)
-                mass *= ZID_SENIORITY_OWNER_DECAY;
-        }
-        out[i].mass = mass;
-    }
+    fill_raw_seniority(relays, n, tip_height, out);
+    apply_owner_cap(relays, n, out);
 
     /* Pass 3 — the per-client draw. THIS is what stops the table from
      * being a global answer: mass says how much lottery weight a relay
      * holds, the client's own draw says where that relay lands for THIS
      * client. */
-    for (size_t i = 0; i < n; i++) {
-        double w = out[i].mass * ZID_SENIORITY_MASS_SCALE;
-        if (!(w > 0.0))
-            continue;               /* fresh / over quota: baseline 1.0 */
-
-        uint64_t d = 0;
-        if (!draw(draw_ctx, out[i].relay_id, &d))
-            continue;               /* no draw: baseline 1.0, never excluded */
-
-        /* Uniform in (0, 1] — the +1 keeps u away from exactly 0, where
-         * pow() would be a zero raised to a positive power rather than a
-         * legitimate smallest draw. */
-        double u = ((double)d + 1.0) / ZID_SENIORITY_DRAW_SPAN;
-
-        /* Efraimidis-Spirakis weighted-sampling key. Larger w pushes the
-         * key toward 1; w near 0 collapses it to 0. Per-client because u
-         * is, globally proportional to w because the key is. */
-        double key = pow(u, 1.0 / w);
-        if (isnan(key) || key < 0.0) key = 0.0;
-        if (key > 1.0) key = 1.0;
-
-        double mult = 1.0 + (ZID_SENIORITY_MAX_MULT - 1.0) * key;
-        if (mult < 1.0) mult = 1.0;
-        if (mult > ZID_SENIORITY_MAX_MULT) mult = ZID_SENIORITY_MAX_MULT;
-        out[i].multiplier = mult;
-    }
+    for (size_t i = 0; i < n; i++)
+        out[i].multiplier =
+            drawn_multiplier(draw, draw_ctx, out[i].relay_id, out[i].mass);
 
     /* Canonical output order, so the table is comparable between clients
      * and binary-searchable by zid_seniority_find(). */
