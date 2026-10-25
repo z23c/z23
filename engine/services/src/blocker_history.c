@@ -150,26 +150,24 @@ static const struct bh_fixed_rule BH_FIXED_RULES[] = {
 #define BH_NUM_FIXED_RULES \
     (sizeof(BH_FIXED_RULES) / sizeof(BH_FIXED_RULES[0]))
 
-/* Parses one EV_OPERATOR_ALERT payload. `*ts_out` gets the bridge's
- * `ts=<unix>` prefix (falls back to "now" if absent/malformed — a
- * defensive floor, not the expected production path). `id_out` gets the
- * extracted blocker/condition id (priority: blocker= > check= >
- * condition= > fixed-prefix table). `reason_out` gets the payload body
- * (post-ts-prefix), bounded copy, always filled regardless of id-parse
- * outcome. Returns true iff an id was extracted. */
-static bool bh_parse_payload(const void *payload, size_t len,
-                             int64_t *ts_out, char *id_out, size_t id_cap,
-                             char *reason_out, size_t reason_cap)
+/* Argument preconditions for bh_parse_payload: any NULL pointer or zero
+ * length/capacity means there is nothing this parser can safely do. */
+static bool bh_parse_payload_args_invalid(const void *payload, size_t len,
+                                          const int64_t *ts_out,
+                                          const char *id_out, size_t id_cap,
+                                          const char *reason_out,
+                                          size_t reason_cap)
 {
-    if (!payload || len == 0 || !ts_out || !id_out || id_cap == 0 ||
-        !reason_out || reason_cap == 0)
-        return false;
+    return !payload || len == 0 || !ts_out || !id_out || id_cap == 0 ||
+           !reason_out || reason_cap == 0;
+}
 
-    char buf[BLOCKER_HISTORY_BRIDGE_BUF];
-    size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
-    memcpy(buf, payload, n);
-    buf[n] = '\0';
-
+/* Splits the bridge's "ts=<unix> " prefix off `buf`: `*ts_out` receives
+ * the decoded timestamp and the return value is the payload body that
+ * follows the prefix. `*ts_out` keeps GetTime() as the defensive floor
+ * when the prefix is absent or malformed. */
+static const char *bh_parse_ts_prefix(char *buf, int64_t *ts_out)
+{
     const char *body = buf;
     int64_t ts = GetTime();
     if (strncmp(buf, "ts=", 3) == 0) {
@@ -181,12 +179,14 @@ static bool bh_parse_payload(const void *payload, size_t len,
         }
     }
     *ts_out = ts;
-    size_t reason_len = strlen(body);
-    if (reason_len >= reason_cap)
-        reason_len = reason_cap - 1;
-    memcpy(reason_out, body, reason_len);
-    reason_out[reason_len] = '\0';
+    return body;
+}
 
+/* Extracts the blocker/condition id from `body` into `id_out`, trying
+ * the key=token forms first (blocker=, check=, condition=) and then the
+ * fixed literal-prefix table. Returns true iff an id was extracted. */
+static bool bh_extract_id(const char *body, char *id_out, size_t id_cap)
+{
     if (bh_token_after(body, "blocker=",   id_out, id_cap)) return true;
     if (bh_token_after(body, "check=",     id_out, id_cap)) return true;
     if (bh_token_after(body, "condition=", id_out, id_cap)) return true;
@@ -199,6 +199,36 @@ static bool bh_parse_payload(const void *payload, size_t len,
         }
     }
     return false;
+}
+
+/* Parses one EV_OPERATOR_ALERT payload. `*ts_out` gets the bridge's
+ * `ts=<unix>` prefix (falls back to "now" if absent/malformed — a
+ * defensive floor, not the expected production path). `id_out` gets the
+ * extracted blocker/condition id (priority: blocker= > check= >
+ * condition= > fixed-prefix table). `reason_out` gets the payload body
+ * (post-ts-prefix), bounded copy, always filled regardless of id-parse
+ * outcome. Returns true iff an id was extracted. */
+static bool bh_parse_payload(const void *payload, size_t len,
+                             int64_t *ts_out, char *id_out, size_t id_cap,
+                             char *reason_out, size_t reason_cap)
+{
+    if (bh_parse_payload_args_invalid(payload, len, ts_out, id_out, id_cap,
+                                      reason_out, reason_cap))
+        return false;
+
+    char buf[BLOCKER_HISTORY_BRIDGE_BUF];
+    size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+    memcpy(buf, payload, n);
+    buf[n] = '\0';
+
+    const char *body = bh_parse_ts_prefix(buf, ts_out);
+    size_t reason_len = strlen(body);
+    if (reason_len >= reason_cap)
+        reason_len = reason_cap - 1;
+    memcpy(reason_out, body, reason_len);
+    reason_out[reason_len] = '\0';
+
+    return bh_extract_id(body, id_out, id_cap);
 }
 
 /* ── Aggregate fold (lock held) ──────────────────────────────────── */

@@ -1576,7 +1576,6 @@ engine/services/src/block_source_policy_runtime.c:bsp_build_runtime_input:56
 engine/services/src/block_sync_service.c:syncsvc_build_stall_recovery:41
 engine/services/src/block_sync_service.c:syncsvc_note_valid_block:20
 engine/services/src/block_sync_service.c:syncsvc_plan_periodic_tip_state:21
-engine/services/src/blocker_history.c:bh_parse_payload:18
 engine/services/src/blog_anchor_transaction_service.c:blog_anchor_payload_decode:17
 engine/services/src/blog_anchor_transaction_service.c:blog_publication_anchor_commit:30
 engine/services/src/blog_anchor_transaction_service.c:blog_publication_anchor_plan:31
