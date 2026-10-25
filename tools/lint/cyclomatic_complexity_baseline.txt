@@ -1030,7 +1030,6 @@ platform/modules/platform/src/watcher_store.c:platform_watcher_store_publish:23
 platform/modules/platform/tests/database_lifetime_windows_acceptance.c:main:17
 platform/modules/platform/tests/file_service_transport_windows_acceptance.c:legacy_send_timeout_is_bounded:17
 platform/modules/platform/tests/file_service_transport_windows_acceptance.c:main:22
-platform/modules/platform/tests/path_replace_windows_acceptance.c:main:34
 platform/modules/platform/tests/positioned_file_windows_acceptance.c:main:25
 platform/modules/platform/tests/private_file_path_swap_acceptance.c:main:24
 platform/modules/platform/tests/private_file_windows_acceptance.c:main:64

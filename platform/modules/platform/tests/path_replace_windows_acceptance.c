@@ -75,7 +75,7 @@ static bool path_to_utf8_forward(const wchar_t *wide, char *out,
     return true;
 }
 
-int main(void)
+static int create_long_path_root(void)
 {
     wchar_t temp[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp)) return fail("temporary path");
@@ -96,8 +96,12 @@ int main(void)
     }
     if (wcslen(g_path) <= MAX_PATH) return fail("fixture exceeds MAX_PATH");
 
-    wchar_t staged[32768], destination[32768];
-    n = swprintf(staged, 32768, L"%ls\\staged.tmp", g_path);
+    return 0;
+}
+
+static int create_fixture_files(wchar_t staged[32768], wchar_t destination[32768])
+{
+    int n = swprintf(staged, 32768, L"%ls\\staged.tmp", g_path);
     int dn = swprintf(destination, 32768, L"%ls\\destination.bin", g_path);
     if (n <= 0 || dn <= 0 || !write_payload(staged, "new-state") ||
         !write_payload(destination, "old-state"))
@@ -108,6 +112,11 @@ int main(void)
                               sizeof(g_destination_utf8)))
         return fail("UTF-8 conversion");
 
+    return 0;
+}
+
+static int check_locked_destination(const wchar_t *destination)
+{
     if (!extended_path(destination)) return fail("destination path");
     HANDLE lock = CreateFileW(g_extended, GENERIC_READ, FILE_SHARE_READ, NULL,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -121,6 +130,11 @@ int main(void)
     }
     if (!CloseHandle(lock)) return fail("unlock destination");
 
+    return 0;
+}
+
+static int check_atomic_replacement(const wchar_t *staged, const wchar_t *destination)
+{
     if (platform_path_replace(g_staged_utf8, g_destination_utf8) != 0 ||
         !destination_is(destination, "new-state"))
         return fail("atomic replacement");
@@ -128,6 +142,11 @@ int main(void)
         GetFileAttributesW(g_extended) != INVALID_FILE_ATTRIBUTES)
         return fail("staging path consumed");
 
+    return 0;
+}
+
+static int remove_fixture_paths(const wchar_t *destination)
+{
     if (!extended_path(destination) || !DeleteFileW(g_extended))
         return fail("file cleanup");
     for (unsigned int i = 0; i < 9; ++i) {
@@ -139,6 +158,18 @@ int main(void)
     }
     if (!RemoveDirectoryW(g_path)) return fail("root cleanup");
 
+    return 0;
+}
+
+int main(void)
+{
+    wchar_t staged[32768], destination[32768];
+    if (create_long_path_root() ||
+        create_fixture_files(staged, destination) ||
+        check_locked_destination(destination) ||
+        check_atomic_replacement(staged, destination) ||
+        remove_fixture_paths(destination))
+        return 1;
     puts("path_replace_windows_acceptance: PASS");
     return 0;
 }
