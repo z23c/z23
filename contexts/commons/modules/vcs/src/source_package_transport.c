@@ -320,17 +320,61 @@ static bool source_package_manifest_build(
     return ok;
 }
 
-bool vcs_source_package_transport_build(
+static bool source_package_inputs_accepted(
     const char *workspace, const uint8_t source_root[32],
     const uint8_t expected_signer[32],
     const uint8_t *lane_wire, size_t lane_wire_len,
-    struct vcs_source_package_transport *transport)
+    const struct vcs_source_package_transport *transport)
 {
     if (!workspace || !source_root || !expected_signer || !lane_wire ||
         !transport ||
         lane_wire_len > SOURCE_PACKAGE_MAX_AUTHORITY_BYTES ||
         !source_package_proven_lane(
             lane_wire, lane_wire_len, source_root, expected_signer))
+        return false;
+    return true;
+}
+
+static bool source_package_store_lane_wire(
+    struct vcs_source_package_transport *transport,
+    const uint8_t *lane_wire, size_t lane_wire_len)
+{
+    transport->lane_wire = zcl_malloc(
+        lane_wire_len, "vcs.source_package.lane");
+    if (!transport->lane_wire) return false;
+    memcpy(transport->lane_wire, lane_wire, lane_wire_len);
+    transport->lane_wire_len = lane_wire_len;
+    return true;
+}
+
+static bool source_package_load_bundle_and_inputs(
+    const char *workspace, const uint8_t source_root[32],
+    struct vcs_source_package_transport *transport)
+{
+    enum vcs_source_bundle_result bundle_result =
+        vcs_source_bundle_sharded_create(
+            workspace, source_root, &transport->source);
+    if (bundle_result != VCS_SOURCE_BUNDLE_OK ||
+        !source_package_offline_inputs(workspace, transport))
+        return false;
+    transport->bundle_metrics = transport->source.metrics;
+    transport->source_transport_bytes =
+        transport->source.manifest_wire_len;
+    for (size_t i = 0; i < transport->source.shard_count; i++)
+        transport->source_transport_bytes +=
+            transport->source.shards[i].wire_len;
+    return true;
+}
+
+bool vcs_source_package_transport_build(
+    const char *workspace, const uint8_t source_root[32],
+    const uint8_t expected_signer[32],
+    const uint8_t *lane_wire, size_t lane_wire_len,
+    struct vcs_source_package_transport *transport)
+{
+    if (!source_package_inputs_accepted(
+            workspace, source_root, expected_signer, lane_wire,
+            lane_wire_len, transport))
         return false;
     vcs_source_package_transport_free(transport);
     struct vcs_manifest tree;
@@ -339,29 +383,12 @@ bool vcs_source_package_transport_build(
         workspace, &tree, &transport->license_bytes,
         &transport->license_len);
     vcs_manifest_free(&tree);
-    if (ok) {
-        transport->lane_wire = zcl_malloc(
-            lane_wire_len, "vcs.source_package.lane");
-        ok = transport->lane_wire != NULL;
-    }
-    if (ok) {
-        memcpy(transport->lane_wire, lane_wire, lane_wire_len);
-        transport->lane_wire_len = lane_wire_len;
-    }
-    enum vcs_source_bundle_result bundle_result = ok
-        ? vcs_source_bundle_sharded_create(
-              workspace, source_root, &transport->source)
-        : VCS_SOURCE_BUNDLE_ERR_SOURCE;
-    ok = ok && bundle_result == VCS_SOURCE_BUNDLE_OK &&
-        source_package_offline_inputs(workspace, transport);
-    if (ok) {
-        transport->bundle_metrics = transport->source.metrics;
-        transport->source_transport_bytes =
-            transport->source.manifest_wire_len;
-        for (size_t i = 0; i < transport->source.shard_count; i++)
-            transport->source_transport_bytes +=
-                transport->source.shards[i].wire_len;
-    }
+    if (ok)
+        ok = source_package_store_lane_wire(
+            transport, lane_wire, lane_wire_len);
+    if (ok)
+        ok = source_package_load_bundle_and_inputs(
+            workspace, source_root, transport);
 
     ok = ok && source_package_manifest_build(transport);
     if (ok) ok = source_package_recipe(transport);

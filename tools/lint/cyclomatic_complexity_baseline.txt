@@ -200,7 +200,6 @@ contexts/commons/modules/vcs/src/source_bundle_sharded.c:sharded_decode:21
 contexts/commons/modules/vcs/src/source_bundle_sharded.c:vcs_source_bundle_sharded_create:17
 contexts/commons/modules/vcs/src/source_bundle_sharded.c:vcs_source_bundle_sharded_import:24
 contexts/commons/modules/vcs/src/source_bundle_sharded.c:vcs_source_bundle_sharded_verify:31
-contexts/commons/modules/vcs/src/source_package_transport.c:vcs_source_package_transport_build:19
 contexts/commons/modules/vcs/src/space.c:manifest_shape:21
 contexts/commons/modules/vcs/src/space.c:vcs_space_manifest_decode:31
 contexts/commons/modules/vcs/src/space.c:vcs_space_result_string:17
