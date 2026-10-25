@@ -145,6 +145,50 @@ static bool swi_run_count_flood(uint64_t seed, uint64_t *out_fp,
     return ok;
 }
 
+/* Build and inject the scenario-2 malformed `headers` frame (one declared
+ * header, deliberately too-short body), then run the NUT's receive loop over
+ * it. Returns the inject+run result. */
+static bool swi_inject_truncated_headers(struct simnet_wire *wire)
+{
+    /* 8 bytes is far short of a full block header (fixed fields + Equihash
+     * solution), so block_header_deserialize() fails on header[0]. */
+    static const uint8_t truncated[8] = {
+        0x04, 0x00, 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef,
+    };
+    struct byte_stream payload;
+    if (!swi_build_headers_payload(1, truncated, sizeof(truncated),
+                                   &payload))
+        return false;
+    bool ok = simnet_wire_inject_message(wire, 0, "headers", payload.data,
+                                         payload.size) &&
+              simnet_wire_run(wire, 1024, 0);
+    stream_free(&payload);
+    return ok;
+}
+
+/* The node must still be alive on the honest link: prove it answers a
+ * fresh ping. A wedged/disconnected node would fail this. */
+static bool swi_node_answers_recovery_ping(struct simnet_wire *wire)
+{
+    const uint64_t recovery_nonce = 0x49424452454356ULL;
+    return !simnet_wire_node(wire)->disconnect &&
+           simnet_wire_peer_send_ping(wire, 0, recovery_nonce) &&
+           simnet_wire_run(wire, 1024, 128) &&
+           simnet_wire_peer_pong_received(wire, 0, recovery_nonce);
+}
+
+/* Scenario-2 outcome gate on the run's stats: the shared monitor checks plus
+ * the malformed-header-specific expectations. */
+static bool swi_malformed_body_stats_ok(const struct simnet_wire_stats *st)
+{
+    return swi_monitors_ok(st) &&
+           st->peer_misbehave_events > 0 &&   /* malformed-header FLOOD offence */
+           !st->nut_disconnected &&           /* 20 pts < 100-pt ban threshold */
+           st->consensus_unchanged &&
+           st->pong_received &&               /* honest link still serves */
+           st->max_recv_msg_count <= MAX_RECV_MESSAGES;
+}
+
 /* SCENARIO 2 — malformed header body, node survives (real:
  * block_header_deserialize() failure inside process_headers(), which emits
  * EV_HEADERS_REJECTED + PEER_OFFENCE_FLOOD but does NOT disconnect — a single
@@ -163,31 +207,10 @@ static bool swi_run_malformed_body(uint64_t seed, uint64_t *out_fp,
 
     bool ok = swi_handshake_peer0(wire);
 
-    /* 8 bytes is far short of a full block header (fixed fields + Equihash
-     * solution), so block_header_deserialize() fails on header[0]. */
-    static const uint8_t truncated[8] = {
-        0x04, 0x00, 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef,
-    };
-    struct byte_stream payload;
-    if (ok) {
-        ok = swi_build_headers_payload(1, truncated, sizeof(truncated),
-                                       &payload);
-        if (ok) {
-            ok = simnet_wire_inject_message(wire, 0, "headers", payload.data,
-                                            payload.size) &&
-                 simnet_wire_run(wire, 1024, 0);
-            stream_free(&payload);
-        }
-    }
+    if (ok)
+        ok = swi_inject_truncated_headers(wire);
 
-    /* The node must still be alive on the honest link: prove it answers a
-     * fresh ping. A wedged/disconnected node would fail this. */
-    const uint64_t recovery_nonce = 0x49424452454356ULL;
-    ok = ok &&
-         !simnet_wire_node(wire)->disconnect &&
-         simnet_wire_peer_send_ping(wire, 0, recovery_nonce) &&
-         simnet_wire_run(wire, 1024, 128) &&
-         simnet_wire_peer_pong_received(wire, 0, recovery_nonce);
+    ok = ok && swi_node_answers_recovery_ping(wire);
 
     struct simnet_wire_stats st;
     memset(&st, 0, sizeof(st));
@@ -197,13 +220,7 @@ static bool swi_run_malformed_body(uint64_t seed, uint64_t *out_fp,
         if (out_fp)
             *out_fp = st.fingerprint;
     }
-    ok = ok &&
-         swi_monitors_ok(&st) &&
-         st.peer_misbehave_events > 0 &&   /* malformed-header FLOOD offence */
-         !st.nut_disconnected &&           /* 20 pts < 100-pt ban threshold */
-         st.consensus_unchanged &&
-         st.pong_received &&               /* honest link still serves */
-         st.max_recv_msg_count <= MAX_RECV_MESSAGES;
+    ok = ok && swi_malformed_body_stats_ok(&st);
 
     simnet_wire_free(wire);
     return ok;
