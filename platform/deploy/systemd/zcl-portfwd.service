@@ -34,7 +34,7 @@
 
 [Unit]
 Description=zclassic23 clearnet port forward (443->127.0.0.1:8443; 8080 left to zcl-supply)
-Documentation=file:%h/github/z23/docs/BLOCK_EXPLORER_HOSTING.md
+Documentation=file:%h/development/z23/main/docs/BLOCK_EXPLORER_HOSTING.md
 After=network-online.target
 Wants=network-online.target
 

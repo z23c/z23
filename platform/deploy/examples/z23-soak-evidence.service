@@ -21,7 +21,7 @@ OnFailure=z23-soak-evidence-onfailure.service
 
 [Service]
 Type=oneshot
-ExecStart=%h/github/z23/tools/scripts/soak_evidence.sh collect
+ExecStart=%h/development/z23/main/tools/scripts/soak_evidence.sh collect
 # Two local RPC reads + systemctl show + /proc read — seconds, not
 # minutes. Generous margin for a loaded box.
 TimeoutStartSec=300

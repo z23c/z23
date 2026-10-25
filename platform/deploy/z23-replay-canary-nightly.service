@@ -29,7 +29,7 @@ Type=oneshot
 # transient unit is actively folding, so the evidence lane never contends
 # with a live sovereign-state cure mint for CPU/IO.
 Environment=ZCL_ISO_SCRATCH_ROOT=%h/.local/state/zclassic23-canary/scratch
-ExecStart=%h/github/z23/tools/scripts/replay_canary_guard.sh --from=anchor
+ExecStart=%h/development/z23/main/tools/scripts/replay_canary_guard.sh --from=anchor
 # > the 90-min (5400 s) hard budget the harness enforces internally.
 TimeoutStartSec=6000
 Nice=10

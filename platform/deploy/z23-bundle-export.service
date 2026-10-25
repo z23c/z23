@@ -10,7 +10,7 @@ Description=Z23 Consensus-State Bundle Export — scheduled backup primitive
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/github/z23
+WorkingDirectory=%h/development/z23/main
 # Target datadir: default points at mint3, the independent from-genesis cure
 # source (docs/agent/HANDOFF.md "THE RELIABLE PATH") — a validated, durable,
 # non-live-copy chain, which is exactly the precondition
@@ -23,7 +23,7 @@ Environment=ZCL_EXPORT_TARGET_DATADIR=%h/.zclassic-c23-mint3
 # Uncomment and point at a second disk/mount/remote-mounted path to close
 # the "only copy lives on this NVMe" gap.
 #Environment=ZCL_EXPORT_SECONDARY=/mnt/backup/zclassic23-bundles
-ExecStart=%h/github/z23/platform/deploy/z23-bundle-export.sh ${ZCL_EXPORT_TARGET_DATADIR}
+ExecStart=%h/development/z23/main/platform/deploy/z23-bundle-export.sh ${ZCL_EXPORT_TARGET_DATADIR}
 # A full checkpoint-content export walks the whole coins/anchor/nullifier
 # set; generous budget for a large datadir on a loaded box.
 TimeoutStartSec=3600

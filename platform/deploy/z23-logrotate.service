@@ -13,7 +13,7 @@ Type=oneshot
 # signaling the node. See tools/scripts/zcl-logrotate.sh header for the
 # full safety-invariant writeup (NEVER touches a non-*.log file, NEVER
 # follows a symlink, flock-serialized per file).
-ExecStart=%h/github/z23/tools/scripts/zcl-logrotate.sh
+ExecStart=%h/development/z23/main/tools/scripts/zcl-logrotate.sh
 # copytruncate of a large log on a spinning disk needs minutes, not seconds.
 TimeoutStartSec=900
 Nice=15

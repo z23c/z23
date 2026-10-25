@@ -175,7 +175,7 @@ OOMScoreAdjust=500
 # bytes that produced it. %h/.local/bin/z23-dev is the same mechanism for
 # the dev binary, and the operator points it at one qualified build before
 # starting this unit (see the Install block above). A hardcoded
-# %h/github/z23/build/bin/z23-dev cannot make that promise: that
+# %h/development/z23/main/build/bin/z23-dev cannot make that promise: that
 # checkout is the operator's own working tree, it is routinely dirty, and
 # its build/bin/z23-dev can be hours stale relative to whatever tree was
 # actually gated — running that path would bind every claimed job to
@@ -246,7 +246,7 @@ ProtectHome=read-only
 # a write error. That is an operator drop-in adding one ReadWritePaths line,
 # not a reason to widen ProtectHome.
 ReadWritePaths=%h/.local/state/z23
-ReadWritePaths=%h/github/z23
+ReadWritePaths=%h/development/z23/main
 ReadWritePaths=%h/.z23
 
 StandardOutput=journal

@@ -30,8 +30,8 @@ After=z23-node.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/github/z23
-ExecStart=%h/github/z23/tools/scripts/build_drift_probe.sh collect
+WorkingDirectory=%h/development/z23/main
+ExecStart=%h/development/z23/main/tools/scripts/build_drift_probe.sh collect
 # Two bounded `agentbuild` invocations at 20s each plus a sha256 of a ~22MB
 # binary. Generous margin for a loaded box; never infinity (see
 # zcl-bombard.service for what TimeoutStartSec=infinity costs).

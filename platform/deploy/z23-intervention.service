@@ -25,7 +25,7 @@ After=z23-node.service
 
 [Service]
 Type=oneshot
-ExecStart=%h/github/z23/tools/scripts/intervention_ledger.sh collect
+ExecStart=%h/development/z23/main/tools/scripts/intervention_ledger.sh collect
 # Watch list. Add units here as lanes are deployed; the collector never
 # auto-discovers, because a monitor that picks its own targets quietly
 # stops watching the one you cared about the day its name changes.

@@ -1065,6 +1065,7 @@ AGENT_IMPACT_RULE("engine/controllers/src/api_controller_dispatch.c|engine/contr
 AGENT_IMPACT_RULE("tools/command/native_dev_hotswap.c|tools/command/native_dev_hotswap.h|engine/composition/commands/dev.def|engine/modules/hotswap/*|engine/composition/hotswap_eligible.def|engine/composition/hotswap_swappable.def|tools/lint/lintc/gate_hotswap_swappable_shape.c|tests/harness/fixtures/hotswap_swappable_bad_shape.def|tests/harness/src/test_hotswap_module.c|engine/controllers/src/status_native_handlers.c", "hotswap_loader hotswap_simnet hotswap_module command_handler_snapshot make_lint_gates")
 AGENT_IMPACT_RULE("tools/scripts/remote_node_update.sh|tools/scripts/lane_recover.sh|platform/deploy/examples/z23-self-update.service|platform/deploy/examples/z23-self-update.timer", "make_lint_gates")
 AGENT_IMPACT_RULE("platform/deploy/devbuild-broker", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/deploy/*|tests/harness/src/test_deploy_units_resolve.c", "deploy_units_resolve")
 
 /* Instant dev loop Wave 1/2: Tier-2 fast restart (clean-shutdown marker + skip). */
 AGENT_IMPACT_RULE("engine/composition/src/boot_shutdown_marker.c|engine/composition/include/config/boot_shutdown_marker.h|engine/composition/src/boot_fast_restart.c|engine/composition/include/config/boot_fast_restart.h|tests/harness/src/test_shutdown_marker.c", "shutdown_marker unclean_shutdown_advance boot_phase make_lint_gates")

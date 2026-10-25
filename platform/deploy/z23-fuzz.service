@@ -3,10 +3,10 @@ Description=Z23 Background Fuzz Lane
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/github/z23
+WorkingDirectory=%h/development/z23/main
 # Clean-skip while any *mint* user service is active; prune old lane logs
 # before/after the run without changing the latest verdict on a skip.
-ExecStart=%h/github/z23/tools/scripts/quality_job_guard.sh fuzz
+ExecStart=%h/development/z23/main/tools/scripts/quality_job_guard.sh fuzz
 TimeoutStartSec=7200
 
 # The lane is evidence, not serving traffic. Keep it polite to the live node.

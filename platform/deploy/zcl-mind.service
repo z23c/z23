@@ -81,7 +81,7 @@ MemorySwapMax=256M
 TasksMax=64
 OOMScoreAdjust=500
 
-ExecStart=%h/github/z23/build/bin/z23-mind dev fleet mind serve
+ExecStart=%h/development/z23/main/build/bin/z23-mind dev fleet mind serve
 
 # The resident handles SIGTERM cooperatively: it finishes or abandons the
 # current rebuild, releases every checkout's owner claim so no query is left

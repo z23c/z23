@@ -34,7 +34,7 @@
 
 [Unit]
 Description=z23 fleet gateway TLS front (public :%i -> loopback gateway)
-Documentation=file:%h/github/z23/platform/deploy/fleet-gateway/README.md
+Documentation=file:%h/development/z23/main/platform/deploy/fleet-gateway/README.md
 After=network-online.target
 Wants=network-online.target
 
@@ -48,7 +48,7 @@ EnvironmentFile=-%h/.config/z23-fleet-gateway/front-%i.env
 #   systemctl --user edit z23-fleet-gateway-front@<front-port>
 # $FRONT_SITE is deliberately UNBRACED: unset it must contribute no
 # argument at all, which is what tells the front "no routing, one backend".
-ExecStart=%h/github/z23/build/bin/zcl-fleet-front ${FRONT_HOST} ${FRONT_PORT} ${GW_HOST} ${GW_PORT} ${FRONT_CERT} ${FRONT_KEY} $FRONT_SITE
+ExecStart=%h/development/z23/main/build/bin/zcl-fleet-front ${FRONT_HOST} ${FRONT_PORT} ${GW_HOST} ${GW_PORT} ${FRONT_CERT} ${FRONT_KEY} $FRONT_SITE
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=300

@@ -17,7 +17,7 @@ Description=Z23 Public Explorer Smoke — the only EXTERNAL availability evidenc
 # READ-ONLY: it issues HTTP GETs and writes only its own ledger.
 [Service]
 Type=oneshot
-ExecStart=%h/github/z23/tools/scripts/public_explorer_smoke.sh
+ExecStart=%h/development/z23/main/tools/scripts/public_explorer_smoke.sh
 Environment=ZCL_PUBLIC_BASE=https://zclnet.net
 # The script exits non-zero on a failed check by design. The ledger line is
 # already written by then, so systemd's own failure accounting is redundant

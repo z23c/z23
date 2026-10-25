@@ -9,7 +9,7 @@ Type=oneshot
 # Polls /api/health + getsyncdetail every 60s; asserts peer_count >= 3,
 # mirror_lag <= breach, mirror_lag_breach_severity == "none", and
 # magicbean_peer_count >= 1. Output goes to the journal.
-ExecStart=%h/github/z23/tools/scripts/soak_assert.sh 540 60
+ExecStart=%h/development/z23/main/tools/scripts/soak_assert.sh 540 60
 
 # Generous so post-restart peer rebuild (peers can take 60-120s to climb
 # from 1→3) doesn't blow up the first probe. The script returns non-zero

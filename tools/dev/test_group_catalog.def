@@ -1797,3 +1797,4 @@ ZCL_TEST_GROUP(legacy_seed)
  * binary is required through the declared BUILD need. */
 ZCL_TEST_GROUP(agent_guard)
 ZCL_TEST_GROUP(fleet_parity)
+ZCL_TEST_GROUP(deploy_units_resolve)

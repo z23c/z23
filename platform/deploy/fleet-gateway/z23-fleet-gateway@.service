@@ -17,13 +17,13 @@
 # ~/.config/z23-fleet-gateway/<port>.env, e.g.:
 #   FLEET_GW_ISSUER=https://<public-host>:<front-port>
 #   FLEET_GW_OWNER_KEY=<owner approval secret, never shared, never logged>
-#   FLEET_GW_NODE=%h/github/z23/build/bin/z23
+#   FLEET_GW_NODE=%h/development/z23/main/build/bin/z23
 # The EnvironmentFile line below is dash-optional: without an owner key the
 # gateway still serves discovery but refuses OAuth approval (fail closed).
 
 [Unit]
 Description=z23 fleet gateway (loopback Streamable HTTP on 127.0.0.1:%i)
-Documentation=file:%h/github/z23/platform/deploy/fleet-gateway/README.md
+Documentation=file:%h/development/z23/main/platform/deploy/fleet-gateway/README.md
 After=network-online.target
 Wants=network-online.target
 
@@ -36,7 +36,7 @@ EnvironmentFile=-%h/.config/z23-fleet-gateway/%i.env
 # ExecStart must be a literal absolute path; a box whose checkout lives
 # elsewhere overrides this line AND FLEET_GW_NODE together:
 #   systemctl --user edit z23-fleet-gateway@<gw-port>
-ExecStart=%h/github/z23/build/bin/z23-fleet-gateway
+ExecStart=%h/development/z23/main/build/bin/z23-fleet-gateway
 # One fork per connection plus one fork/exec per tool call, all bounded by
 # the gateway's own caps (64 KiB headers, 1 MiB bodies, 4 MiB replies).
 # Bounded supervision to match: a crash loop is a symptom, not a workload.

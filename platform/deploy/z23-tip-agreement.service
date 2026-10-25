@@ -31,7 +31,7 @@ After=z23-node.service
 
 [Service]
 Type=oneshot
-ExecStart=%h/github/z23/tools/scripts/tip_agreement_probe.sh collect
+ExecStart=%h/development/z23/main/tools/scripts/tip_agreement_probe.sh collect
 # Worst case per instance: three `core storage query` reads and one
 # `dumpstate`, each capped at ZCL_PARITY_RPC_TIMEOUT_SEC (default 8s), plus
 # one getblockhash RPC at the same cap = 40s. One instance is deployed here,
