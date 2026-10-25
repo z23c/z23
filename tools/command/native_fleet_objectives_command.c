@@ -13,6 +13,7 @@
 
 #include "native_fleet_objectives.h"
 
+#include "base/format_attribute.h"
 #include "json/json.h"
 #include "util/log_macros.h"
 
@@ -246,7 +247,7 @@ struct obj_render_buf {
 };
 
 static void obj_put(struct obj_render_buf *b, const char *format, ...)
-    __attribute__((format(printf, 2, 3)));
+    ZCL_PRINTF_LIKE(2, 3);
 
 static void obj_put(struct obj_render_buf *b, const char *format, ...)
 {
