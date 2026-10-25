@@ -9,10 +9,8 @@
 
 #include "test/spec_helpers.h"
 
-int spec_wallet_accessibility(void)
+static void check_wallet_visual_hierarchy(void)
 {
-    wallet_view_init(NULL);
-
     FEATURE("Visual hierarchy guides the eye") {
         STORY("dashboard balance is the largest element") {
             GIVEN("dashboard loads")
@@ -32,7 +30,10 @@ int spec_wallet_accessibility(void)
             PASS();
         }
     }
+}
 
+static void check_wallet_form_error_prevention(void)
+{
     FEATURE("Forms prevent errors before they happen") {
         STORY("send form validates client-side") {
             GIVEN("send page loads")
@@ -60,7 +61,10 @@ int spec_wallet_accessibility(void)
             PASS();
         }
     }
+}
 
+static void check_wallet_copy_actions(void)
+{
     FEATURE("Copy actions are one tap, not select-all-copy") {
         STORY("receive page has clipboard integration") {
             GIVEN("receive page loads")
@@ -72,7 +76,10 @@ int spec_wallet_accessibility(void)
             PASS();
         }
     }
+}
 
+static void check_wallet_color_meaning(void)
+{
     FEATURE("Color communicates meaning consistently") {
         STORY("privacy meter uses meaningful colors") {
             GIVEN("dashboard loads")
@@ -90,7 +97,10 @@ int spec_wallet_accessibility(void)
             PASS();
         }
     }
+}
 
+static void check_wallet_touch_targets(void)
+{
     FEATURE("Mobile-friendly touch targets") {
         STORY("nav tabs are large enough to tap") {
             GIVEN("dashboard loads")
@@ -102,6 +112,17 @@ int spec_wallet_accessibility(void)
             PASS();
         }
     }
+}
+
+int spec_wallet_accessibility(void)
+{
+    wallet_view_init(NULL);
+
+    check_wallet_visual_hierarchy();
+    check_wallet_form_error_prevention();
+    check_wallet_copy_actions();
+    check_wallet_color_meaning();
+    check_wallet_touch_targets();
 
     SPEC_SUMMARY();
     return SPEC_FAILURES();
