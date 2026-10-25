@@ -106,6 +106,31 @@ static struct zcl_result yardsale_prevout_projection_check(
                    reasons[reason_i]);
 }
 
+static bool yardsale_prevout_fetch_args_unwired(
+    const struct yardsale_prevout_view *view, const uint8_t txid[32],
+    const uint8_t token_id[32], const struct transaction *tx_out)
+{
+    return !view || !view->state || !view->node_db || !view->node_db->open ||
+        !view->datadir || !txid || !token_id || !tx_out;
+}
+
+static bool yardsale_prevout_locator_is_negative(
+    const struct db_tx_index *row)
+{
+    return row->block_height < 0 || row->tx_index < 0;
+}
+
+static bool yardsale_prevout_confirmed_body_matches(
+    struct block *blk, const struct yardsale_prevout_view *view,
+    const struct block_index *index, int tx_index, const uint8_t txid[32])
+{
+    yardsale_prevout_read_block_fn read_block = view->read_block
+        ? view->read_block : yardsale_prevout_read_disk;
+    return read_block(blk, index, view->datadir, view->read_block_ctx) &&
+        (size_t)tx_index < blk->num_vtx &&
+        memcmp(blk->vtx[tx_index].hash.data, txid, 32) == 0;
+}
+
 struct zcl_result yardsale_prevout_fetch_confirmed(void *ctx,
                                                    const uint8_t txid[32],
                                                    uint32_t vout,
@@ -114,15 +139,14 @@ struct zcl_result yardsale_prevout_fetch_confirmed(void *ctx,
                                                    struct transaction *tx_out)
 {
     const struct yardsale_prevout_view *view = ctx;
-    if (!view || !view->state || !view->node_db || !view->node_db->open ||
-        !view->datadir || !txid || !token_id || !tx_out)
+    if (yardsale_prevout_fetch_args_unwired(view, txid, token_id, tx_out))
         return ZCL_ERR(-1, "prevout fetch: unwired chain view");
 
     struct db_tx_index row;
     if (!db_tx_find(view->node_db, txid, &row))
         return ZCL_ERR(-2, "prevout fetch: txid never finalized on "
                            "this node");
-    if (row.block_height < 0 || row.tx_index < 0) {
+    if (yardsale_prevout_locator_is_negative(&row)) {
         LOG_WARN("yardsale", "prevout fetch: locator rejected negative "
                  "position (height=%d tx_index=%d)",
                  row.block_height, row.tx_index);
@@ -143,12 +167,8 @@ struct zcl_result yardsale_prevout_fetch_confirmed(void *ctx,
     struct zcl_result out =
         ZCL_ERR(-8, "prevout fetch: confirmed body unreadable or "
                     "txid mismatch");
-    yardsale_prevout_read_block_fn read_block = view->read_block
-        ? view->read_block : yardsale_prevout_read_disk;
-    if (read_block(&blk, snapshot.block, view->datadir,
-                   view->read_block_ctx) &&
-        (size_t)row.tx_index < blk.num_vtx &&
-        memcmp(blk.vtx[row.tx_index].hash.data, txid, 32) == 0) {
+    if (yardsale_prevout_confirmed_body_matches(
+        &blk, view, snapshot.block, row.tx_index, txid)) {
         struct uint256 body_hash;
         block_header_get_hash(&blk.header, &body_hash);
         if (!yardsale_prevout_chain_unchanged(view, row.block_height,
