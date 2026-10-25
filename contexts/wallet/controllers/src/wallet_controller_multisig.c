@@ -83,6 +83,55 @@ bool rpc_createmultisig(const struct json_value *params, bool help,
     return true;
 }
 
+enum sendmany_recipient_status {
+    SENDMANY_RECIPIENT_OK = 0,
+    SENDMANY_RECIPIENT_BAD_ADDRESS,
+    SENDMANY_RECIPIENT_BAD_AMOUNT
+};
+
+static enum sendmany_recipient_status
+sendmany_parse_recipients(const struct json_value *amounts,
+                          struct tx_destination *dests, int64_t *values,
+                          size_t *n_out, size_t *error_index)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < json_size(amounts) && n < 256; i++) {
+        const char *addr = amounts->keys ? amounts->keys[i] : NULL;
+        const struct json_value *val = json_at(amounts, i);
+        if (!addr || !val) continue;
+
+        if (!wallet_decode_address(addr, &dests[n])) {
+            *error_index = i;
+            return SENDMANY_RECIPIENT_BAD_ADDRESS;
+        }
+
+        values[n] = parse_amount(val);
+        if (values[n] <= 0) {
+            *error_index = i;
+            return SENDMANY_RECIPIENT_BAD_AMOUNT;
+        }
+        n++;
+    }
+    *n_out = n;
+    return SENDMANY_RECIPIENT_OK;
+}
+
+static const char *sendmany_error_or_fallback(const char *error,
+                                              const char *fallback)
+{
+    return error ? error : fallback;
+}
+
+static void sendmany_sync_and_relay(struct wallet_rpc_context *ctx,
+                                    struct wallet_tx *wtx)
+{
+    if (wallet_ctx_db_ready(ctx))
+        node_db_sync_wallet_tx(ctx->node_db, &wtx->tx, ctx->wallet, 0);
+
+    if (ctx->connman)
+        connman_relay_transaction(ctx->connman, &wtx->tx.hash);
+}
+
 bool rpc_sendmany(const struct json_value *params, bool help,
                           struct json_value *result)
 {
@@ -125,23 +174,18 @@ bool rpc_sendmany(const struct json_value *params, bool help,
     struct tx_destination dests[256];
     int64_t values[256];
     size_t n = 0;
+    size_t i = 0;
+    enum sendmany_recipient_status recipient_status =
+        sendmany_parse_recipients(amounts, dests, values, &n, &i);
 
-    for (size_t i = 0; i < json_size(amounts) && n < 256; i++) {
-        const char *addr = amounts->keys ? amounts->keys[i] : NULL;
-        const struct json_value *val = json_at(amounts, i);
-        if (!addr || !val) continue;
+    if (recipient_status == SENDMANY_RECIPIENT_BAD_ADDRESS) {
+        json_set_str(result, "Invalid address");
+        LOG_FAIL("wallet", "sendmany: invalid address at index %zu", i);
+    }
 
-        if (!wallet_decode_address(addr, &dests[n])) {
-            json_set_str(result, "Invalid address");
-            LOG_FAIL("wallet", "sendmany: invalid address at index %zu", i);
-        }
-
-        values[n] = parse_amount(val);
-        if (values[n] <= 0) {
-            json_set_str(result, "Invalid amount");
-            LOG_FAIL("wallet", "sendmany: invalid amount at index %zu", i);
-        }
-        n++;
+    if (recipient_status == SENDMANY_RECIPIENT_BAD_AMOUNT) {
+        json_set_str(result, "Invalid amount");
+        LOG_FAIL("wallet", "sendmany: invalid amount at index %zu", i);
     }
 
     if (n == 0) {
@@ -154,7 +198,7 @@ bool rpc_sendmany(const struct json_value *params, bool help,
     const char *error = NULL;
     if (!wallet_create_transaction_multi(ctx->wallet, dests, values, n,
                                           &wtx, &fee, &error)) {
-        json_set_str(result, error ? error : "Transaction creation failed");
+        json_set_str(result, sendmany_error_or_fallback(error, "Transaction creation failed"));
         LOG_FAIL("wallet", "sendmany: create multi-tx failed (%zu recipients): %s", n, error ? error : "unknown");
     }
 
@@ -176,11 +220,7 @@ bool rpc_sendmany(const struct json_value *params, bool help,
                            persisted.message);
     }
 
-    if (wallet_ctx_db_ready(ctx))
-        node_db_sync_wallet_tx(ctx->node_db, &wtx.tx, ctx->wallet, 0);
-
-    if (ctx->connman)
-        connman_relay_transaction(ctx->connman, &wtx.tx.hash);
+    sendmany_sync_and_relay(ctx, &wtx);
 
     char txid[65];
     uint256_get_hex(&wtx.tx.hash, txid);
