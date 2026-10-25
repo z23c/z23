@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Crenton - Apache License 2.0
  *
  * Sky Combat: top-level game controller.
  */
@@ -208,8 +208,136 @@ void update_camera(sky_combat_game_t* game, float dt) {
     game->camera.target = Vector3Lerp(game->camera.target, game->aircraft->position, 5 * dt);
 }
 
+static bool sky_combat_has_required_systems(const sky_combat_game_t* game) {
+    return game && game->aircraft && game->course && game->weapons && game->input;
+}
+
+static void sky_combat_handle_special_moves(sky_combat_game_t* game, input_state_t input_state, float dt) {
+    if (input_state.barrel_roll_left) {
+        aircraft_barrel_roll_left(game->aircraft, dt);
+    } else if (input_state.barrel_roll_right) {
+        aircraft_barrel_roll_right(game->aircraft, dt);
+    }
+    
+    if (input_state.speed_boost) {
+        aircraft_boost(game->aircraft, dt);
+    }
+    if (input_state.brake) {
+        aircraft_brake(game->aircraft, dt);
+    }
+}
+
+static void sky_combat_fire_weapons(sky_combat_game_t* game, input_state_t input_state) {
+    if (input_state.fire_guns && game->aircraft->fireTimer <= 0) {
+        // Apply aim offset to firing angle
+        float adjusted_yaw = game->aircraft->yaw + game->gun_aim_offset_x;
+        float adjusted_pitch = game->aircraft->pitch + game->gun_aim_offset_y;
+        
+        // Calculate aimed forward vector
+        Vector3 aimed_forward = {
+            cosf(adjusted_yaw * DEG2RAD) * cosf(adjusted_pitch * DEG2RAD),
+            sinf(adjusted_pitch * DEG2RAD),
+            sinf(adjusted_yaw * DEG2RAD) * cosf(adjusted_pitch * DEG2RAD)
+        };
+        
+        weapons_fire_bullet(game->weapons, game->aircraft->position, 
+                          aimed_forward, adjusted_yaw);
+        game->aircraft->fireTimer = FIRE_RATE;
+    }
+    
+    if (input_state.fire_missiles && game->aircraft->missileTimer <= 0) {
+        ring_t* target = course_get_next_ring(game->course);
+        weapons_fire_missile(game->weapons, game->aircraft->position,
+                           aircraft_get_forward_vector(game->aircraft),
+                           game->aircraft->yaw,
+                           game->aircraft->missileSide,
+                           target);
+        // Alternate missile sides
+        game->aircraft->missileSide *= -1;
+        game->aircraft->missileTimer = MISSILE_RATE;
+    }
+}
+
+static void sky_combat_update_simulation(sky_combat_game_t* game, float dt) {
+    game->elapsed_time += dt;
+    
+    // Update input
+    input_update(game->input);
+    input_state_t input_state = input_get_state(game->input);
+    
+    // Update aircraft
+    aircraft_update(game->aircraft, input_state.move_x, input_state.move_y, dt);
+    
+    // Handle special moves
+    sky_combat_handle_special_moves(game, input_state, dt);
+    
+    // Handle weapons with right stick aiming
+    sky_combat_fire_weapons(game, input_state);
+    
+    // Update weapons
+    weapons_update(game->weapons, dt);
+    
+    // Check ring collection
+    if (course_check_ring_collection(game->course, game->aircraft->position, 0)) {
+        game->aircraft->rings++;
+        game->aircraft->score = course_get_total_score(game->course);
+    }
+    
+    // Check completion
+    if (game->aircraft->rings >= game->course->ring_count) {
+        game->completed = true;
+    }
+    
+    // Update camera
+    update_camera(game, dt);
+}
+
+static void sky_combat_reset_game(sky_combat_game_t* game) {
+    // Reset game
+    game->aircraft->position = (Vector3){0, 50, 0};
+    game->aircraft->score = 0;
+    game->aircraft->rings = 0;
+    game->aircraft->speed = AIRCRAFT_BASE_SPEED;
+    game->aircraft->yaw = 0;
+    game->aircraft->pitch = 0;
+    game->aircraft->roll = 0;
+    
+    course_load_intermediate(game->course);
+    game->completed = false;
+    game->elapsed_time = 0;
+}
+
+static void sky_combat_render_frame(sky_combat_game_t* game) {
+    BeginDrawing();
+    ClearBackground(SKYBLUE);
+    
+    BeginMode3D(game->camera);
+    
+    draw_environment(game);
+    course_draw_rings(game->course, game->game_time);
+    draw_navigation_helpers(game);
+    aircraft_draw(game->aircraft, game->game_time);
+    weapons_draw(game->weapons);
+    
+    EndMode3D();
+    
+    // Draw HUD
+    input_state_t input_state = input_get_state(game->input);
+    hud_draw(game->aircraft, game->course, &input_state, &game->hud_config);
+    
+    if (game->completed) {
+        hud_draw_victory(game->aircraft->score, game->elapsed_time);
+    }
+    
+    if (game->paused) {
+        hud_draw_pause_menu();
+    }
+    
+    EndDrawing();
+}
+
 void sky_combat_run(sky_combat_game_t* game) {
-    if (!game || !game->aircraft || !game->course || !game->weapons || !game->input) return;
+    if (!sky_combat_has_required_systems(game)) return;
     
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
@@ -221,120 +349,16 @@ void sky_combat_run(sky_combat_game_t* game) {
         }
         
         if (!game->paused && !game->completed) {
-            game->elapsed_time += dt;
-            
-            // Update input
-            input_update(game->input);
-            input_state_t input_state = input_get_state(game->input);
-            
-            // Update aircraft
-            aircraft_update(game->aircraft, input_state.move_x, input_state.move_y, dt);
-            
-            // Handle special moves
-            if (input_state.barrel_roll_left) {
-                aircraft_barrel_roll_left(game->aircraft, dt);
-            } else if (input_state.barrel_roll_right) {
-                aircraft_barrel_roll_right(game->aircraft, dt);
-            }
-            
-            if (input_state.speed_boost) {
-                aircraft_boost(game->aircraft, dt);
-            }
-            if (input_state.brake) {
-                aircraft_brake(game->aircraft, dt);
-            }
-            
-            // Handle weapons with right stick aiming
-            if (input_state.fire_guns && game->aircraft->fireTimer <= 0) {
-                // Apply aim offset to firing angle
-                float adjusted_yaw = game->aircraft->yaw + game->gun_aim_offset_x;
-                float adjusted_pitch = game->aircraft->pitch + game->gun_aim_offset_y;
-                
-                // Calculate aimed forward vector
-                Vector3 aimed_forward = {
-                    cosf(adjusted_yaw * DEG2RAD) * cosf(adjusted_pitch * DEG2RAD),
-                    sinf(adjusted_pitch * DEG2RAD),
-                    sinf(adjusted_yaw * DEG2RAD) * cosf(adjusted_pitch * DEG2RAD)
-                };
-                
-                weapons_fire_bullet(game->weapons, game->aircraft->position, 
-                                  aimed_forward, adjusted_yaw);
-                game->aircraft->fireTimer = FIRE_RATE;
-            }
-            
-            if (input_state.fire_missiles && game->aircraft->missileTimer <= 0) {
-                ring_t* target = course_get_next_ring(game->course);
-                weapons_fire_missile(game->weapons, game->aircraft->position,
-                                   aircraft_get_forward_vector(game->aircraft),
-                                   game->aircraft->yaw,
-                                   game->aircraft->missileSide,
-                                   target);
-                // Alternate missile sides
-                game->aircraft->missileSide *= -1;
-                game->aircraft->missileTimer = MISSILE_RATE;
-            }
-            
-            // Update weapons
-            weapons_update(game->weapons, dt);
-            
-            // Check ring collection
-            if (course_check_ring_collection(game->course, game->aircraft->position, 0)) {
-                game->aircraft->rings++;
-                game->aircraft->score = course_get_total_score(game->course);
-            }
-            
-            // Check completion
-            if (game->aircraft->rings >= game->course->ring_count) {
-                game->completed = true;
-            }
-            
-            // Update camera
-            update_camera(game, dt);
+            sky_combat_update_simulation(game, dt);
         }
         
         // Restart handling
         if (game->completed && IsKeyPressed(KEY_ENTER)) {
-            // Reset game
-            game->aircraft->position = (Vector3){0, 50, 0};
-            game->aircraft->score = 0;
-            game->aircraft->rings = 0;
-            game->aircraft->speed = AIRCRAFT_BASE_SPEED;
-            game->aircraft->yaw = 0;
-            game->aircraft->pitch = 0;
-            game->aircraft->roll = 0;
-            
-            course_load_intermediate(game->course);
-            game->completed = false;
-            game->elapsed_time = 0;
+            sky_combat_reset_game(game);
         }
         
         // Render
-        BeginDrawing();
-        ClearBackground(SKYBLUE);
-        
-        BeginMode3D(game->camera);
-        
-        draw_environment(game);
-        course_draw_rings(game->course, game->game_time);
-        draw_navigation_helpers(game);
-        aircraft_draw(game->aircraft, game->game_time);
-        weapons_draw(game->weapons);
-        
-        EndMode3D();
-        
-        // Draw HUD
-        input_state_t input_state = input_get_state(game->input);
-        hud_draw(game->aircraft, game->course, &input_state, &game->hud_config);
-        
-        if (game->completed) {
-            hud_draw_victory(game->aircraft->score, game->elapsed_time);
-        }
-        
-        if (game->paused) {
-            hud_draw_pause_menu();
-        }
-        
-        EndDrawing();
+        sky_combat_render_frame(game);
     }
 }
 
