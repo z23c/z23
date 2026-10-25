@@ -85,20 +85,49 @@ int market_moderation_relay_rule_from_string(const char *name)
 
 /* ── Per-datadir policy persistence ─────────────────────────────── */
 
+static void mm_policy_error_clear(char *error, size_t error_capacity)
+{
+    if (error && error_capacity)
+        error[0] = '\0';
+}
+
+static bool mm_policy_datadir_missing(const char *datadir)
+{
+    return !datadir || !datadir[0];
+}
+
+static bool mm_policy_directory_prepare(char directory[1400],
+                                        const char *datadir,
+                                        bool create_directories)
+{
+    int n = snprintf(directory, 1400, "%s/market", datadir);
+    if (n <= 0 || n >= 1400)
+        return false;
+    return !create_directories ||
+        platform_directory_ensure(directory, 0700);
+}
+
+static bool mm_policy_file_path_prepare(char path[1500],
+                                        const char *datadir)
+{
+    int n = snprintf(path, 1500, "%s/%s", datadir,
+                     MARKET_MODERATION_POLICY_FILE);
+    return n > 0 && n < 1500;
+}
+
 static bool mm_policy_paths(const char *datadir, char directory[1400],
                             char path[1500], bool create_directories,
                             char *error, size_t error_capacity)
 {
-    if (error && error_capacity) error[0] = '\0';
-    if (!datadir || !datadir[0]) {
+    mm_policy_error_clear(error, error_capacity);
+    if (mm_policy_datadir_missing(datadir)) {
         if (error && error_capacity)
             snprintf(error, error_capacity, "moderation datadir is missing");
         LOG_ERROR(MM_TAG, "policy path: datadir is missing");
         return false;
     }
-    int n = snprintf(directory, 1400, "%s/market", datadir);
-    if (n <= 0 || n >= 1400 ||
-        (create_directories && !platform_directory_ensure(directory, 0700))) {
+    if (!mm_policy_directory_prepare(directory, datadir,
+                                     create_directories)) {
         if (error && error_capacity)
             snprintf(error, error_capacity,
                      "cannot create market policy directory");
@@ -106,8 +135,7 @@ static bool mm_policy_paths(const char *datadir, char directory[1400],
                   datadir, strerror(errno));
         return false;
     }
-    n = snprintf(path, 1500, "%s/%s", datadir, MARKET_MODERATION_POLICY_FILE);
-    if (n <= 0 || n >= 1500) {
+    if (!mm_policy_file_path_prepare(path, datadir)) {
         if (error && error_capacity)
             snprintf(error, error_capacity, "moderation policy path too long");
         LOG_ERROR(MM_TAG, "policy path: path too long under %s", datadir);
