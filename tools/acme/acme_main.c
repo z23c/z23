@@ -135,98 +135,164 @@ static int report_check(const char *cert_path)
     return ACME_EXIT_FAILED;
 }
 
-int main(int argc, char **argv)
+static int run_selftest(void)
 {
-    if (argc < 2) {
-        usage(stderr);
-        return ACME_EXIT_USAGE;
+    const int failures = acme_selftest_transport() + acme_selftest_protocol();
+    if (failures == 0) {
+        printf("ALL SELFTESTS PASSED\n");
+        return ACME_EXIT_OK;
     }
-    const char *command = argv[1];
+    printf("SOME SELFTESTS FAILED — %d check(s)\n", failures);
+    return ACME_EXIT_FAILED;
+}
 
+/* Help and selftest exit before any option is read. Returns their exit
+ * status, or -1 when `command` is neither. */
+static int builtin_command_status(const char *command)
+{
     if (strcmp(command, "--help") == 0 || strcmp(command, "help") == 0) {
         usage(stdout);
         return ACME_EXIT_OK;
     }
-    if (strcmp(command, "selftest") == 0) {
-        const int failures = acme_selftest_transport() + acme_selftest_protocol();
-        if (failures == 0) {
-            printf("ALL SELFTESTS PASSED\n");
-            return ACME_EXIT_OK;
-        }
-        printf("SOME SELFTESTS FAILED — %d check(s)\n", failures);
-        return ACME_EXIT_FAILED;
-    }
+    if (strcmp(command, "selftest") == 0)
+        return run_selftest();
+    return -1;
+}
 
+/* Returns ACME_EXIT_USAGE when `command` is not obtain, renew or check.
+ * On success, *renew and *check record which of those it is. */
+static int classify_command(const char *command, bool *renew, bool *check)
+{
     const bool obtain = strcmp(command, "obtain") == 0;
-    const bool renew = strcmp(command, "renew") == 0;
-    const bool check = strcmp(command, "check") == 0;
-    if (!obtain && !renew && !check) {
+    *renew = strcmp(command, "renew") == 0;
+    *check = strcmp(command, "check") == 0;
+    if (!obtain && !*renew && !*check) {
         fprintf(stderr, "z23-acme: unknown command \"%s\"\n", command);
         usage(stderr);
         return ACME_EXIT_USAGE;
     }
+    return ACME_EXIT_OK;
+}
 
-    struct acme_client_config cfg = {0};
-    const char *cert_path = NULL;
-    bool staging = false;
+/* How one argv flag was recognized. NONE means try the next group; BAD
+ * means the flag matched but its value was missing or unusable. */
+#define ACME_OPT_NONE 0
+#define ACME_OPT_OK   1
+#define ACME_OPT_BAD  2
 
+static int match_string_option(int argc, char **argv, int *i, const char *a,
+                               struct acme_client_config *cfg,
+                               const char **cert_path)
+{
+    const char **dest = NULL;
+    if (strcmp(a, "--domain") == 0)
+        dest = &cfg->domain;
+    else if (strcmp(a, "--account") == 0)
+        dest = &cfg->account_key_path;
+    else if (strcmp(a, "--cert") == 0)
+        dest = cert_path;
+    else if (strcmp(a, "--key") == 0)
+        dest = &cfg->cert_key_path;
+    else if (strcmp(a, "--handoff") == 0)
+        dest = &cfg->handoff_path;
+    else if (strcmp(a, "--email") == 0)
+        dest = &cfg->contact_email;
+    else if (strcmp(a, "--directory") == 0)
+        dest = &cfg->directory_url;
+    else
+        return ACME_OPT_NONE;
+    if (!take_value(argc, argv, i, dest))
+        return ACME_OPT_BAD;
+    return ACME_OPT_OK;
+}
+
+static int match_int_option(int argc, char **argv, int *i, const char *a,
+                            struct acme_client_config *cfg)
+{
+    int *dest = NULL;
+    if (strcmp(a, "--timeout-ms") == 0)
+        dest = &cfg->timeout_ms;
+    else if (strcmp(a, "--poll-attempts") == 0)
+        dest = &cfg->poll_attempts;
+    else if (strcmp(a, "--poll-interval-ms") == 0)
+        dest = &cfg->poll_interval_ms;
+    else
+        return ACME_OPT_NONE;
+    if (!take_int(argc, argv, i, dest))
+        return ACME_OPT_BAD;
+    return ACME_OPT_OK;
+}
+
+static int match_flag_option(const char *a, bool *staging,
+                             struct acme_client_config *cfg)
+{
+    if (strcmp(a, "--staging") == 0) {
+        *staging = true;
+        return ACME_OPT_OK;
+    }
+    if (strcmp(a, "--agree-tos") == 0) {
+        cfg->agree_terms_of_service = true;
+        return ACME_OPT_OK;
+    }
+    return ACME_OPT_NONE;
+}
+
+static int parse_client_args(int argc, char **argv,
+                             struct acme_client_config *cfg,
+                             const char **cert_path, bool *staging)
+{
     for (int i = 2; i < argc; i++) {
         const char *a = argv[i];
-        bool ok = true;
-        if (strcmp(a, "--domain") == 0)             ok = take_value(argc, argv, &i, &cfg.domain);
-        else if (strcmp(a, "--account") == 0)       ok = take_value(argc, argv, &i, &cfg.account_key_path);
-        else if (strcmp(a, "--cert") == 0)          ok = take_value(argc, argv, &i, &cert_path);
-        else if (strcmp(a, "--key") == 0)           ok = take_value(argc, argv, &i, &cfg.cert_key_path);
-        else if (strcmp(a, "--handoff") == 0)       ok = take_value(argc, argv, &i, &cfg.handoff_path);
-        else if (strcmp(a, "--email") == 0)         ok = take_value(argc, argv, &i, &cfg.contact_email);
-        else if (strcmp(a, "--directory") == 0)     ok = take_value(argc, argv, &i, &cfg.directory_url);
-        else if (strcmp(a, "--timeout-ms") == 0)    ok = take_int(argc, argv, &i, &cfg.timeout_ms);
-        else if (strcmp(a, "--poll-attempts") == 0) ok = take_int(argc, argv, &i, &cfg.poll_attempts);
-        else if (strcmp(a, "--poll-interval-ms") == 0) ok = take_int(argc, argv, &i, &cfg.poll_interval_ms);
-        else if (strcmp(a, "--staging") == 0)       staging = true;
-        else if (strcmp(a, "--agree-tos") == 0)     cfg.agree_terms_of_service = true;
-        else {
+        int matched = match_string_option(argc, argv, &i, a, cfg, cert_path);
+        if (matched == ACME_OPT_NONE)
+            matched = match_int_option(argc, argv, &i, a, cfg);
+        if (matched == ACME_OPT_NONE)
+            matched = match_flag_option(a, staging, cfg);
+        if (matched == ACME_OPT_NONE) {
             fprintf(stderr, "z23-acme: unknown option \"%s\"\n", a);
             usage(stderr);
             return ACME_EXIT_USAGE;
         }
-        if (!ok) {
+        if (matched == ACME_OPT_BAD) {
             fprintf(stderr, "z23-acme: %s needs a value\n", a);
             return ACME_EXIT_USAGE;
         }
     }
-    cfg.cert_path = cert_path;
+    return ACME_EXIT_OK;
+}
 
-    if (!cert_path) {
-        fprintf(stderr, "z23-acme: --cert names the certificate this "
-                        "command reads or writes; it has no default\n");
-        return ACME_EXIT_USAGE;
-    }
-    if (check)
-        return report_check(cert_path);
-
-    if (staging && cfg.directory_url) {
+static int apply_staging_directory(bool staging, struct acme_client_config *cfg)
+{
+    if (staging && cfg->directory_url) {
         fprintf(stderr, "z23-acme: --staging and --directory both name a "
                         "certificate authority; pass one\n");
         return ACME_EXIT_USAGE;
     }
     if (staging)
-        cfg.directory_url = ACME_DIRECTORY_LETSENCRYPT_STAGING;
+        cfg->directory_url = ACME_DIRECTORY_LETSENCRYPT_STAGING;
+    return ACME_EXIT_OK;
+}
 
-    if (renew) {
-        const int64_t now = platform_time_wall_unix();
-        const enum acme_renewal_action action = acme_renewal_check(cert_path, now);
-        if (action == ACME_RENEWAL_CURRENT) {
-            printf("verdict=current cert=%s seconds_until_due=%lld — nothing to do\n",
-                   cert_path,
-                   (long long)acme_renewal_seconds_until_due(cert_path, now));
-            return ACME_EXIT_OK;
-        }
-        printf("verdict=%s cert=%s — ordering\n",
-               acme_renewal_action_name(action), cert_path);
+/* Print the renew verdict. Returns true when the certificate is still
+ * current and the caller must not order. */
+static bool renew_already_current(const char *cert_path)
+{
+    const int64_t now = platform_time_wall_unix();
+    const enum acme_renewal_action action = acme_renewal_check(cert_path, now);
+    if (action == ACME_RENEWAL_CURRENT) {
+        printf("verdict=current cert=%s seconds_until_due=%lld — nothing to do\n",
+               cert_path,
+               (long long)acme_renewal_seconds_until_due(cert_path, now));
+        return true;
     }
+    printf("verdict=%s cert=%s — ordering\n",
+           acme_renewal_action_name(action), cert_path);
+    return false;
+}
 
-    if (!acme_client_obtain(&cfg))
+static int obtain_and_report(const struct acme_client_config *cfg)
+{
+    if (!acme_client_obtain(cfg))
         return ACME_EXIT_FAILED;
 
     /* The renewal is end-to-end from here with nothing else to run. The
@@ -238,10 +304,54 @@ int main(int argc, char **argv)
      * step an operator would otherwise go looking for. */
     int64_t not_before = 0;
     int64_t not_after = 0;
-    (void)acme_certificate_validity(cfg.cert_path, &not_before, &not_after);
-    printf("issued cert=%s key=%s domain=%s not_after=%lld\n", cfg.cert_path,
-           cfg.cert_key_path, cfg.domain, (long long)not_after);
+    (void)acme_certificate_validity(cfg->cert_path, &not_before, &not_after);
+    printf("issued cert=%s key=%s domain=%s not_after=%lld\n", cfg->cert_path,
+           cfg->cert_key_path, cfg->domain, (long long)not_after);
     printf("the running node serves this on its next connection; no restart, "
            "and nothing else to run\n");
     return ACME_EXIT_OK;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 2) {
+        usage(stderr);
+        return ACME_EXIT_USAGE;
+    }
+    const char *command = argv[1];
+
+    const int builtin = builtin_command_status(command);
+    if (builtin >= 0)
+        return builtin;
+
+    bool renew = false;
+    bool check = false;
+    const int known = classify_command(command, &renew, &check);
+    if (known != ACME_EXIT_OK)
+        return known;
+
+    struct acme_client_config cfg = {0};
+    const char *cert_path = NULL;
+    bool staging = false;
+    const int parsed = parse_client_args(argc, argv, &cfg, &cert_path, &staging);
+    if (parsed != ACME_EXIT_OK)
+        return parsed;
+    cfg.cert_path = cert_path;
+
+    if (!cert_path) {
+        fprintf(stderr, "z23-acme: --cert names the certificate this "
+                        "command reads or writes; it has no default\n");
+        return ACME_EXIT_USAGE;
+    }
+    if (check)
+        return report_check(cert_path);
+
+    const int staged = apply_staging_directory(staging, &cfg);
+    if (staged != ACME_EXIT_OK)
+        return staged;
+
+    if (renew && renew_already_current(cert_path))
+        return ACME_EXIT_OK;
+
+    return obtain_and_report(&cfg);
 }
