@@ -65,41 +65,39 @@ static void market_payment_prune_expired_claims(
                  pruned);
 }
 
-static struct zcl_result market_payment_reconcile_record(
-    struct node_db *ndb, struct main_state *main_state,
-    bool chain_current, int wallet_projection_height, int64_t now_unix,
-    struct market_payment_claim_record *record)
+static bool market_payment_reconcile_inputs_missing(
+    const struct node_db *ndb, const struct main_state *main_state,
+    const struct market_payment_claim_record *record, int64_t now_unix)
 {
-    if (!ndb || !ndb->open || !main_state || !record || now_unix <= 0)
-        return ZCL_ERR(-1, "open database, chain state, record, and time required");
-    enum file_payment_auth_error auth = file_payment_auth_verify_for_offer(
-        &record->payment, &record->offer);
-    if (auth != FILE_PAYMENT_AUTH_OK)
-        return ZCL_ERR(-2, "payment claim contract invalid: %s",
-                       file_payment_auth_error_string(auth));
+    return !ndb || !ndb->open || !main_state || !record || now_unix <= 0;
+}
 
-    const struct chain_params *params = chain_params_get();
+/* True after the record is marked CONFLICTED or UNKNOWN. False leaves
+ * *tip_out as the active tip at the wallet projection height. */
+static bool market_payment_chain_blocks_decision(
+    struct market_payment_claim_record *record,
+    const struct chain_params *params, bool chain_current,
+    struct main_state *main_state, int wallet_projection_height,
+    int64_t now_unix, struct block_index **tip_out)
+{
     if (!params || memcmp(record->payment.network_genesis,
                           params->consensus.hashGenesisBlock.data, 32) != 0) {
         market_payment_set_status(record, "CONFLICTED",
                                   "claim network does not match this node",
                                   now_unix);
-        ZCL_CHECK(market_payment_persist(ndb, record));
-        return ZCL_OK;
+        return true;
     }
     if (!chain_current) {
         market_payment_set_status(record, "UNKNOWN",
                                   "chain state is not current", now_unix);
-        ZCL_CHECK(market_payment_persist(ndb, record));
-        return ZCL_OK;
+        return true;
     }
 
     struct block_index *tip = active_chain_tip(&main_state->chain_active);
     if (!tip) {
         market_payment_set_status(record, "UNKNOWN",
                                   "active chain tip is unavailable", now_unix);
-        ZCL_CHECK(market_payment_persist(ndb, record));
-        return ZCL_OK;
+        return true;
     }
     /* wallet_projection_height is the wallet's scanned-through height. Below
      * the tip, some block up to the tip was not read, so an absent note is
@@ -110,27 +108,18 @@ static struct zcl_result market_payment_reconcile_record(
             market_payment_projection_gap(wallet_projection_height,
                                           tip->nHeight),
             now_unix);
-        ZCL_CHECK(market_payment_persist(ndb, record));
-        return ZCL_OK;
+        return true;
     }
+    *tip_out = tip;
+    return false;
+}
 
-    char seller_address[256] = {0};
-    if (!sapling_encode_payment_address(
-            record->offer.z_addr, record->offer.z_addr + 11,
-            params->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS],
-            seller_address, sizeof(seller_address)))
-        return ZCL_ERR(-3, "seller Sapling address encoding failed");
-    uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES];
-    auth = file_payment_memo_encode(&record->payment, memo);
-    if (auth != FILE_PAYMENT_AUTH_OK)
-        return ZCL_ERR(-4, "payment memo construction failed: %s",
-                       file_payment_auth_error_string(auth));
-
-    struct market_payment_authority_observation observed;
-    enum market_payment_authority_state state =
-        db_market_payment_observe_authority(
-            ndb, &record->payment, seller_address, memo, tip->nHeight,
-            tip->hashBlock.data, &observed);
+static void market_payment_apply_authority_state(
+    struct market_payment_claim_record *record,
+    enum market_payment_authority_state state,
+    struct market_payment_authority_observation observed,
+    int64_t now_unix)
+{
     if (state == MARKET_PAYMENT_AUTHORITY_UNKNOWN) {
         market_payment_set_status(record, "UNKNOWN",
                                   "wallet or canonical projection is incomplete",
@@ -162,6 +151,49 @@ static struct zcl_result market_payment_reconcile_record(
                                   "exact payment is not yet confirmed",
                                   now_unix);
     }
+}
+
+static struct zcl_result market_payment_reconcile_record(
+    struct node_db *ndb, struct main_state *main_state,
+    bool chain_current, int wallet_projection_height, int64_t now_unix,
+    struct market_payment_claim_record *record)
+{
+    if (market_payment_reconcile_inputs_missing(ndb, main_state, record,
+                                                now_unix))
+        return ZCL_ERR(-1, "open database, chain state, record, and time required");
+    enum file_payment_auth_error auth = file_payment_auth_verify_for_offer(
+        &record->payment, &record->offer);
+    if (auth != FILE_PAYMENT_AUTH_OK)
+        return ZCL_ERR(-2, "payment claim contract invalid: %s",
+                       file_payment_auth_error_string(auth));
+
+    const struct chain_params *params = chain_params_get();
+    struct block_index *tip = NULL;
+    if (market_payment_chain_blocks_decision(
+            record, params, chain_current, main_state,
+            wallet_projection_height, now_unix, &tip)) {
+        ZCL_CHECK(market_payment_persist(ndb, record));
+        return ZCL_OK;
+    }
+
+    char seller_address[256] = {0};
+    if (!sapling_encode_payment_address(
+            record->offer.z_addr, record->offer.z_addr + 11,
+            params->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS],
+            seller_address, sizeof(seller_address)))
+        return ZCL_ERR(-3, "seller Sapling address encoding failed");
+    uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES];
+    auth = file_payment_memo_encode(&record->payment, memo);
+    if (auth != FILE_PAYMENT_AUTH_OK)
+        return ZCL_ERR(-4, "payment memo construction failed: %s",
+                       file_payment_auth_error_string(auth));
+
+    struct market_payment_authority_observation observed;
+    enum market_payment_authority_state state =
+        db_market_payment_observe_authority(
+            ndb, &record->payment, seller_address, memo, tip->nHeight,
+            tip->hashBlock.data, &observed);
+    market_payment_apply_authority_state(record, state, observed, now_unix);
     ZCL_CHECK(market_payment_persist(ndb, record));
     return ZCL_OK;
 }
