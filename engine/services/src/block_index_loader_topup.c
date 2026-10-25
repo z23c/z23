@@ -908,12 +908,24 @@ static bool node_db_fold_row(struct nodedb_fold *f, int h,
     return true;
 }
 
+/* The range scan is a probe read (no header blobs): enough for every row the
+ * map already holds, which the fold only raises. A hash the map lacks is
+ * inserted from the FULL row, read through the same find path as before, so
+ * node_db_topup_fill_new() sees exactly what it always saw. */
 static bool node_db_fold_range_cb(int height, const struct db_block *row,
                                   void *ctx)
 {
     struct nodedb_fold *f = ctx;
     f->rows_seen++;
-    return node_db_fold_row(f, height, row);
+    struct uint256 hh;
+    memcpy(hh.data, row->hash, 32);
+    if (block_map_find(&f->ms->map_block_index, &hh))
+        return node_db_fold_row(f, height, row);
+    struct db_block full;
+    if (!db_block_find_by_height(f->ndb, height, &full))
+        LOG_FAIL("block_index",
+                 "node.db topup: full row read failed at h=%d", height);
+    return node_db_fold_row(f, height, &full);
 }
 
 /* Read [lo..hi] from node.db `blocks` and fold it. A height with no
@@ -935,7 +947,8 @@ static bool node_db_fold_window(struct nodedb_fold *f, int lo, int hi)
         return true;
     }
 #endif
-    if (!db_block_scan_height_range(f->ndb, lo, hi, node_db_fold_range_cb, f)) {
+    if (!db_block_scan_height_range_probe(f->ndb, lo, hi,
+                                          node_db_fold_range_cb, f)) {
         /* A callback abort already logged its own failure; a read error
          * (prepare/step) is reported here. Either way the fold stops. */
         LOG_FAIL("block_index", "node.db topup: window scan %d..%d failed",

@@ -532,6 +532,89 @@ static int ndt_range_equivalence_cases(const char *dir)
     return failures;
 }
 
+/* Probe scan: the same rows as the full scan with the state columns the
+ * existing-entry fold reads, and none of the header blobs (the full scan
+ * records the solution length, the probe leaves it zero). */
+struct ndt_probe_seen {
+    int n;
+    bool full;
+    int height[8];
+    int status[8], file[8], data[8], undo[8], ntx[8];
+    uint8_t hash0[8];
+    size_t solution_len[8];
+};
+
+static bool ndt_probe_cb(int height, const struct db_block *row, void *ctx)
+{
+    struct ndt_probe_seen *p = ctx;
+    if (p->n >= 8)
+        return false;
+    int i = p->n++;
+    p->height[i] = height;
+    p->status[i] = row->status;
+    p->file[i] = row->file_num;
+    p->data[i] = row->data_pos;
+    p->undo[i] = row->undo_pos;
+    p->ntx[i] = row->num_tx;
+    p->hash0[i] = row->hash[0] ^ row->hash[31];
+    p->solution_len[i] = row->solution_len;
+    return true;
+}
+
+/* Row-for-row on the fold's columns; *narrow is true when the full scan saw a
+ * solution length everywhere and the probe saw none. */
+static bool ndt_probe_compare(const struct ndt_probe_seen *full,
+                              const struct ndt_probe_seen *probe, bool *narrow)
+{
+    bool same = full->n == probe->n;
+    *narrow = true;
+    for (int i = 0; same && i < full->n; i++) {
+        same = full->height[i] == probe->height[i] &&
+               full->status[i] == probe->status[i] &&
+               full->file[i] == probe->file[i] &&
+               full->data[i] == probe->data[i] &&
+               full->undo[i] == probe->undo[i] &&
+               full->ntx[i] == probe->ntx[i] &&
+               full->hash0[i] == probe->hash0[i];
+        *narrow = *narrow && full->solution_len[i] > 0 &&
+                  probe->solution_len[i] == 0;
+    }
+    return same;
+}
+
+static int ndt_probe_scan_cases(const char *dir)
+{
+    int failures = 0;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/node_probe.db", dir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool ready = node_db_open(&ndb, path);
+    for (int h = 10; ready && h <= 14; h++)
+        ready = ndt_write_block_row(&ndb, h, 3 | BLOCK_HAVE_DATA, 2000 + h);
+    NDT_CHECK("probe: fixture db built", ready);
+    struct ndt_probe_seen full, probe;
+    memset(&full, 0, sizeof(full));
+    memset(&probe, 0, sizeof(probe));
+    bool a = ready && db_block_scan_height_range(&ndb, 9, 15, ndt_probe_cb,
+                                                 &full);
+    bool b = ready && db_block_scan_height_range_probe(&ndb, 9, 15,
+                                                       ndt_probe_cb, &probe);
+    NDT_CHECK("probe: both scans ok, five rows each",
+              a && b && full.n == 5 && probe.n == 5);
+    bool narrow = false;
+    bool same = ndt_probe_compare(&full, &probe, &narrow);
+    NDT_CHECK("probe: rows match the full scan on the fold's columns", same);
+    NDT_CHECK("probe: no solution bytes are read", narrow);
+    struct ndt_probe_seen stop;
+    memset(&stop, 0, sizeof(stop));
+    NDT_CHECK("probe: bad range refused",
+              !db_block_scan_height_range_probe(&ndb, 5, 4, ndt_probe_cb,
+                                                &stop));
+    node_db_close(&ndb);
+    return failures;
+}
+
 int test_block_index_node_db_topup(void)
 {
     int failures = 0;
@@ -721,5 +804,6 @@ int test_block_index_node_db_topup(void)
     if (progress) sqlite3_close(progress);
     node_db_close(&ndb);
     return failures + ndt_undo_topup_cases(dir) +
-           ndt_range_equivalence_cases(dir);
+           ndt_range_equivalence_cases(dir) +
+           ndt_probe_scan_cases(dir);
 }

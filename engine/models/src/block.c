@@ -440,21 +440,16 @@ bool db_block_find_by_height(struct node_db *ndb, int height,
  * row per height qualifies; should a damaged db ever hold two, the first in
  * rowid order wins (as LIMIT 1 does) and the repeat is skipped. Heights with
  * no qualifying row are simply not visited. `cb` returns false to abort. */
-bool db_block_scan_height_range(struct node_db *ndb, int lo, int hi,
-                                db_block_range_cb cb, void *ctx)
+/* Shared ordered pass behind both range scans. `sql` selects `height,hash`
+ * first; `narrow` picks the row reader that matches its column list. The
+ * first-by-rowid dedup, status>=3 filter and error handling live here once. */
+static bool scan_height_range(struct node_db *ndb, const char *sql, bool narrow,
+                              int lo, int hi, db_block_range_cb cb, void *ctx)
 {
     if (!ndb || !ndb->open || !cb || lo > hi)
         return false;
     sqlite3_stmt *s = NULL;
-    AR_PREPARE_RET(ndb, s,
-        "SELECT height,hash,prev_hash,version,merkle_root,"
-        "time,bits,nonce,solution,chain_work,status,"
-        "file_num,data_pos,undo_pos,num_tx,"
-        "sapling_root,sprout_root,"
-        "sapling_value,sprout_value"
-        " FROM blocks WHERE height BETWEEN ? AND ?"
-        " AND status>=3 ORDER BY height, rowid",
-        false);
+    AR_PREPARE_RET(ndb, s, sql, false);
     AR_BIND_INT(s, 1, lo);
     AR_BIND_INT(s, 2, hi);
     bool ok = true;
@@ -468,7 +463,15 @@ bool db_block_scan_height_range(struct node_db *ndb, int lo, int hi,
         memset(&row, 0, sizeof(row));
         row.height = height;
         AR_READ_BLOB(s, 1, row.hash, 32);
-        read_block_cols(s, 2, &row);
+        if (narrow) {
+            row.status = (int)AR_COL_INT(s, 2);
+            row.file_num = (int)AR_COL_INT(s, 3);
+            row.data_pos = (int)AR_COL_INT(s, 4);
+            row.undo_pos = (int)AR_COL_INT(s, 5);
+            row.num_tx = (int)AR_COL_INT(s, 6);
+        } else {
+            read_block_cols(s, 2, &row);
+        }
         if (!cb(height, &row, ctx)) {
             ok = false;
             break;
@@ -479,6 +482,33 @@ bool db_block_scan_height_range(struct node_db *ndb, int lo, int hi,
         ok = false;
     AR_FINALIZE(s);
     return ok;
+}
+
+bool db_block_scan_height_range(struct node_db *ndb, int lo, int hi,
+                                db_block_range_cb cb, void *ctx)
+{
+    return scan_height_range(ndb,
+        "SELECT height,hash,prev_hash,version,merkle_root,"
+        "time,bits,nonce,solution,chain_work,status,"
+        "file_num,data_pos,undo_pos,num_tx,"
+        "sapling_root,sprout_root,"
+        "sapling_value,sprout_value"
+        " FROM blocks WHERE height BETWEEN ? AND ?"
+        " AND status>=3 ORDER BY height, rowid",
+        false, lo, hi, cb, ctx);
+}
+
+/* Same rows, same order, same dedup as db_block_scan_height_range(), but only
+ * the position/state columns are read (no solution or other header blobs);
+ * every other db_block field is left zero. */
+bool db_block_scan_height_range_probe(struct node_db *ndb, int lo, int hi,
+                                      db_block_range_cb cb, void *ctx)
+{
+    return scan_height_range(ndb,
+        "SELECT height,hash,status,file_num,data_pos,undo_pos,num_tx"
+        " FROM blocks WHERE height BETWEEN ? AND ?"
+        " AND status>=3 ORDER BY height, rowid",
+        true, lo, hi, cb, ctx);
 }
 
 /* ── Solution accessor ─────────────────────────────────────────── */

@@ -58,6 +58,14 @@ typedef bool (*db_block_range_cb)(int height, const struct db_block *row,
 bool db_block_scan_height_range(struct node_db *ndb, int lo, int hi,
                                 db_block_range_cb cb, void *ctx);
 
+/* The same ordered pass with the same rows, filter, dedup and abort contract,
+ * but a probe read: only hash, status, file_num, data_pos, undo_pos and
+ * num_tx are filled (height too); every other field, including the solution
+ * length, is zero. For callers that need the full row for a few rows fetch
+ * it with db_block_find_by_height(). */
+bool db_block_scan_height_range_probe(struct node_db *ndb, int lo, int hi,
+                                      db_block_range_cb cb, void *ctx);
+
 /* Load just the Equihash solution BLOB for a connected (status>=3) block
  * at `height` into `out` (up to `max` bytes), setting *out_len. The full
  * read helpers above deliberately drop the solution bytes (only the
