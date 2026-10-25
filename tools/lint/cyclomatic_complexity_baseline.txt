@@ -1051,7 +1051,6 @@ tests/harness/src/test_always_sync_lifecycle.c:test_always_sync_lifecycle_platfo
 tests/harness/src/test_anchor_peers.c:test_anchor_peers:45
 tests/harness/src/test_api_catalogs.c:api_catalog_focused_tests:417
 tests/harness/src/test_blake2b_batch_parity.c:test_blake2b_batch_parity:22
-tests/harness/src/test_blake3_kat.c:test_blake3_kat:17
 tests/harness/src/test_block_pruning.c:test_block_pruning:25
 tests/harness/src/test_block_status_event_restart_proof.c:rp_one_cycle:43
 tests/harness/src/test_block_status_event_restart_proof.c:test_block_status_event_restart_proof_platform_arm:21

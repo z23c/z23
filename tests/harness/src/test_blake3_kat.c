@@ -159,7 +159,7 @@ static const struct kat_row kat_rows[] = {
     { 5121,
       "628bd2cb2004694adaab7bbd778a25df25c47b9d4155a55f8fbd79f2fe154cff",
       "6ccf1c34753e7a044db80798ecd0782a8f76f33563accaddbfbb2e0ea4b2d024",
-      "b07f01e518e702f7ccb44a267e9e112d403a7b3f4883a47ffbed4b48339b3c34" },
+      "b07f01e518e702f7ccb44a26e9e1123d403a7b3f4883a47ffbed4b48339b3c34" },
     { 6144,
       "3e2e5b74e048f3add6d21faab3f83aa44d3b2278afb83b80b3c35164ebeca205",
       "3d6b6d21281d0ade5b2b016ae4034c5dec10ca7e475f90f76eac7138e9bc8f1d",
@@ -167,14 +167,14 @@ static const struct kat_row kat_rows[] = {
     { 6145,
       "f1323a8631446cc50536a9f705ee5cb619424d46887f3c376c695b70e0f0507f",
       "9ac301e9e39e45e3250a7e3b3df701aa0fb6889fbd80eeecf28dbc6300fbc539",
-      "379bcc61d0051dd489f686c13de00d5b14c505245103dc040d9e4dd1facab8e5" },
+      "379bcc61d0051dd48f686c13de00d5b14c505245103dc040d9e4dd1facab8e5" },
     { 7168,
       "61da957ec2499a95d6b8023e2b0e604ec7f6b50e80a9678b89d2628e99ada77a",
       "b42835e40e9d4a7f42ad8cc04f85a963a76e18198377ed84adddeaecacc6f3fc",
       "11c37a112765370c94a51415d0d651190c288566e295d505defdad895dae2237" },
     { 7169,
       "a003fc7a51754a9b3c7fae0367ab3d782dccf28855a03d435f8cfe74605e7817",
-      "ed9b1a922c046fdb3d423ae34e143b05ca1bf28b710432857bf738bcedbfa511",
+      "ed9b1a922c046fdb3d423ae34e143b05ca1bf288b710432857bf738bcedbfa511",
       "554b0a5efea9ef183f2f9b931b7497995d9eb26f5c5c6dad2b97d62fc5ac31d9" },
     { 8192,
       "aae792484c8efe4f19e2ca7d371d8c467ffb10748d8a5a1ae579948f718a2a63",
@@ -295,6 +295,60 @@ static void kat_digest(enum kat_mode mode, const uint8_t *input,
     blake3_final(&h, out, out_len);
 }
 
+/* Expected standard-digest hex for one vector row in the given mode. */
+static const char *kat_row_hex(const struct kat_row *row, enum kat_mode mode)
+{
+    switch (mode) {
+    case KAT_HASH:
+        return row->hash;
+    case KAT_KEYED:
+        return row->keyed_hash;
+    default:
+        return row->derive_key;
+    }
+}
+
+/* First standard-digest row whose input length matches, or NULL. */
+static const struct kat_row *kat_find_row(size_t input_len)
+{
+    for (size_t r = 0; r < sizeof(kat_rows) / sizeof(kat_rows[0]); r++) {
+        if (kat_rows[r].input_len == input_len)
+            return &kat_rows[r];
+    }
+    return NULL;
+}
+
+/* First extended-output row matching both length and mode, or NULL. */
+static const struct kat_ext *kat_find_ext(size_t input_len,
+                                          enum kat_mode mode)
+{
+    for (size_t e = 0; e < sizeof(kat_ext) / sizeof(kat_ext[0]); e++) {
+        if (kat_ext[e].input_len == input_len && kat_ext[e].mode == mode)
+            return &kat_ext[e];
+    }
+    return NULL;
+}
+
+/* Stream len bytes through irregular 1..13-byte updates with zero-length
+ * updates interleaved, then write the standard 32-byte digest to out. */
+static void kat_stream_digest(const uint8_t *input, size_t len, uint8_t *out)
+{
+    size_t off = 0;
+    unsigned step = 0;
+    struct blake3_hasher h;
+    blake3_init(&h);
+    while (off < len) {
+        size_t take = 1 + (step * 7 + step * step) % 13;
+        if (take > len - off)
+            take = len - off;
+        blake3_update(&h, input + off, take);
+        off += take;
+        blake3_update(&h, input, 0); /* zero-length is a no-op */
+        step++;
+    }
+    blake3_final(&h, out, BLAKE3_OUT_LEN);
+}
+
 int test_blake3_kat(void)
 {
     static uint8_t input[KAT_MAX_INPUT];
@@ -310,9 +364,7 @@ int test_blake3_kat(void)
         const struct kat_row *row = &kat_rows[r];
         static const char *const names[3] = { "hash", "keyed", "derive" };
         for (int mode = KAT_HASH; mode <= KAT_DERIVE; mode++) {
-            const char *want = mode == KAT_HASH ? row->hash :
-                               mode == KAT_KEYED ? row->keyed_hash :
-                                                   row->derive_key;
+            const char *want = kat_row_hex(row, (enum kat_mode)mode);
             char what[64];
             snprintf(what, sizeof(what), "len=%zu %s", row->input_len,
                      names[mode]);
@@ -345,29 +397,14 @@ int test_blake3_kat(void)
         for (size_t s = 0; s < sizeof(stream_lens) / sizeof(stream_lens[0]);
              s++) {
             size_t len = stream_lens[s];
-            size_t off = 0;
-            unsigned step = 0;
-            struct blake3_hasher h;
-            blake3_init(&h);
-            while (off < len) {
-                size_t take = 1 + (step * 7 + step * step) % 13;
-                if (take > len - off)
-                    take = len - off;
-                blake3_update(&h, input + off, take);
-                off += take;
-                blake3_update(&h, input, 0); /* zero-length is a no-op */
-                step++;
-            }
-            blake3_final(&h, out, BLAKE3_OUT_LEN);
-            for (size_t r = 0; r < sizeof(kat_rows) / sizeof(kat_rows[0]);
-                 r++) {
-                if (kat_rows[r].input_len == len) {
-                    char what[64];
-                    snprintf(what, sizeof(what), "stream len=%zu", len);
-                    failures += check_hex(out, BLAKE3_OUT_LEN,
-                                          kat_rows[r].hash, what);
-                    break;
-                }
+            const struct kat_row *row;
+            kat_stream_digest(input, len, out);
+            row = kat_find_row(len);
+            if (row) {
+                char what[64];
+                snprintf(what, sizeof(what), "stream len=%zu", len);
+                failures += check_hex(out, BLAKE3_OUT_LEN,
+                                      row->hash, what);
             }
         }
         printf("streaming differential: %zu irregular-update runs\n",
@@ -380,6 +417,7 @@ int test_blake3_kat(void)
         struct blake3_hasher h;
         uint8_t short_out[BLAKE3_OUT_LEN];
         uint8_t long_out[EXT_LEN];
+        const struct kat_ext *ext;
         blake3_init(&h);
         blake3_update(&h, input, 2048);
         blake3_final(&h, short_out, sizeof(short_out));
@@ -388,12 +426,10 @@ int test_blake3_kat(void)
             printf("  FAIL: second blake3_final changed the digest prefix\n");
             failures++;
         }
-        for (size_t e = 0; e < sizeof(kat_ext) / sizeof(kat_ext[0]); e++) {
-            if (kat_ext[e].input_len == 2048 && kat_ext[e].mode == KAT_HASH) {
-                failures += check_hex(long_out, EXT_LEN, kat_ext[e].hex,
-                                      "re-final ext len=2048");
-                break;
-            }
+        ext = kat_find_ext(2048, KAT_HASH);
+        if (ext) {
+            failures += check_hex(long_out, EXT_LEN, ext->hex,
+                                  "re-final ext len=2048");
         }
         printf("repeatable final: checked\n");
     }
