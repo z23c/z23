@@ -316,6 +316,34 @@ static void api_contract_service_binding_json(struct json_value *item,
     json_free(&binding);
 }
 
+static bool api_contract_push_args_present(struct json_value *out,
+                                           const char *method,
+                                           const char *path,
+                                           const char *resource,
+                                           const char *action)
+{
+    return out && method && path && resource && action;
+}
+
+static const char *api_contract_text_or_default(const char *value,
+                                                const char *fallback)
+{
+    return value && value[0] ? value : fallback;
+}
+
+static const char *api_contract_auth_class(bool private_route)
+{
+    return private_route ? "operator_private" : "public";
+}
+
+static void api_contract_push_optional_text(struct json_value *item,
+                                            const char *key,
+                                            const char *value)
+{
+    if (value && value[0])
+        json_push_kv_str(item, key, value);
+}
+
 static void api_contract_push(struct json_value *out, const char *method,
                               const char *path, const char *resource,
                               const char *action,
@@ -326,15 +354,16 @@ static void api_contract_push(struct json_value *out, const char *method,
                               bool private_route,
                               const char *command_path)
 {
-    if (!out || !method || !path || !resource || !action)
+    if (!api_contract_push_args_present(out, method, path, resource,
+                                        action))
         return;
 
     char public_path_buf[256];
     const char *public_path = api_contract_path(path, public_path_buf,
                                                 sizeof(public_path_buf));
-    const char *schema = response_schema && response_schema[0]
-        ? response_schema : "zcl.rest.response.v1";
-    const char *fresh = freshness && freshness[0] ? freshness : "none";
+    const char *schema = api_contract_text_or_default(response_schema,
+                                                      "zcl.rest.response.v1");
+    const char *fresh = api_contract_text_or_default(freshness, "none");
     const struct api_app_protocol_contract *protocol =
         api_app_protocol_for_resource(resource);
     const char *crud_operation = api_contract_crud_operation(method);
@@ -362,13 +391,11 @@ static void api_contract_push(struct json_value *out, const char *method,
     json_push_kv_str(&item, "crud_operation", crud_operation);
     json_push_kv_str(&item, "resource_scope", resource_scope);
     json_push_kv_str(&item, "crud_name", crud_name);
-    if (command_path && command_path[0])
-        json_push_kv_str(&item, "command_path", command_path);
+    api_contract_push_optional_text(&item, "command_path", command_path);
     json_push_kv_bool(&item, "private", private_route);
-    json_push_kv_str(&item, "auth",
-                     private_route ? "operator_private" : "public");
+    json_push_kv_str(&item, "auth", api_contract_auth_class(private_route));
     json_push_kv_str(&item, "auth_policy",
-                     private_route ? "operator_private" : "public");
+                     api_contract_auth_class(private_route));
     json_push_kv_bool(&item, "gateway_auth_compatible", true);
     json_push_kv_str(&item, "preferred_service_auth",
                      "hash512_sha3_gost_commitments");
@@ -427,8 +454,7 @@ static void api_contract_push(struct json_value *out, const char *method,
     json_push_kv_bool(&item, "pagination",
                       api_contract_has_pagination(query_params_csv));
     json_push_kv_bool(&item, "canonical", !alias_of || !alias_of[0]);
-    if (alias_of && alias_of[0])
-        json_push_kv_str(&item, "legacy_alias_of", alias_of);
+    api_contract_push_optional_text(&item, "legacy_alias_of", alias_of);
 
     const char *filter_contract_name =
         api_query_filter_contract_for_route(method, public_path);

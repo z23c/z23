@@ -1189,7 +1189,6 @@ engine/controllers/src/anchor_controller.c:rpc_anchor_publish:21
 engine/controllers/src/anchor_controller.c:rpc_anchor_verify:17
 engine/controllers/src/api_controller.c:api_cache_refresh_thread:36
 engine/controllers/src/api_controller_app_protocols.c:api_app_protocol_push_openapi_extensions:40
-engine/controllers/src/api_controller_contracts.c:api_contract_push:22
 engine/controllers/src/api_controller_events.c:api_serve_events:18
 engine/controllers/src/api_controller_index.c:api_openapi_operation_json:28
 engine/controllers/src/api_controller_lookup.c:compute_block:16
