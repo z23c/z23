@@ -649,6 +649,12 @@ static int registry_test_independent_reproduction(void)
 int test_zcode_package_registry(void)
 {
     int failures = 0;
+    /* Every store here is a fixture discarded whole (scratch publishes and
+     * two builder datadirs removed at the end); no case crashes mid-write
+     * and reads back, so the per-write fsync buys nothing. Prior setting
+     * restored below. */
+    bool registry_prior_sync = vcs_package_store_deferred_sync_enabled();
+    vcs_package_store_set_deferred_sync(true);
     TEST("zcode package registry: C23 Commons Alpha roots and DAG rederive") {
         ASSERT_EQ(sizeof(registry_packages) / sizeof(registry_packages[0]),
                   17);
@@ -742,6 +748,7 @@ int test_zcode_package_registry(void)
         PASS();
     } _test_next:;
     failures += registry_test_independent_reproduction();
+    vcs_package_store_set_deferred_sync(registry_prior_sync);
     printf("=== zcode_package_registry: %d failures ===\n", failures);
     return failures;
 }
