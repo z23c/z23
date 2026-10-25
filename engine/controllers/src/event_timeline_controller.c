@@ -123,10 +123,8 @@ static void timeline_push_log_references(struct json_value *out,
     json_free(&refs);
 }
 
-static bool timeline_type_is_problem(const char *type)
+static bool timeline_type_contains_fault_token(const char *type)
 {
-    if (!type)
-        return false;
     return strstr(type, "fail") ||
            strstr(type, "reject") ||
            strstr(type, "stale") ||
@@ -134,8 +132,12 @@ static bool timeline_type_is_problem(const char *type)
            strstr(type, "panic") ||
            strstr(type, "halt") ||
            strstr(type, "timeout") ||
-           strstr(type, "corrupt") ||
-           strstr(type, "critical") ||
+           strstr(type, "corrupt");
+}
+
+static bool timeline_type_contains_extended_problem_token(const char *type)
+{
+    return strstr(type, "critical") ||
            strstr(type, "low") ||
            strstr(type, "drift") ||
            strstr(type, "misbehave") ||
@@ -145,6 +147,75 @@ static bool timeline_type_is_problem(const char *type)
            strstr(type, "operator_needed");
 }
 
+static bool timeline_type_is_problem(const char *type)
+{
+    if (!type)
+        return false;
+    return timeline_type_contains_fault_token(type) ||
+           timeline_type_contains_extended_problem_token(type);
+}
+
+struct timeline_type_count {
+    char type[64];
+    int64_t count;
+    bool problem;
+};
+
+static void timeline_clear_type_count_totals(int64_t *problem_count,
+                                             char *dominant_type,
+                                             size_t dominant_type_len,
+                                             int64_t *dominant_count)
+{
+    if (problem_count)
+        *problem_count = 0;
+    if (dominant_type && dominant_type_len > 0)
+        dominant_type[0] = '\0';
+    if (dominant_count)
+        *dominant_count = 0;
+}
+
+static bool timeline_record_type_count(struct timeline_type_count *counts,
+                                       size_t *used,
+                                       size_t cap,
+                                       const char *type,
+                                       bool problem,
+                                       int64_t *overflow,
+                                       size_t *slot_out)
+{
+    size_t slot = *used;
+    for (size_t j = 0; j < *used; j++) {
+        if (strcmp(counts[j].type, type) == 0) {
+            slot = j;
+            break;
+        }
+    }
+    if (slot == *used) {
+        if (*used >= cap) {
+            (*overflow)++;
+            return false;
+        }
+        snprintf(counts[slot].type, sizeof(counts[slot].type), "%s", type);
+        counts[slot].problem = problem;
+        (*used)++;
+    }
+    counts[slot].count++;
+    *slot_out = slot;
+    return true;
+}
+
+static void timeline_note_dominant_type(const struct timeline_type_count *slot,
+                                        char *dominant_type,
+                                        size_t dominant_type_len,
+                                        int64_t *dominant_count)
+{
+    if (dominant_count && slot->count > *dominant_count) {
+        *dominant_count = slot->count;
+        if (dominant_type && dominant_type_len > 0)
+            snprintf(dominant_type, dominant_type_len, "%s",
+                     slot->type);
+    }
+}
+
 static void timeline_push_type_counts(struct json_value *out,
                                       const struct json_value *events,
                                       int64_t *problem_count,
@@ -152,20 +223,12 @@ static void timeline_push_type_counts(struct json_value *out,
                                       size_t dominant_type_len,
                                       int64_t *dominant_count)
 {
-    struct {
-        char type[64];
-        int64_t count;
-        bool problem;
-    } counts[64] = {0};
+    struct timeline_type_count counts[64] = {0};
     size_t used = 0;
     int64_t overflow = 0;
 
-    if (problem_count)
-        *problem_count = 0;
-    if (dominant_type && dominant_type_len > 0)
-        dominant_type[0] = '\0';
-    if (dominant_count)
-        *dominant_count = 0;
+    timeline_clear_type_count_totals(problem_count, dominant_type,
+                                     dominant_type_len, dominant_count);
 
     size_t n = events && events->type == JSON_ARR ? json_size(events) : 0;
     for (size_t i = 0; i < n; i++) {
@@ -175,29 +238,13 @@ static void timeline_push_type_counts(struct json_value *out,
         if (problem && problem_count)
             (*problem_count)++;
 
-        size_t slot = used;
-        for (size_t j = 0; j < used; j++) {
-            if (strcmp(counts[j].type, type) == 0) {
-                slot = j;
-                break;
-            }
-        }
-        if (slot == used) {
-            if (used >= sizeof(counts) / sizeof(counts[0])) {
-                overflow++;
-                continue;
-            }
-            snprintf(counts[slot].type, sizeof(counts[slot].type), "%s", type);
-            counts[slot].problem = problem;
-            used++;
-        }
-        counts[slot].count++;
-        if (dominant_count && counts[slot].count > *dominant_count) {
-            *dominant_count = counts[slot].count;
-            if (dominant_type && dominant_type_len > 0)
-                snprintf(dominant_type, dominant_type_len, "%s",
-                         counts[slot].type);
-        }
+        size_t slot = 0;
+        if (!timeline_record_type_count(counts, &used,
+                                        sizeof(counts) / sizeof(counts[0]),
+                                        type, problem, &overflow, &slot))
+            continue;
+        timeline_note_dominant_type(&counts[slot], dominant_type,
+                                    dominant_type_len, dominant_count);
     }
 
     struct json_value arr;

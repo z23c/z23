@@ -1256,8 +1256,6 @@ engine/controllers/src/diagnostics_mvp.c:mvp_build_status_json:31
 engine/controllers/src/event_controller.c:rpc_service_operation_filter_arg:23
 engine/controllers/src/event_healthcheck_controller.c:rpc_healthcheck_full:47
 engine/controllers/src/event_operator_snapshot_controller.c:operator_build_snapshot:23
-engine/controllers/src/event_timeline_controller.c:timeline_push_type_counts:19
-engine/controllers/src/event_timeline_controller.c:timeline_type_is_problem:17
 engine/controllers/src/event_timeline_filter_controller.c:timeline_filter_from_params:22
 engine/controllers/src/event_timeline_filter_controller.c:timeline_param_count:18
 engine/controllers/src/event_timeline_filter_controller.c:timeline_push_filters:18
