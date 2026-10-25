@@ -128,6 +128,123 @@ static bool agent_quality_source_id_matches(const char *expected,
            strcmp(expected, observed) == 0;
 }
 
+static bool agent_quality_lane_status_path(char *status_file, size_t out_len,
+                                           const char *status_dir,
+                                           const char *lane)
+{
+    int n;
+    bool path_ok;
+
+    n = snprintf(status_file, out_len, "%s/%s.json",
+                 status_dir ? status_dir : "", lane ? lane : "");
+    path_ok = n >= 0 && (size_t)n < out_len;
+    if (!path_ok)
+        status_file[0] = '\0';
+    return path_ok;
+}
+
+static void agent_quality_lane_read_verdict(const struct json_value *latest,
+                                            const char *expected_source_id,
+                                            const char **latest_status,
+                                            const char **latest_source_id,
+                                            const char **latest_commit,
+                                            bool *source_id_present,
+                                            bool *commit_present,
+                                            bool *source_id_matches)
+{
+    const struct json_value *status_v = json_get(latest, "status");
+    const struct json_value *source_id_v =
+        json_get(latest, "source_id_sha256");
+    const struct json_value *commit_v = json_get(latest, "commit");
+
+    if (status_v)
+        *latest_status = json_get_str(status_v);
+    if (source_id_v)
+        *latest_source_id = json_get_str(source_id_v);
+    if (commit_v)
+        *latest_commit = json_get_str(commit_v);
+    *source_id_present = agent_quality_source_id_valid(*latest_source_id);
+    *commit_present = *latest_commit && (*latest_commit)[0];
+    *source_id_matches = agent_quality_source_id_matches(
+        expected_source_id, *latest_source_id);
+}
+
+static void agent_quality_lane_count_freshness(const char **source_id_freshness,
+                                              bool source_id_matches,
+                                              bool expected_source_id_valid,
+                                              bool source_id_present,
+                                              int *current_count,
+                                              int *stale_count,
+                                              int *unknown_source_id_count)
+{
+    if (source_id_matches) {
+        *source_id_freshness = "current";
+        if (current_count)
+            (*current_count)++;
+    } else if (expected_source_id_valid && source_id_present) {
+        *source_id_freshness = "stale";
+        if (stale_count)
+            (*stale_count)++;
+    } else {
+        *source_id_freshness = "unknown";
+        if (unknown_source_id_count)
+            (*unknown_source_id_count)++;
+    }
+}
+
+static void agent_quality_lane_count_status(const char *latest_status,
+                                           int *failed_count,
+                                           int *running_count,
+                                           int *passed_count,
+                                           int *skipped_count)
+{
+    if (strcmp(latest_status, "failed") == 0 && failed_count)
+        (*failed_count)++;
+    else if (strcmp(latest_status, "running") == 0 && running_count)
+        (*running_count)++;
+    else if (strcmp(latest_status, "passed") == 0 && passed_count)
+        (*passed_count)++;
+    else if (strcmp(latest_status, "skipped") == 0 && skipped_count)
+        (*skipped_count)++;
+}
+
+static void agent_quality_lane_push_verdict(struct json_value *obj, bool valid,
+                                           const char *latest_status,
+                                           const char *expected_source_id,
+                                           const char *latest_source_id,
+                                           bool source_id_present,
+                                           bool expected_source_id_valid,
+                                           bool source_id_matches,
+                                           const char *source_id_freshness,
+                                           const char *expected_commit,
+                                           const char *latest_commit,
+                                           bool commit_present,
+                                           struct json_value *latest)
+{
+    json_push_kv_bool(obj, "latest_json_valid", valid);
+    json_push_kv_str(obj, "latest_status", latest_status);
+    json_push_kv_str(obj, "freshness_authority", "source_id_sha256");
+    json_push_kv_str(obj, "expected_source_id_sha256",
+                     expected_source_id);
+    json_push_kv_str(obj, "latest_source_id_sha256",
+                     latest_source_id ? latest_source_id : "");
+    json_push_kv_bool(obj, "source_id_present", source_id_present);
+    json_push_kv_bool(obj, "expected_source_id_valid",
+                      expected_source_id_valid);
+    json_push_kv_bool(obj, "source_id_matches_expected",
+                      source_id_matches);
+    json_push_kv_str(obj, "source_id_freshness", source_id_freshness);
+    /* Compatibility aliases: these values are source-ID-derived. Git commit
+     * strings below are trace metadata and never participate in freshness. */
+    json_push_kv_str(obj, "expected_commit", expected_commit);
+    json_push_kv_str(obj, "latest_commit",
+                     latest_commit ? latest_commit : "");
+    json_push_kv_bool(obj, "commit_present", commit_present);
+    json_push_kv_bool(obj, "commit_matches_expected", source_id_matches);
+    json_push_kv_str(obj, "commit_freshness", source_id_freshness);
+    json_push_kv(obj, "latest", latest);
+}
+
 static void agent_push_quality_lane(struct json_value *arr, const char *lane,
                                     const char *service, const char *timer,
                                     const char *cadence,
@@ -156,13 +273,9 @@ static void agent_push_quality_lane(struct json_value *arr, const char *lane,
     bool source_id_present = false;
     bool source_id_matches = false;
     bool commit_present = false;
-    int n;
 
-    n = snprintf(status_file, sizeof(status_file), "%s/%s.json",
-                 status_dir ? status_dir : "", lane ? lane : "");
-    path_ok = n >= 0 && (size_t)n < sizeof(status_file);
-    if (!path_ok)
-        status_file[0] = '\0';
+    path_ok = agent_quality_lane_status_path(status_file, sizeof(status_file),
+                                             status_dir, lane);
 
     json_init(&obj);
     json_set_object(&obj);
@@ -189,69 +302,31 @@ static void agent_push_quality_lane(struct json_value *arr, const char *lane,
     if (present) {
         valid = agent_quality_read_json_file(status_file, &latest);
         if (valid) {
-            const struct json_value *status_v = json_get(&latest, "status");
-            const struct json_value *source_id_v =
-                json_get(&latest, "source_id_sha256");
-            const struct json_value *commit_v = json_get(&latest, "commit");
-            if (status_v)
-                latest_status = json_get_str(status_v);
-            if (source_id_v)
-                latest_source_id = json_get_str(source_id_v);
-            if (commit_v)
-                latest_commit = json_get_str(commit_v);
-            source_id_present =
-                agent_quality_source_id_valid(latest_source_id);
-            commit_present = latest_commit && latest_commit[0];
-            source_id_matches = agent_quality_source_id_matches(
-                expected_source_id, latest_source_id);
-            if (source_id_matches) {
-                source_id_freshness = "current";
-                if (current_count)
-                    (*current_count)++;
-            } else if (expected_source_id_valid && source_id_present) {
-                source_id_freshness = "stale";
-                if (stale_count)
-                    (*stale_count)++;
-            } else {
-                source_id_freshness = "unknown";
-                if (unknown_source_id_count)
-                    (*unknown_source_id_count)++;
-            }
+            agent_quality_lane_read_verdict(&latest, expected_source_id,
+                                           &latest_status, &latest_source_id,
+                                           &latest_commit, &source_id_present,
+                                           &commit_present,
+                                           &source_id_matches);
+            agent_quality_lane_count_freshness(
+                &source_id_freshness, source_id_matches,
+                expected_source_id_valid, source_id_present, current_count,
+                stale_count, unknown_source_id_count);
             if (valid_count)
                 (*valid_count)++;
-            if (strcmp(latest_status, "failed") == 0 && failed_count)
-                (*failed_count)++;
-            else if (strcmp(latest_status, "running") == 0 && running_count)
-                (*running_count)++;
-            else if (strcmp(latest_status, "passed") == 0 && passed_count)
-                (*passed_count)++;
-            else if (strcmp(latest_status, "skipped") == 0 && skipped_count)
-                (*skipped_count)++;
+            agent_quality_lane_count_status(latest_status, failed_count,
+                                           running_count, passed_count,
+                                           skipped_count);
         } else {
             json_set_null(&latest);
         }
     }
-    json_push_kv_bool(&obj, "latest_json_valid", valid);
-    json_push_kv_str(&obj, "latest_status", latest_status);
-    json_push_kv_str(&obj, "freshness_authority", "source_id_sha256");
-    json_push_kv_str(&obj, "expected_source_id_sha256",
-                     expected_source_id);
-    json_push_kv_str(&obj, "latest_source_id_sha256",
-                     latest_source_id ? latest_source_id : "");
-    json_push_kv_bool(&obj, "source_id_present", source_id_present);
-    json_push_kv_bool(&obj, "expected_source_id_valid",
-                      expected_source_id_valid);
-    json_push_kv_bool(&obj, "source_id_matches_expected",
-                      source_id_matches);
-    json_push_kv_str(&obj, "source_id_freshness", source_id_freshness);
-    /* Compatibility aliases: these values are source-ID-derived. Git commit
-     * strings below are trace metadata and never participate in freshness. */
-    json_push_kv_str(&obj, "expected_commit", expected_commit);
-    json_push_kv_str(&obj, "latest_commit", latest_commit ? latest_commit : "");
-    json_push_kv_bool(&obj, "commit_present", commit_present);
-    json_push_kv_bool(&obj, "commit_matches_expected", source_id_matches);
-    json_push_kv_str(&obj, "commit_freshness", source_id_freshness);
-    json_push_kv(&obj, "latest", &latest);
+    agent_quality_lane_push_verdict(&obj, valid, latest_status,
+                                   expected_source_id, latest_source_id,
+                                   source_id_present,
+                                   expected_source_id_valid,
+                                   source_id_matches, source_id_freshness,
+                                   expected_commit, latest_commit,
+                                   commit_present, &latest);
     json_free(&latest);
 
     json_push_back(arr, &obj);
