@@ -96,6 +96,13 @@ struct zcl_objective_value zcl_objectives_node_warm_restart_s(
 struct zcl_objective_value zcl_objectives_tokens_per_landed_commit(
     const struct zcl_objectives_options *options);
 
+/* The fleet.objectives.value report (the same reader): spend per role and
+ * model over the same landed lanes. Fills the object `data` with rows, totals,
+ * skipped and screen; false with `reason` set when the inputs cannot answer. */
+bool zcl_objectives_value_data(const struct zcl_objectives_options *options,
+                               struct json_value *data, char *reason,
+                               size_t cap);
+
 /* The one-row baseline producer (native_fleet_objectives_baselines.c): the sum
  * of the banned-str counts in the hardening ratchet baseline under repo. */
 struct zcl_objective_value zcl_objectives_baseline_hardening_banned_str(

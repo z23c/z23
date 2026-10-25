@@ -24,6 +24,7 @@
 #include "json/json.h"
 #include "platform/time_compat.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +51,40 @@ struct tpc_landed {
     size_t cap;
     bool oom;
     bool truncated;
+};
+
+/* One result row of the ledger: the agent that spent it and what it cost. */
+struct tpc_result {
+    const char *agent; /* task_id: the agent id */
+    const char *model; /* the model column, raw */
+    int64_t tokens;    /* uncached input + output */
+    int64_t cache;     /* cache reads */
+};
+
+typedef void (*tpc_result_fn)(const struct tpc_result *r, void *user);
+
+/* One joined agent row kept for the per-role report: its role and model
+ * bucket (role index * TPC_MODELS + model index, set by tpc_fold_row) and
+ * its cost. */
+struct tpc_sample {
+    uint8_t bucket;
+    int64_t tokens;
+    int64_t cache;
+};
+
+struct tpc_samples {
+    struct tpc_sample *v;
+    size_t n;
+    size_t cap;
+    bool oom;
+};
+
+/* The fold a result row feeds: the landed lanes, and the samples when the
+ * per-role report asks for them (NULL for the KPI, which keeps none). */
+struct tpc_fold {
+    const struct zcl_agent_index *ix;
+    struct tpc_landed *l;
+    struct tpc_samples *s;
 };
 
 static int64_t tpc_now(const struct zcl_objectives_options *options)
@@ -179,6 +214,85 @@ static struct tpc_lane *tpc_add_lane(struct tpc_landed *l, const char *name)
     return slot;
 }
 
+/* Saturating sum: a report total never wraps. */
+static int64_t tpc_add(int64_t a, int64_t b)
+{
+    return (b > 0 && a > INT64_MAX - b) ? INT64_MAX : a + b;
+}
+
+/* The per-role report's buckets: nine roles (the eight job labels, then
+ * "other") by four model families (haiku, sonnet, opus, other). */
+#define TPC_ROLES 9u
+#define TPC_MODELS 4u
+#define TPC_BUCKETS (TPC_ROLES * TPC_MODELS)
+static const char *const tpc_roles[TPC_ROLES] = {
+    "write", "cx", "review", "review1", "review2", "fix", "design", "check",
+    "other"};
+static const char *const tpc_models[TPC_MODELS] = {"haiku", "sonnet", "opus",
+                                                   "other"};
+
+/* The role index of an agent's job kind (the label text before ':'). */
+static size_t tpc_role_index(const char *kind)
+{
+    for (size_t i = 0; kind && i + 1u < TPC_ROLES; i++)
+        if (strcmp(kind, tpc_roles[i]) == 0)
+            return i;
+    return TPC_ROLES - 1u;
+}
+
+/* The model family of a ledger model string: haiku, sonnet or opus, found
+ * as a substring (claude-haiku-5-5 is haiku); anything else is other. */
+static size_t tpc_model_index(const char *model)
+{
+    static const char *const keys[] = {"haiku", "sonnet", "opus"};
+    for (size_t i = 0; model && i < 3u; i++)
+        if (strstr(model, keys[i]))
+            return i;
+    return TPC_MODELS - 1u;
+}
+
+static bool tpc_samples_push(struct tpc_samples *s, struct tpc_sample sample)
+{
+    if (s->n == s->cap) {
+        size_t cap = s->cap ? s->cap * 2u : 256u;
+        struct tpc_sample *grown =
+            zcl_realloc(s->v, cap * sizeof(*grown), "tpc_samples");
+        if (!grown) {
+            s->oom = true;
+            return false;
+        }
+        s->v = grown;
+        s->cap = cap;
+    }
+    s->v[s->n++] = sample;
+    return true;
+}
+
+/* Folds one result row into the landed lane its agent joined. The KPI and
+ * the per-role report both read through here, so they cannot disagree on
+ * which rows count. */
+static void tpc_fold_row(const struct tpc_result *r, void *user)
+{
+    struct tpc_fold *f = user;
+    const char *lane = zcl_objectives_agent_lane(f->ix, r->agent);
+    struct tpc_lane *hit = lane ? tpc_find_lane(f->l, lane) : NULL;
+    struct tpc_sample sample;
+    if (!hit)
+        return;
+    hit->tokens = tpc_add(hit->tokens, r->tokens);
+    hit->cache = tpc_add(hit->cache, r->cache);
+    hit->agents++;
+    if (!f->s)
+        return;
+    sample.bucket = (uint8_t)(tpc_role_index(
+                                  zcl_objectives_agent_kind(f->ix, r->agent)) *
+                                  TPC_MODELS +
+                              tpc_model_index(r->model));
+    sample.tokens = r->tokens;
+    sample.cache = r->cache;
+    (void)tpc_samples_push(f->s, sample);
+}
+
 /* The lane a land note names: the text before its first ':'. */
 static bool tpc_note_lane(const char *note, char *out, size_t cap)
 {
@@ -231,40 +345,36 @@ static void tpc_landed_row(const struct json_value *row, void *user)
         (void)tpc_add_lane(l, lane);
 }
 
-/* Folds one ledger line into the landed lane its agent joined. False when
+/* Parses one ledger line and offers each valid result row to fn. False when
  * the line is malformed: the wrong field count, an unknown kind, or a token
- * column that is not a plain decimal count. */
-static bool tpc_row(char *line, const struct zcl_agent_index *ix,
-                    struct tpc_landed *l)
+ * column that is not a plain decimal count. A predict row is valid and
+ * offered to nothing. */
+static bool tpc_row(char *line, tpc_result_fn fn, void *user)
 {
     char *fields[TPC_FIELDS];
-    int64_t tin, tout, cache;
-    const char *lane;
-    struct tpc_lane *hit;
+    struct tpc_result r;
+    int64_t tin, tout;
     if (tpc_split(line, fields) != TPC_FIELDS)
         return false;
     if (strcmp(fields[1], "predict") != 0 && strcmp(fields[1], "result") != 0)
         return false;
     if (!tpc_digits(fields[10], &tin) || !tpc_digits(fields[11], &tout) ||
-        !tpc_digits(fields[12], &cache))
+        !tpc_digits(fields[12], &r.cache))
         return false;
     if (strcmp(fields[1], "result") != 0)
         return true;
-    lane = zcl_objectives_agent_lane(ix, fields[3]);
-    hit = lane ? tpc_find_lane(l, lane) : NULL;
-    if (hit) {
-        hit->tokens += tin + tout;
-        hit->cache += cache;
-        hit->agents++;
-    }
+    r.agent = fields[3];
+    r.model = fields[8];
+    r.tokens = tin + tout;
+    fn(&r, user);
     return true;
 }
 
-/* Walks the experiment ledger. False with `reason` set when the file is
- * missing or unreadable. The header line is not a row. */
-static bool tpc_scan_ledger(const char *path, const struct zcl_agent_index *ix,
-                            struct tpc_landed *l, int64_t *skipped,
-                            char *reason, size_t cap)
+/* Walks the experiment ledger, offering every valid result row to fn.
+ * False with `reason` set when the file is missing or unreadable. The
+ * header line is not a row. */
+static bool tpc_scan_ledger(const char *path, tpc_result_fn fn, void *user,
+                            int64_t *skipped, char *reason, size_t cap)
 {
     char line[TPC_LINE_CAP];
     size_t len = 0;
@@ -277,7 +387,7 @@ static bool tpc_scan_ledger(const char *path, const struct zcl_agent_index *ix,
     }
     while ((status = tpc_read_line(f, line, sizeof(line), &len)) > 0) {
         line_no++;
-        if (line_no > 1 && (status == 2 || !tpc_row(line, ix, l)))
+        if (line_no > 1 && (status == 2 || !tpc_row(line, fn, user)))
             (*skipped)++;
     }
     if (fclose(f) != 0 || status < 0) {
@@ -382,7 +492,8 @@ static struct zcl_objective_value tpc_measure_in(
 {
     int64_t skipped = 0;
     size_t joined;
-    if (!tpc_scan_ledger(ledger, ix, landed, &skipped, v.reason,
+    struct tpc_fold fold = {ix, landed, NULL};
+    if (!tpc_scan_ledger(ledger, tpc_fold_row, &fold, &skipped, v.reason,
                          sizeof(v.reason)))
         return v;
     joined = tpc_joined(landed);
@@ -442,4 +553,309 @@ struct zcl_objective_value zcl_objectives_tokens_per_landed_commit(
     zcl_objectives_agent_index_free(&ix);
     free(landed.lanes);
     return v;
+}
+
+/* ── fleet.objectives.value: the per-role, per-model spend report ─────── */
+
+#define TPV_SCHEMA_OUT "zcl.fleet_objectives_value.v1"
+#define TPV_LEAF "fleet.objectives.value"
+#define TPV_SCREEN_MAX 8192u
+
+/* Everything the report reads: the landed lanes, the agent index, the joined
+ * samples, the malformed-line count, and the non-empty groups in report
+ * order. */
+struct tpv_group {
+    size_t bucket;
+    size_t agents;
+    int64_t fresh;
+    int64_t fresh_median;
+    int64_t cache_median;
+};
+
+struct tpv_read {
+    struct tpc_landed landed;
+    struct zcl_agent_index ix;
+    struct tpc_samples samples;
+    int64_t skipped;
+    struct tpv_group groups[TPC_BUCKETS];
+    size_t n;
+    int64_t total;
+};
+
+static void tpv_free(struct tpv_read *rd)
+{
+    free(rd->landed.lanes);
+    zcl_objectives_agent_index_free(&rd->ix);
+    free(rd->samples.v);
+}
+
+/* Fills the group of one bucket from its samples. A bucket with no sample
+ * keeps agents 0. False on an allocation failure. */
+static bool tpv_group_of(const struct tpc_samples *s, size_t bucket,
+                         struct tpv_group *g)
+{
+    int64_t *tok, *cac;
+    size_t n = 0, k = 0;
+    for (size_t i = 0; i < s->n; i++)
+        if (s->v[i].bucket == bucket)
+            n++;
+    memset(g, 0, sizeof(*g));
+    g->bucket = bucket;
+    g->agents = n;
+    if (n == 0)
+        return true;
+    tok = zcl_malloc(n * sizeof(*tok), "tpv_tokens");
+    cac = zcl_malloc(n * sizeof(*cac), "tpv_cache");
+    if (!tok || !cac) {
+        free(tok);
+        free(cac);
+        return false;
+    }
+    for (size_t i = 0; i < s->n; i++) {
+        if (s->v[i].bucket != bucket)
+            continue;
+        tok[k] = s->v[i].tokens;
+        cac[k++] = s->v[i].cache;
+        g->fresh = tpc_add(g->fresh, s->v[i].tokens);
+    }
+    qsort(tok, n, sizeof(*tok), tpc_cmp_i64);
+    qsort(cac, n, sizeof(*cac), tpc_cmp_i64);
+    g->fresh_median = tpc_median(tok, n);
+    g->cache_median = tpc_median(cac, n);
+    free(tok);
+    free(cac);
+    return true;
+}
+
+/* Biggest fresh total first; a tie goes to the earlier bucket. */
+static int tpv_cmp_group(const void *a, const void *b)
+{
+    const struct tpv_group *x = a, *y = b;
+    if (x->fresh != y->fresh)
+        return x->fresh > y->fresh ? -1 : 1;
+    return (x->bucket > y->bucket) - (x->bucket < y->bucket);
+}
+
+/* The non-empty groups, sorted, and the fresh total over them. */
+static bool tpv_groups(struct tpv_read *rd)
+{
+    size_t n = 0;
+    for (size_t b = 0; b < TPC_BUCKETS; b++) {
+        struct tpv_group g;
+        if (!tpv_group_of(&rd->samples, b, &g))
+            return false;
+        if (g.agents == 0)
+            continue;
+        rd->groups[n++] = g;
+        rd->total = tpc_add(rd->total, g.fresh);
+    }
+    rd->n = n;
+    qsort(rd->groups, n, sizeof(*rd->groups), tpv_cmp_group);
+    return true;
+}
+
+/* A group's whole-percent share of the fresh total, rounded down. */
+static int64_t tpv_share(int64_t fresh, int64_t total)
+{
+    return total > 0 ? (int64_t)((double)fresh * 100.0 / (double)total) : 0;
+}
+
+/* Reads the outcomes and the ledger into rd. False, with reason set, when
+ * either input is missing or unreadable. */
+static bool tpv_read(const struct zcl_objectives_options *options,
+                     struct tpv_read *rd, char *reason, size_t cap)
+{
+    char ledger_buf[1024], outcomes_buf[1024];
+    const char *ledger = NULL, *outcomes = NULL;
+    struct tpc_fold fold = {&rd->ix, &rd->landed, &rd->samples};
+    int64_t now = tpc_now(options);
+    rd->landed.start = now - TPC_WINDOW_S;
+    rd->landed.end = now;
+    if (!tpc_resolve_ledger(options, ledger_buf, sizeof(ledger_buf), &ledger)) {
+        (void)snprintf(reason, cap, "no experiment ledger path (no HOME)");
+        return false;
+    }
+    if (!zcl_objectives_outcomes_path(options, outcomes_buf,
+                                      sizeof(outcomes_buf), &outcomes)) {
+        (void)snprintf(reason, cap, "state root unavailable");
+        return false;
+    }
+    if (!zcl_objectives_ledger_walk(outcomes, tpc_landed_row, &rd->landed,
+                                    reason, cap))
+        return false;
+    if (rd->landed.oom) {
+        (void)snprintf(reason, cap, "out of memory reading landed lanes");
+        return false;
+    }
+    if (!tpc_ledger_present(ledger, reason, cap))
+        return false;
+    if (!zcl_objectives_agent_index_build(&rd->ix)) {
+        (void)snprintf(reason, cap, "out of memory indexing agent meta files");
+        return false;
+    }
+    fold.ix = &rd->ix;
+    if (!tpc_scan_ledger(ledger, tpc_fold_row, &fold, &rd->skipped, reason,
+                         cap))
+        return false;
+    if (rd->samples.oom) {
+        (void)snprintf(reason, cap, "out of memory joining agent token rows");
+        return false;
+    }
+    return tpv_groups(rd);
+}
+
+/* Appends one formatted piece of the screen, never past cap - 1. */
+static void tpv_add(char *out, size_t cap, size_t *used, const char *fmt, ...)
+{
+    va_list ap;
+    int w;
+    if (*used + 1u >= cap)
+        return;
+    va_start(ap, fmt);
+    w = vsnprintf(out + *used, cap - *used, fmt, ap);
+    va_end(ap);
+    if (w < 0)
+        return;
+    *used = (size_t)w >= cap - *used ? cap - 1u : *used + (size_t)w;
+}
+
+static void tpv_screen_row(char *out, size_t cap, size_t *used,
+                           const struct tpv_group *g, int64_t total)
+{
+    tpv_add(out, cap, used, "%-8s %-6s %6zu %14lld %12lld %12lld %5lld\n",
+            tpc_roles[g->bucket / TPC_MODELS],
+            tpc_models[g->bucket % TPC_MODELS], g->agents,
+            (long long)g->fresh, (long long)g->fresh_median,
+            (long long)g->cache_median, (long long)tpv_share(g->fresh, total));
+}
+
+/* The plain-text table: one line per group, then the totals line. */
+static void tpv_screen(char *out, size_t cap, const struct tpv_read *rd,
+                       size_t joined, size_t agents)
+{
+    size_t used = 0;
+    out[0] = '\0';
+    tpv_add(out, cap, &used, "%-8s %-6s %6s %14s %12s %12s %5s\n", "role",
+            "model", "agents", "fresh_total", "fresh_median", "cache_median",
+            "share");
+    for (size_t i = 0; i < rd->n; i++)
+        tpv_screen_row(out, cap, &used, &rd->groups[i], rd->total);
+    tpv_add(out, cap, &used,
+            "landed %zu, joined %zu, agents %zu, fresh tokens %lld, %lld "
+            "malformed lines skipped\n",
+            rd->landed.n, joined, agents, (long long)rd->total,
+            (long long)rd->skipped);
+}
+
+static bool tpv_push_rows(struct json_value *data, const struct tpv_read *rd)
+{
+    struct json_value rows;
+    bool ok = true;
+    json_init(&rows);
+    json_set_array(&rows);
+    for (size_t i = 0; ok && i < rd->n; i++) {
+        const struct tpv_group *g = &rd->groups[i];
+        struct json_value o;
+        json_init(&o);
+        json_set_object(&o);
+        ok = json_push_kv_str(&o, "role", tpc_roles[g->bucket / TPC_MODELS]) &&
+             json_push_kv_str(&o, "model", tpc_models[g->bucket % TPC_MODELS]) &&
+             json_push_kv_int(&o, "agents", (int64_t)g->agents) &&
+             json_push_kv_int(&o, "fresh_total", g->fresh) &&
+             json_push_kv_int(&o, "fresh_median", g->fresh_median) &&
+             json_push_kv_int(&o, "cache_median", g->cache_median) &&
+             json_push_kv_int(&o, "share_pct", tpv_share(g->fresh, rd->total)) &&
+             json_push_back(&rows, &o);
+        json_free(&o);
+    }
+    ok = ok && json_push_kv(data, "rows", &rows);
+    json_free(&rows);
+    return ok;
+}
+
+static bool tpv_push_totals(struct json_value *data, const struct tpv_read *rd,
+                            size_t joined, size_t agents)
+{
+    struct json_value t;
+    bool ok;
+    json_init(&t);
+    json_set_object(&t);
+    ok = json_push_kv_int(&t, "lanes_landed", (int64_t)rd->landed.n) &&
+         json_push_kv_int(&t, "lanes_joined", (int64_t)joined) &&
+         json_push_kv_int(&t, "agents", (int64_t)agents) &&
+         json_push_kv_int(&t, "fresh_total", rd->total) &&
+         json_push_kv(data, "totals", &t);
+    json_free(&t);
+    return ok;
+}
+
+/* Builds the reply data from a finished read. False, with reason set, when
+ * the object cannot be built. */
+static bool tpv_build(struct json_value *data, const struct tpv_read *rd,
+                      char *reason, size_t cap)
+{
+    char screen[TPV_SCREEN_MAX];
+    size_t joined = tpc_joined(&rd->landed), agents = 0;
+    bool ok;
+    for (size_t i = 0; i < rd->n; i++)
+        agents += rd->groups[i].agents;
+    tpv_screen(screen, sizeof(screen), rd, joined, agents);
+    ok = json_push_kv_str(data, "schema", TPV_SCHEMA_OUT) &&
+         tpv_push_rows(data, rd) &&
+         tpv_push_totals(data, rd, joined, agents) &&
+         json_push_kv_int(data, "skipped", rd->skipped) &&
+         json_push_kv_str(data, "screen", screen);
+    if (!ok)
+        (void)snprintf(reason, cap, "out of memory building the %s report",
+                       TPV_LEAF);
+    return ok;
+}
+
+bool zcl_objectives_value_data(const struct zcl_objectives_options *options,
+                               struct json_value *data, char *reason,
+                               size_t cap)
+{
+    struct tpv_read rd;
+    bool ok;
+    memset(&rd, 0, sizeof(rd));
+    ok = tpv_read(options, &rd, reason, cap) && tpv_build(data, &rd, reason, cap);
+    tpv_free(&rd);
+    return ok;
+}
+
+static const char *tpv_input_str(const struct zcl_command_request *request,
+                                 const char *key)
+{
+    const char *v;
+    if (!request || !request->input)
+        return NULL;
+    v = json_get_str(json_get(request->input, key));
+    return (v && v[0]) ? v : NULL;
+}
+
+/* The `fleet.objectives.value` leaf: read-only. `outcomes` and `experiments`
+ * point the reader at a fixture; absent, the state root and the experiment
+ * ledger default as they do for tokens_per_landed_commit. */
+void zcl_native_handle_fleet_objectives_value(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    struct zcl_objectives_options options;
+    char reason[ZCL_OBJECTIVES_REASON_MAX] = "";
+    if (!reply)
+        return;
+    zcl_command_reply_init(reply, TPV_SCHEMA_OUT);
+    memset(&options, 0, sizeof(options));
+    options.outcomes = tpv_input_str(request, "outcomes");
+    options.experiments = tpv_input_str(request, "experiments");
+    if (zcl_objectives_value_data(&options, &reply->data, reason,
+                                  sizeof(reason))) {
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+        reply->exit_code = ZCL_COMMAND_EXIT_OK;
+        return;
+    }
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INVALID, "VALUE_UNREADABLE",
+                           "decide", false, false, reason,
+                           "pass outcomes= and experiments= to point at the "
+                           "land outcomes file and the experiment ledger");
 }

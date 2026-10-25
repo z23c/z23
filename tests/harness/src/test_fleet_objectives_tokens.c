@@ -326,12 +326,179 @@ static int fox_case_tokens_wired(void)
     return failures;
 }
 
+/* ── fleet.objectives.value ───────────────────────────────────────────── */
+
+/* One result row with its model column set (the 9th, 0-based 8th, field). */
+static bool fox_val_row(FILE *f, const char *id, const char *model,
+                        const char *tin, const char *tout, const char *cache)
+{
+    return fprintf(f,
+                   "%s\tresult\tnode1\t%s\tverify\tunknown\tagent-tool\t"
+                   "agent-tool\t%s\tmedium\t%s\t%s\t%s\t0\t0\t0\t0\tunknown\t"
+                   "0\t0\t0\tfixture\n",
+                   FOX_TOK_IN_A, id, model, tin, tout, cache) > 0;
+}
+
+/* Agents: a1 (write:alpha, haiku, 1200 fresh, 5000 cache), a3 (write:alpha,
+ * haiku, 100, 0), a2 (review:alpha, sonnet, 800, 100), b1 (fix:beta, haiku,
+ * 6000, 300), b2 (write:beta, sonnet, 500, 50). d1 is a failed lane's agent
+ * and r1 a research agent: neither counts. One malformed line is skipped. */
+static bool fox_val_write_ledger(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    bool ok;
+    if (!f)
+        return false;
+    ok = fputs(FOX_TOK_HEAD, f) >= 0 &&
+         fox_val_row(f, "a1", "claude-haiku-5-5", "1000", "200", "5000") &&
+         fox_val_row(f, "a2", "claude-sonnet-4-6", "300", "500", "100") &&
+         fox_val_row(f, "a3", "claude-haiku-5-5", "100", "0", "0") &&
+         fox_val_row(f, "b1", "claude-haiku-5-5", "5000", "1000", "300") &&
+         fox_val_row(f, "b2", "claude-sonnet-4-6", "400", "100", "50") &&
+         fox_val_row(f, "d1", "claude-opus-4-7", "900000", "100000", "0") &&
+         fox_val_row(f, "r1", "claude-opus-4-7", "7777777", "1", "0") &&
+         fputs("2026-10-22T10:00:00Z\tresult\tnode1\tshort\n", f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static bool fox_val_write_meta(const char *root)
+{
+    return fox_tok_meta(root, "a1", "write:alpha") &&
+           fox_tok_meta(root, "a2", "review:alpha") &&
+           fox_tok_meta(root, "a3", "write:alpha") &&
+           fox_tok_meta(root, "b1", "fix:beta") &&
+           fox_tok_meta(root, "b2", "write:beta") &&
+           fox_tok_meta(root, "d1", "write:delta") &&
+           fox_tok_meta(root, "r1", "Fix inbound body re-fetch gap");
+}
+
+/* Runs the report on the fixture; `data` is an object the caller frees. */
+static bool fox_val_run(const char *ledger, const char *outcomes,
+                        struct json_value *data, char *reason, size_t cap)
+{
+    struct zcl_objectives_options o;
+    memset(&o, 0, sizeof(o));
+    o.experiments = ledger;
+    o.outcomes = outcomes;
+    o.now = FOX_TOK_NOW;
+    json_init(data);
+    json_set_object(data);
+    return zcl_objectives_value_data(&o, data, reason, cap);
+}
+
+struct fox_val_want {
+    const char *role;
+    const char *model;
+    int64_t agents, fresh, fresh_median, cache_median, share;
+};
+
+static bool fox_val_row_is(const struct json_value *rows, size_t i,
+                           const struct fox_val_want *w)
+{
+    const struct json_value *r = json_at(rows, i);
+    return r && strcmp(json_get_str(json_get(r, "role")), w->role) == 0 &&
+           strcmp(json_get_str(json_get(r, "model")), w->model) == 0 &&
+           json_get_int(json_get(r, "agents")) == w->agents &&
+           json_get_int(json_get(r, "fresh_total")) == w->fresh &&
+           json_get_int(json_get(r, "fresh_median")) == w->fresh_median &&
+           json_get_int(json_get(r, "cache_median")) == w->cache_median &&
+           json_get_int(json_get(r, "share_pct")) == w->share;
+}
+
+/* Rows sorted by fresh total, then totals, skipped and the screen. */
+static bool fox_val_check(const struct json_value *data)
+{
+    static const struct fox_val_want want[] = {
+        {"fix", "haiku", 1, 6000, 6000, 300, 69},
+        {"write", "haiku", 2, 1300, 650, 2500, 15},
+        {"review", "sonnet", 1, 800, 800, 100, 9},
+        {"write", "sonnet", 1, 500, 500, 50, 5},
+    };
+    const struct json_value *rows = json_get(data, "rows");
+    const struct json_value *t = json_get(data, "totals");
+    if (json_size(rows) != 4u)
+        return false;
+    for (size_t i = 0; i < 4u; i++)
+        if (!fox_val_row_is(rows, i, &want[i]))
+            return false;
+    return json_get_int(json_get(t, "lanes_landed")) == 3 &&
+           json_get_int(json_get(t, "lanes_joined")) == 2 &&
+           json_get_int(json_get(t, "agents")) == 5 &&
+           json_get_int(json_get(t, "fresh_total")) == 8600 &&
+           json_get_int(json_get(data, "skipped")) == 1 &&
+           strstr(json_get_str(json_get(data, "screen")), "fix") != NULL;
+}
+
+static int fox_case_value(const char *root)
+{
+    int failures = 0;
+    char ledger[1024], outcomes[1024], reason[ZCL_OBJECTIVES_REASON_MAX] = "";
+    char none[1024];
+    struct json_value data;
+    struct zcl_objective_value kpi;
+    bool ok;
+    (void)snprintf(ledger, sizeof(ledger), "%s/value_rows.tsv", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/value_outcomes.jsonl", root);
+    (void)snprintf(none, sizeof(none), "%s/no_such_rows.tsv", root);
+    TEST("objectives: fleet.objectives.value groups joined agents by role and "
+         "model with exact medians, totals and shares") {
+        ASSERT(fox_val_write_ledger(ledger));
+        ASSERT(fox_tok_write_outcomes(outcomes));
+        ASSERT(fox_val_write_meta(root));
+        ASSERT(setenv("Z23_AGENT_META_ROOT", root, 1) == 0);
+        ok = fox_val_run(ledger, outcomes, &data, reason, sizeof(reason));
+        ASSERT(ok);
+        ok = fox_val_check(&data);
+        json_free(&data);
+        ASSERT(ok);
+        PASS();
+    }
+    TEST("objectives: fleet.objectives.value leaves tokens_per_landed_commit "
+         "unchanged on the same fixture") {
+        ASSERT(fox_val_write_ledger(ledger));
+        ASSERT(fox_tok_write_outcomes(outcomes));
+        ASSERT(fox_val_write_meta(root));
+        ASSERT(setenv("Z23_AGENT_META_ROOT", root, 1) == 0);
+        ok = fox_val_run(ledger, outcomes, &data, reason, sizeof(reason));
+        json_free(&data);
+        ASSERT(ok);
+        /* alpha 2100 (1200 + 800 + 100), beta 6500: the median is their mean. */
+        kpi = fox_tok_measure(ledger, outcomes);
+        ASSERT(kpi.measured);
+        ASSERT_EQ(kpi.value, (int64_t)4300);
+        ASSERT(strstr(kpi.note, "2 landed lanes joined") != NULL);
+        PASS();
+    }
+    TEST("objectives: fleet.objectives.value is unmeasured, naming the cause, "
+         "when the ledger is missing") {
+        ok = fox_val_run(none, outcomes, &data, reason, sizeof(reason));
+        json_free(&data);
+        ASSERT(!ok);
+        ASSERT(strstr(reason, "missing experiment ledger") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int fox_case_value_wired(void)
+{
+    int failures = 0;
+    char root[512];
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "value");
+    failures += fox_case_value(root);
+    (void)unsetenv("Z23_AGENT_META_ROOT");
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 int test_fleet_objectives_tokens(void);
 int test_fleet_objectives_tokens(void)
 {
     int failures = 0;
     failures += fox_case_tokens();
     failures += fox_case_tokens_wired();
+    failures += fox_case_value_wired();
     if (failures == 0)
         printf("test_fleet_objectives_tokens: all passed\n");
     else

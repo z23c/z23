@@ -264,6 +264,31 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives_step)
 
 ZCL_COMMAND_READY_READ(
+    "fleet.objectives.value", "fleet.loop", "",
+    "Token spend per worker role and model over lanes landed in 7 days",
+    "Joins the lanes landed in the trailing 7 days to their worker agents and "
+    "sums each agent's fresh tokens (uncached input plus output) and cache "
+    "reads from the experiment ledger. Groups the agents by role (write, cx, "
+    "review, review1, review2, fix, design, check) and model family (haiku, "
+    "sonnet, opus, other); each row has the agents, the fresh total, the "
+    "median fresh and cache-read tokens per agent and the whole-percent share "
+    "of fresh tokens, largest first. totals count the landed lanes, the lanes "
+    "that joined an agent, the agents and the fresh tokens. skipped counts "
+    "malformed ledger lines. outcomes and experiments point the reader at a "
+    "fixture. Writes nothing; asks no node.",
+    16384,
+    "fleet,objectives,value,tokens,spend,role,model,landed,loop",
+    "zcl.fleet_objectives_value_input.v1", "zcl.fleet_objectives_value.v1",
+    "outcomes,experiments", "",
+    "z23-dev fleet objectives value",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives_value)
+
+ZCL_COMMAND_READY_READ(
     "fleet.goals", "fleet", "",
     "The live fleet report card: goals G1-G13, criteria C1-C8, milestones D1-D8",
     "Prints one row per id in the closed catalog "
