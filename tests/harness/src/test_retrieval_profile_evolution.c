@@ -167,6 +167,100 @@ static bool rpe_fixture_init(struct rpe_fixture *fixture)
         VCS_ZCODE_ATTENTION_OK;
 }
 
+static bool candidate_changes_exactly_one_profile_field(
+    const struct zcode_retrieval_profile_evolution_report *report,
+    const struct zcl_retrieval_profile_v1 *parent)
+{
+    struct zcl_retrieval_profile_v1 reconstructed = report->candidate_profile;
+    reconstructed.context_byte_scale = parent->context_byte_scale;
+    return report->candidate_profile.context_byte_scale == 1000u &&
+           memcmp(&reconstructed, parent, sizeof(reconstructed)) == 0;
+}
+
+static bool ranking_changed_for_same_snapshot(
+    const struct zcode_retrieval_profile_evolution_report *report)
+{
+    return memcmp(report->parent_projection.feature_snapshot_root,
+                  report->candidate_projection.feature_snapshot_root,
+                  32u) == 0 &&
+           memcmp(report->parent_projection.candidate_ranking_root,
+                  report->candidate_projection.candidate_ranking_root,
+                  32u) != 0;
+}
+
+static bool child_binds_exact_parent_lineage(
+    struct zcode_retrieval_profile_evolution_report *report,
+    struct vcs_zcode_heuristic_v1 *parent)
+{
+    return report->candidate_heuristic.derivation ==
+               VCS_ZCODE_HEURISTIC_SPECIALIZE &&
+           report->candidate_heuristic.parent_count == 1u &&
+           memcmp(report->candidate_heuristic.parent_roots[0],
+                  report->parent_heuristic_root, 32u) == 0 &&
+           vcs_zcode_heuristic_validate_derivation(
+               &report->candidate_heuristic, parent, 1u) ==
+               VCS_ZCODE_ATTENTION_OK;
+}
+
+static bool child_binds_profile_snapshot_effect_and_proposal(
+    const struct zcode_retrieval_profile_evolution_report *report)
+{
+    return memcmp(report->candidate_heuristic.proposed_rule_root,
+                  report->candidate_profile_root, 32u) == 0 &&
+           memcmp(report->candidate_heuristic.observed_features_root,
+                  report->feature_snapshot_root, 32u) == 0 &&
+           memcmp(report->candidate_heuristic.expected_effect_root,
+                  report->candidate_projection.candidate_ranking_root,
+                  32u) == 0 &&
+           memcmp(report->candidate_heuristic.proposal_input_root,
+                  report->proposal_input_root, 32u) == 0;
+}
+
+static bool child_reuses_canonical_profile_proposal_identity(
+    struct zcode_retrieval_profile_evolution_request *request,
+    struct rpe_fixture *fixture,
+    struct zcode_retrieval_profile_evolution_report *report)
+{
+    uint8_t canonical_proposal[32];
+    bool canonical = zcl_retrieval_profile_proposal_input_root(
+        request->expected_source_root, fixture->snapshot.source_root,
+        fixture->snapshot.codeindex_root, request->task_id, request->query,
+        fixture->snapshot.baseline_ranking_root,
+        report->candidate_profile_root, report->feature_snapshot_root,
+        report->candidate_projection.candidate_ranking_root,
+        fixture->parent_heuristic.study_root,
+        fixture->parent_heuristic.preregistration_root,
+        request->proposal_evaluator_root, canonical_proposal);
+    return canonical && memcmp(canonical_proposal,
+                               report->proposal_input_root, 32u) == 0;
+}
+
+static bool science_evaluator_applicability_and_budgets_frozen(
+    struct zcode_retrieval_profile_evolution_report *report,
+    const struct vcs_zcode_heuristic_v1 *parent)
+{
+    return memcmp(report->candidate_heuristic.study_root,
+                  parent->study_root, 32u) == 0 &&
+           memcmp(report->candidate_heuristic.preregistration_root,
+                  parent->preregistration_root, 32u) == 0 &&
+           memcmp(report->candidate_heuristic.evaluator_roots,
+                  parent->evaluator_roots,
+                  sizeof(report->candidate_heuristic.evaluator_roots)) == 0 &&
+           memcmp(report->candidate_heuristic.applicability_root,
+                  parent->applicability_root, 32u) == 0 &&
+           report->candidate_heuristic.requested_context_bytes ==
+               parent->requested_context_bytes;
+}
+
+static bool quality_unknown_and_attention_incomplete(
+    const struct zcode_retrieval_profile_evolution_report *report)
+{
+    return report->evaluation_status == ZCL_ONTOLOGY_UNKNOWN &&
+           report->attention_status == ZCL_ONTOLOGY_INCOMPLETE &&
+           report->missing_attention_metrics ==
+               VCS_ZCODE_ATTENTION_METRIC_REQUIRED;
+}
+
 static int case_exact_specialization(void)
 {
     int failures = 0;
@@ -181,70 +275,24 @@ static int case_exact_specialization(void)
     RPE_CHECK("one context-scale proposal succeeds",
               ready && error == ZCODE_RETRIEVAL_PROFILE_EVOLUTION_OK);
 
-    struct zcl_retrieval_profile_v1 reconstructed = report.candidate_profile;
-    reconstructed.context_byte_scale =
-        fixture.parent_profile.context_byte_scale;
     RPE_CHECK("candidate changes exactly one profile field",
-              report.candidate_profile.context_byte_scale == 1000u &&
-              memcmp(&reconstructed, &fixture.parent_profile,
-                     sizeof(reconstructed)) == 0);
+              candidate_changes_exactly_one_profile_field(
+                  &report, &fixture.parent_profile));
     RPE_CHECK("same snapshot produces a changed ranking",
-              memcmp(report.parent_projection.feature_snapshot_root,
-                     report.candidate_projection.feature_snapshot_root,
-                     32u) == 0 &&
-              memcmp(report.parent_projection.candidate_ranking_root,
-                     report.candidate_projection.candidate_ranking_root,
-                     32u) != 0);
+              ranking_changed_for_same_snapshot(&report));
     RPE_CHECK("child binds exact parent lineage",
-              report.candidate_heuristic.derivation ==
-                  VCS_ZCODE_HEURISTIC_SPECIALIZE &&
-              report.candidate_heuristic.parent_count == 1u &&
-              memcmp(report.candidate_heuristic.parent_roots[0],
-                     report.parent_heuristic_root, 32u) == 0 &&
-              vcs_zcode_heuristic_validate_derivation(
-                  &report.candidate_heuristic,
-                  &fixture.parent_heuristic, 1u) ==
-                  VCS_ZCODE_ATTENTION_OK);
+              child_binds_exact_parent_lineage(
+                  &report, &fixture.parent_heuristic));
     RPE_CHECK("child binds profile snapshot effect and proposal",
-              memcmp(report.candidate_heuristic.proposed_rule_root,
-                     report.candidate_profile_root, 32u) == 0 &&
-              memcmp(report.candidate_heuristic.observed_features_root,
-                     report.feature_snapshot_root, 32u) == 0 &&
-              memcmp(report.candidate_heuristic.expected_effect_root,
-                     report.candidate_projection.candidate_ranking_root,
-                     32u) == 0 &&
-              memcmp(report.candidate_heuristic.proposal_input_root,
-                     report.proposal_input_root, 32u) == 0);
-    uint8_t canonical_proposal[32];
-    bool canonical = zcl_retrieval_profile_proposal_input_root(
-        request.expected_source_root, fixture.snapshot.source_root,
-        fixture.snapshot.codeindex_root, request.task_id, request.query,
-        fixture.snapshot.baseline_ranking_root,
-        report.candidate_profile_root, report.feature_snapshot_root,
-        report.candidate_projection.candidate_ranking_root,
-        fixture.parent_heuristic.study_root,
-        fixture.parent_heuristic.preregistration_root,
-        request.proposal_evaluator_root, canonical_proposal);
+              child_binds_profile_snapshot_effect_and_proposal(&report));
     RPE_CHECK("child reuses canonical profile proposal identity",
-              canonical && memcmp(canonical_proposal,
-                                  report.proposal_input_root, 32u) == 0);
+              child_reuses_canonical_profile_proposal_identity(
+                  &request, &fixture, &report));
     RPE_CHECK("science evaluator applicability and budgets stay frozen",
-              memcmp(report.candidate_heuristic.study_root,
-                     fixture.parent_heuristic.study_root, 32u) == 0 &&
-              memcmp(report.candidate_heuristic.preregistration_root,
-                     fixture.parent_heuristic.preregistration_root, 32u) == 0 &&
-              memcmp(report.candidate_heuristic.evaluator_roots,
-                     fixture.parent_heuristic.evaluator_roots,
-                     sizeof(report.candidate_heuristic.evaluator_roots)) == 0 &&
-              memcmp(report.candidate_heuristic.applicability_root,
-                     fixture.parent_heuristic.applicability_root, 32u) == 0 &&
-              report.candidate_heuristic.requested_context_bytes ==
-                  fixture.parent_heuristic.requested_context_bytes);
+              science_evaluator_applicability_and_budgets_frozen(
+                  &report, &fixture.parent_heuristic));
     RPE_CHECK("quality stays unknown and attention stays incomplete",
-              report.evaluation_status == ZCL_ONTOLOGY_UNKNOWN &&
-              report.attention_status == ZCL_ONTOLOGY_INCOMPLETE &&
-              report.missing_attention_metrics ==
-                  VCS_ZCODE_ATTENTION_METRIC_REQUIRED);
+              quality_unknown_and_attention_incomplete(&report));
     return failures;
 }
 
