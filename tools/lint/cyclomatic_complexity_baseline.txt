@@ -1465,7 +1465,6 @@ engine/reducer/jobs/src/stage_repair_reducer_frontier.c:reconcile_block_index_fl
 engine/reducer/jobs/src/stage_repair_reducer_frontier.c:reconcile_tip_finalize_cursor:17
 engine/reducer/jobs/src/stage_repair_reducer_frontier.c:reducer_frontier_reconcile_light_impl:73
 engine/reducer/jobs/src/stage_repair_reducer_frontier_coin.c:stage_reducer_frontier_try_replay_repairs:18
-engine/reducer/jobs/src/stage_repair_reducer_frontier_evidence.c:hash_log_ok_matches_unlocked:17
 engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:rf_tipfin_state_at:16
 engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:stage_reducer_frontier_purge_noncanonical:90
 engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:stage_reducer_frontier_purge_stale_reorg_tipfin:27

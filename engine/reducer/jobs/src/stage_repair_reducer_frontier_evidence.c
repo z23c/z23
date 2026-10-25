@@ -83,6 +83,37 @@ static bool log_ok_unlocked(sqlite3_stmt *st, const char *table, int height,
     return true;
 }
 
+static bool hash_row_profile_verified(sqlite3_stmt *st, const char *table)
+{
+    bool profile_ok = true;
+    if (strcmp(table, "script_validate_log") == 0 ||
+        strcmp(table, "proof_validate_log") == 0 ||
+        strcmp(table, "utxo_apply_log") == 0) {
+        int status_type = sqlite3_column_type(st, 2);
+        const void *status = status_type == SQLITE_TEXT
+            ? sqlite3_column_text(st, 2) : NULL;
+        profile_ok = status &&
+            mint_validation_evidence_parse(
+                status, (size_t)sqlite3_column_bytes(st, 2)) ==
+                MINT_VALIDATION_EVIDENCE_VERIFIED;
+    }
+    return profile_ok;
+}
+
+static bool hash_row_matches_want(sqlite3_stmt *st, const char *table,
+                                  const struct uint256 *want)
+{
+    int row_ok = sqlite3_column_type(st, 0) == SQLITE_INTEGER
+        ? sqlite3_column_int(st, 0) : -1;
+    int hash_type = sqlite3_column_type(st, 1);
+    const void *blob = hash_type == SQLITE_BLOB
+        ? sqlite3_column_blob(st, 1) : NULL;
+    int blen = blob ? sqlite3_column_bytes(st, 1) : 0;
+    bool profile_ok = hash_row_profile_verified(st, table);
+    return row_ok == 1 && profile_ok && blob && blen == 32 &&
+           memcmp(blob, want->data, 32) == 0;
+}
+
 static bool hash_log_ok_matches_unlocked(sqlite3_stmt *st, const char *table,
                                          int height,
                                          const struct uint256 *want,
@@ -96,26 +127,7 @@ static bool hash_log_ok_matches_unlocked(sqlite3_stmt *st, const char *table,
 
     int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
     if (rc == SQLITE_ROW) {
-        int row_ok = sqlite3_column_type(st, 0) == SQLITE_INTEGER
-            ? sqlite3_column_int(st, 0) : -1;
-        int hash_type = sqlite3_column_type(st, 1);
-        const void *blob = hash_type == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 1) : NULL;
-        int blen = blob ? sqlite3_column_bytes(st, 1) : 0;
-        bool profile_ok = true;
-        if (strcmp(table, "script_validate_log") == 0 ||
-            strcmp(table, "proof_validate_log") == 0 ||
-            strcmp(table, "utxo_apply_log") == 0) {
-            int status_type = sqlite3_column_type(st, 2);
-            const void *status = status_type == SQLITE_TEXT
-                ? sqlite3_column_text(st, 2) : NULL;
-            profile_ok = status &&
-                mint_validation_evidence_parse(
-                    status, (size_t)sqlite3_column_bytes(st, 2)) ==
-                    MINT_VALIDATION_EVIDENCE_VERIFIED;
-        }
-        if (row_ok == 1 && profile_ok && blob && blen == 32 &&
-            memcmp(blob, want->data, 32) == 0)
+        if (hash_row_matches_want(st, table, want))
             *matches = true;
     } else if (rc != SQLITE_DONE) {
         LOG_WARN("stage_repair",
