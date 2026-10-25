@@ -392,7 +392,6 @@ contexts/commons/modules/vcs/src/zcode_workspace_manifest.c:workspace_manifest_s
 contexts/commons/modules/vcs/src/zcode_write_scope.c:vcs_zcode_write_scope_parse:16
 contexts/commons/modules/vcs/src/zendp_swarm.c:zendp_publish_to:17
 contexts/commons/modules/vcs/src/zendp_swarm.c:zendp_result_string:21
-contexts/commons/modules/zanc/src/zanc.c:zanc_label_valid:23
 contexts/commons/modules/zssh/tests/test_zssh_channel.c:test_big_transfer:29
 contexts/commons/modules/zssh/tests/test_zssh_channel.c:test_data_controls:26
 contexts/commons/modules/zssh/tests/test_zssh_kex.c:group_negotiation:49

@@ -25,16 +25,39 @@ const char *zanc_hash_type_name(uint8_t t)
     }
 }
 
-/* Minimal RFC 3629 UTF-8 validator: rejects overlong forms, surrogates,
- * code points above U+10FFFF, embedded NUL, and C0 control bytes (<0x20). A
- * label is operator-facing metadata, so control bytes are disallowed too. */
-bool zanc_label_valid(const char *label, size_t len)
+static bool zanc_label_utf8_lead(uint8_t c, uint32_t *cp, size_t *extra)
 {
-    if (len > ZANC_LABEL_MAX) return false;
-    if (len == 0) return true;
-    if (!label) return false;
+    if ((c & 0xe0) == 0xc0) { *cp = c & 0x1f; *extra = 1; }
+    else if ((c & 0xf0) == 0xe0) { *cp = c & 0x0f; *extra = 2; }
+    else if ((c & 0xf8) == 0xf0) { *cp = c & 0x07; *extra = 3; }
+    else return false;                       /* invalid lead byte */
+    return true;
+}
 
-    const uint8_t *p = (const uint8_t *)label;
+static bool zanc_label_utf8_continuations(const uint8_t *p, size_t i,
+                                          size_t extra, uint32_t *cp)
+{
+    for (size_t k = 1; k <= extra; k++) {
+        uint8_t cc = p[i + k];
+        if ((cc & 0xc0) != 0x80) return false;
+        *cp = (*cp << 6) | (cc & 0x3f);
+    }
+    return true;
+}
+
+static bool zanc_label_codepoint_valid(size_t extra, uint32_t cp)
+{
+    /* Reject overlong encodings and out-of-range/surrogate code points. */
+    if (extra == 1 && cp < 0x80) return false;
+    if (extra == 2 && cp < 0x800) return false;
+    if (extra == 3 && cp < 0x10000) return false;
+    if (cp > 0x10ffff) return false;
+    if (cp >= 0xd800 && cp <= 0xdfff) return false;
+    return true;
+}
+
+static bool zanc_label_content_valid(const uint8_t *p, size_t len)
+{
     size_t i = 0;
     while (i < len) {
         uint8_t c = p[i];
@@ -44,26 +67,25 @@ bool zanc_label_valid(const char *label, size_t len)
 
         uint32_t cp;
         size_t extra;
-        if ((c & 0xe0) == 0xc0) { cp = c & 0x1f; extra = 1; }
-        else if ((c & 0xf0) == 0xe0) { cp = c & 0x0f; extra = 2; }
-        else if ((c & 0xf8) == 0xf0) { cp = c & 0x07; extra = 3; }
-        else return false;                       /* invalid lead byte */
-
+        if (!zanc_label_utf8_lead(c, &cp, &extra)) return false;
         if (i + extra >= len) return false;
-        for (size_t k = 1; k <= extra; k++) {
-            uint8_t cc = p[i + k];
-            if ((cc & 0xc0) != 0x80) return false;
-            cp = (cp << 6) | (cc & 0x3f);
-        }
-        /* Reject overlong encodings and out-of-range/surrogate code points. */
-        if (extra == 1 && cp < 0x80) return false;
-        if (extra == 2 && cp < 0x800) return false;
-        if (extra == 3 && cp < 0x10000) return false;
-        if (cp > 0x10ffff) return false;
-        if (cp >= 0xd800 && cp <= 0xdfff) return false;
+        if (!zanc_label_utf8_continuations(p, i, extra, &cp)) return false;
+        if (!zanc_label_codepoint_valid(extra, cp)) return false;
         i += extra + 1;
     }
     return true;
+}
+
+/* Minimal RFC 3629 UTF-8 validator: rejects overlong forms, surrogates,
+ * code points above U+10FFFF, embedded NUL, and C0 control bytes (<0x20). A
+ * label is operator-facing metadata, so control bytes are disallowed too. */
+bool zanc_label_valid(const char *label, size_t len)
+{
+    if (len > ZANC_LABEL_MAX) return false;
+    if (len == 0) return true;
+    if (!label) return false;
+
+    return zanc_label_content_valid((const uint8_t *)label, len);
 }
 
 bool zanc_parse(const uint8_t *script, size_t script_len,
