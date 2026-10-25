@@ -464,7 +464,6 @@ contexts/explorer/modules/presentation/src/presentation_form.c:zcl_present_windo
 contexts/explorer/modules/presentation/src/presentation_form.c:zcl_present_window_form_validate_v1:16
 contexts/explorer/modules/presentation/src/presentation_input.c:zcl_present_window_hover_at_v1:19
 contexts/explorer/views/src/explorer_factoids_records.c:factoids_emit_section_5_records:19
-contexts/explorer/views/src/explorer_network_view.c:explorer_view_network:17
 contexts/market/controllers/src/file_market_controller.c:market_purchase_code:18
 contexts/market/controllers/src/file_market_controller.c:rpc_zmarket_purchase_plan:28
 contexts/market/controllers/src/market_moderation_native_handler.c:market_moderation_view_frozen_kat:42

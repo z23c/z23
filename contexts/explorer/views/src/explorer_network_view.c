@@ -18,6 +18,97 @@
 #include <stdint.h>
 #include <stdio.h>
 
+/* Version distribution. */
+static size_t explorer_emit_version_table(char *response, size_t max,
+                                          size_t off, census_reader *cr,
+                                          int64_t total)
+{
+    struct census_version_bucket vb[CENSUS_MAX_VERSION_BUCKETS];
+    int nv = census_read_versions(cr, vb, CENSUS_MAX_VERSION_BUCKETS);
+    APPEND(off, response, max,
+        "<h2>Version distribution</h2>"
+        "<table><tr><th>User agent</th><th>Nodes</th><th>Share</th>"
+        "<th>Max height</th></tr>");
+    for (int i = 0; i < nv && off + 512 < max; i++) {
+        char safe_ua[256];
+        html_escape(safe_ua, sizeof(safe_ua),
+                    vb[i].user_agent[0] ? vb[i].user_agent : "(unknown)");
+        int64_t share_bp = total > 0 ? (vb[i].count * 10000) / total : 0;
+        APPEND(off, response, max,
+            "<tr><td style='font-family:monospace;font-size:13px'>%s%s</td>"
+            "<td>%lld</td><td>%lld.%02lld%%</td><td>%lld</td></tr>",
+            safe_ua, vb[i].ua_truncated ? "\xE2\x80\xA6" : "",
+            (long long)vb[i].count,
+            (long long)(share_bp / 100), (long long)(share_bp % 100),
+            (long long)vb[i].max_reported_height);
+    }
+    APPEND(off, response, max, "</table>");
+    return off;
+}
+
+/* Bounded node table (newest last_seen first). */
+static size_t explorer_emit_node_table(char *response, size_t max, size_t off,
+                                       census_reader *cr)
+{
+    struct census_node rows[CENSUS_LIST_HARD_CAP];
+    int64_t matched = 0;
+    int n = census_read_list(cr, NULL, 0, 25, rows, CENSUS_LIST_HARD_CAP,
+                             &matched);
+    APPEND(off, response, max,
+        "<h2>Nodes (%d of %lld)</h2>"
+        "<p style='color:#888;font-size:13px'>Newest observation first. Most "
+        "recent last_seen: unix %lld.</p>"
+        "<table><tr><th>Endpoint</th><th>User agent</th><th>Proto</th>"
+        "<th>Height</th><th>Last seen</th><th>Dials ok/try</th></tr>",
+        n, (long long)matched,
+        (long long)(n > 0 ? rows[0].last_seen : 0));
+    for (int i = 0; i < n && off + 512 < max; i++) {
+        char endpoint[CENSUS_ENDPOINT_MAX];
+        snprintf(endpoint, sizeof(endpoint), "%s:%d", rows[i].ip, rows[i].port);
+        char safe_ep[128], safe_ua[128];
+        html_escape(safe_ep, sizeof(safe_ep), endpoint);
+        html_escape(safe_ua, sizeof(safe_ua),
+                    rows[i].user_agent[0] ? rows[i].user_agent : "(unknown)");
+        APPEND(off, response, max,
+            "<tr><td style='font-family:monospace;font-size:13px'>%s</td>"
+            "<td style='font-family:monospace;font-size:12px'>%s%s</td>"
+            "<td>%lld</td><td>%lld</td><td style='font-size:12px;color:#888'>"
+            "%lld</td><td>%lld/%lld</td></tr>",
+            safe_ep, safe_ua, rows[i].ua_truncated ? "\xE2\x80\xA6" : "",
+            (long long)rows[i].protocol_version,
+            (long long)rows[i].reported_height,
+            (long long)rows[i].last_seen,
+            (long long)rows[i].dial_success_count,
+            (long long)(rows[i].dial_success_count + rows[i].dial_fail_count));
+    }
+    APPEND(off, response, max, "</table>");
+    return off;
+}
+
+/* Top advertised endpoints (topology). */
+static size_t explorer_emit_top_advertised_table(char *response, size_t max,
+                                                 size_t off,
+                                                 const struct census_graph_stats *g)
+{
+    if (g->top_count > 0) {
+        APPEND(off, response, max,
+            "<h2>Most advertised endpoints</h2>"
+            "<table><tr><th>Endpoint</th><th>Times seen</th>"
+            "<th>Distinct observers</th></tr>");
+        for (int i = 0; i < g->top_count && off + 512 < max; i++) {
+            char safe_adv[128];
+            html_escape(safe_adv, sizeof(safe_adv), g->top[i].advertised);
+            APPEND(off, response, max,
+                "<tr><td style='font-family:monospace;font-size:13px'>%s</td>"
+                "<td>%lld</td><td>%lld</td></tr>",
+                safe_adv, (long long)g->top[i].times_seen,
+                (long long)g->top[i].distinct_observers);
+        }
+        APPEND(off, response, max, "</table>");
+    }
+    return off;
+}
+
 size_t explorer_view_network(const char *datadir, uint8_t *r, size_t max)
 {
     size_t off = 0;
@@ -77,79 +168,9 @@ size_t explorer_view_network(const char *datadir, uint8_t *r, size_t max)
             "recorded yet.</p>");
     }
 
-    /* Version distribution. */
-    struct census_version_bucket vb[CENSUS_MAX_VERSION_BUCKETS];
-    int nv = census_read_versions(cr, vb, CENSUS_MAX_VERSION_BUCKETS);
-    APPEND(off, response, max,
-        "<h2>Version distribution</h2>"
-        "<table><tr><th>User agent</th><th>Nodes</th><th>Share</th>"
-        "<th>Max height</th></tr>");
-    for (int i = 0; i < nv && off + 512 < max; i++) {
-        char safe_ua[256];
-        html_escape(safe_ua, sizeof(safe_ua),
-                    vb[i].user_agent[0] ? vb[i].user_agent : "(unknown)");
-        int64_t share_bp = total > 0 ? (vb[i].count * 10000) / total : 0;
-        APPEND(off, response, max,
-            "<tr><td style='font-family:monospace;font-size:13px'>%s%s</td>"
-            "<td>%lld</td><td>%lld.%02lld%%</td><td>%lld</td></tr>",
-            safe_ua, vb[i].ua_truncated ? "\xE2\x80\xA6" : "",
-            (long long)vb[i].count,
-            (long long)(share_bp / 100), (long long)(share_bp % 100),
-            (long long)vb[i].max_reported_height);
-    }
-    APPEND(off, response, max, "</table>");
-
-    /* Bounded node table (newest last_seen first). */
-    struct census_node rows[CENSUS_LIST_HARD_CAP];
-    int64_t matched = 0;
-    int n = census_read_list(cr, NULL, 0, 25, rows, CENSUS_LIST_HARD_CAP,
-                             &matched);
-    APPEND(off, response, max,
-        "<h2>Nodes (%d of %lld)</h2>"
-        "<p style='color:#888;font-size:13px'>Newest observation first. Most "
-        "recent last_seen: unix %lld.</p>"
-        "<table><tr><th>Endpoint</th><th>User agent</th><th>Proto</th>"
-        "<th>Height</th><th>Last seen</th><th>Dials ok/try</th></tr>",
-        n, (long long)matched,
-        (long long)(n > 0 ? rows[0].last_seen : 0));
-    for (int i = 0; i < n && off + 512 < max; i++) {
-        char endpoint[CENSUS_ENDPOINT_MAX];
-        snprintf(endpoint, sizeof(endpoint), "%s:%d", rows[i].ip, rows[i].port);
-        char safe_ep[128], safe_ua[128];
-        html_escape(safe_ep, sizeof(safe_ep), endpoint);
-        html_escape(safe_ua, sizeof(safe_ua),
-                    rows[i].user_agent[0] ? rows[i].user_agent : "(unknown)");
-        APPEND(off, response, max,
-            "<tr><td style='font-family:monospace;font-size:13px'>%s</td>"
-            "<td style='font-family:monospace;font-size:12px'>%s%s</td>"
-            "<td>%lld</td><td>%lld</td><td style='font-size:12px;color:#888'>"
-            "%lld</td><td>%lld/%lld</td></tr>",
-            safe_ep, safe_ua, rows[i].ua_truncated ? "\xE2\x80\xA6" : "",
-            (long long)rows[i].protocol_version,
-            (long long)rows[i].reported_height,
-            (long long)rows[i].last_seen,
-            (long long)rows[i].dial_success_count,
-            (long long)(rows[i].dial_success_count + rows[i].dial_fail_count));
-    }
-    APPEND(off, response, max, "</table>");
-
-    /* Top advertised endpoints (topology). */
-    if (g.top_count > 0) {
-        APPEND(off, response, max,
-            "<h2>Most advertised endpoints</h2>"
-            "<table><tr><th>Endpoint</th><th>Times seen</th>"
-            "<th>Distinct observers</th></tr>");
-        for (int i = 0; i < g.top_count && off + 512 < max; i++) {
-            char safe_adv[128];
-            html_escape(safe_adv, sizeof(safe_adv), g.top[i].advertised);
-            APPEND(off, response, max,
-                "<tr><td style='font-family:monospace;font-size:13px'>%s</td>"
-                "<td>%lld</td><td>%lld</td></tr>",
-                safe_adv, (long long)g.top[i].times_seen,
-                (long long)g.top[i].distinct_observers);
-        }
-        APPEND(off, response, max, "</table>");
-    }
+    off = explorer_emit_version_table(response, max, off, cr, total);
+    off = explorer_emit_node_table(response, max, off, cr);
+    off = explorer_emit_top_advertised_table(response, max, off, &g);
 
     APPEND(off, response, max, "</div>");
     census_read_close(cr);
