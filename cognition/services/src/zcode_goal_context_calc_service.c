@@ -32,6 +32,40 @@ static void stem(char *word)
         word[n - 1u] = '\0';
 }
 
+static bool is_word_char(unsigned char c)
+{
+    return isalnum(c) || c == '_';
+}
+
+static bool token_already_listed(const struct zcode_goal_tokens_v1 *out,
+                                 const char *word)
+{
+    for (size_t i = 0; i < out->count; i++)
+        if (strcmp(out->values[i], word) == 0) return true;
+    return false;
+}
+
+static void store_token(struct zcode_goal_tokens_v1 *out, const char *word)
+{
+    if (out->count < ZCODE_GOAL_MAX_TOKENS)
+        (void)snprintf(out->values[out->count++], ZCODE_GOAL_TOKEN_MAX + 1u,
+                       "%s", word);
+    else
+        out->budget_exhausted = true;
+}
+
+static void flush_word(struct zcode_goal_tokens_v1 *out, char *word,
+                       size_t *used)
+{
+    if (*used == 0) return;
+    word[*used] = '\0';
+    stem(word);
+    bool duplicate = token_already_listed(out, word);
+    if (!stopword(word) && !duplicate && word[0])
+        store_token(out, word);
+    *used = 0;
+}
+
 static bool tokenize(const char *goal, struct zcode_goal_tokens_v1 *out)
 {
     if (!goal || !goal[0] || !out) return false;
@@ -39,28 +73,14 @@ static bool tokenize(const char *goal, struct zcode_goal_tokens_v1 *out)
     size_t used = 0;
     char word[ZCODE_GOAL_TOKEN_MAX + 1u];
     for (const unsigned char *p = (const unsigned char *)goal;; p++) {
-        if (isalnum(*p) || *p == '_') {
+        if (is_word_char(*p)) {
             if (used < ZCODE_GOAL_TOKEN_MAX)
                 word[used++] = (char)tolower(*p);
             else
                 out->budget_exhausted = true;
             continue;
         }
-        if (used != 0) {
-            word[used] = '\0';
-            stem(word);
-            bool duplicate = false;
-            for (size_t i = 0; i < out->count; i++)
-                if (strcmp(out->values[i], word) == 0) duplicate = true;
-            if (!stopword(word) && !duplicate && word[0]) {
-                if (out->count < ZCODE_GOAL_MAX_TOKENS)
-                    (void)snprintf(out->values[out->count++],
-                                   ZCODE_GOAL_TOKEN_MAX + 1u, "%s", word);
-                else
-                    out->budget_exhausted = true;
-            }
-            used = 0;
-        }
+        flush_word(out, word, &used);
         if (*p == '\0') break;
     }
     out->valid = true;
