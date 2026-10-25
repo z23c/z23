@@ -52,6 +52,20 @@ static bool is_receipt(const uint8_t *payload, size_t len)
            memcmp(payload, VCS_SERVICE_RECEIPT_MAGIC, 4) == 0;
 }
 
+static bool receipt_frame_context_ready(
+    struct vcs_swarm_receipt_session *session,
+    struct vcs_swarm_engine *engine, struct vcs_service_book *book,
+    struct p2p_node *node)
+{
+    return session && engine && book && node;
+}
+
+static bool receipt_status_warrants_warning(enum vcs_swarm_receipt_status st)
+{
+    return st != VCS_SWARM_RECEIPT_OK && st != VCS_SWARM_RECEIPT_DUPLICATE &&
+           st != VCS_SWARM_RECEIPT_STALE;
+}
+
 bool boot_zcode_swarm_receipt_frame(
     struct msg_processor *mp, struct p2p_node *node,
     struct vcs_swarm_engine *engine, struct vcs_service_book *book,
@@ -61,7 +75,7 @@ bool boot_zcode_swarm_receipt_frame(
     if (!is_identity(payload, payload_len) && !is_receipt(payload, payload_len))
         return false;
     struct vcs_swarm_receipt_session *session = receipt_session(zcode_dir);
-    if (!session || !engine || !book || !node)
+    if (!receipt_frame_context_ready(session, engine, book, node))
         return true; /* consume; never feed ZSID/ZSR1 to the swarm codec */
     uint64_t peer = boot_zcode_swarm_peer_id(node);
     if (is_identity(payload, payload_len)) {
@@ -80,8 +94,7 @@ bool boot_zcode_swarm_receipt_frame(
     enum vcs_swarm_receipt_status st = vcs_swarm_receipt_session_handle(
         session, book, &xfer, peer, day, payload, payload_len, &reply,
         &reply_len);
-    if (st != VCS_SWARM_RECEIPT_OK && st != VCS_SWARM_RECEIPT_DUPLICATE &&
-        st != VCS_SWARM_RECEIPT_STALE)
+    if (receipt_status_warrants_warning(st))
         LOG_WARN("net.zcode_swarm", "peer %llu receipt %s",
                  (unsigned long long)peer,
                  vcs_swarm_receipt_status_string(st));
