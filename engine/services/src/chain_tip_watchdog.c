@@ -416,17 +416,10 @@ static bool wd_observed_work_frontier(int64_t *frontier_out)
     return true;
 }
 
-/* ── Supervisor tick ───────────────────────────────────────────────── */
-
-/* The advance-or-escalate body, factored out so the supervisor tick and the
- * ZCL_TESTING seam share ONE code path. The production tick passes the live
- * chain height, the real monotonic clock, and do_shutdown=true; the test seam
- * injects a height + monotonic timestamp and do_shutdown=false. For the
- * production call this is byte-identical to the previous inline tick body. */
-static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
+/* Height advanced past the recorded tip: record it, reset in-memory stall
+ * state, and finish the tick. Returns false when the tip did not move. */
+static bool wd_commit_tip_advance(int64_t h, int64_t prev, int64_t now_us)
 {
-    int64_t prev = atomic_load(&g_highest_tip);
-
     if (h > prev) {
         atomic_store(&g_highest_tip, h);
         atomic_store(&g_last_advance_us, now_us);
@@ -440,8 +433,83 @@ static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
          * bounded-restart budget so the next hang gets a fresh round. */
         wd_note_advance(h);
         supervisor_progress(atomic_load(&g_id), h);
-        return;
+        return true;
     }
+    return false;
+}
+
+/* Publish the observed work frontier when it is known. Returns true when
+ * that frontier does not extend above the provable tip. */
+static bool wd_note_frontier_caught_up(int64_t h, int64_t *work_frontier)
+{
+    bool frontier_known = wd_observed_work_frontier(work_frontier);
+    if (frontier_known)
+        atomic_store(&g_observed_work_frontier, *work_frontier);
+    return frontier_known && *work_frontier <= h;
+}
+
+/* Seconds since last_advance, or 0 when no advance has been recorded. */
+static int64_t wd_idle_age_secs(int64_t last_advance, int64_t now_us)
+{
+    return last_advance > 0 ? (now_us - last_advance) / 1000000 : 0;
+}
+
+/* First caught-up tick at or past the restart threshold counts one
+ * suppressed restart. The exchange is the last && operand, so it runs only
+ * after both comparisons succeed. Returns true when the caller should log. */
+static bool wd_count_suppressed_tip_restart(int64_t idle_age_s)
+{
+    int64_t restart_secs = atomic_load(&g_thr_restart);
+    if (restart_secs > 0 && idle_age_s >= restart_secs &&
+        !atomic_exchange(&g_at_tip_restart_counted, true)) {
+        atomic_fetch_add(&g_restarts_suppressed_at_tip, 1u);
+        return true;
+    }
+    return false;
+}
+
+/* Work appeared after a quiet-at-tip interval, or no stall budget is
+ * running. Start that budget now and tell the caller not to escalate. */
+static bool wd_arm_actionable_stall(bool was_at_tip, int64_t stall_start,
+                                    int64_t now_us)
+{
+    if (was_at_tip || stall_start == 0) {
+        atomic_store(&g_stall_start_us, now_us);
+        atomic_store(&g_escalation, 0);
+        return true;
+    }
+    return false;
+}
+
+/* `level` is the pre-tick snapshot, so one tick can cross more than one
+ * rung. Rung 1 is the mirror page; rung 3 is the restart decision. */
+static bool wd_escalation_rung_due(int level, int rung,
+                                   int64_t thr_secs, int64_t age_s)
+{
+    return level < rung && thr_secs > 0 && age_s >= thr_secs;
+}
+
+/* Targeted revalidate for the tip-selection wedge only. Every other
+ * deterministic cause falls through to wd_decide_restart. */
+static void wd_drive_named_selection_wedge(const char *cause)
+{
+    if (strcmp(cause, "tip_selection_wedge") == 0)
+        wd_drive_selection_remedy();
+}
+
+/* ── Supervisor tick ───────────────────────────────────────────────── */
+
+/* The advance-or-escalate body, factored out so the supervisor tick and the
+ * ZCL_TESTING seam share ONE code path. The production tick passes the live
+ * chain height, the real monotonic clock, and do_shutdown=true; the test seam
+ * injects a height + monotonic timestamp and do_shutdown=false. For the
+ * production call this is byte-identical to the previous inline tick body. */
+static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
+{
+    int64_t prev = atomic_load(&g_highest_tip);
+
+    if (wd_commit_tip_advance(h, prev, now_us))
+        return;
 
     /* No height change is not itself a fault.  If neither active chain nor
      * best-header knowledge extends above the provable tip, there is no work
@@ -449,18 +517,14 @@ static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
      * blocks.  Clear only the in-memory escalation timer; the real
      * last_advance timestamp remains truthful for diagnostics. */
     int64_t work_frontier = -1;
-    bool frontier_known = wd_observed_work_frontier(&work_frontier);
-    if (frontier_known)
-        atomic_store(&g_observed_work_frontier, work_frontier);
-    if (frontier_known && work_frontier <= h) {
+    if (wd_note_frontier_caught_up(h, &work_frontier)) {
         bool was_at_tip = atomic_exchange(&g_at_observed_tip, true);
         atomic_store(&g_escalation, 0);
         atomic_store(&g_stall_start_us, 0);
         if (!was_at_tip) {
             atomic_fetch_add(&g_at_observed_tip_entries, 1u);
             int64_t last_advance = atomic_load(&g_last_advance_us);
-            int64_t idle_age_s = last_advance > 0
-                ? (now_us - last_advance) / 1000000 : 0;
+            int64_t idle_age_s = wd_idle_age_secs(last_advance, now_us);
             LOG_INFO("chain_tip_watchdog",
                      "[chain_tip_watchdog] idle at observed tip: h=%lld "
                      "work_frontier=%lld idle_age=%llds; no chain work is "
@@ -474,12 +538,8 @@ static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
                 (long long)idle_age_s);
         }
         int64_t last_advance = atomic_load(&g_last_advance_us);
-        int64_t idle_age_s = last_advance > 0
-            ? (now_us - last_advance) / 1000000 : 0;
-        int64_t restart_secs = atomic_load(&g_thr_restart);
-        if (restart_secs > 0 && idle_age_s >= restart_secs &&
-            !atomic_exchange(&g_at_tip_restart_counted, true)) {
-            atomic_fetch_add(&g_restarts_suppressed_at_tip, 1u);
+        int64_t idle_age_s = wd_idle_age_secs(last_advance, now_us);
+        if (wd_count_suppressed_tip_restart(idle_age_s)) {
             LOG_INFO("chain_tip_watchdog",
                      "[chain_tip_watchdog] restart threshold crossed while "
                      "caught up: h=%lld work_frontier=%lld idle_age=%llds; "
@@ -502,9 +562,7 @@ static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
     bool was_at_tip = atomic_exchange(&g_at_observed_tip, false);
     atomic_store(&g_at_tip_restart_counted, false);
     int64_t stall_start = atomic_load(&g_stall_start_us);
-    if (was_at_tip || stall_start == 0) {
-        atomic_store(&g_stall_start_us, now_us);
-        atomic_store(&g_escalation, 0);
+    if (wd_arm_actionable_stall(was_at_tip, stall_start, now_us)) {
         if (was_at_tip) {
             LOG_INFO("chain_tip_watchdog",
                      "[chain_tip_watchdog] work appeared above H*: h=%lld "
@@ -523,7 +581,7 @@ static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
     int64_t thr_mirror  = atomic_load(&g_thr_mirror);
     int64_t thr_restart = atomic_load(&g_thr_restart);
 
-    if (level < 1 && thr_mirror > 0 && age_s >= thr_mirror) {
+    if (wd_escalation_rung_due(level, 1, thr_mirror, age_s)) {
         atomic_store(&g_escalation, 1);
         atomic_fetch_add(&g_fires_mirror, 1u);
         LOG_INFO("chain_tip_watchdog", "[chain_tip_watchdog] tip stalled: h=%lld age=%llds", (long long)h, (long long)age_s);
@@ -532,7 +590,7 @@ static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
             (long long)h, (long long)age_s);
     }
 
-    if (level < 3 && thr_restart > 0 && age_s >= thr_restart) {
+    if (wd_escalation_rung_due(level, 3, thr_restart, age_s)) {
         atomic_store(&g_escalation, 3);
         /* Cause-probe: classify WHY the tip is constant before escalating.
          * A stall pinned on a named deterministic cause — a persisted ok=0
@@ -556,8 +614,7 @@ static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
              * evidence-based revalidate of the specific successor height rather
              * than only skipping the restart. Every other deterministic cause
              * falls through to the escalator hand-off in wd_decide_restart. */
-            if (strcmp(cause, "tip_selection_wedge") == 0)
-                wd_drive_selection_remedy();
+            wd_drive_named_selection_wedge(cause);
         }
         /* Bounded path: increments the persisted no-progress counter and
          * requests shutdown; once the cap is hit it pages an operator and
