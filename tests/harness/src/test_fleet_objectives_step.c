@@ -170,7 +170,9 @@ struct fst_call {
     struct zcl_command_reply reply;
 };
 
-static bool fst_run(struct fst_call *c, const struct fst_world *w, bool force)
+/* limit < 0: max_in_flight is not sent (the default applies). */
+static bool fst_run_in(struct fst_call *c, const struct fst_world *w,
+                       bool force, int limit)
 {
     char why[192];
     json_init(&c->input);
@@ -184,6 +186,8 @@ static bool fst_run(struct fst_call *c, const struct fst_world *w, bool force)
     (void)json_push_kv_str(&c->input, "repo", w->repo);
     if (force)
         (void)json_push_kv_bool(&c->input, "force", true);
+    if (limit >= 0)
+        (void)json_push_kv_int(&c->input, "max_in_flight", limit);
     memset(&c->request, 0, sizeof(c->request));
     c->request.input = &c->input;
     c->request.spec = zcl_command_registry_find(
@@ -197,6 +201,11 @@ static bool fst_run(struct fst_call *c, const struct fst_world *w, bool force)
     }
     zcl_native_handle_fleet_objectives_step(&c->request, &c->reply);
     return true;
+}
+
+static bool fst_run(struct fst_call *c, const struct fst_world *w, bool force)
+{
+    return fst_run_in(c, w, force, -1);
 }
 
 static void fst_end(struct fst_call *c)
@@ -279,7 +288,8 @@ static int fst_case_wait(void)
     int failures = 0;
     struct fst_world w;
     struct fst_call c;
-    TEST("step: a queued loop row is action wait naming its seq") {
+    TEST("step: with max_in_flight 1 a queued loop row is action wait naming "
+         "its seq") {
         char o[1024] = "", q[1024] = "", s[1024] = "";
         ASSERT(fst_world(&w, "wait", 100));
         fst_land_row(o, sizeof(o), 5, "plain work", "landed");
@@ -289,12 +299,108 @@ static int fst_case_wait(void)
         fst_file(&w, "outcomes.jsonl", o);
         fst_file(&w, "queue.jsonl", q);
         fst_file(&w, "objectives.jsonl", s);
-        ASSERT(fst_run(&c, &w, false));
+        ASSERT(fst_run_in(&c, &w, false, 1));
         ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
         ASSERT_STR_EQ(fst_str(&c, "action"), "wait");
         ASSERT_EQ(json_get_int(json_get(json_get(&c.reply.data, "next"),
                                         "seq")), 50);
         ASSERT(strstr(fst_str(&c, "reason"), "seq 50") != NULL);
+        ASSERT(strstr(fst_str(&c, "reason"), "(limit 1)") != NULL);
+        fst_end(&c);
+        fst_restore(&w);
+        PASS();
+    }
+    TEST("step: with the default max_in_flight one queued loop row runs") {
+        char o[1024] = "", q[1024] = "", s[1024] = "";
+        ASSERT(fst_world(&w, "one_default", 100));
+        fst_land_row(o, sizeof(o), 5, "plain work", "landed");
+        fst_land_row(q, sizeof(q), 50, "loop:" FST_OBJ ": in flight",
+                     "queued");
+        fst_snap_row(s, sizeof(s), 5, 5);
+        fst_file(&w, "outcomes.jsonl", o);
+        fst_file(&w, "queue.jsonl", q);
+        fst_file(&w, "objectives.jsonl", s);
+        ASSERT(fst_run(&c, &w, false));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(fst_str(&c, "action"), "run");
+        fst_end(&c);
+        fst_restore(&w);
+        PASS();
+    }
+    TEST("step: with the default max_in_flight two queued loop rows wait, "
+         "naming both seqs, the count and the limit") {
+        char o[1024] = "", q[1024] = "", s[1024] = "";
+        const struct json_value *seqs;
+        ASSERT(fst_world(&w, "two_default", 100));
+        fst_land_row(o, sizeof(o), 5, "plain work", "landed");
+        fst_land_row(q, sizeof(q), 50, "loop:" FST_OBJ ": first", "queued");
+        fst_land_row(q, sizeof(q), 51, "loop:" FST_OBJ ": second", "proving");
+        fst_snap_row(s, sizeof(s), 5, 5);
+        fst_file(&w, "outcomes.jsonl", o);
+        fst_file(&w, "queue.jsonl", q);
+        fst_file(&w, "objectives.jsonl", s);
+        ASSERT(fst_run(&c, &w, false));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(fst_str(&c, "action"), "wait");
+        ASSERT(strstr(fst_str(&c, "reason"),
+                      "2 loop rows in flight (limit 2)") != NULL);
+        ASSERT(strstr(fst_str(&c, "reason"), "seq 50 (" FST_OBJ ", queued)")
+               != NULL);
+        ASSERT(strstr(fst_str(&c, "reason"), "seq 51 (" FST_OBJ ", proving)")
+               != NULL);
+        ASSERT_EQ(json_get_int(json_get(json_get(&c.reply.data, "next"),
+                                        "count")), 2);
+        ASSERT_EQ(json_get_int(json_get(json_get(&c.reply.data, "next"),
+                                        "limit")), 2);
+        ASSERT_EQ(json_get_int(json_get(json_get(&c.reply.data, "next"),
+                                        "seq")), 50);
+        seqs = json_get(json_get(&c.reply.data, "next"), "seqs");
+        ASSERT_EQ(json_size(seqs), 2);
+        ASSERT_EQ(json_get_int(json_at(seqs, 0)), 50);
+        ASSERT_EQ(json_get_int(json_at(seqs, 1)), 51);
+        fst_end(&c);
+        fst_restore(&w);
+        PASS();
+    }
+    TEST("step: max_in_flight 4 lets three queued loop rows run and four "
+         "wait") {
+        char o[1024] = "", q[1024] = "", s[1024] = "";
+        ASSERT(fst_world(&w, "four", 100));
+        fst_land_row(o, sizeof(o), 5, "plain work", "landed");
+        fst_land_row(q, sizeof(q), 50, "loop:" FST_OBJ ": a", "queued");
+        fst_land_row(q, sizeof(q), 51, "loop:" FST_OBJ ": b", "queued");
+        fst_land_row(q, sizeof(q), 52, "loop:" FST_OBJ ": c", "queued");
+        fst_snap_row(s, sizeof(s), 5, 5);
+        fst_file(&w, "outcomes.jsonl", o);
+        fst_file(&w, "queue.jsonl", q);
+        fst_file(&w, "objectives.jsonl", s);
+        ASSERT(fst_run_in(&c, &w, false, 4));
+        ASSERT_STR_EQ(fst_str(&c, "action"), "run");
+        fst_end(&c);
+        fst_land_row(q, sizeof(q), 53, "loop:" FST_OBJ ": d", "queued");
+        fst_file(&w, "queue.jsonl", q);
+        ASSERT(fst_run_in(&c, &w, false, 4));
+        ASSERT_STR_EQ(fst_str(&c, "action"), "wait");
+        ASSERT(strstr(fst_str(&c, "reason"), "4 loop rows in flight (limit 4)")
+               != NULL);
+        fst_end(&c);
+        fst_restore(&w);
+        PASS();
+    }
+    TEST("step: max_in_flight outside 1..4 or not an integer is a typed "
+         "refusal") {
+        ASSERT(fst_world(&w, "refuse", 100));
+        fst_file(&w, "outcomes.jsonl", "");
+        fst_file(&w, "queue.jsonl", "");
+        fst_file(&w, "objectives.jsonl", "");
+        ASSERT(fst_run_in(&c, &w, false, 0));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "STEP_MAX_IN_FLIGHT");
+        ASSERT(json_get(&c.reply.data, "action") == NULL);
+        fst_end(&c);
+        ASSERT(fst_run_in(&c, &w, false, 5));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "STEP_MAX_IN_FLIGHT");
         fst_end(&c);
         fst_restore(&w);
         PASS();

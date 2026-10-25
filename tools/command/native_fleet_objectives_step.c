@@ -22,8 +22,11 @@
  * objective ids. `force: true` overrides it for that one call and the output
  * says so (`forced`); no state file is written or read.
  *
- * IN-FLIGHT RULE. A loop row still queued, proving or otherwise not final in
- * the land queue makes the action `wait`, naming its seq.
+ * IN-FLIGHT RULE. Loop rows still queued, proving or otherwise not final in
+ * the land queue are counted. When the count reaches `max_in_flight` (an
+ * integer 1..4, default 2; anything else is a typed refusal) the action is
+ * `wait`, naming the count, the limit and the seqs. With max_in_flight 1 this
+ * is the one-loop-lane rule.
  *
  * OTHERWISE the brief runs: a runner_ok top objective is action `run` with
  * the objective, level, a suggested lane name `loop-<objective_id>-<n>` (n is
@@ -64,18 +67,29 @@
 #define STP_MAX_LANDED 20u
 #define STP_ID_MAX 64u
 #define STP_PATH_MAX 4352u
+#define STP_MAX_IN_FLIGHT_DEF 2u
+#define STP_MAX_IN_FLIGHT_MIN 1u
+#define STP_MAX_IN_FLIGHT_MAX 4u
+#define STP_MAX_FLIGHT 8u /* lowest in-flight seqs kept for the reply */
 
 struct stp_landed {
     long long seq;
     char objective[STP_ID_MAX];
 };
 
+struct stp_flight {
+    long long seq;
+    char state[16];
+    char objective[STP_ID_MAX];
+};
+
 struct stp_scan {
     struct stp_landed landed[STP_MAX_LANDED]; /* newest first */
     size_t n_landed;
-    long long inflight_seq; /* 0: none; else the lowest loop seq in flight */
-    char inflight_state[16];
-    char inflight_objective[STP_ID_MAX];
+    struct stp_flight flights[STP_MAX_FLIGHT]; /* lowest seq first */
+    size_t n_flights;   /* kept in flights[] */
+    size_t n_inflight;  /* every loop row not final, kept or not */
+    size_t limit;       /* max_in_flight */
     long long max_seq;
 };
 
@@ -88,7 +102,7 @@ struct stp_verdict {
 
 struct stp_decision {
     const char *action;
-    char reason[320];
+    char reason[1024]; /* a wait lists up to STP_MAX_FLIGHT loop rows */
     bool paused, forced;
     struct json_value next;
     struct json_value skipped;  /* array of {objective, reason} */
@@ -154,15 +168,24 @@ static void stp_add_landed(struct stp_scan *sc, long long seq, const char *id)
     (void)snprintf(sc->landed[at].objective, STP_ID_MAX, "%s", id);
 }
 
+/* Counts every loop row not final; keeps the lowest STP_MAX_FLIGHT seqs. */
 static void stp_add_inflight(struct stp_scan *sc,
                              const struct zcl_dl_row_view *r, const char *id)
 {
-    if (sc->inflight_seq != 0 && sc->inflight_seq <= r->seq)
+    size_t at = 0;
+    sc->n_inflight++;
+    while (at < sc->n_flights && sc->flights[at].seq < r->seq)
+        at++;
+    if (at >= STP_MAX_FLIGHT)
         return;
-    sc->inflight_seq = r->seq;
-    (void)snprintf(sc->inflight_state, sizeof(sc->inflight_state), "%s",
+    if (sc->n_flights < STP_MAX_FLIGHT)
+        sc->n_flights++;
+    memmove(&sc->flights[at + 1], &sc->flights[at],
+            (sc->n_flights - at - 1u) * sizeof(sc->flights[0]));
+    sc->flights[at].seq = r->seq;
+    (void)snprintf(sc->flights[at].state, sizeof(sc->flights[at].state), "%s",
                    r->state);
-    (void)snprintf(sc->inflight_objective, STP_ID_MAX, "%s", id);
+    (void)snprintf(sc->flights[at].objective, STP_ID_MAX, "%s", id);
 }
 
 static void stp_scan_rows(struct stp_scan *sc,
@@ -387,23 +410,81 @@ static bool stp_decide_paused(struct stp_decision *d,
     return stp_paused_next(d, v);
 }
 
+/* "N loop rows in flight (limit L): seq a (id, state), ...", listing the
+ * kept seqs and "+K more" for any not kept. */
+static void stp_wait_reason(struct stp_decision *d, const struct stp_scan *sc)
+{
+    size_t used;
+    (void)snprintf(d->reason, sizeof(d->reason),
+                   "%zu loop row%s in flight (limit %zu):", sc->n_inflight,
+                   sc->n_inflight == 1 ? "" : "s", sc->limit);
+    for (size_t i = 0; i < sc->n_flights; i++) {
+        used = strlen(d->reason);
+        (void)snprintf(d->reason + used, sizeof(d->reason) - used,
+                       "%s seq %lld (%s, %s)", i ? "," : "",
+                       sc->flights[i].seq, sc->flights[i].objective,
+                       sc->flights[i].state);
+    }
+    if (sc->n_inflight > sc->n_flights) {
+        used = strlen(d->reason);
+        (void)snprintf(d->reason + used, sizeof(d->reason) - used,
+                       " (+%zu more)", sc->n_inflight - sc->n_flights);
+    }
+}
+
 static bool stp_decide_wait(struct stp_decision *d, const struct stp_scan *sc)
 {
-    if (sc->inflight_seq == 0)
+    if (sc->n_inflight < sc->limit)
         return false;
     d->action = "wait";
-    (void)snprintf(d->reason, sizeof(d->reason),
-                   "loop row seq %lld (%s) is %s in the land queue",
-                   sc->inflight_seq, sc->inflight_objective,
-                   sc->inflight_state);
+    stp_wait_reason(d, sc);
     return true;
 }
 
+/* next names the lowest in-flight row (seq, state, objective, as before),
+ * then the count, the limit and every kept seq. */
 static bool stp_wait_next(struct stp_decision *d, const struct stp_scan *sc)
 {
-    return json_push_kv_int(&d->next, "seq", sc->inflight_seq) &&
-           json_push_kv_str(&d->next, "state", sc->inflight_state) &&
-           json_push_kv_str(&d->next, "objective", sc->inflight_objective);
+    struct json_value seqs;
+    bool ok;
+    json_init(&seqs);
+    json_set_array(&seqs);
+    ok = json_push_kv_int(&d->next, "seq", sc->flights[0].seq) &&
+         json_push_kv_str(&d->next, "state", sc->flights[0].state) &&
+         json_push_kv_str(&d->next, "objective", sc->flights[0].objective) &&
+         json_push_kv_int(&d->next, "count", (int64_t)sc->n_inflight) &&
+         json_push_kv_int(&d->next, "limit", (int64_t)sc->limit);
+    for (size_t i = 0; ok && i < sc->n_flights; i++)
+        ok = stp_push_int_item(&seqs, sc->flights[i].seq);
+    ok = ok && json_push_kv(&d->next, "seqs", &seqs);
+    json_free(&seqs);
+    return ok;
+}
+
+/* Reads max_in_flight into *limit (default STP_MAX_IN_FLIGHT_DEF). Anything
+ * but an integer 1..4 is refused with a typed reply and false. */
+static bool stp_read_limit(const struct zcl_command_request *request,
+                           size_t *limit, struct zcl_command_reply *reply)
+{
+    const struct json_value *v =
+        (request && request->input) ? json_get(request->input, "max_in_flight")
+                                    : NULL;
+    int64_t n = (int64_t)STP_MAX_IN_FLIGHT_DEF;
+    if (v && v->type != JSON_INT)
+        n = -1;
+    else if (v)
+        n = json_get_int(v);
+    if (n < (int64_t)STP_MAX_IN_FLIGHT_MIN ||
+        n > (int64_t)STP_MAX_IN_FLIGHT_MAX) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "STEP_MAX_IN_FLIGHT",
+                               "decide", false, false,
+                               "max_in_flight must be an integer from 1 to 4",
+                               "z23-dev fleet objectives step");
+        return false;
+    }
+    *limit = (size_t)n;
+    return true;
 }
 
 /* ── brief ────────────────────────────────────────────────────────────── */
@@ -881,7 +962,10 @@ void zcl_native_handle_fleet_objectives_step(
     json_init(&d.skipped);
     json_set_array(&d.skipped);
     json_init(&d.dispatch);
-    if (!request || !zcl_dev_land_rows_read(&rows, &n, NULL)) {
+    sc.limit = STP_MAX_IN_FLIGHT_DEF;
+    if (!stp_read_limit(request, &sc.limit, reply))
+        ; /* refused: the typed refusal is already in reply */
+    else if (!request || !zcl_dev_land_rows_read(&rows, &n, NULL)) {
         stp_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "STEP_LAND_READ",
                  "cannot read the land queue rows");
     } else {

@@ -231,9 +231,11 @@ ZCL_COMMAND_READY_READ(
     "verdict of that row's own objective in `verdicts`. If the newest two "
     "landed loop rows both regressed their own objective the action is "
     "`paused`, naming both seqs and objective ids; force: true overrides that "
-    "for one call and the result says so (`forced`); nothing is stored. If a "
-    "loop row is queued, proving or otherwise not final in the land queue the "
-    "action is `wait`, naming its seq. Otherwise the work order of `fleet "
+    "for one call and the result says so (`forced`); nothing is stored. If the "
+    "loop rows queued, proving or otherwise not final in the land queue reach "
+    "max_in_flight (an integer 1..4, default 2; anything else is refused) the "
+    "action is `wait`, naming the count, the limit and the seqs. Otherwise the "
+    "work order of `fleet "
     "objectives brief` is built in process: a runner_ok top objective gives "
     "action `run` with next = {objective, level, runner_ok, lane "
     "`loop-<objective_id>-<n>`, note_prefix `loop:<objective_id>:`, brief}; a "
@@ -253,7 +255,7 @@ ZCL_COMMAND_READY_READ(
     "fleet,objectives,step,loop,pause,regression,landing,runner",
     "zcl.fleet_objectives_step_input.v1", "zcl.fleet_objectives_step.v1",
     "force,snapshot,outcomes,attempts_dir,repo,lintc_dir,baseline,brief,"
-    "exclude", "",
+    "exclude,max_in_flight", "",
     "z23-dev fleet objectives step",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
