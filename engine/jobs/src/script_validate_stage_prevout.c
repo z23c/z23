@@ -60,6 +60,109 @@ static bool sv_coins_prevout_lookup(sqlite3 *db, const uint8_t txid[32],
                                        script_len_out, height_out, NULL);
 }
 
+static bool sv_prevout_apply_script(struct tx_out *out, int64_t value,
+                                    const unsigned char *script, size_t slen,
+                                    int64_t started)
+{
+    if (slen > MAX_SCRIPT_SIZE)
+        return false;  /* never silently truncate a scriptPubKey */
+    out->value = value;
+    script_set(&out->script_pub_key, script, slen);
+    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                              RPF_PREVOUT_HITS, 1);
+    reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                                     RPF_PREVOUT_US,
+                                     (uint64_t)(platform_time_monotonic_us() -
+                                                started));
+    return true;
+}
+
+static bool sv_prevout_note_miss(int64_t started)
+{
+    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                              RPF_PREVOUT_MISSES, 1);
+    reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                                     RPF_PREVOUT_US,
+                                     (uint64_t)(platform_time_monotonic_us() -
+                                                started));
+    return false;
+}
+
+static bool sv_prevout_resolve_at_frontier(
+    sqlite3 *db, const struct outpoint *prevout, struct tx_out *out,
+    const struct script_validate_created_prevout_view *view, int64_t started)
+{
+    int64_t value = 0;
+    unsigned char script[MAX_SCRIPT_SIZE];
+    size_t slen = 0;
+    int min_created = view->frontier <= view->height ? view->frontier : 0;
+    int created_h = -1;
+
+    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                              RPF_PREVOUT_CREATED_LOOKUPS, 1);
+    uint64_t prepares_before = created_outputs_index_prepare_count_thread();
+    bool created_found = created_outputs_index_get_bounded(
+        db, prevout->hash.data, prevout->n, min_created,
+        view->height, &value, script, sizeof(script), &slen,
+        &created_h);
+    reducer_stage_profile_add(
+        REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_PREPARES,
+        created_outputs_index_prepare_count_thread() - prepares_before);
+    if (created_found)
+        return sv_prevout_apply_script(out, value, script, slen, started);
+
+    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                              RPF_PREVOUT_COINS_FALLBACKS, 1);
+    prepares_before = coins_kv_prepare_count_thread();
+    int32_t coin_h = 0;
+    bool coin_found = sv_coins_prevout_lookup(
+        db, prevout->hash.data, prevout->n, &value, script,
+        sizeof(script), &slen, &coin_h);
+    reducer_stage_profile_add(
+        REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_PREPARES,
+        coins_kv_prepare_count_thread() - prepares_before);
+    if (coin_found) {
+        bool usable = coin_h < view->frontier && coin_h <= view->height;
+        if (usable)
+            return sv_prevout_apply_script(out, value, script, slen, started);
+    }
+    return sv_prevout_note_miss(started);
+}
+
+static bool sv_prevout_resolve_without_frontier(
+    sqlite3 *db, const struct outpoint *prevout, struct tx_out *out,
+    int64_t started)
+{
+    int64_t value = 0;
+    unsigned char script[MAX_SCRIPT_SIZE];
+    size_t slen = 0;
+
+    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                              RPF_PREVOUT_CREATED_LOOKUPS, 1);
+    uint64_t prepares_before = created_outputs_index_prepare_count_thread();
+    bool created_found = created_outputs_index_get(
+        db, prevout->hash.data, prevout->n, &value, script, sizeof(script),
+        &slen);
+    reducer_stage_profile_add(
+        REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_PREPARES,
+        created_outputs_index_prepare_count_thread() - prepares_before);
+    if (created_found)
+        return sv_prevout_apply_script(out, value, script, slen, started);
+
+    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
+                              RPF_PREVOUT_COINS_FALLBACKS, 1);
+    prepares_before = coins_kv_prepare_count_thread();
+    bool coin_found = db && coins_kv_get(
+        db, prevout->hash.data, prevout->n, &value, script, sizeof(script),
+        &slen);
+    reducer_stage_profile_add(
+        REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_PREPARES,
+        coins_kv_prepare_count_thread() - prepares_before);
+    if (coin_found)
+        return sv_prevout_apply_script(out, value, script, slen, started);
+    return sv_prevout_note_miss(started);
+}
+
 /* Production prevout resolver (P0 §2.1) — resolves an outpoint to its spent
  * output WITHOUT requiring -txindex, correct at the script_validate frontier
  * (which runs ahead of utxo_apply). Two layers, in order:
@@ -80,130 +183,15 @@ bool script_validate_created_index_prevout(const struct outpoint *prevout,
     if (!prevout || !out)
         return false;
 
-    int64_t value = 0;
-    unsigned char script[MAX_SCRIPT_SIZE];
-    size_t slen = 0;
-
     const struct script_validate_created_prevout_view *view = user;
     sqlite3 *db = view && view->db ? view->db : progress_store_db();
     if (!db)
         return false;
 
-    if (view && view->have_frontier) {
-        int min_created = view->frontier <= view->height ? view->frontier : 0;
-        int created_h = -1;
-        reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                  RPF_PREVOUT_CREATED_LOOKUPS, 1);
-        uint64_t prepares_before =
-            created_outputs_index_prepare_count_thread();
-        bool created_found = created_outputs_index_get_bounded(
-            db, prevout->hash.data, prevout->n, min_created,
-            view->height, &value, script, sizeof(script), &slen,
-            &created_h);
-        reducer_stage_profile_add(
-            REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_PREPARES,
-            created_outputs_index_prepare_count_thread() - prepares_before);
-        if (created_found) {
-            if (slen > MAX_SCRIPT_SIZE)
-                return false;
-            out->value = value;
-            script_set(&out->script_pub_key, script, slen);
-            reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                      RPF_PREVOUT_HITS, 1);
-            reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                             RPF_PREVOUT_US,
-                                      (uint64_t)(platform_time_monotonic_us() -
-                                                 started));
-            return true;
-        }
-
-        reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                  RPF_PREVOUT_COINS_FALLBACKS, 1);
-        prepares_before = coins_kv_prepare_count_thread();
-        int32_t coin_h = 0;
-        bool coin_found = sv_coins_prevout_lookup(
-            db, prevout->hash.data, prevout->n, &value, script,
-            sizeof(script), &slen, &coin_h);
-        reducer_stage_profile_add(
-            REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_PREPARES,
-            coins_kv_prepare_count_thread() - prepares_before);
-        if (coin_found) {
-            bool usable = coin_h < view->frontier && coin_h <= view->height;
-            if (usable) {
-                if (slen > MAX_SCRIPT_SIZE)
-                    return false;
-                out->value = value;
-                script_set(&out->script_pub_key, script, slen);
-                reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                          RPF_PREVOUT_HITS, 1);
-                reducer_stage_profile_observe_us(
-                    REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_US,
-                                          (uint64_t)(platform_time_monotonic_us() -
-                                                     started));
-                return true;
-            }
-        }
-        reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                  RPF_PREVOUT_MISSES, 1);
-        reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                         RPF_PREVOUT_US,
-                                  (uint64_t)(platform_time_monotonic_us() -
-                                             started));
-        return false;
-    }
-
-    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                              RPF_PREVOUT_CREATED_LOOKUPS, 1);
-    uint64_t prepares_before = created_outputs_index_prepare_count_thread();
-    bool created_found = created_outputs_index_get(
-        db, prevout->hash.data, prevout->n, &value, script, sizeof(script),
-        &slen);
-    reducer_stage_profile_add(
-        REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_PREPARES,
-        created_outputs_index_prepare_count_thread() - prepares_before);
-    if (created_found) {
-        if (slen > MAX_SCRIPT_SIZE)
-            return false;  /* never silently truncate a scriptPubKey */
-        out->value = value;
-        script_set(&out->script_pub_key, script, slen);
-        reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                  RPF_PREVOUT_HITS, 1);
-        reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                         RPF_PREVOUT_US,
-                                  (uint64_t)(platform_time_monotonic_us() -
-                                             started));
-        return true;
-    }
-
-    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                              RPF_PREVOUT_COINS_FALLBACKS, 1);
-    prepares_before = coins_kv_prepare_count_thread();
-    bool coin_found = db && coins_kv_get(
-        db, prevout->hash.data, prevout->n, &value, script, sizeof(script),
-        &slen);
-    reducer_stage_profile_add(
-        REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_PREPARES,
-        coins_kv_prepare_count_thread() - prepares_before);
-    if (coin_found) {
-        if (slen > MAX_SCRIPT_SIZE)
-            return false;
-        out->value = value;
-        script_set(&out->script_pub_key, script, slen);
-        reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                  RPF_PREVOUT_HITS, 1);
-        reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                                         RPF_PREVOUT_US,
-                                  (uint64_t)(platform_time_monotonic_us() -
-                                             started));
-        return true;
-    }
-
-    reducer_stage_profile_add(REDUCER_PROFILE_SCRIPT_VALIDATE,
-                              RPF_PREVOUT_MISSES, 1);
-    reducer_stage_profile_observe_us(
-        REDUCER_PROFILE_SCRIPT_VALIDATE, RPF_PREVOUT_US,
-        (uint64_t)(platform_time_monotonic_us() - started));
-    return false;
+    if (view && view->have_frontier)
+        return sv_prevout_resolve_at_frontier(db, prevout, out, view,
+                                              started);
+    return sv_prevout_resolve_without_frontier(db, prevout, out, started);
 }
 
 void script_validate_created_prevout_view_init(
