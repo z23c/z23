@@ -13923,7 +13923,7 @@ check-typed-blocker: $(LINTC_TOOL)
 # (that one only catches an EMPTY string). Empty strings are exempt.
 check-blocker-escape-registered: $(LINTC_TOOL)
 	@echo "══ LINT: blocker escape-action totality ══"
-	@./tools/scripts/check_blocker_escape_registered.sh --selftest && ./tools/scripts/check_blocker_escape_registered.sh
+	@./build/bin/z23-lint check-blocker-escape-registered --selftest && ./build/bin/z23-lint check-blocker-escape-registered
 
 # Gate — blocker remedy totality (HARD, no baseline; ratchets by exhaustive
 # enumeration instead). Doctrine: docs/TENACITY.md "Hold-class

@@ -602,7 +602,7 @@ int t_sync_state_no_ordinal_gate(void)
  * always scans the real tree (the one real registration is
  * "activation_drive_connect", used as the OK-fixture literal). */
 #define BLOCKER_ESCAPE_SCRIPT_REL \
-    "tools/scripts/check_blocker_escape_registered.sh"
+    "build/bin/z23-lint check-blocker-escape-registered"
 #define BLOCKER_ESCAPE_BAD_FIXTURE_REL \
     "test-tmp/_blocker_escape_fixture_bad_tmp.c"
 #define BLOCKER_ESCAPE_OK_FIXTURE_REL \
