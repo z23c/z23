@@ -2430,7 +2430,6 @@ tests/harness/src/test_snapshot_boot_seed.c:sb_build_fixture:16
 tests/harness/src/test_snapshot_negotiation_stalled_condition.c:test_snapshot_negotiation_stalled_condition:26
 tests/harness/src/test_snapshot_shielded.c:test_snapshot_shielded:126
 tests/harness/src/test_snapshot_store_port.c:test_snapshot_store_port:18
-tests/harness/src/test_snark_kat.c:test_snark_kat:17
 tests/harness/src/test_soak_attestation.c:test_sync_benchmark_receipt_wellformed:27
 tests/harness/src/test_sovereign_promotion.c:sp_open_assisted:16
 tests/harness/src/test_sovereignty_guard.c:test_sovereignty_guard:63

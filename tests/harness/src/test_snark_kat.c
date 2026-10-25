@@ -126,6 +126,53 @@ static void g2_mul7(struct g2_point *out, const struct g2_point *Q)
     g2_add(out, &tmp, Q);   /* [7]Q */
 }
 
+/* $HOME when set and non-empty, else "." — the anchor both KATs use to
+ * locate the zcash-params directory. */
+static const char *zcash_params_home_or_dot(void)
+{
+    const char *home = getenv("HOME");
+    return (home && *home) ? home : ".";
+}
+
+/* True when the real output VK both parsed and carries exactly 6 IC
+ * points (5 public inputs + 1). */
+static bool vk_parsed_with_six_ic(bool vk_ok, const struct groth16_vk *vk)
+{
+    return vk_ok && vk->ic_len == 6;
+}
+
+/* Derive the viewing keys (ak, nk, ivk) from the spending keys and then
+ * the diversified payment key pk_d; fails closed when no valid
+ * diversifier was found. */
+static bool derive_sapling_address_keys(uint8_t ask[32], uint8_t nsk[32],
+                                        uint8_t diversifier[11], bool div_ok,
+                                        uint8_t ak[32], uint8_t nk[32],
+                                        uint8_t ivk[32], uint8_t pk_d[32])
+{
+    sapling_ask_to_ak(ask, ak);
+    sapling_nsk_to_nk(nsk, nk);
+    sapling_crh_ivk(ak, nk, ivk);
+    return div_ok && sapling_ivk_to_pkd(ivk, diversifier, pk_d);
+}
+
+/* Run the production prover to build the canonical output proof; fails
+ * closed (false) when the proving context is missing or pk_d was not
+ * derived. */
+static bool build_canonical_output_proof(void *pctx, bool pk_ok,
+                                         uint8_t ovk[32],
+                                         uint8_t diversifier[11],
+                                         uint8_t pk_d[32],
+                                         uint8_t cv[32], uint8_t cm[32],
+                                         uint8_t epk[32],
+                                         uint8_t enc[580], uint8_t out_ct[80],
+                                         uint8_t proof[192])
+{
+    return pctx && pk_ok &&
+        sapling_build_output_with_ctx(pctx, ovk, diversifier, pk_d,
+                                      12345, NULL,
+                                      cv, cm, epk, enc, out_ct, proof);
+}
+
 int test_snark_kat(void)
 {
     printf("\n=== Golden SNARK KAT (BLS12-381 pairing positive pin) ===\n");
@@ -140,11 +187,10 @@ int test_snark_kat(void)
      * ─────────────────────────────────────────────────────────────── */
     printf("KAT A: BLS12-381 bilinearity on real Sapling VK points\n");
     {
-        const char *home = getenv("HOME");
         char path[512];
         snprintf(path, sizeof(path),
                  "%s/.zcash-params/sapling-output.params",
-                 (home && *home) ? home : ".");
+                 zcash_params_home_or_dot());
 
         size_t len = 0;
         /* VK lives at the front of the params blob; 200 KB is ample. */
@@ -165,7 +211,8 @@ int test_snark_kat(void)
         free(buf);
         KAT_CHECK("groth16_vk_read(sapling-output) parses real VK", vk_ok);
         /* Output VK: 6 IC elements (5 public inputs + 1). */
-        KAT_CHECK("sapling-output VK has ic_len == 6", vk_ok && vk.ic_len == 6);
+        KAT_CHECK("sapling-output VK has ic_len == 6",
+                  vk_parsed_with_six_ic(vk_ok, &vk));
 
         if (vk_ok) {
             /* P = alpha_g1 (real, on-curve, non-identity G1 point),
@@ -230,10 +277,9 @@ int test_snark_kat(void)
      * ─────────────────────────────────────────────────────────────── */
     printf("KAT B: canonical prover -> sapling_check_output (consensus path)\n");
     {
-        const char *home = getenv("HOME");
         char params_dir[512];
         snprintf(params_dir, sizeof(params_dir), "%s/.zcash-params",
-                 (home && *home) ? home : ".");
+                 zcash_params_home_or_dot());
 
         if (!sapling_init_params(params_dir)) {
             printf("  zcash-params init failed — skipping prover round-trip\n");
@@ -251,18 +297,17 @@ int test_snark_kat(void)
             sapling_generate_r(nsk);
             sapling_generate_r(ovk);
             uint8_t ak[32], nk[32], ivk[32], pk_d[32];
-            sapling_ask_to_ak(ask, ak);
-            sapling_nsk_to_nk(nsk, nk);
-            sapling_crh_ivk(ak, nk, ivk);
-            bool pk_ok = div_ok && sapling_ivk_to_pkd(ivk, diversifier, pk_d);
+            bool pk_ok = derive_sapling_address_keys(ask, nsk, diversifier,
+                                                     div_ok, ak, nk, ivk,
+                                                     pk_d);
 
             void *pctx = zclassic_sapling_proving_ctx_init();
             uint8_t cv[32], cm[32], epk[32];
             uint8_t enc[580], out_ct[80], proof[192];
-            bool built = pctx && pk_ok &&
-                sapling_build_output_with_ctx(pctx, ovk, diversifier, pk_d,
-                                              12345, NULL,
-                                              cv, cm, epk, enc, out_ct, proof);
+            bool built = build_canonical_output_proof(pctx, pk_ok, ovk,
+                                                      diversifier, pk_d,
+                                                      cv, cm, epk, enc,
+                                                      out_ct, proof);
             KAT_CHECK("canonical prover produced an output proof", built);
 
             if (built) {
