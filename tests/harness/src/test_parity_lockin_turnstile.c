@@ -276,12 +276,12 @@ static int test_stage_genesis_and_accept(void)
     struct delta_summary s;
     struct utxo_apply_turnstile_pending p;
     TS_CHECK("genesis: parent is known {0,0}, row = its own block values",
-             ts_step(db, 0, 5, 3, 1, &s, &p) && s.ok &&
+             ts_step(db, 0, -5, 3, 1, &s, &p) && s.ok &&
              ts_pending_is(&p, true, 2, 5) &&
              shielded_pool_kv_put(db, 0, p.sprout, p.sapling) &&
              kv_pair(db, 0, 2, 5));
     TS_CHECK("known parent, positive block: accepted, totals accumulate",
-             ts_step(db, 1, 4, 0, 0, &s, &p) && s.ok &&
+             ts_step(db, 1, -4, 0, 0, &s, &p) && s.ok &&
              ts_pending_is(&p, true, 2, 9));
     sqlite3_close(db);
     return failures;
@@ -296,17 +296,17 @@ static int test_stage_sapling(void)
     uint64_t before = atomic_load(&g_ua_turnstile_would_reject_total);
     (void)shielded_pool_kv_put(db, 9, 0, 10);
     TS_CHECK("shadow: negative sapling pool still applies, records total",
-             ts_step(db, 10, -20, 0, 0, &s, &p) && s.ok &&
+             ts_step(db, 10, 20, 0, 0, &s, &p) && s.ok &&
              ts_pending_is(&p, true, 0, -10));
     TS_CHECK("shadow: would_reject counted once",
              atomic_load(&g_ua_turnstile_would_reject_total) == before + 1);
     atomic_store(&g_enforce_turnstile, true);
     TS_CHECK("enforce: sapling violation refused, exact label, no row",
-             ts_step(db, 10, -20, 0, 0, &s, &p) &&
+             ts_step(db, 10, 20, 0, 0, &s, &p) &&
              ts_refused_as(&s, "turnstile_sapling", KIND_SAPLING) &&
              !p.write && kv_absent(db, 10));
     TS_CHECK("enforce: exactly-zero sapling total is accepted",
-             ts_step(db, 10, -10, 0, 0, &s, &p) && s.ok &&
+             ts_step(db, 10, 10, 0, 0, &s, &p) && s.ok &&
              ts_pending_is(&p, true, 0, 0));
     atomic_store(&g_enforce_turnstile, false);
     sqlite3_close(db);
@@ -329,7 +329,7 @@ static int test_stage_sprout(void)
              ts_refused_as(&s, "turnstile_sprout", KIND_SPROUT) &&
              !p.write && kv_absent(db, 10));
     TS_CHECK("enforce: sprout is checked before sapling",
-             ts_step(db, 10, -100, 0, 8, &s, &p) &&
+             ts_step(db, 10, 100, 0, 8, &s, &p) &&
              ts_refused_as(&s, "turnstile_sprout", KIND_SPROUT));
     TS_CHECK("enforce: exactly-zero sprout total is accepted",
              ts_step(db, 10, 0, 0, 5, &s, &p) && s.ok &&
@@ -346,7 +346,7 @@ static bool ts_unknown_in_mode(sqlite3 *db, bool enforce)
     uint64_t u = atomic_load(&g_ua_turnstile_unknown_total);
     uint64_t w = atomic_load(&g_ua_turnstile_would_reject_total);
     atomic_store(&g_enforce_turnstile, enforce);
-    bool ok = ts_step(db, 50, -1000, 0, 1000, &s, &p) && s.ok && !p.write &&
+    bool ok = ts_step(db, 50, 1000, 0, 1000, &s, &p) && s.ok && !p.write &&
               atomic_load(&g_ua_turnstile_unknown_total) == u + 1 &&
               atomic_load(&g_ua_turnstile_would_reject_total) == w;
     atomic_store(&g_enforce_turnstile, false);
@@ -424,7 +424,7 @@ static int test_stage_unwind(void)
              utxo_apply_delete_rows_above(db, 3, 5) && kv_absent(db, 3) &&
              kv_absent(db, 5) && kv_pair(db, 2, 0, 3));
     TS_CHECK("new branch recomputes from the fork row, put succeeds",
-             ts_step(db, 3, 10, 0, 0, &s, &p) && s.ok &&
+             ts_step(db, 3, -10, 0, 0, &s, &p) && s.ok &&
              ts_pending_is(&p, true, 0, 13) &&
              shielded_pool_kv_put(db, 3, p.sprout, p.sapling) &&
              kv_pair(db, 3, 0, 13));
