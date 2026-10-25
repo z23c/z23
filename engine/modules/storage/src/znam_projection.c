@@ -346,6 +346,78 @@ static bool apply_expire(sqlite3 *db, const struct ev_znam_expire *ev)
     return rc == SQLITE_DONE;
 }
 
+static bool apply_register_event(sqlite3 *db, const void *payload, size_t len,
+                                 znam_projection_t *p, bool *out_handled)
+{
+    struct ev_znam_register ev;
+    if (!ev_znam_register_parse(payload, len, &ev) ||
+        !apply_register(db, &ev))
+        return false;
+    p->register_total++;
+    *out_handled = true;
+    return true;
+}
+
+static bool apply_update_event(sqlite3 *db, const void *payload, size_t len,
+                               znam_projection_t *p, bool *out_handled)
+{
+    struct ev_znam_update ev;
+    if (!ev_znam_update_parse(payload, len, &ev))
+        return false;
+    bool applied = false;
+    if (ev.action_type == EV_ZNAM_UPDATE_ACTION_ADDR) {
+        applied = apply_update_addr(db, &ev);
+        if (applied) p->update_addr_total++;
+    } else if (ev.action_type == EV_ZNAM_UPDATE_ACTION_TEXT) {
+        applied = apply_update_text(db, &ev);
+        if (applied) p->update_text_total++;
+    } else if (ev.action_type == EV_ZNAM_UPDATE_ACTION_PRIMARY) {
+        applied = apply_update_primary(db, &ev);
+        if (applied) p->update_primary_total++;
+    } else {
+        applied = true;  /* unknown action — skip without failing */
+    }
+    if (!applied) return false;
+    *out_handled = true;
+    return true;
+}
+
+static bool apply_transfer_event(sqlite3 *db, const void *payload, size_t len,
+                                 znam_projection_t *p, bool *out_handled)
+{
+    struct ev_znam_transfer ev;
+    if (!ev_znam_transfer_parse(payload, len, &ev) ||
+        !apply_transfer(db, &ev))
+        return false;
+    p->transfer_total++;
+    *out_handled = true;
+    return true;
+}
+
+static bool apply_renew_event(sqlite3 *db, const void *payload, size_t len,
+                              znam_projection_t *p, bool *out_handled)
+{
+    struct ev_znam_renew ev;
+    if (!ev_znam_renew_parse(payload, len, &ev) ||
+        !apply_renew(db, &ev))
+        return false;
+    p->renew_total++;
+    *out_handled = true;
+    return true;
+}
+
+static bool apply_expire_event(sqlite3 *db, const void *payload, size_t len,
+                               znam_projection_t *p, bool *out_handled)
+{
+    struct ev_znam_expire ev;
+    if (!ev_znam_expire_parse(payload, len, &ev) ||
+        !apply_expire(db, &ev))
+        return false;
+    p->expire_total++;
+    *out_handled = true;
+    return true;
+}
+
 static bool apply_event(sqlite3 *db, enum event_log_type type,
                         const void *payload, size_t len, void *ctx,
                         bool *out_handled)
@@ -353,63 +425,16 @@ static bool apply_event(sqlite3 *db, enum event_log_type type,
     znam_projection_t *p = ctx;
     *out_handled = false;
 
-    if (type == EV_ZNAM_REGISTER) {
-        struct ev_znam_register ev;
-        if (!ev_znam_register_parse(payload, len, &ev) ||
-            !apply_register(db, &ev))
-            return false;
-        p->register_total++;
-        *out_handled = true;
-        return true;
-    }
-    if (type == EV_ZNAM_UPDATE) {
-        struct ev_znam_update ev;
-        if (!ev_znam_update_parse(payload, len, &ev))
-            return false;
-        bool applied = false;
-        if (ev.action_type == EV_ZNAM_UPDATE_ACTION_ADDR) {
-            applied = apply_update_addr(db, &ev);
-            if (applied) p->update_addr_total++;
-        } else if (ev.action_type == EV_ZNAM_UPDATE_ACTION_TEXT) {
-            applied = apply_update_text(db, &ev);
-            if (applied) p->update_text_total++;
-        } else if (ev.action_type == EV_ZNAM_UPDATE_ACTION_PRIMARY) {
-            applied = apply_update_primary(db, &ev);
-            if (applied) p->update_primary_total++;
-        } else {
-            applied = true;  /* unknown action — skip without failing */
-        }
-        if (!applied) return false;
-        *out_handled = true;
-        return true;
-    }
-    if (type == EV_ZNAM_TRANSFER) {
-        struct ev_znam_transfer ev;
-        if (!ev_znam_transfer_parse(payload, len, &ev) ||
-            !apply_transfer(db, &ev))
-            return false;
-        p->transfer_total++;
-        *out_handled = true;
-        return true;
-    }
-    if (type == EV_ZNAM_RENEW) {
-        struct ev_znam_renew ev;
-        if (!ev_znam_renew_parse(payload, len, &ev) ||
-            !apply_renew(db, &ev))
-            return false;
-        p->renew_total++;
-        *out_handled = true;
-        return true;
-    }
-    if (type == EV_ZNAM_EXPIRE) {
-        struct ev_znam_expire ev;
-        if (!ev_znam_expire_parse(payload, len, &ev) ||
-            !apply_expire(db, &ev))
-            return false;
-        p->expire_total++;
-        *out_handled = true;
-        return true;
-    }
+    if (type == EV_ZNAM_REGISTER)
+        return apply_register_event(db, payload, len, p, out_handled);
+    if (type == EV_ZNAM_UPDATE)
+        return apply_update_event(db, payload, len, p, out_handled);
+    if (type == EV_ZNAM_TRANSFER)
+        return apply_transfer_event(db, payload, len, p, out_handled);
+    if (type == EV_ZNAM_RENEW)
+        return apply_renew_event(db, payload, len, p, out_handled);
+    if (type == EV_ZNAM_EXPIRE)
+        return apply_expire_event(db, payload, len, p, out_handled);
     return true;  /* unrecognized event type: skip past it */
 }
 

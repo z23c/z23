@@ -1489,7 +1489,6 @@ engine/modules/storage/src/sqlite_vfs_dir_windows.c:vfs_dir_xlock:26
 engine/modules/storage/src/sqlite_vfs_dir_windows.c:vfs_dir_xshm_lock:21
 engine/modules/storage/src/sqlite_vfs_dir_windows_registration.c:sqlite_vfs_dir_main_file_info:26
 engine/modules/storage/src/sqlite_vfs_dir_windows_registration.c:sqlite_vfs_dir_register:23
-engine/modules/storage/src/znam_projection.c:apply_event:22
 engine/reducer/conditions/src/reducer_drive_watchdog.c:reducer_drive_dump_state_json:51
 engine/reducer/conditions/src/reducer_frontier_light_observe.c:rfrl_detail_push:28
 engine/reducer/conditions/src/reducer_frontier_reconcile_light.c:detect_reducer_frontier_reconcile_light:29
