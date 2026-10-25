@@ -158,6 +158,31 @@ bool stage_repair_body_fetch_observed_hash(
     return ok && found && observed;
 }
 
+static bool body_fetch_gap_ready(int body_fetch_cursor, int validate_cursor,
+                                 int height, const struct validate_row *vh,
+                                 bool body_observed)
+{
+    return body_fetch_cursor == height &&
+           validate_cursor > height &&
+           vh->found && vh->has_hash && vh->ok == 1 &&
+           !body_observed;
+}
+
+static void body_fetch_gap_fill(struct stage_repair_body_fetch_gap *out,
+                                const struct validate_row *vh, int height,
+                                int validate_cursor, int body_fetch_cursor,
+                                bool ready, bool body_observed)
+{
+    out->ready = ready;
+    out->body_observed = body_observed;
+    out->has_target_hash = vh->has_hash;
+    if (vh->has_hash)
+        memcpy(out->target_hash.data, vh->hash, 32);
+    out->target_height = height;
+    out->validate_cursor = validate_cursor;
+    out->body_fetch_cursor = body_fetch_cursor;
+}
+
 bool stage_repair_body_fetch_missing_have_data_candidate(
     sqlite3 *db,
     int height,
@@ -201,20 +226,11 @@ bool stage_repair_body_fetch_missing_have_data_candidate(
     }
     progress_store_tx_unlock();
 
-    bool ready = body_fetch_cursor == height &&
-                 validate_cursor > height &&
-                 vh.found && vh.has_hash && vh.ok == 1 &&
-                 !body_observed;
-    if (out) {
-        out->ready = ready;
-        out->body_observed = body_observed;
-        out->has_target_hash = vh.has_hash;
-        if (vh.has_hash)
-            memcpy(out->target_hash.data, vh.hash, 32);
-        out->target_height = height;
-        out->validate_cursor = validate_cursor;
-        out->body_fetch_cursor = body_fetch_cursor;
-    }
+    bool ready = body_fetch_gap_ready(body_fetch_cursor, validate_cursor,
+                                      height, &vh, body_observed);
+    if (out)
+        body_fetch_gap_fill(out, &vh, height, validate_cursor,
+                            body_fetch_cursor, ready, body_observed);
     return ready;
 }
 
