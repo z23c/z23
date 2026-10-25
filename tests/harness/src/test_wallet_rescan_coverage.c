@@ -589,6 +589,118 @@ static bool wrc_g_write_body(struct script *pay, struct disk_block_pos *pos,
     return wrote;
 }
 
+/* Point n synthetic index entries at one shared on-disk body. */
+static void wrc_fill_chain(struct block_index *idx, struct block_index **chain,
+                           const struct disk_block_pos *pos, int n)
+{
+    for (int i = 0; i < n; i++) {
+        block_index_init(&idx[i]);
+        idx[i].nHeight = i;
+        idx[i].nFile = pos->nFile;
+        idx[i].nDataPos = pos->nPos;
+        idx[i].nStatus = BLOCK_HAVE_DATA;
+        idx[i].phashBlock = NULL;
+        chain[i] = &idx[i];
+    }
+}
+
+/* Create <gdir> and its blocks subdir; blocksdir is filled only on Windows,
+ * where there is no POSIX shell and the two directories are made directly. */
+static bool wrc_g_make_fixture_dirs(const char *gdir, char *blocksdir,
+                                    size_t blocksdir_size)
+{
+#if defined(_WIN32)
+    snprintf(blocksdir, blocksdir_size, "%s/blocks", gdir);
+    if (platform_directory_create(gdir, 0700) != 0 ||
+        platform_directory_create(blocksdir, 0700) != 0)
+        return false;
+#else
+    {
+        char cmd[512];
+        (void)blocksdir;
+        (void)blocksdir_size;
+        snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s/blocks",
+                 gdir, gdir);
+        if (system(cmd) != 0)
+            return false;
+    }
+#endif
+    return true;
+}
+
+/* The pre-kill scan: the coin sits at depth 1 on the baseline height,
+ * immature, with nothing spendable yet. */
+static bool wrc_g_prekill_state(struct wallet *w,
+                                const struct wallet_tx *wtx, int found)
+{
+    return found == 1 && wtx && wtx->confirms == 1 &&
+           w->best_block_height == WRC_G_COIN_AT &&
+           wallet_get_balance(w) == 0 &&
+           wallet_get_immature_balance(w) == WRC_G_VALUE;
+}
+
+/* The durable scan height still names the pre-kill baseline. */
+static bool wrc_g_holds_baseline(struct wallet_sqlite *ws, bool flush_ok)
+{
+    int saved = -1;
+    return flush_ok && wallet_sqlite_read_scan_height(ws, &saved) &&
+           saved == WRC_G_COIN_AT;
+}
+
+/* The rebooted wallet: baseline 60, the coin back at depth 1, unspendable. */
+static bool wrc_g_stale_baseline_restored(struct wallet *w,
+                                          const struct wallet_tx *wtx)
+{
+    return w->best_block_height == WRC_G_COIN_AT &&
+           w->num_wallet_tx == 1 && wtx && wtx->confirms == 1 &&
+           wallet_get_balance(w) == 0;
+}
+
+/* The catch-up report for a fully read gap that holds nothing of ours. */
+static bool wrc_g_empty_gap_read(const struct wallet_rescan_report *rep,
+                                 int found)
+{
+    return found == 0 && rep->start_height == WRC_G_COIN_AT + 1 &&
+           rep->stop_height == WRC_G_TIP &&
+           rep->blocks_scanned == WRC_G_TIP - WRC_G_COIN_AT &&
+           rep->coverage_ok && rep->blocker[0] == '\0';
+}
+
+/* The wallet's scan baseline stands at the tip, with no retry pending. */
+static bool wrc_g_baseline_at_tip(const struct wallet *w)
+{
+    return w->best_block_height == WRC_G_TIP && !w->scan_retry.pending;
+}
+
+/* The coin's stored depth is measured from the tip, not the old baseline. */
+static bool wrc_g_depth_from_tip(const struct wallet_tx *wtx)
+{
+    return wtx && wtx->confirms == WRC_G_TIP - WRC_G_COIN_AT + 1;
+}
+
+/* The real depth reaches maturity exactly at the tip. */
+static bool wrc_g_mature_at_tip(const struct wallet_tx *wtx)
+{
+    return wtx && wallet_tx_get_blocks_to_maturity(wtx) == 0;
+}
+
+/* One wallet tx, fully spendable at the fixture value. */
+static bool wrc_g_spendable_balance(struct wallet *w)
+{
+    return w->num_wallet_tx == 1 && wallet_get_balance(w) == WRC_G_VALUE;
+}
+
+/* The corrected depth and balance survive a flush and a reboot. */
+static bool wrc_g_depth_holds_after_reboot(struct wallet *w,
+                                           const struct wallet_tx *wtx,
+                                           bool flush_ok)
+{
+    return flush_ok && wtx &&
+           wtx->confirms == WRC_G_TIP - WRC_G_COIN_AT + 1 &&
+           w->best_block_height == WRC_G_TIP &&
+           wallet_get_balance(w) == WRC_G_VALUE;
+}
+
 static int wrc_g_kill_restart_baseline(struct wallet *owner,
                                        const struct key_id *kid,
                                        const char *basedir)
@@ -596,21 +708,9 @@ static int wrc_g_kill_restart_baseline(struct wallet *owner,
     int failures = 0;
     char gdir[300];
     snprintf(gdir, sizeof(gdir), "%s_g", basedir);
-#if defined(_WIN32)
     char blocksdir[360];
-    snprintf(blocksdir, sizeof(blocksdir), "%s/blocks", gdir);
-    if (platform_directory_create(gdir, 0700) != 0 ||
-        platform_directory_create(blocksdir, 0700) != 0)
+    if (!wrc_g_make_fixture_dirs(gdir, blocksdir, sizeof(blocksdir)))
         return wrc_expect("G: fixture directory", false);
-#else
-    {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s/blocks",
-                 gdir, gdir);
-        if (system(cmd) != 0)
-            return wrc_expect("G: fixture directory", false);
-    }
-#endif
 
     struct node_db ndb;
     char dbpath[380];
@@ -635,15 +735,7 @@ static int wrc_g_kill_restart_baseline(struct wallet *owner,
         calloc(WRC_G_BLOCKS, sizeof(*idx)); /* raw-alloc-ok:test-fixture */
     struct block_index **chain =
         calloc(WRC_G_BLOCKS, sizeof(*chain)); /* raw-alloc-ok:test-fixture */
-    for (int i = 0; i < WRC_G_BLOCKS; i++) {
-        block_index_init(&idx[i]);
-        idx[i].nHeight = i;
-        idx[i].nFile = pos_empty.nFile;
-        idx[i].nDataPos = pos_empty.nPos;
-        idx[i].nStatus = BLOCK_HAVE_DATA;
-        idx[i].phashBlock = NULL;
-        chain[i] = &idx[i];
-    }
+    wrc_fill_chain(idx, chain, &pos_empty, WRC_G_BLOCKS);
     idx[WRC_G_COIN_AT].nFile = pos_us.nFile;
     idx[WRC_G_COIN_AT].nDataPos = pos_us.nPos;
 
@@ -656,7 +748,7 @@ static int wrc_g_kill_restart_baseline(struct wallet *owner,
 
     struct wallet_sqlite ws;
     failures += wrc_expect("G: wallet_sqlite_open",
-                           wallet_sqlite_open(&ws, ndb.db));
+                           wallet_sqlite_open_r(&ws, ndb.db).ok);
 
     /* The wallet as it ran before the kill: scanned through the coin's
      * height, depth measured from that baseline. */
@@ -667,16 +759,10 @@ static int wrc_g_kill_restart_baseline(struct wallet *owner,
                                      WRC_G_COIN_AT, gdir, &rep);
     const struct wallet_tx *wtx = wrc_only_tx(w);
     failures += wrc_expect("G: the pre-kill scan finds the coin at depth 1",
-                           found == 1 && wtx && wtx->confirms == 1 &&
-                           w->best_block_height == WRC_G_COIN_AT &&
-                           wallet_get_balance(w) == 0 &&
-                           wallet_get_immature_balance(w) == WRC_G_VALUE);
+                           wrc_g_prekill_state(w, wtx, found));
     struct zcl_result fr = wallet_sqlite_flush_transactions_r(&ws, w);
-    int saved = -1;
     failures += wrc_expect("G: the kill-time flush holds height 60, no marker",
-                           fr.ok &&
-                           wallet_sqlite_read_scan_height(&ws, &saved) &&
-                           saved == WRC_G_COIN_AT);
+                           wrc_g_holds_baseline(&ws, fr.ok));
     wallet_free(w);
     free(w);
 
@@ -685,29 +771,21 @@ static int wrc_g_kill_restart_baseline(struct wallet *owner,
     w = wrc_g_reboot(owner, kid, &ws);
     wtx = wrc_only_tx(w);
     failures += wrc_expect("G: reboot restores the stale baseline 60",
-                           w->best_block_height == WRC_G_COIN_AT &&
-                           w->num_wallet_tx == 1 &&
-                           wtx && wtx->confirms == 1 &&
-                           wallet_get_balance(w) == 0);
+                           wrc_g_stale_baseline_restored(w, wtx));
     memset(&rep, 0, sizeof(rep));
     found = wallet_rescan_report(w, &ms.chain_active, WRC_G_COIN_AT + 1,
                                  WRC_G_TIP, gdir, &rep);
     wtx = wrc_only_tx(w);
     failures += wrc_expect("G: the catch-up reads the whole empty gap",
-                           found == 0 && rep.start_height == WRC_G_COIN_AT + 1 &&
-                           rep.stop_height == WRC_G_TIP &&
-                           rep.blocks_scanned == WRC_G_TIP - WRC_G_COIN_AT &&
-                           rep.coverage_ok && rep.blocker[0] == '\0');
+                           wrc_g_empty_gap_read(&rep, found));
     failures += wrc_expect("G: the baseline moved to the tip",
-                           w->best_block_height == WRC_G_TIP &&
-                           !w->scan_retry.pending);
+                           wrc_g_baseline_at_tip(w));
     failures += wrc_expect("G: the stored depth is measured from the tip",
-                           wtx && wtx->confirms == WRC_G_TIP - WRC_G_COIN_AT + 1);
+                           wrc_g_depth_from_tip(wtx));
     failures += wrc_expect("G: the coin matures with the real depth",
-                           wtx && wallet_tx_get_blocks_to_maturity(wtx) == 0);
+                           wrc_g_mature_at_tip(wtx));
     failures += wrc_expect("G: getbalance spends it — no phantom immaturity",
-                           w->num_wallet_tx == 1 &&
-                           wallet_get_balance(w) == WRC_G_VALUE);
+                           wrc_g_spendable_balance(w));
 
     /* The corrected depth survives its own flush and reboot. */
     fr = wallet_sqlite_flush_transactions_r(&ws, w);
@@ -716,10 +794,7 @@ static int wrc_g_kill_restart_baseline(struct wallet *owner,
     w = wrc_g_reboot(owner, kid, &ws);
     wtx = wrc_only_tx(w);
     failures += wrc_expect("G: after flush+reboot the depth and balance hold",
-                           fr.ok && wtx &&
-                           wtx->confirms == WRC_G_TIP - WRC_G_COIN_AT + 1 &&
-                           w->best_block_height == WRC_G_TIP &&
-                           wallet_get_balance(w) == WRC_G_VALUE);
+                           wrc_g_depth_holds_after_reboot(w, wtx, fr.ok));
     wallet_free(w);
     free(w);
 
@@ -743,6 +818,92 @@ static int wrc_g_kill_restart_baseline(struct wallet *owner,
     return failures;
 }
 
+/* Create the fixture datadir and its blocks subdir; blocksdir is filled only
+ * on Windows, where there is no POSIX shell and the two directories are made
+ * directly. */
+static bool wrc_create_fixture_dirs(const char *datadir, char *blocksdir,
+                                    size_t blocksdir_size)
+{
+#if defined(_WIN32)
+    /* No POSIX shell on Windows: create the two directories directly. The
+     * pid suffix makes the path unique, so the rm -rf pre-clean is a no-op
+     * there anyway. */
+    snprintf(blocksdir, blocksdir_size, "%s/blocks", datadir);
+    return platform_directory_create(datadir, 0700) == 0 &&
+           platform_directory_create(blocksdir, 0700) == 0;
+#else
+    {
+        char cmd[512];
+        (void)blocksdir;
+        (void)blocksdir_size;
+        snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s/blocks",
+                 datadir, datadir);
+        return system(cmd) == 0;
+    }
+#endif
+}
+
+/* ── one real block on disk: a coinbase-shaped tx paying our key, plus
+ * a Sapling tx carrying one shielded output. The second tx is what
+ * makes the "wallet holds no Sapling key" condition observable — the
+ * seed-only-restore state, which used to be skipped in total silence. */
+static bool wrc_write_shared_body(const char *datadir,
+                                  const struct script *pay_to_us,
+                                  struct disk_block_pos *pos)
+{
+    bool wrote = false;
+    struct block blk;
+    block_init(&blk);
+    blk.header.nVersion = 4;
+    blk.header.nTime = 1700000000u;
+    blk.header.nBits = 0x2000ffffu;
+    blk.num_vtx = 2;
+    blk.vtx = calloc(2, sizeof(*blk.vtx)); /* raw-alloc-ok:test-fixture */
+    if (blk.vtx) {
+        /* tx0 — pays our key */
+        struct transaction *t0 = &blk.vtx[0];
+        transaction_init(t0);
+        t0->version = 1;
+        t0->vin = calloc(1, sizeof(*t0->vin)); /* raw-alloc-ok:test-fixture */
+        t0->vout = calloc(1, sizeof(*t0->vout)); /* raw-alloc-ok:test-fixture */
+        if (t0->vin && t0->vout) {
+            t0->num_vin = 1;
+            t0->num_vout = 1;
+            outpoint_set_null(&t0->vin[0].prevout);
+            script_init(&t0->vin[0].script_sig);
+            t0->vin[0].sequence = 0xffffffffu;
+            t0->vout[0].value = 1000000;
+            /* struct script is a fixed-size value type — plain copy. */
+            t0->vout[0].script_pub_key = *pay_to_us;
+        }
+        /* tx1 — Sapling v4 with one (all-zero) shielded output */
+        struct transaction *t1 = &blk.vtx[1];
+        transaction_init(t1);
+        t1->overwintered = true;
+        t1->version = 4;
+        t1->version_group_id = 0x892F2085u;
+        t1->v_shielded_output =
+            calloc(1, sizeof(*t1->v_shielded_output)); /* raw-alloc-ok:test-fixture */
+        if (t1->v_shielded_output)
+            t1->num_shielded_output = 1;
+
+        unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
+        wrote = write_block_to_disk(&blk, pos, datadir, msg_start);
+    }
+    block_free(&blk);
+    return wrote;
+}
+
+/* Set or clear BLOCK_HAVE_DATA across the first n index entries. */
+static void wrc_set_have_data(struct block_index *idx, int n, bool have)
+{
+    for (int i = 0; i < n; i++)
+        if (have)
+            idx[i].nStatus |= BLOCK_HAVE_DATA;
+        else
+            idx[i].nStatus &= ~BLOCK_HAVE_DATA;
+}
+
 int test_wallet_rescan_coverage(void);
 int test_wallet_rescan_coverage(void)
 {
@@ -751,28 +912,11 @@ int test_wallet_rescan_coverage(void)
     char datadir[256];
     snprintf(datadir, sizeof(datadir),
              "test-tmp/wallet_rescan_coverage_%d", (int)getpid());
-#if defined(_WIN32)
-    /* No POSIX shell on Windows: create the two directories directly. The
-     * pid suffix makes the path unique, so the rm -rf pre-clean is a no-op
-     * there anyway. */
     char blocksdir[320];
-    snprintf(blocksdir, sizeof(blocksdir), "%s/blocks", datadir);
-    if (platform_directory_create(datadir, 0700) != 0 ||
-        platform_directory_create(blocksdir, 0700) != 0) {
+    if (!wrc_create_fixture_dirs(datadir, blocksdir, sizeof(blocksdir))) {
         printf("wallet_rescan_coverage: could not create %s\n", datadir);
         return 1;
     }
-#else
-    {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s/blocks",
-                 datadir, datadir);
-        if (system(cmd) != 0) {
-            printf("wallet_rescan_coverage: could not create %s\n", datadir);
-            return 1;
-        }
-    }
-#endif
 
     char dbpath[320];
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", datadir);
@@ -796,54 +940,9 @@ int test_wallet_rescan_coverage(void)
     script_init(&pay_to_us);
     script_for_p2pkh(&pay_to_us, &kid);
 
-    /* ── one real block on disk: a coinbase-shaped tx paying our key, plus
-     * a Sapling tx carrying one shielded output. The second tx is what
-     * makes the "wallet holds no Sapling key" condition observable — the
-     * seed-only-restore state, which used to be skipped in total silence. */
     struct disk_block_pos pos;
     disk_block_pos_init(&pos);
-    bool wrote = false;
-    {
-        struct block blk;
-        block_init(&blk);
-        blk.header.nVersion = 4;
-        blk.header.nTime = 1700000000u;
-        blk.header.nBits = 0x2000ffffu;
-        blk.num_vtx = 2;
-        blk.vtx = calloc(2, sizeof(*blk.vtx)); /* raw-alloc-ok:test-fixture */
-        if (blk.vtx) {
-            /* tx0 — pays our key */
-            struct transaction *t0 = &blk.vtx[0];
-            transaction_init(t0);
-            t0->version = 1;
-            t0->vin = calloc(1, sizeof(*t0->vin)); /* raw-alloc-ok:test-fixture */
-            t0->vout = calloc(1, sizeof(*t0->vout)); /* raw-alloc-ok:test-fixture */
-            if (t0->vin && t0->vout) {
-                t0->num_vin = 1;
-                t0->num_vout = 1;
-                outpoint_set_null(&t0->vin[0].prevout);
-                script_init(&t0->vin[0].script_sig);
-                t0->vin[0].sequence = 0xffffffffu;
-                t0->vout[0].value = 1000000;
-                /* struct script is a fixed-size value type — plain copy. */
-                t0->vout[0].script_pub_key = pay_to_us;
-            }
-            /* tx1 — Sapling v4 with one (all-zero) shielded output */
-            struct transaction *t1 = &blk.vtx[1];
-            transaction_init(t1);
-            t1->overwintered = true;
-            t1->version = 4;
-            t1->version_group_id = 0x892F2085u;
-            t1->v_shielded_output =
-                calloc(1, sizeof(*t1->v_shielded_output)); /* raw-alloc-ok:test-fixture */
-            if (t1->v_shielded_output)
-                t1->num_shielded_output = 1;
-
-            unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
-            wrote = write_block_to_disk(&blk, &pos, datadir, msg_start);
-        }
-        block_free(&blk);
-    }
+    bool wrote = wrc_write_shared_body(datadir, &pay_to_us, &pos);
     WRC_CHECK("write a block (1 transparent + 1 shielded tx) to disk", wrote);
 
     /* ── 200 index entries, every one pointing at that same on-disk block.
@@ -859,15 +958,7 @@ int test_wallet_rescan_coverage(void)
         node_db_close(&ndb);
         return failures + 1;
     }
-    for (int i = 0; i < WRC_NBLOCKS; i++) {
-        block_index_init(&idx[i]);
-        idx[i].nHeight = i;
-        idx[i].nFile = pos.nFile;
-        idx[i].nDataPos = pos.nPos;
-        idx[i].nStatus = BLOCK_HAVE_DATA;
-        idx[i].phashBlock = NULL;
-        chain[i] = &idx[i];
-    }
+    wrc_fill_chain(idx, chain, &pos, WRC_NBLOCKS);
 
     struct main_state ms;
     main_state_init(&ms);
@@ -877,7 +968,7 @@ int test_wallet_rescan_coverage(void)
     ms.chain_active.capacity = WRC_NBLOCKS;
 
     struct wallet_sqlite ws;
-    WRC_CHECK("wallet_sqlite_open", wallet_sqlite_open(&ws, ndb.db));
+    WRC_CHECK("wallet_sqlite_open", wallet_sqlite_open_r(&ws, ndb.db).ok);
 
     struct tx_mempool mempool;
     tx_mempool_init(&mempool, 0);
@@ -928,8 +1019,7 @@ int test_wallet_rescan_coverage(void)
      * indexed but no body is on disk. The pre-fix code reported success and
      * "0 wallet outputs found" here, and the user concluded the backup was
      * empty. It must now refuse. ── */
-    for (int i = 0; i < WRC_NBLOCKS; i++)
-        idx[i].nStatus &= ~BLOCK_HAVE_DATA;
+    wrc_set_have_data(idx, WRC_NBLOCKS, false);
     {
         struct json_value params, result;
         wrc_params(&params, 0, last);
@@ -951,8 +1041,7 @@ int test_wallet_rescan_coverage(void)
     }
 
     /* ── C. 150/200 bodies present = 75%, under the 99% floor ────────── */
-    for (int i = 0; i < WRC_NBLOCKS; i++)
-        idx[i].nStatus |= BLOCK_HAVE_DATA;
+    wrc_set_have_data(idx, WRC_NBLOCKS, true);
     for (int i = 0; i < 50; i++)
         idx[i].nStatus &= ~BLOCK_HAVE_DATA;
     {
@@ -982,8 +1071,7 @@ int test_wallet_rescan_coverage(void)
     struct wallet *w2 = zcl_calloc(1, sizeof(*w2), "test-wallet");
     /* ~40 MB wallet: heap, never stack */
     wallet_init(w2);
-    for (int i = 0; i < WRC_NBLOCKS; i++)
-        idx[i].nStatus |= BLOCK_HAVE_DATA;
+    wrc_set_have_data(idx, WRC_NBLOCKS, true);
     idx[7].nStatus &= ~BLOCK_HAVE_DATA;
     rpc_wallet_set_state(w2, &ms, datadir, &ws, &mempool, NULL);
     {

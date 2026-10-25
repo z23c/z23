@@ -832,8 +832,6 @@ tests/harness/src/test_wallet_destruction_drill.c:act1_transparent:73
 tests/harness/src/test_wallet_destruction_drill.c:act2_bodyless_restore_must_fail_loud:29
 tests/harness/src/test_wallet_destruction_drill.c:act3_shielded:61
 tests/harness/src/test_wallet_destruction_drill.c:act4_recovery_phrase:26
-tests/harness/src/test_wallet_rescan_coverage.c:test_wallet_rescan_coverage:18
-tests/harness/src/test_wallet_rescan_coverage.c:wrc_g_kill_restart_baseline:29
 tests/harness/src/test_yardsale_app.c:t_known_sellers:29
 tests/harness/src/test_yardsale_app.c:t_prevout_guard:26
 tests/harness/src/test_yardsale_app.c:t_prevout_service_strict:21
