@@ -222,6 +222,9 @@ Volunteers, including people who drive their own AI coding agents, start at
 cards sized for lower-capability agents, and how to submit.
 Maintainers and fleet members continue with [AGENTS.md](AGENTS.md).
 
+Questions, node reports and ideas:
+join [Z23 Chat on Telegram](https://t.me/z23_chat).
+
 ## Go deeper
 
 - **Run it:** [Getting Started](docs/node/GETTING_STARTED.md) · [Sync](docs/node/SYNC.md) · [MVP acceptance](docs/quality/MVP.md) · [Windows](docs/node/WINDOWS.md)

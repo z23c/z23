@@ -174,7 +174,8 @@ coordinate through native claims and mail, not GitHub.
 
 ## Ask
 
-Use [GitHub Discussions](https://github.com/z23c/z23/discussions) for
+Ask in [Z23 Chat on Telegram](https://t.me/z23_chat), or use
+[GitHub Discussions](https://github.com/z23c/z23/discussions), for
 questions and ideas, including a consensus-related idea before you write code.
 Open an issue only for a user-visible defect; the forms in
 [`ISSUE_TEMPLATE/`](ISSUE_TEMPLATE/) ask for `z23 status` output. Report
