@@ -218,6 +218,64 @@ static enum vcs_zcode_family_admission_error projection_sources_validate(
     return VCS_ZCODE_FAMILY_ADMISSION_OK;
 }
 
+static enum vcs_zcode_family_admission_error projection_copy_sorted_sources(
+    const struct vcs_zcode_family_projection_config_v1 *config,
+    const struct vcs_zcode_family_admission_source_v1 *sources,
+    size_t source_count,
+    struct vcs_zcode_family_admission_source_v1 **sorted_out)
+{
+    *sorted_out = NULL;
+    if (!source_count) return VCS_ZCODE_FAMILY_ADMISSION_OK;
+    struct vcs_zcode_family_admission_source_v1 *sorted =
+        zcl_calloc(source_count, sizeof(*sorted), "family admission sources");
+    if (!sorted) return VCS_ZCODE_FAMILY_ADMISSION_NOMEM;
+    memcpy(sorted, sources, source_count * sizeof(*sorted));
+    enum vcs_zcode_family_admission_error error =
+        projection_sources_validate(config, sorted, source_count);
+    if (error != VCS_ZCODE_FAMILY_ADMISSION_OK) {
+        free(sorted);
+        return error;
+    }
+    *sorted_out = sorted;
+    return VCS_ZCODE_FAMILY_ADMISSION_OK;
+}
+
+static struct vcs_zcode_family_admission_projection *projection_allocate(
+    const struct vcs_zcode_family_projection_config_v1 *config,
+    size_t source_count)
+{
+    struct vcs_zcode_family_admission_projection *projection =
+        zcl_calloc(1, sizeof(*projection), "family admission projection");
+    if (!projection) return NULL;
+    projection->config = *config;
+    if (source_count) {
+        projection->entries = zcl_calloc(
+            source_count, sizeof(*projection->entries),
+            "family admission projection entries");
+        if (!projection->entries) {
+            free(projection);
+            return NULL;
+        }
+    }
+    return projection;
+}
+
+static void projection_derive_entries(
+    const struct vcs_zcode_family_admission_source_v1 *sorted,
+    size_t source_count,
+    const struct vcs_zcode_family_projection_config_v1 *config,
+    struct vcs_zcode_family_admission_projection *projection)
+{
+    for (size_t begin = 0; begin < source_count;) {
+        size_t end = begin + 1u;
+        while (end < source_count && same_key(&sorted[begin], &sorted[end]))
+            end++;
+        projection_derive_entry(sorted, begin, end, config,
+                                &projection->entries[projection->count++]);
+        begin = end;
+    }
+}
+
 enum vcs_zcode_family_admission_error
 vcs_zcode_family_admission_projection_build_v1(
     const struct vcs_zcode_family_projection_config_v1 *config,
@@ -234,42 +292,16 @@ vcs_zcode_family_admission_projection_build_v1(
     if (source_count > VCS_ZCODE_FAMILY_ADMISSION_MAX_SOURCES)
         return VCS_ZCODE_FAMILY_ADMISSION_LIMIT;
     struct vcs_zcode_family_admission_source_v1 *sorted = NULL;
-    if (source_count) {
-        sorted = zcl_calloc(source_count, sizeof(*sorted),
-                            "family admission sources");
-        if (!sorted) return VCS_ZCODE_FAMILY_ADMISSION_NOMEM;
-        memcpy(sorted, sources, source_count * sizeof(*sorted));
-        error = projection_sources_validate(config, sorted, source_count);
-        if (error != VCS_ZCODE_FAMILY_ADMISSION_OK) {
-            free(sorted);
-            return error;
-        }
-    }
+    error =
+        projection_copy_sorted_sources(config, sources, source_count, &sorted);
+    if (error != VCS_ZCODE_FAMILY_ADMISSION_OK) return error;
     struct vcs_zcode_family_admission_projection *projection =
-        zcl_calloc(1, sizeof(*projection), "family admission projection");
+        projection_allocate(config, source_count);
     if (!projection) {
         free(sorted);
         return VCS_ZCODE_FAMILY_ADMISSION_NOMEM;
     }
-    projection->config = *config;
-    if (source_count) {
-        projection->entries = zcl_calloc(
-            source_count, sizeof(*projection->entries),
-            "family admission projection entries");
-        if (!projection->entries) {
-            free(sorted);
-            free(projection);
-            return VCS_ZCODE_FAMILY_ADMISSION_NOMEM;
-        }
-    }
-    for (size_t begin = 0; begin < source_count;) {
-        size_t end = begin + 1u;
-        while (end < source_count && same_key(&sorted[begin], &sorted[end]))
-            end++;
-        projection_derive_entry(sorted, begin, end, config,
-                                &projection->entries[projection->count++]);
-        begin = end;
-    }
+    projection_derive_entries(sorted, source_count, config, projection);
     free(sorted);
     projection_derive_root(projection);
     *out = projection;

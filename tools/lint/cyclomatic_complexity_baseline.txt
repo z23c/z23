@@ -233,7 +233,6 @@ contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_validate:31
 contexts/commons/modules/vcs/src/zcode_family_admission_object.c:admission_shape:31
 contexts/commons/modules/vcs/src/zcode_family_admission_object.c:vcs_zcode_family_admission_error_string:16
-contexts/commons/modules/vcs/src/zcode_family_admission_projection.c:vcs_zcode_family_admission_projection_build_v1:16
 contexts/commons/modules/vcs/src/zcode_focus.c:vcs_zcode_focus_claim_set_parse:23
 contexts/commons/modules/vcs/src/zcode_focus.c:vcs_zcode_focus_claim_set_serialize:19
 contexts/commons/modules/vcs/src/zcode_focus.c:vcs_zcode_focus_compose:16
