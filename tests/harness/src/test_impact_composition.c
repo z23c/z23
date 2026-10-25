@@ -8477,10 +8477,10 @@ static int test_pw_identity_names_missing_restart_env(void)
                         "%s/build/dev-loop/restart.env", root) <
                (int)sizeof(expect_path));
         struct zcl_dev_proof_build_identity_v1 identity = {0};
-        char why[256] = {0};
+        char why[sizeof(expect_path) + sizeof("restart_env_missing: (make dev-bin)")] = {0};
         ASSERT(!zcl_dev_proof_build_identity_v1_capture(root, &identity, why,
                                                         sizeof(why)));
-        char expect_why[512];
+        char expect_why[sizeof(why)];
         ASSERT(snprintf(expect_why, sizeof(expect_why),
                         "restart_env_missing:%s (make dev-bin)",
                         expect_path) < (int)sizeof(expect_why));
