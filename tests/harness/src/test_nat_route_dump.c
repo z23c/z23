@@ -164,6 +164,34 @@ static struct nat_route_dump_abi rd_abi(void)
     };
 }
 
+/* ── verdict helpers ──────────────────────────────────────────────── */
+
+/* Run the parser over a finished image and report whether it found the
+ * default route with exactly the wanted gateway bytes. */
+static bool rd_finds_gateway(const uint8_t *bytes, size_t len,
+                             const struct nat_route_dump_abi *abi,
+                             uint8_t gw[4], const uint8_t want[4])
+{
+    return nat_route_dump_find_default_gateway(bytes, len, abi, gw) &&
+        memcmp(gw, want, 4) == 0;
+}
+
+/* Report whether the parser refused the image and left the caller's 0xAA
+ * sentinel in the first byte of the output buffer untouched. */
+static bool rd_refuses_with_untouched_gw(const uint8_t *bytes, size_t len,
+                                         const struct nat_route_dump_abi *abi,
+                                         uint8_t gw[4])
+{
+    return !nat_route_dump_find_default_gateway(bytes, len, abi, gw) &&
+        gw[0] == 0xAA;
+}
+
+/* Given the parser's verdict, report success plus an unswapped 10.0.0.1. */
+static bool rd_gateway_is_10_0_0_1(bool found, const uint8_t gw[4])
+{
+    return found && gw[0] == 10 && gw[1] == 0 && gw[2] == 0 && gw[3] == 1;
+}
+
 /* ── tests ────────────────────────────────────────────────────────── */
 
 int test_nat_route_dump(void)
@@ -182,8 +210,7 @@ int test_nat_route_dump(void)
         rd_default_route(&d, want);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("default route found, gateway in network byte order",
-                 nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     memcmp(gw, want, 4) == 0);
+                 rd_finds_gateway(d.bytes, d.len, &abi, gw, want));
     }
 
     /* An asymmetric address catches a swap that a palindrome would hide. */
@@ -194,7 +221,7 @@ int test_nat_route_dump(void)
         memset(gw, 0xAA, sizeof gw);
         bool ok = nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw);
         RD_CHECK("10.0.0.1 is not returned as 1.0.0.10",
-                 ok && gw[0] == 10 && gw[1] == 0 && gw[2] == 0 && gw[3] == 1);
+                 rd_gateway_is_10_0_0_1(ok, gw));
     }
 
     /* ── the destination must be the wildcard ─────────────────────── */
@@ -210,8 +237,7 @@ int test_nat_route_dump(void)
         rd_msg_end(&d, at);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("a non-default destination is not mistaken for the default",
-                 !nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     gw[0] == 0xAA);
+                 rd_refuses_with_untouched_gw(d.bytes, d.len, &abi, gw));
     }
 
     /* A zero-length destination sockaddr IS the wildcard — the kernel
@@ -227,8 +253,7 @@ int test_nat_route_dump(void)
         rd_msg_end(&d, at);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("zero-length destination sockaddr reads as the wildcard",
-                 nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     memcmp(gw, nexthop, 4) == 0);
+                 rd_finds_gateway(d.bytes, d.len, &abi, gw, nexthop));
     }
 
     /* A truncated (odd sa_len) wildcard destination pads to the next
@@ -244,8 +269,7 @@ int test_nat_route_dump(void)
         rd_msg_end(&d, at);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("sockaddr padding is honoured (sa_len 5 consumes 8)",
-                 nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     memcmp(gw, nexthop, 4) == 0);
+                 rd_finds_gateway(d.bytes, d.len, &abi, gw, nexthop));
     }
 
     /* ── flag filtering ───────────────────────────────────────────── */
@@ -270,9 +294,7 @@ int test_nat_route_dump(void)
             rd_msg_end(&d, at);
             memset(gw, 0xAA, sizeof gw);
             RD_CHECK(cases[i].name,
-                     !nat_route_dump_find_default_gateway(d.bytes, d.len, &abi,
-                                                          gw) &&
-                         gw[0] == 0xAA);
+                     rd_refuses_with_untouched_gw(d.bytes, d.len, &abi, gw));
         }
     }
 
@@ -300,8 +322,7 @@ int test_nat_route_dump(void)
         rd_msg_end(&d, at);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("a 0.0.0.0 gateway is refused, not returned as success",
-                 !nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     gw[0] == 0xAA);
+                 rd_refuses_with_untouched_gw(d.bytes, d.len, &abi, gw));
     }
 
     /* An AF_LINK next hop is a directly attached route, not a gateway. */
@@ -316,8 +337,7 @@ int test_nat_route_dump(void)
         rd_msg_end(&d, at);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("an AF_LINK next hop is not read as an IPv4 gateway",
-                 !nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     gw[0] == 0xAA);
+                 rd_refuses_with_untouched_gw(d.bytes, d.len, &abi, gw));
     }
 
     /* A gateway sockaddr too short to hold sin_addr must be refused, NOT
@@ -337,8 +357,7 @@ int test_nat_route_dump(void)
         rd_msg_end(&d, at);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("a truncated gateway sockaddr is refused, not read past",
-                 !nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     gw[0] == 0xAA);
+                 rd_refuses_with_untouched_gw(d.bytes, d.len, &abi, gw));
     }
 
     /* ── multi-message walking ────────────────────────────────────── */
@@ -362,8 +381,7 @@ int test_nat_route_dump(void)
         rd_default_route(&d, nexthop);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("the default route is found behind two non-matching messages",
-                 nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     memcmp(gw, nexthop, 4) == 0);
+                 rd_finds_gateway(d.bytes, d.len, &abi, gw, nexthop));
     }
 
     /* A message whose rtm_version we do not understand is skipped, not
@@ -385,8 +403,7 @@ int test_nat_route_dump(void)
         rd_default_route(&d, nexthop);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("a known-version message after an unknown one is still found",
-                 nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     memcmp(gw, nexthop, 4) == 0);
+                 rd_finds_gateway(d.bytes, d.len, &abi, gw, nexthop));
     }
 
     /* ── malformed images are refused, never resynchronized ───────── */
@@ -421,8 +438,7 @@ int test_nat_route_dump(void)
         rd_msg_end(&d, at);
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("a gateway sockaddr overrunning its message is refused",
-                 !nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     gw[0] == 0xAA);
+                 rd_refuses_with_untouched_gw(d.bytes, d.len, &abi, gw));
     }
 
     /* rtm_addrs promises a gateway sockaddr that was never appended. */
@@ -435,8 +451,7 @@ int test_nat_route_dump(void)
         rd_msg_end(&d, at); /* area holds the destination only */
         memset(gw, 0xAA, sizeof gw);
         RD_CHECK("a promised-but-absent gateway sockaddr is refused",
-                 !nat_route_dump_find_default_gateway(d.bytes, d.len, &abi, gw) &&
-                     gw[0] == 0xAA);
+                 rd_refuses_with_untouched_gw(d.bytes, d.len, &abi, gw));
     }
 
     /* ── argument and ABI guards ──────────────────────────────────── */

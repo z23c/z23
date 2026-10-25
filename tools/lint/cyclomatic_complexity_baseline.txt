@@ -2223,7 +2223,6 @@ tests/harness/src/test_models_core.c:test_model_core:22
 tests/harness/src/test_models_wallet_projection.c:test_model_wallet_projection:80
 tests/harness/src/test_models_zslp.c:test_model_zslp:68
 tests/harness/src/test_multisig.c:test_multisig:53
-tests/harness/src/test_nat_route_dump.c:test_nat_route_dump:18
 tests/harness/src/test_native_api_contract.c:app_write_stub_rpc:28
 tests/harness/src/test_native_api_contract.c:raw_simnet_rpc:17
 tests/harness/src/test_native_api_contract.c:run_dev_failure_api_fixture:33
