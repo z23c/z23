@@ -71,6 +71,34 @@ static int run_worker(const char *args, char *out, size_t out_len)
     return (status & 0x7f) == 0 ? (status >> 8) & 0xff : -1;
 }
 
+/* Count the "... OK" tokens the worker's selftest prints, so a run that
+ * stopped asserting cannot pass as a full one. */
+static size_t count_selftest_ok_tokens(const char *out)
+{
+    size_t checks = 0;
+    for (const char *p = out; (p = strstr(p, "... OK\n")) != NULL; p += 7)
+        checks++;
+    return checks;
+}
+
+/* Write a real file whose contents are not a certificate, so `check` has
+ * something genuine to reject. */
+static void write_non_certificate_file(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fputs("this is not a certificate\n", f);
+        fclose(f);
+    }
+}
+
+/* True when the operator asked for a full live order — a non-empty domain
+ * plus explicit agreement — not just the reachability leg. */
+static bool live_full_order_requested(const char *domain, const char *agree)
+{
+    return domain && domain[0] && agree && strcmp(agree, "1") == 0;
+}
+
 int test_acme_worker(void)
 {
     int failures = 0;
@@ -95,9 +123,7 @@ int test_acme_worker(void)
                  strstr(out, "... FAIL") == NULL);
         /* A selftest that stopped asserting would still print the PASS token.
          * Count the checks so an empty run cannot pass as a full one. */
-        size_t checks = 0;
-        for (const char *p = out; (p = strstr(p, "... OK\n")) != NULL; p += 7)
-            checks++;
+        size_t checks = count_selftest_ok_tokens(out);
         AW_CHECK("it ran a substantial number of checks, not zero",
                  checks >= 100);
         printf("acme_worker: worker selftest reported %zu checks\n", checks);
@@ -146,11 +172,7 @@ int test_acme_worker(void)
         AW_CHECK("and names the verdict in typed output",
                  strstr(out, "verdict=absent") != NULL);
 
-        FILE *f = fopen(garbage, "wb");
-        if (f) {
-            fputs("this is not a certificate\n", f);
-            fclose(f);
-        }
+        write_non_certificate_file(garbage);
         snprintf(args, sizeof(args), "check --cert %s", garbage);
         const int unreadable = run_worker(args, out, sizeof(out));
         AW_CHECK("check on a file that is not a certificate exits 1, never 0",
@@ -207,7 +229,7 @@ int test_acme_worker(void)
         test_make_tmpdir(dir, sizeof(dir), "acme_worker", "live");
         const char *domain = getenv("ZCL_ACME_LIVE_DOMAIN");
         const char *agree = getenv("ZCL_ACME_LIVE_AGREE_TOS");
-        if (!domain || !domain[0] || !agree || strcmp(agree, "1") != 0) {
+        if (!live_full_order_requested(domain, agree)) {
             /* Prove the transport and the public chain without issuing: a
              * `check` cannot do it, so drive one real fetch through the
              * worker by asking it to order for a name it will fail to
