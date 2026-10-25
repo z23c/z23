@@ -250,6 +250,51 @@ static void hodl_page_model_init(struct hodl_page_model *m,
     }
 }
 
+static bool hodl_load_verified_caches(sqlite3 *db, const char *datadir,
+                                      const char *datadir_key, int64_t tip,
+                                      struct hodl_wave_snapshot *hodl,
+                                      char cached_hash[HODL_VIEW_CACHE_HASH_MAX],
+                                      bool *cached_snapshot, bool cacheable)
+{
+    bool ok = cacheable &&
+        hodl_view_cache_get_verified(db, datadir_key, tip, hodl,
+                                     cached_snapshot);
+    if (!ok && cacheable) {
+        ok = hodl_view_disk_cache_load_verified(datadir, db, tip, hodl,
+                                                cached_hash,
+                                                cached_snapshot);
+        if (ok)
+            hodl_view_cache_put(datadir_key, hodl->tip_height, cached_hash,
+                                hodl);
+    }
+    return ok;
+}
+
+static bool hodl_refresh_warm_or_scan(sqlite3 *db, const char *datadir,
+                                      const char *datadir_key, int64_t tip,
+                                      const char *tip_hash,
+                                      struct hodl_wave_snapshot *hodl,
+                                      bool cacheable, bool cached_snapshot,
+                                      bool ok, bool *warming_snapshot)
+{
+    if (ok && cached_snapshot && cacheable)
+        (void)hodl_view_refresh_start(datadir, datadir_key, tip, tip_hash);
+    if (!ok && cacheable && !hodl_view_allow_sync_scan(datadir)) {
+        hodl_view_snapshot_base(hodl, tip);
+        snprintf(hodl->status, sizeof(hodl->status),
+                 "Building the verified HODL snapshot in the background");
+        *warming_snapshot = true;
+        (void)hodl_view_refresh_start(datadir, datadir_key, tip, tip_hash);
+    } else if (!ok) {
+        ok = hodl_wave_scan_current_utxos(db, tip, hodl);
+        if (ok && cacheable) {
+            hodl_view_cache_put(datadir_key, tip, tip_hash, hodl);
+            hodl_view_disk_cache_save(datadir, tip, tip_hash, hodl);
+        }
+    }
+    return ok;
+}
+
 size_t explorer_view_hodl(const char *datadir, uint8_t *r, size_t max)
 {
     sqlite3 *db = NULL;
@@ -284,32 +329,12 @@ size_t explorer_view_hodl(const char *datadir, uint8_t *r, size_t max)
     bool cached_snapshot = false;
     bool warming_snapshot = false;
     hodl_view_tip_hash(db, tip, tip_hash);
-    bool ok = cacheable &&
-        hodl_view_cache_get_verified(db, datadir_key, tip, &hodl,
-                                     &cached_snapshot);
-    if (!ok && cacheable) {
-        ok = hodl_view_disk_cache_load_verified(datadir, db, tip, &hodl,
-                                                cached_hash,
-                                                &cached_snapshot);
-        if (ok)
-            hodl_view_cache_put(datadir_key, hodl.tip_height, cached_hash,
-                                &hodl);
-    }
-    if (ok && cached_snapshot && cacheable)
-        (void)hodl_view_refresh_start(datadir, datadir_key, tip, tip_hash);
-    if (!ok && cacheable && !hodl_view_allow_sync_scan(datadir)) {
-        hodl_view_snapshot_base(&hodl, tip);
-        snprintf(hodl.status, sizeof(hodl.status),
-                 "Building the verified HODL snapshot in the background");
-        warming_snapshot = true;
-        (void)hodl_view_refresh_start(datadir, datadir_key, tip, tip_hash);
-    } else if (!ok) {
-        ok = hodl_wave_scan_current_utxos(db, tip, &hodl);
-        if (ok && cacheable) {
-            hodl_view_cache_put(datadir_key, tip, tip_hash, &hodl);
-            hodl_view_disk_cache_save(datadir, tip, tip_hash, &hodl);
-        }
-    }
+    bool ok = hodl_load_verified_caches(db, datadir, datadir_key, tip, &hodl,
+                                        cached_hash, &cached_snapshot,
+                                        cacheable);
+    ok = hodl_refresh_warm_or_scan(db, datadir, datadir_key, tip, tip_hash,
+                                   &hodl, cacheable, cached_snapshot, ok,
+                                   &warming_snapshot);
     sqlite3_close(db);
 
     struct template_var open_vars[] = {

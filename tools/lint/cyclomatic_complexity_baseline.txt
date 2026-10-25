@@ -552,7 +552,6 @@ contexts/explorer/views/src/explorer_factoids_chaindata.c:factoids_emit_section_
 contexts/explorer/views/src/explorer_factoids_records.c:factoids_emit_section_5_records:19
 contexts/explorer/views/src/explorer_factoids_view.c:explorer_factoids_build_json_for_served_tip:16
 contexts/explorer/views/src/explorer_network_view.c:explorer_view_network:17
-contexts/explorer/views/src/explorer_pages_hodl.c:explorer_view_hodl:23
 contexts/explorer/views/src/explorer_pages_hodl_rows.c:hodl_build_survival_rows:28
 contexts/explorer/views/src/explorer_pages_hodl_rows.c:hodl_load_history_wave_rows:16
 contexts/explorer/views/src/explorer_pages_hodl_snapshot.c:hodl_view_disk_cache_read:33
