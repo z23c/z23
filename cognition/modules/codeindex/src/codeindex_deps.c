@@ -358,6 +358,39 @@ enum epoch_state {
     EPOCH_UNKNOWN,  /* epoch-managed, but no epoch is claimed as current */
 };
 
+static bool epoch_read_stable(struct platform_positioned_file *file, char name[72],
+                              const struct platform_positioned_file_snapshot *before,
+                              int64_t *got)
+{
+    struct platform_positioned_file_snapshot after;
+    *got = platform_positioned_file_read(file, name, (size_t)before->size, 0);
+    return *got == (int64_t)before->size &&
+           platform_positioned_file_snapshot(file, &after) &&
+           before->volume == after.volume && before->file_low == after.file_low &&
+           before->file_high == after.file_high && before->size == after.size &&
+           before->modified_seconds == after.modified_seconds &&
+           before->modified_nanoseconds == after.modified_nanoseconds;
+}
+
+static enum epoch_state epoch_resolve_name(const char *root, const char *reldir,
+                                           const char *name, size_t len,
+                                           char out[CI_PATH_MAX])
+{
+    int cn = snprintf(out, CI_PATH_MAX, "%s/epochs/%.*s", reldir, (int)len, name);
+    if (cn <= 0 || (size_t)cn >= CI_PATH_MAX) return EPOCH_UNKNOWN;
+    char path[CI_PATH_MAX];
+    int fn = snprintf(path, sizeof(path), "%s/%s", root, out);
+    if (fn <= 0 || (size_t)fn >= sizeof(path) ||
+        platform_directory_probe_real(path) != PLATFORM_DIRECTORY_PROBE_OK) {
+        LOG_WARN("codeindex",
+                 "%s names current compile epoch %.*s, which is not a "
+                 "directory — its depfiles are OUTSIDE the include graph",
+                 reldir, (int)len, name);
+        return EPOCH_UNKNOWN;
+    }
+    return EPOCH_CURRENT;
+}
+
 static enum epoch_state epoch_current_dir(const char *root, const char *reldir,
                                           char out[CI_PATH_MAX])
 {
@@ -372,7 +405,7 @@ static enum epoch_state epoch_current_dir(const char *root, const char *reldir,
     n = snprintf(path, sizeof(path), "%s/%s/.current-epoch", root, reldir);
     if (n <= 0 || (size_t)n >= sizeof(path)) return EPOCH_UNKNOWN;
     struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before, after;
+    struct platform_positioned_file_snapshot before;
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, path) ||
         !platform_positioned_file_snapshot(&file, &before) ||
@@ -385,16 +418,8 @@ static enum epoch_state epoch_current_dir(const char *root, const char *reldir,
         return EPOCH_UNKNOWN;
     }
     char name[72];
-    int64_t got = platform_positioned_file_read(&file, name,
-                                                 (size_t)before.size, 0);
-    bool stable = got == (int64_t)before.size &&
-                  platform_positioned_file_snapshot(&file, &after) &&
-                  before.volume == after.volume &&
-                  before.file_low == after.file_low &&
-                  before.file_high == after.file_high &&
-                  before.size == after.size &&
-                  before.modified_seconds == after.modified_seconds &&
-                  before.modified_nanoseconds == after.modified_nanoseconds;
+    int64_t got;
+    bool stable = epoch_read_stable(&file, name, &before, &got);
     platform_positioned_file_close(&file);
     size_t len = stable ? (size_t)got : 0;
     while (len > 0 && (name[len - 1] == '\n' || name[len - 1] == '\r')) len--;
@@ -404,19 +429,7 @@ static enum epoch_state epoch_current_dir(const char *root, const char *reldir,
                  "are OUTSIDE the include graph", reldir);
         return EPOCH_UNKNOWN;
     }
-    int cn = snprintf(out, CI_PATH_MAX, "%s/epochs/%.*s", reldir, (int)len,
-                      name);
-    if (cn <= 0 || (size_t)cn >= CI_PATH_MAX) return EPOCH_UNKNOWN;
-    int fn = snprintf(path, sizeof(path), "%s/%s", root, out);
-    if (fn <= 0 || (size_t)fn >= sizeof(path) ||
-        platform_directory_probe_real(path) != PLATFORM_DIRECTORY_PROBE_OK) {
-        LOG_WARN("codeindex",
-                 "%s names current compile epoch %.*s, which is not a "
-                 "directory — its depfiles are OUTSIDE the include graph",
-                 reldir, (int)len, name);
-        return EPOCH_UNKNOWN;
-    }
-    return EPOCH_CURRENT;
+    return epoch_resolve_name(root, reldir, name, len, out);
 }
 
 static bool dep_child_ignored(const char *reldir, const char *name)
@@ -1051,6 +1064,21 @@ static void scan_depfile_text(
     g_scan_depfile = "";
 }
 
+static bool depfile_read_stable(struct platform_positioned_file *file, char *buf,
+                                 size_t len,
+                                 const struct platform_positioned_file_snapshot *before,
+                                 struct platform_positioned_file_snapshot *after)
+{
+    return platform_positioned_file_read(file, buf, len, 0) == (int64_t)len &&
+           platform_positioned_file_snapshot(file, after) &&
+           before->size == after->size && before->volume == after->volume &&
+           before->file_low == after->file_low && before->file_high == after->file_high &&
+           before->modified_seconds == after->modified_seconds &&
+           before->modified_nanoseconds == after->modified_nanoseconds &&
+           before->changed_seconds == after->changed_seconds &&
+           before->changed_nanoseconds == after->changed_nanoseconds;
+}
+
 static bool scan_one_depfile(const char *root, const char *relpath,
                              ci_dep_cb cb, void *user,
                              struct sha3_256_ctx *sha,
@@ -1079,16 +1107,7 @@ static bool scan_one_depfile(const char *root, const char *relpath,
         platform_positioned_file_close(&file);
         LOG_FAIL("codeindex", "allocate depfile path=%s", relpath);
     }
-    bool ok = platform_positioned_file_read(&file, buf, len, 0) ==
-                  (int64_t)len &&
-              platform_positioned_file_snapshot(&file, &after) &&
-              before.size == after.size && before.volume == after.volume &&
-              before.file_low == after.file_low &&
-              before.file_high == after.file_high &&
-              before.modified_seconds == after.modified_seconds &&
-              before.modified_nanoseconds == after.modified_nanoseconds &&
-              before.changed_seconds == after.changed_seconds &&
-              before.changed_nanoseconds == after.changed_nanoseconds;
+    bool ok = depfile_read_stable(&file, buf, len, &before, &after);
     platform_positioned_file_close(&file);
     if (!ok) {
         free(buf);
@@ -1177,6 +1196,33 @@ bool ci_deps_scan_roots(const char *root, ci_dep_cb cb, void *user,
     return deps_scan_exact(root, cb, user, exact_out, stat_out);
 }
 
+static bool depfile_graph_note(const char *root, const char *relpath,
+                                size_t *count, int64_t *newest)
+{
+    char full[CI_PATH_MAX];
+    int fn = snprintf(full, sizeof(full), "%s/%s", root, relpath);
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot snapshot;
+    platform_positioned_file_init(&file);
+    if (fn <= 0 || (size_t)fn >= sizeof(full) ||
+        !platform_positioned_file_open(&file, full) ||
+        !platform_positioned_file_snapshot(&file, &snapshot)) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    platform_positioned_file_close(&file);
+    (*count)++;
+    if (snapshot.modified_seconds > INT64_MAX / INT64_C(1000000000) ||
+        snapshot.modified_seconds < INT64_MIN / INT64_C(1000000000)) {
+        errno = EOVERFLOW;
+        return false;
+    }
+    int64_t mt = snapshot.modified_seconds * INT64_C(1000000000) +
+                 (int64_t)snapshot.modified_nanoseconds;
+    if (mt > *newest) *newest = mt;
+    return true;
+}
+
 bool codeindex_depfile_graph(const char *root, size_t *out_count,
                              int64_t *out_newest_mtime_ns)
 {
@@ -1208,29 +1254,10 @@ bool codeindex_depfile_graph(const char *root, size_t *out_count,
     size_t count = 0;
     int64_t newest = 0;
     for (size_t i = 0; i < paths.count; i++) {
-        char full[CI_PATH_MAX];
-        int fn = snprintf(full, sizeof(full), "%s/%s", root, paths.items[i]);
-        struct platform_positioned_file file;
-        struct platform_positioned_file_snapshot snapshot;
-        platform_positioned_file_init(&file);
-        if (fn <= 0 || (size_t)fn >= sizeof(full) ||
-            !platform_positioned_file_open(&file, full) ||
-            !platform_positioned_file_snapshot(&file, &snapshot)) {
-            platform_positioned_file_close(&file);
+        if (!depfile_graph_note(root, paths.items[i], &count, &newest)) {
             ok = false;
             break;
         }
-        platform_positioned_file_close(&file);
-        count++;
-        if (snapshot.modified_seconds > INT64_MAX / INT64_C(1000000000) ||
-            snapshot.modified_seconds < INT64_MIN / INT64_C(1000000000)) {
-            errno = EOVERFLOW;
-            ok = false;
-            break;
-        }
-        int64_t mt = snapshot.modified_seconds * INT64_C(1000000000) +
-                     (int64_t)snapshot.modified_nanoseconds;
-        if (mt > newest) newest = mt;
     }
     dep_paths_free(&paths);
     if (!ok)

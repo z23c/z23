@@ -18,9 +18,6 @@ cognition/controllers/src/agent_test_controller.c:rpc_agent_test:23
 cognition/controllers/src/event_agent_summary.c:rpc_agent_summary:30
 cognition/modules/codeindex/src/codeindex.c:codeindex_build_cold_ms:19
 cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:26
-cognition/modules/codeindex/src/codeindex_deps.c:codeindex_depfile_graph:19
-cognition/modules/codeindex/src/codeindex_deps.c:epoch_current_dir:27
-cognition/modules/codeindex/src/codeindex_deps.c:scan_one_depfile:21
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_copy_image:23
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_install_posix:61
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_open_image:18
