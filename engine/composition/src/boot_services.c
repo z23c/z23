@@ -425,6 +425,7 @@ static void boot_register_core_liveness_and_reducer(
 {
     if (!svc)
         return;
+    int64_t t_clr = svc_clock_ms();
 
     /* Start the supervisor thread before any core liveness contracts register.
      * Keep this before optional frontend/Tor startup: RPC can come up before
@@ -439,6 +440,7 @@ static void boot_register_core_liveness_and_reducer(
     /* Initialize the typed blocker primitive. Must come before any subsystem
      * calls blocker_set / mirror_consensus_record_blocker. Idempotent. */
     blocker_module_init();
+    t_clr = boot_mark_step(t_clr, "svc.clr.supervisor", "svc.clr.register_contracts");
 
     /* Outbound peer-floor liveness contract.
      *
@@ -489,6 +491,7 @@ static void boot_register_core_liveness_and_reducer(
      * fire. */
     blocker_history_bridge_register();
     self_heal_register(svc->state);
+    t_clr = boot_mark_step(t_clr, "svc.clr.register_contracts", "svc.clr.self_heal_staged_sync");
     /* Spawn the dedicated condition-runner thread. The engine's detect/remedy
      * passes can run for seconds and MUST NOT run on the root supervisor sweep
      * thread (a heavy pass there freezes supervisor_sweep_heartbeat past the 30 s
@@ -496,6 +499,7 @@ static void boot_register_core_liveness_and_reducer(
      * heartbeat; a hung remedy becomes a named blocker, never a frozen root. */
     self_heal_start();
     staged_sync_supervisor_register(svc->state);
+    t_clr = boot_mark_step(t_clr, "svc.clr.self_heal_staged_sync", "svc.clr.seed_frontier");
 
     /* Recover the durable finalized frontier a reboot dropped.
      * staged_sync_supervisor_register (above) ran tip_finalize_stage_init,
@@ -525,6 +529,7 @@ static void boot_register_core_liveness_and_reducer(
     if (!armed_from_anchor)
         (void)block_index_loader_seed_stages_from_cold_import(
             svc->state, boot_node_db(svc), progress_store_db());
+    t_clr = boot_mark_step(t_clr, "svc.clr.seed_frontier", "svc.clr.genesis_seed");
 
     /* Fresh-genesis bootstrap, EVERY network — boot-time mirror of the
      * on-demand ingest seed in reducer_ingest_service.c. Without it the fold
@@ -548,6 +553,7 @@ static void boot_register_core_liveness_and_reducer(
             reducer_ingest_try_seed_anchor(0, gtip->phashBlock->data,
                                            "fresh-genesis-boot");
     }
+    (void)boot_mark_step(t_clr, "svc.clr.genesis_seed", "svc.core_liveness_reducer");
 }
 
 /* ── Runtime service startup (called from app_init) ────────── */
@@ -1350,11 +1356,10 @@ bool app_init_services(struct app_context *ctx,
                            "svc.core_liveness_reducer");
 
     boot_register_core_liveness_and_reducer(svc, params);
-    boot_step_enter("svc.frontend_tor_start");
+    t_svc = boot_mark_step(t_svc, "svc.core_liveness_reducer", "svc.frontend_tor_start");
     boot_configure_frontend_rpc(svc);
 
-    /* frontend kernel start includes onion_tor bootstrap (Tor) — the
-     * span the profile flagged as the likely bulk of the ~11s. */
+    /* Frontend services (RPC, explorer, zcode store, onion_tor) start below. */
     /* A frontend failure is not data loss: keep P2P and chain advancement
      * alive, report DEGRADED_SERVING, and retry a failed RPC bind below.
      * The retry leaves healthy frontend siblings running. */
