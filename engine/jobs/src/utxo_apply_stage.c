@@ -1058,13 +1058,17 @@ void utxo_apply_stage_test_hold_lock(bool hold)
  * first-failure summary helper) lives in utxo_apply_stage_dump.c — see
  * utxo_apply_stage_internal.h. */
 
-/* Snapshot of the bound context for the post-commit turnstile seeder. */
+/* Snapshot of the bound context for the post-commit turnstile seeder. Seeding
+ * is optional work that must never delay block apply: when the stage lock is
+ * busy (init, shutdown, a test holding it) this returns false and the seeder
+ * simply runs on the next drain. */
 bool utxo_apply_stage_seed_context(struct main_state **ms, char *datadir,
                                    size_t datadir_size,
                                    utxo_apply_reader_fn *reader,
                                    void **reader_user)
 {
-    pthread_mutex_lock(&g_lock);
+    if (pthread_mutex_trylock(&g_lock) != 0)
+        return false;
     bool bound = g_ms != NULL;
     if (bound) {
         *ms = g_ms;
