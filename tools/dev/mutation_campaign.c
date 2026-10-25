@@ -76,6 +76,48 @@ static bool mc_prefix(const char *arg, const char *key, const char **val)
     return true;
 }
 
+/* Recognise one `--key=value` argument and store its value in o, trying the
+ * keys in the same order mc_parse always has. Returns false when a is not a
+ * value option, so the caller can try the flag and help forms. */
+static bool mc_parse_value_option(const char *a, struct mc_opts *o)
+{
+    const char *v = NULL;
+    if (mc_prefix(a, "--file=", &v))
+        o->file = v;
+    else if (mc_prefix(a, "--group=", &v))
+        o->group = v;
+    else if (mc_prefix(a, "--target=", &v))
+        o->target = v;
+    else if (mc_prefix(a, "--work=", &v))
+        o->work = v;
+    else if (mc_prefix(a, "--report=", &v))
+        o->report = v;
+    else if (mc_prefix(a, "--limit=", &v))
+        o->limit = (size_t)strtoull(v, NULL, 10);
+    else if (mc_prefix(a, "--build-timeout=", &v))
+        o->build_timeout_ms = (int)(strtol(v, NULL, 10) * 1000);
+    else if (mc_prefix(a, "--test-timeout=", &v))
+        o->test_timeout_ms = (int)(strtol(v, NULL, 10) * 1000);
+    else
+        return false;
+    return true;
+}
+
+/* Recognise one valueless flag argument and set it in o. Returns false when
+ * a is not one of the flags, so the caller can try -h/--help. */
+static bool mc_parse_flag_option(const char *a, struct mc_opts *o)
+{
+    if (strcmp(a, "--list") == 0)
+        o->list = true;
+    else if (strcmp(a, "--no-cache") == 0)
+        o->no_cache = true;
+    else if (strcmp(a, "--quiet") == 0)
+        o->quiet = true;
+    else
+        return false;
+    return true;
+}
+
 static bool mc_parse(int argc, char **argv, struct mc_opts *o)
 {
     memset(o, 0, sizeof *o);
@@ -83,38 +125,18 @@ static bool mc_parse(int argc, char **argv, struct mc_opts *o)
     o->work = "build/mutation-campaign";
     o->build_timeout_ms = 900000;
     o->test_timeout_ms = 300000;
-    const char *v = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (mc_prefix(a, "--file=", &v))
-            o->file = v;
-        else if (mc_prefix(a, "--group=", &v))
-            o->group = v;
-        else if (mc_prefix(a, "--target=", &v))
-            o->target = v;
-        else if (mc_prefix(a, "--work=", &v))
-            o->work = v;
-        else if (mc_prefix(a, "--report=", &v))
-            o->report = v;
-        else if (mc_prefix(a, "--limit=", &v))
-            o->limit = (size_t)strtoull(v, NULL, 10);
-        else if (mc_prefix(a, "--build-timeout=", &v))
-            o->build_timeout_ms = (int)(strtol(v, NULL, 10) * 1000);
-        else if (mc_prefix(a, "--test-timeout=", &v))
-            o->test_timeout_ms = (int)(strtol(v, NULL, 10) * 1000);
-        else if (strcmp(a, "--list") == 0)
-            o->list = true;
-        else if (strcmp(a, "--no-cache") == 0)
-            o->no_cache = true;
-        else if (strcmp(a, "--quiet") == 0)
-            o->quiet = true;
-        else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+        if (mc_parse_value_option(a, o))
+            continue;
+        if (mc_parse_flag_option(a, o))
+            continue;
+        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             mc_usage(stdout);
             exit(0);
-        } else {
-            fprintf(stderr, "mutation-campaign: unknown argument: %s\n", a);
-            return false;
         }
+        fprintf(stderr, "mutation-campaign: unknown argument: %s\n", a);
+        return false;
     }
     if (!o->file) {
         fprintf(stderr, "mutation-campaign: --file is required\n");
