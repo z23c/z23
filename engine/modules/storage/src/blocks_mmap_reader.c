@@ -162,6 +162,16 @@ static struct bmr_slot *bmr_ensure_slot(struct blocks_mmap *m, int32_t nFile)
     return &m->lru[victim];
 }
 
+static bool bmr_payload_magic_ok(const uint8_t *hdr)
+{
+    return (hdr[0] == 0x24 && hdr[1] == 0xe9 &&
+            hdr[2] == 0x27 && hdr[3] == 0x64) ||
+           (hdr[0] == 0xfa && hdr[1] == 0x1a &&
+            hdr[2] == 0xf9 && hdr[3] == 0xbf) ||
+           (hdr[0] == 0xaa && hdr[1] == 0xe8 &&
+            hdr[2] == 0x3f && hdr[3] == 0x5f);
+}
+
 const uint8_t *bmr_get_payload(struct blocks_mmap *m,
                                int32_t nFile, uint32_t nDataPos,
                                size_t *out_len)
@@ -179,12 +189,7 @@ const uint8_t *bmr_get_payload(struct blocks_mmap *m,
     }
 
     const uint8_t *hdr = s->base + (nDataPos - 8u);
-    bool magic_ok = (hdr[0] == 0x24 && hdr[1] == 0xe9 &&
-                     hdr[2] == 0x27 && hdr[3] == 0x64) ||
-                    (hdr[0] == 0xfa && hdr[1] == 0x1a &&
-                     hdr[2] == 0xf9 && hdr[3] == 0xbf) ||
-                    (hdr[0] == 0xaa && hdr[1] == 0xe8 &&
-                     hdr[2] == 0x3f && hdr[3] == 0x5f);
+    bool magic_ok = bmr_payload_magic_ok(hdr);
     if (!magic_ok) {
         fprintf(stderr, "[bmr] bad magic at nFile=%d nDataPos=%u: %02x%02x%02x%02x\n",
                 nFile, nDataPos, hdr[0], hdr[1], hdr[2], hdr[3]);
