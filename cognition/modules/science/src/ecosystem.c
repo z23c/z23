@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Creenton - Apache License 2.0
  * Purpose: derive the live Z23 C23 ecosystem snapshot from checkout evidence. */
 
 #include "science/ecosystem.h"
@@ -216,6 +216,41 @@ static bool text_named_list(char *out, size_t cap, size_t *used,
     return ok;
 }
 
+static bool eco_resolve_inventory_path(
+    const char *root, const struct science_ecosystem_collect_options *options,
+    char *inventory, size_t inventory_cap, const char **resolved)
+{
+    const char *path = options ? options->inventory_path : NULL;
+    if (path && path[0]) {
+        *resolved = path;
+        return true;
+    }
+    int n = snprintf(inventory, inventory_cap,
+                     "%s/build/gen/CAPABILITY_INVENTORY.jsonl", root);
+    if (n <= 0 || (size_t)n >= inventory_cap)
+        return false;
+    *resolved = inventory;
+    return true;
+}
+
+static void eco_collect_growth_if_requested(
+    const char *root, const struct science_ecosystem_collect_options *options,
+    struct science_ecosystem_snapshot *out)
+{
+    if (!options || !options->collect_growth)
+        return;
+    if (science_code_growth_collect(root, &out->growth, out->growth_error,
+                                    sizeof(out->growth_error))) {
+        out->growth_present = true;
+        out->growth_error[0] = '\0';
+    } else {
+        out->growth_present = false;
+        if (!out->growth_error[0])
+            (void)snprintf(out->growth_error, sizeof(out->growth_error),
+                           "Git growth reconstruction failed");
+    }
+}
+
 bool science_ecosystem_collect(
     const char *root,
     const struct science_ecosystem_collect_options *options,
@@ -237,29 +272,14 @@ bool science_ecosystem_collect(
                          "architectural context walk failed");
 
     char inventory[ECO_WALK_PATH_MAX];
-    const char *inventory_path = options ? options->inventory_path : NULL;
-    if (!inventory_path || !inventory_path[0]) {
-        int n = snprintf(inventory, sizeof(inventory),
-                         "%s/build/gen/CAPABILITY_INVENTORY.jsonl", root);
-        if (n <= 0 || (size_t)n >= sizeof(inventory))
-            return eco_error(error, error_cap, "inventory path is too long");
-        inventory_path = inventory;
-    }
+    const char *inventory_path = NULL;
+    if (!eco_resolve_inventory_path(root, options, inventory,
+                                    sizeof(inventory), &inventory_path))
+        return eco_error(error, error_cap, "inventory path is too long");
     if (!science_corpus_measure(root, inventory_path, &out->corpus))
         return eco_error(error, error_cap, "maintained C23 census failed");
 
-    if (options && options->collect_growth) {
-        if (science_code_growth_collect(root, &out->growth, out->growth_error,
-                                        sizeof(out->growth_error))) {
-            out->growth_present = true;
-            out->growth_error[0] = '\0';
-        } else {
-            out->growth_present = false;
-            if (!out->growth_error[0])
-                (void)snprintf(out->growth_error, sizeof(out->growth_error),
-                               "Git growth reconstruction failed");
-        }
-    }
+    eco_collect_growth_if_requested(root, options, out);
 
     if (error && error_cap)
         error[0] = '\0';
