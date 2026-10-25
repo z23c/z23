@@ -253,7 +253,6 @@ contexts/commons/modules/vcs/src/zcode_dht_record_store.c:vcs_zcode_dht_record_s
 contexts/commons/modules/vcs/src/zcode_dht_service_discovery.c:discovery_drive_children:26
 contexts/commons/modules/vcs/src/zcode_dht_service_lookup.c:vcs_zcode_dht_lookup_insert:18
 contexts/commons/modules/vcs/src/zcode_dht_service_lookup.c:vcs_zcode_dht_lookup_schedule:19
-contexts/commons/modules/vcs/src/zcode_dht_service_publication.c:publication_build:16
 contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publication_drive:33
 contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publication_drive_stores:23
 contexts/commons/modules/vcs/src/zcode_dht_service_session.c:vcs_zcode_dht_service_session_open:29

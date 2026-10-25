@@ -31,6 +31,22 @@ void publication_mark_dirty(struct vcs_zcode_dht_service *service,
   service->persistence_generation++;
 }
 
+/* The pre-build refusal test: null service/spec/outputs, a disabled service,
+ * a missing record store, or an ack-kind spec on a path that does not allow
+ * acks. */
+static bool publication_build_input_refused(
+    const struct vcs_zcode_dht_service *service,
+    const struct vcs_zcode_dht_publish_spec *spec,
+    const struct vcs_zcode_dht_record *record, const uint8_t *token,
+    bool allow_ack)
+{
+  return !service || !service->enabled || !service->record_store || !spec ||
+         !record || !token ||
+         ((spec->kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
+           spec->kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK) &&
+          !allow_ack);
+}
+
 /* Build the signed record and its plan token. On refusal, *reason (when
  * non-NULL) says which named record contract failed — VCS_ZCODE_DHT_RECORD_OK
  * still means "not a record-contract refusal" (service disabled, null input,
@@ -44,11 +60,8 @@ static bool publication_build(
 {
   if (reason)
     *reason = VCS_ZCODE_DHT_RECORD_OK;
-  if (!service || !service->enabled || !service->record_store || !spec ||
-      !record || !token ||
-      ((spec->kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
-        spec->kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK) &&
-       !allow_ack))
+  if (publication_build_input_refused(service, spec, record, token,
+                                      allow_ack))
     return false;
   memset(record, 0, sizeof(*record));
   record->kind = spec->kind;
