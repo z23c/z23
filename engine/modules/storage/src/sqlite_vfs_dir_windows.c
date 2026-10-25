@@ -156,19 +156,8 @@ static bool vfs_dir_retry_ioerr(int *retries, DWORD *error)
 
 /* ── Leaf validation and allowlist ─────────────────────────────────────── */
 
-/* Plain-basename rules, mirroring valid_leaf() in
- * platform/modules/platform/src/directory_transaction.c: no separators or drive/stream
- * syntax, no dot-relative names, no trailing dot/space, no reserved device
- * stems. */
-bool vfs_dir_valid_leaf(const char *leaf)
+static bool vfs_dir_device_stem_allowed(const char *leaf)
 {
-    if (!leaf || !leaf[0] || strlen(leaf) > VFS_DIR_LEAF_MAX ||
-        !strcmp(leaf, ".") || !strcmp(leaf, "..") || strchr(leaf, '/') ||
-        strchr(leaf, '\\') || strchr(leaf, ':'))
-        return false;
-    size_t n = strlen(leaf);
-    if (leaf[n - 1] == '.' || leaf[n - 1] == ' ')
-        return false;
     char stem[16];
     size_t stem_len = strcspn(leaf, ".");
     if (stem_len >= sizeof(stem)) stem_len = sizeof(stem) - 1;
@@ -183,6 +172,22 @@ bool vfs_dir_valid_leaf(const char *leaf)
          stem[3] >= '1' && stem[3] <= '9'))
         return false;
     return true;
+}
+
+/* Plain-basename rules, mirroring valid_leaf() in
+ * platform/modules/platform/src/directory_transaction.c: no separators or drive/stream
+ * syntax, no dot-relative names, no trailing dot/space, no reserved device
+ * stems. */
+bool vfs_dir_valid_leaf(const char *leaf)
+{
+    if (!leaf || !leaf[0] || strlen(leaf) > VFS_DIR_LEAF_MAX ||
+        !strcmp(leaf, ".") || !strcmp(leaf, "..") || strchr(leaf, '/') ||
+        strchr(leaf, '\\') || strchr(leaf, ':'))
+        return false;
+    size_t n = strlen(leaf);
+    if (leaf[n - 1] == '.' || leaf[n - 1] == ' ')
+        return false;
+    return vfs_dir_device_stem_allowed(leaf);
 }
 
 static bool vfs_dir_is_hex9(const char *tail)
