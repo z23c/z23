@@ -162,17 +162,24 @@ static struct os_sandbox_rlimits spawn_rlimits(void)
     };
 }
 
-bool agent_broker_spawn_confined(const struct agent_spawn_request *req,
-                                 struct agent_spawn_result *result)
+/* The spawn argument gate. Each LOG_FAIL below both reports and returns
+ * false, so a caller that gets past this helper holds a request that is
+ * fully present and whose script token is safe. */
+static bool spawn_request_is_valid(const struct agent_spawn_request *req,
+                                   struct agent_spawn_result *result)
 {
     if (!req || !result || !req->self_exe || !req->scratch_dir || !req->script)
         LOG_FAIL(BROKER_TAG, "null argument to spawn");
     if (!mvap_param_is_safe(req->script))
         LOG_FAIL(BROKER_TAG, "script name '%s' is not a safe token",
                  req->script);
-    memset(result, 0, sizeof(*result));
+    return true;
+}
 
-    int sv[2];
+/* The socket pair the agent will inherit, with the broker end armed for
+ * credential passing. */
+static bool spawn_open_peer_socket(int sv[2])
+{
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
         LOG_FAIL(BROKER_TAG, "socketpair failed: %s", strerror(errno));
 
@@ -187,6 +194,113 @@ bool agent_broker_spawn_confined(const struct agent_spawn_request *req,
         LOG_FAIL(BROKER_TAG, "SO_PASSCRED on the broker end failed: %s",
                  strerror(errno));
     }
+    return true;
+}
+
+/* The child end of the pair, moved onto the fixed descriptor. */
+static void spawn_child_claim_socket(int sock)
+{
+    if (sock != AGENT_CHILD_SOCKET_FD) {
+        if (dup2(sock, AGENT_CHILD_SOCKET_FD) < 0)
+            _exit(90);
+        (void)close(sock);
+    }
+    /* The socket must survive execve; everything else must not. */
+    (void)fcntl(AGENT_CHILD_SOCKET_FD, F_SETFD, 0);
+}
+
+/* The requested uid/gid drop, then the rlimits and no_new_privs that must
+ * be in place before execve. */
+static void spawn_child_apply_identity_and_limits(
+    const struct agent_spawn_request *req)
+{
+    /* uid drop, when this process has the authority to do one. */
+    if (req->confined_uid != 0 && req->confined_uid != geteuid())
+        spawn_drop_privileges(req->confined_uid, req->confined_gid);
+
+    struct os_sandbox_rlimits lim = spawn_rlimits();
+    if (!zcl_result_is_ok(os_sandbox_set_rlimits(&lim)))
+        _exit(93);
+    if (!os_sandbox_no_new_privs())
+        _exit(94);
+}
+
+/* The Landlock domain, built from spawn_build_grants' rules. */
+static void spawn_child_apply_landlock(const struct agent_spawn_request *req)
+{
+    struct os_sandbox_path_rule rules[8];
+    size_t n = spawn_build_grants(req, rules, 8);
+    struct zcl_result lr = os_sandbox_landlock_restrict(rules, n);
+    /* A kernel without Landlock degrades loudly rather than pretending:
+     * the child reports landlock_applied=false at handshake and the
+     * operator sees it in `metaverse agent status`. */
+    if (!zcl_result_is_ok(lr) && lr.code != OS_SANDBOX_ERR_LANDLOCK_UNAVAILABLE)
+        _exit(95);
+}
+
+/* Copies the confined allow-set out and extends it with g_stage1_extra. */
+static void spawn_child_install_stage1_seccomp(void)
+{
+    size_t n_base = 0;
+    const int *base = agent_confined_allowed_syscalls(&n_base);
+    size_t n_extra = sizeof(g_stage1_extra) / sizeof(g_stage1_extra[0]);
+    int stage1[320];
+    if (n_base + n_extra > sizeof(stage1) / sizeof(stage1[0]))
+        _exit(96);
+    memcpy(stage1, base, n_base * sizeof(int));
+    memcpy(stage1 + n_base, g_stage1_extra, n_extra * sizeof(int));
+    struct zcl_result sr = os_sandbox_seccomp_allow(stage1,
+                                                    n_base + n_extra);
+    if (!zcl_result_is_ok(sr) && sr.code != OS_SANDBOX_ERR_SECCOMP_UNAVAILABLE)
+        _exit(97);
+}
+
+/* execve into the confined agent; never returns. */
+static void spawn_child_exec_agent(const struct agent_spawn_request *req)
+{
+    /* argv carries the mode, the script name, the scratch dir and, when the
+     * broker set one, the canary path to probe. envp is EMPTY — that is
+     * what makes /proc/<pid>/environ carry nothing of the operator's
+     * session, and no grant material exists in either. The canary is an
+     * instruction to TRY a path, not permission to reach it: the Landlock
+     * domain built above decides that, and it was built before this line. */
+    char *argv[6];
+    size_t a = 0;
+    argv[a++] = (char *)req->self_exe;
+    argv[a++] = (char *)"--metaverse-agent-confined";
+    argv[a++] = (char *)req->script;
+    argv[a++] = (char *)req->scratch_dir;
+    if (req->canary && req->canary[0])
+        argv[a++] = (char *)req->canary;
+    argv[a] = NULL;
+    char *const envp[] = { NULL };
+    execve(req->self_exe, argv, envp);
+    _exit(98);
+}
+
+/* The forked child's whole path from close(sv[0]) to execve, in the order
+ * the boundary requires; never returns. */
+static void spawn_confined_child(const struct agent_spawn_request *req,
+                                 int sv[2])
+{
+    (void)close(sv[0]);
+    spawn_child_claim_socket(sv[1]);
+    spawn_child_apply_identity_and_limits(req);
+    spawn_child_apply_landlock(req);
+    spawn_child_install_stage1_seccomp();
+    spawn_child_exec_agent(req);
+}
+
+bool agent_broker_spawn_confined(const struct agent_spawn_request *req,
+                                 struct agent_spawn_result *result)
+{
+    if (!spawn_request_is_valid(req, result))
+        return false;
+    memset(result, 0, sizeof(*result));
+
+    int sv[2];
+    if (!spawn_open_peer_socket(sv))
+        return false;
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -197,65 +311,7 @@ bool agent_broker_spawn_confined(const struct agent_spawn_request *req,
 
     if (pid == 0) {
         /* ── the child, still our code, still trusted ─────────────────── */
-        (void)close(sv[0]);
-        if (sv[1] != AGENT_CHILD_SOCKET_FD) {
-            if (dup2(sv[1], AGENT_CHILD_SOCKET_FD) < 0)
-                _exit(90);
-            (void)close(sv[1]);
-        }
-        /* The socket must survive execve; everything else must not. */
-        (void)fcntl(AGENT_CHILD_SOCKET_FD, F_SETFD, 0);
-
-        /* uid drop, when this process has the authority to do one. */
-        if (req->confined_uid != 0 && req->confined_uid != geteuid())
-            spawn_drop_privileges(req->confined_uid, req->confined_gid);
-
-        struct os_sandbox_rlimits lim = spawn_rlimits();
-        if (!zcl_result_is_ok(os_sandbox_set_rlimits(&lim)))
-            _exit(93);
-        if (!os_sandbox_no_new_privs())
-            _exit(94);
-
-        struct os_sandbox_path_rule rules[8];
-        size_t n = spawn_build_grants(req, rules, 8);
-        struct zcl_result lr = os_sandbox_landlock_restrict(rules, n);
-        /* A kernel without Landlock degrades loudly rather than pretending:
-         * the child reports landlock_applied=false at handshake and the
-         * operator sees it in `metaverse agent status`. */
-        if (!zcl_result_is_ok(lr) && lr.code != OS_SANDBOX_ERR_LANDLOCK_UNAVAILABLE)
-            _exit(95);
-
-        size_t n_base = 0;
-        const int *base = agent_confined_allowed_syscalls(&n_base);
-        size_t n_extra = sizeof(g_stage1_extra) / sizeof(g_stage1_extra[0]);
-        int stage1[320];
-        if (n_base + n_extra > sizeof(stage1) / sizeof(stage1[0]))
-            _exit(96);
-        memcpy(stage1, base, n_base * sizeof(int));
-        memcpy(stage1 + n_base, g_stage1_extra, n_extra * sizeof(int));
-        struct zcl_result sr = os_sandbox_seccomp_allow(stage1,
-                                                        n_base + n_extra);
-        if (!zcl_result_is_ok(sr) && sr.code != OS_SANDBOX_ERR_SECCOMP_UNAVAILABLE)
-            _exit(97);
-
-        /* argv carries the mode, the script name, the scratch dir and, when the
-         * broker set one, the canary path to probe. envp is EMPTY — that is
-         * what makes /proc/<pid>/environ carry nothing of the operator's
-         * session, and no grant material exists in either. The canary is an
-         * instruction to TRY a path, not permission to reach it: the Landlock
-         * domain built above decides that, and it was built before this line. */
-        char *argv[6];
-        size_t a = 0;
-        argv[a++] = (char *)req->self_exe;
-        argv[a++] = (char *)"--metaverse-agent-confined";
-        argv[a++] = (char *)req->script;
-        argv[a++] = (char *)req->scratch_dir;
-        if (req->canary && req->canary[0])
-            argv[a++] = (char *)req->canary;
-        argv[a] = NULL;
-        char *const envp[] = { NULL };
-        execve(req->self_exe, argv, envp);
-        _exit(98);
+        spawn_confined_child(req, sv);
     }
 
     (void)close(sv[1]);
