@@ -363,9 +363,38 @@ static enum zcl_fleet_bundle_peer_state fbc_probe_peer(const char *peer,
     return state;
 }
 
-/* The FETCH_TIMEOUT reply. With --peer it names the peer's state and adds
- * peer, peer_connected and peers_connected to the data (the last two only
- * when the peer list was read). */
+/* The FETCH_TIMEOUT reply. With --peer the peer's state goes in
+ * data.failure_facts (the only data a failed envelope exports); the full
+ * detail lives there because error.message is capped at 192 bytes. */
+void zcl_native_fleet_bundle_timeout_reply(
+    struct zcl_command_reply *reply, const char *peer,
+    enum zcl_fleet_bundle_peer_state state, size_t count, const char *root)
+{
+    char summary[192];
+    char detail[512];
+    if (!zcl_fleet_bundle_timeout_summary(summary, sizeof(summary), peer,
+                                          state))
+        (void)snprintf(summary, sizeof(summary),
+                       "the bundle did not arrive within timeout_s");
+    if (peer && zcl_fleet_bundle_timeout_message(detail, sizeof(detail), peer,
+                                                 state, root)) {
+        struct json_value facts;
+        json_init(&facts);
+        json_set_object(&facts);
+        (void)json_push_kv_str(&facts, "peer", peer);
+        (void)json_push_kv_str(&facts, "detail", detail);
+        if (state != ZCL_FLEET_PEER_UNKNOWN) {
+            (void)json_push_kv_bool(&facts, "peer_connected",
+                                    state == ZCL_FLEET_PEER_CONNECTED);
+            (void)json_push_kv_int(&facts, "peers_connected",
+                                   (int64_t)count);
+        }
+        (void)json_push_kv(&reply->data, "failure_facts", &facts);
+        json_free(&facts);
+    }
+    fbc_fail(reply, "FETCH_TIMEOUT", summary, true, false, FBC_FETCH_CMD);
+}
+
 static void fbc_fail_timeout(const struct fbc_fetch_in *in,
                              struct zcl_command_reply *reply)
 {
@@ -374,23 +403,8 @@ static void fbc_fail_timeout(const struct fbc_fetch_in *in,
     if (in->peer)
         state = fbc_probe_peer(in->peer, &count);
     char root[65];
-    char message[512];
     zcl_hex_encode(in->args.root, 32, root);
-    if (!zcl_fleet_bundle_timeout_message(message, sizeof(message), in->peer,
-                                          state, root))
-        (void)snprintf(message, sizeof(message),
-                       "the bundle did not arrive within timeout_s");
-    if (in->peer) {
-        (void)json_push_kv_str(&reply->data, "peer", in->peer);
-        (void)json_push_kv_str(&reply->data, "detail", message);
-        if (state != ZCL_FLEET_PEER_UNKNOWN) {
-            (void)json_push_kv_bool(&reply->data, "peer_connected",
-                                    state == ZCL_FLEET_PEER_CONNECTED);
-            (void)json_push_kv_int(&reply->data, "peers_connected",
-                                   (int64_t)count);
-        }
-    }
-    fbc_fail(reply, "FETCH_TIMEOUT", message, true, false, FBC_FETCH_CMD);
+    zcl_native_fleet_bundle_timeout_reply(reply, in->peer, state, count, root);
 }
 
 /* One-shot CLI: poll the node's non-blocking step until complete or the

@@ -83,4 +83,19 @@ bool zcl_fleet_bundle_timeout_message(char *out, size_t cap, const char *peer,
                                       enum zcl_fleet_bundle_peer_state state,
                                       const char *root);
 
+/* The short FETCH_TIMEOUT error.message: one complete sentence that fits the
+ * node's 192-byte error field. The full text above goes in failure_facts. */
+bool zcl_fleet_bundle_timeout_summary(char *out, size_t cap, const char *peer,
+                                      enum zcl_fleet_bundle_peer_state state);
+
+struct zcl_command_reply;
+
+/* Fill a FETCH_TIMEOUT failure: the short error.message and, with a peer,
+ * data.failure_facts (peer, detail, and peer_connected/peers_connected when
+ * the peer list was read). `count` is the connected-peer count. */
+void zcl_native_fleet_bundle_timeout_reply(struct zcl_command_reply *reply,
+                                           const char *peer,
+                                           enum zcl_fleet_bundle_peer_state state,
+                                           size_t count, const char *root);
+
 #endif /* ZCL_NATIVE_FLEET_BUNDLE_H */

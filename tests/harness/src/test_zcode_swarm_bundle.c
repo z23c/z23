@@ -13,6 +13,8 @@
 #include "base/hex.h"
 #include "command/native_command.h"
 #include "command/native_fleet_bundle.h"
+#include "config/command_catalog.h"
+#include "kernel/command_registry.h"
 #include "json/json.h"
 #include "vcs/blob_store.h"
 #include "vcs/bundle_carry.h"
@@ -619,6 +621,80 @@ static int bundle_case_timeout_messages(void)
     return failures;
 }
 
+#define BUNDLE_PEER_MAX_PORT BUNDLE_ONION ":65535"
+#define BUNDLE_TIMEOUT_ROOT \
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+
+static bool bundle_summary_fits(enum zcl_fleet_bundle_peer_state state,
+                                const char *peer, const char *ends_with)
+{
+    char msg[192];
+    if (!zcl_fleet_bundle_timeout_summary(msg, sizeof(msg), peer, state))
+        return false;
+    size_t len = strlen(msg);
+    size_t tail = strlen(ends_with);
+    return len < sizeof(msg) && len >= tail &&
+           strcmp(msg + len - tail, ends_with) == 0;
+}
+
+static int bundle_case_summary_fits(void)
+{
+    int failures = 0;
+    SW_CHECK("bundle: every timeout error.message fits 192 bytes, untruncated",
+             bundle_summary_fits(ZCL_FLEET_PEER_CONNECTED, BUNDLE_PEER_MAX_PORT,
+                                 "fleet bundle offer") &&
+             bundle_summary_fits(ZCL_FLEET_PEER_ABSENT, BUNDLE_PEER_MAX_PORT,
+                                 "then retry") &&
+             bundle_summary_fits(ZCL_FLEET_PEER_UNKNOWN, BUNDLE_PEER_MAX_PORT,
+                                 "; retry") &&
+             bundle_summary_fits(ZCL_FLEET_PEER_UNKNOWN, NULL,
+                                 "--peer=<name>.onion)"));
+    return failures;
+}
+
+static void bundle_timeout_handler(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply)
+{
+    (void)request;
+    zcl_native_fleet_bundle_timeout_reply(reply, BUNDLE_PEER_MAX_PORT,
+                                          ZCL_FLEET_PEER_ABSENT, 3,
+                                          BUNDLE_TIMEOUT_ROOT);
+}
+
+static int bundle_case_timeout_facts(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *catalog = zcl_command_catalog();
+    const struct zcl_command_spec *original =
+        zcl_command_registry_find(catalog, "discover.help", NULL);
+    struct zcl_command_spec spec = original ? *original
+                                            : (struct zcl_command_spec){ 0 };
+    spec.handler = bundle_timeout_handler;
+    struct zcl_command_registry registry = { .commands = &spec, .count = 1 };
+    struct zcl_command_context context = {
+        .registry = catalog, .granted_capabilities = UINT64_MAX,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+    };
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    static char out[8192];
+    enum zcl_command_exit code = ZCL_COMMAND_EXIT_OK;
+    size_t used = zcl_command_registry_execute_json(
+        &registry, &spec, &context, &input, false, spec.path, "normal", 0, 0,
+        NULL, out, sizeof(out), &code);
+    json_free(&input);
+    SW_CHECK("bundle: the failure facts reach the serialized failure reply",
+             original && used > 0 && strstr(out, "\"ok\":false") != NULL &&
+             strstr(out, "\"facts\":{") != NULL &&
+             strstr(out, "\"peer_connected\":false") != NULL &&
+             strstr(out, "\"peers_connected\":3") != NULL &&
+             strstr(out, "never connected within timeout_s") != NULL &&
+             strstr(out, "it may be offline or still dialing over Tor") !=
+                 NULL);
+    return failures;
+}
+
 int t_swarm_bundle_transfer(void)
 {
     int failures = 0;
@@ -635,5 +711,7 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_announce_priority();
     failures += bundle_case_priority_after_eviction();
     failures += bundle_case_timeout_messages();
+    failures += bundle_case_summary_fits();
+    failures += bundle_case_timeout_facts();
     return failures;
 }

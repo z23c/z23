@@ -389,3 +389,28 @@ bool zcl_fleet_bundle_timeout_message(char *out, size_t cap, const char *peer,
                      "timeout_s is not known; retry", peer);
     return n > 0 && (size_t)n < cap;
 }
+
+bool zcl_fleet_bundle_timeout_summary(char *out, size_t cap, const char *peer,
+                                      enum zcl_fleet_bundle_peer_state state)
+{
+    if (!out || cap == 0)
+        return false;
+    int n = -1;
+    if (!peer)
+        n = snprintf(out, cap, "%s", ZFB_TIMEOUT_NO_PEER);
+    else if (state == ZCL_FLEET_PEER_CONNECTED)
+        n = snprintf(out, cap,
+                     "the named peer %s is connected but did not serve the "
+                     "root within timeout_s; ask its operator to re-run "
+                     "fleet bundle offer", peer);
+    else if (state == ZCL_FLEET_PEER_ABSENT)
+        n = snprintf(out, cap,
+                     "the named peer %s never connected within timeout_s; "
+                     "ask its operator to keep the node up, then retry",
+                     peer);
+    else
+        n = snprintf(out, cap,
+                     "the named peer %s: peer state is unknown (the node's "
+                     "peer list could not be read); retry", peer);
+    return n > 0 && (size_t)n < cap;
+}
