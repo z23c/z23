@@ -133,6 +133,145 @@ static bool parse_refused(const char *url)
     return !tls_client_url_parse(url, &u);
 }
 
+#if !defined(_WIN32)
+
+static platform_socket_t selftest_bind_loopback(int *port)
+{
+    platform_socket_t listener;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    listener = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (listener != PLATFORM_SOCKET_INVALID &&
+        (platform_socket_bind(listener, (struct sockaddr *)&addr,
+                              sizeof(addr)) != 0 ||
+         platform_socket_listen(listener, 4) != 0)) {
+        platform_socket_close(listener);
+        listener = PLATFORM_SOCKET_INVALID;
+    }
+    if (listener != PLATFORM_SOCKET_INVALID) {
+        struct sockaddr_storage bound;
+        size_t bound_len = sizeof(bound);
+        if (platform_socket_local_address(listener,
+                                          (struct sockaddr *)&bound,
+                                          &bound_len) == 0)
+            *port = ntohs(((struct sockaddr_in *)&bound)->sin_port);
+    }
+    return listener;
+}
+
+static bool selftest_loopback_ready(bool ready, platform_socket_t listener,
+                                    int port)
+{
+    return ready && listener != PLATFORM_SOCKET_INVALID && port > 0;
+}
+
+static void selftest_untrusted_child(int report[2], platform_socket_t listener,
+                                     X509 *cert, EVP_PKEY *key)
+{
+    close(report[0]);
+    SSL_CTX *sctx = SSL_CTX_new(TLS_server_method());
+    if (sctx) {
+        SSL_CTX_use_certificate(sctx, cert);
+        SSL_CTX_use_PrivateKey(sctx, key);
+    }
+    struct sockaddr_storage peer;
+    size_t peer_len = sizeof(peer);
+    platform_socket_t conn = platform_socket_accept(
+        listener, (struct sockaddr *)&peer, &peer_len);
+    if (conn != PLATFORM_SOCKET_INVALID) {
+        const char mark = 'A';
+        ssize_t ignored = write(report[1], &mark, 1);
+        (void)ignored;
+        if (sctx) {
+            SSL *ssl = SSL_new(sctx);
+            if (ssl) {
+                SSL_set_fd(ssl, conn);
+                SSL_accept(ssl);
+                SSL_free(ssl);
+            }
+        }
+        platform_socket_close(conn);
+    }
+    close(report[1]);
+    _exit(0);
+}
+
+static int selftest_untrusted_parent(int report_rd, pid_t child, int port)
+{
+    int failures = 0;
+    char url[64];
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/", port);
+    struct tls_client_request req = {.url = url, .timeout_ms = 8000};
+    struct tls_client_response r;
+    const bool fetched = tls_client_fetch(&req, &r);
+    tls_client_response_free(&r);
+
+    char mark = 0;
+    const ssize_t got = read(report_rd, &mark, 1);
+    close(report_rd);
+    if (child > 0) {
+        int status = 0;
+        waitpid(child, &status, 0);
+    }
+
+    TC_CHECK("the loopback server really saw the connection",
+             got == 1 && mark == 'A');
+    TC_CHECK("a certificate that chains to nothing trusted is REFUSED",
+             !fetched);
+    return failures;
+}
+
+/* The strongest offline statement this file can make. A local TLS
+ * server presents a perfectly well-formed certificate that chains to
+ * nothing in the trust store. If tls_client_fetch() returned a body
+ * here, verification would be decorative.
+ *
+ * The child reports, over a pipe, that it accepted a TCP connection
+ * and entered the TLS handshake. Without that report a refusal could
+ * mean "nothing was listening", which would prove nothing at all. */
+static int selftest_untrusted_refusal(void)
+{
+    int failures = 0;
+    int report[2];
+    X509 *cert = NULL;
+    EVP_PKEY *key = NULL;
+    platform_socket_t listener = PLATFORM_SOCKET_INVALID;
+    int port = 0;
+
+    const bool ready = pipe(report) == 0 &&
+                       acme_selftest_selfsigned("localhost", &cert, &key);
+    if (ready) {
+        listener = selftest_bind_loopback(&port);
+    }
+    TC_CHECK("a loopback TLS server is available for the refusal proof",
+             selftest_loopback_ready(ready, listener, port));
+
+    if (selftest_loopback_ready(ready, listener, port)) {
+        const pid_t child = fork_with_retry();
+        if (child == 0) {
+            selftest_untrusted_child(report, listener, cert, key);
+        }
+        close(report[1]);
+        failures += selftest_untrusted_parent(report[0], child, port);
+    } else {
+        failures += 2;
+        if (ready) {
+            close(report[0]);
+            close(report[1]);
+        }
+    }
+    if (listener != PLATFORM_SOCKET_INVALID)
+        platform_socket_close(listener);
+    X509_free(cert);
+    EVP_PKEY_free(key);
+    return failures;
+}
+
+#endif
+
 int acme_selftest_transport(void)
 {
     int failures = 0;
@@ -347,112 +486,7 @@ int acme_selftest_transport(void)
 
     /* ── verification is really on: an untrusted chain is refused ───── */
 #if !defined(_WIN32)
-    {
-        /* The strongest offline statement this file can make. A local TLS
-         * server presents a perfectly well-formed certificate that chains to
-         * nothing in the trust store. If tls_client_fetch() returned a body
-         * here, verification would be decorative.
-         *
-         * The child reports, over a pipe, that it accepted a TCP connection
-         * and entered the TLS handshake. Without that report a refusal could
-         * mean "nothing was listening", which would prove nothing at all. */
-        int report[2];
-        X509 *cert = NULL;
-        EVP_PKEY *key = NULL;
-        platform_socket_t listener = PLATFORM_SOCKET_INVALID;
-        int port = 0;
-
-        const bool ready = pipe(report) == 0 &&
-                           acme_selftest_selfsigned("localhost", &cert, &key);
-        if (ready) {
-            struct sockaddr_in addr;
-            memset(&addr, 0, sizeof(addr));
-            addr.sin_family = AF_INET;
-            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-            addr.sin_port = 0;
-            listener = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
-            if (listener != PLATFORM_SOCKET_INVALID &&
-                (platform_socket_bind(listener, (struct sockaddr *)&addr,
-                                      sizeof(addr)) != 0 ||
-                 platform_socket_listen(listener, 4) != 0)) {
-                platform_socket_close(listener);
-                listener = PLATFORM_SOCKET_INVALID;
-            }
-            if (listener != PLATFORM_SOCKET_INVALID) {
-                struct sockaddr_storage bound;
-                size_t bound_len = sizeof(bound);
-                if (platform_socket_local_address(listener,
-                                                  (struct sockaddr *)&bound,
-                                                  &bound_len) == 0)
-                    port = ntohs(((struct sockaddr_in *)&bound)->sin_port);
-            }
-        }
-        TC_CHECK("a loopback TLS server is available for the refusal proof",
-                 ready && listener != PLATFORM_SOCKET_INVALID && port > 0);
-
-        if (ready && listener != PLATFORM_SOCKET_INVALID && port > 0) {
-            const pid_t child = fork_with_retry();
-            if (child == 0) {
-                close(report[0]);
-                SSL_CTX *sctx = SSL_CTX_new(TLS_server_method());
-                if (sctx) {
-                    SSL_CTX_use_certificate(sctx, cert);
-                    SSL_CTX_use_PrivateKey(sctx, key);
-                }
-                struct sockaddr_storage peer;
-                size_t peer_len = sizeof(peer);
-                platform_socket_t conn = platform_socket_accept(
-                    listener, (struct sockaddr *)&peer, &peer_len);
-                if (conn != PLATFORM_SOCKET_INVALID) {
-                    const char mark = 'A';
-                    ssize_t ignored = write(report[1], &mark, 1);
-                    (void)ignored;
-                    if (sctx) {
-                        SSL *ssl = SSL_new(sctx);
-                        if (ssl) {
-                            SSL_set_fd(ssl, conn);
-                            SSL_accept(ssl);
-                            SSL_free(ssl);
-                        }
-                    }
-                    platform_socket_close(conn);
-                }
-                close(report[1]);
-                _exit(0);
-            }
-            close(report[1]);
-
-            char url[64];
-            snprintf(url, sizeof(url), "https://127.0.0.1:%d/", port);
-            struct tls_client_request req = {.url = url, .timeout_ms = 8000};
-            struct tls_client_response r;
-            const bool fetched = tls_client_fetch(&req, &r);
-            tls_client_response_free(&r);
-
-            char mark = 0;
-            const ssize_t got = read(report[0], &mark, 1);
-            close(report[0]);
-            if (child > 0) {
-                int status = 0;
-                waitpid(child, &status, 0);
-            }
-
-            TC_CHECK("the loopback server really saw the connection",
-                     got == 1 && mark == 'A');
-            TC_CHECK("a certificate that chains to nothing trusted is REFUSED",
-                     !fetched);
-        } else {
-            failures += 2;
-            if (ready) {
-                close(report[0]);
-                close(report[1]);
-            }
-        }
-        if (listener != PLATFORM_SOCKET_INVALID)
-            platform_socket_close(listener);
-        X509_free(cert);
-        EVP_PKEY_free(key);
-    }
+    failures += selftest_untrusted_refusal();
 #else
     printf("tls_client: UNOBSERVED (the loopback untrusted-chain refusal proof "
            "is POSIX-only; this build is Windows)\n");
