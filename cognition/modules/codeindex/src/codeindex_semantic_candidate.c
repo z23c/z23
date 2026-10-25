@@ -135,23 +135,22 @@ zcl_code_semantic_candidate_v1_derive_verdict(
     return ZCL_CODE_SEMANTIC_CANDIDATE_OK;
 }
 
-enum zcl_code_semantic_candidate_error
-zcl_code_semantic_candidate_v1_validate(
+static enum zcl_code_semantic_candidate_error candidate_header_valid(
     const struct zcl_code_semantic_candidate_v1 *candidate)
 {
-    uint8_t derived = 0;
-    enum zcl_code_semantic_candidate_error error;
     if (!candidate) return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_NULL;
     if (candidate->schema_version != ZCL_CODE_SEMANTIC_CANDIDATE_VERSION)
         return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_VERSION;
     if (!verdict_valid(candidate->verdict) ||
         candidate->vector_hint > ZCL_CODE_SEMANTIC_VECTOR_MODEL_HINT)
         return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_ENUM;
-    error = zcl_code_semantic_candidate_v1_derive_verdict(candidate, &derived);
-    if (error != ZCL_CODE_SEMANTIC_CANDIDATE_OK) return error;
-    if (candidate->flags != 0 || candidate->reserved != 0 ||
-        candidate->reserved_word != 0)
-        return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_FLAGS;
+    return ZCL_CODE_SEMANTIC_CANDIDATE_OK;
+}
+
+static enum zcl_code_semantic_candidate_error
+candidate_mandatory_roots_present(
+    const struct zcl_code_semantic_candidate_v1 *candidate)
+{
     const uint8_t *mandatory_roots[] = {
         candidate->source_root, candidate->universe_root,
         candidate->ontology_root, candidate->context_root,
@@ -164,9 +163,13 @@ zcl_code_semantic_candidate_v1_validate(
          i < sizeof(mandatory_roots) / sizeof(mandatory_roots[0]); i++)
         if (!root_present(mandatory_roots[i]))
             return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_ROOT_ZERO;
-    if (memcmp(candidate->left_subject_root, candidate->right_subject_root,
-               32) >= 0)
-        return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_ORDER;
+    return ZCL_CODE_SEMANTIC_CANDIDATE_OK;
+}
+
+static enum zcl_code_semantic_candidate_error candidate_evidence_roots_valid(
+    const struct zcl_code_semantic_candidate_v1 *candidate)
+{
+    enum zcl_code_semantic_candidate_error error;
     error = evidence_root_valid(candidate->syntax_shape,
                                 candidate->syntax_evidence_root);
     if (error != ZCL_CODE_SEMANTIC_CANDIDATE_OK) return error;
@@ -184,11 +187,43 @@ zcl_code_semantic_candidate_v1_validate(
         memcmp(candidate->behavior_a_evidence_root,
                candidate->behavior_b_evidence_root, 32) == 0)
         return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_CHANNEL_ALIAS;
+    return ZCL_CODE_SEMANTIC_CANDIDATE_OK;
+}
+
+static enum zcl_code_semantic_candidate_error
+candidate_vector_hint_root_valid(
+    const struct zcl_code_semantic_candidate_v1 *candidate)
+{
     if ((candidate->vector_hint == ZCL_CODE_SEMANTIC_VECTOR_ABSENT &&
          root_present(candidate->vector_hint_root)) ||
         (candidate->vector_hint == ZCL_CODE_SEMANTIC_VECTOR_MODEL_HINT &&
          !root_present(candidate->vector_hint_root)))
         return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_ROOT_PRESENCE;
+    return ZCL_CODE_SEMANTIC_CANDIDATE_OK;
+}
+
+enum zcl_code_semantic_candidate_error
+zcl_code_semantic_candidate_v1_validate(
+    const struct zcl_code_semantic_candidate_v1 *candidate)
+{
+    uint8_t derived = 0;
+    enum zcl_code_semantic_candidate_error error;
+    error = candidate_header_valid(candidate);
+    if (error != ZCL_CODE_SEMANTIC_CANDIDATE_OK) return error;
+    error = zcl_code_semantic_candidate_v1_derive_verdict(candidate, &derived);
+    if (error != ZCL_CODE_SEMANTIC_CANDIDATE_OK) return error;
+    if (candidate->flags != 0 || candidate->reserved != 0 ||
+        candidate->reserved_word != 0)
+        return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_FLAGS;
+    error = candidate_mandatory_roots_present(candidate);
+    if (error != ZCL_CODE_SEMANTIC_CANDIDATE_OK) return error;
+    if (memcmp(candidate->left_subject_root, candidate->right_subject_root,
+               32) >= 0)
+        return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_ORDER;
+    error = candidate_evidence_roots_valid(candidate);
+    if (error != ZCL_CODE_SEMANTIC_CANDIDATE_OK) return error;
+    error = candidate_vector_hint_root_valid(candidate);
+    if (error != ZCL_CODE_SEMANTIC_CANDIDATE_OK) return error;
     if (candidate->verdict != derived)
         return ZCL_CODE_SEMANTIC_CANDIDATE_ERR_VERDICT;
     return ZCL_CODE_SEMANTIC_CANDIDATE_OK;

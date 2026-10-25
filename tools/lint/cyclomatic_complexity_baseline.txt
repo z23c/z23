@@ -47,7 +47,6 @@ cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c:ci_merkle_sn
 cognition/modules/codeindex/src/codeindex_scan_file.c:ci_scan_file:26
 cognition/modules/codeindex/src/codeindex_search.c:ci_store_search_text:17
 cognition/modules/codeindex/src/codeindex_search.c:codeindex_search_story:28
-cognition/modules/codeindex/src/codeindex_semantic_candidate.c:zcl_code_semantic_candidate_v1_validate:24
 cognition/modules/codeindex/src/codeindex_store_read.c:ci_store_meta_get:17
 cognition/modules/ontology/src/ontology.c:contexts_bound:17
 cognition/modules/ontology/src/ontology.c:zcl_ontology_evaluate_atom_v1:43
