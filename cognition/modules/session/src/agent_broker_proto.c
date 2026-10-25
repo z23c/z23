@@ -18,6 +18,20 @@
 
 /* ── validation ─────────────────────────────────────────────────────────── */
 
+/* The safe-token alphabet: unreserved characters only, so a token can never
+ * read as structure to a shell, a path join or a query string. */
+static bool mvap_param_char_is_allowed(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+}
+
+/* True iff position i of s (length n) starts a ".." pair. */
+static bool mvap_param_dotdot_at(const char *s, size_t i, size_t n)
+{
+    return s[i] == '.' && i + 1 < n && s[i + 1] == '.';
+}
+
 bool mvap_param_is_safe(const char *s)
 {
     if (!s)
@@ -26,15 +40,12 @@ bool mvap_param_is_safe(const char *s)
     if (n > MVAP_PARAM_MAX)
         return false;
     for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
-        if (!ok)
+        if (!mvap_param_char_is_allowed((unsigned char)s[i]))
             return false;
         /* ".." can only be a traversal attempt: rejected even though '/' is
          * already impossible, so the token stays safe if a future consumer
          * ever joins it onto a directory. */
-        if (c == '.' && i + 1 < n && s[i + 1] == '.')
+        if (mvap_param_dotdot_at(s, i, n))
             return false;
     }
     return true;
@@ -144,26 +155,39 @@ bool mvap_verb_in_version(uint32_t verb, uint32_t version)
     return version >= since && version <= MVAP_VERSION;
 }
 
-const char *mvap_status_name(int32_t status)
+/* mvap_status_name() splits its switch by failure family so no single switch
+ * outgrows the complexity budget. A family names only its own codes and
+ * returns NULL for anything else; the public function tries the families in
+ * wire order and keeps "unknown" for a code no family claims. */
+static const char *mvap_status_name_denied_grant(int32_t status)
 {
     switch (status) {
-    case MVAP_OK:                       return "ok";
-    case MVAP_ERR_BAD_REQUEST:          return "BAD_REQUEST";
-    case MVAP_ERR_UNKNOWN_VERB:         return "UNKNOWN_VERB";
-    case MVAP_ERR_NOT_FOUND:            return "NOT_FOUND";
-    case MVAP_ERR_INTERNAL:             return "INTERNAL";
     case MVAP_ERR_DENIED_NO_GRANT:      return "DENIED_NO_GRANT";
     case MVAP_ERR_DENIED_REVOKED:       return "DENIED_REVOKED";
     case MVAP_ERR_DENIED_EXPIRED:       return "DENIED_EXPIRED";
     case MVAP_ERR_DENIED_ACTION:        return "DENIED_ACTION";
     case MVAP_ERR_DENIED_PROPERTY:      return "DENIED_PROPERTY";
     case MVAP_ERR_DENIED_KIND:          return "DENIED_KIND";
+    default:                            return NULL;
+    }
+}
+
+static const char *mvap_status_name_denied_policy(int32_t status)
+{
+    switch (status) {
     case MVAP_ERR_DENIED_VALUE:         return "DENIED_VALUE";
     case MVAP_ERR_DENIED_BUDGET:        return "DENIED_BUDGET";
     case MVAP_ERR_DENIED_RATE:          return "DENIED_RATE";
     case MVAP_ERR_DENIED_COUNTERPARTY:  return "DENIED_COUNTERPARTY";
     case MVAP_ERR_DENIED_DELEGATION:    return "DENIED_DELEGATION";
     case MVAP_ERR_DENIED_PEER_IDENTITY: return "DENIED_PEER_IDENTITY";
+    default:                            return NULL;
+    }
+}
+
+static const char *mvap_status_name_plan_commit(int32_t status)
+{
+    switch (status) {
     case MVAP_ERR_PLAN_FAILED:          return "PLAN_FAILED";
     case MVAP_ERR_COMMIT_FAILED:        return "COMMIT_FAILED";
     case MVAP_ERR_REVISION_MOVED:       return "REVISION_MOVED";
@@ -172,8 +196,26 @@ const char *mvap_status_name(int32_t status)
     case MVAP_ERR_QUERY_UNAVAILABLE:    return "QUERY_UNAVAILABLE";
     case MVAP_ERR_AUTHORITY_CHANGED:    return "AUTHORITY_CHANGED";
     case MVAP_ERR_REQUEST_ID_REUSED:    return "REQUEST_ID_REUSED";
-    default:                            return "unknown";
+    default:                            return NULL;
     }
+}
+
+const char *mvap_status_name(int32_t status)
+{
+    switch (status) {
+    case MVAP_OK:                       return "ok";
+    case MVAP_ERR_BAD_REQUEST:          return "BAD_REQUEST";
+    case MVAP_ERR_UNKNOWN_VERB:         return "UNKNOWN_VERB";
+    case MVAP_ERR_NOT_FOUND:            return "NOT_FOUND";
+    case MVAP_ERR_INTERNAL:             return "INTERNAL";
+    default:                            break;
+    }
+    const char *name = mvap_status_name_denied_grant(status);
+    if (!name)
+        name = mvap_status_name_denied_policy(status);
+    if (!name)
+        name = mvap_status_name_plan_commit(status);
+    return name ? name : "unknown";
 }
 
 /* ── framing ────────────────────────────────────────────────────────────── */
