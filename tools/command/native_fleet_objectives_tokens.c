@@ -1163,10 +1163,10 @@ void zcl_native_handle_fleet_objectives_value(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct zcl_objectives_options options;
-    char reason[ZCL_OBJECTIVES_REASON_MAX] = "";
     if (!reply)
         return;
     zcl_command_reply_init(reply, TPV_SCHEMA_OUT);
+    char reason[ZCL_OBJECTIVES_REASON_MAX] = "";
     memset(&options, 0, sizeof(options));
     options.outcomes = tpv_input_str(request, "outcomes");
     options.experiments = tpv_input_str(request, "experiments");
