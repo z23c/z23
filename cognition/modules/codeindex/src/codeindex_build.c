@@ -101,6 +101,55 @@ static bool prune_dir(const char *name)
     return strncmp(name, "test-tmp", 8) == 0;
 }
 
+static bool collect_dir(const char *root, const char *reldir,
+                        struct strvec *vec);
+
+static bool collect_child_path(char *out, size_t cap,
+                               const char *reldir, const char *name)
+{
+    int n;
+    if (reldir[0])
+        n = snprintf(out, cap, "%s/%s", reldir, name);
+    else
+        n = snprintf(out, cap, "%s", name);
+    if (n <= 0 || (size_t)n >= cap)
+        return false;
+    return true;
+}
+
+static bool collect_child_stat(const char *root, const char *child,
+                               struct stat *st)
+{
+    char cfull[CI_PATH_MAX];
+    int cn = snprintf(cfull, sizeof(cfull), "%s/%s", root, child);
+    if (cn <= 0 || (size_t)cn >= sizeof(cfull))
+        return false;
+    if (lstat(cfull, st) != 0)
+        return false;
+    return true;
+}
+
+static bool collect_entry(const char *root, const char *reldir,
+                          const char *name, struct strvec *vec)
+{
+    if (name[0] == '.')
+        return true;
+    char child[CI_PATH_MAX];
+    if (!collect_child_path(child, sizeof(child), reldir, name))
+        return false;
+    struct stat st;
+    if (!collect_child_stat(root, child, &st))
+        return false;
+    if (S_ISDIR(st.st_mode)) {
+        if (prune_dir(name))
+            return true;
+        return collect_dir(root, child, vec);
+    }
+    if (S_ISREG(st.st_mode) && is_source_name(name))
+        return sv_push(vec, child);
+    return true;
+}
+
 /* Recursively collect .c/.h under <root>/<reldir> into vec. Missing optional
  * roots are empty; permission, I/O, and allocation failures are hard errors. */
 static bool collect_dir(const char *root, const char *reldir,
@@ -115,36 +164,8 @@ static bool collect_dir(const char *root, const char *reldir,
     if (!d) return errno == ENOENT;
     bool ok = true;
     struct dirent *e;
-    while (ok && (e = readdir(d)) != NULL) {
-        if (e->d_name[0] == '.') continue;
-        char child[CI_PATH_MAX];
-        int n;
-        if (reldir[0])
-            n = snprintf(child, sizeof(child), "%s/%s", reldir, e->d_name);
-        else
-            n = snprintf(child, sizeof(child), "%s", e->d_name);
-        if (n <= 0 || (size_t)n >= sizeof(child)) {
-            ok = false;
-            break;
-        }
-        char cfull[CI_PATH_MAX];
-        int cn = snprintf(cfull, sizeof(cfull), "%s/%s", root, child);
-        if (cn <= 0 || (size_t)cn >= sizeof(cfull)) {
-            ok = false;
-            break;
-        }
-        struct stat st;
-        if (lstat(cfull, &st) != 0) {
-            ok = false;
-            break;
-        }
-        if (S_ISDIR(st.st_mode)) {
-            if (prune_dir(e->d_name)) continue;
-            ok = collect_dir(root, child, vec);
-        } else if (S_ISREG(st.st_mode) && is_source_name(e->d_name)) {
-            ok = sv_push(vec, child);
-        }
-    }
+    while (ok && (e = readdir(d)) != NULL)
+        ok = collect_entry(root, reldir, e->d_name, vec);
     int saved = errno;
     if (closedir(d) != 0 && ok) {
         ok = false;
@@ -249,6 +270,32 @@ static void source_stat_root_add(struct sha3_256_ctx *sha,
     sha_write_u64le(sha, (uint64_t)st->st_ctim.tv_nsec);
 }
 
+static bool source_digest_stat_same(const struct stat *before,
+                                    const struct stat *after)
+{
+    return S_ISREG(after->st_mode) &&
+           before->st_dev == after->st_dev &&
+           before->st_ino == after->st_ino &&
+           before->st_size == after->st_size &&
+           before->st_mtim.tv_sec == after->st_mtim.tv_sec &&
+           before->st_mtim.tv_nsec == after->st_mtim.tv_nsec &&
+           before->st_ctim.tv_sec == after->st_ctim.tv_sec &&
+           before->st_ctim.tv_nsec == after->st_ctim.tv_nsec;
+}
+
+static bool source_digest_read(FILE *f, struct sha3_256_ctx *sha,
+                               const struct stat *before, struct stat *after)
+{
+    unsigned char buf[64 * 1024];
+    size_t nr;
+    while ((nr = fread(buf, 1, sizeof(buf), f)) > 0) {
+        sha3_256_write(sha, buf, nr);
+        ci_test_note_exact_bytes((uint64_t)nr);
+    }
+    return !ferror(f) && fstat(fileno(f), after) == 0 &&
+           source_digest_stat_same(before, after);
+}
+
 static bool source_file_sha3(const char *root, const char *relpath,
                              uint8_t out[32], struct stat *out_st)
 {
@@ -282,19 +329,7 @@ static bool source_file_sha3(const char *root, const char *relpath,
     /* Match ci_scan_file()'s canonical per-file content hash exactly. */
     static const uint8_t content_tag = 0x02;
     sha3_256_write(&sha, &content_tag, 1);
-    unsigned char buf[64 * 1024];
-    size_t nr;
-    while ((nr = fread(buf, 1, sizeof(buf), f)) > 0) {
-        sha3_256_write(&sha, buf, nr);
-        ci_test_note_exact_bytes((uint64_t)nr);
-    }
-    bool ok = !ferror(f) && fstat(fileno(f), &after) == 0 &&
-              S_ISREG(after.st_mode) && before.st_dev == after.st_dev &&
-              before.st_ino == after.st_ino && before.st_size == after.st_size &&
-              before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
-              before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
-              before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
-              before.st_ctim.tv_nsec == after.st_ctim.tv_nsec;
+    bool ok = source_digest_read(f, &sha, &before, &after);
     int close_rc = fclose(f);
     if (!ok || close_rc != 0)
         LOG_FAIL("codeindex", "read source for digest failed path=%s",
@@ -444,6 +479,32 @@ static void codeindex_test_maybe_crash(enum codeindex_test_crash_point point)
 #define codeindex_test_maybe_remove_lock_directory(...) ((void)0)
 #endif
 
+static bool ci_rebuild_lock_ensure_dir(const char *dir)
+{
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+        return false;
+    return true;
+}
+
+static bool ci_rebuild_lock_dir_controlled(int dirfd)
+{
+    struct stat dir_st;
+    if (fstat(dirfd, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) ||
+        dir_st.st_uid != geteuid() ||
+        (dir_st.st_mode & (S_IWGRP | S_IWOTH)))
+        return false;
+    return true;
+}
+
+static bool ci_rebuild_lock_retry_missing(int saved, int attempt, int attempts)
+{
+    if (saved == ENOENT && attempt + 1 < attempts) {
+        platform_sleep_ms(1);
+        return true;
+    }
+    return false;
+}
+
 bool ci_rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
                           int *out_dirfd, int *out_lockfd)
 {
@@ -454,7 +515,7 @@ bool ci_rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
         LOG_FAIL("codeindex", "index directory path too long");
     enum { LOCK_DIRECTORY_ATTEMPTS = 8 };
     for (int attempt = 0; attempt < LOCK_DIRECTORY_ATTEMPTS; attempt++) {
-        if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+        if (!ci_rebuild_lock_ensure_dir(dir))
             LOG_FAIL("codeindex", "create index directory failed: %s",
                      strerror(errno));
 
@@ -462,17 +523,13 @@ bool ci_rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (dirfd < 0) {
             int saved = errno;
-            if (saved == ENOENT && attempt + 1 < LOCK_DIRECTORY_ATTEMPTS) {
-                platform_sleep_ms(1);
+            if (ci_rebuild_lock_retry_missing(saved, attempt,
+                                              LOCK_DIRECTORY_ATTEMPTS))
                 continue;
-            }
             LOG_FAIL("codeindex", "open index directory failed: %s",
                      strerror(saved));
         }
-        struct stat dir_st;
-        if (fstat(dirfd, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) ||
-            dir_st.st_uid != geteuid() ||
-            (dir_st.st_mode & (S_IWGRP | S_IWOTH))) {
+        if (!ci_rebuild_lock_dir_controlled(dirfd)) {
             close(dirfd);
             LOG_FAIL("codeindex",
                      "index directory must be owner-controlled and not writable by group/other");
@@ -487,10 +544,9 @@ bool ci_rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
             /* An opened directory may be unlinked before O_CREAT reaches it.
              * Reacquire by pathname, then revalidate ownership and mode; the
              * stale descriptor is never used for publication. */
-            if (saved == ENOENT && attempt + 1 < LOCK_DIRECTORY_ATTEMPTS) {
-                platform_sleep_ms(1);
+            if (ci_rebuild_lock_retry_missing(saved, attempt,
+                                              LOCK_DIRECTORY_ATTEMPTS))
                 continue;
-            }
             LOG_FAIL("codeindex", "open rebuild lock failed: %s",
                      strerror(saved));
         }
@@ -740,6 +796,352 @@ static void rebuild_report(const struct ci_seed_outcome *seed, bool incremental,
         LOG_INFO("codeindex", "index: rebuilt (%lld ms)", ms);
 }
 
+struct ci_rebuild_job {
+    struct codeindex *ci;
+    bool coalesce_if_fresh;
+    int64_t build_start_ms;
+    const char *failure;
+    bool success;
+    char stage_name[128];
+    struct ci_stage_identity stage_identity;
+    int stagefd;
+    struct ci_store *st;
+    struct ci_merkle *merkle;
+    struct ci_merkle_leaf *changed;
+    struct ci_merkle_leaf *current_leaves;
+    int changed_count;
+    int current_count;
+    bool incremental;
+    bool adopted_spare;
+    bool patchable;
+    bool seedable;
+    struct ci_seed_outcome seed;
+    uint8_t current_dep_stat[32];
+    uint8_t built_source_stat_root[32];
+    uint8_t built_dep_stat_root[32];
+    struct ci_merkle_cost merkle_cost;
+    struct ci_merkle_node merkle_root;
+};
+
+static bool ci_rebuild_coalesce_fresh(struct ci_rebuild_job *job, int dirfd)
+{
+    if (!ci_cleanup_orphan_stages(dirfd)) {
+        job->failure = "orphan staging cleanup failed";
+        return false;
+    }
+
+    /* A second cold opener may have waited while the first one published.
+     * Reopen the pathname under the lock and adopt that exact fresh store
+     * instead of redundantly rebuilding it. Explicit codeindex_rebuild()
+     * passes false and remains a forced deterministic recompute. */
+    if (job->coalesce_if_fresh && !job->ci->store) {
+        struct ci_store *fresh = ci_store_open(job->ci->root);
+        if (fresh) {
+            bool stale = true;
+            struct codeindex fresh_view = {.store = fresh};
+            (void)snprintf(fresh_view.root, sizeof(fresh_view.root), "%s",
+                           job->ci->root);
+            bool checked = codeindex_is_stale(&fresh_view, &stale);
+            if (checked && !stale) {
+                struct ci_store *old = job->ci->store;
+                job->ci->store = fresh;
+                if (old) ci_store_close(old);
+                job->success = true;
+                return false;
+            }
+            /* Missing/corrupt/stale derived state is rebuilt from source.
+             * It is never repaired or accepted as partial authority. */
+            ci_store_close(fresh);
+            ci_merkle_free(fresh_view.pending_merkle);
+        }
+    }
+    return true;
+}
+
+static bool ci_rebuild_refresh_inventory(struct ci_rebuild_job *job)
+{
+    /* The Merkle snapshot is the changed-file oracle. It reads bytes only for
+     * cache keys that moved. Inventory drift, an absent snapshot, depfile
+     * churn, or a snapshot advanced independently of this store all take the
+     * existing deterministic cold path. */
+    struct ci_merkle_cost merkle_cost = {0};
+    if (job->ci->pending_merkle) {
+        job->merkle = job->ci->pending_merkle;
+        merkle_cost.snapshot_used = job->ci->pending_merkle_snapshot_used;
+        merkle_cost.full_rescan = job->ci->pending_merkle_full_rescan;
+        merkle_cost.inventory_changed = job->ci->pending_merkle_inventory_changed;
+        job->ci->pending_merkle = NULL;
+        job->ci->pending_merkle_snapshot_used = false;
+        job->ci->pending_merkle_full_rescan = false;
+        job->ci->pending_merkle_inventory_changed = false;
+    } else {
+        job->merkle = ci_merkle_refresh_reconciled(job->ci->root, &merkle_cost);
+    }
+    if (!job->merkle || !ci_merkle_root(job->merkle, &job->merkle_root) ||
+        !ci_deps_stat_root_sha3(job->ci->root, job->current_dep_stat)) {
+        job->failure = "incremental inventory refresh failed";
+        return false;
+    }
+    job->merkle_cost = merkle_cost;
+    return true;
+}
+
+static bool ci_rebuild_load_leaves(struct ci_rebuild_job *job)
+{
+    if (job->current_count > 0 && (job->patchable || job->seedable)) {
+        job->current_leaves = zcl_calloc((size_t)job->current_count,
+                                         sizeof(*job->current_leaves),
+                                         "ci_incremental_current");
+        job->changed = zcl_calloc((size_t)job->current_count, sizeof(*job->changed),
+                                  "ci_incremental_changed");
+        if (!job->current_leaves || !job->changed ||
+            ci_merkle_leaves(job->merkle, job->current_leaves,
+                             job->current_count) != job->current_count) {
+            job->failure = "collect changed Merkle leaves failed";
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ci_rebuild_note_changes(struct ci_rebuild_job *job)
+{
+    /* Two ways out of a full rescan, and the live Merkle leaves are the input
+     * to both: patch THIS checkout's own previous generation, or — when it has
+     * none at all — seed from the nearest sibling checkout that does. */
+    job->current_count = ci_merkle_leaves(job->merkle, NULL, 0);
+    job->patchable = job->coalesce_if_fresh &&
+        rebuild_can_patch_in_place(job->ci, &job->merkle_cost,
+                                   job->current_dep_stat);
+    job->seedable = job->coalesce_if_fresh && !job->ci->store;
+    if (!ci_rebuild_load_leaves(job))
+        return false;
+    if (job->patchable && job->current_leaves) {
+        bool inventory_same = false;
+        job->changed_count = ci_store_diff_merkle_leaves(
+            job->ci->store, job->current_leaves, job->current_count,
+            job->changed, job->current_count, &inventory_same);
+        job->incremental = inventory_same;
+    }
+    job->seedable = job->seedable && job->current_leaves != NULL;
+    return true;
+}
+
+static bool ci_rebuild_reserve_stage(struct ci_rebuild_job *job, int dirfd)
+{
+    /* An incremental generation is the previous one plus a handful of changed
+     * SQLite pages, so staging it by laying down a fresh full-image clone
+     * makes the publication fsync wait for the WHOLE image. A spare left by
+     * the previous publish already holds those bytes and has had the seconds
+     * since then to reach the disk, so adopting it leaves the fsync with only
+     * the pages this rebuild actually changes. See codeindex_spare.c. */
+    job->adopted_spare = job->incremental &&
+        ci_spare_adopt(dirfd, job->ci->store, job->stage_name,
+                       &job->stage_identity, &job->stagefd);
+    if (!job->adopted_spare) {
+        /* Any spare that survives here clones a generation we are about to
+         * replace, or one this rebuild refused. Either way it is now waste. */
+        ci_spare_discard(dirfd);
+        if (!ci_create_unique_stage(dirfd, job->stage_name, &job->stage_identity,
+                                    &job->stagefd)) {
+            job->failure = "unique staging allocation failed";
+            return false;
+        }
+    }
+    if (!codeindex_test_maybe_tamper_stage(dirfd, job->stage_name)) {
+        job->failure = "test staging substitution failed";
+        return false;
+    }
+    return true;
+}
+
+static bool ci_rebuild_fill_stage(struct ci_rebuild_job *job)
+{
+    if (job->incremental) {
+        memcpy(job->built_dep_stat_root, job->current_dep_stat, 32);
+        if (!job->adopted_spare &&
+            !ci_store_copy_image_fd(job->ci->store, job->stagefd)) {
+            job->failure = "clone prior generation failed";
+            return false;
+        }
+        job->st = ci_store_open_rw_fd(job->stagefd);
+        if (!job->st || !ci_build_store_incremental(
+                            job->ci->root, job->st, job->changed,
+                            job->changed_count, job->built_dep_stat_root,
+                            job->merkle_root.digest.bytes)) {
+            job->failure = "incremental scan or staging update failed";
+            return false;
+        }
+        ci_seed_receipt_clear(job->st);
+        ci_store_close(job->st);
+        job->st = NULL;
+    } else if (job->seedable &&
+               ci_seed_stage_generation(job->ci->root, job->stagefd,
+                                        job->current_leaves, job->current_count,
+                                        job->current_dep_stat,
+                                        job->merkle_root.digest.bytes,
+                                        &job->seed)) {
+        /* The staging inode now holds a sibling checkout's generation with
+         * this checkout's differing files rescanned into it. It goes through
+         * the identical verification and publication below; nothing about the
+         * freshness contract is relaxed for having arrived this way. */
+        memcpy(job->built_dep_stat_root, job->current_dep_stat, 32);
+    } else {
+        if (!ci_build_store_memory(job->ci->root, job->build_start_ms, &job->st,
+                                   job->built_source_stat_root,
+                                   job->built_dep_stat_root)) {
+            job->failure = "source scan or staging write failed";
+            return false;
+        }
+        if (!ci_store_meta_set(job->st, "source_merkle_root_sha3",
+                               job->merkle_root.digest.bytes, 32)) {
+            job->failure = "seal source Merkle root failed";
+            return false;
+        }
+        if (!ci_store_write_image_fd(job->st, job->stagefd)) {
+            job->failure = "serialize staging store failed";
+            return false;
+        }
+        ci_store_close(job->st);
+        job->st = NULL;
+    }
+    return true;
+}
+
+static bool ci_rebuild_recheck_fresh(struct ci_rebuild_job *job)
+{
+    /* Serialization can be non-trivial for a large index. Recheck only the
+     * cached metadata keys at the last boundary before fsync/publication; any
+     * byte change also changes inode/size/mtime/ctime on the supported local
+     * filesystems and forces a clean retry. */
+    struct ci_merkle_cost final_merkle_cost = {0};
+    struct ci_merkle *final_merkle = ci_merkle_refresh(
+        job->ci->root, &final_merkle_cost);
+    struct ci_merkle_node final_merkle_root;
+    uint8_t final_dep_stat_root[32];
+    bool final_ok = final_merkle &&
+        ci_merkle_root(final_merkle, &final_merkle_root) &&
+        memcmp(job->merkle_root.digest.bytes, final_merkle_root.digest.bytes,
+               32) == 0 &&
+        ci_deps_stat_root_sha3(job->ci->root, final_dep_stat_root) &&
+        memcmp(job->built_dep_stat_root, final_dep_stat_root, 32) == 0;
+    ci_merkle_free(final_merkle);
+    if (!final_ok) {
+        job->failure = "source or depfile metadata changed during rebuild";
+        return false;
+    }
+    return true;
+}
+
+static bool ci_rebuild_publish(struct ci_rebuild_job *job, int dirfd)
+{
+    if (!rebuild_stage_identity_holds(dirfd, job->stagefd, job->stage_name,
+                                      &job->stage_identity)) {
+        job->failure = "staging inode identity changed";
+        return false;
+    }
+    unsigned char journal_versions[2];
+    if (pread(job->stagefd, journal_versions, sizeof(journal_versions), 18) !=
+            (ssize_t)sizeof(journal_versions) ||
+        journal_versions[0] != 1 || journal_versions[1] != 1) {
+        job->failure = "staging image is not rollback-journal format";
+        return false;
+    }
+    if (fsync(job->stagefd) != 0) {
+        job->failure = "fsync staging inode failed";
+        return false;
+    }
+
+    codeindex_test_maybe_crash(CODEINDEX_TEST_CRASH_BEFORE_RENAME);
+    if (renameat(dirfd, job->stage_name, dirfd, "index.kv") != 0) {
+        job->failure = "atomic staging publication failed";
+        return false;
+    }
+    job->stage_name[0] = '\0';
+    if (!rebuild_published_identity_holds(dirfd, job->stagefd)) {
+        job->failure = "published index inode identity changed";
+        return false;
+    }
+    /* Make the rollback-journal main file durable before unlinking any WAL
+     * that an older generation might require. A power loss may therefore
+     * leave either (old main + old sidecars) or (new main + old sidecars),
+     * never old main with its WAL removed. Immutable readers safely ignore
+     * sidecars beside the new main. */
+    if (fsync(dirfd) != 0) {
+        job->failure = "fsync published index directory failed";
+        return false;
+    }
+    codeindex_test_maybe_crash(CODEINDEX_TEST_CRASH_AFTER_RENAME);
+    if (!ci_remove_legacy_sidecars(dirfd)) {
+        job->failure = "legacy sidecar cleanup failed";
+        return false;
+    }
+    if (fsync(dirfd) != 0) {
+        job->failure = "fsync legacy sidecar cleanup failed";
+        return false;
+    }
+    close(job->stagefd);
+    job->stagefd = -1;
+    return true;
+}
+
+static bool ci_rebuild_reopen(struct ci_rebuild_job *job, int dirfd)
+{
+    struct ci_store *next = ci_store_open(job->ci->root);
+    if (!next) {
+        job->failure = "reopen published index failed";
+        return false;
+    }
+    struct ci_store *old = job->ci->store;
+    job->ci->store = next;
+    if (old) ci_store_close(old);
+    job->success = true;
+
+    /* Lay down the next staging clone now and let the kernel write it back
+     * while the developer edits, so the NEXT publication's fsync has almost
+     * nothing left to flush. Only a checkout that just took the incremental
+     * path earns the extra image: a checkout that is only ever cold-built
+     * would pay a second full-image write for a spare nothing comes back for.
+     * Best effort throughout — a failure here costs the next rebuild an
+     * ordinary clone and nothing else. */
+    if (job->incremental) (void)ci_spare_publish(dirfd);
+    rebuild_report(&job->seed, job->incremental, job->build_start_ms);
+    return true;
+}
+
+static void ci_rebuild_run(struct ci_rebuild_job *job, int dirfd)
+{
+    if (!ci_rebuild_coalesce_fresh(job, dirfd))
+        return;
+    if (!ci_rebuild_refresh_inventory(job))
+        return;
+    if (!ci_rebuild_note_changes(job))
+        return;
+    if (!ci_rebuild_reserve_stage(job, dirfd))
+        return;
+    if (!ci_rebuild_fill_stage(job))
+        return;
+    if (!ci_rebuild_recheck_fresh(job))
+        return;
+    if (!ci_rebuild_publish(job, dirfd))
+        return;
+    if (!ci_rebuild_reopen(job, dirfd))
+        return;
+}
+
+static void ci_rebuild_release(struct ci_rebuild_job *job, int dirfd, int lockfd)
+{
+    if (job->st) ci_store_close(job->st);
+    ci_merkle_free(job->merkle);
+    free(job->changed);
+    free(job->current_leaves);
+    if (job->stagefd >= 0) close(job->stagefd);
+    if (job->stage_name[0]) {
+        (void)unlinkat(dirfd, job->stage_name, 0);
+    }
+    ci_rebuild_lock_close(dirfd, lockfd);
+}
+
 static bool codeindex_rebuild_internal(struct codeindex *ci,
                                        bool coalesce_if_fresh)
 {
@@ -753,275 +1155,17 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     /* Whole-rebuild wall clock for the cold-build self-receipt; only the
      * full-build branch seals it (ci_build_store_memory). */
     const int64_t build_start_ms = platform_time_monotonic_ms();
-
-    const char *failure = "unknown rebuild failure";
-    bool success = false;
-    char stage_name[128] = "";
-    struct ci_stage_identity stage_identity = {0};
-    int stagefd = -1;
-    struct ci_store *st = NULL;
-    struct ci_merkle *merkle = NULL;
-    struct ci_merkle_leaf *changed = NULL;
-    struct ci_merkle_leaf *current_leaves = NULL;
-    int changed_count = 0;
-    bool incremental = false;
-    bool adopted_spare = false;
-    struct ci_seed_outcome seed = {0};
-    uint8_t current_dep_stat[32] = {0};
-
-    if (!ci_cleanup_orphan_stages(dirfd)) {
-        failure = "orphan staging cleanup failed";
-        goto out;
-    }
-
-    /* A second cold opener may have waited while the first one published.
-     * Reopen the pathname under the lock and adopt that exact fresh store
-     * instead of redundantly rebuilding it. Explicit codeindex_rebuild()
-     * passes false and remains a forced deterministic recompute. */
-    if (coalesce_if_fresh && !ci->store) {
-        struct ci_store *fresh = ci_store_open(ci->root);
-        if (fresh) {
-            bool stale = true;
-            struct codeindex fresh_view = {.store = fresh};
-            (void)snprintf(fresh_view.root, sizeof(fresh_view.root), "%s",
-                           ci->root);
-            bool checked = codeindex_is_stale(&fresh_view, &stale);
-            if (checked && !stale) {
-                struct ci_store *old = ci->store;
-                ci->store = fresh;
-                if (old) ci_store_close(old);
-                success = true;
-                goto out;
-            }
-            /* Missing/corrupt/stale derived state is rebuilt from source.
-             * It is never repaired or accepted as partial authority. */
-            ci_store_close(fresh);
-            ci_merkle_free(fresh_view.pending_merkle);
-        }
-    }
-
-    /* The Merkle snapshot is the changed-file oracle. It reads bytes only for
-     * cache keys that moved. Inventory drift, an absent snapshot, depfile
-     * churn, or a snapshot advanced independently of this store all take the
-     * existing deterministic cold path. */
-    struct ci_merkle_cost merkle_cost = {0};
-    if (ci->pending_merkle) {
-        merkle = ci->pending_merkle;
-        merkle_cost.snapshot_used = ci->pending_merkle_snapshot_used;
-        merkle_cost.full_rescan = ci->pending_merkle_full_rescan;
-        merkle_cost.inventory_changed = ci->pending_merkle_inventory_changed;
-        ci->pending_merkle = NULL;
-        ci->pending_merkle_snapshot_used = false;
-        ci->pending_merkle_full_rescan = false;
-        ci->pending_merkle_inventory_changed = false;
-    } else {
-        merkle = ci_merkle_refresh_reconciled(ci->root, &merkle_cost);
-    }
-    struct ci_merkle_node merkle_root;
-    if (!merkle || !ci_merkle_root(merkle, &merkle_root) ||
-        !ci_deps_stat_root_sha3(ci->root, current_dep_stat)) {
-        failure = "incremental inventory refresh failed";
-        goto out;
-    }
-    /* Two ways out of a full rescan, and the live Merkle leaves are the input
-     * to both: patch THIS checkout's own previous generation, or — when it has
-     * none at all — seed from the nearest sibling checkout that does. */
-    int current_count = ci_merkle_leaves(merkle, NULL, 0);
-    bool patchable = coalesce_if_fresh &&
-        rebuild_can_patch_in_place(ci, &merkle_cost, current_dep_stat);
-    bool seedable = coalesce_if_fresh && !ci->store;
-    if (current_count > 0 && (patchable || seedable)) {
-        current_leaves = zcl_calloc((size_t)current_count,
-                                    sizeof(*current_leaves),
-                                    "ci_incremental_current");
-        changed = zcl_calloc((size_t)current_count, sizeof(*changed),
-                             "ci_incremental_changed");
-        if (!current_leaves || !changed ||
-            ci_merkle_leaves(merkle, current_leaves, current_count) !=
-                current_count) {
-            failure = "collect changed Merkle leaves failed";
-            goto out;
-        }
-    }
-    if (patchable && current_leaves) {
-        bool inventory_same = false;
-        changed_count = ci_store_diff_merkle_leaves(
-            ci->store, current_leaves, current_count, changed, current_count,
-            &inventory_same);
-        incremental = inventory_same;
-    }
-    seedable = seedable && current_leaves != NULL;
-
-    /* An incremental generation is the previous one plus a handful of changed
-     * SQLite pages, so staging it by laying down a fresh full-image clone
-     * makes the publication fsync wait for the WHOLE image. A spare left by
-     * the previous publish already holds those bytes and has had the seconds
-     * since then to reach the disk, so adopting it leaves the fsync with only
-     * the pages this rebuild actually changes. See codeindex_spare.c. */
-    adopted_spare = incremental &&
-        ci_spare_adopt(dirfd, ci->store, stage_name, &stage_identity, &stagefd);
-    if (!adopted_spare) {
-        /* Any spare that survives here clones a generation we are about to
-         * replace, or one this rebuild refused. Either way it is now waste. */
-        ci_spare_discard(dirfd);
-        if (!ci_create_unique_stage(dirfd, stage_name, &stage_identity,
-                                    &stagefd)) {
-            failure = "unique staging allocation failed";
-            goto out;
-        }
-    }
-    if (!codeindex_test_maybe_tamper_stage(dirfd, stage_name)) {
-        failure = "test staging substitution failed";
-        goto out;
-    }
-
-    uint8_t built_source_stat_root[32];
-    uint8_t built_dep_stat_root[32];
-    if (incremental) {
-        memcpy(built_dep_stat_root, current_dep_stat, 32);
-        if (!adopted_spare && !ci_store_copy_image_fd(ci->store, stagefd)) {
-            failure = "clone prior generation failed";
-            goto out;
-        }
-        st = ci_store_open_rw_fd(stagefd);
-        if (!st || !ci_build_store_incremental(
-                       ci->root, st, changed, changed_count,
-                       built_dep_stat_root, merkle_root.digest.bytes)) {
-            failure = "incremental scan or staging update failed";
-            goto out;
-        }
-        ci_seed_receipt_clear(st);
-        ci_store_close(st);
-        st = NULL;
-    } else if (seedable &&
-               ci_seed_stage_generation(ci->root, stagefd, current_leaves,
-                                        current_count, current_dep_stat,
-                                        merkle_root.digest.bytes, &seed)) {
-        /* The staging inode now holds a sibling checkout's generation with
-         * this checkout's differing files rescanned into it. It goes through
-         * the identical verification and publication below; nothing about the
-         * freshness contract is relaxed for having arrived this way. */
-        memcpy(built_dep_stat_root, current_dep_stat, 32);
-    } else {
-        if (!ci_build_store_memory(ci->root, build_start_ms, &st,
-                                   built_source_stat_root,
-                                   built_dep_stat_root)) {
-            failure = "source scan or staging write failed";
-            goto out;
-        }
-        if (!ci_store_meta_set(st, "source_merkle_root_sha3",
-                               merkle_root.digest.bytes, 32)) {
-            failure = "seal source Merkle root failed";
-            goto out;
-        }
-        if (!ci_store_write_image_fd(st, stagefd)) {
-            failure = "serialize staging store failed";
-            goto out;
-        }
-        ci_store_close(st);
-        st = NULL;
-    }
-
-    /* Serialization can be non-trivial for a large index. Recheck only the
-     * cached metadata keys at the last boundary before fsync/publication; any
-     * byte change also changes inode/size/mtime/ctime on the supported local
-     * filesystems and forces a clean retry. */
-    struct ci_merkle_cost final_merkle_cost = {0};
-    struct ci_merkle *final_merkle = ci_merkle_refresh(
-        ci->root, &final_merkle_cost);
-    struct ci_merkle_node final_merkle_root;
-    uint8_t final_dep_stat_root[32];
-    bool final_ok = final_merkle &&
-        ci_merkle_root(final_merkle, &final_merkle_root) &&
-        memcmp(merkle_root.digest.bytes, final_merkle_root.digest.bytes, 32) == 0 &&
-        ci_deps_stat_root_sha3(ci->root, final_dep_stat_root) &&
-        memcmp(built_dep_stat_root, final_dep_stat_root, 32) == 0;
-    ci_merkle_free(final_merkle);
-    if (!final_ok) {
-        failure = "source or depfile metadata changed during rebuild";
-        goto out;
-    }
-
-    if (!rebuild_stage_identity_holds(dirfd, stagefd, stage_name,
-                                      &stage_identity)) {
-        failure = "staging inode identity changed";
-        goto out;
-    }
-    unsigned char journal_versions[2];
-    if (pread(stagefd, journal_versions, sizeof(journal_versions), 18) !=
-            (ssize_t)sizeof(journal_versions) ||
-        journal_versions[0] != 1 || journal_versions[1] != 1) {
-        failure = "staging image is not rollback-journal format";
-        goto out;
-    }
-    if (fsync(stagefd) != 0) {
-        failure = "fsync staging inode failed";
-        goto out;
-    }
-
-    codeindex_test_maybe_crash(CODEINDEX_TEST_CRASH_BEFORE_RENAME);
-    if (renameat(dirfd, stage_name, dirfd, "index.kv") != 0) {
-        failure = "atomic staging publication failed";
-        goto out;
-    }
-    stage_name[0] = '\0';
-    if (!rebuild_published_identity_holds(dirfd, stagefd)) {
-        failure = "published index inode identity changed";
-        goto out;
-    }
-    /* Make the rollback-journal main file durable before unlinking any WAL
-     * that an older generation might require. A power loss may therefore
-     * leave either (old main + old sidecars) or (new main + old sidecars),
-     * never old main with its WAL removed. Immutable readers safely ignore
-     * sidecars beside the new main. */
-    if (fsync(dirfd) != 0) {
-        failure = "fsync published index directory failed";
-        goto out;
-    }
-    codeindex_test_maybe_crash(CODEINDEX_TEST_CRASH_AFTER_RENAME);
-    if (!ci_remove_legacy_sidecars(dirfd)) {
-        failure = "legacy sidecar cleanup failed";
-        goto out;
-    }
-    if (fsync(dirfd) != 0) {
-        failure = "fsync legacy sidecar cleanup failed";
-        goto out;
-    }
-    close(stagefd);
-    stagefd = -1;
-
-    struct ci_store *next = ci_store_open(ci->root);
-    if (!next) {
-        failure = "reopen published index failed";
-        goto out;
-    }
-    struct ci_store *old = ci->store;
-    ci->store = next;
-    if (old) ci_store_close(old);
-    success = true;
-
-    /* Lay down the next staging clone now and let the kernel write it back
-     * while the developer edits, so the NEXT publication's fsync has almost
-     * nothing left to flush. Only a checkout that just took the incremental
-     * path earns the extra image: a checkout that is only ever cold-built
-     * would pay a second full-image write for a spare nothing comes back for.
-     * Best effort throughout — a failure here costs the next rebuild an
-     * ordinary clone and nothing else. */
-    if (incremental) (void)ci_spare_publish(dirfd);
-    rebuild_report(&seed, incremental, build_start_ms);
-
-out:
-    if (st) ci_store_close(st);
-    ci_merkle_free(merkle);
-    free(changed);
-    free(current_leaves);
-    if (stagefd >= 0) close(stagefd);
-    if (stage_name[0]) {
-        (void)unlinkat(dirfd, stage_name, 0);
-    }
-    ci_rebuild_lock_close(dirfd, lockfd);
-    if (!success)
-        LOG_FAIL("codeindex", "rebuild failed: %s", failure);
+    struct ci_rebuild_job job = {
+        .ci = ci,
+        .coalesce_if_fresh = coalesce_if_fresh,
+        .build_start_ms = build_start_ms,
+        .failure = "unknown rebuild failure",
+        .stagefd = -1,
+    };
+    ci_rebuild_run(&job, dirfd);
+    ci_rebuild_release(&job, dirfd, lockfd);
+    if (!job.success)
+        LOG_FAIL("codeindex", "rebuild failed: %s", job.failure);
     return true;
 }
 

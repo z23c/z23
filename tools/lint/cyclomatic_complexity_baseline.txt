@@ -22,10 +22,6 @@ cognition/controllers/src/agent_session_controller.c:rpc_agentsession:16
 cognition/controllers/src/agent_test_controller.c:rpc_agent_test:23
 cognition/controllers/src/event_agent_summary.c:rpc_agent_summary:30
 cognition/modules/codeindex/src/codeindex.c:codeindex_build_cold_ms:19
-cognition/modules/codeindex/src/codeindex_build.c:ci_rebuild_lock_open:17
-cognition/modules/codeindex/src/codeindex_build.c:codeindex_rebuild_internal:61
-cognition/modules/codeindex/src/codeindex_build.c:collect_dir:20
-cognition/modules/codeindex/src/codeindex_build.c:source_file_sha3:21
 cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:26
 cognition/modules/codeindex/src/codeindex_capability.c:codeindex_capabilities:45
 cognition/modules/codeindex/src/codeindex_deps.c:codeindex_depfile_graph:19
