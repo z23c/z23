@@ -264,15 +264,15 @@ see `docs/CONSENSUS_PARITY_DOCTRINE.md`.
 A "repo hygiene / delete the dead directories" pass is a reasonable-sounding task
 that detonates here. Seven top-level directories read as clutter and are pinned
 by a test assert, a runtime string, a byte seal, or a lint gate's scan root.
-Worse than a loud assert: **moving `domain/` hollows its gate to a silent
-CLEAN**, and nothing fires for months.
+Worse than a loud assert: **moving a scan root can hollow a gate to a silent
+CLEAN** unless its empty-scan floor is preserved, as the native domain gate now requires.
 
 | Directory | Looks like | What actually pins it |
 |---|---|---|
 | `core/` | ordinary source | **Byte-sealed.** `core/MANIFEST.sha3` + the `check-core-seal` gate hash every file. Any edit fails `make lint`. Unlock: `make core-unseal REASON="…"` (appends to `core/UNSEAL.md`, mints a one-commit `.core-unseal-token`) → edit → `make core-seal`. An agent cannot mint that token as a normal source edit. |
 | `engine/application/` | two `.gitkeep` files, no source | Hardcoded in the `roots[]` list of `run_check_build_commit_macro_contract()` in `tests/harness/src/test_make_lint_gates.c`; each entry is `opendir()`ed. Delete the directory and the test aborts. |
 | `apps/` | a second code layout next to `app/` | **Runtime data, not code.** `engine/modules/framework/src/app_catalog.c` `snprintf`s `"%s/apps/%s/app.def"` against the datadir at run time, and a native command's reply is asserted equal to that exact string. |
-| `domain/` | 8 files, mostly superseded by `core/` | `tools/scripts/check_domain_purity.sh` ends with `find domain -type f …`. Rename or move the directory and `find` matches nothing, `violations` stays empty, and the gate prints `clean` — **a hollowed gate that still passes**. |
+| `domain/` | 8 files, mostly superseded by `core/` | `build/bin/z23-lint check-domain-purity` requires a non-empty source set and refuses an empty scan. The former shell scan could report clean after `find domain -type f …` matched nothing; preserve the fail-loud floor when moving its scan roots. |
 | `platform/ports/` | 12 headers, no `.c` | `tools/scripts/check_doc_counts.sh` hard-counts `platform/ports/include/ports/*.h` against `port_interfaces` in the `DOC-COUNTS` block of `docs/dev/CODEBASE_MAP.md`. |
 | `platform/adapters/` | thin sqlite wrappers | Same gate hard-counts `platform/adapters/outbound/persistence/src/*.c` against `persistence_adapters`. |
 | `src/` | four loose files at the root | The program entry point (`engine/entry/main.c`, `engine/entry/cli.c`, `src/main_cli_modes.{c,h}`) and the most content-asserted path outside `app/`. It is also in the same `roots[]` list as `engine/application/`. |

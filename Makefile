@@ -13862,8 +13862,8 @@ check-controller-private-headers: $(LINTC_TOOL)
 # build. HARD gate, no baseline (the tree is clean).
 check-domain-purity: $(LINTC_TOOL)
 	@echo "══ LINT: domain/ source purity ══"
-	@./tools/scripts/check_domain_purity.sh --selftest
-	@./tools/scripts/check_domain_purity.sh
+	@$(LINTC_TOOL) check-domain-purity --selftest
+	@$(LINTC_TOOL) check-domain-purity
 
 # Supervisor registration: every long-running service in
 # engine/services/src/*_service.c must register a liveness contract with

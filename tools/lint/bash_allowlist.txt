@@ -221,7 +221,6 @@ tools/scripts/check_consensus_parity.sh
 tools/scripts/check_crypto_perf.sh
 tools/scripts/check_doc_accuracy.sh
 tools/scripts/check_doc_counts.sh
-tools/scripts/check_domain_purity.sh
 tools/scripts/check_dumper_never_blocks.sh
 tools/scripts/check_fleet_source_status.sh
 tools/scripts/check_frontier_single_writer.sh

@@ -256,7 +256,7 @@
 #define E4_FIXTURE_DST   "engine/modules/storage/src/_e4_pure_fixture_projection.c"
 /* Gate #45 — domain/ source purity (hard). The fixture is a domain/ src file
  * with a forbidden include; clean tree exits 0, fixture non-zero. */
-#define DOMAIN_PURITY_SCRIPT_REL  "tools/scripts/check_domain_purity.sh"
+#define DOMAIN_PURITY_SCRIPT_REL  "build/bin/z23-lint check-domain-purity"
 #define DOMAIN_PURITY_FIXTURE_DST "contexts/wallet/domain/src/_domain_purity_fixture_tmp.c"
 /* Gate #49 — inter-shape include direction (ratchet). The fixture is an
  * engine/models/src/ file with an upward #include "services/..."; the clean

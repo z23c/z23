@@ -164,7 +164,7 @@ enlarge the set.
 `platform/domain/encoding` and `contexts/wallet/domain` hold base58/bech32 and
 key-derivation/mnemonic primitives beside their owning authority.
 **No clock, no RNG, no IO** (lint: `z23-lint check-no-raw-clock-outside-platform`,
-`check_domain_purity.sh`). Replayable from a 64-bit seed. Never put IO here.
+`z23-lint check-domain-purity`). Replayable from a 64-bit seed. Never put IO here.
 The consensus modules that used to live here are under `core/` (above).
 
 ### Reusable modules — owned by an authority
@@ -497,7 +497,8 @@ Gates live in **two** directories and neither is deprecated:
 Rule of thumb: put it in `tools/lint/` if it sources `tools/lint/gate_lib.sh`;
 put it in `tools/scripts/` if it is also runnable standalone as an operator
 tool (`check_consensus_parity.sh`, `check_doc_counts.sh`,
-`check_domain_purity.sh`, `check_raw_sqlite.sh` all live there). Either way,
+`check_raw_sqlite.sh` all live there). Native gates such as
+`z23-lint check-domain-purity` live in `tools/lint/lintc/`. Either way,
 add it as a dependency of the `lint` target in the `Makefile`.
 
 RATCHET gates compare against a baseline file (e.g.
@@ -505,7 +506,7 @@ RATCHET gates compare against a baseline file (e.g.
 
 **Every new gate needs a fail-loud floor.** A gate whose scan set goes empty
 (directory renamed, glob stops matching) reports CLEAN and nobody notices —
-`check_domain_purity.sh` is one `find domain …` away from exactly that. Call
+the former shell domain-purity scan was one `find domain …` away from exactly that. Call
 `gate_require_scanned <n> <min> <gate-name> "<what was empty>"` from
 `tools/lint/gate_lib.sh`, as `z23-lint check-command-contract` does.
 

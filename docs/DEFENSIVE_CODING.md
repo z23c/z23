@@ -570,8 +570,8 @@ assert green).
   primitives script support util validation`). Any include from an app/ shape
   (`controllers/`, `models/`, `services/`, `views/`) or an unlisted lib/
   subsystem (`storage/`, `platform/ports/`, …) fails the build. No baseline (the tree is
-  already clean). Override `// domain-purity-ok:<tag>`. Impl:
-  `tools/scripts/check_domain_purity.sh`.
+  already clean). Override `// domain-purity-ok:<tag>`. Command:
+  `build/bin/z23-lint check-domain-purity`.
 
 - **Gate #46: `check-core-include-boundary`** (HARD) — the sealed consensus
   core (top-level `core/`, the Wave 1.1 physical split) is the innermost
