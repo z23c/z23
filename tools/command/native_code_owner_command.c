@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Creeton - Apache License 2.0
  * purpose: Name the physical authority room that owns one source path. */
 
 #include "command/native_command.h"
@@ -81,6 +81,51 @@ static void owner_module(const char *path, char *out, size_t out_size)
     (void)snprintf(out, out_size, "%.*s", (int)length, path);
 }
 
+/* Group purpose joins the public group hierarchy, matching code.map: the
+ * purpose line of the indexed row's group, "" when the path is unindexed or
+ * its group is absent from the hierarchy. */
+static void owner_group_purpose(struct codeindex *index,
+                                const struct ci_file *row, bool found,
+                                char *out, size_t out_size)
+{
+    out[0] = '\0';
+    if (!found) return;
+    static struct ci_group groups[512];
+    int group_count = codeindex_groups(index, groups, 512);
+    for (int i = 0; i < group_count; i++) {
+        if (strcmp(groups[i].path, row->group) == 0) {
+            (void)snprintf(out, out_size, "%s", groups[i].purpose);
+            break;
+        }
+    }
+}
+
+/* The one-line verdict summary a reviewer reads first: shape, owning group,
+ * and whether consensus-sealing applies. */
+static void owner_summarize(bool found, bool exists, bool sealed,
+                            const struct ci_context_assignment *assignment,
+                            const char *authority, const struct ci_file *row,
+                            const char *group_purpose,
+                            char *out, size_t out_size)
+{
+    if (found) {
+        (void)snprintf(out, out_size,
+                       "%s (shape: %s); group %s%s%s; sealed=%s",
+                       assignment->context[0] ? assignment->context
+                                              : authority,
+                       assignment->shape, row->group,
+                       group_purpose[0] ? " — " : "", group_purpose,
+                       sealed ? "yes (consensus-sealed; edits need the unseal ritual)"
+                              : "no");
+    } else {
+        (void)snprintf(out, out_size,
+                       "UNOWNED: not in the code index%s; authority by path is "
+                       "%s/; sealed=%s",
+                       exists ? " but present on disk" : " and not on disk",
+                       authority, sealed ? "yes" : "no");
+    }
+}
+
 void zcl_native_handle_code_owner(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -116,19 +161,9 @@ void zcl_native_handle_code_owner(
         return;
     }
 
-    /* Group purpose joins the public group hierarchy, matching code.map. */
-    char group_purpose[160] = {0};
-    if (found) {
-        static struct ci_group groups[512];
-        int group_count = codeindex_groups(index, groups, 512);
-        for (int i = 0; i < group_count; i++) {
-            if (strcmp(groups[i].path, row.group) == 0) {
-                (void)snprintf(group_purpose, sizeof(group_purpose), "%s",
-                               groups[i].purpose);
-                break;
-            }
-        }
-    }
+    char group_purpose[160];
+    owner_group_purpose(index, &row, found, group_purpose,
+                        sizeof(group_purpose));
     codeindex_close(index);
 
     bool exists = found || owner_on_disk(root, path);
@@ -144,21 +179,8 @@ void zcl_native_handle_code_owner(
 
     const char *verdict = found ? "OWNED" : "UNOWNED";
     char summary[320];
-    if (found) {
-        (void)snprintf(summary, sizeof(summary),
-                       "%s (shape: %s); group %s%s%s; sealed=%s",
-                       assignment.context[0] ? assignment.context : authority,
-                       assignment.shape, row.group,
-                       group_purpose[0] ? " — " : "", group_purpose,
-                       sealed ? "yes (consensus-sealed; edits need the unseal ritual)"
-                              : "no");
-    } else {
-        (void)snprintf(summary, sizeof(summary),
-                       "UNOWNED: not in the code index%s; authority by path is "
-                       "%s/; sealed=%s",
-                       exists ? " but present on disk" : " and not on disk",
-                       authority, sealed ? "yes" : "no");
-    }
+    owner_summarize(found, exists, sealed, &assignment, authority, &row,
+                    group_purpose, summary, sizeof(summary));
 
     (void)json_push_kv_str(&reply->data, "path", path);
     (void)json_push_kv_bool(&reply->data, "exists", exists);
