@@ -264,6 +264,14 @@ static bool progress_store_quick_check_skipped(const char *path)
 #endif
 }
 
+/* True when the existing consensus.db must be quarantined: the verified-clean
+ * skip did not apply and the integrity quick_check failed. */
+static bool progress_store_quick_check_rejects(sqlite3 *db,
+                                               bool skip_existing_check)
+{
+    return !skip_existing_check && !progress_store_quick_check_ok(db);
+}
+
 bool progress_store_open(const char *datadir)
 {
     if (!datadir || !datadir[0]) LOG_FAIL("progress_store",
@@ -425,7 +433,7 @@ bool progress_store_open(const char *datadir)
      * fresh, just-created store that ALSO fails quick_check is a disk/fs fault,
      * not corrupt derived state — log a terminal blocker and fail the open
      * instead of quarantine-looping. */
-    if (!skip_existing_check && !progress_store_quick_check_ok(db)) {
+    if (progress_store_quick_check_rejects(db, skip_existing_check)) {
 #ifdef _WIN32
         /* Quarantine is intentionally still contained: its current helper
          * renames a pathname family after close, outside the retained HANDLE
