@@ -654,7 +654,6 @@ contexts/wallet/controllers/src/wallet_native_handlers.c:wnh_amount_exact:20
 contexts/wallet/controllers/src/wallet_native_handlers.c:zcl_native_handle_wallet_shielded_send:37
 contexts/wallet/controllers/src/wallet_native_handlers.c:zcl_native_handle_wallet_transaction_send:16
 contexts/wallet/controllers/src/wallet_raw_native_handlers.c:zcl_native_handle_wallet_multisig_compose:23
-contexts/wallet/controllers/src/wallet_readiness_controller.c:wallet_readiness_append_sapling:21
 contexts/wallet/controllers/src/wallet_rescan_controller_coins.c:rpc_coinanalysis:22
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rescan_seed_before_oldest_note_from_db:18
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rpc_rescanwitnesses:44

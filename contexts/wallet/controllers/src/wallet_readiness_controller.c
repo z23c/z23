@@ -14,6 +14,47 @@
 #include <stdio.h>
 #include <string.h>
 
+static const char *wallet_readiness_ckpt_load_result_name(
+    const struct sapling_ckpt_stats *ckpt)
+{
+    const char *name = "unknown";
+    switch (ckpt->last_load_result) {
+    case SAPLING_CKPT_LOAD_NONE:      name = "none"; break;
+    case SAPLING_CKPT_LOAD_ABSENT:    name = "absent"; break;
+    case SAPLING_CKPT_LOAD_VERIFIED:  name = "loaded_verified"; break;
+    case SAPLING_CKPT_LOAD_DISCARDED: name = "discarded"; break;
+    default: break;
+    }
+    return name;
+}
+
+static bool wallet_readiness_checkpoint_healthy(
+    bool checkpoint_enabled, const struct sapling_ckpt_stats *ckpt)
+{
+    return checkpoint_enabled && ckpt->write_fails == 0 &&
+        (ckpt->last_load_result == SAPLING_CKPT_LOAD_VERIFIED ||
+         ckpt->last_write_height >= 0);
+}
+
+static bool wallet_readiness_witness_summary_known(
+    struct wallet_rpc_context *ctx, int tip_height,
+    struct db_sapling_witness_summary *ws)
+{
+    return ctx && ctx->node_db &&
+        db_sapling_note_witness_summary(ctx->node_db, tip_height, ws);
+}
+
+static const char *wallet_readiness_witness_state(
+    bool witness_known, bool witness_ready,
+    const struct db_sapling_witness_summary *ws)
+{
+    return !witness_known ? "unavailable" :
+        ws->local_unspent_notes == 0 ? "not_applicable" :
+        witness_ready ? "ready" :
+        ws->missing_notes > 0 ? "rescan_required_missing" :
+        "rescan_required_stale";
+}
+
 void wallet_readiness_append_sapling(struct json_value *result)
 {
     if (!result)
@@ -32,15 +73,8 @@ void wallet_readiness_append_sapling(struct json_value *result)
     struct sapling_ckpt_stats ckpt;
     memset(&ckpt, 0, sizeof(ckpt));
     sapling_ckpt_get_stats(&ckpt);
-    const char *load_result = "unknown";
-    switch (ckpt.last_load_result) {
-    case SAPLING_CKPT_LOAD_NONE:      load_result = "none"; break;
-    case SAPLING_CKPT_LOAD_ABSENT:    load_result = "absent"; break;
-    case SAPLING_CKPT_LOAD_VERIFIED:  load_result = "loaded_verified"; break;
-    case SAPLING_CKPT_LOAD_DISCARDED: load_result = "discarded"; break;
-    default: break;
-    }
-    (void)json_push_kv_str(&sapling, "checkpoint_load_result", load_result);
+    (void)json_push_kv_str(&sapling, "checkpoint_load_result",
+                           wallet_readiness_ckpt_load_result_name(&ckpt));
     (void)json_push_kv_int(&sapling, "checkpoint_last_write_height",
                            ckpt.last_write_height);
     (void)json_push_kv_int(&sapling, "checkpoint_write_failures",
@@ -50,24 +84,19 @@ void wallet_readiness_append_sapling(struct json_value *result)
                             checkpoint_enabled);
     (void)json_push_kv_bool(
         &sapling, "checkpoint_healthy",
-        checkpoint_enabled && ckpt.write_fails == 0 &&
-        (ckpt.last_load_result == SAPLING_CKPT_LOAD_VERIFIED ||
-         ckpt.last_write_height >= 0));
+        wallet_readiness_checkpoint_healthy(checkpoint_enabled, &ckpt));
     struct wallet_rpc_context *ctx = wallet_ctx();
     int tip_height = reducer_frontier_external_tip_height();
     struct db_sapling_witness_summary ws;
-    bool witness_known = ctx && ctx->node_db &&
-        db_sapling_note_witness_summary(ctx->node_db, tip_height, &ws);
+    bool witness_known =
+        wallet_readiness_witness_summary_known(ctx, tip_height, &ws);
     bool witness_ready = witness_known &&
         (ws.local_unspent_notes == 0 ||
          ws.ready_notes == ws.local_unspent_notes);
-    const char *witness_state = !witness_known ? "unavailable" :
-        ws.local_unspent_notes == 0 ? "not_applicable" :
-        witness_ready ? "ready" :
-        ws.missing_notes > 0 ? "rescan_required_missing" :
-        "rescan_required_stale";
     (void)json_push_kv_bool(&sapling, "witness_ready", witness_ready);
-    (void)json_push_kv_str(&sapling, "witness_state", witness_state);
+    (void)json_push_kv_str(
+        &sapling, "witness_state",
+        wallet_readiness_witness_state(witness_known, witness_ready, &ws));
     (void)json_push_kv_int(&sapling, "witness_tip_height", tip_height);
     (void)json_push_kv_int(&sapling, "local_unspent_notes",
                            witness_known ? ws.local_unspent_notes : 0);
@@ -80,6 +109,7 @@ void wallet_readiness_append_sapling(struct json_value *result)
     (void)json_push_kv(result, "sapling", &sapling);
     json_free(&sapling);
 }
+
 
 /* Scan coverage for getwalletinfo. A boot catch-up that could not read its
  * range leaves the wallet incomplete: coins in the unread blocks can be
