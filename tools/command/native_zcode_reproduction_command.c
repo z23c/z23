@@ -50,23 +50,40 @@ static void zrr_hex(struct json_value *data, const char *key,
     (void)json_push_kv_str(data, key, hex);
 }
 
+static bool zrr_challenge_input_valid(
+    const struct zcl_command_request *request,
+    const struct zcl_command_reply *reply, const struct json_value *input,
+    const char *workspace, const char *hex, const struct json_value *now)
+{
+    static const char *const keys[] = {
+        "workspace", "request_hex", "now_unix"
+    };
+    return request && reply && zrr_keys(input, keys, 3) && workspace &&
+           hex && strlen(hex) ==
+                      VCS_ZCODE_REPRODUCTION_REQUEST_WIRE_BYTES * 2u && now &&
+           now->type == JSON_INT && json_get_int(now) > 0;
+}
+
+static bool zrr_challenge_fresh(
+    enum vcs_zcode_reproduction_error error,
+    const struct vcs_zcode_reproduction_request_v1 *out, int64_t evaluated)
+{
+    return error == VCS_ZCODE_REPRODUCTION_OK &&
+           evaluated >= out->created_unix && evaluated < out->expires_unix;
+}
+
 static bool zrr_parse(const struct zcl_command_request *request,
                       struct zcl_command_reply *reply,
                       struct vcs_zcode_reproduction_request_v1 *out,
                       uint8_t wire[VCS_ZCODE_REPRODUCTION_REQUEST_WIRE_BYTES],
                       uint8_t root[32], const char **workspace_out)
 {
-    static const char *const keys[] = {
-        "workspace", "request_hex", "now_unix"
-    };
     const struct json_value *input = request ? request->input : NULL;
     const char *workspace = zrr_str(input, "workspace");
     const char *hex = zrr_str(input, "request_hex");
     const struct json_value *now = input ? json_get(input, "now_unix") : NULL;
-    if (!request || !reply || !zrr_keys(input, keys, 3) || !workspace ||
-        !hex || strlen(hex) !=
-                    VCS_ZCODE_REPRODUCTION_REQUEST_WIRE_BYTES * 2u || !now ||
-        now->type != JSON_INT || json_get_int(now) <= 0) {
+    if (!zrr_challenge_input_valid(request, reply, input, workspace, hex,
+                                   now)) {
         zrr_fail(reply, "BAD_REPRODUCTION_CHALLENGE_INPUT",
                  "workspace, exact request_hex and positive now_unix are required");
         return false;
@@ -86,8 +103,7 @@ static bool zrr_parse(const struct zcl_command_request *request,
         vcs_zcode_reproduction_request_parse(
             wire, VCS_ZCODE_REPRODUCTION_REQUEST_WIRE_BYTES, out);
     int64_t evaluated = json_get_int(now);
-    if (error != VCS_ZCODE_REPRODUCTION_OK ||
-        evaluated < out->created_unix || evaluated >= out->expires_unix) {
+    if (!zrr_challenge_fresh(error, out, evaluated)) {
         zrr_fail(reply, "REPRODUCTION_CHALLENGE_REFUSED",
             error == VCS_ZCODE_REPRODUCTION_OK ? "challenge is not fresh"
                 : vcs_zcode_reproduction_error_string(error));
