@@ -173,7 +173,12 @@ static void dlx_isolate(const char *tag)
         (void)snprintf(cfg, sizeof(cfg), "%s/gitconfig", base);
         FILE *f = fopen(cfg, "w");
         if (f) {
-            (void)fputs("[user]\n\tname = land\n\temail = land@z23.invalid\n", f);
+            /* Fixture repos are disposable and no case here tests power-loss
+             * durability. Every git write otherwise fsyncs its objects and
+             * refs (about 0.4 s per commit on this disk), which dominated the
+             * run; core.fsync=none changes no ref, object or result. */
+            (void)fputs("[user]\n\tname = land\n\temail = land@z23.invalid\n"
+                        "[core]\n\tfsync = none\n", f);
             (void)fclose(f);
             setenv("GIT_CONFIG_GLOBAL", cfg, 1);
         }
