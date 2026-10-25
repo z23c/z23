@@ -59,11 +59,10 @@ static void mk_table(struct checkpoint_data *cd,
     cd->fTransactionsPerDay = 1000.0;
 }
 
-int test_domain_consensus_checkpoints(void)
+/* ──────────────────── hash_at_height ──────────────────── */
+static int check_hash_at_height(void)
 {
     int failures = 0;
-
-    /* ──────────────────── hash_at_height ──────────────────── */
 
     {
         struct checkpoint_entry e[3];
@@ -114,7 +113,13 @@ int test_domain_consensus_checkpoints(void)
                   !domain_consensus_checkpoints_hash_at_height(&cd, 99999, &h));
     }
 
-    /* ──────────────────── last_height ──────────────────── */
+    return failures;
+}
+
+/* ──────────────────── last_height ──────────────────── */
+static int check_last_height(void)
+{
+    int failures = 0;
 
     {
         /* NULL → -1. */
@@ -149,7 +154,13 @@ int test_domain_consensus_checkpoints(void)
                   domain_consensus_checkpoints_last_height(&cd_shuf) == 5000);
     }
 
-    /* ──────────────────── validate_header ──────────────────── */
+    return failures;
+}
+
+/* ──────────────────── validate_header ──────────────────── */
+static int check_validate_header(void)
+{
+    int failures = 0;
 
     {
         struct checkpoint_entry e[3];
@@ -187,15 +198,22 @@ int test_domain_consensus_checkpoints(void)
                   !domain_consensus_checkpoints_validate_header(&cd, 5000, &wrong));
     }
 
-    /* ──────────────── L3 LOCK-IN: checkpoint fork-guard is exact-height-only ──
-     * (docs/work/parity-audit-round2-findings.md, L3.) validate_header()
-     * returns true when no checkpoint exists at the EXACT height, even below
-     * the last checkpoint; zclassicd also rejects nHeight <
-     * lastCheckpoint.nHeight (main.cpp:4386-4392). This pins the current
-     * behavior: a header at a non-checkpointed height below the last
-     * checkpoint (5000) is ACCEPTED with any hash, while an exact-height
-     * mismatch rejects. The accepts flip if a below-last-checkpoint guard
-     * lands. */
+    return failures;
+}
+
+/* ──────────────── L3 LOCK-IN: checkpoint fork-guard is exact-height-only ──
+ * (docs/work/parity-audit-round2-findings.md, L3.) validate_header()
+ * returns true when no checkpoint exists at the EXACT height, even below
+ * the last checkpoint; zclassicd also rejects nHeight <
+ * lastCheckpoint.nHeight (main.cpp:4386-4392). This pins the current
+ * behavior: a header at a non-checkpointed height below the last
+ * checkpoint (5000) is ACCEPTED with any hash, while an exact-height
+ * mismatch rejects. The accepts flip if a below-last-checkpoint guard
+ * lands. */
+static int check_l3_fork_guard_pins(void)
+{
+    int failures = 0;
+
     {
         struct checkpoint_entry e[3];
         struct checkpoint_data cd;
@@ -232,7 +250,13 @@ int test_domain_consensus_checkpoints(void)
                   !domain_consensus_checkpoints_validate_header(&cd, 5000, &forged));
     }
 
-    /* ──────────────────── total_blocks_estimate ──────────────────── */
+    return failures;
+}
+
+/* ──────────────────── total_blocks_estimate ──────────────────── */
+static int check_total_blocks_estimate(void)
+{
+    int failures = 0;
 
     {
         /* NULL → 0. */
@@ -253,7 +277,13 @@ int test_domain_consensus_checkpoints(void)
                   domain_consensus_checkpoints_total_blocks_estimate(&cd) == 5000);
     }
 
-    /* ──────────────────── progress_at_now ──────────────────── */
+    return failures;
+}
+
+/* ──────────────────── progress_at_now ──────────────────── */
+static int check_progress_at_now(void)
+{
+    int failures = 0;
 
     {
         struct checkpoint_entry e[3];
@@ -299,7 +329,13 @@ int test_domain_consensus_checkpoints(void)
                   z == 0.0);
     }
 
-    /* ──────────────────── wrapper-vs-domain regression seal ──────────────── */
+    return failures;
+}
+
+/* ──────────────────── wrapper-vs-domain regression seal ──────────────── */
+static int check_wrapper_parity(void)
+{
+    int failures = 0;
 
     {
         struct checkpoint_entry e[3];
@@ -375,9 +411,16 @@ int test_domain_consensus_checkpoints(void)
                   d_prog_now >= 0.0 && d_prog_now <= 1.0);
     }
 
-    /* ──────────────────── sanity: real mainnet table parity ──────────── */
-    /* Round-trip the selected chainparams' real checkpoint_data through both
-     * APIs, not just the synthetic table. */
+    return failures;
+}
+
+/* ──────────────────── sanity: real mainnet table parity ──────────── */
+/* Round-trip the selected chainparams' real checkpoint_data through both
+ * APIs, not just the synthetic table. */
+static int check_mainnet_parity(void)
+{
+    int failures = 0;
+
     {
         const struct chain_params *p = chain_params_get();
         if (p) {
@@ -392,6 +435,22 @@ int test_domain_consensus_checkpoints(void)
                       domain_consensus_checkpoints_total_blocks_estimate(cd));
         }
     }
+
+    return failures;
+}
+
+int test_domain_consensus_checkpoints(void)
+{
+    int failures = 0;
+
+    failures += check_hash_at_height();
+    failures += check_last_height();
+    failures += check_validate_header();
+    failures += check_l3_fork_guard_pins();
+    failures += check_total_blocks_estimate();
+    failures += check_progress_at_now();
+    failures += check_wrapper_parity();
+    failures += check_mainnet_parity();
 
     return failures;
 }
