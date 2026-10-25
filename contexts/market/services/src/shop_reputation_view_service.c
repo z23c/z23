@@ -27,14 +27,10 @@ static void set_row(struct shop_reputation_view_result_v1 *out,
     (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
 }
 
-static bool render(const struct shop_reputation_view_input_v1 *ev,
-                   struct shop_reputation_view_result_v1 *out)
+static void render_publication_rows(
+    const struct shop_reputation_view_input_v1 *ev,
+    struct shop_reputation_view_result_v1 *out, const char *local_store)
 {
-    if (!ev || !out)
-        return false;
-    memset(out, 0, sizeof(*out));
-    static const char *const local_store = "this node's local zcode store";
-
     set_row(out, "releases_published",
             ev->releases > 0 ? "recorded" : "no_record",
             ev->releases > 0, ev->releases,
@@ -51,7 +47,12 @@ static bool render(const struct shop_reputation_view_input_v1 *ev,
             ev->packages > 0
                 ? "distinct package roots this publisher has released locally"
                 : "no package root released by this publisher is held");
+}
 
+static void render_observation_row(
+    const struct shop_reputation_view_input_v1 *ev,
+    struct shop_reputation_view_result_v1 *out)
+{
     if (ev->observed) {
         char detail[SHOP_REPUTATION_VIEW_DETAIL_MAX];
         (void)snprintf(detail, sizeof(detail),
@@ -67,7 +68,12 @@ static bool render(const struct shop_reputation_view_input_v1 *ev,
                 "local store file mtime (unsigned local observation)",
                 "this node only", "no release envelope is held locally");
     }
+}
 
+static void render_reproduction_row(
+    const struct shop_reputation_view_input_v1 *ev,
+    struct shop_reputation_view_result_v1 *out, const char *local_store)
+{
     char detail[SHOP_REPUTATION_VIEW_DETAIL_MAX];
     (void)snprintf(detail, sizeof(detail),
                    "%u build receipt(s) name this publisher's package+recipe "
@@ -83,7 +89,13 @@ static bool render(const struct shop_reputation_view_input_v1 *ev,
             "byte-identical output sets (distinct receipt ids)", local_store,
             ev->matching_receipts > 0 ? detail
                 : "no build receipt naming this publisher's packages is filed");
+}
 
+static void render_attestation_row(
+    const struct shop_reputation_view_input_v1 *ev,
+    struct shop_reputation_view_result_v1 *out, const char *local_store)
+{
+    char detail[SHOP_REPUTATION_VIEW_DETAIL_MAX];
     (void)snprintf(detail, sizeof(detail),
                    "%u signature-verified attestation(s) from %u distinct "
                    "verifier pubkey(s); a verified signature proves authorship "
@@ -100,7 +112,13 @@ static bool render(const struct shop_reputation_view_input_v1 *ev,
             "signature verifies at read time", local_store,
             ev->distinct_verifiers > 0 ? detail
                 : "no valid attestation naming this publisher's packages is filed");
+}
 
+static void render_dependency_row(
+    const struct shop_reputation_view_input_v1 *ev,
+    struct shop_reputation_view_result_v1 *out, const char *local_store)
+{
+    char detail[SHOP_REPUTATION_VIEW_DETAIL_MAX];
     (void)snprintf(detail, sizeof(detail),
                    "%u declaration(s) read, %u unreadable locally (manifest "
                    "or member bytes not held — counted as unavailable, never "
@@ -113,7 +131,12 @@ static bool render(const struct shop_reputation_view_input_v1 *ev,
             "a manifest member; the package root commits it)", local_store,
             ev->dependent_packages > 0 ? detail
                 : "no locally readable declaration names one of this publisher's package roots");
+}
 
+static void render_settlement_row(
+    const struct shop_reputation_view_input_v1 *ev,
+    struct shop_reputation_view_result_v1 *out, const char *local_store)
+{
     set_row(out, "simulated_settlements",
             ev->settled_entries > 0 ? "recorded" : "no_record",
             ev->settled_entries > 0, ev->settled_entries,
@@ -123,6 +146,22 @@ static bool render(const struct shop_reputation_view_input_v1 *ev,
             ev->settled_entries > 0
                 ? "simulated reward entries settled to this contributor key"
                 : "no simulated settlement to this contributor key is recorded");
+}
+
+static bool render(const struct shop_reputation_view_input_v1 *ev,
+                   struct shop_reputation_view_result_v1 *out)
+{
+    if (!ev || !out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    static const char *const local_store = "this node's local zcode store";
+
+    render_publication_rows(ev, out, local_store);
+    render_observation_row(ev, out);
+    render_reproduction_row(ev, out, local_store);
+    render_attestation_row(ev, out, local_store);
+    render_dependency_row(ev, out, local_store);
+    render_settlement_row(ev, out, local_store);
     set_row(out, "availability_challenges", "unavailable", false, 0,
             "none: no durable challenge record exists", "n/a",
             "the file-market chunk-challenge loop keeps pass/fail counts in "
