@@ -332,6 +332,49 @@ static enum pvla_attempt pvla_verify_height(int32_t h)
     return PVLA_STORED;
 }
 
+/* g_mu held. h is past the lookahead window or INT32_MAX: reclaim a pending
+ * gap, clear it, and wait. True means continue the claim loop. */
+static bool pvla_resweep_exhausted_window_locked(int64_t h, int64_t cursor)
+{
+    if (h >= cursor + PV_LOOKAHEAD_WINDOW || h > INT32_MAX) {
+        /* Window exhausted. Re-sweep from the lowest height we skipped for
+         * a not-yet-written body: on the live path those bodies land while
+         * we scan. Bounded — the reclaim happens at most once per
+         * PVLA_RETRY_WAIT_MS, never in a hot loop, and heights above the
+         * gap keep the verdicts they already earned. A permanently missing
+         * height still costs only one cheap failed claim per sweep
+         * (active_chain_at / BLOCK_HAVE_DATA, no pread), so the
+         * "never block forever on a missing height" property above holds. */
+        if (g_lowest_gap >= cursor && g_lowest_gap < g_next_claim) {
+            g_next_claim = g_lowest_gap;
+            g_sweep_gen++;   /* one logical sweep begins (strike epoch) */
+        }
+        g_lowest_gap = -1;
+        pvla_timed_wait_locked(PVLA_RETRY_WAIT_MS);
+        return true;
+    }
+    return false;
+}
+
+/* g_mu held. Record a height gap, or hold and retry a global verifier
+ * outage, for the attempt just finished. */
+static void pvla_note_verify_attempt_locked(enum pvla_attempt r, int64_t h)
+{
+    if (r == PVLA_HEIGHT_GAP &&
+        (g_lowest_gap < 0 || h < g_lowest_gap))
+        g_lowest_gap = h;
+    if (r == PVLA_GLOBAL_RETRY) {
+        /* Hold the height: pull the claim cursor back so it is retried
+         * (by this or any worker) once the global verifier precondition
+         * clears. A concurrent duplicate re-verify of an in-flight sibling
+         * height is idempotent (verdicts are pure) — only transiently
+         * wasteful, never wrong. */
+        if (g_next_claim > h)
+            g_next_claim = h;
+        pvla_timed_wait_locked(PVLA_RETRY_WAIT_MS);
+    }
+}
+
 static void *pvla_worker_entry(void *arg)
 {
     (void)arg;
@@ -361,23 +404,8 @@ static void *pvla_worker_entry(void *arg)
         if (g_next_claim < cursor)
             g_next_claim = cursor;
         int64_t h = g_next_claim;
-        if (h >= cursor + PV_LOOKAHEAD_WINDOW || h > INT32_MAX) {
-            /* Window exhausted. Re-sweep from the lowest height we skipped for
-             * a not-yet-written body: on the live path those bodies land while
-             * we scan. Bounded — the reclaim happens at most once per
-             * PVLA_RETRY_WAIT_MS, never in a hot loop, and heights above the
-             * gap keep the verdicts they already earned. A permanently missing
-             * height still costs only one cheap failed claim per sweep
-             * (active_chain_at / BLOCK_HAVE_DATA, no pread), so the
-             * "never block forever on a missing height" property above holds. */
-            if (g_lowest_gap >= cursor && g_lowest_gap < g_next_claim) {
-                g_next_claim = g_lowest_gap;
-                g_sweep_gen++;   /* one logical sweep begins (strike epoch) */
-            }
-            g_lowest_gap = -1;
-            pvla_timed_wait_locked(PVLA_RETRY_WAIT_MS);
+        if (pvla_resweep_exhausted_window_locked(h, cursor))
             continue;
-        }
         struct pvla_slot *slot = &g_slots[(uint64_t)h % PV_LOOKAHEAD_WINDOW];
         g_next_claim = h + 1;
         if (slot->height == (int32_t)h)
@@ -387,19 +415,7 @@ static void *pvla_worker_entry(void *arg)
         enum pvla_attempt r = pvla_verify_height((int32_t)h);
 
         pthread_mutex_lock(&g_mu);
-        if (r == PVLA_HEIGHT_GAP &&
-            (g_lowest_gap < 0 || h < g_lowest_gap))
-            g_lowest_gap = h;
-        if (r == PVLA_GLOBAL_RETRY) {
-            /* Hold the height: pull the claim cursor back so it is retried
-             * (by this or any worker) once the global verifier precondition
-             * clears. A concurrent duplicate re-verify of an in-flight sibling
-             * height is idempotent (verdicts are pure) — only transiently
-             * wasteful, never wrong. */
-            if (g_next_claim > h)
-                g_next_claim = h;
-            pvla_timed_wait_locked(PVLA_RETRY_WAIT_MS);
-        }
+        pvla_note_verify_attempt_locked(r, h);
     }
     pthread_mutex_unlock(&g_mu);
     if (child != SUPERVISOR_INVALID_ID)
