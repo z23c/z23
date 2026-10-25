@@ -146,6 +146,20 @@ ZCL_TEST_STACK_SETUP = :
 else ifeq ($(ZCL_HOST_OS),Darwin)
 CC = clang
 CXX = clang++
+# Object compilation and libclang share the SDKROOT already bound by
+# compiler-id; adding compile-only -isysroot would split that identity.
+ifeq ($(origin SDKROOT),undefined)
+SDKROOT := $(shell /usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null)
+endif
+ifeq ($(strip $(SDKROOT)),)
+$(error Darwin SDK unavailable: set SDKROOT to an installed macOS SDK or configure xcrun)
+endif
+ifneq ($(shell test -r '$(subst ','"'"',$(SDKROOT))/usr/include/assert.h' && printf yes),yes)
+$(error Darwin SDK unavailable: SDKROOT must name an installed macOS SDK with usr/include/assert.h)
+endif
+export SDKROOT
+# Older GNU Make does not pass exported assignments to parse-time shells.
+ZCL_COMPILER_ID_ENV = SDKROOT='$(subst ','"'"',$(SDKROOT))'
 ZCL_MACOS_DEPLOYMENT_TARGET := 14.0
 export MACOSX_DEPLOYMENT_TARGET := $(ZCL_MACOS_DEPLOYMENT_TARGET)
 ZCL_PLATFORM_CPPFLAGS = -mmacosx-version-min=$(ZCL_MACOS_DEPLOYMENT_TARGET) \
@@ -1764,7 +1778,7 @@ ifneq ($(origin BUILD_COMPILER_ID),command line)
 # The scope root travels explicitly on the command line (never via ambient
 # environment, matching the frozen-identity provenance contract above): at
 # parse time the shell runs in $(CURDIR), which IS the scope root.
-BUILD_COMPILER_ID := $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) compiler-id "$(CC)" "$(CXX)" "$(CURDIR)"))
+BUILD_COMPILER_ID := $(strip $(shell $(ZCL_COMPILER_ID_ENV) $(BUILD_EPOCH_KEY_TOOL) compiler-id "$(CC)" "$(CXX)" "$(CURDIR)"))
 endif
 BUILD_COMPILER_ID_VALID := $(shell printf '%s\n' '$(BUILD_COMPILER_ID)' | awk '$$0 ~ /^[0-9a-f]{64}$$/ { print "yes" }')
 ifneq ($(BUILD_COMPILER_ID_VALID),yes)
