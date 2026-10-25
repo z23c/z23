@@ -187,8 +187,7 @@ static int fsw_file_hits(const char *path, const regex_t *re, int *hit)
     while (!*hit && fgets(buf, (int)sizeof buf, f))
         if (regexec(re, buf, 0, NULL, 0) == 0)
             *hit = 1;
-    fclose(f);
-    return 0;
+    return fin(f, NULL, path, 0);
 }
 
 static int fsw_base_of(const char *path, char *out, size_t cap)
@@ -241,8 +240,7 @@ static int fsw_load_base(struct fsw_keys *b, const char *path)
             return 2;
         }
     }
-    fclose(f);
-    return 0;
+    return fin(f, NULL, path, 0);
 }
 
 static int fsw_owners(const struct fsw_files *all, const char *owner,
@@ -376,7 +374,8 @@ static int fsw_scan_row(const struct fsw_files *all, const struct fsw_row *row,
     return rc;
 }
 
-static int fsw_read_manifest(FILE *mf, const struct fsw_files *all,
+/* Consumes and closes mf, including on parser or scan failure. */
+static int fsw_read_manifest(FILE *mf, const char *path, const struct fsw_files *all,
                              struct fsw_keys *fronts, struct fsw_keys *allowed,
                              struct fsw_keys *seen, char viol[][FSW_KEY],
                              int *nv, int *nman)
@@ -400,7 +399,7 @@ static int fsw_read_manifest(FILE *mf, const struct fsw_files *all,
         if (rc == 0)
             (*nman)++;
     }
-    return rc;
+    return fin(mf, NULL, path, rc);
 }
 
 static void fsw_stale(const struct fsw_keys *allowed,
@@ -493,9 +492,8 @@ static int fsw_run(void)
     mf = fopen(man, "r");
     if (!mf)
         return fsw_missing(man, bp);
-    rc = fsw_read_manifest(mf, &all, &fronts, &allowed, &seen, viol, &nv,
+    rc = fsw_read_manifest(mf, man, &all, &fronts, &allowed, &seen, viol, &nv,
                            &nman);
-    fclose(mf);
     if (rc)
         return rc;
     if (nman == 0) {
@@ -507,16 +505,97 @@ static int fsw_run(void)
     return fsw_report(nman, allowed.n, viol, nv, stale, ns);
 }
 
+static int fsw_st_manifest(int broken)
+{
+    static struct fsw_files all;
+    static struct fsw_keys fronts, allowed, seen;
+    static char viol[FSW_HIT][FSW_KEY];
+    FILE *f = tmpfile();
+    if (!f) return 1;
+    all.n = allowed.n = 0;
+    if (fsw_add(&all, "owner.c") || setvbuf(f, NULL, _IONBF, 0) != 0) {
+        fclose(f);
+        return 1;
+    }
+    if (fputs("fixture\towner.c\tforbidden_call\n", f) < 0 ||
+        fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return 1;
+    }
+    /* Unbuffered: the first read must reach the invalid descriptor, before
+     * the parser can open any source and potentially reuse that descriptor. */
+    if (broken && close(fileno(f)) != 0) {
+        fclose(f);
+        return 1;
+    }
+    int nv = 0, nman = 0;
+    int rc = fsw_read_manifest(f, "selftest manifest", &all, &fronts,
+                               &allowed, &seen, viol, &nv, &nman);
+    return broken ? rc != 2 : rc != 0 || nman != 1 || nv != 0;
+}
+
+static int fsw_st_files(const char *dir, const char *file)
+{
+    static struct fsw_keys base;
+    regex_t re;
+    if (reg_fail(&re, regcomp(&re, "forbidden_call", REG_EXTENDED)))
+        return 1;
+    int hit = 0;
+    int bad = fsw_file_hits(dir, &re, &hit) != 2 || hit != 0;
+    bad |= fsw_load_base(&base, dir) != 2;
+    if (csr_write(file, "void f(void) { forbidden_call(); }\n"))
+        bad = 1;
+    else
+        bad |= fsw_file_hits(file, &re, &hit) != 0 || hit != 1;
+    if (csr_write(file, "int clean;\n"))
+        bad = 1;
+    else
+        bad |= fsw_file_hits(file, &re, &hit) != 0 || hit != 0;
+    if (csr_write(file, ""))
+        bad = 1;
+    else
+        bad |= fsw_load_base(&base, file) != 0 || base.n != 0;
+    if (csr_write(file, "fixture\tsrc/allowed.c\n"))
+        bad = 1;
+    else
+        bad |= fsw_load_base(&base, file) != 0 || base.n != 1;
+    regfree(&re);
+    return bad;
+}
+
+static int fsw_st_reads(void)
+{
+    char dir[4096], file[4096];
+    const char *tmp = env_or("TMPDIR", "test-tmp");
+    if (csr_mkdirs(tmp) ||
+        ovf(snprintf(dir, sizeof dir, "%s/z23-frontier-read-XXXXXX", tmp), sizeof dir) ||
+        !mkdtemp(dir))
+        return 1;
+    int bad = 0;
+    if (ovf(snprintf(file, sizeof file, "%s/fixture.c", dir), sizeof file))
+        bad = 1;
+    else
+        bad = fsw_st_files(dir, file);
+    bad |= fsw_st_manifest(0);
+    bad |= fsw_st_manifest(1);
+    bad |= rap_rm_rf(dir) != 0;
+    if (bad)
+        fputs("check_frontier_single_writer selftest: read controls FAILED\n", stderr);
+    return bad;
+}
+
 int check_frontier_single_writer_selftest(void)
 {
+    if (fsw_st_reads())
+        return 1;
     int rc = fsw_run();
     if (rc != 0) {
         fprintf(stderr, "check_frontier_single_writer selftest: FAIL — clean "
                         "tree rc=%d want=0\n", rc);
         return 1;
     }
-    fputs("check_frontier_single_writer selftest: PASS — clean tree has no "
-          "new cloned writers\n", stdout);
+    fputs("check_frontier_single_writer selftest: PASS — source, baseline and "
+          "manifest read errors refuse; readable controls and clean tree pass\n", stdout);
     return 0;
 }
 
