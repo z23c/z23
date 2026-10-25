@@ -12,8 +12,9 @@
  * access to Tor directory authorities, and starts the vendored Tor pthread.
  *   ZCL_STRESS_TESTS=1 devbuild --wait make -j28 t-fast-exact ONLY=onion_bootstrap
  *
- * Isolation: an ephemeral loopback port (p2p_port -> SocksPort = p2p_port +
- * 11966) avoids collisions with concurrent nodes. The datadir is a
+ * Isolation: probe the actual ephemeral SocksPort, then derive p2p_port
+ * without wrapping the production SocksPort = p2p_port +11966 mapping.
+ * This avoids probing a different listener from the one Tor binds. The datadir is a
  * test_make_tmpdir() fixture removed on exit. tor_integration static state is
  * process-local and stopping restores the initial state. */
 
@@ -35,10 +36,18 @@
 #include "zsha256/zsha256.h"
 #include "util/write_all.h"
 
-/* Bind port 0 on loopback and return the assigned port. Same idiom as
- * test_acme_cert_reload.c. Returns 0 when no port could be observed; the
- * caller then fails closed on tor_integration_start with an unusable port. */
-static uint16_t onion_free_port(void)
+#define ONION_SOCKS_OFFSET 11966u
+
+/* Keep both ports unprivileged and the production uint16_t sum unwrapped. */
+static bool onion_p2p_for_socks(uint32_t socks, uint16_t *p2p)
+{
+    if (socks < ONION_SOCKS_OFFSET + 1024u || socks > UINT16_MAX) return false;
+    *p2p = (uint16_t)(socks - ONION_SOCKS_OFFSET);
+    return true;
+}
+
+/* Probe the listener Tor actually opens, not its input p2p port. */
+static uint16_t onion_free_socks_port(void)
 {
     platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
                                                 true, false);
@@ -61,6 +70,16 @@ static uint16_t onion_free_port(void)
     return port;
 }
 
+static uint16_t onion_free_p2p_port(void)
+{
+    for (unsigned i = 0; i < 32; i++) {
+        uint16_t socks = onion_free_socks_port(), p2p;
+        if (!socks) return 0;
+        if (onion_p2p_for_socks(socks, &p2p)) return p2p;
+    }
+    return 0; /* Never start Tor using an unprobed or wrapped fallback. */
+}
+
 /* Remove a fixture tree by delegating to the shared test_rm_rf_recursive():
  * the top argument is normalized (trailing separators stripped) and classified
  * with platform_file_shape_read before use, a link is removed as a link and is
@@ -70,6 +89,40 @@ static uint16_t onion_free_port(void)
 static void p11_remove_tree(const char *path)
 {
     (void)test_rm_rf_recursive(path);
+}
+
+/* Hermetic file generation only: this does not start Tor or open a socket. */
+static bool onion_torrc_maps(const char *datadir, uint32_t socks, uint16_t p2p)
+{
+    char path[320], expected[80], line[80];
+    if (!tor_write_torrc(datadir, p2p)) return false;
+    if (snprintf(path, sizeof(path), "%s/torrc", datadir) >= (int)sizeof(path)) return false;
+    snprintf(expected, sizeof(expected), "SocksPort 127.0.0.1:%u\n", (unsigned)socks);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fgets(line, sizeof(line), f) && strcmp(line, expected) == 0;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static int onion_port_mapping_selftest(void)
+{
+    static const struct { uint32_t socks; bool valid; } cases[] = {
+        {0, false}, {177, false}, {11966, false}, {12989, false},
+        {12990, true}, {53747, true}, {65535, true}, {65536, false}
+    };
+    char datadir[256]; int failures = 0;
+    test_make_tmpdir(datadir, sizeof(datadir), "p11", "port_mapping");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint16_t p2p = 0;
+        bool mapped = onion_p2p_for_socks(cases[i].socks, &p2p);
+        if (mapped != cases[i].valid) { failures++; continue; }
+        if (mapped && ((uint32_t)p2p + ONION_SOCKS_OFFSET != cases[i].socks ||
+            !onion_torrc_maps(datadir, cases[i].socks, p2p))) failures++;
+    }
+    p11_remove_tree(datadir);
+    printf("onion bootstrap listener mapping: %s\n", failures ? "FAIL" : "OK");
+    return failures;
 }
 
 #if !defined(_WIN32)
@@ -854,6 +907,7 @@ int test_onion_bootstrap(void)
     failures += p11_remove_tree_link_case(true);
 #endif
     failures += onion_receipt_env_restore_selftest();
+    failures += onion_port_mapping_selftest();
     printf("onion_bootstrap MVP #2 bootstrap_state=ready in <60s... ");
 
     /* The stress gate decides whether the real bootstrap runs at all. When it
@@ -878,13 +932,13 @@ int test_onion_bootstrap(void)
     /* Match the production wiring (boot_services.c:1303-1316): register a handler first. */
     tor_integration_set_handler(p11_noop_handler, NULL);
 
-    /* Pick a free loopback port: a fixed one collides with concurrent soak/test
-     * lanes and tor then fails to bind. A probe-to-bind race is rare and self-evident. */
-    const uint16_t p2p_port = onion_free_port();
+    /* Select a free SocksPort first, then invert the production mapping.
+     * The probe-to-Tor-bind race remains; no unrelated port is substituted. */
+    const uint16_t p2p_port = onion_free_p2p_port();
 
     int64_t mono0 = platform_time_monotonic_us();
-    if (!tor_integration_start(datadir, p2p_port)) {
-        printf("FAIL (tor_integration_start returned false)\n");
+    if (!p2p_port || !tor_integration_start(datadir, p2p_port)) {
+        printf("FAIL (no usable mapped port or tor_integration_start refused)\n");
         failures += !onion_receipt_write(ONION_FAIL, "tor_start_refused", -1);
         p11_remove_tree(datadir);
         return 1;
