@@ -8,7 +8,6 @@
 apps/skycombat/src/models/test_multiplayer_complete.c:main:35
 apps/skycombat/src/models/weapons.c:weapons_draw:21
 apps/skycombat/src/models/weapons.c:weapons_update:25
-apps/skycombat/src/sky_combat_multiplayer_ultimate.c:main:44
 apps/skycombat/src/views/combat_effects.c:effects_update:26
 cognition/controllers/src/agent_background_quality.c:agent_push_quality_lane:32
 cognition/controllers/src/agent_diagnose_controller.c:rpc_agent_diagnose:67

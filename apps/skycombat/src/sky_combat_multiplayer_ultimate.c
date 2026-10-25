@@ -424,6 +424,247 @@ static int game_frame_result(unsigned limit, unsigned rendered)
     return 0;
 }
 
+static void read_keyboard_flight_stick(const multiplayer_game_t *game,
+                                       float *stick_x, float *stick_y)
+{
+    if (!game->input_system->model.connected) {
+        *stick_x = 0.0f;
+        *stick_y = 0.0f;
+        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) *stick_x = -1.0f;
+        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) *stick_x = 1.0f;
+        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) *stick_y = -1.0f;  /* Up = negative Y */
+        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) *stick_y = 1.0f;   /* Down = positive Y */
+    }
+}
+
+static void apply_boost_and_throttle(multiplayer_game_t *game,
+                                     managed_aircraft_t *player,
+                                     input_state_fast_t input, float dt)
+{
+    /* Mario Kart boost system - UR button (speed_boost) is mushroom boost */
+    game->boost_timer -= dt;
+
+    bool boost_pressed = input.speed_boost || 
+                       (!game->input_system->model.connected && IsKeyPressed(KEY_SPACE));
+
+    if (boost_pressed && game->boost_timer <= 0) {
+        game->boost_timer = 0.75f;
+        /* INSTANT massive speed increase (like mushroom boost) */
+        player->aircraft->speed = AIRCRAFT_MAX_SPEED * 2.5f;
+
+        /* Epic boost effects */
+        effects_sonic_boom(game->effects, player->aircraft->position,
+                         aircraft_get_forward_vector(player->aircraft));
+        effects_screen_shake(game->effects, 3.0f, 0.5f);
+        effects_screen_flash(game->effects, SKYBLUE, 0.3f);
+        effects_spawn_powerup_collect(game->effects, player->aircraft->position, SKYBLUE);
+    }
+
+    /* Boost decay - rapid falloff like Mario Kart */
+    if (game->boost_timer > 0) {
+        /* Keep speed lines at max during boost */
+        game->speed_lines_intensity = 1.0f;
+
+        /* Only start decaying speed after 0.25 seconds */
+        if (game->boost_timer < 0.5f) {
+            /* Rapid decay back to normal max speed */
+            float decay_rate = 300.0f * dt;
+            player->aircraft->speed = fmaxf(player->aircraft->speed - decay_rate,
+                                          AIRCRAFT_MAX_SPEED * 1.2f);
+        }
+    }
+    /* UL button (brake) = normal throttle (SWAPPED) */
+    else if (input.brake || (!game->input_system->model.connected && IsKeyDown(KEY_LEFT_SHIFT))) {
+        player->aircraft->speed = fminf(player->aircraft->speed + 60.0f * dt,
+                                      AIRCRAFT_MAX_SPEED * 1.2f);
+        game->speed_lines_intensity = 0.6f;
+    }
+    /* No throttle = gradual speed decrease */
+    else {
+        player->aircraft->speed = fmaxf(player->aircraft->speed - 25.0f * dt,
+                                      AIRCRAFT_MIN_SPEED);
+        game->speed_lines_intensity = fmaxf(0, game->speed_lines_intensity - dt * 2);
+    }
+}
+
+static void control_local_player(multiplayer_game_t *game, input_state_fast_t input,
+                                 float dt)
+{
+    /* Handle input for local player */
+    managed_aircraft_t* player = aircraft_manager_get(game->aircraft_mgr, game->local_player_id);
+    if (player && player->aircraft) {
+        /* Get input from joystick or keyboard */
+        float stick_x = input.move_x;
+        float stick_y = input.move_y;
+
+        read_keyboard_flight_stick(game, &stick_x, &stick_y);
+
+        /* Responsive aircraft control */
+        aircraft_update_responsive(player->aircraft, stick_x, stick_y, dt);
+
+        apply_boost_and_throttle(game, player, input, dt);
+
+        /* Weapons */
+        if (input.fire_guns || (!game->input_system->model.connected && IsKeyPressed(KEY_LEFT_CONTROL))) {
+            aircraft_manager_fire_weapon(game->aircraft_mgr, game->local_player_id);
+
+            /* Weapon effects */
+            Vector3 pos = player->aircraft->position;
+            Vector3 forward = aircraft_get_forward_vector(player->aircraft);
+            weapons_fire_bullet(game->weapons, pos, forward, player->aircraft->yaw);
+            effects_spawn_laser_hit(game->effects, pos, forward, YELLOW);
+        }
+
+        /* Camera control from right stick */
+        game->camera_yaw += input.camera_x * 100.0f * dt;
+    }
+}
+
+static void apply_collected_powerup(managed_aircraft_t *aircraft, powerup_type_t type)
+{
+    /* Apply effect */
+    switch (type) {
+        case POWERUP_HEALTH:
+            aircraft->health = aircraft->max_health;
+            break;
+        case POWERUP_SHIELD:
+            aircraft->powerup_effects.shield_active = true;
+            break;
+        case POWERUP_RAPID_FIRE:
+            aircraft->powerup_effects.rapid_fire_active = true;
+            break;
+        case POWERUP_SPEED_BOOST:
+            aircraft->powerup_effects.speed_boost_active = true;
+            break;
+        default:
+            break;
+    }
+}
+
+static void collect_aircraft_powerups(multiplayer_game_t *game)
+{
+    /* Check collisions */
+    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* aircraft = &game->aircraft_mgr->aircraft[i];
+        if (!aircraft->aircraft) continue;
+
+        /* Power-up collection */
+        for (int j = 0; j < game->powerup_mgr->spawn_point_count; j++) {
+            powerup_t* powerup = &game->powerup_mgr->powerups[j];
+            if (!powerup->active) continue;
+
+            float dist = Vector3Distance(aircraft->aircraft->position, powerup->position);
+            if (dist < 10.0f) {
+                powerup_type_t type;
+                if (powerup_manager_check_collection(game->powerup_mgr, 
+                                                   aircraft->aircraft->position, 10.0f, &type)) {
+                    apply_collected_powerup(aircraft, type);
+
+                    /* Collection effect */
+                    effects_spawn_powerup_collect(game->effects, powerup->position, powerup->color);
+                    effects_show_achievement(game->effects, "POWER-UP!");
+                }
+            }
+        }
+    }
+}
+
+static void render_ultimate_frame(multiplayer_game_t *game,
+                                  RenderTexture2D screen_buffer, float game_time,
+                                  const struct sky_expr_hud *part_hud,
+                                  const struct sky_expr_notice *notice)
+{
+    /* Render to texture for post-processing */
+    BeginTextureMode(screen_buffer);
+    ClearBackground(BLACK);
+
+    BeginMode3D(game->camera);
+
+    /* Draw world */
+    cyberpunk_world_draw(game->world, game->camera);
+
+    /* Draw aircraft with effects */
+    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
+        render_aircraft_ultimate(&game->aircraft_mgr->aircraft[i], game->effects, game_time);
+    }
+
+    /* Draw power-ups */
+    for (int i = 0; i < game->powerup_mgr->spawn_point_count; i++) {
+        render_powerup_ultimate(&game->powerup_mgr->powerups[i], game->effects, game_time);
+    }
+
+    /* Draw weapons */
+    weapons_draw(game->weapons);
+
+    /* Draw effects */
+    effects_draw(game->effects, game->camera);
+
+    EndMode3D();
+
+    EndTextureMode();
+
+    /* Final render with post-processing */
+    BeginDrawing();
+
+    /* Draw screen buffer */
+    DrawTextureRec(screen_buffer.texture, 
+                  (Rectangle){0, 0, screen_buffer.texture.width, -screen_buffer.texture.height},
+                  (Vector2){0, 0}, WHITE);
+
+    /* Speed effects */
+    draw_speed_effects(game);
+
+    /* UI and effects */
+    effects_draw_ui(game->effects, GetScreenWidth(), GetScreenHeight());
+    render_game_hud(part_hud,notice,game);
+
+    /* Damage flash */
+    if (game->damage_flash > 0) {
+        DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), 
+                     Fade(RED, game->damage_flash * 0.3f));
+    }
+
+    EndDrawing();
+}
+
+static void advance_ultimate_frame(multiplayer_game_t *game,
+                                   const struct sky_expr_option *option,
+                                   struct sky_expr_hud *part_hud,
+                                   struct sky_expr_notice *notice,
+                                   RenderTexture2D screen_buffer,
+                                   float *game_time, unsigned *rendered_frames,
+                                   unsigned qa_frames)
+{
+    float dt = GetFrameTime();
+    *game_time += dt;
+    poll_part_hud(option,game,part_hud,notice,dt);
+
+    /* Update input system */
+    input_view_fast_t view = input_mvc_fast_update(game->input_system);
+    input_state_fast_t input = input_view_get_state(view);
+
+    control_local_player(game, input, dt);
+
+    /* Update systems */
+    aircraft_manager_update(game->aircraft_mgr, dt);
+    powerup_manager_update(game->powerup_mgr, dt);
+    weapons_update(game->weapons, dt);
+    effects_update(game->effects, dt);
+    update_camera_ultimate(game, dt);
+
+    collect_aircraft_powerups(game);
+
+    /* Snapshot this tick's kills before advancing/finishing the ledger. */
+    update_match_ledger(game, dt);
+
+    /* Damage flash */
+    if (game->damage_flash > 0) game->damage_flash -= dt;
+
+    render_ultimate_frame(game, screen_buffer, *game_time, part_hud, notice);
+
+    *rendered_frames += qa_frames != 0;
+}
+
 int main(int argc, char **argv) {
     unsigned qa_frames;
     struct sky_expr_option option;
@@ -519,199 +760,8 @@ int main(int argc, char **argv) {
     unsigned rendered_frames = 0;
     
     while (game_frame_pending(qa_frames, rendered_frames)) {
-        float dt = GetFrameTime();
-        game_time += dt;
-        poll_part_hud(&option,&game,&part_hud,&notice,dt);
-        
-        /* Update input system */
-        input_view_fast_t view = input_mvc_fast_update(game.input_system);
-        input_state_fast_t input = input_view_get_state(view);
-        
-        /* Handle input for local player */
-        managed_aircraft_t* player = aircraft_manager_get(game.aircraft_mgr, game.local_player_id);
-        if (player && player->aircraft) {
-            /* Get input from joystick or keyboard */
-            float stick_x = input.move_x;
-            float stick_y = input.move_y;
-            
-            if (!game.input_system->model.connected) {
-                stick_x = 0.0f;
-                stick_y = 0.0f;
-                if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) stick_x = -1.0f;
-                if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) stick_x = 1.0f;
-                if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) stick_y = -1.0f;  /* Up = negative Y */
-                if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) stick_y = 1.0f;   /* Down = positive Y */
-            }
-            
-            /* Responsive aircraft control */
-            aircraft_update_responsive(player->aircraft, stick_x, stick_y, dt);
-            
-            /* Mario Kart boost system - UR button (speed_boost) is mushroom boost */
-            game.boost_timer -= dt;
-            
-            bool boost_pressed = input.speed_boost || 
-                               (!game.input_system->model.connected && IsKeyPressed(KEY_SPACE));
-            
-            if (boost_pressed && game.boost_timer <= 0) {
-                game.boost_timer = 0.75f;
-                /* INSTANT massive speed increase (like mushroom boost) */
-                player->aircraft->speed = AIRCRAFT_MAX_SPEED * 2.5f;
-                
-                /* Epic boost effects */
-                effects_sonic_boom(game.effects, player->aircraft->position,
-                                 aircraft_get_forward_vector(player->aircraft));
-                effects_screen_shake(game.effects, 3.0f, 0.5f);
-                effects_screen_flash(game.effects, SKYBLUE, 0.3f);
-                effects_spawn_powerup_collect(game.effects, player->aircraft->position, SKYBLUE);
-            }
-            
-            /* Boost decay - rapid falloff like Mario Kart */
-            if (game.boost_timer > 0) {
-                /* Keep speed lines at max during boost */
-                game.speed_lines_intensity = 1.0f;
-                
-                /* Only start decaying speed after 0.25 seconds */
-                if (game.boost_timer < 0.5f) {
-                    /* Rapid decay back to normal max speed */
-                    float decay_rate = 300.0f * dt;
-                    player->aircraft->speed = fmaxf(player->aircraft->speed - decay_rate,
-                                                  AIRCRAFT_MAX_SPEED * 1.2f);
-                }
-            }
-            /* UL button (brake) = normal throttle (SWAPPED) */
-            else if (input.brake || (!game.input_system->model.connected && IsKeyDown(KEY_LEFT_SHIFT))) {
-                player->aircraft->speed = fminf(player->aircraft->speed + 60.0f * dt,
-                                              AIRCRAFT_MAX_SPEED * 1.2f);
-                game.speed_lines_intensity = 0.6f;
-            }
-            /* No throttle = gradual speed decrease */
-            else {
-                player->aircraft->speed = fmaxf(player->aircraft->speed - 25.0f * dt,
-                                              AIRCRAFT_MIN_SPEED);
-                game.speed_lines_intensity = fmaxf(0, game.speed_lines_intensity - dt * 2);
-            }
-            
-            /* Weapons */
-            if (input.fire_guns || (!game.input_system->model.connected && IsKeyPressed(KEY_LEFT_CONTROL))) {
-                aircraft_manager_fire_weapon(game.aircraft_mgr, game.local_player_id);
-                
-                /* Weapon effects */
-                Vector3 pos = player->aircraft->position;
-                Vector3 forward = aircraft_get_forward_vector(player->aircraft);
-                weapons_fire_bullet(game.weapons, pos, forward, player->aircraft->yaw);
-                effects_spawn_laser_hit(game.effects, pos, forward, YELLOW);
-            }
-            
-            /* Camera control from right stick */
-            game.camera_yaw += input.camera_x * 100.0f * dt;
-        }
-        
-        /* Update systems */
-        aircraft_manager_update(game.aircraft_mgr, dt);
-        powerup_manager_update(game.powerup_mgr, dt);
-        weapons_update(game.weapons, dt);
-        effects_update(game.effects, dt);
-        update_camera_ultimate(&game, dt);
-        
-        /* Check collisions */
-        for (int i = 0; i < game.aircraft_mgr->aircraft_count; i++) {
-            managed_aircraft_t* aircraft = &game.aircraft_mgr->aircraft[i];
-            if (!aircraft->aircraft) continue;
-            
-            /* Power-up collection */
-            for (int j = 0; j < game.powerup_mgr->spawn_point_count; j++) {
-                powerup_t* powerup = &game.powerup_mgr->powerups[j];
-                if (!powerup->active) continue;
-                
-                float dist = Vector3Distance(aircraft->aircraft->position, powerup->position);
-                if (dist < 10.0f) {
-                    powerup_type_t type;
-                    if (powerup_manager_check_collection(game.powerup_mgr, 
-                                                       aircraft->aircraft->position, 10.0f, &type)) {
-                        /* Apply effect */
-                        switch (type) {
-                            case POWERUP_HEALTH:
-                                aircraft->health = aircraft->max_health;
-                                break;
-                            case POWERUP_SHIELD:
-                                aircraft->powerup_effects.shield_active = true;
-                                break;
-                            case POWERUP_RAPID_FIRE:
-                                aircraft->powerup_effects.rapid_fire_active = true;
-                                break;
-                            case POWERUP_SPEED_BOOST:
-                                aircraft->powerup_effects.speed_boost_active = true;
-                                break;
-                            default:
-                                break;
-                        }
-                        
-                        /* Collection effect */
-                        effects_spawn_powerup_collect(game.effects, powerup->position, powerup->color);
-                        effects_show_achievement(game.effects, "POWER-UP!");
-                    }
-                }
-            }
-        }
-        
-        /* Snapshot this tick's kills before advancing/finishing the ledger. */
-        update_match_ledger(&game, dt);
-        
-        /* Damage flash */
-        if (game.damage_flash > 0) game.damage_flash -= dt;
-        
-        /* Render to texture for post-processing */
-        BeginTextureMode(screen_buffer);
-        ClearBackground(BLACK);
-        
-        BeginMode3D(game.camera);
-        
-        /* Draw world */
-        cyberpunk_world_draw(game.world, game.camera);
-        
-        /* Draw aircraft with effects */
-        for (int i = 0; i < game.aircraft_mgr->aircraft_count; i++) {
-            render_aircraft_ultimate(&game.aircraft_mgr->aircraft[i], game.effects, game_time);
-        }
-        
-        /* Draw power-ups */
-        for (int i = 0; i < game.powerup_mgr->spawn_point_count; i++) {
-            render_powerup_ultimate(&game.powerup_mgr->powerups[i], game.effects, game_time);
-        }
-        
-        /* Draw weapons */
-        weapons_draw(game.weapons);
-        
-        /* Draw effects */
-        effects_draw(game.effects, game.camera);
-        
-        EndMode3D();
-        
-        EndTextureMode();
-        
-        /* Final render with post-processing */
-        BeginDrawing();
-        
-        /* Draw screen buffer */
-        DrawTextureRec(screen_buffer.texture, 
-                      (Rectangle){0, 0, screen_buffer.texture.width, -screen_buffer.texture.height},
-                      (Vector2){0, 0}, WHITE);
-        
-        /* Speed effects */
-        draw_speed_effects(&game);
-        
-        /* UI and effects */
-        effects_draw_ui(game.effects, GetScreenWidth(), GetScreenHeight());
-        render_game_hud(&part_hud,&notice,&game);
-        
-        /* Damage flash */
-        if (game.damage_flash > 0) {
-            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), 
-                         Fade(RED, game.damage_flash * 0.3f));
-        }
-        
-        EndDrawing();
-        rendered_frames += qa_frames != 0;
+        advance_ultimate_frame(&game, &option, &part_hud, &notice, screen_buffer,
+                               &game_time, &rendered_frames, qa_frames);
     }
     
     /* Cleanup */
