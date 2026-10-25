@@ -162,35 +162,38 @@ const char *science_status_name(enum science_status status)
 
 const char *science_refusal_name(enum science_refusal refusal)
 {
-    switch (refusal) {
-    case SCIENCE_OK:                    return "OK";
-    case SCIENCE_REFUSED_ARGUMENT:      return "ARGUMENT";
-    case SCIENCE_REFUSED_STATEMENT:     return "STATEMENT";
-    case SCIENCE_REFUSED_TREATMENT:     return "TREATMENT";
-    case SCIENCE_REFUSED_METRIC:        return "METRIC";
-    case SCIENCE_REFUSED_DIRECTION:     return "DIRECTION";
-    case SCIENCE_REFUSED_EFFECT_FLOOR:  return "EFFECT_FLOOR";
-    case SCIENCE_REFUSED_SAMPLE_FLOOR:  return "SAMPLE_FLOOR";
-    case SCIENCE_REFUSED_ARM:           return "ARM";
-    case SCIENCE_REFUSED_PRODUCER:      return "PRODUCER";
-    case SCIENCE_REFUSED_FIELD:         return "FIELD";
-    case SCIENCE_REFUSED_VERDICT:       return "VERDICT";
-    case SCIENCE_REFUSED_SOURCE:        return "SOURCE";
-    case SCIENCE_REFUSED_COMMAND:       return "COMMAND";
-    case SCIENCE_REFUSED_COMMIT:        return "COMMIT";
-    case SCIENCE_REFUSED_INPUT:         return "INPUT";
-    case SCIENCE_REFUSED_COMPILER:      return "COMPILER";
-    case SCIENCE_REFUSED_OPTIMISATION:  return "OPTIMISATION";
-    case SCIENCE_REFUSED_NPROC:         return "NPROC";
-    case SCIENCE_REFUSED_AVAILABILITY:  return "AVAILABILITY";
-    case SCIENCE_REFUSED_SAMPLES:       return "SAMPLES";
-    case SCIENCE_REFUSED_REASON:        return "REASON";
-    case SCIENCE_REFUSED_DUPLICATE:     return "DUPLICATE";
-    case SCIENCE_REFUSED_RESTATED:      return "RESTATED";
-    case SCIENCE_REFUSED_UNKNOWN_CLAIM: return "UNKNOWN_CLAIM";
-    case SCIENCE_REFUSED_FULL:          return "FULL";
-    case SCIENCE_REFUSED_STORAGE:       return "STORAGE";
-    }
+    static const char *const names[] = {
+        [SCIENCE_OK] = "OK",
+        [SCIENCE_REFUSED_ARGUMENT] = "ARGUMENT",
+        [SCIENCE_REFUSED_STATEMENT] = "STATEMENT",
+        [SCIENCE_REFUSED_TREATMENT] = "TREATMENT",
+        [SCIENCE_REFUSED_METRIC] = "METRIC",
+        [SCIENCE_REFUSED_DIRECTION] = "DIRECTION",
+        [SCIENCE_REFUSED_EFFECT_FLOOR] = "EFFECT_FLOOR",
+        [SCIENCE_REFUSED_SAMPLE_FLOOR] = "SAMPLE_FLOOR",
+        [SCIENCE_REFUSED_ARM] = "ARM",
+        [SCIENCE_REFUSED_PRODUCER] = "PRODUCER",
+        [SCIENCE_REFUSED_FIELD] = "FIELD",
+        [SCIENCE_REFUSED_VERDICT] = "VERDICT",
+        [SCIENCE_REFUSED_SOURCE] = "SOURCE",
+        [SCIENCE_REFUSED_COMMAND] = "COMMAND",
+        [SCIENCE_REFUSED_COMMIT] = "COMMIT",
+        [SCIENCE_REFUSED_INPUT] = "INPUT",
+        [SCIENCE_REFUSED_COMPILER] = "COMPILER",
+        [SCIENCE_REFUSED_OPTIMISATION] = "OPTIMISATION",
+        [SCIENCE_REFUSED_NPROC] = "NPROC",
+        [SCIENCE_REFUSED_AVAILABILITY] = "AVAILABILITY",
+        [SCIENCE_REFUSED_SAMPLES] = "SAMPLES",
+        [SCIENCE_REFUSED_REASON] = "REASON",
+        [SCIENCE_REFUSED_DUPLICATE] = "DUPLICATE",
+        [SCIENCE_REFUSED_RESTATED] = "RESTATED",
+        [SCIENCE_REFUSED_UNKNOWN_CLAIM] = "UNKNOWN_CLAIM",
+        [SCIENCE_REFUSED_FULL] = "FULL",
+        [SCIENCE_REFUSED_STORAGE] = "STORAGE",
+    };
+    unsigned index = (unsigned)refusal;
+    if (index < sizeof(names) / sizeof(names[0]) && names[index])
+        return names[index];
     return "UNKNOWN_REFUSAL";
 }
 
