@@ -146,3 +146,14 @@ Z23_OBJECTIVE_WORK("node_warm_restart_s", 0,
                    "z23-dev fleet objectives",
                    "the restart cost sits in boot of a consensus store or "
                    "the reducer")
+
+Z23_OBJECTIVE_WORK("baseline_hardening_banned_str", 1,
+                   "apps/**,platform/**,contexts/commons/**,contexts/explorer/**,"
+                   "tools/agent/**,tools/verify/**,tools/package_factory.c,"
+                   "tools/corpus_census*.c,tools/bench_fresh_sync.c,"
+                   "tools/arena_product_journey_c23.c,"
+                   "tools/lint/hardening_ratchet_baseline.txt",
+                   "build/bin/z23-lint check-hardening-ratchet",
+                   "the call sits in core/, engine/reducer/, contexts/wallet/, "
+                   "consensus storage or the land driver, or a bounded form "
+                   "would truncate a value the caller relies on")

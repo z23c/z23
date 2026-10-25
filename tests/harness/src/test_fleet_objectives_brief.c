@@ -589,6 +589,107 @@ _test_next:;
     return failures;
 }
 
+#define FOB_HARD_ID "baseline_hardening_banned_str"
+#define FOB_HARD_PATH "tools/lint/hardening_ratchet_baseline.txt"
+
+/* A hardening baseline under p->repo: a comment, another rule's row, a row in
+ * a forbidden tree, a row under a tests/ directory, and two eligible rows
+ * listed out of path order. Every named file exists and is small. */
+static bool fob_hard_fixture(const struct fob_paths *p)
+{
+    char file[700];
+    (void)snprintf(file, sizeof(file), "%s/%s", p->repo, FOB_HARD_PATH);
+    return fob_repo_file(p, FOB_HARD_PATH, 1) &&
+           fob_repo_file(p, "core/m.c", 10) &&
+           fob_repo_file(p, "apps/q/tests/t.c", 10) &&
+           fob_repo_file(p, "apps/aa.c", 10) &&
+           fob_repo_file(p, "apps/zz.c", 10) &&
+           fob_write(file,
+                     "# header\n"
+                     "banned-str core/m.c 3\n"
+                     "banned-str apps/q/tests/t.c 5\n"
+                     "banned-str apps/zz.c 2\n"
+                     "banned-str apps/aa.c 1\n"
+                     "local-reader apps/aa.c 7\n");
+}
+
+static bool fob_hard_card_ok(const struct fob_call *c)
+{
+    const struct json_value *d = &c->reply.data;
+    const struct json_value *owned = json_get(d, "owned");
+    return strcmp(json_get_str(json_get(d, "kind")), "baseline_row") == 0 &&
+           strcmp(json_get_str(json_get(d, "level")), "haiku") == 0 &&
+           strcmp(json_get_str(json_get(d, "target_file")), "apps/aa.c") == 0 &&
+           strcmp(json_get_str(json_get(d, "baseline")), FOB_HARD_PATH) == 0 &&
+           strcmp(json_get_str(json_get(d, "row")),
+                  "banned-str apps/aa.c 1") == 0 &&
+           strcmp(json_get_str(json_get(d, "verify")),
+                  "build/bin/z23-lint check-hardening-ratchet") == 0 &&
+           strcmp(json_get_str(json_get(d, "acceptance")),
+                  json_get_str(json_get(d, "verify"))) == 0 &&
+           strstr(json_get_str(json_get(d, "recipe")), "snprintf") != NULL &&
+           json_get_str(json_get(d, "review_focus"))[0] != '\0' &&
+           json_size(owned) == 2 &&
+           strcmp(json_get_str(json_at(owned, 0)), "apps/aa.c") == 0 &&
+           strcmp(json_get_str(json_at(owned, 1)), FOB_HARD_PATH) == 0 &&
+           json_get(d, "pins") == NULL;
+}
+
+static int fob_case_baseline_row(struct fob_paths *p)
+{
+    int failures = 0;
+    struct fob_call c;
+    char file[700];
+    struct zcl_objectives_options o = {0};
+    struct zcl_objective_value v;
+    (void)snprintf(file, sizeof(file), "%s/%s", p->repo, FOB_HARD_PATH);
+    o.repo = p->repo;
+    TEST("brief: a baseline objective picks the first eligible row by path "
+         "order and emits every card field") {
+        ASSERT(fob_hard_fixture(p));
+        p->exclude[0] = '\0';
+        ASSERT(fob_brief(&c, p, FOB_HARD_ID, true));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(fob_objective_id(&c), FOB_HARD_ID);
+        ASSERT(fob_hard_card_ok(&c));
+        fob_end(&c);
+        PASS();
+    }
+    TEST("brief: exclude skips the baseline row, and no eligible row is a "
+         "typed no-card") {
+        (void)snprintf(p->exclude, sizeof(p->exclude), "apps/aa.c");
+        ASSERT(fob_brief(&c, p, FOB_HARD_ID, true));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "target_file")),
+                      "apps/zz.c");
+        fob_end(&c);
+        (void)snprintf(p->exclude, sizeof(p->exclude), "apps/aa.c,apps/zz.c");
+        ASSERT(fob_brief(&c, p, FOB_HARD_ID, true));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get(&c.reply.data, "target_file") == NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "reason")),
+                      "NO_ELIGIBLE_ROW");
+        p->exclude[0] = '\0';
+        fob_end(&c);
+        PASS();
+    }
+    TEST("objectives: the banned-str producer sums the COUNT of banned-str "
+         "rows only, and refuses a malformed row") {
+        v = zcl_objectives_measure(&o, FOB_HARD_ID);
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 11);
+        ASSERT(fob_write(file, "banned-str apps/a.c 2\nbanned-str apps/b.c x\n"));
+        v = zcl_objectives_measure(&o, FOB_HARD_ID);
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "malformed") != NULL);
+        ASSERT_EQ(remove(file), 0);
+        v = zcl_objectives_measure(&o, FOB_HARD_ID);
+        ASSERT(!v.measured);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_fleet_objectives_brief(void);
 int test_fleet_objectives_brief(void)
 {
@@ -608,6 +709,7 @@ int test_fleet_objectives_brief(void)
         failures += fob_case_refusals(&paths);
         failures += fob_case_protected(&paths);
         failures += fob_case_narrow(root, &paths);
+        failures += fob_case_baseline_row(&paths);
     }
     (void)unsetenv("ZCL_LAND_OBJECTIVES_DATADIR");
     (void)test_rm_rf_recursive(root);

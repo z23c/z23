@@ -96,6 +96,11 @@ struct zcl_objective_value zcl_objectives_node_warm_restart_s(
 struct zcl_objective_value zcl_objectives_tokens_per_landed_commit(
     const struct zcl_objectives_options *options);
 
+/* The one-row baseline producer (native_fleet_objectives_baselines.c): the sum
+ * of the banned-str counts in the hardening ratchet baseline under repo. */
+struct zcl_objective_value zcl_objectives_baseline_hardening_banned_str(
+    const struct zcl_objectives_options *options);
+
 
 /* The agent-to-lane index (native_fleet_objectives_lanes.c): worker agent
  * id -> lane, from the agent-<id>.meta.json job labels under the Claude

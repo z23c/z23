@@ -509,6 +509,174 @@ static void brief_fail_build(struct zcl_command_reply *reply, const char *id)
                            "cannot build the work card for the pick", "");
 }
 
+/* ---- Baseline-row cards: one shrink-only baseline row per card ---------- */
+
+/* A closed table: the objectives whose work is one row of a shrink-only lint
+ * baseline. `parse` splits a baseline line in place and yields the repo path
+ * the row is about (false for comments and rows of other rules). The card
+ * is always the cheapest level: the recipe is mechanical. */
+struct brief_baseline {
+    const char *id;
+    const char *path;
+    const char *recipe;
+    const char *review_focus;
+    bool (*parse)(char *line, char **path);
+};
+
+/* "banned-str PATH COUNT" -> PATH, for a COUNT of at least 1. */
+static bool brief_parse_banned(char *line, char **path)
+{
+    static const char rule[] = "banned-str ";
+    char *sp;
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strncmp(line, rule, sizeof(rule) - 1) != 0)
+        return false;
+    sp = strrchr(line, ' ');
+    if (sp <= line + sizeof(rule) - 1 || atoi(sp + 1) < 1)
+        return false;
+    *sp = '\0';
+    *path = line + sizeof(rule) - 1;
+    return true;
+}
+
+static const struct brief_baseline k_baselines[] = {
+    {"baseline_hardening_banned_str", "tools/lint/hardening_ratchet_baseline.txt",
+     "Replace each strcpy, strcat, sprintf, vsprintf and gets call in the "
+     "target file with the bounded form the codebase already uses: snprintf "
+     "with sizeof the destination (there is no shared safe-string helper), "
+     "or memcpy of a length you checked; then lower COUNT in the row to the "
+     "new finding count, or delete the row at 0.",
+     "Every replacement keeps the same bytes for inputs that fit; truncation "
+     "cannot cut a value a caller relies on; a return value or length the "
+     "old code relied on is still checked.",
+     brief_parse_banned},
+};
+
+static const struct brief_baseline *brief_baseline_find(const char *id)
+{
+    for (size_t i = 0; id && i < sizeof(k_baselines) / sizeof(k_baselines[0]);
+         i++)
+        if (strcmp(k_baselines[i].id, id) == 0)
+            return &k_baselines[i];
+    return NULL;
+}
+
+struct brief_row {
+    char path[240];
+    char text[512];
+};
+
+/* Offers one baseline line as the pick: it must parse, be eligible (never a
+ * file under a tests/ directory either) and sort before the current pick. */
+static void brief_row_offer(const struct brief_inputs *in, const char *owned,
+                            const struct brief_baseline *bl, const char *line,
+                            struct brief_row *best, bool *found)
+{
+    char copy[1024], *path;
+    (void)snprintf(copy, sizeof(copy), "%s", line);
+    if (!bl->parse(copy, &path) || strlen(path) >= sizeof(best->path) ||
+        strlen(line) >= sizeof(best->text) ||
+        !brief_eligible(in, owned, path) || strstr(path, "/tests/") ||
+        (*found && strcmp(path, best->path) >= 0))
+        return;
+    (void)snprintf(best->path, sizeof(best->path), "%s", path);
+    (void)snprintf(best->text, sizeof(best->text), "%s", line);
+    best->text[strcspn(best->text, "\r\n")] = '\0';
+    *found = true;
+}
+
+/* Chooses the first eligible row by path order. 0 found, 1 none eligible,
+ * -1 baseline unreadable. */
+static int brief_choose_row(const struct brief_inputs *in, const char *owned,
+                            const struct brief_baseline *bl,
+                            struct brief_row *best)
+{
+    char full[1024], line[1024];
+    bool found = false;
+    FILE *fp;
+    if (snprintf(full, sizeof(full), "%s/%s", in->repo, bl->path) >=
+        (int)sizeof(full))
+        return -1;
+    fp = fopen(full, "r");
+    if (!fp)
+        return -1;
+    while (fgets(line, sizeof(line), fp))
+        brief_row_offer(in, owned, bl, line, best, &found);
+    (void)fclose(fp);
+    return found ? 0 : 1;
+}
+
+/* Pushes the card fields that make it a baseline-row card. */
+static bool brief_push_row_fields(struct json_value *card,
+                                  const struct brief_work *work,
+                                  const struct brief_baseline *bl,
+                                  const struct brief_row *row)
+{
+    return json_push_kv_str(card, "kind", "baseline_row") &&
+           json_push_kv_str(card, "target_file", row->path) &&
+           json_push_kv_str(card, "baseline", bl->path) &&
+           json_push_kv_str(card, "row", row->text) &&
+           json_push_kv_str(card, "recipe", bl->recipe) &&
+           json_push_kv_str(card, "verify", work->acceptance) &&
+           json_push_kv_str(card, "review_focus", bl->review_focus);
+}
+
+static bool brief_build_row(struct json_value *card,
+                            const struct json_value *next,
+                            const struct brief_work *work,
+                            const struct brief_baseline *bl,
+                            const struct brief_row *row)
+{
+    char name[WORK_CARD_NAME_MAX + 1], outcome[512];
+    struct json_value owned;
+    bool ok;
+    brief_name(work->id, name, sizeof(name));
+    (void)snprintf(outcome, sizeof(outcome),
+                   "Clear the baseline row \"%s\" by fixing the findings in "
+                   "%s, then shrink the row.",
+                   row->text, row->path);
+    json_init(&owned);
+    json_set_array(&owned);
+    ok = json_push_kv_str(card, "schema", WORK_CARD_SCHEMA_ID) &&
+         json_push_kv_str(card, "name", name) &&
+         json_push_kv_str(card, "level", "haiku") &&
+         json_push_kv_str(card, "outcome", outcome) &&
+         brief_push_str_item(&owned, row->path) &&
+         brief_push_str_item(&owned, bl->path) &&
+         json_push_kv(card, "owned", &owned) &&
+         brief_push_csv(card, "forbidden", k_brief_forbidden) &&
+         brief_push_one(card, "contract",
+                        "Keep behaviour unchanged; never weaken a test, "
+                        "assertion, threshold or baseline.") &&
+         json_push_kv_str(card, "acceptance", work->acceptance) &&
+         brief_push_one(card, "stop_if", work->stop_if) &&
+         brief_push_objective(card, next, work) &&
+         brief_push_row_fields(card, work, bl, row);
+    json_free(&owned);
+    return ok;
+}
+
+/* The baseline-row reply: the card for the first eligible row, or a typed
+ * no-card when none is eligible. */
+static void brief_finish_row(struct zcl_command_reply *reply,
+                             const struct json_value *next,
+                             const struct brief_work *work,
+                             const struct brief_baseline *bl,
+                             const struct brief_inputs *in)
+{
+    struct brief_row row = {{0}, {0}};
+    int rc = brief_choose_row(in, work->owned, bl, &row);
+    if (rc > 0)
+        brief_no_card(reply,
+                      "no baseline row is eligible: every row is protected, a "
+                      "test, missing, over 1300 lines or excluded",
+                      "NO_ELIGIBLE_ROW");
+    else if (rc < 0 || !brief_build_row(&reply->data, next, work, bl, &row))
+        brief_fail_build(reply, work->id);
+    else
+        brief_pass(reply);
+}
+
 /* Builds the card for the pick; the complexity card is narrowed to one file
  * first, and when no file is eligible the reply is a typed no-card. */
 static void brief_finish(struct zcl_command_reply *reply,
@@ -516,9 +684,15 @@ static void brief_finish(struct zcl_command_reply *reply,
                          const struct brief_work *work,
                          const struct brief_inputs *in)
 {
+    const struct brief_baseline *bl = work ? brief_baseline_find(work->id) : NULL;
     struct brief_file file;
     bool narrow = work && strcmp(work->id, BRIEF_COMPLEXITY_ID) == 0;
-    int rc = narrow ? brief_choose(in, work->owned, &file) : 0;
+    int rc;
+    if (bl) {
+        brief_finish_row(reply, next, work, bl, in);
+        return;
+    }
+    rc = narrow ? brief_choose(in, work->owned, &file) : 0;
     if (rc > 0)
         brief_no_card(reply,
                       "no file is eligible for the complexity card: every "

@@ -1652,6 +1652,8 @@ static const struct obj_producer k_producers[] = {
     {"land_failure_repeats", obj_land_failure_repeats},
     {"product_commit_share_7d", obj_product_commit_share_7d},
     {"generated_churn_10d", obj_generated_churn_10d},
+    {"baseline_hardening_banned_str",
+     zcl_objectives_baseline_hardening_banned_str},
 };
 
 struct zcl_objective_value zcl_objectives_measure(

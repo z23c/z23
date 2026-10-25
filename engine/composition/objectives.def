@@ -26,7 +26,8 @@
  *   source_    the one thing the value is read from, named plainly:
  *              "outcomes.jsonl", "rows.tsv", "phases.txt", "lint.log",
  *              "test.log", "git_log", "lintc_line_counts",
- *              "cyclomatic_baseline", "status_brief", "boot_status.json", or
+ *              "cyclomatic_baseline", "hardening_baseline", "status_brief",
+ *              "boot_status.json", or
  *              "unmeasured" when no producer exists in the tree yet.
  *   direction_ "min" (lower is better) or "max" (higher is better).
  *   target_    the numeric threshold `met` is judged against.
@@ -128,3 +129,9 @@ Z23_OBJECTIVE("node_warm_restart_s", "product", "boot_status.json", "min",
              "seconds from process start to serving in the datadir's latest "
              "boot beacon; a restart should hand the node back to its user "
              "in seconds, not minutes")
+
+Z23_OBJECTIVE("baseline_hardening_banned_str", "lab", "hardening_baseline",
+             "min", 0, "count",
+             "each banned-str row in the hardening ratchet is a strcpy, "
+             "strcat, sprintf, vsprintf or gets call with no length bound; "
+             "the baseline may only shrink, so the sum is the work still owed")

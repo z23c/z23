@@ -1687,7 +1687,7 @@ int test_fleet_objectives(void)
         ASSERT(strstr(screen, "[####################] 178/300 met") != NULL);
         const char *last = strstr(screen, "lab: met ");
         ASSERT(last != NULL);
-        ASSERT(strstr(last, " of 18, unmeasured ") != NULL);
+        ASSERT(strstr(last, " of 19, unmeasured ") != NULL);
         /* The whole reply must fit the leaf's declared response budget. */
         ASSERT(c.request.spec != NULL);
         ASSERT(c.request.spec->budget_bytes >= 0);
