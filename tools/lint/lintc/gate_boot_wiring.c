@@ -172,41 +172,42 @@ static int sw_file_has_ident(const char *path, const char *ident)
     return found;
 }
 
-/* git ls-files -- <engine path> <cognition path> <contexts glob>: number of
+struct sw_owners { char *out; size_t cap; int count; };
+
+static int sw_owner_path(const char *path, void *ctx)
+{
+    struct sw_owners *owners = ctx;
+    if (owners->count == 0) {
+        size_t n = strlen(path);
+        if (n >= owners->cap)
+            return die("z23-lint: git ls-files path overflow: %s\n", path);
+        memcpy(owners->out, path, n + 1);
+    }
+    owners->count++;
+    return 0;
+}
+
+static int sw_owners_command(const char *cmd, char *out, size_t cap)
+{
+    struct sw_owners owners = { .out = out, .cap = cap };
+    out[0] = '\0';
+    return each_zpath(cmd, sw_owner_path, &owners) ? -1 : owners.count;
+}
+
+/* git ls-files -z -- <engine path> <cognition path> <contexts glob>: number of
  * tracked owners for one per-domain include; when exactly one, the path is
- * copied to out. git's own stderr passes through, as in the shell original. */
+ * copied to out. A failed producer or read returns -1, never a partial count.
+ * git's own stderr passes through, as in the shell original. */
 static int sw_git_owners(const char *rel, char *out, size_t cap)
 {
     char cmd[4096];
     if (ovf(snprintf(cmd, sizeof cmd,
-                     "git ls-files -- 'engine/controllers/include/controllers/%s' "
+                     "git ls-files -z -- 'engine/controllers/include/controllers/%s' "
                      "'cognition/controllers/include/controllers/%s' "
                      "'contexts/*/controllers/include/controllers/%s'",
                      rel, rel, rel), sizeof cmd))
         return -1;
-    FILE *p = popen(cmd, "r");
-    if (!p)
-        return die("z23-lint: popen failed (%s)\n", cmd);
-    char *line = NULL;
-    size_t lcap = 0;
-    ssize_t n;
-    int count = 0;
-    while ((n = getline(&line, &lcap, p)) >= 0) {
-        if (count == 0) {
-            while (n > 0 && (line[n - 1] == '\n'))
-                line[--n] = '\0';
-            if ((size_t)n >= cap) {
-                free(line);
-                pclose(p);
-                return die("z23-lint: git ls-files path overflow\n", "");
-            }
-            memcpy(out, line, (size_t)n + 1);
-        }
-        count++;
-    }
-    free(line);
-    pclose(p);
-    return count;
+    return sw_owners_command(cmd, out, cap);
 }
 
 /* dumper_def_files twin: aggregator first, then each parsed include's single
@@ -274,10 +275,11 @@ static int sw_check_confinement(regex_t *incl, regex_t *conf)
 {
     static char defs[SW_MAX_DEFS][SW_PATH];
     int ndef = 0;
-    if (sw_dumper_files(incl, defs, &ndef)) {
+    int rc = sw_dumper_files(incl, defs, &ndef);
+    if (rc) {
         fputs("check_sandbox_wired: FAIL — could not resolve the dumpstate "
               "descriptor set\n", stderr);
-        return 1;
+        return rc;
     }
     int found = 0;
     for (int i = 0; i < ndef && !found; i++)
@@ -355,7 +357,12 @@ int check_sandbox_wired_run(int argc, char **argv)
                 "process is KILL_PROCESS)\n", k_sw_witness);
         fail = 1;
     }
-    if (sw_check_confinement(&r.incl, &r.conf))
+    rc = sw_check_confinement(&r.incl, &r.conf);
+    if (rc == 2) {
+        sw_free(&r, 5);
+        return rc;
+    }
+    if (rc)
         fail = 1;
     sw_free(&r, 5);
     if (fail) {
@@ -390,6 +397,31 @@ static int sw_want_ident(const char *tag, const char *ident, const char *s,
     return 0;
 }
 
+static int sw_owner_selftest(void)
+{
+    static const struct { const char *command; int owners; } cases[] = {
+        { ":", 0 },
+        { "printf 'owner.c\\000'", 1 },
+        { "printf 'owner.c\\000other.c\\000'", 2 },
+        { "printf 'owner.c\\000'; exit 73", -1 },
+        { "exit 73", -1 },
+    };
+    char out[64];
+    int bad = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int count = sw_owners_command(cases[i].command, out, sizeof out);
+        if (count != cases[i].owners ||
+            (count > 0 && strcmp(out, "owner.c") != 0)) {
+            fprintf(stderr, "check_sandbox_wired selftest: producer case %zu "
+                            "owners=%d want=%d\n", i, count, cases[i].owners);
+            bad = 1;
+        }
+    }
+    char tiny[4];
+    bad |= sw_owners_command("printf 'owner.c\\000'", tiny, sizeof tiny) != -1;
+    return bad;
+}
+
 int check_sandbox_wired_selftest(void)
 {
     const char *t = "check_sandbox_wired";
@@ -398,7 +430,8 @@ int check_sandbox_wired_selftest(void)
     if (cr)
         return cr;
     regmatch_t m[2];
-    int bad = sw_want(t, &r.name, ".name = \"sand" "box\"", 1)
+    int bad = sw_owner_selftest()
+        | sw_want(t, &r.name, ".name = \"sand" "box\"", 1)
         | sw_want(t, &r.name, ".name=\"sand" "box\"", 1)
         | sw_want(t, &r.name, ".namex = \"sand" "box\"", 0)
         | sw_want(t, &r.stage,
