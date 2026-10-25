@@ -863,6 +863,9 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
  * the family under ZCL_LINT_GATE_TIMING=1 and read the `[lint-gate-timing]
  * ... ms=` lines, taken with the whole family running concurrently. Values
  * only need to RANK correctly. Anything not listed is sub-500ms noise. */
+static int lint_entry_weight_medium(lint_gate_fn fn);
+static int lint_entry_weight_small(lint_gate_fn fn);
+
 static int lint_entry_weight(lint_gate_fn fn)
 {
     if (fn == t_silent_errors_bool_fixture)              return 59651;
@@ -881,6 +884,11 @@ static int lint_entry_weight(lint_gate_fn fn)
     if (fn == t_node_db_exec_fixture_trips_gate)         return 4889;
     if (fn == t_fixture_trips_gate)                      return 4885;
     if (fn == t_supervisor_registration_widened_ratchet) return 4749;
+    return lint_entry_weight_medium(fn);
+}
+
+static int lint_entry_weight_medium(lint_gate_fn fn)
+{
     if (fn == t_log_macro_return_type_gate)              return 3728;
     if (fn == t_long_functions_lib_warn_tier)            return 3608;
     if (fn == t_e12_honest_witness)                      return 2202;
@@ -894,6 +902,11 @@ static int lint_entry_weight(lint_gate_fn fn)
     if (fn == t_e2_one_result_type)                      return 1582;
     if (fn == t_systemd_memory_budget)                   return 1412;
     if (fn == t_e3_shape_includes_header)                return 1153;
+    return lint_entry_weight_small(fn);
+}
+
+static int lint_entry_weight_small(lint_gate_fn fn)
+{
     if (fn == t_privileged_transition_receipt_gate)      return 1030;
     if (fn == t_e5_stage_advances_or_blocks)             return 754;
     if (fn == t_no_uncited_victory)                      return 607;
@@ -906,24 +919,8 @@ static int lint_entry_weight(lint_gate_fn fn)
 /* Longest-processing-time-first bin packing: walk the sandbox entries
  * heaviest-first, dropping each into the currently lightest shard. Recomputed
  * per query so no cached state can drift from the table. */
-static int lint_owner_of(size_t idx)
+static int lint_sandbox_owner_of(size_t idx)
 {
-    if (idx >= LINT_GATE_ENTRY_COUNT) return LINT_OWNER_NONE;
-    switch (g_lint_gate_entries[idx].lane) {
-    case LINT_LANE_REALROOT:  return LINT_OWNER_REALROOT;
-    case LINT_LANE_EXCLUSIVE: return LINT_OWNER_EXCLUSIVE;
-    case LINT_LANE_HEAVY: {
-        int k = 0;
-        for (size_t i = 0; i < idx; i++)
-            if (g_lint_gate_entries[i].lane == LINT_LANE_HEAVY) k++;
-        /* A HEAVY entry with no group would vanish; the partition test
-         * asserts the count. */
-        if (k >= LINT_GATE_HEAVY_COUNT) return LINT_OWNER_NONE;
-        return LINT_OWNER_HEAVY_BASE + k;
-    }
-    case LINT_LANE_SANDBOX:   break;
-    }
-
     int order[LINT_GATE_ENTRY_COUNT];
     int n = 0;
     for (size_t i = 0; i < LINT_GATE_ENTRY_COUNT; i++)
@@ -954,6 +951,26 @@ static int lint_owner_of(size_t idx)
         if ((size_t)order[k] == idx) owner = lightest;
     }
     return owner;
+}
+
+static int lint_owner_of(size_t idx)
+{
+    if (idx >= LINT_GATE_ENTRY_COUNT) return LINT_OWNER_NONE;
+    switch (g_lint_gate_entries[idx].lane) {
+    case LINT_LANE_REALROOT:  return LINT_OWNER_REALROOT;
+    case LINT_LANE_EXCLUSIVE: return LINT_OWNER_EXCLUSIVE;
+    case LINT_LANE_HEAVY: {
+        int k = 0;
+        for (size_t i = 0; i < idx; i++)
+            if (g_lint_gate_entries[i].lane == LINT_LANE_HEAVY) k++;
+        /* A HEAVY entry with no group would vanish; the partition test
+         * asserts the count. */
+        if (k >= LINT_GATE_HEAVY_COUNT) return LINT_OWNER_NONE;
+        return LINT_OWNER_HEAVY_BASE + k;
+    }
+    case LINT_LANE_SANDBOX:   break;
+    }
+    return lint_sandbox_owner_of(idx);
 }
 
 static int lint_owner_for_check(lint_gate_fn fn)
@@ -1292,6 +1309,22 @@ static int t_partition_covers_every_check(void)
     return failures;
 }
 
+static int lint_empty_shard_count(const int shard_counts[LINT_GATE_SHARD_COUNT])
+{
+    int empty_shards = 0;
+    for (int s = 0; s < LINT_GATE_SHARD_COUNT; s++)
+        if (shard_counts[s] == 0) empty_shards++;
+    return empty_shards;
+}
+
+static int lint_empty_heavy_count(const int heavy_counts[LINT_GATE_HEAVY_COUNT])
+{
+    int empty_heavy = 0;
+    for (int h = 0; h < LINT_GATE_HEAVY_COUNT; h++)
+        if (heavy_counts[h] != 1) empty_heavy++;
+    return empty_heavy;
+}
+
 static int t_partition_shards_all_carry_work(void)
 {
     int failures = 0;
@@ -1320,12 +1353,8 @@ static int t_partition_shards_all_carry_work(void)
         else if (owner == LINT_OWNER_EXCLUSIVE) exclusive_count++;
     }
 
-    int empty_shards = 0;
-    for (int s = 0; s < LINT_GATE_SHARD_COUNT; s++)
-        if (shard_counts[s] == 0) empty_shards++;
-    int empty_heavy = 0;
-    for (int h = 0; h < LINT_GATE_HEAVY_COUNT; h++)
-        if (heavy_counts[h] != 1) empty_heavy++;
+    int empty_shards = lint_empty_shard_count(shard_counts);
+    int empty_heavy = lint_empty_heavy_count(heavy_counts);
 
     TEST("[lint-gate] every group carries work; the root probe retains its base group") {
         ASSERT(empty_shards == 0);
