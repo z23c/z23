@@ -147,6 +147,85 @@ static bool wire_read_line(const uint8_t **p, const uint8_t *end,
     return true;
 }
 
+/* Wire parse, request line: read the first line and split it into a
+ * 15-char method + 2047-char path exactly like https_server.c. Returns
+ * false when there is no line to read or the split fails, mirroring the
+ * real handler returning without dispatch. */
+static bool wire_parse_request_line(const uint8_t **p, const uint8_t *end,
+                                    char *line, size_t line_cap,
+                                    char *method, char *path)
+{
+    if (!wire_read_line(p, end, line, line_cap))
+        return false;
+
+    /* Identical to https_server.c: a 2-field sscanf. If it doesn't
+     * yield method+path the real handler returns without dispatch. */
+    return sscanf(line, "%15s %2047s", method, path) == 2;
+}
+
+/* Wire parse, headers: drain lines until the blank line, capturing the
+ * first positive Content-Length. */
+static void wire_drain_headers(const uint8_t **p, const uint8_t *end,
+                               char *line, size_t line_cap,
+                               size_t *content_length, bool *have_clen)
+{
+    while (wire_read_line(p, end, line, line_cap)) {
+        if (line[0] == '\0')
+            break; /* blank line → end of headers */
+        if (!*have_clen && strncasecmp(line, "Content-Length:", 15) == 0) {
+            const char *v = line + 15;
+            while (*v == ' ' || *v == '\t') v++;
+            long cl = strtol(v, NULL, 10);
+            if (cl > 0) {
+                *content_length = (size_t)cl;
+                *have_clen = true;
+            }
+        }
+    }
+}
+
+/* ── Wire parse: body = the unconsumed remainder ──────────── */
+static const uint8_t *wire_body_slice(const uint8_t *p, const uint8_t *end,
+                                      bool have_clen, size_t content_length,
+                                      size_t *body_len_out)
+{
+    const uint8_t *body = (p < end) ? p : NULL;
+    size_t body_len = (size_t)(end - p);
+    /* Honour a parsed Content-Length the way a real server would: a
+     * client may claim a length shorter than what it sent; clamp to
+     * what we actually have so we never read past `end`. */
+    if (have_clen && content_length < body_len)
+        body_len = content_length;
+    if (body_len == 0)
+        body = NULL;
+    *body_len_out = body_len;
+    return body;
+}
+
+static void fuzz_http_dispatch_routers(const char *method, const char *path,
+                                       const uint8_t *body, size_t body_len,
+                                       uint8_t *resp, size_t resp_cap)
+{
+    /* ── Primary target: explorer router (no threads, no rate
+     * limiter). Skip /api so we never reach the threaded delegate
+     * (api_handle_request spawns a cache thread). ──────────────── */
+    bool is_api = (strncmp(path, "/api", 4) == 0);
+    if (!is_api) {
+        (void)explorer_handle_request(method, path, body, body_len,
+                                      resp, resp_cap);
+    }
+
+    /* ── Secondary target: the .onion entry point. It does its own
+     * path routing; for /explorer it re-enters explorer_handle_request
+     * (already covered), but it also routes /search?q=, /directory,
+     * /status, /store, /blog, /, and the 429/404 fallbacks. Skip /api
+     * here too. ───────────────────────────────────────────────── */
+    if (!is_api) {
+        (void)onion_service_handle_request(method, path, body, body_len,
+                                           resp, resp_cap);
+    }
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     /* 1 MiB cap matches the other harnesses; real listeners cap the
@@ -160,43 +239,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     /* ── Wire parse: request line ─────────────────────────────── */
     char line[4096];
-    if (!wire_read_line(&p, end, line, sizeof(line)))
-        return 0;
-
     char method[16] = "";
     char path[2048] = "";
-    /* Identical to https_server.c: a 2-field sscanf. If it doesn't
-     * yield method+path the real handler returns without dispatch. */
-    if (sscanf(line, "%15s %2047s", method, path) != 2)
+    if (!wire_parse_request_line(&p, end, line, sizeof(line), method, path))
         return 0;
 
     /* ── Wire parse: drain headers, capture Content-Length ────── */
     size_t content_length = 0;
     bool have_clen = false;
-    while (wire_read_line(&p, end, line, sizeof(line))) {
-        if (line[0] == '\0')
-            break; /* blank line → end of headers */
-        if (!have_clen && strncasecmp(line, "Content-Length:", 15) == 0) {
-            const char *v = line + 15;
-            while (*v == ' ' || *v == '\t') v++;
-            long cl = strtol(v, NULL, 10);
-            if (cl > 0) {
-                content_length = (size_t)cl;
-                have_clen = true;
-            }
-        }
-    }
+    wire_drain_headers(&p, end, line, sizeof(line), &content_length,
+                       &have_clen);
 
-    /* ── Wire parse: body = the unconsumed remainder ──────────── */
-    const uint8_t *body = (p < end) ? p : NULL;
-    size_t body_len = (size_t)(end - p);
-    /* Honour a parsed Content-Length the way a real server would: a
-     * client may claim a length shorter than what it sent; clamp to
-     * what we actually have so we never read past `end`. */
-    if (have_clen && content_length < body_len)
-        body_len = content_length;
-    if (body_len == 0)
-        body = NULL;
+    size_t body_len = 0;
+    const uint8_t *body = wire_body_slice(p, end, have_clen, content_length,
+                                          &body_len);
 
     /* Response buffer sized like the real https path (512 KiB). A
      * fresh malloc per call so ASan catches any out-of-bounds write
@@ -205,24 +261,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     uint8_t *resp = (uint8_t *)malloc(RESP_CAP); // raw-alloc-ok:fuzz-harness-wants-bare-per-call-heap-alloc-so-asan-redzones-catch-oob-writes
     if (!resp) return 0;
 
-    /* ── Primary target: explorer router (no threads, no rate
-     * limiter). Skip /api so we never reach the threaded delegate
-     * (api_handle_request spawns a cache thread). ──────────────── */
-    bool is_api = (strncmp(path, "/api", 4) == 0);
-    if (!is_api) {
-        (void)explorer_handle_request(method, path, body, body_len,
-                                      resp, RESP_CAP);
-    }
-
-    /* ── Secondary target: the .onion entry point. It does its own
-     * path routing; for /explorer it re-enters explorer_handle_request
-     * (already covered), but it also routes /search?q=, /directory,
-     * /status, /store, /blog, /, and the 429/404 fallbacks. Skip /api
-     * here too. ───────────────────────────────────────────────── */
-    if (!is_api) {
-        (void)onion_service_handle_request(method, path, body, body_len,
-                                           resp, RESP_CAP);
-    }
+    fuzz_http_dispatch_routers(method, path, body, body_len, resp, RESP_CAP);
 
     free(resp);
     return 0;
