@@ -18,7 +18,7 @@ for git_env in ${!GIT_@}; do
 done
 [[ "$(git -C "$tool_root" rev-parse --show-toplevel 2>/dev/null)" == "$tool_root" ]] ||
     refuse toolkit-root-mismatch
-helper_inputs=(tools/jsonq.c contexts/commons/packages/zjsonp/include
+helper_inputs=(tools/jsonq.c tools/jsonq_standalone.c tools/multicall.h contexts/commons/packages/zjsonp/include
     contexts/commons/packages/zjsonp/src/zjsonp.c contexts/commons/packages/zutf8/include
     contexts/commons/packages/zutf8/src/zutf8.c)
 archive_helper() { git -C "$tool_root" archive HEAD "${helper_inputs[@]}" > "$1" 2>/dev/null; }
@@ -33,7 +33,7 @@ selftest_helper() {
     chmod +x "$toolkit/tools/scripts/commons_fix_admit.sh" || return 1
     cp "$tool_root/build/bin/z23-package-verify-dev" "$toolkit/build/bin/" || return 1
     git -C "$toolkit" init -q || return 1
-    git -C "$toolkit" add tools/jsonq.c contexts || return 1
+    git -C "$toolkit" add tools/jsonq.c tools/jsonq_standalone.c tools/multicall.h contexts || return 1
     git -C "$toolkit" -c user.name=Fixture -c user.email=fixture@example.invalid \
         -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm trusted-helper || return 1
     # This is a dirty proposal in the toolkit, not an accepted helper input.
@@ -302,7 +302,7 @@ archive_helper "$scratch/helper.tar" || refuse helper-source-unavailable
 tar -xf "$scratch/helper.tar" -C "$scratch/helper" || refuse helper-source-unavailable
 "$compiler" -std=c23 -O1 -I"$scratch/helper/contexts/commons/packages/zjsonp/include" \
     -I"$scratch/helper/contexts/commons/packages/zutf8/include" \
-    "$scratch/helper/tools/jsonq.c" "$scratch/helper/contexts/commons/packages/zjsonp/src/zjsonp.c" \
+    "$scratch/helper/tools/jsonq.c" "$scratch/helper/tools/jsonq_standalone.c" "$scratch/helper/contexts/commons/packages/zjsonp/src/zjsonp.c" \
     "$scratch/helper/contexts/commons/packages/zutf8/src/zutf8.c" \
     -o "$scratch/jsonq" > "$scratch/jsonq.build" 2>&1 || refuse helper-does-not-compile
 patch=$scratch/patch
