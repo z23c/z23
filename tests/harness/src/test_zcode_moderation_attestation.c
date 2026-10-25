@@ -407,6 +407,24 @@ static int test_profile_and_verdict_binding(void)
 /* 3. Composition: who said what, and every fail-closed path.               */
 /* ---------------------------------------------------------------------- */
 
+/* One signer row of a reached quorum: trusted, chain-linked, at sequence 1
+ * and saying reviewed_ok. */
+static bool mod_signer_row_is_trusted_quorum_ok(
+    const struct zcl_moderation_signer_verdict_v1 *found)
+{
+    return found && found->trusted && !found->self &&
+           found->chain_linked && found->sequence == 1u &&
+           found->verdict == ZCL_MODERATION_VERDICT_REVIEWED_OK;
+}
+
+/* The tally of an own-hidden composition: not served, self present, and the
+ * trusted quorum still reached behind it. */
+static bool mod_tally_is_self_hidden_with_quorum(
+    const struct zcl_moderation_tally_v1 *tally)
+{
+    return !tally->serve && tally->self_present && tally->threshold_met;
+}
+
 static int test_composition_rule(void)
 {
     int failures = 0;
@@ -488,9 +506,7 @@ static int test_composition_rule(void)
         for (size_t i = 0; i < 3; i++) {
             const struct zcl_moderation_signer_verdict_v1 *found =
                 zcl_moderation_composition_signer_find_v1(quorum, trusted[i]);
-            ASSERT(found && found->trusted && !found->self &&
-                   found->chain_linked && found->sequence == 1u &&
-                   found->verdict == ZCL_MODERATION_VERDICT_REVIEWED_OK);
+            ASSERT(mod_signer_row_is_trusted_quorum_ok(found));
         }
         /* Signers come out in ascending pubkey order — stable evidence. */
         for (size_t i = 1;
@@ -581,7 +597,7 @@ static int test_composition_rule(void)
                                             &own),
                   ZCL_MODERATION_OK);
         tally = zcl_moderation_composition_tally_v1(own);
-        ASSERT(!tally.serve && tally.self_present && tally.threshold_met);
+        ASSERT(mod_tally_is_self_hidden_with_quorum(&tally));
         ASSERT_EQ((int)tally.self_verdict, (int)ZCL_MODERATION_VERDICT_HIDDEN);
         ASSERT_EQ((int)tally.reason, (int)ZCL_MODERATION_REASON_SELF_HIDDEN);
 
