@@ -234,25 +234,20 @@ static void refresh_poll(struct boot_svc_ctx *svc, int64_t now)
     }
 }
 
-static void refresh_begin_one(struct boot_svc_ctx *svc, int64_t now)
+static struct mesh_refresh_slot *refresh_find_free_slot(void)
 {
-    if (now <= g_refresh_last_admit)
-        return;
-    struct mesh_refresh_slot *slot = NULL;
     for (size_t i = 0; i < MESH_REFRESH_INFLIGHT_MAX; i++)
-        if (!g_refresh_slots[i].used) {
-            slot = &g_refresh_slots[i];
-            break;
-        }
-    if (!slot)
-        return;
-    struct db_mesh_pairing rows[MESH_REFRESH_PAIRING_MAX];
-    int count = db_mesh_pairing_list(boot_node_db(svc), rows,
-                                     MESH_REFRESH_PAIRING_MAX);
-    if (count <= 0)
-        return;
+        if (!g_refresh_slots[i].used)
+            return &g_refresh_slots[i];
+    return NULL;
+}
+
+static struct db_mesh_pairing *refresh_select_pairing(
+    struct db_mesh_pairing *rows, int count, int64_t now,
+    struct mesh_refresh_cooldown **cooldown_out)
+{
     struct db_mesh_pairing *choice = NULL;
-    struct mesh_refresh_cooldown *choice_cooldown = NULL;
+    struct mesh_refresh_cooldown *chosen = NULL;
     for (int i = 0; i < count; i++) {
         if (!mesh_pairing_allows(&rows[i], MESH_PAIRING_CAP_STATUS_READ, now) ||
             refresh_inflight(rows[i].pairing_id))
@@ -261,11 +256,30 @@ static void refresh_begin_one(struct boot_svc_ctx *svc, int64_t now)
             refresh_cooldown(rows[i].pairing_id);
         if (!cooldown || cooldown->next_attempt > now)
             continue;
-        if (!choice || cooldown->next_attempt < choice_cooldown->next_attempt) {
+        if (!choice || cooldown->next_attempt < chosen->next_attempt) {
             choice = &rows[i];
-            choice_cooldown = cooldown;
+            chosen = cooldown;
         }
     }
+    *cooldown_out = chosen;
+    return choice;
+}
+
+static void refresh_begin_one(struct boot_svc_ctx *svc, int64_t now)
+{
+    if (now <= g_refresh_last_admit)
+        return;
+    struct mesh_refresh_slot *slot = refresh_find_free_slot();
+    if (!slot)
+        return;
+    struct db_mesh_pairing rows[MESH_REFRESH_PAIRING_MAX];
+    int count = db_mesh_pairing_list(boot_node_db(svc), rows,
+                                     MESH_REFRESH_PAIRING_MAX);
+    if (count <= 0)
+        return;
+    struct mesh_refresh_cooldown *choice_cooldown = NULL;
+    struct db_mesh_pairing *choice =
+        refresh_select_pairing(rows, count, now, &choice_cooldown);
     if (!choice)
         return;
     g_refresh_last_admit = now;
