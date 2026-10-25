@@ -25,14 +25,12 @@ tools/dev/arena_product_journey_hook.sh
 tools/dev/arena_view.sh
 tools/dev/attestation_flight_acceptance.sh
 tools/dev/attestation_flight_hook.sh
-tools/dev/broker-lane-qualification.sh
 tools/dev/build-epoch-integrity-cached.sh
 tools/dev/build-epoch-key.sh
 tools/dev/build-epoch-lock-wait.sh
 tools/dev/build-epoch-open-file-identity.sh
 tools/dev/build-epoch-selftest.sh
 tools/dev/build-epoch-session.sh
-tools/dev/c23-cache-adversarial.sh
 tools/dev/c23-ingest-bench.sh
 tools/dev/c23_commons_beta_acceptance.sh
 tools/dev/c23_commons_beta_hook.sh

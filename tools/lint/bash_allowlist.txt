@@ -13,7 +13,6 @@ platform/deploy/migrate-role-names-selftest.sh
 platform/deploy/migrate-role-names.sh
 platform/deploy/provision-z23-build-host.sh
 platform/deploy/setup.sh
-platform/deploy/test-devbuild-broker.sh
 platform/deploy/z23-build-zram.sh
 platform/deploy/z23-bundle-bootstrap.sh
 platform/deploy/z23-bundle-export.sh
@@ -43,14 +42,12 @@ tools/dev/arena_product_journey_hook.sh
 tools/dev/arena_view.sh
 tools/dev/attestation_flight_acceptance.sh
 tools/dev/attestation_flight_hook.sh
-tools/dev/broker-lane-qualification.sh
 tools/dev/build-epoch-integrity-cached.sh
 tools/dev/build-epoch-key.sh
 tools/dev/build-epoch-lock-wait.sh
 tools/dev/build-epoch-open-file-identity.sh
 tools/dev/build-epoch-selftest.sh
 tools/dev/build-epoch-session.sh
-tools/dev/c23-cache-adversarial.sh
 tools/dev/c23-ingest-bench.sh
 tools/dev/c23_commons_beta_acceptance.sh
 tools/dev/c23_commons_beta_hook.sh
@@ -82,7 +79,6 @@ tools/dev/fixtures/proof/generation_hook_refresh.sh
 tools/dev/fixtures/proof/stale_candidate_zcc.sh
 tools/dev/fixtures/proof/stale_epoch_dep.sh
 tools/dev/fixtures/receiver/receive-revoke-replay.sh
-tools/dev/fixtures/skycombat/remote_run.sh
 tools/dev/fleet-identity.sh
 tools/dev/generate-compdb.sh
 tools/dev/hotswap-candidates.sh

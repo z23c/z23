@@ -79,14 +79,14 @@ you are new; this page is about operating a host, not about building.
   `--qualification-width 4|8` allows a bounded trial while retaining a
   4 CPU / 4 GiB interactive reservation. Host and node-health evidence
   determines whether that width can become normal policy;
-  [`broker-lane-qualification.sh`](../../tools/dev/broker-lane-qualification.sh)
-  records one isolated node beside separately admitted factory lanes.
+  a retired qualification run recorded one isolated node beside separately
+  admitted factory lanes.
   Direct `dev proof step`
   commands use the 20 GiB release class; direct `make commons-demo`
   commands use the background class;
-  [`test-devbuild-broker.sh`](test-devbuild-broker.sh) exercises concurrent
+  a retired broker test exercised concurrent
   admission, queue order, and the old-wrapper drain gate with short isolated
-  scopes. It is not installed by the repository. During a host cutover, write
+  scopes. That test was never installed by the repository. During a host cutover, write
   the previous script's device/inode and the current nanosecond timestamp to
   `~/.local/state/development/broker-v1/legacy-inode` before atomically
   replacing `~/.local/bin/devbuild`. The new script refuses admission while any
