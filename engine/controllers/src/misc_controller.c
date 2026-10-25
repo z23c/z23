@@ -85,6 +85,83 @@ static bool rpc_getinfo(const struct json_value *params, bool help,
     return true;
 }
 
+static bool validateaddress_text_ok(const char *addr,
+                                     struct json_value *result)
+{
+    if (addr[0] == '\0' || strlen(addr) > 128) {
+        json_set_str(result, "address must be 1-128 printable characters");
+        return false;
+    }
+    for (const unsigned char *s = (const unsigned char *)addr; *s; s++) {
+        if (*s < 33 || *s > 126) {
+            json_set_str(result, "address must be 1-128 printable characters");
+            return false;
+        }
+    }
+    return true;
+}
+
+static void validateaddress_push_sapling_ismine(struct wallet *wallet,
+                                                 struct json_value *result,
+                                                 const uint8_t *diversifier,
+                                                 const uint8_t *pk_d)
+{
+    if (wallet) {
+        bool is_mine = false;
+        for (size_t i = 0; i < wallet->sapling_keys.num_keys; i++) {
+            struct sapling_key_entry *e =
+                &wallet->sapling_keys.keys[i];
+            if (e->used &&
+                memcmp(e->diversifier, diversifier, 11) == 0 &&
+                memcmp(e->pk_d, pk_d, 32) == 0) {
+                is_mine = true;
+                break;
+            }
+        }
+        json_push_kv_bool(result, "ismine", is_mine);
+    }
+}
+
+static void validateaddress_push_pubkeyhash(struct wallet *wallet,
+                                             struct json_value *result,
+                                             struct tx_destination *dest)
+{
+    json_push_kv_str(result, "type", "pubkeyhash");
+    json_push_kv_bool(result, "isscript", false);
+
+    if (wallet) {
+        bool is_mine = keystore_have_key(&wallet->keystore,
+                                           &dest->id.key);
+        json_push_kv_bool(result, "ismine", is_mine);
+
+        if (is_mine) {
+            struct pubkey pk;
+            if (keystore_get_pubkey(&wallet->keystore,
+                                     &dest->id.key, &pk)) {
+                char pk_hex[PUBLIC_KEY_SIZE * 2 + 1];
+                HexStr(pk.vch, pk.size, false, pk_hex, sizeof(pk_hex));
+                json_push_kv_str(result, "pubkey", pk_hex);
+                json_push_kv_bool(result, "iscompressed",
+                                  pk.size == COMPRESSED_PUBLIC_KEY_SIZE);
+            }
+        }
+    }
+}
+
+static void validateaddress_push_scripthash(struct wallet *wallet,
+                                             struct json_value *result,
+                                             struct tx_destination *dest)
+{
+    json_push_kv_str(result, "type", "scripthash");
+    json_push_kv_bool(result, "isscript", true);
+
+    if (wallet) {
+        bool have = keystore_have_cscript(&wallet->keystore,
+                                            &dest->id.script.hash);
+        json_push_kv_bool(result, "ismine", have);
+    }
+}
+
 static bool rpc_validateaddress(const struct json_value *params, bool help,
                                   struct json_value *result)
 {
@@ -99,16 +176,8 @@ static bool rpc_validateaddress(const struct json_value *params, bool help,
     rpc_params_expect(&p, 1, 1);
     const char *addr = rpc_require_str(&p, 0, "address");
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }
-    if (addr[0] == '\0' || strlen(addr) > 128) {
-        json_set_str(result, "address must be 1-128 printable characters");
+    if (!validateaddress_text_ok(addr, result))
         return false;
-    }
-    for (const unsigned char *s = (const unsigned char *)addr; *s; s++) {
-        if (*s < 33 || *s > 126) {
-            json_set_str(result, "address must be 1-128 printable characters");
-            return false;
-        }
-    }
     const struct chain_params *cp = chain_params_get();
 
     json_set_object(result);
@@ -120,21 +189,8 @@ static bool rpc_validateaddress(const struct json_value *params, bool help,
     if (sapling_decode_payment_address(addr, diversifier, pk_d)) {
         json_push_kv_bool(result, "isvalid", true);
         json_push_kv_str(result, "type", "sapling");
-
-        if (ctx->wallet) {
-            bool is_mine = false;
-            for (size_t i = 0; i < ctx->wallet->sapling_keys.num_keys; i++) {
-                struct sapling_key_entry *e =
-                    &ctx->wallet->sapling_keys.keys[i];
-                if (e->used &&
-                    memcmp(e->diversifier, diversifier, 11) == 0 &&
-                    memcmp(e->pk_d, pk_d, 32) == 0) {
-                    is_mine = true;
-                    break;
-                }
-            }
-            json_push_kv_bool(result, "ismine", is_mine);
-        }
+        validateaddress_push_sapling_ismine(ctx->wallet, result,
+                                             diversifier, pk_d);
         return true;
     }
 
@@ -154,35 +210,9 @@ static bool rpc_validateaddress(const struct json_value *params, bool help,
         return true;
 
     if (dest.type == DEST_KEY_ID) {
-        json_push_kv_str(result, "type", "pubkeyhash");
-        json_push_kv_bool(result, "isscript", false);
-
-        if (ctx->wallet) {
-            bool is_mine = keystore_have_key(&ctx->wallet->keystore,
-                                               &dest.id.key);
-            json_push_kv_bool(result, "ismine", is_mine);
-
-            if (is_mine) {
-                struct pubkey pk;
-                if (keystore_get_pubkey(&ctx->wallet->keystore,
-                                         &dest.id.key, &pk)) {
-                    char pk_hex[PUBLIC_KEY_SIZE * 2 + 1];
-                    HexStr(pk.vch, pk.size, false, pk_hex, sizeof(pk_hex));
-                    json_push_kv_str(result, "pubkey", pk_hex);
-                    json_push_kv_bool(result, "iscompressed",
-                                      pk.size == COMPRESSED_PUBLIC_KEY_SIZE);
-                }
-            }
-        }
+        validateaddress_push_pubkeyhash(ctx->wallet, result, &dest);
     } else if (dest.type == DEST_SCRIPT_ID) {
-        json_push_kv_str(result, "type", "scripthash");
-        json_push_kv_bool(result, "isscript", true);
-
-        if (ctx->wallet) {
-            bool have = keystore_have_cscript(&ctx->wallet->keystore,
-                                                &dest.id.script.hash);
-            json_push_kv_bool(result, "ismine", have);
-        }
+        validateaddress_push_scripthash(ctx->wallet, result, &dest);
     }
 
     return true;

@@ -1164,7 +1164,6 @@ engine/controllers/src/legacy_import_scan.c:block_has_shielded_raw:39
 engine/controllers/src/legacy_import_scan.c:extract_height_raw:23
 engine/controllers/src/legacy_import_scan.c:legacy_import_decrypt_thread:22
 engine/controllers/src/legacy_import_scan.c:legacy_import_sapling_filter_thread:18
-engine/controllers/src/misc_controller.c:rpc_validateaddress:20
 engine/controllers/src/name_gateway_controller.c:name_gateway_host_from_target:24
 engine/controllers/src/network_onion_controller.c:network_onion_first_incomplete_stage:18
 engine/controllers/src/network_onion_controller.c:network_onion_status_rpc:21
