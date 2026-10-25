@@ -117,23 +117,34 @@ static bool reconcile_one_canonical_note(
     return true;
 }
 
-bool node_db_reconcile_canonical_sapling_notes(
-    struct node_db *ndb, struct main_state *ms, const char *datadir,
-    size_t *reconciled_out)
+static bool canonical_note_reconcile_args_are_valid(
+    struct node_db *ndb, struct main_state *ms, const char *datadir)
 {
-    if (reconciled_out)
-        *reconciled_out = 0;
-    if (!ndb || !ndb->open || !ms || !datadir)
-        LOG_FAIL("sync", "canonical note reconciliation: invalid argument");
+    return ndb && ndb->open && ms && datadir;
+}
 
-    sqlite3 *db = progress_store_db();
+static bool canonical_nullifier_history_is_complete(sqlite3 *db)
+{
     int64_t activation_cursor = -1;
     bool cursor_found = false;
     progress_store_tx_lock();
     bool complete = db && nullifier_kv_activation_cursor(
         db, &activation_cursor, &cursor_found);
     progress_store_tx_unlock();
-    if (!complete || !cursor_found || activation_cursor != 0)
+    return complete && cursor_found && activation_cursor == 0;
+}
+
+bool node_db_reconcile_canonical_sapling_notes(
+    struct node_db *ndb, struct main_state *ms, const char *datadir,
+    size_t *reconciled_out)
+{
+    if (reconciled_out)
+        *reconciled_out = 0;
+    if (!canonical_note_reconcile_args_are_valid(ndb, ms, datadir))
+        LOG_FAIL("sync", "canonical note reconciliation: invalid argument");
+
+    sqlite3 *db = progress_store_db();
+    if (!canonical_nullifier_history_is_complete(db))
         LOG_FAIL("sync", "canonical nullifier history is not complete");
 
     struct db_sapling_note *notes = NULL;

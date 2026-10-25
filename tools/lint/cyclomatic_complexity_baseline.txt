@@ -946,7 +946,6 @@ engine/controllers/src/store_controller_schema.c:store_attach_content_from_path:
 engine/controllers/src/store_controller_schema.c:store_ensure_schema:24
 engine/controllers/src/sync_controller_blocks.c:advance_wallet_witnesses:26
 engine/controllers/src/sync_controller_blocks.c:node_db_sync_connect_block_local:44
-engine/controllers/src/sync_controller_confirmed_spends.c:node_db_reconcile_canonical_sapling_notes:16
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
 engine/controllers/src/sync_controller_sapling_tree_persist.c:sapling_tree_persist_pair_status:19
 engine/controllers/src/transaction_controller.c:rawtx_find_in_node_db:19
