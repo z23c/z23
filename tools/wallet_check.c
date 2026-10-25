@@ -42,6 +42,15 @@ static bool has(const char *needle) {
     return strstr((char *)page, needle) != NULL;
 }
 
+static bool page_has_either(const char *first, const char *second) {
+    return has(first) || has(second);
+}
+
+static bool page_has_any(const char *first, const char *second,
+                         const char *third) {
+    return has(first) || has(second) || has(third);
+}
+
 /* ── RPC queries ───────────────────────────────────────── */
 
 static double rpc_transparent, rpc_private, rpc_total;
@@ -81,6 +90,13 @@ static bool query_truth(void) {
     return true;
 }
 
+/* Privacy % the UI should show: private share of the RPC total. */
+static int expected_privacy_pct(void) {
+    if (rpc_total > 0)
+        return (int)(100.0 * rpc_private / rpc_total);
+    return 0;
+}
+
 /* ── Check helpers ─────────────────────────────────────── */
 
 #define CHECK(cond, desc) do { \
@@ -90,21 +106,46 @@ static bool query_truth(void) {
 
 #define APPROX(a, b) (fabs((a) - (b)) < 0.0001)
 
+static int privacy_pct_low(int pct) {
+    return pct > 0 ? pct - 1 : 0;
+}
+
+static int privacy_pct_high(int pct) {
+    return pct < 100 ? pct + 1 : 100;
+}
+
+/* "Just now" is only honest while a tx is still Pending. */
+static bool history_avoids_stale_just_now(void) {
+    return !has("Just now") || has("Pending");
+}
+
+/* argv[1] wins; otherwise ~/.zclassic-c23 if HOME is set. */
+static const char *resolve_datadir(int argc, char **argv) {
+    if (argc > 1)
+        return argv[1];
+
+    static char dd[512];
+    const char *home = getenv("HOME");
+    if (home) {
+        snprintf(dd, sizeof(dd), "%s/.zclassic-c23", home);
+        return dd;
+    }
+    return NULL;
+}
+
+static const char *datadir_or_none(const char *datadir) {
+    return datadir ? datadir : "(none)";
+}
+
+static int wallet_check_exit_status(void) {
+    return checks_failed ? 1 : 0;
+}
+
 /* ── The checks ────────────────────────────────────────── */
 
 int main(int argc, char **argv)
 {
-    const char *datadir = NULL;
-    if (argc > 1) {
-        datadir = argv[1];
-    } else {
-        static char dd[512];
-        const char *home = getenv("HOME");
-        if (home) {
-            snprintf(dd, sizeof(dd), "%s/.zclassic-c23", home);
-            datadir = dd;
-        }
-    }
+    const char *datadir = resolve_datadir(argc, argv);
 
     chain_params_select(CHAIN_MAIN);
     ecc_start();
@@ -114,7 +155,7 @@ int main(int argc, char **argv)
     wallet_view_init(datadir);
 
     printf("wallet_check: verifying UI matches zclassicd truth\n");
-    printf("datadir: %s\n\n", datadir ? datadir : "(none)");
+    printf("datadir: %s\n\n", datadir_or_none(datadir));
 
     /* Step 1: Query zclassicd for truth */
     if (!query_truth()) {
@@ -127,9 +168,7 @@ int main(int argc, char **argv)
     wv_sync_wallet_from_zclassicd();
     printf("Sync complete.\n\n");
 
-    int expected_pct = 0;
-    if (rpc_total > 0)
-        expected_pct = (int)(100.0 * rpc_private / rpc_total);
+    int expected_pct = expected_privacy_pct();
     bool has_shieldable = (rpc_transparent > 0.00011);
 
     /* ═══ Dashboard checks ═══ */
@@ -148,7 +187,7 @@ int main(int argc, char **argv)
         /* The displayed balance should match total to 4 decimals */
         char total_4[16];
         snprintf(total_4, sizeof(total_4), "%.4f", rpc_total);
-        CHECK(has(total_str) || has(total_4),
+        CHECK(page_has_either(total_str, total_4),
               "displayed balance matches z_gettotalbalance");
     }
 
@@ -159,16 +198,16 @@ int main(int argc, char **argv)
         /* Allow ±1% rounding */
         char pct_lo[8], pct_hi[8];
         snprintf(pct_lo, sizeof(pct_lo), "%d%%",
-                 expected_pct > 0 ? expected_pct - 1 : 0);
+                 privacy_pct_low(expected_pct));
         snprintf(pct_hi, sizeof(pct_hi), "%d%%",
-                 expected_pct < 100 ? expected_pct + 1 : 100);
-        CHECK(has(pct_str) || has(pct_lo) || has(pct_hi),
+                 privacy_pct_high(expected_pct));
+        CHECK(page_has_any(pct_str, pct_lo, pct_hi),
               "privacy % matches actual t/z ratio");
     }
 
     /* Shield nudge */
     if (has_shieldable) {
-        CHECK(has("Shield All") || has("/wallet/shield"),
+        CHECK(page_has_either("Shield All", "/wallet/shield"),
               "shield action shown (transparent > fee)");
     } else {
         CHECK(!has("Shield All"),
@@ -194,7 +233,7 @@ int main(int argc, char **argv)
         snprintf(total_str, sizeof(total_str), "%.8f", rpc_total);
         char total_4[16];
         snprintf(total_4, sizeof(total_4), "%.4f", rpc_total);
-        CHECK(has(total_str) || has(total_4),
+        CHECK(page_has_either(total_str, total_4),
               "spendable balance = total (t + z)");
     }
 
@@ -204,7 +243,7 @@ int main(int argc, char **argv)
 
     CHECK(pagelen > 500, "renders");
     CHECK(has("recommended"), "private tab recommended");
-    CHECK(has("zs1") || has("No private addresses"),
+    CHECK(page_has_either("zs1", "No private addresses"),
           "z-address shown or fallback");
 
     /* ═══ Shield page checks ═══ */
@@ -217,7 +256,7 @@ int main(int argc, char **argv)
         snprintf(avail_str, sizeof(avail_str), "%.8f", rpc_transparent);
         char avail_4[16];
         snprintf(avail_4, sizeof(avail_4), "%.4f", rpc_transparent);
-        CHECK(has(avail_str) || has(avail_4) || has("Available"),
+        CHECK(page_has_any(avail_str, avail_4, "Available"),
               "available shows transparent balance");
     }
 
@@ -234,7 +273,7 @@ int main(int argc, char **argv)
     render("/wallet/history");
 
     CHECK(pagelen > 500, "renders");
-    CHECK(!has("Just now") || has("Pending"),
+    CHECK(history_avoids_stale_just_now(),
           "no stale 'Just now' on confirmed txs");
 
     /* ═══ Pulse API checks ═══ */
@@ -257,5 +296,5 @@ int main(int argc, char **argv)
 
     ecc_verify_destroy();
     ecc_stop();
-    return checks_failed ? 1 : 0;
+    return wallet_check_exit_status();
 }

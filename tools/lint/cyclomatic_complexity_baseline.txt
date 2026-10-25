@@ -2886,7 +2886,6 @@ tools/serial_bench.c:main:34
 tools/sim/simperf.c:main:28
 tools/simd_bench.c:bench_chacha_aead_row:32
 tools/simd_bench.c:main:26
-tools/wallet_check.c:main:22
 tools/z23_gpu_miner.c:hash_meets_target:16
 tools/z23_gpu_miner.c:main:35
 tools/zcc.c:epoch_authority_current:16
