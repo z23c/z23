@@ -405,7 +405,41 @@ static bool fox_val_row_is(const struct json_value *rows, size_t i,
            json_get_int(json_get(r, "share_pct")) == w->share;
 }
 
-/* Rows sorted by fresh total, then totals, skipped and the screen. */
+struct fox_val_role_want {
+    const char *role;
+    int64_t agents, fresh, share;
+};
+
+/* The role summary: write splits across two model families and must total
+ * 1800 (20 percent), not two per-model shares. Roles in role order. */
+static bool fox_val_role_is(const struct json_value *roles, size_t i,
+                            const struct fox_val_role_want *w)
+{
+    const struct json_value *r = json_at(roles, i);
+    return r && strcmp(json_get_str(json_get(r, "role")), w->role) == 0 &&
+           json_get_int(json_get(r, "agents")) == w->agents &&
+           json_get_int(json_get(r, "fresh_total")) == w->fresh &&
+           json_get_int(json_get(r, "share_pct")) == w->share;
+}
+
+static bool fox_val_roles_check(const struct json_value *data)
+{
+    static const struct fox_val_role_want want[] = {
+        {"write", 3, 1800, 20},
+        {"review", 1, 800, 9},
+        {"fix", 1, 6000, 69},
+    };
+    const struct json_value *roles = json_get(data, "roles");
+    if (json_size(roles) != 3u)
+        return false;
+    for (size_t i = 0; i < 3u; i++)
+        if (!fox_val_role_is(roles, i, &want[i]))
+            return false;
+    return true;
+}
+
+/* Rows sorted by fresh total, then the roles, totals, skipped and the
+ * screen. */
 static bool fox_val_check(const struct json_value *data)
 {
     static const struct fox_val_want want[] = {
@@ -421,6 +455,8 @@ static bool fox_val_check(const struct json_value *data)
     for (size_t i = 0; i < 4u; i++)
         if (!fox_val_row_is(rows, i, &want[i]))
             return false;
+    if (!fox_val_roles_check(data))
+        return false;
     return json_get_int(json_get(t, "lanes_landed")) == 3 &&
            json_get_int(json_get(t, "lanes_joined")) == 2 &&
            json_get_int(json_get(t, "agents")) == 5 &&
@@ -447,8 +483,8 @@ static int fox_case_value(const char *root)
         ASSERT(fox_val_write_meta(root));
         ASSERT(setenv("Z23_AGENT_META_ROOT", root, 1) == 0);
         ok = fox_val_run(ledger, outcomes, &data, reason, sizeof(reason));
-        ASSERT(ok);
-        ok = fox_val_check(&data);
+        if (ok)
+            ok = fox_val_check(&data);
         json_free(&data);
         ASSERT(ok);
         PASS();

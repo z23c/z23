@@ -572,12 +572,19 @@ struct tpv_group {
     int64_t cache_median;
 };
 
+/* One job role summed over every model family: its agents and fresh total. */
+struct tpv_role {
+    size_t agents;
+    int64_t fresh;
+};
+
 struct tpv_read {
     struct tpc_landed landed;
     struct zcl_agent_index ix;
     struct tpc_samples samples;
     int64_t skipped;
     struct tpv_group groups[TPC_BUCKETS];
+    struct tpv_role roles[TPC_ROLES];
     size_t n;
     int64_t total;
 };
@@ -646,8 +653,11 @@ static bool tpv_groups(struct tpv_read *rd)
             return false;
         if (g.agents == 0)
             continue;
+        struct tpv_role *r = &rd->roles[g.bucket / TPC_MODELS];
         rd->groups[n++] = g;
         rd->total = tpc_add(rd->total, g.fresh);
+        r->agents += g.agents;
+        r->fresh = tpc_add(r->fresh, g.fresh);
     }
     rd->n = n;
     qsort(rd->groups, n, sizeof(*rd->groups), tpv_cmp_group);
@@ -729,7 +739,24 @@ static void tpv_screen_row(char *out, size_t cap, size_t *used,
             (long long)g->cache_median, (long long)tpv_share(g->fresh, total));
 }
 
-/* The plain-text table: one line per group, then the totals line. */
+/* One line per job role that has agents: its fresh total and share. */
+static void tpv_screen_roles(char *out, size_t cap, size_t *used,
+                             const struct tpv_read *rd)
+{
+    tpv_add(out, cap, used, "\n%-8s %6s %14s %5s\n", "role", "agents",
+            "fresh_total", "share");
+    for (size_t r = 0; r < TPC_ROLES; r++) {
+        const struct tpv_role *t = &rd->roles[r];
+        if (t->agents == 0)
+            continue;
+        tpv_add(out, cap, used, "%-8s %6zu %14lld %5lld\n", tpc_roles[r],
+                t->agents, (long long)t->fresh,
+                (long long)tpv_share(t->fresh, rd->total));
+    }
+}
+
+/* The plain-text table: one line per group, the role summary, then the
+ * totals line. */
 static void tpv_screen(char *out, size_t cap, const struct tpv_read *rd,
                        size_t joined, size_t agents)
 {
@@ -740,6 +767,7 @@ static void tpv_screen(char *out, size_t cap, const struct tpv_read *rd,
             "share");
     for (size_t i = 0; i < rd->n; i++)
         tpv_screen_row(out, cap, &used, &rd->groups[i], rd->total);
+    tpv_screen_roles(out, cap, &used, rd);
     tpv_add(out, cap, &used,
             "landed %zu, joined %zu, agents %zu, fresh tokens %lld, %lld "
             "malformed lines skipped\n",
@@ -773,6 +801,34 @@ static bool tpv_push_rows(struct json_value *data, const struct tpv_read *rd)
     return ok;
 }
 
+/* The `roles` array: one object per job role that has agents, in role order.
+ * share_pct is the role's share of all fresh tokens. */
+static bool tpv_push_roles(struct json_value *data, const struct tpv_read *rd)
+{
+    struct json_value roles;
+    bool ok = true;
+    json_init(&roles);
+    json_set_array(&roles);
+    for (size_t r = 0; ok && r < TPC_ROLES; r++) {
+        const struct tpv_role *t = &rd->roles[r];
+        struct json_value o;
+        if (t->agents == 0)
+            continue;
+        json_init(&o);
+        json_set_object(&o);
+        ok = json_push_kv_str(&o, "role", tpc_roles[r]) &&
+             json_push_kv_int(&o, "agents", (int64_t)t->agents) &&
+             json_push_kv_int(&o, "fresh_total", t->fresh) &&
+             json_push_kv_int(&o, "share_pct",
+                              tpv_share(t->fresh, rd->total)) &&
+             json_push_back(&roles, &o);
+        json_free(&o);
+    }
+    ok = ok && json_push_kv(data, "roles", &roles);
+    json_free(&roles);
+    return ok;
+}
+
 static bool tpv_push_totals(struct json_value *data, const struct tpv_read *rd,
                             size_t joined, size_t agents)
 {
@@ -802,6 +858,7 @@ static bool tpv_build(struct json_value *data, const struct tpv_read *rd,
     tpv_screen(screen, sizeof(screen), rd, joined, agents);
     ok = json_push_kv_str(data, "schema", TPV_SCHEMA_OUT) &&
          tpv_push_rows(data, rd) &&
+         tpv_push_roles(data, rd) &&
          tpv_push_totals(data, rd, joined, agents) &&
          json_push_kv_int(data, "skipped", rd->skipped) &&
          json_push_kv_str(data, "screen", screen);
