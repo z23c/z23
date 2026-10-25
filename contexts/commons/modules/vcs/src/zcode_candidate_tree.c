@@ -270,7 +270,7 @@ static bool candidate_tree_package_complete(
         status.complete;
 }
 
-enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_import(
+static enum vcs_zcode_candidate_tree_result candidate_tree_import_precheck(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate)
@@ -282,79 +282,139 @@ enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_import(
         return VCS_ZCODE_CANDIDATE_TREE_AUTHORITY;
     if (!candidate_tree_package_complete(store, package_root))
         return VCS_ZCODE_CANDIDATE_TREE_LIMIT;
+    return VCS_ZCODE_CANDIDATE_TREE_OK;
+}
+
+static enum vcs_zcode_candidate_tree_result candidate_tree_import_package(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    struct vcs_package_manifest *package)
+{
     uint8_t *wire = NULL; size_t wire_len = 0;
     if (vcs_package_store_get_manifest_wire(
             store, package_root, &wire, &wire_len) != VCS_PACKAGE_STORE_OK)
         return VCS_ZCODE_CANDIDATE_TREE_STORE;
-    struct vcs_package_manifest package;
-    bool parsed = vcs_package_manifest_parse(wire, wire_len, &package);
+    bool parsed = vcs_package_manifest_parse(wire, wire_len, package);
     free(wire);
     uint8_t root[32];
-    if (!parsed || !vcs_package_manifest_root(&package, root) ||
+    if (!parsed || !vcs_package_manifest_root(package, root) ||
         memcmp(root, package_root, 32) != 0) {
-        if (parsed) vcs_package_manifest_free(&package);
+        if (parsed) vcs_package_manifest_free(package);
         return VCS_ZCODE_CANDIDATE_TREE_AUTHORITY;
     }
-    struct vcs_manifest tree;
-    if (!vcs_tree_load(repo_root, candidate->candidate_source_root, &tree)) {
-        vcs_package_manifest_free(&package);
-        return VCS_ZCODE_CANDIDATE_TREE_CAS;
-    }
-    enum vcs_zcode_candidate_tree_result result =
-        candidate_tree_prefixed_count(&package) == tree.count
-            ? VCS_ZCODE_CANDIDATE_TREE_OK
-            : VCS_ZCODE_CANDIDATE_TREE_AUTHORITY;
+    return VCS_ZCODE_CANDIDATE_TREE_OK;
+}
+
+static enum vcs_zcode_candidate_tree_result candidate_tree_sum_tree_bytes(
+    const struct vcs_manifest *tree, uint64_t max_context_bytes)
+{
     uint64_t tree_bytes = 0;
+    enum vcs_zcode_candidate_tree_result result = VCS_ZCODE_CANDIDATE_TREE_OK;
     for (size_t i = 0; result == VCS_ZCODE_CANDIDATE_TREE_OK &&
-                         i < tree.count; i++) {
-        if (UINT64_MAX - tree_bytes < tree.entries[i].size ||
-            tree_bytes + tree.entries[i].size > task->max_context_bytes)
+                         i < tree->count; i++) {
+        if (UINT64_MAX - tree_bytes < tree->entries[i].size ||
+            tree_bytes + tree->entries[i].size > max_context_bytes)
             result = VCS_ZCODE_CANDIDATE_TREE_LIMIT;
         else
-            tree_bytes += tree.entries[i].size;
+            tree_bytes += tree->entries[i].size;
     }
+    return result;
+}
+
+static enum vcs_zcode_candidate_tree_result candidate_tree_blobs_stage(
+    enum vcs_zcode_candidate_tree_result result, size_t count,
+    struct candidate_tree_blob **blobs_out)
+{
     struct candidate_tree_blob *blobs = result == VCS_ZCODE_CANDIDATE_TREE_OK
-        ? zcl_calloc(tree.count, sizeof(*blobs),
+        ? zcl_calloc(count, sizeof(*blobs),
                      "zcode.candidate_tree.blobs") : NULL;
-    if (result == VCS_ZCODE_CANDIDATE_TREE_OK && tree.count > 0 && !blobs)
+    if (result == VCS_ZCODE_CANDIDATE_TREE_OK && count > 0 && !blobs)
         result = VCS_ZCODE_CANDIDATE_TREE_ALLOC;
+    *blobs_out = blobs;
+    return result;
+}
+
+static enum vcs_zcode_candidate_tree_result candidate_tree_verify_blobs(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const struct vcs_package_manifest *package,
+    const struct vcs_manifest *tree, struct candidate_tree_blob *blobs)
+{
+    enum vcs_zcode_candidate_tree_result result = VCS_ZCODE_CANDIDATE_TREE_OK;
     for (size_t i = 0; result == VCS_ZCODE_CANDIDATE_TREE_OK &&
-                         i < tree.count; i++) {
+                         i < tree->count; i++) {
         char path[1035];
-        if (!candidate_tree_path(tree.entries[i].path, path)) {
+        if (!candidate_tree_path(tree->entries[i].path, path)) {
             result = VCS_ZCODE_CANDIDATE_TREE_SHAPE; break;
         }
-        int index = candidate_tree_package_index(&package, path);
+        int index = candidate_tree_package_index(package, path);
         if (index < 0) {
             result = VCS_ZCODE_CANDIDATE_TREE_AUTHORITY; break;
         }
-        const struct vcs_package_file *file = &package.files[index];
-        if (file->mode != candidate_tree_mode(tree.entries[i].mode) ||
-            file->size != tree.entries[i].size) {
+        const struct vcs_package_file *file = &package->files[index];
+        if (file->mode != candidate_tree_mode(tree->entries[i].mode) ||
+            file->size != tree->entries[i].size) {
             result = VCS_ZCODE_CANDIDATE_TREE_AUTHORITY; break;
         }
         result = candidate_tree_read_file(
             store, package_root, file, (size_t)index,
             &blobs[i].bytes, &blobs[i].len);
-        blobs[i].entry = &tree.entries[i];
+        blobs[i].entry = &tree->entries[i];
         uint8_t hash[32];
         if (result == VCS_ZCODE_CANDIDATE_TREE_OK) {
             vcs_sha3_tag(VCS_TAG_BLOB, blobs[i].bytes, blobs[i].len, hash);
-            if (memcmp(hash, tree.entries[i].blob, 32) != 0)
+            if (memcmp(hash, tree->entries[i].blob, 32) != 0)
                 result = VCS_ZCODE_CANDIDATE_TREE_AUTHORITY;
         }
     }
-    if (result == VCS_ZCODE_CANDIDATE_TREE_OK &&
-        !vcs_object_store_init(repo_root))
-        result = VCS_ZCODE_CANDIDATE_TREE_CAS;
+    return result;
+}
+
+static enum vcs_zcode_candidate_tree_result candidate_tree_repair_blobs(
+    const char *repo_root, struct candidate_tree_blob *blobs, size_t count)
+{
+    if (!vcs_object_store_init(repo_root))
+        return VCS_ZCODE_CANDIDATE_TREE_CAS;
+    enum vcs_zcode_candidate_tree_result result = VCS_ZCODE_CANDIDATE_TREE_OK;
     for (size_t i = 0; result == VCS_ZCODE_CANDIDATE_TREE_OK &&
-                         i < tree.count; i++) {
+                         i < count; i++) {
         uint8_t hash[32];
         if (!vcs_object_put_repair(repo_root, blobs[i].bytes, blobs[i].len,
                                    VCS_TAG_BLOB, hash, NULL) ||
             memcmp(hash, blobs[i].entry->blob, 32) != 0)
             result = VCS_ZCODE_CANDIDATE_TREE_CAS;
     }
+    return result;
+}
+
+enum vcs_zcode_candidate_tree_result vcs_zcode_candidate_tree_import(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate)
+{
+    enum vcs_zcode_candidate_tree_result result =
+        candidate_tree_import_precheck(store, package_root, repo_root,
+                                       task, candidate);
+    if (result != VCS_ZCODE_CANDIDATE_TREE_OK) return result;
+    struct vcs_package_manifest package;
+    result = candidate_tree_import_package(store, package_root, &package);
+    if (result != VCS_ZCODE_CANDIDATE_TREE_OK) return result;
+    struct vcs_manifest tree;
+    if (!vcs_tree_load(repo_root, candidate->candidate_source_root, &tree)) {
+        vcs_package_manifest_free(&package);
+        return VCS_ZCODE_CANDIDATE_TREE_CAS;
+    }
+    result = candidate_tree_prefixed_count(&package) == tree.count
+            ? VCS_ZCODE_CANDIDATE_TREE_OK
+            : VCS_ZCODE_CANDIDATE_TREE_AUTHORITY;
+    if (result == VCS_ZCODE_CANDIDATE_TREE_OK)
+        result = candidate_tree_sum_tree_bytes(&tree,
+                                               task->max_context_bytes);
+    struct candidate_tree_blob *blobs = NULL;
+    result = candidate_tree_blobs_stage(result, tree.count, &blobs);
+    if (result == VCS_ZCODE_CANDIDATE_TREE_OK)
+        result = candidate_tree_verify_blobs(store, package_root, &package,
+                                             &tree, blobs);
+    if (result == VCS_ZCODE_CANDIDATE_TREE_OK)
+        result = candidate_tree_repair_blobs(repo_root, blobs, tree.count);
     candidate_tree_blobs_free(blobs, tree.count);
     vcs_manifest_free(&tree); vcs_package_manifest_free(&package);
     return result;
