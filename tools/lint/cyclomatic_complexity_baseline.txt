@@ -1936,7 +1936,6 @@ tests/harness/src/test_addrman_integrity.c:test_addrman_integrity:39
 tests/harness/src/test_addrman_rebalance.c:test_addrman_rebalance:80
 tests/harness/src/test_agent_spend_policy.c:asp_rpc_hook:18
 tests/harness/src/test_always_sync_lifecycle.c:test_always_sync_lifecycle_platform_arm:47
-tests/harness/src/test_always_sync_selfheal.c:ash_setup_hole_fixture:19
 tests/harness/src/test_amount_subsidy_edge.c:test_amount_subsidy_edge:18
 tests/harness/src/test_anchor_finality.c:test_anchor_finality:131
 tests/harness/src/test_anchor_peers.c:test_anchor_peers:45

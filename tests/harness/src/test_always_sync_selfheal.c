@@ -441,22 +441,20 @@ static struct block_index *ash_insert_index(struct main_state *ms,
     return bi;
 }
 
-/* Rowless script/proof/utxo hole at A+2 with cursors ahead of it. */
-static bool ash_setup_hole_fixture(struct ash_fixture *fx, const char *tag)
+/* The 3-block main_state chain A+1..A+3 the hole fixture hangs rows on. */
+static bool ash_insert_index_chain(struct ash_fixture *fx)
 {
-    memset(fx, 0, sizeof(*fx));
-    test_make_tmpdir(fx->dir, sizeof(fx->dir), "always_sync_selfheal", tag);
-    if (!progress_store_open(fx->dir)) return false;
-    sqlite3 *db = progress_store_db();
-    if (!ash_seed_schema(db)) return false;
-    if (!ash_seed_all_cursors(db, A + 4)) return false;
-
     main_state_init(&fx->ms);
     fx->idx[1] = ash_insert_index(&fx->ms, &fx->hashes[1], A + 1, NULL);
     fx->idx[2] = ash_insert_index(&fx->ms, &fx->hashes[2], A + 2, fx->idx[1]);
     fx->idx[3] = ash_insert_index(&fx->ms, &fx->hashes[3], A + 3, fx->idx[2]);
     if (!fx->idx[1] || !fx->idx[2] || !fx->idx[3]) return false;
+    return true;
+}
 
+/* Full ok-row coverage for A+1..A+3 before the hole is punched. */
+static bool ash_seed_hole_logs(sqlite3 *db, struct ash_fixture *fx)
+{
     if (!ash_put_header_admit(db, A + 1, &fx->hashes[1], NULL) ||
         !ash_put_header_admit(db, A + 2, &fx->hashes[2], &fx->hashes[1]) ||
         !ash_put_header_admit(db, A + 3, &fx->hashes[3], &fx->hashes[2]))
@@ -469,13 +467,33 @@ static bool ash_setup_hole_fixture(struct ash_fixture *fx, const char *tag)
 
     if (!ash_put_tip_log(db, A + 1, 1, &fx->hashes[1])) return false;
     if (!ash_seed_coins_applied(db, A + 2)) return false;
+    return true;
+}
 
-    /* Punch the hole at A+2: script/proof/utxo rows gone, cursors above it. */
+static bool ash_punch_hole_at_a2(sqlite3 *db)
+{
     return ash_delete_height(db, "script_validate_log", A + 2) &&
            ash_delete_height(db, "proof_validate_log", A + 2) &&
            ash_delete_height(db, "utxo_apply_log", A + 2) &&
            ash_delete_height(db, "utxo_apply_log", A + 3) &&
            ash_seed_cursor(db, "utxo_apply", A + 2);
+}
+
+/* Rowless script/proof/utxo hole at A+2 with cursors ahead of it. */
+static bool ash_setup_hole_fixture(struct ash_fixture *fx, const char *tag)
+{
+    memset(fx, 0, sizeof(*fx));
+    test_make_tmpdir(fx->dir, sizeof(fx->dir), "always_sync_selfheal", tag);
+    if (!progress_store_open(fx->dir)) return false;
+    sqlite3 *db = progress_store_db();
+    if (!ash_seed_schema(db)) return false;
+    if (!ash_seed_all_cursors(db, A + 4)) return false;
+
+    if (!ash_insert_index_chain(fx)) return false;
+    if (!ash_seed_hole_logs(db, fx)) return false;
+
+    /* Punch the hole at A+2: script/proof/utxo rows gone, cursors above it. */
+    return ash_punch_hole_at_a2(db);
 }
 
 static void ash_teardown_fixture(struct ash_fixture *fx)
