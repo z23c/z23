@@ -1,9 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: The tokens_per_landed_commit producer. A landed lane is a landed
- *          row of the land outcomes file in the trailing 7 days whose note
- *          starts `<lane>:`. Its worker agents come from the agent meta
- *          index (native_fleet_objectives_lanes.c: agent id -> lane for the
- *          write/cx/review/review1/review2/fix job labels). Its cost is the
+ *          row of the land outcomes file in the trailing 7 days. The row
+ *          names its lane by the basename of its `worktree` (the absolute
+ *          lane path) when that is present and fits; otherwise by the text
+ *          before the first `:` of its note, as before. Its worker agents
+ *          come from the agent meta index (native_fleet_objectives_lanes.c:
+ *          agent id -> lane for the write/cx/review/review1/review2/fix/
+ *          design/check job labels). Its cost is the
  *          sum, over those agents' `result` rows of the experiment ledger
  *          (rows.tsv, 22 tab-separated columns), of tokens_in (uncached
  *          input including cache creation) plus tokens_out. Cache reads
@@ -188,6 +191,26 @@ static bool tpc_note_lane(const char *note, char *out, size_t cap)
     return true;
 }
 
+/* The lane a land row names: the basename of its "worktree" when that is
+ * present and fits, else the note's lane prefix. json_get_str gives "" for a
+ * missing key, which is absent here too. */
+static bool tpc_row_lane(const struct json_value *row, char *out, size_t cap)
+{
+    const char *wt = json_get_str(json_get(row, "worktree"));
+    size_t n = strlen(wt), start;
+    while (n > 0 && wt[n - 1] == '/')
+        n--;
+    start = n;
+    while (start > 0 && wt[start - 1] != '/')
+        start--;
+    if (n > start && n - start < cap) {
+        memcpy(out, wt + start, n - start);
+        out[n - start] = '\0';
+        return true;
+    }
+    return tpc_note_lane(json_get_str(json_get(row, "note")), out, cap);
+}
+
 static void tpc_landed_row(const struct json_value *row, void *user)
 {
     struct tpc_landed *l = user;
@@ -200,9 +223,7 @@ static void tpc_landed_row(const struct json_value *row, void *user)
                                       &when) ||
         when < l->start || when > l->end)
         return;
-    if (!tpc_note_lane(json_get_str(json_get(row, "note")), lane,
-                       sizeof(lane)) ||
-        tpc_find_lane(l, lane))
+    if (!tpc_row_lane(row, lane, sizeof(lane)) || tpc_find_lane(l, lane))
         return;
     if (l->n >= TPC_LANES_MAX)
         l->truncated = true;

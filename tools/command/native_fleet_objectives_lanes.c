@@ -3,9 +3,10 @@
  *          worker agent leaves agent-<id>.meta.json beside its transcript
  *          under the Claude projects root; its "description" is the job
  *          label, `write:<lane>`, `cx:<lane>`, `review:<lane>`,
- *          `review1:<lane>`, `review2:<lane>` or `fix:<lane>`. This leaf maps
- *          agent id to lane for those labels only; any other label is
- *          research and is not indexed.
+ *          `review1:<lane>`, `review2:<lane>`, `fix:<lane>`, `design:<lane>`
+ *          or `check:<lane>` (a lane's design and citation-check agents count
+ *          toward its cost). This leaf maps agent id to lane for those labels
+ *          only; any other label is research and is not indexed.
  *
  * The scan is bounded: a directory depth cap, a cap on meta files read, and
  * a 64 KiB size limit per file. It only ever opens files for reading.
@@ -26,8 +27,9 @@
 #define LANES_META_BYTES 65536u
 #define LANES_PATH_MAX 1024u
 
-static const char *const lanes_prefixes[] = {"write:", "cx:",      "review:",
-                                             "review1:", "review2:", "fix:"};
+static const char *const lanes_prefixes[] = {
+    "write:",   "cx:",     "review:", "review1:", "review2:",
+    "fix:",     "design:", "check:"};
 
 /* The lane named by a job label, or NULL for a research label. */
 static const char *lanes_of_label(const char *label, char *kind)
