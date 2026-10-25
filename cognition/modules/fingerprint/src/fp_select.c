@@ -106,6 +106,72 @@ static void fp_tally_cause(struct fp_index *ix, enum fp_verdict v,
     ix->ncauses++;
 }
 
+/* The measurement mode reproduces the rule this tool shipped with:
+ * external linkage or nothing. Kept exact, including for a `static`
+ * defined in a header, so that a before/after comparison is a
+ * comparison and not an approximation. */
+static bool fp_exclude_static_linkage(struct fp_index *ix, size_t *tally,
+                                      const struct fp_sym *s,
+                                      const struct fp_file *f)
+{
+    if (!ix->allow_source_route && s->is_static) {
+        tally[FP_V_STATIC_LINKAGE]++;
+        fp_tally_cause(ix, FP_V_STATIC_LINKAGE, f->path);
+        return true;
+    }
+    return false;
+}
+
+/* Reachability. A definition that already lives in a header is
+ * reached by including that header — a `static inline` there is
+ * visible to every unit that includes it, so file-local linkage is
+ * not an obstacle at all. Otherwise prefer a header prototype, and
+ * fall back to including the defining unit. */
+static bool fp_route_refused(struct fp_index *ix, size_t *tally,
+                             const struct fp_sym *s,
+                             const struct fp_file *f, int *proto)
+{
+    *proto = f->is_header ? -1 : fp_header_proto(ix, s->name);
+    if (*proto < 0 && !f->is_header &&
+        (!ix->allow_source_route || f->defines_main || f->dup_export)) {
+        /* The only remaining route would be to include this unit, and it
+         * cannot be included: either it defines main(), or it exports a
+         * symbol another unit also exports. Both fail the WHOLE link
+         * rather than one probe, so they are refused here. Split by why
+         * the header route was unavailable, so neither bucket is a
+         * catch-all. */
+        enum fp_verdict why = s->is_static ? FP_V_STATIC_LINKAGE
+                                           : FP_V_NO_PROTOTYPE;
+        tally[why]++;
+        fp_tally_cause(ix, why, f->path);
+        return true;
+    }
+    return false;
+}
+
+/* Fill in what the generated probe includes to reach this definition, and
+ * whether that route is the defining unit itself. */
+static void fp_set_candidate_include(const struct fp_index *ix,
+                                     struct fp_candidate *cand,
+                                     const struct fp_file *f, int proto)
+{
+    if (proto >= 0) {
+        snprintf(cand->include, sizeof cand->include, "%s",
+                 ix->files[ix->syms[proto].file].include);
+        cand->via_source = false;
+    } else if (f->is_header) {
+        snprintf(cand->include, sizeof cand->include, "%s", f->include);
+        cand->via_source = false;
+    } else {
+        /* The repo-relative path of the defining .c. The probe compile
+         * carries -I. so `#include "platform/modules/util/src/x.c"` resolves, and the
+         * grouping key being the path is what puts every candidate of
+         * one unit into exactly one translation unit. */
+        snprintf(cand->include, sizeof cand->include, "%s", f->path);
+        cand->via_source = true;
+    }
+}
+
 static int fp_cmp_cause(const void *a, const void *b)
 {
     const struct fp_cause *x = (const struct fp_cause *)a;
@@ -175,55 +241,16 @@ long fp_index_select(struct fp_index *ix, struct fp_candidate *out, size_t cap,
             continue;
         }
 
-        /* The measurement mode reproduces the rule this tool shipped with:
-         * external linkage or nothing. Kept exact, including for a `static`
-         * defined in a header, so that a before/after comparison is a
-         * comparison and not an approximation. */
-        if (!ix->allow_source_route && s->is_static) {
-            tally[FP_V_STATIC_LINKAGE]++;
-            fp_tally_cause(ix, FP_V_STATIC_LINKAGE, f->path);
+        if (fp_exclude_static_linkage(ix, tally, s, f))
             continue;
-        }
 
-        /* Reachability. A definition that already lives in a header is
-         * reached by including that header — a `static inline` there is
-         * visible to every unit that includes it, so file-local linkage is
-         * not an obstacle at all. Otherwise prefer a header prototype, and
-         * fall back to including the defining unit. */
-        proto = f->is_header ? -1 : fp_header_proto(ix, s->name);
-        if (proto < 0 && !f->is_header &&
-            (!ix->allow_source_route || f->defines_main || f->dup_export)) {
-            /* The only remaining route would be to include this unit, and it
-             * cannot be included: either it defines main(), or it exports a
-             * symbol another unit also exports. Both fail the WHOLE link
-             * rather than one probe, so they are refused here. Split by why
-             * the header route was unavailable, so neither bucket is a
-             * catch-all. */
-            enum fp_verdict why = s->is_static ? FP_V_STATIC_LINKAGE
-                                               : FP_V_NO_PROTOTYPE;
-            tally[why]++;
-            fp_tally_cause(ix, why, f->path);
+        if (fp_route_refused(ix, tally, s, f, &proto))
             continue;
-        }
 
         v = fp_signature_of(ix, (int)i, &cand);
         if (v != FP_V_CANDIDATE) { tally[v]++; continue; }
 
-        if (proto >= 0) {
-            snprintf(cand.include, sizeof cand.include, "%s",
-                     ix->files[ix->syms[proto].file].include);
-            cand.via_source = false;
-        } else if (f->is_header) {
-            snprintf(cand.include, sizeof cand.include, "%s", f->include);
-            cand.via_source = false;
-        } else {
-            /* The repo-relative path of the defining .c. The probe compile
-             * carries -I. so `#include "platform/modules/util/src/x.c"` resolves, and the
-             * grouping key being the path is what puts every candidate of
-             * one unit into exactly one translation unit. */
-            snprintf(cand.include, sizeof cand.include, "%s", f->path);
-            cand.via_source = true;
-        }
+        fp_set_candidate_include(ix, &cand, f, proto);
         tally[FP_V_CANDIDATE]++;
         if (n < cap)
             out[n++] = cand;
