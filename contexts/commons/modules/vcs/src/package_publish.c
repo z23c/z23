@@ -29,7 +29,9 @@
 
 #define PUBLISH_LOG "vcs.publish"
 
-const char *vcs_package_publish_rule_string(
+/* Rule strings for the ok, release-envelope and manifest rules. Returns
+ * NULL for rules of the other families so the caller keeps looking. */
+static const char *publish_envelope_manifest_rule_string(
     enum vcs_package_publish_rule rule)
 {
     switch (rule) {
@@ -48,12 +50,34 @@ const char *vcs_package_publish_rule_string(
         return "license-text-missing";
     case VCS_PACKAGE_PUBLISH_RULE_HIDDEN_EXECUTABLE:
         return "hidden-executable-payload";
+    default:
+        return NULL;
+    }
+}
+
+/* Rule strings for the chunk-source checks. Returns NULL for rules of the
+ * other families so the caller keeps looking. */
+static const char *publish_chunk_rule_string(
+    enum vcs_package_publish_rule rule)
+{
+    switch (rule) {
     case VCS_PACKAGE_PUBLISH_RULE_CHUNK_MISSING:
         return "chunk-source-missing";
     case VCS_PACKAGE_PUBLISH_RULE_CHUNK_SIZE:
         return "chunk-source-size-mismatch";
     case VCS_PACKAGE_PUBLISH_RULE_CHUNK_HASH:
         return "chunk-hash-mismatch";
+    default:
+        return NULL;
+    }
+}
+
+/* Rule strings for the acceptance and recipe rules. Returns NULL for rules
+ * of the other families so the caller keeps looking. */
+static const char *publish_accept_recipe_rule_string(
+    enum vcs_package_publish_rule rule)
+{
+    switch (rule) {
     case VCS_PACKAGE_PUBLISH_RULE_ACCEPT:
         return "release-acceptance-failed";
     case VCS_PACKAGE_PUBLISH_RULE_RECIPE_MISSING:
@@ -66,11 +90,27 @@ const char *vcs_package_publish_rule_string(
         return "recipe-root-mismatch";
     case VCS_PACKAGE_PUBLISH_RULE_RECIPE_PATH:
         return "recipe-path-not-in-manifest";
-    case VCS_PACKAGE_PUBLISH_RULE_IO:
-        return "io-failure";
-    case VCS_PACKAGE_PUBLISH_RULE_ALLOC:
-        return "allocation-failure";
+    default:
+        return NULL;
     }
+}
+
+const char *vcs_package_publish_rule_string(
+    enum vcs_package_publish_rule rule)
+{
+    const char *s = publish_envelope_manifest_rule_string(rule);
+    if (s)
+        return s;
+    s = publish_chunk_rule_string(rule);
+    if (s)
+        return s;
+    s = publish_accept_recipe_rule_string(rule);
+    if (s)
+        return s;
+    if (rule == VCS_PACKAGE_PUBLISH_RULE_IO)
+        return "io-failure";
+    if (rule == VCS_PACKAGE_PUBLISH_RULE_ALLOC)
+        return "allocation-failure";
     return "unknown-rule";
 }
 

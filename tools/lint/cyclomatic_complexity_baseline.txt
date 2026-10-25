@@ -121,7 +121,6 @@ contexts/commons/modules/vcs/src/package_mapping.c:blob_map_parse:19
 contexts/commons/modules/vcs/src/package_mapping.c:mapping_set_serialize:20
 contexts/commons/modules/vcs/src/package_mapping.c:vcs_package_mapping_set_build:22
 contexts/commons/modules/vcs/src/package_prepare_schema.c:prepare_meta_closed:39
-contexts/commons/modules/vcs/src/package_publish.c:vcs_package_publish_rule_string:20
 contexts/commons/modules/vcs/src/package_rank.c:vcs_rank_contributor:17
 contexts/commons/modules/vcs/src/package_rank.c:vcs_rank_projection_from_facts:21
 contexts/commons/modules/vcs/src/package_recipe.c:recipe_define_valid:34
