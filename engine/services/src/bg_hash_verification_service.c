@@ -148,6 +148,92 @@ const char *bg_hash_verify_state_name(enum bg_hash_verify_state state)
 
 /* ── Main verification thread ─────────────────────────────────── */
 
+static int bg_hash_verify_start_height(
+    const struct bg_hash_verification_service *svc)
+{
+    int start_height = load_progress(&svc->progress_store);
+    if (start_height < 1) start_height = 1; /* skip genesis (no block file) */
+    return start_height;
+}
+
+static bool bg_hash_verify_snapshot_block_data(struct main_state *ms, int h,
+                                               struct disk_block_pos *snap_pos,
+                                               struct uint256 *snap_hash)
+{
+    /* Take cs_main briefly to snapshot block_index fields.
+     * Without this lock, active_chain_move_window_tip() can realloc the
+     * chain array or swap entries during reorgs, causing SIGSEGV
+     * when we read stale/freed pointers. */
+    bool have_data = false;
+    disk_block_pos_init(snap_pos);
+
+    zcl_mutex_lock(&ms->cs_main);
+    {
+        const struct block_index *pindex =
+            active_chain_at(&ms->chain_active, h);
+        if (pindex && pindex->phashBlock &&
+            (pindex->nStatus & BLOCK_HAVE_DATA)) {
+            snap_pos->nFile = pindex->nFile;
+            snap_pos->nPos = pindex->nDataPos;
+            *snap_hash = *pindex->phashBlock;
+            have_data = true;
+        }
+    }
+    zcl_mutex_unlock(&ms->cs_main);
+    return have_data;
+}
+
+static bool bg_hash_verify_read_block_hash(
+    struct bg_hash_verification_service *svc,
+    struct disk_block_pos *snap_pos, struct uint256 *computed)
+{
+    /* Read block from disk (pread — thread-safe, no FILE* cache).
+     * All disk I/O happens OUTSIDE cs_main to avoid blocking P2P. */
+    struct block blk;
+    block_init(&blk);
+    if (!read_block_from_disk_pread(&blk, snap_pos, svc->datadir)) {
+        block_free(&blk);
+        return false;
+    }
+
+    /* Recompute hash from the deserialized header */
+    block_header_get_hash(&blk.header, computed);
+    block_free(&blk);
+    return true;
+}
+
+static double bg_hash_verify_blocks_per_sec(
+    const struct timespec *ts_start, int verified)
+{
+    struct timespec now;
+    platform_time_monotonic_timespec(&now);
+    double elapsed = (now.tv_sec - ts_start->tv_sec) +
+        (now.tv_nsec - ts_start->tv_nsec) / 1e9;
+    return elapsed > 0 ? verified / elapsed : 0;
+}
+
+static void bg_hash_verify_update_chain_height_periodically(
+    struct bg_hash_verification_service *svc, struct main_state *ms, int h,
+    int *chain_height)
+{
+    /* Update chain height periodically (chain may grow) */
+    if (h % SAVE_INTERVAL == 0) {
+        zcl_mutex_lock(&ms->cs_main);
+        int new_tip = active_chain_height(&ms->chain_active);
+        zcl_mutex_unlock(&ms->cs_main);
+        if (new_tip > *chain_height) *chain_height = new_tip;
+        atomic_store(&svc->progress.chain_height, *chain_height);
+    }
+}
+
+static void bg_hash_verify_final_save(
+    struct bg_hash_verification_service *svc, int chain_height)
+{
+    /* Final save */
+    if (!atomic_load(&svc->stop_requested))
+        save_progress(&svc->progress_store, chain_height);
+}
+
 static void *bg_hash_verify_thread(void *arg)
 {
     struct bg_hash_verification_service *svc = arg;
@@ -160,8 +246,7 @@ static void *bg_hash_verify_thread(void *arg)
 
     bg_hash_verify_supervisor_heartbeat(svc);
 
-    int start_height = load_progress(&svc->progress_store);
-    if (start_height < 1) start_height = 1; /* skip genesis (no block file) */
+    int start_height = bg_hash_verify_start_height(svc);
 
     zcl_mutex_lock(&ms->cs_main);
     int chain_height = active_chain_height(&ms->chain_active);
@@ -189,44 +274,16 @@ static void *bg_hash_verify_thread(void *arg)
     for (int h = start_height; h <= chain_height; h++) {
         if (atomic_load(&svc->stop_requested)) break;
 
-        /* Take cs_main briefly to snapshot block_index fields.
-         * Without this lock, active_chain_move_window_tip() can realloc the
-         * chain array or swap entries during reorgs, causing SIGSEGV
-         * when we read stale/freed pointers. */
         struct disk_block_pos snap_pos;
         struct uint256 snap_hash;
-        bool have_data = false;
-        disk_block_pos_init(&snap_pos);
-
-        zcl_mutex_lock(&ms->cs_main);
-        {
-            const struct block_index *pindex =
-                active_chain_at(&ms->chain_active, h);
-            if (pindex && pindex->phashBlock &&
-                (pindex->nStatus & BLOCK_HAVE_DATA)) {
-                snap_pos.nFile = pindex->nFile;
-                snap_pos.nPos = pindex->nDataPos;
-                snap_hash = *pindex->phashBlock;
-                have_data = true;
-            }
-        }
-        zcl_mutex_unlock(&ms->cs_main);
+        bool have_data =
+            bg_hash_verify_snapshot_block_data(ms, h, &snap_pos, &snap_hash);
 
         if (!have_data) continue;
 
-        /* Read block from disk (pread — thread-safe, no FILE* cache).
-         * All disk I/O happens OUTSIDE cs_main to avoid blocking P2P. */
-        struct block blk;
-        block_init(&blk);
-        if (!read_block_from_disk_pread(&blk, &snap_pos, svc->datadir)) {
-            block_free(&blk);
-            continue; /* block file may be missing — not a hash error */
-        }
-
-        /* Recompute hash from the deserialized header */
         struct uint256 computed;
-        block_header_get_hash(&blk.header, &computed);
-        block_free(&blk);
+        if (!bg_hash_verify_read_block_hash(svc, &snap_pos, &computed))
+            continue; /* block file may be missing — not a hash error */
 
         /* Compare against stored hash (snapshot — no lock needed) */
         if (uint256_cmp(&computed, &snap_hash) != 0) {
@@ -246,28 +303,15 @@ static void *bg_hash_verify_thread(void *arg)
         if (h % SAVE_INTERVAL == 0)
             save_progress(&svc->progress_store, h);
         if (h % LOG_INTERVAL == 0) {
-            struct timespec now;
-            platform_time_monotonic_timespec(&now);
-            double elapsed = (now.tv_sec - ts_start.tv_sec) +
-                (now.tv_nsec - ts_start.tv_nsec) / 1e9;
-            double bps = elapsed > 0 ? verified / elapsed : 0;
+            double bps = bg_hash_verify_blocks_per_sec(&ts_start, verified);
             printf("[bg-hash-verify] h=%d/%d (%.0f blocks/s, %d mismatches)\n",
                    h, chain_height, bps, mismatches);
         }
-
-        /* Update chain height periodically (chain may grow) */
-        if (h % SAVE_INTERVAL == 0) {
-            zcl_mutex_lock(&ms->cs_main);
-            int new_tip = active_chain_height(&ms->chain_active);
-            zcl_mutex_unlock(&ms->cs_main);
-            if (new_tip > chain_height) chain_height = new_tip;
-            atomic_store(&svc->progress.chain_height, chain_height);
-        }
+        bg_hash_verify_update_chain_height_periodically(svc, ms, h,
+                                                        &chain_height);
     }
 
-    /* Final save */
-    if (!atomic_load(&svc->stop_requested))
-        save_progress(&svc->progress_store, chain_height);
+    bg_hash_verify_final_save(svc, chain_height);
 
     struct timespec ts_end;
     platform_time_monotonic_timespec(&ts_end);
