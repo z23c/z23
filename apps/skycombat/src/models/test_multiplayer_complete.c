@@ -40,6 +40,180 @@ void print_match_status(match_state_t* match, aircraft_manager_t* aircraft_mgr, 
     }
 }
 
+static int game_systems_missing(aircraft_manager_t* aircraft_mgr,
+                                powerup_manager_t* powerup_mgr,
+                                match_state_t* match) {
+    if (!aircraft_mgr || !powerup_mgr || !match) {
+        printf("Failed to create game systems\n");
+        return 1;
+    }
+    return 0;
+}
+
+static void spawn_initial_powerups(powerup_manager_t* powerup_mgr) {
+    // Spawn initial power-ups
+    printf("\nSpawning initial power-ups...\n");
+    for (int i = 0; i < 6; i++) {
+        powerup_manager_spawn_random(powerup_mgr);
+    }
+}
+
+static void apply_collected_powerup(managed_aircraft_t* ma,
+                                    powerup_type_t collected_type,
+                                    float total_time) {
+    // Apply power-up effect
+    float duration = powerup_get_default_duration(collected_type);
+    float value = powerup_get_default_value(collected_type);
+
+    switch (collected_type) {
+        case POWERUP_HEALTH:
+            ma->health = fminf(ma->health + value, ma->max_health);
+            printf("[%.1fs] %s collected Health (+%.0f HP)\n", total_time, ma->name, value);
+            break;
+
+        case POWERUP_REPAIR_KIT:
+            ma->health = ma->max_health;
+            printf("[%.1fs] %s collected Repair Kit (Full health)\n", total_time, ma->name);
+            break;
+
+        default:
+            powerup_effects_apply(&ma->powerup_effects, collected_type, duration, value);
+            printf("[%.1fs] %s collected %s\n", total_time, ma->name, powerup_get_name(collected_type));
+            break;
+    }
+
+    // Apply weapon upgrade if it's a weapon power-up
+    if (ma->weapons) {
+        switch (collected_type) {
+            case POWERUP_RAPID_FIRE:
+                weapons_apply_upgrade(ma->weapons, WEAPON_UPGRADE_RAPID_FIRE, duration);
+                break;
+            case POWERUP_DOUBLE_DAMAGE:
+                weapons_apply_upgrade(ma->weapons, WEAPON_UPGRADE_EXPLOSIVE, duration);
+                break;
+            case POWERUP_LASER:
+                weapons_apply_upgrade(ma->weapons, WEAPON_UPGRADE_HOMING, duration);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+static void collect_aircraft_powerups(aircraft_manager_t* aircraft_mgr,
+                                      powerup_manager_t* powerup_mgr,
+                                      float total_time,
+                                      int* total_powerup_collections) {
+    for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* ma = &aircraft_mgr->aircraft[i];
+        if (ma->health <= 0 || !ma->aircraft) continue;
+
+        powerup_type_t collected_type;
+        if (powerup_manager_check_collection(powerup_mgr, ma->aircraft->position, 10.0f, &collected_type)) {
+            (*total_powerup_collections)++;
+
+            apply_collected_powerup(ma, collected_type, total_time);
+        }
+    }
+}
+
+static int find_killer_id(aircraft_manager_t* aircraft_mgr, int i) {
+    // Find killer (simplified - would need proper tracking)
+    int killer_id = -1;
+    for (int j = 0; j < aircraft_mgr->aircraft_count; j++) {
+        if (i != j && aircraft_mgr->aircraft[j].target_id == i) {
+            killer_id = j;
+            break;
+        }
+    }
+    return killer_id;
+}
+
+static void report_player_kill(match_state_t* match,
+                               aircraft_manager_t* aircraft_mgr,
+                               int killer_id, int i, float total_time) {
+    managed_aircraft_t* killer = &aircraft_mgr->aircraft[killer_id];
+    managed_aircraft_t* victim = &aircraft_mgr->aircraft[i];
+
+    // Debug: Print before calling match_player_killed
+    printf("[%.1fs] KILL: %s (team %d) killed %s (team %d)\n",
+           total_time, killer->name, killer->team_id, victim->name, victim->team_id);
+
+    match_player_killed(match, killer_id, i, killer->team_id, victim->team_id);
+
+    [[maybe_unused]] const char* killer_team = killer->team_id == 0 ? "Red" : "Blue";
+    [[maybe_unused]] const char* victim_team = victim->team_id == 0 ? "Red" : "Blue";
+    printf("         Score after kill: Red %d - Blue %d\n",
+           match->team_scores[0], match->team_scores[1]);
+}
+
+static void check_kills_and_update_match(aircraft_manager_t* aircraft_mgr,
+                                         match_state_t* match,
+                                         float* last_kill_health,
+                                         float total_time) {
+    for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* victim = &aircraft_mgr->aircraft[i];
+
+        if (last_kill_health[i] > 0 && victim->health <= 0) {
+            int killer_id = find_killer_id(aircraft_mgr, i);
+
+            if (killer_id >= 0) {
+                report_player_kill(match, aircraft_mgr, killer_id, i, total_time);
+            }
+        }
+        last_kill_health[i] = victim->health;
+    }
+}
+
+static void announce_match_winner(match_state_t* match) {
+    // Determine winner
+    int winner_id;
+    bool is_team;
+    if (match_check_win_condition(match, &winner_id, &is_team)) {
+        if (is_team) {
+            const char* winner = winner_id == 0 ? "Red Squadron" : "Blue Squadron";
+            printf("\nWINNER: %s!\n", winner);
+        }
+    }
+}
+
+static void print_final_statistics(aircraft_manager_t* aircraft_mgr,
+                                   match_state_t* match,
+                                   int total_powerup_collections,
+                                   float total_time) {
+    // Final statistics
+    printf("\nFinal Score: Red %d - Blue %d\n", match->team_scores[0], match->team_scores[1]);
+
+    printf("\nIndividual Statistics:\n");
+    int red_kills = 0, red_deaths = 0;
+    int blue_kills = 0, blue_deaths = 0;
+
+    for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* ma = &aircraft_mgr->aircraft[i];
+        const char* team = ma->team_id == 0 ? "Red" : "Blue";
+        printf("  %s (%s): %d kills, %d deaths, K/D: %.2f\n", 
+               ma->name, team, ma->kills, ma->deaths,
+               ma->deaths > 0 ? (float)ma->kills / ma->deaths : (float)ma->kills);
+
+        if (ma->team_id == 0) {
+            red_kills += ma->kills;
+            red_deaths += ma->deaths;
+        } else {
+            blue_kills += ma->kills;
+            blue_deaths += ma->deaths;
+        }
+    }
+
+    printf("\nTeam Statistics:\n");
+    printf("  Red Squadron: %d kills, %d deaths\n", red_kills, red_deaths);
+    printf("  Blue Squadron: %d kills, %d deaths\n", blue_kills, blue_deaths);
+
+    printf("\nPower-up Statistics:\n");
+    printf("  Total collections: %d\n", total_powerup_collections);
+    printf("  Collection rate: %.2f per minute\n", 
+           total_powerup_collections / (total_time / 60.0f));
+}
+
 int main(void) {
     printf("=== SKY COMBAT COMPLETE MULTIPLAYER TEST ===\n");
     printf("Team Deathmatch: First to 10 kills wins\n\n");
@@ -52,8 +226,7 @@ int main(void) {
     powerup_manager_t* powerup_mgr = powerup_manager_create();
     match_state_t* match = match_state_create(MATCH_TYPE_TEAM_DEATHMATCH);
     
-    if (!aircraft_mgr || !powerup_mgr || !match) {
-        printf("Failed to create game systems\n");
+    if (game_systems_missing(aircraft_mgr, powerup_mgr, match)) {
         return 1;
     }
     
@@ -72,11 +245,7 @@ int main(void) {
     aircraft_manager_add_with_team(aircraft_mgr, "Blue Leader", BLUE, true, false, 1);
     aircraft_manager_add_with_team(aircraft_mgr, "Blue Two", BLUE, true, false, 1);
     
-    // Spawn initial power-ups
-    printf("\nSpawning initial power-ups...\n");
-    for (int i = 0; i < 6; i++) {
-        powerup_manager_spawn_random(powerup_mgr);
-    }
+    spawn_initial_powerups(powerup_mgr);
     
     printf("\n=== BATTLE BEGINS ===\n");
     
@@ -93,85 +262,11 @@ int main(void) {
         match_state_update(match, DT);
         
         // Check for power-up collections
-        for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
-            managed_aircraft_t* ma = &aircraft_mgr->aircraft[i];
-            if (ma->health <= 0 || !ma->aircraft) continue;
-            
-            powerup_type_t collected_type;
-            if (powerup_manager_check_collection(powerup_mgr, ma->aircraft->position, 10.0f, &collected_type)) {
-                total_powerup_collections++;
-                
-                // Apply power-up effect
-                float duration = powerup_get_default_duration(collected_type);
-                float value = powerup_get_default_value(collected_type);
-                
-                switch (collected_type) {
-                    case POWERUP_HEALTH:
-                        ma->health = fminf(ma->health + value, ma->max_health);
-                        printf("[%.1fs] %s collected Health (+%.0f HP)\n", total_time, ma->name, value);
-                        break;
-                        
-                    case POWERUP_REPAIR_KIT:
-                        ma->health = ma->max_health;
-                        printf("[%.1fs] %s collected Repair Kit (Full health)\n", total_time, ma->name);
-                        break;
-                        
-                    default:
-                        powerup_effects_apply(&ma->powerup_effects, collected_type, duration, value);
-                        printf("[%.1fs] %s collected %s\n", total_time, ma->name, powerup_get_name(collected_type));
-                        break;
-                }
-                
-                // Apply weapon upgrade if it's a weapon power-up
-                if (ma->weapons) {
-                    switch (collected_type) {
-                        case POWERUP_RAPID_FIRE:
-                            weapons_apply_upgrade(ma->weapons, WEAPON_UPGRADE_RAPID_FIRE, duration);
-                            break;
-                        case POWERUP_DOUBLE_DAMAGE:
-                            weapons_apply_upgrade(ma->weapons, WEAPON_UPGRADE_EXPLOSIVE, duration);
-                            break;
-                        case POWERUP_LASER:
-                            weapons_apply_upgrade(ma->weapons, WEAPON_UPGRADE_HOMING, duration);
-                            break;
-                        default:
-                            break;
-                    }
-                }
-            }
-        }
+        collect_aircraft_powerups(aircraft_mgr, powerup_mgr, total_time,
+                                  &total_powerup_collections);
         
         // Check for kills and update match
-        for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
-            managed_aircraft_t* victim = &aircraft_mgr->aircraft[i];
-            
-            if (last_kill_health[i] > 0 && victim->health <= 0) {
-                // Find killer (simplified - would need proper tracking)
-                int killer_id = -1;
-                for (int j = 0; j < aircraft_mgr->aircraft_count; j++) {
-                    if (i != j && aircraft_mgr->aircraft[j].target_id == i) {
-                        killer_id = j;
-                        break;
-                    }
-                }
-                
-                if (killer_id >= 0) {
-                    managed_aircraft_t* killer = &aircraft_mgr->aircraft[killer_id];
-                    
-                    // Debug: Print before calling match_player_killed
-                    printf("[%.1fs] KILL: %s (team %d) killed %s (team %d)\n",
-                           total_time, killer->name, killer->team_id, victim->name, victim->team_id);
-                    
-                    match_player_killed(match, killer_id, i, killer->team_id, victim->team_id);
-                    
-                    [[maybe_unused]] const char* killer_team = killer->team_id == 0 ? "Red" : "Blue";
-                    [[maybe_unused]] const char* victim_team = victim->team_id == 0 ? "Red" : "Blue";
-                    printf("         Score after kill: Red %d - Blue %d\n",
-                           match->team_scores[0], match->team_scores[1]);
-                }
-            }
-            last_kill_health[i] = victim->health;
-        }
+        check_kills_and_update_match(aircraft_mgr, match, last_kill_health, total_time);
         
         // Status update every 15 seconds
         if ((int)(total_time) % 15 == 0 && (int)(total_time - DT) % 15 != 0) {
@@ -185,47 +280,9 @@ int main(void) {
     printf("\n=== MATCH ENDED ===\n");
     printf("Duration: %.1f seconds\n", total_time);
     
-    // Determine winner
-    int winner_id;
-    bool is_team;
-    if (match_check_win_condition(match, &winner_id, &is_team)) {
-        if (is_team) {
-            const char* winner = winner_id == 0 ? "Red Squadron" : "Blue Squadron";
-            printf("\nWINNER: %s!\n", winner);
-        }
-    }
+    announce_match_winner(match);
     
-    // Final statistics
-    printf("\nFinal Score: Red %d - Blue %d\n", match->team_scores[0], match->team_scores[1]);
-    
-    printf("\nIndividual Statistics:\n");
-    int red_kills = 0, red_deaths = 0;
-    int blue_kills = 0, blue_deaths = 0;
-    
-    for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
-        managed_aircraft_t* ma = &aircraft_mgr->aircraft[i];
-        const char* team = ma->team_id == 0 ? "Red" : "Blue";
-        printf("  %s (%s): %d kills, %d deaths, K/D: %.2f\n", 
-               ma->name, team, ma->kills, ma->deaths,
-               ma->deaths > 0 ? (float)ma->kills / ma->deaths : (float)ma->kills);
-        
-        if (ma->team_id == 0) {
-            red_kills += ma->kills;
-            red_deaths += ma->deaths;
-        } else {
-            blue_kills += ma->kills;
-            blue_deaths += ma->deaths;
-        }
-    }
-    
-    printf("\nTeam Statistics:\n");
-    printf("  Red Squadron: %d kills, %d deaths\n", red_kills, red_deaths);
-    printf("  Blue Squadron: %d kills, %d deaths\n", blue_kills, blue_deaths);
-    
-    printf("\nPower-up Statistics:\n");
-    printf("  Total collections: %d\n", total_powerup_collections);
-    printf("  Collection rate: %.2f per minute\n", 
-           total_powerup_collections / (total_time / 60.0f));
+    print_final_statistics(aircraft_mgr, match, total_powerup_collections, total_time);
     
     // Cleanup
     match_state_destroy(match);
