@@ -274,7 +274,7 @@ static int fox_case_tokens_join(const char *root)
         ASSERT(fox_tok_one_ledger(ledger, "j1", "1000", "200"));
         ASSERT(fox_tok_meta(root, "j1", "write:gamma-lane"));
         ASSERT(fox_tok_one_outcome(outcomes, "restart: nothing",
-                                   "/home/fixture/lanes/z23/gamma-lane/"));
+                                   "/srv/lanes/z23/gamma-lane/"));
         v = fox_tok_measure(ledger, outcomes);
         ASSERT(v.measured);
         ASSERT_EQ(v.value, (int64_t)1200);
