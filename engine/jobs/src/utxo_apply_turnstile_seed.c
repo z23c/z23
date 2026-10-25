@@ -82,7 +82,7 @@ static void seed_negative_blocker(int64_t height, const char *pool,
                                   int64_t sprout, int64_t sapling)
 {
     struct blocker_record rec;
-    if (!blocker_init(&rec, "utxo_apply.turnstile_seed_negative", STAGE_NAME, BLOCKER_PERMANENT,
+    if (!blocker_init(&rec, "utxo_apply.turnstile_seed_negative", STAGE_NAME, BLOCKER_TRANSIENT,
                       "turnstile seeder found a negative pool total"))
         return;
     snprintf(rec.reason, sizeof(rec.reason),
