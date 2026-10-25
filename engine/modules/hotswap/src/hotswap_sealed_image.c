@@ -52,6 +52,62 @@ static int si_fail(int fd_to_close, char *err, size_t err_cap,
  * rather than an omission. */
 #define SI_SEALS (F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW)
 
+/* Drain exactly the n bytes just read. `off` is the write cursor into
+ * buf; the loop cannot exit early, so a short write costs another
+ * iteration rather than silently dropping the tail. */
+static int si_write_all(int img_fd, const unsigned char *buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(img_fd, buf + off, len - off);
+        if (w > 0) {
+            off += (size_t)w;
+            continue;
+        }
+        if (w < 0 && errno == EINTR)
+            continue;
+        /* w == 0 on a regular/memfd write means no progress is being made
+         * and never will be; there is no errno for it, so name one rather
+         * than spin forever. */
+        if (w == 0)
+            errno = ENOSPC;
+        return -1;
+    }
+    return 0;
+}
+
+/* The final one-byte read: only EOF is accepted, because one extra byte means
+ * the source grew while it was being copied. */
+static int si_confirm_source_at_eof(int src_fd, unsigned char *probe)
+{
+    for (;;) {
+        ssize_t n = read(src_fd, probe, 1);
+        if (n == 0)
+            break;
+        if (n > 0) {
+            errno = EFBIG;
+            return -1;
+        }
+        if (errno != EINTR)
+            return -1;
+    }
+    return 0;
+}
+
+/* The second fstat: the size seen now must still be the size that was
+ * copied. */
+static int si_verify_source_size_unchanged(int src_fd, uint64_t expected)
+{
+    struct stat after;
+    if (fstat(src_fd, &after) != 0)
+        return -1;
+    if (after.st_size < 0 || (uint64_t)after.st_size != expected) {
+        errno = EAGAIN;
+        return -1;
+    }
+    return 0;
+}
+
 /* Copy exactly the size accepted before the memfd was created.
  *
  * Both halves are loops, not single calls, because read(2) and write(2) are
@@ -83,47 +139,15 @@ static int si_copy_exact(int src_fd, int img_fd, uint64_t expected)
                 continue;
             return -1;
         }
-        /* Drain exactly the n bytes just read. `off` is the write cursor into
-         * buf; the loop cannot exit early, so a short write costs another
-         * iteration rather than silently dropping the tail. */
-        size_t off = 0;
-        while (off < (size_t)n) {
-            ssize_t w = write(img_fd, buf + off, (size_t)n - off);
-            if (w > 0) {
-                off += (size_t)w;
-                continue;
-            }
-            if (w < 0 && errno == EINTR)
-                continue;
-            /* w == 0 on a regular/memfd write means no progress is being made
-             * and never will be; there is no errno for it, so name one rather
-             * than spin forever. */
-            if (w == 0)
-                errno = ENOSPC;
+        if (si_write_all(img_fd, buf, (size_t)n) != 0)
             return -1;
-        }
         total += (uint64_t)n;
     }
 
-    for (;;) {
-        ssize_t n = read(src_fd, buf, 1);
-        if (n == 0)
-            break;
-        if (n > 0) {
-            errno = EFBIG;
-            return -1;
-        }
-        if (errno != EINTR)
-            return -1;
-    }
-
-    struct stat after;
-    if (fstat(src_fd, &after) != 0)
+    if (si_confirm_source_at_eof(src_fd, buf) != 0)
         return -1;
-    if (after.st_size < 0 || (uint64_t)after.st_size != expected) {
-        errno = EAGAIN;
+    if (si_verify_source_size_unchanged(src_fd, expected) != 0)
         return -1;
-    }
     return 0;
 }
 
