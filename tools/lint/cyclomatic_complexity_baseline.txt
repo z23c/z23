@@ -591,7 +591,6 @@ contexts/market/controllers/src/shop_native_handler.c:zcl_native_handle_shop_ini
 contexts/market/controllers/src/shop_native_want.c:shw_build_want:30
 contexts/market/controllers/src/shop_native_want.c:zcl_native_handle_shop_want_cancel:19
 contexts/market/controllers/src/shop_native_want_view_contract.c:shop_want_view_frozen_kat:43
-contexts/market/controllers/src/store_buyer_native_handlers.c:sbn_call:24
 contexts/market/controllers/src/yardsale_controller.c:yardsale_buyer_begin:21
 contexts/market/controllers/src/yardsale_controller.c:yardsale_ceremony_partial_ingest:38
 contexts/market/controllers/src/yardsale_site_controller_buy.c:parse_input_field:22

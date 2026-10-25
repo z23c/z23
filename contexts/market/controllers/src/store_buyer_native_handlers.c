@@ -86,6 +86,46 @@ static void sbn_merge(struct json_value *dst, const struct json_value *src)
     }
 }
 
+/* Copy `text` when it is non-empty, otherwise `fallback`. */
+static void sbn_copy_text_or_fallback(char *dst, size_t dst_len,
+                                      const char *text, const char *fallback)
+{
+    (void)snprintf(dst, dst_len, "%s", text && text[0] ? text : fallback);
+}
+
+/* The RPC error member is either an object with `message` or a bare string. */
+static void sbn_format_rpc_error(char *msg, size_t msg_len,
+                                 const struct json_value *err)
+{
+    const char *why = err->type == JSON_OBJ
+                          ? json_get_str(json_get(err, "message"))
+                          : json_get_str(err);
+    sbn_copy_text_or_fallback(msg, msg_len, why, "the node reported an error");
+}
+
+static void sbn_format_refusal_message(char *msg, size_t msg_len,
+                                       const char *message, const char *detail)
+{
+    (void)snprintf(msg, msg_len, "%s%s%s",
+                   message && message[0] ? message : "the store refused",
+                   detail && detail[0] ? " — " : "",
+                   detail && detail[0] ? detail : "");
+}
+
+static void sbn_lookup_refusal_code(const char *code,
+                                    enum zcl_command_status *status,
+                                    enum zcl_command_exit *exit_code)
+{
+    for (size_t i = 0; i < sizeof(g_sbn_codes) / sizeof(g_sbn_codes[0]);
+         i++) {
+        if (code && strcmp(code, g_sbn_codes[i].code) == 0) {
+            *status = g_sbn_codes[i].status;
+            *exit_code = g_sbn_codes[i].exit_code;
+            break;
+        }
+    }
+}
+
 /* Call one storebuy_* method and hand back the parsed body, or render the
  * failure and return false. `doc` is only valid (and only needs freeing)
  * when this returns true. */
@@ -114,9 +154,8 @@ static bool sbn_call(struct zcl_command_reply *reply, const char *method,
      * for a malformed call, so it is a caller error, not a node state. */
     if (doc->type == JSON_STR) {
         char msg[256];
-        const char *why = json_get_str(doc);
-        (void)snprintf(msg, sizeof(msg), "%s",
-                       why && why[0] ? why : "the node rejected the call");
+        sbn_copy_text_or_fallback(msg, sizeof(msg), json_get_str(doc),
+                                  "the node rejected the call");
         json_free(doc);
         sbn_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                  "BAD_REQUEST", "normalize", msg, method);
@@ -132,11 +171,7 @@ static bool sbn_call(struct zcl_command_reply *reply, const char *method,
     const struct json_value *err = json_get(doc, "error");
     if (err && !json_is_null(err)) {
         char msg[256];
-        const char *why = err->type == JSON_OBJ
-                              ? json_get_str(json_get(err, "message"))
-                              : json_get_str(err);
-        (void)snprintf(msg, sizeof(msg), "%s",
-                       why && why[0] ? why : "the node reported an error");
+        sbn_format_rpc_error(msg, sizeof(msg), err);
         json_free(doc);
         sbn_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
                  "STORE_RPC_ERROR", "execute", msg, method);
@@ -149,23 +184,13 @@ static bool sbn_call(struct zcl_command_reply *reply, const char *method,
         const char *message = json_get_str(json_get(doc, "message"));
         const char *detail = json_get_str(json_get(doc, "detail"));
         char msg[320];
-        (void)snprintf(msg, sizeof(msg), "%s%s%s",
-                       message && message[0] ? message : "the store refused",
-                       detail && detail[0] ? " — " : "",
-                       detail && detail[0] ? detail : "");
+        sbn_format_refusal_message(msg, sizeof(msg), message, detail);
         enum zcl_command_status status = ZCL_COMMAND_STATUS_FAILED;
         enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_FAILED;
-        for (size_t i = 0; i < sizeof(g_sbn_codes) / sizeof(g_sbn_codes[0]);
-             i++) {
-            if (code && strcmp(code, g_sbn_codes[i].code) == 0) {
-                status = g_sbn_codes[i].status;
-                exit_code = g_sbn_codes[i].exit_code;
-                break;
-            }
-        }
+        sbn_lookup_refusal_code(code, &status, &exit_code);
         char code_buf[64];
-        (void)snprintf(code_buf, sizeof(code_buf), "%s",
-                       code && code[0] ? code : "STORE_REFUSED");
+        sbn_copy_text_or_fallback(code_buf, sizeof(code_buf), code,
+                                  "STORE_REFUSED");
         json_free(doc);
         sbn_fail(reply, status, exit_code, code_buf, "execute", msg, method);
         return false;
