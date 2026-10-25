@@ -95,59 +95,75 @@ bool input_controller_init_joystick(input_controller_t* controller) {
 #endif
 }
 
+static void input_controller_reset_input_state(input_controller_t* controller) {
+    memset(controller->axes, 0, sizeof(controller->axes));
+    memset(controller->buttons, 0, sizeof(controller->buttons));
+    
+    // Initialize trigger axes to unpressed state
+    controller->axes[AXIS_L2_TRIGGER] = -32767;  // L2 unpressed
+    controller->axes[AXIS_R2_TRIGGER] = -32767;  // R2 unpressed
+}
+
+static void input_controller_map_keyboard_movement(input_controller_t* controller) {
+    // Map keyboard to controller inputs
+    if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) {
+        controller->axes[AXIS_LEFT_STICK_X] = -32767;
+    }
+    if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) {
+        controller->axes[AXIS_LEFT_STICK_X] = 32767;
+    }
+    if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) {
+        controller->axes[AXIS_LEFT_STICK_Y] = -32767;
+    }
+    if (IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN)) {
+        controller->axes[AXIS_LEFT_STICK_Y] = 32767;
+    }
+}
+
+static void input_controller_map_keyboard_weapons_and_speed(input_controller_t* controller) {
+    // Weapon keys
+    if (IsKeyDown(KEY_LEFT_CONTROL)) {
+        controller->axes[AXIS_L2_TRIGGER] = 32767;  // L2 pressed
+    }
+    if (IsKeyDown(KEY_SPACE)) {
+        controller->axes[AXIS_R2_TRIGGER] = -16000;  // R2 pressed
+    }
+    
+    // Speed controls
+    if (IsKeyDown(KEY_LEFT_SHIFT)) {
+        controller->buttons[BUTTON_GAS] = 1;
+    }
+    if (IsKeyDown(KEY_Z)) {
+        controller->buttons[BUTTON_BRAKE] = 1;
+    }
+}
+
+#ifdef __linux__
+static void input_controller_read_joystick_events(input_controller_t* controller) {
+    struct js_event event;
+    while (read(controller->joystick_fd, &event, sizeof(event)) > 0) {
+        if (event.type == JS_EVENT_AXIS && event.number < AXIS_COUNT) {
+            controller->axes[event.number] = event.value;
+        } else if (event.type == JS_EVENT_BUTTON && event.number < BUTTON_COUNT) {
+            controller->buttons[event.number] = event.value;
+        }
+    }
+}
+#endif
+
 void input_controller_update(input_controller_t* controller) {
 #ifndef __linux__
     controller->connected = false;
 #endif
     if (!controller->connected) {
         // Handle keyboard input
-        memset(controller->axes, 0, sizeof(controller->axes));
-        memset(controller->buttons, 0, sizeof(controller->buttons));
-        
-        // Initialize trigger axes to unpressed state
-        controller->axes[AXIS_L2_TRIGGER] = -32767;  // L2 unpressed
-        controller->axes[AXIS_R2_TRIGGER] = -32767;  // R2 unpressed
-        
-        // Map keyboard to controller inputs
-        if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) {
-            controller->axes[AXIS_LEFT_STICK_X] = -32767;
-        }
-        if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) {
-            controller->axes[AXIS_LEFT_STICK_X] = 32767;
-        }
-        if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP)) {
-            controller->axes[AXIS_LEFT_STICK_Y] = -32767;
-        }
-        if (IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN)) {
-            controller->axes[AXIS_LEFT_STICK_Y] = 32767;
-        }
-        
-        // Weapon keys
-        if (IsKeyDown(KEY_LEFT_CONTROL)) {
-            controller->axes[AXIS_L2_TRIGGER] = 32767;  // L2 pressed
-        }
-        if (IsKeyDown(KEY_SPACE)) {
-            controller->axes[AXIS_R2_TRIGGER] = -16000;  // R2 pressed
-        }
-        
-        // Speed controls
-        if (IsKeyDown(KEY_LEFT_SHIFT)) {
-            controller->buttons[BUTTON_GAS] = 1;
-        }
-        if (IsKeyDown(KEY_Z)) {
-            controller->buttons[BUTTON_BRAKE] = 1;
-        }
+        input_controller_reset_input_state(controller);
+        input_controller_map_keyboard_movement(controller);
+        input_controller_map_keyboard_weapons_and_speed(controller);
 #ifdef __linux__
     } else {
         // Read joystick events
-        struct js_event event;
-        while (read(controller->joystick_fd, &event, sizeof(event)) > 0) {
-            if (event.type == JS_EVENT_AXIS && event.number < AXIS_COUNT) {
-                controller->axes[event.number] = event.value;
-            } else if (event.type == JS_EVENT_BUTTON && event.number < BUTTON_COUNT) {
-                controller->buttons[event.number] = event.value;
-            }
-        }
+        input_controller_read_joystick_events(controller);
 #endif
     }
     

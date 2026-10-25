@@ -5,7 +5,6 @@
 # Only-gets-simpler ratchet: a pin may only fall. A grown function, a pin whose function
 # no longer exists, or a pin whose function is now within the cap fails the gate.
 # A shrunk function still over the cap passes; --tighten-baseline lowers its pin.
-apps/skycombat/src/controllers/input_controller.c:input_controller_update:19
 apps/skycombat/src/controllers/sky_combat.c:sky_combat_run:24
 apps/skycombat/src/controllers/sky_combat_multiplayer_incremental.c:main:74
 apps/skycombat/src/models/aircraft_manager.c:aircraft_manager_check_collisions:24
