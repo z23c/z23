@@ -251,10 +251,8 @@ static bool test_vout_cap_preserved(void)
     return ok;
 }
 
-static bool test_utxo_import_boundaries(void)
+static bool check_utxo_short_height_decode(bool ok)
 {
-    bool ok = true;
-
     struct byte_stream short_height;
     ok = ok && build_utxo_short_height_record(&short_height);
     struct utxo_import_raw_entry raw;
@@ -269,20 +267,30 @@ static bool test_utxo_import_boundaries(void)
          row.script_type == 1 && row.has_address == 1;
     free(row.script_overflow);
     stream_free(&short_height);
+    return ok;
+}
 
+static bool check_utxo_raw_script_decode(bool ok)
+{
     struct byte_stream raw_script;
     ok = ok && build_utxo_raw_script_record(&raw_script, 10240, 88);
+    struct utxo_import_raw_entry raw;
     memset(&raw, 0, sizeof(raw));
     memset(raw.txid, 0x33, sizeof(raw.txid));
     raw.value = raw_script.data;
     raw.value_len = (uint32_t)raw_script.size;
+    struct utxo_import_row row;
     memset(&row, 0, sizeof(row));
-    n = utxo_import_decode_entry(&raw, &row, 1);
+    int n = utxo_import_decode_entry(&raw, &row, 1);
     ok = ok && n == 1 && row.height == 88 && row.script_len == 10240 &&
          row.script_overflow != NULL && row.script_type == 3;
     free(row.script_overflow);
     stream_free(&raw_script);
+    return ok;
+}
 
+static bool check_utxo_value_len_bounds(bool ok)
+{
     uint32_t out_len = 0;
     struct zcl_result len_65535 =
         utxo_import_value_len_checked(65535u, &out_len);
@@ -290,7 +298,15 @@ static bool test_utxo_import_boundaries(void)
     struct zcl_result len_65536 =
         utxo_import_value_len_checked(65536u, &out_len);
     ok = ok && len_65536.ok && out_len == 65536u;
+    return ok;
+}
 
+static bool test_utxo_import_boundaries(void)
+{
+    bool ok = true;
+    ok = check_utxo_short_height_decode(ok);
+    ok = check_utxo_raw_script_decode(ok);
+    ok = check_utxo_value_len_bounds(ok);
     return ok;
 }
 
