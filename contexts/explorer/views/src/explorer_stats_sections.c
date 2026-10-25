@@ -236,6 +236,85 @@ size_t emit_section_3_block_records(uint8_t *r, size_t max, size_t off,
     return off;
 }
 
+/* Bucket share of the UTXO set in percent; 0 when the set is empty. */
+static double utxo_pct_of_count(int64_t bucket, int64_t count)
+{
+    return count > 0 ? (double)bucket / (double)count * 100 : 0;
+}
+
+/* Byte-reverse a 64-hex storage-order txid into display order (txid[65])
+ * and build the 8-char short form; no-op when txhex is NULL or not 64
+ * chars, so callers pass pre-emptied buffers. */
+static void utxo_decode_txid(const char *txhex, char *txid, char *short_tx,
+                             size_t short_max)
+{
+    if (!txhex || strlen(txhex) != 64) return;
+    for (int i = 0; i < 32; i++) {
+        txid[i*2]   = txhex[62-i*2];
+        txid[i*2+1] = txhex[63-i*2];
+    }
+    txid[64] = '\0';
+    snprintf(short_tx, short_max, "%.8s...", txid);
+}
+
+/* Rows for the "Oldest Unspent UTXOs" table: the 20 lowest-height utxos. */
+static size_t emit_utxo_oldest_rows(uint8_t *r, size_t max, size_t off,
+                                    sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT u.height, b.time, u.value, hex(u.txid) "
+            "FROM utxos u LEFT JOIN blocks b ON u.height = b.height "
+            "ORDER BY u.height ASC LIMIT 20",
+            -1, &s, NULL) == SQLITE_OK && s) {
+        while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            int64_t h = sqlite3_column_int64(s, 0);
+            int64_t t = sqlite3_column_int64(s, 1);
+            if (t == 0 && h == 0) t = 1478403829; /* genesis */
+            int64_t v = sqlite3_column_int64(s, 2);
+            const char *txhex = (const char *)sqlite3_column_text(s, 3);
+            char ts[32], vs[32], txid[65] = "", short_tx[18] = "";
+            explorer_format_time(ts, sizeof(ts), (uint32_t)t);
+            zcl_format_zcl(vs, sizeof(vs), v);
+            utxo_decode_txid(txhex, txid, short_tx, sizeof(short_tx));
+            APPEND(off, r, max,
+                "<tr><td><a href='/explorer/block/%" PRId64 "'>%" PRId64 "</a></td>"
+                "<td>%s</td><td class='amount'>%s ZCL</td>"
+                "<td class='hash'><a href='/explorer/tx/%s'>%s</a></td></tr>",
+                h, h, ts, vs, txid, short_tx);
+        }
+        sqlite3_finalize(s);
+    }
+    return off;
+}
+
+/* Rows for the "Top 20 Largest Unspent Outputs" table. */
+static size_t emit_utxo_largest_rows(uint8_t *r, size_t max, size_t off,
+                                     sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT value, height, hex(txid) FROM utxos "
+            "ORDER BY value DESC LIMIT 20",
+            -1, &s, NULL) == SQLITE_OK && s) {
+        while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            int64_t v = sqlite3_column_int64(s, 0);
+            int64_t h = sqlite3_column_int64(s, 1);
+            const char *txhex = (const char *)sqlite3_column_text(s, 2);
+            char vs[32], txid[65] = "", short_tx[18] = "";
+            zcl_format_zcl(vs, sizeof(vs), v);
+            utxo_decode_txid(txhex, txid, short_tx, sizeof(short_tx));
+            APPEND(off, r, max,
+                "<tr><td class='amount'>%s ZCL</td>"
+                "<td><a href='/explorer/block/%" PRId64 "'>%" PRId64 "</a></td>"
+                "<td class='hash'><a href='/explorer/tx/%s'>%s</a></td></tr>",
+                vs, h, h, txid, short_tx);
+        }
+        sqlite3_finalize(s);
+    }
+    return off;
+}
+
 size_t emit_section_6_utxo_distribution(uint8_t *r, size_t max, size_t off,
                                                const struct stats_ctx *c, sqlite3 *db)
 {
@@ -265,84 +344,24 @@ size_t emit_section_6_utxo_distribution(uint8_t *r, size_t max, size_t off,
         "<tr><td>Large (10 - 100 ZCL)</td><td>%" PRId64 "</td><td>%.1f%%</td></tr>"
         "<tr><td>Whale (100+ ZCL)</td><td>%" PRId64 "</td><td>%.1f%%</td></tr>"
         "</table></div>",
-        c->utxo_dust,   c->utxo_count_val > 0 ? (double)c->utxo_dust / c->utxo_count_val * 100 : 0,
-        c->utxo_small,  c->utxo_count_val > 0 ? (double)c->utxo_small / c->utxo_count_val * 100 : 0,
-        c->utxo_medium, c->utxo_count_val > 0 ? (double)c->utxo_medium / c->utxo_count_val * 100 : 0,
-        c->utxo_large,  c->utxo_count_val > 0 ? (double)c->utxo_large / c->utxo_count_val * 100 : 0,
-        c->utxo_whale,  c->utxo_count_val > 0 ? (double)c->utxo_whale / c->utxo_count_val * 100 : 0);
+        c->utxo_dust,   utxo_pct_of_count(c->utxo_dust, c->utxo_count_val),
+        c->utxo_small,  utxo_pct_of_count(c->utxo_small, c->utxo_count_val),
+        c->utxo_medium, utxo_pct_of_count(c->utxo_medium, c->utxo_count_val),
+        c->utxo_large,  utxo_pct_of_count(c->utxo_large, c->utxo_count_val),
+        c->utxo_whale,  utxo_pct_of_count(c->utxo_whale, c->utxo_count_val));
 
     /* Oldest UTXOs */
     APPEND(off, r, max,
         "<h3>Oldest Unspent UTXOs</h3>"
         "<table><tr><th>Block</th><th>Time</th><th>Value</th><th>TXID</th></tr>");
-    {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT u.height, b.time, u.value, hex(u.txid) "
-                "FROM utxos u LEFT JOIN blocks b ON u.height = b.height "
-                "ORDER BY u.height ASC LIMIT 20",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int64_t h = sqlite3_column_int64(s, 0);
-                int64_t t = sqlite3_column_int64(s, 1);
-                if (t == 0 && h == 0) t = 1478403829; /* genesis */
-                int64_t v = sqlite3_column_int64(s, 2);
-                const char *txhex = (const char *)sqlite3_column_text(s, 3);
-                char ts[32], vs[32], txid[65] = "", short_tx[18] = "";
-                explorer_format_time(ts, sizeof(ts), (uint32_t)t);
-                zcl_format_zcl(vs, sizeof(vs), v);
-                if (txhex && strlen(txhex) == 64) {
-                    for (int i = 0; i < 32; i++) {
-                        txid[i*2]   = txhex[62-i*2];
-                        txid[i*2+1] = txhex[63-i*2];
-                    }
-                    txid[64] = '\0';
-                    snprintf(short_tx, sizeof(short_tx), "%.8s...", txid);
-                }
-                APPEND(off, r, max,
-                    "<tr><td><a href='/explorer/block/%" PRId64 "'>%" PRId64 "</a></td>"
-                    "<td>%s</td><td class='amount'>%s ZCL</td>"
-                    "<td class='hash'><a href='/explorer/tx/%s'>%s</a></td></tr>",
-                    h, h, ts, vs, txid, short_tx);
-            }
-            sqlite3_finalize(s);
-        }
-    }
+    off = emit_utxo_oldest_rows(r, max, off, db);
     APPEND(off, r, max, "</table>");
 
     /* Top 20 largest UTXOs */
     APPEND(off, r, max,
         "<h3>Top 20 Largest Unspent Outputs</h3>"
         "<table><tr><th>Value</th><th>Block</th><th>TXID</th></tr>");
-    {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT value, height, hex(txid) FROM utxos "
-                "ORDER BY value DESC LIMIT 20",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int64_t v = sqlite3_column_int64(s, 0);
-                int64_t h = sqlite3_column_int64(s, 1);
-                const char *txhex = (const char *)sqlite3_column_text(s, 2);
-                char vs[32], txid[65] = "", short_tx[18] = "";
-                zcl_format_zcl(vs, sizeof(vs), v);
-                if (txhex && strlen(txhex) == 64) {
-                    for (int i = 0; i < 32; i++) {
-                        txid[i*2]   = txhex[62-i*2];
-                        txid[i*2+1] = txhex[63-i*2];
-                    }
-                    txid[64] = '\0';
-                    snprintf(short_tx, sizeof(short_tx), "%.8s...", txid);
-                }
-                APPEND(off, r, max,
-                    "<tr><td class='amount'>%s ZCL</td>"
-                    "<td><a href='/explorer/block/%" PRId64 "'>%" PRId64 "</a></td>"
-                    "<td class='hash'><a href='/explorer/tx/%s'>%s</a></td></tr>",
-                    vs, h, h, txid, short_tx);
-            }
-            sqlite3_finalize(s);
-        }
-    }
+    off = emit_utxo_largest_rows(r, max, off, db);
     APPEND(off, r, max, "</table>");
 
     APPEND(off, r, max,

@@ -533,7 +533,6 @@ contexts/explorer/views/src/explorer_pages_hodl_rows.c:hodl_build_survival_rows:
 contexts/explorer/views/src/explorer_pages_hodl_rows.c:hodl_load_history_wave_rows:16
 contexts/explorer/views/src/explorer_pages_hodl_snapshot.c:hodl_view_disk_cache_read:33
 contexts/explorer/views/src/explorer_pages_hodl_snapshot.c:hodl_view_disk_cache_save:27
-contexts/explorer/views/src/explorer_stats_sections.c:emit_section_6_utxo_distribution:20
 contexts/explorer/views/src/explorer_tx_view.c:explorer_view_tx:27
 contexts/explorer/views/src/ui_present.c:ui_present_model_from_json:25
 contexts/explorer/views/src/ui_present.c:ui_present_parse_item:17
