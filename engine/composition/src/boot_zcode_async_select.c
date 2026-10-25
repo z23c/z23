@@ -45,15 +45,13 @@ bool boot_zcode_async_needs_retry(
         boot_zcode_async_session_lost(work, event);
 }
 
-bool boot_zcode_async_select_peer(
+static bool async_select_keep_assigned_peer(
     struct vcs_zcode_work_node *work,
     const struct db_build_proof_event *event,
     const struct db_build_job *job, uint8_t work_kind, int64_t now,
-    uint64_t *peer_out, struct vcs_zcode_work_capability_v1 *capability_out)
+    bool retry, uint64_t *peer_out,
+    struct vcs_zcode_work_capability_v1 *capability_out)
 {
-    if (!work || !event || !job || !peer_out || !capability_out)
-        return false;
-    bool retry = boot_zcode_async_needs_retry(work, event, now);
     if (event->peer_id && !retry &&
         vcs_zcode_work_node_peer_capability(
             work, event->peer_id, now, capability_out)) {
@@ -69,6 +67,16 @@ bool boot_zcode_async_select_peer(
             return true;
         }
     }
+    return false;
+}
+
+static bool async_select_from_capable_peers(
+    struct vcs_zcode_work_node *work,
+    const struct db_build_proof_event *event,
+    const struct db_build_job *job, uint8_t work_kind, int64_t now,
+    bool retry, uint64_t *peer_out,
+    struct vcs_zcode_work_capability_v1 *capability_out)
+{
     uint64_t peers[VCS_ZCODE_WORK_NODE_MAX_PEERS];
     struct vcs_zcode_work_capability_v1 capabilities[
         VCS_ZCODE_WORK_NODE_MAX_PEERS];
@@ -100,6 +108,23 @@ bool boot_zcode_async_select_peer(
         }
     }
     return false;
+}
+
+bool boot_zcode_async_select_peer(
+    struct vcs_zcode_work_node *work,
+    const struct db_build_proof_event *event,
+    const struct db_build_job *job, uint8_t work_kind, int64_t now,
+    uint64_t *peer_out, struct vcs_zcode_work_capability_v1 *capability_out)
+{
+    if (!work || !event || !job || !peer_out || !capability_out)
+        return false;
+    bool retry = boot_zcode_async_needs_retry(work, event, now);
+    if (async_select_keep_assigned_peer(
+            work, event, job, work_kind, now, retry, peer_out,
+            capability_out))
+        return true;
+    return async_select_from_capable_peers(
+        work, event, job, work_kind, now, retry, peer_out, capability_out);
 }
 
 const char *boot_zcode_async_log_no_peer(
