@@ -56,6 +56,23 @@ static struct kpi_entry entry_of(const char *id, enum kpi_state s, uint64_t v)
 
 /* ── 1. the metric table is what the encoding assumes it is ────────── */
 
+/* One pass over the table rows, setting *sorted, *named and *drilled to
+ * whether every id is sorted and strictly unique, non-empty and short
+ * enough for its field, and backed by a drill-down command. */
+static void scan_metric_table_rows(const struct kpi_metric_def *d, size_t n,
+                                   bool *sorted, bool *named, bool *drilled)
+{
+    *sorted = true;
+    *named = true;
+    *drilled = true;
+    for (size_t i = 0; i < n; i++) {
+        if (i > 0 && strcmp(d[i - 1].id, d[i].id) >= 0) *sorted = false;
+        if (!d[i].id || !d[i].id[0] || strlen(d[i].id) >= KPI_ID_MAX)
+            *named = false;
+        if (!d[i].drill || !d[i].drill[0]) *drilled = false;
+    }
+}
+
 static int case_table(void)
 {
     int failures = 0;
@@ -68,13 +85,8 @@ static int case_table(void)
     /* The canonical payload's field order IS this order. A table that stopped
      * being sorted would change the bytes for unchanged values and break every
      * comparison against an older frame, silently. */
-    bool sorted = true, named = true, drilled = true;
-    for (size_t i = 0; i < n; i++) {
-        if (i > 0 && strcmp(d[i - 1].id, d[i].id) >= 0) sorted = false;
-        if (!d[i].id || !d[i].id[0] || strlen(d[i].id) >= KPI_ID_MAX)
-            named = false;
-        if (!d[i].drill || !d[i].drill[0]) drilled = false;
-    }
+    bool sorted, named, drilled;
+    scan_metric_table_rows(d, n, &sorted, &named, &drilled);
     KPI_CHECK("every metric id is sorted and strictly unique", sorted);
     KPI_CHECK("every metric id is non-empty and fits the field", named);
     /* A number nobody can drill into is a number nobody can act on. */

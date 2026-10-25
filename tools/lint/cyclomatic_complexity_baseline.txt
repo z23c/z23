@@ -1330,7 +1330,6 @@ tests/harness/src/test_kill9_recovery.c:p11_7_one_cycle:22
 tests/harness/src/test_kill9_recovery.c:p11_7ib_run_phase:42
 tests/harness/src/test_kill9_recovery.c:p11_7mf_run_phase:60
 tests/harness/src/test_kill9_recovery.c:test_kill9_recovery:23
-tests/harness/src/test_kpi.c:case_table:16
 tests/harness/src/test_ldb_snapshot.c:test_ldb_snapshot:27
 tests/harness/src/test_mempool_orphan.c:test_mempool_orphan:45
 tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
