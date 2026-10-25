@@ -2327,7 +2327,6 @@ tests/harness/src/test_retrieval_generation.c:case_projection_binding:77
 tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
 tests/harness/src/test_retrieval_profile_comparison.c:case_exact_specialization:21
 tests/harness/src/test_retrieval_profile_evolution.c:case_exact_specialization:18
-tests/harness/src/test_retrieval_profile_pair_measure.c:case_positive_and_deterministic:17
 tests/harness/src/test_retrieval_science_adapter.c:rsa_case_result_compose:27
 tests/harness/src/test_retrieval_science_adapter.c:rsa_case_statuses_and_refusals:16
 tests/harness/src/test_robustness.c:test_robustness:104

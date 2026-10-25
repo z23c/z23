@@ -293,6 +293,54 @@ static bool rpm_refused_unchanged(
         memcmp(&report, &before, sizeof(report)) == 0;
 }
 
+static bool rpm_exact_mrr_policy_satisfied(
+    const struct zcode_retrieval_profile_pair_measure_report *report)
+{
+    return report->comparison.observation.status ==
+               ZCL_RETRIEVAL_COMPARISON_SATISFIED &&
+           report->parent_result.mrr_bp == 2000u &&
+           report->child_result.mrr_bp == 10000u &&
+           report->comparison.observation.directional_delta_bp == 8000;
+}
+
+static bool rpm_derived_identities_deterministic(
+    const struct zcode_retrieval_profile_pair_measure_report *first,
+    const struct zcode_retrieval_profile_pair_measure_report *repeated)
+{
+    return memcmp(first->parent_result_root,
+                  repeated->parent_result_root, 32u) == 0 &&
+           memcmp(first->child_result_root,
+                  repeated->child_result_root, 32u) == 0 &&
+           memcmp(first->paired_evaluation.evaluation_input_root,
+                  repeated->paired_evaluation.evaluation_input_root,
+                  32u) == 0 &&
+           memcmp(first->comparison.workload_root,
+                  repeated->comparison.workload_root, 32u) == 0;
+}
+
+static bool rpm_policy_shared_before_specialization(
+    const struct rpm_fixture *fixture,
+    const struct zcode_retrieval_profile_pair_measure_report *report)
+{
+    return memcmp(fixture->parent_heuristic.preregistration_root,
+                  fixture->policy_root, 32u) == 0 &&
+           memcmp(fixture->child_heuristic.preregistration_root,
+                  fixture->policy_root, 32u) == 0 &&
+           memcmp(fixture->child_heuristic.parent_roots[0],
+                  fixture->parent_heuristic_root, 32u) == 0 &&
+           memcmp(report->comparison.observation.policy_root,
+                  fixture->policy_root, 32u) == 0;
+}
+
+static bool rpm_wrong_scope_unavailable(
+    const struct zcode_retrieval_profile_pair_measure_report *report)
+{
+    return (report->parent_result.flags &
+            ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE) == 0 &&
+           (report->child_result.flags &
+            ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE) == 0;
+}
+
 static int case_positive_and_deterministic(void)
 {
     int failures = 0;
@@ -307,36 +355,15 @@ static int case_positive_and_deterministic(void)
         zcode_retrieval_profile_pair_measure(
             &request, &repeated) == ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_OK;
     RPM_CHECK("derived pair satisfies exact MRR policy",
-              measured && first.comparison.observation.status ==
-                  ZCL_RETRIEVAL_COMPARISON_SATISFIED &&
-              first.parent_result.mrr_bp == 2000u &&
-              first.child_result.mrr_bp == 10000u &&
-              first.comparison.observation.directional_delta_bp == 8000);
+              measured && rpm_exact_mrr_policy_satisfied(&first));
     RPM_CHECK("all derived identities are deterministic",
-              measured && memcmp(first.parent_result_root,
-                                 repeated.parent_result_root, 32u) == 0 &&
-              memcmp(first.child_result_root,
-                     repeated.child_result_root, 32u) == 0 &&
-              memcmp(first.paired_evaluation.evaluation_input_root,
-                     repeated.paired_evaluation.evaluation_input_root,
-                     32u) == 0 &&
-              memcmp(first.comparison.workload_root,
-                     repeated.comparison.workload_root, 32u) == 0);
+              measured && rpm_derived_identities_deterministic(
+                  &first, &repeated));
     RPM_CHECK("workload policy is shared before child specialization",
-              ready && memcmp(fixture.parent_heuristic.preregistration_root,
-                              fixture.policy_root, 32u) == 0 &&
-              memcmp(fixture.child_heuristic.preregistration_root,
-                     fixture.policy_root, 32u) == 0 &&
-              memcmp(fixture.child_heuristic.parent_roots[0],
-                     fixture.parent_heuristic_root, 32u) == 0 &&
-              memcmp(first.comparison.observation.policy_root,
-                     fixture.policy_root, 32u) == 0);
+              ready && rpm_policy_shared_before_specialization(
+                  &fixture, &first));
     RPM_CHECK("scope remains unavailable rather than false evidence",
-              measured &&
-              (first.parent_result.flags &
-               ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE) == 0 &&
-              (first.child_result.flags &
-               ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE) == 0);
+              measured && rpm_wrong_scope_unavailable(&first));
     return failures;
 }
 
