@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 #if !defined(_WIN32)
 #include <sys/wait.h>
+#include "platform/barrier.h"
 #endif
 #include <time.h>
 #include <unistd.h>
@@ -3846,6 +3847,118 @@ static void check_sqlite_56_db_peer_save_takes_connection_first(int *failures)
 }
 #endif
 
+#if !defined(_WIN32)
+struct tx_statement_case {
+    struct node_db *ndb;
+    zcl_barrier_t bound, probed, release;
+    struct db_tx_index rows[2];
+    bool saved[2], contender_saw_busy;
+};
+struct tx_statement_worker { struct tx_statement_case *test; unsigned which; };
+static void tx_statement_bound(const struct db_tx_index *row, void *context)
+{
+    struct tx_statement_case *c = context;
+    if (row->txid[0] != c->rows[0].txid[0]) return;
+    (void)zcl_barrier_wait(&c->bound);
+    (void)zcl_barrier_wait(&c->release);
+}
+static void *tx_statement_writer(void *context)
+{
+    struct tx_statement_worker *worker = context;
+    struct tx_statement_case *c = worker->test;
+    struct db_tx_index row = c->rows[worker->which];
+    if (worker->which == 1) {
+        sqlite3_mutex *connection = sqlite3_db_mutex(c->ndb->db);
+        int rc = sqlite3_mutex_try(connection);
+        c->contender_saw_busy = rc == SQLITE_BUSY;
+        if (rc == SQLITE_OK) sqlite3_mutex_leave(connection);
+        (void)zcl_barrier_wait(&c->probed);
+    }
+    c->saved[worker->which] = db_tx_save(c->ndb, &row);
+    return NULL;
+}
+static bool tx_statement_barriers(struct tx_statement_case *c)
+{
+    if (zcl_barrier_init(&c->bound, 2)) return false;
+    if (zcl_barrier_init(&c->probed, 2)) { zcl_barrier_destroy(&c->bound); return false; }
+    if (zcl_barrier_init(&c->release, 2)) {
+        zcl_barrier_destroy(&c->probed); zcl_barrier_destroy(&c->bound); return false;
+    }
+    return true;
+}
+static bool tx_statement_threads(struct tx_statement_case *c)
+{
+    pthread_t a, b;
+    struct tx_statement_worker workers[2] = {{c,0},{c,1}};
+    if (pthread_create(&a,NULL,tx_statement_writer,&workers[0])) return false;
+    int bound = zcl_barrier_wait(&c->bound);
+    if (pthread_create(&b,NULL,tx_statement_writer,&workers[1])) {
+        (void)zcl_barrier_wait(&c->release); (void)pthread_join(a,NULL); return false;
+    }
+    int probed = zcl_barrier_wait(&c->probed);
+    int released = zcl_barrier_wait(&c->release);
+    int joined_a = pthread_join(a,NULL), joined_b = pthread_join(b,NULL);
+    return !bound && !probed && !released && !joined_a && !joined_b &&
+        c->saved[0] && c->saved[1] && c->contender_saw_busy;
+}
+static bool tx_statement_unbound(sqlite3_stmt *statement)
+{
+    char *expanded = sqlite3_expanded_sql(statement);
+    bool ok = expanded && !sqlite3_stmt_busy(statement) &&
+        strstr(expanded,"VALUES(NULL,NULL,NULL,NULL,NULL,NULL,NULL)") != NULL;
+    sqlite3_free(expanded); return ok;
+}
+static bool tx_statement_rows(struct tx_statement_case *c)
+{
+    for (unsigned i=0; i<2; i++) {
+        struct db_tx_index found = {0}; const struct db_tx_index *want = &c->rows[i];
+        if (!db_tx_find(c->ndb,want->txid,&found)) return false;
+        if (memcmp(found.block_hash,want->block_hash,32) || found.block_height != want->block_height ||
+            found.tx_index != want->tx_index || found.file_num != want->file_num ||
+            found.file_pos != want->file_pos || found.is_coinbase != want->is_coinbase) return false;
+    }
+    return true;
+}
+static bool tx_statement_failure_clears(struct node_db *ndb, const struct db_tx_index *row)
+{
+    int rc = sqlite3_exec(ndb->db,"CREATE TEMP TRIGGER reject_tx BEFORE INSERT ON transactions "
+        "BEGIN SELECT RAISE(ABORT,'fixture rejection'); END",NULL,NULL,NULL);
+    if (rc != SQLITE_OK) return false;
+    bool refused = !db_tx_save(ndb,row);
+    bool unbound = tx_statement_unbound(ndb->stmt_tx_insert);
+    int dropped = sqlite3_exec(ndb->db,"DROP TRIGGER reject_tx",NULL,NULL,NULL);
+    return refused && unbound && dropped == SQLITE_OK;
+}
+static int check_sqlite_tx_statement_ownership(void)
+{
+    int failures=0;
+    TEST("SQLite tx save owns cached reset/bind/step and releases static bindings on success/failure") {
+        struct node_db ndb; struct tx_statement_case c = {.ndb=&ndb};
+        ASSERT(node_db_open(&ndb,":memory:"));
+        for (unsigned i=0; i<2; i++) {
+            memset(c.rows[i].txid,0x11+i,32); memset(c.rows[i].block_hash,0x31+i,32);
+            c.rows[i].block_height=501+(int)i; c.rows[i].tx_index=1+(int)i;
+            c.rows[i].file_num=2+(int)i; c.rows[i].file_pos=1001+(int)i; c.rows[i].is_coinbase=i==1;
+        }
+        bool barriers = tx_statement_barriers(&c);
+        bool threaded = false;
+        if (barriers) {
+            db_tx_test_bound_hook(tx_statement_bound,&c);
+            threaded=tx_statement_threads(&c);
+            db_tx_test_bound_hook(NULL,NULL);
+            zcl_barrier_destroy(&c.release); zcl_barrier_destroy(&c.probed); zcl_barrier_destroy(&c.bound);
+        }
+        bool rows = threaded && tx_statement_rows(&c);
+        bool clear = tx_statement_unbound(ndb.stmt_tx_insert);
+        bool failure_clear = tx_statement_failure_clears(&ndb,&c.rows[0]);
+        node_db_close(&ndb);
+        ASSERT(barriers && threaded && rows && clear && failure_clear);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_sqlite(void) {
     int failures = 0;
 
@@ -4097,6 +4210,7 @@ int test_sqlite(void) {
     failures += check_sqlite_54_tx_index_shutdown_abort();
 
 #if !defined(_WIN32)
+    failures += check_sqlite_tx_statement_ownership();
     check_sqlite_55_db_block_save_takes_connection_first(&failures);
     check_sqlite_56_db_peer_save_takes_connection_first(&failures);
 #else

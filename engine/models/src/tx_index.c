@@ -8,6 +8,8 @@
  * belongs_to :block */
 
 #include "models/tx_index.h"
+#include "models/database_internal.h"
+#include "util/sync.h"
 #include "models/block.h"
 #include "models/model_fields.h"
 #include "models/def/tx_index_fields.def"
@@ -52,14 +54,23 @@ static bool tx_index_before_save(void *record, void *ctx)
     return true;
 }
 
-static void tx_index_init_hooks(void)
+static zcl_once_t s_tx_hooks_once = ZCL_ONCE_INIT;
+
+static void tx_index_register_hooks(void)
 {
-    static bool done = false;
-    if (done) return;
     struct ar_callbacks *cbs = db_tx_callbacks();
     ar_register_before_save(cbs, tx_index_before_save);
-    done = true;
 }
+
+#if defined(ZCL_TESTING)
+static void (*s_tx_bound_hook)(const struct db_tx_index *, void *);
+static void *s_tx_bound_context;
+void db_tx_test_bound_hook(void (*hook)(const struct db_tx_index *, void *), void *context)
+{
+    s_tx_bound_hook = hook;
+    s_tx_bound_context = context;
+}
+#endif
 
 /* ── Validation ────────────────────────────────────────────────── */
 
@@ -79,17 +90,30 @@ bool db_tx_validate(const struct db_tx_index *t, struct ar_errors *errors)
 
 bool db_tx_save(struct node_db *ndb, const struct db_tx_index *t)
 {
-    if (!ndb->open) return false;
+    if (!ndb || !ndb->open || !ndb->stmt_tx_insert) return false;
 
-    tx_index_init_hooks();
+    if (!zcl_once_call(&s_tx_hooks_once, tx_index_register_hooks)) return false;
     struct ar_callbacks *cbs = db_tx_callbacks();
     AR_BEGIN_SAVE(cbs, "tx_index", t, db_tx_validate);
 
+    /* Match the existing connection-before-state lock order used by cached
+     * block/peer saves. FULLMUTEX per-call locking alone does not own this
+     * complete reset/bind/step sequence. Callbacks stay outside the guard. */
+    bool locked = node_db_lock_connection_and_state(ndb);
+    if (!locked) return false;
     sqlite3_stmt *s = ndb->stmt_tx_insert;
     sqlite3_reset(s);
+    sqlite3_clear_bindings(s);
     tx_index_bind(s, t);
-
+#if defined(ZCL_TESTING)
+    if (s_tx_bound_hook) s_tx_bound_hook(t, s_tx_bound_context);
+#endif
     bool ok = AR_STEP_DONE(s);
+    /* Drop every SQLITE_STATIC reference before the caller's record expires,
+     * including failure exits. No callback runs with either mutex held. */
+    sqlite3_reset(s);
+    sqlite3_clear_bindings(s);
+    node_db_unlock_state_and_connection(ndb, locked);
     AR_FINISH_SAVE(cbs, t, ok);
 }
 

@@ -24,6 +24,11 @@ struct db_tx_index {
 struct ar_callbacks *db_tx_callbacks(void);
 bool db_tx_validate(const struct db_tx_index *t, struct ar_errors *errors);
 
+#if defined(ZCL_TESTING)
+/* Test-only hook inside owned statement sequence; set before starting writers. */
+void db_tx_test_bound_hook(void (*hook)(const struct db_tx_index *, void *), void *context);
+#endif
+
 bool db_tx_save(struct node_db *ndb, const struct db_tx_index *t);
 bool db_tx_find(struct node_db *ndb, const uint8_t txid[32],
                 struct db_tx_index *out);
