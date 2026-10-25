@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: The fleet board/wiki post codec and gossip frames. See the header.
  *
  * Everything here is total and allocation-free. A decode either fills the
