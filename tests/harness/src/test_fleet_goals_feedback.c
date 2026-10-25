@@ -206,6 +206,83 @@ static int fdf_case_malformed(const char *root)
     return failures;
 }
 
+struct fdf_arithmetic_case {
+    const char *name;
+    int64_t now;
+    bool baseline;
+    const char *rows;
+    enum zcl_goal_grade grade;
+    const char *count;
+    const char *median;
+    bool skipped;
+};
+
+static int fdf_arithmetic_one(const char *root,
+                               const struct fdf_arithmetic_case *c)
+{
+    int failures = 0;
+    char path[600], text[16384];
+    struct zcl_goals_options o;
+    fdf_options(&o);
+    (void)snprintf(path, sizeof(path), "%s/d6_arithmetic.jsonl", root);
+    o.outcomes = path;
+    o.now_unix = c->now;
+    TEST("D6: timestamp and median arithmetic stays representable") {
+        printf("  arithmetic case: %s\n", c->name);
+        text[0] = '\0';
+        if (c->baseline)
+            fdf_landed(text, sizeof(text), 20, 60, 0);
+        size_t used = strlen(text);
+        int n = snprintf(text + used, sizeof(text) - used, "%s", c->rows);
+        ASSERT(n >= 0 && (size_t)n < sizeof(text) - used);
+        ASSERT(fdf_write(path, text));
+        struct zcl_goal_result r = zcl_goals_measure(&o, "D6");
+        ASSERT(r.grade == c->grade);
+        ASSERT(fdf_has(r.evidence, c->count));
+        ASSERT(fdf_has(r.evidence, c->median));
+        if (c->skipped)
+            ASSERT(fdf_has(r.evidence, "1 row(s) skipped"));
+        else
+            ASSERT(!fdf_has(r.evidence, "skipped"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fdf_case_arithmetic(const char *root)
+{
+    static const struct fdf_arithmetic_case cases[] = {
+        {"minimum landing precedes modern submit", FDF_NOW, true,
+         "{\"ts\":\"2026-10-20T00:00:00Z\",\"state\":\"landed\","
+         "\"landed_at\":-9223372036854775808}\n",
+         ZCL_GOAL_PARTIAL, "20 landed row(s)", "median 60 s", true},
+        {"maximum future landing is outside the window", FDF_NOW, true,
+         "{\"ts\":\"2026-10-20T00:00:00Z\",\"state\":\"landed\","
+         "\"landed_at\":9223372036854775807}\n",
+         ZCL_GOAL_PARTIAL, "20 landed row(s)", "median 60 s", false},
+        {"ancient submit makes maximum landing duration unrepresentable",
+         INT64_MAX, false,
+         "{\"ts\":\"1970-01-01T00:00:00Z\",\"state\":\"landed\","
+         "\"landed_at\":9223372036854775807}\n"
+         "{\"ts\":\"0001-01-01T00:00:00Z\",\"state\":\"landed\","
+         "\"landed_at\":9223372036854775807}\n",
+         ZCL_GOAL_FAIL, "1 landed row(s)",
+         "median 9223372036854775807 s", true},
+        {"two representable large durations have an exact median",
+         INT64_MAX, false,
+         "{\"ts\":\"1970-01-01T00:00:00Z\",\"state\":\"landed\","
+         "\"landed_at\":9223372036854775805}\n"
+         "{\"ts\":\"1970-01-01T00:00:00Z\",\"state\":\"landed\","
+         "\"landed_at\":9223372036854775807}\n",
+         ZCL_GOAL_FAIL, "2 landed row(s)",
+         "median 9223372036854775806 s", false},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        failures += fdf_arithmetic_one(root, &cases[i]);
+    return failures;
+}
+
 int test_fleet_goals_feedback(void);
 int test_fleet_goals_feedback(void)
 {
@@ -216,6 +293,7 @@ int test_fleet_goals_feedback(void)
     failures += fdf_case_fail(root);
     failures += fdf_case_empty(root);
     failures += fdf_case_malformed(root);
+    failures += fdf_case_arithmetic(root);
     (void)test_rm_rf_recursive(root);
     if (failures == 0)
         printf("test_fleet_goals_feedback: all passed\n");

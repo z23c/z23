@@ -5,7 +5,8 @@
  *          95th percentile of those durations over the last 7 days.
  *
  * Rows that cannot give a duration (no landed_at, unreadable ts, landed
- * before submit) are skipped and counted in the evidence. Rows outside the
+ * before submit, or an unrepresentable duration) are skipped and counted in
+ * the evidence. Rows outside the
  * window are not usable and are not counted as skipped. */
 
 #include "native_fleet_goals_feedback.h"
@@ -17,6 +18,7 @@
 #include "util/compare.h"
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,13 +75,17 @@ static void fbk_row(const struct json_value *row, void *user)
         r->skipped++;
         return;
     }
-    duration = landed - submitted;
-    if (duration < 0) {
+    if (landed < submitted) {
         r->skipped++;
         return;
     }
     if (landed > r->now || landed < r->now - FBK_WEEK_S)
         return;
+    if (submitted < 0 && landed > INT64_MAX + submitted) {
+        r->skipped++;
+        return;
+    }
+    duration = landed - submitted;
     if (r->count >= FBK_ROWS_MAX) {
         r->overflow++;
         return;
@@ -98,7 +104,8 @@ static int64_t fbk_median(const int64_t *sorted, size_t n)
 {
     if (n % 2)
         return sorted[n / 2];
-    return (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+    int64_t a = sorted[n / 2 - 1], b = sorted[n / 2];
+    return a + (b - a) / 2;
 }
 
 static enum zcl_goal_grade fbk_grade(int64_t p95_s)
@@ -116,7 +123,8 @@ static struct zcl_goal_result fbk_measured(struct fbk_rows *r)
     if (r->skipped > 0)
         (void)snprintf(skip, sizeof(skip),
                        "; %zu row(s) skipped (no landed_at, unreadable ts or "
-                       "landed before submit)", r->skipped);
+                       "landed before submit or unrepresentable duration)",
+                       r->skipped);
     return zcl_goal_make(fbk_grade(p95), FBK_NEXT_MEASURED,
                          "%zu landed row(s) in the last 7 days, median %lld s, "
                          "p95 %lld s, bar %d s%s", r->count, (long long)median,
