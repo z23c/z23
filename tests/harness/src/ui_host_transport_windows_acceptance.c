@@ -57,6 +57,29 @@ static DWORD WINAPI server_main(void *opaque)
     return context->accepted ? 0u : 1u;
 }
 
+static ui_host_transport_t connect_to_server_with_retries(void)
+{
+    ui_host_transport_t client = UI_HOST_TRANSPORT_INVALID;
+    for (unsigned attempt = 0; attempt < 100u; attempt++) {
+        client = ui_host_transport_connect_once();
+        if (client != UI_HOST_TRANSPORT_INVALID) break;
+        Sleep(5);
+    }
+    return client;
+}
+
+static bool exchange_ping_pong_with_server(ui_host_transport_t client)
+{
+    static const uint8_t request[4] = {'p', 'i', 'n', 'g'};
+    uint8_t reply[4] = {0};
+    bool exchanged = client != UI_HOST_TRANSPORT_INVALID &&
+        ui_host_transport_send_all(client, request, sizeof(request)) &&
+        ui_host_transport_recv_all(client, reply, sizeof(reply), 3000) &&
+        reply[0] == 'p' && reply[1] == 'o' && reply[2] == 'n' &&
+        reply[3] == 'g';
+    return exchanged;
+}
+
 int main(void)
 {
     struct server_context context = {
@@ -66,19 +89,8 @@ int main(void)
     if (context.listener == UI_HOST_TRANSPORT_INVALID) return 1;
     HANDLE thread = CreateThread(NULL, 0, server_main, &context, 0, NULL);
     if (!thread) return 2;
-    ui_host_transport_t client = UI_HOST_TRANSPORT_INVALID;
-    for (unsigned attempt = 0; attempt < 100u; attempt++) {
-        client = ui_host_transport_connect_once();
-        if (client != UI_HOST_TRANSPORT_INVALID) break;
-        Sleep(5);
-    }
-    static const uint8_t request[4] = {'p', 'i', 'n', 'g'};
-    uint8_t reply[4] = {0};
-    bool exchanged = client != UI_HOST_TRANSPORT_INVALID &&
-        ui_host_transport_send_all(client, request, sizeof(request)) &&
-        ui_host_transport_recv_all(client, reply, sizeof(reply), 3000) &&
-        reply[0] == 'p' && reply[1] == 'o' && reply[2] == 'n' &&
-        reply[3] == 'g';
+    ui_host_transport_t client = connect_to_server_with_retries();
+    bool exchanged = exchange_ping_pong_with_server(client);
     if (exchanged) Sleep(50);
     ui_host_transport_close(client);
     DWORD wait = WaitForSingleObject(thread, 5000);
