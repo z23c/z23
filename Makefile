@@ -8942,8 +8942,8 @@ $(P2_INVARIANT_CHECK_BIN): tools/p2_invariant_check.c vendor/include/sqlite3.h v
 # Read-only SQL query CLI over any sqlite db (progress.kv, node.db, fixture
 # datadirs). Python is banned and the host has no sqlite3 CLI; this is the
 # shell-side diagnostic primitive (the native `sql` command covers node.db).
-ifeq ($(ZCL_HOST_WINDOWS),1)
-# Windows has no argv0 symlink: each tool is its own executable.
+# Standalone on every host, not an argv0 link to z23: lint and the gates that
+# name build/bin/sqlq must not build the full release z23 (tools/sqlq_standalone.c).
 SQLQ_BIN = $(BIN_DIR)/sqlq$(ZCL_HOST_EXEEXT)
 .PHONY: sqlq
 sqlq: $(SQLQ_BIN)
@@ -8954,18 +8954,9 @@ $(SQLQ_BIN): tools/sqlq.c tools/sqlq_standalone.c tools/multicall.h \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/include \
 	    -o $@ tools/sqlq.c tools/sqlq_standalone.c \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
-else
-SQLQ_BIN = $(BIN_DIR)/sqlq
-.PHONY: sqlq
-sqlq: $(SQLQ_BIN)
-$(SQLQ_BIN): $(Z23_BIN)
-	@mkdir -p $(dir $@)
-	ln -sf $(notdir $(Z23_BIN)) $@
-endif
 
 # Nested JSON path query for operator scripts. Python is banned; grep/sed
 # covers flat RPC fields, and this C23 walker covers nested envelopes.
-ifeq ($(ZCL_HOST_WINDOWS),1)
 JSONQ_BIN = $(BIN_DIR)/jsonq$(ZCL_HOST_EXEEXT)
 .PHONY: jsonq
 jsonq: $(JSONQ_BIN)
@@ -8979,14 +8970,6 @@ $(JSONQ_BIN): tools/jsonq.c tools/jsonq_standalone.c tools/multicall.h \
 	    -Icontexts/commons/packages/zjsonp/include -Icontexts/commons/packages/zutf8/include \
 	    -o $@ tools/jsonq.c tools/jsonq_standalone.c contexts/commons/packages/zjsonp/src/zjsonp.c \
 	    contexts/commons/packages/zutf8/src/zutf8.c
-else
-JSONQ_BIN = $(BIN_DIR)/jsonq
-.PHONY: jsonq
-jsonq: $(JSONQ_BIN)
-$(JSONQ_BIN): $(Z23_BIN)
-	@mkdir -p $(dir $@)
-	ln -sf $(notdir $(Z23_BIN)) $@
-endif
 
 # PreToolUse hook for Claude Code: refuses the never-do list (datadirs,
 # reindex flag, Python, git identity, spend/key export, host config, git
