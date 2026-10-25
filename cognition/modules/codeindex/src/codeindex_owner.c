@@ -54,29 +54,33 @@ long long codeindex_generation_age_s(const char *root, long long now_unix)
     return age < 0 ? 0 : age;
 }
 
-static bool owner_claim_inputs_valid(const char *root, long long pid,
-                                     long long heartbeat_unix, char *path,
-                                     size_t path_cap)
+/* The helpers return the failure text (NULL on success) and never log: the
+ * one LOG_FAIL sits in codeindex_owner_claim, so the emitted line keeps the
+ * same function name and message text as before the split. */
+static const char *owner_claim_line(long long pid, long long heartbeat_unix,
+                                    char *line, size_t cap, int *n_out)
 {
-    if (!owner_path(root, path, path_cap) || pid <= 0 ||
-        heartbeat_unix <= 0)
-        LOG_FAIL("codeindex", "invalid owner claim");
-    return true;
+    if (pid <= 0 || heartbeat_unix <= 0) return "invalid owner claim";
+    int n = snprintf(line, cap, "%s %lld %lld\n", CI_OWNER_MAGIC, pid,
+                     heartbeat_unix);
+    if (n <= 0 || (size_t)n >= cap) return "owner claim does not fit";
+    *n_out = n;
+    return NULL;
 }
 
-static bool owner_claim_stage_paths(const char *root, const char *path,
-                                    char *tmp, size_t tmp_cap, char *dir,
-                                    size_t dir_cap)
+static const char *owner_claim_paths(const char *root, char *path,
+                                     size_t path_cap, char *tmp,
+                                     size_t tmp_cap, char *dir, size_t dir_cap)
 {
+    if (!owner_path(root, path, path_cap)) return "invalid owner claim";
     int tn = snprintf(tmp, tmp_cap, "%s.tmp", path);
     int dn = snprintf(dir, dir_cap, "%s/.codeindex", root);
-    if (tn <= 0 || (size_t)tn >= tmp_cap || dn <= 0 ||
-        (size_t)dn >= dir_cap)
-        LOG_FAIL("codeindex", "owner claim path too long");
-    return true;
+    if (tn <= 0 || (size_t)tn >= tmp_cap || dn <= 0 || (size_t)dn >= dir_cap)
+        return "owner claim path too long";
+    return NULL;
 }
 
-static bool owner_claim_dir_ensure(const char *dir)
+static const char *owner_claim_dir_ensure(const char *dir)
 {
 #if defined(_WIN32)
     /* .codeindex is an owner-private marker directory: on Windows that
@@ -85,54 +89,50 @@ static bool owner_claim_dir_ensure(const char *dir)
      * arm goes through the private-directory seam codeindex_build_windows.c
      * already uses for its own owner-private index directory. */
     if (!platform_private_directory_ensure(dir))
-        LOG_FAIL("codeindex", "create index directory for owner marker");
+        return "create index directory for owner marker";
 #else
     if (mkdir(dir, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL("codeindex", "create index directory for owner marker");
+        return "create index directory for owner marker";
 #endif
-    return true;
+    return NULL;
 }
 
-static bool owner_marker_publish(const char *tmp, const char *path,
-                                 const char *line, size_t len)
+static const char *owner_marker_publish(const char *tmp, const char *path,
+                                        const char *line, size_t len)
 {
+    /* Whole-file replace: a reader must never see half a heartbeat. The line
+     * is shorter than a page and a single write of it is atomic in practice
+     * on every filesystem this runs on; truncate-then-write would not be. */
     FILE *f = fopen(tmp, "wb");
-    if (!f) LOG_FAIL("codeindex", "open owner marker for write");
+    if (!f) return "open owner marker for write";
     bool ok = fwrite(line, 1, len, f) == len;
     ok = fflush(f) == 0 && ok;
     ok = fclose(f) == 0 && ok;
     if (!ok || platform_path_replace(tmp, path) != 0) {
         (void)remove(tmp);
-        LOG_FAIL("codeindex", "publish owner marker");
+        return "publish owner marker";
     }
-    return true;
+    return NULL;
 }
 
 bool codeindex_owner_claim(const char *root, long long pid,
                            long long heartbeat_unix)
 {
-    char path[CI_PATH_MAX];
-    if (!owner_claim_inputs_valid(root, pid, heartbeat_unix, path,
-                                  sizeof(path)))
-        return false;
-    /* Whole-file replace: a reader must never see half a heartbeat. The line
-     * is shorter than a page and a single write of it is atomic in practice
-     * on every filesystem this runs on; truncate-then-write would not be. */
+    char path[CI_PATH_MAX], tmp[CI_PATH_MAX], dir[CI_PATH_MAX];
     char line[CI_OWNER_LINE_MAX];
-    int n = snprintf(line, sizeof(line), "%s %lld %lld\n", CI_OWNER_MAGIC, pid,
-                     heartbeat_unix);
-    if (n <= 0 || (size_t)n >= sizeof(line))
-        LOG_FAIL("codeindex", "owner claim does not fit");
-    char tmp[CI_PATH_MAX], dir[CI_PATH_MAX];
-    if (!owner_claim_stage_paths(root, path, tmp, sizeof(tmp), dir,
-                                 sizeof(dir)))
-        return false;
+    int n = 0;
+    const char *err = owner_claim_line(pid, heartbeat_unix, line, sizeof(line),
+                                       &n);
+    if (!err)
+        err = owner_claim_paths(root, path, sizeof(path), tmp, sizeof(tmp),
+                                dir, sizeof(dir));
     /* A checkout can be claimed before it has ever been indexed — that is
      * the ordinary first cycle, and the claim is what stops a reader
      * building the first generation underneath the owner. */
-    if (!owner_claim_dir_ensure(dir))
-        return false;
-    return owner_marker_publish(tmp, path, line, (size_t)n);
+    if (!err) err = owner_claim_dir_ensure(dir);
+    if (!err) err = owner_marker_publish(tmp, path, line, (size_t)n);
+    if (err) LOG_FAIL("codeindex", "%s", err);
+    return true;
 }
 
 bool codeindex_owner_read(const char *root, long long *pid_out,
