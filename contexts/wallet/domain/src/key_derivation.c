@@ -162,6 +162,67 @@ struct zcl_result domain_wallet_derive_pubkey_path(
 
 /* ── Path string parsing ──────────────────────────────────────────── */
 
+/* Outcome of consuming the separator that follows a path component. */
+enum path_sep_result {
+    PATH_SEP_OK,
+    PATH_SEP_TRAILING_SLASH,
+    PATH_SEP_UNEXPECTED_CHAR,
+};
+
+/* Advance *p past an optional leading "m" or "m/" master marker.
+ * Returns false when the path ends immediately after the "m/". */
+static bool path_skip_master_marker(const char **p)
+{
+    if (**p == 'm' || **p == 'M') {
+        (*p)++;
+        if (**p == '/') {
+            (*p)++;
+            if (**p == '\0')
+                return false;
+        }
+    }
+    return true;
+}
+
+/* Parse the decimal component at *p plus its optional hardened
+ * marker. On success store the index and advance *p past the
+ * component; return false on any numeric syntax or range error. */
+static bool path_parse_component(const char **p, uint32_t *index_out)
+{
+    char *endptr;
+    errno = 0;
+    unsigned long val = strtoul(*p, &endptr, 10);
+    if (errno != 0 || endptr == *p || val > 0x7FFFFFFFu)
+        return false;
+
+    uint32_t index = (uint32_t)val;
+
+    /* Hardened marker: ', h, or H. */
+    if (*endptr == '\'' || *endptr == 'h' || *endptr == 'H') {
+        index |= DOMAIN_WALLET_BIP32_HARDENED;
+        endptr++;
+    }
+
+    *index_out = index;
+    *p = endptr;
+    return true;
+}
+
+/* Consume the '/' after a component, or accept end-of-string.
+ * *p advances only when PATH_SEP_OK is returned. */
+static enum path_sep_result path_consume_separator(const char **p)
+{
+    if (**p == '/') {
+        (*p)++;
+        if (**p == '\0')
+            return PATH_SEP_TRAILING_SLASH;
+        return PATH_SEP_OK;
+    }
+    if (**p != '\0')
+        return PATH_SEP_UNEXPECTED_CHAR;
+    return PATH_SEP_OK;
+}
+
 struct zcl_result domain_wallet_parse_path(
         const char *path,
         uint32_t *indices_out,
@@ -184,15 +245,9 @@ struct zcl_result domain_wallet_parse_path(
     const char *p = path;
 
     /* Skip optional leading "m" or "m/" */
-    if (*p == 'm' || *p == 'M') {
-        p++;
-        if (*p == '/') {
-            p++;
-            if (*p == '\0')
-                return ZCL_ERR(DOMAIN_WALLET_KEY_DERIVATION_ERR_PATH_SYNTAX,
-                               "parse_path: trailing slash after master marker");
-        }
-    }
+    if (!path_skip_master_marker(&p))
+        return ZCL_ERR(DOMAIN_WALLET_KEY_DERIVATION_ERR_PATH_SYNTAX,
+                       "parse_path: trailing slash after master marker");
 
     if (*p == '\0') {
         *count_out = 0;
@@ -206,35 +261,21 @@ struct zcl_result domain_wallet_parse_path(
                            "parse_path: more than %d components in '%s'",
                            max_indices, path);
 
-        char *endptr;
-        errno = 0;
-        unsigned long val = strtoul(p, &endptr, 10);
-        if (errno != 0 || endptr == p || val > 0x7FFFFFFFu)
+        uint32_t index;
+        if (!path_parse_component(&p, &index))
             return ZCL_ERR(DOMAIN_WALLET_KEY_DERIVATION_ERR_PATH_SYNTAX,
                            "parse_path: invalid numeric component in '%s'", path);
 
-        uint32_t index = (uint32_t)val;
-
-        /* Hardened marker: ', h, or H. */
-        if (*endptr == '\'' || *endptr == 'h' || *endptr == 'H') {
-            index |= DOMAIN_WALLET_BIP32_HARDENED;
-            endptr++;
-        }
-
         indices_out[count++] = index;
 
-        if (*endptr == '/') {
-            endptr++;
-            if (*endptr == '\0')
-                return ZCL_ERR(DOMAIN_WALLET_KEY_DERIVATION_ERR_PATH_SYNTAX,
-                               "parse_path: trailing slash in '%s'", path);
-        } else if (*endptr != '\0') {
+        enum path_sep_result sep = path_consume_separator(&p);
+        if (sep == PATH_SEP_TRAILING_SLASH)
+            return ZCL_ERR(DOMAIN_WALLET_KEY_DERIVATION_ERR_PATH_SYNTAX,
+                           "parse_path: trailing slash in '%s'", path);
+        if (sep == PATH_SEP_UNEXPECTED_CHAR)
             return ZCL_ERR(DOMAIN_WALLET_KEY_DERIVATION_ERR_PATH_SYNTAX,
                            "parse_path: unexpected character '%c' in '%s'",
-                           *endptr, path);
-        }
-
-        p = endptr;
+                           *p, path);
     }
 
     *count_out = count;
