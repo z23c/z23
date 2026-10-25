@@ -21,6 +21,72 @@
 
 #define UTXO_LADDER_BLOCKER_ID "utxo_ladder_mismatch"
 
+/* Count DIVERGENT rungs; on the first one, record its height. Leaves
+ * *first_divergent_height untouched when nothing diverged (caller seeds -1). */
+static size_t utxo_ladder_count_divergent(
+    const struct utxo_root_ladder_verify_result *results, size_t n,
+    int32_t *first_divergent_height)
+{
+    size_t divergent = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (results[i].status == UTXO_ROOT_LADDER_VERIFY_DIVERGENT) {
+            if (divergent == 0)
+                *first_divergent_height = results[i].height;
+            divergent++;
+        }
+    }
+    return divergent;
+}
+
+/* Read the COVERAGE pair from results[0], keeping the pre-validation
+ * fallbacks (compared=0, total=n) used when no rungs can be read. */
+static void utxo_ladder_read_coverage_pair(
+    const struct utxo_root_ladder_verify_result *results, size_t n,
+    size_t *compared, size_t *total)
+{
+    *compared = (results && n > 0) ? results[0].compared : 0;
+    *total    = (results && n > 0) ? results[0].total    : n;
+}
+
+/* Build the full (deliberately oversized) blocker reason, then fit it into
+ * `reason` (BLOCKER_REASON_MAX). */
+static void utxo_ladder_compose_blocker_reason(
+    char *reason, size_t reason_size, size_t divergent, size_t n,
+    size_t compared, size_t total, int32_t first_divergent_height,
+    bool observe_only)
+{
+    /* The DEFAULT (fail-closed) form is longer than BLOCKER_REASON_MAX. Build
+     * whole into an oversized local, then mark and log the cut via
+     * zcl_text_fit() (never silent: it leaves an in-band [cut N/cap] marker
+     * and WARN-logs the full untruncated text either way). */
+    char full[BLOCKER_REASON_MAX * 2];
+    snprintf(full, sizeof(full),
+             "utxo root ladder mismatch: %zu of %zu locked rung(s) diverged "
+             "(coverage: %zu of %zu compared this call), first at h=%d (this "
+             "node's own coins_kv boundary root differs from the locked "
+             "golden-height ladder — state-wrong-coin class). %s",
+             divergent, n, compared, total, first_divergent_height,
+             observe_only
+                 ? "OBSERVE-ONLY (ZCL_UTXO_LADDER_OBSERVE_ONLY): H* not capped."
+                 : "FAIL-CLOSED: H* capped below the divergent rung; advance "
+                   "holds until validated UTXO state is restored (sovereign "
+                   "cure, owner-gated).");
+    (void)zcl_text_fit(reason, reason_size, full, "utxo_root_ladder_tripwire",
+                       "utxo_root_ladder.reason");
+}
+
+/* Emit the drift-detected event once a mismatch blocker has been set. */
+static void utxo_ladder_emit_drift_detected(int32_t first_divergent_height,
+                                            size_t divergent, size_t n,
+                                            bool observe_only)
+{
+    event_emitf(EV_UTXO_DRIFT_DETECTED, 0,
+                "verdict=utxo_ladder_mismatch h=%d divergent=%zu of=%zu "
+                "observe_only=%d fail_closed=%d",
+                first_divergent_height, divergent, n,
+                observe_only ? 1 : 0, observe_only ? 0 : 1);
+}
+
 /* Fail-closed cap: write an ok=0 utxo_apply_log verdict at the first divergent
  * boundary. The (untouched) reducer_frontier H* fold treats any ok=0 row in a
  * success-checked log as a contiguity terminator, so H* caps at
@@ -56,8 +122,9 @@ utxo_root_ladder_tripwire_report(sqlite3 *db,
      * label, never to gate accept/reject, a blocker, or the H* cap —
      * those still key exclusively off `divergent` below, unchanged from
      * before this fix. */
-    size_t compared = (results && n > 0) ? results[0].compared : 0;
-    size_t total    = (results && n > 0) ? results[0].total    : n;
+    size_t compared;
+    size_t total;
+    utxo_ladder_read_coverage_pair(results, n, &compared, &total);
 
     if (!results || n == 0) {
         LOG_INFO("utxo_ladder",
@@ -67,14 +134,8 @@ utxo_root_ladder_tripwire_report(sqlite3 *db,
     }
 
     int32_t first_divergent_height = -1;
-    size_t divergent = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (results[i].status == UTXO_ROOT_LADDER_VERIFY_DIVERGENT) {
-            if (divergent == 0)
-                first_divergent_height = results[i].height;
-            divergent++;
-        }
-    }
+    size_t divergent =
+        utxo_ladder_count_divergent(results, n, &first_divergent_height);
 
     if (divergent == 0) {
         if (compared == 0) {
@@ -103,25 +164,10 @@ utxo_root_ladder_tripwire_report(sqlite3 *db,
      * to the historical evidence-only posture. */
     bool observe_only = getenv("ZCL_UTXO_LADDER_OBSERVE_ONLY") != NULL;
 
-    /* The DEFAULT (fail-closed) form is longer than BLOCKER_REASON_MAX. Build
-     * whole into an oversized local, then mark and log the cut via
-     * zcl_text_fit() (never silent: it leaves an in-band [cut N/cap] marker
-     * and WARN-logs the full untruncated text either way). */
-    char full[BLOCKER_REASON_MAX * 2];
-    snprintf(full, sizeof(full),
-             "utxo root ladder mismatch: %zu of %zu locked rung(s) diverged "
-             "(coverage: %zu of %zu compared this call), first at h=%d (this "
-             "node's own coins_kv boundary root differs from the locked "
-             "golden-height ladder — state-wrong-coin class). %s",
-             divergent, n, compared, total, first_divergent_height,
-             observe_only
-                 ? "OBSERVE-ONLY (ZCL_UTXO_LADDER_OBSERVE_ONLY): H* not capped."
-                 : "FAIL-CLOSED: H* capped below the divergent rung; advance "
-                   "holds until validated UTXO state is restored (sovereign "
-                   "cure, owner-gated).");
     char reason[BLOCKER_REASON_MAX];
-    (void)zcl_text_fit(reason, sizeof(reason), full, "utxo_root_ladder_tripwire",
-                       "utxo_root_ladder.reason");
+    utxo_ladder_compose_blocker_reason(reason, sizeof(reason), divergent, n,
+                                       compared, total,
+                                       first_divergent_height, observe_only);
 
     struct blocker_record r;
     if (!blocker_init(&r, UTXO_LADDER_BLOCKER_ID, "utxo_root_ladder_tripwire",
@@ -144,11 +190,8 @@ utxo_root_ladder_tripwire_report(sqlite3 *db,
     }
 
     if (blocker_set(&r) == 0)
-        event_emitf(EV_UTXO_DRIFT_DETECTED, 0,
-                    "verdict=utxo_ladder_mismatch h=%d divergent=%zu of=%zu "
-                    "observe_only=%d fail_closed=%d",
-                    first_divergent_height, divergent, n,
-                    observe_only ? 1 : 0, observe_only ? 0 : 1);
+        utxo_ladder_emit_drift_detected(first_divergent_height, divergent, n,
+                                        observe_only);
 
     return UTXO_ROOT_LADDER_TRIPWIRE_MISMATCH;
 }

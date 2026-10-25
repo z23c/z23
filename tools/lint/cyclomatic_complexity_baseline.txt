@@ -1364,7 +1364,6 @@ engine/jobs/src/utxo_apply_nullifiers.c:shielded_history_preflight:27
 engine/jobs/src/utxo_apply_stage.c:step_apply:64
 engine/jobs/src/utxo_apply_stage_fallback.c:hash_bound_fallback:22
 engine/jobs/src/utxo_apply_suffix_inputs.c:utxo_apply_restore_suffix_inputs:18
-engine/jobs/src/utxo_root_ladder_tripwire.c:utxo_root_ladder_tripwire_report:19
 engine/jobs/src/validate_headers_report.c:validate_headers_stage_window_report:16
 engine/jobs/src/validate_headers_stage.c:recheck_failed_rows:53
 engine/jobs/src/validate_headers_stage.c:step_validate:23
