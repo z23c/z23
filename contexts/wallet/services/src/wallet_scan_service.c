@@ -171,28 +171,25 @@ static bool scan_block_txs(const struct block *blk, int height,
     return any_found;
 }
 
-/* The sole durable write path for a completed transparent wallet scan.
- * An empty result uses the same transaction and model-owned table APIs as a
- * populated result, so Controllers never need table knowledge or a second
- * commit/rollback policy. */
-static int wallet_scan_store_results(struct node_db *ndb,
-                                     struct scan_utxo_set *uset,
-                                     struct scan_wtx_list *wl)
+/* Begin the SQLite write transaction that scopes a result write. */
+static bool wallet_scan_begin_write_tx(struct node_db *ndb)
 {
-    bool write_tx_open = false;
+    return ndb && ndb->open && node_db_begin(ndb);
+}
 
-    if (!ndb || !ndb->open || !node_db_begin(ndb))
-        LOG_ERR("wallet_scan", "result write begin failed: %s",
-                (ndb && ndb->db) ? sqlite3_errmsg(ndb->db)
-                                 : "db unavailable");
-    write_tx_open = true;
-    if (!db_wallet_utxo_delete_all(ndb) ||
-        !db_wallet_tx_delete_all(ndb)) {
-        LOG_WARN("wallet_scan",
-                 "wallet_scan: model-owned result reset failed");
-        goto write_fail;
-    }
+/* Clear both model-owned result tables inside the open write transaction. */
+static bool wallet_scan_delete_result_rows(struct node_db *ndb)
+{
+    return db_wallet_utxo_delete_all(ndb) &&
+           db_wallet_tx_delete_all(ndb);
+}
 
+/* Write the in-memory UTXO set as wallet_utxo rows, marking spends.
+ * Returns 0 on success, 1 when a wallet_utxo save failed, 2 when a
+ * mark_spent failed; the caller logs and owns the rollback path. */
+static int wallet_scan_store_utxo_rows(struct node_db *ndb,
+                                       struct scan_utxo_set *uset)
+{
     for (int i = 0; i < uset->count; i++) {
         struct scan_mem_utxo *u = &uset->items[i];
         struct db_wallet_utxo du;
@@ -205,19 +202,22 @@ static int wallet_scan_store_results(struct node_db *ndb,
         du.script_len = u->script_len;
         du.height = u->height;
         du.is_coinbase = u->is_coinbase;
-        if (!db_wallet_utxo_save(ndb, &du)) {
-            LOG_WARN("wallet_scan", "wallet_scan: wallet_utxo save failed");
-            goto write_fail;
-        }
+        if (!db_wallet_utxo_save(ndb, &du))
+            return 1;
         if (u->spent &&
             !db_wallet_utxo_mark_spent(ndb, u->txid, u->vout,
-                                       u->spent_txid, u->spent_vin)) {
-            LOG_WARN("wallet_scan",
-                     "wallet_scan: wallet_utxo mark_spent failed");
-            goto write_fail;
-        }
+                                       u->spent_txid, u->spent_vin))
+            return 2;
     }
+    return 0;
+}
 
+/* Write the in-memory wallet transaction list as wallet_tx rows.
+ * Returns false when a wallet_tx save failed; the caller logs and owns
+ * the rollback path. */
+static bool wallet_scan_store_wtx_rows(struct node_db *ndb,
+                                       struct scan_wtx_list *wl)
+{
     for (int i = 0; i < wl->count; i++) {
         struct scan_mem_wtx *t = &wl->items[i];
         struct db_wallet_tx dt;
@@ -230,10 +230,47 @@ static int wallet_scan_store_results(struct node_db *ndb,
         dt.time_received = (int64_t)t->time;
         dt.from_me = t->from_me;
         dt.fee = t->fee;
-        if (!db_wallet_tx_save(ndb, &dt)) {
-            LOG_WARN("wallet_scan", "wallet_scan: wallet_tx save failed");
-            goto write_fail;
-        }
+        if (!db_wallet_tx_save(ndb, &dt))
+            return false;
+    }
+    return true;
+}
+
+/* The sole durable write path for a completed transparent wallet scan.
+ * An empty result uses the same transaction and model-owned table APIs as a
+ * populated result, so Controllers never need table knowledge or a second
+ * commit/rollback policy. */
+static int wallet_scan_store_results(struct node_db *ndb,
+                                     struct scan_utxo_set *uset,
+                                     struct scan_wtx_list *wl)
+{
+    bool write_tx_open = false;
+
+    if (!wallet_scan_begin_write_tx(ndb))
+        LOG_ERR("wallet_scan", "result write begin failed: %s",
+                (ndb && ndb->db) ? sqlite3_errmsg(ndb->db)
+                                 : "db unavailable");
+    write_tx_open = true;
+    if (!wallet_scan_delete_result_rows(ndb)) {
+        LOG_WARN("wallet_scan",
+                 "wallet_scan: model-owned result reset failed");
+        goto write_fail;
+    }
+
+    int utxo_store = wallet_scan_store_utxo_rows(ndb, uset);
+    if (utxo_store == 1) {
+        LOG_WARN("wallet_scan", "wallet_scan: wallet_utxo save failed");
+        goto write_fail;
+    }
+    if (utxo_store == 2) {
+        LOG_WARN("wallet_scan",
+                 "wallet_scan: wallet_utxo mark_spent failed");
+        goto write_fail;
+    }
+
+    if (!wallet_scan_store_wtx_rows(ndb, wl)) {
+        LOG_WARN("wallet_scan", "wallet_scan: wallet_tx save failed");
+        goto write_fail;
     }
 
     if (!node_db_commit(ndb)) {

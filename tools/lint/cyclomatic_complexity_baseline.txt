@@ -443,7 +443,6 @@ contexts/wallet/services/src/wallet_backup_crypto.c:wallet_backup_decrypt_file:1
 contexts/wallet/services/src/wallet_backup_crypto.c:wbs_write_file_atomic:20
 contexts/wallet/services/src/wallet_backup_service.c:wbs_hash_regular_file:23
 contexts/wallet/services/src/wallet_recovery_service.c:wallet_recovery_run:46
-contexts/wallet/services/src/wallet_scan_service.c:wallet_scan_store_results:17
 contexts/wallet/services/src/yardsale_wallet_service_buy.c:yardsale_wallet_buy:21
 contexts/wallet/services/src/yardsale_wallet_service_buy.c:yw_buy_commit:19
 core/chainparams/src/pow.c:GetNextWorkRequired:21
