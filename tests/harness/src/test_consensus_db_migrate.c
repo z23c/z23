@@ -53,10 +53,9 @@ static bool cdbt_exec(sqlite3 *db, const char *sql)
     return rc == SQLITE_OK;
 }
 
-/* Build a populated progress.kv at <dir>/progress.kv with a small but complete
- * kernel: 3 coins, 1 sprout + 1 sapling anchor, 2 anchor_state rows, 2
- * nullifiers, 2 stage cursors, 1 progress_meta row. Returns true on success. */
-static bool cdbt_build_source(const char *dir)
+/* Open the read-write source database at <dir>/progress.kv; on failure any
+ * partial handle is closed and *db_out is left untouched. */
+static bool cdbt_open_source_db(const char *dir, sqlite3 **db_out)
 {
     char path[300];
     snprintf(path, sizeof(path), "%s/progress.kv", dir);
@@ -65,10 +64,22 @@ static bool cdbt_build_source(const char *dir)
         if (db) sqlite3_close(db);
         return false;
     }
-    bool ok = coins_kv_ensure_schema(db) && anchor_kv_ensure_schema(db) &&
-              nullifier_kv_ensure_schema(db) && progress_meta_table_ensure(db) &&
-              stage_table_ensure(db);
+    *db_out = db;
+    return true;
+}
 
+/* Ensure every schema the kernel snapshot reads from the source db. */
+static bool cdbt_ensure_source_schemas(sqlite3 *db)
+{
+    return coins_kv_ensure_schema(db) && anchor_kv_ensure_schema(db) &&
+           nullifier_kv_ensure_schema(db) && progress_meta_table_ensure(db) &&
+           stage_table_ensure(db);
+}
+
+/* Seed the 3 coins rows (index 0 is the coinbase) into the source db. */
+static bool cdbt_seed_source_coins(sqlite3 *db)
+{
+    bool ok = true;
     for (int i = 0; ok && i < 3; i++) {
         uint8_t txid[32];
         cdbt_txid(txid, (uint8_t)(0x10 + i));
@@ -76,32 +87,60 @@ static bool cdbt_build_source(const char *dir)
         ok = coins_kv_add(db, txid, (uint32_t)i, 5000 + i, 100 + i,
                           i == 0, script, sizeof(script));
     }
+    return ok;
+}
 
-    ok = ok &&
-         cdbt_exec(db,
-             "INSERT INTO sprout_anchors(anchor,height,tree) "
-             "VALUES(x'aa01',101,x'01')") &&
-         cdbt_exec(db,
-             "INSERT INTO sapling_anchors(anchor,height,tree) "
-             "VALUES(x'bb01',102,x'02')") &&
-         cdbt_exec(db,
-             "INSERT INTO anchor_state(pool,activation_cursor) VALUES(0,0)") &&
-         cdbt_exec(db,
-             "INSERT INTO anchor_state(pool,activation_cursor) VALUES(1,102)") &&
-         cdbt_exec(db,
-             "INSERT INTO nullifiers(nf,pool,height) VALUES(x'cc01',0,50)") &&
-         cdbt_exec(db,
-             "INSERT INTO nullifiers(nf,pool,height) VALUES(x'cc02',1,51)") &&
-         cdbt_exec(db,
-             "INSERT INTO stage_cursor(name,cursor,updated_at) "
-             "VALUES('utxo_apply',100,1)") &&
-         cdbt_exec(db,
-             "INSERT INTO stage_cursor(name,cursor,updated_at) "
-             "VALUES('proof_validate',101,1)") &&
-         cdbt_exec(db,
-             "INSERT INTO progress_meta(key,value) "
-             "VALUES('coins_applied_height',x'64')");
+/* Insert the sprout/sapling anchors and both anchor_state rows. */
+static bool cdbt_insert_source_anchor_rows(sqlite3 *db)
+{
+    return cdbt_exec(db,
+               "INSERT INTO sprout_anchors(anchor,height,tree) "
+               "VALUES(x'aa01',101,x'01')") &&
+           cdbt_exec(db,
+               "INSERT INTO sapling_anchors(anchor,height,tree) "
+               "VALUES(x'bb01',102,x'02')") &&
+           cdbt_exec(db,
+               "INSERT INTO anchor_state(pool,activation_cursor) VALUES(0,0)") &&
+           cdbt_exec(db,
+               "INSERT INTO anchor_state(pool,activation_cursor) VALUES(1,102)");
+}
 
+/* Insert the two nullifier rows. */
+static bool cdbt_insert_source_nullifier_rows(sqlite3 *db)
+{
+    return cdbt_exec(db,
+               "INSERT INTO nullifiers(nf,pool,height) VALUES(x'cc01',0,50)") &&
+           cdbt_exec(db,
+               "INSERT INTO nullifiers(nf,pool,height) VALUES(x'cc02',1,51)");
+}
+
+/* Insert both stage cursors and the progress_meta row. */
+static bool cdbt_insert_source_cursor_and_meta_rows(sqlite3 *db)
+{
+    return cdbt_exec(db,
+               "INSERT INTO stage_cursor(name,cursor,updated_at) "
+               "VALUES('utxo_apply',100,1)") &&
+           cdbt_exec(db,
+               "INSERT INTO stage_cursor(name,cursor,updated_at) "
+               "VALUES('proof_validate',101,1)") &&
+           cdbt_exec(db,
+               "INSERT INTO progress_meta(key,value) "
+               "VALUES('coins_applied_height',x'64')");
+}
+
+/* Build a populated progress.kv at <dir>/progress.kv with a small but complete
+ * kernel: 3 coins, 1 sprout + 1 sapling anchor, 2 anchor_state rows, 2
+ * nullifiers, 2 stage cursors, 1 progress_meta row. Returns true on success. */
+static bool cdbt_build_source(const char *dir)
+{
+    sqlite3 *db = NULL;
+    if (!cdbt_open_source_db(dir, &db)) {
+        return false;
+    }
+    bool ok = cdbt_ensure_source_schemas(db) && cdbt_seed_source_coins(db);
+    ok = ok && cdbt_insert_source_anchor_rows(db) &&
+          cdbt_insert_source_nullifier_rows(db) &&
+          cdbt_insert_source_cursor_and_meta_rows(db);
     sqlite3_close(db);
     return ok;
 }

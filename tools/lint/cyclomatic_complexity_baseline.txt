@@ -1916,7 +1916,6 @@ tests/harness/src/test_confine.c:c_confine_serving_normal_ops:26
 tests/harness/src/test_consensus.c:test_consensus:73
 tests/harness/src/test_consensus_db_flip.c:flip_build_source:29
 tests/harness/src/test_consensus_db_flip.c:test_consensus_db_flip_platform_arm:26
-tests/harness/src/test_consensus_db_migrate.c:cdbt_build_source:18
 tests/harness/src/test_consensus_parity.c:test_consensus_parity:18
 tests/harness/src/test_consensus_reject_index.c:test_consensus_reject_index:28
 tests/harness/src/test_consensus_rule_sweep.c:test_consensus_rule_sweep_platform_arm:88
