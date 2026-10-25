@@ -233,6 +233,74 @@ static struct bpc_entry *bpc_detached_from(struct block *loaded,
     return entry;
 }
 
+static bool bpc_entry_resident_hit(const struct bpc_entry *entry,
+                                   int32_t height,
+                                   const uint8_t block_hash[32])
+{
+    return entry->used && !entry->pending_evict && entry->height == height &&
+           memcmp(entry->hash, block_hash, 32) == 0;
+}
+
+static bool bpc_load_miss_body(int32_t height, const uint8_t block_hash[32],
+                               const struct block_index *bi,
+                               const char *datadir, struct block *loaded,
+                               struct block_parse_handle *out)
+{
+    if (!bpc_segment_try(height, block_hash, datadir, loaded,
+                         &out->disk_read_us, &out->parse_us)) {
+        atomic_fetch_add(&g_bpc_blkdat_reads, 1);
+        struct disk_block_pos pos;
+        disk_block_pos_init(&pos);
+        if (!block_index_disk_pos_snapshot(bi, &pos, NULL))
+            return false;
+        uint64_t disk_read_us = 0;
+        uint64_t parse_us = 0;
+        if (!read_block_from_disk_pread_profiled(
+                loaded, &pos, datadir ? datadir : "", &disk_read_us,
+                &parse_us)) {
+            block_free(loaded);
+            return false;
+        }
+        out->disk_read_us += disk_read_us;
+        out->parse_us += parse_us;
+    } else {
+        atomic_fetch_add(&g_bpc_seg_reads, 1);
+    }
+    return true;
+}
+
+static bool bpc_store_unpinned(struct bpc_entry *entry, struct block *loaded,
+                               int32_t height, const uint8_t block_hash[32],
+                               struct block_parse_handle *out)
+{
+    if (!entry->used || entry->pins == 0) {
+        if (entry->used)
+            block_free(&entry->body);
+        memset(entry, 0, sizeof(*entry));
+        entry->used = true;
+        entry->height = height;
+        memcpy(entry->hash, block_hash, 32);
+        entry->body = *loaded;
+        block_init(loaded);
+        entry->generation = atomic_fetch_add(&g_bpc_generation, 1) + 1;
+        bpc_handle_set(out, entry, false);
+        return true;
+    }
+    return false;
+}
+
+static bool bpc_pin_detached_body(struct block_parse_handle *out,
+                                  struct block *loaded, int32_t height,
+                                  const uint8_t hash[32])
+{
+    struct bpc_entry *detached = bpc_detached_from(loaded, height, hash);
+    block_free(loaded);
+    if (!detached)
+        return false;
+    bpc_handle_set(out, detached, false);
+    return true;
+}
+
 bool block_parse_cache_acquire(int32_t height, const uint8_t block_hash[32],
                                const struct block_index *bi,
                                const char *datadir,
@@ -249,8 +317,7 @@ bool block_parse_cache_acquire(int32_t height, const uint8_t block_hash[32],
     out->lock_wait_us += (uint64_t)(platform_time_monotonic_us() - lock_started);
     out->lookup_probes = 1;
     struct bpc_entry *entry = &g_bpc[slot];
-    if (entry->used && !entry->pending_evict && entry->height == height &&
-        memcmp(entry->hash, block_hash, 32) == 0) {
+    if (bpc_entry_resident_hit(entry, height, block_hash)) {
         bpc_handle_set(out, entry, true);
         pthread_mutex_unlock(&g_bpc_mutex);
         return true;
@@ -259,26 +326,8 @@ bool block_parse_cache_acquire(int32_t height, const uint8_t block_hash[32],
 
     struct block loaded;
     block_init(&loaded);
-    if (!bpc_segment_try(height, block_hash, datadir, &loaded,
-                         &out->disk_read_us, &out->parse_us)) {
-        atomic_fetch_add(&g_bpc_blkdat_reads, 1);
-        struct disk_block_pos pos;
-        disk_block_pos_init(&pos);
-        if (!block_index_disk_pos_snapshot(bi, &pos, NULL))
-            return false;
-        uint64_t disk_read_us = 0;
-        uint64_t parse_us = 0;
-        if (!read_block_from_disk_pread_profiled(
-                &loaded, &pos, datadir ? datadir : "", &disk_read_us,
-                &parse_us)) {
-            block_free(&loaded);
-            return false;
-        }
-        out->disk_read_us += disk_read_us;
-        out->parse_us += parse_us;
-    } else {
-        atomic_fetch_add(&g_bpc_seg_reads, 1);
-    }
+    if (!bpc_load_miss_body(height, block_hash, bi, datadir, &loaded, out))
+        return false;
 
     struct uint256 got_hash;
     block_get_hash(&loaded, &got_hash);
@@ -287,48 +336,26 @@ bool block_parse_cache_acquire(int32_t height, const uint8_t block_hash[32],
         LOG_WARN("block_parse_cache",
                  "MISS body hash mismatch h=%d — not caching (bad read?)",
                  height);
-        struct bpc_entry *detached = bpc_detached_from(&loaded, height,
-                                                       got_hash.data);
-        block_free(&loaded);
-        if (!detached)
-            return false;
-        bpc_handle_set(out, detached, false);
-        return true;
+        return bpc_pin_detached_body(out, &loaded, height, got_hash.data);
     }
 
     lock_started = platform_time_monotonic_us();
     pthread_mutex_lock(&g_bpc_mutex);
     out->lock_wait_us += (uint64_t)(platform_time_monotonic_us() - lock_started);
     entry = &g_bpc[slot];
-    if (entry->used && !entry->pending_evict && entry->height == height &&
-        memcmp(entry->hash, block_hash, 32) == 0) {
+    if (bpc_entry_resident_hit(entry, height, block_hash)) {
         bpc_handle_set(out, entry, true); /* another reader won the miss race */
         pthread_mutex_unlock(&g_bpc_mutex);
         block_free(&loaded);
         return true;
     }
-    if (!entry->used || entry->pins == 0) {
-        if (entry->used)
-            block_free(&entry->body);
-        memset(entry, 0, sizeof(*entry));
-        entry->used = true;
-        entry->height = height;
-        memcpy(entry->hash, block_hash, 32);
-        entry->body = loaded;
-        block_init(&loaded);
-        entry->generation = atomic_fetch_add(&g_bpc_generation, 1) + 1;
-        bpc_handle_set(out, entry, false);
+    if (bpc_store_unpinned(entry, &loaded, height, block_hash, out)) {
         pthread_mutex_unlock(&g_bpc_mutex);
         return true;
     }
     pthread_mutex_unlock(&g_bpc_mutex);
 
-    struct bpc_entry *detached = bpc_detached_from(&loaded, height, block_hash);
-    block_free(&loaded);
-    if (!detached)
-        return false;
-    bpc_handle_set(out, detached, false);
-    return true;
+    return bpc_pin_detached_body(out, &loaded, height, block_hash);
 }
 
 const struct block *block_parse_handle_block(
