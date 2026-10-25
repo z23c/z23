@@ -1170,7 +1170,6 @@ platform/modules/platform/src/watcher_record.c:platform_watcher_record_matches:2
 platform/modules/platform/src/watcher_record.c:platform_watcher_record_parse:30
 platform/modules/platform/src/watcher_store.c:platform_watcher_store_publish:23
 platform/modules/platform/tests/database_lifetime_windows_acceptance.c:main:17
-platform/modules/platform/tests/directory_compat_windows_acceptance.c:main:50
 platform/modules/platform/tests/directory_transaction_windows_acceptance.c:main:146
 platform/modules/platform/tests/file_service_transport_windows_acceptance.c:legacy_send_timeout_is_bounded:17
 platform/modules/platform/tests/file_service_transport_windows_acceptance.c:main:22

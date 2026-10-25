@@ -37,18 +37,131 @@ static void split_ticks(uint64_t ticks, int64_t *seconds,
     *nanoseconds = (uint32_t)(ticks % UINT64_C(10000000)) * 100u;
 }
 
-int main(void)
+static int check_directories(const char *root, const char *unicode,
+                             const char *link, bool made_link)
 {
-    wchar_t temp[MAX_PATH], root_wide[MAX_PATH];
+    char canonical[4 * MAX_PATH];
+    if (!platform_directory_canonical_real(unicode, canonical,
+                                           sizeof(canonical)) ||
+        !strstr(canonical, "20260101_000002-\xE9\x9B\xAA") ||
+        (made_link && platform_directory_canonical_real(
+                          link, canonical, sizeof(canonical))))
+        return fail("canonical real-directory resolution");
+
+    struct platform_directory_list list;
+    if (!platform_directory_list_real_sorted(root, &list))
+        return fail("enumeration");
+    if (list.count != 2 || strcmp(list.entries[0].name, "20260101_000000") ||
+        strcmp(list.entries[1].name, "20260101_000002-\xE9\x9B\xAA"))
+        return fail("sorted real-directory filtering");
+    platform_directory_list_free(&list);
+
+    return 0;
+}
+
+static int read_reference_metadata(const wchar_t *plain_wide,
+                                   BY_HANDLE_FILE_INFORMATION *info,
+                                   FILE_BASIC_INFO *basic)
+{
+    HANDLE observed = CreateFileW(
+        plain_wide, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (observed == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(observed, info) ||
+        !GetFileInformationByHandleEx(observed, FileBasicInfo, basic,
+                                      sizeof(*basic))) {
+        if (observed != INVALID_HANDLE_VALUE) CloseHandle(observed);
+        return fail("regular-file reference metadata");
+    }
+    CloseHandle(observed);
+    return 0;
+}
+
+static int check_regular_file(const char *root, const wchar_t *plain_wide,
+                              BY_HANDLE_FILE_INFORMATION *reference,
+                              uint64_t *reference_file_id)
+{
+    struct platform_directory_list list;
+    if (!platform_directory_list_regular_sorted(root, &list))
+        return fail("regular-file enumeration");
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    FILE_BASIC_INFO basic = {0};
+    if (read_reference_metadata(plain_wide, &info, &basic)) return 1;
+    ULARGE_INTEGER modified = {
+        .LowPart = info.ftLastWriteTime.dwLowDateTime,
+        .HighPart = info.ftLastWriteTime.dwHighDateTime,
+    };
+    int64_t modified_seconds = 0, changed_seconds = 0;
+    uint32_t modified_nanoseconds = 0, changed_nanoseconds = 0;
+    split_ticks(modified.QuadPart, &modified_seconds, &modified_nanoseconds);
+    split_ticks((uint64_t)basic.ChangeTime.QuadPart, &changed_seconds,
+                &changed_nanoseconds);
+    uint64_t file_id = ((uint64_t)info.nFileIndexHigh << 32) |
+                       info.nFileIndexLow;
+    if (list.count != 1 || strcmp(list.entries[0].name, "plain-file") ||
+        !list.entries[0].snapshot_valid || list.entries[0].size != 3 ||
+        list.entries[0].volume != info.dwVolumeSerialNumber ||
+        list.entries[0].file_low != file_id ||
+        list.entries[0].file_high != 0 ||
+        list.entries[0].modified_seconds != modified_seconds ||
+        list.entries[0].modified_nanoseconds != modified_nanoseconds ||
+        list.entries[0].changed_seconds != changed_seconds ||
+        list.entries[0].changed_nanoseconds != changed_nanoseconds)
+        return fail("sorted regular-file filtering");
+    platform_directory_list_free(&list);
+
+    *reference = info;
+    *reference_file_id = file_id;
+    return 0;
+}
+
+static int check_combined_children(const char *root,
+                                    BY_HANDLE_FILE_INFORMATION info,
+                                    uint64_t file_id)
+{
+    struct platform_directory_list combined_directories = {0};
+    struct platform_directory_list combined_files = {0};
+    if (!platform_directory_list_children_sorted(
+            root, &combined_directories, &combined_files))
+        return fail("single-pass child enumeration");
+    if (combined_directories.count != 2 ||
+        strcmp(combined_directories.entries[0].name, "20260101_000000") ||
+        strcmp(combined_directories.entries[1].name,
+               "20260101_000002-\xE9\x9B\xAA") ||
+        combined_files.count != 1 ||
+        strcmp(combined_files.entries[0].name, "plain-file") ||
+        !combined_files.entries[0].snapshot_valid ||
+        combined_files.entries[0].size != 3 ||
+        combined_files.entries[0].volume != info.dwVolumeSerialNumber ||
+        combined_files.entries[0].file_low != file_id)
+        return fail("single-pass sorted child filtering");
+    platform_directory_list_free(&combined_directories);
+    platform_directory_list_free(&combined_files);
+
+    return 0;
+}
+
+static int create_root(wchar_t *root_wide, char *root, int capacity)
+{
+    wchar_t temp[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp) ||
         !GetTempFileNameW(temp, L"zdc", 0, root_wide) ||
         !DeleteFileW(root_wide))
         return fail("temporary name");
-    char root[4 * MAX_PATH];
     if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, root_wide, -1,
-                             root, sizeof(root), NULL, NULL) ||
+                             root, capacity, NULL, NULL) ||
         !platform_directory_ensure(root, 0700))
         return fail("UTF-8 root creation");
+
+    return 0;
+}
+
+int main(void)
+{
+    wchar_t root_wide[MAX_PATH];
+    char root[4 * MAX_PATH];
+    if (create_root(root_wide, root, sizeof(root))) return 1;
 
     char alpha[4 * MAX_PATH], unicode[4 * MAX_PATH], plain[4 * MAX_PATH];
     if (!join_path(alpha, sizeof(alpha), root, "/20260101_000000") ||
@@ -82,79 +195,12 @@ int main(void)
                                          SYMBOLIC_LINK_FLAG_DIRECTORY |
                                          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != 0;
 
-    char canonical[4 * MAX_PATH];
-    if (!platform_directory_canonical_real(unicode, canonical,
-                                           sizeof(canonical)) ||
-        !strstr(canonical, "20260101_000002-\xE9\x9B\xAA") ||
-        (made_link && platform_directory_canonical_real(
-                          link, canonical, sizeof(canonical))))
-        return fail("canonical real-directory resolution");
-
-    struct platform_directory_list list;
-    if (!platform_directory_list_real_sorted(root, &list))
-        return fail("enumeration");
-    if (list.count != 2 || strcmp(list.entries[0].name, "20260101_000000") ||
-        strcmp(list.entries[1].name, "20260101_000002-\xE9\x9B\xAA"))
-        return fail("sorted real-directory filtering");
-    platform_directory_list_free(&list);
-
-    if (!platform_directory_list_regular_sorted(root, &list))
-        return fail("regular-file enumeration");
-    HANDLE observed = CreateFileW(
-        plain_wide, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     BY_HANDLE_FILE_INFORMATION info = {0};
-    FILE_BASIC_INFO basic = {0};
-    if (observed == INVALID_HANDLE_VALUE ||
-        !GetFileInformationByHandle(observed, &info) ||
-        !GetFileInformationByHandleEx(observed, FileBasicInfo, &basic,
-                                      sizeof(basic))) {
-        if (observed != INVALID_HANDLE_VALUE) CloseHandle(observed);
-        return fail("regular-file reference metadata");
-    }
-    CloseHandle(observed);
-    ULARGE_INTEGER modified = {
-        .LowPart = info.ftLastWriteTime.dwLowDateTime,
-        .HighPart = info.ftLastWriteTime.dwHighDateTime,
-    };
-    int64_t modified_seconds = 0, changed_seconds = 0;
-    uint32_t modified_nanoseconds = 0, changed_nanoseconds = 0;
-    split_ticks(modified.QuadPart, &modified_seconds, &modified_nanoseconds);
-    split_ticks((uint64_t)basic.ChangeTime.QuadPart, &changed_seconds,
-                &changed_nanoseconds);
-    uint64_t file_id = ((uint64_t)info.nFileIndexHigh << 32) |
-                       info.nFileIndexLow;
-    if (list.count != 1 || strcmp(list.entries[0].name, "plain-file") ||
-        !list.entries[0].snapshot_valid || list.entries[0].size != 3 ||
-        list.entries[0].volume != info.dwVolumeSerialNumber ||
-        list.entries[0].file_low != file_id ||
-        list.entries[0].file_high != 0 ||
-        list.entries[0].modified_seconds != modified_seconds ||
-        list.entries[0].modified_nanoseconds != modified_nanoseconds ||
-        list.entries[0].changed_seconds != changed_seconds ||
-        list.entries[0].changed_nanoseconds != changed_nanoseconds)
-        return fail("sorted regular-file filtering");
-    platform_directory_list_free(&list);
-
-    struct platform_directory_list combined_directories = {0};
-    struct platform_directory_list combined_files = {0};
-    if (!platform_directory_list_children_sorted(
-            root, &combined_directories, &combined_files))
-        return fail("single-pass child enumeration");
-    if (combined_directories.count != 2 ||
-        strcmp(combined_directories.entries[0].name, "20260101_000000") ||
-        strcmp(combined_directories.entries[1].name,
-               "20260101_000002-\xE9\x9B\xAA") ||
-        combined_files.count != 1 ||
-        strcmp(combined_files.entries[0].name, "plain-file") ||
-        !combined_files.entries[0].snapshot_valid ||
-        combined_files.entries[0].size != 3 ||
-        combined_files.entries[0].volume != info.dwVolumeSerialNumber ||
-        combined_files.entries[0].file_low != file_id)
-        return fail("single-pass sorted child filtering");
-    platform_directory_list_free(&combined_directories);
-    platform_directory_list_free(&combined_files);
+    uint64_t file_id = 0;
+    if (check_directories(root, unicode, link, made_link) ||
+        check_regular_file(root, plain_wide, &info, &file_id) ||
+        check_combined_children(root, info, file_id))
+        return 1;
 
     if (made_link) RemoveDirectoryW(link_wide);
     DeleteFileW(plain_wide);
