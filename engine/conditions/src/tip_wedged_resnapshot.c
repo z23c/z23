@@ -239,17 +239,10 @@ static bool witness_tip_wedged_resnapshot(int64_t target_at_detect)
     return st == SNAPSYNC_COMPLETE;
 }
 
-static bool detail_tip_wedged_resnapshot(struct json_value *out)
+static bool push_tip_wedged_detect_fields(struct json_value *out,
+                                          int current_local)
 {
-    struct main_state *ms = sync_monitor_main_state();
-    if (!ms)
-        ms = condition_engine_main_state();
-    struct snapshot_sync_service *svc = runtime_snapsync_existing();
-    enum snapshot_sync_state st = svc ? svc->state : SNAPSYNC_IDLE;
-    int current_local = ms ? active_chain_height(&ms->chain_active) : -1;
-
-    bool ok = true;
-    ok = ok && json_push_kv_str(
+    bool ok = json_push_kv_str(
         out, "trigger",
         trigger_name((enum tip_wedged_trigger)atomic_load(
             &g_trigger_at_detect)));
@@ -265,8 +258,14 @@ static bool detail_tip_wedged_resnapshot(struct json_value *out)
                                  atomic_load(&g_recovery_attempted) != 0);
     ok = ok && json_push_kv_bool(out, "recovery_accepted",
                                  atomic_load(&g_recovery_accepted) != 0);
-    ok = ok && json_push_kv_int(out, "last_manifest_height",
-                                atomic_load(&g_last_manifest_height));
+    return ok;
+}
+
+static bool push_tip_wedged_recovery_fields(
+    struct json_value *out, enum snapshot_sync_state st)
+{
+    bool ok = json_push_kv_int(out, "last_manifest_height",
+                               atomic_load(&g_last_manifest_height));
     ok = ok && json_push_kv_str(out, "snapshot_sync_state",
                                 snapsync_state_name(st));
     ok = ok && json_push_kv_int(out, "last_witness_local_height",
@@ -275,6 +274,20 @@ static bool detail_tip_wedged_resnapshot(struct json_value *out)
         out, "last_witness_snapshot_sync_state",
         snapsync_state_name((enum snapshot_sync_state)atomic_load(
             &g_last_witness_snapsync_state)));
+    return ok;
+}
+
+static bool detail_tip_wedged_resnapshot(struct json_value *out)
+{
+    struct main_state *ms = sync_monitor_main_state();
+    if (!ms)
+        ms = condition_engine_main_state();
+    struct snapshot_sync_service *svc = runtime_snapsync_existing();
+    enum snapshot_sync_state st = svc ? svc->state : SNAPSYNC_IDLE;
+    int current_local = ms ? active_chain_height(&ms->chain_active) : -1;
+
+    bool ok = push_tip_wedged_detect_fields(out, current_local);
+    ok = ok && push_tip_wedged_recovery_fields(out, st);
     ok = ok && json_push_kv_str(
         out, "remedy_contract",
         "snapshot recovery is witnessed when local height reaches target or snapshot sync completes");
