@@ -1797,7 +1797,6 @@ platform/modules/util/src/log_json.c:log_json_escape:23
 platform/modules/util/src/self_backtrace.c:self_backtrace_dump_all:24
 platform/modules/util/src/shutdown_stagewatch.c:shutdown_stagewatch_read_exit_reason:18
 platform/modules/util/src/supervisor.c:sweep_once:18
-platform/modules/util/src/telemetry_render.c:telemetry_render:22
 platform/modules/util/src/thread_registry.c:thread_registry_spawn:17
 tests/harness/differential/groth16_parity_oracle.c:build_corpus:32
 tests/harness/differential/groth16_parity_oracle.c:check_decode_corpus:26

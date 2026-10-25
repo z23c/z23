@@ -729,28 +729,27 @@ static bool document_is_complete(const struct json_value *out,
     return true;
 }
 
-bool telemetry_render(const struct telemetry_domain_schema *schema,
-                      const void *snapshot, enum telemetry_view view,
-                      const char *only_group, struct json_value *out)
+/* An unrecognized view is normal. The three named tiers pass through. */
+static enum telemetry_view normalize_render_view(enum telemetry_view view)
 {
-    if (!out)
-        LOG_FAIL("telemetry_render", "render: out is NULL");
-    json_set_object(out);
-    if (!schema || !snapshot)
-        LOG_FAIL("telemetry_render", "render: schema and snapshot required");
     if (view != TLV_SUMMARY && view != TLV_NORMAL && view != TLV_FULL)
-        view = TLV_NORMAL;
+        return TLV_NORMAL;
+    return view;
+}
+
+/* An empty filter string is no filter. NULL stays NULL. */
+static const char *normalize_only_group(const char *only_group)
+{
     if (only_group && !only_group[0])
-        only_group = NULL;
-    if (!prove_offsets(schema))
-        LOG_FAIL("telemetry_render", "render: domain %s has an out-of-bounds "
-                 "descriptor table", schema->domain);
+        return NULL;
+    return only_group;
+}
 
-    struct telemetry_domain_verdict verdict;
-    if (!eval_domain(schema, snapshot, &verdict))
-        LOG_FAIL("telemetry_render", "render: domain %s could not be judged",
-                 schema->domain);
-
+static bool push_render_header(struct json_value *out,
+                               const struct telemetry_domain_schema *schema,
+                               enum telemetry_view view,
+                               const char *only_group)
+{
     bool hdr = true;
     hdr &= json_push_kv_str(out, "schema", schema->schema_id);
     hdr &= json_push_kv_str(out, "domain", schema->domain);
@@ -764,7 +763,52 @@ bool telemetry_render(const struct telemetry_domain_schema *schema,
          * than returning an empty document that reads like an empty domain. */
         hdr &= json_push_kv_bool(out, "group_filter_matched", matched);
     }
-    if (!hdr)
+    return hdr;
+}
+
+/* Leaves, completeness, freshness and both health tails, then the shape
+ * check. The || chain still stops at the first section that fails closed. */
+static bool push_required_sections(struct json_value *out,
+                                   const struct telemetry_domain_schema *schema,
+                                   const void *snapshot,
+                                   enum telemetry_view view,
+                                   const char *only_group, size_t rendered,
+                                   const struct telemetry_domain_verdict *verdict)
+{
+    if (!push_leaves(out, schema, snapshot, view, only_group))
+        return false;
+
+    struct presence_tally t;
+    tally_presence(schema, snapshot, &t);
+    if (!push_completeness(out, schema, &t, rendered) ||
+        !push_freshness(out, schema, snapshot) ||
+        !push_health(out, schema->domain, verdict) ||
+        !push_legacy_health(out, schema->domain, verdict))
+        return false;
+    return document_is_complete(out, schema->domain);
+}
+
+bool telemetry_render(const struct telemetry_domain_schema *schema,
+                      const void *snapshot, enum telemetry_view view,
+                      const char *only_group, struct json_value *out)
+{
+    if (!out)
+        LOG_FAIL("telemetry_render", "render: out is NULL");
+    json_set_object(out);
+    if (!schema || !snapshot)
+        LOG_FAIL("telemetry_render", "render: schema and snapshot required");
+    view = normalize_render_view(view);
+    only_group = normalize_only_group(only_group);
+    if (!prove_offsets(schema))
+        LOG_FAIL("telemetry_render", "render: domain %s has an out-of-bounds "
+                 "descriptor table", schema->domain);
+
+    struct telemetry_domain_verdict verdict;
+    if (!eval_domain(schema, snapshot, &verdict))
+        LOG_FAIL("telemetry_render", "render: domain %s could not be judged",
+                 schema->domain);
+
+    if (!push_render_header(out, schema, view, only_group))
         LOG_FAIL("telemetry_render", "render: domain %s out of memory writing "
                  "the document header", schema->domain);
 
@@ -783,15 +827,6 @@ bool telemetry_render(const struct telemetry_domain_schema *schema,
         LOG_FAIL("telemetry_render", "render: domain %s out of memory "
                  "attaching the value plane", schema->domain);
 
-    if (!push_leaves(out, schema, snapshot, view, only_group))
-        return false;
-
-    struct presence_tally t;
-    tally_presence(schema, snapshot, &t);
-    if (!push_completeness(out, schema, &t, rendered) ||
-        !push_freshness(out, schema, snapshot) ||
-        !push_health(out, schema->domain, &verdict) ||
-        !push_legacy_health(out, schema->domain, &verdict))
-        return false;
-    return document_is_complete(out, schema->domain);
+    return push_required_sections(out, schema, snapshot, view, only_group,
+                                  rendered, &verdict);
 }
