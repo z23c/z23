@@ -47,6 +47,32 @@ static bool npcf_root(const char *root)
     return root && zcl_hex_decode_lower(root, decoded, sizeof(decoded));
 }
 
+static bool npcf_plan_not_ready(const struct json_value *plan,
+                                const struct json_value *package)
+{
+    return !plan || plan->type != JSON_OBJ || !npcf_bool(plan, "valid") ||
+           !npcf_bool(plan, "ready_to_commit") ||
+           !npcf_bool(package, "chunks_checked");
+}
+
+static bool npcf_plan_fields_missing(const char *token,
+                                     const char *package_root,
+                                     const char *name, const char *semver,
+                                     const char *license)
+{
+    return !npcf_root(token) || !npcf_root(package_root) || !name ||
+           !name[0] || !semver || !semver[0] || !license || !license[0];
+}
+
+static bool npcf_plan_counts_missing(const struct json_value *package,
+                                     int64_t *files, int64_t *bytes,
+                                     int64_t *chunks)
+{
+    return !npcf_int(package, "files", files) ||
+           !npcf_int(package, "bytes", bytes) ||
+           !npcf_int(package, "chunks", chunks);
+}
+
 static void npcf_item(struct zcl_present_model_v1 *model, const char *id,
                       const char *label, const char *value,
                       uint16_t status)
@@ -82,14 +108,10 @@ bool zcl_native_presentation_publication_confirm_model_from_plan(
     const char *license = npcf_str(release, "license");
     const char *package_root = npcf_str(package, "package_root");
     int64_t files = 0, bytes = 0, chunks = 0;
-    if (!plan || plan->type != JSON_OBJ || !npcf_bool(plan, "valid") ||
-        !npcf_bool(plan, "ready_to_commit") ||
-        !npcf_bool(package, "chunks_checked") || !npcf_root(token) ||
-        !npcf_root(package_root) || !name || !name[0] || !semver ||
-        !semver[0] || !license || !license[0] ||
-        !npcf_int(package, "files", &files) ||
-        !npcf_int(package, "bytes", &bytes) ||
-        !npcf_int(package, "chunks", &chunks)) {
+    if (npcf_plan_not_ready(plan, package) ||
+        npcf_plan_fields_missing(token, package_root, name, semver,
+                                 license) ||
+        npcf_plan_counts_missing(package, &files, &bytes, &chunks)) {
         (void)snprintf(why, why_cap,
                        "exact package publication plan is not ready");
         return false;
