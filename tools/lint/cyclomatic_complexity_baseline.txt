@@ -1896,7 +1896,6 @@ tests/harness/src/test_bloom.c:test_bloom:68
 tests/harness/src/test_bls12_381_adversarial.c:test_bls12_381_adversarial:29
 tests/harness/src/test_bn254.c:test_bn254:33
 tests/harness/src/test_bn254_accel.c:test_bn254_accel:23
-tests/harness/src/test_body_crosscheck.c:bx_build_producer:17
 tests/harness/src/test_body_fetch_missing_have_data_condition.c:test_body_fetch_missing_have_data_condition:105
 tests/harness/src/test_body_fetch_stage.c:test_body_fetch_stage_platform_arm:56
 tests/harness/src/test_boot_blocktree_cleanup.c:test_boot_blocktree_cleanup:18

@@ -199,6 +199,54 @@ static bool bx_build_copy(const char *dir, struct bx_fixture *f)
 
 /* ── producer progress.kv: sprout_anchors + nullifiers folded from bodies ─ */
 
+/* Fold one transaction's shielded data into the producer tables: JoinSplit
+ * commitments extend the Sprout tree, JoinSplit nullifiers go to the Sprout
+ * pool and shielded-spend nullifiers to the Sapling pool. Sets *has_js when
+ * any JoinSplit was seen. Returns false if a nullifier insert failed; every
+ * loop still runs to completion, as before. */
+static bool bx_fold_tx_into_producer(sqlite3 *db, struct transaction *tx,
+                                     struct incremental_merkle_tree *tree,
+                                     int height, bool *has_js)
+{
+    bool ok = true;
+    for (size_t j = 0; j < tx->num_joinsplit; j++) {
+        *has_js = true;
+        for (size_t k = 0; k < ZC_NUM_JS_OUTPUTS; k++)
+            incremental_tree_append(tree,
+                                    &tx->v_joinsplit[j].commitments[k]);
+        for (size_t k = 0; k < 2; k++)
+            if (!nullifier_kv_add(db,
+                                  tx->v_joinsplit[j].nullifiers[k].data,
+                                  NULLIFIER_POOL_SPROUT, height))
+                ok = false;
+    }
+    for (size_t j = 0; j < tx->num_shielded_spend; j++)
+        if (!nullifier_kv_add(db,
+                              tx->v_shielded_spend[j].nullifier.data,
+                              NULLIFIER_POOL_SAPLING, height))
+            ok = false;
+    return ok;
+}
+
+/* Fold one block's transactions into the producer tables and, when the block
+ * carried a JoinSplit, record the resulting Sprout frontier. Returns false if
+ * an insert failed; remaining transactions of the block are then skipped. */
+static bool bx_fold_block_into_producer(sqlite3 *db, struct block *b,
+                                        struct incremental_merkle_tree *tree,
+                                        int height)
+{
+    bool ok = true;
+    bool has_js = false;
+    for (size_t i = 0; ok && i < b->num_vtx; i++)
+        if (!bx_fold_tx_into_producer(db, &b->vtx[i], tree, height,
+                                      &has_js))
+            ok = false;
+    if (ok && has_js && !anchor_kv_add_tree(db, ANCHOR_POOL_SPROUT, tree,
+                                            height))
+        ok = false;
+    return ok;
+}
+
 static bool bx_build_producer(const char *dir, struct bx_fixture *f,
                               int checkpoint)
 {
@@ -215,32 +263,9 @@ static bool bx_build_producer(const char *dir, struct bx_fixture *f,
     bool ok = anchor_kv_ensure_schema(db) && nullifier_kv_ensure_schema(db);
     struct incremental_merkle_tree tree;
     sprout_tree_init(&tree);
-    for (int h = 0; ok && h <= checkpoint; h++) {
-        struct block *b = &f->blocks[h];
-        bool has_js = false;
-        for (size_t i = 0; ok && i < b->num_vtx; i++) {
-            struct transaction *tx = &b->vtx[i];
-            for (size_t j = 0; j < tx->num_joinsplit; j++) {
-                has_js = true;
-                for (size_t k = 0; k < ZC_NUM_JS_OUTPUTS; k++)
-                    incremental_tree_append(&tree,
-                                            &tx->v_joinsplit[j].commitments[k]);
-                for (size_t k = 0; k < 2; k++)
-                    if (!nullifier_kv_add(db,
-                                          tx->v_joinsplit[j].nullifiers[k].data,
-                                          NULLIFIER_POOL_SPROUT, h))
-                        ok = false;
-            }
-            for (size_t j = 0; j < tx->num_shielded_spend; j++)
-                if (!nullifier_kv_add(db,
-                                      tx->v_shielded_spend[j].nullifier.data,
-                                      NULLIFIER_POOL_SAPLING, h))
-                    ok = false;
-        }
-        if (ok && has_js &&
-            !anchor_kv_add_tree(db, ANCHOR_POOL_SPROUT, &tree, h))
+    for (int h = 0; ok && h <= checkpoint; h++)
+        if (!bx_fold_block_into_producer(db, &f->blocks[h], &tree, h))
             ok = false;
-    }
     sqlite3_close(db); /* default rollback journal -> no WAL, clean on close */
     return ok;
 }
