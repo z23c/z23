@@ -443,10 +443,8 @@ echo "[check_standalone_tools_link] ${#TOOLS[@]} tool rule(s) in Makefile;" \
 
 # ── Build them ───────────────────────────────────────────────────────────
 # Each target is its own single-TU link; make no-ops the already-built ones.
-violations=0
-failed=()
+violations=0; failed=()
 build_log=$(mktemp)
-trap 'rm -f "$build_log"' EXIT
 
 # The receipt wrapper owns a fast private build path for agent_sha3 so a direct
 # invocation does not pay a Makefile parse. Prove that ACTUAL path from an
@@ -467,34 +465,34 @@ else
     violations=$((violations + 1))
 fi
 
-# The receipt-helper selftest above does not exercise the X11 exemption.
-# Run its focused failure regressions in the normal Linux verdict dimension.
-# It is hermetic (private fixture repo, private temp dir), so it runs BESIDE the
-# tool build below instead of ahead of it; its verdict is collected after the
-# build and a missing or failed child is a violation, never a pass.
-x11_pid=""; x11_log=$(mktemp)
-trap 'rm -f "$build_log" "$x11_log"' EXIT
-[[ "$BUILD_ONLY" == 0 && "$GATE_HOST_OS" == Linux ]] &&
-    { tools/lint/selftest_standalone_tools_x11.sh >"$x11_log" 2>&1 & x11_pid=$!; }
+# The helper selftest above skips the X11 exemption: run its hermetic failure
+# regressions BESIDE the build; a missing or failed child is a violation. Skip
+# stamp (written only after a PASS): the selftest reads just the files hashed
+# here; any hash failure leaves the key empty, which always runs it. The trap
+# reaps the child on an early exit.
+x11_pid=""; x11_log=$(mktemp); x11_stamp=build/lint-stamps/standalone-x11.sha256; x11_key=""
+trap '[[ -z "$x11_pid" ]] || { kill "$x11_pid" 2>/dev/null; wait "$x11_pid" 2>/dev/null; }; rm -f "$build_log" "$x11_log"' EXIT
+if [[ "$BUILD_ONLY" == 0 && "$GATE_HOST_OS" == Linux ]]; then
+    x11_key=$(set -o pipefail; { sha256sum tools/lint/selftest_standalone_tools_x11.sh "$0" tools/lint/gate_lib.sh &&
+      find vendor/x11/include -type f | LC_ALL=C sort | xargs sha256sum && cc --version &&
+      awk '/^NATIVE_UI_DRIVER_BIN = /{a=1} a{if(/^# Crash recovery/)exit;print}' Makefile; } | sha256sum | cut -c1-64) 2>/dev/null || x11_key=""
+    if [[ -n "$x11_key" && "$(cat "$x11_stamp" 2>/dev/null)" == "$x11_key" ]]; then
+        echo "[check_standalone_tools_link] X11 selftest inputs unchanged since last pass; skipped"
+    else tools/lint/selftest_standalone_tools_x11.sh >"$x11_log" 2>&1 & x11_pid=$!; fi
+fi
 
-# Parallelism. This one gate sets the lint wall (the other gates finish inside
-# its shadow) and the targets are independent single-TU links, so it takes the
-# whole grant: ZCL_HOST_JOBS (Makefile-exported affinity mask; the host CPU count is
-# only the fallback outside make), clamped 4..32. Override with ZCL_TOOLS_LINK_JOBS=<n>.
-tl_nproc="${ZCL_HOST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
-tl_jobs="${ZCL_TOOLS_LINK_JOBS:-$tl_nproc}"
-if [ "$tl_jobs" -lt 4 ];  then tl_jobs=4;  fi
-if [ "$tl_jobs" -gt 32 ]; then tl_jobs=32; fi
+# Parallelism: the targets are independent single-TU links, so take the whole
+# grant (ZCL_HOST_JOBS, else the CPU count), clamped 4..32; override ZCL_TOOLS_LINK_JOBS=<n>.
+tl_jobs="${ZCL_TOOLS_LINK_JOBS:-${ZCL_HOST_JOBS:-$(nproc 2>/dev/null || echo 4)}}"
+[ "$tl_jobs" -ge 4 ] || tl_jobs=4
+[ "$tl_jobs" -le 32 ] || tl_jobs=32
 
 if ! make -k -j"$tl_jobs" --no-print-directory "${targets[@]}" >"$build_log" 2>&1; then
-    # Keep going through independent targets in one parse. Make names failed
-    # targets in its diagnostics; serial re-probes repeat source capture for
-    # every tool and discard the original failure context.
+    # One -k parse keeps the original failure context; serial re-probes lose it.
     if grep -Fq "exact source capture failed" "$build_log"; then
         sed 's/^/    /' "$build_log" >&2
         echo "[check_standalone_tools_link] source-identity capture refused, so make could" \
-             "not parse. This is NOT a broken tool rule." >&2
-        echo "[check_standalone_tools_link] re-run on a settled tree." >&2
+             "not parse. This is NOT a broken tool rule; re-run on a settled tree." >&2
         exit 2
     fi
     failed+=("standalone tool build batch (see build output)")
@@ -517,11 +515,15 @@ if [ "$BUILD_ONLY" -eq 1 ]; then
 fi
 
 if [[ -n "$x11_pid" ]]; then
-    if wait "$x11_pid"; then cat "$x11_log"; else
+    if wait "$x11_pid"; then
+        cat "$x11_log"
+        [[ -z "$x11_key" ]] || { mkdir -p "${x11_stamp%/*}" && printf '%s' "$x11_key" >"$x11_stamp"; } 2>/dev/null || true
+    else
         cat "$x11_log" >&2
         failed+=("X11 runtime qualification selftest")
         violations=$((violations + 1))
     fi
+    x11_pid=""
 fi
 
 if (( violations > 0 )); then
