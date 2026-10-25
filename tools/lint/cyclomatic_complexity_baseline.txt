@@ -2969,7 +2969,6 @@ tools/retrieval_eval.c:token_safe:32
 tools/rom_two_builder_compare.c:rtb_derive_anchors:16
 tools/rom_two_builder_compare.c:rtb_derive_coins:18
 tools/serial_bench.c:main:34
-tools/session.c:main:16
 tools/sim/simperf.c:main:28
 tools/simd_bench.c:bench_chacha_aead_row:32
 tools/simd_bench.c:main:26

@@ -119,15 +119,126 @@ static void VERIFY(const char *desc, int cond) {
 
 /* ═══════════════════════════════════════════════════════ */
 
+static const char *resolve_datadir(int argc, char **argv) {
+    if (argc > 1) return argv[1];
+    static char dd[512];
+    const char *home = getenv("HOME");
+    if (home) { snprintf(dd, sizeof(dd), "%s/.zclassic-c23", home); return dd; }
+    return NULL;
+}
+
+static void check_dashboard_page(void) {
+    DO("GET", "/wallet", NULL);
+    VERIFY("dashboard renders >1KB", _len > 1000);
+    VERIFY("balance shown", has("ZCL"));
+    if (rpc_total > 0) {
+        char exp[32]; snprintf(exp, sizeof(exp), "%.8f", rpc_total);
+        VERIFY("balance matches RPC", has(exp));
+    }
+    VERIFY("privacy meter", has("private"));
+    VERIFY("nav present", has(">Send<") && has(">Receive<"));
+}
+
+static void check_send_page(void) {
+    DO("GET", "/wallet/send", NULL);
+    VERIFY("send renders", _len > 1000);
+    double bal = extract_var("var BAL");
+    VERIFY("JS BAL > 0", bal > 0.0001 || rpc_total < 0.001);
+    if (rpc_total > 0.001)
+        VERIFY("BAL matches total", fabs(bal - rpc_total) < 0.001);
+    VERIFY("has address input", has("name=\"address\"") || has("name='address'"));
+    VERIFY("has amount input", has("name=\"amount\"") || has("name='amount'"));
+}
+
+static void try_send_with_bad_address(void) {
+    DO("POST", "/wallet/send/review", "address=xyz&amount=0.5");
+    VERIFY("error shown", has("Invalid") || has("invalid") || has("short"));
+    VERIFY("retry available", has("Try Again") || has("/wallet/send"));
+}
+
+static void review_send_to_valid_zaddress(void) {
+    DO("POST", "/wallet/send/review",
+       "address=zs19hc6ghlrzklr7y82u9w6822zuvrpfmgzlqz7alx8eqtwh2rvzgykl6m3lu8gwarpflcczgyse2p&amount=0.001");
+    VERIFY("review renders", _len > 200);
+    VERIFY("amount shown", has("0.001"));
+    VERIFY("no 'Insufficient'", !has("Insufficient"));
+}
+
+static void check_receive_page(void) {
+    DO("GET", "/wallet/receive", NULL);
+    VERIFY("renders", _len > 500);
+    VERIFY("private recommended", has("recommended"));
+    VERIFY("QR code", has("<svg"));
+    VERIFY("z-address shown", has("zs1"));
+}
+
+static void browse_history_pages(void) {
+    DO("GET", "/wallet/history", NULL);
+    VERIFY("renders", _len > 500);
+    VERIFY("no zero-value", !has("+0.00000000"));
+    VERIFY("no SQL", !has("sqlite3") && !has("SELECT "));
+
+    DO("GET", "/wallet/history?filter=sent", NULL);
+    VERIFY("sent filter works", _len > 200);
+
+    DO("GET", "/wallet/history?filter=recv", NULL);
+    VERIFY("recv filter works", _len > 200);
+
+    DO("GET", "/wallet/history?q=<script>alert(1)</script>", NULL);
+    VERIFY("XSS escaped", !has("<script>alert"));
+}
+
+static void visit_node_page(void) {
+    DO("GET", "/wallet/node", NULL);
+    VERIFY("renders", _len > 1000);
+    VERIFY("sovereignty", has("sovereign"));
+    VERIFY("block height", has("Block Height"));
+    VERIFY("peers", has("Connected Peers"));
+    VERIFY("version", has("ZClassic23:0.1.0"));
+}
+
+static void audit_coins(void) {
+    DO("GET", "/wallet/coins", NULL);
+    VERIFY("renders", _len > 200);
+    VERIFY("coin audit heading", has("Coin Audit"));
+}
+
+static void check_shield_status(void) {
+    DO("GET", "/wallet/shield", NULL);
+    VERIFY("renders", _len > 200);
+}
+
+static void check_pulse_api(void) {
+    DO("GET", "/api/wallet/pulse", NULL);
+    VERIFY("JSON", has("{"));
+    VERIFY("height", has("\"height\""));
+    VERIFY("balance", has("\"balance\""));
+    VERIFY("shielded", has("\"shielded\""));
+}
+
+static void exercise_session_edge_cases(void) {
+    DO("POST", "/wallet/send/review", "");
+    VERIFY("empty form → no crash", _len > 0);
+
+    DO("POST", "/wallet/send/review", NULL);
+    VERIFY("NULL body → no crash", _len > 0);
+
+    DO("POST", "/wallet/shield/confirm", "amount=0");
+    VERIFY("zero shield → invalid", _len > 200);
+
+    DO("POST", "/wallet/shield/confirm", "amount=-1");
+    VERIFY("negative shield → invalid", _len > 200);
+
+    DO("GET", "/wallet/tx/<script>alert(1)</script>", NULL);
+    VERIFY("XSS in txid", !has("<script>alert"));
+
+    { size_t n = DO("GET", "/wallet/doesnotexist", NULL);
+      VERIFY("unknown route → 0", n == 0); }
+}
+
 int main(int argc, char **argv)
 {
-    const char *datadir = NULL;
-    if (argc > 1) datadir = argv[1];
-    else {
-        static char dd[512];
-        const char *home = getenv("HOME");
-        if (home) { snprintf(dd, sizeof(dd), "%s/.zclassic-c23", home); datadir = dd; }
-    }
+    const char *datadir = resolve_datadir(argc, argv);
 
     chain_params_select(CHAIN_MAIN);
     ecc_start();
@@ -159,112 +270,47 @@ int main(int argc, char **argv)
 
     printf("── User opens the app ──\n");
 
-    DO("GET", "/wallet", NULL);
-    VERIFY("dashboard renders >1KB", _len > 1000);
-    VERIFY("balance shown", has("ZCL"));
-    if (rpc_total > 0) {
-        char exp[32]; snprintf(exp, sizeof(exp), "%.8f", rpc_total);
-        VERIFY("balance matches RPC", has(exp));
-    }
-    VERIFY("privacy meter", has("private"));
-    VERIFY("nav present", has(">Send<") && has(">Receive<"));
+    check_dashboard_page();
 
     printf("\n── User checks balance on send page ──\n");
 
-    DO("GET", "/wallet/send", NULL);
-    VERIFY("send renders", _len > 1000);
-    double bal = extract_var("var BAL");
-    VERIFY("JS BAL > 0", bal > 0.0001 || rpc_total < 0.001);
-    if (rpc_total > 0.001)
-        VERIFY("BAL matches total", fabs(bal - rpc_total) < 0.001);
-    VERIFY("has address input", has("name=\"address\"") || has("name='address'"));
-    VERIFY("has amount input", has("name=\"amount\"") || has("name='amount'"));
+    check_send_page();
 
     printf("\n── User tries to send with bad address ──\n");
 
-    DO("POST", "/wallet/send/review", "address=xyz&amount=0.5");
-    VERIFY("error shown", has("Invalid") || has("invalid") || has("short"));
-    VERIFY("retry available", has("Try Again") || has("/wallet/send"));
+    try_send_with_bad_address();
 
     printf("\n── User sends to valid z-address (review) ──\n");
 
-    DO("POST", "/wallet/send/review",
-       "address=zs19hc6ghlrzklr7y82u9w6822zuvrpfmgzlqz7alx8eqtwh2rvzgykl6m3lu8gwarpflcczgyse2p&amount=0.001");
-    VERIFY("review renders", _len > 200);
-    VERIFY("amount shown", has("0.001"));
-    VERIFY("no 'Insufficient'", !has("Insufficient"));
+    review_send_to_valid_zaddress();
 
     printf("\n── User checks receive page ──\n");
 
-    DO("GET", "/wallet/receive", NULL);
-    VERIFY("renders", _len > 500);
-    VERIFY("private recommended", has("recommended"));
-    VERIFY("QR code", has("<svg"));
-    VERIFY("z-address shown", has("zs1"));
+    check_receive_page();
 
     printf("\n── User browses history ──\n");
 
-    DO("GET", "/wallet/history", NULL);
-    VERIFY("renders", _len > 500);
-    VERIFY("no zero-value", !has("+0.00000000"));
-    VERIFY("no SQL", !has("sqlite3") && !has("SELECT "));
-
-    DO("GET", "/wallet/history?filter=sent", NULL);
-    VERIFY("sent filter works", _len > 200);
-
-    DO("GET", "/wallet/history?filter=recv", NULL);
-    VERIFY("recv filter works", _len > 200);
-
-    DO("GET", "/wallet/history?q=<script>alert(1)</script>", NULL);
-    VERIFY("XSS escaped", !has("<script>alert"));
+    browse_history_pages();
 
     printf("\n── User visits node / command center ──\n");
 
-    DO("GET", "/wallet/node", NULL);
-    VERIFY("renders", _len > 1000);
-    VERIFY("sovereignty", has("sovereign"));
-    VERIFY("block height", has("Block Height"));
-    VERIFY("peers", has("Connected Peers"));
-    VERIFY("version", has("ZClassic23:0.1.0"));
+    visit_node_page();
 
     printf("\n── User audits coins ──\n");
 
-    DO("GET", "/wallet/coins", NULL);
-    VERIFY("renders", _len > 200);
-    VERIFY("coin audit heading", has("Coin Audit"));
+    audit_coins();
 
     printf("\n── User checks shield status ──\n");
 
-    DO("GET", "/wallet/shield", NULL);
-    VERIFY("renders", _len > 200);
+    check_shield_status();
 
     printf("\n── User checks pulse API ──\n");
 
-    DO("GET", "/api/wallet/pulse", NULL);
-    VERIFY("JSON", has("{"));
-    VERIFY("height", has("\"height\""));
-    VERIFY("balance", has("\"balance\""));
-    VERIFY("shielded", has("\"shielded\""));
+    check_pulse_api();
 
     printf("\n── Edge cases ──\n");
 
-    DO("POST", "/wallet/send/review", "");
-    VERIFY("empty form → no crash", _len > 0);
-
-    DO("POST", "/wallet/send/review", NULL);
-    VERIFY("NULL body → no crash", _len > 0);
-
-    DO("POST", "/wallet/shield/confirm", "amount=0");
-    VERIFY("zero shield → invalid", _len > 200);
-
-    DO("POST", "/wallet/shield/confirm", "amount=-1");
-    VERIFY("negative shield → invalid", _len > 200);
-
-    DO("GET", "/wallet/tx/<script>alert(1)</script>", NULL);
-    VERIFY("XSS in txid", !has("<script>alert"));
-
-    { size_t n = DO("GET", "/wallet/doesnotexist", NULL);
-      VERIFY("unknown route → 0", n == 0); }
+    exercise_session_edge_cases();
 
     /* ── Summary ── */
     double total_ms = session_ms();
