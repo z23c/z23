@@ -88,6 +88,24 @@ static void forget_explicit_seed(struct app_context *ctx, char *fail_marker)
         fail_marker[0] = '\0';
 }
 
+static bool borrowed_seed_paths_present(const char *datadir,
+                                        const char *seed_path)
+{
+    if (!datadir || !datadir[0] || !seed_path || !seed_path[0])
+        return false;
+    return true;
+}
+
+static const char *borrowed_seed_basename(const char *seed_path)
+{
+    const char *slash = strrchr(seed_path, '/');
+    const char *backslash = strrchr(seed_path, '\\');
+    const char *separator = !slash ? backslash
+                            : !backslash || slash > backslash ? slash
+                                                              : backslash;
+    return separator ? separator + 1 : seed_path;
+}
+
 /* A sovereign consensus bundle is installed in this datadir (marker present),
  * yet a borrowed starter-pack seed file is still lying in the datadir root.
  * Auto-loading it would flip the installed state back to the borrowed seed.
@@ -98,15 +116,10 @@ static void forget_explicit_seed(struct app_context *ctx, char *fail_marker)
  * still prevents auto-load in maybe_autodetect_seed's caller path). */
 static void quarantine_borrowed_seed(const char *datadir, const char *seed_path)
 {
-    if (!datadir || !datadir[0] || !seed_path || !seed_path[0])
+    if (!borrowed_seed_paths_present(datadir, seed_path))
         return;
 
-    const char *slash = strrchr(seed_path, '/');
-    const char *backslash = strrchr(seed_path, '\\');
-    const char *separator = !slash ? backslash
-                            : !backslash || slash > backslash ? slash
-                                                              : backslash;
-    const char *base = separator ? separator + 1 : seed_path;
+    const char *base = borrowed_seed_basename(seed_path);
     if (!base[0])
         return;
 
