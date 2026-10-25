@@ -168,19 +168,95 @@ enum vcs_package_attest_transport_result vcs_package_attest_transport_root(
 
 /* ── local filing (the one implementation) ──────────────────────────── */
 
-enum vcs_package_attest_transport_result vcs_package_attest_transport_file(
-    const char *zcode_dir, const uint8_t *wire, size_t wire_len,
-    const uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES], bool *out_filed,
-    bool *out_already_present)
+/* How a look at the destination ends: nothing on the name yet, the very
+ * same bytes already filed, no readback buffer, or something different
+ * occupies the name. The caller owns every refusal message. */
+enum att_existing_result {
+    ATT_EXISTING_ABSENT,
+    ATT_EXISTING_PRESENT,
+    ATT_EXISTING_ALLOC_FAILED,
+    ATT_EXISTING_CONFLICT,
+};
+
+/* Both public flags start false, whatever the caller passed in. */
+static void att_clear_filed_flags(bool *out_filed, bool *out_already_present)
 {
     if (out_filed)
         *out_filed = false;
     if (out_already_present)
         *out_already_present = false;
-    if (!zcode_dir || !wire || !id)
+}
+
+/* True only when every pointer a filing call dereferences is present. */
+static bool att_file_args_present(const char *zcode_dir, const uint8_t *wire,
+                                  const uint8_t *id)
+{
+    return zcode_dir && wire && id;
+}
+
+/* A canonical attestation is never empty and never past the wire bound. */
+static bool att_wire_len_within_bound(size_t wire_len)
+{
+    return wire_len > 0 && wire_len <= VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES;
+}
+
+/* Lay out "<zcode_dir>/attestations" in dir; false when it cannot fit. */
+static bool att_format_attest_dir(char dir[STORE_PATH_MAX],
+                                  const char *zcode_dir)
+{
+    int n = snprintf(dir, STORE_PATH_MAX, "%s/attestations", zcode_dir);
+    return n > 0 && (size_t)n < STORE_PATH_MAX;
+}
+
+/* Lay out "<dir>/<id in hex>" in dest; false when it cannot fit. */
+static bool att_format_attest_dest(char dest[STORE_PATH_MAX],
+                                   const char *dir, const uint8_t *id)
+{
+    char id_hex[ATT_ID_HEX_BYTES];
+    zcl_hex_encode(id, VCS_PACKAGE_ATTEST_ID_BYTES, id_hex);
+    int n = snprintf(dest, STORE_PATH_MAX, "%s/%s", dir, id_hex);
+    return n > 0 && (size_t)n < STORE_PATH_MAX;
+}
+
+/* Classify what already occupies dest; sets *out_already_present only
+ * when the stored bytes read back identical. */
+static enum att_existing_result att_classify_existing(
+    const char *dest, const uint8_t *wire, size_t wire_len,
+    bool *out_already_present)
+{
+    /* Idempotent: the id IS the content hash, so a same-name file holding
+     * identical bytes is a no-op success. A same-name file that does not
+     * read back identical is store corruption — never overwritten. */
+    struct stat st;
+    if (stat(dest, &st) != 0)
+        return ATT_EXISTING_ABSENT;
+    uint8_t *have = zcl_malloc(ATT_READ_CAP, "attest-transport-readback");
+    if (!have)
+        return ATT_EXISTING_ALLOC_FAILED;
+    size_t have_len = 0;
+    bool same = att_read_bounded(dest, have,
+                                 VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES,
+                                 &have_len) &&
+                have_len == wire_len &&
+                memcmp(have, wire, wire_len) == 0;
+    free(have);
+    if (!same)
+        return ATT_EXISTING_CONFLICT;
+    if (out_already_present)
+        *out_already_present = true;
+    return ATT_EXISTING_PRESENT;
+}
+
+enum vcs_package_attest_transport_result vcs_package_attest_transport_file(
+    const char *zcode_dir, const uint8_t *wire, size_t wire_len,
+    const uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES], bool *out_filed,
+    bool *out_already_present)
+{
+    att_clear_filed_flags(out_filed, out_already_present);
+    if (!att_file_args_present(zcode_dir, wire, id))
         LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_NULL, ATT_LOG,
                    "zcode_dir, wire, or id is NULL");
-    if (wire_len == 0 || wire_len > VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES)
+    if (!att_wire_len_within_bound(wire_len))
         LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST, ATT_LOG,
                    "%zu bytes cannot be a canonical attestation", wire_len);
 
@@ -188,16 +264,12 @@ enum vcs_package_attest_transport_result vcs_package_attest_transport_file(
      * that cannot hold the final name never leaves a new directory
      * behind. */
     char dir[STORE_PATH_MAX];
-    int n = snprintf(dir, sizeof(dir), "%s/attestations", zcode_dir);
-    if (n <= 0 || (size_t)n >= sizeof(dir))
+    if (!att_format_attest_dir(dir, zcode_dir))
         LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_PATH, ATT_LOG,
                    "attestations directory path too long under %s",
                    zcode_dir);
-    char id_hex[ATT_ID_HEX_BYTES];
-    zcl_hex_encode(id, VCS_PACKAGE_ATTEST_ID_BYTES, id_hex);
     char dest[STORE_PATH_MAX];
-    n = snprintf(dest, sizeof(dest), "%s/%s", dir, id_hex);
-    if (n <= 0 || (size_t)n >= sizeof(dest))
+    if (!att_format_attest_dest(dest, dir, id))
         LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_PATH, ATT_LOG,
                    "attestation path too long under %s", dir);
 
@@ -205,30 +277,17 @@ enum vcs_package_attest_transport_result vcs_package_attest_transport_file(
         LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_STORE, ATT_LOG,
                    "cannot create %s: %s", dir, strerror(errno));
 
-    /* Idempotent: the id IS the content hash, so a same-name file holding
-     * identical bytes is a no-op success. A same-name file that does not
-     * read back identical is store corruption — never overwritten. */
-    struct stat st;
-    if (stat(dest, &st) == 0) {
-        uint8_t *have = zcl_malloc(ATT_READ_CAP, "attest-transport-readback");
-        if (!have)
-            LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ALLOC, ATT_LOG,
-                       "readback buffer for %s", dest);
-        size_t have_len = 0;
-        bool same = att_read_bounded(dest, have,
-                                     VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES,
-                                     &have_len) &&
-                    have_len == wire_len &&
-                    memcmp(have, wire, wire_len) == 0;
-        free(have);
-        if (!same)
-            LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT, ATT_LOG,
-                       "a different or unreadable object already occupies "
-                       "%s", dest);
-        if (out_already_present)
-            *out_already_present = true;
+    enum att_existing_result existing =
+        att_classify_existing(dest, wire, wire_len, out_already_present);
+    if (existing == ATT_EXISTING_PRESENT)
         return VCS_PACKAGE_ATTEST_TRANSPORT_OK;
-    }
+    if (existing == ATT_EXISTING_ALLOC_FAILED)
+        LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ALLOC, ATT_LOG,
+                   "readback buffer for %s", dest);
+    if (existing == ATT_EXISTING_CONFLICT)
+        LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT, ATT_LOG,
+                   "a different or unreadable object already occupies "
+                   "%s", dest);
 
     if (!store_atomic_write(dest, wire, wire_len))
         LOG_RETURN(VCS_PACKAGE_ATTEST_TRANSPORT_ERR_STORE, ATT_LOG,
