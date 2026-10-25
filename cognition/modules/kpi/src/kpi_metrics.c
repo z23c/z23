@@ -121,6 +121,56 @@ enum {
     KPI_LINE_MAX      = 4096
 };
 
+/* The argument shapes the scan refuses outright: no path, no pattern table,
+ * no counter array, or a pattern count outside 1..KPI_SCAN_PATS_MAX. */
+static bool kpi_scan_args_valid(const char *path, const char *const *pats,
+                                const uint64_t *counts, size_t npats)
+{
+    if (!path || !pats || !counts || npats == 0 || npats > KPI_SCAN_PATS_MAX)
+        return false;
+    return true;
+}
+
+/* Measure each pattern and zero its counter. A NULL pattern, an empty one,
+ * or one longer than the carry region is refused. *maxlen ends up holding
+ * the longest pattern's length. */
+static bool kpi_scan_prepare_pats(const char *const *pats, size_t npats,
+                                  size_t *plen, size_t *maxlen,
+                                  uint64_t *counts)
+{
+    size_t max = 0;
+    for (size_t i = 0; i < npats; i++) {
+        if (!pats[i])
+            return false;
+        plen[i] = strlen(pats[i]);
+        if (plen[i] == 0 || plen[i] > KPI_SCAN_CARRY)
+            return false;
+        if (plen[i] > max)
+            max = plen[i];
+        counts[i] = 0;
+    }
+    *maxlen = max;
+    return true;
+}
+
+/* One chunk's contribution to the counters: every match that starts before
+ * `stop` and ends within the `have` valid bytes of `buf`. */
+static void kpi_scan_chunk_matches(const unsigned char *buf, size_t have,
+                                   size_t stop, const char *const *pats,
+                                   const size_t *plen, size_t npats,
+                                   uint64_t *counts)
+{
+    for (size_t p = 0; p < stop; p++) {
+        unsigned char c = buf[p];
+        for (size_t i = 0; i < npats; i++) {
+            if (c != (unsigned char)pats[i][0] || plen[i] > have - p)
+                continue;
+            if (memcmp(buf + p, pats[i], plen[i]) == 0)
+                counts[i]++;
+        }
+    }
+}
+
 /* Count occurrences of each pattern in one streaming pass. The trailing
  * (maxlen - 1) bytes of every chunk are carried into the next read, so a
  * pattern straddling a chunk boundary is found exactly once — never missed and
@@ -131,21 +181,13 @@ enum {
 static bool kpi_scan_counts(const char *path, const char *const *pats,
                             size_t npats, uint64_t *counts)
 {
-    if (!path || !pats || !counts || npats == 0 || npats > KPI_SCAN_PATS_MAX)
+    if (!kpi_scan_args_valid(path, pats, counts, npats))
         return false;
 
     size_t plen[KPI_SCAN_PATS_MAX];
     size_t maxlen = 0;
-    for (size_t i = 0; i < npats; i++) {
-        if (!pats[i])
-            return false;
-        plen[i] = strlen(pats[i]);
-        if (plen[i] == 0 || plen[i] > KPI_SCAN_CARRY)
-            return false;
-        if (plen[i] > maxlen)
-            maxlen = plen[i];
-        counts[i] = 0;
-    }
+    if (!kpi_scan_prepare_pats(pats, npats, plen, &maxlen, counts))
+        return false;
 
     FILE *f = fopen(path, "rb");
     if (!f)
@@ -168,15 +210,7 @@ static bool kpi_scan_counts(const char *path, const char *const *pats,
         if (tail > have)
             tail = have;
         size_t stop = have - tail;
-        for (size_t p = 0; p < stop; p++) {
-            unsigned char c = buf[p];
-            for (size_t i = 0; i < npats; i++) {
-                if (c != (unsigned char)pats[i][0] || plen[i] > have - p)
-                    continue;
-                if (memcmp(buf + p, pats[i], plen[i]) == 0)
-                    counts[i]++;
-            }
-        }
+        kpi_scan_chunk_matches(buf, have, stop, pats, plen, npats, counts);
         if (tail > 0)
             memmove(buf, buf + have - tail, tail);
         carry = tail;
@@ -214,6 +248,22 @@ static bool kpi_read_line(FILE *f, char *buf, size_t cap, bool *overlong)
 static const char *kpi_skip_blanks(const char *s)
 {
     while (*s == ' ' || *s == '\t')
+        s++;
+    return s;
+}
+
+/* Advance to the line's terminating NUL. */
+static const char *kpi_skip_to_eol(const char *s)
+{
+    while (*s != '\0')
+        s++;
+    return s;
+}
+
+/* Advance past one whitespace-delimited token. */
+static const char *kpi_skip_token(const char *s)
+{
+    while (*s != '\0' && *s != ' ' && *s != '\t')
         s++;
     return s;
 }
@@ -283,6 +333,60 @@ bool kpi_count_test_groups(const char *path, uint64_t *out)
     return true;
 }
 
+/* Recognise the `LINT_GATES =` assignment itself: the variable name, an
+ * optional ':' or '+' target modifier, then the '=' that starts the list.
+ * Returns the byte after that '=', or NULL when the line does not assign
+ * the variable. */
+static const char *kpi_lint_gates_assign_start(const char *line)
+{
+    static const char k_var[] = "LINT_GATES";
+
+    /* Column zero only: a `LINT_GATES` mentioned inside a comment or a
+     * recipe is prose about the list, not the list. */
+    if (strncmp(line, k_var, sizeof k_var - 1) != 0)
+        return NULL;
+    const char *s = kpi_skip_blanks(line + sizeof k_var - 1);
+    if (*s == ':' || *s == '+')
+        s++;
+    if (*s != '=')
+        return NULL;
+    return s + 1;
+}
+
+/* Walk the backslash-continued list, counting whitespace-separated
+ * tokens. A `#` starts a make comment and ends the line's tokens. */
+static uint64_t kpi_count_gate_list(FILE *f, char *line, const char *s)
+{
+    uint64_t n = 0;
+    bool more = true;
+    while (more) {
+        more = false;
+        for (;;) {
+            s = kpi_skip_blanks(s);
+            if (*s == '\0')
+                break;
+            if (*s == '#') {
+                s = kpi_skip_to_eol(s);
+                break;
+            }
+            if (*s == '\\' && s[1] == '\0') {
+                more = true;
+                break;
+            }
+            n++;
+            s = kpi_skip_token(s);
+        }
+        if (more) {
+            if (!kpi_read_line(f, line, KPI_LINE_MAX, NULL)) {
+                more = false;
+                break;
+            }
+            s = line;
+        }
+    }
+    return n;
+}
+
 bool kpi_count_lint_gates(const char *makefile_path, uint64_t *out)
 {
     if (!makefile_path || !out)
@@ -295,51 +399,13 @@ bool kpi_count_lint_gates(const char *makefile_path, uint64_t *out)
     uint64_t n = 0;
     bool found = false;
     bool bad = false;
-    static const char k_var[] = "LINT_GATES";
 
     while (!found && kpi_read_line(f, line, sizeof line, NULL)) {
-        /* Column zero only: a `LINT_GATES` mentioned inside a comment or a
-         * recipe is prose about the list, not the list. */
-        if (strncmp(line, k_var, sizeof k_var - 1) != 0)
-            continue;
-        const char *s = kpi_skip_blanks(line + sizeof k_var - 1);
-        if (*s == ':' || *s == '+')
-            s++;
-        if (*s != '=')
+        const char *s = kpi_lint_gates_assign_start(line);
+        if (!s)
             continue;
         found = true;
-        s++;
-
-        /* Walk the backslash-continued list, counting whitespace-separated
-         * tokens. A `#` starts a make comment and ends the line's tokens. */
-        bool more = true;
-        while (more) {
-            more = false;
-            for (;;) {
-                s = kpi_skip_blanks(s);
-                if (*s == '\0')
-                    break;
-                if (*s == '#') {
-                    while (*s != '\0')
-                        s++;
-                    break;
-                }
-                if (*s == '\\' && s[1] == '\0') {
-                    more = true;
-                    break;
-                }
-                n++;
-                while (*s != '\0' && *s != ' ' && *s != '\t')
-                    s++;
-            }
-            if (more) {
-                if (!kpi_read_line(f, line, sizeof line, NULL)) {
-                    more = false;
-                    break;
-                }
-                s = line;
-            }
-        }
+        n = kpi_count_gate_list(f, line, s);
     }
     bad = ferror(f) != 0;
     fclose(f);
