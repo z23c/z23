@@ -2192,7 +2192,6 @@ tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
 tests/harness/src/test_merkle_tree.c:test_merkle_tree_scale:149
 tests/harness/src/test_mesh_observation.c:t_parse_refuses_by_name_and_leaves_out_untouched:17
 tests/harness/src/test_mesh_private_object_admission.c:admission_fixture_open:17
-tests/harness/src/test_mesh_private_object_receiver.c:receiver_fixture_make:16
 tests/harness/src/test_mesh_private_object_stage.c:stage_fixture_make:16
 tests/harness/src/test_mesh_status_wire.c:mesh_handshake:16
 tests/harness/src/test_mesh_terminal_worker.c:test_mesh_terminal_worker_platform_arm#2:33

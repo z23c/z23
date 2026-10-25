@@ -25,6 +25,68 @@ static void receiver_fill(uint8_t out[32], uint8_t first)
     for (size_t i = 0; i < 32; i++) out[i] = (uint8_t)(first + i);
 }
 
+static bool receiver_fixture_plaintext_root(
+    struct receiver_fixture *f,
+    uint8_t plain[2][MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES])
+{
+    struct mesh_private_object_root_v1 root;
+    return mesh_private_object_root_v1_init(
+            &root, MESH_PRIVATE_OBJECT_ROOT_PLAINTEXT,
+            f->offer.object_size_bytes, f->offer.ciphertext_size_bytes, 2) ==
+            MESH_PRIVATE_OBJECT_ROOT_OK &&
+        mesh_private_object_root_v1_update(
+            &root, 0, plain[0], sizeof(plain[0])) ==
+            MESH_PRIVATE_OBJECT_ROOT_OK &&
+        mesh_private_object_root_v1_update(&root, 1, plain[1], 7) ==
+            MESH_PRIVATE_OBJECT_ROOT_OK &&
+        mesh_private_object_root_v1_finalize(
+            &root, f->offer.plaintext_root) == MESH_PRIVATE_OBJECT_ROOT_OK;
+}
+
+static bool receiver_fixture_seal_chunks(
+    struct receiver_fixture *f, uint8_t source_secret[32],
+    uint8_t plain[2][MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES])
+{
+    if (mesh_private_object_chunk_seal_v1(
+            &f->offer, source_secret, 0, plain[0], sizeof(plain[0]),
+            f->sealed[0], sizeof(f->sealed[0]), &f->sealed_len[0]) !=
+            MESH_PRIVATE_OBJECT_CHUNK_OK ||
+        mesh_private_object_chunk_seal_v1(
+            &f->offer, source_secret, 1, plain[1], 7,
+            f->sealed[1], sizeof(f->sealed[1]), &f->sealed_len[1]) !=
+            MESH_PRIVATE_OBJECT_CHUNK_OK)
+        return false;
+    return true;
+}
+
+static bool receiver_fixture_ciphertext_root(struct receiver_fixture *f)
+{
+    struct mesh_private_object_root_v1 root;
+    if (mesh_private_object_root_v1_init(
+            &root, MESH_PRIVATE_OBJECT_ROOT_CIPHERTEXT,
+            f->offer.object_size_bytes, f->offer.ciphertext_size_bytes, 2) !=
+            MESH_PRIVATE_OBJECT_ROOT_OK ||
+        mesh_private_object_root_v1_update(
+            &root, 0, f->sealed[0], f->sealed_len[0]) !=
+            MESH_PRIVATE_OBJECT_ROOT_OK ||
+        mesh_private_object_root_v1_update(
+            &root, 1, f->sealed[1], f->sealed_len[1]) !=
+            MESH_PRIVATE_OBJECT_ROOT_OK ||
+        mesh_private_object_root_v1_finalize(
+            &root, f->offer.ciphertext_root) != MESH_PRIVATE_OBJECT_ROOT_OK)
+        return false;
+    return true;
+}
+
+static bool receiver_fixture_derive_and_sign(struct receiver_fixture *f)
+{
+    return mesh_private_object_offer_request_id_v1_derive(
+               &f->offer, f->grant_nonce, f->offer.request_id) ==
+               MESH_PRIVATE_OBJECT_PROTO_OK &&
+        mesh_private_object_offer_v1_sign(&f->offer, f->online_seed) ==
+            MESH_PRIVATE_OBJECT_PROTO_OK;
+}
+
 static bool receiver_fixture_make(struct receiver_fixture *f, uint8_t tag)
 {
     memset(f, 0, sizeof(*f));
@@ -66,46 +128,12 @@ static bool receiver_fixture_make(struct receiver_fixture *f, uint8_t tag)
         plain[0][i] = (uint8_t)(i * 29u + 7u + tag);
     for (size_t i = 0; i < 7; i++)
         plain[1][i] = (uint8_t)(0xd0u + i + tag);
-    struct mesh_private_object_root_v1 root;
-    bool rooted = mesh_private_object_root_v1_init(
-            &root, MESH_PRIVATE_OBJECT_ROOT_PLAINTEXT,
-            f->offer.object_size_bytes, f->offer.ciphertext_size_bytes, 2) ==
-            MESH_PRIVATE_OBJECT_ROOT_OK &&
-        mesh_private_object_root_v1_update(
-            &root, 0, plain[0], sizeof(plain[0])) ==
-            MESH_PRIVATE_OBJECT_ROOT_OK &&
-        mesh_private_object_root_v1_update(&root, 1, plain[1], 7) ==
-            MESH_PRIVATE_OBJECT_ROOT_OK &&
-        mesh_private_object_root_v1_finalize(
-            &root, f->offer.plaintext_root) == MESH_PRIVATE_OBJECT_ROOT_OK;
-    if (!rooted ||
-        mesh_private_object_chunk_seal_v1(
-            &f->offer, source_secret, 0, plain[0], sizeof(plain[0]),
-            f->sealed[0], sizeof(f->sealed[0]), &f->sealed_len[0]) !=
-            MESH_PRIVATE_OBJECT_CHUNK_OK ||
-        mesh_private_object_chunk_seal_v1(
-            &f->offer, source_secret, 1, plain[1], 7,
-            f->sealed[1], sizeof(f->sealed[1]), &f->sealed_len[1]) !=
-            MESH_PRIVATE_OBJECT_CHUNK_OK)
+    if (!receiver_fixture_plaintext_root(f, plain) ||
+        !receiver_fixture_seal_chunks(f, source_secret, plain))
         return false;
-    if (mesh_private_object_root_v1_init(
-            &root, MESH_PRIVATE_OBJECT_ROOT_CIPHERTEXT,
-            f->offer.object_size_bytes, f->offer.ciphertext_size_bytes, 2) !=
-            MESH_PRIVATE_OBJECT_ROOT_OK ||
-        mesh_private_object_root_v1_update(
-            &root, 0, f->sealed[0], f->sealed_len[0]) !=
-            MESH_PRIVATE_OBJECT_ROOT_OK ||
-        mesh_private_object_root_v1_update(
-            &root, 1, f->sealed[1], f->sealed_len[1]) !=
-            MESH_PRIVATE_OBJECT_ROOT_OK ||
-        mesh_private_object_root_v1_finalize(
-            &root, f->offer.ciphertext_root) != MESH_PRIVATE_OBJECT_ROOT_OK)
+    if (!receiver_fixture_ciphertext_root(f))
         return false;
-    return mesh_private_object_offer_request_id_v1_derive(
-               &f->offer, f->grant_nonce, f->offer.request_id) ==
-               MESH_PRIVATE_OBJECT_PROTO_OK &&
-        mesh_private_object_offer_v1_sign(&f->offer, f->online_seed) ==
-            MESH_PRIVATE_OBJECT_PROTO_OK;
+    return receiver_fixture_derive_and_sign(f);
 }
 
 static bool receiver_admission_make(
