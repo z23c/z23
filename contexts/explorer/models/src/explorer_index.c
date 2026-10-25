@@ -418,6 +418,67 @@ static void index_op_return(struct node_db *ndb, const struct transaction *tx,
 
 /* ── Per-tx projection writer ──────────────────────────────────────── */
 
+/* Classify one output's script and save its tx_outputs row. Reports the
+ * classified type through *st_out so the caller can run the first
+ * OP_RETURN dispatch off it; returns the save result for the caller to
+ * log. */
+static bool classify_and_save_tx_output(struct node_db *ndb,
+                                        const struct transaction *tx,
+                                        const struct tx_out *o, size_t vo,
+                                        int height,
+                                        enum script_type *st_out)
+{
+    uint8_t a20[20];
+    bool has = false;
+    enum script_type st = utxo_classify_script(o->script_pub_key.data,
+                                               o->script_pub_key.size,
+                                               a20, &has);
+    *st_out = st;
+    return db_tx_output_save(ndb, tx->hash.data, (uint32_t)vo, o->value,
+                             (int)st, has ? a20 : NULL, height);
+}
+
+/* Dispatch the tx's FIRST OP_RETURN output exactly once; *wrote remembers
+ * whether that first dispatch already happened. */
+static void index_first_op_return_output(struct node_db *ndb,
+                                         const struct transaction *tx,
+                                         const struct tx_out *o, int height,
+                                         enum script_type st, bool *wrote)
+{
+    if (st == SCRIPT_OP_RETURN && !*wrote) {
+        index_op_return(ndb, tx, o, height);
+        *wrote = true;
+    }
+}
+
+/* Save one transparent input, skipping the coinbase null prevout. Returns
+ * false only when a real save was attempted and failed; a skipped coinbase
+ * input counts as success so the caller logs nothing for it. */
+static bool tx_input_save_unless_coinbase(struct node_db *ndb,
+                                          const struct transaction *tx,
+                                          size_t vi, int height)
+{
+    if (outpoint_is_null(&tx->vin[vi].prevout))
+        return true;
+    return db_tx_input_save(ndb, tx->hash.data, (uint32_t)vi,
+                            tx->vin[vi].prevout.hash.data,
+                            tx->vin[vi].prevout.n, height);
+}
+
+/* Save one joinsplit's sprout nullifiers and report how many saves failed,
+ * so the caller logs one warning line per failure. */
+static unsigned joinsplit_nullifier_save_failures(
+    struct node_db *ndb, const struct transaction *tx,
+    const struct js_description *js, int height)
+{
+    unsigned failures = 0;
+    for (size_t k = 0; k < ZC_NUM_JS_INPUTS; k++)
+        if (!db_sprout_nullifier_save(ndb, js->nullifiers[k].data,
+                                      tx->hash.data, height))
+            failures++;
+    return failures;
+}
+
 static void index_tx_projections(struct node_db *ndb,
                                  const struct transaction *tx, int height,
                                  uint32_t *acc_njs, uint32_t *acc_nss,
@@ -428,31 +489,18 @@ static void index_tx_projections(struct node_db *ndb,
     bool wrote_opret = false;
     for (size_t vo = 0; vo < tx->num_vout; vo++) {
         const struct tx_out *o = &tx->vout[vo];
-        uint8_t a20[20];
-        bool has = false;
-        enum script_type st = utxo_classify_script(o->script_pub_key.data,
-                                                   o->script_pub_key.size,
-                                                   a20, &has);
-        if (!db_tx_output_save(ndb, tx->hash.data, (uint32_t)vo, o->value,
-                               (int)st, has ? a20 : NULL, height))
+        enum script_type st;
+        if (!classify_and_save_tx_output(ndb, tx, o, vo, height, &st))
             LOG_WARN("explorer", "tx_output save failed h=%d vout=%zu",
                      height, vo);
-        if (st == SCRIPT_OP_RETURN && !wrote_opret) {
-            index_op_return(ndb, tx, o, height);
-            wrote_opret = true;
-        }
+        index_first_op_return_output(ndb, tx, o, height, st, &wrote_opret);
     }
 
     /* Transparent inputs (skip coinbase null prevout). */
-    for (size_t vi = 0; vi < tx->num_vin; vi++) {
-        if (outpoint_is_null(&tx->vin[vi].prevout))
-            continue;
-        if (!db_tx_input_save(ndb, tx->hash.data, (uint32_t)vi,
-                              tx->vin[vi].prevout.hash.data,
-                              tx->vin[vi].prevout.n, height))
+    for (size_t vi = 0; vi < tx->num_vin; vi++)
+        if (!tx_input_save_unless_coinbase(ndb, tx, vi, height))
             LOG_WARN("explorer", "tx_input save failed h=%d vin=%zu",
                      height, vi);
-    }
     zslp_validity_mark_live_spends(ndb, tx, height);
 
     /* Sapling spends. */
@@ -474,11 +522,11 @@ static void index_tx_projections(struct node_db *ndb,
         const struct js_description *js = &tx->v_joinsplit[j];
         if (!db_joinsplit_save(ndb, tx->hash.data, (uint32_t)j, js, height))
             LOG_WARN("explorer", "joinsplit save failed h=%d", height);
-        for (size_t k = 0; k < ZC_NUM_JS_INPUTS; k++)
-            if (!db_sprout_nullifier_save(ndb, js->nullifiers[k].data,
-                                          tx->hash.data, height))
-                LOG_WARN("explorer", "sprout_nullifier save failed h=%d",
-                         height);
+        unsigned nullifier_failures =
+            joinsplit_nullifier_save_failures(ndb, tx, js, height);
+        for (unsigned f = 0; f < nullifier_failures; f++)
+            LOG_WARN("explorer", "sprout_nullifier save failed h=%d",
+                     height);
         *acc_sprout += js->vpub_old - js->vpub_new;
     }
     *acc_njs += (uint32_t)tx->num_joinsplit;

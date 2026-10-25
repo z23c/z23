@@ -523,7 +523,6 @@ contexts/explorer/controllers/src/explorer_controller_tx.c:serve_tx:52
 contexts/explorer/controllers/src/explorer_controller_tx.c:serve_tx_rpc:43
 contexts/explorer/controllers/src/name_site_controller.c:name_controller_compose_register:20
 contexts/explorer/controllers/src/name_site_controller.c:name_site_handle_request:24
-contexts/explorer/models/src/explorer_index.c:index_tx_projections:17
 contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:31
 contexts/explorer/models/src/explorer_index_zid.c:explorer_index_apply_znam_zid_text:21
 contexts/explorer/modules/presentation/src/presentation.c:present_clipboard_write_image:20
