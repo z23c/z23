@@ -1,0 +1,26 @@
+[Unit]
+Description=Z23 C8 block-hash parity sample (our node vs the C++ oracle, loopback)
+
+[Service]
+Type=oneshot
+# One sample per run: asks both loopback nodes for their tip and the block
+# hash at min(tips) - 100, then appends one JSON line to parity.jsonl under an
+# exclusive lock (native_fleet_parity.c). It reads no datadir and contacts no
+# peer beyond the two loopback RPC ports.
+#
+# A node that cannot answer is recorded as ok:false with null hashes and the
+# leaf still exits 0, because a hole in the series is itself evidence. So a
+# failure of this unit means the append or the lock failed, not that the
+# parity is bad.
+#
+# Cookies are read by the RPC client from <cookie_dir>/.cookie; no secret
+# travels in argv. Pass the cookie DIRECTORIES, not the .cookie files.
+ExecStart=%h/development/z23/main/build/bin/z23-dev fleet receipt parity --a_port=18232 --a_cookie_dir=%h/.zclassic-c23 --b_port=8232 --b_cookie_dir=%h/.local/state/z23-parity/oracle-auth
+
+# A sample is two RPC round trips per node: seconds, not minutes. The bound
+# keeps a wedged RPC from holding the 30-minute timer in "activating".
+TimeoutStartSec=120
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

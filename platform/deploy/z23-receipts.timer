@@ -1,0 +1,17 @@
+[Unit]
+Description=Z23 daily acceptance receipts timer (03:30 local, randomized)
+
+[Timer]
+# Wall-clock (OnCalendar), not monotonic: a monotonic timer drifts across
+# suspends and reboots, the failure the SLO probe timer's comment records.
+OnCalendar=*-*-* 03:30:00
+# Spread the start by up to 15 minutes so the box's other 03:30 work and the
+# shared devbuild queue do not all land on the same second.
+RandomizedDelaySec=900
+# A run missed while the box was off is caught up at the next boot; receipts
+# older than 24 h go stale, so a missed day must not wait for the next 03:30.
+Persistent=true
+Unit=z23-receipts.service
+
+[Install]
+WantedBy=timers.target

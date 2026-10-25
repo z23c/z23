@@ -1,0 +1,17 @@
+[Unit]
+Description=Z23 C8 block-hash parity sample timer (every 30 minutes)
+
+[Timer]
+# Wall-clock (OnCalendar), not monotonic, for the same reason as the other
+# timers in this directory: a monotonic timer drifts across suspends.
+OnCalendar=*-*-* *:00,30:00
+# A few seconds of jitter so the two RPC ports are not hit on the same tick
+# as other loopback work.
+RandomizedDelaySec=30
+# Missed samples are a hole in the series, and a catch-up run after downtime
+# records the state at that later time, so it is safe to run it late.
+Persistent=true
+Unit=z23-parity-receipt.service
+
+[Install]
+WantedBy=timers.target

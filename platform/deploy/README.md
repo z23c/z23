@@ -29,6 +29,13 @@ you are new; this page is about operating a host, not about building.
   the BLIND threshold.
 - **Landing.** `z23-land-step.service` / `.timer` drive the native land queue, one
   `dev land drive --prove` row per tick.
+- **Receipts and vitals.** `z23-receipts.service` / `.timer` run the daily C5 and
+  C7 acceptance producers on a detached worktree of `origin/main`, one `-ExecStart`
+  per target so a red one still records its receipt. `z23-parity-receipt.service` /
+  `.timer` append one C8 block-hash parity sample every 30 minutes, and
+  `z23-vitals-sample.service` / `.timer` append one vitals row every 5 minutes.
+  Each runs the installed `z23-dev` binary (or `devbuild --wait make`, for the
+  receipts) and keeps its evidence in `~/.local/state`.
 - **Agents.** `zcl-agent-worker@.service` and `zcl-agent-receive@.service`, the
   instanced pair. The instance name is the box's own agent identity.
 - **Installers.** `setup.sh`, `provision-z23-build-host.sh`,

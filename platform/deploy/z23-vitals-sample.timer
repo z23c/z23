@@ -1,0 +1,17 @@
+[Unit]
+Description=Z23 vitals sample timer (every 5 minutes)
+
+[Timer]
+# Wall-clock (OnCalendar), not monotonic, as the other timers in this
+# directory: a monotonic cadence drifts across suspends and reboots.
+OnCalendar=*-*-* *:0/5:00
+# Jitter of a few seconds so the sample does not land on the same tick as the
+# other 5-minute units on the box.
+RandomizedDelaySec=15
+# A missed sample is a gap in the vitals history; a catch-up run after
+# downtime records the state at that later time, which is the honest value.
+Persistent=true
+Unit=z23-vitals-sample.service
+
+[Install]
+WantedBy=timers.target

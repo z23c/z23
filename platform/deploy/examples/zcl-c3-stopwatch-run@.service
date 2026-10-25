@@ -18,9 +18,9 @@ OnFailure=zcl-stopwatch-onfailure.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/github/z23
+WorkingDirectory=%h/development/z23/main
 EnvironmentFile=-%h/.config/zclassic23-stopwatch/%i.env
-ExecStart=%h/github/z23/tools/scripts/c3_stopwatch_run_and_record.sh
+ExecStart=%h/development/z23/main/tools/scripts/c3_stopwatch_run_and_record.sh
 # 10-min stopwatch budget (ZCL_CS_BUDGET_SECS default 600) + boot/RPC
 # overhead margin.
 TimeoutStartSec=700

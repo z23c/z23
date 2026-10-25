@@ -1,0 +1,46 @@
+[Unit]
+Description=Z23 daily acceptance receipts (C5 ci-mvp-gates, C7 crash bootstrap) on origin/main
+
+[Service]
+Type=oneshot
+# The acceptance checkout is a detached git worktree, not the maintainer's
+# main checkout, so a scheduled run never races an interactive edit or a
+# lane's dirty tree. The lead creates it once, by hand:
+#   git -C %h/development/z23/main worktree add --detach \
+#       %h/.cache/development-scratch/z23/acceptance origin/main
+# Every run then fast-forwards it to origin/main before building.
+WorkingDirectory=%h/.cache/development-scratch/z23/acceptance
+ExecStartPre=/usr/bin/git -C %h/.cache/development-scratch/z23/acceptance fetch -q origin main
+# A failed fetch or checkout stops the unit here (no '-' prefix): recording a
+# receipt against a stale or half-updated tree would be a false pass.
+ExecStartPre=/usr/bin/git -C %h/.cache/development-scratch/z23/acceptance checkout -q --detach origin/main
+# The binaries the receipt producers run are built before any target starts.
+ExecStartPre=%h/bin/devbuild --wait make dev-bin
+
+# Each target is its own ExecStart=, and each carries a '-' prefix. A red
+# target then does not stop the rest of the unit: the make target itself
+# appends its receipt with the verdict `fail` (Makefile receipt_run), and the
+# other targets must still record theirs. The journal shows which one failed.
+-ExecStart=%h/bin/devbuild --wait make ci-mvp-gates-run
+-ExecStart=%h/bin/devbuild --wait make test-crash-bootstrap-run
+
+# Receipts are written by the make targets (`z23-dev fleet receipt append`)
+# into ~/.local/state/zclassic23-receipts/<ID>.jsonl, and a receipt goes stale
+# after 24 h. The daily timer keeps every C-item inside that window with
+# margin; a missed day is caught up by Persistent=true on the timer.
+#
+# Two full builds and test runs: the bound covers devbuild queueing, a cold
+# build and both suites. A hung target still ends here instead of holding the
+# timer in "activating".
+TimeoutStartSec=21600
+TimeoutStopSec=60
+
+# Acceptance runs are long and background work: yield to the node and to
+# interactive builds, as the land stepper does.
+Nice=10
+CPUWeight=20
+IOWeight=20
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal

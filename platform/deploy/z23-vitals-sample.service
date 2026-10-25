@@ -1,0 +1,19 @@
+[Unit]
+Description=Z23 vitals sample (load, memory, disk for this box into the ledger)
+
+[Service]
+Type=oneshot
+# Reads host facts once through the platform seam and appends one signed
+# vitals row per catalog metric (fleet.def fleet.vitals.sample). A fact this
+# platform cannot measure is stored ABSENT, never as zero, so a sample on an
+# unusual host records a hole rather than a false reading. It contacts no peer.
+ExecStart=%h/development/z23/main/build/bin/z23-dev fleet vitals sample
+
+# A sample reads a handful of /proc and statfs values: milliseconds. The short
+# bound stops a wedged filesystem read from holding the 5-minute timer in
+# "activating", which would silently stop the vitals history.
+TimeoutStartSec=60
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
