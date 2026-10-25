@@ -236,8 +236,7 @@ static void vpc_fixture_reset(void)
     blocker_reset_for_testing();
 }
 
-int test_validation_pack_conditions(void);
-int test_validation_pack_conditions(void)
+static int vpc_check_mirror_divergence_located(void)
 {
     int failures = 0;
 
@@ -284,6 +283,13 @@ int test_validation_pack_conditions(void)
         vpc_clock_clear();
         vpc_fixture_reset();
     }
+
+    return failures;
+}
+
+static int vpc_check_tip_label_divergence(void)
+{
+    int failures = 0;
 
     /* ───────────────── tip_label_divergence ─────────────────
      * detect := blocker_exists("chain.linkage_violation") ||
@@ -348,6 +354,13 @@ int test_validation_pack_conditions(void)
         vpc_clock_clear();
         vpc_fixture_reset();
     }
+
+    return failures;
+}
+
+static int vpc_check_tip_label_rewind_driver_wiring(void)
+{
+    int failures = 0;
 
     /* ───────── tip_label_divergence → rewind_driver wiring ─────────
      * Companion to the block above: there the fixture raised the blockers
@@ -448,6 +461,13 @@ int test_validation_pack_conditions(void)
         vpc_fixture_reset();
         chain_linkage_reset_for_testing();
     }
+
+    return failures;
+}
+
+static int vpc_check_state_window_inconsistent(void)
+{
+    int failures = 0;
 
     /* ───────────────── state_window_inconsistent ─────────────────
      * detect := blocker_exists("window.consistency") ||
@@ -598,6 +618,19 @@ int test_validation_pack_conditions(void)
         invariant_sentinel_reset_for_testing();
         chain_linkage_reset_for_testing();
     }
+
+    return failures;
+}
+
+int test_validation_pack_conditions(void);
+int test_validation_pack_conditions(void)
+{
+    int failures = 0;
+
+    failures += vpc_check_mirror_divergence_located();
+    failures += vpc_check_tip_label_divergence();
+    failures += vpc_check_tip_label_rewind_driver_wiring();
+    failures += vpc_check_state_window_inconsistent();
 
     printf("\n=== validation_pack_conditions: %d failure(s) ===\n", failures);
     return failures;
