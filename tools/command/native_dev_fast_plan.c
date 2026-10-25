@@ -259,24 +259,11 @@ static bool plan_push_tokens(struct plan_list *l, const char *text,
     return true;
 }
 
-/* Whole-file read, NUL-terminated. NULL on open or allocation failure, so a
- * hint file is never silently truncated. */
-static char *plan_read_file(const char *path, size_t *out_len)
-{
-    char *buf = NULL;
-    size_t len = 0;
-    if (!zcl_read_whole_file_text(path, PLAN_FILE_CAP, &buf, &len,
-                                  "dev.test.fast_plan"))
-        return NULL;
-    *out_len = len;
-    return buf;
-}
-
 static bool plan_hint_file(struct plan_state *st)
 {
     const char *path = plan_env("ZCL_FAST_CHANGED_FILES_FILE");
     struct stat sb;
-    char *text;
+    char *text = NULL;
     size_t len = 0;
     bool ok;
     if (!path[0])
@@ -284,8 +271,11 @@ static bool plan_hint_file(struct plan_state *st)
     if (stat(path, &sb) != 0 || !S_ISREG(sb.st_mode))
         return plan_invalid(st, "ZCL_FAST_CHANGED_FILES_FILE does not exist",
                             "env:ZCL_FAST_CHANGED_FILES_FILE");
-    text = plan_read_file(path, &len);
-    if (!text)
+    /* Whole-file, NUL-terminated; NULL on failure so a hint file is never
+     * silently truncated. */
+    if (!zcl_read_whole_file_text(path, PLAN_FILE_CAP, &text, &len,
+                                  "dev.test.fast_plan") ||
+        !text)
         return plan_invalid(st, "ZCL_FAST_CHANGED_FILES_FILE is unreadable",
                             "env:ZCL_FAST_CHANGED_FILES_FILE");
     ok = plan_push_lines(&st->changed, text);
