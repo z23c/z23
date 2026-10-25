@@ -482,6 +482,9 @@ static bool prt_restart_once(struct plugin_run **run)
     struct plugin_run_info info;
     plugin_run_info_get(*run, &info);
     uint64_t pid = info.pid;
+    /* pid 0 would signal the whole process group (the test runner). */
+    if (pid == 0)
+        return false;
     return kill((pid_t)pid, SIGKILL) == 0 && prt_wait(run, 1, 0, prt_new_pid, &pid, 5000);
 }
 
