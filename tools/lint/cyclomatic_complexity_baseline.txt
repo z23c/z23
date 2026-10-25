@@ -24,7 +24,6 @@ cognition/controllers/src/agent_background_quality.c:agent_push_quality_lane:32
 cognition/controllers/src/agent_cure_status_helpers.c:agent_cure_activity_build:17
 cognition/controllers/src/agent_diagnose_controller.c:rpc_agent_diagnose:67
 cognition/controllers/src/agent_interface_controller.c:rpc_agent_deploy_guard:39
-cognition/controllers/src/agent_liveness_controller.c:agent_liveness_push_summary:23
 cognition/controllers/src/agent_resources.c:agent_resources_stat_assign:16
 cognition/controllers/src/agent_security_posture.c:posture_collect_bootstrap:18
 cognition/controllers/src/agent_security_posture.c:posture_finalize:19

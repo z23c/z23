@@ -260,6 +260,74 @@ static void agent_liveness_push_drilldowns(struct json_value *out,
     json_free(&arr);
 }
 
+static bool agent_liveness_in_process_runtime_active(
+    bool supervisor_running, bool supervisor_thread_alive,
+    bool rpc_running, bool https_running, bool fs_running)
+{
+    return supervisor_running || supervisor_thread_alive ||
+           rpc_running || https_running || fs_running;
+}
+
+static bool agent_liveness_attention_needed(
+    int64_t quality_failed, int64_t stale_child_count,
+    int64_t stall_fires_total, bool supervisor_running,
+    bool supervisor_thread_alive)
+{
+    return quality_failed > 0 || stale_child_count > 0 ||
+           stall_fires_total > 0 ||
+           (supervisor_running && !supervisor_thread_alive);
+}
+
+static const char *agent_liveness_effective_runtime_scope(
+    bool in_process_runtime_active, bool target_rpc_reachable)
+{
+    return in_process_runtime_active ? "producer_runtime" :
+           (target_rpc_reachable ? "target_rpc_probe" : "none");
+}
+
+static const char *agent_liveness_producer_runtime_state(
+    bool in_process_runtime_active)
+{
+    return in_process_runtime_active ? "active" : "inactive_or_static_probe";
+}
+
+static const char *agent_liveness_target_runtime_state(
+    bool target_rpc_attempted, bool target_rpc_reachable)
+{
+    return target_rpc_attempted ? (target_rpc_reachable ? "reachable"
+                                                        : "unreachable")
+                                : "not_probed";
+}
+
+static const char *agent_liveness_overall_liveness(
+    bool attention_needed, bool in_process_runtime_active,
+    bool target_rpc_reachable)
+{
+    return attention_needed ? "attention_needed" :
+           (in_process_runtime_active ? "active" :
+            (target_rpc_reachable ? "target_runtime_reachable"
+                                  : "static_or_offline_context"));
+}
+
+static const char *agent_liveness_summary_next_action(
+    bool attention_needed, bool in_process_runtime_active,
+    bool target_rpc_reachable)
+{
+    return attention_needed
+        ? "inspect_agent_liveness_drilldowns"
+        : (in_process_runtime_active ? "monitor_liveness_and_quality_lanes"
+           : (target_rpc_reachable
+                  ? "monitor_target_runtime"
+                  : "probe_target_runtime_or_start_dev_lane"));
+}
+
+static const char *agent_liveness_observation_scope(
+    const char *availability_scope)
+{
+    return availability_scope && availability_scope[0]
+               ? availability_scope : "producer_runtime";
+}
+
 static void agent_liveness_push_summary(struct json_value *out,
                                         const struct json_value *lane,
                                         const struct json_value *runtime,
@@ -288,39 +356,32 @@ static void agent_liveness_push_summary(struct json_value *out,
     const char *lane_name =
         json_get_str(json_get(lane, "lane"));
     bool in_process_runtime_active =
-        supervisor_running || supervisor_thread_alive ||
-        rpc_running || https_running || fs_running;
+        agent_liveness_in_process_runtime_active(
+            supervisor_running, supervisor_thread_alive,
+            rpc_running, https_running, fs_running);
     bool target_rpc_attempted =
         json_get_bool(json_get(availability, "target_rpc_attempted"));
     bool target_rpc_reachable =
         json_get_bool(json_get(availability, "target_rpc_reachable"));
     const char *availability_scope =
         json_get_str(json_get(availability, "availability_scope"));
-    bool attention_needed = quality_failed > 0 ||
-                            sup.stale_child_count > 0 ||
-                            sup.stall_fires_total > 0 ||
-                            (supervisor_running && !supervisor_thread_alive);
+    bool attention_needed = agent_liveness_attention_needed(
+        quality_failed, sup.stale_child_count, sup.stall_fires_total,
+        supervisor_running, supervisor_thread_alive);
     bool effective_runtime_reachable =
         in_process_runtime_active || target_rpc_reachable;
     const char *effective_runtime_scope =
-        in_process_runtime_active ? "producer_runtime" :
-        (target_rpc_reachable ? "target_rpc_probe" : "none");
+        agent_liveness_effective_runtime_scope(
+            in_process_runtime_active, target_rpc_reachable);
     const char *producer_runtime_state =
-        in_process_runtime_active ? "active" : "inactive_or_static_probe";
+        agent_liveness_producer_runtime_state(in_process_runtime_active);
     const char *target_runtime_state =
-        target_rpc_attempted ? (target_rpc_reachable ? "reachable"
-                                                     : "unreachable")
-                             : "not_probed";
-    const char *overall = attention_needed ? "attention_needed" :
-        (in_process_runtime_active ? "active" :
-         (target_rpc_reachable ? "target_runtime_reachable"
-                               : "static_or_offline_context"));
-    const char *next_action = attention_needed
-        ? "inspect_agent_liveness_drilldowns"
-        : (in_process_runtime_active ? "monitor_liveness_and_quality_lanes"
-          : (target_rpc_reachable
-                 ? "monitor_target_runtime"
-                 : "probe_target_runtime_or_start_dev_lane"));
+        agent_liveness_target_runtime_state(target_rpc_attempted,
+                                            target_rpc_reachable);
+    const char *overall = agent_liveness_overall_liveness(
+        attention_needed, in_process_runtime_active, target_rpc_reachable);
+    const char *next_action = agent_liveness_summary_next_action(
+        attention_needed, in_process_runtime_active, target_rpc_reachable);
 
     struct json_value summary;
     json_init(&summary);
@@ -344,8 +405,7 @@ static void agent_liveness_push_summary(struct json_value *out,
     json_push_kv_str(&summary, "effective_runtime_scope",
                      effective_runtime_scope);
     json_push_kv_str(&summary, "runtime_observation_scope",
-                     availability_scope && availability_scope[0]
-                         ? availability_scope : "producer_runtime");
+                     agent_liveness_observation_scope(availability_scope));
     json_push_kv_bool(&summary, "attention_needed", attention_needed);
     json_push_kv_bool(&summary, "rpc_running", rpc_running);
     json_push_kv_bool(&summary, "https_running", https_running);
