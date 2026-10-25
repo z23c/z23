@@ -93,6 +93,24 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_find_node(
         ? VCS_ZCODE_DHT_OK : VCS_ZCODE_DHT_ERR_WIRE_SIZE;
 }
 
+static bool serialize_args_present(
+    const void *m, const uint8_t *wire, const uint8_t *transcript,
+    const uint8_t *online_seed)
+{
+    return m && wire && transcript && online_seed;
+}
+
+static enum vcs_zcode_dht_error check_node_ids(
+    const struct vcs_zcode_dht_msg_nodes *m)
+{
+    for (uint32_t i = 0; i < m->contact_count; i++) {
+        if (!zcl_bytes_any_set(m->node_ids[i], 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
+        if (i && memcmp(m->node_ids[i - 1], m->node_ids[i], 32) >= 0)
+            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+    }
+    return VCS_ZCODE_DHT_OK;
+}
+
 enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_nodes(
     const struct vcs_zcode_dht_msg_nodes *m,
     const uint8_t transcript[32], const uint8_t online_seed[32],
@@ -100,20 +118,17 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_nodes(
 {
     if (!len_out) return VCS_ZCODE_DHT_ERR_NULL;
     *len_out = 0;
-    if (!m || !wire || !transcript || !online_seed)
+    if (!serialize_args_present(m, wire, transcript, online_seed))
         return VCS_ZCODE_DHT_ERR_NULL;
     if (m->contact_count > VCS_ZCODE_DHT_K) return VCS_ZCODE_DHT_ERR_LIMIT;
-    for (uint32_t i = 0; i < m->contact_count; i++) {
-        if (!zcl_bytes_any_set(m->node_ids[i], 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
-        if (i && memcmp(m->node_ids[i - 1], m->node_ids[i], 32) >= 0)
-            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-    }
+    enum vcs_zcode_dht_error e = check_node_ids(m);
+    if (e != VCS_ZCODE_DHT_OK) return e;
     size_t need = VCS_ZCODE_DHT_MSGS_HEADER_BYTES +
         VCS_ZCODE_DHT_MSGS_AUTH_BYTES + 1 + (size_t)m->contact_count * 32 +
         VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES;
     if (cap < need) return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
     size_t off = write_header(wire, VCS_ZCODE_DHT_MSG_NODES);
-    enum vcs_zcode_dht_error e = write_auth(
+    e = write_auth(
         wire, &off, m->session_generation, m->sender_node_id, m->query_id,
         &m->delegation);
     if (e != VCS_ZCODE_DHT_OK) return e;
@@ -137,6 +152,32 @@ static size_t selector_length(
     return length;
 }
 
+static bool selector_name_char_valid(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+           c == '.' || c == '_' || c == '-';
+}
+
+static bool selector_name_chars_valid(
+    const char name[VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES], size_t length)
+{
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (!selector_name_char_valid(c))
+            return false;
+    }
+    return true;
+}
+
+static bool selector_name_padding_zero(
+    const char name[VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES], size_t length)
+{
+    for (size_t i = length; i < VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES; i++)
+        if (name[i] != '\0')
+            return false;
+    return true;
+}
+
 static bool selector_valid(const struct vcs_zcode_dht_record_selector *s)
 {
     if (!s || s->kind < VCS_ZCODE_DHT_RECORD_PROVIDER ||
@@ -146,16 +187,8 @@ static bool selector_valid(const struct vcs_zcode_dht_record_selector *s)
     size_t length = selector_length(s->namespace_name);
     if (!length || length > VCS_ZCODE_DHT_RECORD_NAMESPACE_MAX)
         return false;
-    for (size_t i = 0; i < length; i++) {
-        unsigned char c = (unsigned char)s->namespace_name[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-              c == '.' || c == '_' || c == '-'))
-            return false;
-    }
-    for (size_t i = length; i < VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES; i++)
-        if (s->namespace_name[i] != '\0')
-            return false;
-    return true;
+    return selector_name_chars_valid(s->namespace_name, length) &&
+           selector_name_padding_zero(s->namespace_name, length);
 }
 
 static size_t write_selector(
@@ -222,6 +255,47 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_find_record(
                                         len_out);
 }
 
+static bool records_page_offsets_valid(
+    const struct vcs_zcode_dht_msg_records *m)
+{
+    if (m->page_offset >= VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ||
+        m->page_offset % VCS_ZCODE_DHT_RECORDS_PER_FRAME != 0)
+        return false;
+    if (m->next_offset &&
+        (m->next_offset != m->page_offset + VCS_ZCODE_DHT_RECORDS_PER_FRAME ||
+         m->next_offset >= VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT))
+        return false;
+    return true;
+}
+
+static bool records_count_allowed(const struct vcs_zcode_dht_msg_records *m)
+{
+    if (m->record_count > VCS_ZCODE_DHT_RECORDS_PER_FRAME) return false;
+    if (m->next_offset && m->record_count != VCS_ZCODE_DHT_RECORDS_PER_FRAME)
+        return false;
+    return true;
+}
+
+static enum vcs_zcode_dht_error write_records(
+    const struct vcs_zcode_dht_msg_records *m, uint8_t *wire, size_t *off)
+{
+    for (uint32_t i = 0; i < m->record_count; i++) {
+        if (!selector_matches(&m->selector, &m->records[i]))
+            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+        if (memcmp(m->records[i].network_genesis,
+                   m->delegation.network_genesis, 32) != 0)
+            return VCS_ZCODE_DHT_ERR_NETWORK;
+        if (vcs_zcode_dht_record_encode(&m->records[i], wire + *off) !=
+            VCS_ZCODE_DHT_RECORD_OK)
+            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+        if (i && memcmp(wire + *off - VCS_ZCODE_DHT_RECORD_WIRE_BYTES,
+                        wire + *off, VCS_ZCODE_DHT_RECORD_WIRE_BYTES) >= 0)
+            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+        *off += VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
+    }
+    return VCS_ZCODE_DHT_OK;
+}
+
 enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_records(
     const struct vcs_zcode_dht_msg_records *m,
     const uint8_t transcript[32], const uint8_t online_seed[32],
@@ -229,20 +303,11 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_records(
 {
     if (!len_out) return VCS_ZCODE_DHT_ERR_NULL;
     *len_out = 0;
-    if (!m || !wire || !transcript || !online_seed)
+    if (!serialize_args_present(m, wire, transcript, online_seed))
         return VCS_ZCODE_DHT_ERR_NULL;
-    if (!selector_valid(&m->selector) ||
-        m->page_offset >= VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ||
-        m->page_offset % VCS_ZCODE_DHT_RECORDS_PER_FRAME != 0 ||
-        (m->next_offset &&
-         (m->next_offset !=
-              m->page_offset + VCS_ZCODE_DHT_RECORDS_PER_FRAME ||
-          m->next_offset >= VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT)))
+    if (!selector_valid(&m->selector) || !records_page_offsets_valid(m))
         return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-    if (m->record_count > VCS_ZCODE_DHT_RECORDS_PER_FRAME ||
-        (m->next_offset &&
-         m->record_count != VCS_ZCODE_DHT_RECORDS_PER_FRAME))
-        return VCS_ZCODE_DHT_ERR_LIMIT;
+    if (!records_count_allowed(m)) return VCS_ZCODE_DHT_ERR_LIMIT;
     size_t need = VCS_ZCODE_DHT_MSGS_HEADER_BYTES +
                   VCS_ZCODE_DHT_MSGS_AUTH_BYTES +
                   VCS_ZCODE_DHT_RECORD_SELECTOR_BYTES + 3u +
@@ -258,20 +323,8 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_records(
     wire[off++] = m->page_offset;
     wire[off++] = m->next_offset;
     wire[off++] = (uint8_t)m->record_count;
-    for (uint32_t i = 0; i < m->record_count; i++) {
-        if (!selector_matches(&m->selector, &m->records[i]))
-            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-        if (memcmp(m->records[i].network_genesis,
-                   m->delegation.network_genesis, 32) != 0)
-            return VCS_ZCODE_DHT_ERR_NETWORK;
-        if (vcs_zcode_dht_record_encode(&m->records[i], wire + off) !=
-            VCS_ZCODE_DHT_RECORD_OK)
-            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-        if (i && memcmp(wire + off - VCS_ZCODE_DHT_RECORD_WIRE_BYTES,
-                        wire + off, VCS_ZCODE_DHT_RECORD_WIRE_BYTES) >= 0)
-            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-        off += VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
-    }
+    e = write_records(m, wire, &off);
+    if (e != VCS_ZCODE_DHT_OK) return e;
     e = sign_frame(wire, off, transcript, online_seed, &m->delegation);
     if (e != VCS_ZCODE_DHT_OK) return e;
     off += VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES;
@@ -420,6 +473,265 @@ static enum vcs_zcode_dht_error record_parse_error(
     return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
 }
 
+static enum vcs_zcode_dht_error check_frame_header(const uint8_t *wire,
+                                                   size_t len)
+{
+    if (len < VCS_ZCODE_DHT_MSGS_HEADER_BYTES + VCS_ZCODE_DHT_MSGS_AUTH_BYTES +
+              VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES)
+        return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    if (memcmp(wire, msgs_magic, 8) != 0) return VCS_ZCODE_DHT_ERR_WIRE_MAGIC;
+    if (zcl_read_u16_le(wire + 8) != VCS_ZCODE_DHT_MSGS_WIRE_VERSION)
+        return VCS_ZCODE_DHT_ERR_VERSION;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static enum vcs_zcode_dht_error check_nodes_frame_length(
+    const uint8_t *wire, size_t len, size_t payload_off, uint32_t *count_out)
+{
+    if (payload_off >= len - VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES)
+        return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    *count_out = wire[payload_off];
+    if (*count_out > VCS_ZCODE_DHT_K)
+        return VCS_ZCODE_DHT_ERR_LIMIT;
+    size_t expected = payload_off + 1 + (size_t)*count_out * 32 +
+                      VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES;
+    if (len != expected)
+        return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static enum vcs_zcode_dht_error check_records_frame_length(
+    const uint8_t *wire, size_t len, size_t payload_off, uint32_t *count_out)
+{
+    size_t count_offset = payload_off +
+                          VCS_ZCODE_DHT_RECORD_SELECTOR_BYTES + 2u;
+    if (count_offset >= len - VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES)
+        return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    *count_out = wire[count_offset];
+    if (*count_out > VCS_ZCODE_DHT_RECORDS_PER_FRAME)
+        return VCS_ZCODE_DHT_ERR_LIMIT;
+    size_t expected = count_offset + 1u +
+                      (size_t)*count_out * VCS_ZCODE_DHT_RECORD_WIRE_BYTES +
+                      VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES;
+    if (len != expected) return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static enum vcs_zcode_dht_error check_frame_length(
+    const uint8_t *wire, uint8_t kind, size_t len, size_t payload_off,
+    uint32_t *count_out)
+{
+    if (kind == VCS_ZCODE_DHT_MSG_FIND_NODE) {
+        if (len != VCS_ZCODE_DHT_FIND_NODE_WIRE_BYTES)
+            return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    } else if (kind == VCS_ZCODE_DHT_MSG_NODES) {
+        return check_nodes_frame_length(wire, len, payload_off, count_out);
+    } else if (kind == VCS_ZCODE_DHT_MSG_FIND_RECORD) {
+        if (len != VCS_ZCODE_DHT_FIND_RECORD_WIRE_BYTES)
+            return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    } else if (kind == VCS_ZCODE_DHT_MSG_RECORDS) {
+        return check_records_frame_length(wire, len, payload_off, count_out);
+    } else if (kind == VCS_ZCODE_DHT_MSG_STORE_RECORD) {
+        if (len != VCS_ZCODE_DHT_STORE_RECORD_WIRE_BYTES)
+            return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    } else if (len != VCS_ZCODE_DHT_STORE_RESULT_WIRE_BYTES) {
+        return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    }
+    return VCS_ZCODE_DHT_OK;
+}
+
+static void select_auth_fields(
+    struct vcs_zcode_dht_msg *dst, uint8_t kind, uint64_t **generation,
+    uint8_t **sender, uint8_t **query,
+    struct vcs_zcode_dht_delegation **delegation)
+{
+    switch ((enum vcs_zcode_dht_msg_kind)kind) {
+    case VCS_ZCODE_DHT_MSG_FIND_NODE:
+        *generation = &dst->find_node.session_generation;
+        *sender = dst->find_node.sender_node_id;
+        *query = dst->find_node.query_id;
+        *delegation = &dst->find_node.delegation;
+        break;
+    case VCS_ZCODE_DHT_MSG_NODES:
+        *generation = &dst->nodes.session_generation;
+        *sender = dst->nodes.sender_node_id;
+        *query = dst->nodes.query_id;
+        *delegation = &dst->nodes.delegation;
+        break;
+    case VCS_ZCODE_DHT_MSG_FIND_RECORD:
+        *generation = &dst->find_record.session_generation;
+        *sender = dst->find_record.sender_node_id;
+        *query = dst->find_record.query_id;
+        *delegation = &dst->find_record.delegation;
+        break;
+    case VCS_ZCODE_DHT_MSG_RECORDS:
+        *generation = &dst->records.session_generation;
+        *sender = dst->records.sender_node_id;
+        *query = dst->records.query_id;
+        *delegation = &dst->records.delegation;
+        break;
+    case VCS_ZCODE_DHT_MSG_STORE_RECORD:
+        *generation = &dst->store_record.session_generation;
+        *sender = dst->store_record.sender_node_id;
+        *query = dst->store_record.query_id;
+        *delegation = &dst->store_record.delegation;
+        break;
+    case VCS_ZCODE_DHT_MSG_STORE_RESULT:
+        *generation = &dst->store_result.session_generation;
+        *sender = dst->store_result.sender_node_id;
+        *query = dst->store_result.query_id;
+        *delegation = &dst->store_result.delegation;
+        break;
+    }
+}
+
+static enum vcs_zcode_dht_error parse_find_node_payload(
+    struct vcs_zcode_dht_msg *dst, const uint8_t *wire, size_t *off)
+{
+    memcpy(dst->find_node.target_node_id, wire + *off, 32); *off += 32;
+    if (!zcl_bytes_any_set(dst->find_node.target_node_id, 32))
+        return VCS_ZCODE_DHT_ERR_ID_ZERO;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static enum vcs_zcode_dht_error parse_nodes_payload(
+    struct vcs_zcode_dht_msg *dst, const uint8_t *wire, size_t *off,
+    uint32_t count)
+{
+    (*off)++;
+    for (uint32_t i = 0; i < count; i++) {
+        memcpy(dst->nodes.node_ids[i], wire + *off, 32); *off += 32;
+        if (!zcl_bytes_any_set(dst->nodes.node_ids[i], 32))
+            return VCS_ZCODE_DHT_ERR_ID_ZERO;
+        if (i && memcmp(dst->nodes.node_ids[i - 1],
+                        dst->nodes.node_ids[i], 32) >= 0)
+            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+    }
+    dst->nodes.contact_count = count;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static enum vcs_zcode_dht_error parse_find_record_payload(
+    struct vcs_zcode_dht_msg *dst, const uint8_t *wire, size_t *off)
+{
+    enum vcs_zcode_dht_error e =
+        read_selector(wire + *off, &dst->find_record.selector);
+    if (e != VCS_ZCODE_DHT_OK) return e;
+    *off += VCS_ZCODE_DHT_RECORD_SELECTOR_BYTES;
+    dst->find_record.page_offset = wire[(*off)++];
+    if (dst->find_record.page_offset >=
+            VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ||
+        dst->find_record.page_offset %
+            VCS_ZCODE_DHT_RECORDS_PER_FRAME != 0)
+        return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static bool parsed_records_offsets_valid(
+    uint8_t page_offset, uint8_t next_offset, uint32_t count)
+{
+    if (page_offset >= VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ||
+        page_offset % VCS_ZCODE_DHT_RECORDS_PER_FRAME != 0)
+        return false;
+    if (next_offset &&
+        (next_offset != page_offset + VCS_ZCODE_DHT_RECORDS_PER_FRAME ||
+         next_offset >= VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ||
+         count != VCS_ZCODE_DHT_RECORDS_PER_FRAME))
+        return false;
+    return true;
+}
+
+static enum vcs_zcode_dht_error parse_records_payload(
+    struct vcs_zcode_dht_msg *dst, const uint8_t *wire, size_t *off,
+    uint32_t count, const struct vcs_zcode_dht_msg_verify_context *v)
+{
+    enum vcs_zcode_dht_error e =
+        read_selector(wire + *off, &dst->records.selector);
+    if (e != VCS_ZCODE_DHT_OK) return e;
+    *off += VCS_ZCODE_DHT_RECORD_SELECTOR_BYTES;
+    dst->records.page_offset = wire[(*off)++];
+    dst->records.next_offset = wire[(*off)++];
+    (*off)++;
+    if (!parsed_records_offsets_valid(dst->records.page_offset,
+                                      dst->records.next_offset, count))
+        return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+    struct vcs_zcode_dht_record_verify_context record_verify = {
+        .now_unix = v->now_unix,
+        .authority_verify = v->authority_verify,
+        .authority_ctx = v->authority_ctx,
+    };
+    memcpy(record_verify.network_genesis, v->network_genesis, 32);
+    for (uint32_t i = 0; i < count; i++) {
+        if (i && memcmp(wire + *off - VCS_ZCODE_DHT_RECORD_WIRE_BYTES,
+                        wire + *off,
+                        VCS_ZCODE_DHT_RECORD_WIRE_BYTES) >= 0)
+            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+        enum vcs_zcode_dht_record_error record_error =
+            vcs_zcode_dht_record_parse(
+                wire + *off, VCS_ZCODE_DHT_RECORD_WIRE_BYTES,
+                &record_verify, &dst->records.records[i]);
+        if (record_error != VCS_ZCODE_DHT_RECORD_OK)
+            return record_parse_error(record_error);
+        if (!selector_matches(&dst->records.selector,
+                              &dst->records.records[i]))
+            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+        *off += VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
+    }
+    dst->records.record_count = count;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static enum vcs_zcode_dht_error parse_store_record_payload(
+    struct vcs_zcode_dht_msg *dst, const uint8_t *wire, size_t *off,
+    const struct vcs_zcode_dht_msg_verify_context *v)
+{
+    struct vcs_zcode_dht_record_verify_context record_verify = {
+        .now_unix = v->now_unix,
+        .authority_verify = v->authority_verify,
+        .authority_ctx = v->authority_ctx,
+    };
+    memcpy(record_verify.network_genesis, v->network_genesis, 32);
+    enum vcs_zcode_dht_record_error record_error =
+        vcs_zcode_dht_record_parse(
+            wire + *off, VCS_ZCODE_DHT_RECORD_WIRE_BYTES, &record_verify,
+            &dst->store_record.record);
+    if (record_error != VCS_ZCODE_DHT_RECORD_OK)
+        return record_parse_error(record_error);
+    *off += VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static enum vcs_zcode_dht_error parse_store_result_payload(
+    struct vcs_zcode_dht_msg *dst, const uint8_t *wire, size_t *off)
+{
+    uint8_t status = wire[(*off)++];
+    if (status < VCS_ZCODE_DHT_STORE_STORED ||
+        status > VCS_ZCODE_DHT_STORE_REJECTED ||
+        !zcl_bytes_any_set(wire + *off, 32))
+        return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+    dst->store_result.status = (enum vcs_zcode_dht_store_status)status;
+    memcpy(dst->store_result.record_digest, wire + *off, 32); *off += 32;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static enum vcs_zcode_dht_error parse_msg_payload(
+    struct vcs_zcode_dht_msg *dst, uint8_t kind, const uint8_t *wire,
+    size_t *off, uint32_t count,
+    const struct vcs_zcode_dht_msg_verify_context *v)
+{
+    if (kind == VCS_ZCODE_DHT_MSG_FIND_NODE)
+        return parse_find_node_payload(dst, wire, off);
+    if (kind == VCS_ZCODE_DHT_MSG_NODES)
+        return parse_nodes_payload(dst, wire, off, count);
+    if (kind == VCS_ZCODE_DHT_MSG_FIND_RECORD)
+        return parse_find_record_payload(dst, wire, off);
+    if (kind == VCS_ZCODE_DHT_MSG_RECORDS)
+        return parse_records_payload(dst, wire, off, count, v);
+    if (kind == VCS_ZCODE_DHT_MSG_STORE_RECORD)
+        return parse_store_record_payload(dst, wire, off, v);
+    return parse_store_result_payload(dst, wire, off);
+}
+
 enum vcs_zcode_dht_error vcs_zcode_dht_msg_parse(
     const uint8_t *wire, size_t len,
     const struct vcs_zcode_dht_msg_verify_context *v,
@@ -432,12 +744,8 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_parse(
     struct vcs_zcode_dht_msg parsed;
     memset(&parsed, 0, sizeof(parsed));
     struct vcs_zcode_dht_msg *dst = &parsed;
-    if (len < VCS_ZCODE_DHT_MSGS_HEADER_BYTES + VCS_ZCODE_DHT_MSGS_AUTH_BYTES +
-              VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES)
-        return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
-    if (memcmp(wire, msgs_magic, 8) != 0) return VCS_ZCODE_DHT_ERR_WIRE_MAGIC;
-    if (zcl_read_u16_le(wire + 8) != VCS_ZCODE_DHT_MSGS_WIRE_VERSION)
-        return VCS_ZCODE_DHT_ERR_VERSION;
+    enum vcs_zcode_dht_error e = check_frame_header(wire, len);
+    if (e != VCS_ZCODE_DHT_OK) return e;
     uint8_t kind = wire[10];
     if (kind < VCS_ZCODE_DHT_MSG_FIND_NODE ||
         kind > VCS_ZCODE_DHT_MSG_STORE_RESULT)
@@ -445,84 +753,14 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_parse(
     const size_t payload_off = VCS_ZCODE_DHT_MSGS_HEADER_BYTES +
                                VCS_ZCODE_DHT_MSGS_AUTH_BYTES;
     uint32_t count = 0;
-    if (kind == VCS_ZCODE_DHT_MSG_FIND_NODE) {
-        if (len != VCS_ZCODE_DHT_FIND_NODE_WIRE_BYTES)
-            return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
-    } else if (kind == VCS_ZCODE_DHT_MSG_NODES) {
-        if (payload_off >= len - VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES)
-            return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
-        count = wire[payload_off];
-        if (count > VCS_ZCODE_DHT_K)
-            return VCS_ZCODE_DHT_ERR_LIMIT;
-        size_t expected = payload_off + 1 + (size_t)count * 32 +
-                          VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES;
-        if (len != expected)
-            return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
-    } else if (kind == VCS_ZCODE_DHT_MSG_FIND_RECORD) {
-        if (len != VCS_ZCODE_DHT_FIND_RECORD_WIRE_BYTES)
-            return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
-    } else if (kind == VCS_ZCODE_DHT_MSG_RECORDS) {
-        size_t count_offset = payload_off +
-                              VCS_ZCODE_DHT_RECORD_SELECTOR_BYTES + 2u;
-        if (count_offset >= len - VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES)
-            return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
-        count = wire[count_offset];
-        if (count > VCS_ZCODE_DHT_RECORDS_PER_FRAME)
-            return VCS_ZCODE_DHT_ERR_LIMIT;
-        size_t expected = count_offset + 1u +
-                          (size_t)count * VCS_ZCODE_DHT_RECORD_WIRE_BYTES +
-                          VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES;
-        if (len != expected) return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
-    } else if (kind == VCS_ZCODE_DHT_MSG_STORE_RECORD) {
-        if (len != VCS_ZCODE_DHT_STORE_RECORD_WIRE_BYTES)
-            return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
-    } else if (len != VCS_ZCODE_DHT_STORE_RESULT_WIRE_BYTES) {
-        return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
-    }
+    e = check_frame_length(wire, kind, len, payload_off, &count);
+    if (e != VCS_ZCODE_DHT_OK) return e;
     size_t off = VCS_ZCODE_DHT_MSGS_HEADER_BYTES;
     uint64_t *generation = NULL;
     uint8_t *sender = NULL, *query = NULL;
     struct vcs_zcode_dht_delegation *delegation = NULL;
-    switch ((enum vcs_zcode_dht_msg_kind)kind) {
-    case VCS_ZCODE_DHT_MSG_FIND_NODE:
-        generation = &dst->find_node.session_generation;
-        sender = dst->find_node.sender_node_id;
-        query = dst->find_node.query_id;
-        delegation = &dst->find_node.delegation;
-        break;
-    case VCS_ZCODE_DHT_MSG_NODES:
-        generation = &dst->nodes.session_generation;
-        sender = dst->nodes.sender_node_id;
-        query = dst->nodes.query_id;
-        delegation = &dst->nodes.delegation;
-        break;
-    case VCS_ZCODE_DHT_MSG_FIND_RECORD:
-        generation = &dst->find_record.session_generation;
-        sender = dst->find_record.sender_node_id;
-        query = dst->find_record.query_id;
-        delegation = &dst->find_record.delegation;
-        break;
-    case VCS_ZCODE_DHT_MSG_RECORDS:
-        generation = &dst->records.session_generation;
-        sender = dst->records.sender_node_id;
-        query = dst->records.query_id;
-        delegation = &dst->records.delegation;
-        break;
-    case VCS_ZCODE_DHT_MSG_STORE_RECORD:
-        generation = &dst->store_record.session_generation;
-        sender = dst->store_record.sender_node_id;
-        query = dst->store_record.query_id;
-        delegation = &dst->store_record.delegation;
-        break;
-    case VCS_ZCODE_DHT_MSG_STORE_RESULT:
-        generation = &dst->store_result.session_generation;
-        sender = dst->store_result.sender_node_id;
-        query = dst->store_result.query_id;
-        delegation = &dst->store_result.delegation;
-        break;
-    }
-    enum vcs_zcode_dht_error e = read_auth(
-        wire, &off, v, generation, sender, query, delegation);
+    select_auth_fields(dst, kind, &generation, &sender, &query, &delegation);
+    e = read_auth(wire, &off, v, generation, sender, query, delegation);
     if (e != VCS_ZCODE_DHT_OK) return e;
     size_t unsigned_len = len - VCS_ZCODE_DHT_MSG_SIGNATURE_BYTES;
     e = verify_signature(wire, unsigned_len, wire + unsigned_len,
@@ -530,95 +768,8 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_parse(
                          delegation->online_pubkey);
     if (e != VCS_ZCODE_DHT_OK) return e;
     if (*generation != v->session_generation) return VCS_ZCODE_DHT_ERR_SESSION;
-    if (kind == VCS_ZCODE_DHT_MSG_FIND_NODE) {
-        memcpy(dst->find_node.target_node_id, wire + off, 32); off += 32;
-        if (!zcl_bytes_any_set(dst->find_node.target_node_id, 32))
-            return VCS_ZCODE_DHT_ERR_ID_ZERO;
-    } else if (kind == VCS_ZCODE_DHT_MSG_NODES) {
-        off++;
-        for (uint32_t i = 0; i < count; i++) {
-            memcpy(dst->nodes.node_ids[i], wire + off, 32); off += 32;
-            if (!zcl_bytes_any_set(dst->nodes.node_ids[i], 32))
-                return VCS_ZCODE_DHT_ERR_ID_ZERO;
-            if (i && memcmp(dst->nodes.node_ids[i - 1],
-                            dst->nodes.node_ids[i], 32) >= 0)
-                return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-        }
-        dst->nodes.contact_count = count;
-    } else if (kind == VCS_ZCODE_DHT_MSG_FIND_RECORD) {
-        e = read_selector(wire + off, &dst->find_record.selector);
-        if (e != VCS_ZCODE_DHT_OK) return e;
-        off += VCS_ZCODE_DHT_RECORD_SELECTOR_BYTES;
-        dst->find_record.page_offset = wire[off++];
-        if (dst->find_record.page_offset >=
-                VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ||
-            dst->find_record.page_offset %
-                VCS_ZCODE_DHT_RECORDS_PER_FRAME != 0)
-            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-    } else if (kind == VCS_ZCODE_DHT_MSG_RECORDS) {
-        e = read_selector(wire + off, &dst->records.selector);
-        if (e != VCS_ZCODE_DHT_OK) return e;
-        off += VCS_ZCODE_DHT_RECORD_SELECTOR_BYTES;
-        dst->records.page_offset = wire[off++];
-        dst->records.next_offset = wire[off++];
-        off++;
-        if (dst->records.page_offset >=
-                VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ||
-            dst->records.page_offset % VCS_ZCODE_DHT_RECORDS_PER_FRAME != 0 ||
-            (dst->records.next_offset &&
-             (dst->records.next_offset !=
-                  dst->records.page_offset +
-                      VCS_ZCODE_DHT_RECORDS_PER_FRAME ||
-              dst->records.next_offset >=
-                  VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ||
-              count != VCS_ZCODE_DHT_RECORDS_PER_FRAME)))
-            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-        struct vcs_zcode_dht_record_verify_context record_verify = {
-            .now_unix = v->now_unix,
-            .authority_verify = v->authority_verify,
-            .authority_ctx = v->authority_ctx,
-        };
-        memcpy(record_verify.network_genesis, v->network_genesis, 32);
-        for (uint32_t i = 0; i < count; i++) {
-            if (i && memcmp(wire + off - VCS_ZCODE_DHT_RECORD_WIRE_BYTES,
-                            wire + off,
-                            VCS_ZCODE_DHT_RECORD_WIRE_BYTES) >= 0)
-                return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-            enum vcs_zcode_dht_record_error record_error =
-                vcs_zcode_dht_record_parse(
-                    wire + off, VCS_ZCODE_DHT_RECORD_WIRE_BYTES,
-                    &record_verify, &dst->records.records[i]);
-            if (record_error != VCS_ZCODE_DHT_RECORD_OK)
-                return record_parse_error(record_error);
-            if (!selector_matches(&dst->records.selector,
-                                  &dst->records.records[i]))
-                return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-            off += VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
-        }
-        dst->records.record_count = count;
-    } else if (kind == VCS_ZCODE_DHT_MSG_STORE_RECORD) {
-        struct vcs_zcode_dht_record_verify_context record_verify = {
-            .now_unix = v->now_unix,
-            .authority_verify = v->authority_verify,
-            .authority_ctx = v->authority_ctx,
-        };
-        memcpy(record_verify.network_genesis, v->network_genesis, 32);
-        enum vcs_zcode_dht_record_error record_error =
-            vcs_zcode_dht_record_parse(
-                wire + off, VCS_ZCODE_DHT_RECORD_WIRE_BYTES, &record_verify,
-                &dst->store_record.record);
-        if (record_error != VCS_ZCODE_DHT_RECORD_OK)
-            return record_parse_error(record_error);
-        off += VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
-    } else {
-        uint8_t status = wire[off++];
-        if (status < VCS_ZCODE_DHT_STORE_STORED ||
-            status > VCS_ZCODE_DHT_STORE_REJECTED ||
-            !zcl_bytes_any_set(wire + off, 32))
-            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-        dst->store_result.status = (enum vcs_zcode_dht_store_status)status;
-        memcpy(dst->store_result.record_digest, wire + off, 32); off += 32;
-    }
+    e = parse_msg_payload(dst, kind, wire, &off, count, v);
+    if (e != VCS_ZCODE_DHT_OK) return e;
     dst->kind = (enum vcs_zcode_dht_msg_kind)kind;
     *out = parsed;
     return VCS_ZCODE_DHT_OK;
