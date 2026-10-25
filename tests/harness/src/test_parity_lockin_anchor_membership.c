@@ -8,7 +8,7 @@
  * the important zclassicd semantics: forged roots fail, historical roots
  * pass, Sprout same-transaction intermediate roots pass, incomplete imported
  * history fails closed with a distinct verdict, and anchor writes are atomic
- * with reducer commit/rollback/reorg handling. */
+ * with reducer commit/rollback/reorg handling.*/
 
 #include "test/test_core.h"
 
@@ -346,7 +346,7 @@ static int test_reducer_atomicity(void)
     L7_CHECK("begin committed shared rewind", sql_ok(db, "BEGIN IMMEDIATE"));
     L7_CHECK("shared reducer rewind succeeds",
              utxo_apply_delete_rows_above(db, 50, 50));
-    L7_CHECK("commit shared reducer rewind", sql_ok(db, "COMMIT"));
+    L7_CHECK("commit shared rewind", sql_ok(db, "COMMIT"));
     L7_CHECK("committed rewind removes abandoned anchor",
              anchor_kv_get(db, ANCHOR_POOL_SPROUT, &expected_root,
                            NULL, NULL) == ANCHOR_KV_MISSING);
@@ -403,6 +403,28 @@ static int test_reducer_atomicity(void)
     return failures;
 }
 
+static bool bounded_replay_markers_present_before_genesis(sqlite3 *db)
+{
+    int64_t sprout = -1, sapling = -1, nf = -1;
+    bool sf = false, zf = false, nf_found = false;
+    return anchor_kv_activation_cursor(
+               db, ANCHOR_POOL_SPROUT, &sprout, &sf) &&
+           anchor_kv_activation_cursor(
+               db, ANCHOR_POOL_SAPLING, &sapling, &zf) &&
+           nullifier_kv_activation_cursor(db, &nf, &nf_found) &&
+           sf && zf && nf_found && sprout == 1 && sapling == 1 &&
+           nf == 1;
+}
+
+static bool finished_replay_cursor_holds_marker(sqlite3 *db)
+{
+    int64_t cursor = -1;
+    bool found = false;
+    return anchor_kv_activation_cursor(
+               db, ANCHOR_POOL_SPROUT, &cursor, &found) &&
+           found && cursor == 1;
+}
+
 static int test_bounded_full_replay_frontier(void)
 {
     int failures = 0;
@@ -413,18 +435,8 @@ static int test_bounded_full_replay_frontier(void)
         return failures + 1;
     L7_CHECK("bounded replay reset keeps all histories incomplete",
              shielded_history_begin_full_replay(db, 0));
-    {
-        int64_t sprout = -1, sapling = -1, nf = -1;
-        bool sf = false, zf = false, nf_found = false;
-        L7_CHECK("bounded replay publishes positive markers before genesis",
-                 anchor_kv_activation_cursor(
-                     db, ANCHOR_POOL_SPROUT, &sprout, &sf) &&
-                 anchor_kv_activation_cursor(
-                     db, ANCHOR_POOL_SAPLING, &sapling, &zf) &&
-                 nullifier_kv_activation_cursor(db, &nf, &nf_found) &&
-                 sf && zf && nf_found && sprout == 1 && sapling == 1 &&
-                 nf == 1);
-    }
+    L7_CHECK("bounded replay publishes positive markers before genesis",
+             bounded_replay_markers_present_before_genesis(db));
 
     struct block blk;
     L7_CHECK("construct bounded replay Sprout block",
@@ -459,14 +471,8 @@ static int test_bounded_full_replay_frontier(void)
              shielded_history_full_replay_advance_in_tx(db, 0, 0));
     L7_CHECK("bounded replay transaction commits",
              sql_ok(db, "COMMIT"));
-    {
-        int64_t cursor = -1;
-        bool found = false;
-        L7_CHECK("finished replay stays externally incomplete before epilogue",
-                 anchor_kv_activation_cursor(
-                     db, ANCHOR_POOL_SPROUT, &cursor, &found) &&
-                 found && cursor == 1);
-    }
+    L7_CHECK("finished replay stays externally incomplete before epilogue",
+             finished_replay_cursor_holds_marker(db));
     L7_CHECK("successful target epilogue publishes all completeness",
              shielded_history_publish_full_replay_complete(db, 0));
     L7_CHECK("replayed Sprout frontier remains after completion",
