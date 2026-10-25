@@ -153,6 +153,216 @@ static void render_hud(const aircraft_manager_t* aircraft_mgr,
 }
 
 
+static bool game_systems_missing(aircraft_manager_t* aircraft_mgr,
+                                 powerup_manager_t* powerup_mgr,
+                                 match_state_t* match,
+                                 cyberpunk_world_t* world,
+                                 camera_controller_t* camera,
+                                 input_mvc_fast_t* input_system) {
+    return !aircraft_mgr || !powerup_mgr || !match || !world || !camera
+        || !input_system;
+}
+
+static void apply_keyboard_flight_fallback(const input_mvc_fast_t* input_system,
+                                           float* stick_x,
+                                           float* stick_y) {
+    /* Keyboard fallback if no joystick */
+    if (!input_system->model.connected) {
+        *stick_x = 0.0f;
+        *stick_y = 0.0f;
+
+        /* Left/Right for roll and turning */
+        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) *stick_x = -1.0f;
+        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) *stick_x = 1.0f;
+
+        /* Up/Down for pitch */
+        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) *stick_y = 1.0f;  /* Pull up */
+        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) *stick_y = -1.0f;  /* Push down */
+    }
+}
+
+static void apply_boost_and_throttle(managed_aircraft_t* player,
+                                     const input_mvc_fast_t* input_system,
+                                     const input_state_fast_t* input,
+                                     camera_controller_t* camera,
+                                     float dt) {
+    /* Speed control system like ultimate */
+    static float boost_timer = 0.0f;
+    boost_timer -= dt;
+
+    /* UR button = Mario Kart style boost (ASTRO C40 paddle) */
+    bool boost_pressed = input->speed_boost ||
+                       (!input_system->model.connected && IsKeyPressed(KEY_SPACE));
+
+    if (boost_pressed && boost_timer <= 0) {
+        boost_timer = 0.75f;  /* 0.75 second boost */
+        player->aircraft->speed = AIRCRAFT_MAX_SPEED * 2.5f;
+
+        /* Visual feedback */
+        camera_controller_shake(camera, SHAKE_MEDIUM, 0.5f);
+    }
+
+    /* Boost decay */
+    if (boost_timer > 0) {
+        if (boost_timer < 0.5f) {
+            /* Rapid decay back to normal */
+            float decay_rate = 300.0f * dt;
+            player->aircraft->speed = fmaxf(player->aircraft->speed - decay_rate,
+                                          AIRCRAFT_MAX_SPEED * 1.2f);
+        }
+    }
+    /* UL button = Normal throttle (ASTRO C40 paddle) */
+    else if (input->brake || (!input_system->model.connected && IsKeyDown(KEY_LEFT_SHIFT))) {
+        player->aircraft->speed = fminf(player->aircraft->speed + 60.0f * dt,
+                                      AIRCRAFT_MAX_SPEED * 1.2f);
+    }
+    /* No throttle = gradual slowdown */
+    else {
+        player->aircraft->speed = fmaxf(player->aircraft->speed - 25.0f * dt,
+                                      AIRCRAFT_MIN_SPEED);
+    }
+}
+
+static void fire_player_weapon(aircraft_manager_t* aircraft_mgr,
+                               int local_player,
+                               const input_mvc_fast_t* input_system,
+                               const input_state_fast_t* input) {
+    /* Fire weapons - L2/R2 triggers or keyboard */
+    if (input->fire_guns || (!input_system->model.connected && IsKeyPressed(KEY_LEFT_CONTROL))) {
+        aircraft_manager_fire_weapon(aircraft_mgr, local_player);
+    }
+}
+
+static void orbit_camera_from_stick(camera_controller_t* camera,
+                                    const input_mvc_fast_t* input_system,
+                                    const input_state_fast_t* input,
+                                    float dt) {
+    /* Camera control with right stick */
+    if (input_system->model.connected) {
+        /* Orbit camera with right stick when connected */
+        if (fabsf(input->camera_x) > 0.1f || fabsf(input->camera_y) > 0.1f) {
+            camera_controller_orbit(camera, input->camera_x * 180.0f * dt,
+                                  input->camera_y * 50.0f * dt);
+        }
+    }
+}
+
+static void select_camera_mode_from_keys(camera_controller_t* camera) {
+    /* Camera modes */
+    if (IsKeyPressed(KEY_ONE)) camera_controller_set_mode(camera, CAMERA_MODE_FOLLOW, 0.5f);
+    if (IsKeyPressed(KEY_TWO)) camera_controller_set_mode(camera, CAMERA_MODE_ORBIT, 0.5f);
+    if (IsKeyPressed(KEY_THREE)) camera_controller_set_mode(camera, CAMERA_MODE_COCKPIT, 0.5f);
+    if (IsKeyPressed(KEY_FOUR)) camera_controller_set_mode(camera, CAMERA_MODE_OVERVIEW, 0.5f);
+    if (IsKeyPressed(KEY_FIVE)) camera_controller_set_mode(camera, CAMERA_MODE_FREE, 0.5f);
+}
+
+static void apply_collected_powerup(managed_aircraft_t* aircraft,
+                                    powerup_type_t type) {
+    /* Apply power-up effect */
+    switch (type) {
+        case POWERUP_HEALTH:
+            aircraft->health = aircraft->max_health;
+            break;
+        case POWERUP_SHIELD:
+            aircraft->powerup_effects.shield_active = true;
+            break;
+        case POWERUP_RAPID_FIRE:
+            aircraft->powerup_effects.rapid_fire_active = true;
+            break;
+        case POWERUP_SPEED_BOOST:
+            aircraft->powerup_effects.speed_boost_active = true;
+            break;
+        default:
+            break;
+    }
+}
+
+static void collect_powerups_in_range(aircraft_manager_t* aircraft_mgr,
+                                      powerup_manager_t* powerup_mgr) {
+    /* Check power-up collections */
+    for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* aircraft = &aircraft_mgr->aircraft[i];
+        if (!aircraft->aircraft) continue;
+
+        for (int j = 0; j < powerup_mgr->spawn_point_count; j++) {
+            powerup_t* powerup = &powerup_mgr->powerups[j];
+            if (!powerup->active) continue;
+
+            /* Check distance */
+            float dist = Vector3Distance(aircraft->aircraft->position, powerup->position);
+            if (dist < 10.0f) {
+                powerup_type_t type;
+                if (powerup_manager_check_collection(powerup_mgr, aircraft->aircraft->position, 10.0f, &type)) {
+                    apply_collected_powerup(aircraft, type);
+                }
+            }
+        }
+    }
+}
+
+static void copy_kills_into_team_scores(aircraft_manager_t* aircraft_mgr,
+                                        match_state_t* match) {
+    /* Update match scores from kills */
+    for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
+        const managed_aircraft_t* aircraft = &aircraft_mgr->aircraft[i];
+        if (aircraft->team_id >= 0 && aircraft->team_id < 4) {
+            match->team_scores[aircraft->team_id] = 0;  /* Reset first */
+        }
+    }
+    for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
+        const managed_aircraft_t* aircraft = &aircraft_mgr->aircraft[i];
+        if (aircraft->team_id >= 0 && aircraft->team_id < 4) {
+            match->team_scores[aircraft->team_id] += aircraft->kills;
+        }
+    }
+}
+
+static void draw_match_scene(aircraft_manager_t* aircraft_mgr,
+                             powerup_manager_t* powerup_mgr,
+                             cyberpunk_world_t* world,
+                             camera_controller_t* camera,
+                             match_state_t* match,
+                             int local_player,
+                             input_mvc_fast_t* input_system) {
+    /* Render */
+    BeginDrawing();
+    ClearBackground(SKYBLUE);
+
+    /* 3D rendering */
+    BeginMode3D(camera->camera);
+
+    /* Draw world */
+    cyberpunk_world_draw(world, camera->camera);
+
+    /* Draw aircraft */
+    for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
+        render_aircraft(&aircraft_mgr->aircraft[i]);
+    }
+
+    /* Draw power-ups */
+    for (int i = 0; i < powerup_mgr->spawn_point_count; i++) {
+        render_powerup(&powerup_mgr->powerups[i]);
+    }
+
+    /* Draw spawn points (debug) */
+    for (int i = 0; i < MAX_SPAWN_POINTS; i++) {
+        if (Vector3Length(aircraft_mgr->spawn_points[i]) > 0) {
+            DrawCubeWires(aircraft_mgr->spawn_points[i], 5, 5, 5, GREEN);
+        }
+    }
+
+    EndMode3D();
+
+    /* 2D HUD */
+    render_hud(aircraft_mgr, match, local_player, input_system->model.connected);
+
+    /* Camera mode indicator */
+    const char* mode_name = camera_controller_get_mode_name(camera->mode);
+    DrawText(mode_name, 10, 40, 20, WHITE);
+
+    EndDrawing();
+}
+
 int main(void) {
     /* Initialize window */
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
@@ -167,7 +377,8 @@ int main(void) {
     camera_controller_t* camera = camera_controller_create();
     input_mvc_fast_t* input_system = input_mvc_fast_create();
     
-    if (!aircraft_mgr || !powerup_mgr || !match || !world || !camera || !input_system) {
+    if (game_systems_missing(aircraft_mgr, powerup_mgr, match, world, camera,
+                            input_system)) {
         fprintf(stderr, "Failed to create game systems\n");
         return 1;
     }
@@ -233,79 +444,15 @@ int main(void) {
             float stick_x = input.move_x;
             float stick_y = input.move_y;
             
-            /* Keyboard fallback if no joystick */
-            if (!input_system->model.connected) {
-                stick_x = 0.0f;
-                stick_y = 0.0f;
-                
-                /* Left/Right for roll and turning */
-                if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) stick_x = -1.0f;
-                if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) stick_x = 1.0f;
-                
-                /* Up/Down for pitch */
-                if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) stick_y = 1.0f;  /* Pull up */
-                if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) stick_y = -1.0f;  /* Push down */
-            }
+            apply_keyboard_flight_fallback(input_system, &stick_x, &stick_y);
             
             /* Use the same responsive aircraft update as ultimate */
             aircraft_update_responsive(player->aircraft, stick_x, stick_y, dt);
             
-            /* Speed control system like ultimate */
-            static float boost_timer = 0.0f;
-            boost_timer -= dt;
-            
-            /* UR button = Mario Kart style boost (ASTRO C40 paddle) */
-            bool boost_pressed = input.speed_boost || 
-                               (!input_system->model.connected && IsKeyPressed(KEY_SPACE));
-            
-            if (boost_pressed && boost_timer <= 0) {
-                boost_timer = 0.75f;  /* 0.75 second boost */
-                player->aircraft->speed = AIRCRAFT_MAX_SPEED * 2.5f;
-                
-                /* Visual feedback */
-                camera_controller_shake(camera, SHAKE_MEDIUM, 0.5f);
-            }
-            
-            /* Boost decay */
-            if (boost_timer > 0) {
-                if (boost_timer < 0.5f) {
-                    /* Rapid decay back to normal */
-                    float decay_rate = 300.0f * dt;
-                    player->aircraft->speed = fmaxf(player->aircraft->speed - decay_rate,
-                                                  AIRCRAFT_MAX_SPEED * 1.2f);
-                }
-            }
-            /* UL button = Normal throttle (ASTRO C40 paddle) */
-            else if (input.brake || (!input_system->model.connected && IsKeyDown(KEY_LEFT_SHIFT))) {
-                player->aircraft->speed = fminf(player->aircraft->speed + 60.0f * dt,
-                                              AIRCRAFT_MAX_SPEED * 1.2f);
-            }
-            /* No throttle = gradual slowdown */
-            else {
-                player->aircraft->speed = fmaxf(player->aircraft->speed - 25.0f * dt,
-                                              AIRCRAFT_MIN_SPEED);
-            }
-            
-            /* Fire weapons - L2/R2 triggers or keyboard */
-            if (input.fire_guns || (!input_system->model.connected && IsKeyPressed(KEY_LEFT_CONTROL))) {
-                aircraft_manager_fire_weapon(aircraft_mgr, local_player);
-            }
-            
-            /* Camera control with right stick */
-            if (input_system->model.connected) {
-                /* Orbit camera with right stick when connected */
-                if (fabsf(input.camera_x) > 0.1f || fabsf(input.camera_y) > 0.1f) {
-                    camera_controller_orbit(camera, input.camera_x * 180.0f * dt, 
-                                          input.camera_y * 50.0f * dt);
-                }
-            }
-            
-            /* Camera modes */
-            if (IsKeyPressed(KEY_ONE)) camera_controller_set_mode(camera, CAMERA_MODE_FOLLOW, 0.5f);
-            if (IsKeyPressed(KEY_TWO)) camera_controller_set_mode(camera, CAMERA_MODE_ORBIT, 0.5f);
-            if (IsKeyPressed(KEY_THREE)) camera_controller_set_mode(camera, CAMERA_MODE_COCKPIT, 0.5f);
-            if (IsKeyPressed(KEY_FOUR)) camera_controller_set_mode(camera, CAMERA_MODE_OVERVIEW, 0.5f);
-            if (IsKeyPressed(KEY_FIVE)) camera_controller_set_mode(camera, CAMERA_MODE_FREE, 0.5f);
+            apply_boost_and_throttle(player, input_system, &input, camera, dt);
+            fire_player_weapon(aircraft_mgr, local_player, input_system, &input);
+            orbit_camera_from_stick(camera, input_system, &input, dt);
+            select_camera_mode_from_keys(camera);
             
             /* Update camera with dynamic distance based on speed */
             float cam_distance = 35.0f + player->aircraft->speed * 0.1f;
@@ -328,93 +475,10 @@ int main(void) {
         match_state_update(match, dt);
         camera_controller_update(camera, dt);
         
-        /* Check power-up collections */
-        for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
-            managed_aircraft_t* aircraft = &aircraft_mgr->aircraft[i];
-            if (!aircraft->aircraft) continue;
-            
-            for (int j = 0; j < powerup_mgr->spawn_point_count; j++) {
-                powerup_t* powerup = &powerup_mgr->powerups[j];
-                if (!powerup->active) continue;
-                
-                /* Check distance */
-                float dist = Vector3Distance(aircraft->aircraft->position, powerup->position);
-                if (dist < 10.0f) {
-                    powerup_type_t type;
-                    if (powerup_manager_check_collection(powerup_mgr, aircraft->aircraft->position, 10.0f, &type)) {
-                        /* Apply power-up effect */
-                        switch (type) {
-                            case POWERUP_HEALTH:
-                                aircraft->health = aircraft->max_health;
-                                break;
-                            case POWERUP_SHIELD:
-                                aircraft->powerup_effects.shield_active = true;
-                                break;
-                            case POWERUP_RAPID_FIRE:
-                                aircraft->powerup_effects.rapid_fire_active = true;
-                                break;
-                            case POWERUP_SPEED_BOOST:
-                                aircraft->powerup_effects.speed_boost_active = true;
-                                break;
-                            default:
-                                break;
-                        }
-                    }
-                }
-            }
-        }
-        
-        /* Update match scores from kills */
-        for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
-            const managed_aircraft_t* aircraft = &aircraft_mgr->aircraft[i];
-            if (aircraft->team_id >= 0 && aircraft->team_id < 4) {
-                match->team_scores[aircraft->team_id] = 0;  /* Reset first */
-            }
-        }
-        for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
-            const managed_aircraft_t* aircraft = &aircraft_mgr->aircraft[i];
-            if (aircraft->team_id >= 0 && aircraft->team_id < 4) {
-                match->team_scores[aircraft->team_id] += aircraft->kills;
-            }
-        }
-        
-        /* Render */
-        BeginDrawing();
-        ClearBackground(SKYBLUE);
-        
-        /* 3D rendering */
-        BeginMode3D(camera->camera);
-        
-        /* Draw world */
-        cyberpunk_world_draw(world, camera->camera);
-        
-        /* Draw aircraft */
-        for (int i = 0; i < aircraft_mgr->aircraft_count; i++) {
-            render_aircraft(&aircraft_mgr->aircraft[i]);
-        }
-        
-        /* Draw power-ups */
-        for (int i = 0; i < powerup_mgr->spawn_point_count; i++) {
-            render_powerup(&powerup_mgr->powerups[i]);
-        }
-        
-        /* Draw spawn points (debug) */
-        for (int i = 0; i < MAX_SPAWN_POINTS; i++) {
-            if (Vector3Length(aircraft_mgr->spawn_points[i]) > 0) {
-                DrawCubeWires(aircraft_mgr->spawn_points[i], 5, 5, 5, GREEN);
-            }
-        }
-        
-        EndMode3D();
-        
-        /* 2D HUD */
-        render_hud(aircraft_mgr, match, local_player, input_system->model.connected);
-        
-        /* Camera mode indicator */
-        const char* mode_name = camera_controller_get_mode_name(camera->mode);
-        DrawText(mode_name, 10, 40, 20, WHITE);
-        
-        EndDrawing();
+        collect_powerups_in_range(aircraft_mgr, powerup_mgr);
+        copy_kills_into_team_scores(aircraft_mgr, match);
+        draw_match_scene(aircraft_mgr, powerup_mgr, world, camera, match,
+                         local_player, input_system);
     }
     
     /* Cleanup */

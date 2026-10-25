@@ -9,7 +9,6 @@ apps/skycombat/src/controllers/sky_combat_multiplayer_incremental.c:main:74
 apps/skycombat/src/models/test_multiplayer_complete.c:main:35
 apps/skycombat/src/models/weapons.c:weapons_draw:21
 apps/skycombat/src/models/weapons.c:weapons_update:25
-apps/skycombat/src/sky_combat_multiplayer.c:main:64
 apps/skycombat/src/sky_combat_multiplayer_ultimate.c:main:44
 apps/skycombat/src/views/combat_effects.c:effects_update:26
 cognition/controllers/src/agent_background_quality.c:agent_push_quality_lane:32
