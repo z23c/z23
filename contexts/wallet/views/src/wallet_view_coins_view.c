@@ -19,6 +19,52 @@
 void wv_txid_short(const char *hex, char *out, size_t out_max);
 void wv_txid_lower(const char *hex, char *out, size_t out_max);
 
+/* Append the leading cells of one transparent-UTXO row (txid link, type
+ * pill and amount) at offset ur and return the advanced offset. */
+static size_t wv_append_coin_lead_cells(char *out, size_t outmax, size_t ur,
+                                        const char *txid, int vout,
+                                        int64_t val, const char *stype)
+{
+    char short_tx[18], lower_tx[65];
+    wv_txid_short(txid, short_tx, sizeof(short_tx));
+    wv_txid_lower(txid, lower_tx, sizeof(lower_tx));
+
+    int nn = snprintf(out + ur, outmax - ur,
+        "<tr>"
+        "<td><a href='/explorer/tx/%s' class='hash'>"
+        "%s:%d</a></td>"
+        "<td><span class='pill pill-%s' style='font-size:13px'>"
+        "%s</span></td>"
+        "<td class='zcl'>%.8f</td>",
+        lower_tx, short_tx, vout,
+        stype && stype[0] == 'C' ? "pending" : "t",
+        stype ? stype : "Standard",
+        (double)val / 1e8);
+    if (nn > 0) ur += (size_t)nn;
+    return ur;
+}
+
+/* Append the height and confirmation-count cells of one transparent-UTXO
+ * row, or the Pending pills while it is unconfirmed; returns the advanced
+ * offset. */
+static size_t wv_append_coin_height_cells(char *out, size_t outmax, size_t ur,
+                                          int h, int tip)
+{
+    int confs = (tip > 0 && h > 0) ? (tip - h + 1) : 0;
+    if (confs < 0) confs = 0;
+
+    int nn;
+    if (h > 0)
+        nn = snprintf(out + ur, outmax - ur,
+            "<td>%d</td><td>%d</td>", h, confs);
+    else
+        nn = snprintf(out + ur, outmax - ur,
+            "<td><span class='pill pill-pending'>Pending</span></td>"
+            "<td><span class='pill pill-pending'>Pending</span></td>");
+    if (nn > 0) ur += (size_t)nn;
+    return ur;
+}
+
 size_t wv_render_coin_rows(char *out, size_t outmax,
                            const struct wallet_view_coin *coins, int n,
                            int tip, int64_t *out_total, int *out_count)
@@ -34,34 +80,9 @@ size_t wv_render_coin_rows(char *out, size_t outmax,
         int h = coins[i].height;
         const char *stype = coins[i].type;
 
-        char short_tx[18], lower_tx[65];
-        wv_txid_short(txid, short_tx, sizeof(short_tx));
-        wv_txid_lower(txid, lower_tx, sizeof(lower_tx));
-
-        int confs = (tip > 0 && h > 0) ? (tip - h + 1) : 0;
-        if (confs < 0) confs = 0;
-
-        int nn = snprintf(out + ur, outmax - ur,
-            "<tr>"
-            "<td><a href='/explorer/tx/%s' class='hash'>"
-            "%s:%d</a></td>"
-            "<td><span class='pill pill-%s' style='font-size:13px'>"
-            "%s</span></td>"
-            "<td class='zcl'>%.8f</td>",
-            lower_tx, short_tx, vout,
-            stype && stype[0] == 'C' ? "pending" : "t",
-            stype ? stype : "Standard",
-            (double)val / 1e8);
-        if (nn > 0) ur += (size_t)nn;
-        if (h > 0)
-            nn = snprintf(out + ur, outmax - ur,
-                "<td>%d</td><td>%d</td>", h, confs);
-        else
-            nn = snprintf(out + ur, outmax - ur,
-                "<td><span class='pill pill-pending'>Pending</span></td>"
-                "<td><span class='pill pill-pending'>Pending</span></td>");
-        if (nn > 0) ur += (size_t)nn;
-        nn = snprintf(out + ur, outmax - ur, "</tr>");
+        ur = wv_append_coin_lead_cells(out, outmax, ur, txid, vout, val, stype);
+        ur = wv_append_coin_height_cells(out, outmax, ur, h, tip);
+        int nn = snprintf(out + ur, outmax - ur, "</tr>");
         if (nn > 0) ur += (size_t)nn;
         t_total += val;
         t_count++;
@@ -146,3 +167,4 @@ size_t wv_render_token_rows(char *out, size_t outmax,
     out[tr_off] = '\0';
     return tr_off;
 }
+
