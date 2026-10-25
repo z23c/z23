@@ -1342,7 +1342,6 @@ static int eqp_is_violation(const char *const *lines, int nlines, int idx,
     if (idx >= 1 && regexec(qual, lines[idx - 1], 0, NULL, 0) == 0) return 0;
     return !(idx >= 2 && regexec(qual, lines[idx - 2], 0, NULL, 0) == 0);
 }
-
 int eqp_load(const char *path, int *nlines)
 {
     FILE *f = fopen(path, "r");
@@ -1352,6 +1351,7 @@ int eqp_load(const char *path, int *nlines)
     if (fclose(f) != 0 && err == 0) return die("z23-lint: fclose failed: %s\n", path);
     if (err) return die("z23-lint: read failed: %s\n", path);
     if (n == sizeof eqp_buf - 1) return die("z23-lint: derived buffer overflow\n", "");
+    if (memchr(eqp_buf, '\0', n)) return die("z23-lint: embedded NUL in %s\n", path);
     eqp_buf[n] = '\0';
     *nlines = 0;
     char *p = eqp_buf;

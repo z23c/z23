@@ -77,6 +77,21 @@ static int eqp_case_qualified(const char *work, const char *p_disp, regex_t *lit
     return 0;
 }
 
+static int eqp_case_nul(const char *work, const char *p_disp)
+{
+    char path[4096];
+    static const char text[] = "\0ZClassic is Equi" "hash 200,9 and always will be.\n";
+    if (ovf(snprintf(path, sizeof path, "%s/%s", work, p_disp), sizeof path))
+        return 2;
+    FILE *f = fopen(path, "wb");
+    if (!f) return 2;
+    bool bad = fwrite(text, 1, sizeof text - 1, f) != sizeof text - 1;
+    if (fclose(f) != 0) bad = true;
+    if (bad) return 2;
+    int nlines = 0;
+    return eqp_load(path, &nlines) == 2 ? 0 : 1;
+}
+
 int check_equihash_params_selftest(void)
 {
     regex_t lit, claim, qual;
@@ -105,6 +120,7 @@ int check_equihash_params_selftest(void)
     int frc = eqp_case_flat_claim(work, p_disp, &lit, &claim, &qual, &bad);
     if (frc == 0)
         frc = eqp_case_qualified(work, p_disp, &lit, &claim, &qual, &bad);
+    if (frc == 0) frc = eqp_case_nul(work, p_disp);
     (void)rap_rm_rf(work);
     drop3(&lit, &claim, &qual);
     if (frc)
