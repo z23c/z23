@@ -40,7 +40,6 @@ cognition/modules/codeindex/src/codeindex_merkle.c:merkle_snapshot_decode:28
 cognition/modules/codeindex/src/codeindex_merkle_decode.c:ci_merkle_proof_decode:26
 cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c:ci_merkle_snapshot_image_load_windows:21
 cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c:ci_merkle_snapshot_image_save_windows:23
-cognition/modules/codeindex/src/codeindex_scan_file.c:ci_scan_file:26
 cognition/modules/codeindex/src/codeindex_search.c:ci_store_search_text:17
 cognition/modules/codeindex/src/codeindex_search.c:codeindex_search_story:28
 cognition/modules/codeindex/src/codeindex_store_read.c:ci_store_meta_get:17
