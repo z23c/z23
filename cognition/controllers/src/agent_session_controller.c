@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Crenton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * The `agentsession` RPC: the node's own surface onto the agent_sessions
  * store. See controllers/agent_session_controller.h for WHY this is an RPC
