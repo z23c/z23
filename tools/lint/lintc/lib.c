@@ -708,7 +708,8 @@ void viol_put(char *dst, size_t cap, const char *fmt, ...)
     n = vsnprintf(dst, cap, fmt, ap);
     va_end(ap);
     if (n < 0) {
-        dst[0] = '\0';
+        snprintf(dst, cap, "%s", "(unformattable lint report)");
+        fprintf(stderr, "z23-lint: unformattable lint report counted\n");
         return;
     }
     if ((size_t)n >= cap)

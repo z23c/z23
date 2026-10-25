@@ -277,8 +277,36 @@ static int rma_run(void)
     return 0;
 }
 
+/* An overlong report is cut to its cap and still counted by the caller;
+ * a report vsnprintf cannot format (glibc: "x%2147483647s" returns -1)
+ * becomes the fixed placeholder, so neither case is dropped. */
+static int rma_viol_selftest(void)
+{
+    char viol[2][8];
+    int nv = 0;
+    if (nv < 2) {
+        viol_put(viol[nv], sizeof viol[0], "%s", "abcdefghijklmnop");
+        nv++;
+    }
+    if (nv != 1 || strcmp(viol[0], "abcdefg") != 0) {
+        fprintf(stderr, "check_raw_malloc selftest: FAIL — overlong report "
+                        "not cut and counted (nv=%d text=%s)\n", nv, viol[0]);
+        return 1;
+    }
+    char bad[64];
+    viol_put(bad, sizeof bad, "x%2147483647s", "");
+    if (strcmp(bad, "(unformattable lint report)") != 0) {
+        fprintf(stderr, "check_raw_malloc selftest: FAIL — unformattable "
+                        "report left as %s\n", bad);
+        return 1;
+    }
+    return 0;
+}
+
 int check_raw_malloc_selftest(void)
 {
+    if (rma_viol_selftest() != 0)
+        return 1;
     int rc = rma_run();
     if (rc != 0) {
         fprintf(stderr, "check_raw_malloc selftest: FAIL — clean tree rc=%d "
