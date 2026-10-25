@@ -57,7 +57,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Lookup queue and parameterized handlers: /api/block/:id, /tx/:txid, /address/:addr. Single-slot work queue, served via background thread. */
+/* Lookup queue and parameterized handlers: /api/block/:id, /api/tx/:txid, /api/address/:addr. Single-slot work queue, served via background thread. */
 
 #define LOOKUP_HEIGHT_UNAVAILABLE INT64_C(-1)
 
@@ -235,6 +235,34 @@ static size_t push_address_utxos(struct json_value *out,
     return pushed;
 }
 
+static void parse_block_hash_from_rpc(const char *buf, char *hash,
+                                      size_t hash_len)
+{
+    struct json_value root;
+    const struct json_value *result;
+
+    json_init(&root);
+    result = rpc_result_json(buf, &root);
+    if (result) {
+        const char *s = json_get_str(result);
+        if (s)
+            snprintf(hash, hash_len, "%s", s);
+    }
+    json_free(&root);
+}
+
+static void push_block_neighbor_hashes(struct json_value *body,
+                                       const struct json_value *result)
+{
+    const char *prev_hash = json_str_or(result, "previousblockhash", NULL);
+    const char *next_hash = json_str_or(result, "nextblockhash", NULL);
+    if (prev_hash && prev_hash[0])
+        json_push_kv_str(body, "previousblockhash",
+                         prev_hash);
+    if (next_hash && next_hash[0])
+        json_push_kv_str(body, "nextblockhash", next_hash);
+}
+
 size_t compute_block(const char *param, uint8_t *r, size_t max)
 {
     if (!param || !*param)
@@ -252,14 +280,7 @@ size_t compute_block(const char *param, uint8_t *r, size_t max)
         if (api_rpc_call("getblockhash", params, buf, sizeof(buf)) <= 0)
             return api_json_error(r, max, JSON_500_HEADERS, "RPC unavailable");
 
-        json_init(&root);
-        result = rpc_result_json(buf, &root);
-        if (result) {
-            const char *s = json_get_str(result);
-            if (s)
-                snprintf(hash, sizeof(hash), "%s", s);
-        }
-        json_free(&root);
+        parse_block_hash_from_rpc(buf, hash, sizeof(hash));
     } else if (zcl_is_hex_string(param, 64)) {
         snprintf(hash, sizeof(hash), "%s", param);
     }
@@ -303,13 +324,7 @@ size_t compute_block(const char *param, uint8_t *r, size_t max)
     json_push_kv_str(&body, "merkleroot",
                      json_str_or(result, "merkleroot", ""));
     json_push_kv_str(&body, "nonce", json_str_or(result, "nonce", ""));
-    const char *prev_hash = json_str_or(result, "previousblockhash", NULL);
-    const char *next_hash = json_str_or(result, "nextblockhash", NULL);
-    if (prev_hash && prev_hash[0])
-        json_push_kv_str(&body, "previousblockhash",
-                         prev_hash);
-    if (next_hash && next_hash[0])
-        json_push_kv_str(&body, "nextblockhash", next_hash);
+    push_block_neighbor_hashes(&body, result);
 
     json_init(&txs);
     size_t tx_returned = push_string_array_limited(&txs, tx_src, 200);
