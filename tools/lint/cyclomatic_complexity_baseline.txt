@@ -266,7 +266,6 @@ contexts/commons/modules/vcs/src/zcode_dht_service_persistence.c:vcs_zcode_dht_s
 contexts/commons/modules/vcs/src/zcode_dht_service_publication.c:publication_build:16
 contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publication_drive:33
 contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publication_drive_stores:23
-contexts/commons/modules/vcs/src/zcode_dht_service_records.c:vcs_zcode_dht_service_records_handle:16
 contexts/commons/modules/vcs/src/zcode_dht_service_session.c:vcs_zcode_dht_service_session_open:29
 contexts/commons/modules/vcs/src/zcode_dht_service_session.c:vcs_zcode_dht_service_sessions_reconcile:20
 contexts/commons/modules/vcs/src/zcode_dht_service_view.c:vcs_zcode_dht_service_delegations:16

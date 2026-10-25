@@ -616,6 +616,55 @@ static bool handle_store_record(
   return reply_store_result(service, peer, request, status);
 }
 
+static bool records_apply_records_reply(
+    struct vcs_zcode_dht_service *service,
+    struct service_record_operation *operation,
+    const struct service_query *query,
+    const struct vcs_zcode_dht_msg_records *reply,
+    struct vcs_zcode_dht_time now,
+    enum vcs_zcode_dht_reject_reason *rejected_out)
+{
+  if (query->kind != QUERY_RECORD_LOOKUP ||
+      !records_selector_equal(&query->record_selector, &reply->selector) ||
+      query->record_page_offset != reply->page_offset) {
+    if (rejected_out)
+      *rejected_out = VCS_ZCODE_DHT_REJECT_POISONED;
+    return false;
+  }
+  operation->record_count = reply->record_count;
+  operation->page_offset = reply->page_offset;
+  operation->next_offset = reply->next_offset;
+  memcpy(operation->records, reply->records,
+         operation->record_count * sizeof(*operation->records));
+  operation->state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
+  operation->terminal_mono = now.monotonic_s;
+  service->records_received++;
+  return true;
+}
+
+static bool records_apply_store_result_reply(
+    struct vcs_zcode_dht_service *service,
+    struct service_record_operation *operation,
+    const struct service_query *query,
+    const struct vcs_zcode_dht_msg_store_result *reply,
+    struct vcs_zcode_dht_time now,
+    enum vcs_zcode_dht_reject_reason *rejected_out)
+{
+  if (query->kind != QUERY_RECORD_STORE ||
+      memcmp(query->record_digest, reply->record_digest, 32) != 0) {
+    if (rejected_out)
+      *rejected_out = VCS_ZCODE_DHT_REJECT_POISONED;
+    return false;
+  }
+  operation->store_status = reply->status;
+  operation->state = reply->status == VCS_ZCODE_DHT_STORE_REJECTED
+                         ? VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED
+                         : VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
+  operation->terminal_mono = now.monotonic_s;
+  service->store_result_received++;
+  return true;
+}
+
 bool vcs_zcode_dht_service_records_handle(
     struct vcs_zcode_dht_service *service, struct service_peer *peer,
     struct service_query *query, const struct vcs_zcode_dht_msg *message,
@@ -638,42 +687,14 @@ bool vcs_zcode_dht_service_records_handle(
                                             query->record_operation_id);
   if (!operation)
     return false;
-  if (message->kind == VCS_ZCODE_DHT_MSG_RECORDS) {
-    if (query->kind != QUERY_RECORD_LOOKUP ||
-        !records_selector_equal(&query->record_selector,
-                                &message->records.selector) ||
-        query->record_page_offset != message->records.page_offset) {
-      if (rejected_out)
-        *rejected_out = VCS_ZCODE_DHT_REJECT_POISONED;
-      return false;
-    }
-    operation->record_count = message->records.record_count;
-    operation->page_offset = message->records.page_offset;
-    operation->next_offset = message->records.next_offset;
-    memcpy(operation->records, message->records.records,
-           operation->record_count * sizeof(*operation->records));
-    operation->state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
-    operation->terminal_mono = now.monotonic_s;
-    service->records_received++;
-    return true;
-  }
-  if (message->kind == VCS_ZCODE_DHT_MSG_STORE_RESULT) {
-    if (query->kind != QUERY_RECORD_STORE ||
-        memcmp(query->record_digest, message->store_result.record_digest, 32) !=
-            0) {
-      if (rejected_out)
-        *rejected_out = VCS_ZCODE_DHT_REJECT_POISONED;
-      return false;
-    }
-    operation->store_status = message->store_result.status;
-    operation->state = message->store_result.status ==
-                               VCS_ZCODE_DHT_STORE_REJECTED
-                           ? VCS_ZCODE_DHT_RECORD_OPERATION_REJECTED
-                           : VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
-    operation->terminal_mono = now.monotonic_s;
-    service->store_result_received++;
-    return true;
-  }
+  if (message->kind == VCS_ZCODE_DHT_MSG_RECORDS)
+    return records_apply_records_reply(service, operation, query,
+                                       &message->records, now,
+                                       rejected_out);
+  if (message->kind == VCS_ZCODE_DHT_MSG_STORE_RESULT)
+    return records_apply_store_result_reply(service, operation, query,
+                                            &message->store_result, now,
+                                            rejected_out);
   return false;
 }
 
