@@ -17,23 +17,29 @@ static bool ci_scan_open_stable_source(
     const char *root, const char *relpath)
 {
     platform_positioned_file_init(file);
-    if (!platform_positioned_file_open_beneath(file, root, relpath) ||
-        !platform_positioned_file_snapshot(file, before) ||
-        before->size > SIZE_MAX)
-        LOG_FAIL("codeindex", "open stable source %s", relpath);
-    return true;
+    return platform_positioned_file_open_beneath(file, root, relpath) &&
+        platform_positioned_file_snapshot(file, before) &&
+        before->size <= SIZE_MAX;
 }
 
-static bool ci_scan_read_source_contents(
+/* Status codes for ci_scan_read_source_contents; the caller logs the
+ * failure, this helper frees the buffer and closes the file first. */
+enum ci_scan_read_status {
+    CI_SCAN_READ_OK = 0,
+    CI_SCAN_READ_ALLOC_FAILED,
+    CI_SCAN_READ_FAILED,
+};
+
+static enum ci_scan_read_status ci_scan_read_source_contents(
     struct platform_positioned_file *file,
     const struct platform_positioned_file_snapshot *before,
-    char **buf_out, size_t *len_out, const char *relpath)
+    char **buf_out, size_t *len_out)
 {
     size_t cap = before->size ? (size_t)before->size : 1u, len = 0;
     char *buf = zcl_malloc(cap, "ci_filebuf");
     if (!buf) {
         platform_positioned_file_close(file);
-        LOG_FAIL("codeindex", "alloc filebuf");
+        return CI_SCAN_READ_ALLOC_FAILED;
     }
     while (len < (size_t)before->size) {
         int64_t r = platform_positioned_file_read(
@@ -41,13 +47,13 @@ static bool ci_scan_read_source_contents(
         if (r <= 0) {
             free(buf);
             platform_positioned_file_close(file);
-            LOG_FAIL("codeindex", "read stable source %s", relpath);
+            return CI_SCAN_READ_FAILED;
         }
         len += (size_t)r;
     }
     *buf_out = buf;
     *len_out = len;
-    return true;
+    return CI_SCAN_READ_OK;
 }
 
 static bool ci_scan_source_unchanged(
@@ -93,12 +99,16 @@ bool ci_scan_file(const char *root, const char *relpath,
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;
     if (!ci_scan_open_stable_source(&file, &before, root, relpath))
-        return false;
+        LOG_FAIL("codeindex", "open stable source %s", relpath);
 
     char *buf = NULL;
     size_t len = 0;
-    if (!ci_scan_read_source_contents(&file, &before, &buf, &len, relpath))
-        return false;
+    enum ci_scan_read_status read_status =
+        ci_scan_read_source_contents(&file, &before, &buf, &len);
+    if (read_status == CI_SCAN_READ_ALLOC_FAILED)
+        LOG_FAIL("codeindex", "alloc filebuf");
+    if (read_status == CI_SCAN_READ_FAILED)
+        LOG_FAIL("codeindex", "read stable source %s", relpath);
 
     bool stable = ci_scan_source_unchanged(&file, &before, &after);
     platform_positioned_file_close(&file);
