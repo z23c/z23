@@ -27,19 +27,17 @@ static void stage_fill(uint8_t out[32], uint8_t first)
     for (size_t i = 0; i < 32; i++) out[i] = (uint8_t)(first + i);
 }
 
-static bool stage_fixture_make(struct stage_fixture *f)
+static bool stage_fixture_derive_static_keys(struct stage_fixture *f)
 {
-    memset(f, 0, sizeof(*f));
-    stage_fill(f->source_secret, 0x11);
-    stage_fill(f->target_secret, 0x31);
-    stage_fill(f->online_seed, 0x51);
-    uint8_t grant_nonce[32], ignored_secret[32];
-    stage_fill(grant_nonce, 0x71);
-    if (!curve25519_scalarmult_base(
-            f->offer.ephemeral_x25519_pubkey, f->source_secret) ||
-        !curve25519_scalarmult_base(
-            f->offer.target_noise_static, f->target_secret))
-        return false;
+    return curve25519_scalarmult_base(
+               f->offer.ephemeral_x25519_pubkey, f->source_secret) &&
+        curve25519_scalarmult_base(
+            f->offer.target_noise_static, f->target_secret);
+}
+
+static void stage_fixture_fill_offer(struct stage_fixture *f,
+                                     uint8_t ignored_secret[32])
+{
     f->offer.version = MESH_PRIVATE_OBJECT_PROTO_VERSION;
     stage_fill(f->offer.network_genesis, 0x01);
     stage_fill(f->offer.pairing_id, 0x21);
@@ -48,7 +46,7 @@ static bool stage_fixture_make(struct stage_fixture *f)
     stage_fill(f->offer.source_noise_static, 0x81);
     ed25519_keypair(f->offer.source_online_pubkey, ignored_secret,
                     f->online_seed);
-    memset(ignored_secret, 0, sizeof(ignored_secret));
+    memset(ignored_secret, 0, 32);
     stage_fill(f->offer.target_master_pubkey, 0xa1);
     stage_fill(f->offer.transcript_hash, 0xc1);
     f->offer.connection_generation = 9;
@@ -63,51 +61,95 @@ static bool stage_fixture_make(struct stage_fixture *f)
     f->offer.issued_unix = UINT64_C(1800000000);
     f->offer.expires_unix = f->offer.issued_unix + 60;
     f->offer.deny_mask = MESH_PRIVATE_OBJECT_DENY_REQUIRED;
+}
 
-    uint8_t plain[2][MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES] = {{0}};
+static void stage_fixture_fill_plaintext(
+    uint8_t plain[2][MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES])
+{
     for (size_t i = 0; i < sizeof(plain[0]); i++)
         plain[0][i] = (uint8_t)(i * 29u + 7u);
     for (size_t i = 0; i < 7; i++) plain[1][i] = (uint8_t)(0xd0u + i);
+}
+
+static bool stage_fixture_hash_plaintext_root(
+    struct stage_fixture *f,
+    uint8_t plain[2][MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES])
+{
     struct mesh_private_object_root_v1 root;
-    if (mesh_private_object_root_v1_init(
-            &root, MESH_PRIVATE_OBJECT_ROOT_PLAINTEXT,
-            f->offer.object_size_bytes, f->offer.ciphertext_size_bytes, 2) !=
-            MESH_PRIVATE_OBJECT_ROOT_OK ||
+    return mesh_private_object_root_v1_init(
+               &root, MESH_PRIVATE_OBJECT_ROOT_PLAINTEXT,
+               f->offer.object_size_bytes, f->offer.ciphertext_size_bytes,
+               2) == MESH_PRIVATE_OBJECT_ROOT_OK &&
         mesh_private_object_root_v1_update(
-            &root, 0, plain[0], sizeof(plain[0])) !=
-            MESH_PRIVATE_OBJECT_ROOT_OK ||
-        mesh_private_object_root_v1_update(&root, 1, plain[1], 7) !=
-            MESH_PRIVATE_OBJECT_ROOT_OK ||
+            &root, 0, plain[0], sizeof(plain[0])) ==
+            MESH_PRIVATE_OBJECT_ROOT_OK &&
+        mesh_private_object_root_v1_update(&root, 1, plain[1], 7) ==
+            MESH_PRIVATE_OBJECT_ROOT_OK &&
         mesh_private_object_root_v1_finalize(
-            &root, f->offer.plaintext_root) != MESH_PRIVATE_OBJECT_ROOT_OK)
-        return false;
-    if (mesh_private_object_chunk_seal_v1(
-            &f->offer, f->source_secret, 0, plain[0], sizeof(plain[0]),
-            f->sealed[0], sizeof(f->sealed[0]), &f->sealed_len[0]) !=
-            MESH_PRIVATE_OBJECT_CHUNK_OK ||
+            &root, f->offer.plaintext_root) == MESH_PRIVATE_OBJECT_ROOT_OK;
+}
+
+static bool stage_fixture_seal_chunks(
+    struct stage_fixture *f,
+    uint8_t plain[2][MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES])
+{
+    return mesh_private_object_chunk_seal_v1(
+               &f->offer, f->source_secret, 0, plain[0], sizeof(plain[0]),
+               f->sealed[0], sizeof(f->sealed[0]), &f->sealed_len[0]) ==
+               MESH_PRIVATE_OBJECT_CHUNK_OK &&
         mesh_private_object_chunk_seal_v1(
             &f->offer, f->source_secret, 1, plain[1], 7,
-            f->sealed[1], sizeof(f->sealed[1]), &f->sealed_len[1]) !=
-            MESH_PRIVATE_OBJECT_CHUNK_OK)
-        return false;
-    if (mesh_private_object_root_v1_init(
-            &root, MESH_PRIVATE_OBJECT_ROOT_CIPHERTEXT,
-            f->offer.object_size_bytes, f->offer.ciphertext_size_bytes, 2) !=
-            MESH_PRIVATE_OBJECT_ROOT_OK ||
+            f->sealed[1], sizeof(f->sealed[1]), &f->sealed_len[1]) ==
+            MESH_PRIVATE_OBJECT_CHUNK_OK;
+}
+
+static bool stage_fixture_hash_ciphertext_root(struct stage_fixture *f)
+{
+    struct mesh_private_object_root_v1 root;
+    return mesh_private_object_root_v1_init(
+               &root, MESH_PRIVATE_OBJECT_ROOT_CIPHERTEXT,
+               f->offer.object_size_bytes, f->offer.ciphertext_size_bytes,
+               2) == MESH_PRIVATE_OBJECT_ROOT_OK &&
         mesh_private_object_root_v1_update(
-            &root, 0, f->sealed[0], f->sealed_len[0]) !=
-            MESH_PRIVATE_OBJECT_ROOT_OK ||
+            &root, 0, f->sealed[0], f->sealed_len[0]) ==
+            MESH_PRIVATE_OBJECT_ROOT_OK &&
         mesh_private_object_root_v1_update(
-            &root, 1, f->sealed[1], f->sealed_len[1]) !=
-            MESH_PRIVATE_OBJECT_ROOT_OK ||
+            &root, 1, f->sealed[1], f->sealed_len[1]) ==
+            MESH_PRIVATE_OBJECT_ROOT_OK &&
         mesh_private_object_root_v1_finalize(
-            &root, f->offer.ciphertext_root) != MESH_PRIVATE_OBJECT_ROOT_OK)
-        return false;
+            &root, f->offer.ciphertext_root) == MESH_PRIVATE_OBJECT_ROOT_OK;
+}
+
+static bool stage_fixture_finalize_offer(struct stage_fixture *f,
+                                         uint8_t grant_nonce[32])
+{
     return mesh_private_object_offer_request_id_v1_derive(
                &f->offer, grant_nonce, f->offer.request_id) ==
                MESH_PRIVATE_OBJECT_PROTO_OK &&
         mesh_private_object_offer_v1_sign(&f->offer, f->online_seed) ==
             MESH_PRIVATE_OBJECT_PROTO_OK;
+}
+
+static bool stage_fixture_make(struct stage_fixture *f)
+{
+    memset(f, 0, sizeof(*f));
+    stage_fill(f->source_secret, 0x11);
+    stage_fill(f->target_secret, 0x31);
+    stage_fill(f->online_seed, 0x51);
+    uint8_t grant_nonce[32], ignored_secret[32];
+    stage_fill(grant_nonce, 0x71);
+    if (!stage_fixture_derive_static_keys(f))
+        return false;
+    stage_fixture_fill_offer(f, ignored_secret);
+    uint8_t plain[2][MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES] = {{0}};
+    stage_fixture_fill_plaintext(plain);
+    if (!stage_fixture_hash_plaintext_root(f, plain))
+        return false;
+    if (!stage_fixture_seal_chunks(f, plain))
+        return false;
+    if (!stage_fixture_hash_ciphertext_root(f))
+        return false;
+    return stage_fixture_finalize_offer(f, grant_nonce);
 }
 
 static void stage_leaf(char out[80], const uint8_t id[32], const char *suffix)
