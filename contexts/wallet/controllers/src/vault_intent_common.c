@@ -230,28 +230,42 @@ bool vault_intent_chain_confirmation(struct main_state *ms,
     return true;
 }
 
+static bool vic_amount_input_acceptable(const char *s, const int64_t *out)
+{
+    return s && out && s[0] && s[0] != '-' && s[0] != '+';
+}
+
+static bool vic_scan_amount_digits(const char *s, int64_t *whole,
+                                   int64_t *frac, unsigned *decimals,
+                                   bool *dot)
+{
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p == '.' && !*dot) { *dot = true; continue; }
+        if (*p < '0' || *p > '9') return false; // raw-return-ok:predicate
+        int digit = *p - '0';
+        if (!*dot) {
+            if (*whole > (INT64_MAX - digit) / 10)
+                return false; // raw-return-ok:predicate
+            *whole = *whole * 10 + digit;
+        } else {
+            if (++*decimals > 8) return false; // raw-return-ok:predicate
+            *frac = *frac * 10 + digit;
+        }
+    }
+    return true;
+}
+
 /* Amounts are text only. This is deliberately not the permissive legacy RPC
  * amount parser: floats can never cross this boundary. */
 bool vault_intent_parse_zcl_amount(const char *s, int64_t *out)
 {
-    if (!s || !out || !s[0] || s[0] == '-' || s[0] == '+')
+    if (!vic_amount_input_acceptable(s, out))
         return false; // raw-return-ok:predicate
     int64_t whole = 0, frac = 0;
     unsigned decimals = 0;
     bool dot = false;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if (*p == '.' && !dot) { dot = true; continue; }
-        if (*p < '0' || *p > '9') return false; // raw-return-ok:predicate
-        int digit = *p - '0';
-        if (!dot) {
-            if (whole > (INT64_MAX - digit) / 10)
-                return false; // raw-return-ok:predicate
-            whole = whole * 10 + digit;
-        } else {
-            if (++decimals > 8) return false; // raw-return-ok:predicate
-            frac = frac * 10 + digit;
-        }
-    }
+    if (!vic_scan_amount_digits(s, &whole, &frac, &decimals, &dot))
+        return false; // raw-return-ok:predicate
     if (dot && decimals == 0) return false; // raw-return-ok:predicate
     while (decimals++ < 8) frac *= 10;
     if (whole > (INT64_MAX - frac) / COIN)

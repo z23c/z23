@@ -660,7 +660,6 @@ contexts/wallet/controllers/src/sync_controller_wallet_disconnect.c:wallet_disco
 contexts/wallet/controllers/src/transaction_controller_wallet_lookup.c:rawtx_find_by_wallet_note:18
 contexts/wallet/controllers/src/transaction_controller_wallet_lookup.c:rawtx_find_in_recent_chain:20
 contexts/wallet/controllers/src/transaction_controller_wallet_lookup.c:rawtx_find_in_wallet_db:19
-contexts/wallet/controllers/src/vault_intent_common.c:vault_intent_parse_zcl_amount:20
 contexts/wallet/controllers/src/vault_intent_controller.c:rpc_vi_plan_checked:48
 contexts/wallet/controllers/src/vault_intent_controller.c:vault_intent_commit_input:48
 contexts/wallet/controllers/src/vault_intent_controller.c:vi_build_prepared:20
