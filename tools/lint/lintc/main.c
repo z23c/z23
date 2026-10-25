@@ -18,6 +18,12 @@ static const struct lint_gate k_gates[] = {
 };
 #undef LINT_GATE
 
+const struct lint_gate *lint_gate_table(size_t *n)
+{
+    *n = sizeof k_gates / sizeof k_gates[0];
+    return k_gates;
+}
+
 /* Premise-selection subcommands; they are tools, not gates, so --list and
  * the gate table never name them. */
 static const struct {
@@ -27,6 +33,7 @@ static const struct {
     { "select", lint_select_main },
     { "unit-exec", lint_unit_exec_main },
     { "premise", lint_premise_main },
+    { "precheck", lint_precheck_main },
 };
 
 /* The premise-selection tool named by argv[1], or NULL. */

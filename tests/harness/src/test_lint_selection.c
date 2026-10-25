@@ -14,6 +14,7 @@
  * live Makefile). */
 #include "test/test_core.h"
 
+#include "lint/lintc/lintc.h"
 #include "lint/lintc/premise.h"
 #include "util/spawn.h"
 
@@ -21,6 +22,7 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -1121,9 +1123,148 @@ static int test_lsel_doc_claims_kind_change(void)
 }
 
 
+/* precheck runs against a fixture gate table, so this test binary never links
+ * the real gates. check-no-python fails while a .py file sits in the cwd;
+ * check-clean always passes. */
+static int lsel_pc_no_python_run(int argc, char **argv)
+{
+    DIR *d;
+    struct dirent *e;
+    int found = 0;
+    (void)argc;
+    (void)argv;
+    d = opendir(".");
+    if (!d)
+        return 2;
+    while ((e = readdir(d)) != NULL) {
+        size_t n = strlen(e->d_name);
+        if (n > 3 && strcmp(e->d_name + n - 3, ".py") == 0)
+            found = 1;
+    }
+    closedir(d);
+    return found;
+}
+
+static int lsel_pc_clean_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return 0;
+}
+
+static const struct lint_gate k_lsel_pc_gates[] = {
+    { "check-no-python", lsel_pc_no_python_run, NULL },
+    { "check-clean", lsel_pc_clean_run, NULL },
+};
+
+const struct lint_gate *lint_gate_table(size_t *n)
+{
+    *n = sizeof(k_lsel_pc_gates) / sizeof(k_lsel_pc_gates[0]);
+    return k_lsel_pc_gates;
+}
+
+struct lsel_pc_fx {
+    char root[PATH_MAX];
+    char dirty[PATH_MAX];
+    char clean[PATH_MAX];
+    char out[PATH_MAX];
+    char cwd[PATH_MAX];
+};
+
+static bool lsel_pc_file(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return false;
+    return fputs(text, f) >= 0 && fclose(f) == 0;
+}
+
+/* test-tmp/lintpc_XXXXXX/{dirty,clean}: only dirty holds a .py file. */
+static bool lsel_pc_plant(struct lsel_pc_fx *fx)
+{
+    char py[PATH_MAX * 2];
+    memset(fx, 0, sizeof(*fx));
+    if (!test_mkdtemp(fx->root, sizeof(fx->root), "lintpc"))
+        return false;
+    (void)snprintf(fx->dirty, sizeof(fx->dirty), "%s/dirty", fx->root);
+    (void)snprintf(fx->clean, sizeof(fx->clean), "%s/clean", fx->root);
+    (void)snprintf(fx->out, sizeof(fx->out), "%s/out.txt", fx->root);
+    (void)snprintf(py, sizeof(py), "%s/tool.py", fx->dirty);
+    return getcwd(fx->cwd, sizeof(fx->cwd)) != NULL
+        && mkdir(fx->dirty, 0755) == 0 && mkdir(fx->clean, 0755) == 0
+        && lsel_pc_file(py, "x = 1\n");
+}
+
+/* Runs lint_precheck_main with cwd = tree and its stdout captured into out. */
+static int lsel_pc_run(const struct lsel_pc_fx *fx, const char *tree,
+                       char **argv, int argc, char *out, size_t cap)
+{
+    int rc = 2, saved = -1, fd = -1;
+    FILE *f;
+    if (chdir(tree) != 0)
+        return 2;
+    fflush(stdout);
+    saved = dup(STDOUT_FILENO);
+    fd = open(fx->out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (saved >= 0 && fd >= 0 && dup2(fd, STDOUT_FILENO) >= 0) {
+        rc = lint_precheck_main(argc, argv);
+        fflush(stdout);
+        (void)dup2(saved, STDOUT_FILENO);
+    }
+    if (fd >= 0)
+        close(fd);
+    if (saved >= 0)
+        close(saved);
+    (void)chdir(fx->cwd);
+    out[0] = '\0';
+    f = fopen(fx->out, "r");
+    if (f) {
+        size_t got = fread(out, 1, cap - 1, f);
+        out[got] = '\0';
+        fclose(f);
+    }
+    return rc;
+}
+
+static int test_lsel_precheck(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: precheck names the gate a tree newly breaks, exit 1") {
+        struct lsel_pc_fx fx;
+        char base_arg[PATH_MAX + 16], out[512];
+        ASSERT(lsel_pc_plant(&fx));
+        (void)snprintf(base_arg, sizeof(base_arg), "--base=%s", fx.clean);
+        char *argv[] = { base_arg, (char *)"--gates=check-no-python" };
+        ASSERT_EQ(lsel_pc_run(&fx, fx.dirty, argv, 2, out, sizeof(out)), 1);
+        ASSERT(strstr(out, "NEW check-no-python rc=1\n") != NULL);
+        ASSERT(strstr(out, "precheck: 1 new failure(s) of 1 gates\n") != NULL);
+        ASSERT_EQ(lsel_pc_run(&fx, fx.clean, argv, 2, out, sizeof(out)), 0);
+        ASSERT(strstr(out, "NEW ") == NULL);
+        ASSERT(strstr(out, "precheck: 0 new failure(s) of 1 gates\n") != NULL);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lsel_precheck_usage(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: precheck refuses a missing --base as a usage error") {
+        struct lsel_pc_fx fx;
+        char out[512];
+        char *argv[] = { (char *)"--gates=check-no-python" };
+        ASSERT(lsel_pc_plant(&fx));
+        ASSERT_EQ(lsel_pc_run(&fx, fx.dirty, argv, 1, out, sizeof(out)), 2);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
 int test_lint_selection(void)
 {
     int failures = 0;
+    failures += test_lsel_precheck();
+    failures += test_lsel_precheck_usage();
     failures += test_lsel_doc_claims();
     failures += test_lsel_doc_claims_kind_change();
     failures += test_lsel_per_file_gate();

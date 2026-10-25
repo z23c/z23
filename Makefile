@@ -3429,7 +3429,9 @@ LINTC_PREMISE_CORE_SRCS = tools/lint/lintc/premise.c tools/lint/lintc/premise_tr
 	tools/lint/lintc/premise_git.c tools/lint/lintc/premise_include.c \
 	tools/lint/lintc/premise_make.c tools/lint/lintc/premise_catalog.c \
 	tools/lint/lintc/premise_doc_claims.c tools/lint/lintc/unit_exec.c
-TEST_LINT_SELECTION_SRCS = $(if $(ZCL_HOST_WINDOWS),,$(LINTC_PREMISE_CORE_SRCS))
+# precheck.c is the fork/waitpid runner behind `z23-lint precheck`; its test
+# supplies its own gate table, so the test binary never links the real gates.
+TEST_LINT_SELECTION_SRCS = $(if $(ZCL_HOST_WINDOWS),,$(LINTC_PREMISE_CORE_SRCS) tools/lint/lintc/precheck.c)
 
 # test.c and test_parallel.c each own their own main() — never both in
 # one binary. test_parallel_zcl uses the latter + the same test/spec
