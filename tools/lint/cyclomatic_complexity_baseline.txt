@@ -1726,7 +1726,6 @@ engine/services/src/utxo_recovery_stale_cursor.c:utxo_recovery_repair_stale_curs
 engine/services/src/utxo_recovery_torn_anchor.c:utxo_recovery_heal_torn_legacy_coins_anchor:18
 engine/services/src/zclassicd_oracle_service.c:zclassicd_oracle_init:17
 platform/adapters/outbound/persistence/src/db_maintenance_sqlite.c:dbm_wal_checkpoint:16
-platform/adapters/outbound/persistence/src/hodl_history_sqlite.c:hh_next_fill_height:19
 platform/modules/astro/src/astro_chart.c:astro_chart_compute:26
 platform/modules/astro/src/astro_exact.c:astro_exact_format:23
 platform/modules/codec/tests/test_codec.c:main:32

@@ -322,36 +322,39 @@ static int64_t hh_first_indexed_sample_height(sqlite3 *db,
     return ((min_height + stride - 1) / stride) * stride;
 }
 
-static bool hh_next_fill_height(void *self,
-                                int64_t stride,
-                                int64_t target,
-                                int64_t *out_height)
+static bool hh_close_reader_result(sqlite3 *reader, bool owned_reader, bool result)
 {
-    sqlite3 *db = db_of(self);
-    if (!db || !out_height || stride <= 0 || target < stride)
-        return false;
+    if (owned_reader)
+        sqlite3_close(reader);
+    return result;
+}
 
-    *out_height = 0;
-    bool owned_reader = false;
-    sqlite3 *reader = hh_open_reader(db, &owned_reader);
-    if (!reader)
-        return false;
+static bool hh_next_fill_scan_range(sqlite3 *reader,
+                                    int64_t stride,
+                                    int64_t target,
+                                    int64_t *out_start,
+                                    int64_t *out_source_tip)
+{
     int64_t source_tip = hh_projection_tip_height(reader, target);
     if (source_tip > target)
         source_tip = target;
-    if (source_tip < stride) {
-        if (owned_reader)
-            sqlite3_close(reader);
-        return true;
-    }
-
+    if (source_tip < stride)
+        return false;
     int64_t start = hh_first_indexed_sample_height(reader, stride, source_tip);
-    if (start > source_tip) {
-        if (owned_reader)
-            sqlite3_close(reader);
-        return true;
-    }
+    if (start > source_tip)
+        return false;
+    *out_start = start;
+    *out_source_tip = source_tip;
+    return true;
+}
 
+static bool hh_query_next_fill_height(sqlite3 *reader,
+                                      int64_t start,
+                                      int64_t stride,
+                                      int64_t source_tip,
+                                      int64_t *out_height,
+                                      int *out_rc)
+{
     sqlite3_stmt *s = NULL;
     const char *sql =
         "WITH RECURSIVE expected(h) AS ("
@@ -367,13 +370,8 @@ static bool hh_next_fill_height(void *self,
         "   OR hh.source_tip_height < e.h"
         ") "
         "ORDER BY e.h LIMIT 1";
-    if (sqlite3_prepare_v2(reader, sql, -1, &s, NULL) != SQLITE_OK || !s) {
-        LOG_FAIL("hodl_history",
-                 "prepare next-fill SQL failed: %s", sqlite3_errmsg(reader));
-        if (owned_reader)
-            sqlite3_close(reader);
+    if (sqlite3_prepare_v2(reader, sql, -1, &s, NULL) != SQLITE_OK || !s)
         return false;
-    }
     sqlite3_bind_int64(s, 1, start);
     sqlite3_bind_int64(s, 2, stride);
     sqlite3_bind_int64(s, 3, source_tip);
@@ -382,6 +380,40 @@ static bool hh_next_fill_height(void *self,
     if (rc == SQLITE_ROW)
         *out_height = sqlite3_column_int64(s, 0);
     sqlite3_finalize(s);
+    *out_rc = rc;
+    return true;
+}
+
+static bool hh_next_fill_height(void *self,
+                                int64_t stride,
+                                int64_t target,
+                                int64_t *out_height)
+{
+    sqlite3 *db = db_of(self);
+    if (!db || !out_height || stride <= 0 || target < stride)
+        return false;
+
+    *out_height = 0;
+    bool owned_reader = false;
+    sqlite3 *reader = hh_open_reader(db, &owned_reader);
+    if (!reader)
+        return false;
+
+    int64_t start = 0;
+    int64_t source_tip = 0;
+    if (!hh_next_fill_scan_range(reader, stride, target,
+                                 &start, &source_tip))
+        return hh_close_reader_result(reader, owned_reader, true);
+
+    int rc = SQLITE_OK;
+    if (!hh_query_next_fill_height(reader, start, stride, source_tip,
+                                   out_height, &rc)) {
+        LOG_FAIL("hodl_history",
+                 "prepare next-fill SQL failed: %s", sqlite3_errmsg(reader));
+        if (owned_reader)
+            sqlite3_close(reader);
+        return false;
+    }
     if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
         LOG_FAIL("hodl_history",
                  "next-fill step rc=%d: %s", rc, sqlite3_errmsg(reader));
@@ -389,9 +421,7 @@ static bool hh_next_fill_height(void *self,
             sqlite3_close(reader);
         return false;
     }
-    if (owned_reader)
-        sqlite3_close(reader);
-    return true;
+    return hh_close_reader_result(reader, owned_reader, true);
 }
 
 static bool hh_snapshot_types_valid(sqlite3_stmt *s)
