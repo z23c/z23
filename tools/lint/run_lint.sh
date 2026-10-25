@@ -199,6 +199,7 @@ gate_command() {
         check-no-new-repair-rung)          echo './tools/scripts/check_no_new_repair_rung.sh --selftest && ./tools/scripts/check_no_new_repair_rung.sh' ;;
         check-object-reproducible)            echo 'make --no-print-directory check-object-reproducible' ;; # the Makefile recipe runs the pure selftest once
         check-riscv64-universal)              echo 'make check-riscv64-universal' ;;
+        check-lint-gate-wiring)            echo './build/bin/z23-lint check-lint-gate-wiring --selftest && ./build/bin/z23-lint check-lint-gate-wiring' ;;
         check-no-new-borrowed-seed)        echo './build/bin/z23-lint check-no-new-borrowed-seed .' ;;
         check-no-new-coin-backfill-caller) echo './build/bin/z23-lint check-no-new-coin-backfill-caller .' ;;
         check-route-command-parity)        echo './build/bin/z23-lint check-route-command-parity .' ;;
