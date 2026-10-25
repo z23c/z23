@@ -174,6 +174,83 @@ static void bf_render_worker(struct json_value *out,
     (void)json_push_kv_int(out, "last_seen_at", row->last_seen_at);
 }
 
+static bool bf_plan_args_valid(const char *source_sha, const char *source_cas,
+                               const char *toolchain, const char *input_root,
+                               const char *flags, const char *environment,
+                               const char *profile)
+{
+    if (!bf_hex_id(source_sha) || !bf_hex_id(source_cas) ||
+        !bf_hex_id(toolchain) || !bf_hex_id(input_root) || !bf_hex_id(flags) ||
+        !bf_hex_id(environment) || !profile ||
+        strlen(profile) > BUILD_FABRIC_PROFILE_MAX)
+        return false;
+    return true;
+}
+
+static void bf_plan_fixed_roots(char *flags_hex, char *environment_hex)
+{
+    uint8_t fixed_flags[32], fixed_environment[32];
+    vcs_build_action_v1_fixed_flags_root(fixed_flags);
+    vcs_build_action_v1_fixed_environment_root(fixed_environment);
+    zcl_hex_encode(fixed_flags, 32, flags_hex);
+    zcl_hex_encode(fixed_environment, 32, environment_hex);
+}
+
+static void bf_plan_fill_job(struct db_build_job *job, const char *source_sha,
+                             const char *source_cas, const char *toolchain,
+                             const char *profile, int64_t now)
+{
+    (void)snprintf(job->source_sha256, sizeof(job->source_sha256), "%s", source_sha);
+    (void)snprintf(job->source_cas_sha3, sizeof(job->source_cas_sha3), "%s", source_cas);
+    (void)snprintf(job->toolchain_sha3, sizeof(job->toolchain_sha3), "%s", toolchain);
+    (void)snprintf(job->profile, sizeof(job->profile), "%s", profile);
+    (void)snprintf(job->state, sizeof(job->state), "PLANNED");
+    job->created_at = job->updated_at = now;
+}
+
+static void bf_plan_fill_action(struct db_build_action *action,
+                                const char *input_root,
+                                const char *fixed_flags_hex,
+                                const char *fixed_environment_hex,
+                                int64_t now)
+{
+    (void)snprintf(action->kind, sizeof(action->kind),
+                   "c23.compile.preprocessed.v1");
+    (void)snprintf(action->state, sizeof(action->state), "SNAPSHOTTED");
+    (void)snprintf(action->input_root_sha3, sizeof(action->input_root_sha3), "%s", input_root);
+    (void)snprintf(action->target, sizeof(action->target), "%s",
+                   VCS_BUILD_TARGET_V1);
+    (void)snprintf(action->flags_sha3, sizeof(action->flags_sha3), "%s",
+                   fixed_flags_hex);
+    (void)snprintf(action->environment_sha3, sizeof(action->environment_sha3),
+                   "%s", fixed_environment_hex);
+    (void)snprintf(action->virtual_workdir, sizeof(action->virtual_workdir), "/zbuild/src");
+    (void)snprintf(action->declared_outputs, sizeof(action->declared_outputs), "unit.o");
+    (void)snprintf(action->resource_policy, sizeof(action->resource_policy),
+                   "%s", VCS_BUILD_RESOURCE_POLICY_V1);
+    action->created_at = action->updated_at = now;
+}
+
+static bool bf_plan_persist(const struct zcl_command_request *request,
+                            struct zcl_command_reply *reply,
+                            struct db_build_job *job,
+                            struct db_build_action *action,
+                            struct zcl_result *result)
+{
+    struct node_db local, *ndb = NULL;
+    if (result->ok && bf_open_write(request, reply, &local, &ndb)) {
+        *result = build_fabric_plan(ndb, job, action);
+        if (result->ok &&
+            (!db_build_job_find(ndb, job->job_id, job) ||
+             !db_build_action_find(ndb, action->action_id, action)))
+            *result = ZCL_ERR(-1, "persisted build plan could not be re-read");
+        bf_close_write(&local, ndb);
+    } else if (result->ok) {
+        return false;
+    }
+    return true;
+}
+
 void zcl_native_handle_metaverse_build_plan(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -185,21 +262,15 @@ void zcl_native_handle_metaverse_build_plan(
     const char *flags = bf_arg(request, "flags_sha3");
     const char *environment = bf_arg(request, "environment_sha3");
     const char *profile = bf_arg(request, "profile");
-    if (!bf_hex_id(source_sha) || !bf_hex_id(source_cas) ||
-        !bf_hex_id(toolchain) || !bf_hex_id(input_root) || !bf_hex_id(flags) ||
-        !bf_hex_id(environment) || !profile ||
-        strlen(profile) > BUILD_FABRIC_PROFILE_MAX) {
+    if (!bf_plan_args_valid(source_sha, source_cas, toolchain, input_root,
+                            flags, environment, profile)) {
         bf_fail(reply, "INVALID_INPUT", "plan requires six exact lowercase "
                 "64-hex digests and a profile of at most 31 bytes",
                 "discover schema metaverse.build.plan", false);
         return;
     }
-    uint8_t fixed_flags[32], fixed_environment[32];
     char fixed_flags_hex[65], fixed_environment_hex[65];
-    vcs_build_action_v1_fixed_flags_root(fixed_flags);
-    vcs_build_action_v1_fixed_environment_root(fixed_environment);
-    zcl_hex_encode(fixed_flags, 32, fixed_flags_hex);
-    zcl_hex_encode(fixed_environment, 32, fixed_environment_hex);
+    bf_plan_fixed_roots(fixed_flags_hex, fixed_environment_hex);
     if (strcmp(flags, fixed_flags_hex) != 0 ||
         strcmp(environment, fixed_environment_hex) != 0) {
         bf_fail(reply, "FIXED_PROFILE_MISMATCH",
@@ -210,43 +281,15 @@ void zcl_native_handle_metaverse_build_plan(
     int64_t now = platform_time_wall_unix();
     struct db_build_job job = {0};
     struct db_build_action action = {0};
-    (void)snprintf(job.source_sha256, sizeof(job.source_sha256), "%s", source_sha);
-    (void)snprintf(job.source_cas_sha3, sizeof(job.source_cas_sha3), "%s", source_cas);
-    (void)snprintf(job.toolchain_sha3, sizeof(job.toolchain_sha3), "%s", toolchain);
-    (void)snprintf(job.profile, sizeof(job.profile), "%s", profile);
-    (void)snprintf(job.state, sizeof(job.state), "PLANNED");
-    job.created_at = job.updated_at = now;
-    (void)snprintf(action.kind, sizeof(action.kind),
-                   "c23.compile.preprocessed.v1");
-    (void)snprintf(action.state, sizeof(action.state), "SNAPSHOTTED");
-    (void)snprintf(action.input_root_sha3, sizeof(action.input_root_sha3), "%s", input_root);
-    (void)snprintf(action.target, sizeof(action.target), "%s",
-                   VCS_BUILD_TARGET_V1);
-    (void)snprintf(action.flags_sha3, sizeof(action.flags_sha3), "%s",
-                   fixed_flags_hex);
-    (void)snprintf(action.environment_sha3, sizeof(action.environment_sha3),
-                   "%s", fixed_environment_hex);
-    (void)snprintf(action.virtual_workdir, sizeof(action.virtual_workdir), "/zbuild/src");
-    (void)snprintf(action.declared_outputs, sizeof(action.declared_outputs), "unit.o");
-    (void)snprintf(action.resource_policy, sizeof(action.resource_policy),
-                   "%s", VCS_BUILD_RESOURCE_POLICY_V1);
-    action.created_at = action.updated_at = now;
+    bf_plan_fill_job(&job, source_sha, source_cas, toolchain, profile, now);
+    bf_plan_fill_action(&action, input_root, fixed_flags_hex,
+                        fixed_environment_hex, now);
     struct zcl_result result = build_fabric_action_id(&job, &action,
                                                        action.action_id);
     if (result.ok)
         result = build_fabric_job_id(&job, action.action_id, job.job_id);
     (void)snprintf(action.job_id, sizeof(action.job_id), "%s", job.job_id);
-    struct node_db local, *ndb = NULL;
-    if (result.ok && bf_open_write(request, reply, &local, &ndb)) {
-        result = build_fabric_plan(ndb, &job, &action);
-        if (result.ok &&
-            (!db_build_job_find(ndb, job.job_id, &job) ||
-             !db_build_action_find(ndb, action.action_id, &action)))
-            result = ZCL_ERR(-1, "persisted build plan could not be re-read");
-        bf_close_write(&local, ndb);
-    } else if (result.ok) {
-        return;
-    }
+    if (!bf_plan_persist(request, reply, &job, &action, &result)) return;
     if (!result.ok) {
         bf_fail(reply, "PLAN_REJECTED", result.message, action.action_id, false);
         return;
