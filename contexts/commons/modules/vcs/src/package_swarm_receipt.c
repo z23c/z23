@@ -102,15 +102,87 @@ bool vcs_swarm_receipt_draft(
     return true;
 }
 
+enum {
+    RECEIPT_PARTY_OK = 0,
+    RECEIPT_PARTY_NOT_ONE,
+    RECEIPT_PARTY_SERVED_MISMATCH,
+    RECEIPT_PARTY_FETCHED_MISMATCH
+};
+
+enum {
+    RECEIPT_CREDIT_MAPPED = 0,
+    RECEIPT_CREDIT_REFUSED,
+    RECEIPT_CREDIT_UNKNOWN
+};
+
+static enum vcs_swarm_receipt_status receipt_accept_inputs(
+    const struct vcs_service_book *book,
+    const struct vcs_swarm_transfer *xfer,
+    const uint8_t local_pub[33], const uint8_t *wire)
+{
+    if (!book || !xfer || !local_pub || !wire)
+        return VCS_SWARM_RECEIPT_BAD_INPUT;
+    if (xfer->served == 0 && xfer->fetched == 0)
+        return VCS_SWARM_RECEIPT_NO_TRANSFER;
+    return VCS_SWARM_RECEIPT_OK;
+}
+
+static int receipt_party_bytes(const struct vcs_service_receipt *parsed,
+                               const struct vcs_swarm_transfer *xfer,
+                               const uint8_t local_pub[33],
+                               uint64_t expected)
+{
+    bool as_uploader = memcmp(local_pub, parsed->uploader_pubkey, 33) == 0;
+    bool as_downloader =
+        memcmp(local_pub, parsed->downloader_pubkey, 33) == 0;
+    if (as_uploader == as_downloader)
+        return RECEIPT_PARTY_NOT_ONE;
+    if (as_uploader && expected != xfer->served)
+        return RECEIPT_PARTY_SERVED_MISMATCH;
+    if (as_downloader && expected != xfer->fetched)
+        return RECEIPT_PARTY_FETCHED_MISMATCH;
+    return RECEIPT_PARTY_OK;
+}
+
+static int receipt_credit_kind(enum vcs_service_credit_result cr,
+                               enum vcs_swarm_receipt_status *out)
+{
+    switch (cr) {
+    case VCS_SERVICE_CREDIT_OK:
+        *out = VCS_SWARM_RECEIPT_OK;
+        return RECEIPT_CREDIT_MAPPED;
+    case VCS_SERVICE_CREDIT_DUPLICATE:
+        *out = VCS_SWARM_RECEIPT_DUPLICATE;
+        return RECEIPT_CREDIT_MAPPED;
+    case VCS_SERVICE_CREDIT_UNVERIFIED:
+        *out = VCS_SWARM_RECEIPT_UNVERIFIED;
+        return RECEIPT_CREDIT_MAPPED;
+    case VCS_SERVICE_CREDIT_NOT_PARTY:
+        *out = VCS_SWARM_RECEIPT_NOT_PARTY;
+        return RECEIPT_CREDIT_MAPPED;
+    case VCS_SERVICE_CREDIT_WINDOW:
+        *out = VCS_SWARM_RECEIPT_WINDOW;
+        return RECEIPT_CREDIT_MAPPED;
+    case VCS_SERVICE_CREDIT_BAD_INPUT:
+    case VCS_SERVICE_CREDIT_REPLAYED_REQUEST:
+    case VCS_SERVICE_CREDIT_FULL:
+    case VCS_SERVICE_CREDIT_IO:
+        return RECEIPT_CREDIT_REFUSED;
+    }
+    return RECEIPT_CREDIT_UNKNOWN;
+}
+
 enum vcs_swarm_receipt_status vcs_swarm_receipt_accept(
     struct vcs_service_book *book, const struct vcs_swarm_transfer *xfer,
     const uint8_t local_pub[33], int64_t day,
     const uint8_t *wire, size_t len)
 {
-    if (!book || !xfer || !local_pub || !wire)
+    enum vcs_swarm_receipt_status inputs =
+        receipt_accept_inputs(book, xfer, local_pub, wire);
+    if (inputs == VCS_SWARM_RECEIPT_BAD_INPUT)
         LOG_RETURN(VCS_SWARM_RECEIPT_BAD_INPUT, "vcs.swarm-receipt",
                    "accept: null argument");
-    if (xfer->served == 0 && xfer->fetched == 0)
+    if (inputs == VCS_SWARM_RECEIPT_NO_TRANSFER)
         LOG_RETURN(VCS_SWARM_RECEIPT_NO_TRANSFER, "vcs.swarm-receipt",
                    "accept: no verified transfer");
 
@@ -126,17 +198,16 @@ enum vcs_swarm_receipt_status vcs_swarm_receipt_accept(
                    "accept: package root does not match the transfer");
 
     uint64_t expected = parsed.verified_bytes;
-    bool as_uploader = memcmp(local_pub, parsed.uploader_pubkey, 33) == 0;
-    bool as_downloader = memcmp(local_pub, parsed.downloader_pubkey, 33) == 0;
-    if (as_uploader == as_downloader)
+    int party = receipt_party_bytes(&parsed, xfer, local_pub, expected);
+    if (party == RECEIPT_PARTY_NOT_ONE)
         LOG_RETURN(VCS_SWARM_RECEIPT_NOT_PARTY, "vcs.swarm-receipt",
                    "accept: local key is not exactly one endpoint");
-    if (as_uploader && expected != xfer->served)
+    if (party == RECEIPT_PARTY_SERVED_MISMATCH)
         LOG_RETURN(VCS_SWARM_RECEIPT_BYTES_MISMATCH, "vcs.swarm-receipt",
                    "accept: claimed %llu served != %llu",
                    (unsigned long long)expected,
                    (unsigned long long)xfer->served);
-    if (as_downloader && expected != xfer->fetched)
+    if (party == RECEIPT_PARTY_FETCHED_MISMATCH)
         LOG_RETURN(VCS_SWARM_RECEIPT_BYTES_MISMATCH, "vcs.swarm-receipt",
                    "accept: claimed %llu fetched != %llu",
                    (unsigned long long)expected,
@@ -144,21 +215,15 @@ enum vcs_swarm_receipt_status vcs_swarm_receipt_accept(
 
     enum vcs_service_credit_result cr = vcs_service_book_accept_receipt(
         book, wire, len, local_pub, day);
-    switch (cr) {
-    case VCS_SERVICE_CREDIT_OK: return VCS_SWARM_RECEIPT_OK;
-    case VCS_SERVICE_CREDIT_DUPLICATE: return VCS_SWARM_RECEIPT_DUPLICATE;
-    case VCS_SERVICE_CREDIT_UNVERIFIED: return VCS_SWARM_RECEIPT_UNVERIFIED;
-    case VCS_SERVICE_CREDIT_NOT_PARTY: return VCS_SWARM_RECEIPT_NOT_PARTY;
-    case VCS_SERVICE_CREDIT_WINDOW: return VCS_SWARM_RECEIPT_WINDOW;
-    case VCS_SERVICE_CREDIT_BAD_INPUT:
-    case VCS_SERVICE_CREDIT_REPLAYED_REQUEST:
-    case VCS_SERVICE_CREDIT_FULL:
-    case VCS_SERVICE_CREDIT_IO:
+    enum vcs_swarm_receipt_status mapped = VCS_SWARM_RECEIPT_BAD_INPUT;
+    int credit = receipt_credit_kind(cr, &mapped);
+    if (credit == RECEIPT_CREDIT_REFUSED)
         LOG_RETURN(VCS_SWARM_RECEIPT_BAD_INPUT, "vcs.swarm-receipt",
                    "accept: book refused %s",
                    vcs_service_credit_result_string(cr));
-    }
-    LOG_RETURN(VCS_SWARM_RECEIPT_BAD_INPUT, "vcs.swarm-receipt",
-               "accept: book refused %s",
-               vcs_service_credit_result_string(cr));
+    if (credit == RECEIPT_CREDIT_UNKNOWN)
+        LOG_RETURN(VCS_SWARM_RECEIPT_BAD_INPUT, "vcs.swarm-receipt",
+                   "accept: book refused %s",
+                   vcs_service_credit_result_string(cr));
+    return mapped;
 }
