@@ -143,6 +143,27 @@ static bool cte_agree(const struct cte_domain *d, const struct cte_legacy *l)
     return true;
 }
 
+/* True when both the domain check and the legacy wrapper accept the tx. */
+static bool cte_both_accepted(const struct cte_domain *d,
+                              const struct cte_legacy *l)
+{
+    return d->ok && l->ok;
+}
+
+/* True when the domain reject_reason equals `reason` (a NULL reason is
+ * never equal). */
+static bool cte_reason_is(const struct cte_domain *d, const char *reason)
+{
+    return d->reason && strcmp(d->reason, reason) == 0;
+}
+
+/* True when the domain check rejected with exactly `reason`. */
+static bool cte_rejected_with_reason(const struct cte_domain *d,
+                                     const char *reason)
+{
+    return !d->ok && cte_reason_is(d, reason);
+}
+
 int test_check_tx_edge(void)
 {
     int failures = 0;
@@ -154,7 +175,7 @@ int test_check_tx_edge(void)
         struct cte_domain d = cte_run_domain(&tx);
         struct cte_legacy l = cte_run_legacy(&tx);
         CTE_CHECK("vout == MAX_MONEY: accepted (boundary inclusive)",
-                  d.ok && l.ok);
+                  cte_both_accepted(&d, &l));
         CTE_CHECK("vout == MAX_MONEY: verdicts agree", cte_agree(&d, &l));
         transaction_free(&tx);
     }
@@ -166,7 +187,7 @@ int test_check_tx_edge(void)
         struct cte_domain d = cte_run_domain(&tx);
         struct cte_legacy l = cte_run_legacy(&tx);
         CTE_CHECK("coinbase scriptSig == 2: accepted (low bound inclusive)",
-                  d.ok && l.ok);
+                  cte_both_accepted(&d, &l));
         CTE_CHECK("coinbase scriptSig == 2: verdicts agree",
                   cte_agree(&d, &l));
         transaction_free(&tx);
@@ -179,7 +200,7 @@ int test_check_tx_edge(void)
         struct cte_domain d = cte_run_domain(&tx);
         struct cte_legacy l = cte_run_legacy(&tx);
         CTE_CHECK("coinbase scriptSig == 100: accepted (high bound inclusive)",
-                  d.ok && l.ok);
+                  cte_both_accepted(&d, &l));
         CTE_CHECK("coinbase scriptSig == 100: verdicts agree",
                   cte_agree(&d, &l));
         transaction_free(&tx);
@@ -195,7 +216,7 @@ int test_check_tx_edge(void)
         struct cte_domain d = cte_run_domain(&tx);
         struct cte_legacy l = cte_run_legacy(&tx);
         CTE_CHECK("vout total == MAX_MONEY: accepted (sum boundary inclusive)",
-                  d.ok && l.ok);
+                  cte_both_accepted(&d, &l));
         CTE_CHECK("vout total == MAX_MONEY: verdicts agree",
                   cte_agree(&d, &l));
         transaction_free(&tx);
@@ -212,8 +233,8 @@ int test_check_tx_edge(void)
         struct cte_domain d = cte_run_domain(&tx);
         struct cte_legacy l = cte_run_legacy(&tx);
         CTE_CHECK("vout total == MAX_MONEY+1: rejected txouttotal-toolarge",
-                  !d.ok && d.reason &&
-                  strcmp(d.reason, "bad-txns-txouttotal-toolarge") == 0);
+                  cte_rejected_with_reason(
+                      &d, "bad-txns-txouttotal-toolarge"));
         CTE_CHECK("vout total == MAX_MONEY+1: dos=100", d.dos == 100);
         CTE_CHECK("vout total == MAX_MONEY+1: verdicts agree",
                   cte_agree(&d, &l));
@@ -236,7 +257,7 @@ int test_check_tx_edge(void)
         struct cte_domain d = cte_run_domain(&tx);
         struct cte_legacy l = cte_run_legacy(&tx);
         CTE_CHECK("same prevout hash, differing n: accepted (not a dup)",
-                  d.ok && l.ok);
+                  cte_both_accepted(&d, &l));
         CTE_CHECK("same prevout hash, differing n: verdicts agree",
                   cte_agree(&d, &l));
         transaction_free(&tx);
@@ -252,8 +273,7 @@ int test_check_tx_edge(void)
         struct cte_domain d = cte_run_domain(&tx);
         struct cte_legacy l = cte_run_legacy(&tx);
         CTE_CHECK("non-adjacent dup inputs: rejected inputs-duplicate",
-                  !d.ok && d.reason &&
-                  strcmp(d.reason, "bad-txns-inputs-duplicate") == 0);
+                  cte_rejected_with_reason(&d, "bad-txns-inputs-duplicate"));
         CTE_CHECK("non-adjacent dup inputs: dos=100", d.dos == 100);
         CTE_CHECK("non-adjacent dup inputs: verdicts agree",
                   cte_agree(&d, &l));
@@ -274,10 +294,9 @@ int test_check_tx_edge(void)
         struct cte_domain d = cte_run_domain(&tx);
         struct cte_legacy l = cte_run_legacy(&tx);
         CTE_CHECK("1-vin null prevout: classified coinbase -> bad-cb-length",
-                  !d.ok && d.reason &&
-                  strcmp(d.reason, "bad-cb-length") == 0);
+                  cte_rejected_with_reason(&d, "bad-cb-length"));
         CTE_CHECK("1-vin null prevout: NOT bad-txns-prevout-null",
-                  !(d.reason && strcmp(d.reason, "bad-txns-prevout-null") == 0));
+                  !cte_reason_is(&d, "bad-txns-prevout-null"));
         CTE_CHECK("1-vin null prevout: verdicts agree", cte_agree(&d, &l));
         transaction_free(&tx);
     }
@@ -298,8 +317,8 @@ int test_check_tx_edge(void)
         struct cte_domain d = cte_run_domain(&tx);
         struct cte_legacy l = cte_run_legacy(&tx);
         CTE_CHECK("value_balance < -MAX_MONEY: rejected valuebalance-toolarge",
-                  !d.ok && d.reason &&
-                  strcmp(d.reason, "bad-txns-valuebalance-toolarge") == 0);
+                  cte_rejected_with_reason(
+                      &d, "bad-txns-valuebalance-toolarge"));
         CTE_CHECK("value_balance < -MAX_MONEY: dos=100", d.dos == 100);
         CTE_CHECK("value_balance < -MAX_MONEY: verdicts agree",
                   cte_agree(&d, &l));

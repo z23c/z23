@@ -1881,7 +1881,6 @@ tests/harness/src/test_chainstate_legacy_reader.c:run_bulk_iter_tests:36
 tests/harness/src/test_chainstate_legacy_reader.c:test_chainstate_legacy_reader:18
 tests/harness/src/test_chaos_harness.c:test_chaos_harness:67
 tests/harness/src/test_check_block_edge.c:test_check_block_edge:35
-tests/harness/src/test_check_tx_edge.c:test_check_tx_edge:16
 tests/harness/src/test_checkpoint.c:test_checkpoint:37
 tests/harness/src/test_cli_argv_strict.c:cas_run_daemon_wait_for:23
 tests/harness/src/test_code_have.c:test_code_have:46
