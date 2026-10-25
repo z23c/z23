@@ -505,9 +505,17 @@ static struct zcl_goal_result gr_g6(const struct zcl_goals_options *o)
 
 /* ── G4: wiki read path ───────────────────────────────────────────────── */
 
-/* Newest created_at over the index rows whose host is not this node. */
+/* Prefer present-time evidence; preserve the newest future row as a fallback. */
+static bool gr_wiki_timestamp_preferred(int64_t ts, int64_t best, int64_t now)
+{
+    if ((ts > now) != (best > now))
+        return ts <= now;
+    return ts > best;
+}
+
+/* Newest nonfuture foreign created_at, or newest future when none is present. */
 static void gr_wiki_foreign(const struct json_value *posts, const char *own,
-                            size_t *count, int64_t *newest)
+                            int64_t now, size_t *count, int64_t *newest)
 {
     *count = 0;
     *newest = 0;
@@ -518,7 +526,7 @@ static void gr_wiki_foreign(const struct json_value *posts, const char *own,
         int64_t ts = json_get_int(json_get(row, "created_at"));
         if (!host || !host[0] || strcmp(host, own) == 0)
             continue;
-        if (*count == 0 || ts > *newest)
+        if (*count == 0 || gr_wiki_timestamp_preferred(ts, *newest, now))
             *newest = ts;
         (*count)++;
     }
@@ -541,7 +549,7 @@ struct zcl_goal_result zcl_goals_wiki_grade(bool answered, const char *why,
     if (!own_host || !own_host[0])
         return gr_unmeasured(next, "this node own host id is unreadable, so "
                              "rows from other hosts cannot be told apart");
-    gr_wiki_foreign(json_get(data, "posts"), own_host, &foreign, &newest);
+    gr_wiki_foreign(json_get(data, "posts"), own_host, now, &foreign, &newest);
     if (foreign > 0) {
         age = now - newest;
         (void)snprintf(newest_txt, sizeof(newest_txt), "%lld s old",

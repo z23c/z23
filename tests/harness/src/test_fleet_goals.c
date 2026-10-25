@@ -808,6 +808,63 @@ static bool fgl_wiki_data(struct json_value *v, const char *text)
     return json_read(v, text, strlen(text));
 }
 
+struct fgl_wiki_shadow_case {
+    int64_t first, second, age, latency;
+    bool second_own, fresh;
+};
+
+static int fgl_case_wiki_shadow(const struct fgl_wiki_shadow_case *sample)
+{
+    int failures = 0;
+    char text[512], evidence[128];
+    struct json_value data;
+    json_init(&data);
+    (void)snprintf(text, sizeof(text),
+        "{\"posts\":[{\"host\":\"%s\",\"created_at\":%lld},"
+        "{\"host\":\"%s\",\"created_at\":%lld}]}", FGL_WIKI_FOREIGN,
+        (long long)sample->first,
+        sample->second_own ? FGL_WIKI_OWN : FGL_WIKI_FOREIGN,
+        (long long)sample->second);
+    (void)snprintf(evidence, sizeof(evidence),
+        "%d row(s) from other hosts, newest %lld s old",
+        sample->second_own ? 1 : 2, (long long)sample->age);
+    TEST("wiki: future rows cannot shadow present-time foreign freshness") {
+        printf("[%lld,%lld] ", (long long)sample->first, (long long)sample->second);
+        ASSERT(fgl_wiki_data(&data, text));
+        struct zcl_goal_result r = zcl_goals_wiki_grade(true, "", &data,
+            FGL_WIKI_OWN, FGL_NOW, sample->latency);
+        ASSERT(r.grade == (sample->latency > 10000 ? ZCL_GOAL_FAIL : ZCL_GOAL_PARTIAL));
+        ASSERT(fgl_has(r.evidence, evidence));
+        ASSERT(fgl_has(r.evidence, "pinned expiry not probed"));
+        if (sample->latency <= 10000)
+            ASSERT(fgl_has(r.evidence, sample->fresh
+                ? "; a row from another host is newer"
+                : "; no row from another host is newer"));
+        PASS();
+    } _test_next:;
+    json_free(&data);
+    return failures;
+}
+
+static int fgl_case_wiki_shadows(void)
+{
+    static const struct fgl_wiki_shadow_case cases[] = {
+        {FGL_NOW - 60, FGL_NOW + 60, 60, 120, false, true},
+        {FGL_NOW + 60, FGL_NOW - 60, 60, 120, false, true},
+        {FGL_NOW, FGL_NOW + 60, 0, 120, false, true},
+        {FGL_NOW - 86400, FGL_NOW + 60, 86400, 120, false, true},
+        {FGL_NOW - 86401, FGL_NOW + 60, 86401, 120, false, false},
+        {FGL_NOW + 60, FGL_NOW + 120, -120, 120, false, false},
+        {FGL_NOW - 90000, FGL_NOW - 86401, 86401, 120, false, false},
+        {FGL_NOW - 60, FGL_NOW + 60, 60, 10001, false, true},
+        {FGL_NOW - 60, FGL_NOW + 60, 60, 120, true, true},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        failures += fgl_case_wiki_shadow(&cases[i]);
+    return failures;
+}
+
 static int fgl_case_wiki(void)
 {
     int failures = 0;
@@ -1372,6 +1429,7 @@ int test_fleet_goals(void)
     failures += fgl_case_render();
     failures += fgl_case_bound();
     failures += fgl_case_wiki();
+    failures += fgl_case_wiki_shadows();
     failures += fgl_case_wiki_target(root);
     failures += fgl_case_handler(root);
     failures += fgl_case_checkout(root);
