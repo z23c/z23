@@ -114,6 +114,73 @@ static bool srs_build_received_output_tx(struct transaction *tx,
     return true;
 }
 
+/* True when [ivk] g_d(diversifier) reproduces pk_d, i.e. the keystore
+ * handed out a self-consistent address (the same identity the decrypt
+ * path re-derives). Pure check over the recipient's address material. */
+static bool srs_ivk_rederives_pkd(uint8_t ivk[32],
+                                  uint8_t d[ZC_DIVERSIFIER_SIZE],
+                                  const uint8_t pk_d[32])
+{
+    uint8_t pkd_from_ivk[32];
+    bool ok = sapling_ivk_to_pkd(ivk, d, pkd_from_ivk);
+    return ok && memcmp(pkd_from_ivk, pk_d, 32) == 0;
+}
+
+/* True when the first shielded output's enc_ciphertext holds at least one
+ * non-zero byte, i.e. it is real AEAD ciphertext and not a zeroed buffer. */
+static bool srs_enc_ciphertext_has_nonzero_byte(const struct transaction *tx)
+{
+    for (size_t i = 0; i < ZC_SAPLING_ENCCIPHERTEXT_SIZE; i++)
+        if (tx->v_shielded_output[0].enc_ciphertext[i] != 0)
+            return true;
+    return false;
+}
+
+/* Derive the NEGATIVE test's foreign address into a caller-initialised
+ * keystore: a different seed (0x22) yields an unrelated ivk/pk_d pair.
+ * Returns true when the seed took AND the first address derived. */
+static bool srs_derive_foreign_address(struct sapling_keystore *other,
+                                       uint8_t other_d[ZC_DIVERSIFIER_SIZE],
+                                       uint8_t other_pk_d[32])
+{
+    uint8_t other_seed[32];
+    memset(other_seed, 0x22, 32);
+    return sapling_keystore_set_seed(other, other_seed) &&
+           sapling_keystore_new_address(other, other_d, other_pk_d);
+}
+
+/* True when the foreign keystore really holds an ivk DIFFERENT from the
+ * recipient's (guarded on the address having derived at all). */
+static bool srs_foreign_ivk_differs(bool addr_ok,
+                                    struct sapling_keystore *other,
+                                    const uint8_t recipient_ivk[32])
+{
+    return addr_ok && memcmp(other->keys[0].ivk, recipient_ivk, 32) != 0;
+}
+
+/* True when the wallet does NOT hold the spending key for the foreign
+ * keystore's first ivk (guarded on the address having derived at all). */
+static bool srs_wallet_lacks_foreign_spending_key(bool addr_ok,
+                                                  struct wallet *w,
+                                                  struct sapling_keystore *other)
+{
+    return addr_ok &&
+           !sapling_keystore_have_spending_key(&w->sapling_keys,
+                                               other->keys[0].ivk);
+}
+
+/* Build the payer-side output paying the FOREIGN address, but only when
+ * the foreign address derived at all (addr_ok); returns false without
+ * touching *tx otherwise. */
+static bool srs_build_foreign_output_tx(bool addr_ok,
+                                        struct transaction *tx,
+                                        const uint8_t to_d[ZC_DIVERSIFIER_SIZE],
+                                        const uint8_t to_pk_d[32])
+{
+    return addr_ok &&
+           srs_build_received_output_tx(tx, to_d, to_pk_d, 999000000ULL);
+}
+
 int test_shielded_receive_slice(void);
 int test_shielded_receive_slice(void)
 {
@@ -170,12 +237,8 @@ int test_shielded_receive_slice(void)
     /* Sanity: ivk really reconstructs pk_d from the diversifier — i.e. the
      * keystore handed us a self-consistent address (the same identity the
      * decrypt path re-derives). */
-    {
-        uint8_t pkd_from_ivk[32];
-        bool ok = sapling_ivk_to_pkd(recipient_ivk, to_d, pkd_from_ivk);
-        SRS_CHECK("ivk * g_d(diversifier) == pk_d (address self-consistent)",
-                  ok && memcmp(pkd_from_ivk, to_pk_d, 32) == 0);
-    }
+    SRS_CHECK("ivk * g_d(diversifier) == pk_d (address self-consistent)",
+              srs_ivk_rederives_pkd(recipient_ivk, to_d, to_pk_d));
 
     /* ── (2) PAYER constructs a Sapling output paying the wallet's address.
      * Uses the production sapling_build_output_description — NO proving
@@ -188,13 +251,8 @@ int test_shielded_receive_slice(void)
         SRS_CHECK("tx carries exactly one shielded output",
                   tx.num_shielded_output == 1);
         /* The enc_ciphertext is real AEAD output, not zeros. */
-        bool nonzero = false;
-        for (size_t i = 0; i < ZC_SAPLING_ENCCIPHERTEXT_SIZE; i++)
-            if (tx.v_shielded_output[0].enc_ciphertext[i] != 0) {
-                nonzero = true;
-                break;
-            }
-        SRS_CHECK("enc_ciphertext is real AEAD ciphertext (non-zero)", nonzero);
+        SRS_CHECK("enc_ciphertext is real AEAD ciphertext (non-zero)",
+                  srs_enc_ciphertext_has_nonzero_byte(&tx));
     }
 
     struct uint256 txid;
@@ -237,30 +295,22 @@ int test_shielded_receive_slice(void)
          * ivk/pk_d). The payer encrypts the note to THAT address. */
         struct sapling_keystore other;
         sapling_keystore_init(&other);
-        uint8_t other_seed[32];
-        memset(other_seed, 0x22, 32);
-        bool seeded = sapling_keystore_set_seed(&other, other_seed);
 
         uint8_t other_d[ZC_DIVERSIFIER_SIZE];
         uint8_t other_pk_d[32];
-        bool addr = seeded &&
-                    sapling_keystore_new_address(&other, other_d, other_pk_d);
+        bool addr = srs_derive_foreign_address(&other, other_d, other_pk_d);
         SRS_CHECK("foreign sapling address derived (different ivk)", addr);
 
         /* The foreign ivk is genuinely not ours (the whole point). */
         SRS_CHECK("foreign ivk differs from wallet ivk",
-                  addr &&
-                  memcmp(other.keys[0].ivk, recipient_ivk, 32) != 0);
+                  srs_foreign_ivk_differs(addr, &other, recipient_ivk));
         /* And our wallet does NOT hold the spending key for it. */
         SRS_CHECK("wallet does NOT hold the foreign spending key",
-                  addr &&
-                  !sapling_keystore_have_spending_key(&w->sapling_keys,
-                                                      other.keys[0].ivk));
+                  srs_wallet_lacks_foreign_spending_key(addr, w, &other));
 
         struct transaction foreign_tx;
-        bool fbuilt = addr &&
-            srs_build_received_output_tx(&foreign_tx, other_d, other_pk_d,
-                                         999000000ULL);
+        bool fbuilt = srs_build_foreign_output_tx(addr, &foreign_tx,
+                                                  other_d, other_pk_d);
         SRS_CHECK("payer built an output for the FOREIGN address", fbuilt);
 
         struct uint256 ftxid;
