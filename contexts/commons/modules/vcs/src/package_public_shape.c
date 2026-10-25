@@ -477,6 +477,56 @@ static bool shape_is_fastobj_carrier(const struct vcs_package_manifest *m)
     return true;
 }
 
+/* True when the manifest members name a shape ahead of the signed-release
+ * scan: transport, source bundle, blob, bundle, work context, work output,
+ * task context, or fastobj carrier. A failed proof still claims the root,
+ * so the release scan must not replace that verdict. */
+static bool shape_eval_manifest_shape(struct vcs_package_store *store,
+                                      const uint8_t root[32],
+                                      const struct vcs_package_manifest *m,
+                                      struct shape_eval *out)
+{
+    enum vcs_package_public_shape bytes_shape = shape_bytes_only(m);
+    long release_index = shape_find(m, VCS_PACKAGE_TRANSPORT_RELEASE_PATH);
+    if (release_index >= 0) {
+        out->rule = "release-unverified";
+        if (shape_transport_closes(store, root, m, release_index, &out->deps,
+                                   &out->rule))
+            out->shape = VCS_PACKAGE_PUBLIC_TRANSPORT;
+        return true;
+    }
+    if (shape_find(m, VCS_SOURCE_PACKAGE_MARKER_PATH) >= 0) {
+        out->rule = "source-bundle-authority-missing";
+        if (shape_source_bundle(store, root, m, &out->rule))
+            out->shape = VCS_PACKAGE_PUBLIC_SOURCE_BUNDLE;
+        return true;
+    }
+    if (bytes_shape != VCS_PACKAGE_PUBLIC_REFUSED) {
+        out->shape = bytes_shape;
+        return true;
+    }
+    if (shape_find(m, VCS_ZCODE_WORK_CONTEXT_PATH) >= 0) {
+        out->shape = VCS_PACKAGE_PUBLIC_WORK_CONTEXT;
+        return true;
+    }
+    if (shape_is_work_output(m)) {
+        out->shape = VCS_PACKAGE_PUBLIC_WORK_OUTPUT;
+        return true;
+    }
+    if (shape_is_task_context(m)) {
+        out->shape = VCS_PACKAGE_PUBLIC_TASK_CONTEXT;
+        return true;
+    }
+    if (shape_is_fastobj_carrier(m)) {
+        char detail[256]; /* verify's refusal text; the rule names the class */
+        out->rule = "fastobj-carrier-unverified";
+        if (vcs_fastobj_carrier_verify(store, root, detail, sizeof(detail)))
+            out->shape = VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER;
+        return true;
+    }
+    return false;
+}
+
 /* Classify one root on its own bytes. Never consults another package, so
  * the closure walk below can call it per node without recursing. */
 static void shape_eval_local(struct vcs_package_store *store,
@@ -513,40 +563,18 @@ static void shape_eval_local(struct vcs_package_store *store,
         return;
     }
 
-    char license[VCS_PACKAGE_RELEASE_LICENSE_MAX + 1u];
-    enum vcs_package_public_shape bytes_shape = shape_bytes_only(&m);
-    long release_index = shape_find(&m, VCS_PACKAGE_TRANSPORT_RELEASE_PATH);
-    if (release_index >= 0) {
-        out->rule = "release-unverified";
-        if (shape_transport_closes(store, root, &m, release_index, &out->deps,
-                                   &out->rule))
-            out->shape = VCS_PACKAGE_PUBLIC_TRANSPORT;
-    } else if (shape_find(&m, VCS_SOURCE_PACKAGE_MARKER_PATH) >= 0) {
-        out->rule = "source-bundle-authority-missing";
-        if (shape_source_bundle(store, root, &m, &out->rule))
-            out->shape = VCS_PACKAGE_PUBLIC_SOURCE_BUNDLE;
-    } else if (bytes_shape != VCS_PACKAGE_PUBLIC_REFUSED) {
-        out->shape = bytes_shape;
-    } else if (shape_find(&m, VCS_ZCODE_WORK_CONTEXT_PATH) >= 0) {
-        out->shape = VCS_PACKAGE_PUBLIC_WORK_CONTEXT;
-    } else if (shape_is_work_output(&m)) {
-        out->shape = VCS_PACKAGE_PUBLIC_WORK_OUTPUT;
-    } else if (shape_is_task_context(&m)) {
-        out->shape = VCS_PACKAGE_PUBLIC_TASK_CONTEXT;
-    } else if (shape_is_fastobj_carrier(&m)) {
-        char detail[256]; /* verify's refusal text; the rule names the class */
-        out->rule = "fastobj-carrier-unverified";
-        if (vcs_fastobj_carrier_verify(store, root, detail, sizeof(detail)))
-            out->shape = VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER;
-    } else if (!shape_release_signs(store, root, license)) {
-        out->rule = "no-verified-release";
-    } else {
-        out->rule = "license-text-missing";
-        if (shape_licensed_tail(store, root, &m, license,
-                                VCS_PACKAGE_PUBLISH_LICENSE_PATH,
-                                VCS_PACKAGE_DEPS_META_PATH, &out->deps,
-                                &out->rule))
-            out->shape = VCS_PACKAGE_PUBLIC_RELEASE;
+    if (!shape_eval_manifest_shape(store, root, &m, out)) {
+        char license[VCS_PACKAGE_RELEASE_LICENSE_MAX + 1u];
+        if (!shape_release_signs(store, root, license)) {
+            out->rule = "no-verified-release";
+        } else {
+            out->rule = "license-text-missing";
+            if (shape_licensed_tail(store, root, &m, license,
+                                    VCS_PACKAGE_PUBLISH_LICENSE_PATH,
+                                    VCS_PACKAGE_DEPS_META_PATH, &out->deps,
+                                    &out->rule))
+                out->shape = VCS_PACKAGE_PUBLIC_RELEASE;
+        }
     }
     if (out->shape != VCS_PACKAGE_PUBLIC_REFUSED)
         out->rule = vcs_package_public_shape_string(out->shape);
