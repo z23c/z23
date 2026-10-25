@@ -26,12 +26,10 @@ static void vni_fail(struct zcl_command_reply *reply, const char *code,
         evidence ? evidence : "");
 }
 
-static bool vni_rpc(const struct zcl_command_request *request,
-                    struct zcl_command_reply *reply, const char *method)
+static void vni_apply_agent_session_bearer(
+    const struct zcl_command_request *request, struct json_value *rpc_input,
+    const char *method)
 {
-    struct json_value rpc_input;
-    json_init(&rpc_input);
-    json_copy(&rpc_input, request->input);
     const char *session = request->context
         ? request->context->agent_session : NULL;
     /* Planning must apply a lowered owner-reviewed reserve floor inside the
@@ -40,7 +38,49 @@ static bool vni_rpc(const struct zcl_command_request *request,
      * copied into output or logs. */
     if (session && session[0] &&
         strcmp(method, "vault_intent_plan") == 0)
-        (void)json_push_kv_str(&rpc_input, "_agent_session", session);
+        (void)json_push_kv_str(rpc_input, "_agent_session", session);
+}
+
+static bool vni_method_needs_proof_build(const char *method)
+{
+    return strcmp(method, "vault_intent_plan") == 0 ||
+           strcmp(method, "vault_intent_fanout_plan") == 0 ||
+           strcmp(method, "vault_intent_commit") == 0;
+}
+
+static void vni_copy_error_state(struct zcl_command_reply *reply,
+                                 const struct json_value *body)
+{
+    const char *current_state =
+        json_get_str(json_get(body, "current_state"));
+    const char *next_action =
+        json_get_str(json_get(body, "next_action"));
+    bool retryable = json_get_bool_or(body, "retryable", false);
+    bool human_action_required = json_get_bool_or(
+        body, "human_action_required", false);
+    reply->error.retryable = retryable;
+    reply->error.human_action_required = human_action_required;
+    (void)snprintf(reply->error.current_state,
+                   sizeof(reply->error.current_state), "%s",
+                   current_state && current_state[0]
+                       ? current_state : "REQUEST_FAILED");
+    (void)snprintf(reply->error.next_action,
+                   sizeof(reply->error.next_action), "%s",
+                   next_action && next_action[0]
+                       ? next_action : "inspect the intent request and retry safely");
+    if (retryable) {
+        reply->status = ZCL_COMMAND_STATUS_BLOCKED;
+        reply->exit_code = ZCL_COMMAND_EXIT_TRANSIENT;
+    }
+}
+
+static bool vni_rpc(const struct zcl_command_request *request,
+                    struct zcl_command_reply *reply, const char *method)
+{
+    struct json_value rpc_input;
+    json_init(&rpc_input);
+    json_copy(&rpc_input, request->input);
+    vni_apply_agent_session_bearer(request, &rpc_input, method);
     struct rpc_arg_builder args;
     rpc_arg_builder_init(&args);
     rpc_arg_builder_push_value(&args, &rpc_input);
@@ -56,9 +96,7 @@ static bool vni_rpc(const struct zcl_command_request *request,
      * transaction before relay, so it needs the same bounded proof budget as
      * the non-broadcasting preflight.  Treating commit as an ordinary 10 s
      * RPC makes a timeout ambiguous precisely at the broadcast boundary. */
-    bool proof_build = strcmp(method, "vault_intent_plan") == 0 ||
-                       strcmp(method, "vault_intent_fanout_plan") == 0 ||
-                       strcmp(method, "vault_intent_commit") == 0;
+    bool proof_build = vni_method_needs_proof_build(method);
     bool called = proof_build
         ? wnh_call_rpc_deadline(reply, method, params,
                                 RPC_PROOF_BUILD_TIMEOUT_MS, &body)
@@ -69,29 +107,9 @@ static bool vni_rpc(const struct zcl_command_request *request,
     if (!ok) {
         const char *code = json_get_str(json_get(&body, "code"));
         const char *message = json_get_str(json_get(&body, "message"));
-        const char *current_state =
-            json_get_str(json_get(&body, "current_state"));
-        const char *next_action =
-            json_get_str(json_get(&body, "next_action"));
-        bool retryable = json_get_bool_or(&body, "retryable", false);
-        bool human_action_required = json_get_bool_or(
-            &body, "human_action_required", false);
         vni_fail(reply, code ? code : "INTENT_FAILED",
                  message ? message : "intent operation failed", method);
-        reply->error.retryable = retryable;
-        reply->error.human_action_required = human_action_required;
-        (void)snprintf(reply->error.current_state,
-                       sizeof(reply->error.current_state), "%s",
-                       current_state && current_state[0]
-                           ? current_state : "REQUEST_FAILED");
-        (void)snprintf(reply->error.next_action,
-                       sizeof(reply->error.next_action), "%s",
-                       next_action && next_action[0]
-                           ? next_action : "inspect the intent request and retry safely");
-        if (retryable) {
-            reply->status = ZCL_COMMAND_STATUS_BLOCKED;
-            reply->exit_code = ZCL_COMMAND_EXIT_TRANSIENT;
-        }
+        vni_copy_error_state(reply, &body);
         json_free(&body);
         return false;
     }
