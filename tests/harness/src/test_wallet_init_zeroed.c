@@ -53,6 +53,13 @@ static bool check_recursive_mutex(zcl_mutex_t *mutex)
     return recursive;
 }
 
+static bool check_wallet_mutexes(struct wallet *w)
+{
+    return check_recursive_mutex(&w->cs) &&
+           check_recursive_mutex(&w->keystore.cs) &&
+           check_recursive_mutex(&w->sapling_keys.cs);
+}
+
 static bool equal_wallet_state(const struct wallet *a, const struct wallet *b)
 {
     /* Mutex representations are opaque, including both nested keystores. */
@@ -80,11 +87,7 @@ static int check_equivalence(void)
     if (b) wallet_init_zeroed(b);
     if (ok) {
         ok = equal_wallet_state(a, b) &&
-             check_recursive_mutex(&a->cs) && check_recursive_mutex(&b->cs) &&
-             check_recursive_mutex(&a->keystore.cs) &&
-             check_recursive_mutex(&b->keystore.cs) &&
-             check_recursive_mutex(&a->sapling_keys.cs) &&
-             check_recursive_mutex(&b->sapling_keys.cs) &&
+             check_wallet_mutexes(a) && check_wallet_mutexes(b) &&
              b->default_fee == WALLET_DEFAULT_FEE_ZAT &&
              b->spend_zero_conf_change;
     }
