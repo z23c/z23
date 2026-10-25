@@ -107,6 +107,45 @@ static void coverage_push_missing(struct json_value *missing,
     json_free(&item);
 }
 
+/* Scan the newline-delimited manifest once, counting tracked maintained
+ * source files and collecting the ones the index does not list. Returns false
+ * only when a per-path lookup fails, after copying that path into why; the
+ * caller keeps ownership of the manifest, the index and the error reply. */
+static bool coverage_scan_manifest(struct codeindex *index, char *manifest,
+                                   size_t manifest_capacity,
+                                   struct json_value *missing,
+                                   int *tracked_total, int *indexed_tracked,
+                                   int *missing_total, char *why,
+                                   size_t why_size)
+{
+    char *cursor = manifest;
+    char *end = manifest + strnlen(manifest, manifest_capacity);
+    while (cursor < end) {
+        char *newline = memchr(cursor, '\n', (size_t)(end - cursor));
+        char *next = newline ? newline + 1 : end;
+        if (newline) *newline = '\0';
+        if (cursor[0] && coverage_is_maintained(cursor) &&
+            coverage_is_source(cursor)) {
+            (*tracked_total)++;
+            struct ci_file row;
+            bool found = false;
+            if (!codeindex_file(index, cursor, &row, &found)) {
+                (void)snprintf(why, why_size, "%s", cursor);
+                return false;
+            }
+            if (found) {
+                (*indexed_tracked)++;
+            } else {
+                if (*missing_total < CODE_COVERAGE_MISSING_CAP)
+                    coverage_push_missing(missing, cursor);
+                (*missing_total)++;
+            }
+        }
+        cursor = next;
+    }
+    return true;
+}
+
 void zcl_native_handle_code_coverage(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -153,38 +192,18 @@ void zcl_native_handle_code_coverage(
     json_init(&missing);
     json_set_array(&missing);
 
-    char *cursor = manifest;
-    char *end = manifest + strnlen(manifest, manifest_capacity);
-    while (cursor < end) {
-        char *newline = memchr(cursor, '\n', (size_t)(end - cursor));
-        char *next = newline ? newline + 1 : end;
-        if (newline) *newline = '\0';
-        if (cursor[0] && coverage_is_maintained(cursor) &&
-            coverage_is_source(cursor)) {
-            tracked_total++;
-            struct ci_file row;
-            bool found = false;
-            if (!codeindex_file(index, cursor, &row, &found)) {
-                (void)snprintf(why, sizeof(why), "%s", cursor);
-                json_free(&missing);
-                free(manifest);
-                codeindex_close(index);
-                zcl_command_reply_fail(
-                    reply, ZCL_COMMAND_STATUS_FAILED,
-                    ZCL_COMMAND_EXIT_INTERNAL, "INDEX_LOOKUP", "measure",
-                    false, false, "could not reconcile an indexed path",
-                    why);
-                return;
-            }
-            if (found) {
-                indexed_tracked++;
-            } else {
-                if (missing_total < CODE_COVERAGE_MISSING_CAP)
-                    coverage_push_missing(&missing, cursor);
-                missing_total++;
-            }
-        }
-        cursor = next;
+    if (!coverage_scan_manifest(index, manifest, manifest_capacity, &missing,
+                                &tracked_total, &indexed_tracked,
+                                &missing_total, why, sizeof(why))) {
+        json_free(&missing);
+        free(manifest);
+        codeindex_close(index);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INTERNAL, "INDEX_LOOKUP", "measure",
+            false, false, "could not reconcile an indexed path",
+            why);
+        return;
     }
 
     const char *verdict = missing_total == 0 ? "GREEN" : "RED";
