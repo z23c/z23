@@ -130,11 +130,41 @@ int check_active_chain_set_tip_file(const char *path)
     return 0;
 }
 
-int check_deleted_engine_names_file(const char *path)
+static bool deleted_engine_names_file_allowed(const char *path)
 {
-    if (strstr(path, "/tests/harness/include/test/") || strstr(path, "/contexts/explorer/views/"))
-        return 0;
+    return strstr(path, "/tests/harness/include/test/") ||
+           strstr(path, "/contexts/explorer/views/");
+}
 
+/* Copy one line of source into code, dropping // comments and block
+ * comments. block_comment carries an open slash-star across lines. */
+static void deleted_engine_names_strip_line(const char *line, char *code,
+                                            size_t code_cap,
+                                            bool *block_comment)
+{
+    size_t out = 0;
+    for (size_t pos = 0; line[pos] && out + 1 < code_cap; pos++) {
+        if (*block_comment) {
+            if (line[pos] == '*' && line[pos + 1] == '/') {
+                *block_comment = false;
+                pos++;
+            }
+            continue;
+        }
+        if (line[pos] == '/' && line[pos + 1] == '*') {
+            *block_comment = true;
+            pos++;
+            continue;
+        }
+        if (line[pos] == '/' && line[pos + 1] == '/')
+            break;
+        code[out++] = line[pos];
+    }
+    code[out] = '\0';
+}
+
+static const char *deleted_engine_names_find(const char *code)
+{
     const char *stale[] = {
         "connect_tip",
         "disconnect_tip",
@@ -142,39 +172,33 @@ int check_deleted_engine_names_file(const char *path)
         "process_new_block",
         "accept_block()",
     };
+    for (size_t i = 0; i < sizeof(stale) / sizeof(stale[0]); i++) {
+        if (strstr(code, stale[i]))
+            return stale[i];
+    }
+    return NULL;
+}
+
+int check_deleted_engine_names_file(const char *path)
+{
+    if (deleted_engine_names_file_allowed(path))
+        return 0;
+
     FILE *fp = fopen(path, "rb");
     if (!fp) return -1;
     bool block_comment = false;
     char line[4096];
     while (fgets(line, sizeof(line), fp)) {
         char code[4096];
-        size_t out = 0;
-        for (size_t pos = 0; line[pos] && out + 1 < sizeof(code); pos++) {
-            if (block_comment) {
-                if (line[pos] == '*' && line[pos + 1] == '/') {
-                    block_comment = false;
-                    pos++;
-                }
-                continue;
-            }
-            if (line[pos] == '/' && line[pos + 1] == '*') {
-                block_comment = true;
-                pos++;
-                continue;
-            }
-            if (line[pos] == '/' && line[pos + 1] == '/')
-                break;
-            code[out++] = line[pos];
-        }
-        code[out] = '\0';
-        for (size_t i = 0; i < sizeof(stale) / sizeof(stale[0]); i++) {
-            if (strstr(code, stale[i])) {
-                fprintf(stderr,
-                        "deleted engine name %s still present in %s\n",
-                        stale[i], path);
-                fclose(fp);
-                return 1;
-            }
+        deleted_engine_names_strip_line(line, code, sizeof(code),
+                                        &block_comment);
+        const char *hit = deleted_engine_names_find(code);
+        if (hit) {
+            fprintf(stderr,
+                    "deleted engine name %s still present in %s\n",
+                    hit, path);
+            fclose(fp);
+            return 1;
         }
     }
     int rc = ferror(fp) ? -1 : 0;
