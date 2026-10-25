@@ -55,6 +55,7 @@ struct store_package {
     struct store_unique_chunk *chunks; /* unique hashes, ascending */
     size_t chunk_count;
     uint64_t mutation_generation;
+    uint64_t admission_generation; /* local admission order; unchanged by touches */
 };
 
 struct vcs_package_store {

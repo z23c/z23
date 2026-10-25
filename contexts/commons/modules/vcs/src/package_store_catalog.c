@@ -482,6 +482,7 @@ bool vcs_package_store_refresh(struct vcs_package_store *store)
         same->access_count = old->access_count;
         same->last_access = old->last_access;
         same->mutation_generation = old->mutation_generation;
+        same->admission_generation = old->admission_generation;
     }
     struct vcs_package_store retired = {
         .pkgs = store->pkgs, .pkg_count = store->pkg_count,
@@ -748,6 +749,61 @@ size_t vcs_package_store_list_summaries(
             continue;
         store_fill_summary(store, pkg, &out[n++]);
     }
+    pthread_mutex_unlock(&store->lock);
+    return n;
+}
+
+static bool store_announce_before(const struct store_package *a,
+                                  const struct store_package *b)
+{
+    if (a->pinned != b->pinned)
+        return a->pinned;
+    if (a->admission_generation != b->admission_generation)
+        return a->admission_generation > b->admission_generation;
+    return memcmp(a->root, b->root, sizeof a->root) < 0;
+}
+
+static size_t store_announce_select(struct store_package **selected, size_t n,
+                                    size_t cap, struct store_package *pkg)
+{
+    size_t at = 0;
+    while (at < n && !store_announce_before(pkg, selected[at])) at++;
+    if (at == cap) return n;
+    if (n < cap) n++;
+    memmove(selected + at + 1, selected + at,
+            (n - at - 1) * sizeof(*selected));
+    selected[at] = pkg;
+    return n;
+}
+
+size_t vcs_package_store_list_announce_summaries(
+    struct vcs_package_store *store,
+    struct vcs_package_store_summary *out, size_t max)
+{
+    if (!store || (!out && max > 0))
+        LOG_RETURN(0, STORE_LOG, "null store/announce summaries out");
+    size_t n = 0;
+    pthread_mutex_lock(&store->lock);
+    size_t cap = max < store->pkg_count ? max : store->pkg_count;
+    if (cap == 0) {
+        pthread_mutex_unlock(&store->lock);
+        return 0;
+    }
+    struct store_package **selected = cap <= SIZE_MAX / sizeof(*selected)
+        ? zcl_calloc(cap, sizeof(*selected), "store_announce_selection") : NULL;
+    if (!selected) {
+        pthread_mutex_unlock(&store->lock);
+        LOG_RETURN(0, STORE_LOG, "allocate bounded announce selection");
+    }
+    for (size_t i = 0; i < store->pkg_count; i++) {
+        struct store_package *pkg = &store->pkgs[i];
+        if (!store_package_complete(store, pkg))
+            continue;
+        n = store_announce_select(selected, n, cap, pkg);
+    }
+    for (size_t i = 0; i < n; i++)
+        store_fill_summary(store, selected[i], &out[i]);
+    free(selected);
     pthread_mutex_unlock(&store->lock);
     return n;
 }

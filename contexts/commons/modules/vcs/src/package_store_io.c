@@ -675,6 +675,7 @@ struct store_package *store_record_add(struct vcs_package_store *store,
      * (the enum's zero value is HOT, so this must be explicit). */
     pkg.class_ = VCS_PACKAGE_STORE_CLASS_RARE;
     store_package_touch(store, &pkg);
+    pkg.admission_generation = pkg.mutation_generation;
     {
         char pin[STORE_PATH_MAX];
         snprintf(pin, sizeof(pin), "%s/pins/%s", store->root,

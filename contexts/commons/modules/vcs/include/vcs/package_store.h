@@ -405,6 +405,14 @@ size_t vcs_package_store_list_summaries(
     struct vcs_package_store *store, bool complete_only,
     struct vcs_package_store_summary *out, size_t max);
 
+/* Announcement shelf: complete packages, pins first, newest admission in
+ * this catalog first within each class. Selects before truncating at max.
+ * Catalog replay after restart does not preserve durable admission chronology.
+ * The generic summary API retains its insertion-order contract. */
+size_t vcs_package_store_list_announce_summaries(
+    struct vcs_package_store *store,
+    struct vcs_package_store_summary *out, size_t max);
+
 /* Read-only observation of exact canonical bytes in durable accepted history.
  * Uses current generation and store/process locks, bounded no-follow read,
  * digest/name and signature validation. False includes missing/damaged history

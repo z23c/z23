@@ -1528,8 +1528,8 @@ size_t vcs_swarm_engine_announce_to(struct vcs_swarm_engine *engine,
     if (!engine || !engine->store || peer == 0)
         return 0;
     struct vcs_package_store_summary summaries[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
-    size_t n = vcs_package_store_list_summaries(
-        engine->store, true, summaries, VCS_SWARM_MAX_LOCAL_ANNOUNCES);
+    size_t n = vcs_package_store_list_announce_summaries(
+        engine->store, summaries, VCS_SWARM_MAX_LOCAL_ANNOUNCES);
     pthread_mutex_lock(&engine->lock);
     int slot = peer_slot(engine, peer);
     if (slot < 0) {
@@ -1539,6 +1539,11 @@ size_t vcs_swarm_engine_announce_to(struct vcs_swarm_engine *engine,
     struct swarm_peer *p = &engine->peers[slot];
     size_t queued = 0;
     for (size_t i = 0; i < n; i++) {
+        /* Never emit an unremembered 65th distinct root. This session's
+         * bounded dedupe inventory also protects a free peer's announce
+         * allowance when the prioritized shelf changes between syncs. */
+        if (p->announced_count >= VCS_SWARM_MAX_LOCAL_ANNOUNCES)
+            break;
         if (vcs_swarm_peer_was_announced(p, summaries[i].root))
             continue;
         /* Advertise only what this node would actually serve. Announcing a

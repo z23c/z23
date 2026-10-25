@@ -18,6 +18,7 @@
 #include "vcs/bundle_carry.h"
 #include "vcs/package_public_shape.h"
 #include "vcs/package_store.h"
+#include "vcs/package_swarm.h"
 #include "vcs/package_swarm_node.h"
 
 #include <stdio.h>
@@ -422,6 +423,160 @@ static int bundle_case_peer_rules(void)
     return failures;
 }
 
+enum { BUNDLE_PRIORITY_COUNT = 70 };
+
+static bool bundle_priority_seed(struct sw_node *n, uint8_t roots[][32])
+{
+    for (size_t i = 0; i < BUNDLE_PRIORITY_COUNT; i++) {
+        uint8_t bytes[] = { 0xb7, (uint8_t)i };
+        if (vcs_bundle_put_to_no_evict(n->store, bytes, sizeof bytes, roots[i]) !=
+            VCS_BUNDLE_OK)
+            return false;
+    }
+    return vcs_package_store_pin(n->store, roots[1], true) == VCS_PACKAGE_STORE_OK &&
+           vcs_package_store_pin(n->store, roots[65], true) == VCS_PACKAGE_STORE_OK;
+}
+
+/* Expected wire order is newest pin, older pin, then newest unpinned.
+ * For the fresh session after admission 70, that new pin precedes both. */
+static bool bundle_priority_frames(struct sw_node *n, uint64_t peer,
+                                   const uint8_t roots[][32], bool late)
+{
+    int newest = BUNDLE_PRIORITY_COUNT - 1;
+    size_t pins = late ? 3 : 2;
+    for (size_t i = 0; i < VCS_SWARM_MAX_LOCAL_ANNOUNCES; i++) {
+        size_t expected;
+        if (late && i == 0)
+            expected = BUNDLE_PRIORITY_COUNT;
+        else if (i < pins)
+            expected = i == pins - 2 ? 65 : 1;
+        else {
+            while (newest == 65 || newest == 1)
+                newest--;
+            expected = (size_t)newest--;
+        }
+        uint8_t wire[VCS_SWARM_OUTBOUND_FRAME_MAX];
+        uint64_t target = 0;
+        size_t len = 0;
+        struct vcs_package_swarm_message msg;
+        if (!vcs_swarm_engine_next_outbound(n->engine, peer, &target, wire, &len) ||
+            target != peer || !vcs_package_swarm_parse(wire, len, &msg) ||
+            msg.type != VCS_PACKAGE_SWARM_ANNOUNCE ||
+            memcmp(msg.body.announce.package_root, roots[expected], 32) != 0)
+            return false;
+    }
+    uint8_t wire[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    uint64_t target = 0;
+    size_t len = 0;
+    return !vcs_swarm_engine_next_outbound(n->engine, peer, &target, wire, &len);
+}
+
+static bool bundle_priority_evict(struct vcs_package_store *store, uint8_t root[32])
+{
+    uint8_t bytes[10] = { 0xee }, hash[32], *wire = NULL;
+    size_t len = 0;
+    struct vcs_package_manifest m;
+    vcs_package_manifest_init(&m);
+    bool ok = vcs_package_chunk_hash(bytes, sizeof bytes, hash) &&
+        vcs_package_manifest_add(&m, VCS_BUNDLE_PATH, VCS_PACKAGE_MODE_FILE,
+                                  sizeof bytes, hash, 1) &&
+        vcs_package_manifest_serialize(&m, &wire, &len) &&
+        vcs_package_manifest_root(&m, root);
+    if (ok)
+        ok = vcs_package_store_put_manifest(store, wire, len, NULL) == VCS_PACKAGE_STORE_OK &&
+             vcs_package_store_put_chunk(store, root, VCS_BUNDLE_PATH, 0,
+                                          bytes, sizeof bytes) == VCS_PACKAGE_STORE_OK;
+    free(wire);
+    vcs_package_manifest_free(&m);
+    return ok;
+}
+
+static int bundle_case_priority_after_eviction(void)
+{
+    int failures = 0;
+    char datadir[1024];
+    sw_make_tmpdir(datadir, sizeof datadir, "bundlepriorityevict");
+    struct vcs_package_store *store = vcs_package_store_open(datadir, 100);
+    if (!store) return 1;
+    uint8_t roots[5][32];
+    bool ready = true;
+    for (size_t i = 0; i < 4; i++) {
+        uint8_t bytes[7] = { (uint8_t)i };
+        ready &= vcs_bundle_put_to_no_evict(store, bytes, sizeof bytes, roots[i]) ==
+                 VCS_BUNDLE_OK;
+    }
+    ready = ready && vcs_package_store_pin(store, roots[3], true) == VCS_PACKAGE_STORE_OK &&
+        vcs_package_store_set_class(store, roots[0], VCS_PACKAGE_STORE_CLASS_RARE, 999) ==
+            VCS_PACKAGE_STORE_OK && bundle_priority_evict(store, roots[4]);
+    SW_CHECK("announce priority: public quota admission evicts the old rare victim", ready);
+    if (ready) {
+        struct vcs_package_store_summary rows[5];
+        size_t n = vcs_package_store_list_summaries(store, true, rows, 5);
+        bool absent = n == 4;
+        for (size_t i = 0; i < n; i++)
+            absent &= memcmp(rows[i].root, roots[0], 32) != 0;
+        SW_CHECK("announce priority: evicted root is absent and newest moved to slot zero",
+                 absent && memcmp(rows[0].root, roots[4], 32) == 0);
+        SW_CHECK("announce priority: touching an older survivor preserves its admission age",
+                 vcs_package_store_set_class(store, roots[1], VCS_PACKAGE_STORE_CLASS_RARE, 1) ==
+                     VCS_PACKAGE_STORE_OK);
+        n = vcs_package_store_list_announce_summaries(store, rows, 5);
+        SW_CHECK("announce priority: pin then newest survives eviction array compaction",
+                 n == 4 && memcmp(rows[0].root, roots[3], 32) == 0 &&
+                 memcmp(rows[1].root, roots[4], 32) == 0 &&
+                 memcmp(rows[2].root, roots[2], 32) == 0 &&
+                 memcmp(rows[3].root, roots[1], 32) == 0);
+    }
+    vcs_package_store_close(store);
+    test_rm_rf_recursive(datadir);
+    return failures;
+}
+
+static int bundle_case_announce_priority(void)
+{
+    int failures = 0;
+    struct sw_node n;
+    if (!sw_node_open(&n, "bundlepriority", sw_score_contributor))
+        return 1;
+    uint8_t roots[BUNDLE_PRIORITY_COUNT + 1][32], key[33];
+    bool seeded = bundle_priority_seed(&n, roots);
+    SW_CHECK("announce priority: 70 distinct complete bundles, old and new pins", seeded);
+    if (seeded) {
+        struct vcs_package_store_summary generic[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
+        size_t count = vcs_package_store_list_summaries(n.store, true, generic,
+                                                       VCS_SWARM_MAX_LOCAL_ANNOUNCES);
+        bool original_order = count == VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+        for (size_t i = 0; i < count; i++)
+            original_order &= memcmp(generic[i].root, roots[i], 32) == 0;
+        SW_CHECK("announce priority: generic catalog remains oldest insertion first", original_order);
+        sw_key(91, key);
+        SW_CHECK("announce priority: first peer added",
+                 vcs_swarm_engine_peer_add(n.engine, 91, key));
+        SW_CHECK("announce priority: exactly 64 frames prioritize pins and newest before truncation",
+                 vcs_swarm_engine_announce_to(n.engine, 91) == VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
+                 bundle_priority_frames(&n, 91, roots, false));
+        SW_CHECK("announce priority: repeated shelf is deduplicated",
+                 vcs_swarm_engine_announce_to(n.engine, 91) == 0);
+        uint8_t bytes[] = { 0xb7, BUNDLE_PRIORITY_COUNT };
+        SW_CHECK("announce priority: a later pinned bundle is admitted",
+                 vcs_bundle_put_to_no_evict(n.store, bytes, sizeof bytes,
+                                             roots[BUNDLE_PRIORITY_COUNT]) == VCS_BUNDLE_OK &&
+                 vcs_package_store_pin(n.store, roots[BUNDLE_PRIORITY_COUNT], true) ==
+                     VCS_PACKAGE_STORE_OK);
+        SW_CHECK("announce priority: a full session never emits an unremembered 65th root",
+                 vcs_swarm_engine_announce_to(n.engine, 91) == 0 &&
+                 vcs_swarm_engine_announce_to(n.engine, 91) == 0);
+        sw_key(92, key);
+        SW_CHECK("announce priority: fresh peer receives the later pin first",
+                 vcs_swarm_engine_peer_add(n.engine, 92, key) &&
+                 vcs_swarm_engine_announce_to(n.engine, 92) == VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
+                 bundle_priority_frames(&n, 92, roots, true));
+    }
+    sw_node_close(&n);
+    test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+
 int t_swarm_bundle_transfer(void)
 {
     int failures = 0;
@@ -435,5 +590,7 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_blob_cap_unchanged();
     failures += bundle_case_offer_refusals();
     failures += bundle_case_peer_rules();
+    failures += bundle_case_announce_priority();
+    failures += bundle_case_priority_after_eviction();
     return failures;
 }
