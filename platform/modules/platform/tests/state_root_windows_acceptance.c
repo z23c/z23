@@ -72,11 +72,17 @@ static bool state_root_read_only_cases(
                                        unsafe_dev);
 }
 
-int main(void)
-{
-    wchar_t temp[MAX_PATH], base[MAX_PATH], spoof[MAX_PATH], permissive[MAX_PATH];
+struct state_root_fixture {
+    wchar_t base[MAX_PATH], spoof[MAX_PATH], permissive[MAX_PATH];
     wchar_t target[MAX_PATH], link[MAX_PATH], unicode[MAX_PATH];
     wchar_t z23[MAX_PATH], dev[MAX_PATH];
+    wchar_t unsafe_z23[MAX_PATH], unsafe_dev[MAX_PATH];
+    char base_utf8[MAX_PATH * 3], spoof_utf8[MAX_PATH * 3];
+    char actual[32768];
+};
+
+static int fixture_working_directory(wchar_t temp[MAX_PATH])
+{
     /* Use the current working directory for fixtures.  MSYS2/Cygwin /tmp is
      * mounted noacl, so owner/ACL probes on a path under it fail even though
      * the directory was created by this process.  The working directory is on
@@ -86,40 +92,61 @@ int main(void)
         return fail("could not get current directory");
     if (temp[cwd_len - 1] != L'\\' && temp[cwd_len - 1] != L'/')
         wcscat(temp, L"\\");
-    if (swprintf(base, MAX_PATH, L"%lsz23-state-base-δ-中-%lu-%llu", temp,
+    return 0;
+}
+
+static int create_fixture_paths(struct state_root_fixture *fixture,
+                                const wchar_t *temp)
+{
+    if (swprintf(fixture->base, MAX_PATH, L"%lsz23-state-base-δ-中-%lu-%llu", temp,
                  (unsigned long)GetCurrentProcessId(),
                  (unsigned long long)GetTickCount64()) <= 0 ||
-        swprintf(spoof, MAX_PATH, L"%lsfalso-δ-中-%lu-%llu", temp,
+        swprintf(fixture->spoof, MAX_PATH, L"%lsfalso-δ-中-%lu-%llu", temp,
                  (unsigned long)GetCurrentProcessId(),
                  (unsigned long long)GetTickCount64()) <= 0 ||
-        swprintf(permissive, MAX_PATH, L"%lspermissive", spoof) <= 0 ||
-        swprintf(target, MAX_PATH, L"%lstarget", spoof) <= 0 ||
-        swprintf(link, MAX_PATH, L"%lslink", spoof) <= 0 ||
-        swprintf(unicode, MAX_PATH, L"%lsprivado-δ-中", spoof) <= 0 ||
-        swprintf(z23, MAX_PATH, L"%ls\\z23", base) <= 0 ||
-        swprintf(dev, MAX_PATH, L"%ls\\dev", z23) <= 0 ||
-        !CreateDirectoryW(base, NULL) || !CreateDirectoryW(z23, NULL) ||
+        swprintf(fixture->permissive, MAX_PATH, L"%lspermissive",
+                 fixture->spoof) <= 0 ||
+        swprintf(fixture->target, MAX_PATH, L"%lstarget", fixture->spoof) <= 0 ||
+        swprintf(fixture->link, MAX_PATH, L"%lslink", fixture->spoof) <= 0 ||
+        swprintf(fixture->unicode, MAX_PATH, L"%lsprivado-δ-中",
+                 fixture->spoof) <= 0 ||
+        swprintf(fixture->z23, MAX_PATH, L"%ls\\z23", fixture->base) <= 0 ||
+        swprintf(fixture->dev, MAX_PATH, L"%ls\\dev", fixture->z23) <= 0 ||
+        !CreateDirectoryW(fixture->base, NULL) ||
+        !CreateDirectoryW(fixture->z23, NULL) ||
         /* Leave dev for platform_state_root to create/repair; that matches
          * real first-boot and avoids an inherited-ACL edge case on Windows. */
-        !CreateDirectoryW(spoof, NULL))
+        !CreateDirectoryW(fixture->spoof, NULL))
         return fail("fixture creation failed");
-    char base_utf8[MAX_PATH * 3], spoof_utf8[MAX_PATH * 3];
-    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, base, -1,
-                             base_utf8, sizeof(base_utf8), NULL, NULL) ||
-        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, spoof, -1,
-                             spoof_utf8, sizeof(spoof_utf8), NULL, NULL) ||
-        !SetEnvironmentVariableW(L"ZCL_STATE_ROOT", base) ||
-        !SetEnvironmentVariableA("LOCALAPPDATA", spoof_utf8))
+    return 0;
+}
+
+static int set_fixture_environment(struct state_root_fixture *fixture)
+{
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->base, -1,
+                             fixture->base_utf8, sizeof(fixture->base_utf8),
+                             NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->spoof, -1,
+                             fixture->spoof_utf8, sizeof(fixture->spoof_utf8),
+                             NULL, NULL) ||
+        !SetEnvironmentVariableW(L"ZCL_STATE_ROOT", fixture->base) ||
+        !SetEnvironmentVariableA("LOCALAPPDATA", fixture->spoof_utf8))
         return fail("environment setup failed");
 
-    char expected[32768], actual[32768];
-    if (snprintf(expected, sizeof(expected), "%s", base_utf8) <= 0)
+    return 0;
+}
+
+static int check_root_authority(struct state_root_fixture *fixture)
+{
+    char expected[32768];
+    if (snprintf(expected, sizeof(expected), "%s", fixture->base_utf8) <= 0)
         return fail("expected path construction failed");
-    if (!platform_state_root(actual, sizeof(actual)) ||
-        strncmp(actual, expected, strlen(expected)) != 0 ||
-        strstr(actual, spoof_utf8) != NULL ||
-        strlen(actual) < strlen("/z23/dev") ||
-        strcmp(actual + strlen(actual) - strlen("/z23/dev"), "/z23/dev") != 0) {
+    if (!platform_state_root(fixture->actual, sizeof(fixture->actual)) ||
+        strncmp(fixture->actual, expected, strlen(expected)) != 0 ||
+        strstr(fixture->actual, fixture->spoof_utf8) != NULL ||
+        strlen(fixture->actual) < strlen("/z23/dev") ||
+        strcmp(fixture->actual + strlen(fixture->actual) - strlen("/z23/dev"),
+               "/z23/dev") != 0) {
         if (runtime_is_wine()) {
             fputs("state_root_acceptance: REFUSE: Wine cannot prove state-root "
                   "independence from LOCALAPPDATA\n", stderr);
@@ -128,45 +155,76 @@ int main(void)
         return fail("LOCALAPPDATA spoof influenced authority root");
     }
     uintptr_t retained = 0;
-    if (!platform_private_directory_open_validated(actual, &retained))
+    if (!platform_private_directory_open_validated(fixture->actual, &retained))
         return fail("state root is not protected current-SID/private/no-reparse");
     platform_private_directory_close(retained);
+    return 0;
+}
+
+static int check_private_directory_cases(struct state_root_fixture *fixture)
+{
     char path_utf8[MAX_PATH * 3];
-    wchar_t unsafe_z23[MAX_PATH], unsafe_dev[MAX_PATH];
-    if (!state_root_read_only_cases(actual, dev, permissive, base, unsafe_z23,
-                                    unsafe_dev))
+    if (!state_root_read_only_cases(fixture->actual, fixture->dev,
+                                    fixture->permissive, fixture->base,
+                                    fixture->unsafe_z23,
+                                    fixture->unsafe_dev))
         return fail("state root read-only cases failed");
     if (
-        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, permissive, -1,
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->permissive, -1,
                              path_utf8, sizeof(path_utf8), NULL, NULL) ||
         platform_private_directory_ensure(path_utf8))
         return fail("permissive ACL directory accepted");
-    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, unicode, -1,
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->unicode, -1,
                              path_utf8, sizeof(path_utf8), NULL, NULL) ||
         !platform_private_directory_create(path_utf8))
         return fail("Unicode private directory failed");
-    if (!CreateDirectoryW(target, NULL))
+    if (!CreateDirectoryW(fixture->target, NULL))
         return fail("reparse target creation failed");
     DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY;
 #ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
     flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
 #endif
-    if (CreateSymbolicLinkW(link, target, flags)) {
-        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, link, -1,
+    if (CreateSymbolicLinkW(fixture->link, fixture->target, flags)) {
+        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->link, -1,
                                  path_utf8, sizeof(path_utf8), NULL, NULL) ||
             platform_private_directory_ensure(path_utf8))
             return fail("directory reparse point accepted");
-        RemoveDirectoryW(link);
+        RemoveDirectoryW(fixture->link);
     }
-    RemoveDirectoryW(unicode); RemoveDirectoryW(unsafe_dev);
-    RemoveDirectoryW(unsafe_z23); RemoveDirectoryW(permissive);
-    RemoveDirectoryW(target); RemoveDirectoryW(spoof);
-    if (!RemoveDirectoryW(dev) || !RemoveDirectoryW(z23) ||
-        !RemoveDirectoryW(base))
+    return 0;
+}
+
+static int remove_fixture_paths(struct state_root_fixture *fixture)
+{
+    RemoveDirectoryW(fixture->unicode); RemoveDirectoryW(fixture->unsafe_dev);
+    RemoveDirectoryW(fixture->unsafe_z23); RemoveDirectoryW(fixture->permissive);
+    RemoveDirectoryW(fixture->target); RemoveDirectoryW(fixture->spoof);
+    if (!RemoveDirectoryW(fixture->dev) || !RemoveDirectoryW(fixture->z23) ||
+        !RemoveDirectoryW(fixture->base))
         return fail("state-root fixture cleanup failed");
+    return 0;
+}
+
+int main(void)
+{
+    struct state_root_fixture fixture = {0};
+    wchar_t temp[MAX_PATH];
+    int result = fixture_working_directory(temp);
+    if (result) return result;
+    result = create_fixture_paths(&fixture, temp);
+    if (result) return result;
+    result = set_fixture_environment(&fixture);
+    if (result) return result;
+    result = check_root_authority(&fixture);
+    if (result) return result;
+    result = check_private_directory_cases(&fixture);
+    if (result) return result;
+    result = remove_fixture_paths(&fixture);
+    if (result) return result;
     puts("state_root_acceptance: PASS");
     return 0;
 }
+
 #else
 #include <errno.h>
 #include <sys/stat.h>
