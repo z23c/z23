@@ -75,6 +75,21 @@ static bool bsc_install(struct main_state *ms, int height, bool have_data)
     return active_chain_install_tip_slot(&ms->chain_active, bi);
 }
 
+/* Install ascending block_index slots for every height in
+ * [from_height .. to_height]. Every height gets a present body except
+ * `hole_height`, whose body is marked absent; pass a height outside the
+ * span (e.g. -1) for a fully present span. Returns true only when every
+ * install succeeded (same short-circuit as the inline loops it replaces). */
+static bool bsc_install_span_with_hole(struct main_state *ms, int from_height,
+                                       int to_height, int hole_height)
+{
+    bool seeded = true;
+    for (int h = from_height; h <= to_height; h++)
+        seeded = seeded &&
+                 bsc_install(ms, h, /*have_data=*/(h != hole_height));
+    return seeded;
+}
+
 int test_refold_body_span_contiguous(void);
 int test_refold_body_span_contiguous(void)
 {
@@ -86,9 +101,8 @@ int test_refold_body_span_contiguous(void)
     {
         struct main_state ms;
         main_state_init(&ms);
-        bool seeded = true;
-        for (int h = BSC_ANCHOR; h <= BSC_ANCHOR + 10; h++)
-            seeded = seeded && bsc_install(&ms, h, /*have_data=*/true);
+        bool seeded = bsc_install_span_with_hole(&ms, BSC_ANCHOR,
+                                                 BSC_ANCHOR + 10, -1);
         BSC_CHECK("C1: synthetic contiguous chain installed", seeded);
         BSC_CHECK("C1: tip at anchor+10",
                   active_chain_height(&ms.chain_active) == BSC_ANCHOR + 10);
@@ -125,10 +139,8 @@ int test_refold_body_span_contiguous(void)
         struct main_state ms;
         main_state_init(&ms);
         const int hole = BSC_ANCHOR + 5;
-        bool seeded = true;
-        for (int h = BSC_ANCHOR; h <= BSC_ANCHOR + 10; h++)
-            seeded = seeded &&
-                     bsc_install(&ms, h, /*have_data=*/(h != hole));
+        bool seeded = bsc_install_span_with_hole(&ms, BSC_ANCHOR,
+                                                 BSC_ANCHOR + 10, hole);
         BSC_CHECK("C3: chain with one body hole installed", seeded);
 
         int32_t first_missing = -1;
@@ -153,9 +165,8 @@ int test_refold_body_span_contiguous(void)
         main_state_init(&ms);
         /* Install anchor..anchor+3 contiguous, then JUMP to anchor+6 as the tip
          * — leaving anchor+4 / anchor+5 as NULL slots (no block_index). */
-        bool seeded = true;
-        for (int h = BSC_ANCHOR; h <= BSC_ANCHOR + 3; h++)
-            seeded = seeded && bsc_install(&ms, h, true);
+        bool seeded = bsc_install_span_with_hole(&ms, BSC_ANCHOR,
+                                                 BSC_ANCHOR + 3, -1);
         seeded = seeded && bsc_install(&ms, BSC_ANCHOR + 6, true);
         BSC_CHECK("C4: chain with a header-slot gap installed", seeded);
 
@@ -185,9 +196,8 @@ int test_refold_body_span_contiguous(void)
         struct main_state ms;
         main_state_init(&ms);
         const int hole = BSC_ANCHOR + 2;
-        bool seeded = true;
-        for (int h = BSC_ANCHOR; h <= BSC_ANCHOR + 4; h++)
-            seeded = seeded && bsc_install(&ms, h, (h != hole));
+        bool seeded = bsc_install_span_with_hole(&ms, BSC_ANCHOR,
+                                                 BSC_ANCHOR + 4, hole);
         BSC_CHECK("C6: chain seeded", seeded);
 
         int32_t first_missing = -1;
@@ -201,7 +211,7 @@ int test_refold_body_span_contiguous(void)
         blocker_reset_for_testing();
     }
 
-    /* ── C7: LOCAL body rebind on a gap. ──────────────────────────────────
+    /* C7: LOCAL body rebind on a gap. ──────────────────────────────────
      * A gap triggers scan_block_files_mark_data ONCE, only when the rebind
      * datadir is set AND local blk*.dat exist. The scan over a dummy file
      * marks nothing, so the gap persists and the blocker is still raised;
@@ -229,9 +239,8 @@ int test_refold_body_span_contiguous(void)
         struct main_state ms;
         main_state_init(&ms);
         const int hole = BSC_ANCHOR + 3;
-        bool seeded = true;
-        for (int h = BSC_ANCHOR; h <= BSC_ANCHOR + 6; h++)
-            seeded = seeded && bsc_install(&ms, h, (h != hole));
+        bool seeded = bsc_install_span_with_hole(&ms, BSC_ANCHOR,
+                                                 BSC_ANCHOR + 6, hole);
         BSC_CHECK("C7a: chain with a body hole installed", seeded);
 
         int32_t fm = -1;
@@ -266,9 +275,9 @@ int test_refold_body_span_contiguous(void)
 
         struct main_state ms;
         main_state_init(&ms);
-        bool seeded = true;
-        for (int h = BSC_ANCHOR; h <= BSC_ANCHOR + 4; h++)
-            seeded = seeded && bsc_install(&ms, h, (h != BSC_ANCHOR + 2));
+        bool seeded = bsc_install_span_with_hole(&ms, BSC_ANCHOR,
+                                                 BSC_ANCHOR + 4,
+                                                 BSC_ANCHOR + 2);
         BSC_CHECK("C7b: chain with a hole installed", seeded);
 
         int32_t fm = -1;
@@ -293,9 +302,9 @@ int test_refold_body_span_contiguous(void)
 
         struct main_state ms;
         main_state_init(&ms);
-        bool seeded = true;
-        for (int h = BSC_ANCHOR; h <= BSC_ANCHOR + 4; h++)
-            seeded = seeded && bsc_install(&ms, h, (h != BSC_ANCHOR + 1));
+        bool seeded = bsc_install_span_with_hole(&ms, BSC_ANCHOR,
+                                                 BSC_ANCHOR + 4,
+                                                 BSC_ANCHOR + 1);
         BSC_CHECK("C7c: chain with a hole installed", seeded);
 
         int32_t fm = -1;
