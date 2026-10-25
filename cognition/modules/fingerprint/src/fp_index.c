@@ -117,6 +117,45 @@ static void fp_derive_include(const char *path, char *out, size_t cap)
         snprintf(out, cap, "%s", path);
 }
 
+static size_t fp_clean_line_comment(char *t, size_t i, size_t n)
+{
+    while (i < n && t[i] != '\n') t[i++] = ' ';
+    return i;
+}
+
+static size_t fp_clean_block_comment(char *t, size_t i, size_t n)
+{
+    t[i] = ' '; t[i + 1] = ' '; i += 2;
+    while (i < n) {
+        if (t[i] == '*' && i + 1 < n && t[i + 1] == '/') {
+            t[i] = ' '; t[i + 1] = ' '; i += 2; break;
+        }
+        if (t[i] != '\n') t[i] = ' ';
+        i++;
+    }
+    return i;
+}
+
+static size_t fp_clean_literal(char *t, size_t i, size_t n)
+{
+    char q = t[i];
+    t[i++] = ' ';
+    while (i < n && t[i] != q) {
+        if (t[i] == '\\' && i + 1 < n) {
+            t[i] = ' ';
+            i++;
+            if (t[i] != '\n') t[i] = ' ';
+            i++;
+            continue;
+        }
+        if (t[i] == '\n') break;
+        t[i] = ' ';
+        i++;
+    }
+    if (i < n && t[i] == q) t[i++] = ' ';
+    return i;
+}
+
 /* Blank comments and string/char literals to spaces, keeping newlines and
  * every byte offset. Line splices are left alone; a `\`-continued line still
  * reads as one logical line to the directive scanner below. */
@@ -126,32 +165,11 @@ static void fp_clean(char *t, size_t n)
     while (i < n) {
         char c = t[i];
         if (c == '/' && i + 1 < n && t[i + 1] == '/') {
-            while (i < n && t[i] != '\n') t[i++] = ' ';
+            i = fp_clean_line_comment(t, i, n);
         } else if (c == '/' && i + 1 < n && t[i + 1] == '*') {
-            t[i] = ' '; t[i + 1] = ' '; i += 2;
-            while (i < n) {
-                if (t[i] == '*' && i + 1 < n && t[i + 1] == '/') {
-                    t[i] = ' '; t[i + 1] = ' '; i += 2; break;
-                }
-                if (t[i] != '\n') t[i] = ' ';
-                i++;
-            }
+            i = fp_clean_block_comment(t, i, n);
         } else if (c == '"' || c == '\'') {
-            char q = c;
-            t[i++] = ' ';
-            while (i < n && t[i] != q) {
-                if (t[i] == '\\' && i + 1 < n) {
-                    t[i] = ' ';
-                    i++;
-                    if (t[i] != '\n') t[i] = ' ';
-                    i++;
-                    continue;
-                }
-                if (t[i] == '\n') break;
-                t[i] = ' ';
-                i++;
-            }
-            if (i < n && t[i] == q) t[i++] = ' ';
+            i = fp_clean_literal(t, i, n);
         } else {
             i++;
         }
@@ -438,200 +456,272 @@ static bool fp_segment_has_static(const char *t, size_t s, size_t e)
     return false;
 }
 
+static bool fp_at_line_start(const char *t, size_t i)
+{
+    size_t k;
+    for (k = i; k > 0; k--) {
+        if (t[k - 1] == '\n') break;
+        if (!isspace((unsigned char)t[k - 1])) return false;
+    }
+    return true;
+}
+
+static size_t fp_skip_directive_line(const char *t, size_t i, size_t n)
+{
+    while (i < n) {
+        if (t[i] == '\\') {
+            i++;
+            while (i < n && t[i] != '\n') i++;
+            if (i < n) i++;
+            continue;
+        }
+        if (t[i] == '\n') { i++; break; }
+        i++;
+    }
+    return i;
+}
+
+static bool fp_scan_hash_directive(struct fp_index *ix, int file,
+                                   const char *t, size_t *i, size_t n)
+{
+    size_t at = *i;
+    size_t d = fp_skip_ws(t, at + 1u, n);
+    bool ok = true;
+
+    if (d + 6u <= n && strncmp(t + d, "define", 6) == 0 &&
+        !fp_ident_char((unsigned char)t[d + 6])) {
+        *i = fp_scan_define(ix, file, d + 6u, n, &ok);
+        if (!ok) return false;
+        return true;
+    }
+    *i = fp_skip_directive_line(t, at, n);
+    return true;
+}
+
+static bool fp_scan_line_prefix(struct fp_index *ix, int file, const char *t,
+                                size_t *i, size_t n, bool *ate)
+{
+    bool at_line_start = fp_at_line_start(t, *i);
+    *ate = false;
+    if (t[*i] == '#' && at_line_start) {
+        if (!fp_scan_hash_directive(ix, file, t, i, n))
+            return false;
+        *ate = true;
+        return true;
+    }
+    if (t[*i] == ';') { (*i)++; *ate = true; }
+    return true;
+}
+
+static size_t fp_scan_segment_end(const char *t, size_t j, size_t n)
+{
+    while (j < n) {
+        char c = t[j];
+        if (c == '#') {                       /* a directive mid-segment */
+            while (j < n && t[j] != '\n') j++;
+            continue;
+        }
+        if (c == '(') { j = fp_skip_group(t, j, n, '(', ')'); continue; }
+        if (c == '[') { j = fp_skip_group(t, j, n, '[', ']'); continue; }
+        if (c == ';' || c == '{' || c == '=') break;
+        j++;
+    }
+    return j;
+}
+
+static bool fp_scan_initialized_object(struct fp_index *ix, int file,
+                                       const char *t, size_t seg_s, size_t j,
+                                       size_t n, size_t *i)
+{
+    struct fp_sym s = {0};
+    size_t ns = 0;
+    size_t ne = 0;
+
+    if (fp_object_name(t, seg_s, j, &ns, &ne)) {
+        fp_copy_name(s.name, t + ns, ne - ns);
+        s.kind = (unsigned char)FP_SYM_OBJ;
+        s.file = file;
+        s.const_object = fp_object_is_const(t, seg_s, ns);
+        s.is_static = fp_segment_has_static(t, seg_s, ns);
+        if (!fp_sym_push(ix, &s)) return false;
+    }
+    /* step over the initialiser to its terminating ';' */
+    {
+        int d2 = 0;
+        size_t p = j;
+        for (; p < n; p++) {
+            if (t[p] == '{') d2++;
+            else if (t[p] == '}') d2--;
+            else if (t[p] == ';' && d2 == 0) { p++; break; }
+        }
+        *i = p;
+    }
+    return true;
+}
+
+static bool fp_scan_func_decl(struct fp_index *ix, int file,
+                              const struct fp_file *f, const char *t,
+                              size_t seg_s, size_t j, size_t n, size_t *i,
+                              bool *was_func)
+{
+    size_t name_s = 0;
+    size_t name_e = 0;
+    size_t dstart = seg_s;
+    size_t lp = fp_find_declarator(t, seg_s, j, n, &name_s, &name_e,
+                                   &dstart);
+    *was_func = false;
+    if (lp != (size_t)-1) {
+        size_t rp = fp_skip_group(t, lp, n, '(', ')');
+        size_t after = fp_skip_attrs(t, rp, n);
+        struct fp_sym s = {0};
+        fp_copy_name(s.name, t + name_s, name_e - name_s);
+        s.file = file;
+        s.decl_off = (uint32_t)dstart;
+        s.decl_len = (uint32_t)(rp - dstart);
+        s.is_static = fp_segment_has_static(t, dstart, name_s);
+        if (t[after] == '{') {
+            size_t be = fp_skip_group(t, after, n, '{', '}');
+            s.kind = (unsigned char)FP_SYM_FUNC;
+            s.body_off = (uint32_t)after;
+            s.body_len = (uint32_t)(be - after);
+            s.line = fp_line_of(f, (uint32_t)dstart);
+            *i = be;
+        } else {
+            s.kind = (unsigned char)FP_SYM_PROTO;
+            s.line = fp_line_of(f, (uint32_t)dstart);
+            *i = after + 1u;
+        }
+        if (!fp_sym_push(ix, &s)) return false;
+        *was_func = true;
+    }
+    return true;
+}
+
+static bool fp_scan_aggregate(struct fp_index *ix, int file, const char *t,
+                              size_t seg_s, size_t j, size_t n, size_t *i)
+{
+    size_t be = fp_skip_group(t, j, n, '{', '}');
+    size_t p;
+    bool is_enum = false;
+    for (p = seg_s; p + 4u <= j; p++) {
+        if (strncmp(t + p, "enum", 4) == 0 &&
+            (p == seg_s || !fp_ident_char((unsigned char)t[p - 1])) &&
+            !fp_ident_char((unsigned char)t[p + 4])) {
+            is_enum = true;
+            break;
+        }
+    }
+    if (is_enum && !fp_scan_enum_body(ix, file, j + 1u, be - 1u))
+        return false;
+    /* Resume immediately after the aggregate, consuming only a
+     * semicolon that actually follows it; hunting forward for the
+     * next `;` would run into the next function's body. */
+    p = fp_skip_ws(t, be, n);
+    if (p < n && t[p] == ';')
+        *i = p + 1u;
+    else
+        *i = be;
+    return true;
+}
+
+static bool fp_decl_is_tag_only(const char *t, size_t seg_s, size_t q)
+{
+    return (q - seg_s == 6u && strncmp(t + seg_s, "struct", 6) == 0) ||
+           (q - seg_s == 5u && strncmp(t + seg_s, "union", 5) == 0) ||
+           (q - seg_s == 4u && strncmp(t + seg_s, "enum", 4) == 0);
+}
+
+static bool fp_scan_plain_decl(struct fp_index *ix, int file, const char *t,
+                               size_t seg_s, size_t j, size_t *i)
+{
+    /* a plain declaration */
+    struct fp_sym s = {0};
+    size_t ns = 0;
+    size_t ne = 0;
+    bool is_typedef = (j - seg_s > 7u &&
+                       strncmp(t + seg_s, "typedef", 7) == 0 &&
+                       !fp_ident_char((unsigned char)t[seg_s + 7]));
+    if (fp_object_name(t, seg_s, j, &ns, &ne)) {
+        /* `struct x;` / `union x;` / `enum x;` declares a TAG, not an
+         * object. Filing a forward declaration as a mutable global
+         * made every function mentioning that type name read as
+         * impure — 550 of them, before this test existed. */
+        size_t q = ns;
+        bool tag_only;
+        while (q > seg_s && isspace((unsigned char)t[q - 1])) q--;
+        tag_only = fp_decl_is_tag_only(t, seg_s, q);
+        fp_copy_name(s.name, t + ns, ne - ns);
+        s.file = file;
+        if (tag_only) {
+            s.kind = (unsigned char)FP_SYM_TYPE;
+            s.decl_off = (uint32_t)seg_s;
+            s.decl_len = 0u;
+        } else if (is_typedef) {
+            /* Recorded with its declarator text so fp_sig can walk
+             * one alias at a time down to a real scalar spelling. */
+            s.kind = (unsigned char)FP_SYM_TYPE;
+            s.decl_off = (uint32_t)seg_s;
+            s.decl_len = (uint32_t)(j - seg_s);
+        } else {
+            s.kind = (unsigned char)FP_SYM_OBJ;
+            s.const_object = fp_object_is_const(t, seg_s, ns);
+            s.is_static = fp_segment_has_static(t, seg_s, ns);
+        }
+        if (!fp_sym_push(ix, &s)) return false;
+    }
+    *i = j + 1u;
+    return true;
+}
+
+static bool fp_scan_segment(struct fp_index *ix, int file,
+                            const struct fp_file *f, const char *t,
+                            size_t seg_s, size_t j, size_t n, size_t *i)
+{
+    bool was_func = false;
+
+    if (t[j] == '=') {                        /* object with initialiser */
+        return fp_scan_initialized_object(ix, file, t, seg_s, j, n, i);
+    }
+    if (!fp_scan_func_decl(ix, file, f, t, seg_s, j, n, i, &was_func))
+        return false;
+    if (was_func)
+        return true;
+    if (t[j] == '{') {                         /* aggregate or enum body */
+        return fp_scan_aggregate(ix, file, t, seg_s, j, n, i);
+    }
+    return fp_scan_plain_decl(ix, file, t, seg_s, j, i);
+}
+
 static bool fp_scan_file(struct fp_index *ix, int file)
 {
     struct fp_file *f = &ix->files[file];
     const char *t = f->text;
     size_t n = f->len;
     size_t i = 0;
-    bool ok = true;
 
     while (i < n) {
         size_t seg_s;
         size_t j;
-        bool at_line_start;
-        size_t k;
+        bool ate = false;
 
         i = fp_skip_ws(t, i, n);
         if (i >= n) break;
-
-        at_line_start = true;
-        for (k = i; k > 0; k--) {
-            if (t[k - 1] == '\n') break;
-            if (!isspace((unsigned char)t[k - 1])) { at_line_start = false; break; }
-        }
-        if (t[i] == '#' && at_line_start) {
-            size_t d = fp_skip_ws(t, i + 1u, n);
-            if (d + 6u <= n && strncmp(t + d, "define", 6) == 0 &&
-                !fp_ident_char((unsigned char)t[d + 6])) {
-                i = fp_scan_define(ix, file, d + 6u, n, &ok);
-                if (!ok) return false;
-                continue;
-            }
-            while (i < n) {
-                if (t[i] == '\\') {
-                    i++;
-                    while (i < n && t[i] != '\n') i++;
-                    if (i < n) i++;
-                    continue;
-                }
-                if (t[i] == '\n') { i++; break; }
-                i++;
-            }
+        if (!fp_scan_line_prefix(ix, file, t, &i, n, &ate))
+            return false;
+        if (ate)
             continue;
-        }
-        if (t[i] == ';') { i++; continue; }
-
         seg_s = i;
-        j = i;
-        while (j < n) {
-            char c = t[j];
-            if (c == '#') {                       /* a directive mid-segment */
-                while (j < n && t[j] != '\n') j++;
-                continue;
-            }
-            if (c == '(') { j = fp_skip_group(t, j, n, '(', ')'); continue; }
-            if (c == '[') { j = fp_skip_group(t, j, n, '[', ']'); continue; }
-            if (c == ';' || c == '{' || c == '=') break;
-            j++;
-        }
+        j = fp_scan_segment_end(t, i, n);
         if (j >= n) break;
-
-        if (t[j] == '=') {                        /* object with initialiser */
-            struct fp_sym s = {0};
-            size_t ns = 0;
-            size_t ne = 0;
-            if (fp_object_name(t, seg_s, j, &ns, &ne)) {
-                fp_copy_name(s.name, t + ns, ne - ns);
-                s.kind = (unsigned char)FP_SYM_OBJ;
-                s.file = file;
-                s.const_object = fp_object_is_const(t, seg_s, ns);
-                s.is_static = fp_segment_has_static(t, seg_s, ns);
-                if (!fp_sym_push(ix, &s)) return false;
-            }
-            /* step over the initialiser to its terminating ';' */
-            {
-                int d2 = 0;
-                size_t p = j;
-                for (; p < n; p++) {
-                    if (t[p] == '{') d2++;
-                    else if (t[p] == '}') d2--;
-                    else if (t[p] == ';' && d2 == 0) { p++; break; }
-                }
-                i = p;
-            }
-            continue;
-        }
-
-        {
-            size_t name_s = 0;
-            size_t name_e = 0;
-            size_t dstart = seg_s;
-            size_t lp = fp_find_declarator(t, seg_s, j, n, &name_s, &name_e,
-                                           &dstart);
-            bool is_func = false;
-            if (lp != (size_t)-1) {
-                size_t rp = fp_skip_group(t, lp, n, '(', ')');
-                size_t after = fp_skip_attrs(t, rp, n);
-                {
-                    struct fp_sym s = {0};
-                    fp_copy_name(s.name, t + name_s, name_e - name_s);
-                    s.file = file;
-                    s.decl_off = (uint32_t)dstart;
-                    s.decl_len = (uint32_t)(rp - dstart);
-                    s.is_static = fp_segment_has_static(t, dstart, name_s);
-                    if (t[after] == '{') {
-                        size_t be = fp_skip_group(t, after, n, '{', '}');
-                        s.kind = (unsigned char)FP_SYM_FUNC;
-                        s.body_off = (uint32_t)after;
-                        s.body_len = (uint32_t)(be - after);
-                        s.line = fp_line_of(f, (uint32_t)dstart);
-                        i = be;
-                    } else {
-                        s.kind = (unsigned char)FP_SYM_PROTO;
-                        s.line = fp_line_of(f, (uint32_t)dstart);
-                        i = after + 1u;
-                    }
-                    if (!fp_sym_push(ix, &s)) return false;
-                    is_func = true;
-                }
-            }
-            if (is_func)
-                continue;
-        }
-
-        if (t[j] == '{') {                         /* aggregate or enum body */
-            size_t be = fp_skip_group(t, j, n, '{', '}');
-            size_t p;
-            bool is_enum = false;
-            for (p = seg_s; p + 4u <= j; p++) {
-                if (strncmp(t + p, "enum", 4) == 0 &&
-                    (p == seg_s || !fp_ident_char((unsigned char)t[p - 1])) &&
-                    !fp_ident_char((unsigned char)t[p + 4])) {
-                    is_enum = true;
-                    break;
-                }
-            }
-            if (is_enum && !fp_scan_enum_body(ix, file, j + 1u, be - 1u))
-                return false;
-            /* Resume immediately after the aggregate, consuming only a
-             * semicolon that actually follows it; hunting forward for the
-             * next `;` would run into the next function's body. */
-            p = fp_skip_ws(t, be, n);
-            if (p < n && t[p] == ';')
-                i = p + 1u;
-            else
-                i = be;
-            continue;
-        }
-
-        {                                           /* a plain declaration */
-            struct fp_sym s = {0};
-            size_t ns = 0;
-            size_t ne = 0;
-            bool is_typedef = (j - seg_s > 7u &&
-                               strncmp(t + seg_s, "typedef", 7) == 0 &&
-                               !fp_ident_char((unsigned char)t[seg_s + 7]));
-            if (fp_object_name(t, seg_s, j, &ns, &ne)) {
-                /* `struct x;` / `union x;` / `enum x;` declares a TAG, not an
-                 * object. Filing a forward declaration as a mutable global
-                 * made every function mentioning that type name read as
-                 * impure — 550 of them, before this test existed. */
-                size_t q = ns;
-                bool tag_only;
-                while (q > seg_s && isspace((unsigned char)t[q - 1])) q--;
-                tag_only = (q - seg_s == 6u && strncmp(t + seg_s, "struct", 6) == 0) ||
-                           (q - seg_s == 5u && strncmp(t + seg_s, "union", 5) == 0) ||
-                           (q - seg_s == 4u && strncmp(t + seg_s, "enum", 4) == 0);
-                fp_copy_name(s.name, t + ns, ne - ns);
-                s.file = file;
-                if (tag_only) {
-                    s.kind = (unsigned char)FP_SYM_TYPE;
-                    s.decl_off = (uint32_t)seg_s;
-                    s.decl_len = 0u;
-                } else if (is_typedef) {
-                    /* Recorded with its declarator text so fp_sig can walk
-                     * one alias at a time down to a real scalar spelling. */
-                    s.kind = (unsigned char)FP_SYM_TYPE;
-                    s.decl_off = (uint32_t)seg_s;
-                    s.decl_len = (uint32_t)(j - seg_s);
-                } else {
-                    s.kind = (unsigned char)FP_SYM_OBJ;
-                    s.const_object = fp_object_is_const(t, seg_s, ns);
-                    s.is_static = fp_segment_has_static(t, seg_s, ns);
-                }
-                if (!fp_sym_push(ix, &s)) return false;
-            }
-            i = j + 1u;
-        }
+        if (!fp_scan_segment(ix, file, f, t, seg_s, j, n, &i))
+            return false;
     }
     return true;
 }
 
 /* ── public build/teardown ───────────────────────────────────────────── */
 
-struct fp_index *fp_index_build(const char *root, const char *const *files,
-                                size_t n_files)
+static struct fp_index *fp_index_alloc(const char *root, size_t n_files)
 {
     struct fp_index *ix;
     size_t i;
@@ -653,7 +743,70 @@ struct fp_index *fp_index_build(const char *root, const char *const *files,
     }
     for (i = 0; i < ix->nbuckets; i++)
         ix->bucket[i] = -1;
+    return ix;
+}
 
+static void fp_index_mark_defines_main(struct fp_index *ix)
+{
+    size_t i;
+    /* Mark the units that own a main(). A probe translation unit that
+     * included one would define main() twice — once from the tree, once from
+     * the generated driver — and the whole link would fail rather than one
+     * candidate. Refusing them at scan time keeps that a NAMED exclusion. */
+    for (i = 0; i < ix->nsyms; i++) {
+        const struct fp_sym *s = &ix->syms[i];
+        if (s->kind == (unsigned char)FP_SYM_FUNC &&
+            strcmp(s->name, "main") == 0 && s->file >= 0 &&
+            (size_t)s->file < ix->nfiles)
+            ix->files[s->file].defines_main = true;
+    }
+}
+
+static void fp_index_mark_dup_pair(struct fp_index *ix, const struct fp_sym *s)
+{
+    uint64_t h = fp_hash_str(s->name);
+    int j;
+    for (j = ix->bucket[h % ix->nbuckets]; j >= 0; j = ix->syms[j].next) {
+        const struct fp_sym *o = &ix->syms[j];
+        if (o == s || o->kind != (unsigned char)FP_SYM_FUNC ||
+            o->is_static || o->file == s->file)
+            continue;
+        if (ix->files[o->file].is_header)
+            continue;
+        if (strcmp(o->name, s->name) != 0)
+            continue;
+        ix->files[s->file].dup_export = true;
+        ix->files[o->file].dup_export = true;
+        break;
+    }
+}
+
+static void fp_index_mark_dup_exports(struct fp_index *ix)
+{
+    size_t i;
+    /* Mark the units that export a symbol some other unit also exports. See
+     * fp_file.dup_export: these are the `#if`-guarded platform twins, and
+     * including two of them into two probe TUs is a link failure, not a
+     * probe failure. Quadratic only in the hash chain, which is short. */
+    for (i = 0; i < ix->nsyms; i++) {
+        const struct fp_sym *s = &ix->syms[i];
+        if (s->kind != (unsigned char)FP_SYM_FUNC || s->is_static)
+            continue;
+        if (ix->files[s->file].is_header || ix->files[s->file].dup_export)
+            continue;
+        fp_index_mark_dup_pair(ix, s);
+    }
+}
+
+struct fp_index *fp_index_build(const char *root, const char *const *files,
+                                size_t n_files)
+{
+    struct fp_index *ix;
+    size_t i;
+
+    ix = fp_index_alloc(root, n_files);
+    if (ix == NULL)
+        return NULL;
     for (i = 0; i < n_files; i++) {
         if (!fp_load(ix, root, files[i])) {
             fp_index_free(ix);
@@ -666,44 +819,8 @@ struct fp_index *fp_index_build(const char *root, const char *const *files,
             return NULL;
         }
     }
-    /* Mark the units that own a main(). A probe translation unit that
-     * included one would define main() twice — once from the tree, once from
-     * the generated driver — and the whole link would fail rather than one
-     * candidate. Refusing them at scan time keeps that a NAMED exclusion. */
-    for (i = 0; i < ix->nsyms; i++) {
-        const struct fp_sym *s = &ix->syms[i];
-        if (s->kind == (unsigned char)FP_SYM_FUNC &&
-            strcmp(s->name, "main") == 0 && s->file >= 0 &&
-            (size_t)s->file < ix->nfiles)
-            ix->files[s->file].defines_main = true;
-    }
-    /* Mark the units that export a symbol some other unit also exports. See
-     * fp_file.dup_export: these are the `#if`-guarded platform twins, and
-     * including two of them into two probe TUs is a link failure, not a
-     * probe failure. Quadratic only in the hash chain, which is short. */
-    for (i = 0; i < ix->nsyms; i++) {
-        const struct fp_sym *s = &ix->syms[i];
-        uint64_t h;
-        int j;
-        if (s->kind != (unsigned char)FP_SYM_FUNC || s->is_static)
-            continue;
-        if (ix->files[s->file].is_header || ix->files[s->file].dup_export)
-            continue;
-        h = fp_hash_str(s->name);
-        for (j = ix->bucket[h % ix->nbuckets]; j >= 0; j = ix->syms[j].next) {
-            const struct fp_sym *o = &ix->syms[j];
-            if (o == s || o->kind != (unsigned char)FP_SYM_FUNC ||
-                o->is_static || o->file == s->file)
-                continue;
-            if (ix->files[o->file].is_header)
-                continue;
-            if (strcmp(o->name, s->name) != 0)
-                continue;
-            ix->files[s->file].dup_export = true;
-            ix->files[o->file].dup_export = true;
-            break;
-        }
-    }
+    fp_index_mark_defines_main(ix);
+    fp_index_mark_dup_exports(ix);
     return ix;
 }
 

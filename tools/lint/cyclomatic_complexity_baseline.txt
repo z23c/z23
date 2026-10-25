@@ -55,9 +55,6 @@ cognition/modules/codeindex/src/codeindex_semantic_candidate.c:zcl_code_semantic
 cognition/modules/codeindex/src/codeindex_store_read.c:ci_store_meta_get:17
 cognition/modules/fingerprint/src/fp_emit.c:fp_emit_harness:24
 cognition/modules/fingerprint/src/fp_emit.c:fp_emit_probe:16
-cognition/modules/fingerprint/src/fp_index.c:fp_clean:25
-cognition/modules/fingerprint/src/fp_index.c:fp_index_build:28
-cognition/modules/fingerprint/src/fp_index.c:fp_scan_file:64
 cognition/modules/fleetfacts/src/fleet_facts.c:zcl_fleet_facts_query:17
 cognition/modules/kpi/src/kpi_metrics.c:kpi_count_lint_gates:25
 cognition/modules/kpi/src/kpi_metrics.c:kpi_scan_counts:23
