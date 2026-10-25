@@ -44,6 +44,42 @@
 /* Above this estimated catch-up, recommend re-minting a tip-fresh bundle. */
 #define ZCL_BUNDLE_REMINT_SECS 600
 
+/* Match utxo-seed-<digits>.snapshot — identical to the boot autodetect. */
+static bool bundle_parse_seed_name(const char *nm, long long *height_out)
+{
+    static const char PFX[] = "utxo-seed-";
+    static const char SFX[] = ".snapshot";
+    const size_t plen = sizeof(PFX) - 1, slen = sizeof(SFX) - 1;
+    size_t len = strlen(nm);
+    if (len <= plen + slen)
+        return false;
+    if (strncmp(nm, PFX, plen) != 0)
+        return false;
+    if (strcmp(nm + len - slen, SFX) != 0)
+        return false;
+    long long h = 0;
+    bool digits_ok = true;
+    for (size_t i = plen; i < len - slen; i++) {
+        if (nm[i] < '0' || nm[i] > '9') { digits_ok = false; break; }
+        h = h * 10 + (nm[i] - '0');
+    }
+    if (!digits_ok)
+        return false;
+    *height_out = h;
+    return true;
+}
+
+static void bundle_keep_higher_seed(long long h, const char *nm,
+                                    long long *best_h, char *name,
+                                    size_t name_sz)
+{
+    if (h > *best_h) {
+        *best_h = h;
+        if (name && name_sz)
+            snprintf(name, name_sz, "%s", nm);
+    }
+}
+
 long long bundle_scan_seed_height(const char *datadir, int *count,
                                   char *name, size_t name_sz)
 {
@@ -56,36 +92,16 @@ long long bundle_scan_seed_height(const char *datadir, int *count,
     if (!d)
         return -1;  // raw-return-ok:sentinel -1 = "no bundle dir", not an error
 
-    /* Match utxo-seed-<digits>.snapshot — identical to the boot autodetect. */
-    static const char PFX[] = "utxo-seed-";
-    static const char SFX[] = ".snapshot";
-    const size_t plen = sizeof(PFX) - 1, slen = sizeof(SFX) - 1;
     long long best_h = -1;
     int n = 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         const char *nm = ent->d_name;
-        size_t len = strlen(nm);
-        if (len <= plen + slen)
-            continue;
-        if (strncmp(nm, PFX, plen) != 0)
-            continue;
-        if (strcmp(nm + len - slen, SFX) != 0)
-            continue;
         long long h = 0;
-        bool digits_ok = true;
-        for (size_t i = plen; i < len - slen; i++) {
-            if (nm[i] < '0' || nm[i] > '9') { digits_ok = false; break; }
-            h = h * 10 + (nm[i] - '0');
-        }
-        if (!digits_ok)
+        if (!bundle_parse_seed_name(nm, &h))
             continue;
         n++;
-        if (h > best_h) {
-            best_h = h;
-            if (name && name_sz)
-                snprintf(name, name_sz, "%s", nm);
-        }
+        bundle_keep_higher_seed(h, nm, &best_h, name, name_sz);
     }
     closedir(d);
     if (count) *count = n;
@@ -123,6 +139,53 @@ static const char *bundle_freshness_name(enum bundle_freshness f)
     return "unknown";
 }
 
+static void bundle_probe_pack_files(const char *datadir, bool bundle_present,
+                                    const char *best_name,
+                                    bool *block_index_present,
+                                    bool *failed_marker)
+{
+    if (datadir && datadir[0]) {
+        char p[1200];
+        int n = snprintf(p, sizeof(p), "%s/block_index.bin", datadir);
+        if (n > 0 && (size_t)n < sizeof(p))
+            *block_index_present = (access(p, F_OK) == 0);
+        if (bundle_present) {
+            n = snprintf(p, sizeof(p), "%s/%s.failed", datadir, best_name);
+            if (n > 0 && (size_t)n < sizeof(p))
+                *failed_marker = (access(p, F_OK) == 0);
+        }
+    }
+}
+
+static void bundle_format_recommendation(char *rec, size_t rec_sz,
+                                         enum bundle_freshness verdict,
+                                         bool bundle_present, long long seed_h,
+                                         long long gap, long long header_tip,
+                                         long long est)
+{
+    if (verdict == BUNDLE_FRESH_UNKNOWN) {
+        snprintf(rec, rec_sz, "%s",
+                 !bundle_present
+                     ? "no utxo-seed-<h>.snapshot in datadir; nothing to keep "
+                       "fresh (fresh installs use P2P IBD)"
+                     : "network header tip not known yet (still starting / no "
+                       "peers); staleness undetermined");
+    } else {
+        const char *advice =
+            verdict == BUNDLE_FRESH_OK
+                ? "bundle is current"
+                : (verdict == BUNDLE_FRESH_AGING
+                       ? "consider re-minting a tip-fresh bundle soon"
+                       : "re-mint a tip-fresh bundle now (see "
+                         "tools/mint_v2_snapshot.c runbook)");
+        snprintf(rec, rec_sz,
+                 "bundle seed h=%lld is %lld blocks below header tip h=%lld "
+                 "(~%llds fresh-install catch-up at %d blk/s) — %s",
+                 seed_h, gap, header_tip, est,
+                 ZCL_BUNDLE_CATCHUP_BLOCKS_PER_SEC, advice);
+    }
+}
+
 bool bundle_staleness_dump_state_json(struct json_value *out,
                                       const char *key)
 {
@@ -150,17 +213,8 @@ bool bundle_staleness_dump_state_json(struct json_value *out,
      * (autodetect refuses the bundle without it), and a sibling .failed marker
      * means a prior boot quarantined the bundle (it falls back to P2P IBD). */
     bool block_index_present = false, failed_marker = false;
-    if (datadir && datadir[0]) {
-        char p[1200];
-        int n = snprintf(p, sizeof(p), "%s/block_index.bin", datadir);
-        if (n > 0 && (size_t)n < sizeof(p))
-            block_index_present = (access(p, F_OK) == 0);
-        if (bundle_present) {
-            n = snprintf(p, sizeof(p), "%s/%s.failed", datadir, best_name);
-            if (n > 0 && (size_t)n < sizeof(p))
-                failed_marker = (access(p, F_OK) == 0);
-        }
-    }
+    bundle_probe_pack_files(datadir, bundle_present, best_name,
+                            &block_index_present, &failed_marker);
     json_push_kv_bool(out, "block_index_present", block_index_present);
     json_push_kv_bool(out, "failed_marker", failed_marker);
     json_push_kv_bool(out, "bootable",
@@ -199,27 +253,8 @@ bool bundle_staleness_dump_state_json(struct json_value *out,
     json_push_kv_bool(out, "recommend_remint", verdict == BUNDLE_FRESH_STALE);
 
     char rec[320];
-    if (verdict == BUNDLE_FRESH_UNKNOWN) {
-        snprintf(rec, sizeof(rec), "%s",
-                 !bundle_present
-                     ? "no utxo-seed-<h>.snapshot in datadir; nothing to keep "
-                       "fresh (fresh installs use P2P IBD)"
-                     : "network header tip not known yet (still starting / no "
-                       "peers); staleness undetermined");
-    } else {
-        const char *advice =
-            verdict == BUNDLE_FRESH_OK
-                ? "bundle is current"
-                : (verdict == BUNDLE_FRESH_AGING
-                       ? "consider re-minting a tip-fresh bundle soon"
-                       : "re-mint a tip-fresh bundle now (see "
-                         "tools/mint_v2_snapshot.c runbook)");
-        snprintf(rec, sizeof(rec),
-                 "bundle seed h=%lld is %lld blocks below header tip h=%lld "
-                 "(~%llds fresh-install catch-up at %d blk/s) — %s",
-                 seed_h, gap, header_tip, est,
-                 ZCL_BUNDLE_CATCHUP_BLOCKS_PER_SEC, advice);
-    }
+    bundle_format_recommendation(rec, sizeof(rec), verdict, bundle_present,
+                                 seed_h, gap, header_tip, est);
     json_push_kv_str(out, "recommendation", rec);
     return true;
 }
