@@ -16,6 +16,38 @@
 #include <inttypes.h>
 #include <string.h>
 
+/* True when every pointer the shared builder requires is non-NULL. */
+static bool swap_settle_args_nonnull(const struct swap_settle_ctx *c,
+                                     const struct privkey *key,
+                                     const struct pubkey *pub,
+                                     const struct transaction *out)
+{
+    return c && key && pub && out;
+}
+
+/* True when the contract script is present and its length is in range. */
+static bool swap_settle_contract_len_ok(const struct swap_settle_ctx *c)
+{
+    return c->contract && c->contract_len != 0 && c->contract_len <= 256;
+}
+
+/* Build the scriptSig for one settlement path. `secret` non-NULL selects
+ * the redeem (claim) push, NULL selects the refund push. */
+static size_t swap_settle_build_scriptsig(uint8_t *ss, size_t ss_cap,
+                                          unsigned char *sig, size_t siglen,
+                                          const struct pubkey *pub,
+                                          const uint8_t *secret,
+                                          const struct swap_settle_ctx *c)
+{
+    if (secret)
+        return htlc_build_redeem_scriptsig(ss, ss_cap, sig, siglen, pub->vch,
+                                           pub->size, secret, c->contract,
+                                           c->contract_len);
+    return htlc_build_refund_scriptsig(ss, ss_cap, sig, siglen, pub->vch,
+                                       pub->size, c->contract,
+                                       c->contract_len);
+}
+
 /* Shared builder for both settlement paths. `secret` non-NULL selects the
  * redeem (claim) branch; NULL selects the refund branch. */
 static struct zcl_result swap_settle_build(const struct swap_settle_ctx *c,
@@ -26,7 +58,7 @@ static struct zcl_result swap_settle_build(const struct swap_settle_ctx *c,
                                            const uint8_t *secret,
                                            struct transaction *out)
 {
-    if (!c || !key || !pub || !out)
+    if (!swap_settle_args_nonnull(c, key, pub, out))
         return ZCL_ERR(-1, "swap_settle: NULL argument");
 
     /* Initialize out BEFORE the first thing that can fail. The public header
@@ -41,7 +73,7 @@ static struct zcl_result swap_settle_build(const struct swap_settle_ctx *c,
      * fixed in compact_block_reconstruct() (bce343876). */
     transaction_init(out);
 
-    if (!c->contract || c->contract_len == 0 || c->contract_len > 256)
+    if (!swap_settle_contract_len_ok(c))
         return ZCL_ERR(-2, "swap_settle: bad contract length %zu",
                        c->contract_len);
     if (c->funding_value <= 0)
@@ -97,15 +129,8 @@ static struct zcl_result swap_settle_build(const struct swap_settle_ctx *c,
     sig[siglen++] = (unsigned char)SIGHASH_ALL;
 
     uint8_t ss[512];
-    size_t sslen;
-    if (secret)
-        sslen = htlc_build_redeem_scriptsig(ss, sizeof(ss), sig, siglen,
-                                            pub->vch, pub->size, secret,
-                                            c->contract, c->contract_len);
-    else
-        sslen = htlc_build_refund_scriptsig(ss, sizeof(ss), sig, siglen,
-                                            pub->vch, pub->size,
-                                            c->contract, c->contract_len);
+    size_t sslen = swap_settle_build_scriptsig(ss, sizeof(ss), sig, siglen,
+                                               pub, secret, c);
     if (sslen == 0 || sslen > MAX_SCRIPT_SIZE) {
         transaction_free(out);
         return ZCL_ERR(-9, "swap_settle: scriptSig build failed (len=%zu)",
