@@ -44,6 +44,12 @@ static const char *const k_pc_core[] = {
 
 #if defined(ZCL_TESTING)
 static bool g_pc_force;
+static _Thread_local int64_t g_pc_now;
+void zcl_dev_land_precheck_test_now(int64_t now_s)
+{
+    g_pc_now = now_s > 0 ? now_s : 0;
+}
+
 void zcl_dev_land_precheck_test_force(bool on)
 {
     g_pc_force = on;
@@ -358,6 +364,14 @@ static bool pc_history_visit(const struct zcl_dev_proof_history_failure *row,
 
 #endif
 
+static int64_t pc_now(void)
+{
+#if defined(ZCL_TESTING)
+    if (g_pc_now > 0) return g_pc_now;
+#endif
+    return (int64_t)platform_time_wall_time_t();
+}
+
 /* Merge only a complete read; no partial callback result escapes refusal. */
 static void pc_history_learn(struct pc_run *r, const char *land,
                               struct zcl_land_precheck_gates *g)
@@ -374,7 +388,7 @@ static void pc_history_learn(struct pc_run *r, const char *land,
         pc_history_unproven(r, "history allocation unavailable");
         return;
     }
-    h->now = (int64_t)platform_time_wall_time_t();
+    h->now = pc_now();
     enum zcl_dev_proof_history_result result =
         zcl_dev_proof_history_failures(canonical, pc_history_visit, h);
     if (result != ZCL_PROOF_HISTORY_COMPLETE) {
@@ -616,7 +630,7 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     if (pc_land_dir(land_dir, dir, sizeof(dir)))
         (void)snprintf(ledger, sizeof(ledger), "%s/outcomes.jsonl", dir);
     zcl_land_precheck_gate_set(ledger[0] ? ledger : NULL,
-                               (int64_t)platform_time_wall_time_t(), g);
+                               pc_now(), g);
     r->out = zcl_malloc(PC_OUT_CAP, "dev_land_precheck.out");
     r->deadline = platform_time_monotonic_ms() + ZCL_LAND_PRECHECK_BUDGET_MS;
     if (ledger[0]) pc_history_learn(r, dir, g);

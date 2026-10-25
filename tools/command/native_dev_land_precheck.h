@@ -66,6 +66,8 @@ bool zcl_dev_land_precheck(const char *leaf, const char *wt,
 #if defined(ZCL_TESTING)
 /* Run the gates even while the landing proof stub is set. */
 void zcl_dev_land_precheck_test_force(bool on);
+/* Override precheck ledger/history window time only; nonpositive restores real time. */
+void zcl_dev_land_precheck_test_now(int64_t now_s);
 #endif
 
 #endif

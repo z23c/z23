@@ -191,6 +191,7 @@ static void dlx_isolate(const char *tag)
 
 static void dlx_restore(void)
 {
+    zcl_dev_land_precheck_test_now(0);
     if (g_dlx_had_xdg)
         setenv("XDG_STATE_HOME", g_dlx_saved_xdg, 1);
     else
@@ -13218,6 +13219,8 @@ static bool dlx_pc_file(const struct dlx_rig *rig, const char *name,
     return dlx_write(path, text);
 }
 
+#define DLX_PC_NOW INT64_C(1700000000)
+
 static bool dlx_pc_rig(struct dlx_rig *rig, const char *tag, bool with_lint,
                        const char *known)
 {
@@ -13228,6 +13231,7 @@ static bool dlx_pc_rig(struct dlx_rig *rig, const char *tag, bool with_lint,
     setenv("ZCL_LAND_PROOF_STUB", "running", 1);
     setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
     zcl_dev_land_precheck_test_force(true);
+    zcl_dev_land_precheck_test_now(DLX_PC_NOW);
     if (!dlx_pc_file(rig, "precheck-known", known))
         return false;
     if (!with_lint)
@@ -13301,7 +13305,7 @@ static void dlx_pc_row(char *out, size_t cap, int seq, const char *state,
                        const char *dim, int days_ago, const char *detail)
 {
     char ts[64];
-    time_t t = time(NULL) - (time_t)days_ago * 86400;
+    time_t t = (time_t)DLX_PC_NOW - (time_t)days_ago * 86400;
     struct tm tm_utc;
     (void)gmtime_r(&t, &tm_utc);
     (void)strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
@@ -13329,6 +13333,7 @@ static bool dlx_pc_owned_file(const char *root, const char *relative,
 static bool dlx_pc_history_archive(const char *suffix, int days_ago,
                                    const char *reason, char archive[1600])
 {
+    /* Fixed request/window clocks exercise ages without host elapsed time. */
     char root[512], wt[768], attempt[1200], request[320], failure[1200];
     if (!platform_state_root(root, sizeof(root))) return false;
     (void)snprintf(wt, sizeof(wt), "%s/land/wt", root);
@@ -13343,7 +13348,7 @@ static bool dlx_pc_history_archive(const char *suffix, int days_ago,
     (void)snprintf(request, sizeof(request), "zcl.dev_proof_request.v1\n"
         "1111111111111111111111111111111111111111\n"
         "2222222222222222222222222222222222222222\n%lld\n1\n",
-        (long long)time(NULL) - (long long)days_ago * 86400);
+        (long long)DLX_PC_NOW - (long long)days_ago * 86400);
     char relative[1300];
     (void)snprintf(relative, sizeof(relative), "%s/request", attempt);
     if (!dlx_pc_owned_file(wt, relative, request, 0600)) return false;
@@ -13529,7 +13534,7 @@ static bool dlx_pc_gate_set_learns(void)
     if (!dlx_pc_outcomes(rows))
         return false;
     (void)snprintf(path, sizeof(path), "%s/land/outcomes.jsonl", root);
-    zcl_land_precheck_gate_set(path, (int64_t)time(NULL), &g);
+    zcl_land_precheck_gate_set(path, DLX_PC_NOW, &g);
     ok = g.count == 5;
     for (size_t i = 0; i < g.count; i++) {
         ok = ok && strcmp(g.name[i], "check-too-old") != 0 &&
@@ -13539,7 +13544,7 @@ static bool dlx_pc_gate_set_learns(void)
     ok = ok && g.count == 5 && strcmp(g.name[0], "check-file-size-ceiling") == 0 &&
          strcmp(g.name[4], "check-learned-one") == 0;
     zcl_land_precheck_gate_set("/nonexistent/outcomes.jsonl",
-                               (int64_t)time(NULL), &g);
+                               DLX_PC_NOW, &g);
     ok = ok && g.count == 4;
     dlx_restore();
     return ok;
@@ -13865,6 +13870,7 @@ static int dlx_case_history_precheck(void)
         PASS();
     }
 _test_next:;
+    zcl_dev_land_precheck_test_now(0);
     return failures;
 }
 
@@ -13916,6 +13922,7 @@ static int dlx_case_precheck(void)
         PASS();
     }
 _test_next:;
+    zcl_dev_land_precheck_test_now(0);
     zcl_dev_land_precheck_test_force(false);
     return failures;
 }
@@ -13923,18 +13930,15 @@ _test_next:;
 static int dlx_case_empty_step(void)
 {
     int failures = 0;
-    TEST("land: a step over an empty queue is a no-op that returns at once") {
+    TEST("land: a step over an empty queue is a no-op that leaves the queue empty") {
         struct dlx_call c;
-        time_t t0, t1;
         dlx_isolate("empty");
-        t0 = time(NULL);
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT(strcmp(dlx_str(&c, "state"), "empty") == 0);
         dlx_end(&c);
-        t1 = time(NULL);
-        ASSERT((long long)(t1 - t0) < 10);
+        ASSERT(dlx_queue_empty());
         dlx_restore();
         PASS();
     }
