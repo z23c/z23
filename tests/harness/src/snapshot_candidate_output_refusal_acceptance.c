@@ -22,15 +22,19 @@ bool consensus_state_candidate_fail(
     return false;
 }
 
-int main(void)
+static bool create_candidate_refusal_dir(wchar_t *dir)
 {
-    wchar_t temp[MAX_PATH], dir[MAX_PATH], marker[MAX_PATH];
+    wchar_t temp[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp) ||
         swprintf(dir, MAX_PATH, L"%lsz23-candidate-refuse-%lu", temp,
                  (unsigned long)GetCurrentProcessId()) <= 0 ||
         !CreateDirectoryW(dir, NULL))
-        return 1;
-    (void)swprintf(marker, MAX_PATH, L"%ls\\sentinel", dir);
+        return false;
+    return true;
+}
+
+static bool write_sentinel_marker(const wchar_t *marker)
+{
     const char expected[] = "unchanged";
     DWORD amount = 0;
     HANDLE file = CreateFileW(marker, GENERIC_WRITE, 0, NULL, CREATE_NEW,
@@ -38,8 +42,12 @@ int main(void)
     if (file == INVALID_HANDLE_VALUE ||
         !WriteFile(file, expected, sizeof(expected), &amount, NULL) ||
         amount != sizeof(expected) || !CloseHandle(file))
-        return 1;
+        return false;
+    return true;
+}
 
+static bool candidate_output_open_refused(void)
+{
     struct consensus_state_candidate_request request = {0};
     request.output_dir_fd = 123;
     request.output_name = "must-not-exist.sqlite";
@@ -48,17 +56,36 @@ int main(void)
     if (consensus_state_candidate_output_open(&request, &output, &result) ||
         result.status != CONSENSUS_CANDIDATE_REFUSED ||
         output.binding.dirfd != -1 || output.binding.temp_fd != -1)
-        return 1;
+        return false;
+    return true;
+}
 
+static bool sentinel_marker_unchanged(const wchar_t *marker)
+{
+    const char expected[] = "unchanged";
     char actual[sizeof(expected)] = {0};
-    file = CreateFileW(marker, GENERIC_READ, FILE_SHARE_READ, NULL,
-                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    amount = 0;
+    DWORD amount = 0;
+    HANDLE file = CreateFileW(marker, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     bool unchanged = file != INVALID_HANDLE_VALUE &&
                      ReadFile(file, actual, sizeof(actual), &amount, NULL) &&
                      amount == sizeof(actual) &&
                      memcmp(actual, expected, sizeof(expected)) == 0;
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    return unchanged;
+}
+
+int main(void)
+{
+    wchar_t dir[MAX_PATH], marker[MAX_PATH];
+    if (!create_candidate_refusal_dir(dir))
+        return 1;
+    (void)swprintf(marker, MAX_PATH, L"%ls\\sentinel", dir);
+    if (!write_sentinel_marker(marker))
+        return 1;
+    if (!candidate_output_open_refused())
+        return 1;
+    bool unchanged = sentinel_marker_unchanged(marker);
     DeleteFileW(marker);
     RemoveDirectoryW(dir);
     if (!unchanged) return 1;
