@@ -221,22 +221,25 @@ struct tls_bottleneck {
     const char *reason;  /* "" unless stage is NULL */
 };
 
-static void tls_bottleneck_find(const struct telemetry_domain_schema *s,
-                                const void *snap,
-                                const struct tls_stage_set *set,
-                                struct tls_bottleneck *out)
+/* What one pass over the ladder's cursor leaves found. */
+struct tls_cursor_scan {
+    size_t worst_idx;  /* rung with the largest deficit to its upstream */
+    int64_t worst;     /* that deficit, in blocks */
+    bool found;        /* some rung sits below its immediate upstream */
+    bool any_cursor;   /* at least one cursor leaf was readable */
+};
+
+/* One pass over the ladder's cursor leaves, in rung order, tracking the rung
+ * whose cursor sits furthest below its immediate upstream's. All outputs are
+ * zeroed first, so a level or wholly unreadable ladder leaves found false. */
+static void tls_bottleneck_scan_cursors(
+    const struct telemetry_domain_schema *s, const void *snap,
+    const struct tls_stage_set *set, struct tls_cursor_scan *out)
 {
     memset(out, 0, sizeof *out);
-    out->basis = "none";
-    out->reason = "no_cursor_is_readable_and_no_stage_has_stepped";
-
     char key[TLS_STAGE_NAME_MAX + TLS_CURSOR_SUFFIX_LEN + 1];
     bool have_prev = false;
     int64_t prev = 0;
-    int64_t worst = 0;
-    size_t worst_idx = 0;
-    bool found = false;
-    bool any_cursor = false;
 
     for (size_t i = 0; i < set->count; i++) {
         int n = snprintf(key, sizeof key, "%s%s", set->name[i],
@@ -251,21 +254,35 @@ static void tls_bottleneck_find(const struct telemetry_domain_schema *s,
             have_prev = false;
             continue;
         }
-        any_cursor = true;
-        if (have_prev && prev > cur && (!found || prev - cur > worst)) {
-            worst = prev - cur;
-            worst_idx = i;
-            found = true;
+        out->any_cursor = true;
+        if (have_prev && prev > cur &&
+            (!out->found || prev - cur > out->worst)) {
+            out->worst = prev - cur;
+            out->worst_idx = i;
+            out->found = true;
         }
         prev = cur;
         have_prev = true;
     }
+}
 
-    if (found) {
-        out->stage = set->name[worst_idx];
+static void tls_bottleneck_find(const struct telemetry_domain_schema *s,
+                                const void *snap,
+                                const struct tls_stage_set *set,
+                                struct tls_bottleneck *out)
+{
+    memset(out, 0, sizeof *out);
+    out->basis = "none";
+    out->reason = "no_cursor_is_readable_and_no_stage_has_stepped";
+
+    struct tls_cursor_scan scan;
+    tls_bottleneck_scan_cursors(s, snap, set, &scan);
+
+    if (scan.found) {
+        out->stage = set->name[scan.worst_idx];
         out->basis = "cursor_deficit_to_upstream";
         out->behind_known = true;
-        out->behind_blocks = worst;
+        out->behind_blocks = scan.worst;
         out->reason = "";
         return;
     }
@@ -282,9 +299,9 @@ static void tls_bottleneck_find(const struct telemetry_domain_schema *s,
             return;
         }
         if (m->reason && m->reason[0])
-            out->reason = any_cursor ? m->reason
-                                     : "no_cursor_is_readable";
-    } else if (any_cursor) {
+            out->reason = scan.any_cursor ? m->reason
+                                          : "no_cursor_is_readable";
+    } else if (scan.any_cursor) {
         out->reason = "ladder_is_level_and_no_slowest_stage_leaf_exists";
     }
 }
