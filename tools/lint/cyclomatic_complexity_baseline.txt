@@ -775,7 +775,6 @@ engine/jobs/src/header_admit_stage.c:rewind_cursor_if_active_chain_reorged:22
 engine/jobs/src/header_admit_stage.c:step_admit:21
 engine/jobs/src/proof_validate_stage.c:step_validate:48
 engine/jobs/src/psc_join.c:psc_join:40
-engine/jobs/src/psc_range_fold.c:psc_compile_range:22
 engine/jobs/src/seal_rewind_executor.c:seal_rewind_to_nearest:23
 engine/jobs/src/stage_anchor.c:stage_anchor_cap_target_at_log_frontier:29
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:54

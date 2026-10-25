@@ -225,11 +225,12 @@ static void psc_digest(struct psc_coin *coins, size_t n,
     *out_supply = supply;
 }
 
-/* ── public entry ──────────────────────────────────────────────────────── */
-
-bool psc_compile_range(uint32_t lo, uint32_t hi, int k_workers, int s_shards,
-                       psc_block_provider_fn provider, void *provider_user,
-                       struct psc_range_result *out)
+/* Reject a null result, a missing provider or an empty range, and clamp
+ * worker and shard counts. False: out is null, or reject_kind is set. */
+static bool psc_prepare_range(uint32_t lo, uint32_t hi, int *out_workers,
+                              int *out_shards,
+                              psc_block_provider_fn provider,
+                              struct psc_range_result *out)
 {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
@@ -242,6 +243,8 @@ bool psc_compile_range(uint32_t lo, uint32_t hi, int k_workers, int s_shards,
         snprintf(out->reject_kind, sizeof(out->reject_kind), "empty_range");
         return false;
     }
+    int k_workers = *out_workers;
+    int s_shards = *out_shards;
     if (k_workers <= 0) {
         k_workers = cpu_topology_physical_cores();
         if (k_workers < 1) k_workers = 1;
@@ -251,6 +254,54 @@ bool psc_compile_range(uint32_t lo, uint32_t hi, int k_workers, int s_shards,
     if (s_shards < 1) s_shards = 1;
     out->k_workers = k_workers;
     out->s_shards = s_shards;
+    *out_workers = k_workers;
+    *out_shards = s_shards;
+    return true;
+}
+
+/* First non-empty worker reject wins; an empty set is "internal".
+ * Frees streams and rejects. */
+static void psc_release_failed_extract(struct psc_events *streams,
+                                       char (*rejects)[48], int k_workers,
+                                       struct psc_range_result *out)
+{
+    for (int i = 0; i < k_workers; i++) {
+        if (rejects[i][0]) {
+            snprintf(out->reject_kind, sizeof(out->reject_kind), "%s",
+                     rejects[i]);
+            break;
+        }
+    }
+    if (!out->reject_kind[0])
+        snprintf(out->reject_kind, sizeof(out->reject_kind), "internal");
+    for (int i = 0; i < k_workers; i++) psc_events_free(&streams[i]);
+    free(streams); free(rejects);
+}
+
+static bool psc_finish_join_reject(struct psc_coin *coins,
+                                   struct psc_event *ev, uint8_t *scripts,
+                                   const char *reject, int32_t reject_height,
+                                   int64_t t0, struct psc_range_result *out)
+{
+    bool is_reject = strcmp(reject, "spend_unknown_utxo") == 0 ||
+                     strcmp(reject, "utxo_collision") == 0;
+    snprintf(out->reject_kind, sizeof(out->reject_kind), "%s",
+             reject[0] ? reject : "internal");
+    out->reject_height = reject_height;
+    out->ok = false;
+    free(coins); free(ev); free(scripts);
+    out->total_us = (double)(platform_time_monotonic_us() - t0);
+    return is_reject;
+}
+
+/* ── public entry ──────────────────────────────────────────────────────── */
+
+bool psc_compile_range(uint32_t lo, uint32_t hi, int k_workers, int s_shards,
+                       psc_block_provider_fn provider, void *provider_user,
+                       struct psc_range_result *out)
+{
+    if (!psc_prepare_range(lo, hi, &k_workers, &s_shards, provider, out))
+        return false;
 
     int64_t t0 = platform_time_monotonic_us();
 
@@ -276,17 +327,7 @@ bool psc_compile_range(uint32_t lo, uint32_t hi, int k_workers, int s_shards,
     out->extract_us = (double)(t1 - t0);
 
     if (atomic_load(&ectx.failed)) {
-        for (int i = 0; i < k_workers; i++) {
-            if (rejects[i][0]) {
-                snprintf(out->reject_kind, sizeof(out->reject_kind), "%s",
-                         rejects[i]);
-                break;
-            }
-        }
-        if (!out->reject_kind[0])
-            snprintf(out->reject_kind, sizeof(out->reject_kind), "internal");
-        for (int i = 0; i < k_workers; i++) psc_events_free(&streams[i]);
-        free(streams); free(rejects);
+        psc_release_failed_extract(streams, rejects, k_workers, out);
         return false;
     }
 
@@ -317,17 +358,10 @@ bool psc_compile_range(uint32_t lo, uint32_t hi, int k_workers, int s_shards,
     out->join_us = (double)(t3 - t2);
 
     if (!joined) {
-        bool is_reject = strcmp(reject, "spend_unknown_utxo") == 0 ||
-                         strcmp(reject, "utxo_collision") == 0;
-        snprintf(out->reject_kind, sizeof(out->reject_kind), "%s",
-                 reject[0] ? reject : "internal");
-        out->reject_height = reject_height;
-        out->ok = false;
-        free(coins); free(ev); free(scripts);
-        out->total_us = (double)(platform_time_monotonic_us() - t0);
         /* A typed ordering reject is a definite verdict (return true); a hard
          * internal error is a failure (return false). */
-        return is_reject;
+        return psc_finish_join_reject(coins, ev, scripts, reject,
+                                      reject_height, t0, out);
     }
 
     /* Phase (c): terminal digest (canonical (txid,vout) SHA3). */
