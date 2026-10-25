@@ -346,38 +346,40 @@ static int test_async_fold_contiguity(void)
     return failures;
 }
 
-int test_explorer_index(void)
+/* ── Explorer-index fixture checks ───────────────────────────────────────
+ * Each helper below runs one labelled "... OK/FAIL" check (or one group of
+ * them) with the exact ordering and wording the test has always used, and
+ * returns its failure count. */
+static bool explorer_fixture_db_open(struct node_db *ndb)
 {
-    int failures = 0;
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-
     printf("explorer_index: open in-memory node.db... ");
-    if (node_db_open(&ndb, ":memory:") && ndb.open) {
+    if (node_db_open(ndb, ":memory:") && ndb->open) {
         printf("OK\n");
-    } else {
-        printf("FAIL\n");
-        return 1;   /* nothing else can run */
+        return true;
     }
+    printf("FAIL\n");
+    return false;
+}
 
-    /* Build one tx: 1 real (non-coinbase) input, 2 outputs — a transparent
-     * P2PKH output and an OP_RETURN output. */
-    struct transaction tx;
-    transaction_init(&tx);
-    transaction_alloc(&tx, 1, 2);
+/* Build one tx: 1 real (non-coinbase) input, 2 outputs — a transparent
+ * P2PKH output and an OP_RETURN output. */
+static void build_fixture_tx(struct transaction *tx)
+{
+    transaction_init(tx);
+    transaction_alloc(tx, 1, 2);
 
     /* Input spends a known prevout. */
-    uint256_set_null(&tx.vin[0].prevout.hash);
-    tx.vin[0].prevout.hash.data[0] = 0xAB;
-    tx.vin[0].prevout.n = 7;
-    tx.vin[0].sequence = 0xFFFFFFFFu;
-    tx.vin[0].script_sig.size = 0;
+    uint256_set_null(&tx->vin[0].prevout.hash);
+    tx->vin[0].prevout.hash.data[0] = 0xAB;
+    tx->vin[0].prevout.n = 7;
+    tx->vin[0].sequence = 0xFFFFFFFFu;
+    tx->vin[0].script_sig.size = 0;
 
     /* vout[0]: P2PKH scriptPubKey (OP_DUP OP_HASH160 <20> OP_EQUALVERIFY
      * OP_CHECKSIG) so utxo_classify_script extracts an address. */
-    tx.vout[0].value = 5 * COIN;
+    tx->vout[0].value = 5 * COIN;
     {
-        struct script *sp = &tx.vout[0].script_pub_key;
+        struct script *sp = &tx->vout[0].script_pub_key;
         sp->data[0] = 0x76;        /* OP_DUP */
         sp->data[1] = 0xa9;        /* OP_HASH160 */
         sp->data[2] = 0x14;        /* push 20 */
@@ -389,16 +391,217 @@ int test_explorer_index(void)
     }
 
     /* vout[1]: OP_RETURN with arbitrary payload. */
-    tx.vout[1].value = 0;
+    tx->vout[1].value = 0;
     {
-        struct script *sp = &tx.vout[1].script_pub_key;
+        struct script *sp = &tx->vout[1].script_pub_key;
         sp->data[0] = 0x6a;        /* OP_RETURN */
         sp->data[1] = 0x04;        /* push 4 */
         sp->data[2] = 'D'; sp->data[3] = 'A'; sp->data[4] = 'T'; sp->data[5] = 'A';
         sp->size = 6;
     }
-    tx.lock_time = 0;
-    transaction_compute_hash(&tx);
+    tx->lock_time = 0;
+    transaction_compute_hash(tx);
+}
+
+/* Print `label... `, then OK when COUNT(*) of `sql` equals `want`, else
+ * FAIL (got n). Returns 1 on mismatch, else 0. */
+static int check_row_count(struct node_db *ndb, const char *label,
+                           const char *sql, int want)
+{
+    printf("%s... ", label);
+    int n = count_rows(ndb, sql);
+    if (n == want) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (got %d)\n", n);
+    return 1;
+}
+
+/* Index the fixture block once, then assert the projection tables hold
+ * exactly the expected rows. */
+static int index_and_check_projection(struct node_db *ndb, struct block *blk,
+                                      struct block_index *pindex,
+                                      uint8_t prev_receipt[32],
+                                      uint8_t out_receipt[32],
+                                      int64_t *sprout_v, int64_t *sapling_v)
+{
+    int failures = 0;
+
+    printf("explorer_index: index one synthetic block... ");
+    bool indexed = explorer_index_block(ndb, blk, pindex, prev_receipt,
+                                        out_receipt, sprout_v, sapling_v);
+    if (indexed) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+
+    failures += check_row_count(ndb, "explorer_index: tx_outputs has 2 rows",
+                                "SELECT COUNT(*) FROM tx_outputs", 2);
+    failures += check_row_count(ndb,
+        "explorer_index: P2PKH output recorded an address_hash",
+        "SELECT COUNT(*) FROM tx_outputs WHERE address_hash IS NOT NULL", 1);
+    failures += check_row_count(ndb,
+        "explorer_index: tx_inputs has 1 row (input recorded)",
+        "SELECT COUNT(*) FROM tx_inputs", 1);
+    failures += check_row_count(ndb, "explorer_index: op_returns has 1 row",
+                                "SELECT COUNT(*) FROM op_returns", 1);
+    failures += check_row_count(ndb,
+        "explorer_index: view_integrity has 1 row for the height",
+        "SELECT COUNT(*) FROM view_integrity WHERE height=1", 1);
+    return failures;
+}
+
+/* The model reads back the exact receipt stored for height 1. */
+static int check_receipt_height_read(struct node_db *ndb,
+                                     const uint8_t out_receipt[32])
+{
+    printf("explorer_index: model reads the exact receipt height... ");
+    uint8_t got[32] = {0};
+    if (db_view_integrity_get(ndb, 1, got) &&
+        memcmp(got, out_receipt, 32) == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+/* Reads at a missing and a negative height must fail without touching the
+ * caller's output buffer. */
+static int check_missing_receipt_read_untouched(struct node_db *ndb)
+{
+    printf("explorer_index: missing/negative receipt leaves output untouched... ");
+    uint8_t sentinel[32], before[32];
+    memset(sentinel, 0x6C, sizeof(sentinel));
+    memcpy(before, sentinel, sizeof(before));
+    bool missing = db_view_integrity_get(ndb, 99, sentinel);
+    bool negative = db_view_integrity_get(ndb, -1, sentinel);
+    if (!missing && !negative && memcmp(sentinel, before, 32) == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+/* Idempotency: re-index the same block; INSERT OR REPLACE must not
+ * duplicate any row. */
+static int check_reindex_idempotent(struct node_db *ndb, struct block *blk,
+                                    struct block_index *pindex,
+                                    uint8_t prev_receipt[32],
+                                    uint8_t out_receipt[32],
+                                    int64_t *sprout_v, int64_t *sapling_v)
+{
+    printf("explorer_index: re-index is idempotent (no duplicate rows)... ");
+    bool reindexed = explorer_index_block(ndb, blk, pindex, prev_receipt,
+                                          out_receipt, sprout_v, sapling_v);
+    int n_out = count_rows(ndb, "SELECT COUNT(*) FROM tx_outputs");
+    int n_in  = count_rows(ndb, "SELECT COUNT(*) FROM tx_inputs");
+    int n_or  = count_rows(ndb, "SELECT COUNT(*) FROM op_returns");
+    int n_vi  = count_rows(ndb, "SELECT COUNT(*) FROM view_integrity");
+    if (reindexed && n_out == 2 && n_in == 1 && n_or == 1 && n_vi == 1) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (out=%d in=%d or=%d vi=%d)\n", n_out, n_in, n_or, n_vi);
+    return 1;
+}
+
+/* The integrity receipt must be deterministic + non-zero. */
+static int check_receipt_deterministic(struct node_db *ndb, struct block *blk,
+                                       struct block_index *pindex,
+                                       uint8_t prev_receipt[32],
+                                       const uint8_t out_receipt[32])
+{
+    printf("explorer_index: integrity receipt is non-zero + deterministic... ");
+    uint8_t zero[32] = {0};
+    uint8_t r2[32];
+    explorer_index_block(ndb, blk, pindex, prev_receipt, r2, NULL, NULL);
+    if (memcmp(out_receipt, zero, 32) != 0 &&
+        memcmp(out_receipt, r2, 32) == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+/* A receipt saved at height 2 must not disturb the height-1 read. */
+static int check_adjacent_height_reads(struct node_db *ndb,
+                                       const uint8_t out_receipt[32])
+{
+    printf("explorer_index: receipt read selects adjacent heights exactly... ");
+    uint8_t second[32], got_first[32] = {0}, got_second[32] = {0};
+    memset(second, 0xA5, sizeof(second));
+    bool saved = db_view_integrity_save(ndb, 2, second);
+    bool first_ok = db_view_integrity_get(ndb, 1, got_first);
+    bool second_ok = db_view_integrity_get(ndb, 2, got_second);
+    if (saved && first_ok && second_ok &&
+        memcmp(got_first, out_receipt, 32) == 0 &&
+        memcmp(got_second, second, 32) == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+/* Receipt rows of malformed lengths (2-byte and 33-byte blobs) must be
+ * ignored without touching the caller's output buffer. */
+static int check_malformed_receipt_lengths(struct node_db *ndb)
+{
+    printf("explorer_index: malformed receipt lengths leave output untouched... ");
+    uint8_t sentinel[32], before[32];
+    memset(sentinel, 0x3D, sizeof(sentinel));
+    memcpy(before, sentinel, sizeof(before));
+    int rc = sqlite3_exec(ndb->db,
+        "INSERT INTO view_integrity(height,sha3_hash) VALUES"
+        "(3,x'0102'),(4,zeroblob(33))",
+        NULL, NULL, NULL); // raw-sql-ok:test-malformed-receipt-fixture
+    bool short_found = db_view_integrity_get(ndb, 3, sentinel);
+    bool long_found = db_view_integrity_get(ndb, 4, sentinel);
+    if (rc == SQLITE_OK && !short_found && !long_found &&
+        memcmp(sentinel, before, 32) == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+/* Reading a receipt after node_db_close must fail without touching the
+ * caller's output buffer. */
+static int check_closed_db_read_untouched(struct node_db *ndb)
+{
+    printf("explorer_index: closed-db receipt read leaves output untouched... ");
+    uint8_t sentinel[32], before[32];
+    memset(sentinel, 0xB7, sizeof(sentinel));
+    memcpy(before, sentinel, sizeof(before));
+    bool found = db_view_integrity_get(ndb, 1, sentinel);
+    if (!found && memcmp(sentinel, before, 32) == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+int test_explorer_index(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+
+    if (!explorer_fixture_db_open(&ndb))
+        return 1;   /* nothing else can run */
+
+    /* Build one tx: 1 real (non-coinbase) input, 2 outputs — a transparent
+     * P2PKH output and an OP_RETURN output. */
+    struct transaction tx;
+    build_fixture_tx(&tx);
 
     /* Wrap in a one-tx block at height 1. */
     struct block blk;
@@ -418,100 +621,16 @@ int test_explorer_index(void)
     uint8_t out_receipt[32];
     int64_t sprout_v = 0, sapling_v = 0;
 
-    printf("explorer_index: index one synthetic block... ");
-    bool indexed = explorer_index_block(&ndb, &blk, &pindex, prev_receipt,
-                                        out_receipt, &sprout_v, &sapling_v);
-    if (indexed) printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
-
-    printf("explorer_index: tx_outputs has 2 rows... ");
-    { int n = count_rows(&ndb, "SELECT COUNT(*) FROM tx_outputs");
-      if (n == 2) printf("OK\n"); else { printf("FAIL (got %d)\n", n); failures++; } }
-
-    printf("explorer_index: P2PKH output recorded an address_hash... ");
-    { int n = count_rows(&ndb,
-        "SELECT COUNT(*) FROM tx_outputs WHERE address_hash IS NOT NULL");
-      if (n == 1) printf("OK\n"); else { printf("FAIL (got %d)\n", n); failures++; } }
-
-    printf("explorer_index: tx_inputs has 1 row (input recorded)... ");
-    { int n = count_rows(&ndb, "SELECT COUNT(*) FROM tx_inputs");
-      if (n == 1) printf("OK\n"); else { printf("FAIL (got %d)\n", n); failures++; } }
-
-    printf("explorer_index: op_returns has 1 row... ");
-    { int n = count_rows(&ndb, "SELECT COUNT(*) FROM op_returns");
-      if (n == 1) printf("OK\n"); else { printf("FAIL (got %d)\n", n); failures++; } }
-
-    printf("explorer_index: view_integrity has 1 row for the height... ");
-    { int n = count_rows(&ndb, "SELECT COUNT(*) FROM view_integrity WHERE height=1");
-      if (n == 1) printf("OK\n"); else { printf("FAIL (got %d)\n", n); failures++; } }
-
-    printf("explorer_index: model reads the exact receipt height... ");
-    { uint8_t got[32] = {0};
-      if (db_view_integrity_get(&ndb, 1, got) &&
-          memcmp(got, out_receipt, 32) == 0)
-          printf("OK\n");
-      else { printf("FAIL\n"); failures++; } }
-
-    printf("explorer_index: missing/negative receipt leaves output untouched... ");
-    { uint8_t sentinel[32], before[32];
-      memset(sentinel, 0x6C, sizeof(sentinel));
-      memcpy(before, sentinel, sizeof(before));
-      bool missing = db_view_integrity_get(&ndb, 99, sentinel);
-      bool negative = db_view_integrity_get(&ndb, -1, sentinel);
-      if (!missing && !negative && memcmp(sentinel, before, 32) == 0)
-          printf("OK\n");
-      else { printf("FAIL\n"); failures++; } }
-
-    /* Idempotency: re-index the same block; INSERT OR REPLACE must not
-     * duplicate any row. */
-    printf("explorer_index: re-index is idempotent (no duplicate rows)... ");
-    bool reindexed = explorer_index_block(&ndb, &blk, &pindex, prev_receipt,
-                                          out_receipt, &sprout_v, &sapling_v);
-    int n_out = count_rows(&ndb, "SELECT COUNT(*) FROM tx_outputs");
-    int n_in  = count_rows(&ndb, "SELECT COUNT(*) FROM tx_inputs");
-    int n_or  = count_rows(&ndb, "SELECT COUNT(*) FROM op_returns");
-    int n_vi  = count_rows(&ndb, "SELECT COUNT(*) FROM view_integrity");
-    if (reindexed && n_out == 2 && n_in == 1 && n_or == 1 && n_vi == 1)
-        printf("OK\n");
-    else { printf("FAIL (out=%d in=%d or=%d vi=%d)\n", n_out, n_in, n_or, n_vi);
-           failures++; }
-
-    /* The integrity receipt must be deterministic + non-zero. */
-    printf("explorer_index: integrity receipt is non-zero + deterministic... ");
-    { uint8_t zero[32] = {0};
-      uint8_t r2[32];
-      explorer_index_block(&ndb, &blk, &pindex, prev_receipt, r2, NULL, NULL);
-      if (memcmp(out_receipt, zero, 32) != 0 &&
-          memcmp(out_receipt, r2, 32) == 0)
-          printf("OK\n");
-      else { printf("FAIL\n"); failures++; } }
-
-    printf("explorer_index: receipt read selects adjacent heights exactly... ");
-    { uint8_t second[32], got_first[32] = {0}, got_second[32] = {0};
-      memset(second, 0xA5, sizeof(second));
-      bool saved = db_view_integrity_save(&ndb, 2, second);
-      bool first_ok = db_view_integrity_get(&ndb, 1, got_first);
-      bool second_ok = db_view_integrity_get(&ndb, 2, got_second);
-      if (saved && first_ok && second_ok &&
-          memcmp(got_first, out_receipt, 32) == 0 &&
-          memcmp(got_second, second, 32) == 0)
-          printf("OK\n");
-      else { printf("FAIL\n"); failures++; } }
-
-    printf("explorer_index: malformed receipt lengths leave output untouched... ");
-    { uint8_t sentinel[32], before[32];
-      memset(sentinel, 0x3D, sizeof(sentinel));
-      memcpy(before, sentinel, sizeof(before));
-      int rc = sqlite3_exec(ndb.db,
-          "INSERT INTO view_integrity(height,sha3_hash) VALUES"
-          "(3,x'0102'),(4,zeroblob(33))",
-          NULL, NULL, NULL); // raw-sql-ok:test-malformed-receipt-fixture
-      bool short_found = db_view_integrity_get(&ndb, 3, sentinel);
-      bool long_found = db_view_integrity_get(&ndb, 4, sentinel);
-      if (rc == SQLITE_OK && !short_found && !long_found &&
-          memcmp(sentinel, before, 32) == 0)
-          printf("OK\n");
-      else { printf("FAIL\n"); failures++; } }
+    failures += index_and_check_projection(&ndb, &blk, &pindex, prev_receipt,
+                                           out_receipt, &sprout_v, &sapling_v);
+    failures += check_receipt_height_read(&ndb, out_receipt);
+    failures += check_missing_receipt_read_untouched(&ndb);
+    failures += check_reindex_idempotent(&ndb, &blk, &pindex, prev_receipt,
+                                         out_receipt, &sprout_v, &sapling_v);
+    failures += check_receipt_deterministic(&ndb, &blk, &pindex, prev_receipt,
+                                            out_receipt);
+    failures += check_adjacent_height_reads(&ndb, out_receipt);
+    failures += check_malformed_receipt_lengths(&ndb);
 
     blk.vtx = NULL;   /* tx is stack-local; don't let block_free touch it */
     blk.num_vtx = 0;
@@ -525,14 +644,7 @@ int test_explorer_index(void)
     /* Late-join async fold contiguity (own node.db + db service). */
     failures += test_async_fold_contiguity();
 
-    printf("explorer_index: closed-db receipt read leaves output untouched... ");
-    { uint8_t sentinel[32], before[32];
-      memset(sentinel, 0xB7, sizeof(sentinel));
-      memcpy(before, sentinel, sizeof(before));
-      bool found = db_view_integrity_get(&ndb, 1, sentinel);
-      if (!found && memcmp(sentinel, before, 32) == 0)
-          printf("OK\n");
-      else { printf("FAIL\n"); failures++; } }
+    failures += check_closed_db_read_untouched(&ndb);
 
     return failures;
 }
