@@ -842,7 +842,8 @@ static bool attempt_id(char out[LT_ATTEMPT_ID])
 /* One z23-engine-unit round on the lane with the task file in the unit
  * directory; state and log files are named per attempt. Every round carries a
  * unit kind, the model and a fresh attempt id so it leaves a token receipt.
- * Returns its status. */
+ * The build kind has no prompt template on origin/main: this round needs
+ * lane/engine-kinds (60b3fa3fa) landed first. Returns its status. */
 static int engine_run(struct tick *t, const char *taskname, const char *statename,
                       const char *logname, const char *label)
 {
@@ -1755,7 +1756,7 @@ static bool build_review_prompt(struct tick *t, const char *path)
         return false;
     }
     const int n = snprintf(p, cap,
-        "You are a NON-AUTHOR reviewer of one Z23 commit in the current git worktree. You can only read files (Read, Grep, Glob); you cannot run commands or edit anything.\n"
+        "You are a NON-AUTHOR reviewer of one Z23 commit in the current git worktree. Read the files and change nothing: the lane is checked after your reply, and any edit holds the commit.\n"
         "%s"
         "End your reply with exactly one final line: 'VERDICT: LAND' or 'VERDICT: HOLD <reason with file:line>'.\n"
         "\n----- git show HEAD -----\n%s",
@@ -1796,11 +1797,11 @@ static char *review_text(const struct tick *t)
 }
 
 /* The one-shot model call, serialised across every finish and the hourly tick
- * by a blocking flock on --haiku-lock. It runs as a read-only engine_unit
- * review in the lane (kind review: a report unit that engine_unit holds to
- * Read, Grep and Glob, with a fresh attempt id so it leaves a receipt). A
- * reviewer that still changes the lane is caught by the stage_review check.
- * False when the lock cannot be taken. */
+ * by a blocking flock on --haiku-lock. It runs as an engine_unit review in the
+ * lane (kind review: a report unit, with a fresh attempt id so it leaves a
+ * receipt). Read-only is the prompt's request, not an engine_unit guarantee
+ * until lane/engine-kinds lands: a reviewer that changes the lane is caught by
+ * the stage_review check. False when the lock cannot be taken. */
 static bool review_call(struct tick *t, const char *prompt_path)
 {
     char dir[LT_PATH], state[LT_PATH], log[LT_PATH], secs[24];
