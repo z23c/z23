@@ -329,6 +329,44 @@ bool snapsync_is_active(void)
            st.state == SNAPSYNC_VERIFYING;
 }
 
+/* Check coins_best_block — if set to a meaningful height, UTXOs exist */
+static bool snapsync_coins_best_block_has_real_utxos(
+    const struct snapshot_sync_service *svc)
+{
+    uint8_t cb_buf[32] = {0};
+    size_t cb_len = 0;
+    if (node_db_state_get(svc->ndb, "coins_best_block",
+                          cb_buf, sizeof(cb_buf), &cb_len) && cb_len == 32) {
+        bool all_zero = true;
+        for (int i = 0; i < 32; i++)
+            if (cb_buf[i]) { all_zero = false; break; }
+        if (!all_zero) {
+            /* coins_best_block is set.  Check that it points to a block
+             * at a meaningful height (not just h=587 from a failed partial
+             * connect).  If the height is below the snapshot offer height
+             * and below a safety threshold, we're still waiting. */
+            int64_t utxo_count = 0;
+            struct snapshot_store_sqlite_ctx sctx;
+            struct snapshot_store_port store = {0};
+            if (snapsync_bind_store_internal(&sctx, svc->ndb, &store).ok)
+                (void)store.utxo_count(store.self, &utxo_count);
+            /* A real snapshot import produces 1M+ UTXOs.  A partial
+             * block connect from genesis produces very few. */
+            if (utxo_count > 100000)
+                return true;
+        }
+    }
+    return false;
+}
+
+static bool snapsync_status_in_active_exchange(
+    const struct snapsync_status *st)
+{
+    return st->state == SNAPSYNC_NEGOTIATING ||
+           st->state == SNAPSYNC_RECEIVING ||
+           st->state == SNAPSYNC_VERIFYING;
+}
+
 bool snapsync_awaiting_utxos(void)
 {
     struct snapshot_sync_service *svc = app_runtime_snapshot_sync();
@@ -359,30 +397,8 @@ bool snapsync_awaiting_utxos(void)
     if (coins_kv_count(progress_store_db()) > 100000)
         return false;  /* real UTXO set exists (coins_kv authority) */
 
-    /* Check coins_best_block — if set to a meaningful height, UTXOs exist */
-    uint8_t cb_buf[32] = {0};
-    size_t cb_len = 0;
-    if (node_db_state_get(svc->ndb, "coins_best_block",
-                          cb_buf, sizeof(cb_buf), &cb_len) && cb_len == 32) {
-        bool all_zero = true;
-        for (int i = 0; i < 32; i++)
-            if (cb_buf[i]) { all_zero = false; break; }
-        if (!all_zero) {
-            /* coins_best_block is set.  Check that it points to a block
-             * at a meaningful height (not just h=587 from a failed partial
-             * connect).  If the height is below the snapshot offer height
-             * and below a safety threshold, we're still waiting. */
-            int64_t utxo_count = 0;
-            struct snapshot_store_sqlite_ctx sctx;
-            struct snapshot_store_port store = {0};
-            if (snapsync_bind_store_internal(&sctx, svc->ndb, &store).ok)
-                (void)store.utxo_count(store.self, &utxo_count);
-            /* A real snapshot import produces 1M+ UTXOs.  A partial
-             * block connect from genesis produces very few. */
-            if (utxo_count > 100000)
-                return false;  /* real UTXO set exists */
-        }
-    }
+    if (snapsync_coins_best_block_has_real_utxos(svc))
+        return false;  /* real UTXO set exists */
 
     /* If we get here, UTXO count is low (<100K) — check if snapshot
      * sync is still a possibility (not yet completed or permanently
@@ -396,9 +412,7 @@ bool snapsync_awaiting_utxos(void)
      * stays at h=0 forever even as block bodies arrive). Only treat
      * NEGOTIATING / RECEIVING / VERIFYING as "actively waiting". In
      * IDLE state, fall back to genesis-up sync. */
-    if (st.state == SNAPSYNC_NEGOTIATING ||
-        st.state == SNAPSYNC_RECEIVING ||
-        st.state == SNAPSYNC_VERIFYING)
+    if (snapsync_status_in_active_exchange(&st))
         return true;  /* actively in a snapshot exchange */
 
     return false;
@@ -673,4 +687,3 @@ void snapsync_get_status_snapshot(const struct snapshot_sync_service *svc,
     out->staged_row_count = snapsync_staging_count_internal(svc->ndb);
     snapsync_service_unlock_internal();
 }
-

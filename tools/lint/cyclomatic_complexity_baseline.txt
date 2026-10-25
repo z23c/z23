@@ -1511,7 +1511,6 @@ engine/services/src/shielded_history_promote_service.c:shielded_history_promote_
 engine/services/src/slo_ledger_summary.c:push_summary:45
 engine/services/src/slo_ledger_summary.c:slo_ledger_summary_render_path:39
 engine/services/src/snapshot_fetch.c:snapsync_apply_chunk_local:25
-engine/services/src/snapshot_sync_service.c:snapsync_awaiting_utxos:18
 engine/services/src/snapshot_verify.c:snapsync_build_fc_response:26
 engine/services/src/snapshot_verify.c:snapsync_finalize:16
 engine/services/src/snapshot_verify.c:snapsync_finalize_write:22
