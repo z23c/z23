@@ -1182,7 +1182,6 @@ engine/controllers/src/event_timeline_filter_controller.c:timeline_push_filters:
 engine/controllers/src/explain_native_handlers.c:explain_build:26
 engine/controllers/src/explain_native_handlers.c:explain_compose_health:26
 engine/controllers/src/explain_native_handlers.c:explain_compose_sync:57
-engine/controllers/src/fact_writers_coverage.c:fw_scan_header:19
 engine/controllers/src/file_controller.c:file_manifest_build:20
 engine/controllers/src/file_controller.c:file_manifest_load:23
 engine/controllers/src/health_controller.c:rpc_getservicehealth:30

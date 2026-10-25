@@ -40,6 +40,39 @@ static bool fw_is_mutating_name(const char *fn)
     return false;
 }
 
+/* Pull the declared function name off a line that opens `bool <ident>(`,
+ * skipping the space run after the keyword and requiring the '(' that starts
+ * the parameter list; false when the line opens no such declaration. */
+static bool fw_parse_bool_decl_name(const char *line, char *fn, size_t fnmax)
+{
+    const char *p = line;
+    if (strncmp(p, "bool ", 5) != 0) return false;   /* file-scope decl only */
+    p += 5;
+    while (*p == ' ') p++;
+    size_t k = 0;
+    while (fw_ident_char(*p) && k + 1 < fnmax) fn[k++] = *p++;
+    fn[k] = '\0';
+    if (k == 0 || *p != '(') return false;
+    return true;
+}
+
+/* join to the terminating ';' so a multi-line prototype is one string */
+static void fw_join_decl_lines(struct fw_file *f, size_t ln, char *decl,
+                               size_t declmax)
+{
+    size_t o = 0;
+    decl[0] = '\0';
+    for (size_t i = 0; i < 8 && ln + i <= f->nlines; i++) {
+        char cur[1024];
+        fw_file_line(f, ln + i, cur, sizeof(cur));
+        for (const char *q = cur; *q && o + 2 < declmax; q++)
+            decl[o++] = *q;
+        if (o + 1 < declmax) decl[o++] = ' ';
+        decl[o] = '\0';
+        if (strchr(cur, ';')) break;
+    }
+}
+
 /* Scan one declared header for `bool <ident>(… const char *<key_column> …)`
  * declarations whose name mutates, and report the unclaimed ones. */
 static int fw_scan_header(const char *root, const struct fw_store_row *sr,
@@ -53,28 +86,10 @@ static int fw_scan_header(const char *root, const struct fw_store_row *sr,
     for (size_t ln = 1; ln <= f.nlines; ln++) {
         char line[1024];
         fw_file_line(&f, ln, line, sizeof(line));
-        const char *p = line;
-        if (strncmp(p, "bool ", 5) != 0) continue;   /* file-scope decl only */
-        p += 5;
-        while (*p == ' ') p++;
         char fn[FW_MACRO_NAME_MAX];
-        size_t k = 0;
-        while (fw_ident_char(*p) && k + 1 < sizeof(fn)) fn[k++] = *p++;
-        fn[k] = '\0';
-        if (k == 0 || *p != '(') continue;
-        /* join to the terminating ';' so a multi-line prototype is one string */
+        if (!fw_parse_bool_decl_name(line, fn, sizeof(fn))) continue;
         char decl[2048];
-        size_t o = 0;
-        decl[0] = '\0';
-        for (size_t i = 0; i < 8 && ln + i <= f.nlines; i++) {
-            char cur[1024];
-            fw_file_line(&f, ln + i, cur, sizeof(cur));
-            for (const char *q = cur; *q && o + 2 < sizeof(decl); q++)
-                decl[o++] = *q;
-            if (o + 1 < sizeof(decl)) decl[o++] = ' ';
-            decl[o] = '\0';
-            if (strchr(cur, ';')) break;
-        }
+        fw_join_decl_lines(&f, ln, decl, sizeof(decl));
         if (!strstr(decl, keyparam)) continue;
         if (!fw_is_mutating_name(fn)) continue;
         if (fw_api_claimed(sr->store, fn)) continue;
