@@ -500,6 +500,89 @@ static size_t mo_case_len(const struct mo_refusal_case *c)
     return c->len < 0 ? strlen(c->body) : (size_t)c->len;
 }
 
+/* How a malformed document's refusal misbehaved; MO_REFUSAL_OK means the
+ * refusal behaved. The caller maps each fault to its own FAIL line: a
+ * printf here would name the helper, not the test function. */
+enum mo_refusal_fault {
+    MO_REFUSAL_OK = 0,
+    MO_REFUSAL_ACCEPTED,
+    MO_REFUSAL_MODIFIED_OUT,
+    MO_REFUSAL_NO_REASON,
+    MO_REFUSAL_REASON_UNTERMINATED,
+};
+
+/* Parse one case against the sentinel and classify the refusal, leaving the
+ * reason token in `reason` for the caller's discrimination check. */
+static enum mo_refusal_fault mo_check_refusal(
+    const struct mo_refusal_case *c, const struct mesh_observation *sentinel,
+    char *reason, size_t reason_cap)
+{
+    struct mesh_observation out;
+    memcpy(&out, sentinel, sizeof(out));
+    memset(reason, 0, reason_cap);
+    bool ok = mesh_observation_parse_json(c->body, mo_case_len(c), &out,
+                                          reason);
+    if (ok) return MO_REFUSAL_ACCEPTED;
+    if (memcmp(&out, sentinel, sizeof(out)) != 0)
+        return MO_REFUSAL_MODIFIED_OUT;
+    if (reason[0] == '\0') return MO_REFUSAL_NO_REASON;
+    /* a token, not a sentence, and NUL-terminated inside 32 bytes */
+    size_t rl = 0;
+    while (rl < reason_cap && reason[rl] != '\0') rl++;
+    if (rl >= reason_cap) return MO_REFUSAL_REASON_UNTERMINATED;
+    return MO_REFUSAL_OK;
+}
+
+/* Count the distinct reason tokens across the refused cases. */
+static int mo_count_distinct_reasons(const char (*reasons)[32], size_t n)
+{
+    int distinct = 0;
+    for (size_t i = 0; i < n; i++) {
+        bool dup = false;
+        for (size_t j = 0; j < i; j++)
+            if (strcmp(reasons[i], reasons[j]) == 0) dup = true;
+        if (!dup) distinct++;
+    }
+    return distinct;
+}
+
+/* Fill buf with the document carrying a 4 KB onion string; returns the
+ * document length. */
+static int mo_fill_huge_onion(char *buf, size_t cap)
+{
+    int hn = snprintf(buf, cap,
+                      "{\"schema\":\"%s\",\"self\":{\"onion\":\"",
+                      MESH_OBS_SCHEMA);
+    for (int i = 0; i < 4096; i++) buf[hn + i] = 'a';
+    hn += 4096;
+    hn += snprintf(buf + hn, cap - (size_t)hn, "\"}}");
+    return hn;
+}
+
+/* Fill buf with the document declaring 10 000 edges; returns the document
+ * length. */
+static int mo_fill_many_edges(char *buf, size_t cap)
+{
+    int mn = snprintf(buf, cap,
+                      "{\"schema\":\"%s\",\"self\":{},\"edges\":[",
+                      MESH_OBS_SCHEMA);
+    for (int i = 0; i < 10000 && mn < (int)cap - 32; i++)
+        mn += snprintf(buf + mn, cap - (size_t)mn, "%s{}", i ? "," : "");
+    mn += snprintf(buf + mn, cap - (size_t)mn, "]}");
+    return mn;
+}
+
+/* Copy the front half of the valid document into dst and NUL-terminate it;
+ * returns the copied length. */
+static size_t mo_truncated_copy(char *dst, size_t cap, const char *src,
+                                size_t src_len)
+{
+    size_t tlen = src_len < cap - 1 ? src_len / 2 : 200;
+    memcpy(dst, src, tlen);
+    dst[tlen] = '\0';
+    return tlen;
+}
+
 static int t_parse_refuses_by_name_and_leaves_out_untouched(void)
 {
     int failures = 0;
@@ -513,22 +596,10 @@ static int t_parse_refuses_by_name_and_leaves_out_untouched(void)
 
         /* oversize: a 4 KB onion string, and 10 000 declared edges */
         static char huge_onion[8192];
-        int hn = snprintf(huge_onion, sizeof(huge_onion),
-                          "{\"schema\":\"%s\",\"self\":{\"onion\":\"",
-                          MESH_OBS_SCHEMA);
-        for (int i = 0; i < 4096; i++) huge_onion[hn + i] = 'a';
-        hn += 4096;
-        hn += snprintf(huge_onion + hn, sizeof(huge_onion) - (size_t)hn,
-                       "\"}}");
+        int hn = mo_fill_huge_onion(huge_onion, sizeof(huge_onion));
 
         static char many_edges[131072];
-        int mn = snprintf(many_edges, sizeof(many_edges),
-                          "{\"schema\":\"%s\",\"self\":{},\"edges\":[",
-                          MESH_OBS_SCHEMA);
-        for (int i = 0; i < 10000 && mn < (int)sizeof(many_edges) - 32; i++)
-            mn += snprintf(many_edges + mn, sizeof(many_edges) - (size_t)mn,
-                           "%s{}", i ? "," : "");
-        mn += snprintf(many_edges + mn, sizeof(many_edges) - (size_t)mn, "]}");
+        int mn = mo_fill_many_edges(many_edges, sizeof(many_edges));
 
         static char bad_hex[512];
         snprintf(bad_hex, sizeof(bad_hex),
@@ -543,9 +614,8 @@ static int t_parse_refuses_by_name_and_leaves_out_untouched(void)
                  "\"present\":true}]}}", MESH_OBS_SCHEMA);
 
         static char truncated[256];
-        size_t tlen = gw < sizeof(truncated) - 1 ? gw / 2 : 200;
-        memcpy(truncated, g_mo_a, tlen);
-        truncated[tlen] = '\0';
+        size_t tlen = mo_truncated_copy(truncated, sizeof(truncated), g_mo_a,
+                                        gw);
 
         struct mo_refusal_case cases[] = {
             { "empty",        "",                 0 },
@@ -568,34 +638,28 @@ static int t_parse_refuses_by_name_and_leaves_out_untouched(void)
 
         char reasons[16][32];
         for (size_t i = 0; i < ncases; i++) {
-            struct mesh_observation out;
-            memcpy(&out, &sentinel, sizeof(out));
             char reason[32];
-            memset(reason, 0, sizeof(reason));
-            bool ok = mesh_observation_parse_json(cases[i].body,
-                                                  mo_case_len(&cases[i]),
-                                                  &out, reason);
-            if (ok) {
+            enum mo_refusal_fault fault =
+                mo_check_refusal(&cases[i], &sentinel, reason,
+                                 sizeof(reason));
+            if (fault == MO_REFUSAL_ACCEPTED) {
                 printf("FAIL (%s was ACCEPTED)\n", cases[i].label);
                 failures++;
                 goto _test_next;
             }
-            if (memcmp(&out, &sentinel, sizeof(out)) != 0) {
+            if (fault == MO_REFUSAL_MODIFIED_OUT) {
                 printf("FAIL (%s modified the caller's struct)\n",
                        cases[i].label);
                 failures++;
                 goto _test_next;
             }
-            if (reason[0] == '\0') {
+            if (fault == MO_REFUSAL_NO_REASON) {
                 printf("FAIL (%s refused without naming a reason)\n",
                        cases[i].label);
                 failures++;
                 goto _test_next;
             }
-            /* a token, not a sentence, and NUL-terminated inside 32 bytes */
-            size_t rl = 0;
-            while (rl < sizeof(reason) && reason[rl] != '\0') rl++;
-            if (rl >= sizeof(reason)) {
+            if (fault == MO_REFUSAL_REASON_UNTERMINATED) {
                 printf("FAIL (%s reason token is unterminated)\n",
                        cases[i].label);
                 failures++;
@@ -606,13 +670,7 @@ static int t_parse_refuses_by_name_and_leaves_out_untouched(void)
 
         /* the refusals must DISCRIMINATE: a single catch-all token would let
          * an operator mistake an oversize document for a truncated one */
-        int distinct = 0;
-        for (size_t i = 0; i < ncases; i++) {
-            bool dup = false;
-            for (size_t j = 0; j < i; j++)
-                if (strcmp(reasons[i], reasons[j]) == 0) dup = true;
-            if (!dup) distinct++;
-        }
+        int distinct = mo_count_distinct_reasons(reasons, ncases);
         ASSERT(distinct >= 5);
 
         /* positive control: the SAME parser accepts the good document, so the
