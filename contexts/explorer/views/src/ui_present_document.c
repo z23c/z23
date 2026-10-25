@@ -45,45 +45,39 @@ static void document_window(
     };
 }
 
-bool ui_present_document_from_model(
-    const struct zcl_present_model_v1 *model,
+static bool document_ok(char *error, size_t cap)
+{
+    if (error && cap > 0)
+        error[0] = '\0';
+    return true;
+}
+
+static bool document_compose_qr(
     struct ui_present_document *out,
     char *error, size_t error_cap)
 {
-    if (!model || !out)
-        return document_error(error, error_cap,
-                              "presentation document input is missing");
-    *out = (struct ui_present_document){0};
-    char why[192];
-    if (!zcl_present_model_validate_v1(model, why, sizeof(why)))
-        return document_error(error, error_cap, why);
-    out->model = *model;
-    out->action_count = model->action_count;
-    out->is_qr = model->kind == ZCL_PRESENT_MODEL_QR_CARD;
-    if (!zcl_present_zclassic_icon_rgba(out->icon, sizeof(out->icon)))
-        return document_error(error, error_cap,
-                              "ZClassic presentation icon is unavailable");
-
-    if (out->is_qr) {
-        if (!qr_popup_card_render(&out->model, &out->qr_card,
-                                  error, error_cap) ||
-            !zcl_present_model_qr_payload_v1(
-                &out->model, out->qr_payload, error, error_cap)) {
-            ui_present_document_free(out);
-            return false;
-        }
-        const char *kind = out->qr_card.is_deposit
-            ? "Deposit ZCL" : out->model.title;
-        (void)snprintf(out->title, sizeof(out->title),
-                       "Z23 — %s — C copies, Esc closes", kind);
-        out->page_count = 1;
-        document_window(out, 0, out->qr_card.pixels,
-                        out->qr_card.width, out->qr_card.height,
-                        out->qr_payload);
-        if (error && error_cap > 0) error[0] = '\0';
-        return true;
+    if (!qr_popup_card_render(&out->model, &out->qr_card,
+                              error, error_cap) ||
+        !zcl_present_model_qr_payload_v1(
+            &out->model, out->qr_payload, error, error_cap)) {
+        ui_present_document_free(out);
+        return false;
     }
+    const char *kind = out->qr_card.is_deposit
+        ? "Deposit ZCL" : out->model.title;
+    (void)snprintf(out->title, sizeof(out->title),
+                   "Z23 — %s — C copies, Esc closes", kind);
+    out->page_count = 1;
+    document_window(out, 0, out->qr_card.pixels,
+                    out->qr_card.width, out->qr_card.height,
+                    out->qr_payload);
+    return document_ok(error, error_cap);
+}
 
+static bool document_compose_pages(
+    struct ui_present_document *out,
+    char *error, size_t error_cap)
+{
     if (!zcl_present_model_page_count_v1(
             &out->model, &out->page_count, error, error_cap)) {
         ui_present_document_free(out);
@@ -102,8 +96,30 @@ bool ui_present_document_from_model(
                         out->model.exact_root[0]
                             ? out->model.exact_root : NULL);
     }
-    if (error && error_cap > 0) error[0] = '\0';
-    return true;
+    return document_ok(error, error_cap);
+}
+
+bool ui_present_document_from_model(
+    const struct zcl_present_model_v1 *model,
+    struct ui_present_document *out,
+    char *error, size_t error_cap)
+{
+    if (!model || !out)
+        return document_error(error, error_cap,
+                              "presentation document input is missing");
+    *out = (struct ui_present_document){0};
+    char why[192];
+    if (!zcl_present_model_validate_v1(model, why, sizeof(why)))
+        return document_error(error, error_cap, why);
+    out->model = *model;
+    out->action_count = model->action_count;
+    out->is_qr = model->kind == ZCL_PRESENT_MODEL_QR_CARD;
+    if (!zcl_present_zclassic_icon_rgba(out->icon, sizeof(out->icon)))
+        return document_error(error, error_cap,
+                              "ZClassic presentation icon is unavailable");
+    if (out->is_qr)
+        return document_compose_qr(out, error, error_cap);
+    return document_compose_pages(out, error, error_cap);
 }
 
 bool ui_present_document_from_wire(
