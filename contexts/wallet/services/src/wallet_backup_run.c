@@ -190,6 +190,123 @@ static struct zcl_result wbs_admit_backup_run(
     return _wbs_r;                                                       \
 } while (0)
 
+/* Reset every caller-visible output before any work happens: a failed
+ * run must leave empty strings and -1, never a previous run's values. */
+static void wbs_reset_run_outputs(struct wbs_verify_out *vout,
+                                  char *out_path, size_t out_path_cap,
+                                  int64_t *out_key_count,
+                                  char *err_out, size_t err_cap)
+{
+    vout->tables_verified = 0;
+    vout->missing[0] = '\0';
+    if (err_out && err_cap) err_out[0] = '\0';
+    if (out_path && out_path_cap) out_path[0] = '\0';
+    if (out_key_count) *out_key_count = -1;
+}
+
+/* Turn a write_snapshot copy/manifest failure into the run's failing
+ * result. ZCL_OK means `status` is not a copy/manifest failure and the
+ * run may continue. */
+static struct zcl_result wbs_fail_on_copy_status(
+    enum wallet_backup_store_status status, const char *dst_path,
+    const char *copy_err, char *err_out, size_t err_cap)
+{
+    if (status == WB_STORE_COPY_FAILED || status == WB_STORE_MANIFEST_FAILED) {
+        /* Leave the dst file on disk for forensics, but emit the
+         * failure event and bail out. */
+        struct platform_file_metadata metadata;
+        int64_t bytes = platform_file_metadata_read(dst_path, &metadata) ==
+                                PLATFORM_FILE_METADATA_OK &&
+                            metadata.size <= INT64_MAX
+                            ? (int64_t)metadata.size : -1;
+        struct zcl_result r = ZCL_ERR(status == WB_STORE_MANIFEST_FAILED ? -9 : -7,
+                                      "%s", copy_err);
+        if (err_out) snprintf(err_out, err_cap, "%s", r.message);
+        event_emitf(EV_WALLET_BACKUP_FAILED, 0,
+                    "path=%s bytes=%lld reason=%s",
+                    dst_path, (long long)bytes, r.message);
+        return r;
+    }
+    return ZCL_OK;
+}
+
+/* Round-trip verification over ALL wallet tables: reopen the
+ * backup file read-only and compare each table's row count against the
+ * source's. Verifying only wallet_keys let a copy that dropped
+ * wallet_sapling_keys / wallet_seed / wallet_sapling_notes emit a
+ * SUCCESS event. If any count differs the file is left on disk but we
+ * return non-ok so the caller knows the output is not usable. */
+static struct zcl_result wbs_verify_all_tables(
+    struct wallet_backup_store_port *store, const char *dst_path,
+    const struct wallet_backup_table_stat *stats,
+    char *missing, size_t missing_cap,
+    char *err_out, size_t err_cap, int *out_verified)
+{
+    int verified = 0;
+    for (size_t i = 0; i < WALLET_TABLE_COUNT; i++) {
+        const char *table = WALLET_TABLES[i];
+        int64_t dst_n = store->count_rows_in_file(store->self, dst_path, table);
+        if (!stats[i].present_in_source) {
+            /* Source never had it. Not a failure — but the destination must
+             * not have invented it either, and the operator is TOLD. */
+            wbs_append_missing(missing, missing_cap, table);
+            if (dst_n >= 0) {
+                struct zcl_result r = ZCL_ERR(-8,
+                    "verify: %s absent from source but present in backup "
+                    "with %lld rows", table, (long long)dst_n);
+                if (err_out) snprintf(err_out, err_cap, "%s", r.message);
+                event_emitf(EV_WALLET_BACKUP_FAILED, 0,
+                            "path=%s reason=%s", dst_path, r.message);
+                return r;
+            }
+            continue;
+        }
+        int64_t src_n = -1;
+        if (!store->count_rows(store->self, table, &src_n))
+            src_n = stats[i].rows;
+        if (dst_n < 0 || dst_n != src_n) {
+            struct zcl_result r = ZCL_ERR(-8,
+                    "verify row count mismatch table=%s src=%lld dst=%lld",
+                    table, (long long)src_n, (long long)dst_n);
+            if (err_out) snprintf(err_out, err_cap, "%s", r.message);
+            event_emitf(EV_WALLET_BACKUP_FAILED, 0,
+                        "path=%s reason=%s", dst_path, r.message);
+            return r;
+        }
+        verified++;
+    }
+    *out_verified = verified;
+    return ZCL_OK;
+}
+
+/* Emit the SUCCESS event for a verified backup and publish the run's
+ * outputs (path copy and key count). */
+static void wbs_report_backup_success(
+    struct wallet_backup_store_port *store, const char *dst_path,
+    const char *missing, int verified,
+    char *out_path, int64_t *out_key_count)
+{
+    int64_t dst_key_count =
+        store->count_rows_in_file(store->self, dst_path, "wallet_keys");
+    if (dst_key_count < 0)
+        dst_key_count = 0;
+
+    struct platform_file_metadata metadata;
+    int64_t bytes = platform_file_metadata_read(dst_path, &metadata) ==
+                            PLATFORM_FILE_METADATA_OK &&
+                        metadata.size <= INT64_MAX
+                        ? (int64_t)metadata.size : -1;
+    event_emitf(EV_WALLET_BACKUP, 0,
+                "path=%s bytes=%lld keys=%lld tables_verified=%d "
+                "tables_absent_in_source=%s",
+                dst_path, (long long)bytes, (long long)dst_key_count,
+                verified, missing[0] ? missing : "none");
+
+    if (out_path)
+        memcpy(out_path, dst_path, strlen(dst_path) + 1);
+    if (out_key_count) *out_key_count = dst_key_count;
+}
+
 /* The whole run. `vout` (never NULL) receives the per-table verification
  * result so wbs_run_one_locked — which already holds g_wbs.lock — can record
  * it without re-entering a non-recursive mutex. */
@@ -200,11 +317,8 @@ struct zcl_result wbs_run_once_impl(const char *backup_dir,
                              char *err_out, size_t err_cap,
                              struct wbs_verify_out *vout)
 {
-    vout->tables_verified = 0;
-    vout->missing[0] = '\0';
-    if (err_out && err_cap) err_out[0] = '\0';
-    if (out_path && out_path_cap) out_path[0] = '\0';
-    if (out_key_count) *out_key_count = -1;
+    wbs_reset_run_outputs(vout, out_path, out_path_cap, out_key_count,
+                          err_out, err_cap);
 
     char dst_path[640];
     struct zcl_result admission = wbs_admit_backup_run(
@@ -249,86 +363,22 @@ struct zcl_result wbs_run_once_impl(const char *backup_dir,
     if (status == WB_STORE_ATTACH_FAILED)
         WBS_FAIL(err_out, err_cap, -5, "attach source failed: %s", src_path);
 
-    if (status == WB_STORE_COPY_FAILED || status == WB_STORE_MANIFEST_FAILED) {
-        /* Leave the dst file on disk for forensics, but emit the
-         * failure event and bail out. */
-        struct platform_file_metadata metadata;
-        int64_t bytes = platform_file_metadata_read(dst_path, &metadata) ==
-                                PLATFORM_FILE_METADATA_OK &&
-                            metadata.size <= INT64_MAX
-                            ? (int64_t)metadata.size : -1;
-        struct zcl_result r = ZCL_ERR(status == WB_STORE_MANIFEST_FAILED ? -9 : -7,
-                                      "%s", copy_err);
-        if (err_out) snprintf(err_out, err_cap, "%s", r.message);
-        event_emitf(EV_WALLET_BACKUP_FAILED, 0,
-                    "path=%s bytes=%lld reason=%s",
-                    dst_path, (long long)bytes, r.message);
-        return r;
-    }
+    struct zcl_result copy_r = wbs_fail_on_copy_status(
+        status, dst_path, copy_err, err_out, err_cap);
+    if (!copy_r.ok)
+        return copy_r;
 
-    /* Round-trip verification over ALL wallet tables: reopen the
-     * backup file read-only and compare each table's row count against the
-     * source's. Verifying only wallet_keys let a copy that dropped
-     * wallet_sapling_keys / wallet_seed / wallet_sapling_notes emit a
-     * SUCCESS event. If any count differs the file is left on disk but we
-     * return non-ok so the caller knows the output is not usable. */
-    char *missing = vout->missing;
-    const size_t missing_cap = sizeof(vout->missing);
     int verified = 0;
-    for (size_t i = 0; i < WALLET_TABLE_COUNT; i++) {
-        const char *table = WALLET_TABLES[i];
-        int64_t dst_n = store.count_rows_in_file(store.self, dst_path, table);
-        if (!stats[i].present_in_source) {
-            /* Source never had it. Not a failure — but the destination must
-             * not have invented it either, and the operator is TOLD. */
-            wbs_append_missing(missing, missing_cap, table);
-            if (dst_n >= 0) {
-                struct zcl_result r = ZCL_ERR(-8,
-                    "verify: %s absent from source but present in backup "
-                    "with %lld rows", table, (long long)dst_n);
-                if (err_out) snprintf(err_out, err_cap, "%s", r.message);
-                event_emitf(EV_WALLET_BACKUP_FAILED, 0,
-                            "path=%s reason=%s", dst_path, r.message);
-                return r;
-            }
-            continue;
-        }
-        int64_t src_n = -1;
-        if (!store.count_rows(store.self, table, &src_n))
-            src_n = stats[i].rows;
-        if (dst_n < 0 || dst_n != src_n) {
-            struct zcl_result r = ZCL_ERR(-8,
-                    "verify row count mismatch table=%s src=%lld dst=%lld",
-                    table, (long long)src_n, (long long)dst_n);
-            if (err_out) snprintf(err_out, err_cap, "%s", r.message);
-            event_emitf(EV_WALLET_BACKUP_FAILED, 0,
-                        "path=%s reason=%s", dst_path, r.message);
-            return r;
-        }
-        verified++;
-    }
-
-    int64_t dst_key_count =
-        store.count_rows_in_file(store.self, dst_path, "wallet_keys");
-    if (dst_key_count < 0)
-        dst_key_count = 0;
+    struct zcl_result verify_r = wbs_verify_all_tables(
+        &store, dst_path, stats, vout->missing, sizeof(vout->missing),
+        err_out, err_cap, &verified);
+    if (!verify_r.ok)
+        return verify_r;
 
     vout->tables_verified = verified;
 
-    struct platform_file_metadata metadata;
-    int64_t bytes = platform_file_metadata_read(dst_path, &metadata) ==
-                            PLATFORM_FILE_METADATA_OK &&
-                        metadata.size <= INT64_MAX
-                        ? (int64_t)metadata.size : -1;
-    event_emitf(EV_WALLET_BACKUP, 0,
-                "path=%s bytes=%lld keys=%lld tables_verified=%d "
-                "tables_absent_in_source=%s",
-                dst_path, (long long)bytes, (long long)dst_key_count,
-                verified, missing[0] ? missing : "none");
-
-    if (out_path)
-        memcpy(out_path, dst_path, strlen(dst_path) + 1);
-    if (out_key_count) *out_key_count = dst_key_count;
+    wbs_report_backup_success(&store, dst_path, vout->missing, verified,
+                              out_path, out_key_count);
 
     return ZCL_OK;
 }

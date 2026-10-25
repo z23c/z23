@@ -715,7 +715,6 @@ contexts/wallet/modules/zid/src/zendp.c:zendp_valid:19
 contexts/wallet/modules/zid/src/zpay.c:zpay_memo_decode:21
 contexts/wallet/services/src/wallet_backup_crypto.c:wallet_backup_decrypt_file:17
 contexts/wallet/services/src/wallet_backup_crypto.c:wbs_write_file_atomic:20
-contexts/wallet/services/src/wallet_backup_run.c:wbs_run_once_impl:32
 contexts/wallet/services/src/wallet_backup_service.c:wbs_hash_regular_file:23
 contexts/wallet/services/src/wallet_money_service.c:wallet_money_snapshot_build:35
 contexts/wallet/services/src/wallet_recovery_service.c:wallet_recovery_run:46
