@@ -9,6 +9,7 @@
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
+#include "storage/shielded_pool_kv.h"
 #include "storage/progress_store.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
@@ -43,6 +44,15 @@ static bool clear_legacy_header_admit_mirror(struct node_db *ndb)
         return false;
     }
     return node_db_exec(ndb, "DELETE FROM header_admit_log");
+}
+
+/* Anchor, nullifier and pool-totals history reset to COMPLETE in the open
+ * refold transaction; the three always move together. */
+static bool mint_reset_shielded_history_in_tx(sqlite3 *db)
+{
+    return anchor_kv_reset_mark_complete_in_tx(db) &&
+           nullifier_kv_reset_mark_complete_in_tx(db) &&
+           shielded_pool_kv_reset_in_tx(db);
 }
 
 bool boot_mint_anchor_genesis_reset(struct node_db *ndb)
@@ -102,8 +112,7 @@ bool boot_mint_anchor_genesis_reset(struct node_db *ndb)
             refold_ok = false;
     if (refold_ok && !utxo_apply_frontier_set_in_tx(rpdb, 0))
         refold_ok = false;
-    if (refold_ok && (!anchor_kv_reset_mark_complete_in_tx(rpdb) ||
-                      !nullifier_kv_reset_mark_complete_in_tx(rpdb)))
+    if (refold_ok && !mint_reset_shielded_history_in_tx(rpdb))
         refold_ok = false;
     if (refold_ok) {
         refold_ok = progress_meta_delete_in_tx(

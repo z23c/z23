@@ -11,6 +11,7 @@
 #include "sapling/incremental_merkle_tree.h" /* sapling/sprout tree */
 #include "storage/anchor_kv.h"
 #include "storage/nullifier_kv.h"
+#include "storage/shielded_pool_kv.h"
 #include "storage/snapshot_shielded.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -122,16 +123,17 @@ void boot_capture_shielded(struct uss_handle *h, bool load_ok,
     }
 }
 
-static bool reset_shielded_history_incomplete_in_tx(struct sqlite3 *db,
-                                                     int seed_h)
+bool boot_shielded_history_reset_incomplete_in_tx(struct sqlite3 *db,
+                                                  int seed_h)
 {
     return anchor_kv_reset_mark_empty_below_in_tx(db, seed_h) &&
-           nullifier_kv_reset_mark_empty_below_in_tx(db, seed_h);
+           nullifier_kv_reset_mark_empty_below_in_tx(db, seed_h) &&
+           shielded_pool_kv_reset_in_tx(db);
 }
 
 /* Co-commit the initial Sapling frontier row for a v2 snapshot (Sapling
  * frontier only — no v3 Sprout/nullifier section) in the SAME transaction as
- * reset_shielded_history_incomplete_in_tx above, so the empty-below cursor
+ * boot_shielded_history_reset_incomplete_in_tx above, so the empty-below cursor
  * never commits without its initial frontier row (see the
  * sapling_anchor_frontier_unavailable condition).
  *
@@ -188,7 +190,7 @@ static bool seed_shielded_from_snapshot(
         LOG_WARN("boot", "[boot] seed_shielded: missing Sapling frontier args");
         return false;
     }
-    if (!reset_shielded_history_incomplete_in_tx(rpdb, seed_h))
+    if (!boot_shielded_history_reset_incomplete_in_tx(rpdb, seed_h))
         return false;
 
     /* Sapling — verified against the header-committed root; fail-closed. */
@@ -256,7 +258,7 @@ bool boot_shielded_cure_or_reset_in_tx(
     bool seed_current = shielded_v3 && sapling_verified && sapling &&
                         sapling_len > 0;
     if (!seed_current) {
-        if (!reset_shielded_history_incomplete_in_tx(rpdb, seed_h))
+        if (!boot_shielded_history_reset_incomplete_in_tx(rpdb, seed_h))
             return false;
         /* v2 snapshot (Sapling frontier only): co-commit the verified frontier
          * row in THIS transaction so the empty-below cursor is never committed
@@ -273,7 +275,7 @@ bool boot_shielded_cure_or_reset_in_tx(
         LOG_WARN("boot", "[boot] -load-snapshot-at-own-height: v3 shielded seed wanted "
                  "but seed block_index missing at h=%d — falling back to cursor "
                  "reset", seed_h);
-        return reset_shielded_history_incomplete_in_tx(rpdb, seed_h);
+        return boot_shielded_history_reset_incomplete_in_tx(rpdb, seed_h);
     }
     if (!seed_shielded_from_snapshot(rpdb, seed_h, sapling, sapling_len,
                                      &seed_bi->hashFinalSaplingRoot,

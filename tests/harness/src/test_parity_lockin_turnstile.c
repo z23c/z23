@@ -8,6 +8,8 @@
  * previous total is known, an unknown parent leaves the pool unknown. */
 
 #include "test/test_core.h"
+#include "test/parity_lockin_turnstile_stage.h"
+#include "test/shielded_pool_reset_pairing.h"
 
 #include "jobs/utxo_apply_delta.h"
 #include "jobs/utxo_apply_turnstile.h"
@@ -361,6 +363,35 @@ static bool ts_seed_old_branch(sqlite3 *db)
     return true;
 }
 
+static int test_pool_reset(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    TS_CHECK("reset: open in-memory store",
+             sqlite3_open(":memory:", &db) == SQLITE_OK);
+    TS_CHECK("reset: seed rows",
+             shielded_pool_kv_ensure_schema(db) &&
+             shielded_pool_kv_put(db, 0, 1, 2) &&
+             shielded_pool_kv_put(db, 1, 3, 4));
+    TS_CHECK("reset outside a transaction is refused and keeps the rows",
+             !shielded_pool_kv_reset_in_tx(db) && kv_pair(db, 0, 1, 2) &&
+             kv_pair(db, 1, 3, 4));
+    TS_CHECK("reset inside a transaction drops every row",
+             sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK &&
+             shielded_pool_kv_reset_in_tx(db) && kv_absent(db, 0) &&
+             kv_absent(db, 1));
+    TS_CHECK("reset rolls back with its transaction",
+             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK &&
+             kv_pair(db, 0, 1, 2) && kv_pair(db, 1, 3, 4));
+    TS_CHECK("a recomputed height after a committed reset puts cleanly",
+             sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK &&
+             shielded_pool_kv_reset_in_tx(db) &&
+             sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK &&
+             shielded_pool_kv_put(db, 0, 9, 9) && kv_pair(db, 0, 9, 9));
+    sqlite3_close(db);
+    return failures;
+}
+
 static int test_stage_unwind(void)
 {
     int failures = 0;
@@ -385,5 +416,7 @@ int test_parity_lockin_turnstile(void)
     return test_block_values() + test_check() + test_pool_kv() +
            test_stage_genesis_and_accept() + test_stage_sapling() +
            test_stage_sprout() + test_stage_unknown_parent() +
-           test_stage_unwind();
+           test_stage_unwind() + test_pool_reset() +
+           shielded_pool_reset_pairing_cases() +
+           parity_lockin_turnstile_stage_cases();
 }

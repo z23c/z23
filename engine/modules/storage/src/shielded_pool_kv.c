@@ -142,3 +142,22 @@ bool shielded_pool_kv_delete_range(sqlite3 *db, int64_t from, int64_t to)
                  sqlite3_errmsg(db));
     return true;
 }
+
+bool shielded_pool_kv_reset_in_tx(sqlite3 *db)
+{
+    if (!db)
+        LOG_FAIL(SP_SUBSYS, "reset: NULL db");
+    if (sqlite3_get_autocommit(db) != 0)
+        LOG_FAIL(SP_SUBSYS, "reset requires caller transaction");
+    if (!shielded_pool_kv_ensure_schema(db))
+        return false;
+    char *err = NULL;
+    if (sqlite3_exec(db, "DELETE FROM shielded_pool_totals", NULL, NULL, &err)
+        != SQLITE_OK) {
+        LOG_WARN(SP_SUBSYS, "reset delete failed: %s",
+                 err ? err : sqlite3_errmsg(db));
+        sqlite3_free(err);
+        return false;
+    }
+    return true;
+}

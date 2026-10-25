@@ -39,4 +39,9 @@ bool shielded_pool_kv_max_height(struct sqlite3 *db, int64_t *height_out,
 bool shielded_pool_kv_delete_range(struct sqlite3 *db, int64_t from,
                                    int64_t to);
 
+/* Drop every row. Call in the SAME transaction as nullifier_kv_reset_*: when the
+ * coins authority is replaced the old rows may describe another chain. Refused
+ * (false) outside a caller transaction. */
+bool shielded_pool_kv_reset_in_tx(struct sqlite3 *db);
+
 #endif

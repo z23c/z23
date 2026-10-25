@@ -40,6 +40,12 @@ void boot_capture_shielded(struct uss_handle *h, bool load_ok,
  * transaction, so any later interruption leaves conservative provenance. */
 bool boot_shielded_prepare_assisted_boundary(struct sqlite3 *rpdb, int seed_h);
 
+/* In the caller's open progress.kv transaction: anchor, nullifier AND
+ * shielded_pool_totals reset to an empty history below seed_h. The three move
+ * together whenever the coins authority is replaced. */
+bool boot_shielded_history_reset_incomplete_in_tx(struct sqlite3 *db,
+                                                 int seed_h);
+
 #ifdef ZCL_TESTING
 void boot_shielded_interrupt_after_boundary_for_test(bool enabled);
 bool boot_shielded_consume_boundary_interrupt_for_test(void);

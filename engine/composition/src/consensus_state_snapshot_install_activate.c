@@ -21,6 +21,7 @@
 #include "storage/coins_kv.h"
 #include "storage/consensus_state_bundle_codec.h"
 #include "storage/nullifier_kv.h"
+#include "storage/shielded_pool_kv.h"
 #include "storage/progress_store.h"      /* progress_store_tx_lock/unlock,
                                           * progress_meta_set/delete_in_tx */
 #include "platform/fd_path.h"
@@ -294,6 +295,15 @@ static bool activate_clear_generation_metadata(
     return true;
 }
 
+/* Anchor, nullifier and pool-totals history reset to COMPLETE in the open
+ * install transaction; the three always move together. */
+static bool activate_reset_shielded_history_in_tx(sqlite3 *db)
+{
+    return anchor_kv_reset_mark_complete_in_tx(db) &&
+           nullifier_kv_reset_mark_complete_in_tx(db) &&
+           shielded_pool_kv_reset_in_tx(db);
+}
+
 /* The single atomic install transaction. Assumes the progress-store tx lock is
  * held and BEGIN IMMEDIATE is open on progress_db. Returns false (with the
  * caller rolling back) on any failure. Never partially applies. */
@@ -335,8 +345,7 @@ static bool activate_apply_in_tx(
      *    difference from the wedge-causing refold: complete history, not an
      *    empty table with a positive cursor. The reset primitives join our
      *    open transaction. */
-    if (!anchor_kv_reset_mark_complete_in_tx(progress_db) ||
-        !nullifier_kv_reset_mark_complete_in_tx(progress_db))
+    if (!activate_reset_shielded_history_in_tx(progress_db))
         return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
                              "shielded history reset to complete failed");
     /* The atomic bundle supersedes every partial shielded recovery session.
