@@ -475,6 +475,97 @@ static void network_push_bootstrap_blockers(struct json_value *result,
     json_free(&blockers);
 }
 
+/* The transport half of ordinary P2P bootstrap: a connman, a listen socket,
+ * NODE_NETWORK, a new-enough protocol, and a published provable tip. */
+static bool bootstrap_transport_ready(bool has_connman, bool listening,
+                                      bool node_network, bool protocol_ok,
+                                      bool has_tip)
+{
+    return has_connman && listening && node_network && protocol_ok && has_tip;
+}
+
+/* Ordinary P2P bootstrap is served only when the transport is ready and the
+ * security posture allows public serving. */
+static bool bootstrap_p2p_serving(bool transport_ready,
+                                  bool security_posture_ok)
+{
+    return transport_ready && security_posture_ok;
+}
+
+/* zclassic23 fast sync is ordinary P2P serving with NODE_ZCL23 advertised. */
+static bool bootstrap_zcl23_fast(bool p2p_serving, bool node_zcl23)
+{
+    return p2p_serving && node_zcl23;
+}
+
+/* bootstrapstatus `peers`, including the zclassic23 node-floor counts.
+ * Split out of rpc_bootstrapstatus() so that function's own branch count
+ * stays under its complexity pin. */
+static void network_push_bootstrap_peers(struct json_value *result,
+                                         const struct network_counts *counts,
+                                         struct connman *cm,
+                                         bool p2p_serving, bool node_zcl23)
+{
+    struct json_value peers = {0};
+    json_set_object(&peers);
+    json_push_kv_int(&peers, "connections", (int64_t)counts->connections);
+    json_push_kv_int(&peers, "inbound_connections", counts->inbound);
+    json_push_kv_int(&peers, "outbound_connections", counts->outbound);
+    json_push_kv_int(&peers, "handshaked_connections", counts->handshaked);
+    json_push_kv_int(&peers, "inbound_handshaked_connections",
+                     counts->inbound_handshaked);
+    json_push_kv_int(&peers, "outbound_handshaked_connections",
+                     counts->outbound_handshaked);
+    json_push_kv_int(&peers, "legacy_compatible_peers",
+                     counts->legacy_compatible);
+    json_push_kv_int(&peers, "zclassic23_peers", counts->zcl23);
+    json_push_kv_int(&peers, "zclassic23_peer_connections",
+                     counts->zcl23_connections);
+    json_push_kv_int(&peers,
+                     "zclassic23_duplicate_connections_excluded",
+                     counts->zcl23_duplicate_connections);
+    json_push_kv_int(&peers, "zclassic23_self_connections_excluded",
+                     counts->zcl23_self_connections);
+    network_push_verified_zclassic23_bootstrap_peers(&peers, cm);
+    int64_t verified_zcl23_peers = json_get_int(json_get(&peers,
+        "verified_zclassic23_bootstrap_peer_count"));
+    bool local_verified_zcl23_bootstrap =
+        bootstrap_zcl23_fast(p2p_serving, node_zcl23);
+    json_push_kv_bool(&peers, "local_zclassic23_node_included", node_zcl23);
+    json_push_kv_int(&peers, "zclassic23_nodes_seen",
+                     counts->zcl23 + (node_zcl23 ? 1 : 0));
+    json_push_kv_bool(&peers, "zclassic23_two_node_floor_met",
+                      counts->zcl23 + (node_zcl23 ? 1 : 0) >= 2);
+    json_push_kv_bool(&peers, "local_zclassic23_bootstrap_node_verified",
+                      local_verified_zcl23_bootstrap);
+    json_push_kv_int(&peers, "verified_zclassic23_bootstrap_nodes_seen",
+                     verified_zcl23_peers +
+                         (local_verified_zcl23_bootstrap ? 1 : 0));
+    json_push_kv_bool(&peers, "verified_zclassic23_two_node_floor_met",
+                      verified_zcl23_peers +
+                          (local_verified_zcl23_bootstrap ? 1 : 0) >= 2);
+    json_push_kv(result, "peers", &peers);
+    json_free(&peers);
+}
+
+/* bootstrapstatus `warnings`: facts that do not block serving. Split out
+ * of rpc_bootstrapstatus() so that function's own branch count stays under
+ * its complexity pin. */
+static void network_push_bootstrap_warnings(struct json_value *result,
+                                            bool has_external_ip,
+                                            uint16_t ext_port,
+                                            bool addr_relay_ready)
+{
+    struct json_value warnings = {0};
+    json_set_array(&warnings);
+    if (!has_external_ip || ext_port == 0)
+        json_push_string_item(&warnings, "externalip_not_configured");
+    if (!addr_relay_ready)
+        json_push_string_item(&warnings, "addrman_empty");
+    json_push_kv(result, "warnings", &warnings);
+    json_free(&warnings);
+}
+
 static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
                                 struct json_value *result)
 {
@@ -506,16 +597,18 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     bool listening = counts.listen_socket_count > 0;
     bool has_tip = advertised_height > 0;
     bool transport_ready =
-        has_connman && listening && node_network && protocol_ok && has_tip;
+        bootstrap_transport_ready(has_connman, listening, node_network,
+                                  protocol_ok, has_tip);
     struct agent_security_posture security_posture;
     agent_security_posture_collect(&security_posture, NULL);
     bool security_posture_ok =
         agent_security_posture_allows_public_serving(&security_posture);
-    bool p2p_serving = transport_ready && security_posture_ok;
+    bool p2p_serving = bootstrap_p2p_serving(transport_ready,
+                                             security_posture_ok);
     bool addr_relay_ready = counts.addrman_entries > 0;
     bool beta6_fast =
         beta6_is_serving(beta6_in_band, beta6_listening, security_posture_ok);
-    bool zcl23_fast = p2p_serving && node_zcl23;
+    bool zcl23_fast = bootstrap_zcl23_fast(p2p_serving, node_zcl23);
 
     json_set_object(result);
     json_push_kv_str(result, "schema", BOOTSTRAP_STATUS_SCHEMA);
@@ -569,45 +662,8 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     json_push_kv(result, "p2p", &p2p);
     json_free(&p2p);
 
-    struct json_value peers = {0};
-    json_set_object(&peers);
-    json_push_kv_int(&peers, "connections", (int64_t)counts.connections);
-    json_push_kv_int(&peers, "inbound_connections", counts.inbound);
-    json_push_kv_int(&peers, "outbound_connections", counts.outbound);
-    json_push_kv_int(&peers, "handshaked_connections", counts.handshaked);
-    json_push_kv_int(&peers, "inbound_handshaked_connections",
-                     counts.inbound_handshaked);
-    json_push_kv_int(&peers, "outbound_handshaked_connections",
-                     counts.outbound_handshaked);
-    json_push_kv_int(&peers, "legacy_compatible_peers",
-                     counts.legacy_compatible);
-    json_push_kv_int(&peers, "zclassic23_peers", counts.zcl23);
-    json_push_kv_int(&peers, "zclassic23_peer_connections",
-                     counts.zcl23_connections);
-    json_push_kv_int(&peers,
-                     "zclassic23_duplicate_connections_excluded",
-                     counts.zcl23_duplicate_connections);
-    json_push_kv_int(&peers, "zclassic23_self_connections_excluded",
-                     counts.zcl23_self_connections);
-    network_push_verified_zclassic23_bootstrap_peers(&peers, ctx->connman);
-    int64_t verified_zcl23_peers = json_get_int(json_get(&peers,
-        "verified_zclassic23_bootstrap_peer_count"));
-    bool local_verified_zcl23_bootstrap = p2p_serving && node_zcl23;
-    json_push_kv_bool(&peers, "local_zclassic23_node_included", node_zcl23);
-    json_push_kv_int(&peers, "zclassic23_nodes_seen",
-                     counts.zcl23 + (node_zcl23 ? 1 : 0));
-    json_push_kv_bool(&peers, "zclassic23_two_node_floor_met",
-                      counts.zcl23 + (node_zcl23 ? 1 : 0) >= 2);
-    json_push_kv_bool(&peers, "local_zclassic23_bootstrap_node_verified",
-                      local_verified_zcl23_bootstrap);
-    json_push_kv_int(&peers, "verified_zclassic23_bootstrap_nodes_seen",
-                     verified_zcl23_peers +
-                         (local_verified_zcl23_bootstrap ? 1 : 0));
-    json_push_kv_bool(&peers, "verified_zclassic23_two_node_floor_met",
-                      verified_zcl23_peers +
-                          (local_verified_zcl23_bootstrap ? 1 : 0) >= 2);
-    json_push_kv(result, "peers", &peers);
-    json_free(&peers);
+    network_push_bootstrap_peers(result, &counts, ctx->connman, p2p_serving,
+                                 node_zcl23);
 
     struct json_value addrman = {0};
     json_set_object(&addrman);
@@ -687,14 +743,8 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
                                     security_posture.status, node_bootstrap,
                                     beta6_params_served);
 
-    struct json_value warnings = {0};
-    json_set_array(&warnings);
-    if (!has_external_ip || ext_port == 0)
-        json_push_string_item(&warnings, "externalip_not_configured");
-    if (!addr_relay_ready)
-        json_push_string_item(&warnings, "addrman_empty");
-    json_push_kv(result, "warnings", &warnings);
-    json_free(&warnings);
+    network_push_bootstrap_warnings(result, has_external_ip, ext_port,
+                                    addr_relay_ready);
 
     return true;
 }
