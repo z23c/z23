@@ -95,6 +95,40 @@ static bool detect_peer_floor_violated(void)
     return true;
 }
 
+/* A live outbound node still mid-handshake: the only class this remedy
+ * rotates out. */
+static bool peer_floor_node_is_outbound_pre_handshake(const struct p2p_node *n)
+{
+    return n && !n->inbound && !n->disconnect &&
+           n->state < PEER_HANDSHAKE_COMPLETE;
+}
+
+/* A still-connected inbound node: counted by the remedy, never dropped. */
+static bool peer_floor_node_is_kept_inbound(const struct p2p_node *n)
+{
+    return n && n->inbound && !n->disconnect;
+}
+
+/* With zero healthy outbound there is nothing left to protect: clear
+ * every addnode backoff regardless of failure mix so the dialer can
+ * retry immediately. (Counter-mix gating alone permanently excluded
+ * any addnode that ever logged one protocol failure — e.g. a single
+ * self-induced 90s handshake timeout.) Above zero, forgive only
+ * pure-TCP failure history; a protocol-failing addnode keeps its
+ * backoff. */
+static void peer_floor_clear_addnode_backoffs(struct connman *cm,
+                                              bool zero_outbound)
+{
+    for (int ai = 0; ai < cm->num_addnodes; ai++) {
+        if (zero_outbound ||
+            (cm->addnode_protocol_failures[ai] == 0 &&
+             cm->addnode_tcp_failures[ai] > 0)) {
+            cm->addnode_backoff_sec[ai] = 0;
+            cm->addnode_last_attempt[ai] = 0;
+        }
+    }
+}
+
 static enum condition_remedy_result remedy_peer_floor_violated(void)
 {
     struct connman *cm = sync_monitor_connman();
@@ -126,8 +160,7 @@ static enum condition_remedy_result remedy_peer_floor_violated(void)
     zcl_mutex_lock(&cm->manager.cs_nodes);
     for (size_t i = 0; i < cm->manager.num_nodes; i++) {
         struct p2p_node *n = cm->manager.nodes[i];
-        if (n && !n->inbound && !n->disconnect &&
-            n->state < PEER_HANDSHAKE_COMPLETE) {
+        if (peer_floor_node_is_outbound_pre_handshake(n)) {
             /* Operator-configured -addnode peers are dial targets of last
              * resort; do not tear them down mid-handshake while the floor is
              * low. Let the normal addnode backoff/retirement logic handle a
@@ -161,27 +194,13 @@ static enum condition_remedy_result remedy_peer_floor_violated(void)
          * below. A future influence limit belongs there, as a filtered
          * read; it is not this eviction. So: count what stays connected,
          * emit it as a typed observation, and drop nothing inbound. */
-        if (n && n->inbound && !n->disconnect)
+        if (peer_floor_node_is_kept_inbound(n))
             inbound_kept++;
     }
     zcl_mutex_unlock(&cm->manager.cs_nodes);
 
-    /* With zero healthy outbound there is nothing left to protect: clear
-     * every addnode backoff regardless of failure mix so the dialer can
-     * retry immediately. (Counter-mix gating alone permanently excluded
-     * any addnode that ever logged one protocol failure — e.g. a single
-     * self-induced 90s handshake timeout.) Above zero, forgive only
-     * pure-TCP failure history; a protocol-failing addnode keeps its
-     * backoff. */
     bool zero_outbound = connman_outbound_healthy_count(cm) == 0;
-    for (int ai = 0; ai < cm->num_addnodes; ai++) {
-        if (zero_outbound ||
-            (cm->addnode_protocol_failures[ai] == 0 &&
-             cm->addnode_tcp_failures[ai] > 0)) {
-            cm->addnode_backoff_sec[ai] = 0;
-            cm->addnode_last_attempt[ai] = 0;
-        }
-    }
+    peer_floor_clear_addnode_backoffs(cm, zero_outbound);
     connman_kick_seed_discovery(cm);
 
     /* Peer-of-last-resort. When there is NOTHING outbound, the clearnet
