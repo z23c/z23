@@ -8,6 +8,49 @@
 
 #include "controllers/wallet_controller_internal.h"
 
+static void listtransactions_parse_count_skip(const struct json_value *params,
+                                              int *count, int *skip)
+{
+    /* C++ API: listtransactions "account" count skip
+     * params[0] is the account name (string, ignored).
+     * params[1] is count, params[2] is skip.
+     * For backward compat, if params[0] is numeric, treat as count. */
+    *count = 10;
+    *skip = 0;
+    int param_offset = 0;
+    if (json_size(params) >= 1) {
+        const struct json_value *p0 = json_at(params, 0);
+        if (p0 && p0->type == JSON_STR)
+            param_offset = 1; /* skip account name */
+        else if (p0)
+            *count = (int)json_get_int(p0);
+    }
+    if (json_size(params) >= (size_t)(param_offset + 1))
+        *count = (int)json_get_int(json_at(params, param_offset));
+    if (json_size(params) >= (size_t)(param_offset + 2))
+        *skip = (int)json_get_int(json_at(params, param_offset + 1));
+    if (*count < 0) *count = 0;
+    if (*skip < 0) *skip = 0;
+}
+
+static void listtransactions_append_db_rows(struct wallet_rpc_context *ctx,
+                                            struct db_wallet_tx *rows, int count,
+                                            int skip, struct json_value *result)
+{
+    int n = db_wallet_tx_list(ctx->node_db, rows, (size_t)count, (size_t)skip);
+    for (int i = 0; i < n; i++) {
+        struct transaction tx;
+        if (wallet_db_tx_deserialize(&rows[i], &tx)) {
+            wallet_append_tx_entry(&tx, rows[i].from_me, rows[i].fee,
+                                   wallet_db_tx_confirmations(&rows[i]),
+                                   rows[i].time_received, result);
+            transaction_free(&tx);
+        }
+        db_wallet_tx_free(&rows[i]);
+    }
+    free(rows);
+}
+
 bool rpc_listtransactions(const struct json_value *params, bool help,
                                    struct json_value *result)
 {
@@ -22,26 +65,9 @@ bool rpc_listtransactions(const struct json_value *params, bool help,
 
     ENSURE_WALLET(result);
 
-    /* C++ API: listtransactions "account" count skip
-     * params[0] is the account name (string, ignored).
-     * params[1] is count, params[2] is skip.
-     * For backward compat, if params[0] is numeric, treat as count. */
-    int count = 10;
+    int count = 0;
     int skip = 0;
-    int param_offset = 0;
-    if (json_size(params) >= 1) {
-        const struct json_value *p0 = json_at(params, 0);
-        if (p0 && p0->type == JSON_STR)
-            param_offset = 1; /* skip account name */
-        else if (p0)
-            count = (int)json_get_int(p0);
-    }
-    if (json_size(params) >= (size_t)(param_offset + 1))
-        count = (int)json_get_int(json_at(params, param_offset));
-    if (json_size(params) >= (size_t)(param_offset + 2))
-        skip = (int)json_get_int(json_at(params, param_offset + 1));
-    if (count < 0) count = 0;
-    if (skip < 0) skip = 0;
+    listtransactions_parse_count_skip(params, &count, &skip);
 
     json_set_array(result);
     if (count == 0)
@@ -55,18 +81,7 @@ bool rpc_listtransactions(const struct json_value *params, bool help,
             LOG_FAIL("wallet", "listtransactions: alloc failed for %d rows", count);
         }
 
-        int n = db_wallet_tx_list(ctx->node_db, rows, (size_t)count, (size_t)skip);
-        for (int i = 0; i < n; i++) {
-            struct transaction tx;
-            if (wallet_db_tx_deserialize(&rows[i], &tx)) {
-                wallet_append_tx_entry(&tx, rows[i].from_me, rows[i].fee,
-                                       wallet_db_tx_confirmations(&rows[i]),
-                                       rows[i].time_received, result);
-                transaction_free(&tx);
-            }
-            db_wallet_tx_free(&rows[i]);
-        }
-        free(rows);
+        listtransactions_append_db_rows(ctx, rows, count, skip, result);
         return true;
     }
 
