@@ -34,9 +34,8 @@ static bool exec_checked(sqlite3 *db, const char *sql)
     return ok;
 }
 
-enum consensus_state_producer_session_retire_result
-consensus_state_producer_session_retire(
-    sqlite3 *pdb, struct consensus_state_producer_session_retired *out,
+static void session_retire_clear_outputs(
+    struct consensus_state_producer_session_retired *out,
     char *err, size_t err_size)
 {
     if (err && err_size)
@@ -45,6 +44,25 @@ consensus_state_producer_session_retire(
         memset(out, 0, sizeof(*out));
         out->validation_profile = -1;
     }
+}
+
+static bool session_retire_delete_and_commit(
+    sqlite3 *pdb, const struct producer_session *stored)
+{
+    return exec_checked(
+               pdb, "DELETE FROM consensus_state_producer_session") &&
+           progress_meta_table_ensure(pdb) &&
+           progress_meta_set_in_tx(pdb, k_retired_binary_meta_key,
+                                   stored->running_binary_digest, 32) &&
+           exec_checked(pdb, "COMMIT");
+}
+
+enum consensus_state_producer_session_retire_result
+consensus_state_producer_session_retire(
+    sqlite3 *pdb, struct consensus_state_producer_session_retired *out,
+    char *err, size_t err_size)
+{
+    session_retire_clear_outputs(out, err, err_size);
     if (!pdb) {
         set_err(err, err_size, "producer session retire: NULL store");
         return CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ERROR;
@@ -104,12 +122,7 @@ consensus_state_producer_session_retire(
         return CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_CURRENT;
     }
 
-    bool ok = exec_checked(
-                  pdb, "DELETE FROM consensus_state_producer_session") &&
-              progress_meta_table_ensure(pdb) &&
-              progress_meta_set_in_tx(pdb, k_retired_binary_meta_key,
-                                      stored.running_binary_digest, 32) &&
-              exec_checked(pdb, "COMMIT");
+    bool ok = session_retire_delete_and_commit(pdb, &stored);
     if (!ok)
         (void)exec_checked(pdb, "ROLLBACK");
     progress_store_tx_unlock();
