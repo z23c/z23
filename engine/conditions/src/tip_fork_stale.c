@@ -37,7 +37,7 @@
  *
  * remedy():
  *   1. process_block_invalidate(stale target) — marks it BLOCK_FAILED_VALID
- *      + disconnects/reorgs via the validated path so find_most_work_chain
+ *      +disconnects/reorgs via the validated path so find_most_work_chain
  *      stops selecting it.
  *   2. rebuild_recent(from ~tip-2) — fetch+connect the canonical chain's
  *      recent bodies from zclassicd through the normal validated accept
@@ -163,8 +163,8 @@ static _Atomic int g_test_invalidate_calls;
 static _Atomic int g_test_rebuild_calls;
 static _Atomic int g_test_queue_body_calls;
 static _Atomic int64_t g_test_last_invalidate_height = -1;
-static _Atomic int g_test_last_rebuild_from = -1;
-static _Atomic int g_test_last_queue_body_height = -1;
+static _Atomic int64_t g_test_last_rebuild_from = -1;
+static _Atomic int64_t g_test_last_queue_body_height = -1;
 #endif
 
 static struct main_state *ms_or_null(void)
@@ -185,7 +185,7 @@ static bool same_index_hash(const struct block_index *a,
 }
 
 static bool same_parent_hash(const struct block_index *a,
-                             const struct block_index *b)
+                            const struct block_index *b)
 {
     return a && b && a->pprev && b->pprev &&
            same_index_hash(a->pprev, b->pprev);
@@ -247,19 +247,10 @@ static int64_t stall_window_secs(int64_t tip_h)
     return TIP_STALL_SECS;
 }
 
-static bool detect_tip_fork_stale(void)
+/* Maintain the tip no-advance timer and report whether the applicable
+ * stall window (see stall_window_secs) has fully elapsed for this height. */
+static bool tip_stall_window_elapsed(int64_t tip_h)
 {
-    struct main_state *ms = ms_or_null();
-    if (!ms)
-        return false;
-
-    struct block_index *tip = active_chain_tip(&ms->chain_active);
-    int64_t tip_h = current_tip_height(ms);
-    if (!tip || tip_h <= 0)
-        return false; /* tip not established — stay quiet */
-
-    /* (a) sustained no-advance window. Reset the timer whenever the tip
-     * moves; only a tip that has held still for TIP_STALL_SECS qualifies. */
     int64_t now = platform_time_wall_unix();
     int64_t prev_tip = atomic_load(&g_tip_height_at_check);
     if (prev_tip != tip_h) {
@@ -276,25 +267,64 @@ static bool detect_tip_fork_stale(void)
     if (now - since < window)
         return false;
     atomic_store(&g_stall_window_at_detect, window);
+    return true;
+}
 
-    /* (b) a strictly higher-work HEADER chain exists. */
+/* Return pindex_best_header when a strictly higher-work HEADER chain that is
+ * actually height-ahead of the active tip exists; NULL otherwise. */
+static struct block_index *best_header_ahead_of_tip(
+    struct main_state *ms, struct block_index *tip, int64_t tip_h)
+{
     struct block_index *bh = ms->pindex_best_header;
     if (!bh)
-        return false;
+        return NULL;
     if (arith_uint256_compare(&bh->nChainWork, &tip->nChainWork) <= 0)
-        return false; /* no more-work header chain — normal at-tip */
+        return NULL; /* no more-work header chain — normal at-tip */
     if (bh->nHeight <= tip_h)
-        return false; /* best header not actually ahead — not a fork stall */
+        return NULL; /* best header not actually ahead — not a fork stall */
+    return bh;
+}
+
+/* Return true when the active tip is a data-bearing, unfailed same-height
+ * sibling of the best-header chain's ancestor at tip height — same parent,
+ * different hash. */
+static bool active_tip_is_stale_sibling(struct block_index *bh,
+                                        struct block_index *tip,
+                                        int64_t tip_h)
+{
+    struct block_index *bh_at_tip = block_index_get_ancestor(bh, (int)tip_h);
+    return (tip->nStatus & BLOCK_HAVE_DATA) && !block_has_any_failure(tip) &&
+           bh_at_tip && !same_index_hash(bh_at_tip, tip) &&
+           !block_has_any_failure(bh_at_tip) &&
+           same_parent_hash(bh_at_tip, tip);
+}
+
+static bool detect_tip_fork_stale(void)
+{
+    struct main_state *ms = ms_or_null();
+    if (!ms)
+        return false;
+
+    struct block_index *tip = active_chain_tip(&ms->chain_active);
+    int64_t tip_h = current_tip_height(ms);
+    if (!tip || tip_h <= 0)
+        return false; /* tip not established — stay quiet */
+
+    /* (a) sustained no-advance window. Reset the timer whenever the tip
+     * moves; only a tip that has held still for TIP_STALL_SECS qualifies. */
+    if (!tip_stall_window_elapsed(tip_h))
+        return false;
+
+    /* (b) a strictly higher-work HEADER chain exists. */
+    struct block_index *bh = best_header_ahead_of_tip(ms, tip, tip_h);
+    if (!bh)
+        return false;
 
     /* (c1) The active tip itself is a same-height data-bearing stale
      * sibling of the best-header chain. Limit this first repair to the
      * simple sibling shape (same parent, different hash); deeper divergence
      * will be named by follow-up repair once the frontier rewinds. */
-    struct block_index *bh_at_tip = block_index_get_ancestor(bh, (int)tip_h);
-    if ((tip->nStatus & BLOCK_HAVE_DATA) && !block_has_any_failure(tip) &&
-        bh_at_tip && !same_index_hash(bh_at_tip, tip) &&
-        !block_has_any_failure(bh_at_tip) &&
-        same_parent_hash(bh_at_tip, tip)) {
+    if (active_tip_is_stale_sibling(bh, tip, tip_h)) {
         atomic_store(&g_tip_at_detect, tip_h);
         remember_stale_target(tip, STALE_TARGET_ACTIVE_TIP);
         return true;
