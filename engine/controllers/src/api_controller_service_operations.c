@@ -374,6 +374,21 @@ bool api_service_operation_has_id(const char *operation_id)
     return api_service_operation_lookup_id(operation_id) != NULL;
 }
 
+static bool api_service_operation_text_present(const char *value)
+{
+    return value && value[0];
+}
+
+static const char *api_service_operation_execution_surface(
+    const struct api_service_operation_contract *op)
+{
+    if (api_service_operation_text_present(op->rest_method))
+        return "rest";
+    if (api_service_operation_text_present(op->rpc_method))
+        return "rpc";
+    return "native_or_planned";
+}
+
 void api_service_operation_json(
     struct json_value *obj,
     const struct api_service_operation_contract *op)
@@ -404,32 +419,28 @@ void api_service_operation_json(
     json_push_kv_str(obj, "operation", op->operation);
     json_push_kv_str(obj, "crud_capability", op->crud_capability);
     json_push_kv_str(obj, "status", op->status);
-    if (op->rest_method && op->rest_method[0])
+    if (api_service_operation_text_present(op->rest_method))
         json_push_kv_str(obj, "rest_method", op->rest_method);
-    if (op->rest_route && op->rest_route[0])
+    if (api_service_operation_text_present(op->rest_route))
         json_push_kv_str(obj, "rest_route", op->rest_route);
-    if (op->rpc_method && op->rpc_method[0])
+    if (api_service_operation_text_present(op->rpc_method))
         json_push_kv_str(obj, "rpc_method", op->rpc_method);
     json_push_kv_str(obj, "input_contract", op->input_contract);
     json_push_kv_str(obj, "output_schema", op->output_schema);
     json_push_kv_str(obj, "authority", op->authority);
     json_push_kv_str(obj, "effect", op->effect);
     json_push_kv_str(obj, "execution_surface",
-                     op->rest_method && op->rest_method[0]
-                         ? "rest"
-                         : op->rpc_method && op->rpc_method[0]
-                               ? "rpc"
-                               : "native_or_planned");
+                     api_service_operation_execution_surface(op));
     json_push_kv_str(obj, "write_safety",
                      api_service_operation_write_safety(op));
     json_push_kv_str(obj, "agent_preferred_interface", agent_interface);
     json_push_kv_str(obj, "agent_next_step",
                      api_service_operation_agent_next_step(op));
     json_push_kv_bool(obj, "rest_callable",
-                      op->rest_method && op->rest_method[0] &&
-                      op->rest_route && op->rest_route[0]);
+                      api_service_operation_text_present(op->rest_method) &&
+                      api_service_operation_text_present(op->rest_route));
     json_push_kv_bool(obj, "rpc_callable",
-                      op->rpc_method && op->rpc_method[0]);
+                      api_service_operation_text_present(op->rpc_method));
     json_push_kv_bool(obj, "public_read", op->public_read);
     json_push_kv_bool(obj, "operator_private", op->operator_private);
     json_push_kv_bool(obj, "destructive", op->destructive);
