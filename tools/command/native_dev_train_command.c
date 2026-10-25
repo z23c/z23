@@ -186,6 +186,69 @@ static bool dvt_prepare_stack(const struct zcl_command_request *request,
     return false;
 }
 
+static bool dvt_source_fail(struct zcl_command_reply *reply, const char *code,
+                            const char *message, const char *source)
+{
+    (void)json_push_kv_str(&reply->data, "source", source);
+    dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+             code, "source", message, source);
+    return false;
+}
+
+static bool dvt_source_range(const char *root, const char *source,
+                             struct zcl_command_reply *reply, bool *is_dir,
+                             const char **repo, char *range, size_t cap)
+{
+    *is_dir = zcl_dev_train_is_dir(source);
+    *repo = *is_dir ? source : root;
+    int n = snprintf(range, cap, "origin/main..%s", *is_dir ? "HEAD" : source);
+    if (n < 0 || (size_t)n >= cap)
+        return dvt_source_fail(reply, "SOURCE_RANGE_TOO_LONG",
+                                "source range exceeds the command bound", source);
+    return true;
+}
+
+static bool dvt_source_log(const char *repo, const char *source, const char *range,
+                           struct zcl_command_reply *reply, char *out, size_t cap)
+{
+    const char *args[] = {"log", "--reverse", "--format=%H%x1f%s", range, NULL};
+    if (zcl_dev_train_git(repo, args, out, cap, DVT_GIT_TIMEOUT_MS) != 0)
+        return dvt_source_fail(reply, "SOURCE_LOG_FAILED",
+                                "could not enumerate the source commit range", source);
+    if (strlen(out) >= cap - 1)
+        return dvt_source_fail(reply, "SOURCE_LOG_TOO_LARGE",
+                                "source commit list exceeds the capture bound", source);
+    return true;
+}
+
+/* Probe every source before allocating a stack. A successful empty range is
+ * valid; a failed Git command is never evidence that the source is empty. */
+static bool dvt_sources_preflight(const char *root, const char *sources,
+                                  struct zcl_command_reply *reply)
+{
+    char tokens[ZCL_COMMAND_MAX_INPUT], log[DVT_OUT_CAP], range[PATH_MAX + 32];
+    size_t n = strlen(sources);
+    if (n >= sizeof tokens)
+        return dvt_source_fail(reply, "SOURCES_TOO_LONG",
+                                "source list exceeds the command bound", "");
+    memcpy(tokens, sources, n + 1);
+    char *save = NULL;
+    bool any = false;
+    for (char *source = strtok_r(tokens, "\n", &save); source;
+         source = strtok_r(NULL, "\n", &save)) {
+        const char *repo;
+        bool is_dir;
+        any = true;
+        if (!dvt_source_range(root, source, reply, &is_dir, &repo, range, sizeof range) ||
+            !dvt_source_log(repo, source, range, reply, log, sizeof log))
+            return false;
+    }
+    if (!any)
+        return dvt_source_fail(reply, "NO_SOURCES",
+                                "at least one source token is required", "");
+    return true;
+}
+
 static bool dvt_stack_children(const struct zcl_command_request *request,
                                struct zcl_command_reply *reply, char *parent,
                                struct platform_directory_list *children)
@@ -241,6 +304,7 @@ void zcl_native_handle_dev_train_build(
                 "GIT_FAILED", "fetch", "git fetch origin failed", root);
         return;
     }
+    if (!dvt_sources_preflight(root, sources_csv, reply)) return;
 
     const char *worktree_add_args[] = {"worktree", "add", "--detach",
                                        stack_dir, "origin/main", NULL};
@@ -290,17 +354,18 @@ void zcl_native_handle_dev_train_build(
      * directory (its own origin/main..HEAD) or a ref name resolved in
      * `root` (its own origin/main..<ref>). */
     char sources_buf[ZCL_COMMAND_MAX_INPUT];
-    (void)snprintf(sources_buf, sizeof(sources_buf), "%s", sources_csv);
+    memcpy(sources_buf, sources_csv, strlen(sources_csv) + 1); /* Preflight bounds it. */
     char *save = NULL;
     for (char *source = strtok_r(sources_buf, "\n", &save); source;
          source = strtok_r(NULL, "\n", &save)) {
-        if (!source[0])
-            continue;
-        bool source_is_dir = zcl_dev_train_is_dir(source);
-        const char *ref_repo = source_is_dir ? source : root;
+        bool source_is_dir;
+        const char *ref_repo;
         char range[PATH_MAX + 32];
-        (void)snprintf(range, sizeof(range), "origin/main..%s",
-                      source_is_dir ? "HEAD" : source);
+        if (!dvt_source_range(root, source, reply, &source_is_dir, &ref_repo,
+                               range, sizeof range)) {
+            json_free(&picked); json_free(&skipped); json_free(&warnings);
+            return;
+        }
         if (source_is_dir) {
             /* A directory source may be a linked worktree of the SAME
              * repository (the common case: another lane worktree beside
@@ -312,14 +377,20 @@ void zcl_native_handle_dev_train_build(
              * it, so `git cherry-pick <sha>` never hits "bad object". */
             const char *fetch_source_args[] = {"fetch", "-q", source, "HEAD",
                                                NULL};
-            (void)zcl_dev_train_git(stack_dir, fetch_source_args, NULL, 0,
-                          DVT_FETCH_TIMEOUT_MS);
+            if (zcl_dev_train_git(stack_dir, fetch_source_args, NULL, 0,
+                                   DVT_FETCH_TIMEOUT_MS) != 0) {
+                (void)dvt_source_fail(reply, "SOURCE_FETCH_FAILED",
+                                       "could not fetch the source HEAD into the stack", source);
+                json_free(&picked); json_free(&skipped); json_free(&warnings);
+                return;
+            }
         }
-        const char *log_args[] = {"log", "--reverse",
-                                  "--format=%H%x1f%s", range, NULL};
         char log_out[DVT_OUT_CAP];
-        if (zcl_dev_train_git(ref_repo, log_args, log_out, sizeof(log_out),
-                    DVT_GIT_TIMEOUT_MS) != 0 || !log_out[0]) {
+        if (!dvt_source_log(ref_repo, source, range, reply, log_out, sizeof log_out)) {
+            json_free(&picked); json_free(&skipped); json_free(&warnings);
+            return;
+        }
+        if (!log_out[0]) {
             struct json_value w;
             json_init(&w);
             char msg[PATH_MAX + 64];

@@ -568,6 +568,108 @@ _test_next:;
     return failures;
 }
 
+static int dvt_refused_source(const char *parent, const char *root,
+                               const char *name, const char *sources,
+                               const char *source, const char *code)
+{
+    int failures = 0;
+    struct json_value input = dvt_input_build(name, sources);
+    struct zcl_command_reply reply;
+    dvt_call(zcl_native_handle_dev_train_build, root, &input, &reply);
+    ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+    ASSERT_STR_EQ(reply.error.code, code);
+    ASSERT_STR_EQ(dvt_str(&reply, "source"), source);
+    char stack[1024], worktrees[8192];
+    ASSERT(snprintf(stack, sizeof(stack), "%s/z23-stack%s", parent, name) <
+           (int)sizeof(stack));
+    ASSERT(platform_directory_probe_real(stack) == PLATFORM_DIRECTORY_PROBE_MISSING);
+    const char *list[] = {"worktree", "list", "--porcelain", NULL};
+    ASSERT(dvt_git_capture(root, list, worktrees, sizeof(worktrees)));
+    ASSERT(strstr(worktrees, stack) == NULL);
+_test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return failures;
+}
+
+static int dvt_invalid_sources(const char *parent, const char *root,
+                                const char *valid)
+{
+    int failures = 0;
+    char ceiling[4096], saved[8192], missing[1024], plain[1024], mixed[2048];
+    const char *previous = getenv("GIT_CEILING_DIRECTORIES");
+    bool had_previous = previous != NULL, changed = false;
+    ASSERT(!previous || strlen(previous) < sizeof(saved));
+    if (previous) memcpy(saved, previous, strlen(previous) + 1);
+    ASSERT(platform_directory_canonical_real(parent, ceiling, sizeof(ceiling)));
+    ASSERT(setenv("GIT_CEILING_DIRECTORIES", ceiling, 1) == 0);
+    changed = true;
+    ASSERT(snprintf(missing, sizeof(missing), "%s/missing", ceiling) < (int)sizeof(missing));
+    ASSERT(snprintf(plain, sizeof(plain), "%s/plain", ceiling) < (int)sizeof(plain));
+    ASSERT(platform_directory_ensure(plain, 0700));
+    ASSERT(snprintf(mixed, sizeof(mixed), "%s\n%s", valid, missing) < (int)sizeof(mixed));
+    failures += dvt_refused_source(parent, root, "missing", missing, missing, "SOURCE_LOG_FAILED");
+    failures += dvt_refused_source(parent, root, "plain", plain, plain, "SOURCE_LOG_FAILED");
+    failures += dvt_refused_source(parent, root, "badref", "refs/heads/not-present", "refs/heads/not-present", "SOURCE_LOG_FAILED");
+    failures += dvt_refused_source(parent, root, "mixed", mixed, missing, "SOURCE_LOG_FAILED");
+    failures += dvt_refused_source(parent, root, "notokens", "\n\n", "", "NO_SOURCES");
+_test_next:;
+    if (changed) {
+        if (had_previous) (void)setenv("GIT_CEILING_DIRECTORIES", saved, 1);
+        else (void)unsetenv("GIT_CEILING_DIRECTORIES");
+    }
+    return failures;
+}
+
+static int dvt_empty_source(const char *root, const char *name, const char *source)
+{
+    int failures = 0;
+    struct json_value input = dvt_input_build(name, source);
+    struct zcl_command_reply reply;
+    dvt_call(zcl_native_handle_dev_train_build, root, &input, &reply);
+    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ASSERT(dvt_int(&reply, "commits") == 0);
+    zcl_command_reply_free(&reply);
+    (void)json_push_kv_bool(&input, "force", true);
+    dvt_call(zcl_native_handle_dev_train_drop, root, &input, &reply);
+    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+_test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return failures;
+}
+
+static int dvt_large_log(const char *parent, const char *root, const char *bare)
+{
+    int failures = 0;
+    char source[1024];
+    char *subject = NULL;
+    ASSERT(snprintf(source, sizeof(source), "%s/large", parent) < (int)sizeof(source));
+    ASSERT(dvt_clone(bare, source));
+    subject = malloc(65537);
+    ASSERT(subject != NULL);
+    memset(subject, 'x', 65536);
+    subject[65536] = '\0';
+    ASSERT(dvt_write(source, "long.txt", "first\n"));
+    /* Keep the large payload out of argv, including on Windows. The message
+     * lives in this private clone's Git directory and cannot be committed. */
+    ASSERT(dvt_write(source, ".git/train-message", subject));
+    const char *add[] = {"add", "-A", NULL};
+    const char *commit[] = {"-c", "user.name=Z23 Test",
+                            "-c", "user.email=z23-test@example.invalid",
+                            "-c", "commit.gpgsign=false", "commit", "-q",
+                            "-F", ".git/train-message", NULL};
+    ASSERT(dvt_git(source, add));
+    ASSERT(dvt_git(source, commit));
+    ASSERT(dvt_write(source, "long.txt", "second\n"));
+    ASSERT(dvt_commit(source, "following commit must not disappear"));
+    failures += dvt_refused_source(parent, root, "largelog", source, source,
+                                   "SOURCE_LOG_TOO_LARGE");
+_test_next:;
+    free(subject);
+    return failures;
+}
+
 int test_dev_train(void);
 int test_dev_train(void)
 {
@@ -605,6 +707,17 @@ int test_dev_train(void)
     ASSERT(dvt_write(src_c, "shared.txt", "C change\n"));
     ASSERT(dvt_commit(src_c, "srcC: change shared too"));
     ASSERT(dvt_head(src_c, sha_c1));
+
+    TEST("train build: invalid sources refuse before stack allocation") {
+        ASSERT(dvt_invalid_sources(parent, root, src_a) == 0);
+        ASSERT(dvt_large_log(parent, root, bare) == 0);
+        PASS();
+    }
+    TEST("train build: valid empty directory and ref ranges remain accepted") {
+        ASSERT(dvt_empty_source(root, "emptyref", "origin/main") == 0);
+        ASSERT(dvt_empty_source(root, "emptydir", root) == 0);
+        PASS();
+    }
 
     TEST("train: the four leaves are registered with their declared keys") {
         static const char *const paths[] = {
