@@ -42,56 +42,8 @@ static void gather_tx_output_stats(sqlite3 *db, struct stats_ctx *c)
     sqlite3_finalize(s);
 }
 
-/* Phase 1h: deep chain queries (tx_outputs, joinsplits, sapling_*,
- * sprout_nullifiers, view_integrity, firsts & records). Writes
- * directly into the supplied stats_ctx. */
-void gather_deep_chain_data(sqlite3 *db, struct stats_ctx *c)
+static void gather_chain_records(sqlite3 *db, struct stats_ctx *c)
 {
-    printf("Stats: querying deep chain data...\n"); fflush(stdout);
-
-    /* Transaction I/O */
-    gather_tx_output_stats(db, c);
-    c->total_inputs  = stats_q_i64(db, "SELECT count(*) FROM tx_inputs");
-
-    /* Shielded deep dive (per-tx tables) */
-    c->total_joinsplits   = stats_q_i64(db, "SELECT count(*) FROM joinsplits");
-    c->total_vpub_old     = stats_q_i64(db, "SELECT COALESCE(SUM(vpub_old),0) FROM joinsplits");
-    c->total_vpub_new     = stats_q_i64(db, "SELECT COALESCE(SUM(vpub_new),0) FROM joinsplits");
-    c->total_sap_spends   = stats_q_i64(db, "SELECT count(*) FROM sapling_spends");
-    c->total_sap_outputs  = stats_q_i64(db, "SELECT count(*) FROM sapling_outputs");
-    c->total_sprout_nulls = stats_q_i64(db, "SELECT count(*) FROM sprout_nullifiers");
-    c->unique_sap_anchors = stats_q_i64(db, "SELECT count(DISTINCT anchor) FROM sapling_spends");
-
-    /* SHA3 integrity chain */
-    c->integrity_count = stats_q_i64(db, "SELECT count(*) FROM view_integrity");
-    c->integrity_min_h = stats_q_i64(db, "SELECT MIN(height) FROM view_integrity");
-    c->integrity_max_h = stats_q_i64(db, "SELECT MAX(height) FROM view_integrity");
-    snprintf(c->integrity_latest_hash, sizeof(c->integrity_latest_hash), "N/A");
-    {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT hex(sha3_hash) FROM view_integrity ORDER BY height DESC LIMIT 1",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                const char *h = (const char *)sqlite3_column_text(s, 0);
-                if (h) snprintf(c->integrity_latest_hash, sizeof(c->integrity_latest_hash), "%s", h);
-            }
-            sqlite3_finalize(s);
-        }
-    }
-
-    /* Chain firsts & records */
-    c->first_noncoinbase = stats_q_i64(db,
-        "SELECT MIN(block_height) FROM transactions WHERE is_coinbase=0");
-    struct explorer_first_privacy_heights first_privacy = {0};
-    explorer_query_first_privacy_heights(db, &first_privacy);
-    c->first_joinsplit_h = first_privacy.joinsplit_height;
-    c->first_sapling_h = first_privacy.sapling_height;
-    c->first_opreturn_h = stats_q_i64(db,
-        "SELECT MIN(block_height) FROM op_returns");
-    c->first_zslp_h = stats_q_i64(db,
-        "SELECT MIN(genesis_height) FROM zslp_tokens");
-
     c->most_js_block = 0; c->most_js_count = 0;
     {
         sqlite3_stmt *s = NULL;
@@ -152,6 +104,139 @@ void gather_deep_chain_data(sqlite3 *db, struct stats_ctx *c)
     }
 }
 
+/* Phase 1h: deep chain queries (tx_outputs, joinsplits, sapling_*,
+ * sprout_nullifiers, view_integrity, firsts & records). Writes
+ * directly into the supplied stats_ctx. */
+void gather_deep_chain_data(sqlite3 *db, struct stats_ctx *c)
+{
+    printf("Stats: querying deep chain data...\n"); fflush(stdout);
+
+    /* Transaction I/O */
+    gather_tx_output_stats(db, c);
+    c->total_inputs  = stats_q_i64(db, "SELECT count(*) FROM tx_inputs");
+
+    /* Shielded deep dive (per-tx tables) */
+    c->total_joinsplits   = stats_q_i64(db, "SELECT count(*) FROM joinsplits");
+    c->total_vpub_old     = stats_q_i64(db, "SELECT COALESCE(SUM(vpub_old),0) FROM joinsplits");
+    c->total_vpub_new     = stats_q_i64(db, "SELECT COALESCE(SUM(vpub_new),0) FROM joinsplits");
+    c->total_sap_spends   = stats_q_i64(db, "SELECT count(*) FROM sapling_spends");
+    c->total_sap_outputs  = stats_q_i64(db, "SELECT count(*) FROM sapling_outputs");
+    c->total_sprout_nulls = stats_q_i64(db, "SELECT count(*) FROM sprout_nullifiers");
+    c->unique_sap_anchors = stats_q_i64(db, "SELECT count(DISTINCT anchor) FROM sapling_spends");
+
+    /* SHA3 integrity chain */
+    c->integrity_count = stats_q_i64(db, "SELECT count(*) FROM view_integrity");
+    c->integrity_min_h = stats_q_i64(db, "SELECT MIN(height) FROM view_integrity");
+    c->integrity_max_h = stats_q_i64(db, "SELECT MAX(height) FROM view_integrity");
+    snprintf(c->integrity_latest_hash, sizeof(c->integrity_latest_hash), "N/A");
+    {
+        sqlite3_stmt *s = NULL;
+        if (sqlite3_prepare_v2(db,
+                "SELECT hex(sha3_hash) FROM view_integrity ORDER BY height DESC LIMIT 1",
+                -1, &s, NULL) == SQLITE_OK && s) {
+            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+                const char *h = (const char *)sqlite3_column_text(s, 0);
+                if (h) snprintf(c->integrity_latest_hash, sizeof(c->integrity_latest_hash), "%s", h);
+            }
+            sqlite3_finalize(s);
+        }
+    }
+
+    /* Chain firsts & records */
+    c->first_noncoinbase = stats_q_i64(db,
+        "SELECT MIN(block_height) FROM transactions WHERE is_coinbase=0");
+    struct explorer_first_privacy_heights first_privacy = {0};
+    explorer_query_first_privacy_heights(db, &first_privacy);
+    c->first_joinsplit_h = first_privacy.joinsplit_height;
+    c->first_sapling_h = first_privacy.sapling_height;
+    c->first_opreturn_h = stats_q_i64(db,
+        "SELECT MIN(block_height) FROM op_returns");
+    c->first_zslp_h = stats_q_i64(db,
+        "SELECT MIN(genesis_height) FROM zslp_tokens");
+
+    gather_chain_records(db, c);
+}
+
+static void gather_recent_interval(sqlite3 *db, struct stats_ctx *c)
+{
+    c->recent_avg_interval = 0.0;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT MAX(time), MIN(time), COUNT(*) FROM "
+            "(SELECT time FROM blocks ORDER BY height DESC LIMIT 1000)",
+            -1, &s, NULL) == SQLITE_OK && s) {
+        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            int64_t tmax = sqlite3_column_int64(s, 0);
+            int64_t tmin = sqlite3_column_int64(s, 1);
+            int64_t n    = sqlite3_column_int64(s, 2);
+            if (n > 1 && tmax > tmin)
+                c->recent_avg_interval =
+                    (double)(tmax - tmin) / (double)(n - 1);
+        }
+        sqlite3_finalize(s);
+    } else {
+        printf("Stats: recent-interval query prepare failed: %s\n",
+               sqlite3_errmsg(db)); fflush(stdout);
+    }
+}
+
+static void gather_immature_coinbase(sqlite3 *db, int tip,
+                                     struct stats_ctx *c)
+{
+    c->immature_cb_count = 0;
+    c->immature_cb_value = 0;
+    int64_t mat = (int64_t)tip - 100; /* COINBASE_MATURITY */
+    if (mat < 0) mat = 0;
+    char sql[200];
+    snprintf(sql, sizeof(sql),
+        "SELECT COUNT(*), COALESCE(SUM(value),0) FROM utxos "
+        "WHERE is_coinbase=1 AND height > %lld", (long long)mat);
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
+        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            c->immature_cb_count = sqlite3_column_int64(s, 0);
+            c->immature_cb_value = sqlite3_column_int64(s, 1);
+        }
+        sqlite3_finalize(s);
+    } else {
+        printf("Stats: immature-coinbase query prepare failed: %s\n",
+               sqlite3_errmsg(db)); fflush(stdout);
+    }
+}
+
+static void gather_chainwork(sqlite3 *db, struct stats_ctx *c)
+{
+    c->chainwork_hex[0] = '\0';
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT hex(chain_work) FROM blocks ORDER BY height DESC LIMIT 1",
+            -1, &s, NULL) == SQLITE_OK && s) {
+        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            const char *le = (const char *)sqlite3_column_text(s, 0);
+            if (le) {
+                size_t n = strlen(le);
+                if (n >= 2 && n <= 64 && (n % 2) == 0) {
+                    char be[72];
+                    size_t bo = 0;
+                    for (size_t i = n; i >= 2 && bo + 2 < sizeof(be); i -= 2) {
+                        be[bo++] = le[i - 2];
+                        be[bo++] = le[i - 1];
+                    }
+                    be[bo] = '\0';
+                    size_t z = 0;
+                    while (be[z] == '0' && be[z + 1] != '\0') z++;
+                    snprintf(c->chainwork_hex, sizeof(c->chainwork_hex),
+                             "%s", be + z);
+                }
+            }
+        }
+        sqlite3_finalize(s);
+    } else {
+        printf("Stats: chainwork query prepare failed: %s\n",
+               sqlite3_errmsg(db)); fflush(stdout);
+    }
+}
+
 /* Phase 1h2: recent-window economy aggregates. Cheap range-bounded queries
  * (last ~1 day / 1000 blocks) plus median + chainwork. Writes into ctx. */
 void gather_economy_data(sqlite3 *db, int tip, int64_t tip_time,
@@ -160,26 +245,7 @@ void gather_economy_data(sqlite3 *db, int tip, int64_t tip_time,
     printf("Stats: gathering economy data...\n"); fflush(stdout);
 
     /* Recent average block interval over the last 1000 blocks. */
-    c->recent_avg_interval = 0.0;
-    {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT MAX(time), MIN(time), COUNT(*) FROM "
-                "(SELECT time FROM blocks ORDER BY height DESC LIMIT 1000)",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int64_t tmax = sqlite3_column_int64(s, 0);
-                int64_t tmin = sqlite3_column_int64(s, 1);
-                int64_t n    = sqlite3_column_int64(s, 2);
-                if (n > 1 && tmax > tmin)
-                    c->recent_avg_interval = (double)(tmax - tmin) / (double)(n - 1);
-            }
-            sqlite3_finalize(s);
-        } else {
-            printf("Stats: recent-interval query prepare failed: %s\n",
-                   sqlite3_errmsg(db)); fflush(stdout);
-        }
-    }
+    gather_recent_interval(db, c);
 
     /* Transactions confirmed in the last 24h (by block time). */
     {
@@ -208,27 +274,7 @@ void gather_economy_data(sqlite3 *db, int tip, int64_t tip_time,
     }
 
     /* Unspent coinbase still inside the COINBASE_MATURITY (=100) window. */
-    c->immature_cb_count = 0;
-    c->immature_cb_value = 0;
-    {
-        int64_t mat = (int64_t)tip - 100; /* COINBASE_MATURITY */
-        if (mat < 0) mat = 0;
-        char sql[200];
-        snprintf(sql, sizeof(sql),
-            "SELECT COUNT(*), COALESCE(SUM(value),0) FROM utxos "
-            "WHERE is_coinbase=1 AND height > %lld", (long long)mat);
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                c->immature_cb_count = sqlite3_column_int64(s, 0);
-                c->immature_cb_value = sqlite3_column_int64(s, 1);
-            }
-            sqlite3_finalize(s);
-        } else {
-            printf("Stats: immature-coinbase query prepare failed: %s\n",
-                   sqlite3_errmsg(db)); fflush(stdout);
-        }
-    }
+    gather_immature_coinbase(db, tip, c);
 
     /* Median UTXO value (offset to the middle row of a value-ordered scan). */
     c->median_utxo_value = stats_q_i64(db,
@@ -238,37 +284,7 @@ void gather_economy_data(sqlite3 *db, int tip, int64_t tip_time,
     /* Cumulative chainwork at tip. Stored as a 32-byte little-endian blob;
      * render big-endian hex (matches getblockchaininfo), leading zeros
      * trimmed. */
-    c->chainwork_hex[0] = '\0';
-    {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT hex(chain_work) FROM blocks ORDER BY height DESC LIMIT 1",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                const char *le = (const char *)sqlite3_column_text(s, 0);
-                if (le) {
-                    size_t n = strlen(le);
-                    if (n >= 2 && n <= 64 && (n % 2) == 0) {
-                        char be[72];
-                        size_t bo = 0;
-                        for (size_t i = n; i >= 2 && bo + 2 < sizeof(be); i -= 2) {
-                            be[bo++] = le[i - 2];
-                            be[bo++] = le[i - 1];
-                        }
-                        be[bo] = '\0';
-                        size_t z = 0;
-                        while (be[z] == '0' && be[z + 1] != '\0') z++;
-                        snprintf(c->chainwork_hex, sizeof(c->chainwork_hex),
-                                 "%s", be + z);
-                    }
-                }
-            }
-            sqlite3_finalize(s);
-        } else {
-            printf("Stats: chainwork query prepare failed: %s\n",
-                   sqlite3_errmsg(db)); fflush(stdout);
-        }
-    }
+    gather_chainwork(db, c);
 }
 
 /* Phase 1i: 40-bucket aggregates over 5 time ranges (24h/7d/30d/1y/all).
