@@ -26,13 +26,10 @@
     else { printf("FAIL\n"); failures++; } \
 } while (0)
 
-int test_domain_consensus_pow(void)
+/* Error-path contract checks for domain_consensus_block_proof. */
+static int check_block_proof_contract(void)
 {
     int failures = 0;
-    const struct chain_params *cp = chain_params_get();
-    const struct consensus_params *params = &cp->consensus;
-
-    /* --- error-path / contract tests --- */
 
     /* block_proof: null out -> typed error. */
     {
@@ -40,6 +37,15 @@ int test_domain_consensus_pow(void)
         DCP_CHECK("block_proof null out -> ERR_NULL_OUT",
                   !r.ok && r.code == DOMAIN_CONSENSUS_POW_ERR_NULL_OUT);
     }
+
+    return failures;
+}
+
+/* Error-path contract checks for domain_consensus_increase_difficulty_by. */
+static int check_increase_difficulty_by_contract(
+        const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* increase_difficulty_by: null params -> typed error. */
     {
@@ -67,6 +73,15 @@ int test_domain_consensus_pow(void)
                   !r.ok && r.code == DOMAIN_CONSENSUS_POW_ERR_BAD_DIVISOR);
     }
 
+    return failures;
+}
+
+/* Error-path contract checks for calculate_next_work_required. */
+static int check_calculate_next_work_contract(
+        const struct consensus_params *params)
+{
+    int failures = 0;
+
     /* calculate_next_work_required: null params -> typed error. */
     {
         struct arith_uint256 avg;
@@ -88,7 +103,13 @@ int test_domain_consensus_pow(void)
                   !r.ok && r.code == DOMAIN_CONSENSUS_POW_ERR_NULL_OUT);
     }
 
-    /* --- value tests (pin known points on the curve) --- */
+    return failures;
+}
+
+/* Value checks pinning known points on the PoW curve. */
+static int check_pow_value_points(const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* block_proof for nBits=0: legacy returns zero (target is 0). */
     {
@@ -130,9 +151,13 @@ int test_domain_consensus_pow(void)
                   r.ok && out != 0);
     }
 
-    /* --- regression seal: domain function must match the legacy
-     * wrapper for every sampled input. If anyone "improves" either
-     * side, the test shouts. --- */
+    return failures;
+}
+
+/* Regression seal for block_proof over sampled nBits values. */
+static int check_block_proof_matches_legacy(void)
+{
+    int failures = 0;
 
     /* block_proof vs GetBlockProof. */
     {
@@ -166,6 +191,15 @@ int test_domain_consensus_pow(void)
         DCP_CHECK("block_proof matches GetBlockProof across samples",
                   all_match);
     }
+
+    return failures;
+}
+
+/* Regression seal for increase_difficulty_by over sampled inputs. */
+static int check_increase_difficulty_by_matches_legacy(
+        const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* increase_difficulty_by vs IncreaseDifficultyBy. */
     {
@@ -201,9 +235,18 @@ int test_domain_consensus_pow(void)
                   "across samples", all_match);
     }
 
+    return failures;
+}
+
+/* Regression seal for calculate_next_work_required over sampled inputs. */
+static int check_calculate_next_work_matches_legacy(
+        const struct consensus_params *params)
+{
+    int failures = 0;
+
     /* calculate_next_work_required vs CalculateNextWorkRequired.
      * Sample across timespan extremes: way-too-fast (clamps to min),
-     * way-too-slow (clamps to max), normal. */
+     * way-too-slow (clamps to max). */
     {
         struct arith_uint256 avg;
         arith_uint256_set_compact(&avg, 0x1d00ffff, NULL, NULL);
@@ -247,6 +290,30 @@ int test_domain_consensus_pow(void)
         DCP_CHECK("calculate_next_work_required matches "
                   "CalculateNextWorkRequired across samples", all_match);
     }
+
+    return failures;
+}
+
+int test_domain_consensus_pow(void)
+{
+    int failures = 0;
+    const struct chain_params *cp = chain_params_get();
+    const struct consensus_params *params = &cp->consensus;
+
+    /* --- error-path / contract tests --- */
+    failures += check_block_proof_contract();
+    failures += check_increase_difficulty_by_contract(params);
+    failures += check_calculate_next_work_contract(params);
+
+    /* --- value tests (pin known points on the curve) --- */
+    failures += check_pow_value_points(params);
+
+    /* --- regression seal: domain function must match the legacy
+     * wrapper for every sampled input. If anyone "improves" either
+     * side, the test shouts. --- */
+    failures += check_block_proof_matches_legacy();
+    failures += check_increase_difficulty_by_matches_legacy(params);
+    failures += check_calculate_next_work_matches_legacy(params);
 
     return failures;
 }
