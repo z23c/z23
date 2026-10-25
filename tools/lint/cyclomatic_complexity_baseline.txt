@@ -2245,7 +2245,6 @@ tests/harness/src/test_seed_bootstrap_doors.c:check_directory_is_a_door:18
 tests/harness/src/test_seed_tape.c:test_seed_tape:29
 tests/harness/src/test_seed_torn_import_gate.c:test_seed_torn_import_gate:49
 tests/harness/src/test_segment_sealer.c:test_segment_sealer:20
-tests/harness/src/test_self_heal_scan_fallback.c:test_self_heal_scan_fallback:16
 tests/harness/src/test_sha256_isa_parity.c:test_sha256_isa_parity:43
 tests/harness/src/test_sha3_256_x4.c:test_sha3_256_x4:56
 tests/harness/src/test_sha3_512_x4.c:test_sha3_512_x4:41

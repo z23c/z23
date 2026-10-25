@@ -6,22 +6,8 @@
 
 #include <stdlib.h>
 
-int test_self_heal_scan_fallback(void)
+static bool self_heal_scan_counters_zero_and_depth_override_ok(void)
 {
-    int failures = 0;
-
-    printf("self_heal_scan: dedicated hit/exhausted event names... ");
-    if (strcmp(event_type_name(EV_SELF_HEAL_SCAN_HIT),
-               "val.self_heal_scan_hit") != 0 ||
-        strcmp(event_type_name(EV_SELF_HEAL_SCAN_EXHAUSTED),
-               "val.self_heal_scan_exhausted") != 0) {
-        printf("FAIL\n");
-        failures++;
-    } else {
-        printf("OK\n");
-    }
-
-    printf("self_heal_scan: counters reset and expose depth override... ");
     struct self_heal_scan_stats stats;
 
     unsetenv("ZCL_SELF_HEAL_SCAN_DEPTH");
@@ -45,16 +31,13 @@ int test_self_heal_scan_fallback(void)
     setenv("ZCL_SELF_HEAL_SCAN_DEPTH", "not-a-number", 1);
     ok = ok && process_block_self_heal_scan_depth_limit() == 250000;
     unsetenv("ZCL_SELF_HEAL_SCAN_DEPTH");
-    if (ok) {
-        printf("OK\n");
-    } else {
-        printf("FAIL\n");
-        failures++;
-    }
+    return ok;
+}
 
-    printf("self_heal_scan: broad disk scan is opt-in... ");
+static bool self_heal_scan_disk_scan_opt_in_ok(void)
+{
     unsetenv("ZCL_SELF_HEAL_SCAN_ENABLE");
-    ok = !process_block_self_heal_scan_enabled();
+    bool ok = !process_block_self_heal_scan_enabled();
     setenv("ZCL_SELF_HEAL_SCAN_ENABLE", "1", 1);
     ok = ok && process_block_self_heal_scan_enabled();
     setenv("ZCL_SELF_HEAL_SCAN_ENABLE", "true", 1);
@@ -62,7 +45,34 @@ int test_self_heal_scan_fallback(void)
     setenv("ZCL_SELF_HEAL_SCAN_ENABLE", "0", 1);
     ok = ok && !process_block_self_heal_scan_enabled();
     unsetenv("ZCL_SELF_HEAL_SCAN_ENABLE");
-    if (ok) {
+    return ok;
+}
+
+int test_self_heal_scan_fallback(void)
+{
+    int failures = 0;
+
+    printf("self_heal_scan: dedicated hit/exhausted event names... ");
+    if (strcmp(event_type_name(EV_SELF_HEAL_SCAN_HIT),
+               "val.self_heal_scan_hit") != 0 ||
+        strcmp(event_type_name(EV_SELF_HEAL_SCAN_EXHAUSTED),
+               "val.self_heal_scan_exhausted") != 0) {
+        printf("FAIL\n");
+        failures++;
+    } else {
+        printf("OK\n");
+    }
+
+    printf("self_heal_scan: counters reset and expose depth override... ");
+    if (self_heal_scan_counters_zero_and_depth_override_ok()) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+
+    printf("self_heal_scan: broad disk scan is opt-in... ");
+    if (self_heal_scan_disk_scan_opt_in_ok()) {
         printf("OK\n");
     } else {
         printf("FAIL\n");
