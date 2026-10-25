@@ -16,12 +16,13 @@
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define LANES_MAX_DEPTH 8
 #define LANES_META_BYTES 65536u
@@ -119,11 +120,11 @@ static void lanes_walk(struct zcl_agent_index *ix, const char *dir, int depth);
 
 /* One regular file: read it when it is an in-size agent meta file. */
 static void lanes_file(struct zcl_agent_index *ix, const char *path,
-                       const char *name, const struct stat *st)
+                       const char *name, uint64_t size)
 {
     char id[48];
-    if (!lanes_meta_id(name, id, sizeof(id)) || st->st_size <= 0 ||
-        (size_t)st->st_size > LANES_META_BYTES)
+    if (!lanes_meta_id(name, id, sizeof(id)) || size == 0 ||
+        size > LANES_META_BYTES)
         return;
     if (ix->files >= ZCL_AGENT_INDEX_FILE_CAP) {
         ix->capped = true;
@@ -138,18 +139,21 @@ static void lanes_walk(struct zcl_agent_index *ix, const char *dir, int depth)
     DIR *d = opendir(dir);
     struct dirent *e;
     char path[LANES_PATH_MAX];
-    struct stat st;
     while (d && !ix->oom && !ix->capped && (e = readdir(d)) != NULL) {
         if (e->d_name[0] == '.')
             continue;
         if (snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >=
-                (int)sizeof(path) ||
-            lstat(path, &st) != 0)
+                (int)sizeof(path))
             continue;
-        if (S_ISDIR(st.st_mode) && depth < LANES_MAX_DEPTH)
+        struct platform_file_metadata metadata;
+        enum platform_file_metadata_result result =
+            platform_file_metadata_read(path, &metadata);
+        if (result == PLATFORM_FILE_METADATA_OK)
+            lanes_file(ix, path, e->d_name, metadata.size);
+        else if (result == PLATFORM_FILE_METADATA_NOT_REGULAR &&
+                 depth < LANES_MAX_DEPTH &&
+                 platform_directory_probe_real(path) == PLATFORM_DIRECTORY_PROBE_OK)
             lanes_walk(ix, path, depth + 1);
-        else if (S_ISREG(st.st_mode))
-            lanes_file(ix, path, e->d_name, &st);
     }
     if (d)
         (void)closedir(d);

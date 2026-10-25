@@ -7,6 +7,7 @@
 ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB := -l:libwinpthread.a
 
 ZCL_WINDOWS_ACCEPTANCE_TESTS := \
+	agent_lanes \
 	block_swarm_scale \
 	boot_auto_install_bundle_refusal \
 	boot_export_refusal \
@@ -370,6 +371,15 @@ ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_LIBS := \
 	-Wl,--gc-sections -ladvapi32 -lpsapi -lshell32 -lole32 -luuid \
 	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
+ZCL_WINDOWS_ACCEPTANCE_agent_lanes_SOURCES := \
+	tests/harness/src/agent_lanes_windows_acceptance.c \
+	tools/command/native_fleet_objectives_lanes.c \
+	platform/modules/platform/src/directory_compat.c \
+	platform/modules/platform/src/file_metadata.c \
+	platform/modules/json/src/json.c \
+	platform/modules/base/src/cleanse.c \
+	platform/modules/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_agent_lanes_FLAGS := -Itools
 ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
 	platform/modules/platform/tests/directory_compat_windows_acceptance.c \
 	platform/modules/platform/src/directory_compat.c \

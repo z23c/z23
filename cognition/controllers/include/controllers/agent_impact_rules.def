@@ -7,6 +7,7 @@
  *   AGENT_IMPACT_RULE("path-pattern|other-pattern", "group other_group")
  *
  * Patterns use shell/fnmatch syntax. Keep groups space-separated. */
+AGENT_IMPACT_RULE("tools/command/native_fleet_objectives_lanes.c|tests/harness/src/agent_lanes_windows_acceptance.c", "fleet_objectives_tokens make_lint_gates")
 AGENT_IMPACT_RULE("platform/adapters/outbound/persistence/src/block_log_legacy.c|platform/adapters/outbound/persistence/include/adapters/outbound/persistence/block_log_legacy.h|tests/harness/src/test_block_log_legacy.c", "block_log_legacy make_lint_gates")
 
 AGENT_IMPACT_RULE("platform/modules/fdt/*|tests/harness/src/test_fdt.c", "test_fdt")
