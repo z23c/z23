@@ -14,6 +14,8 @@
 
 #include "command/native_command.h"
 #include "command/native_dev_land_internal.h"
+#include "dev_proof.h"
+#include "platform/directory_compat.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -25,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -32,6 +35,7 @@
 #define PC_OUT_CAP (128u * 1024u)
 #define PC_EVIDENCE_CAP 4096u
 #define PC_TEXT_CAP 1600u
+#define PC_SHIP_GATE "check-ship-remote-transaction"
 
 static const char *const k_pc_core[] = {
     "check-file-size-ceiling", "check-cyclomatic-complexity",
@@ -318,6 +322,133 @@ struct pc_run {
     size_t nskipped, nran;
 };
 
+static void pc_history_unproven(struct pc_run *r, const char *reason)
+{
+    (void)snprintf(r->unproven, sizeof(r->unproven), "proof-history: %s", reason);
+}
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+struct pc_history {
+    struct zcl_land_precheck_gates gates;
+    int64_t now;
+    bool uncertain;
+};
+
+static bool pc_history_visit(const struct zcl_dev_proof_history_failure *row,
+                              void *context)
+{
+    struct pc_history *h = context;
+    if (row->classification != ZCL_PROOF_HISTORY_FAILURE) return true;
+    if (!row->digest[0]) {
+        h->uncertain = true;
+        return true;
+    }
+    if (strncmp(row->digest, "lint:", 5) != 0 &&
+        strncmp(row->digest, "lint ", 5) != 0) return true;
+    /* A retained failure observed now and requested within the window is
+     * definitely recent. An older request cannot date its eventual failure. */
+    if (row->request_started_unix > h->now ||
+        row->request_started_unix < h->now - ZCL_LAND_PRECHECK_WINDOW_S) {
+        h->uncertain = true;
+        return true;
+    }
+    pc_gates_from_text(row->digest, &h->gates);
+    return h->gates.count < ZCL_LAND_PRECHECK_MAX_GATES;
+}
+
+#endif
+
+/* Merge only a complete read; no partial callback result escapes refusal. */
+static void pc_history_learn(struct pc_run *r, const char *land,
+                              struct zcl_land_precheck_gates *g)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    char path[4096 + 4], canonical[4096];
+    if (snprintf(path, sizeof(path), "%s/wt", land) >= (int)sizeof(path) ||
+        !platform_directory_canonical_real(path, canonical, sizeof(canonical))) {
+        pc_history_unproven(r, "canonical land worktree unavailable");
+        return;
+    }
+    struct pc_history *h = zcl_calloc(1, sizeof(*h), "dev_land_precheck.history");
+    if (!h) {
+        pc_history_unproven(r, "history allocation unavailable");
+        return;
+    }
+    h->now = (int64_t)platform_time_wall_time_t();
+    enum zcl_dev_proof_history_result result =
+        zcl_dev_proof_history_failures(canonical, pc_history_visit, h);
+    if (result != ZCL_PROOF_HISTORY_COMPLETE) {
+        pc_history_unproven(r, "incomplete or unsafe retained attempt evidence; historical gates not merged");
+    } else {
+        struct zcl_land_precheck_gates merged = *g;
+        for (size_t i = 0; i < h->gates.count; i++)
+            pc_gate_add(&merged, h->gates.name[i], strlen(h->gates.name[i]));
+        if (merged.count >= ZCL_LAND_PRECHECK_MAX_GATES)
+            pc_history_unproven(r, "historical gate capacity reached; historical gates not merged");
+        else {
+            *g = merged;
+            if (h->uncertain)
+                pc_history_unproven(r, "older/future request start or missing failure step leaves lint history uncertain; uncertain gates not learned");
+        }
+    }
+    free(h);
+#else
+    (void)land;
+    (void)g;
+    pc_history_unproven(r, "native proof history requires a development build");
+#endif
+}
+
+#if !defined(_WIN32)
+static bool pc_ship_file(const char *path, int mode)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && access(path, mode) == 0;
+}
+#endif
+
+static bool pc_ship_ready(struct pc_run *r)
+{
+#if defined(_WIN32)
+    (void)snprintf(r->out, PC_OUT_CAP, "ship adapter unavailable on Windows");
+    return false;
+#else
+    static const char *const required[] = {
+        "tools/ship.sh", "tools/ship_selftest.sh",
+        "tools/lint/check_ship_remote_transaction.sh", "build/bin/jsonq",
+        "build/bin/z23-tor-provenance", "build/bin/check_no_hardlink_seeding"
+    };
+    char path[4096 + 80];
+    for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++) {
+        if (snprintf(path, sizeof(path), "%s/%s", r->wt, required[i]) >= (int)sizeof(path) ||
+            !pc_ship_file(path, X_OK)) {
+            (void)snprintf(r->out, PC_OUT_CAP, "ship prerequisite unavailable: %s", required[i]);
+            return false;
+        }
+    }
+    if (snprintf(path, sizeof(path), "%s/tools/scripts/ship_progress_lib.sh", r->wt) >= (int)sizeof(path) ||
+        !pc_ship_file(path, R_OK)) {
+        (void)snprintf(r->out, PC_OUT_CAP, "ship prerequisite unavailable: tools/scripts/ship_progress_lib.sh");
+        return false;
+    }
+    return true;
+#endif
+}
+
+static int pc_ship_run(struct pc_run *r)
+{
+    static const char *const commands[] = {
+        "./tools/ship.sh", "./tools/ship_selftest.sh",
+        "./tools/lint/check_ship_remote_transaction.sh"
+    };
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+        int rc = pc_run(r->wt, commands[i], i == 0 ? "--selftest" : NULL,
+                        r->deadline, r->out, PC_OUT_CAP);
+        if (rc != 0) return rc;
+    }
+    return 0;
+}
+
 /* Appends "gate: first output line" for an unproven gate to r->unproven and
  * counts the gate as skipped. Both writes are bounded; a full buffer drops
  * the reason but never the skip. */
@@ -384,12 +515,18 @@ static bool pc_gates_run(struct pc_run *r,
     }
     (void)snprintf(list, sizeof(list), "%s", r->out);
     for (size_t i = 0; i < g->count; i++) {
-        if (!pc_known(list, g->name[i])) {
+        bool ship = strcmp(g->name[i], PC_SHIP_GATE) == 0;
+        if (ship && !pc_ship_ready(r)) {
+            pc_note_unproven(r, g->name[i]);
+            continue;
+        }
+        if (!ship && !pc_known(list, g->name[i])) {
             r->skipped[r->nskipped++] = g->name[i];
             continue;
         }
-        rc = pc_run(r->wt, r->bin, g->name[i], r->deadline, r->out, PC_OUT_CAP);
-        if (rc == PC_EXIT_UNPROVEN) {
+        rc = ship ? pc_ship_run(r)
+                  : pc_run(r->wt, r->bin, g->name[i], r->deadline, r->out, PC_OUT_CAP);
+        if (!ship && rc == PC_EXIT_UNPROVEN) {
             pc_note_unproven(r, g->name[i]);
             continue;
         }
@@ -482,6 +619,8 @@ static bool pc_run_gates(const char *leaf, const char *wt,
                                (int64_t)platform_time_wall_time_t(), g);
     r->out = zcl_malloc(PC_OUT_CAP, "dev_land_precheck.out");
     r->deadline = platform_time_monotonic_ms() + ZCL_LAND_PRECHECK_BUDGET_MS;
+    if (ledger[0]) pc_history_learn(r, dir, g);
+    else pc_history_unproven(r, "land state unavailable");
     ok = pc_gates_run(r, g, reply);
     if (ok) {
         pc_push_names(reply, "precheck_ran", r->ran, r->nran);

@@ -13312,6 +13312,196 @@ static void dlx_pc_row(char *out, size_t cap, int seq, const char *state,
                    seq, ts, state, dim, detail);
 }
 
+static bool dlx_pc_owned_file(const char *root, const char *relative,
+                               const char *text, mode_t mode)
+{
+    char path[1600], parent[1600];
+    if (snprintf(path, sizeof(path), "%s/%s", root, relative) >= (int)sizeof(path))
+        return false;
+    (void)snprintf(parent, sizeof(parent), "%s", path);
+    char *slash = strrchr(parent, '/');
+    if (!slash) return false;
+    *slash = 0;
+    return dlx_mkdir_p(parent) && chmod(parent, 0700) == 0 &&
+           dlx_write(path, text) && chmod(path, mode) == 0;
+}
+
+static bool dlx_pc_history_archive(const char *suffix, int days_ago,
+                                   const char *reason, char archive[1600])
+{
+    char root[512], wt[768], attempt[1200], request[320], failure[1200];
+    if (!platform_state_root(root, sizeof(root))) return false;
+    (void)snprintf(wt, sizeof(wt), "%s/land/wt", root);
+    const char *parts[] = {"", ".cache", ".cache/zcl-dev-proof", ".cache/zcl-dev-proof/attempts"};
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+        char path[1000];
+        (void)snprintf(path, sizeof(path), "%s/%s", wt, parts[i]);
+        if (!dlx_mkdir_p(path) || chmod(path, 0700) != 0) return false;
+    }
+    (void)snprintf(attempt, sizeof(attempt),
+        ".cache/zcl-dev-proof/attempts/1111111111111111111111111111111111111111-2222222222222222222222222222222222222222.%s", suffix);
+    (void)snprintf(request, sizeof(request), "zcl.dev_proof_request.v1\n"
+        "1111111111111111111111111111111111111111\n"
+        "2222222222222222222222222222222222222222\n%lld\n1\n",
+        (long long)time(NULL) - (long long)days_ago * 86400);
+    char relative[1300];
+    (void)snprintf(relative, sizeof(relative), "%s/request", attempt);
+    if (!dlx_pc_owned_file(wt, relative, request, 0600)) return false;
+    (void)snprintf(relative, sizeof(relative), "%s/logs/failure.txt", attempt);
+    (void)snprintf(failure, sizeof(failure), "%s\n"
+        "lint check-ship-remote-transaction: FAIL check-ship-remote-transaction 3445 ms (rc=1)\n", reason);
+    return dlx_pc_owned_file(wt, relative, failure, 0600) &&
+           snprintf(archive, 1600, "%s/%s", wt, relative) < 1600;
+}
+
+static bool dlx_pc_ship_files(const struct dlx_rig *rig, bool ready)
+{
+    static const char script[] = "#!/bin/sh\n"
+        "echo \"ship-adapter:$0 $*\" >> build/precheck-ran\n"
+        "if [ -f build/ship-exit ]; then exit \"$(cat build/ship-exit)\"; fi\nexit 0\n";
+    const char *scripts[] = {"tools/ship.sh", "tools/ship_selftest.sh",
+                             "tools/lint/check_ship_remote_transaction.sh"};
+    const char *tools[] = {"build/bin/z23-tor-provenance", "build/bin/check_no_hardlink_seeding"};
+    for (size_t i = 0; i < sizeof(scripts) / sizeof(scripts[0]); i++)
+        if (!dlx_pc_owned_file(rig->clone, scripts[i], script, 0755)) return false;
+    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++)
+        if (!dlx_pc_owned_file(rig->clone, tools[i], "#!/bin/sh\nexit 0\n", 0755)) return false;
+    if (ready && !dlx_pc_owned_file(rig->clone, "build/bin/jsonq", "#!/bin/sh\nexit 0\n", 0755))
+        return false;
+    return dlx_pc_owned_file(rig->clone, "tools/scripts/ship_progress_lib.sh", "# isolated fixture\n", 0600);
+}
+
+static size_t dlx_pc_ship_calls(const struct dlx_rig *rig)
+{
+    char path[1400], line[512];
+    (void)snprintf(path, sizeof(path), "%s/build/precheck-ran", rig->clone);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t count = 0;
+    while (fgets(line, sizeof(line), f))
+        if (strncmp(line, "ship-adapter:", 13) == 0) count++;
+    (void)fclose(f);
+    return count;
+}
+
+static bool dlx_pc_history_ship_pass(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char archive[1600], landed[512];
+    if (!dlx_pc_rig(&rig, "precheck_history_ship", true, "check-arm-symbol-single\n") ||
+        !dlx_pc_history_archive("aaaaaa", 1, "child_proof_failed_exit_2", archive) ||
+        !dlx_pc_history_archive("bbbbbb", 1, "child_proof_failed_exit_2", archive) ||
+        !dlx_pc_ship_files(&rig, true)) return false;
+    dlx_pc_row(landed, sizeof(landed), 9, "landed", "", 0, "solo success");
+    if (!dlx_pc_outcomes(landed)) return false;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.dev_land.v1");
+    char note[64] = "fixture";
+    bool ok = zcl_dev_land_precheck("dev.land", rig.clone, NULL, "run",
+        rig.tip, false, note, sizeof(note), &reply) &&
+        dlx_pc_has(json_get(&reply.data, "precheck_ran"), "check-ship-remote-transaction") &&
+        dlx_pc_ship_calls(&rig) == 3;
+    zcl_command_reply_free(&reply);
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = ok && dlx_run(&c) && dlx_ok(&c) &&
+        dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-ship-remote-transaction") &&
+        dlx_pc_ship_calls(&rig) == 6 &&
+        dlx_pc_ran(&rig, "./tools/ship.sh --selftest");
+    dlx_end(&c);
+    ok = ok && dlx_queue_has_one();
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_ship_failed(struct dlx_call *c, const struct dlx_rig *rig)
+{
+    return !dlx_ok(c) && strcmp(dlx_err_code(c), "PRECHECK_FAILED") == 0 &&
+           strcmp(dlx_str(c, "gate"), "check-ship-remote-transaction") == 0 &&
+           dlx_pc_ship_calls(rig) == 1 && dlx_queue_empty();
+}
+
+static bool dlx_pc_ship_missing(struct dlx_call *c, const struct dlx_rig *rig)
+{
+    return dlx_ok(c) && dlx_queue_has_one() &&
+           dlx_pc_has(dlx_arr(c, "precheck_skipped"), "check-ship-remote-transaction") &&
+           strstr(dlx_str(c, "precheck_unproven"), "build/bin/jsonq") != NULL &&
+           dlx_pc_ship_calls(rig) == 0;
+}
+
+static bool dlx_pc_history_ship_refusal(const char *exit_code, bool ready)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char archive[1600];
+    if (!dlx_pc_rig(&rig, ready ? "precheck_ship_failure" : "precheck_ship_missing", true,
+                    "check-arm-symbol-single\n") ||
+        !dlx_pc_history_archive("aaaaaa", 1, "child_proof_failed_exit_2", archive) ||
+        !dlx_pc_ship_files(&rig, ready)) return false;
+    if (ready && !dlx_pc_file(&rig, "ship-exit", exit_code)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    bool ok = ran && (ready ? dlx_pc_ship_failed(&c, &rig) : dlx_pc_ship_missing(&c, &rig));
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_no_ship(struct dlx_call *c, const struct dlx_rig *rig)
+{
+    return dlx_ok(c) &&
+        dlx_pc_has(dlx_arr(c, "precheck_ran"), "check-learned-one") &&
+        !dlx_pc_has(dlx_arr(c, "precheck_ran"), "check-ship-remote-transaction") &&
+        !dlx_pc_has(dlx_arr(c, "precheck_skipped"), "check-ship-remote-transaction") &&
+        dlx_pc_ship_calls(rig) == 0;
+}
+
+static bool dlx_pc_history_ignored(const char *tag, int days_ago,
+                                  const char *reason, bool unsafe)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char archive[1600], failed[512];
+    if (!dlx_pc_rig(&rig, tag, true, "check-learned-one\n") ||
+        !dlx_pc_history_archive("aaaaaa", days_ago, reason, archive)) return false;
+    if (unsafe) {
+        if (!dlx_pc_history_archive("bbbbbb", 1, "child_proof_failed_exit_2", archive) ||
+            unlink(archive) != 0 || symlink("../request", archive) != 0) return false;
+    }
+    dlx_pc_row(failed, sizeof(failed), 8, "failed", "lint", 1, "check-learned-one failed");
+    if (!dlx_pc_outcomes(failed)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ok = dlx_run(&c) && dlx_pc_no_ship(&c, &rig);
+    if (unsafe || days_ago > 7 || days_ago < 0)
+        ok = ok && strstr(dlx_str(&c, "precheck_unproven"), "proof-history:") != NULL;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_history_allocation_unproven(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char archive[1600], failed[512];
+    if (!dlx_pc_rig(&rig, "history_allocation", true, "check-learned-one\n") ||
+        !dlx_pc_history_archive("aaaaaa", 1, "child_proof_failed_exit_2", archive))
+        return false;
+    dlx_pc_row(failed, sizeof(failed), 8, "failed", "lint", 1, "check-learned-one failed");
+    if (!dlx_pc_outcomes(failed)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    zcl_alloc_fault_fail_next("dev_land_precheck.history");
+    bool ran = dlx_run(&c);
+    bool consumed = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    bool ok = ran && consumed && dlx_pc_no_ship(&c, &rig) &&
+        strstr(dlx_str(&c, "precheck_unproven"), "history allocation unavailable") != NULL &&
+        dlx_queue_has_one();
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_gate_set_learns(void)
 {
     char rows[2048], one[512];
@@ -13638,9 +13828,49 @@ static bool dlx_pc_retry_attaches(void)
     return ok;
 }
 
-static int dlx_case_precheck(void)
+static int dlx_case_history_precheck(void)
 {
     int failures = 0;
+    TEST("land: retained failed train learns ship despite later landing and absent native gate") {
+        ASSERT(dlx_pc_history_ship_pass());
+        PASS();
+    }
+    TEST("land: executed ship failure refuses without queuing") {
+        ASSERT(dlx_pc_history_ship_refusal("1", true));
+        PASS();
+    }
+    TEST("land: executed ship exit 2 is a failure, not an unproven native gate") {
+        ASSERT(dlx_pc_history_ship_refusal("2", true));
+        PASS();
+    }
+    TEST("land: missing ship prerequisite is explicitly unproven without execution") {
+        ASSERT(dlx_pc_history_ship_refusal("0", false));
+        PASS();
+    }
+    TEST("land: uncertain, interrupted and no-verdict history preserves outcome learning") {
+        ASSERT(dlx_pc_history_ignored("history_old", 8, "child_proof_failed_exit_2", false));
+        ASSERT(dlx_pc_history_ignored("history_future", -1, "child_proof_failed_exit_2", false));
+        ASSERT(dlx_pc_history_ignored("history_interrupted", 1, "proof_interrupted_child_proof_failed_exit_2", false));
+        ASSERT(dlx_pc_history_ignored("history_no_verdict", 1, "proof_producer_source_mismatch", false));
+        ASSERT(dlx_pc_history_ignored("history_nonlint", 1,
+            "child_proof_failed_exit_2\ntest: FAIL check-ship-remote-transaction", false));
+        PASS();
+    }
+    TEST("land: unsafe history discards any partial learned gates but preserves outcomes") {
+        ASSERT(dlx_pc_history_ignored("history_unsafe", 1, "child_proof_failed_exit_2", true));
+        PASS();
+    }
+    TEST("land: history allocation failure remains unproven and preserves outcome gates") {
+        ASSERT(dlx_pc_history_allocation_unproven());
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int dlx_case_precheck(void)
+{
+    int failures = dlx_case_history_precheck();
     TEST("land: submit refuses a lane whose precheck gate fails and queues nothing") {
         ASSERT(dlx_pc_failing_gate_refused());
         PASS();

@@ -128,6 +128,71 @@ struct zcl_dev_proof_status {
     bool receipt_reused;
 };
 
+enum zcl_dev_proof_history_class {
+    ZCL_PROOF_HISTORY_FAILURE = 0,
+    ZCL_PROOF_HISTORY_INTERRUPTED,
+    ZCL_PROOF_HISTORY_NO_VERDICT,
+};
+enum zcl_dev_proof_history_time_state {
+    ZCL_PROOF_HISTORY_TIME_MISSING = 0,
+    ZCL_PROOF_HISTORY_TIME_UNUSABLE,
+    ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING,
+};
+struct zcl_dev_proof_history_failure {
+    char attempt[144]; /* native directory leaf: pair plus unique suffix */
+    char local[65], base[65];
+    enum zcl_dev_proof_history_class classification;
+    int64_t request_started_unix; /* request v1 wall time, NOT failure time */
+    int64_t request_started_monotonic_us; /* producer request clock context */
+    enum zcl_dev_proof_history_time_state time_state;
+    /* Both zero unless optional metadata binds exact archive/request bytes.
+     * Recording after archive publication, NOT child exit or pair commit.
+     * Caller must still check future times and its observation window. */
+    int64_t recorded_unix;
+    int64_t recorded_monotonic_us;
+    char reason[256];
+    char digest[2048]; /* native bounded archive remainder; never a path input */
+};
+enum zcl_dev_proof_history_result {
+    ZCL_PROOF_HISTORY_UNAVAILABLE = -3,
+    ZCL_PROOF_HISTORY_LIMIT = -2,
+    ZCL_PROOF_HISTORY_INVALID = -1,
+    ZCL_PROOF_HISTORY_COMPLETE = 0,
+};
+/* Read-only retained-attempt evidence, not receipt/verdict authority. At most
+ * 4096 directory entries. canonical_root must be the canonical checkout path.
+ * Only native request, failure archives and optional time metadata are read, with descriptor-relative
+ * no-follow traversal. Missing store is complete/empty; malformed candidates
+ * refuse. Missing archives are unfinished/successful attempts and are skipped.
+ * Callback records are borrowed; false stops with LIMIT. On any non-COMPLETE
+ * result the consumer MUST discard all accumulated results. Enumeration order
+ * is unspecified. The attempt leaf is unique only within canonical_root;
+ * consumers deduplicate (root, attempt), never sequence or exact pair alone.
+ * Missing/unusable time metadata never suppresses valid failure evidence.
+ * Bound recording metadata must not precede the request wall/monotonic clocks;
+ * this is not boot identity or permission to compare monotonic clocks across
+ * reboots. No time-window verdict is implied by request_started_unix or by
+ * bound recording evidence. No pair marker or PASS receipt is required:
+ * a later retry/PASS must not erase the archived observation of a failed child.
+ */
+enum zcl_dev_proof_history_result zcl_dev_proof_history_failures(
+    const char *canonical_root,
+    bool (*visit)(const struct zcl_dev_proof_history_failure *, void *),
+    void *context);
+
+/* Optional producer-only logs/failure-time.v1 sidecar. LF records, in order:
+ * zcl.dev_proof_failure_recorded.v1, attempt=<native leaf>, local=<oid>,
+ * base=<oid>, request_sha3=<64hex>, failure_sha3=<64hex>, recorded_unix=<n>,
+ * recorded_monotonic_us=<n>, final LF. Hashes are native SHA3-256 of
+ * domain || NUL || exact bytes (including request/archive trailing newlines),
+ * with domains zcl.dev_proof_failure_recorded.request.v1 and
+ * zcl.dev_proof_failure_recorded.failure.v1 respectively. Clocks observe
+ * producer RECORDING after archive creation, not child exit or successful pair
+ * projection. Monotonic is meaningful only in its producer clock context.
+ * Absence, mismatch or malformed metadata never invalidates valid failure
+ * evidence, but cannot grant timed attribution. The history reader exposes
+ * binding state and clocks; the caller owns future/window judgments. */
+
 struct zcl_dev_proof_child_action_inputs_v1 {
     const char *source_sha256_hex;
     const char *source_cas_sha3_hex;
@@ -391,6 +456,14 @@ bool zcl_dev_proof_test_settle_child(const char *repo_root, const char *local,
                                      enum zcl_dev_proof_dimension_id id,
                                      const char *const argv[], char *why,
                                      size_t why_len);
+/* Synthetic native attempts for failure-recording acceptance only: no child,
+ * generation, receipt or scheduling. prepare captures a v1 request; settle
+ * invokes the actual production settlement and returns a readable pair marker.
+ * Tests may arrange archive/metadata I/O boundary fixtures between the calls. */
+bool zcl_dev_proof_test_failure_attempt_prepare(const char *root,
+    const char *local, const char *base, char *out, size_t out_len);
+bool zcl_dev_proof_test_failure_attempt_settle(const char *root,
+    const char *local, const char *base, const char *directory, const char *reason);
 #endif
 /* Notifications publish immutable requests. All consumers share execution
  * exclusion; queue claim remains separately locked and bounded. */

@@ -66,6 +66,7 @@
 #include "platform/file_clone.h"
 #include "platform/ram_scratch.h"
 #include "platform/time_compat.h"
+#include "sha3/sha3.h"
 #include "kernel/command_registry.h"
 #include "test/selection_build_needs.h"
 #include "test/semantic_fuzz.h"
@@ -3111,6 +3112,478 @@ static int test_ic_proof_status_execution_projection(void)
         zcl_dev_proof_status_conclude(&reply, &status);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "execution_state")), "unknown");
         zcl_command_reply_free(&reply);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+struct ic_history_observation {
+    size_t count;
+    char first[144];
+    bool distinct;
+    enum zcl_dev_proof_history_class classification;
+    char digest[64];
+};
+
+static bool ic_history_observe(const struct zcl_dev_proof_history_failure *row,
+                                void *context)
+{
+    struct ic_history_observation *seen = context;
+    if (!seen->count) (void)snprintf(seen->first, sizeof(seen->first), "%s", row->attempt);
+    else seen->distinct = strcmp(seen->first, row->attempt) != 0;
+    seen->count++;
+    seen->classification = row->classification;
+    (void)snprintf(seen->digest, sizeof(seen->digest), "%.*s",
+                   (int)sizeof(seen->digest) - 1, row->digest);
+    return strcmp(row->local, "1111111111111111111111111111111111111111") == 0 &&
+           strcmp(row->base, "2222222222222222222222222222222222222222") == 0 &&
+           row->request_started_unix == 1700000000;
+}
+
+static bool ic_history_fixture(const char *root, const char *suffix,
+                                const char *failure, char attempt[4096])
+{
+    static const char pair[] =
+        "1111111111111111111111111111111111111111-"
+        "2222222222222222222222222222222222222222";
+    static const char request[] = "zcl.dev_proof_request.v1\n"
+        "1111111111111111111111111111111111111111\n"
+        "2222222222222222222222222222222222222222\n1700000000\n1\n";
+    return snprintf(attempt, 4096, "%s/.cache/zcl-dev-proof/attempts/%s.%s",
+                    root, pair, suffix) < 4096 &&
+           ic_proof_private_write(attempt, "request", request) &&
+           ic_proof_private_write(attempt, "logs/failure.txt", failure);
+}
+
+static int test_ic_proof_failure_history(void)
+{
+    int failures = 0;
+    TEST("proof history: retained native archives survive pair replacement and enumerate distinct attempts") {
+        char root[4096], canonical[4096], first[4096], second[4096];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "failure_history");
+        ASSERT(realpath(root, canonical) != NULL);
+        ASSERT(ic_history_fixture(canonical, "aaaaaa", "child_proof_failed_exit_2\nlint: FAIL check-example\n", first));
+        /* Pair projection is irrelevant: even a later receipt cannot erase
+         * these historical observations. This is not a receipt admission test. */
+        ASSERT(ic_proof_private_write(canonical,
+            ".cache/zcl-dev-proof/receipts/1111111111111111111111111111111111111111-2222222222222222222222222222222222222222.receipt",
+            "later pair projection; not an admitted receipt\n"));
+        struct ic_history_observation seen = {0}, unfinished_seen = {0}, again = {0};
+        ASSERT(zcl_dev_proof_history_failures(canonical, ic_history_observe, &seen) == ZCL_PROOF_HISTORY_COMPLETE);
+        ASSERT(seen.count == 1);
+        ASSERT(seen.classification == ZCL_PROOF_HISTORY_FAILURE);
+        ASSERT_STR_EQ(seen.digest, "lint: FAIL check-example\n");
+        /* Native preparation creates the attempt before logs/. A concurrent
+         * or aborted preparation is not malformed historical evidence. */
+        char unfinished[4096];
+        ASSERT(snprintf(unfinished, sizeof(unfinished),
+            "%s/.cache/zcl-dev-proof/attempts/1111111111111111111111111111111111111111-2222222222222222222222222222222222222222.cccccc",
+            canonical) < (int)sizeof(unfinished));
+        ASSERT(mkdir(unfinished, 0700) == 0);
+        ASSERT(zcl_dev_proof_history_failures(canonical, ic_history_observe, &unfinished_seen) == ZCL_PROOF_HISTORY_COMPLETE);
+        ASSERT(unfinished_seen.count == 1);
+        ASSERT(ic_history_fixture(canonical, "bbbbbb", "child_proof_failed_exit_2\nlint: FAIL check-example\n", second));
+        ASSERT(zcl_dev_proof_history_failures(canonical, ic_history_observe, &again) == ZCL_PROOF_HISTORY_COMPLETE);
+        ASSERT(again.count == 2 && again.distinct);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_failure_history_refusals(void)
+{
+    int failures = 0;
+    TEST("proof history: mismatched request, binary archive and symlink refuse attribution") {
+        char root[4096], canonical[4096], attempt[4096], archive[4300];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "history_refuse");
+        ASSERT(realpath(root, canonical) != NULL);
+        ASSERT(ic_history_fixture(canonical, "aaaaaa", "child_proof_failed_exit_2", attempt));
+        ASSERT(ic_proof_private_write(attempt, "request", "zcl.dev_proof_request.v1\nwrong\npair\n1700000000\n1\n"));
+        struct ic_history_observation seen = {0};
+        ASSERT(zcl_dev_proof_history_failures(canonical, ic_history_observe, &seen) == ZCL_PROOF_HISTORY_INVALID);
+        ASSERT(ic_history_fixture(canonical, "aaaaaa", "child_proof_failed_exit_2", attempt));
+        ASSERT(snprintf(archive, sizeof(archive), "%s/logs/failure.txt", attempt) < (int)sizeof(archive));
+        FILE *binary = fopen(archive, "ab");
+        ASSERT(binary != NULL);
+        ASSERT(fputc(0, binary) == 0);
+        ASSERT(fclose(binary) == 0);
+        ASSERT(zcl_dev_proof_history_failures(canonical, ic_history_observe, &seen) == ZCL_PROOF_HISTORY_INVALID);
+        ASSERT(unlink(archive) == 0);
+        ASSERT(symlink("../request", archive) == 0);
+        ASSERT(zcl_dev_proof_history_failures(canonical, ic_history_observe, &seen) == ZCL_PROOF_HISTORY_INVALID);
+        ASSERT(seen.count == 0);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_failure_history_classes(void)
+{
+    int failures = 0;
+    TEST("proof history: interruptions and producer refusals remain distinguishable") {
+        char root[4096], canonical[4096], attempt[4096];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "history_class");
+        ASSERT(realpath(root, canonical) != NULL);
+        ASSERT(ic_history_fixture(canonical, "aaaaaa", "proof_interrupted_child_proof_failed_exit_2", attempt));
+        struct ic_history_observation interrupted = {0}, no_verdict = {0};
+        ASSERT(zcl_dev_proof_history_failures(canonical, ic_history_observe, &interrupted) == ZCL_PROOF_HISTORY_COMPLETE);
+        ASSERT(interrupted.count == 1 && interrupted.classification == ZCL_PROOF_HISTORY_INTERRUPTED);
+        ASSERT(ic_proof_private_write(attempt, "logs/failure.txt", "proof_producer_source_mismatch"));
+        ASSERT(zcl_dev_proof_history_failures(canonical, ic_history_observe, &no_verdict) == ZCL_PROOF_HISTORY_COMPLETE);
+        ASSERT(no_verdict.count == 1 && no_verdict.classification == ZCL_PROOF_HISTORY_NO_VERDICT);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool ic_failure_record_read(const char *path, char *text, size_t cap,
+                                    size_t *size)
+{
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    size_t n = fread(text, 1, cap - 1, file);
+    bool ok = !ferror(file) && feof(file) && !memchr(text, 0, n);
+    if (fclose(file) != 0) ok = false;
+    if (!ok) return false;
+    text[n] = 0;
+    *size = n;
+    return true;
+}
+
+static bool ic_failure_record_hash(const char *attempt, const char *relative,
+                                    const char *domain, char out[65])
+{
+    char path[4300], bytes[2049];
+    size_t n;
+    if (snprintf(path, sizeof(path), "%s/%s", attempt, relative) >= (int)sizeof(path) ||
+        !ic_failure_record_read(path, bytes, sizeof(bytes), &n)) return false;
+    struct sha3_256_ctx sha;
+    uint8_t digest[32];
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, strlen(domain) + 1);
+    sha3_256_write(&sha, (const uint8_t *)bytes, n);
+    sha3_256_finalize(&sha, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
+    return true;
+}
+
+static bool ic_failure_record_bound(const char *attempt, const char *record,
+                                     int64_t *wall, int64_t *mono)
+{
+    const char *clock = strstr(record, "\nrecorded_unix=");
+    long long got_wall = 0, got_mono = 0;
+    int used = 0;
+    if (!clock || sscanf(clock, "\nrecorded_unix=%lld\nrecorded_monotonic_us=%lld\n%n",
+        &got_wall, &got_mono, &used) != 2 || clock[used] || got_wall <= 0 || got_mono <= 0)
+        return false;
+    char request[65], failure[65], expected[1024];
+    if (!ic_failure_record_hash(attempt, "request", "zcl.dev_proof_failure_recorded.request.v1", request) ||
+        !ic_failure_record_hash(attempt, "logs/failure.txt", "zcl.dev_proof_failure_recorded.failure.v1", failure))
+        return false;
+    const char *leaf = strrchr(attempt, '/');
+    if (!leaf) return false;
+    int n = snprintf(expected, sizeof(expected), "zcl.dev_proof_failure_recorded.v1\n"
+        "attempt=%s\nlocal=1111111111111111111111111111111111111111\n"
+        "base=2222222222222222222222222222222222222222\nrequest_sha3=%s\nfailure_sha3=%s\n"
+        "recorded_unix=%lld\nrecorded_monotonic_us=%lld\n", leaf + 1,
+        request, failure, got_wall, got_mono);
+    *wall = (int64_t)got_wall;
+    *mono = (int64_t)got_mono;
+    return n > 0 && n < (int)sizeof(expected) && strcmp(expected, record) == 0;
+}
+
+static const char ic_failure_record_local[] = "1111111111111111111111111111111111111111";
+static const char ic_failure_record_base[] = "2222222222222222222222222222222222222222";
+static const char ic_failure_record_reason[] = "child_proof_failed_exit_2";
+
+static int test_ic_proof_failure_record_time(void)
+{
+    int failures = 0;
+    TEST("proof failure recording: native archive binds recording clocks and never refreshes existing time") {
+        char root[4096], attempt[4096], metadata[4300], record[1024];
+        char request_path[4300], original_request[320];
+        size_t size, request_size;
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "failure_time");
+        ASSERT(ic_proof_private_write(root, ".cache/fixture", "isolated recording retry fixture\n"));
+        ASSERT(zcl_dev_proof_test_failure_attempt_prepare(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, sizeof(attempt)));
+        ASSERT(snprintf(metadata, sizeof(metadata), "%s/logs/failure-time.v1", attempt) < (int)sizeof(metadata));
+        ASSERT(snprintf(request_path, sizeof(request_path), "%s/request", attempt) < (int)sizeof(request_path));
+        ASSERT(ic_failure_record_read(request_path, original_request, sizeof(original_request), &request_size));
+        int64_t wall_before = platform_time_wall_unix(), mono_before = platform_time_monotonic_us();
+        ASSERT(zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, ic_failure_record_reason));
+        ASSERT(ic_failure_record_read(metadata, record, sizeof(record), &size));
+        int64_t wall, mono;
+        ASSERT(ic_failure_record_bound(attempt, record, &wall, &mono));
+        ASSERT(wall >= wall_before && wall <= platform_time_wall_unix());
+        ASSERT(mono >= mono_before && mono <= platform_time_monotonic_us());
+        ASSERT(zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, "different repeated settlement reason"));
+        ASSERT(ic_bytes_equal(metadata, record, size));
+        ASSERT(ic_failure_record_bound(attempt, record, &wall, &mono));
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_status_read(root, ic_failure_record_local, ic_failure_record_base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT_STR_EQ(status.detail, ic_failure_record_reason);
+        /* A changed bound input cannot gain a new authoritative clock. */
+        ASSERT(ic_proof_private_write(attempt, "logs/failure.txt", "tampered bytes\n"));
+        ASSERT(zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, ic_failure_record_reason));
+        ASSERT(ic_bytes_equal(metadata, record, size));
+        ASSERT(!ic_failure_record_bound(attempt, record, &wall, &mono));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure.txt", ic_failure_record_reason));
+        ASSERT(ic_proof_private_write(attempt, "request", "zcl.dev_proof_request.v1\n"
+            "1111111111111111111111111111111111111111\n"
+            "2222222222222222222222222222222222222222\n1700000000\n1\n"));
+        ASSERT(zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, ic_failure_record_reason));
+        ASSERT(ic_bytes_equal(metadata, record, size));
+        ASSERT(!ic_failure_record_bound(attempt, record, &wall, &mono));
+        ASSERT(ic_proof_private_write(attempt, "request", original_request));
+        ASSERT(ic_bytes_equal(request_path, original_request, request_size));
+        ASSERT(ic_failure_record_bound(attempt, record, &wall, &mono));
+        ASSERT(zcl_dev_proof_retry(root, ic_failure_record_local, ic_failure_record_base, &status));
+        ASSERT(ic_bytes_equal(metadata, record, size));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_failure_record_unknown_time(void)
+{
+    int failures = 0;
+    TEST("proof failure recording: archive-only crash and explicit retry preserve unknown time") {
+        char root[4096], attempt[4096], metadata[4300], archive[4300];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "failure_unknown_time");
+        ASSERT(ic_proof_private_write(root, ".cache/fixture", "isolated native retry fixture\n"));
+        ASSERT(zcl_dev_proof_test_failure_attempt_prepare(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, sizeof(attempt)));
+        ASSERT(snprintf(metadata, sizeof(metadata), "%s/logs/failure-time.v1", attempt) < (int)sizeof(metadata));
+        ASSERT(snprintf(archive, sizeof(archive), "%s/logs/failure.txt", attempt) < (int)sizeof(archive));
+        /* Model the existing atomic-write crash boundary without killing a
+         * worker: archive exists, sidecar and pair projection do not. */
+        ASSERT(ic_proof_private_write(attempt, "logs/failure.txt", ic_failure_record_reason));
+        ASSERT(zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, ic_failure_record_reason));
+        ASSERT(access(metadata, F_OK) != 0 && errno == ENOENT);
+        ASSERT(ic_bytes_equal(archive, ic_failure_record_reason, strlen(ic_failure_record_reason)));
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_retry(root, ic_failure_record_local, ic_failure_record_base, &status));
+        ASSERT(access(metadata, F_OK) != 0 && errno == ENOENT);
+        ASSERT(ic_bytes_equal(archive, ic_failure_record_reason, strlen(ic_failure_record_reason)));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_failure_record_refusals(void)
+{
+    int failures = 0;
+    TEST("proof failure recording: unusable archive or mismatched request cannot mint time") {
+        char root[4096], attempt[4096], metadata[4300], archive[4300];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "failure_time_refuse");
+        ASSERT(zcl_dev_proof_test_failure_attempt_prepare(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, sizeof(attempt)));
+        ASSERT(snprintf(metadata, sizeof(metadata), "%s/logs/failure-time.v1", attempt) < (int)sizeof(metadata));
+        ASSERT(snprintf(archive, sizeof(archive), "%s/logs/failure.txt", attempt) < (int)sizeof(archive));
+        ASSERT(mkdir(archive, 0700) == 0);
+        ASSERT(!zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, ic_failure_record_reason));
+        ASSERT(access(metadata, F_OK) != 0 && errno == ENOENT);
+        ASSERT(rmdir(archive) == 0);
+        ASSERT(ic_proof_private_write(attempt, "request", "zcl.dev_proof_request.v1\n"
+            "3333333333333333333333333333333333333333\n"
+            "2222222222222222222222222222222222222222\n1700000000\n1\n"));
+        ASSERT(zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+            ic_failure_record_base, attempt, ic_failure_record_reason));
+        ASSERT(access(metadata, F_OK) != 0 && errno == ENOENT);
+        ASSERT(ic_bytes_equal(archive, ic_failure_record_reason, strlen(ic_failure_record_reason)));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+struct ic_recording_history {
+    size_t count;
+    struct zcl_dev_proof_history_failure row;
+};
+
+static bool ic_recording_history_visit(const struct zcl_dev_proof_history_failure *row,
+                                       void *context)
+{
+    struct ic_recording_history *seen = context;
+    seen->count++;
+    seen->row = *row;
+    return true;
+}
+
+static bool ic_recording_history_state(const char *root,
+                                        enum zcl_dev_proof_history_time_state expected)
+{
+    char canonical[4096];
+    struct ic_recording_history seen = {0};
+    if (!realpath(root, canonical) ||
+        zcl_dev_proof_history_failures(canonical, ic_recording_history_visit, &seen) != ZCL_PROOF_HISTORY_COMPLETE ||
+        seen.count != 1 || seen.row.time_state != expected ||
+        seen.row.classification != ZCL_PROOF_HISTORY_FAILURE ||
+        strcmp(seen.row.reason, ic_failure_record_reason) != 0) return false;
+    if (expected == ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING)
+        return seen.row.recorded_unix >= seen.row.request_started_unix &&
+               seen.row.recorded_monotonic_us >= seen.row.request_started_monotonic_us;
+    return seen.row.recorded_unix == 0 && seen.row.recorded_monotonic_us == 0;
+}
+
+static bool ic_recording_history_prepare(const char *root, char attempt[4096],
+                                          char metadata[4300], char record[1024])
+{
+    size_t size;
+    return zcl_dev_proof_test_failure_attempt_prepare(root, ic_failure_record_local,
+               ic_failure_record_base, attempt, 4096) &&
+           zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+               ic_failure_record_base, attempt, ic_failure_record_reason) &&
+           snprintf(metadata, 4300, "%s/logs/failure-time.v1", attempt) < 4300 &&
+           ic_failure_record_read(metadata, record, 1024, &size);
+}
+
+static bool ic_recording_history_edit(const char *record, const char *prefix,
+                                       const char *value, char changed[1024])
+{
+    const char *start = strstr(record, prefix);
+    if (!start) return false;
+    start += strlen(prefix);
+    const char *end = strchr(start, '\n');
+    if (!end) return false;
+    int n = snprintf(changed, 1024, "%.*s%s%s", (int)(start - record), record, value, end);
+    return n > 0 && n < 1024;
+}
+
+static int test_ic_proof_recording_history_bound(void)
+{
+    int failures = 0;
+    TEST("proof time history: optional recording binds exact bytes while pair projection stays immaterial") {
+        char root[4096], attempt[4096], metadata[4300], record[1024], changed[1024];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "recording_history");
+        ASSERT(ic_recording_history_prepare(root, attempt, metadata, record));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING));
+        ASSERT(ic_proof_private_write(root,
+            ".cache/zcl-dev-proof/receipts/1111111111111111111111111111111111111111-2222222222222222222222222222222222222222.receipt",
+            "later pair projection, not an admitted receipt\n"));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING));
+        ASSERT(unlink(metadata) == 0);
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_MISSING));
+        /* Reader has no observation-now argument: a structurally bound future
+         * recording is still the caller's future/window judgment, never PASS. */
+        ASSERT(ic_recording_history_edit(record, "\nrecorded_unix=", "4102444800", changed));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", changed));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_recording_history_shape(void)
+{
+    int failures = 0;
+    TEST("proof time history: truncated, extra, duplicate, binary and unsafe sidecars preserve unknown-time failure") {
+        char root[4096], attempt[4096], metadata[4300], record[1024], changed[2048];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "recording_shape");
+        ASSERT(ic_recording_history_prepare(root, attempt, metadata, record));
+        (void)snprintf(changed, sizeof(changed), "%s", record);
+        changed[strlen(changed) - 1] = 0;
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", changed));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        memset(changed, 'x', 1024);
+        changed[1024] = 0;
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", changed));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        (void)snprintf(changed, sizeof(changed), "%s", record);
+        changed[0] = 'X';
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", changed));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        (void)snprintf(changed, sizeof(changed), "%sextra=value\n", record);
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", changed));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        (void)snprintf(changed, sizeof(changed), "%srecorded_unix=1700000000\n", record);
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", changed));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", record));
+        FILE *binary = fopen(metadata, "ab");
+        ASSERT(binary != NULL);
+        ASSERT(fputc(0, binary) == 0);
+        ASSERT(fputs("recorded_unix=1700000000\n", binary) >= 0);
+        ASSERT(fclose(binary) == 0);
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        ASSERT(unlink(metadata) == 0);
+        ASSERT(ic_proof_private_write(attempt, "logs/time-target", record));
+        ASSERT(symlink("time-target", metadata) == 0);
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        ASSERT(unlink(metadata) == 0);
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", record));
+        ASSERT(chmod(metadata, 0660) == 0);
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        ASSERT(unlink(metadata) == 0);
+        ASSERT(mkdir(metadata, 0700) == 0);
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool ic_recording_history_mutations(const char *root, const char *attempt,
+                                            const char *record)
+{
+    static const struct { const char *key, *value; } cases[] = {
+        {"\nattempt=", "wrong-attempt"},
+        {"\nlocal=", "3333333333333333333333333333333333333333"},
+        {"\nbase=", "3333333333333333333333333333333333333333"},
+        {"\nrequest_sha3=", "0000000000000000000000000000000000000000000000000000000000000000"},
+        {"\nfailure_sha3=", "0000000000000000000000000000000000000000000000000000000000000000"},
+        {"\nrecorded_unix=", "1"}, {"\nrecorded_monotonic_us=", "1"},
+        {"\nrecorded_unix=", "0"}, {"\nrecorded_monotonic_us=", "0"},
+        {"\nrecorded_unix=", "9223372036854775808"},
+        {"\nrecorded_monotonic_us=", "9223372036854775808"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char changed[1024];
+        if (!ic_recording_history_edit(record, cases[i].key, cases[i].value, changed) ||
+            !ic_proof_private_write(attempt, "logs/failure-time.v1", changed) ||
+            !ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE)) {
+            fprintf(stderr, "recording history mutation failed: %s=%s\n", cases[i].key, cases[i].value);
+            return false;
+        }
+    }
+    return true;
+}
+
+static int test_ic_proof_recording_history_bindings(void)
+{
+    int failures = 0;
+    TEST("proof time history: identity/hash mismatches and recording clock rollback preserve explicit unknown time") {
+        char root[4096], attempt[4096], metadata[4300], record[1024];
+        char request_path[4300], request[320];
+        size_t size;
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "recording_bindings");
+        ASSERT(ic_recording_history_prepare(root, attempt, metadata, record));
+        ASSERT(ic_recording_history_mutations(root, attempt, record));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", record));
+        ASSERT(snprintf(request_path, sizeof(request_path), "%s/request", attempt) < (int)sizeof(request_path));
+        ASSERT(ic_failure_record_read(request_path, request, sizeof(request), &size));
+        ASSERT(ic_proof_private_write(attempt, "request", "zcl.dev_proof_request.v1\n"
+            "1111111111111111111111111111111111111111\n"
+            "2222222222222222222222222222222222222222\n1700000000\n1\n"));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_UNUSABLE));
+        ASSERT(ic_proof_private_write(attempt, "request", request));
+        ASSERT(ic_recording_history_state(root, ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING));
         ASSERT(test_rm_rf_recursive(root) == 0);
         PASS();
     } _test_next:;
@@ -13616,6 +14089,15 @@ int test_impact_composition(void)
     failures += test_ic_landing_proof_refuses_unsafe_lock();
     failures += test_ic_landing_proof_holds_lock_through_worker();
     failures += test_ic_proof_environment_no_verdict();
+    failures += test_ic_proof_failure_history();
+    failures += test_ic_proof_failure_history_refusals();
+    failures += test_ic_proof_failure_history_classes();
+    failures += test_ic_proof_failure_record_time();
+    failures += test_ic_proof_failure_record_unknown_time();
+    failures += test_ic_proof_failure_record_refusals();
+    failures += test_ic_proof_recording_history_bound();
+    failures += test_ic_proof_recording_history_shape();
+    failures += test_ic_proof_recording_history_bindings();
     failures += test_ic_proof_retry();
     failures += test_ic_proof_status_execution_projection();
     failures += test_ic_proof_ensure_passed_writes_no_request();

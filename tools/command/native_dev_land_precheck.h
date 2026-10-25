@@ -8,6 +8,14 @@
  * in the last 7 days of <land state>/outcomes.jsonl (the last line per seq
  * wins), so the precheck learns from the ledger. Each gate runs through the
  * lane worktree's own build/bin/z23-lint with the worktree as cwd.
+ * Retained native failures from canonical <land>/wt are unioned with that
+ * ledger: only FAILURE-class lint digests requested within the last seven
+ * days (and not in the future) establish definitely recent failures. Older
+ * request starts cannot date settlement. Uncertain/incomplete history is
+ * explicitly unproven; incomplete reads contribute no historical gates.
+ * Learned check-ship-remote-transaction uses its fixed three-command adapter,
+ * even without a native lint entry. Missing prerequisites are unproven;
+ * any nonzero executed script verdict, including exit 2, refuses submission.
  */
 #ifndef ZCL_NATIVE_DEV_LAND_PRECHECK_H
 #define ZCL_NATIVE_DEV_LAND_PRECHECK_H

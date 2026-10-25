@@ -11563,8 +11563,100 @@ static bool dp_failure_evidence(const struct proof_paths *paths, char *out,
     return out[0] != '\0';
 }
 
-/* Settle a failed attempt: the pair's `.failed` record and the attempt's
- * own `logs/failure.txt` archive carry the same bytes. The first line is
+/* Read the exact captured request bytes, then validate the native five-line
+ * projection against this attempt's pair. Hashing includes the final newline. */
+static bool dp_failure_time_request(const struct proof_paths *paths,
+                                     char local[65], char base[65], char root[65])
+{
+    char path[PATH_MAX], raw[320], parsed[320], *lines[5], key[132];
+    struct stat st;
+    if (snprintf(path, sizeof(path), "%s/request", paths->attempt) >= (int)sizeof(path) ||
+        lstat(path, &st) != 0 || st.st_size <= 0 || st.st_size >= (off_t)sizeof(raw) ||
+        !read_exact_file(path, (uint8_t *)raw, (size_t)st.st_size) ||
+        memchr(raw, 0, (size_t)st.st_size)) return false;
+    size_t n = (size_t)st.st_size;
+    uint8_t digest[32];
+    hash_text("zcl.dev_proof_failure_recorded.request.v1", raw, n, digest);
+    zcl_hex_encode(digest, sizeof(digest), root);
+    memcpy(parsed, raw, n);
+    parsed[n] = 0;
+    if (n && parsed[n - 1] == '\n') parsed[--n] = 0;
+    if (n && parsed[n - 1] == '\r') parsed[--n] = 0;
+    if (!dp_request_shape_ok(lines, dp_request_split(parsed, lines))) return false;
+    int64_t wall, mono;
+    if (!dp_request_stamps(lines[3], lines[4], &wall, &mono)) return false;
+    (void)snprintf(key, sizeof(key), "%s-%s", lines[1], lines[2]);
+    if (strcmp(key, paths->key) != 0) return false;
+    (void)snprintf(local, 65, "%s", lines[1]);
+    (void)snprintf(base, 65, "%s", lines[2]);
+    return true;
+}
+
+/* Called only after creating this attempt's archive, under the queue lock.
+ * An existing record of ANY shape is never replaced or refreshed. These are
+ * producer recording clocks after archive publication, not child-exit time. */
+static void dp_failure_time_write(const struct proof_paths *paths,
+                                   const char *failure, size_t failure_size)
+{
+    char path[PATH_MAX], local[65], base[65], request[65], failed[65], body[1024];
+    struct stat st;
+    if (snprintf(path, sizeof(path), "%s/failure-time.v1", paths->logs) >= (int)sizeof(path) ||
+        lstat(path, &st) == 0 || errno != ENOENT ||
+        !dp_failure_time_request(paths, local, base, request)) return;
+    uint8_t digest[32];
+    hash_text("zcl.dev_proof_failure_recorded.failure.v1", failure, failure_size, digest);
+    zcl_hex_encode(digest, sizeof(digest), failed);
+    int64_t wall = platform_time_wall_unix(), mono = platform_time_monotonic_us();
+    if (wall <= 0 || mono <= 0) return;
+    int n = snprintf(body, sizeof(body), "zcl.dev_proof_failure_recorded.v1\n"
+        "attempt=%s\nlocal=%s\nbase=%s\nrequest_sha3=%s\nfailure_sha3=%s\n"
+        "recorded_unix=%lld\nrecorded_monotonic_us=%lld\n",
+        paths->attempt_token, local, base, request, failed, (long long)wall, (long long)mono);
+    if (n > 0 && (size_t)n < sizeof(body)) (void)write_atomic(path, body, (size_t)n, 0600);
+}
+
+static bool dp_failure_archive_original(const char *path,
+                                         char out[DP_FAILURE_RECORD_MAX + 1], size_t *size)
+{
+    if (!proof_failure_bytes(path, (uint8_t *)out, size) ||
+        memchr(out, 0, *size)) return false;
+    out[*size] = 0;
+    size_t first = strcspn(out, "\n");
+    /* Same bounded native reason projection as dp_failure_record_read. */
+    if (first && out[first - 1] == '\r') first--;
+    return first > 0 && first < sizeof(((struct zcl_dev_proof_status *)0)->detail);
+}
+
+static void dp_failure_project(const struct proof_paths *paths, const char *message)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/failure.txt", paths->logs) >= (int)sizeof(path)) return;
+    int guard = proof_queue_lock_acquire(paths);
+    if (guard < 0) return;
+    if (proof_lease_current(paths)) {
+        struct stat st;
+        bool fresh = lstat(path, &st) != 0 && errno == ENOENT;
+        size_t n = strlen(message);
+        char original[DP_FAILURE_RECORD_MAX + 1];
+        /* Existing archives are immutable, including the archive-only crash
+         * window: repeating settlement must never repair its unknown time. */
+        if (fresh) {
+            if (write_atomic(path, message, n, 0600))
+                dp_failure_time_write(paths, message, n);
+            (void)write_atomic(paths->failure, message, n, 0600);
+        } else if (dp_failure_archive_original(path, original, &n)) {
+            /* Retrying with another diagnostic cannot change the settled
+             * archive/projection pair and thereby make retry conflict. */
+            (void)write_atomic(paths->failure, original, n, 0600);
+        }
+    }
+    proof_queue_lock_release(guard);
+}
+
+/* On initial settlement the pair's `.failed` projection and the attempt's
+ * own `logs/failure.txt` archive carry the same bytes. Repeated settlement
+ * preserves the original archive and its optional recording metadata.
+ * The first line is
  * the failure token, byte for byte what it always was; the evidence digest
  * follows it when the failing step left one. */
 static void dp_failure_settle(const struct proof_paths *paths, const char *why)
@@ -11586,16 +11678,60 @@ static void dp_failure_settle(const struct proof_paths *paths, const char *why)
         ? snprintf(record, sizeof(record), "%s\n%s", message, evidence)
         : -1;
     if (n > 0 && (size_t)n < sizeof(record)) message = record;
-    char failure_log[PATH_MAX];
-    if (snprintf(failure_log, sizeof(failure_log), "%s/failure.txt",
-                 paths->logs) < (int)sizeof(failure_log))
-        (void)proof_write_if_current(paths, failure_log, message,
-                                     strlen(message), 0600);
-    (void)proof_write_if_current(paths, paths->failure, message,
-                                 strlen(message), 0600);
+    dp_failure_project(paths, message);
 }
 
 #if defined(ZCL_TESTING)
+/* Harness-only preparation uses the same native request bytes and attempt
+ * constructor, without executing a generation or admitting any receipt. */
+bool zcl_dev_proof_test_failure_attempt_prepare(const char *root,
+    const char *local, const char *base, char *out, size_t out_len)
+{
+    struct proof_paths pair, attempt;
+    char body[320], request[PATH_MAX];
+    size_t size;
+    if (!out || !out_len || !proof_paths_fill(root, local, base, &pair) ||
+        !proof_state_prepare(&pair) || !proof_attempt_paths_prepare(&pair, &attempt) ||
+        !proof_request_body(local, base, body, &size) ||
+        snprintf(request, sizeof(request), "%s/request", attempt.attempt) >= (int)sizeof(request) ||
+        !write_atomic(request, body, size, 0600)) return false;
+    return snprintf(out, out_len, "%s", attempt.attempt) < (int)out_len;
+}
+
+static bool dp_test_failure_attempt_fill(const char *root, const char *local,
+    const char *base, const char *directory, struct proof_paths *paths)
+{
+    if (!directory || !proof_paths_fill(root, local, base, paths)) return false;
+    char prefix[PATH_MAX];
+    int n = snprintf(prefix, sizeof(prefix), "%s/%s.", paths->attempts, paths->key);
+    if (n <= 0 || n >= (int)sizeof(prefix) || strncmp(directory, prefix, (size_t)n) != 0)
+        return false;
+    const char *suffix = directory + n;
+    static const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    if (strlen(suffix) != 6 || strspn(suffix, letters) != 6) return false;
+    struct stat st;
+    if (lstat(directory, &st) != 0 || !S_ISDIR(st.st_mode)) return false;
+    (void)snprintf(paths->attempt, sizeof(paths->attempt), "%s", directory);
+    const char *leaf = strrchr(directory, '/') + 1;
+    (void)snprintf(paths->attempt_token, sizeof(paths->attempt_token), "%s", leaf);
+    paths->attempt_worker = (int64_t)getpid();
+    return snprintf(paths->logs, sizeof(paths->logs), "%s/logs", directory) < (int)sizeof(paths->logs) &&
+           snprintf(paths->phases, sizeof(paths->phases), "%s/phases.txt", directory) < (int)sizeof(paths->phases) &&
+           proof_attempt_log_paths(paths);
+}
+
+bool zcl_dev_proof_test_failure_attempt_settle(const char *root,
+    const char *local, const char *base, const char *directory, const char *reason)
+{
+    struct proof_paths paths;
+    if (!reason || !*reason ||
+        !dp_test_failure_attempt_fill(root, local, base, directory, &paths) ||
+        !proof_lease_publish(&paths)) return false;
+    dp_failure_settle(&paths, reason);
+    proof_lease_release(&paths);
+    return proof_private_regular(paths.failure);
+}
+
 /* Run one stub child as dimension `id` of a fresh attempt for the exact
  * pair under `repo_root`, then settle its failure exactly as
  * proof_worker_run() does. Returns true when the child failed and the
