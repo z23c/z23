@@ -1075,6 +1075,7 @@ static int case_effect_per_kind(void)
     } want[] = {
         { "fix-gate", ENGINE_PROMPT_EFFECT_EDIT },
         { "add-test", ENGINE_PROMPT_EFFECT_EDIT },
+        { "build", ENGINE_PROMPT_EFFECT_EDIT },
         { "port-arm", ENGINE_PROMPT_EFFECT_EDIT },
         { "doc-claim", ENGINE_PROMPT_EFFECT_EDIT },
         { "review", ENGINE_PROMPT_EFFECT_REPORT },
@@ -5888,6 +5889,24 @@ static int case_review_pass_no_new_file(void)
     return failures;
 }
 
+static int case_build_kind(void)
+{
+    int failures = 0;
+    EN_CHECK("build is a standard kind",
+             engine_prompt_kind_tier("build") == ENGINE_PROMPT_TIER_STANDARD);
+    EN_CHECK("build edits the worktree, so its effect is EDIT",
+             engine_prompt_kind_effect("build") == ENGINE_PROMPT_EFFECT_EDIT);
+    EN_CHECK("--kind build is accepted: it supplies every required section",
+             engine_prompt_kind_is_complete("build"));
+    const char *protocol = engine_prompt_template_body("build", "protocol");
+    EN_CHECK("build edits the worktree and does not commit",
+             protocol && strstr(protocol, "do not commit"));
+    const char *judging = engine_prompt_template_body("build", "judging");
+    EN_CHECK("build judges by the brief's tests and scope",
+             judging && strstr(judging, "The brief's tests must run and pass"));
+    return failures;
+}
+
 static int case_light_review_pass_kind(void)
 {
     int failures = 0;
@@ -6310,6 +6329,7 @@ int test_engine(void)
     failures += case_review_findings_not_verdict();
     failures += case_contract();
     failures += case_light_patch_kind();
+    failures += case_build_kind();
     failures += case_light_review_pass_kind();
     failures += case_review_pass_no_new_file();
     failures += case_light_card_check_kind();

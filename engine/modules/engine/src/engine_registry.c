@@ -61,6 +61,13 @@ static const char *const k_glm_cli_start_argv[] = {
     "--prompt",    ENGINE_CLI_PROMPT_TOKEN,
     NULL
 };
+/* The settings and the isolation they buy are shared by both Claude forms,
+ * so the read-only form differs from the editing one only in its tools, its
+ * permission mode and its system prompt. */
+#define K_CLAUDE_SETTINGS_ARG                                             \
+    "--settings={\"env\":{\"CLAUDE_CODE_DISABLE_CLAUDE_MDS\":\"1\","       \
+    "\"CLAUDE_CODE_DISABLE_AUTO_MEMORY\":\"1\","                           \
+    "\"CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS\":\"1\"}}"
 /* Takes the prompt TEXT as an argument and has NO directory flag: it works in
  * its current directory, so the row sets cli_cwd_is_workdir and the launcher
  * starts it there; {workdir} is deliberately absent. It has no turn cap flag
@@ -72,13 +79,6 @@ static const char *const k_glm_cli_start_argv[] = {
  * rides in one --settings= element because a slot starting with '{' is a
  * placeholder. The model gets file tools only, with no Bash: builds go
  * through the harness, which judges. */
-/* The settings and the isolation they buy are shared by both Claude forms,
- * so the read-only form differs from the editing one only in its tools, its
- * permission mode and its system prompt. */
-#define K_CLAUDE_SETTINGS_ARG                                             \
-    "--settings={\"env\":{\"CLAUDE_CODE_DISABLE_CLAUDE_MDS\":\"1\","       \
-    "\"CLAUDE_CODE_DISABLE_AUTO_MEMORY\":\"1\","                           \
-    "\"CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS\":\"1\"}}"
 static const char *const k_claude_cli_start_argv[] = {
     "-p",             ENGINE_CLI_PROMPT_TOKEN,
     "--model",        ENGINE_CLI_MODEL_TOKEN,
