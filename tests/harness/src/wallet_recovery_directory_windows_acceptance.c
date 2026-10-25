@@ -16,15 +16,78 @@ static bool to_utf8(const wchar_t *wide, char *out, size_t size)
                                (int)size, NULL, NULL) > 0;
 }
 
-int main(void)
+static bool create_unique_recovery_root(wchar_t *temp, wchar_t *root)
 {
-    wchar_t temp[MAX_PATH], root[MAX_PATH], source[MAX_PATH], target[MAX_PATH];
-    wchar_t link[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp) ||
         swprintf(root, MAX_PATH, L"%lsz23-wallet-recovery-%lu-%llu", temp,
                  (unsigned long)GetCurrentProcessId(),
                  (unsigned long long)GetTickCount64()) <= 0 ||
         !CreateDirectoryW(root, NULL))
+        return false;
+    return true;
+}
+
+static bool write_sentinel_fixture(const char *path, const char *expected,
+                                   size_t expected_size, const char **stage,
+                                   DWORD *error)
+{
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool fixture = platform_private_file_create(path, &file);
+    if (fixture) {
+        *stage = "write";
+        fixture = platform_private_file_write_at(
+            &file, expected, expected_size, 0);
+    }
+    if (fixture) {
+        *stage = "flush";
+        fixture = platform_private_file_flush(&file);
+    }
+    *error = fixture ? ERROR_SUCCESS : GetLastError();
+    platform_private_file_close(&file);
+    return fixture;
+}
+
+static bool sentinel_matches_expected(const char *path, char *actual,
+                                      const char *expected, size_t size)
+{
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool source_unchanged = platform_private_file_open_locked(path, &file) &&
+        platform_private_file_read_at(&file, actual, size, 0) &&
+        memcmp(actual, expected, size) == 0;
+    platform_private_file_close(&file);
+    return source_unchanged;
+}
+
+static bool verify_reparse_point_refusal(const wchar_t *link,
+                                         const wchar_t *source,
+                                         const char *link_utf8)
+{
+    DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY;
+#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+    flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+#endif
+    if (!CreateSymbolicLinkW(link, source, flags))
+        return true;
+    struct wallet_recovery_report report;
+    memset(&report, 0, sizeof(report));
+    struct zcl_result refused =
+        wallet_recovery_test_ensure_datadir(link_utf8, &report);
+    DWORD attrs = GetFileAttributesW(link);
+    if (refused.ok || report.datadir_created ||
+        attrs == INVALID_FILE_ATTRIBUTES ||
+        !(attrs & FILE_ATTRIBUTE_REPARSE_POINT))
+        return false;
+    (void)RemoveDirectoryW(link);
+    return true;
+}
+
+int main(void)
+{
+    wchar_t temp[MAX_PATH], root[MAX_PATH], source[MAX_PATH], target[MAX_PATH];
+    wchar_t link[MAX_PATH];
+    if (!create_unique_recovery_root(temp, root))
         return 1;
     (void)swprintf(source, MAX_PATH, L"%ls\\source-wallet", root);
     (void)swprintf(target, MAX_PATH, L"%ls\\new-recovery", root);
@@ -43,23 +106,11 @@ int main(void)
         return 77;
     }
     (void)snprintf(sentinel, sizeof(sentinel), "%s/sentinel", source_utf8);
-    struct platform_private_file file;
-    platform_private_file_init(&file);
     static const char expected[] = "source wallet remains untouched";
     const char *fixture_stage = "create";
-    bool fixture = platform_private_file_create(sentinel, &file);
-    if (fixture) {
-        fixture_stage = "write";
-        fixture = platform_private_file_write_at(
-            &file, expected, sizeof(expected), 0);
-    }
-    if (fixture) {
-        fixture_stage = "flush";
-        fixture = platform_private_file_flush(&file);
-    }
-    DWORD fixture_error = fixture ? ERROR_SUCCESS : GetLastError();
-    platform_private_file_close(&file);
-    if (!fixture) {
+    DWORD fixture_error = ERROR_SUCCESS;
+    if (!write_sentinel_fixture(sentinel, expected, sizeof(expected),
+                                &fixture_stage, &fixture_error)) {
         fprintf(stderr, "wallet recovery fixture %s failed: win32=%lu\n",
                 fixture_stage, (unsigned long)fixture_error);
         return 3;
@@ -69,28 +120,13 @@ int main(void)
     struct zcl_result made =
         wallet_recovery_test_ensure_datadir(target_utf8, &report);
     char actual[sizeof(expected)] = {0};
-    platform_private_file_init(&file);
-    bool source_unchanged = platform_private_file_open_locked(sentinel, &file) &&
-        platform_private_file_read_at(&file, actual, sizeof(actual), 0) &&
-        memcmp(actual, expected, sizeof(expected)) == 0;
-    platform_private_file_close(&file);
+    bool source_unchanged =
+        sentinel_matches_expected(sentinel, actual, expected,
+                                  sizeof(expected));
     if (!made.ok || !report.datadir_created || !source_unchanged) return 4;
 
-    DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY;
-#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
-    flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-#endif
-    if (CreateSymbolicLinkW(link, source, flags)) {
-        memset(&report, 0, sizeof(report));
-        struct zcl_result refused =
-            wallet_recovery_test_ensure_datadir(link_utf8, &report);
-        DWORD attrs = GetFileAttributesW(link);
-        if (refused.ok || report.datadir_created ||
-            attrs == INVALID_FILE_ATTRIBUTES ||
-            !(attrs & FILE_ATTRIBUTE_REPARSE_POINT))
-            return 5;
-        (void)RemoveDirectoryW(link);
-    }
+    if (!verify_reparse_point_refusal(link, source, link_utf8))
+        return 5;
 
     (void)platform_private_file_unlink_missing_ok(sentinel);
     (void)RemoveDirectoryW(target);
