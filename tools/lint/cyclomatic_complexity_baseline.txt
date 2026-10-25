@@ -2362,7 +2362,6 @@ tests/harness/src/test_syncdiag_anchorstatus.c:syncdiag_cases_anchorstatus:213
 tests/harness/src/test_syncdiag_api_catalog.c:syncdiag_cases_api_catalog:163
 tests/harness/src/test_syncdiag_health.c:syncdiag_cases_health:314
 tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:367
-tests/harness/src/test_telemetry_agents.c:check_node_down_is_unknown_not_unhealthy:17
 tests/harness/src/test_telemetry_network.c:check_fill_completeness:18
 tests/harness/src/test_telemetry_network.c:check_meaning_rows:23
 tests/harness/src/test_telemetry_network.c:check_one_command:22

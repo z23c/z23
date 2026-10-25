@@ -425,6 +425,36 @@ static int check_fill_leaves_nothing_unset(void)
 
 /* ── 3. unreadable is UNKNOWN, never UNHEALTHY ───────────────────────────── */
 
+/* One pass over the rendered `health.unhealthy` array, reporting what the
+ * assertions in the check below judge: the state the CRITICAL leaf carries,
+ * how many findings are worse than unknown, and whether the one such finding
+ * is store_readable=degraded. Judges nothing, prints nothing. */
+static void scan_unhealthy_findings(const struct json_value *doc,
+                                    const char **critical_state,
+                                    size_t *not_unknown,
+                                    bool *the_one_is_store)
+{
+    const struct json_value *arr =
+        json_get(json_get(doc, "health"), "unhealthy");
+    size_t n = (arr && arr->type == JSON_ARR) ? arr->num_children : 0;
+    *critical_state = NULL;
+    *not_unknown = 0;
+    *the_one_is_store = false;
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *f = json_at(arr, i);
+        const char *p = json_get_str(json_get(f, "path"));
+        const char *st = json_get_str(json_get(f, "state"));
+        if (p && strcmp(p, "values.sessions.malformed_rows") == 0)
+            *critical_state = st;
+        if (st && strcmp(st, "unknown") != 0) {
+            (*not_unknown)++;
+            *the_one_is_store =
+                p && strcmp(p, "values.sessions.store_readable") == 0 &&
+                strcmp(st, "degraded") == 0;
+        }
+    }
+}
+
 static int check_node_down_is_unknown_not_unhealthy(void)
 {
     int failures = 0;
@@ -480,25 +510,11 @@ static int check_node_down_is_unknown_not_unhealthy(void)
          * only the faults — so the assertion is about STATES, not membership.
          * Exactly one finding may be worse than unknown, and it must be the
          * one the collector positively established. */
-        const struct json_value *arr =
-            json_get(json_get(&doc, "health"), "unhealthy");
-        size_t n = (arr && arr->type == JSON_ARR) ? arr->num_children : 0;
-        const char *critical_state = NULL;
-        size_t not_unknown = 0;
-        bool the_one_is_store = false;
-        for (size_t i = 0; i < n; i++) {
-            const struct json_value *f = json_at(arr, i);
-            const char *p = json_get_str(json_get(f, "path"));
-            const char *st = json_get_str(json_get(f, "state"));
-            if (p && strcmp(p, "values.sessions.malformed_rows") == 0)
-                critical_state = st;
-            if (st && strcmp(st, "unknown") != 0) {
-                not_unknown++;
-                the_one_is_store =
-                    p && strcmp(p, "values.sessions.store_readable") == 0 &&
-                    strcmp(st, "degraded") == 0;
-            }
-        }
+        const char *critical_state;
+        size_t not_unknown;
+        bool the_one_is_store;
+        scan_unhealthy_findings(&doc, &critical_state, &not_unknown,
+                                &the_one_is_store);
         TA_CHECK("[down] the domain's one CRITICAL rule, unread, reports "
                  "UNKNOWN — never unhealthy on a read that did not happen",
                  critical_state && strcmp(critical_state, "unknown") == 0);
