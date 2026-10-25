@@ -213,19 +213,35 @@ static bool func_name(const char *clean, size_t a, size_t b, char *buf,
     return true;
 }
 
+static bool delim_opens(char c)
+{
+    return c == '(' || c == '[' || c == '{';
+}
+
+static bool delim_closes(char c)
+{
+    return c == ')' || c == ']' || c == '}';
+}
+
+/* '=' that is assignment, not ==, <=, >=, or !=. */
+static bool eq_is_assignment(char prev, char next)
+{
+    return prev != '=' && prev != '<' && prev != '>' && prev != '!' &&
+           next != '=';
+}
+
 /* Is there a top-level '=' (assignment, not comparison) in [a,b)? */
 static bool has_toplevel_eq(const char *clean, size_t a, size_t b)
 {
     int depth = 0;
     for (size_t i = a; i < b; i++) {
         char c = clean[i];
-        if (c == '(' || c == '[' || c == '{') depth++;
-        else if (c == ')' || c == ']' || c == '}') { if (depth > 0) depth--; }
+        if (delim_opens(c)) depth++;
+        else if (delim_closes(c)) { if (depth > 0) depth--; }
         else if (c == '=' && depth == 0) {
             char prev = i > a ? clean[i - 1] : 0;
             char next = i + 1 < b ? clean[i + 1] : 0;
-            if (prev != '=' && prev != '<' && prev != '>' && prev != '!' &&
-                next != '=')
+            if (eq_is_assignment(prev, next))
                 return true;
         }
     }
@@ -327,6 +343,58 @@ static void emit_sym(struct scan_ctx *c, const char *name, char kind,
 
 /* ── segment classifiers ────────────────────────────────────────────── */
 
+static bool is_type_tag(const char *first)
+{
+    return strcmp(first, "struct") == 0 || strcmp(first, "union") == 0 ||
+           strcmp(first, "enum") == 0;
+}
+
+static char tag_kind(const char *first)
+{
+    return (first[0] == 'e') ? 'E' : 'S';
+}
+
+/* 'static' as a standalone token before the name → internal linkage */
+static char func_linkage_kind(const char *sig)
+{
+    return (strncmp(sig, "static ", 7) == 0 ||
+            strstr(sig, " static ")) ? 't' : 'T';
+}
+
+/* True when the struct/union/enum block is fully classified. */
+static bool classify_tag_block(struct scan_ctx *c, size_t a, size_t b,
+                               const char *first, bool *pending, char *pkind)
+{
+    if (!is_type_tag(first))
+        return false;
+    char kind = tag_kind(first);
+    /* named form: "struct NAME {" — start just past the tag WORD, not
+     * past seg_start (which may carry leading whitespace). */
+    size_t wstart = first_tok(c->clean, a, b);
+    size_t after = first_tok(c->clean, wstart + strlen(first), b);
+    if (after < b && is_ident_start((unsigned char)c->clean[after])) {
+        char nm[128];
+        ident_at(c->clean, after, b, nm, sizeof(nm));
+        size_t nend = after;
+        while (nend < b && is_ident_char((unsigned char)c->clean[nend]))
+            nend++;
+        size_t rest = first_tok(c->clean, nend, b);
+        if (rest >= b) {
+            /* "struct NAME {" — a genuine type definition. */
+            emit_sym(c, nm, kind, true, after, a, b, false);
+            return true;
+        }
+        /* "struct NAME *f(...)" / "struct NAME v = {...}" — a function or
+         * data whose RETURN/VAR type is this tag; fall through. */
+    } else {
+        /* anonymous "struct {" — the (optional) name follows the block. */
+        *pending = true; *pkind = kind;
+        return true;
+    }
+    /* fall through to function / data detection */
+    return false;
+}
+
 /* A block-opening segment [a,b) (text before its '{'). Sets *pending / *pkind
  * for typedef / anonymous struct-enum whose name follows the block. */
 static void classify_block_open(struct scan_ctx *c, size_t a, size_t b,
@@ -341,34 +409,8 @@ static void classify_block_open(struct scan_ctx *c, size_t a, size_t b,
     if (strcmp(first, "typedef") == 0) {
         *pending = true; *pkind = 'Y'; return;   /* name follows the block */
     }
-    if (strcmp(first, "struct") == 0 || strcmp(first, "union") == 0 ||
-        strcmp(first, "enum") == 0) {
-        char kind = (first[0] == 'e') ? 'E' : 'S';
-        /* named form: "struct NAME {" — start just past the tag WORD, not
-         * past seg_start (which may carry leading whitespace). */
-        size_t wstart = first_tok(c->clean, a, b);
-        size_t after = first_tok(c->clean, wstart + strlen(first), b);
-        if (after < b && is_ident_start((unsigned char)c->clean[after])) {
-            char nm[128];
-            ident_at(c->clean, after, b, nm, sizeof(nm));
-            size_t nend = after;
-            while (nend < b && is_ident_char((unsigned char)c->clean[nend]))
-                nend++;
-            size_t rest = first_tok(c->clean, nend, b);
-            if (rest >= b) {
-                /* "struct NAME {" — a genuine type definition. */
-                emit_sym(c, nm, kind, true, after, a, b, false);
-                return;
-            }
-            /* "struct NAME *f(...)" / "struct NAME v = {...}" — a function or
-             * data whose RETURN/VAR type is this tag; fall through. */
-        } else {
-            /* anonymous "struct {" — the (optional) name follows the block. */
-            *pending = true; *pkind = kind;
-            return;
-        }
-        /* fall through to function / data detection */
-    }
+    if (classify_tag_block(c, a, b, first, pending, pkind))
+        return;
     /* data initializer: "... = { ... }" */
     if (has_toplevel_eq(c->clean, a, b)) {
         char nm[128]; size_t off;
@@ -384,11 +426,9 @@ static void classify_block_open(struct scan_ctx *c, size_t a, size_t b,
             emit_sym(c, nm, 'D', true, off, a, b, true);
             return;
         }
-        /* 'static' as a standalone token before the name → internal linkage */
         char sig[512];
         clean_signature(c, a, off, sig, sizeof(sig));
-        char kind = (strncmp(sig, "static ", 7) == 0 ||
-                     strstr(sig, " static ")) ? 't' : 'T';
+        char kind = func_linkage_kind(sig);
         emit_sym(c, nm, kind, true, off, a, b, false);
         return;
     }
@@ -400,19 +440,125 @@ static void classify_block_open(struct scan_ctx *c, size_t a, size_t b,
     }
 }
 
-/* A ';'-terminated segment [a,b). *pending carries a typedef/anon name to
- * bind from this segment's tail. */
-static void classify_semicolon(struct scan_ctx *c, size_t a, size_t b,
-                               bool *pending, char *pkind)
+/* bind a pending typedef/anonymous name from the tail */
+static bool bind_pending_tail(struct scan_ctx *c, size_t a, size_t b,
+                              bool *pending, char *pkind)
 {
-    /* bind a pending typedef/anonymous name from the tail */
     if (*pending) {
         char nm[128]; size_t off;
         if (last_ident(c->clean, a, b, nm, sizeof(nm), &off))
             emit_sym(c, nm, *pkind, true, off, a, b, false);
         *pending = false; *pkind = 0;
+        return true;
+    }
+    return false;
+}
+
+/* typedef on one line */
+static bool classify_typedef_semi(struct scan_ctx *c, size_t a, size_t b,
+                                  const char *first)
+{
+    if (strcmp(first, "typedef") != 0)
+        return false;
+    /* function-pointer typedef: "(*NAME)" */
+    for (size_t i = a; i + 1 < b; i++) {
+        if (c->clean[i] == '(' && c->clean[i + 1] == '*') {
+            size_t j = first_tok(c->clean, i + 2, b);
+            if (j < b && is_ident_start((unsigned char)c->clean[j])) {
+                char nm[128];
+                ident_at(c->clean, j, b, nm, sizeof(nm));
+                emit_sym(c, nm, 'Y', true, j, a, b, true);
+                return true;
+            }
+        }
+    }
+    char nm[128]; size_t off;
+    if (last_ident(c->clean, a, b, nm, sizeof(nm), &off))
+        emit_sym(c, nm, 'Y', true, off, a, b, false);
+    return true;
+}
+
+static bool range_has_lparen(const char *clean, size_t a, size_t b)
+{
+    for (size_t i = a; i < b; i++)
+        if (clean[i] == '(')
+            return true;
+    return false;
+}
+
+static void emit_tag_semi(struct scan_ctx *c, size_t a, size_t b,
+                          const char *first)
+{
+    /* count identifier tokens after the tag word */
+    size_t after = first_tok(c->clean, a, b) + strlen(first);
+    char nm[128]; size_t off;
+    int ntok = 0; size_t last_off = 0; char last_nm[128] = "";
+    size_t i = after;
+    while (i < b) {
+        if (is_ident_start((unsigned char)c->clean[i])) {
+            ident_at(c->clean, i, b, nm, sizeof(nm));
+            snprintf(last_nm, sizeof(last_nm), "%s", nm);
+            last_off = i;
+            ntok++;
+            while (i < b && is_ident_char((unsigned char)c->clean[i])) i++;
+        } else i++;
+    }
+    (void)off;
+    char kind = tag_kind(first);
+    if (ntok == 1) {
+        /* "struct foo;" forward declaration */
+        emit_sym(c, last_nm, kind, false, last_off, a, b, false);
+    } else if (ntok >= 2) {
+        /* "struct foo bar;" → data var bar */
+        emit_sym(c, last_nm, 'D', false, last_off, a, b, false);
+    }
+}
+
+static void emit_paren_semi(struct scan_ctx *c, size_t a, size_t b, size_t s0)
+{
+    char nm[128]; size_t off;
+    if (func_name(c->clean, a, b, nm, sizeof(nm), &off)) {
+        /* macro-call form "NAME(...)" with no return type → partial data */
+        if (off == s0) {
+            emit_sym(c, nm, 'D', false, off, a, b, true);
+            return;
+        }
+        char sig[512];
+        clean_signature(c, a, off, sig, sizeof(sig));
+        char kind = func_linkage_kind(sig);
+        /* prototype: DECLARATION (header canonical; also .c forward decl) */
+        emit_sym(c, nm, kind, false, off, a, b, false);
         return;
     }
+    /* fn-pointer var or messy → partial */
+    char anm[128]; size_t aoff;
+    if (last_ident(c->clean, a, b, anm, sizeof(anm), &aoff))
+        emit_sym(c, anm, 'D', false, aoff, a, b, true);
+}
+
+static void emit_plain_data_semi(struct scan_ctx *c, size_t a, size_t b)
+{
+    /* plain data declaration: name before first '=' or '[' or last ident */
+    size_t stop = b;
+    int depth = 0;
+    for (size_t i = a; i < b; i++) {
+        char ch = c->clean[i];
+        if (delim_opens(ch)) depth++;
+        else if (delim_closes(ch)) { if (depth) depth--; }
+        else if (depth == 0 && ch == '=') { stop = i; break; }
+    }
+    char nm[128]; size_t off;
+    if (last_ident(c->clean, a, stop, nm, sizeof(nm), &off))
+        emit_sym(c, nm, 'D', false, off, a, b, false);
+}
+
+/* A ';'-terminated segment [a,b). *pending carries a typedef/anon name to
+ * bind from this segment's tail. */
+static void classify_semicolon(struct scan_ctx *c, size_t a, size_t b,
+                               bool *pending, char *pkind)
+{
+    if (bind_pending_tail(c, a, b, pending, pkind))
+        return;
 
     size_t s0 = first_tok(c->clean, a, b);
     if (s0 >= b) return;  /* empty */
@@ -420,98 +566,65 @@ static void classify_semicolon(struct scan_ctx *c, size_t a, size_t b,
     char first[64];
     leading_word(c->clean, a, b, first, sizeof(first));
 
-    /* typedef on one line */
-    if (strcmp(first, "typedef") == 0) {
-        /* function-pointer typedef: "(*NAME)" */
-        for (size_t i = a; i + 1 < b; i++) {
-            if (c->clean[i] == '(' && c->clean[i + 1] == '*') {
-                size_t j = first_tok(c->clean, i + 2, b);
-                if (j < b && is_ident_start((unsigned char)c->clean[j])) {
-                    char nm[128];
-                    ident_at(c->clean, j, b, nm, sizeof(nm));
-                    emit_sym(c, nm, 'Y', true, j, a, b, true);
-                    return;
-                }
-            }
-        }
-        char nm[128]; size_t off;
-        if (last_ident(c->clean, a, b, nm, sizeof(nm), &off))
-            emit_sym(c, nm, 'Y', true, off, a, b, false);
+    if (classify_typedef_semi(c, a, b, first))
         return;
-    }
 
-    bool tag = (strcmp(first, "struct") == 0 || strcmp(first, "union") == 0 ||
-                strcmp(first, "enum") == 0);
-    bool has_paren = false;
-    for (size_t i = a; i < b; i++) if (c->clean[i] == '(') { has_paren = true; break; }
+    bool tag = is_type_tag(first);
+    bool has_paren = range_has_lparen(c->clean, a, b);
 
     if (tag && !has_paren) {
-        /* count identifier tokens after the tag word */
-        size_t after = first_tok(c->clean, a, b) + strlen(first);
-        char nm[128]; size_t off;
-        int ntok = 0; size_t last_off = 0; char last_nm[128] = "";
-        size_t i = after;
-        while (i < b) {
-            if (is_ident_start((unsigned char)c->clean[i])) {
-                ident_at(c->clean, i, b, nm, sizeof(nm));
-                snprintf(last_nm, sizeof(last_nm), "%s", nm);
-                last_off = i;
-                ntok++;
-                while (i < b && is_ident_char((unsigned char)c->clean[i])) i++;
-            } else i++;
-        }
-        (void)off;
-        char kind = (first[0] == 'e') ? 'E' : 'S';
-        if (ntok == 1) {
-            /* "struct foo;" forward declaration */
-            emit_sym(c, last_nm, kind, false, last_off, a, b, false);
-        } else if (ntok >= 2) {
-            /* "struct foo bar;" → data var bar */
-            emit_sym(c, last_nm, 'D', false, last_off, a, b, false);
-        }
+        emit_tag_semi(c, a, b, first);
         return;
     }
 
     if (has_paren) {
-        char nm[128]; size_t off;
-        if (func_name(c->clean, a, b, nm, sizeof(nm), &off)) {
-            /* macro-call form "NAME(...)" with no return type → partial data */
-            if (off == s0) {
-                emit_sym(c, nm, 'D', false, off, a, b, true);
-                return;
-            }
-            char sig[512];
-            clean_signature(c, a, off, sig, sizeof(sig));
-            char kind = (strncmp(sig, "static ", 7) == 0 ||
-                         strstr(sig, " static ")) ? 't' : 'T';
-            /* prototype: DECLARATION (header canonical; also .c forward decl) */
-            emit_sym(c, nm, kind, false, off, a, b, false);
-            return;
-        }
-        /* fn-pointer var or messy → partial */
-        char anm[128]; size_t aoff;
-        if (last_ident(c->clean, a, b, anm, sizeof(anm), &aoff))
-            emit_sym(c, anm, 'D', false, aoff, a, b, true);
+        emit_paren_semi(c, a, b, s0);
         return;
     }
 
-    /* plain data declaration: name before first '=' or '[' or last ident */
-    {
-        size_t stop = b;
-        int depth = 0;
-        for (size_t i = a; i < b; i++) {
-            char ch = c->clean[i];
-            if (ch == '(' || ch == '[' || ch == '{') depth++;
-            else if (ch == ')' || ch == ']' || ch == '}') { if (depth) depth--; }
-            else if (depth == 0 && ch == '=') { stop = i; break; }
-        }
-        char nm[128]; size_t off;
-        if (last_ident(c->clean, a, stop, nm, sizeof(nm), &off))
-            emit_sym(c, nm, 'D', false, off, a, b, false);
-    }
+    emit_plain_data_semi(c, a, b);
 }
 
 /* ── refs pass (call sites inside function bodies) ──────────────────── */
+
+static size_t skip_hspace(const char *clean, size_t d, size_t b);
+
+static bool scan_ref_skip(struct scan_ctx *c, size_t i, int *line, int *brace)
+{
+    if (c->clean[i] == '\n') { (*line)++; return true; }
+    if ((size_t)*line < c->nlines && c->pp_line[*line]) return true;
+    char ch = c->clean[i];
+    if (ch == '{') { (*brace)++; return true; }
+    if (ch == '}') { if (*brace > 0) (*brace)--; return true; }
+    if (*brace <= 0) return true;  /* only body-interior call sites */
+    return false;
+}
+
+static void scan_ref_ident(struct scan_ctx *c, size_t *i)
+{
+    size_t s = *i;
+    while (*i < c->len && is_ident_char((unsigned char)c->clean[*i]))
+        (*i)++;
+    size_t e = *i;
+    /* look ahead past spaces for '(' */
+    size_t k = skip_hspace(c->clean, e, c->len);
+    if (k < c->len && c->clean[k] == '(') {
+        char nm[128];
+        size_t n = e - s;
+        if (n < sizeof(nm)) {
+            memcpy(nm, c->clean + s, n);
+            nm[n] = '\0';
+            if (!is_keyword(nm) &&
+                c->refs_emitted < CI_MAX_REFS_PER_FILE) {
+                int rl = line_of(c, s);
+                c->on_ref(nm, c->relpath, rl,
+                          enclosing_for_line(c, rl), c->user);
+                c->refs_emitted++;
+            }
+        }
+    }
+    *i = e - 1;  /* for-loop will ++ */
+}
 
 static void scan_refs(struct scan_ctx *c)
 {
@@ -522,36 +635,10 @@ static void scan_refs(struct scan_ctx *c)
     int brace = 0;
     int line = 0;  /* 0-based */
     for (size_t i = 0; i < c->len; i++) {
-        if (c->clean[i] == '\n') { line++; continue; }
-        if ((size_t)line < c->nlines && c->pp_line[line]) continue;
-        char ch = c->clean[i];
-        if (ch == '{') { brace++; continue; }
-        if (ch == '}') { if (brace > 0) brace--; continue; }
-        if (brace <= 0) continue;  /* only body-interior call sites */
-        if (is_ident_start((unsigned char)ch)) {
-            size_t s = i;
-            while (i < c->len && is_ident_char((unsigned char)c->clean[i])) i++;
-            size_t e = i;
-            /* look ahead past spaces for '(' */
-            size_t k = e;
-            while (k < c->len && (c->clean[k] == ' ' || c->clean[k] == '\t')) k++;
-            if (k < c->len && c->clean[k] == '(') {
-                char nm[128];
-                size_t n = e - s;
-                if (n < sizeof(nm)) {
-                    memcpy(nm, c->clean + s, n);
-                    nm[n] = '\0';
-                    if (!is_keyword(nm) &&
-                        c->refs_emitted < CI_MAX_REFS_PER_FILE) {
-                        int rl = line_of(c, s);
-                        c->on_ref(nm, c->relpath, rl,
-                                  enclosing_for_line(c, rl), c->user);
-                        c->refs_emitted++;
-                    }
-                }
-            }
-            i = e - 1;  /* for-loop will ++ */
-        }
+        if (scan_ref_skip(c, i, &line, &brace))
+            continue;
+        if (is_ident_start((unsigned char)c->clean[i]))
+            scan_ref_ident(c, &i);
     }
 }
 

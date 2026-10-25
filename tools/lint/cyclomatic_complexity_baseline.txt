@@ -50,10 +50,6 @@ cognition/modules/codeindex/src/codeindex_merkle_decode.c:ci_merkle_proof_decode
 cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c:ci_merkle_snapshot_image_load_windows:21
 cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c:ci_merkle_snapshot_image_save_windows:23
 cognition/modules/codeindex/src/codeindex_query.c:codeindex_symbol_by_id:17
-cognition/modules/codeindex/src/codeindex_scan.c:classify_block_open:19
-cognition/modules/codeindex/src/codeindex_scan.c:classify_semicolon:41
-cognition/modules/codeindex/src/codeindex_scan.c:has_toplevel_eq:18
-cognition/modules/codeindex/src/codeindex_scan.c:scan_refs:21
 cognition/modules/codeindex/src/codeindex_scan_file.c:ci_scan_file:26
 cognition/modules/codeindex/src/codeindex_search.c:ci_store_search_text:17
 cognition/modules/codeindex/src/codeindex_search.c:codeindex_search_story:28
