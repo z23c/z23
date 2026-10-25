@@ -1956,7 +1956,6 @@ tests/harness/src/test_always_sync_selfheal.c:ash_setup_hole_fixture:19
 tests/harness/src/test_amount_subsidy_edge.c:test_amount_subsidy_edge:18
 tests/harness/src/test_anchor_finality.c:test_anchor_finality:131
 tests/harness/src/test_anchor_peers.c:test_anchor_peers:45
-tests/harness/src/test_anchor_selfmint.c:test_anchor_selfmint:26
 tests/harness/src/test_api_access.c:api_access_focused_tests:62
 tests/harness/src/test_api_catalogs.c:api_catalog_focused_tests:417
 tests/harness/src/test_api_controller_supervision.c:api_controller_supervision_focused_tests:37
