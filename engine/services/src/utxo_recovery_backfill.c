@@ -21,6 +21,7 @@
 #include "config/db_service.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
+#include "validation/connect_block.h"
 #include "chain/chain.h"
 #include "models/database.h"
 #include "storage/disk_block_io.h"
@@ -206,14 +207,7 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
             struct block blk;
             if (!read_block_from_disk_index(&blk, bi, bctx->datadir))
                 break;
-            for (size_t i = 0; i < blk.num_vtx; i++) {
-                const struct transaction *tx = &blk.vtx[i];
-                for (size_t j = 0; j < tx->num_joinsplit; j++) {
-                    sprout_val += tx->v_joinsplit[j].vpub_old;
-                    sprout_val -= tx->v_joinsplit[j].vpub_new;
-                }
-                sapling_val += tx->value_balance;
-            }
+            connect_block_shielded_values(&blk, &sprout_val, &sapling_val);
             block_free(&blk);
             if (sprout_val != 0 || sapling_val != 0) {
                 bi->nSproutValue = sprout_val;

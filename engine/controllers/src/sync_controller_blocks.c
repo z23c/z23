@@ -31,6 +31,7 @@
 #include "storage/coins_db.h"
 #include "coins/undo.h"
 #include "validation/chainstate.h"
+#include "validation/connect_block.h"
 #include "validation/mirror_consensus.h"
 #include "validation/txmempool.h"
 #include "sapling/incremental_merkle_tree.h"
@@ -367,14 +368,9 @@ static bool node_db_sync_connect_block_local(struct node_db *ndb,
     db_blk.data_pos = (int)pindex->nDataPos;
     db_blk.num_tx = (int)blk->num_vtx;
 
-    /* Compute per-block shielded value from transactions */
-    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
-        const struct transaction *tx = &blk->vtx[ti];
-        for (size_t ji = 0; ji < tx->num_joinsplit; ji++)
-            db_blk.sprout_value += tx->v_joinsplit[ji].vpub_old
-                                  - tx->v_joinsplit[ji].vpub_new;
-        db_blk.sapling_value += tx->value_balance;
-    }
+    /* Per-block shielded value, the same sum core connect_block uses */
+    connect_block_shielded_values(blk, &db_blk.sprout_value,
+                                  &db_blk.sapling_value);
 
     if (!db_block_save_canonical(ndb, &db_blk)) {
         fail_reason = "db_block_save_canonical";
