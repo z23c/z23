@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Creiton - Apache License 2.0
  * Purpose: Canonical ontology set and universe-bound manifest codecs. */
 #include "ontology/ontology.h"
 
@@ -573,7 +573,7 @@ static bool manifest_references_valid(
     return manifest_domains_valid(manifest, inputs);
 }
 
-bool zcl_ontology_manifest_v1_validate(
+static bool manifest_universe_binding_valid(
     const struct zcl_ontology_manifest_v1 *manifest,
     const struct zcl_source_universe_v1 *universe,
     const struct zcl_ontology_manifest_inputs_v1 *inputs)
@@ -590,6 +590,13 @@ bool zcl_ontology_manifest_v1_validate(
             ZCL_ONTOLOGY_OBJECT_GAP, NULL, 0, empty_gap_root) ||
         memcmp(manifest->gap_set_root, empty_gap_root, 32) != 0)
         return false;
+    return true;
+}
+
+static bool manifest_logic_object_sets_match(
+    const struct zcl_ontology_manifest_v1 *manifest,
+    const struct zcl_ontology_manifest_inputs_v1 *inputs)
+{
     return manifest_typed_set_matches(
                ZCL_ONTOLOGY_OBJECT_TERM, inputs->terms,
                inputs->term_count, sizeof(*inputs->terms), manifest_term_root,
@@ -609,8 +616,14 @@ bool zcl_ontology_manifest_v1_validate(
                ZCL_ONTOLOGY_OBJECT_RULE, inputs->rules,
                inputs->rule_count, sizeof(*inputs->rules),
                manifest_rule_root, manifest->rule_count,
-               manifest->rule_set_root) &&
-           manifest_typed_set_matches(
+               manifest->rule_set_root);
+}
+
+static bool manifest_grounded_object_sets_match(
+    const struct zcl_ontology_manifest_v1 *manifest,
+    const struct zcl_ontology_manifest_inputs_v1 *inputs)
+{
+    return manifest_typed_set_matches(
                ZCL_ONTOLOGY_OBJECT_CONTEXT, inputs->contexts,
                inputs->context_count, sizeof(*inputs->contexts),
                manifest_context_root, manifest->context_count,
@@ -629,6 +642,17 @@ bool zcl_ontology_manifest_v1_validate(
                ZCL_ONTOLOGY_OBJECT_DOMAIN, inputs->domains,
                inputs->domain_count, sizeof(*inputs->domains),
                manifest_domain_root, manifest->domain_count,
-               manifest->domain_set_root) &&
+               manifest->domain_set_root);
+}
+
+bool zcl_ontology_manifest_v1_validate(
+    const struct zcl_ontology_manifest_v1 *manifest,
+    const struct zcl_source_universe_v1 *universe,
+    const struct zcl_ontology_manifest_inputs_v1 *inputs)
+{
+    if (!manifest_universe_binding_valid(manifest, universe, inputs))
+        return false;
+    return manifest_logic_object_sets_match(manifest, inputs) &&
+           manifest_grounded_object_sets_match(manifest, inputs) &&
            manifest_references_valid(manifest, universe, inputs);
 }

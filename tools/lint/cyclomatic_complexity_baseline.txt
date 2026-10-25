@@ -31,7 +31,6 @@ cognition/modules/codeindex/src/codeindex_search.c:codeindex_search_story:28
 cognition/modules/ontology/src/ontology.c:contexts_bound:17
 cognition/modules/ontology/src/ontology.c:zcl_ontology_evaluate_atom_v1:43
 cognition/modules/ontology/src/ontology.c:zcl_ontology_predicate_v1_root:18
-cognition/modules/ontology/src/ontology_manifest.c:zcl_ontology_manifest_v1_validate:17
 cognition/modules/science/src/ecosystem.c:science_ecosystem_collect:19
 cognition/modules/science/src/science_corpus.c:walk_dir:20
 cognition/modules/session/src/agent_broker.c:agent_broker_handle:27
