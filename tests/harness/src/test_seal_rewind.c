@@ -165,6 +165,166 @@ static void sw_fold(sqlite3 *db, int last, const int *grids, int ngrids)
     }
 }
 
+static int sw_test_select_nearest_base(const int *grids, int ngrids)
+{
+    /* ── (A) NEAREST-BASE SELECTION ─────────────────────────────────────── */
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "select");
+    SW_CHECK("select: store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    sw_setup_schema(db);
+    sw_fold(db, 24, grids, ngrids);
+
+    struct seal_record base;
+    bool found = false;
+    SW_CHECK("select: H=17 finds base G=15",
+             seal_kv_nearest_rewind_base(db, 17, &base, &found) &&
+             found && base.height == 15);
+    SW_CHECK("select: H=20 finds base G=20 (exact)",
+             seal_kv_nearest_rewind_base(db, 20, &base, &found) &&
+             found && base.height == 20);
+    SW_CHECK("select: H=1000 finds highest G=20",
+             seal_kv_nearest_rewind_base(db, 1000, &base, &found) &&
+             found && base.height == 20);
+    SW_CHECK("select: H=10 finds exact G=10",
+             seal_kv_nearest_rewind_base(db, 10, &base, &found) &&
+             found && base.height == 10);
+    SW_CHECK("select: H=4 (below all seals) → none",
+             seal_kv_nearest_rewind_base(db, 4, &base, &found) && !found);
+
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int sw_test_refold_to_seal(const int *grids, int ngrids)
+{
+    /* ── (B) SELF-VERIFIED RE-FOLD ──────────────────────────────────────── */
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "rewind");
+    SW_CHECK("rewind: store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    sw_setup_schema(db);
+    sw_fold(db, 24, grids, ngrids);
+
+    /* Pre-state: 25 coins applied, cursor 25. */
+    SW_CHECK("rewind: pre coins count == 25", coins_kv_count(db) == 25);
+    SW_CHECK("rewind: pre cursor == 25",
+             stage_cursor_persisted(db, "utxo_apply", "t") == 25);
+
+    struct seal_record base15;
+    bool bf = false;
+    seal_kv_nearest_rewind_base(db, 17, &base15, &bf);
+
+    struct seal_rewind_result rr;
+    bool ok = seal_rewind_to_nearest(db, 17, /*floor=*/0, &rr);
+    SW_CHECK("rewind: call returns true", ok);
+    SW_CHECK("rewind: rewound == true", rr.rewound);
+    SW_CHECK("rewind: refusal == OK", rr.refusal == SEAL_REWIND_OK);
+    SW_CHECK("rewind: seal_height == 15", rr.seal_height == 15);
+    SW_CHECK("rewind: cursor_before == 25", rr.cursor_before == 25);
+    SW_CHECK("rewind: unwound 10 heights [15,24]", rr.unwound_heights == 10);
+    SW_CHECK("rewind: coins_verified", rr.coins_verified);
+
+    /* Post-state: exactly the coins set the seal at 15 committed to. */
+    SW_CHECK("rewind: post coins count == 15", coins_kv_count(db) == 15);
+    SW_CHECK("rewind: post utxo_apply cursor == 15",
+             stage_cursor_persisted(db, "utxo_apply", "t") == 15);
+    SW_CHECK("rewind: post tip_finalize cursor == 15",
+             stage_cursor_persisted(db, "tip_finalize", "t") == 15);
+    int32_t applied = -1; bool af = false;
+    coins_kv_get_applied_height(db, &applied, &af);
+    SW_CHECK("rewind: post coins_applied_height == 15", af && applied == 15);
+
+    uint8_t now[32];
+    SW_CHECK("rewind: recomputed commitment == seal_15.coins_sha3",
+             coins_kv_commitment(db, now) == 0 && bf &&
+             memcmp(now, base15.coins_sha3, 32) == 0);
+
+    /* Idempotent-ish: a second rewind to 17 now no-ops (seal 15 is at the
+     * frontier, nothing above it to unwind). */
+    struct seal_rewind_result rr2;
+    seal_rewind_to_nearest(db, 17, 0, &rr2);
+    SW_CHECK("rewind: second call refuses ABOVE_FRONTIER",
+             !rr2.rewound && rr2.refusal == SEAL_REWIND_ABOVE_FRONTIER);
+
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int sw_test_refuse_torn_seal(const int *grids, int ngrids)
+{
+    /* ── (C) TORN-SEAL REFUSAL (state unchanged) ────────────────────────── */
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "torn");
+    SW_CHECK("torn: store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    sw_setup_schema(db);
+    sw_fold(db, 24, grids, ngrids);
+    /* A self-valid seal at 22 that LIES about its coins_sha3. */
+    sw_seal_torn_at(db, 22);
+
+    struct seal_record picked;
+    bool pf = false;
+    SW_CHECK("torn: nearest base for H=23 is the torn seal G=22",
+             seal_kv_nearest_rewind_base(db, 23, &picked, &pf) &&
+             pf && picked.height == 22);
+
+    uint8_t before[32];
+    coins_kv_commitment(db, before);
+    int64_t count_before = coins_kv_count(db);
+
+    struct seal_rewind_result rr;
+    bool ok = seal_rewind_to_nearest(db, 23, /*floor=*/0, &rr);
+    SW_CHECK("torn: call returns true", ok);
+    SW_CHECK("torn: rewound == false", !rr.rewound);
+    SW_CHECK("torn: refusal == COMMITMENT_MISMATCH",
+             rr.refusal == SEAL_REWIND_COMMITMENT_MISMATCH);
+    SW_CHECK("torn: coins_verified == false", !rr.coins_verified);
+
+    /* The reducer must be byte-for-byte as it was — the failed unwind rolled
+     * back atomically. */
+    uint8_t after[32];
+    coins_kv_commitment(db, after);
+    SW_CHECK("torn: coins count unchanged", coins_kv_count(db) == count_before);
+    SW_CHECK("torn: coins commitment unchanged",
+             memcmp(before, after, 32) == 0);
+    SW_CHECK("torn: cursor unchanged (== 25)",
+             stage_cursor_persisted(db, "utxo_apply", "t") == 25);
+
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int sw_test_refuse_below_floor(const int *grids, int ngrids)
+{
+    /* ── (D) FINALITY-FLOOR REFUSAL ─────────────────────────────────────── */
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "floor");
+    SW_CHECK("floor: store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    sw_setup_schema(db);
+    sw_fold(db, 24, grids, ngrids);
+
+    /* Nearest base for H=17 is G=15; a floor of 16 forbids crossing it. */
+    struct seal_rewind_result rr;
+    seal_rewind_to_nearest(db, 17, /*floor=*/16, &rr);
+    SW_CHECK("floor: seal below floor refused BELOW_FLOOR",
+             !rr.rewound && rr.refusal == SEAL_REWIND_BELOW_FLOOR);
+    SW_CHECK("floor: state untouched (cursor == 25)",
+             stage_cursor_persisted(db, "utxo_apply", "t") == 25);
+
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_seal_rewind(void);
 int test_seal_rewind(void)
 {
@@ -172,153 +332,10 @@ int test_seal_rewind(void)
     int failures = 0;
     const int grids[4] = { 5, 10, 15, 20 };
 
-    /* ── (A) NEAREST-BASE SELECTION ─────────────────────────────────────── */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "select");
-        SW_CHECK("select: store opens", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        sw_setup_schema(db);
-        sw_fold(db, 24, grids, 4);
-
-        struct seal_record base;
-        bool found = false;
-        SW_CHECK("select: H=17 finds base G=15",
-                 seal_kv_nearest_rewind_base(db, 17, &base, &found) &&
-                 found && base.height == 15);
-        SW_CHECK("select: H=20 finds base G=20 (exact)",
-                 seal_kv_nearest_rewind_base(db, 20, &base, &found) &&
-                 found && base.height == 20);
-        SW_CHECK("select: H=1000 finds highest G=20",
-                 seal_kv_nearest_rewind_base(db, 1000, &base, &found) &&
-                 found && base.height == 20);
-        SW_CHECK("select: H=10 finds exact G=10",
-                 seal_kv_nearest_rewind_base(db, 10, &base, &found) &&
-                 found && base.height == 10);
-        SW_CHECK("select: H=4 (below all seals) → none",
-                 seal_kv_nearest_rewind_base(db, 4, &base, &found) && !found);
-
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
-
-    /* ── (B) SELF-VERIFIED RE-FOLD ──────────────────────────────────────── */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "rewind");
-        SW_CHECK("rewind: store opens", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        sw_setup_schema(db);
-        sw_fold(db, 24, grids, 4);
-
-        /* Pre-state: 25 coins applied, cursor 25. */
-        SW_CHECK("rewind: pre coins count == 25", coins_kv_count(db) == 25);
-        SW_CHECK("rewind: pre cursor == 25",
-                 stage_cursor_persisted(db, "utxo_apply", "t") == 25);
-
-        struct seal_record base15;
-        bool bf = false;
-        seal_kv_nearest_rewind_base(db, 17, &base15, &bf);
-
-        struct seal_rewind_result rr;
-        bool ok = seal_rewind_to_nearest(db, 17, /*floor=*/0, &rr);
-        SW_CHECK("rewind: call returns true", ok);
-        SW_CHECK("rewind: rewound == true", rr.rewound);
-        SW_CHECK("rewind: refusal == OK", rr.refusal == SEAL_REWIND_OK);
-        SW_CHECK("rewind: seal_height == 15", rr.seal_height == 15);
-        SW_CHECK("rewind: cursor_before == 25", rr.cursor_before == 25);
-        SW_CHECK("rewind: unwound 10 heights [15,24]", rr.unwound_heights == 10);
-        SW_CHECK("rewind: coins_verified", rr.coins_verified);
-
-        /* Post-state: exactly the coins set the seal at 15 committed to. */
-        SW_CHECK("rewind: post coins count == 15", coins_kv_count(db) == 15);
-        SW_CHECK("rewind: post utxo_apply cursor == 15",
-                 stage_cursor_persisted(db, "utxo_apply", "t") == 15);
-        SW_CHECK("rewind: post tip_finalize cursor == 15",
-                 stage_cursor_persisted(db, "tip_finalize", "t") == 15);
-        int32_t applied = -1; bool af = false;
-        coins_kv_get_applied_height(db, &applied, &af);
-        SW_CHECK("rewind: post coins_applied_height == 15", af && applied == 15);
-
-        uint8_t now[32];
-        SW_CHECK("rewind: recomputed commitment == seal_15.coins_sha3",
-                 coins_kv_commitment(db, now) == 0 && bf &&
-                 memcmp(now, base15.coins_sha3, 32) == 0);
-
-        /* Idempotent-ish: a second rewind to 17 now no-ops (seal 15 is at the
-         * frontier, nothing above it to unwind). */
-        struct seal_rewind_result rr2;
-        seal_rewind_to_nearest(db, 17, 0, &rr2);
-        SW_CHECK("rewind: second call refuses ABOVE_FRONTIER",
-                 !rr2.rewound && rr2.refusal == SEAL_REWIND_ABOVE_FRONTIER);
-
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
-
-    /* ── (C) TORN-SEAL REFUSAL (state unchanged) ────────────────────────── */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "torn");
-        SW_CHECK("torn: store opens", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        sw_setup_schema(db);
-        sw_fold(db, 24, grids, 4);
-        /* A self-valid seal at 22 that LIES about its coins_sha3. */
-        sw_seal_torn_at(db, 22);
-
-        struct seal_record picked;
-        bool pf = false;
-        SW_CHECK("torn: nearest base for H=23 is the torn seal G=22",
-                 seal_kv_nearest_rewind_base(db, 23, &picked, &pf) &&
-                 pf && picked.height == 22);
-
-        uint8_t before[32];
-        coins_kv_commitment(db, before);
-        int64_t count_before = coins_kv_count(db);
-
-        struct seal_rewind_result rr;
-        bool ok = seal_rewind_to_nearest(db, 23, /*floor=*/0, &rr);
-        SW_CHECK("torn: call returns true", ok);
-        SW_CHECK("torn: rewound == false", !rr.rewound);
-        SW_CHECK("torn: refusal == COMMITMENT_MISMATCH",
-                 rr.refusal == SEAL_REWIND_COMMITMENT_MISMATCH);
-        SW_CHECK("torn: coins_verified == false", !rr.coins_verified);
-
-        /* The reducer must be byte-for-byte as it was — the failed unwind rolled
-         * back atomically. */
-        uint8_t after[32];
-        coins_kv_commitment(db, after);
-        SW_CHECK("torn: coins count unchanged", coins_kv_count(db) == count_before);
-        SW_CHECK("torn: coins commitment unchanged",
-                 memcmp(before, after, 32) == 0);
-        SW_CHECK("torn: cursor unchanged (== 25)",
-                 stage_cursor_persisted(db, "utxo_apply", "t") == 25);
-
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
-
-    /* ── (D) FINALITY-FLOOR REFUSAL ─────────────────────────────────────── */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "floor");
-        SW_CHECK("floor: store opens", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        sw_setup_schema(db);
-        sw_fold(db, 24, grids, 4);
-
-        /* Nearest base for H=17 is G=15; a floor of 16 forbids crossing it. */
-        struct seal_rewind_result rr;
-        seal_rewind_to_nearest(db, 17, /*floor=*/16, &rr);
-        SW_CHECK("floor: seal below floor refused BELOW_FLOOR",
-                 !rr.rewound && rr.refusal == SEAL_REWIND_BELOW_FLOOR);
-        SW_CHECK("floor: state untouched (cursor == 25)",
-                 stage_cursor_persisted(db, "utxo_apply", "t") == 25);
-
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
+    failures += sw_test_select_nearest_base(grids, 4);
+    failures += sw_test_refold_to_seal(grids, 4);
+    failures += sw_test_refuse_torn_seal(grids, 4);
+    failures += sw_test_refuse_below_floor(grids, 4);
 
     printf("=== seal_rewind tests complete: %d failure(s) ===\n", failures);
     return failures;
