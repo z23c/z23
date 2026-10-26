@@ -123,6 +123,39 @@ static bool authority_coin_frontier_allows(sqlite3 *db, int height,
     return true;
 }
 
+static bool tip_finalize_anchor_authority_args_unusable(sqlite3 *db,
+                                                        stage_t *stage,
+                                                        int height,
+                                                        const uint8_t hash[32])
+{
+    return !db || !stage || height < 0 || !hash;
+}
+
+/* Writes the authority anchor row, anchors the upstream cursors when asked,
+ * and caps *target at the tip_finalize_log frontier. Returns false on any
+ * failure. */
+static bool tip_finalize_anchor_write_row_and_cap_target(
+    sqlite3 *db, int height, const uint8_t hash[32], bool anchor_upstream,
+    const char *reason, uint64_t cursor, int64_t rows, uint64_t *target)
+{
+    if (!ensure_authority_anchor_row(db, height, hash))
+        return false;
+    if (anchor_upstream &&
+        !stage_anchor_upstream_cursors_to(db, *target, STAGE_NAME, reason,
+                                          false /* runtime re-anchor */))
+        return false;
+    /* FIX-3 jump site 2: never advance the finalize cursor past a rowless
+     * height. A healthy restart is unchanged — the scan over
+     * [cursor, height) ends below the just-ensured anchor row at `height`;
+     * a held/rowless span caps the jump so the stage re-finalizes forward
+     * (slower, never wrong). */
+    if (!stage_anchor_cap_target_at_log_frontier(db, "tip_finalize_log",
+                                                 cursor, *target,
+                                                 rows <= 0, target))
+        return false;
+    return true;
+}
+
 bool tip_finalize_anchor_cursor_to_authority(sqlite3 *db, int height,
                                              const uint8_t hash[32],
                                              bool anchor_upstream,
@@ -130,7 +163,7 @@ bool tip_finalize_anchor_cursor_to_authority(sqlite3 *db, int height,
                                              const char *reason)
 {
     stage_t *stage = tip_finalize_stage_handle();
-    if (!db || !stage || height < 0 || !hash)
+    if (tip_finalize_anchor_authority_args_unusable(db, stage, height, hash))
         return true;
 
     /* Fail-loud validation pack, check 3(c): the (height, hash) authority
@@ -175,20 +208,8 @@ bool tip_finalize_anchor_cursor_to_authority(sqlite3 *db, int height,
     int64_t rows = stage_log_row_count(db, STAGE_NAME, "tip_finalize_log");
     if (require_prior_progress && cursor == 0 && rows <= 0)
         return true;
-    if (!ensure_authority_anchor_row(db, height, hash))
-        return false;
-    if (anchor_upstream &&
-        !stage_anchor_upstream_cursors_to(db, target, STAGE_NAME, reason,
-                                          false /* runtime re-anchor */))
-        return false;
-    /* FIX-3 jump site 2: never advance the finalize cursor past a rowless
-     * height. A healthy restart is unchanged — the scan over
-     * [cursor, height) ends below the just-ensured anchor row at `height`;
-     * a held/rowless span caps the jump so the stage re-finalizes forward
-     * (slower, never wrong). */
-    if (!stage_anchor_cap_target_at_log_frontier(db, "tip_finalize_log",
-                                                 cursor, target,
-                                                 rows <= 0, &target))
+    if (!tip_finalize_anchor_write_row_and_cap_target(
+            db, height, hash, anchor_upstream, reason, cursor, rows, &target))
         return false;
     if (cursor >= target)
         return true;
@@ -265,6 +286,34 @@ static bool tip_finalize_seed_cursor_publish(sqlite3 *db, uint64_t cursor,
     return true;
 }
 
+/* Returns true when the trusted-base raise or the paired hash write fails. */
+static bool tip_finalize_seed_trusted_base_write_fails(sqlite3 *db, int height,
+                                                       const uint8_t hash[32])
+{
+    bool trusted_raised = false;
+    return !progress_meta_raise_u64_in_tx(db, REDUCER_TRUSTED_BASE_HEIGHT_KEY,
+                                          (uint64_t)height, &trusted_raised,
+                                          NULL) ||
+           (trusted_raised &&
+            !progress_meta_set_in_tx(db, REDUCER_TRUSTED_BASE_HASH_KEY,
+                                     hash, 32));
+}
+
+static void tip_finalize_seed_read_pre_insert_state(sqlite3 *db,
+                                                    bool trusted_seed,
+                                                    uint64_t *cursor,
+                                                    bool *seed_exempt)
+{
+    /* PRE-INSERT state for the FIX-3 seed-exemption verdict: a trusted
+     * (SHA3-verified snapshot) seed is caller-declared; a fresh datadir is
+     * recognised by the log being empty BEFORE the anchor row below is
+     * written (stage_anchor.h, prong 2). */
+    *cursor = stage_cursor_persisted(db, STAGE_NAME, STAGE_NAME);
+    int64_t pre_insert_rows =
+        stage_log_row_count(db, STAGE_NAME, "tip_finalize_log");
+    *seed_exempt = trusted_seed || pre_insert_rows == 0;
+}
+
 bool tip_finalize_stage_seed_anchor(int height, const uint8_t hash[32],
                                     bool trusted_seed)
 {
@@ -319,13 +368,7 @@ bool tip_finalize_stage_seed_anchor(int height, const uint8_t hash[32],
     }
     (void)prev_trusted_height;
     (void)prev_trusted_found;
-    bool trusted_raised = false;
-    if (!progress_meta_raise_u64_in_tx(db, REDUCER_TRUSTED_BASE_HEIGHT_KEY,
-                                       (uint64_t)height, &trusted_raised,
-                                       NULL) ||
-        (trusted_raised &&
-         !progress_meta_set_in_tx(db, REDUCER_TRUSTED_BASE_HASH_KEY,
-                                  hash, 32))) {
+    if (tip_finalize_seed_trusted_base_write_fails(db, height, hash)) {
         LOG_WARN("tip_finalize",
                  "[tip_finalize] seed trusted-base write failed h=%d",
                  height);
@@ -333,14 +376,10 @@ bool tip_finalize_stage_seed_anchor(int height, const uint8_t hash[32],
         return false;
     }
 
-    /* PRE-INSERT state for the FIX-3 seed-exemption verdict: a trusted
-     * (SHA3-verified snapshot) seed is caller-declared; a fresh datadir is
-     * recognised by the log being empty BEFORE the anchor row below is
-     * written (stage_anchor.h, prong 2). */
-    uint64_t cursor = stage_cursor_persisted(db, STAGE_NAME, STAGE_NAME);
-    int64_t pre_insert_rows =
-        stage_log_row_count(db, STAGE_NAME, "tip_finalize_log");
-    bool seed_exempt = trusted_seed || pre_insert_rows == 0;
+    uint64_t cursor = 0;
+    bool seed_exempt = false;
+    tip_finalize_seed_read_pre_insert_state(db, trusted_seed, &cursor,
+                                            &seed_exempt);
 
     struct uint256 tip_hash;
     memcpy(tip_hash.data, hash, 32);
