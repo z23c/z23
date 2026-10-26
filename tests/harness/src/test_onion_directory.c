@@ -117,6 +117,90 @@ static int od_freshness_rule(void)
 
 /* ── 2. Parsing the onion half of a /directory.json ───────────────── */
 
+static int od_parse_relay_hints_nulls(void)
+{
+    int failures = 0;
+    struct onion_relay_hint hints[16];
+    int n;
+
+    /* Unknown port or height is JSON null (net/onion_service.h); the key
+     * stays in place and this parser reads it as 0 = UNKNOWN and stores
+     * nothing. The clearnet_ip -> clearnet_port adjacency connman's string
+     * scan depends on is asserted below. */
+    static const char NULLS[] =
+        "{\"nodes\":["
+        "{\"onion\":\"" OD_HOST_A "\",\"name\":\"\",\"apps\":[\"blog\"],"
+        "\"port\":null,\"services\":0,"
+        "\"height\":null,\"last_seen\":1799999000,\"version\":\"relay\","
+        "\"self\":false,\"clearnet_ip\":\"\",\"clearnet_port\":0},"
+        "{\"onion\":\"" OD_HOST_B "\",\"name\":\"\",\"apps\":[],"
+        "\"port\":39150,\"services\":0,"
+        "\"height\":7,\"last_seen\":1799998000,\"version\":\"relay\","
+        "\"self\":false,\"clearnet_ip\":\"\",\"clearnet_port\":0}"
+        "],\"count\":2}";
+    memset(hints, 0, sizeof(hints));
+    n = onion_directory_parse_relay_hints(NULLS, NULL, hints, 16);
+    OD_CHECK("a null port/height does not truncate the scan",
+             n == 2 && strcmp(hints[0].hostname, OD_HOST_A) == 0 &&
+             strcmp(hints[1].hostname, OD_HOST_B) == 0);
+    OD_CHECK("a null port reads back as UNKNOWN, never as a number",
+             n == 2 && hints[0].port == 0);
+    OD_CHECK("a null height reads back as UNKNOWN",
+             n == 2 && hints[0].height == 0);
+    OD_CHECK("a null neighbour does not bleed into the next object",
+             n == 2 && hints[1].port == 39150 && hints[1].height == 7);
+    OD_CHECK("everything else on a null-carrying row still parses",
+             n == 2 && hints[0].last_seen == 1799999000 &&
+             strcmp(hints[0].apps, "blog") == 0);
+
+    return failures;
+}
+
+static int od_parse_relay_hints_apps(void)
+{
+    int failures = 0;
+    struct onion_relay_hint hints[16];
+    int n;
+
+    /* Junk app ids are dropped, never fatal — the hostname and the honest
+     * ids around the junk survive, exactly the hostname scan's posture. */
+    static const char JUNKAPPS[] =
+        "{\"nodes\":["
+        "{\"onion\":\"" OD_HOST_A "\",\"apps\":[\"yardsale\",\"Yardsale\","
+        "\"yard sale\",\"\",\"blog\",\"yardsale\"],\"port\":8033},"
+        "{\"onion\":\"" OD_HOST_B "\",\"apps\":\"not-an-array\",\"port\":9033}"
+        "]}";
+    memset(hints, 0, sizeof(hints));
+    n = onion_directory_parse_relay_hints(JUNKAPPS, NULL, hints, 16);
+    OD_CHECK("junk app ids are rejected, the valid ones kept and deduped",
+             n == 2 && strcmp(hints[0].apps, "yardsale,blog") == 0);
+    OD_CHECK("a non-array apps field reads as no advertisement",
+             n == 2 && hints[1].apps[0] == '\0');
+
+    /* The cap: more ids than ONION_DIR_APPS_MAX keeps exactly the first
+     * ONION_DIR_APPS_MAX valid ones. */
+    static const char OVERCAP[] =
+        "{\"nodes\":[{\"onion\":\"" OD_HOST_A "\",\"apps\":["
+        "\"a1\",\"a2\",\"a3\",\"a4\",\"a5\",\"a6\",\"a7\",\"a8\",\"a9\""
+        "],\"port\":8033}]}";
+    memset(hints, 0, sizeof(hints));
+    n = onion_directory_parse_relay_hints(OVERCAP, NULL, hints, 16);
+    OD_CHECK("the apps list is capped",
+             n == 1 &&
+             strcmp(hints[0].apps, "a1,a2,a3,a4,a5,a6,a7,a8") == 0);
+    /* An over-long id is rejected, not truncated into a valid one. */
+    static const char LONGID[] =
+        "{\"nodes\":[{\"onion\":\"" OD_HOST_A "\",\"apps\":["
+        "\"abcdefghijabcdefghijabcdefghijabcdefghij\",\"ok\""
+        "],\"port\":8033}]}";
+    memset(hints, 0, sizeof(hints));
+    n = onion_directory_parse_relay_hints(LONGID, NULL, hints, 16);
+    OD_CHECK("an over-long app id is rejected, the next one survives",
+             n == 1 && strcmp(hints[0].apps, "ok") == 0);
+
+    return failures;
+}
+
 static int od_parse_relay_hints(void)
 {
     int failures = 0;
@@ -156,72 +240,8 @@ static int od_parse_relay_hints(void)
              n == 2 && strcmp(hints[0].apps, "yardsale,blog") == 0 &&
              hints[1].apps[0] == '\0');
 
-    /* Unknown port or height is JSON null (net/onion_service.h); the key
-     * stays in place and this parser reads it as 0 = UNKNOWN and stores
-     * nothing. The clearnet_ip -> clearnet_port adjacency connman's string
-     * scan depends on is asserted below. */
-    static const char NULLS[] =
-        "{\"nodes\":["
-        "{\"onion\":\"" OD_HOST_A "\",\"name\":\"\",\"apps\":[\"blog\"],"
-        "\"port\":null,\"services\":0,"
-        "\"height\":null,\"last_seen\":1799999000,\"version\":\"relay\","
-        "\"self\":false,\"clearnet_ip\":\"\",\"clearnet_port\":0},"
-        "{\"onion\":\"" OD_HOST_B "\",\"name\":\"\",\"apps\":[],"
-        "\"port\":39150,\"services\":0,"
-        "\"height\":7,\"last_seen\":1799998000,\"version\":\"relay\","
-        "\"self\":false,\"clearnet_ip\":\"\",\"clearnet_port\":0}"
-        "],\"count\":2}";
-    memset(hints, 0, sizeof(hints));
-    n = onion_directory_parse_relay_hints(NULLS, NULL, hints, 16);
-    OD_CHECK("a null port/height does not truncate the scan",
-             n == 2 && strcmp(hints[0].hostname, OD_HOST_A) == 0 &&
-             strcmp(hints[1].hostname, OD_HOST_B) == 0);
-    OD_CHECK("a null port reads back as UNKNOWN, never as a number",
-             n == 2 && hints[0].port == 0);
-    OD_CHECK("a null height reads back as UNKNOWN",
-             n == 2 && hints[0].height == 0);
-    OD_CHECK("a null neighbour does not bleed into the next object",
-             n == 2 && hints[1].port == 39150 && hints[1].height == 7);
-    OD_CHECK("everything else on a null-carrying row still parses",
-             n == 2 && hints[0].last_seen == 1799999000 &&
-             strcmp(hints[0].apps, "blog") == 0);
-
-    /* Junk app ids are dropped, never fatal — the hostname and the honest
-     * ids around the junk survive, exactly the hostname scan's posture. */
-    static const char JUNKAPPS[] =
-        "{\"nodes\":["
-        "{\"onion\":\"" OD_HOST_A "\",\"apps\":[\"yardsale\",\"Yardsale\","
-        "\"yard sale\",\"\",\"blog\",\"yardsale\"],\"port\":8033},"
-        "{\"onion\":\"" OD_HOST_B "\",\"apps\":\"not-an-array\",\"port\":9033}"
-        "]}";
-    memset(hints, 0, sizeof(hints));
-    n = onion_directory_parse_relay_hints(JUNKAPPS, NULL, hints, 16);
-    OD_CHECK("junk app ids are rejected, the valid ones kept and deduped",
-             n == 2 && strcmp(hints[0].apps, "yardsale,blog") == 0);
-    OD_CHECK("a non-array apps field reads as no advertisement",
-             n == 2 && hints[1].apps[0] == '\0');
-
-    /* The cap: more ids than ONION_DIR_APPS_MAX keeps exactly the first
-     * ONION_DIR_APPS_MAX valid ones. */
-    static const char OVERCAP[] =
-        "{\"nodes\":[{\"onion\":\"" OD_HOST_A "\",\"apps\":["
-        "\"a1\",\"a2\",\"a3\",\"a4\",\"a5\",\"a6\",\"a7\",\"a8\",\"a9\""
-        "],\"port\":8033}]}";
-    memset(hints, 0, sizeof(hints));
-    n = onion_directory_parse_relay_hints(OVERCAP, NULL, hints, 16);
-    OD_CHECK("the apps list is capped",
-             n == 1 &&
-             strcmp(hints[0].apps, "a1,a2,a3,a4,a5,a6,a7,a8") == 0);
-    /* An over-long id is rejected, not truncated into a valid one. */
-    static const char LONGID[] =
-        "{\"nodes\":[{\"onion\":\"" OD_HOST_A "\",\"apps\":["
-        "\"abcdefghijabcdefghijabcdefghijabcdefghij\",\"ok\""
-        "],\"port\":8033}]}";
-    memset(hints, 0, sizeof(hints));
-    n = onion_directory_parse_relay_hints(LONGID, NULL, hints, 16);
-    OD_CHECK("an over-long app id is rejected, the next one survives",
-             n == 1 && strcmp(hints[0].apps, "ok") == 0);
-
+    failures += od_parse_relay_hints_nulls();
+    failures += od_parse_relay_hints_apps();
     /* Asking about ourselves must not learn ourselves. */
     memset(hints, 0, sizeof(hints));
     n = onion_directory_parse_relay_hints(BODY, OD_HOST_A, hints, 16);
@@ -501,6 +521,49 @@ static int64_t od_durable_wall_ms(void *self)
     return INT64_C(1700000000000);
 }
 
+static int od_durable_serve(sqlite3 *db, int64_t now)
+{
+    int failures = 0;
+
+    /* ── serve: every row carries its own age ────────────────────── */
+    od_insert_row(db, OD_HOST_C, now - ONION_DIR_EXPIRE_SECS - 60, "discovery");
+    static uint8_t resp[262144];
+    memset(resp, 0, sizeof(resp));
+    size_t rn = onion_service_handle_request("GET", "/directory.json", NULL, 0,
+                                             resp, sizeof(resp));
+    const char *json = (const char *)resp;
+    OD_CHECK("/directory.json still answers", rn > 0 && strstr(json, "200 OK"));
+    OD_CHECK("every served row carries its own age",
+             strstr(json, "\"age_secs\":") != NULL);
+    OD_CHECK("every served row carries a stale flag",
+             strstr(json, "\"stale\":") != NULL);
+    OD_CHECK("every served row says where it came from",
+             strstr(json, "\"source\":") != NULL);
+    OD_CHECK("the response states when it was generated",
+             strstr(json, "\"generated_at\":") != NULL);
+    OD_CHECK("the response states the freshness policy it applied",
+             strstr(json, "\"stale_after_secs\":") != NULL &&
+             strstr(json, "\"expire_after_secs\":") != NULL);
+    OD_CHECK("a row inside the window is served",
+             strstr(json, OD_HOST_A) != NULL);
+    OD_CHECK("an aged-out row is NOT served as if it were current",
+             strstr(json, OD_HOST_C) == NULL);
+    OD_CHECK("the response admits how many rows it withheld",
+             strstr(json, "\"skipped_expired\":1") != NULL);
+    /* Track 2: every row carries its app-service advertisement, right
+     * after "name" and never between clearnet_ip and clearnet_port (the
+     * connman seed-fetch string-scan reads clearnet_port within 50 chars
+     * of clearnet_ip — the adjacency below is the interop pin). */
+    OD_CHECK("a row with an advertisement serves it as a JSON array",
+             strstr(json, "\"apps\":[\"blog\",\"yardsale\"]") != NULL);
+    OD_CHECK("a row with no advertisement serves an empty array",
+             strstr(json, "\"apps\":[]") != NULL);
+    OD_CHECK("the apps key never splits clearnet_ip from clearnet_port",
+             strstr(json, "\"clearnet_ip\":\"1.2.3.4\",\"clearnet_port\":") ||
+             strstr(json, "\"clearnet_ip\":\"\",\"clearnet_port\":"));
+    return failures;
+}
+
 static int od_durable_directory(void)
 {
     int failures = 0;
@@ -666,42 +729,7 @@ static int od_durable_directory(void)
              od_row_int(db, OD_HOST_A, "last_seen") > 0 &&
              od_row_int(db, OD_HOST_B, "last_seen") > 0);
 
-    /* ── serve: every row carries its own age ────────────────────── */
-    od_insert_row(db, OD_HOST_C, now - ONION_DIR_EXPIRE_SECS - 60, "discovery");
-    static uint8_t resp[262144];
-    memset(resp, 0, sizeof(resp));
-    size_t rn = onion_service_handle_request("GET", "/directory.json", NULL, 0,
-                                             resp, sizeof(resp));
-    const char *json = (const char *)resp;
-    OD_CHECK("/directory.json still answers", rn > 0 && strstr(json, "200 OK"));
-    OD_CHECK("every served row carries its own age",
-             strstr(json, "\"age_secs\":") != NULL);
-    OD_CHECK("every served row carries a stale flag",
-             strstr(json, "\"stale\":") != NULL);
-    OD_CHECK("every served row says where it came from",
-             strstr(json, "\"source\":") != NULL);
-    OD_CHECK("the response states when it was generated",
-             strstr(json, "\"generated_at\":") != NULL);
-    OD_CHECK("the response states the freshness policy it applied",
-             strstr(json, "\"stale_after_secs\":") != NULL &&
-             strstr(json, "\"expire_after_secs\":") != NULL);
-    OD_CHECK("a row inside the window is served",
-             strstr(json, OD_HOST_A) != NULL);
-    OD_CHECK("an aged-out row is NOT served as if it were current",
-             strstr(json, OD_HOST_C) == NULL);
-    OD_CHECK("the response admits how many rows it withheld",
-             strstr(json, "\"skipped_expired\":1") != NULL);
-    /* Track 2: every row carries its app-service advertisement, right
-     * after "name" and never between clearnet_ip and clearnet_port (the
-     * connman seed-fetch string-scan reads clearnet_port within 50 chars
-     * of clearnet_ip — the adjacency below is the interop pin). */
-    OD_CHECK("a row with an advertisement serves it as a JSON array",
-             strstr(json, "\"apps\":[\"blog\",\"yardsale\"]") != NULL);
-    OD_CHECK("a row with no advertisement serves an empty array",
-             strstr(json, "\"apps\":[]") != NULL);
-    OD_CHECK("the apps key never splits clearnet_ip from clearnet_port",
-             strstr(json, "\"clearnet_ip\":\"1.2.3.4\",\"clearnet_port\":") ||
-             strstr(json, "\"clearnet_ip\":\"\",\"clearnet_port\":"));
+    failures += od_durable_serve(db, now);
 
     sqlite3_close(db);
     onion_service_stop();
@@ -1396,6 +1424,144 @@ static int od_test_app_peers(const char *datadir)
 
 /* ── 10. end-to-end through the real request handler ───────────── */
 
+static int od_served_json_fields(const char *js)
+{
+    int failures = 0;
+
+    OD_CHECK("directory.json carries the on-chain name",
+             strstr(js, "\"name\":\"alice\"") != NULL);
+    OD_CHECK("directory.json still carries the raw onion",
+             strstr(js, "\"onion\":\"" HOST_A "\"") != NULL);
+    OD_CHECK("directory.json carries per-row age",
+             strstr(js, "\"age_secs\":") != NULL);
+    /* The contact record: last_success + dial_success_count for contact,
+     * fail_count for failures. */
+    OD_CHECK("directory.json carries the contact record",
+             strstr(js, "\"last_success\":") != NULL &&
+             strstr(js, "\"dial_success_count\":") != NULL &&
+             strstr(js, "\"fail_count\":") != NULL);
+    OD_CHECK("directory.json declares its freshness policy",
+             strstr(js, "\"expire_after_secs\":") != NULL &&
+             strstr(js, "\"stale_after_secs\":") != NULL);
+    /* Track 2: the self row serves its app advertisement (the mounted
+     * app-catalog Apps from the site-route registry). */
+    OD_CHECK("directory.json serves the self row's app advertisement",
+             strstr(js, "\"apps\":[\"blog\",\"yardsale\"]") != NULL);
+
+    /* ── THE TWO FIELDS A STRANGER ACTS ON, end to end ──
+     *
+     * Through the REAL router: the self row reports what the node
+     * measured, and a row it knows nothing about says so. The self row
+     * sorts first (ORDER BY self DESC), so row 0 is ours; bound the self
+     * assertions to that object, since other rows legitimately carry a port
+     * a peer STATED, including 8033. */
+    char selfobj[1400] = "";
+    {
+        const char *o = strchr(js, '{');            /* envelope */
+        o = o ? strchr(o + 1, '{') : NULL;          /* row 0 */
+        const char *e = o ? strchr(o, '}') : NULL;
+        if (o && e) {
+            size_t len = (size_t)(e - o) + 1;
+            if (len < sizeof(selfobj)) {
+                memcpy(selfobj, o, len);
+                selfobj[len] = '\0';
+            }
+        }
+    }
+    OD_CHECK("the self row is the one under assertion",
+             strstr(selfobj, "\"self\":true") != NULL);
+    OD_CHECK("the self row reports the node's REAL connected height",
+             strstr(selfobj, "\"height\":3,") != NULL);
+    OD_CHECK("the self row never re-publishes the literal height 0",
+             strstr(selfobj, "\"height\":0,") == NULL);
+    OD_CHECK("the self row never invents the mainnet default port",
+             strstr(selfobj, "\"port\":8033") == NULL);
+    OD_CHECK("with no installed P2P route the self row says so, in null",
+             strstr(selfobj, "\"port\":null,") != NULL);
+
+    OD_CHECK("no row in the document claims a confident height of zero",
+             strstr(js, "\"height\":0,") == NULL);
+    /* A port a peer actually stated is served as stated. */
+    OD_CHECK("a stated peer port is served verbatim",
+             strstr(js, "\"port\":39150,") != NULL);
+    /* And a height nobody has told us is an honest null, distinguishable
+     * from a real zero by any reader. */
+    OD_CHECK("an unknown peer height is served as null",
+             strstr(js, "\"height\":null,") != NULL);
+    return failures;
+}
+
+static int od_served_json_schema(const char *js)
+{
+    int failures = 0;
+
+    /* THE SCHEMA HELD, for all three classes of consumer in the tree.
+     *
+     * 1. connman's clearnet STRING SCAN (try_onion_seed_fetch_depth) reads
+     *    clearnet_port within 50 chars of clearnet_ip; clearnet_port stays
+     *    a number. */
+    {
+        const char *cip = strstr(js, "\"clearnet_ip\":");
+        const char *cpt = cip ? strstr(cip, "\"clearnet_port\":") : NULL;
+        OD_CHECK("clearnet_ip is still immediately followed by clearnet_port",
+                 cip && cpt && (size_t)(cpt - cip) < 50);
+        OD_CHECK("clearnet_port is still a number, not a null",
+                 cpt && strncmp(cpt, "\"clearnet_port\":null", 20) != 0);
+    }
+    /* 2. The relay-hint scanner reads the document we just served and gets
+     *    UNKNOWN back for the nulls — an absence relayed onward stays an
+     *    absence instead of being re-minted as a fact at every hop. */
+    {
+        struct onion_relay_hint back[16];
+        memset(back, 0, sizeof(back));
+        int nb = onion_directory_parse_relay_hints(js, NULL, back, 16);
+        bool null_row_read_unknown = false, stated_row_kept = false;
+        for (int i = 0; i < nb; i++) {
+            if (strcmp(back[i].hostname, PH_HOST_UNKNOWN) == 0)
+                null_row_read_unknown =
+                    (back[i].port == 0 && back[i].height == 0);
+            if (strcmp(back[i].hostname, PH_HOST_STATED) == 0)
+                stated_row_kept = (back[i].port == 39150);
+        }
+        OD_CHECK("our own learner reads the served document back",
+                 nb > 0);
+        OD_CHECK("a null we published reads back as UNKNOWN, not a default",
+                 null_row_read_unknown);
+        OD_CHECK("a stated port we published survives the round trip",
+                 stated_row_kept);
+    }
+    return failures;
+}
+
+static int od_served_json_strict(const char *js)
+{
+    int failures = 0;
+
+    /* 3. The STRICT JSON parser (platform/modules/json), which rom_fetch_parse_directory
+     *    runs over this whole document to reach its "artifacts" array.
+     *    Emitting null rather than omitting the key keeps that parse valid
+     *    AND keeps the field readable as an explicit unknown. */
+    {
+        const char *body = strstr(js, "\r\n\r\n");
+        body = body ? body + 4 : NULL;
+        struct json_value root;
+        json_init(&root);
+        bool parsed = body && json_read(&root, body, strlen(body));
+        OD_CHECK("the strict JSON parser accepts the served document",
+                 parsed);
+        const struct json_value *nodes = json_get(&root, "nodes");
+        const struct json_value *row0 =
+            (nodes && nodes->num_children > 0) ? &nodes->children[0] : NULL;
+        OD_CHECK("the strict parser sees an unknown port as an explicit null",
+                 row0 && json_is_null(json_get(row0, "port")));
+        OD_CHECK("the key is PRESENT, not omitted — the shape is unchanged",
+                 row0 && json_get(row0, "port") != NULL &&
+                 json_get(row0, "height") != NULL);
+        json_free(&root);
+    }
+    return failures;
+}
+
 static int od_test_served_pages(const char *datadir)
 {
     int failures = 0;
@@ -1504,123 +1670,9 @@ static int od_test_served_pages(const char *datadir)
     resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = 0;
     const char *js = (const char *)resp;
     OD_CHECK("directory.json served", n > 0);
-    OD_CHECK("directory.json carries the on-chain name",
-             strstr(js, "\"name\":\"alice\"") != NULL);
-    OD_CHECK("directory.json still carries the raw onion",
-             strstr(js, "\"onion\":\"" HOST_A "\"") != NULL);
-    OD_CHECK("directory.json carries per-row age",
-             strstr(js, "\"age_secs\":") != NULL);
-    /* The contact record: last_success + dial_success_count for contact,
-     * fail_count for failures. */
-    OD_CHECK("directory.json carries the contact record",
-             strstr(js, "\"last_success\":") != NULL &&
-             strstr(js, "\"dial_success_count\":") != NULL &&
-             strstr(js, "\"fail_count\":") != NULL);
-    OD_CHECK("directory.json declares its freshness policy",
-             strstr(js, "\"expire_after_secs\":") != NULL &&
-             strstr(js, "\"stale_after_secs\":") != NULL);
-    /* Track 2: the self row serves its app advertisement (the mounted
-     * app-catalog Apps from the site-route registry). */
-    OD_CHECK("directory.json serves the self row's app advertisement",
-             strstr(js, "\"apps\":[\"blog\",\"yardsale\"]") != NULL);
-
-    /* ── THE TWO FIELDS A STRANGER ACTS ON, end to end ──
-     *
-     * Through the REAL router: the self row reports what the node
-     * measured, and a row it knows nothing about says so. The self row
-     * sorts first (ORDER BY self DESC), so row 0 is ours; bound the self
-     * assertions to that object, since other rows legitimately carry a port
-     * a peer STATED, including 8033. */
-    char selfobj[1400] = "";
-    {
-        const char *o = strchr(js, '{');            /* envelope */
-        o = o ? strchr(o + 1, '{') : NULL;          /* row 0 */
-        const char *e = o ? strchr(o, '}') : NULL;
-        if (o && e) {
-            size_t len = (size_t)(e - o) + 1;
-            if (len < sizeof(selfobj)) {
-                memcpy(selfobj, o, len);
-                selfobj[len] = '\0';
-            }
-        }
-    }
-    OD_CHECK("the self row is the one under assertion",
-             strstr(selfobj, "\"self\":true") != NULL);
-    OD_CHECK("the self row reports the node's REAL connected height",
-             strstr(selfobj, "\"height\":3,") != NULL);
-    OD_CHECK("the self row never re-publishes the literal height 0",
-             strstr(selfobj, "\"height\":0,") == NULL);
-    OD_CHECK("the self row never invents the mainnet default port",
-             strstr(selfobj, "\"port\":8033") == NULL);
-    OD_CHECK("with no installed P2P route the self row says so, in null",
-             strstr(selfobj, "\"port\":null,") != NULL);
-
-    OD_CHECK("no row in the document claims a confident height of zero",
-             strstr(js, "\"height\":0,") == NULL);
-    /* A port a peer actually stated is served as stated. */
-    OD_CHECK("a stated peer port is served verbatim",
-             strstr(js, "\"port\":39150,") != NULL);
-    /* And a height nobody has told us is an honest null, distinguishable
-     * from a real zero by any reader. */
-    OD_CHECK("an unknown peer height is served as null",
-             strstr(js, "\"height\":null,") != NULL);
-    /* THE SCHEMA HELD, for all three classes of consumer in the tree.
-     *
-     * 1. connman's clearnet STRING SCAN (try_onion_seed_fetch_depth) reads
-     *    clearnet_port within 50 chars of clearnet_ip; clearnet_port stays
-     *    a number. */
-    {
-        const char *cip = strstr(js, "\"clearnet_ip\":");
-        const char *cpt = cip ? strstr(cip, "\"clearnet_port\":") : NULL;
-        OD_CHECK("clearnet_ip is still immediately followed by clearnet_port",
-                 cip && cpt && (size_t)(cpt - cip) < 50);
-        OD_CHECK("clearnet_port is still a number, not a null",
-                 cpt && strncmp(cpt, "\"clearnet_port\":null", 20) != 0);
-    }
-    /* 2. The relay-hint scanner reads the document we just served and gets
-     *    UNKNOWN back for the nulls — an absence relayed onward stays an
-     *    absence instead of being re-minted as a fact at every hop. */
-    {
-        struct onion_relay_hint back[16];
-        memset(back, 0, sizeof(back));
-        int nb = onion_directory_parse_relay_hints(js, NULL, back, 16);
-        bool null_row_read_unknown = false, stated_row_kept = false;
-        for (int i = 0; i < nb; i++) {
-            if (strcmp(back[i].hostname, PH_HOST_UNKNOWN) == 0)
-                null_row_read_unknown =
-                    (back[i].port == 0 && back[i].height == 0);
-            if (strcmp(back[i].hostname, PH_HOST_STATED) == 0)
-                stated_row_kept = (back[i].port == 39150);
-        }
-        OD_CHECK("our own learner reads the served document back",
-                 nb > 0);
-        OD_CHECK("a null we published reads back as UNKNOWN, not a default",
-                 null_row_read_unknown);
-        OD_CHECK("a stated port we published survives the round trip",
-                 stated_row_kept);
-    }
-    /* 3. The STRICT JSON parser (platform/modules/json), which rom_fetch_parse_directory
-     *    runs over this whole document to reach its "artifacts" array.
-     *    Emitting null rather than omitting the key keeps that parse valid
-     *    AND keeps the field readable as an explicit unknown. */
-    {
-        const char *body = strstr(js, "\r\n\r\n");
-        body = body ? body + 4 : NULL;
-        struct json_value root;
-        json_init(&root);
-        bool parsed = body && json_read(&root, body, strlen(body));
-        OD_CHECK("the strict JSON parser accepts the served document",
-                 parsed);
-        const struct json_value *nodes = json_get(&root, "nodes");
-        const struct json_value *row0 =
-            (nodes && nodes->num_children > 0) ? &nodes->children[0] : NULL;
-        OD_CHECK("the strict parser sees an unknown port as an explicit null",
-                 row0 && json_is_null(json_get(row0, "port")));
-        OD_CHECK("the key is PRESENT, not omitted — the shape is unchanged",
-                 row0 && json_get(row0, "port") != NULL &&
-                 json_get(row0, "height") != NULL);
-        json_free(&root);
-    }
+    failures += od_served_json_fields(js);
+    failures += od_served_json_schema(js);
+    failures += od_served_json_strict(js);
 
     /* DIRECTORY HTML — name as the heading, address still rendered. */
     onion_ratelimit_test_reset();
@@ -1650,6 +1702,31 @@ static int od_test_served_pages(const char *datadir)
     struct onion_directory_refresh_stats st;
     OD_CHECK("a refresh with no published datadir fails, never silently ok",
              !onion_service_directory_refresh(&st));
+    return failures;
+}
+
+static int od_test_response_tiny_buffers(void)
+{
+    int failures = 0;
+
+    /* A deliberately tiny buffer: the render wants orders of magnitude
+     * more room, so only the clamp keeps the report inside it. */
+    static uint8_t tiny[256];
+    memset(tiny, 0, sizeof(tiny));
+    onion_ratelimit_test_reset();
+    size_t tn = onion_service_handle_request("GET", "/directory.json", NULL, 0,
+                                             tiny, sizeof(tiny));
+    OD_CHECK("a 256-byte buffer is never reported as overfilled (json)",
+             tn > 0 && tn < sizeof(tiny));
+    OD_CHECK("the truncated response stays NUL-terminated in bounds",
+             memchr(tiny, 0, sizeof(tiny)) != NULL);
+
+    memset(tiny, 0, sizeof(tiny));
+    onion_ratelimit_test_reset();
+    tn = onion_service_handle_request("GET", "/", NULL, 0,
+                                      tiny, sizeof(tiny));
+    OD_CHECK("a 256-byte buffer is never reported as overfilled (home)",
+             tn > 0 && tn < sizeof(tiny));
     return failures;
 }
 
@@ -1731,24 +1808,7 @@ static int od_test_response_bounds(const char *datadir)
         }
     }
 
-    /* A deliberately tiny buffer: the render wants orders of magnitude
-     * more room, so only the clamp keeps the report inside it. */
-    static uint8_t tiny[256];
-    memset(tiny, 0, sizeof(tiny));
-    onion_ratelimit_test_reset();
-    size_t tn = onion_service_handle_request("GET", "/directory.json", NULL, 0,
-                                             tiny, sizeof(tiny));
-    OD_CHECK("a 256-byte buffer is never reported as overfilled (json)",
-             tn > 0 && tn < sizeof(tiny));
-    OD_CHECK("the truncated response stays NUL-terminated in bounds",
-             memchr(tiny, 0, sizeof(tiny)) != NULL);
-
-    memset(tiny, 0, sizeof(tiny));
-    onion_ratelimit_test_reset();
-    tn = onion_service_handle_request("GET", "/", NULL, 0,
-                                      tiny, sizeof(tiny));
-    OD_CHECK("a 256-byte buffer is never reported as overfilled (home)",
-             tn > 0 && tn < sizeof(tiny));
+    failures += od_test_response_tiny_buffers();
 
     onion_service_stop();
     return failures;

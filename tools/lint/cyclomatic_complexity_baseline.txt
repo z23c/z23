@@ -1216,10 +1216,6 @@ tests/harness/src/test_network_crawler.c:test_network_crawler:46
 tests/harness/src/test_node_health_service.c:test_node_health_service:304
 tests/harness/src/test_nullifier_backfill_service.c:nbf_reader:16
 tests/harness/src/test_nullifier_backfill_service.c:test_nullifier_backfill_service:42
-tests/harness/src/test_onion_directory.c:od_durable_directory:16
-tests/harness/src/test_onion_directory.c:od_parse_relay_hints:26
-tests/harness/src/test_onion_directory.c:od_test_response_bounds:17
-tests/harness/src/test_onion_directory.c:od_test_served_pages:36
 tests/harness/src/test_ontology_horn_evaluator.c:horn_fixture_init:24
 tests/harness/src/test_ontology_horn_evaluator.c:test_ontology_horn_fixed_point:26
 tests/harness/src/test_op_return_index.c:test_backfill_declared_partial_coverage:17
