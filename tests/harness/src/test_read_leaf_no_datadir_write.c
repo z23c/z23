@@ -471,6 +471,41 @@ static bool rlw_set_add(const char *name, int *count)
     return true;
 }
 
+static char rlw_dir_set_kind(mode_t mode)
+{
+    return S_ISDIR(mode) ? 'd'
+         : S_ISREG(mode) ? 'f'
+         : S_ISLNK(mode) ? 'l' : 'o';
+}
+
+static bool rlw_dir_set_walk(const char *base, const char *relative,
+                             int *count);
+
+static bool rlw_dir_set_entry(const char *base, const char *relative,
+                              const char *name, int *count)
+{
+    char child[RLW_SET_NAME_MAX - 3];
+    int n = relative && relative[0]
+                ? snprintf(child, sizeof(child), "%s/%s", relative, name)
+                : snprintf(child, sizeof(child), "%s", name);
+    char path[1200];
+    if (n <= 0 || (size_t)n >= sizeof(child) ||
+        snprintf(path, sizeof(path), "%s/%s", base, child) >=
+            (int)sizeof(path))
+        return false;
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return false;
+    char typed[RLW_SET_NAME_MAX];
+    char kind = rlw_dir_set_kind(st.st_mode);
+    n = snprintf(typed, sizeof(typed), "%c %s", kind, child);
+    if (n <= 0 || (size_t)n >= sizeof(typed) ||
+        !rlw_set_add(typed, count) ||
+        (S_ISDIR(st.st_mode) && !rlw_dir_set_walk(base, child, count)))
+        return false;
+    return true;
+}
+
 static bool rlw_dir_set_walk(const char *base, const char *relative,
                              int *count)
 {
@@ -489,32 +524,7 @@ static bool rlw_dir_set_walk(const char *base, const char *relative,
     while (ok && (e = readdir(d)) != NULL) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
             continue;
-        char child[RLW_SET_NAME_MAX - 3];
-        n = relative && relative[0]
-                ? snprintf(child, sizeof(child), "%s/%s", relative,
-                           e->d_name)
-                : snprintf(child, sizeof(child), "%s", e->d_name);
-        char path[1200];
-        if (n <= 0 || (size_t)n >= sizeof(child) ||
-            snprintf(path, sizeof(path), "%s/%s", base, child) >=
-                (int)sizeof(path)) {
-            ok = false;
-            break;
-        }
-        struct stat st;
-        if (lstat(path, &st) != 0) {
-            ok = false;
-            break;
-        }
-        char typed[RLW_SET_NAME_MAX];
-        char kind = S_ISDIR(st.st_mode) ? 'd'
-                  : S_ISREG(st.st_mode) ? 'f'
-                  : S_ISLNK(st.st_mode) ? 'l' : 'o';
-        n = snprintf(typed, sizeof(typed), "%c %s", kind, child);
-        if (n <= 0 || (size_t)n >= sizeof(typed) ||
-            !rlw_set_add(typed, count) ||
-            (S_ISDIR(st.st_mode) && !rlw_dir_set_walk(base, child, count)))
-            ok = false;
+        ok = rlw_dir_set_entry(base, relative, e->d_name, count);
     }
     closedir(d);
     return ok;
@@ -699,50 +709,66 @@ static bool rlw_seed_node_db(const char *dir, const char *db_path)
  * happen. Honest shapes: refuse with an error code; answer the rest with a
  * section marked "read": false and a reason; or answer "ready": false with
  * a typed blocker. A bare empty answer counts as none of them. */
+static void rlw_invoke_build_input(const struct rlw_leaf *lf,
+                                   const char *datadir,
+                                   struct json_value *input)
+{
+    json_init(input);
+    json_set_object(input);
+    (void)json_push_kv_str(input, "datadir", datadir);
+    if (lf->k1)
+        (void)json_push_kv_str(input, lf->k1,
+            strcmp(lf->v1, RLW_DATADIR_VALUE) == 0 ? datadir : lf->v1);
+    if (lf->k2)
+        (void)json_push_kv_str(input, lf->k2,
+            strcmp(lf->v2, RLW_DATADIR_VALUE) == 0 ? datadir : lf->v2);
+    rlw_add_complex_input(lf, input);
+}
+
+static bool rlw_reply_declares_not_ready(const struct json_value *data)
+{
+    const struct json_value *ready = json_get(data, "ready");
+    const char *blocker = json_get_str(json_get(data, "blocker"));
+    const char *current = json_get_str(json_get(data, "current_state"));
+    const char *next = json_get_str(json_get(data, "next_action"));
+    return ready && ready->type == JSON_BOOL &&
+        !json_get_bool(ready) && blocker && blocker[0] &&
+        strcmp(blocker, "NONE") != 0 && current && current[0] &&
+        next && next[0];
+}
+
+static bool rlw_reply_discloses_unread(const struct json_value *data)
+{
+    bool refused = false;
+    for (size_t i = 0; i < data->num_children && !refused; i++) {
+        const struct json_value *sec = &data->children[i];
+        if (sec->type != JSON_OBJ)
+            continue;
+        const struct json_value *r = json_get(sec, "read");
+        if (r && r->type == JSON_BOOL && !json_get_bool(r) &&
+            json_get(sec, "reason"))
+            refused = true;
+    }
+    return refused;
+}
+
 static bool rlw_invoke_refused(const struct rlw_leaf *lf, const char *datadir,
                                char *code_out, size_t code_size)
 {
     struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
-    (void)json_push_kv_str(&input, "datadir", datadir);
-    if (lf->k1)
-        (void)json_push_kv_str(&input, lf->k1,
-            strcmp(lf->v1, RLW_DATADIR_VALUE) == 0 ? datadir : lf->v1);
-    if (lf->k2)
-        (void)json_push_kv_str(&input, lf->k2,
-            strcmp(lf->v2, RLW_DATADIR_VALUE) == 0 ? datadir : lf->v2);
-    rlw_add_complex_input(lf, &input);
+    rlw_invoke_build_input(lf, datadir, &input);
 
     struct zcl_command_request request = { .input = &input };
     struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.read_leaf_probe.v1");
     lf->fn(&request, &reply);
     bool refused = reply.exit_code != 0 || reply.error.code[0] != '\0';
-    if (!refused && reply.data.type == JSON_OBJ) {
-        const struct json_value *ready = json_get(&reply.data, "ready");
-        const char *blocker = json_get_str(json_get(&reply.data, "blocker"));
-        const char *current = json_get_str(
-            json_get(&reply.data, "current_state"));
-        const char *next = json_get_str(json_get(&reply.data, "next_action"));
-        refused = ready && ready->type == JSON_BOOL &&
-            !json_get_bool(ready) && blocker && blocker[0] &&
-            strcmp(blocker, "NONE") != 0 && current && current[0] &&
-            next && next[0];
-    }
+    if (!refused && reply.data.type == JSON_OBJ)
+        refused = rlw_reply_declares_not_ready(&reply.data);
     /* Degrade-and-disclose: any top-level section with "read": false
      * says in the reply that it did not look. */
-    if (!refused && reply.data.type == JSON_OBJ) {
-        for (size_t i = 0; i < reply.data.num_children && !refused; i++) {
-            const struct json_value *sec = &reply.data.children[i];
-            if (sec->type != JSON_OBJ)
-                continue;
-            const struct json_value *r = json_get(sec, "read");
-            if (r && r->type == JSON_BOOL && !json_get_bool(r) &&
-                json_get(sec, "reason"))
-                refused = true;
-        }
-    }
+    if (!refused && reply.data.type == JSON_OBJ)
+        refused = rlw_reply_discloses_unread(&reply.data);
     if (code_out && code_size)
         snprintf(code_out, code_size, "%s",
                  reply.error.code[0]      ? reply.error.code
@@ -1391,6 +1417,53 @@ static int t_wal_datadir_with_live_writer(void)
  * The handle is queried after it is returned, so "no wal-index means no
  * writer" must hold for the handle's whole life. The handle may report the
  * fresh state or refuse; it must never report the stale count as current. */
+static int rlw_wal_race_check_untouched(sqlite3 *ro, const char *count_sql)
+{
+    int failures = 0;
+    sqlite3_stmt *stmt = NULL;
+    int64_t seen = -1;
+    if (sqlite3_prepare_v2(ro, count_sql, -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW)
+        seen = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    RLW_CHECK("walrace: the untouched snapshot answers its 2 seeded rows",
+              seen == 2);
+    return failures;
+}
+
+static int rlw_wal_race_check_fresh(sqlite3 *ro, const char *db_path,
+                                    const char *count_sql)
+{
+    int failures = 0;
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(ro, count_sql, -1, &stmt, NULL);
+    int64_t answered = -1;
+    int step_rc = SQLITE_OK;
+    if (rc == SQLITE_OK) {
+        step_rc = sqlite3_step(stmt);
+        if (step_rc == SQLITE_ROW)
+            answered = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+
+    bool refused = rc != SQLITE_OK || step_rc == SQLITE_INTERRUPT ||
+                   (step_rc != SQLITE_ROW && step_rc != SQLITE_DONE);
+    bool fresh = answered == 3;
+    if (!refused && !fresh)
+        printf("    read-only handle answered %lld (prepare rc=%d, step "
+               "rc=%d) where the committed truth is 3\n",
+               (long long)answered, rc, step_rc);
+    RLW_CHECK("walrace: the handle reports the fresh state or refuses — "
+              "never the pre-commit count",
+              refused || fresh);
+    /* The fresh truth really is 3, so a refusal above was a refusal to
+     * report 2. A plain READONLY open is safe now: the writer's
+     * wal-index is already on disk. */
+    RLW_CHECK("walrace: the committed truth on disk is 3 rows",
+              rlw_scalar(db_path, count_sql) == 3);
+    return failures;
+}
+
 static int t_wal_snapshot_writer_arrives_after_open(void)
 {
     int failures = 0;
@@ -1425,16 +1498,8 @@ static int t_wal_snapshot_writer_arrives_after_open(void)
               rlw_count_entries(dir, "node.db-") == 0);
 
     /* 1b. it answers, and answers correctly, while nothing has changed */
-    if (ro) {
-        sqlite3_stmt *stmt = NULL;
-        int64_t seen = -1;
-        if (sqlite3_prepare_v2(ro, count_sql, -1, &stmt, NULL) == SQLITE_OK &&
-            sqlite3_step(stmt) == SQLITE_ROW)
-            seen = sqlite3_column_int64(stmt, 0);
-        sqlite3_finalize(stmt);
-        RLW_CHECK("walrace: the untouched snapshot answers its 2 seeded rows",
-                  seen == 2);
-    }
+    if (ro)
+        failures += rlw_wal_race_check_untouched(ro, count_sql);
 
     /* 2. Now the writer arrives, commits, and stays attached. A bare
      *    READWRITE connection, not node_db_open(): the boot ceremony
@@ -1456,34 +1521,8 @@ static int t_wal_snapshot_writer_arrives_after_open(void)
 
     /* 3. the query the leaf would have run. Either answer is acceptable;
      *    "2" is not. */
-    if (live_open && ro) {
-        sqlite3_stmt *stmt = NULL;
-        int rc = sqlite3_prepare_v2(ro, count_sql, -1, &stmt, NULL);
-        int64_t answered = -1;
-        int step_rc = SQLITE_OK;
-        if (rc == SQLITE_OK) {
-            step_rc = sqlite3_step(stmt);
-            if (step_rc == SQLITE_ROW)
-                answered = sqlite3_column_int64(stmt, 0);
-        }
-        sqlite3_finalize(stmt);
-
-        bool refused = rc != SQLITE_OK || step_rc == SQLITE_INTERRUPT ||
-                       (step_rc != SQLITE_ROW && step_rc != SQLITE_DONE);
-        bool fresh = answered == 3;
-        if (!refused && !fresh)
-            printf("    read-only handle answered %lld (prepare rc=%d, step "
-                   "rc=%d) where the committed truth is 3\n",
-                   (long long)answered, rc, step_rc);
-        RLW_CHECK("walrace: the handle reports the fresh state or refuses — "
-                  "never the pre-commit count",
-                  refused || fresh);
-        /* The fresh truth really is 3, so a refusal above was a refusal to
-         * report 2. A plain READONLY open is safe now: the writer's
-         * wal-index is already on disk. */
-        RLW_CHECK("walrace: the committed truth on disk is 3 rows",
-                  rlw_scalar(db_path, count_sql) == 3);
-    }
+    if (live_open && ro)
+        failures += rlw_wal_race_check_fresh(ro, db_path, count_sql);
 
     zcl_native_node_db_close_readonly(&ro, &ro_shim);
 
@@ -1544,6 +1583,66 @@ static bool rlw_is_datadir_read_leaf(const struct zcl_command_spec *s)
            rlw_csv_has(s->input_keys, "datadir");
 }
 
+static const struct rlw_leaf *rlw_coverage_find_leaf(const char *path)
+{
+    for (int j = 0; j < RLW_LEAF_COUNT; j++)
+        if (strcmp(g_rlw_leaves[j].path, path) == 0)
+            return &g_rlw_leaves[j];
+    return NULL;
+}
+
+static const struct rlw_uncovered *rlw_coverage_find_uncovered(
+    const char *path)
+{
+    for (int j = 0; j < RLW_UNCOVERED_COUNT; j++)
+        if (strcmp(g_rlw_uncovered[j].path, path) == 0)
+            return &g_rlw_uncovered[j];
+    return NULL;
+}
+
+static int rlw_coverage_check_command(const struct zcl_command_spec *s,
+                                      int *uncovered_seen)
+{
+    int failures = 0;
+    const struct rlw_leaf *exercised = rlw_coverage_find_leaf(s->path);
+    const struct rlw_uncovered *listed =
+        rlw_coverage_find_uncovered(s->path);
+
+    char what[224];
+    if (exercised && listed) {
+        snprintf(what, sizeof(what),
+                 "coverage: %s is exercised AND listed uncovered — pick "
+                 "one", s->path);
+        RLW_CHECK(what, false);
+        return failures;
+    }
+    if (!exercised && !listed) {
+        printf("    [%s] declared READ, takes `datadir`, and is in "
+               "neither g_rlw_leaves nor g_rlw_uncovered\n", s->path);
+        snprintf(what, sizeof(what),
+                 "coverage: %s is accounted for (exercised or listed "
+                 "with a reason)", s->path);
+        RLW_CHECK(what, false);
+        return failures;
+    }
+    if (listed) {
+        (*uncovered_seen)++;
+        /* An entry needs a stated reason. */
+        snprintf(what, sizeof(what),
+                 "coverage: %s is listed uncovered WITH a stated reason",
+                 s->path);
+        RLW_CHECK(what, listed->why != NULL && listed->why[0] != '\0');
+        return failures;
+    }
+    /* Exercised: the pointer this file calls must be the pointer the
+     * registry dispatches, or the case below proves a different leaf. */
+    snprintf(what, sizeof(what),
+             "coverage: %s is exercised through the registry's own "
+             "handler pointer", s->path);
+    RLW_CHECK(what, exercised->fn == s->handler);
+    return failures;
+}
+
 static int t_registry_coverage(void)
 {
     int failures = 0;
@@ -1560,49 +1659,7 @@ static int t_registry_coverage(void)
         if (!rlw_is_datadir_read_leaf(s))
             continue;
         derived++;
-
-        const struct rlw_leaf *exercised = NULL;
-        for (int j = 0; j < RLW_LEAF_COUNT && !exercised; j++)
-            if (strcmp(g_rlw_leaves[j].path, s->path) == 0)
-                exercised = &g_rlw_leaves[j];
-
-        const struct rlw_uncovered *listed = NULL;
-        for (int j = 0; j < RLW_UNCOVERED_COUNT && !listed; j++)
-            if (strcmp(g_rlw_uncovered[j].path, s->path) == 0)
-                listed = &g_rlw_uncovered[j];
-
-        char what[224];
-        if (exercised && listed) {
-            snprintf(what, sizeof(what),
-                     "coverage: %s is exercised AND listed uncovered — pick "
-                     "one", s->path);
-            RLW_CHECK(what, false);
-            continue;
-        }
-        if (!exercised && !listed) {
-            printf("    [%s] declared READ, takes `datadir`, and is in "
-                   "neither g_rlw_leaves nor g_rlw_uncovered\n", s->path);
-            snprintf(what, sizeof(what),
-                     "coverage: %s is accounted for (exercised or listed "
-                     "with a reason)", s->path);
-            RLW_CHECK(what, false);
-            continue;
-        }
-        if (listed) {
-            uncovered_seen++;
-            /* An entry needs a stated reason. */
-            snprintf(what, sizeof(what),
-                     "coverage: %s is listed uncovered WITH a stated reason",
-                     s->path);
-            RLW_CHECK(what, listed->why != NULL && listed->why[0] != '\0');
-            continue;
-        }
-        /* Exercised: the pointer this file calls must be the pointer the
-         * registry dispatches, or the case below proves a different leaf. */
-        snprintf(what, sizeof(what),
-                 "coverage: %s is exercised through the registry's own "
-                 "handler pointer", s->path);
-        RLW_CHECK(what, exercised->fn == s->handler);
+        failures += rlw_coverage_check_command(s, &uncovered_seen);
     }
 
     printf("    derived=%d exercised_table=%d uncovered_table=%d "
