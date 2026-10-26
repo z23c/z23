@@ -54,6 +54,60 @@ static void chain_restore_recompute_active_suffix(struct active_chain *c,
     }
 }
 
+static bool chain_restore_find_wrong_height_parent(
+    struct active_chain *c,
+    int h,
+    struct block_index **parent_out,
+    struct block_index **prev_slot_out)
+{
+    struct block_index *child = active_chain_at(c, h);
+    if (!child || child->nHeight != h)
+        return false;
+
+    struct block_index *parent = child->pprev;
+    if (!parent || parent == child || !parent->phashBlock)
+        return false;
+    if (parent->nStatus & BLOCK_FAILED_MASK)
+        return false;
+
+    struct block_index *prev_slot = active_chain_at(c, h - 1);
+    if (prev_slot && prev_slot != parent)
+        return false;
+    if (prev_slot == parent && parent->nHeight == h - 1)
+        return false;
+
+    *parent_out = parent;
+    *prev_slot_out = prev_slot;
+    return true;
+}
+
+static void chain_restore_relabel_parent_into_active_slot(
+    struct active_chain *c,
+    int h,
+    int tip_h,
+    struct block_index *parent,
+    struct block_index *prev_slot,
+    int *relabeled,
+    int *slotted,
+    int *old_slots_cleared)
+{
+    int old_h = parent->nHeight;
+    if (old_h >= 0 && old_h <= tip_h && old_h != h - 1 &&
+        active_chain_at(c, old_h) == parent) {
+        chain_restore_active_repair_store_slot(c, old_h, NULL);
+        (*old_slots_cleared)++;
+    }
+
+    if (parent->nHeight != h - 1) {
+        parent->nHeight = h - 1;
+        (*relabeled)++;
+    }
+    if (prev_slot != parent) {
+        chain_restore_active_repair_store_slot(c, h - 1, parent);
+        (*slotted)++;
+    }
+}
+
 static int chain_restore_relabel_wrong_height_parents(
     struct active_chain *c,
     int tip_h)
@@ -67,37 +121,17 @@ static int chain_restore_relabel_wrong_height_parents(
     int first_changed = tip_h + 1;
 
     for (int h = tip_h; h > 0; h--) {
-        struct block_index *child = active_chain_at(c, h);
-        if (!child || child->nHeight != h)
+        struct block_index *parent = NULL;
+        struct block_index *prev_slot = NULL;
+        bool found = chain_restore_find_wrong_height_parent(
+            c, h, &parent, &prev_slot);
+        if (!found)
             continue;
 
-        struct block_index *parent = child->pprev;
-        if (!parent || parent == child || !parent->phashBlock)
-            continue;
-        if (parent->nStatus & BLOCK_FAILED_MASK)
-            continue;
+        chain_restore_relabel_parent_into_active_slot(
+            c, h, tip_h, parent, prev_slot,
+            &relabeled, &slotted, &old_slots_cleared);
 
-        struct block_index *prev_slot = active_chain_at(c, h - 1);
-        if (prev_slot && prev_slot != parent)
-            continue;
-        if (prev_slot == parent && parent->nHeight == h - 1)
-            continue;
-
-        int old_h = parent->nHeight;
-        if (old_h >= 0 && old_h <= tip_h && old_h != h - 1 &&
-            active_chain_at(c, old_h) == parent) {
-            chain_restore_active_repair_store_slot(c, old_h, NULL);
-            old_slots_cleared++;
-        }
-
-        if (parent->nHeight != h - 1) {
-            parent->nHeight = h - 1;
-            relabeled++;
-        }
-        if (prev_slot != parent) {
-            chain_restore_active_repair_store_slot(c, h - 1, parent);
-            slotted++;
-        }
         if (h - 1 < first_changed)
             first_changed = h - 1;
     }
@@ -116,6 +150,37 @@ static int chain_restore_relabel_wrong_height_parents(
     return relabeled + slotted + old_slots_cleared;
 }
 
+static bool chain_restore_slot_parent_link_is_stale(
+    struct active_chain *c,
+    int h,
+    struct block_index **child_out,
+    struct block_index **parent_out)
+{
+    struct block_index *child = active_chain_at(c, h);
+    struct block_index *parent = active_chain_at(c, h - 1);
+    if (!child || !parent)
+        return false;
+    if (child == parent)
+        return false;
+    if (child->nHeight != h || parent->nHeight != h - 1)
+        return false;
+    if (child->nStatus & BLOCK_FAILED_MASK)
+        return false;
+    if (parent->nStatus & BLOCK_FAILED_MASK)
+        return false;
+    if (child->pprev == parent)
+        return false;
+
+    /* Same-height disagreements need disk prev-hash evidence. This
+     * projection fallback repairs only detached stale links. */
+    if (child->pprev && child->pprev->nHeight == h - 1)
+        return false;
+
+    *child_out = child;
+    *parent_out = parent;
+    return true;
+}
+
 static int chain_restore_relink_active_slot_parents(
     struct active_chain *c,
     int tip_h)
@@ -127,24 +192,11 @@ static int chain_restore_relink_active_slot_parents(
     int first_changed = tip_h + 1;
 
     for (int h = 1; h <= tip_h; h++) {
-        struct block_index *child = active_chain_at(c, h);
-        struct block_index *parent = active_chain_at(c, h - 1);
-        if (!child || !parent)
-            continue;
-        if (child == parent)
-            continue;
-        if (child->nHeight != h || parent->nHeight != h - 1)
-            continue;
-        if (child->nStatus & BLOCK_FAILED_MASK)
-            continue;
-        if (parent->nStatus & BLOCK_FAILED_MASK)
-            continue;
-        if (child->pprev == parent)
-            continue;
-
-        /* Same-height disagreements need disk prev-hash evidence. This
-         * projection fallback repairs only detached stale links. */
-        if (child->pprev && child->pprev->nHeight == h - 1)
+        struct block_index *child = NULL;
+        struct block_index *parent = NULL;
+        bool stale = chain_restore_slot_parent_link_is_stale(
+            c, h, &child, &parent);
+        if (!stale)
             continue;
 
         child->pprev = parent;
