@@ -89,14 +89,9 @@ static void free_locktime_block(struct block *blk)
     free(blk->vtx);
 }
 
-/* ── tests ───────────────────────────────────────────────── */
-
-int test_bip113_bip65(void)
+static int mtp_calculation_failures(void)
 {
     int failures = 0;
-    printf("\n=== BIP113/BIP65 Time Hardening ===\n");
-
-    /* ── MTP calculation ──────────────────────────────── */
 
     printf("MTP of 11 ascending timestamps is middle value... ");
     {
@@ -138,7 +133,12 @@ int test_bip113_bip65(void)
         else printf("OK\n");
     }
 
-    /* ── is_final_tx ──────────────────────────────────── */
+    return failures;
+}
+
+static int is_final_tx_failures(void)
+{
+    int failures = 0;
 
     printf("GIVEN tx with locktime=0 THEN always final... ");
     {
@@ -224,7 +224,12 @@ int test_bip113_bip65(void)
         else printf("OK\n");
     }
 
-    /* ── Adversarial timestamps ───────────────────────── */
+    return failures;
+}
+
+static int adversarial_timestamp_failures(void)
+{
+    int failures = 0;
 
     printf("ADVERSARIAL: miner advances timestamp but MTP is lower... ");
     {
@@ -268,7 +273,12 @@ int test_bip113_bip65(void)
         else printf("OK\n");
     }
 
-    /* ── contextual_check_block + MTP ─────────────────── */
+    return failures;
+}
+
+static int contextual_check_block_failures(void)
+{
+    int failures = 0;
 
     printf("contextual_check_block uses BLOCK TIME not MTP (final by block time -> accept)... ");
     {
@@ -397,7 +407,12 @@ int test_bip113_bip65(void)
         else printf("OK\n");
     }
 
-    /* ── Block header timestamp vs MTP ─────────────────── */
+    return failures;
+}
+
+static int block_header_time_failures(void)
+{
+    int failures = 0;
 
     printf("contextual_check_block_header rejects timestamp <= MTP... ");
     {
@@ -442,7 +457,12 @@ int test_bip113_bip65(void)
         }
     }
 
-    /* ── BIP65: OP_CHECKLOCKTIMEVERIFY ─────────────────── */
+    return failures;
+}
+
+static int cltv_script_failures(void)
+{
+    int failures = 0;
 
     printf("BIP65: CLTV rejects negative locktime on stack... ");
     {
@@ -582,6 +602,34 @@ int test_bip113_bip65(void)
             printf("FAIL (ok=%d err=%d)\n", ok, err); failures++;
         } else printf("OK\n");
     }
+
+    return failures;
+}
+
+/* ── tests ───────────────────────────────────────────────── */
+
+int test_bip113_bip65(void)
+{
+    int failures = 0;
+    printf("\n=== BIP113/BIP65 Time Hardening ===\n");
+
+    /* ── MTP calculation ──────────────────────────────── */
+    failures += mtp_calculation_failures();
+
+    /* ── is_final_tx ──────────────────────────────────── */
+    failures += is_final_tx_failures();
+
+    /* ── Adversarial timestamps ───────────────────────── */
+    failures += adversarial_timestamp_failures();
+
+    /* ── contextual_check_block + MTP ─────────────────── */
+    failures += contextual_check_block_failures();
+
+    /* ── Block header timestamp vs MTP ─────────────────── */
+    failures += block_header_time_failures();
+
+    /* ── BIP65: OP_CHECKLOCKTIMEVERIFY ─────────────────── */
+    failures += cltv_script_failures();
 
     printf("=== BIP113/BIP65: %d failures ===\n\n", failures);
     return failures;
