@@ -147,8 +147,6 @@ contexts/commons/modules/vcs/src/zcode_shadow_protocol.c:vcs_zcode_shadow_protoc
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:shadow_package_facts:16
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:vcs_zcode_shadow_attribution_plan_cas:31
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:vcs_zcode_shadow_epoch_plan_cas:36
-contexts/commons/modules/vcs/src/zcode_sovereignty_policy.c:vcs_zcode_sovereignty_policy_load:35
-contexts/commons/modules/vcs/src/zcode_sovereignty_policy.c:vcs_zcode_sovereignty_policy_save:22
 contexts/commons/modules/vcs/src/zcode_write_scope.c:vcs_zcode_write_scope_parse:16
 contexts/commons/modules/vcs/src/zendp_swarm.c:zendp_publish_to:17
 contexts/commons/modules/vcs/src/zendp_swarm.c:zendp_result_string:21

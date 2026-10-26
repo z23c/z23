@@ -429,6 +429,44 @@ void vcs_zcode_sovereignty_policy_digest(
                               ? SOVEREIGNTY_POLICY_FLAG_ADVISORY : 0, out);
 }
 
+static void policy_save_encode(
+    const struct vcs_zcode_sovereignty_policy *policy, uint8_t *wire)
+{
+  memcpy(wire, policy_magic, 8);
+  zcl_write_u32_le(wire + 8, SOVEREIGNTY_POLICY_VERSION);
+  zcl_write_u32_le(wire + 12, (uint32_t)policy->count);
+  memcpy(wire + 16, policy->network_genesis, 32);
+  uint32_t flags = policy->advisory_enabled
+                       ? SOVEREIGNTY_POLICY_FLAG_ADVISORY
+                       : 0;
+  zcl_write_u32_le(wire + 48, flags);
+  policy_digest(policy, flags, wire + 52);
+  for (size_t i = 0; i < policy->count; i++)
+    memcpy(wire + SOVEREIGNTY_POLICY_HEADER_BYTES +
+               i * VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES,
+           policy->entries[i].wire, VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES);
+}
+
+static bool policy_save_create_temp(const char *resolved, char *temporary,
+                                    size_t temporary_capacity,
+                                    struct platform_private_file *staged)
+{
+  bool created = false;
+  for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
+    uint64_t sequence = atomic_fetch_add_explicit(
+        &g_policy_temp_sequence, 1, memory_order_relaxed);
+    int n = snprintf(temporary, temporary_capacity, "%s.tmp.%llu.%llu",
+                     resolved, (unsigned long long)os_proc_current_pid(),
+                     (unsigned long long)sequence);
+    if (n <= 0 || (size_t)n >= temporary_capacity)
+      break;
+    created = platform_private_file_create(temporary, staged);
+    if (!created && errno != EEXIST)
+      break;
+  }
+  return created;
+}
+
 enum vcs_zcode_sovereignty_result vcs_zcode_sovereignty_policy_save(
     const struct vcs_zcode_sovereignty_policy *policy, const char *datadir,
     char *error_out, size_t error_capacity)
@@ -447,19 +485,7 @@ enum vcs_zcode_sovereignty_result vcs_zcode_sovereignty_policy_save(
   if (!wire)
     return policy_error(error_out, error_capacity, VCS_ZCODE_SOVEREIGNTY_IO,
                         "sovereignty save allocation failed");
-  memcpy(wire, policy_magic, 8);
-  zcl_write_u32_le(wire + 8, SOVEREIGNTY_POLICY_VERSION);
-  zcl_write_u32_le(wire + 12, (uint32_t)policy->count);
-  memcpy(wire + 16, policy->network_genesis, 32);
-  uint32_t flags = policy->advisory_enabled
-                       ? SOVEREIGNTY_POLICY_FLAG_ADVISORY
-                       : 0;
-  zcl_write_u32_le(wire + 48, flags);
-  policy_digest(policy, flags, wire + 52);
-  for (size_t i = 0; i < policy->count; i++)
-    memcpy(wire + SOVEREIGNTY_POLICY_HEADER_BYTES +
-               i * VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES,
-           policy->entries[i].wire, VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES);
+  policy_save_encode(policy, wire);
   char resolved[1500], parent[1400], temporary[1600];
   if (!platform_private_destination_resolve(
           path, resolved, sizeof(resolved), parent, sizeof(parent))) {
@@ -469,19 +495,8 @@ enum vcs_zcode_sovereignty_result vcs_zcode_sovereignty_policy_save(
   }
   struct platform_private_file staged;
   platform_private_file_init(&staged);
-  bool created = false;
-  for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
-    uint64_t sequence = atomic_fetch_add_explicit(
-        &g_policy_temp_sequence, 1, memory_order_relaxed);
-    int n = snprintf(temporary, sizeof(temporary), "%s.tmp.%llu.%llu",
-                     resolved, (unsigned long long)os_proc_current_pid(),
-                     (unsigned long long)sequence);
-    if (n <= 0 || (size_t)n >= sizeof(temporary))
-      break;
-    created = platform_private_file_create(temporary, &staged);
-    if (!created && errno != EEXIST)
-      break;
-  }
+  bool created = policy_save_create_temp(resolved, temporary,
+                                         sizeof(temporary), &staged);
   bool ok = created &&
             platform_private_file_write_at(&staged, wire, bytes, 0) &&
             platform_private_file_truncate(&staged, bytes) &&
@@ -516,6 +531,71 @@ static bool policy_snapshot_equal(
          a->changed_nanoseconds == b->changed_nanoseconds;
 }
 
+static bool policy_load_open_checked(
+    enum platform_file_metadata_result probe, const char *path,
+    struct platform_positioned_file *file,
+    struct platform_positioned_file_snapshot *before)
+{
+  size_t max_bytes = SOVEREIGNTY_POLICY_HEADER_BYTES +
+                     VCS_ZCODE_SOVEREIGNTY_MAX_RULES *
+                         VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES;
+  return probe == PLATFORM_FILE_METADATA_OK &&
+         platform_positioned_file_open(file, path) &&
+         platform_positioned_file_snapshot(file, before) &&
+         platform_positioned_file_is_private(file) &&
+         before->size >= SOVEREIGNTY_POLICY_HEADER_BYTES &&
+         before->size <= max_bytes;
+}
+
+static bool policy_load_read_unchanged(
+    struct platform_positioned_file *file,
+    const struct platform_positioned_file_snapshot *before,
+    struct platform_positioned_file_snapshot *after, uint8_t *wire,
+    size_t bytes)
+{
+  int64_t got = platform_positioned_file_read(file, wire, bytes, 0);
+  return got == (int64_t)bytes &&
+         platform_positioned_file_snapshot(file, after) &&
+         policy_snapshot_equal(before, after);
+}
+
+static bool policy_load_header_valid(const uint8_t *wire, size_t bytes,
+                                     const uint8_t network_genesis[32],
+                                     uint32_t count, uint32_t flags)
+{
+  return memcmp(wire, policy_magic, 8) == 0 &&
+         zcl_read_u32_le(wire + 8) == SOVEREIGNTY_POLICY_VERSION &&
+         memcmp(wire + 16, network_genesis, 32) == 0 &&
+         count <= VCS_ZCODE_SOVEREIGNTY_MAX_RULES &&
+         (flags & ~SOVEREIGNTY_POLICY_FLAG_ADVISORY) == 0 &&
+         bytes == SOVEREIGNTY_POLICY_HEADER_BYTES +
+                      (size_t)count * VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES;
+}
+
+static bool policy_load_entries(const uint8_t *wire,
+                                struct vcs_zcode_sovereignty_policy *temporary,
+                                uint32_t count, uint32_t flags)
+{
+  bool valid = true;
+  temporary->advisory_enabled =
+      (flags & SOVEREIGNTY_POLICY_FLAG_ADVISORY) != 0;
+  for (uint32_t i = 0; valid && i < count; i++) {
+    const uint8_t *rule_wire =
+        wire + SOVEREIGNTY_POLICY_HEADER_BYTES +
+        (size_t)i * VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES;
+    if (i && memcmp(rule_wire - VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES,
+                    rule_wire, VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES) >= 0)
+      valid = false;
+    struct vcs_zcode_sovereignty_rule rule;
+    if (valid && !rule_decode(rule_wire, &rule))
+      valid = false;
+    if (valid && vcs_zcode_sovereignty_policy_add(temporary, &rule) !=
+                     VCS_ZCODE_SOVEREIGNTY_OK)
+      valid = false;
+  }
+  return valid;
+}
+
 enum vcs_zcode_sovereignty_result vcs_zcode_sovereignty_policy_load(
     struct vcs_zcode_sovereignty_policy *policy, const char *datadir,
     char *error_out, size_t error_capacity)
@@ -536,15 +616,7 @@ enum vcs_zcode_sovereignty_result vcs_zcode_sovereignty_policy_load(
   struct platform_positioned_file file;
   struct platform_positioned_file_snapshot before, after;
   platform_positioned_file_init(&file);
-  size_t max_bytes = SOVEREIGNTY_POLICY_HEADER_BYTES +
-                     VCS_ZCODE_SOVEREIGNTY_MAX_RULES *
-                         VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES;
-  if (probe != PLATFORM_FILE_METADATA_OK ||
-      !platform_positioned_file_open(&file, path) ||
-      !platform_positioned_file_snapshot(&file, &before) ||
-      !platform_positioned_file_is_private(&file) ||
-      before.size < SOVEREIGNTY_POLICY_HEADER_BYTES ||
-      before.size > max_bytes) {
+  if (!policy_load_open_checked(probe, path, &file, &before)) {
     platform_positioned_file_close(&file);
     return policy_error(error_out, error_capacity,
                         VCS_ZCODE_SOVEREIGNTY_CORRUPT,
@@ -557,43 +629,20 @@ enum vcs_zcode_sovereignty_result vcs_zcode_sovereignty_policy_load(
     return policy_error(error_out, error_capacity, VCS_ZCODE_SOVEREIGNTY_IO,
                         "sovereignty load allocation failed");
   }
-  int64_t got = platform_positioned_file_read(&file, wire, bytes, 0);
-  bool valid = got == (int64_t)bytes &&
-               platform_positioned_file_snapshot(&file, &after) &&
-               policy_snapshot_equal(&before, &after);
+  bool valid = policy_load_read_unchanged(&file, &before, &after, wire, bytes);
   platform_positioned_file_close(&file);
   uint32_t count = valid ? zcl_read_u32_le(wire + 12) : 0;
   uint32_t flags = valid ? zcl_read_u32_le(wire + 48) : 0;
-  valid = valid && memcmp(wire, policy_magic, 8) == 0 &&
-          zcl_read_u32_le(wire + 8) == SOVEREIGNTY_POLICY_VERSION &&
-          memcmp(wire + 16, policy->network_genesis, 32) == 0 &&
-          count <= VCS_ZCODE_SOVEREIGNTY_MAX_RULES &&
-          (flags & ~SOVEREIGNTY_POLICY_FLAG_ADVISORY) == 0 &&
-          bytes == SOVEREIGNTY_POLICY_HEADER_BYTES +
-                       (size_t)count * VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES;
+  valid = valid && policy_load_header_valid(wire, bytes,
+                                            policy->network_genesis, count,
+                                            flags);
   struct vcs_zcode_sovereignty_policy *temporary = NULL;
   if (valid) {
     temporary = vcs_zcode_sovereignty_policy_create(policy->network_genesis);
     valid = temporary != NULL;
   }
-  if (valid) {
-    temporary->advisory_enabled =
-        (flags & SOVEREIGNTY_POLICY_FLAG_ADVISORY) != 0;
-    for (uint32_t i = 0; valid && i < count; i++) {
-      const uint8_t *rule_wire =
-          wire + SOVEREIGNTY_POLICY_HEADER_BYTES +
-          (size_t)i * VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES;
-      if (i && memcmp(rule_wire - VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES,
-                      rule_wire, VCS_ZCODE_SOVEREIGNTY_RULE_WIRE_BYTES) >= 0)
-        valid = false;
-      struct vcs_zcode_sovereignty_rule rule;
-      if (valid && !rule_decode(rule_wire, &rule))
-        valid = false;
-      if (valid && vcs_zcode_sovereignty_policy_add(temporary, &rule) !=
-                       VCS_ZCODE_SOVEREIGNTY_OK)
-        valid = false;
-    }
-  }
+  if (valid)
+    valid = policy_load_entries(wire, temporary, count, flags);
   if (valid) {
     uint8_t digest[32];
     policy_digest(temporary, flags, digest);
