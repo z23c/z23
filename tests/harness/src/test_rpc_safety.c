@@ -696,10 +696,12 @@ static int t_listunspent_frees_filtered_rows(void)
     struct main_state ms;
     build_unresolved_tip_state(&ms, 10);
     struct node_db ndb;
-    bool ok = node_db_open(&ndb, ":memory:") && lu_seed_rows(&ndb);
+    char datadir[PATH_MAX];
+    bool ok = test_mkdtemp(datadir, sizeof(datadir), "rpc_safety_lu") &&
+              node_db_open(&ndb, ":memory:") && lu_seed_rows(&ndb);
     struct rpc_table tbl;
     rpc_table_init(&tbl);
-    wallet_rpc_context_set_base(wallet, &ms, "/tmp", NULL, NULL, NULL);
+    wallet_rpc_context_set_base(wallet, &ms, datadir, NULL, NULL, NULL);
     wallet_rpc_context_set_node_db(&ndb);
     wallet_rpc_context_set_coins_tip(NULL);
     register_wallet_rpc_commands(&tbl);
