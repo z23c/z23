@@ -832,6 +832,114 @@ static int test_brief_spaced_value(void)
     return failures;
 }
 
+/* ── unit: lab.run human view ──────────────────────────────────────── */
+
+/* Recorded zcl.lab_run.v1 envelopes (compiler_id and raw_tail trimmed). */
+#define LAB_ENV_HEAD \
+    "{\"schema\":\"zcl.result.v1\",\"command\":\"lab.run\",\"ok\":true," \
+    "\"status\":\"passed\",\"data_schema\":\"zcl.lab_run.v1\",\"data\":{" \
+    "\"root\":\"5e400b25a20170bd7fcd8b41e88f2583a25da49d1f37bf1ae38b7359\"," \
+    "\"kind\":\"run\",\"file\":\"%s\","
+#define LAB_CONF \
+    "\"sanitizer\":{\"enabled\":true,\"status\":\"enabled\",\"findings\":0," \
+    "\"first\":\"\"},\"confinement\":{\"landlock\":true,\"pidns\":true," \
+    "\"seccomp\":true,\"network\":\"denied\",\"filesystem\":" \
+    "\"private workdir\",\"processes\":\"no fork; threads only\"}," \
+    "\"cache\":{\"hit\":false}}}"
+
+static size_t cr_lab_render(const char *body, bool human, char *out,
+                            size_t cap)
+{
+    char doc[4096];
+    snprintf(doc, sizeof(doc), LAB_ENV_HEAD "%s", "x.c", body);
+    struct zcl_cli_render_env e = cr_env(80, false);
+    e.human = human;
+    return zcl_cli_render_doc(doc, strlen(doc), "lab.run", &e, out, cap);
+}
+
+static int test_lab_run_render(void)
+{
+    int failures = 0;
+    char out[4096];
+    TEST("lab.run pass reads as a short plain-words view") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":true,\"wall_us\":260000,\"diagnostics\":[]},"
+            "\"run\":{\"ran\":true,\"exit_code\":0,\"signal\":0,"
+            "\"signal_name\":\"\",\"timed_out\":false,\"wall_us\":19000,"
+            "\"max_rss_kb\":6656,\"stdout\":\"hello, lab\\n\","
+            "\"stdout_truncated\":false,\"stderr\":\"\","
+            "\"stderr_truncated\":false}," LAB_CONF, true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "lab run  x.c") != NULL);
+        ASSERT(strstr(out, "strict C23, sanitizers on (0.26 s)") != NULL);
+        ASSERT(strstr(out, "exit 0 in 19 ms, 6.5 MB peak") != NULL);
+        ASSERT(strstr(out, "no network, private workdir, no fork") != NULL);
+        ASSERT(strstr(out, "output") != NULL && strstr(out, "hello, lab") != NULL);
+        ASSERT(strstr(out, "receipt  5e400b25a201") != NULL);
+        ASSERT(strstr(out, "\"schema\"") == NULL);
+        PASS();
+    }
+    TEST("lab.run compile failure shows diagnostics and did not run") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":false,\"wall_us\":368000,\"diagnostics\":["
+            "{\"line\":1,\"col\":25,\"severity\":\"note\",\"message\":\"a note\"},"
+            "{\"line\":1,\"col\":25,\"severity\":\"error\","
+            "\"message\":\"'undefined_symbol' undeclared\"}]},"
+            "\"run\":{\"ran\":false,\"exit_code\":-1,\"signal\":0,"
+            "\"signal_name\":\"\",\"timed_out\":false,\"wall_us\":0,"
+            "\"max_rss_kb\":0,\"stdout\":\"\",\"stderr\":\"\"},"
+            "\"sanitizer\":{\"enabled\":false,\"findings\":0},"
+            "\"confinement\":{},\"cache\":{\"hit\":false}}}", true, out,
+            sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "failed (0.37 s)") != NULL);
+        ASSERT(strstr(out, "1:25 'undefined_symbol' undeclared") != NULL);
+        ASSERT(strstr(out, "did not run") != NULL);
+        ASSERT(strstr(out, "sandbox") == NULL);
+        ASSERT(strstr(out, "receipt") == NULL);
+        PASS();
+    }
+    TEST("lab.run nonzero exit is stated with stderr, long stdout cut") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":true,\"wall_us\":2000,\"diagnostics\":[]},"
+            "\"run\":{\"ran\":true,\"exit_code\":3,\"signal\":0,"
+            "\"signal_name\":\"\",\"timed_out\":false,\"wall_us\":6788,"
+            "\"max_rss_kb\":6656,\"stdout\":\"a\\nb\\nc\\nd\\ne\\n\","
+            "\"stdout_truncated\":false,\"stderr\":\"oops\\n\","
+            "\"stderr_truncated\":false}," LAB_CONF, true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "exit 3 in 7 ms") != NULL);
+        ASSERT(strstr(out, "stderr") != NULL && strstr(out, "oops") != NULL);
+        ASSERT(strstr(out, "(truncated)") != NULL);
+        ASSERT(strstr(out, "  d\n") == NULL);
+        PASS();
+    }
+    TEST("lab.run signal and sanitizer finding are stated plainly") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":true,\"wall_us\":2000,\"diagnostics\":[]},"
+            "\"run\":{\"ran\":true,\"exit_code\":-1,\"signal\":11,"
+            "\"signal_name\":\"SIGSEGV\",\"timed_out\":false,\"wall_us\":900,"
+            "\"max_rss_kb\":6656,\"stdout\":\"\",\"stderr\":\"\"},"
+            "\"sanitizer\":{\"enabled\":true,\"findings\":1,\"first\":"
+            "\"ub.c:9:7: runtime error: signed integer overflow\\n\"},"
+            "\"confinement\":{\"network\":\"denied\",\"seccomp\":true},"
+            "\"cache\":{\"hit\":true}}}", true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "killed by SIGSEGV after 1 ms") != NULL);
+        ASSERT(strstr(out, "1 sanitizer finding") != NULL);
+        ASSERT(strstr(out, "signed integer overflow") != NULL);
+        ASSERT(strstr(out, "(cached)") != NULL);
+        PASS();
+    }
+    TEST("lab.run non-human mode renders nothing, so JSON stays canonical") {
+        size_t n = cr_lab_render("\"compile\":{\"ok\":true}}}", false, out,
+                                 sizeof(out));
+        ASSERT(n == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── unit: bare-z23 first-steps line ───────────────────────────────── */
 
 static int test_start_hint(void)
@@ -1135,6 +1243,7 @@ int test_cli_render(void)
     failures += test_brief_render();
     failures += test_brief_spaced_value();
     failures += test_start_hint();
+    failures += test_lab_run_render();
 
     const char *stale = NULL;
     if (!cr_bin_fresh(&stale)) {

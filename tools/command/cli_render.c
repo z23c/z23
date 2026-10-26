@@ -997,7 +997,7 @@ static void render_schema_doc(struct buf *b,
     emit_header(b, e, head);
     const char *id = json_get_str(json_get(root, "id"));
     if (id && id[0])
-        emit_kv(b, e, 8, "id", id);
+        emit_kv(b, e, 7, "id", id);
     const char *keys = json_get_str(json_get(root, "allowed_keys"));
     char spaced[384];
     if (keys && keys[0]) {
@@ -1014,7 +1014,7 @@ static void render_schema_doc(struct buf *b,
         spaced[sl] = '\0';
         keys = spaced;
     }
-    emit_kv(b, e, 8, "keys",
+    emit_kv(b, e, 7, "keys",
             (keys && keys[0]) ? keys : "(no arguments)");
 }
 
@@ -1435,6 +1435,194 @@ static void render_data_tree(struct buf *b,
         buf_puts(b, "... (truncated, pipe to JSON for full)\n");
 }
 
+/* ── lab.run: a receipt read like a person ─────────────────────────── */
+
+/* Wall time in plain units: whole ms under 100 ms, else seconds. */
+static void lab_fmt_wall(char *out, size_t cap, int64_t us)
+{
+    if (us < 100000)
+        (void)snprintf(out, cap, "%lld ms", (long long)((us + 500) / 1000));
+    else
+        (void)snprintf(out, cap, "%.2f s", (double)us / 1e6);
+}
+
+static const char *lab_str(const struct json_value *v)
+{
+    const char *s = json_get_str(v);
+    return s ? s : "";
+}
+
+/* Up to LAB_TEXT_LINES lines of a captured stream, control bytes shown as
+ * '?' so program output cannot drive the terminal; says when cut short. */
+enum { LAB_TEXT_LINES = 3, LAB_LINE_MAX = 200 };
+
+static void lab_emit_text(struct buf *b, const struct zcl_cli_render_env *e,
+                          const char *key, const char *text, bool cut)
+{
+    const char *p = text ? text : "";
+    int shown = 0;
+    while (*p && shown < LAB_TEXT_LINES) {
+        char line[LAB_LINE_MAX];
+        size_t n = 0;
+        while (*p && *p != '\n') {
+            unsigned char c = (unsigned char)*p++;
+            if (n + 1 < sizeof(line))
+                line[n++] = (c < 0x20 && c != '\t') || c == 0x7f ? '?' : (char)c;
+        }
+        line[n] = '\0';
+        if (*p == '\n')
+            p++;
+        emit_kv(b, e, 7, shown == 0 ? key : "", line);
+        shown++;
+    }
+    if (*p || cut)
+        emit_kv(b, e, 7, "", "... (truncated)");
+}
+
+/* The first diagnostics of a failed compile, errors before notes. */
+static void lab_emit_diagnostics(struct buf *b,
+                                 const struct zcl_cli_render_env *e,
+                                 const struct json_value *diags)
+{
+    int shown = 0;
+    for (int pass = 0; pass < 2 && diags && diags->type == JSON_ARR; pass++) {
+        for (size_t i = 0; i < diags->num_children && shown < LAB_TEXT_LINES; i++) {
+            const struct json_value *d = &diags->children[i];
+            const char *sev = json_get_str(json_get(d, "severity"));
+            bool is_err = sev && strcmp(sev, "error") == 0;
+            if (is_err != (pass == 0))
+                continue;
+            char line[LAB_LINE_MAX];
+            (void)snprintf(line, sizeof(line), "%lld:%lld %s",
+                           (long long)json_get_int(json_get(d, "line")),
+                           (long long)json_get_int(json_get(d, "col")),
+                           lab_str(json_get(d, "message")));
+            emit_kv(b, e, 7, shown == 0 ? "error" : "", line);
+            shown++;
+        }
+    }
+}
+
+/* The `ran` row: exit, signal or timeout stated plainly. */
+static void lab_emit_ran(struct buf *b, const struct zcl_cli_render_env *e,
+                         const struct json_value *run)
+{
+    char wall[32], line[160];
+    lab_fmt_wall(wall, sizeof(wall), json_get_int(json_get(run, "wall_us")));
+    const char *sig = json_get_str(json_get(run, "signal_name"));
+    if (json_get_bool(json_get(run, "timed_out")))
+        (void)snprintf(line, sizeof(line), "timed out, stopped after %s", wall);
+    else if (sig && sig[0])
+        (void)snprintf(line, sizeof(line), "killed by %s after %s", sig, wall);
+    else
+        (void)snprintf(line, sizeof(line), "exit %lld in %s, %.1f MB peak",
+                       (long long)json_get_int(json_get(run, "exit_code")),
+                       wall,
+                       (double)json_get_int(json_get(run, "max_rss_kb")) / 1024.0);
+    emit_kv(b, e, 7, "ran", line);
+}
+
+/* What the sandbox held, from the confinement words the receipt carries. */
+static void lab_emit_sandbox(struct buf *b, const struct zcl_cli_render_env *e,
+                             const struct json_value *conf)
+{
+    const char *net = json_get_str(json_get(conf, "network"));
+    const char *fs = json_get_str(json_get(conf, "filesystem"));
+    const char *proc = json_get_str(json_get(conf, "processes"));
+    char line[200];
+    (void)snprintf(line, sizeof(line), "%s%s%s%s%s",
+                   net && strcmp(net, "denied") == 0 ? "no network" : "network open",
+                   fs ? ", " : "", fs ? fs : "",
+                   proc && strncmp(proc, "no fork", 7) == 0 ? ", no fork" : "",
+                   json_get_bool(json_get(conf, "seccomp")) ? "" : ", seccomp off");
+    emit_kv(b, e, 7, "sandbox", line);
+}
+
+/* A sanitizer finding is stated plainly with its first quoted line. */
+static void lab_emit_sanitizer(struct buf *b,
+                               const struct zcl_cli_render_env *e,
+                               const struct json_value *san)
+{
+    int64_t n = json_get_int(json_get(san, "findings"));
+    if (n <= 0)
+        return;
+    char count[48];
+    (void)snprintf(count, sizeof(count), "%lld sanitizer finding%s",
+                   (long long)n, n == 1 ? "" : "s");
+    emit_kv(b, e, 7, "caught", count);
+    const char *first = json_get_str(json_get(san, "first"));
+    if (first && first[0]) {
+        lab_emit_text(b, e, "", first, false);
+    }
+}
+
+static void render_lab_run(struct buf *b, const struct zcl_cli_render_env *e,
+                           const struct json_value *root)
+{
+    const struct json_value *data = json_get(root, "data");
+    const struct json_value *comp = json_get(data, "compile");
+    const struct json_value *run = json_get(data, "run");
+    const struct json_value *san = json_get(data, "sanitizer");
+    char head[300], wall[32], line[160];
+    (void)snprintf(head, sizeof(head), "lab run  %s",
+                   lab_str(json_get(data, "file")));
+    emit_header(b, e, head);
+    lab_fmt_wall(wall, sizeof(wall), json_get_int(json_get(comp, "wall_us")));
+    bool built = json_get_bool(json_get(comp, "ok"));
+    (void)snprintf(line, sizeof(line), "%s (%s)",
+                   !built ? "failed"
+                   : json_get_bool(json_get(san, "enabled"))
+                         ? "strict C23, sanitizers on"
+                         : "strict C23, sanitizers off",
+                   wall);
+    emit_kv(b, e, 7, "built", line);
+    if (!built) {
+        lab_emit_diagnostics(b, e, json_get(comp, "diagnostics"));
+        emit_kv(b, e, 7, "ran", "did not run: the program did not compile");
+        return;
+    }
+    lab_emit_ran(b, e, run);
+    lab_emit_sandbox(b, e, json_get(data, "confinement"));
+    lab_emit_sanitizer(b, e, san);
+    const char *out = json_get_str(json_get(run, "stdout"));
+    if (out && out[0])
+        lab_emit_text(b, e, "output", out,
+                      json_get_bool(json_get(run, "stdout_truncated")));
+    const char *err = json_get_str(json_get(run, "stderr"));
+    if (err && err[0])
+        lab_emit_text(b, e, "stderr", err,
+                      json_get_bool(json_get(run, "stderr_truncated")));
+    (void)snprintf(line, sizeof(line), "%.12s%s", lab_str(json_get(data, "root")),
+                   json_get_bool(json_get(json_get(data, "cache"), "hit"))
+                       ? " (cached)" : "");
+    emit_kv(b, e, 7, "receipt", line);
+}
+
+/* Recipe renderers for ok=true envelopes, keyed by command path. */
+typedef void (*recipe_fn)(struct buf *, const struct zcl_cli_render_env *,
+                          const struct json_value *);
+static const struct {
+    const char *command_path;
+    recipe_fn render;
+} recipe_table[] = {
+    { "zcode.node.join", render_zcode_join },
+    { "join", render_zcode_join },
+    { "zcode.package.offered", render_zcode_offered },
+    { "zcode.guide", render_zcode_guide },
+    { "yardsale.guide", render_yardsale_guide },
+    { "core.network.peers.list", render_peer_list },
+    { "lab.run", render_lab_run },
+};
+
+static recipe_fn recipe_for(const char *command_path)
+{
+    for (size_t i = 0; command_path && i < sizeof(recipe_table) /
+                                              sizeof(recipe_table[0]); i++)
+        if (strcmp(command_path, recipe_table[i].command_path) == 0)
+            return recipe_table[i].render;
+    return NULL;
+}
+
 /* ── entry points ──────────────────────────────────────────────────── */
 
 /* code.guide has its own layout; the wiki shapes are recognized by their
@@ -1489,22 +1677,8 @@ size_t zcl_cli_render_doc(const char *doc, size_t doc_len,
             render_error(&b, env, &root);
         else if (render_guide_or_wiki(&b, env, &root, command_path))
             ;
-        else if (command_path &&
-                 (strcmp(command_path, "zcode.node.join") == 0 ||
-                  strcmp(command_path, "join") == 0))
-            render_zcode_join(&b, env, &root);
-        else if (command_path &&
-                 strcmp(command_path, "zcode.package.offered") == 0)
-            render_zcode_offered(&b, env, &root);
-        else if (command_path &&
-                 strcmp(command_path, "zcode.guide") == 0)
-            render_zcode_guide(&b, env, &root);
-        else if (command_path &&
-                 strcmp(command_path, "yardsale.guide") == 0)
-            render_yardsale_guide(&b, env, &root);
-        else if (command_path &&
-                 strcmp(command_path, "core.network.peers.list") == 0)
-            render_peer_list(&b, env, &root);
+        else if (recipe_for(command_path))
+            recipe_for(command_path)(&b, env, &root);
         else if (tree_render_leaf(command_path))
             render_data_tree(&b, env, &root, command_path);
         else
