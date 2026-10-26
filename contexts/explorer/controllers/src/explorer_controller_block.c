@@ -33,6 +33,47 @@
 #include <stdlib.h>
 #include <string.h>
 
+static size_t parse_rpc_tx_rows(const char *txarr, struct explorer_block_rpc_tx_row *rows)
+{
+    size_t nrows = 0;
+    if (txarr) {
+        const char *p = txarr + 6; /* skip "tx":[ */
+        int idx = 0;
+        while (p && idx < 100) {
+            if (*p == '"') {
+                p++;
+                const char *end = strchr(p, '"');
+                if (!end) break;
+                char txid[65];
+                size_t tlen = (size_t)(end - p);
+                if (tlen > 64) tlen = 64;
+                memcpy(txid, p, tlen);
+                txid[tlen] = '\0';
+
+                char short_txid[18];
+                if (tlen >= 64)
+                    snprintf(short_txid, sizeof(short_txid), "%.8s...%.4s", txid, txid + 60);
+                else
+                    /* bounded to fit short_txid[18]; a malformed sub-64 txid
+                     * is displayed truncated rather than tripping fortify */
+                    snprintf(short_txid, sizeof(short_txid), "%.17s", txid);
+
+                rows[nrows].index = idx;
+                snprintf(rows[nrows].txid, sizeof(rows[nrows].txid), "%s", txid);
+                snprintf(rows[nrows].short_txid, sizeof(rows[nrows].short_txid), "%s", short_txid);
+                nrows++;
+                idx++;
+                p = end + 1;
+            } else if (*p == ']') {
+                break;
+            } else {
+                p++;
+            }
+        }
+    }
+    return nrows;
+}
+
 static size_t serve_block_rpc(const char *param, uint8_t *r, size_t max)
 {
     /* Empty param: render the not-found view so callers get a real error
@@ -85,42 +126,7 @@ static size_t serve_block_rpc(const char *param, uint8_t *r, size_t max)
     /* Parse up to 100 txids into the row array; the view applies the
      * same buffer-bound guard when emitting rows. */
     struct explorer_block_rpc_tx_row rows[100];
-    size_t nrows = 0;
-    if (txarr) {
-        const char *p = txarr + 6; /* skip "tx":[ */
-        int idx = 0;
-        while (p && idx < 100) {
-            if (*p == '"') {
-                p++;
-                const char *end = strchr(p, '"');
-                if (!end) break;
-                char txid[65];
-                size_t tlen = (size_t)(end - p);
-                if (tlen > 64) tlen = 64;
-                memcpy(txid, p, tlen);
-                txid[tlen] = '\0';
-
-                char short_txid[18];
-                if (tlen >= 64)
-                    snprintf(short_txid, sizeof(short_txid), "%.8s...%.4s", txid, txid + 60);
-                else
-                    /* bounded to fit short_txid[18]; a malformed sub-64 txid
-                     * is displayed truncated rather than tripping fortify */
-                    snprintf(short_txid, sizeof(short_txid), "%.17s", txid);
-
-                rows[nrows].index = idx;
-                snprintf(rows[nrows].txid, sizeof(rows[nrows].txid), "%s", txid);
-                snprintf(rows[nrows].short_txid, sizeof(rows[nrows].short_txid), "%s", short_txid);
-                nrows++;
-                idx++;
-                p = end + 1;
-            } else if (*p == ']') {
-                break;
-            } else {
-                p++;
-            }
-        }
-    }
+    size_t nrows = parse_rpc_tx_rows(txarr, rows);
     d.rows = rows;
     d.num_rows = nrows;
 
@@ -129,13 +135,9 @@ static size_t serve_block_rpc(const char *param, uint8_t *r, size_t max)
 
 /* ── Block Detail (native) ────────────────────────────────── */
 
-size_t serve_block(const char *param, uint8_t *r, size_t max)
+static const struct block_index *lookup_block_index_for_param(
+    struct explorer_context *ctx, const char *param)
 {
-    struct explorer_context *ctx = explorer_ctx();
-    if (use_rpc_proxy())
-        return serve_block_rpc(param, r, max);
-    if (!ctx->main_state || !param || !param[0]) return 0;
-
     const struct block_index *bi = NULL;
 
     if (zcl_is_all_digits(param)) {
@@ -150,11 +152,105 @@ size_t serve_block(const char *param, uint8_t *r, size_t max)
             &ctx->main_state->map_block_index, &hash);
     }
 
-    if (!bi) {
-        char safe_param[256];
-        html_escape(safe_param, sizeof(safe_param), param ? param : "");
-        return explorer_view_block_not_found(safe_param, r, max);
+    return bi;
+}
+
+static size_t render_block_not_found_page(const char *param, uint8_t *r, size_t max)
+{
+    char safe_param[256];
+    html_escape(safe_param, sizeof(safe_param), param ? param : "");
+    return explorer_view_block_not_found(safe_param, r, max);
+}
+
+static void fill_block_header_fields(struct explorer_block_view_data *d,
+                                     struct block *blk,
+                                     const struct block_index *bi, bool loaded)
+{
+    if (loaded) {
+        uint256_get_hex(&blk->header.hashMerkleRoot, d->merkle);
+        uint256_get_hex(&blk->header.hashFinalSaplingRoot, d->sapling_root);
+        uint256_get_hex(&blk->header.nNonce, d->nonce);
+    } else {
+        struct uint256 bi_merkle = block_index_merkle_root(bi);
+        struct uint256 bi_nonce = block_index_nonce(bi);
+        uint256_get_hex(&bi_merkle, d->merkle);
+        uint256_get_hex(&bi->hashFinalSaplingRoot, d->sapling_root);
+        uint256_get_hex(&bi_nonce, d->nonce);
     }
+}
+
+static size_t pack_block_tx_rows(struct explorer_block_tx_row *rows, struct block *blk)
+{
+    size_t nrows = 0;
+    size_t show_max = blk->num_vtx > 100 ? 100 : blk->num_vtx;
+    for (size_t i = 0; i < show_max; i++) {
+        const struct transaction *tx = &blk->vtx[i];
+        struct explorer_block_tx_row *row = &rows[nrows];
+
+        /* Format the abbreviation from a local copy: row->txid and
+         * row->short_txid live in the same rows[] object, so passing
+         * row->txid as the snprintf source trips -Wrestrict even though
+         * the two fields never overlap. */
+        char txid_hex[65];
+        uint256_get_hex(&tx->hash, txid_hex);
+        memcpy(row->txid, txid_hex, sizeof(row->txid));
+        snprintf(row->short_txid, sizeof(row->short_txid),
+                 "%.8s...%.4s", txid_hex, txid_hex + 60);
+
+        zcl_format_zcl(row->value, sizeof(row->value),
+                       transaction_get_value_out(tx));
+
+        bool is_cb = transaction_is_coinbase(tx);
+        bool has_shielded = (tx->num_shielded_spend > 0 || tx->num_shielded_output > 0 ||
+                             tx->num_joinsplit > 0);
+
+        /* Check for ZSLP */
+        bool is_slp = false;
+        struct slp_message slp;
+        if (tx->num_vout > 0 && tx->vout[0].script_pub_key.size > 0)
+            is_slp = slp_parse(tx->vout[0].script_pub_key.data,
+                               tx->vout[0].script_pub_key.size, &slp);
+
+        row->type_tags[0] = '\0';
+        if (is_cb) snprintf(row->type_tags, sizeof(row->type_tags),
+                            "<span class='tag tag-cb'>Coinbase</span> ");
+        if (has_shielded) {
+            size_t tl = strlen(row->type_tags);
+            snprintf(row->type_tags + tl, sizeof(row->type_tags) - tl,
+                "<span class='tag tag-shielded'>Shielded</span> ");
+        }
+        if (is_slp) {
+            size_t tl = strlen(row->type_tags);
+            /* The ticker is attacker-controlled OP_RETURN bytes (not
+             * charset-restricted); escape before embedding to prevent
+             * stored XSS, mirroring the tx view (explorer_controller_tx.c). */
+            char esc_ticker[256];
+            html_escape(esc_ticker, sizeof(esc_ticker), slp.ticker);
+            snprintf(row->type_tags + tl, sizeof(row->type_tags) - tl,
+                "<span class='tag tag-slp'>ZSLP: %s</span> ", esc_ticker);
+        }
+
+        /* Combined transparent + shielded counts */
+        row->inputs = tx->num_vin + tx->num_shielded_spend +
+                      tx->num_joinsplit;
+        row->outputs = tx->num_vout + tx->num_shielded_output +
+                       tx->num_joinsplit;
+        nrows++;
+    }
+    return nrows;
+}
+
+size_t serve_block(const char *param, uint8_t *r, size_t max)
+{
+    struct explorer_context *ctx = explorer_ctx();
+    if (use_rpc_proxy())
+        return serve_block_rpc(param, r, max);
+    if (!ctx->main_state || !param || !param[0]) return 0;
+
+    const struct block_index *bi = lookup_block_index_for_param(ctx, param);
+
+    if (!bi)
+        return render_block_not_found_page(param, r, max);
 
     struct explorer_block_view_data d;
     memset(&d, 0, sizeof(d));
@@ -169,17 +265,7 @@ size_t serve_block(const char *param, uint8_t *r, size_t max)
     bool loaded = ctx->datadir && read_block_from_disk_index(&blk, bi, ctx->datadir);
     d.loaded = loaded;
 
-    if (loaded) {
-        uint256_get_hex(&blk.header.hashMerkleRoot, d.merkle);
-        uint256_get_hex(&blk.header.hashFinalSaplingRoot, d.sapling_root);
-        uint256_get_hex(&blk.header.nNonce, d.nonce);
-    } else {
-        struct uint256 bi_merkle = block_index_merkle_root(bi);
-        struct uint256 bi_nonce = block_index_nonce(bi);
-        uint256_get_hex(&bi_merkle, d.merkle);
-        uint256_get_hex(&bi->hashFinalSaplingRoot, d.sapling_root);
-        uint256_get_hex(&bi_nonce, d.nonce);
-    }
+    fill_block_header_fields(&d, &blk, bi, loaded);
 
     format_time(d.ts, sizeof(d.ts), bi->nTime);
     zcl_format_zcl(d.sapling_val, sizeof(d.sapling_val), bi->nSaplingValue);
@@ -193,61 +279,7 @@ size_t serve_block(const char *param, uint8_t *r, size_t max)
     size_t nrows = 0;
     if (loaded && blk.num_vtx > 0) {
         d.num_vtx = blk.num_vtx;
-        size_t show_max = blk.num_vtx > 100 ? 100 : blk.num_vtx;
-        for (size_t i = 0; i < show_max; i++) {
-            const struct transaction *tx = &blk.vtx[i];
-            struct explorer_block_tx_row *row = &rows[nrows];
-
-            /* Format the abbreviation from a local copy: row->txid and
-             * row->short_txid live in the same rows[] object, so passing
-             * row->txid as the snprintf source trips -Wrestrict even though
-             * the two fields never overlap. */
-            char txid_hex[65];
-            uint256_get_hex(&tx->hash, txid_hex);
-            memcpy(row->txid, txid_hex, sizeof(row->txid));
-            snprintf(row->short_txid, sizeof(row->short_txid),
-                     "%.8s...%.4s", txid_hex, txid_hex + 60);
-
-            zcl_format_zcl(row->value, sizeof(row->value),
-                           transaction_get_value_out(tx));
-
-            bool is_cb = transaction_is_coinbase(tx);
-            bool has_shielded = (tx->num_shielded_spend > 0 || tx->num_shielded_output > 0 ||
-                                 tx->num_joinsplit > 0);
-
-            /* Check for ZSLP */
-            bool is_slp = false;
-            struct slp_message slp;
-            if (tx->num_vout > 0 && tx->vout[0].script_pub_key.size > 0)
-                is_slp = slp_parse(tx->vout[0].script_pub_key.data,
-                                   tx->vout[0].script_pub_key.size, &slp);
-
-            row->type_tags[0] = '\0';
-            if (is_cb) snprintf(row->type_tags, sizeof(row->type_tags),
-                                "<span class='tag tag-cb'>Coinbase</span> ");
-            if (has_shielded) {
-                size_t tl = strlen(row->type_tags);
-                snprintf(row->type_tags + tl, sizeof(row->type_tags) - tl,
-                    "<span class='tag tag-shielded'>Shielded</span> ");
-            }
-            if (is_slp) {
-                size_t tl = strlen(row->type_tags);
-                /* The ticker is attacker-controlled OP_RETURN bytes (not
-                 * charset-restricted); escape before embedding to prevent
-                 * stored XSS, mirroring the tx view (explorer_controller_tx.c). */
-                char esc_ticker[256];
-                html_escape(esc_ticker, sizeof(esc_ticker), slp.ticker);
-                snprintf(row->type_tags + tl, sizeof(row->type_tags) - tl,
-                    "<span class='tag tag-slp'>ZSLP: %s</span> ", esc_ticker);
-            }
-
-            /* Combined transparent + shielded counts */
-            row->inputs = tx->num_vin + tx->num_shielded_spend +
-                          tx->num_joinsplit;
-            row->outputs = tx->num_vout + tx->num_shielded_output +
-                           tx->num_joinsplit;
-            nrows++;
-        }
+        nrows = pack_block_tx_rows(rows, &blk);
     }
     d.rows = rows;
     d.num_rows = nrows;
