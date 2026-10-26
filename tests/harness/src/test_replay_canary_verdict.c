@@ -205,7 +205,7 @@ static void seed_fixtures(const char *fx, const char *mode)
     } else if (strcmp(mode, "fail-sha3-malformed") == 0) {
         write_file(fx, "getutxocommitment.json",
             "{\"sha3_hash\":\"azzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
-            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\",\"height\":3145329}\n");
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\",\"height\":3145329}\n");
     } else if (strcmp(mode, "fail-crossnode") == 0) {
         /* zclassicd txouts disagree with the node => "crossnode_txouts". */
         write_file(fx, "zd_gettxoutsetinfo.json",
