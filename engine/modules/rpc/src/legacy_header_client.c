@@ -160,6 +160,118 @@ bool legacy_header_rpc_fetch_one(const char *host, int port,
     return ok;
 }
 
+static void lhc_zero_out_count(int *out_count)
+{
+    if (out_count)
+        *out_count = 0;
+}
+
+static bool lhc_batch_args_valid(const struct block_header *out,
+                                 const int *out_count,
+                                 int from_h, int n)
+{
+    return out && out_count && from_h >= 0 &&
+           n > 0 && n <= LEGACY_HEADER_RPC_BATCH_MAX;
+}
+
+/* Formats one batch request item into dst: a getblockheader request for
+ * hashes[i] when header_reqs is true, else a getblockhash request for
+ * height. Returns the snprintf result. */
+static int lhc_format_batch_item(char *dst, size_t avail,
+                                 bool header_reqs, int i, int height,
+                                 const char *hashes, size_t hash_slot)
+{
+    const char *sep = i ? "," : "";
+    if (header_reqs) {
+        const char *h_str = hashes + (size_t)i * hash_slot;
+        return snprintf(dst, avail,
+            "%s{\"jsonrpc\":\"1.0\",\"id\":%d,"
+            "\"method\":\"getblockheader\","
+            "\"params\":[\"%s\",false]}",
+            sep, i, h_str);
+    }
+    return snprintf(dst, avail,
+        "%s{\"jsonrpc\":\"1.0\",\"id\":%d,\"method\":\"getblockhash\","
+        "\"params\":[%d]}",
+        sep, i, height);
+}
+
+/* Builds one batch JSON-RPC request body: getblockhash requests for
+ * from_h..from_h+n-1 when header_reqs is false, or getblockheader
+ * requests from hashes when true. */
+static bool lhc_build_batch_body(bool header_reqs, int from_h, int n,
+                                 const char *hashes, size_t hash_slot,
+                                 char **body_out, char *err, size_t err_sz)
+{
+    size_t cap = header_reqs ? (size_t)n * 200 + 16
+                             : (size_t)n * 96 + 16;
+    char *body = zcl_malloc(cap, header_reqs ? "lhc_batch_body2"
+                                             : "lhc_batch_body1");
+    if (!body) {
+        snprintf(err, err_sz, header_reqs ? "oom body2" : "oom body1");
+        return false;
+    }
+    size_t off = 0;
+    body[off++] = '[';
+    for (int i = 0; i < n; i++) {
+        int w = lhc_format_batch_item(body + off, cap - off, header_reqs,
+                                      i, from_h + i, hashes, hash_slot);
+        if (w < 0 || (size_t)w >= cap - off) {
+            free(body);
+            snprintf(err, err_sz,
+                     header_reqs ? "body2 overflow at i=%d"
+                                 : "body1 overflow at i=%d", i);
+            return false;
+        }
+        off += (size_t)w;
+    }
+    if (off + 2 >= cap) {
+        free(body);
+        snprintf(err, err_sz, header_reqs ? "body2 trailer overflow"
+                                          : "body1 trailer overflow");
+        return false;
+    }
+    body[off++] = ']';
+    body[off] = '\0';
+    *body_out = body;
+    return true;
+}
+
+static bool lhc_check_hash_lengths(const char *hashes, int n,
+                                   size_t hash_slot,
+                                   char *err, size_t err_sz)
+{
+    for (int i = 0; i < n; i++) {
+        const char *h_str = hashes + (size_t)i * hash_slot;
+        if (strlen(h_str) != 64) {
+            snprintf(err, err_sz,
+                     "hash[%d] not 64 hex chars (got %zu)",
+                     i, strlen(h_str));
+            return false;
+        }
+    }
+    return true;
+}
+
+static int lhc_deserialize_batch_headers(const char *hexes, int n,
+                                         size_t hex_slot,
+                                         struct block_header *out,
+                                         char *err, size_t err_sz)
+{
+    int parsed = 0;
+    for (int i = 0; i < n; i++) {
+        const char *hex = hexes + (size_t)i * hex_slot;
+        char prefix[32];
+        snprintf(prefix, sizeof(prefix), "header[%d]: ", i);
+        if (!lhc_deserialize_header_hex(hex, &out[i], prefix,
+                                        err, err_sz)) {
+            break;
+        }
+        parsed++;
+    }
+    return parsed;
+}
+
 bool legacy_header_rpc_fetch_batch(const char *host, int port,
                                    const char *user, const char *pass,
                                    int from_h, int n,
@@ -167,40 +279,17 @@ bool legacy_header_rpc_fetch_batch(const char *host, int port,
                                    int *out_count,
                                    char *err, size_t err_sz)
 {
-    if (out_count) *out_count = 0;
-    if (!out || !out_count || from_h < 0 ||
-        n <= 0 || n > LEGACY_HEADER_RPC_BATCH_MAX) {
+    lhc_zero_out_count(out_count);
+    if (!lhc_batch_args_valid(out, out_count, from_h, n)) {
         snprintf(err, err_sz, "bad batch args");
         return false;
     }
 
-    size_t body1_cap = (size_t)n * 96 + 16;
-    char *body1 = zcl_malloc(body1_cap, "lhc_batch_body1");
-    if (!body1) {
-        snprintf(err, err_sz, "oom body1");
+    char *body1 = NULL;
+    if (!lhc_build_batch_body(false, from_h, n, NULL, 0,
+                              &body1, err, err_sz)) {
         return false;
     }
-    size_t off = 0;
-    body1[off++] = '[';
-    for (int i = 0; i < n; i++) {
-        int w = snprintf(body1 + off, body1_cap - off,
-            "%s{\"jsonrpc\":\"1.0\",\"id\":%d,\"method\":\"getblockhash\","
-            "\"params\":[%d]}",
-            i ? "," : "", i, from_h + i);
-        if (w < 0 || (size_t)w >= body1_cap - off) {
-            free(body1);
-            snprintf(err, err_sz, "body1 overflow at i=%d", i);
-            return false;
-        }
-        off += (size_t)w;
-    }
-    if (off + 2 >= body1_cap) {
-        free(body1);
-        snprintf(err, err_sz, "body1 trailer overflow");
-        return false;
-    }
-    body1[off++] = ']';
-    body1[off] = '\0';
 
     char *resp1 = NULL;
     if (!legacy_rpc_call(host, port, user, pass, body1, &resp1,
@@ -225,49 +314,19 @@ bool legacy_header_rpc_fetch_batch(const char *host, int port,
         free(hashes);
         return false;
     }
-    for (int i = 0; i < n; i++) {
-        const char *h_str = hashes + (size_t)i * LHC_HASH_SLOT;
-        if (strlen(h_str) != 64) {
-            snprintf(err, err_sz,
-                     "hash[%d] not 64 hex chars (got %zu)",
-                     i, strlen(h_str));
-            free(hashes);
-            return false;
-        }
+    if (!lhc_check_hash_lengths(hashes, n, LHC_HASH_SLOT,
+                                err, err_sz)) {
+        free(hashes);
+        return false;
     }
 
-    size_t body2_cap = (size_t)n * 200 + 16;
-    char *body2 = zcl_malloc(body2_cap, "lhc_batch_body2");
-    if (!body2) {
+    char *body2 = NULL;
+    if (!lhc_build_batch_body(true, from_h, n, hashes, LHC_HASH_SLOT,
+                              &body2, err, err_sz)) {
         free(hashes);
-        snprintf(err, err_sz, "oom body2");
         return false;
-    }
-    off = 0;
-    body2[off++] = '[';
-    for (int i = 0; i < n; i++) {
-        const char *h_str = hashes + (size_t)i * LHC_HASH_SLOT;
-        int w = snprintf(body2 + off, body2_cap - off,
-            "%s{\"jsonrpc\":\"1.0\",\"id\":%d,"
-            "\"method\":\"getblockheader\","
-            "\"params\":[\"%s\",false]}",
-            i ? "," : "", i, h_str);
-        if (w < 0 || (size_t)w >= body2_cap - off) {
-            free(hashes);
-            free(body2);
-            snprintf(err, err_sz, "body2 overflow at i=%d", i);
-            return false;
-        }
-        off += (size_t)w;
     }
     free(hashes);
-    if (off + 2 >= body2_cap) {
-        free(body2);
-        snprintf(err, err_sz, "body2 trailer overflow");
-        return false;
-    }
-    body2[off++] = ']';
-    body2[off] = '\0';
 
     char *resp2 = NULL;
     if (!legacy_rpc_call(host, port, user, pass, body2, &resp2,
@@ -292,17 +351,8 @@ bool legacy_header_rpc_fetch_batch(const char *host, int port,
         return false;
     }
 
-    int parsed = 0;
-    for (int i = 0; i < n; i++) {
-        const char *hex = hexes + (size_t)i * hex_slot;
-        char prefix[32];
-        snprintf(prefix, sizeof(prefix), "header[%d]: ", i);
-        if (!lhc_deserialize_header_hex(hex, &out[i], prefix,
-                                        err, err_sz)) {
-            break;
-        }
-        parsed++;
-    }
+    int parsed = lhc_deserialize_batch_headers(hexes, n, hex_slot,
+                                               out, err, err_sz);
     free(hexes);
     *out_count = parsed;
     return true;
