@@ -184,6 +184,114 @@ static struct zcl_result auth_verify_denied(void)
     return ZCL_ERR(-100, "authentication failed");
 }
 
+/* True only when every pointer argument auth_login_verify requires is
+ * non-NULL (pubkey_hex is optional and deliberately not checked here); the
+ * caller answers all of them with the single ZCL_ERR(-1) return. */
+static bool auth_login_verify_args_present(struct node_db *ndb,
+                                           const char *server_id,
+                                           const char *address,
+                                           const char *nonce_hex,
+                                           const uint8_t *sig,
+                                           struct auth_session *out)
+{
+    return ndb && server_id && address && nonce_hex && sig && out;
+}
+
+/* Map a raw signature length to the principal key kind that can have
+ * produced it: COMPACT_SIGNATURE_SIZE means secp256k1, 64 means ed25519.
+ * Returns false when the length matches neither kind. */
+static bool auth_key_kind_for_sig_len(size_t sig_len,
+                                      enum principal_key_kind *kind)
+{
+    if (sig_len == COMPACT_SIGNATURE_SIZE) {
+        *kind = PRINCIPAL_KEY_SECP256K1;
+        return true;
+    }
+    if (sig_len == 64) {
+        *kind = PRINCIPAL_KEY_ED25519;
+        return true;
+    }
+    return false;
+}
+
+/* Look up the issued challenge row and rebuild the exact pre-image that was
+ * signed: magic || compact_size(len) || canonical body. Fills *row and the
+ * pre-image buffer; returns the pre-image length, or 0 when the nonce is
+ * unknown, the body overflows, or the pre-image does not fit. */
+static size_t auth_rebuild_challenge_preimage(struct node_db *ndb,
+                                              const char *server_id,
+                                              const char *nonce_hex,
+                                              struct db_auth_challenge *row,
+                                              unsigned char *preimage,
+                                              size_t preimage_size)
+{
+    if (!db_auth_challenge_find(ndb, nonce_hex, row))
+        return 0;
+    char body[AUTH_MESSAGE_MAX];
+    if (!auth_render_body(body, sizeof(body), server_id, row->address,
+                          nonce_hex, row->issued_at, row->expires_at))
+        return 0;
+    return auth_build_preimage(body, preimage, preimage_size);
+}
+
+/* Recover the secp256k1 signer from a compact signature over the pre-image,
+ * filling the derived address and the hex form of the recovered public key
+ * (stored_pubkey_hex is the caller's zero-initialised
+ * PRINCIPAL_PUBKEY_HEX_MAX + 1 byte buffer, matching the loop bound below).
+ * Returns 0 on success, -1 when recovery or address encoding fails. */
+static int auth_recover_secp256k1_signer(const uint8_t *sig,
+                                         const unsigned char *preimage,
+                                         size_t plen,
+                                         char *recovered,
+                                         size_t recovered_size,
+                                         char *stored_pubkey_hex)
+{
+    struct uint256 h;
+    hash256(preimage, plen, h.data);
+    struct pubkey pk;
+    pubkey_init(&pk);
+    if (!pubkey_recover_compact(&pk, &h, sig))
+        return -1;
+    struct key_id kid = pubkey_get_id(&pk);
+    if (!auth_encode_address_from_keyid(&kid, recovered, recovered_size))
+        return -1;
+    /* Each iteration writes exactly two hex digits plus its own NUL; the
+     * next iteration overwrites that NUL, and the last one terminates the
+     * string. stored_pubkey_hex is zero-initialised, so a zero-length key
+     * still yields "". */
+    for (unsigned i = 0; i < pk.size && i < PRINCIPAL_PUBKEY_HEX_MAX / 2; i++)
+        snprintf(stored_pubkey_hex + i * 2, 3, "%02x", pk.vch[i]);
+    return 0;
+}
+
+/* Verify an ed25519 signature against the client-presented public key and
+ * fill the derived address plus the stored key hex from it. Returns 0 on
+ * success, -1 on any failure. */
+static int auth_verify_ed25519_signer(const uint8_t *sig,
+                                      const unsigned char *preimage,
+                                      size_t plen,
+                                      const char *pubkey_hex,
+                                      char *recovered,
+                                      size_t recovered_size,
+                                      char *stored_pubkey_hex,
+                                      size_t stored_pubkey_hex_size)
+{
+    /* ed25519: recovery is impossible; the client must present its key. */
+    if (!pubkey_hex || !pubkey_hex[0])
+        return -1;
+    uint8_t pk32[32];
+    if (ParseHex(pubkey_hex, pk32, sizeof(pk32)) != 32)
+        return -1;
+    if (!ed25519_verify(sig, preimage, plen, pk32))
+        return -1;
+    struct key_id kid;
+    hash160(pk32, sizeof(pk32), kid.id.data);
+    if (!auth_encode_address_from_keyid(&kid, recovered, recovered_size))
+        return -1;
+    snprintf(stored_pubkey_hex, stored_pubkey_hex_size, "%s", pubkey_hex);
+    return 0;
+}
+
 struct zcl_result auth_login_verify(struct node_db *ndb,
                                     const char *server_id,
                                     const char *address,
@@ -192,67 +300,41 @@ struct zcl_result auth_login_verify(struct node_db *ndb,
                                     const char *pubkey_hex,
                                     struct auth_session *out)
 {
-    if (!ndb || !server_id || !address || !nonce_hex || !sig || !out)
+    if (!auth_login_verify_args_present(ndb, server_id, address, nonce_hex,
+                                        sig, out))
         return ZCL_ERR(-1, "auth_login_verify: null argument");
     memset(out, 0, sizeof(*out));
 
     enum principal_key_kind kind;
-    if (sig_len == COMPACT_SIGNATURE_SIZE)
-        kind = PRINCIPAL_KEY_SECP256K1;
-    else if (sig_len == 64)
-        kind = PRINCIPAL_KEY_ED25519;
-    else
+    if (!auth_key_kind_for_sig_len(sig_len, &kind))
         return auth_verify_denied();
 
     /* Recover the issued/expiry to rebuild the exact signed message. */
     struct db_auth_challenge row;
-    if (!db_auth_challenge_find(ndb, nonce_hex, &row))
-        return auth_verify_denied();
-
-    char body[AUTH_MESSAGE_MAX];
-    if (!auth_render_body(body, sizeof(body), server_id, row.address,
-                          nonce_hex, row.issued_at, row.expires_at))
-        return auth_verify_denied();
-
     unsigned char preimage[AUTH_MESSAGE_MAX + 64];
-    size_t plen = auth_build_preimage(body, preimage, sizeof(preimage));
+    size_t plen = auth_rebuild_challenge_preimage(ndb, server_id, nonce_hex,
+                                                  &row, preimage,
+                                                  sizeof(preimage));
     if (plen == 0)
         return auth_verify_denied();
 
     char recovered[PRINCIPAL_ADDRESS_MAX + 1] = {0};
     char stored_pubkey_hex[PRINCIPAL_PUBKEY_HEX_MAX + 1] = {0};
 
-    if (kind == PRINCIPAL_KEY_SECP256K1) {
-        struct uint256 h;
-        hash256(preimage, plen, h.data);
-        struct pubkey pk;
-        pubkey_init(&pk);
-        if (!pubkey_recover_compact(&pk, &h, sig))
-            return auth_verify_denied();
-        struct key_id kid = pubkey_get_id(&pk);
-        if (!auth_encode_address_from_keyid(&kid, recovered, sizeof(recovered)))
-            return auth_verify_denied();
-        /* Each iteration writes exactly two hex digits plus its own NUL; the
-         * next iteration overwrites that NUL, and the last one terminates the
-         * string. stored_pubkey_hex is zero-initialised, so a zero-length key
-         * still yields "". */
-        for (unsigned i = 0; i < pk.size && i < PRINCIPAL_PUBKEY_HEX_MAX / 2; i++)
-            snprintf(stored_pubkey_hex + i * 2, 3, "%02x", pk.vch[i]);
-    } else {
-        /* ed25519: recovery is impossible; the client must present its key. */
-        if (!pubkey_hex || !pubkey_hex[0])
-            return auth_verify_denied();
-        uint8_t pk32[32];
-        if (ParseHex(pubkey_hex, pk32, sizeof(pk32)) != 32)
-            return auth_verify_denied();
-        if (!ed25519_verify(sig, preimage, plen, pk32))
-            return auth_verify_denied();
-        struct key_id kid;
-        hash160(pk32, sizeof(pk32), kid.id.data);
-        if (!auth_encode_address_from_keyid(&kid, recovered, sizeof(recovered)))
-            return auth_verify_denied();
-        snprintf(stored_pubkey_hex, sizeof(stored_pubkey_hex), "%s", pubkey_hex);
-    }
+    int signer_ok;
+    if (kind == PRINCIPAL_KEY_SECP256K1)
+        signer_ok = auth_recover_secp256k1_signer(sig, preimage, plen,
+                                                  recovered,
+                                                  sizeof(recovered),
+                                                  stored_pubkey_hex);
+    else
+        signer_ok = auth_verify_ed25519_signer(sig, preimage, plen,
+                                               pubkey_hex, recovered,
+                                               sizeof(recovered),
+                                               stored_pubkey_hex,
+                                               sizeof(stored_pubkey_hex));
+    if (signer_ok != 0)
+        return auth_verify_denied();
 
     /* Constant-time bind: the recovered signer must be the claimed address and
      * the address the nonce was issued to.

@@ -1308,7 +1308,6 @@ engine/reducer/services/src/reducer_ingest_service.c:reducer_read_back_verdict:1
 engine/services/src/address_index_service.c:ai_do_batch:28
 engine/services/src/agents_telemetry_fill.c:at_scan:23
 engine/services/src/anchor_selfmint.c:anchor_selfmint_snapshot_status:20
-engine/services/src/auth_login_service.c:auth_login_verify:27
 engine/services/src/bg_validation_authority.c:bg_validation_authority_publish:24
 engine/services/src/bg_validation_proofs.c:bg_validation_verify_shielded_proofs:30
 engine/services/src/bg_validation_service.c:bg_validation_thread:24
