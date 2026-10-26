@@ -393,6 +393,787 @@ static bool lv_seed_cb(const struct uss_record *r, void *vctx)
     return true;
 }
 
+struct lv_e_fix {
+    struct node_db *ndb;
+    sqlite3 *pdb;
+    const char *snap_path;
+    const char *dir;
+    const struct lv_built *ok_snap;
+    const struct sha3_utxo_checkpoint *cp_ovr;
+    uint8_t ok_artifact_sha256[32];
+    bool marker_matches;
+    bool marker_pending;
+    bool bound_pending;
+    char expected_artifact_sha256[65];
+};
+
+struct lv_v2_fix {
+    char v2_dir[256];
+    char v2_path[320];
+    char v2_dbpath[320];
+    char v2_blocks[320];
+    struct uint256 v2_root;
+    struct byte_stream v2_serialized;
+    uint8_t v2_anchor_hash[32];
+    uint8_t v2_payload_sha3[32];
+    uint64_t v2_count;
+    int64_t v2_supply;
+    struct uss_header v2_header;
+    uint8_t v2_artifact_sha256[32];
+    char v2_artifact_hex[65];
+    struct node_db v2_ndb;
+    struct main_state v2_ms;
+    struct block_index *v2_blocks_owned;
+    bool v2_context;
+    sqlite3 *v2_pdb;
+    bool v2_reopened;
+};
+
+static int lv_boot_match_mismatch_cases(struct node_db *ndb, sqlite3 *pdb,
+                                        const char *snap_path,
+                                        const struct lv_built *ok_snap,
+                                        const struct sha3_utxo_checkpoint *cp_ovr)
+{
+    int failures = 0;
+
+    /* (c) ABSENT snapshot → eligible=false (safe fallback, no file yet). */
+    unlink(snap_path);
+    LV_CHECK("(c) absent snapshot → NOT eligible",
+             !boot_load_verify_snapshot_eligible(ndb, pdb));
+
+    /* (a) MATCH: write the matching snapshot. */
+    LV_CHECK("write matching snapshot", lv_write(snap_path, ok_snap));
+    LV_CHECK("(a) matching snapshot → eligible",
+             boot_load_verify_snapshot_eligible(ndb, pdb));
+
+    /* (a) the verified set loads via the seed's loader binding (uss_open with expected_sha3 = checkpoint) and iterates into coins_kv at the anchor count. */
+    {
+        char err[128] = {0};
+        struct uss_header hdr;
+        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+        struct uss_handle *h = uss_open(snap_path, /*verify_full_sha3=*/true,
+                                        cp->sha3_hash, &hdr, err, sizeof(err));
+        LV_CHECK("(a) uss_open binds checkpoint root + verifies", h != NULL);
+        if (h) {
+            LV_CHECK("(a) header count == checkpoint", hdr.count == cp->utxo_count);
+            /* Seed coins_kv like mint_load_record_cb (lv_seed_cb below). */
+            struct lv_seed_lc lc = { .db = pdb, .n = 0, .ok = true };
+            int64_t emitted = uss_iter(h, lv_seed_cb, &lc);
+            LV_CHECK("(a) seeded all records", emitted == (int64_t)hdr.count && lc.ok);
+            LV_CHECK("(a) coins_kv holds the anchor count",
+                     coins_kv_count(pdb) == (int64_t)cp->utxo_count);
+            uss_close(h);
+        }
+    }
+
+    /* (d) HEALTHY: with the migration-complete stamp and applied height set, coins_kv is proven authority and eligible is false even with the matching snapshot present. */
+    {
+        char *terr = NULL;
+        sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, &terr);
+        uint8_t one = 1;
+        (void)progress_meta_set_in_tx(pdb, COINS_KV_MIGRATION_COMPLETE_KEY, &one, 1);
+        (void)coins_kv_set_applied_height_in_tx(pdb, 1234);
+        sqlite3_exec(pdb, "COMMIT", NULL, NULL, &terr);
+        if (terr) sqlite3_free(terr);
+        LV_CHECK("(d) proven authority → NOT eligible",
+                 coins_kv_is_proven_authority(pdb, NULL) &&
+                 !boot_load_verify_snapshot_eligible(ndb, pdb));
+    }
+
+    /* Reset coins_kv back to empty for the mismatch case (not proven). */
+    LV_CHECK("reset coins_kv for mismatch case", coins_kv_reset_for_reseed(pdb));
+    LV_CHECK("coins_kv empty again", coins_kv_count(pdb) == 0);
+
+    /* (b) MISMATCH: on-disk body SHA3 != header root == checkpoint; uss_open(.,expected=cp) refuses and the gate is false. */
+    {
+        struct lv_built bad_snap;
+        lv_build_snapshot(&bad_snap, /*tamper=*/true);
+        /* Header still claims the checkpoint root but the body is tampered; the full-body recompute diverges. */
+        LV_CHECK("write tampered snapshot", lv_write(snap_path, &bad_snap));
+
+        char err[128] = {0};
+        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+        struct uss_handle *h = uss_open(snap_path, /*verify_full_sha3=*/true,
+                                        cp->sha3_hash, NULL, err, sizeof(err));
+        LV_CHECK("(b) tampered snapshot REFUSED by loader", h == NULL);
+        if (h) uss_close(h);
+        LV_CHECK("(b) tampered snapshot → NOT eligible",
+                 !boot_load_verify_snapshot_eligible(ndb, pdb));
+        LV_CHECK("(b) coins_kv NEVER seeded by a bad set",
+                 coins_kv_count(pdb) == 0);
+    }
+
+    /* (b2) MISMATCH via wrong checkpoint: uss_open rejects at the header memcmp before the body recompute. */
+    {
+        struct lv_built ok2;
+        lv_build_snapshot(&ok2, /*tamper=*/false);
+        LV_CHECK("rewrite clean snapshot", lv_write(snap_path, &ok2));
+        /* Install a different checkpoint root (flip a byte) so the valid snapshot root no longer matches. */
+        struct sha3_utxo_checkpoint cp_wrong = *cp_ovr;
+        cp_wrong.sha3_hash[0] ^= 0xff;
+        checkpoints_set_sha3_override_for_test(&cp_wrong);
+
+        char err[128] = {0};
+        struct uss_handle *h = uss_open(snap_path, /*verify_full_sha3=*/true,
+                                        cp_wrong.sha3_hash, NULL, err, sizeof(err));
+        LV_CHECK("(b2) wrong-checkpoint snapshot REFUSED", h == NULL);
+        if (h) uss_close(h);
+        LV_CHECK("(b2) wrong-checkpoint → NOT eligible",
+                 !boot_load_verify_snapshot_eligible(ndb, pdb));
+        LV_CHECK("(b2) coins_kv still untouched", coins_kv_count(pdb) == 0);
+    }
+    return failures;
+}
+
+static bool lv_e0_positive_shielded_boundary(sqlite3 *pdb)
+{
+    int64_t nf_boundary = 0, sprout_boundary = 0, sapling_boundary = 0;
+    bool nf_found = false, sprout_found = false, sapling_found = false;
+    return nullifier_kv_activation_cursor(pdb, &nf_boundary, &nf_found) &&
+           anchor_kv_activation_cursor(pdb, ANCHOR_POOL_SPROUT,
+                                        &sprout_boundary, &sprout_found) &&
+           anchor_kv_activation_cursor(pdb, ANCHOR_POOL_SAPLING,
+                                        &sapling_boundary, &sapling_found) &&
+           nf_found && sprout_found && sapling_found &&
+           nf_boundary == 1234 && sprout_boundary == 1234 &&
+           sapling_boundary == 1234;
+}
+
+static int lv_e0_interrupt_shielded_history(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+
+    /* (e) After a snapshot is self-SHA3 verified, -load-snapshot-at-own-height may quarantine a broken local authority store and rebuild it from that set. */
+    checkpoints_set_sha3_override_for_test(fx->cp_ovr);
+    LV_CHECK("(e) rewrite matching snapshot for authority-store recovery",
+             lv_write(fx->snap_path, fx->ok_snap));
+
+    uint8_t old_nf[32] = {0xA5};
+    uint8_t old_txid[32] = {0xC3};
+    LV_CHECK("(e0) seed stale complete shielded history",
+             test_complete_genesis_shielded_replay(pdb) &&
+             nullifier_kv_add(pdb, old_nf, NULLIFIER_POOL_SAPLING, 7));
+    LV_CHECK("(e0) seed pre-transition coin",
+             coins_kv_add(pdb, old_txid, 0, 99, 1, false,
+                          (const uint8_t *)"\x51", 1));
+    boot_shielded_interrupt_after_boundary_for_test(true);
+    boot_load_snapshot_at_own_height_reset(fx->ndb, fx->snap_path, fx->dir,
+                                           NULL, true);
+    bool old_nf_found = true;
+    LV_CHECK("(e0) interruption leaves pre-reset coins untouched",
+             coins_kv_count(pdb) == 1);
+    LV_CHECK("(e0) interruption already published positive shielded boundary",
+             lv_e0_positive_shielded_boundary(pdb));
+    LV_CHECK("(e0) interruption cannot retain stale nullifier rows",
+             nullifier_kv_get(pdb, old_nf, NULLIFIER_POOL_SAPLING,
+                              &old_nf_found, NULL) && !old_nf_found);
+    return failures;
+}
+
+static int lv_e0_pending_artifact_gate(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+
+    fx->marker_matches = false;
+    fx->marker_pending = false;
+    memset(fx->ok_artifact_sha256, 0, sizeof fx->ok_artifact_sha256);
+    LV_CHECK("(e0) exact snapshot identity hashes",
+             lv_artifact_sha256(fx->snap_path, fx->ok_artifact_sha256));
+    LV_CHECK("(e0) interrupted install is a global pending boot gate",
+             boot_snapshot_install_marker_pending(pdb, &fx->marker_pending) &&
+                 fx->marker_pending);
+    LV_CHECK("(e0) interrupted install leaves matching durable marker",
+             boot_snapshot_install_marker_blocks_resume(
+                 pdb, fx->ok_artifact_sha256, &fx->marker_matches) &&
+                 fx->marker_matches);
+    fx->bound_pending = false;
+    LV_CHECK("(e0) pending gate accepts exact fully verified artifact",
+             boot_snapshot_install_pending_artifact_matches(
+                 pdb, fx->snap_path, &fx->bound_pending) && fx->bound_pending);
+    fx->marker_matches = true;
+    LV_CHECK("(e0) mismatched marker identity still blocks resume",
+             boot_snapshot_install_marker_blocks_resume(
+                 pdb, (uint8_t[32]){0x7F}, &fx->marker_matches) &&
+                 !fx->marker_matches);
+    struct lv_built interrupted_bad_snap;
+    lv_build_snapshot(&interrupted_bad_snap, /*tamper=*/true);
+    LV_CHECK("(e0) replace pending artifact with corrupt same-header file",
+             lv_write(fx->snap_path, &interrupted_bad_snap));
+    fx->bound_pending = false;
+    LV_CHECK("(e0) pending gate rejects corrupt same-header artifact",
+             !boot_snapshot_install_pending_artifact_matches(
+                 pdb, fx->snap_path, &fx->bound_pending) && fx->bound_pending);
+    LV_CHECK("(e0) restore exact pending artifact",
+             lv_write(fx->snap_path, fx->ok_snap));
+    return failures;
+}
+
+static int lv_e0_restart_converged_receipt(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+
+    /* Restart on the same healthy store: the marker must defeat RESUME-FAST, rerun the verified loader, and clear only after the durable tip/trusted-base seed succeeds. */
+    boot_load_snapshot_at_own_height_reset(fx->ndb, fx->snap_path, fx->dir,
+                                           NULL, true);
+    int32_t interrupted_applied = -1;
+    bool interrupted_found = false;
+    LV_CHECK("(e0) restart converges interrupted install",
+             coins_kv_count(pdb) == (int64_t)fx->ok_snap->count &&
+             coins_kv_get_applied_height(pdb, &interrupted_applied,
+                                         &interrupted_found) &&
+             interrupted_found && interrupted_applied == 1235);
+    LV_CHECK("(e0) successful tip seed completes exact receipt",
+             (fx->marker_matches = false,
+              !boot_snapshot_install_marker_blocks_resume(
+                  pdb, fx->ok_artifact_sha256, &fx->marker_matches)) &&
+                 fx->marker_matches);
+    return failures;
+}
+
+static int lv_e0_committed_reseed_proof(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+    struct chain_restore_boot_snapshot boot_proof;
+    chain_restore_get_boot_snapshot(&boot_proof);
+    char expected_artifact_sha256[65] = {0};
+    HexStr(fx->ok_artifact_sha256, 32, false, expected_artifact_sha256,
+           sizeof(expected_artifact_sha256));
+    memcpy(fx->expected_artifact_sha256, expected_artifact_sha256,
+           sizeof expected_artifact_sha256);
+    LV_CHECK("(e0) dumpstate proof records committed verified reseed",
+             boot_proof.assisted_snapshot_body_sha3_verified &&
+             !boot_proof.assisted_snapshot_embedded_frontier_verified &&
+             boot_proof.assisted_snapshot_reseed_committed &&
+             boot_proof.assisted_snapshot_seed_height == 1234 &&
+             boot_proof.assisted_snapshot_record_count == fx->ok_snap->count &&
+             strcmp(boot_proof.assisted_snapshot_payload_sha3,
+                    "") != 0 &&
+             strcmp(boot_proof.assisted_snapshot_anchor_block_hash,
+                    "0000000000000000000000000000000000000000000000000000000000000000") == 0 &&
+             strcmp(boot_proof.assisted_snapshot_path, fx->snap_path) == 0);
+    LV_CHECK("(e0) converged install clears global pending boot gate",
+             boot_snapshot_install_marker_pending(pdb, &fx->marker_pending) &&
+                 !fx->marker_pending);
+    fx->bound_pending = true;
+    LV_CHECK("(e0) no pending journal needs no loader artifact",
+             boot_snapshot_install_pending_artifact_matches(
+                 pdb, NULL, &fx->bound_pending) && !fx->bound_pending);
+    return failures;
+}
+
+static int lv_e0_reopen_resume_fast(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+
+    progress_store_close();
+    LV_CHECK("(e0) completed receipt survives store reopen",
+             progress_store_open(fx->dir));
+    pdb = progress_store_db();
+    fx->pdb = pdb;
+    fx->marker_matches = false;
+    LV_CHECK("(e0) reopened receipt retains exact artifact identity",
+             pdb && !boot_snapshot_install_marker_blocks_resume(
+                        pdb, fx->ok_artifact_sha256, &fx->marker_matches) &&
+                 fx->marker_matches);
+    LV_CHECK("(e0) resume fixture has reducer log schemas",
+             lv_ensure_reducer_log_tables(pdb));
+    uint8_t resume_poison[32] = {0xD6};
+    LV_CHECK("(e0) seed post-snapshot forward-state witness",
+             coins_kv_add(pdb, resume_poison, 0, 9, 1235, false,
+                          (const uint8_t *)"\x51", 1));
+    chain_restore_boot_snapshot_reset_for_testing();
+    boot_load_snapshot_at_own_height_reset(fx->ndb, fx->snap_path, fx->dir,
+                                           NULL, true);
+    struct chain_restore_boot_snapshot boot_proof;
+    chain_restore_get_boot_snapshot(&boot_proof);
+    LV_CHECK("(e0) RESUME-FAST republishes exact completed receipt",
+             boot_proof.assisted_snapshot_body_sha3_verified &&
+             boot_proof.assisted_snapshot_reseed_committed &&
+             !boot_proof.assisted_snapshot_embedded_frontier_verified &&
+             boot_proof.assisted_snapshot_record_count == fx->ok_snap->count &&
+             strcmp(boot_proof.assisted_snapshot_payload_sha3, "") != 0 &&
+             strcmp(boot_proof.assisted_snapshot_artifact_sha256,
+                    fx->expected_artifact_sha256) == 0 &&
+             strcmp(boot_proof.assisted_snapshot_path, fx->snap_path) == 0 &&
+             coins_kv_exists(pdb, resume_poison, 0));
+    return failures;
+}
+
+static int lv_e0_generation_invalidates_receipt(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+    char *generation_err = NULL;
+    bool generation_advanced =
+        sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL,
+                     &generation_err) == SQLITE_OK &&
+        coins_kv_bump_authority_generation_in_tx(pdb) &&
+        sqlite3_exec(pdb, "COMMIT", NULL, NULL,
+                     &generation_err) == SQLITE_OK;
+    if (!generation_advanced)
+        (void)sqlite3_exec(pdb, "ROLLBACK", NULL, NULL, NULL);
+    sqlite3_free(generation_err);
+    int32_t stale_applied = -1;
+    bool stale_pending = true, stale_matches = false;
+    bool stale_frontier = true;
+    LV_CHECK("(e0) authority generation invalidates completed receipt",
+             generation_advanced &&
+             !boot_snapshot_install_resume_allowed(
+                 pdb, &(struct uss_header){.height = 1234},
+                 fx->ok_artifact_sha256, &stale_applied, &stale_pending,
+                 &stale_matches, &stale_frontier) &&
+             !stale_pending && stale_matches && !stale_frontier);
+    return failures;
+}
+
+static int lv_e0_absent_receipt_refuses(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+
+    LV_CHECK("(e0) delete completed receipt for absent-receipt refusal",
+             progress_meta_delete(
+                 pdb, BOOT_SNAPSHOT_INSTALL_MARKER_KEY));
+    int32_t absent_applied = -1;
+    bool absent_pending = true, absent_matches = true;
+    bool absent_frontier = true;
+    LV_CHECK("(e0) generic coins authority cannot replace absent receipt",
+             !boot_snapshot_install_resume_allowed(
+                 pdb, &(struct uss_header){.height = 1234},
+                 fx->ok_artifact_sha256, &absent_applied, &absent_pending,
+                 &absent_matches, &absent_frontier) &&
+                 !absent_pending && !absent_matches && !absent_frontier);
+    return failures;
+}
+
+static int lv_e0_legacy_v1_marker(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+    uint8_t legacy_marker[BOOT_SNAPSHOT_INSTALL_MARKER_BYTES] = {0};
+    memcpy(legacy_marker, "ZCLSIM1", 7);
+    lv_wle32(legacy_marker + 8, 1);
+    lv_wle32(legacy_marker + 12,
+             BOOT_SNAPSHOT_INSTALL_MARKER_BYTES);
+    lv_wle32(legacy_marker + 16, 1234);
+    lv_wle64(legacy_marker + 24, fx->ok_snap->count);
+    memcpy(legacy_marker + 32, fx->ok_snap->body_sha3, 32);
+    struct uss_header legacy_header = {
+        .height = 1234,
+        .count = fx->ok_snap->count,
+    };
+    memcpy(legacy_header.sha3_hash, fx->ok_snap->body_sha3, 32);
+    LV_CHECK("(e0) legacy v1 pending receipt is readable",
+             progress_meta_set(
+                 pdb, BOOT_SNAPSHOT_INSTALL_MARKER_KEY,
+                 legacy_marker, sizeof(legacy_marker)) &&
+             boot_snapshot_install_marker_pending(pdb, &fx->marker_pending) &&
+             fx->marker_pending &&
+             boot_snapshot_install_pending_artifact_matches(
+                 pdb, fx->snap_path, &fx->bound_pending) && fx->bound_pending);
+    lv_wle64(legacy_marker + 24, fx->ok_snap->count + 1);
+    LV_CHECK("(e0) mismatched legacy v1 receipt fails closed",
+             progress_meta_set(
+                 pdb, BOOT_SNAPSHOT_INSTALL_MARKER_KEY,
+                 legacy_marker, sizeof(legacy_marker)) &&
+             !boot_snapshot_install_pending_artifact_matches(
+                 pdb, fx->snap_path, &fx->bound_pending) && fx->bound_pending);
+    lv_wle64(legacy_marker + 24, fx->ok_snap->count);
+    LV_CHECK("(e0) verified legacy v1 receipt upgrades to exact v2",
+             progress_meta_set(
+                 pdb, BOOT_SNAPSHOT_INSTALL_MARKER_KEY,
+                 legacy_marker, sizeof(legacy_marker)) &&
+             boot_snapshot_install_marker_begin(
+                 pdb, &legacy_header, fx->ok_artifact_sha256) &&
+             boot_snapshot_install_marker_blocks_resume(
+                 pdb, fx->ok_artifact_sha256, &fx->marker_matches) &&
+             fx->marker_matches);
+    return failures;
+}
+
+static int lv_e0b_poison_coin_retry(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+
+    /* Model a kill after the applied-height COMMIT: authority is true but the in-progress marker must force a verified reseed; a poison coin proves the fast-resume path did not run. */
+    uint8_t poison_txid[32] = {0xE7};
+    LV_CHECK("(e0b) arm applied-height crash marker",
+             boot_snapshot_install_marker_begin(
+                 pdb, &(struct uss_header){
+                     .height = 1234, .count = fx->ok_snap->count},
+                 fx->ok_artifact_sha256));
+    LV_CHECK("(e0b) add poison coin to partial authority fixture",
+             coins_kv_add(pdb, poison_txid, 0, 7, 1234, false,
+                          (const uint8_t *)"\x51", 1) &&
+             coins_kv_is_proven_authority(pdb, NULL));
+    boot_load_snapshot_at_own_height_reset(fx->ndb, fx->snap_path, fx->dir,
+                                           NULL, true);
+    LV_CHECK("(e0b) marker suppresses RESUME-FAST and removes poison",
+             coins_kv_count(pdb) == (int64_t)fx->ok_snap->count &&
+             !coins_kv_exists(pdb, poison_txid, 0));
+    LV_CHECK("(e0b) converged retry clears marker",
+             !boot_snapshot_install_marker_blocks_resume(
+                 pdb, fx->ok_artifact_sha256, NULL));
+    return failures;
+}
+
+static int lv_e1_e2_quarantine_rebuild(struct lv_e_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *pdb = fx->pdb;
+
+    progress_store_close();
+    LV_CHECK("(e1) corrupt progress.kv fixture written",
+             lv_write_junk_progress_store(fx->dir));
+    boot_load_snapshot_at_own_height_reset(fx->ndb, fx->snap_path, fx->dir,
+                                           NULL, true);
+    pdb = progress_store_db();
+    fx->pdb = pdb;
+    int32_t applied = -1;
+    bool found = false;
+    LV_CHECK("(e1) corrupt progress.kv quarantined",
+             lv_has_quarantined_progress_store(fx->dir));
+    LV_CHECK("(e1) loader rebuilt coins_kv from verified snapshot",
+             pdb && coins_kv_count(pdb) == (int64_t)fx->ok_snap->count &&
+             coins_kv_get_applied_height(pdb, &applied, &found) &&
+             found && applied == 1235);
+
+    progress_store_close();
+    LV_CHECK("(e2) bad stage_cursor fixture written",
+             lv_write_bad_stage_cursor_store(fx->dir));
+    LV_CHECK("(e2) bad schema progress_store opens",
+             progress_store_open(fx->dir));
+    boot_load_snapshot_at_own_height_reset(fx->ndb, fx->snap_path, fx->dir,
+                                           NULL, true);
+    pdb = progress_store_db();
+    fx->pdb = pdb;
+    applied = -1;
+    found = false;
+    LV_CHECK("(e2) bad schema progress.kv quarantined",
+             lv_has_quarantined_progress_store(fx->dir));
+    LV_CHECK("(e2) loader rebuilt stage cursors and coins_kv",
+             pdb && coins_kv_count(pdb) == (int64_t)fx->ok_snap->count &&
+             coins_kv_get_applied_height(pdb, &applied, &found) &&
+             found && applied == 1235);
+    return failures;
+}
+
+static bool lv_f_commit_proven_above_seed(sqlite3 *pdb)
+{
+    char *terr = NULL;
+    bool ok = pdb &&
+        sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, &terr) == SQLITE_OK;
+    uint8_t one = 1;
+    ok = ok &&
+         progress_meta_set_in_tx(pdb, COINS_KV_MIGRATION_COMPLETE_KEY,
+                                 &one, 1) &&
+         coins_kv_set_applied_height_in_tx(pdb, 1240) &&
+         sqlite3_exec(pdb, "COMMIT", NULL, NULL, &terr) == SQLITE_OK;
+    if (!ok && pdb)
+        sqlite3_exec(pdb, "ROLLBACK", NULL, NULL, NULL);
+    if (terr)
+        sqlite3_free(terr);
+    return ok;
+}
+
+static int lv_f_seed_authority(struct node_db *ndb, sqlite3 **pdb_slot,
+                               const char *snap_path, const char *dir,
+                               const struct lv_built *ok_snap,
+                               struct main_state *ms,
+                               struct block_index **owned_blocks,
+                               bool *ok_out)
+{
+    int failures = 0;
+    sqlite3 *pdb = *pdb_slot;
+
+    /* (f) RESUME-FAST repair: when persisted coins_kv authority is already past the snapshot seed, the loader must still seed the trusted reducer base at the applied coins frontier, or H* falls back to the checkpoint. */
+    main_state_init(ms);
+    *owned_blocks = NULL;
+    bool ok = lv_seed_active_chain(ms, ndb, 1239, -1, NULL, owned_blocks);
+    LV_CHECK("(f) active chain fixture reaches applied frontier", ok);
+    struct lv_built bound_snap = *ok_snap;
+    if (ok)
+        memcpy(bound_snap.file + 40,
+               (*owned_blocks)[1234].hashBlock.data, 32);
+    LV_CHECK("(f) write snapshot bound to active-chain seed",
+             ok && lv_write(snap_path, &bound_snap));
+    if (ok)
+        boot_load_snapshot_at_own_height_reset(
+            ndb, snap_path, dir, ms, true);
+
+    pdb = progress_store_db();
+    *pdb_slot = pdb;
+    ok = lv_f_commit_proven_above_seed(pdb);
+    LV_CHECK("(f) setup proven coins authority above snapshot seed", ok);
+    LV_CHECK("(f) reducer log schemas exist",
+             pdb && lv_ensure_reducer_log_tables(pdb));
+    LV_CHECK("(f) stale high header cursor fixture",
+             pdb && lv_force_stage_cursor(pdb, "validate_headers", 1250));
+    LV_CHECK("(f) H* starts at checkpoint before resume repair",
+             pdb && lv_compute_hstar(pdb) == 1234);
+    *ok_out = ok;
+    return failures;
+}
+
+static int lv_f_repair_frontier(struct node_db *ndb, sqlite3 *pdb,
+                                const char *snap_path, const char *dir,
+                                struct main_state *ms, bool ok,
+                                struct block_index *owned_blocks)
+{
+    int failures = 0;
+    seed_integrity_gate_reset_for_testing();
+    seed_integrity_gate_set_node_db_for_testing(ndb);
+    if (ok)
+        boot_load_snapshot_at_own_height_reset(ndb, snap_path, dir, ms,
+                                               true);
+    seed_integrity_gate_reset_for_testing();
+
+    int32_t hstar_after = pdb ? lv_compute_hstar(pdb) : -1;
+    int32_t applied = -1;
+    bool found = false;
+    LV_CHECK("(f) resume repair raises H* to proven coins frontier",
+             hstar_after == 1239);
+    LV_CHECK("(f) resume repair rewinds high header cursor to boundary",
+             pdb && lv_stage_cursor(pdb, "validate_headers") == 1240);
+    LV_CHECK("(f) resume repair stamps tip_finalize to served boundary",
+             pdb && lv_stage_cursor(pdb, "tip_finalize") == 1239);
+    LV_CHECK("(f) resume repair preserves applied frontier",
+             pdb && coins_kv_get_applied_height(pdb, &applied, &found) &&
+             found && applied == 1240);
+
+    main_state_free(ms);
+    free(owned_blocks);
+    return failures;
+}
+
+static int lv_g_build_v2_artifact(struct lv_v2_fix *fx)
+{
+    int failures = 0;
+
+    /* (g) A canonical USS v2 artifact carries its header-bound Sapling frontier through the production installer, durable receipt reopen, and RESUME-FAST, so embedded_frontier_verified=true describes installed authority. */
+    progress_store_close();
+    test_make_tmpdir(fx->v2_dir, sizeof(fx->v2_dir), "load_verify_boot", "v2");
+    snprintf(fx->v2_path, sizeof(fx->v2_path), "%s/sapling-v2.snapshot",
+             fx->v2_dir);
+    snprintf(fx->v2_dbpath, sizeof(fx->v2_dbpath), "%s/node.db", fx->v2_dir);
+    snprintf(fx->v2_blocks, sizeof(fx->v2_blocks), "%s/blocks", fx->v2_dir);
+
+    struct incremental_merkle_tree v2_tree;
+    sapling_tree_init(&v2_tree);
+    for (uint8_t i = 1; i <= 3; i++) {
+        struct uint256 leaf;
+        uint256_set_null(&leaf);
+        leaf.data[0] = (uint8_t)(0x90u + i);
+        leaf.data[31] = i;
+        incremental_tree_append(&v2_tree, &leaf);
+    }
+    incremental_tree_root(&v2_tree, &fx->v2_root);
+    stream_init(&fx->v2_serialized, 4096);
+    LV_CHECK("(g) nonempty Sapling frontier serializes",
+             incremental_tree_serialize(&v2_tree, &fx->v2_serialized) &&
+                 !fx->v2_serialized.error && fx->v2_serialized.size > 0);
+
+    memset(fx->v2_anchor_hash, 0, sizeof fx->v2_anchor_hash);
+    lv_hash_for_height(30, fx->v2_anchor_hash);
+    struct snapshot_shielded v2_shielded = {
+        .sapling = fx->v2_serialized.data,
+        .sapling_len = (uint32_t)fx->v2_serialized.size,
+    };
+    sqlite3 *v2_source = NULL;
+    memset(fx->v2_payload_sha3, 0, sizeof fx->v2_payload_sha3);
+    fx->v2_count = 0;
+    fx->v2_supply = 0;
+    bool v2_written =
+        sqlite3_open(":memory:", &v2_source) == SQLITE_OK &&
+        lv_seed_snapshot_coins(v2_source) &&
+        coins_kv_snapshot_write(v2_source, fx->v2_path, 30, fx->v2_anchor_hash,
+                                &v2_shielded, fx->v2_payload_sha3, &fx->v2_count,
+                                &fx->v2_supply);
+    LV_CHECK("(g) canonical writer emits two-coin USS v2", v2_written &&
+             fx->v2_count == 2 && fx->v2_supply == 3300);
+    if (v2_source)
+        sqlite3_close(v2_source);
+    return failures;
+}
+
+static int lv_g_parse_v2_frontier(struct lv_v2_fix *fx)
+{
+    int failures = 0;
+    const uint8_t *v2_frontier = NULL;
+    uint32_t v2_frontier_len = 0;
+    char v2_err[160] = {0};
+    memset(fx->v2_artifact_sha256, 0, sizeof fx->v2_artifact_sha256);
+    struct uss_handle *v2_handle =
+        uss_open(fx->v2_path, true, NULL, &fx->v2_header, v2_err,
+                 sizeof(v2_err));
+    bool v2_parsed = v2_handle && uss_version(v2_handle) == 2 &&
+        uss_frontier(v2_handle, &v2_frontier, &v2_frontier_len) &&
+        v2_frontier_len == fx->v2_serialized.size &&
+        memcmp(v2_frontier, fx->v2_serialized.data, v2_frontier_len) == 0 &&
+        uss_artifact_sha256(v2_handle, fx->v2_artifact_sha256);
+    LV_CHECK("(g) production parser verifies exact v2 frontier bytes",
+             v2_parsed);
+    if (v2_handle)
+        uss_close(v2_handle);
+    return failures;
+}
+
+static int lv_g_bind_v2_active_chain(struct lv_v2_fix *fx)
+{
+    int failures = 0;
+    main_state_init(&fx->v2_ms);
+    fx->v2_blocks_owned = NULL;
+    fx->v2_context = node_db_open(&fx->v2_ndb, fx->v2_dbpath) &&
+        progress_store_open(fx->v2_dir) &&
+        lv_seed_active_chain(&fx->v2_ms, &fx->v2_ndb, 30, 30, &fx->v2_root,
+                             &fx->v2_blocks_owned);
+    LV_CHECK("(g) real active chain binds v2 anchor and Sapling root",
+             fx->v2_context &&
+                 memcmp(fx->v2_header.anchor_block_hash,
+                        fx->v2_blocks_owned[30].hashBlock.data, 32) == 0 &&
+                 memcmp(fx->v2_blocks_owned[30].hashFinalSaplingRoot.data,
+                        fx->v2_root.data, 32) == 0);
+    LV_CHECK("(g) v2 install fixture has no blocks directory",
+             access(fx->v2_blocks, F_OK) != 0);
+
+    chain_restore_boot_snapshot_reset_for_testing();
+    if (fx->v2_context)
+        boot_load_snapshot_at_own_height_reset(
+            &fx->v2_ndb, fx->v2_path, fx->v2_dir, &fx->v2_ms, true);
+    return failures;
+}
+
+static int lv_g_publish_v2_install_proof(struct lv_v2_fix *fx)
+{
+    int failures = 0;
+    fx->v2_pdb = progress_store_db();
+    struct chain_restore_boot_snapshot v2_proof;
+    chain_restore_get_boot_snapshot(&v2_proof);
+    char v2_payload_hex[65] = {0};
+    char v2_anchor_hex[65] = {0};
+    char v2_artifact_hex[65] = {0};
+    HexStr(fx->v2_payload_sha3, 32, false, v2_payload_hex,
+           sizeof(v2_payload_hex));
+    HexStr(fx->v2_anchor_hash, 32, false, v2_anchor_hex,
+           sizeof(v2_anchor_hex));
+    HexStr(fx->v2_artifact_sha256, 32, false, v2_artifact_hex,
+           sizeof(v2_artifact_hex));
+    memcpy(fx->v2_artifact_hex, v2_artifact_hex, sizeof v2_artifact_hex);
+    LV_CHECK("(g) fresh production install publishes exact verified v2 proof",
+             v2_proof.assisted_snapshot_body_sha3_verified &&
+             v2_proof.assisted_snapshot_embedded_frontier_verified &&
+             v2_proof.assisted_snapshot_reseed_committed &&
+             v2_proof.assisted_snapshot_seed_height == 30 &&
+             v2_proof.assisted_snapshot_record_count == fx->v2_count &&
+             strcmp(v2_proof.assisted_snapshot_payload_sha3,
+                    v2_payload_hex) == 0 &&
+             strcmp(v2_proof.assisted_snapshot_anchor_block_hash,
+                    v2_anchor_hex) == 0 &&
+             strcmp(v2_proof.assisted_snapshot_artifact_sha256,
+                    v2_artifact_hex) == 0 &&
+             strcmp(v2_proof.assisted_snapshot_path, fx->v2_path) == 0);
+    return failures;
+}
+
+static int lv_g_durable_v2_anchor(struct lv_v2_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *v2_pdb = fx->v2_pdb;
+    struct incremental_merkle_tree v2_anchor_tree;
+    struct uint256 v2_anchor_root;
+    int64_t v2_anchor_height = -1;
+    sapling_tree_init(&v2_anchor_tree);
+    LV_CHECK("(g) root-verified v2 frontier is durable anchor authority",
+             v2_pdb && anchor_kv_latest_tree(
+                 v2_pdb, ANCHOR_POOL_SAPLING, &v2_anchor_tree,
+                 &v2_anchor_root, &v2_anchor_height) == ANCHOR_KV_FOUND &&
+             v2_anchor_height == 30 &&
+             memcmp(v2_anchor_root.data, fx->v2_root.data, 32) == 0);
+
+    uint8_t v2_tree_blob[4096] = {0};
+    size_t v2_tree_len = 0;
+    int64_t v2_rebuild_height = -1;
+    struct incremental_merkle_tree v2_persisted_tree;
+    struct uint256 v2_persisted_root;
+    sapling_tree_init(&v2_persisted_tree);
+    struct byte_stream v2_tree_stream;
+    bool v2_tree_pair = node_db_state_get(
+            &fx->v2_ndb, "sapling_tree", v2_tree_blob,
+            sizeof(v2_tree_blob), &v2_tree_len) &&
+        node_db_state_get_int(&fx->v2_ndb, "sapling_tree_rebuild_height",
+                              &v2_rebuild_height);
+    stream_init_from_data(&v2_tree_stream, v2_tree_blob, v2_tree_len);
+    v2_tree_pair = v2_tree_pair &&
+        incremental_tree_deserialize(&v2_persisted_tree,
+                                     &v2_tree_stream);
+    incremental_tree_root(&v2_persisted_tree, &v2_persisted_root);
+    LV_CHECK("(g) node-state frontier pair matches header root",
+             v2_tree_pair && v2_rebuild_height == 30 &&
+             memcmp(v2_persisted_root.data, fx->v2_root.data, 32) == 0);
+    stream_free(&v2_tree_stream);
+    return failures;
+}
+
+static int lv_g_reopen_v2_receipt(struct lv_v2_fix *fx)
+{
+    int failures = 0;
+    progress_store_close();
+    node_db_close(&fx->v2_ndb);
+    fx->v2_reopened = node_db_open(&fx->v2_ndb, fx->v2_dbpath) &&
+                      progress_store_open(fx->v2_dir);
+    fx->v2_pdb = progress_store_db();
+    int32_t v2_applied = -1;
+    bool v2_pending = true, v2_matches = false;
+    bool v2_frontier_verified = false;
+    LV_CHECK("(g) reopened receipt preserves verified-frontier authority",
+             fx->v2_reopened && boot_snapshot_install_resume_allowed(
+                 fx->v2_pdb, &fx->v2_header, fx->v2_artifact_sha256, &v2_applied,
+                 &v2_pending, &v2_matches, &v2_frontier_verified) &&
+             v2_applied == 31 && !v2_pending && v2_matches &&
+             v2_frontier_verified);
+    return failures;
+}
+
+static int lv_g_v2_resume_fast(struct lv_v2_fix *fx)
+{
+    int failures = 0;
+    sqlite3 *v2_pdb = fx->v2_pdb;
+    LV_CHECK("(g) reopened resume fixture has reducer log schemas",
+             v2_pdb && lv_ensure_reducer_log_tables(v2_pdb));
+    uint8_t v2_poison[32] = {0xe4};
+    LV_CHECK("(g) forward-state witness seeds after v2 install",
+             v2_pdb && coins_kv_add(
+                 v2_pdb, v2_poison, 0, 77, 31, false,
+                 (const uint8_t *)"\x51", 1));
+    chain_restore_boot_snapshot_reset_for_testing();
+    if (fx->v2_reopened)
+        boot_load_snapshot_at_own_height_reset(
+            &fx->v2_ndb, fx->v2_path, fx->v2_dir, &fx->v2_ms, true);
+    struct chain_restore_boot_snapshot v2_proof;
+    chain_restore_get_boot_snapshot(&v2_proof);
+    LV_CHECK("(g) RESUME-FAST preserves forward state and republishes true",
+             coins_kv_exists(v2_pdb, v2_poison, 0) &&
+             v2_proof.assisted_snapshot_body_sha3_verified &&
+             v2_proof.assisted_snapshot_embedded_frontier_verified &&
+             v2_proof.assisted_snapshot_reseed_committed &&
+             strcmp(v2_proof.assisted_snapshot_artifact_sha256,
+                    fx->v2_artifact_hex) == 0 &&
+             strcmp(v2_proof.assisted_snapshot_path, fx->v2_path) == 0);
+
+    progress_store_close();
+    node_db_close(&fx->v2_ndb);
+    main_state_free(&fx->v2_ms);
+    free(fx->v2_blocks_owned);
+    stream_free(&fx->v2_serialized);
+    return failures;
+}
+
 int test_load_verify_boot(void);
 int test_load_verify_boot(void)
 {
@@ -429,602 +1210,44 @@ int test_load_verify_boot(void)
     cp_ovr.total_supply = ok_snap.total;
     checkpoints_set_sha3_override_for_test(&cp_ovr);
 
-    /* (c) ABSENT snapshot → eligible=false (safe fallback, no file yet). */
-    unlink(snap_path);
-    LV_CHECK("(c) absent snapshot → NOT eligible",
-             !boot_load_verify_snapshot_eligible(&ndb, pdb));
+    failures += lv_boot_match_mismatch_cases(&ndb, pdb, snap_path, &ok_snap,
+                                            &cp_ovr);
 
-    /* (a) MATCH: write the matching snapshot. */
-    LV_CHECK("write matching snapshot", lv_write(snap_path, &ok_snap));
-    LV_CHECK("(a) matching snapshot → eligible",
-             boot_load_verify_snapshot_eligible(&ndb, pdb));
+    struct lv_e_fix e = {
+        .ndb = &ndb,
+        .pdb = pdb,
+        .snap_path = snap_path,
+        .dir = dir,
+        .ok_snap = &ok_snap,
+        .cp_ovr = &cp_ovr,
+    };
+    failures += lv_e0_interrupt_shielded_history(&e);
+    failures += lv_e0_pending_artifact_gate(&e);
+    failures += lv_e0_restart_converged_receipt(&e);
+    failures += lv_e0_committed_reseed_proof(&e);
+    failures += lv_e0_reopen_resume_fast(&e);
+    failures += lv_e0_generation_invalidates_receipt(&e);
+    failures += lv_e0_absent_receipt_refuses(&e);
+    failures += lv_e0_legacy_v1_marker(&e);
+    failures += lv_e0b_poison_coin_retry(&e);
+    failures += lv_e1_e2_quarantine_rebuild(&e);
 
-    /* (a) the verified set loads via the seed's loader binding (uss_open with expected_sha3 = checkpoint) and iterates into coins_kv at the anchor count. */
-    {
-        char err[128] = {0};
-        struct uss_header hdr;
-        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        struct uss_handle *h = uss_open(snap_path, /*verify_full_sha3=*/true,
-                                        cp->sha3_hash, &hdr, err, sizeof(err));
-        LV_CHECK("(a) uss_open binds checkpoint root + verifies", h != NULL);
-        if (h) {
-            LV_CHECK("(a) header count == checkpoint", hdr.count == cp->utxo_count);
-            /* Seed coins_kv like mint_load_record_cb (lv_seed_cb below). */
-            struct lv_seed_lc lc = { .db = pdb, .n = 0, .ok = true };
-            int64_t emitted = uss_iter(h, lv_seed_cb, &lc);
-            LV_CHECK("(a) seeded all records", emitted == (int64_t)hdr.count && lc.ok);
-            LV_CHECK("(a) coins_kv holds the anchor count",
-                     coins_kv_count(pdb) == (int64_t)cp->utxo_count);
-            uss_close(h);
-        }
-    }
+    struct main_state ms;
+    struct block_index *owned_blocks = NULL;
+    bool ok = false;
+    failures += lv_f_seed_authority(&ndb, &pdb, snap_path, dir, &ok_snap,
+                                    &ms, &owned_blocks, &ok);
+    failures += lv_f_repair_frontier(&ndb, pdb, snap_path, dir, &ms, ok,
+                                     owned_blocks);
 
-    /* (d) HEALTHY: with the migration-complete stamp and applied height set, coins_kv is proven authority and eligible is false even with the matching snapshot present. */
-    {
-        char *terr = NULL;
-        sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, &terr);
-        uint8_t one = 1;
-        (void)progress_meta_set_in_tx(pdb, COINS_KV_MIGRATION_COMPLETE_KEY, &one, 1);
-        (void)coins_kv_set_applied_height_in_tx(pdb, 1234);
-        sqlite3_exec(pdb, "COMMIT", NULL, NULL, &terr);
-        if (terr) sqlite3_free(terr);
-        LV_CHECK("(d) proven authority → NOT eligible",
-                 coins_kv_is_proven_authority(pdb, NULL) &&
-                 !boot_load_verify_snapshot_eligible(&ndb, pdb));
-    }
-
-    /* Reset coins_kv back to empty for the mismatch case (not proven). */
-    LV_CHECK("reset coins_kv for mismatch case", coins_kv_reset_for_reseed(pdb));
-    LV_CHECK("coins_kv empty again", coins_kv_count(pdb) == 0);
-
-    /* (b) MISMATCH: on-disk body SHA3 != header root == checkpoint; uss_open(.,expected=cp) refuses and the gate is false. */
-    {
-        struct lv_built bad_snap;
-        lv_build_snapshot(&bad_snap, /*tamper=*/true);
-        /* Header still claims the checkpoint root but the body is tampered; the full-body recompute diverges. */
-        LV_CHECK("write tampered snapshot", lv_write(snap_path, &bad_snap));
-
-        char err[128] = {0};
-        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        struct uss_handle *h = uss_open(snap_path, /*verify_full_sha3=*/true,
-                                        cp->sha3_hash, NULL, err, sizeof(err));
-        LV_CHECK("(b) tampered snapshot REFUSED by loader", h == NULL);
-        if (h) uss_close(h);
-        LV_CHECK("(b) tampered snapshot → NOT eligible",
-                 !boot_load_verify_snapshot_eligible(&ndb, pdb));
-        LV_CHECK("(b) coins_kv NEVER seeded by a bad set",
-                 coins_kv_count(pdb) == 0);
-    }
-
-    /* (b2) MISMATCH via wrong checkpoint: uss_open rejects at the header memcmp before the body recompute. */
-    {
-        struct lv_built ok2;
-        lv_build_snapshot(&ok2, /*tamper=*/false);
-        LV_CHECK("rewrite clean snapshot", lv_write(snap_path, &ok2));
-        /* Install a different checkpoint root (flip a byte) so the valid snapshot root no longer matches. */
-        struct sha3_utxo_checkpoint cp_wrong = cp_ovr;
-        cp_wrong.sha3_hash[0] ^= 0xff;
-        checkpoints_set_sha3_override_for_test(&cp_wrong);
-
-        char err[128] = {0};
-        struct uss_handle *h = uss_open(snap_path, /*verify_full_sha3=*/true,
-                                        cp_wrong.sha3_hash, NULL, err, sizeof(err));
-        LV_CHECK("(b2) wrong-checkpoint snapshot REFUSED", h == NULL);
-        if (h) uss_close(h);
-        LV_CHECK("(b2) wrong-checkpoint → NOT eligible",
-                 !boot_load_verify_snapshot_eligible(&ndb, pdb));
-        LV_CHECK("(b2) coins_kv still untouched", coins_kv_count(pdb) == 0);
-    }
-
-    /* (e) After a snapshot is self-SHA3 verified, -load-snapshot-at-own-height may quarantine a broken local authority store and rebuild it from that set. */
-    {
-        checkpoints_set_sha3_override_for_test(&cp_ovr);
-        LV_CHECK("(e) rewrite matching snapshot for authority-store recovery",
-                 lv_write(snap_path, &ok_snap));
-
-        uint8_t old_nf[32] = {0xA5};
-        uint8_t old_txid[32] = {0xC3};
-        LV_CHECK("(e0) seed stale complete shielded history",
-                 test_complete_genesis_shielded_replay(pdb) &&
-                 nullifier_kv_add(pdb, old_nf, NULLIFIER_POOL_SAPLING, 7));
-        LV_CHECK("(e0) seed pre-transition coin",
-                 coins_kv_add(pdb, old_txid, 0, 99, 1, false,
-                              (const uint8_t *)"\x51", 1));
-        boot_shielded_interrupt_after_boundary_for_test(true);
-        boot_load_snapshot_at_own_height_reset(&ndb, snap_path, dir, NULL, true);
-        int64_t nf_boundary = 0, sprout_boundary = 0, sapling_boundary = 0;
-        bool nf_found = false, sprout_found = false, sapling_found = false;
-        bool old_nf_found = true;
-        LV_CHECK("(e0) interruption leaves pre-reset coins untouched",
-                 coins_kv_count(pdb) == 1);
-        LV_CHECK("(e0) interruption already published positive shielded boundary",
-                 nullifier_kv_activation_cursor(pdb, &nf_boundary, &nf_found) &&
-                 anchor_kv_activation_cursor(pdb, ANCHOR_POOL_SPROUT,
-                                              &sprout_boundary, &sprout_found) &&
-                 anchor_kv_activation_cursor(pdb, ANCHOR_POOL_SAPLING,
-                                              &sapling_boundary, &sapling_found) &&
-                 nf_found && sprout_found && sapling_found &&
-                 nf_boundary == 1234 && sprout_boundary == 1234 &&
-                 sapling_boundary == 1234);
-        LV_CHECK("(e0) interruption cannot retain stale nullifier rows",
-                 nullifier_kv_get(pdb, old_nf, NULLIFIER_POOL_SAPLING,
-                                  &old_nf_found, NULL) && !old_nf_found);
-
-        bool marker_matches = false;
-        bool marker_pending = false;
-        uint8_t ok_artifact_sha256[32] = {0};
-        LV_CHECK("(e0) exact snapshot identity hashes",
-                 lv_artifact_sha256(snap_path, ok_artifact_sha256));
-        LV_CHECK("(e0) interrupted install is a global pending boot gate",
-                 boot_snapshot_install_marker_pending(pdb, &marker_pending) &&
-                     marker_pending);
-        LV_CHECK("(e0) interrupted install leaves matching durable marker",
-                 boot_snapshot_install_marker_blocks_resume(
-                     pdb, ok_artifact_sha256, &marker_matches) &&
-                     marker_matches);
-        bool bound_pending = false;
-        LV_CHECK("(e0) pending gate accepts exact fully verified artifact",
-                 boot_snapshot_install_pending_artifact_matches(
-                     pdb, snap_path, &bound_pending) && bound_pending);
-        marker_matches = true;
-        LV_CHECK("(e0) mismatched marker identity still blocks resume",
-                 boot_snapshot_install_marker_blocks_resume(
-                     pdb, (uint8_t[32]){0x7F}, &marker_matches) &&
-                     !marker_matches);
-        struct lv_built interrupted_bad_snap;
-        lv_build_snapshot(&interrupted_bad_snap, /*tamper=*/true);
-        LV_CHECK("(e0) replace pending artifact with corrupt same-header file",
-                 lv_write(snap_path, &interrupted_bad_snap));
-        bound_pending = false;
-        LV_CHECK("(e0) pending gate rejects corrupt same-header artifact",
-                 !boot_snapshot_install_pending_artifact_matches(
-                     pdb, snap_path, &bound_pending) && bound_pending);
-        LV_CHECK("(e0) restore exact pending artifact",
-                 lv_write(snap_path, &ok_snap));
-
-        /* Restart on the same healthy store: the marker must defeat RESUME-FAST, rerun the verified loader, and clear only after the durable tip/trusted-base seed succeeds. */
-        boot_load_snapshot_at_own_height_reset(&ndb, snap_path, dir, NULL,
-                                               true);
-        int32_t interrupted_applied = -1;
-        bool interrupted_found = false;
-        LV_CHECK("(e0) restart converges interrupted install",
-                 coins_kv_count(pdb) == (int64_t)ok_snap.count &&
-                 coins_kv_get_applied_height(pdb, &interrupted_applied,
-                                             &interrupted_found) &&
-                 interrupted_found && interrupted_applied == 1235);
-        LV_CHECK("(e0) successful tip seed completes exact receipt",
-                 (marker_matches = false,
-                  !boot_snapshot_install_marker_blocks_resume(
-                      pdb, ok_artifact_sha256, &marker_matches)) &&
-                     marker_matches);
-        struct chain_restore_boot_snapshot boot_proof;
-        chain_restore_get_boot_snapshot(&boot_proof);
-        char expected_artifact_sha256[65] = {0};
-        HexStr(ok_artifact_sha256, 32, false, expected_artifact_sha256,
-               sizeof(expected_artifact_sha256));
-        LV_CHECK("(e0) dumpstate proof records committed verified reseed",
-                 boot_proof.assisted_snapshot_body_sha3_verified &&
-                 !boot_proof.assisted_snapshot_embedded_frontier_verified &&
-                 boot_proof.assisted_snapshot_reseed_committed &&
-                 boot_proof.assisted_snapshot_seed_height == 1234 &&
-                 boot_proof.assisted_snapshot_record_count == ok_snap.count &&
-                 strcmp(boot_proof.assisted_snapshot_payload_sha3,
-                        "") != 0 &&
-                 strcmp(boot_proof.assisted_snapshot_anchor_block_hash,
-                        "0000000000000000000000000000000000000000000000000000000000000000") == 0 &&
-                 strcmp(boot_proof.assisted_snapshot_path, snap_path) == 0);
-        LV_CHECK("(e0) converged install clears global pending boot gate",
-                 boot_snapshot_install_marker_pending(pdb, &marker_pending) &&
-                     !marker_pending);
-        bound_pending = true;
-        LV_CHECK("(e0) no pending journal needs no loader artifact",
-                 boot_snapshot_install_pending_artifact_matches(
-                     pdb, NULL, &bound_pending) && !bound_pending);
-
-        progress_store_close();
-        LV_CHECK("(e0) completed receipt survives store reopen",
-                 progress_store_open(dir));
-        pdb = progress_store_db();
-        marker_matches = false;
-        LV_CHECK("(e0) reopened receipt retains exact artifact identity",
-                 pdb && !boot_snapshot_install_marker_blocks_resume(
-                            pdb, ok_artifact_sha256, &marker_matches) &&
-                     marker_matches);
-        LV_CHECK("(e0) resume fixture has reducer log schemas",
-                 lv_ensure_reducer_log_tables(pdb));
-        uint8_t resume_poison[32] = {0xD6};
-        LV_CHECK("(e0) seed post-snapshot forward-state witness",
-                 coins_kv_add(pdb, resume_poison, 0, 9, 1235, false,
-                              (const uint8_t *)"\x51", 1));
-        chain_restore_boot_snapshot_reset_for_testing();
-        boot_load_snapshot_at_own_height_reset(&ndb, snap_path, dir, NULL,
-                                               true);
-        chain_restore_get_boot_snapshot(&boot_proof);
-        LV_CHECK("(e0) RESUME-FAST republishes exact completed receipt",
-                 boot_proof.assisted_snapshot_body_sha3_verified &&
-                 boot_proof.assisted_snapshot_reseed_committed &&
-                 !boot_proof.assisted_snapshot_embedded_frontier_verified &&
-                 boot_proof.assisted_snapshot_record_count == ok_snap.count &&
-                 strcmp(boot_proof.assisted_snapshot_payload_sha3, "") != 0 &&
-                 strcmp(boot_proof.assisted_snapshot_artifact_sha256,
-                        expected_artifact_sha256) == 0 &&
-                 strcmp(boot_proof.assisted_snapshot_path, snap_path) == 0 &&
-                 coins_kv_exists(pdb, resume_poison, 0));
-
-        char *generation_err = NULL;
-        bool generation_advanced =
-            sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL,
-                         &generation_err) == SQLITE_OK &&
-            coins_kv_bump_authority_generation_in_tx(pdb) &&
-            sqlite3_exec(pdb, "COMMIT", NULL, NULL,
-                         &generation_err) == SQLITE_OK;
-        if (!generation_advanced)
-            (void)sqlite3_exec(pdb, "ROLLBACK", NULL, NULL, NULL);
-        sqlite3_free(generation_err);
-        int32_t stale_applied = -1;
-        bool stale_pending = true, stale_matches = false;
-        bool stale_frontier = true;
-        LV_CHECK("(e0) authority generation invalidates completed receipt",
-                 generation_advanced &&
-                 !boot_snapshot_install_resume_allowed(
-                     pdb, &(struct uss_header){.height = 1234},
-                     ok_artifact_sha256, &stale_applied, &stale_pending,
-                     &stale_matches, &stale_frontier) &&
-                 !stale_pending && stale_matches && !stale_frontier);
-
-        LV_CHECK("(e0) delete completed receipt for absent-receipt refusal",
-                 progress_meta_delete(
-                     pdb, BOOT_SNAPSHOT_INSTALL_MARKER_KEY));
-        int32_t absent_applied = -1;
-        bool absent_pending = true, absent_matches = true;
-        bool absent_frontier = true;
-        LV_CHECK("(e0) generic coins authority cannot replace absent receipt",
-                 !boot_snapshot_install_resume_allowed(
-                     pdb, &(struct uss_header){.height = 1234},
-                     ok_artifact_sha256, &absent_applied, &absent_pending,
-                     &absent_matches, &absent_frontier) &&
-                     !absent_pending && !absent_matches && !absent_frontier);
-
-        uint8_t legacy_marker[BOOT_SNAPSHOT_INSTALL_MARKER_BYTES] = {0};
-        memcpy(legacy_marker, "ZCLSIM1", 7);
-        lv_wle32(legacy_marker + 8, 1);
-        lv_wle32(legacy_marker + 12,
-                 BOOT_SNAPSHOT_INSTALL_MARKER_BYTES);
-        lv_wle32(legacy_marker + 16, 1234);
-        lv_wle64(legacy_marker + 24, ok_snap.count);
-        memcpy(legacy_marker + 32, ok_snap.body_sha3, 32);
-        struct uss_header legacy_header = {
-            .height = 1234,
-            .count = ok_snap.count,
-        };
-        memcpy(legacy_header.sha3_hash, ok_snap.body_sha3, 32);
-        LV_CHECK("(e0) legacy v1 pending receipt is readable",
-                 progress_meta_set(
-                     pdb, BOOT_SNAPSHOT_INSTALL_MARKER_KEY,
-                     legacy_marker, sizeof(legacy_marker)) &&
-                 boot_snapshot_install_marker_pending(pdb, &marker_pending) &&
-                 marker_pending &&
-                 boot_snapshot_install_pending_artifact_matches(
-                     pdb, snap_path, &bound_pending) && bound_pending);
-        lv_wle64(legacy_marker + 24, ok_snap.count + 1);
-        LV_CHECK("(e0) mismatched legacy v1 receipt fails closed",
-                 progress_meta_set(
-                     pdb, BOOT_SNAPSHOT_INSTALL_MARKER_KEY,
-                     legacy_marker, sizeof(legacy_marker)) &&
-                 !boot_snapshot_install_pending_artifact_matches(
-                     pdb, snap_path, &bound_pending) && bound_pending);
-        lv_wle64(legacy_marker + 24, ok_snap.count);
-        LV_CHECK("(e0) verified legacy v1 receipt upgrades to exact v2",
-                 progress_meta_set(
-                     pdb, BOOT_SNAPSHOT_INSTALL_MARKER_KEY,
-                     legacy_marker, sizeof(legacy_marker)) &&
-                 boot_snapshot_install_marker_begin(
-                     pdb, &legacy_header, ok_artifact_sha256) &&
-                 boot_snapshot_install_marker_blocks_resume(
-                     pdb, ok_artifact_sha256, &marker_matches) &&
-                 marker_matches);
-
-        /* Model a kill after the applied-height COMMIT: authority is true but the in-progress marker must force a verified reseed; a poison coin proves the fast-resume path did not run. */
-        uint8_t poison_txid[32] = {0xE7};
-        LV_CHECK("(e0b) arm applied-height crash marker",
-                 boot_snapshot_install_marker_begin(
-                     pdb, &(struct uss_header){
-                         .height = 1234, .count = ok_snap.count},
-                     ok_artifact_sha256));
-        LV_CHECK("(e0b) add poison coin to partial authority fixture",
-                 coins_kv_add(pdb, poison_txid, 0, 7, 1234, false,
-                              (const uint8_t *)"\x51", 1) &&
-                 coins_kv_is_proven_authority(pdb, NULL));
-        boot_load_snapshot_at_own_height_reset(&ndb, snap_path, dir, NULL,
-                                               true);
-        LV_CHECK("(e0b) marker suppresses RESUME-FAST and removes poison",
-                 coins_kv_count(pdb) == (int64_t)ok_snap.count &&
-                 !coins_kv_exists(pdb, poison_txid, 0));
-        LV_CHECK("(e0b) converged retry clears marker",
-                 !boot_snapshot_install_marker_blocks_resume(
-                     pdb, ok_artifact_sha256, NULL));
-
-        progress_store_close();
-        LV_CHECK("(e1) corrupt progress.kv fixture written",
-                 lv_write_junk_progress_store(dir));
-        boot_load_snapshot_at_own_height_reset(&ndb, snap_path, dir, NULL, true);
-        pdb = progress_store_db();
-        int32_t applied = -1;
-        bool found = false;
-        LV_CHECK("(e1) corrupt progress.kv quarantined",
-                 lv_has_quarantined_progress_store(dir));
-        LV_CHECK("(e1) loader rebuilt coins_kv from verified snapshot",
-                 pdb && coins_kv_count(pdb) == (int64_t)ok_snap.count &&
-                 coins_kv_get_applied_height(pdb, &applied, &found) &&
-                 found && applied == 1235);
-
-        progress_store_close();
-        LV_CHECK("(e2) bad stage_cursor fixture written",
-                 lv_write_bad_stage_cursor_store(dir));
-        LV_CHECK("(e2) bad schema progress_store opens",
-                 progress_store_open(dir));
-        boot_load_snapshot_at_own_height_reset(&ndb, snap_path, dir, NULL, true);
-        pdb = progress_store_db();
-        applied = -1;
-        found = false;
-        LV_CHECK("(e2) bad schema progress.kv quarantined",
-                 lv_has_quarantined_progress_store(dir));
-        LV_CHECK("(e2) loader rebuilt stage cursors and coins_kv",
-                 pdb && coins_kv_count(pdb) == (int64_t)ok_snap.count &&
-                 coins_kv_get_applied_height(pdb, &applied, &found) &&
-                 found && applied == 1235);
-    }
-
-    /* (f) RESUME-FAST repair: when persisted coins_kv authority is already past the snapshot seed, the loader must still seed the trusted reducer base at the applied coins frontier, or H* falls back to the checkpoint. */
-    {
-        struct main_state ms;
-        main_state_init(&ms);
-        struct block_index *owned_blocks = NULL;
-        bool ok = lv_seed_active_chain(&ms, &ndb, 1239, -1, NULL,
-                                       &owned_blocks);
-        LV_CHECK("(f) active chain fixture reaches applied frontier", ok);
-        struct lv_built bound_snap = ok_snap;
-        if (ok)
-            memcpy(bound_snap.file + 40,
-                   owned_blocks[1234].hashBlock.data, 32);
-        LV_CHECK("(f) write snapshot bound to active-chain seed",
-                 ok && lv_write(snap_path, &bound_snap));
-        if (ok)
-            boot_load_snapshot_at_own_height_reset(
-                &ndb, snap_path, dir, &ms, true);
-
-        pdb = progress_store_db();
-        char *terr = NULL;
-        ok = pdb &&
-            sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, &terr) == SQLITE_OK;
-        uint8_t one = 1;
-        ok = ok &&
-             progress_meta_set_in_tx(pdb, COINS_KV_MIGRATION_COMPLETE_KEY,
-                                     &one, 1) &&
-             coins_kv_set_applied_height_in_tx(pdb, 1240) &&
-             sqlite3_exec(pdb, "COMMIT", NULL, NULL, &terr) == SQLITE_OK;
-        if (!ok && pdb)
-            sqlite3_exec(pdb, "ROLLBACK", NULL, NULL, NULL);
-        if (terr)
-            sqlite3_free(terr);
-        LV_CHECK("(f) setup proven coins authority above snapshot seed", ok);
-        LV_CHECK("(f) reducer log schemas exist",
-                 pdb && lv_ensure_reducer_log_tables(pdb));
-        LV_CHECK("(f) stale high header cursor fixture",
-                 pdb && lv_force_stage_cursor(pdb, "validate_headers", 1250));
-        LV_CHECK("(f) H* starts at checkpoint before resume repair",
-                 pdb && lv_compute_hstar(pdb) == 1234);
-
-        seed_integrity_gate_reset_for_testing();
-        seed_integrity_gate_set_node_db_for_testing(&ndb);
-        if (ok)
-            boot_load_snapshot_at_own_height_reset(&ndb, snap_path, dir, &ms,
-                                                   true);
-        seed_integrity_gate_reset_for_testing();
-
-        int32_t hstar_after = pdb ? lv_compute_hstar(pdb) : -1;
-        int32_t applied = -1;
-        bool found = false;
-        LV_CHECK("(f) resume repair raises H* to proven coins frontier",
-                 hstar_after == 1239);
-        LV_CHECK("(f) resume repair rewinds high header cursor to boundary",
-                 pdb && lv_stage_cursor(pdb, "validate_headers") == 1240);
-        LV_CHECK("(f) resume repair stamps tip_finalize to served boundary",
-                 pdb && lv_stage_cursor(pdb, "tip_finalize") == 1239);
-        LV_CHECK("(f) resume repair preserves applied frontier",
-                 pdb && coins_kv_get_applied_height(pdb, &applied, &found) &&
-                 found && applied == 1240);
-
-        main_state_free(&ms);
-        free(owned_blocks);
-    }
-
-    /* (g) A canonical USS v2 artifact carries its header-bound Sapling frontier through the production installer, durable receipt reopen, and RESUME-FAST, so embedded_frontier_verified=true describes installed authority. */
-    {
-        progress_store_close();
-        char v2_dir[256];
-        test_make_tmpdir(v2_dir, sizeof(v2_dir), "load_verify_boot", "v2");
-        char v2_path[320], v2_dbpath[320], v2_blocks[320];
-        snprintf(v2_path, sizeof(v2_path), "%s/sapling-v2.snapshot", v2_dir);
-        snprintf(v2_dbpath, sizeof(v2_dbpath), "%s/node.db", v2_dir);
-        snprintf(v2_blocks, sizeof(v2_blocks), "%s/blocks", v2_dir);
-
-        struct incremental_merkle_tree v2_tree;
-        sapling_tree_init(&v2_tree);
-        for (uint8_t i = 1; i <= 3; i++) {
-            struct uint256 leaf;
-            uint256_set_null(&leaf);
-            leaf.data[0] = (uint8_t)(0x90u + i);
-            leaf.data[31] = i;
-            incremental_tree_append(&v2_tree, &leaf);
-        }
-        struct uint256 v2_root;
-        incremental_tree_root(&v2_tree, &v2_root);
-        struct byte_stream v2_serialized;
-        stream_init(&v2_serialized, 4096);
-        LV_CHECK("(g) nonempty Sapling frontier serializes",
-                 incremental_tree_serialize(&v2_tree, &v2_serialized) &&
-                     !v2_serialized.error && v2_serialized.size > 0);
-
-        uint8_t v2_anchor_hash[32] = {0};
-        lv_hash_for_height(30, v2_anchor_hash);
-        struct snapshot_shielded v2_shielded = {
-            .sapling = v2_serialized.data,
-            .sapling_len = (uint32_t)v2_serialized.size,
-        };
-        sqlite3 *v2_source = NULL;
-        uint8_t v2_payload_sha3[32] = {0};
-        uint64_t v2_count = 0;
-        int64_t v2_supply = 0;
-        bool v2_written =
-            sqlite3_open(":memory:", &v2_source) == SQLITE_OK &&
-            lv_seed_snapshot_coins(v2_source) &&
-            coins_kv_snapshot_write(v2_source, v2_path, 30, v2_anchor_hash,
-                                    &v2_shielded, v2_payload_sha3, &v2_count,
-                                    &v2_supply);
-        LV_CHECK("(g) canonical writer emits two-coin USS v2", v2_written &&
-                 v2_count == 2 && v2_supply == 3300);
-        if (v2_source)
-            sqlite3_close(v2_source);
-
-        struct uss_header v2_header;
-        uint8_t v2_artifact_sha256[32] = {0};
-        const uint8_t *v2_frontier = NULL;
-        uint32_t v2_frontier_len = 0;
-        char v2_err[160] = {0};
-        struct uss_handle *v2_handle =
-            uss_open(v2_path, true, NULL, &v2_header, v2_err, sizeof(v2_err));
-        bool v2_parsed = v2_handle && uss_version(v2_handle) == 2 &&
-            uss_frontier(v2_handle, &v2_frontier, &v2_frontier_len) &&
-            v2_frontier_len == v2_serialized.size &&
-            memcmp(v2_frontier, v2_serialized.data, v2_frontier_len) == 0 &&
-            uss_artifact_sha256(v2_handle, v2_artifact_sha256);
-        LV_CHECK("(g) production parser verifies exact v2 frontier bytes",
-                 v2_parsed);
-        if (v2_handle)
-            uss_close(v2_handle);
-
-        struct node_db v2_ndb;
-        struct main_state v2_ms;
-        main_state_init(&v2_ms);
-        struct block_index *v2_blocks_owned = NULL;
-        bool v2_context = node_db_open(&v2_ndb, v2_dbpath) &&
-            progress_store_open(v2_dir) &&
-            lv_seed_active_chain(&v2_ms, &v2_ndb, 30, 30, &v2_root,
-                                 &v2_blocks_owned);
-        LV_CHECK("(g) real active chain binds v2 anchor and Sapling root",
-                 v2_context &&
-                     memcmp(v2_header.anchor_block_hash,
-                            v2_blocks_owned[30].hashBlock.data, 32) == 0 &&
-                     memcmp(v2_blocks_owned[30].hashFinalSaplingRoot.data,
-                            v2_root.data, 32) == 0);
-        LV_CHECK("(g) v2 install fixture has no blocks directory",
-                 access(v2_blocks, F_OK) != 0);
-
-        chain_restore_boot_snapshot_reset_for_testing();
-        if (v2_context)
-            boot_load_snapshot_at_own_height_reset(
-                &v2_ndb, v2_path, v2_dir, &v2_ms, true);
-        sqlite3 *v2_pdb = progress_store_db();
-        struct chain_restore_boot_snapshot v2_proof;
-        chain_restore_get_boot_snapshot(&v2_proof);
-        char v2_payload_hex[65] = {0};
-        char v2_anchor_hex[65] = {0};
-        char v2_artifact_hex[65] = {0};
-        HexStr(v2_payload_sha3, 32, false, v2_payload_hex,
-               sizeof(v2_payload_hex));
-        HexStr(v2_anchor_hash, 32, false, v2_anchor_hex,
-               sizeof(v2_anchor_hex));
-        HexStr(v2_artifact_sha256, 32, false, v2_artifact_hex,
-               sizeof(v2_artifact_hex));
-        LV_CHECK("(g) fresh production install publishes exact verified v2 proof",
-                 v2_proof.assisted_snapshot_body_sha3_verified &&
-                 v2_proof.assisted_snapshot_embedded_frontier_verified &&
-                 v2_proof.assisted_snapshot_reseed_committed &&
-                 v2_proof.assisted_snapshot_seed_height == 30 &&
-                 v2_proof.assisted_snapshot_record_count == v2_count &&
-                 strcmp(v2_proof.assisted_snapshot_payload_sha3,
-                        v2_payload_hex) == 0 &&
-                 strcmp(v2_proof.assisted_snapshot_anchor_block_hash,
-                        v2_anchor_hex) == 0 &&
-                 strcmp(v2_proof.assisted_snapshot_artifact_sha256,
-                        v2_artifact_hex) == 0 &&
-                 strcmp(v2_proof.assisted_snapshot_path, v2_path) == 0);
-
-        struct incremental_merkle_tree v2_anchor_tree;
-        struct uint256 v2_anchor_root;
-        int64_t v2_anchor_height = -1;
-        sapling_tree_init(&v2_anchor_tree);
-        LV_CHECK("(g) root-verified v2 frontier is durable anchor authority",
-                 v2_pdb && anchor_kv_latest_tree(
-                     v2_pdb, ANCHOR_POOL_SAPLING, &v2_anchor_tree,
-                     &v2_anchor_root, &v2_anchor_height) == ANCHOR_KV_FOUND &&
-                 v2_anchor_height == 30 &&
-                 memcmp(v2_anchor_root.data, v2_root.data, 32) == 0);
-
-        uint8_t v2_tree_blob[4096] = {0};
-        size_t v2_tree_len = 0;
-        int64_t v2_rebuild_height = -1;
-        struct incremental_merkle_tree v2_persisted_tree;
-        struct uint256 v2_persisted_root;
-        sapling_tree_init(&v2_persisted_tree);
-        struct byte_stream v2_tree_stream;
-        bool v2_tree_pair = node_db_state_get(
-                &v2_ndb, "sapling_tree", v2_tree_blob,
-                sizeof(v2_tree_blob), &v2_tree_len) &&
-            node_db_state_get_int(&v2_ndb, "sapling_tree_rebuild_height",
-                                  &v2_rebuild_height);
-        stream_init_from_data(&v2_tree_stream, v2_tree_blob, v2_tree_len);
-        v2_tree_pair = v2_tree_pair &&
-            incremental_tree_deserialize(&v2_persisted_tree,
-                                         &v2_tree_stream);
-        incremental_tree_root(&v2_persisted_tree, &v2_persisted_root);
-        LV_CHECK("(g) node-state frontier pair matches header root",
-                 v2_tree_pair && v2_rebuild_height == 30 &&
-                 memcmp(v2_persisted_root.data, v2_root.data, 32) == 0);
-        stream_free(&v2_tree_stream);
-
-        progress_store_close();
-        node_db_close(&v2_ndb);
-        bool v2_reopened = node_db_open(&v2_ndb, v2_dbpath) &&
-                           progress_store_open(v2_dir);
-        v2_pdb = progress_store_db();
-        int32_t v2_applied = -1;
-        bool v2_pending = true, v2_matches = false;
-        bool v2_frontier_verified = false;
-        LV_CHECK("(g) reopened receipt preserves verified-frontier authority",
-                 v2_reopened && boot_snapshot_install_resume_allowed(
-                     v2_pdb, &v2_header, v2_artifact_sha256, &v2_applied,
-                     &v2_pending, &v2_matches, &v2_frontier_verified) &&
-                 v2_applied == 31 && !v2_pending && v2_matches &&
-                 v2_frontier_verified);
-        LV_CHECK("(g) reopened resume fixture has reducer log schemas",
-                 v2_pdb && lv_ensure_reducer_log_tables(v2_pdb));
-        uint8_t v2_poison[32] = {0xe4};
-        LV_CHECK("(g) forward-state witness seeds after v2 install",
-                 v2_pdb && coins_kv_add(
-                     v2_pdb, v2_poison, 0, 77, 31, false,
-                     (const uint8_t *)"\x51", 1));
-        chain_restore_boot_snapshot_reset_for_testing();
-        if (v2_reopened)
-            boot_load_snapshot_at_own_height_reset(
-                &v2_ndb, v2_path, v2_dir, &v2_ms, true);
-        chain_restore_get_boot_snapshot(&v2_proof);
-        LV_CHECK("(g) RESUME-FAST preserves forward state and republishes true",
-                 coins_kv_exists(v2_pdb, v2_poison, 0) &&
-                 v2_proof.assisted_snapshot_body_sha3_verified &&
-                 v2_proof.assisted_snapshot_embedded_frontier_verified &&
-                 v2_proof.assisted_snapshot_reseed_committed &&
-                 strcmp(v2_proof.assisted_snapshot_artifact_sha256,
-                        v2_artifact_hex) == 0 &&
-                 strcmp(v2_proof.assisted_snapshot_path, v2_path) == 0);
-
-        progress_store_close();
-        node_db_close(&v2_ndb);
-        main_state_free(&v2_ms);
-        free(v2_blocks_owned);
-        stream_free(&v2_serialized);
-    }
+    struct lv_v2_fix v2 = {0};
+    failures += lv_g_build_v2_artifact(&v2);
+    failures += lv_g_parse_v2_frontier(&v2);
+    failures += lv_g_bind_v2_active_chain(&v2);
+    failures += lv_g_publish_v2_install_proof(&v2);
+    failures += lv_g_durable_v2_anchor(&v2);
+    failures += lv_g_reopen_v2_receipt(&v2);
+    failures += lv_g_v2_resume_fast(&v2);
 
     /* Teardown. */
     checkpoints_set_sha3_override_for_test(NULL);
