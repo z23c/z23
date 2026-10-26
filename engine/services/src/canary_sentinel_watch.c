@@ -230,6 +230,242 @@ static bool canary_source_id_valid(const char *source_id)
     return true;
 }
 
+static int64_t canary_sentinel_mtime(const char *path)
+{
+    struct platform_file_metadata metadata;
+    return platform_file_metadata_read(path, &metadata) ==
+               PLATFORM_FILE_METADATA_OK
+               ? metadata.modified_seconds : 0;
+}
+
+static bool read_parsed_sentinel(const char *path, struct json_value *v)
+{
+    char raw[CANARY_SENTINEL_MAX_BYTES];
+    size_t raw_len = 0;
+    bool readable = read_sentinel(path, raw, sizeof(raw), &raw_len);
+    json_init(v);
+    return readable && json_read(v, raw, raw_len) && v->type == JSON_OBJ;
+}
+
+static bool mark_parse_failure_once(struct canary_kind_slot *slot,
+                                    int64_t mtime)
+{
+    bool log_it = slot->parse_fail_logged_mtime != mtime;
+    if (log_it)
+        slot->parse_fail_logged_mtime = mtime;
+    return log_it;
+}
+
+struct canary_sentinel_fields {
+    const char *verdict;
+    const char *from;
+    const char *reason;
+    const char *source_id;
+    const char *artifact;
+    const char *build_commit;
+    int64_t ts;
+    int64_t started_ts;
+};
+
+struct canary_identity_match {
+    const char *running_source_id;
+    const char *running_artifact;
+    bool exact_source;
+    bool exact_artifact;
+    bool cross_build;
+    bool cross_artifact;
+};
+
+struct canary_verdict_class {
+    bool stale_run;
+    bool is_fail;
+    bool authoritative_clear;
+    bool rejected_clear;
+    int64_t process_start;
+};
+
+static void load_sentinel_fields(const struct json_value *v,
+                                 struct canary_sentinel_fields *fields)
+{
+    fields->verdict = json_get_str(json_get(v, "verdict"));
+    fields->from = json_get_str(json_get(v, "from"));
+    fields->reason = json_get_str(json_get(v, "reason"));
+    fields->source_id = json_get_str(json_get(v, "source_id_sha256"));
+    fields->artifact = json_get_str(json_get(v, "artifact_sha256"));
+    fields->build_commit = json_get_str(json_get(v, "build_commit"));
+    fields->ts = json_get_int(json_get(v, "ts"));
+    fields->started_ts = json_get_int(json_get(v, "started_ts"));
+
+    /* A syntactically valid JSON object is not necessarily a typed sentinel.
+     * Normalize every optional/malformed string to empty before strcmp/copy:
+     * an unknown verdict then follows the fail-closed clear path, while a
+     * missing display field can never become a NULL `%s` argument. */
+    if (!fields->verdict) fields->verdict = "";
+    if (!fields->from) fields->from = "";
+    if (!fields->reason) fields->reason = "";
+    if (!fields->source_id) fields->source_id = "";
+    if (!fields->artifact) fields->artifact = "";
+    if (!fields->build_commit) fields->build_commit = "";
+}
+
+static void compare_canary_identities(const char *sentinel_source_id,
+                                      const char *sentinel_artifact,
+                                      struct canary_identity_match *id)
+{
+    /* The verdict dir is shared across builds. Only the exact SHA-256 source
+     * identity participates in the staleness decision; build_commit is
+     * display-only GitHub trace metadata. A legacy sentinel without a valid
+     * source ID retains the pre-migration behavior and is not silently
+     * discarded. */
+    const char *running_source_id = zcl_build_source_id_sha256();
+    const char *running_artifact = running_artifact_sha256();
+    bool sentinel_source_valid = canary_source_id_valid(sentinel_source_id);
+    bool running_source_valid = canary_source_id_valid(running_source_id);
+    bool source_ids_comparable = sentinel_source_valid &&
+                                 running_source_valid;
+    bool exact_source = source_ids_comparable &&
+                        strcmp(sentinel_source_id, running_source_id) == 0;
+    bool artifact_ids_comparable =
+        canary_source_id_valid(sentinel_artifact) &&
+        canary_source_id_valid(running_artifact);
+    bool exact_artifact = artifact_ids_comparable &&
+                          strcmp(sentinel_artifact, running_artifact) == 0;
+    id->running_source_id = running_source_id;
+    id->running_artifact = running_artifact;
+    id->exact_source = exact_source;
+    id->exact_artifact = exact_artifact;
+    id->cross_build = source_ids_comparable && !exact_source;
+    id->cross_artifact = artifact_ids_comparable && !exact_artifact;
+}
+
+static void classify_canary_verdict(const char *verdict, int64_t started_ts,
+                                    bool exact_source, bool exact_artifact,
+                                    struct canary_verdict_class *cls)
+{
+    int64_t process_start =
+        atomic_load_explicit(&g_watch.process_start_unix,
+                             memory_order_relaxed);
+    bool stale_run = started_ts > 0 && process_start > 0 &&
+                     started_ts < process_start;
+    bool is_fail = strcmp(verdict, "FAIL") == 0;
+    bool is_pass = strcmp(verdict, "PASS") == 0;
+    bool current_run = started_ts > 0 && process_start > 0 &&
+                       started_ts >= process_start;
+    cls->process_start = process_start;
+    cls->stale_run = stale_run;
+    cls->is_fail = is_fail;
+    cls->authoritative_clear = is_pass && exact_source && exact_artifact &&
+                               current_run;
+    cls->rejected_clear = !is_fail && !cls->authoritative_clear;
+}
+
+static void store_sentinel_verdict_locked(
+    struct canary_kind_slot *slot,
+    const struct canary_sentinel_fields *fields,
+    const struct canary_identity_match *id,
+    const struct canary_verdict_class *cls)
+{
+    slot->current_pass = cls->authoritative_clear;
+    snprintf(slot->verdict, sizeof(slot->verdict), "%s", fields->verdict);
+    snprintf(slot->reason, sizeof(slot->reason), "%s", fields->reason);
+    snprintf(slot->source_id_sha256, sizeof(slot->source_id_sha256), "%s",
+             fields->source_id);
+    snprintf(slot->artifact_sha256, sizeof(slot->artifact_sha256), "%s",
+             fields->artifact);
+    snprintf(slot->build_commit, sizeof(slot->build_commit), "%s",
+             fields->build_commit);
+    /* The slot key is the filename-derived kind, ALWAYS. Renaming the slot
+     * from the sentinel's `from` field would orphan a FAILed slot if the
+     * two ever disagreed (the PASS that should clear it would land in a
+     * fresh slot, leaving an un-clearable page). `from` is recorded for
+     * display only. */
+    snprintf(slot->from, sizeof(slot->from), "%s", fields->from);
+    slot->ts = fields->ts;
+    slot->started_ts = fields->started_ts;
+    slot->stale_build = id->cross_build || id->cross_artifact;
+    slot->stale_run = cls->stale_run;
+    slot->clear_rejected = cls->rejected_clear;
+    if (cls->is_fail && !id->cross_build && !id->cross_artifact &&
+        !cls->stale_run) {
+        /* A legacy/malformed identity may conservatively raise, but it can
+         * never clear a source-bound latch. Known stale evidence is ignored. */
+        slot->fail = true;
+        snprintf(slot->latched_reason, sizeof(slot->latched_reason), "%s",
+                 fields->reason);
+        slot->latched_ts = fields->ts;
+    } else if (cls->authoritative_clear && !id->cross_build &&
+               !id->cross_artifact && !cls->stale_run) {
+        slot->fail = false;
+        slot->latched_reason[0] = '\0';
+        slot->latched_ts = 0;
+    }
+    slot->parse_fail_logged_mtime = 0; /* readable again: re-arm log-once */
+}
+
+struct canary_stale_log {
+    bool stale_build;
+    bool stale_run;
+    bool rejected_clear;
+    char kind[CANARY_KIND_NAME_MAX];
+    char reason[CANARY_REASON_MAX];
+    char source_id[CANARY_SOURCE_ID_MAX];
+    char artifact[CANARY_ARTIFACT_ID_MAX];
+    int64_t started_ts;
+    int64_t process_start;
+};
+
+static void arm_canary_stale_logs_locked(struct canary_kind_slot *slot,
+                                         int64_t mtime,
+                                         int64_t process_start,
+                                         struct canary_stale_log *log)
+{
+    /* A dropped cross-build FAIL must never be a SILENT swallow (fail-loud
+     * doctrine): say so once per mtime, with the build mismatch named. */
+    memset(log, 0, sizeof(*log));
+    log->stale_build = slot->stale_build &&
+                       slot->stale_build_logged_mtime != mtime;
+    log->stale_run = slot->stale_run &&
+                     slot->stale_run_logged_mtime != mtime;
+    log->rejected_clear = slot->clear_rejected &&
+        slot->clear_rejected_logged_mtime != mtime;
+    if (log->stale_build || log->stale_run || log->rejected_clear) {
+        if (log->stale_build)
+            slot->stale_build_logged_mtime = mtime;
+        if (log->stale_run)
+            slot->stale_run_logged_mtime = mtime;
+        if (log->rejected_clear)
+            slot->clear_rejected_logged_mtime = mtime;
+        snprintf(log->kind, sizeof(log->kind), "%s", slot->kind);
+        snprintf(log->reason, sizeof(log->reason), "%s", slot->reason);
+        snprintf(log->source_id, sizeof(log->source_id), "%s",
+                 slot->source_id_sha256);
+        snprintf(log->artifact, sizeof(log->artifact), "%s",
+                 slot->artifact_sha256);
+        log->started_ts = slot->started_ts;
+        log->process_start = process_start;
+    }
+}
+
+struct canary_log_display {
+    const char *running_source;
+    const char *running_artifact;
+    const char *source_id;
+    const char *artifact;
+};
+
+static void canary_log_display_labels(const char *running_source_id,
+                                     const char *running_artifact,
+                                     const char *source_id,
+                                     const char *artifact,
+                                     struct canary_log_display *out)
+{
+    out->running_source = running_source_id ? running_source_id : "-";
+    out->running_artifact =
+        running_artifact && running_artifact[0] ? running_artifact : "-";
+    out->source_id = source_id[0] ? source_id : "-";
+    out->artifact = artifact[0] ? artifact : "-";
+}
+
 /* Parse one sentinel and fold its verdict into the kind slot. Corrupt/torn
  * JSON is skipped and logged once per file mtime — it NEVER raises alone. */
 static void process_sentinel(const char *dir, const char *name)
@@ -255,28 +491,16 @@ static void process_sentinel(const char *dir, const char *name)
     if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
         return;
 
-    struct platform_file_metadata metadata;
-    int64_t mtime =
-        platform_file_metadata_read(path, &metadata) == PLATFORM_FILE_METADATA_OK
-        ? metadata.modified_seconds : 0;
-
-    char raw[CANARY_SENTINEL_MAX_BYTES];
-    size_t raw_len = 0;
-    bool readable = read_sentinel(path, raw, sizeof(raw), &raw_len);
-
+    int64_t mtime = canary_sentinel_mtime(path);
     struct json_value v;
-    json_init(&v);
-    bool parsed = readable && json_read(&v, raw, raw_len) &&
-                  v.type == JSON_OBJ;
+    bool parsed = read_parsed_sentinel(path, &v);
 
     pthread_mutex_lock(&g_watch.lock);
     slot->parsed = parsed;
     if (!parsed) {
         /* Keep the slot's previous verdict — a torn read is transport noise,
          * never a page and never a clear. Log once per mtime, not per tick. */
-        bool log_it = slot->parse_fail_logged_mtime != mtime;
-        if (log_it)
-            slot->parse_fail_logged_mtime = mtime;
+        bool log_it = mark_parse_failure_once(slot, mtime);
         pthread_mutex_unlock(&g_watch.lock);
         json_free(&v);
         if (log_it) {
@@ -288,150 +512,43 @@ static void process_sentinel(const char *dir, const char *name)
         return;
     }
 
-    const char *verdict = json_get_str(json_get(&v, "verdict"));
-    const char *from    = json_get_str(json_get(&v, "from"));
-    const char *reason  = json_get_str(json_get(&v, "reason"));
-    const char *sentinel_source_id =
-        json_get_str(json_get(&v, "source_id_sha256"));
-    const char *sentinel_artifact =
-        json_get_str(json_get(&v, "artifact_sha256"));
-    const char *scommit = json_get_str(json_get(&v, "build_commit"));
-    int64_t ts          = json_get_int(json_get(&v, "ts"));
-    int64_t started_ts  = json_get_int(json_get(&v, "started_ts"));
+    struct canary_sentinel_fields fields = {0};
+    load_sentinel_fields(&v, &fields);
+    struct canary_identity_match id = {0};
+    compare_canary_identities(fields.source_id, fields.artifact, &id);
+    struct canary_verdict_class cls = {0};
+    classify_canary_verdict(fields.verdict, fields.started_ts,
+                            id.exact_source, id.exact_artifact, &cls);
+    store_sentinel_verdict_locked(slot, &fields, &id, &cls);
 
-    /* A syntactically valid JSON object is not necessarily a typed sentinel.
-     * Normalize every optional/malformed string to empty before strcmp/copy:
-     * an unknown verdict then follows the fail-closed clear path, while a
-     * missing display field can never become a NULL `%s` argument. */
-    if (!verdict) verdict = "";
-    if (!from) from = "";
-    if (!reason) reason = "";
-    if (!sentinel_source_id) sentinel_source_id = "";
-    if (!sentinel_artifact) sentinel_artifact = "";
-    if (!scommit) scommit = "";
-
-    /* The verdict dir is shared across builds. Only the exact SHA-256 source
-     * identity participates in the staleness decision; build_commit is
-     * display-only GitHub trace metadata. A legacy sentinel without a valid
-     * source ID retains the pre-migration behavior and is not silently
-     * discarded. */
-    const char *running_source_id = zcl_build_source_id_sha256();
-    const char *running_artifact = running_artifact_sha256();
-    bool sentinel_source_valid = canary_source_id_valid(sentinel_source_id);
-    bool running_source_valid = canary_source_id_valid(running_source_id);
-    bool source_ids_comparable = sentinel_source_valid &&
-                                 running_source_valid;
-    bool exact_source = source_ids_comparable &&
-                        strcmp(sentinel_source_id, running_source_id) == 0;
-    bool cross_build = source_ids_comparable && !exact_source;
-    bool artifact_ids_comparable =
-        canary_source_id_valid(sentinel_artifact) &&
-        canary_source_id_valid(running_artifact);
-    bool exact_artifact = artifact_ids_comparable &&
-                          strcmp(sentinel_artifact, running_artifact) == 0;
-    bool cross_artifact = artifact_ids_comparable && !exact_artifact;
-    int64_t process_start =
-        atomic_load_explicit(&g_watch.process_start_unix,
-                             memory_order_relaxed);
-    bool stale_run = started_ts > 0 && process_start > 0 &&
-                     started_ts < process_start;
-    bool is_fail = strcmp(verdict, "FAIL") == 0;
-    bool is_pass = strcmp(verdict, "PASS") == 0;
-    bool current_run = started_ts > 0 && process_start > 0 &&
-                       started_ts >= process_start;
-    bool authoritative_clear = is_pass && exact_source && exact_artifact &&
-                               current_run;
-    slot->current_pass = authoritative_clear;
-    bool rejected_clear = !is_fail && !authoritative_clear;
-
-    snprintf(slot->verdict, sizeof(slot->verdict), "%s", verdict);
-    snprintf(slot->reason, sizeof(slot->reason), "%s", reason);
-    snprintf(slot->source_id_sha256, sizeof(slot->source_id_sha256), "%s",
-             sentinel_source_id);
-    snprintf(slot->artifact_sha256, sizeof(slot->artifact_sha256), "%s",
-             sentinel_artifact);
-    snprintf(slot->build_commit, sizeof(slot->build_commit), "%s", scommit);
-    /* The slot key is the filename-derived kind, ALWAYS. Renaming the slot
-     * from the sentinel's `from` field would orphan a FAILed slot if the
-     * two ever disagreed (the PASS that should clear it would land in a
-     * fresh slot, leaving an un-clearable page). `from` is recorded for
-     * display only. */
-    snprintf(slot->from, sizeof(slot->from), "%s", from);
-    slot->ts = ts;
-    slot->started_ts = started_ts;
-    slot->stale_build = cross_build || cross_artifact;
-    slot->stale_run = stale_run;
-    slot->clear_rejected = rejected_clear;
-    if (is_fail && !cross_build && !cross_artifact && !stale_run) {
-        /* A legacy/malformed identity may conservatively raise, but it can
-         * never clear a source-bound latch. Known stale evidence is ignored. */
-        slot->fail = true;
-        snprintf(slot->latched_reason, sizeof(slot->latched_reason), "%s",
-                 reason);
-        slot->latched_ts = ts;
-    } else if (authoritative_clear && !cross_build && !cross_artifact &&
-               !stale_run) {
-        slot->fail = false;
-        slot->latched_reason[0] = '\0';
-        slot->latched_ts = 0;
-    }
-    slot->parse_fail_logged_mtime = 0; /* readable again: re-arm log-once */
-
-    /* A dropped cross-build FAIL must never be a SILENT swallow (fail-loud
-     * doctrine): say so once per mtime, with the build mismatch named. */
-    bool log_stale_build = slot->stale_build &&
-                           slot->stale_build_logged_mtime != mtime;
-    bool log_stale_run = slot->stale_run &&
-                         slot->stale_run_logged_mtime != mtime;
-    bool log_rejected_clear = slot->clear_rejected &&
-        slot->clear_rejected_logged_mtime != mtime;
-    char log_kind[CANARY_KIND_NAME_MAX] = {0};
-    char log_reason[CANARY_REASON_MAX] = {0};
-    char log_source_id[CANARY_SOURCE_ID_MAX] = {0};
-    char log_artifact[CANARY_ARTIFACT_ID_MAX] = {0};
-    int64_t log_started_ts = 0;
-    int64_t log_process_start = 0;
-    if (log_stale_build || log_stale_run || log_rejected_clear) {
-        if (log_stale_build)
-            slot->stale_build_logged_mtime = mtime;
-        if (log_stale_run)
-            slot->stale_run_logged_mtime = mtime;
-        if (log_rejected_clear)
-            slot->clear_rejected_logged_mtime = mtime;
-        snprintf(log_kind, sizeof(log_kind), "%s", slot->kind);
-        snprintf(log_reason, sizeof(log_reason), "%s", slot->reason);
-        snprintf(log_source_id, sizeof(log_source_id), "%s",
-                 slot->source_id_sha256);
-        snprintf(log_artifact, sizeof(log_artifact), "%s",
-                 slot->artifact_sha256);
-        log_started_ts = slot->started_ts;
-        log_process_start = process_start;
-    }
+    struct canary_stale_log snap = {0};
+    arm_canary_stale_logs_locked(slot, mtime, cls.process_start, &snap);
     pthread_mutex_unlock(&g_watch.lock);
     json_free(&v);
 
-    if (log_stale_build)
+    struct canary_log_display labels = {0};
+    canary_log_display_labels(id.running_source_id, id.running_artifact,
+                              snap.source_id, snap.artifact, &labels);
+    if (snap.stale_build)
         LOG_INFO("canary_watch", "[canary_watch] ignoring STALE cross-binary "
                  "verdict kind=%s source_id=%s (running=%s) artifact=%s "
                  "(running_artifact=%s) reason=%s "
-                 "— latch unchanged", log_kind, log_source_id,
-                 running_source_id ? running_source_id : "-", log_artifact,
-                 running_artifact && running_artifact[0]
-                     ? running_artifact : "-", log_reason);
-    if (log_stale_run)
+                 "— latch unchanged", snap.kind, snap.source_id,
+                 labels.running_source, snap.artifact,
+                 labels.running_artifact, snap.reason);
+    if (snap.stale_run)
         LOG_INFO("canary_watch", "[canary_watch] ignoring STALE pre-start "
                  "verdict kind=%s started_ts=%lld process_start=%lld "
-                 "reason=%s — latch unchanged", log_kind,
-                 (long long)log_started_ts, (long long)log_process_start,
-                 log_reason);
-    if (log_rejected_clear)
+                 "reason=%s — latch unchanged", snap.kind,
+                 (long long)snap.started_ts, (long long)snap.process_start,
+                 snap.reason);
+    if (snap.rejected_clear)
         LOG_WARN("canary_watch", "[canary_watch] rejected non-authoritative "
                  "clear/unknown verdict kind=%s source_id=%s artifact=%s "
                  "started_ts=%lld "
-                 "process_start=%lld — FAIL latch preserved", log_kind,
-                 log_source_id[0] ? log_source_id : "-",
-                 log_artifact[0] ? log_artifact : "-",
-                 (long long)log_started_ts, (long long)log_process_start);
+                 "process_start=%lld — FAIL latch preserved", snap.kind,
+                 labels.source_id, labels.artifact,
+                 (long long)snap.started_ts, (long long)snap.process_start);
 }
 
 /* Recompute the OR of all per-kind FAIL latches. */
