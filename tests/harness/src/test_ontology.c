@@ -89,6 +89,32 @@ static bool ontology_terms_sort(
     return true;
 }
 
+static void ontology_set_connective_facts(
+    struct zcl_ontology_formula_query_v1 *query, uint8_t left, uint8_t right,
+    const struct zcl_ontology_assertion_v1 prototypes[4],
+    struct zcl_ontology_assertion_v1 facts[4])
+{
+    size_t fact_count = 0;
+    if (left & 1u) facts[fact_count++] = prototypes[0];
+    if (left & 2u) facts[fact_count++] = prototypes[1];
+    if (right & 1u) facts[fact_count++] = prototypes[2];
+    if (right & 2u) facts[fact_count++] = prototypes[3];
+    query->assertions = fact_count ? facts : NULL;
+    query->assertion_count = fact_count;
+}
+
+static void ontology_set_state_facts(
+    struct zcl_ontology_formula_query_v1 *query, uint8_t state,
+    const struct zcl_ontology_assertion_v1 prototypes[4],
+    struct zcl_ontology_assertion_v1 facts[4])
+{
+    size_t fact_count = 0;
+    if (state & 1u) facts[fact_count++] = prototypes[0];
+    if (state & 2u) facts[fact_count++] = prototypes[1];
+    query->assertions = fact_count ? facts : NULL;
+    query->assertion_count = fact_count;
+}
+
 static int test_ontology_four_valued_calculus(void)
 {
     int failures = 0;
@@ -227,13 +253,8 @@ static int test_ontology_four_valued_calculus(void)
             ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
             for (uint8_t left = 0; left < 4; left++) {
                 for (uint8_t right = 0; right < 4; right++) {
-                    size_t fact_count = 0;
-                    if (left & 1u) facts[fact_count++] = prototypes[0];
-                    if (left & 2u) facts[fact_count++] = prototypes[1];
-                    if (right & 1u) facts[fact_count++] = prototypes[2];
-                    if (right & 2u) facts[fact_count++] = prototypes[3];
-                    query.assertions = fact_count ? facts : NULL;
-                    query.assertion_count = fact_count;
+                    ontology_set_connective_facts(&query, left, right,
+                                                  prototypes, facts);
                     ASSERT(zcl_ontology_evaluate_formula_v1(
                         evaluator, &universe, &formula, &query, &result));
                     ASSERT(result.complete);
@@ -253,11 +274,7 @@ static int test_ontology_four_valued_calculus(void)
             ZCL_ONTOLOGY_PROVED, ZCL_ONTOLOGY_BOTH,
         };
         for (uint8_t state = 0; state < 4; state++) {
-            size_t fact_count = 0;
-            if (state & 1u) facts[fact_count++] = prototypes[0];
-            if (state & 2u) facts[fact_count++] = prototypes[1];
-            query.assertions = fact_count ? facts : NULL;
-            query.assertion_count = fact_count;
+            ontology_set_state_facts(&query, state, prototypes, facts);
             ASSERT(zcl_ontology_evaluate_formula_v1(
                 evaluator, &universe, &formula, &query, &result));
             ASSERT(result.complete && result.status == not_expected[state]);
@@ -689,6 +706,35 @@ static int test_ontology_manifest_codec(void)
     return failures;
 }
 
+static void ontology_init_facts(struct zcl_ontology_assertion_v1 facts[4],
+                                const uint8_t context_root[32])
+{
+    for (size_t i = 0; i < 4; i++) {
+        facts[i].schema_version = 1;
+        facts[i].arity = 1;
+        memcpy(facts[i].context_root, context_root, 32);
+        root(facts[i].evidence_root, (uint8_t)(50 + i));
+    }
+}
+
+static void ontology_init_import_nodes(
+    struct zcl_ontology_formula_node_v1 imported_nodes[2])
+{
+    for (size_t i = 0; i < 2; i++)
+        formula_node_init(&imported_nodes[i], 0, 2);
+}
+
+static void ontology_order_domains(
+    struct zcl_ontology_domain_v1 imported_domains[2])
+{
+    if (memcmp(imported_domains[0].context_root,
+               imported_domains[1].context_root, 32) > 0) {
+        struct zcl_ontology_domain_v1 swap = imported_domains[0];
+        imported_domains[0] = imported_domains[1];
+        imported_domains[1] = swap;
+    }
+}
+
 static int test_ontology_formula_language(void)
 {
     int failures = 0;
@@ -750,12 +796,7 @@ static int test_ontology_formula_language(void)
     ASSERT(zcl_ontology_domain_v1_root(&domain, domain_root));
 
     struct zcl_ontology_assertion_v1 facts[4] = {0};
-    for (size_t i = 0; i < 4; i++) {
-        facts[i].schema_version = 1;
-        facts[i].arity = 1;
-        memcpy(facts[i].context_root, context_root, 32);
-        root(facts[i].evidence_root, (uint8_t)(50 + i));
-    }
+    ontology_init_facts(facts, context_root);
     /* P(a), P(b), explicit-not-Q(a), Q(b). */
     memcpy(facts[0].predicate_root, predicate_roots[0], 32);
     memcpy(facts[0].argument_roots[0], values[0], 32);
@@ -1130,15 +1171,9 @@ static int test_ontology_formula_language(void)
         memcpy(imported_domains[1].context_root, context_root, 32);
         root(imported_domains[0].coverage_evidence_root, 72);
         root(imported_domains[1].coverage_evidence_root, 73);
-        if (memcmp(imported_domains[0].context_root,
-                   imported_domains[1].context_root, 32) > 0) {
-            struct zcl_ontology_domain_v1 swap = imported_domains[0];
-            imported_domains[0] = imported_domains[1];
-            imported_domains[1] = swap;
-        }
+        ontology_order_domains(imported_domains);
         struct zcl_ontology_formula_node_v1 imported_nodes[2];
-        for (size_t i = 0; i < 2; i++)
-            formula_node_init(&imported_nodes[i], 0, 2);
+        ontology_init_import_nodes(imported_nodes);
         imported_nodes[0].op = ZCL_ONTOLOGY_FORMULA_EQUAL;
         imported_nodes[0].arity = 2;
         formula_variable(&imported_nodes[0].terms[0], 0, entity_type);
@@ -1639,6 +1674,21 @@ static int test_ontology_horn_rule_codec(void)
     return failures;
 }
 
+static void ontology_init_contexts(struct zcl_ontology_context_v1 contexts[3],
+                                   const uint8_t ur[32],
+                                   const uint8_t empty_imports[32])
+{
+    for (size_t i = 0; i < 3; i++) {
+        contexts[i].schema_version = 1;
+        contexts[i].kind = i == 2 ? ZCL_ONTOLOGY_CONTEXT_BUILD
+                                  : ZCL_ONTOLOGY_CONTEXT_CORPUS;
+        memcpy(contexts[i].universe_root, ur, 32);
+        root(contexts[i].subject_root, (uint8_t)(11 + i));
+        root(contexts[i].policy_root, (uint8_t)(16 + i));
+        memcpy(contexts[i].import_manifest_root, empty_imports, 32);
+    }
+}
+
 int test_ontology(void)
 {
     int failures = 0;
@@ -1662,15 +1712,7 @@ int test_ontology(void)
     struct zcl_ontology_context_v1 contexts[3] = {0};
     uint8_t empty_imports[32];
     ASSERT(zcl_ontology_import_manifest_v1_root(ur, NULL, 0, empty_imports));
-    for (size_t i = 0; i < 3; i++) {
-        contexts[i].schema_version = 1;
-        contexts[i].kind = i == 2 ? ZCL_ONTOLOGY_CONTEXT_BUILD
-                                  : ZCL_ONTOLOGY_CONTEXT_CORPUS;
-        memcpy(contexts[i].universe_root, ur, 32);
-        root(contexts[i].subject_root, (uint8_t)(11 + i));
-        root(contexts[i].policy_root, (uint8_t)(16 + i));
-        memcpy(contexts[i].import_manifest_root, empty_imports, 32);
-    }
+    ontology_init_contexts(contexts, ur, empty_imports);
     uint8_t here[32], foreign[32], importing[32], arg[32];
     ASSERT(zcl_ontology_context_v1_root(&contexts[0], here));
     ASSERT(zcl_ontology_context_v1_root(&contexts[1], foreign));
