@@ -242,6 +242,138 @@ static void hodl_history_row_to_wave(const struct hodl_history_row *hist,
         hodl_pct_x1000(hist->older_5y_zat, hist->total_zat);
 }
 
+static void hodl_fill_threshold_columns(const struct hodl_cum_row *cum,
+                                        int n_cum,
+                                        int64_t sample_height,
+                                        int64_t total,
+                                        struct hodl_survival_row *row)
+{
+    for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
+        int64_t boundary =
+            hodl_height_for_age(sample_height, HODL_THRESHOLDS[t].age_seconds);
+        int64_t older = hodl_cum_at(cum, n_cum, boundary);
+        row->older_zat[t] = older;
+        row->pct_x1000[t] = hodl_pct_x1000(older, total);
+    }
+}
+
+static int hodl_load_cumulative_rows(sqlite3 *db,
+                                     int64_t tip_height,
+                                     struct hodl_cum_row *cum,
+                                     int *n_cum_out)
+{
+    sqlite3_stmt *scan = NULL;
+    int64_t running = 0;
+    int n_cum = 0;
+    int rc;
+
+    rc = sqlite3_prepare_v2(db,
+            "SELECT height, SUM(value) FROM utxos "
+            "WHERE value > 0 AND height >= 0 AND height <= ?1 "
+            "GROUP BY height ORDER BY height ASC",
+            -1, &scan, NULL);
+    if (rc != SQLITE_OK || !scan)
+        return -1;
+    sqlite3_bind_int64(scan, 1, tip_height);
+    while (AR_STEP_ROW_READONLY(scan) == SQLITE_ROW) {
+        if (n_cum >= HODL_CUM_MAX_ROWS) {
+            sqlite3_finalize(scan);
+            return -1;
+        }
+        int64_t h = sqlite3_column_int64(scan, 0);
+        int64_t v = sqlite3_column_int64(scan, 1);
+        if (h < 0 || v <= 0)
+            continue;
+        running += v;
+        cum[n_cum].height = h;
+        cum[n_cum].cumulative_zat = running;
+        n_cum++;
+    }
+    sqlite3_finalize(scan);
+    if (n_cum < 2 || running <= 0)
+        return -1;
+    *n_cum_out = n_cum;
+    return 0;
+}
+
+static int64_t hodl_row_sample_stride(int64_t tip_height, int64_t stride)
+{
+    int64_t estimated_rows = tip_height / stride + 2;
+
+    if (estimated_rows > HODL_SURVIVAL_MAX_ROWS - 1) {
+        int64_t mul = (estimated_rows + HODL_SURVIVAL_MAX_ROWS - 2) /
+                      (HODL_SURVIVAL_MAX_ROWS - 1);
+        if (mul > 1)
+            stride *= mul;
+    }
+    return stride;
+}
+
+static int hodl_fill_sampled_rows(const struct hodl_cum_row *cum,
+                                  int n_cum,
+                                  const struct hodl_wave_snapshot *hodl,
+                                  sqlite3_stmt *time_lookup,
+                                  int64_t stride,
+                                  struct hodl_survival_row *rows)
+{
+    int n_rows = 0;
+
+    for (int64_t h = stride;
+         h <= hodl->tip_height && n_rows < HODL_SURVIVAL_MAX_ROWS - 1;
+         h += stride) {
+        int64_t total = hodl_cum_at(cum, n_cum, h);
+        if (total <= 0)
+            continue;
+        rows[n_rows].height = h;
+        rows[n_rows].time = hodl_block_time_lookup(time_lookup, h);
+        rows[n_rows].total_zat = total;
+        hodl_fill_threshold_columns(cum, n_cum, h, total, &rows[n_rows]);
+        n_rows++;
+    }
+    return n_rows;
+}
+
+static int hodl_append_tip_sample_row(const struct hodl_cum_row *cum,
+                                      int n_cum,
+                                      const struct hodl_wave_snapshot *hodl,
+                                      sqlite3_stmt *time_lookup,
+                                      struct hodl_survival_row *rows,
+                                      int n_rows)
+{
+    if (n_rows == 0 || rows[n_rows - 1].height < hodl->tip_height) {
+        int idx = n_rows;
+        if (idx < HODL_SURVIVAL_MAX_ROWS) {
+            int64_t total = hodl->total_value > 0
+                ? hodl->total_value : hodl_cum_at(cum, n_cum, hodl->tip_height);
+            rows[idx].height = hodl->tip_height;
+            rows[idx].time = hodl_block_time_lookup(time_lookup,
+                                                    hodl->tip_height);
+            rows[idx].total_zat = total;
+            hodl_fill_threshold_columns(cum, n_cum, hodl->tip_height, total,
+                                        &rows[idx]);
+            n_rows++;
+        }
+    }
+    return n_rows;
+}
+
+static int hodl_history_rows_from_table(const struct hodl_history_row *hist,
+                                        int hist_n,
+                                        int64_t tip_height,
+                                        struct hodl_survival_row *rows)
+{
+    int n = 0;
+
+    for (int i = 0; i < hist_n && n < HODL_SURVIVAL_MAX_ROWS - 1; i++) {
+        if (hist[i].height < 1 || hist[i].height > tip_height ||
+            hist[i].time <= 0 || hist[i].total_zat <= 0)
+            continue;
+        hodl_history_row_to_wave(&hist[i], &rows[n]);
+        n++;
+    }
+    return n;
+}
+
 bool hodl_load_history_wave_rows(sqlite3 *db,
                                  const struct hodl_wave_snapshot *hodl,
                                  struct hodl_survival_row *rows,
@@ -258,13 +390,7 @@ bool hodl_load_history_wave_rows(sqlite3 *db,
     if (!hist)
         return false;
     hist_n = hodl_history_load_all(db, hist, HODL_SURVIVAL_MAX_ROWS - 1);
-    for (int i = 0; i < hist_n && n < HODL_SURVIVAL_MAX_ROWS - 1; i++) {
-        if (hist[i].height < 1 || hist[i].height > hodl->tip_height ||
-            hist[i].time <= 0 || hist[i].total_zat <= 0)
-            continue;
-        hodl_history_row_to_wave(&hist[i], &rows[n]);
-        n++;
-    }
+    n = hodl_history_rows_from_table(hist, hist_n, hodl->tip_height, rows);
     free(hist);
     if (n == 0)
         return false;
@@ -308,11 +434,9 @@ bool hodl_build_survival_rows(sqlite3 *db,
                               int *row_count)
 {
     struct hodl_cum_row *cum = NULL;
-    sqlite3_stmt *scan = NULL;
     sqlite3_stmt *time_lookup = NULL;
     int n_cum = 0;
     int n_rows = 0;
-    int64_t running = 0;
     int64_t stride = HODL_HISTORY_SAMPLE_STRIDE;
 
     if (!db || !hodl || !rows || !row_count || hodl->tip_height < 1)
@@ -322,43 +446,12 @@ bool hodl_build_survival_rows(sqlite3 *db,
     if (!cum)
         return false;
 
-    if (sqlite3_prepare_v2(db,
-            "SELECT height, SUM(value) FROM utxos "
-            "WHERE value > 0 AND height >= 0 AND height <= ?1 "
-            "GROUP BY height ORDER BY height ASC",
-            -1, &scan, NULL) != SQLITE_OK || !scan) {
-        free(cum);
-        return false;
-    }
-    sqlite3_bind_int64(scan, 1, hodl->tip_height);
-    while (AR_STEP_ROW_READONLY(scan) == SQLITE_ROW) {
-        if (n_cum >= HODL_CUM_MAX_ROWS) {
-            sqlite3_finalize(scan);
-            free(cum);
-            return false;
-        }
-        int64_t h = sqlite3_column_int64(scan, 0);
-        int64_t v = sqlite3_column_int64(scan, 1);
-        if (h < 0 || v <= 0)
-            continue;
-        running += v;
-        cum[n_cum].height = h;
-        cum[n_cum].cumulative_zat = running;
-        n_cum++;
-    }
-    sqlite3_finalize(scan);
-    if (n_cum < 2 || running <= 0) {
+    if (hodl_load_cumulative_rows(db, hodl->tip_height, cum, &n_cum) != 0) {
         free(cum);
         return false;
     }
 
-    int64_t estimated_rows = hodl->tip_height / stride + 2;
-    if (estimated_rows > HODL_SURVIVAL_MAX_ROWS - 1) {
-        int64_t mul = (estimated_rows + HODL_SURVIVAL_MAX_ROWS - 2) /
-                      (HODL_SURVIVAL_MAX_ROWS - 1);
-        if (mul > 1)
-            stride *= mul;
-    }
+    stride = hodl_row_sample_stride(hodl->tip_height, stride);
 
     if (sqlite3_prepare_v2(db,
             "SELECT time FROM blocks WHERE height=?1 LIMIT 1",
@@ -366,44 +459,10 @@ bool hodl_build_survival_rows(sqlite3 *db,
         time_lookup = NULL;
     }
 
-    for (int64_t h = stride;
-         h <= hodl->tip_height && n_rows < HODL_SURVIVAL_MAX_ROWS - 1;
-         h += stride) {
-        int64_t total = hodl_cum_at(cum, n_cum, h);
-        if (total <= 0)
-            continue;
-        rows[n_rows].height = h;
-        rows[n_rows].time = hodl_block_time_lookup(time_lookup, h);
-        rows[n_rows].total_zat = total;
-        for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
-            int64_t boundary =
-                hodl_height_for_age(h, HODL_THRESHOLDS[t].age_seconds);
-            int64_t older = hodl_cum_at(cum, n_cum, boundary);
-            rows[n_rows].older_zat[t] = older;
-            rows[n_rows].pct_x1000[t] = hodl_pct_x1000(older, total);
-        }
-        n_rows++;
-    }
-
-    if (n_rows == 0 || rows[n_rows - 1].height < hodl->tip_height) {
-        int idx = n_rows;
-        if (idx < HODL_SURVIVAL_MAX_ROWS) {
-            int64_t total = hodl->total_value > 0
-                ? hodl->total_value : hodl_cum_at(cum, n_cum, hodl->tip_height);
-            rows[idx].height = hodl->tip_height;
-            rows[idx].time = hodl_block_time_lookup(time_lookup,
-                                                    hodl->tip_height);
-            rows[idx].total_zat = total;
-            for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
-                int64_t boundary = hodl_height_for_age(
-                    hodl->tip_height, HODL_THRESHOLDS[t].age_seconds);
-                int64_t older = hodl_cum_at(cum, n_cum, boundary);
-                rows[idx].older_zat[t] = older;
-                rows[idx].pct_x1000[t] = hodl_pct_x1000(older, total);
-            }
-            n_rows++;
-        }
-    }
+    n_rows = hodl_fill_sampled_rows(cum, n_cum, hodl, time_lookup, stride,
+                                    rows);
+    n_rows = hodl_append_tip_sample_row(cum, n_cum, hodl, time_lookup, rows,
+                                        n_rows);
 
     if (time_lookup)
         sqlite3_finalize(time_lookup);
