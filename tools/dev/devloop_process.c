@@ -42,6 +42,52 @@ void zcl_devloop_process_cancel_poll_clear(void)
 /* A child started with no environment unless the caller gives one. */
 static const char *const g_process_no_env[] = {NULL};
 
+static bool process_windows_native_path(const char *image, size_t image_len)
+{
+    return (image_len >= 3u && image[1] == ':' &&
+            (image[2] == '\\' || image[2] == '/')) ||
+           (image_len >= 2u && image[0] == '\\' && image[1] == '\\');
+}
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+static enum platform_process_wait_result process_windows_wait(
+    struct platform_process *child, int64_t started, int timeout_ms,
+    struct zcl_devloop_process_result *out, uint32_t *code)
+{
+    enum platform_process_wait_result waited = PLATFORM_PROCESS_WAIT_RUNNING;
+    while (waited == PLATFORM_PROCESS_WAIT_RUNNING) {
+        if (!zcl_devloop_process_cancel_requested() && g_process_cancel_poll &&
+            g_process_cancel_poll(g_process_cancel_poll_opaque))
+            zcl_devloop_process_cancel_request();
+        int64_t elapsed = platform_time_monotonic_us() - started;
+        if (zcl_devloop_process_cancel_requested() ||
+            elapsed >= (int64_t)timeout_ms * 1000) {
+            out->cancelled = zcl_devloop_process_cancel_requested();
+            out->timed_out = !out->cancelled;
+            (void)platform_process_terminate(child,
+                                             out->cancelled ? 125u : 124u);
+        }
+        waited = platform_process_wait(child, 5u, code);
+    }
+    return waited;
+}
+
+static bool process_windows_finish(struct platform_process *child,
+                                   int64_t started,
+                                   enum platform_process_wait_result waited,
+                                   uint32_t code,
+                                   struct zcl_devloop_process_result *out)
+{
+    int64_t elapsed = platform_time_monotonic_us() - started;
+    out->elapsed_ms = elapsed / 1000;
+    out->body_us = elapsed > out->startup_us ? elapsed - out->startup_us : 0;
+    bool ok = waited == PLATFORM_PROCESS_WAIT_EXITED;
+    if (ok) out->exit_code = (int)code;
+    platform_process_close(child);
+    return ok;
+}
+#endif
+
 static bool process_run_impl(const char *cwd, int exec_fd,
                              const char *const argv[],
                              const char *const envp[], int timeout_ms,
@@ -52,10 +98,7 @@ static bool process_run_impl(const char *cwd, int exec_fd,
     (void)envp; /* unused only when process execution is compiled out */
     size_t image_len = argv && argv[0] ? strlen(argv[0]) : 0u;
     if (!cwd || !cwd[0] || !argv || !argv[0] || !out || timeout_ms <= 0 ||
-        exec_fd >= 0 ||
-        !((image_len >= 3u && argv[0][1] == ':' &&
-           (argv[0][2] == '\\' || argv[0][2] == '/')) ||
-          (image_len >= 2u && argv[0][0] == '\\' && argv[0][1] == '\\'))) {
+        exec_fd >= 0 || !process_windows_native_path(argv[0], image_len)) {
         if (out) { memset(out, 0, sizeof(*out)); out->exit_code = -1; }
         fprintf(stderr, "[devloop] process: Windows requires an absolute "
                         "native executable path; descriptor execution is unavailable\n");
@@ -76,28 +119,9 @@ static bool process_run_impl(const char *cwd, int exec_fd,
         return false;
     out->startup_us = platform_time_monotonic_us() - started;
     uint32_t code = 0;
-    enum platform_process_wait_result waited = PLATFORM_PROCESS_WAIT_RUNNING;
-    while (waited == PLATFORM_PROCESS_WAIT_RUNNING) {
-        if (!zcl_devloop_process_cancel_requested() && g_process_cancel_poll &&
-            g_process_cancel_poll(g_process_cancel_poll_opaque))
-            zcl_devloop_process_cancel_request();
-        int64_t elapsed = platform_time_monotonic_us() - started;
-        if (zcl_devloop_process_cancel_requested() ||
-            elapsed >= (int64_t)timeout_ms * 1000) {
-            out->cancelled = zcl_devloop_process_cancel_requested();
-            out->timed_out = !out->cancelled;
-            (void)platform_process_terminate(&child,
-                                             out->cancelled ? 125u : 124u);
-        }
-        waited = platform_process_wait(&child, 5u, &code);
-    }
-    int64_t elapsed = platform_time_monotonic_us() - started;
-    out->elapsed_ms = elapsed / 1000;
-    out->body_us = elapsed > out->startup_us ? elapsed - out->startup_us : 0;
-    bool ok = waited == PLATFORM_PROCESS_WAIT_EXITED;
-    if (ok) out->exit_code = (int)code;
-    platform_process_close(&child);
-    return ok;
+    enum platform_process_wait_result waited =
+        process_windows_wait(&child, started, timeout_ms, out, &code);
+    return process_windows_finish(&child, started, waited, code, out);
 #endif
 }
 
@@ -412,6 +436,47 @@ static bool darwin_pread_exact(int fd, void *body, size_t body_len,
     return true;
 }
 
+static bool darwin_scan_load_command(int fd, const struct stat *st,
+                                     uint64_t commands_end, uint64_t *cursor,
+                                     const struct load_command *command,
+                                     bool *found, off_t *blob_offset,
+                                     size_t *blob_size)
+{
+    if (command->cmdsize < sizeof(*command) ||
+        *cursor + command->cmdsize > commands_end) {
+        fprintf(stderr,
+                "[devloop] process: malformed Mach-O load-command bounds\n");
+        errno = ENOEXEC;
+        return false;
+    }
+    if (command->cmd == LC_CODE_SIGNATURE) {
+        struct linkedit_data_command signature_command;
+        if (*found || command->cmdsize < sizeof(signature_command) ||
+            !darwin_pread_exact(fd, &signature_command,
+                                sizeof(signature_command), (off_t)*cursor)) {
+            fprintf(stderr,
+                    "[devloop] process: ambiguous Mach-O code signature command\n");
+            errno = ENOEXEC;
+            return false;
+        }
+        uint64_t signature_end =
+            (uint64_t)signature_command.dataoff +
+            (uint64_t)signature_command.datasize;
+        if (signature_command.datasize == 0 ||
+            signature_end > (uint64_t)st->st_size) {
+            fprintf(stderr,
+                    "[devloop] process: Mach-O code signature exceeds file bounds\n");
+            errno = ENOEXEC;
+            return false;
+        }
+        *blob_offset = (off_t)signature_command.dataoff;
+        *blob_size = (size_t)signature_command.datasize;
+        *found = true;
+    }
+    *cursor += command->cmdsize;
+    return true;
+}
+
 static bool darwin_code_signature_region(int fd, const struct stat *st,
                                          off_t *blob_offset,
                                          size_t *blob_size)
@@ -452,39 +517,9 @@ static bool darwin_code_signature_region(int fd, const struct stat *st,
             !darwin_pread_exact(fd, &command, sizeof(command),
                                 (off_t)cursor))
             return false;
-        if (command.cmdsize < sizeof(command) ||
-            cursor + command.cmdsize > commands_end) {
-            fprintf(stderr,
-                    "[devloop] process: malformed Mach-O load-command bounds\n");
-            errno = ENOEXEC;
+        if (!darwin_scan_load_command(fd, st, commands_end, &cursor, &command,
+                                      &found, blob_offset, blob_size))
             return false;
-        }
-        if (command.cmd == LC_CODE_SIGNATURE) {
-            struct linkedit_data_command signature_command;
-            if (found || command.cmdsize < sizeof(signature_command) ||
-                !darwin_pread_exact(fd, &signature_command,
-                                    sizeof(signature_command),
-                                    (off_t)cursor)) {
-                fprintf(stderr,
-                        "[devloop] process: ambiguous Mach-O code signature command\n");
-                errno = ENOEXEC;
-                return false;
-            }
-            uint64_t signature_end =
-                (uint64_t)signature_command.dataoff +
-                (uint64_t)signature_command.datasize;
-            if (signature_command.datasize == 0 ||
-                signature_end > (uint64_t)st->st_size) {
-                fprintf(stderr,
-                        "[devloop] process: Mach-O code signature exceeds file bounds\n");
-                errno = ENOEXEC;
-                return false;
-            }
-            *blob_offset = (off_t)signature_command.dataoff;
-            *blob_size = (size_t)signature_command.datasize;
-            found = true;
-        }
-        cursor += command.cmdsize;
     }
     if (!found || cursor != commands_end) {
         fprintf(stderr,
