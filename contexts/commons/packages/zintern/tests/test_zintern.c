@@ -182,12 +182,161 @@ static void test_differential(void)
     zintern_destroy(p);
 }
 
+static void test_cli(void);
+
 int main(void)
 {
+    test_cli();
     test_basic();
     test_binary_and_empty();
     test_alloc_failure();
     test_differential();
     puts("test_zintern: all groups passed (basic binary allocfail diff)");
     return 0;
+}
+
+static FILE *cli_source, *cli_sink;
+static size_t cli_flushes, cli_puts, cli_fail_put;
+static bool cli_read_fault;
+static struct alloc_ctl cli_alloc;
+static FILE *real_stdin(void) { return stdin; }
+static FILE *real_stdout(void) { return stdout; }
+static zintern *cli_create(zintern_alloc ignored)
+{
+    (void)ignored;
+    cli_alloc = (struct alloc_ctl){.live = 0, .fail_after = -1};
+    return zintern_create((zintern_alloc){ctl_malloc, ctl_free, &cli_alloc});
+}
+static uint32_t cli_put(zintern *p, const void *bytes, size_t n)
+{
+    if (++cli_puts == cli_fail_put) cli_alloc.fail_after = 0;
+    return zintern_put(p, bytes, n);
+}
+[[maybe_unused]] static int cli_flush(FILE *stream)
+{
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+[[maybe_unused]] static int cli_error(FILE *stream)
+{
+    return (stream == cli_source && cli_read_fault) || ferror(stream);
+}
+#undef stdin
+#undef stdout
+#define stdin cli_source
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define fflush cli_flush
+#define ferror cli_error
+#define zintern_create cli_create
+#define zintern_put cli_put
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef zintern_put
+#undef zintern_create
+#undef ferror
+#undef fflush
+#undef printf
+#undef stdin
+#undef stdout
+#define stdin real_stdin()
+#define stdout real_stdout()
+
+static FILE *cli_input(const char *text)
+{
+    FILE *source = tmpfile();
+    CHECK(source != NULL);
+    CHECK(fputs(text, source) >= 0 && fflush(source) == 0);
+    rewind(source);
+    return source;
+}
+static int cli_invoke(FILE *source, FILE *sink, const char *mode, bool query_words)
+{
+    char *args[] = {"zintern", (char *)mode, "b", "a", "b", NULL};
+    char large_word[513];
+    if (cli_fail_put) {
+        memset(large_word, 'x', sizeof large_word - 1);
+        large_word[sizeof large_word - 1] = '\0';
+        args[3] = large_word;
+    }
+    cli_source = source;
+    cli_sink = sink;
+    cli_flushes = cli_puts = 0;
+    int rc = embedded_cli_main(query_words ? 5 : (mode ? 2 : 1), args);
+    cli_source = stdin;
+    cli_sink = stdout;
+    CHECK(cli_alloc.live == 0);
+    return rc;
+}
+static void cli_case(const char *input, const char *mode, bool query_words,
+                      int status, const char *want)
+{
+    FILE *source = cli_input(input), *sink = tmpfile();
+    CHECK(sink != NULL);
+    CHECK(cli_invoke(source, sink, mode, query_words) == status);
+    if (!*want) { CHECK(cli_flushes == 0); }
+    char bytes[256];
+    rewind(sink);
+    size_t n = fread(bytes, 1, sizeof bytes, sink);
+    CHECK(!ferror(sink) && n == strlen(want) && !memcmp(bytes, want, n));
+    CHECK(fclose(source) == 0 && fclose(sink) == 0);
+}
+static void cli_failed_output(bool query, bool buffered)
+{
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *source = cli_input("b\na\nb\n");
+    FILE *sink = fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r");
+    CHECK(sink != NULL);
+    char buffer[4096];
+    if (buffered) { CHECK(setvbuf(sink, buffer, _IOFBF, sizeof buffer) == 0); }
+    CHECK(cli_invoke(source, sink, query ? "-q" : NULL, query) == 2);
+    CHECK(ferror(sink));
+    CHECK(fclose(source) == 0);
+    (void)fclose(sink);
+}
+static void cli_failed_input(void)
+{
+    cli_read_fault = true;
+    cli_case("", NULL, false, 2, "");
+    cli_case("b\n", NULL, false, 2, "0\tb\n");
+    cli_read_fault = false;
+#ifdef _WIN32
+    FILE *source = fopen("NUL", "w");
+#else
+    FILE *source = fopen("/dev/null", "w");
+#endif
+    FILE *sink = tmpfile();
+    CHECK(source != NULL && sink != NULL);
+    CHECK(cli_invoke(source, sink, NULL, false) == 2);
+    CHECK(cli_flushes == 0 && ftell(sink) == 0);
+    CHECK(fclose(source) == 0 && fclose(sink) == 0);
+}
+static void test_cli(void)
+{
+    cli_case("b\na\nb\n", NULL, false, 0, "0\tb\n1\ta\n0\tb\n");
+    cli_case("ignored", "-q", true, 0, "0\tb\n1\ta\n0\tb\n");
+    cli_case("\r\nb\r\n\n", NULL, false, 0, "0\t\n1\tb\n0\t\n");
+    cli_case("b\n", "unknown", false, 0, "0\tb\n");
+    cli_case("", NULL, false, 0, "");
+    cli_case("", "-q", false, 0, "");
+    cli_failed_output(false, false);
+    cli_failed_output(true, false);
+#ifdef __linux__
+    cli_failed_output(false, true);
+    cli_failed_output(true, true);
+#endif
+    cli_failed_input();
+    cli_fail_put = 2;
+    char growth[516];
+    memcpy(growth, "b\n", 2);
+    memset(growth + 2, 'x', 512);
+    memcpy(growth + 514, "\n", 2);
+    cli_case(growth, NULL, false, 2, "0\tb\n");
+    cli_case("", "-q", true, 2, "0\tb\n");
+    cli_fail_put = 0;
 }
