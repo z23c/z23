@@ -6,6 +6,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+static FILE *cli_source, *cli_sink;
+static unsigned cli_output_flushes;
+static int cli_fflush(FILE *stream) {
+  if (stream == cli_sink) cli_output_flushes++;
+  return fflush(stream);
+}
+#undef stdin
+#undef stdout
+#define stdin cli_source
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define fflush cli_fflush
+#define main zmap_cli_main
+#include "../app/main.c"
+#undef main
+#undef printf
+#undef fflush
+#undef stdout
+#undef stdin
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -334,7 +354,118 @@ static void test_failed_growth_unchanged(void) {
   zmap_destroy(m, nullptr, nullptr);
 }
 
+static bool cli_result(FILE *source, FILE *output, int status, const char *want) {
+  cli_source = source; cli_sink = output;
+  char *args[] = {"wordfreq", NULL};
+  if (zmap_cli_main(1, args) != status) return false;
+  rewind(output);
+  char bytes[128];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  return !ferror(output) && n == strlen(want) && memcmp(bytes, want, n) == 0;
+}
+
+static bool cli_padding(FILE *source, size_t count) {
+  char bytes[16384];
+  memset(bytes, ' ', sizeof bytes);
+  while (count) {
+    size_t n = count < sizeof bytes ? count : sizeof bytes;
+    if (fwrite(bytes, 1, n, source) != n) return false;
+    count -= n;
+  }
+  return true;
+}
+
+static int cli_bound_case(size_t length, int status) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int bad = 1;
+  if (!source || !output || length < 1) goto cleanup;
+  if (!cli_padding(source, length - 1) || fputc('z', source) == EOF ||
+      fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (!cli_result(source, output, status, status == 0 ? "      1 z\n" : "")) goto cleanup;
+  bad = 0;
+cleanup:
+  if (source && fclose(source) != 0) bad = 1;
+  if (output && fclose(output) != 0) bad = 1;
+  return bad;
+}
+
+static void test_cli_bound(void) {
+  CHECK(cli_bound_case(MAX_INPUT - 1, 0) == 0);
+  CHECK(cli_bound_case(MAX_INPUT, 0) == 0);
+  CHECK(cli_bound_case(MAX_INPUT + 1, 2) == 0);
+}
+
+static void test_cli_controls(void) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  if (!source || !output) { CHECK(false); goto cleanup; }
+  CHECK(fputs("b a b c a", source) >= 0 && fflush(source) == 0);
+  rewind(source);
+  CHECK(cli_result(source, output, 0, "      2 a\n      2 b\n      1 c\n"));
+cleanup:
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+}
+
+static void test_cli_read_error(void) {
+#if defined(_WIN32)
+  FILE *source = fopen("NUL", "w");
+#else
+  FILE *source = fopen("/dev/null", "w");
+#endif
+  FILE *output = tmpfile();
+  if (source && output) {
+    CHECK(cli_result(source, output, 2, ""));
+    CHECK(ferror(source));
+  } else CHECK(false);
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+}
+
+static int cli_output_cleanup(FILE *source, FILE *output, int bad) {
+  if (source && fclose(source) != 0) bad = 1;
+  if (output) (void)fclose(output);
+  return bad;
+}
+
+static int cli_sink_case(bool empty, bool buffered) {
+  FILE *source = tmpfile();
+#if defined(__linux__)
+  FILE *output = fopen(buffered ? "/dev/full" : "/dev/null", buffered ? "w" : "r");
+#elif defined(_WIN32)
+  FILE *output = fopen("NUL", "r");
+#else
+  FILE *output = fopen("/dev/null", "r");
+#endif
+  int bad = 1;
+  char buffer[4096];
+  if (!source || !output) goto cleanup;
+  if (buffered && setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+  if (fputs(empty ? "" : "a a b\n", source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  cli_source = source; cli_sink = output; cli_output_flushes = 0;
+  char *args[] = {"wordfreq", NULL};
+  if (zmap_cli_main(1, args) != (empty ? 0 : 2)) goto cleanup;
+  if (empty ? (ferror(output) || cli_output_flushes != 0) : !ferror(output)) goto cleanup;
+  bad = 0;
+cleanup:
+  return cli_output_cleanup(source, output, bad);
+}
+
+static void test_cli_output(void) {
+  CHECK(cli_sink_case(false, false) == 0);
+  CHECK(cli_sink_case(true, false) == 0);
+#if defined(__linux__)
+  CHECK(cli_sink_case(false, true) == 0);
+  CHECK(cli_sink_case(true, true) == 0);
+#endif
+}
+
 int main(void) {
+  test_cli_output();
+  test_cli_bound();
+  test_cli_controls();
+  test_cli_read_error();
     test_failed_growth_unchanged();
     test_clear_retains_capacity();
     test_clear_tombstone_growth();

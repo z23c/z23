@@ -79,6 +79,14 @@ static entry *collect_entries(zmap *m, size_t n, const zmap_alloc *alloc) {
   return entries;
 }
 
+static bool print_entries(const entry *entries, size_t shown) {
+  if (!shown) return true;
+  for (size_t i = 0; i < shown; i++)
+    if (printf("%7llu %s\n", (unsigned long long)entries[i].count,
+               entries[i].word) < 0) return false;
+  return fflush(stdout) == 0 && !ferror(stdout);
+}
+
 int main(int argc, char **argv) {
   long top = 20;
   if (argc > 1) {
@@ -92,7 +100,8 @@ int main(int argc, char **argv) {
 
   static char input[MAX_INPUT];
   size_t len = fread(input, 1, sizeof(input), stdin);
-  if (ferror(stdin) || !feof(stdin)) {
+  int extra = len == sizeof input ? fgetc(stdin) : EOF;
+  if (ferror(stdin) || extra != EOF) {
     fprintf(stderr, "wordfreq: read error or input over 64 MiB bound\n");
     return 2;
   }
@@ -118,12 +127,14 @@ int main(int argc, char **argv) {
   entries_sort(entries, n);
 
   size_t shown = top == 0 || (size_t)top > n ? n : (size_t)top;
-  for (size_t i = 0; i < shown; i++)
-    printf("%7llu %s\n", (unsigned long long)entries[i].count,
-           entries[i].word);
+  bool wrote = print_entries(entries, shown);
   fprintf(stderr, "%zu distinct words\n", n);
 
   alloc.dealloc(alloc.ctx, entries);
   zmap_destroy(m, nullptr, nullptr);
+  if (!wrote) {
+    fprintf(stderr, "wordfreq: output write failed\n");
+    return 2;
+  }
   return 0;
 }
