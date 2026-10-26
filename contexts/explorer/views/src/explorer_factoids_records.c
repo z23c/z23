@@ -36,11 +36,10 @@ static double fq_double(sqlite3 *db, const char *sql, double def)
     } while(0)
 
 /* Largest unspent transparent output: scans the live UTXO set, so it is
- * the largest coin still spendable today. `oldest` switches to the
- * oldest-unspent-coin query, which returns height in v0 and value in v1. */
-static size_t factoids_record_unspent_extreme(char *r, size_t max,
-                                              size_t off, sqlite3 *db,
-                                              bool oldest)
+ * the largest coin still spendable today. */
+static size_t factoids_record_unspent_largest_or_oldest(char *r, size_t max,
+                                                         size_t off, sqlite3 *db,
+                                                         bool oldest)
 {
     struct sql_row_i64_3 row;
     const char *sql = oldest
@@ -100,11 +99,9 @@ static size_t factoids_record_most_tx_in_block(char *r, size_t max,
     return off;
 }
 
-/* "Most in a block" count over a per-block table: `sapling` picks the
- * sapling_outputs table, otherwise joinsplits. */
-static size_t factoids_record_most_in_block(char *r, size_t max,
-                                            size_t off, sqlite3 *db,
-                                            bool sapling)
+static size_t factoids_record_most_sapling_or_joinsplit_in_block(char *r, size_t max,
+                                                                 size_t off, sqlite3 *db,
+                                                                 bool sapling)
 {
     struct sql_row_i64_2 row;
     const char *sql = sapling
@@ -288,18 +285,18 @@ size_t factoids_emit_section_5_records(uint8_t *buf, size_t cap, size_t off,
         "<table class='txlist'>"
         "<tr><th>Record</th><th>Value</th><th>Block</th><th>Time</th><th>SHA3</th></tr>");
 
-    off = factoids_record_unspent_extreme(r, max, off, db, /*oldest=*/false);
+    off = factoids_record_unspent_largest_or_oldest(r, max, off, db, false);
     off = factoids_record_largest_output_ever(r, max, off, db);
     off = factoids_record_most_tx_in_block(r, max, off, db);
-    off = factoids_record_most_in_block(r, max, off, db, /*sapling=*/false);
-    off = factoids_record_most_in_block(r, max, off, db, /*sapling=*/true);
+    off = factoids_record_most_sapling_or_joinsplit_in_block(r, max, off, db, false);
+    off = factoids_record_most_sapling_or_joinsplit_in_block(r, max, off, db, true);
     off = factoids_record_highest_difficulty(r, max, off, db);
     off = factoids_record_longest_block_gap(r, max, off, db);
     off = factoids_record_shortest_block_gap(r, max, off, db);
     off = factoids_record_largest_shielding_block(r, max, off, db);
     off = factoids_record_largest_unshielding_block(r, max, off, db);
     off = factoids_record_most_blocks_in_utc_day(r, max, off, db);
-    off = factoids_record_unspent_extreme(r, max, off, db, /*oldest=*/true);
+    off = factoids_record_unspent_largest_or_oldest(r, max, off, db, true);
     off = factoids_record_hodl_dormant_supply(r, max, off, db);
     off = factoids_record_pre_buttercup_coins(r, max, off, db);
 
