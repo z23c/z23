@@ -1566,7 +1566,6 @@ tests/harness/src/test_domain_consensus_check_block.c:test_domain_consensus_chec
 tests/harness/src/test_domain_consensus_coinbase.c:test_domain_consensus_coinbase:53
 tests/harness/src/test_domain_consensus_sapling_structural.c:test_domain_consensus_sapling_structural:27
 tests/harness/src/test_domain_consensus_tx_structural.c:test_domain_consensus_tx_structural:51
-tests/harness/src/test_domain_consensus_upgrades.c:test_domain_consensus_upgrades:37
 tests/harness/src/test_domain_encoding_base58.c:test_domain_encoding_base58:26
 tests/harness/src/test_domain_wallet_mnemonic.c:test_domain_wallet_mnemonic:68
 tests/harness/src/test_ed25519_differential.c:test_ed25519_differential:28
