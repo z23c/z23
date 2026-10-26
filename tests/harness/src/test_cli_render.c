@@ -847,14 +847,20 @@ static int test_brief_spaced_value(void)
     "\"private workdir\",\"processes\":\"no fork; threads only\"}," \
     "\"cache\":{\"hit\":false}}}"
 
-static size_t cr_lab_render(const char *body, bool human, char *out,
-                            size_t cap)
+static size_t cr_lab_render_file(const char *file, const char *body,
+                                 bool human, char *out, size_t cap)
 {
     char doc[4096];
-    snprintf(doc, sizeof(doc), LAB_ENV_HEAD "%s", "x.c", body);
+    snprintf(doc, sizeof(doc), LAB_ENV_HEAD "%s", file, body);
     struct zcl_cli_render_env e = cr_env(80, false);
     e.human = human;
     return zcl_cli_render_doc(doc, strlen(doc), "lab.run", &e, out, cap);
+}
+
+static size_t cr_lab_render(const char *body, bool human, char *out,
+                            size_t cap)
+{
+    return cr_lab_render_file("x.c", body, human, out, cap);
 }
 
 static int test_lab_run_render(void)
@@ -910,7 +916,7 @@ static int test_lab_run_render(void)
         ASSERT(n > 0);
         ASSERT(strstr(out, "exit 3 in 7 ms") != NULL);
         ASSERT(strstr(out, "stderr") != NULL && strstr(out, "oops") != NULL);
-        ASSERT(strstr(out, "(truncated)") != NULL);
+        ASSERT(strstr(out, "more output not shown") != NULL);
         ASSERT(strstr(out, "  d\n") == NULL);
         PASS();
     }
@@ -929,6 +935,59 @@ static int test_lab_run_render(void)
         ASSERT(strstr(out, "1 sanitizer finding") != NULL);
         ASSERT(strstr(out, "signed integer overflow") != NULL);
         ASSERT(strstr(out, "(cached)") != NULL);
+        PASS();
+    }
+    TEST("lab.run that did not run claims no exit, peak or sandbox") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":true,\"wall_us\":2000,\"diagnostics\":[]},"
+            "\"run\":{\"ran\":false,\"exit_code\":-1,\"wall_us\":0,"
+            "\"max_rss_kb\":0,\"stdout\":\"\",\"stderr\":\"\"},"
+            LAB_CONF, true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "did not run") != NULL);
+        ASSERT(strstr(out, "exit ") == NULL);
+        ASSERT(strstr(out, "MB peak") == NULL);
+        ASSERT(strstr(out, "sandbox") == NULL);
+        ASSERT(strstr(out, "receipt") == NULL);
+        PASS();
+    }
+    TEST("lab.run escapes control bytes in file, diagnostic and output") {
+        size_t n = cr_lab_render_file("a\\u001b[31mb\\u0007.c",
+            "\"compile\":{\"ok\":false,\"wall_us\":2000,\"diagnostics\":["
+            "{\"line\":1,\"col\":2,\"severity\":\"error\","
+            "\"message\":\"bad \\u001b[31mred\\u0007\"}]},"
+            "\"run\":{\"ran\":false},\"sanitizer\":{\"enabled\":false}}}",
+            true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strchr(out, '\033') == NULL && strchr(out, '\a') == NULL);
+        ASSERT(strstr(out, "a\\x1b[31mb\\x07.c") != NULL);
+        ASSERT(strstr(out, "bad \\x1b[31mred\\x07") != NULL);
+        n = cr_lab_render(
+            "\"compile\":{\"ok\":true,\"wall_us\":2000,\"diagnostics\":[]},"
+            "\"run\":{\"ran\":true,\"exit_code\":0,\"wall_us\":900,"
+            "\"max_rss_kb\":1024,\"stdout\":\"\\u001b[31mred\\u0007\\n\","
+            "\"stderr\":\"\\u009b2J\"}," LAB_CONF, true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strchr(out, '\033') == NULL && strchr(out, '\a') == NULL);
+        ASSERT(strstr(out, "\\x1b[31mred\\x07") != NULL);
+        ASSERT(strstr(out, "\\x9b2J") != NULL);
+        PASS();
+    }
+    TEST("lab.run long output lines end with the cut marker") {
+        char longline[700];
+        memset(longline, 'z', sizeof(longline) - 1);
+        longline[sizeof(longline) - 1] = '\0';
+        char body[1600];
+        snprintf(body, sizeof(body),
+            "\"compile\":{\"ok\":true,\"wall_us\":2000,\"diagnostics\":[]},"
+            "\"run\":{\"ran\":true,\"exit_code\":0,\"wall_us\":900,"
+            "\"max_rss_kb\":1024,\"stdout\":\"%s\\nshort\\n\","
+            "\"stderr\":\"\"}," LAB_CONF, longline);
+        char big[8192];
+        size_t n = cr_lab_render(body, true, big, sizeof(big));
+        ASSERT(n > 0);
+        ASSERT(strstr(big, "z\xE2\x80\xA6\n") != NULL);
+        ASSERT(cr_max_line_width(big) <= 80);
         PASS();
     }
     TEST("lab.run non-human mode renders nothing, so JSON stays canonical") {

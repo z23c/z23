@@ -1437,6 +1437,14 @@ static void render_data_tree(struct buf *b,
 
 /* ── lab.run: a receipt read like a person ─────────────────────────── */
 
+enum { LAB_TEXT_LINES = 3, LAB_LINE_MAX = 512 };
+
+static const char *lab_str(const struct json_value *v)
+{
+    const char *s = json_get_str(v);
+    return s ? s : "";
+}
+
 /* Wall time in plain units: whole ms under 100 ms, else seconds. */
 static void lab_fmt_wall(char *out, size_t cap, int64_t us)
 {
@@ -1446,37 +1454,59 @@ static void lab_fmt_wall(char *out, size_t cap, int64_t us)
         (void)snprintf(out, cap, "%.2f s", (double)us / 1e6);
 }
 
-static const char *lab_str(const struct json_value *v)
+/* The one sanitizer for text that came from the program, the compiler or
+ * the user (output, diagnostics, file names). Control bytes, DEL and the
+ * two-byte C1 forms (CSI included) become visible \xNN escapes, so no
+ * escape sequence reaches the terminal. A cut at the buffer end is marked
+ * with the same ellipsis the width truncation uses. */
+static void lab_clean(char *dst, size_t cap, const char *s, size_t n)
 {
-    const char *s = json_get_str(v);
-    return s ? s : "";
+    size_t w = 0;
+    bool cut = false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        bool esc = c < 0x20 || c == 0x7F;
+        char piece[8] = { (char)c, '\0' };
+        size_t pl = 1;
+        if (c == 0xC2 && i + 1 < n && (unsigned char)s[i + 1] >= 0x80 &&
+            (unsigned char)s[i + 1] <= 0x9F) {
+            c = (unsigned char)s[++i];
+            esc = true;
+        }
+        if (esc)
+            pl = (size_t)snprintf(piece, sizeof(piece), "\\x%02x", c);
+        if (w + pl + 4 > cap) {
+            cut = true;
+            break;
+        }
+        memcpy(dst + w, piece, pl);
+        w += pl;
+    }
+    if (cut) {
+        memcpy(dst + w, "…", 3);
+        w += 3;
+    }
+    dst[w] = '\0';
 }
 
-/* Up to LAB_TEXT_LINES lines of a captured stream, control bytes shown as
- * '?' so program output cannot drive the terminal; says when cut short. */
-enum { LAB_TEXT_LINES = 3, LAB_LINE_MAX = 200 };
-
+/* Up to LAB_TEXT_LINES lines of a captured stream, sanitized; says when
+ * the stream or the line count was cut short. */
 static void lab_emit_text(struct buf *b, const struct zcl_cli_render_env *e,
                           const char *key, const char *text, bool cut)
 {
     const char *p = text ? text : "";
     int shown = 0;
     while (*p && shown < LAB_TEXT_LINES) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
         char line[LAB_LINE_MAX];
-        size_t n = 0;
-        while (*p && *p != '\n') {
-            unsigned char c = (unsigned char)*p++;
-            if (n + 1 < sizeof(line))
-                line[n++] = (c < 0x20 && c != '\t') || c == 0x7f ? '?' : (char)c;
-        }
-        line[n] = '\0';
-        if (*p == '\n')
-            p++;
+        lab_clean(line, sizeof(line), p, len);
         emit_kv(b, e, 7, shown == 0 ? key : "", line);
         shown++;
+        p += len + (nl ? 1 : 0);
     }
     if (*p || cut)
-        emit_kv(b, e, 7, "", "... (truncated)");
+        emit_kv(b, e, 7, "", "… (more output not shown)");
 }
 
 /* The first diagnostics of a failed compile, errors before notes. */
@@ -1489,30 +1519,34 @@ static void lab_emit_diagnostics(struct buf *b,
         for (size_t i = 0; i < diags->num_children && shown < LAB_TEXT_LINES; i++) {
             const struct json_value *d = &diags->children[i];
             const char *sev = json_get_str(json_get(d, "severity"));
-            bool is_err = sev && strcmp(sev, "error") == 0;
-            if (is_err != (pass == 0))
+            if ((sev && strcmp(sev, "error") == 0) != (pass == 0))
                 continue;
-            char line[LAB_LINE_MAX];
+            const char *m = lab_str(json_get(d, "message"));
+            char msg[LAB_LINE_MAX], line[LAB_LINE_MAX + 48];
+            lab_clean(msg, sizeof(msg), m, strlen(m));
             (void)snprintf(line, sizeof(line), "%lld:%lld %s",
                            (long long)json_get_int(json_get(d, "line")),
-                           (long long)json_get_int(json_get(d, "col")),
-                           lab_str(json_get(d, "message")));
+                           (long long)json_get_int(json_get(d, "col")), msg);
             emit_kv(b, e, 7, shown == 0 ? "error" : "", line);
             shown++;
         }
     }
 }
 
-/* The `ran` row: exit, signal or timeout stated plainly. */
+/* The `ran` row, only for a run that happened: exit, signal, timeout or
+ * disk limit stated plainly. */
 static void lab_emit_ran(struct buf *b, const struct zcl_cli_render_env *e,
                          const struct json_value *run)
 {
-    char wall[32], line[160];
+    char wall[32], line[160], sig[64];
     lab_fmt_wall(wall, sizeof(wall), json_get_int(json_get(run, "wall_us")));
-    const char *sig = json_get_str(json_get(run, "signal_name"));
+    const char *sn = lab_str(json_get(run, "signal_name"));
+    lab_clean(sig, sizeof(sig), sn, strlen(sn));
     if (json_get_bool(json_get(run, "timed_out")))
         (void)snprintf(line, sizeof(line), "timed out, stopped after %s", wall);
-    else if (sig && sig[0])
+    else if (json_get_bool(json_get(run, "disk_exceeded")))
+        (void)snprintf(line, sizeof(line), "stopped: disk limit exceeded after %s", wall);
+    else if (sig[0])
         (void)snprintf(line, sizeof(line), "killed by %s after %s", sig, wall);
     else
         (void)snprintf(line, sizeof(line), "exit %lld in %s, %.1f MB peak",
@@ -1522,20 +1556,35 @@ static void lab_emit_ran(struct buf *b, const struct zcl_cli_render_env *e,
     emit_kv(b, e, 7, "ran", line);
 }
 
-/* What the sandbox held, from the confinement words the receipt carries. */
+/* What the sandbox held, claimed only for the fields the receipt carries
+ * and only for a program that ran. */
 static void lab_emit_sandbox(struct buf *b, const struct zcl_cli_render_env *e,
                              const struct json_value *conf)
 {
-    const char *net = json_get_str(json_get(conf, "network"));
+    const struct json_value *net = json_get(conf, "network");
+    const struct json_value *seccomp = json_get(conf, "seccomp");
     const char *fs = json_get_str(json_get(conf, "filesystem"));
     const char *proc = json_get_str(json_get(conf, "processes"));
-    char line[200];
-    (void)snprintf(line, sizeof(line), "%s%s%s%s%s",
-                   net && strcmp(net, "denied") == 0 ? "no network" : "network open",
-                   fs ? ", " : "", fs ? fs : "",
-                   proc && strncmp(proc, "no fork", 7) == 0 ? ", no fork" : "",
-                   json_get_bool(json_get(conf, "seccomp")) ? "" : ", seccomp off");
-    emit_kv(b, e, 7, "sandbox", line);
+    char line[LAB_LINE_MAX], fsc[96];
+    size_t w = 0;
+    line[0] = '\0';
+    if (net && net->type == JSON_STR)
+        w += (size_t)snprintf(line + w, sizeof(line) - w, "%s",
+                              strcmp(net->val.s, "denied") == 0
+                                  ? "no network" : "network open");
+    if (fs) {
+        lab_clean(fsc, sizeof(fsc), fs, strlen(fs));
+        w += (size_t)snprintf(line + w, sizeof(line) - w, "%s%s",
+                              w ? ", " : "", fsc);
+    }
+    if (proc && strncmp(proc, "no fork", 7) == 0)
+        w += (size_t)snprintf(line + w, sizeof(line) - w, "%s%s",
+                              w ? ", " : "", "no fork");
+    if (seccomp && seccomp->type == JSON_BOOL && !seccomp->val.b)
+        (void)snprintf(line + w, sizeof(line) - w, "%s%s", w ? ", " : "",
+                       "seccomp off");
+    if (line[0])
+        emit_kv(b, e, 7, "sandbox", line);
 }
 
 /* A sanitizer finding is stated plainly with its first quoted line. */
@@ -1551,39 +1600,18 @@ static void lab_emit_sanitizer(struct buf *b,
                    (long long)n, n == 1 ? "" : "s");
     emit_kv(b, e, 7, "caught", count);
     const char *first = json_get_str(json_get(san, "first"));
-    if (first && first[0]) {
+    if (first && first[0])
         lab_emit_text(b, e, "", first, false);
-    }
 }
 
-static void render_lab_run(struct buf *b, const struct zcl_cli_render_env *e,
-                           const struct json_value *root)
+/* The rows after a run that happened. */
+static void lab_emit_ran_rows(struct buf *b, const struct zcl_cli_render_env *e,
+                              const struct json_value *data)
 {
-    const struct json_value *data = json_get(root, "data");
-    const struct json_value *comp = json_get(data, "compile");
     const struct json_value *run = json_get(data, "run");
-    const struct json_value *san = json_get(data, "sanitizer");
-    char head[300], wall[32], line[160];
-    (void)snprintf(head, sizeof(head), "lab run  %s",
-                   lab_str(json_get(data, "file")));
-    emit_header(b, e, head);
-    lab_fmt_wall(wall, sizeof(wall), json_get_int(json_get(comp, "wall_us")));
-    bool built = json_get_bool(json_get(comp, "ok"));
-    (void)snprintf(line, sizeof(line), "%s (%s)",
-                   !built ? "failed"
-                   : json_get_bool(json_get(san, "enabled"))
-                         ? "strict C23, sanitizers on"
-                         : "strict C23, sanitizers off",
-                   wall);
-    emit_kv(b, e, 7, "built", line);
-    if (!built) {
-        lab_emit_diagnostics(b, e, json_get(comp, "diagnostics"));
-        emit_kv(b, e, 7, "ran", "did not run: the program did not compile");
-        return;
-    }
     lab_emit_ran(b, e, run);
     lab_emit_sandbox(b, e, json_get(data, "confinement"));
-    lab_emit_sanitizer(b, e, san);
+    lab_emit_sanitizer(b, e, json_get(data, "sanitizer"));
     const char *out = json_get_str(json_get(run, "stdout"));
     if (out && out[0])
         lab_emit_text(b, e, "output", out,
@@ -1592,10 +1620,58 @@ static void render_lab_run(struct buf *b, const struct zcl_cli_render_env *e,
     if (err && err[0])
         lab_emit_text(b, e, "stderr", err,
                       json_get_bool(json_get(run, "stderr_truncated")));
-    (void)snprintf(line, sizeof(line), "%.12s%s", lab_str(json_get(data, "root")),
-                   json_get_bool(json_get(json_get(data, "cache"), "hit"))
-                       ? " (cached)" : "");
-    emit_kv(b, e, 7, "receipt", line);
+}
+
+/* The `built` row: only claims sanitizers when the receipt says so. */
+static void lab_emit_built(struct buf *b, const struct zcl_cli_render_env *e,
+                           const struct json_value *comp,
+                           const struct json_value *san)
+{
+    char wall[32], line[160];
+    lab_fmt_wall(wall, sizeof(wall), json_get_int(json_get(comp, "wall_us")));
+    const struct json_value *en = json_get(san, "enabled");
+    const char *what = "failed";
+    if (json_get_bool(json_get(comp, "ok")))
+        what = !en || en->type != JSON_BOOL ? "strict C23"
+               : en->val.b ? "strict C23, sanitizers on"
+                           : "strict C23, sanitizers off";
+    (void)snprintf(line, sizeof(line), "%s (%s)", what, wall);
+    emit_kv(b, e, 7, "built", line);
+}
+
+static void render_lab_run(struct buf *b, const struct zcl_cli_render_env *e,
+                           const struct json_value *root)
+{
+    const struct json_value *data = json_get(root, "data");
+    const struct json_value *comp = json_get(data, "compile");
+    char file[LAB_LINE_MAX], head[LAB_LINE_MAX + 16], line[160];
+    const char *f = lab_str(json_get(data, "file"));
+    lab_clean(file, sizeof(file), f, strlen(f));
+    (void)snprintf(head, sizeof(head), "lab run  %s", file);
+    emit_header(b, e, head);
+    lab_emit_built(b, e, comp, json_get(data, "sanitizer"));
+    if (!json_get_bool(json_get(comp, "ok"))) {
+        lab_emit_diagnostics(b, e, json_get(comp, "diagnostics"));
+        emit_kv(b, e, 7, "ran", "did not run: the program did not compile");
+    } else if (!json_get_bool(json_get(json_get(data, "run"), "ran"))) {
+        const char *d = lab_str(json_get(comp, "detail"));
+        char dc[96];
+        lab_clean(dc, sizeof(dc), d, strlen(d));
+        (void)snprintf(line, sizeof(line), "did not run%s%s",
+                       dc[0] ? ": " : " (no run was recorded)", dc);
+        emit_kv(b, e, 7, "ran", line);
+    } else {
+        lab_emit_ran_rows(b, e, data);
+    }
+    const char *root_hex = lab_str(json_get(data, "root"));
+    if (root_hex[0] && json_get_bool(json_get(json_get(data, "run"), "ran"))) {
+        char hex[40];
+        lab_clean(hex, sizeof(hex), root_hex, strnlen(root_hex, 12));
+        (void)snprintf(line, sizeof(line), "%s%s", hex,
+                       json_get_bool(json_get(json_get(data, "cache"), "hit"))
+                           ? " (cached)" : "");
+        emit_kv(b, e, 7, "receipt", line);
+    }
 }
 
 /* Recipe renderers for ok=true envelopes, keyed by command path. */
