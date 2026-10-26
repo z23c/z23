@@ -192,20 +192,8 @@ static void teardown(void) {
     wallet_view_init(NULL);
 }
 
-/* ────────────────────────────────────────────────────────── */
-
-int spec_smoke(void)
-{
+static int smoke_dashboard(void) {
     int failures = 0;
-    printf("\n=== SMOKE TEST: every user flow with real data ===\n");
-
-    /* Realistic wallet: 0.81 transparent, 0.16 shielded,
-       15 transactions, 8 peers */
-    if (!setup_wallet(81000000, 16000000, 15, 8)) {
-        printf("SKIP: could not create test wallet\n");
-        return 0;
-    }
-    wallet_view_init(g_dir);
 
     /* ── 1. User opens the app ── */
     printf("1. Dashboard loads... ");
@@ -222,6 +210,11 @@ int spec_smoke(void)
         }
     }
     if (failures == 0) printf("OK\n");
+    return failures;
+}
+
+static int smoke_send_form(void) {
+    int failures = 0;
 
     /* ── 2. User clicks Send ── */
     printf("2. Send page... ");
@@ -247,6 +240,11 @@ int spec_smoke(void)
         }
         if (failures == f0) printf("OK\n");
     }
+    return failures;
+}
+
+static int smoke_send_empty_inputs(void) {
+    int failures = 0;
 
     /* ── 4. User submits zero amount ── */
     printf("4. Send review (zero amount)... ");
@@ -272,6 +270,11 @@ int spec_smoke(void)
         failures += check_page("send-confirm-empty", 100);
         if (failures == f0) printf("OK\n");
     }
+    return failures;
+}
+
+static int smoke_receive_page(void) {
+    int failures = 0;
 
     /* ── 7. User clicks Receive ── */
     printf("7. Receive page... ");
@@ -289,6 +292,11 @@ int spec_smoke(void)
         }
         if (failures == f0) printf("OK\n");
     }
+    return failures;
+}
+
+static int smoke_history_pages(void) {
+    int failures = 0;
 
     /* ── 8. User clicks History ── */
     printf("8. History page... ");
@@ -324,6 +332,11 @@ int spec_smoke(void)
         failures += check_page("history-search", 200);
         if (failures == f0) printf("OK\n");
     }
+    return failures;
+}
+
+static int smoke_node_and_coins(void) {
+    int failures = 0;
 
     /* ── 12. User clicks Node ── */
     printf("12. Node page... ");
@@ -349,6 +362,11 @@ int spec_smoke(void)
         failures += check_page("coins", 200);
         if (failures == f0) printf("OK\n");
     }
+    return failures;
+}
+
+static int smoke_shield_flow(void) {
+    int failures = 0;
 
     /* ── 14. Shield form ── */
     printf("14. Shield form... ");
@@ -389,6 +407,11 @@ int spec_smoke(void)
         }
         if (failures == f0) printf("OK\n");
     }
+    return failures;
+}
+
+static int smoke_tx_and_pulse(void) {
+    int failures = 0;
 
     /* ── 17. Tx detail (valid hex) ── */
     printf("17. Tx detail (valid txid)... ");
@@ -419,6 +442,11 @@ int spec_smoke(void)
         if (HAS("<!DOCTYPE")) { printf("  BUG: pulse returned HTML\n"); failures++; }
         if (failures == f0) printf("OK\n");
     }
+    return failures;
+}
+
+static int smoke_route_and_xss(void) {
+    int failures = 0;
 
     /* ── 20. Unknown route ── */
     printf("20. Unknown route... ");
@@ -443,6 +471,11 @@ int spec_smoke(void)
         if (HAS("<script>alert")) { printf("  BUG: XSS not escaped\n"); failures++; }
         if (failures == f0) printf("OK\n");
     }
+    return failures;
+}
+
+static int smoke_empty_and_full_shield(void) {
+    int failures = 0;
 
     teardown();
 
@@ -476,6 +509,34 @@ int spec_smoke(void)
         teardown();
         if (failures == f0) printf("OK\n");
     }
+    return failures;
+}
+
+/* ────────────────────────────────────────────────────────── */
+
+int spec_smoke(void)
+{
+    int failures = 0;
+    printf("\n=== SMOKE TEST: every user flow with real data ===\n");
+
+    /* Realistic wallet: 0.81 transparent, 0.16 shielded,
+       15 transactions, 8 peers */
+    if (!setup_wallet(81000000, 16000000, 15, 8)) {
+        printf("SKIP: could not create test wallet\n");
+        return 0;
+    }
+    wallet_view_init(g_dir);
+
+    failures += smoke_dashboard();
+    failures += smoke_send_form();
+    failures += smoke_send_empty_inputs();
+    failures += smoke_receive_page();
+    failures += smoke_history_pages();
+    failures += smoke_node_and_coins();
+    failures += smoke_shield_flow();
+    failures += smoke_tx_and_pulse();
+    failures += smoke_route_and_xss();
+    failures += smoke_empty_and_full_shield();
 
     printf("\n=== SMOKE: %d failures ===\n", failures);
     return failures;

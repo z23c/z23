@@ -1475,7 +1475,6 @@ tests/harness/differential/groth16_parity_oracle.c:check_pairing_values:21
 tests/harness/differential/groth16_parity_oracle.c:main:19
 tests/harness/spec/spec_data_hooks.c:spec_data_hooks:41
 tests/harness/spec/spec_render_audit.c:spec_render_audit:97
-tests/harness/spec/spec_smoke.c:spec_smoke:66
 tests/harness/spec/spec_state_machine.c:spec_state_machine:39
 tests/harness/src/build_release_regression_fixture.c:test_build_release_regression_fixture:43
 tests/harness/src/codeindex_freshness_windows_acceptance.c:main:22
