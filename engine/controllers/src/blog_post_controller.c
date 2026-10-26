@@ -42,43 +42,72 @@ static struct zcl_result blog_anchor_read_money(
                                        wallet_scope, out);
 }
 
+static bool blog_anchor_prepare_args_valid(
+    const struct wallet_rpc_context *ctx, const uint8_t *anchor_script,
+    size_t anchor_script_len, int64_t maximum_fee_zat,
+    const uint8_t *raw_tx, const size_t *raw_tx_len,
+    const uint8_t *txid_out, const int64_t *actual_fee_zat)
+{
+    return ctx && ctx->wallet && anchor_script && anchor_script_len != 0 &&
+        anchor_script_len <= MAX_SCRIPT_SIZE && maximum_fee_zat > 0 &&
+        raw_tx && raw_tx_len && txid_out && actual_fee_zat;
+}
+
+static struct zcl_result blog_anchor_select_fee_coins(
+    struct wallet_rpc_context *ctx, int64_t maximum_fee_zat,
+    struct coin_entry **selected, size_t *selected_len,
+    int64_t *selected_value, int64_t *wallet_fee)
+{
+    *wallet_fee = wallet_default_fee(ctx->wallet);
+    if (*wallet_fee <= 0 || *wallet_fee > maximum_fee_zat)
+        return ZCL_ERR(-2, "wallet fee exceeds Blog anchor maximum fee");
+    struct coin_entry *available = zcl_malloc(
+        BLOG_ANCHOR_WALLET_COINS_MAX * sizeof(*available),
+        "blog_anchor_available_coins");
+    *selected = zcl_malloc(
+        BLOG_ANCHOR_WALLET_COINS_MAX * sizeof(**selected),
+        "blog_anchor_selected_coins");
+    if (!available || !*selected) {
+        free(available);
+        free(*selected);
+        return ZCL_ERR(-3, "Blog anchor coin inventory allocation failed");
+    }
+    size_t available_len = 0;
+    *selected_len = 0;
+    *selected_value = 0;
+    wallet_available_coins(ctx->wallet, available, &available_len,
+                           BLOG_ANCHOR_WALLET_COINS_MAX, true, false);
+    bool funded = wallet_select_coins(
+        ctx->wallet, available, available_len, *wallet_fee, *selected,
+        selected_len, BLOG_ANCHOR_WALLET_COINS_MAX, selected_value);
+    free(available);
+    if (!funded || *selected_len == 0 || *selected_value <= *wallet_fee) {
+        free(*selected);
+        return ZCL_ERR(-4,
+                       "confirmed transparent funds cannot cover the Blog anchor fee");
+    }
+    return ZCL_OK;
+}
+
 static struct zcl_result blog_anchor_prepare_wallet(
     void *opaque, const uint8_t *anchor_script, size_t anchor_script_len,
     int64_t maximum_fee_zat, uint8_t *raw_tx, size_t raw_capacity,
     size_t *raw_tx_len, uint8_t txid_out[32], int64_t *actual_fee_zat)
 {
     struct wallet_rpc_context *ctx = opaque;
-    if (!ctx || !ctx->wallet || !anchor_script || anchor_script_len == 0 ||
-        anchor_script_len > MAX_SCRIPT_SIZE || maximum_fee_zat <= 0 ||
-        !raw_tx || !raw_tx_len || !txid_out || !actual_fee_zat)
+    if (!blog_anchor_prepare_args_valid(
+            ctx, anchor_script, anchor_script_len, maximum_fee_zat, raw_tx,
+            raw_tx_len, txid_out, actual_fee_zat))
         return ZCL_ERR(-1, "Blog anchor wallet prepare context is incomplete");
-    int64_t wallet_fee = wallet_default_fee(ctx->wallet);
-    if (wallet_fee <= 0 || wallet_fee > maximum_fee_zat)
-        return ZCL_ERR(-2, "wallet fee exceeds Blog anchor maximum fee");
-    struct coin_entry *available = zcl_malloc(
-        BLOG_ANCHOR_WALLET_COINS_MAX * sizeof(*available),
-        "blog_anchor_available_coins");
-    struct coin_entry *selected = zcl_malloc(
-        BLOG_ANCHOR_WALLET_COINS_MAX * sizeof(*selected),
-        "blog_anchor_selected_coins");
-    if (!available || !selected) {
-        free(available);
-        free(selected);
-        return ZCL_ERR(-3, "Blog anchor coin inventory allocation failed");
-    }
-    size_t available_len = 0, selected_len = 0;
+    struct coin_entry *selected = NULL;
+    size_t selected_len = 0;
     int64_t selected_value = 0;
-    wallet_available_coins(ctx->wallet, available, &available_len,
-                           BLOG_ANCHOR_WALLET_COINS_MAX, true, false);
-    bool funded = wallet_select_coins(
-        ctx->wallet, available, available_len, wallet_fee, selected,
-        &selected_len, BLOG_ANCHOR_WALLET_COINS_MAX, &selected_value);
-    free(available);
-    if (!funded || selected_len == 0 || selected_value <= wallet_fee) {
-        free(selected);
-        return ZCL_ERR(-4,
-                       "confirmed transparent funds cannot cover the Blog anchor fee");
-    }
+    int64_t wallet_fee = 0;
+    struct zcl_result coins = blog_anchor_select_fee_coins(
+        ctx, maximum_fee_zat, &selected, &selected_len, &selected_value,
+        &wallet_fee);
+    if (!coins.ok)
+        return coins;
     struct pubkey change_key;
     if (!wallet_get_key_from_pool(ctx->wallet, &change_key)) {
         free(selected);
@@ -129,6 +158,49 @@ static struct zcl_result blog_anchor_prepare_wallet(
         : ZCL_ERR(-8, "Blog anchor prepared transaction is too large");
 }
 
+static struct zcl_result blog_anchor_decode_prepared_tx(
+    const uint8_t *raw_tx, size_t raw_tx_len,
+    const uint8_t expected_txid[32], struct wallet_tx *wtx)
+{
+    memset(wtx, 0, sizeof(*wtx));
+    struct byte_stream stream;
+    stream_init_from_data(&stream, raw_tx, raw_tx_len);
+    bool decoded = transaction_deserialize(&wtx->tx, &stream) &&
+        stream_remaining(&stream) == 0;
+    stream_free(&stream);
+    if (!decoded) {
+        transaction_free(&wtx->tx);
+        return ZCL_ERR(-2, "prepared Blog transaction failed to decode");
+    }
+    transaction_compute_hash(&wtx->tx);
+    if (memcmp(wtx->tx.hash.data, expected_txid, 32) != 0) {
+        transaction_free(&wtx->tx);
+        return ZCL_ERR(-3, "prepared Blog transaction identity changed");
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result blog_anchor_commit_unrecorded_tx(
+    struct wallet_rpc_context *ctx, struct wallet_tx *wtx)
+{
+    if (!wallet_get_tx(ctx->wallet, &wtx->tx.hash)) {
+        struct zcl_result committed = wallet_commit_from_context(ctx, wtx);
+        if (!committed.ok) {
+            transaction_free(&wtx->tx);
+            return committed;
+        }
+        struct zcl_result persisted =
+            wallet_persist_commit_before_relay(ctx, wtx);
+        if (!persisted.ok) {
+            transaction_free(&wtx->tx);
+            return persisted;
+        }
+        if (wallet_ctx_db_ready(ctx))
+            node_db_sync_wallet_tx(ctx->node_db, &wtx->tx, ctx->wallet, 0);
+    }
+    return ZCL_OK;
+}
+
 static struct zcl_result blog_anchor_publish_wallet(
     void *opaque, const uint8_t *raw_tx, size_t raw_tx_len,
     const uint8_t expected_txid[32])
@@ -138,39 +210,16 @@ static struct zcl_result blog_anchor_publish_wallet(
         !ctx->coins_tip || !raw_tx || raw_tx_len == 0 || !expected_txid)
         return ZCL_ERR(-1, "Blog anchor wallet publish context is incomplete");
     struct wallet_tx wtx;
-    memset(&wtx, 0, sizeof(wtx));
-    struct byte_stream stream;
-    stream_init_from_data(&stream, raw_tx, raw_tx_len);
-    bool decoded = transaction_deserialize(&wtx.tx, &stream) &&
-        stream_remaining(&stream) == 0;
-    stream_free(&stream);
-    if (!decoded) {
-        transaction_free(&wtx.tx);
-        return ZCL_ERR(-2, "prepared Blog transaction failed to decode");
-    }
-    transaction_compute_hash(&wtx.tx);
-    if (memcmp(wtx.tx.hash.data, expected_txid, 32) != 0) {
-        transaction_free(&wtx.tx);
-        return ZCL_ERR(-3, "prepared Blog transaction identity changed");
-    }
+    struct zcl_result decoded = blog_anchor_decode_prepared_tx(
+        raw_tx, raw_tx_len, expected_txid, &wtx);
+    if (!decoded.ok)
+        return decoded;
     wtx.time_received = (int64_t)platform_time_wall_time_t();
     wtx.from_me = true;
     wtx.used = true;
-    if (!wallet_get_tx(ctx->wallet, &wtx.tx.hash)) {
-        struct zcl_result committed = wallet_commit_from_context(ctx, &wtx);
-        if (!committed.ok) {
-            transaction_free(&wtx.tx);
-            return committed;
-        }
-        struct zcl_result persisted =
-            wallet_persist_commit_before_relay(ctx, &wtx);
-        if (!persisted.ok) {
-            transaction_free(&wtx.tx);
-            return persisted;
-        }
-        if (wallet_ctx_db_ready(ctx))
-            node_db_sync_wallet_tx(ctx->node_db, &wtx.tx, ctx->wallet, 0);
-    }
+    struct zcl_result recorded = blog_anchor_commit_unrecorded_tx(ctx, &wtx);
+    if (!recorded.ok)
+        return recorded;
     if (ctx->connman)
         connman_relay_transaction(ctx->connman, &wtx.tx.hash);
     transaction_free(&wtx.tx);
@@ -272,6 +321,37 @@ static void blog_anchor_render(
     }
 }
 
+static bool blog_anchor_plan_id_parse(const char *plan_hex,
+                                      uint8_t plan_id[32])
+{
+    return plan_hex && strlen(plan_hex) == 64 && IsHex(plan_hex) &&
+        ParseHex(plan_hex, plan_id, 32) == 32;
+}
+
+static const char *blog_anchor_plan_request_build(
+    const char *scope, const char *name, const char *event_hex,
+    const char *idempotency, struct blog_anchor_request *request)
+{
+    uint8_t event_id[32];
+    if (!name || !event_hex || !idempotency ||
+        strlen(event_hex) != 64 || !IsHex(event_hex) ||
+        ParseHex(event_hex, event_id, sizeof(event_id)) != 32)
+        return "blog_anchor plan requires name, 64-hex event_id, and idempotency_key";
+    memset(request, 0, sizeof(*request));
+    if (strlen(scope) >= sizeof(request->wallet_scope) ||
+        strlen(name) >= sizeof(request->blog_name) ||
+        strlen(idempotency) >= sizeof(request->idempotency_key))
+        return "blog_anchor plan input exceeds bounds";
+    (void)snprintf(request->wallet_scope, sizeof(request->wallet_scope),
+                   "%s", scope);
+    (void)snprintf(request->blog_name, sizeof(request->blog_name), "%s",
+                   name);
+    (void)snprintf(request->idempotency_key,
+                   sizeof(request->idempotency_key), "%s", idempotency);
+    memcpy(request->event_id, event_id, 32);
+    return NULL;
+}
+
 static bool rpc_blog_anchor(const struct json_value *params, bool help,
                             struct json_value *result)
 {
@@ -305,8 +385,7 @@ static bool rpc_blog_anchor(const struct json_value *params, bool help,
     struct zcl_result outcome;
     if (confirm) {
         uint8_t plan_id[32];
-        if (!plan_hex || strlen(plan_hex) != 64 || !IsHex(plan_hex) ||
-            ParseHex(plan_hex, plan_id, sizeof(plan_id)) != 32) {
+        if (!blog_anchor_plan_id_parse(plan_hex, plan_id)) {
             json_set_str(result,
                          "blog_anchor commit requires a 64-hex plan_id");
             return false;
@@ -314,29 +393,13 @@ static bool rpc_blog_anchor(const struct json_value *params, bool help,
         outcome = blog_publication_anchor_commit(
             &runtime, scope, plan_id, &anchored);
     } else {
-        uint8_t event_id[32];
-        if (!name || !event_hex || !idempotency ||
-            strlen(event_hex) != 64 || !IsHex(event_hex) ||
-            ParseHex(event_hex, event_id, sizeof(event_id)) != 32) {
-            json_set_str(result,
-                "blog_anchor plan requires name, 64-hex event_id, and idempotency_key");
-            return false;
-        }
         struct blog_anchor_request request;
-        memset(&request, 0, sizeof(request));
-        if (strlen(scope) >= sizeof(request.wallet_scope) ||
-            strlen(name) >= sizeof(request.blog_name) ||
-            strlen(idempotency) >= sizeof(request.idempotency_key)) {
-            json_set_str(result, "blog_anchor plan input exceeds bounds");
+        const char *plan_error = blog_anchor_plan_request_build(
+            scope, name, event_hex, idempotency, &request);
+        if (plan_error) {
+            json_set_str(result, plan_error);
             return false;
         }
-        (void)snprintf(request.wallet_scope, sizeof(request.wallet_scope),
-                       "%s", scope);
-        (void)snprintf(request.blog_name, sizeof(request.blog_name), "%s",
-                       name);
-        (void)snprintf(request.idempotency_key,
-                       sizeof(request.idempotency_key), "%s", idempotency);
-        memcpy(request.event_id, event_id, 32);
         outcome = blog_publication_anchor_plan(
             &runtime, &request, &anchored);
     }
@@ -488,6 +551,75 @@ static bool blog_path_segments(const char *path,
     return true;
 }
 
+static bool blog_site_method_read_only(const char *method, bool *head_only)
+{
+    *head_only = strcmp(method, "HEAD") == 0;
+    return strcmp(method, "GET") == 0 || *head_only;
+}
+
+static bool blog_site_copy_request_path(const char *path, char *clean_path,
+                                        size_t clean_max)
+{
+    const char *query = strchr(path, '?');
+    size_t path_len = query ? (size_t)(query - path) : strlen(path);
+    if (path_len == 0 || path_len >= clean_max)
+        return false;
+    memcpy(clean_path, path, path_len);
+    clean_path[path_len] = 0;
+    return true;
+}
+
+static bool blog_site_route_valid(const char *path,
+                                  char name[BLOG_NAME_MAX + 1],
+                                  char slug[BLOG_SLUG_MAX + 1],
+                                  bool *has_name, bool *has_slug)
+{
+    return blog_path_segments(path, name, slug, has_name, has_slug) &&
+        (!*has_name || znam_validate_name(name));
+}
+
+static struct node_db *blog_site_open_node_db(void)
+{
+    struct node_db *ndb = app_runtime_node_db();
+    return ndb && ndb->open ? ndb : NULL;
+}
+
+static size_t blog_site_render_page(
+    struct node_db *ndb, const char *name, const char *slug,
+    bool has_name, bool has_slug, uint8_t *rendered, size_t body_capacity,
+    struct zcl_result *result)
+{
+    size_t rendered_len = 0;
+    if (has_slug) {
+        struct blog_post_page page;
+        *result = blog_post_controller_show(ndb, name, slug, &page);
+        if (result->ok)
+            rendered_len = blog_post_view_render(
+                &page, rendered, body_capacity);
+    } else {
+        struct blog_post_index_page page;
+        *result = blog_post_controller_index(
+            ndb, has_name ? name : NULL, &page);
+        if (result->ok)
+            rendered_len = blog_post_index_view_render(
+                &page, rendered, body_capacity);
+    }
+    return rendered_len;
+}
+
+static size_t blog_site_send_page(bool result_ok, size_t rendered_len,
+                                  const uint8_t *rendered, bool head_only,
+                                  uint8_t *response, size_t response_max)
+{
+    if (result_ok && rendered_len > 0)
+        return blog_http_response("200 OK", rendered, rendered_len,
+                                  head_only, response, response_max);
+    static const uint8_t missing[] = "<!doctype html><h1>404 Not Found</h1>";
+    return blog_http_response("404 Not Found", missing,
+                              sizeof(missing) - 1, head_only,
+                              response, response_max);
+}
+
 size_t blog_site_handle_request(const char *method, const char *path,
                                 const uint8_t *body, size_t body_len,
                                 uint8_t *response, size_t response_max)
@@ -496,35 +628,32 @@ size_t blog_site_handle_request(const char *method, const char *path,
     (void)body_len;
     if (!method || !path || !response || response_max < 512)
         return 0;
-    bool head_only = strcmp(method, "HEAD") == 0;
-    if (strcmp(method, "GET") != 0 && !head_only) {
+    bool head_only = false;
+    if (!blog_site_method_read_only(method, &head_only)) {
         static const uint8_t denied[] =
             "<!doctype html><h1>405 Method Not Allowed</h1>";
         return blog_http_response("405 Method Not Allowed", denied,
                                   sizeof(denied) - 1, false,
                                   response, response_max);
     }
-    const char *query = strchr(path, '?');
-    size_t path_len = query ? (size_t)(query - path) : strlen(path);
     char clean_path[256];
-    if (path_len == 0 || path_len >= sizeof(clean_path)) {
+    if (!blog_site_copy_request_path(path, clean_path,
+                                     sizeof(clean_path))) {
         static const uint8_t bad[] = "<!doctype html><h1>400 Bad Request</h1>";
         return blog_http_response("400 Bad Request", bad, sizeof(bad) - 1,
                                   head_only, response, response_max);
     }
-    memcpy(clean_path, path, path_len);
-    clean_path[path_len] = 0;
     char name[BLOG_NAME_MAX + 1], slug[BLOG_SLUG_MAX + 1];
     bool has_name = false, has_slug = false;
-    if (!blog_path_segments(clean_path, name, slug, &has_name, &has_slug) ||
-        (has_name && !znam_validate_name(name))) {
+    if (!blog_site_route_valid(clean_path, name, slug, &has_name,
+                               &has_slug)) {
         static const uint8_t missing[] = "<!doctype html><h1>404 Not Found</h1>";
         return blog_http_response("404 Not Found", missing,
                                   sizeof(missing) - 1, head_only,
                                   response, response_max);
     }
-    struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !ndb->open) {
+    struct node_db *ndb = blog_site_open_node_db();
+    if (!ndb) {
         LOG_WARN("blog", "public Blog requested while node.db is unavailable");
         return 0; /* caller may use the legacy static fallback */
     }
@@ -534,32 +663,13 @@ size_t blog_site_handle_request(const char *method, const char *path,
         LOG_WARN("blog", "public Blog response allocation failed");
         return 0;
     }
-    size_t rendered_len = 0;
     struct zcl_result result;
-    if (has_slug) {
-        struct blog_post_page page;
-        result = blog_post_controller_show(ndb, name, slug, &page);
-        if (result.ok)
-            rendered_len = blog_post_view_render(
-                &page, rendered, body_capacity);
-    } else {
-        struct blog_post_index_page page;
-        result = blog_post_controller_index(
-            ndb, has_name ? name : NULL, &page);
-        if (result.ok)
-            rendered_len = blog_post_index_view_render(
-                &page, rendered, body_capacity);
-    }
-    size_t response_len = 0;
-    if (result.ok && rendered_len > 0) {
-        response_len = blog_http_response("200 OK", rendered, rendered_len,
-                                          head_only, response, response_max);
-    } else {
-        static const uint8_t missing[] = "<!doctype html><h1>404 Not Found</h1>";
-        response_len = blog_http_response("404 Not Found", missing,
-                                          sizeof(missing) - 1, head_only,
-                                          response, response_max);
-    }
+    size_t rendered_len = blog_site_render_page(
+        ndb, name, slug, has_name, has_slug, rendered, body_capacity,
+        &result);
+    size_t response_len = blog_site_send_page(
+        result.ok, rendered_len, rendered, head_only, response,
+        response_max);
     free(rendered);
     return response_len;
 }
