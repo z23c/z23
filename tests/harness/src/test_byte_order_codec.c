@@ -251,8 +251,17 @@ static void u64_corpus(uint64_t out[U64_CORPUS_N])
         out[n++] = 0xFFull << (8 * k);
 }
 
-int test_byte_order_codec(void);
-int test_byte_order_codec(void)
+/* ─────────────── the five sections, one helper each ──────────────────
+ *
+ * Extracted from test_byte_order_codec below; section 4 is split across
+ * two helpers to keep each one small. Every helper keeps the harness
+ * contract the unsplit body had — a local failures counter and a
+ * trailing _test_next label for the assertion macros — so a failed
+ * assertion abandons the rest of that helper. The caller stops at the
+ * first nonzero return, reproducing the original's single jump past
+ * every later section. */
+
+static int verify_absolute_byte_layout(void)
 {
     int failures = 0;
 
@@ -384,6 +393,14 @@ int test_byte_order_codec(void)
         PASS();
     }
 
+_test_next:;
+    return failures;
+}
+
+static int verify_unaligned_offset_access(void)
+{
+    int failures = 0;
+
     /* ═══════════ 2. unaligned buffers ═══════════════════════════════ */
 
     TEST("every width writes and reads correctly at every odd offset") {
@@ -423,6 +440,14 @@ int test_byte_order_codec(void)
         }
         PASS();
     }
+
+_test_next:;
+    return failures;
+}
+
+static int verify_corpus_round_trips(void)
+{
+    int failures = 0;
 
     /* ═══════════ 3. round-trip, after the layout is pinned ══════════ */
 
@@ -472,6 +497,14 @@ int test_byte_order_codec(void)
         }
         PASS();
     }
+
+_test_next:;
+    return failures;
+}
+
+static int verify_consensus_record_originals(void)
+{
+    int failures = 0;
 
     /* ═══════════ 4. byte-identity vs the replaced originals ═════════ */
     /* One assertion per migrated call site's helper. A failure here means a
@@ -543,6 +576,16 @@ int test_byte_order_codec(void)
         }
         PASS();
     }
+
+_test_next:;
+    return failures;
+}
+
+static int verify_snapshot_png_wallet_originals(void)
+{
+    int failures = 0;
+
+    /* Section 4, continued: the remaining migrated call sites. */
 
     TEST("snapshot_shielded.c: put_le32/put_le64 (the shielded snapshot "
          "file, whose bytes are also the SHA3 input)") {
@@ -626,6 +669,14 @@ int test_byte_order_codec(void)
         PASS();
     }
 
+_test_next:;
+    return failures;
+}
+
+static int verify_crypto_common_forwards(void)
+{
+    int failures = 0;
+
     /* ═══════════ 5. crypto/common.h still speaks for its callers ════ */
     /* Two of ReadLE32's twelve includers are under the byte-sealed core/
      * (core/math/src/hash.c and arith_uint256.c). The forwarding must be
@@ -660,6 +711,37 @@ int test_byte_order_codec(void)
         ASSERT_EQ(b[1], 0x12);
         PASS();
     }
+
+_test_next:;
+    return failures;
+}
+
+int test_byte_order_codec(void);
+int test_byte_order_codec(void)
+{
+    int failures = 0;
+
+    failures += verify_absolute_byte_layout();
+    if (failures != 0)
+        goto _test_next;
+
+    failures += verify_unaligned_offset_access();
+    if (failures != 0)
+        goto _test_next;
+
+    failures += verify_corpus_round_trips();
+    if (failures != 0)
+        goto _test_next;
+
+    failures += verify_consensus_record_originals();
+    if (failures != 0)
+        goto _test_next;
+
+    failures += verify_snapshot_png_wallet_originals();
+    if (failures != 0)
+        goto _test_next;
+
+    failures += verify_crypto_common_forwards();
 
 _test_next:;
     if (failures == 0)
