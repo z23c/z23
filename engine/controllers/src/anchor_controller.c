@@ -113,6 +113,14 @@ static uint8_t parse_hash_type(const char *s)
     return 0;
 }
 
+/* True when hex is exactly 64 hex characters and decodes to the 32 bytes
+ * written to digest. */
+static bool parse_digest_hex(const char *hex, uint8_t digest[32])
+{
+    return strlen(hex) == 64 && IsHex(hex) &&
+           ParseHex(hex, digest, 32) == 32;
+}
+
 /* ── Digest helpers ─────────────────────────────────────────────── */
 
 /* SHA2-256 and SHA3-256 of a file, computed in one streaming pass. Reads
@@ -234,6 +242,58 @@ static void emit_lookup(uint8_t hash_type, const uint8_t digest[32],
 
 /* ── anchor_publish ─────────────────────────────────────────────── */
 
+/* The "hash_type" argument of anchor_publish: the parsed field when one is
+ * given, the documented SHA3-256 default otherwise. */
+static uint8_t anchor_publish_hash_type(const struct json_value *params)
+{
+    const char *ht_str = anchor_str_field(params, 3, "hash_type");
+    return ht_str ? parse_hash_type(ht_str) : ZANC_HASH_SHA3_256;
+}
+
+/* True when a wallet and mempool are loaded, so anchor_publish can compose
+ * and broadcast a transaction instead of returning OP_RETURN hex. */
+static bool anchor_wallet_ready(void)
+{
+    return g_anchor_wallet && g_anchor_mempool;
+}
+
+/* Resolve the digest to anchor from the "file"/"digest" arguments: hash the
+ * file (keeping the digest selected by hash_type) or parse the hex digest.
+ * Returns NULL on success with digest filled in, else the RPC error
+ * message. */
+static const char *anchor_publish_digest(const struct json_value *params,
+                                         uint8_t hash_type,
+                                         uint8_t digest[32])
+{
+    const char *file = anchor_str_field(params, 0, "file");
+    const char *digest_hex = anchor_str_field(params, 1, "digest");
+    if (file) {
+        uint8_t sha2[32], sha3[32];
+        if (!hash_file(file, sha2, sha3))
+            return "Failed to read/hash file";
+        memcpy(digest, hash_type == ZANC_HASH_SHA2_256 ? sha2 : sha3, 32);
+        return NULL;
+    }
+    if (!digest_hex)
+        return "Missing file or digest";
+    if (!parse_digest_hex(digest_hex, digest))
+        return "Invalid digest (need 64 hex chars)";
+    return NULL;
+}
+
+/* The leading hash_type/digest/label fields of the anchor_publish result
+ * object, shared by the broadcast and no-wallet result shapes. */
+static void anchor_publish_result_header(struct json_value *result,
+                                         uint8_t hash_type,
+                                         const char *digest_out,
+                                         const char *label)
+{
+    json_set_object(result);
+    json_push_kv_str(result, "hash_type", zanc_hash_type_name(hash_type));
+    json_push_kv_str(result, "digest", digest_out);
+    json_push_kv_str(result, "label", label ? label : "");
+}
+
 static bool rpc_anchor_publish(const struct json_value *params, bool help,
                                struct json_value *result)
 {
@@ -247,8 +307,7 @@ static bool rpc_anchor_publish(const struct json_value *params, bool help,
         return true;
     }
 
-    const char *ht_str = anchor_str_field(params, 3, "hash_type");
-    uint8_t hash_type = ht_str ? parse_hash_type(ht_str) : ZANC_HASH_SHA3_256;
+    uint8_t hash_type = anchor_publish_hash_type(params);
     if (hash_type == 0) {
         json_set_str(result, "Invalid hash_type (use sha2 or sha3)");
         return false;
@@ -262,23 +321,10 @@ static bool rpc_anchor_publish(const struct json_value *params, bool help,
     }
 
     uint8_t digest[32];
-    const char *file = anchor_str_field(params, 0, "file");
-    const char *digest_hex = anchor_str_field(params, 1, "digest");
-    if (file) {
-        uint8_t sha2[32], sha3[32];
-        if (!hash_file(file, sha2, sha3)) {
-            json_set_str(result, "Failed to read/hash file");
-            return false;
-        }
-        memcpy(digest, hash_type == ZANC_HASH_SHA2_256 ? sha2 : sha3, 32);
-    } else if (digest_hex) {
-        if (strlen(digest_hex) != 64 || !IsHex(digest_hex) ||
-            ParseHex(digest_hex, digest, sizeof(digest)) != 32) {
-            json_set_str(result, "Invalid digest (need 64 hex chars)");
-            return false;
-        }
-    } else {
-        json_set_str(result, "Missing file or digest");
+    const char *input_error = anchor_publish_digest(params, hash_type,
+                                                    digest);
+    if (input_error) {
+        json_set_str(result, input_error);
         return false;
     }
 
@@ -293,7 +339,7 @@ static bool rpc_anchor_publish(const struct json_value *params, bool help,
     char digest_out[65];
     HexStr(digest, 32, false, digest_out, sizeof(digest_out));
 
-    if (g_anchor_wallet && g_anchor_mempool) {
+    if (anchor_wallet_ready()) {
         struct wallet_tx wtx;
         memset(&wtx, 0, sizeof(wtx));
         int64_t fee_paid = 0;
@@ -319,10 +365,7 @@ static bool rpc_anchor_publish(const struct json_value *params, bool help,
                      commit.code, commit.message);
         }
 
-        json_set_object(result);
-        json_push_kv_str(result, "hash_type", zanc_hash_type_name(hash_type));
-        json_push_kv_str(result, "digest", digest_out);
-        json_push_kv_str(result, "label", label ? label : "");
+        anchor_publish_result_header(result, hash_type, digest_out, label);
         char txid_hex[65];
         uint256_get_hex(&wtx.tx.hash, txid_hex);
         json_push_kv_str(result, "txid", txid_hex);
@@ -331,10 +374,7 @@ static bool rpc_anchor_publish(const struct json_value *params, bool help,
         return true;
     }
 
-    json_set_object(result);
-    json_push_kv_str(result, "hash_type", zanc_hash_type_name(hash_type));
-    json_push_kv_str(result, "digest", digest_out);
-    json_push_kv_str(result, "label", label ? label : "");
+    anchor_publish_result_header(result, hash_type, digest_out, label);
     char hex[257];
     HexStr(script, script_len, false, hex, sizeof(hex));
     json_push_kv_str(result, "op_return_hex", hex);
@@ -346,6 +386,50 @@ static bool rpc_anchor_publish(const struct json_value *params, bool help,
 }
 
 /* ── anchor_verify ──────────────────────────────────────────────── */
+
+/* Report a hashed file's SHA2-256/SHA3-256 digests on result and append the
+ * two lookup records to matches; *anchored is true when either digest is
+ * anchored on-chain. */
+static void anchor_push_file_records(const uint8_t sha2[32],
+                                     const uint8_t sha3[32],
+                                     struct json_value *result,
+                                     struct json_value *matches,
+                                     bool *anchored)
+{
+    char hex[65];
+    HexStr(sha2, 32, false, hex, sizeof(hex));
+    json_push_kv_str(result, "sha2_256", hex);
+    HexStr(sha3, 32, false, hex, sizeof(hex));
+    json_push_kv_str(result, "sha3_256", hex);
+    struct json_value m2 = {0}, m3 = {0};
+    emit_lookup(ZANC_HASH_SHA2_256, sha2, &m2);
+    emit_lookup(ZANC_HASH_SHA3_256, sha3, &m3);
+    const struct json_value *a2 = json_get(&m2, "anchored");
+    const struct json_value *a3 = json_get(&m3, "anchored");
+    *anchored = (a2 && json_get_bool(a2)) || (a3 && json_get_bool(a3));
+    json_push_back(matches, &m2);
+    json_push_back(matches, &m3);
+    json_free(&m2);
+    json_free(&m3);
+}
+
+/* Append one lookup record per hash type (skipping every type but the
+ * requested one when want is nonzero) and set *any_anchored on a hit. */
+static void anchor_digest_lookup_records(uint8_t want,
+                                         const uint8_t digest[32],
+                                         struct json_value *matches,
+                                         bool *any_anchored)
+{
+    for (uint8_t t = ZANC_HASH_SHA2_256; t <= ZANC_HASH_SHA3_256; t++) {
+        if (want && t != want) continue;
+        struct json_value m = {0};
+        emit_lookup(t, digest, &m);
+        const struct json_value *an = json_get(&m, "anchored");
+        if (an && json_get_bool(an)) *any_anchored = true;
+        json_push_back(matches, &m);
+        json_free(&m);
+    }
+}
 
 static bool rpc_anchor_verify(const struct json_value *params, bool help,
                               struct json_value *result)
@@ -375,39 +459,17 @@ static bool rpc_anchor_verify(const struct json_value *params, bool help,
             json_set_str(result, "Failed to read/hash file");
             return false;
         }
-        char hex[65];
-        HexStr(sha2, 32, false, hex, sizeof(hex));
-        json_push_kv_str(result, "sha2_256", hex);
-        HexStr(sha3, 32, false, hex, sizeof(hex));
-        json_push_kv_str(result, "sha3_256", hex);
-        struct json_value m2 = {0}, m3 = {0};
-        emit_lookup(ZANC_HASH_SHA2_256, sha2, &m2);
-        emit_lookup(ZANC_HASH_SHA3_256, sha3, &m3);
-        const struct json_value *a2 = json_get(&m2, "anchored");
-        const struct json_value *a3 = json_get(&m3, "anchored");
-        any_anchored = (a2 && json_get_bool(a2)) || (a3 && json_get_bool(a3));
-        json_push_back(&matches, &m2);
-        json_push_back(&matches, &m3);
-        json_free(&m2);
-        json_free(&m3);
+        anchor_push_file_records(sha2, sha3, result, &matches,
+                                 &any_anchored);
     } else if (digest_hex) {
         uint8_t digest[32];
-        if (strlen(digest_hex) != 64 || !IsHex(digest_hex) ||
-            ParseHex(digest_hex, digest, sizeof(digest)) != 32) {
+        if (!parse_digest_hex(digest_hex, digest)) {
             json_free(&matches);
             json_set_str(result, "Invalid digest (need 64 hex chars)");
             return false;
         }
         uint8_t want = ht_str ? parse_hash_type(ht_str) : 0;
-        for (uint8_t t = ZANC_HASH_SHA2_256; t <= ZANC_HASH_SHA3_256; t++) {
-            if (want && t != want) continue;
-            struct json_value m = {0};
-            emit_lookup(t, digest, &m);
-            const struct json_value *an = json_get(&m, "anchored");
-            if (an && json_get_bool(an)) any_anchored = true;
-            json_push_back(&matches, &m);
-            json_free(&m);
-        }
+        anchor_digest_lookup_records(want, digest, &matches, &any_anchored);
     } else {
         json_free(&matches);
         json_set_str(result, "Missing file or digest");
