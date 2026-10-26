@@ -188,11 +188,9 @@ struct ae_getaddr_probe {
     bool terrible_leaked;
 };
 
-static struct ae_bucket_family ae_bound_new_buckets_by_source(void)
+static struct ae_bucket_family ae_bound_new_buckets_by_source(struct addr_man *am)
 {
     struct ae_bucket_family r;
-    struct addr_man am;
-    addrman_init(&am);
     struct net_addr attacker_src = ae_source(41, 7, 0, 1);
 
     bool seen[ADDRMAN_NEW_BUCKET_COUNT];
@@ -219,7 +217,7 @@ static struct ae_bucket_family ae_bound_new_buckets_by_source(void)
         memset(&info, 0, sizeof(info));
         info.addr = dst;
         info.source = attacker_src;
-        int b = addr_info_get_new_bucket(&info, &am.nKey, &attacker_src);
+        int b = addr_info_get_new_bucket(&info, &am->nKey, &attacker_src);
         if (b >= 0 && b < ADDRMAN_NEW_BUCKET_COUNT && !seen[b]) {
             seen[b] = true;
             distinct++;
@@ -228,17 +226,14 @@ static struct ae_bucket_family ae_bound_new_buckets_by_source(void)
 
     bool ok = distinct <= ADDRMAN_NEW_BUCKETS_PER_SOURCE_GROUP;
     ok = ok && distinct > 0;
-    addrman_free(&am);
     r.distinct = distinct;
     r.ok = ok;
     return r;
 }
 
-static struct ae_flood_bound ae_bound_single_source_flood(void)
+static struct ae_flood_bound ae_bound_single_source_flood(struct addr_man *am)
 {
     struct ae_flood_bound r;
-    struct addr_man am;
-    addrman_init(&am);
     struct net_addr attacker_src = ae_source(42, 9, 0, 1);
 
     int added = 0;
@@ -257,20 +252,19 @@ static struct ae_flood_bound ae_bound_single_source_flood(void)
             (uint8_t)(1 + (i % 60)),
             (uint8_t)(i % 256),
             (uint8_t)((i * 5) % 254 + 1), 8033);
-        if (addrman_add(&am, &dst, &attacker_src, 0))
+        if (addrman_add(am, &dst, &attacker_src, 0))
             added++;
     }
 
     struct addrman_bucket_stats stats;
-    addrman_get_bucket_stats(&am, &stats);
+    addrman_get_bucket_stats(am, &stats);
 
     int bound = ADDRMAN_NEW_BUCKETS_PER_SOURCE_GROUP * 3;
     bool ok = stats.new_buckets_nonempty <= bound;
     /* And, regardless of slack, nowhere near the full 1024-bucket
      * table — the actual eclipse-resistance headline number. */
     ok = ok && stats.new_buckets_nonempty < ADDRMAN_NEW_BUCKET_COUNT / 4;
-    ok = ok && (addrman_consistency_check(&am, NULL, 0) == 0);
-    addrman_free(&am);
+    ok = ok && (addrman_consistency_check(am, NULL, 0) == 0);
     r.added = added;
     r.buckets = stats.new_buckets_nonempty;
     r.bound = bound;
@@ -297,11 +291,9 @@ static struct ae_select_tally ae_tally_select_hits(struct addr_man *am,
     return hits;
 }
 
-static struct ae_diversity ae_measure_selection_diversity(void)
+static struct ae_diversity ae_measure_selection_diversity(struct addr_man *am)
 {
     struct ae_diversity r;
-    struct addr_man am;
-    addrman_init(&am);
 
     /* 80 honest addresses, each its OWN distinct /16 source group
      * (first octet varies 130..209, second octet fixed) — realistic
@@ -311,11 +303,11 @@ static struct ae_diversity ae_measure_selection_diversity(void)
         struct net_addr src = ae_source((uint8_t)(130 + s), 5, 0, 1);
         struct net_address dst = ae_addr((uint8_t)(130 + s), 6,
                                          (uint8_t)(s + 1), 1, 8033);
-        if (addrman_add(&am, &dst, &src, 0))
+        if (addrman_add(am, &dst, &src, 0))
             honest_added++;
     }
     struct addrman_bucket_stats before;
-    addrman_get_bucket_stats(&am, &before);
+    addrman_get_bucket_stats(am, &before);
 
     /* Attacker: single source group, 3000 addresses (37x the honest
      * count) — the whole point of the flood is to outnumber honest
@@ -328,17 +320,17 @@ static struct ae_diversity ae_measure_selection_diversity(void)
             (uint8_t)((i / 256) % 256),
             (uint8_t)(i % 256),
             (uint8_t)((i * 7) % 254 + 1), 8033);
-        if (addrman_add(&am, &dst, &attacker_src, 0))
+        if (addrman_add(am, &dst, &attacker_src, 0))
             attacker_added++;
     }
 
     struct addrman_bucket_stats after;
-    addrman_get_bucket_stats(&am, &after);
+    addrman_get_bucket_stats(am, &after);
     int honest_buckets = before.new_buckets_nonempty;
     int attacker_buckets = after.new_buckets_nonempty - before.new_buckets_nonempty;
 
     const int trials = 4000;
-    struct ae_select_tally hits = ae_tally_select_hits(&am, trials);
+    struct ae_select_tally hits = ae_tally_select_hits(am, trials);
 
     /* Bucket-share floor: even with generous slack for hash skew,
      * honest addresses occupying a comparable/larger BUCKET share
@@ -355,8 +347,7 @@ static struct ae_diversity ae_measure_selection_diversity(void)
     /* And the attacker must not achieve near-total eclipse despite
      * its 37x address-count advantage. */
     ok = ok && (double)hits.attacker_hits / (double)trials < 0.90;
-    ok = ok && (addrman_consistency_check(&am, NULL, 0) == 0);
-    addrman_free(&am);
+    ok = ok && (addrman_consistency_check(am, NULL, 0) == 0);
 
     r.honest_hits = hits.honest_hits;
     r.attacker_hits = hits.attacker_hits;
@@ -372,11 +363,9 @@ static struct ae_diversity ae_measure_selection_diversity(void)
     return r;
 }
 
-static struct ae_bucket_family ae_bound_tried_buckets_by_group(void)
+static struct ae_bucket_family ae_bound_tried_buckets_by_group(struct addr_man *am)
 {
     struct ae_bucket_family r;
-    struct addr_man am;
-    addrman_init(&am);
 
     bool seen[ADDRMAN_TRIED_BUCKET_COUNT];
     memset(seen, 0, sizeof(seen));
@@ -391,7 +380,7 @@ static struct ae_bucket_family ae_bound_tried_buckets_by_group(void)
         struct addr_info info;
         memset(&info, 0, sizeof(info));
         info.addr = dst;
-        int b = addr_info_get_tried_bucket(&info, &am.nKey);
+        int b = addr_info_get_tried_bucket(&info, &am->nKey);
         if (b >= 0 && b < ADDRMAN_TRIED_BUCKET_COUNT && !seen[b]) {
             seen[b] = true;
             distinct++;
@@ -400,7 +389,6 @@ static struct ae_bucket_family ae_bound_tried_buckets_by_group(void)
 
     bool ok = distinct <= ADDRMAN_TRIED_BUCKETS_PER_GROUP;
     ok = ok && distinct > 0;
-    addrman_free(&am);
     r.distinct = distinct;
     r.ok = ok;
     return r;
@@ -416,11 +404,9 @@ static int ae_count_entries_in_tried(const struct addr_man *am,
     return count;
 }
 
-static struct ae_tried_evict ae_bound_tried_eviction(void)
+static struct ae_tried_evict ae_bound_tried_eviction(struct addr_man *am)
 {
     struct ae_tried_evict r;
-    struct addr_man am;
-    addrman_init(&am);
 
     const int K = 24;
     struct net_address honest[24];
@@ -434,13 +420,13 @@ static struct ae_tried_evict ae_bound_tried_eviction(void)
          * regardless). */
         struct net_addr src = ae_source((uint8_t)(150 + i), 1, 0, 1);
         honest[i] = ae_addr((uint8_t)(150 + i), 2, 3, 4, 8033);
-        addrman_add(&am, &honest[i], &src, 0);
-        addrman_good(&am, &honest[i].svc,
+        addrman_add(am, &honest[i], &src, 0);
+        addrman_good(am, &honest[i].svc,
                      (int64_t)platform_time_wall_time_t());
-        honest_id[i] = ae_find_id(&am, &honest[i]);
+        honest_id[i] = ae_find_id(am, &honest[i]);
     }
 
-    int honest_in_tried_before = ae_count_entries_in_tried(&am, honest_id, K);
+    int honest_in_tried_before = ae_count_entries_in_tried(am, honest_id, K);
 
     /* Attacker: 2000 distinct addresses, ALL sharing ONE own /16
      * (78.8.x.x), each added and immediately promoted to tried —
@@ -451,15 +437,15 @@ static struct ae_tried_evict ae_bound_tried_eviction(void)
         struct net_address dst = ae_addr(78, 8,
             (uint8_t)((i / 256) % 256), (uint8_t)((i * 5) % 254 + 1),
             8033);
-        addrman_add(&am, &dst, &attacker_src, 0);
-        addrman_good(&am, &dst.svc, (int64_t)platform_time_wall_time_t());
+        addrman_add(am, &dst, &attacker_src, 0);
+        addrman_good(am, &dst.svc, (int64_t)platform_time_wall_time_t());
     }
 
-    int honest_in_tried_after = ae_count_entries_in_tried(&am, honest_id, K);
+    int honest_in_tried_after = ae_count_entries_in_tried(am, honest_id, K);
 
     int evicted = honest_in_tried_before - honest_in_tried_after;
 
-    bool ok = (addrman_consistency_check(&am, NULL, 0) == 0);
+    bool ok = (addrman_consistency_check(am, NULL, 0) == 0);
     /* The hard ceiling: an attacker confined to
      * ADDRMAN_TRIED_BUCKETS_PER_GROUP buckets can touch at most that
      * many of the K honest buckets (each honest entry's bucket is a
@@ -469,7 +455,6 @@ static struct ae_tried_evict ae_bound_tried_eviction(void)
     ok = ok && evicted <= ADDRMAN_TRIED_BUCKETS_PER_GROUP;
     ok = ok && honest_in_tried_before == K;   /* sanity: all promoted */
     ok = ok && honest_in_tried_after >= K - ADDRMAN_TRIED_BUCKETS_PER_GROUP;
-    addrman_free(&am);
 
     r.k = K;
     r.before = honest_in_tried_before;
@@ -606,7 +591,9 @@ int test_addrman_eclipse(void)
      *      group (no insertion needed) ───────────────────────────── */
     printf("addrman_eclipse: new-bucket family bounded by source group... ");
     {
-        struct ae_bucket_family nb = ae_bound_new_buckets_by_source();
+        struct addr_man am;
+        addrman_init(&am);
+        struct ae_bucket_family nb = ae_bound_new_buckets_by_source(&am);
         if (nb.ok)
             printf("OK (distinct=%d, bound=%d)\n", nb.distinct,
                    ADDRMAN_NEW_BUCKETS_PER_SOURCE_GROUP);
@@ -615,13 +602,16 @@ int test_addrman_eclipse(void)
                    ADDRMAN_NEW_BUCKETS_PER_SOURCE_GROUP);
             failures++;
         }
+        addrman_free(&am);
     }
 
     /* ── 2. Real flood: a single source group cannot occupy more than a
      *      small, bounded slice of the new table ────────────────────── */
     printf("addrman_eclipse: single-source-group real flood stays bounded... ");
     {
-        struct ae_flood_bound fl = ae_bound_single_source_flood();
+        struct addr_man am;
+        addrman_init(&am);
+        struct ae_flood_bound fl = ae_bound_single_source_flood(&am);
         if (fl.ok)
             printf("OK (added=%d, buckets=%d/%d, bound=%d)\n", fl.added,
                    fl.buckets, ADDRMAN_NEW_BUCKET_COUNT, fl.bound);
@@ -630,6 +620,7 @@ int test_addrman_eclipse(void)
                    fl.buckets, ADDRMAN_NEW_BUCKET_COUNT, fl.bound);
             failures++;
         }
+        addrman_free(&am);
     }
 
     /* ── 3. Selection diversity: after the flood, honest addresses from
@@ -638,7 +629,9 @@ int test_addrman_eclipse(void)
      *      address-count share (attacker has ~50-100x more addresses) ── */
     printf("addrman_eclipse: selection diversity survives a flood... ");
     {
-        struct ae_diversity dv = ae_measure_selection_diversity();
+        struct addr_man am;
+        addrman_init(&am);
+        struct ae_diversity dv = ae_measure_selection_diversity(&am);
         if (dv.ok)
             printf("OK (honest=%d attacker=%d other=%d /%d trials; "
                    "buckets honest=%d attacker=%d, honest_added=%d "
@@ -655,13 +648,16 @@ int test_addrman_eclipse(void)
                    dv.expected_honest_frac, dv.honest_frac);
             failures++;
         }
+        addrman_free(&am);
     }
 
     /* ── 4. TRIED-table family bound is a pure function of the
      *      ADDRESS'S OWN group (no insertion needed) ────────────────── */
     printf("addrman_eclipse: tried-bucket family bounded by own group... ");
     {
-        struct ae_bucket_family tb = ae_bound_tried_buckets_by_group();
+        struct addr_man am;
+        addrman_init(&am);
+        struct ae_bucket_family tb = ae_bound_tried_buckets_by_group(&am);
         if (tb.ok)
             printf("OK (distinct=%d, bound=%d)\n", tb.distinct,
                    ADDRMAN_TRIED_BUCKETS_PER_GROUP);
@@ -670,6 +666,7 @@ int test_addrman_eclipse(void)
                    ADDRMAN_TRIED_BUCKETS_PER_GROUP);
             failures++;
         }
+        addrman_free(&am);
     }
 
     /* ── 5. Tried eviction is bounded: a single-group attacker flood to
@@ -678,7 +675,9 @@ int test_addrman_eclipse(void)
      *      a hard combinatorial ceiling, verified for K=24 > 8 ─────── */
     printf("addrman_eclipse: tried eviction bounded, honest mostly survive... ");
     {
-        struct ae_tried_evict ev = ae_bound_tried_eviction();
+        struct addr_man am;
+        addrman_init(&am);
+        struct ae_tried_evict ev = ae_bound_tried_eviction(&am);
         if (ev.ok)
             printf("OK (K=%d before=%d after=%d evicted=%d ceiling=%d)\n",
                    ev.k, ev.before, ev.after, ev.evicted,
@@ -689,6 +688,7 @@ int test_addrman_eclipse(void)
                    ADDRMAN_TRIED_BUCKETS_PER_GROUP);
             failures++;
         }
+        addrman_free(&am);
     }
 
     /* ── 6. terrible/old handling: freshness + attempt-limit thresholds,
