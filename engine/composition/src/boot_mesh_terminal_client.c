@@ -456,25 +456,11 @@ void boot_mesh_terminal_client_message(struct mesh_stream *st,
         (void)mesh_stream_grant(st, (uint32_t)(len - kept));
 }
 
-void boot_mesh_terminal_client_ended(struct mesh_stream *st,
-                                     enum mesh_stream_refusal reason,
-                                     const uint8_t *payload, size_t len)
+/* No service verdict arrived: name the ending from the stream's own
+ * reason so the requester never has to guess. */
+static void client_name_stream_ending(struct mesh_terminal_client_session *s,
+                                      enum mesh_stream_refusal reason)
 {
-    struct mesh_terminal_client_session *s = client_session(st, NULL);
-    if (!s)
-        return;
-    /* The responder's own verdict, when it sent one with the close. */
-    if (payload && len >= 1u) {
-        if (payload[0] == MESH_TERMINAL_MSG_RECEIPT)
-            client_receipt(st, s, payload + 1, len - 1u);
-        else if (payload[0] == MESH_TERMINAL_MSG_CLOSE)
-            client_close_message(s, payload + 1, len - 1u);
-    }
-    if (s->ended)
-        return;
-    s->ended = true;
-    /* No service verdict arrived: name the ending from the stream's own
-     * reason so the requester never has to guess. */
     switch (reason) {
     case MESH_STREAM_REFUSED_PEER_UNPAIRED:
         s->verdict = MESH_TERMINAL_RECEIPT_NOT_PAIRED;
@@ -517,6 +503,26 @@ void boot_mesh_terminal_client_ended(struct mesh_stream *st,
     }
 }
 
+void boot_mesh_terminal_client_ended(struct mesh_stream *st,
+                                     enum mesh_stream_refusal reason,
+                                     const uint8_t *payload, size_t len)
+{
+    struct mesh_terminal_client_session *s = client_session(st, NULL);
+    if (!s)
+        return;
+    /* The responder's own verdict, when it sent one with the close. */
+    if (payload && len >= 1u) {
+        if (payload[0] == MESH_TERMINAL_MSG_RECEIPT)
+            client_receipt(st, s, payload + 1, len - 1u);
+        else if (payload[0] == MESH_TERMINAL_MSG_CLOSE)
+            client_close_message(s, payload + 1, len - 1u);
+    }
+    if (s->ended)
+        return;
+    s->ended = true;
+    client_name_stream_ending(s, reason);
+}
+
 void boot_mesh_terminal_client_release(struct mesh_stream *st)
 {
     struct mesh_terminal_client_session *s = st->service_state;
@@ -544,11 +550,11 @@ static bool client_open_survey(struct mesh_stream *st, void *ctx)
     return true;
 }
 
-enum boot_mesh_terminal_open_result boot_mesh_terminal_client_open(
+static enum boot_mesh_terminal_open_result client_open_check_args_and_service(
     const char *pairing_id_hex, uint16_t cols, uint16_t rows,
-    uint8_t terminal_id_out[32])
+    uint8_t terminal_id_out[32], uint8_t pairing_id[32],
+    struct boot_svc_ctx **svc_out)
 {
-    uint8_t pairing_id[32];
     if (!pairing_id_hex || strlen(pairing_id_hex) != MESH_PAIRING_ID_HEX ||
         !zcl_hex_decode_lower(pairing_id_hex, pairing_id, 32) ||
         !terminal_id_out || cols > MESH_TERMINAL_MAX_COLS ||
@@ -556,18 +562,122 @@ enum boot_mesh_terminal_open_result boot_mesh_terminal_client_open(
         return MESH_TERMINAL_OPEN_BAD_ARGUMENT;
 
     struct boot_svc_ctx *svc = boot_mesh_terminal_client_service();
+    *svc_out = svc;
     if (!svc || !svc->msg_processor || !svc->datadir)
         return MESH_TERMINAL_OPEN_UNAVAILABLE;
+    return MESH_TERMINAL_OPEN_OK;
+}
+
+static bool client_open_msg_processor_ready(const struct msg_processor *mp)
+{
+    return mp->net_mgr && mp->params;
+}
+
+static struct node_db *client_open_node_db(void)
+{
+    struct node_db *ndb = app_runtime_node_db();
+    if (!ndb || !app_runtime_node_db_handle_open(ndb))
+        return NULL;
+    return ndb;
+}
+
+static enum boot_mesh_terminal_open_result client_open_pairing_row(
+    struct node_db *ndb, const char *pairing_id_hex, int64_t now,
+    struct db_mesh_pairing *row)
+{
+    if (!db_mesh_pairing_find(ndb, pairing_id_hex, row))
+        return MESH_TERMINAL_OPEN_NOT_PAIRED;
+    if (!mesh_pairing_allows(row, MESH_PAIRING_CAP_TERMINAL_EXEC, now))
+        return row->revoked_at != 0 ? MESH_TERMINAL_OPEN_REVOKED
+                                    : MESH_TERMINAL_OPEN_EXPIRED;
+    return MESH_TERMINAL_OPEN_OK;
+}
+
+static enum boot_mesh_terminal_open_result client_open_peer_authority(
+    struct msg_processor *mp, struct db_mesh_pairing *row,
+    struct node_db *ndb, const char *pairing_id_hex, int64_t now,
+    struct noise_transport_snapshot *session,
+    struct vcs_zcode_dht_delegation *responder_delegation)
+{
+    struct p2p_node *peer = boot_mesh_find_session_peer(
+        mp->net_mgr, row->peer_noise_pubkey, session);
+    if (!peer)
+        return MESH_TERMINAL_OPEN_PEER_NOT_CONNECTED;
+
+    /* Pre-flight the exact authority the responder will re-verify: the
+     * peer's greatest-seq held delegation must support this pairing. */
+    uint8_t network_genesis[32];
+    if (!boot_mesh_peer_delegation(row, responder_delegation) ||
+        !boot_zcode_dht_network_genesis(network_genesis) ||
+        mesh_pairing_service_authorize_terminal(
+            ndb, network_genesis, pairing_id_hex, responder_delegation,
+            session->remote_static, now) != MESH_PAIRING_OK) {
+        p2p_node_release(peer);
+        return MESH_TERMINAL_OPEN_PEER_IDENTITY_UNAVAILABLE;
+    }
+    p2p_node_release(peer);
+    return MESH_TERMINAL_OPEN_OK;
+}
+
+static enum boot_mesh_terminal_open_result client_open_pick_terminal_id(
+    uint8_t terminal_id[32], bool *have_id)
+{
+    for (int attempt = 0; attempt < 4 && !*have_id; attempt++) {
+        if (!zcl_random_secret_bytes(terminal_id, 32, "mesh_terminal_open"))
+            return MESH_TERMINAL_OPEN_UNAVAILABLE;
+        struct client_visit v;
+        memset(&v, 0, sizeof(v));
+        v.terminal_id = terminal_id;
+        mesh_stream_visit(MESH_TERMINAL_SERVICE_NAME, client_open_survey, &v);
+        if (v.live >= MESH_TERMINAL_CLIENT_SESSIONS_MAX)
+            return MESH_TERMINAL_OPEN_BUSY;
+        *have_id = !v.found;
+    }
+    return MESH_TERMINAL_OPEN_OK;
+}
+
+static uint16_t client_open_or_default(uint16_t value, uint16_t fallback)
+{
+    return value ? value : fallback;
+}
+
+static enum boot_mesh_terminal_open_result client_open_refusal_result(
+    enum mesh_stream_refusal opened)
+{
+    switch (opened) {
+    case MESH_STREAM_REFUSED_PEER_NOT_CONNECTED:
+        return MESH_TERMINAL_OPEN_PEER_NOT_CONNECTED;
+    case MESH_STREAM_REFUSED_CAP:
+    case MESH_STREAM_REFUSED_ID_IN_USE:
+        return MESH_TERMINAL_OPEN_BUSY;
+    case MESH_STREAM_REFUSED_LINK_NOT_NOISE:
+        return MESH_TERMINAL_OPEN_NOISE_DISABLED;
+    default:
+        return MESH_TERMINAL_OPEN_SEND_FAILED;
+    }
+}
+
+enum boot_mesh_terminal_open_result boot_mesh_terminal_client_open(
+    const char *pairing_id_hex, uint16_t cols, uint16_t rows,
+    uint8_t terminal_id_out[32])
+{
+    uint8_t pairing_id[32];
+    struct boot_svc_ctx *svc = NULL;
+    enum boot_mesh_terminal_open_result preflight =
+        client_open_check_args_and_service(pairing_id_hex, cols, rows,
+                                           terminal_id_out, pairing_id, &svc);
+    if (preflight != MESH_TERMINAL_OPEN_OK)
+        return preflight;
     struct msg_processor *mp = svc->msg_processor;
-    if (!mp->net_mgr || !mp->params) {
+    if (!client_open_msg_processor_ready(mp)) {
         LOG_ERROR("net.mesh_terminal", "client open: msg_processor incomplete");
         return MESH_TERMINAL_OPEN_UNAVAILABLE;
     }
     if (!mp->net_mgr->noise_enabled)
         return MESH_TERMINAL_OPEN_NOISE_DISABLED;
 
-    struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !app_runtime_node_db_handle_open(ndb)) {
+    struct node_db *ndb = client_open_node_db();
+    if (!ndb) {
         LOG_ERROR("net.mesh_terminal", "client open: node_db unavailable");
         return MESH_TERMINAL_OPEN_UNAVAILABLE;
     }
@@ -577,11 +687,10 @@ enum boot_mesh_terminal_open_result boot_mesh_terminal_client_open(
         return MESH_TERMINAL_OPEN_UNAVAILABLE;
     }
     struct db_mesh_pairing row;
-    if (!db_mesh_pairing_find(ndb, pairing_id_hex, &row))
-        return MESH_TERMINAL_OPEN_NOT_PAIRED;
-    if (!mesh_pairing_allows(&row, MESH_PAIRING_CAP_TERMINAL_EXEC, now))
-        return row.revoked_at != 0 ? MESH_TERMINAL_OPEN_REVOKED
-                                   : MESH_TERMINAL_OPEN_EXPIRED;
+    enum boot_mesh_terminal_open_result paired =
+        client_open_pairing_row(ndb, pairing_id_hex, now, &row);
+    if (paired != MESH_TERMINAL_OPEN_OK)
+        return paired;
 
     /* The open names OUR anchored master identity from the filed local
      * delegation; without it no honest open can be composed. */
@@ -596,24 +705,12 @@ enum boot_mesh_terminal_open_result boot_mesh_terminal_client_open(
 
     struct noise_transport_snapshot session;
     memset(&session, 0, sizeof(session));
-    struct p2p_node *peer = boot_mesh_find_session_peer(
-        mp->net_mgr, row.peer_noise_pubkey, &session);
-    if (!peer)
-        return MESH_TERMINAL_OPEN_PEER_NOT_CONNECTED;
-
-    /* Pre-flight the exact authority the responder will re-verify: the
-     * peer's greatest-seq held delegation must support this pairing. */
     struct vcs_zcode_dht_delegation responder_delegation;
-    uint8_t network_genesis[32];
-    if (!boot_mesh_peer_delegation(&row, &responder_delegation) ||
-        !boot_zcode_dht_network_genesis(network_genesis) ||
-        mesh_pairing_service_authorize_terminal(
-            ndb, network_genesis, pairing_id_hex, &responder_delegation,
-            session.remote_static, now) != MESH_PAIRING_OK) {
-        p2p_node_release(peer);
-        return MESH_TERMINAL_OPEN_PEER_IDENTITY_UNAVAILABLE;
-    }
-    p2p_node_release(peer);
+    enum boot_mesh_terminal_open_result peer_state =
+        client_open_peer_authority(mp, &row, ndb, pairing_id_hex, now,
+                                   &session, &responder_delegation);
+    if (peer_state != MESH_TERMINAL_OPEN_OK)
+        return peer_state;
 
     struct mesh_terminal_open_v1 open;
     memset(&open, 0, sizeof(open));
@@ -621,21 +718,15 @@ enum boot_mesh_terminal_open_result boot_mesh_terminal_client_open(
     open.flags = MESH_TERMINAL_PROTO_FLAGS_NONE;
     open.capability = MESH_TERMINAL_CAP_TERMINAL_EXEC;
     bool have_id = false;
-    for (int attempt = 0; attempt < 4 && !have_id; attempt++) {
-        if (!zcl_random_secret_bytes(open.terminal_id, 32,
-                                     "mesh_terminal_open")) {
-            LOG_ERROR("net.mesh_terminal",
-                      "client open: terminal id generation failed");
-            return MESH_TERMINAL_OPEN_UNAVAILABLE;
-        }
-        struct client_visit v;
-        memset(&v, 0, sizeof(v));
-        v.terminal_id = open.terminal_id;
-        mesh_stream_visit(MESH_TERMINAL_SERVICE_NAME, client_open_survey, &v);
-        if (v.live >= MESH_TERMINAL_CLIENT_SESSIONS_MAX)
-            return MESH_TERMINAL_OPEN_BUSY;
-        have_id = !v.found;
+    enum boot_mesh_terminal_open_result picked =
+        client_open_pick_terminal_id(open.terminal_id, &have_id);
+    if (picked == MESH_TERMINAL_OPEN_UNAVAILABLE) {
+        LOG_ERROR("net.mesh_terminal",
+                  "client open: terminal id generation failed");
+        return MESH_TERMINAL_OPEN_UNAVAILABLE;
     }
+    if (picked != MESH_TERMINAL_OPEN_OK)
+        return picked;
     if (!have_id) {
         LOG_ERROR("net.mesh_terminal",
                   "client open: terminal id collision persisted");
@@ -653,8 +744,8 @@ enum boot_mesh_terminal_open_result boot_mesh_terminal_client_open(
     open.connection_generation = session.connection_generation;
     open.issued_unix = (uint64_t)now;
     open.expires_unix = (uint64_t)now + MESH_TERMINAL_OPEN_MAX_LIFETIME_SECONDS;
-    open.cols = cols ? cols : 80;
-    open.rows = rows ? rows : 24;
+    open.cols = client_open_or_default(cols, 80);
+    open.rows = client_open_or_default(rows, 24);
 
     uint8_t wire[MESH_TERMINAL_OPEN_V1_WIRE_BYTES];
     enum mesh_terminal_proto_error encoded =
@@ -693,17 +784,7 @@ enum boot_mesh_terminal_open_result boot_mesh_terminal_client_open(
         free(s);
         LOG_ERROR("net.mesh_terminal", "client open refused: %s",
                   mesh_stream_refusal_string(opened));
-        switch (opened) {
-        case MESH_STREAM_REFUSED_PEER_NOT_CONNECTED:
-            return MESH_TERMINAL_OPEN_PEER_NOT_CONNECTED;
-        case MESH_STREAM_REFUSED_CAP:
-        case MESH_STREAM_REFUSED_ID_IN_USE:
-            return MESH_TERMINAL_OPEN_BUSY;
-        case MESH_STREAM_REFUSED_LINK_NOT_NOISE:
-            return MESH_TERMINAL_OPEN_NOISE_DISABLED;
-        default:
-            return MESH_TERMINAL_OPEN_SEND_FAILED;
-        }
+        return client_open_refusal_result(opened);
     }
     memcpy(terminal_id_out, open.terminal_id, 32);
     return MESH_TERMINAL_OPEN_OK;
