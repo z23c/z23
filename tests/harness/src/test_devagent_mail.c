@@ -640,6 +640,7 @@ static int test_mail_paging(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -772,6 +773,7 @@ static int test_mail_brief_drain(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -954,6 +956,7 @@ static int test_mail_ref_filter_and_agent_resume(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1111,6 +1114,7 @@ static int test_mail_cwd_invariance(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 #endif /* !defined(_WIN32) */
@@ -1173,6 +1177,7 @@ static int test_mail_board_fields(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1547,6 +1552,7 @@ static int test_mail_leaf_registered(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1634,6 +1640,7 @@ static int test_mail_first_post_roundtrip(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1672,6 +1679,7 @@ static int test_mail_ack_persists_cursor(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1805,6 +1813,7 @@ static int test_mail_body_refusals(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1955,6 +1964,7 @@ static int test_mail_body_path_verdicts(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -2013,6 +2023,7 @@ static int test_mail_ack_atomic(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -2118,39 +2129,76 @@ static int test_mail_fork_interleave(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 #endif /* !defined(_WIN32) */
+
+/* The first group, in original order. A failure ends the run here, as it
+ * did when every test shared one function. */
+static int test_mail_front_half(void)
+{
+    int failures = 0;
+
+    failures += test_mail_independent_cursor();
+    if (failures) return failures;
+    failures += test_mail_exact_locator();
+    if (failures) return failures;
+    failures += test_mail_exact_maximum();
+    if (failures) return failures;
+    failures += test_mail_exact_malformed();
+    if (failures) return failures;
+    failures += test_mail_exact_nul();
+    if (failures) return failures;
+    failures += test_mail_prefix_cursor();
+    if (failures) return failures;
+    failures += test_mail_paging();
+    if (failures) return failures;
+    failures += test_mail_brief_drain();
+    if (failures) return failures;
+    failures += test_mail_ref_filter_and_agent_resume();
+    if (failures) return failures;
+    failures += test_mail_stored_cursor();
+    if (failures) return failures;
+    failures += test_mail_board_fields();
+    if (failures) return failures;
+#if !defined(_WIN32)
+    failures += test_mail_cwd_invariance();
+#endif
+    return failures;
+}
+
+/* The second group, in original order, with the same first-failure stop. */
+static int test_mail_back_half(void)
+{
+    int failures = 0;
+
+    failures += test_mail_leaf_registered();
+    if (failures) return failures;
+    failures += test_mail_first_post_roundtrip();
+    if (failures) return failures;
+    failures += test_mail_ack_persists_cursor();
+    if (failures) return failures;
+    failures += test_mail_body_refusals();
+    if (failures) return failures;
+    failures += test_mail_body_path_verdicts();
+#if !defined(_WIN32)
+    if (failures) return failures;
+    failures += test_mail_ack_atomic();
+    if (failures) return failures;
+    failures += test_mail_fork_interleave();
+#endif
+    return failures;
+}
 
 int test_devagent_mail(void);
 int test_devagent_mail(void)
 {
     int failures = 0;
 
-    failures += test_mail_independent_cursor();
-    failures += test_mail_exact_locator();
-    failures += test_mail_exact_maximum();
-    failures += test_mail_exact_malformed();
-    failures += test_mail_exact_nul();
-    failures += test_mail_prefix_cursor();
-    failures += test_mail_paging();
-    failures += test_mail_brief_drain();
-    failures += test_mail_ref_filter_and_agent_resume();
-    failures += test_mail_stored_cursor();
-    failures += test_mail_board_fields();
-#if !defined(_WIN32)
-    failures += test_mail_cwd_invariance();
-#endif
-
-    failures += test_mail_leaf_registered();
-    failures += test_mail_first_post_roundtrip();
-    failures += test_mail_ack_persists_cursor();
-    failures += test_mail_body_refusals();
-    failures += test_mail_body_path_verdicts();
-#if !defined(_WIN32)
-    failures += test_mail_ack_atomic();
-    failures += test_mail_fork_interleave();
-#endif
+    failures += test_mail_front_half();
+    if (failures == 0)
+        failures += test_mail_back_half();
 
     dvx_restore();
     if (failures == 0)
