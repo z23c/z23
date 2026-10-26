@@ -109,6 +109,136 @@ static const char *facts_short_path(const char *p)
     return keep;
 }
 
+/* Render the `key` form: each resolved mutation site (capped) as file:line
+ * via <fn|SQL verb>, then the slot's honesty flags and summary. The caller
+ * owns arr/lines and the report lock. */
+static void facts_render_slot(struct zcl_command_reply *reply,
+                              const struct fact_row *row,
+                              struct json_value *arr,
+                              struct json_value *lines)
+{
+    for (int i = 0; i < row->n_sites && i < FACTS_SITE_CAP; i++) {
+        const struct fact_writer_site *s = &row->sites[i];
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "path", s->path);
+        (void)json_push_kv_int(&o, "line", s->line);
+        (void)json_push_kv_str(&o, "via", s->via_name);
+        (void)json_push_kv_str(&o, "via_kind",
+                               s->via == FACT_VIA_API ? "api" : "raw_sql");
+        facts_push_obj(arr, &o);
+        char l[224];
+        (void)snprintf(l, sizeof(l), "%s:%d  %s%s",
+                       facts_short_path(s->path), s->line, s->via_name,
+                       s->via == FACT_VIA_RAW_SQL ? " (raw SQL)" : "");
+        facts_push_line(lines, l);
+    }
+    (void)json_push_kv_str(&reply->data, "scope", "slot");
+    (void)json_push_kv_bool(&reply->data, "authority_proven", false);
+    (void)json_push_kv_bool(&reply->data, "source_coverage_complete", false);
+    (void)json_push_kv_bool(&reply->data, "runtime_reachability_proven", false);
+    (void)json_push_kv_str(
+        &reply->data, "evidence_ceiling",
+        "resolved named-literal source mutation sites under the declared "
+        "derivations only; completeness, runtime reachability, ownership "
+        "role, target database, serialization, and duplicate fact homes "
+        "are UNPROVEN");
+    (void)json_push_kv_str(&reply->data, "store", row->store);
+    (void)json_push_kv_str(&reply->data, "key", row->key);
+    (void)json_push_kv_int(&reply->data, "writer_files", row->writer_files);
+    (void)json_push_kv_int(&reply->data, "writer_sites", row->writer_sites);
+    (void)json_push_kv(&reply->data, "writers", arr);
+    (void)json_push_kv(&reply->data, "lines", lines);
+    (void)json_push_kv_bool(&reply->data, "truncated", row->sites_truncated);
+    char summary[512];
+    (void)snprintf(summary, sizeof(summary),
+                   "%s/%s: %d writer file(s), %d site(s)%s",
+                   row->store, row->key, row->writer_files,
+                   row->writer_sites,
+                   row->writer_files > 1
+                       ? " — MULTI-SURFACE: authority and duplicate-home "
+                         "claims remain UNPROVEN"
+                       : " — single resolved mutation surface; authority "
+                         "still UNPROVEN");
+    (void)json_push_kv_str(&reply->data, "summary", summary);
+}
+
+/* Render the no-argument census: ranked multi-surface slots, per-store
+ * honesty counters, and the census summary. The caller owns arr/lines/stores
+ * and the report lock. */
+static void facts_render_census(struct zcl_command_reply *reply,
+                                const struct fact_writers_report *rep,
+                                const char *want_store,
+                                struct json_value *arr,
+                                struct json_value *lines,
+                                struct json_value *stores)
+{
+    int shown = 0;
+    for (int i = 0; i < rep->n_rows && shown < FACTS_TOP_CAP; i++) {
+        const struct fact_row *row = &rep->rows[i];
+        if (row->writer_files < 2) break;   /* rows are ranked desc */
+        if (want_store && strcmp(row->store, want_store) != 0) continue;
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "store", row->store);
+        (void)json_push_kv_str(&o, "key", row->key);
+        (void)json_push_kv_int(&o, "writer_files", row->writer_files);
+        (void)json_push_kv_int(&o, "writer_sites", row->writer_sites);
+        facts_push_obj(arr, &o);
+        char l[224];
+        (void)snprintf(l, sizeof(l), "%d files  %s/%s", row->writer_files,
+                       row->store, row->key);
+        facts_push_line(lines, l);
+        shown++;
+    }
+
+    for (int i = 0; i < rep->n_stores && i < FACTS_STORE_CAP; i++) {
+        const struct fact_store_stat *st = &rep->stores[i];
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "store", st->store);
+        (void)json_push_kv_int(&o, "facts", st->facts);
+        (void)json_push_kv_int(&o, "facts_multi_writer", st->facts_multi_writer);
+        (void)json_push_kv_int(&o, "sites_resolved", st->sites_resolved);
+        (void)json_push_kv_int(&o, "sites_unresolved", st->sites_unresolved);
+        facts_push_obj(stores, &o);
+    }
+
+    (void)json_push_kv_str(&reply->data, "scope", "census");
+    (void)json_push_kv_bool(&reply->data, "authority_proven", false);
+    (void)json_push_kv_bool(&reply->data, "source_coverage_complete", false);
+    (void)json_push_kv_bool(&reply->data, "runtime_reachability_proven", false);
+    (void)json_push_kv_str(
+        &reply->data, "evidence_ceiling",
+        "resolved named-literal source mutation sites under the declared "
+        "derivations only; completeness, runtime reachability, ownership role, "
+        "target database, serialization, and duplicate fact homes are UNPROVEN");
+    (void)json_push_kv_int(&reply->data, "files_scanned", rep->files_scanned);
+    (void)json_push_kv_int(&reply->data, "facts_total", rep->facts_total);
+    (void)json_push_kv_int(&reply->data, "facts_multi_writer",
+                           rep->facts_multi_writer);
+    (void)json_push_kv_int(&reply->data, "writer_sites", rep->sites_total);
+    (void)json_push_kv_int(&reply->data, "sites_unresolved",
+                           rep->sites_unresolved);
+    (void)json_push_kv_int(&reply->data, "rows_dropped", rep->rows_dropped);
+    (void)json_push_kv(&reply->data, "multi_writer", arr);
+    (void)json_push_kv(&reply->data, "stores", stores);
+    (void)json_push_kv(&reply->data, "lines", lines);
+    (void)json_push_kv_bool(&reply->data, "truncated",
+                            shown < rep->facts_multi_writer);
+    char summary[512];
+    (void)snprintf(summary, sizeof(summary),
+                   "%d resolved named-literal slot(s) across %d store(s); "
+                   "%d have "
+                   "mutation sites in MORE THAN ONE file (%d shown); %d write "
+                   "site(s) had a non-literal key and are unattributed. "
+                   "Authority roles and duplicate fact homes are UNPROVEN. "
+                   "`code provenance facts <key>` names each resolved site.",
+                   rep->facts_total, rep->n_stores, rep->facts_multi_writer,
+                   shown, rep->sites_unresolved);
+    (void)json_push_kv_str(&reply->data, "summary", summary);
+}
+
 void zcl_native_handle_code_facts(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
 {
@@ -161,123 +291,16 @@ void zcl_native_handle_code_facts(const struct zcl_command_request *request,
                                    "input", false, false, detail, want_key);
             return;
         }
-        for (int i = 0; i < row->n_sites && i < FACTS_SITE_CAP; i++) {
-            const struct fact_writer_site *s = &row->sites[i];
-            struct json_value o;
-            json_init(&o); json_set_object(&o);
-            (void)json_push_kv_str(&o, "path", s->path);
-            (void)json_push_kv_int(&o, "line", s->line);
-            (void)json_push_kv_str(&o, "via", s->via_name);
-            (void)json_push_kv_str(&o, "via_kind",
-                                   s->via == FACT_VIA_API ? "api" : "raw_sql");
-            facts_push_obj(&arr, &o);
-            char l[224];
-            (void)snprintf(l, sizeof(l), "%s:%d  %s%s",
-                           facts_short_path(s->path), s->line, s->via_name,
-                           s->via == FACT_VIA_RAW_SQL ? " (raw SQL)" : "");
-            facts_push_line(&lines, l);
-        }
-        (void)json_push_kv_str(&reply->data, "scope", "slot");
-        (void)json_push_kv_bool(&reply->data, "authority_proven", false);
-        (void)json_push_kv_bool(&reply->data, "source_coverage_complete", false);
-        (void)json_push_kv_bool(&reply->data, "runtime_reachability_proven", false);
-        (void)json_push_kv_str(
-            &reply->data, "evidence_ceiling",
-            "resolved named-literal source mutation sites under the declared "
-            "derivations only; completeness, runtime reachability, ownership "
-            "role, target database, serialization, and duplicate fact homes "
-            "are UNPROVEN");
-        (void)json_push_kv_str(&reply->data, "store", row->store);
-        (void)json_push_kv_str(&reply->data, "key", row->key);
-        (void)json_push_kv_int(&reply->data, "writer_files", row->writer_files);
-        (void)json_push_kv_int(&reply->data, "writer_sites", row->writer_sites);
-        (void)json_push_kv(&reply->data, "writers", &arr);
-        (void)json_push_kv(&reply->data, "lines", &lines);
-        (void)json_push_kv_bool(&reply->data, "truncated", row->sites_truncated);
-        char summary[512];
-        (void)snprintf(summary, sizeof(summary),
-                       "%s/%s: %d writer file(s), %d site(s)%s",
-                       row->store, row->key, row->writer_files,
-                       row->writer_sites,
-                       row->writer_files > 1
-                           ? " — MULTI-SURFACE: authority and duplicate-home "
-                             "claims remain UNPROVEN"
-                           : " — single resolved mutation surface; authority "
-                             "still UNPROVEN");
-        (void)json_push_kv_str(&reply->data, "summary", summary);
+        facts_render_slot(reply, row, &arr, &lines);
         json_free(&arr);
         json_free(&lines);
         facts_report_unlock();
         return;
     }
 
-    int shown = 0;
-    for (int i = 0; i < rep->n_rows && shown < FACTS_TOP_CAP; i++) {
-        const struct fact_row *row = &rep->rows[i];
-        if (row->writer_files < 2) break;   /* rows are ranked desc */
-        if (want_store && strcmp(row->store, want_store) != 0) continue;
-        struct json_value o;
-        json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "store", row->store);
-        (void)json_push_kv_str(&o, "key", row->key);
-        (void)json_push_kv_int(&o, "writer_files", row->writer_files);
-        (void)json_push_kv_int(&o, "writer_sites", row->writer_sites);
-        facts_push_obj(&arr, &o);
-        char l[224];
-        (void)snprintf(l, sizeof(l), "%d files  %s/%s", row->writer_files,
-                       row->store, row->key);
-        facts_push_line(&lines, l);
-        shown++;
-    }
-
     struct json_value stores;
     json_init(&stores); json_set_array(&stores);
-    for (int i = 0; i < rep->n_stores && i < FACTS_STORE_CAP; i++) {
-        const struct fact_store_stat *st = &rep->stores[i];
-        struct json_value o;
-        json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "store", st->store);
-        (void)json_push_kv_int(&o, "facts", st->facts);
-        (void)json_push_kv_int(&o, "facts_multi_writer", st->facts_multi_writer);
-        (void)json_push_kv_int(&o, "sites_resolved", st->sites_resolved);
-        (void)json_push_kv_int(&o, "sites_unresolved", st->sites_unresolved);
-        facts_push_obj(&stores, &o);
-    }
-
-    (void)json_push_kv_str(&reply->data, "scope", "census");
-    (void)json_push_kv_bool(&reply->data, "authority_proven", false);
-    (void)json_push_kv_bool(&reply->data, "source_coverage_complete", false);
-    (void)json_push_kv_bool(&reply->data, "runtime_reachability_proven", false);
-    (void)json_push_kv_str(
-        &reply->data, "evidence_ceiling",
-        "resolved named-literal source mutation sites under the declared "
-        "derivations only; completeness, runtime reachability, ownership role, "
-        "target database, serialization, and duplicate fact homes are UNPROVEN");
-    (void)json_push_kv_int(&reply->data, "files_scanned", rep->files_scanned);
-    (void)json_push_kv_int(&reply->data, "facts_total", rep->facts_total);
-    (void)json_push_kv_int(&reply->data, "facts_multi_writer",
-                           rep->facts_multi_writer);
-    (void)json_push_kv_int(&reply->data, "writer_sites", rep->sites_total);
-    (void)json_push_kv_int(&reply->data, "sites_unresolved",
-                           rep->sites_unresolved);
-    (void)json_push_kv_int(&reply->data, "rows_dropped", rep->rows_dropped);
-    (void)json_push_kv(&reply->data, "multi_writer", &arr);
-    (void)json_push_kv(&reply->data, "stores", &stores);
-    (void)json_push_kv(&reply->data, "lines", &lines);
-    (void)json_push_kv_bool(&reply->data, "truncated",
-                            shown < rep->facts_multi_writer);
-    char summary[512];
-    (void)snprintf(summary, sizeof(summary),
-                   "%d resolved named-literal slot(s) across %d store(s); "
-                   "%d have "
-                   "mutation sites in MORE THAN ONE file (%d shown); %d write "
-                   "site(s) had a non-literal key and are unattributed. "
-                   "Authority roles and duplicate fact homes are UNPROVEN. "
-                   "`code provenance facts <key>` names each resolved site.",
-                   rep->facts_total, rep->n_stores, rep->facts_multi_writer,
-                   shown, rep->sites_unresolved);
-    (void)json_push_kv_str(&reply->data, "summary", summary);
-
+    facts_render_census(reply, rep, want_store, &arr, &lines, &stores);
     json_free(&arr);
     json_free(&lines);
     json_free(&stores);
