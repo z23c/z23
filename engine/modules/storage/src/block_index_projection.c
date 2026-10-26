@@ -696,6 +696,38 @@ static bool catch_up_cb(uint64_t offset, enum event_log_type type,
     return bip_replay_after_event(c);
 }
 
+/* Flush trailing batch (if any) — must run even on stream error
+ * to checkpoint partial progress, but ONLY if no per-event error
+ * occurred (otherwise we rolled back already). */
+static void catch_up_flush_trailing(struct catch_up_ctx *c)
+{
+    if (!c->error && c->last_offset_after > c->batch_start_offset)
+        (void)bip_replay_commit(c);   /* sets c.error on failure */
+}
+
+/* Always persist last_catch_up_ms (one tiny standalone txn). */
+static void catch_up_persist_elapsed(block_index_projection_t *p,
+                                     int64_t elapsed)
+{
+    p->last_catch_up_ms = elapsed;
+    char *err = NULL;
+    if (sqlite3_exec(p->db, "BEGIN IMMEDIATE",
+                     NULL, NULL, &err) == SQLITE_OK) {
+        meta_set_u64(p->db, "last_catch_up_ms", (uint64_t)elapsed);
+        sqlite3_exec(p->db, "COMMIT", NULL, NULL, &err);
+    }
+    if (err) sqlite3_free(err);
+}
+
+/* A multi-million-header first catch-up can otherwise leave a WAL as
+ * large as the projection itself, making the next boot replay it before
+ * RPC can open. No projection statements or transaction remain here. */
+static void catch_up_checkpoint_wal(struct catch_up_ctx *c, int rc)
+{
+    if (rc >= 0 && !c->error && c->total_consumed > 0)
+        checkpoint_wal(c->p->db, "after catch-up");
+}
+
 uint64_t block_index_projection_catch_up(block_index_projection_t *p)
 {
     if (!p || !p->db || !p->log) {
@@ -764,11 +796,7 @@ uint64_t block_index_projection_catch_up(block_index_projection_t *p)
 
     int rc = event_log_stream(p->log, p->last_consumed_offset,
                               catch_up_cb, &c);
-    /* Flush trailing batch (if any) — must run even on stream error
-     * to checkpoint partial progress, but ONLY if no per-event error
-     * occurred (otherwise we rolled back already). */
-    if (!c.error && c.last_offset_after > c.batch_start_offset)
-        (void)bip_replay_commit(&c);   /* sets c.error on failure */
+    catch_up_flush_trailing(&c);
     bip_replay_finish(&c);
     sqlite3_finalize(c.ins_stmt);
     sqlite3_finalize(c.exists_stmt);
@@ -781,22 +809,10 @@ uint64_t block_index_projection_catch_up(block_index_projection_t *p)
                 "event(s) had no prior row (durable-log ordering defect; "
                 "skipped, cursor still advanced)\n", c.status_orphans);
 
-    /* Always persist last_catch_up_ms (one tiny standalone txn). */
     int64_t elapsed = mono_now_ms() - t0;
-    p->last_catch_up_ms = elapsed;
-    char *err = NULL;
-    if (sqlite3_exec(p->db, "BEGIN IMMEDIATE",
-                     NULL, NULL, &err) == SQLITE_OK) {
-        meta_set_u64(p->db, "last_catch_up_ms", (uint64_t)elapsed);
-        sqlite3_exec(p->db, "COMMIT", NULL, NULL, &err);
-    }
-    if (err) sqlite3_free(err);
+    catch_up_persist_elapsed(p, elapsed);
 
-    /* A multi-million-header first catch-up can otherwise leave a WAL as
-     * large as the projection itself, making the next boot replay it before
-     * RPC can open. No projection statements or transaction remain here. */
-    if (rc >= 0 && !c.error && c.total_consumed > 0)
-        checkpoint_wal(p->db, "after catch-up");
+    catch_up_checkpoint_wal(&c, rc);
 
     pthread_mutex_unlock(&p->mu);
 
@@ -945,6 +961,12 @@ int block_index_projection_iterate_storage_order(
     return iterate_query(p, cb, user, "SELECT hash, blob FROM block_index");
 }
 
+/* Store one u32 field little-endian into the commitment absorb buffer. */
+static void store_le32(uint8_t *q, uint32_t v)
+{
+    for (int i = 0; i < 4; i++) q[i] = (uint8_t)((v >> (i*8)) & 0xFF);
+}
+
 /* SHA3-256 over (height, hash) canonical order, absorbing for each
  * entry the same load-bearing fields the diff tool checks. */
 int block_index_projection_commitment(block_index_projection_t *p,
@@ -982,20 +1004,20 @@ int block_index_projection_commitment(block_index_projection_t *p,
         memcpy(buf, hashb, 32);
         uint8_t *q = buf + 32;
         uint32_t h32 = (uint32_t)height;
-        for (int i = 0; i < 4; i++) q[i] = (uint8_t)((h32 >> (i*8)) & 0xFF);
+        store_le32(q, h32);
         q += 4;
-        for (int i = 0; i < 4; i++) q[i] = (uint8_t)((n_status >> (i*8)) & 0xFF);
+        store_le32(q, n_status);
         q += 4;
         uint32_t f32 = (uint32_t)n_file;
-        for (int i = 0; i < 4; i++) q[i] = (uint8_t)((f32 >> (i*8)) & 0xFF);
+        store_le32(q, f32);
         q += 4;
-        for (int i = 0; i < 4; i++) q[i] = (uint8_t)((ndatapos >> (i*8)) & 0xFF);
+        store_le32(q, ndatapos);
         q += 4;
-        for (int i = 0; i < 4; i++) q[i] = (uint8_t)((nundopos >> (i*8)) & 0xFF);
+        store_le32(q, nundopos);
         q += 4;
-        for (int i = 0; i < 4; i++) q[i] = (uint8_t)((ntime >> (i*8)) & 0xFF);
+        store_le32(q, ntime);
         q += 4;
-        for (int i = 0; i < 4; i++) q[i] = (uint8_t)((nbits >> (i*8)) & 0xFF);
+        store_le32(q, nbits);
 
         sha3_256_write(&h, buf, sizeof(buf));
     }
