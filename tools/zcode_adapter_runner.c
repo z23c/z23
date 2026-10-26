@@ -140,38 +140,53 @@ static bool adapter_nproc_limit(uint64_t *out)
     return true;
 }
 
-int main(int argc, char **argv)
+static int adapter_report_identity(void)
 {
-    if (argc == 2 && strcmp(argv[1], "--identity") == 0) {
-        printf("{\"schema\":\"zcl.zcode_adapter_runner_identity.v1\","
-               "\"source_id\":\"%s\"}\n", ZCL_BUILD_SOURCE_ID);
-        return 0;
+    printf("{\"schema\":\"zcl.zcode_adapter_runner_identity.v1\","
+           "\"source_id\":\"%s\"}\n", ZCL_BUILD_SOURCE_ID);
+    return 0;
+}
+
+static int adapter_report_binding(void)
+{
+    char codex_path[PATH_MAX], digest[65];
+    if (!adapter_codex_path(codex_path) ||
+        !adapter_file_sha3(codex_path, digest)) {
+        fprintf(stderr, "adapter_runner: fixed Codex binding unavailable\n");
+        return 69;
     }
-    if (argc == 2 && strcmp(argv[1], "--binding") == 0) {
-        char codex_path[PATH_MAX], digest[65];
-        if (!adapter_codex_path(codex_path) ||
-            !adapter_file_sha3(codex_path, digest)) {
-            fprintf(stderr, "adapter_runner: fixed Codex binding unavailable\n");
-            return 69;
-        }
-        printf("{\"schema\":\"zcl.zcode_adapter_executable_binding.v1\","
-               "\"ready\":true,\"artifact_sha3\":\"%s\"}\n", digest);
-        return 0;
-    }
-    bool preflight = argc == 4 && strcmp(argv[1], "--preflight") == 0;
+    printf("{\"schema\":\"zcl.zcode_adapter_executable_binding.v1\","
+           "\"ready\":true,\"artifact_sha3\":\"%s\"}\n", digest);
+    return 0;
+}
+
+static int adapter_check_usage(int argc, bool preflight)
+{
     if ((!preflight && argc != 3) || (preflight && argc != 4)) {
         fprintf(stderr, "adapter_runner: candidate and packet required\n");
         return 64;
     }
+    return 0;
+}
+
+static int adapter_resolve_paths(char **argv, bool preflight,
+                                 char candidate[PATH_MAX],
+                                 char packet[PATH_MAX],
+                                 char codex[PATH_MAX])
+{
     const char *candidate_arg = argv[preflight ? 2 : 1];
     const char *packet_arg = argv[preflight ? 3 : 2];
-    char candidate[PATH_MAX], packet[PATH_MAX], codex[PATH_MAX];
     if (!realpath(candidate_arg, candidate) || !realpath(packet_arg, packet) ||
         !adapter_beneath(candidate, packet) ||
         (!preflight && !adapter_codex_path(codex))) {
         fprintf(stderr, "adapter_runner: fixed adapter or paths unavailable\n");
         return 69;
     }
+    return 0;
+}
+
+static int adapter_open_bounded_packet(const char *packet, int *out)
+{
     int packet_fd = open(packet, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat packet_st;
     if (packet_fd < 0 || fstat(packet_fd, &packet_st) != 0 ||
@@ -181,6 +196,25 @@ int main(int argc, char **argv)
         fprintf(stderr, "adapter_runner: bounded packet refused\n");
         return 65;
     }
+    *out = packet_fd;
+    return 0;
+}
+
+static bool adapter_credential_unusable(bool preflight,
+                                        const char *inherited_key,
+                                        const char *access_token)
+{
+    return !preflight &&
+           (!inherited_key || !inherited_key[0] ||
+            strlen(inherited_key) > 16384u ||
+            (getenv("CODEX_API_KEY") && getenv("CODEX_API_KEY")[0] &&
+             access_token && access_token[0]));
+}
+
+static int adapter_prepare_credentials(bool preflight, int packet_fd,
+                                       const char **credential_name_out,
+                                       char **api_key_out)
+{
     const char *credential_name = "CODEX_API_KEY";
     const char *inherited_key = preflight ? NULL : getenv(credential_name);
     const char *access_token = preflight ? NULL : getenv("CODEX_ACCESS_TOKEN");
@@ -189,29 +223,47 @@ int main(int argc, char **argv)
         credential_name = "CODEX_ACCESS_TOKEN";
         inherited_key = access_token;
     }
-    if (!preflight &&
-        (!inherited_key || !inherited_key[0] ||
-         strlen(inherited_key) > 16384u ||
-         (getenv("CODEX_API_KEY") && getenv("CODEX_API_KEY")[0] &&
-          access_token && access_token[0]))) {
+    if (adapter_credential_unusable(preflight, inherited_key, access_token)) {
         close(packet_fd);
         fprintf(stderr, "adapter_runner: one supported Codex credential required\n");
         return 69;
     }
-    char *api_key = preflight ? NULL : strdup(inherited_key);
-    char adapter_home[PATH_MAX], adapter_tmp[PATH_MAX];
-    int hn = snprintf(adapter_home, sizeof(adapter_home),
+    *credential_name_out = credential_name;
+    *api_key_out = preflight ? NULL : strdup(inherited_key);
+    return 0;
+}
+
+static int adapter_prepare_directories(bool preflight, char *api_key,
+                                       int packet_fd, const char *candidate,
+                                       char adapter_home[PATH_MAX],
+                                       char adapter_tmp[PATH_MAX])
+{
+    int hn = snprintf(adapter_home, (size_t)PATH_MAX,
                       "%s/.zcode-adapter-home", candidate);
-    int tn = snprintf(adapter_tmp, sizeof(adapter_tmp),
+    int tn = snprintf(adapter_tmp, (size_t)PATH_MAX,
                       "%s/.zcode-adapter-tmp", candidate);
     if ((!preflight && !api_key) || hn <= 0 ||
-        (size_t)hn >= sizeof(adapter_home) ||
-        tn <= 0 || (size_t)tn >= sizeof(adapter_tmp) ||
+        (size_t)hn >= (size_t)PATH_MAX ||
+        tn <= 0 || (size_t)tn >= (size_t)PATH_MAX ||
         !adapter_mkdir(adapter_home) || !adapter_mkdir(adapter_tmp)) {
         free(api_key); close(packet_fd);
         fprintf(stderr, "adapter_runner: private adapter directories unavailable\n");
         return 73;
     }
+    return 0;
+}
+
+static void adapter_shred_api_key(char *api_key)
+{
+    if (api_key) memory_cleanse(api_key, strlen(api_key));
+    free(api_key);
+}
+
+static int adapter_scrub_environment(bool preflight, const char *credential_name,
+                                     char *api_key, int packet_fd,
+                                     const char *adapter_home,
+                                     const char *adapter_tmp)
+{
     if (platform_clear_environment() != 0 ||
         (!preflight && setenv(credential_name, api_key, 1) != 0) ||
         setenv("HOME", adapter_home, 1) != 0 ||
@@ -219,14 +271,17 @@ int main(int argc, char **argv)
         setenv("TMPDIR", adapter_tmp, 1) != 0 ||
         setenv("PATH", "/usr/bin:/bin", 1) != 0 ||
         setenv("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt", 1) != 0) {
-        if (api_key) memory_cleanse(api_key, strlen(api_key));
-        free(api_key); close(packet_fd);
+        adapter_shred_api_key(api_key);
+        close(packet_fd);
         fprintf(stderr, "adapter_runner: environment scrub failed\n");
         return 70;
     }
-    if (api_key) memory_cleanse(api_key, strlen(api_key));
-    free(api_key);
+    adapter_shred_api_key(api_key);
+    return 0;
+}
 
+static int adapter_install_limits(int packet_fd)
+{
     uint64_t nproc_limit = 0;
     if (!adapter_nproc_limit(&nproc_limit)) {
         close(packet_fd);
@@ -247,6 +302,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "adapter_runner: resource confinement unavailable\n");
         return 70;
     }
+    return 0;
+}
+
+static int adapter_confine_paths(bool preflight, const char *candidate,
+                                 const char *codex, int packet_fd)
+{
     struct os_sandbox_path_rule rules[20];
     size_t count = 0;
     adapter_rule_add(rules, &count, candidate, true, false, true);
@@ -272,6 +333,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "adapter_runner: Landlock confinement unavailable\n");
         return 70;
     }
+    return 0;
+}
+
+static int adapter_setup_confined_io(bool preflight, int packet_fd,
+                                     const char *candidate)
+{
     if (chdir(candidate) != 0 || dup2(packet_fd, STDIN_FILENO) < 0 ||
         (!preflight && dup2(STDOUT_FILENO, STDERR_FILENO) < 0)) {
         close(packet_fd);
@@ -280,26 +347,33 @@ int main(int argc, char **argv)
     }
     if (packet_fd > STDERR_FILENO)
         close(packet_fd);
-    if (preflight) {
-        const char sentinel[] = ".zcode-adapter-preflight";
-        int fd = open(sentinel, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
-                                O_NOFOLLOW, 0600);
-        bool ok = fd >= 0;
-        if (fd >= 0) {
-            ok = close(fd) == 0;
-            fd = -1;
-        }
-        if (ok) ok = unlink(sentinel) == 0;
-        if (!ok) {
-            (void)unlink(sentinel);
-            fprintf(stderr, "adapter_runner: sandbox write probe failed\n");
-            return 70;
-        }
-        printf("{\"schema\":\"zcl.zcode_adapter_sandbox_preflight.v1\","
-               "\"sandbox_started\":true,"
-               "\"model_request_attempted\":false}\n");
-        return 0;
+    return 0;
+}
+
+static int adapter_probe_sandbox_write(void)
+{
+    const char sentinel[] = ".zcode-adapter-preflight";
+    int fd = open(sentinel, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                            O_NOFOLLOW, 0600);
+    bool ok = fd >= 0;
+    if (fd >= 0) {
+        ok = close(fd) == 0;
+        fd = -1;
     }
+    if (ok) ok = unlink(sentinel) == 0;
+    if (!ok) {
+        (void)unlink(sentinel);
+        fprintf(stderr, "adapter_runner: sandbox write probe failed\n");
+        return 70;
+    }
+    printf("{\"schema\":\"zcl.zcode_adapter_sandbox_preflight.v1\","
+           "\"sandbox_started\":true,"
+           "\"model_request_attempted\":false}\n");
+    return 0;
+}
+
+static int adapter_exec_codex(const char *codex, const char *candidate)
+{
     const char *const codex_argv[] = {
         codex, "exec", "--sandbox", "workspace-write", "-C", candidate,
         "--skip-git-repo-check", "--ephemeral", "--ignore-user-config",
@@ -313,4 +387,64 @@ int main(int argc, char **argv)
     execv(codex, (char *const *)codex_argv);
     fprintf(stderr, "adapter_runner: fixed codex exec failed\n");
     return 127;
+}
+
+static int adapter_prepare_inputs(int argc, char **argv, bool *preflight,
+                                  char candidate[PATH_MAX],
+                                  char codex[PATH_MAX], int *packet_fd,
+                                  const char **credential_name, char **api_key)
+{
+    *preflight = argc == 4 && strcmp(argv[1], "--preflight") == 0;
+    int rc = adapter_check_usage(argc, *preflight);
+    if (rc != 0) return rc;
+    char packet[PATH_MAX];
+    rc = adapter_resolve_paths(argv, *preflight, candidate, packet, codex);
+    if (rc != 0) return rc;
+    rc = adapter_open_bounded_packet(packet, packet_fd);
+    if (rc != 0) return rc;
+    return adapter_prepare_credentials(*preflight, *packet_fd, credential_name,
+                                       api_key);
+}
+
+static int adapter_confine_process(bool preflight, int packet_fd,
+                                   const char *candidate, const char *codex)
+{
+    int rc = adapter_install_limits(packet_fd);
+    if (rc != 0) return rc;
+    rc = adapter_confine_paths(preflight, candidate, codex, packet_fd);
+    if (rc != 0) return rc;
+    return adapter_setup_confined_io(preflight, packet_fd, candidate);
+}
+
+static int adapter_run_sandboxed(int argc, char **argv)
+{
+    bool preflight = false;
+    char candidate[PATH_MAX], codex[PATH_MAX];
+    char adapter_home[PATH_MAX], adapter_tmp[PATH_MAX];
+    const char *credential_name = NULL;
+    char *api_key = NULL;
+    int packet_fd = -1;
+    int rc = adapter_prepare_inputs(argc, argv, &preflight, candidate, codex,
+                                    &packet_fd, &credential_name, &api_key);
+    if (rc != 0) return rc;
+    rc = adapter_prepare_directories(preflight, api_key, packet_fd, candidate,
+                                     adapter_home, adapter_tmp);
+    if (rc != 0) return rc;
+    rc = adapter_scrub_environment(preflight, credential_name, api_key,
+                                   packet_fd, adapter_home, adapter_tmp);
+    if (rc != 0) return rc;
+    rc = adapter_confine_process(preflight, packet_fd, candidate, codex);
+    if (rc != 0) return rc;
+    if (preflight)
+        return adapter_probe_sandbox_write();
+    return adapter_exec_codex(codex, candidate);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "--identity") == 0)
+        return adapter_report_identity();
+    if (argc == 2 && strcmp(argv[1], "--binding") == 0)
+        return adapter_report_binding();
+    return adapter_run_sandboxed(argc, argv);
 }
