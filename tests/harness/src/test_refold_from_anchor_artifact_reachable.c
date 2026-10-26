@@ -350,17 +350,24 @@ static int raa_check_cursor_reset(const char *dir)
 
     boot_refold_from_anchor_reset(&pndb);
 
+    /* Scan BEFORE RAA_CHECK prints its progress prefix: the helper's
+     * per-stage fprintf(stderr, ...) diagnostic must not interleave with
+     * the unbuffered "... " prefix. */
+    bool upstream_ok = raa_upstream_cursors_land_at_anchor_plus_1(pk);
     RAA_CHECK("cursor: the 7 upstream stage cursors == anchor+1 (the "
               "'next height to process' convention) — never 0/genesis",
-              raa_upstream_cursors_land_at_anchor_plus_1(pk));
+              upstream_ok);
 
     RAA_CHECK("cursor: tip_finalize cursor == the anchor exactly (the "
               "'served tip' convention) — never 0/genesis",
               pk && raa_cursor_is(pk, "tip_finalize",
                                   REDUCER_FRONTIER_TRUSTED_ANCHOR));
 
+    /* Same ordering: the genesis scan's stage_cursor_read_or_zero LOG_WARN
+     * must precede the prefix, not follow it. */
+    bool none_at_genesis = raa_no_stage_cursor_sits_at_genesis(pk);
     RAA_CHECK("cursor: none of the eight stage cursors sit at genesis (0)",
-              raa_no_stage_cursor_sits_at_genesis(pk));
+              none_at_genesis);
 
     int32_t applied = -1;
     RAA_CHECK("cursor: coins_kv is proven authority after the reset",
