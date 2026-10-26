@@ -150,30 +150,37 @@ static void session_peer_retire(struct vcs_zcode_dht_service *service,
   memset(peer, 0, sizeof(*peer));
 }
 
-bool vcs_zcode_dht_service_session_open(
-    struct vcs_zcode_dht_service *service, uint64_t peer_id,
-    const struct vcs_zcode_dht_session *session,
-    struct vcs_zcode_dht_time now) {
+static bool session_open_rejected(
+    const struct vcs_zcode_dht_service *service, uint64_t peer_id,
+    const struct vcs_zcode_dht_session *session) {
   if (!service || !service->enabled || !peer_id || !session ||
       !session->established || !session->generation ||
       !session->connection_serial)
-    return false;
-  if (retired_contains(service, peer_id, session->generation,
-                       session->connection_serial))
-    return false;
-  struct service_peer *peer = session_peer_find(service, peer_id);
-  if (peer && peer->connected &&
-      peer->session.generation == session->generation &&
-      peer->session.connection_serial == session->connection_serial &&
-      memcmp(peer->session.transcript_hash, session->transcript_hash, 32) == 0 &&
-      memcmp(peer->session.remote_static, session->remote_static, 32) == 0)
     return true;
-  if (peer &&
-      session->connection_serial <= peer->session.connection_serial)
-    return false;
-  if (peer && peer->connected)
-    session_peer_retire(service, peer, now);
-  peer = session_peer_find(service, peer_id);
+  return retired_contains(service, peer_id, session->generation,
+                          session->connection_serial);
+}
+
+static bool session_peer_matches_session(
+    const struct service_peer *peer,
+    const struct vcs_zcode_dht_session *session) {
+  return peer && peer->connected &&
+         peer->session.generation == session->generation &&
+         peer->session.connection_serial == session->connection_serial &&
+         memcmp(peer->session.transcript_hash, session->transcript_hash,
+                32) == 0 &&
+         memcmp(peer->session.remote_static, session->remote_static, 32) == 0;
+}
+
+static bool session_peer_serial_is_stale(
+    const struct service_peer *peer,
+    const struct vcs_zcode_dht_session *session) {
+  return peer && session->connection_serial <= peer->session.connection_serial;
+}
+
+static struct service_peer *session_peer_select_slot(
+    struct vcs_zcode_dht_service *service, uint64_t peer_id) {
+  struct service_peer *peer = session_peer_find(service, peer_id);
   if (!peer)
     for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++)
       if (!service->peers[i].used) {
@@ -186,10 +193,13 @@ bool vcs_zcode_dht_service_session_open(
         peer = &service->peers[i];
         break;
       }
-  if (!peer) {
-    service->rejected[VCS_ZCODE_DHT_REJECT_CAP]++;
-    return false;
-  }
+  return peer;
+}
+
+static void session_peer_bind_session(
+    struct service_peer *peer, uint64_t peer_id,
+    const struct vcs_zcode_dht_session *session,
+    struct vcs_zcode_dht_time now) {
   memset(peer, 0, sizeof(*peer));
   peer->used = true;
   peer->connected = true;
@@ -198,14 +208,41 @@ bool vcs_zcode_dht_service_session_open(
   peer->opened_mono = now.monotonic_s;
   peer->rate_tokens = VCS_ZCODE_DHT_SERVICE_RATE_BURST;
   peer->rate_refill_mono = now.monotonic_s;
-  (void)session_authenticate_cached_contact(service, peer, now);
-  if (!peer->used || !peer->connected)
-    return false;
+}
+
+static void session_peer_send_bootstrap_find(
+    struct vcs_zcode_dht_service *service, struct service_peer *peer,
+    struct vcs_zcode_dht_time now) {
   if (session_query_count(service) <
       VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES)
     (void)vcs_zcode_dht_service_send_find(
         service, peer, QUERY_BOOTSTRAP, 0, service->self_id, NULL,
         now.monotonic_s);
+}
+
+bool vcs_zcode_dht_service_session_open(
+    struct vcs_zcode_dht_service *service, uint64_t peer_id,
+    const struct vcs_zcode_dht_session *session,
+    struct vcs_zcode_dht_time now) {
+  if (session_open_rejected(service, peer_id, session))
+    return false;
+  struct service_peer *peer = session_peer_find(service, peer_id);
+  if (session_peer_matches_session(peer, session))
+    return true;
+  if (session_peer_serial_is_stale(peer, session))
+    return false;
+  if (peer && peer->connected)
+    session_peer_retire(service, peer, now);
+  peer = session_peer_select_slot(service, peer_id);
+  if (!peer) {
+    service->rejected[VCS_ZCODE_DHT_REJECT_CAP]++;
+    return false;
+  }
+  session_peer_bind_session(peer, peer_id, session, now);
+  (void)session_authenticate_cached_contact(service, peer, now);
+  if (!peer->used || !peer->connected)
+    return false;
+  session_peer_send_bootstrap_find(service, peer, now);
   return true;
 }
 
@@ -231,14 +268,10 @@ void vcs_zcode_dht_service_session_close(
           service, &service->queries[i], QUERY_OUTCOME_FAILED, now);
 }
 
-void vcs_zcode_dht_service_sessions_reconcile(
+static void session_reconcile_close_absent(
     struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_live_session *live, size_t live_count,
     struct vcs_zcode_dht_time now) {
-  if (!service || (live_count && !live))
-    return;
-  if (live_count > VCS_ZCODE_DHT_SERVICE_MAX_PEERS)
-    live_count = VCS_ZCODE_DHT_SERVICE_MAX_PEERS;
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++) {
     struct service_peer *peer = &service->peers[i];
     if (!peer->used || !peer->connected)
@@ -255,6 +288,11 @@ void vcs_zcode_dht_service_sessions_reconcile(
       vcs_zcode_dht_service_session_close(
           service, peer->peer_id, peer->session.generation, now);
   }
+}
+
+static void session_reconcile_drop_absent_retired(
+    struct vcs_zcode_dht_service *service,
+    const struct vcs_zcode_dht_live_session *live, size_t live_count) {
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++) {
     if (!service->retired[i].used)
       continue;
@@ -270,6 +308,18 @@ void vcs_zcode_dht_service_sessions_reconcile(
     if (!found)
       memset(&service->retired[i], 0, sizeof(service->retired[i]));
   }
+}
+
+void vcs_zcode_dht_service_sessions_reconcile(
+    struct vcs_zcode_dht_service *service,
+    const struct vcs_zcode_dht_live_session *live, size_t live_count,
+    struct vcs_zcode_dht_time now) {
+  if (!service || (live_count && !live))
+    return;
+  if (live_count > VCS_ZCODE_DHT_SERVICE_MAX_PEERS)
+    live_count = VCS_ZCODE_DHT_SERVICE_MAX_PEERS;
+  session_reconcile_close_absent(service, live, live_count, now);
+  session_reconcile_drop_absent_retired(service, live, live_count);
 }
 
 bool vcs_zcode_dht_service_retain_unique_node_session(
