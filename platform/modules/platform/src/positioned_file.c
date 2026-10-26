@@ -93,6 +93,87 @@ bool platform_positioned_file_open_resolved(
     return positioned_open_path(file, path, true);
 }
 
+typedef NTSTATUS (NTAPI *nt_create_file_fn)(
+    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
+    PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+
+static bool positioned_component_invalid(const wchar_t *part, size_t length)
+{
+    return !length || length > UINT16_MAX / sizeof(*part) ||
+            (length == 1 && part[0] == L'.') ||
+            (length == 2 && part[0] == L'.' && part[1] == L'.');
+}
+
+static bool positioned_open_component(
+    nt_create_file_fn create_file, HANDLE current, wchar_t *part,
+    size_t length, bool leaf, HANDLE *handle, NTSTATUS *result)
+{
+        UNICODE_STRING name = {.Length = (USHORT)(length * sizeof(*part)),
+            .MaximumLength = (USHORT)(length * sizeof(*part)), .Buffer = part};
+        OBJECT_ATTRIBUTES attributes;
+        InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE,
+                                   current, NULL);
+        IO_STATUS_BLOCK status = {0};
+        *result = create_file(handle,
+            FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE |
+                (leaf ? FILE_READ_DATA : FILE_TRAVERSE),
+            &attributes, &status, NULL, FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT |
+                (leaf ? FILE_NON_DIRECTORY_FILE : FILE_DIRECTORY_FILE),
+            NULL, 0);
+        if (*result < 0) return false;
+        BY_HANDLE_FILE_INFORMATION component = {0};
+        bool valid = GetFileInformationByHandle(*handle, &component) &&
+            !(component.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+            (leaf ? !(component.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                  : (component.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY));
+        if (!valid) { CloseHandle(*handle); *handle = INVALID_HANDLE_VALUE; return false; }
+    return true;
+}
+
+static bool positioned_walk_windows_beneath(
+    struct platform_positioned_file *file, HANDLE directory, wchar_t *relative_wide)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    FARPROC symbol = ntdll ? GetProcAddress(ntdll, "NtCreateFile") : NULL;
+    nt_create_file_fn create_file = NULL;
+    static_assert(sizeof(create_file) == sizeof(symbol),
+                  "Windows function pointer representations must match");
+    memcpy(&create_file, &symbol, sizeof(create_file));
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    HANDLE current = directory;
+    wchar_t *part = relative_wide;
+    NTSTATUS result = (NTSTATUS)-1;
+    while (create_file) {
+        wchar_t *slash = wcschr(part, L'/');
+        size_t length = slash ? (size_t)(slash - part) : wcslen(part);
+        if (positioned_component_invalid(part, length))
+            break;
+        bool leaf = slash == NULL;
+        if (!positioned_open_component(create_file, current, part, length,
+                                       leaf, &handle, &result)) break;
+        if (current != directory) CloseHandle(current);
+        current = handle;
+        if (leaf) break;
+        handle = INVALID_HANDLE_VALUE;
+        part = slash + 1;
+    }
+    if (current != directory && current != handle) CloseHandle(current);
+    CloseHandle(directory);
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    if (result < 0 || handle == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+        return false;
+    }
+    platform_positioned_file_close(file);
+    file->native = (uintptr_t)handle;
+    return true;
+}
+
 bool platform_positioned_file_open_beneath(
     struct platform_positioned_file *file, const char *root,
     const char *relative)
@@ -118,67 +199,7 @@ bool platform_positioned_file_open_beneath(
         if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
         return false;
     }
-    typedef NTSTATUS (NTAPI *nt_create_file_fn)(
-        PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
-        PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
-    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-    FARPROC symbol = ntdll ? GetProcAddress(ntdll, "NtCreateFile") : NULL;
-    nt_create_file_fn create_file = NULL;
-    static_assert(sizeof(create_file) == sizeof(symbol),
-                  "Windows function pointer representations must match");
-    memcpy(&create_file, &symbol, sizeof(create_file));
-    HANDLE handle = INVALID_HANDLE_VALUE;
-    HANDLE current = directory;
-    wchar_t *part = relative_wide;
-    NTSTATUS result = (NTSTATUS)-1;
-    while (create_file) {
-        wchar_t *slash = wcschr(part, L'/');
-        size_t length = slash ? (size_t)(slash - part) : wcslen(part);
-        if (!length || length > UINT16_MAX / sizeof(*part) ||
-            (length == 1 && part[0] == L'.') ||
-            (length == 2 && part[0] == L'.' && part[1] == L'.'))
-            break;
-        bool leaf = slash == NULL;
-        UNICODE_STRING name = {.Length = (USHORT)(length * sizeof(*part)),
-            .MaximumLength = (USHORT)(length * sizeof(*part)), .Buffer = part};
-        OBJECT_ATTRIBUTES attributes;
-        InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE,
-                                   current, NULL);
-        IO_STATUS_BLOCK status = {0};
-        result = create_file(&handle,
-            FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE |
-                (leaf ? FILE_READ_DATA : FILE_TRAVERSE),
-            &attributes, &status, NULL, FILE_ATTRIBUTE_NORMAL,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
-            FILE_OPEN_REPARSE_POINT |
-                (leaf ? FILE_NON_DIRECTORY_FILE : FILE_DIRECTORY_FILE),
-            NULL, 0);
-        if (result < 0) break;
-        BY_HANDLE_FILE_INFORMATION component = {0};
-        bool valid = GetFileInformationByHandle(handle, &component) &&
-            !(component.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
-            (leaf ? !(component.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                  : (component.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY));
-        if (!valid) { CloseHandle(handle); handle = INVALID_HANDLE_VALUE; break; }
-        if (current != directory) CloseHandle(current);
-        current = handle;
-        if (leaf) break;
-        handle = INVALID_HANDLE_VALUE;
-        part = slash + 1;
-    }
-    if (current != directory && current != handle) CloseHandle(current);
-    CloseHandle(directory);
-    BY_HANDLE_FILE_INFORMATION info = {0};
-    if (result < 0 || handle == INVALID_HANDLE_VALUE ||
-        !GetFileInformationByHandle(handle, &info) ||
-        (info.dwFileAttributes &
-         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
-        if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
-        return false;
-    }
-    platform_positioned_file_close(file);
-    file->native = (uintptr_t)handle;
-    return true;
+    return positioned_walk_windows_beneath(file, directory, relative_wide);
 }
 
 void platform_positioned_file_close(struct platform_positioned_file *file)
@@ -299,6 +320,35 @@ bool platform_positioned_file_is_executable(
            signature == IMAGE_NT_SIGNATURE;
 }
 
+static bool positioned_private_acl(
+    PACL dacl, TOKEN_USER *user, BYTE *system_buffer, PSID owner_rights, bool ok)
+{
+    bool user_allowed = false;
+    ACL_SIZE_INFORMATION info = {0};
+    ok = ok && GetAclInformation(dacl, &info, sizeof(info),
+                                 AclSizeInformation);
+    for (DWORD i = 0; ok && i < info.AceCount; i++) {
+        void *raw = NULL;
+        if (!GetAce(dacl, i, &raw)) { ok = false; break; }
+        ACE_HEADER *header = raw;
+        PSID sid = NULL;
+        if (header->AceType == ACCESS_ALLOWED_ACE_TYPE)
+            sid = &((ACCESS_ALLOWED_ACE *)raw)->SidStart;
+        else if (header->AceType == ACCESS_DENIED_ACE_TYPE)
+            sid = &((ACCESS_DENIED_ACE *)raw)->SidStart;
+        else { ok = false; break; }
+        bool is_user = EqualSid(sid, user->User.Sid) != 0;
+        bool is_system = EqualSid(sid, system_buffer) != 0;
+        bool is_owner_rights = EqualSid(sid, owner_rights) != 0;
+        if (!is_user && !is_system && !is_owner_rights) ok = false;
+        if ((is_user || is_owner_rights) &&
+            header->AceType == ACCESS_ALLOWED_ACE_TYPE)
+            user_allowed = true;
+    }
+    ok = ok && user_allowed;
+    return ok;
+}
+
 bool platform_positioned_file_is_private(
     const struct platform_positioned_file *file)
 {
@@ -329,29 +379,7 @@ bool platform_positioned_file_is_private(
          AllocateAndInitializeSid(&creator_authority, 1,
                                   SECURITY_CREATOR_OWNER_RIGHTS_RID,
                                   0, 0, 0, 0, 0, 0, 0, &owner_rights);
-    bool user_allowed = false;
-    ACL_SIZE_INFORMATION info = {0};
-    ok = ok && GetAclInformation(dacl, &info, sizeof(info),
-                                 AclSizeInformation);
-    for (DWORD i = 0; ok && i < info.AceCount; i++) {
-        void *raw = NULL;
-        if (!GetAce(dacl, i, &raw)) { ok = false; break; }
-        ACE_HEADER *header = raw;
-        PSID sid = NULL;
-        if (header->AceType == ACCESS_ALLOWED_ACE_TYPE)
-            sid = &((ACCESS_ALLOWED_ACE *)raw)->SidStart;
-        else if (header->AceType == ACCESS_DENIED_ACE_TYPE)
-            sid = &((ACCESS_DENIED_ACE *)raw)->SidStart;
-        else { ok = false; break; }
-        bool is_user = EqualSid(sid, user->User.Sid) != 0;
-        bool is_system = EqualSid(sid, system_buffer) != 0;
-        bool is_owner_rights = EqualSid(sid, owner_rights) != 0;
-        if (!is_user && !is_system && !is_owner_rights) ok = false;
-        if ((is_user || is_owner_rights) &&
-            header->AceType == ACCESS_ALLOWED_ACE_TYPE)
-            user_allowed = true;
-    }
-    ok = ok && user_allowed;
+    ok = positioned_private_acl(dacl, user, system_buffer, owner_rights, ok);
     free(user);
     if (owner_rights) FreeSid(owner_rights);
     if (token) CloseHandle(token);
@@ -440,25 +468,18 @@ bool platform_positioned_file_open_resolved(
     return positioned_open_path(file, path, true);
 }
 
-bool platform_positioned_file_open_beneath(
-    struct platform_positioned_file *file, const char *root,
-    const char *relative)
+static int positioned_walk_posix_beneath(int fd, const char *relative)
 {
-    if (!file || !root || !relative || !relative[0] || relative[0] == '/' ||
-        strchr(relative, '\\'))
-        return false;
-    int fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
     char path[4096];
     size_t length = strlen(relative);
-    if (length >= sizeof(path)) { close(fd); return false; }
+    if (length >= sizeof(path)) { close(fd); return -1; }
     memcpy(path, relative, length + 1);
     char *part = path;
     for (;;) {
         char *slash = strchr(part, '/');
         if (slash) *slash = '\0';
         if (!part[0] || strcmp(part, ".") == 0 || strcmp(part, "..") == 0) {
-            close(fd); return false;
+            close(fd); return -1;
         }
         /* O_NONBLOCK for the same reason as platform_positioned_file_open
          * above: the S_ISREG refusal below the loop cannot run until the
@@ -470,11 +491,25 @@ bool platform_positioned_file_open_beneath(
         int next = openat(fd, part, O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
                           O_NONBLOCK | (slash ? O_DIRECTORY : 0));
         close(fd);
-        if (next < 0) return false;
+        if (next < 0) return -1;
         fd = next;
         if (!slash) break;
         part = slash + 1;
     }
+    return fd;
+}
+
+bool platform_positioned_file_open_beneath(
+    struct platform_positioned_file *file, const char *root,
+    const char *relative)
+{
+    if (!file || !root || !relative || !relative[0] || relative[0] == '/' ||
+        strchr(relative, '\\'))
+        return false;
+    int fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    fd = positioned_walk_posix_beneath(fd, relative);
+    if (fd < 0) return false;
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         close(fd);
