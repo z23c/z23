@@ -285,11 +285,8 @@ static bool rie_exec(sqlite3 *db, const char *sql)
     return rc == SQLITE_OK;
 }
 
-static bool seed_proof_validate(sqlite3 *db, const struct rie_branch *br,
-                                int through_height)
+static bool rie_create_seed_tables(sqlite3 *db)
 {
-    if (!db || !br || through_height < 0 || through_height >= br->n)
-        return false;
     if (!rie_exec(db,
         "CREATE TABLE IF NOT EXISTS header_admit_log ("
         "  height INTEGER PRIMARY KEY, hash BLOB NOT NULL,"
@@ -316,6 +313,12 @@ static bool seed_proof_validate(sqlite3 *db, const struct rie_branch *br,
         "  first_failure_serror INTEGER, validated_at INTEGER NOT NULL,"
         "  block_hash BLOB)"))
         return false;
+    return true;
+}
+
+static bool rie_seed_proof_rows(sqlite3 *db, const struct rie_branch *br,
+                                int through_height)
+{
     sqlite3_stmt *st = NULL;
     sqlite3_stmt *script_st = NULL;
     sqlite3_stmt *header_st = NULL;
@@ -411,6 +414,15 @@ static bool seed_proof_validate(sqlite3 *db, const struct rie_branch *br,
     bool ok = sqlite3_step(st) == SQLITE_DONE;
     sqlite3_finalize(st);
     return ok;
+}
+
+static bool seed_proof_validate(sqlite3 *db, const struct rie_branch *br,
+                                int through_height)
+{
+    if (!db || !br || through_height < 0 || through_height >= br->n)
+        return false;
+    return rie_create_seed_tables(db) &&
+           rie_seed_proof_rows(db, br, through_height);
 }
 
 /* Read the tip_finalize_log status string at `height`; false if no row. */
@@ -583,6 +595,347 @@ static struct block_index *install_branch(struct rie_env *e,
 }
 
 /* ── Test ─────────────────────────────────────────────────────────────── */
+static int rie_check_front_door(void)
+{
+    /* Front door: reducer_ingest_block rejects bad PoW. A synthetic block
+     * can never pass the stateless Equihash gate, so accept is driven at
+     * the stage level. */
+    int failures = 0;
+    RIE_CHECK("front-door: reducer is authoritative",
+              reducer_is_authoritative());
+
+    struct rie_branch B;
+    bool b = branch_build(&B, 0x33, 2, -1, 0, NULL);
+    RIE_CHECK("front-door: branch builds", b);
+    if (b) {
+        struct validation_state vs;
+        bool acc = reducer_ingest_block(boot_activation_controller(),
+                                        &B.bodies[1], REDUCER_SRC_P2P,
+                                        false, &vs);
+        RIE_CHECK("front-door: synthetic block fails stateless Equihash",
+                  !acc && !validation_state_is_valid(&vs));
+        RIE_CHECK("front-door: failed verdict is not valid",
+                  !validation_state_is_valid(&vs));
+    }
+    branch_free(&B);
+    return failures;
+}
+
+static int rie_run_accept_scenario(const struct rie_ext_coin *ext)
+{
+    /* SCENARIO 1: a valid block is ingested. Genesis + two coinbase blocks;
+     * the stage drain must advance the in-mem tip to the top block and
+     * reflect every coinbase in the UTXO projection.
+     * tip_finalize looks ahead one block (new_tip = active_chain_at(H+1)),
+     * so an n-height chain finalizes 0..n-2 and the tip sits at n-1. */
+    int failures = 0;
+    const int N = 3;                /* genesis h0 + h1 + h2 */
+    struct rie_branch C;
+    bool built = branch_build(&C, 0x44, N, -1, 0, NULL);
+    RIE_CHECK("accept: chain builds", built);
+
+    struct rie_env e;
+    bool opened = built && rie_env_open(&e, "accept", &C, ext, 2);
+    RIE_CHECK("accept: env opens", opened);
+
+    if (opened) {
+        struct block_index *want_tip = install_branch(&e, &C);
+
+        RIE_CHECK("accept: seed proof_validate through tip",
+                  seed_proof_validate(progress_store_db(), &C, C.n - 1));
+
+        int adv = rie_drain_to_convergence();
+        RIE_CHECK("accept: reducer drain advanced", adv >= C.n - 1);
+
+        /* Runtime seed-anchor re-seed is loud: reducer_ingest_try_seed_anchor
+         * LOG_WARNs and counts a failure without aborting ingest.
+         *   - Forced failure: height<0 hits the arg guard, counted.
+         *   - Healthy re-seed of genesis after the drain is a monotonic
+         *     idempotent no-op and must not trip the counter. */
+        {
+            uint64_t before =
+                reducer_ingest_seed_anchor_reseed_failure_count();
+            uint8_t dummy_hash[32] = {0};
+            reducer_ingest_try_seed_anchor(-1, dummy_hash,
+                                           "unit-forced-failure");
+            RIE_CHECK("seed-anchor: forced failure is counted",
+                      reducer_ingest_seed_anchor_reseed_failure_count()
+                          == before + 1);
+
+            reducer_ingest_try_seed_anchor(0, C.blocks[0].phashBlock->data,
+                                           "unit-healthy-reseed");
+            RIE_CHECK("seed-anchor: healthy re-seed does not increment",
+                      reducer_ingest_seed_anchor_reseed_failure_count()
+                          == before + 1);
+        }
+
+        /* Every valid height below the top is finalized (lookahead 0..n-2). */
+        RIE_CHECK("accept: tip_finalize cursor at n-1",
+                  tip_finalize_stage_cursor() == (uint64_t)(C.n - 1));
+        /* The reducer drove the in-mem tip to the top block; the
+         * highest finalized height is n-2 (lookahead). */
+        struct block_index *tip = active_chain_tip(&e.ms.chain_active);
+        RIE_CHECK("accept: in-mem tip is the top ingested block (keystone)",
+                  tip == want_tip && tip->nHeight == C.n - 1);
+        RIE_CHECK("accept: highest finalized height is n-2 (lookahead)",
+                  tf_max_finalized_height(progress_store_db()) == C.n - 2);
+        char status[32];
+        RIE_CHECK("accept: h1 finalized (not rejected)",
+                  tf_log_status_at(progress_store_db(), 1,
+                                   status, sizeof(status)) &&
+                  strcmp(status, "finalized") == 0);
+
+        /* coins_kv reflects all three coinbases. */
+        sqlite3 *pdb = progress_store_db();
+        bool all_cb_live = true;
+        for (int h = 0; h < C.n; h++) {
+            struct uint256 cb;
+            cb_txid(&cb, (h == 0) ? 0x00 : 0x44, h);
+            if (!coins_kv_exists(pdb, cb.data, 0))
+                all_cb_live = false;
+        }
+        RIE_CHECK("accept: every ingested coinbase live in coins_kv",
+                  all_cb_live);
+        RIE_CHECK("accept: utxo_apply recorded no spend-unknown",
+                  utxo_apply_stage_spend_unknown_total() == 0);
+
+        rie_env_close(&e);
+    }
+    branch_free(&C);
+    return failures;
+}
+
+static int rie_run_invalid_scenario(const struct rie_ext_coin *ext)
+{
+    /* SCENARIO 2: an invalid block is rejected and the chain does not
+     * progress past it. Genesis h0 + valid h1 + invalid h2 (spends a coin
+     * in no UTXO set). compute_block_delta rejects h2, so utxo_apply
+     * finalizes h1 and holds its cursor at h2 with a typed blocker.
+     * h2 is never finalized and its outputs are never applied. */
+    int failures = 0;
+    const int N = 3;                /* genesis h0 + valid h1 + bad h2 */
+    struct rie_branch D;
+    bool built = branch_build(&D, 0x55, N, 2 /*spend_at=h2*/, 2 /*bad*/,
+                              NULL);
+    RIE_CHECK("invalid: chain builds", built);
+
+    struct rie_env e;
+    bool opened = built && rie_env_open(&e, "invalid", &D, ext, 2);
+    RIE_CHECK("invalid: env opens", opened);
+
+    if (opened) {
+        (void)install_branch(&e, &D);
+
+        RIE_CHECK("invalid: seed proof_validate through tip",
+                  seed_proof_validate(progress_store_db(), &D, D.n - 1));
+
+        (void)rie_drain_to_convergence();
+
+        /* The real UTXO consensus check caught the unknown spend at h2. */
+        RIE_CHECK("invalid: utxo_apply flagged spend-unknown",
+                  utxo_apply_stage_spend_unknown_total() >= 1);
+
+        /* The valid h1 IS finalized; the invalid h2 is NEVER finalized. */
+        char s1[32] = {0}, s2[32] = {0};
+        bool h1_row = tf_log_status_at(progress_store_db(), 1,
+                                       s1, sizeof(s1));
+        bool h2_row = tf_log_status_at(progress_store_db(), 2,
+                                       s2, sizeof(s2));
+        RIE_CHECK("invalid: valid h1 was finalized",
+                  h1_row && strcmp(s1, "finalized") == 0);
+        RIE_CHECK("invalid: invalid h2 NOT finalized (upstream_failed)",
+                  (!h2_row) || strcmp(s2, "finalized") != 0);
+        RIE_CHECK("invalid: utxo_apply cursor held at rejected h2",
+                  utxo_apply_stage_cursor() == 2);
+        RIE_CHECK("invalid: typed blocker records rejected h2",
+                  blocker_exists("utxo_apply.apply_failed"));
+        /* The highest finalized height is the valid h1, never h2. */
+        RIE_CHECK("invalid: highest finalized height is the valid h1",
+                  tf_max_finalized_height(progress_store_db()) == 1);
+
+        /* The invalid block's spend output is absent from the UTXO set. */
+        sqlite3 *pdb = progress_store_db();
+        struct uint256 bad_out;
+        spend_txid(&bad_out, 0x55, 2);
+        RIE_CHECK("invalid: rejected spend output absent from coins_kv",
+                  !coins_kv_exists(pdb, bad_out.data, 0));
+        /* h2's coinbase is also absent (its whole delta was rejected). */
+        struct uint256 bad_cb;
+        cb_txid(&bad_cb, 0x55, 2);
+        RIE_CHECK("invalid: rejected block coinbase absent from coins_kv",
+                  !coins_kv_exists(pdb, bad_cb.data, 0));
+        blocker_clear("utxo_apply.apply_failed");
+
+        rie_env_close(&e);
+    }
+    branch_free(&D);
+    return failures;
+}
+
+static int rie_run_reorg_incremental(const struct rie_ext_coin *ext,
+                                     struct rie_branch *L,
+                                     struct rie_branch *W, uint8_t *cA,
+                                     uint64_t *countA, bool *haveA,
+                                     int *l_only_absent)
+{
+    int failures = 0;
+    struct rie_env e;
+    bool opened = rie_env_open(&e, "reorg_a", L, ext, 2);
+    RIE_CHECK("reorg A: env opens", opened);
+    if (opened) {
+        (void)install_branch(&e, L);
+        RIE_CHECK("reorg A: seed L proof_validate",
+                  seed_proof_validate(progress_store_db(), L,
+                                      L->n - 1));
+        int advL = rie_drain_to_convergence();
+        RIE_CHECK("reorg A: L drained to tip", advL >= L->n);
+        struct block_index *tipL = active_chain_tip(&e.ms.chain_active);
+        RIE_CHECK("reorg A: tip at L",
+                  tipL && tipL->nHeight == L->n - 1);
+
+        /* Install W's index + tip and extend proof_validate; the
+         * reducer must unwind L and apply W. */
+        e.ctx.active = W;
+        for (int h = 1; h < W->n; h++)  /* h0 shared genesis already in */
+            test_block_map_insert(&e.ms.map_block_index,
+                             W->blocks[h].phashBlock, &W->blocks[h]);
+        /* Make W heavier than L at its tip. */
+        for (int h = 0; h < W->n; h++)
+            arith_uint256_set_u64(&W->blocks[h].nChainWork,
+                                  (uint64_t)(h + 1) * 10u);
+        active_chain_move_window_tip(&e.ms.chain_active, &W->blocks[W->n - 1]);
+        RIE_CHECK("reorg A: seed W proof_validate",
+                  seed_proof_validate(progress_store_db(), W,
+                                      W->n - 1));
+
+        (void)rie_drain_to_convergence();
+        RIE_CHECK("reorg A: utxo_apply reorg-unwound",
+                  utxo_apply_stage_reorg_unwound_total() >= 1);
+        struct block_index *tipW = active_chain_tip(&e.ms.chain_active);
+        RIE_CHECK("reorg A: tip reorged to W",
+                  tipW && tipW->nHeight == W->n - 1 &&
+                  tipW == &W->blocks[W->n - 1]);
+
+        /* coins_kv count + SHA3 commitment for the parity proof. */
+        sqlite3 *pdb = progress_store_db();
+        *countA = (uint64_t)coins_kv_count(pdb);
+        *haveA = (coins_kv_commitment(pdb, cA) == 0);
+
+        /* Every L-only outpoint must be ABSENT after the reorg. */
+        struct uint256 t; int absent = 0;
+        cb_txid(&t, 0x11, 1);
+        if (!coins_kv_exists(pdb, t.data, 0)) absent++;
+        cb_txid(&t, 0x11, 2);
+        if (!coins_kv_exists(pdb, t.data, 0)) absent++;
+        cb_txid(&t, 0x11, 3);
+        if (!coins_kv_exists(pdb, t.data, 0)) absent++;
+        spend_txid(&t, 0x11, 2);
+        if (!coins_kv_exists(pdb, t.data, 0)) absent++;
+        *l_only_absent = absent;
+
+        rie_env_close(&e);
+    }
+    return failures;
+}
+
+static int rie_run_reorg_direct(const struct rie_ext_coin *ext,
+                                struct rie_branch *W2, uint8_t *cB,
+                                uint64_t *countB, bool *haveB)
+{
+    int failures = 0;
+    struct rie_env e;
+    bool opened = rie_env_open(&e, "reorg_b", W2, ext, 2);
+    RIE_CHECK("reorg B: env opens", opened);
+    if (opened) {
+        for (int h = 0; h < W2->n; h++)
+            arith_uint256_set_u64(&W2->blocks[h].nChainWork,
+                                  (uint64_t)(h + 1) * 10u);
+        (void)install_branch(&e, W2);
+        RIE_CHECK("reorg B: seed W proof_validate",
+                  seed_proof_validate(progress_store_db(), W2,
+                                      W2->n - 1));
+        int adv = rie_drain_to_convergence();
+        RIE_CHECK("reorg B: W drained to tip", adv >= W2->n);
+        RIE_CHECK("reorg B: no reorg unwind",
+                  utxo_apply_stage_reorg_unwound_total() == 0);
+        struct block_index *tip = active_chain_tip(&e.ms.chain_active);
+        RIE_CHECK("reorg B: tip at W", tip && tip->nHeight == W2->n - 1);
+
+        /* coins_kv parity source. */
+        sqlite3 *pdb = progress_store_db();
+        *countB = (uint64_t)coins_kv_count(pdb);
+        *haveB = (coins_kv_commitment(pdb, cB) == 0);
+        rie_env_close(&e);
+    }
+    return failures;
+}
+
+static int rie_run_reorg_scenario(const struct rie_ext_coin *ext)
+{
+    /* SCENARIO 3: a heavier competing branch reorgs byte-exact.
+     * RUN A: ingest L (genesis + L1..L3), then W (genesis + W1..W4); the
+     * inverse-delta unwind + re-finalize must converge the UTXO set onto W.
+     * RUN B: ingest W directly from the fork point.
+     * PROOF: commitment(A) == commitment(B) and count(A) == count(B). */
+    int failures = 0;
+    struct rie_branch L, W, W2;
+    bool built = branch_build(&L, 0x11, 4, 2, 1, &ext[0]) &&  /* loser  */
+                 branch_build(&W, 0x22, 5, 2, 1, &ext[1]) &&  /* winner */
+                 branch_build(&W2, 0x22, 5, 2, 1, &ext[1]);   /* W copy */
+    RIE_CHECK("reorg: branches build", built);
+
+    uint8_t cA[32] = {0}, cB[32] = {0};
+    uint64_t countA = 0, countB = 0;
+    bool haveA = false, haveB = false;
+    int l_only_absent = 0;
+
+    /* RUN A: ingest L, then reorg to W. */
+    if (built) {
+        failures += rie_run_reorg_incremental(ext, &L, &W, cA, &countA,
+                                              &haveA, &l_only_absent);
+    }
+
+    /* RUN B: direct build of W from the fork point. */
+    if (built) {
+        failures += rie_run_reorg_direct(ext, &W2, cB, &countB, &haveB);
+    }
+
+    bool count_eq = (countA == countB);
+    bool cmt_eq = haveA && haveB && (memcmp(cA, cB, 32) == 0);
+    printf("[reorg values] countA=%" PRIu64 " countB=%" PRIu64
+           " commitment_match=%d l_only_absent=%d/4\n",
+           countA, countB, cmt_eq ? 1 : 0, l_only_absent);
+    if (!cmt_eq && haveA && haveB)
+        printf("[divergence] reducer reorg UTXO set != direct build — a "
+               "wrong inverse silently corrupted the reorged UTXO set\n");
+
+    RIE_CHECK("reorg PROOF: reorged count == direct-build count", count_eq);
+    RIE_CHECK("reorg PROOF: reorged commitment == direct-build commitment "
+              "(byte-exact SHA3 UTXO set)", cmt_eq);
+    RIE_CHECK("reorg PROOF: every L-only outpoint absent after reorg",
+              l_only_absent == 4);
+
+    branch_free(&L);
+    branch_free(&W);
+    branch_free(&W2);
+    return failures;
+}
+
+static int rie_check_no_stage_spin(void)
+{
+    /* Advance-or-blocker false-fire proof: healthy folds plus a legitimately
+     * blocked invalid height (scenario 2) never name a stage as spinning. */
+    int failures = 0;
+    struct blocker_snapshot snaps[BLOCKER_CAP];
+    int bn = blocker_snapshot_all(snaps, BLOCKER_CAP);
+    bool any_spin = false;
+    for (int i = 0; i < bn; i++)
+        if (strncmp(snaps[i].id, "stage_spin_", 11) == 0)
+            any_spin = true;
+    RIE_CHECK("teardown: no stage_spin_* blocker fired (no false-fire)",
+              !any_spin);
+    return failures;
+}
 
 int test_reducer_ingest_e2e(void);
 int test_reducer_ingest_e2e(void)
@@ -607,315 +960,19 @@ int test_reducer_ingest_e2e(void)
     ext[1].script[0] = 0x76; ext[1].script[1] = 0xa9; ext[1].script[2] = 0xBC;
     ext[1].script_len = 3;
 
-    /* Front door: reducer_ingest_block rejects bad PoW. A synthetic block
-     * can never pass the stateless Equihash gate, so accept is driven at
-     * the stage level. */
-    {
-        RIE_CHECK("front-door: reducer is authoritative",
-                  reducer_is_authoritative());
+    failures += rie_check_front_door();
 
-        struct rie_branch B;
-        bool b = branch_build(&B, 0x33, 2, -1, 0, NULL);
-        RIE_CHECK("front-door: branch builds", b);
-        if (b) {
-            struct validation_state vs;
-            bool acc = reducer_ingest_block(boot_activation_controller(),
-                                            &B.bodies[1], REDUCER_SRC_P2P,
-                                            false, &vs);
-            RIE_CHECK("front-door: synthetic block fails stateless Equihash",
-                      !acc && !validation_state_is_valid(&vs));
-            RIE_CHECK("front-door: failed verdict is not valid",
-                      !validation_state_is_valid(&vs));
-        }
-        branch_free(&B);
-    }
+    failures += rie_run_accept_scenario(ext);
 
-    /* SCENARIO 1: a valid block is ingested. Genesis + two coinbase blocks;
-     * the stage drain must advance the in-mem tip to the top block and
-     * reflect every coinbase in the UTXO projection.
-     * tip_finalize looks ahead one block (new_tip = active_chain_at(H+1)),
-     * so an n-height chain finalizes 0..n-2 and the tip sits at n-1. */
-    {
-        const int N = 3;                /* genesis h0 + h1 + h2 */
-        struct rie_branch C;
-        bool built = branch_build(&C, 0x44, N, -1, 0, NULL);
-        RIE_CHECK("accept: chain builds", built);
+    failures += rie_run_invalid_scenario(ext);
 
-        struct rie_env e;
-        bool opened = built && rie_env_open(&e, "accept", &C, ext, 2);
-        RIE_CHECK("accept: env opens", opened);
-
-        if (opened) {
-            struct block_index *want_tip = install_branch(&e, &C);
-
-            RIE_CHECK("accept: seed proof_validate through tip",
-                      seed_proof_validate(progress_store_db(), &C, C.n - 1));
-
-            int adv = rie_drain_to_convergence();
-            RIE_CHECK("accept: reducer drain advanced", adv >= C.n - 1);
-
-            /* Runtime seed-anchor re-seed is loud: reducer_ingest_try_seed_anchor
-             * LOG_WARNs and counts a failure without aborting ingest.
-             *   - Forced failure: height<0 hits the arg guard, counted.
-             *   - Healthy re-seed of genesis after the drain is a monotonic
-             *     idempotent no-op and must not trip the counter. */
-            {
-                uint64_t before =
-                    reducer_ingest_seed_anchor_reseed_failure_count();
-                uint8_t dummy_hash[32] = {0};
-                reducer_ingest_try_seed_anchor(-1, dummy_hash,
-                                               "unit-forced-failure");
-                RIE_CHECK("seed-anchor: forced failure is counted",
-                          reducer_ingest_seed_anchor_reseed_failure_count()
-                              == before + 1);
-
-                reducer_ingest_try_seed_anchor(0, C.blocks[0].phashBlock->data,
-                                               "unit-healthy-reseed");
-                RIE_CHECK("seed-anchor: healthy re-seed does not increment",
-                          reducer_ingest_seed_anchor_reseed_failure_count()
-                              == before + 1);
-            }
-
-            /* Every valid height below the top is finalized (lookahead 0..n-2). */
-            RIE_CHECK("accept: tip_finalize cursor at n-1",
-                      tip_finalize_stage_cursor() == (uint64_t)(C.n - 1));
-            /* The reducer drove the in-mem tip to the top block; the
-             * highest finalized height is n-2 (lookahead). */
-            struct block_index *tip = active_chain_tip(&e.ms.chain_active);
-            RIE_CHECK("accept: in-mem tip is the top ingested block (keystone)",
-                      tip == want_tip && tip->nHeight == C.n - 1);
-            RIE_CHECK("accept: highest finalized height is n-2 (lookahead)",
-                      tf_max_finalized_height(progress_store_db()) == C.n - 2);
-            char status[32];
-            RIE_CHECK("accept: h1 finalized (not rejected)",
-                      tf_log_status_at(progress_store_db(), 1,
-                                       status, sizeof(status)) &&
-                      strcmp(status, "finalized") == 0);
-
-            /* coins_kv reflects all three coinbases. */
-            sqlite3 *pdb = progress_store_db();
-            bool all_cb_live = true;
-            for (int h = 0; h < C.n; h++) {
-                struct uint256 cb;
-                cb_txid(&cb, (h == 0) ? 0x00 : 0x44, h);
-                if (!coins_kv_exists(pdb, cb.data, 0))
-                    all_cb_live = false;
-            }
-            RIE_CHECK("accept: every ingested coinbase live in coins_kv",
-                      all_cb_live);
-            RIE_CHECK("accept: utxo_apply recorded no spend-unknown",
-                      utxo_apply_stage_spend_unknown_total() == 0);
-
-            rie_env_close(&e);
-        }
-        branch_free(&C);
-    }
-
-    /* SCENARIO 2: an invalid block is rejected and the chain does not
-     * progress past it. Genesis h0 + valid h1 + invalid h2 (spends a coin
-     * in no UTXO set). compute_block_delta rejects h2, so utxo_apply
-     * finalizes h1 and holds its cursor at h2 with a typed blocker.
-     * h2 is never finalized and its outputs are never applied. */
-    {
-        const int N = 3;                /* genesis h0 + valid h1 + bad h2 */
-        struct rie_branch D;
-        bool built = branch_build(&D, 0x55, N, 2 /*spend_at=h2*/, 2 /*bad*/,
-                                  NULL);
-        RIE_CHECK("invalid: chain builds", built);
-
-        struct rie_env e;
-        bool opened = built && rie_env_open(&e, "invalid", &D, ext, 2);
-        RIE_CHECK("invalid: env opens", opened);
-
-        if (opened) {
-            (void)install_branch(&e, &D);
-
-            RIE_CHECK("invalid: seed proof_validate through tip",
-                      seed_proof_validate(progress_store_db(), &D, D.n - 1));
-
-            (void)rie_drain_to_convergence();
-
-            /* The real UTXO consensus check caught the unknown spend at h2. */
-            RIE_CHECK("invalid: utxo_apply flagged spend-unknown",
-                      utxo_apply_stage_spend_unknown_total() >= 1);
-
-            /* The valid h1 IS finalized; the invalid h2 is NEVER finalized. */
-            char s1[32] = {0}, s2[32] = {0};
-            bool h1_row = tf_log_status_at(progress_store_db(), 1,
-                                           s1, sizeof(s1));
-            bool h2_row = tf_log_status_at(progress_store_db(), 2,
-                                           s2, sizeof(s2));
-            RIE_CHECK("invalid: valid h1 was finalized",
-                      h1_row && strcmp(s1, "finalized") == 0);
-            RIE_CHECK("invalid: invalid h2 NOT finalized (upstream_failed)",
-                      (!h2_row) || strcmp(s2, "finalized") != 0);
-            RIE_CHECK("invalid: utxo_apply cursor held at rejected h2",
-                      utxo_apply_stage_cursor() == 2);
-            RIE_CHECK("invalid: typed blocker records rejected h2",
-                      blocker_exists("utxo_apply.apply_failed"));
-            /* The highest finalized height is the valid h1, never h2. */
-            RIE_CHECK("invalid: highest finalized height is the valid h1",
-                      tf_max_finalized_height(progress_store_db()) == 1);
-
-            /* The invalid block's spend output is absent from the UTXO set. */
-            sqlite3 *pdb = progress_store_db();
-            struct uint256 bad_out;
-            spend_txid(&bad_out, 0x55, 2);
-            RIE_CHECK("invalid: rejected spend output absent from coins_kv",
-                      !coins_kv_exists(pdb, bad_out.data, 0));
-            /* h2's coinbase is also absent (its whole delta was rejected). */
-            struct uint256 bad_cb;
-            cb_txid(&bad_cb, 0x55, 2);
-            RIE_CHECK("invalid: rejected block coinbase absent from coins_kv",
-                      !coins_kv_exists(pdb, bad_cb.data, 0));
-            blocker_clear("utxo_apply.apply_failed");
-
-            rie_env_close(&e);
-        }
-        branch_free(&D);
-    }
-
-    /* SCENARIO 3: a heavier competing branch reorgs byte-exact.
-     * RUN A: ingest L (genesis + L1..L3), then W (genesis + W1..W4); the
-     * inverse-delta unwind + re-finalize must converge the UTXO set onto W.
-     * RUN B: ingest W directly from the fork point.
-     * PROOF: commitment(A) == commitment(B) and count(A) == count(B). */
-    {
-        struct rie_branch L, W, W2;
-        bool built = branch_build(&L, 0x11, 4, 2, 1, &ext[0]) &&  /* loser  */
-                     branch_build(&W, 0x22, 5, 2, 1, &ext[1]) &&  /* winner */
-                     branch_build(&W2, 0x22, 5, 2, 1, &ext[1]);   /* W copy */
-        RIE_CHECK("reorg: branches build", built);
-
-        uint8_t cA[32] = {0}, cB[32] = {0};
-        uint64_t countA = 0, countB = 0;
-        bool haveA = false, haveB = false;
-        int l_only_absent = 0;
-
-        /* RUN A: ingest L, then reorg to W. */
-        if (built) {
-            struct rie_env e;
-            bool opened = rie_env_open(&e, "reorg_a", &L, ext, 2);
-            RIE_CHECK("reorg A: env opens", opened);
-            if (opened) {
-                (void)install_branch(&e, &L);
-                RIE_CHECK("reorg A: seed L proof_validate",
-                          seed_proof_validate(progress_store_db(), &L,
-                                              L.n - 1));
-                int advL = rie_drain_to_convergence();
-                RIE_CHECK("reorg A: L drained to tip", advL >= L.n);
-                struct block_index *tipL = active_chain_tip(&e.ms.chain_active);
-                RIE_CHECK("reorg A: tip at L",
-                          tipL && tipL->nHeight == L.n - 1);
-
-                /* Install W's index + tip and extend proof_validate; the
-                 * reducer must unwind L and apply W. */
-                e.ctx.active = &W;
-                for (int h = 1; h < W.n; h++)  /* h0 shared genesis already in */
-                    test_block_map_insert(&e.ms.map_block_index,
-                                     W.blocks[h].phashBlock, &W.blocks[h]);
-                /* Make W heavier than L at its tip. */
-                for (int h = 0; h < W.n; h++)
-                    arith_uint256_set_u64(&W.blocks[h].nChainWork,
-                                          (uint64_t)(h + 1) * 10u);
-                active_chain_move_window_tip(&e.ms.chain_active, &W.blocks[W.n - 1]);
-                RIE_CHECK("reorg A: seed W proof_validate",
-                          seed_proof_validate(progress_store_db(), &W,
-                                              W.n - 1));
-
-                (void)rie_drain_to_convergence();
-                RIE_CHECK("reorg A: utxo_apply reorg-unwound",
-                          utxo_apply_stage_reorg_unwound_total() >= 1);
-                struct block_index *tipW = active_chain_tip(&e.ms.chain_active);
-                RIE_CHECK("reorg A: tip reorged to W",
-                          tipW && tipW->nHeight == W.n - 1 &&
-                          tipW == &W.blocks[W.n - 1]);
-
-                /* coins_kv count + SHA3 commitment for the parity proof. */
-                sqlite3 *pdb = progress_store_db();
-                countA = (uint64_t)coins_kv_count(pdb);
-                haveA = (coins_kv_commitment(pdb, cA) == 0);
-
-                /* Every L-only outpoint must be ABSENT after the reorg. */
-                struct uint256 t; int absent = 0;
-                cb_txid(&t, 0x11, 1);
-                if (!coins_kv_exists(pdb, t.data, 0)) absent++;
-                cb_txid(&t, 0x11, 2);
-                if (!coins_kv_exists(pdb, t.data, 0)) absent++;
-                cb_txid(&t, 0x11, 3);
-                if (!coins_kv_exists(pdb, t.data, 0)) absent++;
-                spend_txid(&t, 0x11, 2);
-                if (!coins_kv_exists(pdb, t.data, 0)) absent++;
-                l_only_absent = absent;
-
-                rie_env_close(&e);
-            }
-        }
-
-        /* RUN B: direct build of W from the fork point. */
-        if (built) {
-            struct rie_env e;
-            bool opened = rie_env_open(&e, "reorg_b", &W2, ext, 2);
-            RIE_CHECK("reorg B: env opens", opened);
-            if (opened) {
-                for (int h = 0; h < W2.n; h++)
-                    arith_uint256_set_u64(&W2.blocks[h].nChainWork,
-                                          (uint64_t)(h + 1) * 10u);
-                (void)install_branch(&e, &W2);
-                RIE_CHECK("reorg B: seed W proof_validate",
-                          seed_proof_validate(progress_store_db(), &W2,
-                                              W2.n - 1));
-                int adv = rie_drain_to_convergence();
-                RIE_CHECK("reorg B: W drained to tip", adv >= W2.n);
-                RIE_CHECK("reorg B: no reorg unwind",
-                          utxo_apply_stage_reorg_unwound_total() == 0);
-                struct block_index *tip = active_chain_tip(&e.ms.chain_active);
-                RIE_CHECK("reorg B: tip at W", tip && tip->nHeight == W2.n - 1);
-
-                /* coins_kv parity source. */
-                sqlite3 *pdb = progress_store_db();
-                countB = (uint64_t)coins_kv_count(pdb);
-                haveB = (coins_kv_commitment(pdb, cB) == 0);
-                rie_env_close(&e);
-            }
-        }
-
-        bool count_eq = (countA == countB);
-        bool cmt_eq = haveA && haveB && (memcmp(cA, cB, 32) == 0);
-        printf("[reorg values] countA=%" PRIu64 " countB=%" PRIu64
-               " commitment_match=%d l_only_absent=%d/4\n",
-               countA, countB, cmt_eq ? 1 : 0, l_only_absent);
-        if (!cmt_eq && haveA && haveB)
-            printf("[divergence] reducer reorg UTXO set != direct build — a "
-                   "wrong inverse silently corrupted the reorged UTXO set\n");
-
-        RIE_CHECK("reorg PROOF: reorged count == direct-build count", count_eq);
-        RIE_CHECK("reorg PROOF: reorged commitment == direct-build commitment "
-                  "(byte-exact SHA3 UTXO set)", cmt_eq);
-        RIE_CHECK("reorg PROOF: every L-only outpoint absent after reorg",
-                  l_only_absent == 4);
-
-        branch_free(&L);
-        branch_free(&W);
-        branch_free(&W2);
-    }
+    failures += rie_run_reorg_scenario(ext);
 
     /* Belt + suspenders: production authority remains reducer-owned. */
     RIE_CHECK("teardown: reducer remains authoritative",
               reducer_is_authoritative());
 
-    /* Advance-or-blocker false-fire proof: healthy folds plus a legitimately
-     * blocked invalid height (scenario 2) never name a stage as spinning. */
-    {
-        struct blocker_snapshot snaps[BLOCKER_CAP];
-        int bn = blocker_snapshot_all(snaps, BLOCKER_CAP);
-        bool any_spin = false;
-        for (int i = 0; i < bn; i++)
-            if (strncmp(snaps[i].id, "stage_spin_", 11) == 0)
-                any_spin = true;
-        RIE_CHECK("teardown: no stage_spin_* blocker fired (no false-fire)",
-                  !any_spin);
-    }
+    failures += rie_check_no_stage_spin();
 
     printf("=== reducer-ingest end-to-end: %d failures ===\n", failures);
     return failures;
