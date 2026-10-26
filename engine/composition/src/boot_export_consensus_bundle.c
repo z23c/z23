@@ -43,6 +43,75 @@
 
 #define EXPORT_SUBSYS "export_consensus_bundle"
 
+#ifndef _WIN32
+static bool datadir_name_is_empty(const char *datadir)
+{
+    return !datadir || !datadir[0];
+}
+
+/* The PoW anchor for the shielded tip: the header-committed final Sapling
+ * root at the checkpoint height, from THIS node's validated block index.
+ * Require the validated header at the checkpoint height to be the exact
+ * compiled-checkpoint block, so the root is the one PoW commits there. */
+static bool checkpoint_db_header_valid(struct node_db *ndb,
+                                       const struct sha3_utxo_checkpoint *cp)
+{
+    struct db_block blk;
+    return db_block_find_by_height(ndb, cp->height, &blk) &&
+           blk.status >= BLOCK_VALID_TRANSACTIONS &&
+           memcmp(blk.hash, cp->block_hash, 32) == 0;
+}
+
+static bool format_bundle_name(char *name, size_t name_size, int height)
+{
+    int nn = snprintf(name, name_size, "consensus-state-bundle-%d.sqlite",
+                      height);
+    return nn > 0 && (size_t)nn < name_size;
+}
+
+/* The blocks-projection row can carry a zero sapling_root and stale file
+ * positions (the legacy header import never populated them for this
+ * layout), so the PoW anchor for the shielded tip comes from the in-RAM
+ * validated block index: the entry at the checkpoint height must hash to
+ * exactly the compiled checkpoint's block hash, and its committed final
+ * Sapling root must be non-zero. */
+static bool ram_chain_owns_checkpoint(const struct main_state *ms,
+                                      const struct sha3_utxo_checkpoint *cp,
+                                      const struct block_index **out)
+{
+    const struct block_index *bi =
+        ms ? active_chain_at(&ms->chain_active, cp->height) : NULL;
+    *out = bi;
+    return bi && bi->phashBlock &&
+           memcmp(bi->phashBlock->data, cp->block_hash, 32) == 0;
+}
+
+static bool sapling_root_is_zero(const struct block_index *bi)
+{
+    struct uint256 zero_root;
+    memset(&zero_root, 0, sizeof(zero_root));
+    return memcmp(bi->hashFinalSaplingRoot.data, zero_root.data, 32) == 0;
+}
+
+static bool export_result_ok(bool exported,
+                             const struct consensus_state_export_result *res)
+{
+    return exported && res->status == CONSENSUS_EXPORT_EXPORTED;
+}
+
+static const char *export_reason_or_default(const char *reason,
+                                            const char *fallback)
+{
+    return reason[0] ? reason : fallback;
+}
+
+static void format_digest_hex(char *digest_hex, const uint8_t digest[32])
+{
+    for (int i = 0; i < 32; i++)
+        snprintf(digest_hex + 2 * i, 3, "%02x", digest[i]);
+}
+#endif
+
 void boot_export_consensus_bundle(struct node_db *ndb, struct main_state *ms,
                                   const char *datadir)
 {
@@ -61,7 +130,7 @@ void boot_export_consensus_bundle(struct node_db *ndb, struct main_state *ms,
              "Windows export refused before datadir or output mutation");
     exit(EXIT_FAILURE);
 #else
-    if (!datadir || !datadir[0]) {
+    if (datadir_name_is_empty(datadir)) {
         fprintf(stderr, "REFUSED: -export-consensus-bundle: empty datadir\n");
         LOG_WARN(EXPORT_SUBSYS, "empty datadir");
         _exit(EXIT_FAILURE);
@@ -80,14 +149,7 @@ void boot_export_consensus_bundle(struct node_db *ndb, struct main_state *ms,
         _exit(EXIT_FAILURE);
     }
 
-    /* The PoW anchor for the shielded tip: the header-committed final Sapling
-     * root at the checkpoint height, from THIS node's validated block index.
-     * Require the validated header at the checkpoint height to be the exact
-     * compiled-checkpoint block, so the root is the one PoW commits there. */
-    struct db_block blk;
-    if (!db_block_find_by_height(ndb, cp->height, &blk) ||
-        blk.status < BLOCK_VALID_TRANSACTIONS ||
-        memcmp(blk.hash, cp->block_hash, 32) != 0) {
+    if (!checkpoint_db_header_valid(ndb, cp)) {
         fprintf(stderr,
                 "REFUSED: -export-consensus-bundle: no validated header at the "
                 "compiled checkpoint height %d (import the header chain first)\n",
@@ -98,9 +160,7 @@ void boot_export_consensus_bundle(struct node_db *ndb, struct main_state *ms,
     }
 
     char name[128];
-    int nn = snprintf(name, sizeof(name), "consensus-state-bundle-%d.sqlite",
-                      cp->height);
-    if (nn <= 0 || (size_t)nn >= sizeof(name)) {
+    if (!format_bundle_name(name, sizeof(name), cp->height)) {
         fprintf(stderr,
                 "REFUSED: -export-consensus-bundle: bundle name overflow\n");
         LOG_WARN(EXPORT_SUBSYS, "bundle name overflow height=%d", cp->height);
@@ -123,16 +183,8 @@ void boot_export_consensus_bundle(struct node_db *ndb, struct main_state *ms,
     };
     memcpy(request.expected_block_hash, cp->block_hash, 32);
 
-    /* The blocks-projection row can carry a zero sapling_root and stale file
-     * positions (the legacy header import never populated them for this
-     * layout), so the PoW anchor for the shielded tip comes from the in-RAM
-     * validated block index: the entry at the checkpoint height must hash to
-     * exactly the compiled checkpoint's block hash, and its committed final
-     * Sapling root must be non-zero. */
-    const struct block_index *cp_bi =
-        ms ? active_chain_at(&ms->chain_active, cp->height) : NULL;
-    if (!cp_bi || !cp_bi->phashBlock ||
-        memcmp(cp_bi->phashBlock->data, cp->block_hash, 32) != 0) {
+    const struct block_index *cp_bi;
+    if (!ram_chain_owns_checkpoint(ms, cp, &cp_bi)) {
         (void)close(dir_fd);
         fprintf(stderr,
                 "REFUSED: -export-consensus-bundle: in-RAM header chain does "
@@ -143,9 +195,7 @@ void boot_export_consensus_bundle(struct node_db *ndb, struct main_state *ms,
                  cp->height);
         _exit(EXIT_FAILURE);
     }
-    struct uint256 zero_root;
-    memset(&zero_root, 0, sizeof(zero_root));
-    if (memcmp(cp_bi->hashFinalSaplingRoot.data, zero_root.data, 32) == 0) {
+    if (sapling_root_is_zero(cp_bi)) {
         (void)close(dir_fd);
         fprintf(stderr,
                 "REFUSED: -export-consensus-bundle: the validated header at "
@@ -164,17 +214,17 @@ void boot_export_consensus_bundle(struct node_db *ndb, struct main_state *ms,
         consensus_state_snapshot_export(progress_store_db(), &request, &res);
     (void)close(dir_fd);
 
-    if (!exported || res.status != CONSENSUS_EXPORT_EXPORTED) {
+    if (!export_result_ok(exported, &res)) {
         fprintf(stderr, "REFUSED: -export-consensus-bundle: %s\n",
-                res.reason[0] ? res.reason : "checkpoint-content export failed");
+                export_reason_or_default(res.reason,
+                                         "checkpoint-content export failed"));
         LOG_WARN(EXPORT_SUBSYS, "export refused status=%d: %s", (int)res.status,
-                 res.reason[0] ? res.reason : "unknown");
+                 export_reason_or_default(res.reason, "unknown"));
         _exit(EXIT_FAILURE);
     }
 
     char digest_hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(digest_hex + 2 * i, 3, "%02x", res.artifact_digest[i]);
+    format_digest_hex(digest_hex, res.artifact_digest);
     fprintf(stderr,
             "EXPORTED: -export-consensus-bundle: %s at h=%d -> %s/%s "
             "(digest=%s coins=%llu anchors=%llu nullifiers=%llu) via "
