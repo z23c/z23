@@ -45,7 +45,7 @@ static bool geometry_valid(uint16_t cols, uint16_t rows)
            rows <= MESH_TERMINAL_MAX_ROWS;
 }
 
-const char *mesh_terminal_proto_error_string(
+static const char *mesh_terminal_proto_error_frame_string(
     enum mesh_terminal_proto_error error)
 {
     switch (error) {
@@ -58,14 +58,31 @@ const char *mesh_terminal_proto_error_string(
     case MESH_TERMINAL_PROTO_CAPABILITY: return "capability";
     case MESH_TERMINAL_PROTO_FIELD: return "field";
     case MESH_TERMINAL_PROTO_TIME: return "time";
+    default: return NULL;
+    }
+}
+
+static const char *mesh_terminal_proto_error_detail_string(
+    enum mesh_terminal_proto_error error)
+{
+    switch (error) {
     case MESH_TERMINAL_PROTO_GEOMETRY: return "geometry";
     case MESH_TERMINAL_PROTO_STATUS: return "status";
     case MESH_TERMINAL_PROTO_REASON: return "reason";
     case MESH_TERMINAL_PROTO_CAPSULE_ROOT: return "capsule-root";
     case MESH_TERMINAL_PROTO_KEY_MISMATCH: return "key-mismatch";
     case MESH_TERMINAL_PROTO_SIGNATURE: return "signature";
+    default: return "unknown";
     }
-    return "unknown";
+}
+
+const char *mesh_terminal_proto_error_string(
+    enum mesh_terminal_proto_error error)
+{
+    const char *name = mesh_terminal_proto_error_frame_string(error);
+    if (name)
+        return name;
+    return mesh_terminal_proto_error_detail_string(error);
 }
 
 const char *mesh_terminal_receipt_status_string(
@@ -516,6 +533,20 @@ enum mesh_terminal_proto_error mesh_terminal_receipt_v1_root(
     return MESH_TERMINAL_PROTO_OK;
 }
 
+static bool receipt_fields_match_open(
+    const struct mesh_terminal_receipt_v1 *receipt,
+    const struct mesh_terminal_open_v1 *open, const uint8_t open_root[32])
+{
+    return memcmp(receipt->request_id, open->terminal_id, 32) == 0 &&
+        memcmp(receipt->request_root, open_root, 32) == 0 &&
+        memcmp(receipt->network_genesis, open->network_genesis, 32) == 0 &&
+        memcmp(receipt->pairing_id, open->pairing_id, 32) == 0 &&
+        memcmp(receipt->responder_master_pubkey,
+               open->target_master_pubkey, 32) == 0 &&
+        memcmp(receipt->transcript_hash, open->transcript_hash, 32) == 0 &&
+        receipt->connection_generation == open->connection_generation;
+}
+
 enum mesh_terminal_proto_error mesh_terminal_receipt_v1_matches_open(
     const struct mesh_terminal_receipt_v1 *receipt,
     const struct mesh_terminal_open_v1 *open)
@@ -530,14 +561,7 @@ enum mesh_terminal_proto_error mesh_terminal_receipt_v1_matches_open(
     uint8_t open_root[32];
     error = mesh_terminal_open_v1_root(open, open_root);
     bool fields_match = error == MESH_TERMINAL_PROTO_OK &&
-        memcmp(receipt->request_id, open->terminal_id, 32) == 0 &&
-        memcmp(receipt->request_root, open_root, 32) == 0 &&
-        memcmp(receipt->network_genesis, open->network_genesis, 32) == 0 &&
-        memcmp(receipt->pairing_id, open->pairing_id, 32) == 0 &&
-        memcmp(receipt->responder_master_pubkey,
-               open->target_master_pubkey, 32) == 0 &&
-        memcmp(receipt->transcript_hash, open->transcript_hash, 32) == 0 &&
-        receipt->connection_generation == open->connection_generation;
+        receipt_fields_match_open(receipt, open, open_root);
     memory_cleanse(open_root, sizeof(open_root));
     if (!fields_match)
         return MESH_TERMINAL_PROTO_FIELD;
