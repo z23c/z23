@@ -193,12 +193,11 @@ static int rsr_retry_after_bind_conflict(struct zcl_service_kernel *kernel,
     return failures;
 }
 
-int test_rpc_service_restart(void)
+/* Builds this run's datadir under test-tmp, clearing any state an earlier
+ * run left behind. Returns 0, or 1 after printing why it could not. */
+static int rsr_prepare_datadir(char *datadir, size_t capacity)
 {
-    int failures = 0;
-
-    char datadir[256];
-    snprintf(datadir, sizeof(datadir),
+    snprintf(datadir, capacity,
              "test-tmp/rpc_service_restart_%d", (int)getpid());
     test_rm_rf(datadir);
     if (mkdir("test-tmp", 0755) != 0 && errno != EEXIST) {
@@ -209,7 +208,16 @@ int test_rpc_service_restart(void)
         printf("rpc_service_restart: FAIL (mkdir datadir)\n");
         return 1;
     }
+    return 0;
+}
 
+/* Registers the probe method, holds the RPC port, and loads the real
+ * frontend spec plus the stand-in site into `kernel`. Returns 0 with the
+ * held socket in `*held_fd_out`, or 1 after undoing whatever was set up. */
+static int rsr_bring_up_frontend_services(char *datadir,
+                                          struct zcl_service_kernel *kernel,
+                                          platform_socket_t *held_fd_out)
+{
     rpc_table_init(&g_tbl);
     struct rpc_command probe = {
         .category = "control",
@@ -241,8 +249,7 @@ int test_rpc_service_restart(void)
     g_svc.rpc_table = &g_tbl;
     g_svc.datadir = datadir;
 
-    struct zcl_service_kernel kernel;
-    zcl_service_kernel_init(&kernel);
+    zcl_service_kernel_init(kernel);
     struct zcl_service_spec spec = boot_frontend_rpc_http_spec(&g_svc);
     /* Stands in for https_explorer, registered AFTER rpc_http as
      * boot_register_frontend_services() does: a front door that cannot bind
@@ -254,21 +261,27 @@ int test_rpc_service_restart(void)
         .ctx = &g_site_starts,
         .flags = ZCL_SERVICE_OPTIONAL,
     };
-    if (!zcl_service_kernel_register(&kernel, &spec) ||
-        !zcl_service_kernel_register(&kernel, &site)) {
+    if (!zcl_service_kernel_register(kernel, &spec) ||
+        !zcl_service_kernel_register(kernel, &site)) {
         printf("rpc_service_restart: FAIL (service registration)\n");
         platform_socket_close(held_fd);
         unsetenv("ZCL_RPC_COOKIE_ROTATE_SEC");
         test_rm_rf(datadir);
         return 1;
     }
+    *held_fd_out = held_fd;
+    return 0;
+}
 
-    char cookie_path[320], rpcport_path[320];
-    snprintf(cookie_path, sizeof(cookie_path), "%s/.cookie", datadir);
-    snprintf(rpcport_path, sizeof(rpcport_path), "%s/.rpcport", datadir);
-
+/* The refused-start edge: an occupied RPC port must fail start_all, leave
+ * no cookie or stale port hint behind, and keep the node in warmup. */
+static int rsr_check_refused_start(struct zcl_service_kernel *kernel,
+                                   const char *cookie_path,
+                                   const char *rpcport_path)
+{
+    int failures = 0;
     printf("rpc_service_restart: occupied RPC port refuses frontend start... ");
-    bool occupied_started = zcl_service_kernel_start_all(&kernel);
+    bool occupied_started = zcl_service_kernel_start_all(kernel);
     if (!occupied_started) {
         printf("OK\n");
     } else {
@@ -299,14 +312,14 @@ int test_rpc_service_restart(void)
         printf("FAIL\n");
         failures++;
     }
-    failures += rsr_site_survived_refused_front_door();
+    return failures;
+}
 
-    failures += rsr_retry_after_bind_conflict(&kernel, held_fd);
-
-    /* Close the cycle unconditionally: a failed independent service leaves its
-     * siblings RUNNING, so the next start_all is a restart. */
-    zcl_service_kernel_stop_all(&kernel);
-
+/* One full stop -> start pass over the real hooks: stop re-enters warmup
+ * with the restart reason, the next start clears it, methods answer. */
+static int rsr_check_warmup_across_stop_start(struct zcl_service_kernel *kernel)
+{
+    int failures = 0;
     printf("rpc_service_restart: stopped RPC re-enters warmup... ");
     if (rpc_is_in_warmup(NULL, 0) &&
         rsr_probe_refused(&g_tbl, "RPC server restarting")) {
@@ -317,7 +330,7 @@ int test_rpc_service_restart(void)
     }
 
     printf("rpc_service_restart: first start clears warmup... ");
-    if (zcl_service_kernel_start_all(&kernel) && !rpc_is_in_warmup(NULL, 0)) {
+    if (zcl_service_kernel_start_all(kernel) && !rpc_is_in_warmup(NULL, 0)) {
         printf("OK\n");
     } else {
         printf("FAIL\n");
@@ -331,14 +344,16 @@ int test_rpc_service_restart(void)
         printf("FAIL\n");
         failures++;
     }
+    return failures;
+}
 
-    /* The stop edge. Without the re-arm the node would come back up still
-     * claiming ready while it re-initialises. */
-    int64_t stop_started_ms = platform_time_monotonic_ms();
-    zcl_service_kernel_stop_all(&kernel);
-    int64_t stop_elapsed_ms =
-        platform_time_monotonic_ms() - stop_started_ms;
-
+/* The measured stop edge: bounded shutdown, authority files gone, and
+ * warmup re-armed with the client-visible reason. */
+static int rsr_check_stop_edge(int64_t stop_elapsed_ms,
+                               const char *cookie_path,
+                               const char *rpcport_path)
+{
+    int failures = 0;
     printf("rpc_service_restart: idle listener stop is bounded... ");
     if (stop_elapsed_ms >= 0 && stop_elapsed_ms < 3000) {
         printf("OK (%lldms)\n", (long long)stop_elapsed_ms);
@@ -367,12 +382,20 @@ int test_rpc_service_restart(void)
             failures++;
         }
     }
+    return failures;
+}
 
+/* The lifecycle is a loop, not a single spare life: the second and third
+ * stop -> start cycles behave like the first, and declaring ready twice in
+ * a row is a no-op. */
+static int rsr_check_repeated_cycles(struct zcl_service_kernel *kernel)
+{
+    int failures = 0;
     /* set_rpc_warmup_finished() a second time must not abort: the stop hook
      * re-armed warmup. */
     printf("rpc_service_restart: the service restarts without killing "
            "the node... ");
-    if (zcl_service_kernel_start_all(&kernel)) {
+    if (zcl_service_kernel_start_all(kernel)) {
         printf("OK\n");
     } else {
         printf("FAIL\n");
@@ -396,9 +419,9 @@ int test_rpc_service_restart(void)
     }
 
     /* A third cycle: the lifecycle is a loop, not a single spare life. */
-    zcl_service_kernel_stop_all(&kernel);
+    zcl_service_kernel_stop_all(kernel);
     printf("rpc_service_restart: a second restart behaves identically... ");
-    if (rpc_is_in_warmup(NULL, 0) && zcl_service_kernel_start_all(&kernel) &&
+    if (rpc_is_in_warmup(NULL, 0) && zcl_service_kernel_start_all(kernel) &&
         !rpc_is_in_warmup(NULL, 0) && rsr_probe_answers(&g_tbl)) {
         printf("OK\n");
     } else {
@@ -416,6 +439,49 @@ int test_rpc_service_restart(void)
         printf("FAIL\n");
         failures++;
     }
+    return failures;
+}
+
+int test_rpc_service_restart(void)
+{
+    int failures = 0;
+
+    char datadir[256];
+    if (rsr_prepare_datadir(datadir, sizeof(datadir)) != 0)
+        return 1;
+
+    struct zcl_service_kernel kernel;
+    platform_socket_t held_fd;
+    if (rsr_bring_up_frontend_services(datadir, &kernel, &held_fd) != 0)
+        return 1;
+
+    char cookie_path[320], rpcport_path[320];
+    snprintf(cookie_path, sizeof(cookie_path), "%s/.cookie", datadir);
+    snprintf(rpcport_path, sizeof(rpcport_path), "%s/.rpcport", datadir);
+
+    failures += rsr_check_refused_start(&kernel, cookie_path, rpcport_path);
+
+    failures += rsr_site_survived_refused_front_door();
+
+    failures += rsr_retry_after_bind_conflict(&kernel, held_fd);
+
+    /* Close the cycle unconditionally: a failed independent service leaves its
+     * siblings RUNNING, so the next start_all is a restart. */
+    zcl_service_kernel_stop_all(&kernel);
+
+    failures += rsr_check_warmup_across_stop_start(&kernel);
+
+    /* The stop edge. Without the re-arm the node would come back up still
+     * claiming ready while it re-initialises. */
+    int64_t stop_started_ms = platform_time_monotonic_ms();
+    zcl_service_kernel_stop_all(&kernel);
+    int64_t stop_elapsed_ms =
+        platform_time_monotonic_ms() - stop_started_ms;
+
+    failures += rsr_check_stop_edge(stop_elapsed_ms, cookie_path,
+                                    rpcport_path);
+
+    failures += rsr_check_repeated_cycles(&kernel);
 
     zcl_service_kernel_stop_all(&kernel);
     zcl_service_kernel_reset(&kernel);
