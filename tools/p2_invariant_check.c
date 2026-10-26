@@ -55,6 +55,27 @@ static bool is_dir(const char *p)
     return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+/* Success transfers a prepared statement to the caller, with ROW or DONE
+ * distinguished explicitly. Every failure finalizes it before DB cleanup. */
+static bool query_first_row(sqlite3 *db, const char *sql, const char *context,
+                             sqlite3_stmt **st, bool *has_row)
+{
+    *st = NULL;
+    *has_row = false;
+    int rc = sqlite3_prepare_v2(db, sql, -1, st, NULL);
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(*st); // raw-sql-ok:standalone-dev-tool
+        if (rc == SQLITE_ROW || rc == SQLITE_DONE) {
+            *has_row = rc == SQLITE_ROW;
+            return true;
+        }
+    }
+    fprintf(stderr, "%s read failed: %s\n", context, sqlite3_errmsg(db));
+    sqlite3_finalize(*st);
+    *st = NULL;
+    return false;
+}
+
 int main(int argc, char **argv)
 {
     const char *arg = NULL;
@@ -104,15 +125,14 @@ int main(int argc, char **argv)
     bool cursor_present = false;
     int64_t apply_cursor = 0;
     sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
+    bool has_row = false;
+    if (!query_first_row(db,
             "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
-            -1, &st, NULL) != SQLITE_OK) {
-        fprintf(stderr, "stage_cursor read failed: %s\n", sqlite3_errmsg(db));
+            "stage_cursor", &st, &has_row)) {
         sqlite3_close(db);
         return 3;
     }
-    if (sqlite3_step(st) == SQLITE_ROW && // raw-sql-ok:standalone-dev-tool
-        sqlite3_column_type(st, 0) != SQLITE_NULL) {
+    if (has_row && sqlite3_column_type(st, 0) != SQLITE_NULL) {
         cursor_present = true;
         apply_cursor = sqlite3_column_int64(st, 0);
     }
@@ -123,15 +143,13 @@ int main(int argc, char **argv)
     bool frontier_malformed = false;
     int64_t frontier = 0;
     st = NULL;
-    if (sqlite3_prepare_v2(db,
+    if (!query_first_row(db,
             "SELECT value FROM progress_meta WHERE key='coins_applied_height'",
-            -1, &st, NULL) != SQLITE_OK) {
-        fprintf(stderr, "progress_meta read failed: %s\n", sqlite3_errmsg(db));
+            "progress_meta", &st, &has_row)) {
         sqlite3_close(db);
         return 3;
     }
-    if (sqlite3_step(st) == SQLITE_ROW && // raw-sql-ok:standalone-dev-tool
-        sqlite3_column_type(st, 0) != SQLITE_NULL) {
+    if (has_row && sqlite3_column_type(st, 0) != SQLITE_NULL) {
         frontier_absent = false;
         const void *blob = sqlite3_column_blob(st, 0);
         int n = sqlite3_column_bytes(st, 0);

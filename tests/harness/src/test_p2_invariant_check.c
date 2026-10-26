@@ -156,6 +156,77 @@ static int test_p2_encoding_and_dirs(void)
     return failures;
 }
 
+static int p2_fixture_int(sqlite3 *db, const char *sql, const char *arg)
+{
+    sqlite3_stmt *st = NULL;
+    int value = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK &&
+        (!arg || sqlite3_bind_text(st, 1, arg, -1, SQLITE_STATIC) == SQLITE_OK) &&
+        sqlite3_step(st) == SQLITE_ROW)
+        value = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    return value;
+}
+
+static bool p2_corrupt_fixture(const char *path, const char *table)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    int root = p2_fixture_int(db, "SELECT rootpage FROM sqlite_schema WHERE name=?1", table);
+    int size = p2_fixture_int(db, "PRAGMA page_size", NULL);
+    sqlite3_close(db);
+    if (root <= 1 || size < 512) return false;
+    FILE *file = fopen(path, "r+b");
+    if (!file) return false;
+    long offset = (long)(root - 1) * size;
+    bool ok = fseek(file, offset, SEEK_SET) == 0 && fputc(0xff, file) != EOF;
+    printf("corrupt_fixture table=%s rootpage=%d page_size=%d offset=%ld\n", table, root, size, offset);
+    return fclose(file) == 0 && ok;
+}
+
+static bool p2_probe_corruption(const char *path, const char *sql)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    sqlite3_stmt *st = NULL;
+    int prep = sqlite3_prepare_v2(db, sql, -1, &st, NULL);
+    int step = prep == SQLITE_OK ? sqlite3_step(st) : -1;
+    printf("corrupt_probe prepare=%d step=%d errmsg=%s\n", prep, step, sqlite3_errmsg(db));
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return prep == SQLITE_OK && step == SQLITE_CORRUPT;
+}
+
+static int test_p2_step_error(const char *table, const char *sql)
+{
+    int failures = 0;
+    char dir[4096], store[4608], buf[2048];
+    test_make_tmpdir(dir, sizeof dir, "p2_invariant", table);
+    snprintf(store, sizeof store, "%s/corrupt.kv", dir);
+    TEST("p2_invariant_check: successful prepare followed by corrupt step is read error 3") {
+        ASSERT(p2_fixture(store, 5, 5));
+        ASSERT(p2_run(store, NULL, buf, sizeof buf) == 0);
+        ASSERT(p2_corrupt_fixture(store, table));
+        ASSERT(p2_probe_corruption(store, sql));
+        const char *modes[] = {NULL, "--immutable"};
+        for (size_t i = 0; i < sizeof modes / sizeof modes[0]; i++) {
+            int rc = p2_run(store, modes[i], buf, sizeof buf);
+            printf("corrupt_tool table=%s immutable=%d status=%d\n", table, i != 0, rc);
+            ASSERT(rc == 3);
+            ASSERT(buf[0] == 0);
+        }
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_p2_invariant_check(void)
 {
     int failures = 0;
@@ -167,5 +238,9 @@ int test_p2_invariant_check(void)
     }
     failures += test_p2_verdicts();
     failures += test_p2_encoding_and_dirs();
+    failures += test_p2_step_error("progress_meta",
+        "SELECT value FROM progress_meta WHERE key='coins_applied_height'");
+    failures += test_p2_step_error("stage_cursor",
+        "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'");
     return failures;
 }
