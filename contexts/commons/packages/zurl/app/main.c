@@ -5,13 +5,13 @@
 
 #include <stdio.h>
 
-static void show(const char *name, const char *text, zurl_span s,
+static void show(FILE *output, const char *name, const char *text, zurl_span s,
                  bool present) {
   if (present)
-    printf("  %s: %.*s\n", name, (int)s.len, text + s.off);
+    fprintf(output, "  %s: %.*s\n", name, (int)s.len, text + s.off);
 }
 
-int main(int argc, char **argv) {
+static int cli_run(int argc, char **argv, FILE *output) {
   if (argc < 2) {
     fprintf(stderr, "usage: zurl URI [URI ...]\n");
     return 2;
@@ -21,23 +21,31 @@ int main(int argc, char **argv) {
     const char *t = argv[a];
     zurl u;
     if (!zurl_parse(t, &u)) {
-      printf("%s: INVALID\n", t);
+      fprintf(output, "%s: INVALID\n", t);
       rc = 1;
       continue;
     }
-    printf("%s:\n", t);
-    show("scheme", t, u.scheme, true);
-    show("userinfo", t, u.userinfo, u.has_userinfo);
-    show("host", t, u.host, u.has_authority);
+    fprintf(output, "%s:\n", t);
+    show(output, "scheme", t, u.scheme, true);
+    show(output, "userinfo", t, u.userinfo, u.has_userinfo);
+    show(output, "host", t, u.host, u.has_authority);
     if (u.host_is_ipv4)
-      printf("  host-kind: ipv4\n");
+      fprintf(output, "  host-kind: ipv4\n");
     else if (u.host_is_ip_literal)
-      printf("  host-kind: ip-literal\n");
+      fprintf(output, "  host-kind: ip-literal\n");
     if (u.has_port)
-      printf("  port: %u\n", u.port);
-    show("path", t, u.path, true);
-    show("query", t, u.query, u.has_query);
-    show("fragment", t, u.fragment, u.has_fragment);
+      fprintf(output, "  port: %u\n", u.port);
+    show(output, "path", t, u.path, true);
+    show(output, "query", t, u.query, u.has_query);
+    show(output, "fragment", t, u.fragment, u.has_fragment);
+  }
+  if (fflush(output) != 0 || ferror(output)) {
+    fputs("zurl: output write failed\n", stderr);
+    return 1;
   }
   return rc;
+}
+
+int main(int argc, char **argv) {
+  return cli_run(argc, argv, stdout);
 }

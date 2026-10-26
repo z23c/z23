@@ -5,6 +5,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define main zurl_cli_main
+#include "../app/main.c"
+#undef main
+
 #define CHECK(cond)                                                          \
   do {                                                                       \
     if (!(cond)) {                                                           \
@@ -283,7 +287,55 @@ static int test_ipv4_trailing_dot(void) {
   return 0;
 }
 
+static int cli_case(char *uri, int status, const char *expected) {
+  FILE *output = tmpfile();
+  if (!output) return 1;
+  char *argv[] = {"zurl", uri, NULL};
+  bool ok = cli_run(uri ? 2 : 1, argv, output) == status;
+  rewind(output);
+  char bytes[1024];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  ok = ok && !ferror(output) && n == strlen(expected) &&
+       memcmp(bytes, expected, n) == 0;
+  if (fclose(output) != 0) ok = false;
+  return ok ? 0 : 1;
+}
+
+static int cli_output_error(const char *path, const char *access) {
+  FILE *output = fopen(path, access);
+  if (!output) return 1;
+  char buffer[4096];
+  bool ok = setvbuf(output, buffer, _IOFBF, sizeof buffer) == 0;
+  char *argv[] = {"zurl", "https://example.com/a?b#c", NULL};
+  if (ok) ok = cli_run(2, argv, output) == 1 && ferror(output);
+  (void)fclose(output);
+  return ok ? 0 : 1;
+}
+
+static int test_cli(void) {
+  CHECK(cli_case("http://user@127.0.0.1:8080/a?b#c", 0,
+      "http://user@127.0.0.1:8080/a?b#c:\n"
+      "  scheme: http\n  userinfo: user\n  host: 127.0.0.1\n"
+      "  host-kind: ipv4\n  port: 8080\n  path: /a\n"
+      "  query: b\n  fragment: c\n") == 0);
+  CHECK(cli_case("http://[::1]/", 0,
+      "http://[::1]/:\n  scheme: http\n  host: [::1]\n"
+      "  host-kind: ip-literal\n  path: /\n") == 0);
+  CHECK(cli_case("not a URI", 1, "not a URI: INVALID\n") == 0);
+  CHECK(cli_case(NULL, 2, "") == 0);
+#if defined(_WIN32)
+  CHECK(cli_output_error("NUL", "r") == 0);
+#else
+  CHECK(cli_output_error("/dev/null", "r") == 0);
+#endif
+#if defined(__linux__)
+  CHECK(cli_output_error("/dev/full", "w") == 0);
+#endif
+  return 0;
+}
+
 int main(void) {
+    if (test_cli() != 0) return 1;
     if (test_failure_zeroes_all_fields() != 0) return 1;
     if (test_ipv4_trailing_dot()) return 1;
 
