@@ -323,8 +323,6 @@ int test_devagent_rules(void)
 {
     int failures = test_rules_exact_revalidation();
 
-    /* One reported case per helper; the chain keeps the stop-at-first-failure
-     * order the _test_next goto gave when every case lived in this body. */
     int own = test_rules_leaf_registration();
     if (own == 0) own = test_rules_unfiltered_full_table();
     if (own == 0) own = test_rules_values_are_machine_answers();
