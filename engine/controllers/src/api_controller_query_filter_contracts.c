@@ -101,44 +101,67 @@ k_query_filter_contracts[] = {
     },
 };
 
+static bool api_query_filter_contract_shape_valid(
+    const struct api_query_filter_contract_definition *contract)
+{
+    return contract && contract->name && contract->name[0] &&
+           contract->fields && contract->field_count != 0 &&
+           contract->example && contract->filter_semantics &&
+           contract->error_code && contract->default_error &&
+           contract->key_cap != 0 &&
+           contract->key_cap <=
+               sizeof(((struct api_query_filter *)0)->unknown_key);
+}
+
+static bool api_query_filter_field_shape_valid(
+    const struct api_query_filter_field_definition *field,
+    size_t key_cap)
+{
+    return field->key && field->key[0] && field->allowed &&
+           field->allowed[0] && strlen(field->key) < key_cap &&
+           field->value_index < API_QUERY_FILTER_MAX_FIELDS &&
+           field->value_cap != 0 &&
+           field->value_cap <= API_QUERY_FILTER_VALUE_CAP &&
+           field->validation <= API_QUERY_FILTER_ENUM;
+}
+
+static bool api_query_filter_field_slots_valid(
+    const struct api_query_filter_contract_definition *contract,
+    size_t field_index)
+{
+    const struct api_query_filter_field_definition *field =
+        &contract->fields[field_index];
+    bool canonical_slot = !field->alias;
+
+    for (size_t j = 0; j < contract->field_count; j++) {
+        const struct api_query_filter_field_definition *peer =
+            &contract->fields[j];
+
+        if (field_index != j && peer->key &&
+            strcmp(peer->key, field->key) == 0)
+            return false; /* raw-return-ok:invalid-filter-contract */
+        if (field_index == j || peer->alias ||
+            peer->value_index != field->value_index)
+            continue;
+        if (canonical_slot || peer->value_cap != field->value_cap)
+            return false; /* raw-return-ok:invalid-filter-contract */
+        canonical_slot = true;
+    }
+    if (!canonical_slot)
+        return false; /* raw-return-ok:invalid-filter-contract */
+    return true;
+}
+
 static bool api_query_filter_contract_valid(
     const struct api_query_filter_contract_definition *contract)
 {
-    if (!contract || !contract->name || !contract->name[0] ||
-        !contract->fields || contract->field_count == 0 ||
-        !contract->example || !contract->filter_semantics ||
-        !contract->error_code || !contract->default_error ||
-        contract->key_cap == 0 ||
-        contract->key_cap > sizeof(((struct api_query_filter *)0)->unknown_key))
+    if (!api_query_filter_contract_shape_valid(contract))
         return false; /* raw-return-ok:invalid-filter-contract */
 
     for (size_t i = 0; i < contract->field_count; i++) {
-        const struct api_query_filter_field_definition *field =
-            &contract->fields[i];
-        bool canonical_slot = !field->alias;
-
-        if (!field->key || !field->key[0] || !field->allowed ||
-            !field->allowed[0] || strlen(field->key) >= contract->key_cap ||
-            field->value_index >= API_QUERY_FILTER_MAX_FIELDS ||
-            field->value_cap == 0 ||
-            field->value_cap > API_QUERY_FILTER_VALUE_CAP ||
-            field->validation > API_QUERY_FILTER_ENUM)
-            return false; /* raw-return-ok:invalid-filter-contract */
-
-        for (size_t j = 0; j < contract->field_count; j++) {
-            const struct api_query_filter_field_definition *peer =
-                &contract->fields[j];
-
-            if (i != j && peer->key && strcmp(peer->key, field->key) == 0)
-                return false; /* raw-return-ok:invalid-filter-contract */
-            if (i == j || peer->alias ||
-                peer->value_index != field->value_index)
-                continue;
-            if (canonical_slot || peer->value_cap != field->value_cap)
-                return false; /* raw-return-ok:invalid-filter-contract */
-            canonical_slot = true;
-        }
-        if (!canonical_slot)
+        if (!api_query_filter_field_shape_valid(&contract->fields[i],
+                                                contract->key_cap) ||
+            !api_query_filter_field_slots_valid(contract, i))
             return false; /* raw-return-ok:invalid-filter-contract */
     }
     return true;
@@ -375,41 +398,19 @@ void api_query_filter_values_json(const struct api_query_filter *filter,
     json_push_kv_str(out, "semantics", filter->contract->filter_semantics);
 }
 
-bool api_query_filter_validate(const struct api_query_filter *filter,
-                               char *err,
-                               size_t err_len)
+static void api_query_filter_format_error(char *err, size_t err_len,
+                                          const char *format,
+                                          const char *arg_a,
+                                          const char *arg_b,
+                                          const char *arg_c)
 {
-    char allowed[API_QUERY_FILTER_MAX_FIELDS * 50];
+    if (err && err_len > 0)
+        snprintf(err, err_len, format, arg_a, arg_b, arg_c);
+}
 
-    if (!filter) {
-        if (err && err_len > 0)
-            snprintf(err, err_len, "missing query-filter state");
-        LOG_FAIL("api.query_filter", "missing query-filter state");
-    }
-    if (!filter->contract) {
-        if (err && err_len > 0)
-            snprintf(err, err_len, "unknown query-filter contract '%s'",
-                     filter->unknown_key);
-        LOG_FAIL("api.query_filter", "unknown query-filter contract '%s'",
-                 filter->unknown_key);
-    }
-    if (!api_query_filter_contract_valid(filter->contract)) {
-        if (err && err_len > 0)
-            snprintf(err, err_len, "invalid query-filter contract '%s'",
-                     filter->contract->name ? filter->contract->name : "(unnamed)");
-        LOG_FAIL("api.query_filter", "invalid query-filter contract '%s'",
-                 filter->contract->name ? filter->contract->name : "(unnamed)");
-    }
-
-    if (filter->unknown_key[0]) {
-        api_query_filter_canonical_keys(filter->contract,
-                                        allowed, sizeof(allowed));
-        if (err && err_len > 0)
-            snprintf(err, err_len, "unknown filter '%s' (allowed: %s)",
-                     filter->unknown_key, allowed);
-        return false; /* raw-return-ok:filter-validation-error */
-    }
-
+static const struct api_query_filter_field_definition *
+api_query_filter_find_invalid_value(const struct api_query_filter *filter)
+{
     for (size_t i = 0; i < filter->contract->field_count; i++) {
         const struct api_query_filter_field_definition *field =
             &filter->contract->fields[i];
@@ -424,9 +425,58 @@ bool api_query_filter_validate(const struct api_query_filter *filter,
                     : api_query_filter_allowed_value(value, field->allowed);
         if (valid)
             continue;
-        if (err && err_len > 0)
-            snprintf(err, err_len, "invalid %s '%s' (allowed: %s)",
-                     field->key, value, field->allowed);
+        return field;
+    }
+    return NULL;
+}
+
+bool api_query_filter_validate(const struct api_query_filter *filter,
+                               char *err,
+                               size_t err_len)
+{
+    char allowed[API_QUERY_FILTER_MAX_FIELDS * 50];
+    const struct api_query_filter_field_definition *invalid;
+
+    if (!filter) {
+        api_query_filter_format_error(err, err_len,
+                                      "missing query-filter state",
+                                      NULL, NULL, NULL);
+        LOG_FAIL("api.query_filter", "missing query-filter state");
+    }
+    if (!filter->contract) {
+        api_query_filter_format_error(err, err_len,
+                                      "unknown query-filter contract '%s'",
+                                      filter->unknown_key, NULL, NULL);
+        LOG_FAIL("api.query_filter", "unknown query-filter contract '%s'",
+                 filter->unknown_key);
+    }
+    if (!api_query_filter_contract_valid(filter->contract)) {
+        api_query_filter_format_error(err, err_len,
+                                      "invalid query-filter contract '%s'",
+                                      filter->contract->name
+                                          ? filter->contract->name
+                                          : "(unnamed)",
+                                      NULL, NULL);
+        LOG_FAIL("api.query_filter", "invalid query-filter contract '%s'",
+                 filter->contract->name ? filter->contract->name : "(unnamed)");
+    }
+
+    if (filter->unknown_key[0]) {
+        api_query_filter_canonical_keys(filter->contract,
+                                        allowed, sizeof(allowed));
+        api_query_filter_format_error(err, err_len,
+                                      "unknown filter '%s' (allowed: %s)",
+                                      filter->unknown_key, allowed, NULL);
+        return false; /* raw-return-ok:filter-validation-error */
+    }
+
+    invalid = api_query_filter_find_invalid_value(filter);
+    if (invalid) {
+        api_query_filter_format_error(err, err_len,
+                                      "invalid %s '%s' (allowed: %s)",
+                                      invalid->key,
+                                      filter->values[invalid->value_index],
+                                      invalid->allowed);
         return false; /* raw-return-ok:filter-validation-error */
     }
     return true;
