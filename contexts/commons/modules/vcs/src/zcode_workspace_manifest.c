@@ -355,6 +355,27 @@ enum vcs_zcode_commons_error vcs_zcode_workspace_entry_v1_root(
     return VCS_ZCODE_COMMONS_OK;
 }
 
+static enum vcs_zcode_commons_error workspace_edge_validate_one(
+    const struct vcs_zcode_workspace_manifest_v1 *workspace, size_t i)
+{
+    const struct vcs_zcode_workspace_edge_v1 *edge = &workspace->edges[i];
+    if (edge->reserved != 0 || edge->from_entry >= workspace->entry_count ||
+        edge->to_entry >= workspace->entry_count ||
+        edge->from_entry == edge->to_entry) {
+        return VCS_ZCODE_COMMONS_ENUM;
+    }
+    if (i > 0) {
+        const struct vcs_zcode_workspace_edge_v1 *prior =
+            &workspace->edges[i - 1u];
+        if (prior->from_entry > edge->from_entry ||
+            (prior->from_entry == edge->from_entry &&
+             prior->to_entry >= edge->to_entry)) {
+            return VCS_ZCODE_COMMONS_ORDER;
+        }
+    }
+    return VCS_ZCODE_COMMONS_OK;
+}
+
 static enum vcs_zcode_commons_error workspace_edges_validate(
     const struct vcs_zcode_workspace_manifest_v1 *workspace)
 {
@@ -369,20 +390,8 @@ static enum vcs_zcode_commons_error workspace_edges_validate(
     enum vcs_zcode_commons_error error = VCS_ZCODE_COMMONS_OK;
     for (size_t i = 0; i < workspace->edge_count; i++) {
         const struct vcs_zcode_workspace_edge_v1 *edge = &workspace->edges[i];
-        if (edge->reserved != 0 || edge->from_entry >= workspace->entry_count ||
-            edge->to_entry >= workspace->entry_count ||
-            edge->from_entry == edge->to_entry) {
-            error = VCS_ZCODE_COMMONS_ENUM; goto done;
-        }
-        if (i > 0) {
-            const struct vcs_zcode_workspace_edge_v1 *prior =
-                &workspace->edges[i - 1u];
-            if (prior->from_entry > edge->from_entry ||
-                (prior->from_entry == edge->from_entry &&
-                 prior->to_entry >= edge->to_entry)) {
-                error = VCS_ZCODE_COMMONS_ORDER; goto done;
-            }
-        }
+        error = workspace_edge_validate_one(workspace, i);
+        if (error != VCS_ZCODE_COMMONS_OK) goto done;
         indegree[edge->to_entry]++;
     }
     size_t removed_count = 0;
@@ -403,6 +412,35 @@ done:
     return error;
 }
 
+static enum vcs_zcode_commons_error workspace_manifest_shape_limits(
+    const struct vcs_zcode_workspace_manifest_v1 *workspace)
+{
+    if (workspace->sequence == 0 || workspace->entry_count == 0 ||
+        workspace->entry_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
+        workspace->edge_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
+        workspace->typed_asset_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
+        !workspace->entries ||
+        (workspace->edge_count > 0 && !workspace->edges) ||
+        (workspace->typed_asset_count > 0 && !workspace->typed_asset_roots))
+        return VCS_ZCODE_COMMONS_LIMIT;
+    return VCS_ZCODE_COMMONS_OK;
+}
+
+static enum vcs_zcode_commons_error workspace_manifest_shape_roots(
+    const struct vcs_zcode_workspace_manifest_v1 *workspace,
+    bool require_signature)
+{
+    if ((workspace->sequence == 1 &&
+         !workspace_zero(workspace->predecessor_workspace_root)) ||
+        (workspace->sequence > 1 &&
+         workspace_zero(workspace->predecessor_workspace_root)) ||
+        !zcl_bytes_any_set(workspace->signer_root, 32) ||
+        (require_signature &&
+         !zcl_bytes_any_set(workspace->signature, 64)))
+        return VCS_ZCODE_COMMONS_ROOT;
+    return VCS_ZCODE_COMMONS_OK;
+}
+
 static enum vcs_zcode_commons_error workspace_manifest_shape(
     const struct vcs_zcode_workspace_manifest_v1 *workspace,
     bool require_signature)
@@ -412,24 +450,12 @@ static enum vcs_zcode_commons_error workspace_manifest_shape(
         return VCS_ZCODE_COMMONS_VERSION_ERROR;
     if (!workspace_flags(workspace->schema_version, workspace->flags))
         return VCS_ZCODE_COMMONS_FLAGS;
-    if (workspace->sequence == 0 || workspace->entry_count == 0 ||
-        workspace->entry_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
-        workspace->edge_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
-        workspace->typed_asset_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
-        !workspace->entries ||
-        (workspace->edge_count > 0 && !workspace->edges) ||
-        (workspace->typed_asset_count > 0 && !workspace->typed_asset_roots))
-        return VCS_ZCODE_COMMONS_LIMIT;
-    if ((workspace->sequence == 1 &&
-         !workspace_zero(workspace->predecessor_workspace_root)) ||
-        (workspace->sequence > 1 &&
-         workspace_zero(workspace->predecessor_workspace_root)) ||
-        !zcl_bytes_any_set(workspace->signer_root, 32) ||
-        (require_signature &&
-         !zcl_bytes_any_set(workspace->signature, 64)))
-        return VCS_ZCODE_COMMONS_ROOT;
     enum vcs_zcode_commons_error error =
-        workspace_entries_validate(workspace);
+        workspace_manifest_shape_limits(workspace);
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
+    error = workspace_manifest_shape_roots(workspace, require_signature);
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
+    error = workspace_entries_validate(workspace);
     if (error != VCS_ZCODE_COMMONS_OK) return error;
     for (size_t i = 0; i < workspace->typed_asset_count; i++) {
         if (!zcl_bytes_any_set(workspace->typed_asset_roots[i], 32))
@@ -622,6 +648,58 @@ void vcs_zcode_workspace_manifest_v1_decoded_free(
     memset(decoded, 0, sizeof(*decoded));
 }
 
+static enum vcs_zcode_commons_error workspace_manifest_decode_limits(
+    const struct vcs_zcode_workspace_manifest_v1 *workspace)
+{
+    if (workspace->entry_count == 0 ||
+        workspace->entry_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
+        workspace->edge_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
+        workspace->typed_asset_count > VCS_ZCODE_COMMONS_MAX_CLAIMS)
+        return VCS_ZCODE_COMMONS_LIMIT;
+    return VCS_ZCODE_COMMONS_OK;
+}
+
+static enum vcs_zcode_commons_error workspace_manifest_decode_wire_bytes(
+    const struct vcs_zcode_workspace_manifest_v1 *workspace,
+    size_t *expected)
+{
+    *expected = VCS_ZCODE_WORKSPACE_MANIFEST_V1_WIRE_BASE_BYTES;
+    if (!workspace_manifest_wire_add(
+            expected, workspace->entry_count,
+            VCS_ZCODE_WORKSPACE_MANIFEST_V1_ENTRY_WIRE_BYTES) ||
+        !workspace_manifest_wire_add(
+            expected, workspace->edge_count,
+            VCS_ZCODE_WORKSPACE_MANIFEST_V1_EDGE_WIRE_BYTES) ||
+        !workspace_manifest_wire_add(
+            expected, workspace->typed_asset_count,
+            VCS_ZCODE_WORKSPACE_MANIFEST_V1_ASSET_WIRE_BYTES))
+        return VCS_ZCODE_COMMONS_OVERFLOW;
+    return VCS_ZCODE_COMMONS_OK;
+}
+
+static enum vcs_zcode_commons_error workspace_manifest_decode_alloc(
+    struct vcs_zcode_workspace_manifest_v1_decoded *out,
+    const struct vcs_zcode_workspace_manifest_v1 *workspace)
+{
+    out->entries = zcl_calloc(
+        workspace->entry_count, sizeof(*out->entries),
+        "workspace_manifest_v1_entries");
+    if (workspace->edge_count > 0)
+        out->edges = zcl_calloc(
+            workspace->edge_count, sizeof(*out->edges),
+            "workspace_manifest_v1_edges");
+    if (workspace->typed_asset_count > 0)
+        out->typed_asset_roots = zcl_calloc(
+            workspace->typed_asset_count, sizeof(*out->typed_asset_roots),
+            "workspace_manifest_v1_assets");
+    if (!out->entries || (workspace->edge_count > 0 && !out->edges) ||
+        (workspace->typed_asset_count > 0 && !out->typed_asset_roots)) {
+        vcs_zcode_workspace_manifest_v1_decoded_free(out);
+        return VCS_ZCODE_COMMONS_LIMIT;
+    }
+    return VCS_ZCODE_COMMONS_OK;
+}
+
 enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_decode(
     struct vcs_zcode_workspace_manifest_v1_decoded *out,
     const uint8_t *wire, size_t wire_len)
@@ -643,46 +721,24 @@ enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_decode(
     workspace->edge_count = zcl_read_u32_le(wire + off); off += 4;
     workspace->typed_asset_count = zcl_read_u32_le(wire + off); off += 4;
     memcpy(workspace->signer_root, wire + off, 32); off += 32;
-    if (workspace->entry_count == 0 ||
-        workspace->entry_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
-        workspace->edge_count > VCS_ZCODE_COMMONS_MAX_CLAIMS ||
-        workspace->typed_asset_count > VCS_ZCODE_COMMONS_MAX_CLAIMS) {
+    enum vcs_zcode_commons_error error =
+        workspace_manifest_decode_limits(workspace);
+    if (error != VCS_ZCODE_COMMONS_OK) {
         memset(out, 0, sizeof(*out));
-        return VCS_ZCODE_COMMONS_LIMIT;
+        return error;
     }
-    size_t expected = VCS_ZCODE_WORKSPACE_MANIFEST_V1_WIRE_BASE_BYTES;
-    if (!workspace_manifest_wire_add(
-            &expected, workspace->entry_count,
-            VCS_ZCODE_WORKSPACE_MANIFEST_V1_ENTRY_WIRE_BYTES) ||
-        !workspace_manifest_wire_add(
-            &expected, workspace->edge_count,
-            VCS_ZCODE_WORKSPACE_MANIFEST_V1_EDGE_WIRE_BYTES) ||
-        !workspace_manifest_wire_add(
-            &expected, workspace->typed_asset_count,
-            VCS_ZCODE_WORKSPACE_MANIFEST_V1_ASSET_WIRE_BYTES)) {
+    size_t expected = 0;
+    error = workspace_manifest_decode_wire_bytes(workspace, &expected);
+    if (error != VCS_ZCODE_COMMONS_OK) {
         memset(out, 0, sizeof(*out));
-        return VCS_ZCODE_COMMONS_OVERFLOW;
+        return error;
     }
     if (wire_len != expected) {
         memset(out, 0, sizeof(*out));
         return VCS_ZCODE_COMMONS_SIZE;
     }
-    out->entries = zcl_calloc(
-        workspace->entry_count, sizeof(*out->entries),
-        "workspace_manifest_v1_entries");
-    if (workspace->edge_count > 0)
-        out->edges = zcl_calloc(
-            workspace->edge_count, sizeof(*out->edges),
-            "workspace_manifest_v1_edges");
-    if (workspace->typed_asset_count > 0)
-        out->typed_asset_roots = zcl_calloc(
-            workspace->typed_asset_count, sizeof(*out->typed_asset_roots),
-            "workspace_manifest_v1_assets");
-    if (!out->entries || (workspace->edge_count > 0 && !out->edges) ||
-        (workspace->typed_asset_count > 0 && !out->typed_asset_roots)) {
-        vcs_zcode_workspace_manifest_v1_decoded_free(out);
-        return VCS_ZCODE_COMMONS_LIMIT;
-    }
+    error = workspace_manifest_decode_alloc(out, workspace);
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
     workspace->entries = out->entries;
     workspace->edges = out->edges;
     workspace->typed_asset_roots = out->typed_asset_roots;
@@ -700,7 +756,7 @@ enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_decode(
         memcpy(out->typed_asset_roots[i], wire + off, 32); off += 32;
     }
     memcpy(workspace->signature, wire + off, 64); off += 64;
-    enum vcs_zcode_commons_error error = off == wire_len
+    error = off == wire_len
         ? vcs_zcode_workspace_manifest_v1_verify(workspace)
         : VCS_ZCODE_COMMONS_SIZE;
     if (error != VCS_ZCODE_COMMONS_OK)
@@ -742,6 +798,16 @@ enum vcs_zcode_commons_error vcs_zcode_mission_v1_validate(
     return VCS_ZCODE_COMMONS_OK;
 }
 
+static enum vcs_zcode_commons_error contribution_split_entry_shape(
+    const struct vcs_zcode_contribution_split_entry_v1 *entry)
+{
+    if (!zcl_bytes_any_set(entry->recipient_binding_root, 32) ||
+        !zcl_bytes_any_set(entry->signature, 64) ||
+        entry->award_atoms == 0)
+        return VCS_ZCODE_COMMONS_ROOT;
+    return VCS_ZCODE_COMMONS_OK;
+}
+
 enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_validate(
     const struct vcs_zcode_contribution_split_v1 *split)
 {
@@ -758,10 +824,9 @@ enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_validate(
     for (size_t i = 0; i < split->entry_count; i++) {
         const struct vcs_zcode_contribution_split_entry_v1 *entry =
             &split->entries[i];
-        if (!zcl_bytes_any_set(entry->recipient_binding_root, 32) ||
-            !zcl_bytes_any_set(entry->signature, 64) ||
-            entry->award_atoms == 0)
-            return VCS_ZCODE_COMMONS_ROOT;
+        enum vcs_zcode_commons_error error =
+            contribution_split_entry_shape(entry);
+        if (error != VCS_ZCODE_COMMONS_OK) return error;
         if (i > 0 && memcmp(
                 split->entries[i - 1u].recipient_binding_root,
                 entry->recipient_binding_root, 32) >= 0)

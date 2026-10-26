@@ -339,10 +339,6 @@ contexts/commons/modules/vcs/src/zcode_work_swarm.c:vcs_zcode_work_swarm_seriali
 contexts/commons/modules/vcs/src/zcode_work_swarm.c:zcws_admission_valid:21
 contexts/commons/modules/vcs/src/zcode_work_swarm.c:zcws_capability_valid:18
 contexts/commons/modules/vcs/src/zcode_work_swarm.c:zcws_request_valid:19
-contexts/commons/modules/vcs/src/zcode_workspace_manifest.c:vcs_zcode_contribution_split_v1_validate:16
-contexts/commons/modules/vcs/src/zcode_workspace_manifest.c:vcs_zcode_workspace_manifest_v1_decode:25
-contexts/commons/modules/vcs/src/zcode_workspace_manifest.c:workspace_edges_validate:19
-contexts/commons/modules/vcs/src/zcode_workspace_manifest.c:workspace_manifest_shape:26
 contexts/commons/modules/vcs/src/zcode_write_scope.c:vcs_zcode_write_scope_parse:16
 contexts/commons/modules/vcs/src/zendp_swarm.c:zendp_publish_to:17
 contexts/commons/modules/vcs/src/zendp_swarm.c:zendp_result_string:21
