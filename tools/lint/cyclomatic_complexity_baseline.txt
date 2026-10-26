@@ -1812,8 +1812,6 @@ tests/harness/src/test_canary_sentinel_watch.c:test_canary_sentinel_watch:99
 tests/harness/src/test_catalog_completeness.c:test_catalog_completeness:42
 tests/harness/src/test_chacha20_isa_parity.c:test_chacha20_isa_parity:37
 tests/harness/src/test_chain.c:test_chain:318
-tests/harness/src/test_chain_evidence_live_advance.c:test_durable_frontier_one_row_skew_is_not_hash_mismatch:18
-tests/harness/src/test_chain_evidence_live_advance.c:test_live_advance_clears_active_tip_hash_mismatch:16
 tests/harness/src/test_chain_integrity_failed_condition.c:test_chain_integrity_failed_condition:66
 tests/harness/src/test_chain_linkage_check.c:test_chain_linkage_check:53
 tests/harness/src/test_chain_segment.c:test_chain_segment:45

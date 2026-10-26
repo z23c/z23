@@ -128,6 +128,29 @@ static bool save_projection_block(struct live_fixture *f, int idx)
     return db_block_save(&f->ndb, &row);
 }
 
+/* The post-boot frontier tuple this test seeds is active=3, sqlite=2,
+ * persisted=1: one durable row of expected lag, which must stay healthy.
+ * Returns nonzero when the snapshot does not show exactly that tuple. */
+static int snapshot_fails_one_row_skew_health(
+    const struct chain_evidence_controller_view *v)
+{
+    return v->active_tip_height != 3 ||
+           v->sqlite_max_height != 2 ||
+           v->persisted_active_tip_height != 1 ||
+           v->active_tip_hash_mismatch ||
+           v->health_reason[0] != '\0';
+}
+
+/* Both red snapshots in this test (tampered persisted hash, then the widened
+ * two-row gap) must report the same degradation: active_tip_hash_mismatch set
+ * with its reason.  Returns nonzero when the snapshot is not that red. */
+static int snapshot_fails_hash_mismatch_red(
+    const struct chain_evidence_controller_view *v)
+{
+    return !v->active_tip_hash_mismatch ||
+           strcmp(v->health_reason, "active_tip_hash_mismatch") != 0;
+}
+
 /* The blocks projection and cec evidence follower commit independently.  A
  * live tuple can therefore be active=N, sqlite=N-k, persisted=sqlite-1.  That
  * one-row durable skew is not a fork/hash contradiction; a two-row skew is.
@@ -152,12 +175,7 @@ static int test_durable_frontier_one_row_skew_is_not_hash_mismatch(void)
 
     struct chain_evidence_controller_view one_behind;
     chain_evidence_controller_snapshot(&f.authority, &one_behind);
-    if (one_behind.active_tip_height != 3 ||
-        one_behind.sqlite_max_height != 2 ||
-        one_behind.persisted_active_tip_height != 1 ||
-        one_behind.active_tip_hash_mismatch ||
-        one_behind.health_reason[0] != '\0')
-        failures++;
+    failures += snapshot_fails_one_row_skew_health(&one_behind);
 
     /* The height shape alone is insufficient: a random/corrupt persisted
      * hash at sqlite-1 must not inherit the expected-lag exemption. */
@@ -166,9 +184,7 @@ static int test_durable_frontier_one_row_skew_is_not_hash_mismatch(void)
         failures++;
     struct chain_evidence_controller_view tampered;
     chain_evidence_controller_snapshot(&f.authority, &tampered);
-    if (!tampered.active_tip_hash_mismatch ||
-        strcmp(tampered.health_reason, "active_tip_hash_mismatch") != 0)
-        failures++;
+    failures += snapshot_fails_hash_mismatch_red(&tampered);
 
     /* Widen only the evidence gap.  sqlite remains 2 and active remains 3;
      * persisted=0 is now two rows behind the projection and must fail loud. */
@@ -179,12 +195,35 @@ static int test_durable_frontier_one_row_skew_is_not_hash_mismatch(void)
 
     struct chain_evidence_controller_view two_behind;
     chain_evidence_controller_snapshot(&f.authority, &two_behind);
-    if (!two_behind.active_tip_hash_mismatch ||
-        strcmp(two_behind.health_reason, "active_tip_hash_mismatch") != 0)
-        failures++;
+    failures += snapshot_fails_hash_mismatch_red(&two_behind);
 
     live_fixture_free(&f);
     return failures;
+}
+
+/* Before the live evidence follow: the reducer moved the served tip to
+ * height 2 while the persisted evidence still names height 1, so the
+ * snapshot must show the production degradation.  Returns nonzero when it
+ * does not. */
+static int snapshot_fails_pre_follow_degradation(
+    const struct chain_evidence_controller_view *v)
+{
+    return v->active_tip_height != 2 ||
+           v->persisted_active_tip_height != 1 ||
+           !v->active_tip_hash_mismatch ||
+           v->health_reason[0] == '\0';
+}
+
+/* After the live evidence follow: the persisted evidence tracks the served
+ * tip (height 2) with no mismatch flags and no health reason.  Returns
+ * nonzero when the snapshot is not that healthy. */
+static int snapshot_fails_post_follow_health(
+    const struct chain_evidence_controller_view *v)
+{
+    return v->persisted_active_tip_height != 2 ||
+           v->active_tip_hash_mismatch ||
+           v->csr_cursor_mismatch ||
+           v->health_reason[0] != '\0';
 }
 
 /* CORE REGRESSION: after the reducer advances the served tip past the
@@ -209,11 +248,7 @@ static int test_live_advance_clears_active_tip_hash_mismatch(void)
     chain_evidence_controller_snapshot(&f.authority, &before);
     /* The live tip is block 2 but persisted evidence still names block 1 —
      * this is exactly the production degradation. */
-    if (before.active_tip_height != 2 ||
-        before.persisted_active_tip_height != 1 ||
-        !before.active_tip_hash_mismatch ||
-        before.health_reason[0] == '\0')
-        failures++;
+    failures += snapshot_fails_pre_follow_degradation(&before);
 
     /* The live evidence follow advances the persisted evidence. */
     if (!chain_evidence_controller_record_finalized_tip(
@@ -222,11 +257,7 @@ static int test_live_advance_clears_active_tip_hash_mismatch(void)
 
     struct chain_evidence_controller_view after;
     chain_evidence_controller_snapshot(&f.authority, &after);
-    if (after.persisted_active_tip_height != 2 ||
-        after.active_tip_hash_mismatch ||
-        after.csr_cursor_mismatch ||
-        after.health_reason[0] != '\0')
-        failures++;
+    failures += snapshot_fails_post_follow_health(&after);
     /* The persisted hash now equals the served tip's hash. */
     if (!after.has_persisted_active_tip_hash ||
         memcmp(after.persisted_active_tip_hash.data,
