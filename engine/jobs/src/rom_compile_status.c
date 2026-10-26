@@ -148,149 +148,162 @@ static void push_stages(struct json_value *out, const char **bottleneck_abbrev)
     *bottleneck_abbrev = k_stage_rows[slow].abbrev;
 }
 
+/* Layer 1 — ROM checkpoint: the compiled SHA3 UTXO commitment. Always
+ * present (it is baked into the binary), so this layer is always
+ * "filled" in the ladder render. */
+static void push_rom_checkpoint_layer(struct json_value *layers)
+{
+    struct json_value l;
+    json_init(&l);
+    json_set_object(&l);
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    json_push_kv_bool(&l, "present", cp != NULL);
+    json_push_kv_int(&l, "height",
+                     cp ? (int64_t)cp->height
+                        : (int64_t)REDUCER_FRONTIER_TRUSTED_ANCHOR);
+    char prefix[9] = {0};
+    if (cp) hex_prefix(cp->sha3_hash, 4, prefix, sizeof(prefix));
+    json_push_kv_str(&l, "sha3_prefix", prefix);
+    json_push_kv(layers, "rom_checkpoint", &l);
+    json_free(&l);
+}
+
+/* Layer 2 — sealed history: write-once SHA3-committed block-body
+ * segments (engine/modules/storage/chain_segment.{c,h}). Composed via the EXISTING
+ * chain_segments dumper — no directory-resolution logic duplicated
+ * here. */
+static void push_sealed_history_layer(struct json_value *layers)
+{
+    struct json_value seg;
+    json_init(&seg);
+    bool ok = chain_segment_dump_state_json(&seg, NULL);
+    struct json_value l;
+    json_init(&l);
+    json_set_object(&l);
+    int64_t segment_count = ok ? json_get_int(json_get(&seg, "segment_count")) : 0;
+    int64_t present_count =
+        ok ? json_get_int(json_get(&seg, "present_count")) : 0;
+    json_push_kv_bool(&l, "present", ok && segment_count > 0);
+    json_push_kv_int(&l, "segment_count", segment_count);
+    json_push_kv_int(&l, "present_count", present_count);
+    /* verified_count == the store's chain_segment_stat.verified_count (the
+     * cheap present-and-matching-header pass the dumper reports); the
+     * manifest ladder row reads it. */
+    json_push_kv_int(&l, "verified_count", present_count);
+    json_push_kv_int(&l, "min_height",
+                     ok ? json_get_int(json_get(&seg, "min_height")) : -1);
+    json_push_kv_int(&l, "max_height",
+                     ok ? json_get_int(json_get(&seg, "max_height")) : -1);
+    json_push_kv(layers, "sealed_history", &l);
+    json_free(&l);
+    json_free(&seg);
+}
+
+/* Layer 3 — sealed base+receipt state: the state-seal ring
+ * (engine/modules/storage/seal_kv.h), composed via the EXISTING seal dumper. Reports
+ * the highest RATIFIED grid-point seal. */
+static void push_sealed_base_receipt_layer(struct json_value *layers)
+{
+    struct json_value seal;
+    json_init(&seal);
+    bool ok = seal_dump_state_json(&seal, NULL);
+    int32_t best_height = -1;
+    bool any_ratified = false;
+    const struct json_value *slots = ok ? json_get(&seal, "slots") : NULL;
+    if (slots && slots->type == JSON_ARR) {
+        for (size_t i = 0; i < slots->num_children; i++) {
+            const struct json_value *slot = json_at(slots, i);
+            if (json_get_bool(json_get(slot, "ratified"))) {
+                int64_t h = json_get_int(json_get(slot, "height"));
+                if (!any_ratified || h > best_height) {
+                    best_height = (int32_t)h;
+                    any_ratified = true;
+                }
+            }
+        }
+    }
+    struct json_value l;
+    json_init(&l);
+    json_set_object(&l);
+    json_push_kv_bool(&l, "present", any_ratified);
+    json_push_kv_int(&l, "ratified_height", best_height);
+    json_push_kv(layers, "sealed_base_receipt", &l);
+    json_free(&l);
+    json_free(&seal);
+}
+
+/* Layer 4 — delta: the coins-applied frontier co-committed with every
+ * coin mutation (jobs/reducer_frontier.h derivation, never a separate
+ * cache). */
+static void push_delta_layer(struct json_value *layers)
+{
+    int32_t coins_best = -1;
+    bool found = false;
+    bool ok = reducer_frontier_derive_coins_best_now(&coins_best, NULL,
+                                                     NULL);
+    found = ok;
+    struct json_value l;
+    json_init(&l);
+    json_set_object(&l);
+    json_push_kv_bool(&l, "present", found && coins_best >= 0);
+    json_push_kv_int(&l, "coins_best_height", found ? coins_best : -1);
+    json_push_kv(layers, "delta", &l);
+    json_free(&l);
+}
+
+/* Layer 5 — tip ring: the provable-tip served to external consumers. */
+static void push_tip_ring_layer(struct json_value *layers)
+{
+    struct json_value l;
+    json_init(&l);
+    json_set_object(&l);
+    int32_t hstar = reducer_frontier_provable_tip_cached();
+    json_push_kv_bool(&l, "present", hstar > 0);
+    json_push_kv_int(&l, "hstar", hstar);
+    json_push_kv_int(&l, "external_tip_height",
+                     reducer_frontier_external_tip_height());
+    json_push_kv(layers, "tip_ring", &l);
+    json_free(&l);
+}
+
+/* Layer 6 — bundle export: the standing live consensus-state bundle
+ * exporter (config/bundle_exporter.h). The last exported generation is the
+ * head of the ROM pipeline that others re-serve. Composed via the EXISTING
+ * exporter dumper; graceful present=false when the exporter never opened a
+ * session (no state) or never exported. */
+static void push_bundle_export_layer(struct json_value *layers)
+{
+    struct json_value bx;
+    json_init(&bx);
+    bool ok = bundle_exporter_dump_state_json(&bx, NULL);
+    int64_t last_height =
+        ok ? json_get_int(json_get(&bx, "last_export_height")) : 0;
+    const struct json_value *gens = ok ? json_get(&bx, "generations") : NULL;
+    int64_t gen_count =
+        (gens && gens->type == JSON_ARR) ? (int64_t)gens->num_children : 0;
+    struct json_value l;
+    json_init(&l);
+    json_set_object(&l);
+    json_push_kv_bool(&l, "present", ok && last_height > 0);
+    json_push_kv_int(&l, "last_height", last_height);
+    json_push_kv_int(&l, "generations", gen_count);
+    json_push_kv(layers, "bundle_export", &l);
+    json_free(&l);
+    json_free(&bx);
+}
+
 static void push_layers(struct json_value *out)
 {
     struct json_value layers;
     json_init(&layers);
     json_set_object(&layers);
 
-    /* Layer 1 — ROM checkpoint: the compiled SHA3 UTXO commitment. Always
-     * present (it is baked into the binary), so this layer is always
-     * "filled" in the ladder render. */
-    {
-        struct json_value l;
-        json_init(&l);
-        json_set_object(&l);
-        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        json_push_kv_bool(&l, "present", cp != NULL);
-        json_push_kv_int(&l, "height",
-                         cp ? (int64_t)cp->height
-                            : (int64_t)REDUCER_FRONTIER_TRUSTED_ANCHOR);
-        char prefix[9] = {0};
-        if (cp) hex_prefix(cp->sha3_hash, 4, prefix, sizeof(prefix));
-        json_push_kv_str(&l, "sha3_prefix", prefix);
-        json_push_kv(&layers, "rom_checkpoint", &l);
-        json_free(&l);
-    }
-
-    /* Layer 2 — sealed history: write-once SHA3-committed block-body
-     * segments (engine/modules/storage/chain_segment.{c,h}). Composed via the EXISTING
-     * chain_segments dumper — no directory-resolution logic duplicated
-     * here. */
-    {
-        struct json_value seg;
-        json_init(&seg);
-        bool ok = chain_segment_dump_state_json(&seg, NULL);
-        struct json_value l;
-        json_init(&l);
-        json_set_object(&l);
-        int64_t segment_count = ok ? json_get_int(json_get(&seg, "segment_count")) : 0;
-        int64_t present_count =
-            ok ? json_get_int(json_get(&seg, "present_count")) : 0;
-        json_push_kv_bool(&l, "present", ok && segment_count > 0);
-        json_push_kv_int(&l, "segment_count", segment_count);
-        json_push_kv_int(&l, "present_count", present_count);
-        /* verified_count == the store's chain_segment_stat.verified_count (the
-         * cheap present-and-matching-header pass the dumper reports); the
-         * manifest ladder row reads it. */
-        json_push_kv_int(&l, "verified_count", present_count);
-        json_push_kv_int(&l, "min_height",
-                         ok ? json_get_int(json_get(&seg, "min_height")) : -1);
-        json_push_kv_int(&l, "max_height",
-                         ok ? json_get_int(json_get(&seg, "max_height")) : -1);
-        json_push_kv(&layers, "sealed_history", &l);
-        json_free(&l);
-        json_free(&seg);
-    }
-
-    /* Layer 3 — sealed base+receipt state: the state-seal ring
-     * (engine/modules/storage/seal_kv.h), composed via the EXISTING seal dumper. Reports
-     * the highest RATIFIED grid-point seal. */
-    {
-        struct json_value seal;
-        json_init(&seal);
-        bool ok = seal_dump_state_json(&seal, NULL);
-        int32_t best_height = -1;
-        bool any_ratified = false;
-        const struct json_value *slots = ok ? json_get(&seal, "slots") : NULL;
-        if (slots && slots->type == JSON_ARR) {
-            for (size_t i = 0; i < slots->num_children; i++) {
-                const struct json_value *slot = json_at(slots, i);
-                if (json_get_bool(json_get(slot, "ratified"))) {
-                    int64_t h = json_get_int(json_get(slot, "height"));
-                    if (!any_ratified || h > best_height) {
-                        best_height = (int32_t)h;
-                        any_ratified = true;
-                    }
-                }
-            }
-        }
-        struct json_value l;
-        json_init(&l);
-        json_set_object(&l);
-        json_push_kv_bool(&l, "present", any_ratified);
-        json_push_kv_int(&l, "ratified_height", best_height);
-        json_push_kv(&layers, "sealed_base_receipt", &l);
-        json_free(&l);
-        json_free(&seal);
-    }
-
-    /* Layer 4 — delta: the coins-applied frontier co-committed with every
-     * coin mutation (jobs/reducer_frontier.h derivation, never a separate
-     * cache). */
-    {
-        int32_t coins_best = -1;
-        bool found = false;
-        bool ok = reducer_frontier_derive_coins_best_now(&coins_best, NULL,
-                                                         NULL);
-        found = ok;
-        struct json_value l;
-        json_init(&l);
-        json_set_object(&l);
-        json_push_kv_bool(&l, "present", found && coins_best >= 0);
-        json_push_kv_int(&l, "coins_best_height", found ? coins_best : -1);
-        json_push_kv(&layers, "delta", &l);
-        json_free(&l);
-    }
-
-    /* Layer 5 — tip ring: the provable-tip served to external consumers. */
-    {
-        struct json_value l;
-        json_init(&l);
-        json_set_object(&l);
-        int32_t hstar = reducer_frontier_provable_tip_cached();
-        json_push_kv_bool(&l, "present", hstar > 0);
-        json_push_kv_int(&l, "hstar", hstar);
-        json_push_kv_int(&l, "external_tip_height",
-                         reducer_frontier_external_tip_height());
-        json_push_kv(&layers, "tip_ring", &l);
-        json_free(&l);
-    }
-
-    /* Layer 6 — bundle export: the standing live consensus-state bundle
-     * exporter (config/bundle_exporter.h). The last exported generation is the
-     * head of the ROM pipeline that others re-serve. Composed via the EXISTING
-     * exporter dumper; graceful present=false when the exporter never opened a
-     * session (no state) or never exported. */
-    {
-        struct json_value bx;
-        json_init(&bx);
-        bool ok = bundle_exporter_dump_state_json(&bx, NULL);
-        int64_t last_height =
-            ok ? json_get_int(json_get(&bx, "last_export_height")) : 0;
-        const struct json_value *gens = ok ? json_get(&bx, "generations") : NULL;
-        int64_t gen_count =
-            (gens && gens->type == JSON_ARR) ? (int64_t)gens->num_children : 0;
-        struct json_value l;
-        json_init(&l);
-        json_set_object(&l);
-        json_push_kv_bool(&l, "present", ok && last_height > 0);
-        json_push_kv_int(&l, "last_height", last_height);
-        json_push_kv_int(&l, "generations", gen_count);
-        json_push_kv(&layers, "bundle_export", &l);
-        json_free(&l);
-        json_free(&bx);
-    }
+    push_rom_checkpoint_layer(&layers);
+    push_sealed_history_layer(&layers);
+    push_sealed_base_receipt_layer(&layers);
+    push_delta_layer(&layers);
+    push_tip_ring_layer(&layers);
+    push_bundle_export_layer(&layers);
 
     json_push_kv(out, "layers", &layers);
     json_free(&layers);
@@ -311,6 +324,114 @@ static void push_layers(struct json_value *out)
  * NON-BLOCKING trylock (same "diagnostics are observational, never queue
  * behind the reducer" contract as reducer_frontier_dump_state_json) — a
  * busy store reports itself busy rather than blocking the caller. */
+
+struct rcs_shielded_snapshot {
+    bool sprout_anchor_found;
+    bool sapling_anchor_found;
+    bool nullifier_found;
+    int64_t sprout_anchor_cursor;
+    int64_t sapling_anchor_cursor;
+    int64_t nullifier_cursor;
+    int64_t sprout_anchor_count;
+    int64_t sapling_anchor_count;
+    int64_t sprout_nullifier_count;
+    int64_t sapling_nullifier_count;
+};
+
+struct rcs_shielded_gaps {
+    bool anchor;
+    bool nullifier;
+};
+
+static bool read_shielded_import_snapshot(sqlite3 *db,
+                                          struct rcs_shielded_snapshot *s)
+{
+    bool ok = false;
+    if (db && progress_store_tx_trylock()) {
+        ok =
+            anchor_kv_activation_cursor(db, ANCHOR_POOL_SPROUT,
+                                        &s->sprout_anchor_cursor,
+                                        &s->sprout_anchor_found) &&
+            anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING,
+                                        &s->sapling_anchor_cursor,
+                                        &s->sapling_anchor_found) &&
+            nullifier_kv_activation_cursor(db, &s->nullifier_cursor,
+                                           &s->nullifier_found) &&
+            anchor_kv_row_count(db, ANCHOR_POOL_SPROUT,
+                                &s->sprout_anchor_count) &&
+            anchor_kv_row_count(db, ANCHOR_POOL_SAPLING,
+                                &s->sapling_anchor_count) &&
+            nullifier_kv_row_count(db, NULLIFIER_POOL_SPROUT,
+                                   &s->sprout_nullifier_count) &&
+            nullifier_kv_row_count(db, NULLIFIER_POOL_SAPLING,
+                                   &s->sapling_nullifier_count);
+        progress_store_tx_unlock();
+    }
+    return ok;
+}
+
+static struct rcs_shielded_gaps push_shielded_gap_sections(
+    struct json_value *si, bool snapshot_ok,
+    const struct rcs_shielded_snapshot *s, bool anchor_gap_blocker,
+    bool nf_gap_blocker)
+{
+    struct rcs_shielded_gaps gaps;
+
+    bool anchor_cursor_known = s->sprout_anchor_found && s->sapling_anchor_found;
+    gaps.anchor = !snapshot_ok || !anchor_cursor_known ||
+                  s->sprout_anchor_cursor > 0 || s->sapling_anchor_cursor > 0 ||
+                  anchor_gap_blocker;
+    struct json_value anchor;
+    json_init(&anchor);
+    json_set_object(&anchor);
+    json_push_kv_bool(&anchor, "cursor_known", anchor_cursor_known);
+    json_push_kv_int(&anchor, "sprout_activation_cursor",
+                     s->sprout_anchor_cursor);
+    json_push_kv_int(&anchor, "sapling_activation_cursor",
+                     s->sapling_anchor_cursor);
+    json_push_kv_bool(&anchor, "gap_blocker_active", anchor_gap_blocker);
+    json_push_kv_bool(&anchor, "gap", gaps.anchor);
+    json_push_kv_int(&anchor, "sprout_anchors_imported",
+                     s->sprout_anchor_count);
+    json_push_kv_int(&anchor, "sapling_anchors_imported",
+                     s->sapling_anchor_count);
+    json_push_kv(si, "anchor", &anchor);
+    json_free(&anchor);
+
+    gaps.nullifier = !snapshot_ok || !s->nullifier_found ||
+                     s->nullifier_cursor > 0 || nf_gap_blocker;
+    struct json_value nf;
+    json_init(&nf);
+    json_set_object(&nf);
+    json_push_kv_bool(&nf, "cursor_known", s->nullifier_found);
+    json_push_kv_int(&nf, "activation_cursor", s->nullifier_cursor);
+    json_push_kv_bool(&nf, "gap_blocker_active", nf_gap_blocker);
+    json_push_kv_bool(&nf, "gap", gaps.nullifier);
+    json_push_kv_int(&nf, "sprout_nullifiers_imported",
+                     s->sprout_nullifier_count);
+    json_push_kv_int(&nf, "sapling_nullifiers_imported",
+                     s->sapling_nullifier_count);
+    json_push_kv(si, "nullifier", &nf);
+    json_free(&nf);
+
+    return gaps;
+}
+
+static const char *shielded_import_status(bool snapshot_ok, bool anchor_gap,
+                                          bool nf_gap)
+{
+    const char *status;
+    if (!snapshot_ok)
+        status = "unknown_snapshot_unavailable";
+    else if (anchor_gap)
+        status = "gap_anchor_backfill_pending";
+    else if (nf_gap)
+        status = "gap_nullifier_backfill_pending";
+    else
+        status = "complete";
+    return status;
+}
+
 static void push_shielded_import(struct json_value *out)
 {
     struct json_value si;
@@ -323,62 +444,27 @@ static void push_shielded_import(struct json_value *out)
     sqlite3 *db = progress_store_db();
     json_push_kv_bool(&si, "progress_store_open", db != NULL);
 
-    bool snapshot_ok = false;
-    bool sprout_a_found = false, sapling_a_found = false, nf_found = false;
-    int64_t sprout_a_cursor = -1, sapling_a_cursor = -1, nf_cursor = -1;
-    int64_t sprout_a_count = 0, sapling_a_count = 0;
-    int64_t sprout_nf_count = 0, sapling_nf_count = 0;
-
-    if (db && progress_store_tx_trylock()) {
-        snapshot_ok =
-            anchor_kv_activation_cursor(db, ANCHOR_POOL_SPROUT,
-                                        &sprout_a_cursor, &sprout_a_found) &&
-            anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING,
-                                        &sapling_a_cursor, &sapling_a_found) &&
-            nullifier_kv_activation_cursor(db, &nf_cursor, &nf_found) &&
-            anchor_kv_row_count(db, ANCHOR_POOL_SPROUT, &sprout_a_count) &&
-            anchor_kv_row_count(db, ANCHOR_POOL_SAPLING, &sapling_a_count) &&
-            nullifier_kv_row_count(db, NULLIFIER_POOL_SPROUT,
-                                   &sprout_nf_count) &&
-            nullifier_kv_row_count(db, NULLIFIER_POOL_SAPLING,
-                                   &sapling_nf_count);
-        progress_store_tx_unlock();
-    }
+    struct rcs_shielded_snapshot snap = {
+        .sprout_anchor_found = false,
+        .sapling_anchor_found = false,
+        .nullifier_found = false,
+        .sprout_anchor_cursor = -1,
+        .sapling_anchor_cursor = -1,
+        .nullifier_cursor = -1,
+        .sprout_anchor_count = 0,
+        .sapling_anchor_count = 0,
+        .sprout_nullifier_count = 0,
+        .sapling_nullifier_count = 0,
+    };
+    bool snapshot_ok = read_shielded_import_snapshot(db, &snap);
     json_push_kv_bool(&si, "snapshot_complete", snapshot_ok);
     json_push_kv_str(&si, "snapshot_status",
                      !db ? "progress_store_closed"
                          : snapshot_ok ? "available"
                                        : "progress_store_busy_or_error");
 
-    bool anchor_cursor_known = sprout_a_found && sapling_a_found;
-    bool anchor_gap = !snapshot_ok || !anchor_cursor_known ||
-                      sprout_a_cursor > 0 || sapling_a_cursor > 0 ||
-                      anchor_gap_blocker;
-    struct json_value anchor;
-    json_init(&anchor);
-    json_set_object(&anchor);
-    json_push_kv_bool(&anchor, "cursor_known", anchor_cursor_known);
-    json_push_kv_int(&anchor, "sprout_activation_cursor", sprout_a_cursor);
-    json_push_kv_int(&anchor, "sapling_activation_cursor", sapling_a_cursor);
-    json_push_kv_bool(&anchor, "gap_blocker_active", anchor_gap_blocker);
-    json_push_kv_bool(&anchor, "gap", anchor_gap);
-    json_push_kv_int(&anchor, "sprout_anchors_imported", sprout_a_count);
-    json_push_kv_int(&anchor, "sapling_anchors_imported", sapling_a_count);
-    json_push_kv(&si, "anchor", &anchor);
-    json_free(&anchor);
-
-    bool nf_gap = !snapshot_ok || !nf_found || nf_cursor > 0 || nf_gap_blocker;
-    struct json_value nf;
-    json_init(&nf);
-    json_set_object(&nf);
-    json_push_kv_bool(&nf, "cursor_known", nf_found);
-    json_push_kv_int(&nf, "activation_cursor", nf_cursor);
-    json_push_kv_bool(&nf, "gap_blocker_active", nf_gap_blocker);
-    json_push_kv_bool(&nf, "gap", nf_gap);
-    json_push_kv_int(&nf, "sprout_nullifiers_imported", sprout_nf_count);
-    json_push_kv_int(&nf, "sapling_nullifiers_imported", sapling_nf_count);
-    json_push_kv(&si, "nullifier", &nf);
-    json_free(&nf);
+    struct rcs_shielded_gaps gaps = push_shielded_gap_sections(
+        &si, snapshot_ok, &snap, anchor_gap_blocker, nf_gap_blocker);
 
     /* The SAME live cursor fold.height derives from (both gaps hold shielded
      * spends behind this stage, jobs/utxo_apply_stage.h) — named here too so
@@ -387,16 +473,9 @@ static void push_shielded_import(struct json_value *out)
     json_push_kv_int(&si, "utxo_apply_next_height",
                      (int64_t)utxo_apply_stage_cursor());
 
-    const char *status;
-    if (!snapshot_ok)
-        status = "unknown_snapshot_unavailable";
-    else if (anchor_gap)
-        status = "gap_anchor_backfill_pending";
-    else if (nf_gap)
-        status = "gap_nullifier_backfill_pending";
-    else
-        status = "complete";
-    json_push_kv_str(&si, "status", status);
+    json_push_kv_str(&si, "status",
+                     shielded_import_status(snapshot_ok, gaps.anchor,
+                                            gaps.nullifier));
 
     json_push_kv(out, "shielded_import", &si);
     json_free(&si);
