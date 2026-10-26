@@ -188,6 +188,29 @@ static void debug_bundle_push_subsystems(struct json_value *root,
     json_free(&subs);
 }
 
+/* Document header: format version, the wall-clock capture time (raw and
+ * ISO-8601 UTC) and the trigger identification, with the stall child and
+ * reason pair only when the supervisor observer triggered the capture. */
+static void debug_bundle_push_capture_metadata(struct json_value *root,
+                                               int64_t wall,
+                                               const char *utc_iso,
+                                               const char *trigger,
+                                               const char *trigger_child,
+                                               int trigger_reason)
+{
+    json_push_kv_str(root, "format", "zcl.debug_bundle.v1");
+    json_push_kv_int(root, "captured_at", wall);
+    json_push_kv_str(root, "captured_at_utc", utc_iso);
+    json_push_kv_str(root, "trigger",
+                     trigger && trigger[0] ? trigger : "manual");
+    if (trigger_child && trigger_child[0]) {
+        json_push_kv_str(root, "trigger_child", trigger_child);
+        json_push_kv_str(root, "trigger_stall_reason",
+                         supervisor_stall_reason_name(
+                             (enum supervisor_stall_reason)trigger_reason));
+    }
+}
+
 /* ── The writer (shared by manual RPC + stall auto-capture) ────────── */
 
 static bool debug_bundle_capture_enter(void)
@@ -228,6 +251,70 @@ void debug_bundle_capture_lease_release_for_test(void)
     debug_bundle_capture_leave();
 }
 
+/* A bundle needs a non-empty datadir to land in; anything else fails the
+ * write before any capture work starts. */
+static bool debug_bundle_datadir_valid(const char *datadir)
+{
+    return datadir && datadir[0];
+}
+
+/* Both UTC timestamp strings for one wall-clock reading: the ISO-8601 value
+ * embedded in the document and the filename-safe variant used to name
+ * debug-bundle-<utc>.json. One combined success check — the caller logs
+ * the single "UTC timestamp formatting failed" failure. */
+static bool debug_bundle_format_utc_timestamps(int64_t wall,
+                                               char *utc_iso,
+                                               size_t utc_iso_size,
+                                               char *utc_name,
+                                               size_t utc_name_size)
+{
+    time_t wall_t = (time_t)wall;
+    struct tm tm_utc;
+#ifdef _WIN32
+    bool split_ok = gmtime_s(&tm_utc, &wall_t) == 0;
+#else
+    bool split_ok = gmtime_r(&wall_t, &tm_utc) != NULL;
+#endif
+    return split_ok &&
+           strftime(utc_iso, utc_iso_size,
+                    "%Y-%m-%dT%H:%M:%SZ", &tm_utc) > 0 &&
+           strftime(utc_name, utc_name_size,
+                    "%Y%m%dT%H%M%SZ", &tm_utc) > 0;
+}
+
+/* Result of the exclusive-name scan in debug_bundle_create_exclusive();
+ * the caller maps each failure mode to its own log line. */
+enum debug_bundle_create_status {
+    DEBUG_BUNDLE_CREATE_OK = 0,
+    DEBUG_BUNDLE_CREATE_PATH_ABSENT,
+    DEBUG_BUNDLE_CREATE_NO_FREE_NAME,
+};
+
+/* Create <datadir>/debug-bundle-<utc>.json (O_EXCL; -N suffix on
+ * collision, same convention as self_backtrace's backtrace-<ts>.log). */
+static int debug_bundle_create_exclusive(const char *datadir,
+                                         const char *utc_name,
+                                         struct debug_bundle_result *res,
+                                         struct platform_private_file *file)
+{
+    for (int k = 0; k < 1000; k++) {
+        if (k == 0)
+            snprintf(res->path, sizeof(res->path),
+                     "%s/debug-bundle-%s.json", datadir, utc_name);
+        else
+            snprintf(res->path, sizeof(res->path),
+                     "%s/debug-bundle-%s-%d.json", datadir, utc_name, k);
+        if (platform_private_file_create(res->path, file))
+            return DEBUG_BUNDLE_CREATE_OK;
+        /* A false absent result includes both an existing collision and an
+         * inaccessible path. Continue choosing a fresh exclusive name; if
+         * the parent is inaccessible every candidate fails closed. */
+        if (platform_private_path_absent(res->path))
+            return DEBUG_BUNDLE_CREATE_PATH_ABSENT;
+    }
+    return DEBUG_BUNDLE_CREATE_NO_FREE_NAME;
+}
+
 static bool debug_bundle_write_leased(const char *trigger,
                                       const char *trigger_child,
                                       int trigger_reason,
@@ -238,37 +325,21 @@ static bool debug_bundle_write_leased(const char *trigger,
     memset(res, 0, sizeof(*res));
 
     const char *datadir = diag_datadir();
-    if (!datadir || !datadir[0])
+    if (!debug_bundle_datadir_valid(datadir))
         LOG_FAIL(DBB_SUBSYS, "cannot write debug bundle: datadir not set");
 
     int64_t wall = (int64_t)platform_time_wall_time_t();
-    time_t wall_t = (time_t)wall;
-    struct tm tm_utc;
     char utc_iso[24] = {0};
     char utc_name[24] = {0};
-#ifdef _WIN32
-    if (gmtime_s(&tm_utc, &wall_t) != 0 ||
-#else
-    if (!gmtime_r(&wall_t, &tm_utc) ||
-#endif
-        strftime(utc_iso, sizeof(utc_iso), "%Y-%m-%dT%H:%M:%SZ", &tm_utc) == 0 ||
-        strftime(utc_name, sizeof(utc_name), "%Y%m%dT%H%M%SZ", &tm_utc) == 0)
+    if (!debug_bundle_format_utc_timestamps(wall, utc_iso, sizeof(utc_iso),
+                                            utc_name, sizeof(utc_name)))
         LOG_FAIL(DBB_SUBSYS, "UTC timestamp formatting failed");
 
     struct json_value root;
     json_init(&root);
     json_set_object(&root);
-    json_push_kv_str(&root, "format", "zcl.debug_bundle.v1");
-    json_push_kv_int(&root, "captured_at", wall);
-    json_push_kv_str(&root, "captured_at_utc", utc_iso);
-    json_push_kv_str(&root, "trigger",
-                     trigger && trigger[0] ? trigger : "manual");
-    if (trigger_child && trigger_child[0]) {
-        json_push_kv_str(&root, "trigger_child", trigger_child);
-        json_push_kv_str(&root, "trigger_stall_reason",
-                         supervisor_stall_reason_name(
-                             (enum supervisor_stall_reason)trigger_reason));
-    }
+    debug_bundle_push_capture_metadata(&root, wall, utc_iso, trigger,
+                                       trigger_child, trigger_reason);
     node_binary_identity_push_json(&root, "build", true);
     debug_bundle_push_supervisor_stalls(&root);
     debug_bundle_push_subsystems(&root, res);
@@ -292,32 +363,16 @@ static bool debug_bundle_write_leased(const char *trigger,
                  wrote, need + 1);
     }
 
-    /* Create <datadir>/debug-bundle-<utc>.json (O_EXCL; -N suffix on
-     * collision, same convention as self_backtrace's backtrace-<ts>.log). */
     struct platform_private_file file;
     platform_private_file_init(&file);
-    bool created = false;
-    for (int k = 0; k < 1000; k++) {
-        if (k == 0)
-            snprintf(res->path, sizeof(res->path),
-                     "%s/debug-bundle-%s.json", datadir, utc_name);
-        else
-            snprintf(res->path, sizeof(res->path),
-                     "%s/debug-bundle-%s-%d.json", datadir, utc_name, k);
-        if (platform_private_file_create(res->path, &file)) {
-            created = true;
-            break;
-        }
-        /* A false absent result includes both an existing collision and an
-         * inaccessible path. Continue choosing a fresh exclusive name; if
-         * the parent is inaccessible every candidate fails closed. */
-        if (platform_private_path_absent(res->path)) {
-            free(buf);
-            LOG_FAIL(DBB_SUBSYS, "creating private bundle %s failed",
-                     res->path);
-        }
+    int created = debug_bundle_create_exclusive(datadir, utc_name,
+                                                res, &file);
+    if (created == DEBUG_BUNDLE_CREATE_PATH_ABSENT) {
+        free(buf);
+        LOG_FAIL(DBB_SUBSYS, "creating private bundle %s failed",
+                 res->path);
     }
-    if (!created) {
+    if (created != DEBUG_BUNDLE_CREATE_OK) {
         free(buf);
         LOG_FAIL(DBB_SUBSYS, "no free debug-bundle filename under %s",
                  datadir);
