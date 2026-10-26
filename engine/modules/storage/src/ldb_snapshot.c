@@ -134,6 +134,59 @@ static bool name_is_ldb(const char *name)
     size_t n = strlen(name);
     return n >= 4 && strcmp(name + n - 4, ".ldb") == 0;
 }
+
+/* True when `path` does not exist or is not a directory. */
+static bool src_dir_missing(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) != 0 || !S_ISDIR(st.st_mode);
+}
+
+/* Create the snapshot destination directory, tolerating one that
+ * already exists. Returns 0 on success, -1 on failure (errno set). */
+static int ensure_dst_dir(const char *dst_dir)
+{
+    if (mkdir(dst_dir, 0700) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
+/* Copy every entry of the open directory `d` from `src_dir` into
+ * `dst_dir`: hardlink-or-copy *.ldb files, byte-copy known metadata
+ * names, skip the rest. Returns 0 on success, 1 when link_or_copy
+ * failed, 2 when copy_file failed; on failure the error message has
+ * already been written with set_err and the caller logs. */
+static int copy_dir_entries(DIR *d, const char *src_dir, const char *dst_dir,
+                            char *err, size_t err_sz)
+{
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0) continue;
+        if (strcmp(de->d_name, "..") == 0) continue;
+        if (strcmp(de->d_name, "LOCK") == 0) continue;
+
+        char src_p[2048], dst_p[2048];
+        snprintf(src_p, sizeof(src_p), "%s/%s", src_dir, de->d_name);
+        snprintf(dst_p, sizeof(dst_p), "%s/%s", dst_dir, de->d_name);
+
+        char sub_err[256] = {0};
+        if (name_is_ldb(de->d_name)) {
+            if (!link_or_copy(src_p, dst_p, sub_err, sizeof(sub_err))) {
+                set_err(err, err_sz, "link_or_copy(%s): %s",
+                        de->d_name, sub_err);
+                return 1;
+            }
+        } else if (is_metadata_name(de->d_name)) {
+            if (!copy_file(src_p, dst_p, sub_err, sizeof(sub_err))) {
+                set_err(err, err_sz, "copy(%s): %s",
+                        de->d_name, sub_err);
+                return 2;
+            }
+        }
+        /* Unknown files (extensions we don't recognize): skip
+         * silently. LevelDB doesn't need them. */
+    }
+    return 0;
+}
 #endif
 
 void ldb_snapshot_destroy(const char *dst_dir)
@@ -177,8 +230,7 @@ bool ldb_snapshot_make(const char *src_dir,
     return false;
 #else
     /* Verify src exists. */
-    struct stat st;
-    if (stat(src_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+    if (src_dir_missing(src_dir)) {
         set_err(err_msg, err_sz,
                 "src missing: %s", src_dir);
         LOG_FAIL("ldb_snapshot", "src missing");
@@ -188,7 +240,7 @@ bool ldb_snapshot_make(const char *src_dir,
     /* Wipe stale dst. */
     ldb_snapshot_destroy(dst_dir);
 
-    if (mkdir(dst_dir, 0700) != 0 && errno != EEXIST) {
+    if (ensure_dst_dir(dst_dir) != 0) {
         set_err(err_msg, err_sz,
                 "mkdir(%s): %s", dst_dir, strerror(errno));
         LOG_FAIL("ldb_snapshot", "mkdir");
@@ -216,44 +268,20 @@ bool ldb_snapshot_make(const char *src_dir,
         return false;
     }
 
-    bool ok = true;
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        if (strcmp(de->d_name, ".") == 0) continue;
-        if (strcmp(de->d_name, "..") == 0) continue;
-        if (strcmp(de->d_name, "LOCK") == 0) continue;
-
-        char src_p[2048], dst_p[2048];
-        snprintf(src_p, sizeof(src_p), "%s/%s", src_dir, de->d_name);
-        snprintf(dst_p, sizeof(dst_p), "%s/%s", dst_dir, de->d_name);
-
-        char sub_err[256] = {0};
-        if (name_is_ldb(de->d_name)) {
-            if (!link_or_copy(src_p, dst_p, sub_err, sizeof(sub_err))) {
-                set_err(err_msg, err_sz, "link_or_copy(%s): %s",
-                        de->d_name, sub_err);
-                LOG_FAIL("ldb_snapshot", "link_or_copy");
-                ok = false;
-                break;
-            }
-        } else if (is_metadata_name(de->d_name)) {
-            if (!copy_file(src_p, dst_p, sub_err, sizeof(sub_err))) {
-                set_err(err_msg, err_sz, "copy(%s): %s",
-                        de->d_name, sub_err);
-                LOG_FAIL("ldb_snapshot", "copy");
-                ok = false;
-                break;
-            }
-        }
-        /* Unknown files (extensions we don't recognize): skip
-         * silently. LevelDB doesn't need them. */
-    }
-    closedir(d);
-
-    if (!ok) {
+    int cpy = copy_dir_entries(d, src_dir, dst_dir, err_msg, err_sz);
+    if (cpy == 1) {
+        LOG_FAIL("ldb_snapshot", "link_or_copy");
+        closedir(d);
         ldb_snapshot_destroy(dst_dir);
         return false;
     }
+    if (cpy == 2) {
+        LOG_FAIL("ldb_snapshot", "copy");
+        closedir(d);
+        ldb_snapshot_destroy(dst_dir);
+        return false;
+    }
+    closedir(d);
 
     /* Race detection: re-read CURRENT in src. If MANIFEST rotated
      * mid-copy, our MANIFEST file may now be stale. */

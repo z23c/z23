@@ -1308,7 +1308,6 @@ engine/modules/storage/src/event_log.c:event_log_stream:19
 engine/modules/storage/src/ldb_reader_version.c:apply_edit:34
 engine/modules/storage/src/ldb_reader_version.c:ldb_memtable_load:16
 engine/modules/storage/src/ldb_reader_version.c:ldb_version_load:19
-engine/modules/storage/src/ldb_snapshot.c:ldb_snapshot_make:20
 engine/modules/storage/src/nullifier_kv.c:marker_read_i64:18
 engine/modules/storage/src/nullifier_kv.c:nullifier_kv_initialize_history:19
 engine/modules/storage/src/nullifier_kv.c:shielded_history_begin_full_replay:21
