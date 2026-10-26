@@ -56,6 +56,121 @@ static void znin_merge(struct json_value *dst, const struct json_value *src)
     }
 }
 
+static bool znin_validate_inputs(struct zcl_command_reply *reply,
+                                 const struct json_value *input,
+                                 const char *path, const char *scope,
+                                 const char *plan_id, bool confirm,
+                                 bool operation_inputs_present)
+{
+    if (!scope || (strcmp(scope, "dev") != 0 && strcmp(scope, "prod") != 0)) {
+        znin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                  "WALLET_SCOPE_REQUIRED", "normalize",
+                  "wallet_scope must explicitly be dev or prod", path);
+        return false;
+    }
+    bool has_idempotency =
+        json_get_str(json_get(input, "idempotency_key")) != NULL;
+    if ((confirm && (!plan_id || strlen(plan_id) != 64)) ||
+        (!confirm && (!has_idempotency || !operation_inputs_present))) {
+        znin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                  "MISSING_INPUT", "normalize",
+                  confirm
+                    ? "commit requires wallet_scope, 64-hex plan_id, and confirm:true"
+                    : "plan requires wallet_scope, operation fields, and idempotency_key",
+                  path);
+        return false;
+    }
+    return true;
+}
+
+static char *znin_encode_forwarded(const struct json_value *input,
+                                   const char *operation, bool confirm)
+{
+    struct json_value forwarded;
+    json_init(&forwarded); json_set_object(&forwarded);
+    for (size_t i = 0; i < input->num_children; i++) {
+        const char *key = input->keys ? input->keys[i] : NULL;
+        if (key && key[0])
+            (void)json_push_kv(&forwarded, key, &input->children[i]);
+    }
+    if (!confirm) (void)json_push_kv_str(&forwarded, "operation", operation);
+    struct rpc_arg_builder args;
+    rpc_arg_builder_init(&args);
+    rpc_arg_builder_push_value(&args, &forwarded);
+    json_free(&forwarded);
+    return rpc_arg_builder_to_json(&args);
+}
+
+static void znin_apply_plan_stage(struct json_value *data, const char *scope,
+                                  const char *durable)
+{
+    struct json_value commit;
+    json_init(&commit); json_set_object(&commit);
+    (void)json_push_kv_str(&commit, "wallet_scope", scope);
+    (void)json_push_kv_str(&commit, "plan_id", durable ? durable : "");
+    (void)json_push_kv_bool(&commit, "confirm", true);
+    char encoded[256];
+    size_t wrote = json_write(&commit, encoded, sizeof(encoded));
+    json_free(&commit);
+    if (wrote == 0 || wrote >= sizeof(encoded))
+        snprintf(encoded, sizeof(encoded), "{\"confirm\":true}");
+    (void)json_push_kv_str(data, "stage", "plan");
+    (void)json_push_kv_bool(data, "committed", false);
+    (void)json_push_kv_str(data, "commit_input", encoded);
+}
+
+static void znin_stage_outcome(struct zcl_command_reply *reply,
+                               const struct json_value *body, const char *scope,
+                               bool confirm)
+{
+    if (!confirm) {
+        const char *durable = json_get_str(json_get(body, "plan_id"));
+        znin_apply_plan_stage(&reply->data, scope, durable);
+    } else {
+        (void)json_push_kv_str(&reply->data, "stage", "committed");
+        (void)json_push_kv_bool(&reply->data, "committed", true);
+    }
+}
+
+static bool znin_check_response(struct json_value *body,
+                                struct zcl_command_reply *reply, bool confirm)
+{
+    const char *error = NULL;
+    if (znin_rpc_error(body, &error) || body->type != JSON_OBJ) {
+        char message[256];
+        snprintf(message, sizeof(message), "%s",
+                 error && error[0] ? error : "znam_intent reported an error");
+        json_free(body);
+        znin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                  "ZNAM_INTENT_REFUSED", "execute", message, "znam_intent");
+        return false;
+    }
+    const char *status = json_get_str(json_get(body, "status"));
+    const char *expected = confirm ? "broadcast" : "planned";
+    if (!status || strcmp(status, expected) != 0) {
+        char message[192];
+        snprintf(message, sizeof(message),
+                 "ZNAM intent expected %s, got %s", expected,
+                 status && status[0] ? status : "absent");
+        json_free(body);
+        znin_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                  "ZNAM_INTENT_INCOMPLETE", "execute", message,
+                  "znam_intent");
+        return false;
+    }
+    return true;
+}
+
+static void znin_finalize_success(struct zcl_command_reply *reply,
+                                  struct json_value *body, const char *scope,
+                                  bool confirm)
+{
+    znin_merge(&reply->data, body);
+    znin_stage_outcome(reply, body, scope, confirm);
+    json_free(body);
+    reply->error.mutated = true; /* plan atomically reserves custody */
+}
+
 static void znin_run(const struct zcl_command_request *request,
                      struct zcl_command_reply *reply, const char *operation,
                      bool operation_inputs_present)
@@ -65,37 +180,10 @@ static void znin_run(const struct zcl_command_request *request,
     const char *scope = json_get_str(json_get(request->input, "wallet_scope"));
     bool confirm = json_get_bool_or(request->input, "confirm", false);
     const char *plan_id = json_get_str(json_get(request->input, "plan_id"));
-    if (!scope || (strcmp(scope, "dev") != 0 && strcmp(scope, "prod") != 0)) {
-        znin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                  "WALLET_SCOPE_REQUIRED", "normalize",
-                  "wallet_scope must explicitly be dev or prod", path);
+    if (!znin_validate_inputs(reply, request->input, path, scope, plan_id,
+                              confirm, operation_inputs_present))
         return;
-    }
-    bool has_idempotency =
-        json_get_str(json_get(request->input, "idempotency_key")) != NULL;
-    if ((confirm && (!plan_id || strlen(plan_id) != 64)) ||
-        (!confirm && (!has_idempotency || !operation_inputs_present))) {
-        znin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                  "MISSING_INPUT", "normalize",
-                  confirm
-                    ? "commit requires wallet_scope, 64-hex plan_id, and confirm:true"
-                    : "plan requires wallet_scope, operation fields, and idempotency_key",
-                  path);
-        return;
-    }
-    struct json_value forwarded;
-    json_init(&forwarded); json_set_object(&forwarded);
-    for (size_t i = 0; i < request->input->num_children; i++) {
-        const char *key = request->input->keys ? request->input->keys[i] : NULL;
-        if (key && key[0])
-            (void)json_push_kv(&forwarded, key, &request->input->children[i]);
-    }
-    if (!confirm) (void)json_push_kv_str(&forwarded, "operation", operation);
-    struct rpc_arg_builder args;
-    rpc_arg_builder_init(&args);
-    rpc_arg_builder_push_value(&args, &forwarded);
-    json_free(&forwarded);
-    char *params = rpc_arg_builder_to_json(&args);
+    char *params = znin_encode_forwarded(request->input, operation, confirm);
     if (!params) {
         znin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
                   "ARG_BUILD_FAILED", "normalize",
@@ -121,51 +209,8 @@ static void znin_run(const struct zcl_command_request *request,
                   "znam_intent returned an unparseable body", "znam_intent");
         return;
     }
-    const char *error = NULL;
-    if (znin_rpc_error(&body, &error) || body.type != JSON_OBJ) {
-        char message[256];
-        snprintf(message, sizeof(message), "%s",
-                 error && error[0] ? error : "znam_intent reported an error");
-        json_free(&body);
-        znin_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                  "ZNAM_INTENT_REFUSED", "execute", message, "znam_intent");
-        return;
-    }
-    const char *status = json_get_str(json_get(&body, "status"));
-    const char *expected = confirm ? "broadcast" : "planned";
-    if (!status || strcmp(status, expected) != 0) {
-        char message[192];
-        snprintf(message, sizeof(message),
-                 "ZNAM intent expected %s, got %s", expected,
-                 status && status[0] ? status : "absent");
-        json_free(&body);
-        znin_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                  "ZNAM_INTENT_INCOMPLETE", "execute", message,
-                  "znam_intent");
-        return;
-    }
-    znin_merge(&reply->data, &body);
-    if (!confirm) {
-        const char *durable = json_get_str(json_get(&body, "plan_id"));
-        struct json_value commit;
-        json_init(&commit); json_set_object(&commit);
-        (void)json_push_kv_str(&commit, "wallet_scope", scope);
-        (void)json_push_kv_str(&commit, "plan_id", durable ? durable : "");
-        (void)json_push_kv_bool(&commit, "confirm", true);
-        char encoded[256];
-        size_t wrote = json_write(&commit, encoded, sizeof(encoded));
-        json_free(&commit);
-        if (wrote == 0 || wrote >= sizeof(encoded))
-            snprintf(encoded, sizeof(encoded), "{\"confirm\":true}");
-        (void)json_push_kv_str(&reply->data, "stage", "plan");
-        (void)json_push_kv_bool(&reply->data, "committed", false);
-        (void)json_push_kv_str(&reply->data, "commit_input", encoded);
-    } else {
-        (void)json_push_kv_str(&reply->data, "stage", "committed");
-        (void)json_push_kv_bool(&reply->data, "committed", true);
-    }
-    json_free(&body);
-    reply->error.mutated = true; /* plan atomically reserves custody */
+    if (!znin_check_response(&body, reply, confirm)) return;
+    znin_finalize_success(reply, &body, scope, confirm);
 }
 
 void zcl_native_handle_name_register(
