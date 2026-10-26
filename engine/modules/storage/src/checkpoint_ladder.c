@@ -91,6 +91,157 @@ ladder_bind_baked(const struct checkpoint_rung *r,
     return CHECKPOINT_RUNG_MISMATCH;
 }
 
+/* The most recently accepted (non-MISMATCH) rung, carried rung-to-rung to
+ * enforce strictly ascending heights and non-decreasing chainwork. */
+struct ladder_prev_state {
+    bool have;
+    int32_t height;
+    uint8_t chainwork[32];
+};
+
+/* Static per-rung guards: self-consistency, then (against the prior accepted
+ * rung) strictly ascending heights and non-decreasing chainwork. Returns
+ * CHECKPOINT_RUNG_MISMATCH with res->detail filled on the first violation;
+ * otherwise CHECKPOINT_RUNG_UNVERIFIABLE — these guards carry no positive
+ * witness, so the caller's verdict is unchanged. */
+static enum checkpoint_rung_verdict
+ladder_check_rung_invariants(const struct checkpoint_rung *r,
+                             struct checkpoint_ladder_result *res,
+                             const struct ladder_prev_state *prev)
+{
+    if (!checkpoint_rung_self_consistent(r)) {
+        snprintf(res->detail, sizeof(res->detail),
+                 "self-inconsistent: rom_state_root/self_digest do not "
+                 "recompute from fields");
+        return CHECKPOINT_RUNG_MISMATCH;
+    }
+
+    if (prev->have) {
+        if (r->height <= prev->height) {
+            snprintf(res->detail, sizeof(res->detail),
+                     "height %d not strictly greater than prior rung %d",
+                     r->height, prev->height);
+            return CHECKPOINT_RUNG_MISMATCH;
+        }
+        if (memcmp(r->chainwork, prev->chainwork, 32) < 0) {
+            snprintf(res->detail, sizeof(res->detail),
+                     "chainwork decreases vs prior rung at height %d",
+                     prev->height);
+            return CHECKPOINT_RUNG_MISMATCH;
+        }
+    }
+    return CHECKPOINT_RUNG_UNVERIFIABLE;
+}
+
+/* Node-held witnesses for one rung, in order: the header chain's block hash
+ * at the rung's height, then the node's own re-derived state root. A match
+ * with either sets *positive_witness; a conflict with either returns
+ * CHECKPOINT_RUNG_MISMATCH with res->detail filled; an absent hook or a
+ * height the node cannot serve gives no witness. */
+static enum checkpoint_rung_verdict
+ladder_check_node_witnesses(const struct checkpoint_ladder_hooks *hooks,
+                            const struct checkpoint_rung *r,
+                            struct checkpoint_ladder_result *res,
+                            bool *positive_witness)
+{
+    /* Header-chain binding. */
+    if (hooks && hooks->block_hash_at) {
+        uint8_t hh[32];
+        if (hooks->block_hash_at(hooks->ctx, r->height, hh)) {
+            if (memcmp(hh, r->block_hash, 32) == 0) {
+                *positive_witness = true;
+            } else {
+                snprintf(res->detail, sizeof(res->detail),
+                         "block hash does not match the header chain at "
+                         "height %d",
+                         r->height);
+                return CHECKPOINT_RUNG_MISMATCH;
+            }
+        }
+    }
+
+    /* Root re-derivation where the node holds the state. */
+    if (hooks && hooks->rederive_at) {
+        struct checkpoint_rung d;
+        if (hooks->rederive_at(hooks->ctx, r->height, &d)) {
+            uint8_t droot[32];
+            checkpoint_rung_compute_rom_state_root(&d, droot);
+            if (memcmp(droot, r->rom_state_root, 32) == 0) {
+                *positive_witness = true;
+            } else {
+                snprintf(res->detail, sizeof(res->detail),
+                         "node-rederived roots differ from the rung at "
+                         "height %d",
+                         r->height);
+                return CHECKPOINT_RUNG_MISMATCH;
+            }
+        }
+    }
+    return CHECKPOINT_RUNG_UNVERIFIABLE;
+}
+
+/* Verify a single rung into *res (verdict/detail/bound filled) and record
+ * the outcome: a MISMATCH flags *any_mismatch and leaves *prev untouched;
+ * any other verdict advances *prev for the next rung's guards. One
+ * iteration of checkpoint_ladder_verify's loop, unchanged. */
+static void ladder_verify_rung(const struct checkpoint_rung *r,
+                               struct checkpoint_ladder_result *res,
+                               const struct checkpoint_ladder_hooks *hooks,
+                               struct ladder_prev_state *prev,
+                               bool *any_mismatch)
+{
+    memset(res, 0, sizeof(*res));
+    res->height = r->height;
+    res->candidate_unbaked = true;
+    enum checkpoint_rung_verdict verdict = CHECKPOINT_RUNG_UNVERIFIABLE;
+    bool positive_witness = false;
+
+    if (ladder_check_rung_invariants(r, res, prev) ==
+        CHECKPOINT_RUNG_MISMATCH) {
+        verdict = CHECKPOINT_RUNG_MISMATCH;
+        goto record;
+    }
+
+    /* Baked binding (see ladder_bind_baked). */
+    if (ladder_bind_baked(r, res) == CHECKPOINT_RUNG_MISMATCH) {
+        verdict = CHECKPOINT_RUNG_MISMATCH;
+        goto record;
+    }
+    if (res->bound)
+        verdict = CHECKPOINT_RUNG_VERIFIED;
+
+    if (ladder_check_node_witnesses(hooks, r, res, &positive_witness) ==
+        CHECKPOINT_RUNG_MISMATCH) {
+        verdict = CHECKPOINT_RUNG_MISMATCH;
+        goto record;
+    }
+
+    if (verdict != CHECKPOINT_RUNG_MISMATCH && !res->bound) {
+        if (positive_witness) {
+            verdict = CHECKPOINT_RUNG_VERIFIED;
+            snprintf(res->detail, sizeof(res->detail),
+                     "self-consistent; verified against node state "
+                     "(candidate_unbaked, not a trust root)");
+        } else {
+            verdict = CHECKPOINT_RUNG_UNVERIFIABLE;
+            snprintf(res->detail, sizeof(res->detail),
+                     "self-consistent; no header/rederive/baked witness "
+                     "(candidate_unbaked)");
+        }
+    }
+
+record:
+    res->verdict = verdict;
+    if (verdict == CHECKPOINT_RUNG_MISMATCH) {
+        if (any_mismatch)
+            *any_mismatch = true;
+    } else {
+        prev->have = true;
+        prev->height = r->height;
+        memcpy(prev->chainwork, r->chainwork, 32);
+    }
+}
+
 size_t checkpoint_ladder_verify(const struct checkpoint_rung *rungs, size_t n,
                                 const struct checkpoint_ladder_hooks *hooks,
                                 struct checkpoint_ladder_result *out,
@@ -101,113 +252,12 @@ size_t checkpoint_ladder_verify(const struct checkpoint_rung *rungs, size_t n,
     if (!rungs || !out)
         return 0; // raw-return-ok:pure-verifier-null-guard-no-side-effects
 
-    bool have_prev = false;
-    int32_t prev_height = 0;
-    uint8_t prev_chainwork[32] = {0};
+    struct ladder_prev_state prev = {0};
 
     size_t written = 0;
     for (size_t i = 0; i < n && written < out_cap; i++) {
-        const struct checkpoint_rung *r = &rungs[i];
-        struct checkpoint_ladder_result *res = &out[written];
-        memset(res, 0, sizeof(*res));
-        res->height = r->height;
-        res->candidate_unbaked = true;
-        enum checkpoint_rung_verdict verdict = CHECKPOINT_RUNG_UNVERIFIABLE;
-        bool positive_witness = false;
-
-        if (!checkpoint_rung_self_consistent(r)) {
-            verdict = CHECKPOINT_RUNG_MISMATCH;
-            snprintf(res->detail, sizeof(res->detail),
-                     "self-inconsistent: rom_state_root/self_digest do not "
-                     "recompute from fields");
-            goto record;
-        }
-
-        if (have_prev) {
-            if (r->height <= prev_height) {
-                verdict = CHECKPOINT_RUNG_MISMATCH;
-                snprintf(res->detail, sizeof(res->detail),
-                         "height %d not strictly greater than prior rung %d",
-                         r->height, prev_height);
-                goto record;
-            }
-            if (memcmp(r->chainwork, prev_chainwork, 32) < 0) {
-                verdict = CHECKPOINT_RUNG_MISMATCH;
-                snprintf(res->detail, sizeof(res->detail),
-                         "chainwork decreases vs prior rung at height %d",
-                         prev_height);
-                goto record;
-            }
-        }
-
-        /* Baked binding (see ladder_bind_baked). */
-        if (ladder_bind_baked(r, res) == CHECKPOINT_RUNG_MISMATCH) {
-            verdict = CHECKPOINT_RUNG_MISMATCH;
-            goto record;
-        }
-        if (res->bound)
-            verdict = CHECKPOINT_RUNG_VERIFIED;
-
-        /* Header-chain binding. */
-        if (hooks && hooks->block_hash_at) {
-            uint8_t hh[32];
-            if (hooks->block_hash_at(hooks->ctx, r->height, hh)) {
-                if (memcmp(hh, r->block_hash, 32) == 0) {
-                    positive_witness = true;
-                } else {
-                    verdict = CHECKPOINT_RUNG_MISMATCH;
-                    snprintf(res->detail, sizeof(res->detail),
-                             "block hash does not match the header chain at "
-                             "height %d",
-                             r->height);
-                    goto record;
-                }
-            }
-        }
-
-        /* Root re-derivation where the node holds the state. */
-        if (hooks && hooks->rederive_at) {
-            struct checkpoint_rung d;
-            if (hooks->rederive_at(hooks->ctx, r->height, &d)) {
-                uint8_t droot[32];
-                checkpoint_rung_compute_rom_state_root(&d, droot);
-                if (memcmp(droot, r->rom_state_root, 32) == 0) {
-                    positive_witness = true;
-                } else {
-                    verdict = CHECKPOINT_RUNG_MISMATCH;
-                    snprintf(res->detail, sizeof(res->detail),
-                             "node-rederived roots differ from the rung at "
-                             "height %d",
-                             r->height);
-                    goto record;
-                }
-            }
-        }
-
-        if (verdict != CHECKPOINT_RUNG_MISMATCH && !res->bound) {
-            if (positive_witness) {
-                verdict = CHECKPOINT_RUNG_VERIFIED;
-                snprintf(res->detail, sizeof(res->detail),
-                         "self-consistent; verified against node state "
-                         "(candidate_unbaked, not a trust root)");
-            } else {
-                verdict = CHECKPOINT_RUNG_UNVERIFIABLE;
-                snprintf(res->detail, sizeof(res->detail),
-                         "self-consistent; no header/rederive/baked witness "
-                         "(candidate_unbaked)");
-            }
-        }
-
-    record:
-        res->verdict = verdict;
-        if (verdict == CHECKPOINT_RUNG_MISMATCH) {
-            if (any_mismatch)
-                *any_mismatch = true;
-        } else {
-            have_prev = true;
-            prev_height = r->height;
-            memcpy(prev_chainwork, r->chainwork, 32);
-        }
+        ladder_verify_rung(&rungs[i], &out[written], hooks, &prev,
+                           any_mismatch);
         written++;
     }
     return written;
