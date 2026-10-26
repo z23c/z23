@@ -8,6 +8,9 @@
 #include <stdio.h>
 #include <limits.h>
 #include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <time.h>
 
 static int failures = 0;
 
@@ -310,7 +313,10 @@ static void test_required_field_separators(void) {
   expect_parse_ok(" 0, 30 0 * jan mon ");
 }
 
+static void test_cli(void);
+
 int main(void) {
+  test_cli();
   expect_next("* * * * *", LLONG_MAX, -1);
     test_required_field_separators();
     test_sunday_range_alias();
@@ -330,3 +336,169 @@ int main(void) {
   puts("zcron: all tests passed");
   return 0;
 }
+
+#if !defined(_WIN32)
+static FILE *cli_sink;
+static size_t cli_flushes, cli_calendar_calls, cli_calendar_fault, cli_format_calls, cli_format_fault;
+static bool cli_clock_failure;
+static FILE *real_stdout(void) { return stdout; }
+static time_t cli_clock(time_t *out) {
+  time_t value = cli_clock_failure ? (time_t)-1 : (time_t)0;
+  if (out) *out = value;
+  return value;
+}
+static struct tm *cli_calendar(const time_t *value, struct tm *out) {
+  if (++cli_calendar_calls == cli_calendar_fault) return NULL;
+  return gmtime_r(value, out);
+}
+static size_t cli_format(char *out, size_t cap, const char *format, const struct tm *tmv) {
+  if (++cli_format_calls == cli_format_fault) return 0;
+  return strftime(out, cap, format, tmv);
+}
+[[maybe_unused]] static int cli_flush(FILE *stream) {
+  if (stream == cli_sink) cli_flushes++;
+  return fflush(stream);
+}
+#undef stdout
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define puts(text) fprintf(cli_sink, "%s\n", (text))
+#define fflush cli_flush
+#define time cli_clock
+#define gmtime_r cli_calendar
+#define strftime cli_format
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef strftime
+#undef gmtime_r
+#undef time
+#undef fflush
+#undef puts
+#undef printf
+#undef stdout
+#define stdout real_stdout()
+
+static FILE *required_stream(FILE *stream) {
+  if (!stream) { fprintf(stderr, "zcron CLI fixture setup failed\n"); exit(2); }
+  return stream;
+}
+static int cli_invoke(FILE *sink, int argc, char **args) {
+  cli_sink = sink;
+  cli_flushes = cli_calendar_calls = cli_format_calls = 0;
+  errno = ERANGE;
+  int rc = embedded_cli_main(argc, args);
+  cli_sink = stdout;
+  return rc;
+}
+static void cli_case(int argc, char **args, int status, const char *want) {
+  FILE *sink = required_stream(tmpfile());
+  CHECK(cli_invoke(sink, argc, args) == status);
+  if (!*want) CHECK(cli_flushes == 0);
+  else CHECK(cli_flushes == 1);
+  char bytes[512];
+  rewind(sink);
+  size_t n = fread(bytes, 1, sizeof bytes, sink);
+  CHECK(!ferror(sink) && n == strlen(want) && !memcmp(bytes, want, n));
+  CHECK(fclose(sink) == 0);
+}
+static void cli_numeric(void) {
+  char epoch_overflow[64], epoch_underflow[64], count_overflow[64], count_underflow[64];
+  snprintf(epoch_overflow, sizeof epoch_overflow, "%lld0", LLONG_MAX);
+  snprintf(epoch_underflow, sizeof epoch_underflow, "%lld0", LLONG_MIN);
+  snprintf(count_overflow, sizeof count_overflow, "%d0", INT_MAX);
+  snprintf(count_underflow, sizeof count_underflow, "%d0", INT_MIN);
+  const char *bad_epoch[] = {"", " ", "junk", "1junk", "1 ", epoch_overflow, epoch_underflow};
+  for (size_t i = 0; i < sizeof bad_epoch / sizeof bad_epoch[0]; i++) {
+    char *args[] = {"zcron", "* * * * *", (char *)bad_epoch[i], "1", NULL};
+    cli_case(4, args, 2, "");
+  }
+  const char *bad_count[] = {"", " ", "junk", "1junk", "1 ", count_overflow, count_underflow, "4294967297"};
+  for (size_t i = 0; i < sizeof bad_count / sizeof bad_count[0]; i++) {
+    /* A negative epoch makes even the unchecked old positive count stop
+     * at its first 'never', keeping the red fixture bounded. */
+    char *args[] = {"zcron", "* * * * *", "-1", (char *)bad_count[i], NULL};
+    cli_case(4, args, 2, "");
+  }
+  char maximum[64], minimum[64];
+  snprintf(maximum, sizeof maximum, "%lld", LLONG_MAX);
+  snprintf(minimum, sizeof minimum, "%lld", LLONG_MIN);
+  char *max_epoch[] = {"zcron", "* * * * *", maximum, "1", NULL};
+  char *min_epoch[] = {"zcron", "* * * * *", minimum, "1", NULL};
+  cli_case(4, max_epoch, 0, "never (within 8 years)\n");
+  cli_case(4, min_epoch, 0, "never (within 8 years)\n");
+  const char *counts[] = {"0", "-0", "-1"};
+  for (size_t i = 0; i < sizeof counts / sizeof counts[0]; i++) {
+    char *args[] = {"zcron", "* * * * *", "0", (char *)counts[i], NULL};
+    cli_case(4, args, 0, "");
+  }
+}
+static void cli_normal(void) {
+  char *args[] = {"zcron", "* * * * *", " \t+0", "+2", "ignored", NULL};
+  cli_case(5, args, 0, "60  1970-01-01 00:01 UTC\n120  1970-01-01 00:02 UTC\n");
+  char *zero[] = {"zcron", "* * * * *", "-0", "1", NULL};
+  cli_case(4, zero, 0, "60  1970-01-01 00:01 UTC\n");
+  char *defaults[] = {"zcron", "* * * * *", NULL};
+  cli_case(2, defaults, 0, "60  1970-01-01 00:01 UTC\n120  1970-01-01 00:02 UTC\n180  1970-01-01 00:03 UTC\n240  1970-01-01 00:04 UTC\n300  1970-01-01 00:05 UTC\n");
+  char *never[] = {"zcron", "0 0 31 2 *", "0", "1", NULL};
+  cli_case(4, never, 0, "never (within 8 years)\n");
+  cli_clock_failure = true;
+  cli_case(2, defaults, 1, "");
+  cli_clock_failure = false;
+  char *invalid[] = {"zcron", "invalid", "junk", "junk", NULL};
+  cli_case(4, invalid, 1, "");
+  char *usage[] = {"zcron", NULL};
+  cli_case(1, usage, 2, "");
+}
+static void cli_failed_sink(bool never, bool buffered) {
+#ifdef _WIN32
+  const char *null_path = "NUL";
+#else
+  const char *null_path = "/dev/null";
+#endif
+  FILE *sink = required_stream(fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r"));
+  char buffer[4096];
+  if (buffered && setvbuf(sink, buffer, _IOFBF, sizeof buffer) != 0) exit(2);
+  char *args[] = {"zcron", never ? "0 0 31 2 *" : "* * * * *", "0", "1", NULL};
+  CHECK(cli_invoke(sink, 4, args) == 1 && ferror(sink));
+  (void)fclose(sink);
+}
+static void cli_calendar_errors(void) {
+  char *args[] = {"zcron", "* * * * *", "0", "2", NULL};
+  cli_calendar_fault = 1;
+  cli_case(4, args, 1, "");
+  cli_calendar_fault = 2;
+  cli_case(4, args, 1, "60  1970-01-01 00:01 UTC\n");
+  cli_calendar_fault = 0;
+  cli_format_fault = 1;
+  cli_case(4, args, 1, "");
+  cli_format_fault = 2;
+  cli_case(4, args, 1, "60  1970-01-01 00:01 UTC\n");
+  cli_format_fault = 0;
+  char *range[] = {"zcron", "* * * * *", "9223372036854770000", "1", NULL};
+  cli_case(4, range, 1, "");
+  int count = 0;
+  char maximum[64], minimum[64];
+  snprintf(maximum, sizeof maximum, "%d", INT_MAX);
+  snprintf(minimum, sizeof minimum, "%d", INT_MIN);
+  errno = ERANGE;
+  CHECK(parse_count(maximum, &count) == 0 && count == INT_MAX && errno != ERANGE);
+  CHECK(parse_count(minimum, &count) == 0 && count == INT_MIN);
+}
+
+static void test_cli(void) {
+  cli_numeric();
+  cli_normal();
+  cli_calendar_errors();
+  cli_failed_sink(false, false);
+  cli_failed_sink(true, false);
+#ifdef __linux__
+  cli_failed_sink(false, true);
+  cli_failed_sink(true, true);
+#endif
+}
+#else
+static void test_cli(void) {
+  fprintf(stderr, "UNOBSERVED (zcron CLI calendar coverage requires gmtime_r on _WIN32)\n");
+}
+#endif
