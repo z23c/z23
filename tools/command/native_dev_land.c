@@ -8936,8 +8936,13 @@ static void dl_step_proof_unclaimed(const char *detail, struct zcl_command_reply
  * checkout — which a running proof may be reading — are never touched:
  * merge-tree and commit-tree only add objects, and a multi-commit replay
  * leaves its intermediate commits unreferenced for git's own garbage
- * collection. The in-flight row is never rewritten by this check and no
- * queued row is reordered. */
+ * collection. Every git spawn runs with its working directory in a scratch
+ * directory under the land state dir (precheck-cwd) and --git-dir at the
+ * landing worktree's git dir, so a merge driver's .merge_file_* temp files
+ * (left behind when the deadline kills a spawn) never reach the checkout;
+ * they are swept from the scratch directory after each beat. The
+ * in-flight row is never rewritten by this check and no queued row is
+ * reordered. */
 
 #define DL_PRECHECK_ROWS 4
 #define DL_PRECHECK_COMMITS 64
@@ -8964,6 +8969,8 @@ struct dl_pc {
     const char *main;
     int64_t deadline;
     bool expired;
+    char gitdir[4096];  /* the landing worktree's git dir */
+    char cwd[4096 + 32]; /* scratch cwd every spawn runs in, off the worktree */
     char *buf;
     size_t cap;
     char why[1152];
@@ -9045,6 +9052,72 @@ static bool dl_pc_expired(struct dl_pc *pc)
     return pc->expired;
 }
 
+/* One plumbing git for the precheck: the repository is the landing
+ * worktree's (--git-dir), the working directory is the scratch directory
+ * under the land state dir. An external merge driver writes its
+ * .merge_file_XXXXXX temp files into git's working directory, and a spawn
+ * the deadline kills leaves them there: they must never land in the
+ * checkout a proof is running in. */
+static int dl_pc_spawn(const struct dl_pc *pc, const char *const *args,
+                       char *out, size_t cap, int timeout_ms)
+{
+    const char *argv[24];
+    char gd[4096 + 16];
+    size_t n = 0;
+    char sink[2];
+    if (snprintf(gd, sizeof(gd), "--git-dir=%s", pc->gitdir) >=
+        (int)sizeof(gd))
+        return -1;
+    argv[n++] = "git";
+    argv[n++] = "-C";
+    argv[n++] = pc->cwd;
+    argv[n++] = gd;
+    for (size_t i = 0; args[i]; i++) {
+        if (n + 2 > sizeof(argv) / sizeof(argv[0]))
+            return -1;
+        argv[n++] = args[i];
+    }
+    argv[n] = NULL;
+    return zcl_spawn_capture(argv, out ? out : sink, out ? cap : sizeof(sink),
+                             timeout_ms);
+}
+
+/* Remove what a merge driver left in the scratch directory. */
+static void dl_pc_sweep(const struct dl_pc *pc)
+{
+    DIR *dir = opendir(pc->cwd);
+    struct dirent *e;
+    if (!dir)
+        return;
+    while ((e = readdir(dir)) != NULL) {
+        char path[4096 + 32 + 300];
+        if (strncmp(e->d_name, ".merge_file_", 12) != 0)
+            continue;
+        if (snprintf(path, sizeof(path), "%s/%s", pc->cwd, e->d_name) <
+            (int)sizeof(path))
+            (void)unlink(path);
+    }
+    closedir(dir);
+}
+
+/* Resolve the worktree's git dir and make the scratch directory. False
+ * means the check cannot run without touching the checkout: skipped. */
+static bool dl_pc_setup(struct dl_pc *pc)
+{
+    char scratch[4096 + 32];
+    const char *args[] = { "rev-parse", "--absolute-git-dir", NULL };
+    if (snprintf(scratch, sizeof(scratch), "%s/precheck-cwd", pc->d->land) >=
+            (int)sizeof(scratch) ||
+        !dl_mkdir_one(scratch) ||
+        snprintf(pc->cwd, sizeof(pc->cwd), "%s", scratch) >=
+            (int)sizeof(pc->cwd) ||
+        dl_git(pc->d->wt, args, pc->gitdir, sizeof(pc->gitdir),
+               DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(pc->gitdir);
+    return pc->gitdir[0] == '/';
+}
+
 /* dl_git() held to the beat's deadline. A spawn that runs into it may have
  * been killed mid-output, so its answer is never read: -1, as for a launch
  * that failed. */
@@ -9056,7 +9129,7 @@ static int dl_pc_git(struct dl_pc *pc, const char *const *args, char *out,
     if (dl_pc_expired(pc))
         return -1;
     int64_t left = pc->deadline - platform_time_monotonic_ms();
-    int rc = dl_git(pc->d->wt, args, out, cap, left > 0 ? (int)left : 1);
+    int rc = dl_pc_spawn(pc, args, out, cap, left > 0 ? (int)left : 1);
     return dl_pc_expired(pc) ? -1 : rc;
 }
 
@@ -9555,7 +9628,16 @@ static bool dl_precheck_load(const struct dl_dirs *d, const char *observed_main,
                           .cap = DL_GIT_CAP,
                           .deadline = platform_time_monotonic_ms() +
                                       dl_precheck_budget_ms() };
+    if (!dl_pc_setup(pc)) {
+        dl_precheck_log(d, "precheck skipped: cannot resolve the landing "
+                           "git dir or make its scratch directory\n");
+        free(buf);
+        free(pc);
+        free(rows);
+        return;
+    }
     dl_precheck_walk(pc, rows, nrows, &t);
+    dl_pc_sweep(pc);
     free(buf);
     free(pc);
     if (!dl_precheck_mark(d, observed_main, t.seen, t.nseen)) {

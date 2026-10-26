@@ -10,6 +10,8 @@
 
 #include "test/test_dev_land_common.h"
 
+#include <dirent.h>
+
 
 /* ── rebase regeneration for tips that carry merges ───────────────────────
  *
@@ -1027,6 +1029,63 @@ _test_next:;
     return failures;
 }
 
+/* Count the .merge_file_* temp files an external merge driver left in
+ * `dir`. */
+static int dlx_qp_stray_merge_files(const char *dir)
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    int n = 0;
+    if (!d)
+        return -1;
+    while ((e = readdir(d)) != NULL)
+        if (strncmp(e->d_name, ".merge_file_", 12) == 0)
+            n++;
+    closedir(d);
+    return n;
+}
+
+static int test_dev_land_queued_driver_cwd_clean(void)
+{
+    int failures = 0;
+    TEST("land: a precheck replay killed at its deadline inside an external "
+         "merge driver leaves no .merge_file_* in the landing worktree and "
+         "answers uncertain") {
+        struct dlx_rig rig;
+        char m1[64], b[64], landwt[1300], landdir[1200], attrs[1400];
+        const char *cfg_drv[] = { "config", "merge.slow.driver",
+                                  "sleep 3; cp %A %A", NULL };
+        const char *cfg_attr[] = { "config", "core.attributesFile", attrs,
+                                   NULL };
+        dlx_isolate("qp_driver");
+        ASSERT(dlx_rig_make(&rig, "qp_driver_rig"));
+        ASSERT(dlx_qp_branch(&rig, "qp-b", "seed.txt", "mine\n", NULL, NULL,
+                             b));
+        ASSERT(dlx_qp_start(&rig, b));
+        ASSERT(dlx_qp_beat("started", 1, 0));
+        ASSERT(dlx_qp_push_main(&rig, "seed.txt", "theirs\n", m1));
+        ASSERT(dlx_qp_beat("rebased", -1, -1));
+        dlx_land_wt(landwt, sizeof(landwt));
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(snprintf(attrs, sizeof(attrs), "%s/slow.attrs", landdir) <
+               (int)sizeof(attrs));
+        ASSERT(dlx_write_dep(landdir, "slow.attrs", "seed.txt merge=slow\n"));
+        ASSERT(dlx_git(landwt, cfg_drv) == 0);
+        ASSERT(dlx_git(landwt, cfg_attr) == 0);
+        setenv("ZCL_LAND_TEST_PRECHECK_BUDGET_MS", "1200", 1);
+        ASSERT(dlx_qp_beat_u("started", -1, 0, 1));
+        unsetenv("ZCL_LAND_TEST_PRECHECK_BUDGET_MS");
+        ASSERT_EQ(dlx_qp_stray_merge_files(landwt), 0);
+        ASSERT(dlx_qp_queued_has(b, 1));
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    unsetenv("ZCL_LAND_TEST_PRECHECK_BUDGET_MS");
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_queued_priority_order(void)
 {
     int failures = 0;
@@ -1171,6 +1230,7 @@ int test_dev_land_queued_precheck_cases(void)
     failures += test_dev_land_queued_union_attr_kept();
     failures += test_dev_land_queued_uncertain_backoff();
     failures += test_dev_land_queued_priority_order();
+    failures += test_dev_land_queued_driver_cwd_clean();
     failures += test_dev_land_queued_deadline_left();
     failures += test_dev_land_queued_chain();
     failures += test_dev_land_queued_merge_tip();
