@@ -116,46 +116,72 @@ static bool urs_store_repaired_anchor(struct node_db *ndb,
     return false;
 }
 
-bool utxo_recovery_repair_stale_cursor_from_sync_projection(
-    struct node_db *ndb)
+/* Read one 32-byte hash-valued state key; a missing or short value is a
+ * silent "no repair" refusal, exactly as the inline checks were. Shared
+ * by the coins anchor and the sync-projection tip hash. */
+static bool urs_state_get_hash32(struct node_db *ndb, const char *key,
+                                 uint8_t out[32])
+{
+    size_t len = 0;
+    return node_db_state_get(ndb, key, out, 32, &len) && len == 32;
+}
+
+/* Load the persisted inputs of the repair decision, in the original
+ * order: the lagging coins_best_block anchor hash, then the
+ * sync-projection tip height (which must be positive) and tip hash. */
+static bool urs_load_anchor_and_projection_tip(struct node_db *ndb,
+                                               uint8_t coins_hash[32],
+                                               uint8_t sync_hash[32],
+                                               int64_t *sync_h)
 {
     if (!ndb || !ndb->open || !ndb->db)
         return false;
 
+    return urs_state_get_hash32(ndb, "coins_best_block", coins_hash) &&
+           node_db_state_get_int(ndb, "sync_projection_tip_height",
+                                 sync_h) &&
+           *sync_h > 0 &&
+           urs_state_get_hash32(ndb, "sync_projection_tip_hash",
+                                sync_hash);
+}
+
+/* Confirm the mirror really proves the coins are there: the block index
+ * resolves the anchor and tip hashes at exactly the projected heights,
+ * the projection tip is strictly ahead of the coins anchor, and the
+ * utxo set is non-empty. */
+static bool urs_mirror_confirms_stale_cursor(struct node_db *ndb,
+                                             const uint8_t coins_hash[32],
+                                             const uint8_t sync_hash[32],
+                                             int64_t sync_h,
+                                             int64_t *coins_h,
+                                             bool *have_utxos,
+                                             int64_t *max_utxo_h)
+{
+    int64_t resolved_sync_h = -1;
+    return urs_block_height_for_hash(ndb, coins_hash, coins_h) &&
+           urs_block_height_for_hash(ndb, sync_hash, &resolved_sync_h) &&
+           resolved_sync_h == sync_h &&
+           sync_h > *coins_h &&
+           urs_utxo_height_summary(ndb, have_utxos, max_utxo_h) &&
+           *have_utxos;
+}
+
+bool utxo_recovery_repair_stale_cursor_from_sync_projection(
+    struct node_db *ndb)
+{
     uint8_t coins_hash[32];
-    size_t len = 0;
-    if (!node_db_state_get(ndb, "coins_best_block",
-                           coins_hash, sizeof(coins_hash), &len) ||
-        len != sizeof(coins_hash))
-        return false;
-
-    int64_t sync_h = -1;
-    if (!node_db_state_get_int(ndb, "sync_projection_tip_height", &sync_h) ||
-        sync_h <= 0)
-        return false;
-
     uint8_t sync_hash[32];
-    len = 0;
-    if (!node_db_state_get(ndb, "sync_projection_tip_hash",
-                           sync_hash, sizeof(sync_hash), &len) ||
-        len != sizeof(sync_hash))
+    int64_t sync_h = -1;
+    if (!urs_load_anchor_and_projection_tip(ndb, coins_hash, sync_hash,
+                                            &sync_h))
         return false;
 
     int64_t coins_h = -1;
-    if (!urs_block_height_for_hash(ndb, coins_hash, &coins_h))
-        return false;
-
-    int64_t resolved_sync_h = -1;
-    if (!urs_block_height_for_hash(ndb, sync_hash, &resolved_sync_h) ||
-        resolved_sync_h != sync_h)
-        return false;
-    if (sync_h <= coins_h)
-        return false;
-
     bool have_utxos = false;
     int64_t max_utxo_h = -1;
-    if (!urs_utxo_height_summary(ndb, &have_utxos, &max_utxo_h) ||
-        !have_utxos)
+    if (!urs_mirror_confirms_stale_cursor(ndb, coins_hash, sync_hash,
+                                          sync_h, &coins_h, &have_utxos,
+                                          &max_utxo_h))
         return false;
 
     if (max_utxo_h + UTXO_CHECKPOINT_NEAR_WINDOW < sync_h) {
