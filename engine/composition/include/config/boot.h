@@ -1243,6 +1243,14 @@ bool boot_load_verify_snapshot_eligible(struct node_db *ndb,
 bool boot_need_legacy_header_pull(int64_t local_index_size, int64_t chain_h,
                                   bool legacy_source_present);
 
+/* Snapshot zclassicd's LevelDB index at zcd_idx_path into snap_path (impl in
+ * engine/composition/src/boot_steps.c; retries a manifest that changed during
+ * the copy). On failure the source directory, its LOCK included, is left
+ * untouched and the caller skips the import; zclassicd's own directory is
+ * never opened. */
+bool boot_legacy_index_snapshot(const char *zcd_idx_path,
+                                const char *snap_path);
+
 /* Pure predicate (impl in engine/composition/src/boot_legacy_import.c): decide whether
  * boot should hydrate the in-memory block index from the node.db `blocks`
  * table — the sink `--importblockindex` CLI-bulk-loads header rows into

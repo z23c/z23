@@ -406,6 +406,34 @@ static int bp_node_db_gate_refuses(void)
     bp_park_fixture_end(dir);
     return failures;
 }
+
+/* A legacy index whose snapshot cannot be built (here: no CURRENT) must be
+ * left exactly as it was. The step used to unlink zclassicd's LOCK on any
+ * snapshot failure and open the directory itself, which lets a second
+ * process write a live zclassicd's index. Returns its own failure count. */
+static int bp_legacy_snapshot_keeps_source_lock(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], src[PATH_MAX + 16], lock[PATH_MAX + 32];
+    char snap[PATH_MAX + 16];
+    test_make_tmpdir(dir, sizeof(dir), "bootphase", "ldblock");
+    snprintf(src, sizeof(src), "%s/index", dir);
+    snprintf(lock, sizeof(lock), "%s/LOCK", src);
+    snprintf(snap, sizeof(snap), "%s/snap", dir);
+    FILE *f = mkdir(src, 0700) == 0 ? fopen(lock, "w") : NULL;
+    bool fixture_ok = f != NULL;
+    if (f)
+        fclose(f);
+    BP_CHECK("legacy snapshot fixture: index dir with only a LOCK",
+             fixture_ok);
+    BP_CHECK("legacy snapshot without CURRENT fails",
+             fixture_ok && !boot_legacy_index_snapshot(src, snap));
+    struct stat st;
+    BP_CHECK("failed legacy snapshot keeps zclassicd's LOCK",
+             fixture_ok && stat(lock, &st) == 0);
+    test_rm_rf(dir);
+    return failures;
+}
 static int bp_test_thread_io_evidence(void);  /* end of file */
 static int test_boot_event_log_lifecycle(void)
 {
@@ -1038,6 +1066,7 @@ int test_boot_phase(void)
     }
 
     failures += bp_node_db_gate_refuses();
+    failures += bp_legacy_snapshot_keeps_source_lock();
     failures += bp_test_legacy_header_pull_predicates();
     failures += bp_test_blocks_table_hydrate_predicates();
     failures += bp_test_legal_forward_jumps();

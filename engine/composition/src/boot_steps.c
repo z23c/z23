@@ -186,9 +186,12 @@ static void boot_zcd_set_chain_tip_from_work(struct main_state *st,
 }
 
 /* Build a snapshot dir so we can open the LevelDB even while a live
- * zclassicd holds the source LOCK. See engine/modules/storage/src/ldb_snapshot.c. */
-static bool boot_zcd_make_index_snapshot(const char *zcd_idx_path,
-                                         const char *snap_path)
+ * zclassicd holds the source LOCK. See engine/modules/storage/src/ldb_snapshot.c.
+ * A failed snapshot leaves zclassicd's directory exactly as it was: its LOCK
+ * is an fcntl lock, so a stale one never blocks an open, and unlinking a
+ * held one would let two processes write zclassicd's index. */
+bool boot_legacy_index_snapshot(const char *zcd_idx_path,
+                                const char *snap_path)
 {
     char snap_err[256] = {0};
     bool snap_ok = false;
@@ -199,19 +202,12 @@ static bool boot_zcd_make_index_snapshot(const char *zcd_idx_path,
             strcmp(snap_err, "manifest_changed") != 0)
             break;
     }
-    if (!snap_ok) {
+    if (!snap_ok)
         fprintf(stderr,
                 "[boot] ldb_snapshot_make(%s) failed: %s; "
-                "falling back to direct open (may unlink "
-                "stale LOCK)\n", zcd_idx_path, snap_err);
-        /* Fallback path for a crashed zclassicd whose LOCK
-         * is stale: unlink it and open directly. Only used
-         * when the snapshot path itself fails. */
-        char lock_path[1300];
-        snprintf(lock_path, sizeof(lock_path),
-                 "%s/LOCK", zcd_idx_path);
-        unlink(lock_path);
-    }
+                "skipping the zclassicd index import (headers "
+                "sync from the network instead)\n",
+                zcd_idx_path, snap_err);
     return snap_ok;
 }
 
@@ -308,12 +304,13 @@ static void boot_blkidx_import_from_zclassicd(struct app_context *ctx,
     char snap_path[1200];
     snprintf(snap_path, sizeof(snap_path),
              "%s/.legacy_ldb_snap", ctx->datadir);
-    bool snap_ok = boot_zcd_make_index_snapshot(zcd_idx_path, snap_path);
-    const char *open_path = snap_ok ? snap_path : zcd_idx_path;
-    boot_zcd_load_index(ctx, st, open_path, have_ndcb, ndcb);
+    /* Only the snapshot is ever opened: opening zclassicd's own directory
+     * would write a new log and MANIFEST into another program's datadir. */
+    if (!boot_legacy_index_snapshot(zcd_idx_path, snap_path))
+        return;
+    boot_zcd_load_index(ctx, st, snap_path, have_ndcb, ndcb);
     /* Tear down the snapshot (hardlinks free cheaply). */
-    if (snap_ok)
-        ldb_snapshot_destroy(snap_path);
+    ldb_snapshot_destroy(snap_path);
     /* Copy block files from zclassicd if we don't have them */
     if (st->map_block_index.size > 1000)
         boot_zcd_copy_block_files(ctx, home);
