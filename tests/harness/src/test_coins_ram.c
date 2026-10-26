@@ -1344,7 +1344,7 @@ int test_coins_ram(void)
 
             /* ── SQLite B-tree get cost (overlay OFF) ── */
             const int PROBES = getenv("ZCL_TEST_PERF_ASSERTS") ? 200000 : 5000;
-            volatile int64_t sink = 0;
+            volatile int64_t sink;
             int hit = 0;
             int hit2 = 0;
             double sqlite_ns = 0;
