@@ -763,7 +763,6 @@ engine/composition/src/boot_bundle_fetch.c:boot_bundle_fetch_maybe:22
 engine/composition/src/boot_bundle_fetch_seeds.c:bbf_add_connect_seed:19
 engine/composition/src/boot_bundle_fetch_seeds.c:bbf_assemble_seeds:17
 engine/composition/src/boot_datadir_lock.c:boot_datadir_lock_acquire#2:42
-engine/composition/src/boot_header_seed_import.c:boot_header_seed_import_maybe:32
 engine/composition/src/boot_index.c:boot_index_shielded_tx:20
 engine/composition/src/boot_index.c:boot_index_verify_coins_tip_consistency:52
 engine/composition/src/boot_index.c:propagate_nchaintx:29
