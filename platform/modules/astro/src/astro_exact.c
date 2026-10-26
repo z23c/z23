@@ -332,6 +332,85 @@ bool astro_exact_floor_i64(const struct astro_exact *a, int64_t *out)
     return true;
 }
 
+/* Whole part of a magnitude as decimal digits, least significant first.
+ * Returns 0 and sets *count on success, -1 if a division step failed, 1 if
+ * the value is wider than the digit buffer. */
+static int exact_whole_digits(const struct astro_mag *whole, char *digits,
+                              size_t cap, size_t *count)
+{
+    if (astro_mag_is_zero(whole)) {
+        digits[0] = '0';
+        *count = 1;
+        return 0;
+    }
+
+    struct astro_mag cur = *whole;
+    size_t n = 0;
+    while (!astro_mag_is_zero(&cur) && n < cap) {
+        uint64_t d = 0;
+        struct astro_mag q;
+        if (!astro_mag_div_u64(&q, &d, &cur, 10u))
+            return -1;
+        digits[n++] = (char)('0' + (int)d);
+        cur = q;
+    }
+    if (!astro_mag_is_zero(&cur))
+        return 1; /* number wider than the digit buffer */
+    *count = n;
+    return 0;
+}
+
+/* Scaled fractional value of frac_digits digits. Returns 0 and sets *val on
+ * success, -1 if a multiplication step failed, 1 if the result does not fit
+ * one limb. */
+static int exact_frac_value(const struct astro_mag *rem, unsigned frac_digits,
+                            uint64_t *val)
+{
+    /* Fractional part: rem * 10^frac_digits >> FRAC_BITS, truncated. */
+    uint64_t scale = 1u;
+    for (unsigned i = 0; i < frac_digits; i++)
+        scale *= 10u;
+    struct astro_mag scale_mag, scaled, frac_int;
+    astro_mag_from_u64(&scale_mag, scale);
+    if (!astro_mag_mul(&scaled, rem, &scale_mag))
+        return -1;
+    astro_mag_shr(&frac_int, &scaled, ASTRO_EXACT_FRAC_BITS);
+    uint64_t v = frac_int.used == 0 ? 0 : frac_int.limb[0];
+    if (frac_int.used > 1)
+        return 1;
+    *val = v;
+    return 0;
+}
+
+/* Bytes astro_exact_format writes for this value, terminator included. */
+static size_t exact_format_need(bool negative, size_t int_count,
+                                unsigned frac_digits)
+{
+    return int_count + (negative ? 1u : 0u) +
+           (frac_digits > 0 ? frac_digits + 1u : 0u) + 1u;
+}
+
+/* Emit sign, integer digits, fraction and terminator into buf. */
+static void exact_format_write(char *buf, bool negative,
+                               const char *int_digits, size_t int_count,
+                               unsigned frac_digits, uint64_t frac_val)
+{
+    size_t pos = 0;
+    if (negative)
+        buf[pos++] = '-';
+    for (size_t i = int_count; i > 0; i--)
+        buf[pos++] = int_digits[i - 1];
+    if (frac_digits > 0) {
+        buf[pos++] = '.';
+        for (unsigned i = frac_digits; i > 0; i--) {
+            buf[pos + i - 1] = (char)('0' + (int)(frac_val % 10u));
+            frac_val /= 10u;
+        }
+        pos += frac_digits;
+    }
+    buf[pos] = '\0';
+}
+
 bool astro_exact_format(const struct astro_exact *a, unsigned frac_digits,
                         char *buf, size_t buf_len)
 {
@@ -356,53 +435,18 @@ bool astro_exact_format(const struct astro_exact *a, unsigned frac_digits,
      * happened to outgrow. */
     char int_digits[208];
     size_t int_count = 0;
-    if (astro_mag_is_zero(&whole)) {
-        int_digits[int_count++] = '0';
-    } else {
-        struct astro_mag cur = whole;
-        while (!astro_mag_is_zero(&cur) && int_count < sizeof(int_digits)) {
-            uint64_t d = 0;
-            struct astro_mag q;
-            if (!astro_mag_div_u64(&q, &d, &cur, 10u))
-                return false;
-            int_digits[int_count++] = (char)('0' + (int)d);
-            cur = q;
-        }
-        if (!astro_mag_is_zero(&cur))
-            return false; /* number wider than the digit buffer */
-    }
-
-    /* Fractional part: rem * 10^frac_digits >> FRAC_BITS, truncated. */
-    uint64_t scale = 1u;
-    for (unsigned i = 0; i < frac_digits; i++)
-        scale *= 10u;
-    struct astro_mag scale_mag, scaled, frac_int;
-    astro_mag_from_u64(&scale_mag, scale);
-    if (!astro_mag_mul(&scaled, &rem, &scale_mag))
-        return false;
-    astro_mag_shr(&frac_int, &scaled, ASTRO_EXACT_FRAC_BITS);
-    uint64_t frac_val = frac_int.used == 0 ? 0 : frac_int.limb[0];
-    if (frac_int.used > 1)
+    if (exact_whole_digits(&whole, int_digits, sizeof(int_digits),
+                           &int_count) != 0)
         return false;
 
-    size_t need = int_count + (a->negative ? 1u : 0u) +
-                  (frac_digits > 0 ? frac_digits + 1u : 0u) + 1u;
-    if (need > buf_len)
+    uint64_t frac_val = 0;
+    if (exact_frac_value(&rem, frac_digits, &frac_val) != 0)
         return false;
 
-    size_t pos = 0;
-    if (a->negative)
-        buf[pos++] = '-';
-    for (size_t i = int_count; i > 0; i--)
-        buf[pos++] = int_digits[i - 1];
-    if (frac_digits > 0) {
-        buf[pos++] = '.';
-        for (unsigned i = frac_digits; i > 0; i--) {
-            buf[pos + i - 1] = (char)('0' + (int)(frac_val % 10u));
-            frac_val /= 10u;
-        }
-        pos += frac_digits;
-    }
-    buf[pos] = '\0';
+    if (exact_format_need(a->negative, int_count, frac_digits) > buf_len)
+        return false;
+
+    exact_format_write(buf, a->negative, int_digits, int_count, frac_digits,
+                       frac_val);
     return true;
 }
