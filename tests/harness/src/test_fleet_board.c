@@ -1415,6 +1415,56 @@ static int test_fleet_board_durable_wiki(void)
     return failures;
 }
 
+static bool fb_rpc_show_request(bool ok, struct rpc_table *table,
+                                const char *id, struct json_value *params,
+                                struct json_value *input,
+                                struct json_value *result)
+{
+    return ok && json_push_kv_str(input, "op", "show") &&
+           json_push_kv_str(input, "id", id) &&
+           json_push_back(params, input) &&
+           rpc_table_execute(table, "fleet_board", params, result) &&
+           json_get_bool(json_get(result, "ok"));
+}
+
+static bool fb_rpc_check_show_reply(bool ok, struct json_value *result,
+                                    const struct fleet_board_post *post,
+                                    struct fleet_board_post *reconstructed)
+{
+    const char *agent = json_get_str(json_get(result, "agent"));
+    const char *body = json_get_str(json_get(result, "text"));
+    const char *slug = json_get_str(json_get(result, "slug"));
+    const char *title = json_get_str(json_get(result, "title"));
+    ok = ok && agent && body && slug && title;
+    if (ok) {
+        fb_test_compose(reconstructed, FLEET_BOARD_KIND_WIKI, agent, body,
+            (uint64_t)json_get_int(json_get(result, "created_at")),
+            (uint32_t)json_get_int(json_get(result, "ttl")));
+        (void)snprintf(reconstructed->slug, sizeof(reconstructed->slug),
+                       "%s", slug);
+        (void)snprintf(reconstructed->title, sizeof(reconstructed->title),
+                       "%s", title);
+        ok = fleet_board_kind_from_name(
+                 json_get_str(json_get(result, "kind")),
+                 &reconstructed->kind) &&
+             zcl_hex_decode(json_get_str(json_get(result, "id")),
+                            reconstructed->id, 32) &&
+             zcl_hex_decode(json_get_str(json_get(result, "host")),
+                            reconstructed->host_pubkey, 32) &&
+             zcl_hex_decode(json_get_str(json_get(result, "ref")),
+                            reconstructed->ref, 32) &&
+             zcl_hex_decode(json_get_str(json_get(result, "supersedes")),
+                            reconstructed->supersedes, 32) &&
+             zcl_hex_decode(json_get_str(json_get(result, "signature")),
+                            reconstructed->signature, 64) &&
+             json_get_int(json_get(result, "text_len")) ==
+                 reconstructed->text_len &&
+             fleet_board_post_verify(reconstructed) == FLEET_BOARD_OK &&
+             memcmp(reconstructed->id, post->id, 32) == 0;
+    }
+    return ok;
+}
+
 static int test_fleet_board_rpc_verification(void)
 {
     int failures = 0;
@@ -1472,39 +1522,14 @@ static int test_fleet_board_rpc_verification(void)
         char id[65];
         fleet_board_id_to_hex(post.id, id);
         json_set_array(&params); json_set_object(&input);
-        ok = ok && json_push_kv_str(&input, "op", "show") &&
-             json_push_kv_str(&input, "id", id) &&
-             json_push_back(&params, &input) &&
-             rpc_table_execute(&table, "fleet_board", &params, &result) &&
-             json_get_bool(json_get(&result, "ok"));
+        ok = fb_rpc_show_request(ok, &table, id, &params, &input, &result);
         struct fleet_board_post reconstructed = {0};
         if (!ok) {
             char diagnostic[1024];
             json_write(&result, diagnostic, sizeof(diagnostic));
             fprintf(stderr, "fleet board: show RPC failed: %s\n", diagnostic);
         }
-        const char *agent = json_get_str(json_get(&result, "agent"));
-        const char *body = json_get_str(json_get(&result, "text"));
-        const char *slug = json_get_str(json_get(&result, "slug"));
-        const char *title = json_get_str(json_get(&result, "title"));
-        ok = ok && agent && body && slug && title;
-        if (ok) {
-            fb_test_compose(&reconstructed, FLEET_BOARD_KIND_WIKI, agent, body,
-                (uint64_t)json_get_int(json_get(&result, "created_at")),
-                (uint32_t)json_get_int(json_get(&result, "ttl")));
-            (void)snprintf(reconstructed.slug, sizeof(reconstructed.slug), "%s", slug);
-            (void)snprintf(reconstructed.title, sizeof(reconstructed.title), "%s", title);
-            ok = fleet_board_kind_from_name(json_get_str(json_get(&result, "kind")),
-                    &reconstructed.kind) &&
-                 zcl_hex_decode(json_get_str(json_get(&result, "id")), reconstructed.id, 32) &&
-                 zcl_hex_decode(json_get_str(json_get(&result, "host")), reconstructed.host_pubkey, 32) &&
-                 zcl_hex_decode(json_get_str(json_get(&result, "ref")), reconstructed.ref, 32) &&
-                 zcl_hex_decode(json_get_str(json_get(&result, "supersedes")), reconstructed.supersedes, 32) &&
-                 zcl_hex_decode(json_get_str(json_get(&result, "signature")), reconstructed.signature, 64) &&
-                 json_get_int(json_get(&result, "text_len")) == reconstructed.text_len &&
-                 fleet_board_post_verify(&reconstructed) == FLEET_BOARD_OK &&
-                 memcmp(reconstructed.id, post.id, 32) == 0;
-        }
+        ok = fb_rpc_check_show_reply(ok, &result, &post, &reconstructed);
         json_free(&params); json_free(&input); json_free(&result);
         app_runtime_set_current(NULL);
         if (was_warming_up)
@@ -1527,20 +1552,12 @@ struct fb_rpc_reader {
     bool ok;
 };
 
-static bool fb_rpc_verify_item(const struct json_value *item,
-                               const struct fb_rpc_reader *reader)
+static bool fb_rpc_verify_item_post(const struct json_value *item,
+                                    const char *agent, const char *text,
+                                    const char *kind, const char *host,
+                                    const char *id, const char *ref,
+                                    const char *signature)
 {
-    const char *agent = json_get_str(json_get(item, "agent"));
-    const char *text = json_get_str(json_get(item, "text"));
-    const char *kind = json_get_str(json_get(item, "kind"));
-    const char *host = json_get_str(json_get(item, "host"));
-    const char *id = json_get_str(json_get(item, "id"));
-    const char *ref = json_get_str(json_get(item, "ref"));
-    const char *signature = json_get_str(json_get(item, "signature"));
-    if (!agent || !text || !kind || !host || !id || !ref || !signature ||
-        strcmp(agent, reader->agent) != 0 || strcmp(host, reader->host) != 0)
-        return false;
-
     struct fleet_board_post post;
     memset(&post, 0, sizeof(post));
     size_t text_len = strlen(text);
@@ -1558,6 +1575,24 @@ static bool fb_rpc_verify_item(const struct json_value *item,
     (void)snprintf(post.agent, sizeof(post.agent), "%s", agent);
     return json_get_int(json_get(item, "text_len")) == (int64_t)text_len &&
            fleet_board_post_verify(&post) == FLEET_BOARD_OK;
+}
+
+static bool fb_rpc_verify_item(const struct json_value *item,
+                               const struct fb_rpc_reader *reader)
+{
+    const char *agent = json_get_str(json_get(item, "agent"));
+    const char *text = json_get_str(json_get(item, "text"));
+    const char *kind = json_get_str(json_get(item, "kind"));
+    const char *host = json_get_str(json_get(item, "host"));
+    const char *id = json_get_str(json_get(item, "id"));
+    const char *ref = json_get_str(json_get(item, "ref"));
+    const char *signature = json_get_str(json_get(item, "signature"));
+    if (!agent || !text || !kind || !host || !id || !ref || !signature ||
+        strcmp(agent, reader->agent) != 0 || strcmp(host, reader->host) != 0)
+        return false;
+
+    return fb_rpc_verify_item_post(item, agent, text, kind, host, id, ref,
+                                   signature);
 }
 
 static void *fb_rpc_reader_main(void *opaque)
