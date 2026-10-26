@@ -394,42 +394,86 @@ static void ua_reject_note(int next_h, const char *status)
     utxo_apply_reject_count_and_emit(next_h, status, counter, label);
 }
 
-static job_result_t step_apply(struct stage_step_ctx *c)
-{
-    atomic_store(&g_ua_last_step_unix, platform_time_wall_unix());
-
-    struct main_state *ms = g_ms;
-    if (utxo_apply_sapling_rebuild_paused() || !ms) return JOB_IDLE;
-    sqlite3 *db = progress_store_db();
-    if (!db) return JOB_IDLE;
-
-    int next_h = (int)c->cursor_in;
-    if (next_h < 0) {
-        ua_fatal_permanent_blocker((int)c->cursor_in,
-                                   "stage cursor persisted negative");
-        return JOB_FATAL;
-    }
-    bool skip_crypto = mint_skip_crypto_get();
-    enum mint_validation_evidence expected_evidence =
-        mint_validation_evidence_expected(skip_crypto);
-    uint64_t pv_cursor = 0;
-    if (!stage_upstream_frontier_or_zero(db, "proof_validate", STAGE_NAME,
-                                   &pv_cursor)) {
-        ua_fatal_permanent_blocker(next_h,
-                                   "proof_validate cursor read failed");
-        return JOB_FATAL;
-    }
-    if ((uint64_t)next_h >= pv_cursor) {
-        atomic_store(&g_ua_last_blocked_unix, platform_time_wall_unix());
-        return JOB_IDLE;
-    }
-
+/* Locals of step_apply. One frame owns them so each slice sees the same
+ * rows, block view and delta the original step held until the same release. */
+struct ua_apply_work {
+    struct stage_step_ctx *c;
+    struct main_state *ms;
+    sqlite3 *db;
+    int next_h;
+    bool skip_crypto;
+    enum mint_validation_evidence expected_evidence;
+    uint64_t pv_cursor;
     struct proof_validate_row upstream;
-    int found = utxo_apply_proof_validate_log_at(db, next_h, &upstream);
+    struct script_validate_verdict_row sv_row;
+    int sv_found;
+    struct block_index *bi;
+    struct block owned;
+    struct block_parse_handle handle;
+    const struct block *blk;
+    bool borrowed;
+    struct delta_summary summary;
+    struct utxo_apply_turnstile_pending pool_pending;
+};
+
+/* CONTINUE: step_apply still has work. DONE: *result is the step verdict. */
+enum ua_apply_flow {
+    UA_APPLY_CONTINUE = 0,
+    UA_APPLY_DONE = 1
+};
+
+/* Pause, open db, negative cursor, and the proof_validate frontier gate. */
+static enum ua_apply_flow ua_open_apply_frontier(struct ua_apply_work *w,
+                                                job_result_t *result)
+{
+    w->ms = g_ms;
+    if (utxo_apply_sapling_rebuild_paused() || !w->ms) {
+        *result = JOB_IDLE;
+        return UA_APPLY_DONE;
+    }
+    w->db = progress_store_db();
+    if (!w->db) {
+        *result = JOB_IDLE;
+        return UA_APPLY_DONE;
+    }
+
+    w->next_h = (int)w->c->cursor_in;
+    if (w->next_h < 0) {
+        ua_fatal_permanent_blocker((int)w->c->cursor_in,
+                                   "stage cursor persisted negative");
+        *result = JOB_FATAL;
+        return UA_APPLY_DONE;
+    }
+    w->skip_crypto = mint_skip_crypto_get();
+    w->expected_evidence =
+        mint_validation_evidence_expected(w->skip_crypto);
+    w->pv_cursor = 0;
+    if (!stage_upstream_frontier_or_zero(w->db, "proof_validate", STAGE_NAME,
+                                   &w->pv_cursor)) {
+        ua_fatal_permanent_blocker(w->next_h,
+                                   "proof_validate cursor read failed");
+        *result = JOB_FATAL;
+        return UA_APPLY_DONE;
+    }
+    if ((uint64_t)w->next_h >= w->pv_cursor) {
+        atomic_store(&g_ua_last_blocked_unix, platform_time_wall_unix());
+        *result = JOB_IDLE;
+        return UA_APPLY_DONE;
+    }
+    return UA_APPLY_CONTINUE;
+}
+
+/* Read both height-keyed verdicts. A hole or an evidence mismatch stops. */
+static enum ua_apply_flow ua_read_apply_verdicts(struct ua_apply_work *w,
+                                                job_result_t *result)
+{
+    int found = utxo_apply_proof_validate_log_at(w->db, w->next_h,
+                                                &w->upstream);
     if (found < 0) {
-        ua_fatal_permanent_blocker(next_h,
+        ua_fatal_permanent_blocker(w->next_h,
                                    "proof_validate_log read returned error");
-        return JOB_FATAL;
+        *result = JOB_FATAL;
+        return UA_APPLY_DONE;
     }
     if (found == 0) {
         /* Reaching here implies next_h < pv_cursor (the >= guard above
@@ -440,77 +484,114 @@ static job_result_t step_apply(struct stage_step_ctx *c)
          * is what manufactured this hole class in the first place. The L1
          * reconcile-light Condition is the healer; the counters/WARN here
          * are the alarm. */
-        utxo_apply_upstream_hole_note(next_h, pv_cursor);
+        utxo_apply_upstream_hole_note(w->next_h, w->pv_cursor);
         atomic_store(&g_ua_last_blocked_unix, platform_time_wall_unix());
-        return JOB_IDLE;
+        *result = JOB_IDLE;
+        return UA_APPLY_DONE;
     }
-    utxo_apply_upstream_hole_healed(next_h);
+    utxo_apply_upstream_hole_healed(w->next_h);
 
     /* Both height-keyed upstream verdicts must agree with the selected block.
      * Missing or foreign hashes refuse apply before verdict interpretation. */
-    struct script_validate_verdict_row sv_row;
-    int sv_found = script_validate_log_verdict_at(db, next_h, &sv_row);
-    if (sv_found < 0) {
-        ua_fatal_permanent_blocker(next_h,
+    w->sv_found = script_validate_log_verdict_at(w->db, w->next_h, &w->sv_row);
+    if (w->sv_found < 0) {
+        ua_fatal_permanent_blocker(w->next_h,
                                    "script_validate_log verdict read returned error");
-        return JOB_FATAL;
+        *result = JOB_FATAL;
+        return UA_APPLY_DONE;
     }
-    if (upstream.ok == 1 && sv_found == 1 && sv_row.ok == 1 &&
-        (upstream.evidence != expected_evidence ||
-         sv_row.evidence != expected_evidence))
-        return utxo_apply_evidence_refuse(c, next_h, expected_evidence,
-                                          upstream.evidence, sv_row.evidence);
+    if (w->upstream.ok == 1 && w->sv_found == 1 && w->sv_row.ok == 1 &&
+        (w->upstream.evidence != w->expected_evidence ||
+         w->sv_row.evidence != w->expected_evidence)) {
+        *result = utxo_apply_evidence_refuse(w->c, w->next_h,
+                                            w->expected_evidence,
+                                            w->upstream.evidence,
+                                            w->sv_row.evidence);
+        return UA_APPLY_DONE;
+    }
     utxo_apply_evidence_clear();
+    return UA_APPLY_CONTINUE;
+}
 
-    struct block_index *bi = utxo_apply_select_apply_block(
-        db, ms, next_h, sv_found == 1 ? &sv_row : NULL);
-    if (!bi) {
+/* Select the block, park a history hold, and bind the proof_validate hash. */
+static enum ua_apply_flow ua_select_proof_bound_block(struct ua_apply_work *w,
+                                                     job_result_t *result)
+{
+    w->bi = utxo_apply_select_apply_block(
+        w->db, w->ms, w->next_h,
+        w->sv_found == 1 ? &w->sv_row : NULL);
+    if (!w->bi) {
         atomic_store(&g_ua_last_blocked_unix, platform_time_wall_unix());
-        return JOB_IDLE;
+        *result = JOB_IDLE;
+        return UA_APPLY_DONE;
     }
     if (utxo_apply_history_hold_should_park(
-            db, next_h, bi->phashBlock, upstream.has_block_hash,
-            &upstream.block_hash,
-            sv_found == 1 && sv_row.has_block_hash, &sv_row.block_hash)) {
+            w->db, w->next_h, w->bi->phashBlock, w->upstream.has_block_hash,
+            &w->upstream.block_hash,
+            w->sv_found == 1 && w->sv_row.has_block_hash,
+            &w->sv_row.block_hash)) {
         atomic_store(&g_ua_last_blocked_unix, platform_time_wall_unix());
-        return JOB_IDLE;
+        *result = JOB_IDLE;
+        return UA_APPLY_DONE;
     }
-    if (!upstream.has_block_hash ||
-        !uint256_eq(&upstream.block_hash, bi->phashBlock))
-        return utxo_apply_label_splice_refuse(c, next_h,
-            "proof_validate_log", bi->phashBlock,
-            upstream.has_block_hash ? &upstream.block_hash : NULL);
-    if (sv_found != 1 || !sv_row.has_block_hash ||
-        !uint256_eq(&sv_row.block_hash, bi->phashBlock))
-        return utxo_apply_label_splice_refuse(c, next_h,
-            "script_validate_log", bi->phashBlock,
-            sv_found == 1 && sv_row.has_block_hash ? &sv_row.block_hash : NULL);
+    if (!w->upstream.has_block_hash ||
+        !uint256_eq(&w->upstream.block_hash, w->bi->phashBlock)) {
+        *result = utxo_apply_label_splice_refuse(w->c, w->next_h,
+            "proof_validate_log", w->bi->phashBlock,
+            w->upstream.has_block_hash ? &w->upstream.block_hash : NULL);
+        return UA_APPLY_DONE;
+    }
+    return UA_APPLY_CONTINUE;
+}
+
+/* Bind the script_validate hash, then refuse an upstream failure verdict. */
+static enum ua_apply_flow ua_accept_script_upstream(struct ua_apply_work *w,
+                                                   job_result_t *result)
+{
+    if (w->sv_found != 1 || !w->sv_row.has_block_hash ||
+        !uint256_eq(&w->sv_row.block_hash, w->bi->phashBlock)) {
+        *result = utxo_apply_label_splice_refuse(w->c, w->next_h,
+            "script_validate_log", w->bi->phashBlock,
+            w->sv_found == 1 && w->sv_row.has_block_hash
+                ? &w->sv_row.block_hash : NULL);
+        return UA_APPLY_DONE;
+    }
     /* The previously-refused verdict is re-bound (or no longer provably
      * foreign): close the memo so a re-opened splice counts as new. */
-    utxo_apply_label_splice_healed(next_h);
-    if (upstream.ok != 1 || sv_row.ok != 1) {
+    utxo_apply_label_splice_healed(w->next_h);
+    if (w->upstream.ok != 1 || w->sv_row.ok != 1) {
         atomic_fetch_add(&g_ua_upstream_failed_total, 1);
-        return block_apply_failure(c, next_h, "upstream_failed",
-            upstream.ok != 1 ? "proof_validate" : "script_validate", NULL);
+        *result = block_apply_failure(w->c, w->next_h, "upstream_failed",
+            w->upstream.ok != 1 ? "proof_validate" : "script_validate", NULL);
+        return UA_APPLY_DONE;
     }
-    struct block owned; struct block_parse_handle handle;
-    const struct block *blk = NULL; bool borrowed = false;
-    if (!stage_acquire_block_view(&owned, &handle, &blk, &borrowed,
-                                  bi, next_h, g_datadir, g_reader,
+    return UA_APPLY_CONTINUE;
+}
+
+/* Load the body, compute the delta, and advance a count-only replay skip. */
+static enum ua_apply_flow ua_compute_delta_or_count(struct ua_apply_work *w,
+                                                   job_result_t *result)
+{
+    w->blk = NULL;
+    w->borrowed = false;
+    if (!stage_acquire_block_view(&w->owned, &w->handle, &w->blk, &w->borrowed,
+                                  w->bi, w->next_h, g_datadir, g_reader,
                                   g_reader_user)) {
-        utxo_apply_select_idle_note(next_h, UA_SELECT_IDLE_STAGE_READ_FAILED, bi);
-        block_free(&owned);
+        utxo_apply_select_idle_note(w->next_h, UA_SELECT_IDLE_STAGE_READ_FAILED,
+                                   w->bi);
+        block_free(&w->owned);
         /* body_persist already verified this body — names a typed blocker (see stage_body_read_hold). */
-        return stage_body_read_hold(STAGE_NAME, next_h, bi->phashBlock, &g_ua_last_blocked_unix);
+        *result = stage_body_read_hold(STAGE_NAME, w->next_h, w->bi->phashBlock,
+                                      &g_ua_last_blocked_unix);
+        return UA_APPLY_DONE;
     }
     stage_body_read_hold_clear(STAGE_NAME);
-    struct delta_summary summary;
-    struct utxo_apply_turnstile_pending pool_pending = { .write = false };
+    w->pool_pending = (struct utxo_apply_turnstile_pending){ .write = false };
     /* Prevout-resolution phase: compute_block_delta walks each input's prevout
      * (created-index / coins_kv) to build the add/spend set. */
     int64_t ua_pv_t0 = platform_time_monotonic_us();
-    utxo_apply_compute_block_delta(blk, (uint32_t)next_h,
-                                   g_lookup, g_lookup_user, &summary);
+    utxo_apply_compute_block_delta(w->blk, (uint32_t)w->next_h,
+                                   g_lookup, g_lookup_user, &w->summary);
     reducer_stage_profile_observe_us(
         REDUCER_PROFILE_UTXO_APPLY, RPF_UA_PREVOUT_US,
         (uint64_t)(platform_time_monotonic_us() - ua_pv_t0));
@@ -526,81 +607,102 @@ static job_result_t step_apply(struct stage_step_ctx *c)
      * not corrupted past a real reject. This whole branch is unreachable when
      * the env is unset (count_only_d2_skip is always false then), so the live
      * fold runs exactly as it does today. */
-    if (summary.count_only_d2_skip) {
-        replay_count_only_note_block_replayed((uint32_t)next_h);
-        free_delta(&summary);
-        stage_release_block_view(&owned, &handle, borrowed);
+    if (w->summary.count_only_d2_skip) {
+        replay_count_only_note_block_replayed((uint32_t)w->next_h);
+        free_delta(&w->summary);
+        stage_release_block_view(&w->owned, &w->handle, w->borrowed);
         /* Advance the cursor WITHOUT authoring/sealing/minting: this is a
          * diagnostic walk over a copy, not a real apply. coins_applied_height
          * is intentionally NOT co-committed (no coins were written), so the
          * copy's coins_kv reflects the truth that this block was skipped. */
-        atomic_store(&g_ua_last_advance_height, (int64_t)next_h);
-        c->cursor_out = c->cursor_in + 1;
+        atomic_store(&g_ua_last_advance_height, (int64_t)w->next_h);
+        w->c->cursor_out = w->c->cursor_in + 1;
         /* Emit the running summary when we reach the proven tip (cursor caught
          * up to the upstream proof_validate frontier — see the pv_cursor guard
          * at step_apply entry; one more tick returns JOB_IDLE). target_tip is
          * the header_admit cursor (top of the staged pipeline == header tip),
          * so the gate can assert the walk reached the FULL header chain, not a
          * subset stalled below it. */
-        if (c->cursor_out >= pv_cursor)
+        if (w->c->cursor_out >= w->pv_cursor)
             replay_count_only_emit_summary(
-                (int64_t)stage_cursor_persisted(db, "header_admit", STAGE_NAME));
-        return JOB_ADVANCED;
+                (int64_t)stage_cursor_persisted(w->db, "header_admit",
+                                               STAGE_NAME));
+        *result = JOB_ADVANCED;
+        return UA_APPLY_DONE;
     }
+    return UA_APPLY_CONTINUE;
+}
 
-    if (summary.ok) {
+/* Shielded-history gate, then the turnstile-before-nullifier gate. */
+static enum ua_apply_flow ua_gate_shielded_then_turnstile(
+    struct ua_apply_work *w, job_result_t *result)
+{
+    if (w->summary.ok) {
         enum utxo_apply_shielded_gate_result sg =
-            utxo_apply_shielded_history_gate(db, blk, next_h, &summary);
+            utxo_apply_shielded_history_gate(w->db, w->blk, w->next_h,
+                                            &w->summary);
         if (sg == UTXO_SHIELDED_GATE_ERROR) {
-            ua_fatal_permanent_blocker(next_h,
+            ua_fatal_permanent_blocker(w->next_h,
                                        "shielded history gate store failure");
-            free_delta(&summary);
-            stage_release_block_view(&owned, &handle, borrowed);
-            return JOB_FATAL;
+            free_delta(&w->summary);
+            stage_release_block_view(&w->owned, &w->handle, w->borrowed);
+            *result = JOB_FATAL;
+            return UA_APPLY_DONE;
         }
         if (sg == UTXO_SHIELDED_GATE_HOLD) {
             (void)utxo_apply_history_hold_record(
-                db, next_h,
-                strcmp(summary.failure_kind, "nullifier-history-gap") == 0
+                w->db, w->next_h,
+                strcmp(w->summary.failure_kind, "nullifier-history-gap") == 0
                     ? 1 : 2,
-                bi->phashBlock);
-            free_delta(&summary);
-            stage_release_block_view(&owned, &handle, borrowed);
-            return JOB_IDLE;
+                w->bi->phashBlock);
+            free_delta(&w->summary);
+            stage_release_block_view(&w->owned, &w->handle, w->borrowed);
+            *result = JOB_IDLE;
+            return UA_APPLY_DONE;
         }
     }
 
     /* Turnstile BEFORE the nullifier insert (see ua_turnstile_then_nullifiers). */
-    if (summary.ok) {
-        if (!ua_turnstile_then_nullifiers(db, blk, next_h, bi->phashBlock,
-                                          &summary, &pool_pending)) {
-            free_delta(&summary);
-            stage_release_block_view(&owned, &handle, borrowed);
-            return JOB_FATAL;
+    if (w->summary.ok) {
+        if (!ua_turnstile_then_nullifiers(w->db, w->blk, w->next_h,
+                                          w->bi->phashBlock, &w->summary,
+                                          &w->pool_pending)) {
+            free_delta(&w->summary);
+            stage_release_block_view(&w->owned, &w->handle, w->borrowed);
+            *result = JOB_FATAL;
+            return UA_APPLY_DONE;
         }
     }
+    return UA_APPLY_CONTINUE;
+}
 
+/* Author coins_kv, then the inverse-delta and pool row, inside the stage txn. */
+static enum ua_apply_flow ua_author_apply_coins(struct ua_apply_work *w,
+                                               job_result_t *result)
+{
     /* Author the canonical coins_kv set (the sole live UTXO ledger). In-txn: a
      * failure rolls back the whole stage txn (cursor + inverse-delta + log
      * row + coins) — never a torn partial apply. Scripts in `summary.added`
      * alias into `blk`, so apply before block_free. */
-    if (summary.ok) {
+    if (w->summary.ok) {
         int64_t ua_apply_t0 = platform_time_monotonic_us();
-        bool ua_apply_ok = apply_coins_kv(db, &summary, (uint32_t)next_h);
+        bool ua_apply_ok = apply_coins_kv(w->db, &w->summary,
+                                          (uint32_t)w->next_h);
         reducer_stage_profile_observe_us(
             REDUCER_PROFILE_UTXO_APPLY, RPF_UA_APPLY_US,
             (uint64_t)(platform_time_monotonic_us() - ua_apply_t0));
         if (!ua_apply_ok) {
-            ua_fatal_permanent_blocker(next_h,
+            ua_fatal_permanent_blocker(w->next_h,
                                        "coins_kv author store failure");
-            free_delta(&summary);
-            stage_release_block_view(&owned, &handle, borrowed);
-            return JOB_FATAL;
+            free_delta(&w->summary);
+            stage_release_block_view(&w->owned, &w->handle, w->borrowed);
+            *result = JOB_FATAL;
+            return UA_APPLY_DONE;
         }
         /* Feed the batch-commit conservation invariant (a): this authored
          * block's created/spent counts (no-op unless a drain batch is open). */
-        reducer_commit_invariants_note_coins(next_h, summary.added_count,
-                                             summary.spent_count);
+        reducer_commit_invariants_note_coins(w->next_h, w->summary.added_count,
+                                             w->summary.spent_count);
     }
 
     /* Persist the per-block inverse-delta (the later-disconnect source — no
@@ -608,60 +710,76 @@ static job_result_t step_apply(struct stage_step_ctx *c)
      * fork is distinguishable. In the stage txn so delta + log row + cursor
      * land atomically; only a successful apply persists one (failure rows
      * have nothing to invert). */
-    if (summary.ok) {
-        if (!ua_persist_delta_and_pool(db, next_h, bi->phashBlock, &summary,
-                                       &pool_pending)) {
-            free_delta(&summary);
-            stage_release_block_view(&owned, &handle, borrowed);
-            return JOB_FATAL;
+    if (w->summary.ok) {
+        if (!ua_persist_delta_and_pool(w->db, w->next_h, w->bi->phashBlock,
+                                       &w->summary, &w->pool_pending)) {
+            free_delta(&w->summary);
+            stage_release_block_view(&w->owned, &w->handle, w->borrowed);
+            *result = JOB_FATAL;
+            return UA_APPLY_DONE;
         }
     }
+    return UA_APPLY_CONTINUE;
+}
 
-    if (summary.ok && !skip_crypto)
+/* Counters, the utxo_apply_log row, and the refused-block blocker. */
+static enum ua_apply_flow ua_write_apply_verdict(struct ua_apply_work *w,
+                                                job_result_t *result)
+{
+    if (w->summary.ok && !w->skip_crypto)
         atomic_fetch_add(&g_ua_verified_total, 1);
-    if (summary.ok) {
+    if (w->summary.ok) {
         atomic_fetch_add(&g_ua_total_outputs_added,
-                         (uint64_t)summary.added_count);
+                         (uint64_t)w->summary.added_count);
         atomic_fetch_add(&g_ua_total_outputs_spent,
-                         (uint64_t)summary.spent_count);
+                         (uint64_t)w->summary.spent_count);
     } else {
         /* The event label is zclassicd's exact reject string where one
          * exists; dedup + keep-alive policy lives in reject_count_and_emit. */
-        ua_reject_note(next_h, summary.status);
+        ua_reject_note(w->next_h, w->summary.status);
     }
 
-    const char *apply_status = summary.ok
-        ? mint_validation_evidence_status(expected_evidence) : summary.status;
+    const char *apply_status = w->summary.ok
+        ? mint_validation_evidence_status(w->expected_evidence)
+        : w->summary.status;
     /* Commit phase: the durable utxo_apply_log row that stamps this height's
      * verdict (the step's own last write before the batch COMMIT/savepoint). */
     int64_t ua_commit_t0 = platform_time_monotonic_us();
-    bool ua_log_ok = utxo_apply_log_insert(db, next_h, apply_status, summary.ok,
-                    summary.spent_count, summary.added_count,
-                    summary.total_value_delta, summary.failure_kind,
-                    summary.ok ? NULL : summary.failure_detail);
+    bool ua_log_ok = utxo_apply_log_insert(w->db, w->next_h, apply_status,
+                    w->summary.ok, w->summary.spent_count,
+                    w->summary.added_count, w->summary.total_value_delta,
+                    w->summary.failure_kind,
+                    w->summary.ok ? NULL : w->summary.failure_detail);
     reducer_stage_profile_observe_us(
         REDUCER_PROFILE_UTXO_APPLY, RPF_UA_COMMIT_US,
         (uint64_t)(platform_time_monotonic_us() - ua_commit_t0));
     if (!ua_log_ok) {
-        ua_fatal_permanent_blocker(next_h,
+        ua_fatal_permanent_blocker(w->next_h,
                                    "utxo_apply_log insert store failure");
-        free_delta(&summary);
-        stage_release_block_view(&owned, &handle, borrowed);
-        return JOB_FATAL;
+        free_delta(&w->summary);
+        stage_release_block_view(&w->owned, &w->handle, w->borrowed);
+        *result = JOB_FATAL;
+        return UA_APPLY_DONE;
     }
 
-    if (!summary.ok) {
-        const char *status = summary.status;
-        const char *kind = summary.failure_kind;
+    if (!w->summary.ok) {
+        const char *status = w->summary.status;
+        const char *kind = w->summary.failure_kind;
         uint8_t detail[36];
-        memcpy(detail, summary.failure_detail, sizeof(detail));
-        free_delta(&summary);
-        stage_release_block_view(&owned, &handle, borrowed);
-        return block_apply_failure(c, next_h, status, kind, detail);
+        memcpy(detail, w->summary.failure_detail, sizeof(detail));
+        free_delta(&w->summary);
+        stage_release_block_view(&w->owned, &w->handle, w->borrowed);
+        *result = block_apply_failure(w->c, w->next_h, status, kind, detail);
+        return UA_APPLY_DONE;
     }
+    return UA_APPLY_CONTINUE;
+}
 
-    free_delta(&summary);
-    stage_release_block_view(&owned, &handle, borrowed);
+/* Release the view, co-commit the applied frontier, and count a real replay. */
+static job_result_t ua_commit_applied_frontier(struct ua_apply_work *w)
+{
+    free_delta(&w->summary);
+    stage_release_block_view(&w->owned, &w->handle, w->borrowed);
 
     /* Co-commit the contiguous applied frontier = the SAME value written to
      * the stage cursor (cursor_in + 1), so coins_applied_height ==
@@ -669,9 +787,9 @@ static job_result_t step_apply(struct stage_step_ctx *c)
      * verdicts return JOB_BLOCKED above and hold cursor/frontier at the
      * unresolved height (scratch log row rolled back) — fail-closed, never a
      * mixed coins window over a hole. The seal hook rides THIS txn, never fails it. */
-    uint64_t next_cursor = c->cursor_in + 1;
-    if (!coins_kv_set_applied_height_in_tx(db, (int32_t)next_cursor)) {
-        ua_fatal_permanent_blocker(next_h,
+    uint64_t next_cursor = w->c->cursor_in + 1;
+    if (!coins_kv_set_applied_height_in_tx(w->db, (int32_t)next_cursor)) {
+        ua_fatal_permanent_blocker(w->next_h,
                                    "coins_applied_height co-commit store failure");
         return JOB_FATAL;
     }
@@ -684,7 +802,7 @@ static job_result_t step_apply(struct stage_step_ctx *c)
      * coins_kv_is_proven_authority false and every money-gated command refused.
      * Rides this txn and never fails it: a not-yet / store-error verdict simply
      * leaves the node refused and retries on the next applied block. */
-    utxo_apply_self_derived_stamp_in_tx(db);
+    utxo_apply_self_derived_stamp_in_tx(w->db);
     /* created_outputs prune is DECOUPLED from this kernel co-commit tx:
      * it runs post-commit in its OWN transaction from
      * utxo_apply_stage_drain(), computed from the final committed cursor. The
@@ -693,19 +811,20 @@ static job_result_t step_apply(struct stage_step_ctx *c)
      * crash between the kernel COMMIT and the prune leaves extra
      * created_outputs rows below the retention floor: harmless (the bounded
      * resolver height-ignores them; the next drain re-prunes). */
-    seal_candidate_hook_in_tx(db, g_ms, (int32_t)next_cursor);
+    seal_candidate_hook_in_tx(w->db, g_ms, (int32_t)next_cursor);
     /* SELF-MINT the SHA3-verified anchor snapshot once, at the compiled
      * checkpoint height (observe-only, best-effort — see
      * services/anchor_selfmint.h). */
-    anchor_selfmint_hook_in_tx(db, g_datadir, (int32_t)next_cursor);
+    anchor_selfmint_hook_in_tx(w->db, g_datadir, (int32_t)next_cursor);
     /* Bind the checkpoint to THIS cursor, not the catchup lane's pace. */
-    sapling_checkpoint_hook_in_tx(db, (int64_t)next_h, bi->phashBlock ? bi->phashBlock->data : NULL);
+    sapling_checkpoint_hook_in_tx(w->db, (int64_t)w->next_h,
+        w->bi->phashBlock ? w->bi->phashBlock->data : NULL);
 
-    atomic_store(&g_ua_last_advance_height, (int64_t)next_h);
+    atomic_store(&g_ua_last_advance_height, (int64_t)w->next_h);
     utxo_apply_reject_memo_clear();
     blocker_clear("utxo_apply.apply_failed");
-    c->cursor_out = next_cursor;
-    utxo_apply_progress_note(next_h, next_cursor);
+    w->c->cursor_out = next_cursor;
+    utxo_apply_progress_note(w->next_h, next_cursor);
 
     /* REPLAY GATE coverage accounting (no-op unless ZCL_REPLAY_COUNT_ONLY):
      * count every successfully-applied block toward blocks_replayed so the
@@ -713,14 +832,41 @@ static job_result_t step_apply(struct stage_step_ctx *c)
      * -genesis walk (a FALSE 0). Mark genesis readable when this is h=0.
      * Emit the running summary once the cursor catches the proven tip. */
     if (replay_count_only_active()) {
-        if (next_h == 0)
+        if (w->next_h == 0)
             replay_count_only_mark_genesis_readable();
-        replay_count_only_note_block_replayed((uint32_t)next_h);
-        if (next_cursor >= pv_cursor)
+        replay_count_only_note_block_replayed((uint32_t)w->next_h);
+        if (next_cursor >= w->pv_cursor)
             replay_count_only_emit_summary(
-                (int64_t)stage_cursor_persisted(db, "header_admit", STAGE_NAME));
+                (int64_t)stage_cursor_persisted(w->db, "header_admit",
+                                               STAGE_NAME));
     }
     return JOB_ADVANCED;
+}
+
+static job_result_t step_apply(struct stage_step_ctx *c)
+{
+    atomic_store(&g_ua_last_step_unix, platform_time_wall_unix());
+
+    struct ua_apply_work w;
+    job_result_t result;
+    w.c = c;
+    if (ua_open_apply_frontier(&w, &result) != UA_APPLY_CONTINUE)
+        return result;
+    if (ua_read_apply_verdicts(&w, &result) != UA_APPLY_CONTINUE)
+        return result;
+    if (ua_select_proof_bound_block(&w, &result) != UA_APPLY_CONTINUE)
+        return result;
+    if (ua_accept_script_upstream(&w, &result) != UA_APPLY_CONTINUE)
+        return result;
+    if (ua_compute_delta_or_count(&w, &result) != UA_APPLY_CONTINUE)
+        return result;
+    if (ua_gate_shielded_then_turnstile(&w, &result) != UA_APPLY_CONTINUE)
+        return result;
+    if (ua_author_apply_coins(&w, &result) != UA_APPLY_CONTINUE)
+        return result;
+    if (ua_write_apply_verdict(&w, &result) != UA_APPLY_CONTINUE)
+        return result;
+    return ua_commit_applied_frontier(&w);
 }
 
 static void utxo_apply_step_noadvance_note(sqlite3 *db, job_result_t r,
