@@ -442,6 +442,26 @@ static bool fc_scan_cache(const char *cache_dir, struct fc_entry **entries,
     return true;
 }
 
+static bool fc_read_chunk_at(struct platform_positioned_file *file,
+                             uint8_t *buf, size_t want, uint64_t offset,
+                             size_t *got_out)
+{
+    size_t got = 0;
+    while (got < want) {
+        int64_t n = platform_positioned_file_read(
+            file, buf + got, want - got, offset + got);
+        if (n < 0) {
+            *got_out = got;
+            return false;
+        }
+        if (n == 0)
+            break;
+        got += (size_t)n;
+    }
+    *got_out = got;
+    return true;
+}
+
 /* Stream one object file: compute every 1 MiB chunk hash (canonical
  * content.v2 chunk identity) and the whole-file SHA3-256 in one pass,
  * without holding the object in memory. Exactly `size` bytes must be
@@ -471,17 +491,7 @@ static bool fc_hash_object_stream(const char *cache_dir,
         if ((uint64_t)want > size - hashed_bytes)
             want = (size_t)(size - hashed_bytes);
         size_t got = 0;
-        while (got < want) {
-            int64_t n = platform_positioned_file_read(
-                &file, buf + got, want - got, hashed_bytes + got);
-            if (n < 0) {
-                ok = false;
-                break;
-            }
-            if (n == 0)
-                break;
-            got += (size_t)n;
-        }
+        ok = fc_read_chunk_at(&file, buf, want, hashed_bytes, &got);
         if (!ok || got == 0) {
             if (ok)
                 ok = false; /* short file: fewer bytes than stat claimed */
@@ -607,6 +617,218 @@ const char *fc_store_err(enum vcs_package_store_result r)
 
 /* ── export ─────────────────────────────────────────────────────────── */
 
+static bool fc_export_alloc_arrays(size_t count, uint8_t ***sides,
+                                   size_t **side_lens, uint8_t **chunk_hashes,
+                                   char *err, size_t err_cap)
+{
+    bool ok = true;
+    *sides = zcl_calloc(count, sizeof(**sides), "fastobj-admit-sides");
+    *side_lens = zcl_calloc(count, sizeof(**side_lens), "fastobj-admit-lens");
+    *chunk_hashes = zcl_malloc((size_t)(FASTOBJ_CARRIER_MAX_OBJECT_BYTES /
+                                        VCS_PACKAGE_CHUNK_BYTES + 1u) *
+                               32u, "fastobj-admit-chunks");
+    if (!*sides || !*side_lens || !*chunk_hashes) {
+        (void)snprintf(err, err_cap, "entry alloc failed");
+        ok = false;
+    }
+    return ok;
+}
+
+static bool fc_export_add_entry(const char *cache_dir,
+                                const struct fc_entry *entry,
+                                uint8_t **side, size_t *side_len,
+                                struct vcs_package_manifest *manifest,
+                                uint8_t *chunk_hashes, uint64_t *object_bytes,
+                                char *err, size_t err_cap)
+{
+    struct stat st;
+    char obj_path[4096], side_path[4096];
+    char key_arg[65];
+    memcpy(key_arg, entry->key, 65);
+    if (!vcs_fastobj_cache_paths(cache_dir, key_arg, obj_path,
+                                 sizeof(obj_path), side_path,
+                                 sizeof(side_path)) ||
+        stat(obj_path, &st) != 0) {
+        (void)snprintf(err, err_cap, "entry %.16s...: object vanished",
+                       key_arg);
+        return false;
+    }
+    uint32_t chunks = st.st_size == 0
+        ? 0u
+        : (uint32_t)(((uint64_t)st.st_size +
+                      VCS_PACKAGE_CHUNK_BYTES - 1u) /
+                     VCS_PACKAGE_CHUNK_BYTES);
+    uint64_t obj_len = 0;
+    uint8_t obj_sha[32];
+    if (!fc_verify_entry(cache_dir, key_arg, side, side_len, &obj_len,
+                         chunk_hashes, chunks, obj_sha, err, err_cap))
+        return false;
+    *object_bytes += obj_len;
+    char obj_cpath[4096], side_cpath[4096];
+    int on = snprintf(obj_cpath, sizeof(obj_cpath), "%s%s.o",
+                      carrier_dir, key_arg);
+    int sn = snprintf(side_cpath, sizeof(side_cpath), "%s%s.json",
+                      carrier_dir, key_arg);
+    if (on <= 0 || (size_t)on >= sizeof(obj_cpath) || sn <= 0 ||
+        (size_t)sn >= sizeof(side_cpath) ||
+        !vcs_package_path_valid(obj_cpath) ||
+        !vcs_package_path_valid(side_cpath) ||
+        !vcs_package_manifest_add(manifest, obj_cpath,
+                                  VCS_PACKAGE_MODE_FILE, obj_len,
+                                  chunk_hashes, chunks) ||
+        !vcs_package_content_add_file(manifest, side_cpath,
+                                      VCS_PACKAGE_MODE_FILE, *side,
+                                      *side_len)) {
+        (void)snprintf(err, err_cap,
+                       "entry %.16s...: manifest add failed", key_arg);
+        return false;
+    }
+    return true;
+}
+
+static bool fc_export_put_manifest(struct vcs_package_store *store,
+                                   struct vcs_package_manifest *manifest,
+                                   uint8_t **wire, size_t *wire_len,
+                                   uint8_t root[32], char *err,
+                                   size_t err_cap)
+{
+    bool ok = true;
+    if (!vcs_package_manifest_serialize(manifest, wire, wire_len) ||
+        !vcs_package_manifest_root(manifest, root)) {
+        (void)snprintf(err, err_cap, "carrier manifest serialize failed");
+        ok = false;
+    }
+    uint8_t stored_root[32] = {0};
+    if (ok) {
+        enum vcs_package_store_result r = vcs_package_store_put_manifest(
+            store, *wire, *wire_len, stored_root);
+        if (r != VCS_PACKAGE_STORE_OK) {
+            (void)snprintf(err, err_cap, "store refused the carrier "
+                         "manifest: %s", fc_store_err(r));
+            ok = false;
+        } else if (memcmp(stored_root, root, 32) != 0) {
+            (void)snprintf(err, err_cap,
+                           "store computed a different carrier root");
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+static bool fc_export_put_chunks(struct vcs_package_store *store,
+                                 uint8_t root[32],
+                                 struct platform_positioned_file *file,
+                                 uint8_t *buf, uint64_t size,
+                                 const char *obj_cpath,
+                                 char *err, size_t err_cap)
+{
+    bool ok = true;
+    uint32_t chunks = size == 0
+        ? 0u
+        : (uint32_t)((size + VCS_PACKAGE_CHUNK_BYTES - 1u) /
+                     VCS_PACKAGE_CHUNK_BYTES);
+    for (uint32_t c = 0; ok && c < chunks; c++) {
+        size_t want = VCS_PACKAGE_CHUNK_BYTES, got = 0;
+        while (got < want) {
+            int64_t n = platform_positioned_file_read(
+                file, buf + got, want - got,
+                (uint64_t)c * VCS_PACKAGE_CHUNK_BYTES + got);
+            if (n < 0) {
+                break;
+            }
+            if (n == 0)
+                break;
+            got += (size_t)n;
+        }
+        enum vcs_package_store_result wr = vcs_package_store_put_chunk(
+            store, root, obj_cpath, c, buf, got);
+        if (wr != VCS_PACKAGE_STORE_OK) {
+            (void)snprintf(err, err_cap,
+                           "store refused object chunk %s[%u]: %s",
+                           obj_cpath, c, fc_store_err(wr));
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+static bool fc_export_put_object(struct vcs_package_store *store,
+                                 uint8_t root[32], const char *cache_dir,
+                                 const char *key, const char *obj_cpath,
+                                 char *err, size_t err_cap)
+{
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    uint64_t size = 0;
+    bool opened = fc_open_cache_object(cache_dir, key, &file, &size);
+    uint8_t *buf = opened ? zcl_malloc(VCS_PACKAGE_CHUNK_BYTES,
+                                       "fastobj-admit-obj") : NULL;
+    if (!opened || !buf) {
+        (void)snprintf(err, err_cap, "entry %.16s...: object reopen "
+                     "unreadable or over cap", key);
+        if (opened)
+            platform_positioned_file_close(&file);
+        free(buf);
+        return false;
+    }
+    bool ok = fc_export_put_chunks(store, root, &file, buf, size, obj_cpath,
+                                   err, err_cap);
+    platform_positioned_file_close(&file);
+    free(buf);
+    return ok;
+}
+
+static bool fc_export_put_entry(struct vcs_package_store *store,
+                                uint8_t root[32], const char *cache_dir,
+                                const struct fc_entry *entry,
+                                const uint8_t *side, size_t side_len,
+                                char *err, size_t err_cap)
+{
+    char obj_cpath[4096], side_cpath[4096];
+    (void)snprintf(obj_cpath, sizeof(obj_cpath), "%s%s.o", carrier_dir,
+                   entry->key);
+    (void)snprintf(side_cpath, sizeof(side_cpath), "%s%s.json",
+                   carrier_dir, entry->key);
+    bool ok = fc_export_put_object(store, root, cache_dir, entry->key,
+                                   obj_cpath, err, err_cap);
+    if (ok) {
+        enum vcs_package_store_result wr =
+            vcs_package_content_put_file(store, root, side_cpath,
+                                         side, side_len);
+        if (wr != VCS_PACKAGE_STORE_OK) {
+            (void)snprintf(err, err_cap,
+                           "store refused sidecar %s: %s", side_cpath,
+                           fc_store_err(wr));
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+static bool fc_export_check_complete(struct vcs_package_store *store,
+                                     uint8_t root[32], char *err,
+                                     size_t err_cap)
+{
+    bool ok = true;
+    struct vcs_package_store_status status;
+    /* bool return, not a store result code. */
+    if (!vcs_package_store_package_status(store, root, &status) ||
+        !status.complete) {
+        (void)snprintf(err, err_cap, "carrier incomplete in store");
+        ok = false;
+    }
+    return ok;
+}
+
+static void fc_export_free_sides(uint8_t **sides, size_t count)
+{
+    if (sides) {
+        for (size_t i = 0; i < count; i++)
+            free(sides[i]);
+        free(sides);
+    }
+}
+
 bool vcs_fastobj_carrier_export(const char *cache_dir,
                                 struct vcs_package_store *store,
                                 uint8_t root_out[32],
@@ -633,174 +855,33 @@ bool vcs_fastobj_carrier_export(const char *cache_dir,
     if (!ok)
         (void)snprintf(err, err_cap,
                        "cache %s holds no entries", cache_dir);
-    if (ok) {
-        sides = zcl_calloc(count, sizeof(*sides), "fastobj-admit-sides");
-        side_lens = zcl_calloc(count, sizeof(*side_lens), "fastobj-admit-lens");
-        chunk_hashes = zcl_malloc((size_t)(FASTOBJ_CARRIER_MAX_OBJECT_BYTES /
-                                       VCS_PACKAGE_CHUNK_BYTES + 1u) *
-                              32u, "fastobj-admit-chunks");
-        if (!sides || !side_lens || !chunk_hashes) {
-            (void)snprintf(err, err_cap, "entry alloc failed");
-            ok = false;
-        }
-    }
+    if (ok)
+        ok = fc_export_alloc_arrays(count, &sides, &side_lens,
+                                    &chunk_hashes, err, err_cap);
     uint64_t object_bytes = 0;
-    for (size_t i = 0; ok && i < count; i++) {
-        struct stat st;
-        char obj_path[4096], side_path[4096];
-        char key_arg[65];
-        memcpy(key_arg, entries[i].key, 65);
-        if (!vcs_fastobj_cache_paths(cache_dir, key_arg, obj_path,
-                                     sizeof(obj_path), side_path,
-                                     sizeof(side_path)) ||
-            stat(obj_path, &st) != 0) {
-            (void)snprintf(err, err_cap, "entry %.16s...: object vanished",
-                           key_arg);
-            ok = false;
-            break;
-        }
-        uint32_t chunks = st.st_size == 0
-            ? 0u
-            : (uint32_t)(((uint64_t)st.st_size +
-                          VCS_PACKAGE_CHUNK_BYTES - 1u) /
-                         VCS_PACKAGE_CHUNK_BYTES);
-        uint64_t obj_len = 0;
-        uint8_t obj_sha[32];
-        if (!fc_verify_entry(cache_dir, key_arg, &sides[i], &side_lens[i],
-                             &obj_len, chunk_hashes, chunks, obj_sha, err,
-                             err_cap)) {
-            ok = false;
-            break;
-        }
-        object_bytes += obj_len;
-        char obj_cpath[4096], side_cpath[4096];
-        int on = snprintf(obj_cpath, sizeof(obj_cpath), "%s%s.o",
-                          carrier_dir, key_arg);
-        int sn = snprintf(side_cpath, sizeof(side_cpath), "%s%s.json",
-                          carrier_dir, key_arg);
-        if (on <= 0 || (size_t)on >= sizeof(obj_cpath) || sn <= 0 ||
-            (size_t)sn >= sizeof(side_cpath) ||
-            !vcs_package_path_valid(obj_cpath) ||
-            !vcs_package_path_valid(side_cpath) ||
-            !vcs_package_manifest_add(&manifest, obj_cpath,
-                                      VCS_PACKAGE_MODE_FILE, obj_len,
-                                      chunk_hashes, chunks) ||
-            !vcs_package_content_add_file(&manifest, side_cpath,
-                                          VCS_PACKAGE_MODE_FILE, sides[i],
-                                          side_lens[i])) {
-            (void)snprintf(err, err_cap,
-                           "entry %.16s...: manifest add failed", key_arg);
-            ok = false;
-            break;
-        }
-    }
+    for (size_t i = 0; ok && i < count; i++)
+        ok = fc_export_add_entry(cache_dir, &entries[i], &sides[i],
+                                 &side_lens[i], &manifest, chunk_hashes,
+                                 &object_bytes, err, err_cap);
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     uint8_t root[32] = {0};
-    if (ok && (!vcs_package_manifest_serialize(&manifest, &wire,
-                                               &wire_len) ||
-               !vcs_package_manifest_root(&manifest, root))) {
-        (void)snprintf(err, err_cap, "carrier manifest serialize failed");
-        ok = false;
-    }
-    uint8_t stored_root[32] = {0};
-    if (ok) {
-        enum vcs_package_store_result r = vcs_package_store_put_manifest(
-            store, wire, wire_len, stored_root);
-        if (r != VCS_PACKAGE_STORE_OK) {
-            (void)snprintf(err, err_cap, "store refused the carrier "
-                         "manifest: %s", fc_store_err(r));
-            ok = false;
-        } else if (memcmp(stored_root, root, 32) != 0) {
-            (void)snprintf(err, err_cap,
-                           "store computed a different carrier root");
-            ok = false;
-        }
-    }
+    if (ok)
+        ok = fc_export_put_manifest(store, &manifest, &wire, &wire_len,
+                                    root, err, err_cap);
     /* Stream each object's chunks in from disk again at put time; the
      * sidecar is small enough to admit whole. */
-    for (size_t i = 0; ok && i < count; i++) {
-        char obj_cpath[4096], side_cpath[4096];
-        (void)snprintf(obj_cpath, sizeof(obj_cpath), "%s%s.o", carrier_dir,
-                       entries[i].key);
-        (void)snprintf(side_cpath, sizeof(side_cpath), "%s%s.json",
-                       carrier_dir, entries[i].key);
-        struct platform_positioned_file file;
-        platform_positioned_file_init(&file);
-        uint64_t size = 0;
-        bool opened = fc_open_cache_object(cache_dir, entries[i].key,
-                                           &file, &size);
-        uint8_t *buf = opened ? zcl_malloc(VCS_PACKAGE_CHUNK_BYTES,
-                                           "fastobj-admit-obj") : NULL;
-        if (!opened || !buf) {
-            (void)snprintf(err, err_cap, "entry %.16s...: object reopen "
-                         "unreadable or over cap",
-                           entries[i].key);
-            if (opened)
-                platform_positioned_file_close(&file);
-            free(buf);
-            ok = false;
-            break;
-        }
-        uint32_t chunks = size == 0
-            ? 0u
-            : (uint32_t)((size + VCS_PACKAGE_CHUNK_BYTES - 1u) /
-                         VCS_PACKAGE_CHUNK_BYTES);
-        for (uint32_t c = 0; ok && c < chunks; c++) {
-            size_t want = VCS_PACKAGE_CHUNK_BYTES, got = 0;
-            while (got < want) {
-                int64_t n = platform_positioned_file_read(
-                    &file, buf + got, want - got,
-                    (uint64_t)c * VCS_PACKAGE_CHUNK_BYTES + got);
-                if (n < 0) {
-                    break;
-                }
-                if (n == 0)
-                    break;
-                got += (size_t)n;
-            }
-            enum vcs_package_store_result wr = vcs_package_store_put_chunk(
-                store, root, obj_cpath, c, buf, got);
-            if (wr != VCS_PACKAGE_STORE_OK) {
-                (void)snprintf(err, err_cap,
-                               "store refused object chunk %s[%u]: %s",
-                               obj_cpath, c, fc_store_err(wr));
-                ok = false;
-            }
-        }
-        platform_positioned_file_close(&file);
-        free(buf);
-        if (ok) {
-            enum vcs_package_store_result wr =
-                vcs_package_content_put_file(store, root, side_cpath,
-                                             sides[i], side_lens[i]);
-            if (wr != VCS_PACKAGE_STORE_OK) {
-                (void)snprintf(err, err_cap,
-                               "store refused sidecar %s: %s", side_cpath,
-                               fc_store_err(wr));
-                ok = false;
-            }
-        }
-    }
-    if (ok) {
-        struct vcs_package_store_status status;
-        /* bool return, not a store result code. */
-        if (!vcs_package_store_package_status(store, root, &status) ||
-            !status.complete) {
-            (void)snprintf(err, err_cap, "carrier incomplete in store");
-            ok = false;
-        }
-    }
+    for (size_t i = 0; ok && i < count; i++)
+        ok = fc_export_put_entry(store, root, cache_dir, &entries[i],
+                                 sides[i], side_lens[i], err, err_cap);
+    if (ok)
+        ok = fc_export_check_complete(store, root, err, err_cap);
     if (ok) {
         memcpy(root_out, root, 32);
         fc_fill_stats(&manifest, (uint32_t)count, object_bytes, stats);
     }
     free(wire);
-    if (sides) {
-        for (size_t i = 0; i < count; i++)
-            free(sides[i]);
-        free(sides);
-    }
+    fc_export_free_sides(sides, count);
     free(side_lens);
     free(chunk_hashes);
     vcs_package_manifest_free(&manifest);
@@ -898,6 +979,96 @@ static bool fc_admit_entry(const char *cache_dir, const char *key,
     return ok;
 }
 
+static bool fc_carrier_check_layout(size_t count, size_t n,
+                                    const char *cache_dir, char *err,
+                                    size_t err_cap)
+{
+    bool ok = true;
+    if (count % 2u != 0u || n == 0 ||
+        n > VCS_FASTOBJ_CARRIER_MAX_ENTRIES) {
+        (void)snprintf(err, err_cap,
+                       "carrier holds %zu files — not entry pairs",
+                       count);
+        ok = false;
+    }
+    if (ok && cache_dir && !fc_mkdir_p(cache_dir)) {
+        (void)snprintf(err, err_cap, "cannot create cache dir %s",
+                       cache_dir);
+        ok = false;
+    }
+    return ok;
+}
+
+static bool fc_carrier_check_pair(const struct vcs_package_manifest *manifest,
+                                  size_t i, char key[65], char *err,
+                                  size_t err_cap)
+{
+    const struct vcs_package_file *side_f = &manifest->files[2u * i];
+    const struct vcs_package_file *obj_f = &manifest->files[2u * i + 1u];
+    char side_key[65];
+    bool ok = true;
+    if (!fc_carrier_member(side_f->path, ".json", side_key) ||
+        !fc_carrier_member(obj_f->path, ".o", key) ||
+        strcmp(key, side_key) != 0) {
+        (void)snprintf(err, err_cap,
+                       "carrier files %.60s / %.60s are not an entry "
+                       "pair", side_f->path, obj_f->path);
+        ok = false;
+    }
+    if (ok && (obj_f->size > FASTOBJ_CARRIER_MAX_OBJECT_BYTES ||
+               side_f->size > VCS_FASTOBJ_SIDECAR_MAX_BYTES)) {
+        (void)snprintf(err, err_cap,
+                       "carrier entry %.16s...: member over cap", key);
+        ok = false;
+    }
+    return ok;
+}
+
+static bool fc_carrier_admit_pair(struct vcs_package_store *store,
+                                  const uint8_t root[32],
+                                  struct vcs_package_manifest *manifest,
+                                  size_t i, const char *key,
+                                  const char *cache_dir,
+                                  uint64_t *object_bytes,
+                                  char *err, size_t err_cap)
+{
+    uint8_t *obj = NULL, *side = NULL;
+    size_t obj_len = 0, side_len = 0;
+    enum vcs_package_store_result r1 = vcs_package_content_get_file_at(
+        store, root, manifest, (uint32_t)(2u * i + 1u), &obj, &obj_len);
+    enum vcs_package_store_result r2 = vcs_package_content_get_file_at(
+        store, root, manifest, (uint32_t)(2u * i), &side, &side_len);
+    if (r1 != VCS_PACKAGE_STORE_OK || r2 != VCS_PACKAGE_STORE_OK) {
+        free(obj);
+        free(side);
+        (void)snprintf(err, err_cap, "entry %.16s...: %s", key,
+                       fc_store_err(r1 != VCS_PACKAGE_STORE_OK ? r1
+                                                               : r2));
+        return false;
+    }
+    uint8_t expect[32];
+    bool entry_ok = vcs_fastobj_sidecar_verify(side, side_len, key,
+                                               expect, err, err_cap);
+    if (entry_ok) {
+        uint8_t actual[32];
+        zcl_sha3_256(obj, obj_len, actual);
+        if (memcmp(actual, expect, 32) != 0) {
+            (void)snprintf(err, err_cap,
+                           "entry %.16s...: object does not hash to "
+                           "its sidecar object_sha3", key);
+            entry_ok = false;
+        }
+    }
+    if (entry_ok && cache_dir)
+        entry_ok = fc_admit_entry(cache_dir, key, obj, obj_len, side,
+                                  side_len, err, err_cap);
+    if (entry_ok)
+        *object_bytes += obj_len;
+    free(obj);
+    free(side);
+    return entry_ok;
+}
+
 /* Walk one carrier root in the store, verifying every entry pair; when
  * `cache_dir` is non-NULL each verified pair also lands in the receiving
  * cache (admit). A NULL cache_dir is the read-only walk behind
@@ -936,78 +1107,15 @@ static bool fc_carrier_apply(const char *cache_dir,
      * first differing byte is 'j' < 'o'. Members pair as adjacent files
      * (2i = sidecar, 2i+1 = object). */
     size_t n = manifest.count / 2u;
-    if (ok && (manifest.count % 2u != 0u || n == 0 ||
-               n > VCS_FASTOBJ_CARRIER_MAX_ENTRIES)) {
-        (void)snprintf(err, err_cap,
-                       "carrier holds %zu files — not entry pairs",
-                       manifest.count);
-        ok = false;
-    }
-    if (ok && cache_dir && !fc_mkdir_p(cache_dir)) {
-        (void)snprintf(err, err_cap, "cannot create cache dir %s",
-                       cache_dir);
-        ok = false;
-    }
+    if (ok)
+        ok = fc_carrier_check_layout(manifest.count, n, cache_dir, err,
+                                     err_cap);
     uint64_t object_bytes = 0;
     for (size_t i = 0; ok && i < n; i++) {
-        const struct vcs_package_file *side_f = &manifest.files[2u * i];
-        const struct vcs_package_file *obj_f = &manifest.files[2u * i + 1u];
-        char key[65], side_key[65];
-        if (!fc_carrier_member(side_f->path, ".json", side_key) ||
-            !fc_carrier_member(obj_f->path, ".o", key) ||
-            strcmp(key, side_key) != 0) {
-            (void)snprintf(err, err_cap,
-                           "carrier files %.60s / %.60s are not an entry "
-                           "pair", side_f->path, obj_f->path);
-            ok = false;
-            break;
-        }
-        if (obj_f->size > FASTOBJ_CARRIER_MAX_OBJECT_BYTES ||
-            side_f->size > VCS_FASTOBJ_SIDECAR_MAX_BYTES) {
-            (void)snprintf(err, err_cap,
-                           "carrier entry %.16s...: member over cap", key);
-            ok = false;
-            break;
-        }
-        uint8_t *obj = NULL, *side = NULL;
-        size_t obj_len = 0, side_len = 0;
-        enum vcs_package_store_result r1 = vcs_package_content_get_file_at(
-            store, root, &manifest, (uint32_t)(2u * i + 1u), &obj, &obj_len);
-        enum vcs_package_store_result r2 = vcs_package_content_get_file_at(
-            store, root, &manifest, (uint32_t)(2u * i), &side, &side_len);
-        if (r1 != VCS_PACKAGE_STORE_OK || r2 != VCS_PACKAGE_STORE_OK) {
-            free(obj);
-            free(side);
-            (void)snprintf(err, err_cap, "entry %.16s...: %s", key,
-                           fc_store_err(r1 != VCS_PACKAGE_STORE_OK ? r1
-                                                                   : r2));
-            ok = false;
-            break;
-        }
-        uint8_t expect[32];
-        bool entry_ok = vcs_fastobj_sidecar_verify(side, side_len, key,
-                                                   expect, err, err_cap);
-        if (entry_ok) {
-            uint8_t actual[32];
-            zcl_sha3_256(obj, obj_len, actual);
-            if (memcmp(actual, expect, 32) != 0) {
-                (void)snprintf(err, err_cap,
-                               "entry %.16s...: object does not hash to "
-                               "its sidecar object_sha3", key);
-                entry_ok = false;
-            }
-        }
-        if (entry_ok && cache_dir)
-            entry_ok = fc_admit_entry(cache_dir, key, obj, obj_len, side,
-                                      side_len, err, err_cap);
-        if (entry_ok)
-            object_bytes += obj_len;
-        free(obj);
-        free(side);
-        if (!entry_ok) {
-            ok = false;
-            break;
-        }
+        char key[65];
+        ok = fc_carrier_check_pair(&manifest, i, key, err, err_cap) &&
+             fc_carrier_admit_pair(store, root, &manifest, i, key, cache_dir,
+                                   &object_bytes, err, err_cap);
     }
     if (ok)
         fc_fill_stats(&manifest, (uint32_t)n, object_bytes, stats);
