@@ -1601,7 +1601,6 @@ tests/harness/src/test_zcode_dht_service.c:test_record_churn_fallback:24
 tests/harness/src/test_zcode_dht_service.c:test_sparse_iterative_network:36
 tests/harness/src/test_zcode_dht_service.c:test_sparse_space16_network:59
 tests/harness/src/test_zcode_dht_service.c:test_zcode_dht_service:18
-tests/harness/src/test_zcode_discovery_projection.c:zproj_mint_corpus:20
 tests/harness/src/test_zcode_moderation_attestation.c:test_composition_rule:18
 tests/harness/src/test_zcode_package_dev.c:zpd_find_build_receipt:36
 tests/harness/src/test_zcode_package_dev.c:zpd_next_is:20

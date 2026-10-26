@@ -490,6 +490,101 @@ static const uint8_t *zproj_lineage_rep(
 
 /* ── 1: determinism + input-order invariance ─────────────────────── */
 
+/* Finalize the corpus citation chains in dependency order: C's root, then
+ * B's set citing {C}, then A's set citing {B, C}. Returns 0, or -1 on the
+ * first failure. */
+static int zproj_mint_citation_chains(
+    const char *workspace, struct vcs_zcode_study_spec_v1 studies[3],
+    uint8_t roots[3][32])
+{
+    uint8_t payload[VCS_ZCODE_DISCOVERY_PROJECTION_MAX_CITATION_SET * 32u];
+    size_t count = 0;
+    /* C carries no citation object: its root is final. */
+    if (vcs_zcode_study_spec_root(&studies[2], roots[2]) !=
+        VCS_ZCODE_SCIENCE_OK)
+        return -1;
+    /* B cites {C}: encode, point B at the set, finalize B's root. */
+    if (!vcs_zcode_discovery_citation_set_encode(roots[2], 1, payload,
+                                                 &count,
+                                                 studies[1].citations_root))
+        return -1;
+    if (!zproj_put(workspace, studies[1].citations_root, payload,
+                   count * 32u))
+        return -1;
+    if (vcs_zcode_study_spec_root(&studies[1], roots[1]) !=
+        VCS_ZCODE_SCIENCE_OK)
+        return -1;
+    /* A cites {B, C}. */
+    uint8_t a_cited[2][32];
+    memcpy(a_cited[0], roots[1], 32);
+    memcpy(a_cited[1], roots[2], 32);
+    if (!vcs_zcode_discovery_citation_set_encode(&a_cited[0][0], 2, payload,
+                                                 &count,
+                                                 studies[0].citations_root))
+        return -1;
+    if (!zproj_put(workspace, studies[0].citations_root, payload,
+                   count * 32u))
+        return -1;
+    if (vcs_zcode_study_spec_root(&studies[0], roots[0]) !=
+        VCS_ZCODE_SCIENCE_OK)
+        return -1;
+    return 0;
+}
+
+/* Store the corpus vote zoo (valid, expired, cross-network, replay, FLAG,
+ * and tampered-signature votes) over the finalized study roots. Returns 0,
+ * or -1 on the first failure. */
+static int zproj_mint_vote_zoo(const char *workspace,
+                               const uint8_t genesis[32],
+                               uint8_t roots[3][32])
+{
+    /* The vote zoo: valid USEFUL (voter A on B), valid INTERESTING
+     * (voter B on C), expired (voter C on B), cross-network (voter D on B),
+     * a voter+sequence replay pair (voter E on C, twice), a FLAG (voter F
+     * on A), and a tampered signature (voter G on B). */
+    uint8_t voter[32], key[32], id[32], alt_genesis[32];
+    zproj_root(alt_genesis, 99);
+    zproj_seed(voter, 51);
+    zproj_seed(key, 61);
+    if (!zproj_put_vote(workspace, genesis, voter, roots[1],
+                        VCS_ZCODE_CURATION_USEFUL, 1, 5000, key, id))
+        return -1;
+    zproj_seed(voter, 52);
+    zproj_seed(key, 62);
+    if (!zproj_put_vote(workspace, genesis, voter, roots[2],
+                        VCS_ZCODE_CURATION_INTERESTING, 1, 5000, key, id))
+        return -1;
+    zproj_seed(voter, 53);
+    zproj_seed(key, 63);
+    if (!zproj_put_vote(workspace, genesis, voter, roots[1],
+                        VCS_ZCODE_CURATION_USEFUL, 1, 1500, key, id))
+        return -1; /* expired at ZPROJ_NOW */
+    zproj_seed(voter, 54);
+    zproj_seed(key, 64);
+    if (!zproj_put_vote(workspace, alt_genesis, voter, roots[1],
+                        VCS_ZCODE_CURATION_USEFUL, 1, 5000, key, id))
+        return -1; /* cross-network */
+    zproj_seed(voter, 55);
+    zproj_seed(key, 65);
+    if (!zproj_put_vote(workspace, genesis, voter, roots[2],
+                        VCS_ZCODE_CURATION_USEFUL, 7, 5000, key, id))
+        return -1; /* replay pair, first */
+    if (!zproj_put_vote(workspace, genesis, voter, roots[2],
+                        VCS_ZCODE_CURATION_USEFUL, 7, 4999, key, id))
+        return -1; /* replay pair, second (different expiry, same seq) */
+    zproj_seed(voter, 56);
+    zproj_seed(key, 66);
+    if (!zproj_put_vote(workspace, genesis, voter, roots[0],
+                        VCS_ZCODE_CURATION_FLAG, 1, 5000, key, id))
+        return -1; /* FLAG: never a seed */
+    zproj_seed(voter, 57);
+    zproj_seed(key, 67);
+    if (!zproj_put_tampered_vote(workspace, genesis, voter, roots[1], key,
+                                 id))
+        return -1;
+    return 0;
+}
+
 /* Mint the shared corpus: studies A/B/C with citation edges A->B, A->C,
  * B->C and the full vote zoo. Citation sets name FINAL study roots, so
  * they are built dependency-order (C's root is fixed; B's set cites C;
@@ -505,36 +600,7 @@ static bool zproj_mint_corpus(const char *workspace, bool reverse,
         zproj_root(sources[i], src_bytes[i]);
     }
     zproj_root(genesis, 50);
-    uint8_t payload[VCS_ZCODE_DISCOVERY_PROJECTION_MAX_CITATION_SET * 32u];
-    size_t count = 0;
-    /* C carries no citation object: its root is final. */
-    if (vcs_zcode_study_spec_root(&studies[2], roots[2]) !=
-        VCS_ZCODE_SCIENCE_OK)
-        return false;
-    /* B cites {C}: encode, point B at the set, finalize B's root. */
-    if (!vcs_zcode_discovery_citation_set_encode(roots[2], 1, payload,
-                                                 &count,
-                                                 studies[1].citations_root))
-        return false;
-    if (!zproj_put(workspace, studies[1].citations_root, payload,
-                   count * 32u))
-        return false;
-    if (vcs_zcode_study_spec_root(&studies[1], roots[1]) !=
-        VCS_ZCODE_SCIENCE_OK)
-        return false;
-    /* A cites {B, C}. */
-    uint8_t a_cited[2][32];
-    memcpy(a_cited[0], roots[1], 32);
-    memcpy(a_cited[1], roots[2], 32);
-    if (!vcs_zcode_discovery_citation_set_encode(&a_cited[0][0], 2, payload,
-                                                 &count,
-                                                 studies[0].citations_root))
-        return false;
-    if (!zproj_put(workspace, studies[0].citations_root, payload,
-                   count * 32u))
-        return false;
-    if (vcs_zcode_study_spec_root(&studies[0], roots[0]) !=
-        VCS_ZCODE_SCIENCE_OK)
+    if (zproj_mint_citation_chains(workspace, studies, roots) != 0)
         return false;
     /* Insertion order must not matter: forward on one workspace, reverse
      * on the other. */
@@ -548,49 +614,7 @@ static bool zproj_mint_corpus(const char *workspace, bool reverse,
         if (!zproj_put_study(workspace, &studies[order[k]], ignored))
             return false;
     }
-    /* The vote zoo: valid USEFUL (voter A on B), valid INTERESTING
-     * (voter B on C), expired (voter C on B), cross-network (voter D on B),
-     * a voter+sequence replay pair (voter E on C, twice), a FLAG (voter F
-     * on A), and a tampered signature (voter G on B). */
-    uint8_t voter[32], key[32], id[32], alt_genesis[32];
-    zproj_root(alt_genesis, 99);
-    zproj_seed(voter, 51);
-    zproj_seed(key, 61);
-    if (!zproj_put_vote(workspace, genesis, voter, roots[1],
-                        VCS_ZCODE_CURATION_USEFUL, 1, 5000, key, id))
-        return false;
-    zproj_seed(voter, 52);
-    zproj_seed(key, 62);
-    if (!zproj_put_vote(workspace, genesis, voter, roots[2],
-                        VCS_ZCODE_CURATION_INTERESTING, 1, 5000, key, id))
-        return false;
-    zproj_seed(voter, 53);
-    zproj_seed(key, 63);
-    if (!zproj_put_vote(workspace, genesis, voter, roots[1],
-                        VCS_ZCODE_CURATION_USEFUL, 1, 1500, key, id))
-        return false; /* expired at ZPROJ_NOW */
-    zproj_seed(voter, 54);
-    zproj_seed(key, 64);
-    if (!zproj_put_vote(workspace, alt_genesis, voter, roots[1],
-                        VCS_ZCODE_CURATION_USEFUL, 1, 5000, key, id))
-        return false; /* cross-network */
-    zproj_seed(voter, 55);
-    zproj_seed(key, 65);
-    if (!zproj_put_vote(workspace, genesis, voter, roots[2],
-                        VCS_ZCODE_CURATION_USEFUL, 7, 5000, key, id))
-        return false; /* replay pair, first */
-    if (!zproj_put_vote(workspace, genesis, voter, roots[2],
-                        VCS_ZCODE_CURATION_USEFUL, 7, 4999, key, id))
-        return false; /* replay pair, second (different expiry, same seq) */
-    zproj_seed(voter, 56);
-    zproj_seed(key, 66);
-    if (!zproj_put_vote(workspace, genesis, voter, roots[0],
-                        VCS_ZCODE_CURATION_FLAG, 1, 5000, key, id))
-        return false; /* FLAG: never a seed */
-    zproj_seed(voter, 57);
-    zproj_seed(key, 67);
-    if (!zproj_put_tampered_vote(workspace, genesis, voter, roots[1], key,
-                                 id))
+    if (zproj_mint_vote_zoo(workspace, genesis, roots) != 0)
         return false;
     return true;
 }
