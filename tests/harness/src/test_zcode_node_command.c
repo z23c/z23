@@ -144,6 +144,30 @@ static bool znt_has_line(const char *text, const char *line)
 
 /* ── 1-2: the declarative contract and the aliases ──────────────────────── */
 
+static int t_registry_planned_leaves(void)
+{
+    int failures = 0;
+    /* Every update leaf must be PLANNED-with-a-reason. A READY leaf with no
+     * implementation, or a PLANNED leaf with an empty reason, is the silent
+     * stall this surface is explicitly designed not to be. */
+    static const char *const planned[] = {
+        "zcode.node.update.status",
+        "zcode.node.update.check",
+        "zcode.node.update.apply",
+    };
+    for (size_t i = 0; i < sizeof(planned) / sizeof(planned[0]); i++) {
+        const struct zcl_command_spec *s = znt_leaf(planned[i]);
+        char name[160];
+        snprintf(name, sizeof(name), "%s is PLANNED, handler-free, and names "
+                 "its reason", planned[i]);
+        ZNJ_CHECK(name,
+                  s && s->availability == ZCL_COMMAND_PLANNED &&
+                  s->handler == NULL && s->availability_reason &&
+                  s->availability_reason[0]);
+    }
+    return failures;
+}
+
 static int t_registry_contract(void)
 {
     int failures = 0;
@@ -184,24 +208,7 @@ static int t_registry_contract(void)
     ZNJ_CHECK("the native adapter owns the `update` root word",
               zcl_native_command_is_root("update"));
 
-    /* Every update leaf must be PLANNED-with-a-reason. A READY leaf with no
-     * implementation, or a PLANNED leaf with an empty reason, is the silent
-     * stall this surface is explicitly designed not to be. */
-    static const char *const planned[] = {
-        "zcode.node.update.status",
-        "zcode.node.update.check",
-        "zcode.node.update.apply",
-    };
-    for (size_t i = 0; i < sizeof(planned) / sizeof(planned[0]); i++) {
-        const struct zcl_command_spec *s = znt_leaf(planned[i]);
-        char name[160];
-        snprintf(name, sizeof(name), "%s is PLANNED, handler-free, and names "
-                 "its reason", planned[i]);
-        ZNJ_CHECK(name,
-                  s && s->availability == ZCL_COMMAND_PLANNED &&
-                  s->handler == NULL && s->availability_reason &&
-                  s->availability_reason[0]);
-    }
+    failures += t_registry_planned_leaves();
     return failures;
 }
 
@@ -243,6 +250,251 @@ static int t_menu_budgets(void)
 
 /* ── 4-6: the handler ───────────────────────────────────────────────────── */
 
+static int t_join_check_probe_removed(const char *dd)
+{
+    int failures = 0;
+    static const char probe_prefix[] = ".z23-join-c23-probe.";
+    bool probe_left = false;
+    DIR *dir = opendir(dd);
+    struct dirent *entry = NULL;
+    while (dir && (entry = readdir(dir)) != NULL)
+        if (strncmp(entry->d_name, probe_prefix,
+                    sizeof(probe_prefix) - 1) == 0)
+            probe_left = true;
+    if (dir)
+        closedir(dir);
+    ZNJ_CHECK("the private C23 probe source is removed", !probe_left);
+    return failures;
+}
+
+static int t_join_check_written_file(const char *text, bool compiler_present,
+                                     const char *dd,
+                                     const struct json_value *data)
+{
+    int failures = 0;
+    ZNJ_CHECK("the config file exists after join", text != NULL);
+    ZNJ_CHECK("packagehost=1 is written unconditionally",
+              znt_has_line(text, "packagehost=1"));
+    /* This group only runs after the tree compiled as C23, so a working
+     * driver is on PATH. Probing `/dev/null` with -pedantic-errors rejects
+     * an empty translation unit and used to report compiler_present=false
+     * / buildworker=0 on exactly those hosts — advertising no compile
+     * capacity the box can deliver. The handler itself is the detector. */
+    ZNJ_CHECK("join reports compiler_present on a host that built this C23 tree",
+              compiler_present);
+    ZNJ_CHECK("join writes buildworker=1 rather than a false empty-TU 0",
+              znt_has_line(text, "buildworker=1"));
+    /* The file is the swarm-tier fact. `joined` stays this process's flags
+     * and must not be inverted just because the write succeeded. */
+    ZNJ_CHECK("swarm_member is true once packagehost=1 is written",
+              json_get_bool(json_get(data, "swarm_member")));
+    ZNJ_CHECK("config_package_hosting reflects the written file",
+              json_get_bool(json_get(data, "config_package_hosting")));
+    ZNJ_CHECK("config_build_worker agrees with the compiler probe",
+              json_get_bool(json_get(data, "config_build_worker"))
+                  == compiler_present);
+    ZNJ_CHECK("joined stays this process's flags, not the file just written",
+              json_get_str(json_get(data, "swarm_member_means"))
+                  && strstr(json_get_str(json_get(data,
+                                                  "swarm_member_means")),
+                            "this process") != NULL);
+    failures += t_join_check_probe_removed(dd);
+    /* The one claim that must never drift: what the reply SAYS about the
+     * compiler and what the file DOES about the worker are the same fact. */
+    ZNJ_CHECK("buildworker agrees with the reported compiler",
+              compiler_present ? znt_has_line(text, "buildworker=1")
+                               : znt_has_line(text, "buildworker=0"));
+    ZNJ_CHECK("an unrelated pre-existing setting survives the rewrite",
+              znt_has_line(text, "txindex=1"));
+    ZNJ_CHECK("the flags land exactly once each",
+              text && !strstr(text, "packagehost=1\npackagehost=1"));
+    ZNJ_CHECK("join reports the first write as a change",
+              json_get_bool(json_get(data, "config_changed")));
+    return failures;
+}
+
+static int t_join_check_tier_reports(const struct json_value *data)
+{
+    int failures = 0;
+    /* Tiers, by name. DHT optional is the load-bearing bit. */
+    const struct json_value *swarm = json_get(data, "swarm_tier");
+    const struct json_value *dht = json_get(data, "dht_tier");
+    ZNJ_CHECK("the SWARM tier is reported and needs only -packagehost=1",
+              swarm && json_get_str(json_get(swarm, "requires")) &&
+              strstr(json_get_str(json_get(swarm, "requires")),
+                     "-packagehost=1") != NULL &&
+              json_get_bool(json_get(swarm, "optional")) == false);
+    ZNJ_CHECK("the DHT tier is reported as an OPTIONAL upgrade, not a blocker",
+              dht && json_get_bool(json_get(dht, "optional")));
+    ZNJ_CHECK("the DHT tier names -noisetransport and the fee-bearing anchor",
+              dht && json_get_str(json_get(dht, "requires")) &&
+              strstr(json_get_str(json_get(dht, "requires")),
+                     "-noisetransport") != NULL &&
+              strstr(json_get_str(json_get(dht, "requires")), "fee") != NULL);
+    ZNJ_CHECK("join names a restart instead of performing one",
+              json_get_bool(json_get(data, "restart_required")) &&
+              json_get_str(json_get(data, "restart_command")) &&
+              strcmp(json_get_str(json_get(data, "restart_command")),
+                     "systemctl --user restart z23-node") == 0);
+    return failures;
+}
+
+static int t_join_check_verdict_fields(const struct json_value *verdict)
+{
+    int failures = 0;
+    ZNJ_CHECK("join reports all four dimensions independently",
+              verdict && json_get_str(json_get(verdict, "reachable")) &&
+              json_get_str(json_get(verdict, "responsive")) &&
+              json_get_str(json_get(verdict, "fresh")) &&
+              json_get_str(json_get(verdict, "serving")));
+    /* From a one-shot CLI these are structurally invisible. Reporting them as
+     * `failed` would grade a healthy node broken for standing in the wrong
+     * place; reporting them as `confirmed` would be a promise this process
+     * cannot keep. */
+    ZNJ_CHECK("join reports what it cannot see as unobservable, not failed",
+              verdict &&
+              strcmp(json_get_str(json_get(verdict, "reachable")),
+                     "unobservable") == 0 &&
+              strcmp(json_get_str(json_get(verdict, "serving")),
+                     "unobservable") == 0);
+    ZNJ_CHECK("join names the vantage that CAN answer those dimensions",
+              verdict && json_get_str(json_get(verdict, "vantage")) &&
+              json_get_str(json_get(verdict, "vantage"))[0]);
+    ZNJ_CHECK("join reports latency as unmeasured rather than inventing one",
+              verdict && json_get_int(json_get(verdict, "latency_ms")) < 0);
+    return failures;
+}
+
+static int t_join_check_announcement_fields(const struct json_value *data,
+                                            const struct json_value *announce)
+{
+    int failures = 0;
+    ZNJ_CHECK("join never announces ready from a vantage that cannot see it",
+              announce && strcmp(json_get_str(json_get(announce, "state")),
+                                 "ready") != 0);
+    ZNJ_CHECK("join marks the outstanding stage unobservable, not in-progress",
+              announce &&
+              strcmp(json_get_str(json_get(announce, "state_signal")),
+                     "unobservable") == 0);
+    ZNJ_CHECK("join names the four announcement stages separately",
+              announce &&
+              json_get_str(json_get(announce, "descriptor_published")) &&
+              json_get_str(json_get(announce, "rendezvous_established")) &&
+              json_get_str(json_get(announce, "circuit_built")) &&
+              json_get_str(json_get(announce, "listener_accepting")));
+    ZNJ_CHECK("join says the joined scalar is config, not a reachability verdict",
+              json_get_str(json_get(data, "joined_means")) != NULL);
+    return failures;
+}
+
+static int t_join_check_next_command(const struct zcl_command_reply *reply,
+                                     const char *dd)
+{
+    int failures = 0;
+    /* The typed next command, counted and validated by the registry itself. */
+    ZNJ_CHECK("join emits exactly one typed next command",
+              reply->next_count == 1);
+    ZNJ_CHECK("the next command verifies resident Commons service",
+              reply->next_count == 1 &&
+              strcmp(reply->next[0].command, "zcode.package.offered") == 0);
+    ZNJ_CHECK("the next command names the datadir join just wrote",
+              reply->next_count == 1 &&
+              strstr(reply->next[0].input_json, dd) != NULL);
+    return failures;
+}
+
+static int t_join_check_rerun_idempotent(const struct zcl_command_spec *join,
+                                         const char *conf, const char *dd)
+{
+    int failures = 0;
+    char why[192] = {0};
+    struct znt_cmd c;
+    /* Re-running must be idempotent: same two lines, and now reported as no
+     * change, because a node that is already joined must not be told to
+     * restart again. */
+    znt_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    bool again = znt_run(join, &c, why, sizeof(why));
+    ZNJ_CHECK("join re-runs cleanly",
+              again && c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ZNJ_CHECK("the second run reports no flag change",
+              again && !json_get_bool(json_get(&c.reply.data,
+                                               "config_changed")));
+    char *text = znt_slurp(conf);
+    ZNJ_CHECK("the second run still leaves exactly one packagehost line",
+              text && !strstr(text, "packagehost=1\npackagehost=1"));
+    ZNJ_CHECK("the second run still preserves the unrelated setting",
+              znt_has_line(text, "txindex=1"));
+    free(text);
+    znt_cmd_free(&c);
+    return failures;
+}
+
+static int t_join_check_flipped_buildworker(const struct zcl_command_spec *join,
+                                            const char *conf, const char *dd)
+{
+    int failures = 0;
+    char why[192] = {0};
+    struct znt_cmd c;
+    /* A flag whose VALUE flipped is a change, even though its key was
+     * present both times. Deciding "changed" from key presence alone
+     * reported "no change" for a node that had joined on a box with no C23
+     * compiler and later gained one: buildworker really did go 0 -> 1, the
+     * node's behaviour really did depend on a restart, and the operator was
+     * told there was nothing to do.
+     *
+     * The expected value is read from the run above rather than assumed, so
+     * this asserts the same thing on a build host with a compiler and one
+     * without. */
+    znt_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    bool probe = znt_run(join, &c, why, sizeof(why));
+    bool decided = probe && json_get_bool(json_get(&c.reply.data,
+                                                   "compiler_present"));
+    znt_cmd_free(&c);
+
+    FILE *seed = fopen(conf, "we");
+    if (seed) {
+        fprintf(seed, "packagehost=1\nbuildworker=%d\ntxindex=1\n",
+                decided ? 0 : 1);
+        fclose(seed);
+    }
+    znt_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", dd);
+    bool flip = znt_run(join, &c, why, sizeof(why));
+    ZNJ_CHECK("a buildworker value that flipped IS reported as a change",
+              seed && flip &&
+              json_get_bool(json_get(&c.reply.data, "config_changed")));
+    char *text = znt_slurp(conf);
+    ZNJ_CHECK("the flipped run writes the decided value and keeps the "
+              "operator's unrelated setting",
+              text && znt_has_line(text, "txindex=1") &&
+              znt_has_line(text, decided ? "buildworker=1"
+                                         : "buildworker=0"));
+    free(text);
+    znt_cmd_free(&c);
+
+    /* The negated spelling is a VALUE (off), not an occurrence of the
+     * flag being on, so against a decided buildworker=1 it must compare
+     * as different rather than as already-on. */
+    if (decided) {
+        seed = fopen(conf, "we");
+        if (seed) {
+            fprintf(seed, "packagehost=1\n-nobuildworker\n");
+            fclose(seed);
+        }
+        znt_cmd_init(&c);
+        (void)json_push_kv_str(&c.input, "datadir", dd);
+        bool neg = znt_run(join, &c, why, sizeof(why));
+        ZNJ_CHECK("a negated -nobuildworker line reads as off, not as "
+                  "already-on",
+                  seed && neg &&
+                  json_get_bool(json_get(&c.reply.data, "config_changed")));
+        znt_cmd_free(&c);
+    }
+    return failures;
+}
+
 static int t_join_writes_config(void)
 {
     int failures = 0;
@@ -281,209 +533,23 @@ static int t_join_writes_config(void)
     ZNJ_CHECK("join names the exact flags it wrote", wrote && wrote[0]);
 
     char *text = znt_slurp(conf);
-    ZNJ_CHECK("the config file exists after join", text != NULL);
-    ZNJ_CHECK("packagehost=1 is written unconditionally",
-              znt_has_line(text, "packagehost=1"));
-    /* This group only runs after the tree compiled as C23, so a working
-     * driver is on PATH. Probing `/dev/null` with -pedantic-errors rejects
-     * an empty translation unit and used to report compiler_present=false
-     * / buildworker=0 on exactly those hosts — advertising no compile
-     * capacity the box can deliver. The handler itself is the detector. */
-    ZNJ_CHECK("join reports compiler_present on a host that built this C23 tree",
-              compiler_present);
-    ZNJ_CHECK("join writes buildworker=1 rather than a false empty-TU 0",
-              znt_has_line(text, "buildworker=1"));
-    /* The file is the swarm-tier fact. `joined` stays this process's flags
-     * and must not be inverted just because the write succeeded. */
-    ZNJ_CHECK("swarm_member is true once packagehost=1 is written",
-              json_get_bool(json_get(&c.reply.data, "swarm_member")));
-    ZNJ_CHECK("config_package_hosting reflects the written file",
-              json_get_bool(json_get(&c.reply.data,
-                                     "config_package_hosting")));
-    ZNJ_CHECK("config_build_worker agrees with the compiler probe",
-              json_get_bool(json_get(&c.reply.data, "config_build_worker"))
-                  == compiler_present);
-    ZNJ_CHECK("joined stays this process's flags, not the file just written",
-              json_get_str(json_get(&c.reply.data, "swarm_member_means"))
-                  && strstr(json_get_str(json_get(&c.reply.data,
-                                                  "swarm_member_means")),
-                            "this process") != NULL);
-    {
-        static const char probe_prefix[] = ".z23-join-c23-probe.";
-        bool probe_left = false;
-        DIR *dir = opendir(dd);
-        struct dirent *entry = NULL;
-        while (dir && (entry = readdir(dir)) != NULL)
-            if (strncmp(entry->d_name, probe_prefix,
-                        sizeof(probe_prefix) - 1) == 0)
-                probe_left = true;
-        if (dir)
-            closedir(dir);
-        ZNJ_CHECK("the private C23 probe source is removed", !probe_left);
-    }
-    /* The one claim that must never drift: what the reply SAYS about the
-     * compiler and what the file DOES about the worker are the same fact. */
-    ZNJ_CHECK("buildworker agrees with the reported compiler",
-              compiler_present ? znt_has_line(text, "buildworker=1")
-                               : znt_has_line(text, "buildworker=0"));
-    ZNJ_CHECK("an unrelated pre-existing setting survives the rewrite",
-              znt_has_line(text, "txindex=1"));
-    ZNJ_CHECK("the flags land exactly once each",
-              text && !strstr(text, "packagehost=1\npackagehost=1"));
-    ZNJ_CHECK("join reports the first write as a change",
-              json_get_bool(json_get(&c.reply.data, "config_changed")));
-
-    /* Tiers, by name. DHT optional is the load-bearing bit. */
-    const struct json_value *swarm = json_get(&c.reply.data, "swarm_tier");
-    const struct json_value *dht = json_get(&c.reply.data, "dht_tier");
-    ZNJ_CHECK("the SWARM tier is reported and needs only -packagehost=1",
-              swarm && json_get_str(json_get(swarm, "requires")) &&
-              strstr(json_get_str(json_get(swarm, "requires")),
-                     "-packagehost=1") != NULL &&
-              json_get_bool(json_get(swarm, "optional")) == false);
-    ZNJ_CHECK("the DHT tier is reported as an OPTIONAL upgrade, not a blocker",
-              dht && json_get_bool(json_get(dht, "optional")));
-    ZNJ_CHECK("the DHT tier names -noisetransport and the fee-bearing anchor",
-              dht && json_get_str(json_get(dht, "requires")) &&
-              strstr(json_get_str(json_get(dht, "requires")),
-                     "-noisetransport") != NULL &&
-              strstr(json_get_str(json_get(dht, "requires")), "fee") != NULL);
-    ZNJ_CHECK("join names a restart instead of performing one",
-              json_get_bool(json_get(&c.reply.data, "restart_required")) &&
-              json_get_str(json_get(&c.reply.data, "restart_command")) &&
-              strcmp(json_get_str(json_get(&c.reply.data, "restart_command")),
-                     "systemctl --user restart z23-node") == 0);
+    failures += t_join_check_written_file(text, compiler_present, dd,
+                                          &c.reply.data);
+    failures += t_join_check_tier_reports(&c.reply.data);
 
     /* The composed verdict, as the join reply actually emits it. */
     const struct json_value *verdict = json_get(&c.reply.data, "verdict");
     const struct json_value *announce =
         json_get(&c.reply.data, "announcement");
-    ZNJ_CHECK("join reports all four dimensions independently",
-              verdict && json_get_str(json_get(verdict, "reachable")) &&
-              json_get_str(json_get(verdict, "responsive")) &&
-              json_get_str(json_get(verdict, "fresh")) &&
-              json_get_str(json_get(verdict, "serving")));
-    /* From a one-shot CLI these are structurally invisible. Reporting them as
-     * `failed` would grade a healthy node broken for standing in the wrong
-     * place; reporting them as `confirmed` would be a promise this process
-     * cannot keep. */
-    ZNJ_CHECK("join reports what it cannot see as unobservable, not failed",
-              verdict &&
-              strcmp(json_get_str(json_get(verdict, "reachable")),
-                     "unobservable") == 0 &&
-              strcmp(json_get_str(json_get(verdict, "serving")),
-                     "unobservable") == 0);
-    ZNJ_CHECK("join names the vantage that CAN answer those dimensions",
-              verdict && json_get_str(json_get(verdict, "vantage")) &&
-              json_get_str(json_get(verdict, "vantage"))[0]);
-    ZNJ_CHECK("join reports latency as unmeasured rather than inventing one",
-              verdict && json_get_int(json_get(verdict, "latency_ms")) < 0);
-    ZNJ_CHECK("join never announces ready from a vantage that cannot see it",
-              announce && strcmp(json_get_str(json_get(announce, "state")),
-                                 "ready") != 0);
-    ZNJ_CHECK("join marks the outstanding stage unobservable, not in-progress",
-              announce &&
-              strcmp(json_get_str(json_get(announce, "state_signal")),
-                     "unobservable") == 0);
-    ZNJ_CHECK("join names the four announcement stages separately",
-              announce &&
-              json_get_str(json_get(announce, "descriptor_published")) &&
-              json_get_str(json_get(announce, "rendezvous_established")) &&
-              json_get_str(json_get(announce, "circuit_built")) &&
-              json_get_str(json_get(announce, "listener_accepting")));
-    ZNJ_CHECK("join says the joined scalar is config, not a reachability verdict",
-              json_get_str(json_get(&c.reply.data, "joined_means")) != NULL);
+    failures += t_join_check_verdict_fields(verdict);
+    failures += t_join_check_announcement_fields(&c.reply.data, announce);
 
-    /* The typed next command, counted and validated by the registry itself. */
-    ZNJ_CHECK("join emits exactly one typed next command",
-              c.reply.next_count == 1);
-    ZNJ_CHECK("the next command verifies resident Commons service",
-              c.reply.next_count == 1 &&
-              strcmp(c.reply.next[0].command, "zcode.package.offered") == 0);
-    ZNJ_CHECK("the next command names the datadir join just wrote",
-              c.reply.next_count == 1 &&
-              strstr(c.reply.next[0].input_json, dd) != NULL);
+    failures += t_join_check_next_command(&c.reply, dd);
     free(text);
     znt_cmd_free(&c);
 
-    /* Re-running must be idempotent: same two lines, and now reported as no
-     * change, because a node that is already joined must not be told to
-     * restart again. */
-    znt_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    bool again = znt_run(join, &c, why, sizeof(why));
-    ZNJ_CHECK("join re-runs cleanly",
-              again && c.reply.status == ZCL_COMMAND_STATUS_PASSED);
-    ZNJ_CHECK("the second run reports no flag change",
-              again && !json_get_bool(json_get(&c.reply.data,
-                                               "config_changed")));
-    text = znt_slurp(conf);
-    ZNJ_CHECK("the second run still leaves exactly one packagehost line",
-              text && !strstr(text, "packagehost=1\npackagehost=1"));
-    ZNJ_CHECK("the second run still preserves the unrelated setting",
-              znt_has_line(text, "txindex=1"));
-    free(text);
-    znt_cmd_free(&c);
-
-    /* A flag whose VALUE flipped is a change, even though its key was
-     * present both times. Deciding "changed" from key presence alone
-     * reported "no change" for a node that had joined on a box with no C23
-     * compiler and later gained one: buildworker really did go 0 -> 1, the
-     * node's behaviour really did depend on a restart, and the operator was
-     * told there was nothing to do.
-     *
-     * The expected value is read from the run above rather than assumed, so
-     * this asserts the same thing on a build host with a compiler and one
-     * without. */
-    {
-        znt_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", dd);
-        bool probe = znt_run(join, &c, why, sizeof(why));
-        bool decided = probe && json_get_bool(json_get(&c.reply.data,
-                                                       "compiler_present"));
-        znt_cmd_free(&c);
-
-        FILE *seed = fopen(conf, "we");
-        if (seed) {
-            fprintf(seed, "packagehost=1\nbuildworker=%d\ntxindex=1\n",
-                    decided ? 0 : 1);
-            fclose(seed);
-        }
-        znt_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", dd);
-        bool flip = znt_run(join, &c, why, sizeof(why));
-        ZNJ_CHECK("a buildworker value that flipped IS reported as a change",
-                  seed && flip &&
-                  json_get_bool(json_get(&c.reply.data, "config_changed")));
-        text = znt_slurp(conf);
-        ZNJ_CHECK("the flipped run writes the decided value and keeps the "
-                  "operator's unrelated setting",
-                  text && znt_has_line(text, "txindex=1") &&
-                  znt_has_line(text, decided ? "buildworker=1"
-                                             : "buildworker=0"));
-        free(text);
-        znt_cmd_free(&c);
-
-        /* The negated spelling is a VALUE (off), not an occurrence of the
-         * flag being on, so against a decided buildworker=1 it must compare
-         * as different rather than as already-on. */
-        if (decided) {
-            seed = fopen(conf, "we");
-            if (seed) {
-                fprintf(seed, "packagehost=1\n-nobuildworker\n");
-                fclose(seed);
-            }
-            znt_cmd_init(&c);
-            (void)json_push_kv_str(&c.input, "datadir", dd);
-            bool neg = znt_run(join, &c, why, sizeof(why));
-            ZNJ_CHECK("a negated -nobuildworker line reads as off, not as "
-                      "already-on",
-                      seed && neg &&
-                      json_get_bool(json_get(&c.reply.data,
-                                             "config_changed")));
-            znt_cmd_free(&c);
-        }
-    }
+    failures += t_join_check_rerun_idempotent(join, conf, dd);
+    failures += t_join_check_flipped_buildworker(join, conf, dd);
 
     unlink(conf);
     test_cleanup_tmpdir(dd);
@@ -601,6 +667,20 @@ static int t_update_leaves_refuse_by_name(void)
 
 /* ── 8-9: the composed verdict type ─────────────────────────────────────── */
 
+static bool t_verdict_dims_equal(const struct json_value *va,
+                                 const struct json_value *vb)
+{
+    return va && vb &&
+        strcmp(json_get_str(json_get(va, "reachable")),
+               json_get_str(json_get(vb, "reachable"))) == 0 &&
+        strcmp(json_get_str(json_get(va, "responsive")),
+               json_get_str(json_get(vb, "responsive"))) == 0 &&
+        strcmp(json_get_str(json_get(va, "fresh")),
+               json_get_str(json_get(vb, "fresh"))) == 0 &&
+        strcmp(json_get_str(json_get(va, "serving")),
+               json_get_str(json_get(vb, "serving"))) == 0;
+}
+
 static int t_verdict_composes(void)
 {
     int failures = 0;
@@ -648,16 +728,7 @@ static int t_verdict_composes(void)
               zcl_join_verdict_push_json(&b, &slow, NULL));
     const struct json_value *va = json_get(&a, "verdict");
     const struct json_value *vb = json_get(&b, "verdict");
-    bool same_dims =
-        va && vb &&
-        strcmp(json_get_str(json_get(va, "reachable")),
-               json_get_str(json_get(vb, "reachable"))) == 0 &&
-        strcmp(json_get_str(json_get(va, "responsive")),
-               json_get_str(json_get(vb, "responsive"))) == 0 &&
-        strcmp(json_get_str(json_get(va, "fresh")),
-               json_get_str(json_get(vb, "fresh"))) == 0 &&
-        strcmp(json_get_str(json_get(va, "serving")),
-               json_get_str(json_get(vb, "serving"))) == 0;
+    bool same_dims = t_verdict_dims_equal(va, vb);
     ZNJ_CHECK("a 900-second latency changes NO dimension", same_dims);
     ZNJ_CHECK("speed is still reported, as its own measured number",
               vb && json_get_int(json_get(vb, "latency_ms")) == 900000);
