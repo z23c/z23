@@ -595,7 +595,7 @@ static int test_have_data_hook_quiesce_drains_inflight(void)
     pthread_t fire_w, quiesce_w;
     bool fire_started = false, quiesce_started = false;
 
-    TEST("have-data hook: quiesce drains an admitted callback before teardown") {
+    TEST("have_data hook: quiesce drains an admitted callback before teardown") {
         disk_block_io_set_have_data_hook(hook_lifetime_blocking_cb, &f);
         if (pthread_create(&fire_w, NULL, hook_lifetime_fire_worker, NULL) != 0) {
             printf("FAIL (fire worker)\n"); failures++; goto _test_next;
@@ -966,8 +966,7 @@ static int test_scoped_read_fd_cache(void)
         if (pa.nFile != pb.nFile) {
             printf("FAIL (blocks not colocated file a=%d b=%d)\n",
                    pa.nFile, pb.nFile);
-            failures++;
-            goto _test_next;
+            failures++; goto _test_next;
         }
 
         disk_block_io_read_fd_cache_enter();
@@ -986,8 +985,7 @@ static int test_scoped_read_fd_cache(void)
         disk_block_io_read_fd_cache_exit();
         if (!ok) {
             printf("FAIL (interleaved cached reads returned wrong block)\n");
-            failures++;
-            goto _test_next;
+            failures++; goto _test_next;
         }
 
         /* After exit the cache is off and its fd closed: a normal read works. */
