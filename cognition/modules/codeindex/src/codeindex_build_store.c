@@ -228,32 +228,12 @@ static bool build_files_with_shards(struct build_ctx *build, const char *root)
     return enumerated && closed && !build->err;
 }
 
-bool ci_build_store_memory(const char *root, int64_t build_start_ms,
-                           struct ci_store **out_store,
-                           uint8_t source_stat_out[32],
-                           uint8_t dep_stat_out[32])
+/* Preserve diagnostic origins across the extracted metadata publication. */
+#define build (*build_state)
+static bool ci_publish_guarded_build_roots_and_projection(
+    bool ok, struct ci_store *store, struct build_ctx *build_state,
+    const char *root, uint8_t source_stat_out[32], uint8_t dep_stat_out[32])
 {
-    if (!root || !out_store || !source_stat_out || !dep_stat_out)
-        LOG_FAIL("codeindex", "null argument to memory store build");
-    *out_store = NULL;
-    /* The caller stamps the rebuild start when it takes the lock so the
-     * self-receipt covers the whole cold build (freshness passes included),
-     * not only this assembly phase. A nonpositive stamp means "unknown". */
-    if (build_start_ms <= 0)
-        build_start_ms = platform_time_monotonic_ms();
-
-    struct ci_store *store = ci_store_open_path(":memory:");
-    if (!store) LOG_FAIL("codeindex", "open in-memory staging store failed");
-    struct build_ctx build;
-    memset(&build, 0, sizeof(build));
-    build.store = store;
-    ci_source_root_init(&build.source_root);
-
-    bool tx_open = ci_store_begin(store);
-    bool ok = tx_open && ci_store_clear(store) && ci_group_emit_all(store) &&
-              build_files_with_shards(&build, root);
-    if (ok) idmap_sort(&build);
-
     uint8_t built_source_root[32], built_dep_root[32];
     if (ok) {
         sha3_256_finalize(&build.source_root, built_source_root);
@@ -286,6 +266,41 @@ bool ci_build_store_memory(const char *root, int64_t build_start_ms,
                                retrieval_projection_root,
                                sizeof(retrieval_projection_root));
 
+    return ok;
+}
+#undef build
+
+#line 231
+bool ci_build_store_memory(const char *root, int64_t build_start_ms,
+                           struct ci_store **out_store,
+                           uint8_t source_stat_out[32],
+                           uint8_t dep_stat_out[32])
+{
+    if (!root || !out_store || !source_stat_out || !dep_stat_out)
+        LOG_FAIL("codeindex", "null argument to memory store build");
+    *out_store = NULL;
+    /* The caller stamps the rebuild start when it takes the lock so the
+     * self-receipt covers the whole cold build (freshness passes included),
+     * not only this assembly phase. A nonpositive stamp means "unknown". */
+    if (build_start_ms <= 0)
+        build_start_ms = platform_time_monotonic_ms();
+
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) LOG_FAIL("codeindex", "open in-memory staging store failed");
+    struct build_ctx build;
+    memset(&build, 0, sizeof(build));
+    build.store = store;
+    ci_source_root_init(&build.source_root);
+
+    bool tx_open = ci_store_begin(store);
+    bool ok = tx_open && ci_store_clear(store) && ci_group_emit_all(store) &&
+              build_files_with_shards(&build, root);
+    if (ok) idmap_sort(&build);
+
+    ok = ci_publish_guarded_build_roots_and_projection(
+        ok, store, &build, root, source_stat_out, dep_stat_out);
+
+#line 289
     /* The cold build's self-receipt: the whole-rebuild wall time (from the
      * rebuild-lock stamp the caller passed in) and how many files the exact
      * generation holds. Recorded only on this full-build path — the
