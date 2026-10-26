@@ -423,6 +423,157 @@ static void operator_build_summary(struct json_value *summary,
     json_push_kv_str(summary, "summary", summary_text);
 }
 
+static const char *operator_peer_direction_status(
+    const struct operator_capture *capture)
+{
+    return !capture->peers.direction_known ? "unknown"
+        : capture->peers.inbound_count + capture->peers.outbound_count ==
+              capture->peers.peer_count ? "pass" : "fail";
+}
+
+static void operator_push_chain_evidence(
+    struct json_value *result, const struct operator_capture *capture,
+    const struct operator_verdict *verdict)
+{
+    struct json_value chain = {0};
+    json_set_object(&chain);
+    const char *chain_status = !verdict->chain_values_known
+        ? "partial"
+        : !operator_snapshot_chain_bindings_known(capture)
+            ? "partial"
+        : !capture->critical_frontier_stable
+            ? "unstable"
+        : verdict->chain_consistent ? "ok" : "error";
+    json_push_kv_str(&chain, "status", chain_status);
+    json_push_kv_str(&chain, "authority", "local_consensus_validation");
+    json_push_kv_str(&chain, "trust", "authoritative");
+    json_push_kv_bool(&chain, "authority_pair_known",
+                      capture->chain.authority_pair_known);
+    json_push_kv_bool(&chain, "durable_authority_known",
+                      capture->chain.durable_authority_known);
+    json_push_kv_bool(&chain, "authority_matches_served",
+                      capture->chain.authority_matches_served);
+    json_push_kv_str(&chain, "served_authority_source",
+        chain_frontier_authority_source_name(capture->chain.authority_source));
+    json_push_kv_bool(&chain, "ancestry_known",
+                      capture->chain.ancestry_known);
+    json_push_kv_bool(&chain, "served_ancestor_indexed",
+                      capture->chain.served_ancestor_indexed);
+    json_push_kv_bool(&chain, "indexed_ancestor_header",
+                      capture->chain.indexed_ancestor_header);
+    json_push_kv_bool(&chain, "work_known", capture->chain.work_known);
+    json_push_kv_bool(&chain, "work_monotone",
+                      capture->chain.work_monotone);
+    json_push_kv_bool(&chain, "validity_known",
+                      capture->chain.validity_known);
+    json_push_kv_bool(&chain, "validity_sufficient",
+                      capture->chain.validity_sufficient);
+    json_push_kv_bool(&chain, "failure_free",
+                      capture->chain.failure_free);
+    if (verdict->chain_values_known)
+        json_push_kv_bool(&chain, "consistent", verdict->chain_consistent);
+    else
+        operator_push_null(&chain, "consistent");
+    operator_push_frontier(&chain, "served", &capture->chain.served,
+                           "reducer_frontier_hstar",
+                           chain_frontier_authority_source_name(
+                               capture->chain.authority_source));
+    operator_push_frontier(&chain, "indexed", &capture->chain.indexed,
+                           "active_chain_window",
+                           "raw_indexed_window");
+    operator_push_frontier(&chain, "validated_header",
+                           &capture->chain.header,
+                           "pindex_best_header",
+                           "local_header_validation");
+    operator_push_int_known(&chain, "gap", verdict->gap_known, verdict->gap);
+    operator_push_int_known(&chain, "index_gap", verdict->gap_known,
+                            verdict->index_gap);
+    json_push_kv(result, "chain", &chain);
+    json_free(&chain);
+}
+
+static void operator_push_peer_evidence(
+    struct json_value *result, const struct operator_capture *capture)
+{
+    struct json_value peers = {0};
+    json_set_object(&peers);
+    json_push_kv_bool(&peers, "known", capture->peers.available);
+    json_push_kv_bool(&peers, "stale", capture->peers.stale);
+    json_push_kv_bool(&peers, "direction_known",
+                      capture->peers.direction_known);
+    json_push_kv_bool(&peers, "ready_known", capture->peers.ready_known);
+    json_push_kv_bool(&peers, "advertised_max_height_known",
+                      capture->peers.peer_best_height_known);
+    json_push_kv_str(&peers, "status",
+                     !capture->peers.available ? "error"
+                     : capture->peers.stale ? "stale"
+                     : !capture->peers.direction_known ||
+                       !capture->peers.ready_known ? "partial" : "ok");
+    json_push_kv_str(&peers, "authority", "live_connman_snapshot");
+    json_push_kv_str(&peers, "peer_height_trust",
+                     "untrusted_peer_advertisement");
+    json_push_kv_int(&peers, "generation",
+                     (int64_t)capture->peers.generation);
+    json_push_kv_int(&peers, "age_seconds", capture->peers.age_seconds);
+    operator_push_int_known(&peers, "total", capture->peers.available,
+                            (int64_t)capture->peers.peer_count);
+    operator_push_int_known(&peers, "inbound",
+                            capture->peers.direction_known,
+                            (int64_t)capture->peers.inbound_count);
+    operator_push_int_known(&peers, "outbound",
+                            capture->peers.direction_known,
+                            (int64_t)capture->peers.outbound_count);
+    operator_push_int_known(&peers, "ready", capture->peers.ready_known,
+                            (int64_t)capture->peers.ready_count);
+    operator_push_int_known(&peers, "advertised_max_height",
+                            capture->peers.peer_best_height_known,
+                            capture->peers.peer_best_height);
+    json_push_kv(result, "peers", &peers);
+    json_free(&peers);
+}
+
+static void operator_push_invariant_report(
+    struct json_value *result, const struct operator_capture *capture,
+    const struct operator_verdict *verdict)
+{
+    struct json_value invariants = {0};
+    json_set_object(&invariants);
+    operator_push_invariant(
+        &invariants, "critical_frontier_stable",
+        capture->critical_frontier_stable ? "pass" : "fail",
+        "critical chain tuple is equal before and after component capture");
+    operator_push_invariant(
+        &invariants, "frontier_order",
+        !verdict->chain_values_known ? "unknown"
+        : verdict->frontier_order_ok ? "pass" : "fail",
+        "served H* <= indexed active tip <= locally validated header");
+    operator_push_invariant(
+        &invariants, "chain_lineage_and_work",
+        !operator_snapshot_chain_bindings_known(capture) ? "unknown"
+        : verdict->chain_consistent ? "pass" : "fail",
+        "durable served hash, ancestry, and cumulative work agree");
+    operator_push_invariant(
+        &invariants, "frontier_validity",
+        !capture->chain.validity_known ? "unknown"
+        : capture->chain.validity_sufficient && capture->chain.failure_free
+            ? "pass" : "fail",
+        "served is script-valid; indexed/header are tree-valid; none failed");
+    operator_push_invariant(
+        &invariants, "blocker_counts", "pass",
+        "per-class counts are derived from one locked blocker entry copy");
+    operator_push_invariant(
+        &invariants, "security_posture",
+        capture->security_review_required ? "fail" : "pass",
+        "healthy and serving require a review-free security posture");
+    const char *peer_direction_status =
+        operator_peer_direction_status(capture);
+    operator_push_invariant(
+        &invariants, "peer_direction_sum", peer_direction_status,
+        "inbound + outbound equals total when direction is known");
+    json_push_kv(result, "invariants", &invariants);
+    json_free(&invariants);
+}
+
 static void operator_build_snapshot(struct json_value *result,
                                     const struct operator_capture *capture)
 {
@@ -483,97 +634,9 @@ static void operator_build_snapshot(struct json_value *result,
     json_push_kv(result, "capture", &capture_json);
     json_free(&capture_json);
 
-    struct json_value chain = {0};
-    json_set_object(&chain);
-    const char *chain_status = !verdict.chain_values_known
-        ? "partial"
-        : !operator_snapshot_chain_bindings_known(capture)
-            ? "partial"
-        : !capture->critical_frontier_stable
-            ? "unstable"
-        : verdict.chain_consistent ? "ok" : "error";
-    json_push_kv_str(&chain, "status", chain_status);
-    json_push_kv_str(&chain, "authority", "local_consensus_validation");
-    json_push_kv_str(&chain, "trust", "authoritative");
-    json_push_kv_bool(&chain, "authority_pair_known",
-                      capture->chain.authority_pair_known);
-    json_push_kv_bool(&chain, "durable_authority_known",
-                      capture->chain.durable_authority_known);
-    json_push_kv_bool(&chain, "authority_matches_served",
-                      capture->chain.authority_matches_served);
-    json_push_kv_str(&chain, "served_authority_source",
-        chain_frontier_authority_source_name(capture->chain.authority_source));
-    json_push_kv_bool(&chain, "ancestry_known",
-                      capture->chain.ancestry_known);
-    json_push_kv_bool(&chain, "served_ancestor_indexed",
-                      capture->chain.served_ancestor_indexed);
-    json_push_kv_bool(&chain, "indexed_ancestor_header",
-                      capture->chain.indexed_ancestor_header);
-    json_push_kv_bool(&chain, "work_known", capture->chain.work_known);
-    json_push_kv_bool(&chain, "work_monotone",
-                      capture->chain.work_monotone);
-    json_push_kv_bool(&chain, "validity_known",
-                      capture->chain.validity_known);
-    json_push_kv_bool(&chain, "validity_sufficient",
-                      capture->chain.validity_sufficient);
-    json_push_kv_bool(&chain, "failure_free",
-                      capture->chain.failure_free);
-    if (verdict.chain_values_known)
-        json_push_kv_bool(&chain, "consistent", verdict.chain_consistent);
-    else
-        operator_push_null(&chain, "consistent");
-    operator_push_frontier(&chain, "served", &capture->chain.served,
-                           "reducer_frontier_hstar",
-                           chain_frontier_authority_source_name(
-                               capture->chain.authority_source));
-    operator_push_frontier(&chain, "indexed", &capture->chain.indexed,
-                           "active_chain_window",
-                           "raw_indexed_window");
-    operator_push_frontier(&chain, "validated_header",
-                           &capture->chain.header,
-                           "pindex_best_header",
-                           "local_header_validation");
-    operator_push_int_known(&chain, "gap", verdict.gap_known, verdict.gap);
-    operator_push_int_known(&chain, "index_gap", verdict.gap_known,
-                            verdict.index_gap);
-    json_push_kv(result, "chain", &chain);
-    json_free(&chain);
+    operator_push_chain_evidence(result, capture, &verdict);
 
-    struct json_value peers = {0};
-    json_set_object(&peers);
-    json_push_kv_bool(&peers, "known", capture->peers.available);
-    json_push_kv_bool(&peers, "stale", capture->peers.stale);
-    json_push_kv_bool(&peers, "direction_known",
-                      capture->peers.direction_known);
-    json_push_kv_bool(&peers, "ready_known", capture->peers.ready_known);
-    json_push_kv_bool(&peers, "advertised_max_height_known",
-                      capture->peers.peer_best_height_known);
-    json_push_kv_str(&peers, "status",
-                     !capture->peers.available ? "error"
-                     : capture->peers.stale ? "stale"
-                     : !capture->peers.direction_known ||
-                       !capture->peers.ready_known ? "partial" : "ok");
-    json_push_kv_str(&peers, "authority", "live_connman_snapshot");
-    json_push_kv_str(&peers, "peer_height_trust",
-                     "untrusted_peer_advertisement");
-    json_push_kv_int(&peers, "generation",
-                     (int64_t)capture->peers.generation);
-    json_push_kv_int(&peers, "age_seconds", capture->peers.age_seconds);
-    operator_push_int_known(&peers, "total", capture->peers.available,
-                            (int64_t)capture->peers.peer_count);
-    operator_push_int_known(&peers, "inbound",
-                            capture->peers.direction_known,
-                            (int64_t)capture->peers.inbound_count);
-    operator_push_int_known(&peers, "outbound",
-                            capture->peers.direction_known,
-                            (int64_t)capture->peers.outbound_count);
-    operator_push_int_known(&peers, "ready", capture->peers.ready_known,
-                            (int64_t)capture->peers.ready_count);
-    operator_push_int_known(&peers, "advertised_max_height",
-                            capture->peers.peer_best_height_known,
-                            capture->peers.peer_best_height);
-    json_push_kv(result, "peers", &peers);
-    json_free(&peers);
+    operator_push_peer_evidence(result, capture);
 
     struct json_value download = {0};
     json_set_object(&download);
@@ -621,44 +684,7 @@ static void operator_build_snapshot(struct json_value *result,
     json_push_kv(result, "operator_latch", &latch);
     json_free(&latch);
 
-    struct json_value invariants = {0};
-    json_set_object(&invariants);
-    operator_push_invariant(
-        &invariants, "critical_frontier_stable",
-        capture->critical_frontier_stable ? "pass" : "fail",
-        "critical chain tuple is equal before and after component capture");
-    operator_push_invariant(
-        &invariants, "frontier_order",
-        !verdict.chain_values_known ? "unknown"
-        : verdict.frontier_order_ok ? "pass" : "fail",
-        "served H* <= indexed active tip <= locally validated header");
-    operator_push_invariant(
-        &invariants, "chain_lineage_and_work",
-        !operator_snapshot_chain_bindings_known(capture) ? "unknown"
-        : verdict.chain_consistent ? "pass" : "fail",
-        "durable served hash, ancestry, and cumulative work agree");
-    operator_push_invariant(
-        &invariants, "frontier_validity",
-        !capture->chain.validity_known ? "unknown"
-        : capture->chain.validity_sufficient && capture->chain.failure_free
-            ? "pass" : "fail",
-        "served is script-valid; indexed/header are tree-valid; none failed");
-    operator_push_invariant(
-        &invariants, "blocker_counts", "pass",
-        "per-class counts are derived from one locked blocker entry copy");
-    operator_push_invariant(
-        &invariants, "security_posture",
-        capture->security_review_required ? "fail" : "pass",
-        "healthy and serving require a review-free security posture");
-    const char *peer_direction_status =
-        !capture->peers.direction_known ? "unknown"
-        : capture->peers.inbound_count + capture->peers.outbound_count ==
-              capture->peers.peer_count ? "pass" : "fail";
-    operator_push_invariant(
-        &invariants, "peer_direction_sum", peer_direction_status,
-        "inbound + outbound equals total when direction is known");
-    json_push_kv(result, "invariants", &invariants);
-    json_free(&invariants);
+    operator_push_invariant_report(result, capture, &verdict);
 
     struct json_value summary = {0};
     operator_build_summary(&summary, capture, &verdict);
