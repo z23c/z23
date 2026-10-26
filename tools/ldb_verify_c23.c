@@ -67,7 +67,7 @@ static void keep_sample(const char *key, size_t len, uint64_t index,
 }
 
 /* Equal lengths and equal bytes; a zero-length slice equals only another
- * zero-length slice. Shared by the stream, get and seek comparisons. */
+ * zero-length slice. Shared by the stream and seek comparisons. */
 static bool slices_equal(const char *a, size_t alen, const char *b,
                          size_t blen)
 {
@@ -185,7 +185,7 @@ static int compare_present_get(leveldb_t *cdb, leveldb_readoptions_t *cro,
                 rval ? "found" : "absent");
         hexdump("key", (const char *)s->key, s->len);
         rc = 1;
-    } else if (cval && !slices_equal(cval, cn, rval, rn)) {
+    } else if (cval && (cn != rn || memcmp(cval, rval, cn) != 0)) {
         fprintf(stderr, "FAIL: get value differs for sample %zu\n", index);
         hexdump("key", (const char *)s->key, s->len);
         hexdump("cxx", cval, cn);
@@ -219,7 +219,7 @@ static int probe_absent_key(leveldb_t *cdb, leveldb_readoptions_t *cro,
     char *rval = ldbr_get(rdb, rro, (const char *)probe, plen, &rn, &re);
     int rc = 0;
     if (ce || re || (cval == NULL) != (rval == NULL) ||
-        (cval && !slices_equal(cval, cn, rval, rn))) {
+        (cval && (cn != rn || memcmp(cval, rval, cn) != 0))) {
         fprintf(stderr, "FAIL: absent-key probe disagrees at "
                 "sample %zu\n", index);
         rc = 1;
