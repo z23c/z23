@@ -493,11 +493,6 @@ contexts/market/controllers/src/yardsale_controller.c:yardsale_buyer_begin:21
 contexts/market/controllers/src/yardsale_controller.c:yardsale_ceremony_partial_ingest:38
 contexts/market/controllers/src/yardsale_site_controller_buy.c:parse_input_field:22
 contexts/market/controllers/src/yardsale_site_controller_buy.c:yardsale_site_handle_buy_post:72
-contexts/market/models/src/zslp_validity.c:inputs_read_db:17
-contexts/market/models/src/zslp_validity.c:validate_message:56
-contexts/market/models/src/zslp_validity.c:zslp_validity_apply_height:21
-contexts/market/models/src/zslp_validity.c:zslp_validity_inputs_match:21
-contexts/market/models/src/zslp_validity.c:zslp_validity_token_summary:20
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_accept_decode:24
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_buyer_verify_partial:24
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_error_string:24
