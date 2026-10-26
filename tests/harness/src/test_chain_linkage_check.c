@@ -54,6 +54,198 @@ static struct block_index *clc_insert(struct main_state *ms,
     return pi;
 }
 
+/* Heights 0..count-1, each linked to the previous, then walked as +1
+ * window advances. ok short-circuits only the advance loop. */
+static bool clc_insert_and_advance_heights(struct main_state *ms,
+                                           struct uint256 *hash,
+                                           struct block_index **out,
+                                           int count, uint8_t salt)
+{
+    struct block_index *prev = NULL;
+    bool ok = true;
+    for (int i = 0; i < count; i++) {
+        out[i] = clc_insert(ms, &hash[i], i, prev, salt);
+        ok = ok && out[i] != NULL;
+        prev = out[i];
+    }
+    for (int i = 0; i < count && ok; i++)
+        ok = active_chain_move_window_tip(&ms->chain_active, out[i]);
+    return ok;
+}
+
+/* The refused move always runs. Later queries short-circuit on ok. */
+static bool clc_label_splice_hold_latched(struct main_state *ms,
+                                          struct block_index *spliced,
+                                          struct block_index *kept_tip,
+                                          bool ok)
+{
+    bool refused = !active_chain_move_window_tip(&ms->chain_active, spliced);
+    ok = ok && refused;
+    ok = ok && chain_linkage_hold_active();
+    ok = ok && chain_linkage_hold_refuse_from() == 11;
+    ok = ok && blocker_exists("chain.linkage_violation");
+    ok = ok && blocker_class_for("chain.linkage_violation") ==
+                   BLOCKER_PERMANENT;
+    ok = ok && chain_linkage_violations_total() == 1;
+    /* Crash-only: window tip unchanged, process obviously alive. */
+    ok = ok && active_chain_tip(&ms->chain_active) == kept_tip;
+    return ok;
+}
+
+/* 1. Healthy chain: genesis install + sequential +1 advances pass,
+ * no blocker, no hold. */
+static int clc_healthy_genesis_advances(void)
+{
+    struct main_state ms; main_state_init(&ms);
+    static struct uint256 h[16];
+    struct block_index *b[16];
+    int failures = 0;
+    bool ok = clc_insert_and_advance_heights(&ms, h, b, 12, 0x11);
+    ok = ok && !chain_linkage_hold_active();
+    ok = ok && !blocker_exists("chain.linkage_violation");
+    ok = ok && chain_linkage_violations_total() == 0;
+    CLC_CHECK("healthy genesis + 11 sequential advances pass", ok);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* 2. Label splice fires at block 1: a block whose pprev height label
+ * is 7 below (the +6/+7 splice boundary shape) is REFUSED. */
+static int clc_label_splice_hold_and_clear(void)
+{
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    struct main_state ms; main_state_init(&ms);
+    static struct uint256 h[16];
+    struct block_index *b[16];
+    int failures = 0;
+    bool ok = clc_insert_and_advance_heights(&ms, h, b, 5, 0x22);
+    /* The spliced block: built on b[4] (h=4) but LABELED h=11. */
+    b[5] = clc_insert(&ms, &h[5], 11, b[4], 0x22);
+    ok = ok && b[5] != NULL;
+    ok = clc_label_splice_hold_latched(&ms, b[5], b[4], ok);
+    CLC_CHECK("label splice refused at block 1 + HOLD + blocker", ok);
+
+    /* 3. HOLD semantics on the same state: a rewind BELOW the
+     * divergence passes; a healthy-looking move AT/PAST it refuses. */
+    bool rewind_ok = active_chain_move_window_tip(&ms.chain_active, b[2]);
+    uint64_t refusals_before = chain_linkage_hold_refusals_total();
+    /* healthy-labeled block at 11 building correctly would still be
+     * refused by the hold (refuse_from=11): build labels 3..11. */
+    struct block_index *p = b[2];
+    static struct uint256 h2[16];
+    struct block_index *c = NULL;
+    for (int i = 3; i <= 11; i++) {
+        c = clc_insert(&ms, &h2[i], i, p, 0x33);
+        p = c;
+    }
+    bool held = !active_chain_move_window_tip(&ms.chain_active, c);
+    bool ok2 = rewind_ok && held &&
+               chain_linkage_hold_refusals_total() > refusals_before;
+    CLC_CHECK("HOLD: rewind below passes, move at/past refuses", ok2);
+
+    /* 4. Clear releases hold + blocker; the held move now passes. */
+    chain_linkage_hold_clear("linkage");
+    bool ok3 = !chain_linkage_hold_active() &&
+               !blocker_exists("chain.linkage_violation") &&
+               active_chain_move_window_tip(&ms.chain_active, c);
+    CLC_CHECK("clear releases hold + blocker; move passes", ok3);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* 5. Depth-10 reorg: rewind to the fork then reconnect a heavier
+ * branch block-by-block — never fires (non-fire proof). */
+static int clc_depth10_reorg_reconnect(void)
+{
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    struct main_state ms; main_state_init(&ms);
+    static struct uint256 h[40];
+    struct block_index *a[20], *bb[20];
+    int failures = 0;
+    /* branch A: 0..14 */
+    bool ok = clc_insert_and_advance_heights(&ms, h, a, 15, 0x44);
+    /* branch B forks at height 4 (depth-10 reorg), extends to 16 */
+    struct block_index *prev = a[4];
+    for (int i = 5; i <= 16; i++) {
+        bb[i] = clc_insert(&ms, &h[20 + i], i, prev, 0x55);
+        ok = ok && bb[i] != NULL;
+        prev = bb[i];
+    }
+    /* rewind to the fork point, then reconnect B one by one */
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, a[4]);
+    for (int i = 5; i <= 16 && ok; i++)
+        ok = active_chain_move_window_tip(&ms.chain_active, bb[i]);
+    ok = ok && !chain_linkage_hold_active();
+    ok = ok && !blocker_exists("chain.linkage_violation");
+    ok = ok && active_chain_tip(&ms.chain_active) == bb[16];
+    CLC_CHECK("depth-10 reorg rewind+reconnect never fires", ok);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* 6. Cold-import shape: a jump far past the window (> +1) with
+ * healthy labels passes (scoped out of pointer identity). */
+static int clc_seed_jump_healthy_labels(void)
+{
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    struct main_state ms; main_state_init(&ms);
+    static struct uint256 h[40];
+    struct block_index *prev = NULL, *bi = NULL;
+    bool ok = true;
+    int failures = 0;
+    for (int i = 0; i < 30; i++) {
+        bi = clc_insert(&ms, &h[i], i, prev, 0x66);
+        ok = ok && bi != NULL;
+        prev = bi;
+    }
+    /* window empty (height -1): seed-jump straight to 29 */
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, bi);
+    ok = ok && !chain_linkage_hold_active();
+    ok = ok && !blocker_exists("chain.linkage_violation");
+    CLC_CHECK("seed jump (> +1, healthy labels) passes", ok);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* 7. +1 advance whose pprev is NOT the window tip object (a
+ * single-move 1-block fork switch) is ALLOWED — fill_window rewrites
+ * the window from the pprev walk — but COUNTED as a diagnostic.
+ * Refusing it would false-HOLD routine network reorgs. */
+static int clc_offtip_fork_switch_counted(void)
+{
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    struct main_state ms; main_state_init(&ms);
+    static struct uint256 h[8];
+    struct block_index *b0, *b1, *b1x, *b2;
+    int failures = 0;
+    b0 = clc_insert(&ms, &h[0], 0, NULL, 0x77);
+    b1 = clc_insert(&ms, &h[1], 1, b0, 0x77);
+    b1x = clc_insert(&ms, &h[2], 1, b0, 0x78); /* sibling at h=1 */
+    bool ok = b0 && b1 && b1x;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, b0);
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, b1);
+    /* b2 builds on the SIBLING b1x, not the window tip b1 */
+    b2 = clc_insert(&ms, &h[3], 2, b1x, 0x78);
+    ok = ok && b2 != NULL;
+    uint64_t before = chain_linkage_offtip_switches_total();
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, b2);
+    ok = ok && chain_linkage_offtip_switches_total() == before + 1;
+    ok = ok && !blocker_exists("chain.linkage_violation");
+    ok = ok && !chain_linkage_hold_active();
+    /* The window was rewritten onto the new branch. */
+    ok = ok && active_chain_at(&ms.chain_active, 1) == b1x;
+    ok = ok && active_chain_tip(&ms.chain_active) == b2;
+    CLC_CHECK("+1 fork switch allowed + counted (no false HOLD)", ok);
+    chain_linkage_reset_for_testing();
+    blocker_reset_for_testing();
+    main_state_free(&ms);
+    return failures;
+}
+
 int test_chain_linkage_check(void)
 {
     test_reset_shared_globals();   /* monolith isolation: see test_helpers.c */
@@ -64,176 +256,10 @@ int test_chain_linkage_check(void)
     blocker_reset_for_testing();
     chain_linkage_reset_for_testing();
 
-    /* 1. Healthy chain: genesis install + sequential +1 advances pass,
-     * no blocker, no hold. */
-    {
-        struct main_state ms; main_state_init(&ms);
-        static struct uint256 h[16];
-        struct block_index *b[16];
-        struct block_index *prev = NULL;
-        bool ok = true;
-        for (int i = 0; i < 12; i++) {
-            b[i] = clc_insert(&ms, &h[i], i, prev, 0x11);
-            ok = ok && b[i] != NULL;
-            prev = b[i];
-        }
-        for (int i = 0; i < 12 && ok; i++)
-            ok = active_chain_move_window_tip(&ms.chain_active, b[i]);
-        ok = ok && !chain_linkage_hold_active();
-        ok = ok && !blocker_exists("chain.linkage_violation");
-        ok = ok && chain_linkage_violations_total() == 0;
-        CLC_CHECK("healthy genesis + 11 sequential advances pass", ok);
-        main_state_free(&ms);
-    }
-
-    /* 2. Label splice fires at block 1: a block whose pprev height label
-     * is 7 below (the +6/+7 splice boundary shape) is REFUSED. */
-    {
-        chain_linkage_reset_for_testing();
-        blocker_reset_for_testing();
-        struct main_state ms; main_state_init(&ms);
-        static struct uint256 h[16];
-        struct block_index *b[16];
-        struct block_index *prev = NULL;
-        bool ok = true;
-        for (int i = 0; i < 5; i++) {
-            b[i] = clc_insert(&ms, &h[i], i, prev, 0x22);
-            ok = ok && b[i] != NULL;
-            prev = b[i];
-        }
-        for (int i = 0; i < 5 && ok; i++)
-            ok = active_chain_move_window_tip(&ms.chain_active, b[i]);
-        /* The spliced block: built on b[4] (h=4) but LABELED h=11. */
-        b[5] = clc_insert(&ms, &h[5], 11, b[4], 0x22);
-        ok = ok && b[5] != NULL;
-        bool refused = !active_chain_move_window_tip(&ms.chain_active, b[5]);
-        ok = ok && refused;
-        ok = ok && chain_linkage_hold_active();
-        ok = ok && chain_linkage_hold_refuse_from() == 11;
-        ok = ok && blocker_exists("chain.linkage_violation");
-        ok = ok && blocker_class_for("chain.linkage_violation") ==
-                       BLOCKER_PERMANENT;
-        ok = ok && chain_linkage_violations_total() == 1;
-        /* Crash-only: window tip unchanged, process obviously alive. */
-        ok = ok && active_chain_tip(&ms.chain_active) == b[4];
-        CLC_CHECK("label splice refused at block 1 + HOLD + blocker", ok);
-
-        /* 3. HOLD semantics on the same state: a rewind BELOW the
-         * divergence passes; a healthy-looking move AT/PAST it refuses. */
-        bool rewind_ok = active_chain_move_window_tip(&ms.chain_active, b[2]);
-        uint64_t refusals_before = chain_linkage_hold_refusals_total();
-        /* healthy-labeled block at 11 building correctly would still be
-         * refused by the hold (refuse_from=11): build labels 3..11. */
-        struct block_index *p = b[2];
-        static struct uint256 h2[16];
-        struct block_index *c = NULL;
-        for (int i = 3; i <= 11; i++) {
-            c = clc_insert(&ms, &h2[i], i, p, 0x33);
-            p = c;
-        }
-        bool held = !active_chain_move_window_tip(&ms.chain_active, c);
-        bool ok2 = rewind_ok && held &&
-                   chain_linkage_hold_refusals_total() > refusals_before;
-        CLC_CHECK("HOLD: rewind below passes, move at/past refuses", ok2);
-
-        /* 4. Clear releases hold + blocker; the held move now passes. */
-        chain_linkage_hold_clear("linkage");
-        bool ok3 = !chain_linkage_hold_active() &&
-                   !blocker_exists("chain.linkage_violation") &&
-                   active_chain_move_window_tip(&ms.chain_active, c);
-        CLC_CHECK("clear releases hold + blocker; move passes", ok3);
-        main_state_free(&ms);
-    }
-
-    /* 5. Depth-10 reorg: rewind to the fork then reconnect a heavier
-     * branch block-by-block — never fires (non-fire proof). */
-    {
-        chain_linkage_reset_for_testing();
-        blocker_reset_for_testing();
-        struct main_state ms; main_state_init(&ms);
-        static struct uint256 h[40];
-        struct block_index *a[20], *bb[20];
-        struct block_index *prev = NULL;
-        bool ok = true;
-        for (int i = 0; i < 15; i++) {           /* branch A: 0..14 */
-            a[i] = clc_insert(&ms, &h[i], i, prev, 0x44);
-            ok = ok && a[i] != NULL;
-            prev = a[i];
-        }
-        for (int i = 0; i < 15 && ok; i++)
-            ok = active_chain_move_window_tip(&ms.chain_active, a[i]);
-        /* branch B forks at height 4 (depth-10 reorg), extends to 16 */
-        prev = a[4];
-        for (int i = 5; i <= 16; i++) {
-            bb[i] = clc_insert(&ms, &h[20 + i], i, prev, 0x55);
-            ok = ok && bb[i] != NULL;
-            prev = bb[i];
-        }
-        /* rewind to the fork point, then reconnect B one by one */
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, a[4]);
-        for (int i = 5; i <= 16 && ok; i++)
-            ok = active_chain_move_window_tip(&ms.chain_active, bb[i]);
-        ok = ok && !chain_linkage_hold_active();
-        ok = ok && !blocker_exists("chain.linkage_violation");
-        ok = ok && active_chain_tip(&ms.chain_active) == bb[16];
-        CLC_CHECK("depth-10 reorg rewind+reconnect never fires", ok);
-        main_state_free(&ms);
-    }
-
-    /* 6. Cold-import shape: a jump far past the window (> +1) with
-     * healthy labels passes (scoped out of pointer identity). */
-    {
-        chain_linkage_reset_for_testing();
-        blocker_reset_for_testing();
-        struct main_state ms; main_state_init(&ms);
-        static struct uint256 h[40];
-        struct block_index *prev = NULL, *bi = NULL;
-        bool ok = true;
-        for (int i = 0; i < 30; i++) {
-            bi = clc_insert(&ms, &h[i], i, prev, 0x66);
-            ok = ok && bi != NULL;
-            prev = bi;
-        }
-        /* window empty (height -1): seed-jump straight to 29 */
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, bi);
-        ok = ok && !chain_linkage_hold_active();
-        ok = ok && !blocker_exists("chain.linkage_violation");
-        CLC_CHECK("seed jump (> +1, healthy labels) passes", ok);
-        main_state_free(&ms);
-    }
-
-    /* 7. +1 advance whose pprev is NOT the window tip object (a
-     * single-move 1-block fork switch) is ALLOWED — fill_window rewrites
-     * the window from the pprev walk — but COUNTED as a diagnostic.
-     * Refusing it would false-HOLD routine network reorgs. */
-    {
-        chain_linkage_reset_for_testing();
-        blocker_reset_for_testing();
-        struct main_state ms; main_state_init(&ms);
-        static struct uint256 h[8];
-        struct block_index *b0, *b1, *b1x, *b2;
-        b0 = clc_insert(&ms, &h[0], 0, NULL, 0x77);
-        b1 = clc_insert(&ms, &h[1], 1, b0, 0x77);
-        b1x = clc_insert(&ms, &h[2], 1, b0, 0x78); /* sibling at h=1 */
-        bool ok = b0 && b1 && b1x;
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, b0);
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, b1);
-        /* b2 builds on the SIBLING b1x, not the window tip b1 */
-        b2 = clc_insert(&ms, &h[3], 2, b1x, 0x78);
-        ok = ok && b2 != NULL;
-        uint64_t before = chain_linkage_offtip_switches_total();
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, b2);
-        ok = ok && chain_linkage_offtip_switches_total() == before + 1;
-        ok = ok && !blocker_exists("chain.linkage_violation");
-        ok = ok && !chain_linkage_hold_active();
-        /* The window was rewritten onto the new branch. */
-        ok = ok && active_chain_at(&ms.chain_active, 1) == b1x;
-        ok = ok && active_chain_tip(&ms.chain_active) == b2;
-        CLC_CHECK("+1 fork switch allowed + counted (no false HOLD)", ok);
-        chain_linkage_reset_for_testing();
-        blocker_reset_for_testing();
-        main_state_free(&ms);
-    }
-
+    failures += clc_healthy_genesis_advances();
+    failures += clc_label_splice_hold_and_clear();
+    failures += clc_depth10_reorg_reconnect();
+    failures += clc_seed_jump_healthy_labels();
+    failures += clc_offtip_fork_switch_counted();
     return failures;
 }
