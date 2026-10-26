@@ -41,6 +41,54 @@ static bool npd_root(const char *root)
     return root && zcl_hex_decode_lower(root, decoded, sizeof(decoded));
 }
 
+static const char *npd_receipt_phase_name(
+    enum vcs_package_build_result result_class)
+{
+    static const struct npd_receipt_phase_row {
+        enum vcs_package_build_result code;
+        const char *name;
+    } rows[] = {
+        {VCS_PACKAGE_BUILD_RESULT_BUILD_FAIL, "COMPILE_RED"},
+        {VCS_PACKAGE_BUILD_RESULT_TEST_FAIL, "STORY_RED"},
+        {VCS_PACKAGE_BUILD_RESULT_TEST_PASS, "STORY_GREEN"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        if (rows[i].code == result_class) return rows[i].name;
+    return "COMPILE_GREEN";
+}
+
+static bool npd_push_dev_cycle_facts(struct json_value *facts, bool passed,
+                                     const char *phase,
+                                     const char *package_root, bool test_ran,
+                                     const char *receipt_hex)
+{
+    return json_push_kv_str(facts, "schema", "zcl.dev_cycle.v1") &&
+        json_push_kv_str(facts, "status", passed ? "passed" : "rejected") &&
+        json_push_kv_str(facts, "phase", phase) &&
+        json_push_kv_str(facts, "edit_epoch", package_root) &&
+        json_push_kv_str(facts, "candidate_object_root", package_root) &&
+        json_push_kv_str(facts, "affected_component", "installed C23 package") &&
+        json_push_kv_str(facts, "feedback_class",
+            test_ran ? "ISOLATED_PACKAGE_TEST" :
+                       "COMPILE_ONLY_PACKAGE_RECEIPT") &&
+        json_push_kv_str(facts, "receipt_id", receipt_hex);
+}
+
+static bool npd_push_verdict_facts(struct json_value *facts,
+                                   const char *toolchain, const char *result,
+                                   bool passed, bool test_ran)
+{
+    return json_push_kv_str(facts, "toolchain", toolchain) &&
+        json_push_kv_str(facts, "result_class", result) &&
+        json_push_kv_bool(facts, "candidate_bytes_executed", test_ran) &&
+        json_push_kv_bool(facts, "proof_complete", passed && test_ran) &&
+        json_push_kv_str(facts, "agent_next_action",
+            passed && test_ran
+                ? "request independent reproduction for this exact candidate"
+                : passed ? "add a sensitive candidate behavior story"
+                         : "inspect the named package build or test mismatch");
+}
+
 static bool npd_package_facts(const char *receipt_hex,
                               struct json_value *facts,
                               char *why, size_t why_cap)
@@ -63,36 +111,17 @@ static bool npd_package_facts(const char *receipt_hex,
     zcl_hex_encode(receipt.package_root, 32, package_root);
     const char *result = vcs_package_build_result_string(
         (enum vcs_package_build_result)receipt.result_class);
-    const char *phase = receipt.result_class == VCS_PACKAGE_BUILD_RESULT_BUILD_FAIL
-        ? "COMPILE_RED" : receipt.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_FAIL
-        ? "STORY_RED" : receipt.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS
-        ? "STORY_GREEN" : "COMPILE_GREEN";
+    const char *phase = npd_receipt_phase_name(receipt.result_class);
     bool passed = receipt.result_class == VCS_PACKAGE_BUILD_RESULT_BUILD_PASS ||
         receipt.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS;
     char toolchain[257];
     (void)snprintf(toolchain, sizeof(toolchain), "%s %s; %s",
                    receipt.compiler_id, receipt.compiler_version, result);
     json_set_object(facts);
-    bool ok = json_push_kv_str(facts, "schema", "zcl.dev_cycle.v1") &&
-        json_push_kv_str(facts, "status", passed ? "passed" : "rejected") &&
-        json_push_kv_str(facts, "phase", phase) &&
-        json_push_kv_str(facts, "edit_epoch", package_root) &&
-        json_push_kv_str(facts, "candidate_object_root", package_root) &&
-        json_push_kv_str(facts, "affected_component", "installed C23 package") &&
-        json_push_kv_str(facts, "feedback_class",
-            receipt.test_ran ? "ISOLATED_PACKAGE_TEST" :
-                               "COMPILE_ONLY_PACKAGE_RECEIPT") &&
-        json_push_kv_str(facts, "receipt_id", receipt_hex) &&
-        json_push_kv_str(facts, "toolchain", toolchain) &&
-        json_push_kv_str(facts, "result_class", result) &&
-        json_push_kv_bool(facts, "candidate_bytes_executed", receipt.test_ran) &&
-        json_push_kv_bool(facts, "proof_complete",
-                          passed && receipt.test_ran) &&
-        json_push_kv_str(facts, "agent_next_action",
-            passed && receipt.test_ran
-                ? "request independent reproduction for this exact candidate"
-                : passed ? "add a sensitive candidate behavior story"
-                         : "inspect the named package build or test mismatch");
+    bool ok = npd_push_dev_cycle_facts(facts, passed, phase, package_root,
+                                       receipt.test_ran, receipt_hex) &&
+        npd_push_verdict_facts(facts, toolchain, result, passed,
+                               receipt.test_ran);
     if (!passed)
         ok = ok && json_push_kv_str(facts, "failure_capsule", result);
     if (!ok) {
@@ -119,19 +148,35 @@ static void npd_item(struct zcl_present_model_v1 *model, uint16_t kind,
 
 static int npd_phase(const char *status, const char *phase, bool *red)
 {
+    static const struct npd_phase_rule {
+        const char *name;
+        bool prefix;
+        int stage;
+        bool red;
+    } rules[] = {
+        {"EDIT_SEEN", false, 1, false},
+        {"IMPACT_READY", false, 2, false},
+        {"COMPILE_GREEN", false, 3, false},
+        {"COMPILE_RED", false, 3, true},
+        {"STORY_GREEN", false, 4, false},
+        {"STORY_RED", false, 4, true},
+        {"FOCUSED_RED", false, 5, true},
+        /* FOCUSED_GREEN and FOCUSED_PARTIAL: focused evidence, not red. */
+        {"FOCUSED_", true, 5, false},
+        {"PROOF_PENDING", false, 5, false},
+        {"SUPERSEDED", false, 0, true},
+    };
     *red = false;
     if (!status || !phase) return -1;
-    if (strcmp(phase, "EDIT_SEEN") == 0) return 1;
-    if (strcmp(phase, "IMPACT_READY") == 0) return 2;
-    if (strcmp(phase, "COMPILE_GREEN") == 0) return 3;
-    if (strcmp(phase, "COMPILE_RED") == 0) { *red = true; return 3; }
-    if (strcmp(phase, "STORY_GREEN") == 0) return 4;
-    if (strcmp(phase, "STORY_RED") == 0) { *red = true; return 4; }
-    if (strcmp(phase, "FOCUSED_RED") == 0) { *red = true; return 5; }
-    /* FOCUSED_GREEN and FOCUSED_PARTIAL: focused evidence, not red. */
-    if (strncmp(phase, "FOCUSED_", 8) == 0) return 5;
-    if (strcmp(phase, "PROOF_PENDING") == 0) return 5;
-    if (strcmp(phase, "SUPERSEDED") == 0) { *red = true; return 0; }
+    for (size_t i = 0; i < sizeof(rules) / sizeof(rules[0]); i++) {
+        bool match = rules[i].prefix
+            ? strncmp(phase, rules[i].name, strlen(rules[i].name)) == 0
+            : strcmp(phase, rules[i].name) == 0;
+        if (match) {
+            *red = rules[i].red;
+            return rules[i].stage;
+        }
+    }
     if (strcmp(status, "passed") == 0) return 5;
     if (strcmp(status, "rejected") == 0 || strcmp(status, "blocked") == 0) {
         *red = true;
@@ -171,66 +216,43 @@ static void npd_stage(struct zcl_present_model_v1 *model, int number,
     item->denominator = 1u;
 }
 
-bool zcl_native_presentation_development_model_from_facts(
-    const struct json_value *facts, struct zcl_present_model_v1 *model,
-    char *why, size_t why_cap)
+static const char *npd_select_exact_root(const char *epoch,
+                                         const char *source,
+                                         const char *candidate)
 {
-    const char *schema = npd_str(facts, "schema");
-    const char *status = npd_str(facts, "status");
-    const char *phase = npd_str(facts, "phase");
-    const char *epoch = npd_str(facts, "edit_epoch");
-    const char *source = npd_str(facts, "source_id_sha256");
-    const char *candidate = npd_str(facts, "candidate_object_root");
-    const char *component = npd_str(facts, "affected_component");
-    const char *feedback = npd_str(facts, "feedback_class");
-    const char *capsule = npd_str(facts, "failure_capsule");
-    const char *next = npd_str(facts, "agent_next_action");
-    const char *receipt = npd_str(facts, "receipt_id");
-    const char *toolchain = npd_str(facts, "toolchain");
-    const char *root = npd_root(epoch) ? epoch :
-                       npd_root(source) ? source : candidate;
-    bool red = false;
-    int current = npd_phase(status, phase, &red);
-    if (!facts || facts->type != JSON_OBJ || !schema ||
-        strcmp(schema, "zcl.dev_cycle.v1") != 0 || !status ||
-        strcmp(status, "unavailable") == 0 || current < 0 || !npd_root(root)) {
-        (void)snprintf(why, why_cap,
-                       "canonical exact development verdict is unavailable");
-        return false;
-    }
-    bool proof_complete = npd_bool(facts, "proof_complete");
-    zcl_present_model_init_v1(model, ZCL_PRESENT_MODEL_PROGRESS);
-    (void)snprintf(model->request_id, sizeof(model->request_id),
-                   "develop-%.12s", root);
-    (void)snprintf(model->title, sizeof(model->title),
-                   "Exact development consequence");
-    (void)snprintf(model->summary, sizeof(model->summary),
-                   "Canonical local event %s: %s%s", phase, status,
-                   red ? " - named mismatch" : "");
-    (void)snprintf(model->exact_root, sizeof(model->exact_root), "%s", root);
-    bool candidate_executed = npd_bool(facts, "candidate_bytes_executed");
-    bool stage_observed[] = {
-        false,
-        npd_root(root),
-        (component && component[0]) || current == 2,
-        current == 3 || current == 4 ||
-            npd_root(candidate),
-        current == 4 || (candidate_executed && feedback && feedback[0]),
-        proof_complete || (current == 5 &&
-            strncmp(phase, "FOCUSED_", 8) == 0),
-    };
-    for (int number = 1; number <= 5; number++)
-        npd_stage(model, number, current, stage_observed[number],
-                  red && number == current,
-                  proof_complete && number == 5);
+    return npd_root(epoch) ? epoch : npd_root(source) ? source : candidate;
+}
 
+static bool npd_verdict_unavailable(const struct json_value *facts,
+                                    const char *schema, const char *status,
+                                    int current, const char *root)
+{
+    return !facts || facts->type != JSON_OBJ || !schema ||
+        strcmp(schema, "zcl.dev_cycle.v1") != 0 || !status ||
+        strcmp(status, "unavailable") == 0 || current < 0 || !npd_root(root);
+}
+
+static void npd_fill_stage_observed(const char *root, const char *component,
+                                    int current, const char *candidate,
+                                    const char *phase, bool candidate_executed,
+                                    const char *feedback, bool proof_complete,
+                                    bool observed[6])
+{
+    observed[0] = false;
+    observed[1] = npd_root(root);
+    observed[2] = (component && component[0]) || current == 2;
+    observed[3] = current == 3 || current == 4 || npd_root(candidate);
+    observed[4] = current == 4 ||
+        (candidate_executed && feedback && feedback[0]);
+    observed[5] = proof_complete || (current == 5 &&
+        strncmp(phase, "FOCUSED_", 8) == 0);
+}
+
+static void npd_push_closure_item(struct zcl_present_model_v1 *model,
+                                  bool files_known, int64_t files,
+                                  const char *component)
+{
     char value[257];
-    int64_t files = 0, elapsed = 0, compiler = 0, linker = 0;
-    bool files_known = npd_int(facts, "changed_path_count", &files) ||
-        npd_int(facts, "file_count", &files);
-    bool elapsed_known = npd_int(facts, "elapsed_us", &elapsed);
-    bool compiler_known = npd_int(facts, "compiler_processes", &compiler);
-    bool linker_known = npd_int(facts, "linker_processes", &linker);
     if (files_known)
         (void)snprintf(value, sizeof(value), "%lld file(s); %s",
                        (long long)files,
@@ -242,11 +264,24 @@ bool zcl_native_presentation_development_model_from_facts(
              files_known && component && component[0]
                  ? ZCL_PRESENT_STATUS_INFO : ZCL_PRESENT_STATUS_YELLOW,
              "closure", "LOCAL OBSERVATION - Affected closure", value);
+}
+
+static void npd_push_candidate_item(struct zcl_present_model_v1 *model,
+                                    const char *candidate)
+{
     npd_item(model, ZCL_PRESENT_ITEM_KEY_VALUE,
              npd_root(candidate) ? ZCL_PRESENT_STATUS_GREEN :
                                    ZCL_PRESENT_STATUS_YELLOW,
              "candidate", "LOCAL OBSERVATION - Candidate object",
              npd_root(candidate) ? candidate : "not emitted by this stage");
+}
+
+static void npd_push_resources_item(struct zcl_present_model_v1 *model,
+                                    bool elapsed_known, int64_t elapsed,
+                                    bool compiler_known, int64_t compiler,
+                                    bool linker_known, int64_t linker)
+{
+    char value[257];
     char elapsed_text[32] = "unknown";
     char compiler_text[32] = "unknown";
     char linker_text[32] = "unknown";
@@ -265,6 +300,12 @@ bool zcl_native_presentation_development_model_from_facts(
              elapsed_known && compiler_known && linker_known
                  ? ZCL_PRESENT_STATUS_INFO : ZCL_PRESENT_STATUS_YELLOW,
              "resources", "LOCAL OBSERVATION - Time and processes", value);
+}
+
+static void npd_push_provenance_items(struct zcl_present_model_v1 *model,
+                                      const char *receipt,
+                                      const char *toolchain)
+{
     if (receipt && receipt[0])
         npd_item(model, ZCL_PRESENT_ITEM_KEY_VALUE, ZCL_PRESENT_STATUS_GREEN,
                  "receipt", "LOCAL OBSERVATION - Build receipt", receipt);
@@ -272,6 +313,13 @@ bool zcl_native_presentation_development_model_from_facts(
         npd_item(model, ZCL_PRESENT_ITEM_KEY_VALUE, ZCL_PRESENT_STATUS_INFO,
                  "toolchain", "LOCAL OBSERVATION - Toolchain and verdict",
                  toolchain);
+}
+
+static void npd_push_outcome_items(struct zcl_present_model_v1 *model,
+                                   const char *feedback, bool red,
+                                   const char *capsule, const char *status,
+                                   const char *next)
+{
     npd_item(model, ZCL_PRESENT_ITEM_KEY_VALUE,
              feedback ? ZCL_PRESENT_STATUS_INFO : ZCL_PRESENT_STATUS_YELLOW,
              "behavior-class", "LOCAL OBSERVATION - Behavior lane",
@@ -287,6 +335,64 @@ bool zcl_native_presentation_development_model_from_facts(
     npd_item(model, ZCL_PRESENT_ITEM_KEY_VALUE, ZCL_PRESENT_STATUS_INFO,
              "next", "NEXT - One dominant agent action",
              next && next[0] ? next : "wait for the next canonical event");
+}
+
+bool zcl_native_presentation_development_model_from_facts(
+    const struct json_value *facts, struct zcl_present_model_v1 *model,
+    char *why, size_t why_cap)
+{
+    const char *schema = npd_str(facts, "schema");
+    const char *status = npd_str(facts, "status");
+    const char *phase = npd_str(facts, "phase");
+    const char *epoch = npd_str(facts, "edit_epoch");
+    const char *source = npd_str(facts, "source_id_sha256");
+    const char *candidate = npd_str(facts, "candidate_object_root");
+    const char *component = npd_str(facts, "affected_component");
+    const char *feedback = npd_str(facts, "feedback_class");
+    const char *capsule = npd_str(facts, "failure_capsule");
+    const char *next = npd_str(facts, "agent_next_action");
+    const char *receipt = npd_str(facts, "receipt_id");
+    const char *toolchain = npd_str(facts, "toolchain");
+    const char *root = npd_select_exact_root(epoch, source, candidate);
+    bool red = false;
+    int current = npd_phase(status, phase, &red);
+    if (npd_verdict_unavailable(facts, schema, status, current, root)) {
+        (void)snprintf(why, why_cap,
+                       "canonical exact development verdict is unavailable");
+        return false;
+    }
+    bool proof_complete = npd_bool(facts, "proof_complete");
+    zcl_present_model_init_v1(model, ZCL_PRESENT_MODEL_PROGRESS);
+    (void)snprintf(model->request_id, sizeof(model->request_id),
+                   "develop-%.12s", root);
+    (void)snprintf(model->title, sizeof(model->title),
+                   "Exact development consequence");
+    (void)snprintf(model->summary, sizeof(model->summary),
+                   "Canonical local event %s: %s%s", phase, status,
+                   red ? " - named mismatch" : "");
+    (void)snprintf(model->exact_root, sizeof(model->exact_root), "%s", root);
+    bool candidate_executed = npd_bool(facts, "candidate_bytes_executed");
+    bool stage_observed[6];
+    npd_fill_stage_observed(root, component, current, candidate, phase,
+                            candidate_executed, feedback, proof_complete,
+                            stage_observed);
+    for (int number = 1; number <= 5; number++)
+        npd_stage(model, number, current, stage_observed[number],
+                  red && number == current,
+                  proof_complete && number == 5);
+
+    int64_t files = 0, elapsed = 0, compiler = 0, linker = 0;
+    bool files_known = npd_int(facts, "changed_path_count", &files) ||
+        npd_int(facts, "file_count", &files);
+    bool elapsed_known = npd_int(facts, "elapsed_us", &elapsed);
+    bool compiler_known = npd_int(facts, "compiler_processes", &compiler);
+    bool linker_known = npd_int(facts, "linker_processes", &linker);
+    npd_push_closure_item(model, files_known, files, component);
+    npd_push_candidate_item(model, candidate);
+    npd_push_resources_item(model, elapsed_known, elapsed, compiler_known,
+                            compiler, linker_known, linker);
+    npd_push_provenance_items(model, receipt, toolchain);
+    npd_push_outcome_items(model, feedback, red, capsule, status, next);
     return zcl_present_model_validate_v1(model, why, why_cap);
 }
 
