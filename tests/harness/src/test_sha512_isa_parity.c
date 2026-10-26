@@ -79,6 +79,116 @@ static bool sha512_host_has_hardware(void)
     return false;
 }
 
+/* Published SHA-512 vectors shared by the KAT and comparator-teeth checks. */
+static const struct {
+    const char *message;
+    size_t len;
+    const char *digest;
+} kats[] = {
+    { "", 0,
+      "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+      "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e" },
+    { "abc", 3,
+      "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+      "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f" },
+    { "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
+      "ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu", 112,
+      "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018"
+      "501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909" },
+};
+
+/* Runs the published vectors through both implementation tiers and returns
+ * the number of mismatches. */
+static int sha512_count_kat_failures(void)
+{
+    int kat_failures = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        sha512_select_impl(pass == 0 ? SHA512_IMPL_PORTABLE
+                                     : SHA512_IMPL_ARM);
+        for (size_t i = 0; i < sizeof(kats) / sizeof(kats[0]); ++i) {
+            unsigned char got[SHA512_OUTPUT_SIZE];
+            unsigned char want[SHA512_OUTPUT_SIZE];
+            if (sha512_hex(kats[i].digest, want, sizeof(want)) != 0) {
+                kat_failures++;
+                continue;
+            }
+            sha512_oneshot((const unsigned char *)kats[i].message,
+                           kats[i].len, got);
+            if (memcmp(got, want, sizeof(got)) != 0)
+                kat_failures++;
+        }
+    }
+    return kat_failures;
+}
+
+/* Hashes every length 0..1024 through both tiers and returns the number of
+ * mismatches. */
+static int sha512_count_length_sweep_failures(unsigned char *buffer)
+{
+    int diff_failures = 0;
+    for (size_t len = 0; len <= 1024; ++len) {
+        unsigned char portable[SHA512_OUTPUT_SIZE];
+        unsigned char hardware[SHA512_OUTPUT_SIZE];
+        sha512_rng_fill(buffer, len);
+        sha512_select_impl(SHA512_IMPL_PORTABLE);
+        sha512_oneshot(buffer, len, portable);
+        sha512_select_impl(SHA512_IMPL_ARM);
+        sha512_oneshot(buffer, len, hardware);
+        if (memcmp(portable, hardware, sizeof(portable)) != 0)
+            diff_failures++;
+    }
+    return diff_failures;
+}
+
+/* Feeds each random buffer to the ARM tier in random chunks and returns how
+ * often the result differs from the portable one-shot digest. */
+static int sha512_count_chunked_parity_failures(unsigned char *buffer)
+{
+    int diff_failures = 0;
+    for (int trial = 0; trial < 5000; ++trial) {
+        size_t len = (size_t)(sha512_rng_next() % 8193);
+        unsigned char portable[SHA512_OUTPUT_SIZE];
+        unsigned char hardware[SHA512_OUTPUT_SIZE];
+        sha512_rng_fill(buffer, len);
+
+        sha512_select_impl(SHA512_IMPL_PORTABLE);
+        sha512_oneshot(buffer, len, portable);
+
+        sha512_select_impl(SHA512_IMPL_ARM);
+        struct sha512_ctx ctx;
+        sha512_init(&ctx);
+        size_t off = 0;
+        while (off < len) {
+            size_t part = (size_t)(sha512_rng_next() % 193) + 1;
+            if (part > len - off)
+                part = len - off;
+            sha512_write(&ctx, buffer + off, part);
+            off += part;
+        }
+        sha512_finalize(&ctx, hardware);
+        if (memcmp(portable, hardware, sizeof(portable)) != 0)
+            diff_failures++;
+    }
+    return diff_failures;
+}
+
+/* Returns true when the ARM tier digests "abc" to the published vector and
+ * a one-bit flip of the message does not. */
+static bool sha512_arm_detects_bit_flip(void)
+{
+    unsigned char want[SHA512_OUTPUT_SIZE];
+    unsigned char good[SHA512_OUTPUT_SIZE];
+    unsigned char bad[SHA512_OUTPUT_SIZE];
+    unsigned char message[3] = {'a', 'b', 'c'};
+    (void)sha512_hex(kats[1].digest, want, sizeof(want));
+    sha512_select_impl(SHA512_IMPL_ARM);
+    sha512_oneshot(message, sizeof(message), good);
+    message[2] ^= 1;
+    sha512_oneshot(message, sizeof(message), bad);
+    return memcmp(good, want, sizeof(good)) == 0 &&
+           memcmp(bad, want, sizeof(bad)) != 0;
+}
+
 int test_sha512_isa_parity(void)
 {
     int failures = 0;
@@ -102,41 +212,8 @@ int test_sha512_isa_parity(void)
         failures++;
     }
 
-    static const struct {
-        const char *message;
-        size_t len;
-        const char *digest;
-    } kats[] = {
-        { "", 0,
-          "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
-          "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e" },
-        { "abc", 3,
-          "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
-          "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f" },
-        { "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
-          "ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu", 112,
-          "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018"
-          "501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909" },
-    };
-
     printf("sha512_isa_parity: published KATs through both tiers... ");
-    int kat_failures = 0;
-    for (int pass = 0; pass < 2; ++pass) {
-        sha512_select_impl(pass == 0 ? SHA512_IMPL_PORTABLE
-                                     : SHA512_IMPL_ARM);
-        for (size_t i = 0; i < sizeof(kats) / sizeof(kats[0]); ++i) {
-            unsigned char got[SHA512_OUTPUT_SIZE];
-            unsigned char want[SHA512_OUTPUT_SIZE];
-            if (sha512_hex(kats[i].digest, want, sizeof(want)) != 0) {
-                kat_failures++;
-                continue;
-            }
-            sha512_oneshot((const unsigned char *)kats[i].message,
-                           kats[i].len, got);
-            if (memcmp(got, want, sizeof(got)) != 0)
-                kat_failures++;
-        }
-    }
+    int kat_failures = sha512_count_kat_failures();
     if (kat_failures == 0)
         printf("OK\n");
     else {
@@ -151,17 +228,7 @@ int test_sha512_isa_parity(void)
         printf("allocation FAIL\n");
         failures++;
     } else {
-        for (size_t len = 0; len <= 1024; ++len) {
-            unsigned char portable[SHA512_OUTPUT_SIZE];
-            unsigned char hardware[SHA512_OUTPUT_SIZE];
-            sha512_rng_fill(buffer, len);
-            sha512_select_impl(SHA512_IMPL_PORTABLE);
-            sha512_oneshot(buffer, len, portable);
-            sha512_select_impl(SHA512_IMPL_ARM);
-            sha512_oneshot(buffer, len, hardware);
-            if (memcmp(portable, hardware, sizeof(portable)) != 0)
-                diff_failures++;
-        }
+        diff_failures = sha512_count_length_sweep_failures(buffer);
         if (diff_failures == 0)
             printf("OK\n");
         else {
@@ -170,31 +237,7 @@ int test_sha512_isa_parity(void)
         }
 
         printf("sha512_isa_parity: randomized + chunked parity x5000... ");
-        diff_failures = 0;
-        for (int trial = 0; trial < 5000; ++trial) {
-            size_t len = (size_t)(sha512_rng_next() % 8193);
-            unsigned char portable[SHA512_OUTPUT_SIZE];
-            unsigned char hardware[SHA512_OUTPUT_SIZE];
-            sha512_rng_fill(buffer, len);
-
-            sha512_select_impl(SHA512_IMPL_PORTABLE);
-            sha512_oneshot(buffer, len, portable);
-
-            sha512_select_impl(SHA512_IMPL_ARM);
-            struct sha512_ctx ctx;
-            sha512_init(&ctx);
-            size_t off = 0;
-            while (off < len) {
-                size_t part = (size_t)(sha512_rng_next() % 193) + 1;
-                if (part > len - off)
-                    part = len - off;
-                sha512_write(&ctx, buffer + off, part);
-                off += part;
-            }
-            sha512_finalize(&ctx, hardware);
-            if (memcmp(portable, hardware, sizeof(portable)) != 0)
-                diff_failures++;
-        }
+        diff_failures = sha512_count_chunked_parity_failures(buffer);
         if (diff_failures == 0)
             printf("OK\n");
         else {
@@ -205,23 +248,11 @@ int test_sha512_isa_parity(void)
     }
 
     printf("sha512_isa_parity: comparator teeth... ");
-    {
-        unsigned char want[SHA512_OUTPUT_SIZE];
-        unsigned char good[SHA512_OUTPUT_SIZE];
-        unsigned char bad[SHA512_OUTPUT_SIZE];
-        unsigned char message[3] = {'a', 'b', 'c'};
-        (void)sha512_hex(kats[1].digest, want, sizeof(want));
-        sha512_select_impl(SHA512_IMPL_ARM);
-        sha512_oneshot(message, sizeof(message), good);
-        message[2] ^= 1;
-        sha512_oneshot(message, sizeof(message), bad);
-        if (memcmp(good, want, sizeof(good)) == 0 &&
-            memcmp(bad, want, sizeof(bad)) != 0) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
+    if (sha512_arm_detects_bit_flip()) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
     }
 
     printf("sha512_isa_parity: boot KAT path... ");
