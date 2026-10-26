@@ -504,8 +504,6 @@ contexts/commons/services/src/zcode_lane_service.c:zcode_accepted_work_find:29
 contexts/commons/services/src/zcode_lane_service.c:zcode_lane_advance:53
 contexts/commons/views/src/metaverse_view.c:metaverse_view_property:31
 contexts/commons/views/src/metaverse_view_pages.c:metaverse_view_commons:16
-contexts/commons/views/src/zcode_view.c:zcode_download_response:22
-contexts/commons/views/src/zcode_view.c:zcode_view_packages:22
 contexts/commons/views/src/zcode_view_pages.c:zcode_view_badges:20
 contexts/commons/views/src/zcode_view_pages.c:zcode_view_leaderboard:21
 contexts/commons/views/src/zcode_view_pages.c:zcode_view_publisher:38

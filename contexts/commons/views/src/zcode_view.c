@@ -50,6 +50,32 @@ size_t zcode_error_response(const char *status_code,
     return zcode_wrap_response(body, body_len, status_code, resp, max);
 }
 
+static bool zcode_download_char_allowed(char c)
+{
+    /* strchr also matches the terminator, so reject NUL up front. */
+    return c != '\0' &&
+           strchr("abcdefghijklmnopqrstuvwxyz"
+                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                  "0123456789._-", c) != NULL;
+}
+
+/* Header-injection guard: keep only [A-Za-z0-9._-] in the filename
+ * (the controller only ever passes hex-derived names, but the header
+ * must stay well-formed for any caller). */
+static void zcode_download_sanitize_filename(const char *download_filename,
+                                             char *safe_name, size_t cap)
+{
+    size_t j = 0;
+    if (download_filename) {
+        for (size_t i = 0; download_filename[i] && j < cap - 1; i++) {
+            char c = download_filename[i];
+            if (zcode_download_char_allowed(c))
+                safe_name[j++] = c;
+        }
+    }
+    safe_name[j] = '\0';
+}
+
 size_t zcode_download_response(const uint8_t *body, size_t body_len,
                                const char *download_filename,
                                uint8_t *resp, size_t max)
@@ -57,21 +83,9 @@ size_t zcode_download_response(const uint8_t *body, size_t body_len,
     if (!resp || max == 0 || (!body && body_len > 0))
         return 0;
 
-    /* Header-injection guard: keep only [A-Za-z0-9._-] in the filename
-     * (the controller only ever passes hex-derived names, but the header
-     * must stay well-formed for any caller). */
     char safe_name[80];
-    size_t j = 0;
-    if (download_filename) {
-        for (size_t i = 0; download_filename[i] &&
-                            j < sizeof(safe_name) - 1; i++) {
-            char c = download_filename[i];
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
-                safe_name[j++] = c;
-        }
-    }
-    safe_name[j] = '\0';
+    zcode_download_sanitize_filename(download_filename, safe_name,
+                                     sizeof(safe_name));
 
     int hdr_len = snprintf((char *)resp, max,
         "HTTP/1.1 200 OK\r\n"
@@ -148,6 +162,66 @@ size_t zcode_view_index(size_t packages, uint64_t settled_facts,
 
 /* ── /zcode/packages — search ─────────────────────────────────────── */
 
+static void zcode_append_packages_summary(char *body, size_t body_size,
+                                          size_t *off, const char *query,
+                                          const char *safe_query,
+                                          size_t rendered, size_t total,
+                                          size_t scanned)
+{
+    int n;
+    if (query && query[0]) {
+        n = snprintf(body + *off, body_size - *off,
+            "<p>%zu match%s for <b>%s</b> (%zu shown, %zu packages "
+            "scanned).</p>",
+            total, total == 1 ? "" : "es", safe_query, rendered, scanned);
+    } else {
+        n = snprintf(body + *off, body_size - *off,
+            "<p>%zu published release%s (%zu shown).%s</p>",
+            total, total == 1 ? "" : "s", rendered,
+            total == 0 ? " Publish your first package: "
+                         "`z23 zcode guide`." : "");
+    }
+    if (n > 0) *off += (size_t)n;
+}
+
+static void zcode_append_package_card(
+    const struct vcs_package_index_entry *e, char *body, size_t body_size,
+    size_t *off)
+{
+    char safe_name[160], safe_semver[80], safe_license[48];
+    char safe_znam[80];
+    html_escape(safe_name, sizeof(safe_name), e->name);
+    html_escape(safe_semver, sizeof(safe_semver), e->semver);
+    html_escape(safe_license, sizeof(safe_license), e->license);
+    safe_znam[0] = '\0';
+    if (e->has_znam)
+        html_escape(safe_znam, sizeof(safe_znam), e->znam);
+    int n = snprintf(body + *off, body_size - *off,
+        "<div class='card'>"
+        "<h3><a href='/zcode/package/%s'>%s</a> "
+        "<span class='pill'>%s</span></h3>"
+        "<div class='kv'><b>license</b>"
+        "<span class='val mono'>%s</span></div>"
+        "<div class='kv'><b>publisher</b><span class='val mono'>"
+        "<a href='/zcode/publisher/%s'>%.16s&hellip;</a></span></div>"
+        "<div class='kv'><b>package root</b>"
+        "<span class='val mono'>%.16s&hellip;</span></div>"
+        "<div class='kv'><b>files</b><span class='val'>%u</span></div>"
+        "<div class='kv'><b>bytes</b><span class='val'>%llu</span></div>",
+        e->package_root_hex, safe_name, safe_semver, safe_license,
+        e->publisher_hex, e->publisher_hex, e->package_root_hex,
+        e->file_count, (unsigned long long)e->total_bytes);
+    if (n > 0) *off += (size_t)n;
+    if (e->has_znam) {
+        n = snprintf(body + *off, body_size - *off,
+            "<div class='kv'><b>znam pointer</b>"
+            "<span class='val mono'>%s</span></div>", safe_znam);
+        if (n > 0) *off += (size_t)n;
+    }
+    n = snprintf(body + *off, body_size - *off, "</div>");
+    if (n > 0) *off += (size_t)n;
+}
+
 size_t zcode_view_packages(const struct vcs_package_index_entry **rows,
                            size_t rendered, size_t total, size_t scanned,
                            const char *query, uint8_t *resp, size_t max)
@@ -171,55 +245,12 @@ size_t zcode_view_packages(const struct vcs_package_index_entry **rows,
         safe_query);
     if (n > 0) off += (size_t)n;
 
-    if (query && query[0]) {
-        n = snprintf(body + off, sizeof(body) - off,
-            "<p>%zu match%s for <b>%s</b> (%zu shown, %zu packages "
-            "scanned).</p>",
-            total, total == 1 ? "" : "es", safe_query, rendered, scanned);
-    } else {
-        n = snprintf(body + off, sizeof(body) - off,
-            "<p>%zu published release%s (%zu shown).%s</p>",
-            total, total == 1 ? "" : "s", rendered,
-            total == 0 ? " Publish your first package: "
-                         "`z23 zcode guide`." : "");
-    }
-    if (n > 0) off += (size_t)n;
+    zcode_append_packages_summary(body, sizeof(body), &off, query,
+                                  safe_query, rendered, total, scanned);
 
-    for (size_t i = 0; i < rendered && off < sizeof(body) - 1024; i++) {
-        const struct vcs_package_index_entry *e = rows[i];
-        char safe_name[160], safe_semver[80], safe_license[48];
-        char safe_znam[80];
-        html_escape(safe_name, sizeof(safe_name), e->name);
-        html_escape(safe_semver, sizeof(safe_semver), e->semver);
-        html_escape(safe_license, sizeof(safe_license), e->license);
-        safe_znam[0] = '\0';
-        if (e->has_znam)
-            html_escape(safe_znam, sizeof(safe_znam), e->znam);
-        n = snprintf(body + off, sizeof(body) - off,
-            "<div class='card'>"
-            "<h3><a href='/zcode/package/%s'>%s</a> "
-            "<span class='pill'>%s</span></h3>"
-            "<div class='kv'><b>license</b>"
-            "<span class='val mono'>%s</span></div>"
-            "<div class='kv'><b>publisher</b><span class='val mono'>"
-            "<a href='/zcode/publisher/%s'>%.16s&hellip;</a></span></div>"
-            "<div class='kv'><b>package root</b>"
-            "<span class='val mono'>%.16s&hellip;</span></div>"
-            "<div class='kv'><b>files</b><span class='val'>%u</span></div>"
-            "<div class='kv'><b>bytes</b><span class='val'>%llu</span></div>",
-            e->package_root_hex, safe_name, safe_semver, safe_license,
-            e->publisher_hex, e->publisher_hex, e->package_root_hex,
-            e->file_count, (unsigned long long)e->total_bytes);
-        if (n > 0) off += (size_t)n;
-        if (e->has_znam) {
-            n = snprintf(body + off, sizeof(body) - off,
-                "<div class='kv'><b>znam pointer</b>"
-                "<span class='val mono'>%s</span></div>", safe_znam);
-            if (n > 0) off += (size_t)n;
-        }
-        n = snprintf(body + off, sizeof(body) - off, "</div>");
-        if (n > 0) off += (size_t)n;
-    }
+    for (size_t i = 0; i < rendered && off < sizeof(body) - 1024; i++)
+        zcode_append_package_card(rows[i], body, sizeof(body), &off);
+
     if (total > rendered) {
         n = snprintf(body + off, sizeof(body) - off,
             "<p class='meta'>%zu more match%s not shown (page cap %u).</p>",
