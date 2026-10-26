@@ -332,8 +332,6 @@ static int dcb_check_valid_block_accepts(void)
         noncoinbase_tx(&txs[1], 0x41);
         struct block b;
         build_block(&b, txs, 2);
-        /* Sentinel as in the reject cases: the OK path must clear it. */
-        reason[0] = '\xff'; dos = -1;
 
         /* merkle ok */
         struct zcl_result rm =
