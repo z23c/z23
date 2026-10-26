@@ -37,6 +37,68 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Splice the fixed view key into the dumpstate params array literal; false
+ * means the params buffer could not hold the encoded key. */
+static bool ts_encode_dumpstate_params(char *params, size_t cap,
+                                       const char *key)
+{
+    int n = snprintf(params, cap, "[\"storage_telemetry\",\"%s\"]", key);
+    return n > 0 && (size_t)n < cap;
+}
+
+/* Parse the raw node reply into `body`; the caller checks the shape so the
+ * failure reply is raised at the dispatch site. */
+static bool ts_read_dumpstate_body(struct json_value *body, const char *raw)
+{
+    return json_read(body, raw, strlen(raw));
+}
+
+/* node_rpc_call surfaces a JSON-RPC failure as either {"error":{...}} or a
+ * bare {"code":..,"message":..}; both mean the dump did not happen. */
+/* Pull the human-readable message out of either failure envelope shape. */
+static bool ts_rpc_failure_envelope(const struct json_value *body,
+                                    const char **message_out)
+{
+    const struct json_value *err = json_get(body, "error");
+    const struct json_value *ecode = json_get(body, "code");
+    const struct json_value *emsg = json_get(body, "message");
+    const char *msg = NULL;
+    bool failed = (err && !json_is_null(err)) ||
+                  (ecode && ecode->type == JSON_INT &&
+                   emsg && emsg->type == JSON_STR);
+    if (failed) {
+        if (err && err->type == JSON_OBJ)
+            msg = json_get_str(json_get(err, "message"));
+        else if (emsg && emsg->type == JSON_STR)
+            msg = json_get_str(emsg);
+    }
+    *message_out = msg;
+    return failed;
+}
+
+/* The rendered telemetry document is the `state` member of the dumpstate
+ * reply, or nothing usable. */
+static const struct json_value *ts_rendered_state(
+    const struct json_value *body)
+{
+    const struct json_value *state = json_get(body, "state");
+    return state && state->type == JSON_OBJ ? state : NULL;
+}
+
+/* One sibling suggestion, and NEVER this leaf: a next[] entry naming the
+ * command currently being served makes push_next_array reject the whole
+ * reply, and the CLI reports the total loss as RESPONSE_BUDGET_EXCEEDED
+ * over an empty document. */
+static void ts_add_sibling_suggestion(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *sibling,
+    const char *sibling_reason)
+{
+    if (sibling && request->spec &&
+        strcmp(sibling, request->spec->path) != 0)
+        (void)zcl_command_reply_add_next(reply, sibling, "{}", sibling_reason);
+}
+
 /* dumpstate params for the storage telemetry subsystem at one view/group.
  * `key` is a fixed token from the table below — never caller text — so it is
  * spliced into the array literal rather than round-tripped through a JSON
@@ -49,9 +111,7 @@ static void ts_dispatch(const struct zcl_command_request *request,
         return;
 
     char params[96];
-    int n = snprintf(params, sizeof params,
-                     "[\"storage_telemetry\",\"%s\"]", key);
-    if (n <= 0 || (size_t)n >= sizeof params) {
+    if (!ts_encode_dumpstate_params(params, sizeof params, key)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "ARG_BUILD_FAILED",
                                "normalize", false, false,
@@ -74,7 +134,7 @@ static void ts_dispatch(const struct zcl_command_request *request,
     }
 
     struct json_value body;
-    if (!json_read(&body, raw, strlen(raw)) || body.type != JSON_OBJ) {
+    if (!ts_read_dumpstate_body(&body, raw) || body.type != JSON_OBJ) {
         json_free(&body);
         free(raw);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -86,18 +146,8 @@ static void ts_dispatch(const struct zcl_command_request *request,
     }
     free(raw);
 
-    /* node_rpc_call surfaces a JSON-RPC failure as either {"error":{...}} or a
-     * bare {"code":..,"message":..}; both mean the dump did not happen. */
-    const struct json_value *err = json_get(&body, "error");
-    const struct json_value *ecode = json_get(&body, "code");
-    const struct json_value *emsg = json_get(&body, "message");
-    if ((err && !json_is_null(err)) ||
-        (ecode && ecode->type == JSON_INT && emsg && emsg->type == JSON_STR)) {
-        const char *msg = NULL;
-        if (err && err->type == JSON_OBJ)
-            msg = json_get_str(json_get(err, "message"));
-        else if (emsg && emsg->type == JSON_STR)
-            msg = json_get_str(emsg);
+    const char *msg = NULL;
+    if (ts_rpc_failure_envelope(&body, &msg)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "STATE_ERROR",
                                "execute", false, false,
@@ -113,8 +163,8 @@ static void ts_dispatch(const struct zcl_command_request *request,
      * around it (subsystem/description/captured_at) is dumpstate's, and
      * projecting it would spend the byte budget on a descriptor the caller
      * already has from `discover describe`. */
-    const struct json_value *state = json_get(&body, "state");
-    if (!state || state->type != JSON_OBJ) {
+    const struct json_value *state = ts_rendered_state(&body);
+    if (!state) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "BAD_STATE_BODY",
                                "serialize", false, false,
@@ -125,13 +175,7 @@ static void ts_dispatch(const struct zcl_command_request *request,
     }
     zcl_native_bridge_project(request, state, reply);
 
-    /* One sibling suggestion, and NEVER this leaf: a next[] entry naming the
-     * command currently being served makes push_next_array reject the whole
-     * reply, and the CLI reports the total loss as RESPONSE_BUDGET_EXCEEDED
-     * over an empty document. */
-    if (sibling && request->spec &&
-        strcmp(sibling, request->spec->path) != 0)
-        (void)zcl_command_reply_add_next(reply, sibling, "{}", sibling_reason);
+    ts_add_sibling_suggestion(request, reply, sibling, sibling_reason);
 
     json_free(&body);
 }
