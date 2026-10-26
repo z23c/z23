@@ -6,6 +6,19 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_source, *cli_sink;
+#undef stdin
+#undef stdout
+#define stdin cli_source
+#define stdout cli_sink
+#define putchar(c) fputc((c), cli_sink)
+#define main zhtml_cli_main
+#include "../app/main.c"
+#undef main
+#undef putchar
+#undef stdout
+#undef stdin
+
 static int g_fail = 0;
 #define CHECK(cond)                                                     \
   do {                                                                  \
@@ -181,7 +194,104 @@ static void test_numeric_leading_zero_range(void) {
         out[0] == 'A' && out[1] == 0);
 }
 
+static int cli_case(const void *data, size_t len, char **args, int argc,
+                    int status, const void *want, size_t want_len) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int bad = 1;
+  if (!source || !output) goto cleanup;
+  if (fwrite(data, 1, len, source) != len || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  cli_source = source; cli_sink = output;
+  if (zhtml_cli_main(argc, args) != status) goto cleanup;
+  if (want) {
+    rewind(output);
+    unsigned char got[2 * ZHTML_MAX + 128];
+    size_t n = fread(got, 1, sizeof got, output);
+    if (ferror(output) || n != want_len || memcmp(got, want, n) != 0) goto cleanup;
+  }
+  bad = 0;
+cleanup:
+  if (source && fclose(source) != 0) bad = 1;
+  if (output && fclose(output) != 0) bad = 1;
+  return bad;
+}
+
+static int cli_unescape(const void *data, size_t len, int status,
+                        const void *want, size_t want_len) {
+  char *args[] = {"zhtml", "unescape", NULL};
+  return cli_case(data, len, args, 2, status, want, want_len);
+}
+
+static void test_cli_splits(void) {
+  const char *entities[] = {"&amp;", "&lt;", "&gt;", "&quot;", "&apos;",
+                            "&#65;", "&#128512;", "&#x1F600;"};
+  unsigned char text[3 * 8192 + 64], want[sizeof text];
+  for (size_t e = 0; e < sizeof entities / sizeof entities[0]; e++) {
+    size_t n = strlen(entities[e]);
+    for (size_t split = 1; split < n; split++) {
+      size_t start = 8192 - split;
+      memset(text, 'a', sizeof text);
+      text[10] = 0; /* Raw bytes before the split entity must survive. */
+      memcpy(text + start, entities[e], n);
+      memcpy(text + start + n, "&lt;Z", 5);
+      size_t len = sizeof text;
+      size_t decoded = zhtml_unescape((char *)want, sizeof want, text, len);
+      CHECK(decoded != SIZE_MAX && decoded < sizeof want);
+      if (decoded != SIZE_MAX && decoded < sizeof want)
+        CHECK(cli_unescape(text, len, 0, want, decoded) == 0);
+    }
+  }
+}
+
+static void test_cli_entity_bounds(void) {
+  static unsigned char text[2 * ZHTML_MAX + 16];
+  text[0] = 'P'; text[1] = '&'; text[2] = '#';
+  memset(text + 3, '0', ZHTML_MAX - 5);
+  text[ZHTML_MAX - 2] = '6'; text[ZHTML_MAX - 1] = '5';
+  text[ZHTML_MAX] = ';'; text[ZHTML_MAX + 1] = 'Q';
+  CHECK(cli_unescape(text, ZHTML_MAX + 2, 0, "PAQ", 3) == 0);
+  memmove(text + ZHTML_MAX + 1, text + ZHTML_MAX, 2);
+  text[ZHTML_MAX] = '0'; /* One byte beyond the entity bound. */
+  CHECK(cli_unescape(text, ZHTML_MAX + 3, 1, NULL, 0) == 0);
+  memset(text, 'x', sizeof text);
+  CHECK(cli_unescape(text, sizeof text, 0, text, sizeof text) == 0);
+  const char *bad[] = {"&", "&#", "&#x", "&amp", "&#65", "&#x41",
+                        "&unknown;", "&bad&amp;", "&bad;&amp"};
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    CHECK(cli_unescape(bad[i], strlen(bad[i]), 1, NULL, 0) == 0);
+}
+
+static void test_cli_controls(void) {
+  char *escape[] = {"zhtml", "escape", NULL};
+  CHECK(cli_case("<&", 2, escape, 2, 0, "&lt;&amp;", 9) == 0);
+  char *argv[] = {"zhtml", "unescape", "&amp;", "&#65;", NULL};
+  CHECK(cli_case("", 0, argv, 4, 0, "&\nA\n", 4) == 0);
+  char *escaped[] = {"zhtml", "escape", "<&", NULL};
+  CHECK(cli_case("", 0, escaped, 3, 0, "&lt;&amp;\n", 10) == 0);
+}
+
+static void test_cli_read_error(void) {
+#if defined(_WIN32)
+  FILE *source = fopen("NUL", "w");
+#else
+  FILE *source = fopen("/dev/null", "w");
+#endif
+  FILE *output = tmpfile();
+  if (source && output) {
+    cli_source = source; cli_sink = output;
+    char *args[] = {"zhtml", "unescape", NULL};
+    CHECK(zhtml_cli_main(2, args) == 1);
+    CHECK(ferror(source) && ftell(output) == 0);
+  } else CHECK(false);
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+}
+
 int main(void) {
+  test_cli_splits();
+  test_cli_entity_bounds();
+  test_cli_controls();
+  test_cli_read_error();
   test_numeric_leading_zero_range();
   test_kat();
   test_roundtrip();
