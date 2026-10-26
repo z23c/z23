@@ -28,6 +28,53 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Encodes one dumpstate round trip into `params`; returns true when snprintf
+ * failed or the fixed buffer could not hold the encoded projection key. */
+static bool trc_encode_params_failed(char *params, size_t cap,
+                                     const char *key)
+{
+    int n = snprintf(params, cap, "[\"telemetry_rollup\",\"%s\"]", key);
+    return n <= 0 || (size_t)n >= cap;
+}
+
+static bool trc_has_rpc_error_envelope(const struct json_value *body)
+{
+    /* node_rpc_call surfaces a JSON-RPC failure as either {"error":{...}} or a
+     * bare {"code":..,"message":..}; both mean the dump did not happen. */
+    const struct json_value *err = json_get(body, "error");
+    if (err && !json_is_null(err))
+        return true;
+    const struct json_value *ecode = json_get(body, "code");
+    const struct json_value *emsg = json_get(body, "message");
+    return ecode && ecode->type == JSON_INT && emsg && emsg->type == JSON_STR;
+}
+
+/* Extracts the human-readable message from a failure envelope detected by
+ * trc_has_rpc_error_envelope, substituting the generic line when the
+ * envelope carries no message text of its own. */
+static const char *trc_rpc_error_message(const struct json_value *body)
+{
+    const struct json_value *err = json_get(body, "error");
+    const struct json_value *emsg = json_get(body, "message");
+    const char *msg = NULL;
+    if (err && err->type == JSON_OBJ)
+        msg = json_get_str(json_get(err, "message"));
+    else if (emsg && emsg->type == JSON_STR)
+        msg = json_get_str(emsg);
+    return msg && msg[0] ? msg : "the telemetry rollup reported an error";
+}
+
+/* Returns the rollup's `state` member when it is a JSON object, NULL when
+ * the body carried no state object. */
+static const struct json_value *trc_state_object(
+    const struct json_value *body)
+{
+    const struct json_value *state = json_get(body, "state");
+    if (!state || state->type != JSON_OBJ)
+        return NULL;
+    return state;
+}
+
 /* One dumpstate round trip against the `telemetry_rollup` subsystem at one
  * projection. `key` is a fixed token from the three call sites below — never
  * caller text — so it is spliced into the params array rather than
@@ -39,9 +86,7 @@ static void trc_dispatch(const struct zcl_command_request *request,
         return;
 
     char params[96];
-    int n = snprintf(params, sizeof params, "[\"telemetry_rollup\",\"%s\"]",
-                     key);
-    if (n <= 0 || (size_t)n >= sizeof params) {
+    if (trc_encode_params_failed(params, sizeof params, key)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "ARG_BUILD_FAILED",
                                "normalize", false, false,
@@ -78,24 +123,11 @@ static void trc_dispatch(const struct zcl_command_request *request,
     }
     free(raw);
 
-    /* node_rpc_call surfaces a JSON-RPC failure as either {"error":{...}} or a
-     * bare {"code":..,"message":..}; both mean the dump did not happen. */
-    const struct json_value *err = json_get(&body, "error");
-    const struct json_value *ecode = json_get(&body, "code");
-    const struct json_value *emsg = json_get(&body, "message");
-    if ((err && !json_is_null(err)) ||
-        (ecode && ecode->type == JSON_INT && emsg && emsg->type == JSON_STR)) {
-        const char *msg = NULL;
-        if (err && err->type == JSON_OBJ)
-            msg = json_get_str(json_get(err, "message"));
-        else if (emsg && emsg->type == JSON_STR)
-            msg = json_get_str(emsg);
+    if (trc_has_rpc_error_envelope(&body)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "STATE_ERROR",
                                "execute", false, false,
-                               msg && msg[0]
-                                   ? msg
-                                   : "the telemetry rollup reported an error",
+                               trc_rpc_error_message(&body),
                                "telemetry_rollup");
         json_free(&body);
         return;
@@ -104,8 +136,8 @@ static void trc_dispatch(const struct zcl_command_request *request,
     /* The rolled-up document is the `state` member; the dumpstate envelope
      * around it is a descriptor the caller already has from
      * `discover describe`, and projecting it would spend the byte budget. */
-    const struct json_value *state = json_get(&body, "state");
-    if (!state || state->type != JSON_OBJ) {
+    const struct json_value *state = trc_state_object(&body);
+    if (!state) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "BAD_STATE_BODY",
                                "serialize", false, false,
