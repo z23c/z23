@@ -424,12 +424,6 @@ static int cyc_c_rbrace(struct cyc_lx *lx, const struct cyc_emit *em)
     return 0;
 }
 
-static void cyc_c_semi(struct cyc_lx *lx)
-{
-    if (!cyc_off(lx) && lx->brace == 0 && lx->paren == 0)
-        lx->head_ok = 0;
-}
-
 /* `&&` / `||`: one decision point, and only for two ADJACENT operator
  * characters. A lone `&` or `|` (address-of, bitwise) counts nothing, and
  * nothing is ever paired across an intervening character, so `f(&x); if (a
@@ -480,7 +474,7 @@ static int cyc_punct(struct cyc_lx *lx, const struct cyc_emit *em,
             return rc;
         break;
     }
-    case ';': cyc_c_semi(lx); break;
+    case ';': cyc_c_other(lx); break;
     case '&':
     case '|': cyc_c_logic(lx, s->line, s->n, s->i, c); break;
     case '?': cyc_c_quest(lx); break;
