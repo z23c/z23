@@ -20,6 +20,16 @@ static void ui_present_error(char *error, size_t cap, const char *message)
     if (error && cap > 0) (void)snprintf(error, cap, "%s", message);
 }
 
+static void ui_present_error_clear(char *error, size_t cap)
+{
+    if (error && cap > 0) error[0] = '\0';
+}
+
+static bool ui_present_error_empty(char *error, size_t cap)
+{
+    return error && cap > 0 && !error[0];
+}
+
 static bool ui_present_text(char *out, size_t cap,
                             const struct json_value *value,
                             bool required, char *error, size_t error_cap)
@@ -134,6 +144,58 @@ static bool ui_present_u32(const struct json_value *value, uint32_t *out,
     return true;
 }
 
+static bool ui_present_json_array_bounded(const struct json_value *array,
+                                          size_t max)
+{
+    return !array ||
+           (array->type == JSON_ARR && json_size(array) <= max);
+}
+
+static uint32_t ui_present_json_array_count(const struct json_value *array)
+{
+    return array ? (uint32_t)json_size(array) : 0;
+}
+
+static int ui_present_item_parse_fields(
+    const struct json_value *value,
+    struct zcl_present_model_item_v1 *item,
+    char *error, size_t error_cap)
+{
+    if (!ui_present_text(item->id, sizeof(item->id), json_get(value, "id"),
+                         false, error, error_cap))
+        return -1;
+    if (!ui_present_text(item->label, sizeof(item->label),
+                         json_get(value, "label"), false, error,
+                         error_cap))
+        return -1;
+    if (!ui_present_text(item->value, sizeof(item->value),
+                         json_get(value, "value"), false, error,
+                         error_cap))
+        return -1;
+    if (!ui_present_u32(json_get(value, "numerator"), &item->numerator, 0,
+                        error, error_cap))
+        return -1;
+    if (!ui_present_u32(json_get(value, "denominator"), &item->denominator,
+                        0, error, error_cap))
+        return -1;
+    return 0;
+}
+
+static int ui_present_item_parse_parent_index(
+    const struct json_value *value,
+    struct zcl_present_model_item_v1 *item,
+    char *error, size_t error_cap)
+{
+    const struct json_value *member = json_get(value, "parent_index");
+    uint32_t parent = 0;
+    if (!member) return 0;
+    if (!ui_present_u32(member, &parent, 0, error, error_cap) ||
+        parent > UINT16_MAX)
+        return -1;
+    item->parent_index = (uint16_t)parent;
+    return 0;
+}
+
 static bool ui_present_parse_item(const struct json_value *value,
                                   struct zcl_present_model_item_v1 *item,
                                   char *error, size_t error_cap)
@@ -162,25 +224,11 @@ static bool ui_present_parse_item(const struct json_value *value,
                          "visual model item status is invalid");
         return false;
     }
-    if (!ui_present_text(item->id, sizeof(item->id), json_get(value, "id"),
-                         false, error, error_cap) ||
-        !ui_present_text(item->label, sizeof(item->label),
-                         json_get(value, "label"), false, error, error_cap) ||
-        !ui_present_text(item->value, sizeof(item->value),
-                         json_get(value, "value"), false, error, error_cap) ||
-        !ui_present_u32(json_get(value, "numerator"), &item->numerator, 0,
-                        error, error_cap) ||
-        !ui_present_u32(json_get(value, "denominator"), &item->denominator, 0,
-                        error, error_cap)) {
+    if (ui_present_item_parse_fields(value, item, error, error_cap) != 0)
         return false;
-    }
-    uint32_t parent = 0;
-    if (json_get(value, "parent_index")) {
-        if (!ui_present_u32(json_get(value, "parent_index"), &parent, 0,
-                            error, error_cap) || parent > UINT16_MAX)
-            return false;
-        item->parent_index = (uint16_t)parent;
-    }
+    if (ui_present_item_parse_parent_index(value, item,
+                                           error, error_cap) != 0)
+        return false;
     static const struct { const char *name; uint16_t flag; } flags[] = {
         {"selected", ZCL_PRESENT_ITEM_SELECTED},
         {"required", ZCL_PRESENT_ITEM_REQUIRED},
@@ -224,6 +272,29 @@ static bool ui_present_parse_action(
     return true;
 }
 
+static bool ui_present_model_header_valid(
+    const struct json_value *input,
+    struct zcl_present_model_v1 *out,
+    char *error, size_t error_cap)
+{
+    uint16_t kind = ui_present_model_kind(
+        json_get_str(json_get(input, "kind")));
+    zcl_present_model_init_v1(out, (enum zcl_present_model_kind)kind);
+    return kind &&
+           ui_present_text(out->request_id, sizeof(out->request_id),
+                           json_get(input, "request_id"), true, error,
+                           error_cap) &&
+           ui_present_text(out->title, sizeof(out->title),
+                           json_get(input, "title"), true, error,
+                           error_cap) &&
+           ui_present_text(out->summary, sizeof(out->summary),
+                           json_get(input, "summary"), false, error,
+                           error_cap) &&
+           ui_present_text(out->exact_root, sizeof(out->exact_root),
+                           json_get(input, "exact_root"), false, error,
+                           error_cap);
+}
+
 bool ui_present_model_from_json(const struct json_value *input,
                                 struct zcl_present_model_v1 *out,
                                 char *error, size_t error_cap)
@@ -232,52 +303,36 @@ bool ui_present_model_from_json(const struct json_value *input,
         "kind", "request_id", "title", "summary", "exact_root",
         "items", "actions", "output", "page",
     };
-    if (error && error_cap > 0) error[0] = '\0';
+    ui_present_error_clear(error, error_cap);
     if (!out || !ui_present_keys_allowed(
             input, allowed, sizeof(allowed) / sizeof(allowed[0]),
             error, error_cap))
         return false;
-    uint16_t kind = ui_present_model_kind(
-        json_get_str(json_get(input, "kind")));
-    zcl_present_model_init_v1(out, (enum zcl_present_model_kind)kind);
-    if (!kind ||
-        !ui_present_text(out->request_id, sizeof(out->request_id),
-                         json_get(input, "request_id"), true,
-                         error, error_cap) ||
-        !ui_present_text(out->title, sizeof(out->title),
-                         json_get(input, "title"), true,
-                         error, error_cap) ||
-        !ui_present_text(out->summary, sizeof(out->summary),
-                         json_get(input, "summary"), false,
-                         error, error_cap) ||
-        !ui_present_text(out->exact_root, sizeof(out->exact_root),
-                         json_get(input, "exact_root"), false,
-                         error, error_cap)) {
-        if (error && error_cap > 0 && !error[0])
+    if (!ui_present_model_header_valid(input, out, error, error_cap)) {
+        if (ui_present_error_empty(error, error_cap))
             ui_present_error(error, error_cap,
                              "visual model kind is invalid");
         return false;
     }
     const struct json_value *items = json_get(input, "items");
-    if (items && (items->type != JSON_ARR ||
-                  json_size(items) > ZCL_PRESENT_MODEL_ITEMS_MAX)) {
+    if (!ui_present_json_array_bounded(items, ZCL_PRESENT_MODEL_ITEMS_MAX)) {
         ui_present_error(error, error_cap,
                          "visual model items are not a bounded array");
         return false;
     }
-    out->item_count = items ? (uint32_t)json_size(items) : 0;
+    out->item_count = ui_present_json_array_count(items);
     for (uint32_t i = 0; i < out->item_count; i++)
         if (!ui_present_parse_item(json_at(items, i), &out->items[i],
                                    error, error_cap))
             return false;
     const struct json_value *actions = json_get(input, "actions");
-    if (actions && (actions->type != JSON_ARR ||
-                    json_size(actions) > ZCL_PRESENT_MODEL_ACTIONS_MAX)) {
+    if (!ui_present_json_array_bounded(
+            actions, ZCL_PRESENT_MODEL_ACTIONS_MAX)) {
         ui_present_error(error, error_cap,
                          "visual model actions are not a bounded array");
         return false;
     }
-    out->action_count = actions ? (uint32_t)json_size(actions) : 0;
+    out->action_count = ui_present_json_array_count(actions);
     for (uint32_t i = 0; i < out->action_count; i++)
         if (!ui_present_parse_action(json_at(actions, i), &out->actions[i],
                                      error, error_cap))
