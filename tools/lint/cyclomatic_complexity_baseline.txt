@@ -1469,9 +1469,6 @@ tools/command/native_dev_command.c:zcl_native_handle_dev_app_simulate:18
 tools/command/native_dev_command.c:zcl_native_handle_dev_drive:35
 tools/command/native_dev_command.c:zcl_native_handle_dev_ff:23
 tools/command/native_dev_command.c:zcl_native_handle_dev_publication_status:16
-tools/command/native_dev_hotswap.c:registry_probe_cb:36
-tools/command/native_dev_hotswap.c:rpc_dev_hotswap_native:19
-tools/command/native_dev_hotswap.c:service_resident_observation_append:24
 tools/command/native_dev_land.c:dl_dependency_repair_one:36
 tools/command/native_dev_land.c:dl_materialize_file:43
 tools/command/native_dev_land.c:dl_status:40

@@ -243,31 +243,16 @@ static bool registry_commit_batch_cb(void *ctx,
     return true;
 }
 
-/* PROBE BEFORE PUBLISH — the last gate, and the one that replaces module
- * self-certification.
- *
- * The candidate's declared probe leaf is dispatched against the PUBLIC command
- * registry's contract for that leaf: the registry-resolved spec (which must
- * still be a READY, read-only, non-alias leaf), the registry's own input
- * validation of the resident-owned bounded canonical request, and the registry
- * reply envelope. The reply is checked against the case's frozen schema and
- * tighter byte budget. Any mismatch returns false and publishes NOTHING.
- *
- * This runs the candidate body, which for a native bridge leaf issues one
- * loopback RPC. In the resident node that is a self-call served by a sibling
- * RPC worker (RPC_HTTP_WORKERS=4) under the client's receive timeout — it
- * cannot wedge the activation path. */
-static bool registry_probe_cb(void *ctx, const char *leaf,
-                              zcl_hotswap_handler_fn fn, char *why,
-                              size_t why_sz)
-{
-    (void)ctx;
 #define PROBE_FAIL(...)                                                      \
     do {                                                                     \
         if (why && why_sz) snprintf(why, why_sz, __VA_ARGS__);               \
         return false;                                                        \
     } while (0)
 
+static bool registry_probe_case_for_leaf(
+    const char *leaf, zcl_hotswap_handler_fn fn,
+    const struct zcl_hotswap_probe_case **out, char *why, size_t why_sz)
+{
     if (!leaf || !leaf[0] || !fn)
         PROBE_FAIL("probe leaf or candidate handler missing");
 
@@ -279,8 +264,15 @@ static bool registry_probe_cb(void *ctx, const char *leaf,
         probe->byte_budget == 0 || probe->byte_budget > ZCL_COMMAND_LIST_BUDGET)
         PROBE_FAIL("probe case '%s' has an invalid resident contract",
                    probe->case_id ? probe->case_id : "(unnamed)");
+    *out = probe;
+    return true;
+}
 
-    const struct zcl_command_registry *reg = zcl_command_catalog();
+static bool registry_probe_spec_check(
+    const struct zcl_command_registry *reg, const char *leaf,
+    const struct zcl_hotswap_probe_case *probe,
+    const struct zcl_command_spec **out, char *why, size_t why_sz)
+{
     bool was_alias = false;
     const struct zcl_command_spec *spec =
         zcl_command_registry_find(reg, leaf, &was_alias);
@@ -304,24 +296,122 @@ static bool registry_probe_cb(void *ctx, const char *leaf,
         PROBE_FAIL("probe case '%s' budget %zu exceeds registry budget %zu",
                    probe->case_id, probe->byte_budget,
                    (size_t)spec->budget_bytes);
+    *out = spec;
+    return true;
+}
 
-    struct json_value input;
-    json_init(&input);
-    if (!json_read(&input, probe->canonical_input_json,
+static bool registry_probe_input_check(
+    const struct zcl_command_spec *spec, const char *leaf,
+    const struct zcl_hotswap_probe_case *probe, struct json_value *input,
+    char *why, size_t why_sz)
+{
+    if (!json_read(input, probe->canonical_input_json,
                    strlen(probe->canonical_input_json)) ||
-        input.type != JSON_OBJ) {
-        json_free(&input);
+        input->type != JSON_OBJ) {
+        json_free(input);
         PROBE_FAIL("probe case '%s' canonical input is not a JSON object",
                    probe->case_id);
     }
     char vwhy[192] = {0};
-    if (!zcl_command_registry_input_validate(spec, &input, vwhy,
+    if (!zcl_command_registry_input_validate(spec, input, vwhy,
                                              sizeof(vwhy))) {
-        json_free(&input);
+        json_free(input);
         PROBE_FAIL("bounded probe case '%s' rejected for '%s': %s",
                    probe->case_id, leaf,
                    vwhy[0] ? vwhy : "input validation failed");
     }
+    return true;
+}
+
+static bool registry_probe_reply_shape(struct zcl_command_reply *reply,
+                                       const struct zcl_command_spec *spec,
+                                       char *detail, size_t detail_sz)
+{
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED &&
+        reply->status != ZCL_COMMAND_STATUS_ACCEPTED) {
+        snprintf(detail, detail_sz, "status=%s code=%s message=%s",
+                 zcl_command_status_name(reply->status),
+                 reply->error.code[0] ? reply->error.code : "(none)",
+                 reply->error.message[0] ? reply->error.message : "(none)");
+        return false;
+    }
+    if (!reply->data_schema ||
+        strcmp(reply->data_schema, spec->output_schema) != 0) {
+        snprintf(detail, detail_sz,
+                 "reply data_schema '%s' != declared output schema '%s'",
+                 reply->data_schema ? reply->data_schema : "(null)",
+                 spec->output_schema);
+        return false;
+    }
+    if (reply->data.type != JSON_OBJ) {
+        snprintf(detail, detail_sz,
+                 "reply data is not a JSON object (type %d)",
+                 (int)reply->data.type);
+        return false;
+    }
+    return true;
+}
+
+static bool registry_probe_reply_render(struct zcl_command_reply *reply,
+                                        size_t budget, char *detail,
+                                        size_t detail_sz)
+{
+    bool ok = true;
+    char *rendered = (char *)zcl_malloc(budget + 1, "hotswap.probe.render");
+    if (!rendered) {
+        ok = false;
+        snprintf(detail, detail_sz, "probe render buffer unavailable");
+    } else {
+        size_t n = json_write(&reply->data, rendered, budget + 1);
+        if (n == 0 || n > budget) {
+            ok = false;
+            snprintf(detail, detail_sz,
+                     "reply data does not render inside the declared "
+                     "%zu-byte budget", budget);
+        }
+        if (ok) {
+            probe_rendered_clear();
+            g_probe_rendered = rendered;
+            rendered = NULL;
+        }
+        free(rendered);
+    }
+    return ok;
+}
+
+/* PROBE BEFORE PUBLISH — the last gate, and the one that replaces module
+ * self-certification.
+ *
+ * The candidate's declared probe leaf is dispatched against the PUBLIC command
+ * registry's contract for that leaf: the registry-resolved spec (which must
+ * still be a READY, read-only, non-alias leaf), the registry's own input
+ * validation of the resident-owned bounded canonical request, and the registry
+ * reply envelope. The reply is checked against the case's frozen schema and
+ * tighter byte budget. Any mismatch returns false and publishes NOTHING.
+ *
+ * This runs the candidate body, which for a native bridge leaf issues one
+ * loopback RPC. In the resident node that is a self-call served by a sibling
+ * RPC worker (RPC_HTTP_WORKERS=4) under the client's receive timeout — it
+ * cannot wedge the activation path. */
+static bool registry_probe_cb(void *ctx, const char *leaf,
+                              zcl_hotswap_handler_fn fn, char *why,
+                              size_t why_sz)
+{
+    (void)ctx;
+
+    const struct zcl_hotswap_probe_case *probe = NULL;
+    if (!registry_probe_case_for_leaf(leaf, fn, &probe, why, why_sz))
+        return false;
+
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = NULL;
+    if (!registry_probe_spec_check(reg, leaf, probe, &spec, why, why_sz))
+        return false;
+
+    struct json_value input;
+    json_init(&input);
+    if (!registry_probe_input_check(spec, leaf, probe, &input, why, why_sz))
+        return false;
 
     size_t budget = probe->byte_budget;
     struct zcl_command_context context = {
@@ -340,48 +430,11 @@ static bool registry_probe_cb(void *ctx, const char *leaf,
     zcl_command_reply_init(&reply, probe->expected_schema);
     fn(&request, &reply);
 
-    bool ok = true;
     char detail[192] = {0};
-    if (reply.status != ZCL_COMMAND_STATUS_PASSED &&
-        reply.status != ZCL_COMMAND_STATUS_ACCEPTED) {
-        ok = false;
-        snprintf(detail, sizeof(detail), "status=%s code=%s message=%s",
-                 zcl_command_status_name(reply.status),
-                 reply.error.code[0] ? reply.error.code : "(none)",
-                 reply.error.message[0] ? reply.error.message : "(none)");
-    } else if (!reply.data_schema ||
-               strcmp(reply.data_schema, spec->output_schema) != 0) {
-        ok = false;
-        snprintf(detail, sizeof(detail),
-                 "reply data_schema '%s' != declared output schema '%s'",
-                 reply.data_schema ? reply.data_schema : "(null)",
-                 spec->output_schema);
-    } else if (reply.data.type != JSON_OBJ) {
-        ok = false;
-        snprintf(detail, sizeof(detail),
-                 "reply data is not a JSON object (type %d)",
-                 (int)reply.data.type);
-    } else {
-        char *rendered = (char *)zcl_malloc(budget + 1, "hotswap.probe.render");
-        if (!rendered) {
-            ok = false;
-            snprintf(detail, sizeof(detail), "probe render buffer unavailable");
-        } else {
-            size_t n = json_write(&reply.data, rendered, budget + 1);
-            if (n == 0 || n > budget) {
-                ok = false;
-                snprintf(detail, sizeof(detail),
-                         "reply data does not render inside the declared "
-                         "%zu-byte budget", budget);
-            }
-            if (ok) {
-                probe_rendered_clear();
-                g_probe_rendered = rendered;
-                rendered = NULL;
-            }
-            free(rendered);
-        }
-    }
+    bool ok = registry_probe_reply_shape(&reply, spec, detail, sizeof(detail));
+    if (ok)
+        ok = registry_probe_reply_render(&reply, budget, detail,
+                                         sizeof(detail));
 
     zcl_command_reply_free(&reply);
     json_free(&input);
@@ -608,6 +661,44 @@ static void service_report_to_reply(
     }
 }
 
+static void service_probe_dispatch(const char *operation,
+                                   struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply)
+{
+    if (strcmp(operation, "zcode.commons.economics.status") == 0) {
+        zcl_native_handle_zcode_commons_economics_status(request, reply);
+    } else if (strcmp(operation, "zcode.commons.corpus.show") == 0) {
+        zcl_native_handle_zcode_commons_corpus_show(request, reply);
+    } else if (strcmp(operation, "app.market.purchase.guide") == 0) {
+        zcl_native_handle_market_purchase_guide(request, reply);
+    } else if (strcmp(operation, "app.market.moderation.guide") == 0) {
+        zcl_native_handle_market_moderation_guide(request, reply);
+    } else if (strcmp(operation, "zcode.package.guide") == 0) {
+        zcl_native_handle_zcode_package_guide(request, reply);
+    } else if (strcmp(operation, "zcode.moderation.status") == 0) {
+        zcl_native_handle_zcode_moderation_status(request, reply);
+    } else if (strcmp(operation, "zcode.passport.status") == 0) {
+        zcl_native_handle_zcode_passport_status(request, reply);
+    } else if (strcmp(operation, "zcode.work.context") == 0) {
+        zcl_native_handle_zcode_work_context(request, reply);
+    } else if (strcmp(operation, "zcode.package.dev.promotion-guide") == 0) {
+        zcl_native_handle_zcode_lane_guide(request, reply);
+    } else if (strcmp(operation, "zcode.workspace.status") == 0) {
+        zcl_native_handle_zcode_workspace_status(request, reply);
+    } else if (strcmp(operation, "app.shop.reputation") == 0) {
+        zcl_native_handle_shop_reputation(request, reply);
+    } else if (strcmp(operation, "app.shop.status") == 0) {
+        zcl_native_handle_shop_status(request, reply);
+    } else if (strcmp(operation, "app.shop.want.list") == 0) {
+        zcl_native_handle_shop_want_list(request, reply);
+    } else {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+            ZCL_COMMAND_EXIT_BLOCKED, "UNKNOWN_SERVICE_PROBE", "probe",
+            false, false, "service probe operation is not statically bound",
+            operation);
+    }
+}
+
 /* After a service candidate has passed the frozen host-owned KAT and been
  * published, observe it through the service's ordinary static status handler. The
  * candidate cannot choose this operation or its input, and the handler keeps
@@ -637,38 +728,7 @@ static void service_resident_observation_append(struct json_value *out,
     struct zcl_command_request request = { .input = &input };
     struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, probe->expected_schema);
-    if (strcmp(operation, "zcode.commons.economics.status") == 0) {
-        zcl_native_handle_zcode_commons_economics_status(&request, &reply);
-    } else if (strcmp(operation, "zcode.commons.corpus.show") == 0) {
-        zcl_native_handle_zcode_commons_corpus_show(&request, &reply);
-    } else if (strcmp(operation, "app.market.purchase.guide") == 0) {
-        zcl_native_handle_market_purchase_guide(&request, &reply);
-    } else if (strcmp(operation, "app.market.moderation.guide") == 0) {
-        zcl_native_handle_market_moderation_guide(&request, &reply);
-    } else if (strcmp(operation, "zcode.package.guide") == 0) {
-        zcl_native_handle_zcode_package_guide(&request, &reply);
-    } else if (strcmp(operation, "zcode.moderation.status") == 0) {
-        zcl_native_handle_zcode_moderation_status(&request, &reply);
-    } else if (strcmp(operation, "zcode.passport.status") == 0) {
-        zcl_native_handle_zcode_passport_status(&request, &reply);
-    } else if (strcmp(operation, "zcode.work.context") == 0) {
-        zcl_native_handle_zcode_work_context(&request, &reply);
-    } else if (strcmp(operation, "zcode.package.dev.promotion-guide") == 0) {
-        zcl_native_handle_zcode_lane_guide(&request, &reply);
-    } else if (strcmp(operation, "zcode.workspace.status") == 0) {
-        zcl_native_handle_zcode_workspace_status(&request, &reply);
-    } else if (strcmp(operation, "app.shop.reputation") == 0) {
-        zcl_native_handle_shop_reputation(&request, &reply);
-    } else if (strcmp(operation, "app.shop.status") == 0) {
-        zcl_native_handle_shop_status(&request, &reply);
-    } else if (strcmp(operation, "app.shop.want.list") == 0) {
-        zcl_native_handle_shop_want_list(&request, &reply);
-    } else {
-        zcl_command_reply_fail(&reply, ZCL_COMMAND_STATUS_BLOCKED,
-            ZCL_COMMAND_EXIT_BLOCKED, "UNKNOWN_SERVICE_PROBE", "probe",
-            false, false, "service probe operation is not statically bound",
-            operation);
-    }
+    service_probe_dispatch(operation, &request, &reply);
     char *rendered = NULL;
     size_t rendered_len = 0;
     if (reply.exit_code == ZCL_COMMAND_EXIT_OK && reply.data_schema &&
@@ -691,6 +751,82 @@ static void service_resident_observation_append(struct json_value *out,
     json_free(&input);
 }
 
+static bool rpc_dev_hotswap_params_ok(const struct json_value *params,
+                                      struct json_value *result)
+{
+    if (!params || params->type != JSON_ARR || json_size(params) < 1 ||
+        json_size(params) > 2) {
+        json_rpc_error_full(result, RPC_INVALID_PARAMS,
+            "expected [so_path, (activate)]", "dev_hotswap_native");
+        return false;
+    }
+    return true;
+}
+
+static const char *rpc_dev_hotswap_so_path_arg(const struct json_value *path_v,
+                                               struct json_value *result)
+{
+    if (!path_v || path_v->type != JSON_STR) {
+        json_rpc_error_full(result, RPC_INVALID_PARAMS,
+            "so_path must be a string", "dev_hotswap_native");
+        return NULL;
+    }
+    const char *so_path = json_get_str(path_v);
+    if (!so_path || so_path[0] != '/') {
+        json_rpc_error_full(result, RPC_INVALID_PARAMETER,
+            "so_path must be absolute", "dev_hotswap_native");
+        return NULL;
+    }
+    return so_path;
+}
+
+static void rpc_dev_hotswap_service_result(
+    struct json_value *result,
+    const struct zcl_hotswap_service_report *report, bool service_ok)
+{
+    json_set_object(result);
+    json_push_kv_str(result, "schema", "zcl.hotswap_service_activate.v1");
+    json_push_kv_bool(result, "ok", report->ok);
+    json_push_kv_bool(result, "verify_only", report->verify_only);
+    json_push_kv_bool(result, "activated", report->activated);
+    json_push_kv_bool(result, "rolled_back", report->rolled_back);
+    json_push_kv_bool(result, "probed", report->probed);
+    json_push_kv_bool(result, "dev_restart", report->dev_restart);
+    json_push_kv_int(result, "generation", (int64_t)report->generation);
+    json_push_kv_str(result, "service_id", report->service_id);
+    json_push_kv_str(result, "stage", report->stage);
+    if (report->error[0])
+        json_push_kv_str(result, "error", report->error);
+    if (service_ok && report->activated)
+        service_resident_observation_append(
+            result, report->service_id);
+}
+
+/* Return the full report either way; the CLI renders ok/verify_only/error. */
+static void rpc_dev_hotswap_report_result(
+    struct json_value *result, const struct hotswap_activate_report *report)
+{
+    json_set_object(result);
+    json_push_kv_str(result, "schema", "zcl.hotswap_activate.v2");
+    json_push_kv_bool(result, "ok", report->ok);
+    json_push_kv_bool(result, "verify_only", report->verify_only);
+    json_push_kv_bool(result, "activated", report->activated);
+    json_push_kv_bool(result, "rolled_back", report->rolled_back);
+    json_push_kv_bool(result, "probed", report->probed);
+    json_push_kv_int(result, "generation", (int64_t)report->generation);
+    json_push_kv_int(result, "leaf_count", (int64_t)report->leaf_count);
+    json_push_kv_str(result, "source_tu", report->source_tu);
+    json_push_kv_str(result, "leaves", report->leaves);
+    json_push_kv_str(result, "probe_leaf", report->probe_leaf);
+    json_push_kv_str(result, "handler", report->handler_name);
+    json_push_kv_str(result, "artifact_sha256", report->artifact_sha256);
+    json_push_kv_str(result, "stage", report->stage);
+    if (report->error[0])
+        json_push_kv_str(result, "error", report->error);
+    probe_rendered_append(result);
+    probe_rendered_clear();
+}
+
 /* Resident RPC: perform the swap IN this (running node) process.
  * Positional params: [so_path, (activate_bool)]. activate defaults false
  * (verify-only). A true activate is still gated by hotswap_activation_authorized
@@ -709,25 +845,13 @@ static bool rpc_dev_hotswap_native(const struct json_value *params, bool help,
             "dev_hotswap_native");
         return false;
     }
-    if (!params || params->type != JSON_ARR || json_size(params) < 1 ||
-        json_size(params) > 2) {
-        json_rpc_error_full(result, RPC_INVALID_PARAMS,
-            "expected [so_path, (activate)]", "dev_hotswap_native");
+    if (!rpc_dev_hotswap_params_ok(params, result))
         return false;
-    }
     const struct json_value *path_v = json_at(params, 0);
     const struct json_value *act_v = json_size(params) > 1 ? json_at(params, 1) : NULL;
-    if (!path_v || path_v->type != JSON_STR) {
-        json_rpc_error_full(result, RPC_INVALID_PARAMS,
-            "so_path must be a string", "dev_hotswap_native");
+    const char *so_path = rpc_dev_hotswap_so_path_arg(path_v, result);
+    if (!so_path)
         return false;
-    }
-    const char *so_path = json_get_str(path_v);
-    if (!so_path || so_path[0] != '/') {
-        json_rpc_error_full(result, RPC_INVALID_PARAMETER,
-            "so_path must be absolute", "dev_hotswap_native");
-        return false;
-    }
     bool activate = act_v && act_v->type == JSON_BOOL && json_get_bool(act_v);
 
     /* Service islands carry a distinct descriptor. Try that symbol first;
@@ -739,23 +863,7 @@ static bool rpc_dev_hotswap_native(const struct json_value *params, bool help,
     bool service_ok = probe_service_any(
         so_path, g_resident_datadir, activate, &service_report);
     if (service_report.recognized) {
-        json_set_object(result);
-        json_push_kv_str(result, "schema", "zcl.hotswap_service_activate.v1");
-        json_push_kv_bool(result, "ok", service_report.ok);
-        json_push_kv_bool(result, "verify_only", service_report.verify_only);
-        json_push_kv_bool(result, "activated", service_report.activated);
-        json_push_kv_bool(result, "rolled_back", service_report.rolled_back);
-        json_push_kv_bool(result, "probed", service_report.probed);
-        json_push_kv_bool(result, "dev_restart", service_report.dev_restart);
-        json_push_kv_int(result, "generation",
-                         (int64_t)service_report.generation);
-        json_push_kv_str(result, "service_id", service_report.service_id);
-        json_push_kv_str(result, "stage", service_report.stage);
-        if (service_report.error[0])
-            json_push_kv_str(result, "error", service_report.error);
-        if (service_ok && service_report.activated)
-            service_resident_observation_append(
-                result, service_report.service_id);
+        rpc_dev_hotswap_service_result(result, &service_report, service_ok);
         return service_ok;
     }
 
@@ -765,26 +873,7 @@ static bool rpc_dev_hotswap_native(const struct json_value *params, bool help,
     probe_rendered_clear();
     hotswap_activate(so_path, g_resident_datadir, activate, &hooks, &report);
 
-    /* Return the full report either way; the CLI renders ok/verify_only/error. */
-    json_set_object(result);
-    json_push_kv_str(result, "schema", "zcl.hotswap_activate.v2");
-    json_push_kv_bool(result, "ok", report.ok);
-    json_push_kv_bool(result, "verify_only", report.verify_only);
-    json_push_kv_bool(result, "activated", report.activated);
-    json_push_kv_bool(result, "rolled_back", report.rolled_back);
-    json_push_kv_bool(result, "probed", report.probed);
-    json_push_kv_int(result, "generation", (int64_t)report.generation);
-    json_push_kv_int(result, "leaf_count", (int64_t)report.leaf_count);
-    json_push_kv_str(result, "source_tu", report.source_tu);
-    json_push_kv_str(result, "leaves", report.leaves);
-    json_push_kv_str(result, "probe_leaf", report.probe_leaf);
-    json_push_kv_str(result, "handler", report.handler_name);
-    json_push_kv_str(result, "artifact_sha256", report.artifact_sha256);
-    json_push_kv_str(result, "stage", report.stage);
-    if (report.error[0])
-        json_push_kv_str(result, "error", report.error);
-    probe_rendered_append(result);
-    probe_rendered_clear();
+    rpc_dev_hotswap_report_result(result, &report);
     return report.ok;
 }
 
