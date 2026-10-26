@@ -148,12 +148,12 @@ static void rtb_rom_state_root(const struct rtb_derived *d, int64_t height,
 
 /* A coins row passes the codec's shape rules: 32-byte txid, non-negative
  * vout and height, and a 0/1 coinbase flag. */
-static int rtb_coins_row_wellformed(const void *txid, int txid_len,
+static int rtb_coins_row_wellformed(sqlite3_stmt *st, const void *txid,
                                     int64_t vout, int64_t height,
                                     int64_t is_cb)
 {
-    return txid != NULL && txid_len == 32 && vout >= 0 && height >= 0 &&
-           (is_cb == 0 || is_cb == 1);
+    return txid != NULL && sqlite3_column_bytes(st, 0) == 32 && vout >= 0 &&
+           height >= 0 && (is_cb == 0 || is_cb == 1);
 }
 
 /* Strict (txid,vout) order: the first row passes unconditionally; every
@@ -215,8 +215,7 @@ static int rtb_derive_coins(sqlite3 *db, struct rtb_derived *d, char *err,
         int script_len = sqlite3_column_bytes(st, 3);
         int64_t height = sqlite3_column_int64(st, 4);
         int64_t is_cb = sqlite3_column_int64(st, 5);
-        if (!rtb_coins_row_wellformed(txid, sqlite3_column_bytes(st, 0),
-                                      vout, height, is_cb)) {
+        if (!rtb_coins_row_wellformed(st, txid, vout, height, is_cb)) {
             snprintf(err, errlen, "coins row %" PRId64 ": malformed", count);
             sqlite3_finalize(st);
             return 0;
@@ -251,14 +250,14 @@ static int rtb_derive_coins(sqlite3 *db, struct rtb_derived *d, char *err,
 
 /* An anchors row passes the codec's shape rules: pool 0/1, 32-byte anchor,
  * non-negative height, and a non-NULL tree. */
-static int rtb_anchor_row_wellformed(int64_t pool, const void *anchor,
-                                     int anchor_len, int64_t height,
+static int rtb_anchor_row_wellformed(sqlite3_stmt *st, int64_t pool,
+                                     const void *anchor, int64_t height,
                                      const void *tree)
 {
     if (pool != 0 && pool != 1)
         return 0;
-    return anchor != NULL && anchor_len == 32 && height >= 0 &&
-           tree != NULL;
+    return anchor != NULL && sqlite3_column_bytes(st, 1) == 32 &&
+           height >= 0 && tree != NULL;
 }
 
 /* Three-way (pool,anchor) order against the previous row: negative when
@@ -303,9 +302,7 @@ static int rtb_derive_anchors(sqlite3 *db, struct rtb_derived *d, char *err,
         int64_t height = sqlite3_column_int64(st, 2);
         const void *tree = sqlite3_column_blob(st, 3);
         int tree_len = sqlite3_column_bytes(st, 3);
-        if (!rtb_anchor_row_wellformed(pool, anchor,
-                                       sqlite3_column_bytes(st, 1), height,
-                                       tree)) {
+        if (!rtb_anchor_row_wellformed(st, pool, anchor, height, tree)) {
             snprintf(err, errlen, "anchors row %" PRId64 ": malformed", count);
             sqlite3_finalize(st);
             return 0;
