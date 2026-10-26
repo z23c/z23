@@ -246,7 +246,6 @@ static size_t fsx_serialize(const struct fsx_call *c, char *buf, size_t cap)
 
 /* ── the fixtures ───────────────────────────────────────────────────────── */
 
-/* Branch main in the clone, land the one base commit, publish it to origin. */
 static bool fsx_repo_seed_main(const char *main_dir)
 {
     const char *checkout[] = {"checkout", "-q", "-b", "main", NULL};
@@ -256,7 +255,6 @@ static bool fsx_repo_seed_main(const char *main_dir)
            fsx_commit(main_dir, "base") && fsx_git(main_dir, push);
 }
 
-/* Link the three worktrees off origin/main: clean (detached), ahead, dirty. */
 static bool fsx_repo_link_worktrees(const char *main_dir, const char *clean,
                                     const char *ahead, const char *dirty)
 {
@@ -270,7 +268,6 @@ static bool fsx_repo_link_worktrees(const char *main_dir, const char *clean,
            fsx_git(main_dir, add_dirty);
 }
 
-/* Land exactly two commits on the ahead branch: write, commit, write, commit. */
 static bool fsx_repo_commit_two_ahead(const char *ahead)
 {
     return fsx_write(ahead, "b.c", "int b(void){return 2;}\n") &&
@@ -427,8 +424,6 @@ _test_next:;
     return failures;
 }
 
-/* The declared latency budget: the packet reports both that it stayed inside
- * the class and the class itself. */
 static int fsx_case_latency_budget(const char *board)
 {
     int failures = 0;
@@ -454,7 +449,6 @@ _test_next:;
     return failures;
 }
 
-/* A tight byte budget: the packet fits inside it and names what it cut. */
 static int fsx_case_packet_budget(const char *board)
 {
     int failures = 0;
@@ -627,7 +621,11 @@ int test_dev_fleet_start(void)
     failures += fsx_case_outside_home(root, board);
 
     /* (g) the declared latency budget holds */
-    failures += fsx_case_latency_budget(board);
+    {
+        int latency = fsx_case_latency_budget(board);
+        failures += latency;
+        if (latency) goto _test_next;
+    }
 
     /* (e) a missing board dir is unavailable with a reason, not a failure */
     TEST("start: a board directory that is not there is unavailable, not fatal") {
@@ -655,7 +653,11 @@ int test_dev_fleet_start(void)
     }
 
     /* (d) budget */
-    failures += fsx_case_packet_budget(board);
+    {
+        int packet = fsx_case_packet_budget(board);
+        failures += packet;
+        if (packet) goto _test_next;
+    }
 
     TEST("start: a budget outside the declared range is refused by name") {
         struct fsx_call c;
