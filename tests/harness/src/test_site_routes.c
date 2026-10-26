@@ -207,24 +207,17 @@ static bool sr_app_onion_enabled(const char *def_path)
     return found;
 }
 
-/* ── The group ───────────────────────────────────────────────────────── */
-
-int test_site_routes(void)
+static bool sr_dispatch_order_pinned(void)
 {
-    printf("\n=== site route registry tests ===\n");
-    int failures = 0;
-
-    /* 1. Pinned dispatch order. */
-    SR_CHECK("registry row count", g_zcl_site_routes_count == K_ROW_COUNT);
     bool order_ok = g_zcl_site_routes_count == K_ROW_COUNT;
     for (size_t i = 0; i < K_ROW_COUNT && order_ok; i++)
         order_ok = strcmp(g_zcl_site_routes[i].id, k_rows[i].id) == 0 &&
                    strcmp(g_zcl_site_routes[i].prefix, k_rows[i].prefix) == 0;
-    SR_CHECK("dispatch order pinned (store,/n/,/names,zcode,board,wiki,metaverse,"
-             "blog,yardsale,/market/chunk,/observation.json,/install.sh)",
-             order_ok);
+    return order_ok;
+}
 
-    /* 2. Cost classes valid + pinned; route keys pinned. */
+static bool sr_cost_classes_valid(void)
+{
     bool cost_ok = true;
     for (size_t i = 0; i < g_zcl_site_routes_count; i++) {
         enum onion_route_class c = g_zcl_site_routes[i].cost;
@@ -232,27 +225,39 @@ int test_site_routes(void)
             c != ONION_ROUTE_EXPENSIVE)
             cost_ok = false;
     }
-    SR_CHECK("every cost class valid", cost_ok);
-    SR_CHECK("names_gateway EXPENSIVE + name-gateway key",
-             sr_find("names_gateway") &&
-             sr_find("names_gateway")->cost == ONION_ROUTE_EXPENSIVE &&
-             strcmp(sr_find("names_gateway")->route_key,
-                    "name-gateway") == 0);
+    return cost_ok;
+}
+
+static bool sr_names_gateway_expensive(void)
+{
+    return sr_find("names_gateway") &&
+           sr_find("names_gateway")->cost == ONION_ROUTE_EXPENSIVE &&
+           strcmp(sr_find("names_gateway")->route_key,
+                  "name-gateway") == 0;
+}
+
+static bool sr_other_rows_cheap(void)
+{
     bool others_cheap = true;
     for (size_t i = 0; i < g_zcl_site_routes_count; i++)
         if (strcmp(g_zcl_site_routes[i].id, "names_gateway") != 0 &&
             (g_zcl_site_routes[i].cost != ONION_ROUTE_CHEAP ||
              g_zcl_site_routes[i].route_key[0] != '\0'))
             others_cheap = false;
-    SR_CHECK("all other rows CHEAP with no route key", others_cheap);
+    return others_cheap;
+}
 
-    /* 3. Method flags. */
+static bool sr_flags_within_mask(void)
+{
     bool flags_ok = true;
     for (size_t i = 0; i < g_zcl_site_routes_count; i++)
         if (g_zcl_site_routes[i].flags & ~ZCL_SITE_F_ALL)
             flags_ok = false;
-    SR_CHECK("flags within the known mask", flags_ok);
+    return flags_ok;
+}
 
+static bool sr_post_onion_set_exact(void)
+{
     bool post_set_ok = true;
     for (size_t i = 0; i < g_zcl_site_routes_count; i++) {
         const char *id = g_zcl_site_routes[i].id;
@@ -264,13 +269,11 @@ int test_site_routes(void)
         if (want_post != has_post)
             post_set_ok = false;
     }
-    SR_CHECK("POST-onion set is exactly {store, names, yardsale}",
-             post_set_ok);
+    return post_set_ok;
+}
 
-    /* The HTTPS expansion serves every row except the onion-only store
-     * and market_chunk mounts; the POST-flagged rows it does serve
-     * (names, yardsale) are GET/HEAD-only there by the listener-wide 405
-     * gate — POST exists only in the onion dispatch. */
+static bool sr_https_set_exact(void)
+{
     bool https_set_ok = true;
     for (size_t i = 0; i < g_zcl_site_routes_count; i++) {
         const char *id = g_zcl_site_routes[i].id;
@@ -282,33 +285,39 @@ int test_site_routes(void)
         if (want_https != has_https)
             https_set_ok = false;
     }
-    SR_CHECK("HTTPS set is every row except store, market_chunk and "
-             "observation", https_set_ok);
-    SR_CHECK("onion-only rows carry no HTTPS bit",
-             sr_find("store") && sr_find("market_chunk") &&
-             sr_find("observation") &&
-             !(sr_find("store")->flags & ZCL_SITE_F_HTTPS) &&
-             !(sr_find("market_chunk")->flags & ZCL_SITE_F_HTTPS) &&
-             !(sr_find("observation")->flags & ZCL_SITE_F_HTTPS) &&
-             (sr_find("market_chunk")->flags &
-              (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED)) ==
-                 (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED) &&
-             (sr_find("observation")->flags &
-              (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED)) ==
-                 (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED));
-    SR_CHECK("HTTPS-served POST rows are GET-only there (F_HTTPS|"
-             "F_POST_ONION, no https-POST bit exists)",
-             sr_find("names") && sr_find("yardsale") &&
-             (sr_find("names")->flags &
-              (ZCL_SITE_F_HTTPS | ZCL_SITE_F_POST_ONION)) ==
-                 (ZCL_SITE_F_HTTPS | ZCL_SITE_F_POST_ONION) &&
-             (sr_find("yardsale")->flags &
-              (ZCL_SITE_F_HTTPS | ZCL_SITE_F_POST_ONION)) ==
-                 (ZCL_SITE_F_HTTPS | ZCL_SITE_F_POST_ONION) &&
-             sr_find("store") &&
-             !(sr_find("store")->flags & ZCL_SITE_F_HTTPS));
+    return https_set_ok;
+}
 
-    /* 4. apps/<app>/app.def mount correspondence, both directions. */
+static bool sr_onion_only_row_flags(void)
+{
+    return sr_find("store") && sr_find("market_chunk") &&
+           sr_find("observation") &&
+           !(sr_find("store")->flags & ZCL_SITE_F_HTTPS) &&
+           !(sr_find("market_chunk")->flags & ZCL_SITE_F_HTTPS) &&
+           !(sr_find("observation")->flags & ZCL_SITE_F_HTTPS) &&
+           (sr_find("market_chunk")->flags &
+            (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED)) ==
+               (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED) &&
+           (sr_find("observation")->flags &
+            (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED)) ==
+               (ZCL_SITE_F_PREFIX_GUARD | ZCL_SITE_F_FAIL_CLOSED);
+}
+
+static bool sr_https_post_rows_get_only(void)
+{
+    return sr_find("names") && sr_find("yardsale") &&
+           (sr_find("names")->flags &
+            (ZCL_SITE_F_HTTPS | ZCL_SITE_F_POST_ONION)) ==
+               (ZCL_SITE_F_HTTPS | ZCL_SITE_F_POST_ONION) &&
+           (sr_find("yardsale")->flags &
+            (ZCL_SITE_F_HTTPS | ZCL_SITE_F_POST_ONION)) ==
+               (ZCL_SITE_F_HTTPS | ZCL_SITE_F_POST_ONION) &&
+           sr_find("store") &&
+           !(sr_find("store")->flags & ZCL_SITE_F_HTTPS);
+}
+
+static bool sr_app_def_mounts_match(void)
+{
     static const struct { const char *app; const char *def_path; } k_apps[] = {
         { "blog",     "contexts/commons/apps/blog/app.def"     },
         { "social",   "contexts/commons/apps/social/app.def"   },
@@ -335,10 +344,11 @@ int test_site_routes(void)
         if (n_rows != 1 || !r || strcmp(r->prefix, mount) != 0)
             mounts_ok = false;
     }
-    SR_CHECK("app.def mounts 1:1 with rows (social \"/\" = documented "
-             "exception)", mounts_ok);
-    /* Reverse: no row may sit on a mount some app.def declares under a
-     * different app id, and no row claims "/". */
+    return mounts_ok;
+}
+
+static bool sr_app_rows_match_defs(void)
+{
     bool reverse_ok = (sr_count_prefix("/") == 0);
     for (size_t i = 0; i < g_zcl_site_routes_count && reverse_ok; i++) {
         const char *id = g_zcl_site_routes[i].id;
@@ -352,15 +362,11 @@ int test_site_routes(void)
                 reverse_ok = false;
         }
     }
-    SR_CHECK("rows named for apps mount their app.def prefix; no row "
-             "claims \"/\"", reverse_ok);
+    return reverse_ok;
+}
 
-    /* 4b. The app_id column: exactly the mounted app-catalog Apps carry
-     * their id (blog, yardsale — the set served as "apps" on this node's
-     * /directory.json self row), and every one of them declares
-     * ZCL_APP_ONION(true) in its app.def, so the advertisement can never
-     * drift from the catalog. social declares ONION(true) but has no row
-     * (the documented "/" exception) and so advertises nothing. */
+static bool sr_app_id_column_pinned(void)
+{
     bool appcol_ok = true;
     for (size_t i = 0; i < g_zcl_site_routes_count; i++) {
         const struct zcl_site_route *r = &g_zcl_site_routes[i];
@@ -382,17 +388,11 @@ int test_site_routes(void)
         if (!sr_app_onion_enabled(path))
             appcol_ok = false;
     }
-    SR_CHECK("app_id column is exactly {blog, yardsale}, each ZCL_APP_"
-             "ONION(true) in its app.def", appcol_ok);
+    return appcol_ok;
+}
 
-    /* 5. Byte-exact nav/grid pins. */
-    SR_CHECK("app-side nav table",
-             sr_nav_eq(g_zcl_site_nav_app, g_zcl_site_nav_app_count,
-                       k_nav_app, sizeof(k_nav_app) / sizeof(k_nav_app[0])));
-    SR_CHECK("onion nav table",
-             sr_nav_eq(g_zcl_site_nav_onion, g_zcl_site_nav_onion_count,
-                       k_nav_onion,
-                       sizeof(k_nav_onion) / sizeof(k_nav_onion[0])));
+static bool sr_landing_grid_pinned(void)
+{
     bool grid_ok = g_zcl_site_app_grid_count ==
                    sizeof(k_grid) / sizeof(k_grid[0]);
     for (size_t i = 0; i < sizeof(k_grid) / sizeof(k_grid[0]) && grid_ok;
@@ -400,27 +400,23 @@ int test_site_routes(void)
         grid_ok = strcmp(g_zcl_site_app_grid[i].href, k_grid[i].href) == 0 &&
                   strcmp(g_zcl_site_app_grid[i].label, k_grid[i].label) == 0 &&
                   strcmp(g_zcl_site_app_grid[i].desc, k_grid[i].desc) == 0;
-    SR_CHECK("landing app grid", grid_ok);
+    return grid_ok;
+}
 
-    char nav_buf[1024];
-    size_t nav_len = site_emit_global_nav(nav_buf, sizeof(nav_buf), NULL);
-    SR_CHECK("SITE_GLOBAL_NAV literal twin",
-             nav_len == strlen(SITE_GLOBAL_NAV) &&
-             strcmp(nav_buf, SITE_GLOBAL_NAV) == 0);
-    nav_len = zcl_site_onion_nav_emit(nav_buf, sizeof(nav_buf));
-    SR_CHECK("onion nav emitter byte-identical to the former "
-             "ONION_GLOBAL_NAV",
-             nav_len == strlen(k_onion_nav_html) &&
-             strcmp(nav_buf, k_onion_nav_html) == 0);
-    /* The active-class path still marks exactly the matching link. */
-    nav_len = site_emit_global_nav(nav_buf, sizeof(nav_buf), "blog");
-    SR_CHECK("active class emission intact",
-             strstr(nav_buf, "<a href='/blog' class='active'>Blog</a>") &&
-             !strstr(nav_buf, "<a href='/store' class='active'>"));
+static bool sr_emitted_nav_matches(size_t nav_len, const char *nav_buf,
+                                   const char *want)
+{
+    return nav_len == strlen(want) && strcmp(nav_buf, want) == 0;
+}
 
-    /* 6. Classifier agreement: each row's prefix classifies to the row's
-     * own class and key, and the hand-written specials above the def
-     * expansion still fire. */
+static bool sr_active_class_marks_blog(const char *nav_buf)
+{
+    return strstr(nav_buf, "<a href='/blog' class='active'>Blog</a>") &&
+           !strstr(nav_buf, "<a href='/store' class='active'>");
+}
+
+static bool sr_classify_rows_match(void)
+{
     char key[32];
     bool classify_ok = true;
     for (size_t i = 0; i < g_zcl_site_routes_count; i++) {
@@ -436,39 +432,154 @@ int test_site_routes(void)
             strcmp(key, g_zcl_site_routes[i].route_key) != 0)
             classify_ok = false;
     }
+    return classify_ok;
+}
+
+static bool sr_store_order_post_expensive(char key[32])
+{
+    return onion_route_classify("POST", "/store/orders", key) ==
+               ONION_ROUTE_EXPENSIVE &&
+           strcmp(key, "store-order") == 0;
+}
+
+static bool sr_search_specials_expensive(char key[32])
+{
+    return onion_route_classify("GET", "/search", key) ==
+               ONION_ROUTE_EXPENSIVE &&
+           strcmp(key, "search-hostname") == 0 &&
+           onion_route_classify("GET", "/explorer/search", NULL) ==
+               ONION_ROUTE_EXPENSIVE;
+}
+
+static bool sr_chrome_static_unaffected(char key[32])
+{
+    return onion_route_classify("GET", "/", key) == ONION_ROUTE_STATIC &&
+           onion_route_classify("GET", "/status", NULL) ==
+               ONION_ROUTE_STATIC &&
+           onion_route_classify("GET", "/explorer/style.css", NULL) ==
+               ONION_ROUTE_STATIC;
+}
+
+static bool sr_names_gateway_registry_split(char key[32])
+{
+    return onion_route_classify("GET", "/n/somename", key) ==
+               ONION_ROUTE_EXPENSIVE &&
+           strcmp(key, "name-gateway") == 0 &&
+           onion_route_classify("GET", "/names", key) ==
+               ONION_ROUTE_CHEAP &&
+           key[0] == '\0';
+}
+
+/* ── The group ───────────────────────────────────────────────────────── */
+
+int test_site_routes(void)
+{
+    printf("\n=== site route registry tests ===\n");
+    int failures = 0;
+
+    /* 1. Pinned dispatch order. */
+    SR_CHECK("registry row count", g_zcl_site_routes_count == K_ROW_COUNT);
+    bool order_ok = sr_dispatch_order_pinned();
+    SR_CHECK("dispatch order pinned (store,/n/,/names,zcode,board,wiki,metaverse,"
+             "blog,yardsale,/market/chunk,/observation.json,/install.sh)",
+             order_ok);
+
+    /* 2. Cost classes valid + pinned; route keys pinned. */
+    bool cost_ok = sr_cost_classes_valid();
+    SR_CHECK("every cost class valid", cost_ok);
+    SR_CHECK("names_gateway EXPENSIVE + name-gateway key",
+             sr_names_gateway_expensive());
+    bool others_cheap = sr_other_rows_cheap();
+    SR_CHECK("all other rows CHEAP with no route key", others_cheap);
+
+    /* 3. Method flags. */
+    bool flags_ok = sr_flags_within_mask();
+    SR_CHECK("flags within the known mask", flags_ok);
+
+    bool post_set_ok = sr_post_onion_set_exact();
+    SR_CHECK("POST-onion set is exactly {store, names, yardsale}",
+             post_set_ok);
+
+    /* The HTTPS expansion serves every row except the onion-only store
+     * and market_chunk mounts; the POST-flagged rows it does serve
+     * (names, yardsale) are GET/HEAD-only there by the listener-wide 405
+     * gate — POST exists only in the onion dispatch. */
+    bool https_set_ok = sr_https_set_exact();
+    SR_CHECK("HTTPS set is every row except store, market_chunk and "
+             "observation", https_set_ok);
+    SR_CHECK("onion-only rows carry no HTTPS bit",
+             sr_onion_only_row_flags());
+    SR_CHECK("HTTPS-served POST rows are GET-only there (F_HTTPS|"
+             "F_POST_ONION, no https-POST bit exists)",
+             sr_https_post_rows_get_only());
+
+    /* 4. apps/<app>/app.def mount correspondence, both directions. */
+    bool mounts_ok = sr_app_def_mounts_match();
+    SR_CHECK("app.def mounts 1:1 with rows (social \"/\" = documented "
+             "exception)", mounts_ok);
+    /* Reverse: no row may sit on a mount some app.def declares under a
+     * different app id, and no row claims "/". */
+    bool reverse_ok = sr_app_rows_match_defs();
+    SR_CHECK("rows named for apps mount their app.def prefix; no row "
+             "claims \"/\"", reverse_ok);
+
+    /* 4b. The app_id column: exactly the mounted app-catalog Apps carry
+     * their id (blog, yardsale — the set served as "apps" on this node's
+     * /directory.json self row), and every one of them declares
+     * ZCL_APP_ONION(true) in its app.def, so the advertisement can never
+     * drift from the catalog. social declares ONION(true) but has no row
+     * (the documented "/" exception) and so advertises nothing. */
+    bool appcol_ok = sr_app_id_column_pinned();
+    SR_CHECK("app_id column is exactly {blog, yardsale}, each ZCL_APP_"
+             "ONION(true) in its app.def", appcol_ok);
+
+    /* 5. Byte-exact nav/grid pins. */
+    SR_CHECK("app-side nav table",
+             sr_nav_eq(g_zcl_site_nav_app, g_zcl_site_nav_app_count,
+                       k_nav_app, sizeof(k_nav_app) / sizeof(k_nav_app[0])));
+    SR_CHECK("onion nav table",
+             sr_nav_eq(g_zcl_site_nav_onion, g_zcl_site_nav_onion_count,
+                       k_nav_onion,
+                       sizeof(k_nav_onion) / sizeof(k_nav_onion[0])));
+    bool grid_ok = sr_landing_grid_pinned();
+    SR_CHECK("landing app grid", grid_ok);
+
+    char nav_buf[1024];
+    size_t nav_len = site_emit_global_nav(nav_buf, sizeof(nav_buf), NULL);
+    SR_CHECK("SITE_GLOBAL_NAV literal twin",
+             sr_emitted_nav_matches(nav_len, nav_buf, SITE_GLOBAL_NAV));
+    nav_len = zcl_site_onion_nav_emit(nav_buf, sizeof(nav_buf));
+    SR_CHECK("onion nav emitter byte-identical to the former "
+             "ONION_GLOBAL_NAV",
+             sr_emitted_nav_matches(nav_len, nav_buf, k_onion_nav_html));
+    /* The active-class path still marks exactly the matching link. */
+    nav_len = site_emit_global_nav(nav_buf, sizeof(nav_buf), "blog");
+    SR_CHECK("active class emission intact",
+             sr_active_class_marks_blog(nav_buf));
+
+    /* 6. Classifier agreement: each row's prefix classifies to the row's
+     * own class and key, and the hand-written specials above the def
+     * expansion still fire. */
+    bool classify_ok = sr_classify_rows_match();
     SR_CHECK("classify(prefix) == row cost + key for every row",
              classify_ok);
+    char key[32];
     key[0] = '\0';
     SR_CHECK("store order POST special still EXPENSIVE",
-             onion_route_classify("POST", "/store/orders", key) ==
-                 ONION_ROUTE_EXPENSIVE &&
-             strcmp(key, "store-order") == 0);
+             sr_store_order_post_expensive(key));
     key[0] = '\0';
     SR_CHECK("store order GET stays CHEAP (method-sensitive)",
              onion_route_classify("GET", "/store/orders", key) ==
                  ONION_ROUTE_CHEAP);
     key[0] = '\0';
     SR_CHECK("search specials still EXPENSIVE",
-             onion_route_classify("GET", "/search", key) ==
-                 ONION_ROUTE_EXPENSIVE &&
-             strcmp(key, "search-hostname") == 0 &&
-             onion_route_classify("GET", "/explorer/search", NULL) ==
-                 ONION_ROUTE_EXPENSIVE);
+             sr_search_specials_expensive(key));
     key[0] = '\0';
     SR_CHECK("chrome STATIC set unaffected",
-             onion_route_classify("GET", "/", key) == ONION_ROUTE_STATIC &&
-             onion_route_classify("GET", "/status", NULL) ==
-                 ONION_ROUTE_STATIC &&
-             onion_route_classify("GET", "/explorer/style.css", NULL) ==
-                 ONION_ROUTE_STATIC);
+             sr_chrome_static_unaffected(key));
     key[0] = '\0';
     SR_CHECK("names gateway vs registry split",
-             onion_route_classify("GET", "/n/somename", key) ==
-                 ONION_ROUTE_EXPENSIVE &&
-             strcmp(key, "name-gateway") == 0 &&
-             onion_route_classify("GET", "/names", key) ==
-                 ONION_ROUTE_CHEAP &&
-             key[0] == '\0');
+             sr_names_gateway_registry_split(key));
 
     if (failures == 0)
         printf("site_routes: all checks passed\n");
