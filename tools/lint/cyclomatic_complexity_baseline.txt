@@ -536,7 +536,6 @@ contexts/market/controllers/src/yardsale_site_controller_buy.c:parse_input_field
 contexts/market/controllers/src/yardsale_site_controller_buy.c:yardsale_site_handle_buy_post:72
 contexts/market/controllers/src/zslp_intent_controller.c:rpc_zslp_intent:40
 contexts/market/controllers/src/zslp_intent_controller.c:ztic_prepare:34
-contexts/market/controllers/src/zslp_intent_native_handler.c:ztin_run:34
 contexts/market/models/src/zslp_validity.c:inputs_read_db:17
 contexts/market/models/src/zslp_validity.c:validate_message:56
 contexts/market/models/src/zslp_validity.c:zslp_validity_apply_height:21
