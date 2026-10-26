@@ -1554,7 +1554,6 @@ tests/harness/src/test_boot_snapshot_drop_bodiless.c:test_boot_snapshot_drop_bod
 tests/harness/src/test_boot_snapshot_failure_memory.c:test_boot_snapshot_failure_memory:38
 tests/harness/src/test_build_fabric.c:test_bf_confined_worker:28
 tests/harness/src/test_byte_order_codec.c:test_byte_order_codec:22
-tests/harness/src/test_canary_sentinel_watch.c:test_canary_sentinel_watch:99
 tests/harness/src/test_catalog_completeness.c:test_catalog_completeness:42
 tests/harness/src/test_chacha20_isa_parity.c:test_chacha20_isa_parity:37
 tests/harness/src/test_chain.c:test_chain:318
