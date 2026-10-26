@@ -1145,7 +1145,6 @@ tests/harness/src/test_groth16_selfverify.c:native_circuit_baseline:17
 tests/harness/src/test_groth16_selfverify.c:spend_circuit_shape_gate:88
 tests/harness/src/test_groth16_selfverify.c:test_groth16_selfverify:18
 tests/harness/src/test_hd_keychain.c:test_hd_keychain:63
-tests/harness/src/test_header_admit_stage.c:test_header_admit_stage:36
 tests/harness/src/test_header_sync_stall.c:test_header_sync_stall:44
 tests/harness/src/test_helpers.c:test_abs_path:19
 tests/harness/src/test_helpers.c:test_spawn_capture_env:23
