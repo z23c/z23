@@ -297,49 +297,146 @@ static bool parse_pair(const char *s, struct fwd_pair *out)
     return true;
 }
 
-int main(int argc, char **argv)
+/* Parse the command line into forward pairs. Returns 0 when every pair is
+ * valid (with the default 443->8443 and 80->8080 pairs installed when no
+ * pairs are given), or the argv index of the first bad pair for the caller
+ * to report and exit on. */
+static int parse_forward_args(int argc, char **argv, struct fwd_pair *pairs, int *npairs)
 {
-    struct fwd_pair pairs[MAX_PAIRS];
-    int npairs = 0;
-
+    *npairs = 0;
     if (argc > 1) {
-        for (int i = 1; i < argc && npairs < MAX_PAIRS; i++) {
-            if (!parse_pair(argv[i], &pairs[npairs])) {
-                fprintf(stderr,
-                        "zcl_portfwd: bad pair '%s' (want LISTEN:TARGET, e.g. 443:8443)\n",
-                        argv[i]);
-                return 2;
-            }
-            npairs++;
+        for (int i = 1; i < argc && *npairs < MAX_PAIRS; i++) {
+            if (!parse_pair(argv[i], &pairs[*npairs]))
+                return i;
+            (*npairs)++;
         }
     } else {
-        pairs[npairs++] = (struct fwd_pair){443, 8443};
-        pairs[npairs++] = (struct fwd_pair){80, 8080};
+        pairs[(*npairs)++] = (struct fwd_pair){443, 8443};
+        pairs[(*npairs)++] = (struct fwd_pair){80, 8080};
     }
+    return 0;
+}
 
+/* Ignore SIGPIPE (a write to a dead socket must surface EPIPE, not kill the
+ * process) and flip g_stop on SIGINT/SIGTERM. */
+static void install_signal_handlers(void)
+{
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa = {0};
     sa.sa_handler = on_signal;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+}
+
+/* Bind one pair's two listeners: IPv6 then IPv4. Returns true if either
+ * family registered; *v6_ok / *v4_ok report which sockets make_listener()
+ * managed to create (they drive the [v6]/[v4] tags in the caller's log). */
+static bool bind_pair_sockets(const struct fwd_pair *pr, bool *v6_ok, bool *v4_ok)
+{
+    bool any = false;
+    /* IPv6 first (so a single ::  socket isn't accidentally dual-stack),
+     * then IPv4. Either binding succeeding counts the pair as live. */
+    int f6 = make_listener(pr->listen_port, AF_INET6, true);
+    *v6_ok = f6 >= 0;
+    if (f6 >= 0 && add_listener(f6, pr->target_port) == 0) any = true;
+    int f4 = make_listener(pr->listen_port, AF_INET, f6 >= 0);
+    *v4_ok = f4 >= 0;
+    if (f4 >= 0 && add_listener(f4, pr->target_port) == 0) any = true;
+    return any;
+}
+
+/* Move bytes for one proxied endpoint according to its readiness flags and
+ * note hangups. Returns true if the pair must be torn down. */
+static bool service_endpoint_io(struct endpoint *e, struct endpoint *peer, uint32_t ev)
+{
+    bool tear = false;
+
+    if (ev & EPOLLIN)  handle_read(e);
+    /* moving our peer's buffer? data read from e went into peer->buf. */
+    if (peer && peer->buf_len > peer->buf_off)
+        if (!handle_write(peer)) tear = true;
+    if ((ev & EPOLLOUT) && !tear)
+        if (!handle_write(e)) tear = true;
+    if (ev & (EPOLLHUP | EPOLLERR)) tear = true;
+    if (ev & EPOLLRDHUP) e->read_eof = true;
+    return tear;
+}
+
+/* Tear down once both directions are drained and one side is gone. */
+static bool pair_should_close(struct endpoint *e, struct endpoint *peer, bool tear)
+{
+    if (!tear && e->read_eof && (!peer || peer->buf_len == peer->buf_off))
+        tear = true;
+    if (!tear && peer && peer->read_eof && e->buf_len == e->buf_off)
+        tear = true;
+    return tear;
+}
+
+/* Handle one event from the current epoll batch: skip stale events for
+ * endpoints torn down earlier in the batch, accept on listeners, move bytes
+ * for proxied pairs and tear down finished ones. */
+static void dispatch_epoll_event(struct endpoint *e, uint32_t ev)
+{
+    /* This endpoint (or its pair) was torn down earlier in THIS batch;
+     * its memory is queued for free, skip the stale event. */
+    if (e->dead) return;
+
+    if (e->is_listener) { handle_accept(e); return; }
+
+    struct endpoint *peer = e->peer;
+    bool tear = service_endpoint_io(e, peer, ev);
+    tear = pair_should_close(e, peer, tear);
+
+    if (tear) { close_pair(e); return; }
+
+    ep_update(e);
+    if (peer) ep_update(peer);
+}
+
+/* Run the epoll event loop until g_stop is set. Returns 0 on a clean stop,
+ * or -1 when epoll_wait fails hard (EINTR is retried) so the caller can
+ * report it. */
+static int run_event_loop(void)
+{
+    struct epoll_event events[EPOLL_EVENTS];
+    while (!g_stop) {
+        int n = epoll_wait(g_epfd, events, EPOLL_EVENTS, -1);
+        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        for (int i = 0; i < n; i++) {
+            dispatch_epoll_event(events[i].data.ptr, events[i].events);
+        }
+        /* Safe now: no further events in this batch reference these. */
+        drain_free_list();
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    struct fwd_pair pairs[MAX_PAIRS];
+    int npairs = 0;
+
+    int bad_arg = parse_forward_args(argc, argv, pairs, &npairs);
+    if (bad_arg) {
+        fprintf(stderr,
+                "zcl_portfwd: bad pair '%s' (want LISTEN:TARGET, e.g. 443:8443)\n",
+                argv[bad_arg]);
+        return 2;
+    }
+
+    install_signal_handlers();
 
     g_epfd = epoll_create1(EPOLL_CLOEXEC);
     if (g_epfd < 0) { perror("zcl_portfwd: epoll_create1"); return 1; }
 
     int bound = 0;
     for (int i = 0; i < npairs; i++) {
-        bool any = false;
-        /* IPv6 first (so a single ::  socket isn't accidentally dual-stack),
-         * then IPv4. Either binding succeeding counts the pair as live. */
-        int f6 = make_listener(pairs[i].listen_port, AF_INET6, true);
-        if (f6 >= 0 && add_listener(f6, pairs[i].target_port) == 0) any = true;
-        int f4 = make_listener(pairs[i].listen_port, AF_INET, f6 >= 0);
-        if (f4 >= 0 && add_listener(f4, pairs[i].target_port) == 0) any = true;
-        if (any) {
+        bool v6 = false, v4 = false;
+        if (bind_pair_sockets(&pairs[i], &v6, &v4)) {
             bound++;
             fprintf(stderr, "zcl_portfwd: listening :%u -> %s:%u%s%s\n",
                     pairs[i].listen_port, TARGET_ADDR, pairs[i].target_port,
-                    f6 >= 0 ? " [v6]" : "", f4 >= 0 ? " [v4]" : "");
+                    v6 ? " [v6]" : "", v4 ? " [v4]" : "");
         } else {
             fprintf(stderr,
                     "zcl_portfwd: could NOT bind :%u (need cap_net_bind_service for <1024? "
@@ -352,46 +449,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    struct epoll_event events[EPOLL_EVENTS];
-    while (!g_stop) {
-        int n = epoll_wait(g_epfd, events, EPOLL_EVENTS, -1);
-        if (n < 0) { if (errno == EINTR) continue; perror("zcl_portfwd: epoll_wait"); break; }
-        for (int i = 0; i < n; i++) {
-            struct endpoint *e = events[i].data.ptr;
-            uint32_t ev = events[i].events;
-
-            /* This endpoint (or its pair) was torn down earlier in THIS batch;
-             * its memory is queued for free, skip the stale event. */
-            if (e->dead) continue;
-
-            if (e->is_listener) { handle_accept(e); continue; }
-
-            struct endpoint *peer = e->peer;
-            bool tear = false;
-
-            if (ev & EPOLLIN)  handle_read(e);
-            /* moving our peer's buffer? data read from e went into peer->buf. */
-            if (peer && peer->buf_len > peer->buf_off)
-                if (!handle_write(peer)) tear = true;
-            if ((ev & EPOLLOUT) && !tear)
-                if (!handle_write(e)) tear = true;
-            if (ev & (EPOLLHUP | EPOLLERR)) tear = true;
-            if (ev & EPOLLRDHUP) e->read_eof = true;
-
-            /* Tear down once both directions are drained and one side is gone. */
-            if (!tear && e->read_eof && (!peer || peer->buf_len == peer->buf_off))
-                tear = true;
-            if (!tear && peer && peer->read_eof && e->buf_len == e->buf_off)
-                tear = true;
-
-            if (tear) { close_pair(e); continue; }
-
-            ep_update(e);
-            if (peer) ep_update(peer);
-        }
-        /* Safe now: no further events in this batch reference these. */
-        drain_free_list();
-    }
+    if (run_event_loop() < 0) perror("zcl_portfwd: epoll_wait");
 
     if (g_epfd >= 0) close(g_epfd);
     return 0;
