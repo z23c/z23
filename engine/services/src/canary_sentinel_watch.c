@@ -506,29 +506,40 @@ static void process_sentinel(const char *dir, const char *name)
     pthread_mutex_unlock(&g_watch.lock);
     json_free(&v);
 
-    if (snap.stale_build)
+    bool log_stale_build = snap.stale_build;
+    bool log_stale_run = snap.stale_run;
+    bool log_rejected_clear = snap.rejected_clear;
+    const char *log_kind = snap.kind;
+    const char *log_reason = snap.reason;
+    const char *log_source_id = snap.source_id;
+    const char *log_artifact = snap.artifact;
+    int64_t log_started_ts = snap.started_ts;
+    int64_t log_process_start = snap.process_start;
+    const char *running_source_id = id.running_source_id;
+    const char *running_artifact = id.running_artifact;
+
+    if (log_stale_build)
         LOG_INFO("canary_watch", "[canary_watch] ignoring STALE cross-binary "
                  "verdict kind=%s source_id=%s (running=%s) artifact=%s "
                  "(running_artifact=%s) reason=%s "
-                 "— latch unchanged", snap.kind, snap.source_id,
-                 id.running_source_id ? id.running_source_id : "-",
-                 snap.artifact,
-                 id.running_artifact && id.running_artifact[0]
-                     ? id.running_artifact : "-", snap.reason);
-    if (snap.stale_run)
+                 "— latch unchanged", log_kind, log_source_id,
+                 running_source_id ? running_source_id : "-", log_artifact,
+                 running_artifact && running_artifact[0]
+                     ? running_artifact : "-", log_reason);
+    if (log_stale_run)
         LOG_INFO("canary_watch", "[canary_watch] ignoring STALE pre-start "
                  "verdict kind=%s started_ts=%lld process_start=%lld "
-                 "reason=%s — latch unchanged", snap.kind,
-                 (long long)snap.started_ts, (long long)snap.process_start,
-                 snap.reason);
-    if (snap.rejected_clear)
+                 "reason=%s — latch unchanged", log_kind,
+                 (long long)log_started_ts, (long long)log_process_start,
+                 log_reason);
+    if (log_rejected_clear)
         LOG_WARN("canary_watch", "[canary_watch] rejected non-authoritative "
                  "clear/unknown verdict kind=%s source_id=%s artifact=%s "
                  "started_ts=%lld "
-                 "process_start=%lld — FAIL latch preserved", snap.kind,
-                 snap.source_id[0] ? snap.source_id : "-",
-                 snap.artifact[0] ? snap.artifact : "-",
-                 (long long)snap.started_ts, (long long)snap.process_start);
+                 "process_start=%lld — FAIL latch preserved", log_kind,
+                 log_source_id[0] ? log_source_id : "-",
+                 log_artifact[0] ? log_artifact : "-",
+                 (long long)log_started_ts, (long long)log_process_start);
 }
 
 /* Recompute the OR of all per-kind FAIL latches. */
