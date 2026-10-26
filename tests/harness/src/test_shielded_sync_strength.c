@@ -399,6 +399,76 @@ static void sst_summary_init(struct delta_summary *s)
     s->status = "ok";
 }
 
+static bool sst_frontier_seed_open_marked_db(sqlite3 **db, int64_t seed_h)
+{
+    bool ok = sqlite3_open(":memory:", db) == SQLITE_OK && *db;
+    return ok && anchor_kv_reset_mark_empty_below_in_tx(*db, seed_h);
+}
+
+static bool sst_frontier_fold_is_gap(sqlite3 *db, uint8_t cm_seed,
+                                     int64_t seed_h)
+{
+    struct block blk;
+    bool built = sst_block_with_one_output(&blk, cm_seed);
+    struct delta_summary s;
+    sst_summary_init(&s);
+    bool store_ok = built &&
+        utxo_apply_check_and_insert_anchors(db, &blk,
+                                            (int)(seed_h + 1), &s);
+    bool gap = built && store_ok && !s.ok && s.status &&
+        strcmp(s.status, "shielded_anchor_history_gap") == 0;
+    if (built)
+        block_free(&blk);
+    return gap;
+}
+
+static bool sst_frontier_fold_succeeds(sqlite3 *db, uint8_t cm_seed,
+                                       int64_t seed_h)
+{
+    struct block blk;
+    bool built = sst_block_with_one_output(&blk, cm_seed);
+    struct delta_summary s;
+    sst_summary_init(&s);
+    bool store_ok = built &&
+        utxo_apply_check_and_insert_anchors(db, &blk,
+                                            (int)(seed_h + 1), &s);
+    bool folded = built && store_ok && s.ok;
+    if (built)
+        block_free(&blk);
+    return folded;
+}
+
+static void sst_frontier_seed_row_state(sqlite3 *db, bool *row_present,
+                                        bool *table_empty_after)
+{
+    int64_t row_count = -1;
+    *row_present = anchor_kv_row_count(db, ANCHOR_POOL_SAPLING,
+                                       &row_count) && row_count >= 1;
+    anchor_kv_table_is_empty(db, ANCHOR_POOL_SAPLING, table_empty_after);
+}
+
+static bool sst_frontier_seed_positive_pass(bool ok, bool pre_incomplete,
+                                            bool pre_fold_ok, bool seeded,
+                                            bool row_present,
+                                            bool table_empty_after,
+                                            bool post_found,
+                                            bool post_fold_ok)
+{
+    return ok && pre_incomplete && pre_fold_ok && seeded && row_present &&
+        !table_empty_after && post_found && post_fold_ok;
+}
+
+static bool sst_frontier_seed_negative_pass(bool ok2, bool neg_incomplete,
+                                            bool neg_fold_fails_closed)
+{
+    return ok2 && neg_incomplete && neg_fold_fails_closed;
+}
+
+static void sst_frontier_seed_close_db(sqlite3 *db)
+{
+    if (db) sqlite3_close(db);
+}
+
 /* ── Deliverable 3: FRONTIER SEED (positive + negative) ───────────────────
  * A snapshot/refold seed resets the Sapling anchor-history marker to
  * "incomplete below N" via anchor_kv_reset_mark_empty_below_in_tx(N) — the
@@ -424,8 +494,7 @@ static int test_sst_frontier_seed_positive_and_negative(void)
 
     /* ── POSITIVE: seed the frontier row, prove the fold now proceeds. ── */
     sqlite3 *db_pos = NULL;
-    bool ok = sqlite3_open(":memory:", &db_pos) == SQLITE_OK && db_pos;
-    ok = ok && anchor_kv_reset_mark_empty_below_in_tx(db_pos, seed_h);
+    bool ok = sst_frontier_seed_open_marked_db(&db_pos, seed_h);
 
     /* Before the seed: latest_tree is HISTORY_INCOMPLETE (fail-closed). */
     struct incremental_merkle_tree pre;
@@ -434,33 +503,15 @@ static int test_sst_frontier_seed_positive_and_negative(void)
     bool pre_incomplete = pre_lr == ANCHOR_KV_HISTORY_INCOMPLETE;
 
     /* The first shielded-output block above N fails closed pre-seed. */
-    bool pre_fold_ok = false;
-    {
-        struct block blk;
-        bool built = ok && sst_block_with_one_output(&blk, 0x31);
-        struct delta_summary s;
-        sst_summary_init(&s);
-        bool store_ok = built &&
-            utxo_apply_check_and_insert_anchors(db_pos, &blk,
-                                                (int)(seed_h + 1), &s);
-        pre_fold_ok = built && store_ok && !s.ok && s.status &&
-            strcmp(s.status, "shielded_anchor_history_gap") == 0;
-        if (built)
-            block_free(&blk);
-    }
+    bool pre_fold_ok = ok && sst_frontier_fold_is_gap(db_pos, 0x31, seed_h);
 
     /* The cure: a verified frontier row at N. */
     bool seeded = ok && anchor_kv_seed_frontier_row(
         db_pos, ANCHOR_POOL_SAPLING, &seed_tree, seed_h, &seed_root);
 
     bool row_present = false, table_empty_after = true;
-    if (seeded) {
-        int64_t row_count = -1;
-        row_present = anchor_kv_row_count(db_pos, ANCHOR_POOL_SAPLING,
-                                          &row_count) && row_count >= 1;
-        anchor_kv_table_is_empty(db_pos, ANCHOR_POOL_SAPLING,
-                                 &table_empty_after);
-    }
+    if (seeded)
+        sst_frontier_seed_row_state(db_pos, &row_present, &table_empty_after);
 
     struct incremental_merkle_tree post;
     struct uint256 post_root;
@@ -472,54 +523,32 @@ static int test_sst_frontier_seed_positive_and_negative(void)
         memcmp(post_root.data, seed_root.data, 32) == 0;
 
     /* The first shielded-output block above N now folds successfully. */
-    bool post_fold_ok = false;
-    {
-        struct block blk;
-        bool built = seeded && sst_block_with_one_output(&blk, 0x42);
-        struct delta_summary s;
-        sst_summary_init(&s);
-        bool store_ok = built &&
-            utxo_apply_check_and_insert_anchors(db_pos, &blk,
-                                                (int)(seed_h + 1), &s);
-        post_fold_ok = built && store_ok && s.ok;
-        if (built)
-            block_free(&blk);
-    }
+    bool post_fold_ok = seeded &&
+        sst_frontier_fold_succeeds(db_pos, 0x42, seed_h);
 
-    if (db_pos) sqlite3_close(db_pos);
+    sst_frontier_seed_close_db(db_pos);
 
-    bool positive_pass = ok && pre_incomplete && pre_fold_ok && seeded &&
-        row_present && !table_empty_after && post_found && post_fold_ok;
+    bool positive_pass = sst_frontier_seed_positive_pass(ok, pre_incomplete,
+        pre_fold_ok, seeded, row_present, table_empty_after, post_found,
+        post_fold_ok);
 
     /* ── NEGATIVE: same reset, NO seed — the guard must still fail closed
      * on the very same first shielded-output block above N. ── */
     sqlite3 *db_neg = NULL;
-    bool ok2 = sqlite3_open(":memory:", &db_neg) == SQLITE_OK && db_neg;
-    ok2 = ok2 && anchor_kv_reset_mark_empty_below_in_tx(db_neg, seed_h);
+    bool ok2 = sst_frontier_seed_open_marked_db(&db_neg, seed_h);
 
     struct incremental_merkle_tree neg_tree;
     enum anchor_kv_lookup_result neg_lr = ok2 ? anchor_kv_latest_tree(
         db_neg, ANCHOR_POOL_SAPLING, &neg_tree, NULL, NULL) : ANCHOR_KV_ERROR;
     bool neg_incomplete = neg_lr == ANCHOR_KV_HISTORY_INCOMPLETE;
 
-    bool neg_fold_fails_closed = false;
-    {
-        struct block blk;
-        bool built = ok2 && sst_block_with_one_output(&blk, 0x53);
-        struct delta_summary s;
-        sst_summary_init(&s);
-        bool store_ok = built &&
-            utxo_apply_check_and_insert_anchors(db_neg, &blk,
-                                                (int)(seed_h + 1), &s);
-        neg_fold_fails_closed = built && store_ok && !s.ok && s.status &&
-            strcmp(s.status, "shielded_anchor_history_gap") == 0;
-        if (built)
-            block_free(&blk);
-    }
+    bool neg_fold_fails_closed = ok2 &&
+        sst_frontier_fold_is_gap(db_neg, 0x53, seed_h);
 
-    if (db_neg) sqlite3_close(db_neg);
+    sst_frontier_seed_close_db(db_neg);
 
-    bool negative_pass = ok2 && neg_incomplete && neg_fold_fails_closed;
+    bool negative_pass = sst_frontier_seed_negative_pass(ok2, neg_incomplete,
+        neg_fold_fails_closed);
 
     bool pass = positive_pass && negative_pass;
 
@@ -803,6 +832,18 @@ static int test_sst_anchor_kv_binding_refusal_falls_through(void)
  * healthy derived state could have produced the header root either. That is a
  * body-availability DEPENDENCY. A root mismatch on a walk that folded every
  * in-range body IS a derived-state disagreement and stays PERMANENT. */
+static bool sst_root_mismatch_dep_pass(bool ok, int rc, bool found, int cls,
+                                       bool names_gap)
+{
+    return ok && rc < 0 && found && cls == BLOCKER_DEPENDENCY && names_gap;
+}
+
+static bool sst_root_mismatch_perm_pass(bool ok, int rc, bool found, int cls,
+                                        bool no_gap)
+{
+    return ok && rc < 0 && found && cls == BLOCKER_PERMANENT && no_gap;
+}
+
 static int test_sst_root_mismatch_classification(void)
 {
     int failures = 0;
@@ -841,8 +882,8 @@ static int test_sst_root_mismatch_classification(void)
     bool found_dep = sst_blocker_class_for(want_dep, &class_dep);
     bool names_gap = sst_blocker_reason_mentions("body_gap=1") &&
                      sst_blocker_reason_mentions("classes=no_data");
-    bool dep_pass = ok_dep && rc_dep < 0 && found_dep &&
-                    class_dep == BLOCKER_DEPENDENCY && names_gap;
+    bool dep_pass = sst_root_mismatch_dep_pass(ok_dep, rc_dep, found_dep,
+                                               class_dep, names_gap);
 
     sst_window_free(wd);
     node_db_close(&ndb_dep);
@@ -875,8 +916,8 @@ static int test_sst_root_mismatch_classification(void)
     int class_perm = -1;
     bool found_perm = sst_blocker_class_for(want_perm, &class_perm);
     bool no_gap = !sst_blocker_reason_mentions("body_gap=");
-    bool perm_pass = ok_perm && rc_perm < 0 && found_perm &&
-                     class_perm == BLOCKER_PERMANENT && no_gap;
+    bool perm_pass = sst_root_mismatch_perm_pass(ok_perm, rc_perm, found_perm,
+                                                 class_perm, no_gap);
 
     sst_window_free(wp);
     node_db_close(&ndb_perm);
@@ -894,6 +935,46 @@ static int test_sst_root_mismatch_classification(void)
         failures++;
     }
     return failures;
+}
+
+static bool sst_preflight_pos_pass(bool ok, int rc, bool found, int cls,
+                                   bool nothing_folded, bool names_cause)
+{
+    return ok && rc < 0 && found && cls == BLOCKER_DEPENDENCY &&
+        nothing_folded && names_cause;
+}
+
+static bool sst_preflight_neg_fill(struct block_index bis[11],
+                                   struct incremental_merkle_tree *tree,
+                                   struct active_chain *chain,
+                                   const char *dir, bool ok, int base,
+                                   int bodies_from)
+{
+    for (int i = 0; i < 11 && ok; i++) {
+        sst_init_index(&bis[i], base + i, (uint8_t)(0x50 + i));
+        if (i >= bodies_from) {
+            struct uint256 cm;
+            memset(cm.data, 0, 32);
+            cm.data[0] = (uint8_t)(0x60 + i);
+            incremental_tree_append(tree, &cm);
+            struct disk_block_pos pos;
+            ok = sst_write_output_block(dir, &cm, &pos);
+            if (ok) {
+                bis[i].nStatus |= BLOCK_HAVE_DATA;
+                bis[i].nFile = pos.nFile;
+                bis[i].nDataPos = pos.nPos;
+            }
+        }
+        incremental_tree_root(tree, &bis[i].hashFinalSaplingRoot);
+        ok = ok && active_chain_install_tip_slot(chain, &bis[i]);
+    }
+    return ok;
+}
+
+static bool sst_preflight_neg_pass(bool ok, bool bindable, int rc, int want,
+                                   bool blocker)
+{
+    return ok && bindable && rc == want && !blocker;
 }
 
 /* ── Deliverable 8: refuse a provably-impossible replay BEFORE walking ───
@@ -964,9 +1045,8 @@ static int test_sst_preflight_refuses_impossible_replay(void)
         sst_blocker_reason_mentions("classes=no_data") &&
         sst_blocker_reason_mentions(
             "replay_impossible_bodies_absent_below_first_foldable_body");
-    bool pos_pass = ok && rc_pos < 0 && found_pos &&
-                    class_pos == BLOCKER_DEPENDENCY && nothing_folded &&
-                    names_cause;
+    bool pos_pass = sst_preflight_pos_pass(ok, rc_pos, found_pos, class_pos,
+                                           nothing_folded, names_cause);
 
     sst_window_free(w);
     node_db_close(&ndb);
@@ -998,32 +1078,15 @@ static int test_sst_preflight_refuses_impossible_replay(void)
     struct active_chain neg_chain;
     active_chain_init(&neg_chain);
     struct block_index neg_bis[11];
-    for (int i = 0; i < 11 && ok_neg; i++) {
-        sst_init_index(&neg_bis[i], base + i, (uint8_t)(0x50 + i));
-        if (i >= bodies_from) {
-            struct uint256 cm;
-            memset(cm.data, 0, 32);
-            cm.data[0] = (uint8_t)(0x60 + i);
-            incremental_tree_append(&neg_tree, &cm);
-            struct disk_block_pos pos;
-            ok_neg = sst_write_output_block(dir_neg, &cm, &pos);
-            if (ok_neg) {
-                neg_bis[i].nStatus |= BLOCK_HAVE_DATA;
-                neg_bis[i].nFile = pos.nFile;
-                neg_bis[i].nDataPos = pos.nPos;
-            }
-        }
-        incremental_tree_root(&neg_tree, &neg_bis[i].hashFinalSaplingRoot);
-        ok_neg = ok_neg && active_chain_install_tip_slot(&neg_chain,
-                                                        &neg_bis[i]);
-    }
+    ok_neg = sst_preflight_neg_fill(neg_bis, &neg_tree, &neg_chain, dir_neg,
+                                    ok_neg, base, bodies_from);
 
     int rc_neg = ok_neg ? sapling_tree_rebuild(&ndb_neg, &neg_chain, dir_neg)
                         : -1;
     bool neg_blocker = sst_fail_closed_active();
     int want_neg = 11 - bodies_from;   /* only the bodies above the run fold */
-    bool neg_pass = ok_neg && empty_root_is_bindable && rc_neg == want_neg &&
-                    !neg_blocker;
+    bool neg_pass = sst_preflight_neg_pass(ok_neg, empty_root_is_bindable,
+                                           rc_neg, want_neg, neg_blocker);
 
     active_chain_free(&neg_chain);
     node_db_close(&ndb_neg);
