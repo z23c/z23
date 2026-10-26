@@ -1147,7 +1147,6 @@ tests/harness/src/test_explorer.c:test_explorer:362
 tests/harness/src/test_fastobj_carrier.c:fcw_candidate_build:36
 tests/harness/src/test_fastobj_carrier.c:test_fastobj_carrier_platform_arm:166
 tests/harness/src/test_file_market_moderation.c:test_mmt_view_filter:38
-tests/harness/src/test_fleet_ledger.c:test_fleet_ledger:40
 tests/harness/src/test_fold_inram_crash_proof.c:fip_proof1_ab_equivalence:25
 tests/harness/src/test_fold_inram_crash_proof.c:fip_proof2_crash_resume:30
 tests/harness/src/test_fold_inram_crash_proof.c:fip_setup:25
