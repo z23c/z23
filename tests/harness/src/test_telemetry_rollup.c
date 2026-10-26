@@ -60,6 +60,44 @@ static const struct json_value *arr_at(const struct json_value *a, size_t i)
     return json_at(a, i);
 }
 
+/* Defects counted in one pass over the two registries. */
+struct registry_defects {
+    size_t mismatched;
+    size_t no_fill;
+    size_t no_schema;
+    size_t zero_size;
+};
+
+/* Provider i and schema i must name the same domain. */
+static bool provider_matches_schema(const struct telemetry_provider *p,
+                                    const struct telemetry_domain_schema *s)
+{
+    return p && s && p->domain && s->domain &&
+           strcmp(p->domain, s->domain) == 0;
+}
+
+/* Count registry drift in one pass: mismatched domain names, missing
+ * collector adapters, wrong schema pointers, zero-size snapshots. */
+static struct registry_defects count_provider_registry_defects(void)
+{
+    struct registry_defects d = {0, 0, 0, 0};
+    for (size_t i = 0; i < telemetry_provider_count(); i++) {
+        const struct telemetry_provider *p = telemetry_provider_at(i);
+        const struct telemetry_domain_schema *s = telemetry_domain_at(i);
+        if (!provider_matches_schema(p, s))
+            d.mismatched++;
+        if (p && !p->fill)
+            d.no_fill++;
+        if (p && p->schema != s)
+            d.no_schema++;
+        /* A provider whose snapshot size is 0 would let telemetry_evaluate
+         * read a domain's descriptors against nothing. */
+        if (p && p->snapshot_size == 0)
+            d.zero_size++;
+    }
+    return d;
+}
+
 /* The two registries are pasted from one table; drift means a hand edit. */
 static int check_registries_agree(void)
 {
@@ -68,30 +106,15 @@ static int check_registries_agree(void)
     TL_CHECK("[rollup] the provider registry holds every telemetry domain",
              telemetry_provider_count() == telemetry_domain_count());
 
-    size_t mismatched = 0, no_fill = 0, no_schema = 0, zero_size = 0;
-    for (size_t i = 0; i < telemetry_provider_count(); i++) {
-        const struct telemetry_provider *p = telemetry_provider_at(i);
-        const struct telemetry_domain_schema *s = telemetry_domain_at(i);
-        if (!p || !s || !p->domain || !s->domain ||
-            strcmp(p->domain, s->domain) != 0)
-            mismatched++;
-        if (p && !p->fill)
-            no_fill++;
-        if (p && p->schema != s)
-            no_schema++;
-        /* A provider whose snapshot size is 0 would let telemetry_evaluate
-         * read a domain's descriptors against nothing. */
-        if (p && p->snapshot_size == 0)
-            zero_size++;
-    }
+    struct registry_defects d = count_provider_registry_defects();
     TL_CHECK("[rollup] provider i and schema i name the SAME domain, in the "
              "same order — a domain cannot be registered in one and not the "
-             "other", mismatched == 0);
-    TL_CHECK("[rollup] every domain has a collector adapter", no_fill == 0);
+             "other", d.mismatched == 0);
+    TL_CHECK("[rollup] every domain has a collector adapter", d.no_fill == 0);
     TL_CHECK("[rollup] every provider points at its own domain's schema",
-             no_schema == 0);
+             d.no_schema == 0);
     TL_CHECK("[rollup] every provider declares a non-zero snapshot size",
-             zero_size == 0);
+             d.zero_size == 0);
 
     /* The shared buffer a rollup allocates must fit the largest domain, or
      * telemetry_provider_collect refuses that domain rather than truncating
@@ -139,6 +162,70 @@ static int check_collect_refuses_a_short_buffer(void)
     return failures;
 }
 
+/* Defects counted in one pass over a document's `domains[]` rows. */
+struct domain_row_defects {
+    size_t bad_name;
+    size_t bad_health;
+    size_t silent_unknown;
+    size_t has_prose;
+};
+
+/* Row i must carry registry i's own domain name. */
+static bool domain_row_names_its_domain(const struct json_value *o, size_t i)
+{
+    const char *dom = json_get_str(json_get(o, "domain"));
+    const struct telemetry_provider *p = telemetry_provider_at(i);
+    return dom && p && strcmp(dom, p->domain) == 0;
+}
+
+/* Health must be one of the four enum tokens, never prose. */
+static bool health_is_an_enum_token(const char *h)
+{
+    return h && (strcmp(h, "ok") == 0 || strcmp(h, "unknown") == 0 ||
+                 strcmp(h, "degraded") == 0 || strcmp(h, "unhealthy") == 0);
+}
+
+/* A domain that could not be collected must say why, and must not be
+ * called ok. */
+static size_t count_silent_unknown_reasons(const struct json_value *o,
+                                           const char *h)
+{
+    size_t silent = 0;
+    const struct json_value *c = json_get(o, "collected");
+    if (c && c->type == JSON_BOOL && !json_get_bool(c)) {
+        const char *why = json_get_str(json_get(o, "reason"));
+        if (!why || !*why)
+            silent++;
+        if (h && strcmp(h, "ok") == 0)
+            silent++;
+    }
+    return silent;
+}
+
+static struct domain_row_defects count_domain_row_defects(
+    const struct json_value *arr)
+{
+    struct domain_row_defects d = {0, 0, 0, 0};
+    for (size_t i = 0; i < json_size(arr); i++) {
+        const struct json_value *o = arr_at(arr, i);
+        if (!o || o->type != JSON_OBJ) {
+            d.bad_name++;
+            continue;
+        }
+        if (!domain_row_names_its_domain(o, i))
+            d.bad_name++;
+        const char *h = json_get_str(json_get(o, "health"));
+        if (!health_is_an_enum_token(h))
+            d.bad_health++;
+        d.silent_unknown += count_silent_unknown_reasons(o, h);
+        /* Terse by contract: a per-domain row carries counts, never the
+         * means/implies/next prose that makes a domain document ~4 KB. */
+        if (json_get(o, "means") || json_get(o, "implies"))
+            d.has_prose++;
+    }
+    return d;
+}
+
 /* Walk the `domains[]` array of a rollup document and assert the invariants
  * that hold whatever the node's real state is. */
 static int check_domain_rows(const struct json_value *doc, const char *what)
@@ -155,54 +242,23 @@ static int check_domain_rows(const struct json_value *doc, const char *what)
     if (!arr || arr->type != JSON_ARR)
         return failures;
 
-    size_t bad_name = 0, bad_health = 0, silent_unknown = 0, has_prose = 0;
-    for (size_t i = 0; i < json_size(arr); i++) {
-        const struct json_value *o = arr_at(arr, i);
-        if (!o || o->type != JSON_OBJ) {
-            bad_name++;
-            continue;
-        }
-        const char *dom = json_get_str(json_get(o, "domain"));
-        const struct telemetry_provider *p = telemetry_provider_at(i);
-        if (!dom || !p || strcmp(dom, p->domain) != 0)
-            bad_name++;
-
-        const char *h = json_get_str(json_get(o, "health"));
-        if (!h || (strcmp(h, "ok") != 0 && strcmp(h, "unknown") != 0 &&
-                   strcmp(h, "degraded") != 0 && strcmp(h, "unhealthy") != 0))
-            bad_health++;
-
-        /* A domain that could not be collected must say why, and must not be
-         * called ok. */
-        const struct json_value *c = json_get(o, "collected");
-        if (c && c->type == JSON_BOOL && !json_get_bool(c)) {
-            const char *why = json_get_str(json_get(o, "reason"));
-            if (!why || !*why)
-                silent_unknown++;
-            if (h && strcmp(h, "ok") == 0)
-                silent_unknown++;
-        }
-        /* Terse by contract: a per-domain row carries counts, never the
-         * means/implies/next prose that makes a domain document ~4 KB. */
-        if (json_get(o, "means") || json_get(o, "implies"))
-            has_prose++;
-    }
+    struct domain_row_defects d = count_domain_row_defects(arr);
     (void)snprintf(label, sizeof label,
                    "[rollup] %s rows are in registry order and name their own "
                    "domain", what);
-    TL_CHECK(label, bad_name == 0);
+    TL_CHECK(label, d.bad_name == 0);
     (void)snprintf(label, sizeof label,
                    "[rollup] %s reports health as one of the four enum "
                    "tokens, never prose", what);
-    TL_CHECK(label, bad_health == 0);
+    TL_CHECK(label, d.bad_health == 0);
     (void)snprintf(label, sizeof label,
                    "[rollup] %s: an uncollected domain always states a reason "
                    "and is never called ok", what);
-    TL_CHECK(label, silent_unknown == 0);
+    TL_CHECK(label, d.silent_unknown == 0);
     (void)snprintf(label, sizeof label,
                    "[rollup] %s carries no per-field prose — eight domains of "
                    "it would empty the reply, not truncate it", what);
-    TL_CHECK(label, has_prose == 0);
+    TL_CHECK(label, d.has_prose == 0);
     return failures;
 }
 
