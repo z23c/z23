@@ -105,8 +105,6 @@ contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation_attribution_validate:21
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation_error_string:32
 contexts/commons/modules/vcs/src/zcode_dht_service_discovery.c:discovery_drive_children:26
-contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publication_drive:33
-contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publication_drive_stores:23
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_error_string:16
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_parse:37
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_propose_cas:30
