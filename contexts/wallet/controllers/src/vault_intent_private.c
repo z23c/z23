@@ -132,18 +132,64 @@ static enum vault_intent_route vip_route_parse(const char *route)
     return 0;
 }
 
+static const char *vip_effect_str(const struct json_value *value,
+                                  const char *key)
+{
+    const struct json_value *field = json_get(value, key);
+    return field ? json_get_str(field) : NULL;
+}
+
+static const char *vip_effect_amount_str(const struct json_value *value)
+{
+    const struct json_value *amount_value = json_get(value, "amount");
+    return amount_value && amount_value->type == JSON_STR
+        ? json_get_str(amount_value) : NULL;
+}
+
+static const char *vip_memo_nonempty(const char *memo)
+{
+    return memo && memo[0] ? memo : NULL;
+}
+
+static bool vip_effect_memo_acceptable(const char *memo_hex,
+                                       const char *memo, bool is_z)
+{
+    return is_z || (!memo_hex && !memo);
+}
+
+static bool vip_effect_memo_copy(struct vip_effect *out, const char *memo,
+                                 enum vip_memo_kind kind)
+{
+    size_t n = strlen(memo);
+    bool valid = kind == VIP_MEMO_HEX
+        ? n <= 1024 && (n & 1u) == 0 && IsHex(memo)
+        : n <= sizeof(out->memo);
+    if (!valid)
+        return false;
+    out->memo_kind = kind;
+    out->memo_len = (uint16_t)n;
+    memcpy(out->memo, memo, n);
+    return true;
+}
+
+static bool vip_effect_memo_copy_selected(struct vip_effect *out,
+                                          const char *memo_hex,
+                                          const char *memo)
+{
+    if (memo_hex)
+        return vip_effect_memo_copy(out, memo_hex, VIP_MEMO_HEX);
+    if (memo)
+        return vip_effect_memo_copy(out, memo, VIP_MEMO_TEXT);
+    return true;
+}
+
 static bool vip_effect_parse(const struct json_value *value,
                              struct vip_effect *out, int64_t *total,
                              size_t *transparent, size_t *shielded)
 {
-    const char *asset = value && value->type == JSON_OBJ
-        ? json_get_str(json_get(value, "asset")) : NULL;
-    const char *to = value && value->type == JSON_OBJ
-        ? json_get_str(json_get(value, "to")) : NULL;
-    const struct json_value *amount_value = value && value->type == JSON_OBJ
-        ? json_get(value, "amount") : NULL;
-    const char *amount = amount_value && amount_value->type == JSON_STR
-        ? json_get_str(amount_value) : NULL;
+    const char *asset = vip_effect_str(value, "asset");
+    const char *to = vip_effect_str(value, "to");
+    const char *amount = vip_effect_amount_str(value);
     int64_t zats = 0;
     if (!asset || strcmp(asset, "ZCL") != 0 || !to || !to[0] ||
         strlen(to) > VIP_ADDR_MAX ||
@@ -152,45 +198,72 @@ static bool vip_effect_parse(const struct json_value *value,
         return false;
 
     bool is_z = wallet_addr_is_sapling(to);
-    const char *memo_hex = json_get_str(json_get(value, "memo_hex"));
-    const char *memo = json_get_str(json_get(value, "memo"));
-    if (memo_hex && !memo_hex[0]) memo_hex = NULL;
-    if (memo && !memo[0]) memo = NULL;
-    if ((memo_hex || memo) && !is_z)
+    const char *memo_hex = vip_memo_nonempty(
+        json_get_str(json_get(value, "memo_hex")));
+    const char *memo = vip_memo_nonempty(
+        json_get_str(json_get(value, "memo")));
+    bool memo_ok = vip_effect_memo_acceptable(memo_hex, memo, is_z);
+    if (!memo_ok)
         return false;
 
     memset(out, 0, sizeof(*out));
     (void)snprintf(out->to, sizeof(out->to), "%s", to);
     out->amount = zats;
-    if (memo_hex) {
-        size_t n = strlen(memo_hex);
-        if (n > 1024 || (n & 1u) != 0 || !IsHex(memo_hex))
-            return false;
-        out->memo_kind = VIP_MEMO_HEX;
-        out->memo_len = (uint16_t)n;
-        memcpy(out->memo, memo_hex, n);
-    } else if (memo) {
-        size_t n = strlen(memo);
-        if (n > sizeof(out->memo))
-            return false;
-        out->memo_kind = VIP_MEMO_TEXT;
-        out->memo_len = (uint16_t)n;
-        memcpy(out->memo, memo, n);
-    }
+    memo_ok = vip_effect_memo_copy_selected(out, memo_hex, memo);
+    if (!memo_ok)
+        return false;
     *total += zats;
     if (is_z) (*shielded)++; else (*transparent)++;
     return true;
 }
 
+static enum vault_intent_route vip_route_actual(bool from_z,
+                                                size_t transparent,
+                                                size_t shielded)
+{
+    if (transparent && shielded)
+        return VAULT_INTENT_ROUTE_MIXED;
+    if (from_z && transparent)
+        return VAULT_INTENT_ROUTE_UNSHIELD;
+    if (from_z)
+        return VAULT_INTENT_ROUTE_PRIVATE;
+    if (shielded)
+        return VAULT_INTENT_ROUTE_SHIELD;
+    return VAULT_INTENT_ROUTE_TRANSPARENT;
+}
+
+static void vip_parse_fields(const struct json_value *input,
+                             const char **from,
+                             enum vault_intent_route *requested_route,
+                             const struct json_value **effects, size_t *count)
+{
+    *from = json_get_str(json_get(input, "from"));
+    const char *requested = json_get_str(json_get(input, "route"));
+    *requested_route = vip_route_parse(requested);
+    *effects = json_get(input, "effects");
+    *count = *effects && (*effects)->type == JSON_ARR
+        ? json_size(*effects) : 0;
+}
+
+static bool vip_effects_parse(const struct json_value *effects, size_t count,
+                              struct vip_payload *out, int64_t *total,
+                              size_t *transparent, size_t *shielded)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < count; i++)
+        ok = vip_effect_parse(json_at(effects, i), &out->effects[i], total,
+                              transparent, shielded);
+    return ok;
+}
+
 static bool vip_parse(const struct json_value *input, struct vip_payload *out,
                       int64_t *total, struct json_value *result)
 {
-    const char *from = json_get_str(json_get(input, "from"));
-    const char *requested = json_get_str(json_get(input, "route"));
-    enum vault_intent_route requested_route = vip_route_parse(requested);
-    const struct json_value *effects = json_get(input, "effects");
-    size_t count = effects && effects->type == JSON_ARR
-        ? json_size(effects) : 0;
+    const char *from;
+    enum vault_intent_route requested_route;
+    const struct json_value *effects;
+    size_t count;
+    vip_parse_fields(input, &from, &requested_route, &effects, &count);
     if (!from || !from[0] || strlen(from) > VIP_ADDR_MAX) {
         vip_error(result, "FROM_REQUIRED", "from must name one wallet address");
         return false;
@@ -208,26 +281,15 @@ static bool vip_parse(const struct json_value *input, struct vip_payload *out,
     memset(out, 0, sizeof(*out));
     (void)snprintf(out->from, sizeof(out->from), "%s", from);
     size_t transparent = 0, shielded = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (!vip_effect_parse(json_at(effects, i), &out->effects[i], total,
-                              &transparent, &shielded)) {
-            vip_error(result, "INVALID_EFFECT",
+    if (!vip_effects_parse(effects, count, out, total,
+                           &transparent, &shielded)) {
+        vip_error(result, "INVALID_EFFECT",
                       "each effect needs asset=ZCL, a valid address, an exact decimal-string amount, and a memo only for Sapling");
-            return false;
-        }
+        return false;
     }
     bool from_z = wallet_addr_is_sapling(from);
-    enum vault_intent_route actual;
-    if (transparent && shielded)
-        actual = VAULT_INTENT_ROUTE_MIXED;
-    else if (from_z && transparent)
-        actual = VAULT_INTENT_ROUTE_UNSHIELD;
-    else if (from_z)
-        actual = VAULT_INTENT_ROUTE_PRIVATE;
-    else if (shielded)
-        actual = VAULT_INTENT_ROUTE_SHIELD;
-    else
-        actual = VAULT_INTENT_ROUTE_TRANSPARENT;
+    enum vault_intent_route actual =
+        vip_route_actual(from_z, transparent, shielded);
     if (actual == VAULT_INTENT_ROUTE_TRANSPARENT || actual != requested_route) {
         vip_error(result, "ROUTE_MISMATCH",
                   actual == VAULT_INTENT_ROUTE_TRANSPARENT
@@ -272,39 +334,74 @@ static bool vip_encode(const struct vip_payload *p, uint8_t *out, size_t cap,
     return true;
 }
 
+static bool vip_decode_route(struct byte_stream *s, uint8_t *route)
+{
+    uint8_t magic[4];
+    return stream_read(s, magic, 4) && memcmp(magic, "VIP2", 4) == 0 &&
+        stream_read_u8(s, route) && *route >= VAULT_INTENT_ROUTE_PRIVATE &&
+        *route <= VAULT_INTENT_ROUTE_MIXED &&
+        *route != VAULT_INTENT_ROUTE_TRANSPARENT;
+}
+
+static bool vip_decode_header(struct byte_stream *s, struct vip_payload *p,
+                              uint8_t *from_len, uint8_t *count)
+{
+    return stream_read_u8(s, from_len) && *from_len > 0 &&
+        *from_len <= VIP_ADDR_MAX && stream_read(s, p->from, *from_len) &&
+        stream_read_u8(s, count) && *count > 0 && *count <= VIP_EFFECTS_MAX &&
+        stream_read_i64_le(s, &p->fee);
+}
+
+static bool vip_decode_effect_recipient(struct byte_stream *s,
+                                        struct vip_effect *e,
+                                        uint8_t *to_len)
+{
+    return stream_read_u8(s, to_len) && *to_len > 0 &&
+        *to_len <= VIP_ADDR_MAX && stream_read(s, e->to, *to_len) &&
+        stream_read_i64_le(s, &e->amount) && e->amount > 0 &&
+        MoneyRange(e->amount);
+}
+
+static bool vip_decode_effect_memo(struct byte_stream *s,
+                                   struct vip_effect *e, uint8_t *memo_kind)
+{
+    return stream_read_u8(s, memo_kind) && *memo_kind <= VIP_MEMO_HEX &&
+        stream_read_u16_le(s, &e->memo_len) &&
+        e->memo_len <= sizeof(e->memo) &&
+        stream_read(s, e->memo, e->memo_len);
+}
+
+static bool vip_effect_memo_consistent(const struct vip_effect *e)
+{
+    return (e->memo_kind == VIP_MEMO_NONE && e->memo_len == 0) ||
+        (e->memo_kind != VIP_MEMO_NONE && e->memo_len > 0);
+}
+
+static bool vip_decode_effect(struct byte_stream *s, struct vip_effect *e)
+{
+    uint8_t to_len = 0, memo_kind = 0;
+    bool ok = vip_decode_effect_recipient(s, e, &to_len) &&
+        vip_decode_effect_memo(s, e, &memo_kind);
+    if (to_len <= VIP_ADDR_MAX)
+        e->to[to_len] = '\0';
+    e->memo_kind = (enum vip_memo_kind)memo_kind;
+    return ok && vip_effect_memo_consistent(e);
+}
+
 static bool vip_decode(const uint8_t *raw, size_t len, struct vip_payload *p)
 {
     memset(p, 0, sizeof(*p));
     struct byte_stream s;
     stream_init_from_data(&s, raw, len);
-    uint8_t magic[4], route = 0, from_len = 0, count = 0;
-    bool ok = stream_read(&s, magic, 4) && memcmp(magic, "VIP2", 4) == 0 &&
-        stream_read_u8(&s, &route) && route >= VAULT_INTENT_ROUTE_PRIVATE &&
-        route <= VAULT_INTENT_ROUTE_MIXED &&
-        route != VAULT_INTENT_ROUTE_TRANSPARENT &&
-        stream_read_u8(&s, &from_len) && from_len > 0 &&
-        from_len <= VIP_ADDR_MAX && stream_read(&s, p->from, from_len) &&
-        stream_read_u8(&s, &count) && count > 0 && count <= VIP_EFFECTS_MAX &&
-        stream_read_i64_le(&s, &p->fee);
-    p->from[from_len] = '\0';
+    uint8_t route = 0, from_len = 0, count = 0;
+    bool ok = vip_decode_route(&s, &route) &&
+        vip_decode_header(&s, p, &from_len, &count);
+    if (from_len <= VIP_ADDR_MAX)
+        p->from[from_len] = '\0';
     p->route = (enum vault_intent_route)route;
     p->effects_len = count;
-    for (size_t i = 0; ok && i < p->effects_len; i++) {
-        struct vip_effect *e = &p->effects[i];
-        uint8_t to_len = 0, memo_kind = 0;
-        ok = stream_read_u8(&s, &to_len) && to_len > 0 &&
-            to_len <= VIP_ADDR_MAX && stream_read(&s, e->to, to_len) &&
-            stream_read_i64_le(&s, &e->amount) && e->amount > 0 &&
-            MoneyRange(e->amount) && stream_read_u8(&s, &memo_kind) &&
-            memo_kind <= VIP_MEMO_HEX &&
-            stream_read_u16_le(&s, &e->memo_len) &&
-            e->memo_len <= sizeof(e->memo) &&
-            stream_read(&s, e->memo, e->memo_len);
-        e->to[to_len] = '\0';
-        e->memo_kind = (enum vip_memo_kind)memo_kind;
-        ok = ok && ((e->memo_kind == VIP_MEMO_NONE && e->memo_len == 0) ||
-                    (e->memo_kind != VIP_MEMO_NONE && e->memo_len > 0));
-    }
+    for (size_t i = 0; ok && i < p->effects_len; i++)
+        ok = vip_decode_effect(&s, &p->effects[i]);
     ok = ok && p->fee >= 0 && stream_remaining(&s) == 0;
     stream_free(&s);
     return ok;
@@ -419,23 +516,224 @@ static bool vip_refresh_money_for_reservation(
     return true;
 }
 
+static void vip_plan_render_outcome(struct wallet_rpc_context *ctx,
+                                    const struct vip_payload *p,
+                                    const struct vault_intent_row *row,
+                                    bool idempotent_plan,
+                                    struct json_value *result)
+{
+    json_set_object(result);
+    (void)json_push_kv_bool(result, "ok", true);
+    vault_intent_render_row(ctx, result, row);
+    vip_render_plan_details(p, row, result);
+    (void)json_push_kv_bool(result, "idempotent_plan", idempotent_plan);
+}
+
+static bool vip_plan_request_valid(const char *scope, const char *idem,
+                                   struct wallet_rpc_context *ctx,
+                                   struct json_value *result)
+{
+    if (!wallet_money_scope_valid(scope)) {
+        vip_error(result, "WALLET_SCOPE_REQUIRED",
+                  "wallet_scope must explicitly be dev, prod, or test");
+        return false;
+    }
+    if (!vault_intent_idempotency_key_valid(idem)) {
+        vip_error(result, "IDEMPOTENCY_KEY_REQUIRED",
+                  "idempotency_key must be 1..64 printable characters");
+        return false;
+    }
+    return vault_intent_context_ready(ctx, result);
+}
+
+static bool vip_plan_prepare(const char *agent_session, const char *scope,
+                             struct vip_payload *p, int64_t target,
+                             int64_t *session_reserve_floor,
+                             uint8_t *plain, size_t plain_cap,
+                             size_t *plain_len, uint8_t request_digest[32],
+                             struct json_value *result)
+{
+    if (agent_session && agent_session[0]) {
+        const char *recipients[VIP_EFFECTS_MAX];
+        for (size_t i = 0; i < p->effects_len; i++)
+            recipients[i] = p->effects[i].to;
+        char why[64] = { 0 };
+        bool planned = agent_session_service_plan_intent(
+            agent_session, scope, target + p->fee, recipients,
+            p->effects_len, session_reserve_floor, why, sizeof(why));
+        if (!planned) {
+            vip_error(result, why[0] ? why : "POLICY_STORE",
+                      "bounded session refused the exact intent plan");
+            return false;
+        }
+    }
+    bool encoded = vip_encode(p, plain, plain_cap, plain_len);
+    if (!encoded) {
+        vip_error(result, "PLAN_TOO_LARGE",
+                  "normalized recipients and memos exceed the encrypted plan budget");
+        return false;
+    }
+    vip_request_digest(plain, *plain_len, scope, request_digest);
+    return true;
+}
+
+enum vip_replay { VIP_REPLAY_NONE = 0, VIP_REPLAY_DONE, VIP_REPLAY_REFUSED };
+
+static enum vip_replay vip_plan_replay(
+    struct wallet_rpc_context *ctx, const char *scope, const char *idem,
+    const char *agent_session, const uint8_t request_digest[32],
+    struct vip_payload *p, uint8_t *plain, size_t plain_cap,
+    struct vault_intent_row *existing, struct json_value *result)
+{
+    bool found = vault_intent_find_application_idempotency(
+        ctx->node_db, scope, VIP_APP_KIND, idem, existing);
+    if (!found)
+        return VIP_REPLAY_NONE;
+    if (agent_session && agent_session[0] &&
+        existing->agent_session_id[0] &&
+        strcmp(existing->agent_session_id, agent_session) != 0) {
+        memory_cleanse(plain, plain_cap);
+        memory_cleanse(p, sizeof(*p));
+        vip_error(result, "POLICY_INTENT_SESSION",
+                  "that idempotency key is bound to another grant");
+        return VIP_REPLAY_REFUSED;
+    }
+    bool same = existing->has_request_digest &&
+        memcmp(existing->request_digest, request_digest, 32) == 0;
+    memory_cleanse(plain, plain_cap);
+    if (!same) {
+        memory_cleanse(p, sizeof(*p));
+        vip_error(result, "IDEMPOTENCY_CONFLICT",
+                  "that idempotency key already names a different request");
+        return VIP_REPLAY_REFUSED;
+    }
+    vip_plan_render_outcome(ctx, p, existing, true, result);
+    memory_cleanse(p, sizeof(*p));
+    return VIP_REPLAY_DONE;
+}
+
+static bool vip_plan_preflight_build(struct wallet_rpc_context *ctx,
+                                     const struct vip_payload *p,
+                                     struct json_value *result)
+{
+    /* Non-broadcast monetary preflight: prove the current source, witnesses,
+     * keys, fee, recipients, and prover can build. The signed candidate is
+     * discarded; commit later stores its own exact bytes before relay. */
+    struct json_value params, prepare_result;
+    json_init(&params); vip_params(p, &params);
+    json_init(&prepare_result);
+    struct wallet_tx prepared; memset(&prepared, 0, sizeof(prepared));
+    bool buildable = z_sendmany_prepare(&params, &prepared, &prepare_result);
+    json_free(&params);
+    if (!buildable) {
+        const char *reason = json_get_str(&prepare_result);
+        char why[256]; (void)snprintf(why, sizeof(why), "%s",
+            reason && reason[0] ? reason : "z_sendmany preflight refused");
+        json_free(&prepare_result);
+        vip_error(result, "PRIVATE_BUILD_UNAVAILABLE", why);
+        return false;
+    }
+    json_free(&prepare_result);
+    if (!vault_intent_private_requirements_current(ctx, &prepared.tx,
+                                                   result)) {
+        transaction_free(&prepared.tx);
+        return false;
+    }
+    transaction_free(&prepared.tx);
+    return true;
+}
+
+enum vip_persist {
+    VIP_PERSIST_ERROR = 0, VIP_PERSIST_RESERVED, VIP_PERSIST_NOT_RESERVED
+};
+
+static enum vip_persist vip_plan_persist(
+    struct wallet_rpc_context *ctx, const struct wallet_money_snapshot *money,
+    const struct vip_payload *p, int64_t target, int64_t reservation,
+    const char *scope, const char *idem, const char *agent_session,
+    const uint8_t *plain, size_t plain_len,
+    const uint8_t request_digest[32], struct vault_intent_row *row,
+    struct json_value *result)
+{
+    struct wallet_money_snapshot reserved_money;
+    bool reserved = wallet_money_snapshot_after_reservation(
+        money, reservation, &reserved_money);
+    if (!reserved) {
+        vip_error(result, "MONEY_STATE_NOT_CURRENT",
+                  "current money snapshot cannot include this reservation");
+        return VIP_PERSIST_ERROR;
+    }
+    memset(row, 0, sizeof(*row));
+    if (RAND_bytes(row->plan_id, 32) != 1) {
+        vip_error(result, "RNG_FAILED", "could not mint plan id");
+        return VIP_PERSIST_ERROR;
+    }
+    row->state = VAULT_INTENT_PLANNED; row->route = p->route;
+    row->created_at = (int64_t)platform_time_wall_time_t();
+    row->expires_at = row->created_at + VIP_TTL; row->updated_at = row->created_at;
+    row->anchor_height = money->tip_height;
+    memcpy(row->anchor_hash, money->tip_hash, 32);
+    (void)snprintf(row->wallet_scope, sizeof(row->wallet_scope), "%s", scope);
+    (void)snprintf(row->wallet_instance_id, sizeof(row->wallet_instance_id),
+                   "%s", money->identity.wallet_instance_id);
+    wallet_identity_genesis_hex(&money->identity, row->wallet_genesis);
+    memcpy(row->snapshot_root, reserved_money.snapshot_root, 32);
+    row->has_snapshot_root = true;
+    row->recipient_value_zat = target; row->max_fee_zat = p->fee;
+    row->reserved_zat = reservation;
+    (void)snprintf(row->application_kind, sizeof(row->application_kind), "%s",
+                   VIP_APP_KIND);
+    (void)snprintf(row->idempotency_key, sizeof(row->idempotency_key), "%s", idem);
+    memcpy(row->request_digest, request_digest, 32); row->has_request_digest = true;
+    if (agent_session && agent_session[0])
+        (void)snprintf(row->agent_session_id,
+                       sizeof(row->agent_session_id), "%s", agent_session);
+    vault_intent_digest_payload(plain, plain_len, row, row->digest);
+    bool encrypted = wallet_metadata_encrypt(ctx->node_db, row->plan_id, 32,
+        plain, plain_len, row->encrypted_payload, sizeof(row->encrypted_payload),
+        &row->encrypted_payload_len);
+    /* The post-reservation root is a pure transform of the post-proof CURRENT
+     * snapshot.  The database compares its reservation total and inserts this
+     * exact row under one BEGIN IMMEDIATE, so no poll or second save is part
+     * of correctness. */
+    bool stored = encrypted && vault_intent_reserve_bound(
+        ctx->node_db, row, money->confirmed_zat,
+        money->intent_reserved_zat);
+    return stored ? VIP_PERSIST_RESERVED : VIP_PERSIST_NOT_RESERVED;
+}
+
+static void vip_plan_persist_failed(struct wallet_rpc_context *ctx,
+                                    const char *scope, const char *idem,
+                                    const uint8_t request_digest[32],
+                                    const struct vip_payload *p,
+                                    struct vault_intent_row *existing,
+                                    struct json_value *result)
+{
+    bool found = vault_intent_find_application_idempotency(
+        ctx->node_db, scope, VIP_APP_KIND, idem, existing);
+    if (!found) {
+        vip_error(result, "PLAN_PERSIST_FAILED",
+                  "plan was not reserved; retry the same idempotency_key");
+        return;
+    }
+    bool same = existing->has_request_digest &&
+        memcmp(existing->request_digest, request_digest, 32) == 0;
+    if (!same) {
+        vip_error(result, "IDEMPOTENCY_CONFLICT",
+                  "that idempotency key already names a different request");
+        return;
+    }
+    vip_plan_render_outcome(ctx, p, existing, true, result);
+}
+
 bool vault_intent_private_plan(const struct json_value *input,
                                struct json_value *result)
 {
     struct wallet_rpc_context *ctx = wallet_rpc_context_current();
     const char *scope = json_get_str(json_get(input, "wallet_scope"));
     const char *idem = json_get_str(json_get(input, "idempotency_key"));
-    if (!wallet_money_scope_valid(scope)) {
-        vip_error(result, "WALLET_SCOPE_REQUIRED",
-                  "wallet_scope must explicitly be dev, prod, or test");
+    if (!vip_plan_request_valid(scope, idem, ctx, result))
         return true;
-    }
-    if (!vault_intent_idempotency_key_valid(idem)) {
-        vip_error(result, "IDEMPOTENCY_KEY_REQUIRED",
-                  "idempotency_key must be 1..64 printable characters");
-        return true;
-    }
-    if (!vault_intent_context_ready(ctx, result)) return true;
     (void)vault_intent_expire_due(
         ctx->node_db, (int64_t)platform_time_wall_time_t());
 
@@ -451,59 +749,20 @@ bool vault_intent_private_plan(const struct json_value *input,
     const char *agent_session =
         json_get_str(json_get(input, "_agent_session"));
     int64_t session_reserve_floor = VAULT_INTENT_DEV_RESERVE_FLOOR_ZAT;
-    if (agent_session && agent_session[0]) {
-        const char *recipients[VIP_EFFECTS_MAX];
-        for (size_t i = 0; i < p.effects_len; i++)
-            recipients[i] = p.effects[i].to;
-        char why[64] = { 0 };
-        if (!agent_session_service_plan_intent(
-                agent_session, scope, target + p.fee, recipients,
-                p.effects_len, &session_reserve_floor,
-                why, sizeof(why))) {
-            vip_error(result, why[0] ? why : "POLICY_STORE",
-                      "bounded session refused the exact intent plan");
-            memory_cleanse(&p, sizeof(p));
-            return true;
-        }
-    }
     uint8_t plain[WALLET_METADATA_PLAINTEXT_MAX]; size_t plain_len = 0;
-    if (!vip_encode(&p, plain, sizeof(plain), &plain_len)) {
-        vip_error(result, "PLAN_TOO_LARGE",
-                  "normalized recipients and memos exceed the encrypted plan budget");
+    uint8_t request_digest[32];
+    if (!vip_plan_prepare(agent_session, scope, &p, target,
+                          &session_reserve_floor, plain, sizeof(plain),
+                          &plain_len, request_digest, result)) {
         memory_cleanse(&p, sizeof(p));
         return true;
     }
-    uint8_t request_digest[32];
-    vip_request_digest(plain, plain_len, scope, request_digest);
 
     struct vault_intent_row existing;
-    if (vault_intent_find_application_idempotency(
-            ctx->node_db, scope, VIP_APP_KIND, idem, &existing)) {
-        if (agent_session && agent_session[0] &&
-            existing.agent_session_id[0] &&
-            strcmp(existing.agent_session_id, agent_session) != 0) {
-            memory_cleanse(plain, sizeof(plain));
-            memory_cleanse(&p, sizeof(p));
-            vip_error(result, "POLICY_INTENT_SESSION",
-                      "that idempotency key is bound to another grant");
-            return true;
-        }
-        bool same = existing.has_request_digest &&
-            memcmp(existing.request_digest, request_digest, 32) == 0;
-        memory_cleanse(plain, sizeof(plain));
-        if (!same) {
-            memory_cleanse(&p, sizeof(p));
-            vip_error(result, "IDEMPOTENCY_CONFLICT",
-                      "that idempotency key already names a different request");
-            return true;
-        }
-        json_set_object(result); (void)json_push_kv_bool(result, "ok", true);
-        vault_intent_render_row(ctx, result, &existing);
-        vip_render_plan_details(&p, &existing, result);
-        (void)json_push_kv_bool(result, "idempotent_plan", true);
-        memory_cleanse(&p, sizeof(p));
+    if (vip_plan_replay(ctx, scope, idem, agent_session, request_digest,
+                        &p, plain, sizeof(plain), &existing, result)
+            != VIP_REPLAY_NONE)
         return true;
-    }
 
     int64_t reservation = target + p.fee;
     struct wallet_money_snapshot money;
@@ -512,30 +771,8 @@ bool vault_intent_private_plan(const struct json_value *input,
             session_reserve_floor, &money, result))
         goto plan_clean;
 
-    /* Non-broadcast monetary preflight: prove the current source, witnesses,
-     * keys, fee, recipients, and prover can build. The signed candidate is
-     * discarded; commit later stores its own exact bytes before relay. */
-    struct json_value params, prepare_result;
-    json_init(&params); vip_params(&p, &params);
-    json_init(&prepare_result);
-    struct wallet_tx prepared; memset(&prepared, 0, sizeof(prepared));
-    bool buildable = z_sendmany_prepare(&params, &prepared, &prepare_result);
-    json_free(&params);
-    if (!buildable) {
-        const char *reason = json_get_str(&prepare_result);
-        char why[256]; (void)snprintf(why, sizeof(why), "%s",
-            reason && reason[0] ? reason : "z_sendmany preflight refused");
-        json_free(&prepare_result);
-        vip_error(result, "PRIVATE_BUILD_UNAVAILABLE", why);
+    if (!vip_plan_preflight_build(ctx, &p, result))
         goto plan_clean;
-    }
-    json_free(&prepare_result);
-    if (!vault_intent_private_requirements_current(
-            ctx, &prepared.tx, result)) {
-        transaction_free(&prepared.tx);
-        goto plan_clean;
-    }
-    transaction_free(&prepared.tx);
 
     /* A real Sapling proof may take tens of seconds.  The tip, mempool, or a
      * concurrent reservation can change while it is built, so the pre-proof
@@ -547,74 +784,16 @@ bool vault_intent_private_plan(const struct json_value *input,
             session_reserve_floor, &money, result))
         goto plan_clean;
 
-    struct wallet_money_snapshot reserved_money;
-    if (!wallet_money_snapshot_after_reservation(
-            &money, reservation, &reserved_money)) {
-        vip_error(result, "MONEY_STATE_NOT_CURRENT",
-                  "current money snapshot cannot include this reservation");
-        goto plan_clean;
+    struct vault_intent_row row;
+    enum vip_persist persisted = vip_plan_persist(
+        ctx, &money, &p, target, reservation, scope, idem, agent_session,
+        plain, plain_len, request_digest, &row, result);
+    if (persisted == VIP_PERSIST_RESERVED) {
+        vip_plan_render_outcome(ctx, &p, &row, false, result);
+    } else if (persisted == VIP_PERSIST_NOT_RESERVED) {
+        vip_plan_persist_failed(ctx, scope, idem, request_digest, &p,
+                                &existing, result);
     }
-    struct vault_intent_row row; memset(&row, 0, sizeof(row));
-    if (RAND_bytes(row.plan_id, 32) != 1) {
-        vip_error(result, "RNG_FAILED", "could not mint plan id");
-        goto plan_clean;
-    }
-    row.state = VAULT_INTENT_PLANNED; row.route = p.route;
-    row.created_at = (int64_t)platform_time_wall_time_t();
-    row.expires_at = row.created_at + VIP_TTL; row.updated_at = row.created_at;
-    row.anchor_height = money.tip_height;
-    memcpy(row.anchor_hash, money.tip_hash, 32);
-    (void)snprintf(row.wallet_scope, sizeof(row.wallet_scope), "%s", scope);
-    (void)snprintf(row.wallet_instance_id, sizeof(row.wallet_instance_id),
-                   "%s", money.identity.wallet_instance_id);
-    wallet_identity_genesis_hex(&money.identity, row.wallet_genesis);
-    memcpy(row.snapshot_root, reserved_money.snapshot_root, 32);
-    row.has_snapshot_root = true;
-    row.recipient_value_zat = target; row.max_fee_zat = p.fee;
-    row.reserved_zat = reservation;
-    (void)snprintf(row.application_kind, sizeof(row.application_kind), "%s",
-                   VIP_APP_KIND);
-    (void)snprintf(row.idempotency_key, sizeof(row.idempotency_key), "%s", idem);
-    memcpy(row.request_digest, request_digest, 32); row.has_request_digest = true;
-    if (agent_session && agent_session[0])
-        (void)snprintf(row.agent_session_id,
-                       sizeof(row.agent_session_id), "%s", agent_session);
-    vault_intent_digest_payload(plain, plain_len, &row, row.digest);
-    bool encrypted = wallet_metadata_encrypt(ctx->node_db, row.plan_id, 32,
-        plain, plain_len, row.encrypted_payload, sizeof(row.encrypted_payload),
-        &row.encrypted_payload_len);
-    /* The post-reservation root is a pure transform of the post-proof CURRENT
-     * snapshot.  The database compares its reservation total and inserts this
-     * exact row under one BEGIN IMMEDIATE, so no poll or second save is part
-     * of correctness. */
-    bool stored = encrypted && vault_intent_reserve_bound(
-        ctx->node_db, &row, money.confirmed_zat,
-        money.intent_reserved_zat);
-    if (!stored) {
-        if (vault_intent_find_application_idempotency(
-                ctx->node_db, scope, VIP_APP_KIND, idem, &existing)) {
-            bool same = existing.has_request_digest &&
-                memcmp(existing.request_digest, request_digest, 32) == 0;
-            if (!same) {
-                vip_error(result, "IDEMPOTENCY_CONFLICT",
-                          "that idempotency key already names a different request");
-                goto plan_clean;
-            }
-            json_set_object(result);
-            (void)json_push_kv_bool(result, "ok", true);
-            vault_intent_render_row(ctx, result, &existing);
-            vip_render_plan_details(&p, &existing, result);
-            (void)json_push_kv_bool(result, "idempotent_plan", true);
-            goto plan_clean;
-        }
-        vip_error(result, "PLAN_PERSIST_FAILED",
-                  "plan was not reserved; retry the same idempotency_key");
-        goto plan_clean;
-    }
-    json_set_object(result); (void)json_push_kv_bool(result, "ok", true);
-    vault_intent_render_row(ctx, result, &row);
-    vip_render_plan_details(&p, &row, result);
-    (void)json_push_kv_bool(result, "idempotent_plan", false);
 
 plan_clean:
     memory_cleanse(plain, sizeof(plain));
