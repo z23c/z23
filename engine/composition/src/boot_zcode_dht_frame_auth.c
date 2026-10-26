@@ -67,8 +67,8 @@ enum boot_zcode_dht_frame_verdict boot_zcode_dht_frame_classify(
       {VCS_ZCODE_DHT_REJECT_REPLAY, BOOT_FRAME_REFUTED},
       {VCS_ZCODE_DHT_REJECT_POISONED, BOOT_FRAME_REFUTED},
       {VCS_ZCODE_DHT_REJECT_IDENTITY, BOOT_FRAME_REFUTED},
-      /* Deliberately enumerated rather than defaulted: a future reject
-       * reason must be classified consciously, not silently scored. */
+      /* Deliberately enumerated rather than defaulted: a future reject reason
+       * must be classified consciously, not silently scored. */
       {VCS_ZCODE_DHT_REJECT_MALFORMED, BOOT_FRAME_DECODE_DETERMINISTIC},
       {VCS_ZCODE_DHT_REJECT_PLAINTEXT, BOOT_FRAME_DECODE_DETERMINISTIC},
       {VCS_ZCODE_DHT_REJECT_DELEGATION, BOOT_FRAME_DECODE_DETERMINISTIC},
