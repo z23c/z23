@@ -194,6 +194,61 @@ enum snapsync_serve_result snapsync_validate_serve_request(
     return SNAPSYNC_SERVE_OK;
 }
 
+/* Argument sanity for snapsync_prepare_serve_step — a pure predicate, so
+ * the error return and its message stay with the caller. */
+static bool snapsync_serve_step_args_valid(const struct snapsync_serve_step *step,
+                                           const struct p2p_node *node,
+                                           const uint8_t *buf, int64_t buf_size)
+{
+    return step && node && buf && buf_size > 0;
+}
+
+/* Walk one chunk's entry list: each entry is a 49-byte fixed part, then a
+ * length byte (253 introduces a 2-byte extended length, 254 a 4-byte one)
+ * and that many payload bytes. *io_scan enters just past the chunk's
+ * 4-byte entry count and is left holding how far the walk advanced.
+ * Returns false when a header ran past buf_size mid-entry; the caller
+ * reports the stopped-at cursor in its error message either way. */
+static bool snapsync_scan_chunk_entries(const uint8_t *buf, int64_t buf_size,
+                                        uint32_t entries, int64_t *io_scan)
+{
+    int64_t scan = *io_scan;
+    bool ok = true;
+
+    for (uint32_t i = 0; i < entries && ok; i++) {
+        uint64_t slen;
+
+        scan += 49;
+        if (scan >= buf_size) {
+            ok = false;
+            break;
+        }
+
+        slen = buf[scan++];
+        if (slen == 253) {
+            if (scan + 2 > buf_size) {
+                ok = false;
+                break;
+            }
+            slen = buf[scan] | ((uint16_t)buf[scan + 1] << 8);
+            scan += 2;
+        } else if (slen == 254) {
+            if (scan + 4 > buf_size) {
+                ok = false;
+                break;
+            }
+            slen = buf[scan] | ((uint32_t)buf[scan + 1] << 8) |
+                   ((uint32_t)buf[scan + 2] << 16) |
+                   ((uint32_t)buf[scan + 3] << 24);
+            scan += 4;
+        }
+        scan += (int64_t)slen;
+    }
+
+    *io_scan = scan;
+    return ok;
+}
+
 struct zcl_result snapsync_prepare_serve_step(struct snapsync_serve_step *step,
                                               struct p2p_node *node,
                                               const uint8_t *buf,
@@ -204,7 +259,7 @@ struct zcl_result snapsync_prepare_serve_step(struct snapsync_serve_step *step,
     uint32_t entries;
     bool ok = true;
 
-    if (!step || !node || !buf || buf_size <= 0)
+    if (!snapsync_serve_step_args_valid(step, node, buf, buf_size))
         return ZCL_ERR(-1, "prepare_serve_step: invalid args step=%p node=%p "
                        "buf=%p size=%lld", (void*)step, (void*)node,
                        (void*)buf, (long long)buf_size);
@@ -238,36 +293,7 @@ struct zcl_result snapsync_prepare_serve_step(struct snapsync_serve_step *step,
                        entries, (long long)pos);
 
     scan = pos + 4;
-    for (uint32_t i = 0; i < entries && ok; i++) {
-        uint64_t slen;
-
-        scan += 49;
-        if (scan >= buf_size) {
-            ok = false;
-            break;
-        }
-
-        slen = buf[scan++];
-        if (slen == 253) {
-            if (scan + 2 > buf_size) {
-                ok = false;
-                break;
-            }
-            slen = buf[scan] | ((uint16_t)buf[scan + 1] << 8);
-            scan += 2;
-        } else if (slen == 254) {
-            if (scan + 4 > buf_size) {
-                ok = false;
-                break;
-            }
-            slen = buf[scan] | ((uint32_t)buf[scan + 1] << 8) |
-                   ((uint32_t)buf[scan + 2] << 16) |
-                   ((uint32_t)buf[scan + 3] << 24);
-            scan += 4;
-        }
-        scan += (int64_t)slen;
-    }
-
+    ok = snapsync_scan_chunk_entries(buf, buf_size, entries, &scan);
     if (!ok || scan > buf_size)
         return ZCL_ERR(-4, "prepare_serve_step: scan overflow scan=%lld "
                        "buf_size=%lld entries=%u",
