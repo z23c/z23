@@ -64,13 +64,18 @@ static bool watch_windows_stop(void *opaque)
     return state && state->stop && state->stop(state->opaque);
 }
 
+static const char *watch_requested_root(const char *repo_root)
+{
+    return repo_root && repo_root[0] ? repo_root : ".";
+}
+
 int zcl_devloop_watch_mode_until(const char *repo_root,
     enum zcl_devloop_publish_mode publish_mode,
     zcl_devloop_stop_predicate stop, void *stop_opaque)
 {
     char root[ZCL_DEVLOOP_PATH_MAX], cache[ZCL_DEVLOOP_PATH_MAX];
     char lock_path[ZCL_DEVLOOP_PATH_MAX];
-    const char *requested = repo_root && repo_root[0] ? repo_root : ".";
+    const char *requested = watch_requested_root(repo_root);
     const char *mode = zcl_devloop_publish_mode_name(publish_mode);
     if (!mode || !platform_directory_canonical_real(requested, root,
                                                      sizeof(root)))
@@ -1452,17 +1457,23 @@ static void watch_emit_stopped_heartbeat(bool idle_exit)
 }
 
 #if defined(ZCL_TESTING)
+static pid_t watch_selftest_fork_pauser(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGTERM, SIG_DFL);
+        for (;;) pause();
+    }
+    return pid;
+}
+
 bool zcl_devloop_watch_commit_preemption_selftest(void)
 {
     struct watch_context ctx = {0};
     ctx.proof_pending_count = 1;
-    pid_t edit = fork();
+    pid_t edit = watch_selftest_fork_pauser();
     if (edit < 0)
         return false;
-    if (edit == 0) {
-        signal(SIGTERM, SIG_DFL);
-        for (;;) pause();
-    }
     ctx.proof_worker_pid = edit;
     ctx.proof_worker_kind = WATCH_PROOF_WORKER_EDIT;
     watch_commit_priority_apply(&ctx, true);
@@ -1472,13 +1483,9 @@ bool zcl_devloop_watch_commit_preemption_selftest(void)
         watch_commit_proof_claimable(&ctx);
 
     ctx.proof_pending_count = 1;
-    pid_t commit = fork();
+    pid_t commit = watch_selftest_fork_pauser();
     if (commit < 0)
         return false;
-    if (commit == 0) {
-        signal(SIGTERM, SIG_DFL);
-        for (;;) pause();
-    }
     ctx.proof_worker_pid = commit;
     ctx.proof_worker_kind = WATCH_PROOF_WORKER_COMMIT;
     watch_commit_priority_apply(&ctx, true);
@@ -1489,13 +1496,9 @@ bool zcl_devloop_watch_commit_preemption_selftest(void)
     watch_proof_join(&ctx);
 
     ctx.proof_pending_count = 1;
-    pid_t dirty_edit = fork();
+    pid_t dirty_edit = watch_selftest_fork_pauser();
     if (dirty_edit < 0)
         return false;
-    if (dirty_edit == 0) {
-        signal(SIGTERM, SIG_DFL);
-        for (;;) pause();
-    }
     ctx.proof_worker_pid = dirty_edit;
     ctx.proof_worker_kind = WATCH_PROOF_WORKER_EDIT;
     watch_commit_priority_apply(&ctx, false);
@@ -2359,6 +2362,53 @@ static bool watch_previous_blob(struct watch_context *ctx, const char *path,
     return true;
 }
 
+static void watch_hash_edit_epoch(struct watch_edit_epoch *epoch, size_t count)
+{
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    static const char domain[] = "zcl.dev_edit_epoch.v1";
+    watch_hash_cstr(&sha, domain);
+    watch_hash_u64(&sha, epoch->sequence);
+    watch_hash_cstr(&sha, epoch->parent);
+    watch_hash_cstr(&sha, epoch->dependency_generation);
+    watch_hash_cstr(&sha, epoch->owner);
+    watch_hash_cstr(&sha, epoch->component);
+    watch_hash_u64(&sha, epoch->blob_count);
+    for (size_t i = 0; i < count; i++) {
+        const struct watch_edit_blob *blob = &epoch->blobs[i];
+        watch_hash_cstr(&sha, blob->path);
+        watch_hash_bool(&sha, blob->previous_known);
+        watch_hash_bool(&sha, blob->previous_present);
+        sha3_256_write(&sha, blob->previous_digest.bytes, 32);
+        watch_hash_u64(&sha, blob->previous_size);
+        watch_hash_bool(&sha, blob->new_present);
+        sha3_256_write(&sha, blob->new_digest.bytes, 32);
+        watch_hash_u64(&sha, blob->new_size);
+    }
+    watch_digest_hex(&sha, epoch->id);
+}
+
+static void watch_commit_edit_epoch_overlay(
+    struct watch_context *ctx, const struct watch_edit_epoch *epoch,
+    size_t count)
+{
+    /* Commit the already-complete immutable epoch to the resident overlay.
+     * No repository discovery occurs here: one slot per known changed path. */
+    for (size_t i = 0; i < count; i++) {
+        const struct watch_edit_blob *blob = &epoch->blobs[i];
+        struct watch_blob_state *state = watch_overlay_find(ctx, blob->path);
+        if (!state) {
+            state = &ctx->overlay[ctx->overlay_count++];
+            memset(state, 0, sizeof(*state));
+            (void)snprintf(state->path, sizeof(state->path), "%s",
+                           blob->path);
+        }
+        state->digest = blob->new_digest;
+        state->size = blob->new_size;
+        state->present = blob->new_present;
+    }
+}
+
 static bool watch_build_edit_epoch(struct watch_context *ctx,
                                    const char *const *files, size_t count,
                                    int64_t seen_us,
@@ -2416,47 +2466,12 @@ static bool watch_build_edit_epoch(struct watch_context *ctx,
     if (new_overlay_slots > ZCL_DEVLOOP_WATCH_MAX_FILES - ctx->overlay_count)
         return false;
 
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    static const char domain[] = "zcl.dev_edit_epoch.v1";
-    watch_hash_cstr(&sha, domain);
-    watch_hash_u64(&sha, epoch->sequence);
-    watch_hash_cstr(&sha, epoch->parent);
-    watch_hash_cstr(&sha, epoch->dependency_generation);
-    watch_hash_cstr(&sha, epoch->owner);
-    watch_hash_cstr(&sha, epoch->component);
-    watch_hash_u64(&sha, epoch->blob_count);
-    for (size_t i = 0; i < count; i++) {
-        const struct watch_edit_blob *blob = &epoch->blobs[i];
-        watch_hash_cstr(&sha, blob->path);
-        watch_hash_bool(&sha, blob->previous_known);
-        watch_hash_bool(&sha, blob->previous_present);
-        sha3_256_write(&sha, blob->previous_digest.bytes, 32);
-        watch_hash_u64(&sha, blob->previous_size);
-        watch_hash_bool(&sha, blob->new_present);
-        sha3_256_write(&sha, blob->new_digest.bytes, 32);
-        watch_hash_u64(&sha, blob->new_size);
-    }
-    watch_digest_hex(&sha, epoch->id);
+    watch_hash_edit_epoch(epoch, count);
     epoch->impact_ready_us = platform_time_monotonic_us();
     epoch->immutable_epoch_creation_us =
         epoch->impact_ready_us - epoch_started_us;
 
-    /* Commit the already-complete immutable epoch to the resident overlay.
-     * No repository discovery occurs here: one slot per known changed path. */
-    for (size_t i = 0; i < count; i++) {
-        const struct watch_edit_blob *blob = &epoch->blobs[i];
-        struct watch_blob_state *state = watch_overlay_find(ctx, blob->path);
-        if (!state) {
-            state = &ctx->overlay[ctx->overlay_count++];
-            memset(state, 0, sizeof(*state));
-            (void)snprintf(state->path, sizeof(state->path), "%s",
-                           blob->path);
-        }
-        state->digest = blob->new_digest;
-        state->size = blob->new_size;
-        state->present = blob->new_present;
-    }
+    watch_commit_edit_epoch_overlay(ctx, epoch, count);
     ctx->edit_epoch_sequence = epoch->sequence;
     (void)snprintf(ctx->parent_edit_epoch, sizeof(ctx->parent_edit_epoch),
                    "%s", epoch->id);
@@ -2806,6 +2821,22 @@ static bool watch_emit_impact_ready(struct watch_context *ctx,
     return true;
 }
 
+static bool watch_emit_proof_pending_header(struct json_value *doc,
+                                            size_t count)
+{
+    return json_push_kv_str(doc, "schema", "zcl.dev_cycle.v1") &&
+        json_push_kv_str(doc, "producer", "reflex-reactor") &&
+        json_push_kv_str(doc, "status", "proof_pending") &&
+        json_push_kv_str(doc, "action", "verify") &&
+        json_push_kv_str(doc, "reason", "integration_proof_deferred") &&
+        json_push_kv_str(doc, "phase", "PROOF_PENDING") &&
+        json_push_kv_bool(doc, "runtime_published", false) &&
+        json_push_kv_bool(doc, "proof_complete", false) &&
+        json_push_kv_str(doc, "edit_epoch",
+                         zcl_devloop_event_edit_epoch()) &&
+        json_push_kv_int(doc, "file_count", (int64_t)count);
+}
+
 static bool watch_emit_proof_pending(struct watch_context *ctx,
                                      const char *const *files, size_t count)
 {
@@ -2814,17 +2845,7 @@ static bool watch_emit_proof_pending(struct watch_context *ctx,
     struct json_value doc, paths;
     json_init(&doc); json_set_object(&doc);
     json_init(&paths); json_set_array(&paths);
-    bool ok = json_push_kv_str(&doc, "schema", "zcl.dev_cycle.v1") &&
-        json_push_kv_str(&doc, "producer", "reflex-reactor") &&
-        json_push_kv_str(&doc, "status", "proof_pending") &&
-        json_push_kv_str(&doc, "action", "verify") &&
-        json_push_kv_str(&doc, "reason", "integration_proof_deferred") &&
-        json_push_kv_str(&doc, "phase", "PROOF_PENDING") &&
-        json_push_kv_bool(&doc, "runtime_published", false) &&
-        json_push_kv_bool(&doc, "proof_complete", false) &&
-        json_push_kv_str(&doc, "edit_epoch",
-                         zcl_devloop_event_edit_epoch()) &&
-        json_push_kv_int(&doc, "file_count", (int64_t)count);
+    bool ok = watch_emit_proof_pending_header(&doc, count);
     for (size_t i = 0; ok && i < count; i++) {
         struct json_value item;
         json_init(&item); json_set_str(&item, files[i]);
@@ -2849,6 +2870,21 @@ static bool watch_emit_proof_pending(struct watch_context *ctx,
     return watch_stream_flush(ctx);
 }
 
+static bool watch_emit_superseded_header(struct json_value *doc,
+                                         const struct watch_context *ctx)
+{
+    return json_push_kv_str(doc, "schema", "zcl.dev_cycle.v1") &&
+        json_push_kv_str(doc, "producer", "reflex-reactor") &&
+        json_push_kv_str(doc, "status", "superseded") &&
+        json_push_kv_str(doc, "action", "cancel") &&
+        json_push_kv_str(doc, "reason", "newer_edit_epoch") &&
+        json_push_kv_str(doc, "phase", "SUPERSEDED") &&
+        json_push_kv_bool(doc, "runtime_published", false) &&
+        json_push_kv_bool(doc, "proof_complete", false) &&
+        json_push_kv_int(doc, "queued_file_count",
+                         (int64_t)ctx->changed_count);
+}
+
 static bool watch_emit_superseded(struct watch_context *ctx)
 {
     if (!ctx || ctx->changed_count == 0)
@@ -2856,16 +2892,7 @@ static bool watch_emit_superseded(struct watch_context *ctx)
     struct json_value doc, paths;
     json_init(&doc); json_set_object(&doc);
     json_init(&paths); json_set_array(&paths);
-    bool ok = json_push_kv_str(&doc, "schema", "zcl.dev_cycle.v1") &&
-        json_push_kv_str(&doc, "producer", "reflex-reactor") &&
-        json_push_kv_str(&doc, "status", "superseded") &&
-        json_push_kv_str(&doc, "action", "cancel") &&
-        json_push_kv_str(&doc, "reason", "newer_edit_epoch") &&
-        json_push_kv_str(&doc, "phase", "SUPERSEDED") &&
-        json_push_kv_bool(&doc, "runtime_published", false) &&
-        json_push_kv_bool(&doc, "proof_complete", false) &&
-        json_push_kv_int(&doc, "queued_file_count",
-                         (int64_t)ctx->changed_count);
+    bool ok = watch_emit_superseded_header(&doc, ctx);
     if (ok && zcl_devloop_event_edit_epoch()[0])
         ok = json_push_kv_str(&doc, "edit_epoch",
                               zcl_devloop_event_edit_epoch());
@@ -2954,6 +2981,40 @@ static bool reserve_watch(struct watch_context *ctx)
     return true;
 }
 
+static bool add_watch_recursive(struct watch_context *ctx, const char *rel);
+
+static bool add_watch_child(struct watch_context *ctx, const char *full,
+                            const char *rel, const char *name)
+{
+    char child_full[PATH_MAX], child_rel[ZCL_DEVLOOP_PATH_MAX];
+    int fn = snprintf(child_full, sizeof(child_full), "%s/%s",
+                      full, name);
+    int rn = rel && rel[0]
+        ? snprintf(child_rel, sizeof(child_rel), "%s/%s", rel, name)
+        : snprintf(child_rel, sizeof(child_rel), "%s", name);
+    if (fn <= 0 || (size_t)fn >= sizeof(child_full) ||
+        rn <= 0 || (size_t)rn >= sizeof(child_rel))
+        return true;
+    struct stat st;
+    if (lstat(child_full, &st) == 0 && S_ISDIR(st.st_mode) &&
+        !S_ISLNK(st.st_mode))
+        return add_watch_recursive(ctx, child_rel);
+    return true;
+}
+
+static bool add_watch_children(struct watch_context *ctx, DIR *dir,
+                               const char *full, const char *rel)
+{
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (ignored_dir(entry->d_name))
+            continue;
+        if (!add_watch_child(ctx, full, rel, entry->d_name))
+            return false;
+    }
+    return true;
+}
+
 static bool add_watch_recursive(struct watch_context *ctx, const char *rel)
 {
     if (!reserve_watch(ctx))
@@ -2976,31 +3037,9 @@ static bool add_watch_recursive(struct watch_context *ctx, const char *rel)
     DIR *dir = opendir(full);
     if (!dir)
         return true;
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (ignored_dir(entry->d_name))
-            continue;
-        char child_full[PATH_MAX], child_rel[ZCL_DEVLOOP_PATH_MAX];
-        int fn = snprintf(child_full, sizeof(child_full), "%s/%s",
-                          full, entry->d_name);
-        int rn = rel && rel[0]
-            ? snprintf(child_rel, sizeof(child_rel), "%s/%s", rel,
-                       entry->d_name)
-            : snprintf(child_rel, sizeof(child_rel), "%s", entry->d_name);
-        if (fn <= 0 || (size_t)fn >= sizeof(child_full) ||
-            rn <= 0 || (size_t)rn >= sizeof(child_rel))
-            continue;
-        struct stat st;
-        if (lstat(child_full, &st) == 0 && S_ISDIR(st.st_mode) &&
-            !S_ISLNK(st.st_mode)) {
-            if (!add_watch_recursive(ctx, child_rel)) {
-                closedir(dir);
-                return false;
-            }
-        }
-    }
+    bool ok = add_watch_children(ctx, dir, full, rel);
     closedir(dir);
-    return true;
+    return ok;
 }
 #endif
 
@@ -3102,6 +3141,82 @@ static bool collect_events_macos(struct watch_context *ctx)
 }
 #endif
 
+#if !defined(__APPLE__)
+static void collect_events_request_rescan(struct watch_context *ctx)
+{
+    mutation_sequence_advance(ctx);
+    ctx->force_full_source_rescan = true;
+    add_changed(ctx, "Makefile");
+}
+
+static void collect_events_dir_changed(struct watch_context *ctx,
+                                       const struct inotify_event *ev,
+                                       const char *rel)
+{
+    mutation_sequence_advance(ctx);
+    add_changed(ctx, "Makefile");
+    if ((ev->mask & (IN_CREATE | IN_MOVED_TO)) &&
+        !add_watch_recursive(ctx, rel)) {
+        ctx->force_full_source_rescan = true;
+    }
+    if (ev->mask & (IN_DELETE | IN_MOVED_FROM))
+        ctx->force_full_source_rescan = true;
+}
+
+static bool collect_events_file_changed(struct watch_context *ctx,
+                                        const struct inotify_event *ev,
+                                        const char *rel)
+{
+    if (!(ev->mask & IN_ISDIR) &&
+        zcl_devloop_watch_event_is_mutation(ev->mask)) {
+        mutation_sequence_advance(ctx);
+        size_t before = ctx->changed_count;
+        add_changed(ctx, rel);
+        return ctx->changed_count != before;
+    }
+    return false;
+}
+
+static bool collect_inotify_event(struct watch_context *ctx,
+                                  const struct inotify_event *ev)
+{
+    if (ev->mask & IN_Q_OVERFLOW) {
+        collect_events_request_rescan(ctx);
+        return true;
+    }
+    struct watched_dir *dir = find_watch(ctx, ev->wd);
+    if (!dir)
+        return false;
+    bool saw = false;
+    if (ev->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) {
+        collect_events_request_rescan(ctx);
+        saw = true;
+    }
+    if (ev->len == 0)
+        return saw;
+    char rel[ZCL_DEVLOOP_PATH_MAX];
+    int rn = dir->rel[0]
+        ? snprintf(rel, sizeof(rel), "%s/%s", dir->rel, ev->name)
+        : snprintf(rel, sizeof(rel), "%s", ev->name);
+    if (rn <= 0 || (size_t)rn >= sizeof(rel))
+        return saw;
+    if (ev->mask & IN_ISDIR) {
+        /* The recursive watch deliberately never enters generated,
+         * dependency, or dot-prefixed scratch directories. Their
+         * create/remove traffic is equally irrelevant: treating it
+         * as a synthetic Makefile edit cancels the exact proof that
+         * created a test scratch directory in the first place. */
+        if (ignored_dir(ev->name))
+            return saw;
+        collect_events_dir_changed(ctx, ev, rel);
+        return true;
+    }
+    if (collect_events_file_changed(ctx, ev, rel))
+        saw = true;
+    return saw;
+}
+#endif
+
 static bool collect_events(struct watch_context *ctx)
 {
 #if defined(__APPLE__)
@@ -3120,56 +3235,8 @@ static bool collect_events(struct watch_context *ctx)
         for (char *p = buffer; p < buffer + n; ) {
             struct inotify_event *ev = (struct inotify_event *)p;
             p += sizeof(*ev) + ev->len;
-            if (ev->mask & IN_Q_OVERFLOW) {
-                mutation_sequence_advance(ctx);
-                ctx->force_full_source_rescan = true;
-                add_changed(ctx, "Makefile");
+            if (collect_inotify_event(ctx, ev))
                 saw = true;
-                continue;
-            }
-            struct watched_dir *dir = find_watch(ctx, ev->wd);
-            if (!dir)
-                continue;
-            if (ev->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) {
-                mutation_sequence_advance(ctx);
-                ctx->force_full_source_rescan = true;
-                add_changed(ctx, "Makefile");
-                saw = true;
-            }
-            if (ev->len == 0)
-                continue;
-            char rel[ZCL_DEVLOOP_PATH_MAX];
-            int rn = dir->rel[0]
-                ? snprintf(rel, sizeof(rel), "%s/%s", dir->rel, ev->name)
-                : snprintf(rel, sizeof(rel), "%s", ev->name);
-            if (rn <= 0 || (size_t)rn >= sizeof(rel))
-                continue;
-            if (ev->mask & IN_ISDIR) {
-                /* The recursive watch deliberately never enters generated,
-                 * dependency, or dot-prefixed scratch directories. Their
-                 * create/remove traffic is equally irrelevant: treating it
-                 * as a synthetic Makefile edit cancels the exact proof that
-                 * created a test scratch directory in the first place. */
-                if (ignored_dir(ev->name))
-                    continue;
-                mutation_sequence_advance(ctx);
-                add_changed(ctx, "Makefile");
-                saw = true;
-                if ((ev->mask & (IN_CREATE | IN_MOVED_TO)) &&
-                    !add_watch_recursive(ctx, rel)) {
-                    ctx->force_full_source_rescan = true;
-                }
-                if (ev->mask & (IN_DELETE | IN_MOVED_FROM))
-                    ctx->force_full_source_rescan = true;
-                continue;
-            }
-            if (!(ev->mask & IN_ISDIR) &&
-                zcl_devloop_watch_event_is_mutation(ev->mask)) {
-                mutation_sequence_advance(ctx);
-                size_t before = ctx->changed_count;
-                add_changed(ctx, rel);
-                saw = saw || ctx->changed_count != before;
-            }
         }
     }
     return saw;
