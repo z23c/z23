@@ -847,12 +847,14 @@ static int test_brief_spaced_value(void)
     "\"private workdir\",\"processes\":\"no fork; threads only\"}," \
     "\"cache\":{\"hit\":false}}}"
 
+static int cr_lab_width = 80;
+
 static size_t cr_lab_render_file(const char *file, const char *body,
                                  bool human, char *out, size_t cap)
 {
     char doc[4096];
     snprintf(doc, sizeof(doc), LAB_ENV_HEAD "%s", file, body);
-    struct zcl_cli_render_env e = cr_env(80, false);
+    struct zcl_cli_render_env e = cr_env(cr_lab_width, false);
     e.human = human;
     return zcl_cli_render_doc(doc, strlen(doc), "lab.run", &e, out, cap);
 }
@@ -988,6 +990,25 @@ static int test_lab_run_render(void)
         ASSERT(n > 0);
         ASSERT(strstr(big, "z\xE2\x80\xA6\n") != NULL);
         ASSERT(cr_max_line_width(big) <= 80);
+        PASS();
+    }
+    TEST("lab.run cut never splits a multi-byte character") {
+        char wide[1000];
+        wide[0] = '\0';
+        for (int i = 0; i < 300; i++)
+            strcat(wide, "\xE2\x82\xAC"); /* € x300, longer than the buffer */
+        char body[2048];
+        snprintf(body, sizeof(body),
+            "\"compile\":{\"ok\":true,\"wall_us\":2000,\"diagnostics\":[]},"
+            "\"run\":{\"ran\":true,\"exit_code\":0,\"wall_us\":900,"
+            "\"max_rss_kb\":1024,\"stdout\":\"%s\",\"stderr\":\"\"},"
+            LAB_CONF, wide);
+        char big[8192];
+        cr_lab_width = 240;
+        size_t n = cr_lab_render(body, true, big, sizeof(big));
+        cr_lab_width = 80;
+        ASSERT(n > 0);
+        ASSERT(strstr(big, "\xE2\x82\xAC\xE2\x80\xA6\n") != NULL);
         PASS();
     }
     TEST("lab.run non-human mode renders nothing, so JSON stays canonical") {

@@ -1454,6 +1454,20 @@ static void lab_fmt_wall(char *out, size_t cap, int64_t us)
         (void)snprintf(out, cap, "%.2f s", (double)us / 1e6);
 }
 
+/* Length of dst[0..w) with a trailing incomplete UTF-8 sequence dropped,
+ * so a cut never leaves half a character. */
+static size_t lab_whole_chars(const char *dst, size_t w)
+{
+    size_t j = w;
+    while (j > 0 && ((unsigned char)dst[j - 1] & 0xC0) == 0x80)
+        j--;
+    if (j == 0 || (unsigned char)dst[j - 1] < 0xC0)
+        return w;
+    unsigned char lead = (unsigned char)dst[j - 1];
+    size_t need = (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : 4;
+    return w - (j - 1) < need ? j - 1 : w;
+}
+
 /* The one sanitizer for text that came from the program, the compiler or
  * the user (output, diagnostics, file names). Control bytes, DEL and the
  * two-byte C1 forms (CSI included) become visible \xNN escapes, so no
@@ -1483,6 +1497,7 @@ static void lab_clean(char *dst, size_t cap, const char *s, size_t n)
         w += pl;
     }
     if (cut) {
+        w = lab_whole_chars(dst, w);
         memcpy(dst + w, "…", 3);
         w += 3;
     }
