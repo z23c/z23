@@ -119,6 +119,42 @@ static int test_sqlq_refusals(void)
     return failures;
 }
 
+static int test_sqlq_statement_tail(void)
+{
+    int failures = 0;
+    char dir[4096], db[4608], buf[256] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "sqlq", "tail");
+    TEST("sqlq: trailing SQL refuses before any result is printed") {
+        ASSERT(sqlq_fixture(dir, db, sizeof(db)));
+        const char *bad[] = {
+            "SELECT 1; SELECT 2", "SELECT 1; SELECT FROM WHERE",
+            "SELECT 1; DELETE FROM t", "PRAGMA user_version; SELECT 2",
+            "SELECT 1; /* comment */ SELECT 2", "SELECT 1; -- comment\n SELECT 2",
+            "SELECT 1; ; garbage", "SELECT 1; /", "SELECT 1; -"
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            ASSERT(sqlq_run(db, bad[i], buf, sizeof(buf)) == 1);
+            ASSERT(strcmp(buf, "") == 0);
+        }
+        const char *good[] = {
+            "SELECT 1;", "SELECT 1; \t\r\n; ;",
+            "SELECT 1; -- SELECT 2", "SELECT 1; /* SELECT 2 */ ; -- end",
+            "SELECT 1; /* unterminated comment", "SELECT 1 /* ; SELECT 2 */"
+        };
+        for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+            ASSERT(sqlq_run(db, good[i], buf, sizeof(buf)) == 0);
+            ASSERT(strcmp(buf, "1" SQLQ_EOL) == 0);
+        }
+        ASSERT(sqlq_run(db, "SELECT COUNT(*) FROM t", buf, sizeof(buf)) == 0);
+        ASSERT(strcmp(buf, "2" SQLQ_EOL) == 0);
+        ASSERT(sqlq_run(db, "SELECT '; SELECT 2'; -- end", buf, sizeof(buf)) == 0);
+        ASSERT(strcmp(buf, "; SELECT 2" SQLQ_EOL) == 0);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
 #if !defined(_WIN32)
 /* One query, two spellings past the link: a link named sqlq in a temp dir
  * (argv0 dispatch in z23) and `z23 sqlq` (argv+1). Both must print the
@@ -144,6 +180,13 @@ static int test_sqlq_multicall_names(void)
         const char *by_sub[] = {"build/bin/z23", "sqlq", db, sql, NULL};
         ASSERT(test_host_tool_capture(by_sub, buf, sizeof(buf), 5000) == 0);
         ASSERT(strcmp(buf, expect) == 0);
+        const char *bad_link[] = {alias, db, "SELECT 1; SELECT 2", NULL};
+        ASSERT(test_host_tool_capture(bad_link, buf, sizeof(buf), 5000) == 1);
+        ASSERT(strcmp(buf, "") == 0);
+        const char *bad_sub[] = {"build/bin/z23", "sqlq", db,
+                                 "SELECT 1; SELECT 2", NULL};
+        ASSERT(test_host_tool_capture(bad_sub, buf, sizeof(buf), 5000) == 1);
+        ASSERT(strcmp(buf, "") == 0);
         PASS();
     } _test_next:;
     (void)test_rm_rf_recursive(dir);
@@ -161,6 +204,7 @@ int test_sqlq(void)
     }
     failures += test_sqlq_rows_and_typing();
     failures += test_sqlq_refusals();
+    failures += test_sqlq_statement_tail();
 #if !defined(_WIN32)
     failures += test_sqlq_multicall_names();
 #endif

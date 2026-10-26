@@ -23,6 +23,43 @@
 #include <string.h>
 #include <strings.h>
 
+/* Validate without preparing another statement: some PRAGMAs take effect
+ * during prepare. SQLite permits empty statements and trailing comments. */
+static bool sqlq_empty_tail(const char *tail)
+{
+    while (*tail) {
+        if (strchr(" \t\r\n\f\v;", *tail)) {
+            tail++;
+        } else if (tail[0] == '-' && tail[1] == '-') {
+            tail += 2;
+            while (*tail && *tail != '\n') tail++;
+        } else if (tail[0] == '/' && tail[1] == '*') {
+            const char *end = strstr(tail + 2, "*/");
+            if (!end) return true;
+            tail = end + 2;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+static sqlite3_stmt *sqlq_prepare(sqlite3 *db, const char *sql)
+{
+    sqlite3_stmt *st = NULL;
+    const char *tail = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, &tail) != SQLITE_OK) {
+        fprintf(stderr, "sqlq: prepare failed: %s\n", sqlite3_errmsg(db));
+        return NULL;
+    }
+    if (!sqlq_empty_tail(tail)) {
+        fputs("sqlq: expected one statement; trailing SQL is not allowed\n", stderr);
+        sqlite3_finalize(st);
+        return NULL;
+    }
+    return st;
+}
+
 int sqlq_main(int argc, char **argv)
 {
     if (argc != 3) {
@@ -46,9 +83,8 @@ int sqlq_main(int argc, char **argv)
     }
     sqlite3_busy_timeout(db, 2000);
 
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
-        fprintf(stderr, "sqlq: prepare failed: %s\n", sqlite3_errmsg(db));
+    sqlite3_stmt *st = sqlq_prepare(db, sql);
+    if (!st) {
         sqlite3_close(db);
         return 1;
     }
