@@ -246,9 +246,6 @@ static struct json_value vd_shielded_input(void)
     return input;
 }
 
-/* Each of the three vault.list predicates below carries exactly one
- * VD_CHECK's condition, unchanged, so the policy case body stays small
- * while the checks themselves (and their strings) stay where they were. */
 static bool vd_list_reports_six_live_classes(
     const struct json_value *reply_data)
 {
@@ -280,10 +277,6 @@ static bool vd_list_legacy_totals_are_exact(const struct json_value *legacy)
         json_get_int(json_get(legacy, "total_zat")) == 2969662;
 }
 
-/* Builds the block-7 fixture: tmp node_db holding one operator principal
- * and the two agent sessions, plus a heap wallet, and stands the
- * db_service up. Returns whether every step succeeded; the caller owns
- * dir, ndb, dbsvc, runtime and *wallet_out and logs the outcome. */
 static bool vd_policy_fixture_open(char *dir, size_t dir_sz,
                                    struct node_db *ndb,
                                    struct db_service *dbsvc,
