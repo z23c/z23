@@ -209,7 +209,7 @@ static void g1_affine_to_compressed(uint8_t out[48], const struct g1_point *p)
 /* ============================================================
  * Corpus construction — deterministic, params-free
  * ============================================================ */
-static void build_corpus(void)
+static void build_g1_compressed_corpus(void)
 {
     uint8_t buf[MAX_INPUT];
 
@@ -232,6 +232,11 @@ static void build_corpus(void)
     /* one-bit flip deep in x */
     memcpy(buf, G1_GEN_COMPRESSED, 48); buf[40] ^= 0x01;
     push_bytes(FAM_G1_COMPRESSED, "g1c: generator x one-bit flipped", buf, 48);
+}
+
+static void build_g1_uncompressed_corpus(void)
+{
+    uint8_t buf[MAX_INPUT];
 
     /* ---- FAM_G1_UNCOMPRESSED (96 bytes) ---- */
     memset(buf, 0, 96);
@@ -244,6 +249,11 @@ static void build_corpus(void)
     push_bytes(FAM_G1_UNCOMPRESSED, "g1u: x >= q", buf, 96);
     memset(buf, 0xff, 96); buf[0] = 0x40;
     push_bytes(FAM_G1_UNCOMPRESSED, "g1u: infinity flag + dirty bytes (quirk)", buf, 96);
+}
+
+static void build_g2_compressed_corpus(void)
+{
+    uint8_t buf[MAX_INPUT];
 
     /* ---- FAM_G2_COMPRESSED (96 bytes) ---- */
     push_bytes(FAM_G2_COMPRESSED, "g2c: canonical generator", G2_GEN_COMPRESSED, 96);
@@ -257,6 +267,11 @@ static void build_corpus(void)
     push_bytes(FAM_G2_COMPRESSED, "g2c: x >= q", buf, 96);
     memcpy(buf, G2_GEN_COMPRESSED, 96); buf[80] ^= 0x01;
     push_bytes(FAM_G2_COMPRESSED, "g2c: generator x one-bit flipped", buf, 96);
+}
+
+static void build_g2_uncompressed_corpus(void)
+{
+    uint8_t buf[MAX_INPUT];
 
     /* ---- FAM_G2_UNCOMPRESSED (192 bytes) ---- */
     memset(buf, 0, 192);
@@ -265,7 +280,10 @@ static void build_corpus(void)
     push_bytes(FAM_G2_UNCOMPRESSED, "g2u: canonical infinity", buf, 192);
     memset(buf, 0xff, 192); buf[0] = 0x1f;
     push_bytes(FAM_G2_UNCOMPRESSED, "g2u: x >= q", buf, 192);
+}
 
+static void build_proof_read_corpus(void)
+{
     /* ---- FAM_PROOF_READ (192 bytes, compressed A|B|C) ---- */
     {
         uint8_t good[192];
@@ -299,7 +317,10 @@ static void build_corpus(void)
         memset(badB + 48, 0xff, 96); badB[48] = 0xbf;
         push_bytes(FAM_PROOF_READ, "proof: B out-of-field (REJECT)", badB, 192);
     }
+}
 
+static void build_verify_corpus(void)
+{
     /* ---- FAM_VERIFY (synthetic params-free VK) ----
      * alpha=G1, beta=gamma=delta=G2, IC=[O, G1], n_inputs=1.
      * proof j: A=G1, B=G2, C=-t*G1, input t  => valid. */
@@ -373,7 +394,10 @@ static void build_corpus(void)
             }
         }
     }
+}
 
+static void build_batch_corpus(void)
+{
     /* ---- FAM_BATCH ---- */
     {
         struct g1_point G1, O1;
@@ -451,115 +475,142 @@ static void build_corpus(void)
             }
         }
     }
+}
 
-    /* ---- WIDE family: MAX_PI distinct IC bases + full-width scalars ----
-     * The single-input vectors above only ever multiply IC[1] by a small
-     * scalar, which leaves the high limbs of the multiplier — and every IC
-     * base but the first — untested. Any fixed-base / windowed rewrite of the
-     * public-input scalar-mul has to reproduce the SAME group element for a
-     * full 256-bit multiplier on EVERY base, so these vectors sweep:
-     *   zero, 1, 2^64-1, all-256-bits-set, r-1, and mixed limb patterns,
-     * across MAX_PI independent bases, with a bit-flip reject control on each.
-     * A window that straddles a limb boundary, drops the top window, or
-     * mis-indexes a base flips one of these from ACCEPT to REJECT. */
-    {
-        struct g1_point G1, O1;
-        struct g2_point G2;
-        (void)g1_from_compressed(&G1, G1_GEN_COMPRESSED);
-        (void)g2_from_compressed(&G2, G2_GEN_COMPRESSED);
-        g1_identity(&O1);
-
-        /* Distinct fixed bases: IC[0] = O, IC[i] = (7i+1)*G1. */
-        static struct g1_point wic[MAX_PI + 1];
-        wic[0] = O1;
-        for (int i = 1; i <= MAX_PI; i++) {
-            uint64_t m[4] = { (uint64_t)(7 * i + 1), 0, 0, 0 };
-            g1_scalar_mul(&wic[i], &G1, m);
-        }
-
-        /* Set 4 leads with r-1 (0x73eda753...ffffffff00000000), the largest
-         * valid Fr scalar, on two bases. */
-        static const uint64_t SCALARS[][MAX_PI][4] = {
-            {{0,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}},
-            {{1,0,0,0},{2,0,0,0},{3,0,0,0},{4,0,0,0}},
-            {{0xFFFFFFFFFFFFFFFFULL,0,0,0},{0,0,1,0},{0,1,0,0},{0,0,0,1}},
-            {{0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL,
-              0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL},
-             {0xF0F0F0F0F0F0F0F0ULL,0x0F0F0F0F0F0F0F0FULL,
-              0xAAAAAAAAAAAAAAAAULL,0x5555555555555555ULL},
-             {1,0,0,0},{0,0,0,0}},
-            {{0xffffffff00000000ULL,0x53bda402fffe5bfeULL,
-              0x3339d80809a1d805ULL,0x73eda753299d7d48ULL},
-             {0xffffffff00000000ULL,0x53bda402fffe5bfeULL,
-              0x3339d80809a1d805ULL,0x73eda753299d7d48ULL},
-             {0x8000000000000000ULL,0,0,0x0000000000000001ULL},
-             {0x0000000000000010ULL,0x0000000000000000ULL,
-              0x1000000000000000ULL,0x0000000000000000ULL}},
-        };
-        const size_t n_sets = sizeof(SCALARS) / sizeof(SCALARS[0]);
-
-        for (size_t s = 0; s < n_sets; s++) {
-            for (int flip = 0; flip < 2; flip++) {
-                char lbl[96];
-                snprintf(lbl, sizeof(lbl),
-                         "verify-wide: %zu bases, scalar set %zu%s",
-                         (size_t)MAX_PI, s, flip ? " + input bit-flip (REJECT)"
-                                                 : " (ACCEPT)");
-                push_vec(FAM_VERIFY, lbl);
-                struct verify_payload *vp = &g_vpayload[g_nvecs - 1];
-                vp->vk.alpha_g1 = G1; vp->vk.beta_g2 = G2;
-                vp->vk.gamma_g2 = G2; vp->vk.delta_g2 = G2;
-                vp->vk.ic = wic; vp->vk.ic_len = MAX_PI + 1;
-                vp->n_proofs = 1; vp->n_inputs = MAX_PI;
-
-                /* vk_x = IC[0] + sum(input[i] * IC[i+1]); C = -vk_x accepts. */
-                struct g1_point vkx = wic[0];
-                for (int i = 0; i < MAX_PI; i++) {
-                    memcpy(vp->inputs[i], SCALARS[s][i], sizeof(vp->inputs[i]));
-                    if (SCALARS[s][i][0] == 0 && SCALARS[s][i][1] == 0 &&
-                        SCALARS[s][i][2] == 0 && SCALARS[s][i][3] == 0)
-                        continue;
-                    struct g1_point term;
-                    g1_scalar_mul(&term, &wic[i + 1], SCALARS[s][i]);
-                    g1_add(&vkx, &vkx, &term);
-                }
-                vp->proof[0].a = G1;
-                vp->proof[0].b = G2;
-                g1_neg(&vp->proof[0].c, &vkx);
-                if (flip)
-                    vp->inputs[MAX_PI - 1][3] ^= 0x8000000000000000ULL;
-            }
-        }
-
-        /* Batch over the same wide VK: all-valid ACCEPT, one-corrupted REJECT. */
-        for (int corrupt = 0; corrupt < 2; corrupt++) {
-            push_vec(FAM_BATCH, corrupt
-                     ? "batch-wide: 4 proofs over 4 bases, one corrupted (REJECT)"
-                     : "batch-wide: 4 proofs over 4 bases (ACCEPT)");
+static void build_wide_verify_sets(struct g1_point G1, struct g2_point G2,
+                                   struct g1_point *wic,
+                                   const uint64_t (*scalars)[MAX_PI][4],
+                                   size_t n_sets)
+{
+    for (size_t s = 0; s < n_sets; s++) {
+        for (int flip = 0; flip < 2; flip++) {
+            char lbl[96];
+            snprintf(lbl, sizeof(lbl),
+                     "verify-wide: %zu bases, scalar set %zu%s",
+                     (size_t)MAX_PI, s, flip ? " + input bit-flip (REJECT)"
+                                             : " (ACCEPT)");
+            push_vec(FAM_VERIFY, lbl);
             struct verify_payload *vp = &g_vpayload[g_nvecs - 1];
             vp->vk.alpha_g1 = G1; vp->vk.beta_g2 = G2;
             vp->vk.gamma_g2 = G2; vp->vk.delta_g2 = G2;
             vp->vk.ic = wic; vp->vk.ic_len = MAX_PI + 1;
-            vp->n_proofs = 4; vp->n_inputs = MAX_PI;
-            for (size_t j = 0; j < 4; j++) {
-                struct g1_point vkx = wic[0];
-                for (int i = 0; i < MAX_PI; i++) {
-                    uint64_t *dst = vp->inputs[j * MAX_PI + i];
-                    memcpy(dst, SCALARS[j + 1][i], sizeof(SCALARS[j + 1][i]));
-                    if (dst[0] == 0 && dst[1] == 0 && dst[2] == 0 && dst[3] == 0)
-                        continue;
-                    struct g1_point term;
-                    g1_scalar_mul(&term, &wic[i + 1], dst);
-                    g1_add(&vkx, &vkx, &term);
-                }
-                vp->proof[j].a = G1;
-                vp->proof[j].b = G2;
-                g1_neg(&vp->proof[j].c, &vkx);
+            vp->n_proofs = 1; vp->n_inputs = MAX_PI;
+
+            /* vk_x = IC[0] + sum(input[i] * IC[i+1]); C = -vk_x accepts. */
+            struct g1_point vkx = wic[0];
+            for (int i = 0; i < MAX_PI; i++) {
+                memcpy(vp->inputs[i], scalars[s][i], sizeof(vp->inputs[i]));
+                if (scalars[s][i][0] == 0 && scalars[s][i][1] == 0 &&
+                    scalars[s][i][2] == 0 && scalars[s][i][3] == 0)
+                    continue;
+                struct g1_point term;
+                g1_scalar_mul(&term, &wic[i + 1], scalars[s][i]);
+                g1_add(&vkx, &vkx, &term);
             }
-            if (corrupt)
-                g1_add(&vp->proof[3].c, &vp->proof[3].c, &G1);
+            vp->proof[0].a = G1;
+            vp->proof[0].b = G2;
+            g1_neg(&vp->proof[0].c, &vkx);
+            if (flip)
+                vp->inputs[MAX_PI - 1][3] ^= 0x8000000000000000ULL;
         }
     }
+}
+
+static void build_wide_batch_sets(struct g1_point G1, struct g2_point G2,
+                                  struct g1_point *wic,
+                                  const uint64_t (*scalars)[MAX_PI][4])
+{
+    /* Batch over the same wide VK: all-valid ACCEPT, one-corrupted REJECT. */
+    for (int corrupt = 0; corrupt < 2; corrupt++) {
+        push_vec(FAM_BATCH, corrupt
+                 ? "batch-wide: 4 proofs over 4 bases, one corrupted (REJECT)"
+                 : "batch-wide: 4 proofs over 4 bases (ACCEPT)");
+        struct verify_payload *vp = &g_vpayload[g_nvecs - 1];
+        vp->vk.alpha_g1 = G1; vp->vk.beta_g2 = G2;
+        vp->vk.gamma_g2 = G2; vp->vk.delta_g2 = G2;
+        vp->vk.ic = wic; vp->vk.ic_len = MAX_PI + 1;
+        vp->n_proofs = 4; vp->n_inputs = MAX_PI;
+        for (size_t j = 0; j < 4; j++) {
+            struct g1_point vkx = wic[0];
+            for (int i = 0; i < MAX_PI; i++) {
+                uint64_t *dst = vp->inputs[j * MAX_PI + i];
+                memcpy(dst, scalars[j + 1][i], sizeof(scalars[j + 1][i]));
+                if (dst[0] == 0 && dst[1] == 0 && dst[2] == 0 && dst[3] == 0)
+                    continue;
+                struct g1_point term;
+                g1_scalar_mul(&term, &wic[i + 1], dst);
+                g1_add(&vkx, &vkx, &term);
+            }
+            vp->proof[j].a = G1;
+            vp->proof[j].b = G2;
+            g1_neg(&vp->proof[j].c, &vkx);
+        }
+        if (corrupt)
+            g1_add(&vp->proof[3].c, &vp->proof[3].c, &G1);
+    }
+}
+
+/* ---- WIDE family: MAX_PI distinct IC bases + full-width scalars ----
+ * The single-input vectors above only ever multiply IC[1] by a small
+ * scalar, which leaves the high limbs of the multiplier — and every IC
+ * base but the first — untested. Any fixed-base / windowed rewrite of the
+ * public-input scalar-mul has to reproduce the SAME group element for a
+ * full 256-bit multiplier on EVERY base, so these vectors sweep:
+ *   zero, 1, 2^64-1, all-256-bits-set, r-1, and mixed limb patterns,
+ * across MAX_PI independent bases, with a bit-flip reject control on each.
+ * A window that straddles a limb boundary, drops the top window, or
+ * mis-indexes a base flips one of these from ACCEPT to REJECT. */
+static void build_wide_corpus(void)
+{
+    struct g1_point G1, O1;
+    struct g2_point G2;
+    (void)g1_from_compressed(&G1, G1_GEN_COMPRESSED);
+    (void)g2_from_compressed(&G2, G2_GEN_COMPRESSED);
+    g1_identity(&O1);
+
+    /* Distinct fixed bases: IC[0] = O, IC[i] = (7i+1)*G1. */
+    static struct g1_point wic[MAX_PI + 1];
+    wic[0] = O1;
+    for (int i = 1; i <= MAX_PI; i++) {
+        uint64_t m[4] = { (uint64_t)(7 * i + 1), 0, 0, 0 };
+        g1_scalar_mul(&wic[i], &G1, m);
+    }
+
+    /* Set 4 leads with r-1 (0x73eda753...ffffffff00000000), the largest
+     * valid Fr scalar, on two bases. */
+    static const uint64_t SCALARS[][MAX_PI][4] = {
+        {{0,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}},
+        {{1,0,0,0},{2,0,0,0},{3,0,0,0},{4,0,0,0}},
+        {{0xFFFFFFFFFFFFFFFFULL,0,0,0},{0,0,1,0},{0,1,0,0},{0,0,0,1}},
+        {{0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL,
+          0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL},
+         {0xF0F0F0F0F0F0F0F0ULL,0x0F0F0F0F0F0F0F0FULL,
+          0xAAAAAAAAAAAAAAAAULL,0x5555555555555555ULL},
+         {1,0,0,0},{0,0,0,0}},
+        {{0xffffffff00000000ULL,0x53bda402fffe5bfeULL,
+          0x3339d80809a1d805ULL,0x73eda753299d7d48ULL},
+         {0xffffffff00000000ULL,0x53bda402fffe5bfeULL,
+          0x3339d80809a1d805ULL,0x73eda753299d7d48ULL},
+         {0x8000000000000000ULL,0,0,0x0000000000000001ULL},
+         {0x0000000000000010ULL,0x0000000000000000ULL,
+          0x1000000000000000ULL,0x0000000000000000ULL}},
+    };
+    const size_t n_sets = sizeof(SCALARS) / sizeof(SCALARS[0]);
+
+    build_wide_verify_sets(G1, G2, wic, SCALARS, n_sets);
+    build_wide_batch_sets(G1, G2, wic, SCALARS);
+}
+
+static void build_corpus(void)
+{
+    build_g1_compressed_corpus();
+    build_g1_uncompressed_corpus();
+    build_g2_compressed_corpus();
+    build_g2_uncompressed_corpus();
+    build_proof_read_corpus();
+    build_verify_corpus();
+    build_batch_corpus();
+    build_wide_corpus();
 }
 
 /* ============================================================
@@ -692,6 +743,38 @@ static int write_pairing_values(const char *path)
     return 0;
 }
 
+/* True when the file starts with the frozen pairing-values magic. */
+static bool check_pairing_magic_ok(FILE *f)
+{
+    const size_t len = strlen(PAIRVAL_MAGIC);
+    char magic[64] = {0};
+    return fread(magic, 1, len, f) == len &&
+           memcmp(magic, PAIRVAL_MAGIC, len) == 0;
+}
+
+/* Index of the first byte where the two Fp12 encodings differ, or
+ * PC_FP12_BYTES when they are equal. */
+static int check_pairing_first_diff(const uint8_t *now, const uint8_t *frozen)
+{
+    int d = 0;
+    while (d < PC_FP12_BYTES && now[d] == frozen[d]) d++;
+    return d;
+}
+
+/* Reads one frozen record: label length, label, then the Fp12 bytes.
+ * Returns 0 on success, 1 on a short read (stop the loop), 2 when the label
+ * does not fit in label_cap (fail the check). */
+static int check_pairing_read_record(FILE *f, char *label, size_t label_cap,
+                                     uint8_t *frozen)
+{
+    uint16_t llen = 0;
+    if (fread(&llen, sizeof(llen), 1, f) != 1) return 1;
+    if (llen >= label_cap) return 2;
+    if (fread(label, 1, llen, f) != llen) return 1;
+    if (fread(frozen, 1, PC_FP12_BYTES, f) != PC_FP12_BYTES) return 1;
+    return 0;
+}
+
 /* Returns 0 iff every vector's Fp12 is byte-identical to the frozen file AND
  * (when linked) to bls12_381_pairing_candidate. */
 static int check_pairing_values(const char *path)
@@ -701,9 +784,7 @@ static int check_pairing_values(const char *path)
     if (n == 0) { fprintf(stderr, "pairing corpus build failed\n"); return -1; }
     FILE *f = fopen(path, "rb");
     if (!f) { perror(path); return -1; }
-    char magic[64] = {0};
-    if (fread(magic, 1, strlen(PAIRVAL_MAGIC), f) != strlen(PAIRVAL_MAGIC) ||
-        memcmp(magic, PAIRVAL_MAGIC, strlen(PAIRVAL_MAGIC)) != 0) {
+    if (!check_pairing_magic_ok(f)) {
         fprintf(stderr, "pairing values: bad magic\n"); fclose(f); return -1;
     }
     uint32_t cnt = 0;
@@ -718,21 +799,18 @@ static int check_pairing_values(const char *path)
     const bool have_cand = pc_have_candidate();
     int bad = 0;
     for (uint32_t i = 0; i < cnt; i++) {
-        uint16_t llen = 0;
         char label[128] = {0};
         uint8_t frozen[PC_FP12_BYTES];
-        if (fread(&llen, sizeof(llen), 1, f) != 1) break;
-        if (llen >= sizeof(label)) { fclose(f); return -1; }
-        if (fread(label, 1, llen, f) != llen) break;
-        if (fread(frozen, 1, PC_FP12_BYTES, f) != PC_FP12_BYTES) break;
+        int rc = check_pairing_read_record(f, label, sizeof(label), frozen);
+        if (rc == 2) { fclose(f); return -1; }
+        if (rc == 1) break;
 
         struct fp12 e;
         uint8_t now[PC_FP12_BYTES];
         bls12_381_pairing(&e, &v[i].p, &v[i].q);
         pc_fp12_to_bytes(now, &e);
         if (memcmp(now, frozen, PC_FP12_BYTES) != 0) {
-            int d = 0;
-            while (d < PC_FP12_BYTES && now[d] == frozen[d]) d++;
+            int d = check_pairing_first_diff(now, frozen);
             fprintf(stderr,
                     "PAIRING VALUE MISMATCH [%s]: Fp12 coefficient %s, "
                     "byte %d: frozen %02x current %02x\n"
@@ -748,8 +826,7 @@ static int check_pairing_values(const char *path)
             bls12_381_pairing_candidate(&ec, &v[i].p, &v[i].q);
             pc_fp12_to_bytes(cand, &ec);
             if (memcmp(cand, frozen, PC_FP12_BYTES) != 0) {
-                int d = 0;
-                while (d < PC_FP12_BYTES && cand[d] == frozen[d]) d++;
+                int d = check_pairing_first_diff(cand, frozen);
                 fprintf(stderr,
                         "PAIRING CANDIDATE MISMATCH [%s]: Fp12 coefficient %s, "
                         "byte %d: frozen %02x candidate %02x\n"
@@ -856,6 +933,64 @@ static int write_decode_corpus(const char *path)
     return 0;
 }
 
+/* True when the file starts with the self-describing decode-corpus magic. */
+static bool check_decode_magic_ok(FILE *f)
+{
+    const size_t len = strlen(DECODE_MAGIC);
+    char magic[64] = {0};
+    return fread(magic, 1, len, f) == len &&
+           memcmp(magic, DECODE_MAGIC, len) == 0;
+}
+
+/* Reads one bytes->verdict record. Returns 0 on success, 1 on a short read
+ * (stop the loop), 2 when the input is larger than MAX_INPUT (fail the
+ * check). */
+static int check_decode_read_record(FILE *f, uint8_t *fam, uint8_t *verdict,
+                                    uint8_t *input, char *label,
+                                    size_t label_cap)
+{
+    uint16_t ilen = 0, llen = 0;
+    if (fread(fam, 1, 1, f) != 1) return 1;
+    if (fread(verdict, 1, 1, f) != 1) return 1;
+    if (fread(&ilen, sizeof(ilen), 1, f) != 1) return 1;
+    if (ilen > MAX_INPUT) return 2;
+    if (fread(input, 1, ilen, f) != ilen) return 1;
+    if (fread(&llen, sizeof(llen), 1, f) != 1) return 1;
+    if (llen >= label_cap) llen = label_cap - 1;
+    if (fread(label, 1, llen, f) != llen) return 1;
+    return 0;
+}
+
+/* Re-runs one record's bytes through the byte-decode family's decoder.
+ * Returns 1 accept, 0 reject, or -1 when fam is not a byte-decode family. */
+static int check_decode_verdict(uint8_t fam, uint8_t *input)
+{
+    switch (fam) {
+    case FAM_G1_COMPRESSED: {
+        struct g1_point p;
+        return g1_from_compressed(&p, input) ? 1 : 0;
+    }
+    case FAM_G1_UNCOMPRESSED: {
+        struct g1_point p;
+        return g1_from_uncompressed(&p, input) ? 1 : 0;
+    }
+    case FAM_G2_COMPRESSED: {
+        struct g2_point p;
+        return g2_from_compressed(&p, input) ? 1 : 0;
+    }
+    case FAM_G2_UNCOMPRESSED: {
+        struct g2_point p;
+        return g2_from_uncompressed(&p, input) ? 1 : 0;
+    }
+    case FAM_PROOF_READ: {
+        struct groth16_proof gp;
+        return groth16_proof_read(&gp, input) ? 1 : 0;
+    }
+    default:
+        return -1;
+    }
+}
+
 /* Reload the decode corpus and re-run each record's bytes through the current
  * decoder, asserting the stored verdict still holds (independent of the
  * in-memory generator — proves the on-disk corpus and the code agree). */
@@ -863,9 +998,7 @@ static int check_decode_corpus(const char *path)
 {
     FILE *f = fopen(path, "rb");
     if (!f) { perror(path); return -1; }
-    char magic[64] = {0};
-    if (fread(magic, 1, strlen(DECODE_MAGIC), f) != strlen(DECODE_MAGIC) ||
-        memcmp(magic, DECODE_MAGIC, strlen(DECODE_MAGIC)) != 0) {
+    if (!check_decode_magic_ok(f)) {
         fprintf(stderr, "decode corpus: bad magic\n"); fclose(f); return -1;
     }
     uint32_t n = 0;
@@ -873,26 +1006,17 @@ static int check_decode_corpus(const char *path)
     int mismatches = 0;
     for (uint32_t i = 0; i < n; i++) {
         uint8_t fam = 0, verdict = 0;
-        uint16_t ilen = 0, llen = 0;
         uint8_t input[MAX_INPUT];
         char label[128] = {0};
-        if (fread(&fam, 1, 1, f) != 1) break;
-        if (fread(&verdict, 1, 1, f) != 1) break;
-        if (fread(&ilen, sizeof(ilen), 1, f) != 1) break;
-        if (ilen > MAX_INPUT) { fclose(f); return -1; }
-        if (fread(input, 1, ilen, f) != ilen) break;
-        if (fread(&llen, sizeof(llen), 1, f) != 1) break;
-        if (llen >= sizeof(label)) llen = sizeof(label) - 1;
-        if (fread(label, 1, llen, f) != llen) break;
+        int rc = check_decode_read_record(f, &fam, &verdict, input, label,
+                                          sizeof(label));
+        if (rc == 2) { fclose(f); return -1; }
+        if (rc == 1) break;
 
-        uint8_t got = 0;
-        switch (fam) {
-        case FAM_G1_COMPRESSED:   { struct g1_point p; got = g1_from_compressed(&p, input) ? 1 : 0; break; }
-        case FAM_G1_UNCOMPRESSED: { struct g1_point p; got = g1_from_uncompressed(&p, input) ? 1 : 0; break; }
-        case FAM_G2_COMPRESSED:   { struct g2_point p; got = g2_from_compressed(&p, input) ? 1 : 0; break; }
-        case FAM_G2_UNCOMPRESSED: { struct g2_point p; got = g2_from_uncompressed(&p, input) ? 1 : 0; break; }
-        case FAM_PROOF_READ:      { struct groth16_proof gp; got = groth16_proof_read(&gp, input) ? 1 : 0; break; }
-        default: fprintf(stderr, "decode corpus: bad family %u\n", fam); fclose(f); return -1;
+        int got = check_decode_verdict(fam, input);
+        if (got < 0) {
+            fprintf(stderr, "decode corpus: bad family %u\n", fam);
+            fclose(f); return -1;
         }
         if (got != verdict) {
             fprintf(stderr, "DECODE CORPUS MISMATCH [%s]: stored=%u current=%u\n",
@@ -905,6 +1029,39 @@ static int check_decode_corpus(const char *path)
 }
 
 /* ============================================================ */
+static int run_mode_record(const char *golden, const char *corpus,
+                           const char *pairval)
+{
+    if (write_golden(golden) != 0) return 2;
+    if (write_decode_corpus(corpus) != 0) return 2;
+    if (write_pairing_values(pairval) != 0) return 2;
+    printf("recorded %zu golden verdicts -> %s\n", g_nvecs, golden);
+    printf("recorded decode corpus -> %s\n", corpus);
+    printf("recorded pairing Fp12 values -> %s\n", pairval);
+    /* Print a human-readable manifest to stdout. */
+    for (size_t i = 0; i < g_nvecs; i++)
+        printf("  [%3zu] fam=%d verdict=%s  %s\n",
+               i, g_vecs[i].fam, g_vecs[i].verdict ? "ACCEPT" : "REJECT",
+               g_vecs[i].label);
+    return 0;
+}
+
+static int run_mode_check(const char *golden, const char *corpus,
+                          const char *pairval)
+{
+    int rc = 0;
+    if (read_golden_and_check(golden) != 0) rc = 1;
+    if (check_decode_corpus(corpus) != 0) rc = 1;
+    if (check_pairing_values(pairval) != 0) rc = 1;
+    if (rc == 0)
+        printf("PARITY OK: %zu vectors, verdicts match frozen golden "
+               "(verify/batch vectors agree on both public-input paths)\n",
+               g_nvecs);
+    else
+        fprintf(stderr, "PARITY FAILED (see mismatches above)\n");
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     const char *mode = (argc > 1) ? argv[1] : "check";
@@ -930,33 +1087,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (strcmp(mode, "record") == 0) {
-        if (write_golden(golden) != 0) return 2;
-        if (write_decode_corpus(corpus) != 0) return 2;
-        if (write_pairing_values(pairval) != 0) return 2;
-        printf("recorded %zu golden verdicts -> %s\n", g_nvecs, golden);
-        printf("recorded decode corpus -> %s\n", corpus);
-        printf("recorded pairing Fp12 values -> %s\n", pairval);
-        /* Print a human-readable manifest to stdout. */
-        for (size_t i = 0; i < g_nvecs; i++)
-            printf("  [%3zu] fam=%d verdict=%s  %s\n",
-                   i, g_vecs[i].fam, g_vecs[i].verdict ? "ACCEPT" : "REJECT",
-                   g_vecs[i].label);
-        return 0;
-    }
-    if (strcmp(mode, "check") == 0) {
-        int rc = 0;
-        if (read_golden_and_check(golden) != 0) rc = 1;
-        if (check_decode_corpus(corpus) != 0) rc = 1;
-        if (check_pairing_values(pairval) != 0) rc = 1;
-        if (rc == 0)
-            printf("PARITY OK: %zu vectors, verdicts match frozen golden "
-                   "(verify/batch vectors agree on both public-input paths)\n",
-                   g_nvecs);
-        else
-            fprintf(stderr, "PARITY FAILED (see mismatches above)\n");
-        return rc;
-    }
+    if (strcmp(mode, "record") == 0) return run_mode_record(golden, corpus,
+                                                            pairval);
+    if (strcmp(mode, "check") == 0) return run_mode_check(golden, corpus,
+                                                          pairval);
     if (strcmp(mode, "list") == 0) {
         for (size_t i = 0; i < g_nvecs; i++)
             printf("  [%3zu] fam=%d verdict=%s  %s\n",
