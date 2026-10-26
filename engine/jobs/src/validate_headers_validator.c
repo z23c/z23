@@ -465,17 +465,20 @@ static bool validate_from_source(header_source_fn fn,
     return validate_header_fields(&h, cp, out_reason, out_reason_size);
 }
 
-bool validate_headers_default_validator(const struct block_index *bi,
-                                        const char *datadir,
-                                        char *out_reason,
-                                        size_t out_reason_size,
-                                        void *user)
+/* Entry preamble of validate_headers_default_validator: null guard,
+ * chain-params resolution, the genesis exemption and the version gate.
+ * Writes the resolved params to *cp_out (only when proceeding) and
+ * returns 1 when the header is exempt (the caller returns true), 0 when
+ * the ordered source resolver should run, or -1 with out_reason already
+ * set (the caller returns false). */
+static int validate_header_precheck(const struct block_index *bi,
+                                    const struct chain_params **cp_out,
+                                    char *out_reason,
+                                    size_t out_reason_size)
 {
-    (void)user;
-    (void)datadir;
     if (!bi || !bi->phashBlock) {
         snprintf(out_reason, out_reason_size, "null-block-index");
-        return false;
+        return -1;
     }
 
     /* (0) Genesis is exempt from contextual header checks — its validity is
@@ -487,16 +490,91 @@ bool validate_headers_default_validator(const struct block_index *bi,
     const struct chain_params *cp = chain_params_get();
     if (!cp) {
         snprintf(out_reason, out_reason_size, "no-chain-params");
-        return false;
+        return -1;
     }
+    *cp_out = cp;
     if (uint256_eq(bi->phashBlock, &cp->consensus.hashGenesisBlock))
-        return true;
+        return 1;
 
     /* (1) version. */
     if (bi->nVersion < MIN_BLOCK_VERSION) {
         snprintf(out_reason, out_reason_size, "version-too-low");
-        return false;
+        return -1;
     }
+    return 0;
+}
+
+/* Tail of the ordered source resolver in validate_headers_default_validator:
+ * the in-memory block index, the persisted block-index record and finally
+ * the node.db solution BLOB, followed by the resolver's final
+ * had_hash_mismatch reason. Same stop rule as the resolver proper — a
+ * hash-bound header's verdict is terminal. Returns the caller's verdict. */
+static bool validate_from_index_sources(const struct block_index *bi,
+                                        const struct chain_params *cp,
+                                        char *out_reason,
+                                        size_t out_reason_size,
+                                        bool *had_hash_bound_header,
+                                        bool *had_hash_mismatch)
+{
+    /* The block index stores full header fields, including nonce and
+     * Equihash solution, for headers admitted through normal P2P/RPC
+     * paths. Validate from that header snapshot next. */
+    if (validate_from_source(header_from_block_index, "block-index",
+                             bi, cp, out_reason, out_reason_size,
+                             had_hash_bound_header, had_hash_mismatch))
+        return true;
+    if (*had_hash_bound_header)
+        return false;
+
+    /* Restart/load paths deliberately keep the Equihash solution out
+     * of the hot in-memory index to save RAM. The persisted block-index
+     * record still owns it, so load that compact header record instead
+     * of making header validation depend on readable block bodies. */
+    if (validate_from_source(header_from_persisted_block_index,
+                             "persisted-index", bi, cp,
+                             out_reason, out_reason_size,
+                             had_hash_bound_header, had_hash_mismatch))
+        return true;
+    if (*had_hash_bound_header)
+        return false;
+
+    /* Final source: the node.db blocks.solution BLOB. A cold-imported /
+     * near-empty LevelDB leaves both index paths solution-less even though
+     * the real, network-anchored Equihash solution lives in SQLite. We
+     * validate it IDENTICALLY (same validate_header_fields → CheckProofOfWork
+     * + check_equihash_solution). On a node.db that ALSO lacks the solution
+     * this still FAILS with "no-header-solution-backfill-required" — never a
+     * false pass. */
+    if (validate_from_source(header_from_node_db_solution, "node-db-solution",
+                             bi, cp, out_reason, out_reason_size,
+                             had_hash_bound_header, had_hash_mismatch))
+        return true;
+    if (*had_hash_bound_header)
+        return false;
+
+    if (*had_hash_mismatch)
+        snprintf(out_reason, out_reason_size, "header-source-hash-mismatch");
+    return false;
+}
+
+bool validate_headers_default_validator(const struct block_index *bi,
+                                        const char *datadir,
+                                        char *out_reason,
+                                        size_t out_reason_size,
+                                        void *user)
+{
+    (void)user;
+    (void)datadir;
+
+    /* Entry preamble: null guard, chain params, the genesis exemption and
+     * the version gate (steps (0) and (1) live in validate_header_precheck). */
+    const struct chain_params *cp = NULL;
+    int precheck = validate_header_precheck(bi, &cp, out_reason,
+                                            out_reason_size);
+    if (precheck > 0)
+        return true;
+    if (precheck < 0)
+        return false;
 
     /* (2) PoW target. Cheap — no disk. (cp resolved at (0) above.) */
 
@@ -545,48 +623,9 @@ bool validate_headers_default_validator(const struct block_index *bi,
     if (had_hash_bound_header)
         return false;
 
-    /* The block index stores full header fields, including nonce and
-     * Equihash solution, for headers admitted through normal P2P/RPC
-     * paths. Validate from that header snapshot next. */
-    if (validate_from_source(header_from_block_index, "block-index",
-                             bi, cp, out_reason, out_reason_size,
-                             &had_hash_bound_header,
-                             &had_hash_mismatch))
-        return true;
-    if (had_hash_bound_header)
-        return false;
-
-    /* Restart/load paths deliberately keep the Equihash solution out
-     * of the hot in-memory index to save RAM. The persisted block-index
-     * record still owns it, so load that compact header record instead
-     * of making header validation depend on readable block bodies. */
-    if (validate_from_source(header_from_persisted_block_index,
-                             "persisted-index", bi, cp,
-                             out_reason, out_reason_size,
-                             &had_hash_bound_header,
-                             &had_hash_mismatch))
-        return true;
-    if (had_hash_bound_header)
-        return false;
-
-    /* Final source: the node.db blocks.solution BLOB. A cold-imported /
-     * near-empty LevelDB leaves both index paths solution-less even though
-     * the real, network-anchored Equihash solution lives in SQLite. We
-     * validate it IDENTICALLY (same validate_header_fields → CheckProofOfWork
-     * + check_equihash_solution). On a node.db that ALSO lacks the solution
-     * this still FAILS with "no-header-solution-backfill-required" — never a
-     * false pass. */
-    if (validate_from_source(header_from_node_db_solution, "node-db-solution",
-                             bi, cp, out_reason, out_reason_size,
-                             &had_hash_bound_header,
-                             &had_hash_mismatch))
-        return true;
-    if (had_hash_bound_header)
-        return false;
-
-    if (had_hash_mismatch)
-        snprintf(out_reason, out_reason_size, "header-source-hash-mismatch");
-    return false;
+    return validate_from_index_sources(bi, cp, out_reason, out_reason_size,
+                                       &had_hash_bound_header,
+                                       &had_hash_mismatch);
 }
 
 /* ── On-demand single-header pass record (the instant-on seam) ──────────────
@@ -612,15 +651,25 @@ void validate_headers_ensure_set_validator_for_test(vh_validator_fn fn,
 }
 #endif
 
-bool validate_headers_stage_ensure_pass_record(struct main_state *ms,
-                                               int32_t height)
+#ifdef ZCL_TESTING
+/* Select the validator for the on-demand pass record below: the override
+ * installed by validate_headers_ensure_set_validator_for_test when one is
+ * present, else the production default passed in by the caller. */
+static void select_pass_record_validator(vh_validator_fn *fn, void **user)
 {
-    if (!ms || height < 0)
-        return false;
-    sqlite3 *db = progress_store_db();
-    if (!db)
-        return false;
+    if (g_ensure_validator_override) {
+        *fn = g_ensure_validator_override;
+        *user = g_ensure_validator_override_user;
+    }
+}
+#endif
 
+/* Resolve the block_index entry at `height` for
+ * validate_headers_stage_ensure_pass_record. Read-only: no chain state is
+ * mutated. */
+static struct block_index *resolve_pass_record_index(struct main_state *ms,
+                                                     int32_t height)
+{
     /* Resolve the header at `height`: the connected chain first, then the
      * header-tip ancestor walk (read-only — chain_active is never mutated).
      * Works before validate_headers_stage_init: no Job state is touched. */
@@ -643,6 +692,19 @@ bool validate_headers_stage_ensure_pass_record(struct main_state *ms,
                 bi = candidate;
         }
     }
+    return bi;
+}
+
+bool validate_headers_stage_ensure_pass_record(struct main_state *ms,
+                                               int32_t height)
+{
+    if (!ms || height < 0)
+        return false;
+    sqlite3 *db = progress_store_db();
+    if (!db)
+        return false;
+
+    struct block_index *bi = resolve_pass_record_index(ms, height);
     if (!bi || !bi->phashBlock)
         return false;
 
@@ -657,10 +719,7 @@ bool validate_headers_stage_ensure_pass_record(struct main_state *ms,
     vh_validator_fn validator = validate_headers_default_validator;
     void *validator_user = NULL;
 #ifdef ZCL_TESTING
-    if (g_ensure_validator_override) {
-        validator = g_ensure_validator_override;
-        validator_user = g_ensure_validator_override_user;
-    }
+    select_pass_record_validator(&validator, &validator_user);
 #endif
     /* FULL canonical validation: PoW target + Equihash solution. A wrong-block or
      * PoW-invalid header at `height` fails here → NO pass row is written → the
