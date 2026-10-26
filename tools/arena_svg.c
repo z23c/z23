@@ -447,6 +447,86 @@ static bool as_write_svg(const char *path, const struct as_snap *snaps,
     return true;
 }
 
+static bool as_planes_out_of_range(uint8_t planes_per_team)
+{
+    return planes_per_team < 1 || planes_per_team > 4;
+}
+
+static bool as_decode_ctls(const uint8_t **fp, unsigned num_planes,
+                           zdog_ctl ctls[])
+{
+    for (unsigned i = 0; i < num_planes; i++) {
+        if (!zdog_ctl_decode(*fp, ZDOG_CTL_WIRE_LEN, &ctls[i]))
+            return false;
+        *fp += ZDOG_CTL_WIRE_LEN;
+    }
+    return true;
+}
+
+static void as_note_first_engagement(struct as_snap *snaps,
+                                     const zdog_match *m)
+{
+    if (!snaps[1].present && as_any_shot(m)) {
+        snaps[1].present = true;
+        snaps[1].m = *m;
+    }
+}
+
+static void as_track_kill(struct as_snap *snaps, const zdog_match *m,
+                          const zdog_match *lag, unsigned lag_len,
+                          unsigned lag_head, uint32_t *prev_score)
+{
+    const uint32_t score = m->score[0] + m->score[1];
+    if (score > *prev_score) {
+        if (!snaps[2].present) {
+            snaps[2].present = true;
+            snaps[2].m = *m;
+        }
+        /* The oldest entry still in the window is the state AS_LAG
+         * ticks ago (fewer, and possibly none, very early in a match).
+         * Overwritten by every later kill, so it settles on the run-in
+         * to the last one. */
+        snaps[4].present = true;
+        snaps[4].m = lag_len > 0 ? lag[lag_head] : *m;
+        *prev_score = score;
+    }
+}
+
+static void as_note_midpoint(struct as_snap *snaps, const zdog_match *m,
+                             uint64_t mid_tick)
+{
+    if (m->tick == mid_tick) {
+        snaps[3].present = true;
+        snaps[3].m = *m;
+    }
+}
+
+static void as_push_lag(zdog_match *lag, unsigned *lag_len,
+                        unsigned *lag_head, const zdog_match *m)
+{
+    /* Push this state into the rolling window AFTER the kill check, so
+     * the window still holds the pre-kill history at that moment. Once
+     * full it holds ticks [T-AS_LAG, T-1], oldest first at lag_head. */
+    if (*lag_len < AS_LAG) {
+        lag[(*lag_len)++] = *m;
+    } else {
+        lag[*lag_head] = *m;
+        *lag_head = (*lag_head + 1u) % AS_LAG;
+    }
+}
+
+static void as_record_final_snap(struct as_snap *snaps, const zdog_match *m)
+{
+    snaps[5].present = true;
+    snaps[5].m = *m;
+    if (!snaps[4].present)
+        snaps[4].note = "no kill was scored in this replay";
+    if (!snaps[2].present)
+        snaps[2].note = "no kill was scored in this replay";
+    if (!snaps[1].present)
+        snaps[1].note = "no round was ever fired";
+}
+
 static int as_render(const char *replay_path, const char *out_path,
                      const char *red_label, const char *blue_label)
 {
@@ -480,7 +560,7 @@ static int as_render(const char *replay_path, const char *out_path,
     }
     const uint64_t seed = zcl_read_u64_le(buf + AS_REPLAY_MAGIC_LEN + 4u);
     const uint8_t planes_per_team = buf[AS_REPLAY_MAGIC_LEN + 4u + 8u];
-    if (planes_per_team < 1 || planes_per_team > 4) {
+    if (as_planes_out_of_range(planes_per_team)) {
         rc = as_mismatch("header-planes");
         goto out;
     }
@@ -513,45 +593,15 @@ static int as_render(const char *replay_path, const char *out_path,
     const uint8_t *fp = buf + AS_HEADER_LEN;
     for (uint64_t t = 0; t < recorded_ticks; t++) {
         zdog_ctl ctls[ZDOG_MAX_PLANES];
-        for (unsigned i = 0; i < num_planes; i++) {
-            if (!zdog_ctl_decode(fp, ZDOG_CTL_WIRE_LEN, &ctls[i])) {
-                rc = as_mismatch("ctl-frame");
-                goto out;
-            }
-            fp += ZDOG_CTL_WIRE_LEN;
+        if (!as_decode_ctls(&fp, num_planes, ctls)) {
+            rc = as_mismatch("ctl-frame");
+            goto out;
         }
         zdog_tick(&m, ctls);
-        if (!snaps[1].present && as_any_shot(&m)) {
-            snaps[1].present = true;
-            snaps[1].m = m;
-        }
-        const uint32_t score = m.score[0] + m.score[1];
-        if (score > prev_score) {
-            if (!snaps[2].present) {
-                snaps[2].present = true;
-                snaps[2].m = m;
-            }
-            /* The oldest entry still in the window is the state AS_LAG
-             * ticks ago (fewer, and possibly none, very early in a match).
-             * Overwritten by every later kill, so it settles on the run-in
-             * to the last one. */
-            snaps[4].present = true;
-            snaps[4].m = lag_len > 0 ? lag[lag_head] : m;
-            prev_score = score;
-        }
-        if (m.tick == mid_tick) {
-            snaps[3].present = true;
-            snaps[3].m = m;
-        }
-        /* Push this state into the rolling window AFTER the kill check, so
-         * the window still holds the pre-kill history at that moment. Once
-         * full it holds ticks [T-AS_LAG, T-1], oldest first at lag_head. */
-        if (lag_len < AS_LAG) {
-            lag[lag_len++] = m;
-        } else {
-            lag[lag_head] = m;
-            lag_head = (lag_head + 1u) % AS_LAG;
-        }
+        as_note_first_engagement(snaps, &m);
+        as_track_kill(snaps, &m, lag, lag_len, lag_head, &prev_score);
+        as_note_midpoint(snaps, &m, mid_tick);
+        as_push_lag(lag, &lag_len, &lag_head, &m);
     }
 
     /* The same acceptance arena_runner --verify-replay applies. */
@@ -573,14 +623,7 @@ static int as_render(const char *replay_path, const char *out_path,
         rc = as_mismatch("final-state");
         goto out;
     }
-    snaps[5].present = true;
-    snaps[5].m = m;
-    if (!snaps[4].present)
-        snaps[4].note = "no kill was scored in this replay";
-    if (!snaps[2].present)
-        snaps[2].note = "no kill was scored in this replay";
-    if (!snaps[1].present)
-        snaps[1].note = "no round was ever fired";
+    as_record_final_snap(snaps, &m);
 
     uint8_t replay_root[SHA3_256_OUTPUT_SIZE];
     uint8_t state_root[SHA3_256_OUTPUT_SIZE];
@@ -603,6 +646,14 @@ out:
     return rc;
 }
 
+static const char *as_option_value(int argc, char **argv, int i,
+                                   const char *eq)
+{
+    if (eq)
+        return eq + 1;
+    return i + 1 < argc ? argv[i + 1] : NULL;
+}
+
 int main(int argc, char **argv)
 {
     const char *replay = NULL;
@@ -623,10 +674,7 @@ int main(int argc, char **argv)
         }
         memcpy(name, a, nl);
         name[nl] = '\0';
-        if (eq)
-            v = eq + 1;
-        else if (i + 1 < argc)
-            v = argv[i + 1];
+        v = as_option_value(argc, argv, i, eq);
         if (strcmp(name, "--help") == 0) {
             as_usage(stdout);
             return 0;

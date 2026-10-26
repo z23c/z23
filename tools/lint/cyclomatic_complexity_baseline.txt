@@ -1441,8 +1441,6 @@ tools/arena_present.c:main:42
 tools/arena_runner.c:ar_run_match:23
 tools/arena_runner.c:ar_verify_replay:19
 tools/arena_runner.c:main:35
-tools/arena_svg.c:as_render:27
-tools/arena_svg.c:main:16
 tools/arena_view.c:av_draw_hud:19
 tools/arena_view.c:av_input:23
 tools/arena_view.c:main:67
