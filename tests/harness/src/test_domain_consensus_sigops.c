@@ -30,8 +30,7 @@
 
 #define DCS_CHECK(name, expr) do { \
     printf("domain_consensus_sigops: %s... ", (name)); \
-    if ((expr)) printf("OK\n"); \
-    else { printf("FAIL\n"); failures++; } \
+    if ((expr)) printf("OK\n"); else { printf("FAIL\n"); failures++; } \
 } while (0)
 
 static void set_p2sh_script(struct script *s)
@@ -54,7 +53,8 @@ static void set_p2pkh_script(struct script *s)
     s->size = 25;
 }
 
-int test_domain_consensus_sigops(void)
+/* Null-argument contract checks for both counters. */
+static int check_null_arg_contracts(void)
 {
     int failures = 0;
 
@@ -117,6 +117,14 @@ int test_domain_consensus_sigops(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+/* Legacy counter values on empty and single-output shapes. */
+static int check_legacy_value_counts(void)
+{
+    int failures = 0;
+
     /* ---- value tests ---- */
 
     /* empty tx -> count 0 (legacy) */
@@ -159,6 +167,14 @@ int test_domain_consensus_sigops(void)
                   r.ok && domain_n == 20 && legacy_n == 20);
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+/* P2SH gating: flag off, coinbase, non-P2SH and NULL prevout entries. */
+static int check_p2sh_gating(void)
+{
+    int failures = 0;
 
     /* P2SH: flag off -> 0 (no IO, no array touched). */
     {
@@ -218,6 +234,14 @@ int test_domain_consensus_sigops(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+/* P2SH 2-of-3 multisig regression seal. */
+static int check_p2sh_multisig_regression(void)
+{
+    int failures = 0;
+
     /* P2SH multisig regression seal: 2-of-3 redeem (OP_2 <pk1> <pk2> <pk3>
      * OP_3 OP_CHECKMULTISIG) in a P2SH scriptPubKey; the scriptSig pushes the
      * redeem, which script_get_sig_op_count_p2sh counts accurately. */
@@ -258,6 +282,14 @@ int test_domain_consensus_sigops(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+/* Large mixed-shape seal: many vin/vout with assorted sigops. */
+static int check_large_mixed_shape(void)
+{
+    int failures = 0;
+
     /* Large mixed shape: many inputs and outputs with assorted sigops.
      * Regression seal: domain must equal legacy wrapper for both counters. */
     {
@@ -294,6 +326,14 @@ int test_domain_consensus_sigops(void)
                   r1.ok && domain_legacy == 22);
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+/* Cross-shape seal: domain == validation wrapper for every shape. */
+static int check_wrapper_match_across_shapes(void)
+{
+    int failures = 0;
 
     /* ---- regression seal: domain == core/modules/validation wrapper across shapes.
      * This is the final cross-check covering ALL shapes above. */
@@ -335,6 +375,20 @@ int test_domain_consensus_sigops(void)
         }
         DCS_CHECK("legacy: domain matches wrapper across shapes", all_match);
     }
+
+    return failures;
+}
+
+int test_domain_consensus_sigops(void)
+{
+    int failures = 0;
+
+    failures += check_null_arg_contracts();
+    failures += check_legacy_value_counts();
+    failures += check_p2sh_gating();
+    failures += check_p2sh_multisig_regression();
+    failures += check_large_mixed_shape();
+    failures += check_wrapper_match_across_shapes();
 
     return failures;
 }
