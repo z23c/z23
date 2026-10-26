@@ -1165,7 +1165,6 @@ engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_init:31
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_stats_snapshot_impl:44
 engine/services/src/legacy_mirror_sync_state.c:lms_state_name:19
 engine/services/src/mirror_divergence_locator.c:mirror_divergence_locate:18
-engine/services/src/network_census_fold.c:network_census_compute:39
 engine/services/src/node_db_catchup_decrypt.c:node_db_catchup_try_sapling_decrypt:22
 engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:113
 engine/services/src/node_db_import_service.c:node_db_import_service_run:58
