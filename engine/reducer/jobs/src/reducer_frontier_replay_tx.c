@@ -355,6 +355,51 @@ bool reducer_frontier_replay_dry_run_stale_script(
     return ok;
 }
 
+/* Script-repair TX1 prefix: coin inverse deltas, stage-log deletes and the
+ * utxo_apply delta-row delete, in that order. */
+static bool rf_replay_stale_script_delete_logs_and_unwind_coins(
+    sqlite3 *db,
+    int replay_first,
+    int script_cursor,
+    int proof_cursor,
+    int utxo_cursor,
+    bool rewind_headers)
+{
+    bool rewind_coins = utxo_cursor > replay_first;
+    return !((rewind_coins &&
+              !reducer_frontier_replay_inverse_delta_range_checked(db, replay_first, utxo_cursor)) ||
+             !reducer_frontier_replay_delete_log_range(
+                 db, "script_validate_log", replay_first, script_cursor) ||
+             !reducer_frontier_replay_delete_log_range(
+                 db, "proof_validate_log", replay_first, proof_cursor) ||
+             (rewind_headers &&
+              !reducer_frontier_replay_delete_log_range(
+                  db, "validate_headers_log", replay_first, script_cursor)) ||
+             (rewind_coins &&
+              !utxo_apply_delete_rows_above(db, replay_first, utxo_cursor - 1)));
+}
+
+/* Script-repair TX1 suffix: cursor forces, write-cursor unwind and frontier
+ * set, in that order. */
+static bool rf_replay_stale_script_force_cursors_and_frontier(
+    sqlite3 *db,
+    int replay_first,
+    int utxo_cursor,
+    bool rewind_headers)
+{
+    bool rewind_coins = utxo_cursor > replay_first;
+    return !((rewind_headers &&
+              !stage_repair_force_stage_cursor(db, "validate_headers",
+                                               replay_first)) ||
+             !stage_repair_force_stage_cursor(db, "script_validate", replay_first) ||
+             !stage_repair_force_stage_cursor(db, "proof_validate", replay_first) ||
+             !stage_repair_force_stage_cursor(db, "tip_finalize", replay_first) ||
+             (rewind_coins &&
+              !utxo_apply_unwind_write_cursor(db, (uint64_t)replay_first)) ||
+             (rewind_coins &&
+              !utxo_apply_frontier_set_in_tx(db, replay_first)));
+}
+
 bool reducer_frontier_replay_stale_script_tx(
     sqlite3 *db,
     struct main_state *ms,
@@ -399,7 +444,6 @@ bool reducer_frontier_replay_stale_script_tx(
      * validate_headers and script_validate re-derive their hash from the SAME
      * on-disk canonical body -> v.hash==s.block_hash by construction, the split
      * cannot persist. */
-    bool rewind_coins = utxo_cursor > replay_first;
 
     /* ── TX1: kernel-authoritative rewind ─────────────────────────────── */
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
@@ -409,27 +453,11 @@ bool reducer_frontier_replay_stale_script_tx(
         if (err) sqlite3_free(err);
         return false;
     }
-    if ((rewind_coins &&
-         !reducer_frontier_replay_inverse_delta_range_checked(db, replay_first, utxo_cursor)) ||
-        !reducer_frontier_replay_delete_log_range(
-            db, "script_validate_log", replay_first, script_cursor) ||
-        !reducer_frontier_replay_delete_log_range(
-            db, "proof_validate_log", replay_first, proof_cursor) ||
-        (rewind_headers &&
-         !reducer_frontier_replay_delete_log_range(
-             db, "validate_headers_log", replay_first, script_cursor)) ||
-        (rewind_coins &&
-         !utxo_apply_delete_rows_above(db, replay_first, utxo_cursor - 1)) ||
-        (rewind_headers &&
-         !stage_repair_force_stage_cursor(db, "validate_headers",
-                                          replay_first)) ||
-        !stage_repair_force_stage_cursor(db, "script_validate", replay_first) ||
-        !stage_repair_force_stage_cursor(db, "proof_validate", replay_first) ||
-        !stage_repair_force_stage_cursor(db, "tip_finalize", replay_first) ||
-        (rewind_coins &&
-         !utxo_apply_unwind_write_cursor(db, (uint64_t)replay_first)) ||
-        (rewind_coins &&
-         !utxo_apply_frontier_set_in_tx(db, replay_first))) {
+    if (!rf_replay_stale_script_delete_logs_and_unwind_coins(
+            db, replay_first, script_cursor, proof_cursor, utxo_cursor,
+            rewind_headers) ||
+        !rf_replay_stale_script_force_cursors_and_frontier(
+            db, replay_first, utxo_cursor, rewind_headers)) {
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         return false;
     }
@@ -502,6 +530,34 @@ bool reducer_frontier_replay_backfill_created_outputs_projection(
     return true;
 }
 
+/* Proof-repair rewind chain: coin inverse deltas, proof log delete, cursor
+ * forces, frontier set, then the repair marker record, in that order. */
+static bool rf_replay_stale_proof_rewind_and_record_marker(
+    sqlite3 *db,
+    int height,
+    int replay_first,
+    int proof_cursor,
+    int utxo_cursor,
+    const struct uint256 *block_hash)
+{
+    bool rewind_coins = utxo_cursor > replay_first;
+    return !((rewind_coins &&
+              !reducer_frontier_replay_inverse_delta_range_checked(db, replay_first, utxo_cursor)) ||
+             !reducer_frontier_replay_delete_log_range(
+                 db, "proof_validate_log", replay_first, proof_cursor) ||
+             (rewind_coins &&
+              !utxo_apply_delete_rows_above(db, replay_first, utxo_cursor - 1)) ||
+             !stage_repair_force_stage_cursor(db, "proof_validate", replay_first) ||
+             !stage_repair_force_stage_cursor(db, "tip_finalize", replay_first) ||
+             (rewind_coins &&
+              !utxo_apply_unwind_write_cursor(db, (uint64_t)replay_first)) ||
+             (rewind_coins &&
+              !utxo_apply_frontier_set_in_tx(db, replay_first)) ||
+             !stage_reducer_frontier_repair_marker_record_in_tx(
+                 db, REPAIR_MARKER_KIND_RF_PROOF_REPLAY, height, block_hash,
+                 "stale proof"));
+}
+
 bool reducer_frontier_replay_stale_proof_tx(sqlite3 *db,
                                             int height,
                                             int replay_first,
@@ -518,22 +574,8 @@ bool reducer_frontier_replay_stale_proof_tx(sqlite3 *db,
         return false;
     }
 
-    bool rewind_coins = utxo_cursor > replay_first;
-    if ((rewind_coins &&
-         !reducer_frontier_replay_inverse_delta_range_checked(db, replay_first, utxo_cursor)) ||
-        !reducer_frontier_replay_delete_log_range(
-            db, "proof_validate_log", replay_first, proof_cursor) ||
-        (rewind_coins &&
-         !utxo_apply_delete_rows_above(db, replay_first, utxo_cursor - 1)) ||
-        !stage_repair_force_stage_cursor(db, "proof_validate", replay_first) ||
-        !stage_repair_force_stage_cursor(db, "tip_finalize", replay_first) ||
-        (rewind_coins &&
-         !utxo_apply_unwind_write_cursor(db, (uint64_t)replay_first)) ||
-        (rewind_coins &&
-         !utxo_apply_frontier_set_in_tx(db, replay_first)) ||
-        !stage_reducer_frontier_repair_marker_record_in_tx(
-            db, REPAIR_MARKER_KIND_RF_PROOF_REPLAY, height, block_hash,
-            "stale proof")) {
+    if (!rf_replay_stale_proof_rewind_and_record_marker(
+            db, height, replay_first, proof_cursor, utxo_cursor, block_hash)) {
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         return false;
     }
