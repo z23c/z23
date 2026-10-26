@@ -128,7 +128,7 @@ static void build_multisig_2of3(struct script *s)
 
 /* ---- the test ---- */
 
-int test_domain_consensus_script_standard(void)
+static int dcss_check_null_contracts_and_type_names(void)
 {
     int failures = 0;
 
@@ -208,6 +208,13 @@ int test_domain_consensus_script_standard(void)
                strcmp(domain_consensus_script_txn_output_type_name(
                        DOMAIN_SCRIPT_TX_NULL_DATA), "nulldata") == 0);
 
+    return failures;
+}
+
+static int dcss_check_solver_hash_scripts(void)
+{
+    int failures = 0;
+
     /* ---- per-shape recognition ---- */
 
     /* P2PKH */
@@ -246,6 +253,13 @@ int test_domain_consensus_script_standard(void)
         DCSS_CHECK("p2sh -> SCRIPTHASH + hash extracted", ok);
     }
 
+    return failures;
+}
+
+static int dcss_check_solver_pubkey_scripts(void)
+{
+    int failures = 0;
+
     /* P2PK compressed */
     {
         struct script s; script_init(&s);
@@ -279,6 +293,13 @@ int test_domain_consensus_script_standard(void)
                    t == DOMAIN_SCRIPT_TX_PUBKEY &&
                    n == 1 && solution_sizes[0] == 65);
     }
+
+    return failures;
+}
+
+static int dcss_check_solver_null_data(void)
+{
+    int failures = 0;
 
     /* OP_RETURN bare */
     {
@@ -315,6 +336,13 @@ int test_domain_consensus_script_standard(void)
                    r.ok && matched &&
                    t == DOMAIN_SCRIPT_TX_NULL_DATA);
     }
+
+    return failures;
+}
+
+static int dcss_check_solver_multisig(void)
+{
+    int failures = 0;
 
     /* Multisig 2-of-3 */
     {
@@ -356,6 +384,13 @@ int test_domain_consensus_script_standard(void)
                    n == 0);
     }
 
+    return failures;
+}
+
+static int dcss_check_solver_nonstandard(void)
+{
+    int failures = 0;
+
     /* Nonstandard */
     {
         struct script s; script_init(&s);
@@ -373,6 +408,13 @@ int test_domain_consensus_script_standard(void)
                    t == DOMAIN_SCRIPT_TX_NONSTANDARD &&
                    n == 0);
     }
+
+    return failures;
+}
+
+static int dcss_check_sig_args_expected(void)
+{
+    int failures = 0;
 
     /* ---- sig_args_expected per type ---- */
     {
@@ -401,6 +443,13 @@ int test_domain_consensus_script_standard(void)
                    domain_consensus_script_sig_args_expected(
                            DOMAIN_SCRIPT_TX_MULTISIG, NULL, NULL, 0) == -1);
     }
+
+    return failures;
+}
+
+static int dcss_check_extract_recognized_destinations(void)
+{
+    int failures = 0;
 
     /* ---- extract_destination ---- */
     {
@@ -435,6 +484,14 @@ int test_domain_consensus_script_standard(void)
         DCSS_CHECK("extract P2PK valid -> DEST_KEY_ID",
                    r.ok && matched && d.type == DEST_KEY_ID);
     }
+
+    return failures;
+}
+
+static int dcss_check_extract_absent_destinations(void)
+{
+    int failures = 0;
+
     {
         /* Multisig has no single destination. */
         struct script s; script_init(&s);
@@ -469,6 +526,13 @@ int test_domain_consensus_script_standard(void)
                    r.ok && !matched && d.type == DEST_NONE);
     }
 
+    return failures;
+}
+
+static int dcss_check_script_id_from_script(void)
+{
+    int failures = 0;
+
     /* ---- script_id_from_script ---- */
     {
         struct script s; script_init(&s);
@@ -487,6 +551,13 @@ int test_domain_consensus_script_standard(void)
         DCSS_CHECK("script_id wrapper matches domain",
                    memcmp(sid.hash.data, domain_h, 20) == 0);
     }
+
+    return failures;
+}
+
+static int dcss_check_domain_matches_legacy(void)
+{
+    int failures = 0;
 
     /* ---- REGRESSION SEAL: domain == legacy wrapper across every shape ---- */
     {
@@ -560,6 +631,25 @@ int test_domain_consensus_script_standard(void)
         DCSS_CHECK("regression seal: domain == legacy across all shapes",
                    all_match);
     }
+
+    return failures;
+}
+
+int test_domain_consensus_script_standard(void)
+{
+    int failures = 0;
+
+    failures += dcss_check_null_contracts_and_type_names();
+    failures += dcss_check_solver_hash_scripts();
+    failures += dcss_check_solver_pubkey_scripts();
+    failures += dcss_check_solver_null_data();
+    failures += dcss_check_solver_multisig();
+    failures += dcss_check_solver_nonstandard();
+    failures += dcss_check_sig_args_expected();
+    failures += dcss_check_extract_recognized_destinations();
+    failures += dcss_check_extract_absent_destinations();
+    failures += dcss_check_script_id_from_script();
+    failures += dcss_check_domain_matches_legacy();
 
     return failures;
 }
