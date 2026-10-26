@@ -183,6 +183,427 @@ static void gsf_free_outbound_peer(struct p2p_node *node)
     zcl_mutex_destroy(&node->cs_send);
 }
 
+/* 1. Fallback serve: no in-memory solution, node.db has the full
+ *    hash-bound header -> servable with the real solution; entry healed. */
+static int gsf_serve_node_db_fallback(struct msg_processor *mp,
+                                     struct block_index *bi_b,
+                                     const struct block_header *hb,
+                                     const struct uint256 *hash_b)
+{
+    int failures = 0;
+    struct block_header out;
+    block_header_init(&out);
+    bool ok = getheaders_index_header_servable(mp, bi_b, &out);
+    GSF_CHECK("fallback serves header from node.db row", ok);
+    struct uint256 served_hash;
+    block_header_get_hash(&out, &served_hash);
+    GSF_CHECK("served header hash-binds to the index entry",
+              ok && uint256_eq(&served_hash, hash_b));
+    GSF_CHECK("served header carries the real Equihash solution",
+              ok && out.nSolutionSize == hb->nSolutionSize &&
+              out.nSolutionSize > 0 &&
+              memcmp(out.nSolution, hb->nSolution,
+                     hb->nSolutionSize) == 0);
+    GSF_CHECK("index entry healed with the stored solution",
+              ok && tbi_ext(bi_b)->nSolutionSize == hb->nSolutionSize);
+    GSF_CHECK("served entry keeps its validity bits",
+              ok && bi_b->nStatus == BLOCK_VALID_TREE);
+    return failures;
+}
+
+/* 2. Availability is not a validity verdict: A has no in-memory solution,
+ *    flat file or node.db row -> refuse, without BLOCK_FAILED_VALID and
+ *    without a fabricated solution. */
+static int gsf_unavailable_store_refusal(struct msg_processor *mp,
+                                        struct block_index *bi_a)
+{
+    int failures = 0;
+    struct block_header out;
+    block_header_init(&out);
+    uint64_t nb_before = getheaders_serve_refusals_no_header_bytes();
+    bool ok = getheaders_index_header_servable(mp, bi_a, &out);
+    GSF_CHECK("entry with no reachable store is refused", !ok);
+    GSF_CHECK("refusal does NOT mark BLOCK_FAILED_VALID",
+              !ok && bi_a->nStatus == BLOCK_VALID_TREE);
+    GSF_CHECK("refusal fabricates no in-memory solution",
+              !ok && tbi_ext(bi_a)->nSolutionSize == 0);
+    /* 2b. ATTRIBUTION. This refusal is data availability (no store holds
+     *     the bytes) and must be named and counted as that, not relabelled
+     *     "header-hash-mismatch". Every height below a bundle/snapshot
+     *     seed floor is in this state. */
+    GSF_CHECK("refusal is attributed to no-header-bytes, not a hash "
+              "mismatch",
+              !ok && getheaders_serve_refusals_no_header_bytes() ==
+                         nb_before + 1);
+    GSF_CHECK("missing local solution arms bounded header-only repair",
+              !ok && header_serve_repair_test_armed() &&
+              header_serve_repair_wants(bi_a));
+    return failures;
+}
+
+/* One bounded repair span, partial progress on B, then a retry that must
+ * not widen the span. */
+static int gsf_publish_repair_span(struct msg_processor *mp,
+                                  struct block_index *bi_b,
+                                  struct block_index *bi_d,
+                                  const struct block_header *hb)
+{
+    int failures = 0;
+    struct p2p_node peer;
+    gsf_setup_outbound_peer(&peer, bi_d->nHeight);
+    header_serve_repair_maybe_send(mp, &peer, 1);
+    GSF_CHECK("first peer publishes one exact bounded repair span",
+              peer.send_size > 0 &&
+              header_serve_repair_test_expected_count() == 3);
+    GSF_CHECK("verified span member records partial progress",
+              getheaders_cache_repair_candidate(mp, bi_b, hb) &&
+              header_serve_repair_test_cached_count() == 1 &&
+              header_serve_repair_test_armed());
+    struct p2p_node retry_peer;
+    gsf_setup_outbound_peer(&retry_peer, bi_d->nHeight);
+    header_serve_repair_maybe_send(mp, &retry_peer, 7);
+    GSF_CHECK("retry preserves the immutable span and partial progress",
+              retry_peer.send_size > 0 &&
+              header_serve_repair_test_expected_count() == 3 &&
+              header_serve_repair_test_cached_count() == 1);
+    gsf_free_outbound_peer(&peer);
+    gsf_free_outbound_peer(&retry_peer);
+    return failures;
+}
+
+/* 4. Snapshot reducers retain complete hash-bound headers in
+ *    header_solution_repair even when the body and node.db row are absent.
+ *    The runtime port must reuse that authority and the serve path must
+ *    still run its independent full-PoW gate. */
+static int gsf_serve_reducer_repair_row(sqlite3 *progress_db,
+                                       const struct uint256 *hash_a,
+                                       const struct block_header *ha,
+                                       struct msg_processor *mp,
+                                       struct block_index *bi_a)
+{
+    int failures = 0;
+    GSF_CHECK("repair row for A stored",
+              progress_db && stage_repair_header_solution_save(
+                  progress_db, 1, hash_a, ha));
+    struct block_header out;
+    block_header_init(&out);
+    bool ok = getheaders_index_header_servable(mp, bi_a, &out);
+    struct uint256 served_hash;
+    block_header_get_hash(&out, &served_hash);
+    GSF_CHECK("fallback serves header from reducer repair row", ok);
+    GSF_CHECK("repair-row header hash-binds to the index entry",
+              ok && uint256_eq(&served_hash, hash_a));
+    GSF_CHECK("repair-row header carries the real Equihash solution",
+              ok && out.nSolutionSize == ha->nSolutionSize &&
+              memcmp(out.nSolution, ha->nSolution,
+                     ha->nSolutionSize) == 0);
+    GSF_CHECK("repair-row fallback heals the in-memory entry",
+              ok && tbi_ext(bi_a)->nSolutionSize == ha->nSolutionSize);
+    return failures;
+}
+
+/* 5. No local store retains D. A refusal arms one header-only peer fetch;
+ *    its response is inert until the serve path hash-binds and full-PoW
+ *    verifies it, then heals D and completes the bounded flight without
+ *    downloading a block body. */
+static int gsf_repair_storeless_d(struct msg_processor *mp,
+                                 struct block_index *bi_d,
+                                 const struct block_header *hd)
+{
+    int failures = 0;
+    struct block_header out;
+    block_header_init(&out);
+    bool missed = !getheaders_index_header_servable(mp, bi_d, &out);
+    GSF_CHECK("storeless D arms header-only peer repair",
+              missed && header_serve_repair_test_armed() &&
+              header_serve_repair_wants(bi_d));
+    struct block_header forged_d = *hd;
+    forged_d.nSolution[0] ^= 0x01;
+    bool forged_cached =
+        getheaders_cache_repair_candidate(mp, bi_d, &forged_d);
+    GSF_CHECK("wrong-hash peer repair candidate remains inert",
+              !forged_cached && header_serve_repair_test_armed() &&
+              tbi_ext(bi_d)->nSolutionSize == 0);
+    bool cached = getheaders_cache_repair_candidate(mp, bi_d, hd);
+    GSF_CHECK("peer repair candidate passes independent full verification",
+              cached);
+    GSF_CHECK("verified peer repair completes its bounded flight",
+              cached && !header_serve_repair_test_armed());
+    block_header_init(&out);
+    GSF_CHECK("verified peer repair heals subsequent serving",
+              cached && getheaders_index_header_servable(mp, bi_d, &out));
+    return failures;
+}
+
+/* 6. The healed entry serves again off the in-memory hot path, hash-bound
+ *    with the real solution, without re-reading the store. */
+static int gsf_serve_healed_memory_path(struct msg_processor *mp,
+                                       struct block_index *bi_b,
+                                       const struct block_header *hb,
+                                       const struct uint256 *hash_b)
+{
+    int failures = 0;
+    struct block_header out;
+    block_header_init(&out);
+    bool ok = getheaders_index_header_servable(mp, bi_b, &out);
+    struct uint256 served_hash;
+    block_header_get_hash(&out, &served_hash);
+    GSF_CHECK("healed entry serves again from the in-memory path", ok);
+    GSF_CHECK("second serve still hash-binds",
+              ok && uint256_eq(&served_hash, hash_b));
+    GSF_CHECK("second serve still carries the real solution",
+              ok && out.nSolutionSize == hb->nSolutionSize &&
+              memcmp(out.nSolution, hb->nSolution,
+                     hb->nSolutionSize) == 0);
+    return failures;
+}
+
+/* 8. A header that is internally valid but filed under the WRONG hash
+ *    must never be served. Entry X is keyed by a hash that is not B's yet
+ *    reassembles into B's header (same pprev, fields and real Equihash
+ *    solution), so every self-contained check passes. Requiring the
+ *    serialized header to hash to the entry's own phashBlock closes it: it
+ *    is strictly stronger than "the solution is valid". X has no flat file
+ *    or node.db row, so refusal is the only correct answer. */
+static int gsf_refuse_wrong_hash_filing(struct main_state *ms,
+                                       const struct uint256 *hash_b,
+                                       const struct block_header *hb,
+                                       struct block_index *bi_a,
+                                       struct msg_processor *mp)
+{
+    int failures = 0;
+    struct uint256 hash_x = *hash_b;
+    hash_x.data[0] ^= 0x5a;   /* not B, not A, not g */
+
+    struct block_index *bi_x =
+        chainstate_insert_block_index((struct chainstate *)ms, &hash_x);
+    GSF_CHECK("wrong-hash fixture entry inserted", bi_x != NULL);
+    if (bi_x) {
+        bi_x->nHeight = 2;
+        bi_x->nVersion = hb->nVersion;
+        tbi_ext(bi_x)->hashMerkleRoot = hb->hashMerkleRoot;
+        bi_x->hashFinalSaplingRoot = hb->hashFinalSaplingRoot;
+        bi_x->nTime = hb->nTime;
+        bi_x->nBits = hb->nBits;
+        tbi_ext(bi_x)->nNonce = hb->nNonce;
+        bi_x->nStatus = BLOCK_VALID_TREE;
+        bi_x->pprev = bi_a;   /* reassembles to exactly hb */
+
+        uint8_t *sol = zcl_malloc(hb->nSolutionSize, "gsf_wrong_hash_sol");
+        GSF_CHECK("wrong-hash fixture solution allocated", sol != NULL);
+        if (sol) {
+            memcpy(sol, hb->nSolution, hb->nSolutionSize);
+            tbi_ext(bi_x)->nSolution = sol;
+            tbi_ext(bi_x)->nSolutionSize = hb->nSolutionSize;
+
+            /* Sanity: the assembled header is valid on its own terms, so
+             * a pass below cannot come from a malformed fixture. */
+            struct block_header rebuilt = *hb;
+            struct uint256 rebuilt_hash;
+            block_header_get_hash(&rebuilt, &rebuilt_hash);
+            GSF_CHECK("wrong-hash fixture rebuilds a genuinely valid "
+                      "header", uint256_eq(&rebuilt_hash, hash_b) &&
+                      !uint256_eq(&hash_x, hash_b));
+
+            struct block_header out;
+            block_header_init(&out);
+            bool ok = getheaders_index_header_servable(mp, bi_x, &out);
+            GSF_CHECK("a valid header filed under the wrong hash is "
+                      "refused", !ok);
+            GSF_CHECK("that refusal is still not a validity verdict",
+                      !ok && bi_x->nStatus == BLOCK_VALID_TREE);
+            GSF_CHECK("off-authority refusal cannot pin peer repair",
+                      !header_serve_repair_test_armed());
+        }
+    }
+    return failures;
+}
+
+/* 9. A hash-bound header marked BLOCK_VALID_TREE whose Equihash solution
+ *    is garbage must still be refused. BLOCK_VALID_TREE does not witness
+ *    an Equihash check: block_index_blocks_hydrate.c full-checks one row
+ *    in 10,000 below the ROM checkpoint, block_index_loader.c calls
+ *    block_row_verify with a NULL header (skipping hash bind and Equihash),
+ *    boot_block_file_scan.c assigns the bit unconditionally, and
+ *    boot_header_seed_import.c clamps a peer-supplied artifact to it. So a
+ *    hostile bundle can carry rows that hash-bind and pass CheckProofOfWork
+ *    with no Equihash run; fixture Y is such a row. Y has no flat file or
+ *    node.db row, so refusal is the only correct answer. */
+/* Corrupt the solution (same size), then grind for a variant whose
+ * bytes still satisfy CheckProofOfWork, as a hostile bundle-builder
+ * would. Regtest powLimit is 0x0f0f..., so a few tries suffice. */
+static bool gsf_grind_forged_pow_header(struct block_header *hy,
+                                       struct uint256 *hash_y,
+                                       const struct block_header *hb,
+                                       const struct chain_params *cp)
+{
+    bool y_ready = false;
+    for (int attempt = 0; attempt < 4096 && !y_ready; attempt++) {
+        for (size_t i = 0; i < hy->nSolutionSize; i++)
+            hy->nSolution[i] = (uint8_t)(hb->nSolution[i] ^ 0xa5 ^
+                                        (uint8_t)attempt);
+        block_header_get_hash(hy, hash_y);
+        if (!CheckProofOfWork(*hash_y, hy->nBits, &cp->consensus))
+            continue;
+        if (check_equihash_solution(hy, cp))
+            continue;          /* astronomically unlikely; skip it */
+        y_ready = true;
+    }
+    return y_ready;
+}
+
+static int gsf_file_forged_tree_refusal(struct main_state *ms,
+                                       struct block_header *hy,
+                                       const struct uint256 *hash_y,
+                                       const struct uint256 *hash_b,
+                                       const struct uint256 *hash_a,
+                                       struct block_index *bi_a,
+                                       struct msg_processor *mp,
+                                       const struct chain_params *cp)
+{
+    int failures = 0;
+    GSF_CHECK("F1 fixture: forged solution really fails Equihash",
+              !check_equihash_solution(hy, cp));
+    GSF_CHECK("F1 fixture: forged header really passes "
+              "CheckProofOfWork",
+              CheckProofOfWork(*hash_y, hy->nBits, &cp->consensus));
+    GSF_CHECK("F1 fixture: forged header is not one we mined",
+              !uint256_eq(hash_y, hash_b));
+
+    struct block_index *bi_y =
+        chainstate_insert_block_index((struct chainstate *)ms, hash_y);
+    GSF_CHECK("F1 fixture entry inserted", bi_y != NULL);
+    if (bi_y) {
+        bi_y->nHeight = 2;
+        bi_y->nVersion = hy->nVersion;
+        tbi_ext(bi_y)->hashMerkleRoot = hy->hashMerkleRoot;
+        bi_y->hashFinalSaplingRoot = hy->hashFinalSaplingRoot;
+        bi_y->nTime = hy->nTime;
+        bi_y->nBits = hy->nBits;
+        tbi_ext(bi_y)->nNonce = hy->nNonce;
+        bi_y->nStatus = BLOCK_VALID_TREE;   /* the hydrate/loader
+                                             * strength, no more */
+        bi_y->pprev = bi_a;
+
+        uint8_t *ysol = zcl_malloc(hy->nSolutionSize, "gsf_forged_sol");
+        GSF_CHECK("F1 fixture solution allocated", ysol != NULL);
+        if (ysol) {
+            memcpy(ysol, hy->nSolution, hy->nSolutionSize);
+            tbi_ext(bi_y)->nSolution = ysol;
+            tbi_ext(bi_y)->nSolutionSize = hy->nSolutionSize;
+
+            /* This entry hash-binds, so the refusal can only come
+             * from the Equihash check. */
+            struct block_header rebuilt;
+            block_header_init(&rebuilt);
+            rebuilt.nVersion = bi_y->nVersion;
+            rebuilt.hashPrevBlock = *hash_a;
+            rebuilt.hashMerkleRoot = tbi_ext(bi_y)->hashMerkleRoot;
+            rebuilt.hashFinalSaplingRoot = bi_y->hashFinalSaplingRoot;
+            rebuilt.nTime = bi_y->nTime;
+            rebuilt.nBits = bi_y->nBits;
+            rebuilt.nNonce = tbi_ext(bi_y)->nNonce;
+            memcpy(rebuilt.nSolution, hy->nSolution, hy->nSolutionSize);
+            rebuilt.nSolutionSize = hy->nSolutionSize;
+            struct uint256 rebuilt_hash;
+            block_header_get_hash(&rebuilt, &rebuilt_hash);
+            GSF_CHECK("F1 fixture hash-binds to its index entry",
+                      uint256_eq(&rebuilt_hash, hash_y));
+
+            struct block_header out;
+            block_header_init(&out);
+            uint64_t nb_before = getheaders_serve_refusals_no_header_bytes();
+            bool ok = getheaders_index_header_servable(mp, bi_y, &out);
+            GSF_CHECK("a BLOCK_VALID_TREE entry whose Equihash "
+                      "solution is forged is REFUSED", !ok);
+            GSF_CHECK("that refusal is still not a validity verdict",
+                      !ok && bi_y->nStatus == BLOCK_VALID_TREE);
+            /* The no-header-bytes counter attributes: this entry's
+             * bytes were in the index and it failed on PoW, so that
+             * counter must not move. */
+            GSF_CHECK("a PoW refusal is NOT counted as missing "
+                      "header bytes",
+                      !ok &&
+                      getheaders_serve_refusals_no_header_bytes() ==
+                          nb_before);
+        }
+    }
+    return failures;
+}
+
+static int gsf_refuse_forged_equihash(struct main_state *ms,
+                                     const struct block_header *hb,
+                                     const struct uint256 *hash_b,
+                                     const struct uint256 *hash_a,
+                                     struct block_index *bi_a,
+                                     struct msg_processor *mp,
+                                     const struct chain_params *cp)
+{
+    int failures = 0;
+    struct block_header hy = *hb;
+    struct uint256 hash_y;
+    bool y_ready = gsf_grind_forged_pow_header(&hy, &hash_y, hb, cp);
+    GSF_CHECK("F1 fixture: forged header found (PoW passes, Equihash "
+              "does not)", y_ready);
+    if (y_ready)
+        failures += gsf_file_forged_tree_refusal(ms, &hy, &hash_y, hash_b,
+                                                hash_a, bi_a, mp, cp);
+    return failures;
+}
+
+static int gsf_check_announced_tip(const struct send_segment *seg,
+                                  const struct uint256 *hash_d)
+{
+    int failures = 0;
+    struct byte_stream wire;
+    stream_init_from_data(&wire, seg->data + MSG_HEADER_SIZE,
+                          seg->size - MSG_HEADER_SIZE);
+    uint64_t count = 0;
+    uint64_t tx_count = 1;
+    struct block_header announced;
+    block_header_init(&announced);
+    bool decoded = stream_read_compact_size(&wire, &count) &&
+                   block_header_deserialize(&announced, &wire) &&
+                   stream_read_compact_size(&wire, &tx_count);
+    struct uint256 announced_hash;
+    block_header_get_hash(&announced, &announced_hash);
+    GSF_CHECK("negotiation header is exact verified tip",
+              decoded && count == 1 && tx_count == 0 &&
+              uint256_eq(&announced_hash, hash_d));
+    return failures;
+}
+
+/* 11. A peer can be node2's source for the current block, so anti-echo
+ *     relay sends it no header. Its first BIP 130 sendheaders negotiation
+ *     must publish one independently verified current-tip header; the
+ *     proof is bounded to once per connection. */
+static int gsf_sendheaders_one_tip_proof(struct main_state *ms,
+                                        struct msg_processor *mp,
+                                        struct block_index *bi_d,
+                                        const struct uint256 *hash_d)
+{
+    int failures = 0;
+    struct p2p_node peer;
+    gsf_setup_outbound_peer(&peer, bi_d->nHeight);
+    GSF_CHECK("active tip fixture installed",
+              active_chain_move_window_tip(&ms->chain_active, bi_d));
+    bool first = process_sendheaders(mp, &peer);
+    struct send_segment *seg = peer.send_head;
+    bool framed = first && peer.prefer_headers && seg &&
+                  seg->size > (size_t)MSG_HEADER_SIZE &&
+                  memcmp(seg->data + MESSAGE_START_SIZE, "headers", 7) == 0;
+    GSF_CHECK("first sendheaders publishes one current-tip header",
+              framed && seg->data[MSG_HEADER_SIZE] == 1);
+    if (framed)
+        failures += gsf_check_announced_tip(seg, hash_d);
+    gsf_drain_send_queue(&peer);
+    GSF_CHECK("duplicate sendheaders emits no second tip proof",
+              process_sendheaders(mp, &peer) && peer.send_head == NULL &&
+              peer.send_size == 0);
+    gsf_free_outbound_peer(&peer);
+    return failures;
+}
+
 int test_getheaders_serve_fallback(void);
 int test_getheaders_serve_fallback(void)
 {
@@ -245,73 +666,9 @@ int test_getheaders_serve_fallback(void)
     struct msg_processor mp;
     msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_gsf_nm, NULL);
 
-    /* 1. Fallback serve: no in-memory solution, node.db has the full
-     *    hash-bound header -> servable with the real solution; entry healed. */
-    {
-        struct block_header out;
-        block_header_init(&out);
-        bool ok = getheaders_index_header_servable(&mp, bi_b, &out);
-        GSF_CHECK("fallback serves header from node.db row", ok);
-        struct uint256 served_hash;
-        block_header_get_hash(&out, &served_hash);
-        GSF_CHECK("served header hash-binds to the index entry",
-                  ok && uint256_eq(&served_hash, &hash_b));
-        GSF_CHECK("served header carries the real Equihash solution",
-                  ok && out.nSolutionSize == hb.nSolutionSize &&
-                  out.nSolutionSize > 0 &&
-                  memcmp(out.nSolution, hb.nSolution,
-                         hb.nSolutionSize) == 0);
-        GSF_CHECK("index entry healed with the stored solution",
-                  ok && tbi_ext(bi_b)->nSolutionSize == hb.nSolutionSize);
-        GSF_CHECK("served entry keeps its validity bits",
-                  ok && bi_b->nStatus == BLOCK_VALID_TREE);
-    }
-
-    /* 2. Availability is not a validity verdict: A has no in-memory solution,
-     *    flat file or node.db row -> refuse, without BLOCK_FAILED_VALID and
-     *    without a fabricated solution. */
-    {
-        struct block_header out;
-        block_header_init(&out);
-        uint64_t nb_before = getheaders_serve_refusals_no_header_bytes();
-        bool ok = getheaders_index_header_servable(&mp, bi_a, &out);
-        GSF_CHECK("entry with no reachable store is refused", !ok);
-        GSF_CHECK("refusal does NOT mark BLOCK_FAILED_VALID",
-                  !ok && bi_a->nStatus == BLOCK_VALID_TREE);
-        GSF_CHECK("refusal fabricates no in-memory solution",
-                  !ok && tbi_ext(bi_a)->nSolutionSize == 0);
-        /* 2b. ATTRIBUTION. This refusal is data availability (no store holds
-         *     the bytes) and must be named and counted as that, not relabelled
-         *     "header-hash-mismatch". Every height below a bundle/snapshot
-         *     seed floor is in this state. */
-        GSF_CHECK("refusal is attributed to no-header-bytes, not a hash "
-                  "mismatch",
-                  !ok && getheaders_serve_refusals_no_header_bytes() ==
-                             nb_before + 1);
-        GSF_CHECK("missing local solution arms bounded header-only repair",
-                  !ok && header_serve_repair_test_armed() &&
-                  header_serve_repair_wants(bi_a));
-
-        struct p2p_node peer;
-        gsf_setup_outbound_peer(&peer, bi_d->nHeight);
-        header_serve_repair_maybe_send(&mp, &peer, 1);
-        GSF_CHECK("first peer publishes one exact bounded repair span",
-                  peer.send_size > 0 &&
-                  header_serve_repair_test_expected_count() == 3);
-        GSF_CHECK("verified span member records partial progress",
-                  getheaders_cache_repair_candidate(&mp, bi_b, &hb) &&
-                  header_serve_repair_test_cached_count() == 1 &&
-                  header_serve_repair_test_armed());
-        struct p2p_node retry_peer;
-        gsf_setup_outbound_peer(&retry_peer, bi_d->nHeight);
-        header_serve_repair_maybe_send(&mp, &retry_peer, 7);
-        GSF_CHECK("retry preserves the immutable span and partial progress",
-                  retry_peer.send_size > 0 &&
-                  header_serve_repair_test_expected_count() == 3 &&
-                  header_serve_repair_test_cached_count() == 1);
-        gsf_free_outbound_peer(&peer);
-        gsf_free_outbound_peer(&retry_peer);
-    }
+    failures += gsf_serve_node_db_fallback(&mp, bi_b, &hb, &hash_b);
+    failures += gsf_unavailable_store_refusal(&mp, bi_a);
+    failures += gsf_publish_repair_span(&mp, bi_b, bi_d, &hb);
 
     /* 3. The successor walk advances from g past unservable A to servable B,
      *    not re-querying successor(g). */
@@ -325,74 +682,10 @@ int test_getheaders_serve_fallback(void)
     }
     header_serve_repair_test_reset();
 
-    /* 4. Snapshot reducers retain complete hash-bound headers in
-     *    header_solution_repair even when the body and node.db row are absent.
-     *    The runtime port must reuse that authority and the serve path must
-     *    still run its independent full-PoW gate. */
-    GSF_CHECK("repair row for A stored",
-              progress_db && stage_repair_header_solution_save(
-                  progress_db, 1, &hash_a, &ha));
-    {
-        struct block_header out;
-        block_header_init(&out);
-        bool ok = getheaders_index_header_servable(&mp, bi_a, &out);
-        struct uint256 served_hash;
-        block_header_get_hash(&out, &served_hash);
-        GSF_CHECK("fallback serves header from reducer repair row", ok);
-        GSF_CHECK("repair-row header hash-binds to the index entry",
-                  ok && uint256_eq(&served_hash, &hash_a));
-        GSF_CHECK("repair-row header carries the real Equihash solution",
-                  ok && out.nSolutionSize == ha.nSolutionSize &&
-                  memcmp(out.nSolution, ha.nSolution,
-                         ha.nSolutionSize) == 0);
-        GSF_CHECK("repair-row fallback heals the in-memory entry",
-                  ok && tbi_ext(bi_a)->nSolutionSize == ha.nSolutionSize);
-    }
-
-    /* 5. No local store retains D. A refusal arms one header-only peer fetch;
-     *    its response is inert until the serve path hash-binds and full-PoW
-     *    verifies it, then heals D and completes the bounded flight without
-     *    downloading a block body. */
-    {
-        struct block_header out;
-        block_header_init(&out);
-        bool missed = !getheaders_index_header_servable(&mp, bi_d, &out);
-        GSF_CHECK("storeless D arms header-only peer repair",
-                  missed && header_serve_repair_test_armed() &&
-                  header_serve_repair_wants(bi_d));
-        struct block_header forged_d = hd;
-        forged_d.nSolution[0] ^= 0x01;
-        bool forged_cached =
-            getheaders_cache_repair_candidate(&mp, bi_d, &forged_d);
-        GSF_CHECK("wrong-hash peer repair candidate remains inert",
-                  !forged_cached && header_serve_repair_test_armed() &&
-                  tbi_ext(bi_d)->nSolutionSize == 0);
-        bool cached = getheaders_cache_repair_candidate(&mp, bi_d, &hd);
-        GSF_CHECK("peer repair candidate passes independent full verification",
-                  cached);
-        GSF_CHECK("verified peer repair completes its bounded flight",
-                  cached && !header_serve_repair_test_armed());
-        block_header_init(&out);
-        GSF_CHECK("verified peer repair heals subsequent serving",
-                  cached && getheaders_index_header_servable(&mp, bi_d, &out));
-    }
-
-    /* 6. The healed entry serves again off the in-memory hot path, hash-bound
-     *    with the real solution, without re-reading the store. */
-    {
-        struct block_header out;
-        block_header_init(&out);
-        bool ok = getheaders_index_header_servable(&mp, bi_b, &out);
-        struct uint256 served_hash;
-        block_header_get_hash(&out, &served_hash);
-        GSF_CHECK("healed entry serves again from the in-memory path", ok);
-        GSF_CHECK("second serve still hash-binds",
-                  ok && uint256_eq(&served_hash, &hash_b));
-        GSF_CHECK("second serve still carries the real solution",
-                  ok && out.nSolutionSize == hb.nSolutionSize &&
-                  memcmp(out.nSolution, hb.nSolution,
-                         hb.nSolutionSize) == 0);
-    }
+    failures += gsf_serve_reducer_repair_row(progress_db, &hash_a, &ha,
+                                            &mp, bi_a);
+    failures += gsf_repair_storeless_d(&mp, bi_d, &hd);
+    failures += gsf_serve_healed_memory_path(&mp, bi_b, &hb, &hash_b);
 
     /* 7. Serve-path solution cache accounting: healing A, B and D pins their
      *    solutions, and the cache is bounded. */
@@ -400,164 +693,10 @@ int test_getheaders_serve_fallback(void)
               getheaders_solution_cache_bytes() >=
               ha.nSolutionSize + hb.nSolutionSize + hd.nSolutionSize);
 
-    /* 8. A header that is internally valid but filed under the WRONG hash
-     *    must never be served. Entry X is keyed by a hash that is not B's yet
-     *    reassembles into B's header (same pprev, fields and real Equihash
-     *    solution), so every self-contained check passes. Requiring the
-     *    serialized header to hash to the entry's own phashBlock closes it: it
-     *    is strictly stronger than "the solution is valid". X has no flat file
-     *    or node.db row, so refusal is the only correct answer. */
-    {
-        struct uint256 hash_x = hash_b;
-        hash_x.data[0] ^= 0x5a;   /* not B, not A, not g */
+    failures += gsf_refuse_wrong_hash_filing(&ms, &hash_b, &hb, bi_a, &mp);
 
-        struct block_index *bi_x =
-            chainstate_insert_block_index((struct chainstate *)&ms, &hash_x);
-        GSF_CHECK("wrong-hash fixture entry inserted", bi_x != NULL);
-        if (bi_x) {
-            bi_x->nHeight = 2;
-            bi_x->nVersion = hb.nVersion;
-            tbi_ext(bi_x)->hashMerkleRoot = hb.hashMerkleRoot;
-            bi_x->hashFinalSaplingRoot = hb.hashFinalSaplingRoot;
-            bi_x->nTime = hb.nTime;
-            bi_x->nBits = hb.nBits;
-            tbi_ext(bi_x)->nNonce = hb.nNonce;
-            bi_x->nStatus = BLOCK_VALID_TREE;
-            bi_x->pprev = bi_a;   /* reassembles to exactly hb */
-
-            uint8_t *sol = zcl_malloc(hb.nSolutionSize, "gsf_wrong_hash_sol");
-            GSF_CHECK("wrong-hash fixture solution allocated", sol != NULL);
-            if (sol) {
-                memcpy(sol, hb.nSolution, hb.nSolutionSize);
-                tbi_ext(bi_x)->nSolution = sol;
-                tbi_ext(bi_x)->nSolutionSize = hb.nSolutionSize;
-
-                /* Sanity: the assembled header is valid on its own terms, so
-                 * a pass below cannot come from a malformed fixture. */
-                struct block_header rebuilt = hb;
-                struct uint256 rebuilt_hash;
-                block_header_get_hash(&rebuilt, &rebuilt_hash);
-                GSF_CHECK("wrong-hash fixture rebuilds a genuinely valid "
-                          "header", uint256_eq(&rebuilt_hash, &hash_b) &&
-                          !uint256_eq(&hash_x, &hash_b));
-
-                struct block_header out;
-                block_header_init(&out);
-                bool ok = getheaders_index_header_servable(&mp, bi_x, &out);
-                GSF_CHECK("a valid header filed under the wrong hash is "
-                          "refused", !ok);
-                GSF_CHECK("that refusal is still not a validity verdict",
-                          !ok && bi_x->nStatus == BLOCK_VALID_TREE);
-                GSF_CHECK("off-authority refusal cannot pin peer repair",
-                          !header_serve_repair_test_armed());
-            }
-        }
-    }
-
-    /* 9. A hash-bound header marked BLOCK_VALID_TREE whose Equihash solution
-     *    is garbage must still be refused. BLOCK_VALID_TREE does not witness
-     *    an Equihash check: block_index_blocks_hydrate.c full-checks one row
-     *    in 10,000 below the ROM checkpoint, block_index_loader.c calls
-     *    block_row_verify with a NULL header (skipping hash bind and Equihash),
-     *    boot_block_file_scan.c assigns the bit unconditionally, and
-     *    boot_header_seed_import.c clamps a peer-supplied artifact to it. So a
-     *    hostile bundle can carry rows that hash-bind and pass CheckProofOfWork
-     *    with no Equihash run; fixture Y is such a row. Y has no flat file or
-     *    node.db row, so refusal is the only correct answer. */
-    {
-        struct block_header hy = hb;
-        struct uint256 hash_y;
-        bool y_ready = false;
-        /* Corrupt the solution (same size), then grind for a variant whose
-         * bytes still satisfy CheckProofOfWork, as a hostile bundle-builder
-         * would. Regtest powLimit is 0x0f0f..., so a few tries suffice. */
-        for (int attempt = 0; attempt < 4096 && !y_ready; attempt++) {
-            for (size_t i = 0; i < hy.nSolutionSize; i++)
-                hy.nSolution[i] = (uint8_t)(hb.nSolution[i] ^ 0xa5 ^
-                                            (uint8_t)attempt);
-            block_header_get_hash(&hy, &hash_y);
-            if (!CheckProofOfWork(hash_y, hy.nBits, &cp->consensus))
-                continue;
-            if (check_equihash_solution(&hy, cp))
-                continue;          /* astronomically unlikely; skip it */
-            y_ready = true;
-        }
-        GSF_CHECK("F1 fixture: forged header found (PoW passes, Equihash "
-                  "does not)", y_ready);
-
-        if (y_ready) {
-            GSF_CHECK("F1 fixture: forged solution really fails Equihash",
-                      !check_equihash_solution(&hy, cp));
-            GSF_CHECK("F1 fixture: forged header really passes "
-                      "CheckProofOfWork",
-                      CheckProofOfWork(hash_y, hy.nBits, &cp->consensus));
-            GSF_CHECK("F1 fixture: forged header is not one we mined",
-                      !uint256_eq(&hash_y, &hash_b));
-
-            struct block_index *bi_y =
-                chainstate_insert_block_index((struct chainstate *)&ms,
-                                              &hash_y);
-            GSF_CHECK("F1 fixture entry inserted", bi_y != NULL);
-            if (bi_y) {
-                bi_y->nHeight = 2;
-                bi_y->nVersion = hy.nVersion;
-                tbi_ext(bi_y)->hashMerkleRoot = hy.hashMerkleRoot;
-                bi_y->hashFinalSaplingRoot = hy.hashFinalSaplingRoot;
-                bi_y->nTime = hy.nTime;
-                bi_y->nBits = hy.nBits;
-                tbi_ext(bi_y)->nNonce = hy.nNonce;
-                bi_y->nStatus = BLOCK_VALID_TREE;   /* the hydrate/loader
-                                                     * strength, no more */
-                bi_y->pprev = bi_a;
-
-                uint8_t *ysol = zcl_malloc(hy.nSolutionSize,
-                                           "gsf_forged_sol");
-                GSF_CHECK("F1 fixture solution allocated", ysol != NULL);
-                if (ysol) {
-                    memcpy(ysol, hy.nSolution, hy.nSolutionSize);
-                    tbi_ext(bi_y)->nSolution = ysol;
-                    tbi_ext(bi_y)->nSolutionSize = hy.nSolutionSize;
-
-                    /* This entry hash-binds, so the refusal can only come
-                     * from the Equihash check. */
-                    struct block_header rebuilt;
-                    block_header_init(&rebuilt);
-                    rebuilt.nVersion = bi_y->nVersion;
-                    rebuilt.hashPrevBlock = hash_a;
-                    rebuilt.hashMerkleRoot = tbi_ext(bi_y)->hashMerkleRoot;
-                    rebuilt.hashFinalSaplingRoot = bi_y->hashFinalSaplingRoot;
-                    rebuilt.nTime = bi_y->nTime;
-                    rebuilt.nBits = bi_y->nBits;
-                    rebuilt.nNonce = tbi_ext(bi_y)->nNonce;
-                    memcpy(rebuilt.nSolution, hy.nSolution, hy.nSolutionSize);
-                    rebuilt.nSolutionSize = hy.nSolutionSize;
-                    struct uint256 rebuilt_hash;
-                    block_header_get_hash(&rebuilt, &rebuilt_hash);
-                    GSF_CHECK("F1 fixture hash-binds to its index entry",
-                              uint256_eq(&rebuilt_hash, &hash_y));
-
-                    struct block_header out;
-                    block_header_init(&out);
-                    uint64_t nb_before =
-                        getheaders_serve_refusals_no_header_bytes();
-                    bool ok = getheaders_index_header_servable(&mp, bi_y,
-                                                               &out);
-                    GSF_CHECK("a BLOCK_VALID_TREE entry whose Equihash "
-                              "solution is forged is REFUSED", !ok);
-                    GSF_CHECK("that refusal is still not a validity verdict",
-                              !ok && bi_y->nStatus == BLOCK_VALID_TREE);
-                    /* The no-header-bytes counter attributes: this entry's
-                     * bytes were in the index and it failed on PoW, so that
-                     * counter must not move. */
-                    GSF_CHECK("a PoW refusal is NOT counted as missing "
-                              "header bytes",
-                              !ok &&
-                              getheaders_serve_refusals_no_header_bytes() ==
-                                  nb_before);
-                }
-            }
-        }
-    }
+    failures += gsf_refuse_forged_equihash(&ms, &hb, &hash_b, &hash_a,
+                                          bi_a, &mp, cp);
 
     /* 10. The serve-path solution cache is bounded, not merely counted. 64 MiB
      *    mirrors HEADERS_SOLUTION_CACHE_MAX_BYTES in
@@ -568,45 +707,7 @@ int test_getheaders_serve_fallback(void)
               getheaders_solution_cache_bytes() <=
               (size_t)64 * 1024 * 1024);
 
-    /* 11. A peer can be node2's source for the current block, so anti-echo
-     *     relay sends it no header. Its first BIP 130 sendheaders negotiation
-     *     must publish one independently verified current-tip header; the
-     *     proof is bounded to once per connection. */
-    {
-        struct p2p_node peer;
-        gsf_setup_outbound_peer(&peer, bi_d->nHeight);
-        GSF_CHECK("active tip fixture installed",
-                  active_chain_move_window_tip(&ms.chain_active, bi_d));
-        bool first = process_sendheaders(&mp, &peer);
-        struct send_segment *seg = peer.send_head;
-        bool framed = first && peer.prefer_headers && seg &&
-                      seg->size > (size_t)MSG_HEADER_SIZE &&
-                      memcmp(seg->data + MESSAGE_START_SIZE, "headers", 7) == 0;
-        GSF_CHECK("first sendheaders publishes one current-tip header",
-                  framed && seg->data[MSG_HEADER_SIZE] == 1);
-        if (framed) {
-            struct byte_stream wire;
-            stream_init_from_data(&wire, seg->data + MSG_HEADER_SIZE,
-                                  seg->size - MSG_HEADER_SIZE);
-            uint64_t count = 0;
-            uint64_t tx_count = 1;
-            struct block_header announced;
-            block_header_init(&announced);
-            bool decoded = stream_read_compact_size(&wire, &count) &&
-                           block_header_deserialize(&announced, &wire) &&
-                           stream_read_compact_size(&wire, &tx_count);
-            struct uint256 announced_hash;
-            block_header_get_hash(&announced, &announced_hash);
-            GSF_CHECK("negotiation header is exact verified tip",
-                      decoded && count == 1 && tx_count == 0 &&
-                      uint256_eq(&announced_hash, &hash_d));
-        }
-        gsf_drain_send_queue(&peer);
-        GSF_CHECK("duplicate sendheaders emits no second tip proof",
-                  process_sendheaders(&mp, &peer) && peer.send_head == NULL &&
-                  peer.send_size == 0);
-        gsf_free_outbound_peer(&peer);
-    }
+    failures += gsf_sendheaders_one_tip_proof(&ms, &mp, bi_d, &hash_d);
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);
