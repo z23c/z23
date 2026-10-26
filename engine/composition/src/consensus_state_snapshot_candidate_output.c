@@ -372,7 +372,15 @@ static bool candidate_post_hook_unchanged(int fd, const struct stat *sealed,
     return consensus_export_descriptor_digest(fd, after_hook_digest) &&
            memcmp(after_hook_digest, digest, 32) == 0 &&
            fstat(fd, &after_hook) == 0 &&
-           candidate_stat_identity_matches(sealed, &after_hook);
+           after_hook.st_dev == sealed->st_dev &&
+           after_hook.st_ino == sealed->st_ino &&
+           after_hook.st_nlink == 0 &&
+           after_hook.st_size == sealed->st_size &&
+           after_hook.st_mode == sealed->st_mode &&
+           after_hook.st_mtim.tv_sec == sealed->st_mtim.tv_sec &&
+           after_hook.st_mtim.tv_nsec == sealed->st_mtim.tv_nsec &&
+           after_hook.st_ctim.tv_sec == sealed->st_ctim.tv_sec &&
+           after_hook.st_ctim.tv_nsec == sealed->st_ctim.tv_nsec;
 }
 
 static bool candidate_output_linked(
