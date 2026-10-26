@@ -203,6 +203,23 @@ void syncsvc_assign_peer_blocks(struct sync_block_batch *batch,
                                         out_hashes, plan.max_assign);
 }
 
+static void sync_peer_tip_facts(
+    const struct p2p_node *node, int new_tip_height, uint32_t new_tip_time,
+    int max_peer_height, bool *tip_is_recent, bool *reached_peer)
+{
+    *tip_is_recent = (new_tip_time > 0 &&
+        (int64_t)new_tip_time > (int64_t)platform_time_wall_time_t()
+            - POST_BUTTERCUP_POW_TARGET_SPACING * 2);
+    *reached_peer = (node->starting_height > 0 &&
+                         new_tip_height >= node->starting_height);
+    /* Guard against stale starting_height: if peers have advanced
+     * 144+ blocks beyond this node's starting_height, don't use it
+     * for at-tip detection — it would trigger false AT_TIP. */
+    if (*reached_peer && max_peer_height > 0 &&
+        max_peer_height > node->starting_height + 144)
+        *reached_peer = false;
+}
+
 void syncsvc_note_valid_block(struct sync_block_acceptance *result,
                               const struct p2p_node *node,
                               enum sync_state sync_state,
@@ -234,17 +251,9 @@ void syncsvc_note_valid_block(struct sync_block_acceptance *result,
      * (b) handles the edge case where peer's starting_height from
      * handshake is stale — the peer advanced while we were syncing,
      * so new_tip_height never reaches the old starting_height. */
-    bool tip_is_recent = (new_tip_time > 0 &&
-        (int64_t)new_tip_time > (int64_t)platform_time_wall_time_t()
-            - POST_BUTTERCUP_POW_TARGET_SPACING * 2);
-    bool reached_peer = (node->starting_height > 0 &&
-                         new_tip_height >= node->starting_height);
-    /* Guard against stale starting_height: if peers have advanced
-     * 144+ blocks beyond this node's starting_height, don't use it
-     * for at-tip detection — it would trigger false AT_TIP. */
-    if (reached_peer && max_peer_height > 0 &&
-        max_peer_height > node->starting_height + 144)
-        reached_peer = false;
+    bool tip_is_recent = false, reached_peer = false;
+    sync_peer_tip_facts(node, new_tip_height, new_tip_time, max_peer_height,
+                       &tip_is_recent, &reached_peer);
 
     if (!reached_peer && !tip_is_recent)
         return;
@@ -291,6 +300,15 @@ void syncsvc_note_valid_block(struct sync_block_acceptance *result,
     }
 }
 
+static bool sync_tip_authority_missing(
+    bool served_tip_published, int served_height, int local_height,
+    int header_height, size_t peer_count, int peer_height)
+{
+    return !served_tip_published || served_height < 0 || local_height < 0 ||
+        served_height > local_height || header_height < local_height ||
+        peer_count == 0 || peer_height < 0;
+}
+
 void syncsvc_plan_periodic_tip_state(
     struct sync_tip_state_evaluation *result,
     enum sync_state sync_state,
@@ -325,9 +343,8 @@ void syncsvc_plan_periodic_tip_state(
     /* Fail closed until every authority needed by the decision exists.  In
      * particular, do not turn an isolated node AT_TIP merely because its
      * local/header heights agree with each other. */
-    if (!served_tip_published || served_height < 0 || local_height < 0 ||
-        served_height > local_height || header_height < local_height ||
-        peer_count == 0 || peer_height < 0)
+    if (sync_tip_authority_missing(served_tip_published, served_height,
+            local_height, header_height, peer_count, peer_height))
         return;
 
     int target = local_height;
@@ -492,6 +509,92 @@ static enum stall_recovery_early stall_recovery_early_exit(
     return STALL_RECOVERY_AT_TIP_NUDGE;
 }
 
+#define STALL_PROBE_WINDOW 10
+#define STALL_ALT_CANDIDATES 64
+struct stall_candidates {
+    struct block_index *descendants[STALL_ALT_CANDIDATES];
+    struct block_index *fallback[STALL_PROBE_WINDOW][STALL_ALT_CANDIDATES];
+    size_t fallback_count[STALL_PROBE_WINDOW];
+};
+
+static void stall_observe_probe_height(
+    struct sync_stall_recovery *recovery, struct block_index *px,
+    int dh, bool have_data_at[STALL_PROBE_WINDOW])
+{
+    if (dh <= STALL_PROBE_WINDOW) {
+        if (dh == 1) {
+            recovery->entries_at_next++;
+            if (px->nStatus & BLOCK_FAILED_MASK) recovery->entries_failed++;
+            if (px->nStatus & BLOCK_HAVE_DATA) recovery->entries_with_data++;
+        }
+        if (px->nStatus & BLOCK_HAVE_DATA)
+            have_data_at[dh - 1] = true;
+    }
+}
+
+static void stall_keep_descendant(
+    struct stall_candidates *cand, struct block_index *px,
+    struct block_index *tip, int our_h, size_t *cand_count)
+{
+    if ((*cand_count) == STALL_ALT_CANDIDATES &&
+        px->nHeight >= cand->descendants[(*cand_count) - 1]->nHeight)
+        return;
+    /* Filter BEFORE bounding the pool. Unrelated forks must
+     * not crowd out a descendant, nor deep descendants H+1. */
+    struct block_index *walk = pprev_walk_until_height(
+        px, our_h, 100000, "block_sync.alt_descent");
+    if (walk != tip &&
+        !(walk && walk->phashBlock && tip->phashBlock &&
+          uint256_eq(walk->phashBlock, tip->phashBlock)))
+        return;
+    size_t pos = (*cand_count);
+    if (pos == STALL_ALT_CANDIDATES) {
+        --pos;
+    } else {
+        ++(*cand_count);
+    }
+    while (pos > 0 &&
+           cand->descendants[pos - 1]->nHeight > px->nHeight) {
+        cand->descendants[pos] = cand->descendants[pos - 1];
+        --pos;
+    }
+    cand->descendants[pos] = px;
+}
+
+static void stall_scan_candidates(
+    const struct main_state *ms, struct sync_stall_recovery *recovery,
+    int our_h, struct block_index *tip, struct stall_candidates *cand,
+    size_t *cand_count, bool have_data_at[STALL_PROBE_WINDOW])
+{
+    {
+        size_t pi = 0;
+        struct block_index *px;
+        while (block_map_next(&ms->map_block_index, &pi, NULL, &px)) {
+            if (!px) continue;
+            int dh = px->nHeight - our_h;
+            if (dh < 1) continue;
+            stall_observe_probe_height(recovery, px, dh, have_data_at);
+            if (tip && dh <= 512 &&
+                !(px->nStatus & BLOCK_FAILED_MASK) &&
+                !(px->nStatus & BLOCK_HAVE_DATA) &&
+                px->phashBlock) {
+                /* Keep each possible first-gap fallback independently;
+                 * data later in the map can move that gap forward. */
+                if (dh <= STALL_PROBE_WINDOW &&
+                    cand->fallback_count[dh - 1] < STALL_ALT_CANDIDATES)
+                    cand->fallback[dh - 1][cand->fallback_count[dh - 1]++] = px;
+                stall_keep_descendant(cand, px, tip, our_h, cand_count);
+            }
+        }
+    }
+    for (int probe = 1; probe <= STALL_PROBE_WINDOW; probe++) {
+        if (!have_data_at[probe - 1]) {
+            recovery->next_height = our_h + probe;
+            break;
+        }
+    }
+}
+
 bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
                                   const struct main_state *ms,
                                   const struct p2p_node *node,
@@ -524,75 +627,12 @@ bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
      * The map holds millions of entries at depth — a probe loop of up to
      * 10 full scans plus two more full scans pins a core and starves every
      * other map reader when run near a deep tip. */
-    #define STALL_PROBE_WINDOW 10
-    #define STALL_ALT_CANDIDATES 64
     bool have_data_at[STALL_PROBE_WINDOW] = {false};
-    struct stall_candidates {
-        struct block_index *descendants[STALL_ALT_CANDIDATES];
-        struct block_index *fallback[STALL_PROBE_WINDOW][STALL_ALT_CANDIDATES];
-        size_t fallback_count[STALL_PROBE_WINDOW];
-    };
     struct stall_candidates *cand = zcl_calloc(1, sizeof(*cand), "stall cand");
     if (!cand) return true;
     struct block_index *tip = active_chain_tip(&ms->chain_active);
     size_t cand_count = 0;
-    {
-        size_t pi = 0;
-        struct block_index *px;
-        while (block_map_next(&ms->map_block_index, &pi, NULL, &px)) {
-            if (!px) continue;
-            int dh = px->nHeight - our_h;
-            if (dh < 1) continue;
-            if (dh <= STALL_PROBE_WINDOW) {
-                if (dh == 1) {
-                    recovery->entries_at_next++;
-                    if (px->nStatus & BLOCK_FAILED_MASK) recovery->entries_failed++;
-                    if (px->nStatus & BLOCK_HAVE_DATA) recovery->entries_with_data++;
-                }
-                if (px->nStatus & BLOCK_HAVE_DATA)
-                    have_data_at[dh - 1] = true;
-            }
-            if (tip && dh <= 512 &&
-                !(px->nStatus & BLOCK_FAILED_MASK) &&
-                !(px->nStatus & BLOCK_HAVE_DATA) &&
-                px->phashBlock) {
-                /* Keep each possible first-gap fallback independently;
-                 * data later in the map can move that gap forward. */
-                if (dh <= STALL_PROBE_WINDOW &&
-                    cand->fallback_count[dh - 1] < STALL_ALT_CANDIDATES)
-                    cand->fallback[dh - 1][cand->fallback_count[dh - 1]++] = px;
-                if (cand_count == STALL_ALT_CANDIDATES &&
-                    px->nHeight >= cand->descendants[cand_count - 1]->nHeight)
-                    continue;
-                /* Filter BEFORE bounding the pool. Unrelated forks must
-                 * not crowd out a descendant, nor deep descendants H+1. */
-                struct block_index *walk = pprev_walk_until_height(
-                    px, our_h, 100000, "block_sync.alt_descent");
-                if (walk != tip &&
-                    !(walk && walk->phashBlock && tip->phashBlock &&
-                      uint256_eq(walk->phashBlock, tip->phashBlock)))
-                    continue;
-                size_t pos = cand_count;
-                if (pos == STALL_ALT_CANDIDATES) {
-                    --pos;
-                } else {
-                    ++cand_count;
-                }
-                while (pos > 0 &&
-                       cand->descendants[pos - 1]->nHeight > px->nHeight) {
-                    cand->descendants[pos] = cand->descendants[pos - 1];
-                    --pos;
-                }
-                cand->descendants[pos] = px;
-            }
-        }
-    }
-    for (int probe = 1; probe <= STALL_PROBE_WINDOW; probe++) {
-        if (!have_data_at[probe - 1]) {
-            recovery->next_height = our_h + probe;
-            break;
-        }
-    }
+    stall_scan_candidates(ms, recovery, our_h, tip, cand, &cand_count, have_data_at);
 
     if (!tip) {
         free(cand);
@@ -627,8 +667,7 @@ bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
         }
     }
     free(cand);
-    #undef STALL_PROBE_WINDOW
-    #undef STALL_ALT_CANDIDATES
+
 
     recovery->alt_hashes = alt_hashes;
     recovery->alt_heights = alt_heights;
@@ -642,6 +681,9 @@ bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
 
     return true;
 }
+
+#undef STALL_PROBE_WINDOW
+#undef STALL_ALT_CANDIDATES
 
 enum sync_header_request_anchor syncsvc_recovery_header_anchor(
     const struct sync_stall_recovery *recovery,

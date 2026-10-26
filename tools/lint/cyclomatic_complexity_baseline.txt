@@ -1047,9 +1047,6 @@ engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_tip_fro
 engine/services/src/block_index_loader_rebuild.c:load_block_index_from_projection:17
 engine/services/src/block_index_sqlite_cache.c:load_block_index_sqlite:33
 engine/services/src/block_index_sqlite_cache.c:save_block_index_recent:34
-engine/services/src/block_sync_service.c:syncsvc_build_stall_recovery:41
-engine/services/src/block_sync_service.c:syncsvc_note_valid_block:20
-engine/services/src/block_sync_service.c:syncsvc_plan_periodic_tip_state:21
 engine/services/src/blog_anchor_transaction_service.c:blog_anchor_payload_decode:17
 engine/services/src/blog_anchor_transaction_service.c:blog_publication_anchor_commit:30
 engine/services/src/blog_anchor_transaction_service.c:blog_publication_anchor_plan:31
