@@ -1428,7 +1428,6 @@ tests/harness/src/test_store_transparent_pay.c:test_store_transparent_pay:39
 tests/harness/src/test_store_transparent_pay.c:tstp_exact_chain_payment:62
 tests/harness/src/test_supervisor.c:test_supervisor:84
 tests/harness/src/test_supervisor_production_tree.c:test_supervisor_production_tree:43
-tests/harness/src/test_sync_rate_below_floor.c:test_sync_rate_below_floor:36
 tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:367
 tests/harness/src/test_test_group_selector.c:capture_command_ends:17
 tests/harness/src/test_test_group_selector.c:test_runner_exact_selection:26

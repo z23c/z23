@@ -168,59 +168,8 @@ static bool srbf_overflow_floor_uses_default(struct srbf_fake_clock *fc,
     return tripped && restore_rc == 0;
 }
 
-int test_sync_rate_below_floor(void);
-int test_sync_rate_below_floor(void)
+static bool srbf_check_detected_rate_details(void)
 {
-    printf("\n=== sync_rate_below_floor condition tests ===\n");
-    int failures = 0;
-    struct srbf_fake_clock fc;
-    int64_t t0 = 4000000000;
-    const int64_t WINDOW_US = 10 * 1000 * 1000; /* 10s per simulated window */
-
-    SRBF_CHECK("overflowing floor configuration falls back to the default",
-               srbf_overflow_floor_uses_default(&fc, t0, WINDOW_US));
-
-    /* ---- (a) sustained below-floor rate with peers+work trips it ---- */
-    {
-        struct connman cm; struct download_manager dm; struct main_state ms;
-        srbf_reset(&cm, &dm, &ms);
-        srbf_fake_clock_install(&fc, t0);
-        sync_rate_below_floor_test_set_log_head_override(0);
-
-        struct p2p_node peer = {0};
-        peer.id = 1;
-        peer.starting_height = 10000;
-        peer.state = PEER_ACTIVE;
-        peer.services = NODE_NETWORK;
-        struct p2p_node *peers[1] = { &peer };
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = 1;
-
-        /* 1 block per 10s window == 0.1 bps, comfortably below the default
-         * 1 bps floor. First tick only establishes the baseline sample. */
-        int64_t mono = 1000000000;
-        int64_t cur = 0;
-        srbf_tick(&fc, t0, mono, cur, 0);
-        bool ok = true;
-        ok = ok && condition_engine_get_active_count() == 0;
-
-        for (int i = 0; i < 5; i++) {
-            mono += WINDOW_US;
-            cur += 1;
-            srbf_tick(&fc, t0 + 30 * (i + 1), mono, cur, 0);
-        }
-        ok = ok && sync_rate_below_floor_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && blocker_exists("sync_rate_below_floor");
-        SRBF_CHECK("K consecutive below-floor windows (peers+work) trips it",
-                  ok);
-
-        /* ACT (Pillar 1): the remedy did not merely NAME the slowdown — it
-         * invoked the always-terminating recovery ladder. Witness the ladder
-         * arm, not just the blocker. */
-        SRBF_CHECK("sustained growing-gap remedy ARMS the recovery ladder",
-                  sticky_escalator_test_armed());
-
         struct json_value dump;
         json_init(&dump);
         json_set_object(&dump);
@@ -246,22 +195,16 @@ int test_sync_rate_below_floor(void)
               json_get_int(json_get(detail, "network_tip_at_detect")) == 10000;
         okd = okd && json_get_int(json_get(detail, "log_head_at_detect")) == 0;
         json_free(&dump);
-        SRBF_CHECK("detail names observed_bps vs floor_bps + network state",
-                  okd);
+    return okd;
+}
 
-        /* ---- (b) recovery clears it: a fast window pushes bps over floor */
-        mono += WINDOW_US;
-        cur += 1000; /* 1000 blocks / 10s == 100 bps, well over the floor */
-        srbf_tick(&fc, t0 + 200, mono, cur, 0);
-
-        bool ok2 = true;
-        ok2 = ok2 && !blocker_exists("sync_rate_below_floor");
-        ok2 = ok2 && condition_engine_get_active_count() == 0;
-        SRBF_CHECK("rate recovering above floor clears the blocker", ok2);
-
-        srbf_cleanup();
-    }
-
+#define fc (*fake_clock)
+#define t0 (*start_wall)
+#define WINDOW_US (*window_duration)
+static int srbf_check_healthy_fold_windows(
+    int failures, struct srbf_fake_clock *fake_clock,
+    const int64_t *start_wall, const int64_t *window_duration)
+{
     /* ---- (c) a healthy fold (comfortably above floor) never false-fires ---- */
     {
         struct connman cm; struct download_manager dm; struct main_state ms;
@@ -295,7 +238,13 @@ int test_sync_rate_below_floor(void)
                   "windows", ok);
         srbf_cleanup();
     }
+    return failures;
+}
 
+static int srbf_check_throttle_dominated_window(
+    int failures, struct srbf_fake_clock *fake_clock,
+    const int64_t *start_wall, const int64_t *window_duration)
+{
     /* ---- (d) throttle-dominated window is skipped, not counted ---- */
     {
         struct connman cm; struct download_manager dm; struct main_state ms;
@@ -353,6 +302,87 @@ int test_sync_rate_below_floor(void)
                   "below-floor", ok);
         srbf_cleanup();
     }
+    return failures;
+}
+#undef WINDOW_US
+#undef t0
+#undef fc
+
+int test_sync_rate_below_floor(void);
+int test_sync_rate_below_floor(void)
+{
+    printf("\n=== sync_rate_below_floor condition tests ===\n");
+    int failures = 0;
+    struct srbf_fake_clock fc;
+    int64_t t0 = 4000000000;
+    const int64_t WINDOW_US = 10 * 1000 * 1000; /* 10s per simulated window */
+
+    SRBF_CHECK("overflowing floor configuration falls back to the default",
+               srbf_overflow_floor_uses_default(&fc, t0, WINDOW_US));
+
+    /* ---- (a) sustained below-floor rate with peers+work trips it ---- */
+    {
+        struct connman cm; struct download_manager dm; struct main_state ms;
+        srbf_reset(&cm, &dm, &ms);
+        srbf_fake_clock_install(&fc, t0);
+        sync_rate_below_floor_test_set_log_head_override(0);
+
+        struct p2p_node peer = {0};
+        peer.id = 1;
+        peer.starting_height = 10000;
+        peer.state = PEER_ACTIVE;
+        peer.services = NODE_NETWORK;
+        struct p2p_node *peers[1] = { &peer };
+        cm.manager.nodes = peers;
+        cm.manager.num_nodes = 1;
+
+        /* 1 block per 10s window == 0.1 bps, comfortably below the default
+         * 1 bps floor. First tick only establishes the baseline sample. */
+        int64_t mono = 1000000000;
+        int64_t cur = 0;
+        srbf_tick(&fc, t0, mono, cur, 0);
+        bool ok = true;
+        ok = ok && condition_engine_get_active_count() == 0;
+
+        for (int i = 0; i < 5; i++) {
+            mono += WINDOW_US;
+            cur += 1;
+            srbf_tick(&fc, t0 + 30 * (i + 1), mono, cur, 0);
+        }
+        ok = ok && sync_rate_below_floor_test_remedy_calls() == 1;
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && blocker_exists("sync_rate_below_floor");
+        SRBF_CHECK("K consecutive below-floor windows (peers+work) trips it",
+                  ok);
+
+        /* ACT (Pillar 1): the remedy did not merely NAME the slowdown — it
+         * invoked the always-terminating recovery ladder. Witness the ladder
+         * arm, not just the blocker. */
+        SRBF_CHECK("sustained growing-gap remedy ARMS the recovery ladder",
+                  sticky_escalator_test_armed());
+
+        bool okd = srbf_check_detected_rate_details();
+        SRBF_CHECK("detail names observed_bps vs floor_bps + network state",
+                  okd);
+
+        /* ---- (b) recovery clears it: a fast window pushes bps over floor */
+        mono += WINDOW_US;
+        cur += 1000; /* 1000 blocks / 10s == 100 bps, well over the floor */
+        srbf_tick(&fc, t0 + 200, mono, cur, 0);
+
+        bool ok2 = true;
+        ok2 = ok2 && !blocker_exists("sync_rate_below_floor");
+        ok2 = ok2 && condition_engine_get_active_count() == 0;
+        SRBF_CHECK("rate recovering above floor clears the blocker", ok2);
+
+        srbf_cleanup();
+    }
+
+    failures = srbf_check_healthy_fold_windows(
+        failures, &fc, &t0, &WINDOW_US);
+
+    failures = srbf_check_throttle_dominated_window(
+        failures, &fc, &t0, &WINDOW_US);
 
     /* ---- (e) the peers+work gate: no peers, or backlog drained ---- */
     {
