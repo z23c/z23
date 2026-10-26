@@ -35,7 +35,7 @@ static bool qualification_load(const char *workspace, const uint8_t root[32],
         workspace, root, maximum, wire, wire_len) == 0;
 }
 
-const char *vcs_zcode_reproduction_qualification_string(
+static const char *qualification_string_input_verdict(
     enum vcs_zcode_reproduction_qualification verdict)
 {
     switch (verdict) {
@@ -50,6 +50,15 @@ const char *vcs_zcode_reproduction_qualification_string(
         return "no_reproduction_receipt";
     case VCS_ZCODE_QUALIFICATION_RECEIPT:
         return "reproduction_receipt_invalid";
+    default:
+        return NULL;
+    }
+}
+
+static const char *qualification_string_outcome_verdict(
+    enum vcs_zcode_reproduction_qualification verdict)
+{
+    switch (verdict) {
     case VCS_ZCODE_QUALIFICATION_OUTPUT_MISMATCH:
         return "reproduction_output_mismatch";
     case VCS_ZCODE_QUALIFICATION_SIGNER_NOT_APPROVED:
@@ -66,8 +75,18 @@ const char *vcs_zcode_reproduction_qualification_string(
         return "duplicate_reproduction";
     case VCS_ZCODE_QUALIFICATION_CONTRADICTION:
         return "contradictory_reproductions";
+    default:
+        return NULL;
     }
-    return "unknown";
+}
+
+const char *vcs_zcode_reproduction_qualification_string(
+    enum vcs_zcode_reproduction_qualification verdict)
+{
+    const char *text = qualification_string_input_verdict(verdict);
+    if (!text)
+        text = qualification_string_outcome_verdict(verdict);
+    return text ? text : "unknown";
 }
 
 static enum vcs_zcode_reproduction_qualification qualification_finish(
@@ -176,6 +195,366 @@ static bool qualification_load_release(
     return ok;
 }
 
+static bool qualification_arguments_valid(
+    const char *workspace, const uint8_t score_receipt_root[32],
+    const uint8_t policy_candidate_root[32],
+    const uint8_t reproduction_request_root[32],
+    const uint8_t reproduction_proof_set_root[32],
+    const struct vcs_zcode_reproduction_qualification_report *out,
+    int64_t now_unix)
+{
+    return workspace && score_receipt_root && policy_candidate_root &&
+        reproduction_request_root && reproduction_proof_set_root && out &&
+        now_unix > 0;
+}
+
+static bool qualification_load_score_receipt(
+    const char *workspace, const uint8_t root[32],
+    struct vcs_zcode_score_receipt_v1 *score)
+{
+    uint8_t *wire = NULL, observed[32];
+    size_t wire_len = 0;
+    bool ok = qualification_load(workspace, root, VCS_ZCODE_SCORE_WIRE_BYTES,
+                                 &wire, &wire_len) &&
+        vcs_zcode_score_receipt_parse(wire, wire_len, score) ==
+            VCS_ZCODE_SCORE_OK &&
+        vcs_zcode_score_receipt_id(score, observed) == VCS_ZCODE_SCORE_OK &&
+        qualification_equal(observed, root);
+    free(wire);
+    return ok && vcs_zcode_score_receipt_verify_cas(workspace, score) ==
+        VCS_ZCODE_SCORE_OK;
+}
+
+static bool qualification_load_policy_candidate(
+    const char *workspace, const uint8_t root[32],
+    struct vcs_zcode_policy_candidate_v1 *policy)
+{
+    uint8_t *wire = NULL, observed[32];
+    size_t wire_len = 0;
+    bool ok = qualification_load(workspace, root,
+                                 VCS_ZCODE_POLICY_CANDIDATE_WIRE_BYTES,
+                                 &wire, &wire_len) &&
+        vcs_zcode_policy_candidate_parse(wire, wire_len, policy) ==
+            VCS_ZCODE_SHADOW_OK &&
+        vcs_zcode_policy_candidate_root(policy, observed) ==
+            VCS_ZCODE_SHADOW_OK &&
+        qualification_equal(observed, root);
+    free(wire);
+    return ok;
+}
+
+static bool qualification_load_approved_set(
+    const char *workspace, struct vcs_zcode_policy_candidate_v1 *policy,
+    struct vcs_zcode_approved_reproducer_set_v1 *approved)
+{
+    uint8_t *wire = NULL, observed[32];
+    size_t wire_len = 0;
+    bool ok = qualification_load(
+        workspace, policy->approved_reproducer_set_root,
+        VCS_ZCODE_APPROVED_REPRODUCER_SET_MAX_WIRE_BYTES, &wire, &wire_len) &&
+        vcs_zcode_approved_reproducer_set_parse(wire, wire_len, approved) ==
+            VCS_ZCODE_SHADOW_OK &&
+        vcs_zcode_approved_reproducer_set_root(approved, observed) ==
+            VCS_ZCODE_SHADOW_OK &&
+        qualification_equal(observed, policy->approved_reproducer_set_root) &&
+        vcs_zcode_policy_candidate_validate_set(policy, approved) ==
+            VCS_ZCODE_SHADOW_OK;
+    free(wire);
+    return ok;
+}
+
+static bool qualification_load_request(
+    const char *workspace, const uint8_t reproduction_request_root[32],
+    const uint8_t policy_candidate_root[32],
+    const struct vcs_zcode_policy_candidate_v1 *policy,
+    const struct vcs_zcode_score_receipt_v1 *score,
+    struct vcs_zcode_reproduction_request_v1 *request)
+{
+    uint8_t *wire = NULL, observed[32];
+    size_t wire_len = 0;
+    bool ok = qualification_load(workspace, reproduction_request_root,
+                                 VCS_ZCODE_REPRODUCTION_REQUEST_WIRE_BYTES,
+                                 &wire, &wire_len) &&
+        vcs_zcode_reproduction_request_parse(wire, wire_len, request) ==
+            VCS_ZCODE_REPRODUCTION_OK &&
+        vcs_zcode_reproduction_request_root(request, observed) ==
+            VCS_ZCODE_REPRODUCTION_OK &&
+        qualification_equal(observed, reproduction_request_root) &&
+        qualification_equal(request->zc23_policy_root,
+                            policy_candidate_root) &&
+        qualification_equal(request->network_genesis_root,
+                            policy->network_genesis_root) &&
+        qualification_equal(request->task_root, score->task_root) &&
+        qualification_equal(request->candidate_root, score->candidate_root) &&
+        qualification_equal(request->package_root, score->package_root) &&
+        qualification_equal(request->release_root, score->release_root) &&
+        qualification_equal(request->recipe_root, score->recipe_root) &&
+        qualification_equal(request->dependency_lock_root,
+                            score->dependency_lock_root) &&
+        qualification_equal(request->toolchain_capsule_root,
+                            score->api_capsule_root);
+    free(wire);
+    return ok;
+}
+
+static enum vcs_zcode_reproduction_qualification
+qualification_load_score_policy_request(
+    const char *workspace, const uint8_t score_receipt_root[32],
+    const uint8_t policy_candidate_root[32],
+    const uint8_t reproduction_request_root[32],
+    struct vcs_zcode_score_receipt_v1 *score,
+    struct vcs_zcode_policy_candidate_v1 *policy,
+    struct vcs_zcode_approved_reproducer_set_v1 *approved,
+    struct vcs_zcode_reproduction_request_v1 *request)
+{
+    if (!qualification_load_score_receipt(workspace, score_receipt_root,
+                                          score))
+        return VCS_ZCODE_QUALIFICATION_SCORE;
+    if (!qualification_load_policy_candidate(workspace, policy_candidate_root,
+                                             policy))
+        return VCS_ZCODE_QUALIFICATION_POLICY;
+    if (!qualification_load_approved_set(workspace, policy, approved))
+        return VCS_ZCODE_QUALIFICATION_POLICY;
+    if (!qualification_load_request(workspace, reproduction_request_root,
+                                    policy_candidate_root, policy, score,
+                                    request))
+        return VCS_ZCODE_QUALIFICATION_REQUEST;
+    return VCS_ZCODE_QUALIFICATION_READY;
+}
+
+static bool qualification_load_reference(
+    const char *workspace,
+    const struct vcs_zcode_reproduction_request_v1 *request,
+    struct vcs_package_build_receipt *reference)
+{
+    struct vcs_build_artifact_manifest_v1 manifest;
+    return qualification_load_build(workspace, request->reference_build_root,
+                                    reference) &&
+        qualification_load_manifest(workspace, request->output_manifest_root,
+                                    &manifest) &&
+        qualification_equal(reference->package_root, request->package_root) &&
+        qualification_equal(reference->recipe_root, request->recipe_root) &&
+        qualification_equal(reference->lock_root,
+                            request->dependency_lock_root) &&
+        qualification_equal(manifest.action_sha3, request->action_root);
+}
+
+static bool qualification_load_candidate(
+    const char *workspace, const struct vcs_zcode_score_receipt_v1 *score,
+    struct vcs_zcode_candidate_v1 *candidate)
+{
+    uint8_t *wire = NULL, observed[32];
+    size_t wire_len = 0;
+    bool ok = qualification_load(workspace, score->candidate_root,
+                                 VCS_ZCODE_CANDIDATE_WIRE_BYTES,
+                                 &wire, &wire_len) &&
+        vcs_zcode_candidate_parse(wire, wire_len, candidate) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_root(candidate, observed) == VCS_ZCODE_DEV_OK &&
+        qualification_equal(observed, score->candidate_root);
+    free(wire);
+    return ok;
+}
+
+static bool qualification_load_proof_set(
+    const char *workspace, const uint8_t root[32],
+    uint8_t proof_roots[][32], size_t *proof_count)
+{
+    uint8_t *wire = NULL, observed[32];
+    size_t wire_len = 0;
+    bool ok = qualification_load(workspace, root, VCS_ZCODE_PROOF_SET_WIRE_MAX,
+                                 &wire, &wire_len) &&
+        vcs_zcode_proof_set_parse(wire, wire_len, proof_roots,
+            VCS_ZCODE_PROOF_SET_MAX_RECEIPTS, proof_count) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_set_root(proof_roots, *proof_count, observed) ==
+            VCS_ZCODE_DEV_OK &&
+        qualification_equal(observed, root);
+    free(wire);
+    return ok;
+}
+
+static enum vcs_zcode_reproduction_qualification
+qualification_load_reproduction_inputs(
+    const char *workspace, const uint8_t reproduction_proof_set_root[32],
+    struct vcs_zcode_reproduction_request_v1 *request,
+    struct vcs_zcode_score_receipt_v1 *score,
+    struct vcs_package_build_receipt *reference,
+    struct vcs_zcode_candidate_v1 *candidate,
+    uint8_t proof_roots[][32], size_t *proof_count)
+{
+    if (!qualification_load_reference(workspace, request, reference))
+        return VCS_ZCODE_QUALIFICATION_REQUEST;
+    if (!qualification_load_candidate(workspace, score, candidate))
+        return VCS_ZCODE_QUALIFICATION_SCORE;
+    if (!qualification_load_proof_set(workspace, reproduction_proof_set_root,
+                                      proof_roots, proof_count))
+        return VCS_ZCODE_QUALIFICATION_SCORE;
+    return VCS_ZCODE_QUALIFICATION_READY;
+}
+
+static bool qualification_load_work_receipt(
+    const char *workspace, const uint8_t root[32],
+    struct vcs_zcode_work_receipt_v1 *work)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool ok = qualification_load(workspace, root,
+                                 VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES,
+                                 &wire, &wire_len) &&
+        vcs_zcode_work_receipt_parse(wire, wire_len, work) ==
+            VCS_ZCODE_DEV_OK;
+    free(wire);
+    return ok;
+}
+
+static bool qualification_check_work_receipt(
+    struct vcs_zcode_work_receipt_v1 *work, const uint8_t proof_root[32],
+    const struct vcs_zcode_reproduction_request_v1 *request,
+    const struct vcs_zcode_score_receipt_v1 *score,
+    const uint8_t reproduction_request_root[32])
+{
+    uint8_t observed[32];
+    return vcs_zcode_work_receipt_id(work, observed) == VCS_ZCODE_DEV_OK &&
+        qualification_equal(observed, proof_root) &&
+        vcs_zcode_work_receipt_verify(work, work->signer_pubkey) ==
+            VCS_ZCODE_DEV_OK &&
+        work->work_kind == VCS_ZCODE_WORK_REPRODUCE &&
+        qualification_equal(work->action_root, request->action_root) &&
+        work->status == VCS_ZCODE_WORK_PASS && work->exit_status == 0 &&
+        qualification_equal(work->task_root, request->task_root) &&
+        qualification_equal(work->candidate_root, request->candidate_root) &&
+        qualification_equal(work->proof_policy_root,
+                            score->proof_policy_root) &&
+        qualification_equal(work->toolchain_capsule_root,
+                            request->toolchain_capsule_root) &&
+        qualification_equal(work->input_root, reproduction_request_root) &&
+        qualification_equal(work->evidence_root, request->output_manifest_root);
+}
+
+static enum vcs_zcode_reproduction_qualification
+qualification_collect_reproductions(
+    const char *workspace, const uint8_t reproduction_request_root[32],
+    const struct vcs_zcode_reproduction_request_v1 *request,
+    const struct vcs_zcode_score_receipt_v1 *score,
+    uint8_t proof_roots[][32], size_t proof_count,
+    struct vcs_zcode_work_receipt_v1 *reproduction_works,
+    uint8_t reproduction_roots[][32], size_t *reproduction_count,
+    int64_t now_unix)
+{
+    bool saw_reproduce = false;
+
+    for (size_t i = 0; i < proof_count; i++) {
+        struct vcs_zcode_work_receipt_v1 work;
+        if (!qualification_load_work_receipt(workspace, proof_roots[i],
+                                             &work))
+            return VCS_ZCODE_QUALIFICATION_SCORE;
+        if (work.work_kind != VCS_ZCODE_WORK_REPRODUCE &&
+            !qualification_equal(work.action_root, request->action_root))
+            continue;
+        saw_reproduce = true;
+        if (!qualification_check_work_receipt(&work, proof_roots[i], request,
+                                              score, reproduction_request_root))
+            return VCS_ZCODE_QUALIFICATION_RECEIPT;
+        if (work.started_unix < request->created_unix ||
+            work.finished_unix > request->expires_unix)
+            return VCS_ZCODE_QUALIFICATION_CHALLENGE_EXPIRED;
+        reproduction_works[*reproduction_count] = work;
+        memcpy(reproduction_roots[*reproduction_count], proof_roots[i], 32);
+        (*reproduction_count)++;
+    }
+    if (*reproduction_count == 0) {
+        if (!saw_reproduce && now_unix >= request->expires_unix)
+            return VCS_ZCODE_QUALIFICATION_CHALLENGE_EXPIRED;
+        return VCS_ZCODE_QUALIFICATION_NO_RECEIPT;
+    }
+    return VCS_ZCODE_QUALIFICATION_READY;
+}
+
+/* READY when no two reproductions conflict, else the first conflict. */
+static enum vcs_zcode_reproduction_qualification
+qualification_check_reproduction_pairs(
+    const struct vcs_zcode_work_receipt_v1 *works, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        for (size_t j = i + 1u; j < count; j++) {
+            if (!qualification_equal(works[i].output_root,
+                                     works[j].output_root))
+                return VCS_ZCODE_QUALIFICATION_CONTRADICTION;
+            if (qualification_equal(works[i].signer_pubkey,
+                                    works[j].signer_pubkey) ||
+                qualification_equal(works[i].lease_id, works[j].lease_id))
+                return VCS_ZCODE_QUALIFICATION_DUPLICATE;
+        }
+    }
+    return VCS_ZCODE_QUALIFICATION_READY;
+}
+
+static enum vcs_zcode_reproduction_qualification
+qualification_check_reproducer(
+    const char *workspace, struct vcs_package_build_receipt *reference,
+    struct vcs_zcode_approved_reproducer_set_v1 *approved,
+    struct vcs_zcode_reproduction_request_v1 *request, uint64_t epoch,
+    struct vcs_zcode_work_receipt_v1 *work,
+    struct vcs_zcode_approved_reproducer_entry_v1 *entry,
+    struct qualification_identity *reproducer_identity,
+    struct vcs_zcode_reproduction_qualification_report *out)
+{
+    struct vcs_package_build_receipt rebuild;
+    struct vcs_reproduce_verdict reproduction;
+    if (!qualification_load_build(workspace, work->output_root, &rebuild))
+        return VCS_ZCODE_QUALIFICATION_OUTPUT_MISMATCH;
+    if (rebuild.isolation != VCS_PACKAGE_BUILD_ISOLATION_FULL)
+        return VCS_ZCODE_QUALIFICATION_CONFINEMENT_INSUFFICIENT;
+    vcs_package_reproduce_compare(reference, &rebuild, &reproduction);
+    out->reproduce_rule = reproduction.rule;
+    if (!reproduction.reproduced)
+        return VCS_ZCODE_QUALIFICATION_OUTPUT_MISMATCH;
+
+    enum vcs_zcode_shadow_error approval =
+        vcs_zcode_approved_reproducer_set_find(
+            approved, work->signer_pubkey, request->action_root, epoch,
+            work->finished_unix, entry);
+    if (approval == VCS_ZCODE_SHADOW_NOT_FOUND ||
+        approval == VCS_ZCODE_SHADOW_ACTION)
+        return VCS_ZCODE_QUALIFICATION_SIGNER_NOT_APPROVED;
+    if (approval != VCS_ZCODE_SHADOW_OK)
+        return VCS_ZCODE_QUALIFICATION_APPROVAL_NOT_VALID;
+    if (!qualification_load_binding(
+            workspace, entry->contributor_binding_root,
+            request->network_genesis_root, work->finished_unix,
+            reproducer_identity) ||
+        !qualification_equal(reproducer_identity->zid, work->signer_pubkey))
+        return VCS_ZCODE_QUALIFICATION_SIGNER_NOT_APPROVED;
+    return VCS_ZCODE_QUALIFICATION_READY;
+}
+
+static bool qualification_check_reproducer_distinct(
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_score_receipt_v1 *score,
+    const struct vcs_zcode_work_receipt_v1 *work, bool requester_known,
+    const struct qualification_identity *requester_identity)
+{
+    return !qualification_equal(work->signer_pubkey,
+                                candidate->author_pubkey) &&
+        !qualification_equal(work->signer_pubkey, score->lane_signer) &&
+        !(requester_known &&
+          qualification_equal(work->signer_pubkey, requester_identity->zid));
+}
+
+static bool qualification_check_publisher_distinct(
+    const char *workspace, const uint8_t release_root[32],
+    const struct qualification_identity *reproducer_identity,
+    bool *publisher_known)
+{
+    struct vcs_package_release release;
+    *publisher_known = qualification_load_release(workspace, release_root,
+                                                  &release);
+    return !(*publisher_known &&
+             memcmp(reproducer_identity->zcl, release.publisher_pubkey, 33) ==
+                 0);
+}
+
 enum vcs_zcode_reproduction_qualification
 vcs_zcode_reproduction_qualify_cas(
     const char *workspace, const uint8_t score_receipt_root[32],
@@ -185,130 +564,38 @@ vcs_zcode_reproduction_qualify_cas(
     uint64_t epoch, int64_t now_unix,
     struct vcs_zcode_reproduction_qualification_report *out)
 {
+    enum vcs_zcode_reproduction_qualification verdict;
     if (out) memset(out, 0, sizeof(*out));
-    if (!workspace || !score_receipt_root || !policy_candidate_root ||
-        !reproduction_request_root || !reproduction_proof_set_root ||
-        !out || now_unix <= 0)
+    if (!qualification_arguments_valid(workspace, score_receipt_root,
+                                       policy_candidate_root,
+                                       reproduction_request_root,
+                                       reproduction_proof_set_root, out,
+                                       now_unix))
         return out ? qualification_finish(out, VCS_ZCODE_QUALIFICATION_NULL)
                    : VCS_ZCODE_QUALIFICATION_NULL;
     out->reproduce_rule = VCS_REPRODUCE_REFERENCE_INVALID;
     /* A canonical v1 object has no physical-location attestation. */
     out->physical_independence_proven = false;
 
-    uint8_t *wire = NULL, observed[32];
-    size_t wire_len = 0;
     struct vcs_zcode_score_receipt_v1 score;
-    if (!qualification_load(workspace, score_receipt_root,
-                            VCS_ZCODE_SCORE_WIRE_BYTES, &wire, &wire_len) ||
-        vcs_zcode_score_receipt_parse(wire, wire_len, &score) !=
-            VCS_ZCODE_SCORE_OK ||
-        vcs_zcode_score_receipt_id(&score, observed) != VCS_ZCODE_SCORE_OK ||
-        !qualification_equal(observed, score_receipt_root)) {
-        free(wire);
-        return qualification_finish(out, VCS_ZCODE_QUALIFICATION_SCORE);
-    }
-    free(wire); wire = NULL;
-    if (vcs_zcode_score_receipt_verify_cas(workspace, &score) !=
-            VCS_ZCODE_SCORE_OK)
-        return qualification_finish(out, VCS_ZCODE_QUALIFICATION_SCORE);
-
     struct vcs_zcode_policy_candidate_v1 policy;
-    if (!qualification_load(workspace, policy_candidate_root,
-                            VCS_ZCODE_POLICY_CANDIDATE_WIRE_BYTES,
-                            &wire, &wire_len) ||
-        vcs_zcode_policy_candidate_parse(wire, wire_len, &policy) !=
-            VCS_ZCODE_SHADOW_OK ||
-        vcs_zcode_policy_candidate_root(&policy, observed) !=
-            VCS_ZCODE_SHADOW_OK ||
-        !qualification_equal(observed, policy_candidate_root)) {
-        free(wire);
-        return qualification_finish(out, VCS_ZCODE_QUALIFICATION_POLICY);
-    }
-    free(wire); wire = NULL;
     struct vcs_zcode_approved_reproducer_set_v1 approved;
-    if (!qualification_load(workspace, policy.approved_reproducer_set_root,
-                            VCS_ZCODE_APPROVED_REPRODUCER_SET_MAX_WIRE_BYTES,
-                            &wire, &wire_len) ||
-        vcs_zcode_approved_reproducer_set_parse(wire, wire_len, &approved) !=
-            VCS_ZCODE_SHADOW_OK ||
-        vcs_zcode_approved_reproducer_set_root(&approved, observed) !=
-            VCS_ZCODE_SHADOW_OK ||
-        !qualification_equal(observed,
-                             policy.approved_reproducer_set_root) ||
-        vcs_zcode_policy_candidate_validate_set(&policy, &approved) !=
-            VCS_ZCODE_SHADOW_OK) {
-        free(wire);
-        return qualification_finish(out, VCS_ZCODE_QUALIFICATION_POLICY);
-    }
-    free(wire); wire = NULL;
-
     struct vcs_zcode_reproduction_request_v1 request;
-    if (!qualification_load(workspace, reproduction_request_root,
-                            VCS_ZCODE_REPRODUCTION_REQUEST_WIRE_BYTES,
-                            &wire, &wire_len) ||
-        vcs_zcode_reproduction_request_parse(wire, wire_len, &request) !=
-            VCS_ZCODE_REPRODUCTION_OK ||
-        vcs_zcode_reproduction_request_root(&request, observed) !=
-            VCS_ZCODE_REPRODUCTION_OK ||
-        !qualification_equal(observed, reproduction_request_root) ||
-        !qualification_equal(request.zc23_policy_root,
-                             policy_candidate_root) ||
-        !qualification_equal(request.network_genesis_root,
-                             policy.network_genesis_root) ||
-        !qualification_equal(request.task_root, score.task_root) ||
-        !qualification_equal(request.candidate_root, score.candidate_root) ||
-        !qualification_equal(request.package_root, score.package_root) ||
-        !qualification_equal(request.release_root, score.release_root) ||
-        !qualification_equal(request.recipe_root, score.recipe_root) ||
-        !qualification_equal(request.dependency_lock_root,
-                             score.dependency_lock_root) ||
-        !qualification_equal(request.toolchain_capsule_root,
-                             score.api_capsule_root)) {
-        free(wire);
-        return qualification_finish(out, VCS_ZCODE_QUALIFICATION_REQUEST);
-    }
-    free(wire); wire = NULL;
+    verdict = qualification_load_score_policy_request(
+        workspace, score_receipt_root, policy_candidate_root,
+        reproduction_request_root, &score, &policy, &approved, &request);
+    if (verdict != VCS_ZCODE_QUALIFICATION_READY)
+        return qualification_finish(out, verdict);
 
     struct vcs_package_build_receipt reference;
-    struct vcs_build_artifact_manifest_v1 manifest;
-    if (!qualification_load_build(workspace, request.reference_build_root,
-                                  &reference) ||
-        !qualification_load_manifest(workspace, request.output_manifest_root,
-                                     &manifest) ||
-        !qualification_equal(reference.package_root, request.package_root) ||
-        !qualification_equal(reference.recipe_root, request.recipe_root) ||
-        !qualification_equal(reference.lock_root,
-                             request.dependency_lock_root) ||
-        !qualification_equal(manifest.action_sha3, request.action_root))
-        return qualification_finish(out, VCS_ZCODE_QUALIFICATION_REQUEST);
-
     struct vcs_zcode_candidate_v1 candidate;
-    if (!qualification_load(workspace, score.candidate_root,
-                            VCS_ZCODE_CANDIDATE_WIRE_BYTES,
-                            &wire, &wire_len) ||
-        vcs_zcode_candidate_parse(wire, wire_len, &candidate) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_candidate_root(&candidate, observed) != VCS_ZCODE_DEV_OK ||
-        !qualification_equal(observed, score.candidate_root)) {
-        free(wire);
-        return qualification_finish(out, VCS_ZCODE_QUALIFICATION_SCORE);
-    }
-    free(wire); wire = NULL;
-
     uint8_t proof_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32];
     size_t proof_count = 0;
-    if (!qualification_load(workspace, reproduction_proof_set_root,
-                            VCS_ZCODE_PROOF_SET_WIRE_MAX, &wire, &wire_len) ||
-        vcs_zcode_proof_set_parse(wire, wire_len, proof_roots,
-            VCS_ZCODE_PROOF_SET_MAX_RECEIPTS, &proof_count) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_set_root(proof_roots, proof_count, observed) !=
-            VCS_ZCODE_DEV_OK ||
-        !qualification_equal(observed, reproduction_proof_set_root)) {
-        free(wire);
-        return qualification_finish(out, VCS_ZCODE_QUALIFICATION_SCORE);
-    }
-    free(wire); wire = NULL;
+    verdict = qualification_load_reproduction_inputs(
+        workspace, reproduction_proof_set_root, &request, &score, &reference,
+        &candidate, proof_roots, &proof_count);
+    if (verdict != VCS_ZCODE_QUALIFICATION_READY)
+        return qualification_finish(out, verdict);
 
     struct qualification_identity requester_identity;
     bool requester_known = qualification_load_binding(
@@ -321,124 +608,37 @@ vcs_zcode_reproduction_qualify_cas(
         reproduction_works[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS];
     uint8_t reproduction_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32];
     size_t reproduction_count = 0;
-    bool saw_reproduce = false;
 
-    for (size_t i = 0; i < proof_count; i++) {
-        struct vcs_zcode_work_receipt_v1 work;
-        if (!qualification_load(workspace, proof_roots[i],
-                                VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES,
-                                &wire, &wire_len) ||
-            vcs_zcode_work_receipt_parse(wire, wire_len, &work) !=
-                VCS_ZCODE_DEV_OK) {
-            free(wire);
-            return qualification_finish(out, VCS_ZCODE_QUALIFICATION_SCORE);
-        }
-        free(wire); wire = NULL;
-        if (work.work_kind != VCS_ZCODE_WORK_REPRODUCE &&
-            !qualification_equal(work.action_root, request.action_root))
-            continue;
-        saw_reproduce = true;
-        if (vcs_zcode_work_receipt_id(&work, observed) != VCS_ZCODE_DEV_OK ||
-            !qualification_equal(observed, proof_roots[i]) ||
-            vcs_zcode_work_receipt_verify(&work, work.signer_pubkey) !=
-                VCS_ZCODE_DEV_OK ||
-            work.work_kind != VCS_ZCODE_WORK_REPRODUCE ||
-            !qualification_equal(work.action_root, request.action_root) ||
-            work.status != VCS_ZCODE_WORK_PASS || work.exit_status != 0 ||
-            !qualification_equal(work.task_root, request.task_root) ||
-            !qualification_equal(work.candidate_root,
-                                 request.candidate_root) ||
-            !qualification_equal(work.proof_policy_root,
-                                 score.proof_policy_root) ||
-            !qualification_equal(work.toolchain_capsule_root,
-                                 request.toolchain_capsule_root) ||
-            !qualification_equal(work.input_root,
-                                 reproduction_request_root) ||
-            !qualification_equal(work.evidence_root,
-                                 request.output_manifest_root))
-            return qualification_finish(out, VCS_ZCODE_QUALIFICATION_RECEIPT);
-        if (work.started_unix < request.created_unix ||
-            work.finished_unix > request.expires_unix)
-            return qualification_finish(
-                out, VCS_ZCODE_QUALIFICATION_CHALLENGE_EXPIRED);
-        reproduction_works[reproduction_count] = work;
-        memcpy(reproduction_roots[reproduction_count], proof_roots[i], 32);
-        reproduction_count++;
-    }
-    if (reproduction_count == 0) {
-        if (!saw_reproduce && now_unix >= request.expires_unix)
-            return qualification_finish(out,
-                VCS_ZCODE_QUALIFICATION_CHALLENGE_EXPIRED);
-        return qualification_finish(out, VCS_ZCODE_QUALIFICATION_NO_RECEIPT);
-    }
-    for (size_t i = 0; i < reproduction_count; i++) {
-        for (size_t j = i + 1u; j < reproduction_count; j++) {
-            if (!qualification_equal(reproduction_works[i].output_root,
-                                     reproduction_works[j].output_root))
-                return qualification_finish(out,
-                    VCS_ZCODE_QUALIFICATION_CONTRADICTION);
-            if (qualification_equal(reproduction_works[i].signer_pubkey,
-                                    reproduction_works[j].signer_pubkey) ||
-                qualification_equal(reproduction_works[i].lease_id,
-                                    reproduction_works[j].lease_id))
-                return qualification_finish(out,
-                    VCS_ZCODE_QUALIFICATION_DUPLICATE);
-        }
-    }
+    verdict = qualification_collect_reproductions(
+        workspace, reproduction_request_root, &request, &score, proof_roots,
+        proof_count, reproduction_works, reproduction_roots,
+        &reproduction_count, now_unix);
+    if (verdict != VCS_ZCODE_QUALIFICATION_READY)
+        return qualification_finish(out, verdict);
+    verdict = qualification_check_reproduction_pairs(reproduction_works,
+                                                     reproduction_count);
+    if (verdict != VCS_ZCODE_QUALIFICATION_READY)
+        return qualification_finish(out, verdict);
 
     for (size_t i = 0; i < reproduction_count; i++) {
-        const struct vcs_zcode_work_receipt_v1 *work =
-            &reproduction_works[i];
-
-        struct vcs_package_build_receipt rebuild;
-        struct vcs_reproduce_verdict reproduction;
-        if (!qualification_load_build(workspace, work->output_root, &rebuild))
-            return qualification_finish(out,
-                VCS_ZCODE_QUALIFICATION_OUTPUT_MISMATCH);
-        if (rebuild.isolation != VCS_PACKAGE_BUILD_ISOLATION_FULL)
-            return qualification_finish(out,
-                VCS_ZCODE_QUALIFICATION_CONFINEMENT_INSUFFICIENT);
-        vcs_package_reproduce_compare(&reference, &rebuild, &reproduction);
-        out->reproduce_rule = reproduction.rule;
-        if (!reproduction.reproduced)
-            return qualification_finish(out,
-                VCS_ZCODE_QUALIFICATION_OUTPUT_MISMATCH);
-
+        struct vcs_zcode_work_receipt_v1 *work = &reproduction_works[i];
         struct vcs_zcode_approved_reproducer_entry_v1 entry;
-        enum vcs_zcode_shadow_error approval =
-            vcs_zcode_approved_reproducer_set_find(
-                &approved, work->signer_pubkey, request.action_root, epoch,
-                work->finished_unix, &entry);
-        if (approval == VCS_ZCODE_SHADOW_NOT_FOUND ||
-            approval == VCS_ZCODE_SHADOW_ACTION)
-            return qualification_finish(out,
-                VCS_ZCODE_QUALIFICATION_SIGNER_NOT_APPROVED);
-        if (approval != VCS_ZCODE_SHADOW_OK)
-            return qualification_finish(out,
-                VCS_ZCODE_QUALIFICATION_APPROVAL_NOT_VALID);
         struct qualification_identity reproducer_identity;
-        if (!qualification_load_binding(
-                workspace, entry.contributor_binding_root,
-                request.network_genesis_root, work->finished_unix,
-                &reproducer_identity) ||
-            !qualification_equal(reproducer_identity.zid,
-                                 work->signer_pubkey))
-            return qualification_finish(out,
-                VCS_ZCODE_QUALIFICATION_SIGNER_NOT_APPROVED);
-        if (qualification_equal(work->signer_pubkey,
-                                candidate.author_pubkey) ||
-            qualification_equal(work->signer_pubkey, score.lane_signer) ||
-            (requester_known &&
-             qualification_equal(work->signer_pubkey,
-                                 requester_identity.zid)))
+        bool publisher_known = false;
+
+        verdict = qualification_check_reproducer(
+            workspace, &reference, &approved, &request, epoch, work, &entry,
+            &reproducer_identity, out);
+        if (verdict != VCS_ZCODE_QUALIFICATION_READY)
+            return qualification_finish(out, verdict);
+        if (!qualification_check_reproducer_distinct(
+                &candidate, &score, work, requester_known,
+                &requester_identity))
             return qualification_finish(out,
                 VCS_ZCODE_QUALIFICATION_SIGNER_NOT_DISTINCT);
-
-        struct vcs_package_release release;
-        bool publisher_known = qualification_load_release(
-            workspace, request.release_root, &release);
-        if (publisher_known &&
-            memcmp(reproducer_identity.zcl, release.publisher_pubkey, 33) == 0)
+        if (!qualification_check_publisher_distinct(
+                workspace, request.release_root, &reproducer_identity,
+                &publisher_known))
             return qualification_finish(out,
                 VCS_ZCODE_QUALIFICATION_SIGNER_NOT_DISTINCT);
         out->identity_linkage_complete = publisher_known;
