@@ -140,60 +140,89 @@ static int scale_check_incremental_edit(struct codeindex **index,
     return failures;
 }
 
-static int test_codeindex_scale_platform_arm(void)
+/* What one measured cold-build pass leaves behind: the store it opened
+ * (NULL when the open failed), the receipt that store sealed, and the CPU
+ * and wall timings the linearity gate compares. */
+struct scale_cold_result {
+    struct codeindex *index;
+    long long receipt_ms;
+    uint64_t cpu_us;
+    uint64_t wall_us;
+};
+
+/* The two warm questions asked of the reopened 50k index, with the CPU each
+ * query consumed, for the budget checks that follow them. */
+struct scale_warm_answer {
+    bool file_ok;
+    int nfound;
+    uint64_t file_cpu_us;
+    uint64_t find_cpu_us;
+    struct ci_symbol syms[8];
+};
+
+/* One cold-build pass: wipe <root>, generate the fixture, open the store
+ * cold under both clocks, then check the exact file count and the sealed
+ * self-receipt. The label strings carry each pass's size wording so the
+ * 50k and 500k passes share one shape instead of two clones. Returns the
+ * pass's failure count; the measurements land in *out. */
+static int scale_cold_build_pass(const char *root, long files,
+                                 const char *generate_label,
+                                 const char *count_label,
+                                 const char *receipt_label,
+                                 struct scale_cold_result *out)
 {
     int failures = 0;
+    (void)test_rm_rf_recursive(root);
+    printf("  codeindex_scale: generating %ld-file tree...\n", files);
+    SCALE_CHECK(generate_label, scale_generate(root, files));
 
-    /* ── 1: 50k-file cold build + the store's self-receipt ── */
-    (void)test_rm_rf_recursive(FIX_50K);
-    printf("  codeindex_scale: generating %ld-file tree...\n",
-           SCALE_50K_FILES);
-    SCALE_CHECK("generate the 50k-file tree",
-                scale_generate(FIX_50K, SCALE_50K_FILES));
-
-    uint64_t cold50_start_us = scale_monotonic_us();
-    uint64_t cold50_cpu_start_us = test_process_cpu_us();
-    struct codeindex *ci = codeindex_open(FIX_50K);
-    uint64_t cold50_cpu_us = test_process_cpu_us() - cold50_cpu_start_us;
-    uint64_t cold50_us = scale_monotonic_us() - cold50_start_us;
-    long long receipt50_ms = 0, receipt50_files = 0;
-    bool receipt50 = ci &&
-        codeindex_build_cold_ms(ci, &receipt50_ms, &receipt50_files);
+    uint64_t cold_start_us = scale_monotonic_us();
+    uint64_t cold_cpu_start_us = test_process_cpu_us();
+    out->index = codeindex_open(root);
+    uint64_t cold_cpu_us = test_process_cpu_us() - cold_cpu_start_us;
+    uint64_t cold_us = scale_monotonic_us() - cold_start_us;
+    long long receipt_ms = 0, receipt_files = 0;
+    bool receipt = out->index &&
+        codeindex_build_cold_ms(out->index, &receipt_ms, &receipt_files);
     printf("SCALE_BUILD files=%ld ms=%llu receipt_ms=%lld\n",
-           SCALE_50K_FILES, (unsigned long long)(cold50_us / 1000),
-           receipt50_ms);
-    SCALE_CHECK("cold build of 50k files opens with an exact count",
-                ci && codeindex_file_count(ci) == (int)SCALE_50K_FILES);
-    SCALE_CHECK("the store seals its cold-build self-receipt",
-                receipt50 && receipt50_ms > 0 &&
-                receipt50_files == SCALE_50K_FILES);
-    if (!ci) {
-        (void)test_rm_rf_recursive(FIX_50K);
-        return failures + 1;
-    }
+           files, (unsigned long long)(cold_us / 1000), receipt_ms);
+    SCALE_CHECK(count_label,
+                out->index && codeindex_file_count(out->index) == (int)files);
+    SCALE_CHECK(receipt_label,
+                receipt && receipt_ms > 0 &&
+                receipt_files == files);
+    out->receipt_ms = receipt_ms;
+    out->cpu_us = cold_cpu_us;
+    out->wall_us = cold_us;
+    return failures;
+}
 
-    /* ── 2: an incremental refresh leaves the cold-build receipt ── */
-    failures += scale_check_incremental_edit(&ci, receipt50_ms);
-
-    /* ── 3: warm questions, query time only ── */
-    if (ci) { codeindex_close(ci); ci = NULL; }
-    ci = codeindex_open(FIX_50K);
-    SCALE_CHECK("warm reopen of the 50k index", ci != NULL);
+/* Reopen the 50k index warm, ask it the two budgeted questions and print
+ * the query-cost line. Returns the reopen check's failure count; the
+ * answers and their query CPU costs land in *answer. */
+static int scale_warm_reopen_and_query(struct codeindex **index,
+                                       struct scale_warm_answer *answer)
+{
+    int failures = 0;
+    if (*index) { codeindex_close(*index); *index = NULL; }
+    *index = codeindex_open(FIX_50K);
+    SCALE_CHECK("warm reopen of the 50k index", *index != NULL);
     struct ci_file file_rec;
     bool file_found = false;
     /* Query CPU on the calling thread: the budget bounds what an indexed
      * lookup costs (no scan), so a descheduled caller must not fail it. */
     uint64_t q_file_start_us = scale_monotonic_us();
     uint64_t q_file_cpu_start_us = test_thread_cpu_us();
-    bool q_file_ok = ci &&
-        codeindex_file(ci, "src/m000/s00/f00042.c", &file_rec, &file_found) &&
+    bool q_file_ok = *index &&
+        codeindex_file(*index, "src/m000/s00/f00042.c", &file_rec,
+                       &file_found) &&
         file_found;
     uint64_t q_file_cpu_us = test_thread_cpu_us() - q_file_cpu_start_us;
     uint64_t q_file_us = scale_monotonic_us() - q_file_start_us;
-    struct ci_symbol syms[8];
     uint64_t q_find_start_us = scale_monotonic_us();
     uint64_t q_find_cpu_start_us = test_thread_cpu_us();
-    int nfound = ci ? codeindex_find(ci, "scale_sym_49999", syms, 8) : -1;
+    answer->nfound = *index ? codeindex_find(*index, "scale_sym_49999",
+                                             answer->syms, 8) : -1;
     uint64_t q_find_cpu_us = test_thread_cpu_us() - q_find_cpu_start_us;
     uint64_t q_find_us = scale_monotonic_us() - q_find_start_us;
     printf("  codeindex_scale: warm file-lookup cpu_us=%llu symbol-find cpu_us=%llu budget_us=%llu (wall_us=%llu/%llu)\n",
@@ -201,56 +230,96 @@ static int test_codeindex_scale_platform_arm(void)
            (unsigned long long)q_find_cpu_us,
            (unsigned long long)WARM_QUESTION_BUDGET_US,
            (unsigned long long)q_file_us, (unsigned long long)q_find_us);
+    answer->file_ok = q_file_ok;
+    answer->file_cpu_us = q_file_cpu_us;
+    answer->find_cpu_us = q_find_cpu_us;
+    return failures;
+}
+
+/* Check both warm questions against the 50 ms CPU budget. */
+static int scale_check_warm_query_budgets(const struct scale_warm_answer *answer)
+{
+    int failures = 0;
     SCALE_CHECK("warm exact-path lookup costs under 50 ms of CPU",
-                q_file_ok && q_file_cpu_us <= WARM_QUESTION_BUDGET_US);
+                answer->file_ok &&
+                answer->file_cpu_us <= WARM_QUESTION_BUDGET_US);
     SCALE_CHECK("warm symbol find costs under 50 ms of CPU",
-                nfound >= 1 &&
-                strcmp(syms[0].name, "scale_sym_49999") == 0 &&
-                q_find_cpu_us <= WARM_QUESTION_BUDGET_US);
-    if (ci) { codeindex_close(ci); ci = NULL; }
+                answer->nfound >= 1 &&
+                strcmp(answer->syms[0].name, "scale_sym_49999") == 0 &&
+                answer->find_cpu_us <= WARM_QUESTION_BUDGET_US);
+    return failures;
+}
 
-    /* ── 4: 500k-file cold build ── */
-    (void)test_rm_rf_recursive(FIX_500K);
-    printf("  codeindex_scale: generating %ld-file tree...\n",
-           SCALE_500K_FILES);
-    SCALE_CHECK("generate the 500k-file tree",
-                scale_generate(FIX_500K, SCALE_500K_FILES));
-
-    uint64_t cold500_start_us = scale_monotonic_us();
-    uint64_t cold500_cpu_start_us = test_process_cpu_us();
-    struct codeindex *ci500 = codeindex_open(FIX_500K);
-    uint64_t cold500_cpu_us = test_process_cpu_us() - cold500_cpu_start_us;
-    uint64_t cold500_us = scale_monotonic_us() - cold500_start_us;
-    long long receipt500_ms = 0, receipt500_files = 0;
-    bool receipt500 = ci500 &&
-        codeindex_build_cold_ms(ci500, &receipt500_ms, &receipt500_files);
-    printf("SCALE_BUILD files=%ld ms=%llu receipt_ms=%lld\n",
-           SCALE_500K_FILES, (unsigned long long)(cold500_us / 1000),
-           receipt500_ms);
-    SCALE_CHECK("cold build of 500k files opens with an exact count",
-                ci500 && codeindex_file_count(ci500) == (int)SCALE_500K_FILES);
-    SCALE_CHECK("the 500k store seals its cold-build self-receipt",
-                receipt500 && receipt500_ms > 0 &&
-                receipt500_files == SCALE_500K_FILES);
-    if (ci500) { codeindex_close(ci500); ci500 = NULL; }
-
-    /* ── 5: linearity — 10x the files within 30x the time ── */
+/* The linearity gate and the run's verdict line; the verdict must see every
+ * failure so far, hence failures_so_far. Returns this check's own failure
+ * count. */
+static int scale_check_linearity_and_verdict(
+    const struct scale_cold_result *build50,
+    const struct scale_cold_result *build500, int failures_so_far)
+{
+    int failures = 0;
     /* The bound is about the work a cold build does, so it compares the
      * process CPU (user+system, all threads) each build consumed. The two
      * builds run minutes apart on a shared host; wall time would grade
      * whatever load each happened to meet. */
-    double ratio = cold50_cpu_us > 0 ? (double)cold500_cpu_us /
-                                       (double)cold50_cpu_us : 0.0;
-    bool linear = cold50_cpu_us > 0 && cold500_cpu_us > 0 &&
-                  cold500_cpu_us <= cold50_cpu_us * SCALE_LINEARITY_BOUND;
+    double ratio = build50->cpu_us > 0 ? (double)build500->cpu_us /
+                                        (double)build50->cpu_us : 0.0;
+    bool linear = build50->cpu_us > 0 && build500->cpu_us > 0 &&
+                  build500->cpu_us <= build50->cpu_us * SCALE_LINEARITY_BOUND;
     printf("SCALE_LINEARITY ratio=%.1fx bound=%llux cpu50_us=%llu "
            "cpu500_us=%llu wall50_us=%llu wall500_us=%llu\n", ratio,
            (unsigned long long)SCALE_LINEARITY_BOUND,
-           (unsigned long long)cold50_cpu_us,
-           (unsigned long long)cold500_cpu_us,
-           (unsigned long long)cold50_us, (unsigned long long)cold500_us);
+           (unsigned long long)build50->cpu_us,
+           (unsigned long long)build500->cpu_us,
+           (unsigned long long)build50->wall_us,
+           (unsigned long long)build500->wall_us);
     SCALE_CHECK("500k cold build stays within 30x of the 50k build", linear);
-    printf("SCALE_VERDICT=%s\n", linear && failures == 0 ? "PASS" : "FAIL");
+    printf("SCALE_VERDICT=%s\n",
+           linear && failures_so_far + failures == 0 ? "PASS" : "FAIL");
+    return failures;
+}
+
+static int test_codeindex_scale_platform_arm(void)
+{
+    int failures = 0;
+    struct scale_cold_result build50 = {0};
+    struct scale_cold_result build500 = {0};
+    struct scale_warm_answer warm = {0};
+
+    /* ── 1: 50k-file cold build + the store's self-receipt ── */
+    failures += scale_cold_build_pass(
+        FIX_50K, SCALE_50K_FILES,
+        "generate the 50k-file tree",
+        "cold build of 50k files opens with an exact count",
+        "the store seals its cold-build self-receipt", &build50);
+    if (!build50.index) {
+        (void)test_rm_rf_recursive(FIX_50K);
+        return failures + 1;
+    }
+
+    /* ── 2: an incremental refresh leaves the cold-build receipt ── */
+    failures += scale_check_incremental_edit(&build50.index,
+                                             build50.receipt_ms);
+
+    /* ── 3: warm questions, query time only ── */
+    failures += scale_warm_reopen_and_query(&build50.index, &warm);
+    failures += scale_check_warm_query_budgets(&warm);
+    if (build50.index) { codeindex_close(build50.index); build50.index = NULL; }
+
+    /* ── 4: 500k-file cold build ── */
+    failures += scale_cold_build_pass(
+        FIX_500K, SCALE_500K_FILES,
+        "generate the 500k-file tree",
+        "cold build of 500k files opens with an exact count",
+        "the 500k store seals its cold-build self-receipt", &build500);
+    if (build500.index) {
+        codeindex_close(build500.index);
+        build500.index = NULL;
+    }
+
+    /* ── 5: linearity — 10x the files within 30x the time ── */
+    failures += scale_check_linearity_and_verdict(&build50, &build500,
+                                                  failures);
 
     (void)test_rm_rf_recursive(FIX_50K);
     (void)test_rm_rf_recursive(FIX_500K);

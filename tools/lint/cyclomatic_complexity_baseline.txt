@@ -1716,7 +1716,6 @@ tests/harness/src/test_codeindex.c:write_fixture:28
 tests/harness/src/test_codeindex_incremental.c:cin_capture:21
 tests/harness/src/test_codeindex_incremental.c:test_codeindex_incremental:26
 tests/harness/src/test_codeindex_projection.c:test_codeindex_projection_integrity:46
-tests/harness/src/test_codeindex_scale.c:test_codeindex_scale_platform_arm:24
 tests/harness/src/test_coins_applied_frontier.c:test_coins_applied_frontier:44
 tests/harness/src/test_coins_kv.c:ck_case_anchor_coin_byte_flip:19
 tests/harness/src/test_coins_kv.c:ck_case_seed_checkpoint_gate:17
