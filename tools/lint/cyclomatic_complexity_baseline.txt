@@ -1101,7 +1101,6 @@ engine/controllers/src/api_controller_node.c:api_serve_health:17
 engine/controllers/src/api_controller_node.c:api_serve_node_status:26
 engine/controllers/src/api_controller_query_filter_contracts.c:api_query_filter_contract_valid:32
 engine/controllers/src/api_controller_query_filter_contracts.c:api_query_filter_validate:21
-engine/controllers/src/api_controller_resources.c:api_serve_peers:16
 engine/controllers/src/api_controller_routes.c:api_dynamic_route_dispatch:42
 engine/controllers/src/api_controller_routes.c:api_dynamic_route_match:20
 engine/controllers/src/api_controller_service_operations.c:api_service_operation_json:17
