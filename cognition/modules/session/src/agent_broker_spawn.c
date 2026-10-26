@@ -162,41 +162,6 @@ static struct os_sandbox_rlimits spawn_rlimits(void)
     };
 }
 
-/* The spawn argument gate. Each LOG_FAIL below both reports and returns
- * false, so a caller that gets past this helper holds a request that is
- * fully present and whose script token is safe. */
-static bool spawn_request_is_valid(const struct agent_spawn_request *req,
-                                   struct agent_spawn_result *result)
-{
-    if (!req || !result || !req->self_exe || !req->scratch_dir || !req->script)
-        LOG_FAIL(BROKER_TAG, "null argument to spawn");
-    if (!mvap_param_is_safe(req->script))
-        LOG_FAIL(BROKER_TAG, "script name '%s' is not a safe token",
-                 req->script);
-    return true;
-}
-
-/* The socket pair the agent will inherit, with the broker end armed for
- * credential passing. */
-static bool spawn_open_peer_socket(int sv[2])
-{
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
-        LOG_FAIL(BROKER_TAG, "socketpair failed: %s", strerror(errno));
-
-    /* Before the fork, so every byte the child ever sends arrives with the
-     * kernel's own statement of which process sent it. SO_PEERCRED on a pair
-     * would name US on both ends and could not tell the two apart. */
-    int passcred = 1;
-    if (setsockopt(sv[0], SOL_SOCKET, SO_PASSCRED, &passcred,
-                   sizeof(passcred)) != 0) {
-        (void)close(sv[0]);
-        (void)close(sv[1]);
-        LOG_FAIL(BROKER_TAG, "SO_PASSCRED on the broker end failed: %s",
-                 strerror(errno));
-    }
-    return true;
-}
-
 /* The child end of the pair, moved onto the fixed descriptor. */
 static void spawn_child_claim_socket(int sock)
 {
@@ -294,13 +259,28 @@ static void spawn_confined_child(const struct agent_spawn_request *req,
 bool agent_broker_spawn_confined(const struct agent_spawn_request *req,
                                  struct agent_spawn_result *result)
 {
-    if (!spawn_request_is_valid(req, result))
-        return false;
+    if (!req || !result || !req->self_exe || !req->scratch_dir || !req->script)
+        LOG_FAIL(BROKER_TAG, "null argument to spawn");
+    if (!mvap_param_is_safe(req->script))
+        LOG_FAIL(BROKER_TAG, "script name '%s' is not a safe token",
+                 req->script);
     memset(result, 0, sizeof(*result));
 
     int sv[2];
-    if (!spawn_open_peer_socket(sv))
-        return false;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
+        LOG_FAIL(BROKER_TAG, "socketpair failed: %s", strerror(errno));
+
+    /* Before the fork, so every byte the child ever sends arrives with the
+     * kernel's own statement of which process sent it. SO_PEERCRED on a pair
+     * would name US on both ends and could not tell the two apart. */
+    int passcred = 1;
+    if (setsockopt(sv[0], SOL_SOCKET, SO_PASSCRED, &passcred,
+                   sizeof(passcred)) != 0) {
+        (void)close(sv[0]);
+        (void)close(sv[1]);
+        LOG_FAIL(BROKER_TAG, "SO_PASSCRED on the broker end failed: %s",
+                 strerror(errno));
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
