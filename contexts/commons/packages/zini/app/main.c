@@ -14,18 +14,31 @@
 
 #define MAX_INPUT (16u * 1024u * 1024u)
 
+typedef struct {
+  FILE *stream;
+  size_t emitted;
+  bool failed;
+} cli_output;
+
 static void print_entry(void *ctx, const char *section, const char *key,
                         const char *value) {
-  (void)ctx;
-  if (section[0] != '\0')
-    printf("[%s] ", section);
-  printf("%s = %s\n", key, value);
+  cli_output *output = ctx;
+  if (output->failed) return;
+  if (section[0] != '\0' && fprintf(output->stream, "[%s] ", section) < 0) {
+    output->failed = true;
+    return;
+  }
+  if (fprintf(output->stream, "%s = %s\n", key, value) < 0) {
+    output->failed = true;
+    return;
+  }
+  output->emitted++;
 }
 
-int main(void) {
+static int cli_run(FILE *source, FILE *output) {
   static char input[MAX_INPUT];
-  size_t len = fread(input, 1, sizeof(input), stdin);
-  if (ferror(stdin) || !feof(stdin)) {
+  size_t len = fread(input, 1, sizeof(input), source);
+  if (ferror(source) || !feof(source)) {
     fprintf(stderr, "inidump: read error or input over 16 MiB bound\n");
     return 2;
   }
@@ -37,8 +50,23 @@ int main(void) {
     return 1;
   }
 
-  zini_foreach(ini, print_entry, nullptr);
-  fprintf(stderr, "%zu entries\n", zini_count(ini));
+  size_t expected = zini_count(ini);
+  cli_output state = {output, 0, false};
+  zini_foreach(ini, print_entry, &state);
   zini_destroy(ini);
+  if (state.failed || fflush(output) != 0 || ferror(output)) {
+    fputs("inidump: output write failed\n", stderr);
+    return 2;
+  }
+  if (state.emitted != expected) {
+    fprintf(stderr, "inidump: incomplete iteration: emitted %zu of %zu entries\n",
+            state.emitted, expected);
+    return 2;
+  }
+  fprintf(stderr, "%zu entries\n", expected);
   return 0;
+}
+
+int main(void) {
+  return cli_run(stdin, stdout);
 }

@@ -5,6 +5,17 @@
 #include <stdio.h>
 #include <string.h>
 
+static bool cli_omit_entries;
+static void cli_test_foreach(const zini *ini, zini_entry_fn fn, void *ctx) {
+  if (!cli_omit_entries) zini_foreach(ini, fn, ctx);
+}
+
+#define zini_foreach cli_test_foreach
+#define main zini_cli_main
+#include "../app/main.c"
+#undef main
+#undef zini_foreach
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -218,7 +229,62 @@ static void test_embedded_nul(void) {
   zini_destroy(ini);
 }
 
+static int cli_case(const char *text, bool omit, int status, const char *expected) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (fputs(text, source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  cli_omit_entries = omit;
+  int rc = cli_run(source, output);
+  cli_omit_entries = false;
+  if (rc != status) goto cleanup;
+  rewind(output);
+  char bytes[1024];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  if (ferror(output) || n != strlen(expected)) goto cleanup;
+  if (memcmp(bytes, expected, n) != 0) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static int cli_output_error(const char *path, const char *access) {
+  FILE *source = tmpfile(), *output = fopen(path, access);
+  char buffer[4096];
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+  if (fputs("k=v\n", source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (cli_run(source, output) != 2 || !ferror(output)) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output) (void)fclose(output);
+  return failed;
+}
+
+static void test_cli_output(void) {
+  CHECK(cli_case("", false, 0, "") == 0);
+  CHECK(cli_case("k=v\n", true, 2, "") == 0);
+  CHECK(cli_case("k=v\n", false, 0, "k = v\n") == 0);
+  CHECK(cli_case("[z]\nb=2\na=1\n[]\ng=0\n[a]\nk=v\n", false, 0,
+      "g = 0\n[a] k = v\n[z] a = 1\n[z] b = 2\n") == 0);
+#if defined(_WIN32)
+  CHECK(cli_output_error("NUL", "r") == 0);
+#else
+  CHECK(cli_output_error("/dev/null", "r") == 0);
+#endif
+#if defined(__linux__)
+  CHECK(cli_output_error("/dev/full", "w") == 0);
+#endif
+}
+
 int main(void) {
+  test_cli_output();
   test_sections_and_keys();
   test_global_section();
   test_comments();
