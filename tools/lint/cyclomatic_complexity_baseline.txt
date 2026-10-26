@@ -2047,7 +2047,6 @@ tools/command/native_dev_retrieval_command.c:zcl_native_dev_retrieval_stream_jso
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_build:29
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_check:19
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_status:17
-tools/command/native_devagent_hot.c:zcl_native_handle_dev_agent_hot:38
 tools/command/native_devagent_mail.c:dvm_has_ipv4:17
 tools/command/native_devagent_mutate_command.c:zcl_native_handle_dev_agent_mutate:42
 tools/command/native_devagent_queue.c:dvq_compose_task:21

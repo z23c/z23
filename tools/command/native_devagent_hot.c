@@ -203,22 +203,19 @@ static bool dvh_owned_route_group(const struct agent_impact_acc *acc,
     return false;
 }
 
-void zcl_native_handle_dev_agent_hot(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+/* The two BAD_INPUT refusals in one place: a leaf without a path is
+ * undirected, and an absolute or escaping path would leave the inspected
+ * directory. False means the reply already carries the refusal. */
+static bool dvh_validate_path_input(struct zcl_command_reply *reply,
+                                    const char *path)
 {
-    if (!request || !reply)
-        return;
-    int64_t t0_ms = platform_time_monotonic_ms();
-    const struct json_value *input = request->input;
-
-    const char *path = dvh_str(input, "path");
     if (!path || !path[0]) {
         dvh_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                    "BAD_INPUT", "validate",
                    "dev.agent.hot requires a repo-relative source file in "
                    "`path`",
                    "path", "z23 dev agent hot --path=<repo-relative file>");
-        return;
+        return false;
     }
     if (path[0] == '/' || strstr(path, "..") != NULL ||
         strlen(path) >= (size_t)PATH_MAX) {
@@ -227,16 +224,32 @@ void zcl_native_handle_dev_agent_hot(
                    "path must be a repo-relative source file inside the "
                    "inspected directory",
                    path, "z23 dev agent hot --path=<repo-relative file>");
-        return;
+        return false;
     }
+    return true;
+}
 
+/* The inspected directory: the cwd input when given, else the process
+ * working directory, else "." so the join still names a file. Returns the
+ * cwd input when non-empty and NULL otherwise — exactly what the
+ * checkout-root lookup takes. */
+static const char *dvh_inspect_dir(const struct json_value *input,
+                                   char dir[PATH_MAX])
+{
     const char *cwd = dvh_str(input, "cwd");
-    char dir[PATH_MAX];
     if (cwd && cwd[0])
-        (void)snprintf(dir, sizeof(dir), "%s", cwd);
-    else if (!getcwd(dir, sizeof(dir)))
-        (void)snprintf(dir, sizeof(dir), "%s", ".");
+        (void)snprintf(dir, PATH_MAX, "%s", cwd);
+    else if (!getcwd(dir, PATH_MAX))
+        (void)snprintf(dir, PATH_MAX, "%s", ".");
+    return cwd && cwd[0] ? cwd : NULL;
+}
 
+/* The leaf inspects one saved file: join, then prove it readable, so the
+ * refusal can name the joined path. False means the reply already carries
+ * the FILE_NOT_FOUND refusal. */
+static bool dvh_saved_file_readable(struct zcl_command_reply *reply,
+                                    const char *dir, const char *path)
+{
     char full[PATH_MAX];
     int joined = snprintf(full, sizeof(full), "%s/%s", dir, path);
     if (joined <= 0 || (size_t)joined >= sizeof(full) ||
@@ -251,37 +264,153 @@ void zcl_native_handle_dev_agent_hot(
                    "the saved file is not readable under the inspected "
                    "directory",
                    full[0] ? full : path, next);
-        return;
+        return false;
     }
+    return true;
+}
+
+/* The owning group exactly as code.tests routes it: an explicit override
+ * must resolve to exactly one registered group, otherwise the consensus
+ * route names it, otherwise the first registered shared-rule group does.
+ * False means no owning group exists — the caller answers UNRESOLVED. */
+static bool dvh_resolve_owning_group(const struct json_value *input,
+                                     const char *path,
+                                     char wanted[ZCL_TEST_GROUP_FULL_MAX],
+                                     char group[ZCL_TEST_GROUP_FULL_MAX])
+{
+    const char *override = dvh_str(input, "group");
+    if (override && override[0]) {
+        bool resolved = zcl_test_group_resolve_exact(override, wanted);
+        if (!resolved)
+            return false;
+        (void)snprintf(group, ZCL_TEST_GROUP_FULL_MAX, "%s", override);
+        return true;
+    }
+    struct agent_impact_acc acc;
+    bool consensus_risk = false;
+    const char *route = NULL;
+    memset(&acc, 0, sizeof(acc));
+    route = zcl_native_code_route_for_path(path, &acc, &consensus_risk);
+    if (!route)
+        route = "";
+    if (consensus_risk) {
+        bool resolved = zcl_test_group_resolve_exact(route, wanted);
+        if (!resolved)
+            return false;
+    } else {
+        bool owned = dvh_owned_route_group(&acc, wanted);
+        if (!owned)
+            return false;
+    }
+    (void)snprintf(group, ZCL_TEST_GROUP_FULL_MAX, "%s", route);
+    return true;
+}
+
+/* A transcript with no SUITE VERDICT line proves nothing either way; the
+ * refusal names the argv so the reader can rerun it by hand. */
+static void dvh_refuse_verdict_missing(struct zcl_command_reply *reply,
+                                       const char *command_line, int run_rc)
+{
+    char msg[640];
+    (void)snprintf(msg, sizeof(msg),
+                   run_rc < 0
+                       ? "the runner could not start: %s (exit %d)"
+                       : "the runner printed no SUITE VERDICT line: %s "
+                         "(exit %d); nothing about this run may be read "
+                         "as a pass",
+                   command_line, run_rc);
+    dvh_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+               "RUNNER_FAILED", "verify", msg, command_line,
+               command_line);
+}
+
+/* A negative count off a verdict line is garbage, not a signal; it reads
+ * as zero so the reply never invents negative groups. */
+static long long dvh_clamped_count(long long value)
+{
+    return value < 0 ? 0 : value;
+}
+
+/* The verdict off the runner's own counts: any failure is FAIL, one
+ * executed group is PASS, silence is NOSHA. */
+static const char *dvh_verdict_name(const struct zcl_devagent_verdict *vd)
+{
+    long long failed = dvh_clamped_count(vd->groups_failed);
+    long long ran = dvh_clamped_count(vd->groups_ran);
+    return failed > 0 ? "FAIL" : ran >= 1 ? "PASS" : "NOSHA";
+}
+
+/* Exactly one next command per verdict: cheap lint on PASS, the focused
+ * rebuild on FAIL, the gated opt-in rerun on NOSHA. */
+static void dvh_format_next_command(char next[512], const char *verdict,
+                                    const char *group)
+{
+    if (verdict[0] == 'P')
+        (void)snprintf(next, 512, "%s", "make lint-fast");
+    else if (verdict[0] == 'F')
+        (void)snprintf(next, 512,
+                       "ulimit -s unlimited; make -s t-fast ONLY=%s", group);
+    else
+        (void)snprintf(next, 512,
+                       "ZCL_STRESS_TESTS=1 ZCL_PARAMS_TESTS=1 z23 dev agent "
+                       "test --group=%s --exact=true",
+                       group);
+}
+
+/* The executed-run reply: the verdict and its one next command off the
+ * runner's own counts. Mode says which path the leaf took; hotswapped
+ * says what the runner's SUITE VERDICT line itself reported. */
+static void dvh_emit_run_outcome(struct zcl_command_reply *reply,
+                                 const char *path, const char *group,
+                                 bool loop_resident,
+                                 const struct zcl_devagent_verdict *vd,
+                                 int64_t t0_ms)
+{
+    const char *verdict = dvh_verdict_name(vd);
+    char next[512];
+    dvh_format_next_command(next, verdict, group);
+    long long ran = dvh_clamped_count(vd->groups_ran);
+    long long failed = dvh_clamped_count(vd->groups_failed);
+    long long skips = dvh_clamped_count(vd->self_skips);
+    (void)json_push_kv_str(&reply->data, "leaf", DVH_LEAF);
+    (void)json_push_kv_str(&reply->data, "path", path);
+    (void)json_push_kv_str(&reply->data, "group", group);
+    (void)json_push_kv_str(&reply->data, "mode",
+                           loop_resident ? "hotswap" : "rebuild");
+    (void)json_push_kv_bool(&reply->data, "hotswapped", vd->hotswap);
+    (void)json_push_kv_int(&reply->data, "groups_ran", ran);
+    (void)json_push_kv_int(&reply->data, "groups_failed", failed);
+    (void)json_push_kv_int(&reply->data, "self_skips", skips);
+    (void)json_push_kv_int(&reply->data, "elapsed_ms",
+                           dvh_elapsed_ms(t0_ms));
+    (void)json_push_kv_str(&reply->data, "verdict", verdict);
+    dvh_push_next(&reply->data, next);
+}
+
+void zcl_native_handle_dev_agent_hot(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    int64_t t0_ms = platform_time_monotonic_ms();
+    const struct json_value *input = request->input;
+
+    const char *path = dvh_str(input, "path");
+    if (!dvh_validate_path_input(reply, path))
+        return;
+
+    char dir[PATH_MAX];
+    const char *cwd = dvh_inspect_dir(input, dir);
+
+    if (!dvh_saved_file_readable(reply, dir, path))
+        return;
 
     /* ── owning group: the override, or the code.tests route ─────────── */
     char wanted[ZCL_TEST_GROUP_FULL_MAX];
     char group[ZCL_TEST_GROUP_FULL_MAX];
-    const char *override = dvh_str(input, "group");
-    if (override && override[0]) {
-        if (!zcl_test_group_resolve_exact(override, wanted)) {
-            dvh_emit_unresolved(reply, path, t0_ms);
-            return;
-        }
-        (void)snprintf(group, sizeof(group), "%s", override);
-    } else {
-        struct agent_impact_acc acc;
-        bool consensus_risk = false;
-        const char *route = NULL;
-        memset(&acc, 0, sizeof(acc));
-        route = zcl_native_code_route_for_path(path, &acc, &consensus_risk);
-        if (!route)
-            route = "";
-        if (consensus_risk) {
-            if (!zcl_test_group_resolve_exact(route, wanted)) {
-                dvh_emit_unresolved(reply, path, t0_ms);
-                return;
-            }
-        } else if (!dvh_owned_route_group(&acc, wanted)) {
-            dvh_emit_unresolved(reply, path, t0_ms);
-            return;
-        }
-        (void)snprintf(group, sizeof(group), "%s", route);
+    if (!dvh_resolve_owning_group(input, path, wanted, group)) {
+        dvh_emit_unresolved(reply, path, t0_ms);
+        return;
     }
 
     /* ── resident loop or rebuild ──────────────────────────────────────
@@ -289,8 +418,7 @@ void zcl_native_handle_dev_agent_hot(
      * it, so the group runs as-is. Without one the runner is rebuilt
      * first: a verdict off a stale binary is a refusal, not a shortcut. */
     char root[PATH_MAX];
-    if (!zcl_devagent_checkout_root(cwd && cwd[0] ? cwd : NULL, root,
-                                    sizeof(root))) {
+    if (!zcl_devagent_checkout_root(cwd, root, sizeof(root))) {
         char msg[640];
         (void)snprintf(msg, sizeof(msg),
                        "no Z23 checkout root above '%s'; cannot locate "
@@ -333,47 +461,9 @@ void zcl_native_handle_dev_agent_hot(
     int run_rc = zcl_devagent_run_group(root, selector, DVH_TEST_TIMEOUT_MS,
                                         &vd, &truncated);
     if (run_rc < 0 || !vd.present) {
-        char msg[640];
-        (void)snprintf(msg, sizeof(msg),
-                       run_rc < 0
-                           ? "the runner could not start: %s (exit %d)"
-                           : "the runner printed no SUITE VERDICT line: %s "
-                             "(exit %d); nothing about this run may be read "
-                             "as a pass",
-                       command_line, run_rc);
-        dvh_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                   "RUNNER_FAILED", "verify", msg, command_line,
-                   command_line);
+        dvh_refuse_verdict_missing(reply, command_line, run_rc);
         return;
     }
 
-    long long ran = vd.groups_ran < 0 ? 0 : vd.groups_ran;
-    long long failed = vd.groups_failed < 0 ? 0 : vd.groups_failed;
-    long long skips = vd.self_skips < 0 ? 0 : vd.self_skips;
-    const char *verdict = failed > 0 ? "FAIL" : ran >= 1 ? "PASS" : "NOSHA";
-    char next[512];
-    if (verdict[0] == 'P')
-        (void)snprintf(next, sizeof(next), "%s", "make lint-fast");
-    else if (verdict[0] == 'F')
-        (void)snprintf(next, sizeof(next),
-                       "ulimit -s unlimited; make -s t-fast ONLY=%s", group);
-    else
-        (void)snprintf(next, sizeof(next),
-                       "ZCL_STRESS_TESTS=1 ZCL_PARAMS_TESTS=1 z23 dev agent "
-                       "test --group=%s --exact=true",
-                       group);
-
-    (void)json_push_kv_str(&reply->data, "leaf", DVH_LEAF);
-    (void)json_push_kv_str(&reply->data, "path", path);
-    (void)json_push_kv_str(&reply->data, "group", group);
-    (void)json_push_kv_str(&reply->data, "mode",
-                           loop_resident ? "hotswap" : "rebuild");
-    (void)json_push_kv_bool(&reply->data, "hotswapped", vd.hotswap);
-    (void)json_push_kv_int(&reply->data, "groups_ran", ran);
-    (void)json_push_kv_int(&reply->data, "groups_failed", failed);
-    (void)json_push_kv_int(&reply->data, "self_skips", skips);
-    (void)json_push_kv_int(&reply->data, "elapsed_ms",
-                           dvh_elapsed_ms(t0_ms));
-    (void)json_push_kv_str(&reply->data, "verdict", verdict);
-    dvh_push_next(&reply->data, next);
+    dvh_emit_run_outcome(reply, path, group, loop_resident, &vd, t0_ms);
 }
