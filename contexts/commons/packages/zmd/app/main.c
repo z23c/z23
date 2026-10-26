@@ -19,7 +19,8 @@ static bool stdout_write(void *ctx, const char *data, size_t len) {
 
 int main(void) {
   size_t len = fread(input, 1, sizeof(input), stdin);
-  if (ferror(stdin) || !feof(stdin)) {
+  int extra = len == sizeof input ? fgetc(stdin) : EOF;
+  if (ferror(stdin) || extra != EOF) {
     fprintf(stderr, "zmd: read error or input over 16 MiB bound\n");
     return 2;
   }

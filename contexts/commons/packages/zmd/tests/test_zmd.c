@@ -5,6 +5,17 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_source, *cli_sink;
+#undef stdin
+#undef stdout
+#define stdin cli_source
+#define stdout cli_sink
+#define main zmd_cli_main
+#include "../app/main.c"
+#undef main
+#undef stdout
+#undef stdin
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -265,7 +276,71 @@ static void test_long_document(void) {
   EXPECT(md, want);
 }
 
+static bool cli_result(FILE *source, FILE *output, int status, const char *want) {
+  cli_source = source; cli_sink = output;
+  if (zmd_cli_main() != status) return false;
+  rewind(output);
+  char bytes[80];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  return !ferror(output) && n == strlen(want) && memcmp(bytes, want, n) == 0;
+}
+
+static bool cli_padding(FILE *source, size_t count) {
+  char bytes[4096];
+  memset(bytes, '\n', sizeof bytes);
+  while (count) {
+    size_t n = count < sizeof bytes ? count : sizeof bytes;
+    if (fwrite(bytes, 1, n, source) != n) return false;
+    count -= n;
+  }
+  return true;
+}
+
+static bool cli_payload(FILE *source, size_t length, const char *text, bool tail) {
+  size_t n = strlen(text);
+  if (length < n) return false;
+  if (tail) return cli_padding(source, length - n) && fputs(text, source) >= 0;
+  return fputs(text, source) >= 0 && cli_padding(source, length - n);
+}
+
+static int cli_bound_case(size_t length, const char *text, bool tail,
+                          int status, const char *want) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int bad = 1;
+  if (!source || !output) goto cleanup;
+  if (!cli_payload(source, length, text, tail) || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (!cli_result(source, output, status, want)) goto cleanup;
+  bad = 0;
+cleanup:
+  if (source && fclose(source) != 0) bad = 1;
+  if (output && fclose(output) != 0) bad = 1;
+  return bad;
+}
+
+static void test_cli_bound(void) {
+  CHECK(cli_bound_case(ZMD_MAX_INPUT - 1, "# X\n", false, 0, "<h1>X</h1>\n") == 0);
+  CHECK(cli_bound_case(ZMD_MAX_INPUT, "# X\n", false, 0, "<h1>X</h1>\n") == 0);
+  CHECK(cli_bound_case(ZMD_MAX_INPUT + 1, "# X\n", false, 2, "") == 0);
+  CHECK(cli_bound_case(ZMD_MAX_INPUT, "X", true, 0, "<p>X</p>\n") == 0);
+  CHECK(cli_bound_case(ZMD_MAX_INPUT, "\xff", true, 1, "") == 0);
+  CHECK(cli_bound_case(4, "# X\n", false, 0, "<h1>X</h1>\n") == 0);
+#if defined(_WIN32)
+  FILE *source = fopen("NUL", "w");
+#else
+  FILE *source = fopen("/dev/null", "w");
+#endif
+  FILE *output = tmpfile();
+  if (source && output) {
+    CHECK(cli_result(source, output, 2, ""));
+    CHECK(ferror(source));
+  } else CHECK(false);
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+}
+
 int main(void) {
+  test_cli_bound();
   test_headings();
   test_paragraphs();
   test_inline();
