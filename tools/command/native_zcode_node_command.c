@@ -71,6 +71,34 @@ static void znj_fail(struct zcl_command_reply *reply, const char *code,
                            evidence ? evidence : "zcode.node.join");
 }
 
+static bool znj_write_c23_probe(const char *workdir, char *probe_path,
+                                size_t probe_cap)
+{
+    if (!workdir || !workdir[0])
+        return false;
+    int pn = snprintf(probe_path, probe_cap,
+                      "%s/.z23-join-c23-probe.XXXXXX", workdir);
+    if (pn <= 0 || (size_t)pn >= probe_cap)
+        return false;
+    int probe_fd = mkstemp(probe_path);
+    if (probe_fd < 0)
+        return false;
+    FILE *pf = fdopen(probe_fd, "w");
+    if (!pf) {
+        (void)close(probe_fd);
+        (void)unlink(probe_path);
+        return false;
+    }
+    bool wrote = fputs("typedef int z23_c23_probe;\n", pf) >= 0;
+    if (fclose(pf) != 0)
+        wrote = false;
+    if (!wrote) {
+        (void)unlink(probe_path);
+        return false;
+    }
+    return true;
+}
+
 /* First line of `<compiler> --version`, or NULL, but only after that same
  * driver successfully enters strict C23 mode. A version banner proves that
  * a program exists; it does not prove the node can fulfill C23 build work.
@@ -85,30 +113,12 @@ static const char *znj_detect_compiler(const char *workdir, char *version,
     const char *found = NULL;
     if (version && version_cap)
         version[0] = '\0';
-    if (!workdir || !workdir[0])
-        return NULL;
 
     char probe_path[4700];
-    int pn = snprintf(probe_path, sizeof(probe_path),
-                      "%s/.z23-join-c23-probe.XXXXXX", workdir);
-    if (pn <= 0 || (size_t)pn >= sizeof(probe_path))
+    bool wrote_probe = znj_write_c23_probe(workdir, probe_path,
+                                           sizeof(probe_path));
+    if (!wrote_probe)
         return NULL;
-    int probe_fd = mkstemp(probe_path);
-    if (probe_fd < 0)
-        return NULL;
-    FILE *pf = fdopen(probe_fd, "w");
-    if (!pf) {
-        (void)close(probe_fd);
-        (void)unlink(probe_path);
-        return NULL;
-    }
-    bool wrote = fputs("typedef int z23_c23_probe;\n", pf) >= 0;
-    if (fclose(pf) != 0)
-        wrote = false;
-    if (!wrote) {
-        (void)unlink(probe_path);
-        return NULL;
-    }
 
     for (size_t i = 0; i < sizeof(drivers) / sizeof(drivers[0]); i++) {
         const char *argv[] = { drivers[i], "--version", NULL };
@@ -180,130 +190,219 @@ static int znj_line_value(const char *line, const char *flag)
     return negated ? !value : value;
 }
 
-/* Rewrite <datadir>/z23.conf so it carries exactly the flags we decided,
- * preserving every OTHER line the operator put there. Written to a sibling
- * temp file and renamed, so a crash mid-write can never leave a half-parsed
- * config behind. Returns false with `why` filled on any failure. */
-static bool znj_write_conf(const char *path, bool build_worker,
-                           bool *changed, char *why, size_t why_cap)
+/* "changed" is about the FLAGS' VALUES, not the bytes: re-running join
+ * on an already-joined node rewrites the same two lines and must report
+ * that nothing new needs a restart — but a node whose buildworker
+ * answer actually flipped must report that it does. */
+static void znj_set_conf_changed(bool *changed, int prev_packagehost,
+                                 int prev_buildworker, bool build_worker)
 {
+    if (changed)
+        *changed = prev_packagehost != 1 ||
+                   prev_buildworker != (build_worker ? 1 : 0);
+}
+
+static bool znj_walk_conf_lines(char *existing, bool ok,
+                                int *prev_packagehost, int *prev_buildworker,
+                                bool (*keep_line)(void *ctx, const char *line),
+                                void *ctx)
+{
+    for (char *line = existing; ok && line && *line;) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+        int v;
+        if ((v = znj_line_value(line, "packagehost")) >= 0) {
+            *prev_packagehost = v;
+        } else if ((v = znj_line_value(line, "buildworker")) >= 0) {
+            *prev_buildworker = v;
+        } else if (strncmp(line, "# Written by `z23 join`", 23) != 0) {
+            ok = keep_line(ctx, line);
+        }
+        if (!nl)
+            break;
+        line = nl + 1;
+    }
+    return ok;
+}
+
 #if defined(_WIN32)
-    char directory[4700];
-    const char *leaf = NULL;
+static const char *znj_win_last_sep(const char *path)
+{
     const char *slash = strrchr(path, '/');
     const char *backslash = strrchr(path, '\\');
     if (!slash || (backslash && backslash > slash))
         slash = backslash;
+    return slash;
+}
+
+static bool znj_win_split_conf_path(const char *path, char *directory,
+                                    size_t directory_cap, const char **leaf,
+                                    char *why, size_t why_cap)
+{
+    const char *slash = znj_win_last_sep(path);
     size_t directory_len = slash ? (size_t)(slash - path) : 0u;
     if (slash && directory_len == 2u && path[1] == ':')
         directory_len++;
     if (!slash || slash == path || !slash[1] ||
-        directory_len >= sizeof(directory)) {
+        directory_len >= directory_cap) {
         snprintf(why, why_cap, "config file path is invalid or too long");
         return false;
     }
     memcpy(directory, path, directory_len);
     directory[directory_len] = '\0';
-    leaf = slash + 1;
+    *leaf = slash + 1;
+    return true;
+}
 
-    struct platform_directory_transaction dir;
-    struct platform_directory_child source, staged;
-    platform_directory_transaction_init(&dir);
+static bool znj_win_read_existing(struct platform_directory_transaction *dir,
+                                  const char *directory, const char *leaf,
+                                  char **existing_out, size_t *existing_len_out,
+                                  char *why, size_t why_cap)
+{
+    struct platform_directory_child source;
+    platform_directory_transaction_init(dir);
     platform_directory_child_init(&source);
-    platform_directory_child_init(&staged);
-    char *existing = NULL;
-    size_t existing_len = 0;
-    bool ok = platform_directory_transaction_open(&dir, directory);
+    *existing_out = NULL;
+    *existing_len_out = 0;
+    bool ok = platform_directory_transaction_open(dir, directory);
     if (!ok) {
         snprintf(why, why_cap, "config directory is not private or safe");
         return false;
     }
 
     enum platform_directory_result opened =
-        platform_directory_child_open_result(&dir, leaf, false, false,
+        platform_directory_child_open_result(dir, leaf, false, false,
                                              &source, NULL);
     if (opened == PLATFORM_DIRECTORY_OK) {
         struct platform_directory_child_info info;
         ok = platform_directory_child_info(&source, &info) &&
              info.size <= ZNJ_CONF_MAX_BYTES;
         if (ok) {
-            existing_len = (size_t)info.size;
-            existing = zcl_malloc(existing_len + 1u,
-                                  "zcode.node.join.existing-config");
-            ok = existing != NULL &&
-                 platform_directory_child_read_exact(&source, existing,
-                                                     existing_len, 0);
+            *existing_len_out = (size_t)info.size;
+            *existing_out = zcl_malloc(*existing_len_out + 1u,
+                                       "zcode.node.join.existing-config");
+            ok = *existing_out != NULL &&
+                 platform_directory_child_read_exact(&source, *existing_out,
+                                                     *existing_len_out, 0);
             if (ok)
-                existing[existing_len] = '\0';
+                (*existing_out)[*existing_len_out] = '\0';
         }
         platform_directory_child_close(&source);
         if (!ok) {
-            free(existing);
-            platform_directory_transaction_close(&dir);
+            free(*existing_out);
+            platform_directory_transaction_close(dir);
             snprintf(why, why_cap,
                      "existing config file is unreadable or larger than %u bytes",
                      ZNJ_CONF_MAX_BYTES);
             return false;
         }
     } else if (opened != PLATFORM_DIRECTORY_MISSING) {
-        platform_directory_transaction_close(&dir);
+        platform_directory_transaction_close(dir);
         snprintf(why, why_cap, "existing config file is not a safe regular file");
         return false;
     }
+    return true;
+}
 
+struct znj_win_conf_buf {
+    char *output;
+    size_t len;
+};
+
+static bool znj_win_keep_line(void *ctx, const char *line)
+{
+    struct znj_win_conf_buf *buf = ctx;
+    size_t line_len = strlen(line);
+    memcpy(buf->output + buf->len, line, line_len);
+    buf->len += line_len;
+    buf->output[buf->len++] = '\n';
+    return true;
+}
+
+static bool znj_win_publish_conf(struct platform_directory_transaction *dir,
+                                 const char *leaf, const char *output,
+                                 size_t output_len, bool ok)
+{
+    struct platform_directory_child staged;
+    platform_directory_child_init(&staged);
+    char staged_leaf[64];
+    int staged_n = snprintf(staged_leaf, sizeof(staged_leaf),
+                            "z23.conf.join.%ld.tmp", (long)_getpid());
+    bool staged_created = false;
+    ok = ok && staged_n > 0 && (size_t)staged_n < sizeof(staged_leaf) &&
+         platform_directory_child_create(dir, staged_leaf, &staged) &&
+         (staged_created = true) &&
+         platform_directory_child_write_exact(&staged, output, output_len,
+                                              0) &&
+         platform_directory_child_flush(&staged) &&
+         platform_directory_child_replace(dir, &staged, leaf, false) &&
+         platform_directory_transaction_flush(dir);
+    platform_directory_child_close(&staged);
+    if (!ok && staged_created)
+        (void)platform_directory_child_unlink(dir, staged_leaf, true);
+    return ok;
+}
+
+static char *znj_win_render_conf(char *existing, size_t existing_len,
+                                 bool build_worker, size_t *output_len,
+                                 int *prev_packagehost, int *prev_buildworker,
+                                 bool *tail_ok)
+{
     static const char header[] =
         "# Written by `z23 join`. Command-line flags still win.\n";
     size_t output_cap = existing_len + sizeof(header) + 64u;
     char *output = zcl_malloc(output_cap, "zcode.node.join.config-output");
+    if (!output)
+        return NULL;
+    struct znj_win_conf_buf buf = { output, sizeof(header) - 1u };
+    memcpy(output, header, buf.len);
+    *prev_packagehost = -1;
+    *prev_buildworker = -1;
+    (void)znj_walk_conf_lines(existing, true, prev_packagehost,
+                              prev_buildworker, znj_win_keep_line, &buf);
+    int tail = snprintf(output + buf.len, output_cap - buf.len,
+                        "packagehost=1\nbuildworker=%d\n",
+                        build_worker ? 1 : 0);
+    *tail_ok = tail > 0 && (size_t)tail < output_cap - buf.len;
+    if (*tail_ok)
+        buf.len += (size_t)tail;
+    *output_len = buf.len;
+    return output;
+}
+
+static bool znj_write_conf_windows(const char *path, bool build_worker,
+                                   bool *changed, char *why, size_t why_cap)
+{
+    char directory[4700];
+    const char *leaf = NULL;
+    bool split = znj_win_split_conf_path(path, directory, sizeof(directory),
+                                         &leaf, why, why_cap);
+    if (!split)
+        return false;
+
+    struct platform_directory_transaction dir;
+    char *existing = NULL;
+    size_t existing_len = 0;
+    bool read_ok = znj_win_read_existing(&dir, directory, leaf, &existing,
+                                         &existing_len, why, why_cap);
+    if (!read_ok)
+        return false;
+
+    int prev_packagehost = -1;
+    int prev_buildworker = -1;
+    size_t output_len = 0;
+    bool tail_ok = false;
+    char *output = znj_win_render_conf(existing, existing_len, build_worker,
+                                       &output_len, &prev_packagehost,
+                                       &prev_buildworker, &tail_ok);
     if (!output) {
         free(existing);
         platform_directory_transaction_close(&dir);
         snprintf(why, why_cap, "cannot allocate config output");
         return false;
     }
-    size_t output_len = sizeof(header) - 1u;
-    memcpy(output, header, output_len);
-    int prev_packagehost = -1, prev_buildworker = -1;
-    for (char *line = existing; line && *line;) {
-        char *nl = strchr(line, '\n');
-        if (nl)
-            *nl = '\0';
-        int v;
-        if ((v = znj_line_value(line, "packagehost")) >= 0) {
-            prev_packagehost = v;
-        } else if ((v = znj_line_value(line, "buildworker")) >= 0) {
-            prev_buildworker = v;
-        } else if (strncmp(line, "# Written by `z23 join`", 23) != 0) {
-            size_t line_len = strlen(line);
-            memcpy(output + output_len, line, line_len);
-            output_len += line_len;
-            output[output_len++] = '\n';
-        }
-        if (!nl)
-            break;
-        line = nl + 1;
-    }
-    int tail = snprintf(output + output_len, output_cap - output_len,
-                        "packagehost=1\nbuildworker=%d\n",
-                        build_worker ? 1 : 0);
-    ok = tail > 0 && (size_t)tail < output_cap - output_len;
-    if (ok)
-        output_len += (size_t)tail;
-
-    char staged_leaf[64];
-    int staged_n = snprintf(staged_leaf, sizeof(staged_leaf),
-                            "z23.conf.join.%ld.tmp", (long)_getpid());
-    bool staged_created = false;
-    ok = ok && staged_n > 0 && (size_t)staged_n < sizeof(staged_leaf) &&
-         platform_directory_child_create(&dir, staged_leaf, &staged) &&
-         (staged_created = true) &&
-         platform_directory_child_write_exact(&staged, output, output_len, 0) &&
-         platform_directory_child_flush(&staged) &&
-         platform_directory_child_replace(&dir, &staged, leaf, false) &&
-         platform_directory_transaction_flush(&dir);
-    platform_directory_child_close(&staged);
-    if (!ok && staged_created)
-        (void)platform_directory_child_unlink(&dir, staged_leaf, true);
+    bool ok = znj_win_publish_conf(&dir, leaf, output, output_len, tail_ok);
     free(output);
     free(existing);
     platform_directory_transaction_close(&dir);
@@ -311,58 +410,57 @@ static bool znj_write_conf(const char *path, bool build_worker,
         snprintf(why, why_cap, "cannot atomically publish %s", path);
         return false;
     }
-    if (changed)
-        *changed = prev_packagehost != 1 ||
-                   prev_buildworker != (build_worker ? 1 : 0);
+    znj_set_conf_changed(changed, prev_packagehost, prev_buildworker,
+                         build_worker);
     return true;
+}
 #else
-    char *existing = NULL;
-    size_t existing_len = 0;
+static bool znj_posix_keep_line(void *ctx, const char *line)
+{
+    FILE *f = ctx;
+    return fprintf(f, "%s\n", line) >= 0;
+}
+
+static bool znj_posix_read_existing(const char *path, char **existing,
+                                    size_t *existing_len, char *why,
+                                    size_t why_cap)
+{
+    *existing = NULL;
+    *existing_len = 0;
     if (access(path, F_OK) == 0 &&
-        !zcl_read_whole_file_text(path, ZNJ_CONF_MAX_BYTES, &existing,
-                                  &existing_len, "zcode.node.join")) {
+        !zcl_read_whole_file_text(path, ZNJ_CONF_MAX_BYTES, existing,
+                                  existing_len, "zcode.node.join")) {
         snprintf(why, why_cap,
                  "existing config file is unreadable or larger than %u bytes",
                  ZNJ_CONF_MAX_BYTES);
         return false;
     }
+    return true;
+}
 
-    char tmp[4700];
-    int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    if (n <= 0 || (size_t)n >= sizeof(tmp)) {
-        free(existing);
+static bool znj_posix_open_temp(const char *path, char *tmp, size_t tmp_cap,
+                                FILE **out, char **existing, char *why,
+                                size_t why_cap)
+{
+    int n = snprintf(tmp, tmp_cap, "%s.tmp", path);
+    if (n <= 0 || (size_t)n >= tmp_cap) {
+        free(*existing);
+        *existing = NULL;
         snprintf(why, why_cap, "config file path is too long");
         return false;
     }
-
-    FILE *f = fopen(tmp, "we");
-    if (!f) {
-        free(existing);
+    *out = fopen(tmp, "we");
+    if (!*out) {
+        free(*existing);
+        *existing = NULL;
         snprintf(why, why_cap, "cannot create %s", tmp);
         return false;
     }
+    return true;
+}
 
-    bool ok = fputs("# Written by `z23 join`. Command-line flags still win.\n",
-                    f) >= 0;
-    /* -1 = the flag is absent from the existing file. A later line wins, as
-     * with any repeated setting. */
-    int prev_packagehost = -1, prev_buildworker = -1;
-    for (char *line = existing; ok && line && *line;) {
-        char *nl = strchr(line, '\n');
-        if (nl)
-            *nl = '\0';
-        int v;
-        if ((v = znj_line_value(line, "packagehost")) >= 0) {
-            prev_packagehost = v;
-        } else if ((v = znj_line_value(line, "buildworker")) >= 0) {
-            prev_buildworker = v;
-        } else if (strncmp(line, "# Written by `z23 join`", 23) != 0) {
-            ok = fprintf(f, "%s\n", line) >= 0;
-        }
-        if (!nl)
-            break;
-        line = nl + 1;
-    }
+static bool znj_posix_write_flags(FILE *f, bool ok, bool build_worker)
+{
     ok = ok && fprintf(f, "packagehost=1\n") > 0;
     ok = ok && fprintf(f, "buildworker=%d\n", build_worker ? 1 : 0) > 0;
     /* The bytes must be on the platter before the rename publishes them:
@@ -370,19 +468,11 @@ static bool znj_write_conf(const char *path, bool build_worker,
     ok = ok && fflush(f) == 0 && fsync(fileno(f)) == 0;
     if (fclose(f) != 0)
         ok = false;
+    return ok;
+}
 
-    if (!ok) {
-        (void)unlink(tmp);
-        free(existing);
-        snprintf(why, why_cap, "cannot write %s", tmp);
-        return false;
-    }
-    if (rename(tmp, path) != 0) {
-        (void)unlink(tmp);
-        free(existing);
-        snprintf(why, why_cap, "cannot publish %s", path);
-        return false;
-    }
+static void znj_posix_fsync_parent(const char *path)
+{
     /* The rename is what publishes the file, and a rename is itself only a
      * directory update: fsyncing the bytes leaves a window where the config
      * can vanish entirely on power loss even though it was never torn.
@@ -399,15 +489,65 @@ static bool znj_write_conf(const char *path, bool build_worker,
             (void)close(dfd);
         }
     }
+}
+
+static bool znj_write_conf_posix(const char *path, bool build_worker,
+                                 bool *changed, char *why, size_t why_cap)
+{
+    char *existing = NULL;
+    size_t existing_len = 0;
+    bool read_ok = znj_posix_read_existing(path, &existing, &existing_len,
+                                           why, why_cap);
+    if (!read_ok)
+        return false;
+
+    char tmp[4700];
+    FILE *f = NULL;
+    bool opened = znj_posix_open_temp(path, tmp, sizeof(tmp), &f, &existing,
+                                      why, why_cap);
+    if (!opened)
+        return false;
+
+    bool ok = fputs("# Written by `z23 join`. Command-line flags still win.\n",
+                    f) >= 0;
+    /* -1 = the flag is absent from the existing file. A later line wins, as
+     * with any repeated setting. */
+    int prev_packagehost = -1, prev_buildworker = -1;
+    ok = znj_walk_conf_lines(existing, ok, &prev_packagehost,
+                             &prev_buildworker, znj_posix_keep_line, f);
+    ok = znj_posix_write_flags(f, ok, build_worker);
+
+    if (!ok) {
+        (void)unlink(tmp);
+        free(existing);
+        snprintf(why, why_cap, "cannot write %s", tmp);
+        return false;
+    }
+    if (rename(tmp, path) != 0) {
+        (void)unlink(tmp);
+        free(existing);
+        snprintf(why, why_cap, "cannot publish %s", path);
+        return false;
+    }
+    znj_posix_fsync_parent(path);
     free(existing);
-    /* "changed" is about the FLAGS' VALUES, not the bytes: re-running join
-     * on an already-joined node rewrites the same two lines and must report
-     * that nothing new needs a restart — but a node whose buildworker
-     * answer actually flipped must report that it does. */
-    if (changed)
-        *changed = prev_packagehost != 1 ||
-                   prev_buildworker != (build_worker ? 1 : 0);
+    znj_set_conf_changed(changed, prev_packagehost, prev_buildworker,
+                         build_worker);
     return true;
+}
+#endif
+
+/* Rewrite <datadir>/z23.conf so it carries exactly the flags we decided,
+ * preserving every OTHER line the operator put there. Written to a sibling
+ * temp file and renamed, so a crash mid-write can never leave a half-parsed
+ * config behind. Returns false with `why` filled on any failure. */
+static bool znj_write_conf(const char *path, bool build_worker,
+                           bool *changed, char *why, size_t why_cap)
+{
+#if defined(_WIN32)
+    return znj_write_conf_windows(path, build_worker, changed, why, why_cap);
+#else
+    return znj_write_conf_posix(path, build_worker, changed, why, why_cap);
 #endif
 }
 
@@ -427,12 +567,11 @@ static bool znj_push_tier(struct json_value *data, const char *key,
     return ok;
 }
 
-void zcl_native_handle_zcode_node_join(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static bool znj_join_paths(const struct zcl_command_request *request,
+                           struct zcl_command_reply *reply,
+                           const char **datadir_out, char *conf_path,
+                           size_t conf_cap)
 {
-    if (!request || !reply)
-        return;
-
     const struct json_value *dd_in = json_get(request->input, "datadir");
     const char *datadir = dd_in ? json_get_str(dd_in) : NULL;
     if (!datadir || !datadir[0])
@@ -440,7 +579,7 @@ void zcl_native_handle_zcode_node_join(
     if (!datadir || !datadir[0]) {
         znj_fail(reply, "MISSING_DATADIR",
                  "no datadir given (input datadir or -datadir=DIR)", NULL);
-        return;
+        return false;
     }
 
     /* Fail closed on a datadir that does not exist rather than minting one: a
@@ -452,81 +591,86 @@ void zcl_native_handle_zcode_node_join(
                  "that datadir does not exist; start the node once so it "
                  "creates its data directory, or pass -datadir=DIR for the "
                  "instance you meant", datadir);
-        return;
+        return false;
     }
 
-    char conf_path[4600];
-    int n = snprintf(conf_path, sizeof(conf_path), "%s/%s", datadir,
+    int n = snprintf(conf_path, conf_cap, "%s/%s", datadir,
                      ZCL_NODE_CONFIG_FILENAME);
-    if (n <= 0 || (size_t)n >= sizeof(conf_path)) {
+    if (n <= 0 || (size_t)n >= conf_cap) {
         znj_fail(reply, "DATADIR_PATH_TOO_LONG",
                  "the datadir path is too long to hold a config file",
                  datadir);
-        return;
+        return false;
     }
+    *datadir_out = datadir;
+    return true;
+}
 
-    struct zcl_zcode_join_posture posture;
-    if (!zcl_zcode_join_posture_fill(&posture)) {
-        znj_fail(reply, "JOIN_POSTURE_UNREADABLE",
-                 "this process could not read its own join posture", NULL);
-        return;
-    }
+struct znj_compiler_labels {
+    const char *name;
+    const char *version;
+    const char *wrote_flags;
+};
 
-    char compiler_version[256];
-    const char *compiler =
-        znj_detect_compiler(datadir, compiler_version,
-                            sizeof(compiler_version));
+static void znj_compiler_labels(const char *compiler, const char *version,
+                                struct znj_compiler_labels *out)
+{
+    out->name = compiler ? compiler : "";
+    out->version = compiler ? version : "";
+    out->wrote_flags = compiler ? "packagehost=1 buildworker=1"
+                                : "packagehost=1 buildworker=0";
+}
 
-    char why[256] = {0};
-    bool changed = false;
-    if (!znj_write_conf(conf_path, compiler != NULL, &changed, why,
-                        sizeof(why))) {
-        znj_fail(reply, "CONFIG_WRITE_FAILED",
-                 why[0] ? why : "the config file could not be written",
-                 conf_path);
-        return;
-    }
-
+static bool znj_push_join_scalars(struct json_value *data, const char *datadir,
+                                  const char *conf_path,
+                                  const struct zcl_zcode_join_posture *posture,
+                                  const char *compiler, bool changed,
+                                  const struct znj_compiler_labels *labels)
+{
     /* The dispatcher already ran zcl_command_reply_init with this leaf's
      * declared output_schema; re-initializing here would discard it. */
-    struct json_value *data = &reply->data;
-    bool ok =
-        json_push_kv_str(data, "datadir", datadir) &&
-        json_push_kv_str(data, "config_file", conf_path) &&
-        zcl_zcode_join_posture_push_json(data, &posture) &&
-        json_push_kv_bool(data, "compiler_present", compiler != NULL) &&
-        json_push_kv_str(data, "compiler", compiler ? compiler : "") &&
-        json_push_kv_str(data, "compiler_version",
-                         compiler ? compiler_version : "") &&
-        json_push_kv_str(data, "wrote_flags",
-                         compiler ? "packagehost=1 buildworker=1"
-                                  : "packagehost=1 buildworker=0") &&
-        json_push_kv_bool(data, "config_changed", changed) &&
-        /* File facts, distinct from this process's flags. Swarm needs only
-         * packagehost=1; `joined` stays "both flags on THIS process". */
-        json_push_kv_bool(data, "config_package_hosting", true) &&
-        json_push_kv_bool(data, "config_build_worker", compiler != NULL) &&
-        json_push_kv_bool(data, "swarm_member", true) &&
-        json_push_kv_str(
-            data, "swarm_member_means",
-            "swarm_member is the written file (packagehost=1); joined is "
-            "this process's flags, not the file");
+    return json_push_kv_str(data, "datadir", datadir) &&
+           json_push_kv_str(data, "config_file", conf_path) &&
+           zcl_zcode_join_posture_push_json(data, posture) &&
+           json_push_kv_bool(data, "compiler_present", compiler != NULL) &&
+           json_push_kv_str(data, "compiler", labels->name) &&
+           json_push_kv_str(data, "compiler_version", labels->version) &&
+           json_push_kv_str(data, "wrote_flags", labels->wrote_flags) &&
+           json_push_kv_bool(data, "config_changed", changed) &&
+           /* File facts, distinct from this process's flags. Swarm needs only
+            * packagehost=1; `joined` stays "both flags on THIS process". */
+           json_push_kv_bool(data, "config_package_hosting", true) &&
+           json_push_kv_bool(data, "config_build_worker", compiler != NULL);
+}
+
+static bool znj_push_swarm_membership(struct json_value *data,
+                                      const char *compiler)
+{
+    bool ok = json_push_kv_bool(data, "swarm_member", true) &&
+              json_push_kv_str(
+                  data, "swarm_member_means",
+                  "swarm_member is the written file (packagehost=1); joined is "
+                  "this process's flags, not the file");
     if (!compiler)
         ok = ok && json_push_kv_str(
                        data, "build_worker_note",
                        "no C23 compiler found on this host, so buildworker "
                        "stays 0: advertising compile capacity this box "
                        "cannot deliver would fail every request it wins");
+    return ok;
+}
 
-    ok = ok &&
-         znj_push_tier(data, "swarm_tier", "swarm", "-packagehost=1", false,
-                       "package hosting over ordinary P2P peers; no coins, "
-                       "no on-chain identity, no invitation") &&
-         znj_push_tier(data, "dht_tier", "dht",
-                       "-noisetransport plus an ACTIVE on-chain ZID anchor "
-                       "(its registration spends a fee)", true,
-                       "an optional upgrade, never a blocker: a node "
-                       "without an anchor is still a full swarm member");
+static bool znj_push_join_outcome(struct json_value *data)
+{
+    bool ok =
+        znj_push_tier(data, "swarm_tier", "swarm", "-packagehost=1", false,
+                      "package hosting over ordinary P2P peers; no coins, "
+                      "no on-chain identity, no invitation") &&
+        znj_push_tier(data, "dht_tier", "dht",
+                      "-noisetransport plus an ACTIVE on-chain ZID anchor "
+                      "(its registration spends a fee)", true,
+                      "an optional upgrade, never a blocker: a node "
+                      "without an anchor is still a full swarm member");
 
     /* ── the composed verdict, from THIS vantage ───────────────────────────
      *
@@ -585,13 +729,12 @@ void zcl_native_handle_zcode_node_join(
                           "command started, stopped and signalled nothing. "
                           "Substitute your own unit name if it is not "
                           "zclassic23.");
+    return ok;
+}
 
-    if (!ok) {
-        znj_fail(reply, "JOIN_REPLY_REFUSED",
-                 "the join reply object refused a field", conf_path);
-        return;
-    }
-
+static void znj_add_offered_next(struct zcl_command_reply *reply,
+                                 const char *datadir)
+{
     /* ONE typed next command, hard-validated against the registry
      * (engine/modules/kernel/src/command_registry.c:1993-2034) rather than an untyped
      * next_safe_command string: after the restart, `zcode package offered`
@@ -610,4 +753,66 @@ void zcl_native_handle_zcode_node_join(
         reply, "zcode.package.offered",
         (nn > 0 && nn < sizeof(next_in)) ? next_in : "{}",
         "after the restart above, verify resident Commons service");
+}
+
+static bool znj_emit_join_reply(struct zcl_command_reply *reply,
+                                const char *datadir, const char *conf_path,
+                                const struct zcl_zcode_join_posture *posture,
+                                const char *compiler,
+                                const char *compiler_version, bool changed)
+{
+    struct znj_compiler_labels labels;
+    znj_compiler_labels(compiler, compiler_version, &labels);
+    struct json_value *data = &reply->data;
+    bool ok = znj_push_join_scalars(data, datadir, conf_path, posture,
+                                    compiler, changed, &labels) &&
+              znj_push_swarm_membership(data, compiler) &&
+              znj_push_join_outcome(data);
+    if (!ok) {
+        znj_fail(reply, "JOIN_REPLY_REFUSED",
+                 "the join reply object refused a field", conf_path);
+        return false;
+    }
+    znj_add_offered_next(reply, datadir);
+    return true;
+}
+
+void zcl_native_handle_zcode_node_join(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+
+    const char *datadir = NULL;
+    char conf_path[4600];
+    bool paths = znj_join_paths(request, reply, &datadir, conf_path,
+                                sizeof(conf_path));
+    if (!paths)
+        return;
+
+    struct zcl_zcode_join_posture posture;
+    if (!zcl_zcode_join_posture_fill(&posture)) {
+        znj_fail(reply, "JOIN_POSTURE_UNREADABLE",
+                 "this process could not read its own join posture", NULL);
+        return;
+    }
+
+    char compiler_version[256];
+    const char *compiler =
+        znj_detect_compiler(datadir, compiler_version,
+                            sizeof(compiler_version));
+
+    char why[256] = {0};
+    bool changed = false;
+    if (!znj_write_conf(conf_path, compiler != NULL, &changed, why,
+                        sizeof(why))) {
+        znj_fail(reply, "CONFIG_WRITE_FAILED",
+                 why[0] ? why : "the config file could not be written",
+                 conf_path);
+        return;
+    }
+
+    if (!znj_emit_join_reply(reply, datadir, conf_path, &posture, compiler,
+                             compiler_version, changed))
+        return;
 }
