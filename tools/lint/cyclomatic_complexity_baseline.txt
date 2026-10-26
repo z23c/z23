@@ -1461,7 +1461,6 @@ engine/services/src/property_catalog_service.c:pc_znam_list:17
 engine/services/src/property_catalog_service.c:pc_zslp_list:18
 engine/services/src/property_catalog_service.c:property_catalog_list_with_sources:31
 engine/services/src/property_grant_commit.c:commit_attempt:35
-engine/services/src/quorum_oracle_service.c:quorum_oracle_probe:25
 engine/services/src/recovery_policy.c:policy_load_from_env:16
 engine/services/src/reindex_epilogue.c:derive_authority_from_node_db_utxos:35
 engine/services/src/rolling_anchor_service.c:ra_load_locked:23

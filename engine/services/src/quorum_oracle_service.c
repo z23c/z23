@@ -232,6 +232,59 @@ static void qo_probe_peer(int height,
     }
 }
 
+static int qo_count_source_agreements(const struct quorum_oracle_result *out,
+                                      int counts[QO_SRC_NUM])
+{
+    int total_with_hash = 0;
+    for (int i = 0; i < QO_SRC_NUM; i++) {
+        if (!out->by_source[i].present) continue;
+        if (out->by_source[i].error) continue;
+        if (out->by_source[i].hash_hex[0] == '\0') continue;
+        total_with_hash++;
+        for (int j = 0; j < QO_SRC_NUM; j++) {
+            if (!out->by_source[j].present || out->by_source[j].error)
+                continue;
+            if (out->by_source[j].hash_hex[0] == '\0') continue;
+            if (strcasecmp(out->by_source[i].hash_hex,
+                           out->by_source[j].hash_hex) == 0) {
+                counts[i]++;
+            }
+        }
+    }
+    return total_with_hash;
+}
+
+static void qo_find_largest_agreement_group(const int counts[QO_SRC_NUM],
+                                            int *best_idx, int *best_count)
+{
+    *best_idx = -1;
+    *best_count = 0;
+    for (int i = 0; i < QO_SRC_NUM; i++) {
+        if (counts[i] > *best_count) {
+            *best_count = counts[i];
+            *best_idx = i;
+        }
+    }
+}
+
+static void qo_find_first_disagreeing_pair(const struct quorum_oracle_result *out,
+                                           const char **a, const char **b)
+{
+    *a = NULL;
+    *b = NULL;
+    for (int i = 0; i < QO_SRC_NUM; i++) {
+        if (!out->by_source[i].present || out->by_source[i].error)
+            continue;
+        if (out->by_source[i].hash_hex[0] == '\0') continue;
+        if (!*a) {
+            *a = out->by_source[i].hash_hex;
+        } else if (strcasecmp(*a, out->by_source[i].hash_hex) != 0) {
+            *b = out->by_source[i].hash_hex;
+            break;
+        }
+    }
+}
+
 struct zcl_result quorum_oracle_probe(int height, struct quorum_oracle_result *out)
 {
     if (!out)
@@ -253,31 +306,11 @@ struct zcl_result quorum_oracle_probe(int height, struct quorum_oracle_result *o
      * max(counts) is the largest agreeing group regardless of source order —
      * the property the min_agree gate below relies on. */
     int counts[QO_SRC_NUM] = {0};
-    int total_with_hash = 0;
-    for (int i = 0; i < QO_SRC_NUM; i++) {
-        if (!out->by_source[i].present) continue;
-        if (out->by_source[i].error) continue;
-        if (out->by_source[i].hash_hex[0] == '\0') continue;
-        total_with_hash++;
-        for (int j = 0; j < QO_SRC_NUM; j++) {
-            if (!out->by_source[j].present || out->by_source[j].error)
-                continue;
-            if (out->by_source[j].hash_hex[0] == '\0') continue;
-            if (strcasecmp(out->by_source[i].hash_hex,
-                           out->by_source[j].hash_hex) == 0) {
-                counts[i]++;
-            }
-        }
-    }
+    int total_with_hash = qo_count_source_agreements(out, counts);
 
     int min_agree = g_qo.min_agree;
     int best_idx = -1, best_count = 0;
-    for (int i = 0; i < QO_SRC_NUM; i++) {
-        if (counts[i] > best_count) {
-            best_count = counts[i];
-            best_idx = i;
-        }
-    }
+    qo_find_largest_agreement_group(counts, &best_idx, &best_count);
 
     atomic_fetch_add(&g_qo.total_probes, 1);
     atomic_store(&g_qo.last_height, height);
@@ -317,17 +350,7 @@ struct zcl_result quorum_oracle_probe(int height, struct quorum_oracle_result *o
     atomic_fetch_add(&g_qo.total_splits, 1);
 
     const char *a = NULL, *b = NULL;
-    for (int i = 0; i < QO_SRC_NUM; i++) {
-        if (!out->by_source[i].present || out->by_source[i].error)
-            continue;
-        if (out->by_source[i].hash_hex[0] == '\0') continue;
-        if (!a) {
-            a = out->by_source[i].hash_hex;
-        } else if (strcasecmp(a, out->by_source[i].hash_hex) != 0) {
-            b = out->by_source[i].hash_hex;
-            break;
-        }
-    }
+    qo_find_first_disagreeing_pair(out, &a, &b);
     if (a && b) {
         pthread_mutex_lock(&g_qo.lock);
         snprintf(g_qo.last_split_a, sizeof(g_qo.last_split_a), "%s", a);
