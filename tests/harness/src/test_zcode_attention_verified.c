@@ -17,6 +17,20 @@
     }                                                                     \
 } while (0)
 
+struct av_fixtures {
+    struct vcs_zcode_focus_v1 focus;
+    struct vcs_zcode_heuristic_v1 heuristics[4];
+    struct vcs_zcode_attention_bid_v1 bids[4];
+    struct vcs_zcode_science_statement_v1 statements[4];
+    uint8_t secret[32];
+    uint8_t pubkey[32];
+    uint8_t wrong_signer[32];
+    uint8_t policy_root[32];
+    uint8_t evaluator_root[32];
+    size_t indices[4];
+    struct vcs_zcode_attention_verified_report report;
+};
+
 static void av_root(uint8_t out[32], uint8_t tag)
 {
     memset(out, tag, 32);
@@ -138,185 +152,234 @@ static bool av_statement(
            VCS_ZCODE_SCIENCE_OK;
 }
 
-int test_zcode_attention_verified(void)
+static int av_build_fixtures(struct av_fixtures *c)
 {
     int failures = 0;
-    struct vcs_zcode_focus_v1 focus;
-    struct vcs_zcode_heuristic_v1 heuristics[4];
-    struct vcs_zcode_attention_bid_v1 bids[4];
-    struct vcs_zcode_science_statement_v1 statements[4];
     const uint8_t priorities[4] = {
         VCS_ZCODE_ATTENTION_P2_PRODUCTIVITY,
         VCS_ZCODE_ATTENTION_P1_USER_JOURNEY,
         VCS_ZCODE_ATTENTION_P3_RESEARCH,
         VCS_ZCODE_ATTENTION_P0_SECURITY,
     };
-    uint8_t seed[32], secret[32], pubkey[32], wrong_signer[32];
-    uint8_t policy_root[32], evaluator_root[32];
+    uint8_t seed[32];
     av_root(seed, 40);
-    ed25519_keypair(pubkey, secret, seed);
-    av_root(wrong_signer, 41);
-    av_root(policy_root, 4);
-    av_root(evaluator_root, 5);
-    av_focus(&focus);
+    ed25519_keypair(c->pubkey, c->secret, seed);
+    av_root(c->wrong_signer, 41);
+    av_root(c->policy_root, 4);
+    av_root(c->evaluator_root, 5);
+    av_focus(&c->focus);
     bool fixtures_ok = true;
     for (size_t i = 0; i < 4; i++) {
-        av_heuristic(&heuristics[i], (uint8_t)(50u + i));
-        av_bid(&bids[i], &heuristics[i], &focus, priorities[i],
+        av_heuristic(&c->heuristics[i], (uint8_t)(50u + i));
+        av_bid(&c->bids[i], &c->heuristics[i], &c->focus, priorities[i],
                (uint8_t)(60u + i));
         fixtures_ok = fixtures_ok &&
-            av_statement(&statements[i], &bids[i], &heuristics[i],
-                         &focus, secret, pubkey);
+            av_statement(&c->statements[i], &c->bids[i], &c->heuristics[i],
+                         &c->focus, c->secret, c->pubkey);
     }
     AV_CHECK("fixtures-seal", fixtures_ok);
+    return failures;
+}
+
+static int av_check_statement_binding(struct av_fixtures *c)
+{
+    int failures = 0;
     for (size_t i = 0; i < 4; i++) {
         AV_CHECK("exact-statement-binding",
                  vcs_zcode_attention_bid_verify_statement(
-                     &bids[i], &heuristics[i], &focus, &statements[i],
-                     pubkey) == VCS_ZCODE_ATTENTION_OK);
+                     &c->bids[i], &c->heuristics[i], &c->focus,
+                     &c->statements[i], c->pubkey) ==
+                     VCS_ZCODE_ATTENTION_OK);
     }
+    return failures;
+}
 
-    struct vcs_zcode_heuristic_v1 unresolved_derived = heuristics[0];
+static int av_check_unresolved_derivation_refusal(struct av_fixtures *c)
+{
+    int failures = 0;
+    struct vcs_zcode_heuristic_v1 unresolved_derived = c->heuristics[0];
     unresolved_derived.derivation = VCS_ZCODE_HEURISTIC_REPAIR;
     unresolved_derived.parent_count = 1;
     av_root(unresolved_derived.proposed_rule_root, 70);
     av_root(unresolved_derived.proposal_input_root, 71);
     av_root(unresolved_derived.provenance_root, 72);
     (void)vcs_zcode_heuristic_root(
-        &heuristics[0], unresolved_derived.parent_roots[0]);
+        &c->heuristics[0], unresolved_derived.parent_roots[0]);
     struct vcs_zcode_attention_bid_v1 unresolved_bid;
     struct vcs_zcode_science_statement_v1 unresolved_statement;
-    av_bid(&unresolved_bid, &unresolved_derived, &focus,
+    av_bid(&unresolved_bid, &unresolved_derived, &c->focus,
            VCS_ZCODE_ATTENTION_P2_PRODUCTIVITY, 73);
     bool unresolved_statement_ok = av_statement(
         &unresolved_statement, &unresolved_bid, &unresolved_derived,
-        &focus, secret, pubkey);
+        &c->focus, c->secret, c->pubkey);
     AV_CHECK("verified-seam-refuses-unresolved-derived-heuristic",
              unresolved_statement_ok &&
              vcs_zcode_attention_bid_verify_statement(
-                 &unresolved_bid, &unresolved_derived, &focus,
-                 &unresolved_statement, pubkey) ==
+                 &unresolved_bid, &unresolved_derived, &c->focus,
+                 &unresolved_statement, c->pubkey) ==
                  VCS_ZCODE_ATTENTION_DERIVATION);
+    return failures;
+}
 
-    size_t indices[4] = {SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX};
-    struct vcs_zcode_attention_verified_report report;
+static int av_check_frontier_priority_order(struct av_fixtures *c)
+{
+    int failures = 0;
+    c->indices[0] = SIZE_MAX;
+    c->indices[1] = SIZE_MAX;
+    c->indices[2] = SIZE_MAX;
+    c->indices[3] = SIZE_MAX;
     AV_CHECK("hard-p0-before-superior-lower-priority",
              vcs_zcode_attention_frontier_next_verified(
-                 bids, 4, heuristics, statements, &focus, policy_root,
-                 evaluator_root, pubkey, indices, 4, &report) ==
-                 VCS_ZCODE_ATTENTION_OK &&
-             report.verified_count == 4 &&
-             report.choice.selected_priority_class ==
+                 c->bids, 4, c->heuristics, c->statements, &c->focus,
+                 c->policy_root, c->evaluator_root, c->pubkey, c->indices,
+                 4, &c->report) == VCS_ZCODE_ATTENTION_OK &&
+             c->report.verified_count == 4 &&
+             c->report.choice.selected_priority_class ==
                  VCS_ZCODE_ATTENTION_P0_SECURITY &&
-             report.choice.frontier.frontier_count == 1 && indices[0] == 3);
+             c->report.choice.frontier.frontier_count == 1 &&
+             c->indices[0] == 3);
     AV_CHECK("removing-p0-reveals-p1",
              vcs_zcode_attention_frontier_next_verified(
-                 bids, 3, heuristics, statements, &focus, policy_root,
-                 evaluator_root, pubkey, indices, 4, &report) ==
-                 VCS_ZCODE_ATTENTION_OK &&
-             report.choice.selected_priority_class ==
-                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY && indices[0] == 1);
+                 c->bids, 3, c->heuristics, c->statements, &c->focus,
+                 c->policy_root, c->evaluator_root, c->pubkey, c->indices,
+                 4, &c->report) == VCS_ZCODE_ATTENTION_OK &&
+             c->report.choice.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
+             c->indices[0] == 1);
+    return failures;
+}
 
+static int av_check_duplicate_generation_refusal(struct av_fixtures *c)
+{
+    int failures = 0;
     struct vcs_zcode_attention_bid_v1 generation_bids[2] = {
-        bids[0], bids[0]
+        c->bids[0], c->bids[0]
     };
     struct vcs_zcode_heuristic_v1 generation_heuristics[2] = {
-        heuristics[0], heuristics[0]
+        c->heuristics[0], c->heuristics[0]
     };
     struct vcs_zcode_science_statement_v1 generation_statements[2] = {
-        statements[0], statements[0]
+        c->statements[0], c->statements[0]
     };
     generation_bids[1].evidence_root[0] ^= 1u;
     generation_bids[1].expected_user_value_bp++;
     generation_bids[1].information_gain_bp--;
     bool generation_statement_ok = av_statement(
         &generation_statements[1], &generation_bids[1],
-        &generation_heuristics[1], &focus, secret, pubkey);
+        &generation_heuristics[1], &c->focus, c->secret, c->pubkey);
     AV_CHECK("signed-evidence-cannot-duplicate-one-logical-candidate",
              generation_statement_ok &&
              vcs_zcode_attention_frontier_next_verified(
                  generation_bids, 2, generation_heuristics,
-                 generation_statements, &focus, policy_root,
-                 evaluator_root, pubkey, indices, 4, &report) ==
+                 generation_statements, &c->focus, c->policy_root,
+                 c->evaluator_root, c->pubkey, c->indices, 4, &c->report) ==
                  VCS_ZCODE_ATTENTION_DUPLICATE);
+    return failures;
+}
 
-    struct vcs_zcode_attention_bid_v1 changed_bid = bids[3];
+static int av_check_signed_result_commitments(struct av_fixtures *c)
+{
+    int failures = 0;
+    struct vcs_zcode_attention_bid_v1 changed_bid = c->bids[3];
     changed_bid.expected_user_value_bp++;
     AV_CHECK("signed-result-commits-every-score",
              vcs_zcode_attention_bid_verify_statement(
-                 &changed_bid, &heuristics[3], &focus, &statements[3],
-                 pubkey) == VCS_ZCODE_ATTENTION_BINDING);
-    changed_bid = bids[3];
+                 &changed_bid, &c->heuristics[3], &c->focus,
+                 &c->statements[3], c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    changed_bid = c->bids[3];
     changed_bid.priority_class = VCS_ZCODE_ATTENTION_P3_RESEARCH;
     AV_CHECK("signed-result-commits-priority-class",
              vcs_zcode_attention_bid_verify_statement(
-                 &changed_bid, &heuristics[3], &focus, &statements[3],
-                 pubkey) == VCS_ZCODE_ATTENTION_BINDING);
-    changed_bid = bids[3];
+                 &changed_bid, &c->heuristics[3], &c->focus,
+                 &c->statements[3], c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    changed_bid = c->bids[3];
     changed_bid.priority_policy_root[0] ^= 1u;
     AV_CHECK("signed-result-commits-priority-policy",
              vcs_zcode_attention_bid_verify_statement(
-                 &changed_bid, &heuristics[3], &focus, &statements[3],
-                 pubkey) == VCS_ZCODE_ATTENTION_BINDING);
-    changed_bid = bids[3];
+                 &changed_bid, &c->heuristics[3], &c->focus,
+                 &c->statements[3], c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    changed_bid = c->bids[3];
     changed_bid.evidence_root[0] ^= 1u;
     AV_CHECK("signed-result-commits-evidence",
              vcs_zcode_attention_bid_verify_statement(
-                 &changed_bid, &heuristics[3], &focus, &statements[3],
-                 pubkey) == VCS_ZCODE_ATTENTION_BINDING);
-    changed_bid = bids[3];
+                 &changed_bid, &c->heuristics[3], &c->focus,
+                 &c->statements[3], c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    changed_bid = c->bids[3];
     changed_bid.bid_evaluator_root[0] ^= 1u;
     AV_CHECK("signed-result-commits-evaluator",
              vcs_zcode_attention_bid_verify_statement(
-                 &changed_bid, &heuristics[3], &focus, &statements[3],
-                 pubkey) == VCS_ZCODE_ATTENTION_BINDING);
-    struct vcs_zcode_focus_v1 changed_focus = focus;
+                 &changed_bid, &c->heuristics[3], &c->focus,
+                 &c->statements[3], c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    struct vcs_zcode_focus_v1 changed_focus = c->focus;
     changed_focus.claim_set_root[0] ^= 1u;
     AV_CHECK("signed-result-commits-focus",
              vcs_zcode_attention_bid_verify_statement(
-                 &bids[3], &heuristics[3], &changed_focus, &statements[3],
-                 pubkey) == VCS_ZCODE_ATTENTION_BINDING);
-    struct vcs_zcode_heuristic_v1 changed_heuristic = heuristics[3];
+                 &c->bids[3], &c->heuristics[3], &changed_focus,
+                 &c->statements[3], c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    struct vcs_zcode_heuristic_v1 changed_heuristic = c->heuristics[3];
     changed_heuristic.proposed_rule_root[0] ^= 1u;
     AV_CHECK("signed-result-commits-heuristic",
              vcs_zcode_attention_bid_verify_statement(
-                 &bids[3], &changed_heuristic, &focus, &statements[3],
-                 pubkey) == VCS_ZCODE_ATTENTION_BINDING);
+                 &c->bids[3], &changed_heuristic, &c->focus,
+                 &c->statements[3], c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
     AV_CHECK("wrong-local-signer-refuses",
              vcs_zcode_attention_bid_verify_statement(
-                 &bids[3], &heuristics[3], &focus, &statements[3],
-                 wrong_signer) == VCS_ZCODE_ATTENTION_EVIDENCE);
-    struct vcs_zcode_science_statement_v1 changed_statement = statements[3];
+                 &c->bids[3], &c->heuristics[3], &c->focus,
+                 &c->statements[3], c->wrong_signer) ==
+                 VCS_ZCODE_ATTENTION_EVIDENCE);
+    return failures;
+}
+
+static int av_check_statement_tampering_refusal(struct av_fixtures *c)
+{
+    int failures = 0;
+    struct vcs_zcode_science_statement_v1 changed_statement =
+        c->statements[3];
     changed_statement.signature[0] ^= 1u;
     AV_CHECK("tampered-signature-refuses",
              vcs_zcode_attention_bid_verify_statement(
-                 &bids[3], &heuristics[3], &focus, &changed_statement,
-                 pubkey) == VCS_ZCODE_ATTENTION_EVIDENCE);
-    changed_statement = statements[3];
+                 &c->bids[3], &c->heuristics[3], &c->focus,
+                 &changed_statement, c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_EVIDENCE);
+    changed_statement = c->statements[3];
     changed_statement.subject_root[0] ^= 1u;
     AV_CHECK("rebound-subject-reseals",
              vcs_zcode_science_statement_seal(
-                 &changed_statement, secret, pubkey) ==
+                 &changed_statement, c->secret, c->pubkey) ==
                  VCS_ZCODE_SCIENCE_OK);
     AV_CHECK("signed-wrong-subject-refuses",
              vcs_zcode_attention_bid_verify_statement(
-                 &bids[3], &heuristics[3], &focus, &changed_statement,
-                 pubkey) == VCS_ZCODE_ATTENTION_BINDING);
-    changed_statement = statements[3];
+                 &c->bids[3], &c->heuristics[3], &c->focus,
+                 &changed_statement, c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    changed_statement = c->statements[3];
     changed_statement.profile = VCS_ZCODE_SCIENCE_PROFILE_OBSERVATION;
     AV_CHECK("non-result-fixture-reseals",
              vcs_zcode_science_statement_seal(
-                 &changed_statement, secret, pubkey) ==
+                 &changed_statement, c->secret, c->pubkey) ==
                  VCS_ZCODE_SCIENCE_OK);
     AV_CHECK("signed-non-result-is-incomplete",
              vcs_zcode_attention_bid_verify_statement(
-                 &bids[3], &heuristics[3], &focus, &changed_statement,
-                 pubkey) == VCS_ZCODE_ATTENTION_EVIDENCE);
+                 &c->bids[3], &c->heuristics[3], &c->focus,
+                 &changed_statement, c->pubkey) ==
+                 VCS_ZCODE_ATTENTION_EVIDENCE);
+    return failures;
+}
 
+static int av_check_capacity_atomicity(struct av_fixtures *c)
+{
+    int failures = 0;
     struct vcs_zcode_attention_bid_v1 capacity_bids[4];
     struct vcs_zcode_science_statement_v1 capacity_statements[4];
-    memcpy(capacity_bids, bids, sizeof(bids));
-    memcpy(capacity_statements, statements, sizeof(statements));
+    memcpy(capacity_bids, c->bids, sizeof(c->bids));
+    memcpy(capacity_statements, c->statements, sizeof(c->statements));
     capacity_bids[0].priority_class = VCS_ZCODE_ATTENTION_P0_SECURITY;
     capacity_bids[0].expected_user_value_bp = 9000;
     capacity_bids[0].expected_cost_milliunits = 900;
@@ -324,43 +387,69 @@ int test_zcode_attention_verified(void)
     capacity_bids[3].expected_cost_milliunits = 10;
     AV_CHECK("capacity-fixtures-reseal",
              av_statement(&capacity_statements[0], &capacity_bids[0],
-                          &heuristics[0], &focus, secret, pubkey) &&
+                          &c->heuristics[0], &c->focus, c->secret,
+                          c->pubkey) &&
              av_statement(&capacity_statements[3], &capacity_bids[3],
-                          &heuristics[3], &focus, secret, pubkey));
-    indices[0] = SIZE_MAX;
+                          &c->heuristics[3], &c->focus, c->secret,
+                          c->pubkey));
+    c->indices[0] = SIZE_MAX;
     AV_CHECK("capacity-is-atomic-and-reports-need",
              vcs_zcode_attention_frontier_next_verified(
-                 capacity_bids, 4, heuristics, capacity_statements, &focus,
-                 policy_root, evaluator_root, pubkey, indices, 1, &report) ==
+                 capacity_bids, 4, c->heuristics, capacity_statements,
+                 &c->focus, c->policy_root, c->evaluator_root, c->pubkey,
+                 c->indices, 1, &c->report) ==
                  VCS_ZCODE_ATTENTION_CAPACITY &&
-             report.verified_count == 4 &&
-             report.choice.frontier.frontier_count == 2 &&
-             report.choice.frontier.returned_count == 0 &&
-             indices[0] == SIZE_MAX);
+             c->report.verified_count == 4 &&
+             c->report.choice.frontier.frontier_count == 2 &&
+             c->report.choice.frontier.returned_count == 0 &&
+             c->indices[0] == SIZE_MAX);
+    return failures;
+}
 
-    changed_statement = statements[1];
+static int av_check_fail_closed_and_empty_set(struct av_fixtures *c)
+{
+    int failures = 0;
+    struct vcs_zcode_science_statement_v1 changed_statement =
+        c->statements[1];
     changed_statement.signature[0] ^= 1u;
     struct vcs_zcode_science_statement_v1 invalid_statements[4];
-    memcpy(invalid_statements, statements, sizeof(statements));
+    memcpy(invalid_statements, c->statements, sizeof(c->statements));
     invalid_statements[1] = changed_statement;
-    memset(&report, 0xa5, sizeof(report));
-    struct vcs_zcode_attention_verified_report report_before = report;
-    indices[0] = SIZE_MAX;
+    memset(&c->report, 0xa5, sizeof(c->report));
+    struct vcs_zcode_attention_verified_report report_before = c->report;
+    c->indices[0] = SIZE_MAX;
     AV_CHECK("one-unverified-row-fails-closed",
              vcs_zcode_attention_frontier_next_verified(
-                 bids, 4, heuristics, invalid_statements, &focus,
-                 policy_root, evaluator_root, pubkey, indices, 4, &report) ==
-                 VCS_ZCODE_ATTENTION_EVIDENCE &&
-             memcmp(&report, &report_before, sizeof(report)) == 0 &&
-             indices[0] == SIZE_MAX);
+                 c->bids, 4, c->heuristics, invalid_statements, &c->focus,
+                 c->policy_root, c->evaluator_root, c->pubkey, c->indices,
+                 4, &c->report) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+             memcmp(&c->report, &report_before, sizeof(c->report)) == 0 &&
+             c->indices[0] == SIZE_MAX);
     AV_CHECK("empty-set-is-explicit",
              vcs_zcode_attention_frontier_next_verified(
-                 NULL, 0, NULL, NULL, &focus, policy_root, evaluator_root,
-                 pubkey, NULL, 0, &report) == VCS_ZCODE_ATTENTION_OK &&
-             report.verified_count == 0 &&
-             report.choice.frontier.input_count == 0 &&
-             report.choice.selected_priority_class ==
+                 NULL, 0, NULL, NULL, &c->focus, c->policy_root,
+                 c->evaluator_root, c->pubkey, NULL, 0, &c->report) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+             c->report.verified_count == 0 &&
+             c->report.choice.frontier.input_count == 0 &&
+             c->report.choice.selected_priority_class ==
                  VCS_ZCODE_ATTENTION_PRIORITY_AUTO);
+    return failures;
+}
+
+int test_zcode_attention_verified(void)
+{
+    int failures = 0;
+    struct av_fixtures fixtures;
+    failures += av_build_fixtures(&fixtures);
+    failures += av_check_statement_binding(&fixtures);
+    failures += av_check_unresolved_derivation_refusal(&fixtures);
+    failures += av_check_frontier_priority_order(&fixtures);
+    failures += av_check_duplicate_generation_refusal(&fixtures);
+    failures += av_check_signed_result_commitments(&fixtures);
+    failures += av_check_statement_tampering_refusal(&fixtures);
+    failures += av_check_capacity_atomicity(&fixtures);
+    failures += av_check_fail_closed_and_empty_set(&fixtures);
     AV_CHECK("error-string-evidence",
              strcmp(vcs_zcode_attention_error_string(
                         VCS_ZCODE_ATTENTION_EVIDENCE), "evidence") == 0);
