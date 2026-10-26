@@ -252,10 +252,67 @@ static void market_review_plan_token(const char *offer_hex,
     sha3_256_finalize(&sha, out);
 }
 
+/* Shared plumbing for the three exact two-step setters below: the usage
+ * guard, argument reads, the mode-word check, plan-token verification,
+ * and the message picker for refused writes. These helpers only compute
+ * and report; the setters themselves set every error string and take
+ * every early return, exactly as before. */
+
+/* True when the command should answer with its usage text instead of
+ * acting: help was asked for, or params is absent or too short to carry
+ * the command's required arguments. */
+static bool market_rpc_show_usage(const struct json_value *params,
+                                  bool help, size_t min_args)
+{
+    return help || !params || json_size(params) < min_args;
+}
+
+/* The string at params[index], or NULL when that argument is absent or
+ * is not a string. */
+static const char *market_rpc_arg_str(const struct json_value *params,
+                                      int index)
+{
+    const struct json_value *arg = json_at(params, index);
+    return arg && arg->type == JSON_STR ? json_get_str(arg) : NULL;
+}
+
+/* True only for the two mode words every exact two-step setter takes. */
+static bool market_mode_is_plan_or_commit(const char *mode)
+{
+    return mode && (strcmp(mode, "plan") == 0 || strcmp(mode, "commit") == 0);
+}
+
+/* Verifies the plan_token argument at params[index] against the token
+ * minted at plan time. Returns 0 when it is the canonical 64-hex token
+ * and matches, -1 when it is not the canonical token (the caller
+ * answers INVALID_PLAN_TOKEN), and 1 when it is canonical but was
+ * minted against a value that has since moved (the caller answers
+ * STALE_PLAN). */
+static int market_plan_token_verify(const struct json_value *params,
+                                    int index, const uint8_t token[32])
+{
+    const char *hex = market_rpc_arg_str(params, index);
+    uint8_t supplied[32], difference = 0;
+    if (!hex || strlen(hex) != 64 ||
+        !zcl_hex_decode_lower(hex, supplied, 32))
+        return -1;
+    for (size_t i = 0; i < 32; i++)
+        difference |= supplied[i] ^ token[i];
+    return difference ? 1 : 0;
+}
+
+/* The service's own refusal message when it set one, else the caller's
+ * per-command fallback. */
+static const char *market_result_message(const struct zcl_result *r,
+                                         const char *fallback)
+{
+    return r->message[0] ? r->message : fallback;
+}
+
 static bool rpc_zmarket_moderation_profile_set(
     const struct json_value *params, bool help, struct json_value *result)
 {
-    if (help || !params || json_size(params) < 2) {
+    if (market_rpc_show_usage(params, help, 2)) {
         json_set_str(result,
             "zmarket_moderation_profile_set \"profile\" \"mode\" "
             "[\"plan_token\"]\n"
@@ -271,12 +328,8 @@ static bool rpc_zmarket_moderation_profile_set(
             "3. plan_token (string, required for commit) 64-hex plan token\n");
         return true;
     }
-    const struct json_value *arg0 = json_at(params, 0);
-    const struct json_value *arg1 = json_at(params, 1);
-    const char *name =
-        arg0 && arg0->type == JSON_STR ? json_get_str(arg0) : NULL;
-    const char *mode =
-        arg1 && arg1->type == JSON_STR ? json_get_str(arg1) : NULL;
+    const char *name = market_rpc_arg_str(params, 0);
+    const char *mode = market_rpc_arg_str(params, 1);
     int profile = market_moderation_profile_from_string(name);
     if (profile < 0) {
         json_set_str(result,
@@ -284,7 +337,7 @@ static bool rpc_zmarket_moderation_profile_set(
             "general-audience.v1, open-view");
         return false;
     }
-    if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0)) {
+    if (!market_mode_is_plan_or_commit(mode)) {
         json_set_str(result, "mode must be \"plan\" or \"commit\"");
         return false;
     }
@@ -296,20 +349,14 @@ static bool rpc_zmarket_moderation_profile_set(
 
     bool committed = false;
     if (strcmp(mode, "commit") == 0) {
-        const struct json_value *arg2 = json_at(params, 2);
-        const char *hex =
-            arg2 && arg2->type == JSON_STR ? json_get_str(arg2) : NULL;
-        uint8_t supplied[32], difference = 0;
-        if (!hex || strlen(hex) != 64 ||
-            !zcl_hex_decode_lower(hex, supplied, 32)) {
+        int verified = market_plan_token_verify(params, 2, token);
+        if (verified < 0) {
             json_set_str(result,
                 "INVALID_PLAN_TOKEN: commit requires the canonical 64-hex "
                 "plan_token minted by mode \"plan\"");
             return false;
         }
-        for (size_t i = 0; i < 32; i++)
-            difference |= supplied[i] ^ token[i];
-        if (difference) {
+        if (verified > 0) {
             json_set_str(result,
                 "STALE_PLAN: the active moderation profile moved after the "
                 "plan was minted — re-plan and commit again");
@@ -320,7 +367,7 @@ static bool rpc_zmarket_moderation_profile_set(
         if (!set.ok) {
             char message[300];
             snprintf(message, sizeof(message), "POLICY_REFUSED: %s",
-                     set.message[0] ? set.message : "profile save failed");
+                     market_result_message(&set, "profile save failed"));
             json_set_str(result, message);
             return false;
         }
@@ -350,7 +397,7 @@ static bool rpc_zmarket_moderation_profile_set(
 static bool rpc_zmarket_moderation_relay_set(
     const struct json_value *params, bool help, struct json_value *result)
 {
-    if (help || !params || json_size(params) < 2) {
+    if (market_rpc_show_usage(params, help, 2)) {
         json_set_str(result,
             "zmarket_moderation_relay_set \"relay_rule\" \"mode\" "
             "[\"plan_token\"]\n"
@@ -376,12 +423,8 @@ static bool rpc_zmarket_moderation_relay_set(
             "3. plan_token (string, required for commit) 64-hex plan token\n");
         return true;
     }
-    const struct json_value *arg0 = json_at(params, 0);
-    const struct json_value *arg1 = json_at(params, 1);
-    const char *name =
-        arg0 && arg0->type == JSON_STR ? json_get_str(arg0) : NULL;
-    const char *mode =
-        arg1 && arg1->type == JSON_STR ? json_get_str(arg1) : NULL;
+    const char *name = market_rpc_arg_str(params, 0);
+    const char *mode = market_rpc_arg_str(params, 1);
     int rule = market_moderation_relay_rule_from_string(name);
     if (rule < 0) {
         json_set_str(result,
@@ -389,7 +432,7 @@ static bool rpc_zmarket_moderation_relay_set(
             "relay-all.v1, relay-reviewed-only.v1");
         return false;
     }
-    if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0)) {
+    if (!market_mode_is_plan_or_commit(mode)) {
         json_set_str(result, "mode must be \"plan\" or \"commit\"");
         return false;
     }
@@ -401,20 +444,14 @@ static bool rpc_zmarket_moderation_relay_set(
 
     bool committed = false;
     if (strcmp(mode, "commit") == 0) {
-        const struct json_value *arg2 = json_at(params, 2);
-        const char *hex =
-            arg2 && arg2->type == JSON_STR ? json_get_str(arg2) : NULL;
-        uint8_t supplied[32], difference = 0;
-        if (!hex || strlen(hex) != 64 ||
-            !zcl_hex_decode_lower(hex, supplied, 32)) {
+        int verified = market_plan_token_verify(params, 2, token);
+        if (verified < 0) {
             json_set_str(result,
                 "INVALID_PLAN_TOKEN: commit requires the canonical 64-hex "
                 "plan_token minted by mode \"plan\"");
             return false;
         }
-        for (size_t i = 0; i < 32; i++)
-            difference |= supplied[i] ^ token[i];
-        if (difference) {
+        if (verified > 0) {
             json_set_str(result,
                 "STALE_PLAN: the active relay rule moved after the plan was "
                 "minted — re-plan and commit again");
@@ -425,7 +462,7 @@ static bool rpc_zmarket_moderation_relay_set(
         if (!set.ok) {
             char message[300];
             snprintf(message, sizeof(message), "POLICY_REFUSED: %s",
-                     set.message[0] ? set.message : "relay rule save failed");
+                     market_result_message(&set, "relay rule save failed"));
             json_set_str(result, message);
             return false;
         }
@@ -448,10 +485,45 @@ static bool rpc_zmarket_moderation_relay_set(
     return true;
 }
 
+/* Decodes the offer_id argument into 32 bytes. Returns 0 on success and
+ * -1 when id_hex is missing, is not 64 characters, or is not canonical
+ * lower hex. */
+static int market_offer_id_parse(const char *id_hex, uint8_t out[32])
+{
+    if (!id_hex || strlen(id_hex) != 64 ||
+        !zcl_hex_decode_lower(id_hex, out, 32))
+        return -1;
+    return 0;
+}
+
+/* Builds the plan/commit reply for zmarket_review_set: the minted plan
+ * token, the mark as it now stands, and what it replaced. */
+static void market_review_set_push_result(struct json_value *result,
+                                          const char *mode, bool committed,
+                                          uint8_t token[32],
+                                          const char *id_hex, int state,
+                                          const char *previous_name)
+{
+    char token_hex[65];
+    zcl_hex_encode(token, 32, token_hex);
+    json_set_object(result);
+    json_push_kv_str(result, "mode", mode);
+    json_push_kv_bool(result, "committed", committed);
+    json_push_kv_str(result, "plan_token", token_hex);
+    json_push_kv_str(result, "status", committed ? "marked" : "planned");
+    json_push_kv_str(result, "offer_id", id_hex);
+    json_push_kv_str(result, "review_state",
+                     market_review_state_string(
+                         (enum market_review_state)state));
+    json_push_kv_str(result, "previous_review_state", previous_name);
+    json_push_kv_bool(result, "local_only", true);
+    json_push_kv_bool(result, "gossiped", false);
+}
+
 static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
                                    struct json_value *result)
 {
-    if (help || !params || json_size(params) < 3) {
+    if (market_rpc_show_usage(params, help, 3)) {
         json_set_str(result,
             "zmarket_review_set \"offer_id\" \"review_state\" \"mode\" "
             "[\"plan_token\"]\n"
@@ -485,18 +557,11 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
             "NODE_UNAVAILABLE: the market store is not open on this node");
         return false;
     }
-    const struct json_value *arg0 = json_at(params, 0);
-    const struct json_value *arg1 = json_at(params, 1);
-    const struct json_value *arg2 = json_at(params, 2);
-    const char *id_hex =
-        arg0 && arg0->type == JSON_STR ? json_get_str(arg0) : NULL;
-    const char *state_text =
-        arg1 && arg1->type == JSON_STR ? json_get_str(arg1) : NULL;
-    const char *mode =
-        arg2 && arg2->type == JSON_STR ? json_get_str(arg2) : NULL;
+    const char *id_hex = market_rpc_arg_str(params, 0);
+    const char *state_text = market_rpc_arg_str(params, 1);
+    const char *mode = market_rpc_arg_str(params, 2);
     uint8_t offer_id[32];
-    if (!id_hex || strlen(id_hex) != 64 ||
-        !zcl_hex_decode_lower(id_hex, offer_id, 32)) {
+    if (market_offer_id_parse(id_hex, offer_id) < 0) {
         json_set_str(result,
             "INVALID_OFFER_ID: offer_id must be the 64-hex signed offer id");
         return false;
@@ -508,7 +573,7 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
             "sensitive");
         return false;
     }
-    if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0)) {
+    if (!market_mode_is_plan_or_commit(mode)) {
         json_set_str(result, "mode must be \"plan\" or \"commit\"");
         return false;
     }
@@ -531,20 +596,14 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
 
     bool committed = false;
     if (strcmp(mode, "commit") == 0) {
-        const struct json_value *arg3 = json_at(params, 3);
-        const char *hex =
-            arg3 && arg3->type == JSON_STR ? json_get_str(arg3) : NULL;
-        uint8_t supplied[32], difference = 0;
-        if (!hex || strlen(hex) != 64 ||
-            !zcl_hex_decode_lower(hex, supplied, 32)) {
+        int verified = market_plan_token_verify(params, 3, token);
+        if (verified < 0) {
             json_set_str(result,
                 "INVALID_PLAN_TOKEN: commit requires the canonical 64-hex "
                 "plan_token minted by mode \"plan\"");
             return false;
         }
-        for (size_t i = 0; i < 32; i++)
-            difference |= supplied[i] ^ token[i];
-        if (difference) {
+        if (verified > 0) {
             json_set_str(result,
                 "STALE_PLAN: the review mark moved after the plan was minted "
                 "— re-plan and commit again");
@@ -565,8 +624,8 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
             }
             char message[300];
             snprintf(message, sizeof(message), "REVIEW_REFUSED: %s",
-                     marked.message[0] ? marked.message
-                                       : "the mark could not persist");
+                     market_result_message(&marked,
+                                           "the mark could not persist"));
             json_set_str(result, message);
             return false;
         }
@@ -581,20 +640,8 @@ static bool rpc_zmarket_review_set(const struct json_value *params, bool help,
                  previous_name);
     }
 
-    char token_hex[65];
-    zcl_hex_encode(token, 32, token_hex);
-    json_set_object(result);
-    json_push_kv_str(result, "mode", mode);
-    json_push_kv_bool(result, "committed", committed);
-    json_push_kv_str(result, "plan_token", token_hex);
-    json_push_kv_str(result, "status", committed ? "marked" : "planned");
-    json_push_kv_str(result, "offer_id", id_hex);
-    json_push_kv_str(result, "review_state",
-                     market_review_state_string(
-                         (enum market_review_state)state));
-    json_push_kv_str(result, "previous_review_state", previous_name);
-    json_push_kv_bool(result, "local_only", true);
-    json_push_kv_bool(result, "gossiped", false);
+    market_review_set_push_result(result, mode, committed, token, id_hex,
+                                  state, previous_name);
     return true;
 }
 
