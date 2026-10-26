@@ -233,10 +233,6 @@ contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publicati
 contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publication_drive_stores:23
 contexts/commons/modules/vcs/src/zcode_dht_service_session.c:vcs_zcode_dht_service_session_open:29
 contexts/commons/modules/vcs/src/zcode_dht_service_session.c:vcs_zcode_dht_service_sessions_reconcile:20
-contexts/commons/modules/vcs/src/zcode_discovery_rank.c:rank_normalize:38
-contexts/commons/modules/vcs/src/zcode_discovery_rank.c:vcs_zcode_discovery_rank_compute:30
-contexts/commons/modules/vcs/src/zcode_discovery_rank.c:vcs_zcode_discovery_rank_error_string:18
-contexts/commons/modules/vcs/src/zcode_discovery_rank.c:vcs_zcode_discovery_rank_result_validate:25
 contexts/commons/modules/vcs/src/zcode_epoch_creation.c:vcs_zcode_epoch_creation_parse:39
 contexts/commons/modules/vcs/src/zcode_epoch_creation.c:vcs_zcode_epoch_creation_serialize:33
 contexts/commons/modules/vcs/src/zcode_epoch_creation.c:vcs_zcode_epoch_creation_validate:26

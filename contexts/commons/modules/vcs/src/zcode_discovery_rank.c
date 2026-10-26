@@ -96,14 +96,11 @@ static void rank_normalized_free(struct rank_normalized *normalized)
     memset(normalized, 0, sizeof(*normalized));
 }
 
-static enum vcs_zcode_discovery_rank_error rank_normalize(
+static enum vcs_zcode_discovery_rank_error rank_normalize_check_inputs(
     const struct vcs_zcode_discovery_node_v1 *nodes, size_t node_count,
     const struct vcs_zcode_discovery_edge_v1 *edges, size_t edge_count,
-    const struct vcs_zcode_discovery_seed_v1 *seeds, size_t seed_count,
-    struct rank_normalized *out)
+    const struct vcs_zcode_discovery_seed_v1 *seeds, size_t seed_count)
 {
-    if (!out) return VCS_ZCODE_DISCOVERY_RANK_ERR_NULL;
-    memset(out, 0, sizeof(*out));
     if (!nodes || node_count == 0)
         return nodes ? VCS_ZCODE_DISCOVERY_RANK_ERR_LIMIT
                      : VCS_ZCODE_DISCOVERY_RANK_ERR_NULL;
@@ -114,7 +111,13 @@ static enum vcs_zcode_discovery_rank_error rank_normalize(
         seed_count > VCS_ZCODE_DISCOVERY_RANK_MAX_SEEDS ||
         seed_count > node_count)
         return VCS_ZCODE_DISCOVERY_RANK_ERR_LIMIT;
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
 
+static enum vcs_zcode_discovery_rank_error rank_normalize_nodes(
+    const struct vcs_zcode_discovery_node_v1 *nodes, size_t node_count,
+    struct rank_normalized *out)
+{
     out->nodes = zcl_malloc(node_count * sizeof(*out->nodes),
                             "zcode_discovery_rank_nodes");
     if (!out->nodes) return VCS_ZCODE_DISCOVERY_RANK_ERR_ALLOCATION;
@@ -133,7 +136,13 @@ static enum vcs_zcode_discovery_rank_error rank_normalize(
             return VCS_ZCODE_DISCOVERY_RANK_ERR_NODE_DUPLICATE;
         }
     }
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
 
+static enum vcs_zcode_discovery_rank_error rank_normalize_edges(
+    const struct vcs_zcode_discovery_edge_v1 *edges, size_t edge_count,
+    struct rank_normalized *out)
+{
     if (edge_count > 0) {
         out->edges = zcl_malloc(edge_count * sizeof(*out->edges),
                                 "zcode_discovery_rank_edges");
@@ -168,7 +177,13 @@ static enum vcs_zcode_discovery_rank_error rank_normalize(
             return VCS_ZCODE_DISCOVERY_RANK_ERR_EDGE_DUPLICATE;
         }
     }
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
 
+static enum vcs_zcode_discovery_rank_error rank_normalize_seeds(
+    const struct vcs_zcode_discovery_seed_v1 *seeds, size_t seed_count,
+    struct rank_normalized *out)
+{
     if (seed_count > 0) {
         out->seeds = zcl_malloc(seed_count * sizeof(*out->seeds),
                                 "zcode_discovery_rank_seeds");
@@ -205,6 +220,25 @@ static enum vcs_zcode_discovery_rank_error rank_normalize(
         }
     }
     return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
+
+static enum vcs_zcode_discovery_rank_error rank_normalize(
+    const struct vcs_zcode_discovery_node_v1 *nodes, size_t node_count,
+    const struct vcs_zcode_discovery_edge_v1 *edges, size_t edge_count,
+    const struct vcs_zcode_discovery_seed_v1 *seeds, size_t seed_count,
+    struct rank_normalized *out)
+{
+    if (!out) return VCS_ZCODE_DISCOVERY_RANK_ERR_NULL;
+    memset(out, 0, sizeof(*out));
+    enum vcs_zcode_discovery_rank_error error = rank_normalize_check_inputs(
+        nodes, node_count, edges, edge_count, seeds, seed_count);
+    if (error != VCS_ZCODE_DISCOVERY_RANK_OK) return error;
+
+    error = rank_normalize_nodes(nodes, node_count, out);
+    if (error != VCS_ZCODE_DISCOVERY_RANK_OK) return error;
+    error = rank_normalize_edges(edges, edge_count, out);
+    if (error != VCS_ZCODE_DISCOVERY_RANK_OK) return error;
+    return rank_normalize_seeds(seeds, seed_count, out);
 }
 
 static void rank_hash_u16(struct sha3_256_ctx *sha, uint16_t value)
@@ -264,7 +298,21 @@ static void rank_seed_hash(const struct rank_normalized *normalized,
     sha3_256_finalize(&sha, out);
 }
 
-const char *vcs_zcode_discovery_rank_error_string(
+static const char *rank_error_string_runtime(
+    enum vcs_zcode_discovery_rank_error error)
+{
+    switch (error) {
+    case VCS_ZCODE_DISCOVERY_RANK_ERR_ALLOCATION: return "allocation";
+    case VCS_ZCODE_DISCOVERY_RANK_ERR_MASS: return "mass-conservation";
+    case VCS_ZCODE_DISCOVERY_RANK_ERR_WIRE_SIZE: return "wire-size";
+    case VCS_ZCODE_DISCOVERY_RANK_ERR_WIRE_MAGIC: return "wire-magic";
+    case VCS_ZCODE_DISCOVERY_RANK_ERR_ORDER: return "entry-order";
+    case VCS_ZCODE_DISCOVERY_RANK_ERR_COVERAGE: return "coverage-invalid";
+    default: return "unknown";
+    }
+}
+
+static const char *rank_error_string_input(
     enum vcs_zcode_discovery_rank_error error)
 {
     switch (error) {
@@ -281,14 +329,14 @@ const char *vcs_zcode_discovery_rank_error_string(
         return "seed-node-missing";
     case VCS_ZCODE_DISCOVERY_RANK_ERR_SEED_DUPLICATE: return "seed-duplicate";
     case VCS_ZCODE_DISCOVERY_RANK_ERR_SEED_WEIGHT: return "seed-weight";
-    case VCS_ZCODE_DISCOVERY_RANK_ERR_ALLOCATION: return "allocation";
-    case VCS_ZCODE_DISCOVERY_RANK_ERR_MASS: return "mass-conservation";
-    case VCS_ZCODE_DISCOVERY_RANK_ERR_WIRE_SIZE: return "wire-size";
-    case VCS_ZCODE_DISCOVERY_RANK_ERR_WIRE_MAGIC: return "wire-magic";
-    case VCS_ZCODE_DISCOVERY_RANK_ERR_ORDER: return "entry-order";
-    case VCS_ZCODE_DISCOVERY_RANK_ERR_COVERAGE: return "coverage-invalid";
+    default: return rank_error_string_runtime(error);
     }
-    return "unknown";
+}
+
+const char *vcs_zcode_discovery_rank_error_string(
+    enum vcs_zcode_discovery_rank_error error)
+{
+    return rank_error_string_input(error);
 }
 
 enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_graph_root(
@@ -355,13 +403,10 @@ static uint64_t rank_mass_sum(const uint64_t *mass, size_t count)
     return sum;
 }
 
-enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_compute(
-    const struct vcs_zcode_discovery_node_v1 *nodes, size_t node_count,
-    const struct vcs_zcode_discovery_edge_v1 *edges, size_t edge_count,
-    const struct vcs_zcode_discovery_seed_v1 *seeds, size_t seed_count,
-    const uint8_t filter_policy_root[32],
+static enum vcs_zcode_discovery_rank_error rank_compute_check_args(
     struct vcs_zcode_discovery_rank_entry_v1 *entries,
     size_t entry_capacity,
+    const uint8_t filter_policy_root[32],
     struct vcs_zcode_discovery_rank_result_v1 *out)
 {
     if (!out || !entries || !filter_policy_root)
@@ -373,9 +418,109 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_compute(
     memset(entries, 0, entry_capacity * sizeof(*entries));
     if (!zcl_bytes_any_set(filter_policy_root, 32))
         return VCS_ZCODE_DISCOVERY_RANK_ERR_ROOT_ZERO;
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
+
+static void rank_compute_edge_ranges(const struct rank_normalized *normalized,
+                                     size_t node_count, size_t edge_count,
+                                     uint32_t *out_start, uint32_t *out_count)
+{
+    size_t edge_cursor = 0;
+    for (size_t i = 0; i < node_count; i++) {
+        out_start[i] = (uint32_t)edge_cursor;
+        while (edge_cursor < edge_count &&
+               normalized->edges[edge_cursor].from == i) {
+            out_count[i]++;
+            edge_cursor++;
+        }
+    }
+}
+
+static enum vcs_zcode_discovery_rank_error rank_compute_step(
+    const struct rank_normalized *normalized, size_t node_count,
+    const uint32_t *out_start, const uint32_t *out_count,
+    uint64_t teleport_mass, uint64_t link_mass,
+    const uint64_t *current, uint64_t *next, uint64_t *budgets)
+{
+    memset(next, 0, node_count * sizeof(*next));
+    rank_add_personalization(normalized, teleport_mass, next);
+    uint64_t budget_sum = 0;
+    for (size_t i = 0; i < node_count; i++) {
+        budgets[i] =
+            current[i] * VCS_ZCODE_DISCOVERY_RANK_DAMPING_NUMERATOR /
+            VCS_ZCODE_DISCOVERY_RANK_DAMPING_DENOMINATOR;
+        budget_sum += budgets[i];
+    }
+    uint64_t source_remainder = link_mass - budget_sum;
+    if (source_remainder >= node_count)
+        return VCS_ZCODE_DISCOVERY_RANK_ERR_MASS;
+    for (size_t i = 0; i < (size_t)source_remainder; i++) budgets[i]++;
+
+    for (size_t i = 0; i < node_count; i++) {
+        if (out_count[i] == 0) {
+            rank_add_personalization(normalized, budgets[i], next);
+            continue;
+        }
+        uint64_t each = budgets[i] / out_count[i];
+        uint64_t remainder = budgets[i] % out_count[i];
+        for (size_t j = 0; j < out_count[i]; j++) {
+            uint32_t target =
+                normalized->edges[out_start[i] + j].to;
+            next[target] += each + (j < remainder ? 1u : 0u);
+        }
+    }
+    if (rank_mass_sum(next, node_count) !=
+        VCS_ZCODE_DISCOVERY_RANK_MASS)
+        return VCS_ZCODE_DISCOVERY_RANK_ERR_MASS;
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
+
+static enum vcs_zcode_discovery_rank_error rank_compute_finish(
+    const struct rank_normalized *normalized, const uint64_t *current,
+    struct rank_order_entry *order, size_t node_count,
+    struct vcs_zcode_discovery_rank_entry_v1 *entries, size_t entry_capacity,
+    const uint8_t filter_policy_root[32],
+    struct vcs_zcode_discovery_rank_result_v1 *out)
+{
+    for (size_t i = 0; i < node_count; i++) {
+        memcpy(order[i].root, normalized->nodes[i], 32);
+        order[i].mass = current[i];
+    }
+    qsort(order, node_count, sizeof(*order), rank_order_cmp);
+    size_t rendered = node_count < entry_capacity ? node_count : entry_capacity;
+    uint64_t coverage = 0;
+    for (size_t i = 0; i < rendered; i++) {
+        memcpy(entries[i].property_root, order[i].root, 32);
+        entries[i].mass = order[i].mass;
+        coverage += order[i].mass;
+    }
+    out->schema_version = VCS_ZCODE_DISCOVERY_RANK_VERSION;
+    rank_graph_hash(normalized, out->graph_root);
+    rank_seed_hash(normalized, out->seed_set_root);
+    memcpy(out->filter_policy_root, filter_policy_root, 32);
+    out->node_count = (uint32_t)node_count;
+    out->entry_count = (uint32_t)rendered;
+    out->coverage_mass = coverage;
+    out->truncated = rendered < node_count;
+    out->entries = entries;
+    return vcs_zcode_discovery_rank_result_validate(out);
+}
+
+enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_compute(
+    const struct vcs_zcode_discovery_node_v1 *nodes, size_t node_count,
+    const struct vcs_zcode_discovery_edge_v1 *edges, size_t edge_count,
+    const struct vcs_zcode_discovery_seed_v1 *seeds, size_t seed_count,
+    const uint8_t filter_policy_root[32],
+    struct vcs_zcode_discovery_rank_entry_v1 *entries,
+    size_t entry_capacity,
+    struct vcs_zcode_discovery_rank_result_v1 *out)
+{
+    enum vcs_zcode_discovery_rank_error error = rank_compute_check_args(
+        entries, entry_capacity, filter_policy_root, out);
+    if (error != VCS_ZCODE_DISCOVERY_RANK_OK) return error;
 
     struct rank_normalized normalized;
-    enum vcs_zcode_discovery_rank_error error = rank_normalize(
+    error = rank_normalize(
         nodes, node_count, edges, edge_count, seeds, seed_count, &normalized);
     if (error != VCS_ZCODE_DISCOVERY_RANK_OK) return error;
 
@@ -396,15 +541,8 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_compute(
         goto done;
     }
 
-    size_t edge_cursor = 0;
-    for (size_t i = 0; i < node_count; i++) {
-        out_start[i] = (uint32_t)edge_cursor;
-        while (edge_cursor < edge_count &&
-               normalized.edges[edge_cursor].from == i) {
-            out_count[i]++;
-            edge_cursor++;
-        }
-    }
+    rank_compute_edge_ranges(&normalized, node_count, edge_count,
+                             out_start, out_count);
 
     rank_add_personalization(&normalized,
                              VCS_ZCODE_DISCOVERY_RANK_MASS, current);
@@ -418,67 +556,18 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_compute(
 
     for (size_t iteration = 0;
          iteration < VCS_ZCODE_DISCOVERY_RANK_ITERATIONS; iteration++) {
-        memset(next, 0, node_count * sizeof(*next));
-        rank_add_personalization(&normalized, teleport_mass, next);
-        uint64_t budget_sum = 0;
-        for (size_t i = 0; i < node_count; i++) {
-            budgets[i] =
-                current[i] * VCS_ZCODE_DISCOVERY_RANK_DAMPING_NUMERATOR /
-                VCS_ZCODE_DISCOVERY_RANK_DAMPING_DENOMINATOR;
-            budget_sum += budgets[i];
-        }
-        uint64_t source_remainder = link_mass - budget_sum;
-        if (source_remainder >= node_count) {
-            error = VCS_ZCODE_DISCOVERY_RANK_ERR_MASS;
-            goto done;
-        }
-        for (size_t i = 0; i < (size_t)source_remainder; i++) budgets[i]++;
-
-        for (size_t i = 0; i < node_count; i++) {
-            if (out_count[i] == 0) {
-                rank_add_personalization(&normalized, budgets[i], next);
-                continue;
-            }
-            uint64_t each = budgets[i] / out_count[i];
-            uint64_t remainder = budgets[i] % out_count[i];
-            for (size_t j = 0; j < out_count[i]; j++) {
-                uint32_t target =
-                    normalized.edges[out_start[i] + j].to;
-                next[target] += each + (j < remainder ? 1u : 0u);
-            }
-        }
-        if (rank_mass_sum(next, node_count) !=
-            VCS_ZCODE_DISCOVERY_RANK_MASS) {
-            error = VCS_ZCODE_DISCOVERY_RANK_ERR_MASS;
-            goto done;
-        }
+        error = rank_compute_step(&normalized, node_count, out_start,
+                                  out_count, teleport_mass, link_mass,
+                                  current, next, budgets);
+        if (error != VCS_ZCODE_DISCOVERY_RANK_OK) goto done;
         uint64_t *swap = current;
         current = next;
         next = swap;
     }
 
-    for (size_t i = 0; i < node_count; i++) {
-        memcpy(order[i].root, normalized.nodes[i], 32);
-        order[i].mass = current[i];
-    }
-    qsort(order, node_count, sizeof(*order), rank_order_cmp);
-    size_t rendered = node_count < entry_capacity ? node_count : entry_capacity;
-    uint64_t coverage = 0;
-    for (size_t i = 0; i < rendered; i++) {
-        memcpy(entries[i].property_root, order[i].root, 32);
-        entries[i].mass = order[i].mass;
-        coverage += order[i].mass;
-    }
-    out->schema_version = VCS_ZCODE_DISCOVERY_RANK_VERSION;
-    rank_graph_hash(&normalized, out->graph_root);
-    rank_seed_hash(&normalized, out->seed_set_root);
-    memcpy(out->filter_policy_root, filter_policy_root, 32);
-    out->node_count = (uint32_t)node_count;
-    out->entry_count = (uint32_t)rendered;
-    out->coverage_mass = coverage;
-    out->truncated = rendered < node_count;
-    out->entries = entries;
-    error = vcs_zcode_discovery_rank_result_validate(out);
+    error = rank_compute_finish(&normalized, current, order, node_count,
+                                entries, entry_capacity, filter_policy_root,
+                                out);
 
 done:
     free(order);
@@ -495,7 +584,7 @@ done:
     return error;
 }
 
-enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_result_validate(
+static enum vcs_zcode_discovery_rank_error rank_result_check_header(
     const struct vcs_zcode_discovery_rank_result_v1 *result)
 {
     if (!result || !result->entries)
@@ -512,27 +601,44 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_result_validate(
         return VCS_ZCODE_DISCOVERY_RANK_ERR_LIMIT;
     if (result->truncated != (result->entry_count < result->node_count))
         return VCS_ZCODE_DISCOVERY_RANK_ERR_COVERAGE;
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
+
+static enum vcs_zcode_discovery_rank_error rank_result_check_entry(
+    const struct vcs_zcode_discovery_rank_result_v1 *result, size_t i)
+{
+    const struct vcs_zcode_discovery_rank_entry_v1 *entry =
+        &result->entries[i];
+    if (!zcl_bytes_any_set(entry->property_root, 32) ||
+        entry->mass > VCS_ZCODE_DISCOVERY_RANK_MASS)
+        return VCS_ZCODE_DISCOVERY_RANK_ERR_COVERAGE;
+    if (i > 0) {
+        const struct vcs_zcode_discovery_rank_entry_v1 *previous =
+            &result->entries[i - 1];
+        if (previous->mass < entry->mass ||
+            (previous->mass == entry->mass &&
+             memcmp(previous->property_root, entry->property_root, 32) >= 0))
+            return VCS_ZCODE_DISCOVERY_RANK_ERR_ORDER;
+    }
+    for (size_t j = 0; j < i; j++) {
+        if (memcmp(result->entries[j].property_root,
+                   entry->property_root, 32) == 0)
+            return VCS_ZCODE_DISCOVERY_RANK_ERR_ORDER;
+    }
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
+
+enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_result_validate(
+    const struct vcs_zcode_discovery_rank_result_v1 *result)
+{
+    enum vcs_zcode_discovery_rank_error error =
+        rank_result_check_header(result);
+    if (error != VCS_ZCODE_DISCOVERY_RANK_OK) return error;
     uint64_t coverage = 0;
     for (size_t i = 0; i < result->entry_count; i++) {
-        const struct vcs_zcode_discovery_rank_entry_v1 *entry =
-            &result->entries[i];
-        if (!zcl_bytes_any_set(entry->property_root, 32) ||
-            entry->mass > VCS_ZCODE_DISCOVERY_RANK_MASS)
-            return VCS_ZCODE_DISCOVERY_RANK_ERR_COVERAGE;
-        if (i > 0) {
-            const struct vcs_zcode_discovery_rank_entry_v1 *previous =
-                &result->entries[i - 1];
-            if (previous->mass < entry->mass ||
-                (previous->mass == entry->mass &&
-                 memcmp(previous->property_root, entry->property_root, 32) >= 0))
-                return VCS_ZCODE_DISCOVERY_RANK_ERR_ORDER;
-        }
-        for (size_t j = 0; j < i; j++) {
-            if (memcmp(result->entries[j].property_root,
-                       entry->property_root, 32) == 0)
-                return VCS_ZCODE_DISCOVERY_RANK_ERR_ORDER;
-        }
-        coverage += entry->mass;
+        error = rank_result_check_entry(result, i);
+        if (error != VCS_ZCODE_DISCOVERY_RANK_OK) return error;
+        coverage += result->entries[i].mass;
     }
     if (coverage != result->coverage_mass ||
         coverage > VCS_ZCODE_DISCOVERY_RANK_MASS ||
