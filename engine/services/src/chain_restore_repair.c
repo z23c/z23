@@ -367,8 +367,6 @@ static int chain_restore_rebuild_disk_tiebreak(const struct block_index *cand,
                                                const struct block_index *best,
                                                const char *datadir)
 {
-    if (!datadir || !datadir[0])
-        return 0;
     bool cand_disk = chain_restore_candidate_matches_disk(cand, datadir);
     bool best_disk = chain_restore_candidate_matches_disk(best, datadir);
     if (cand_disk && !best_disk)
@@ -391,7 +389,7 @@ static bool chain_restore_rebuild_prefer_candidate(const struct block_index *can
         return true;
     if (best_data && !cand_data)
         return false;
-    if (cand_data && best_data) {
+    if (datadir && datadir[0] && cand_data && best_data) {
         int disk = chain_restore_rebuild_disk_tiebreak(cand, best, datadir);
         if (disk != 0)
             return disk > 0;
