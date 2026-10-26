@@ -192,6 +192,270 @@ static void import_block_index_fill_row(struct db_block *db_blk,
     }
 }
 
+/* Re-derive the ROM state checkpoint height used as the verification
+ * floor for imported rows (-1 when no ROM checkpoint is present). */
+static int64_t import_block_index_rom_checkpoint_height(void)
+{
+    const struct rom_state_checkpoint *rom_cp = get_rom_state_checkpoint();
+    return rom_cp ? (int64_t)rom_cp->height : -1;
+}
+
+/* Close the three sources the T1 import opened: the block index LevelDB
+ * wrapper, the selected-chain record, and this thread's SQLite handle. */
+static void import_block_index_close_sources(struct db_wrapper *dbw,
+                                             struct snapshot_selected_chain *chain,
+                                             struct node_db *ndb)
+{
+    db_wrapper_close(dbw);
+    snapshot_selected_chain_free(chain);
+    node_db_close(ndb);
+}
+
+/* Prepare the SQLite side for the bulk walk and position the iterator:
+ * turbo pragmas, busy timeout, drop the block indexes, reset the blocks
+ * projection, then seek to the first 'b' key and open the bulk load
+ * transaction. On any failure everything opened so far is closed and
+ * false is returned — the caller only returns NULL. */
+static bool import_block_index_begin_bulk_scan(struct node_db *ndb,
+                                               struct db_wrapper *dbw,
+                                               struct snapshot_selected_chain *chain,
+                                               struct db_iterator *it)
+{
+    /* Turbo mode */
+    bool ok = snapshot_sql_exec_checked(ndb, "PRAGMA synchronous=OFF",
+                                        "T1 set synchronous=OFF") &&
+              snapshot_sql_exec_checked(ndb, "PRAGMA cache_size=-524288",
+                                        "T1 set cache_size") &&
+              snapshot_sql_exec_checked(ndb, "PRAGMA wal_autocheckpoint=0",
+                                        "T1 disable wal_autocheckpoint");
+    if (ok) {
+        sqlite3_busy_timeout(ndb->db, 30000);
+
+        /* Drop block indexes for bulk load */
+        ok = snapshot_sql_exec_checked(ndb,
+                "DROP INDEX IF EXISTS idx_blocks_prev",
+                "T1 drop idx_blocks_prev") &&
+             snapshot_sql_exec_checked(ndb,
+                "DROP INDEX IF EXISTS idx_blocks_height",
+                "T1 drop idx_blocks_height") &&
+             snapshot_sql_exec_checked(ndb,
+                "DROP INDEX IF EXISTS idx_blocks_chainwork",
+                "T1 drop idx_blocks_chainwork");
+    }
+    if (ok)
+        ok = import_block_index_reset(ndb);
+    if (!ok) {
+        import_block_index_close_sources(dbw, chain, ndb);
+        return ok;
+    }
+
+    /* Iterate all 'b'-prefixed entries */
+    db_iter_init(it, dbw);
+
+    char seek_key[33];
+    seek_key[0] = 'b';
+    memset(seek_key + 1, 0, 32);
+    db_iter_seek(it, seek_key, 33);
+
+    bool begun = snapshot_tx_begin_checked(ndb,
+                                           "T1 begin bulk load transaction");
+    if (!begun) {
+        db_iter_free(it);
+        import_block_index_close_sources(dbw, chain, ndb);
+    }
+    return begun;
+}
+
+/* Outcome of import_block_index_next_row() for one source LevelDB row. */
+enum snapshot_import_row_status {
+    SNAPSHOT_IMPORT_ROW_END,      /* non-'b' key: the 'b' walk is over */
+    SNAPSHOT_IMPORT_ROW_SKIPPED,  /* row not imported; iterator advanced */
+    SNAPSHOT_IMPORT_ROW_READY     /* row verified and filled into *db_blk */
+};
+
+/* Fetch, deserialize, and harden-verify the row under *it. Rows that are
+ * skipped (short key, failed deserialize, off the selected chain, or
+ * quarantined by verification) advance the iterator and return
+ * ..._SKIPPED; the first non-'b' key returns ..._END without advancing;
+ * a row that passes every check is filled into *db_blk and returned as
+ * ..._READY — the caller saves it and advances the iterator itself. */
+static enum snapshot_import_row_status
+import_block_index_next_row(struct db_iterator *it,
+                            struct snapshot_selected_chain *selected_chain,
+                            const struct chain_params *cp,
+                            int64_t rom_checkpoint_height,
+                            struct block_index_import_args *a,
+                            int *max_height,
+                            struct db_block *db_blk)
+{
+    size_t key_len;
+    const char *key_data = db_iter_key(it, &key_len);
+
+    if (key_len < 1 || key_data[0] != 'b')
+        return SNAPSHOT_IMPORT_ROW_END;
+    if (key_len < 33) {
+        db_iter_next(it);
+        return SNAPSHOT_IMPORT_ROW_SKIPPED;
+    }
+
+    /* Hash is in key bytes 1..32 */
+    uint8_t block_hash[32];
+    memcpy(block_hash, key_data + 1, 32);
+
+    /* Deserialize disk_block_index from value */
+    size_t val_len;
+    const char *val_data = db_iter_value(it, &val_len);
+
+    struct disk_block_index dbi;
+    disk_block_index_init(&dbi);
+    struct byte_stream s;
+    stream_init_from_data(&s, (unsigned char *)val_data, val_len);
+
+    if (!disk_block_index_deserialize(&dbi, &s)) {
+        stream_free(&s);
+        db_iter_next(it);
+        return SNAPSHOT_IMPORT_ROW_SKIPPED;
+    }
+    stream_free(&s);
+
+    if (!snapshot_selected_chain_contains(selected_chain, dbi.nHeight,
+                                          block_hash)) {
+        db_iter_next(it);
+        return SNAPSHOT_IMPORT_ROW_SKIPPED;
+    }
+
+    /* Trust hardening: hash-bind this row to the LevelDB key
+     * that named it, and check its PoW target — see import_row_verify()
+     * doc comment above. A row failing either is quarantined (skipped,
+     * counted, typed blocker) — the bulk import CONTINUES rather than
+     * aborting on one bad legacy row. */
+    char reason[64];
+    if (!snapshot_import_row_verify(&dbi, block_hash, cp,
+                                    rom_checkpoint_height,
+                                    reason, sizeof(reason))) {
+        import_row_quarantine(dbi.nHeight, block_hash, reason);
+        a->quarantined++;
+        db_iter_next(it);
+        return SNAPSHOT_IMPORT_ROW_SKIPPED;
+    }
+
+    import_block_index_fill_row(db_blk, &dbi, block_hash,
+                                a->header_only, max_height);
+    return SNAPSHOT_IMPORT_ROW_READY;
+}
+
+/* Every 100000 imported rows: commit the in-flight bulk transaction,
+ * report progress, and reopen a fresh one. Updates *tx_open to the live
+ * transaction state and returns false when the batch commit or reopen
+ * failed — the caller aborts the walk. */
+static bool import_block_index_batch_rollover(struct node_db *ndb, int count,
+                                              int64_t t_start, bool *tx_open)
+{
+    if (count % 100000 != 0)
+        return true;
+    bool committed = snapshot_tx_commit_checked(ndb, "T1 batch commit");
+    if (!committed) {
+        *tx_open = false;
+        return committed;
+    }
+    *tx_open = false;
+    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
+    int rate = elapsed > 0 ? count / (int)elapsed : count;
+    printf("T1: %d blocks (%d/s)\n", count, rate);
+    fflush(stdout);
+    bool reopened = snapshot_tx_begin_checked(ndb, "T1 batch reopen");
+    *tx_open = reopened;
+    return reopened;
+}
+
+/* Rebuild the block indexes dropped for the bulk load and restore the
+ * turbo-mode pragmas. Returns the combined result of the checked
+ * statements. */
+static bool import_block_index_rebuild_block_indexes(struct node_db *ndb)
+{
+    /* Rebuild indexes */
+    printf("T1: rebuilding block indexes...\n");
+    fflush(stdout);
+    return snapshot_sql_exec_checked(ndb,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_blocks_height"
+            " ON blocks(height) WHERE status >= 3",
+            "T1 rebuild idx_blocks_height") &&
+           snapshot_sql_exec_checked(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_blocks_prev ON blocks(prev_hash)",
+            "T1 rebuild idx_blocks_prev") &&
+           snapshot_sql_exec_checked(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_blocks_chainwork"
+            " ON blocks(chain_work DESC)",
+            "T1 rebuild idx_blocks_chainwork") &&
+           snapshot_sql_exec_checked(ndb, "PRAGMA synchronous=NORMAL",
+            "T1 restore synchronous=NORMAL") &&
+           snapshot_sql_exec_checked(ndb, "PRAGMA wal_autocheckpoint=1000",
+            "T1 restore wal_autocheckpoint");
+}
+
+/* Wind the import down after the bulk walk. ok=false rolls the open bulk
+ * transaction back (if any) and stops; otherwise the tail transaction is
+ * committed, the block indexes rebuilt, the fast-boot cursors stamped,
+ * the sources closed and, on full success, the completion line printed
+ * and a->result set to 0. Every failure path closes the sources and
+ * leaves a->result at -1. */
+static void import_block_index_finalize(struct node_db *ndb,
+                                        struct db_wrapper *dbw,
+                                        struct snapshot_selected_chain *chain,
+                                        bool ok, bool tx_open, int max_height,
+                                        int64_t t_start,
+                                        struct block_index_import_args *a)
+{
+    if (!ok) {
+        if (tx_open)
+            snapshot_tx_rollback_best_effort(ndb, "T1 rollback after failure");
+        import_block_index_close_sources(dbw, chain, ndb);
+        return;
+    }
+
+    bool committed = !tx_open ||
+                     snapshot_tx_commit_checked(ndb, "T1 final commit");
+    if (!committed) {
+        import_block_index_close_sources(dbw, chain, ndb);
+        return;
+    }
+
+    bool done = import_block_index_rebuild_block_indexes(ndb);
+    if (!done) {
+        import_block_index_close_sources(dbw, chain, ndb);
+        return;
+    }
+
+    /* Fast-boot cursors: the imported index carries authoritative prev_hash
+     * and per-block shielded deltas, so the normal boot's pprev-repair disk
+     * walk and shielded backfill are redundant on this datadir. Stamp both
+     * "done-through" cursors to the imported tip so boot skips those O(chain)
+     * passes and RPC binds in seconds. A datadir NOT produced by this path
+     * leaves the cursors absent (-1) and does the full work once. */
+    if (max_height >= 0) {
+        done = import_block_index_stamp_cursors(ndb, max_height);
+        if (done) {
+            printf("T1: fast-boot cursors set (pprev_repaired_height=%d, "
+                   "shielded_backfill_height=%d)\n", max_height, max_height);
+            fflush(stdout);
+        }
+    }
+    if (!done) {
+        import_block_index_close_sources(dbw, chain, ndb);
+        return;
+    }
+
+    import_block_index_close_sources(dbw, chain, ndb);
+
+    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
+    printf("T1: block index import complete: %d blocks in %llds"
+           " (%d quarantined)\n",
+           a->count, (long long)elapsed, a->quarantined);
+    fflush(stdout);
+
+    a->result = 0;
+}
+
 static void *import_block_index_thread(void *arg)
 {
     struct block_index_import_args *a = arg;
@@ -200,8 +464,7 @@ static void *import_block_index_thread(void *arg)
     a->quarantined = 0;
 
     const struct chain_params *cp = chain_params_get();
-    const struct rom_state_checkpoint *rom_cp = get_rom_state_checkpoint();
-    int64_t rom_checkpoint_height = rom_cp ? (int64_t)rom_cp->height : -1;
+    int64_t rom_checkpoint_height = import_block_index_rom_checkpoint_height();
 
     /* Open our own SQLite connection */
     struct node_db ndb;
@@ -231,56 +494,9 @@ static void *import_block_index_thread(void *arg)
     bool ok = true;
     int max_height = -1;  /* highest imported height — seeds fast-boot cursors */
 
-    /* Turbo mode */
-    if (!snapshot_sql_exec_checked(&ndb, "PRAGMA synchronous=OFF",
-                                   "T1 set synchronous=OFF") ||
-        !snapshot_sql_exec_checked(&ndb, "PRAGMA cache_size=-524288",
-                                   "T1 set cache_size") ||
-        !snapshot_sql_exec_checked(&ndb, "PRAGMA wal_autocheckpoint=0",
-                                   "T1 disable wal_autocheckpoint")) {
-        db_wrapper_close(&dbw);
-        snapshot_selected_chain_free(&selected_chain);
-        node_db_close(&ndb);
-        return NULL;
-    }
-    sqlite3_busy_timeout(ndb.db, 30000);
-
-    /* Drop block indexes for bulk load */
-    if (!snapshot_sql_exec_checked(&ndb,
-            "DROP INDEX IF EXISTS idx_blocks_prev",
-            "T1 drop idx_blocks_prev") ||
-        !snapshot_sql_exec_checked(&ndb,
-            "DROP INDEX IF EXISTS idx_blocks_height",
-            "T1 drop idx_blocks_height") ||
-        !snapshot_sql_exec_checked(&ndb,
-            "DROP INDEX IF EXISTS idx_blocks_chainwork",
-            "T1 drop idx_blocks_chainwork")) {
-        db_wrapper_close(&dbw);
-        snapshot_selected_chain_free(&selected_chain);
-        node_db_close(&ndb);
-        return NULL;
-    }
-    if (!import_block_index_reset(&ndb)) {
-        db_wrapper_close(&dbw);
-        snapshot_selected_chain_free(&selected_chain);
-        node_db_close(&ndb);
-        return NULL;
-    }
-
-    /* Iterate all 'b'-prefixed entries */
     struct db_iterator it;
-    db_iter_init(&it, &dbw);
-
-    char seek_key[33];
-    seek_key[0] = 'b';
-    memset(seek_key + 1, 0, 32);
-    db_iter_seek(&it, seek_key, 33);
-
-    if (!snapshot_tx_begin_checked(&ndb, "T1 begin bulk load transaction")) {
-        db_iter_free(&it);
-        db_wrapper_close(&dbw);
-        snapshot_selected_chain_free(&selected_chain);
-        node_db_close(&ndb);
+    if (!import_block_index_begin_bulk_scan(&ndb, &dbw, &selected_chain,
+                                            &it)) {
         return NULL;
     }
     tx_open = true;
@@ -302,60 +518,17 @@ static void *import_block_index_thread(void *arg)
             ok = false;
             break;
         }
-        size_t key_len;
-        const char *key_data = db_iter_key(&it, &key_len);
 
-        if (key_len < 1 || key_data[0] != 'b') break;
-        if (key_len < 33) { db_iter_next(&it); continue; }
-
-        /* Hash is in key bytes 1..32 */
-        uint8_t block_hash[32];
-        memcpy(block_hash, key_data + 1, 32);
-
-        /* Deserialize disk_block_index from value */
-        size_t val_len;
-        const char *val_data = db_iter_value(&it, &val_len);
-
-        struct disk_block_index dbi;
-        disk_block_index_init(&dbi);
-        struct byte_stream s;
-        stream_init_from_data(&s, (unsigned char *)val_data, val_len);
-
-        if (!disk_block_index_deserialize(&dbi, &s)) {
-            stream_free(&s);
-            db_iter_next(&it);
+        struct db_block db_blk;
+        enum snapshot_import_row_status row = import_block_index_next_row(
+            &it, &selected_chain, cp, rom_checkpoint_height, a,
+            &max_height, &db_blk);
+        if (row == SNAPSHOT_IMPORT_ROW_END)
+            break;
+        if (row == SNAPSHOT_IMPORT_ROW_SKIPPED)
             continue;
-        }
-        stream_free(&s);
-
-        if (!snapshot_selected_chain_contains(&selected_chain, dbi.nHeight,
-                                              block_hash)) {
-            db_iter_next(&it);
-            continue;
-        }
-
-        /* Trust hardening: hash-bind this row to the LevelDB key
-         * that named it, and check its PoW target — see import_row_verify()
-         * doc comment above. A row failing either is quarantined (skipped,
-         * counted, typed blocker) — the bulk import CONTINUES rather than
-         * aborting on one bad legacy row. */
-        {
-            char reason[64];
-            if (!snapshot_import_row_verify(&dbi, block_hash, cp,
-                                            rom_checkpoint_height,
-                                            reason, sizeof(reason))) {
-                import_row_quarantine(dbi.nHeight, block_hash, reason);
-                a->quarantined++;
-                db_iter_next(&it);
-                continue;
-            }
-        }
 
         /* Insert into SQLite blocks table */
-        struct db_block db_blk;
-        import_block_index_fill_row(&db_blk, &dbi, block_hash,
-                                    a->header_only, &max_height);
-
         if (!db_block_save(&ndb, &db_blk)) {
             LOG_WARN("snapshot", "T1: block save failed at height %d", db_blk.height);
             ok = false;
@@ -363,22 +536,10 @@ static void *import_block_index_thread(void *arg)
         }
         a->count++;
 
-        if (a->count % 100000 == 0) {
-            if (!snapshot_tx_commit_checked(&ndb, "T1 batch commit")) {
-                ok = false;
-                tx_open = false;
-                break;
-            }
-            tx_open = false;
-            int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
-            int rate = elapsed > 0 ? a->count / (int)elapsed : a->count;
-            printf("T1: %d blocks (%d/s)\n", a->count, rate);
-            fflush(stdout);
-            if (!snapshot_tx_begin_checked(&ndb, "T1 batch reopen")) {
-                ok = false;
-                break;
-            }
-            tx_open = true;
+        if (!import_block_index_batch_rollover(&ndb, a->count, t_start,
+                                               &tx_open)) {
+            ok = false;
+            break;
         }
 
         db_iter_next(&it);
@@ -386,75 +547,8 @@ static void *import_block_index_thread(void *arg)
 
     db_iter_free(&it);
 
-    if (!ok) {
-        if (tx_open)
-            snapshot_tx_rollback_best_effort(&ndb, "T1 rollback after failure");
-        db_wrapper_close(&dbw);
-        snapshot_selected_chain_free(&selected_chain);
-        node_db_close(&ndb);
-        return NULL;
-    }
-    if (tx_open && !snapshot_tx_commit_checked(&ndb, "T1 final commit")) {
-        db_wrapper_close(&dbw);
-        snapshot_selected_chain_free(&selected_chain);
-        node_db_close(&ndb);
-        return NULL;
-    }
-    tx_open = false;
-
-    /* Rebuild indexes */
-    printf("T1: rebuilding block indexes...\n");
-    fflush(stdout);
-    if (!snapshot_sql_exec_checked(&ndb,
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_blocks_height"
-            " ON blocks(height) WHERE status >= 3",
-            "T1 rebuild idx_blocks_height") ||
-        !snapshot_sql_exec_checked(&ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blocks_prev ON blocks(prev_hash)",
-            "T1 rebuild idx_blocks_prev") ||
-        !snapshot_sql_exec_checked(&ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blocks_chainwork"
-            " ON blocks(chain_work DESC)",
-            "T1 rebuild idx_blocks_chainwork") ||
-        !snapshot_sql_exec_checked(&ndb, "PRAGMA synchronous=NORMAL",
-            "T1 restore synchronous=NORMAL") ||
-        !snapshot_sql_exec_checked(&ndb, "PRAGMA wal_autocheckpoint=1000",
-            "T1 restore wal_autocheckpoint")) {
-        db_wrapper_close(&dbw);
-        snapshot_selected_chain_free(&selected_chain);
-        node_db_close(&ndb);
-        return NULL;
-    }
-
-    /* Fast-boot cursors: the imported index carries authoritative prev_hash
-     * and per-block shielded deltas, so the normal boot's pprev-repair disk
-     * walk and shielded backfill are redundant on this datadir. Stamp both
-     * "done-through" cursors to the imported tip so boot skips those O(chain)
-     * passes and RPC binds in seconds. A datadir NOT produced by this path
-     * leaves the cursors absent (-1) and does the full work once. */
-    if (max_height >= 0) {
-        if (!import_block_index_stamp_cursors(&ndb, max_height)) {
-            db_wrapper_close(&dbw);
-            snapshot_selected_chain_free(&selected_chain);
-            node_db_close(&ndb);
-            return NULL;
-        }
-        printf("T1: fast-boot cursors set (pprev_repaired_height=%d, "
-               "shielded_backfill_height=%d)\n", max_height, max_height);
-        fflush(stdout);
-    }
-
-    db_wrapper_close(&dbw);
-    snapshot_selected_chain_free(&selected_chain);
-    node_db_close(&ndb);
-
-    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
-    printf("T1: block index import complete: %d blocks in %llds"
-           " (%d quarantined)\n",
-           a->count, (long long)elapsed, a->quarantined);
-    fflush(stdout);
-
-    a->result = 0;
+    import_block_index_finalize(&ndb, &dbw, &selected_chain, ok, tx_open,
+                                max_height, t_start, a);
     return NULL;
 }
 
