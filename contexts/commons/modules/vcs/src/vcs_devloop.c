@@ -394,71 +394,13 @@ bool vcs_devloop_publication_progress_load(
     return true;
 }
 
-/* Resolve an additive artifact suffix back to its mapping receipt.  Every
- * link is address-verified by the object loader and must stay on the exact
- * immutable job; callers can therefore reuse one checked chain instead of
- * reimplementing predecessor traversal for every idempotent retry. */
-bool publication_artifact_chain_load(
+static bool publication_artifact_chain_load_release_links(
     const char *repo_root,
     const struct vcs_devloop_publication_receipt *latest,
-    struct publication_artifact_chain *out)
+    struct publication_artifact_chain *out,
+    const struct vcs_devloop_publication_receipt *cursor)
 {
-    if (!repo_root || !latest || !out) return false;
-    memset(out, 0, sizeof(*out));
-    const struct vcs_devloop_publication_receipt *cursor = latest;
-    if (cursor->phase == VCS_DEVLOOP_PUBLICATION_PHASE_SOURCE_REPRODUCED) {
-        out->source_reproduction = *cursor;
-        out->source_reproduced = true;
-        if (!vcs_devloop_publication_receipt_load(
-                repo_root, cursor->predecessor_receipt_root,
-                &out->storage_ack) ||
-            out->storage_ack.phase !=
-                VCS_DEVLOOP_PUBLICATION_PHASE_STORAGE_ACKNOWLEDGED ||
-            memcmp(out->storage_ack.job_root, latest->job_root, 32) != 0)
-            return false;
-        cursor = &out->storage_ack;
-    }
-    if (cursor->phase ==
-            VCS_DEVLOOP_PUBLICATION_PHASE_STORAGE_ACKNOWLEDGED) {
-        if (!out->source_reproduced) out->storage_ack = *cursor;
-        out->storage_acknowledged = true;
-        if (!vcs_devloop_publication_receipt_load(
-                repo_root, cursor->predecessor_receipt_root,
-                &out->provider) ||
-            out->provider.phase !=
-                VCS_DEVLOOP_PUBLICATION_PHASE_PROVIDER_ANNOUNCED ||
-            memcmp(out->provider.job_root, latest->job_root, 32) != 0)
-            return false;
-        cursor = &out->provider;
-    }
-    if (cursor->phase ==
-            VCS_DEVLOOP_PUBLICATION_PHASE_PROVIDER_ANNOUNCED) {
-        if (!out->storage_acknowledged) out->provider = *cursor;
-        out->provider_announced = true;
-        if (!vcs_devloop_publication_receipt_load(
-                repo_root, cursor->predecessor_receipt_root,
-                &out->workspace) ||
-            out->workspace.phase !=
-                VCS_DEVLOOP_PUBLICATION_PHASE_WORKSPACE_PUBLISHED ||
-            memcmp(out->workspace.job_root, latest->job_root, 32) != 0)
-            return false;
-        cursor = &out->workspace;
-    }
-    if (cursor->phase ==
-            VCS_DEVLOOP_PUBLICATION_PHASE_WORKSPACE_PUBLISHED) {
-        if (!out->provider_announced) out->workspace = *cursor;
-        out->workspace_published = true;
-        if (!vcs_devloop_publication_receipt_load(
-                repo_root, cursor->predecessor_receipt_root,
-                &out->passport) ||
-            out->passport.phase !=
-                VCS_DEVLOOP_PUBLICATION_PHASE_PASSPORT_PUBLISHED ||
-            memcmp(out->passport.job_root, latest->job_root, 32) != 0)
-            return false;
-        cursor = &out->passport;
-    }
-    if (cursor->phase ==
-            VCS_DEVLOOP_PUBLICATION_PHASE_PASSPORT_PUBLISHED) {
+    if (cursor->phase == VCS_DEVLOOP_PUBLICATION_PHASE_PASSPORT_PUBLISHED) {
         if (!out->workspace_published) out->passport = *cursor;
         out->passport_published = true;
         if (!vcs_devloop_publication_receipt_load(
@@ -489,6 +431,93 @@ bool publication_artifact_chain_load(
         out->mapping_ready = true;
     }
     return true;
+}
+
+static bool publication_artifact_chain_load_announcement_links(
+    const char *repo_root,
+    const struct vcs_devloop_publication_receipt *latest,
+    struct publication_artifact_chain *out,
+    const struct vcs_devloop_publication_receipt *cursor)
+{
+    if (cursor->phase ==
+            VCS_DEVLOOP_PUBLICATION_PHASE_PROVIDER_ANNOUNCED) {
+        if (!out->storage_acknowledged) out->provider = *cursor;
+        out->provider_announced = true;
+        if (!vcs_devloop_publication_receipt_load(
+                repo_root, cursor->predecessor_receipt_root,
+                &out->workspace) ||
+            out->workspace.phase !=
+                VCS_DEVLOOP_PUBLICATION_PHASE_WORKSPACE_PUBLISHED ||
+            memcmp(out->workspace.job_root, latest->job_root, 32) != 0)
+            return false;
+        cursor = &out->workspace;
+    }
+    if (cursor->phase ==
+            VCS_DEVLOOP_PUBLICATION_PHASE_WORKSPACE_PUBLISHED) {
+        if (!out->provider_announced) out->workspace = *cursor;
+        out->workspace_published = true;
+        if (!vcs_devloop_publication_receipt_load(
+                repo_root, cursor->predecessor_receipt_root,
+                &out->passport) ||
+            out->passport.phase !=
+                VCS_DEVLOOP_PUBLICATION_PHASE_PASSPORT_PUBLISHED ||
+            memcmp(out->passport.job_root, latest->job_root, 32) != 0)
+            return false;
+        cursor = &out->passport;
+    }
+    return publication_artifact_chain_load_release_links(
+        repo_root, latest, out, cursor);
+}
+
+static bool publication_artifact_chain_load_reproduction_links(
+    const char *repo_root,
+    const struct vcs_devloop_publication_receipt *latest,
+    struct publication_artifact_chain *out,
+    const struct vcs_devloop_publication_receipt *cursor)
+{
+    if (cursor->phase == VCS_DEVLOOP_PUBLICATION_PHASE_SOURCE_REPRODUCED) {
+        out->source_reproduction = *cursor;
+        out->source_reproduced = true;
+        if (!vcs_devloop_publication_receipt_load(
+                repo_root, cursor->predecessor_receipt_root,
+                &out->storage_ack) ||
+            out->storage_ack.phase !=
+                VCS_DEVLOOP_PUBLICATION_PHASE_STORAGE_ACKNOWLEDGED ||
+            memcmp(out->storage_ack.job_root, latest->job_root, 32) != 0)
+            return false;
+        cursor = &out->storage_ack;
+    }
+    if (cursor->phase ==
+            VCS_DEVLOOP_PUBLICATION_PHASE_STORAGE_ACKNOWLEDGED) {
+        if (!out->source_reproduced) out->storage_ack = *cursor;
+        out->storage_acknowledged = true;
+        if (!vcs_devloop_publication_receipt_load(
+                repo_root, cursor->predecessor_receipt_root,
+                &out->provider) ||
+            out->provider.phase !=
+                VCS_DEVLOOP_PUBLICATION_PHASE_PROVIDER_ANNOUNCED ||
+            memcmp(out->provider.job_root, latest->job_root, 32) != 0)
+            return false;
+        cursor = &out->provider;
+    }
+    return publication_artifact_chain_load_announcement_links(
+        repo_root, latest, out, cursor);
+}
+
+/* Resolve an additive artifact suffix back to its mapping receipt.  Every
+ * link is address-verified by the object loader and must stay on the exact
+ * immutable job; callers can therefore reuse one checked chain instead of
+ * reimplementing predecessor traversal for every idempotent retry. */
+bool publication_artifact_chain_load(
+    const char *repo_root,
+    const struct vcs_devloop_publication_receipt *latest,
+    struct publication_artifact_chain *out)
+{
+    if (!repo_root || !latest || !out) return false;
+    memset(out, 0, sizeof(*out));
+    const struct vcs_devloop_publication_receipt *cursor = latest;
+    return publication_artifact_chain_load_reproduction_links(
+        repo_root, latest, out, cursor);
 }
 
 bool publication_accepted_work_valid(
@@ -1104,6 +1133,152 @@ static bool accepted_candidate_existing_job(
     return true;
 }
 
+static bool accepted_candidate_inputs_invalid(
+    const char *authority_workspace, const char *candidate_workspace,
+    const uint8_t accepted_work_root[32],
+    const uint8_t expected_source_root[32], int64_t now_unix)
+{
+    return !authority_workspace || !authority_workspace[0] ||
+        !candidate_workspace || !candidate_workspace[0] ||
+        !accepted_work_root || !expected_source_root || now_unix <= 0;
+}
+
+static bool accepted_candidate_source_mismatch(
+    const char *candidate_workspace, const uint8_t expected_source_root[32],
+    uint8_t actual_source_root[32])
+{
+    return vcs_tree_capture_path(candidate_workspace, actual_source_root) !=
+            VCS_OK ||
+        memcmp(actual_source_root, expected_source_root, 32) != 0;
+}
+
+static bool accepted_candidate_bundle_export_rejected(
+    const char *authority_workspace, const uint8_t accepted_work_root[32],
+    const uint8_t expected_source_root[32], int64_t now_unix,
+    uint8_t **bundle, size_t *bundle_len,
+    struct vcs_zcode_accepted_work_v1 *exported)
+{
+    enum vcs_zcode_accepted_work_bundle_result bundle_result =
+        vcs_zcode_accepted_work_bundle_export(
+            authority_workspace, accepted_work_root, now_unix,
+            bundle, bundle_len, exported);
+    if (bundle_result != VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK ||
+        memcmp(exported->candidate.candidate_source_root,
+               expected_source_root, 32) != 0) {
+        free(*bundle);
+        return true;
+    }
+    return false;
+}
+
+static bool accepted_candidate_bundle_import_rejected(
+    const char *candidate_workspace, const uint8_t accepted_work_root[32],
+    const uint8_t expected_source_root[32], uint8_t *bundle,
+    size_t bundle_len, struct vcs_zcode_accepted_work_v1 *imported,
+    struct vcs_devloop_accepted_candidate_result *out)
+{
+    enum vcs_zcode_accepted_work_bundle_result bundle_result =
+        vcs_zcode_accepted_work_bundle_import(
+            candidate_workspace, accepted_work_root, expected_source_root,
+            bundle, bundle_len, imported, &out->imported_objects,
+            &out->imported_work_receipts);
+    free(bundle);
+    return bundle_result != VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK ||
+        memcmp(imported->accepted_work_root, accepted_work_root, 32) != 0;
+}
+
+static bool accepted_candidate_parent_capture_failed(
+    const char *candidate_workspace, const char *authority_workspace,
+    const uint8_t expected_source_root[32], uint8_t actual_source_root[32],
+    uint8_t parent_workspace_root[32])
+{
+    return vcs_tree_capture_into(candidate_workspace, authority_workspace,
+                                 actual_source_root) != VCS_OK ||
+        memcmp(actual_source_root, expected_source_root, 32) != 0 ||
+        vcs_tree_capture_path(authority_workspace, parent_workspace_root) !=
+            VCS_OK;
+}
+
+static bool accepted_candidate_commit_put_failed(
+    const char *authority_workspace,
+    const uint8_t expected_source_root[32],
+    const uint8_t accepted_work_root[32], int64_t now_unix,
+    uint8_t commit_root[32])
+{
+    char accepted_hex[65];
+    zcl_hex_encode(accepted_work_root, 32, accepted_hex);
+    struct vcs_commit detached = {
+        .version = VCS_COMMIT_VERSION,
+        .verdict_status = 0,
+        .elapsed_ms = 0,
+        .committed_at = now_unix,
+    };
+    memcpy(detached.tree_hash, expected_source_root, 32);
+    (void)snprintf(detached.phase, sizeof(detached.phase), "%s", "verify");
+    (void)snprintf(detached.task_ref, sizeof(detached.task_ref), "%s",
+                   accepted_hex);
+    uint8_t commit_preimage[VCS_COMMIT_PREIMAGE_BYTES];
+    return !vcs_commit_preimage(&detached, commit_preimage) ||
+        !vcs_object_put_repair(authority_workspace, commit_preimage,
+                               sizeof(commit_preimage), VCS_TAG_COMMIT,
+                               commit_root, NULL);
+}
+
+static const char *accepted_candidate_queue_publication_error(
+    const char *authority_workspace,
+    const uint8_t expected_source_root[32],
+    uint8_t parent_workspace_root[32],
+    const char *source_identity_hex, const char *source_cas_hex,
+    uint8_t commit_root[32],
+    struct vcs_devloop_anchor_result *anchor,
+    struct vcs_devloop_publication_job *job)
+{
+    struct vcs_devloop_verdict verdict = {
+        .verdict_status = 0,
+        .phase = "verify",
+        .elapsed_ms = 0,
+        .proof_complete = true,
+        .proof_scope = "accepted_work_proof_policy",
+        .source_identity_hex = source_identity_hex,
+        .source_cas_hex = source_cas_hex,
+    };
+    bool queued = publication_enqueue_from_commit(
+        authority_workspace, &verdict, commit_root, parent_workspace_root,
+        anchor);
+    anchor->publication_status = queued
+        ? VCS_DEVLOOP_PUBLICATION_QUEUED
+        : VCS_DEVLOOP_PUBLICATION_ERROR;
+    if (!queued ||
+        !vcs_devloop_publication_job_load(
+            authority_workspace, anchor->publication_job_root, job) ||
+        memcmp(job->source_tree_root, expected_source_root, 32) != 0 ||
+        memcmp(job->parent_workspace_root, parent_workspace_root, 32) != 0)
+        return anchor->publication_error[0]
+            ? anchor->publication_error
+            : anchor->error[0] ? anchor->error
+            : "accepted candidate publication job could not be queued";
+    return NULL;
+}
+
+static bool accepted_candidate_advance_refused(
+    const char *workspace, uint8_t job_root[32],
+    const uint8_t accepted_work_root[32], int64_t now_unix,
+    uint8_t progress_root[32])
+{
+    uint8_t waiting_root[32];
+    bool waiting_reused = false, proven_reused = false;
+    if (!vcs_devloop_publication_advance_waiting_acceptance(
+            workspace, job_root, waiting_root, &waiting_reused) ||
+        !vcs_devloop_publication_advance_proven_work(
+            workspace, job_root, accepted_work_root, now_unix,
+            progress_root, &proven_reused))
+        return true;
+    (void)waiting_root;
+    (void)waiting_reused;
+    (void)proven_reused;
+    return false;
+}
+
 void vcs_devloop_publication_bind_accepted_candidate(
     const char *authority_workspace, const char *candidate_workspace,
     const uint8_t accepted_work_root[32],
@@ -1112,17 +1287,16 @@ void vcs_devloop_publication_bind_accepted_candidate(
 {
     if (!out) return;
     memset(out, 0, sizeof(*out));
-    if (!authority_workspace || !authority_workspace[0] ||
-        !candidate_workspace || !candidate_workspace[0] ||
-        !accepted_work_root || !expected_source_root || now_unix <= 0) {
+    if (accepted_candidate_inputs_invalid(
+            authority_workspace, candidate_workspace, accepted_work_root,
+            expected_source_root, now_unix)) {
         accepted_candidate_fail(out, "invalid accepted candidate binding input");
         return;
     }
 
     uint8_t actual_source_root[32];
-    if (vcs_tree_capture_path(candidate_workspace, actual_source_root) !=
-            VCS_OK ||
-        memcmp(actual_source_root, expected_source_root, 32) != 0) {
+    if (accepted_candidate_source_mismatch(
+            candidate_workspace, expected_source_root, actual_source_root)) {
         accepted_candidate_fail(out,
             "retained candidate source no longer matches the accepted source root");
         return;
@@ -1130,25 +1304,16 @@ void vcs_devloop_publication_bind_accepted_candidate(
     uint8_t *bundle = NULL;
     size_t bundle_len = 0;
     struct vcs_zcode_accepted_work_v1 exported, imported;
-    enum vcs_zcode_accepted_work_bundle_result bundle_result =
-        vcs_zcode_accepted_work_bundle_export(
-            authority_workspace, accepted_work_root, now_unix,
-            &bundle, &bundle_len, &exported);
-    if (bundle_result != VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK ||
-        memcmp(exported.candidate.candidate_source_root,
-               expected_source_root, 32) != 0) {
-        free(bundle);
+    if (accepted_candidate_bundle_export_rejected(
+            authority_workspace, accepted_work_root, expected_source_root,
+            now_unix, &bundle, &bundle_len, &exported)) {
         accepted_candidate_fail(out,
             "accepted-work authority does not bind the retained candidate source");
         return;
     }
-    bundle_result = vcs_zcode_accepted_work_bundle_import(
-        candidate_workspace, accepted_work_root, expected_source_root,
-        bundle, bundle_len, &imported, &out->imported_objects,
-        &out->imported_work_receipts);
-    free(bundle);
-    if (bundle_result != VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK ||
-        memcmp(imported.accepted_work_root, accepted_work_root, 32) != 0) {
+    if (accepted_candidate_bundle_import_rejected(
+            candidate_workspace, accepted_work_root, expected_source_root,
+            bundle, bundle_len, &imported, out)) {
         accepted_candidate_fail(out,
             "accepted-work authority bundle failed independent import verification");
         return;
@@ -1184,80 +1349,38 @@ void vcs_devloop_publication_bind_accepted_candidate(
     zcl_hex_encode(source_identity, 32, source_identity_hex);
     zcl_hex_encode(expected_source_root, 32, source_cas_hex);
     uint8_t parent_workspace_root[32];
-    if (vcs_tree_capture_into(candidate_workspace, authority_workspace,
-                              actual_source_root) != VCS_OK ||
-        memcmp(actual_source_root, expected_source_root, 32) != 0 ||
-        vcs_tree_capture_path(authority_workspace, parent_workspace_root) !=
-            VCS_OK) {
+    if (accepted_candidate_parent_capture_failed(
+            candidate_workspace, authority_workspace, expected_source_root,
+            actual_source_root, parent_workspace_root)) {
         accepted_candidate_fail(out,
             "candidate and unchanged parent source could not enter the publication CAS");
         return;
     }
-    char accepted_hex[65];
-    zcl_hex_encode(accepted_work_root, 32, accepted_hex);
-    struct vcs_commit detached = {
-        .version = VCS_COMMIT_VERSION,
-        .verdict_status = 0,
-        .elapsed_ms = 0,
-        .committed_at = now_unix,
-    };
-    memcpy(detached.tree_hash, expected_source_root, 32);
-    (void)snprintf(detached.phase, sizeof(detached.phase), "%s", "verify");
-    (void)snprintf(detached.task_ref, sizeof(detached.task_ref), "%s",
-                   accepted_hex);
-    uint8_t commit_preimage[VCS_COMMIT_PREIMAGE_BYTES];
     uint8_t commit_root[32];
-    if (!vcs_commit_preimage(&detached, commit_preimage) ||
-        !vcs_object_put_repair(authority_workspace, commit_preimage,
-                               sizeof(commit_preimage), VCS_TAG_COMMIT,
-                               commit_root, NULL)) {
+    if (accepted_candidate_commit_put_failed(
+            authority_workspace, expected_source_root, accepted_work_root,
+            now_unix, commit_root)) {
         accepted_candidate_fail(out,
             "detached accepted candidate commit could not enter the publication CAS");
         return;
     }
-    struct vcs_devloop_verdict verdict = {
-        .verdict_status = 0,
-        .phase = "verify",
-        .elapsed_ms = 0,
-        .proof_complete = true,
-        .proof_scope = "accepted_work_proof_policy",
-        .source_identity_hex = source_identity_hex,
-        .source_cas_hex = source_cas_hex,
-    };
     struct vcs_devloop_anchor_result anchor = {0};
     struct vcs_devloop_publication_job job;
-    bool queued = publication_enqueue_from_commit(
-        authority_workspace, &verdict, commit_root, parent_workspace_root,
-        &anchor);
-    anchor.publication_status = queued
-        ? VCS_DEVLOOP_PUBLICATION_QUEUED
-        : VCS_DEVLOOP_PUBLICATION_ERROR;
-    if (!queued ||
-        !vcs_devloop_publication_job_load(
-            authority_workspace, anchor.publication_job_root, &job) ||
-        memcmp(job.source_tree_root, expected_source_root, 32) != 0 ||
-        memcmp(job.parent_workspace_root, parent_workspace_root, 32) != 0) {
-        accepted_candidate_fail(out, anchor.publication_error[0]
-            ? anchor.publication_error
-            : anchor.error[0] ? anchor.error
-            : "accepted candidate publication job could not be queued");
+    const char *queue_error = accepted_candidate_queue_publication_error(
+        authority_workspace, expected_source_root, parent_workspace_root,
+        source_identity_hex, source_cas_hex, commit_root, &anchor, &job);
+    if (queue_error) {
+        accepted_candidate_fail(out, queue_error);
         return;
     }
-    uint8_t waiting_root[32], progress_root[32];
-    bool waiting_reused = false, proven_reused = false;
-    if (!vcs_devloop_publication_advance_waiting_acceptance(
+    uint8_t progress_root[32];
+    if (accepted_candidate_advance_refused(
             authority_workspace, anchor.publication_job_root,
-            waiting_root, &waiting_reused) ||
-        !vcs_devloop_publication_advance_proven_work(
-            authority_workspace, anchor.publication_job_root,
-            accepted_work_root, now_unix, progress_root, &proven_reused)) {
+            accepted_work_root, now_unix, progress_root)) {
         accepted_candidate_fail(out,
             "publication job refused the independently verified accepted-work root");
         return;
     }
-    (void)waiting_root;
-    (void)waiting_reused;
-    (void)proven_reused;
     memcpy(out->source_tree_root, job.source_tree_root, 32);
     memcpy(out->vcs_commit_root, job.vcs_commit_root, 32);
     memcpy(out->proof_receipt_root, job.proof_receipt_root, 32);
