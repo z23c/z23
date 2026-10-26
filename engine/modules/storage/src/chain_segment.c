@@ -102,11 +102,25 @@ static pthread_mutex_t g_publish_mutex = PTHREAD_MUTEX_INITIALIZER;
 static enum cseg_status chain_segment_manifest_rebuild_unlocked(
     const char *dir, char *err, size_t errlen);
 
-static enum cseg_status atomic_write_ro(const char *path,
-                                        const uint8_t *buf, size_t len,
-                                        char *err, size_t errlen)
-{
 #if defined(_WIN32)
+/* Write, flush and atomically replace the staged file, then flush the
+ * parent directory. Returns the combined short-circuit result of the
+ * four durable-publication steps, in order. */
+static bool stage_publish_windows(struct platform_private_file *staged,
+                                  const char *tmp, const char *resolved,
+                                  const char *parent,
+                                  const uint8_t *buf, size_t len)
+{
+    return platform_private_file_write_at(staged, buf, len, 0) &&
+           platform_private_file_flush(staged) &&
+           platform_private_file_replace(staged, tmp, resolved) &&
+           platform_private_parent_flush(parent);
+}
+
+static enum cseg_status atomic_write_ro_windows(const char *path,
+                                                const uint8_t *buf, size_t len,
+                                                char *err, size_t errlen)
+{
     char tmp[4096], resolved[4096], parent[4096];
     if (!platform_private_path_resolve(path, resolved, sizeof(resolved),
                                        parent, sizeof(parent))) {
@@ -122,40 +136,50 @@ static enum cseg_status atomic_write_ro(const char *path,
         set_err(err, errlen, "exclusive stage create failed: %s", path);
         return CSEG_ERR_IO;
     }
-    bool ok = platform_private_file_write_at(&staged, buf, len, 0) &&
-              platform_private_file_flush(&staged) &&
-              platform_private_file_replace(&staged, tmp, resolved) &&
-              platform_private_parent_flush(parent);
+    bool ok = stage_publish_windows(&staged, tmp, resolved, parent, buf, len);
     if (!ok && staged.native != (uintptr_t)-1) {
         (void)platform_private_file_retire(&staged, tmp);
         platform_private_file_close(&staged);
     }
     if (!ok) set_err(err, errlen, "durable publication failed: %s", path);
     return ok ? CSEG_OK : CSEG_ERR_IO;
+}
 #else
-    char tmp[4096];
-    int fd;
+/* Create this attempt's exclusive staging file, retrying only EINTR.
+ * Returns the staging descriptor, or -1 after setting err. */
+static int stage_open_exclusive(char *tmp, size_t tmplen, const char *path,
+                                char *err, size_t errlen)
+{
     for (;;) {
-        int n = snprintf(tmp, sizeof(tmp), "%s.%ld-%u.tmp", path,
+        int n = snprintf(tmp, tmplen, "%s.%ld-%u.tmp", path,
                          (long)getpid(),
                          (unsigned)atomic_fetch_add(&g_stage_seq, 1));
-        if (n < 0 || (size_t)n >= sizeof(tmp)) {
+        if (n < 0 || (size_t)n >= tmplen) {
             set_err(err, errlen, "staging name too long: %s", path);
-            return CSEG_ERR_IO;
+            return -1;
         }
-        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                  0644);
+        int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                      0644);
         if (fd >= 0)
-            break;
+            return fd;
         if (errno == EEXIST) {
             set_err(err, errlen, "stage name already exists: %s", tmp);
-            return CSEG_ERR_IO;
+            return -1;
         }
         if (errno != EINTR) {
             set_err(err, errlen, "open(%s): %s", tmp, strerror(errno));
-            return CSEG_ERR_IO;
+            return -1;
         }
     }
+}
+
+static enum cseg_status atomic_write_ro_posix(const char *path,
+                                              const uint8_t *buf, size_t len,
+                                              char *err, size_t errlen)
+{
+    char tmp[4096];
+    int fd = stage_open_exclusive(tmp, sizeof(tmp), path, err, errlen);
+    if (fd < 0) return CSEG_ERR_IO;
     size_t off = 0;
     while (off < len) {
         ssize_t w = write(fd, buf + off, len - off);
@@ -185,6 +209,17 @@ static enum cseg_status atomic_write_ro(const char *path,
     /* Seal read-only: finalized history is never rewritten. */
     (void)chmod(path, 0444);
     return CSEG_OK;
+}
+#endif
+
+static enum cseg_status atomic_write_ro(const char *path,
+                                        const uint8_t *buf, size_t len,
+                                        char *err, size_t errlen)
+{
+#if defined(_WIN32)
+    return atomic_write_ro_windows(path, buf, len, err, errlen);
+#else
+    return atomic_write_ro_posix(path, buf, len, err, errlen);
 #endif
 }
 
@@ -318,6 +353,28 @@ struct chain_segment {
     uint8_t  digest[32];
 };
 
+/* Bounds-check every index entry of a parsed segment against its geometry.
+ * Returns CSEG_OK, or CSEG_ERR_FORMAT after setting err. */
+static enum cseg_status verify_index_entries(const struct chain_segment *seg,
+                                             uint64_t trailer_off,
+                                             const char *path,
+                                             char *err, size_t errlen)
+{
+    /* Every index entry must land inside [data_offset, trailer_off). */
+    for (uint32_t i = 0; i < seg->count; i++) {
+        const uint8_t *e = seg->index + (uint64_t)i * CHAIN_SEGMENT_INDEX_ENTRY_SIZE;
+        uint32_t len = get_u32(e + 4);
+        uint64_t off = get_u64(e + 8);
+        if (len == 0 || off < seg->data_offset ||
+            off > trailer_off || len > trailer_off - off) {
+            set_err(err, errlen, "%s: index[%u] out of range (off=%llu len=%u)",
+                    path, i, (unsigned long long)off, len);
+            return CSEG_ERR_FORMAT;
+        }
+    }
+    return CSEG_OK;
+}
+
 /* Parse + validate the header and geometry of a mapped segment. */
 static enum cseg_status parse_segment(struct chain_segment *seg,
                                       const char *path,
@@ -359,18 +416,9 @@ static enum cseg_status parse_segment(struct chain_segment *seg,
     seg->index = seg->base + CHAIN_SEGMENT_HEADER_SIZE;
 
     uint64_t trailer_off = seg->size - CHAIN_SEGMENT_TRAILER_SIZE;
-    /* Every index entry must land inside [data_offset, trailer_off). */
-    for (uint32_t i = 0; i < seg->count; i++) {
-        const uint8_t *e = seg->index + (uint64_t)i * CHAIN_SEGMENT_INDEX_ENTRY_SIZE;
-        uint32_t len = get_u32(e + 4);
-        uint64_t off = get_u64(e + 8);
-        if (len == 0 || off < seg->data_offset ||
-            off > trailer_off || len > trailer_off - off) {
-            set_err(err, errlen, "%s: index[%u] out of range (off=%llu len=%u)",
-                    path, i, (unsigned long long)off, len);
-            return CSEG_ERR_FORMAT;
-        }
-    }
+    enum cseg_status st = verify_index_entries(seg, trailer_off, path,
+                                               err, errlen);
+    if (st != CSEG_OK) return st;
 
     /* Whole-segment digest over [0, trailer_off). */
     uint8_t got[32];
@@ -383,28 +431,37 @@ static enum cseg_status parse_segment(struct chain_segment *seg,
     return CSEG_OK;
 }
 
-enum cseg_status chain_segment_open(const char *path,
-                                    struct chain_segment **out,
-                                    char *err, size_t errlen)
+/* True when two snapshots of a file describe byte-identical content: same
+ * length, identity and timestamps, compared in this order. */
+static bool positioned_snapshots_equal(const struct platform_positioned_file_snapshot *a,
+                                       const struct platform_positioned_file_snapshot *b)
 {
-    if (!path || !out) { set_err(err, errlen, "null path/out"); return CSEG_ERR_ARG; }
-    *out = NULL;
+    if (a->size != b->size) return false;
+    if (a->volume != b->volume) return false;
+    if (a->file_low != b->file_low) return false;
+    if (a->file_high != b->file_high) return false;
+    if (a->modified_seconds != b->modified_seconds) return false;
+    if (a->modified_nanoseconds != b->modified_nanoseconds) return false;
+    if (a->changed_seconds != b->changed_seconds) return false;
+    if (a->changed_nanoseconds != b->changed_nanoseconds) return false;
+    return true;
+}
 
-    struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before, after;
-    platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path) ||
-        !platform_positioned_file_snapshot(&file, &before) ||
-        before.size == 0 || before.size > SIZE_MAX) {
-        platform_positioned_file_close(&file);
-        set_err(err, errlen, "validated open(%s) failed", path);
-        return CSEG_ERR_IO;
-    }
+/* Map the already-validated file, parse + digest-check the segment in it,
+ * then confirm the file did not change while it was being validated. On
+ * success *out owns the mapping and the file; on any failure every
+ * resource is released and a typed status is returned. */
+static enum cseg_status map_and_verify_segment(struct platform_positioned_file *file,
+                                               const struct platform_positioned_file_snapshot *before,
+                                               struct chain_segment **out,
+                                               const char *path,
+                                               char *err, size_t errlen)
+{
     struct platform_read_mapping mapping;
     platform_read_mapping_init(&mapping);
-    if (!platform_read_mapping_open_positioned(&mapping, &file,
-                                                (size_t)before.size)) {
-        platform_positioned_file_close(&file);
+    if (!platform_read_mapping_open_positioned(&mapping, file,
+                                                (size_t)before->size)) {
+        platform_positioned_file_close(file);
         set_err(err, errlen, "read mapping(%s) failed", path);
         return CSEG_ERR_IO;
     }
@@ -412,12 +469,12 @@ enum cseg_status chain_segment_open(const char *path,
     struct chain_segment *seg = zcl_malloc(sizeof(*seg), "chain_segment/open");
     if (!seg) {
         platform_read_mapping_close(&mapping);
-        platform_positioned_file_close(&file);
+        platform_positioned_file_close(file);
         set_err(err, errlen, "alloc chain_segment");
         return CSEG_ERR_IO;
     }
     memset(seg, 0, sizeof(*seg));
-    seg->file = file;
+    seg->file = *file;
     seg->mapping = mapping;
     seg->base = mapping.data;
     seg->size = mapping.size;
@@ -429,13 +486,9 @@ enum cseg_status chain_segment_open(const char *path,
         free(seg);
         return st;
     }
+    struct platform_positioned_file_snapshot after;
     if (!platform_positioned_file_snapshot(&seg->file, &after) ||
-        before.size != after.size || before.volume != after.volume ||
-        before.file_low != after.file_low || before.file_high != after.file_high ||
-        before.modified_seconds != after.modified_seconds ||
-        before.modified_nanoseconds != after.modified_nanoseconds ||
-        before.changed_seconds != after.changed_seconds ||
-        before.changed_nanoseconds != after.changed_nanoseconds) {
+        !positioned_snapshots_equal(before, &after)) {
         platform_read_mapping_close(&seg->mapping);
         platform_positioned_file_close(&seg->file);
         free(seg);
@@ -444,6 +497,26 @@ enum cseg_status chain_segment_open(const char *path,
     }
     *out = seg;
     return CSEG_OK;
+}
+
+enum cseg_status chain_segment_open(const char *path,
+                                    struct chain_segment **out,
+                                    char *err, size_t errlen)
+{
+    if (!path || !out) { set_err(err, errlen, "null path/out"); return CSEG_ERR_ARG; }
+    *out = NULL;
+
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > SIZE_MAX) {
+        platform_positioned_file_close(&file);
+        set_err(err, errlen, "validated open(%s) failed", path);
+        return CSEG_ERR_IO;
+    }
+    return map_and_verify_segment(&file, &before, out, path, err, errlen);
 }
 
 void chain_segment_close(struct chain_segment *seg)
@@ -639,6 +712,46 @@ enum cseg_status chain_segment_manifest_rebuild(const char *dir,
     return st;
 }
 
+/* Read the whole already-opened manifest through a stable-read window: the
+ * file is snapshotted, read, and snapshotted again, and must describe the
+ * same bytes both times. Closes *file on every path; on success *out_buf
+ * (caller frees) holds *out_size validated bytes. */
+static enum cseg_status manifest_read_stable(struct platform_positioned_file *file,
+                                             const char *path,
+                                             uint8_t **out_buf, size_t *out_size,
+                                             char *err, size_t errlen)
+{
+    struct platform_positioned_file_snapshot before, after;
+    *out_buf = NULL; *out_size = 0;
+    if (!platform_positioned_file_snapshot(file, &before) ||
+        before.size > SIZE_MAX) {
+        set_err(err, errlen, "snapshot(%s) failed", path);
+        platform_positioned_file_close(file);
+        return CSEG_ERR_IO;
+    }
+    if (before.size < CHAIN_MANIFEST_HEADER_SIZE + CHAIN_MANIFEST_TRAILER_SIZE) {
+        platform_positioned_file_close(file);
+        set_err(err, errlen, "%s: truncated", path);
+        return CSEG_ERR_MANIFEST;
+    }
+    uint8_t *buf = zcl_malloc((size_t)before.size, "chain_segment/load_manifest");
+    if (!buf) { platform_positioned_file_close(file); set_err(err, errlen, "alloc"); return CSEG_ERR_IO; }
+    int64_t got = platform_positioned_file_read(file, buf,
+                                                (size_t)before.size, 0);
+    bool stable = got >= 0 && (uint64_t)got == before.size &&
+        platform_positioned_file_snapshot(file, &after) &&
+        positioned_snapshots_equal(&before, &after);
+    platform_positioned_file_close(file);
+    if (!stable) {
+        free(buf);
+        set_err(err, errlen, "%s: unstable/short read", path);
+        return CSEG_ERR_IO;
+    }
+    *out_buf = buf;
+    *out_size = (size_t)before.size;
+    return CSEG_OK;
+}
+
 /* Load + validate manifest.dat into a malloc'd entry array. An absent manifest
  * yields *out_n = 0 and CSEG_OK. */
 static enum cseg_status load_manifest(const char *dir,
@@ -651,42 +764,18 @@ static enum cseg_status load_manifest(const char *dir,
     manifest_path(path, sizeof(path), dir);
 
     struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before, after;
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, path)) {
         if (platform_private_path_absent(path)) return CSEG_OK;
         set_err(err, errlen, "validated open(%s) failed", path);
         return CSEG_ERR_IO;
     }
-    if (!platform_positioned_file_snapshot(&file, &before) ||
-        before.size > SIZE_MAX) {
-        set_err(err, errlen, "snapshot(%s) failed", path);
-        platform_positioned_file_close(&file);
-        return CSEG_ERR_IO;
-    }
-    if (before.size < CHAIN_MANIFEST_HEADER_SIZE + CHAIN_MANIFEST_TRAILER_SIZE) {
-        platform_positioned_file_close(&file);
-        set_err(err, errlen, "%s: truncated", path);
-        return CSEG_ERR_MANIFEST;
-    }
-    uint8_t *buf = zcl_malloc((size_t)before.size, "chain_segment/load_manifest");
-    if (!buf) { platform_positioned_file_close(&file); set_err(err, errlen, "alloc"); return CSEG_ERR_IO; }
-    int64_t got = platform_positioned_file_read(&file, buf,
-                                                (size_t)before.size, 0);
-    bool stable = got >= 0 && (uint64_t)got == before.size &&
-        platform_positioned_file_snapshot(&file, &after) &&
-        before.size == after.size && before.volume == after.volume &&
-        before.file_low == after.file_low && before.file_high == after.file_high &&
-        before.modified_seconds == after.modified_seconds &&
-        before.modified_nanoseconds == after.modified_nanoseconds &&
-        before.changed_seconds == after.changed_seconds &&
-        before.changed_nanoseconds == after.changed_nanoseconds;
-    platform_positioned_file_close(&file);
-    if (!stable) {
-        free(buf);
-        set_err(err, errlen, "%s: unstable/short read", path);
-        return CSEG_ERR_IO;
-    }
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    enum cseg_status st = manifest_read_stable(&file, path, &buf, &size,
+                                               err, errlen);
+    if (st != CSEG_OK) return st;
+
     if (memcmp(buf, MAN_MAGIC, 8) != 0 ||
         get_u32(buf + 8) != CHAIN_MANIFEST_FORMAT_VERSION) {
         free(buf); set_err(err, errlen, "%s: bad header", path);
@@ -694,7 +783,7 @@ static enum cseg_status load_manifest(const char *dir,
     }
     uint32_t n = get_u32(buf + 12);
     uint64_t body = CHAIN_MANIFEST_HEADER_SIZE + (uint64_t)n * CHAIN_MANIFEST_ENTRY_SIZE;
-    if (body + CHAIN_MANIFEST_TRAILER_SIZE != before.size) {
+    if (body + CHAIN_MANIFEST_TRAILER_SIZE != size) {
         free(buf); set_err(err, errlen, "%s: size inconsistent with count %u", path, n);
         return CSEG_ERR_MANIFEST;
     }
