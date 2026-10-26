@@ -155,6 +155,22 @@ static enum vcs_source_bundle_result sharded_compress_one(
     return VCS_SOURCE_BUNDLE_OK;
 }
 
+static enum vcs_source_bundle_result sharded_account_part(
+    const struct vcs_source_bundle_shard *part, uint64_t *aggregate,
+    uint64_t *compressed_bytes)
+{
+    uint64_t payload_len = part->wire_len -
+        VCS_SOURCE_BUNDLE_SHARD_HEADER_BYTES;
+    if (UINT64_MAX - *aggregate < part->wire_len ||
+        UINT64_MAX - *compressed_bytes < payload_len)
+        return VCS_SOURCE_BUNDLE_ERR_LIMIT;
+    *aggregate += part->wire_len;
+    *compressed_bytes += payload_len;
+    if (*aggregate > VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES)
+        return VCS_SOURCE_BUNDLE_ERR_LIMIT;
+    return VCS_SOURCE_BUNDLE_OK;
+}
+
 enum vcs_source_bundle_result vcs_source_bundle_sharded_create(
     const char *workspace, const uint8_t tree_root[32],
     struct vcs_source_bundle_sharded *bundle)
@@ -188,17 +204,8 @@ enum vcs_source_bundle_result vcs_source_bundle_sharded_create(
                                       (size_t)sizes[i], part);
         if (result == VCS_SOURCE_BUNDLE_OK) {
             bundle->shard_count++;
-            uint64_t payload_len = part->wire_len -
-                VCS_SOURCE_BUNDLE_SHARD_HEADER_BYTES;
-            if (UINT64_MAX - aggregate < part->wire_len ||
-                UINT64_MAX - compressed_bytes < payload_len) {
-                result = VCS_SOURCE_BUNDLE_ERR_LIMIT;
-            } else {
-                aggregate += part->wire_len;
-                compressed_bytes += payload_len;
-                if (aggregate > VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES)
-                    result = VCS_SOURCE_BUNDLE_ERR_LIMIT;
-            }
+            result = sharded_account_part(part, &aggregate,
+                                          &compressed_bytes);
         }
     }
     for (size_t i = 0; i < 256u; i++) free(payloads[i]);
@@ -213,11 +220,10 @@ enum vcs_source_bundle_result vcs_source_bundle_sharded_create(
     return result;
 }
 
-static enum vcs_source_bundle_result sharded_decode(
+static enum vcs_source_bundle_result sharded_check_wire_header(
     const struct vcs_source_bundle_shard *part,
-    uint16_t expected_index, size_t expected_len, uint8_t **payload_out)
+    uint16_t expected_index, size_t expected_len)
 {
-    *payload_out = NULL;
     if (!part || !part->wire ||
         part->wire_len < VCS_SOURCE_BUNDLE_SHARD_HEADER_BYTES ||
         part->wire_len > VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES ||
@@ -231,6 +237,17 @@ static enum vcs_source_bundle_result sharded_decode(
         vcs_rd_u16le(part->wire + 46) != VCS_SOURCE_BUNDLE_SHARD_COUNT ||
         vcs_rd_u64le(part->wire + 48) != expected_len)
         return VCS_SOURCE_BUNDLE_ERR_WIRE;
+    return VCS_SOURCE_BUNDLE_OK;
+}
+
+static enum vcs_source_bundle_result sharded_decode(
+    const struct vcs_source_bundle_shard *part,
+    uint16_t expected_index, size_t expected_len, uint8_t **payload_out)
+{
+    *payload_out = NULL;
+    enum vcs_source_bundle_result wire_result =
+        sharded_check_wire_header(part, expected_index, expected_len);
+    if (wire_result != VCS_SOURCE_BUNDLE_OK) return wire_result;
     uint64_t compressed_len = vcs_rd_u64le(part->wire + 56);
     if (compressed_len == 0 || compressed_len > ULONG_MAX ||
         compressed_len !=
@@ -252,17 +269,78 @@ static enum vcs_source_bundle_result sharded_decode(
     return VCS_SOURCE_BUNDLE_OK;
 }
 
+static enum vcs_source_bundle_result sharded_verify_check_inputs(
+    const struct vcs_source_bundle_sharded *bundle,
+    const uint8_t expected_tree_root[32])
+{
+    if (!bundle || !expected_tree_root || !bundle->manifest_wire ||
+        bundle->manifest_wire_len == 0 ||
+        bundle->manifest_wire_len > VCS_SOURCE_BUNDLE_MAX_MANIFEST_BYTES ||
+        bundle->shard_count > VCS_SOURCE_BUNDLE_SHARD_COUNT)
+        return VCS_SOURCE_BUNDLE_ERR_NULL;
+    return VCS_SOURCE_BUNDLE_OK;
+}
+
+static enum vcs_source_bundle_result sharded_map_parts(
+    const struct vcs_source_bundle_sharded *bundle,
+    const uint64_t sizes[256],
+    const struct vcs_source_bundle_shard *parts[256],
+    uint64_t *compressed_bytes)
+{
+    enum vcs_source_bundle_result result = VCS_SOURCE_BUNDLE_OK;
+    for (size_t i = 0; result == VCS_SOURCE_BUNDLE_OK &&
+                       i < bundle->shard_count; i++) {
+        const struct vcs_source_bundle_shard *part = &bundle->shards[i];
+        if (part->index >= 256u || parts[part->index] ||
+            sizes[part->index] == 0)
+            result = VCS_SOURCE_BUNDLE_ERR_WIRE;
+        else {
+            parts[part->index] = part;
+            *compressed_bytes += part->wire_len -
+                VCS_SOURCE_BUNDLE_SHARD_HEADER_BYTES;
+        }
+    }
+    return result;
+}
+
+static enum vcs_source_bundle_result sharded_verify_shard(
+    const struct vcs_source_bundle_shard *part, uint16_t shard,
+    uint64_t shard_size, const struct vcs_manifest *manifest)
+{
+    uint8_t *payload = NULL;
+    enum vcs_source_bundle_result result = sharded_decode(
+        part, shard, (size_t)shard_size, &payload);
+    size_t off = 0;
+    for (size_t i = 0; result == VCS_SOURCE_BUNDLE_OK &&
+                       i < manifest->count; i++) {
+        const struct vcs_entry *entry = &manifest->entries[i];
+        if (sharded_index(entry->path) != shard) continue;
+        uint8_t blob_root[32];
+        if (off > shard_size || entry->size > shard_size - off) {
+            result = VCS_SOURCE_BUNDLE_ERR_WIRE;
+            break;
+        }
+        vcs_sha3_tag(VCS_TAG_BLOB, payload + off,
+                     (size_t)entry->size, blob_root);
+        if (memcmp(blob_root, entry->blob, 32) != 0)
+            result = VCS_SOURCE_BUNDLE_ERR_BLOB;
+        off += (size_t)entry->size;
+    }
+    if (result == VCS_SOURCE_BUNDLE_OK && off != shard_size)
+        result = VCS_SOURCE_BUNDLE_ERR_WIRE;
+    free(payload);
+    return result;
+}
+
 enum vcs_source_bundle_result vcs_source_bundle_sharded_verify(
     const struct vcs_source_bundle_sharded *bundle,
     const uint8_t expected_tree_root[32],
     struct vcs_source_bundle_metrics *metrics)
 {
     if (metrics) memset(metrics, 0, sizeof(*metrics));
-    if (!bundle || !expected_tree_root || !bundle->manifest_wire ||
-        bundle->manifest_wire_len == 0 ||
-        bundle->manifest_wire_len > VCS_SOURCE_BUNDLE_MAX_MANIFEST_BYTES ||
-        bundle->shard_count > VCS_SOURCE_BUNDLE_SHARD_COUNT)
-        return VCS_SOURCE_BUNDLE_ERR_NULL;
+    enum vcs_source_bundle_result result =
+        sharded_verify_check_inputs(bundle, expected_tree_root);
+    if (result != VCS_SOURCE_BUNDLE_OK) return result;
     struct vcs_manifest manifest;
     if (!vcs_manifest_parse(bundle->manifest_wire,
                             bundle->manifest_wire_len, &manifest))
@@ -278,19 +356,7 @@ enum vcs_source_bundle_result vcs_source_bundle_sharded_verify(
     }
     const struct vcs_source_bundle_shard *parts[256] = {0};
     uint64_t compressed_bytes = 0;
-    enum vcs_source_bundle_result result = VCS_SOURCE_BUNDLE_OK;
-    for (size_t i = 0; result == VCS_SOURCE_BUNDLE_OK &&
-                       i < bundle->shard_count; i++) {
-        const struct vcs_source_bundle_shard *part = &bundle->shards[i];
-        if (part->index >= 256u || parts[part->index] ||
-            sizes[part->index] == 0)
-            result = VCS_SOURCE_BUNDLE_ERR_WIRE;
-        else {
-            parts[part->index] = part;
-            compressed_bytes += part->wire_len -
-                VCS_SOURCE_BUNDLE_SHARD_HEADER_BYTES;
-        }
-    }
+    result = sharded_map_parts(bundle, sizes, parts, &compressed_bytes);
     for (uint16_t shard = 0; result == VCS_SOURCE_BUNDLE_OK &&
                               shard < 256u; shard++) {
         if ((sizes[shard] > 0) != (parts[shard] != NULL)) {
@@ -298,29 +364,8 @@ enum vcs_source_bundle_result vcs_source_bundle_sharded_verify(
             break;
         }
         if (sizes[shard] == 0) continue;
-        uint8_t *payload = NULL;
-        result = sharded_decode(parts[shard], shard, (size_t)sizes[shard],
-                                 &payload);
-        size_t off = 0;
-        for (size_t i = 0; result == VCS_SOURCE_BUNDLE_OK &&
-                           i < manifest.count; i++) {
-            const struct vcs_entry *entry = &manifest.entries[i];
-            if (sharded_index(entry->path) != shard) continue;
-            uint8_t blob_root[32];
-            if (off > sizes[shard] ||
-                entry->size > sizes[shard] - off) {
-                result = VCS_SOURCE_BUNDLE_ERR_WIRE;
-                break;
-            }
-            vcs_sha3_tag(VCS_TAG_BLOB, payload + off,
-                         (size_t)entry->size, blob_root);
-            if (memcmp(blob_root, entry->blob, 32) != 0)
-                result = VCS_SOURCE_BUNDLE_ERR_BLOB;
-            off += (size_t)entry->size;
-        }
-        if (result == VCS_SOURCE_BUNDLE_OK && off != sizes[shard])
-            result = VCS_SOURCE_BUNDLE_ERR_WIRE;
-        free(payload);
+        result = sharded_verify_shard(parts[shard], shard, sizes[shard],
+                                      &manifest);
     }
     if (result == VCS_SOURCE_BUNDLE_OK && metrics) {
         metrics->source_bytes = source_bytes;
@@ -329,6 +374,67 @@ enum vcs_source_bundle_result vcs_source_bundle_sharded_verify(
     }
     vcs_manifest_free(&manifest);
     return result;
+}
+
+static enum vcs_source_bundle_result sharded_import_blob(
+    const char *workspace, const struct vcs_entry *entry,
+    uint8_t *blob, struct vcs_source_bundle_metrics *admitted)
+{
+    bool existed = vcs_object_has(workspace, entry->blob);
+    bool repaired = false;
+    uint8_t stored[32];
+    if (!vcs_object_put_repair(
+            workspace, blob, (size_t)entry->size,
+            VCS_TAG_BLOB, stored, &repaired) ||
+        memcmp(stored, entry->blob, 32) != 0)
+        return VCS_SOURCE_BUNDLE_ERR_STORE;
+    if (existed && !repaired) {
+        admitted->reused_blobs++;
+        admitted->reused_bytes += entry->size;
+    } else {
+        admitted->new_blobs++;
+        admitted->new_bytes += entry->size;
+    }
+    admitted->repaired = admitted->repaired || repaired;
+    return VCS_SOURCE_BUNDLE_OK;
+}
+
+static enum vcs_source_bundle_result sharded_import_shard(
+    const struct vcs_source_bundle_shard *part, uint16_t shard,
+    uint64_t shard_size, const struct vcs_manifest *manifest,
+    const char *workspace, struct vcs_source_bundle_metrics *admitted)
+{
+    uint8_t *payload = NULL;
+    enum vcs_source_bundle_result result = sharded_decode(
+        part, shard, (size_t)shard_size, &payload);
+    size_t off = 0;
+    for (size_t i = 0; result == VCS_SOURCE_BUNDLE_OK &&
+                       i < manifest->count; i++) {
+        const struct vcs_entry *entry = &manifest->entries[i];
+        if (sharded_index(entry->path) != shard) continue;
+        result = sharded_import_blob(workspace, entry, payload + off,
+                                     admitted);
+        if (result != VCS_SOURCE_BUNDLE_OK) break;
+        off += (size_t)entry->size;
+    }
+    free(payload);
+    return result;
+}
+
+static enum vcs_source_bundle_result sharded_import_manifest(
+    const struct vcs_source_bundle_sharded *bundle,
+    const uint8_t expected_tree_root[32], const char *workspace,
+    struct vcs_source_bundle_metrics *admitted)
+{
+    bool existed = vcs_object_has(workspace, expected_tree_root);
+    bool repaired = false;
+    if (!vcs_object_put_addressed_repair(
+            workspace, expected_tree_root, bundle->manifest_wire,
+            bundle->manifest_wire_len, &repaired))
+        return VCS_SOURCE_BUNDLE_ERR_STORE;
+    admitted->manifest_reused = existed && !repaired;
+    admitted->repaired = admitted->repaired || repaired;
+    return VCS_SOURCE_BUNDLE_OK;
 }
 
 enum vcs_source_bundle_result vcs_source_bundle_sharded_import(
@@ -359,48 +465,12 @@ enum vcs_source_bundle_result vcs_source_bundle_sharded_import(
     for (uint16_t shard = 0; result == VCS_SOURCE_BUNDLE_OK &&
                               shard < 256u; shard++) {
         if (sizes[shard] == 0) continue;
-        uint8_t *payload = NULL;
-        result = sharded_decode(parts[shard], shard, (size_t)sizes[shard],
-                                 &payload);
-        size_t off = 0;
-        for (size_t i = 0; result == VCS_SOURCE_BUNDLE_OK &&
-                           i < manifest.count; i++) {
-            const struct vcs_entry *entry = &manifest.entries[i];
-            if (sharded_index(entry->path) != shard) continue;
-            bool existed = vcs_object_has(workspace, entry->blob);
-            bool repaired = false;
-            uint8_t stored[32];
-            if (!vcs_object_put_repair(
-                    workspace, payload + off, (size_t)entry->size,
-                    VCS_TAG_BLOB, stored, &repaired) ||
-                memcmp(stored, entry->blob, 32) != 0) {
-                result = VCS_SOURCE_BUNDLE_ERR_STORE;
-                break;
-            }
-            if (existed && !repaired) {
-                admitted.reused_blobs++;
-                admitted.reused_bytes += entry->size;
-            } else {
-                admitted.new_blobs++;
-                admitted.new_bytes += entry->size;
-            }
-            admitted.repaired = admitted.repaired || repaired;
-            off += (size_t)entry->size;
-        }
-        free(payload);
+        result = sharded_import_shard(parts[shard], shard, sizes[shard],
+                                      &manifest, workspace, &admitted);
     }
-    if (result == VCS_SOURCE_BUNDLE_OK) {
-        bool existed = vcs_object_has(workspace, expected_tree_root);
-        bool repaired = false;
-        if (!vcs_object_put_addressed_repair(
-                workspace, expected_tree_root, bundle->manifest_wire,
-                bundle->manifest_wire_len, &repaired))
-            result = VCS_SOURCE_BUNDLE_ERR_STORE;
-        else {
-            admitted.manifest_reused = existed && !repaired;
-            admitted.repaired = admitted.repaired || repaired;
-        }
-    }
+    if (result == VCS_SOURCE_BUNDLE_OK)
+        result = sharded_import_manifest(bundle, expected_tree_root,
+                                         workspace, &admitted);
     if (result == VCS_SOURCE_BUNDLE_OK && metrics) *metrics = admitted;
     vcs_manifest_free(&manifest);
     return result;
