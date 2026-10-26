@@ -370,6 +370,112 @@ static bool compose_path(char *out, size_t cap, const char *datadir,
     return true;
 }
 
+/* Read the node cookie from path into cookie, stripping one trailing
+ * newline. A missing or unreadable file leaves cookie untouched so the
+ * caller can fall back to conf credentials. */
+static void read_cookie_file(const char *path, char *cookie, size_t cap)
+{
+    FILE *cf = fopen(path, "r");
+    if (cf) {
+        if (fgets(cookie, cap, cf)) {
+            char *nl = strchr(cookie, '\n');
+            if (nl) *nl = '\0';
+        }
+        fclose(cf);
+    }
+}
+
+/* Acquire the RPC credential: the cookie file first, then
+ * rpcuser:rpcpassword from the conf. Returns 0 with cookie filled,
+ * 1 when no credential exists anywhere (cookie left empty), or -1 when
+ * the conf credential is invalid, which load_conf_auth has already
+ * reported to stderr. */
+static int load_any_auth(const char *cookie_path, const char *conf_path,
+                         char *cookie, size_t cookie_cap)
+{
+    /* Try cookie auth first (C23 node uses cookies) */
+    read_cookie_file(cookie_path, cookie, cookie_cap);
+
+    /* Fall back to rpcuser:rpcpassword from conf (zclassicd) */
+    if (cookie[0] == '\0') {
+        int conf = load_conf_auth(conf_path, cookie, cookie_cap);
+        if (conf < 0)
+            return -1;
+        if (conf == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Build params JSON from remaining args */
+static void build_params_json(char *params, size_t cap, int argc,
+                              char *argv[])
+{
+    if (argc > 2) {
+        /* If single arg with commas, pass as-is */
+        if (argc == 3) {
+            snprintf(params, cap, "%s", argv[2]);
+        } else {
+            /* Multiple args — join with commas */
+            size_t off = 0;
+            for (int i = 2; i < argc && off < cap - 2; i++) {
+                if (i > 2) params[off++] = ',';
+                off += (size_t)snprintf(params + off, cap - off, "%s", argv[i]);
+            }
+        }
+    }
+}
+
+/* Map the ZCL_RPCPORT value to a usable port, keeping the default of 18232
+ * for a missing, unparseable, or out-of-range value rather than connecting
+ * to port 0. */
+static int rpc_port_from_env(const char *port_env)
+{
+    int port = 18232;
+    if (port_env) {
+        int parsed = atoi(port_env);
+        if (parsed > 0 && parsed <= 65535) port = parsed;
+    }
+    return port;
+}
+
+/* Compose the cookie and conf paths as a pair; compose_path reports an
+ * overlong path itself, and the second compose is skipped when the first
+ * already failed, exactly as the previous early return did. */
+static bool compose_auth_paths(char *cookie_path, size_t cookie_cap,
+                               char *conf_path, size_t conf_cap,
+                               const char *datadir, const char *home)
+{
+    return compose_path(cookie_path, cookie_cap, datadir, home,
+                        ".cookie", ".zclassic-c23/.cookie") &&
+           compose_path(conf_path, conf_cap, datadir, home,
+                        "zclassic.conf", "zclassic.conf");
+}
+
+/* Retry the call with rpcuser:rpcpassword credentials from zclassic.conf:
+ * compose <datadir>/zclassic.conf, <home>/.zclassic-c23/zclassic.conf, or
+ * the bare fallback, read the credential, and on success store the fresh
+ * rpc_call result in *n_out. Returns load_conf_auth's status, so a
+ * negative value means the caller must stop. */
+static int conf_retry_auth(int *n_out, const char *datadir, const char *home,
+                           int port, const char *method, const char *params,
+                           char *response, size_t response_cap)
+{
+    char conf_path2[512];
+    if (datadir)
+        snprintf(conf_path2, sizeof(conf_path2), "%s/zclassic.conf", datadir);
+    else if (home)
+        snprintf(conf_path2, sizeof(conf_path2), "%s/.zclassic-c23/zclassic.conf", home);
+    else
+        snprintf(conf_path2, sizeof(conf_path2), "zclassic.conf");
+    char fallback[256] = "";
+    int auth = load_conf_auth(conf_path2, fallback, sizeof(fallback));
+    if (auth > 0)
+        *n_out = rpc_call("127.0.0.1", port, fallback, method, params,
+                          response, response_cap);
+    return auth;
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2) {
@@ -388,64 +494,31 @@ int main(int argc, char *argv[])
     const char *datadir = getenv("ZCL_DATADIR");
     /* Compose both paths before any file is opened: a truncated prefix
      * can name another node's directory and so another node's cookie. */
-    if (!compose_path(cookie_path, sizeof(cookie_path), datadir, home,
-                      ".cookie", ".zclassic-c23/.cookie") ||
-        !compose_path(conf_path, sizeof(conf_path), datadir, home,
-                      "zclassic.conf", "zclassic.conf"))
+    if (!compose_auth_paths(cookie_path, sizeof(cookie_path),
+                            conf_path, sizeof(conf_path), datadir, home))
         return 1;
 
     char cookie[256] = "";
 
-    /* Try cookie auth first (C23 node uses cookies) */
-    {
-        FILE *cf = fopen(cookie_path, "r");
-        if (cf) {
-            if (fgets(cookie, sizeof(cookie), cf)) {
-                char *nl = strchr(cookie, '\n');
-                if (nl) *nl = '\0';
-            }
-            fclose(cf);
-        }
-    }
-
-    /* Fall back to rpcuser:rpcpassword from conf (zclassicd) */
-    if (cookie[0] == '\0')
-    {
-        if (load_conf_auth(conf_path, cookie, sizeof(cookie)) < 0)
-            return 1;
-    }
-
-    if (cookie[0] == '\0') {
-        fprintf(stderr, "No auth found (no cookie, no rpcuser/rpcpassword)\n");
+    /* 0 = credential acquired, 1 = none found (reported below), -1 = the
+     * conf credential was invalid (already reported by load_conf_auth). */
+    int auth = load_any_auth(cookie_path, conf_path, cookie, sizeof(cookie));
+    if (auth != 0) {
+        if (auth == 1)
+            fprintf(stderr, "No auth found (no cookie, no rpcuser/rpcpassword)\n");
         return 1;
     }
 
     /* Build params JSON from remaining args */
     char params[4096] = "";
-    if (argc > 2) {
-        /* If single arg with commas, pass as-is */
-        if (argc == 3) {
-            snprintf(params, sizeof(params), "%s", argv[2]);
-        } else {
-            /* Multiple args — join with commas */
-            size_t off = 0;
-            for (int i = 2; i < argc && off < sizeof(params) - 2; i++) {
-                if (i > 2) params[off++] = ',';
-                off += (size_t)snprintf(params + off, sizeof(params) - off, "%s", argv[i]);
-            }
-        }
-    }
+    build_params_json(params, sizeof(params), argc, argv);
 
     /* Override the default RPC port via env. Matches the documentation
      * in README.md (Environment variables section). atoi() returns 0
      * for unparseable values; we keep the literal default in that
      * case rather than connecting to port 0. */
-    int port = 18232;
     const char *port_env = getenv("ZCL_RPCPORT");
-    if (port_env) {
-        int parsed = atoi(port_env);
-        if (parsed > 0 && parsed <= 65535) port = parsed;
-    }
+    int port = rpc_port_from_env(port_env);
 
     char response[1024 * 1024];
     int n = rpc_call("127.0.0.1", port, cookie, argv[1], params,
@@ -457,20 +530,11 @@ int main(int argc, char *argv[])
 
     /* If we got "Unauthorized", retry with conf auth */
     if (n == 0 || strstr(response, "Unauthorized")) {
-        char conf_path2[512];
-        if (datadir)
-            snprintf(conf_path2, sizeof(conf_path2), "%s/zclassic.conf", datadir);
-        else if (home)
-            snprintf(conf_path2, sizeof(conf_path2), "%s/.zclassic-c23/zclassic.conf", home);
-        else
-            snprintf(conf_path2, sizeof(conf_path2), "zclassic.conf");
-        char fallback[256] = "";
-        int auth = load_conf_auth(conf_path2, fallback, sizeof(fallback));
-        if (auth < 0)
+        int retried = n;
+        if (conf_retry_auth(&retried, datadir, home, port, argv[1],
+                            params, response, sizeof(response)) < 0)
             return 1;
-        if (auth > 0)
-            n = rpc_call("127.0.0.1", port, fallback, argv[1], params,
-                         response, sizeof(response));
+        n = retried;
     }
 
     if (n > 0)

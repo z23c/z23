@@ -2519,7 +2519,6 @@ tools/zcc.c:scan_entries:27
 tools/zcc.c:zcc_dispatch:36
 tools/zcl-nodectl.c:cmd_launch:30
 tools/zcl-nodectl.c:main:16
-tools/zcl-rpc.c:main:27
 tools/zcl_portfwd.c:main:41
 tools/zcode_adapter_runner.c:main:73
 tools/zcode_app_server_benchmark.c:handle_notification:18
