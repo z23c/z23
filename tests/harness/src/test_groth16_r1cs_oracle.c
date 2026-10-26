@@ -577,6 +577,324 @@ static void transcript_hash_of(uint8_t out[32], const uint8_t *rows, size_t n)
     sha3_256_finalize(&h, out);
 }
 
+#define failures (*failure_count)
+static void r1cs_check_section_boundaries(
+    const struct spend_section_shape *sections, size_t nsec, int *failure_count)
+{
+    /* Per-section cumulative boundaries. A section that lands on the wrong
+     * count cannot be parity-correct whatever its hash says, and naming the
+     * section is what makes a regression diagnosable. */
+    for (size_t s = 0; s < nsec && s < R1CS_SECTIONS; s++) {
+        if (sections[s].num_constraints == REF_CUM[s])
+            continue;
+        printf("  S%-2zu (%s) cumulative constraints %zu != reference %zu\n",
+               s + 1, sections[s].name ? sections[s].name : "?",
+               sections[s].num_constraints, REF_CUM[s]);
+        failures++;
+    }
+}
+
+#define cs (*system_storage)
+#define ref (*reference_file)
+#define ref_rows (*reference_rows)
+static void r1cs_open_reference_dump(
+    const char *ref_path, FILE **reference_file, size_t *reference_rows,
+    const struct constraint_system *system_storage, int *failure_count)
+{
+    if (ref_path && *ref_path) {
+        ref = fopen(ref_path, "rb");
+        if (!ref) {
+            printf("  NOTE: ZCL_R1CS_REF=%s could not be opened; "
+                   "falling back to golden-hash comparison\n", ref_path);
+        } else {
+            uint8_t magic[8];
+            uint32_t r_rows = 0, r_inputs = 0, r_aux = 0;
+            bool hdr_ok = fread(magic, 1, 8, ref) == 8
+                       && memcmp(magic, "ZR1CS\x00\x00\x01", 8) == 0
+                       && rd_u32(ref, &r_rows) && rd_u32(ref, &r_inputs)
+                       && rd_u32(ref, &r_aux);
+            R1CS_CHECK("reference dump header parsed", hdr_ok);
+            if (!hdr_ok) {
+                fclose(ref);
+                ref = NULL;
+            } else {
+                ref_rows = r_rows;
+                printf("  reference: %u rows, %u inputs, %u aux (from %s)\n",
+                       r_rows, r_inputs, r_aux, ref_path);
+                R1CS_CHECK("reference row count == the 1..21 prefix (76893)",
+                           (size_t)r_rows == R1CS_PREFIX_CONSTRAINTS);
+                R1CS_CHECK("reference input count == native input count",
+                           (size_t)r_inputs == cs.num_inputs);
+            }
+        }
+    }
+}
+#undef ref_rows
+#undef ref
+#undef cs
+
+#define na (*native_a)
+#define nb (*native_b)
+#define nc (*native_c)
+#define ra (*reference_a)
+#define rb (*reference_b)
+#define rc (*reference_c)
+static void r1cs_print_row_difference(
+    size_t i, size_t nsec, const struct spend_section_shape *sections,
+    const struct ctbuf *native_a, const struct ctbuf *native_b,
+    const struct ctbuf *native_c, const struct ctbuf *reference_a,
+    const struct ctbuf *reference_b, const struct ctbuf *reference_c)
+{
+                    /* Name the section the row falls in, so the report points
+                     * at a gadget rather than a bare row number. */
+                    size_t sec = 0;
+                    while (sec < R1CS_SECTIONS && i >= REF_CUM[sec])
+                        sec++;
+                    printf("  DIFF row %zu (section %zu, %s):\n", i, sec + 1,
+                           sec < nsec && sections[sec].name
+                               ? sections[sec].name : "?");
+                    printf("    native:\n");
+                    print_lc("A", na.t, na.n);
+                    print_lc("B", nb.t, nb.n);
+                    print_lc("C", nc.t, nc.n);
+                    printf("    reference:\n");
+                    print_lc("A", ra.t, ra.n);
+                    print_lc("B", rb.t, rb.n);
+                    print_lc("C", rc.t, rc.n);
+}
+#undef rc
+#undef rb
+#undef ra
+#undef nc
+#undef nb
+#undef na
+
+#define cs (*system_storage)
+#define na (*native_a)
+#define nb (*native_b)
+#define nc (*native_c)
+#define scratch (*scratch_storage)
+#define scratch_cap (*scratch_capacity)
+#define ra (*reference_a)
+#define rb (*reference_b)
+#define rc (*reference_c)
+#define ref (*reference_file)
+static void r1cs_hash_and_compare_rows(
+    struct constraint_system *system_storage, uint8_t *rows, size_t n_rows,
+    FILE **reference_file, size_t ref_rows, uint8_t *ref_rowh,
+    struct ctbuf *native_a, struct ctbuf *native_b, struct ctbuf *native_c,
+    struct ctbuf *reference_a, struct ctbuf *reference_b, struct ctbuf *reference_c,
+    struct ftmp **scratch_storage, size_t *scratch_capacity,
+    const struct spend_section_shape *sections, size_t nsec, int *failure_count)
+{
+    size_t diffs = 0, first_diff = 0;
+    bool have_first_diff = false;
+    for (size_t i = 0; i < n_rows; i++) {
+        const struct r1cs_constraint *k = &cs.constraints[i];
+        canon_lc(&cs, &k->a, &na, &scratch, &scratch_cap);
+        canon_lc(&cs, &k->b, &nb, &scratch, &scratch_cap);
+        canon_lc(&cs, &k->c, &nc, &scratch, &scratch_cap);
+        row_hash(rows + i * 32, &na, &nb, &nc);
+
+        if (ref && i < ref_rows) {
+            if (!ref_read_lc(ref, &ra) || !ref_read_lc(ref, &rb)
+                || !ref_read_lc(ref, &rc)) {
+                printf("  FAIL: reference dump truncated at row %zu\n", i);
+                failures++;
+                fclose(ref);
+                ref = NULL;
+            } else {
+                if (ref_rowh)
+                    row_hash(ref_rowh + i * 32, &ra, &rb, &rc);
+                if (!ct_equal(&na, &ra) || !ct_equal(&nb, &rb)
+                    || !ct_equal(&nc, &rc)) {
+                diffs++;
+                if (!have_first_diff) {
+                    have_first_diff = true;
+                    first_diff = i;
+                }
+                if (diffs <= 12) {
+                    r1cs_print_row_difference(i, nsec, sections,
+                        &na, &nb, &nc, &ra, &rb, &rc);
+                }
+                }
+            }
+        }
+    }
+
+    if (ref) {
+        printf("  row-by-row diff vs reference: %zu differing rows of %zu\n",
+               diffs, n_rows);
+        if (diffs)
+            printf("  first differing row: %zu\n", first_diff);
+        R1CS_CHECK("ZERO matrix differences vs the reference transcript",
+                   diffs == 0);
+        fclose(ref);
+        ref = NULL;
+    }
+}
+#undef ref
+#undef rc
+#undef rb
+#undef ra
+#undef scratch_cap
+#undef scratch
+#undef nc
+#undef nb
+#undef na
+#undef cs
+
+#define ref_rowh (*reference_hashes)
+static void r1cs_print_reference_hashes(uint8_t **reference_hashes)
+{
+    /* The reference's own section + transcript hashes, computed by this same
+     * encoder. These are the values to bake into GOLDEN_SECTION /
+     * GOLDEN_TRANSCRIPT — printed in a paste-ready form on purpose. */
+    if (ref_rowh) {
+        printf("  --- REFERENCE section hashes (bake these as goldens) ---\n");
+        size_t rprev = 0;
+        for (size_t s = 0; s < R1CS_REF_SECTIONS; s++) {
+            size_t end = REF_CUM[s];
+            uint8_t h[32];
+            struct sha3_256_ctx ctx;
+            sha3_256_init(&ctx);
+            sha3_256_write(&ctx, ref_rowh + rprev * 32, (end - rprev) * 32);
+            sha3_256_finalize(&ctx, h);
+            char hx[65];
+            hex_of(hx, h);
+            printf("    \"%s\",\n", hx);
+            rprev = end;
+        }
+        uint8_t rall[32];
+        char rallhx[65];
+        transcript_hash_of(rall, ref_rowh, R1CS_PREFIX_CONSTRAINTS);
+        hex_of(rallhx, rall);
+        printf("  REFERENCE transcript SHA3-256 = \"%s\"\n", rallhx);
+        free(ref_rowh);
+        ref_rowh = NULL;
+    }
+}
+#undef ref_rowh
+
+static void r1cs_check_section_hashes(
+    const uint8_t *rows, size_t n_rows, int *failure_count)
+{
+    /* ── Section + transcript hashes ──────────────────────────────────── */
+    printf("  --- canonical section hashes ---\n");
+    size_t prev = 0;
+    for (size_t s = 0; s < R1CS_SECTIONS; s++) {
+        size_t end = REF_CUM[s];
+        if (end > n_rows)
+            break;
+        uint8_t h[32];
+        struct sha3_256_ctx ctx;
+        sha3_256_init(&ctx);
+        sha3_256_write(&ctx, rows + prev * 32, (end - prev) * 32);
+        sha3_256_finalize(&ctx, h);
+        char hx[65];
+        hex_of(hx, h);
+        const bool is_ref = s < R1CS_REF_SECTIONS;
+        const char *want = is_ref ? GOLDEN_SECTION[s]
+                                  : PIN_SECTION[s - R1CS_REF_SECTIONS];
+        bool match = *want && strcmp(hx, want) == 0;
+        printf("  S%-2zu rows[%6zu,%6zu)  %s  %s\n", s + 1, prev, end, hx,
+               match ? (is_ref ? "== golden (reference)" : "== pin (native)")
+                     : (*want ? "!! MISMATCH" : "!! NO GOLDEN BAKED"));
+        if (!match)
+            failures++;
+        prev = end;
+    }
+}
+
+static void r1cs_check_reordered_constraints(
+    const uint8_t *rows, size_t n_rows, const uint8_t all[32], int *failure_count)
+{
+    /* 4/5: reorder two constraints. */
+    {
+        uint8_t *mut = zcl_malloc(n_rows * 32, "r1cs_mut_reorder");
+        bool caught = false;
+        size_t located = SIZE_MAX;
+        if (mut) {
+            memcpy(mut, rows, n_rows * 32);
+            /* Two rows that genuinely differ, so the swap is observable. */
+            size_t i = 0, j = 1;
+            while (j < n_rows
+                   && memcmp(rows + i * 32, rows + j * 32, 32) == 0)
+                j++;
+            uint8_t tmp[32];
+            memcpy(tmp, mut + i * 32, 32);
+            memcpy(mut + i * 32, mut + j * 32, 32);
+            memcpy(mut + j * 32, tmp, 32);
+            uint8_t h[32];
+            transcript_hash_of(h, mut, n_rows);
+            caught = memcmp(h, all, 32) != 0;
+            for (size_t r = 0; r < n_rows; r++)
+                if (memcmp(mut + r * 32, rows + r * 32, 32) != 0) {
+                    located = r;
+                    break;
+                }
+            free(mut);
+        }
+        R1CS_CHECK("4/5 two reordered constraints is CAUGHT", caught);
+        R1CS_CHECK("    ... and the first differing row is located",
+                   located != SIZE_MAX);
+    }
+}
+
+#define cs (*system_storage)
+#define na (*native_a)
+#define nb (*native_b)
+#define nc (*native_c)
+#define scratch (*scratch_storage)
+#define scratch_cap (*scratch_capacity)
+static void r1cs_check_input_relabel(
+    struct constraint_system *system_storage, const uint8_t *rows, size_t n_rows,
+    struct ctbuf *native_a, struct ctbuf *native_b, struct ctbuf *native_c,
+    struct ftmp **scratch_storage, size_t *scratch_capacity, int *failure_count)
+{
+    /* 5/5: relabel one input variable as an aux variable. */
+    {
+        /* Find a row that references a public INPUT — the rk/cv binding rows
+         * do. Relabel that term's kind to AUX and confirm the hash moves.
+         * The scan covers A, B and C: which matrix the input term lands in is
+         * exactly what this oracle exists to pin down, so an injection that
+         * only looked in A would silently find nothing whenever the circuit
+         * put its inputs elsewhere (that is how this check first failed). */
+        bool caught = false, found_input = false;
+        struct ctbuf *lcs[3] = { &na, &nb, &nc };
+        static const char *lcname[3] = { "A", "B", "C" };
+        for (size_t i = 0; i < n_rows && !found_input; i++) {
+            const struct r1cs_constraint *k = &cs.constraints[i];
+            canon_lc(&cs, &k->a, &na, &scratch, &scratch_cap);
+            canon_lc(&cs, &k->b, &nb, &scratch, &scratch_cap);
+            canon_lc(&cs, &k->c, &nc, &scratch, &scratch_cap);
+            for (size_t w = 0; w < 3 && !found_input; w++) {
+                for (size_t t = 0; t < lcs[w]->n; t++) {
+                    if (lcs[w]->t[t].kind != 1)
+                        continue;
+                    found_input = true;
+                    lcs[w]->t[t].kind = 2;     /* INPUT:n -> AUX:n */
+                    uint8_t h[32];
+                    row_hash(h, &na, &nb, &nc);
+                    caught = memcmp(h, rows + i * 32, 32) != 0;
+                    printf("      relabelled INPUT:%" PRIu64 " as AUX in %s "
+                           "at row %zu\n", lcs[w]->t[t].idx, lcname[w], i);
+                    break;
+                }
+            }
+        }
+        R1CS_CHECK("5/5 an input variable relabelled as aux is CAUGHT",
+                   found_input && caught);
+    }
+}
+#undef scratch_cap
+#undef scratch
+#undef nc
+#undef nb
+#undef na
+#undef cs
+#undef failures
+
 int test_groth16_r1cs_oracle(void)
 {
     int failures = 0;
@@ -615,17 +933,7 @@ int test_groth16_r1cs_oracle(void)
     R1CS_CHECK("the honest witness satisfies every emitted constraint",
                cs_is_satisfied(&cs, NULL));
 
-    /* Per-section cumulative boundaries. A section that lands on the wrong
-     * count cannot be parity-correct whatever its hash says, and naming the
-     * section is what makes a regression diagnosable. */
-    for (size_t s = 0; s < nsec && s < R1CS_SECTIONS; s++) {
-        if (sections[s].num_constraints == REF_CUM[s])
-            continue;
-        printf("  S%-2zu (%s) cumulative constraints %zu != reference %zu\n",
-               s + 1, sections[s].name ? sections[s].name : "?",
-               sections[s].num_constraints, REF_CUM[s]);
-        failures++;
-    }
+    r1cs_check_section_boundaries(sections, nsec, &failures);
 
     /* ── Canonical transcript ─────────────────────────────────────────── */
     size_t n_rows = cs.num_constraints;
@@ -645,33 +953,7 @@ int test_groth16_r1cs_oracle(void)
     const char *ref_path = getenv("ZCL_R1CS_REF");
     FILE *ref = NULL;
     size_t ref_rows = 0;
-    if (ref_path && *ref_path) {
-        ref = fopen(ref_path, "rb");
-        if (!ref) {
-            printf("  NOTE: ZCL_R1CS_REF=%s could not be opened; "
-                   "falling back to golden-hash comparison\n", ref_path);
-        } else {
-            uint8_t magic[8];
-            uint32_t r_rows = 0, r_inputs = 0, r_aux = 0;
-            bool hdr_ok = fread(magic, 1, 8, ref) == 8
-                       && memcmp(magic, "ZR1CS\x00\x00\x01", 8) == 0
-                       && rd_u32(ref, &r_rows) && rd_u32(ref, &r_inputs)
-                       && rd_u32(ref, &r_aux);
-            R1CS_CHECK("reference dump header parsed", hdr_ok);
-            if (!hdr_ok) {
-                fclose(ref);
-                ref = NULL;
-            } else {
-                ref_rows = r_rows;
-                printf("  reference: %u rows, %u inputs, %u aux (from %s)\n",
-                       r_rows, r_inputs, r_aux, ref_path);
-                R1CS_CHECK("reference row count == the 1..21 prefix (76893)",
-                           (size_t)r_rows == R1CS_PREFIX_CONSTRAINTS);
-                R1CS_CHECK("reference input count == native input count",
-                           (size_t)r_inputs == cs.num_inputs);
-            }
-        }
-    }
+    r1cs_open_reference_dump(ref_path, &ref, &ref_rows, &cs, &failures);
 
     /* When diffing against the reference, hash the REFERENCE rows with the
      * very same encoder. That is what makes the baked goldens below the
@@ -684,118 +966,13 @@ int test_groth16_r1cs_oracle(void)
                    "diff only\n");
     }
 
-    size_t diffs = 0, first_diff = 0;
-    bool have_first_diff = false;
-    for (size_t i = 0; i < n_rows; i++) {
-        const struct r1cs_constraint *k = &cs.constraints[i];
-        canon_lc(&cs, &k->a, &na, &scratch, &scratch_cap);
-        canon_lc(&cs, &k->b, &nb, &scratch, &scratch_cap);
-        canon_lc(&cs, &k->c, &nc, &scratch, &scratch_cap);
-        row_hash(rows + i * 32, &na, &nb, &nc);
+    r1cs_hash_and_compare_rows(&cs, rows, n_rows, &ref, ref_rows, ref_rowh,
+        &na, &nb, &nc, &ra, &rb, &rc, &scratch, &scratch_cap,
+        sections, nsec, &failures);
 
-        if (ref && i < ref_rows) {
-            if (!ref_read_lc(ref, &ra) || !ref_read_lc(ref, &rb)
-                || !ref_read_lc(ref, &rc)) {
-                printf("  FAIL: reference dump truncated at row %zu\n", i);
-                failures++;
-                fclose(ref);
-                ref = NULL;
-            } else {
-                if (ref_rowh)
-                    row_hash(ref_rowh + i * 32, &ra, &rb, &rc);
-                if (!ct_equal(&na, &ra) || !ct_equal(&nb, &rb)
-                    || !ct_equal(&nc, &rc)) {
-                diffs++;
-                if (!have_first_diff) {
-                    have_first_diff = true;
-                    first_diff = i;
-                }
-                if (diffs <= 12) {
-                    /* Name the section the row falls in, so the report points
-                     * at a gadget rather than a bare row number. */
-                    size_t sec = 0;
-                    while (sec < R1CS_SECTIONS && i >= REF_CUM[sec])
-                        sec++;
-                    printf("  DIFF row %zu (section %zu, %s):\n", i, sec + 1,
-                           sec < nsec && sections[sec].name
-                               ? sections[sec].name : "?");
-                    printf("    native:\n");
-                    print_lc("A", na.t, na.n);
-                    print_lc("B", nb.t, nb.n);
-                    print_lc("C", nc.t, nc.n);
-                    printf("    reference:\n");
-                    print_lc("A", ra.t, ra.n);
-                    print_lc("B", rb.t, rb.n);
-                    print_lc("C", rc.t, rc.n);
-                }
-                }
-            }
-        }
-    }
+    r1cs_print_reference_hashes(&ref_rowh);
 
-    if (ref) {
-        printf("  row-by-row diff vs reference: %zu differing rows of %zu\n",
-               diffs, n_rows);
-        if (diffs)
-            printf("  first differing row: %zu\n", first_diff);
-        R1CS_CHECK("ZERO matrix differences vs the reference transcript",
-                   diffs == 0);
-        fclose(ref);
-        ref = NULL;
-    }
-
-    /* The reference's own section + transcript hashes, computed by this same
-     * encoder. These are the values to bake into GOLDEN_SECTION /
-     * GOLDEN_TRANSCRIPT — printed in a paste-ready form on purpose. */
-    if (ref_rowh) {
-        printf("  --- REFERENCE section hashes (bake these as goldens) ---\n");
-        size_t rprev = 0;
-        for (size_t s = 0; s < R1CS_REF_SECTIONS; s++) {
-            size_t end = REF_CUM[s];
-            uint8_t h[32];
-            struct sha3_256_ctx ctx;
-            sha3_256_init(&ctx);
-            sha3_256_write(&ctx, ref_rowh + rprev * 32, (end - rprev) * 32);
-            sha3_256_finalize(&ctx, h);
-            char hx[65];
-            hex_of(hx, h);
-            printf("    \"%s\",\n", hx);
-            rprev = end;
-        }
-        uint8_t rall[32];
-        char rallhx[65];
-        transcript_hash_of(rall, ref_rowh, R1CS_PREFIX_CONSTRAINTS);
-        hex_of(rallhx, rall);
-        printf("  REFERENCE transcript SHA3-256 = \"%s\"\n", rallhx);
-        free(ref_rowh);
-        ref_rowh = NULL;
-    }
-
-    /* ── Section + transcript hashes ──────────────────────────────────── */
-    printf("  --- canonical section hashes ---\n");
-    size_t prev = 0;
-    for (size_t s = 0; s < R1CS_SECTIONS; s++) {
-        size_t end = REF_CUM[s];
-        if (end > n_rows)
-            break;
-        uint8_t h[32];
-        struct sha3_256_ctx ctx;
-        sha3_256_init(&ctx);
-        sha3_256_write(&ctx, rows + prev * 32, (end - prev) * 32);
-        sha3_256_finalize(&ctx, h);
-        char hx[65];
-        hex_of(hx, h);
-        const bool is_ref = s < R1CS_REF_SECTIONS;
-        const char *want = is_ref ? GOLDEN_SECTION[s]
-                                  : PIN_SECTION[s - R1CS_REF_SECTIONS];
-        bool match = *want && strcmp(hx, want) == 0;
-        printf("  S%-2zu rows[%6zu,%6zu)  %s  %s\n", s + 1, prev, end, hx,
-               match ? (is_ref ? "== golden (reference)" : "== pin (native)")
-                     : (*want ? "!! MISMATCH" : "!! NO GOLDEN BAKED"));
-        if (!match)
-            failures++;
-        prev = end;
-    }
+    r1cs_check_section_hashes(rows, n_rows, &failures);
 
     /* The 1..21 prefix hash is the REFERENCE transcript's, unchanged by the
      * later sections — keep checking exactly those rows. */
@@ -873,71 +1050,10 @@ int test_groth16_r1cs_oracle(void)
                    caught);
     }
 
-    /* 4/5: reorder two constraints. */
-    {
-        uint8_t *mut = zcl_malloc(n_rows * 32, "r1cs_mut_reorder");
-        bool caught = false;
-        size_t located = SIZE_MAX;
-        if (mut) {
-            memcpy(mut, rows, n_rows * 32);
-            /* Two rows that genuinely differ, so the swap is observable. */
-            size_t i = 0, j = 1;
-            while (j < n_rows
-                   && memcmp(rows + i * 32, rows + j * 32, 32) == 0)
-                j++;
-            uint8_t tmp[32];
-            memcpy(tmp, mut + i * 32, 32);
-            memcpy(mut + i * 32, mut + j * 32, 32);
-            memcpy(mut + j * 32, tmp, 32);
-            uint8_t h[32];
-            transcript_hash_of(h, mut, n_rows);
-            caught = memcmp(h, all, 32) != 0;
-            for (size_t r = 0; r < n_rows; r++)
-                if (memcmp(mut + r * 32, rows + r * 32, 32) != 0) {
-                    located = r;
-                    break;
-                }
-            free(mut);
-        }
-        R1CS_CHECK("4/5 two reordered constraints is CAUGHT", caught);
-        R1CS_CHECK("    ... and the first differing row is located",
-                   located != SIZE_MAX);
-    }
+    r1cs_check_reordered_constraints(rows, n_rows, all, &failures);
 
-    /* 5/5: relabel one input variable as an aux variable. */
-    {
-        /* Find a row that references a public INPUT — the rk/cv binding rows
-         * do. Relabel that term's kind to AUX and confirm the hash moves.
-         * The scan covers A, B and C: which matrix the input term lands in is
-         * exactly what this oracle exists to pin down, so an injection that
-         * only looked in A would silently find nothing whenever the circuit
-         * put its inputs elsewhere (that is how this check first failed). */
-        bool caught = false, found_input = false;
-        struct ctbuf *lcs[3] = { &na, &nb, &nc };
-        static const char *lcname[3] = { "A", "B", "C" };
-        for (size_t i = 0; i < n_rows && !found_input; i++) {
-            const struct r1cs_constraint *k = &cs.constraints[i];
-            canon_lc(&cs, &k->a, &na, &scratch, &scratch_cap);
-            canon_lc(&cs, &k->b, &nb, &scratch, &scratch_cap);
-            canon_lc(&cs, &k->c, &nc, &scratch, &scratch_cap);
-            for (size_t w = 0; w < 3 && !found_input; w++) {
-                for (size_t t = 0; t < lcs[w]->n; t++) {
-                    if (lcs[w]->t[t].kind != 1)
-                        continue;
-                    found_input = true;
-                    lcs[w]->t[t].kind = 2;     /* INPUT:n -> AUX:n */
-                    uint8_t h[32];
-                    row_hash(h, &na, &nb, &nc);
-                    caught = memcmp(h, rows + i * 32, 32) != 0;
-                    printf("      relabelled INPUT:%" PRIu64 " as AUX in %s "
-                           "at row %zu\n", lcs[w]->t[t].idx, lcname[w], i);
-                    break;
-                }
-            }
-        }
-        R1CS_CHECK("5/5 an input variable relabelled as aux is CAUGHT",
-                   found_input && caught);
-    }
+    r1cs_check_input_relabel(&cs, rows, n_rows, &na, &nb, &nc,
+                             &scratch, &scratch_cap, &failures);
 
     free(rows);
     ctbuf_free(&na); ctbuf_free(&nb); ctbuf_free(&nc);
