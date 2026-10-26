@@ -133,6 +133,161 @@ static enum bii_verdict bii_check_tip_in_sql(struct node_db *db,
     }
 }
 
+/* ── bii_verify phases ──────────────────────────────────────── */
+
+/* Body presence gate: fills *out_metadata and returns BII_OK when
+ * block_index.bin exists and is a regular readable file; otherwise
+ * writes the reason to err_out and returns the matching verdict. */
+static enum bii_verdict bii_check_body_presence(
+    const char *body_path, struct platform_file_metadata *out_metadata,
+    char *err_out, size_t err_cap)
+{
+    enum platform_file_metadata_result metadata_result =
+        platform_file_metadata_read(body_path, out_metadata);
+    if (metadata_result != PLATFORM_FILE_METADATA_OK) {
+        if (err_out) snprintf(err_out, err_cap,
+                "block_index.bin: %s",
+                metadata_result == PLATFORM_FILE_METADATA_MISSING
+                    ? "missing" : "unreadable or not a regular file");
+        return metadata_result == PLATFORM_FILE_METADATA_MISSING
+            ? BII_BODY_MISSING : BII_BODY_UNREADABLE;
+    }
+    return BII_OK;
+}
+
+/* SQLite tip cross-check with the shared tip report: returns
+ * bii_check_tip_in_sql's verdict unchanged and writes err_out only
+ * when that verdict is not BII_OK. */
+static enum bii_verdict bii_cross_check_tip(struct node_db *db,
+                                            const struct block_index *declared_tip,
+                                            char *err_out, size_t err_cap)
+{
+    enum bii_verdict sql = bii_check_tip_in_sql(db, declared_tip);
+    if (sql != BII_OK && err_out && declared_tip)
+        snprintf(err_out, err_cap,
+                "tip h=%d: %s", declared_tip->nHeight,
+                bii_verdict_name(sql));
+    return sql;
+}
+
+/* Embedded magic/version matched but the payload hash, size,
+ * or a read failed — refuse loudly with the specific reason. */
+static enum bii_verdict bii_embedded_integrity_failure(
+    enum ssio_read_verdict ev, char *err_out, size_t err_cap)
+{
+    if (err_out) snprintf(err_out, err_cap,
+            "embedded integrity: %s",
+            ev == SSIO_READ_STALE      ? "payload hash/size mismatch" :
+            ev == SSIO_READ_UNSUPPORTED ? "unsupported embedded version" :
+            ev == SSIO_READ_MISSING    ? "block_index.bin vanished" :
+                                         "block_index.bin unreadable");
+    return ev == SSIO_READ_MISSING ? BII_BODY_MISSING
+                                   : (ev == SSIO_READ_UNSUPPORTED
+                                          ? BII_SIDECAR_UNSUPPORTED
+                                          : BII_HASH_MISMATCH);
+}
+
+/* Sidecar absent: report it, then still run the SQLite cross-check
+ * before settling on the missing-sidecar verdict. */
+static enum bii_verdict bii_verify_without_sidecar(
+    struct node_db *db, const struct block_index *declared_tip,
+    const char *side_path, char *err_out, size_t err_cap)
+{
+    if (err_out) snprintf(err_out, err_cap,
+            "no sidecar at %s (first run after upgrade?)", side_path);
+    /* Even without a sidecar the SQLite cross-check is still
+     * useful — a stale block_index.bin tip trips the tip check
+     * regardless. */
+    enum bii_verdict sql = bii_check_tip_in_sql(db, declared_tip);
+    if (sql != BII_OK) {
+        if (err_out) {
+            char tmp[256];
+            snprintf(tmp, sizeof(tmp),
+                     "sidecar missing; SQLite cross-check: %s",
+                     bii_verdict_name(sql));
+            snprintf(err_out, err_cap, "%s", tmp);
+        }
+        return sql;
+    }
+    return BII_SIDECAR_MISSING;
+}
+
+/* Hash the whole body and compare it to the sidecar header: hash
+ * failure, mid-hash size drift and sha3 mismatch each map to their
+ * verdict; BII_OK means the body matches the sidecar. */
+static enum bii_verdict bii_hash_and_compare_body(
+    const char *datadir, const char *body_path,
+    const struct ssio_sidecar_header *hdr,
+    char *err_out, size_t err_cap)
+{
+    uint8_t actual_hash[32];
+    uint64_t hashed_size = 0;
+    if (!ssio_hash_body(datadir, &bii_spec, actual_hash, &hashed_size)) {
+        if (err_out) snprintf(err_out, err_cap,
+                "failed to hash %s: %s", body_path, strerror(errno));
+        return BII_BODY_UNREADABLE;
+    }
+    if (hashed_size != hdr->body_size) {
+        if (err_out) snprintf(err_out, err_cap,
+                "size drift mid-hash: sidecar=%llu hashed=%llu",
+                (unsigned long long)hdr->body_size,
+                (unsigned long long)hashed_size);
+        return BII_SIDECAR_STALE;
+    }
+    if (memcmp(actual_hash, hdr->body_sha3, 32) != 0) {
+        if (err_out) {
+            char exp[65], got[65];
+            HexStr(hdr->body_sha3, 32, false, exp, sizeof(exp));
+            HexStr(actual_hash, 32, false, got, sizeof(got));
+            snprintf(err_out, err_cap,
+                    "body sha3 mismatch expected=%s actual=%s",
+                    exp, got);
+        }
+        return BII_HASH_MISMATCH;
+    }
+    return BII_OK;
+}
+
+/* Legacy two-file layout: sidecar read, size gate, full body hash
+ * and the SQLite tip cross-check. */
+static enum bii_verdict bii_verify_two_file_layout(
+    const char *datadir, struct node_db *db,
+    const struct block_index *declared_tip,
+    const char *body_path, const char *side_path,
+    const struct platform_file_metadata *body_metadata,
+    char *err_out, size_t err_cap)
+{
+    /* Sidecar read. */
+    struct ssio_sidecar_header hdr;
+    enum bii_verdict rv = bii_read_sidecar(datadir, &hdr);
+    if (rv == BII_SIDECAR_MISSING)
+        return bii_verify_without_sidecar(db, declared_tip, side_path,
+                                          err_out, err_cap);
+    if (rv != BII_OK) {
+        if (err_out) snprintf(err_out, err_cap,
+                "sidecar read: %s", bii_verdict_name(rv));
+        return rv;
+    }
+
+    /* Size check before expensive hash. */
+    if (hdr.body_size != body_metadata->size) {
+        if (err_out) snprintf(err_out, err_cap,
+                "size drift: sidecar=%llu actual=%llu",
+                (unsigned long long)hdr.body_size,
+                (unsigned long long)body_metadata->size);
+        return BII_SIDECAR_STALE;
+    }
+
+    /* Full hash. */
+    enum bii_verdict hv = bii_hash_and_compare_body(datadir, body_path,
+                                                    &hdr, err_out, err_cap);
+    if (hv != BII_OK)
+        return hv;
+
+    /* SQLite cross-check. */
+    return bii_cross_check_tip(db, declared_tip, err_out, err_cap);
+}
+
 enum bii_verdict bii_verify(const char *datadir,
                              struct node_db *db,
                              const struct block_index *declared_tip,
@@ -151,16 +306,11 @@ enum bii_verdict bii_verify(const char *datadir,
 
     /* Body presence. */
     struct platform_file_metadata body_metadata;
-    enum platform_file_metadata_result metadata_result =
-        platform_file_metadata_read(body_path, &body_metadata);
-    if (metadata_result != PLATFORM_FILE_METADATA_OK) {
-        if (err_out) snprintf(err_out, err_cap,
-                "block_index.bin: %s",
-                metadata_result == PLATFORM_FILE_METADATA_MISSING
-                    ? "missing" : "unreadable or not a regular file");
-        return metadata_result == PLATFORM_FILE_METADATA_MISSING
-            ? BII_BODY_MISSING : BII_BODY_UNREADABLE;
-    }
+    enum bii_verdict presence = bii_check_body_presence(body_path,
+                                                        &body_metadata,
+                                                        err_out, err_cap);
+    if (presence != BII_OK)
+        return presence;
 
     /* Embedded single-file format FIRST (task #32): the integrity header
      * is the body's own first 48 bytes, so a re-hash of the payload
@@ -174,106 +324,16 @@ enum bii_verdict bii_verify(const char *datadir,
         if (ev == SSIO_READ_OK) {
             /* Body integrity proven by the embedded header; only the
              * SQLite tip cross-check remains. */
-            enum bii_verdict sql = bii_check_tip_in_sql(db, declared_tip);
-            if (sql != BII_OK) {
-                if (err_out && declared_tip) snprintf(err_out, err_cap,
-                        "tip h=%d: %s", declared_tip->nHeight,
-                        bii_verdict_name(sql));
-                return sql;
-            }
-            return BII_OK;
+            return bii_cross_check_tip(db, declared_tip, err_out, err_cap);
         }
-        if (ev != SSIO_READ_BAD_MAGIC) {
-            /* Embedded magic/version matched but the payload hash, size,
-             * or a read failed — refuse loudly with the specific reason. */
-            if (err_out) snprintf(err_out, err_cap,
-                    "embedded integrity: %s",
-                    ev == SSIO_READ_STALE      ? "payload hash/size mismatch" :
-                    ev == SSIO_READ_UNSUPPORTED ? "unsupported embedded version" :
-                    ev == SSIO_READ_MISSING    ? "block_index.bin vanished" :
-                                                 "block_index.bin unreadable");
-            return ev == SSIO_READ_MISSING ? BII_BODY_MISSING
-                                           : (ev == SSIO_READ_UNSUPPORTED
-                                                  ? BII_SIDECAR_UNSUPPORTED
-                                                  : BII_HASH_MISMATCH);
-        }
+        if (ev != SSIO_READ_BAD_MAGIC)
+            return bii_embedded_integrity_failure(ev, err_out, err_cap);
         /* SSIO_READ_BAD_MAGIC → legacy two-file body; continue. */
     }
 
-    /* Sidecar read. */
-    struct ssio_sidecar_header hdr;
-    enum bii_verdict rv = bii_read_sidecar(datadir, &hdr);
-    if (rv == BII_SIDECAR_MISSING) {
-        if (err_out) snprintf(err_out, err_cap,
-                "no sidecar at %s (first run after upgrade?)", side_path);
-        /* Even without a sidecar the SQLite cross-check is still
-         * useful — a stale block_index.bin tip trips the tip check
-         * regardless. */
-        enum bii_verdict sql = bii_check_tip_in_sql(db, declared_tip);
-        if (sql != BII_OK) {
-            if (err_out) {
-                char tmp[256];
-                snprintf(tmp, sizeof(tmp),
-                         "sidecar missing; SQLite cross-check: %s",
-                         bii_verdict_name(sql));
-                snprintf(err_out, err_cap, "%s", tmp);
-            }
-            return sql;
-        }
-        return BII_SIDECAR_MISSING;
-    }
-    if (rv != BII_OK) {
-        if (err_out) snprintf(err_out, err_cap,
-                "sidecar read: %s", bii_verdict_name(rv));
-        return rv;
-    }
-
-    /* Size check before expensive hash. */
-    if (hdr.body_size != body_metadata.size) {
-        if (err_out) snprintf(err_out, err_cap,
-                "size drift: sidecar=%llu actual=%llu",
-                (unsigned long long)hdr.body_size,
-                (unsigned long long)body_metadata.size);
-        return BII_SIDECAR_STALE;
-    }
-
-    /* Full hash. */
-    uint8_t actual_hash[32];
-    uint64_t hashed_size = 0;
-    if (!ssio_hash_body(datadir, &bii_spec, actual_hash, &hashed_size)) {
-        if (err_out) snprintf(err_out, err_cap,
-                "failed to hash %s: %s", body_path, strerror(errno));
-        return BII_BODY_UNREADABLE;
-    }
-    if (hashed_size != hdr.body_size) {
-        if (err_out) snprintf(err_out, err_cap,
-                "size drift mid-hash: sidecar=%llu hashed=%llu",
-                (unsigned long long)hdr.body_size,
-                (unsigned long long)hashed_size);
-        return BII_SIDECAR_STALE;
-    }
-    if (memcmp(actual_hash, hdr.body_sha3, 32) != 0) {
-        if (err_out) {
-            char exp[65], got[65];
-            HexStr(hdr.body_sha3, 32, false, exp, sizeof(exp));
-            HexStr(actual_hash, 32, false, got, sizeof(got));
-            snprintf(err_out, err_cap,
-                    "body sha3 mismatch expected=%s actual=%s",
-                    exp, got);
-        }
-        return BII_HASH_MISMATCH;
-    }
-
-    /* SQLite cross-check. */
-    enum bii_verdict sql = bii_check_tip_in_sql(db, declared_tip);
-    if (sql != BII_OK) {
-        if (err_out && declared_tip) snprintf(err_out, err_cap,
-                "tip h=%d: %s", declared_tip->nHeight,
-                bii_verdict_name(sql));
-        return sql;
-    }
-
-    return BII_OK;
+    return bii_verify_two_file_layout(datadir, db, declared_tip,
+                                      body_path, side_path, &body_metadata,
+                                      err_out, err_cap);
 }
 
 void bii_quarantine_corrupt(const char *datadir, enum bii_verdict v)
