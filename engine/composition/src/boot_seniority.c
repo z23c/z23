@@ -207,22 +207,26 @@ static size_t bsen_binding_index(const struct boot_seniority_pass *pass,
     return SIZE_MAX;
 }
 
-void boot_seniority_weigh_address(struct boot_seniority_pass *pass,
-                                  const uint8_t ip[16], uint16_t port,
-                                  const struct peer_reputation *rep)
+/* NET-2: bandwidth_score 0..255 -> bounded [1, MAX] multiplier. */
+static double bsen_bandwidth_multiplier(const struct peer_reputation *rep)
 {
-    if (!pass || !ip)
-        return;
-
-    /* NET-2: bandwidth_score 0..255 -> bounded [1, MAX] multiplier. */
     double bandwidth_mult = 1.0;
     if (rep && rep->bandwidth_score > 0) {
         double frac = (double)rep->bandwidth_score / 255.0;
         if (frac > 1.0) frac = 1.0;
         bandwidth_mult = 1.0 + (ADDRMAN_REPUTATION_MAX_MULT - 1.0) * frac;
     }
+    return bandwidth_mult;
+}
 
-    /* T5.2: on-chain seniority, per-client, owner-capped, epoch-keyed. */
+/* T5.2: on-chain seniority, per-client, owner-capped, epoch-keyed. Returns
+ * the multiplier this address earns through its on-chain binding and
+ * reports the binding row that answered for it (SIZE_MAX when none did) so
+ * the caller can mark it seen. */
+static double bsen_seniority_multiplier(struct boot_seniority_pass *pass,
+                                        const uint8_t ip[16], uint16_t port,
+                                        size_t *bidx_out)
+{
     double seniority_mult = 1.0;
     size_t bidx = SIZE_MAX;
     if (pass->table_n && pass->bindings_n) {
@@ -234,6 +238,21 @@ void boot_seniority_weigh_address(struct boot_seniority_pass *pass,
                 seniority_mult = w->multiplier;
         }
     }
+    *bidx_out = bidx;
+    return seniority_mult;
+}
+
+void boot_seniority_weigh_address(struct boot_seniority_pass *pass,
+                                  const uint8_t ip[16], uint16_t port,
+                                  const struct peer_reputation *rep)
+{
+    if (!pass || !ip)
+        return;
+
+    double bandwidth_mult = bsen_bandwidth_multiplier(rep);
+
+    size_t bidx = SIZE_MAX;
+    double seniority_mult = bsen_seniority_multiplier(pass, ip, port, &bidx);
     if (bidx != SIZE_MAX && bidx < BOOT_RELAY_BINDINGS_MAX)
         pass->seen[bidx] = true;
 
@@ -351,6 +370,67 @@ static bool bsen_epoch_seed(const struct addr_man *am, int32_t epoch_height,
 
 /* ── Table build ───────────────────────────────────────────────────── */
 
+/* Fill regs[0..n) from the on-chain identity projection, page by page.
+ * Returns the number of rows filled; a short page ends the sweep. */
+static size_t bsen_load_registrations(struct boot_svc_ctx *svc,
+                                      struct zid_relay_registration *regs,
+                                      size_t n)
+{
+    /* Page the projection in bounded chunks — the row struct is large and
+     * this runs on the refresh worker's stack. */
+    struct zid_identity page[32];
+    size_t filled = 0;
+    int offset = 0;
+    while (filled < n) {
+        int got = db_zid_identity_list(svc->node_db, page,
+                                       (int)(sizeof(page) / sizeof(page[0])),
+                                       offset);
+        if (got <= 0)
+            break;
+        for (int i = 0; i < got && filled < n; i++) {
+            memset(&regs[filled], 0, sizeof(regs[filled]));
+            memcpy(regs[filled].relay_id, page[i].master_pubkey, 32);
+            regs[filled].registration_height = page[i].anchor_height;
+            /* owner_id is an opaque grouping key; an empty owner_address
+             * stays all-zero, which zid_seniority treats as "unknown owner"
+             * and pointedly does NOT pool with other unknowns. */
+            if (page[i].owner_address[0])
+                sha3_256((const unsigned char *)page[i].owner_address,
+                         strlen(page[i].owner_address), regs[filled].owner_id);
+            filled++;
+        }
+        offset += got;
+    }
+    return filled;
+}
+
+/* Rank `filled` registrations into tbl[0..n) against the live tip, keyed by
+ * this client's epoch draw. Returns the ranked row count, 0 when there is
+ * nothing to rank or the epoch seed could not be derived. */
+static size_t bsen_rank_registrations(struct zid_relay_registration *regs,
+                                      size_t filled, const struct addr_man *am,
+                                      int32_t epoch_height,
+                                      struct zid_seniority_weight *tbl,
+                                      size_t n)
+{
+    size_t count = 0;
+    if (filled > 0) {
+        struct bsen_draw_ctx dctx;
+        memset(&dctx, 0, sizeof(dctx));
+        if (bsen_epoch_seed(am, epoch_height, dctx.seed)) {
+            /* The tip the AGE score is measured against is the live tip; the
+             * epoch height only keys the per-client draw. Conflating them
+             * would freeze every relay's age at the epoch boundary. */
+            int32_t tip = reducer_frontier_provable_tip_cached();
+            int ranked = zid_seniority_rank(regs, filled, tip,
+                                            bsen_client_draw, &dctx, tbl, n);
+            if (ranked > 0)
+                count = (size_t)ranked;
+        }
+    }
+    return count;
+}
+
 /* Build this node's seniority table from the on-chain identity projection.
  *
  * Reads anchor_height (how long the identity has been anchored) and
@@ -391,47 +471,9 @@ static size_t bsen_build_table(struct zid_seniority_weight **out_table,
         return 0;
     }
 
-    /* Page the projection in bounded chunks — the row struct is large and
-     * this runs on the refresh worker's stack. */
-    struct zid_identity page[32];
-    size_t filled = 0;
-    int offset = 0;
-    while (filled < n) {
-        int got = db_zid_identity_list(svc->node_db, page,
-                                       (int)(sizeof(page) / sizeof(page[0])),
-                                       offset);
-        if (got <= 0)
-            break;
-        for (int i = 0; i < got && filled < n; i++) {
-            memset(&regs[filled], 0, sizeof(regs[filled]));
-            memcpy(regs[filled].relay_id, page[i].master_pubkey, 32);
-            regs[filled].registration_height = page[i].anchor_height;
-            /* owner_id is an opaque grouping key; an empty owner_address
-             * stays all-zero, which zid_seniority treats as "unknown owner"
-             * and pointedly does NOT pool with other unknowns. */
-            if (page[i].owner_address[0])
-                sha3_256((const unsigned char *)page[i].owner_address,
-                         strlen(page[i].owner_address), regs[filled].owner_id);
-            filled++;
-        }
-        offset += got;
-    }
-
-    size_t count = 0;
-    if (filled > 0) {
-        struct bsen_draw_ctx dctx;
-        memset(&dctx, 0, sizeof(dctx));
-        if (bsen_epoch_seed(am, epoch_height, dctx.seed)) {
-            /* The tip the AGE score is measured against is the live tip; the
-             * epoch height only keys the per-client draw. Conflating them
-             * would freeze every relay's age at the epoch boundary. */
-            int32_t tip = reducer_frontier_provable_tip_cached();
-            int ranked = zid_seniority_rank(regs, filled, tip,
-                                            bsen_client_draw, &dctx, tbl, n);
-            if (ranked > 0)
-                count = (size_t)ranked;
-        }
-    }
+    size_t filled = bsen_load_registrations(svc, regs, n);
+    size_t count = bsen_rank_registrations(regs, filled, am, epoch_height,
+                                           tbl, n);
 
     free(regs);
     if (count == 0) {
