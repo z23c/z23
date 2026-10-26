@@ -104,6 +104,68 @@ struct money_binding_read {
     bool current;
 };
 
+/* Map a binding's wallet_scope to its fixed row: dev is row 0, prod is row 1,
+ * and anything else has no row. */
+static int money_scope_slot(const char *scope)
+{
+    return scope && strcmp(scope, "dev") == 0 ? 0
+         : scope && strcmp(scope, "prod") == 0 ? 1 : -1;
+}
+
+/* The shape rules one wallets[] entry must satisfy before it is trusted: an
+ * unused slot, a 32-character wallet id, a 64-character genesis, an absolute
+ * datadir that fits, and a real port number. */
+static bool money_binding_fields_valid(int slot,
+                                       const struct money_binding_read rows[2],
+                                       const char *wid, const char *gen,
+                                       const char *dd, int64_t port)
+{
+    return slot >= 0 && !rows[slot].configured && wid && strlen(wid) == 32 &&
+           gen && strlen(gen) == 64 && dd && dd[0] == '/' &&
+           strlen(dd) < sizeof(rows[slot].binding.node_datadir) &&
+           port > 0 && port <= 65535;
+}
+
+/* Validate one wallets[] entry against its slot and, when it passes, copy the
+ * granted fields into that row's binding. */
+static bool money_apply_binding_row(const struct json_value *wallets, size_t i,
+                                    struct money_binding_read rows[2])
+{
+    const struct json_value *w = json_at(wallets, i);
+    const char *scope = w ? json_get_str(json_get(w, "scope")) : NULL;
+    const char *wid = w ? json_get_str(json_get(w, "wallet_instance_id")) : NULL;
+    const char *gen = w ? json_get_str(json_get(w, "network_genesis")) : NULL;
+    const char *dd = w ? json_get_str(json_get(w, "node_datadir")) : NULL;
+    int64_t port = w ? json_get_int(json_get(w, "rpc_port")) : 0;
+    int slot = money_scope_slot(scope);
+    bool ok = money_binding_fields_valid(slot, rows, wid, gen, dd, port);
+    if (ok) {
+        struct agent_money_binding *b = &rows[slot].binding;
+        (void)snprintf(b->wallet_scope, sizeof(b->wallet_scope), "%s", scope);
+        (void)snprintf(b->wallet_instance_id, sizeof(b->wallet_instance_id),
+                       "%s", wid);
+        (void)snprintf(b->network_genesis, sizeof(b->network_genesis), "%s",
+                       gen);
+        (void)snprintf(b->node_datadir, sizeof(b->node_datadir), "%s", dd);
+        b->rpc_port = (int)port;
+        rows[slot].configured = true;
+    }
+    return ok;
+}
+
+/* Walk the parsed wallets array; the first entry that fails its slot's shape
+ * rules rejects the whole file. */
+static bool money_load_wallets(struct json_value *doc,
+                               struct money_binding_read rows[2])
+{
+    const struct json_value *wallets = json_get(doc, "wallets");
+    bool ok = wallets && wallets->type == JSON_ARR &&
+              json_size(wallets) <= 2;
+    for (size_t i = 0; ok && i < json_size(wallets); i++)
+        ok = money_apply_binding_row(wallets, i, rows);
+    return ok;
+}
+
 static bool money_load_bindings(const char *dir,
                                 struct money_binding_read rows[2])
 {
@@ -121,43 +183,11 @@ static bool money_load_bindings(const char *dir,
     raw[n] = '\0';
     struct json_value doc;
     json_init(&doc);
-    if (!json_read(&doc, raw, n)) {
-        json_free(&doc);
-        return false;
-    }
-    const struct json_value *wallets = json_get(&doc, "wallets");
-    if (!wallets || wallets->type != JSON_ARR || json_size(wallets) > 2) {
-        json_free(&doc);
-        return false;
-    }
-    for (size_t i = 0; i < json_size(wallets); i++) {
-        const struct json_value *w = json_at(wallets, i);
-        const char *scope = w ? json_get_str(json_get(w, "scope")) : NULL;
-        int slot = scope && strcmp(scope, "dev") == 0 ? 0
-                 : scope && strcmp(scope, "prod") == 0 ? 1 : -1;
-        const char *wid = w ? json_get_str(json_get(w, "wallet_instance_id")) : NULL;
-        const char *gen = w ? json_get_str(json_get(w, "network_genesis")) : NULL;
-        const char *dd = w ? json_get_str(json_get(w, "node_datadir")) : NULL;
-        int64_t port = w ? json_get_int(json_get(w, "rpc_port")) : 0;
-        if (slot < 0 || rows[slot].configured || !wid || strlen(wid) != 32 ||
-            !gen || strlen(gen) != 64 || !dd || dd[0] != '/' ||
-            strlen(dd) >= sizeof(rows[slot].binding.node_datadir) ||
-            port <= 0 || port > 65535) {
-            json_free(&doc);
-            return false;
-        }
-        struct agent_money_binding *b = &rows[slot].binding;
-        (void)snprintf(b->wallet_scope, sizeof(b->wallet_scope), "%s", scope);
-        (void)snprintf(b->wallet_instance_id, sizeof(b->wallet_instance_id),
-                       "%s", wid);
-        (void)snprintf(b->network_genesis, sizeof(b->network_genesis), "%s",
-                       gen);
-        (void)snprintf(b->node_datadir, sizeof(b->node_datadir), "%s", dd);
-        b->rpc_port = (int)port;
-        rows[slot].configured = true;
-    }
+    bool ok = json_read(&doc, raw, n);
+    if (ok)
+        ok = money_load_wallets(&doc, rows);
     json_free(&doc);
-    return true;
+    return ok;
 }
 
 static void money_unknown(struct json_value *out, const char *scope,
@@ -177,6 +207,55 @@ static void money_unknown(struct json_value *out, const char *scope,
     (void)json_push_kv_str(out, "snapshot_root", "");
 }
 
+/* A live reply is only authoritative when all three identity fields it served
+ * match the binding that paid for the read. */
+static bool money_identity_matches(const struct money_binding_read *row,
+                                   const char *scope, const char *wid,
+                                   const char *gen)
+{
+    return scope && wid && gen &&
+        strcmp(scope, row->binding.wallet_scope) == 0 &&
+        strcmp(wid, row->binding.wallet_instance_id) == 0 &&
+        strcmp(gen, row->binding.network_genesis) == 0;
+}
+
+/* Remember the wallet id the endpoint actually served, for cross-scope
+ * duplicate detection. */
+static void money_record_observed_wallet(struct money_binding_read *row,
+                                         const char *wid)
+{
+    if (wid && strlen(wid) == 32)
+        (void)snprintf(row->observed_wallet_instance_id,
+                       sizeof(row->observed_wallet_instance_id), "%s", wid);
+}
+
+/* Consume the raw RPC reply and return its snapshot member, or NULL when the
+ * reply does not parse or carries no snapshot object. */
+static const struct json_value *money_reply_snapshot(struct json_value *reply,
+                                                     char *raw)
+{
+    bool parsed = json_read(reply, raw, strlen(raw));
+    free(raw);
+    const struct json_value *snapshot =
+        parsed ? json_get(reply, "snapshot") : NULL;
+    return snapshot && snapshot->type == JSON_OBJ ? snapshot : NULL;
+}
+
+/* Age out an otherwise sound snapshot instead of trusting stale numbers. */
+static void money_mark_stale(struct money_binding_read *row)
+{
+    struct json_value *status_value =
+        (struct json_value *)json_get(&row->snapshot, "status");
+    struct json_value *complete_value =
+        (struct json_value *)json_get(&row->snapshot, "complete");
+    struct json_value *reason_value =
+        (struct json_value *)json_get(&row->snapshot, "reason");
+    if (status_value) json_set_str(status_value, "STALE");
+    if (complete_value) json_set_bool(complete_value, false);
+    if (reason_value)
+        json_set_str(reason_value, "observation is older than 30 seconds");
+}
+
 static bool money_query(struct money_binding_read *row)
 {
     if (!row->rpc)
@@ -192,11 +271,8 @@ static bool money_query(struct money_binding_read *row)
         return false;
     struct json_value reply;
     json_init(&reply);
-    bool parsed = json_read(&reply, raw, strlen(raw));
-    free(raw);
-    const struct json_value *snapshot = parsed ? json_get(&reply, "snapshot")
-                                               : NULL;
-    if (!snapshot || snapshot->type != JSON_OBJ) {
+    const struct json_value *snapshot = money_reply_snapshot(&reply, raw);
+    if (!snapshot) {
         json_free(&reply);
         return false;
     }
@@ -205,15 +281,10 @@ static bool money_query(struct money_binding_read *row)
     const char *gen = json_get_str(json_get(snapshot, "network_genesis"));
     const char *status = json_get_str(json_get(snapshot, "status"));
     const bool reported_current = status && strcmp(status, "CURRENT") == 0;
-    if (wid && strlen(wid) == 32)
-        (void)snprintf(row->observed_wallet_instance_id,
-                       sizeof(row->observed_wallet_instance_id), "%s", wid);
+    money_record_observed_wallet(row, wid);
     int64_t observed = json_get_int(json_get(snapshot, "observed_at"));
     int64_t now = (int64_t)platform_time_wall_time_t();
-    bool identity_ok = scope && wid && gen &&
-        strcmp(scope, row->binding.wallet_scope) == 0 &&
-        strcmp(wid, row->binding.wallet_instance_id) == 0 &&
-        strcmp(gen, row->binding.network_genesis) == 0;
+    bool identity_ok = money_identity_matches(row, scope, wid, gen);
     json_copy(&row->snapshot, snapshot);
     json_free(&reply);
     if (!identity_ok) {
@@ -224,16 +295,7 @@ static bool money_query(struct money_binding_read *row)
         return true;
     }
     if (observed <= 0 || now < observed || now - observed > 30) {
-        struct json_value *status_value =
-            (struct json_value *)json_get(&row->snapshot, "status");
-        struct json_value *complete_value =
-            (struct json_value *)json_get(&row->snapshot, "complete");
-        struct json_value *reason_value =
-            (struct json_value *)json_get(&row->snapshot, "reason");
-        if (status_value) json_set_str(status_value, "STALE");
-        if (complete_value) json_set_bool(complete_value, false);
-        if (reason_value)
-            json_set_str(reason_value, "observation is older than 30 seconds");
+        money_mark_stale(row);
         return true;
     }
     row->current = reported_current &&
@@ -307,6 +369,56 @@ static void money_portfolio_root(const struct money_binding_read rows[2],
     zcl_hex_encode(root, 32, out);
 }
 
+/* Two configured bindings must name two different wallets. */
+static bool money_configured_duplicate(const struct money_binding_read rows[2])
+{
+    return rows[0].configured && rows[1].configured &&
+        strcmp(rows[0].binding.wallet_instance_id,
+               rows[1].binding.wallet_instance_id) == 0;
+}
+
+/* Two independent reads that served the same wallet id are one wallet wearing
+ * two grants. */
+static bool money_observed_duplicate(const struct money_binding_read rows[2])
+{
+    if (!rows[0].observed_wallet_instance_id[0] ||
+        !rows[1].observed_wallet_instance_id[0])
+        return false;
+    return strcmp(rows[0].observed_wallet_instance_id,
+                  rows[1].observed_wallet_instance_id) == 0;
+}
+
+/* Replace each row that never reached a verdict with its explicit UNKNOWN or
+ * CONFLICTED reason, in dev/prod order. */
+static void money_mark_unqueried(struct money_binding_read rows[2],
+                                 bool binding_ok, const bool queried[2])
+{
+    for (int i = 0; i < 2; i++) {
+        const char *scope = i == 0 ? "dev" : "prod";
+        if (!binding_ok)
+            money_unknown(&rows[i].snapshot, scope, "CONFLICTED",
+                          "private custody binding file is malformed");
+        else if (!rows[i].configured)
+            money_unknown(&rows[i].snapshot, scope, "UNKNOWN",
+                          "owner created no binding for this wallet scope");
+        else if (!queried[i])
+            money_unknown(&rows[i].snapshot, scope, "UNKNOWN",
+                          "bound wallet endpoint is unreachable");
+    }
+}
+
+/* A duplicated wallet id voids both scopes' answers. */
+static void money_mark_duplicate(struct money_binding_read rows[2])
+{
+    for (int i = 0; i < 2; i++) {
+        json_free(&rows[i].snapshot); json_init(&rows[i].snapshot);
+        money_unknown(&rows[i].snapshot, i == 0 ? "dev" : "prod",
+                      "CONFLICTED",
+                      "duplicate wallet_instance_id on active bindings");
+        rows[i].current = false;
+    }
+}
+
 struct zcl_result metaverse_agent_service_money(
     const char *dir, metaverse_agent_rpc_fn rpc,
     char *out, size_t out_cap, size_t *out_len)
@@ -324,35 +436,11 @@ struct zcl_result metaverse_agent_service_money(
     bool queried[2] = { false, false };
     if (binding_ok)
         money_query_configured(rows, queried);
-    for (int i = 0; i < 2; i++) {
-        const char *scope = i == 0 ? "dev" : "prod";
-        if (!binding_ok)
-            money_unknown(&rows[i].snapshot, scope, "CONFLICTED",
-                          "private custody binding file is malformed");
-        else if (!rows[i].configured)
-            money_unknown(&rows[i].snapshot, scope, "UNKNOWN",
-                          "owner created no binding for this wallet scope");
-        else if (!queried[i])
-            money_unknown(&rows[i].snapshot, scope, "UNKNOWN",
-                          "bound wallet endpoint is unreachable");
-    }
-    const bool configured_duplicate = rows[0].configured && rows[1].configured &&
-        strcmp(rows[0].binding.wallet_instance_id,
-               rows[1].binding.wallet_instance_id) == 0;
-    const bool observed_duplicate =
-        rows[0].observed_wallet_instance_id[0] &&
-        rows[1].observed_wallet_instance_id[0] &&
-        strcmp(rows[0].observed_wallet_instance_id,
-               rows[1].observed_wallet_instance_id) == 0;
-    if (configured_duplicate || observed_duplicate) {
-        for (int i = 0; i < 2; i++) {
-            json_free(&rows[i].snapshot); json_init(&rows[i].snapshot);
-            money_unknown(&rows[i].snapshot, i == 0 ? "dev" : "prod",
-                          "CONFLICTED",
-                          "duplicate wallet_instance_id on active bindings");
-            rows[i].current = false;
-        }
-    }
+    money_mark_unqueried(rows, binding_ok, queried);
+    const bool configured_duplicate = money_configured_duplicate(rows);
+    const bool observed_duplicate = money_observed_duplicate(rows);
+    if (configured_duplicate || observed_duplicate)
+        money_mark_duplicate(rows);
 
     struct json_value doc, wallets;
     json_init(&doc); json_set_object(&doc);
@@ -441,6 +529,89 @@ static void liquidity_copy_fanout(struct json_value *dst,
     json_free(&fanout);
 }
 
+/* The liquidity call's argument contract, checked before any read is made. */
+static bool liquidity_args_valid(const char *wallet_scope,
+                                 int64_t recipient_value_zat,
+                                 int64_t maximum_fee_zat,
+                                 int requested_concurrency)
+{
+    return wallet_scope &&
+        (strcmp(wallet_scope, "dev") == 0 ||
+         strcmp(wallet_scope, "prod") == 0) &&
+        recipient_value_zat > 0 && maximum_fee_zat >= 0 &&
+        requested_concurrency >= 1 && requested_concurrency <= 50;
+}
+
+/* Probe the other scope for the same live wallet id. Not a pure predicate:
+ * when the requested slot's identity matches, money_query runs and mutates
+ * rows[other_slot] even when no duplicate is found. */
+static bool liquidity_observed_duplicate(bool identity_ok, const char *wid,
+                                         struct money_binding_read rows[2],
+                                         int other_slot)
+{
+    bool probed = identity_ok && rows[other_slot].configured &&
+                  money_query(&rows[other_slot]);
+    return probed && rows[other_slot].observed_wallet_instance_id[0] &&
+           strcmp(wid, rows[other_slot].observed_wallet_instance_id) == 0;
+}
+
+/* Exchange the formatted liquidity request for a document: either the scalar
+ * fields the endpoint served, or the specific refusal that says why not. */
+static void liquidity_probe_and_render(const char *wallet_scope,
+                                       struct money_binding_read rows[2],
+                                       int slot, int other_slot,
+                                       metaverse_agent_rpc_fn rpc,
+                                       const char *params,
+                                       struct json_value *doc)
+{
+    char *raw = rpc(rows[slot].binding.node_datadir,
+                    rows[slot].binding.rpc_port, "agentsession", params,
+                    MVS_MONEY_RPC_CONNECT_MS, MVS_MONEY_RPC_TOTAL_MS);
+    struct json_value reply;
+    json_init(&reply);
+    bool parsed = raw && json_read(&reply, raw, strlen(raw));
+    free(raw);
+    const char *scope = parsed
+        ? json_get_str(json_get(&reply, "wallet_scope")) : NULL;
+    const char *wid = parsed
+        ? json_get_str(json_get(&reply, "wallet_instance_id")) : NULL;
+    const char *gen = parsed
+        ? json_get_str(json_get(&reply, "network_genesis")) : NULL;
+    bool identity_ok = money_identity_matches(&rows[slot], scope, wid, gen);
+    bool observed_duplicate = liquidity_observed_duplicate(identity_ok, wid,
+                                                           rows, other_slot);
+    if (!parsed) {
+        liquidity_unknown(doc, wallet_scope, "UNKNOWN",
+                          "bound wallet endpoint is unreachable");
+    } else if (!identity_ok) {
+        liquidity_unknown(doc, wallet_scope, "CONFLICTED",
+                          "live wallet identity differs from binding");
+    } else if (observed_duplicate) {
+        liquidity_unknown(doc, wallet_scope, "CONFLICTED",
+                          "duplicate wallet_instance_id on active bindings");
+    } else {
+        json_set_object(doc);
+        (void)json_push_kv_str(doc, "schema",
+                               "zcl.metaverse_agent_liquidity.v1");
+        static const char *const keys[] = {
+            "wallet_scope", "wallet_instance_id", "network_genesis",
+            "money_status", "money_reason", "money_snapshot_root",
+            "observed_at", "status", "reason", "amounts_known",
+            "requested_concurrency", "current_independent_slots",
+            "current_inputs_used", "recipient_value_zat",
+            "maximum_fee_zat", "required_per_slot_zat",
+            "future_total_required_zat", "transparent_available_zat",
+            "agent_available_zat", "ready_now", "fanout_recommended",
+            "fanout_possible", "advisory", "next_command",
+        };
+        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+            liquidity_copy_scalar(doc, &reply, keys[i]);
+        liquidity_copy_fanout(doc, &reply);
+        (void)json_push_kv_bool(doc, "automatic_rebalance", false);
+    }
+    json_free(&reply);
+}
+
 struct zcl_result metaverse_agent_service_liquidity(
     const char *dir, const char *wallet_scope, int64_t recipient_value_zat,
     int64_t maximum_fee_zat, int requested_concurrency,
@@ -449,11 +620,8 @@ struct zcl_result metaverse_agent_service_liquidity(
     struct zcl_result valid = dir_ok(dir, out, out_cap, out_len);
     if (!valid.ok)
         return valid;
-    if (!wallet_scope ||
-        (strcmp(wallet_scope, "dev") != 0 &&
-         strcmp(wallet_scope, "prod") != 0) ||
-        recipient_value_zat <= 0 || maximum_fee_zat < 0 ||
-        requested_concurrency < 1 || requested_concurrency > 50)
+    if (!liquidity_args_valid(wallet_scope, recipient_value_zat,
+                              maximum_fee_zat, requested_concurrency))
         return ZCL_ERR(MVS_ERR_BAD_ARGS,
                        "wallet_scope dev|prod, positive recipient value, non-negative fee, and concurrency 1..50 are required");
 
@@ -464,8 +632,8 @@ struct zcl_result metaverse_agent_service_liquidity(
         json_init(&rows[i].snapshot);
     }
     const bool bindings_ok = money_load_bindings(dir, rows);
-    const int slot = strcmp(wallet_scope, "dev") == 0 ? 0 : 1;
-    const int other_slot = slot == 0 ? 1 : 0;
+    const int slot = money_scope_slot(wallet_scope);
+    const int other_slot = 1 - slot;
     struct json_value doc;
     json_init(&doc);
     if (!bindings_ok) {
@@ -474,9 +642,7 @@ struct zcl_result metaverse_agent_service_liquidity(
     } else if (!rows[slot].configured) {
         liquidity_unknown(&doc, wallet_scope, "UNKNOWN",
                           "owner created no binding for this wallet scope");
-    } else if (rows[0].configured && rows[1].configured &&
-               strcmp(rows[0].binding.wallet_instance_id,
-                      rows[1].binding.wallet_instance_id) == 0) {
+    } else if (money_configured_duplicate(rows)) {
         liquidity_unknown(&doc, wallet_scope, "CONFLICTED",
                           "duplicate wallet_instance_id on active bindings");
     } else if (!rpc) {
@@ -490,60 +656,8 @@ struct zcl_result metaverse_agent_service_liquidity(
             "\"concurrency\":%d}]",
             wallet_scope, (long long)recipient_value_zat,
             (long long)maximum_fee_zat, requested_concurrency);
-        char *raw = rpc(rows[slot].binding.node_datadir,
-                        rows[slot].binding.rpc_port, "agentsession", params,
-                        MVS_MONEY_RPC_CONNECT_MS, MVS_MONEY_RPC_TOTAL_MS);
-        struct json_value reply;
-        json_init(&reply);
-        bool parsed = raw && json_read(&reply, raw, strlen(raw));
-        free(raw);
-        const char *scope = parsed
-            ? json_get_str(json_get(&reply, "wallet_scope")) : NULL;
-        const char *wid = parsed
-            ? json_get_str(json_get(&reply, "wallet_instance_id")) : NULL;
-        const char *gen = parsed
-            ? json_get_str(json_get(&reply, "network_genesis")) : NULL;
-        bool identity_ok = scope && wid && gen &&
-            strcmp(scope, rows[slot].binding.wallet_scope) == 0 &&
-            strcmp(wid, rows[slot].binding.wallet_instance_id) == 0 &&
-            strcmp(gen, rows[slot].binding.network_genesis) == 0;
-        bool observed_duplicate = false;
-        if (identity_ok && rows[other_slot].configured &&
-            money_query(&rows[other_slot]) &&
-            rows[other_slot].observed_wallet_instance_id[0]) {
-            observed_duplicate = strcmp(
-                wid, rows[other_slot].observed_wallet_instance_id) == 0;
-        }
-        if (!parsed) {
-            liquidity_unknown(&doc, wallet_scope, "UNKNOWN",
-                              "bound wallet endpoint is unreachable");
-        } else if (!identity_ok) {
-            liquidity_unknown(&doc, wallet_scope, "CONFLICTED",
-                              "live wallet identity differs from binding");
-        } else if (observed_duplicate) {
-            liquidity_unknown(&doc, wallet_scope, "CONFLICTED",
-                              "duplicate wallet_instance_id on active bindings");
-        } else {
-            json_set_object(&doc);
-            (void)json_push_kv_str(&doc, "schema",
-                                   "zcl.metaverse_agent_liquidity.v1");
-            static const char *const keys[] = {
-                "wallet_scope", "wallet_instance_id", "network_genesis",
-                "money_status", "money_reason", "money_snapshot_root",
-                "observed_at", "status", "reason", "amounts_known",
-                "requested_concurrency", "current_independent_slots",
-                "current_inputs_used", "recipient_value_zat",
-                "maximum_fee_zat", "required_per_slot_zat",
-                "future_total_required_zat", "transparent_available_zat",
-                "agent_available_zat", "ready_now", "fanout_recommended",
-                "fanout_possible", "advisory", "next_command",
-            };
-            for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
-                liquidity_copy_scalar(&doc, &reply, keys[i]);
-            liquidity_copy_fanout(&doc, &reply);
-            (void)json_push_kv_bool(&doc, "automatic_rebalance", false);
-        }
-        json_free(&reply);
+        liquidity_probe_and_render(wallet_scope, rows, slot, other_slot, rpc,
+                                   params, &doc);
     }
 
     size_t n = json_write(&doc, out, out_cap);
