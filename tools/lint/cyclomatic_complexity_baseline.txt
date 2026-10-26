@@ -52,7 +52,6 @@ contexts/wallet/controllers/src/vault_intent_controller.c:vi_encode:16
 contexts/wallet/controllers/src/wallet_rescan_controller_coins.c:rpc_coinanalysis:22
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rescan_seed_before_oldest_note_from_db:18
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rpc_rescanwitnesses:44
-contexts/wallet/controllers/src/wallet_scan.c:wallet_scan_blocks:44
 contexts/wallet/controllers/src/wallet_shielded_send.c:z_sendmany_run:87
 contexts/wallet/controllers/src/wallet_shielded_send_shielded.c:z_sendmany_shielded:58
 contexts/wallet/controllers/src/wallet_view_sync.c:wv_sync_wallet_from_zclassicd:43
