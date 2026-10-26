@@ -115,21 +115,17 @@ size_t metaverse_view_index(const struct metaverse_view_index_input *in,
 
 /* ── /metaverse/property — the sovereign property catalog ─────────── */
 
-size_t metaverse_view_property(const struct property_catalog_page *page,
-                               const char *kind_filter,
-                               uint8_t *resp, size_t max)
+static size_t metaverse_property_intro(const struct property_catalog_page *page,
+                                       const char *kind_filter,
+                                       char *body, size_t cap, size_t off)
 {
-    char body[40960];
-    size_t off = 0;
-    int n = metaverse_body_start(body, sizeof(body), "Sovereign Property");
-    if (n > 0) off = (size_t)n;
-
     char safe_filter[64];
     safe_filter[0] = '\0';
-    if (kind_filter && kind_filter[0])
+    bool filtered = kind_filter && kind_filter[0];
+    if (filtered)
         html_escape(safe_filter, sizeof(safe_filter), kind_filter);
 
-    SITE_APPEND(off, body, sizeof(body),
+    SITE_APPEND(off, body, cap,
         "<h1>Sovereign Property</h1>"
         "<p>The property catalog is a projection, not a source of truth: "
         "every read asks each property kind's authoritative model directly. "
@@ -137,31 +133,26 @@ size_t metaverse_view_property(const struct property_catalog_page *page,
         page->total_across_kinds,
         page->total_across_kinds == 1 ? "y" : "ies",
         page->kind_count, page->kind_count == 1 ? "" : "s",
-        kind_filter && kind_filter[0] ? " (filtered to kind <b>" : "",
-        kind_filter && kind_filter[0] ? safe_filter : "",
-        kind_filter && kind_filter[0] ? "</b>)" : "");
+        filtered ? " (filtered to kind <b>" : "",
+        filtered ? safe_filter : "",
+        filtered ? "</b>)" : "");
+    return off;
+}
 
-    if (!page->store_read) {
-        char safe_reason[256];
-        html_escape(safe_reason, sizeof(safe_reason), page->store_reason);
-        SITE_APPEND(off, body, sizeof(body),
-            "<p class='bad'>A store under this datadir is present but "
-            "unreadable: %s. An empty list below is a failure to look, not "
-            "an inventory.</p>", safe_reason);
-    }
-
+static size_t metaverse_property_kinds(const struct property_catalog_page *page,
+                                       char *body, size_t cap, size_t off)
+{
     /* Per-kind coverage: every kind gets a row, including unavailable
      * ones — a kind that vanished would read as "owns nothing". */
-    SITE_APPEND(off, body, sizeof(body),
+    SITE_APPEND(off, body, cap,
         "<div class='card'><h2>Property kinds</h2>"
         "<table><thead><tr><th>kind</th><th>authority</th>"
         "<th>settlement class</th><th>status</th><th>total</th>"
         "<th>shown</th></tr></thead><tbody>");
-    for (size_t i = 0; i < page->kind_count && off < sizeof(body) - 1024;
-         i++) {
+    for (size_t i = 0; i < page->kind_count && off < cap - 1024; i++) {
         const struct property_catalog_kind_row *k = &page->kinds[i];
         if (k->available) {
-            SITE_APPEND(off, body, sizeof(body),
+            SITE_APPEND(off, body, cap,
                 "<tr><td class='mono'>%s</td><td class='mono'>%s</td>"
                 "<td><span class='pill'>%s</span></td>"
                 "<td>available%s%s</td><td>%zu</td><td>%zu%s</td></tr>",
@@ -176,7 +167,7 @@ size_t metaverse_view_property(const struct property_catalog_page *page,
             char safe_reason[256];
             html_escape(safe_reason, sizeof(safe_reason),
                         k->unavailable_reason ? k->unavailable_reason : "");
-            SITE_APPEND(off, body, sizeof(body),
+            SITE_APPEND(off, body, cap,
                 "<tr><td class='mono'>%s</td><td class='mono'>%s</td>"
                 "<td><span class='pill'>%s</span></td>"
                 "<td colspan='3'>unavailable &mdash; %s</td></tr>",
@@ -184,19 +175,22 @@ size_t metaverse_view_property(const struct property_catalog_page *page,
                 metaverse_settlement_name(k->settlement), safe_reason);
         }
     }
-    SITE_APPEND(off, body, sizeof(body),
-        "</tbody></table></div>");
+    SITE_APPEND(off, body, cap, "</tbody></table></div>");
+    return off;
+}
 
+static size_t metaverse_property_rows(const struct property_catalog_page *page,
+                                      char *body, size_t cap, size_t off)
+{
     /* The bounded property rows: status + evidence grade per property. */
-    SITE_APPEND(off, body, sizeof(body),
+    SITE_APPEND(off, body, cap,
         "<div class='card'><h2>Properties</h2>");
     if (page->count > 0) {
-        SITE_APPEND(off, body, sizeof(body),
+        SITE_APPEND(off, body, cap,
             "<table><thead><tr><th>property</th><th>name</th>"
             "<th>status</th><th>evidence grade</th><th>owner</th></tr>"
             "</thead><tbody>");
-        for (size_t i = 0; i < page->count && off < sizeof(body) - 1024;
-             i++) {
+        for (size_t i = 0; i < page->count && off < cap - 1024; i++) {
             const struct metaverse_property_view *v = &page->items[i];
             char safe_id[128], safe_name[160], safe_owner[160];
             html_escape(safe_id, sizeof(safe_id), v->id_text);
@@ -206,7 +200,7 @@ size_t metaverse_view_property(const struct property_catalog_page *page,
                             ? v->owner_principal
                             : (v->owner_principal_kind
                                    ? v->owner_principal_kind : "none"));
-            SITE_APPEND(off, body, sizeof(body),
+            SITE_APPEND(off, body, cap,
                 "<tr><td class='mono'>%s</td><td>%s</td>"
                 "<td>%s</td><td><span class='pill'>%s</span></td>"
                 "<td class='mono'>%s</td></tr>",
@@ -214,20 +208,47 @@ size_t metaverse_view_property(const struct property_catalog_page *page,
                 metaverse_property_status_name(v->status),
                 metaverse_evidence_name(v->evidence), safe_owner);
         }
-        SITE_APPEND(off, body, sizeof(body), "</tbody></table>");
+        SITE_APPEND(off, body, cap, "</tbody></table>");
         if (page->total_across_kinds > page->count) {
-            SITE_APPEND(off, body, sizeof(body),
+            SITE_APPEND(off, body, cap,
                 "<p class='meta'>%zu more propert%s not shown (page cap "
                 "%u).</p>", page->total_across_kinds - page->count,
                 page->total_across_kinds - page->count == 1 ? "y" : "ies",
                 METAVERSE_VIEW_MAX_ROWS);
         }
     } else {
-        SITE_APPEND(off, body, sizeof(body),
+        SITE_APPEND(off, body, cap,
             "<p>No properties projected%s &mdash; an empty catalog renders "
             "empty, never padded.</p>",
             page->store_read ? "" : " (see the store failure above)");
     }
+    return off;
+}
+
+size_t metaverse_view_property(const struct property_catalog_page *page,
+                               const char *kind_filter,
+                               uint8_t *resp, size_t max)
+{
+    char body[40960];
+    size_t off = 0;
+    int n = metaverse_body_start(body, sizeof(body), "Sovereign Property");
+    if (n > 0) off = (size_t)n;
+
+    off = metaverse_property_intro(page, kind_filter, body, sizeof(body),
+                                   off);
+
+    if (!page->store_read) {
+        char safe_reason[256];
+        html_escape(safe_reason, sizeof(safe_reason), page->store_reason);
+        SITE_APPEND(off, body, sizeof(body),
+            "<p class='bad'>A store under this datadir is present but "
+            "unreadable: %s. An empty list below is a failure to look, not "
+            "an inventory.</p>", safe_reason);
+    }
+
+    off = metaverse_property_kinds(page, body, sizeof(body), off);
+    off = metaverse_property_rows(page, body, sizeof(body), off);
+
     SITE_APPEND(off, body, sizeof(body),
         "</div><p><a href='/metaverse'>&larr; Metaverse</a></p>");
 
