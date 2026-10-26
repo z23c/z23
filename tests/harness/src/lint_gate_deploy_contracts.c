@@ -1101,7 +1101,7 @@ int t_agent_fast_ci_contract(void)
         ASSERT(repo_path(path, sizeof(path), "README.md") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
         ASSERT(strstr(buf, "docs/node/GETTING_STARTED.md") != NULL);
-        ASSERT(strstr(buf, "Public start here") != NULL);
+        ASSERT(strstr(buf, "\n## Start here\n") != NULL);
         ASSERT(strstr(buf, "make dev-bin") != NULL);
         /* Same contract, phrased as the README phrases it: how a
          * contributor finds a valid `ONLY=` group. */

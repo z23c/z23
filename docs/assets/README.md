@@ -5,6 +5,7 @@
 Vector images used by the root README and the manuals, and the recorded
 values behind the Commons demo captures.
 
+- [`z23-face.svg`](./z23-face.svg): the Z23 mark, a flame with a Z cut through it
 - [`z23-hero.svg`](./z23-hero.svg): project banner
 - [`z23-intent-compiler.svg`](./z23-intent-compiler.svg): intent compiler diagram
 - [`z23-journey.svg`](./z23-journey.svg): user journey diagram
