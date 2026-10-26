@@ -105,14 +105,20 @@ static int sps_run_case(const struct sps_case *c)
     return ok;
 }
 
+static size_t sps_count_fails(void)
+{
+    size_t fails = 0;
+    for (size_t i = 0; i < sizeof k_sps_cases / sizeof k_sps_cases[0]; i++)
+        if (!sps_run_case(&k_sps_cases[i]))
+            fails++;
+    return fails;
+}
+
 int check_split_preserved_selftest(void)
 {
-    int fails = 0;
-    for (size_t i = 0; i < sizeof k_sps_cases / sizeof k_sps_cases[0]; i++)
-        fails += !sps_run_case(&k_sps_cases[i]);
-    if (fails)
+    if (sps_count_fails() != 0)
         return 1;
-    printf("[check_split_preserved] SELFTEST PASS (licence, includes, LOG calls, comments, "
-           "strings, split and dedup modes)\n");
+    puts("[check_split_preserved] SELFTEST PASS (licence, includes, LOG calls, comments, "
+         "strings, split and dedup modes)");
     return 0;
 }
