@@ -125,6 +125,57 @@ static bool fleet_add_lines(struct fleet_files *files, char *capture)
     return true;
 }
 
+static const char *fleet_lane_branch(const char *ref)
+{
+    if (strcmp(ref, "origin/main") == 0) return "main";
+    size_t prefix = strlen("origin/agent/");
+    if (strncmp(ref, "origin/agent/", prefix) == 0 && ref[prefix])
+        return ref + strlen("origin/");
+    return NULL;
+}
+
+static void fleet_lane_fill(struct fleet_lane *lane, const char *branch,
+                            const char *head)
+{
+    (void)snprintf(lane->branch, sizeof(lane->branch), "%s", branch);
+    (void)snprintf(lane->remote, sizeof(lane->remote), "origin/%s", branch);
+    (void)snprintf(lane->ref, sizeof(lane->ref),
+                   "refs/remotes/origin/%s", branch);
+    (void)snprintf(lane->head, sizeof(lane->head), "%s", head);
+}
+
+enum fleet_lane_scan_result {
+    FLEET_LANE_SCAN_OK = 0,
+    FLEET_LANE_SCAN_MALFORMED = 1
+};
+
+static int fleet_parse_lane_lines(char *capture, struct fleet_lane *lanes,
+                                  size_t *count, bool *main_seen)
+{
+    char *line = capture;
+    while (*line) {
+        char *end = strchr(line, '\n');
+        if (end) *end = 0;
+        char *space = strchr(line, ' ');
+        if (!space) return FLEET_LANE_SCAN_MALFORMED;
+        *space++ = 0;
+        const char *branch = fleet_lane_branch(line);
+        if (!branch) {
+            if (!end) return FLEET_LANE_SCAN_OK;
+            line = end + 1;
+            continue;
+        }
+        if (*count >= FLEET_MAX_LANES || !fleet_oid(space) ||
+            strlen(branch) >= sizeof(lanes[0].branch))
+            return FLEET_LANE_SCAN_MALFORMED;
+        fleet_lane_fill(&lanes[(*count)++], branch, space);
+        if (strcmp(branch, "main") == 0) *main_seen = true;
+        if (!end) return FLEET_LANE_SCAN_OK;
+        line = end + 1;
+    }
+    return FLEET_LANE_SCAN_OK;
+}
+
 static bool fleet_load_lanes(const char *root, char *capture,
                              struct fleet_lane **out, size_t *count,
                              char *why, size_t why_size)
@@ -136,33 +187,9 @@ static bool fleet_load_lanes(const char *root, char *capture,
     struct fleet_lane *lanes = zcl_calloc(FLEET_MAX_LANES, sizeof(*lanes),
                                           "fleet_lanes");
     if (!lanes) { fleet_reason(why, why_size, "%s", "cannot allocate lanes"); return false; }
-    char *line = capture;
-    bool main_seen = false, ok = true;
-    while (*line && ok) {
-        char *end = strchr(line, '\n');
-        if (end) *end = 0;
-        char *space = strchr(line, ' ');
-        if (!space) { ok = false; break; }
-        *space++ = 0;
-        size_t prefix = strlen("origin/agent/");
-        const char *branch = NULL;
-        if (strcmp(line, "origin/main") == 0) branch = "main";
-        else if (strncmp(line, "origin/agent/", prefix) == 0 && line[prefix])
-            branch = line + strlen("origin/");
-        else { if (!end) break; line = end + 1; continue; }
-        if (*count >= FLEET_MAX_LANES || !fleet_oid(space) ||
-            strlen(branch) >= sizeof(lanes[0].branch)) { ok = false; break; }
-        struct fleet_lane *lane = &lanes[(*count)++];
-        (void)snprintf(lane->branch, sizeof(lane->branch), "%s", branch);
-        (void)snprintf(lane->remote, sizeof(lane->remote), "origin/%s", branch);
-        (void)snprintf(lane->ref, sizeof(lane->ref),
-                       "refs/remotes/origin/%s", branch);
-        (void)snprintf(lane->head, sizeof(lane->head), "%s", space);
-        if (strcmp(branch, "main") == 0) main_seen = true;
-        if (!end) break;
-        line = end + 1;
-    }
-    if (!ok || !main_seen) {
+    bool main_seen = false;
+    if (fleet_parse_lane_lines(capture, lanes, count, &main_seen) !=
+        FLEET_LANE_SCAN_OK || !main_seen) {
         free(lanes);
         fleet_reason(why, why_size, "%s", !main_seen ?
                      "origin/main is missing from the local Git refs" :
@@ -269,6 +296,16 @@ static bool fleet_lane_files(const char *root, struct fleet_lane *lane,
     return true;
 }
 
+static bool fleet_load_lane_files(const char *root, struct fleet_lane lanes[],
+                                  size_t count, char *capture, char *why,
+                                  size_t why_size)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < count; i++)
+        ok = fleet_lane_files(root, &lanes[i], capture, why, why_size);
+    return ok;
+}
+
 static bool fleet_files_json(const struct fleet_files *files,
                              struct json_value *out)
 {
@@ -312,6 +349,54 @@ static bool fleet_lane_json(struct fleet_lane *lane, struct json_value *out,
     return ok;
 }
 
+static bool fleet_rows_json(struct fleet_lane lanes[], size_t count,
+                            struct json_value *rows, size_t *owner_total,
+                            char *why, size_t why_size)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < count; i++) {
+        struct json_value row;
+        json_init(&row);
+        size_t owner = 0;
+        ok = fleet_lane_json(&lanes[i], &row, &owner, why, why_size) &&
+             json_push_back(rows, &row);
+        *owner_total += owner;
+        json_free(&row);
+    }
+    return ok;
+}
+
+static bool fleet_push_summary(bool ok, struct json_value *out,
+                               struct fleet_lane *lanes, size_t count,
+                               struct json_value *rows, size_t owner_total)
+{
+    if (ok) {
+        json_set_object(out);
+        ok = json_push_kv_str(out, "schema", "zcl.dev_fleet.v1") &&
+             json_push_kv_str(out, "source", "git_and_lint_receipts_only") &&
+             json_push_kv_bool(out, "live_node_read", false) &&
+             json_push_kv_str(out, "remote", "origin") &&
+             json_push_kv_str(out, "main_head", lanes[0].head) &&
+             json_push_kv_int(out, "lane_count", (int64_t)count) &&
+             json_push_kv(out, "lanes", rows) &&
+             json_push_kv_int(out, "owner_only_red_gate_count",
+                              (int64_t)owner_total) &&
+             json_push_kv_bool(out, "inventory_complete", true);
+    }
+    return ok;
+}
+
+static void fleet_lanes_free(struct fleet_lane *lanes, size_t count)
+{
+    for (size_t i = 0; i < count; i++) fleet_files_free(&lanes[i].files);
+    free(lanes);
+}
+
+static bool fleet_reason_blank(const char *why)
+{
+    return !why || !why[0];
+}
+
 bool zcl_dev_fleet_collect(const char *checkout_root, struct json_value *out,
                            char *why, size_t why_size)
 {
@@ -331,36 +416,17 @@ bool zcl_dev_fleet_collect(const char *checkout_root, struct json_value *out,
                                why_size) &&
               fleet_load_worktrees(checkout_root, capture, lanes, count, why,
                                    why_size);
-    for (size_t i = 0; ok && i < count; i++)
-        ok = fleet_lane_files(checkout_root, &lanes[i], capture, why, why_size);
+    ok = ok && fleet_load_lane_files(checkout_root, lanes, count, capture,
+                                     why, why_size);
     struct json_value rows;
     json_init(&rows); json_set_array(&rows);
     size_t owner_total = 0;
-    for (size_t i = 0; ok && i < count; i++) {
-        struct json_value row;
-        json_init(&row);
-        size_t owner = 0;
-        ok = fleet_lane_json(&lanes[i], &row, &owner, why, why_size) &&
-             json_push_back(&rows, &row);
-        owner_total += owner;
-        json_free(&row);
-    }
-    if (ok) {
-        json_set_object(out);
-        ok = json_push_kv_str(out, "schema", "zcl.dev_fleet.v1") &&
-             json_push_kv_str(out, "source", "git_and_lint_receipts_only") &&
-             json_push_kv_bool(out, "live_node_read", false) &&
-             json_push_kv_str(out, "remote", "origin") &&
-             json_push_kv_str(out, "main_head", lanes[0].head) &&
-             json_push_kv_int(out, "lane_count", (int64_t)count) &&
-             json_push_kv(out, "lanes", &rows) &&
-             json_push_kv_int(out, "owner_only_red_gate_count",
-                              (int64_t)owner_total) &&
-             json_push_kv_bool(out, "inventory_complete", true);
-    }
-    for (size_t i = 0; i < count; i++) fleet_files_free(&lanes[i].files);
-    free(lanes); free(capture); json_free(&rows);
-    if (!ok && (!why || !why[0]))
+    ok = ok && fleet_rows_json(lanes, count, &rows, &owner_total, why,
+                               why_size);
+    ok = fleet_push_summary(ok, out, lanes, count, &rows, owner_total);
+    fleet_lanes_free(lanes, count);
+    free(capture); json_free(&rows);
+    if (!ok && fleet_reason_blank(why))
         fleet_reason(why, why_size, "%s", "cannot build fleet projection");
     return ok;
 }

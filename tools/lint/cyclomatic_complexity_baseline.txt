@@ -2281,8 +2281,6 @@ tools/command/native_dev_command.c:zcl_native_handle_dev_app_simulate:18
 tools/command/native_dev_command.c:zcl_native_handle_dev_drive:35
 tools/command/native_dev_command.c:zcl_native_handle_dev_ff:23
 tools/command/native_dev_command.c:zcl_native_handle_dev_publication_status:16
-tools/command/native_dev_fleet.c:fleet_load_lanes:19
-tools/command/native_dev_fleet.c:zcl_dev_fleet_collect:25
 tools/command/native_dev_fleet_receipts.c:fleet_read_receipt:50
 tools/command/native_dev_fleet_start.c:fs_collect_units:25
 tools/command/native_dev_fleet_start.c:fs_collect_worktrees:34
