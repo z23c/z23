@@ -357,6 +357,212 @@ static struct mvp_verdict mvp_c7_verdict(const struct mvp_evidence *ev)
     return v;
 }
 
+/* ── C2: Tor onion bootstrap < 60s ───────────────────────────────
+ * Evidence = the last valid zcl.onion_bootstrap_receipt.v1 row. With no
+ * ledger the criterion stays unknown and names the operator proof. */
+static bool mvp_push_c2_criterion(struct json_value *arr,
+                                  const struct mvp_evidence *ev)
+{
+    struct json_value e = {0};
+    bool seen = ev->c2_verdict != MVP_RECEIPT_NONE;
+    mvp_evidence_begin(&e, seen ? ev->c2_source : MVP_C2_OPERATOR_SOURCE,
+                       seen);
+    json_push_kv_str(&e, "utc", ev->c2_utc);
+    json_push_kv_int(&e, "bootstrap_ms", ev->c2_bootstrap_ms);
+    json_push_kv_int(&e, "bootstrap_ms_max", MVP_ONION_BOOTSTRAP_MS_MAX);
+    struct mvp_verdict v = mvp_c2_verdict(ev);
+    mvp_push_criterion(arr, "C2", "Tor onion bootstrap in <60s", v.met, 0,
+                       v.blocker, v.reason, &e);
+    json_free(&e);
+    return v.met == MVP_MET;
+}
+
+/* ── C3: cold-start sync to tip < 10min ──────────────────────────
+ * Evidence = live tip-hold (node_health sync_state/gap) + a cold-start
+ * sync-benchmark receipt. The receipt source is PENDING (no <10min
+ * cold-start-to-tip receipt is produced yet), so the criterion is
+ * unknown; the live tip-hold facts are surfaced as supporting evidence. */
+static bool mvp_push_c3_criterion(struct json_value *arr,
+                                  const struct mvp_evidence *ev)
+{
+    struct json_value e = {0};
+    mvp_evidence_begin(&e,
+        "tip-hold (node_health sync_state/gap) + cold-start sync-benchmark "
+        "receipt [pending]", true);
+    json_push_kv_bool(&e, "sync_benchmark_receipt_present",
+                      ev->c3_sync_benchmark_receipt_present);
+    if (ev->c3_health_present) {
+        json_push_kv_bool(&e, "health_present", true);
+        json_push_kv_str(&e, "sync_state",
+                         sync_state_name((enum sync_state)ev->c3_sync_state));
+        json_push_kv_int(&e, "log_head_gap", ev->c3_log_head_gap);
+        json_push_kv_bool(&e, "at_tip",
+                          ev->c3_sync_state == SYNC_AT_TIP);
+    } else {
+        json_push_kv_bool(&e, "health_present", false);
+    }
+    json_push_kv_int(&e, "cold_sync_secs", ev->c3_cold_sync_secs);
+
+    enum mvp_met st;
+    const char *reason;
+    const char *blocker = NULL;
+    if (!ev->c3_sync_benchmark_receipt_present) {
+        st = MVP_UNKNOWN;
+        reason = "sync-benchmark receipt pending: no <10min "
+                 "cold-start-to-tip receipt produced yet";
+    } else if (ev->c3_cold_sync_secs >= 0 &&
+               ev->c3_cold_sync_secs <= 600) {
+        st = MVP_MET;
+        reason = "cold-start sync-to-tip receipt within the 10min budget";
+    } else {
+        st = MVP_UNMET;
+        blocker = "sync.cold_start_over_budget";
+        reason = "cold-start sync-to-tip receipt exceeded the 10min budget";
+    }
+    mvp_push_criterion(arr, "C3", "Cold-start sync to tip in <10 min", st,
+                       0, blocker, reason, &e);
+    json_free(&e);
+    return st == MVP_MET;
+}
+
+/* ── C6: 7-day soak with zero operator intervention ──────────────
+ * Local ticks, elapsed hours and an optional SLO probe are partial
+ * observations. They cannot establish the sovereign, exact-parity,
+ * workload-bound 168h claim. A caller must also supply a retained MET
+ * result from the full soak-evidence-report judge. Runtime does not
+ * currently track that result, so C6 stays unknown with a named reason. */
+static bool mvp_push_c6_criterion(struct json_value *arr,
+                                  const struct mvp_evidence *ev)
+{
+    struct json_value e = {0};
+    mvp_evidence_begin(&e,
+        "soak attestation service + external SLO probe", true);
+    json_push_kv_bool(&e, "soak_service_initialized", ev->c6_soak_present);
+    json_push_kv_bool(&e, "last_healthy", ev->c6_soak_last_healthy);
+    json_push_kv_bool(&e, "window_eligible", ev->c6_soak_window_eligible);
+    json_push_kv_int(&e, "window_hours", ev->c6_soak_window_hours);
+    json_push_kv_int(&e, "window_hours_required",
+                     MVP_SOAK_WINDOW_HOURS_REQUIRED);
+    json_push_kv_bool(&e, "full_judge_met", ev->c6_full_judge_met);
+    json_push_kv_bool(&e, "slo_probe_present", ev->c6_slo_probe_present);
+    json_push_kv_real(&e, "slo_success_rate", ev->c6_slo_success_rate);
+
+    enum mvp_met st;
+    int64_t since = 0;
+    const char *blocker = NULL;
+    const char *reason;
+    if (!ev->c6_soak_present) {
+        st = MVP_UNKNOWN;
+        reason = "soak attestation service not initialized "
+                 "(no soak_attestation.jsonl)";
+    } else if (ev->c6_soak_window_hours < 0) {
+        st = MVP_UNKNOWN;
+        reason = "continuous clean-window hours not tracked at runtime; "
+                 "run make soak-evidence-report for the MET/NOT_MET judge";
+    } else if (!ev->c6_soak_last_healthy || !ev->c6_soak_window_eligible) {
+        st = MVP_UNMET;
+        blocker = "soak.window_broken";
+        reason = "soak window not clean: an unhealthy or ineligible tick";
+    } else if (ev->c6_soak_window_hours < MVP_SOAK_WINDOW_HOURS_REQUIRED) {
+        st = MVP_UNMET;
+        blocker = "soak.window_incomplete";
+        reason = "clean soak window shorter than the required 168h";
+    } else if (ev->c6_slo_probe_present &&
+               ev->c6_slo_success_rate < MVP_SLO_SUCCESS_MIN) {
+        st = MVP_UNMET;
+        blocker = "soak.slo_below_floor";
+        reason = "external SLO probe success rate below the floor";
+    } else {
+        static const enum mvp_met verdict[2] = {MVP_UNKNOWN, MVP_MET};
+        static const char *const explanation[2] = {
+            "full C6 soak-evidence-report MET verdict not supplied; "
+            "local healthy ticks cannot qualify the 168h window",
+            "168h+ clean, healthy, eligible soak window with full judge MET",
+        };
+        st = verdict[ev->c6_full_judge_met];
+        reason = explanation[ev->c6_full_judge_met];
+    }
+    mvp_push_criterion(arr, "C6",
+        "7-day soak with zero operator intervention", st, since, blocker,
+        reason, &e);
+    json_free(&e);
+    return st == MVP_MET;
+}
+
+/* ── C7: recover from kill -9 in <2 min ──────────────────────────
+ * Evidence = the last valid zcl.crash_recovery_receipt.v1 row. With no
+ * ledger the criterion stays unknown and names the operator proof. */
+static bool mvp_push_c7_criterion(struct json_value *arr,
+                                  const struct mvp_evidence *ev)
+{
+    struct json_value e = {0};
+    bool seen = ev->c7_verdict != MVP_RECEIPT_NONE;
+    mvp_evidence_begin(&e, seen ? ev->c7_source : MVP_C7_OPERATOR_SOURCE,
+                       seen);
+    json_push_kv_str(&e, "utc", ev->c7_utc);
+    json_push_kv_bool(&e, "recovery_drill_present",
+                      ev->c7_recovery_drill_present);
+    json_push_kv_int(&e, "recovery_secs", ev->c7_recovery_secs);
+    json_push_kv_int(&e, "recovery_secs_max", MVP_RECOVERY_SECS_MAX);
+    struct mvp_verdict v = mvp_c7_verdict(ev);
+    mvp_push_criterion(arr, "C7", "Recover from kill -9 in <2 min", v.met,
+                       0, v.blocker, v.reason, &e);
+    json_free(&e);
+    return v.met == MVP_MET;
+}
+
+/* C8 counter observations and a quiet canary latch are supporting facts.
+ * Positive qualification additionally requires exact, fresh genesis proof
+ * and retained coverage of the complete parity window. */
+static bool mvp_push_c8_criterion(struct json_value *arr,
+                                  const struct mvp_evidence *ev)
+{
+    struct json_value e = {0};
+    mvp_evidence_begin(&e,
+        "utxo_parity oracle + replay-canary watch", true);
+    json_push_kv_bool(&e, "parity_oracle_present", ev->c8_parity_present);
+    json_push_kv_int(&e, "parity_mismatches", ev->c8_parity_mismatches);
+    json_push_kv_bool(&e, "canary_present", ev->c8_canary_present);
+    json_push_kv_bool(&e, "canary_fail_active", ev->c8_canary_fail_active);
+    json_push_kv_bool(&e, "genesis_pass", ev->c8_genesis_pass);
+    json_push_kv_bool(&e, "genesis_fresh", ev->c8_genesis_fresh);
+    json_push_kv_bool(&e, "running_identity_match",
+                      ev->c8_running_identity_match);
+    json_push_kv_bool(&e, "live_coarse_match", ev->c8_live_coarse_match);
+    json_push_kv_bool(&e, "full_window_qualified",
+                      ev->c8_full_window_qualified);
+    json_push_kv_int(&e, "window_hours_required",
+                     MVP_SOAK_WINDOW_HOURS_REQUIRED);
+
+    enum mvp_met st;
+    const char *blocker = NULL;
+    const char *reason;
+    if (ev->c8_canary_fail_active) {
+        st = MVP_UNMET;
+        blocker = "consensus.replay_canary_failed";
+        reason = "a replay-canary kind is latched FAIL";
+    } else if (ev->c8_parity_present && ev->c8_parity_mismatches > 0) {
+        st = MVP_UNMET;
+        blocker = "consensus.utxo_drift";
+        reason = "utxo_parity oracle detected mismatches";
+    } else if (ev->c8_parity_present && ev->c8_parity_mismatches == 0) {
+        static const enum mvp_met verdict[2] = {MVP_UNKNOWN, MVP_MET};
+        st = verdict[mvp_c8_qualified(ev)];
+        reason = mvp_c8_missing_reason(ev);
+    } else if (!ev->c8_parity_present && !ev->c8_canary_present) {
+        st = MVP_UNKNOWN;
+        reason = "no zclassicd parity oracle resolved and no replay-canary "
+                 "verdict present";
+    } else {
+        st = MVP_UNKNOWN;
+        reason = mvp_c8_oracle_gap(ev);
+    }
+    mvp_push_criterion(arr, "C8", "Consensus parity with zclassicd", st, 0,
+                       blocker, reason, &e);
+    json_free(&e);
+    return st == MVP_MET;
+}
+
 bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out)
 {
     if (!out)
@@ -390,69 +596,8 @@ bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out
         if (st == MVP_MET) met_count++;
     }
 
-    /* ── C2: Tor onion bootstrap < 60s ───────────────────────────────
-     * Evidence = the last valid zcl.onion_bootstrap_receipt.v1 row. With no
-     * ledger the criterion stays unknown and names the operator proof. */
-    {
-        struct json_value e = {0};
-        bool seen = ev->c2_verdict != MVP_RECEIPT_NONE;
-        mvp_evidence_begin(&e, seen ? ev->c2_source : MVP_C2_OPERATOR_SOURCE,
-                           seen);
-        json_push_kv_str(&e, "utc", ev->c2_utc);
-        json_push_kv_int(&e, "bootstrap_ms", ev->c2_bootstrap_ms);
-        json_push_kv_int(&e, "bootstrap_ms_max", MVP_ONION_BOOTSTRAP_MS_MAX);
-        struct mvp_verdict v = mvp_c2_verdict(ev);
-        mvp_push_criterion(&arr, "C2", "Tor onion bootstrap in <60s", v.met, 0,
-                           v.blocker, v.reason, &e);
-        json_free(&e);
-        if (v.met == MVP_MET) met_count++;
-    }
-
-    /* ── C3: cold-start sync to tip < 10min ──────────────────────────
-     * Evidence = live tip-hold (node_health sync_state/gap) + a cold-start
-     * sync-benchmark receipt. The receipt source is PENDING (no <10min
-     * cold-start-to-tip receipt is produced yet), so the criterion is
-     * unknown; the live tip-hold facts are surfaced as supporting evidence. */
-    {
-        struct json_value e = {0};
-        mvp_evidence_begin(&e,
-            "tip-hold (node_health sync_state/gap) + cold-start sync-benchmark "
-            "receipt [pending]", true);
-        json_push_kv_bool(&e, "sync_benchmark_receipt_present",
-                          ev->c3_sync_benchmark_receipt_present);
-        if (ev->c3_health_present) {
-            json_push_kv_bool(&e, "health_present", true);
-            json_push_kv_str(&e, "sync_state",
-                             sync_state_name((enum sync_state)ev->c3_sync_state));
-            json_push_kv_int(&e, "log_head_gap", ev->c3_log_head_gap);
-            json_push_kv_bool(&e, "at_tip",
-                              ev->c3_sync_state == SYNC_AT_TIP);
-        } else {
-            json_push_kv_bool(&e, "health_present", false);
-        }
-        json_push_kv_int(&e, "cold_sync_secs", ev->c3_cold_sync_secs);
-
-        enum mvp_met st;
-        const char *reason;
-        const char *blocker = NULL;
-        if (!ev->c3_sync_benchmark_receipt_present) {
-            st = MVP_UNKNOWN;
-            reason = "sync-benchmark receipt pending: no <10min "
-                     "cold-start-to-tip receipt produced yet";
-        } else if (ev->c3_cold_sync_secs >= 0 &&
-                   ev->c3_cold_sync_secs <= 600) {
-            st = MVP_MET;
-            reason = "cold-start sync-to-tip receipt within the 10min budget";
-        } else {
-            st = MVP_UNMET;
-            blocker = "sync.cold_start_over_budget";
-            reason = "cold-start sync-to-tip receipt exceeded the 10min budget";
-        }
-        mvp_push_criterion(&arr, "C3", "Cold-start sync to tip in <10 min", st,
-                           0, blocker, reason, &e);
-        json_free(&e);
-        if (st == MVP_MET) met_count++;
-    }
+    if (mvp_push_c2_criterion(&arr, ev)) met_count++;
+    if (mvp_push_c3_criterion(&arr, ev)) met_count++;
 
     /* ── C4: receive shielded payment end-to-end ─────────────────────
      * Offline operator proof (make test-shielded-payment; needs
@@ -489,137 +634,9 @@ bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out
         if (st == MVP_MET) met_count++;
     }
 
-    /* ── C6: 7-day soak with zero operator intervention ──────────────
-     * Local ticks, elapsed hours and an optional SLO probe are partial
-     * observations. They cannot establish the sovereign, exact-parity,
-     * workload-bound 168h claim. A caller must also supply a retained MET
-     * result from the full soak-evidence-report judge. Runtime does not
-     * currently track that result, so C6 stays unknown with a named reason. */
-    {
-        struct json_value e = {0};
-        mvp_evidence_begin(&e,
-            "soak attestation service + external SLO probe", true);
-        json_push_kv_bool(&e, "soak_service_initialized", ev->c6_soak_present);
-        json_push_kv_bool(&e, "last_healthy", ev->c6_soak_last_healthy);
-        json_push_kv_bool(&e, "window_eligible", ev->c6_soak_window_eligible);
-        json_push_kv_int(&e, "window_hours", ev->c6_soak_window_hours);
-        json_push_kv_int(&e, "window_hours_required",
-                         MVP_SOAK_WINDOW_HOURS_REQUIRED);
-        json_push_kv_bool(&e, "full_judge_met", ev->c6_full_judge_met);
-        json_push_kv_bool(&e, "slo_probe_present", ev->c6_slo_probe_present);
-        json_push_kv_real(&e, "slo_success_rate", ev->c6_slo_success_rate);
-
-        enum mvp_met st;
-        int64_t since = 0;
-        const char *blocker = NULL;
-        const char *reason;
-        if (!ev->c6_soak_present) {
-            st = MVP_UNKNOWN;
-            reason = "soak attestation service not initialized "
-                     "(no soak_attestation.jsonl)";
-        } else if (ev->c6_soak_window_hours < 0) {
-            st = MVP_UNKNOWN;
-            reason = "continuous clean-window hours not tracked at runtime; "
-                     "run make soak-evidence-report for the MET/NOT_MET judge";
-        } else if (!ev->c6_soak_last_healthy || !ev->c6_soak_window_eligible) {
-            st = MVP_UNMET;
-            blocker = "soak.window_broken";
-            reason = "soak window not clean: an unhealthy or ineligible tick";
-        } else if (ev->c6_soak_window_hours < MVP_SOAK_WINDOW_HOURS_REQUIRED) {
-            st = MVP_UNMET;
-            blocker = "soak.window_incomplete";
-            reason = "clean soak window shorter than the required 168h";
-        } else if (ev->c6_slo_probe_present &&
-                   ev->c6_slo_success_rate < MVP_SLO_SUCCESS_MIN) {
-            st = MVP_UNMET;
-            blocker = "soak.slo_below_floor";
-            reason = "external SLO probe success rate below the floor";
-        } else {
-            static const enum mvp_met verdict[2] = {MVP_UNKNOWN, MVP_MET};
-            static const char *const explanation[2] = {
-                "full C6 soak-evidence-report MET verdict not supplied; "
-                "local healthy ticks cannot qualify the 168h window",
-                "168h+ clean, healthy, eligible soak window with full judge MET",
-            };
-            st = verdict[ev->c6_full_judge_met];
-            reason = explanation[ev->c6_full_judge_met];
-        }
-        mvp_push_criterion(&arr, "C6",
-            "7-day soak with zero operator intervention", st, since, blocker,
-            reason, &e);
-        json_free(&e);
-        if (st == MVP_MET) met_count++;
-    }
-
-    /* ── C7: recover from kill -9 in <2 min ──────────────────────────
-     * Evidence = the last valid zcl.crash_recovery_receipt.v1 row. With no
-     * ledger the criterion stays unknown and names the operator proof. */
-    {
-        struct json_value e = {0};
-        bool seen = ev->c7_verdict != MVP_RECEIPT_NONE;
-        mvp_evidence_begin(&e, seen ? ev->c7_source : MVP_C7_OPERATOR_SOURCE,
-                           seen);
-        json_push_kv_str(&e, "utc", ev->c7_utc);
-        json_push_kv_bool(&e, "recovery_drill_present",
-                          ev->c7_recovery_drill_present);
-        json_push_kv_int(&e, "recovery_secs", ev->c7_recovery_secs);
-        json_push_kv_int(&e, "recovery_secs_max", MVP_RECOVERY_SECS_MAX);
-        struct mvp_verdict v = mvp_c7_verdict(ev);
-        mvp_push_criterion(&arr, "C7", "Recover from kill -9 in <2 min", v.met,
-                           0, v.blocker, v.reason, &e);
-        json_free(&e);
-        if (v.met == MVP_MET) met_count++;
-    }
-
-    /* C8 counter observations and a quiet canary latch are supporting facts.
-     * Positive qualification additionally requires exact, fresh genesis proof
-     * and retained coverage of the complete parity window. */
-    {
-        struct json_value e = {0};
-        mvp_evidence_begin(&e,
-            "utxo_parity oracle + replay-canary watch", true);
-        json_push_kv_bool(&e, "parity_oracle_present", ev->c8_parity_present);
-        json_push_kv_int(&e, "parity_mismatches", ev->c8_parity_mismatches);
-        json_push_kv_bool(&e, "canary_present", ev->c8_canary_present);
-        json_push_kv_bool(&e, "canary_fail_active", ev->c8_canary_fail_active);
-        json_push_kv_bool(&e, "genesis_pass", ev->c8_genesis_pass);
-        json_push_kv_bool(&e, "genesis_fresh", ev->c8_genesis_fresh);
-        json_push_kv_bool(&e, "running_identity_match",
-                          ev->c8_running_identity_match);
-        json_push_kv_bool(&e, "live_coarse_match", ev->c8_live_coarse_match);
-        json_push_kv_bool(&e, "full_window_qualified",
-                          ev->c8_full_window_qualified);
-        json_push_kv_int(&e, "window_hours_required",
-                         MVP_SOAK_WINDOW_HOURS_REQUIRED);
-
-        enum mvp_met st;
-        const char *blocker = NULL;
-        const char *reason;
-        if (ev->c8_canary_fail_active) {
-            st = MVP_UNMET;
-            blocker = "consensus.replay_canary_failed";
-            reason = "a replay-canary kind is latched FAIL";
-        } else if (ev->c8_parity_present && ev->c8_parity_mismatches > 0) {
-            st = MVP_UNMET;
-            blocker = "consensus.utxo_drift";
-            reason = "utxo_parity oracle detected mismatches";
-        } else if (ev->c8_parity_present && ev->c8_parity_mismatches == 0) {
-            static const enum mvp_met verdict[2] = {MVP_UNKNOWN, MVP_MET};
-            st = verdict[mvp_c8_qualified(ev)];
-            reason = mvp_c8_missing_reason(ev);
-        } else if (!ev->c8_parity_present && !ev->c8_canary_present) {
-            st = MVP_UNKNOWN;
-            reason = "no zclassicd parity oracle resolved and no replay-canary "
-                     "verdict present";
-        } else {
-            st = MVP_UNKNOWN;
-            reason = mvp_c8_oracle_gap(ev);
-        }
-        mvp_push_criterion(&arr, "C8", "Consensus parity with zclassicd", st, 0,
-                           blocker, reason, &e);
-        json_free(&e);
-        if (st == MVP_MET) met_count++;
-    }
+    if (mvp_push_c6_criterion(&arr, ev)) met_count++;
+    if (mvp_push_c7_criterion(&arr, ev)) met_count++;
+    if (mvp_push_c8_criterion(&arr, ev)) met_count++;
 
     json_push_kv(out, "criteria", &arr);
     json_free(&arr);
