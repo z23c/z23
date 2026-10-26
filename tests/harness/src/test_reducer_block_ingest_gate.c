@@ -334,6 +334,322 @@ static int rbi_context_intake_case(void)
     return failures;
 }
 
+/* Create the hermetic tmp datadir tree (with the net-specific blocks/ dir),
+ * then open the fresh progress store and event log in it. On success stores
+ * the open event log in *out_lg and fills the dir/netdir/blocksdir path
+ * buffers the caller needs for the controller and teardown; on a setup
+ * failure the helper closes the store, removes the tmp tree, restores the
+ * global datadir + default chain, and leaves *out_lg NULL so the caller
+ * aborts. Returns this phase's RBI_CHECK failure count. */
+static int rbi_open_hermetic_datadir_store(char *dir, size_t dir_size,
+                                           char *netdir, size_t netdir_size,
+                                           char *blocksdir,
+                                           size_t blocksdir_size,
+                                           event_log_t **out_lg)
+{
+    int failures = 0;
+    *out_lg = NULL;
+
+    rbi_mkdir_p("./test-tmp");
+    test_fmt_tmpdir(dir, dir_size, "reducer_block_ingest_gate", "main");
+    rbi_mkdir_p(dir);
+
+    /* Point the global datadir at the hermetic tmp dir so the front door's
+     * write_block_to_disk(ctl->datadir, ...) and the stages' block reader
+     * (GetDataDir(net_specific=true)) share one blocks/ directory. Use the
+     * net-specific path GetDataDir returns for the controller and pre-create
+     * its blocks/ dir. */
+    SetDataDir(dir);
+    GetDataDir(true /*net-specific (regtest subdir)*/, netdir, netdir_size);
+    rbi_mkdir_p(netdir);
+    snprintf(blocksdir, blocksdir_size, "%s/blocks", netdir);
+    rbi_mkdir_p(blocksdir);
+
+    char log_path[512];
+    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
+
+    progress_store_close();
+    bool store_ok = progress_store_open(dir);
+    RBI_CHECK("progress_store opens at fresh datadir", store_ok);
+
+    event_log_t *lg = store_ok ? event_log_open(log_path) : NULL;
+    RBI_CHECK("event log opens", lg != NULL);
+
+    if (!store_ok || !lg) {
+        if (lg)
+            event_log_close(lg);
+        progress_store_close();
+        test_cleanup_tmpdir(blocksdir);
+        test_cleanup_tmpdir(netdir);
+        test_cleanup_tmpdir(dir);
+        SetDataDir("");
+        ClearDataDirCache();
+        chain_params_select(CHAIN_MAIN);
+    } else {
+        *out_lg = lg;
+    }
+    return failures;
+}
+
+/* Insert the genesis block_index into the map, the active chain and the
+ * best-header anchor. Returns this phase's RBI_CHECK failure count. */
+static int rbi_install_genesis_anchor(struct main_state *ms,
+                                      struct uint256 *genesis_hash)
+{
+    int failures = 0;
+    struct block_index *genesis = chainstate_insert_block_index(
+        (struct chainstate *)ms, genesis_hash);
+    RBI_CHECK("genesis block_index inserted", genesis != NULL);
+    if (genesis) {
+        genesis->nHeight = 0;
+        genesis->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+        genesis->nTx = 1;
+        genesis->nChainTx = 1;
+        genesis->nChainWork = GetBlockProof(genesis);
+        active_chain_move_window_tip(&ms->chain_active, genesis);
+        ms->pindex_best_header = genesis;
+    }
+    return failures;
+}
+
+/* Init all eight reducer stages, then seed the genesis utxo_apply_log row
+ * and the tip_finalize anchor. *stages_ok reports whether every stage init
+ * succeeded. Returns this phase's RBI_CHECK failure count. */
+static int rbi_bind_reducer_stages_and_seed_anchor(struct main_state *ms,
+                                                   struct uint256 *genesis_hash,
+                                                   bool *stages_ok)
+{
+    int failures = 0;
+    *stages_ok =
+        header_admit_stage_init(ms) &&
+        validate_headers_stage_init(ms) &&
+        body_fetch_stage_init(ms) &&
+        body_persist_stage_init(ms) &&
+        script_validate_stage_init(ms) &&
+        proof_validate_stage_init(ms) &&
+        utxo_apply_stage_init(ms) &&
+        tip_finalize_stage_init(ms);
+    RBI_CHECK("all eight reducer stages init", *stages_ok);
+
+    /* Now that utxo_apply created its log table, seed the genesis (height 0)
+     * applied row so the cold-start anchor can finalize cleanly into block 1
+     * (see rbi_seed_genesis_utxo_apply_row). */
+    if (*stages_ok)
+        RBI_CHECK("seed genesis utxo_apply_log row",
+                  rbi_seed_genesis_utxo_apply_row(progress_store_db()));
+
+    /* Seed the processed genesis anchor after stage initialization: this
+     * advances upstream cursors to 1 while preserving the fresh H0 authority. */
+    RBI_CHECK("tip_finalize anchor seed at genesis",
+              tip_finalize_stage_seed_anchor(0, genesis_hash->data, false));
+    return failures;
+}
+
+/* Build and mine the standalone height-1 block under test and confirm it
+ * passes the front door's stateless check_block gate; the block is freed
+ * here. Reports *mined1 and *cb_value. Returns this phase's RBI_CHECK
+ * failure count. */
+static int rbi_verify_block1_passes_front_door_gate(
+    const struct chain_params *cp, struct uint256 *genesis_hash,
+    bool stages_ok, int64_t *cb_value, bool *mined1)
+{
+    int failures = 0;
+    struct block blk1;
+    block_init(&blk1);
+    bool built1 = stages_ok &&
+                  rbi_build_regtest_block(&blk1, 1, genesis_hash, cp,
+                                          cb_value);
+    RBI_CHECK("regtest block at height 1 builds", built1);
+    *mined1 = built1 && mine_block_pow(&blk1, 1, cp, 0);
+    RBI_CHECK("mine_block_pow solves Equihash (48,5) + nonce", *mined1);
+    if (*mined1) {
+        struct validation_state vs;
+        validation_state_init(&vs);
+        RBI_CHECK("mined block passes reducer check_block gate",
+                  check_block(&blk1, &vs, cp, true, true, true));
+    }
+    block_free(&blk1);  /* rebuilt+admitted+persisted by the helper below */
+    return failures;
+}
+
+/* Mine, header-admit and persist blocks 1 and 2 (rbi_mine_admit_persist) so
+ * block 2 exists as the lookahead successor. blk1b/blk2 are caller-owned
+ * (already block_init'd; the caller frees them); fills *hash1, *cb_txid
+ * (block 1's coinbase txid, when block 1 prepared), *cb_value, *bi2 and
+ * *prepared2. Returns this phase's RBI_CHECK failure count. */
+static int rbi_prepare_blocks_one_and_two(struct rbi_ingest_ctx *ictx,
+                                          struct uint256 *genesis_hash,
+                                          bool mined1,
+                                          struct block *blk1b,
+                                          struct block *blk2,
+                                          struct uint256 *hash1,
+                                          struct uint256 *cb_txid,
+                                          int64_t *cb_value,
+                                          struct block_index **bi2,
+                                          bool *prepared2)
+{
+    int failures = 0;
+    struct uint256 hash2;
+    uint256_set_null(&hash2);
+    int64_t cb2_value = 0;
+    struct block_index *bi1 = NULL;
+    *bi2 = NULL;
+    *prepared2 = false;
+
+    bool prepared1 = mined1 &&
+        rbi_mine_admit_persist(ictx, 1, genesis_hash, blk1b, hash1,
+                               cb_value, &bi1);
+    RBI_CHECK("block 1 mined + header-admitted + body-on-disk (HAVE_DATA)",
+              prepared1);
+    if (prepared1) *cb_txid = blk1b->vtx[0].hash;
+
+    *prepared2 = prepared1 &&
+        rbi_mine_admit_persist(ictx, 2, hash1, blk2, &hash2,
+                               &cb2_value, bi2);
+    RBI_CHECK("block 2 (lookahead successor) mined + admitted + body-on-disk",
+              *prepared2);
+    return failures;
+}
+
+/* Drive block 1's body through the reducer front door and kick the stages to
+ * full convergence when the lookahead successor was prepared. Returns this
+ * phase's RBI_CHECK failure count. */
+static int rbi_ingest_block1_through_front_door(struct main_state *ms,
+                                                struct chain_activation_controller *ctl,
+                                                struct block *blk1b,
+                                                struct block_index *bi2,
+                                                bool prepared2)
+{
+    int failures = 0;
+    bool front_door_ok = false;
+    if (prepared2) {
+        ms->pindex_best_header = bi2;  /* finalize down to the successor */
+        (void)active_chain_extend_window(&ms->chain_active, bi2);
+
+        struct validation_state out;
+        validation_state_init(&out);
+        front_door_ok = reducer_ingest_block(ctl, blk1b, REDUCER_SRC_MINED,
+                                             true /*force: locally requested*/,
+                                             &out);
+        /* Drive stage work to full convergence: reducer_kick() drains only
+         * within a bounded latency budget, so loop until a kick makes zero
+         * advances (the cap is a runaway guard). */
+        for (int it = 0; it < 1000 && reducer_kick(ctl) > 0; it++) {
+            /* keep draining */
+        }
+        printf("reducer_block_ingest_gate: front-door verdict=%s%s\n",
+               front_door_ok ? "accepted" : "pending",
+               (!front_door_ok && out.reject_reason[0]) ? out.reject_reason
+                                                        : "");
+        /* The front door ran its real consensus gate (check_block) without a
+         * stateless reject — a garbage block would have returned a DoS reason
+         * here, not the benign tip-pending one. */
+        RBI_CHECK("front door passed block 1 through the stateless gate "
+                  "(no consensus reject)",
+                  front_door_ok ||
+                  strcmp(out.reject_reason, "block-not-finalized-by-reducer")
+                      == 0);
+    }
+    return failures;
+}
+
+/* Assert the post-ingest invariants on the tip and the UTXO set: block 1's
+ * finalized row with the window bounded to the prepared span, block 1's
+ * coinbase live, and the SHA3 commitment moved. Returns this phase's
+ * RBI_CHECK failure count. */
+static int rbi_assert_block1_finalized_and_utxo_committed(
+    struct main_state *ms, int height_before, uint64_t count_before,
+    const uint8_t *commit_before, bool have_commit_before, bool applied2,
+    struct uint256 *hash1, struct uint256 *cb_txid, int64_t cb_value)
+{
+    int failures = 0;
+    /* ── (5a) ASSERT: block 1 finalized and the active window is bounded ──
+     * Block 1 is finalized by the reducer. Block 2 is the prepared lookahead
+     * successor; a full convergence drain may leave the visible active-chain
+     * window at height 2, but it must not lag before block 1 or advance beyond
+     * the staged lookahead. */
+    int height_after = active_chain_height(&ms->chain_active);
+    printf("reducer_block_ingest_gate: tip height %d -> %d\n",
+           height_before, height_after);
+    RBI_CHECK("active_chain_height reached block 1 and stayed within the "
+              "prepared lookahead span",
+              height_after >= height_before + 1 &&
+              height_after <= height_before + 2);
+    RBI_CHECK("block 1 is finalized by tip_finalize (reducer, not legacy)",
+              tip_finalize_stage_finalized_total() >= 1);
+    /* Block 1 landed on the active chain: tip_finalize's one-block-lookahead
+     * convention stores at height H the hash of the block at H+1, so block 1
+     * is witnessed by the row at height 0 carrying its hash. */
+    {
+        uint8_t fin_hash[32] = {0};
+        bool finalized_row = tip_finalize_stage_finalized_tip_at(
+            progress_store_db(), 0, fin_hash);
+        RBI_CHECK("block 1 has a durable finalized tip row (height-0 lookahead "
+                  "row carries block 1's hash)",
+                  finalized_row && memcmp(fin_hash, hash1->data, 32) == 0);
+    }
+
+    /* ── (5b) ASSERT: UTXO commitment recomputes WITH the applied block 1 ──
+     * Block 1's coinbase is live in the UTXO set and the SHA3 commitment moved.
+     * (The set also carries block 2's coinbase as the pending successor; we
+     * assert specifically on block 1's coinbase — the block under test.) */
+    uint64_t count_after = (uint64_t)coins_kv_count(progress_store_db());
+    printf("reducer_block_ingest_gate: utxo count %llu -> %llu\n",
+           (unsigned long long)count_before, (unsigned long long)count_after);
+    /* Block 1 added exactly one new coinbase UTXO over the genesis baseline
+     * (block 2's coinbase is also live as the pending successor). */
+    RBI_CHECK("block 1's coinbase added exactly one UTXO over genesis",
+              count_after == count_before + 1 + (applied2 ? 1 : 0));
+
+    int64_t live_value = 0;
+    bool cb_live = coins_kv_get(progress_store_db(), cb_txid->data, 0,
+                                &live_value, NULL, 0, NULL);
+    RBI_CHECK("block 1's coinbase output is live in the UTXO set", cb_live);
+    RBI_CHECK("live coinbase value equals subsidy",
+              cb_live && live_value == cb_value && cb_value > 0);
+
+    uint8_t commit_after[32];
+    bool have_commit_after =
+        (coins_kv_commitment(progress_store_db(), commit_after) == 0);
+    RBI_CHECK("post-ingest UTXO commitment recomputes", have_commit_after);
+    RBI_CHECK("UTXO commitment changed after the block applied",
+              have_commit_before && have_commit_after &&
+              memcmp(commit_before, commit_after, 32) != 0);
+    return failures;
+}
+
+/* Replay block 1 through the headers-first catch-up path and assert the
+ * exact-hash bypass behaviour. Returns this phase's RBI_CHECK failure
+ * count. */
+static int rbi_assert_known_header_catchup_bypass(
+    struct chain_activation_controller *ctl, struct block *blk1b)
+{
+    int failures = 0;
+    RBI_CHECK("known-header fast path starts with an empty admit inbox",
+              mailbox_header_admit_drain(rbi_discard_header) == 0);
+    uint64_t known_before =
+        reducer_ingest_catchup_known_header_bypass_total();
+    uint64_t solution_skip_before =
+        reducer_ingest_catchup_validated_solution_skip_total();
+    struct validation_state catchup_out;
+    validation_state_init(&catchup_out);
+    bool catchup_final = reducer_stage_p2p_block_for_catchup(
+        ctl, blk1b, &catchup_out);
+    RBI_CHECK("known-header catch-up remains a staged, non-final verdict",
+              !catchup_final &&
+              strcmp(catchup_out.reject_reason,
+                     "p2p-block-staged-for-reducer") == 0);
+    RBI_CHECK("known-header catch-up takes the exact-hash bypass",
+              reducer_ingest_catchup_known_header_bypass_total() ==
+                  known_before + 1);
+    RBI_CHECK("validated header avoids a redundant solution rewrite",
+              reducer_ingest_catchup_validated_solution_skip_total() ==
+                  solution_skip_before + 1);
+    RBI_CHECK("known-header catch-up enqueues no duplicate header",
+              mailbox_header_admit_drain(rbi_discard_header) == 0);
+    return failures;
+}
+
 int test_reducer_block_ingest_gate(void)
 {
     printf("\n=== reducer block-ingest gate "
@@ -371,42 +687,13 @@ int test_reducer_block_ingest_gate(void)
 
     /* ── (1) Stand up a fresh node-db / progress.kv at genesis ──────────── */
     char dir[256];
-    rbi_mkdir_p("./test-tmp");
-    test_fmt_tmpdir(dir, sizeof(dir), "reducer_block_ingest_gate", "main");
-    rbi_mkdir_p(dir);
-
-    /* Point the global datadir at the hermetic tmp dir so the front door's
-     * write_block_to_disk(ctl->datadir, ...) and the stages' block reader
-     * (GetDataDir(net_specific=true)) share one blocks/ directory. Use the
-     * net-specific path GetDataDir returns for the controller and pre-create
-     * its blocks/ dir. */
-    SetDataDir(dir);
     char netdir[512];
-    GetDataDir(true /*net-specific (regtest subdir)*/, netdir, sizeof(netdir));
-    rbi_mkdir_p(netdir);
     char blocksdir[640];
-    snprintf(blocksdir, sizeof(blocksdir), "%s/blocks", netdir);
-    rbi_mkdir_p(blocksdir);
-
-    char log_path[512];
-    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
-
-    progress_store_close();
-    bool store_ok = progress_store_open(dir);
-    RBI_CHECK("progress_store opens at fresh datadir", store_ok);
-
-    event_log_t *lg = store_ok ? event_log_open(log_path) : NULL;
-    RBI_CHECK("event log opens", lg != NULL);
-
-    if (!store_ok || !lg) {
-        if (lg) event_log_close(lg);
-        progress_store_close();
-        test_cleanup_tmpdir(blocksdir);
-        test_cleanup_tmpdir(netdir);
-        test_cleanup_tmpdir(dir);
-        SetDataDir("");
-        ClearDataDirCache();
-        chain_params_select(CHAIN_MAIN);
+    event_log_t *lg = NULL;
+    failures += rbi_open_hermetic_datadir_store(dir, sizeof(dir), netdir,
+                                                sizeof(netdir), blocksdir,
+                                                sizeof(blocksdir), &lg);
+    if (!lg) {
         printf("=== reducer block-ingest gate: %d failures (setup) ===\n",
                failures);
         return failures;
@@ -425,43 +712,13 @@ int test_reducer_block_ingest_gate(void)
      * active chain, and as the best-header anchor. The reducer extends the
      * window from pindex_best_header, so block 1 builds on this. */
     struct uint256 genesis_hash = cp->consensus.hashGenesisBlock;
-    struct block_index *genesis = chainstate_insert_block_index(
-        (struct chainstate *)&ms, &genesis_hash);
-    RBI_CHECK("genesis block_index inserted", genesis != NULL);
-    if (genesis) {
-        genesis->nHeight = 0;
-        genesis->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
-        genesis->nTx = 1;
-        genesis->nChainTx = 1;
-        genesis->nChainWork = GetBlockProof(genesis);
-        active_chain_move_window_tip(&ms.chain_active, genesis);
-        ms.pindex_best_header = genesis;
-    }
+    failures += rbi_install_genesis_anchor(&ms, &genesis_hash);
 
     /* Bind the fresh genesis authority before adding durable anchor history,
      * matching test_boot_matrix's production-default stage setup. */
-    bool stages_ok =
-        header_admit_stage_init(&ms) &&
-        validate_headers_stage_init(&ms) &&
-        body_fetch_stage_init(&ms) &&
-        body_persist_stage_init(&ms) &&
-        script_validate_stage_init(&ms) &&
-        proof_validate_stage_init(&ms) &&
-        utxo_apply_stage_init(&ms) &&
-        tip_finalize_stage_init(&ms);
-    RBI_CHECK("all eight reducer stages init", stages_ok);
-
-    /* Now that utxo_apply created its log table, seed the genesis (height 0)
-     * applied row so the cold-start anchor can finalize cleanly into block 1
-     * (see rbi_seed_genesis_utxo_apply_row). */
-    if (stages_ok)
-        RBI_CHECK("seed genesis utxo_apply_log row",
-                  rbi_seed_genesis_utxo_apply_row(progress_store_db()));
-
-    /* Seed the processed genesis anchor after stage initialization: this
-     * advances upstream cursors to 1 while preserving the fresh H0 authority. */
-    RBI_CHECK("tip_finalize anchor seed at genesis",
-              tip_finalize_stage_seed_anchor(0, genesis_hash.data, false));
+    bool stages_ok = false;
+    failures += rbi_bind_reducer_stages_and_seed_anchor(&ms, &genesis_hash,
+                                                        &stages_ok);
 
     /* Build the activation controller (its mutex serializes the front door;
      * its params drive check_block). datadir is stored by pointer, so it must
@@ -491,22 +748,12 @@ int test_reducer_block_ingest_gate(void)
      * and confirm it passes the EXACT stateless gate the reducer front door
      * applies (check_block with check_pow=true). If this fails the front door
      * would reject before any stage runs. */
-    struct block blk1;
-    block_init(&blk1);
     int64_t cb_value = 0;
-    bool built1 = stages_ok &&
-                  rbi_build_regtest_block(&blk1, 1, &genesis_hash, cp,
-                                          &cb_value);
-    RBI_CHECK("regtest block at height 1 builds", built1);
-    bool mined1 = built1 && mine_block_pow(&blk1, 1, cp, 0);
-    RBI_CHECK("mine_block_pow solves Equihash (48,5) + nonce", mined1);
-    if (mined1) {
-        struct validation_state vs;
-        validation_state_init(&vs);
-        RBI_CHECK("mined block passes reducer check_block gate",
-                  check_block(&blk1, &vs, cp, true, true, true));
-    }
-    block_free(&blk1);  /* rebuilt+admitted+persisted by the helper below */
+    bool mined1 = false;
+    failures += rbi_verify_block1_passes_front_door_gate(cp, &genesis_hash,
+                                                          stages_ok,
+                                                          &cb_value,
+                                                          &mined1);
 
     /* ── (3b) Prepare blocks 1 and 2 in the "headers + bodies synced" state ──
      * Block 2 is the lookahead successor tip_finalize needs to finalize
@@ -514,58 +761,22 @@ int test_reducer_block_ingest_gate(void)
     struct block blk1b, blk2;
     block_init(&blk1b);
     block_init(&blk2);
-    struct uint256 hash1, hash2, cb_txid;
-    uint256_set_null(&hash1); uint256_set_null(&hash2);
+    struct uint256 hash1, cb_txid;
+    uint256_set_null(&hash1);
     uint256_set_null(&cb_txid);
-    int64_t cb2_value = 0;
-    struct block_index *bi1 = NULL, *bi2 = NULL;
-
-    bool prepared1 = mined1 &&
-        rbi_mine_admit_persist(&ictx, 1, &genesis_hash, &blk1b, &hash1,
-                               &cb_value, &bi1);
-    RBI_CHECK("block 1 mined + header-admitted + body-on-disk (HAVE_DATA)",
-              prepared1);
-    if (prepared1) cb_txid = blk1b.vtx[0].hash;
-
-    bool prepared2 = prepared1 &&
-        rbi_mine_admit_persist(&ictx, 2, &hash1, &blk2, &hash2,
-                               &cb2_value, &bi2);
-    RBI_CHECK("block 2 (lookahead successor) mined + admitted + body-on-disk",
-              prepared2);
+    struct block_index *bi2 = NULL;
+    bool prepared2 = false;
+    failures += rbi_prepare_blocks_one_and_two(&ictx, &genesis_hash, mined1,
+                                               &blk1b, &blk2, &hash1,
+                                               &cb_txid, &cb_value, &bi2,
+                                               &prepared2);
 
     /* ── (4) Drive block 1's body through the reducer front door ───────────
      * reducer_ingest_block runs check_block (real Equihash gate) then drains
      * the eight stages under the activation mutex. With block 2 as the
      * lookahead successor, the drain applies and finalizes block 1. */
-    bool front_door_ok = false;
-    if (prepared2) {
-        ms.pindex_best_header = bi2;  /* finalize down to the successor */
-        (void)active_chain_extend_window(&ms.chain_active, bi2);
-
-        struct validation_state out;
-        validation_state_init(&out);
-        front_door_ok = reducer_ingest_block(&ctl, &blk1b, REDUCER_SRC_MINED,
-                                             true /*force: locally requested*/,
-                                             &out);
-        /* Drive stage work to full convergence: reducer_kick() drains only
-         * within a bounded latency budget, so loop until a kick makes zero
-         * advances (the cap is a runaway guard). */
-        for (int it = 0; it < 1000 && reducer_kick(&ctl) > 0; it++) {
-            /* keep draining */
-        }
-        printf("reducer_block_ingest_gate: front-door verdict=%s%s\n",
-               front_door_ok ? "accepted" : "pending",
-               (!front_door_ok && out.reject_reason[0]) ? out.reject_reason
-                                                        : "");
-        /* The front door ran its real consensus gate (check_block) without a
-         * stateless reject — a garbage block would have returned a DoS reason
-         * here, not the benign tip-pending one. */
-        RBI_CHECK("front door passed block 1 through the stateless gate "
-                  "(no consensus reject)",
-                  front_door_ok ||
-                  strcmp(out.reject_reason, "block-not-finalized-by-reducer")
-                      == 0);
-    }
+    failures += rbi_ingest_block1_through_front_door(&ms, &ctl, &blk1b, bi2,
+                                                     prepared2);
 
     /* The reducer (not legacy connect_block) applied block 1 end-to-end through
      * the front door: utxo_apply recorded a success at height 1, no
@@ -576,84 +787,15 @@ int test_reducer_block_ingest_gate(void)
               utxo_apply_stage_spend_unknown_total() == 0);
     bool applied2 = utxo_apply_stage_succeeded_at(2);
 
-    /* ── (5a) ASSERT: block 1 finalized and the active window is bounded ──
-     * Block 1 is finalized by the reducer. Block 2 is the prepared lookahead
-     * successor; a full convergence drain may leave the visible active-chain
-     * window at height 2, but it must not lag before block 1 or advance beyond
-     * the staged lookahead. */
-    int height_after = active_chain_height(&ms.chain_active);
-    printf("reducer_block_ingest_gate: tip height %d -> %d\n",
-           height_before, height_after);
-    RBI_CHECK("active_chain_height reached block 1 and stayed within the "
-              "prepared lookahead span",
-              height_after >= height_before + 1 &&
-              height_after <= height_before + 2);
-    RBI_CHECK("block 1 is finalized by tip_finalize (reducer, not legacy)",
-              tip_finalize_stage_finalized_total() >= 1);
-    /* Block 1 landed on the active chain: tip_finalize's one-block-lookahead
-     * convention stores at height H the hash of the block at H+1, so block 1
-     * is witnessed by the row at height 0 carrying its hash. */
-    {
-        uint8_t fin_hash[32] = {0};
-        bool finalized_row = tip_finalize_stage_finalized_tip_at(
-            progress_store_db(), 0, fin_hash);
-        RBI_CHECK("block 1 has a durable finalized tip row (height-0 lookahead "
-                  "row carries block 1's hash)",
-                  finalized_row && memcmp(fin_hash, hash1.data, 32) == 0);
-    }
-
-    /* ── (5b) ASSERT: UTXO commitment recomputes WITH the applied block 1 ──
-     * Block 1's coinbase is live in the UTXO set and the SHA3 commitment moved.
-     * (The set also carries block 2's coinbase as the pending successor; we
-     * assert specifically on block 1's coinbase — the block under test.) */
-    uint64_t count_after = (uint64_t)coins_kv_count(progress_store_db());
-    printf("reducer_block_ingest_gate: utxo count %llu -> %llu\n",
-           (unsigned long long)count_before, (unsigned long long)count_after);
-    /* Block 1 added exactly one new coinbase UTXO over the genesis baseline
-     * (block 2's coinbase is also live as the pending successor). */
-    RBI_CHECK("block 1's coinbase added exactly one UTXO over genesis",
-              count_after == count_before + 1 + (applied2 ? 1 : 0));
-
-    int64_t live_value = 0;
-    bool cb_live = coins_kv_get(progress_store_db(), cb_txid.data, 0,
-                                &live_value, NULL, 0, NULL);
-    RBI_CHECK("block 1's coinbase output is live in the UTXO set", cb_live);
-    RBI_CHECK("live coinbase value equals subsidy",
-              cb_live && live_value == cb_value && cb_value > 0);
-
-    uint8_t commit_after[32];
-    bool have_commit_after =
-        (coins_kv_commitment(progress_store_db(), commit_after) == 0);
-    RBI_CHECK("post-ingest UTXO commitment recomputes", have_commit_after);
-    RBI_CHECK("UTXO commitment changed after the block applied",
-              have_commit_before && have_commit_after &&
-              memcmp(commit_before, commit_after, 32) != 0);
+    /* ── (5) Assert the post-ingest state: finality + UTXO commitment ──── */
+    failures += rbi_assert_block1_finalized_and_utxo_committed(
+        &ms, height_before, count_before, commit_before, have_commit_before,
+        applied2, &hash1, &cb_txid, cb_value);
 
     /* Headers-first catch-up must not replay an exact known header through the
      * bounded mailbox. It still stages/persists the body and preserves the
      * normal pending-reducer verdict. */
-    RBI_CHECK("known-header fast path starts with an empty admit inbox",
-              mailbox_header_admit_drain(rbi_discard_header) == 0);
-    uint64_t known_before =
-        reducer_ingest_catchup_known_header_bypass_total();
-    uint64_t solution_skip_before =
-        reducer_ingest_catchup_validated_solution_skip_total();
-    struct validation_state catchup_out;
-    validation_state_init(&catchup_out);
-    bool catchup_final = reducer_stage_p2p_block_for_catchup(
-        &ctl, &blk1b, &catchup_out);
-    RBI_CHECK("known-header catch-up remains a staged, non-final verdict",
-              !catchup_final &&
-              strcmp(catchup_out.reject_reason,
-                     "p2p-block-staged-for-reducer") == 0);
-    RBI_CHECK("known-header catch-up takes the exact-hash bypass",
-              reducer_ingest_catchup_known_header_bypass_total() ==
-                  known_before + 1);
-    RBI_CHECK("validated header avoids a redundant solution rewrite",
-              reducer_ingest_catchup_validated_solution_skip_total() ==
-                  solution_skip_before + 1);
-    RBI_CHECK("known-header catch-up enqueues no duplicate header",
-              mailbox_header_admit_drain(rbi_discard_header) == 0);
+    failures += rbi_assert_known_header_catchup_bypass(&ctl, &blk1b);
 
     /* ── (6) Teardown ───────────────────────────────────────────────────── */
     /* Both helper-built blocks were block_init'd unconditionally; block_free is
