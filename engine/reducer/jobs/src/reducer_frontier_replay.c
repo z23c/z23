@@ -269,6 +269,65 @@ enum rf_hash_split_side stage_repair_classify_hash_split(
     return RF_SPLIT_SCRIPT_SIDE;
 }
 
+static bool reducer_frontier_replay_read_stale_script_cursors(
+    sqlite3 *db,
+    stale_script_detector_fn detect,
+    int *script_cursor,
+    int *proof_cursor,
+    int *utxo_cursor,
+    int *tip_cursor,
+    int *body_cursor,
+    int *height,
+    int32_t *coins_frontier,
+    bool *coins_found)
+{
+    return stage_repair_cursor_at_unlocked(db, "script_validate",
+                                           script_cursor) &&
+           stage_repair_cursor_at_unlocked(db, "proof_validate",
+                                           proof_cursor) &&
+           stage_repair_cursor_at_unlocked(db, "utxo_apply",
+                                           utxo_cursor) &&
+           stage_repair_cursor_at_unlocked(db, "tip_finalize",
+                                           tip_cursor) &&
+           stage_repair_cursor_at_unlocked(db, "body_persist",
+                                           body_cursor) &&
+           coins_kv_get_applied_height(db, coins_frontier,
+                                        coins_found) &&
+           detect(db, *script_cursor, height);
+}
+
+static int reducer_frontier_replay_record_stale_script_hole(
+    struct stage_reducer_frontier_reconcile_result *out,
+    int height,
+    int script_cursor,
+    int utxo_cursor,
+    int tip_cursor,
+    int body_cursor,
+    bool coins_found,
+    int32_t coins_frontier)
+{
+    int replay_first = (coins_found && coins_frontier >= 0 &&
+                        coins_frontier < height)
+                           ? coins_frontier
+                           : height;
+    out->stale_script_repair_height = height;
+    out->stale_script_cursor_before = script_cursor;
+    out->stale_script_cursor_after = script_cursor;
+    out->stale_script_utxo_cursor_before = utxo_cursor;
+    out->stale_script_tip_cursor_before = tip_cursor;
+    out->stale_script_backfill_first = replay_first;
+    out->stale_script_backfill_last = body_cursor > 0 ? body_cursor - 1 : -1;
+    return replay_first;
+}
+
+static bool reducer_frontier_replay_stale_script_hole_is_unactionable(
+    int height, int script_cursor, int proof_cursor, int body_cursor,
+    bool coins_found)
+{
+    return height < 0 || script_cursor <= 0 || height >= script_cursor ||
+           proof_cursor <= height || body_cursor <= height || !coins_found;
+}
+
 /* Shared body for the two stale-script replay paths. `detect` picks the lowest
  * height to re-derive (an ok=0 status hole, or an ok=1 hash split).
  * `rewind_headers` is true ONLY for the hash-split path: it additionally drops
@@ -301,37 +360,19 @@ bool maybe_replay_stale_script_via(
      * bounded hash-checked pread; the dry-run already reads blocks under
      * this lock. */
     progress_store_tx_lock();
-    bool ok = stage_repair_cursor_at_unlocked(db, "script_validate",
-                                              &script_cursor) &&
-              stage_repair_cursor_at_unlocked(db, "proof_validate",
-                                              &proof_cursor) &&
-              stage_repair_cursor_at_unlocked(db, "utxo_apply",
-                                              &utxo_cursor) &&
-              stage_repair_cursor_at_unlocked(db, "tip_finalize",
-                                              &tip_cursor) &&
-              stage_repair_cursor_at_unlocked(db, "body_persist",
-                                              &body_cursor) &&
-              coins_kv_get_applied_height(db, &coins_frontier,
-                                           &coins_found) &&
-              detect(db, script_cursor, &height);
+    bool ok = reducer_frontier_replay_read_stale_script_cursors(
+        db, detect, &script_cursor, &proof_cursor, &utxo_cursor,
+        &tip_cursor, &body_cursor, &height, &coins_frontier, &coins_found);
     if (!ok) {
         progress_store_tx_unlock();
         return false;
     }
 
-    int replay_first = (coins_found && coins_frontier >= 0 &&
-                        coins_frontier < height)
-                           ? coins_frontier
-                           : height;
-    out->stale_script_repair_height = height;
-    out->stale_script_cursor_before = script_cursor;
-    out->stale_script_cursor_after = script_cursor;
-    out->stale_script_utxo_cursor_before = utxo_cursor;
-    out->stale_script_tip_cursor_before = tip_cursor;
-    out->stale_script_backfill_first = replay_first;
-    out->stale_script_backfill_last = body_cursor > 0 ? body_cursor - 1 : -1;
-    if (height < 0 || script_cursor <= 0 || height >= script_cursor ||
-        proof_cursor <= height || body_cursor <= height || !coins_found) {
+    int replay_first = reducer_frontier_replay_record_stale_script_hole(
+        out, height, script_cursor, utxo_cursor, tip_cursor, body_cursor,
+        coins_found, coins_frontier);
+    if (reducer_frontier_replay_stale_script_hole_is_unactionable(
+            height, script_cursor, proof_cursor, body_cursor, coins_found)) {
         progress_store_tx_unlock();
         return true;
     }
@@ -546,6 +587,59 @@ bool stage_reducer_frontier_try_validate_script_hash_split_replay(
                                          /*rewind_headers=*/true);
 }
 
+static bool reducer_frontier_replay_read_stale_proof_cursors(
+    sqlite3 *db,
+    int *script_cursor,
+    int *proof_cursor,
+    int *utxo_cursor,
+    int *height)
+{
+    return stage_repair_cursor_at_unlocked(db, "script_validate",
+                                           script_cursor) &&
+           stage_repair_cursor_at_unlocked(db, "proof_validate",
+                                           proof_cursor) &&
+           stage_repair_cursor_at_unlocked(db, "utxo_apply",
+                                           utxo_cursor) &&
+           stale_proof_hole_unlocked(db, *proof_cursor, height);
+}
+
+static void reducer_frontier_replay_record_stale_proof_hole(
+    struct stage_reducer_frontier_reconcile_result *out,
+    int *out_height,
+    int height,
+    int proof_cursor,
+    int utxo_cursor)
+{
+    if (out_height) *out_height = height;
+    if (out) {
+        out->stale_script_repair_height = height;
+        out->stale_script_cursor_before = proof_cursor;
+        out->stale_script_cursor_after = proof_cursor;
+        out->stale_script_utxo_cursor_before = utxo_cursor;
+    }
+}
+
+static bool reducer_frontier_replay_stale_proof_hole_is_unactionable(
+    int height, int proof_cursor, int script_cursor)
+{
+    return height < 0 || proof_cursor <= 0 || height >= proof_cursor ||
+           script_cursor <= height;
+}
+
+static void reducer_frontier_replay_record_stale_proof_repaired(
+    struct stage_reducer_frontier_reconcile_result *out,
+    bool *out_repaired,
+    int replay_first)
+{
+    if (out) {
+        out->stale_script_repaired = true;
+        out->stale_script_cursor_after = replay_first;
+        out->refused_coin_tear = false;
+        out->repaired = true;
+    }
+    if (out_repaired) *out_repaired = true;
+}
+
 /* Core proof internal_error one-shot rewind, parameterized by the block_hash
  * used for the marker key. Holds the progress lock across the snapshot and the
  * rewind COMMIT (same contract as maybe_replay_stale_script_via: a drain
@@ -571,33 +665,23 @@ static bool replay_stale_proof_core(
     int script_ok = -1;
 
     progress_store_tx_lock();
-    bool ok = stage_repair_cursor_at_unlocked(db, "script_validate",
-                                              &script_cursor) &&
-              stage_repair_cursor_at_unlocked(db, "proof_validate",
-                                              &proof_cursor) &&
-              stage_repair_cursor_at_unlocked(db, "utxo_apply",
-                                              &utxo_cursor) &&
-              stale_proof_hole_unlocked(db, proof_cursor, &height);
+    bool ok = reducer_frontier_replay_read_stale_proof_cursors(
+        db, &script_cursor, &proof_cursor, &utxo_cursor, &height);
     if (!ok) {
         progress_store_tx_unlock();
         return false;
     }
 
-    if (out_height) *out_height = height;
-    if (out) {
-        out->stale_script_repair_height = height;
-        out->stale_script_cursor_before = proof_cursor;
-        out->stale_script_cursor_after = proof_cursor;
-        out->stale_script_utxo_cursor_before = utxo_cursor;
-    }
+    reducer_frontier_replay_record_stale_proof_hole(
+        out, out_height, height, proof_cursor, utxo_cursor);
 
     /* No transient proof hole, or it sits at/above the cursor: nothing to do.
      * Also require script PASSED at the hole — a script hole at the same
      * height is the script path's domain (it deletes proof_validate_log down
      * to its own replay_first in the same tx), so the proof path must not
      * double-own it. script_validate must have advanced past the hole too. */
-    if (height < 0 || proof_cursor <= 0 || height >= proof_cursor ||
-        script_cursor <= height) {
+    if (reducer_frontier_replay_stale_proof_hole_is_unactionable(
+            height, proof_cursor, script_cursor)) {
         progress_store_tx_unlock();
         return true;
     }
@@ -651,13 +735,8 @@ static bool replay_stale_proof_core(
     if (!ok)
         return false;
 
-    if (out) {
-        out->stale_script_repaired = true;
-        out->stale_script_cursor_after = replay_first;
-        out->refused_coin_tear = false;
-        out->repaired = true;
-    }
-    if (out_repaired) *out_repaired = true;
+    reducer_frontier_replay_record_stale_proof_repaired(
+        out, out_repaired, replay_first);
     LOG_WARN("stage_repair",
              "[stage_repair] stale proof repair rewound proof/utxo/tip cursors "
              "to h=%d for transient proof internal_error hole h=%d "
@@ -736,6 +815,34 @@ bool stage_repair_validate_script_hash_split_detect_for_testing(
     return ok;
 }
 
+static bool reducer_frontier_replay_read_hash_split_cursors(
+    sqlite3 *db,
+    int *script_cursor,
+    int *proof_cursor,
+    int *tip_cursor,
+    int *height)
+{
+    return stage_repair_cursor_at_unlocked(db, "script_validate",
+                                           script_cursor) &&
+           stage_repair_cursor_at_unlocked(db, "proof_validate",
+                                           proof_cursor) &&
+           stage_repair_cursor_at_unlocked(db, "tip_finalize",
+                                           tip_cursor) &&
+           stale_script_hash_split_unlocked(db, *script_cursor, height);
+}
+
+static bool reducer_frontier_replay_apply_hash_split_rewind(
+    sqlite3 *db, int height, int script_cursor, int proof_cursor)
+{
+    return reducer_frontier_replay_delete_log_range(
+               db, "script_validate_log", height, script_cursor) &&
+           reducer_frontier_replay_delete_log_range(
+               db, "proof_validate_log", height, proof_cursor) &&
+           stage_repair_force_stage_cursor(db, "script_validate", height) &&
+           stage_repair_force_stage_cursor(db, "proof_validate", height) &&
+           stage_repair_force_stage_cursor(db, "tip_finalize", height);
+}
+
 /* Test-only witness for the hash_split repair. Detects the lowest split, then
  * applies the coins-NOT-advanced subset of stale_script_replay_tx: delete the
  * stale script+proof verdicts at/above the split and rewind script/proof/tip so
@@ -754,13 +861,8 @@ bool stage_repair_validate_script_hash_split_rewind_for_testing(
 
     progress_store_tx_lock();
     int script_cursor = -1, proof_cursor = -1, tip_cursor = -1, height = -1;
-    bool ok = stage_repair_cursor_at_unlocked(db, "script_validate",
-                                              &script_cursor) &&
-              stage_repair_cursor_at_unlocked(db, "proof_validate",
-                                              &proof_cursor) &&
-              stage_repair_cursor_at_unlocked(db, "tip_finalize",
-                                              &tip_cursor) &&
-              stale_script_hash_split_unlocked(db, script_cursor, &height);
+    bool ok = reducer_frontier_replay_read_hash_split_cursors(
+        db, &script_cursor, &proof_cursor, &tip_cursor, &height);
     if (!ok) {
         progress_store_tx_unlock();
         return false;
@@ -780,13 +882,8 @@ bool stage_repair_validate_script_hash_split_rewind_for_testing(
         progress_store_tx_unlock();
         return false;
     }
-    if (!reducer_frontier_replay_delete_log_range(
-            db, "script_validate_log", height, script_cursor) ||
-        !reducer_frontier_replay_delete_log_range(
-            db, "proof_validate_log", height, proof_cursor) ||
-        !stage_repair_force_stage_cursor(db, "script_validate", height) ||
-        !stage_repair_force_stage_cursor(db, "proof_validate", height) ||
-        !stage_repair_force_stage_cursor(db, "tip_finalize", height)) {
+    if (!reducer_frontier_replay_apply_hash_split_rewind(
+            db, height, script_cursor, proof_cursor)) {
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         progress_store_tx_unlock();
         return false;

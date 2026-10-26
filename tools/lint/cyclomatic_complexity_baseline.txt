@@ -911,9 +911,6 @@ engine/reducer/jobs/src/reducer_frontier.c:log_contiguous_prefix:25
 engine/reducer/jobs/src/reducer_frontier.c:log_ok_at:21
 engine/reducer/jobs/src/reducer_frontier.c:reducer_frontier_compute_hstar:20
 engine/reducer/jobs/src/reducer_frontier.c:reducer_trusted_anchor:16
-engine/reducer/jobs/src/reducer_frontier_replay.c:maybe_replay_stale_script_via:29
-engine/reducer/jobs/src/reducer_frontier_replay.c:replay_stale_proof_core:23
-engine/reducer/jobs/src/reducer_frontier_replay.c:stage_repair_validate_script_hash_split_rewind_for_testing:19
 engine/reducer/jobs/src/reducer_frontier_replay_tx.c:reducer_frontier_replay_stale_proof_tx:19
 engine/reducer/jobs/src/reducer_frontier_replay_tx.c:reducer_frontier_replay_stale_script_tx:24
 engine/reducer/jobs/src/reducer_frontier_stage_cursor.c:reducer_frontier_stage_cursor_derived:32
