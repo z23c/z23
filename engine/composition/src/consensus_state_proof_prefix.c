@@ -81,6 +81,43 @@ static bool text_equal(sqlite3_stmt *st, int column, const char *expected)
            memcmp(text, expected, len) == 0;
 }
 
+static int64_t column_int_if_row(int rc, sqlite3_stmt *st, int column)
+{
+    return rc == SQLITE_ROW &&
+                   sqlite3_column_type(st, column) == SQLITE_INTEGER
+               ? sqlite3_column_int64(st, column) : -1;
+}
+
+/* Reports whether the stepped row's raw columns violate the shape
+ * contract: ordinal, name, height window and non-negative counters. */
+static bool component_row_values_bad(int rc, size_t i, int64_t ordinal,
+                                     int64_t cursor, int64_t first,
+                                     int64_t last, int64_t row_count,
+                                     int64_t hash_count, int32_t height,
+                                     uint64_t rows, sqlite3_stmt *st)
+{
+    return rc != SQLITE_ROW || ordinal != (int64_t)i ||
+           !text_equal(st, 1, k_component_names[i]) || cursor < 0 ||
+           first != 0 || last != height || row_count < 0 ||
+           (uint64_t)row_count != rows || hash_count < 0;
+}
+
+/* Reports whether the cross-field invariants fail: hash-bound count,
+ * cursor progress bounds and a non-zero component digest. */
+static bool component_row_invariants_bad(size_t i, int64_t cursor,
+                                         int64_t hash_count, uint64_t rows,
+                                         uint64_t minimum, sqlite3_stmt *st,
+                                         uint8_t digest[32])
+{
+    return (uint64_t)hash_count !=
+               (k_component_hash_bound[i] ? rows : 0u) ||
+           (uint64_t)cursor < minimum ||
+           (i == 6u && (uint64_t)cursor != rows) ||
+           (i == 7u && (uint64_t)cursor > minimum + 1u) ||
+           !copy_blob32(st, 7, digest) ||
+           !zcl_bytes_any_set(digest, 32);
+}
+
 static bool read_components(
     sqlite3 *db, const char *table,
     struct consensus_state_bundle_proof_summary
@@ -102,37 +139,20 @@ static bool read_components(
     uint64_t rows = (uint64_t)height + 1u;
     for (size_t i = 0; i < CONSENSUS_STATE_BUNDLE_PROOF_COUNT; i++) {
         int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
-        int64_t ordinal = rc == SQLITE_ROW &&
-                                  sqlite3_column_type(st, 0) == SQLITE_INTEGER
-                              ? sqlite3_column_int64(st, 0) : -1;
-        int64_t cursor = rc == SQLITE_ROW &&
-                                 sqlite3_column_type(st, 2) == SQLITE_INTEGER
-                             ? sqlite3_column_int64(st, 2) : -1;
-        int64_t first = rc == SQLITE_ROW &&
-                                sqlite3_column_type(st, 3) == SQLITE_INTEGER
-                            ? sqlite3_column_int64(st, 3) : -1;
-        int64_t last = rc == SQLITE_ROW &&
-                               sqlite3_column_type(st, 4) == SQLITE_INTEGER
-                           ? sqlite3_column_int64(st, 4) : -1;
-        int64_t row_count = rc == SQLITE_ROW &&
-                                    sqlite3_column_type(st, 5) == SQLITE_INTEGER
-                                ? sqlite3_column_int64(st, 5) : -1;
-        int64_t hash_count = rc == SQLITE_ROW &&
-                                     sqlite3_column_type(st, 6) == SQLITE_INTEGER
-                                 ? sqlite3_column_int64(st, 6) : -1;
+        int64_t ordinal = column_int_if_row(rc, st, 0);
+        int64_t cursor = column_int_if_row(rc, st, 2);
+        int64_t first = column_int_if_row(rc, st, 3);
+        int64_t last = column_int_if_row(rc, st, 4);
+        int64_t row_count = column_int_if_row(rc, st, 5);
+        int64_t hash_count = column_int_if_row(rc, st, 6);
         uint64_t minimum = i == CONSENSUS_STATE_BUNDLE_PROOF_COUNT - 1u
                                ? (uint64_t)height : rows;
-        if (rc != SQLITE_ROW || ordinal != (int64_t)i ||
-            !text_equal(st, 1, k_component_names[i]) || cursor < 0 ||
-            first != 0 || last != height || row_count < 0 ||
-            (uint64_t)row_count != rows || hash_count < 0 ||
-            (uint64_t)hash_count !=
-                (k_component_hash_bound[i] ? rows : 0u) ||
-            (uint64_t)cursor < minimum ||
-            (i == 6u && (uint64_t)cursor != rows) ||
-            (i == 7u && (uint64_t)cursor > minimum + 1u) ||
-            !copy_blob32(st, 7, out[i].component_digest) ||
-            !zcl_bytes_any_set(out[i].component_digest, 32)) {
+        if (component_row_values_bad(rc, i, ordinal, cursor, first, last,
+                                     row_count, hash_count, height, rows,
+                                     st) ||
+            component_row_invariants_bad(i, cursor, hash_count, rows,
+                                         minimum, st,
+                                         out[i].component_digest)) {
             ok = false;
             break;
         }
@@ -238,6 +258,91 @@ static bool prefix_install_generation(sqlite3 *db, uint8_t bytes[8])
     return true;
 }
 
+static bool prefix_store_prepared(sqlite3 *db)
+{
+    return ensure_schema(db) && clear_rows(db);
+}
+
+static bool prefix_install_base_row(
+    sqlite3 *db, const struct consensus_state_bundle_manifest *manifest,
+    const uint8_t generation_bytes[8])
+{
+    static const char base_sql[] =
+        "INSERT INTO consensus_state_proof_prefix_base("
+        "singleton,height,block_hash,validation_profile,"
+        "proof_manifest_digest,source_digest,artifact_digest,authority_generation) "
+        "VALUES(1,?,?,?,?,?,?,?)";
+    sqlite3_stmt *base = NULL;
+    bool ok = sqlite3_prepare_v2(db, base_sql, -1, &base, NULL) ==
+                  SQLITE_OK &&
+              sqlite3_bind_int(base, 1, manifest->height) == SQLITE_OK &&
+              sqlite3_bind_blob(base, 2, manifest->block_hash, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_int(base, 3, manifest->validation_profile) ==
+                  SQLITE_OK &&
+              sqlite3_bind_blob(base, 4, manifest->proof_manifest_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(base, 5, manifest->source_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(base, 6, manifest->artifact_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(base, 7, generation_bytes,
+                                8, SQLITE_STATIC) ==
+                  SQLITE_OK &&
+              sqlite3_step(base) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
+    if (base)
+        sqlite3_finalize(base);
+    return ok;
+}
+
+static bool prefix_install_component_row(
+    sqlite3_stmt *st, size_t ordinal,
+    const struct consensus_state_bundle_proof_summary *row)
+{
+    return sqlite3_bind_int(st, 1, (int)ordinal) == SQLITE_OK &&
+           sqlite3_bind_text(st, 2, row->component, -1,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_int64(st, 3,
+                              (sqlite3_int64)row->cursor) ==
+               SQLITE_OK &&
+           sqlite3_bind_int64(st, 4, row->first_height) ==
+               SQLITE_OK &&
+           sqlite3_bind_int64(st, 5, row->last_height) ==
+               SQLITE_OK &&
+           sqlite3_bind_int64(st, 6,
+                              (sqlite3_int64)row->row_count) ==
+               SQLITE_OK &&
+           sqlite3_bind_int64(
+               st, 7, (sqlite3_int64)row->hash_bound_count) ==
+               SQLITE_OK &&
+           sqlite3_bind_blob(st, 8, row->component_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
+}
+
+static bool prefix_install_component_rows(
+    sqlite3 *db,
+    const struct consensus_state_bundle_proof_summary *components)
+{
+    static const char component_sql[] =
+        "INSERT INTO consensus_state_proof_prefix_component("
+        "ordinal,component,cursor,first_height,last_height,row_count,"
+        "hash_bound_count,component_digest) VALUES(?,?,?,?,?,?,?,?)";
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, component_sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < CONSENSUS_STATE_BUNDLE_PROOF_COUNT; i++) {
+        ok = prefix_install_component_row(st, i, &components[i]);
+        if (ok && i + 1u < CONSENSUS_STATE_BUNDLE_PROOF_COUNT)
+            ok = sqlite3_reset(st) == SQLITE_OK &&
+                 sqlite3_clear_bindings(st) == SQLITE_OK;
+    }
+    if (st)
+        sqlite3_finalize(st);
+    return ok;
+}
+
 bool consensus_state_proof_prefix_install_in_tx(
     sqlite3 *progress_db, sqlite3 *bundle_db,
     const struct consensus_state_bundle_manifest *manifest)
@@ -260,69 +365,13 @@ bool consensus_state_proof_prefix_install_in_tx(
     uint8_t generation_bytes[8];
     if (!prefix_install_generation(progress_db, generation_bytes))
         return false; /* raw-return-ok:generation refusal logged */
-    if (!ensure_schema(progress_db) || !clear_rows(progress_db))
+    if (!prefix_store_prepared(progress_db))
         return false; /* raw-return-ok:helper logged store failure */
 
-    static const char base_sql[] =
-        "INSERT INTO consensus_state_proof_prefix_base("
-        "singleton,height,block_hash,validation_profile,"
-        "proof_manifest_digest,source_digest,artifact_digest,authority_generation) "
-        "VALUES(1,?,?,?,?,?,?,?)";
-    sqlite3_stmt *base = NULL;
-    bool ok = sqlite3_prepare_v2(progress_db, base_sql, -1, &base, NULL) ==
-                  SQLITE_OK &&
-              sqlite3_bind_int(base, 1, manifest->height) == SQLITE_OK &&
-              sqlite3_bind_blob(base, 2, manifest->block_hash, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_int(base, 3, manifest->validation_profile) ==
-                  SQLITE_OK &&
-              sqlite3_bind_blob(base, 4, manifest->proof_manifest_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(base, 5, manifest->source_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(base, 6, manifest->artifact_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(base, 7, generation_bytes,
-                                sizeof(generation_bytes), SQLITE_STATIC) ==
-                  SQLITE_OK &&
-              sqlite3_step(base) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
-    if (base)
-        sqlite3_finalize(base);
-
-    static const char component_sql[] =
-        "INSERT INTO consensus_state_proof_prefix_component("
-        "ordinal,component,cursor,first_height,last_height,row_count,"
-        "hash_bound_count,component_digest) VALUES(?,?,?,?,?,?,?,?)";
-    sqlite3_stmt *st = NULL;
+    bool ok = prefix_install_base_row(progress_db, manifest,
+                                      generation_bytes);
     if (ok)
-        ok = sqlite3_prepare_v2(progress_db, component_sql, -1, &st, NULL) ==
-             SQLITE_OK;
-    for (size_t i = 0; ok && i < CONSENSUS_STATE_BUNDLE_PROOF_COUNT; i++) {
-        ok = sqlite3_bind_int(st, 1, (int)i) == SQLITE_OK &&
-             sqlite3_bind_text(st, 2, components[i].component, -1,
-                               SQLITE_STATIC) == SQLITE_OK &&
-             sqlite3_bind_int64(st, 3,
-                                (sqlite3_int64)components[i].cursor) ==
-                 SQLITE_OK &&
-             sqlite3_bind_int64(st, 4, components[i].first_height) ==
-                 SQLITE_OK &&
-             sqlite3_bind_int64(st, 5, components[i].last_height) ==
-                 SQLITE_OK &&
-             sqlite3_bind_int64(st, 6,
-                                (sqlite3_int64)components[i].row_count) ==
-                 SQLITE_OK &&
-             sqlite3_bind_int64(
-                 st, 7, (sqlite3_int64)components[i].hash_bound_count) ==
-                 SQLITE_OK &&
-             sqlite3_bind_blob(st, 8, components[i].component_digest, 32,
-                               SQLITE_STATIC) == SQLITE_OK &&
-             sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
-        if (ok && i + 1u < CONSENSUS_STATE_BUNDLE_PROOF_COUNT)
-            ok = sqlite3_reset(st) == SQLITE_OK &&
-                 sqlite3_clear_bindings(st) == SQLITE_OK;
-    }
-    if (st)
-        sqlite3_finalize(st);
+        ok = prefix_install_component_rows(progress_db, components);
     if (!ok)
         return prefix_fail("prefix install: durable evidence write failed");
     LOG_INFO(PREFIX_SUBSYS,
@@ -357,6 +406,53 @@ static bool prefix_load_digests(sqlite3_stmt *st,
         zcl_bytes_any_set(out->artifact_digest, 32);
 }
 
+static bool prefix_profile_supported(int profile)
+{
+    return profile == CONSENSUS_STATE_VALIDATION_FULL ||
+           profile == CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD;
+}
+
+/* 0 = prepared; 1 = table legitimately absent; -1 = malformed evidence. */
+static int prefix_base_query_prepare(sqlite3 *db, bool generation_present,
+                                     sqlite3_stmt **st)
+{
+    const char *sql = generation_present ?
+        "SELECT height,block_hash,validation_profile,proof_manifest_digest,"
+        "source_digest,artifact_digest,authority_generation "
+        "FROM consensus_state_proof_prefix_base WHERE singleton=1" :
+        "SELECT height,block_hash,validation_profile,proof_manifest_digest,"
+        "source_digest,artifact_digest,NULL "
+        "FROM consensus_state_proof_prefix_base WHERE singleton=1";
+    if (sqlite3_prepare_v2(db, sql, -1, st, NULL) != SQLITE_OK) {
+        /* A pre-feature or full-replay datadir legitimately has no table;
+         * every other prepare error is malformed evidence, not absence. */
+        const char *msg = sqlite3_errmsg(db);
+        if (msg && strstr(msg, "no such table") != NULL)
+            return 1;
+        return -1;
+    }
+    return 0;
+}
+
+static bool prefix_base_row_valid(sqlite3_stmt *st, int rc, int64_t *height,
+                                  int *profile,
+                                  struct consensus_state_proof_prefix *out)
+{
+    bool ok = rc == SQLITE_ROW &&
+              sqlite3_column_type(st, 0) == SQLITE_INTEGER;
+    *height = ok ? sqlite3_column_int64(st, 0) : -1;
+    *profile = ok && sqlite3_column_type(st, 2) == SQLITE_INTEGER
+                   ? sqlite3_column_int(st, 2) : 0;
+    ok = ok && *height >= 0 && *height < INT32_MAX &&
+         prefix_profile_supported(*profile) &&
+         prefix_load_digests(st, out);
+    if (ok)
+        ok = prefix_load_generation(st, out);
+    if (ok)
+        ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+    return ok;
+}
+
 bool consensus_state_proof_prefix_load(
     sqlite3 *progress_db, struct consensus_state_proof_prefix *out)
 {
@@ -367,39 +463,20 @@ bool consensus_state_proof_prefix_load(
     bool generation_present = false;
     if (!generation_column_present(progress_db, &generation_present))
         return false; /* raw-return-ok:introspection logged failure */
-    const char *sql = generation_present ?
-        "SELECT height,block_hash,validation_profile,proof_manifest_digest,"
-        "source_digest,artifact_digest,authority_generation "
-        "FROM consensus_state_proof_prefix_base WHERE singleton=1" :
-        "SELECT height,block_hash,validation_profile,proof_manifest_digest,"
-        "source_digest,artifact_digest,NULL "
-        "FROM consensus_state_proof_prefix_base WHERE singleton=1";
-    if (sqlite3_prepare_v2(progress_db, sql, -1, &st, NULL) != SQLITE_OK) {
-        /* A pre-feature or full-replay datadir legitimately has no table;
-         * every other prepare error is malformed evidence, not absence. */
-        const char *msg = sqlite3_errmsg(progress_db);
-        if (msg && strstr(msg, "no such table") != NULL)
-            return true;
+    int prep = prefix_base_query_prepare(progress_db, generation_present,
+                                         &st);
+    if (prep > 0)
+        return true;
+    if (prep < 0)
         return prefix_fail("prefix load: base query failed");
-    }
     int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
     if (rc == SQLITE_DONE) {
         sqlite3_finalize(st);
         return true;
     }
-    bool ok = rc == SQLITE_ROW &&
-              sqlite3_column_type(st, 0) == SQLITE_INTEGER;
-    int64_t height = ok ? sqlite3_column_int64(st, 0) : -1;
-    int profile = ok && sqlite3_column_type(st, 2) == SQLITE_INTEGER
-                      ? sqlite3_column_int(st, 2) : 0;
-    ok = ok && height >= 0 && height < INT32_MAX &&
-         (profile == CONSENSUS_STATE_VALIDATION_FULL ||
-          profile == CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) &&
-         prefix_load_digests(st, out);
-    if (ok)
-        ok = prefix_load_generation(st, out);
-    if (ok)
-        ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+    int64_t height;
+    int profile;
+    bool ok = prefix_base_row_valid(st, rc, &height, &profile, out);
     sqlite3_finalize(st);
     if (!ok)
         return prefix_fail("prefix load: base row malformed");
@@ -451,106 +528,186 @@ static bool header_has_genesis(sqlite3 *db, bool *present)
     return rc == SQLITE_DONE;
 }
 
-bool consensus_state_proof_header_digest(
-    sqlite3 *progress_db, int32_t height, const uint8_t expected_hash[32],
-    uint8_t out[32], struct consensus_state_bundle_proof_parent *parent_out)
+static bool header_args_valid(sqlite3 *progress_db,
+                              const uint8_t expected_hash[32],
+                              uint8_t out[32], int32_t height)
 {
-    if (parent_out)
-        memset(parent_out, 0, sizeof(*parent_out));
-    if (!progress_db || !expected_hash || !out || height < 0)
-        return prefix_fail("header proof: invalid argument");
+    return progress_db && expected_hash && out && height >= 0;
+}
 
+/* 0 = proceed; 1 = genesis probe failed; 2 = prefix load failed;
+ * 3 = no genesis corpus and no admitted prefix;
+ * 4 = target does not extend the admitted prefix. */
+static int header_prefix_mode(sqlite3 *progress_db, int32_t height,
+                              struct consensus_state_proof_prefix *prefix,
+                              bool *composed, int64_t *first)
+{
     bool genesis = false;
     if (!header_has_genesis(progress_db, &genesis))
-        return prefix_fail("header proof: genesis probe failed");
-    struct consensus_state_proof_prefix prefix;
-    if (!consensus_state_proof_prefix_load(progress_db, &prefix))
-        return false; /* raw-return-ok:prefix loader logged malformed evidence */
-    bool composed = !genesis && prefix.present;
-    if (!genesis && !prefix.present)
-        return prefix_fail(
-            "header proof: neither local genesis corpus nor admitted prefix exists");
-    if (composed && height <= prefix.height)
-        return prefix_fail(
-            "header proof: target does not extend the admitted prefix");
+        return 1;
+    if (!consensus_state_proof_prefix_load(progress_db, prefix))
+        return 2;
+    *composed = !genesis && prefix->present;
+    if (!genesis && !prefix->present)
+        return 3;
+    if (*composed && height <= prefix->height)
+        return 4;
+    *first = *composed ? (int64_t)prefix->height + 1 : 0;
+    return 0;
+}
 
-    int64_t first = composed ? (int64_t)prefix.height + 1 : 0;
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(
-            progress_db,
-            "SELECT height,hash,parent_hash FROM header_admit_log "
-            "WHERE height BETWEEN ? AND ? ORDER BY height",
-            -1, &st, NULL) != SQLITE_OK)
-        return prefix_fail("header proof: row query prepare failed");
-    bool ok = sqlite3_bind_int64(st, 1, first) == SQLITE_OK &&
-              sqlite3_bind_int(st, 2, height) == SQLITE_OK;
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
+static void header_seed_chain(struct sha3_256_ctx *ctx, bool composed,
+                              const struct consensus_state_proof_prefix
+                                  *prefix,
+                              int32_t height, uint8_t prior[32])
+{
+    memset(prior, 0, 32);
     if (composed) {
         static const char suffix_domain[] =
             "zcl.consensus_state_bundle.v1/proof-extension-suffix/header";
-        sha3_256_write(&ctx, (const uint8_t *)suffix_domain,
+        sha3_256_write(ctx, (const uint8_t *)suffix_domain,
                        sizeof(suffix_domain));
-        proof_u64(&ctx, (uint64_t)prefix.height);
-        proof_u64(&ctx, (uint64_t)height);
-        sha3_256_write(&ctx, prefix.block_hash, 32);
+        proof_u64(ctx, (uint64_t)prefix->height);
+        proof_u64(ctx, (uint64_t)height);
+        sha3_256_write(ctx, prefix->block_hash, 32);
+        memcpy(prior, prefix->block_hash, 32);
     } else {
         static const char domain[] =
             "zcl.consensus_state_bundle.v1/source-header-chain";
-        sha3_256_write(&ctx, (const uint8_t *)domain, sizeof(domain));
+        sha3_256_write(ctx, (const uint8_t *)domain, sizeof(domain));
     }
+}
 
-    uint8_t prior[32] = {0};
-    if (composed)
-        memcpy(prior, prefix.block_hash, 32);
+static bool header_row_linked(sqlite3_stmt *st, int64_t row_height,
+                              const void *parent, const uint8_t prior[32])
+{
+    bool genesis_parent = row_height == 0 &&
+                          sqlite3_column_type(st, 2) == SQLITE_NULL;
+    bool linked_parent = row_height > 0 && parent &&
+                         sqlite3_column_bytes(st, 2) == 32 &&
+                         memcmp(parent, prior, 32) == 0;
+    return genesis_parent || linked_parent;
+}
+
+static void header_row_hash(struct sha3_256_ctx *ctx, int64_t row_height,
+                            const void *hash, const void *parent)
+{
+    proof_u64(ctx, (uint64_t)row_height);
+    sha3_256_write(ctx, hash, 32);
+    if (row_height == 0) {
+        uint8_t no_parent[32] = {0};
+        sha3_256_write(ctx, no_parent, 32);
+    } else {
+        sha3_256_write(ctx, parent, 32);
+    }
+}
+
+static bool header_corpus_rows_ok(sqlite3_stmt *st,
+                                  struct sha3_256_ctx *ctx, int64_t first,
+                                  int32_t height,
+                                  const uint8_t expected_hash[32],
+                                  uint8_t prior[32])
+{
     int64_t expected_height = first;
     int rc = SQLITE_ERROR;
-    while (ok && (rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
         int64_t row_height = sqlite3_column_type(st, 0) == SQLITE_INTEGER
                                  ? sqlite3_column_int64(st, 0) : -1;
         const void *hash = sqlite3_column_type(st, 1) == SQLITE_BLOB
                                ? sqlite3_column_blob(st, 1) : NULL;
         const void *parent = sqlite3_column_type(st, 2) == SQLITE_BLOB
                                  ? sqlite3_column_blob(st, 2) : NULL;
-        bool genesis_parent = row_height == 0 &&
-                              sqlite3_column_type(st, 2) == SQLITE_NULL;
-        bool linked_parent = row_height > 0 && parent &&
-                             sqlite3_column_bytes(st, 2) == 32 &&
-                             memcmp(parent, prior, 32) == 0;
         if (row_height != expected_height || !hash ||
             sqlite3_column_bytes(st, 1) != 32 ||
-            (!genesis_parent && !linked_parent)) {
-            ok = false;
-            break;
-        }
-        proof_u64(&ctx, (uint64_t)row_height);
-        sha3_256_write(&ctx, hash, 32);
-        if (row_height == 0) {
-            uint8_t no_parent[32] = {0};
-            sha3_256_write(&ctx, no_parent, 32);
-        } else {
-            sha3_256_write(&ctx, parent, 32);
-        }
+            !header_row_linked(st, row_height, parent, prior))
+            return false;
+        header_row_hash(ctx, row_height, hash, parent);
         memcpy(prior, hash, 32);
         expected_height++;
     }
-    if (rc != SQLITE_DONE || expected_height != (int64_t)height + 1 ||
-        memcmp(prior, expected_hash, 32) != 0)
-        ok = false;
+    return rc == SQLITE_DONE && expected_height == (int64_t)height + 1 &&
+           memcmp(prior, expected_hash, 32) == 0;
+}
+
+/* 0 = corpus verified; 1 = query prepare failed; 2 = corpus unusable. */
+static int header_corpus_chain_status(
+    sqlite3 *progress_db, bool composed,
+    const struct consensus_state_proof_prefix *prefix, int32_t height,
+    int64_t first, const uint8_t expected_hash[32],
+    struct sha3_256_ctx *ctx)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(
+            progress_db,
+            "SELECT height,hash,parent_hash FROM header_admit_log "
+            "WHERE height BETWEEN ? AND ? ORDER BY height",
+            -1, &st, NULL) != SQLITE_OK)
+        return 1;
+    bool ok = sqlite3_bind_int64(st, 1, first) == SQLITE_OK &&
+              sqlite3_bind_int(st, 2, height) == SQLITE_OK;
+    sha3_256_init(ctx);
+    uint8_t prior[32];
+    header_seed_chain(ctx, composed, prefix, height, prior);
+    if (ok)
+        ok = header_corpus_rows_ok(st, ctx, first, height, expected_hash,
+                                   prior);
     sqlite3_finalize(st);
-    if (!ok)
+    return ok ? 0 : 2;
+}
+
+static bool header_composed_suffix_digest(
+    struct sha3_256_ctx *ctx,
+    const struct consensus_state_proof_prefix *prefix, uint8_t out[32],
+    struct consensus_state_bundle_proof_parent *parent_out)
+{
+    struct consensus_state_bundle_proof_parent parent;
+    prefix_to_parent(prefix, &parent);
+    sha3_256_finalize(ctx, parent.suffix_digest[0]);
+    bool ok = consensus_state_bundle_proof_extension_digest(&parent, 0, out);
+    if (ok && parent_out)
+        *parent_out = parent;
+    return ok;
+}
+
+bool consensus_state_proof_header_digest(
+    sqlite3 *progress_db, int32_t height, const uint8_t expected_hash[32],
+    uint8_t out[32], struct consensus_state_bundle_proof_parent *parent_out)
+{
+    if (parent_out)
+        memset(parent_out, 0, sizeof(*parent_out));
+    if (!header_args_valid(progress_db, expected_hash, out, height))
+        return prefix_fail("header proof: invalid argument");
+
+    struct consensus_state_proof_prefix prefix;
+    bool composed = false;
+    int64_t first = 0;
+    int mode = header_prefix_mode(progress_db, height, &prefix, &composed,
+                                  &first);
+    if (mode == 1)
+        return prefix_fail("header proof: genesis probe failed");
+    if (mode == 2)
+        return false; /* raw-return-ok:prefix loader logged malformed evidence */
+    if (mode == 3)
+        return prefix_fail(
+            "header proof: neither local genesis corpus nor admitted prefix exists");
+    if (mode == 4)
+        return prefix_fail(
+            "header proof: target does not extend the admitted prefix");
+
+    struct sha3_256_ctx ctx;
+    int corpus = header_corpus_chain_status(progress_db, composed, &prefix,
+                                            height, first, expected_hash,
+                                            &ctx);
+    if (corpus == 1)
+        return prefix_fail("header proof: row query prepare failed");
+    if (corpus == 2)
         return prefix_fail("header proof: corpus incomplete, unlinked, or wrong tip");
 
     if (!composed) {
         sha3_256_finalize(&ctx, out);
         return true;
     }
-    struct consensus_state_bundle_proof_parent parent;
-    prefix_to_parent(&prefix, &parent);
-    sha3_256_finalize(&ctx, parent.suffix_digest[0]);
-    if (!consensus_state_bundle_proof_extension_digest(&parent, 0, out))
+    if (!header_composed_suffix_digest(&ctx, &prefix, out, parent_out))
         return prefix_fail("header proof: extension digest failed");
-    if (parent_out)
-        *parent_out = parent;
     return true;
 }
