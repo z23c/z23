@@ -358,7 +358,7 @@ static void mark_tip_and_explorer(double elapsed, const char *state, long height
     }
 }
 
-/* True once at tip with a live explorer for more than 5s. */
+/* True once the explorer is live and more than 5s have passed since reaching the tip. */
 static bool fully_operational(double t_tip, double t_explorer, double elapsed)
 {
     return t_tip > 0 && t_explorer > 0 && elapsed - t_tip > 5;
