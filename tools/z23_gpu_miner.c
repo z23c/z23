@@ -83,19 +83,19 @@ static void miner_hash256(const unsigned char *data, size_t len,
     sha256_finalize(&ctx, hash);
 }
 
-static bool hash_meets_target(const unsigned char prefix[108],
-                              const unsigned char nonce[32],
-                              const unsigned char solution[400])
+static bool compact_bits_overflow(uint32_t compact)
 {
-    uint32_t compact = zcl_read_u32_le(prefix + 104);
     uint32_t size = compact >> 24;
     uint32_t word = compact & 0x007fffffu;
-    bool overflow = word != 0 &&
+    return word != 0 &&
         (size > 34u || (word > 0xffu && size > 33u) ||
          (word > 0xffffu && size > 32u));
-    if ((compact & 0x00800000u) || word == 0 || overflow)
-        return false;
-    unsigned char target[32] = {0};
+}
+
+static void expand_compact_target(uint32_t compact, unsigned char target[32])
+{
+    uint32_t size = compact >> 24;
+    uint32_t word = compact & 0x007fffffu;
     if (size <= 3u) {
         word >>= 8u * (3u - size);
         target[0] = (unsigned char)word;
@@ -107,6 +107,13 @@ static bool hash_meets_target(const unsigned char prefix[108],
         if (at + 1u < 32u) target[at + 1u] = (unsigned char)(word >> 8);
         if (at + 2u < 32u) target[at + 2u] = (unsigned char)(word >> 16);
     }
+}
+
+static void hash_header_with_solution(const unsigned char prefix[108],
+                                      const unsigned char nonce[32],
+                                      const unsigned char solution[400],
+                                      unsigned char hash[32])
+{
     unsigned char serialized[108 + 32 + 3 + 400];
     memcpy(serialized, prefix, 108);
     memcpy(serialized + 108, nonce, 32);
@@ -114,13 +121,33 @@ static bool hash_meets_target(const unsigned char prefix[108],
     serialized[141] = 0x90;
     serialized[142] = 0x01;
     memcpy(serialized + 143, solution, 400);
-    unsigned char hash[32];
     miner_hash256(serialized, sizeof(serialized), hash);
+}
+
+static bool hash_meets_difficulty(const unsigned char hash[32],
+                                  const unsigned char target[32])
+{
     for (int i = 31; i >= 0; --i) {
         if (hash[i] < target[i]) return true;
         if (hash[i] > target[i]) return false;
     }
     return true;
+}
+
+static bool hash_meets_target(const unsigned char prefix[108],
+                              const unsigned char nonce[32],
+                              const unsigned char solution[400])
+{
+    uint32_t compact = zcl_read_u32_le(prefix + 104);
+    uint32_t word = compact & 0x007fffffu;
+    bool overflow = compact_bits_overflow(compact);
+    if ((compact & 0x00800000u) || word == 0 || overflow)
+        return false;
+    unsigned char target[32] = {0};
+    expand_compact_target(compact, target);
+    unsigned char hash[32];
+    hash_header_with_solution(prefix, nonce, solution, hash);
+    return hash_meets_difficulty(hash, target);
 }
 
 static void print_device(const struct z23_gpu_equihash_device *d)
@@ -144,10 +171,187 @@ static void print_stats(const struct z23_gpu_equihash_stats *s)
            s->candidates, s->valid_solutions);
 }
 
+static void print_probe_report(const struct z23_gpu_equihash_device *device)
+{
+    printf("{\"schema\":\"z23.gpu_miner_probe.v1\",\"ok\":true,");
+    print_device(device);
+    printf(",\"backend\":\"OpenCL 1.2 dynamic\",\"device_code\":\"driver-JIT native assembly\"}\n");
+}
+
+static bool missing_command_or_help(int argc, char **argv)
+{
+    return argc < 2 || strcmp(argv[1], "--help") == 0 ||
+        strcmp(argv[1], "-h") == 0;
+}
+
+static bool parse_mine_args(int argc, char **argv, unsigned char prefix[108],
+                            uint64_t *max_nonces)
+{
+    if (argc < 3 || argc > 4)
+        return false;
+    return zcl_hex_decode(argv[2], prefix, 108) &&
+        parse_count(argc == 4 ? argv[3] : NULL, 256, max_nonces);
+}
+
+static void build_benchmark_prefix(unsigned char prefix[108])
+{
+    prefix[0] = 4;
+    prefix[100] = 0x65;
+    prefix[101] = 0x23;
+    prefix[104] = 0xff;
+    prefix[105] = 0xff;
+    prefix[106] = 0x7f;
+    prefix[107] = 0x20;
+}
+
+static int parse_mining_mode(int argc, char **argv,
+                             struct z23_gpu_equihash *gpu, bool *benchmark,
+                             uint64_t *max_nonces, unsigned char prefix[108])
+{
+    *benchmark = strcmp(argv[1], "benchmark") == 0;
+    if (*benchmark) {
+        if (argc > 3 || !parse_count(argc == 3 ? argv[2] : NULL, 4, max_nonces)) {
+            fprintf(stderr, "benchmark nonces must be in [1,1000000]\n");
+            z23_gpu_equihash_close(gpu);
+            return 2;
+        }
+        build_benchmark_prefix(prefix);
+        return 0;
+    }
+    if (strcmp(argv[1], "mine") == 0) {
+        if (!parse_mine_args(argc, argv, prefix, max_nonces)) {
+            fprintf(stderr, "mine requires 216 hex characters and optional max_nonces [1,1000000]\n");
+            z23_gpu_equihash_close(gpu);
+            return 2;
+        }
+        return 0;
+    }
+    usage(stderr);
+    z23_gpu_equihash_close(gpu);
+    return 2;
+}
+
+static bool build_equihash_state(struct equihash_params *params,
+                                 unsigned char prefix[108],
+                                 unsigned char nonce[32],
+                                 struct blake2b_ctx *state)
+{
+    return equihash_initialise_state(params, state) == 0 &&
+        blake2b_update(state, prefix, 108) == 0 &&
+        blake2b_update(state, nonce, 32) == 0;
+}
+
+static void print_mine_solution_result(
+    const struct z23_gpu_equihash_device *device, bool benchmark,
+    uint64_t attempts, uint64_t total_us, uint64_t total_valid,
+    const unsigned char nonce[32],
+    const unsigned char solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES],
+    const struct z23_gpu_equihash_stats *stats, bool found_pow)
+{
+    printf("{\"schema\":\"z23.gpu_miner_result.v1\",\"ok\":true,");
+    print_device(device);
+    printf(",\"mode\":\"%s\",\"attempts\":%" PRIu64
+           ",\"total_elapsed_us\":%" PRIu64
+           ",\"solutions_per_second\":%.6f,\"nonce\":\"",
+           benchmark ? "benchmark" : "mine", attempts,
+           total_us, total_us ? (1000000.0 * total_valid / total_us) : 0.0);
+    print_hex(nonce, 32);
+    printf("\",\"solution\":\"");
+    print_hex(solution, Z23_GPU_EQUIHASH_SOLUTION_BYTES);
+    printf("\",\"last_solve\":{");
+    print_stats(stats);
+    printf("},\"pow_target_met\":%s}\n", found_pow ? "true" : "false");
+}
+
+static int mine_nonce_space(
+    struct z23_gpu_equihash *gpu, const struct z23_gpu_equihash_device *device,
+    struct equihash_params *params, unsigned char prefix[108],
+    bool benchmark, uint64_t max_nonces, char *error, size_t error_size,
+    uint64_t *total_us, uint64_t *total_candidates, uint64_t *total_valid,
+    bool *found_equihash,
+    unsigned char last_solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES],
+    unsigned char last_nonce[32],
+    struct z23_gpu_equihash_stats *last_stats)
+{
+    unsigned char nonce[32] = {0};
+    for (uint64_t attempt = 0; attempt < max_nonces; ++attempt) {
+        struct blake2b_ctx state;
+        if (!build_equihash_state(params, prefix, nonce, &state)) {
+            fprintf(stderr, "failed to construct Equihash state\n");
+            return 1;
+        }
+        struct z23_gpu_equihash_stats stats;
+        memset(&stats, 0, sizeof(stats));
+        unsigned char solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES];
+        bool solved = z23_gpu_equihash_solve(gpu, params, &state, solution,
+                                             &stats, error, error_size);
+        *total_us += stats.elapsed_us;
+        *total_candidates += stats.candidates;
+        *total_valid += stats.valid_solutions;
+        if (solved) {
+            *found_equihash = true;
+            if (benchmark) {
+                memcpy(last_solution, solution,
+                       Z23_GPU_EQUIHASH_SOLUTION_BYTES);
+                memcpy(last_nonce, nonce, sizeof(nonce));
+                *last_stats = stats;
+            } else if (hash_meets_target(prefix, nonce, solution)) {
+                bool found_pow = true;
+                print_mine_solution_result(device, benchmark, attempt + 1,
+                                           *total_us, *total_valid, nonce,
+                                           solution, &stats, found_pow);
+                return 0;
+            }
+        }
+        increment_nonce(nonce);
+    }
+    return -1;
+}
+
+static int report_search_exhausted(
+    const struct z23_gpu_equihash_device *device,
+    struct z23_gpu_equihash *gpu, bool benchmark, uint64_t max_nonces,
+    uint64_t total_us, uint64_t total_candidates, uint64_t total_valid,
+    bool found_equihash, const unsigned char last_nonce[32],
+    const unsigned char last_solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES],
+    const struct z23_gpu_equihash_stats *last_stats)
+{
+    if (benchmark && found_equihash) {
+        printf("{\"schema\":\"z23.gpu_miner_result.v1\",\"ok\":true,");
+        print_device(device);
+        printf(",\"mode\":\"benchmark\",\"attempts\":%" PRIu64
+               ",\"total_elapsed_us\":%" PRIu64
+               ",\"solutions_per_second\":%.6f,\"nonce\":\"",
+               max_nonces, total_us,
+               total_us ? (1000000.0 * total_valid / total_us) : 0.0);
+        print_hex(last_nonce, 32);
+        printf("\",\"solution\":\"");
+        print_hex(last_solution, Z23_GPU_EQUIHASH_SOLUTION_BYTES);
+        printf("\",\"last_solve\":{");
+        print_stats(last_stats);
+        printf("},\"valid_solutions\":%" PRIu64
+               ",\"pow_target_met\":false}\n", total_valid);
+        z23_gpu_equihash_close(gpu);
+        return 0;
+    }
+
+    printf("{\"schema\":\"z23.gpu_miner_result.v1\",\"ok\":false,");
+    print_device(device);
+    printf(",\"mode\":\"%s\",\"attempts\":%" PRIu64
+           ",\"total_elapsed_us\":%" PRIu64
+           ",\"candidates\":%" PRIu64 ",\"valid_solutions\":%" PRIu64
+           ",\"reason\":\"%s\"}\n",
+           benchmark ? "benchmark" : "mine", max_nonces, total_us,
+           total_candidates, total_valid,
+           found_equihash ? "no solution met the encoded target" :
+                            "no valid Equihash solution in nonce budget");
+    z23_gpu_equihash_close(gpu);
+    return benchmark ? 1 : 3;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc < 2 || strcmp(argv[1], "--help") == 0 ||
-        strcmp(argv[1], "-h") == 0) {
+    if (missing_command_or_help(argc, argv)) {
         usage(argc < 2 ? stderr : stdout);
         return argc < 2 ? 2 : 0;
     }
@@ -162,130 +366,40 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(argv[1], "probe") == 0) {
-        printf("{\"schema\":\"z23.gpu_miner_probe.v1\",\"ok\":true,");
-        print_device(&device);
-        printf(",\"backend\":\"OpenCL 1.2 dynamic\",\"device_code\":\"driver-JIT native assembly\"}\n");
+        print_probe_report(&device);
         z23_gpu_equihash_close(gpu);
         return 0;
     }
 
+    bool benchmark = false;
     uint64_t max_nonces = 0;
     unsigned char prefix[108] = {0};
-    bool benchmark = strcmp(argv[1], "benchmark") == 0;
-    if (benchmark) {
-        if (argc > 3 || !parse_count(argc == 3 ? argv[2] : NULL, 4, &max_nonces)) {
-            fprintf(stderr, "benchmark nonces must be in [1,1000000]\n");
-            z23_gpu_equihash_close(gpu);
-            return 2;
-        }
-        prefix[0] = 4;
-        prefix[100] = 0x65;
-        prefix[101] = 0x23;
-        prefix[104] = 0xff;
-        prefix[105] = 0xff;
-        prefix[106] = 0x7f;
-        prefix[107] = 0x20;
-    } else if (strcmp(argv[1], "mine") == 0) {
-        if (argc < 3 || argc > 4 ||
-            !zcl_hex_decode(argv[2], prefix, sizeof(prefix)) ||
-            !parse_count(argc == 4 ? argv[3] : NULL, 256, &max_nonces)) {
-            fprintf(stderr, "mine requires 216 hex characters and optional max_nonces [1,1000000]\n");
-            z23_gpu_equihash_close(gpu);
-            return 2;
-        }
-    } else {
-        usage(stderr);
-        z23_gpu_equihash_close(gpu);
-        return 2;
-    }
+    int mode_status = parse_mining_mode(argc, argv, gpu, &benchmark,
+                                        &max_nonces, prefix);
+    if (mode_status != 0)
+        return mode_status;
 
     struct equihash_params params;
     equihash_params_init(&params, 192, 7);
-    unsigned char nonce[32] = {0};
     uint64_t total_us = 0;
     uint64_t total_candidates = 0;
     uint64_t total_valid = 0;
     bool found_equihash = false;
-    bool found_pow = false;
     unsigned char last_solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES] = {0};
     unsigned char last_nonce[32] = {0};
     struct z23_gpu_equihash_stats last_stats;
     memset(&last_stats, 0, sizeof(last_stats));
 
-    for (uint64_t attempt = 0; attempt < max_nonces; ++attempt) {
-        struct blake2b_ctx state;
-        if (equihash_initialise_state(&params, &state) != 0 ||
-            blake2b_update(&state, prefix, sizeof(prefix)) != 0 ||
-            blake2b_update(&state, nonce, sizeof(nonce)) != 0) {
-            fprintf(stderr, "failed to construct Equihash state\n");
-            z23_gpu_equihash_close(gpu);
-            return 1;
-        }
-        struct z23_gpu_equihash_stats stats;
-        memset(&stats, 0, sizeof(stats));
-        unsigned char solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES];
-        bool solved = z23_gpu_equihash_solve(gpu, &params, &state, solution,
-                                             &stats, error, sizeof(error));
-        total_us += stats.elapsed_us;
-        total_candidates += stats.candidates;
-        total_valid += stats.valid_solutions;
-        if (solved) {
-            found_equihash = true;
-            if (benchmark) {
-                memcpy(last_solution, solution, sizeof(last_solution));
-                memcpy(last_nonce, nonce, sizeof(last_nonce));
-                last_stats = stats;
-            } else if (hash_meets_target(prefix, nonce, solution)) {
-                found_pow = true;
-                printf("{\"schema\":\"z23.gpu_miner_result.v1\",\"ok\":true,");
-                print_device(&device);
-                printf(",\"mode\":\"%s\",\"attempts\":%" PRIu64
-                       ",\"total_elapsed_us\":%" PRIu64
-                       ",\"solutions_per_second\":%.6f,\"nonce\":\"",
-                       benchmark ? "benchmark" : "mine", attempt + 1,
-                       total_us, total_us ? (1000000.0 * total_valid / total_us) : 0.0);
-                print_hex(nonce, sizeof(nonce));
-                printf("\",\"solution\":\"");
-                print_hex(solution, sizeof(solution));
-                printf("\",\"last_solve\":{");
-                print_stats(&stats);
-                printf("},\"pow_target_met\":%s}\n", found_pow ? "true" : "false");
-                z23_gpu_equihash_close(gpu);
-                return 0;
-            }
-        }
-        increment_nonce(nonce);
-    }
-
-    if (benchmark && found_equihash) {
-        printf("{\"schema\":\"z23.gpu_miner_result.v1\",\"ok\":true,");
-        print_device(&device);
-        printf(",\"mode\":\"benchmark\",\"attempts\":%" PRIu64
-               ",\"total_elapsed_us\":%" PRIu64
-               ",\"solutions_per_second\":%.6f,\"nonce\":\"",
-               max_nonces, total_us,
-               total_us ? (1000000.0 * total_valid / total_us) : 0.0);
-        print_hex(last_nonce, sizeof(last_nonce));
-        printf("\",\"solution\":\"");
-        print_hex(last_solution, sizeof(last_solution));
-        printf("\",\"last_solve\":{");
-        print_stats(&last_stats);
-        printf("},\"valid_solutions\":%" PRIu64
-               ",\"pow_target_met\":false}\n", total_valid);
+    int search_status = mine_nonce_space(
+        gpu, &device, &params, prefix, benchmark, max_nonces, error,
+        sizeof(error), &total_us, &total_candidates, &total_valid,
+        &found_equihash, last_solution, last_nonce, &last_stats);
+    if (search_status >= 0) {
         z23_gpu_equihash_close(gpu);
-        return 0;
+        return search_status;
     }
-
-    printf("{\"schema\":\"z23.gpu_miner_result.v1\",\"ok\":false,");
-    print_device(&device);
-    printf(",\"mode\":\"%s\",\"attempts\":%" PRIu64
-           ",\"total_elapsed_us\":%" PRIu64
-           ",\"candidates\":%" PRIu64 ",\"valid_solutions\":%" PRIu64
-           ",\"reason\":\"%s\"}\n",
-           benchmark ? "benchmark" : "mine", max_nonces, total_us,
-           total_candidates, total_valid,
-           found_equihash ? "no solution met the encoded target" :
-                            "no valid Equihash solution in nonce budget");
-    z23_gpu_equihash_close(gpu);
-    return benchmark ? 1 : 3;
+    return report_search_exhausted(&device, gpu, benchmark, max_nonces,
+                                   total_us, total_candidates, total_valid,
+                                   found_equihash, last_nonce, last_solution,
+                                   &last_stats);
 }
