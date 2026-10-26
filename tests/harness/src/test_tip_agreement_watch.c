@@ -142,19 +142,302 @@ static const char *summary_of(const struct tip_agreement_report *rep,
 
 int test_tip_agreement_watch(void);
 
-int test_tip_agreement_watch(void)
-{
-    int failures = 0;
-    char text[4096];
-    char summary[TIP_AGREEMENT_SUMMARY_MAX];
-    struct tip_agreement_report rep;
+/* Preserve shared storage and array sizes across ordered extractions. */
+#define text (*text_buffer)
+#define summary (*summary_buffer)
+#define rep (*report)
 
-    /* ── (a) ONE peer cannot mint agreement ────────────────────────────
-     * The live host's actual condition on 2026-07-30: exactly one remote host
-     * surfacing a tip hash, and it is the operator's own second server. Here
-     * that host even AGREES with us and the recorder wrote "agrees" — and the
-     * report must still refuse, by name. */
-    {
+static bool taw_check_null_measurements(
+    bool ok,
+    struct tip_agreement_report *report)
+{
+        /* every null reads as unknown (-1), never as a measured zero */
+        ok = ok && rep.height == -1;
+        ok = ok && rep.modal_remote_peers == -1;
+        ok = ok && rep.modal_remote_groups == -1;
+        ok = ok && rep.disagreeing_peers == -1;
+        ok = ok && rep.contested_peers == -1;
+    return ok;
+}
+
+static bool taw_check_dump_last_sample(
+    bool ok,
+    const struct json_value *last)
+{
+        ok = ok && last != NULL;
+        ok = ok && json_get_int(json_get(last, "height")) == 3198906;
+        ok = ok && json_get_int(json_get(last,
+                        "independent_peers_backing_mode")) == 1;
+        ok = ok && json_get_int(json_get(last,
+                        "min_distinct_peers_control")) == 2;
+        ok = ok && strcmp(json_get_str(json_get(last, "our_tip_hash")),
+                          HASH_A) == 0;
+        ok = ok && strcmp(json_get_str(json_get(last, "modal_remote_hash")),
+                          HASH_A) == 0;
+        ok = ok && strcmp(json_get_str(json_get(last, "independence")),
+                          "insufficient") == 0;
+    return ok;
+}
+
+#define dump (*dump_buffer)
+static bool taw_check_keyed_dump_forms(
+    bool ok,
+    struct json_value *dump_buffer)
+{
+        /* keyed form: the last sample only, no rollup */
+        json_init(&dump);
+        ok = ok && tip_agreement_dump_state_json(&dump, "last");
+        ok = ok && json_get(&dump, "last_sample") != NULL;
+        ok = ok && json_get(&dump, "tail_rollup") == NULL;
+        json_free(&dump);
+
+        /* an unknown key says so rather than guessing */
+        json_init(&dump);
+        ok = ok && tip_agreement_dump_state_json(&dump, "bogus");
+        ok = ok && json_get(&dump, "error") != NULL;
+        json_free(&dump);
+    return ok;
+}
+#undef dump
+
+static bool taw_check_control_floor_boundaries(
+    bool ok)
+{
+        /* The floor is a floor, not a replacement: a genuinely adequate peer
+         * count still grades SUFFICIENT, and a control STRONGER than the floor
+         * is still honoured as written. */
+        ok = ok && tip_agreement_required_distinct_peers(1) ==
+                       TIP_AGREEMENT_MIN_DISTINCT_PEERS;
+        ok = ok && tip_agreement_required_distinct_peers(2) == 2;
+        ok = ok && tip_agreement_required_distinct_peers(9) == 9;
+        /* an unreadable control does not borrow the floor either */
+        ok = ok && tip_agreement_required_distinct_peers(0) == -1;
+        ok = ok && tip_agreement_required_distinct_peers(-1) == -1;
+
+        ok = ok && tip_agreement_classify_independence(1, 1) ==
+                       TIP_AGREEMENT_INDEPENDENCE_INSUFFICIENT;
+        ok = ok && tip_agreement_classify_independence(2, 1) ==
+                       TIP_AGREEMENT_INDEPENDENCE_SUFFICIENT;
+        ok = ok && tip_agreement_classify_independence(9, 9) ==
+                       TIP_AGREEMENT_INDEPENDENCE_SUFFICIENT;
+        ok = ok && tip_agreement_classify_independence(8, 9) ==
+                       TIP_AGREEMENT_INDEPENDENCE_INSUFFICIENT;
+    return ok;
+}
+
+static bool taw_check_weakened_control_with_quorum(
+    bool ok,
+    char (*text_buffer)[4096],
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
+        row(text, sizeof(text), 1785386099LL, "agrees", 1, 3198906, HASH_A,
+            HASH_A, 4, 0, "weakened_control_four_peers");
+        ok = ok && scan_text(text, &rep);
+        ok = ok && rep.independence == TIP_AGREEMENT_INDEPENDENCE_SUFFICIENT;
+        ok = ok && tip_agreement_reports_agreement(&rep);
+        summary_of(&rep, summary, sizeof(summary));
+        ok = ok && strncmp(summary, "agrees ", 7) == 0;
+        /* even then the weakened control stays VISIBLE, not honoured */
+        ok = ok && strstr(summary, "required 2") != NULL;
+        ok = ok && strstr(summary, "control_recorded 1") != NULL;
+    return ok;
+}
+
+static bool taw_check_nul_row_survivor(
+    bool ok,
+    struct tip_agreement_report *report)
+{
+            ok = ok && rep.present;
+            /* the two intact rows, and only those two */
+            ok = ok && rep.rows_scanned == 2;
+            /* THE ACCEPTANCE BAR: the row after the corrupt one survived and
+             * is the sample, so a lost NUL cannot silently freeze this report
+             * on the row before the corruption. */
+            ok = ok && rep.height == 3500003;
+            ok = ok && rep.last_ts == 1785394120LL;
+            /* the corrupt row is counted, and counted as what it is: a write
+             * that did not all land, not a foreign row shape */
+            ok = ok && rep.incomplete_rows == 1;
+            ok = ok && rep.malformed_rows == 0;
+    return ok;
+}
+
+static bool taw_check_fitting_tail_rows(
+    bool ok,
+    const char *path,
+    struct tip_agreement_report *report)
+{
+        /* (g1) A row that FITS must not be mistaken for one that did not.
+         * fgets() over a buffer of exactly EVIDENCE_ROW_MAX returns a
+         * 4095-byte row buffer-full with no newline visible, which the old
+         * check read as overlong: the row was dropped and counted malformed
+         * (reproduced at both 4095 and 4096). */
+        for (size_t len = EVIDENCE_ROW_MAX - 1; len <= EVIDENCE_ROW_MAX;
+             len++) {
+            FILE *f = fopen(path, "wb");
+            ok = ok && f != NULL;
+            if (!f)
+                break;
+            ok = ok && write_row_of_len(f, 1785390000LL, 3100001, len, true);
+            ok = ok && write_row_of_len(f, 1785390060LL, 3100002, SHORT_ROW,
+                                        true);
+            fclose(f);
+            ok = ok && tip_agreement_read_ledger(path, &rep);
+            ok = ok && rep.rows_scanned == 2;
+            ok = ok && rep.malformed_rows == 0;
+            ok = ok && rep.incomplete_rows == 0;
+            ok = ok && rep.height == 3100002;    /* the LAST row won */
+        }
+    return ok;
+}
+
+static bool taw_check_post_seek_fragment(
+    bool ok,
+    const char *path,
+    struct tip_agreement_report *report)
+{
+        /* (g2) A post-seek fragment long enough to fill the row buffer used to
+         * cost the row AFTER it: the overlong branch returned before `first`
+         * was cleared, so the next line — a real, complete row — was dropped
+         * as if IT were the fragment. The file must exceed
+         * TIP_AGREEMENT_TAIL_BYTES for the seek to happen at all. */
+        {
+            FILE *f = fopen(path, "wb");
+            ok = ok && f != NULL;
+            if (f) {
+                ok = ok && write_row_of_len(f, 1785391000LL, 3200001,
+                                            TIP_AGREEMENT_TAIL_BYTES + 20000,
+                                            true);
+                ok = ok && write_row_of_len(f, 1785391060LL, 3200002, SHORT_ROW,
+                                            true);
+                fclose(f);
+            }
+            ok = ok && tip_agreement_read_ledger(path, &rep);
+            /* was present=false: nothing at all was scanned */
+            ok = ok && rep.present;
+            ok = ok && rep.rows_scanned == 1;
+            ok = ok && rep.height == 3200002;    /* the real row survived */
+            ok = ok && rep.last_ts == 1785391060LL;
+            /* the fragment is a fragment, not a malformed row: its true length
+             * is unknown, so counting it would invent a defect */
+            ok = ok && rep.malformed_rows == 0;
+            ok = ok && rep.incomplete_rows == 0;
+        }
+    return ok;
+}
+
+static bool taw_check_torn_final_row(
+    bool ok,
+    const char *path,
+    struct tip_agreement_report *report)
+{
+        /* (g3) A torn final line must never become "the" sample. It used to
+         * reach the callback, so a half-written append silently supplied the
+         * height, the hashes and the outcome of the current sample. */
+        {
+            FILE *f = fopen(path, "wb");
+            ok = ok && f != NULL;
+            if (f) {
+                ok = ok && write_row_of_len(f, 1785392000LL, 3300001, SHORT_ROW,
+                                            true);
+                /* caught mid-append: no trailing newline */
+                ok = ok && write_row_of_len(f, 1785392060LL, 3300002,
+                                            SHORT_ROW, false);
+                fclose(f);
+            }
+            ok = ok && tip_agreement_read_ledger(path, &rep);
+            ok = ok && rep.rows_scanned == 1;
+            ok = ok && rep.height == 3300001;    /* the COMPLETE row */
+            ok = ok && rep.last_ts == 1785392000LL;
+            /* counted, and counted honestly: not malformed, not a sample */
+            ok = ok && rep.incomplete_rows == 1;
+            ok = ok && rep.malformed_rows == 0;
+        }
+    return ok;
+}
+
+static bool taw_check_overlong_tail_rows(
+    bool ok,
+    const char *path,
+    struct tip_agreement_report *report)
+{
+        /* (g4) AND THE LENGTH CHECK DID NOT GO SOFT. A row genuinely longer
+         * than EVIDENCE_ROW_MAX is still refused and still counted malformed,
+         * and its tail is still consumed rather than folded in as a second
+         * phantom row. */
+        {
+            FILE *f = fopen(path, "wb");
+            ok = ok && f != NULL;
+            if (f) {
+                ok = ok && write_row_of_len(f, 1785393000LL, 3400001, SHORT_ROW,
+                                            true);
+                ok = ok && write_row_of_len(f, 1785393060LL, 3400002,
+                                            EVIDENCE_ROW_MAX + 1, true);
+                ok = ok && write_row_of_len(f, 1785393120LL, 3400003, 9000,
+                                            true);
+                ok = ok && write_row_of_len(f, 1785393180LL, 3400004, SHORT_ROW,
+                                            true);
+                fclose(f);
+            }
+            ok = ok && tip_agreement_read_ledger(path, &rep);
+            ok = ok && rep.rows_scanned == 2;    /* only the two short rows */
+            /* one just over the bound, one far over */
+            ok = ok && rep.malformed_rows == 2;
+            ok = ok && rep.incomplete_rows == 0;
+            ok = ok && rep.height == 3400004;
+        }
+    return ok;
+}
+
+static bool taw_check_embedded_nul_row(
+    bool ok,
+    const char *path,
+    struct tip_agreement_report *report)
+{
+        /* (g5) AN EMBEDDED NUL IN ONE ROW MUST NOT COST THE NEXT ROW.
+         * A torn append does not always end the file — the filesystem can
+         * allocate the block and lose the data, so the row reads back with a
+         * NUL in the middle of otherwise perfect JSON and its newline still
+         * on the end. The scanner used to find its row boundaries with
+         * strlen(), which stops at that NUL: the line looked unterminated, so
+         * the reader armed its consume-the-rest-of-the-line state even though
+         * fgets() had already eaten the newline, and the NEXT line — a
+         * complete, valid, uncorrupted row — was swallowed as that phantom
+         * tail. One NUL cost two rows and the second loss was counted in
+         * neither counter (reproduced: 1 row scanned, incomplete=1, third row
+         * gone silently). Row boundaries are byte-counted now, so a NUL
+         * disqualifies its own row and reaches no further. */
+        {
+            char corrupt[2048];
+            row(corrupt, sizeof(corrupt), 1785394060LL, "agrees", 2, 3500002,
+                HASH_A, HASH_A, 4, 0, "nul_fixture");
+            size_t clen = strlen(corrupt);       /* includes the newline */
+            ok = ok && clen > 40 && corrupt[clen - 1] == '\n';
+            /* mid-content, nowhere near the terminator */
+            corrupt[clen / 2] = '\0';
+
+            FILE *f = fopen(path, "wb");
+            ok = ok && f != NULL;
+            if (f) {
+                ok = ok && write_row_of_len(f, 1785394000LL, 3500001,
+                                            SHORT_ROW, true);
+                ok = ok && fwrite(corrupt, 1, clen, f) == clen;
+                ok = ok && write_row_of_len(f, 1785394120LL, 3500003,
+                                            SHORT_ROW, true);
+                fclose(f);
+            }
+            ok = ok && tip_agreement_read_ledger(path, &rep);
+        ok = taw_check_nul_row_survivor(ok, report);
+        }
+    return ok;
+}
+
+static bool taw_verify_single_witness(
+    char (*text_buffer)[4096],
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         row(text, sizeof(text), 1785386039LL, "agrees", 2, 3198906, HASH_A,
             HASH_A, 1, 0, "one_host_only");
@@ -176,13 +459,14 @@ int test_tip_agreement_watch(void)
         ok = ok && strstr(summary, "required=2") != NULL;
         /* and it must not read like agreement anywhere on the line */
         ok = ok && strstr(summary, "agrees height=") == NULL;
-        TAW_CHECK("one witness cannot mint agreement, and says so by name", ok);
-    }
+    return ok;
+}
 
-    /* ── (b) an unreadable control is not a satisfied control ──────────
-     * A row with no min_distinct_peers cannot testify that any floor was in
-     * force, so it must not borrow the shipped default of 2. */
-    {
+static bool taw_verify_unreadable_control(
+    char (*text_buffer)[4096],
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         row(text, sizeof(text), 1785386039LL, "agrees", -1, 3198906, HASH_A,
             HASH_A, 5, 0, "no_control_recorded");
@@ -208,11 +492,14 @@ int test_tip_agreement_watch(void)
                        TIP_AGREEMENT_INDEPENDENCE_UNKNOWN;
         ok = ok && tip_agreement_classify_independence(9, -1) ==
                        TIP_AGREEMENT_INDEPENDENCE_UNKNOWN;
-        TAW_CHECK("an unreadable control refuses instead of defaulting", ok);
-    }
+    return ok;
+}
 
-    /* ── (c) recorded bytes beat the recorded verdict ──────────────────── */
-    {
+static bool taw_verify_hash_contradiction(
+    char (*text_buffer)[4096],
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         row(text, sizeof(text), 1785386039LL, "agrees", 2, 3198906, HASH_A,
             HASH_B, 4, 0, "forged_or_buggy_agrees");
@@ -224,11 +511,14 @@ int test_tip_agreement_watch(void)
         summary_of(&rep, summary, sizeof(summary));
         ok = ok && strstr(summary, TIP_AGREEMENT_CONTRADICTION_TOKEN) != NULL;
         ok = ok && strstr(summary, "agrees height=") == NULL;
-        TAW_CHECK("an agrees row whose own hashes differ is not agreement", ok);
-    }
+    return ok;
+}
 
-    /* ── (d) a disagreeing sample is reported in full ──────────────────── */
-    {
+static bool taw_verify_disagreeing_sample(
+    char (*text_buffer)[4096],
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         row(text, sizeof(text), 1785386100LL, "disagrees", 2, 3198900, HASH_A,
             HASH_B, 6, 6, "remote_mode_differs");
@@ -244,14 +534,12 @@ int test_tip_agreement_watch(void)
         ok = ok && strncmp(summary, "disagrees ", 10) == 0;
         ok = ok && strstr(summary, "height=3198900") != NULL;
         ok = ok && strstr(summary, "disagreeing_peers=6") != NULL;
-        TAW_CHECK("a disagreeing sample is recorded and named, not suppressed",
-                  ok);
-    }
+    return ok;
+}
 
-    /* The producer emits a non-empty array of flat objects when it sees rival
-     * hashes. Pin that exact shape: rejecting the array would silently remove
-     * the most important (DISAGREES) evidence from the rollup. */
-    {
+static bool taw_verify_producer_disagreement(
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         static const char producer_disagreement[] =
             "{\"ts\":1785386160,\"instance\":\"canonical\",\"rpcport\":18232,"
@@ -276,11 +564,14 @@ int test_tip_agreement_watch(void)
         ok = ok && rep.disagreeing_peers == 6;
         ok = ok && rep.outcome == TIP_AGREEMENT_OUTCOME_DISAGREES;
         ok = ok && !tip_agreement_reports_agreement(&rep);
-        TAW_CHECK("producer nonempty disagreement array remains visible", ok);
-    }
+    return ok;
+}
 
-    /* ── (e) agreement, when all three hold ───────────────────────────── */
-    {
+static bool taw_verify_sufficient_agreement(
+    char (*text_buffer)[4096],
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         row(text, sizeof(text), 1785386200LL, "agrees", 2, 3198906, HASH_A,
             HASH_A, 7, 0, "modal_hash_matches");
@@ -304,12 +595,12 @@ int test_tip_agreement_watch(void)
         ok = ok && scan_text(text, &rep);
         ok = ok && rep.hashes_match;
         ok = ok && tip_agreement_reports_agreement(&rep);
-        TAW_CHECK("agreement is reported when independence and bytes both hold",
-                  ok);
-    }
+    return ok;
+}
 
-    /* ── rollup + unknown/malformed accounting ────────────────────────── */
-    {
+static bool taw_verify_rollup_accounting(
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         char multi[8192];
         char one[2048];
@@ -344,13 +635,14 @@ int test_tip_agreement_watch(void)
         /* the LAST usable row is the unknown one; unknown is not agreement */
         ok = ok && rep.outcome == TIP_AGREEMENT_OUTCOME_UNKNOWN;
         ok = ok && !tip_agreement_reports_agreement(&rep);
-        TAW_CHECK("tail rollup counts every outcome and never hides one", ok);
-    }
+    return ok;
+}
 
-    /* ── a could-not-ask row with nothing measured ─────────────────────
-     * The live shape: null height, empty hashes, null peer counts. It must
-     * read as a refusal, and its own reason must survive to the operator. */
-    {
+static bool taw_verify_unmeasured_sample(
+    char (*text_buffer)[4096],
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         row(text, sizeof(text), 1785386039LL, "could-not-ask", 2, -1, "", "",
             -1, -1, "no_hash_with_min_distinct_peers_2");
@@ -365,22 +657,13 @@ int test_tip_agreement_watch(void)
         summary_of(&rep, summary, sizeof(summary));
         ok = ok && strstr(summary, TIP_AGREEMENT_INSUFFICIENT_TOKEN) != NULL;
         ok = ok && strstr(summary, "recorded_outcome=could-not-ask") != NULL;
-        TAW_CHECK("a nothing-measured sample refuses and keeps its reason", ok);
-    }
+    return ok;
+}
 
-    /* ── the VERBATIM live row, nulls and all ──────────────────────────
-     * Copied byte-for-byte out of the ledger a read-only probe wrote against
-     * the owner's live node on 2026-07-30 (21 connected peers, exactly one
-     * surfacing a tip hash, and that one host was the operator's OWN second
-     * server). Two reasons it is pinned here rather than
-     * generated:
-     *   - the real recorder writes JSON `null`, not -1, for anything it could
-     *     not measure. A parser that read null as 0 would turn "nobody
-     *     counted" into "zero disagreed", which is the exact shape of false
-     *     green this whole rung exists to prevent.
-     *   - it proves the reader refuses the condition that actually obtains on
-     *     this host, rather than only a hand-built one. */
-    {
+static bool taw_verify_live_null_fields(
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         static const char live_row[] =
             "{\"ts\":1785387019,\"instance\":\"canonical\",\"rpcport\":18232,"
@@ -398,12 +681,7 @@ int test_tip_agreement_watch(void)
         ok = ok && scan_text(live_row, &rep);
         ok = ok && rep.present && rep.rows_scanned == 1;
         ok = ok && rep.could_not_ask == 1;
-        /* every null reads as unknown (-1), never as a measured zero */
-        ok = ok && rep.height == -1;
-        ok = ok && rep.modal_remote_peers == -1;
-        ok = ok && rep.modal_remote_groups == -1;
-        ok = ok && rep.disagreeing_peers == -1;
-        ok = ok && rep.contested_peers == -1;
+        ok = taw_check_null_measurements(ok, report);
         /* while the fields it DID measure survive intact */
         ok = ok && rep.our_height == 3198925;
         ok = ok && rep.peers_usable == 1;
@@ -416,12 +694,13 @@ int test_tip_agreement_watch(void)
         ok = ok && !tip_agreement_reports_agreement(&rep);
         summary_of(&rep, summary, sizeof(summary));
         ok = ok && strstr(summary, TIP_AGREEMENT_INSUFFICIENT_TOKEN) != NULL;
-        TAW_CHECK("the verbatim live row refuses, and its nulls stay unknown",
-                  ok);
-    }
+    return ok;
+}
 
-    /* ── absence is data, never an error ──────────────────────────────── */
-    {
+static bool taw_verify_missing_ledger(
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         ok = ok && tip_agreement_read_ledger("/nonexistent/zcl-taw/none.jsonl",
                                              &rep);
@@ -434,11 +713,12 @@ int test_tip_agreement_watch(void)
         ok = ok && !tip_agreement_read_ledger(NULL, &rep);
         ok = ok && !tip_agreement_read_ledger("/tmp/x", NULL);
         ok = ok && !tip_agreement_scan("x", 1, NULL);
-        TAW_CHECK("a missing ledger is present=false, not an error", ok);
-    }
+    return ok;
+}
 
-    /* ── the typed dump, over a real file, via the recorder's own env var ── */
-    {
+static bool taw_verify_typed_dump(
+    char (*text_buffer)[4096])
+{
         bool ok = true;
         char dir[] = "/tmp/zcl-taw-XXXXXX";
         ok = ok && mkdtemp(dir) != NULL;
@@ -468,55 +748,26 @@ int test_tip_agreement_watch(void)
                                           "insufficient_independent_peers")) ==
                        true;
         const struct json_value *last = json_get(&dump, "last_sample");
-        ok = ok && last != NULL;
-        ok = ok && json_get_int(json_get(last, "height")) == 3198906;
-        ok = ok && json_get_int(json_get(last,
-                        "independent_peers_backing_mode")) == 1;
-        ok = ok && json_get_int(json_get(last,
-                        "min_distinct_peers_control")) == 2;
-        ok = ok && strcmp(json_get_str(json_get(last, "our_tip_hash")),
-                          HASH_A) == 0;
-        ok = ok && strcmp(json_get_str(json_get(last, "modal_remote_hash")),
-                          HASH_A) == 0;
-        ok = ok && strcmp(json_get_str(json_get(last, "independence")),
-                          "insufficient") == 0;
+        ok = taw_check_dump_last_sample(ok, last);
         ok = ok && strstr(json_get_str(json_get(&dump, "summary")),
                           TIP_AGREEMENT_INSUFFICIENT_TOKEN) != NULL;
         const struct json_value *roll = json_get(&dump, "tail_rollup");
         ok = ok && roll && json_get_int(json_get(roll, "rows_scanned")) == 1;
         json_free(&dump);
 
-        /* keyed form: the last sample only, no rollup */
-        json_init(&dump);
-        ok = ok && tip_agreement_dump_state_json(&dump, "last");
-        ok = ok && json_get(&dump, "last_sample") != NULL;
-        ok = ok && json_get(&dump, "tail_rollup") == NULL;
-        json_free(&dump);
-
-        /* an unknown key says so rather than guessing */
-        json_init(&dump);
-        ok = ok && tip_agreement_dump_state_json(&dump, "bogus");
-        ok = ok && json_get(&dump, "error") != NULL;
-        json_free(&dump);
+        ok = taw_check_keyed_dump_forms(ok, &dump);
 
         unsetenv("ZCL_PARITY_LEDGER_DIR");
         unlink(path);
         rmdir(dir);
-        TAW_CHECK("the typed dump reports the refusal and the raw sample", ok);
-    }
+    return ok;
+}
 
-    /* ── (f) THE ROW CANNOT SET ITS OWN BAR ────────────────────────────
-     * min_distinct_peers is a field of the row being graded. Grading only
-     * against it let a row that reported control=1 and carried exactly one
-     * backing peer grade itself SUFFICIENT and publish agreement — one host
-     * manufacturing agreement, which is the failure (a) above exists to make
-     * impossible. Reproduced before this block existed:
-     *   control=1 peers=1 -> independence=sufficient agreement_reported=TRUE
-     * Anyone can produce such a row: ZCL_PARITY_MIN_DISTINCT_PEERS=1 on the
-     * recorder, an old ledger copied in, or a hand-written line. So the
-     * recorded control may only ever RAISE the bar above
-     * TIP_AGREEMENT_MIN_DISTINCT_PEERS, never lower it. */
-    {
+static bool taw_verify_independence_floor(
+    char (*text_buffer)[4096],
+    char (*summary_buffer)[TIP_AGREEMENT_SUMMARY_MAX],
+    struct tip_agreement_report *report)
+{
         bool ok = true;
         row(text, sizeof(text), 1785386039LL, "agrees", 1, 3198906, HASH_A,
             HASH_A, 1, 0, "weakened_control_one_peer");
@@ -535,36 +786,150 @@ int test_tip_agreement_watch(void)
         ok = ok && strstr(summary, "control_recorded=1") != NULL;
         ok = ok && strstr(summary, "agrees height=") == NULL;
 
-        /* The floor is a floor, not a replacement: a genuinely adequate peer
-         * count still grades SUFFICIENT, and a control STRONGER than the floor
-         * is still honoured as written. */
-        ok = ok && tip_agreement_required_distinct_peers(1) ==
-                       TIP_AGREEMENT_MIN_DISTINCT_PEERS;
-        ok = ok && tip_agreement_required_distinct_peers(2) == 2;
-        ok = ok && tip_agreement_required_distinct_peers(9) == 9;
-        /* an unreadable control does not borrow the floor either */
-        ok = ok && tip_agreement_required_distinct_peers(0) == -1;
-        ok = ok && tip_agreement_required_distinct_peers(-1) == -1;
+        ok = taw_check_control_floor_boundaries(ok);
 
-        ok = ok && tip_agreement_classify_independence(1, 1) ==
-                       TIP_AGREEMENT_INDEPENDENCE_INSUFFICIENT;
-        ok = ok && tip_agreement_classify_independence(2, 1) ==
-                       TIP_AGREEMENT_INDEPENDENCE_SUFFICIENT;
-        ok = ok && tip_agreement_classify_independence(9, 9) ==
-                       TIP_AGREEMENT_INDEPENDENCE_SUFFICIENT;
-        ok = ok && tip_agreement_classify_independence(8, 9) ==
-                       TIP_AGREEMENT_INDEPENDENCE_INSUFFICIENT;
+        ok = taw_check_weakened_control_with_quorum(ok, text_buffer, summary_buffer, report);
+    return ok;
+}
 
-        row(text, sizeof(text), 1785386099LL, "agrees", 1, 3198906, HASH_A,
-            HASH_A, 4, 0, "weakened_control_four_peers");
-        ok = ok && scan_text(text, &rep);
-        ok = ok && rep.independence == TIP_AGREEMENT_INDEPENDENCE_SUFFICIENT;
-        ok = ok && tip_agreement_reports_agreement(&rep);
-        summary_of(&rep, summary, sizeof(summary));
-        ok = ok && strncmp(summary, "agrees ", 7) == 0;
-        /* even then the weakened control stays VISIBLE, not honoured */
-        ok = ok && strstr(summary, "required 2") != NULL;
-        ok = ok && strstr(summary, "control_recorded 1") != NULL;
+static bool taw_verify_bounded_tail(
+    struct tip_agreement_report *report)
+{
+        bool ok = true;
+        char dir[] = "/tmp/zcl-taw-tail-XXXXXX";
+        ok = ok && mkdtemp(dir) != NULL;
+        char path[512];
+        snprintf(path, sizeof(path), "%s/agreement-ledger.jsonl", dir);
+
+        ok = taw_check_fitting_tail_rows(ok, path, report);
+
+        ok = taw_check_post_seek_fragment(ok, path, report);
+
+        ok = taw_check_torn_final_row(ok, path, report);
+
+        ok = taw_check_overlong_tail_rows(ok, path, report);
+
+        ok = taw_check_embedded_nul_row(ok, path, report);
+
+        unlink(path);
+        rmdir(dir);
+    return ok;
+}
+
+#undef rep
+#undef summary
+#undef text
+
+int test_tip_agreement_watch(void)
+{
+    int failures = 0;
+    char text[4096];
+    char summary[TIP_AGREEMENT_SUMMARY_MAX];
+    struct tip_agreement_report rep;
+
+    /* ── (a) ONE peer cannot mint agreement ────────────────────────────
+     * The live host's actual condition on 2026-07-30: exactly one remote host
+     * surfacing a tip hash, and it is the operator's own second server. Here
+     * that host even AGREES with us and the recorder wrote "agrees" — and the
+     * report must still refuse, by name. */
+    {
+        bool ok = taw_verify_single_witness(&text, &summary, &rep);
+        TAW_CHECK("one witness cannot mint agreement, and says so by name", ok);
+    }
+
+    /* ── (b) an unreadable control is not a satisfied control ──────────
+     * A row with no min_distinct_peers cannot testify that any floor was in
+     * force, so it must not borrow the shipped default of 2. */
+    {
+        bool ok = taw_verify_unreadable_control(&text, &summary, &rep);
+        TAW_CHECK("an unreadable control refuses instead of defaulting", ok);
+    }
+
+    /* ── (c) recorded bytes beat the recorded verdict ──────────────────── */
+    {
+        bool ok = taw_verify_hash_contradiction(&text, &summary, &rep);
+        TAW_CHECK("an agrees row whose own hashes differ is not agreement", ok);
+    }
+
+    /* ── (d) a disagreeing sample is reported in full ──────────────────── */
+    {
+        bool ok = taw_verify_disagreeing_sample(&text, &summary, &rep);
+        TAW_CHECK("a disagreeing sample is recorded and named, not suppressed",
+                  ok);
+    }
+
+    /* The producer emits a non-empty array of flat objects when it sees rival
+     * hashes. Pin that exact shape: rejecting the array would silently remove
+     * the most important (DISAGREES) evidence from the rollup. */
+    {
+        bool ok = taw_verify_producer_disagreement(&rep);
+        TAW_CHECK("producer nonempty disagreement array remains visible", ok);
+    }
+
+    /* ── (e) agreement, when all three hold ───────────────────────────── */
+    {
+        bool ok = taw_verify_sufficient_agreement(&text, &summary, &rep);
+        TAW_CHECK("agreement is reported when independence and bytes both hold",
+                  ok);
+    }
+
+    /* ── rollup + unknown/malformed accounting ────────────────────────── */
+    {
+        bool ok = taw_verify_rollup_accounting(&rep);
+        TAW_CHECK("tail rollup counts every outcome and never hides one", ok);
+    }
+
+    /* ── a could-not-ask row with nothing measured ─────────────────────
+     * The live shape: null height, empty hashes, null peer counts. It must
+     * read as a refusal, and its own reason must survive to the operator. */
+    {
+        bool ok = taw_verify_unmeasured_sample(&text, &summary, &rep);
+        TAW_CHECK("a nothing-measured sample refuses and keeps its reason", ok);
+    }
+
+    /* ── the VERBATIM live row, nulls and all ──────────────────────────
+     * Copied byte-for-byte out of the ledger a read-only probe wrote against
+     * the owner's live node on 2026-07-30 (21 connected peers, exactly one
+     * surfacing a tip hash, and that one host was the operator's OWN second
+     * server). Two reasons it is pinned here rather than
+     * generated:
+     *   - the real recorder writes JSON `null`, not -1, for anything it could
+     *     not measure. A parser that read null as 0 would turn "nobody
+     *     counted" into "zero disagreed", which is the exact shape of false
+     *     green this whole rung exists to prevent.
+     *   - it proves the reader refuses the condition that actually obtains on
+     *     this host, rather than only a hand-built one. */
+    {
+        bool ok = taw_verify_live_null_fields(&summary, &rep);
+        TAW_CHECK("the verbatim live row refuses, and its nulls stay unknown",
+                  ok);
+    }
+
+    /* ── absence is data, never an error ──────────────────────────────── */
+    {
+        bool ok = taw_verify_missing_ledger(&summary, &rep);
+        TAW_CHECK("a missing ledger is present=false, not an error", ok);
+    }
+
+    /* ── the typed dump, over a real file, via the recorder's own env var ── */
+    {
+        bool ok = taw_verify_typed_dump(&text);
+        TAW_CHECK("the typed dump reports the refusal and the raw sample", ok);
+    }
+
+    /* ── (f) THE ROW CANNOT SET ITS OWN BAR ────────────────────────────
+     * min_distinct_peers is a field of the row being graded. Grading only
+     * against it let a row that reported control=1 and carried exactly one
+     * backing peer grade itself SUFFICIENT and publish agreement — one host
+     * manufacturing agreement, which is the failure (a) above exists to make
+     * impossible. Reproduced before this block existed:
+     *   control=1 peers=1 -> independence=sufficient agreement_reported=TRUE
+     * Anyone can produce such a row: ZCL_PARITY_MIN_DISTINCT_PEERS=1 on the
+     * recorder, an old ledger copied in, or a hand-written line. So the
+     * recorded control may only ever RAISE the bar above
+     * TIP_AGREEMENT_MIN_DISTINCT_PEERS, never lower it. */
+    {
+        bool ok = taw_verify_independence_floor(&text, &summary, &rep);
         TAW_CHECK("a row's own control cannot lower the independence floor",
                   ok);
     }
@@ -576,160 +941,7 @@ int test_tip_agreement_watch(void)
      * per-sample field. Both readers over that scanner (this one and
      * services/stopwatch_skip_watch.h) were affected. */
     {
-        bool ok = true;
-        char dir[] = "/tmp/zcl-taw-tail-XXXXXX";
-        ok = ok && mkdtemp(dir) != NULL;
-        char path[512];
-        snprintf(path, sizeof(path), "%s/agreement-ledger.jsonl", dir);
-
-        /* (g1) A row that FITS must not be mistaken for one that did not.
-         * fgets() over a buffer of exactly EVIDENCE_ROW_MAX returns a
-         * 4095-byte row buffer-full with no newline visible, which the old
-         * check read as overlong: the row was dropped and counted malformed
-         * (reproduced at both 4095 and 4096). */
-        for (size_t len = EVIDENCE_ROW_MAX - 1; len <= EVIDENCE_ROW_MAX;
-             len++) {
-            FILE *f = fopen(path, "wb");
-            ok = ok && f != NULL;
-            if (!f)
-                break;
-            ok = ok && write_row_of_len(f, 1785390000LL, 3100001, len, true);
-            ok = ok && write_row_of_len(f, 1785390060LL, 3100002, SHORT_ROW,
-                                        true);
-            fclose(f);
-            ok = ok && tip_agreement_read_ledger(path, &rep);
-            ok = ok && rep.rows_scanned == 2;
-            ok = ok && rep.malformed_rows == 0;
-            ok = ok && rep.incomplete_rows == 0;
-            ok = ok && rep.height == 3100002;    /* the LAST row won */
-        }
-
-        /* (g2) A post-seek fragment long enough to fill the row buffer used to
-         * cost the row AFTER it: the overlong branch returned before `first`
-         * was cleared, so the next line — a real, complete row — was dropped
-         * as if IT were the fragment. The file must exceed
-         * TIP_AGREEMENT_TAIL_BYTES for the seek to happen at all. */
-        {
-            FILE *f = fopen(path, "wb");
-            ok = ok && f != NULL;
-            if (f) {
-                ok = ok && write_row_of_len(f, 1785391000LL, 3200001,
-                                            TIP_AGREEMENT_TAIL_BYTES + 20000,
-                                            true);
-                ok = ok && write_row_of_len(f, 1785391060LL, 3200002, SHORT_ROW,
-                                            true);
-                fclose(f);
-            }
-            ok = ok && tip_agreement_read_ledger(path, &rep);
-            /* was present=false: nothing at all was scanned */
-            ok = ok && rep.present;
-            ok = ok && rep.rows_scanned == 1;
-            ok = ok && rep.height == 3200002;    /* the real row survived */
-            ok = ok && rep.last_ts == 1785391060LL;
-            /* the fragment is a fragment, not a malformed row: its true length
-             * is unknown, so counting it would invent a defect */
-            ok = ok && rep.malformed_rows == 0;
-            ok = ok && rep.incomplete_rows == 0;
-        }
-
-        /* (g3) A torn final line must never become "the" sample. It used to
-         * reach the callback, so a half-written append silently supplied the
-         * height, the hashes and the outcome of the current sample. */
-        {
-            FILE *f = fopen(path, "wb");
-            ok = ok && f != NULL;
-            if (f) {
-                ok = ok && write_row_of_len(f, 1785392000LL, 3300001, SHORT_ROW,
-                                            true);
-                /* caught mid-append: no trailing newline */
-                ok = ok && write_row_of_len(f, 1785392060LL, 3300002,
-                                            SHORT_ROW, false);
-                fclose(f);
-            }
-            ok = ok && tip_agreement_read_ledger(path, &rep);
-            ok = ok && rep.rows_scanned == 1;
-            ok = ok && rep.height == 3300001;    /* the COMPLETE row */
-            ok = ok && rep.last_ts == 1785392000LL;
-            /* counted, and counted honestly: not malformed, not a sample */
-            ok = ok && rep.incomplete_rows == 1;
-            ok = ok && rep.malformed_rows == 0;
-        }
-
-        /* (g4) AND THE LENGTH CHECK DID NOT GO SOFT. A row genuinely longer
-         * than EVIDENCE_ROW_MAX is still refused and still counted malformed,
-         * and its tail is still consumed rather than folded in as a second
-         * phantom row. */
-        {
-            FILE *f = fopen(path, "wb");
-            ok = ok && f != NULL;
-            if (f) {
-                ok = ok && write_row_of_len(f, 1785393000LL, 3400001, SHORT_ROW,
-                                            true);
-                ok = ok && write_row_of_len(f, 1785393060LL, 3400002,
-                                            EVIDENCE_ROW_MAX + 1, true);
-                ok = ok && write_row_of_len(f, 1785393120LL, 3400003, 9000,
-                                            true);
-                ok = ok && write_row_of_len(f, 1785393180LL, 3400004, SHORT_ROW,
-                                            true);
-                fclose(f);
-            }
-            ok = ok && tip_agreement_read_ledger(path, &rep);
-            ok = ok && rep.rows_scanned == 2;    /* only the two short rows */
-            /* one just over the bound, one far over */
-            ok = ok && rep.malformed_rows == 2;
-            ok = ok && rep.incomplete_rows == 0;
-            ok = ok && rep.height == 3400004;
-        }
-
-        /* (g5) AN EMBEDDED NUL IN ONE ROW MUST NOT COST THE NEXT ROW.
-         * A torn append does not always end the file — the filesystem can
-         * allocate the block and lose the data, so the row reads back with a
-         * NUL in the middle of otherwise perfect JSON and its newline still
-         * on the end. The scanner used to find its row boundaries with
-         * strlen(), which stops at that NUL: the line looked unterminated, so
-         * the reader armed its consume-the-rest-of-the-line state even though
-         * fgets() had already eaten the newline, and the NEXT line — a
-         * complete, valid, uncorrupted row — was swallowed as that phantom
-         * tail. One NUL cost two rows and the second loss was counted in
-         * neither counter (reproduced: 1 row scanned, incomplete=1, third row
-         * gone silently). Row boundaries are byte-counted now, so a NUL
-         * disqualifies its own row and reaches no further. */
-        {
-            char corrupt[2048];
-            row(corrupt, sizeof(corrupt), 1785394060LL, "agrees", 2, 3500002,
-                HASH_A, HASH_A, 4, 0, "nul_fixture");
-            size_t clen = strlen(corrupt);       /* includes the newline */
-            ok = ok && clen > 40 && corrupt[clen - 1] == '\n';
-            /* mid-content, nowhere near the terminator */
-            corrupt[clen / 2] = '\0';
-
-            FILE *f = fopen(path, "wb");
-            ok = ok && f != NULL;
-            if (f) {
-                ok = ok && write_row_of_len(f, 1785394000LL, 3500001,
-                                            SHORT_ROW, true);
-                ok = ok && fwrite(corrupt, 1, clen, f) == clen;
-                ok = ok && write_row_of_len(f, 1785394120LL, 3500003,
-                                            SHORT_ROW, true);
-                fclose(f);
-            }
-            ok = ok && tip_agreement_read_ledger(path, &rep);
-            ok = ok && rep.present;
-            /* the two intact rows, and only those two */
-            ok = ok && rep.rows_scanned == 2;
-            /* THE ACCEPTANCE BAR: the row after the corrupt one survived and
-             * is the sample, so a lost NUL cannot silently freeze this report
-             * on the row before the corruption. */
-            ok = ok && rep.height == 3500003;
-            ok = ok && rep.last_ts == 1785394120LL;
-            /* the corrupt row is counted, and counted as what it is: a write
-             * that did not all land, not a foreign row shape */
-            ok = ok && rep.incomplete_rows == 1;
-            ok = ok && rep.malformed_rows == 0;
-        }
-
-        unlink(path);
-        rmdir(dir);
+        bool ok = taw_verify_bounded_tail(&rep);
         TAW_CHECK("the tail read keeps every real row and no invented one", ok);
     }
 
