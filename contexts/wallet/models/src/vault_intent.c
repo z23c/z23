@@ -73,6 +73,65 @@ static bool vault_intent_input_save(
         AR_BIND_INT(s, 3, input->vout));
 }
 
+static bool vault_intent_legacy_scope_empty(const struct vault_intent_row *r)
+{
+    return r->wallet_scope[0] == '\0' &&
+        r->wallet_instance_id[0] == '\0' && r->wallet_genesis[0] == '\0' &&
+        !r->has_snapshot_root && r->recipient_value_zat == 0 &&
+        r->max_fee_zat == 0 && r->reserved_zat == 0;
+}
+
+static bool vault_intent_reservation_fully_bound(
+    const struct vault_intent_row *r)
+{
+    return (strcmp(r->wallet_scope, "dev") == 0 ||
+            strcmp(r->wallet_scope, "prod") == 0 ||
+            strcmp(r->wallet_scope, "test") == 0) &&
+        zcl_is_hex_string(r->wallet_instance_id,
+                          WALLET_INSTANCE_ID_HEX_LEN) &&
+        zcl_is_hex_string(r->wallet_genesis, WALLET_GENESIS_HEX_LEN) &&
+        r->has_snapshot_root && MoneyRange(r->recipient_value_zat) &&
+        MoneyRange(r->max_fee_zat) &&
+        r->recipient_value_zat <= MAX_MONEY - r->max_fee_zat &&
+        r->recipient_value_zat + r->max_fee_zat > 0 &&
+        r->reserved_zat == r->recipient_value_zat + r->max_fee_zat;
+}
+
+static bool vault_intent_application_fields_empty(
+    const struct vault_intent_row *r)
+{
+    return r->application_kind[0] == '\0' &&
+        r->idempotency_key[0] == '\0' && !r->has_request_digest;
+}
+
+static bool vault_intent_application_fully_bound(
+    const struct vault_intent_row *r, bool bound)
+{
+    return bound &&
+        r->application_kind[0] != '\0' &&
+        strlen(r->application_kind) <= VAULT_INTENT_APPLICATION_MAX &&
+        model_string_is_printable(r->application_kind) &&
+        r->idempotency_key[0] != '\0' &&
+        strlen(r->idempotency_key) <= VAULT_INTENT_IDEMPOTENCY_MAX &&
+        model_string_is_printable(r->idempotency_key) &&
+        r->has_request_digest;
+}
+
+static bool vault_intent_agent_fields_empty(const struct vault_intent_row *r)
+{
+    return r->agent_session_id[0] == '\0' &&
+        r->agent_debited_zat == 0;
+}
+
+static bool vault_intent_agent_debit_bound(
+    const struct vault_intent_row *r, bool bound)
+{
+    return bound &&
+        zcl_is_hex_string(r->agent_session_id, AGENT_SESSION_ID_MAX) &&
+        (r->agent_debited_zat == 0 ||
+         r->agent_debited_zat == r->reserved_zat);
+}
+
 bool vault_intent_validate(const struct vault_intent_row *r,
                            struct ar_errors *errors)
 {
@@ -99,46 +158,21 @@ bool vault_intent_validate(const struct vault_intent_row *r,
                      (r->error_code[0] == '\0' ||
                       model_string_is_printable(r->error_code)), "error_code",
                      "is invalid");
-    const bool legacy = r->wallet_scope[0] == '\0' &&
-        r->wallet_instance_id[0] == '\0' && r->wallet_genesis[0] == '\0' &&
-        !r->has_snapshot_root && r->recipient_value_zat == 0 &&
-        r->max_fee_zat == 0 && r->reserved_zat == 0;
-    const bool bound =
-        (strcmp(r->wallet_scope, "dev") == 0 ||
-         strcmp(r->wallet_scope, "prod") == 0 ||
-         strcmp(r->wallet_scope, "test") == 0) &&
-        zcl_is_hex_string(r->wallet_instance_id,
-                          WALLET_INSTANCE_ID_HEX_LEN) &&
-        zcl_is_hex_string(r->wallet_genesis, WALLET_GENESIS_HEX_LEN) &&
-        r->has_snapshot_root && MoneyRange(r->recipient_value_zat) &&
-        MoneyRange(r->max_fee_zat) &&
-        r->recipient_value_zat <= MAX_MONEY - r->max_fee_zat &&
-        r->recipient_value_zat + r->max_fee_zat > 0 &&
-        r->reserved_zat == r->recipient_value_zat + r->max_fee_zat;
+    const bool legacy = vault_intent_legacy_scope_empty(r);
+    const bool bound = vault_intent_reservation_fully_bound(r);
     validates_custom(errors, legacy || bound, "custody_binding",
                      "must be wholly legacy-empty or a complete reservation");
-    const bool application_empty = r->application_kind[0] == '\0' &&
-        r->idempotency_key[0] == '\0' && !r->has_request_digest;
-    const bool application_bound = bound &&
-        r->application_kind[0] != '\0' &&
-        strlen(r->application_kind) <= VAULT_INTENT_APPLICATION_MAX &&
-        model_string_is_printable(r->application_kind) &&
-        r->idempotency_key[0] != '\0' &&
-        strlen(r->idempotency_key) <= VAULT_INTENT_IDEMPOTENCY_MAX &&
-        model_string_is_printable(r->idempotency_key) &&
-        r->has_request_digest;
+    const bool application_empty = vault_intent_application_fields_empty(r);
+    const bool application_bound =
+        vault_intent_application_fully_bound(r, bound);
     validates_custom(errors, application_empty || application_bound,
                      "application_binding",
                      "must be wholly empty or kind, idempotency, and digest");
     validates_custom(errors, legacy || r->recipient_value_zat > 0 ||
                      application_bound, "fee_only_intent",
                      "requires a named idempotent application workflow");
-    const bool agent_empty = r->agent_session_id[0] == '\0' &&
-        r->agent_debited_zat == 0;
-    const bool agent_bound = bound &&
-        zcl_is_hex_string(r->agent_session_id, AGENT_SESSION_ID_MAX) &&
-        (r->agent_debited_zat == 0 ||
-         r->agent_debited_zat == r->reserved_zat);
+    const bool agent_empty = vault_intent_agent_fields_empty(r);
+    const bool agent_bound = vault_intent_agent_debit_bound(r, bound);
     validates_custom(errors, agent_empty || agent_bound, "agent_binding",
                      "must be empty or bind one exact reservation debit");
     return !ar_errors_any(errors);
@@ -211,17 +245,96 @@ bool vault_intent_save(struct node_db *ndb, const struct vault_intent_row *r)
         AR_BIND_INT(s, 26, r->agent_debited_zat));
 }
 
+static bool vault_intent_reserve_call_invalid(
+    struct node_db *ndb, const struct vault_intent_row *r,
+    int64_t confirmed_zat, bool require_expected_reserved,
+    int64_t expected_reserved_zat)
+{
+    return !ndb || !ndb->open || !r || confirmed_zat < 0 ||
+        (require_expected_reserved && expected_reserved_zat < 0);
+}
+
+static bool vault_intent_reserve_payload_invalid(
+    const struct vault_intent_row *r, const uint8_t *raw_tx,
+    size_t raw_tx_len, const struct vault_intent_input *inputs,
+    size_t input_count)
+{
+    return r->reserved_zat <= 0 || (raw_tx && (raw_tx_len == 0 ||
+        raw_tx_len > VAULT_INTENT_RAW_MAX)) || (!raw_tx && raw_tx_len != 0) ||
+        (input_count > 0 && !inputs) || input_count > 4096;
+}
+
+static bool vault_intent_reserve_totals_allow(
+    int64_t reserved, int64_t direct_lifetime, int64_t completed,
+    int64_t reserved_zat, bool require_expected_reserved,
+    int64_t expected_reserved_zat)
+{
+    return reserved >= 0 && direct_lifetime >= 0 && completed >= 0 &&
+        (!require_expected_reserved || reserved == expected_reserved_zat) &&
+        reserved <= INT64_MAX - reserved_zat &&
+        direct_lifetime <= INT64_MAX - completed;
+}
+
+static bool vault_intent_reserve_agent_session_allows(
+    struct node_db *ndb, const struct vault_intent_row *r,
+    struct db_agent_session *session)
+{
+    return agent_session_find(ndb, r->agent_session_id, session) &&
+        !session->revoked &&
+        (session->expires_at == 0 || r->created_at < session->expires_at) &&
+        strcmp(session->wallet_scope, r->wallet_scope) == 0 &&
+        strcmp(session->wallet_instance_id,
+               r->wallet_instance_id) == 0 &&
+        strcmp(session->wallet_genesis, r->wallet_genesis) == 0;
+}
+
+static bool vault_intent_reserve_dev_allows(
+    struct node_db *ndb, const struct vault_intent_row *r,
+    int64_t confirmed_zat, int64_t reserved, int64_t direct_lifetime,
+    int64_t completed)
+{
+    const int64_t next = reserved + r->reserved_zat;
+    const int64_t lifetime = direct_lifetime + completed;
+    int64_t reserve_floor = VAULT_INTENT_DEV_RESERVE_FLOOR_ZAT;
+    bool allowed = true;
+    if (r->agent_session_id[0]) {
+        struct db_agent_session session;
+        allowed = vault_intent_reserve_agent_session_allows(
+            ndb, r, &session);
+        if (allowed)
+            reserve_floor = session.reserve_floor_zat;
+    }
+    return allowed && confirmed_zat >= reserve_floor &&
+        next <= confirmed_zat - reserve_floor &&
+        lifetime <= VAULT_INTENT_DEV_LIFETIME_CAP_ZAT &&
+        next <= VAULT_INTENT_DEV_LIFETIME_CAP_ZAT - lifetime;
+}
+
+static bool vault_intent_reserve_persist(
+    struct node_db *ndb, const struct vault_intent_row *r,
+    const uint8_t *raw_tx, size_t raw_tx_len,
+    const struct vault_intent_input *inputs, size_t input_count,
+    bool inputs_ready, bool allowed)
+{
+    bool saved = inputs_ready && allowed && vault_intent_save(ndb, r) &&
+        (!raw_tx || vault_intent_store_raw(ndb, r->plan_id,
+                                           raw_tx, raw_tx_len));
+    for (size_t i = 0; saved && i < input_count; i++)
+        saved = vault_intent_input_save(ndb, r->plan_id, &inputs[i]);
+    return saved;
+}
+
 static bool vault_intent_reserve_internal(
     struct node_db *ndb, const struct vault_intent_row *r,
     int64_t confirmed_zat, const uint8_t *raw_tx, size_t raw_tx_len,
     const struct vault_intent_input *inputs, size_t input_count,
     bool require_expected_reserved, int64_t expected_reserved_zat)
 {
-    if (!ndb || !ndb->open || !r || confirmed_zat < 0 ||
-        (require_expected_reserved && expected_reserved_zat < 0) ||
-        r->reserved_zat <= 0 || (raw_tx && (raw_tx_len == 0 ||
-        raw_tx_len > VAULT_INTENT_RAW_MAX)) || (!raw_tx && raw_tx_len != 0) ||
-        (input_count > 0 && !inputs) || input_count > 4096)
+    if (vault_intent_reserve_call_invalid(
+            ndb, r, confirmed_zat, require_expected_reserved,
+            expected_reserved_zat) ||
+        vault_intent_reserve_payload_invalid(
+            r, raw_tx, raw_tx_len, inputs, input_count))
         LOG_FAIL("vault_intent", "reserve: invalid argument");
     if (!node_db_begin_immediate(ndb))
         return false; /* raw-return-ok:busy is a fail-closed reservation */
@@ -232,39 +345,17 @@ static bool vault_intent_reserve_internal(
         ndb, r->wallet_scope);
     int64_t completed = vault_intent_unbound_completed_total(
         ndb, r->wallet_scope, r->wallet_instance_id);
-    bool allowed = reserved >= 0 && direct_lifetime >= 0 && completed >= 0 &&
-        (!require_expected_reserved || reserved == expected_reserved_zat) &&
-        reserved <= INT64_MAX - r->reserved_zat &&
-        direct_lifetime <= INT64_MAX - completed;
-    if (allowed && strcmp(r->wallet_scope, "dev") == 0) {
-        const int64_t next = reserved + r->reserved_zat;
-        const int64_t lifetime = direct_lifetime + completed;
-        int64_t reserve_floor = VAULT_INTENT_DEV_RESERVE_FLOOR_ZAT;
-        if (r->agent_session_id[0]) {
-            struct db_agent_session session;
-            allowed = agent_session_find(
-                    ndb, r->agent_session_id, &session) &&
-                !session.revoked &&
-                (session.expires_at == 0 || r->created_at < session.expires_at) &&
-                strcmp(session.wallet_scope, r->wallet_scope) == 0 &&
-                strcmp(session.wallet_instance_id,
-                       r->wallet_instance_id) == 0 &&
-                strcmp(session.wallet_genesis, r->wallet_genesis) == 0;
-            if (allowed)
-                reserve_floor = session.reserve_floor_zat;
-        }
-        allowed = allowed && confirmed_zat >= reserve_floor &&
-            next <= confirmed_zat - reserve_floor &&
-            lifetime <= VAULT_INTENT_DEV_LIFETIME_CAP_ZAT &&
-            next <= VAULT_INTENT_DEV_LIFETIME_CAP_ZAT - lifetime;
-    } else if (allowed) {
+    bool allowed = vault_intent_reserve_totals_allow(
+        reserved, direct_lifetime, completed, r->reserved_zat,
+        require_expected_reserved, expected_reserved_zat);
+    if (allowed && strcmp(r->wallet_scope, "dev") == 0)
+        allowed = vault_intent_reserve_dev_allows(
+            ndb, r, confirmed_zat, reserved, direct_lifetime, completed);
+    else if (allowed)
         allowed = reserved + r->reserved_zat <= confirmed_zat;
-    }
-    bool saved = inputs_ready && allowed && vault_intent_save(ndb, r) &&
-        (!raw_tx || vault_intent_store_raw(ndb, r->plan_id,
-                                           raw_tx, raw_tx_len));
-    for (size_t i = 0; saved && i < input_count; i++)
-        saved = vault_intent_input_save(ndb, r->plan_id, &inputs[i]);
+    bool saved = vault_intent_reserve_persist(
+        ndb, r, raw_tx, raw_tx_len, inputs, input_count, inputs_ready,
+        allowed);
     if (!saved || !node_db_commit(ndb)) {
         (void)node_db_rollback(ndb);
         return false; /* raw-return-ok:nothing was reserved */
