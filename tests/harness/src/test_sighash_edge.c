@@ -125,6 +125,272 @@ static bool she_sig(const struct script *sc, const struct transaction *tx,
     return signature_hash(sc, tx, nIn, ht, amount, branch_id, NULL, out);
 }
 
+/* Cases 1a/1b: Sprout must REJECT SIGHASH_SINGLE when nIn >= num_vout
+ * (no Bitcoin uint256(1) sentinel), with or without ANYONECANPAY.
+ * Builds a Sprout tx from (n_vin, n_vout) and signs input nIn with
+ * raw_type. */
+static bool she_sprout_single_rejected(const uint8_t *p2pkh,
+                                       size_t p2pkh_len,
+                                       unsigned int n_vin,
+                                       unsigned int n_vout,
+                                       unsigned int nIn,
+                                       uint32_t raw_type)
+{
+    struct transaction tx = she_build_tx(n_vin, n_vout, false, 1, 0);
+    struct script sc; script_set(&sc, p2pkh, p2pkh_len);
+    struct uint256 r;
+    bool rejected = !she_sig(&sc, &tx, nIn, raw_type, 0, 0, &r);
+    she_free_tx(&tx);
+    return rejected;
+}
+
+static bool she_sprout_single_e2e_eval_false(void)
+{
+    /* 1b-e2e. zclassicd parity pin — DO NOT "FIX" the reject into
+     *     Bitcoin's uint256(1) sentinel. zclassicd THROWS logic_error at
+     *     zclassic-cpp/src/script/interpreter.cpp:1158-1163 (Zcash
+     *     deleted the one-hash sentinel); CheckSig catches it at
+     *     :1197-1202 and returns false, so OP_CHECKSIG pushes false and
+     *     the script fails EVAL_FALSE — indistinguishable from any bad
+     *     signature. This case proves the c23 LOG_FAIL→false path lands
+     *     on the SAME observable verdict: a Sprout 1-vin/0-vout tx
+     *     spending a P2PK output, signed with SIGHASH_SINGLE over the
+     *     would-be sentinel hash uint256(1), must fail verify_script
+     *     with SCRIPT_ERR_EVAL_FALSE (push-false, not an abort). If a
+     *     future "fix" makes signature_hash return uint256(1)+true, the
+     *     signature below VERIFIES, OP_CHECKSIG pushes true, and this
+     *     test FAILS — implementing the sentinel forks from zclassicd. */
+    struct privkey key;
+    privkey_make_new(&key, true);
+    struct pubkey pub;
+    privkey_get_pubkey(&key, &pub);
+
+    /* P2PK prevout scriptPubKey: <pubkey> OP_CHECKSIG. */
+    struct script spk; script_init(&spk);
+    bool ok = script_push_data(&spk, pub.vch, pub.size)
+           && script_push_op(&spk, OP_CHECKSIG);
+
+    /* Sprout tx, 1 vin / 0 vout: the SIGHASH_SINGLE trigger. */
+    struct transaction tx = she_build_tx(1, 0, false, 1, 0);
+
+    /* Sign the would-be sentinel hash uint256(1). Under the
+     * sentinel this signature would verify (zclassicd would still
+     * reject the tx); under the parity reject the sighash is never
+     * produced, so the signature cannot matter. */
+    struct uint256 one;
+    uint256_set_null(&one);
+    one.data[0] = 0x01;
+    unsigned char sig[80];
+    size_t siglen = sizeof(sig);
+    ok = ok && privkey_sign(&key, &one, sig, &siglen) && siglen <= 72;
+
+    /* scriptSig: <DER sig || hashtype byte>. */
+    struct script ssig; script_init(&ssig);
+    if (ok) {
+        sig[siglen++] = SIGHASH_SINGLE;
+        ok = script_push_data(&ssig, sig, siglen);
+    }
+
+    struct tx_sig_checker tsc;
+    tx_sig_checker_init(&tsc, &tx, 0, 0 /* amount: Sprout ignores */,
+                        0 /* branch_id: Sprout ignores */, NULL);
+    struct sig_checker checker = tx_make_sig_checker(&tsc);
+
+    ScriptError serr = SCRIPT_ERR_OK;
+    bool verdict = verify_script(&ssig, &spk,
+                                 SCRIPT_VERIFY_P2SH |
+                                 SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY,
+                                 &checker, 0, &serr);
+    she_free_tx(&tx);
+    bool good = ok && !verdict && serr == SCRIPT_ERR_EVAL_FALSE;
+    return good;
+}
+
+/* Cases 1c/1d: the overwintered regimes (ZIP-143 / ZIP-243) do NOT
+ * reject SIGHASH_SINGLE with nIn >= num_vout — they fall through to a
+ * null outputs digest and produce a well-defined non-null hash. */
+static bool she_overwintered_single_null_outputs_accepted(
+    const uint8_t *p2pkh, size_t p2pkh_len, uint32_t version,
+    uint32_t version_group_id, uint32_t branch_id)
+{
+    struct transaction tx = she_build_tx(2, 1, true, version,
+                                         version_group_id);
+    struct script sc; script_set(&sc, p2pkh, p2pkh_len);
+    struct uint256 r;
+    bool ok = she_sig(&sc, &tx, 1, SIGHASH_SINGLE, 100, branch_id, &r);
+    ok = ok && !uint256_is_null(&r);
+    she_free_tx(&tx);
+    return ok;
+}
+
+/* Case 2: SIGHASH_SINGLE commits to exactly vout[nIn] (Sapling). */
+static bool she_sapling_single_commits_to_matched_vout_only(
+    const uint8_t *p2pkh, size_t p2pkh_len)
+{
+    /* 2 vin, 3 vout; sign input nIn=1 -> must commit only to vout[1]. */
+    struct script sc; script_set(&sc, p2pkh, p2pkh_len);
+    const unsigned int nIn = 1;
+
+    struct transaction tx =
+        she_build_tx(2, 3, true, 4, SAPLING_VERSION_GROUP_ID);
+    struct uint256 base, mut_match, mut_other;
+    bool ok = she_sig(&sc, &tx, nIn, SIGHASH_SINGLE, 0, 0x76b809bb, &base);
+
+    /* Mutate the MATCHED output (vout[1]) -> hash MUST change. */
+    tx.vout[nIn].value += 1;
+    ok = ok && she_sig(&sc, &tx, nIn, SIGHASH_SINGLE, 0, 0x76b809bb,
+                       &mut_match);
+    tx.vout[nIn].value -= 1; /* restore */
+
+    /* Mutate a DIFFERENT output (vout[2]) -> hash MUST NOT change. */
+    tx.vout[2].value += 1;
+    ok = ok && she_sig(&sc, &tx, nIn, SIGHASH_SINGLE, 0, 0x76b809bb,
+                       &mut_other);
+    tx.vout[2].value -= 1;
+
+    bool good = ok && !uint256_eq(&base, &mut_match)
+                   && uint256_eq(&base, &mut_other);
+    she_free_tx(&tx);
+    return good;
+}
+
+/* Case 3: ANYONECANPAY isolates the signed input (Sprout). */
+static bool she_sprout_anyonecanpay_isolates_signed_input(
+    const uint8_t *p2pkh, size_t p2pkh_len)
+{
+    struct script sc; script_set(&sc, p2pkh, p2pkh_len);
+    const unsigned int nIn = 0;
+    const uint32_t ht = SIGHASH_ALL | SIGHASH_ANYONECANPAY;
+
+    struct transaction tx = she_build_tx(3, 2, false, 1, 0);
+    struct uint256 base, mut_other_in, mut_signed_in;
+    bool ok = she_sig(&sc, &tx, nIn, ht, 0, 0, &base);
+
+    /* Mutate a DIFFERENT input (vin[2]) -> ACP must ignore it. */
+    tx.vin[2].sequence ^= 0xFFFFFFFFu;
+    tx.vin[2].prevout.n ^= 0xFF;
+    ok = ok && she_sig(&sc, &tx, nIn, ht, 0, 0, &mut_other_in);
+    tx.vin[2].sequence ^= 0xFFFFFFFFu;
+    tx.vin[2].prevout.n ^= 0xFF;
+
+    /* Mutate the SIGNED input (vin[0]) -> hash must change. */
+    tx.vin[nIn].sequence ^= 0x1;
+    ok = ok && she_sig(&sc, &tx, nIn, ht, 0, 0, &mut_signed_in);
+    tx.vin[nIn].sequence ^= 0x1;
+
+    bool good = ok && uint256_eq(&base, &mut_other_in)
+                   && !uint256_eq(&base, &mut_signed_in);
+    she_free_tx(&tx);
+    return good;
+}
+
+/* Case 4 (both halves): hash the SAME tx twice under two different
+ * consensus_branch_ids and report via *same_hash whether the two
+ * digests are equal. Sapling mixes the branch id into the ZIP-243
+ * personalization (digests differ); Sprout ignores it (digests are
+ * equal). Returns false if either signature_hash call fails. */
+static bool she_hash_tx_under_two_branch_ids(const uint8_t *p2pkh,
+                                             size_t p2pkh_len,
+                                             bool overwintered,
+                                             uint32_t version,
+                                             uint32_t version_group_id,
+                                             uint32_t branch_a,
+                                             uint32_t branch_b,
+                                             bool *same_hash)
+{
+    struct script sc; script_set(&sc, p2pkh, p2pkh_len);
+
+    struct transaction tx =
+        she_build_tx(1, 1, overwintered, version, version_group_id);
+    struct uint256 a, b;
+    bool ok = she_sig(&sc, &tx, 0, SIGHASH_ALL, 50, branch_a, &a)
+           && she_sig(&sc, &tx, 0, SIGHASH_ALL, 50, branch_b, &b);
+    she_free_tx(&tx);
+    *same_hash = uint256_eq(&a, &b);
+    return ok;
+}
+
+/* Case 5: empty scriptCode (size 0) vs a 1-byte scriptCode (Sapling). */
+static bool she_sapling_empty_scriptcode_distinct_from_one_byte(void)
+{
+    struct transaction tx =
+        she_build_tx(1, 1, true, 4, SAPLING_VERSION_GROUP_ID);
+
+    struct script empty; script_init(&empty);          /* size 0 */
+    struct script one;  { uint8_t b = 0x51; script_set(&one, &b, 1); }
+
+    struct uint256 r_empty, r_one;
+    bool ok = she_sig(&empty, &tx, 0, SIGHASH_ALL, 100, 0x76b809bb, &r_empty)
+           && she_sig(&one,   &tx, 0, SIGHASH_ALL, 100, 0x76b809bb, &r_one);
+    bool good = ok && !uint256_is_null(&r_empty)
+                   && !uint256_eq(&r_empty, &r_one);
+    she_free_tx(&tx);
+    return good;
+}
+
+/* Case 6: empty vout (num_vout==0) with SIGHASH_ALL must yield a
+ * deterministic, non-null hash without crashing, across all three sig
+ * versions. */
+static bool she_empty_vout_sighash_all_deterministic(const uint8_t *p2pkh,
+                                                     size_t p2pkh_len)
+{
+    struct {
+        const char *label;
+        bool overwintered; uint32_t version; uint32_t vgi; uint32_t branch;
+    } vs[] = {
+        { "sprout",     false, 1, 0,                           0          },
+        { "overwinter", true,  3, OVERWINTER_VERSION_GROUP_ID, 0x5ba81b19 },
+        { "sapling",    true,  4, SAPLING_VERSION_GROUP_ID,    0x76b809bb },
+    };
+    struct script sc; script_set(&sc, p2pkh, p2pkh_len);
+    bool good = true;
+    for (unsigned int v = 0; v < 3; v++) {
+        struct transaction tx = she_build_tx(1, 0, vs[v].overwintered,
+                                             vs[v].version, vs[v].vgi);
+        struct uint256 r1, r2;
+        bool ok = she_sig(&sc, &tx, 0, SIGHASH_ALL, 25, vs[v].branch, &r1)
+               && she_sig(&sc, &tx, 0, SIGHASH_ALL, 25, vs[v].branch, &r2);
+        if (!ok || uint256_is_null(&r1) || !uint256_eq(&r1, &r2)) {
+            printf("\n  empty-vout failed for %s ", vs[v].label);
+            good = false;
+        }
+        she_free_tx(&tx);
+    }
+    return good;
+}
+
+/* Case 7: value_balance is committed in Sapling (ZIP-243) but NOT in
+ * Overwinter (ZIP-143). */
+static bool she_value_balance_committed_in_sapling_only(
+    const uint8_t *p2pkh, size_t p2pkh_len)
+{
+    struct script sc; script_set(&sc, p2pkh, p2pkh_len);
+
+    /* Sapling: value_balance is in the digest. */
+    struct transaction txs =
+        she_build_tx(1, 1, true, 4, SAPLING_VERSION_GROUP_ID);
+    struct uint256 s0, s1;
+    txs.value_balance = 0;
+    bool ok = she_sig(&sc, &txs, 0, SIGHASH_ALL, 100, 0x76b809bb, &s0);
+    txs.value_balance = 1234567;
+    ok = ok && she_sig(&sc, &txs, 0, SIGHASH_ALL, 100, 0x76b809bb, &s1);
+    bool sapling_sensitive = ok && !uint256_eq(&s0, &s1);
+    she_free_tx(&txs);
+
+    /* Overwinter: value_balance is NOT serialized -> hash unchanged. */
+    struct transaction txo =
+        she_build_tx(1, 1, true, 3, OVERWINTER_VERSION_GROUP_ID);
+    struct uint256 o0, o1;
+    txo.value_balance = 0;
+    bool ok2 = she_sig(&sc, &txo, 0, SIGHASH_ALL, 100, 0x5ba81b19, &o0);
+    txo.value_balance = 1234567;
+    ok2 = ok2 && she_sig(&sc, &txo, 0, SIGHASH_ALL, 100, 0x5ba81b19, &o1);
+    bool overwinter_insensitive = ok2 && uint256_eq(&o0, &o1);
+    she_free_tx(&txo);
+
+    return sapling_sensitive && overwinter_insensitive;
+}
+
 int test_sighash_edge(void)
 {
     int failures = 0;
@@ -143,11 +409,8 @@ int test_sighash_edge(void)
      *     (Already covered by the sibling test for nIn=1; here we also
      *     nail the most adversarial boundary: nIn=0, num_vout=0 below.) */
     {
-        struct transaction tx = she_build_tx(2, 1, false, 1, 0);
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        struct uint256 r;
-        bool rejected = !she_sig(&sc, &tx, 1, SIGHASH_SINGLE, 0, 0, &r);
-        she_free_tx(&tx);
+        bool rejected = she_sprout_single_rejected(p2pkh, sizeof(p2pkh),
+                                                   2, 1, 1, SIGHASH_SINGLE);
         SHE_CHECK("sprout SINGLE nIn(1)>=num_vout(1) rejected", rejected);
     }
 
@@ -156,77 +419,20 @@ int test_sighash_edge(void)
      *     (consensus contract violation), and the ACP bit must not let
      *     it slip through. */
     {
-        struct transaction tx = she_build_tx(1, 0, false, 1, 0);
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        struct uint256 r;
-        bool rejected =
-            !she_sig(&sc, &tx, 0,
-                     SIGHASH_SINGLE | SIGHASH_ANYONECANPAY, 0, 0, &r);
-        she_free_tx(&tx);
+        bool rejected = she_sprout_single_rejected(p2pkh, sizeof(p2pkh),
+                                                   1, 0, 0,
+                                                   SIGHASH_SINGLE |
+                                                   SIGHASH_ANYONECANPAY);
         SHE_CHECK("sprout SINGLE+ACP nIn=0 num_vout=0 rejected (no sentinel)",
                   rejected);
     }
 
-    /* 1b-e2e. zclassicd parity pin — DO NOT "FIX" the reject into
-     *     Bitcoin's uint256(1) sentinel. zclassicd THROWS logic_error at
-     *     zclassic-cpp/src/script/interpreter.cpp:1158-1163 (Zcash
-     *     deleted the one-hash sentinel); CheckSig catches it at
-     *     :1197-1202 and returns false, so OP_CHECKSIG pushes false and
-     *     the script fails EVAL_FALSE — indistinguishable from any bad
-     *     signature. This case proves the c23 LOG_FAIL→false path lands
-     *     on the SAME observable verdict: a Sprout 1-vin/0-vout tx
-     *     spending a P2PK output, signed with SIGHASH_SINGLE over the
-     *     would-be sentinel hash uint256(1), must fail verify_script
-     *     with SCRIPT_ERR_EVAL_FALSE (push-false, not an abort). If a
-     *     future "fix" makes signature_hash return uint256(1)+true, the
-     *     signature below VERIFIES, OP_CHECKSIG pushes true, and this
-     *     test FAILS — implementing the sentinel forks from zclassicd. */
+    /* 1b-e2e. See the comment inside she_sprout_single_e2e_eval_false. */
     {
-        struct privkey key;
-        privkey_make_new(&key, true);
-        struct pubkey pub;
-        privkey_get_pubkey(&key, &pub);
-
-        /* P2PK prevout scriptPubKey: <pubkey> OP_CHECKSIG. */
-        struct script spk; script_init(&spk);
-        bool ok = script_push_data(&spk, pub.vch, pub.size)
-               && script_push_op(&spk, OP_CHECKSIG);
-
-        /* Sprout tx, 1 vin / 0 vout: the SIGHASH_SINGLE trigger. */
-        struct transaction tx = she_build_tx(1, 0, false, 1, 0);
-
-        /* Sign the would-be sentinel hash uint256(1). Under the
-         * sentinel this signature would verify (zclassicd would still
-         * reject the tx); under the parity reject the sighash is never
-         * produced, so the signature cannot matter. */
-        struct uint256 one;
-        uint256_set_null(&one);
-        one.data[0] = 0x01;
-        unsigned char sig[80];
-        size_t siglen = sizeof(sig);
-        ok = ok && privkey_sign(&key, &one, sig, &siglen) && siglen <= 72;
-
-        /* scriptSig: <DER sig || hashtype byte>. */
-        struct script ssig; script_init(&ssig);
-        if (ok) {
-            sig[siglen++] = SIGHASH_SINGLE;
-            ok = script_push_data(&ssig, sig, siglen);
-        }
-
-        struct tx_sig_checker tsc;
-        tx_sig_checker_init(&tsc, &tx, 0, 0 /* amount: Sprout ignores */,
-                            0 /* branch_id: Sprout ignores */, NULL);
-        struct sig_checker checker = tx_make_sig_checker(&tsc);
-
-        ScriptError serr = SCRIPT_ERR_OK;
-        bool verdict = verify_script(&ssig, &spk,
-                                     SCRIPT_VERIFY_P2SH |
-                                     SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY,
-                                     &checker, 0, &serr);
-        she_free_tx(&tx);
+        bool good = she_sprout_single_e2e_eval_false();
         SHE_CHECK("sprout SINGLE e2e: verify_script false + EVAL_FALSE "
                   "(zclassicd parity, no uint256(1) sentinel)",
-                  ok && !verdict && serr == SCRIPT_ERR_EVAL_FALSE);
+                  good);
     }
 
     /* 1c. Sapling (ZIP-243), plain SINGLE, nIn=1 >= num_vout=1: NOT
@@ -234,13 +440,8 @@ int test_sighash_edge(void)
      *     digest and SUCCEEDS, producing a well-defined non-null hash.
      *     This asymmetry vs Sprout is the load-bearing fact. */
     {
-        struct transaction tx =
-            she_build_tx(2, 1, true, 4, SAPLING_VERSION_GROUP_ID);
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        struct uint256 r;
-        bool ok = she_sig(&sc, &tx, 1, SIGHASH_SINGLE, 100, 0x76b809bb, &r);
-        ok = ok && !uint256_is_null(&r);
-        she_free_tx(&tx);
+        bool ok = she_overwintered_single_null_outputs_accepted(
+            p2pkh, sizeof(p2pkh), 4, SAPLING_VERSION_GROUP_ID, 0x76b809bb);
         SHE_CHECK("sapling SINGLE nIn>=num_vout accepted (null outputs digest)",
                   ok);
     }
@@ -248,13 +449,9 @@ int test_sighash_edge(void)
     /* 1d. Overwinter (ZIP-143) shares the no-reject behaviour: SINGLE
      *     with nIn>=num_vout succeeds (null outputs digest). */
     {
-        struct transaction tx =
-            she_build_tx(2, 1, true, 3, OVERWINTER_VERSION_GROUP_ID);
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        struct uint256 r;
-        bool ok = she_sig(&sc, &tx, 1, SIGHASH_SINGLE, 100, 0x5ba81b19, &r);
-        ok = ok && !uint256_is_null(&r);
-        she_free_tx(&tx);
+        bool ok = she_overwintered_single_null_outputs_accepted(
+            p2pkh, sizeof(p2pkh), 3, OVERWINTER_VERSION_GROUP_ID,
+            0x5ba81b19);
         SHE_CHECK("overwinter SINGLE nIn>=num_vout accepted (null outputs)",
                   ok);
     }
@@ -265,30 +462,8 @@ int test_sighash_edge(void)
      *    does not. This is the defining property of SINGLE.
      * ================================================================== */
     {
-        /* 2 vin, 3 vout; sign input nIn=1 -> must commit only to vout[1]. */
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        const unsigned int nIn = 1;
-
-        struct transaction tx =
-            she_build_tx(2, 3, true, 4, SAPLING_VERSION_GROUP_ID);
-        struct uint256 base, mut_match, mut_other;
-        bool ok = she_sig(&sc, &tx, nIn, SIGHASH_SINGLE, 0, 0x76b809bb, &base);
-
-        /* Mutate the MATCHED output (vout[1]) -> hash MUST change. */
-        tx.vout[nIn].value += 1;
-        ok = ok && she_sig(&sc, &tx, nIn, SIGHASH_SINGLE, 0, 0x76b809bb,
-                           &mut_match);
-        tx.vout[nIn].value -= 1; /* restore */
-
-        /* Mutate a DIFFERENT output (vout[2]) -> hash MUST NOT change. */
-        tx.vout[2].value += 1;
-        ok = ok && she_sig(&sc, &tx, nIn, SIGHASH_SINGLE, 0, 0x76b809bb,
-                           &mut_other);
-        tx.vout[2].value -= 1;
-
-        bool good = ok && !uint256_eq(&base, &mut_match)
-                       && uint256_eq(&base, &mut_other);
-        she_free_tx(&tx);
+        bool good = she_sapling_single_commits_to_matched_vout_only(
+            p2pkh, sizeof(p2pkh));
         SHE_CHECK("sapling SINGLE commits to vout[nIn] only", good);
     }
 
@@ -298,29 +473,8 @@ int test_sighash_edge(void)
      *    mutating the signed input MUST.
      * ================================================================== */
     {
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        const unsigned int nIn = 0;
-        const uint32_t ht = SIGHASH_ALL | SIGHASH_ANYONECANPAY;
-
-        struct transaction tx = she_build_tx(3, 2, false, 1, 0);
-        struct uint256 base, mut_other_in, mut_signed_in;
-        bool ok = she_sig(&sc, &tx, nIn, ht, 0, 0, &base);
-
-        /* Mutate a DIFFERENT input (vin[2]) -> ACP must ignore it. */
-        tx.vin[2].sequence ^= 0xFFFFFFFFu;
-        tx.vin[2].prevout.n ^= 0xFF;
-        ok = ok && she_sig(&sc, &tx, nIn, ht, 0, 0, &mut_other_in);
-        tx.vin[2].sequence ^= 0xFFFFFFFFu;
-        tx.vin[2].prevout.n ^= 0xFF;
-
-        /* Mutate the SIGNED input (vin[0]) -> hash must change. */
-        tx.vin[nIn].sequence ^= 0x1;
-        ok = ok && she_sig(&sc, &tx, nIn, ht, 0, 0, &mut_signed_in);
-        tx.vin[nIn].sequence ^= 0x1;
-
-        bool good = ok && uint256_eq(&base, &mut_other_in)
-                       && !uint256_eq(&base, &mut_signed_in);
-        she_free_tx(&tx);
+        bool good = she_sprout_anyonecanpay_isolates_signed_input(
+            p2pkh, sizeof(p2pkh));
         SHE_CHECK("sprout ANYONECANPAY isolates the signed input", good);
     }
 
@@ -331,26 +485,20 @@ int test_sighash_edge(void)
      *    contrast, ignores branch_id entirely (legacy double-SHA256).
      * ================================================================== */
     {
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-
-        struct transaction tx =
-            she_build_tx(1, 1, true, 4, SAPLING_VERSION_GROUP_ID);
-        struct uint256 a, b;
-        bool ok = she_sig(&sc, &tx, 0, SIGHASH_ALL, 50, 0x76b809bb, &a)
-               && she_sig(&sc, &tx, 0, SIGHASH_ALL, 50, 0x2bb40e60, &b);
-        bool good = ok && !uint256_eq(&a, &b);
-        she_free_tx(&tx);
+        bool same_hash;
+        bool ok = she_hash_tx_under_two_branch_ids(
+            p2pkh, sizeof(p2pkh), true, 4, SAPLING_VERSION_GROUP_ID,
+            0x76b809bb, 0x2bb40e60, &same_hash);
+        bool good = ok && !same_hash;
         SHE_CHECK("sapling hash depends on consensus_branch_id", good);
     }
     {
         /* Sprout: branch_id is not part of the message at all. */
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        struct transaction tx = she_build_tx(1, 1, false, 1, 0);
-        struct uint256 a, b;
-        bool ok = she_sig(&sc, &tx, 0, SIGHASH_ALL, 50, 0x00000000, &a)
-               && she_sig(&sc, &tx, 0, SIGHASH_ALL, 50, 0xdeadbeef, &b);
-        bool good = ok && uint256_eq(&a, &b);
-        she_free_tx(&tx);
+        bool same_hash;
+        bool ok = she_hash_tx_under_two_branch_ids(
+            p2pkh, sizeof(p2pkh), false, 1, 0, 0x00000000, 0xdeadbeef,
+            &same_hash);
+        bool good = ok && same_hash;
         SHE_CHECK("sprout hash ignores consensus_branch_id", good);
     }
 
@@ -360,18 +508,7 @@ int test_sighash_edge(void)
      *    branch of the script_code serialization.
      * ================================================================== */
     {
-        struct transaction tx =
-            she_build_tx(1, 1, true, 4, SAPLING_VERSION_GROUP_ID);
-
-        struct script empty; script_init(&empty);          /* size 0 */
-        struct script one;  { uint8_t b = 0x51; script_set(&one, &b, 1); }
-
-        struct uint256 r_empty, r_one;
-        bool ok = she_sig(&empty, &tx, 0, SIGHASH_ALL, 100, 0x76b809bb, &r_empty)
-               && she_sig(&one,   &tx, 0, SIGHASH_ALL, 100, 0x76b809bb, &r_one);
-        bool good = ok && !uint256_is_null(&r_empty)
-                       && !uint256_eq(&r_empty, &r_one);
-        she_free_tx(&tx);
+        bool good = she_sapling_empty_scriptcode_distinct_from_one_byte();
         SHE_CHECK("sapling empty scriptCode accepted and distinct from 1-byte",
                   good);
     }
@@ -382,28 +519,8 @@ int test_sighash_edge(void)
      *    across all three sig versions.
      * ================================================================== */
     {
-        struct {
-            const char *label;
-            bool overwintered; uint32_t version; uint32_t vgi; uint32_t branch;
-        } vs[] = {
-            { "sprout",     false, 1, 0,                           0          },
-            { "overwinter", true,  3, OVERWINTER_VERSION_GROUP_ID, 0x5ba81b19 },
-            { "sapling",    true,  4, SAPLING_VERSION_GROUP_ID,    0x76b809bb },
-        };
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        bool good = true;
-        for (unsigned int v = 0; v < 3; v++) {
-            struct transaction tx = she_build_tx(1, 0, vs[v].overwintered,
-                                                 vs[v].version, vs[v].vgi);
-            struct uint256 r1, r2;
-            bool ok = she_sig(&sc, &tx, 0, SIGHASH_ALL, 25, vs[v].branch, &r1)
-                   && she_sig(&sc, &tx, 0, SIGHASH_ALL, 25, vs[v].branch, &r2);
-            if (!ok || uint256_is_null(&r1) || !uint256_eq(&r1, &r2)) {
-                printf("\n  empty-vout failed for %s ", vs[v].label);
-                good = false;
-            }
-            she_free_tx(&tx);
-        }
+        bool good = she_empty_vout_sighash_all_deterministic(
+            p2pkh, sizeof(p2pkh));
         SHE_CHECK("empty vout SIGHASH_ALL: deterministic non-null all versions",
                   good);
     }
@@ -415,32 +532,10 @@ int test_sighash_edge(void)
      *    two regimes being collapsed into one serialization.
      * ================================================================== */
     {
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-
-        /* Sapling: value_balance is in the digest. */
-        struct transaction txs =
-            she_build_tx(1, 1, true, 4, SAPLING_VERSION_GROUP_ID);
-        struct uint256 s0, s1;
-        txs.value_balance = 0;
-        bool ok = she_sig(&sc, &txs, 0, SIGHASH_ALL, 100, 0x76b809bb, &s0);
-        txs.value_balance = 1234567;
-        ok = ok && she_sig(&sc, &txs, 0, SIGHASH_ALL, 100, 0x76b809bb, &s1);
-        bool sapling_sensitive = ok && !uint256_eq(&s0, &s1);
-        she_free_tx(&txs);
-
-        /* Overwinter: value_balance is NOT serialized -> hash unchanged. */
-        struct transaction txo =
-            she_build_tx(1, 1, true, 3, OVERWINTER_VERSION_GROUP_ID);
-        struct uint256 o0, o1;
-        txo.value_balance = 0;
-        bool ok2 = she_sig(&sc, &txo, 0, SIGHASH_ALL, 100, 0x5ba81b19, &o0);
-        txo.value_balance = 1234567;
-        ok2 = ok2 && she_sig(&sc, &txo, 0, SIGHASH_ALL, 100, 0x5ba81b19, &o1);
-        bool overwinter_insensitive = ok2 && uint256_eq(&o0, &o1);
-        she_free_tx(&txo);
-
+        bool good = she_value_balance_committed_in_sapling_only(
+            p2pkh, sizeof(p2pkh));
         SHE_CHECK("value_balance committed in sapling but not overwinter",
-                  sapling_sensitive && overwinter_insensitive);
+                  good);
     }
 
     return failures;
