@@ -10,7 +10,7 @@
  *   - reducer_frontier_compute_hstar (the provable tip + served_floor), and
  *   - stage_rederive_range (THE universal, LCC-safe, served-floor-preserving
  *     re-derive primitive; NOT modified here).
- * The escalate-on-once fallback names a typed blocker rather than looping. */
+ * The escalate-once fallback names a typed blocker rather than looping. */
 
 #include "jobs/rewind_driver.h"
 
