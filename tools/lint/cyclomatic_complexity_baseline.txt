@@ -2117,7 +2117,6 @@ tests/harness/src/test_script_validate_stage.c:test_script_validate_stage:29
 tests/harness/src/test_sd_notify.c:test_sd_notify_platform_arm:61
 tests/harness/src/test_seal_kv.c:test_seal_kv:30
 tests/harness/src/test_secp256k1_differential.c:test_secp256k1_differential:60
-tests/harness/src/test_secrets_hygiene.c:test_recover_tool_path_documented:18
 tests/harness/src/test_seed_tape.c:test_seed_tape:29
 tests/harness/src/test_seed_torn_import_gate.c:test_seed_torn_import_gate:49
 tests/harness/src/test_segment_sealer.c:test_segment_sealer:20

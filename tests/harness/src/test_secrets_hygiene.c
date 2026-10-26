@@ -245,6 +245,40 @@ static int test_check_no_secret_printf_script(void)
     return failures;
 }
 
+/* Advance past the leading spaces and tabs of an allowlist line, so
+ * classification sees real content rather than the fence indent. */
+static const char *skip_indent_blanks(const char *p)
+{
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return p;
+}
+
+/* Resolve one quoted allowlist regex entry back into a path. open_quote
+ * points at the entry's leading single quote. Returns true when the
+ * entry is a plain literal path (escaped dots only, no metacharacters);
+ * path receives the resolved text and *len its length either way. */
+static bool allowlist_entry_to_path(const char *open_quote, char *path,
+                                    size_t path_size, size_t *len)
+{
+    size_t n = 0;
+    const char *q = open_quote + 1;
+    bool literal = true;
+    while (*q && *q != '\'' && n + 1 < path_size) {
+        if (*q == '\\') {
+            q++;
+            if (*q != '.') { literal = false; break; }
+        } else if (strchr("*?+[](){}|^$", *q) != NULL) {
+            literal = false;
+            break;
+        }
+        path[n++] = *q++;
+    }
+    path[n] = '\0';
+    *len = n;
+    return literal;
+}
+
 static int test_recover_tool_path_documented(void)
 {
     int failures = 0;
@@ -280,8 +314,7 @@ static int test_recover_tool_path_documented(void)
             /* Allowlist ends at a line whose first non-whitespace char is
              * ')'. We can't key off any ')' because the justification
              * comments may contain parentheses. */
-            const char *p = line;
-            while (*p == ' ' || *p == '\t') p++;
+            const char *p = skip_indent_blanks(line);
             if (*p == ')') {
                 in_allowlist = false;
                 continue;
@@ -300,19 +333,7 @@ static int test_recover_tool_path_documented(void)
              * widen the allowlist, cannot pass this check either. */
             char path[512];
             size_t n = 0;
-            const char *q = p + 1;
-            bool literal = true;
-            while (*q && *q != '\'' && n + 1 < sizeof(path)) {
-                if (*q == '\\') {
-                    q++;
-                    if (*q != '.') { literal = false; break; }
-                } else if (strchr("*?+[](){}|^$", *q) != NULL) {
-                    literal = false;
-                    break;
-                }
-                path[n++] = *q++;
-            }
-            path[n] = '\0';
+            bool literal = allowlist_entry_to_path(p, path, sizeof(path), &n);
             if (!literal || n == 0 || access(path, F_OK) != 0) {
                 printf("\n  stale or non-literal allowlist entry: %s", path);
                 missing_files++;
