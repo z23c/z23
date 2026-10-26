@@ -41,7 +41,12 @@ int main(int argc, char **argv)
         return 1;
     }
     for (size_t i = 0; i < sizeof dk; i++)
-        printf("%02x", dk[i]);
-    putchar('\n');
+        if (printf("%02x", dk[i]) < 0) goto output_error;
+    if (putchar('\n') == EOF || fflush(stdout) != 0 || ferror(stdout))
+        goto output_error;
     return 0;
+
+output_error:
+    fputs("zscrypt: output write failed\n", stderr);
+    return 1;
 }

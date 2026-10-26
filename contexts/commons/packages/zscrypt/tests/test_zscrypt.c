@@ -7,6 +7,8 @@
 #include <limits.h>
 
 static FILE *cli_sink;
+#undef stdout
+#define stdout cli_sink
 #define printf(...) fprintf(cli_sink, __VA_ARGS__)
 #define putchar(c) fputc((c), cli_sink)
 #define main zscrypt_cli_main
@@ -14,6 +16,7 @@ static FILE *cli_sink;
 #undef main
 #undef putchar
 #undef printf
+#undef stdout
 
 static int failures;
 
@@ -177,8 +180,43 @@ static void test_cli_args(void)
     check(cli_case(4, args, 1, "") == 0, "CLI retains library power-of-two validation");
 }
 
+static int cli_output_failure(bool buffered)
+{
+#if defined(__linux__)
+    FILE *output = fopen(buffered ? "/dev/full" : "/dev/null", buffered ? "w" : "r");
+#elif defined(_WIN32)
+    FILE *output = fopen("NUL", "r");
+#else
+    FILE *output = fopen("/dev/null", "r");
+#endif
+    if (!output) return 1;
+    char buffer[4096];
+    if (buffered && setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) {
+        fclose(output);
+        return 1;
+    }
+    cli_sink = output;
+    char *args[] = {"zscrypt", "pw", "salt", "2", NULL};
+    int bad = zscrypt_cli_main(4, args) != 1 || !ferror(output);
+    if (buffered) (void)fclose(output);
+    else if (fclose(output) != 0) bad = 1;
+    return bad;
+}
+
+static void test_cli_output(void)
+{
+    char *args[] = {"zscrypt", "pw", "salt", "2", NULL};
+    check(cli_case(4, args, 0, "4cbdb601720926082a6dd5a15313d860c799be83d7363e4ab7ba1f1d0194356b\n") == 0,
+          "CLI known N2 output");
+    check(cli_output_failure(false) == 0, "CLI refuses readonly output");
+#if defined(__linux__)
+    check(cli_output_failure(true) == 0, "CLI refuses buffered output failure");
+#endif
+}
+
 int main(void)
 {
+    test_cli_output();
     test_cli_args();
     test_pbkdf2();
     test_scrypt_vectors();
