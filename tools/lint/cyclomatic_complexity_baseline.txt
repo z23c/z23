@@ -1550,7 +1550,6 @@ tests/harness/src/test_sapling_tree.c:test_sapling_tree:27
 tests/harness/src/test_script_validate_stage.c:test_script_validate_stage:29
 tests/harness/src/test_sd_notify.c:test_sd_notify_platform_arm:61
 tests/harness/src/test_secp256k1_differential.c:test_secp256k1_differential:60
-tests/harness/src/test_seed_tape.c:test_seed_tape:29
 tests/harness/src/test_seed_torn_import_gate.c:test_seed_torn_import_gate:49
 tests/harness/src/test_sha256_isa_parity.c:test_sha256_isa_parity:43
 tests/harness/src/test_sha3_256_x4.c:test_sha3_256_x4:56
