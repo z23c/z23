@@ -2638,8 +2638,6 @@ tools/core_seal.c:read_and_hash:27
 tools/core_seal.c:read_manifest:27
 tools/core_seal.c:verify_sections:20
 tools/crash_recovery_test.c:main:45
-tools/dev/dependency_links.c:scan_directory:16
-tools/dev/dependency_links.c:zcl_dependency_links_scan:16
 tools/dev/dev_activation.c:dev_activation_canon:27
 tools/dev/dev_activation.c:dev_activation_link_generation:19
 tools/dev/dev_activation.c:dev_activation_sha256_file:16
