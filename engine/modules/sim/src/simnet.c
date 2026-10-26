@@ -136,6 +136,14 @@ static void sim_free_tx(struct transaction *tx)
     tx->vout = NULL;
 }
 
+/* Free the vin/vout arrays of every tx — the shared cleanup path for the
+ * tx arrays whose ownership sim_mint_block takes over (see sim_free_tx). */
+static void sim_free_txs(struct transaction *txs, size_t ntx)
+{
+    for (size_t i = 0; i < ntx; i++)
+        sim_free_tx(&txs[i]);
+}
+
 /* get_anchor vtable hook for s->null_view (see simnet.h's
  * sapling_anchor_history doc comment). Linear scan is fine — sim runs mint a
  * handful of blocks, never a real chain's worth. Sprout is never queried by
@@ -185,6 +193,111 @@ static bool sim_commit_sapling(struct simnet *s,
     return true;
 }
 
+/* A mint request is valid only for an initialized simnet handed a
+ * non-empty tx array. */
+static bool sim_mint_request_valid(const struct simnet *s, size_t ntx)
+{
+    return s && s->initialized && ntx != 0;
+}
+
+/* Move the caller-built txs into the block's vtx copy array and collect
+ * their txids for the merkle root. */
+static void sim_block_take_txs(struct block *blk, struct transaction *txs,
+                               struct uint256 *txids, size_t ntx)
+{
+    for (size_t i = 0; i < ntx; i++) {
+        blk->vtx[i] = txs[i];
+        txids[i] = txs[i].hash;
+    }
+}
+
+/* Post-Sapling activation, connect_block (connect_block.c:704-736)
+ * rejects an all-zero hashFinalSaplingRoot.
+ *
+ * Transparent-only sims (s->sapling_tree == NULL): the tree is never
+ * appended to and stays empty, so its root is exactly the empty-tree
+ * root — stamp that.
+ *
+ * s->sapling_tree enabled: append THIS block's shielded-output
+ * note commitments (in tx, then output order) to a value-copy of the live
+ * tree and stamp the REAL resulting root. The copy `tree_after` is
+ * committed to s->sapling_tree only after connect_block accepts the block,
+ * so a rejected block leaves the tree unchanged (rollback-safe). */
+/* Returns whether *tree_after holds a tree to commit after connect. */
+static bool sim_stamp_sapling_root(struct simnet *s, struct transaction *txs,
+                                   size_t ntx, int height,
+                                   struct incremental_merkle_tree *tree_after,
+                                   struct uint256 *sapling_root_out)
+{
+    bool have_tree_after = false;
+    if (consensus_network_upgrade_active(&s->params.consensus, height,
+                                         UPGRADE_SAPLING)) {
+        if (s->sapling_tree) {
+            *tree_after = *s->sapling_tree;
+            for (size_t i = 0; i < ntx; i++)
+                for (size_t j = 0; j < txs[i].num_shielded_output; j++)
+                    incremental_tree_append(tree_after,
+                                            &txs[i].v_shielded_output[j].cm);
+            incremental_tree_root(tree_after, sapling_root_out);
+            have_tree_after = true;
+        } else {
+            struct incremental_merkle_tree stree;
+            sapling_tree_init(&stree);
+            incremental_tree_empty_root(&stree, sapling_root_out);
+        }
+    }
+    return have_tree_after;
+}
+
+/* Drive the REAL shielded consensus verifier on each shielded tx.
+ * contextual_check_transaction (validation/contextual_check_tx.c) is the
+ * exact function contextual_check_block invokes per tx (and that the live
+ * node reaches via engine/jobs/src/script_validate_contextual.c). It runs
+ * check_spend/check_output/final_check on the Sapling descriptions plus the
+ * JoinSplit Ed25519 sig — the full Groth16 verification path — with the
+ * deferral gate off (g_deferred_proof_validation_below_height == -1, set in
+ * simnet_init) so no proof is skipped. We invoke it per shielded tx (not
+ * the whole block) so the harness's plain v1 coinbase does not have to
+ * satisfy the block-level BIP34 / Overwinter-version rules, which are
+ * orthogonal to the shielded-proof verification.
+ * The transparent value balance is still enforced by connect_block below. */
+/* Returns 0 when every shielded tx verifies (or the verifier is off);
+ * -1 on the first rejection, with *out_rejected_tx set to that tx's index
+ * and *out_vs holding its reject reason for the caller to log. */
+static int sim_contextual_check_shielded_txs(struct simnet *s,
+                                             struct transaction *txs,
+                                             size_t ntx, int height,
+                                             size_t *out_rejected_tx,
+                                             struct validation_state *out_vs)
+{
+    if (!s->run_contextual_check)
+        return 0;
+    for (size_t i = 0; i < ntx; i++) {
+        if (txs[i].num_shielded_spend == 0 &&
+            txs[i].num_shielded_output == 0 &&
+            txs[i].num_joinsplit == 0)
+            continue;
+        validation_state_init(out_vs);
+        if (!contextual_check_transaction(&txs[i], out_vs,
+                                          &s->params.consensus,
+                                          height, 100 /* dosLevel */)) {
+            *out_rejected_tx = i;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Clone the assembled block into `captured` when the caller asked for the
+ * minted block back; a NULL out_block request is an unconditional success. */
+static bool sim_capture_block(struct block *captured, struct block *blk,
+                              const struct block *out_block)
+{
+    if (!out_block)
+        return true;
+    return block_clone(captured, blk);
+}
+
 /* Assemble `txs[0..ntx)` into a block at `height`, drive it through the
  * REAL connect_block, and on success advance the in-RAM tip. Frees each
  * tx's vin/vout (and the block's vtx copy array) on every path — the caller
@@ -192,12 +305,12 @@ static bool sim_commit_sapling(struct simnet *s,
 static bool sim_mint_block(struct simnet *s, struct transaction *txs,
                            size_t ntx, int height, struct block *out_block)
 {
-    if (!s || !s->initialized || ntx == 0)
+    if (!sim_mint_request_valid(s, ntx))
         LOG_FAIL("simnet", "invalid mint request (ntx=%zu)", ntx);
 
     struct uint256 *txids = zcl_malloc(ntx * sizeof(*txids), "simnet_txids");
     if (!txids) {
-        for (size_t i = 0; i < ntx; i++) sim_free_tx(&txs[i]);
+        sim_free_txs(txs, ntx);
         LOG_FAIL("simnet", "OOM allocating %zu txids", ntx);
     }
 
@@ -207,13 +320,10 @@ static bool sim_mint_block(struct simnet *s, struct transaction *txs,
     blk.vtx = zcl_calloc(ntx, sizeof(struct transaction), "simnet_blk_vtx");
     if (!blk.vtx) {
         free(txids);
-        for (size_t i = 0; i < ntx; i++) sim_free_tx(&txs[i]);
+        sim_free_txs(txs, ntx);
         LOG_FAIL("simnet", "OOM allocating %zu vtx", ntx);
     }
-    for (size_t i = 0; i < ntx; i++) {
-        blk.vtx[i] = txs[i];
-        txids[i] = txs[i].hash;
-    }
+    sim_block_take_txs(&blk, txs, txids, ntx);
 
     blk.header.nVersion = 4;
     blk.header.hashPrevBlock = s->tip.hashBlock;
@@ -221,37 +331,10 @@ static bool sim_mint_block(struct simnet *s, struct transaction *txs,
     blk.header.nTime = s->next_block_time;
     free(txids);
 
-    /* Post-Sapling activation, connect_block (connect_block.c:704-736)
-     * rejects an all-zero hashFinalSaplingRoot.
-     *
-     * Transparent-only sims (s->sapling_tree == NULL): the tree is never
-     * appended to and stays empty, so its root is exactly the empty-tree
-     * root — stamp that.
-     *
-     * s->sapling_tree enabled: append THIS block's shielded-output
-     * note commitments (in tx, then output order) to a value-copy of the live
-     * tree and stamp the REAL resulting root. The copy `tree_after` is
-     * committed to s->sapling_tree only after connect_block accepts the block,
-     * so a rejected block leaves the tree unchanged (rollback-safe). */
     struct incremental_merkle_tree tree_after;
-    bool have_tree_after = false;
-    if (consensus_network_upgrade_active(&s->params.consensus, height,
-                                         UPGRADE_SAPLING)) {
-        if (s->sapling_tree) {
-            tree_after = *s->sapling_tree;
-            for (size_t i = 0; i < ntx; i++)
-                for (size_t j = 0; j < txs[i].num_shielded_output; j++)
-                    incremental_tree_append(&tree_after,
-                                            &txs[i].v_shielded_output[j].cm);
-            incremental_tree_root(&tree_after,
-                                  &blk.header.hashFinalSaplingRoot);
-            have_tree_after = true;
-        } else {
-            struct incremental_merkle_tree stree;
-            sapling_tree_init(&stree);
-            incremental_tree_empty_root(&stree, &blk.header.hashFinalSaplingRoot);
-        }
-    }
+    bool have_tree_after =
+        sim_stamp_sapling_root(s, txs, ntx, height, &tree_after,
+                               &blk.header.hashFinalSaplingRoot);
 
     struct uint256 block_hash;
     block_header_get_hash(&blk.header, &block_hash);
@@ -265,44 +348,22 @@ static bool sim_mint_block(struct simnet *s, struct transaction *txs,
     struct validation_state vs;
     validation_state_init(&vs);
 
-    /* Drive the REAL shielded consensus verifier on each shielded tx.
-     * contextual_check_transaction (validation/contextual_check_tx.c) is the
-     * exact function contextual_check_block invokes per tx (and that the live
-     * node reaches via engine/jobs/src/script_validate_contextual.c). It runs
-     * check_spend/check_output/final_check on the Sapling descriptions plus the
-     * JoinSplit Ed25519 sig — the full Groth16 verification path — with the
-     * deferral gate off (g_deferred_proof_validation_below_height == -1, set in
-     * simnet_init) so no proof is skipped. We invoke it per shielded tx (not
-     * the whole block) so the harness's plain v1 coinbase does not have to
-     * satisfy the block-level BIP34 / Overwinter-version rules, which are
-     * orthogonal to the shielded-proof verification.
-     * The transparent value balance is still enforced by connect_block below. */
-    if (s->run_contextual_check) {
-        for (size_t i = 0; i < ntx; i++) {
-            if (txs[i].num_shielded_spend == 0 &&
-                txs[i].num_shielded_output == 0 &&
-                txs[i].num_joinsplit == 0)
-                continue;
-            struct validation_state cvs;
-            validation_state_init(&cvs);
-            if (!contextual_check_transaction(&txs[i], &cvs,
-                                              &s->params.consensus,
-                                              height, 100 /* dosLevel */)) {
-                free(blk.vtx);
-                for (size_t k = 0; k < ntx; k++)
-                    sim_free_tx(&txs[k]);
-                LOG_FAIL("simnet",
-                         "contextual_check_transaction rejected tx %zu "
-                         "at height %d: %s", i, height, cvs.reject_reason);
-            }
-        }
+    size_t rejected_tx = 0;
+    struct validation_state cvs;
+    if (sim_contextual_check_shielded_txs(s, txs, ntx, height, &rejected_tx,
+                                          &cvs) != 0) {
+        free(blk.vtx);
+        sim_free_txs(txs, ntx);
+        LOG_FAIL("simnet",
+                 "contextual_check_transaction rejected tx %zu "
+                 "at height %d: %s", rejected_tx, height, cvs.reject_reason);
     }
 
     struct block captured;
     block_init(&captured);
-    if (out_block && !block_clone(&captured, &blk)) {
+    if (!sim_capture_block(&captured, &blk, out_block)) {
         free(blk.vtx);
-        for (size_t i = 0; i < ntx; i++) sim_free_tx(&txs[i]);
+        sim_free_txs(txs, ntx);
         LOG_FAIL("simnet", "cannot capture block at height %d", height);
     }
 
@@ -310,8 +371,7 @@ static bool sim_mint_block(struct simnet *s, struct transaction *txs,
                             false /* just_check */);
 
     free(blk.vtx);
-    for (size_t i = 0; i < ntx; i++)
-        sim_free_tx(&txs[i]);
+    sim_free_txs(txs, ntx);
 
     if (!ok) {
         block_free(&captured);
@@ -364,14 +424,14 @@ bool simnet_init(struct simnet *s)
     s->params = *chain_params_get();
     memset(&s->cpentry, 0, sizeof(s->cpentry));
     s->cpentry.height = SIM_CHECKPOINT_HEIGHT;
-    memset(s->cpentry.hash.data, 0x01, 32);
+    memset(&s->cpentry.hash.data, 0x01, 32);
     s->params.checkpointData.entries = &s->cpentry;
     s->params.checkpointData.nEntries = 1;
 
     /* Synthetic base tip, one below the first mintable height. */
     block_index_init(&s->tip);
     s->tip.nHeight = SIM_BASE_HEIGHT - 1;
-    memset(s->tip.hashBlock.data, 0x33, 32);
+    memset(&s->tip.hashBlock.data, 0x33, 32);
     s->tip.phashBlock = &s->tip.hashBlock;
     s->tip.pprev = NULL;
     s->tip.has_chain_sprout_value = false;
