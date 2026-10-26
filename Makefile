@@ -2198,7 +2198,7 @@ check-vendor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(BIN_DIR)/z
 	@./build/bin/z23-lint check-tor-provenance
 
 # Reusable native presentation package. This deliberately has a tiny source
-# closure: fourteen project TUs plus pinned RGFW headers, with no node/app objects.
+# closure: fifteen project TUs plus pinned RGFW headers, with no node/app objects.
 PRESENTATION_BUILD_DIR := build/presentation
 PRESENTATION_PACKAGE_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	-Icontexts/explorer/modules/presentation/include -Iplatform/modules/base/include \
@@ -2208,6 +2208,7 @@ PRESENTATION_PACKAGE_SRCS := \
 	contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
 	contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
 	contexts/explorer/modules/presentation/src/presentation_focus.c \
+	contexts/explorer/modules/presentation/src/presentation_validate.c \
 	contexts/explorer/modules/presentation/src/presentation_form.c \
 	contexts/explorer/modules/presentation/src/presentation_form_model.c \
 	contexts/explorer/modules/presentation/src/presentation_input.c \
@@ -2223,6 +2224,7 @@ PRESENTATION_PACKAGE_OBJS := \
 	$(PRESENTATION_BUILD_DIR)/presentation_canvas_model.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_canvas_select.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_focus.o \
+	$(PRESENTATION_BUILD_DIR)/presentation_validate.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_form.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_form_model.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_input.o \
@@ -2280,6 +2282,7 @@ $(PRESENTATION_BUILD_DIR)/presentation.o: \
 	contexts/explorer/modules/presentation/src/presentation.c \
 	contexts/explorer/modules/presentation/src/presentation_canvas_internal.h \
 	contexts/explorer/modules/presentation/src/presentation_focus_internal.h \
+	contexts/explorer/modules/presentation/src/presentation_validate_internal.h \
 	contexts/explorer/modules/presentation/src/presentation_form_internal.h \
 	contexts/explorer/modules/presentation/include/presentation/presentation.h \
 	contexts/explorer/modules/presentation/include/presentation/model_render.h \
@@ -2321,6 +2324,17 @@ $(PRESENTATION_BUILD_DIR)/presentation_focus.o: \
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
 		contexts/explorer/modules/presentation/src/presentation_focus.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation_focus.o
+
+$(PRESENTATION_BUILD_DIR)/presentation_validate.o: \
+	contexts/explorer/modules/presentation/src/presentation_validate.c \
+	contexts/explorer/modules/presentation/src/presentation_validate_internal.h \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	contexts/explorer/modules/presentation/include/presentation/canvas.h \
+	contexts/explorer/modules/presentation/include/presentation/model_render.h
+	@mkdir -p $(PRESENTATION_BUILD_DIR)
+	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
+		contexts/explorer/modules/presentation/src/presentation_validate.c \
+		-o $(PRESENTATION_BUILD_DIR)/presentation_validate.o
 
 $(PRESENTATION_BUILD_DIR)/presentation_form.o: \
 	contexts/explorer/modules/presentation/src/presentation_form.c \
@@ -2468,6 +2482,7 @@ presentation-portability: presentation-demo
 			contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
 			contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
 			contexts/explorer/modules/presentation/src/presentation_focus.c \
+			contexts/explorer/modules/presentation/src/presentation_validate.c \
 			contexts/explorer/modules/presentation/src/presentation_form.c \
 			contexts/explorer/modules/presentation/src/presentation_form_model.c \
 			contexts/explorer/modules/presentation/src/presentation_input.c \
