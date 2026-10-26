@@ -1617,7 +1617,6 @@ tests/harness/src/test_progress_store.c:test_progress_store:100
 tests/harness/src/test_projection_replay_invariant.c:run_mempool:19
 tests/harness/src/test_pv_lookahead.c:la_fold_from:27
 tests/harness/src/test_pv_lookahead.c:test_pv_lookahead:39
-tests/harness/src/test_reducer_drive_watchdog.c:test_reducer_drive_watchdog:74
 tests/harness/src/test_reducer_frontier_reconcile_light.c:make_fixture_block_readable:20
 tests/harness/src/test_reducer_frontier_reconcile_light.c:test_reducer_frontier_reconcile_light:369
 tests/harness/src/test_reducer_ingest_e2e.c:seed_proof_validate:20

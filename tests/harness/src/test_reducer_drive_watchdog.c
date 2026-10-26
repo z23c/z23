@@ -216,6 +216,310 @@ static int rdw_test_r1_cadence(void)
     return failures;
 }
 
+enum rdw_json_kind {
+    RDW_JSON_PRESENT = 0,
+    RDW_JSON_BOOL_EQ,
+    RDW_JSON_INT_EQ,
+    RDW_JSON_INT_GT
+};
+
+struct rdw_json_expect {
+    const char *key;
+    enum rdw_json_kind kind;
+    int64_t value;
+};
+
+static bool rdw_json_fields_match(const struct json_value *v,
+                                  const struct rdw_json_expect *rows,
+                                  size_t n)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < n; i++) {
+        switch (rows[i].kind) {
+        case RDW_JSON_PRESENT:
+            ok = json_get(v, rows[i].key) != NULL;
+            break;
+        case RDW_JSON_BOOL_EQ:
+            ok = json_get_bool(json_get(v, rows[i].key)) ==
+                 (rows[i].value != 0);
+            break;
+        case RDW_JSON_INT_EQ:
+            ok = json_get_int(json_get(v, rows[i].key)) == rows[i].value;
+            break;
+        case RDW_JSON_INT_GT:
+            ok = json_get_int(json_get(v, rows[i].key)) > rows[i].value;
+            break;
+        }
+    }
+    return ok;
+}
+
+static bool rdw_spin_baseline_quiet(struct rdw_fake_clock *fc, int64_t t0)
+{
+    rdw_reset();
+    rdw_fake_clock_install(fc, t0);
+    reducer_drive_watchdog_test_set_threshold_secs(0);
+    reducer_drive_watchdog_test_set_cursor_override(100);
+
+    reducer_drive_enter_labeled("test_drive");
+    rdw_real_nap();
+
+    condition_engine_tick(); /* tick 1: baseline only, cursor=100 */
+    bool ok = true;
+    ok = ok && reducer_drive_watchdog_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok;
+}
+
+static bool rdw_spin_frozen_cursor_tripped(struct rdw_fake_clock *fc,
+                                           int64_t t0)
+{
+    rdw_fake_clock_set(fc, t0 + 20); /* clear the poll_secs gate */
+    condition_engine_tick(); /* tick 2: cursor still 100 -> trip + remedy */
+
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "reducer_drive_watchdog", &snap);
+    bool ok2 = true;
+    ok2 = ok2 && reducer_drive_watchdog_test_remedy_calls() == 1;
+    ok2 = ok2 && condition_engine_get_active_count() == 1;
+    ok2 = ok2 && got && snap.currently_active;
+    ok2 = ok2 && blocker_exists("reducer_drive_stuck");
+    return ok2;
+}
+
+static bool rdw_stuck_blocker_names_test_drive(
+    const struct blocker_snapshot *snaps, int n)
+{
+    bool found_reason = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].id, "reducer_drive_stuck") == 0 &&
+            strstr(snaps[i].reason, "test_drive") != NULL) {
+            found_reason = true;
+            break;
+        }
+    }
+    return found_reason;
+}
+
+static bool rdw_stuck_blocker_arms_ladder_kick(
+    const struct blocker_snapshot *snaps, int n)
+{
+    bool esc_wired = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].id, "reducer_drive_stuck") == 0) {
+            esc_wired = strcmp(snaps[i].escape_action,
+                               "reducer_drive_ladder_kick") == 0 &&
+                        snaps[i].escape_deadline_us > 0;
+            break;
+        }
+    }
+    return esc_wired;
+}
+
+static bool rdw_escape_sweep_arms_ladder(void)
+{
+    bool armed_before = sticky_escalator_test_armed();
+    int dispatched_before = blocker_escape_dispatched_count();
+    /* Push the blocker clock past the 60s escape deadline so the sweep fires,
+     * then restore the real clock. */
+    blocker_advance_clock_for_testing(70LL * 1000 * 1000);
+    int fired = blocker_supervisor_sweep();
+    bool ok_escape = !armed_before &&
+                     fired >= 1 &&
+                     blocker_escape_dispatched_count() > dispatched_before &&
+                     sticky_escalator_test_armed();
+    blocker_set_clock_for_testing(0);
+    return ok_escape;
+}
+
+static bool rdw_cursor_advance_cleared(struct rdw_fake_clock *fc, int64_t t0)
+{
+    reducer_drive_watchdog_test_set_cursor_override(101);
+    rdw_fake_clock_set(fc, t0 + 40);
+    condition_engine_tick(); /* cursor advanced past frozen -> witness clears */
+
+    bool ok3 = true;
+    ok3 = ok3 && !blocker_exists("reducer_drive_stuck");
+    ok3 = ok3 && condition_engine_get_active_count() == 0;
+    struct condition_runtime_snapshot snap3;
+    bool got3 = condition_engine_get_registered_snapshot(
+        "reducer_drive_watchdog", &snap3);
+    ok3 = ok3 && got3 && snap3.cleared_count == 1;
+    return ok3;
+}
+
+static bool rdw_fresh_frozen_cursor_retripped(struct rdw_fake_clock *fc,
+                                              int64_t t0)
+{
+    reducer_drive_watchdog_test_set_cursor_override(200);
+    rdw_fake_clock_set(fc, t0 + 60);
+    condition_engine_tick(); /* baseline reset to 200, no trip */
+    rdw_fake_clock_set(fc, t0 + 80);
+    condition_engine_tick(); /* cursor unchanged -> re-trip */
+
+    bool ok4 = true;
+    ok4 = ok4 && blocker_exists("reducer_drive_stuck");
+    ok4 = ok4 && condition_engine_get_active_count() == 1;
+    return ok4;
+}
+
+static bool rdw_drive_exit_cleared(struct rdw_fake_clock *fc, int64_t t0)
+{
+    reducer_drive_exit();
+    rdw_fake_clock_set(fc, t0 + 100);
+    condition_engine_tick(); /* drive inactive -> witness clears */
+
+    bool ok5 = true;
+    ok5 = ok5 && !blocker_exists("reducer_drive_stuck");
+    ok5 = ok5 && condition_engine_get_active_count() == 0;
+    ok5 = ok5 && !reducer_drive_active();
+    return ok5;
+}
+
+static bool rdw_dump_documented_fields(const struct json_value *v,
+                                       bool dumped)
+{
+    static const struct rdw_json_expect rows[] = {
+        { .key = "active", .kind = RDW_JSON_PRESENT, .value = 0 },
+        { .key = "active", .kind = RDW_JSON_BOOL_EQ, .value = 0 },
+        { .key = "label", .kind = RDW_JSON_PRESENT, .value = 0 },
+        { .key = "age_us", .kind = RDW_JSON_PRESENT, .value = 0 },
+        { .key = "watchdog_threshold_secs", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "watchdog_threshold_secs", .kind = RDW_JSON_INT_EQ,
+          .value = 0 },
+        { .key = "last_watchdog_fire_unix", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "last_watchdog_fire_unix", .kind = RDW_JSON_INT_GT,
+          .value = 0 },
+        { .key = "utxo_apply_cursor", .kind = RDW_JSON_PRESENT, .value = 0 },
+        { .key = "utxo_apply_cursor", .kind = RDW_JSON_INT_EQ, .value = 200 },
+        { .key = "coins_applied_read_ok", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "coins_applied_read_ok", .kind = RDW_JSON_BOOL_EQ,
+          .value = 1 },
+        { .key = "coins_applied_height", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "coins_applied_height", .kind = RDW_JSON_INT_EQ,
+          .value = 4242 },
+    };
+    return dumped &&
+           rdw_json_fields_match(v, rows, sizeof rows / sizeof rows[0]);
+}
+
+static bool rdw_dump_drain_fsync_fields(const struct json_value *v)
+{
+    /* Drive+fsync telemetry (drain-exit counters, fsync timing) is always
+     * emitted, 0 included, unlike stage_spin. */
+    static const struct rdw_json_expect drain_totals[] = {
+        { .key = "drain_exit_converged_total", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "drain_exit_budget_total", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "drain_last_round_advances", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "drain_last_elapsed_us", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+    };
+    bool okt = rdw_json_fields_match(
+        v, drain_totals, sizeof drain_totals / sizeof drain_totals[0]);
+    const struct json_value *stage_us =
+        json_get(v, "drain_last_stage_us");
+    okt = okt && stage_us != NULL;
+    static const char *const stage_names[] = {
+        "header_admit", "validate_headers", "body_fetch", "body_persist",
+        "script_validate", "proof_validate", "utxo_apply", "tip_finalize"
+    };
+    for (size_t i = 0; stage_us &&
+         i < sizeof(stage_names) / sizeof(stage_names[0]); i++)
+        okt = okt && json_get(stage_us, stage_names[i]) != NULL;
+    static const struct rdw_json_expect fsync_fields[] = {
+        { .key = "fsync_last_flush_us", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "fsync_flush_us_ewma", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+    };
+    okt = okt && rdw_json_fields_match(
+        v, fsync_fields, sizeof fsync_fields / sizeof fsync_fields[0]);
+    return okt;
+}
+
+static bool rdw_dump_event_log_fields(const struct json_value *v)
+{
+    /* event_log_deferred, plus the append-path split: all always emitted. */
+    static const struct rdw_json_expect rows[] = {
+        { .key = "event_log_deferred", .kind = RDW_JSON_PRESENT, .value = 0 },
+        { .key = "event_log_barrier_appends", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "event_log_deferred_appends", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+        { .key = "event_log_barrier_us_total", .kind = RDW_JSON_PRESENT,
+          .value = 0 },
+    };
+    return rdw_json_fields_match(v, rows, sizeof rows / sizeof rows[0]);
+}
+
+static bool rdw_drain_exit_stats_are_zero(void)
+{
+    reducer_drain_exit_stats_reset_for_testing();
+    struct reducer_drain_exit_stats des;
+    reducer_drain_exit_stats_snapshot(&des);
+    return des.exit_converged_total == 0 &&
+           des.exit_budget_total == 0 &&
+           des.last_round_advances == 0 &&
+           des.last_elapsed_us == 0;
+}
+
+static bool rdw_batch_fsync_healthy_quiet(void)
+{
+    condition_engine_reset_for_testing();
+    register_batch_fsync_slow();
+    batch_fsync_slow_test_set_budget_us(10000); /* 10ms */
+    bool trig1 = reducer_body_fsync_test_trigger_precommit();
+    condition_engine_tick();
+    return trig1 && !blocker_exists("batch_fsync_slow") &&
+           condition_engine_get_active_count() == 0;
+}
+
+static bool rdw_batch_fsync_slow_trips(void)
+{
+    condition_engine_reset_for_testing();
+    register_batch_fsync_slow();
+    batch_fsync_slow_test_set_budget_us(10000); /* 10ms, same as f1 */
+    reducer_body_fsync_test_set_inject_delay_us(320 * 1000);
+    bool trig2 = reducer_body_fsync_test_trigger_precommit();
+    condition_engine_tick();
+    return trig2 && blocker_exists("batch_fsync_slow") &&
+           condition_engine_get_active_count() == 1 &&
+           batch_fsync_slow_test_remedy_calls() == 1;
+}
+
+static bool rdw_batch_fsync_reason_names_ewma(void)
+{
+    struct blocker_snapshot snaps[BLOCKER_CAP];
+    int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
+    bool found_reason = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].id, "batch_fsync_slow") == 0 &&
+            strstr(snaps[i].reason, "flush_us_ewma=") != NULL &&
+            strstr(snaps[i].reason, "budget_us=") != NULL) {
+            found_reason = true;
+            break;
+        }
+    }
+    return found_reason;
+}
+
+static bool rdw_batch_fsync_budget_clears(void)
+{
+    reducer_body_fsync_test_set_inject_delay_us(0);
+    batch_fsync_slow_test_set_budget_us(60LL * 1000 * 1000); /* 60s */
+    condition_engine_tick();
+    return !blocker_exists("batch_fsync_slow") &&
+           condition_engine_get_active_count() == 0;
+}
+
 int test_reducer_drive_watchdog(void);
 int test_reducer_drive_watchdog(void)
 {
@@ -226,108 +530,38 @@ int test_reducer_drive_watchdog(void)
 
     /* ---- (a) injected spin: detect fires + blocker named ---- */
     {
-        rdw_reset();
-        rdw_fake_clock_install(&fc, t0);
-        reducer_drive_watchdog_test_set_threshold_secs(0);
-        reducer_drive_watchdog_test_set_cursor_override(100);
-
-        reducer_drive_enter_labeled("test_drive");
-        rdw_real_nap();
-
-        condition_engine_tick(); /* tick 1: baseline only, cursor=100 */
-        bool ok = true;
-        ok = ok && reducer_drive_watchdog_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
+        bool ok = rdw_spin_baseline_quiet(&fc, t0);
         RDW_CHECK("baseline tick does not trip", ok);
 
-        rdw_fake_clock_set(&fc, t0 + 20); /* clear the poll_secs gate */
-        condition_engine_tick(); /* tick 2: cursor still 100 -> trip + remedy */
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "reducer_drive_watchdog", &snap);
-        bool ok2 = true;
-        ok2 = ok2 && reducer_drive_watchdog_test_remedy_calls() == 1;
-        ok2 = ok2 && condition_engine_get_active_count() == 1;
-        ok2 = ok2 && got && snap.currently_active;
-        ok2 = ok2 && blocker_exists("reducer_drive_stuck");
+        bool ok2 = rdw_spin_frozen_cursor_tripped(&fc, t0);
         RDW_CHECK("frozen cursor across two ticks trips + fires remedy once",
-                 ok2);
+                  ok2);
 
         struct blocker_snapshot snaps[BLOCKER_CAP];
         int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
-        bool found_reason = false;
-        for (int i = 0; i < n; i++) {
-            if (strcmp(snaps[i].id, "reducer_drive_stuck") == 0 &&
-                strstr(snaps[i].reason, "test_drive") != NULL) {
-                found_reason = true;
-                break;
-            }
-        }
+        bool found_reason = rdw_stuck_blocker_names_test_drive(snaps, n);
         RDW_CHECK("blocker detail names the driver label", found_reason);
 
         /* ---- (a2) the blocker carries a deadline-gated escape that
          * blocker_supervisor_sweep() actuates into the recovery ladder. ---- */
-        bool esc_wired = false;
-        for (int i = 0; i < n; i++) {
-            if (strcmp(snaps[i].id, "reducer_drive_stuck") == 0) {
-                esc_wired = strcmp(snaps[i].escape_action,
-                                   "reducer_drive_ladder_kick") == 0 &&
-                            snaps[i].escape_deadline_us > 0;
-                break;
-            }
-        }
-        RDW_CHECK("blocker arms a deadline-gated ladder-kick escape", esc_wired);
+        bool esc_wired = rdw_stuck_blocker_arms_ladder_kick(snaps, n);
+        RDW_CHECK("blocker arms a deadline-gated ladder-kick escape",
+                  esc_wired);
 
-        bool armed_before = sticky_escalator_test_armed();
-        int dispatched_before = blocker_escape_dispatched_count();
-        /* Push the blocker clock past the 60s escape deadline so the sweep fires,
-         * then restore the real clock. */
-        blocker_advance_clock_for_testing(70LL * 1000 * 1000);
-        int fired = blocker_supervisor_sweep();
-        bool ok_escape = !armed_before &&
-                         fired >= 1 &&
-                         blocker_escape_dispatched_count() > dispatched_before &&
-                         sticky_escalator_test_armed();
-        blocker_set_clock_for_testing(0);
+        bool ok_escape = rdw_escape_sweep_arms_ladder();
         RDW_CHECK("deadline sweep actuates the escape -> ARMS the ladder",
-                 ok_escape);
+                  ok_escape);
 
         /* ---- (b) cursor movement clears it ---- */
-        reducer_drive_watchdog_test_set_cursor_override(101);
-        rdw_fake_clock_set(&fc, t0 + 40);
-        condition_engine_tick(); /* cursor advanced past frozen -> witness clears */
-
-        bool ok3 = true;
-        ok3 = ok3 && !blocker_exists("reducer_drive_stuck");
-        ok3 = ok3 && condition_engine_get_active_count() == 0;
-        struct condition_runtime_snapshot snap3;
-        bool got3 = condition_engine_get_registered_snapshot(
-            "reducer_drive_watchdog", &snap3);
-        ok3 = ok3 && got3 && snap3.cleared_count == 1;
+        bool ok3 = rdw_cursor_advance_cleared(&fc, t0);
         RDW_CHECK("cursor advance past the frozen height clears the blocker",
-                 ok3);
+                  ok3);
 
         /* ---- (c) drive exit clears it (re-trip first) ---- */
-        reducer_drive_watchdog_test_set_cursor_override(200);
-        rdw_fake_clock_set(&fc, t0 + 60);
-        condition_engine_tick(); /* baseline reset to 200, no trip */
-        rdw_fake_clock_set(&fc, t0 + 80);
-        condition_engine_tick(); /* cursor unchanged -> re-trip */
-
-        bool ok4 = true;
-        ok4 = ok4 && blocker_exists("reducer_drive_stuck");
-        ok4 = ok4 && condition_engine_get_active_count() == 1;
+        bool ok4 = rdw_fresh_frozen_cursor_retripped(&fc, t0);
         RDW_CHECK("re-trip after a fresh frozen cursor", ok4);
 
-        reducer_drive_exit();
-        rdw_fake_clock_set(&fc, t0 + 100);
-        condition_engine_tick(); /* drive inactive -> witness clears */
-
-        bool ok5 = true;
-        ok5 = ok5 && !blocker_exists("reducer_drive_stuck");
-        ok5 = ok5 && condition_engine_get_active_count() == 0;
-        ok5 = ok5 && !reducer_drive_active();
+        bool ok5 = rdw_drive_exit_cleared(&fc, t0);
         RDW_CHECK("drive exit clears the blocker", ok5);
     }
 
@@ -352,58 +586,15 @@ int test_reducer_drive_watchdog(void)
             struct json_value v;
             json_init(&v);
             bool dumped = reducer_drive_dump_state_json(&v, NULL);
-            bool okd = true;
-            okd = okd && dumped;
-            okd = okd && json_get(&v, "active") != NULL;
-            okd = okd && json_get_bool(json_get(&v, "active")) == false;
-            okd = okd && json_get(&v, "label") != NULL;
-            okd = okd && json_get(&v, "age_us") != NULL;
-            okd = okd && json_get(&v, "watchdog_threshold_secs") != NULL;
-            okd = okd && json_get_int(
-                json_get(&v, "watchdog_threshold_secs")) == 0;
-            okd = okd && json_get(&v, "last_watchdog_fire_unix") != NULL;
-            okd = okd &&
-                  json_get_int(json_get(&v, "last_watchdog_fire_unix")) > 0;
-            okd = okd && json_get(&v, "utxo_apply_cursor") != NULL;
-            okd = okd &&
-                  json_get_int(json_get(&v, "utxo_apply_cursor")) == 200;
-            okd = okd && json_get(&v, "coins_applied_read_ok") != NULL;
-            okd = okd && json_get_bool(
-                json_get(&v, "coins_applied_read_ok")) == true;
-            okd = okd && json_get(&v, "coins_applied_height") != NULL;
-            okd = okd &&
-                  json_get_int(json_get(&v, "coins_applied_height")) == 4242;
+            bool okd = rdw_dump_documented_fields(&v, dumped);
             RDW_CHECK("dump emits all documented fields with live values",
-                     okd);
+                      okd);
 
-            /* Drive+fsync telemetry (drain-exit counters, fsync timing) is always
-             * emitted, 0 included, unlike stage_spin. */
-            bool okt = true;
-            okt = okt && json_get(&v, "drain_exit_converged_total") != NULL;
-            okt = okt && json_get(&v, "drain_exit_budget_total") != NULL;
-            okt = okt && json_get(&v, "drain_last_round_advances") != NULL;
-            okt = okt && json_get(&v, "drain_last_elapsed_us") != NULL;
-            const struct json_value *stage_us =
-                json_get(&v, "drain_last_stage_us");
-            okt = okt && stage_us != NULL;
-            static const char *const stage_names[] = {
-                "header_admit", "validate_headers", "body_fetch", "body_persist",
-                "script_validate", "proof_validate", "utxo_apply", "tip_finalize"
-            };
-            for (size_t i = 0; stage_us &&
-                 i < sizeof(stage_names) / sizeof(stage_names[0]); i++)
-                okt = okt && json_get(stage_us, stage_names[i]) != NULL;
-            okt = okt && json_get(&v, "fsync_last_flush_us") != NULL;
-            okt = okt && json_get(&v, "fsync_flush_us_ewma") != NULL;
+            bool okt = rdw_dump_drain_fsync_fields(&v);
             RDW_CHECK("dump carries the drain-exit + fsync-timing fields",
-                     okt);
+                      okt);
 
-            /* event_log_deferred, plus the append-path split: all always emitted. */
-            bool oka = true;
-            oka = oka && json_get(&v, "event_log_deferred") != NULL;
-            oka = oka && json_get(&v, "event_log_barrier_appends") != NULL;
-            oka = oka && json_get(&v, "event_log_deferred_appends") != NULL;
-            oka = oka && json_get(&v, "event_log_barrier_us_total") != NULL;
+            bool oka = rdw_dump_event_log_fields(&v);
             RDW_CHECK("dump carries the event_log append-path attribution",
                       oka);
             json_free(&v);
@@ -417,13 +608,7 @@ int test_reducer_drive_watchdog(void)
      * via the ZCL_TESTING reset + snapshot pair; break-site attribution is covered
      * by test_mint_fold_livelock. Guards only the snapshot/reset plumbing. ---- */
     {
-        reducer_drain_exit_stats_reset_for_testing();
-        struct reducer_drain_exit_stats des;
-        reducer_drain_exit_stats_snapshot(&des);
-        bool ok = des.exit_converged_total == 0 &&
-                  des.exit_budget_total == 0 &&
-                  des.last_round_advances == 0 &&
-                  des.last_elapsed_us == 0;
+        bool ok = rdw_drain_exit_stats_are_zero();
         RDW_CHECK("drain-exit stats: reset zeroes all four fields", ok);
     }
 
@@ -442,58 +627,28 @@ int test_reducer_drive_watchdog(void)
 
         /* (f1) an unmodified fast flush never trips the condition, proven against
          * the same 10ms budget the slow case uses. */
-        condition_engine_reset_for_testing();
-        register_batch_fsync_slow();
-        batch_fsync_slow_test_set_budget_us(10000); /* 10ms */
-        bool trig1 = reducer_body_fsync_test_trigger_precommit();
-        condition_engine_tick();
-        bool ok_healthy = trig1 && !blocker_exists("batch_fsync_slow") &&
-                          condition_engine_get_active_count() == 0;
+        bool ok_healthy = rdw_batch_fsync_healthy_quiet();
         RDW_CHECK("batch_fsync_slow: healthy fast flush does not false-fire",
-                 ok_healthy);
+                  ok_healthy);
 
         /* (f2) One injected 320ms flush against the 10ms budget trips on either EWMA
          * path: next = (prev == 0) ? sample : prev + (sample - prev) / 16, so it
          * seeds to 320000us or damps to ~20000us; both exceed 10ms. The delay must
          * stay above 16 * budget. A fresh engine reset gives a "first tick". */
-        condition_engine_reset_for_testing();
-        register_batch_fsync_slow();
-        batch_fsync_slow_test_set_budget_us(10000); /* 10ms, same as f1 */
-        reducer_body_fsync_test_set_inject_delay_us(320 * 1000);
-        bool trig2 = reducer_body_fsync_test_trigger_precommit();
-        condition_engine_tick();
-        bool ok_slow = trig2 && blocker_exists("batch_fsync_slow") &&
-                       condition_engine_get_active_count() == 1 &&
-                       batch_fsync_slow_test_remedy_calls() == 1;
+        bool ok_slow = rdw_batch_fsync_slow_trips();
         RDW_CHECK("batch_fsync_slow: injected slow flush trips the blocker",
-                 ok_slow);
+                  ok_slow);
 
-        {
-            struct blocker_snapshot snaps[BLOCKER_CAP];
-            int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
-            bool found_reason = false;
-            for (int i = 0; i < n; i++) {
-                if (strcmp(snaps[i].id, "batch_fsync_slow") == 0 &&
-                    strstr(snaps[i].reason, "flush_us_ewma=") != NULL &&
-                    strstr(snaps[i].reason, "budget_us=") != NULL) {
-                    found_reason = true;
-                    break;
-                }
-            }
-            RDW_CHECK("batch_fsync_slow: blocker names the EWMA + budget",
-                     found_reason);
-        }
+        bool found_reason = rdw_batch_fsync_reason_names_ewma();
+        RDW_CHECK("batch_fsync_slow: blocker names the EWMA + budget",
+                  found_reason);
 
         /* (f3) raise the budget far above the elevated EWMA on the same active
          * episode: an active episode is checked every tick, so the witness clears
          * without a reset or waiting out EWMA decay. */
-        reducer_body_fsync_test_set_inject_delay_us(0);
-        batch_fsync_slow_test_set_budget_us(60LL * 1000 * 1000); /* 60s */
-        condition_engine_tick();
-        bool ok_clear = !blocker_exists("batch_fsync_slow") &&
-                        condition_engine_get_active_count() == 0;
+        bool ok_clear = rdw_batch_fsync_budget_clears();
         RDW_CHECK("batch_fsync_slow: budget clearing the EWMA clears "
-                 "the blocker", ok_clear);
+                  "the blocker", ok_clear);
 
         /* dumpstate carries live fsync timing after real activity. */
         struct json_value v2;
@@ -503,7 +658,7 @@ int test_reducer_drive_watchdog(void)
             json_get(&v2, "fsync_flush_us_ewma") != NULL &&
             json_get_int(json_get(&v2, "fsync_flush_us_ewma")) > 0;
         RDW_CHECK("batch_fsync_slow: dumpstate reflects live EWMA activity",
-                 okd2);
+                  okd2);
         json_free(&v2);
 
         /* strtoll() reports ERANGE by returning LLONG_MAX for this runtime
