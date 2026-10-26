@@ -15,7 +15,7 @@
  *     (coins_applied=A+5 > utxo_apply ok=1 prefix=A+2 + 1).
  *
  * Fixture: utxo_apply ok=1 prefix == A+2 (hole at A+3); the cursor is set so
- *   ua_log_frontier == cursor-1, isolating I4.4 from I4.3.
+ * ua_log_frontier == cursor-1, isolating I4.4 from I4.3.
  *
  * Scratch files live under ./test-tmp/<name>_<pid>/.
  */
@@ -149,8 +149,6 @@ static bool cca_set_applied(sqlite3 *db, int32_t height)
     return ok;
 }
 
-/* Fixture setup (2): build the schema, add the contaminated coin above the
- * anchor and stamp coins_applied to A+5. Returns the CCA_CHECK failure count. */
 static int cca_check_schema_and_contaminated_coin(sqlite3 *pk)
 {
     int failures = 0;
@@ -170,8 +168,6 @@ static int cca_check_schema_and_contaminated_coin(sqlite3 *pk)
     return failures;
 }
 
-/* Fixture setup (3): the utxo_apply ok=1 prefix hole and the stage cursors
- * that isolate I4.4 from I4.3/I4.1. Returns the CCA_CHECK failure count. */
 static int cca_check_prefix_hole_and_cursors(sqlite3 *pk)
 {
     int failures = 0;
@@ -237,8 +233,6 @@ static int cca_check_half_b_sweeps(void)
     return failures;
 }
 
-/* Snapshot the blockers and check the window.consistency reason text names
- * I4.4 with the exact heights. Returns the CCA_CHECK failure count. */
 static int cca_check_half_b_reason_text(void)
 {
     int failures = 0;
