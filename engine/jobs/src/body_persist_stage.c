@@ -275,27 +275,193 @@ static job_result_t requeue_body_for_refetch(struct block_index *bi,
     return JOB_IDLE;
 }
 
+/* step_persist phase helpers: each phase either finishes the step — returning
+ * STEP_PHASE_FINISHED with *result set to the step's job_result_t — or
+ * returns STEP_PHASE_CONTINUE so step_persist runs the next phase. Same
+ * checks, same order, same side effects as the former single-function flow. */
+enum step_phase {
+    STEP_PHASE_CONTINUE = 0,
+    STEP_PHASE_FINISHED,
+};
+
+/* Preflight: NULL stage state, closed progress store, negative cursor, then
+ * the body_fetch frontier check. Fills *ms_out, *db_out, *next_h_out and
+ * *bf_cursor_out on STEP_PHASE_CONTINUE. */
+static enum step_phase step_preflight_gate(struct stage_step_ctx *c,
+                                           struct main_state **ms_out,
+                                           sqlite3 **db_out, int *next_h_out,
+                                           uint64_t *bf_cursor_out,
+                                           job_result_t *result)
+{
+    struct main_state *ms = g_ms;
+    if (!ms) {
+        *result = JOB_IDLE;
+        return STEP_PHASE_FINISHED;
+    }
+    sqlite3 *db = progress_store_db();
+    if (!db) {
+        *result = JOB_IDLE;
+        return STEP_PHASE_FINISHED;
+    }
+
+    int next_h = (int)c->cursor_in;
+    if (next_h < 0) {
+        *result = JOB_FATAL;
+        return STEP_PHASE_FINISHED;
+    }
+
+    uint64_t bf_cursor = 0;
+    if (!stage_cursor_read_or_zero(db, "body_fetch", STAGE_NAME,
+                                   &bf_cursor)) {
+        *result = JOB_FATAL;
+        return STEP_PHASE_FINISHED;
+    }
+    if ((uint64_t)next_h >= bf_cursor) {
+        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+        *result = JOB_IDLE;
+        return STEP_PHASE_FINISHED;
+    }
+
+    *ms_out = ms;
+    *db_out = db;
+    *next_h_out = next_h;
+    *bf_cursor_out = bf_cursor;
+    return STEP_PHASE_CONTINUE;
+}
+
+/* The upstream body_fetch verdict failed (a deterministic header-consensus
+ * verdict a re-fetch cannot change): write the one permanent ok=0 row this
+ * stage persists and advance the cursor past the height. */
+static job_result_t step_persist_upstream_failed(sqlite3 *db,
+                                                 struct stage_step_ctx *c,
+                                                 int next_h)
+{
+    if (!body_persist_log_insert(db, next_h, "upstream_failed", false))
+        return JOB_FATAL;
+    atomic_fetch_add(&g_upstream_failed_total, 1);
+    atomic_store(&g_last_advance_height, (int64_t)next_h);
+    requeue_hold_disarm();
+    c->cursor_out = c->cursor_in + 1;
+    return JOB_ADVANCED;
+}
+
+/* Gate on the block_index entry: the body must be present (BLOCK_HAVE_DATA)
+ * before this stage reads it; otherwise record the hold and idle. */
+static enum step_phase step_gate_body_present(struct main_state *ms,
+                                              int next_h,
+                                              struct block_index **bi_out,
+                                              job_result_t *result)
+{
+    struct block_index *bi = stage_body_index_at(ms, next_h);
+    if (!bi || !bi->phashBlock ||
+        !(block_index_status_load(bi) & BLOCK_HAVE_DATA)) {
+        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+        /* The body this stage requeued has still not arrived. Name it once the
+         * remedy has demonstrably failed (see requeue_hold_note_idle) — a
+         * height at or below the active tip is not re-requestable. */
+        requeue_hold_note_idle(next_h, active_chain_height(&ms->chain_active));
+        *result = JOB_IDLE;
+        return STEP_PHASE_FINISHED;
+    }
+    *bi_out = bi;
+    return STEP_PHASE_CONTINUE;
+}
+
+/* Read the body for `next_h`: from the shared parse cache when no reader is
+ * installed (borrowed) or through the configured reader (owned). Returns the
+ * acquire/read call's own result; on success profiles the cache handle and
+ * fills *blk_out and *borrowed for the caller's verification/release paths. */
+static bool step_read_body(int next_h, struct block_index *bi,
+                           struct block *owned,
+                           struct block_parse_handle *handle,
+                           const struct block **blk_out, bool *borrowed)
+{
+    *borrowed = g_reader == NULL;
+    bool read_ok = *borrowed
+        ? block_parse_cache_acquire(next_h, bi->phashBlock->data, bi,
+                                    g_datadir, handle)
+        : stage_read_block(owned, bi, next_h, g_datadir, g_reader,
+                           g_reader_user);
+    if (read_ok) {
+        if (*borrowed)
+            profile_acquire(handle);
+        *blk_out = *borrowed ? block_parse_handle_block(handle) : owned;
+    }
+    return read_ok;
+}
+
+/* Success tail of step_persist: index the block's created outputs, set
+ * BLOCK_HAVE_DATA + nTx and re-emit the status event, persist the verified
+ * row, then advance the cursor. Returns the step's result. */
+static job_result_t step_commit_verified(sqlite3 *db, struct block_index *bi,
+                                         const struct block *blk, int next_h,
+                                         struct stage_step_ctx *c,
+                                         struct block_parse_handle *handle,
+                                         struct block *owned, bool borrowed)
+{
+    /* Index every output this block creates so script_validate (stage 5) can
+     * resolve transparent prevouts without -txindex. body_persist (stage 4) is
+     * strictly upstream, so the index is complete at/below the script_validate
+     * frontier before it is needed (P0 §2.1). Load-bearing for validation:
+     * a write failure is fatal, not silently skipped. */
+    int64_t phase_started = platform_time_monotonic_us();
+    if (!created_outputs_index_put_block(db, blk, next_h)) {
+        release_stage_block(handle, owned, borrowed);
+        return JOB_FATAL;
+    }
+    reducer_stage_profile_observe_us(REDUCER_PROFILE_BODY_PERSIST,
+                                     RPF_CREATED_INDEX_US,
+                              (uint64_t)(platform_time_monotonic_us() -
+                                         phase_started));
+
+    /* The body has landed on disk and round-tripped (hash + merkle verified),
+     * so mark BLOCK_HAVE_DATA on the in-memory block_index entry. Then re-emit
+     * a lightweight status event with the updated nStatus so the projection
+     * persists the HAVE_DATA bit (idempotent — the projection patches its
+     * already-durable EV_BLOCK_HEADER row keyed on hash, see
+     * jobs/block_header_emit.h). This bump never re-serializes the immutable
+     * header fields/solution: reducer_ingest_service.c's EV_BLOCK_HEADER emit
+     * already recorded them for this hash before body_persist ever runs (this
+     * stage is strictly downstream of body admission). nTx rides the same
+     * event: an n_tx=0 row breaks the next boot's nChainTx propagation
+     * exactly at this block. */
+    block_index_status_fetch_or(bi, BLOCK_HAVE_DATA);
+    if (bi->nTx == 0 && blk->num_vtx > 0)
+        bi->nTx = (unsigned int)blk->num_vtx;
+    phase_started = platform_time_monotonic_us();
+    block_index_emit_status_event(bi, "body_persist", &g_header_event_emit_total, &g_header_event_emit_fail_total);
+    reducer_stage_profile_observe_us(
+        REDUCER_PROFILE_BODY_PERSIST, RPF_HEADER_EVENT_US,
+        (uint64_t)(platform_time_monotonic_us() - phase_started));
+
+    release_stage_block(handle, owned, borrowed);
+    phase_started = platform_time_monotonic_us();
+    if (!body_persist_log_insert(db, next_h, "verified", true))
+        return JOB_FATAL;
+    reducer_stage_profile_observe_us(REDUCER_PROFILE_BODY_PERSIST,
+                                     RPF_STAGE_LOG_CURSOR_US,
+                              (uint64_t)(platform_time_monotonic_us() -
+                                         phase_started));
+    atomic_fetch_add(&g_verified_total, 1);
+    atomic_store(&g_last_advance_height, (int64_t)next_h);
+    requeue_hold_disarm();
+    c->cursor_out = c->cursor_in + 1;
+    return JOB_ADVANCED;
+}
+
 static job_result_t step_persist(struct stage_step_ctx *c)
 {
     int64_t total_started = platform_time_monotonic_us();
     atomic_store(&g_last_step_unix, platform_time_wall_unix());
 
-    struct main_state *ms = g_ms;
-    if (!ms) return JOB_IDLE;
-    sqlite3 *db = progress_store_db();
-    if (!db) return JOB_IDLE;
-
-    int next_h = (int)c->cursor_in;
-    if (next_h < 0) return JOB_FATAL;
-
+    struct main_state *ms = NULL;
+    sqlite3 *db = NULL;
+    int next_h = 0;
     uint64_t bf_cursor = 0;
-    if (!stage_cursor_read_or_zero(db, "body_fetch", STAGE_NAME,
-                                   &bf_cursor))
-        return JOB_FATAL;
-    if ((uint64_t)next_h >= bf_cursor) {
-        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-        return JOB_IDLE;
-    }
+    job_result_t result = JOB_IDLE;
+    if (step_preflight_gate(c, &ms, &db, &next_h, &bf_cursor, &result) ==
+        STEP_PHASE_FINISHED)
+        return result;
 
     struct body_fetch_row upstream;
     int found = body_persist_body_fetch_log_at(db, next_h, &upstream);
@@ -310,46 +476,26 @@ static job_result_t step_persist(struct stage_step_ctx *c)
     }
     stage_upstream_log_hole_clear(STAGE_NAME);
 
-    if (upstream.ok == 0) {
-        if (!body_persist_log_insert(db, next_h, "upstream_failed", false))
-            return JOB_FATAL;
-        atomic_fetch_add(&g_upstream_failed_total, 1);
-        atomic_store(&g_last_advance_height, (int64_t)next_h);
-        requeue_hold_disarm();
-        c->cursor_out = c->cursor_in + 1;
-        return JOB_ADVANCED;
-    }
+    if (upstream.ok == 0)
+        return step_persist_upstream_failed(db, c, next_h);
 
-    struct block_index *bi = stage_body_index_at(ms, next_h);
-    if (!bi || !bi->phashBlock ||
-        !(block_index_status_load(bi) & BLOCK_HAVE_DATA)) {
-        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-        /* The body this stage requeued has still not arrived. Name it once the
-         * remedy has demonstrably failed (see requeue_hold_note_idle) — a
-         * height at or below the active tip is not re-requestable. */
-        requeue_hold_note_idle(next_h, active_chain_height(&ms->chain_active));
-        return JOB_IDLE;
-    }
+    struct block_index *bi = NULL;
+    if (step_gate_body_present(ms, next_h, &bi, &result) ==
+        STEP_PHASE_FINISHED)
+        return result;
 
     struct block owned;
     block_init(&owned);
     struct block_parse_handle handle;
     memset(&handle, 0, sizeof(handle));
-    bool borrowed = g_reader == NULL;
+    const struct block *blk = NULL;
+    bool borrowed = false;
     int64_t acquire_started = platform_time_monotonic_us();
-    bool read_ok = borrowed
-        ? block_parse_cache_acquire(next_h, bi->phashBlock->data, bi,
-                                    g_datadir, &handle)
-        : stage_read_block(&owned, bi, next_h, g_datadir, g_reader,
-                           g_reader_user);
-    if (!read_ok) {
+    if (!step_read_body(next_h, bi, &owned, &handle, &blk, &borrowed)) {
         block_free(&owned);
         return requeue_body_for_refetch(bi, next_h, "read_failed",
                                         &g_read_failed_total);
     }
-    if (borrowed) profile_acquire(&handle);
-    const struct block *blk = borrowed ? block_parse_handle_block(&handle)
-                                       : &owned;
     reducer_stage_profile_observe_us(
         REDUCER_PROFILE_BODY_PERSIST, RPF_UPSTREAM_US,
         (uint64_t)(acquire_started - total_started));
@@ -388,54 +534,8 @@ static job_result_t step_persist(struct stage_step_ctx *c)
                                         &g_merkle_mismatch_total);
     }
 
-    /* Index every output this block creates so script_validate (stage 5) can
-     * resolve transparent prevouts without -txindex. body_persist (stage 4) is
-     * strictly upstream, so the index is complete at/below the script_validate
-     * frontier before it is needed (P0 §2.1). Load-bearing for validation:
-     * a write failure is fatal, not silently skipped. */
-    phase_started = platform_time_monotonic_us();
-    if (!created_outputs_index_put_block(db, blk, next_h)) {
-        release_stage_block(&handle, &owned, borrowed);
-        return JOB_FATAL;
-    }
-    reducer_stage_profile_observe_us(REDUCER_PROFILE_BODY_PERSIST,
-                                     RPF_CREATED_INDEX_US,
-                              (uint64_t)(platform_time_monotonic_us() -
-                                         phase_started));
-
-    /* The body has landed on disk and round-tripped (hash + merkle verified),
-     * so mark BLOCK_HAVE_DATA on the in-memory block_index entry. Then re-emit
-     * a lightweight status event with the updated nStatus so the projection
-     * persists the HAVE_DATA bit (idempotent — the projection patches its
-     * already-durable EV_BLOCK_HEADER row keyed on hash, see
-     * jobs/block_header_emit.h). This bump never re-serializes the immutable
-     * header fields/solution: reducer_ingest_service.c's EV_BLOCK_HEADER emit
-     * already recorded them for this hash before body_persist ever runs (this
-     * stage is strictly downstream of body admission). nTx rides the same
-     * event: an n_tx=0 row breaks the next boot's nChainTx propagation
-     * exactly at this block. */
-    block_index_status_fetch_or(bi, BLOCK_HAVE_DATA);
-    if (bi->nTx == 0 && blk->num_vtx > 0)
-        bi->nTx = (unsigned int)blk->num_vtx;
-    phase_started = platform_time_monotonic_us();
-    block_index_emit_status_event(bi, "body_persist", &g_header_event_emit_total, &g_header_event_emit_fail_total);
-    reducer_stage_profile_observe_us(
-        REDUCER_PROFILE_BODY_PERSIST, RPF_HEADER_EVENT_US,
-        (uint64_t)(platform_time_monotonic_us() - phase_started));
-
-    release_stage_block(&handle, &owned, borrowed);
-    phase_started = platform_time_monotonic_us();
-    if (!body_persist_log_insert(db, next_h, "verified", true))
-        return JOB_FATAL;
-    reducer_stage_profile_observe_us(REDUCER_PROFILE_BODY_PERSIST,
-                                     RPF_STAGE_LOG_CURSOR_US,
-                              (uint64_t)(platform_time_monotonic_us() -
-                                         phase_started));
-    atomic_fetch_add(&g_verified_total, 1);
-    atomic_store(&g_last_advance_height, (int64_t)next_h);
-    requeue_hold_disarm();
-    c->cursor_out = c->cursor_in + 1;
-    return JOB_ADVANCED;
+    return step_commit_verified(db, bi, blk, next_h, c, &handle, &owned,
+                                borrowed);
 }
 
 bool body_persist_stage_init(struct main_state *ms)
