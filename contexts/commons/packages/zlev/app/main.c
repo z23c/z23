@@ -9,6 +9,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+
+static int finish_output(int written) {
+  if (written < 0 || fflush(stdout) != 0 || ferror(stdout)) {
+    fprintf(stderr, "zlev: output write failed\n");
+    return 1;
+  }
+  return 0;
+}
 
 int main(int argc, char **argv) {
   int sim = 0;
@@ -19,8 +28,9 @@ int main(int argc, char **argv) {
       sim = 1;
     } else if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc - 2) {
       char *end = NULL;
+      errno = 0;
       limit = strtol(argv[++i], &end, 10);
-      if (end == argv[i] || *end != '\0' || limit < 0) {
+      if (end == argv[i] || *end != '\0' || limit < 0 || errno == ERANGE) {
         fprintf(stderr, "zlev: bad --limit value\n");
         return 2;
       }
@@ -41,8 +51,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "zlev: input too long\n");
         return 1;
       }
-      printf("%d.%03d\n", m / 1000, m % 1000);
-      return 0;
+      return finish_output(printf("%d.%03d\n", m / 1000, m % 1000));
     }
     {
       size_t d = limit >= 0 ? zlev_distance_bounded(a, na, b, nb,
@@ -52,8 +61,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "zlev: input too long\n");
         return 1;
       }
-      printf("%zu\n", d);
-      return 0;
+      return finish_output(printf("%zu\n", d));
     }
   }
 }
