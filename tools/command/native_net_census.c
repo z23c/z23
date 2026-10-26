@@ -118,7 +118,7 @@ static int census_parse_limit(const struct zcl_command_request *request)
     return limit;
 }
 
-/* Read the optional 1-based page number (0 = first page). */
+/* Read the optional 0-based page number (0 = first page). */
 static int64_t census_parse_page(const struct zcl_command_request *request)
 {
     int64_t page = 0;
