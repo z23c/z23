@@ -132,6 +132,107 @@ static enum vcs_package_deps_error deps_insert(struct vcs_package_deps *deps,
     return VCS_PACKAGE_DEPS_OK;
 }
 
+static enum vcs_package_deps_error deps_check_schema(
+    const struct json_value *doc)
+{
+    const struct json_value *schema = json_get(doc, "schema");
+    if (schema && (schema->type != JSON_INT ||
+                   json_get_int(schema) != VCS_PACKAGE_DEPS_SCHEMA))
+        return VCS_PACKAGE_DEPS_ERR_META_SCHEMA;
+    return VCS_PACKAGE_DEPS_OK;
+}
+
+static enum vcs_package_deps_error deps_parse_edge_name(
+    const struct json_value *row, struct vcs_package_dep *edge, size_t i,
+    char *detail, size_t detail_cap)
+{
+    const struct json_value *nv = json_get(row, "name");
+    if (nv) {
+        const char *s = nv->type == JSON_STR ? json_get_str(nv) : NULL;
+        if (!s || strlen(s) >= sizeof(edge->name)) {
+            deps_detail(detail, detail_cap, "dependencies[%zu].name", i);
+            return VCS_PACKAGE_DEPS_ERR_DEP_NAME;
+        }
+        (void)snprintf(edge->name, sizeof(edge->name), "%s", s);
+        if (!deps_label_ok(edge->name, sizeof(edge->name))) {
+            deps_detail(detail, detail_cap, "dependencies[%zu].name", i);
+            return VCS_PACKAGE_DEPS_ERR_DEP_NAME;
+        }
+    }
+    return VCS_PACKAGE_DEPS_OK;
+}
+
+static enum vcs_package_deps_error deps_parse_edge_semver(
+    const struct json_value *row, struct vcs_package_dep *edge, size_t i,
+    char *detail, size_t detail_cap)
+{
+    const struct json_value *sv = json_get(row, "semver");
+    if (sv) {
+        const char *s = sv->type == JSON_STR ? json_get_str(sv) : NULL;
+        if (!s || strlen(s) >= sizeof(edge->semver)) {
+            deps_detail(detail, detail_cap, "dependencies[%zu].semver", i);
+            return VCS_PACKAGE_DEPS_ERR_DEP_SEMVER;
+        }
+        (void)snprintf(edge->semver, sizeof(edge->semver), "%s", s);
+        if (!deps_label_ok(edge->semver, sizeof(edge->semver))) {
+            deps_detail(detail, detail_cap, "dependencies[%zu].semver", i);
+            return VCS_PACKAGE_DEPS_ERR_DEP_SEMVER;
+        }
+    }
+    return VCS_PACKAGE_DEPS_OK;
+}
+
+/* One declared dependency row: shape, root, labels, then the sorted insert. */
+static enum vcs_package_deps_error deps_parse_edge(
+    struct vcs_package_deps *out, const struct json_value *row, size_t i,
+    char *detail, size_t detail_cap)
+{
+    if (!row || row->type != JSON_OBJ) {
+        deps_detail(detail, detail_cap, "dependencies[%zu]", i);
+        return VCS_PACKAGE_DEPS_ERR_DEP_SHAPE;
+    }
+    struct vcs_package_dep edge;
+    memset(&edge, 0, sizeof(edge));
+    const struct json_value *rv = json_get(row, "root");
+    const char *rhex = rv && rv->type == JSON_STR ? json_get_str(rv)
+                                                  : NULL;
+    if (!rhex || !zcl_hex_decode_lower(rhex, edge.root, 32) ||
+        deps_root_is_zero(edge.root)) {
+        deps_detail(detail, detail_cap, "dependencies[%zu].root=%s", i,
+                    rhex ? rhex : "(missing)");
+        return VCS_PACKAGE_DEPS_ERR_DEP_ROOT;
+    }
+    enum vcs_package_deps_error err =
+        deps_parse_edge_name(row, &edge, i, detail, detail_cap);
+    if (err != VCS_PACKAGE_DEPS_OK)
+        return err;
+    err = deps_parse_edge_semver(row, &edge, i, detail, detail_cap);
+    if (err != VCS_PACKAGE_DEPS_OK)
+        return err;
+    err = deps_insert(out, &edge);
+    if (err != VCS_PACKAGE_DEPS_OK)
+        deps_detail(detail, detail_cap, "dependencies[%zu]", i);
+    return err;
+}
+
+static enum vcs_package_deps_error deps_parse_edges(
+    struct vcs_package_deps *out, const struct json_value *deps,
+    char *detail, size_t detail_cap)
+{
+    enum vcs_package_deps_error err = VCS_PACKAGE_DEPS_OK;
+    size_t n = json_size(deps);
+    if (n > VCS_PACKAGE_DEPS_MAX_DIRECT) {
+        deps_detail(detail, detail_cap, "%zu entries > %u cap", n,
+                    VCS_PACKAGE_DEPS_MAX_DIRECT);
+        err = VCS_PACKAGE_DEPS_ERR_DEP_COUNT;
+    }
+    for (size_t i = 0; i < n && err == VCS_PACKAGE_DEPS_OK; i++) {
+        const struct json_value *row = json_at(deps, i);
+        err = deps_parse_edge(out, row, i, detail, detail_cap);
+    }
+    return err;
+}
+
 enum vcs_package_deps_error vcs_package_deps_parse_meta(
     const uint8_t *text, size_t len, struct vcs_package_deps *out,
     char *detail, size_t detail_cap)
@@ -157,82 +258,15 @@ enum vcs_package_deps_error vcs_package_deps_parse_meta(
         json_free(&doc);
         return VCS_PACKAGE_DEPS_ERR_META_JSON;
     }
-    enum vcs_package_deps_error err = VCS_PACKAGE_DEPS_OK;
-    const struct json_value *schema = json_get(&doc, "schema");
-    if (schema && (schema->type != JSON_INT ||
-                   json_get_int(schema) != VCS_PACKAGE_DEPS_SCHEMA))
-        err = VCS_PACKAGE_DEPS_ERR_META_SCHEMA;
+    enum vcs_package_deps_error err = deps_check_schema(&doc);
 
     const struct json_value *deps = err == VCS_PACKAGE_DEPS_OK
                                         ? json_get(&doc, "dependencies")
                                         : NULL;
     if (err == VCS_PACKAGE_DEPS_OK && deps && deps->type != JSON_ARR)
         err = VCS_PACKAGE_DEPS_ERR_DEP_SHAPE;
-    if (err == VCS_PACKAGE_DEPS_OK && deps) {
-        size_t n = json_size(deps);
-        if (n > VCS_PACKAGE_DEPS_MAX_DIRECT) {
-            deps_detail(detail, detail_cap, "%zu entries > %u cap", n,
-                        VCS_PACKAGE_DEPS_MAX_DIRECT);
-            err = VCS_PACKAGE_DEPS_ERR_DEP_COUNT;
-        }
-        for (size_t i = 0; i < n && err == VCS_PACKAGE_DEPS_OK; i++) {
-            const struct json_value *row = json_at(deps, i);
-            if (!row || row->type != JSON_OBJ) {
-                deps_detail(detail, detail_cap, "dependencies[%zu]", i);
-                err = VCS_PACKAGE_DEPS_ERR_DEP_SHAPE;
-                break;
-            }
-            struct vcs_package_dep edge;
-            memset(&edge, 0, sizeof(edge));
-            const struct json_value *rv = json_get(row, "root");
-            const char *rhex = rv && rv->type == JSON_STR ? json_get_str(rv)
-                                                          : NULL;
-            if (!rhex || !zcl_hex_decode_lower(rhex, edge.root, 32) ||
-                deps_root_is_zero(edge.root)) {
-                deps_detail(detail, detail_cap, "dependencies[%zu].root=%s", i,
-                            rhex ? rhex : "(missing)");
-                err = VCS_PACKAGE_DEPS_ERR_DEP_ROOT;
-                break;
-            }
-            const struct json_value *nv = json_get(row, "name");
-            if (nv) {
-                const char *s = nv->type == JSON_STR ? json_get_str(nv) : NULL;
-                if (!s || strlen(s) >= sizeof(edge.name)) {
-                    deps_detail(detail, detail_cap, "dependencies[%zu].name",
-                                i);
-                    err = VCS_PACKAGE_DEPS_ERR_DEP_NAME;
-                    break;
-                }
-                (void)snprintf(edge.name, sizeof(edge.name), "%s", s);
-                if (!deps_label_ok(edge.name, sizeof(edge.name))) {
-                    deps_detail(detail, detail_cap, "dependencies[%zu].name",
-                                i);
-                    err = VCS_PACKAGE_DEPS_ERR_DEP_NAME;
-                    break;
-                }
-            }
-            const struct json_value *sv = json_get(row, "semver");
-            if (sv) {
-                const char *s = sv->type == JSON_STR ? json_get_str(sv) : NULL;
-                if (!s || strlen(s) >= sizeof(edge.semver)) {
-                    deps_detail(detail, detail_cap, "dependencies[%zu].semver",
-                                i);
-                    err = VCS_PACKAGE_DEPS_ERR_DEP_SEMVER;
-                    break;
-                }
-                (void)snprintf(edge.semver, sizeof(edge.semver), "%s", s);
-                if (!deps_label_ok(edge.semver, sizeof(edge.semver))) {
-                    deps_detail(detail, detail_cap, "dependencies[%zu].semver",
-                                i);
-                    err = VCS_PACKAGE_DEPS_ERR_DEP_SEMVER;
-                    break;
-                }
-            }
-            err = deps_insert(out, &edge);
-            if (err != VCS_PACKAGE_DEPS_OK)
-                deps_detail(detail, detail_cap, "dependencies[%zu]", i);
-        }
-    }
+    if (err == VCS_PACKAGE_DEPS_OK && deps)
+        err = deps_parse_edges(out, deps, detail, detail_cap);
     json_free(&doc);
     if (err != VCS_PACKAGE_DEPS_OK)
         vcs_package_deps_init(out);
@@ -401,6 +435,31 @@ static enum vcs_package_deps_error deps_normalize_depths(
     return VCS_PACKAGE_DEPS_OK;
 }
 
+static bool deps_on_stack(const struct deps_frame *stack, size_t sp,
+                          const uint8_t root[32])
+{
+    bool on_stack = false;
+    for (size_t i = 0; i < sp; i++)
+        if (memcmp(stack[i].root, root, 32) == 0)
+            on_stack = true;
+    return on_stack;
+}
+
+/* Release the DFS scratch, then settle depths and the error state. */
+static enum vcs_package_deps_error deps_resolve_finish(
+    struct vcs_package_lock *out, struct deps_frame *stack,
+    struct vcs_package_deps *graph, enum vcs_package_deps_error err,
+    char *detail, size_t detail_cap)
+{
+    free(stack);
+    if (err == VCS_PACKAGE_DEPS_OK)
+        err = deps_normalize_depths(out, graph, detail, detail_cap);
+    free(graph);
+    if (err != VCS_PACKAGE_DEPS_OK)
+        vcs_package_lock_init(out);
+    return err;
+}
+
 // long-function-ok:one-dfs-state-machine — the iterative DFS (push, descend,
 // cycle check, post-order emit) is one state machine; splitting it would put
 // the stack, the visited set, and the cycle test in three places.
@@ -440,11 +499,7 @@ enum vcs_package_deps_error vcs_package_lock_resolve(
         const struct vcs_package_dep *edge = &top->deps.items[top->next++];
         if (vcs_package_lock_find(out, edge->root) != SIZE_MAX)
             continue; /* already emitted: a shared dependency, not a cycle */
-        bool on_stack = false;
-        for (size_t i = 0; i < sp; i++)
-            if (memcmp(stack[i].root, edge->root, 32) == 0)
-                on_stack = true;
-        if (on_stack) {
+        if (deps_on_stack(stack, sp, edge->root)) {
             char hex[65];
             deps_hexify(edge->root, hex);
             deps_detail(detail, detail_cap, "root %s is already being resolved",
@@ -461,13 +516,7 @@ enum vcs_package_deps_error vcs_package_lock_resolve(
         err = deps_push(stack, &sp, edge->root, (uint16_t)(top->depth + 1u),
                         edge, src, detail, detail_cap);
     }
-    free(stack);
-    if (err == VCS_PACKAGE_DEPS_OK)
-        err = deps_normalize_depths(out, graph, detail, detail_cap);
-    free(graph);
-    if (err != VCS_PACKAGE_DEPS_OK)
-        vcs_package_lock_init(out);
-    return err;
+    return deps_resolve_finish(out, stack, graph, err, detail, detail_cap);
 }
 
 /* ── canonical wire ─────────────────────────────────────────────────── */
@@ -502,6 +551,17 @@ static size_t lock_wire_size(const struct vcs_package_lock *lock)
     return n;
 }
 
+static bool lock_write_node(struct zcl_codec_writer *writer,
+                            const struct vcs_package_lock_node *n,
+                            size_t nl, size_t sl)
+{
+    return zcl_codec_write_bytes(writer, n->root, 32) &&
+        zcl_codec_write_u16_string(writer, n->name, nl) &&
+        zcl_codec_write_u16_string(writer, n->semver, sl) &&
+        zcl_codec_write_u16le(writer, n->depth) &&
+        zcl_codec_write_u16le(writer, n->direct_deps);
+}
+
 enum vcs_package_deps_error vcs_package_lock_serialize(
     const struct vcs_package_lock *lock, uint8_t **out, size_t *out_len)
 {
@@ -531,11 +591,7 @@ enum vcs_package_deps_error vcs_package_lock_serialize(
         const struct vcs_package_lock_node *n = &lock->nodes[i];
         size_t nl = strlen(n->name);
         size_t sl = strlen(n->semver);
-        ok = ok && zcl_codec_write_bytes(&writer, n->root, 32) &&
-            zcl_codec_write_u16_string(&writer, n->name, nl) &&
-            zcl_codec_write_u16_string(&writer, n->semver, sl) &&
-            zcl_codec_write_u16le(&writer, n->depth) &&
-            zcl_codec_write_u16le(&writer, n->direct_deps);
+        ok = ok && lock_write_node(&writer, n, nl, sl);
     }
     size_t written = 0;
     ok = ok && zcl_codec_writer_finish(&writer, &written) && written == need;
@@ -545,6 +601,50 @@ enum vcs_package_deps_error vcs_package_lock_serialize(
     }
     *out = buf;
     *out_len = written;
+    return VCS_PACKAGE_DEPS_OK;
+}
+
+static enum vcs_package_deps_error lock_parse_header(
+    struct zcl_codec_reader *reader, uint16_t *count)
+{
+    uint8_t magic[VCS_PACKAGE_LOCK_WIRE_MAGIC_BYTES];
+    uint16_t version = 0;
+    if (!zcl_codec_read_bytes(reader, magic, sizeof(magic)) ||
+        memcmp(magic, lock_wire_magic, sizeof(magic)) != 0)
+        return VCS_PACKAGE_DEPS_ERR_WIRE_MAGIC;
+    if (!zcl_codec_read_u16le(reader, &version))
+        return VCS_PACKAGE_DEPS_ERR_WIRE_TRUNCATED;
+    if (version != VCS_PACKAGE_LOCK_VERSION)
+        return VCS_PACKAGE_DEPS_ERR_WIRE_VERSION;
+    if (!zcl_codec_read_u16le(reader, count))
+        return VCS_PACKAGE_DEPS_ERR_WIRE_TRUNCATED;
+    if (*count > VCS_PACKAGE_LOCK_MAX_NODES)
+        return VCS_PACKAGE_DEPS_ERR_NODE_COUNT;
+    return VCS_PACKAGE_DEPS_OK;
+}
+
+static enum vcs_package_deps_error lock_parse_node(
+    struct zcl_codec_reader *reader, struct vcs_package_lock *out)
+{
+    struct vcs_package_lock_node n;
+    memset(&n, 0, sizeof(n));
+    uint16_t nl = 0, sl = 0;
+    if (!zcl_codec_read_bytes(reader, n.root, 32) ||
+        !zcl_codec_read_u16_string(reader, n.name, sizeof(n.name),
+                                   &nl) ||
+        !zcl_codec_read_u16_string(reader, n.semver, sizeof(n.semver),
+                                   &sl) ||
+        !zcl_codec_read_u16le(reader, &n.depth) ||
+        !zcl_codec_read_u16le(reader, &n.direct_deps))
+        return VCS_PACKAGE_DEPS_ERR_WIRE_TRUNCATED;
+    if (deps_root_is_zero(n.root) || !deps_label_ok(n.name, sizeof(n.name)) ||
+        !deps_label_ok(n.semver, sizeof(n.semver)) ||
+        n.depth > VCS_PACKAGE_LOCK_MAX_DEPTH ||
+        n.direct_deps > VCS_PACKAGE_DEPS_MAX_DIRECT) {
+        vcs_package_lock_init(out);
+        return VCS_PACKAGE_DEPS_ERR_WIRE_ORDER;
+    }
+    out->nodes[out->count++] = n;
     return VCS_PACKAGE_DEPS_OK;
 }
 
@@ -561,39 +661,14 @@ enum vcs_package_deps_error vcs_package_lock_parse(
         return VCS_PACKAGE_DEPS_ERR_WIRE_TRUNCATED;
     struct zcl_codec_reader reader;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    uint8_t magic[VCS_PACKAGE_LOCK_WIRE_MAGIC_BYTES];
-    uint16_t version = 0, count = 0;
-    if (!zcl_codec_read_bytes(&reader, magic, sizeof(magic)) ||
-        memcmp(magic, lock_wire_magic, sizeof(magic)) != 0)
-        return VCS_PACKAGE_DEPS_ERR_WIRE_MAGIC;
-    if (!zcl_codec_read_u16le(&reader, &version))
-        return VCS_PACKAGE_DEPS_ERR_WIRE_TRUNCATED;
-    if (version != VCS_PACKAGE_LOCK_VERSION)
-        return VCS_PACKAGE_DEPS_ERR_WIRE_VERSION;
-    if (!zcl_codec_read_u16le(&reader, &count))
-        return VCS_PACKAGE_DEPS_ERR_WIRE_TRUNCATED;
-    if (count > VCS_PACKAGE_LOCK_MAX_NODES)
-        return VCS_PACKAGE_DEPS_ERR_NODE_COUNT;
+    uint16_t count = 0;
+    enum vcs_package_deps_error herr = lock_parse_header(&reader, &count);
+    if (herr != VCS_PACKAGE_DEPS_OK)
+        return herr;
     for (uint16_t i = 0; i < count; i++) {
-        struct vcs_package_lock_node n;
-        memset(&n, 0, sizeof(n));
-        uint16_t nl = 0, sl = 0;
-        if (!zcl_codec_read_bytes(&reader, n.root, 32) ||
-            !zcl_codec_read_u16_string(&reader, n.name, sizeof(n.name),
-                                       &nl) ||
-            !zcl_codec_read_u16_string(&reader, n.semver, sizeof(n.semver),
-                                       &sl) ||
-            !zcl_codec_read_u16le(&reader, &n.depth) ||
-            !zcl_codec_read_u16le(&reader, &n.direct_deps))
-            return VCS_PACKAGE_DEPS_ERR_WIRE_TRUNCATED;
-        if (deps_root_is_zero(n.root) || !deps_label_ok(n.name, sizeof(n.name)) ||
-            !deps_label_ok(n.semver, sizeof(n.semver)) ||
-            n.depth > VCS_PACKAGE_LOCK_MAX_DEPTH ||
-            n.direct_deps > VCS_PACKAGE_DEPS_MAX_DIRECT) {
-            vcs_package_lock_init(out);
-            return VCS_PACKAGE_DEPS_ERR_WIRE_ORDER;
-        }
-        out->nodes[out->count++] = n;
+        enum vcs_package_deps_error nerr = lock_parse_node(&reader, out);
+        if (nerr != VCS_PACKAGE_DEPS_OK)
+            return nerr;
     }
     if (!zcl_codec_reader_finish(&reader)) {
         vcs_package_lock_init(out);
