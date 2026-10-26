@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -141,10 +142,79 @@ static int pot_remove_tree(const char *root, const char *bin, const char *tmp)
     return unlink(stub) | rmdir(bin) | rmdir(tmp) | rmdir(root);
 }
 
+
+/* Runs the oracle binary itself (record/check take a directory; the driver
+ * wrapper always uses the committed corpus). Returns its exit status, or -1. */
+static int pot_run_real(const char *drv, const char *mode, const char *dir)
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execl(drv, drv, mode, dir, (char *)nullptr);
+        _exit(127);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+/* Byte offset where record two starts in groth16_decode_corpus.bin: the
+ * magic, a u32 count, then record one (fam u8, verdict u8, ilen u16, input,
+ * llen u16, label). Returns -1 when the file is too short to hold record one.
+ * The magic literal mirrors DECODE_MAGIC in groth16_parity_oracle.c. */
+static long pot_record_two_offset(const char *path)
+{
+    const size_t magic = sizeof("G16PARITY-DECODE-01\n") - 1;
+    unsigned char hdr[512];
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t got = fread(hdr, 1, sizeof hdr, f);
+    fclose(f);
+    if (got < magic + 4 + 4) return -1;
+    uint16_t ilen = 0, llen = 0;
+    size_t off = magic + 4;
+    memcpy(&ilen, hdr + off + 2, sizeof ilen);
+    off += 4 + ilen;
+    if (off + sizeof llen > got) return -1;
+    memcpy(&llen, hdr + off, sizeof llen);
+    off += sizeof llen + llen;
+    return off > got ? -1 : (long)off;
+}
+
+static void pot_remove_fixture(const char *dir)
+{
+    static const char *const names[] = {
+        "groth16_parity_golden.bin", "groth16_decode_corpus.bin",
+        "groth16_pairing_values.bin"};
+    char path[BUF * 2 + 32];
+    for (size_t i = 0; i < sizeof names / sizeof *names; i++) {
+        snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        unlink(path);
+    }
+    rmdir(dir);
+}
+
+/* A corpus whose declared records are cut before record two must FAIL the
+ * check. Records the frozen files with the real driver, truncates the decode
+ * corpus after record one, and expects the check to refuse it. */
+static void pot_case_truncated_decode(const char *drv, const char *root)
+{
+    char dir[BUF * 2], path[BUF * 2 + 32];
+    snprintf(dir, sizeof dir, "%s/trunc", root);
+    pot_check(mkdir(dir, 0755) == 0, "truncated decode fixture dir");
+    pot_check(pot_run_real(drv, "record", dir) == 0, "truncated decode fixture record");
+    snprintf(path, sizeof path, "%s/groth16_decode_corpus.bin", dir);
+    long off = pot_record_two_offset(path);
+    pot_check(off > 0 && truncate(path, off) == 0, "truncated decode fixture cut");
+    pot_check(pot_run_real(drv, "check", dir) == 1,
+              "truncated decode corpus fails check");
+    pot_remove_fixture(dir);
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s <driver> <scratch-dir>\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr, "usage: %s <driver> <scratch-dir> <oracle>\n", argv[0]);
         return 2;
     }
     char root[BUF], bin[BUF + 16], tmp[BUF + 16], path[BUF * 2 + 32];
@@ -169,6 +239,7 @@ int main(int argc, char **argv)
     pot_case_signal(argv[1], tmp, SIGHUP, 1, "SIGHUP cleans up");
     pot_case_signal(argv[1], tmp, SIGTERM, 2, "repeated SIGTERM cleans up");
     pot_case_signal(argv[1], tmp, SIGINT, 2, "repeated SIGINT cleans up");
+    pot_case_truncated_decode(argv[3], root);
 
     if (g_failures == 0 && pot_remove_tree(root, bin, tmp) != 0) return 2;
     puts(g_failures ? "run_parity_oracle_selftest: FAILED"

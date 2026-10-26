@@ -762,7 +762,7 @@ static int check_pairing_first_diff(const uint8_t *now, const uint8_t *frozen)
 }
 
 /* Reads one frozen record: label length, label, then the Fp12 bytes.
- * Returns 0 on success, 1 on a short read (stop the loop), 2 when the label
+ * Returns 0 on success, 1 on a short read (truncated: the caller fails), 2 when the label
  * does not fit in label_cap (fail the check). */
 static int check_pairing_read_record(FILE *f, char *label, size_t label_cap,
                                      uint8_t *frozen)
@@ -803,7 +803,12 @@ static int check_pairing_values(const char *path)
         uint8_t frozen[PC_FP12_BYTES];
         int rc = check_pairing_read_record(f, label, sizeof(label), frozen);
         if (rc == 2) { fclose(f); return -1; }
-        if (rc == 1) break;
+        if (rc == 1) {
+            fprintf(stderr, "PAIRING VALUE FAIL: truncated record %u of %u "
+                    "(short read; the frozen file is cut)\n", i + 1, cnt);
+            fclose(f);
+            return -1;
+        }
 
         struct fp12 e;
         uint8_t now[PC_FP12_BYTES];
@@ -943,7 +948,7 @@ static bool check_decode_magic_ok(FILE *f)
 }
 
 /* Reads one bytes->verdict record. Returns 0 on success, 1 on a short read
- * (stop the loop), 2 when the input is larger than MAX_INPUT (fail the
+ * (a truncated corpus: the caller fails), 2 when the input is larger than MAX_INPUT (fail the
  * check). */
 static int check_decode_read_record(FILE *f, uint8_t *fam, uint8_t *verdict,
                                     uint8_t *input, char *label,
@@ -1011,7 +1016,12 @@ static int check_decode_corpus(const char *path)
         int rc = check_decode_read_record(f, &fam, &verdict, input, label,
                                           sizeof(label));
         if (rc == 2) { fclose(f); return -1; }
-        if (rc == 1) break;
+        if (rc == 1) {
+            fprintf(stderr, "DECODE CORPUS FAIL: truncated record %u of %u "
+                    "(short read; the corpus file is cut)\n", i + 1, n);
+            fclose(f);
+            return -1;
+        }
 
         int got = check_decode_verdict(fam, input);
         if (got < 0) {
