@@ -386,7 +386,7 @@ done:
     return error;
 }
 
-static bool shadow_snapshot_valid(
+static bool shadow_snapshot_header_valid(
     const struct vcs_c23_evidence_snapshot_v1 *snapshot)
 {
     if (!snapshot || snapshot->schema_version !=
@@ -397,7 +397,12 @@ static bool shadow_snapshot_valid(
         !zcl_bytes_any_set(snapshot->evidence_set_root, 32) ||
         snapshot->total_weight == 0)
         return false;
-    uint64_t total = 0;
+    return true;
+}
+
+static bool shadow_snapshot_rows_valid(
+    const struct vcs_c23_evidence_snapshot_v1 *snapshot, uint64_t *total)
+{
     for (size_t i = 0; i < snapshot->candidate_count; i++) {
         if (!zcl_bytes_any_set(snapshot->rows[i].seed_root, 32) ||
             !zcl_bytes_any_set(snapshot->rows[i].zid_pubkey, 32) ||
@@ -405,13 +410,28 @@ static bool shadow_snapshot_valid(
             snapshot->rows[i].weight > VCS_C23_SHADOW_MAX_WEIGHT ||
             (i != 0 && memcmp(snapshot->rows[i - 1].zid_pubkey,
                               snapshot->rows[i].zid_pubkey, 32) >= 0) ||
-            !zcl_u64_add(total, snapshot->rows[i].weight, &total))
+            !zcl_u64_add(*total, snapshot->rows[i].weight, total))
             return false;
     }
+    return true;
+}
+
+static bool shadow_snapshot_totals_match(
+    const struct vcs_c23_evidence_snapshot_v1 *snapshot, uint64_t total)
+{
     uint8_t root[32];
     shadow_snapshot_root(snapshot, root);
     return total == snapshot->total_weight &&
            memcmp(root, snapshot->snapshot_root, 32) == 0;
+}
+
+static bool shadow_snapshot_valid(
+    const struct vcs_c23_evidence_snapshot_v1 *snapshot)
+{
+    uint64_t total = 0;
+    return shadow_snapshot_header_valid(snapshot) &&
+           shadow_snapshot_rows_valid(snapshot, &total) &&
+           shadow_snapshot_totals_match(snapshot, total);
 }
 
 static void shadow_election_seed_root(
@@ -506,6 +526,92 @@ static void shadow_election_root(
     sha3_256_finalize(&sha, out);
 }
 
+static enum vcs_c23_shadow_election_error
+shadow_election_check_seats_and_blocks(
+    const struct vcs_c23_shadow_election_input *input, size_t seat_capacity)
+{
+    if (input->seat_count == 0 ||
+        input->seat_count > VCS_C23_SHADOW_MAX_SEATS ||
+        input->seat_count > input->snapshot->candidate_count ||
+        input->seat_count > seat_capacity)
+        return VCS_C23_SHADOW_ELECTION_SEATS;
+    for (size_t i = 0; i < VCS_C23_SHADOW_ELECTION_BLOCKS; i++)
+        if (!zcl_bytes_any_set(input->seed_block_hashes[i], 32))
+            return VCS_C23_SHADOW_ELECTION_ROOT;
+    return VCS_C23_SHADOW_ELECTION_OK;
+}
+
+static void shadow_election_copy_candidates(
+    const struct vcs_c23_evidence_snapshot_v1 *snapshot,
+    struct shadow_candidate *candidates)
+{
+    for (size_t i = 0; i < snapshot->candidate_count; i++) {
+        memcpy(candidates[i].seed_root,
+               snapshot->rows[i].seed_root, 32);
+        memcpy(candidates[i].zid_pubkey,
+               snapshot->rows[i].zid_pubkey, 32);
+        candidates[i].weight = snapshot->rows[i].weight;
+    }
+}
+
+static void shadow_election_fill_header(
+    const struct vcs_c23_shadow_election_input *input,
+    struct vcs_c23_shadow_election_seat *seats,
+    struct vcs_c23_shadow_election_v1 *out)
+{
+    out->schema_version = VCS_C23_SHADOW_ELECTION_VERSION;
+    out->election_epoch = input->snapshot->election_epoch;
+    out->seed_start_height = input->seed_start_height;
+    memcpy(out->snapshot_root, input->snapshot->snapshot_root, 32);
+    shadow_election_seed_root(input, out->election_seed_root);
+    out->total_candidate_weight = input->snapshot->total_weight;
+    out->seat_count = input->seat_count;
+    out->seats = seats;
+    out->simulation_only = true;
+    out->authority_conferred = false;
+}
+
+static enum vcs_c23_shadow_election_error shadow_election_select_seats(
+    const struct vcs_c23_shadow_election_input *input,
+    struct vcs_c23_shadow_election_v1 *out,
+    struct shadow_candidate *candidates,
+    struct vcs_c23_shadow_election_seat *seats)
+{
+    if (!shadow_concentration(
+            input->snapshot, &out->maximum_candidate_weight,
+            &out->maximum_weight_ppm, &out->concentration_ppm))
+        return VCS_C23_SHADOW_ELECTION_OVERFLOW;
+
+    uint64_t remaining_weight = input->snapshot->total_weight;
+    for (size_t seat = 0; seat < input->seat_count; seat++) {
+        uint64_t draw = 0;
+        if (!shadow_draw(out->election_seed_root, seat,
+                         remaining_weight, &draw))
+            return VCS_C23_SHADOW_ELECTION_OVERFLOW;
+        uint64_t cumulative = 0;
+        size_t selected = input->snapshot->candidate_count;
+        for (size_t i = 0; i < input->snapshot->candidate_count; i++) {
+            if (candidates[i].selected) continue;
+            if (!zcl_u64_add(cumulative, candidates[i].weight,
+                             &cumulative))
+                return VCS_C23_SHADOW_ELECTION_OVERFLOW;
+            if (draw < cumulative) {
+                selected = i;
+                break;
+            }
+        }
+        if (selected == input->snapshot->candidate_count)
+            return VCS_C23_SHADOW_ELECTION_SEATS;
+        candidates[selected].selected = true;
+        memcpy(seats[seat].seed_root, candidates[selected].seed_root, 32);
+        memcpy(seats[seat].zid_pubkey,
+               candidates[selected].zid_pubkey, 32);
+        seats[seat].weight = candidates[selected].weight;
+        remaining_weight -= candidates[selected].weight;
+    }
+    return VCS_C23_SHADOW_ELECTION_OK;
+}
+
 enum vcs_c23_shadow_election_error vcs_c23_shadow_election_build(
     const struct vcs_c23_shadow_election_input *input,
     struct vcs_c23_shadow_election_seat *seats, size_t seat_capacity,
@@ -519,79 +625,19 @@ enum vcs_c23_shadow_election_error vcs_c23_shadow_election_build(
         return VCS_C23_SHADOW_ELECTION_NULL;
     if (!shadow_snapshot_valid(input->snapshot))
         return VCS_C23_SHADOW_ELECTION_EVIDENCE;
-    if (input->seat_count == 0 ||
-        input->seat_count > VCS_C23_SHADOW_MAX_SEATS ||
-        input->seat_count > input->snapshot->candidate_count ||
-        input->seat_count > seat_capacity)
-        return VCS_C23_SHADOW_ELECTION_SEATS;
-    for (size_t i = 0; i < VCS_C23_SHADOW_ELECTION_BLOCKS; i++)
-        if (!zcl_bytes_any_set(input->seed_block_hashes[i], 32))
-            return VCS_C23_SHADOW_ELECTION_ROOT;
+    enum vcs_c23_shadow_election_error error =
+        shadow_election_check_seats_and_blocks(input, seat_capacity);
+    if (error != VCS_C23_SHADOW_ELECTION_OK) return error;
 
     struct shadow_candidate *candidates = zcl_calloc(
         input->snapshot->candidate_count, sizeof(*candidates),
         "c23_shadow_election_candidates");
     if (!candidates) return VCS_C23_SHADOW_ELECTION_ALLOCATION;
-    for (size_t i = 0; i < input->snapshot->candidate_count; i++) {
-        memcpy(candidates[i].seed_root,
-               input->snapshot->rows[i].seed_root, 32);
-        memcpy(candidates[i].zid_pubkey,
-               input->snapshot->rows[i].zid_pubkey, 32);
-        candidates[i].weight = input->snapshot->rows[i].weight;
-    }
+    shadow_election_copy_candidates(input->snapshot, candidates);
 
-    out->schema_version = VCS_C23_SHADOW_ELECTION_VERSION;
-    out->election_epoch = input->snapshot->election_epoch;
-    out->seed_start_height = input->seed_start_height;
-    memcpy(out->snapshot_root, input->snapshot->snapshot_root, 32);
-    shadow_election_seed_root(input, out->election_seed_root);
-    out->total_candidate_weight = input->snapshot->total_weight;
-    out->seat_count = input->seat_count;
-    out->seats = seats;
-    out->simulation_only = true;
-    out->authority_conferred = false;
-    enum vcs_c23_shadow_election_error error =
-        VCS_C23_SHADOW_ELECTION_OK;
-    if (!shadow_concentration(
-            input->snapshot, &out->maximum_candidate_weight,
-            &out->maximum_weight_ppm, &out->concentration_ppm)) {
-        error = VCS_C23_SHADOW_ELECTION_OVERFLOW;
-        goto done;
-    }
-
-    uint64_t remaining_weight = input->snapshot->total_weight;
-    for (size_t seat = 0; seat < input->seat_count; seat++) {
-        uint64_t draw = 0;
-        if (!shadow_draw(out->election_seed_root, seat,
-                         remaining_weight, &draw)) {
-            error = VCS_C23_SHADOW_ELECTION_OVERFLOW;
-            goto done;
-        }
-        uint64_t cumulative = 0;
-        size_t selected = input->snapshot->candidate_count;
-        for (size_t i = 0; i < input->snapshot->candidate_count; i++) {
-            if (candidates[i].selected) continue;
-            if (!zcl_u64_add(cumulative, candidates[i].weight,
-                             &cumulative)) {
-                error = VCS_C23_SHADOW_ELECTION_OVERFLOW;
-                goto done;
-            }
-            if (draw < cumulative) {
-                selected = i;
-                break;
-            }
-        }
-        if (selected == input->snapshot->candidate_count) {
-            error = VCS_C23_SHADOW_ELECTION_SEATS;
-            goto done;
-        }
-        candidates[selected].selected = true;
-        memcpy(seats[seat].seed_root, candidates[selected].seed_root, 32);
-        memcpy(seats[seat].zid_pubkey,
-               candidates[selected].zid_pubkey, 32);
-        seats[seat].weight = candidates[selected].weight;
-        remaining_weight -= candidates[selected].weight;
-    }
+    shadow_election_fill_header(input, seats, out);
+    error = shadow_election_select_seats(input, out, candidates, seats);
+    if (error != VCS_C23_SHADOW_ELECTION_OK) goto done;
     shadow_election_root(out, out->election_root);
 
 done:
