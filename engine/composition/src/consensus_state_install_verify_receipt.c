@@ -41,6 +41,12 @@ static bool valid_dir_fd(int dir_fd)
     return dir_fd >= 0;
 }
 
+static bool receipt_args_valid(int dir_fd, const uint8_t bundle_sha3_256[32],
+                               const uint8_t verifier_epoch[32])
+{
+    return valid_dir_fd(dir_fd) && bundle_sha3_256 && verifier_epoch;
+}
+
 #ifndef _WIN32
 static void put_u32(uint8_t *b, size_t o, uint32_t v)
 {
@@ -116,38 +122,31 @@ static bool write_all(int fd, const uint8_t *buf, size_t n)
 }
 #endif
 
-bool consensus_state_install_verify_receipt_lookup(
-    int dir_fd, const uint8_t bundle_sha3_256[32],
-    const uint8_t verifier_epoch[32], int64_t *out_age_us)
+#ifndef _WIN32
+/* Read-status codes from read_receipt_wire(); the caller logs per code so
+ * every message keeps its exact wording and this file's function names. */
+enum {
+    IVR_READ_OK = 0,
+    IVR_READ_OPEN_FAILED,
+    IVR_READ_MALFORMED
+};
+
+/* Opens the receipt under dir_fd, reads up to the wire buffer size and
+ * closes it. *out_open_err carries errno when IVR_READ_OPEN_FAILED is
+ * returned; *out_off always carries the bytes read otherwise. */
+static int read_receipt_wire(int dir_fd, uint8_t wire[IVR_WIRE_SIZE + 1],
+                             size_t *out_off, int *out_open_err)
 {
-    if (out_age_us)
-        *out_age_us = 0;
-    if (!valid_dir_fd(dir_fd) || !bundle_sha3_256 || !verifier_epoch)
-        return false; /* raw-return-ok:no-receipt-store-available */
-
-#ifdef _WIN32
-    /* A POSIX integer dirfd cannot carry a Windows directory HANDLE. Native
-     * callers must use lookup_root(), which performs handle-bound reads. */
-    return false;
-#else
-
     int fd = openat(dir_fd, CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME,
                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
-        /* ENOENT is the ordinary "never verified this datadir before" case
-         * and is not worth logging; anything else (permissions, etc.) is
-         * still fail-soft to a full verify, logged once for visibility. */
-        if (errno != ENOENT)
-            LOG_WARN(IVR_SUBSYS,
-                     "receipt open failed (falling back to full verify): %s",
-                     strerror(errno));
-        return false; /* raw-return-ok:no-receipt-fail-soft */
+        *out_open_err = errno;
+        return IVR_READ_OPEN_FAILED;
     }
-    uint8_t wire[IVR_WIRE_SIZE + 1];
     size_t off = 0;
     bool read_ok = true;
-    while (off < sizeof(wire)) {
-        ssize_t r = read(fd, wire + off, sizeof(wire) - off);
+    while (off < IVR_WIRE_SIZE + 1) {
+        ssize_t r = read(fd, wire + off, (IVR_WIRE_SIZE + 1) - off);
         if (r > 0) {
             off += (size_t)r;
             continue;
@@ -159,49 +158,210 @@ bool consensus_state_install_verify_receipt_lookup(
         break;
     }
     (void)close(fd);
-    if (!read_ok || off != IVR_WIRE_SIZE) {
+    *out_off = off;
+    if (!read_ok || off != IVR_WIRE_SIZE)
+        return IVR_READ_MALFORMED;
+    return IVR_READ_OK;
+}
+
+/* Check-status codes from check_receipt_wire(); the caller logs per code. */
+enum {
+    IVR_CHECK_OK = 0,
+    IVR_CHECK_BAD_VERSION,
+    IVR_CHECK_BAD_DIGEST,
+    IVR_CHECK_DIFFERENT_KEY
+};
+
+/* Validates version, self-digest and bundle/epoch identity of a wire
+ * record that already passed the size check. */
+static int check_receipt_wire(const uint8_t wire[IVR_WIRE_SIZE],
+                              const uint8_t bundle_sha3_256[32],
+                              const uint8_t verifier_epoch[32])
+{
+    if (get_u32(wire, IVR_OFF_VERSION) != IVR_VERSION)
+        return IVR_CHECK_BAD_VERSION;
+    uint8_t expected_digest[32];
+    ivr_digest(wire, expected_digest);
+    if (memcmp(expected_digest, wire + IVR_OFF_DIGEST, 32) != 0)
+        return IVR_CHECK_BAD_DIGEST;
+    if (memcmp(wire + IVR_OFF_BUNDLE, bundle_sha3_256, 32) != 0 ||
+        memcmp(wire + IVR_OFF_EPOCH, verifier_epoch, 32) != 0)
+        return IVR_CHECK_DIFFERENT_KEY;
+    return IVR_CHECK_OK;
+}
+
+/* Age of a validated wire record, clamped at zero for clock skew. */
+static int64_t receipt_age_us(const uint8_t wire[IVR_WIRE_SIZE])
+{
+    int64_t verified_at_us = (int64_t)get_u64(wire, IVR_OFF_TIME);
+    int64_t age_us = GetTimeMicros() - verified_at_us;
+    if (age_us < 0)
+        age_us = 0;
+    return age_us;
+}
+#endif
+
+bool consensus_state_install_verify_receipt_lookup(
+    int dir_fd, const uint8_t bundle_sha3_256[32],
+    const uint8_t verifier_epoch[32], int64_t *out_age_us)
+{
+    if (out_age_us)
+        *out_age_us = 0;
+    if (!receipt_args_valid(dir_fd, bundle_sha3_256, verifier_epoch))
+        return false; /* raw-return-ok:no-receipt-store-available */
+
+#ifdef _WIN32
+    /* A POSIX integer dirfd cannot carry a Windows directory HANDLE. Native
+     * callers must use lookup_root(), which performs handle-bound reads. */
+    return false;
+#else
+
+    uint8_t wire[IVR_WIRE_SIZE + 1];
+    size_t off = 0;
+    int open_err = 0;
+    int read_status = read_receipt_wire(dir_fd, wire, &off, &open_err);
+    if (read_status == IVR_READ_OPEN_FAILED) {
+        /* ENOENT is the ordinary "never verified this datadir before" case
+         * and is not worth logging; anything else (permissions, etc.) is
+         * still fail-soft to a full verify, logged once for visibility. */
+        if (open_err != ENOENT)
+            LOG_WARN(IVR_SUBSYS,
+                     "receipt open failed (falling back to full verify): %s",
+                     strerror(open_err));
+        return false; /* raw-return-ok:no-receipt-fail-soft */
+    }
+    if (read_status == IVR_READ_MALFORMED) {
         LOG_WARN(IVR_SUBSYS,
                  "receipt is unreadable/malformed (falling back to full "
                  "verify): bytes=%zu", off);
         return false; /* raw-return-ok:corrupt-receipt-fail-soft */
     }
-    if (get_u32(wire, IVR_OFF_VERSION) != IVR_VERSION) {
+    int check_status = check_receipt_wire(wire, bundle_sha3_256,
+                                          verifier_epoch);
+    if (check_status == IVR_CHECK_BAD_VERSION) {
         LOG_WARN(IVR_SUBSYS,
                  "receipt has an unknown version (falling back to full "
                  "verify)");
         return false; /* raw-return-ok:unknown-version-fail-soft */
     }
-    uint8_t expected_digest[32];
-    ivr_digest(wire, expected_digest);
-    if (memcmp(expected_digest, wire + IVR_OFF_DIGEST, 32) != 0) {
+    if (check_status == IVR_CHECK_BAD_DIGEST) {
         LOG_WARN(IVR_SUBSYS,
                  "receipt failed self-digest verification (falling back to "
                  "full verify)");
         return false; /* raw-return-ok:tampered-receipt-fail-soft */
     }
-    if (memcmp(wire + IVR_OFF_BUNDLE, bundle_sha3_256, 32) != 0 ||
-        memcmp(wire + IVR_OFF_EPOCH, verifier_epoch, 32) != 0) {
+    if (check_status == IVR_CHECK_DIFFERENT_KEY) {
         LOG_INFO(IVR_SUBSYS,
                  "receipt is for a different bundle hash or verifier build "
                  "epoch; content will be verified in full");
         return false; /* raw-return-ok:different-key-fail-soft */
     }
-    int64_t verified_at_us = (int64_t)get_u64(wire, IVR_OFF_TIME);
-    int64_t now_us = GetTimeMicros();
-    int64_t age_us = now_us - verified_at_us;
-    if (age_us < 0)
-        age_us = 0;
+    int64_t age_us = receipt_age_us(wire);
     if (out_age_us)
         *out_age_us = age_us;
     return true;
 #endif
 }
 
+#ifndef _WIN32
+/* Temp-creation status codes from create_receipt_temp(); the caller logs
+ * per code so every message keeps its exact wording. */
+enum {
+    IVR_TEMP_OK = 0,
+    IVR_TEMP_NAME_OVERFLOW,
+    IVR_TEMP_OPEN_FAILED,
+    IVR_TEMP_EXHAUSTED
+};
+
+/* Creates the O_EXCL temp receipt next to the final name, retrying the
+ * nonce suffix on EEXIST. On IVR_TEMP_OK, *out_fd holds the open fd and tmp
+ * the chosen name; *out_err carries errno on IVR_TEMP_OPEN_FAILED. */
+static int create_receipt_temp(int dir_fd, char *tmp, size_t tmp_size,
+                               int *out_fd, int *out_err)
+{
+    for (unsigned attempt = 0; attempt < 64; attempt++) {
+        uint64_t nonce = atomic_fetch_add_explicit(&g_temp_nonce, 1,
+                                                    memory_order_relaxed);
+        int n = snprintf(tmp, tmp_size, "%s.tmp.%ld.%016llx",
+                         CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME,
+                         (long)getpid(), (unsigned long long)nonce);
+        if (n <= 0 || (size_t)n >= tmp_size)
+            return IVR_TEMP_NAME_OVERFLOW;
+        int fd = openat(dir_fd, tmp,
+                        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                        0600);
+        if (fd >= 0) {
+            *out_fd = fd;
+            return IVR_TEMP_OK;
+        }
+        if (errno != EEXIST) {
+            *out_err = errno;
+            return IVR_TEMP_OPEN_FAILED;
+        }
+    }
+    return IVR_TEMP_EXHAUSTED;
+}
+
+/* Outcome of publish_receipt(). Each failure step is a flag with the errno
+ * captured at the failing call, so the caller can log every message itself;
+ * a short write raises no flag and only turns ok false, as it is not
+ * logged. */
+struct ivr_publish_outcome {
+    bool ok;
+    bool sync_failed;
+    int sync_err;
+    bool close_failed;
+    int close_err;
+    bool rename_failed;
+    int rename_err;
+    bool dir_fsync_failed;
+    int dir_fsync_err;
+};
+
+/* Writes wire to the temp fd, syncs, closes, renames into place and syncs
+ * the directory; unlinks the temp when the rename never happened. */
+static struct ivr_publish_outcome publish_receipt(
+    int dir_fd, const char *tmp, int fd, const uint8_t wire[IVR_WIRE_SIZE])
+{
+    struct ivr_publish_outcome o = {0};
+    bool ok = write_all(fd, wire, IVR_WIRE_SIZE);
+    if (ok && platform_data_sync(fd) != 0) {
+        ok = false;
+        o.sync_failed = true;
+        o.sync_err = errno;
+    }
+    if (close(fd) != 0) {
+        ok = false;
+        o.close_failed = true;
+        o.close_err = errno;
+    }
+    bool renamed = false;
+    if (ok && renameat(dir_fd, tmp, dir_fd,
+                       CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME) != 0) {
+        ok = false;
+        o.rename_failed = true;
+        o.rename_err = errno;
+    } else if (ok) {
+        renamed = true;
+    }
+    if (ok && fsync(dir_fd) != 0) {
+        o.dir_fsync_failed = true;
+        o.dir_fsync_err = errno;
+    }
+    if (!ok && !renamed) {
+        (void)unlinkat(dir_fd, tmp, 0);
+        (void)fsync(dir_fd);
+    }
+    o.ok = ok;
+    return o;
+}
+#endif
+
 void consensus_state_install_verify_receipt_store(
     int dir_fd, const uint8_t bundle_sha3_256[32],
     const uint8_t verifier_epoch[32])
 {
-    if (!valid_dir_fd(dir_fd) || !bundle_sha3_256 || !verifier_epoch)
+    if (!receipt_args_valid(dir_fd, bundle_sha3_256, verifier_epoch))
         return;
 #ifdef _WIN32
     LOG_WARN(IVR_SUBSYS,
@@ -214,59 +374,37 @@ void consensus_state_install_verify_receipt_store(
 
     char tmp[128];
     int fd = -1;
-    for (unsigned attempt = 0; attempt < 64; attempt++) {
-        uint64_t nonce = atomic_fetch_add_explicit(&g_temp_nonce, 1,
-                                                    memory_order_relaxed);
-        int n = snprintf(tmp, sizeof(tmp), "%s.tmp.%ld.%016llx",
-                         CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME,
-                         (long)getpid(), (unsigned long long)nonce);
-        if (n <= 0 || (size_t)n >= sizeof(tmp)) {
-            LOG_WARN(IVR_SUBSYS, "receipt store: temp name overflow");
-            return;
-        }
-        fd = openat(dir_fd, tmp,
-                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                    0600);
-        if (fd >= 0)
-            break;
-        if (errno != EEXIST) {
-            LOG_WARN(IVR_SUBSYS, "receipt store: openat temp failed: %s",
-                     strerror(errno));
-            return;
-        }
+    int temp_err = 0;
+    int temp_status = create_receipt_temp(dir_fd, tmp, sizeof(tmp), &fd,
+                                          &temp_err);
+    if (temp_status == IVR_TEMP_NAME_OVERFLOW) {
+        LOG_WARN(IVR_SUBSYS, "receipt store: temp name overflow");
+        return;
     }
-    if (fd < 0) {
+    if (temp_status == IVR_TEMP_OPEN_FAILED) {
+        LOG_WARN(IVR_SUBSYS, "receipt store: openat temp failed: %s",
+                 strerror(temp_err));
+        return;
+    }
+    if (temp_status == IVR_TEMP_EXHAUSTED) {
         LOG_WARN(IVR_SUBSYS, "receipt store: could not allocate a temp name");
         return;
     }
-    bool ok = write_all(fd, wire, sizeof(wire));
-    if (ok && platform_data_sync(fd) != 0) {
-        ok = false;
+    struct ivr_publish_outcome outcome = publish_receipt(dir_fd, tmp, fd,
+                                                         wire);
+    if (outcome.sync_failed)
         LOG_WARN(IVR_SUBSYS, "receipt store: data sync failed: %s",
-                 strerror(errno));
-    }
-    if (close(fd) != 0) {
-        ok = false;
+                 strerror(outcome.sync_err));
+    if (outcome.close_failed)
         LOG_WARN(IVR_SUBSYS, "receipt store: close failed: %s",
-                 strerror(errno));
-    }
-    bool renamed = false;
-    if (ok && renameat(dir_fd, tmp, dir_fd,
-                       CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME) != 0) {
-        ok = false;
+                 strerror(outcome.close_err));
+    if (outcome.rename_failed)
         LOG_WARN(IVR_SUBSYS, "receipt store: renameat into place failed: %s",
-                 strerror(errno));
-    } else if (ok) {
-        renamed = true;
-    }
-    if (ok && fsync(dir_fd) != 0)
+                 strerror(outcome.rename_err));
+    if (outcome.dir_fsync_failed)
         LOG_WARN(IVR_SUBSYS, "receipt store: directory fsync failed: %s",
-                 strerror(errno));
-    if (!ok && !renamed) {
-        (void)unlinkat(dir_fd, tmp, 0);
-        (void)fsync(dir_fd);
-    }
-    if (ok)
+                 strerror(outcome.dir_fsync_err));
+    if (outcome.ok)
         LOG_INFO(IVR_SUBSYS,
                  "content-verify receipt persisted; a byte-identical bundle "
                  "under this exact binary will skip the deep content scan");
