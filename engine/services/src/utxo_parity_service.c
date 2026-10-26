@@ -4,7 +4,7 @@
 // mandates a bool return (false = couldn't populate), not struct zcl_result;
 // every other fallible surface in this file already returns zcl_result.
 
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * utxo_parity_service — see services/utxo_parity_service.h for rationale.
  *
