@@ -172,7 +172,7 @@ size_t serve_send(uint8_t *r, size_t max) {
         "'Invalid characters';return;}"
         "this.style.borderColor='#34d399';"
         "setTimeout(function(){document.getElementById('addr')"
-        ".style.borderColor='';},1500);}});"
+        ".style.borderColor='';},1500);});"
         /* Loading overlay on submit */
         "document.getElementById('review-btn').addEventListener('click',"
         "function(e){if(!validateSend()){e.preventDefault();return;}"
