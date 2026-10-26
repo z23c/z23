@@ -284,23 +284,25 @@ void node_db_owner_lease_release(struct node_db *ndb)
     ndb->lifetime_owner_lease_slot = -1;
 }
 
-bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
+/* Resolves the canonical identity and the lease path for ndb into the
+ * caller's buffers, returning the combined result so the caller can log. */
+static bool owner_lease_resolve_paths(struct node_db *ndb,
+                                      char identity[NODE_DB_OWNER_PATH_MAX],
+                                      char lock_path[NODE_DB_OWNER_PATH_MAX])
 {
-    char identity[NODE_DB_OWNER_PATH_MAX];
-    char lock_path[NODE_DB_OWNER_PATH_MAX];
-    if (!ndb || !ndb->path[0])
-        LOG_FAIL("db", "database owner lease requires a path");
-    if (strcmp(ndb->path, ":memory:") == 0) return true;
-    if (!platform_path_identity(identity, sizeof(identity), ndb->path) ||
-        !node_db_owner_lock_path(lock_path, identity))
-        LOG_FAIL("db", "database owner lease path is too long: %s", ndb->path);
-#if defined(__APPLE__)
-    if (!create_if_missing && access(ndb->path, F_OK) != 0)
-        LOG_FAIL("db", "database owner lease open failed for %s: %s",
-                 ndb->path, strerror(errno));
-#endif
-    pthread_mutex_lock(&g_owner_lease_mutex);
-    int free_slot = -1;
+    return platform_path_identity(identity, NODE_DB_OWNER_PATH_MAX,
+                                  ndb->path) &&
+           node_db_owner_lock_path(lock_path, identity);
+}
+
+/* Scans the registry with g_owner_lease_mutex held by the caller (and left
+ * held): reaps slots whose lease was taken by another process, adds a
+ * reference to a live lease this process already holds for identity and
+ * returns its slot, and otherwise leaves the first free slot in
+ * *free_slot. Returns the re-referenced slot, or -1 when none matched. */
+static int owner_lease_registry_scan(const char *identity, int *free_slot)
+{
+    *free_slot = -1;
     for (int i = 0; i < NODE_DB_OWNER_LEASES; i++) {
         struct node_db_owner_lease *lease = &g_owner_leases[i];
         if (lease->refs > 0 && lease->pid != getpid()) {
@@ -311,11 +313,34 @@ bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
         if (lease->refs > 0 && lease->pid == getpid() &&
             strcmp(lease->path, identity) == 0) {
             lease->refs++;
-            ndb->lifetime_owner_lease_slot = i;
-            pthread_mutex_unlock(&g_owner_lease_mutex);
-            return true;
+            return i;
         }
-        if (lease->refs == 0 && free_slot < 0) free_slot = i;
+        if (lease->refs == 0 && *free_slot < 0) *free_slot = i;
+    }
+    return -1;
+}
+
+bool node_db_owner_lease_acquire(struct node_db *ndb, bool create_if_missing)
+{
+    char identity[NODE_DB_OWNER_PATH_MAX];
+    char lock_path[NODE_DB_OWNER_PATH_MAX];
+    if (!ndb || !ndb->path[0])
+        LOG_FAIL("db", "database owner lease requires a path");
+    if (strcmp(ndb->path, ":memory:") == 0) return true;
+    if (!owner_lease_resolve_paths(ndb, identity, lock_path))
+        LOG_FAIL("db", "database owner lease path is too long: %s", ndb->path);
+#if defined(__APPLE__)
+    if (!create_if_missing && access(ndb->path, F_OK) != 0)
+        LOG_FAIL("db", "database owner lease open failed for %s: %s",
+                 ndb->path, strerror(errno));
+#endif
+    pthread_mutex_lock(&g_owner_lease_mutex);
+    int free_slot = -1;
+    int reused = owner_lease_registry_scan(identity, &free_slot);
+    if (reused >= 0) {
+        ndb->lifetime_owner_lease_slot = reused;
+        pthread_mutex_unlock(&g_owner_lease_mutex);
+        return true;
     }
     if (free_slot < 0) {
         pthread_mutex_unlock(&g_owner_lease_mutex);
@@ -357,6 +382,19 @@ fail_locked:
     }
 }
 
+/* Returns the lease at slot when this process holds exactly one reference
+ * to it for path, NULL otherwise; the caller holds g_owner_lease_mutex. */
+static struct node_db_owner_lease *owner_lease_slot_exclusive(int slot,
+                                                              const char *path)
+{
+    struct node_db_owner_lease *lease =
+        slot < NODE_DB_OWNER_LEASES ? &g_owner_leases[slot] : NULL;
+    if (lease && lease->pid == getpid() && lease->refs == 1 &&
+        strcmp(lease->path, path) == 0)
+        return lease;
+    return NULL;
+}
+
 bool node_db_owner_lease_rebind(struct node_db *ndb)
 {
     if (!ndb || ndb->lifetime_owner_lease_slot < 0)
@@ -366,13 +404,10 @@ bool node_db_owner_lease_rebind(struct node_db *ndb)
     if (!platform_path_identity(identity, sizeof(identity), ndb->path))
         LOG_FAIL("db", "database owner rebind path is invalid");
     pthread_mutex_lock(&g_owner_lease_mutex);
-    int slot = ndb->lifetime_owner_lease_slot;
     struct node_db_owner_lease *lease =
-        slot < NODE_DB_OWNER_LEASES ? &g_owner_leases[slot] : NULL;
-    bool valid = lease && lease->pid == getpid() && lease->refs == 1 &&
-                 strcmp(lease->path, identity) == 0;
+        owner_lease_slot_exclusive(ndb->lifetime_owner_lease_slot, identity);
     pthread_mutex_unlock(&g_owner_lease_mutex);
-    if (!valid)
+    if (!lease)
         LOG_FAIL("db", "database owner rebind found ambiguous ownership");
     return true;
 #else
@@ -388,11 +423,9 @@ bool node_db_owner_lease_rebind(struct node_db *ndb)
                  strerror(saved));
     }
     pthread_mutex_lock(&g_owner_lease_mutex);
-    int slot = ndb->lifetime_owner_lease_slot;
     struct node_db_owner_lease *lease =
-        slot < NODE_DB_OWNER_LEASES ? &g_owner_leases[slot] : NULL;
-    if (!lease || lease->pid != getpid() || lease->refs != 1 ||
-        strcmp(lease->path, ndb->path) != 0) {
+        owner_lease_slot_exclusive(ndb->lifetime_owner_lease_slot, ndb->path);
+    if (!lease) {
         pthread_mutex_unlock(&g_owner_lease_mutex);
         (void)owner_lease_unlock(replacement);
         (void)close(replacement);
