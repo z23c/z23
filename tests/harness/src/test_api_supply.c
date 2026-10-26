@@ -5,12 +5,10 @@
 
 #include "test/api_test_fixtures.h"
 
-int api_supply_focused_tests(void)
+/* Exact supply values at fixed pre-Buttercup heights. */
+static int check_supply_at_fixed_heights(void)
 {
     int failures = 0;
-    uint8_t resp[8192];
-
-    /* ── Supply calculation correctness tests ────────────── */
 
     printf("api: supply at height 0 is 0... ");
     {
@@ -37,6 +35,14 @@ int api_supply_focused_tests(void)
         else { printf("FAIL (got %" PRId64 ", expected %" PRId64 ")\n", s, expected); failures++; }
     }
 
+    return failures;
+}
+
+/* Supply across the Buttercup activation boundary. */
+static int check_supply_after_buttercup_activation(void)
+{
+    int failures = 0;
+
     printf("api: supply at Buttercup activation (707001) includes new rate... ");
     {
         int64_t s = compute_supply_at_height(707001);
@@ -59,6 +65,14 @@ int api_supply_focused_tests(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (got %" PRId64 ", expected %" PRId64 ")\n", s, expected); failures++; }
     }
+
+    return failures;
+}
+
+/* Monotonicity across eras and the 21M ceiling. */
+static int check_supply_monotonicity_and_ceiling(void)
+{
+    int failures = 0;
 
     printf("api: supply is monotonically increasing... ");
     {
@@ -100,6 +114,14 @@ int api_supply_focused_tests(void)
         else failures++;
     }
 
+    return failures;
+}
+
+/* Pre-Buttercup era increments and the ZCL/satoshi conversion. */
+static int check_era_increment_and_zcl_conversion(void)
+{
+    int failures = 0;
+
     printf("api: pre-Buttercup is all one era (no halving before 707000)... ");
     {
         /* Since 707000 < 840000, all pre-BC blocks at 12.5 ZCL.
@@ -119,6 +141,15 @@ int api_supply_focused_tests(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Routing and payload shape of the stats/supply endpoints. */
+static int check_supply_route_responses(void)
+{
+    int failures = 0;
+    uint8_t resp[8192];
 
     printf("api: trailing slash stripped in routing... ");
     {
@@ -168,6 +199,21 @@ int api_supply_focused_tests(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int api_supply_focused_tests(void)
+{
+    int failures = 0;
+
+    /* ── Supply calculation correctness tests ────────────── */
+
+    failures += check_supply_at_fixed_heights();
+    failures += check_supply_after_buttercup_activation();
+    failures += check_supply_monotonicity_and_ceiling();
+    failures += check_era_increment_and_zcl_conversion();
+    failures += check_supply_route_responses();
 
     return failures;
 }
