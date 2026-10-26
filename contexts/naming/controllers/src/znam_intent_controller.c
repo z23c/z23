@@ -81,14 +81,9 @@ static bool znic_prepare_context_complete(
     const int64_t *actual_fee_zat, const struct vault_intent_input *inputs,
     const size_t *input_count, int64_t maximum_fee_zat)
 {
-    const void *const required[] = {
-        ctx, request, raw_tx, raw_tx_len, txid_out, actual_fee_zat, inputs,
-        input_count, ctx ? ctx->wallet : NULL, ctx ? ctx->node_db : NULL,
-    };
-    bool complete = maximum_fee_zat > 0;
-    for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++)
-        complete = complete && required[i] != NULL;
-    return complete;
+    return ctx && ctx->wallet && ctx->node_db && request && raw_tx &&
+           raw_tx_len && txid_out && actual_fee_zat && inputs &&
+           input_count && maximum_fee_zat > 0;
 }
 
 static struct zcl_result znic_check_name_registration(
