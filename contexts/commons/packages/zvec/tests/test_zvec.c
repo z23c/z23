@@ -6,6 +6,35 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
+
+static FILE *cli_sink;
+static size_t cli_flushes;
+static FILE *real_stdout(void) { return stdout; }
+static zvec *cli_create(zvec_alloc ignored);
+[[maybe_unused]] static int cli_flush(FILE *stream)
+{
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+static int cli_puts(const char *text) {
+    if (fputs(text, cli_sink) == EOF) return EOF;
+    return fputc('\n', cli_sink);
+}
+#define puts cli_puts
+#define zvec_create cli_create
+#define fflush cli_flush
+#undef stdout
+#define stdout cli_sink
+#define main zvec_cli_main
+#include "../app/main.c"
+#undef main
+#undef puts
+#undef zvec_create
+#undef fflush
+#undef stdout
+#define stdout real_stdout()
 
 #define CHECK(cond) do { \
     if (!(cond)) { \
@@ -39,6 +68,13 @@ static zvec_alloc ta(struct test_alloc *t, size_t fail_after)
 {
     *t = (struct test_alloc){ .fail_after = fail_after };
     return (zvec_alloc){ ta_malloc, ta_free, t };
+}
+
+static struct test_alloc cli_alloc;
+static zvec *cli_create(zvec_alloc ignored)
+{
+    (void)ignored;
+    return zvec_create(ta(&cli_alloc, SIZE_MAX));
 }
 
 static void test_initial_capacity(void)
@@ -261,8 +297,90 @@ static void test_stress_vs_model(void)
     zvec_destroy(v);
 }
 
+static int cli_case(int argc, char **args, int status, const char *want,
+                     bool stale_errno)
+{
+    FILE *output = tmpfile();
+    if (!output) return 1;
+    cli_sink = output;
+    errno = stale_errno ? ERANGE : 0;
+    int bad = zvec_cli_main(argc, args) != status;
+    cli_sink = stdout;
+    if (cli_alloc.mallocs != cli_alloc.frees) bad = 1;
+    rewind(output);
+    char bytes[256];
+    size_t n = fread(bytes, 1, sizeof bytes, output);
+    if (ferror(output) || n != strlen(want) || memcmp(bytes, want, n) != 0) bad = 1;
+    if (fclose(output) != 0) bad = 1;
+    return bad;
+}
+
+static int cli_index_case(const char *operation, const char *index,
+                           int status, const char *want, bool stale_errno)
+{
+    char op[256];
+    int n = snprintf(op, sizeof op, strcmp(operation, "insert") == 0
+        ? "%s:%s:injected" : "%s:%s", operation, index);
+    if (n < 0 || (size_t)n >= sizeof op) return 1;
+    char *args[] = {"zvec", "push:first", "push:second", op, NULL};
+    return cli_case(4, args, status, want, stale_errno);
+}
+
+static void test_cli_invalid_indices(void)
+{
+    const char *ops[] = {"remove", "swap-remove", "insert"};
+    const char *bad[] = {"garbage", "", " \t", "1junk", "1 ", "-1", " -2",
+        "184467440737095516160", "0x1"};
+    unsigned failures = 0;
+    for (size_t op = 0; op < sizeof ops / sizeof ops[0]; op++) {
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            int rc = cli_index_case(ops[op], bad[i], 2, "", false);
+            if (rc) failures++;
+            fprintf(stderr, "cli_invalid_index op=%s row=%zu result=%s\n",
+                    ops[op], i, rc ? "FAIL" : "PASS");
+        }
+    }
+    CHECK(failures == 0);
+    CHECK(cli_index_case("remove", "1:extra", 2, "", false) == 0);
+    CHECK(cli_index_case("swap-remove", "1:extra", 2, "", false) == 0);
+}
+
+static void test_cli_valid_indices(void)
+{
+    const char *ones[] = {"1", "+1", " \t1"};
+    for (size_t i = 0; i < sizeof ones / sizeof ones[0]; i++) {
+        CHECK(cli_index_case("remove", ones[i], 0, "first\n", false) == 0);
+        CHECK(cli_index_case("swap-remove", ones[i], 0, "first\n", false) == 0);
+        CHECK(cli_index_case("insert", ones[i], 0, "first\ninjected\nsecond\n", false) == 0);
+    }
+    CHECK(cli_index_case("remove", "-0", 0, "second\n", false) == 0);
+    CHECK(cli_index_case("swap-remove", "-0", 0, "second\n", false) == 0);
+    CHECK(cli_index_case("insert", "-0", 0, "injected\nfirst\nsecond\n", false) == 0);
+    char maximum[3 * sizeof(size_t) + 1];
+    snprintf(maximum, sizeof maximum, "%zu", SIZE_MAX);
+    size_t parsed = 0;
+    CHECK(parse_index(maximum, '\0', &parsed, NULL) && parsed == SIZE_MAX);
+    errno = ERANGE;
+    CHECK(parse_index("1", '\0', &parsed, NULL) && parsed == 1);
+    CHECK(cli_index_case("remove", maximum, 0, "first\nsecond\n", false) == 0);
+    CHECK(cli_index_case("swap-remove", maximum, 0, "first\nsecond\n", false) == 0);
+    CHECK(cli_index_case("insert", maximum, 1, "", false) == 0);
+    CHECK(cli_index_case("remove", "1", 0, "first\n", true) == 0);
+    char *ops[] = {"zvec", "push:first", "push:second", "push:third",
+        "swap-remove:0", "insert:1:with:colon", "pop", NULL};
+    CHECK(cli_case(7, ops, 0, "third\nwith:colon\n", false) == 0);
+    char *clear[] = {"zvec", "push:first", "clear", "push:last", NULL};
+    CHECK(cli_case(4, clear, 0, "last\n", false) == 0);
+}
+
+static void test_cli_output(void);
+
 int main(void)
 {
+    cli_sink = stdout;
+    test_cli_output();
+    test_cli_invalid_indices();
+    test_cli_valid_indices();
     test_initial_capacity();
     test_basic();
     test_insert_remove();
@@ -272,4 +390,65 @@ int main(void)
     test_stress_vs_model();
     puts("test_zvec: all groups passed (capacity basic insert index allocfail growth stress)");
     return 0;
+}
+
+static int output_invoke(FILE *sink, int argc, char **args)
+{
+    cli_sink = sink;
+    cli_flushes = 0;
+    int rc = zvec_cli_main(argc, args);
+    cli_sink = stdout;
+    CHECK(cli_alloc.mallocs == cli_alloc.frees);
+    return rc;
+}
+static void output_failure(bool buffered)
+{
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *sink = fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r");
+    CHECK(sink != NULL);
+    char buffer[4096];
+    if (buffered) { CHECK(setvbuf(sink, buffer, _IOFBF, sizeof buffer) == 0); }
+    char *args[] = {"zvec", "push:first", "push:", "push:last", NULL};
+    CHECK(output_invoke(sink, 4, args) == 1);
+    CHECK(ferror(sink));
+    (void)fclose(sink);
+}
+static void output_unused(void)
+{
+    const struct { char *ops[5]; int argc, status; } rows[] = {
+        {{"zvec", "clear", NULL}, 2, 0},
+        {{"zvec", "push:x", "clear", NULL}, 3, 0},
+        {{"zvec", "push:x", "pop", NULL}, 3, 0},
+        {{"zvec", "push:x", "remove:garbage", NULL}, 3, 2},
+        {{"zvec", "push:x", "unknown", NULL}, 3, 2},
+        {{"zvec", NULL}, 1, 2},
+        {{"zvec", "insert:1:x", NULL}, 2, 1}
+    };
+#ifdef _WIN32
+    FILE *sink = fopen("NUL", "r");
+#else
+    FILE *sink = fopen("/dev/null", "r");
+#endif
+    CHECK(sink != NULL);
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        char *args[5];
+        memcpy(args, rows[i].ops, sizeof args);
+        CHECK(output_invoke(sink, rows[i].argc, args) == rows[i].status);
+        CHECK(cli_flushes == 0 && !ferror(sink));
+    }
+    CHECK(fclose(sink) == 0);
+}
+static void test_cli_output(void)
+{
+    char *args[] = {"zvec", "push:first", "push:", "push:last", NULL};
+    CHECK(cli_case(4, args, 0, "first\n\nlast\n", false) == 0);
+    output_failure(false);
+#ifdef __linux__
+    output_failure(true);
+#endif
+    output_unused();
 }
