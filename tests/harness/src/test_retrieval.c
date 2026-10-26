@@ -301,9 +301,7 @@ static int case_existing_token_growth(void)
     return failures;
 }
 
-/* ── 4. the tokenizer ──────────────────────────────────────────────── */
-
-static int case_tokenizer(void)
+static int case_tokenizer_public_api(void)
 {
     int failures = 0;
     struct token_capture capture = {.accept = 4};
@@ -321,6 +319,15 @@ static int case_tokenizer(void)
     RT_CHECK("the public tokenizer refuses NULL inputs",
              !zcl_retrieval_tokenize(NULL, token_capture_emit, &capture) &&
              !zcl_retrieval_tokenize("one", NULL, &capture));
+    return failures;
+}
+
+/* ── 4. the tokenizer ──────────────────────────────────────────────── */
+
+static int case_tokenizer(void)
+{
+    int failures = 0;
+    failures += case_tokenizer_public_api();
     struct zcl_retrieval *r = zcl_retrieval_create();
     RT_CHECK("an index is created", r != NULL);
     if (!r)
@@ -611,6 +618,123 @@ static int case_checked_refusals(void)
     return failures;
 }
 
+static int case_gold_metrics_ranking(struct zcl_retrieval_gold_task *tasks,
+                                     const struct zcl_retrieval_ranked_file
+                                         *ranked_b,
+                                     struct zcl_retrieval_eval_metrics *m)
+{
+    int failures = 0;
+    RT_CHECK("gold metrics score two reviewed tasks",
+             zcl_retrieval_evaluate(tasks, 2, m));
+    RT_CHECK("macro Recall@5 is one half",
+             m->recall_at_5_available && m->recall_at_5_bp == 5000);
+    RT_CHECK("macro Recall@20 is complete",
+             m->recall_at_20_available && m->recall_at_20_bp == 10000);
+    RT_CHECK("MRR preserves the rank-2 and rank-18 answers",
+             m->mrr_available && m->mrr_bp == 2777);
+    RT_CHECK("top-five file and context costs are explicit",
+             m->unique_files_at_5 == 10 && m->context_bytes_at_5 == 150 &&
+             m->approximate_tokens_at_5 == 38);
+    RT_CHECK("wrong-scope rate is one of ten selected files",
+             m->wrong_scope_files_at_5 == 1 &&
+             m->wrong_scope_at_5_available &&
+             m->wrong_scope_at_5_bp == 1000);
+
+    tasks[1].ranked_count = 16;
+    tasks[1].ranking_complete = false;
+    RT_CHECK("a truncated top-16 ranking still evaluates honestly",
+             zcl_retrieval_evaluate(tasks, 2, m));
+    RT_CHECK("Recall@5 remains observable at depth sixteen",
+             m->recall_at_5_available && m->recall_at_5_bp == 5000);
+    RT_CHECK("Recall@20 is unavailable, never counted as a miss",
+             !m->recall_at_20_available && m->recall_at_20_bp == 0);
+    RT_CHECK("MRR is unavailable when the first answer may be below the cap",
+             !m->mrr_available && m->mrr_bp == 0);
+
+    struct zcl_retrieval_ranked_file rank21[21];
+    memcpy(rank21, ranked_b, sizeof(rank21));
+    struct zcl_retrieval_ranked_file swap = rank21[17];
+    rank21[17] = rank21[20];
+    rank21[20] = swap;
+    tasks[1].ranked = rank21;
+    tasks[1].ranked_count = 21;
+    tasks[1].ranking_complete = true;
+    RT_CHECK("moving the answer to rank 21 is a measured Recall@20 miss",
+             zcl_retrieval_evaluate(tasks, 2, m) &&
+             m->recall_at_20_available && m->recall_at_20_bp == 5000);
+    return failures;
+}
+
+static int case_gold_metrics_selection(struct zcl_retrieval_gold_task *tasks,
+                                       struct zcl_retrieval_eval_metrics *m)
+{
+    int failures = 0;
+    static const struct zcl_retrieval_ranked_file duplicated[] = {
+        {"x.c", 1, true, true}, {"a.c", 1, true, true},
+        {"a.c", 999, false, true}, {"y.c", 1, true, true},
+        {"b.c", 1, true, true},
+    };
+    tasks[0].ranked = duplicated;
+    tasks[0].ranked_count = sizeof(duplicated) / sizeof(duplicated[0]);
+    RT_CHECK("a duplicate path cannot improve rank, recall, or context cost",
+             zcl_retrieval_evaluate(tasks, 1, m) &&
+             m->recall_at_5_bp == 10000 && m->mrr_bp == 5000 &&
+             m->unique_files_at_5 == 4 && m->context_bytes_at_5 == 4 &&
+             m->wrong_scope_files_at_5 == 0);
+
+    struct zcl_retrieval_ranked_file unscoped[] = {
+        {"x.c", 1, false, true}, {"a.c", 1, false, false},
+    };
+    tasks[0].ranked = unscoped;
+    tasks[0].ranked_count = sizeof(unscoped) / sizeof(unscoped[0]);
+    tasks[0].ranking_complete = true;
+    RT_CHECK("one unclassified top-five file makes wrong-scope unavailable",
+             zcl_retrieval_evaluate(tasks, 1, m) &&
+             !m->wrong_scope_at_5_available &&
+             m->wrong_scope_files_at_5 == 0 &&
+             m->wrong_scope_at_5_bp == 0);
+
+    tasks[0].ranked_count = 0;
+    RT_CHECK("zero selected files leave wrong-scope unavailable",
+             zcl_retrieval_evaluate(tasks, 1, m) &&
+             !m->wrong_scope_at_5_available &&
+             m->wrong_scope_files_at_5 == 0 &&
+             m->wrong_scope_at_5_bp == 0);
+
+    tasks[0].relevant_count = 0;
+    RT_CHECK("an empty relevance judgement refuses instead of scoring",
+             !zcl_retrieval_evaluate(tasks, 1, m) && m->tasks == 0);
+    RT_CHECK("an empty corpus refuses instead of reporting perfect zeroes",
+             !zcl_retrieval_evaluate(NULL, 0, m));
+    return failures;
+}
+
+static int case_gold_metrics_zero_complete(struct zcl_retrieval_gold_task *zero,
+                                           struct zcl_retrieval_eval_metrics *m)
+{
+    int failures = 0;
+    RT_CHECK("a complete zero-hit ranking is a measured zero",
+             zcl_retrieval_evaluate(zero, 1, m) &&
+             m->recall_at_5_available && m->recall_at_5_bp == 0 &&
+             m->recall_at_20_available && m->recall_at_20_bp == 0 &&
+             m->mrr_available && m->mrr_bp == 0 &&
+             m->unique_files_at_5 == 0 && m->context_bytes_at_5 == 0);
+    return failures;
+}
+
+static int case_gold_metrics_zero_incomplete(struct zcl_retrieval_gold_task *zero,
+                                             struct zcl_retrieval_eval_metrics *m)
+{
+    int failures = 0;
+    zero->ranking_complete = false;
+    RT_CHECK("an incomplete zero-hit ranking is valid but unavailable",
+             zcl_retrieval_evaluate(zero, 1, m) &&
+             !m->recall_at_5_available && !m->recall_at_20_available &&
+             !m->mrr_available && m->recall_at_5_bp == 0 &&
+             m->recall_at_20_bp == 0 && m->mrr_bp == 0);
+    return failures;
+}
+
 static int case_gold_metrics(void)
 {
     int failures = 0;
@@ -641,83 +765,8 @@ static int case_gold_metrics(void)
          ranked_b, sizeof(ranked_b) / sizeof(ranked_b[0]), true},
     };
     struct zcl_retrieval_eval_metrics m = {0};
-    RT_CHECK("gold metrics score two reviewed tasks",
-             zcl_retrieval_evaluate(tasks, 2, &m));
-    RT_CHECK("macro Recall@5 is one half",
-             m.recall_at_5_available && m.recall_at_5_bp == 5000);
-    RT_CHECK("macro Recall@20 is complete",
-             m.recall_at_20_available && m.recall_at_20_bp == 10000);
-    RT_CHECK("MRR preserves the rank-2 and rank-18 answers",
-             m.mrr_available && m.mrr_bp == 2777);
-    RT_CHECK("top-five file and context costs are explicit",
-             m.unique_files_at_5 == 10 && m.context_bytes_at_5 == 150 &&
-             m.approximate_tokens_at_5 == 38);
-    RT_CHECK("wrong-scope rate is one of ten selected files",
-             m.wrong_scope_files_at_5 == 1 &&
-             m.wrong_scope_at_5_available &&
-             m.wrong_scope_at_5_bp == 1000);
-
-    tasks[1].ranked_count = 16;
-    tasks[1].ranking_complete = false;
-    RT_CHECK("a truncated top-16 ranking still evaluates honestly",
-             zcl_retrieval_evaluate(tasks, 2, &m));
-    RT_CHECK("Recall@5 remains observable at depth sixteen",
-             m.recall_at_5_available && m.recall_at_5_bp == 5000);
-    RT_CHECK("Recall@20 is unavailable, never counted as a miss",
-             !m.recall_at_20_available && m.recall_at_20_bp == 0);
-    RT_CHECK("MRR is unavailable when the first answer may be below the cap",
-             !m.mrr_available && m.mrr_bp == 0);
-
-    struct zcl_retrieval_ranked_file rank21[21];
-    memcpy(rank21, ranked_b, sizeof(rank21));
-    struct zcl_retrieval_ranked_file swap = rank21[17];
-    rank21[17] = rank21[20];
-    rank21[20] = swap;
-    tasks[1].ranked = rank21;
-    tasks[1].ranked_count = 21;
-    tasks[1].ranking_complete = true;
-    RT_CHECK("moving the answer to rank 21 is a measured Recall@20 miss",
-             zcl_retrieval_evaluate(tasks, 2, &m) &&
-             m.recall_at_20_available && m.recall_at_20_bp == 5000);
-
-    static const struct zcl_retrieval_ranked_file duplicated[] = {
-        {"x.c", 1, true, true}, {"a.c", 1, true, true},
-        {"a.c", 999, false, true}, {"y.c", 1, true, true},
-        {"b.c", 1, true, true},
-    };
-    tasks[0].ranked = duplicated;
-    tasks[0].ranked_count = sizeof(duplicated) / sizeof(duplicated[0]);
-    RT_CHECK("a duplicate path cannot improve rank, recall, or context cost",
-             zcl_retrieval_evaluate(tasks, 1, &m) &&
-             m.recall_at_5_bp == 10000 && m.mrr_bp == 5000 &&
-             m.unique_files_at_5 == 4 && m.context_bytes_at_5 == 4 &&
-             m.wrong_scope_files_at_5 == 0);
-
-    struct zcl_retrieval_ranked_file unscoped[] = {
-        {"x.c", 1, false, true}, {"a.c", 1, false, false},
-    };
-    tasks[0].ranked = unscoped;
-    tasks[0].ranked_count = sizeof(unscoped) / sizeof(unscoped[0]);
-    tasks[0].ranking_complete = true;
-    RT_CHECK("one unclassified top-five file makes wrong-scope unavailable",
-             zcl_retrieval_evaluate(tasks, 1, &m) &&
-             !m.wrong_scope_at_5_available &&
-             m.wrong_scope_files_at_5 == 0 &&
-             m.wrong_scope_at_5_bp == 0);
-
-    tasks[0].ranked_count = 0;
-    RT_CHECK("zero selected files leave wrong-scope unavailable",
-             zcl_retrieval_evaluate(tasks, 1, &m) &&
-             !m.wrong_scope_at_5_available &&
-             m.wrong_scope_files_at_5 == 0 &&
-             m.wrong_scope_at_5_bp == 0);
-
-    tasks[0].relevant_count = 0;
-    RT_CHECK("an empty relevance judgement refuses instead of scoring",
-             !zcl_retrieval_evaluate(tasks, 1, &m) && m.tasks == 0);
-    RT_CHECK("an empty corpus refuses instead of reporting perfect zeroes",
-             !zcl_retrieval_evaluate(NULL, 0, &m));
-
+    failures += case_gold_metrics_ranking(tasks, ranked_b, &m);
+    failures += case_gold_metrics_selection(tasks, &m);
     struct zcl_retrieval_gold_task zero = {
         .task_id = "zero",
         .query = "a real query with no hits",
@@ -727,18 +776,8 @@ static int case_gold_metrics(void)
         .ranked_count = 0,
         .ranking_complete = true,
     };
-    RT_CHECK("a complete zero-hit ranking is a measured zero",
-             zcl_retrieval_evaluate(&zero, 1, &m) &&
-             m.recall_at_5_available && m.recall_at_5_bp == 0 &&
-             m.recall_at_20_available && m.recall_at_20_bp == 0 &&
-             m.mrr_available && m.mrr_bp == 0 &&
-             m.unique_files_at_5 == 0 && m.context_bytes_at_5 == 0);
-    zero.ranking_complete = false;
-    RT_CHECK("an incomplete zero-hit ranking is valid but unavailable",
-             zcl_retrieval_evaluate(&zero, 1, &m) &&
-             !m.recall_at_5_available && !m.recall_at_20_available &&
-             !m.mrr_available && m.recall_at_5_bp == 0 &&
-             m.recall_at_20_bp == 0 && m.mrr_bp == 0);
+    failures += case_gold_metrics_zero_complete(&zero, &m);
+    failures += case_gold_metrics_zero_incomplete(&zero, &m);
     return failures;
 }
 
