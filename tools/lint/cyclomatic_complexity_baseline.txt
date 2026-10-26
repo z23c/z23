@@ -1241,8 +1241,6 @@ tests/harness/src/test_blake3_kat.c:test_blake3_kat:17
 tests/harness/src/test_block_index_loader.c:test_block_index_loader:299
 tests/harness/src/test_block_index_node_db_topup.c:test_block_index_node_db_topup:42
 tests/harness/src/test_block_index_projection.c:run_bound_dirty_delta:22
-tests/harness/src/test_block_index_topup.c:run_bound_topup_integration:42
-tests/harness/src/test_block_index_topup.c:test_block_index_topup:53
 tests/harness/src/test_block_pruning.c:test_block_pruning:25
 tests/harness/src/test_block_scan.c:test_legacy_import_clear_rollback:18
 tests/harness/src/test_block_scan.c:test_wallet_scan_empty_replacement:34

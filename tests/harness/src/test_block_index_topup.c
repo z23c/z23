@@ -601,56 +601,83 @@ static int run_bind_term_order_refuses(void)
     return failures;
 }
 
-static int run_bound_topup_integration(void)
+struct boundtop_fx {
+    char dir[256];
+    char db_path[320];
+    event_log_t *log;
+    block_index_projection_t *bip;
+    struct main_state source, loaded;
+    struct uint256 h10, h11, h12;
+    struct block_index *s10;
+    struct block_index *l10, *l11;
+    bool emitted;
+    bool saved;
+    struct block_index_flat_identity identity;
+};
+
+static int boundtop_setup(struct boundtop_fx *fx)
 {
     int failures = 0;
-    char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "topup", "bound");
-    char log_path[320], db_path[320];
-    snprintf(log_path, sizeof(log_path), "%s/events", dir);
-    snprintf(db_path, sizeof(db_path), "%s/projection.db", dir);
-    event_log_t *log = event_log_open(log_path);
-    block_index_projection_t *bip = log
-        ? block_index_projection_open(db_path, log) : NULL;
-    struct main_state source, loaded;
-    main_state_init(&source);
-    main_state_init(&loaded);
-    struct uint256 h9 = {0}, h10 = {0}, h11 = {0}, h12 = {0};
-    h9.data[0] = 9; h10.data[0] = 10; h11.data[0] = 11; h12.data[0] = 12;
-    struct block_index *s9 = topup_insert_entry(&source, &h9, 9);
-    struct block_index *s10 = topup_insert_entry(&source, &h10, 10);
-    struct block_index *s11 = topup_insert_entry(&source, &h11, 11);
+    test_make_tmpdir(fx->dir, sizeof(fx->dir), "topup", "bound");
+    char log_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events", fx->dir);
+    snprintf(fx->db_path, sizeof(fx->db_path), "%s/projection.db", fx->dir);
+    fx->log = event_log_open(log_path);
+    fx->bip = fx->log
+        ? block_index_projection_open(fx->db_path, fx->log) : NULL;
+    main_state_init(&fx->source);
+    main_state_init(&fx->loaded);
+    struct uint256 h9 = {0};
+    h9.data[0] = 9;
+    fx->h10.data[0] = 10; fx->h11.data[0] = 11; fx->h12.data[0] = 12;
+    struct block_index *s9 = topup_insert_entry(&fx->source, &h9, 9);
+    struct block_index *s10 = topup_insert_entry(&fx->source, &fx->h10, 10);
+    struct block_index *s11 = topup_insert_entry(&fx->source, &fx->h11, 11);
+    fx->s10 = s10;
     if (s9) s9->nBits = 0x1f07ffffu;
     if (s10) s10->nBits = 0x1f07ffffu;
     if (s11) s11->nBits = 0x1f07ffffu;
     if (s11) s11->pprev = s10;
-    bool emitted = log && bip && s9 && s10 && s11 &&
-        topup_emit_row(log, &h10, NULL, 10, BLOCK_VALID_TREE, -1, 0, 0) &&
-        topup_emit_row(log, &h11, &h10, 11, BLOCK_VALID_TREE, -1, 0, 0) &&
-        block_index_projection_catch_up(bip) != UINT64_MAX;
-    TOPUP_CHECK("bound: exact projection setup", emitted);
-    struct block_index_flat_identity identity;
-    bool saved = emitted && save_block_index_flat_identity(
-        dir, &source, &identity).ok;
-    TOPUP_CHECK("bound: verified flat saved", saved);
+    fx->emitted = fx->log && fx->bip && s9 && s10 && s11 &&
+        topup_emit_row(fx->log, &fx->h10, NULL, 10, BLOCK_VALID_TREE,
+                       -1, 0, 0) &&
+        topup_emit_row(fx->log, &fx->h11, &fx->h10, 11, BLOCK_VALID_TREE,
+                       -1, 0, 0) &&
+        block_index_projection_catch_up(fx->bip) != UINT64_MAX;
+    TOPUP_CHECK("bound: exact projection setup", fx->emitted);
+    return failures;
+}
+
+static int boundtop_flat_bind(struct boundtop_fx *fx)
+{
+    int failures = 0;
+    struct block_index *s10 = fx->s10;
+    fx->saved = fx->emitted && save_block_index_flat_identity(
+        fx->dir, &fx->source, &fx->identity).ok;
+    TOPUP_CHECK("bound: verified flat saved", fx->saved);
     TOPUP_CHECK("bound: strict row equality refuses a flat superset",
-                saved && !block_index_projection_bind_saved_flat(
-                    bip, &identity));
+                fx->saved && !block_index_projection_bind_saved_flat(
+                    fx->bip, &fx->identity));
     if (s10) s10->nStatus = 0;
     TOPUP_CHECK("bound: uncovered projection state refuses subset bind",
-                saved && !block_index_projection_bind_saved_flat_state(
-                    bip, &identity, &source));
+                fx->saved && !block_index_projection_bind_saved_flat_state(
+                    fx->bip, &fx->identity, &fx->source));
     if (s10) s10->nStatus = BLOCK_VALID_TREE;
     TOPUP_CHECK("bound: verified projection subset binds to flat superset",
-                saved && block_index_projection_bind_saved_flat_state(
-                    bip, &identity, &source));
+                fx->saved && block_index_projection_bind_saved_flat_state(
+                    fx->bip, &fx->identity, &fx->source));
     TOPUP_CHECK("bound: verified flat loads",
-                saved && load_block_index_flat(dir, &loaded).ok);
+                fx->saved && load_block_index_flat(fx->dir, &fx->loaded).ok);
+    return failures;
+}
 
+static int boundtop_clean_topup(struct boundtop_fx *fx)
+{
+    int failures = 0;
     /* Install a valid projection-only probe without dirty membership. The
      * bound clean path must visit zero rows and therefore leave it inert. */
     struct ev_block_header probe = {0};
-    memcpy(probe.hash, h10.data, 32);
+    memcpy(probe.hash, fx->h10.data, 32);
     probe.height = 10; probe.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
     probe.nFile = 4; probe.nDataPos = 444; probe.nTime = 1700000010u;
     probe.nBits = 0x2000ffffu; probe.nVersion = 4; probe.nTx = 9;
@@ -658,64 +685,103 @@ static int run_bound_topup_integration(void)
     bool probe_ok = ev_block_header_serialize(
         &probe, NULL, blob, sizeof(blob), &blob_len);
     sqlite3 *raw = NULL; sqlite3_stmt *stmt = NULL;
-    if (probe_ok && sqlite3_open_v2(db_path, &raw, SQLITE_OPEN_READWRITE,
+    if (probe_ok && sqlite3_open_v2(fx->db_path, &raw, SQLITE_OPEN_READWRITE,
                                     NULL) == SQLITE_OK &&
         sqlite3_prepare_v2(raw, "UPDATE block_index SET n_status=?,blob=? "
                            "WHERE hash=?", -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, probe.nStatus);
         sqlite3_bind_blob(stmt, 2, blob, (int)blob_len, SQLITE_TRANSIENT);
-        sqlite3_bind_blob(stmt, 3, h10.data, 32, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 3, fx->h10.data, 32, SQLITE_TRANSIENT);
         probe_ok = sqlite3_step(stmt) == SQLITE_DONE; // raw-sql-ok:test-fixture-corruption
     } else {
         probe_ok = false;
     }
     sqlite3_finalize(stmt); if (raw) sqlite3_close(raw);
-    struct block_index *l10 = block_map_find(&loaded.map_block_index, &h10);
-    struct block_index *l11 = block_map_find(&loaded.map_block_index, &h11);
+    fx->l10 = block_map_find(&fx->loaded.map_block_index, &fx->h10);
+    fx->l11 = block_map_find(&fx->loaded.map_block_index, &fx->h11);
     TOPUP_CHECK("bound: clean topup succeeds",
                 probe_ok && block_index_projection_topup_with(
-                    bip, &loaded, dir));
+                    fx->bip, &fx->loaded, fx->dir));
     TOPUP_CHECK("bound: clean topup consumed zero rows",
-                l10 && l10->nTx == 0 && !(l10->nStatus & BLOCK_HAVE_DATA));
+                fx->l10 && fx->l10->nTx == 0 &&
+                !(fx->l10->nStatus & BLOCK_HAVE_DATA));
+    return failures;
+}
 
+static int boundtop_dirty_topup(struct boundtop_fx *fx)
+{
+    int failures = 0;
     TOPUP_CHECK("bound: status delta emitted",
-                topup_emit_status(log, &h11,
+                topup_emit_status(fx->log, &fx->h11,
                     BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA, 5, 555, 7));
     TOPUP_CHECK("bound: dirty-only topup succeeds",
-                block_index_projection_topup_with(bip, &loaded, dir));
+                block_index_projection_topup_with(
+                    fx->bip, &fx->loaded, fx->dir));
     TOPUP_CHECK("bound: only dirty status hash applied",
-                l10 && l10->nTx == 0 && l11 && l11->nTx == 7 &&
-                l11->nFile == 5);
+                fx->l10 && fx->l10->nTx == 0 && fx->l11 &&
+                fx->l11->nTx == 7 && fx->l11->nFile == 5);
+    return failures;
+}
 
+static int boundtop_tip_delta(struct boundtop_fx *fx)
+{
+    int failures = 0;
     bool tip_delta = topup_emit_row(
-        log, &h12, &h11, 12, BLOCK_VALID_TREE, -1, 0, 0) &&
-        block_index_projection_catch_up(bip) != UINT64_MAX;
+        fx->log, &fx->h12, &fx->h11, 12, BLOCK_VALID_TREE, -1, 0, 0) &&
+        block_index_projection_catch_up(fx->bip) != UINT64_MAX;
     TOPUP_CHECK("bound: projection row absent from flat refuses subset bind",
                 tip_delta && !block_index_projection_bind_saved_flat_state(
-                    bip, &identity, &source));
+                    fx->bip, &fx->identity, &fx->source));
     TOPUP_CHECK("bound: stale flat tip is covered by exact dirty row",
                 tip_delta && block_index_projection_bound_covers_tip(
-                    bip, dir, h12.data, 12));
+                    fx->bip, fx->dir, fx->h12.data, 12));
     TOPUP_CHECK("bound: wrong-height dirty tip is not covered",
                 !block_index_projection_bound_covers_tip(
-                    bip, dir, h12.data, 13));
+                    fx->bip, fx->dir, fx->h12.data, 13));
     TOPUP_CHECK("bound: covered stale tip topup succeeds",
-                block_index_projection_topup_with(bip, &loaded, dir));
-    struct block_index *l12 = block_map_find(&loaded.map_block_index, &h12);
+                block_index_projection_topup_with(
+                    fx->bip, &fx->loaded, fx->dir));
+    struct block_index *l12 = block_map_find(&fx->loaded.map_block_index,
+                                             &fx->h12);
     TOPUP_CHECK("bound: covered stale tip inserted from delta",
-                l12 && l12->nHeight == 12 && l12->pprev == l11);
+                l12 && l12->nHeight == 12 && l12->pprev == fx->l11);
+    return failures;
+}
 
+static int boundtop_replaced_identity(struct boundtop_fx *fx)
+{
+    int failures = 0;
+    struct block_index *s10 = fx->s10;
     if (s10) s10->nTx = 1; /* publish a different, deliberately unbound SHA3 */
     TOPUP_CHECK("bound: replacement flat identity saved",
-                save_block_index_flat_identity(dir, &source, NULL).ok);
+                save_block_index_flat_identity(fx->dir, &fx->source,
+                                               NULL).ok);
     TOPUP_CHECK("bound: mismatched identity falls through full scan",
-                block_index_projection_topup_with(bip, &loaded, dir) &&
-                l10 && l10->nTx == 9 && l10->nFile == 4);
+                block_index_projection_topup_with(fx->bip, &fx->loaded,
+                                                  fx->dir) &&
+                fx->l10 && fx->l10->nTx == 9 && fx->l10->nFile == 4);
+    return failures;
+}
 
-    if (bip) block_index_projection_close(bip);
-    if (log) event_log_close(log);
-    main_state_free(&loaded); main_state_free(&source);
-    test_cleanup_tmpdir(dir);
+static void boundtop_close(struct boundtop_fx *fx)
+{
+    if (fx->bip) block_index_projection_close(fx->bip);
+    if (fx->log) event_log_close(fx->log);
+    main_state_free(&fx->loaded); main_state_free(&fx->source);
+    test_cleanup_tmpdir(fx->dir);
+}
+
+static int run_bound_topup_integration(void)
+{
+    int failures = 0;
+    struct boundtop_fx fx = {0};
+    failures += boundtop_setup(&fx);
+    failures += boundtop_flat_bind(&fx);
+    failures += boundtop_clean_topup(&fx);
+    failures += boundtop_dirty_topup(&fx);
+    failures += boundtop_tip_delta(&fx);
+    failures += boundtop_replaced_identity(&fx);
+    boundtop_close(&fx);
     return failures;
 }
 
@@ -956,40 +1022,46 @@ static int run_bind_parallel_cases(void)
     return failures;
 }
 
-int test_block_index_topup(void)
-{
-    int failures = 0;
-    /* Rows pass the shared PoW gate: regtest params admit the 0x2000ffff
-     * fixture bits. Restored on every return. */
-    chain_params_select(CHAIN_REGTEST);
-
+struct topup_fx {
     char dir[256];
-    snprintf(dir, sizeof(dir), "./test-tmp/topup_%d", (int)getpid());
+    char el_path[320];
+    char bip_path[320];
+    struct uint256 h100, h101, h102, h103, h104, h105;
+    struct main_state ms;
+    struct block_index *e100, *e101, *e102, *e103, *e104, *e105;
+    struct block_index *edisk;
+    event_log_t *log;
+    block_index_projection_t *bip;
+};
+
+static void topup_fixture_paths(struct topup_fx *fx)
+{
+    snprintf(fx->dir, sizeof(fx->dir), "./test-tmp/topup_%d", (int)getpid());
     mkdir("./test-tmp", 0755);
-    mkdir(dir, 0755);
+    mkdir(fx->dir, 0755);
     char blocks_dir[320];
-    snprintf(blocks_dir, sizeof(blocks_dir), "%s/blocks", dir);
+    snprintf(blocks_dir, sizeof(blocks_dir), "%s/blocks", fx->dir);
     mkdir(blocks_dir, 0755);
 
-    char el_path[320];
-    snprintf(el_path, sizeof(el_path), "%s/event_log.dat", dir);
-    char bip_path[320];
-    snprintf(bip_path, sizeof(bip_path), "%s/bip.db", dir);
+    snprintf(fx->el_path, sizeof(fx->el_path), "%s/event_log.dat", fx->dir);
+    snprintf(fx->bip_path, sizeof(fx->bip_path), "%s/bip.db", fx->dir);
 
     /* Unique hashes for heights 100..105 + disk block. */
-    struct uint256 h100, h101, h102, h103, h104, h105;
-    topup_hash_for(100, &h100);
-    topup_hash_for(101, &h101);
-    topup_hash_for(102, &h102);
-    topup_hash_for(103, &h103);
-    topup_hash_for(104, &h104);
-    topup_hash_for(105, &h105);
+    topup_hash_for(100, &fx->h100);
+    topup_hash_for(101, &fx->h101);
+    topup_hash_for(102, &fx->h102);
+    topup_hash_for(103, &fx->h103);
+    topup_hash_for(104, &fx->h104);
+    topup_hash_for(105, &fx->h105);
+}
 
-    struct main_state ms;
-    main_state_init(&ms);
+static int topup_fixture_entries(struct topup_fx *fx)
+{
+    int failures = 0;
+    main_state_init(&fx->ms);
 
     /* e100: the "old extent" — full state the top-up must never lower. */
-    struct block_index *e100 = topup_insert_entry(&ms, &h100, 100);
+    struct block_index *e100 = topup_insert_entry(&fx->ms, &fx->h100, 100);
     if (e100) {
         e100->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
         e100->nTx = 5;
@@ -997,9 +1069,9 @@ int test_block_index_topup(void)
         e100->nDataPos = 500;
     }
     /* e101/e102/e103: header-only window entries. */
-    struct block_index *e101 = topup_insert_entry(&ms, &h101, 101);
-    struct block_index *e102 = topup_insert_entry(&ms, &h102, 102);
-    struct block_index *e103 = topup_insert_entry(&ms, &h103, 103);
+    struct block_index *e101 = topup_insert_entry(&fx->ms, &fx->h101, 101);
+    struct block_index *e102 = topup_insert_entry(&fx->ms, &fx->h102, 102);
+    struct block_index *e103 = topup_insert_entry(&fx->ms, &fx->h103, 103);
     if (e103) {
         /* Parent work for the inserted-child chainwork assertion. */
         memset(&e103->nChainWork, 0, sizeof(e103->nChainWork));
@@ -1008,7 +1080,7 @@ int test_block_index_topup(void)
     /* e105: a CONTENTLESS STUB at the wrong height (height 0, nBits 0, no
      * HAVE_DATA, nTx 0); the top-up must hydrate it, not refuse a label
      * conflict. */
-    struct block_index *e105 = topup_insert_entry(&ms, &h105, 0);
+    struct block_index *e105 = topup_insert_entry(&fx->ms, &fx->h105, 0);
     if (e105) {
         e105->nBits = 0;
         e105->nStatus = 0;
@@ -1016,7 +1088,17 @@ int test_block_index_topup(void)
     }
     TOPUP_CHECK("setup: entries inserted",
                 e100 && e101 && e102 && e103 && e105);
+    fx->e100 = e100;
+    fx->e101 = e101;
+    fx->e102 = e102;
+    fx->e103 = e103;
+    fx->e105 = e105;
+    return failures;
+}
 
+static int topup_fixture_disk_entry(struct topup_fx *fx)
+{
+    int failures = 0;
     /* Disk-recovery entry: a REAL block on disk, nTx=0 in the entry. */
     struct block_index *edisk = NULL;
     {
@@ -1038,11 +1120,11 @@ int test_block_index_topup(void)
         struct disk_block_pos pos;
         disk_block_pos_init(&pos);
         unsigned char msg_start[4] = {0x24, 0xe9, 0x27, 0x64};
-        bool wrote = write_block_to_disk(&b, &pos, dir, msg_start);
+        bool wrote = write_block_to_disk(&b, &pos, fx->dir, msg_start);
         block_free(&b);
         TOPUP_CHECK("setup: disk block written", wrote);
         if (wrote) {
-            edisk = topup_insert_entry(&ms, &bh, 200);
+            edisk = topup_insert_entry(&fx->ms, &bh, 200);
             if (edisk) {
                 edisk->nStatus |= BLOCK_HAVE_DATA;
                 edisk->nFile = pos.nFile;
@@ -1052,57 +1134,72 @@ int test_block_index_topup(void)
         }
         TOPUP_CHECK("setup: disk entry inserted", edisk != NULL);
     }
+    fx->edisk = edisk;
+    return failures;
+}
 
+static int topup_open_stores(struct topup_fx *fx)
+{
+    int failures = 0;
     /* Projection rows. */
-    event_log_t *log = event_log_open(el_path);
-    TOPUP_CHECK("setup: event log opens", log != NULL);
-    block_index_projection_t *bip =
-        log ? block_index_projection_open(bip_path, log) : NULL;
-    TOPUP_CHECK("setup: projection opens", bip != NULL);
-    if (!log || !bip) {
-        if (bip) block_index_projection_close(bip);
-        if (log) event_log_close(log);
-        main_state_free(&ms);
-        chain_params_select(CHAIN_MAIN);
-        return failures + 1;
-    }
+    fx->log = event_log_open(fx->el_path);
+    TOPUP_CHECK("setup: event log opens", fx->log != NULL);
+    fx->bip = fx->log
+        ? block_index_projection_open(fx->bip_path, fx->log) : NULL;
+    TOPUP_CHECK("setup: projection opens", fx->bip != NULL);
+    return failures;
+}
 
+static int topup_emit_rows(struct topup_fx *fx)
+{
+    int failures = 0;
     bool rows_ok = true;
     /* r101: the canonical merge row. */
-    rows_ok &= topup_emit_row(log, &h101, &h100, 101,
+    rows_ok &= topup_emit_row(fx->log, &fx->h101, &fx->h100, 101,
                               BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA,
                               2, 1234, 7);
     /* r102: data + a FAILED bit that must NOT be copied. */
-    rows_ok &= topup_emit_row(log, &h102, &h101, 102,
+    rows_ok &= topup_emit_row(fx->log, &fx->h102, &fx->h101, 102,
                               BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
                               BLOCK_FAILED_VALID,
                               2, 2345, 3);
     /* r103: HEIGHT CONFLICT — same hash as e103, recorded height 999. */
-    rows_ok &= topup_emit_row(log, &h103, &h102, 999,
+    rows_ok &= topup_emit_row(fx->log, &fx->h103, &fx->h102, 999,
                               BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA,
                               2, 3456, 9);
     /* r104: missing from the map → insert, parent = e103. */
-    rows_ok &= topup_emit_row(log, &h104, &h103, 104,
+    rows_ok &= topup_emit_row(fx->log, &fx->h104, &fx->h103, 104,
                               BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA,
                               2, 4567, 4);
     /* r100: tries to overwrite the full entry — must be a no-op. */
-    rows_ok &= topup_emit_row(log, &h100, NULL, 100,
+    rows_ok &= topup_emit_row(fx->log, &fx->h100, NULL, 100,
                               BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA,
                               9, 9999, 999);
     /* r105: the real record for the contentless stub e105 — height 105,
      * real nBits (topup_emit_row stamps 0x2000ffff), data-backed. */
-    rows_ok &= topup_emit_row(log, &h105, &h104, 105,
+    rows_ok &= topup_emit_row(fx->log, &fx->h105, &fx->h104, 105,
                               BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA,
                               2, 5678, 6);
     TOPUP_CHECK("setup: rows emitted", rows_ok);
+    return failures;
+}
 
+static int topup_check_full_topup(struct topup_fx *fx)
+{
+    int failures = 0;
     /* ── Run the top-up. ─────────────────────────────────────────── */
     uint64_t progress_before = boot_progress_marker();
-    bool ran = block_index_projection_topup_with(bip, &ms, dir);
+    bool ran = block_index_projection_topup_with(fx->bip, &fx->ms, fx->dir);
     TOPUP_CHECK("topup returns ok", ran);
     TOPUP_CHECK("topup ticks boot_progress (born-red: silent nTx/iterate)",
                 boot_progress_marker() > progress_before);
+    return failures;
+}
 
+static int topup_check_raise_merge(struct topup_fx *fx)
+{
+    int failures = 0;
+    struct block_index *e101 = fx->e101;
     /* 1. raise-only merge on e101. */
     TOPUP_CHECK("e101 gained HAVE_DATA",
                 e101 && (e101->nStatus & BLOCK_HAVE_DATA));
@@ -1112,7 +1209,14 @@ int test_block_index_topup(void)
     TOPUP_CHECK("e101 validity raised to SCRIPTS",
                 e101 && (e101->nStatus & BLOCK_VALID_MASK)
                             == BLOCK_VALID_SCRIPTS);
+    return failures;
+}
 
+static int topup_check_refused_rows(struct topup_fx *fx)
+{
+    int failures = 0;
+    struct block_index *e102 = fx->e102;
+    struct block_index *e103 = fx->e103;
     /* 3. FAILED bit not copied onto e102. */
     TOPUP_CHECK("e102 gained HAVE_DATA",
                 e102 && (e102->nStatus & BLOCK_HAVE_DATA));
@@ -1124,9 +1228,17 @@ int test_block_index_topup(void)
     TOPUP_CHECK("e103 gained nothing",
                 e103 && e103->nTx == 0 &&
                 !(e103->nStatus & BLOCK_HAVE_DATA));
+    return failures;
+}
 
+static int topup_check_insert_missing(struct topup_fx *fx)
+{
+    int failures = 0;
+    struct block_index *e103 = fx->e103;
     /* 5. insert-missing for h104. */
-    struct block_index *e104 = block_map_find(&ms.map_block_index, &h104);
+    struct block_index *e104 =
+        block_map_find(&fx->ms.map_block_index, &fx->h104);
+    fx->e104 = e104;
     TOPUP_CHECK("h104 inserted", e104 != NULL);
     TOPUP_CHECK("h104 height + nTx from the row",
                 e104 && e104->nHeight == 104 && e104->nTx == 4);
@@ -1136,12 +1248,25 @@ int test_block_index_topup(void)
                 e104 && e103 &&
                 arith_uint256_compare(&e104->nChainWork,
                                       &e103->nChainWork) > 0);
+    return failures;
+}
 
+static int topup_check_never_lowers(struct topup_fx *fx)
+{
+    int failures = 0;
+    struct block_index *e100 = fx->e100;
     /* 2. e100 never lowered/overwritten. */
     TOPUP_CHECK("e100 kept nTx", e100 && e100->nTx == 5);
     TOPUP_CHECK("e100 kept positions",
                 e100 && e100->nFile == 1 && e100->nDataPos == 500);
+    return failures;
+}
 
+static int topup_check_hydrated_stub(struct topup_fx *fx)
+{
+    int failures = 0;
+    struct block_index *e104 = fx->e104;
+    struct block_index *e105 = fx->e105;
     /* 5b. contentless stub HYDRATED from the projection row: height
      * re-labelled, header fields + data availability adopted, pprev re-linked,
      * chainwork recomputed. A real entry at a conflicting height (e103) still
@@ -1159,27 +1284,82 @@ int test_block_index_topup(void)
                 e105 && e104 &&
                 arith_uint256_compare(&e105->nChainWork,
                                       &e104->nChainWork) > 0);
+    return failures;
+}
 
+static int topup_check_disk_recovery(struct topup_fx *fx)
+{
+    int failures = 0;
     /* 6. nTx recovered from disk for the legacy-emit entry. */
     TOPUP_CHECK("edisk nTx recovered from the block file",
-                edisk && edisk->nTx == 3);
+                fx->edisk && fx->edisk->nTx == 3);
+    return failures;
+}
 
+static int topup_check_idempotent_rerun(struct topup_fx *fx)
+{
+    int failures = 0;
+    struct block_index *e100 = fx->e100;
+    struct block_index *e101 = fx->e101;
+    struct block_index *e103 = fx->e103;
     /* 7. idempotent second run. */
-    bool ran2 = block_index_projection_topup_with(bip, &ms, dir);
+    bool ran2 = block_index_projection_topup_with(fx->bip, &fx->ms, fx->dir);
     TOPUP_CHECK("second topup returns ok", ran2);
     TOPUP_CHECK("second topup changed nothing",
                 e101 && e101->nTx == 7 && e101->nFile == 2 &&
                 e100 && e100->nTx == 5 &&
                 e103 && e103->nTx == 0 &&
-                edisk && edisk->nTx == 3);
+                fx->edisk && fx->edisk->nTx == 3);
+    return failures;
+}
 
+static int topup_check_null_projection(struct topup_fx *fx)
+{
+    int failures = 0;
     /* NULL projection is a no-op success. */
     TOPUP_CHECK("NULL projection no-op",
-                block_index_projection_topup_with(NULL, &ms, dir));
+                block_index_projection_topup_with(NULL, &fx->ms, fx->dir));
+    return failures;
+}
 
-    block_index_projection_close(bip);
-    event_log_close(log);
-    main_state_free(&ms);
+static void topup_close_stores(struct topup_fx *fx)
+{
+    block_index_projection_close(fx->bip);
+    event_log_close(fx->log);
+    main_state_free(&fx->ms);
+}
+
+int test_block_index_topup(void)
+{
+    int failures = 0;
+    /* Rows pass the shared PoW gate: regtest params admit the 0x2000ffff
+     * fixture bits. Restored on every return. */
+    chain_params_select(CHAIN_REGTEST);
+
+    struct topup_fx fx = {0};
+    topup_fixture_paths(&fx);
+    failures += topup_fixture_entries(&fx);
+    failures += topup_fixture_disk_entry(&fx);
+    failures += topup_open_stores(&fx);
+    if (!fx.log || !fx.bip) {
+        if (fx.bip) block_index_projection_close(fx.bip);
+        if (fx.log) event_log_close(fx.log);
+        main_state_free(&fx.ms);
+        chain_params_select(CHAIN_MAIN);
+        return failures + 1;
+    }
+
+    failures += topup_emit_rows(&fx);
+    failures += topup_check_full_topup(&fx);
+    failures += topup_check_raise_merge(&fx);
+    failures += topup_check_refused_rows(&fx);
+    failures += topup_check_insert_missing(&fx);
+    failures += topup_check_never_lowers(&fx);
+    failures += topup_check_hydrated_stub(&fx);
+    failures += topup_check_disk_recovery(&fx);
+    failures += topup_check_idempotent_rerun(&fx);
+    failures += topup_check_null_projection(&fx);
+    topup_close_stores(&fx);
     failures += run_bound_topup_integration() + run_undo_topup_cases()
                 + run_undo_changed_file_cases()
                 + run_undo_insert_seal_cases()
