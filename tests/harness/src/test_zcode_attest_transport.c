@@ -227,25 +227,13 @@ static bool zat_wire(uint8_t cls, const uint8_t package_root[32],
 
 /* ── 1. the pure transport root ─────────────────────────────────────── */
 
-static int t_root(void)
+/* Determinism: two independent calls over the same bytes agree, and
+ * the transport root is exactly vcs_blob_root() of those bytes. */
+static int zat_root_determinism_checks(
+    const uint8_t *wire, size_t wire_len,
+    const uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES], uint8_t root_out[32])
 {
     int failures = 0;
-    uint8_t pkg[32], rel[32], recipe[32];
-    zat_pattern_root(0x10, pkg);
-    zat_pattern_root(0x40, rel);
-    zat_pattern_root(0x80, recipe);
-
-    uint8_t wire[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
-    size_t wire_len = 0;
-    uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
-    bool built = zat_wire(VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pkg, rel,
-                          recipe, 0x22, wire, &wire_len, id);
-    ZAT_CHECK("root: attestation wire builds", built);
-    if (!built)
-        return failures + 1;
-
-    /* Determinism: two independent calls over the same bytes agree, and
-     * the transport root is exactly vcs_blob_root() of those bytes. */
     struct vcs_package_attest_transport_outcome o1;
     struct vcs_package_attest_transport_outcome o2;
     enum vcs_package_attest_transport_result r1 =
@@ -262,26 +250,17 @@ static int t_root(void)
     ZAT_CHECK("root: the transport root IS the blob root of the wire",
               blob_ok && memcmp(o1.transport_root, blob_root, 32) == 0);
     ZAT_CHECK("root: the outcome carries the recomputed attestation id",
-              memcmp(o1.attestation_id, id, sizeof(id)) == 0 &&
+              memcmp(o1.attestation_id, id,
+                     VCS_PACKAGE_ATTEST_ID_BYTES) == 0 &&
               o1.blob_error == VCS_BLOB_OK &&
               o1.attest_error == VCS_PACKAGE_ATTEST_OK);
+    memcpy(root_out, o1.transport_root, 32);
+    return failures;
+}
 
-    /* Two DIFFERENT wires must not collide: the root commits the exact
-     * signed bytes, and these differ in the attested package root. */
-    uint8_t other_pkg[32];
-    zat_pattern_root(0x11, other_pkg);
-    uint8_t wire_b[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
-    size_t wire_b_len = 0;
-    uint8_t id_b[VCS_PACKAGE_ATTEST_ID_BYTES];
-    struct vcs_package_attest_transport_outcome ob;
-    bool built_b = zat_wire(VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, other_pkg,
-                            rel, recipe, 0x22, wire_b, &wire_b_len, id_b);
-    ZAT_CHECK("root: a second, different wire builds", built_b);
-    ZAT_CHECK("root: different wires yield different roots",
-              built_b &&
-              vcs_package_attest_transport_root(wire_b, wire_b_len, &ob) ==
-                  VCS_PACKAGE_ATTEST_TRANSPORT_OK &&
-              memcmp(ob.transport_root, o1.transport_root, 32) != 0);
+static int zat_root_refusal_checks(const uint8_t *wire, size_t wire_len)
+{
+    int failures = 0;
 
     /* A non-canonical wire has no transport root: the bytes are parsed
      * and verified BEFORE anything is advertised. */
@@ -335,6 +314,47 @@ static int t_root(void)
     return failures;
 }
 
+static int t_root(void)
+{
+    int failures = 0;
+    uint8_t pkg[32], rel[32], recipe[32];
+    zat_pattern_root(0x10, pkg);
+    zat_pattern_root(0x40, rel);
+    zat_pattern_root(0x80, recipe);
+
+    uint8_t wire[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+    size_t wire_len = 0;
+    uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
+    bool built = zat_wire(VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, pkg, rel,
+                          recipe, 0x22, wire, &wire_len, id);
+    ZAT_CHECK("root: attestation wire builds", built);
+    if (!built)
+        return failures + 1;
+
+    uint8_t first_root[32];
+    failures += zat_root_determinism_checks(wire, wire_len, id, first_root);
+
+    /* Two DIFFERENT wires must not collide: the root commits the exact
+     * signed bytes, and these differ in the attested package root. */
+    uint8_t other_pkg[32];
+    zat_pattern_root(0x11, other_pkg);
+    uint8_t wire_b[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+    size_t wire_b_len = 0;
+    uint8_t id_b[VCS_PACKAGE_ATTEST_ID_BYTES];
+    struct vcs_package_attest_transport_outcome ob;
+    bool built_b = zat_wire(VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, other_pkg,
+                            rel, recipe, 0x22, wire_b, &wire_b_len, id_b);
+    ZAT_CHECK("root: a second, different wire builds", built_b);
+    ZAT_CHECK("root: different wires yield different roots",
+              built_b &&
+              vcs_package_attest_transport_root(wire_b, wire_b_len, &ob) ==
+                  VCS_PACKAGE_ATTEST_TRANSPORT_OK &&
+              memcmp(ob.transport_root, first_root, 32) != 0);
+
+    failures += zat_root_refusal_checks(wire, wire_len);
+    return failures;
+}
+
 /* ── 2. offer -> admit over a real store ────────────────────────────── */
 
 struct zat_node {
@@ -370,6 +390,111 @@ static void zat_attest_path(const struct zat_node *n,
     snprintf(out, out_n, "%s/attestations/%s", n->zcode, id_hex);
 }
 
+static int zat_offer_publisher_checks(
+    const struct zat_node *pub, const uint8_t *wire, size_t wire_len,
+    const uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES],
+    uint8_t offered_root_out[32])
+{
+    int failures = 0;
+
+    /* The publisher files its own attestation through the single filer. */
+    bool filed = false;
+    bool already = false;
+    enum vcs_package_attest_transport_result fr =
+        vcs_package_attest_transport_file(pub->zcode, wire, wire_len, id,
+                                          &filed, &already);
+    ZAT_CHECK("round trip: the publisher files the wire",
+              fr == VCS_PACKAGE_ATTEST_TRANSPORT_OK && filed && !already);
+
+    /* Offering re-reads, re-parses, re-verifies, re-derives the id, and
+     * admits the exact bytes as a blob. Nothing is announced. */
+    struct vcs_package_attest_transport_outcome off;
+    enum vcs_package_attest_transport_result orr =
+        vcs_package_attest_transport_offer(pub->store, pub->zcode, id, &off);
+    ZAT_CHECK("round trip: offer publishes the blob and names its root",
+              orr == VCS_PACKAGE_ATTEST_TRANSPORT_OK &&
+              memcmp(off.attestation_id, id,
+                     VCS_PACKAGE_ATTEST_ID_BYTES) == 0);
+
+    /* Re-offering identical bytes is idempotent and yields the same root. */
+    struct vcs_package_attest_transport_outcome off2;
+    ZAT_CHECK("round trip: re-offering identical bytes is idempotent",
+              vcs_package_attest_transport_offer(pub->store, pub->zcode, id,
+                                                 &off2) ==
+                  VCS_PACKAGE_ATTEST_TRANSPORT_OK &&
+              memcmp(off2.transport_root, off.transport_root, 32) == 0);
+
+    /* Offering an id this node does not hold is ERR_ABSENT, by name. */
+    {
+        uint8_t ghost_id[VCS_PACKAGE_ATTEST_ID_BYTES];
+        zat_pattern_root(0x07, ghost_id);
+        struct vcs_package_attest_transport_outcome ga;
+        ZAT_CHECK("round trip: offering an absent id is named",
+                  vcs_package_attest_transport_offer(pub->store, pub->zcode,
+                                                     ghost_id, &ga) ==
+                      VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ABSENT);
+    }
+    memcpy(offered_root_out, off.transport_root, 32);
+    return failures;
+}
+
+static int zat_offer_receiver_admits(
+    const struct zat_node *rcv, const uint8_t *wire, size_t wire_len,
+    const uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES], const uint8_t pkg[32],
+    const uint8_t offered_root[32], uint8_t delivered_root[32])
+{
+    int failures = 0;
+
+    /* The swarm's job is moving the exact bytes; both nodes derive the
+     * SAME transport root from them, which is what makes a POINTER
+     * resolvable at all. */
+    enum vcs_blob_result br =
+        vcs_blob_put_to(rcv->store, wire, wire_len, delivered_root);
+    ZAT_CHECK("round trip: the receiver derives the publisher's root",
+              br == VCS_BLOB_OK &&
+              memcmp(delivered_root, offered_root, 32) == 0);
+
+    struct vcs_package_attest_transport_outcome adm;
+    enum vcs_package_attest_transport_result ar =
+        vcs_package_attest_transport_admit(rcv->store, rcv->zcode,
+                                           delivered_root, NULL, &adm);
+    ZAT_CHECK("round trip: the receiver admits and files it",
+              ar == VCS_PACKAGE_ATTEST_TRANSPORT_OK && adm.filed &&
+              !adm.already_present &&
+              memcmp(adm.attestation_id, id,
+                     VCS_PACKAGE_ATTEST_ID_BYTES) == 0 &&
+              memcmp(adm.attestation.package_root, pkg, 32) == 0);
+    return failures;
+}
+
+static int zat_offer_re_admit_checks(const struct zat_node *rcv,
+                                     const uint8_t delivered_root[32])
+{
+    int failures = 0;
+
+    /* Identical re-admission is OK and files nothing new. */
+    struct vcs_package_attest_transport_outcome adm2;
+    ZAT_CHECK("round trip: re-admitting the same blob is idempotent",
+              vcs_package_attest_transport_admit(rcv->store, rcv->zcode,
+                                                 delivered_root, NULL,
+                                                 &adm2) ==
+                  VCS_PACKAGE_ATTEST_TRANSPORT_OK &&
+              !adm2.filed && adm2.already_present);
+
+    /* A root the receiver does not hold is the blob layer's rule, named. */
+    {
+        uint8_t absent[32];
+        zat_pattern_root(0xa5, absent);
+        struct vcs_package_attest_transport_outcome ab;
+        ZAT_CHECK("round trip: an unheld transport root is named",
+                  vcs_package_attest_transport_admit(rcv->store, rcv->zcode,
+                                                     absent, NULL, &ab) ==
+                      VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB &&
+                  ab.blob_error == VCS_BLOB_ERR_ABSENT);
+    }
+    return failures;
+}
+
 static int t_offer_admit(void)
 {
     int failures = 0;
@@ -398,62 +523,13 @@ static int t_offer_admit(void)
         return failures + 1;
     }
 
-    /* The publisher files its own attestation through the single filer. */
-    bool filed = false;
-    bool already = false;
-    enum vcs_package_attest_transport_result fr =
-        vcs_package_attest_transport_file(pub.zcode, wire, wire_len, id,
-                                          &filed, &already);
-    ZAT_CHECK("round trip: the publisher files the wire",
-              fr == VCS_PACKAGE_ATTEST_TRANSPORT_OK && filed && !already);
+    uint8_t offered_root[32];
+    failures += zat_offer_publisher_checks(&pub, wire, wire_len, id,
+                                           offered_root);
 
-    /* Offering re-reads, re-parses, re-verifies, re-derives the id, and
-     * admits the exact bytes as a blob. Nothing is announced. */
-    struct vcs_package_attest_transport_outcome off;
-    enum vcs_package_attest_transport_result orr =
-        vcs_package_attest_transport_offer(pub.store, pub.zcode, id, &off);
-    ZAT_CHECK("round trip: offer publishes the blob and names its root",
-              orr == VCS_PACKAGE_ATTEST_TRANSPORT_OK &&
-              memcmp(off.attestation_id, id, sizeof(id)) == 0);
-
-    /* Re-offering identical bytes is idempotent and yields the same root. */
-    struct vcs_package_attest_transport_outcome off2;
-    ZAT_CHECK("round trip: re-offering identical bytes is idempotent",
-              vcs_package_attest_transport_offer(pub.store, pub.zcode, id,
-                                                 &off2) ==
-                  VCS_PACKAGE_ATTEST_TRANSPORT_OK &&
-              memcmp(off2.transport_root, off.transport_root, 32) == 0);
-
-    /* Offering an id this node does not hold is ERR_ABSENT, by name. */
-    {
-        uint8_t ghost_id[VCS_PACKAGE_ATTEST_ID_BYTES];
-        zat_pattern_root(0x07, ghost_id);
-        struct vcs_package_attest_transport_outcome ga;
-        ZAT_CHECK("round trip: offering an absent id is named",
-                  vcs_package_attest_transport_offer(pub.store, pub.zcode,
-                                                     ghost_id, &ga) ==
-                      VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ABSENT);
-    }
-
-    /* The swarm's job is moving the exact bytes; both nodes derive the
-     * SAME transport root from them, which is what makes a POINTER
-     * resolvable at all. */
     uint8_t delivered_root[32];
-    enum vcs_blob_result br =
-        vcs_blob_put_to(rcv.store, wire, wire_len, delivered_root);
-    ZAT_CHECK("round trip: the receiver derives the publisher's root",
-              br == VCS_BLOB_OK &&
-              memcmp(delivered_root, off.transport_root, 32) == 0);
-
-    struct vcs_package_attest_transport_outcome adm;
-    enum vcs_package_attest_transport_result ar =
-        vcs_package_attest_transport_admit(rcv.store, rcv.zcode,
-                                           delivered_root, NULL, &adm);
-    ZAT_CHECK("round trip: the receiver admits and files it",
-              ar == VCS_PACKAGE_ATTEST_TRANSPORT_OK && adm.filed &&
-              !adm.already_present &&
-              memcmp(adm.attestation_id, id, sizeof(id)) == 0 &&
-              memcmp(adm.attestation.package_root, pkg, 32) == 0);
+    failures += zat_offer_receiver_admits(&rcv, wire, wire_len, id, pkg,
+                                          offered_root, delivered_root);
 
     /* The filed bytes are the signed bytes, unchanged. */
     {
@@ -467,26 +543,7 @@ static int t_offer_admit(void)
                   memcmp(back, wire, wire_len) == 0);
     }
 
-    /* Identical re-admission is OK and files nothing new. */
-    struct vcs_package_attest_transport_outcome adm2;
-    ZAT_CHECK("round trip: re-admitting the same blob is idempotent",
-              vcs_package_attest_transport_admit(rcv.store, rcv.zcode,
-                                                 delivered_root, NULL,
-                                                 &adm2) ==
-                  VCS_PACKAGE_ATTEST_TRANSPORT_OK &&
-              !adm2.filed && adm2.already_present);
-
-    /* A root the receiver does not hold is the blob layer's rule, named. */
-    {
-        uint8_t absent[32];
-        zat_pattern_root(0xa5, absent);
-        struct vcs_package_attest_transport_outcome ab;
-        ZAT_CHECK("round trip: an unheld transport root is named",
-                  vcs_package_attest_transport_admit(rcv.store, rcv.zcode,
-                                                     absent, NULL, &ab) ==
-                      VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB &&
-                  ab.blob_error == VCS_BLOB_ERR_ABSENT);
-    }
+    failures += zat_offer_re_admit_checks(&rcv, delivered_root);
 
     zat_node_close(&pub);
     zat_node_close(&rcv);

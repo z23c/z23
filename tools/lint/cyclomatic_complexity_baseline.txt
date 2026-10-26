@@ -2379,8 +2379,6 @@ tests/harness/src/test_zcode_add.c:za_publish_ex:30
 tests/harness/src/test_zcode_attention_bid.c:test_zcode_attention_bid:89
 tests/harness/src/test_zcode_attention_lineage.c:test_zcode_attention_lineage:51
 tests/harness/src/test_zcode_attention_verified.c:test_zcode_attention_verified:22
-tests/harness/src/test_zcode_attest_transport.c:t_offer_admit:18
-tests/harness/src/test_zcode_attest_transport.c:t_root:16
 tests/harness/src/test_zcode_benchmark_exec.c:zbex_seed_context:16
 tests/harness/src/test_zcode_contributor.c:t_packages:16
 tests/harness/src/test_zcode_contributor.c:t_rebuild_equivalence:16
