@@ -107,16 +107,8 @@ char *zcl_native_name_list_body(const struct json_value *args,
 
 /* ── Messaging (ZMSG) ───────────────────────────────────────── */
 
-/* Native inbox is the full inbox, newest first. The native command's optional
- * `unread_only` boolean filter is intentionally not carried onto the native
- * leaf: the registry input validator only admits a fixed set of boolean keys
- * (verbose/confirm/relink_generation), so an `unread_only` bool would be
- * rejected before dispatch. The full inbox is the honest bounded read. */
-static bool native_inbox_index_valid(const struct json_value *doc)
+static bool native_inbox_index_keys_valid(const struct json_value *doc)
 {
-    if (!doc || doc->type != JSON_OBJ)
-        return false;
-
     size_t messages_fields = 0;
     size_t shown_fields = 0;
     size_t total_fields = 0;
@@ -134,7 +126,11 @@ static bool native_inbox_index_valid(const struct json_value *doc)
     if (messages_fields != 1 || shown_fields != 1 || total_fields > 1 ||
         doc->num_children != 2 + total_fields)
         return false;
+    return true;
+}
 
+static bool native_inbox_index_fields_valid(const struct json_value *doc)
+{
     const struct json_value *messages = json_get(doc, "messages");
     const struct json_value *shown = json_get(doc, "shown");
     const struct json_value *total = json_get(doc, "total");
@@ -145,6 +141,20 @@ static bool native_inbox_index_valid(const struct json_value *doc)
         shown->val.i != (int64_t)message_count)
         return false;
     return !total || (total->type == JSON_INT && total->val.i >= shown->val.i);
+}
+
+/* Native inbox is the full inbox, newest first. The native command's optional
+ * `unread_only` boolean filter is intentionally not carried onto the native
+ * leaf: the registry input validator only admits a fixed set of boolean keys
+ * (verbose/confirm/relink_generation), so an `unread_only` bool would be
+ * rejected before dispatch. The full inbox is the honest bounded read. */
+static bool native_inbox_index_valid(const struct json_value *doc)
+{
+    if (!doc || doc->type != JSON_OBJ)
+        return false;
+
+    return native_inbox_index_keys_valid(doc) &&
+           native_inbox_index_fields_valid(doc);
 }
 
 static char *native_inbox_index_invalid(struct zcl_native_body_err *err,

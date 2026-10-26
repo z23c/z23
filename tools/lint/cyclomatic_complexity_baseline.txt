@@ -753,7 +753,6 @@ engine/controllers/src/api_controller_routes.c:api_dynamic_route_match:20
 engine/controllers/src/api_controller_status.c:api_milestone_status_json:43
 engine/controllers/src/api_controller_status.c:api_refold_status_json:21
 engine/controllers/src/api_controller_status.c:api_serve_node_summary:30
-engine/controllers/src/app_native_handlers.c:native_inbox_index_valid:21
 engine/controllers/src/blockchain_controller_chain.c:rpc_getblockchaininfo:34
 engine/controllers/src/blog_controller.c:blog_discover_onion_peers_wallet:28
 engine/controllers/src/file_controller.c:file_manifest_build:20
