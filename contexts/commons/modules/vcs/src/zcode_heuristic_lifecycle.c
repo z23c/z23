@@ -39,6 +39,26 @@ static bool hl_memory_overlaps(const void *left, size_t left_size,
     return l < r + right_size && r < l + left_size;
 }
 
+static enum vcs_zcode_attention_error hl_snapshot_check_statement_roots(
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    bool *anchor_found)
+{
+    for (size_t i = 0;
+         i < VCS_ZCODE_HEURISTIC_LIFECYCLE_MAX_STATEMENTS; i++) {
+        bool active = i < snapshot->statement_count;
+        bool nonzero = hl_root_nonzero(snapshot->statement_roots[i]);
+        if (active != nonzero) return VCS_ZCODE_ATTENTION_ROOT;
+        if (!active) continue;
+        if (i != 0 && memcmp(snapshot->statement_roots[i - 1u],
+                             snapshot->statement_roots[i], 32) >= 0)
+            return VCS_ZCODE_ATTENTION_ORDER;
+        if (memcmp(snapshot->statement_roots[i],
+                   snapshot->anchor_statement_root, 32) == 0)
+            *anchor_found = true;
+    }
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
 static enum vcs_zcode_attention_error hl_snapshot_validate(
     const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot)
 {
@@ -55,19 +75,9 @@ static enum vcs_zcode_attention_error hl_snapshot_validate(
         return VCS_ZCODE_ATTENTION_ROOT;
 
     bool anchor_found = false;
-    for (size_t i = 0;
-         i < VCS_ZCODE_HEURISTIC_LIFECYCLE_MAX_STATEMENTS; i++) {
-        bool active = i < snapshot->statement_count;
-        bool nonzero = hl_root_nonzero(snapshot->statement_roots[i]);
-        if (active != nonzero) return VCS_ZCODE_ATTENTION_ROOT;
-        if (!active) continue;
-        if (i != 0 && memcmp(snapshot->statement_roots[i - 1u],
-                             snapshot->statement_roots[i], 32) >= 0)
-            return VCS_ZCODE_ATTENTION_ORDER;
-        if (memcmp(snapshot->statement_roots[i],
-                   snapshot->anchor_statement_root, 32) == 0)
-            anchor_found = true;
-    }
+    enum vcs_zcode_attention_error error =
+        hl_snapshot_check_statement_roots(snapshot, &anchor_found);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
     if (snapshot->statement_count == 0)
         return hl_root_nonzero(snapshot->anchor_statement_root)
             ? VCS_ZCODE_ATTENTION_BINDING : VCS_ZCODE_ATTENTION_OK;
@@ -175,7 +185,7 @@ static uint8_t hl_relation_for_profile(uint8_t profile)
     }
 }
 
-enum vcs_zcode_attention_error vcs_zcode_heuristic_lifecycle_fold(
+static enum vcs_zcode_attention_error hl_fold_check_inputs(
     const char *workspace,
     const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
     struct vcs_zcode_heuristic_lifecycle_report *report)
@@ -188,24 +198,15 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_lifecycle_fold(
         hl_memory_overlaps(report, sizeof(*report), snapshot,
                            sizeof(*snapshot)))
         return VCS_ZCODE_ATTENTION_ALIAS;
-    enum vcs_zcode_attention_error error = hl_snapshot_validate(snapshot);
-    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    return hl_snapshot_validate(snapshot);
+}
 
-    struct vcs_zcode_heuristic_lifecycle_report result = {0};
-    result.status = VCS_ZCODE_HEURISTIC_LIFECYCLE_UNDETERMINED;
-    hl_snapshot_root(snapshot, result.snapshot_root);
-    if (snapshot->statement_count == 0) {
-        result.complete = true;
-        result.reason = VCS_ZCODE_HEURISTIC_LIFECYCLE_REASON_EMPTY;
-        *report = result;
-        return VCS_ZCODE_ATTENTION_OK;
-    }
-
-    struct hl_node *nodes = zcl_calloc(
-        snapshot->statement_count, sizeof(*nodes), "heuristic_lifecycle");
-    if (!nodes) return VCS_ZCODE_ATTENTION_CAS;
-    size_t anchor = hl_find_root(snapshot, snapshot->anchor_statement_root);
-    bool valid = anchor != SIZE_MAX;
+static bool hl_fold_load_nodes(
+    const char *workspace,
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct hl_node *nodes)
+{
+    bool valid = true;
     for (size_t i = 0; valid && i < snapshot->statement_count; i++) {
         valid = hl_statement_load(
             workspace, snapshot->statement_roots[i],
@@ -224,14 +225,14 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_lifecycle_fold(
                    relations.rows[0].statement_root, 32);
         }
     }
-    if (!valid) {
-        free(nodes);
-        return VCS_ZCODE_ATTENTION_EVIDENCE;
-    }
+    return valid;
+}
 
-    valid = nodes[anchor].statement.profile ==
-            VCS_ZCODE_SCIENCE_PROFILE_RESULT &&
-        nodes[anchor].relation_count == 0;
+static bool hl_fold_link_predecessors(
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct hl_node *nodes, size_t anchor)
+{
+    bool valid = true;
     for (size_t i = 0; valid && i < snapshot->statement_count; i++) {
         if (i == anchor) continue;
         uint8_t expected_relation =
@@ -249,11 +250,13 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_lifecycle_fold(
             snapshot, nodes[i].predecessor_root);
         valid = nodes[i].predecessor != SIZE_MAX;
     }
-    if (!valid) {
-        free(nodes);
-        return VCS_ZCODE_ATTENTION_EVIDENCE;
-    }
+    return valid;
+}
 
+static bool hl_fold_chain_is_ambiguous(
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct hl_node *nodes, size_t anchor)
+{
     bool ambiguous = false;
     for (size_t i = 0; i < snapshot->statement_count; i++) {
         if (i == anchor) continue;
@@ -273,27 +276,78 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_lifecycle_fold(
     }
     if (current != SIZE_MAX || visited_count != snapshot->statement_count)
         ambiguous = true;
+    return ambiguous;
+}
+
+static void hl_fold_set_head_status(
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    const struct hl_node *nodes, size_t anchor,
+    struct vcs_zcode_heuristic_lifecycle_report *result)
+{
+    size_t head = anchor;
+    while (nodes[head].child != SIZE_MAX) head = nodes[head].child;
+    memcpy(result->head_statement_root,
+           snapshot->statement_roots[head], 32);
+    switch (nodes[head].statement.profile) {
+    case VCS_ZCODE_SCIENCE_PROFILE_RESULT:
+    case VCS_ZCODE_SCIENCE_PROFILE_SUPERSESSION:
+        result->status = VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED;
+        break;
+    case VCS_ZCODE_SCIENCE_PROFILE_RETRACTION:
+        result->status = VCS_ZCODE_HEURISTIC_LIFECYCLE_RETIRED;
+        break;
+    default:
+        break;
+    }
+}
+
+enum vcs_zcode_attention_error vcs_zcode_heuristic_lifecycle_fold(
+    const char *workspace,
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report)
+{
+    enum vcs_zcode_attention_error error =
+        hl_fold_check_inputs(workspace, snapshot, report);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+
+    struct vcs_zcode_heuristic_lifecycle_report result = {0};
+    result.status = VCS_ZCODE_HEURISTIC_LIFECYCLE_UNDETERMINED;
+    hl_snapshot_root(snapshot, result.snapshot_root);
+    if (snapshot->statement_count == 0) {
+        result.complete = true;
+        result.reason = VCS_ZCODE_HEURISTIC_LIFECYCLE_REASON_EMPTY;
+        *report = result;
+        return VCS_ZCODE_ATTENTION_OK;
+    }
+
+    struct hl_node *nodes = zcl_calloc(
+        snapshot->statement_count, sizeof(*nodes), "heuristic_lifecycle");
+    if (!nodes) return VCS_ZCODE_ATTENTION_CAS;
+    size_t anchor = hl_find_root(snapshot, snapshot->anchor_statement_root);
+    bool valid = anchor != SIZE_MAX;
+    valid = valid && hl_fold_load_nodes(workspace, snapshot, nodes);
+    if (!valid) {
+        free(nodes);
+        return VCS_ZCODE_ATTENTION_EVIDENCE;
+    }
+
+    valid = nodes[anchor].statement.profile ==
+            VCS_ZCODE_SCIENCE_PROFILE_RESULT &&
+        nodes[anchor].relation_count == 0;
+    valid = valid && hl_fold_link_predecessors(snapshot, nodes, anchor);
+    if (!valid) {
+        free(nodes);
+        return VCS_ZCODE_ATTENTION_EVIDENCE;
+    }
+
+    bool ambiguous = hl_fold_chain_is_ambiguous(snapshot, nodes, anchor);
 
     result.validated_count = snapshot->statement_count;
     result.complete = true;
     if (ambiguous) {
         result.reason = VCS_ZCODE_HEURISTIC_LIFECYCLE_REASON_AMBIGUOUS;
     } else {
-        size_t head = anchor;
-        while (nodes[head].child != SIZE_MAX) head = nodes[head].child;
-        memcpy(result.head_statement_root,
-               snapshot->statement_roots[head], 32);
-        switch (nodes[head].statement.profile) {
-        case VCS_ZCODE_SCIENCE_PROFILE_RESULT:
-        case VCS_ZCODE_SCIENCE_PROFILE_SUPERSESSION:
-            result.status = VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED;
-            break;
-        case VCS_ZCODE_SCIENCE_PROFILE_RETRACTION:
-            result.status = VCS_ZCODE_HEURISTIC_LIFECYCLE_RETIRED;
-            break;
-        default:
-            break;
-        }
+        hl_fold_set_head_status(snapshot, nodes, anchor, &result);
     }
     free(nodes);
     *report = result;
