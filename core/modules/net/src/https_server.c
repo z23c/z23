@@ -35,6 +35,7 @@
 #include <strings.h>
 #endif
 #include "util/log_macros.h"
+#include "util/path_check.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
 #include "util/thread_liveness.h"
@@ -768,6 +769,71 @@ static bool https_root_wants_install_script(const char *user_agent,
     return true;
 }
 
+/* Operator-set front paths (-site-home= / -site-start=). Empty means the
+ * default: "/" redirects browsers to /explorer and "/start" is not special.
+ * Set once at boot before the listener serves, copied here. */
+#define HTTPS_FRONT_PATH_MAX 256
+static char g_front_home[HTTPS_FRONT_PATH_MAX];
+static char g_front_start[HTTPS_FRONT_PATH_MAX];
+
+/* A redirect target must be a rooted local path: "/" first, not "//" (a
+ * protocol-relative URL leaves the site), no backslash, and clean under
+ * path_check_url_arg (no control bytes, no ".." segment). */
+static bool https_front_path_ok(const char *name, const char *p)
+{
+    if (!path_check_url_arg(p, HTTPS_FRONT_PATH_MAX - 1) || p[1] == '/' ||
+        strchr(p, '\\') != NULL) {
+        LOG_WARN("https", "-site-%s path rejected; keeping the default", name);
+        return false;
+    }
+    return true;
+}
+
+void https_server_set_front_paths(const char *home, const char *start)
+{
+    g_front_home[0] = '\0';
+    g_front_start[0] = '\0';
+    if (home && home[0] && https_front_path_ok("home", home))
+        snprintf(g_front_home, sizeof(g_front_home), "%s", home);
+    if (start && start[0] && https_front_path_ok("start", start))
+        snprintf(g_front_start, sizeof(g_front_start), "%s", start);
+}
+
+/* Where a browser GET "/" is sent. */
+static const char *https_root_redirect_target(void)
+{
+    return g_front_home[0] ? g_front_home : "/explorer";
+}
+
+/* Where GET/HEAD "/start" is sent, or NULL when it is not special. */
+static const char *https_start_redirect_target(const char *path)
+{
+    return (g_front_start[0] && strcmp(path, "/start") == 0)
+               ? g_front_start : NULL;
+}
+
+static void https_write_redirect(SSL *ssl, const char *location)
+{
+    char resp[HTTPS_FRONT_PATH_MAX + 96];
+    int n = snprintf(resp, sizeof(resp),
+                     "HTTP/1.1 302 Found\r\n"
+                     "Location: %s\r\n"
+                     "Connection: close\r\n\r\n", location);
+    if (n > 0 && (size_t)n < sizeof(resp))
+        SSL_write(ssl, resp, n);
+}
+
+#ifdef ZCL_TESTING
+const char *https_root_redirect_target_for_testing(void)
+{
+    return https_root_redirect_target();
+}
+const char *https_start_redirect_target_for_testing(const char *path)
+{
+    return https_start_redirect_target(path);
+}
+#endif
+
 #ifdef ZCL_TESTING
 bool https_root_wants_install_script_for_testing(const char *user_agent,
                                                  const char *accept)
@@ -857,11 +923,14 @@ static void handle_https_client(SSL *ssl, platform_socket_t fd,
             free(buf);
             return;
         }
-        const char *resp =
-            "HTTP/1.1 302 Found\r\n"
-            "Location: /explorer\r\n"
-            "Connection: close\r\n\r\n";
-        SSL_write(ssl, resp, (int)strlen(resp));
+        https_write_redirect(ssl, https_root_redirect_target());
+        return;
+    }
+
+    /* Operator-set agent entry point (-site-start=). */
+    const char *start_to = https_start_redirect_target(path);
+    if (start_to) {
+        https_write_redirect(ssl, start_to);
         return;
     }
 

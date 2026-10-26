@@ -103,6 +103,11 @@ void print_usage(const char *prog)
     printf("  -httpsdomain=<dom>  TLS servername / HTTPS-redirect host for the\n");
     printf("                      clearnet explorer (optional; defaults to the\n");
     printf("                      request Host header with a single cert)\n");
+    printf("  -site-home=<path>   Where the clearnet HTTPS root sends browsers\n");
+    printf("                      (default /explorer; script clients still get\n");
+    printf("                      the installer)\n");
+    printf("  -site-start=<path>  Make /start on the clearnet HTTPS port redirect\n");
+    printf("                      to this path (default: /start is not special)\n");
     printf("  -profile=<name>     Service profile: full, zclassic-only, explorer, onion-node, legacy-compat\n");
     printf("  -operator-lane=<name>  Operator lane: canonical, soak, dev, test,\n");
     printf("                      copy, standby. canonical, soak and standby\n");
@@ -1065,6 +1070,8 @@ static int args_arm_misc_network(const char *arg,
     }
     else if (strncmp(arg, "-externalip=", 12) == 0) ctx->external_ip = arg + 12;
     else if (strncmp(arg, "-httpsdomain=", 13) == 0) ctx->https_domain = arg + 13;
+    else if (strncmp(arg, "-site-home=", 11) == 0) ctx->site_home = arg + 11;
+    else if (strncmp(arg, "-site-start=", 12) == 0) ctx->site_start = arg + 12;
     else if (strcmp(arg, "-fleetrostergate") == 0 ||
              strcmp(arg, "-fleetrostergate=1") == 0)
         boot_fleet_roster_set_gate(BOOT_FLEET_ROSTER_GATE_ON);

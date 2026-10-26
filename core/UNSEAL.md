@@ -312,3 +312,7 @@ later lane flips it HARD.
 - 2026-10-25T16:26:37Z — REASON: ZIP-209 Sapling pool parity: the per-block Sapling delta is -valueBalance (zclassicd ConnectBlock saplingValue += -tx.valueBalance); core added +valueBalance. Latent (runs only when the chain Sapling value is known; the live node stores 0). Oracle h=476977: valueBalance -1 ZCL, chainValue +1 ZCL. Owner-approved 2026-10-25.
   old ROOT: bf8be6cf014cd435e26209f319eb5f9cd13ab8dadfae0a9d6fa0b01d198f8af9
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-26T21:48:23Z — REASON: Owner-authorized 2026-10-26: default-off https_server_set_front_paths so a site node can point the browser root and /start elsewhere; existing behaviour unchanged when unset
+  old ROOT: bfa2e068bab92e18f15eb5be151823feb8b6929dd6e902d59161a61256840681
+  by: owner unseal ritual (make core-unseal)

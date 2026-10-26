@@ -442,6 +442,8 @@ static bool boot_https_explorer_start(void *ctx)
     snprintf(handoff_path, sizeof(handoff_path), "%s/ssl/%s", svc->datadir,
              ACME_HANDOFF_FILENAME);
     boot_https_arm_public_install(svc->datadir);
+    https_server_set_front_paths(svc->app_ctx->site_home,
+                                 svc->app_ctx->site_start);
     if (platform_directory_create(ssl_dir, 0700) != 0 && errno != EEXIST) {
         printf("HTTPS: cannot create %s - block explorer not on clearnet\n",
                ssl_dir);

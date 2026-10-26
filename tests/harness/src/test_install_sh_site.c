@@ -100,5 +100,41 @@ int test_install_sh_site(void)
     ISH_CHECK("no User-Agent at all stays a browsing request",
               !https_root_wants_install_script_for_testing(NULL, NULL));
 
+    /* Front paths: default-off; set paths steer the browser root and
+     * /start; a bad path is refused and keeps the default. */
+    https_server_set_front_paths(NULL, NULL);
+    ISH_CHECK("front paths default: root goes to /explorer",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/explorer") == 0);
+    ISH_CHECK("front paths default: /start is not special",
+              https_start_redirect_target_for_testing("/start") == NULL);
+    https_server_set_front_paths("", "");
+    ISH_CHECK("empty front paths keep the defaults",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/explorer") == 0 &&
+              https_start_redirect_target_for_testing("/start") == NULL);
+    https_server_set_front_paths("/wiki/home", "/wiki/start.txt");
+    ISH_CHECK("site-home steers the browser root",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/wiki/home") == 0);
+    ISH_CHECK("site-start steers /start only",
+              strcmp(https_start_redirect_target_for_testing("/start"),
+                     "/wiki/start.txt") == 0 &&
+              https_start_redirect_target_for_testing("/starts") == NULL &&
+              https_start_redirect_target_for_testing("/") == NULL);
+    ISH_CHECK("script clients still want the installer with front paths set",
+              https_root_wants_install_script_for_testing("curl/8.0", ""));
+    https_server_set_front_paths("wiki", "//evil.example/x");
+    ISH_CHECK("unrooted and protocol-relative paths are refused",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/explorer") == 0 &&
+              https_start_redirect_target_for_testing("/start") == NULL);
+    https_server_set_front_paths("/a/../b", "/x\r\nSet-Cookie: y=1");
+    ISH_CHECK("dot-dot and control bytes are refused",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/explorer") == 0 &&
+              https_start_redirect_target_for_testing("/start") == NULL);
+    https_server_set_front_paths(NULL, NULL);
+
     return failures;
 }

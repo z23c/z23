@@ -107,6 +107,14 @@ bool https_deferred_pending(void);    /* HTTPS start deferred during IBD, not ye
  * release bytes. Empty or unset keeps GET / as the explorer redirect. */
 void https_server_set_public_install_root(const char *path);
 
+/* Front paths for a site node (-site-home= / -site-start=). `home` replaces
+ * the browser GET / redirect target (default /explorer); `start`, when set,
+ * makes GET/HEAD /start answer 302 to it. Both are copied. NULL or empty
+ * keeps the default; a path that is not rooted ("/x", not "//x"), or fails
+ * path_check_url_arg, is logged and ignored. Script clients still get the
+ * installer at /. */
+void https_server_set_front_paths(const char *home, const char *start);
+
 #ifdef ZCL_TESTING
 #include <stddef.h>
 #include <stdint.h>
@@ -121,6 +129,10 @@ bool https_server_acme_challenge_filepath_for_testing(const char *root,
  * https_server.c. */
 bool https_root_wants_install_script_for_testing(const char *user_agent,
                                                  const char *accept);
+/* The Location a browser GET / gets, and the Location GET /start gets
+ * (NULL when /start is not special). */
+const char *https_root_redirect_target_for_testing(void);
+const char *https_start_redirect_target_for_testing(const char *path);
 void https_server_handle_http_for_testing(platform_socket_t fd,
                                           int64_t deadline_ms);
 bool https_server_public_install_filepath_for_testing(const char *root,

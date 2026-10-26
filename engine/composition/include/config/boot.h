@@ -361,6 +361,10 @@ struct app_context {
                                  * cert the server presents that cert regardless of SNI,
                                  * so NULL is fine (HTTP→HTTPS redirect then falls back
                                  * to the request's Host header). */
+    const char *site_home;     /* -site-home=PATH : browser GET / redirect target on the
+                                * clearnet HTTPS port. NULL/empty keeps /explorer. */
+    const char *site_start;    /* -site-start=PATH : GET /start redirects here. NULL/empty
+                                * leaves /start unspecial. */
     /* `-httpsaltdomain=NAME`, repeatable (argv-owned pointers; never freed).
      * ADDITIONAL names this host answers for on the SAME 443 listener, each
      * served its own certificate by TLS SNI. The pair for NAME lives in its
