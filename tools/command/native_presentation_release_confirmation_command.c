@@ -442,8 +442,7 @@ void zcl_native_handle_presentation_release_confirm(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (nprc_arguments_missing(request, reply)) return;
-    const char *workspace_arg = nprc_workspace_argument(
-        nprc_str(request->input, "workspace"));
+    const char *workspace_arg = nprc_str(request->input, "workspace");
     const char *work = nprc_str(request->input, "work");
     const char *proof_datadir = nprc_str(request->input, "datadir");
     if (zcl_native_forward_live_command(
@@ -451,6 +450,7 @@ void zcl_native_handle_presentation_release_confirm(
             "LIVE_RELEASE_CONFIRM_FAILED", "present",
             "app.presentation.release-confirm", reply))
         return;
+    workspace_arg = nprc_workspace_argument(workspace_arg);
     char workspace[NPRC_PATH_MAX];
     if (!platform_directory_canonical_real(workspace_arg, workspace,
                                            sizeof(workspace))) {
