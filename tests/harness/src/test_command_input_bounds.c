@@ -1356,8 +1356,7 @@ static bool cib_machine_shape(const char *key,const char *value)
     if(!spec||n<0||(size_t)n>=sizeof raw)return false;
     struct json_value input;json_init(&input);
     bool parsed=json_read(&input,raw,(size_t)n);
-    bool accepted = parsed &&
-        zcl_command_registry_input_validate(spec, &input, NULL, 0);
+    bool accepted=parsed&&zcl_command_registry_input_validate(spec,&input,NULL,0);
     json_free(&input);return accepted;
 }
 static int t_machine_protected_object_types(void)
