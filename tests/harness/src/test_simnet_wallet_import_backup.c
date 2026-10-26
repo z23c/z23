@@ -228,19 +228,6 @@ static void ib_make_datadir(char *dir, size_t dirlen, const char *tag)
     mkdir(blocks, 0755); /* raw-alloc-ok:test-fixture */
 }
 
-/* wallet_sqlite_open is now marked deprecated in favour of the richer
- * wallet_sqlite_open_r, and this harness turns deprecation into an
- * error. This lane asserts only the call's boolean outcome, so route it
- * through a locally silenced shim that calls the original entry point
- * with the original arguments — identical behaviour, no diagnostic. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-static bool ib_wallet_sqlite_open(struct wallet_sqlite *ws, sqlite3 *db)
-{
-    return wallet_sqlite_open(ws, db);
-}
-#pragma GCC diagnostic pop
-
 /* Trust fixture for the sendtoaddress sovereignty guard
  * (sovereignty_guard_allow fails closed when the progress store is
  * absent): give this test process the same bare/self-derived fixture as
@@ -407,13 +394,6 @@ static bool ib_shielded_spending_refusal_retires_scratch(void)
     return ok;
 }
 
-/* Part 1 runs as a sequence of phase helpers over one shared fixture.
- * The wallets, node DBs, simnet and validation state all outlive any
- * single phase (wallet_rescan walks ms2.chain_active; the shared RPC
- * context points into this state until cleanup), so every phase takes
- * this context, which part1 keeps on its own frame exactly like the
- * locals it replaced. A phase that hits one of part1's original early
- * return paths performs that path's cleanup and sets `halted`. */
 struct ib_part1 {
     bool halted;
     int64_t fund_value;
@@ -489,7 +469,7 @@ static int ib_p1_open_wallet1(struct ib_part1 *p1)
     }
     wallet_init(p1->w1);
     IB_CHECK("wallet1: wallet_sqlite_open",
-             ib_wallet_sqlite_open(&p1->ws1, p1->ndb1.db));
+             wallet_sqlite_open(&p1->ws1, p1->ndb1.db));
 
     rpc_wallet_set_state(p1->w1, NULL, p1->datadir1, &p1->ws1, NULL, NULL);
     rpc_wallet_set_node_db(NULL);
@@ -686,7 +666,7 @@ static int ib_p1_setup_wallet2(struct ib_part1 *p1)
 
     wallet_init(p1->w2);
     IB_CHECK("wallet2: wallet_sqlite_open",
-             ib_wallet_sqlite_open(&p1->ws2, p1->ndb2.db));
+             wallet_sqlite_open(&p1->ws2, p1->ndb2.db));
 
     main_state_init(&p1->ms2);
     struct block_index **chain_arr =
@@ -904,7 +884,13 @@ static __attribute__((noinline)) int part1_import_rescan_spend(void)
     ib_ensure_rpc_warmup_finished();
 
     struct ib_part1 p1;
-    memset(&p1, 0, sizeof(p1));
+    p1.halted = false;
+    p1.addrA[0] = 0;
+    p1.wifA[0] = 0;
+    p1.addrR[0] = 0;
+    p1.sendtxid[0] = 0;
+    p1.have_sendtx = false;
+    p1.mined = false;
     p1.fund_value = COIN_VALUE;
     p1.send_fee = WALLET_DEFAULT_FEE_ZAT;
 
@@ -945,7 +931,7 @@ static __attribute__((noinline)) int part2_backup_restore(void)
              node_db_open(&ndb, srcdb));
 
     struct wallet_sqlite ws;
-    IB_CHECK("part2: wallet_sqlite_open", ib_wallet_sqlite_open(&ws, ndb.db));
+    IB_CHECK("part2: wallet_sqlite_open", wallet_sqlite_open(&ws, ndb.db));
 
     wallet_lock_reset_for_test();
     IB_CHECK("part2: unlock encrypted wallet fixture",
@@ -1030,7 +1016,7 @@ static __attribute__((noinline)) int part2_backup_restore(void)
                  restored_balance == orig_balance);
 
         struct wallet_sqlite ws_restored;
-        bool ws_ok = ib_wallet_sqlite_open(&ws_restored, ndb_restored.db);
+        bool ws_ok = wallet_sqlite_open(&ws_restored, ndb_restored.db);
         struct privkey got;
         privkey_init(&got);
         struct zcl_result rr = ws_ok ?
