@@ -1320,8 +1320,6 @@ tests/harness/src/test_yardsale_app.c:t_prevout_service_strict:21
 tests/harness/src/test_yardsale_app.c:t_simnet_atomic_purchase:47
 tests/harness/src/test_yardsale_app.c:t_webbuy_plan_gate:45
 tests/harness/src/test_yardsale_wallet.c:test_yardsale_wallet:130
-tests/harness/src/test_zclassicd_oracle.c:mock_server_loop:22
-tests/harness/src/test_zclassicd_oracle.c:test_zclassicd_oracle:106
 tests/harness/src/test_zcode_add.c:t_deps_rules:19
 tests/harness/src/test_zcode_add.c:t_e2e:289
 tests/harness/src/test_zcode_add.c:t_generations:22
