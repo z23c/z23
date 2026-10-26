@@ -2432,7 +2432,7 @@ static const char *unit_ledger_provider(const char *engine_id)
         return engine_id;
     /* The GPT CLI rows spend against the ledger's existing codex subject. */
     if (strcmp(engine_id, "openai") == 0 || strcmp(engine_id, "gpt-luna") == 0 ||
-        strcmp(engine_id, "gpt-sol") == 0)
+        strcmp(engine_id, "gpt-sol") == 0 || strcmp(engine_id, "gpt-astra") == 0)
         return "codex";
     return NULL; /* `fixture` spends nothing; an unknown id names nothing */
 }

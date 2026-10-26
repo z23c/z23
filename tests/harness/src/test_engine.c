@@ -6233,9 +6233,10 @@ static int case_gpt_dispatch_e2e(void)
                ENGINE_UNIT_BIN);
         return 1;
     }
-    static const char *const ids[] = { "gpt-luna", "gpt-sol" };
-    static const char *const models[] = { "gpt-6-luna", "gpt-6.1-sol" };
-    for (size_t i = 0; i < 2; i++) {
+    static const char *const ids[] = { "gpt-luna", "gpt-sol", "gpt-astra" };
+    static const char *const models[] = { "gpt-6-luna", "gpt-6.1-sol",
+                                          "gpt-6-astra" };
+    for (size_t i = 0; i < 3; i++) {
         char calls[4096], receipt[8192], ledger[2048], envd[65536];
         bool edited = false;
         const bool ran = gpt_dispatch_run(ids[i], calls, sizeof(calls),

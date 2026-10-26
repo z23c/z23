@@ -365,6 +365,21 @@ static const struct engine_vendor k_engine_vendors[] = {
         .max_retries   = 1,
     },
     {
+        .id            = "gpt-astra",
+        .display       = "OpenAI GPT-6 Astra (installed agent CLI, subscription auth, low effort)",
+        .url           = NULL,
+        .default_model = "gpt-6-astra",
+        .program       = "codex",
+        .start_argv    = k_gpt_cli_start_argv,
+        .report_start_argv = k_gpt_cli_report_argv,
+        .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
+        .report_format = ENGINE_CLI_OUTPUT_PLAIN,
+        .wire          = ENGINE_WIRE_LOCAL_CLI,
+        .delivery      = ENGINE_DELIVERS_EDITS,
+        .costs_money   = true,
+        .max_retries   = 1,
+    },
+    {
         /* Moonshot's Kimi agent CLI, subscription-authenticated. Output is
          * plain text: no usage is decoded, so the receipt records tokens and
          * cost as unreported, never zero. */

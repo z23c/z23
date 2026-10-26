@@ -398,9 +398,9 @@ static int gpt_row_argv(const struct engine_vendor *v, const char *model)
 static int case_gpt_rows(void)
 {
     int failures = 0;
-    const char *ids[] = { "gpt-luna", "gpt-sol" };
-    const char *models[] = { "gpt-6-luna", "gpt-6.1-sol" };
-    for (size_t i = 0; i < 2; i++) {
+    const char *ids[] = { "gpt-luna", "gpt-sol", "gpt-astra" };
+    const char *models[] = { "gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra" };
+    for (size_t i = 0; i < 3; i++) {
         const struct engine_vendor *v = engine_by_id(ids[i]);
         EC_CHECK("gpt row exists", v != NULL);
         if (!v) continue;

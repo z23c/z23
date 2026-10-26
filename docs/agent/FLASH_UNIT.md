@@ -126,7 +126,7 @@ existing file inside the repo or the state dir).
 ### Claude and GPT engines
 
 A row may name `engine`: `claude-haiku` or `claude-sonnet` (Claude CLI) and
-`gpt-luna` or `gpt-sol` (`codex exec`, models `gpt-6-luna` and `gpt-6.1-sol`,
+`gpt-luna`, `gpt-sol` or `gpt-astra` (`codex exec`, models `gpt-6-luna`, `gpt-6.1-sol` and `gpt-6-astra`,
 reasoning effort fixed at low, writes confined by codex workspace-write (worktree plus temp dirs), network off,
 plain output so tokens and cost are recorded as unreported) feed units
 through the same harness (`--engine <id>`). The harness scrubs only the parent

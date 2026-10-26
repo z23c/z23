@@ -1000,7 +1000,17 @@ static int dvx_engine_cases(void)
         ASSERT(strstr(argv, "glm") == NULL);
         PASS();
     }
+    TEST("queue: a gpt-astra row launches --engine gpt-astra with its own model") {
+        ASSERT(dvx_engine_argv("enga", "gptunit", "gpt-astra", "gpt-6-astra", -1,
+                               argv, sizeof(argv)));
+        ASSERT(strncmp(argv, "--engine\ngpt-astra\n--model\ngpt-6-astra\n--task\n",
+                       46) == 0);
+        ASSERT(strstr(argv, "claude") == NULL);
+        PASS();
+    }
     TEST("queue: gpt and claude/glm model families refuse each other") {
+        ASSERT(dvx_engine_refused("engs1", "gpt-astra", "claude-haiku-5-5",
+                                  "ENGINE_MODEL_MISMATCH"));
         ASSERT(dvx_engine_refused("engg1", "gpt-sol", "claude-haiku-5-5",
                                   "ENGINE_MODEL_MISMATCH"));
         ASSERT(dvx_engine_refused("engg2", "gpt-luna", "glm-5.3-flash",
