@@ -342,6 +342,67 @@ static bool dln_write_all(int fd, const void *data, size_t size)
     return true;
 }
 
+/* Format the temporary name beside target; false when it does not fit. */
+static bool dln_clone_temp_name(char *temporary, size_t cap,
+                                const char *target)
+{
+    int temporary_len = snprintf(temporary, cap, "%s.tmp.XXXXXX", target);
+    return temporary_len > 0 && temporary_len < (int)cap;
+}
+
+enum dln_copy_result {
+    DLN_COPY_OK,
+    DLN_COPY_READ_FAILED,
+    DLN_COPY_WRITE_FAILED,
+};
+
+/* Byte-copy input onto output when the clone was unavailable and ok is still
+ * true. A read or write failure is reported for the caller to log. */
+static enum dln_copy_result dln_clone_copy_bytes(
+    int input, int output, bool ok, enum platform_file_clone_result cloned)
+{
+    unsigned char buffer[65536];
+    if (!ok || cloned != PLATFORM_FILE_CLONE_UNAVAILABLE)
+        return DLN_COPY_OK;
+    while (true) {
+        ssize_t got = read(input, buffer, sizeof(buffer));
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got < 0)
+            return DLN_COPY_READ_FAILED;
+        if (got == 0)
+            return DLN_COPY_OK;
+        if (!dln_write_all(output, buffer, (size_t)got))
+            return DLN_COPY_WRITE_FAILED;
+    }
+}
+
+enum dln_meta_result {
+    DLN_META_OK,
+    DLN_META_CHMOD_FAILED,
+    DLN_META_TIMES_FAILED,
+};
+
+/* Give the clone the source's mode and times, when ok is still true. */
+static enum dln_meta_result dln_clone_set_meta(int output,
+                                               const struct stat *source_st,
+                                               bool ok)
+{
+    if (!ok)
+        return DLN_META_OK;
+    if (fchmod(output, source_st->st_mode & 07777) != 0)
+        return DLN_META_CHMOD_FAILED;
+    {
+        const struct timespec times[2] = {
+            source_st->st_atim,
+            source_st->st_mtim,
+        };
+        if (futimens(output, times) != 0)
+            return DLN_META_TIMES_FAILED;
+    }
+    return DLN_META_OK;
+}
+
 /* Clone or copy `source` onto a new inode at `target`. NEVER link(). */
 static bool dln_clone_file(const char *source, const char *target,
                            const struct stat *source_st)
@@ -349,18 +410,17 @@ static bool dln_clone_file(const char *source, const char *target,
     int input = -1;
     int output = -1;
     char temporary[DLN_PATH_CAP];
-    int temporary_len;
     bool ok;
     enum platform_file_clone_result cloned = PLATFORM_FILE_CLONE_UNAVAILABLE;
+    enum dln_copy_result copied_bytes;
+    enum dln_meta_result meta;
 
     input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (input < 0) {
         dln_log("open_source", source);
         return false;
     }
-    temporary_len =
-        snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX", target);
-    ok = temporary_len > 0 && temporary_len < (int)sizeof(temporary);
+    ok = dln_clone_temp_name(temporary, sizeof(temporary), target);
     if (!ok) {
         dln_log("tmp_path", target);
         (void)close(input);
@@ -378,41 +438,25 @@ static bool dln_clone_file(const char *source, const char *target,
         errno = EIO;
         ok = false;
     }
-    while (ok && cloned == PLATFORM_FILE_CLONE_UNAVAILABLE) {
-        unsigned char buffer[65536];
-        ssize_t got = read(input, buffer, sizeof(buffer));
-        if (got < 0 && errno == EINTR)
-            continue;
-        if (got < 0) {
-            dln_log("read", source);
-            ok = false;
-            break;
-        }
-        if (got == 0)
-            break;
-        if (!dln_write_all(output, buffer, (size_t)got)) {
-            dln_log("write", temporary);
-            ok = false;
-            break;
-        }
+    copied_bytes = dln_clone_copy_bytes(input, output, ok, cloned);
+    if (copied_bytes == DLN_COPY_READ_FAILED) {
+        dln_log("read", source);
+        ok = false;
+    } else if (copied_bytes == DLN_COPY_WRITE_FAILED) {
+        dln_log("write", temporary);
+        ok = false;
     }
     if (close(input) != 0)
         ok = false;
     input = -1;
     if (output >= 0) {
-        if (ok && fchmod(output, source_st->st_mode & 07777) != 0) {
+        meta = dln_clone_set_meta(output, source_st, ok);
+        if (meta == DLN_META_CHMOD_FAILED) {
             dln_log("fchmod", temporary);
             ok = false;
-        }
-        if (ok) {
-            const struct timespec times[2] = {
-                source_st->st_atim,
-                source_st->st_mtim,
-            };
-            if (futimens(output, times) != 0) {
-                dln_log("futimens", temporary);
-                ok = false;
-            }
+        } else if (meta == DLN_META_TIMES_FAILED) {
+            dln_log("futimens", temporary);
+            ok = false;
         }
         if (close(output) != 0)
             ok = false;
@@ -425,6 +469,34 @@ static bool dln_clone_file(const char *source, const char *target,
     if (!ok)
         (void)unlink(temporary);
     return ok;
+}
+
+/* True for the "." and ".." entries that readdir() returns. */
+static bool dln_is_dot_entry(const char *name)
+{
+    return strcmp(name, ".") == 0 || strcmp(name, "..") == 0;
+}
+
+/* Join one directory entry name onto the source and target paths. */
+static bool dln_child_paths(char *child_source, char *child_target,
+                            const char *source, const char *target,
+                            const char *name)
+{
+    return zcl_path_join(child_source, DLN_PATH_CAP, source, name) &&
+           zcl_path_join(child_target, DLN_PATH_CAP, target, name);
+}
+
+/* Copy one regular file: make its parents, then clone it onto a new inode. */
+static bool dln_materialize_regular(const char *source, const char *target,
+                                    const struct stat *source_st, int *copied)
+{
+    if (!dln_mkdir_parents(target))
+        return false;
+    if (!dln_clone_file(source, target, source_st))
+        return false;
+    if (copied)
+        (*copied)++;
+    return true;
 }
 
 /* Recursion shape of dl_materialize() (native_dev_land.c:2563-2598) on
@@ -444,15 +516,8 @@ static bool dln_materialize(const char *source, const char *target,
     }
     if (lstat(target, &target_st) == 0)
         return true;
-    if (S_ISREG(source_st.st_mode)) {
-        if (!dln_mkdir_parents(target))
-            return false;
-        if (!dln_clone_file(source, target, &source_st))
-            return false;
-        if (copied)
-            (*copied)++;
-        return true;
-    }
+    if (S_ISREG(source_st.st_mode))
+        return dln_materialize_regular(source, target, &source_st, copied);
     if (!S_ISDIR(source_st.st_mode)) {
         /* Regular files only: a symlink or device is not copied. A named
          * directory walk still succeeds after skipping those children. */
@@ -473,13 +538,10 @@ static bool dln_materialize(const char *source, const char *target,
     ok = true;
     while (ok && (entry = readdir(dir)) != NULL) {
         char child_source[DLN_PATH_CAP], child_target[DLN_PATH_CAP];
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0)
+        if (dln_is_dot_entry(entry->d_name))
             continue;
-        if (!zcl_path_join(child_source, sizeof(child_source), source,
-                      entry->d_name) ||
-            !zcl_path_join(child_target, sizeof(child_target), target,
-                      entry->d_name) ||
+        if (!dln_child_paths(child_source, child_target, source, target,
+                             entry->d_name) ||
             !dln_materialize(child_source, child_target, copied))
             ok = false;
     }
@@ -544,6 +606,108 @@ static bool dln_materialize_one(const char *root, const char *dest,
     return dln_materialize(source, target, copied);
 }
 
+/* Set failed_rel to rel when the caller passed a buffer for it. */
+static void dln_set_failed_rel(char *failed_rel, size_t failed_cap,
+                               const char *rel)
+{
+    if (failed_rel && failed_cap)
+        (void)snprintf(failed_rel, failed_cap, "%s", rel);
+}
+
+/* Close dir; ok is cleared only when closedir() fails. */
+static bool dln_closedir_keep(DIR *dir, bool ok)
+{
+    return closedir(dir) == 0 && ok;
+}
+
+enum dln_ext_visit {
+    DLN_EXT_SKIP,
+    DLN_EXT_FAILED,
+    DLN_EXT_DESCEND,
+};
+
+/* Classify one entry of vendor/tor/src/ext: a directory is descended into,
+ * anything else is skipped, and a path that cannot be joined fails. */
+static enum dln_ext_visit dln_ext_group_entry(const char *ext,
+                                              const char *name, char *group)
+{
+    struct stat st;
+    if (dln_is_dot_entry(name))
+        return DLN_EXT_SKIP;
+    if (!zcl_path_join(group, DLN_PATH_CAP, ext, name))
+        return DLN_EXT_FAILED;
+    if (lstat(group, &st) != 0 || !S_ISDIR(st.st_mode))
+        return DLN_EXT_SKIP;
+    return DLN_EXT_DESCEND;
+}
+
+/* Classify one entry of a group directory: a .a regular file is materialised,
+ * a directory is descended into, and anything else is skipped. */
+static enum dln_ext_visit dln_ext_member_entry(
+    const char *root, const char *dest, const char *group_name,
+    const char *group, const char *name, char *member, int *copied,
+    char *failed_rel, size_t failed_cap)
+{
+    struct stat st;
+    if (dln_is_dot_entry(name))
+        return DLN_EXT_SKIP;
+    if (!zcl_path_join(member, DLN_PATH_CAP, group, name))
+        return DLN_EXT_FAILED;
+    if (lstat(member, &st) != 0)
+        return DLN_EXT_SKIP;
+    if (S_ISREG(st.st_mode) && dln_ends_with_a(name)) {
+        char rel[DLN_PATH_CAP];
+        int n = snprintf(rel, sizeof(rel), "vendor/tor/src/ext/%s/%s",
+                         group_name, name);
+        if (n <= 0 || (size_t)n >= sizeof(rel) ||
+            !dln_materialize_one(root, dest, rel, copied)) {
+            dln_set_failed_rel(failed_rel, failed_cap,
+                               n > 0 ? rel : "vendor/tor/src/ext");
+            return DLN_EXT_FAILED;
+        }
+        return DLN_EXT_SKIP;
+    }
+    if (!S_ISDIR(st.st_mode))
+        return DLN_EXT_SKIP;
+    return DLN_EXT_DESCEND;
+}
+
+/* Materialise the .a files directly inside member, then close files. */
+static bool dln_ext_scan_files(const char *root, const char *dest,
+                               const char *group_name,
+                               const char *member_name, const char *member,
+                               DIR *files, int *copied, char *failed_rel,
+                               size_t failed_cap)
+{
+    struct dirent *entry;
+    bool ok = true;
+    while (ok && (entry = readdir(files)) != NULL) {
+        char file[DLN_PATH_CAP];
+        char rel[DLN_PATH_CAP];
+        struct stat st;
+        int n;
+        if (dln_is_dot_entry(entry->d_name))
+            continue;
+        if (!zcl_path_join(file, sizeof(file), member, entry->d_name)) {
+            ok = false;
+            break;
+        }
+        if (lstat(file, &st) != 0 || !S_ISREG(st.st_mode) ||
+            !dln_ends_with_a(entry->d_name))
+            continue;
+        n = snprintf(rel, sizeof(rel), "vendor/tor/src/ext/%s/%s/%s",
+                     group_name, member_name, entry->d_name);
+        if (n <= 0 || (size_t)n >= sizeof(rel) ||
+            !dln_materialize_one(root, dest, rel, copied)) {
+            dln_set_failed_rel(failed_rel, failed_cap,
+                               n > 0 ? rel : "vendor/tor/src/ext");
+            ok = false;
+            break;
+        }
+    }
+    return dln_closedir_keep(files, ok);
+}
+
 static bool dln_materialize_ext_archives(const char *root, const char *dest,
                                          int *copied, char *failed_rel,
                                          size_t failed_cap)
@@ -559,32 +723,26 @@ static bool dln_materialize_ext_archives(const char *root, const char *dest,
     if (lstat(ext, &st) != 0)
         return true;
     if (!S_ISDIR(st.st_mode)) {
-        if (failed_rel && failed_cap)
-            (void)snprintf(failed_rel, failed_cap, "%s",
-                           "vendor/tor/src/ext");
+        dln_set_failed_rel(failed_rel, failed_cap, "vendor/tor/src/ext");
         dln_log("ext_not_dir", ext);
         return false;
     }
     d1 = opendir(ext);
     if (!d1) {
         dln_log("opendir", ext);
-        if (failed_rel && failed_cap)
-            (void)snprintf(failed_rel, failed_cap, "%s",
-                           "vendor/tor/src/ext");
+        dln_set_failed_rel(failed_rel, failed_cap, "vendor/tor/src/ext");
         return false;
     }
     while (ok && (e1 = readdir(d1)) != NULL) {
         char l1[DLN_PATH_CAP];
         DIR *d2;
         struct dirent *e2;
-        struct stat st1;
-        if (strcmp(e1->d_name, ".") == 0 || strcmp(e1->d_name, "..") == 0)
-            continue;
-        if (!zcl_path_join(l1, sizeof(l1), ext, e1->d_name)) {
+        enum dln_ext_visit visit = dln_ext_group_entry(ext, e1->d_name, l1);
+        if (visit == DLN_EXT_FAILED) {
             ok = false;
             break;
         }
-        if (lstat(l1, &st1) != 0 || !S_ISDIR(st1.st_mode))
+        if (visit == DLN_EXT_SKIP)
             continue;
         d2 = opendir(l1);
         if (!d2) {
@@ -594,79 +752,28 @@ static bool dln_materialize_ext_archives(const char *root, const char *dest,
         }
         while (ok && (e2 = readdir(d2)) != NULL) {
             char l2[DLN_PATH_CAP];
-            struct stat st2;
-            if (strcmp(e2->d_name, ".") == 0 ||
-                strcmp(e2->d_name, "..") == 0)
-                continue;
-            if (!zcl_path_join(l2, sizeof(l2), l1, e2->d_name)) {
+            DIR *d3;
+            visit = dln_ext_member_entry(root, dest, e1->d_name, l1,
+                                         e2->d_name, l2, copied,
+                                         failed_rel, failed_cap);
+            if (visit == DLN_EXT_FAILED) {
                 ok = false;
                 break;
             }
-            if (lstat(l2, &st2) != 0)
+            if (visit == DLN_EXT_SKIP)
                 continue;
-            if (S_ISREG(st2.st_mode) && dln_ends_with_a(e2->d_name)) {
-                char rel[DLN_PATH_CAP];
-                int n = snprintf(rel, sizeof(rel),
-                                 "vendor/tor/src/ext/%s/%s", e1->d_name,
-                                 e2->d_name);
-                if (n <= 0 || (size_t)n >= sizeof(rel) ||
-                    !dln_materialize_one(root, dest, rel, copied)) {
-                    if (failed_rel && failed_cap)
-                        (void)snprintf(failed_rel, failed_cap, "%s",
-                                       n > 0 ? rel : "vendor/tor/src/ext");
-                    ok = false;
-                    break;
-                }
-                continue;
+            d3 = opendir(l2);
+            if (!d3) {
+                dln_log("opendir", l2);
+                ok = false;
+                break;
             }
-            if (!S_ISDIR(st2.st_mode))
-                continue;
-            {
-                DIR *d3 = opendir(l2);
-                struct dirent *e3;
-                if (!d3) {
-                    dln_log("opendir", l2);
-                    ok = false;
-                    break;
-                }
-                while (ok && (e3 = readdir(d3)) != NULL) {
-                    char l3[DLN_PATH_CAP];
-                    struct stat st3;
-                    char rel[DLN_PATH_CAP];
-                    int n;
-                    if (strcmp(e3->d_name, ".") == 0 ||
-                        strcmp(e3->d_name, "..") == 0)
-                        continue;
-                    if (!zcl_path_join(l3, sizeof(l3), l2, e3->d_name)) {
-                        ok = false;
-                        break;
-                    }
-                    if (lstat(l3, &st3) != 0 || !S_ISREG(st3.st_mode) ||
-                        !dln_ends_with_a(e3->d_name))
-                        continue;
-                    n = snprintf(rel, sizeof(rel),
-                                 "vendor/tor/src/ext/%s/%s/%s", e1->d_name,
-                                 e2->d_name, e3->d_name);
-                    if (n <= 0 || (size_t)n >= sizeof(rel) ||
-                        !dln_materialize_one(root, dest, rel, copied)) {
-                        if (failed_rel && failed_cap)
-                            (void)snprintf(failed_rel, failed_cap, "%s",
-                                           n > 0 ? rel
-                                                 : "vendor/tor/src/ext");
-                        ok = false;
-                        break;
-                    }
-                }
-                if (closedir(d3) != 0)
-                    ok = false;
-            }
+            ok = dln_ext_scan_files(root, dest, e1->d_name, e2->d_name, l2,
+                                    d3, copied, failed_rel, failed_cap);
         }
-        if (closedir(d2) != 0)
-            ok = false;
+        ok = dln_closedir_keep(d2, ok);
     }
-    if (closedir(d1) != 0)
-        ok = false;
-    return ok;
+    return dln_closedir_keep(d1, ok);
 }
 /* Copy every table row the lane consumes by direct copy. Replies and returns
  * false on the first failure. */
@@ -701,6 +808,172 @@ static bool dln_materialize_required(struct zcl_command_reply *reply,
     return true;
 }
 
+/* Read one request field as a string; "" when the request has no input. */
+static const char *dln_input_str(const struct zcl_command_request *request,
+                                 const char *key)
+{
+    return request && request->input
+               ? json_get_str(json_get(request->input, key))
+               : "";
+}
+
+/* Resolve the checkout root from cwd; refuses when cwd is not a checkout. */
+static bool dln_lane_find_root(struct zcl_command_reply *reply, char *cwd,
+                               char *root)
+{
+    if (!getcwd(cwd, DLN_PATH_CAP)) {
+        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "lane.root_not_checkout", "root",
+                 "cwd is not a git checkout", "");
+        return false;
+    }
+    {
+        static const char *const top_args[] = { "rev-parse",
+                                                "--show-toplevel", NULL };
+        if (dln_git(cwd, top_args, root, DLN_PATH_CAP,
+                    DLN_GIT_TIMEOUT_MS) != 0 ||
+            !root[0]) {
+            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                     ZCL_COMMAND_EXIT_INVALID, "lane.root_not_checkout",
+                     "root", "cwd is not a git checkout", cwd);
+            return false;
+        }
+        dln_strip(root);
+    }
+    return true;
+}
+
+/* Check the path and base arguments, and that base resolves in the root. */
+static bool dln_lane_validate(struct zcl_command_reply *reply,
+                              const char *root, const char *path,
+                              const char *base)
+{
+    if (!path[0] || !dln_is_abs(path)) {
+        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "INVALID_PATH", "validate",
+                 "path must be an absolute worktree path", path);
+        return false;
+    }
+    if (!base[0]) {
+        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "INVALID_BASE", "validate", "base is required", "");
+        return false;
+    }
+    {
+        const char *verify_args[] = { "rev-parse", "--verify", "--quiet",
+                                      base, NULL };
+        char resolved[80];
+        if (dln_git(root, verify_args, resolved, sizeof(resolved),
+                    DLN_GIT_TIMEOUT_MS) != 0) {
+            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                     ZCL_COMMAND_EXIT_INVALID, "lane.base_unresolved",
+                     "base", "base does not resolve", base);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Create the parent directories of the worktree; refuse if they fail. */
+static bool dln_lane_make_parent(struct zcl_command_reply *reply,
+                                 const char *path)
+{
+    if (!dln_mkdir_parents(path)) {
+        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "lane.path_not_worktree", "worktree_add",
+                 "could not create the worktree parent directory", path);
+        return false;
+    }
+    return true;
+}
+
+/* Refuse when an existing path is not a worktree of the checkout root. */
+static bool dln_lane_check_worktree(struct zcl_command_reply *reply,
+                                    const char *root, const char *path)
+{
+    if (dln_is_worktree_of(path, root))
+        return true;
+    dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+             "lane.path_not_worktree", "worktree",
+             "path exists but is not a worktree of this checkout", path);
+    return false;
+}
+
+/* True when git reports vendor/tor as not initialised (a '-' status). */
+static bool dln_lane_submodule_missing(const char *path)
+{
+    const char *st_args[] = { "submodule", "status", "--", "vendor/tor",
+                              NULL };
+    char st_out[DLN_OUT_CAP];
+    return dln_git(path, st_args, st_out, sizeof(st_out),
+                   DLN_GIT_TIMEOUT_MS) == 0 &&
+           st_out[0] == '-';
+}
+
+/* Materialise the dependencies; refuses on the first one that cannot be. */
+static bool dln_lane_materialize_deps(struct zcl_command_reply *reply,
+                                      const char *root, const char *path,
+                                      int *copied)
+{
+    char failed_rel[DLN_PATH_CAP];
+    char why[256];
+    /* Preflight every required source that the worktree does not yet hold,
+     * so a missing ROOT dependency refuses without copying any sibling. */
+    if (!dln_preflight(reply, root, path))
+        return false;
+    if (!dln_materialize_required(reply, root, path, copied))
+        return false;
+
+    failed_rel[0] = '\0';
+    if (!dln_materialize_ext_archives(root, path, copied, failed_rel,
+                                      sizeof(failed_rel))) {
+        (void)snprintf(why, sizeof(why), "lane.materialize_failed:%s",
+                       failed_rel[0] ? failed_rel : "vendor/tor/src/ext");
+        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                 ZCL_COMMAND_EXIT_INTERNAL, "lane.materialize_failed",
+                 "materialize", why, failed_rel);
+        return false;
+    }
+    return true;
+}
+
+/* Read the worktree's HEAD; refuses unless it is a 40-hex commit. */
+static bool dln_lane_read_head(struct zcl_command_reply *reply,
+                               const char *path, char *head, size_t head_cap)
+{
+    static const char *const head_args[] = { "rev-parse", "HEAD", NULL };
+    if (dln_git(path, head_args, head, head_cap, DLN_GIT_TIMEOUT_MS) != 0) {
+        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "GIT_FAILED", "head", "git rev-parse HEAD failed", path);
+        return false;
+    }
+    dln_strip(head);
+    if (!dln_sha_ok(head)) {
+        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "GIT_FAILED", "head", "HEAD is not a 40-hex commit", head);
+        return false;
+    }
+    return true;
+}
+
+/* Refuse unless vendor/tor/libtor.a exists; fills libtor_st on success. */
+static bool dln_lane_check_libtor(struct zcl_command_reply *reply,
+                                  const char *path, struct stat *libtor_st)
+{
+    char libtor_path[DLN_PATH_CAP];
+    if (!zcl_path_join(libtor_path, sizeof(libtor_path), path,
+                       "vendor/tor/libtor.a") ||
+        lstat(libtor_path, libtor_st) != 0) {
+        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "lane.dependency_unavailable:vendor/tor/libtor.a", "deps",
+                 "lane.dependency_unavailable:vendor/tor/libtor.a "
+                 "(make vendor)",
+                 "vendor/tor/libtor.a");
+        return false;
+    }
+    return true;
+}
+
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 void zcl_native_handle_dev_lane_new(
@@ -717,77 +990,25 @@ void zcl_native_handle_dev_lane_new(
              "make dev-bin, or z23-dev dev lane new");
     return;
 #else
-    const char *path = request && request->input
-                           ? json_get_str(json_get(request->input, "path"))
-                           : "";
-    const char *base = request && request->input
-                           ? json_get_str(json_get(request->input, "base"))
-                           : "";
+    const char *path = dln_input_str(request, "path");
+    const char *base = dln_input_str(request, "base");
     char cwd[DLN_PATH_CAP];
     char root[DLN_PATH_CAP];
     char head[80];
-    char why[256];
-    char failed_rel[DLN_PATH_CAP];
     int copied = 0;
     struct stat libtor_st;
-    char libtor_path[DLN_PATH_CAP];
     const char *make_argv[8];
 
-    if (!getcwd(cwd, sizeof(cwd))) {
-        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                 "lane.root_not_checkout", "root",
-                 "cwd is not a git checkout", "");
+    if (!dln_lane_find_root(reply, cwd, root))
         return;
-    }
-    {
-        static const char *const top_args[] = { "rev-parse",
-                                                "--show-toplevel", NULL };
-        if (dln_git(cwd, top_args, root, sizeof(root),
-                    DLN_GIT_TIMEOUT_MS) != 0 ||
-            !root[0]) {
-            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                     ZCL_COMMAND_EXIT_INVALID, "lane.root_not_checkout",
-                     "root", "cwd is not a git checkout", cwd);
-            return;
-        }
-        dln_strip(root);
-    }
-    if (!path[0] || !dln_is_abs(path)) {
-        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                 "INVALID_PATH", "validate",
-                 "path must be an absolute worktree path", path);
+    if (!dln_lane_validate(reply, root, path, base))
         return;
-    }
-    if (!base[0]) {
-        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                 "INVALID_BASE", "validate", "base is required", "");
-        return;
-    }
-    {
-        const char *verify_args[] = { "rev-parse", "--verify", "--quiet",
-                                      base, NULL };
-        char resolved[80];
-        if (dln_git(root, verify_args, resolved, sizeof(resolved),
-                    DLN_GIT_TIMEOUT_MS) != 0) {
-            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                     ZCL_COMMAND_EXIT_INVALID, "lane.base_unresolved",
-                     "base", "base does not resolve", base);
-            return;
-        }
-    }
-
     if (!dln_has_git(path)) {
         const char *add_args[] = { "worktree", "add", "--detach", path,
                                    base, NULL };
         char add_out[DLN_OUT_CAP];
-        if (!dln_mkdir_parents(path)) {
-            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                     ZCL_COMMAND_EXIT_INTERNAL, "lane.path_not_worktree",
-                     "worktree_add",
-                     "could not create the worktree parent directory",
-                     path);
+        if (!dln_lane_make_parent(reply, path))
             return;
-        }
         if (dln_git(root, add_args, add_out, sizeof(add_out),
                     DLN_GIT_TIMEOUT_MS) != 0) {
             dln_log("worktree_add", add_out);
@@ -798,47 +1019,20 @@ void zcl_native_handle_dev_lane_new(
             return;
         }
     }
-    if (!dln_is_worktree_of(path, root)) {
-        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                 "lane.path_not_worktree", "worktree",
-                 "path exists but is not a worktree of this checkout",
-                 path);
-        return;
-    }
-
-    {
-        const char *st_args[] = { "submodule", "status", "--",
-                                  "vendor/tor", NULL };
-        char st_out[DLN_OUT_CAP];
-        if (dln_git(path, st_args, st_out, sizeof(st_out),
-                    DLN_GIT_TIMEOUT_MS) == 0 &&
-            st_out[0] == '-') {
-            const char *init_args[] = { "submodule", "update", "--init",
-                                        "--", "vendor/tor", NULL };
-            char init_out[DLN_OUT_CAP];
-            if (dln_git(path, init_args, init_out, sizeof(init_out),
-                        DLN_GIT_TIMEOUT_MS) != 0)
-                dln_log("submodule_init", init_out);
-        }
-    }
-
-    /* Preflight every required source that the worktree does not yet hold,
-     * so a missing ROOT dependency refuses without copying any sibling. */
-    if (!dln_preflight(reply, root, path))
-        return;
-    if (!dln_materialize_required(reply, root, path, &copied))
+    if (!dln_lane_check_worktree(reply, root, path))
         return;
 
-    failed_rel[0] = '\0';
-    if (!dln_materialize_ext_archives(root, path, &copied, failed_rel,
-                                      sizeof(failed_rel))) {
-        (void)snprintf(why, sizeof(why), "lane.materialize_failed:%s",
-                       failed_rel[0] ? failed_rel : "vendor/tor/src/ext");
-        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                 ZCL_COMMAND_EXIT_INTERNAL, "lane.materialize_failed",
-                 "materialize", why, failed_rel);
-        return;
+    if (dln_lane_submodule_missing(path)) {
+        const char *init_args[] = { "submodule", "update", "--init",
+                                    "--", "vendor/tor", NULL };
+        char init_out[DLN_OUT_CAP];
+        if (dln_git(path, init_args, init_out, sizeof(init_out),
+                    DLN_GIT_TIMEOUT_MS) != 0)
+            dln_log("submodule_init", init_out);
     }
+
+    if (!dln_lane_materialize_deps(reply, root, path, &copied))
+        return;
 
     make_argv[0] = "make";
     make_argv[1] = "-C";
@@ -858,36 +1052,10 @@ void zcl_native_handle_dev_lane_new(
         }
     }
 
-    {
-        static const char *const head_args[] = { "rev-parse", "HEAD",
-                                                 NULL };
-        if (dln_git(path, head_args, head, sizeof(head),
-                    DLN_GIT_TIMEOUT_MS) != 0) {
-            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                     ZCL_COMMAND_EXIT_INTERNAL, "GIT_FAILED", "head",
-                     "git rev-parse HEAD failed", path);
-            return;
-        }
-        dln_strip(head);
-        if (!dln_sha_ok(head)) {
-            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                     ZCL_COMMAND_EXIT_INTERNAL, "GIT_FAILED", "head",
-                     "HEAD is not a 40-hex commit", head);
-            return;
-        }
-    }
-
-    if (!zcl_path_join(libtor_path, sizeof(libtor_path), path,
-                  "vendor/tor/libtor.a") ||
-        lstat(libtor_path, &libtor_st) != 0) {
-        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                 ZCL_COMMAND_EXIT_INVALID,
-                 "lane.dependency_unavailable:vendor/tor/libtor.a", "deps",
-                 "lane.dependency_unavailable:vendor/tor/libtor.a "
-                 "(make vendor)",
-                 "vendor/tor/libtor.a");
+    if (!dln_lane_read_head(reply, path, head, sizeof(head)))
         return;
-    }
+    if (!dln_lane_check_libtor(reply, path, &libtor_st))
+        return;
 
     (void)json_push_kv_bool(&reply->data, "ok", true);
     (void)json_push_kv_str(&reply->data, "path", path);
