@@ -51,7 +51,7 @@ static struct net_addr make_pub_source(uint8_t a, uint8_t b, uint8_t c,
     return src;
 }
 
-int test_addrman_rebalance(void)
+static int addrman_rebalance_empty_consistency(void)
 {
     int failures = 0;
 
@@ -69,6 +69,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_add_consistency(void)
+{
+    int failures = 0;
 
     /* ── 2. Consistency after basic adds ───────────────────────── */
     printf("addrman_rebalance: add + consistency... ");
@@ -94,6 +100,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_good_promotion(void)
+{
+    int failures = 0;
 
     /* ── 3. Consistency after good (new→tried promotion) ──────── */
     printf("addrman_rebalance: good promotion + consistency... ");
@@ -123,6 +135,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_bucket_stats(void)
+{
+    int failures = 0;
 
     /* ── 4. Bucket stats with known distribution ──────────────── */
     printf("addrman_rebalance: bucket stats... ");
@@ -155,6 +173,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_single_source_flood(void)
+{
+    int failures = 0;
 
     /* ── 5. Adversarial: single source flooding ───────────────── */
     printf("addrman_rebalance: single-source flood... ");
@@ -191,6 +215,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_diverse_source_spread(void)
+{
+    int failures = 0;
 
     /* ── 6. Adversarial: diverse sources preserve distribution ── */
     printf("addrman_rebalance: diverse sources spread... ");
@@ -229,6 +259,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_tried_collision(void)
+{
+    int failures = 0;
 
     /* ── 7. Tried collision eviction maintains consistency ──────── */
     printf("addrman_rebalance: tried collision consistency... ");
@@ -276,6 +312,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_select_tried(void)
+{
+    int failures = 0;
 
     /* ── 8. Select from tried table works ──────────────────────── */
     printf("addrman_rebalance: select tried... ");
@@ -300,6 +342,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_attempt_tracking(void)
+{
+    int failures = 0;
 
     /* ── 9. Attempt tracking increments ────────────────────────── */
     printf("addrman_rebalance: attempt tracking... ");
@@ -321,6 +369,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_get_addr_pct(void)
+{
+    int failures = 0;
 
     /* ── 10. get_addr returns subset ───────────────────────────── */
     printf("addrman_rebalance: get_addr pct limit... ");
@@ -355,6 +409,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_terrible_eviction(void)
+{
+    int failures = 0;
 
     /* ── 11. Terrible entries get evicted on collision ──────────── */
     printf("addrman_rebalance: terrible eviction... ");
@@ -385,6 +445,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_bucket_determinism(void)
+{
+    int failures = 0;
 
     /* ── 12. Bucket position determinism ───────────────────────── */
     printf("addrman_rebalance: bucket position determinism... ");
@@ -421,6 +487,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_index_dedup(void)
+{
+    int failures = 0;
 
     /* ── 13. O(1) index: dedup — same address never creates two entries ── */
     printf("addrman_rebalance: index dedup... ");
@@ -450,6 +522,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_index_scan_agree(void)
+{
+    int failures = 0;
 
     /* ── 14. O(1) index agrees with brute-force scan on a full table ── */
     printf("addrman_rebalance: index == brute-force scan... ");
@@ -498,6 +576,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_serialize_dedup(void)
+{
+    int failures = 0;
 
     /* ── 15. Serialize → deserialize rebuilds the index (dedup survives) ── */
     printf("addrman_rebalance: serialize round-trip dedup... ");
@@ -559,6 +643,12 @@ int test_addrman_rebalance(void)
         addrman_free(&am);
         addrman_free(&am2);
     }
+    return failures;
+}
+
+static int addrman_rebalance_delete_readd_sync(void)
+{
+    int failures = 0;
 
     /* ── 16. Delete path: churn that deletes entries keeps index in sync ── */
     printf("addrman_rebalance: delete-then-readd index sync... ");
@@ -610,6 +700,12 @@ int test_addrman_rebalance(void)
         }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int addrman_rebalance_index_grow(void)
+{
+    int failures = 0;
 
     /* ── 17. Index grows correctly past its initial slot count ──────── */
     printf("addrman_rebalance: index grow/rebuild... ");
@@ -650,5 +746,29 @@ int test_addrman_rebalance(void)
         addrman_free(&am);
     }
 
+    return failures;
+}
+
+int test_addrman_rebalance(void)
+{
+    int failures = 0;
+
+    failures += addrman_rebalance_empty_consistency();
+    failures += addrman_rebalance_add_consistency();
+    failures += addrman_rebalance_good_promotion();
+    failures += addrman_rebalance_bucket_stats();
+    failures += addrman_rebalance_single_source_flood();
+    failures += addrman_rebalance_diverse_source_spread();
+    failures += addrman_rebalance_tried_collision();
+    failures += addrman_rebalance_select_tried();
+    failures += addrman_rebalance_attempt_tracking();
+    failures += addrman_rebalance_get_addr_pct();
+    failures += addrman_rebalance_terrible_eviction();
+    failures += addrman_rebalance_bucket_determinism();
+    failures += addrman_rebalance_index_dedup();
+    failures += addrman_rebalance_index_scan_agree();
+    failures += addrman_rebalance_serialize_dedup();
+    failures += addrman_rebalance_delete_readd_sync();
+    failures += addrman_rebalance_index_grow();
     return failures;
 }
