@@ -74,40 +74,16 @@ static bool source_bundle_total(const struct vcs_manifest *manifest,
     return total <= VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES && total <= SIZE_MAX;
 }
 
-enum vcs_source_bundle_result vcs_source_bundle_create(
-    const char *workspace, const uint8_t tree_root[32], uint8_t **wire_out,
-    size_t *wire_len_out, struct vcs_source_bundle_metrics *metrics)
+static enum vcs_source_bundle_result source_bundle_collect_blobs(
+    const char *workspace, const struct vcs_manifest *manifest,
+    uint8_t *payload, size_t manifest_len)
 {
-    if (wire_out) *wire_out = NULL;
-    if (wire_len_out) *wire_len_out = 0;
-    source_bundle_metrics_init(metrics);
-    if (!workspace || !tree_root || !wire_out || !wire_len_out)
-        return VCS_SOURCE_BUNDLE_ERR_NULL;
-    struct vcs_manifest manifest;
-    if (!vcs_tree_load(workspace, tree_root, &manifest))
-        return VCS_SOURCE_BUNDLE_ERR_SOURCE;
-    uint8_t *manifest_wire = NULL;
-    size_t manifest_len = 0;
-    uint64_t payload_len64 = 0;
-    if (!vcs_manifest_serialize(&manifest, &manifest_wire, &manifest_len) ||
-        !source_bundle_total(&manifest, manifest_len, &payload_len64)) {
-        free(manifest_wire);
-        vcs_manifest_free(&manifest);
-        return VCS_SOURCE_BUNDLE_ERR_LIMIT;
-    }
-    size_t payload_len = (size_t)payload_len64;
-    uint8_t *payload = zcl_malloc(payload_len, "vcs.source_bundle.payload");
-    if (!payload) {
-        free(manifest_wire); vcs_manifest_free(&manifest);
-        return VCS_SOURCE_BUNDLE_ERR_ALLOC;
-    }
-    memcpy(payload, manifest_wire, manifest_len);
     size_t off = manifest_len;
     enum vcs_source_bundle_result result = VCS_SOURCE_BUNDLE_OK;
-    for (size_t i = 0; i < manifest.count; i++) {
+    for (size_t i = 0; i < manifest->count; i++) {
         uint8_t *blob = NULL;
         size_t blob_len = 0;
-        const struct vcs_entry *entry = &manifest.entries[i];
+        const struct vcs_entry *entry = &manifest->entries[i];
         if (entry->size > SIZE_MAX ||
             vcs_object_get(workspace, entry->blob, VCS_TAG_BLOB,
                            &blob, &blob_len) != 0 ||
@@ -120,6 +96,17 @@ enum vcs_source_bundle_result vcs_source_bundle_create(
         off += blob_len;
         free(blob);
     }
+    return result;
+}
+
+static enum vcs_source_bundle_result source_bundle_finish_create(
+    const uint8_t tree_root[32], struct vcs_manifest *manifest,
+    uint8_t *manifest_wire, size_t manifest_len,
+    uint8_t *payload, size_t payload_len,
+    uint8_t **wire_out, size_t *wire_len_out,
+    struct vcs_source_bundle_metrics *metrics,
+    enum vcs_source_bundle_result result)
+{
     uLong bound = 0;
     uint8_t *compressed = NULL;
     uLongf compressed_len = 0;
@@ -166,21 +153,53 @@ enum vcs_source_bundle_result vcs_source_bundle_create(
         if (metrics) {
             metrics->source_bytes = payload_len - manifest_len;
             metrics->compressed_bytes = compressed_len;
-            metrics->file_count = (uint32_t)manifest.count;
+            metrics->file_count = (uint32_t)manifest->count;
         }
     }
     free(compressed); free(payload); free(manifest_wire);
-    vcs_manifest_free(&manifest);
+    vcs_manifest_free(manifest);
     return result;
 }
 
-static enum vcs_source_bundle_result source_bundle_decode(
-    const uint8_t *wire, size_t wire_len,
-    const uint8_t expected_tree_root[32], struct source_bundle_decoded *out,
-    struct vcs_source_bundle_metrics *metrics)
+enum vcs_source_bundle_result vcs_source_bundle_create(
+    const char *workspace, const uint8_t tree_root[32], uint8_t **wire_out,
+    size_t *wire_len_out, struct vcs_source_bundle_metrics *metrics)
 {
-    memset(out, 0, sizeof(*out));
-    vcs_manifest_init(&out->manifest);
+    if (wire_out) *wire_out = NULL;
+    if (wire_len_out) *wire_len_out = 0;
+    source_bundle_metrics_init(metrics);
+    if (!workspace || !tree_root || !wire_out || !wire_len_out)
+        return VCS_SOURCE_BUNDLE_ERR_NULL;
+    struct vcs_manifest manifest;
+    if (!vcs_tree_load(workspace, tree_root, &manifest))
+        return VCS_SOURCE_BUNDLE_ERR_SOURCE;
+    uint8_t *manifest_wire = NULL;
+    size_t manifest_len = 0;
+    uint64_t payload_len64 = 0;
+    if (!vcs_manifest_serialize(&manifest, &manifest_wire, &manifest_len) ||
+        !source_bundle_total(&manifest, manifest_len, &payload_len64)) {
+        free(manifest_wire);
+        vcs_manifest_free(&manifest);
+        return VCS_SOURCE_BUNDLE_ERR_LIMIT;
+    }
+    size_t payload_len = (size_t)payload_len64;
+    uint8_t *payload = zcl_malloc(payload_len, "vcs.source_bundle.payload");
+    if (!payload) {
+        free(manifest_wire); vcs_manifest_free(&manifest);
+        return VCS_SOURCE_BUNDLE_ERR_ALLOC;
+    }
+    memcpy(payload, manifest_wire, manifest_len);
+    enum vcs_source_bundle_result result = source_bundle_collect_blobs(
+        workspace, &manifest, payload, manifest_len);
+    return source_bundle_finish_create(tree_root, &manifest,
+        manifest_wire, manifest_len, payload, payload_len,
+        wire_out, wire_len_out, metrics, result);
+}
+
+static enum vcs_source_bundle_result source_bundle_check_header(
+    const uint8_t *wire, size_t wire_len,
+    const uint8_t expected_tree_root[32])
+{
     if (!wire || !expected_tree_root ||
         wire_len < VCS_SOURCE_BUNDLE_HEADER_BYTES ||
         wire_len > VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES ||
@@ -190,6 +209,14 @@ static enum vcs_source_bundle_result source_bundle_decode(
         return VCS_SOURCE_BUNDLE_ERR_WIRE;
     if (memcmp(wire + 12, expected_tree_root, 32) != 0)
         return VCS_SOURCE_BUNDLE_ERR_ROOT;
+    return VCS_SOURCE_BUNDLE_OK;
+}
+
+static enum vcs_source_bundle_result source_bundle_inflate(
+    const uint8_t *wire, size_t wire_len, struct source_bundle_decoded *out,
+    uint64_t *manifest_len_out, uint64_t *payload_len_out,
+    uint64_t *compressed_len_out)
+{
     uint64_t manifest_len64 = vcs_rd_u64le(wire + 44);
     uint64_t payload_len64 = vcs_rd_u64le(wire + 52);
     uint64_t compressed_len64 = vcs_rd_u64le(wire + 60);
@@ -214,22 +241,15 @@ static enum vcs_source_bundle_result source_bundle_decode(
         source_bundle_decoded_free(out);
         return VCS_SOURCE_BUNDLE_ERR_CODEC;
     }
-    out->manifest_wire = out->payload;
-    if (!vcs_manifest_parse(out->manifest_wire, out->manifest_len,
-                            &out->manifest)) {
-        source_bundle_decoded_free(out);
-        return VCS_SOURCE_BUNDLE_ERR_WIRE;
-    }
-    uint8_t checked_root[32];
-    uint64_t expected_payload = 0;
-    if (!vcs_manifest_tree_hash(&out->manifest, checked_root) ||
-        memcmp(checked_root, expected_tree_root, 32) != 0 ||
-        !source_bundle_total(&out->manifest, out->manifest_len,
-                             &expected_payload) ||
-        expected_payload != payload_len64) {
-        source_bundle_decoded_free(out);
-        return VCS_SOURCE_BUNDLE_ERR_ROOT;
-    }
+    *manifest_len_out = manifest_len64;
+    *payload_len_out = payload_len64;
+    *compressed_len_out = compressed_len64;
+    return VCS_SOURCE_BUNDLE_OK;
+}
+
+static enum vcs_source_bundle_result source_bundle_check_blobs(
+    struct source_bundle_decoded *out)
+{
     size_t off = out->manifest_len;
     for (size_t i = 0; i < out->manifest.count; i++) {
         const struct vcs_entry *entry = &out->manifest.entries[i];
@@ -253,6 +273,41 @@ static enum vcs_source_bundle_result source_bundle_decode(
         source_bundle_decoded_free(out);
         return VCS_SOURCE_BUNDLE_ERR_WIRE;
     }
+    return VCS_SOURCE_BUNDLE_OK;
+}
+
+static enum vcs_source_bundle_result source_bundle_decode(
+    const uint8_t *wire, size_t wire_len,
+    const uint8_t expected_tree_root[32], struct source_bundle_decoded *out,
+    struct vcs_source_bundle_metrics *metrics)
+{
+    memset(out, 0, sizeof(*out));
+    vcs_manifest_init(&out->manifest);
+    enum vcs_source_bundle_result result = source_bundle_check_header(
+        wire, wire_len, expected_tree_root);
+    if (result != VCS_SOURCE_BUNDLE_OK) return result;
+    uint64_t manifest_len64, payload_len64, compressed_len64;
+    result = source_bundle_inflate(wire, wire_len, out,
+        &manifest_len64, &payload_len64, &compressed_len64);
+    if (result != VCS_SOURCE_BUNDLE_OK) return result;
+    out->manifest_wire = out->payload;
+    if (!vcs_manifest_parse(out->manifest_wire, out->manifest_len,
+                            &out->manifest)) {
+        source_bundle_decoded_free(out);
+        return VCS_SOURCE_BUNDLE_ERR_WIRE;
+    }
+    uint8_t checked_root[32];
+    uint64_t expected_payload = 0;
+    if (!vcs_manifest_tree_hash(&out->manifest, checked_root) ||
+        memcmp(checked_root, expected_tree_root, 32) != 0 ||
+        !source_bundle_total(&out->manifest, out->manifest_len,
+                             &expected_payload) ||
+        expected_payload != payload_len64) {
+        source_bundle_decoded_free(out);
+        return VCS_SOURCE_BUNDLE_ERR_ROOT;
+    }
+    result = source_bundle_check_blobs(out);
+    if (result != VCS_SOURCE_BUNDLE_OK) return result;
     if (metrics) {
         metrics->source_bytes = payload_len64 - manifest_len64;
         metrics->compressed_bytes = compressed_len64;
@@ -277,30 +332,18 @@ enum vcs_source_bundle_result vcs_source_bundle_verify(
     return result;
 }
 
-enum vcs_source_bundle_result vcs_source_bundle_import(
-    const uint8_t *wire, size_t wire_len,
-    const uint8_t expected_tree_root[32], const char *workspace,
-    struct vcs_source_bundle_metrics *metrics)
+static enum vcs_source_bundle_result source_bundle_import_blobs(
+    const char *workspace, const struct source_bundle_decoded *decoded,
+    struct vcs_source_bundle_metrics *metrics,
+    enum vcs_source_bundle_result result)
 {
-    source_bundle_metrics_init(metrics);
-    if (!wire || !expected_tree_root || !workspace)
-        return VCS_SOURCE_BUNDLE_ERR_NULL;
-    struct source_bundle_decoded decoded;
-    enum vcs_source_bundle_result result = source_bundle_decode(
-        wire, wire_len, expected_tree_root, &decoded, metrics);
-    if (result != VCS_SOURCE_BUNDLE_OK)
-        return result;
-    if (!vcs_object_store_init(workspace)) {
-        source_bundle_decoded_free(&decoded);
-        return VCS_SOURCE_BUNDLE_ERR_STORE;
-    }
-    size_t off = decoded.manifest_len;
-    for (size_t i = 0; i < decoded.manifest.count; i++) {
-        const struct vcs_entry *entry = &decoded.manifest.entries[i];
+    size_t off = decoded->manifest_len;
+    for (size_t i = 0; i < decoded->manifest.count; i++) {
+        const struct vcs_entry *entry = &decoded->manifest.entries[i];
         bool existed = vcs_object_has(workspace, entry->blob);
         bool repaired = false;
         uint8_t stored[32];
-        if (!vcs_object_put_repair(workspace, decoded.payload + off,
+        if (!vcs_object_put_repair(workspace, decoded->payload + off,
                                    (size_t)entry->size, VCS_TAG_BLOB,
                                    stored, &repaired) ||
             memcmp(stored, entry->blob, 32) != 0) {
@@ -319,6 +362,27 @@ enum vcs_source_bundle_result vcs_source_bundle_import(
         }
         off += (size_t)entry->size;
     }
+    return result;
+}
+
+enum vcs_source_bundle_result vcs_source_bundle_import(
+    const uint8_t *wire, size_t wire_len,
+    const uint8_t expected_tree_root[32], const char *workspace,
+    struct vcs_source_bundle_metrics *metrics)
+{
+    source_bundle_metrics_init(metrics);
+    if (!wire || !expected_tree_root || !workspace)
+        return VCS_SOURCE_BUNDLE_ERR_NULL;
+    struct source_bundle_decoded decoded;
+    enum vcs_source_bundle_result result = source_bundle_decode(
+        wire, wire_len, expected_tree_root, &decoded, metrics);
+    if (result != VCS_SOURCE_BUNDLE_OK)
+        return result;
+    if (!vcs_object_store_init(workspace)) {
+        source_bundle_decoded_free(&decoded);
+        return VCS_SOURCE_BUNDLE_ERR_STORE;
+    }
+    result = source_bundle_import_blobs(workspace, &decoded, metrics, result);
     if (result == VCS_SOURCE_BUNDLE_OK) {
         bool manifest_existed = vcs_object_has(workspace,
                                                expected_tree_root);
