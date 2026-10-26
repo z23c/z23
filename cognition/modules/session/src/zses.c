@@ -75,6 +75,23 @@ bool zses_looks_clearnet(const char *endpoint)
     return endpoint[0] >= '0' && endpoint[0] <= '9';
 }
 
+static void zses_set_refuse(enum zses_refuse *refuse, enum zses_refuse code)
+{
+    if (refuse)
+        *refuse = code;
+}
+
+static const char *zses_posture_or_onion(const char *posture)
+{
+    return (posture && posture[0]) ? posture : "onion";
+}
+
+static const char *zses_clearnet_or_onion(const char *clearnet,
+                                          const char *onion)
+{
+    return (clearnet && clearnet[0]) ? clearnet : onion;
+}
+
 bool zses_pick_endpoint(const char *posture, const char *onion,
                         const char *clearnet, char *out, size_t out_cap,
                         enum zses_refuse *refuse)
@@ -87,22 +104,19 @@ bool zses_pick_endpoint(const char *posture, const char *onion,
         LOG_FAIL("zses", "pick_endpoint: out buffer missing");
     out[0] = '\0';
     *refuse = ZSES_OK;
-    const char *p = (posture && posture[0]) ? posture : "onion";
+    const char *p = zses_posture_or_onion(posture);
     if (strcmp(p, "none") == 0) {
-        if (refuse)
-            *refuse = ZSES_REFUSE_NO_ONION;
+        zses_set_refuse(refuse, ZSES_REFUSE_NO_ONION);
         LOG_FAIL("zses", "pick_endpoint: posture=none publishes nothing");
     }
     if (strcmp(p, "clearnet") == 0) {
-        const char *ep = (clearnet && clearnet[0]) ? clearnet : onion;
+        const char *ep = zses_clearnet_or_onion(clearnet, onion);
         if (!ep || !ep[0]) {
-            if (refuse)
-                *refuse = ZSES_REFUSE_NO_ONION;
+            zses_set_refuse(refuse, ZSES_REFUSE_NO_ONION);
             LOG_FAIL("zses", "pick_endpoint: clearnet posture has no endpoint");
         }
         if (strlen(ep) >= out_cap) {
-            if (refuse)
-                *refuse = ZSES_REFUSE_BAD_ENDPOINT;
+            zses_set_refuse(refuse, ZSES_REFUSE_BAD_ENDPOINT);
             LOG_FAIL("zses", "pick_endpoint: endpoint too long");
         }
         memcpy(out, ep, strlen(ep) + 1);
@@ -110,23 +124,19 @@ bool zses_pick_endpoint(const char *posture, const char *onion,
     }
     /* Default onion: never emit a numeric IP. */
     if (!onion || !onion[0]) {
-        if (refuse)
-            *refuse = ZSES_REFUSE_NO_ONION;
+        zses_set_refuse(refuse, ZSES_REFUSE_NO_ONION);
         LOG_FAIL("zses", "pick_endpoint: onion posture needs an onion endpoint");
     }
     if (zses_looks_clearnet(onion)) {
-        if (refuse)
-            *refuse = ZSES_REFUSE_CLEARNET_FORBIDDEN;
+        zses_set_refuse(refuse, ZSES_REFUSE_CLEARNET_FORBIDDEN);
         LOG_FAIL("zses", "pick_endpoint: refused clearnet under onion posture");
     }
     if (!zses_looks_onion(onion)) {
-        if (refuse)
-            *refuse = ZSES_REFUSE_NO_ONION;
+        zses_set_refuse(refuse, ZSES_REFUSE_NO_ONION);
         LOG_FAIL("zses", "pick_endpoint: onion posture needs an exact v3 onion endpoint");
     }
     if (strlen(onion) >= out_cap) {
-        if (refuse)
-            *refuse = ZSES_REFUSE_BAD_ENDPOINT;
+        zses_set_refuse(refuse, ZSES_REFUSE_BAD_ENDPOINT);
         LOG_FAIL("zses", "pick_endpoint: onion endpoint too long");
     }
     memcpy(out, onion, strlen(onion) + 1);
@@ -249,6 +259,23 @@ bool zses_invite_encode_json(const struct zses_invite *inv, char *out,
     return true;
 }
 
+static int64_t zses_decode_expires(const struct json_value *exp)
+{
+    return exp ? json_get_int(exp) : 0;
+}
+
+static bool zses_decode_fields_valid(const char *schema, const char *endpoint,
+                                     const char *tag, int64_t expires)
+{
+    return schema && strcmp(schema, ZSES_SCHEMA) == 0 &&
+           endpoint && endpoint[0] && tag && tag[0] && expires > 0;
+}
+
+static bool zses_decode_hex(const char *hex, unsigned char *out, size_t want)
+{
+    return hex && zcl_hex_decode(hex, out, want);
+}
+
 bool zses_invite_decode_json(const char *json, struct zses_invite *inv)
 {
     if (!json || !inv)
@@ -268,9 +295,8 @@ bool zses_invite_decode_json(const char *json, struct zses_invite *inv)
     const char *pub_hex = json_get_str(json_get(&v, "pubkey"));
     const char *sig_hex = json_get_str(json_get(&v, "signature"));
     const struct json_value *exp = json_get(&v, "expires");
-    int64_t expires = exp ? json_get_int(exp) : 0;
-    bool ok = schema && strcmp(schema, ZSES_SCHEMA) == 0 &&
-              endpoint && endpoint[0] && tag && tag[0] && expires > 0;
+    int64_t expires = zses_decode_expires(exp);
+    bool ok = zses_decode_fields_valid(schema, endpoint, tag, expires);
     if (ok && strlen(endpoint) <= ZSES_ENDPOINT_MAX &&
         strlen(tag) <= ZSES_TAG_MAX) {
         memcpy(inv->endpoint, endpoint, strlen(endpoint) + 1);
@@ -279,10 +305,10 @@ bool zses_invite_decode_json(const char *json, struct zses_invite *inv)
     } else {
         ok = false;
     }
-    if (ok && pub_hex && zcl_hex_decode(pub_hex, inv->pubkey, ZSES_PUBKEY_LEN))
+    if (ok && zses_decode_hex(pub_hex, inv->pubkey, ZSES_PUBKEY_LEN))
         inv->has_pubkey = true;
-    if (ok && sig_hex &&
-        zcl_hex_decode(sig_hex, inv->signature, COMPACT_SIGNATURE_SIZE))
+    if (ok && zses_decode_hex(sig_hex, inv->signature,
+                              COMPACT_SIGNATURE_SIZE))
         inv->has_signature = true;
     json_free(&v);
     if (!ok)
