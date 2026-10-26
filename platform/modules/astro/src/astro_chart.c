@@ -171,19 +171,110 @@ static bool compute_ascendant(struct astro_exact julian_day,
     return true;
 }
 
+/* Every refusal astro_chart_compute makes before any ephemeris work: NULL
+ * arguments, an invalid instant, or a place outside the accepted latitude
+ * and longitude limits. */
+static bool chart_arguments_are_valid(const struct astro_instant *when,
+                                      const struct astro_place *where,
+                                      const struct astro_chart *out)
+{
+    return out != NULL && when != NULL && where != NULL &&
+           astro_instant_is_valid(when) &&
+           where->latitude_microdeg <= ASTRO_LATITUDE_MICRODEG_LIMIT &&
+           where->latitude_microdeg >= -ASTRO_LATITUDE_MICRODEG_LIMIT &&
+           where->longitude_microdeg <= ASTRO_LONGITUDE_MICRODEG_LIMIT &&
+           where->longitude_microdeg >= -ASTRO_LONGITUDE_MICRODEG_LIMIT;
+}
+
+/* The two time scales the ephemeris takes from one Julian day: Julian
+ * centuries and Julian millennia. False if either is not a valid exact. */
+static bool chart_epoch_scales(struct astro_exact jd,
+                               struct astro_exact *centuries,
+                               struct astro_exact *millennia)
+{
+    *centuries = astro_julian_centuries(jd);
+    *millennia = astro_julian_millennia(jd);
+    return astro_exact_is_valid(centuries) && astro_exact_is_valid(millennia);
+}
+
+/* The Earth's heliocentric position in the coplanar model, polar and
+ * rectangular. */
+static bool earth_heliocentric_xy(struct astro_exact tau,
+                                  struct astro_polar *polar,
+                                  struct astro_exact *x,
+                                  struct astro_exact *y)
+{
+    return astro_earth_heliocentric(tau, polar) && polar_to_xy(polar, x, y);
+}
+
+/* Geocentric longitude of a heliocentric rectangular position: offset it by
+ * the Earth's, take the direction from the origin, normalize to [0, 360). */
+static bool geocentric_longitude_from_xy(struct astro_exact x,
+                                         struct astro_exact y,
+                                         struct astro_exact earth_x,
+                                         struct astro_exact earth_y,
+                                         struct astro_exact *out_deg)
+{
+    struct astro_exact dx = astro_exact_sub(x, earth_x);
+    struct astro_exact dy = astro_exact_sub(y, earth_y);
+    struct astro_exact rad = astro_exact_atan2(dy, dx);
+    *out_deg = astro_degrees_normalize(astro_exact_radians_to_degrees(rad));
+    return true;
+}
+
+/* Geocentric longitude of one body. The Sun is the Earth's heliocentric
+ * direction turned around, the Moon comes from its own theory, and a
+ * planet's is the direction from the Earth's heliocentric position to its. */
+static bool body_geocentric_longitude(enum astro_body body,
+                                      struct astro_exact t,
+                                      const struct astro_polar *earth,
+                                      struct astro_exact earth_x,
+                                      struct astro_exact earth_y,
+                                      struct astro_exact *out_deg)
+{
+    if (body == ASTRO_BODY_SUN) {
+        /* The Sun's geocentric direction is opposite the Earth's
+         * heliocentric one. Exact by construction, no subtraction of
+         * nearly equal vectors. */
+        *out_deg = astro_degrees_normalize(astro_exact_add(
+            earth->longitude_deg, astro_exact_from_i64(180)));
+        return true;
+    }
+    if (body == ASTRO_BODY_MOON)
+        return astro_moon_longitude_deg(t, out_deg);
+
+    struct astro_polar helio;
+    struct astro_exact px, py;
+    return astro_planet_heliocentric(body, t, &helio) &&
+           polar_to_xy(&helio, &px, &py) &&
+           geocentric_longitude_from_xy(px, py, earth_x, earth_y, out_deg);
+}
+
+/* Every body's position, in enum order: geocentric longitude first, then the
+ * exact sign/degree/arcminute/arcsecond split. Stops at the first failure,
+ * leaving the remaining bodies untouched. */
+static bool chart_fill_bodies(struct astro_exact t,
+                              const struct astro_polar *earth,
+                              struct astro_exact earth_x,
+                              struct astro_exact earth_y,
+                              struct astro_chart *chart)
+{
+    bool filled = true;
+    for (int b = 0; b < ASTRO_BODY_COUNT && filled; b++) {
+        enum astro_body body = (enum astro_body)b;
+        struct astro_exact lon;
+        filled = body_geocentric_longitude(body, t, earth, earth_x, earth_y,
+                                           &lon) &&
+                 astro_position_from_longitude(lon, &chart->body[b]);
+    }
+    return filled;
+}
+
 bool astro_chart_compute(const struct astro_instant *when,
                          const struct astro_place *where,
                          struct astro_chart *out)
 {
-    if (out == NULL || when == NULL || where == NULL)
-        return false;
-    if (!astro_instant_is_valid(when))
-        return false;
-    if (where->latitude_microdeg > ASTRO_LATITUDE_MICRODEG_LIMIT ||
-        where->latitude_microdeg < -ASTRO_LATITUDE_MICRODEG_LIMIT)
-        return false;
-    if (where->longitude_microdeg > ASTRO_LONGITUDE_MICRODEG_LIMIT ||
-        where->longitude_microdeg < -ASTRO_LONGITUDE_MICRODEG_LIMIT)
+    if (!chart_arguments_are_valid(when, where, out))
         return false;
     if (!astro_prepare())
         return false;
@@ -192,17 +283,13 @@ bool astro_chart_compute(const struct astro_instant *when,
     if (!astro_instant_julian_day(when, &jd))
         return false;
 
-    struct astro_exact t = astro_julian_centuries(jd);
-    struct astro_exact tau = astro_julian_millennia(jd);
-    if (!astro_exact_is_valid(&t) || !astro_exact_is_valid(&tau))
+    struct astro_exact t, tau;
+    if (!chart_epoch_scales(jd, &t, &tau))
         return false;
 
     struct astro_polar earth;
-    if (!astro_earth_heliocentric(tau, &earth))
-        return false;
-
     struct astro_exact earth_x, earth_y;
-    if (!polar_to_xy(&earth, &earth_x, &earth_y))
+    if (!earth_heliocentric_xy(tau, &earth, &earth_x, &earth_y))
         return false;
 
     /* Build into a local and publish only on success, so a caller that
@@ -213,35 +300,8 @@ bool astro_chart_compute(const struct astro_instant *when,
     chart.where = *where;
     chart.julian_day = jd;
 
-    for (int b = 0; b < ASTRO_BODY_COUNT; b++) {
-        enum astro_body body = (enum astro_body)b;
-        struct astro_exact lon;
-
-        if (body == ASTRO_BODY_SUN) {
-            /* The Sun's geocentric direction is opposite the Earth's
-             * heliocentric one. Exact by construction, no subtraction of
-             * nearly equal vectors. */
-            lon = astro_degrees_normalize(astro_exact_add(
-                earth.longitude_deg, astro_exact_from_i64(180)));
-        } else if (body == ASTRO_BODY_MOON) {
-            if (!astro_moon_longitude_deg(t, &lon))
-                return false;
-        } else {
-            struct astro_polar helio;
-            if (!astro_planet_heliocentric(body, t, &helio))
-                return false;
-            struct astro_exact px, py;
-            if (!polar_to_xy(&helio, &px, &py))
-                return false;
-            struct astro_exact dx = astro_exact_sub(px, earth_x);
-            struct astro_exact dy = astro_exact_sub(py, earth_y);
-            struct astro_exact rad = astro_exact_atan2(dy, dx);
-            lon = astro_degrees_normalize(astro_exact_radians_to_degrees(rad));
-        }
-
-        if (!astro_position_from_longitude(lon, &chart.body[b]))
-            return false;
-    }
+    if (!chart_fill_bodies(t, &earth, earth_x, earth_y, &chart))
+        return false;
 
     struct astro_exact asc;
     if (!compute_ascendant(jd, t, where, &asc))
