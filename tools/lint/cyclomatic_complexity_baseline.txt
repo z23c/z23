@@ -752,8 +752,6 @@ engine/composition/src/boot_refold_staged.c:boot_refold_from_anchor_reset:34
 engine/composition/src/boot_refold_staged.c:boot_snapshot_apply_to_coins_kv:19
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
 engine/composition/src/boot_services.c:app_init_services:110
-engine/composition/src/boot_shielded_seed.c:boot_capture_shielded:23
-engine/composition/src/boot_shielded_seed.c:seed_shielded_from_snapshot:18
 engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:55
 engine/composition/src/boot_snapshot_install.c:boot_snapshot_install_marker_complete:18
 engine/composition/src/boot_snapshot_install.c:boot_snapshot_install_resume_allowed:23

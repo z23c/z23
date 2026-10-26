@@ -45,6 +45,48 @@ bool boot_shielded_prepare_assisted_boundary(sqlite3 *db, int seed_h)
     return shielded_history_reset_to_boundary(db, boundary);
 }
 
+static bool boot_capture_copy_v2_frontier(uint8_t **sapling,
+                                          uint32_t *sapling_len,
+                                          const uint8_t *fblob, uint32_t flen)
+{
+    *sapling = zcl_malloc(flen, "boot.embedded_frontier");
+    if (*sapling) {
+        memcpy(*sapling, fblob, flen);
+        *sapling_len = flen;
+        return true;
+    }
+    return false;
+}
+
+static bool boot_capture_copy_v3_sections(
+    uint8_t **sapling, uint32_t *sapling_len, uint8_t **sprout,
+    uint32_t *sprout_len, uint8_t **nfs, uint64_t *nf_count,
+    const uint8_t *sap, uint32_t sap_len, const uint8_t *spr,
+    uint32_t spr_len, const uint8_t *nf, uint64_t nfc)
+{
+    bool cap_ok = true;
+    if (sap_len > 0 && !*sapling) {
+        *sapling = zcl_malloc(sap_len, "boot.embedded_frontier");
+        if (*sapling) {
+            memcpy(*sapling, sap, sap_len);
+            *sapling_len = sap_len;
+        }
+        else cap_ok = false;
+    }
+    if (cap_ok && spr_len > 0) {
+        *sprout = zcl_malloc(spr_len, "boot.embedded_sprout");
+        if (*sprout) { memcpy(*sprout, spr, spr_len); *sprout_len = spr_len; }
+        else cap_ok = false;
+    }
+    if (cap_ok && nfc > 0) {
+        size_t nf_bytes = (size_t)nfc * SNAPSHOT_NF_RECORD_BYTES;
+        *nfs = zcl_malloc(nf_bytes, "boot.embedded_nfs");
+        if (*nfs) { memcpy(*nfs, nf, nf_bytes); *nf_count = nfc; }
+        else cap_ok = false;
+    }
+    return cap_ok;
+}
+
 void boot_capture_shielded(struct uss_handle *h, bool load_ok,
                            uint8_t **sapling, uint32_t *sapling_len,
                            bool *shielded_v3,
@@ -60,10 +102,8 @@ void boot_capture_shielded(struct uss_handle *h, bool load_ok,
         const uint8_t *fblob = NULL;
         uint32_t flen = 0;
         if (uss_frontier(h, &fblob, &flen) && fblob && flen > 0 && !*sapling) {
-            *sapling = zcl_malloc(flen, "boot.embedded_frontier");
-            if (*sapling) {
-                memcpy(*sapling, fblob, flen);
-                *sapling_len = flen;
+            if (boot_capture_copy_v2_frontier(sapling, sapling_len, fblob,
+                                              flen)) {
                 LOG_INFO("boot", "[boot] -load-snapshot-at-own-height: v2 "
                          "snapshot carries a %u-byte Sapling frontier", flen);
             } else {
@@ -92,23 +132,9 @@ void boot_capture_shielded(struct uss_handle *h, bool load_ok,
         return;
     }
 
-    bool cap_ok = true;
-    if (sap_len > 0 && !*sapling) {
-        *sapling = zcl_malloc(sap_len, "boot.embedded_frontier");
-        if (*sapling) { memcpy(*sapling, sap, sap_len); *sapling_len = sap_len; }
-        else cap_ok = false;
-    }
-    if (cap_ok && spr_len > 0) {
-        *sprout = zcl_malloc(spr_len, "boot.embedded_sprout");
-        if (*sprout) { memcpy(*sprout, spr, spr_len); *sprout_len = spr_len; }
-        else cap_ok = false;
-    }
-    if (cap_ok && nfc > 0) {
-        size_t nf_bytes = (size_t)nfc * SNAPSHOT_NF_RECORD_BYTES;
-        *nfs = zcl_malloc(nf_bytes, "boot.embedded_nfs");
-        if (*nfs) { memcpy(*nfs, nf, nf_bytes); *nf_count = nfc; }
-        else cap_ok = false;
-    }
+    bool cap_ok = boot_capture_copy_v3_sections(
+        sapling, sapling_len, sprout, sprout_len, nfs, nf_count,
+        sap, sap_len, spr, spr_len, nf, nfc);
     if (cap_ok) {
         *shielded_v3 = true;
         LOG_INFO("boot", "[boot] -load-snapshot-at-own-height: v3 snapshot "
@@ -172,6 +198,28 @@ static void seed_v2_sapling_frontier_row_in_tx(
      * nothing; the after-reset seed / runtime condition stay the backstop. */
 }
 
+/* Add the v3 nullifier records in order. On the first failing insert, store
+ * its record index in *failed_rec and return false. */
+static bool seed_shielded_add_nullifiers(struct sqlite3 *rpdb,
+                                         const uint8_t *nfs, uint64_t nf_count,
+                                         uint64_t *failed_rec)
+{
+    for (uint64_t i = 0; i < nf_count; i++) {
+        const uint8_t *rec = nfs + i * SNAPSHOT_NF_RECORD_BYTES;
+        uint8_t pool = 0, nf[32];
+        int64_t hgt = 0;
+        snapshot_shielded_unpack_nf(rec, &pool, nf, &hgt);
+        int kvpool = (pool == 0) ? NULLIFIER_POOL_SPROUT
+                                 : NULLIFIER_POOL_SAPLING;
+        if (hgt < 0) hgt = 0;
+        if (!nullifier_kv_add(rpdb, nf, kvpool, hgt)) {
+            *failed_rec = i;
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Install v3's current frontiers/nullifier rows in the caller's transaction.
  * v3 contains no proof that its historical anchor set or nullifier prefix is
  * complete: the Sapling frontier root is checked against the local header, but
@@ -230,19 +278,11 @@ static bool seed_shielded_from_snapshot(
      * they are complete. Persist the positive history-gap marker even when the
      * section is empty; this co-commits with the outer staged install. */
     if (nfs && nf_count > 0) {
-        for (uint64_t i = 0; i < nf_count; i++) {
-            const uint8_t *rec = nfs + i * SNAPSHOT_NF_RECORD_BYTES;
-            uint8_t pool = 0, nf[32];
-            int64_t hgt = 0;
-            snapshot_shielded_unpack_nf(rec, &pool, nf, &hgt);
-            int kvpool = (pool == 0) ? NULLIFIER_POOL_SPROUT
-                                     : NULLIFIER_POOL_SAPLING;
-            if (hgt < 0) hgt = 0;
-            if (!nullifier_kv_add(rpdb, nf, kvpool, hgt)) {
-                LOG_WARN("boot", "[boot] seed_shielded: nullifier_kv_add failed "
-                         "at record %llu", (unsigned long long)i);
-                return false;
-            }
+        uint64_t i = 0;
+        if (!seed_shielded_add_nullifiers(rpdb, nfs, nf_count, &i)) {
+            LOG_WARN("boot", "[boot] seed_shielded: nullifier_kv_add failed "
+                     "at record %llu", (unsigned long long)i);
+            return false;
         }
     }
     return true;
