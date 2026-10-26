@@ -188,6 +188,30 @@ zcl_retrieval_pair_observation_serialize(
     return ZCL_RETRIEVAL_PAIR_OBSERVATION_OK;
 }
 
+static void rpo_roots_mutable(
+    struct zcl_retrieval_pair_observation_v1 *observation,
+    uint8_t *roots[18])
+{
+    roots[0] = observation->study_root;
+    roots[1] = observation->task_root;
+    roots[2] = observation->candidate_root;
+    roots[3] = observation->action_root;
+    roots[4] = observation->source_root;
+    roots[5] = observation->snapshot_source_root;
+    roots[6] = observation->retrieval_projection_root;
+    roots[7] = observation->feature_snapshot_root;
+    roots[8] = observation->parent_heuristic_root;
+    roots[9] = observation->child_heuristic_root;
+    roots[10] = observation->policy_root;
+    roots[11] = observation->evaluator_root;
+    roots[12] = observation->workload_root;
+    roots[13] = observation->parent_arm_root;
+    roots[14] = observation->child_arm_root;
+    roots[15] = observation->evaluation_input_root;
+    roots[16] = observation->parent_result_root;
+    roots[17] = observation->child_result_root;
+}
+
 enum zcl_retrieval_pair_observation_error
 zcl_retrieval_pair_observation_parse(
     const uint8_t *wire, size_t wire_len,
@@ -211,10 +235,10 @@ zcl_retrieval_pair_observation_parse(
     parsed.missing_arms = wire[off++];
     parsed.failed_guards = zcl_read_u16_le(wire + off); off += 2u;
     parsed.directional_delta_bp = zcl_read_i32_le(wire + off); off += 4u;
-    const uint8_t *roots[18];
-    rpo_roots_const(&parsed, roots);
+    uint8_t *roots[18];
+    rpo_roots_mutable(&parsed, roots);
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
-        memcpy((uint8_t *)roots[i], wire + off, 32u);
+        memcpy(roots[i], wire + off, 32u);
         off += 32u;
     }
     enum zcl_retrieval_pair_observation_error error = off == wire_len
