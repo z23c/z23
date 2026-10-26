@@ -114,7 +114,6 @@ static bool icb_canonical_candidate(int target_fd, const char *home,
     *canonical = *canonical || same;
     return true;
 }
-/* Null the outputs when present, then report whether classification can run. */
 static bool icb_classify_args_ready(const char *datadir, int *out_fd,
                                     bool *out_canonical)
 {
@@ -125,8 +124,6 @@ static bool icb_classify_args_ready(const char *datadir, int *out_fd,
     return datadir && datadir[0] && out_fd && out_canonical;
 }
 
-/* 0 when `home` is absent or its canonical datadir resolved; -1 when resolution
- * failed. An empty home is absent, matching the original guard on pw_dir[0]. */
 static int icb_note_home_candidate(int target_fd, const char *home,
                                    bool *have_home, bool *canonical)
 {
@@ -705,7 +702,7 @@ static struct zcl_result icb_install_admit_receipt(
 }
 
 static struct zcl_result icb_install_admit_through_receipt(
-    const char *bundle_path, const char *datadir, const char *authorization,
+    const char *bundle_path, const char *datadir,
     struct node_db *ndb, struct main_state *ms, int *dir_fd,
     struct consensus_state_artifact_evidence **artifact,
     struct consensus_state_bundle_manifest *manifest,
@@ -723,7 +720,7 @@ static struct zcl_result icb_install_admit_through_receipt(
                        classified.message);
     struct zcl_result rc = icb_install_note_cutover_refusal(
         out, datadir,
-        icb_cutover_refusal(canonical, authorization, ndb,
+        icb_cutover_refusal(canonical, getenv("ZCL_DEPLOY_ALLOW_CANONICAL"), ndb,
                             progress_store_db(), *dir_fd));
     if (!rc.ok)
         return rc;
@@ -1067,9 +1064,8 @@ struct zcl_result consensus_state_install_from_bundle(
         CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
     struct consensus_state_source_receipt receipt;
     memset(&receipt, 0, sizeof(receipt));
-    const char *authorization = getenv("ZCL_DEPLOY_ALLOW_CANONICAL");
     rc = icb_install_admit_through_receipt(
-        bundle_path, datadir, authorization, ndb, ms, &dir_fd, &artifact,
+        bundle_path, datadir, ndb, ms, &dir_fd, &artifact,
         &manifest, &receipt, &lane, out);
     if (!rc.ok)
         goto done;
