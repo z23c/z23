@@ -200,10 +200,9 @@ uint64_t os_proc_current_pid(void)
 #endif
 }
 
-bool os_proc_pid_start_token(uint64_t pid, uint64_t *token)
-{
-    if (!token || pid == 0 || pid > UINT32_MAX) return false;
 #if defined(_WIN32)
+static bool os_proc_pid_start_token_win(uint64_t pid, uint64_t *token)
+{
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
                                  (DWORD)pid);
     FILETIME created, exited, kernel, user;
@@ -213,7 +212,10 @@ bool os_proc_pid_start_token(uint64_t pid, uint64_t *token)
     if (!ok) return false;
     *token = ((uint64_t)created.dwHighDateTime << 32) | created.dwLowDateTime;
     return true;
+}
 #elif defined(__linux__)
+static bool os_proc_pid_start_token_linux(uint64_t pid, uint64_t *token)
+{
     char path[64], row[4096];
     int n = snprintf(path, sizeof(path), "/proc/%llu/stat",
                      (unsigned long long)pid);
@@ -232,7 +234,10 @@ bool os_proc_pid_start_token(uint64_t pid, uint64_t *token)
     char *end = NULL; unsigned long long value = strtoull(p, &end, 10);
     if (!end || (end == p)) return false;
     *token = (uint64_t)value; return true;
+}
 #elif defined(__APPLE__)
+static bool os_proc_pid_start_token_apple(uint64_t pid, uint64_t *token)
+{
     if (pid > INT_MAX) return false;
     struct proc_bsdinfo info = {0};
     int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info,
@@ -245,6 +250,18 @@ bool os_proc_pid_start_token(uint64_t pid, uint64_t *token)
     *token = info.pbi_start_tvsec * UINT64_C(1000000) +
              info.pbi_start_tvusec;
     return *token != 0;
+}
+#endif
+
+bool os_proc_pid_start_token(uint64_t pid, uint64_t *token)
+{
+    if (!token || pid == 0 || pid > UINT32_MAX) return false;
+#if defined(_WIN32)
+    return os_proc_pid_start_token_win(pid, token);
+#elif defined(__linux__)
+    return os_proc_pid_start_token_linux(pid, token);
+#elif defined(__APPLE__)
+    return os_proc_pid_start_token_apple(pid, token);
 #else
     (void)pid; return false;
 #endif
@@ -281,9 +298,9 @@ bool os_proc_io_bytes(uint64_t *out)
 #endif
 }
 
-int64_t os_proc_uptime_seconds(void)
-{
 #if defined(_WIN32)
+static int64_t os_proc_uptime_seconds_win(void)
+{
     FILETIME created, exited, kernel, user, now;
     if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel,
                          &user))
@@ -299,7 +316,10 @@ int64_t os_proc_uptime_seconds(void)
         return 0;
     return (int64_t)((now_ticks.QuadPart - created_ticks.QuadPart) /
                      UINT64_C(10000000));
+}
 #elif defined(__APPLE__)
+static int64_t os_proc_uptime_seconds_apple(void)
+{
     struct proc_bsdinfo info;
     int read = proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &info,
                             (int)sizeof(info));
@@ -308,7 +328,10 @@ int64_t os_proc_uptime_seconds(void)
     time_t now = time(NULL);
     return now >= (time_t)info.pbi_start_tvsec
         ? (int64_t)(now - (time_t)info.pbi_start_tvsec) : 0;
+}
 #else
+static int64_t os_proc_uptime_seconds_procfs(void)
+{
     /* System uptime */
     double sys_up = 0;
     FILE *f = fopen("/proc/uptime", "r");
@@ -352,6 +375,17 @@ int64_t os_proc_uptime_seconds(void)
     double proc_start_sec = (double)starttime / (double)clk;
     double age = sys_up - proc_start_sec;
     return age > 0 ? (int64_t)age : 0;
+}
+#endif
+
+int64_t os_proc_uptime_seconds(void)
+{
+#if defined(_WIN32)
+    return os_proc_uptime_seconds_win();
+#elif defined(__APPLE__)
+    return os_proc_uptime_seconds_apple();
+#else
+    return os_proc_uptime_seconds_procfs();
 #endif
 }
 
@@ -454,10 +488,9 @@ bool os_proc_self_exe_open_path(char *buf, size_t n)
 #endif
 }
 
-bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n)
-{
-    if (pid == 0 || pid > UINT32_MAX || !buf || n == 0) return false;
 #if defined(_WIN32)
+static bool os_proc_pid_exe_path_win(uint64_t pid, char *buf, size_t n)
+{
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
                                  (DWORD)pid);
     if (!process) return false;
@@ -475,11 +508,17 @@ bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n)
         return false;
     buf[required] = '\0';
     return true;
+}
 #elif defined(__APPLE__)
+static bool os_proc_pid_exe_path_apple(uint64_t pid, char *buf, size_t n)
+{
     if (pid > INT_MAX || n > INT_MAX) return false;
     int length = proc_pidpath((int)pid, buf, (uint32_t)n);
     return length > 0 && (size_t)length < n;
+}
 #else
+static bool os_proc_pid_exe_path_linux(uint64_t pid, char *buf, size_t n)
+{
     char link[64];
     int written = snprintf(link, sizeof(link), "/proc/%llu/exe",
                            (unsigned long long)pid);
@@ -488,6 +527,18 @@ bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n)
     if (length <= 0 || (size_t)length >= n) return false;
     buf[length] = '\0';
     return true;
+}
+#endif
+
+bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n)
+{
+    if (pid == 0 || pid > UINT32_MAX || !buf || n == 0) return false;
+#if defined(_WIN32)
+    return os_proc_pid_exe_path_win(pid, buf, n);
+#elif defined(__APPLE__)
+    return os_proc_pid_exe_path_apple(pid, buf, n);
+#else
+    return os_proc_pid_exe_path_linux(pid, buf, n);
 #endif
 }
 
@@ -723,6 +774,15 @@ bool os_proc_cmdline_has_token(const char *token)
 #endif
 }
 
+#if !defined(_WIN32)
+static bool os_proc_close_inherited_fd(int fd, int own)
+{
+    if (fd > STDERR_FILENO && fd != own && close(fd) != 0 && errno != EBADF)
+        return false;
+    return true;
+}
+#endif
+
 bool os_proc_close_inherited_fds(void)
 {
 #if defined(_WIN32)
@@ -749,8 +809,7 @@ bool os_proc_close_inherited_fds(void)
             break;
         }
         int fd = (int)number;
-        if (fd > STDERR_FILENO && fd != own && close(fd) != 0 &&
-            errno != EBADF)
+        if (!os_proc_close_inherited_fd(fd, own))
             ok = false;
     }
     int saved = errno;
