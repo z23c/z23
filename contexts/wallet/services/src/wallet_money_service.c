@@ -211,14 +211,17 @@ static bool money_classes_complete(const struct vault_snapshot *v,
     return true;
 }
 
-struct zcl_result wallet_money_snapshot_build(
-    struct node_db *ndb, struct main_state *main_state,
-    const char *wallet_scope, struct wallet_money_snapshot *out)
+static bool money_snapshot_args_valid(
+    const struct node_db *ndb, const struct main_state *main_state,
+    const char *wallet_scope, const struct wallet_money_snapshot *out)
 {
-    if (!ndb || !ndb->open || !main_state || !out ||
-        !wallet_money_scope_valid(wallet_scope))
-        return ZCL_ERR(-1,
-                       "open node_db, main_state, and dev|prod|test scope are required");
+    return ndb && ndb->open && main_state && out &&
+        wallet_money_scope_valid(wallet_scope);
+}
+
+static void money_snapshot_init(struct wallet_money_snapshot *out,
+                                const char *wallet_scope)
+{
     memset(out, 0, sizeof(*out));
     (void)snprintf(out->wallet_scope, sizeof(out->wallet_scope), "%s",
                    wallet_scope);
@@ -226,18 +229,121 @@ struct zcl_result wallet_money_snapshot_build(
     out->tip_height = -1;
     out->network_tip_height = -1;
     out->observed_at = (int64_t)platform_time_wall_time_t();
+}
 
-    if (!wallet_identity_find(ndb, &out->identity)) {
+static bool money_identity_lane_ready(struct node_db *ndb,
+                                      const char *wallet_scope,
+                                      struct wallet_money_snapshot *out)
+{
+    bool found = wallet_identity_find(ndb, &out->identity);
+    if (!found) {
         (void)snprintf(out->reason, sizeof(out->reason),
                        "wallet identity is not initialized");
-        money_root(out);
-        return ZCL_OK;
+        return false;
     }
     const char *expected_lane = wallet_money_scope_expected_lane(wallet_scope);
     if (strcmp(out->identity.operator_lane, expected_lane) != 0) {
         (void)snprintf(out->status, sizeof(out->status), "CONFLICTED");
         (void)snprintf(out->reason, sizeof(out->reason),
                        "wallet scope does not match persisted operator lane");
+        return false;
+    }
+    return true;
+}
+
+static bool money_coins_tip_now(int32_t *money_tip,
+                                uint8_t money_tip_hash[32])
+{
+    bool money_tip_hash_found = false;
+    bool ok = reducer_frontier_derive_coins_best_now(
+        money_tip, money_tip_hash, &money_tip_hash_found);
+    return ok && money_tip_hash_found;
+}
+
+static void money_snapshot_freshness_status(
+    struct wallet_money_snapshot *out,
+    enum wallet_money_freshness freshness, int32_t money_tip, int32_t hstar,
+    enum sync_state state)
+{
+    (void)snprintf(out->status, sizeof(out->status), "%s",
+                   freshness == WALLET_MONEY_FRESHNESS_STALE
+                       ? "STALE" : "UNKNOWN");
+    if (freshness == WALLET_MONEY_FRESHNESS_STALE &&
+        out->network_tip_height > money_tip)
+        (void)snprintf(out->reason, sizeof(out->reason),
+                       "wallet coins tip is %d blocks behind network tip",
+                       out->network_tip_height - money_tip);
+    else if (freshness == WALLET_MONEY_FRESHNESS_STALE &&
+             money_tip != hstar)
+        (void)snprintf(out->reason, sizeof(out->reason),
+                       money_tip == hstar + 1
+                           ? "wallet coins tip is one block ahead of the proven fold edge"
+                           : "wallet coins tip is outside the proven fold edge");
+    else if (freshness == WALLET_MONEY_FRESHNESS_STALE)
+        (void)snprintf(out->reason, sizeof(out->reason),
+                       "node sync state is %s", sync_state_name(state));
+    else
+        (void)snprintf(out->reason, sizeof(out->reason),
+                       "network tip freshness is unavailable");
+}
+
+static int64_t money_lifetime_lab_spent(struct node_db *ndb,
+                                        const char *wallet_scope,
+                                        const char *wallet_instance_id)
+{
+    int64_t direct_lifetime =
+        agent_session_scope_lifetime_spent(ndb, wallet_scope);
+    int64_t completed_intents = vault_intent_unbound_completed_total(
+        ndb, wallet_scope, wallet_instance_id);
+    return direct_lifetime >= 0 && completed_intents >= 0 &&
+        direct_lifetime <= INT64_MAX - completed_intents
+            ? direct_lifetime + completed_intents : -1;
+}
+
+static bool money_authorities_stable(
+    struct main_state *main_state, int32_t money_tip,
+    const uint8_t money_tip_hash[32],
+    const struct money_chain_view *before, int32_t *target_height_after)
+{
+    int32_t money_tip_after = -1;
+    uint8_t money_tip_hash_after[32] = { 0 };
+    bool money_tip_hash_after_found = false;
+    bool money_after_ok = reducer_frontier_derive_coins_best_now(
+        &money_tip_after, money_tip_hash_after,
+        &money_tip_hash_after_found);
+    struct money_chain_view after = {
+        .target_height = -1,
+        .sync_state = sync_get_state(),
+    };
+    if (money_after_ok && money_tip_hash_after_found)
+        after = money_chain_view_capture(
+            main_state, money_tip_after, money_tip_hash_after);
+    *target_height_after = after.target_height;
+    bool hstar_after_published =
+        reducer_frontier_provable_tip_is_published();
+    int32_t hstar_after = reducer_frontier_provable_tip_cached();
+    enum wallet_money_freshness freshness_after =
+        wallet_money_freshness_classify(
+            hstar_after_published, hstar_after, money_tip_after,
+            after.target_height, after.peer_count, after.sync_state);
+    return money_after_ok && money_tip_hash_after_found &&
+        after.money_tip_matches_active && money_tip_after == money_tip &&
+        memcmp(money_tip_hash_after, money_tip_hash,
+               sizeof(money_tip_hash_after)) == 0 &&
+        after.target_height == before->target_height &&
+        freshness_after == WALLET_MONEY_FRESHNESS_CURRENT;
+}
+
+struct zcl_result wallet_money_snapshot_build(
+    struct node_db *ndb, struct main_state *main_state,
+    const char *wallet_scope, struct wallet_money_snapshot *out)
+{
+    if (!money_snapshot_args_valid(ndb, main_state, wallet_scope, out))
+        return ZCL_ERR(-1,
+                       "open node_db, main_state, and dev|prod|test scope are required");
+    money_snapshot_init(out, wallet_scope);
+
+    if (!money_identity_lane_ready(ndb, wallet_scope, out)) {
         money_root(out);
         return ZCL_OK;
     }
@@ -246,10 +352,7 @@ struct zcl_result wallet_money_snapshot_build(
     int32_t hstar = reducer_frontier_provable_tip_cached();
     int32_t money_tip = -1;
     uint8_t money_tip_hash[32] = { 0 };
-    bool money_tip_hash_found = false;
-    if (!reducer_frontier_derive_coins_best_now(
-            &money_tip, money_tip_hash, &money_tip_hash_found) ||
-        !money_tip_hash_found) {
+    if (!money_coins_tip_now(&money_tip, money_tip_hash)) {
         /* Name WHAT is missing. The refusal itself is unchanged — a node that
          * cannot prove the coin state is still refused — but "unavailable" on
          * its own sent an operator hand-writing database markers to get past
@@ -278,27 +381,8 @@ struct zcl_result wallet_money_snapshot_build(
         hstar_published, hstar, money_tip, out->network_tip_height,
         before.peer_count, before.sync_state);
     if (freshness != WALLET_MONEY_FRESHNESS_CURRENT) {
-        (void)snprintf(out->status, sizeof(out->status), "%s",
-                       freshness == WALLET_MONEY_FRESHNESS_STALE
-                           ? "STALE" : "UNKNOWN");
-        if (freshness == WALLET_MONEY_FRESHNESS_STALE &&
-            out->network_tip_height > money_tip)
-            (void)snprintf(out->reason, sizeof(out->reason),
-                           "wallet coins tip is %d blocks behind network tip",
-                           out->network_tip_height - money_tip);
-        else if (freshness == WALLET_MONEY_FRESHNESS_STALE &&
-                 money_tip != hstar)
-            (void)snprintf(out->reason, sizeof(out->reason),
-                           money_tip == hstar + 1
-                               ? "wallet coins tip is one block ahead of the proven fold edge"
-                               : "wallet coins tip is outside the proven fold edge");
-        else if (freshness == WALLET_MONEY_FRESHNESS_STALE)
-            (void)snprintf(out->reason, sizeof(out->reason),
-                           "node sync state is %s",
-                           sync_state_name(before.sync_state));
-        else
-            (void)snprintf(out->reason, sizeof(out->reason),
-                           "network tip freshness is unavailable");
+        money_snapshot_freshness_status(out, freshness, money_tip, hstar,
+                                        before.sync_state);
         money_root(out);
         return ZCL_OK;
     }
@@ -321,14 +405,8 @@ struct zcl_result wallet_money_snapshot_build(
     out->intent_reserved_zat = vault_intent_reserved_total_at(
         ndb, wallet_scope, out->identity.wallet_instance_id,
         out->observed_at);
-    int64_t direct_lifetime =
-        agent_session_scope_lifetime_spent(ndb, wallet_scope);
-    int64_t completed_intents = vault_intent_unbound_completed_total(
+    out->lifetime_lab_spent_zat = money_lifetime_lab_spent(
         ndb, wallet_scope, out->identity.wallet_instance_id);
-    out->lifetime_lab_spent_zat =
-        direct_lifetime >= 0 && completed_intents >= 0 &&
-        direct_lifetime <= INT64_MAX - completed_intents
-            ? direct_lifetime + completed_intents : -1;
     if (out->intent_reserved_zat < 0 ||
         out->lifetime_lab_spent_zat < 0) {
         (void)snprintf(out->reason, sizeof(out->reason),
@@ -347,33 +425,10 @@ struct zcl_result wallet_money_snapshot_build(
      * witnesses after the vault/intent reads and publish numbers only when the
      * exact money tip, active/header/peer target, and freshness classification
      * stayed unchanged for the whole observation. */
-    int32_t money_tip_after = -1;
-    uint8_t money_tip_hash_after[32] = { 0 };
-    bool money_tip_hash_after_found = false;
-    bool money_after_ok = reducer_frontier_derive_coins_best_now(
-        &money_tip_after, money_tip_hash_after,
-        &money_tip_hash_after_found);
-    struct money_chain_view after = {
-        .target_height = -1,
-        .sync_state = sync_get_state(),
-    };
-    if (money_after_ok && money_tip_hash_after_found)
-        after = money_chain_view_capture(
-            main_state, money_tip_after, money_tip_hash_after);
-    bool hstar_after_published =
-        reducer_frontier_provable_tip_is_published();
-    int32_t hstar_after = reducer_frontier_provable_tip_cached();
-    enum wallet_money_freshness freshness_after =
-        wallet_money_freshness_classify(
-            hstar_after_published, hstar_after, money_tip_after,
-            after.target_height, after.peer_count, after.sync_state);
-    if (!money_after_ok || !money_tip_hash_after_found ||
-        !after.money_tip_matches_active || money_tip_after != money_tip ||
-        memcmp(money_tip_hash_after, money_tip_hash,
-               sizeof(money_tip_hash)) != 0 ||
-        after.target_height != before.target_height ||
-        freshness_after != WALLET_MONEY_FRESHNESS_CURRENT) {
-        out->network_tip_height = after.target_height;
+    int32_t target_height_after = -1;
+    if (!money_authorities_stable(main_state, money_tip, money_tip_hash,
+                                  &before, &target_height_after)) {
+        out->network_tip_height = target_height_after;
         (void)snprintf(out->status, sizeof(out->status), "STALE");
         (void)snprintf(out->reason, sizeof(out->reason),
                        "money authorities changed during observation");
