@@ -1040,7 +1040,6 @@ platform/modules/util/src/blocker.c:blocker_supervisor_sweep:25
 platform/modules/util/src/cpu_topology.c:scan_darwin:18
 platform/modules/util/src/cpu_topology.c:scan_windows:27
 platform/modules/util/src/supervisor.c:sweep_once:18
-tests/harness/spec/spec_data_hooks.c:spec_data_hooks:41
 tests/harness/src/build_release_regression_fixture.c:test_build_release_regression_fixture:43
 tests/harness/src/codeindex_freshness_windows_acceptance.c:main:22
 tests/harness/src/codeindex_freshness_windows_acceptance.c:mutation_acceptance:32

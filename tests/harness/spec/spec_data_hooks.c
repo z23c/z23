@@ -60,10 +60,9 @@ static void reset(void) {
     g_bd_count=0; g_ad_count=0; g_async_s=0; g_async_d=0;
 }
 
-int spec_data_hooks(void)
+static int test_validate_hooks_fire_and_halt(void)
 {
     int failures = 0;
-    printf("\n=== ActiveRecord Lifecycle Hooks ===\n");
 
     {   printf("before_validate and after_validate fire... ");
         reset();
@@ -77,26 +76,38 @@ int spec_data_hooks(void)
     }
 
     {   printf("before_validate halt stops validation... ");
+        reset();
         struct ar_callbacks cb; ar_callbacks_init(&cb);
         ar_register_before_validate(&cb, hook_reject);
         bool ok = !ar_run_before_validate(&cb, NULL);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
-    {   printf("full lifecycle: validate → save → after fires... ");
-        reset();
-        struct ar_callbacks cb; ar_callbacks_init(&cb);
-        ar_register_before_validate(&cb, hook_bv);
-        ar_register_after_validate(&cb, hook_av);
-        ar_register_before_save(&cb, hook_bs);
-        ar_register_after_save(&cb, hook_as);
-        ar_run_before_validate(&cb, NULL);
-        ar_run_after_validate(&cb, NULL);
-        ar_run_before_save(&cb, NULL);
-        ar_run_after_save(&cb, NULL);
-        bool ok = g_bv_count==1 && g_av_count==1 && g_bs_count==1 && g_as_count==1;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    return failures;
+}
+
+static int test_full_lifecycle_hooks_fire(void)
+{
+    int failures = 0;
+    printf("full lifecycle: validate → save → after fires... ");
+    reset();
+    struct ar_callbacks cb; ar_callbacks_init(&cb);
+    ar_register_before_validate(&cb, hook_bv);
+    ar_register_after_validate(&cb, hook_av);
+    ar_register_before_save(&cb, hook_bs);
+    ar_register_after_save(&cb, hook_as);
+    ar_run_before_validate(&cb, NULL);
+    ar_run_after_validate(&cb, NULL);
+    ar_run_before_save(&cb, NULL);
+    ar_run_after_save(&cb, NULL);
+    bool ok = g_bv_count==1 && g_av_count==1 && g_bs_count==1 && g_as_count==1;
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int test_save_halt_and_destroy_hooks(void)
+{
+    int failures = 0;
 
     {   printf("before_save halt does not affect validation... ");
         reset();
@@ -120,6 +131,13 @@ int spec_data_hooks(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_async_hooks_fire(void)
+{
+    int failures = 0;
+
     {   printf("after_save_async fires... ");
         reset();
         struct ar_callbacks cb; ar_callbacks_init(&cb);
@@ -138,105 +156,152 @@ int spec_data_hooks(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
-    {   printf("multiple before_save callbacks all run... ");
-        reset();
-        struct ar_callbacks cb; ar_callbacks_init(&cb);
-        ar_register_before_save(&cb, hook_bs);
-        ar_register_before_save(&cb, hook_bs);
-        ar_register_before_save(&cb, hook_bs);
-        ar_run_before_save(&cb, NULL);
-        bool ok = g_bs_count == 3;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    return failures;
+}
 
-    {   printf("callback overflow rejected... ");
-        struct ar_callbacks cb; ar_callbacks_init(&cb);
-        bool ok = true;
-        for (int i = 0; i < AR_MAX_CALLBACKS; i++)
-            ok = ok && ar_register_before_save(&cb, hook_bs);
-        ok = ok && !ar_register_before_save(&cb, hook_bs);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+static int test_multiple_before_save_callbacks_run(void)
+{
+    int failures = 0;
+    printf("multiple before_save callbacks all run... ");
+    reset();
+    struct ar_callbacks cb; ar_callbacks_init(&cb);
+    ar_register_before_save(&cb, hook_bs);
+    ar_register_before_save(&cb, hook_bs);
+    ar_register_before_save(&cb, hook_bs);
+    ar_run_before_save(&cb, NULL);
+    bool ok = g_bs_count == 3;
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
 
-    {   printf("context pointer passed to callbacks... ");
-        struct ar_callbacks cb; ar_callbacks_init(&cb);
-        int ctx_val = 42;
-        ar_callbacks_set_ctx(&cb, &ctx_val);
-        bool ok = cb.ctx == &ctx_val;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+static int test_callback_overflow_rejected(void)
+{
+    int failures = 0;
+    printf("callback overflow rejected... ");
+    struct ar_callbacks cb; ar_callbacks_init(&cb);
+    bool ok = true;
+    for (int i = 0; i < AR_MAX_CALLBACKS; i++)
+        ok = ok && ar_register_before_save(&cb, hook_bs);
+    ok = ok && !ar_register_before_save(&cb, hook_bs);
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
 
-    {   printf("wallet_sqlite key write emits model.wallet_key_saved... ");
-        event_log_init();
-        event_clear_all_observers();
-        g_wk_saved_fired = 0;
-        g_sk_saved_fired = 0;
-        memset(g_wk_payload, 0, sizeof(g_wk_payload));
-        event_observe(EV_WALLET_KEY_SAVED, on_wallet_key_saved, NULL);
-        event_observe(EV_SAPLING_KEY_SAVED, on_sapling_key_saved, NULL);
+static int test_context_pointer_passed_to_callbacks(void)
+{
+    int failures = 0;
+    printf("context pointer passed to callbacks... ");
+    struct ar_callbacks cb; ar_callbacks_init(&cb);
+    int ctx_val = 42;
+    ar_callbacks_set_ctx(&cb, &ctx_val);
+    bool ok = cb.ctx == &ctx_val;
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
 
-        /* The model save hook is gone — the encryption-aware single
-         * writer (wallet_sqlite) owns the key-saved event feed. */
-        struct node_db ndb;
-        bool ok = node_db_open(&ndb, ":memory:");
-        struct wallet_sqlite ws;
-        ok = ok && wallet_sqlite_open(&ws, ndb.db);
-        struct privkey key;
-        struct pubkey pk;
-        privkey_init(&key);
-        memset(key.vch, 0xC3, 32);
-        key.vch[1] = 0x3C;              /* keep it a valid scalar */
-        key.fValid = true;
-        key.fCompressed = true;
-        ok = ok && privkey_get_pubkey(&key, &pk);
-        ok = ok && wallet_sqlite_write_key(&ws, &pk, &key);
-        ok = ok && g_wk_saved_fired == 1;
-        ok = ok && strstr(g_wk_payload, "kind=transparent") != NULL;
-        ok = ok && g_sk_saved_fired == 0;
-        /* Rewrite of an existing row must NOT re-emit (once-per-key). */
-        ok = ok && wallet_sqlite_write_key(&ws, &pk, &key);
-        ok = ok && g_wk_saved_fired == 1;
-        wallet_sqlite_close(&ws);
-        node_db_close(&ndb);
-        event_clear_all_observers();
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+static void install_key_saved_observers(void)
+{
+    event_log_init();
+    event_clear_all_observers();
+    g_wk_saved_fired = 0;
+    g_sk_saved_fired = 0;
+    memset(g_wk_payload, 0, sizeof(g_wk_payload));
+    event_observe(EV_WALLET_KEY_SAVED, on_wallet_key_saved, NULL);
+    event_observe(EV_SAPLING_KEY_SAVED, on_sapling_key_saved, NULL);
+}
 
-    {   printf("wallet_sqlite sapling write emits both events... ");
-        event_log_init();
-        event_clear_all_observers();
-        g_wk_saved_fired = 0;
-        g_sk_saved_fired = 0;
-        memset(g_wk_payload, 0, sizeof(g_wk_payload));
-        event_observe(EV_WALLET_KEY_SAVED, on_wallet_key_saved, NULL);
-        event_observe(EV_SAPLING_KEY_SAVED, on_sapling_key_saved, NULL);
+/* wallet_sqlite_open / wallet_sqlite_write_key are the deprecated legacy
+ * single-writer entry points this spec deliberately covers, so silence the
+ * deprecation warning for these two functions without changing any call. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+static int test_wallet_sqlite_emits_wallet_key_saved(void)
+{
+    int failures = 0;
+    printf("wallet_sqlite key write emits model.wallet_key_saved... ");
+    install_key_saved_observers();
 
-        struct node_db ndb;
-        bool ok = node_db_open(&ndb, ":memory:");
-        struct wallet_sqlite ws;
-        ok = ok && wallet_sqlite_open(&ws, ndb.db);
-        struct sapling_key_entry sk;
-        memset(&sk, 0, sizeof(sk));
-        memset(sk.ivk, 0xA1, 32);
-        memset(&sk.xsk, 0xB2, sizeof(sk.xsk));
-        memset(&sk.xfvk, 0xC3, sizeof(sk.xfvk));
-        memset(sk.diversifier, 0xD4, 11);
-        memset(sk.pk_d, 0xE5, 32);
-        sk.child_index = 0;
-        sk.used = true;
-        ok = ok && wallet_sqlite_write_sapling_key(&ws, 0, &sk);
-        ok = ok && g_wk_saved_fired == 1;
-        ok = ok && strstr(g_wk_payload, "kind=sapling") != NULL;
-        ok = ok && g_sk_saved_fired == 1;
-        /* Rewrite of an existing row must NOT re-emit. */
-        ok = ok && wallet_sqlite_write_sapling_key(&ws, 0, &sk);
-        ok = ok && g_wk_saved_fired == 1;
-        ok = ok && g_sk_saved_fired == 1;
-        wallet_sqlite_close(&ws);
-        node_db_close(&ndb);
-        event_clear_all_observers();
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    /* The model save hook is gone — the encryption-aware single
+     * writer (wallet_sqlite) owns the key-saved event feed. */
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, ":memory:");
+    struct wallet_sqlite ws;
+    ok = ok && wallet_sqlite_open(&ws, ndb.db);
+    struct privkey key;
+    struct pubkey pk;
+    privkey_init(&key);
+    memset(key.vch, 0xC3, 32);
+    key.vch[1] = 0x3C;              /* keep it a valid scalar */
+    key.fValid = true;
+    key.fCompressed = true;
+    ok = ok && privkey_get_pubkey(&key, &pk);
+    ok = ok && wallet_sqlite_write_key(&ws, &pk, &key);
+    ok = ok && g_wk_saved_fired == 1;
+    ok = ok && strstr(g_wk_payload, "kind=transparent") != NULL;
+    ok = ok && g_sk_saved_fired == 0;
+    /* Rewrite of an existing row must NOT re-emit (once-per-key). */
+    ok = ok && wallet_sqlite_write_key(&ws, &pk, &key);
+    ok = ok && g_wk_saved_fired == 1;
+    wallet_sqlite_close(&ws);
+    node_db_close(&ndb);
+    event_clear_all_observers();
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+#pragma GCC diagnostic pop
+
+/* Same legacy wallet_sqlite entry points as above. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+static int test_wallet_sqlite_emits_sapling_key_saved(void)
+{
+    int failures = 0;
+    printf("wallet_sqlite sapling write emits both events... ");
+    install_key_saved_observers();
+
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, ":memory:");
+    struct wallet_sqlite ws;
+    ok = ok && wallet_sqlite_open(&ws, ndb.db);
+    struct sapling_key_entry sk;
+    memset(&sk, 0, sizeof(sk));
+    memset(sk.ivk, 0xA1, 32);
+    memset(&sk.xsk, 0xB2, sizeof(sk.xsk));
+    memset(&sk.xfvk, 0xC3, sizeof(sk.xfvk));
+    memset(sk.diversifier, 0xD4, 11);
+    memset(sk.pk_d, 0xE5, 32);
+    sk.child_index = 0;
+    sk.used = true;
+    ok = ok && wallet_sqlite_write_sapling_key(&ws, 0, &sk);
+    ok = ok && g_wk_saved_fired == 1;
+    ok = ok && strstr(g_wk_payload, "kind=sapling") != NULL;
+    ok = ok && g_sk_saved_fired == 1;
+    /* Rewrite of an existing row must NOT re-emit. */
+    ok = ok && wallet_sqlite_write_sapling_key(&ws, 0, &sk);
+    ok = ok && g_wk_saved_fired == 1;
+    ok = ok && g_sk_saved_fired == 1;
+    wallet_sqlite_close(&ws);
+    node_db_close(&ndb);
+    event_clear_all_observers();
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+#pragma GCC diagnostic pop
+
+int spec_data_hooks(void)
+{
+    int failures = 0;
+    printf("\n=== ActiveRecord Lifecycle Hooks ===\n");
+
+    failures += test_validate_hooks_fire_and_halt();
+    failures += test_full_lifecycle_hooks_fire();
+    failures += test_save_halt_and_destroy_hooks();
+    failures += test_async_hooks_fire();
+    failures += test_multiple_before_save_callbacks_run();
+    failures += test_callback_overflow_rejected();
+    failures += test_context_pointer_passed_to_callbacks();
+    failures += test_wallet_sqlite_emits_wallet_key_saved();
+    failures += test_wallet_sqlite_emits_sapling_key_saved();
 
     printf("Data hooks: %d failures\n", failures);
     return failures;
