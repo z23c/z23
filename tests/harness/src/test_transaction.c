@@ -9,7 +9,7 @@
 #include "coins/undo.h"
 #include "bloom/merkleblock.h"
 
-int test_transaction(void)
+static int test_tx_outpoint_alloc_and_value(void)
 {
     int failures = 0;
 
@@ -57,6 +57,13 @@ int test_transaction(void)
         else { printf("FAIL (%" PRId64 ")\n", total); failures++; }
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int test_tx_coinbase_bloom_and_merkle_roots(void)
+{
+    int failures = 0;
 
     printf("transaction_is_coinbase... ");
     {
@@ -145,6 +152,13 @@ int test_transaction(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_tx_partial_merkle_build_extract(void)
+{
+    int failures = 0;
+
     printf("partial_merkle_tree build/extract... ");
     {
         struct uint256 txids[4];
@@ -170,6 +184,13 @@ int test_transaction(void)
         merkle_tree_free(&t);
     }
 
+    return failures;
+}
+
+static int test_tx_sighash_type_anyone_can_pay(void)
+{
+    int failures = 0;
+
     printf("sighash_type... ");
     {
         struct sighash_type s = sighash_type_default();
@@ -183,6 +204,13 @@ int test_transaction(void)
             else { printf("FAIL\n"); failures++; }
         } else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_tx_stream_scalar_roundtrips(void)
+{
+    int failures = 0;
 
     printf("stream write/read u32... ");
     {
@@ -259,6 +287,13 @@ int test_transaction(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_tx_header_and_outpoint_serde(void)
+{
+    int failures = 0;
+
     printf("block_header serialize/deserialize roundtrip... ");
     {
         struct block_header h;
@@ -315,6 +350,13 @@ int test_transaction(void)
         else { printf("FAIL\n"); failures++; }
         stream_free(&s);
     }
+
+    return failures;
+}
+
+static int test_tx_vin_vout_and_hash(void)
+{
+    int failures = 0;
 
     printf("tx_in serialize/deserialize... ");
     {
@@ -376,6 +418,13 @@ int test_transaction(void)
         else { printf("FAIL\n"); failures++; }
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int test_tx_signature_hash_sprout_sapling(void)
+{
+    int failures = 0;
 
     printf("signature_hash sprout... ");
     {
@@ -470,6 +519,13 @@ int test_transaction(void)
         else { printf("FAIL (cache mismatch)\n"); failures++; }
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int test_tx_check_transaction_rules(void)
+{
+    int failures = 0;
 
     printf("check_transaction valid... ");
     {
@@ -577,6 +633,13 @@ int test_transaction(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int test_tx_sig_checker_wiring(void)
+{
+    int failures = 0;
+
     printf("tx_sig_checker create... ");
     {
         struct transaction tx;
@@ -632,6 +695,13 @@ int test_transaction(void)
         else { printf("FAIL\n"); failures++; }
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int test_tx_contextual_and_expiry(void)
+{
+    int failures = 0;
 
     printf("contextual_check_tx sprout rejects overwinter... ");
     {
@@ -731,6 +801,13 @@ int test_transaction(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_tx_in_undo_roundtrip(void)
+{
+    int failures = 0;
+
     printf("tx_in_undo serialize/deserialize roundtrip... ");
     {
         struct tx_in_undo u;
@@ -767,6 +844,13 @@ int test_transaction(void)
         else { printf("FAIL\n"); failures++; }
         stream_free(&s);
     }
+
+    return failures;
+}
+
+static int test_tx_block_undo_roundtrip(void)
+{
+    int failures = 0;
 
     printf("block_undo serialize/deserialize roundtrip... ");
     {
@@ -811,6 +895,13 @@ int test_transaction(void)
         stream_free(&s);
     }
 
+    return failures;
+}
+
+static int test_tx_merkle_tree_serde(void)
+{
+    int failures = 0;
+
     printf("merkle_tree serialize/deserialize roundtrip... ");
     {
         struct uint256 txids[4];
@@ -852,6 +943,13 @@ int test_transaction(void)
         stream_free(&rs);
     }
 
+    return failures;
+}
+
+static int test_tx_merkle_block_serde(void)
+{
+    int failures = 0;
+
     printf("merkle_block serialize/deserialize roundtrip... ");
     {
         struct merkle_block mb;
@@ -890,6 +988,13 @@ int test_transaction(void)
         stream_free(&ws);
         stream_free(&rs);
     }
+
+    return failures;
+}
+
+static int test_tx_serialize_roundtrip(void)
+{
+    int failures = 0;
 
     printf("transaction serialize/deserialize roundtrip... ");
     {
@@ -930,5 +1035,28 @@ int test_transaction(void)
         stream_free(&rs);
     }
 
+    return failures;
+}
+
+int test_transaction(void)
+{
+    int failures = 0;
+
+    failures += test_tx_outpoint_alloc_and_value();
+    failures += test_tx_coinbase_bloom_and_merkle_roots();
+    failures += test_tx_partial_merkle_build_extract();
+    failures += test_tx_sighash_type_anyone_can_pay();
+    failures += test_tx_stream_scalar_roundtrips();
+    failures += test_tx_header_and_outpoint_serde();
+    failures += test_tx_vin_vout_and_hash();
+    failures += test_tx_signature_hash_sprout_sapling();
+    failures += test_tx_check_transaction_rules();
+    failures += test_tx_sig_checker_wiring();
+    failures += test_tx_contextual_and_expiry();
+    failures += test_tx_in_undo_roundtrip();
+    failures += test_tx_block_undo_roundtrip();
+    failures += test_tx_merkle_tree_serde();
+    failures += test_tx_merkle_block_serde();
+    failures += test_tx_serialize_roundtrip();
     return failures;
 }
