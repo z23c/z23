@@ -2856,6 +2856,40 @@ static int codex_edit_kind_check(const char *path, const char *task,
     return failures;
 }
 
+/* A stale last-message path that cannot be removed (here a non-empty
+ * directory of that name) refuses the review before the CLI runs, so the
+ * old file can never be read as this round's report. */
+static int codex_stale_message_check(const char *path, const char *task,
+                                     const char *worktree, const char *dir,
+                                     const char *args)
+{
+    int failures = 0;
+    char state[700], stale[760], keep[800], cmd[4096], log[700];
+    static char logtxt[16384], argtxt[8192];
+    (void)snprintf(state, sizeof(state), "%s/state3", dir);
+    (void)snprintf(stale, sizeof(stale), "%s/last-message.txt", state);
+    (void)snprintf(keep, sizeof(keep), "%s/keep", stale);
+    (void)snprintf(log, sizeof(log), "%s/run3.log", dir);
+    const bool ready = mkdir(state, 0700) == 0 && mkdir(stale, 0700) == 0 &&
+                       write_whole_file(keep, "old round\n") &&
+                       (unlink(args) == 0 || errno == ENOENT);
+    EN_CHECK("the stale last-message fixture is written", ready);
+    if (!ready)
+        return failures;
+    (void)snprintf(cmd, sizeof(cmd),
+        "env PATH='%s' %s --engine gpt-sol --task %s --no-group --kind review "
+        "--yes-dispatch --worktree %s --state-dir %s --rounds 1 >%s 2>&1",
+        path, ENGINE_UNIT_BIN, task, worktree, state, log);
+    TEST_DISCARD(system(cmd));
+    logtxt[0] = argtxt[0] = '\0';
+    EN_CHECK("an uncleared last-message file refuses the review",
+             read_whole_file(log, logtxt, sizeof(logtxt)) &&
+             strstr(logtxt, "fresh last-message file") != NULL);
+    EN_CHECK("the CLI never ran for the refused review",
+             !read_whole_file(args, argtxt, sizeof(argtxt)));
+    return failures;
+}
+
 /* A codex row on a review kind: read-only argv with -o, the reply decoded from
  * the recorded last-message file (stdout is noise), and no OPENAI_API_KEY in
  * the child. The same row on an edit kind keeps workspace-write. */
@@ -2928,6 +2962,7 @@ static int case_engine_unit_codex_review_e2e(void)
              strstr(envtxt, "OPENAI_API_KEY") == NULL);
 
     failures += codex_edit_kind_check(path, task, worktree, state, dir, args);
+    failures += codex_stale_message_check(path, task, worktree, dir, args);
     return failures;
 }
 

@@ -1362,14 +1362,16 @@ static bool dispatch_fixture(const struct engine_vendor *v, const char *path,
 
 /* Where a report CLI is told to leave its final message. Any stale file from
  * an earlier round is removed first, so a CLI that writes nothing can never
- * be read as having said the previous round's words. */
+ * be read as having said the previous round's words; a stale file that
+ * cannot be removed means no path at all. */
 static const char *unit_last_message_path(const struct unit_opts *o,
                                           char *buf, size_t cap)
 {
     if (!o->state_dir || !o->state_dir[0] ||
         (size_t)snprintf(buf, cap, "%s/last-message.txt", o->state_dir) >= cap)
         return NULL;
-    (void)unlink(buf);
+    if (unlink(buf) != 0 && errno != ENOENT)
+        return NULL;
     return buf;
 }
 
@@ -1449,6 +1451,13 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
     char last_message_buf[1024];
     const char *last_message = unit_last_message_path(
         o, last_message_buf, sizeof(last_message_buf));
+    if (!last_message && engine_prompt_kind_effect(o->kind) ==
+                             ENGINE_PROMPT_EFFECT_REPORT) {
+        dr->err = ENGINE_ERR_REFUSED;
+        LOG_FAIL("engine_unit",
+                 "a report unit needs a fresh last-message file under "
+                 "--state-dir; it could not be named or cleared");
+    }
     const struct engine_cli_inputs in = {
         .prompt  = prompt,
         .workdir = workdir,
