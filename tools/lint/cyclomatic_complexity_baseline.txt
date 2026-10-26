@@ -549,8 +549,6 @@ contexts/explorer/views/src/explorer_stats_sections.c:emit_section_6_utxo_distri
 contexts/explorer/views/src/explorer_tx_view.c:explorer_view_tx:27
 contexts/explorer/views/src/ui_present.c:ui_present_model_from_json:25
 contexts/explorer/views/src/ui_present.c:ui_present_parse_item:17
-contexts/explorer/views/src/ui_present_host_transport.c:ui_host_transport_accept:16
-contexts/explorer/views/src/ui_present_host_transport.c:ui_host_transport_peer_allowed:16
 contexts/market/controllers/src/file_market_controller.c:market_purchase_code:18
 contexts/market/controllers/src/file_market_controller.c:rpc_zmarket_purchase_plan:28
 contexts/market/controllers/src/market_content_native_handler.c:zcl_native_handle_market_content_register:58

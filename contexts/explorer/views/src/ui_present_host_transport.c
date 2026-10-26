@@ -406,6 +406,47 @@ bool ui_host_transport_parse_reply(
     return *payload_len <= ZCL_PRESENT_MODEL_WIRE_MAX;
 }
 
+#if defined(_WIN32)
+static bool ui_host_pipe_open_peer_handles(HANDLE pipe,
+                                           HANDLE *client_process,
+                                           HANDLE *process_token,
+                                           HANDLE *client_token)
+{
+    ULONG client_pid = 0;
+    return GetNamedPipeClientProcessId(pipe, &client_pid) &&
+           client_pid != 0 &&
+           (*client_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                          FALSE, client_pid)) != NULL &&
+           OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY,
+                            process_token) &&
+           OpenProcessToken(*client_process, TOKEN_QUERY, client_token);
+}
+
+static bool ui_host_pipe_tokens_same_user(HANDLE process_token,
+                                          HANDLE client_token)
+{
+    DWORD process_bytes = 0;
+    DWORD client_bytes = 0;
+    TOKEN_USER *process_user = NULL;
+    TOKEN_USER *client_user = NULL;
+    (void)GetTokenInformation(process_token, TokenUser, NULL, 0,
+                              &process_bytes);
+    (void)GetTokenInformation(client_token, TokenUser, NULL, 0,
+                              &client_bytes);
+    process_user = zcl_malloc(process_bytes, "ui_host_process_user");
+    client_user = zcl_malloc(client_bytes, "ui_host_client_user");
+    bool ok = process_user && client_user &&
+              GetTokenInformation(process_token, TokenUser, process_user,
+                                  process_bytes, &process_bytes) &&
+              GetTokenInformation(client_token, TokenUser, client_user,
+                                  client_bytes, &client_bytes) &&
+              EqualSid(process_user->User.Sid, client_user->User.Sid);
+    free(process_user);
+    free(client_user);
+    return ok;
+}
+#endif
+
 bool ui_host_transport_peer_allowed(ui_host_transport_t client)
 {
 #if defined(_WIN32)
@@ -413,34 +454,10 @@ bool ui_host_transport_peer_allowed(ui_host_transport_t client)
     HANDLE process_token = NULL;
     HANDLE client_token = NULL;
     HANDLE client_process = NULL;
-    ULONG client_pid = 0;
-    DWORD process_bytes = 0;
-    DWORD client_bytes = 0;
-    TOKEN_USER *process_user = NULL;
-    TOKEN_USER *client_user = NULL;
-    bool ok = GetNamedPipeClientProcessId(pipe, &client_pid) &&
-              client_pid != 0 &&
-              (client_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
-                                            FALSE, client_pid)) != NULL &&
-              OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY,
-                               &process_token) &&
-              OpenProcessToken(client_process, TOKEN_QUERY, &client_token);
-    if (ok) {
-        (void)GetTokenInformation(process_token, TokenUser, NULL, 0,
-                                  &process_bytes);
-        (void)GetTokenInformation(client_token, TokenUser, NULL, 0,
-                                  &client_bytes);
-        process_user = zcl_malloc(process_bytes, "ui_host_process_user");
-        client_user = zcl_malloc(client_bytes, "ui_host_client_user");
-        ok = process_user && client_user &&
-             GetTokenInformation(process_token, TokenUser, process_user,
-                                 process_bytes, &process_bytes) &&
-             GetTokenInformation(client_token, TokenUser, client_user,
-                                 client_bytes, &client_bytes) &&
-             EqualSid(process_user->User.Sid, client_user->User.Sid);
-    }
-    free(process_user);
-    free(client_user);
+    bool ok = ui_host_pipe_open_peer_handles(pipe, &client_process,
+                                             &process_token, &client_token);
+    if (ok)
+        ok = ui_host_pipe_tokens_same_user(process_token, client_token);
     if (process_token) CloseHandle(process_token);
     if (client_token) CloseHandle(client_token);
     if (client_process) CloseHandle(client_process);
@@ -504,12 +521,10 @@ ui_host_transport_t ui_host_transport_listen(void)
 #endif
 }
 
-ui_host_transport_t ui_host_transport_accept(ui_host_transport_t *listener,
-                                             int timeout_ms)
-{
-    if (!listener || *listener == UI_HOST_TRANSPORT_INVALID)
-        return UI_HOST_TRANSPORT_INVALID;
 #if defined(_WIN32)
+static ui_host_transport_t ui_host_pipe_accept_client(
+    ui_host_transport_t *listener, int timeout_ms)
+{
     HANDLE pipe = ui_host_handle(*listener);
     OVERLAPPED overlap = {0};
     overlap.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -532,7 +547,11 @@ ui_host_transport_t ui_host_transport_accept(ui_host_transport_t *listener,
     if (!ok) return UI_HOST_TRANSPORT_INVALID;
     *listener = ui_host_stream(ui_host_pipe_instance());
     return ui_host_stream(pipe);
+}
 #else
+static ui_host_transport_t ui_host_socket_accept_client(
+    ui_host_transport_t *listener, int timeout_ms)
+{
     int ready = platform_socket_wait_readable(*listener, timeout_ms);
     if (ready <= 0) return UI_HOST_TRANSPORT_INVALID;
 #if defined(__linux__)
@@ -549,6 +568,18 @@ ui_host_transport_t ui_host_transport_accept(ui_host_transport_t *listener,
     }
     return client;
 #endif
+}
+#endif
+
+ui_host_transport_t ui_host_transport_accept(ui_host_transport_t *listener,
+                                             int timeout_ms)
+{
+    if (!listener || *listener == UI_HOST_TRANSPORT_INVALID)
+        return UI_HOST_TRANSPORT_INVALID;
+#if defined(_WIN32)
+    return ui_host_pipe_accept_client(listener, timeout_ms);
+#else
+    return ui_host_socket_accept_client(listener, timeout_ms);
 #endif
 }
 
