@@ -10,6 +10,16 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_source, *cli_sink;
+#undef stdin
+#define stdin cli_source
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define main zre_cli_main
+#include "../app/main.c"
+#undef main
+#undef printf
+#undef stdin
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -462,7 +472,82 @@ static void test_empty_fragment_alternatives(void) {
   fprintf(stderr, "empty fragment capture: %s\n", failures == before ? "PASS" : "FAIL");
 }
 
+static bool cli_result(FILE *source, FILE *output, bool dash,
+                        int status, const char *want) {
+  cli_source = source; cli_sink = output;
+  char *args[] = {"zre", "^X$", "-", NULL};
+  if (zre_cli_main(dash ? 3 : 2, args) != status) return false;
+  rewind(output);
+  char bytes[80];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  return !ferror(output) && n == strlen(want) && memcmp(bytes, want, n) == 0;
+}
+
+static bool cli_padding(FILE *source, size_t count) {
+  char bytes[16384];
+  memset(bytes, ' ', sizeof bytes);
+  while (count) {
+    size_t n = count < sizeof bytes ? count : sizeof bytes;
+    if (fwrite(bytes, 1, n, source) != n) return false;
+    count -= n;
+  }
+  return true;
+}
+
+static int cli_bound_case(size_t length, int last, bool dash, int status) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int bad = 1;
+  if (!source || !output || length < 2) goto cleanup;
+  if (!cli_padding(source, length - 2) || fputc('\n', source) == EOF ||
+      fputc(last, source) == EOF || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (!cli_result(source, output, dash, status, status == 0 ? "X\n" : "")) goto cleanup;
+  bad = 0;
+cleanup:
+  if (source && fclose(source) != 0) bad = 1;
+  if (output && fclose(output) != 0) bad = 1;
+  return bad;
+}
+
+static void test_cli_bound(void) {
+  for (int dash = 0; dash < 2; dash++) {
+    CHECK(cli_bound_case(MAX_INPUT - 1, 'X', dash, 0) == 0);
+    CHECK(cli_bound_case(MAX_INPUT, 'X', dash, 0) == 0);
+    CHECK(cli_bound_case(MAX_INPUT + 1, 'X', dash, 2) == 0);
+    CHECK(cli_bound_case(MAX_INPUT, 'Y', dash, 1) == 0);
+  }
+}
+
+static void test_cli_controls(void) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  if (!source || !output) { CHECK(false); goto cleanup; }
+  CHECK(fputs("X\r\nY\r\nX", source) >= 0 && fflush(source) == 0);
+  rewind(source);
+  CHECK(cli_result(source, output, false, 0, "X\nX\n"));
+cleanup:
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+}
+
+static void test_cli_read_error(void) {
+#if defined(_WIN32)
+  FILE *source = fopen("NUL", "w");
+#else
+  FILE *source = fopen("/dev/null", "w");
+#endif
+  FILE *output = tmpfile();
+  if (source && output) {
+    CHECK(cli_result(source, output, true, 2, ""));
+    CHECK(ferror(source));
+  } else CHECK(false);
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+}
+
 int main(void) {
+  test_cli_bound();
+  test_cli_controls();
+  test_cli_read_error();
   test_literals();
   test_dot();
   test_star_plus_quest();

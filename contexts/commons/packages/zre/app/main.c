@@ -18,6 +18,12 @@
 
 static char input[MAX_INPUT];
 
+static bool read_input(FILE *source, size_t *len) {
+  *len = fread(input, 1, sizeof input, source);
+  int extra = *len == sizeof input ? fgetc(source) : EOF;
+  return !ferror(source) && extra == EOF;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2 || argc > 3) {
     fprintf(stderr, "usage: zre PATTERN [FILE]\n");
@@ -41,8 +47,8 @@ int main(int argc, char **argv) {
       return 2;
     }
   }
-  size_t len = fread(input, 1, sizeof(input), in);
-  if (ferror(in) || !feof(in)) {
+  size_t len;
+  if (!read_input(in, &len)) {
     fprintf(stderr, "zre: read error or input over 16 MiB bound\n");
     if (in != stdin)
       fclose(in);
