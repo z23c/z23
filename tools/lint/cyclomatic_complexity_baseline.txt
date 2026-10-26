@@ -1063,7 +1063,6 @@ engine/controllers/src/network_snapshot_loader_contract.c:network_push_snapshot_
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
 engine/controllers/src/nodelog_controller.c:line_level:22
 engine/controllers/src/nodelog_controller.c:parse_syslog_timestamp:16
-engine/controllers/src/repair_controller.c:rpc_rescanblockfiles:27
 engine/controllers/src/repair_controller_rebuild.c:backfill_header_solutions_run:24
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_fetch_and_connect:27
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_resolve_range:21

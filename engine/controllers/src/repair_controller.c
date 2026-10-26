@@ -87,6 +87,95 @@ static bool rpc_repairheights(const struct json_value *params, bool help,
 
 /* ── rescanblockfiles — re-scan all blk*.dat files ────────────── */
 
+static void count_block_index_data_stats(struct main_state *ms,
+                                         size_t *total_entries,
+                                         size_t *have_data_entries)
+{
+    size_t si = 0;
+    struct block_index *sb;
+    while (block_map_next(&ms->map_block_index, &si, NULL, &sb)) {
+        if (!sb) continue;
+        (*total_entries)++;
+        if (sb->nStatus & BLOCK_HAVE_DATA)
+            (*have_data_entries)++;
+    }
+}
+
+/* Diagnostic: verify coins_best_block matches active chain tip */
+static void warn_if_coins_best_differs_from_tip(struct repair_context *ctx)
+{
+    struct uint256 coins_best;
+    coins_view_cache_get_best_block(ctx->coins_tip, &coins_best);
+    struct block_index *tip = active_chain_tip(&ctx->main_state->chain_active);
+    if (tip && tip->phashBlock &&
+        uint256_cmp(&coins_best, tip->phashBlock) != 0) {
+        char cbhex[65], tiphex[65];
+        uint256_get_hex(&coins_best, cbhex);
+        uint256_get_hex(tip->phashBlock, tiphex);
+        printf("RPC rescanblockfiles: WARNING coins_best_block=%s "
+               "!= tip=%s (h=%d) — connect_block will reconcile\n",
+               cbhex, tiphex, tip->nHeight);
+    }
+}
+
+static size_t count_blocks_with_data_above_height(struct main_state *ms,
+                                                  int height)
+{
+    size_t above = 0;
+    size_t si = 0;
+    struct block_index *sb;
+    while (block_map_next(&ms->map_block_index, &si, NULL, &sb)) {
+        if (sb && (sb->nStatus & BLOCK_HAVE_DATA) &&
+            sb->nHeight > height)
+            above++;
+    }
+    return above;
+}
+
+static struct block_index *find_block_at_height_preferring_data(
+    struct main_state *ms, int height)
+{
+    size_t di = 0;
+    struct block_index *db;
+    struct block_index *found = NULL;
+    while (block_map_next(&ms->map_block_index, &di, NULL, &db)) {
+        if (db && db->nHeight == height) {
+            found = db;
+            if (db->nStatus & BLOCK_HAVE_DATA) break;
+        }
+    }
+    return found;
+}
+
+static void push_next_block_vs_tip_diagnostics(struct repair_context *ctx,
+                                               struct json_value *result,
+                                               struct block_index *next_any)
+{
+    json_push_kv_int(result, "next_nChainTx",
+                     (int64_t)next_any->nChainTx);
+    json_push_kv_int(result, "next_have_data",
+                     (next_any->nStatus & BLOCK_HAVE_DATA) ? 1 : 0);
+    json_push_kv_int(result, "next_has_pprev",
+                     next_any->pprev ? 1 : 0);
+    json_push_kv_int(result, "next_status",
+                     (int64_t)next_any->nStatus);
+    /* Compare chain work: does next block beat the tip? */
+    struct block_index *tip_bi = active_chain_tip(
+        &ctx->main_state->chain_active);
+    if (tip_bi) {
+        int cmp = arith_uint256_compare(&next_any->nChainWork,
+                                        &tip_bi->nChainWork);
+        json_push_kv_int(result, "next_vs_tip_chainwork", cmp);
+        json_push_kv_int(result, "tip_nChainWork_zero",
+                         arith_uint256_is_zero(&tip_bi->nChainWork) ? 1 : 0);
+        json_push_kv_int(result, "next_nChainWork_zero",
+                         arith_uint256_is_zero(&next_any->nChainWork) ? 1 : 0);
+        /* Check block_index_is_valid for tip+1 */
+        json_push_kv_int(result, "next_valid_tree",
+                         block_index_is_valid(next_any, BLOCK_VALID_TREE) ? 1 : 0);
+    }
+}
+
 static bool rpc_rescanblockfiles(const struct json_value *params, bool help,
                                   struct json_value *result)
 {
@@ -128,17 +217,8 @@ static bool rpc_rescanblockfiles(const struct json_value *params, bool help,
 
     /* Count index stats */
     size_t total_entries = 0, have_data_entries = 0;
-    {
-        size_t si = 0;
-        struct block_index *sb;
-        while (block_map_next(&ctx->main_state->map_block_index,
-                               &si, NULL, &sb)) {
-            if (!sb) continue;
-            total_entries++;
-            if (sb->nStatus & BLOCK_HAVE_DATA)
-                have_data_entries++;
-        }
-    }
+    count_block_index_data_stats(ctx->main_state, &total_entries,
+                                 &have_data_entries);
 
     json_set_object(result);
     json_push_kv_int(result, "marked", marked);
@@ -150,74 +230,23 @@ static bool rpc_rescanblockfiles(const struct json_value *params, bool help,
            marked, have_data_entries, total_entries, (long long)elapsed);
     fflush(stdout);
 
-    /* Diagnostic: verify coins_best_block matches active chain tip */
-    {
-        struct uint256 coins_best;
-        coins_view_cache_get_best_block(ctx->coins_tip, &coins_best);
-        struct block_index *tip = active_chain_tip(&ctx->main_state->chain_active);
-        if (tip && tip->phashBlock &&
-            uint256_cmp(&coins_best, tip->phashBlock) != 0) {
-            char cbhex[65], tiphex[65];
-            uint256_get_hex(&coins_best, cbhex);
-            uint256_get_hex(tip->phashBlock, tiphex);
-            printf("RPC rescanblockfiles: WARNING coins_best_block=%s "
-                   "!= tip=%s (h=%d) — connect_block will reconcile\n",
-                   cbhex, tiphex, tip->nHeight);
-        }
-    }
+    warn_if_coins_best_differs_from_tip(ctx);
 
     /* If we have blocks with data above our tip, trigger chain activation
      * to connect them immediately instead of waiting for header sync. */
     {
         int tip_h = active_chain_height(&ctx->main_state->chain_active);
-        size_t above_tip = 0;
-        size_t si2 = 0;
-        struct block_index *sb2;
-        while (block_map_next(&ctx->main_state->map_block_index,
-                               &si2, NULL, &sb2)) {
-            if (sb2 && (sb2->nStatus & BLOCK_HAVE_DATA) &&
-                sb2->nHeight > tip_h)
-                above_tip++;
-        }
+        size_t above_tip = count_blocks_with_data_above_height(
+            ctx->main_state, tip_h);
         json_push_kv_int(result, "tip_height", (int64_t)tip_h);
 
         /* Diagnostic: check next block after tip */
         {
-            size_t di = 0;
-            struct block_index *db;
-            struct block_index *next_any = NULL;
-            while (block_map_next(&ctx->main_state->map_block_index,
-                                   &di, NULL, &db)) {
-                if (db && db->nHeight == tip_h + 1) {
-                    next_any = db;
-                    if (db->nStatus & BLOCK_HAVE_DATA) break;
-                }
-            }
-            if (next_any) {
-                json_push_kv_int(result, "next_nChainTx",
-                                  (int64_t)next_any->nChainTx);
-                json_push_kv_int(result, "next_have_data",
-                                  (next_any->nStatus & BLOCK_HAVE_DATA) ? 1 : 0);
-                json_push_kv_int(result, "next_has_pprev",
-                                  next_any->pprev ? 1 : 0);
-                json_push_kv_int(result, "next_status",
-                                  (int64_t)next_any->nStatus);
-                /* Compare chain work: does next block beat the tip? */
-                struct block_index *tip_bi = active_chain_tip(
-                    &ctx->main_state->chain_active);
-                if (tip_bi) {
-                    int cmp = arith_uint256_compare(&next_any->nChainWork,
-                                                     &tip_bi->nChainWork);
-                    json_push_kv_int(result, "next_vs_tip_chainwork", cmp);
-                    json_push_kv_int(result, "tip_nChainWork_zero",
-                        arith_uint256_is_zero(&tip_bi->nChainWork) ? 1 : 0);
-                    json_push_kv_int(result, "next_nChainWork_zero",
-                        arith_uint256_is_zero(&next_any->nChainWork) ? 1 : 0);
-                    /* Check block_index_is_valid for tip+1 */
-                    json_push_kv_int(result, "next_valid_tree",
-                        block_index_is_valid(next_any, BLOCK_VALID_TREE) ? 1 : 0);
-                }
-            }
+            struct block_index *next_any =
+                find_block_at_height_preferring_data(ctx->main_state,
+                                                     tip_h + 1);
+            if (next_any)
+                push_next_block_vs_tip_diagnostics(ctx, result, next_any);
         }
 
         if (above_tip > 0) {
