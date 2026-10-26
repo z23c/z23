@@ -236,9 +236,8 @@ static int search_text_check_args(struct ci_store *s, const char *q,
     return 0;
 }
 
-static sqlite3_stmt *search_text_prepare(struct ci_store *s)
+static bool search_text_prepare(struct ci_store *s, sqlite3_stmt **stmt)
 {
-    sqlite3_stmt *stmt = NULL;
     static const char sql[] =
         "SELECT " CI_SYM_COLS ","
         " instr(lower(name),lower(?1))>0 AS in_name,"
@@ -261,11 +260,7 @@ static sqlite3_stmt *search_text_prepare(struct ci_store *s)
         "    OR instr(lower(doc),lower(?1))>0"
         " ORDER BY rank ASC,name ASC,(def_path='') ASC,def_path ASC,def_line ASC";
     sqlite3 *db = ci_store_db(s);
-    if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        ci_store_unlock(s);
-        LOG_NULL("codeindex", "prepare search_text");
-    }
-    return stmt;
+    return db && sqlite3_prepare_v2(db, sql, -1, stmt, NULL) == SQLITE_OK;
 }
 
 static bool search_text_fill_hit(sqlite3_stmt *stmt, struct ci_search_hit *hit)
@@ -290,8 +285,11 @@ int ci_store_search_text(struct ci_store *s, const char *q,
 {
     if (search_text_check_args(s, q, out, cap) < 0) return -1;
     ci_store_lock(s);
-    sqlite3_stmt *stmt = search_text_prepare(s);
-    if (!stmt) return -1;
+    sqlite3_stmt *stmt = NULL;
+    if (!search_text_prepare(s, &stmt)) {
+        ci_store_unlock(s);
+        LOG_ERR("codeindex", "prepare search_text");
+    }
     sqlite3_bind_text(stmt, 1, q, -1, SQLITE_TRANSIENT);
     int n = 0;
     int rc = SQLITE_DONE;
