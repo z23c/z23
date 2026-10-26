@@ -393,6 +393,165 @@ static void bdr_hash(uint8_t out[32], int32_t h)
     out[31] = 0xD0;
 }
 
+/* Cap on one syncsvc_collect_needed_blocks pass's output buffer; shared by
+ * the first scan and the steady-state re-collect loop of the (m) fault. */
+enum { BDR_MAX_COLLECT = 4096 };
+
+/* Builds the synthetic chain index array — one block_index per height
+ * 0..n chained through pprev, each pointing at its deterministic bdr_hash
+ * — then marks heights [1, baseline] as already durably persisted. */
+static void bdr_init_chain_fixture(struct block_index *chain,
+                                   struct uint256 *hashes, int32_t n,
+                                   int32_t baseline)
+{
+    for (int32_t h = 0; h <= n; h++) {
+        block_index_init(&chain[h]);
+        bdr_hash(hashes[h].data, h);
+        chain[h].phashBlock = &hashes[h];
+        chain[h].nHeight = h;
+        chain[h].nVersion = 4;
+        if (h > 0) chain[h].pprev = &chain[h - 1];
+    }
+    for (int32_t h = 1; h <= baseline; h++)
+        chain[h].nStatus |= BLOCK_HAVE_DATA;
+}
+
+/* Counts how many entries of a fresh collect pass are heights the chain
+ * already had durably persisted (<= persisted_through) — each of them
+ * would be a forbidden refetch. */
+static uint64_t bdr_count_duplicate_persisted_in_collect(
+    const int32_t *need_heights, size_t count, int32_t persisted_through)
+{
+    uint64_t dupes = 0;
+    for (size_t i = 0; i < count; i++)
+        if (need_heights[i] <= persisted_through)
+            dupes++;
+    return dupes;
+}
+
+/* Counts how many already-persisted heights the download manager still
+ * lists as in-flight — the other half of the no-refetch assertion. */
+static uint64_t bdr_count_duplicate_persisted_in_flight(
+    struct download_manager *dm, int32_t persisted_through)
+{
+    uint64_t dupes = 0;
+    for (int32_t h = 1; h <= persisted_through; h++) {
+        struct uint256 hh;
+        bdr_hash(hh.data, h);
+        if (dl_is_in_flight(dm, &hh))
+            dupes++;
+    }
+    return dupes;
+}
+
+/* Marks the first `completed_count` blocks the doomed peer was assigned as
+ * received, stamping BLOCK_HAVE_DATA on each so those heights are durable
+ * before the disconnect. Returns 0 when every dl_mark_received credits
+ * `peer`; on a mismatch returns 1 and reports the offending height and the
+ * peer that actually answered, for the caller to free and log. */
+static int bdr_mark_completed_before_disconnect(
+    struct download_manager *dm, struct block_index *chain,
+    struct uint256 *assigned_hashes, uint32_t peer, int32_t baseline,
+    int32_t completed_count, int32_t *bad_height_out, uint32_t *bad_peer_out)
+{
+    /* dl_assign_to_peer hands back heights in ascending order (the queue is
+     * height-sorted), so the first `completed_count` entries are exactly
+     * heights (baseline, baseline+completed_count]. */
+    for (int32_t i = 0; i < completed_count; i++) {
+        int32_t h = baseline + 1 + i;
+        uint32_t got_peer = dl_mark_received(dm, &assigned_hashes[i]);
+        if (got_peer != peer) {
+            *bad_height_out = h;
+            *bad_peer_out = got_peer;
+            return 1;
+        }
+        chain[h].nStatus |= BLOCK_HAVE_DATA;
+    }
+    return 0;
+}
+
+/* Phase 4 body: drives the resumed peer toward the tip, re-collecting and
+ * re-assigning as its window empties (the real steady-state tick). Returns
+ * 0 when the drive finished (tip reached or a genuine stall); on a
+ * post-resume dl_mark_received mismatch returns 1 and reports the peer
+ * that answered plus the height reached so far, for the caller to free and
+ * log. On 0, `cur_height_out`, `duplicate_persisted` and
+ * `resume_latency_us_out` carry everything the caller records. */
+static int bdr_drive_resumed_peer_to_tip(
+    struct download_manager *dm, struct block_index *chain,
+    struct block_index *candidate, struct uint256 *need_hashes,
+    int32_t *need_heights, struct uint256 *out_hashes, int32_t n,
+    int32_t our_height, size_t reconnect_assign, int64_t t_assigned_us,
+    uint32_t peer, int32_t *cur_height_out, uint64_t *duplicate_persisted,
+    int64_t *resume_latency_us_out, uint32_t *bad_peer_out)
+{
+    int64_t t_first_progress_us = 0;
+    bool measured_first = false;
+    int32_t cur_height = our_height;
+    size_t batch_off = 0, batch_len = reconnect_assign;
+    int guard = 0;
+    while (cur_height < n && guard++ < 4 * (n + 1)) {
+        if (batch_off >= batch_len) {
+            struct sync_needed_blocks more;
+            struct block_index *tipN = &chain[cur_height];
+            syncsvc_collect_needed_blocks(&more, candidate, tipN, cur_height,
+                                          need_hashes, need_heights,
+                                          BDR_MAX_COLLECT);
+            *duplicate_persisted += bdr_count_duplicate_persisted_in_collect(
+                need_heights, more.count, our_height);
+            dl_queue_blocks(dm, need_hashes, need_heights, more.count);
+            batch_len = dl_assign_to_peer(dm, peer, out_hashes,
+                                          BDR_MAX_COLLECT);
+            batch_off = 0;
+            if (batch_len == 0) break;   /* nothing assignable; real stall */
+        }
+
+        struct uint256 *hh = &out_hashes[batch_off++];
+        platform_sleep_ms(2);   /* simulated LAN body-transfer latency */
+        uint32_t got_peer = dl_mark_received(dm, hh);
+        if (got_peer != peer) {
+            *cur_height_out = cur_height;
+            *bad_peer_out = got_peer;
+            return 1;
+        }
+        if (!measured_first) {
+            t_first_progress_us = platform_time_monotonic_us();
+            measured_first = true;
+        }
+        cur_height++;
+        chain[cur_height].nStatus |= BLOCK_HAVE_DATA;
+        dl_add_bytes_received(dm, 512);
+    }
+    *cur_height_out = cur_height;
+    *resume_latency_us_out = measured_first
+        ? t_first_progress_us - t_assigned_us : -1;
+    return 0;
+}
+
+/* Writes the fault capsule's numeric outcome fields (everything except the
+ * summary note, which the caller emits). */
+static void bdr_fill_resume_result(struct body_download_resume_result *out,
+                                   int32_t n, int32_t persisted_at_disruption,
+                                   int32_t final_height,
+                                   uint64_t requested_total,
+                                   uint64_t duplicate_persisted,
+                                   int64_t resume_latency_us)
+{
+    out->chain_len = n;
+    out->persisted_at_disruption = persisted_at_disruption;
+    out->final_height = final_height;
+    out->requested_total = requested_total;
+    out->duplicate_persisted_requests = duplicate_persisted;
+    out->resume_latency_us = resume_latency_us;
+
+    out->base.ok = true;
+    out->base.recovered = (final_height == n) && (duplicate_persisted == 0);
+    /* This path never touches the blocker/condition/event escalation
+     * surface — a stalled body fetch is body_fetch_missing_have_data's
+     * typed blocker, not an operator page. */
+    out->base.operator_paged = false;
+}
+
 bool chaos_fault_peer_disconnect_mid_body_download(
     int32_t chain_len, struct body_download_resume_result *out)
 {
@@ -419,14 +578,6 @@ bool chaos_fault_peer_disconnect_mid_body_download(
                    "chain", n);
         return false;
     }
-    for (int32_t h = 0; h <= n; h++) {
-        block_index_init(&chain[h]);
-        bdr_hash(hashes[h].data, h);
-        chain[h].phashBlock = &hashes[h];
-        chain[h].nHeight = h;
-        chain[h].nVersion = 4;
-        if (h > 0) chain[h].pprev = &chain[h - 1];
-    }
 
     /* Fixed, deterministic proportions of the chain:
      *   [1, baseline]              — already durably persisted (HAVE_DATA)
@@ -441,8 +592,7 @@ bool chaos_fault_peer_disconnect_mid_body_download(
     int32_t batch_end = n / 2;
     int32_t completed_kill = baseline + (batch_end - baseline) / 3;
 
-    for (int32_t h = 1; h <= baseline; h++)
-        chain[h].nStatus |= BLOCK_HAVE_DATA;
+    bdr_init_chain_fixture(chain, hashes, n, baseline);
 
     struct download_manager dm;
     dl_init(&dm);
@@ -459,7 +609,6 @@ bool chaos_fault_peer_disconnect_mid_body_download(
     /* ── Phase 1: the FIRST header-driven scan, at the durable baseline —
      * exactly what msg_headers.c runs the moment headers up to `candidate`
      * are admitted. ────────────────────────────────────────────────── */
-    enum { BDR_MAX_COLLECT = 4096 };
     struct uint256 need_hashes[BDR_MAX_COLLECT];
     int32_t need_heights[BDR_MAX_COLLECT];
     struct sync_needed_blocks needed;
@@ -484,20 +633,18 @@ bool chaos_fault_peer_disconnect_mid_body_download(
         return false;
     }
 
-    /* dl_assign_to_peer hands back heights in ascending order (the queue is
-     * height-sorted), so the first `completed_count` entries are exactly
-     * heights (baseline, baseline+completed_count]. */
     int32_t completed_count = completed_kill - baseline;
-    for (int32_t i = 0; i < completed_count; i++) {
-        int32_t h = baseline + 1 + i;
-        uint32_t got_peer = dl_mark_received(&dm, &out_hashes[i]);
-        if (got_peer != PEER_A) {
-            dl_free(&dm); free(chain); free(hashes);
-            chaos_note(&out->base, "harness defect: mark_received(h=%d) "
-                       "peer=%u want=%u", h, got_peer, PEER_A);
-            return false;
-        }
-        chain[h].nStatus |= BLOCK_HAVE_DATA;
+    int32_t mark_bad_height = 0;
+    uint32_t mark_bad_peer = 0;
+    if (bdr_mark_completed_before_disconnect(&dm, chain, out_hashes, PEER_A,
+                                             baseline, completed_count,
+                                             &mark_bad_height,
+                                             &mark_bad_peer) != 0) {
+        dl_free(&dm); free(chain); free(hashes);
+        chaos_note(&out->base, "harness defect: mark_received(h=%d) "
+                   "peer=%u want=%u", mark_bad_height, mark_bad_peer,
+                   PEER_A);
+        return false;
     }
     int32_t our_height = completed_kill;   /* genuine forward progress */
 
@@ -519,15 +666,10 @@ bool chaos_fault_peer_disconnect_mid_body_download(
                                   need_hashes, need_heights, BDR_MAX_COLLECT);
 
     uint64_t duplicate_persisted = 0;
-    for (size_t i = 0; i < needed2.count; i++)
-        if (need_heights[i] <= our_height)
-            duplicate_persisted++;
-    for (int32_t h = 1; h <= our_height; h++) {
-        struct uint256 hh;
-        bdr_hash(hh.data, h);
-        if (dl_is_in_flight(&dm, &hh))
-            duplicate_persisted++;
-    }
+    duplicate_persisted += bdr_count_duplicate_persisted_in_collect(
+        need_heights, needed2.count, our_height);
+    duplicate_persisted += bdr_count_duplicate_persisted_in_flight(
+        &dm, our_height);
     dl_queue_blocks(&dm, need_hashes, need_heights, needed2.count);
 
     /* Deliberately small first reconnect window (a fresh, unscored peer) so
@@ -551,64 +693,28 @@ bool chaos_fault_peer_disconnect_mid_body_download(
      * models a real LAN body round-trip so resume_latency_us reports a
      * representative figure instead of a meaningless sub-microsecond
      * in-process one. ────────────────────────────────────────────────── */
-    int64_t t_first_progress_us = 0;
-    bool measured_first = false;
     int32_t cur_height = our_height;
-    size_t batch_off = 0, batch_len = reconnect_assign;
-    int guard = 0;
-    while (cur_height < n && guard++ < 4 * (n + 1)) {
-        if (batch_off >= batch_len) {
-            struct sync_needed_blocks more;
-            struct block_index *tipN = &chain[cur_height];
-            syncsvc_collect_needed_blocks(&more, candidate, tipN, cur_height,
-                                          need_hashes, need_heights,
-                                          BDR_MAX_COLLECT);
-            for (size_t i = 0; i < more.count; i++)
-                if (need_heights[i] <= our_height)
-                    duplicate_persisted++;
-            dl_queue_blocks(&dm, need_hashes, need_heights, more.count);
-            batch_len = dl_assign_to_peer(&dm, PEER_B, out_hashes,
-                                          BDR_MAX_COLLECT);
-            batch_off = 0;
-            if (batch_len == 0) break;   /* nothing assignable; real stall */
-        }
-
-        struct uint256 *hh = &out_hashes[batch_off++];
-        platform_sleep_ms(2);   /* simulated LAN body-transfer latency */
-        uint32_t got_peer = dl_mark_received(&dm, hh);
-        if (got_peer != PEER_B) {
-            dl_free(&dm); free(chain); free(hashes);
-            chaos_note(&out->base, "harness defect: post-resume "
-                       "mark_received peer=%u want=%u at h=%d",
-                       got_peer, PEER_B, cur_height + 1);
-            return false;
-        }
-        if (!measured_first) {
-            t_first_progress_us = platform_time_monotonic_us();
-            measured_first = true;
-        }
-        cur_height++;
-        chain[cur_height].nStatus |= BLOCK_HAVE_DATA;
-        dl_add_bytes_received(&dm, 512);
+    int64_t resume_latency_us = -1;
+    uint32_t resume_bad_peer = 0;
+    if (bdr_drive_resumed_peer_to_tip(&dm, chain, candidate, need_hashes,
+                                      need_heights, out_hashes, n, our_height,
+                                      reconnect_assign, t_assigned_us, PEER_B,
+                                      &cur_height, &duplicate_persisted,
+                                      &resume_latency_us,
+                                      &resume_bad_peer) != 0) {
+        dl_free(&dm); free(chain); free(hashes);
+        chaos_note(&out->base, "harness defect: post-resume "
+                   "mark_received peer=%u want=%u at h=%d",
+                   resume_bad_peer, PEER_B, cur_height + 1);
+        return false;
     }
 
     uint64_t requested_total = 0;
     dl_get_stats(&dm, &requested_total, NULL, NULL, NULL, NULL);
 
-    out->chain_len = n;
-    out->persisted_at_disruption = our_height;
-    out->final_height = cur_height;
-    out->requested_total = requested_total;
-    out->duplicate_persisted_requests = duplicate_persisted;
-    out->resume_latency_us = measured_first
-        ? t_first_progress_us - t_assigned_us : -1;
+    bdr_fill_resume_result(out, n, our_height, cur_height, requested_total,
+                           duplicate_persisted, resume_latency_us);
 
-    out->base.ok = true;
-    out->base.recovered = (cur_height == n) && (duplicate_persisted == 0);
-    /* This path never touches the blocker/condition/event escalation
-     * surface — a stalled body fetch is body_fetch_missing_have_data's
-     * typed blocker, not an operator page. */
-    out->base.operator_paged = false;
     chaos_note(&out->base,
                "chain=%d baseline=%d disrupted_at=%d final=%d requeued=%zu "
                "requested_total=%llu duplicates=%llu "

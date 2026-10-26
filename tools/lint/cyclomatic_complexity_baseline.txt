@@ -1151,7 +1151,6 @@ engine/modules/hotswap/src/hotswap_service.c:zcl_hotswap_service_publish:30
 engine/modules/rpc/src/httpserver.c:rpc_http_start:40
 engine/modules/sim/src/seed_tape.c:seed_tape_load_from_memory:24
 engine/modules/sim/src/simnet.c:sim_mint_block:29
-engine/modules/sim/src/simnet_chaos_faults_download.c:chaos_fault_peer_disconnect_mid_body_download:29
 engine/modules/sim/src/simnet_chaos_faults_rom.c:chaos_fault_conflicting_chunk_peers:34
 engine/modules/sim/src/simnet_chaos_faults_rom.c:chaos_fault_journal_commit_enospc:17
 engine/modules/sim/src/simnet_chaos_faults_rom.c:chaos_fault_kill_resume_boundary:40
