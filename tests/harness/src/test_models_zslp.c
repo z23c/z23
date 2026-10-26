@@ -182,6 +182,237 @@ static int tzslp_test_display_order(void)
     return 1;
 }
 
+/* The three db-backed cases share one open and one close. The directory is
+ * always removed; the db is closed only after a successful open. */
+static bool tzslp_open_model_db(struct node_db *ndb,
+                                char *dbdir, size_t dbdir_n,
+                                char *dbpath, size_t dbpath_n,
+                                const char *tag)
+{
+    test_make_tmpdir(dbdir, dbdir_n, "models_zslp", tag);
+    snprintf(dbpath, dbpath_n, "%s/node.db", dbdir);
+    memset(ndb, 0, sizeof(*ndb));
+    return node_db_open(ndb, dbpath);
+}
+
+static bool tzslp_close_model_db(struct node_db *ndb, bool opened, bool ok,
+                                 const char *dbdir)
+{
+    if (opened)
+        node_db_close(ndb);
+    ok &= fixture_rm_ok(dbdir);
+    return ok;
+}
+
+/* Save a balance, require the normalized key, credit it, and read it back. */
+static bool tzslp_balance_saved_and_credited(struct node_db *ndb)
+{
+    struct db_zslp_balance bal;
+    struct db_zslp_balance got;
+    bool ok;
+
+    memset(&bal, 0, sizeof(bal));
+    memset(&got, 0, sizeof(got));
+    snprintf(bal.token_id, sizeof(bal.token_id), "%s", "testcoin");
+    snprintf(bal.address, sizeof(bal.address), "%s", "t1Buyer123");
+    bal.balance = 42;
+    ok = db_zslp_balance_save(ndb, &bal);
+    ok = ok && (strcmp(bal.token_id, "TESTCOIN") == 0);
+    if (!ok)
+        return ok;
+    ok = db_zslp_balance_find(ndb, "testcoin", "t1Buyer123", &got);
+    ok = ok && (strcmp(got.token_id, "TESTCOIN") == 0)
+            && (got.balance == 42);
+    if (!ok)
+        return ok;
+    ok = db_zslp_balance_credit(ndb, "testcoin", "t1Buyer123", 8);
+    if (!ok)
+        return ok;
+    ok = db_zslp_balance_find(ndb, "TESTCOIN", "t1Buyer123", &got);
+    ok = ok && (got.balance == 50);
+    return ok;
+}
+
+/* Reject a blank key, save two tokens, then find and list them in order. */
+static bool tzslp_token_saved_found_listed(struct node_db *ndb)
+{
+    struct db_zslp_token_info token;
+    struct db_zslp_token_info listed[4];
+    struct ar_errors e;
+    bool ok;
+
+    memset(&token, 0, sizeof(token));
+    memset(listed, 0, sizeof(listed));
+    ar_errors_clear(&e);
+    ok = !db_zslp_token_validate_key("", &e) && ar_errors_any(&e);
+    if (!ok)
+        return ok;
+    ok = db_zslp_token_save_key(ndb, "testcoin",
+                                "TESTCOIN", "Test Coin",
+                                2, "", 0, 1000);
+    ok = ok && db_zslp_token_save_key(ndb, "coinb",
+                                      "COINB", "Coin B",
+                                      0, "", 12, 500);
+    if (!ok)
+        return ok;
+    ok = db_zslp_token_find(ndb, "TESTCOIN", &token);
+    ok = ok && (strcmp(token.token_id, "TESTCOIN") == 0)
+            && (strcmp(token.ticker, "TESTCOIN") == 0)
+            && (token.total_minted == 1000);
+    if (!ok)
+        return ok;
+    return (db_zslp_token_list(ndb, listed, 4) == 2)
+        && (strcmp(listed[0].ticker, "COINB") == 0)
+        && (strcmp(listed[1].ticker, "TESTCOIN") == 0);
+}
+
+/* One transfer row, listed back by the display-order token id. */
+static bool tzslp_transfer_listed(struct node_db *ndb)
+{
+    uint8_t txid[32];
+    uint8_t token_id[32];
+    uint8_t addr_hash[20];
+    struct db_zslp_transfer_info listed[4];
+    bool ok;
+
+    memset(txid, 0x11, sizeof(txid));
+    memset(token_id, 0x22, sizeof(token_id));
+    memset(addr_hash, 0x33, sizeof(addr_hash));
+    memset(listed, 0, sizeof(listed));
+    ok = db_zslp_transfer_save(ndb, txid, 123, token_id, 2, 77, 1,
+                               addr_hash);
+    if (!ok)
+        return ok;
+    return (db_zslp_transfer_list_by_token(
+                ndb,
+                "2222222222222222222222222222222222222222222222222222222222222222",
+                listed, 4) == 1)
+        && (strcmp(listed[0].token_id,
+                   "2222222222222222222222222222222222222222222222222222222222222222") == 0)
+        && (listed[0].block_height == 123)
+        && (listed[0].tx_type == 2)
+        && (listed[0].amount == 77)
+        && (listed[0].vout == 1)
+        && (strlen(listed[0].to_addr_hex) == 40);
+}
+
+static bool tzslp_model_db_case_ok(const char *tag,
+                                   bool (*exercise)(struct node_db *ndb))
+{
+    char dbdir[256];
+    char dbpath[320];
+    struct node_db ndb;
+    bool opened;
+    bool ok;
+
+    opened = tzslp_open_model_db(&ndb, dbdir, sizeof(dbdir),
+                                 dbpath, sizeof(dbpath), tag);
+    ok = opened;
+    if (ok)
+        ok = exercise(&ndb);
+    return tzslp_close_model_db(&ndb, opened, ok, dbdir);
+}
+
+/* banner, key, want_ok, collision_fail. want_ok 1 accepts .ok; 0 accepts
+ * !.ok. collision_fail selects the one distinct failure line. */
+struct tzslp_key_row {
+    const char *banner;
+    const char *key;
+    int want_ok;
+    int collision_fail;
+};
+
+static const struct tzslp_key_row tzslp_key_rows[] = {
+    {
+        .banner = "validate_token_key: accepts 3-char ticker 'ZCL' (has non-hex)... ",
+        .key = "ZCL",
+        .want_ok = 1,
+        .collision_fail = 0
+    },
+    {
+        .banner = "validate_token_key: accepts 'BTC' (T is non-hex)... ",
+        .key = "BTC",
+        .want_ok = 1,
+        .collision_fail = 0
+    },
+    /* store_controller seeds "ZCL23ACCESS" as a token_id for token-gated access. */
+    {
+        .banner = "validate_token_key: accepts 11-char 'ZCL23ACCESS' "
+                  "(has Z/L/S non-hex — real codebase token)... ",
+        .key = "ZCL23ACCESS",
+        .want_ok = 1,
+        .collision_fail = 0
+    },
+    {
+        .banner = "validate_token_key: accepts 10-char 'ZCL23STORE'... ",
+        .key = "ZCL23STORE",
+        .want_ok = 1,
+        .collision_fail = 0
+    },
+    /* Hex-shaped ids that are not full txids are rejected: they would collide with a truncated txid prefix. */
+    {
+        .banner = "validate_token_key: rejects 10-char all-hex "
+                  "(ambiguous with truncated txid)... ",
+        .key = "abcdef1234",
+        .want_ok = 0,
+        .collision_fail = 1
+    },
+    {
+        .banner = "validate_token_key: rejects 32-char all-hex "
+                  "(mid-range txid prefix)... ",
+        .key = "abcdef0123456789abcdef0123456789",
+        .want_ok = 0,
+        .collision_fail = 0
+    },
+    {
+        .banner = "validate_token_key: rejects 63-char all-hex "
+                  "(just below full txid)... ",
+        .key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345678",
+        .want_ok = 0,
+        .collision_fail = 0
+    },
+    {
+        .banner = "validate_token_key: accepts 64-char hex txid "
+                  "(canonical full-txid form)... ",
+        .key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        .want_ok = 1,
+        .collision_fail = 0
+    },
+    /* 64 chars with 'g' — alphanumeric, non-hex. Not a txid
+     * (txids are hex), not ambiguous with anything — accept. */
+    {
+        .banner = "validate_token_key: accepts 64-char non-hex alphanumeric... ",
+        .key = "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+        .want_ok = 1,
+        .collision_fail = 0
+    },
+    {
+        .banner = "validate_token_key: rejects empty string... ",
+        .key = "",
+        .want_ok = 0,
+        .collision_fail = 0
+    },
+    /* 65 chars */
+    {
+        .banner = "validate_token_key: rejects >64 chars... ",
+        .key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567890",
+        .want_ok = 0,
+        .collision_fail = 0
+    },
+    {
+        .banner = "validate_token_key: rejects NULL... ",
+        .key = NULL,
+        .want_ok = 0,
+        .collision_fail = 0
+    },
+    {
+        .banner = "validate_token_key: rejects punctuation (non-alnum)... ",
+        .key = "ZCL-23",
+        .want_ok = 0,
+        .collision_fail = 0
+    }
+};
+
 int test_model_zslp(void)
 {
     int failures = 0;
@@ -199,266 +430,40 @@ int test_model_zslp(void)
     }
 
     printf("ZSLP balance save normalizes token key before save... ");
-    {
-        char dbdir[256];
-        char dbpath[320];
-        struct node_db ndb;
-        bool ok;
-        test_make_tmpdir(dbdir, sizeof(dbdir), "models_zslp", "balances");
-        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
-        memset(&ndb, 0, sizeof(ndb));
-        ok = node_db_open(&ndb, dbpath);
-
-        if (ok) {
-            struct db_zslp_balance bal;
-            struct db_zslp_balance got;
-            memset(&bal, 0, sizeof(bal));
-            memset(&got, 0, sizeof(got));
-            snprintf(bal.token_id, sizeof(bal.token_id), "%s", "testcoin");
-            snprintf(bal.address, sizeof(bal.address), "%s", "t1Buyer123");
-            bal.balance = 42;
-            ok = db_zslp_balance_save(&ndb, &bal);
-            if (ok && strcmp(bal.token_id, "TESTCOIN") != 0) {
-                ok = false;
-            }
-            if (ok && !db_zslp_balance_find(&ndb, "testcoin", "t1Buyer123", &got)) {
-                ok = false;
-            }
-            if (ok && strcmp(got.token_id, "TESTCOIN") != 0) {
-                ok = false;
-            }
-            if (ok && got.balance != 42) {
-                ok = false;
-            }
-            if (ok && !db_zslp_balance_credit(&ndb, "testcoin", "t1Buyer123", 8)) {
-                ok = false;
-            }
-            if (ok && !db_zslp_balance_find(&ndb, "TESTCOIN", "t1Buyer123", &got)) {
-                ok = false;
-            }
-            if (ok && got.balance != 50) {
-                ok = false;
-            }
-            node_db_close(&ndb);
-        }
-
-        ok &= fixture_rm_ok(dbdir);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    if (tzslp_model_db_case_ok("balances",
+                               tzslp_balance_saved_and_credited))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     printf("ZSLP token model saves, finds, and lists normalized keys... ");
-    {
-        char dbdir[256];
-        char dbpath[320];
-        struct node_db ndb;
-        bool ok;
-        test_make_tmpdir(dbdir, sizeof(dbdir), "models_zslp", "tokens");
-        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
-        memset(&ndb, 0, sizeof(ndb));
-        ok = node_db_open(&ndb, dbpath);
-
-        if (ok) {
-            struct db_zslp_token_info token;
-            struct db_zslp_token_info listed[4];
-            struct ar_errors e;
-            memset(&token, 0, sizeof(token));
-            memset(listed, 0, sizeof(listed));
-            ar_errors_clear(&e);
-            ok = !db_zslp_token_validate_key("", &e) && ar_errors_any(&e);
-            if (ok && !db_zslp_token_save_key(&ndb, "testcoin",
-                                              "TESTCOIN", "Test Coin",
-                                              2, "", 0, 1000)) {
-                ok = false;
-            }
-            if (ok && !db_zslp_token_save_key(&ndb, "coinb",
-                                              "COINB", "Coin B",
-                                              0, "", 12, 500)) {
-                ok = false;
-            }
-            if (ok && !db_zslp_token_find(&ndb, "TESTCOIN", &token)) {
-                ok = false;
-            }
-            if (ok && strcmp(token.token_id, "TESTCOIN") != 0) {
-                ok = false;
-            }
-            if (ok && strcmp(token.ticker, "TESTCOIN") != 0) {
-                ok = false;
-            }
-            if (ok && token.total_minted != 1000) {
-                ok = false;
-            }
-            if (ok && db_zslp_token_list(&ndb, listed, 4) != 2) {
-                ok = false;
-            }
-            if (ok && strcmp(listed[0].ticker, "COINB") != 0) {
-                ok = false;
-            }
-            if (ok && strcmp(listed[1].ticker, "TESTCOIN") != 0) {
-                ok = false;
-            }
-            node_db_close(&ndb);
-        }
-
-        ok &= fixture_rm_ok(dbdir);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    if (tzslp_model_db_case_ok("tokens", tzslp_token_saved_found_listed))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     printf("ZSLP transfer model lists token-scoped transfers... ");
-    {
-        char dbdir[256];
-        char dbpath[320];
-        struct node_db ndb;
-        bool ok;
-        test_make_tmpdir(dbdir, sizeof(dbdir), "models_zslp", "transfers");
-        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
-        memset(&ndb, 0, sizeof(ndb));
-        ok = node_db_open(&ndb, dbpath);
-
-        if (ok) {
-            uint8_t txid[32];
-            uint8_t token_id[32];
-            uint8_t addr_hash[20];
-            struct db_zslp_transfer_info listed[4];
-
-            memset(txid, 0x11, sizeof(txid));
-            memset(token_id, 0x22, sizeof(token_id));
-            memset(addr_hash, 0x33, sizeof(addr_hash));
-            memset(listed, 0, sizeof(listed));
-            ok = db_zslp_transfer_save(&ndb, txid, 123, token_id, 2, 77, 1, addr_hash);
-            if (ok && db_zslp_transfer_list_by_token(&ndb,
-                    "2222222222222222222222222222222222222222222222222222222222222222",
-                    listed, 4) != 1) {
-                ok = false;
-            }
-            if (ok && strcmp(listed[0].token_id,
-                    "2222222222222222222222222222222222222222222222222222222222222222") != 0) {
-                ok = false;
-            }
-            if (ok && listed[0].block_height != 123) {
-                ok = false;
-            }
-            if (ok && listed[0].tx_type != 2) {
-                ok = false;
-            }
-            if (ok && listed[0].amount != 77) {
-                ok = false;
-            }
-            if (ok && listed[0].vout != 1) {
-                ok = false;
-            }
-            if (ok && strlen(listed[0].to_addr_hex) != 40) {
-                ok = false;
-            }
-            node_db_close(&ndb);
-        }
-
-        ok &= fixture_rm_ok(dbdir);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    if (tzslp_model_db_case_ok("transfers", tzslp_transfer_listed))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     /* ── token_key validator disambiguation ─────────────────── */
+    for (size_t i = 0;
+         i < sizeof(tzslp_key_rows) / sizeof(tzslp_key_rows[0]); i++) {
+        const struct tzslp_key_row *row = &tzslp_key_rows[i];
+        int raw;
+        int passed;
 
-    printf("validate_token_key: accepts 3-char ticker 'ZCL' (has non-hex)... ");
-    {
-        if (zslp_service_validate_token_key("ZCL").ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: accepts 'BTC' (T is non-hex)... ");
-    {
-        if (zslp_service_validate_token_key("BTC").ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: accepts 11-char 'ZCL23ACCESS' "
-           "(has Z/L/S non-hex — real codebase token)... ");
-    {
-        /* store_controller seeds "ZCL23ACCESS" as a token_id for token-gated access. */
-        if (zslp_service_validate_token_key("ZCL23ACCESS").ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: accepts 10-char 'ZCL23STORE'... ");
-    {
-        if (zslp_service_validate_token_key("ZCL23STORE").ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: rejects 10-char all-hex "
-           "(ambiguous with truncated txid)... ");
-    {
-        /* Hex-shaped ids that are not full txids are rejected: they would collide with a truncated txid prefix. */
-        if (!zslp_service_validate_token_key("abcdef1234").ok)
+        printf("%s", row->banner);
+        raw = zslp_service_validate_token_key(row->key).ok;
+        passed = row->want_ok ? raw : !raw;
+        if (passed)
             printf("OK\n");
-        else { printf("FAIL (collision gate missing)\n"); failures++; }
-    }
-
-    printf("validate_token_key: rejects 32-char all-hex "
-           "(mid-range txid prefix)... ");
-    {
-        if (!zslp_service_validate_token_key(
-                "abcdef0123456789abcdef0123456789").ok)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: rejects 63-char all-hex "
-           "(just below full txid)... ");
-    {
-        if (!zslp_service_validate_token_key(
-                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345678").ok)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: accepts 64-char hex txid "
-           "(canonical full-txid form)... ");
-    {
-        if (zslp_service_validate_token_key(
-                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789").ok)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: accepts 64-char non-hex alphanumeric... ");
-    {
-        /* 64 chars with 'g' — alphanumeric, non-hex. Not a txid
-         * (txids are hex), not ambiguous with anything — accept. */
-        if (zslp_service_validate_token_key(
-                "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg").ok)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: rejects empty string... ");
-    {
-        if (!zslp_service_validate_token_key("").ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: rejects >64 chars... ");
-    {
-        /* 65 chars */
-        if (!zslp_service_validate_token_key(
-                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567890").ok)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: rejects NULL... ");
-    {
-        if (!zslp_service_validate_token_key(NULL).ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("validate_token_key: rejects punctuation (non-alnum)... ");
-    {
-        if (!zslp_service_validate_token_key("ZCL-23").ok)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else if (row->collision_fail) {
+            printf("FAIL (collision gate missing)\n");
+            failures++;
+        } else {
+            printf("FAIL\n");
+            failures++;
+        }
     }
 
     failures += tzslp_test_display_order();
