@@ -58,7 +58,7 @@
     do { \
         printf("%s... ", (name)); \
         if (cond) { printf("OK\n"); } \
-        else { printf("FAIL (%s)\n", #cond); failures++; } \
+        else { printf("FAIL (%s)\n", #cond); } \
     } while (0)
 
 static const struct telemetry_domain_schema *sync_schema(void)
@@ -173,6 +173,50 @@ static void make_ladder_consistent(struct sync_snapshot *snap, int *failures)
 
 /* ── 1. the table is fully annotated ─────────────────────────────────── */
 
+/* The prose one leaf's ontology row owes: every row must state its means,
+ * and a JUDGED row must also say what an unhealthy value implies and what
+ * to run next. Bumps the caller's tallies and names each leaf that falls
+ * short as it goes. */
+static void tally_leaf_prose(const struct telemetry_field *f,
+                             const char *path, int *no_means,
+                             int *no_implies, int *no_next, int *judged)
+{
+    if (!f->means || !f->means[0]) {
+        (*no_means)++;
+        printf("  leaf %s ships an empty means\n", path);
+    }
+    if (f->rule == TFR_INFO)
+        return;
+    (*judged)++;
+    if (!f->implies || !f->implies[0]) {
+        (*no_implies)++;
+        printf("  judged leaf %s ships an empty implies\n", path);
+    }
+    if (!f->next || !f->next[0]) {
+        (*no_next)++;
+        printf("  judged leaf %s ships an empty next\n", path);
+    }
+}
+
+/* Count the ratio rules whose operand names no leaf of this same table. */
+static int count_dangling_ratio_operands(void)
+{
+    const struct telemetry_domain_schema *s = sync_schema();
+    int dangling = 0;
+    for (size_t i = 0; i < s->leaf_count; i++) {
+        const struct telemetry_field *f =
+            telemetry_field_lookup("sync", s->leaves[i].path);
+        if (!f || (f->rule != TFR_MIN_RATIO_OF && f->rule != TFR_MAX_RATIO_OF))
+            continue;
+        if (!f->operand || !leaf_by_path(f->operand)) {
+            dangling++;
+            printf("  ratio leaf %s references missing operand '%s'\n",
+                   s->leaves[i].path, f->operand ? f->operand : "(null)");
+        }
+    }
+    return dangling;
+}
+
 static int check_table_is_annotated(void)
 {
     int failures = 0;
@@ -209,21 +253,8 @@ static int check_table_is_annotated(void)
             printf("  leaf %s has NO ontology row\n", lf->path);
             continue;
         }
-        if (!f->means || !f->means[0]) {
-            no_means++;
-            printf("  leaf %s ships an empty means\n", lf->path);
-        }
-        if (f->rule == TFR_INFO)
-            continue;
-        judged++;
-        if (!f->implies || !f->implies[0]) {
-            no_implies++;
-            printf("  judged leaf %s ships an empty implies\n", lf->path);
-        }
-        if (!f->next || !f->next[0]) {
-            no_next++;
-            printf("  judged leaf %s ships an empty next\n", lf->path);
-        }
+        tally_leaf_prose(f, lf->path, &no_means, &no_implies, &no_next,
+                         &judged);
     }
     TS_CHECK("[sync] every leaf belongs to a declared group",
              orphan_group == 0);
@@ -239,18 +270,7 @@ static int check_table_is_annotated(void)
 
     /* Each ratio rule must point at a leaf that EXISTS in this same table,
      * or the evaluator silently reports the row ABSENT forever. */
-    int dangling = 0;
-    for (size_t i = 0; i < s->leaf_count; i++) {
-        const struct telemetry_field *f =
-            telemetry_field_lookup("sync", s->leaves[i].path);
-        if (!f || (f->rule != TFR_MIN_RATIO_OF && f->rule != TFR_MAX_RATIO_OF))
-            continue;
-        if (!f->operand || !leaf_by_path(f->operand)) {
-            dangling++;
-            printf("  ratio leaf %s references missing operand '%s'\n",
-                   s->leaves[i].path, f->operand ? f->operand : "(null)");
-        }
-    }
+    int dangling = count_dangling_ratio_operands();
     TS_CHECK("[sync] every ratio rule's operand is a leaf of this domain",
              dangling == 0);
     return failures;
