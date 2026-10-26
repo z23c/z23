@@ -1079,7 +1079,6 @@ engine/conditions/src/have_data_unreadable.c:witness_have_data_unreadable:17
 engine/conditions/src/local_header_refill_needed.c:detail_local_header_refill_needed:28
 engine/conditions/src/sapling_anchor_frontier_unavailable.c:tier1b_borrow_verified_frontier:21
 engine/conditions/src/shielded_selfheal_ladder.c:shielded_selfheal_run_named_remedy:23
-engine/conditions/src/stale_validate_headers_repair.c:remedy_stale_validate_headers_repair:21
 engine/conditions/src/tip_fork_stale.c:detect_tip_fork_stale:18
 engine/conditions/src/tip_wedged_resnapshot.c:detail_tip_wedged_resnapshot:16
 engine/controllers/src/anchor_controller.c:rpc_anchor_publish:21

@@ -310,11 +310,88 @@ static bool detect_stale_validate_headers_repair(void)
     return true;
 }
 
+/* Small steps split out of remedy_stale_validate_headers_repair so its own
+ * branching stays flat. Every log line stays in the remedy itself: LOG_*
+ * prints the enclosing function's name, so these helpers only compute values
+ * and side effects, never log. */
+
+/* True when the remedy has nothing to work on: no open progress db, or no
+ * target captured by detect(). */
+static bool stale_repair_target_unavailable(sqlite3 *db, int target)
+{
+    if (!db)
+        return true;
+    return target < 0;
+}
+
+/* Resolve the canonical best-header hash for the repair target and report
+ * whether its hash-bound solution is already durable. `*canon` is NULL when
+ * the best-header authority has no entry for the target. */
+static bool repair_canonical_solution_present(
+    struct main_state *ms, sqlite3 *db, int target,
+    struct uint256 *canon_hash, const struct uint256 **canon)
+{
+    bool have_canon = best_header_target_hash(ms, target, canon_hash);
+    *canon = have_canon ? canon_hash : NULL;
+    return have_canon &&
+        stage_repair_header_solution_available(db, target, *canon);
+}
+
+/* Swap the pending repair source back to NONE and, when one was pending,
+ * credit it with the now-served repair. Returns the source taken (NONE when
+ * nothing was pending) so the caller can name it in its log line. */
+static int settle_pending_repair_source(int target)
+{
+    int pending = atomic_exchange(&g_repair_pending_source,
+                                  HEADER_PROBE_SRC_NONE);
+    if (pending != HEADER_PROBE_SRC_NONE)
+        header_probe_note_repair_served(
+            (enum header_probe_repair_source)pending, target);
+    return pending;
+}
+
+/* Peer count the deferral refusal names: the re-fetch's own count when it was
+ * attempted, otherwise the live connman count — the one reader either way, so
+ * the refusal can never disagree with the request. */
+static int stale_repair_refetch_peer_count(int refetch)
+{
+    return refetch >= 0 ? refetch : connected_peer_count();
+}
+
+/* Two bits, because the two causes are different episodes: a target
+ * that goes from "not asked" to "asked but no peer" must re-emit
+ * rather than be swallowed as a repeat of the previous reason. */
+static uint64_t stale_repair_defer_key(int target, bool refetch_attempted,
+                                       int peers)
+{
+    return ((uint64_t)(uint32_t)target << 2) |
+        (uint64_t)(peers > 0 ? 2u : 0u) |
+        (uint64_t)(refetch_attempted ? 1u : 0u);
+}
+
+/* True when neither the oracle nor any peer can serve the repair right now:
+ * the re-fetch was not even asked for, or it was asked but no peer is
+ * connected to serve it. */
+static bool stale_repair_no_durable_source(bool refetch_attempted, int peers)
+{
+    return !refetch_attempted || peers <= 0;
+}
+
+/* Map the poison_rewind outcome onto the remedy ladder: OK only when the
+ * rewind actually repaired something. */
+static enum condition_remedy_result rewind_result_to_remedy(
+    const struct stage_repair_header_solution_result *rr)
+{
+    if (rr->repaired)
+        return COND_REMEDY_OK;
+    return COND_REMEDY_SKIP;
+}
+
 static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
 {
     sqlite3 *db = progress_store_db();
     int target = atomic_load(&g_target_at_detect);
-    if (!db || target < 0)
+    if (stale_repair_target_unavailable(db, target))
         return COND_REMEDY_SKIP;
 
     atomic_fetch_add(&g_remedy_calls, 1);
@@ -325,11 +402,9 @@ static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
     if (validate_repairable_mode(mode)) {
         struct main_state *ms0 = condition_engine_main_state();
         struct uint256 canon_hash;
-        bool have_canon =
-            best_header_target_hash(ms0, target, &canon_hash);
-        const struct uint256 *canon = have_canon ? &canon_hash : NULL;
-        bool solution_present = have_canon &&
-            stage_repair_header_solution_available(db, target, canon);
+        const struct uint256 *canon = NULL;
+        bool solution_present = repair_canonical_solution_present(
+            ms0, db, target, &canon_hash, &canon);
 
         /* Already repaired (e.g. an async P2P getdata re-fetch fired on an
          * earlier tick has now delivered + saved the canonical solution).
@@ -337,11 +412,7 @@ static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
          * DEFER to the non-destructive validate_headers recheck (see the long
          * rationale at the bottom of this block — no poison_rewind here). */
         if (solution_present) {
-            int pending = atomic_exchange(&g_repair_pending_source,
-                                          HEADER_PROBE_SRC_NONE);
-            if (pending != HEADER_PROBE_SRC_NONE)
-                header_probe_note_repair_served(
-                    (enum header_probe_repair_source)pending, target);
+            int pending = settle_pending_repair_source(target);
             clear_stale_header_no_source_blocker();
             LOG_WARN("condition",
                      "[condition:stale_validate_headers_repair] "
@@ -358,7 +429,7 @@ static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
          * header_solution_repair (INSERT OR REPLACE by height — it OVERWRITES
          * any stale wrong-block row, which the hash-aware availability check
          * above does not accept). */
-        struct zcl_result r = have_canon
+        struct zcl_result r = canon
             ? header_probe_pull_range(target, 128, NULL)
             : ZCL_ERR(-1, "best-header authority unavailable h=%d", target);
         if (r.ok) {
@@ -404,7 +475,7 @@ static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
          * one connman reader either way, so the refusal below can name which
          * of the two actually held. */
         bool refetch_attempted = refetch >= 0;
-        int peers = refetch_attempted ? refetch : connected_peer_count();
+        int peers = stale_repair_refetch_peer_count(refetch);
         atomic_store(&g_repair_pending_source, HEADER_PROBE_SRC_P2P);
         header_probe_note_p2p_request(target, peers);
         /* De-storm: while the oracle is down / no peer can serve, this remedy
@@ -413,18 +484,13 @@ static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
          * missing-input episode collapses to first-fire + 60 s keepalive keyed
          * on the (target,peers-available) fingerprint, rather than one WARN per
          * re-arm. The typed blocker (below) remains the authoritative signal. */
-        /* Two bits, because the two causes are different episodes: a target
-         * that goes from "not asked" to "asked but no peer" must re-emit
-         * rather than be swallowed as a repeat of the previous reason. */
-        uint64_t defer_key =
-            ((uint64_t)(uint32_t)target << 2) |
-            (uint64_t)(peers > 0 ? 2u : 0u) |
-            (uint64_t)(refetch_attempted ? 1u : 0u);
+        uint64_t defer_key = stale_repair_defer_key(target, refetch_attempted,
+                                                    peers);
         uint64_t defer_reps = 0;
         bool emit_defer = log_throttle_should_emit(
             &g_stale_repair_defer_log, defer_key, platform_time_wall_unix(),
             60, &defer_reps);
-        if (!refetch_attempted || peers <= 0) {
+        if (stale_repair_no_durable_source(refetch_attempted, peers)) {
             /* Missing input: no oracle, no peer can serve the repair right now.
              * Name it with a typed blocker and SKIP. condition.c increments
              * attempts unconditionally, but cooldown_secs>0 +
@@ -480,7 +546,7 @@ static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
              "[condition:stale_validate_headers_repair] h=%d mode=%d "
              "deleted=%d rewound=%d",
              target, rr.mode, rr.deleted_rows, rr.rewound_cursors);
-    return rr.repaired ? COND_REMEDY_OK : COND_REMEDY_SKIP;
+    return rewind_result_to_remedy(&rr);
 }
 
 /* Oracle-independent P2P re-fetch of the
