@@ -246,7 +246,7 @@ static int check_calculate_next_work_matches_legacy(
 
     /* calculate_next_work_required vs CalculateNextWorkRequired.
      * Sample across timespan extremes: way-too-fast (clamps to min),
-     * way-too-slow (clamps to max). */
+     * way-too-slow (clamps to max), normal. */
     {
         struct arith_uint256 avg;
         arith_uint256_set_compact(&avg, 0x1d00ffff, NULL, NULL);
