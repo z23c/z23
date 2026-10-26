@@ -1058,8 +1058,6 @@ engine/jobs/src/psc_audit.c:psc_audit_run:18
 engine/jobs/src/psc_join.c:psc_join:40
 engine/jobs/src/psc_range_fold.c:psc_compile_range:22
 engine/jobs/src/refold_progress.c:refold_progress_dump_state_json:17
-engine/jobs/src/script_validate_stage.c:step_validate:31
-engine/jobs/src/script_validate_stage.c:sv_hold_unresolved:16
 engine/jobs/src/seal_rewind_executor.c:seal_rewind_to_nearest:23
 engine/jobs/src/stage_anchor.c:stage_anchor_cap_target_at_log_frontier:29
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:54
