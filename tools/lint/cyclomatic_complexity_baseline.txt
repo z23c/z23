@@ -161,8 +161,6 @@ contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_cens
 contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c:assignment_shape:26
 contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c:vcs_zcode_c23_corpus_rules_v1_validate:21
 contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c:vcs_zcode_c23_error_string:17
-contexts/commons/modules/vcs/src/zcode_c23_corpus_shard.c:entry_validate:20
-contexts/commons/modules/vcs/src/zcode_c23_corpus_shard.c:vcs_zcode_c23_corpus_shard_v1_decode:16
 contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:bundle_parse_parts:17
 contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:bundle_validate_authority:18
 contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:vcs_zcode_candidate_bundle_export:27

@@ -19,7 +19,7 @@ size_t vcs_zcode_c23_corpus_shard_v1_wire_size(size_t entry_count)
            entry_count * VCS_ZCODE_C23_SHARD_ENTRY_WIRE_BYTES;
 }
 
-static enum vcs_zcode_c23_error entry_validate(
+static enum vcs_zcode_c23_error entry_check_roots_flags_masks(
     const struct vcs_zcode_c23_corpus_entry_v1 *entry)
 {
     if (!zcl_bytes_any_set(entry->semantic_lineage_root, 32) ||
@@ -30,11 +30,13 @@ static enum vcs_zcode_c23_error entry_validate(
         return VCS_ZCODE_C23_FLAGS;
     if (entry->exclusion_mask & ~VCS_ZCODE_C23_EXCLUSION_MASK)
         return VCS_ZCODE_C23_ENUM;
-    uint64_t total_loc = 0;
-    if (!zcl_u64_add(entry->production_loc, entry->test_loc, &total_loc))
-        return VCS_ZCODE_C23_OVERFLOW;
-    bool counted = (entry->flags & VCS_ZCODE_C23_ENTRY_COUNTED) != 0;
-    bool durable = (entry->flags & VCS_ZCODE_C23_ENTRY_DURABLE) != 0;
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error entry_check_policy(
+    const struct vcs_zcode_c23_corpus_entry_v1 *entry, uint64_t total_loc,
+    bool counted, bool durable)
+{
     if (counted) {
         const uint8_t *roots[] = {
             entry->passport_root, entry->proof_root,
@@ -48,6 +50,21 @@ static enum vcs_zcode_c23_error entry_validate(
     } else if (total_loc != 0 || entry->exclusion_mask == 0 || durable) {
         return VCS_ZCODE_C23_POLICY;
     }
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error entry_validate(
+    const struct vcs_zcode_c23_corpus_entry_v1 *entry)
+{
+    enum vcs_zcode_c23_error error = entry_check_roots_flags_masks(entry);
+    if (error != VCS_ZCODE_C23_OK) return error;
+    uint64_t total_loc = 0;
+    if (!zcl_u64_add(entry->production_loc, entry->test_loc, &total_loc))
+        return VCS_ZCODE_C23_OVERFLOW;
+    bool counted = (entry->flags & VCS_ZCODE_C23_ENTRY_COUNTED) != 0;
+    bool durable = (entry->flags & VCS_ZCODE_C23_ENTRY_DURABLE) != 0;
+    error = entry_check_policy(entry, total_loc, counted, durable);
+    if (error != VCS_ZCODE_C23_OK) return error;
     if (durable && !zcl_bytes_any_set(entry->possession_root, 32))
         return VCS_ZCODE_C23_ROOT;
     if (!durable && zcl_bytes_any_set(entry->possession_root, 32))
@@ -156,6 +173,16 @@ static size_t entry_read(struct vcs_zcode_c23_corpus_entry_v1 *entry,
     return off;
 }
 
+static enum vcs_zcode_c23_error shard_check_wire_prefix(
+    const uint8_t *wire, size_t wire_len)
+{
+    if (wire_len < VCS_ZCODE_C23_SHARD_HEADER_WIRE_BYTES ||
+        memcmp(wire, shard_magic, sizeof(shard_magic)) != 0)
+        return wire_len < VCS_ZCODE_C23_SHARD_HEADER_WIRE_BYTES
+            ? VCS_ZCODE_C23_SIZE : VCS_ZCODE_C23_MAGIC;
+    return VCS_ZCODE_C23_OK;
+}
+
 enum vcs_zcode_c23_error vcs_zcode_c23_corpus_shard_v1_decode(
     struct vcs_zcode_c23_corpus_shard_v1 *out,
     struct vcs_zcode_c23_corpus_entry_v1 *entries, size_t entry_capacity,
@@ -163,10 +190,8 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_shard_v1_decode(
 {
     if (!out || !entries || !wire) return VCS_ZCODE_C23_NULL;
     memset(out, 0, sizeof(*out));
-    if (wire_len < VCS_ZCODE_C23_SHARD_HEADER_WIRE_BYTES ||
-        memcmp(wire, shard_magic, sizeof(shard_magic)) != 0)
-        return wire_len < VCS_ZCODE_C23_SHARD_HEADER_WIRE_BYTES
-            ? VCS_ZCODE_C23_SIZE : VCS_ZCODE_C23_MAGIC;
+    enum vcs_zcode_c23_error error = shard_check_wire_prefix(wire, wire_len);
+    if (error != VCS_ZCODE_C23_OK) return error;
     size_t off = sizeof(shard_magic);
     out->schema_version = zcl_read_u16_le(wire + off); off += 2;
     out->flags = zcl_read_u16_le(wire + off); off += 2;
@@ -186,7 +211,7 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_shard_v1_decode(
         off += entry_read(&entries[i], wire + off);
     out->entries = entries;
     out->entry_count = count;
-    enum vcs_zcode_c23_error error = off == wire_len
+    error = off == wire_len
         ? vcs_zcode_c23_corpus_shard_v1_validate(out)
         : VCS_ZCODE_C23_SIZE;
     if (error != VCS_ZCODE_C23_OK) memset(out, 0, sizeof(*out));
