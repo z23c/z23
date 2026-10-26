@@ -67,6 +67,33 @@ static int test_onion_identity_vector(void)
     return failures;
 }
 
+/* Hostname file carries the standard "<addr>.onion" content. */
+static bool onion_hostname_matches(const char *tmpdir, const char *addr)
+{
+    char hostname_path[1152];
+    snprintf(hostname_path, sizeof(hostname_path),
+             "%s/tor_data/onion_service/hostname", tmpdir);
+    char expected_hn[80];
+    snprintf(expected_hn, sizeof(expected_hn), "%s.onion", addr);
+    char hline[128] = "";
+    FILE *f = fopen(hostname_path, "r");
+    if (f) { if (!fgets(hline, sizeof(hline), f)) hline[0] = '\0'; fclose(f); }
+    size_t hl = strlen(hline);
+    while (hl > 0 && (hline[hl-1] == '\n' || hline[hl-1] == '\r'))
+        hline[--hl] = '\0';
+    return strcmp(hline, expected_hn) == 0;
+}
+
+/* The seed is key material: mode 0600, never group/world-readable. */
+static bool onion_seed_mode_owner_only(const char *tmpdir)
+{
+    char seed_path[1152];
+    snprintf(seed_path, sizeof(seed_path),
+             "%s/tor_data/onion_service/identity_seed", tmpdir);
+    struct stat st;
+    return stat(seed_path, &st) == 0 && (st.st_mode & 0777) == 0600;
+}
+
 /* Two onion_identity_ensure() calls on one datadir = two boots: the first
  * mints, the second reuses — the address MUST be identical. */
 static int test_onion_identity_stable_across_boots(void)
@@ -91,27 +118,8 @@ static int test_onion_identity_stable_across_boots(void)
                 memcmp(seed1, seed2, 32) == 0 &&
                 strcmp(addr1, addr2) == 0 && strlen(addr1) == 56;
 
-    /* Hostname file carries the standard "<addr>.onion" content. */
-    char hostname_path[1152];
-    snprintf(hostname_path, sizeof(hostname_path),
-             "%s/tor_data/onion_service/hostname", tmpdir);
-    char expected_hn[80];
-    snprintf(expected_hn, sizeof(expected_hn), "%s.onion", addr1);
-    char hline[128] = "";
-    FILE *f = fopen(hostname_path, "r");
-    if (f) { if (!fgets(hline, sizeof(hline), f)) hline[0] = '\0'; fclose(f); }
-    size_t hl = strlen(hline);
-    while (hl > 0 && (hline[hl-1] == '\n' || hline[hl-1] == '\r'))
-        hline[--hl] = '\0';
-    bool hostname_ok = strcmp(hline, expected_hn) == 0;
-
-    /* The seed is key material: mode 0600, never group/world-readable. */
-    char seed_path[1152];
-    snprintf(seed_path, sizeof(seed_path),
-             "%s/tor_data/onion_service/identity_seed", tmpdir);
-    struct stat st;
-    bool mode_ok = stat(seed_path, &st) == 0 &&
-                   (st.st_mode & 0777) == 0600;
+    bool hostname_ok = onion_hostname_matches(tmpdir, addr1);
+    bool mode_ok = onion_seed_mode_owner_only(tmpdir);
 
     if (same && hostname_ok && mode_ok) {
         printf("OK\n");
@@ -372,6 +380,23 @@ static int test_onion_persist_args_parse(void)
     return failures;
 }
 
+/* One fleet-default argv scenario: parse these arguments into a fresh
+ * context and compare the onion-persist outcome with what the scenario
+ * expects; check_forced selects whether onion_persist_forced_off is part
+ * of the expectation. */
+static bool onion_persist_argv_scenario(int argc, char **argv,
+                                        bool expect_persist,
+                                        bool expect_forced_off,
+                                        bool check_forced)
+{
+    struct app_context ctx = {0};
+    bool show_metrics = false;
+    int rc = args_parse_node_options(argc, argv, &ctx, &show_metrics);
+    return rc == -1 && ctx.onion_persist == expect_persist &&
+           (!check_forced ||
+            ctx.onion_persist_forced_off == expect_forced_off);
+}
+
 /* A node that pins peers by .onion address needs its OWN onion fixed too:
  * -tor + at least one -addnode=<x>.onion defaults -onion-persist ON, a plain
  * -tor node keeps the ephemeral default, and an explicit -onion-persist=0
@@ -394,47 +419,33 @@ static int test_onion_persist_fleet_default(void)
 
     /* -tor + a pinned .onion addnode, no explicit -onion-persist: defaults
      * ON. Order-independent — the addnode arrives before -tor here. */
-    struct app_context fleet_ctx = {0};
-    bool show_metrics = false;
     char *fleet_argv[] = {
         "zclassic23",
         "-addnode=n3c4bry42qzoiduhfqk33ugeptdycmnsmjnrkmjirrudtpw7xvhc5kid.onion:39360",
         "-tor",
     };
-    int fleet_rc = args_parse_node_options(3, fleet_argv, &fleet_ctx,
-                                           &show_metrics);
-    bool fleet_defaults_on = fleet_rc == -1 && fleet_ctx.onion_persist &&
-                             !fleet_ctx.onion_persist_forced_off;
+    bool fleet_defaults_on = onion_persist_argv_scenario(3, fleet_argv,
+                                                         true, false, true);
 
     /* -tor alone, no pinned onion peer: still defaults OFF (ephemeral). */
-    struct app_context plain_ctx = {0};
     char *plain_argv[] = { "zclassic23", "-tor" };
-    int plain_rc = args_parse_node_options(2, plain_argv, &plain_ctx,
-                                           &show_metrics);
-    bool plain_stays_ephemeral = plain_rc == -1 && !plain_ctx.onion_persist;
+    bool plain_stays_ephemeral =
+        onion_persist_argv_scenario(2, plain_argv, false, false, false);
 
     /* -tor + pinned onion peer + explicit -onion-persist=0: forced off. */
-    struct app_context forced_off_ctx = {0};
     char *forced_off_argv[] = {
         "zclassic23",
         "-tor",
         "-addnode=n3c4bry42qzoiduhfqk33ugeptdycmnsmjnrkmjirrudtpw7xvhc5kid.onion:39360",
         "-onion-persist=0",
     };
-    int forced_off_rc = args_parse_node_options(4, forced_off_argv,
-                                                &forced_off_ctx,
-                                                &show_metrics);
-    bool forced_off = forced_off_rc == -1 && !forced_off_ctx.onion_persist &&
-                      forced_off_ctx.onion_persist_forced_off;
+    bool forced_off = onion_persist_argv_scenario(4, forced_off_argv,
+                                                  false, true, true);
 
     /* -onion-persist=1 is the explicit-on spelling alongside the bare form. */
-    struct app_context explicit_on_ctx = {0};
     char *explicit_on_argv[] = { "zclassic23", "-onion-persist=1" };
-    int explicit_on_rc = args_parse_node_options(2, explicit_on_argv,
-                                                 &explicit_on_ctx,
-                                                 &show_metrics);
-    bool explicit_on = explicit_on_rc == -1 && explicit_on_ctx.onion_persist &&
-                       !explicit_on_ctx.onion_persist_forced_off;
+    bool explicit_on = onion_persist_argv_scenario(2, explicit_on_argv,
+                                                   true, false, true);
 
     if (pure_off_no_tor && pure_on && pure_off_no_onion_peer &&
         pure_off_no_peers && fleet_defaults_on && plain_stays_ephemeral &&
