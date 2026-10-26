@@ -113,6 +113,13 @@ static bool seal_body_read(void *user, uint32_t height,
     return copy != NULL;
 }
 
+/* Writes "<what>: <detail>" into the caller's err buffer when one was given. */
+static void seal_next_set_err(char *err, size_t errlen,
+                              const char *what, const char *detail)
+{
+    if (err && errlen) snprintf(err, errlen, "%s: %s", what, detail);
+}
+
 /* ── Pure single-seal primitive (no service state) ──────────────────────────
  * Seal the single oldest unsealed, fully-below-frontier segment in `dir`. This
  * re-opens the coverage table on every call, so looping it walks the backlog
@@ -135,7 +142,7 @@ int segment_sealer_seal_next(const char *dir, uint32_t frontier_incl,
     if (ost != CSEG_OK) {
         LOG_WARN("segment_sealer", "[segment_sealer] store open %s: %s (%s)",
                  dir, cseg_status_str(ost), oerr);
-        if (err && errlen) snprintf(err, errlen, "store open: %s", oerr);
+        seal_next_set_err(err, errlen, "store open", oerr);
         return -1; // raw-return-ok:logged-warn-above; caller records last_status
     }
 
@@ -149,7 +156,7 @@ int segment_sealer_seal_next(const char *dir, uint32_t frontier_incl,
     if (!mk.ok) {
         LOG_WARN("segment_sealer", "[segment_sealer] mkdir %s: %s",
                  dir, mk.message);
-        if (err && errlen) snprintf(err, errlen, "mkdir: %s", mk.message);
+        seal_next_set_err(err, errlen, "mkdir", mk.message);
         return -1; // raw-return-ok:logged-warn-above; caller records last_status
     }
 

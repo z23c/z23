@@ -968,7 +968,6 @@ engine/services/src/property_grant_commit.c:commit_attempt:35
 engine/services/src/recovery_policy.c:policy_load_from_env:16
 engine/services/src/rolling_anchor_service.c:ra_load_locked:23
 engine/services/src/rolling_anchor_service.c:rolling_anchor_extend_if_due:19
-engine/services/src/segment_sealer_service.c:segment_sealer_seal_next:16
 engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:41
 engine/services/src/shielded_history_promote_service.c:shielded_history_promote_run:59
 engine/services/src/slo_ledger_summary.c:push_summary:45
