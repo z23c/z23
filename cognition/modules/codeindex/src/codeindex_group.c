@@ -491,8 +491,22 @@ static bool emit_product_context_groups(struct ci_store *s)
     return true;
 }
 
+/* What emit_module_groups hands back to ci_group_emit_all: the two failure
+ * outcomes carry the string ci_group_emit_all logs for them, because those
+ * LOG_FAIL calls belong inside ci_group_emit_all and its name is what the
+ * log records. The refused outcome has no log, like the plain false return
+ * it replaces. */
+enum emit_modules_result {
+    k_modules_written,
+    k_modules_no_owner,   /* *fault names the module, unshortened */
+    k_modules_bad_path,   /* *fault names the module path, in path_fault */
+    k_modules_refused,    /* the store refused a row; nothing to log */
+};
+
 /* Emit the navigation and workspace groups for every build module. */
-static bool emit_module_groups(struct ci_store *s)
+static enum emit_modules_result emit_module_groups(struct ci_store *s,
+                                                   const char **fault,
+                                                   char path_fault[64])
 {
     /* Each build module keeps its own precise navigation group beneath the
      * authority declared by the context manifest. */
@@ -500,17 +514,23 @@ static bool emit_module_groups(struct ci_store *s)
     const char *const *mods = ci_lib_modules(&nmod);
     for (size_t i = 0; i < nmod; i++) {
         char module_path[64], parent[64];
-        if (!codeindex_module_group_path(mods[i], module_path))
-            LOG_FAIL("codeindex", "module lacks architecture owner: %s", mods[i]);
+        if (!codeindex_module_group_path(mods[i], module_path)) {
+            *fault = mods[i];
+            return k_modules_no_owner;
+        }
         (void)snprintf(parent, sizeof(parent), "%s", module_path);
         char *slash = strrchr(parent, '/');
-        if (!slash) LOG_FAIL("codeindex", "invalid module path: %s", module_path);
+        if (!slash) {
+            (void)snprintf(path_fault, 64, "%s", module_path);
+            *fault = path_fault;
+            return k_modules_bad_path;
+        }
         *slash = '\0';
-        if (!emit(s, module_path, "module", parent)) return false;
+        if (!emit(s, module_path, "module", parent)) return k_modules_refused;
         (void)snprintf(module_path, sizeof(module_path), "lib/%s", mods[i]);
-        if (!emit(s, module_path, "workspace-module", "lib")) return false;
+        if (!emit(s, module_path, "workspace-module", "lib")) return k_modules_refused;
     }
-    return true;
+    return k_modules_written;
 }
 
 /* Emit the app-shape groups of the external workspace. */
@@ -531,7 +551,14 @@ bool ci_group_emit_all(struct ci_store *s)
     if (!emit_root_groups(s)) return false;
     if (!emit_fixed_authority_rooms(s)) return false;
     if (!emit_product_context_groups(s)) return false;
-    if (!emit_module_groups(s)) return false;
+    const char *fault = "";
+    char path_fault[64] = "";
+    enum emit_modules_result modules = emit_module_groups(s, &fault, path_fault);
+    if (modules == k_modules_no_owner)
+        LOG_FAIL("codeindex", "module lacks architecture owner: %s", fault);
+    if (modules == k_modules_bad_path)
+        LOG_FAIL("codeindex", "invalid module path: %s", fault);
+    if (modules != k_modules_written) return false;
     if (!emit_workspace_shape_groups(s)) return false;
     return true;
 }
