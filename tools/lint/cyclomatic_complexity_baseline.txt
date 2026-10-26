@@ -539,8 +539,6 @@ contexts/market/controllers/src/market_moderation_native_handler.c:zcl_native_ha
 contexts/market/controllers/src/market_moderation_rpc.c:rpc_zmarket_moderation_profile_set:22
 contexts/market/controllers/src/market_moderation_rpc.c:rpc_zmarket_moderation_relay_set:22
 contexts/market/controllers/src/market_moderation_rpc.c:rpc_zmarket_review_set:30
-contexts/market/controllers/src/market_purchase_native_handler.c:market_purchase_view_frozen_kat:26
-contexts/market/controllers/src/market_purchase_native_handler.c:mpn_call:18
 contexts/market/controllers/src/shop_native_fulfill.c:shf_build_row:22
 contexts/market/controllers/src/shop_native_fulfill.c:zcl_native_handle_shop_want_fulfill_post:26
 contexts/market/controllers/src/shop_native_fulfill.c:zcl_native_handle_shop_want_fulfill_withdraw:20

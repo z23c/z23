@@ -79,6 +79,49 @@ static void mpn_error_class_to_command(
     }
 }
 
+/* A transport-level ({"error":{code,message}} from the loopback client)
+ * or JSON-RPC-level ({code:int,message} from the server) failure is an
+ * error envelope, not a purchase document — neither carries the
+ * purchase "code" string, so without this branch they fall through to
+ * the misleading PURCHASE_REFUSED default. Purchase refusals render
+ * "code" as a STRING; the JSON-RPC error object renders it as an int,
+ * which is what distinguishes the two shapes. */
+static const char *mpn_node_error_message(const struct json_value *body)
+{
+    const struct json_value *envelope = json_get(body, "error");
+    const char *env_message = envelope
+        ? json_get_str(json_get(envelope, "message")) : NULL;
+    const struct json_value *rpc_code = json_get(body, "code");
+    if (!env_message && rpc_code && rpc_code->type == JSON_INT)
+        env_message = json_get_str(json_get(body, "message"));
+    return env_message;
+}
+
+/* Classifies a refused purchase through the hot-swappable view service
+ * and renders the bounded failure copies. status and exit_code arrive at
+ * their FAILED defaults and change only when the service classifies the
+ * code. */
+static void mpn_classify_refusal(const char *code, const char *message,
+                                 enum zcl_command_status *status,
+                                 enum zcl_command_exit *exit_code,
+                                 char *code_copy, size_t code_sz,
+                                 char *message_copy, size_t message_sz)
+{
+    struct zcl_hotswap_service_lease lease = {0};
+    const struct market_purchase_view_service_v1 *service =
+        zcl_hotswap_service_acquire(MARKET_PURCHASE_VIEW_SERVICE_ID, &lease);
+    if (!service) service = market_purchase_view_service_builtin();
+    struct market_purchase_error_result_v1 classified = {0};
+    if (service->classify_error(code, &classified))
+        mpn_error_class_to_command(classified.error_class, status, exit_code);
+    zcl_hotswap_service_release(&lease);
+    (void)snprintf(code_copy, code_sz, "%s",
+                   code && code[0] ? code : "PURCHASE_REFUSED");
+    (void)snprintf(message_copy, message_sz, "%s",
+                   message && message[0] ? message
+                                         : "the purchase operation was refused");
+}
+
 static bool mpn_call(struct zcl_command_reply *reply, const char *method,
                      const struct json_value *input, struct json_value *body,
                      long total_ms)
@@ -125,19 +168,7 @@ static bool mpn_call(struct zcl_command_reply *reply, const char *method,
         return false;
     }
     free(raw);
-    /* A transport-level ({"error":{code,message}} from the loopback client)
-     * or JSON-RPC-level ({code:int,message} from the server) failure is an
-     * error envelope, not a purchase document — neither carries the
-     * purchase "code" string, so without this branch they fall through to
-     * the misleading PURCHASE_REFUSED default. Purchase refusals render
-     * "code" as a STRING; the JSON-RPC error object renders it as an int,
-     * which is what distinguishes the two shapes. */
-    const struct json_value *envelope = json_get(body, "error");
-    const char *env_message = envelope
-        ? json_get_str(json_get(envelope, "message")) : NULL;
-    const struct json_value *rpc_code = json_get(body, "code");
-    if (!env_message && rpc_code && rpc_code->type == JSON_INT)
-        env_message = json_get_str(json_get(body, "message"));
+    const char *env_message = mpn_node_error_message(body);
     if (env_message) {
         char message_copy[320];
         (void)snprintf(message_copy, sizeof(message_copy), "%s", env_message);
@@ -151,41 +182,28 @@ static bool mpn_call(struct zcl_command_reply *reply, const char *method,
 
     const char *code = json_get_str(json_get(body, "code"));
     const char *message = json_get_str(json_get(body, "message"));
-    struct zcl_hotswap_service_lease lease = {0};
-    const struct market_purchase_view_service_v1 *service =
-        zcl_hotswap_service_acquire(MARKET_PURCHASE_VIEW_SERVICE_ID, &lease);
-    if (!service) service = market_purchase_view_service_builtin();
-    struct market_purchase_error_result_v1 classified = {0};
     enum zcl_command_status status = ZCL_COMMAND_STATUS_FAILED;
     enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_FAILED;
-    if (service->classify_error(code, &classified))
-        mpn_error_class_to_command(classified.error_class, &status, &exit_code);
-    zcl_hotswap_service_release(&lease);
     char code_copy[64], message_copy[320];
-    (void)snprintf(code_copy, sizeof(code_copy), "%s",
-                   code && code[0] ? code : "PURCHASE_REFUSED");
-    (void)snprintf(message_copy, sizeof(message_copy), "%s",
-                   message && message[0] ? message
-                                         : "the purchase operation was refused");
+    mpn_classify_refusal(code, message, &status, &exit_code, code_copy,
+                         sizeof(code_copy), message_copy,
+                         sizeof(message_copy));
     json_free(body);
     mpn_fail(reply, status, exit_code, code_copy, "execute", message_copy,
              method, false);
     return false;
 }
 
-static bool market_purchase_view_frozen_kat(const void *opaque, char *why,
-                                            size_t why_sz)
-{
-    const struct market_purchase_view_service_v1 *service = opaque;
-    struct market_purchase_error_result_v1 classified;
-    struct market_purchase_guide_result_v1 guide;
-    char commit[192];
-    const char *plan =
-        "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
-    static const struct {
-        const char *code;
-        enum market_purchase_error_class_v1 error_class;
-    } vectors[] = {
+/* Frozen classification baseline for the hot-swap KAT: every code the
+ * purchase view service must recognize, with the error class it must map
+ * each one to. */
+struct market_purchase_kat_error_vector {
+    const char *code;
+    enum market_purchase_error_class_v1 error_class;
+};
+
+static const struct market_purchase_kat_error_vector
+    k_market_purchase_kat_error_vectors[] = {
         {"MONEY_STATE_NOT_CURRENT", MARKET_PURCHASE_ERROR_TRANSIENT},
         {"IDEMPOTENCY_CONFLICT", MARKET_PURCHASE_ERROR_INVALID},
         {"CUSTODY_ALLOCATION_EXCEEDED", MARKET_PURCHASE_ERROR_DENIED},
@@ -201,30 +219,82 @@ static bool market_purchase_view_frozen_kat(const void *opaque, char *why,
         {"STAGING_VERIFICATION_FAILED", MARKET_PURCHASE_ERROR_FAILED},
         {"DELIVERY_NOT_READY", MARKET_PURCHASE_ERROR_TRANSIENT},
         {"ONION_DELIVERY_UNAVAILABLE", MARKET_PURCHASE_ERROR_DENIED},
-    };
-    if (!service || !service->classify_error ||
-        !service->render_commit_input || !service->render_guide) {
-        if (why && why_sz) (void)snprintf(why, why_sz,
-            "frozen marketplace service shape vector failed");
-        return false;
+};
+
+/* True when the swapped-in service exposes the full frozen KAT surface. */
+static bool market_purchase_kat_shape_ok(
+    const struct market_purchase_view_service_v1 *service)
+{
+    return service && service->classify_error && service->render_commit_input &&
+           service->render_guide;
+}
+
+/* Sweeps the frozen classification table through the service; returns the
+ * index of the first vector it classifies differently, or the table size
+ * when every vector agrees. classified is shared with the caller so
+ * service calls see the same struct state as before. */
+static size_t market_purchase_kat_first_disagreeing_vector(
+    const struct market_purchase_view_service_v1 *service,
+    struct market_purchase_error_result_v1 *classified)
+{
+    for (size_t i = 0; i < sizeof(k_market_purchase_kat_error_vectors) /
+                            sizeof(k_market_purchase_kat_error_vectors[0]);
+         i++) {
+        if (!service->classify_error(
+                k_market_purchase_kat_error_vectors[i].code, classified) ||
+            !classified->known ||
+            classified->error_class !=
+                k_market_purchase_kat_error_vectors[i].error_class)
+            return i;
     }
-    for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
-        if (!service->classify_error(vectors[i].code, &classified) ||
-            !classified.known || classified.error_class != vectors[i].error_class) {
-            if (why && why_sz) (void)snprintf(why, why_sz,
-                "frozen marketplace error vector %zu failed", i);
-            return false;
-        }
-    }
-    if (!service->classify_error("UNKNOWN", &classified) || classified.known ||
-        classified.error_class != MARKET_PURCHASE_ERROR_FAILED ||
+    return sizeof(k_market_purchase_kat_error_vectors) /
+           sizeof(k_market_purchase_kat_error_vectors[0]);
+}
+
+/* Runs the frozen "UNKNOWN", commit-input and guide vectors in order;
+ * returns 0 while the service still matches the frozen baseline. */
+static int market_purchase_kat_static_checks_hold(
+    const struct market_purchase_view_service_v1 *service,
+    struct market_purchase_error_result_v1 *classified,
+    struct market_purchase_guide_result_v1 *guide)
+{
+    char commit[192];
+    const char *plan =
+        "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+    if (!service->classify_error("UNKNOWN", classified) || classified->known ||
+        classified->error_class != MARKET_PURCHASE_ERROR_FAILED ||
         !service->render_commit_input("dev", plan, commit, sizeof(commit)) ||
         strcmp(commit,
             "{\"wallet_scope\":\"dev\",\"plan_id\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\",\"confirm\":true}") != 0 ||
         service->render_commit_input("other", plan, commit, sizeof(commit)) ||
-        !service->render_guide(&guide) || guide.classified_error_count != 15 ||
-        guide.effects_swappable || !guide.payment_authority_static ||
-        strcmp(guide.flow, "plan->commit->status->retrieve") != 0) {
+        !service->render_guide(guide) || guide->classified_error_count != 15 ||
+        guide->effects_swappable || !guide->payment_authority_static ||
+        strcmp(guide->flow, "plan->commit->status->retrieve") != 0)
+        return 1;
+    return 0;
+}
+
+static bool market_purchase_view_frozen_kat(const void *opaque, char *why,
+                                            size_t why_sz)
+{
+    const struct market_purchase_view_service_v1 *service = opaque;
+    struct market_purchase_error_result_v1 classified;
+    struct market_purchase_guide_result_v1 guide;
+    if (!market_purchase_kat_shape_ok(service)) {
+        if (why && why_sz) (void)snprintf(why, why_sz,
+            "frozen marketplace service shape vector failed");
+        return false;
+    }
+    size_t disagreed = market_purchase_kat_first_disagreeing_vector(
+        service, &classified);
+    if (disagreed < sizeof(k_market_purchase_kat_error_vectors) /
+                        sizeof(k_market_purchase_kat_error_vectors[0])) {
+        if (why && why_sz) (void)snprintf(why, why_sz,
+            "frozen marketplace error vector %zu failed", disagreed);
+        return false;
+    }
+    if (market_purchase_kat_static_checks_hold(service, &classified, &guide) !=
+        0) {
         if (why && why_sz) (void)snprintf(why, why_sz,
             "frozen marketplace error/commit/guide vector failed");
         return false;
