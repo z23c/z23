@@ -1596,7 +1596,6 @@ tests/harness/src/test_core_seal_interop.c:csi_dialect_discriminates:23
 tests/harness/src/test_core_seal_interop.c:csi_real_sections:37
 tests/harness/src/test_core_seal_interop.c:csi_synthetic_tree:27
 tests/harness/src/test_cpu_topology.c:test_cpu_topology:33
-tests/harness/src/test_created_outputs_index.c:test_created_outputs_index:29
 tests/harness/src/test_crypto_perf_selftest.c:test_crypto_perf_selftest:27
 tests/harness/src/test_crypto_registry.c:test_crypto_registry:66
 tests/harness/src/test_db_migration_idempotent.c:db_mig_family_same:27
