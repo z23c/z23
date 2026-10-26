@@ -431,22 +431,6 @@ static enum cseg_status parse_segment(struct chain_segment *seg,
     return CSEG_OK;
 }
 
-/* True when two snapshots of a file describe byte-identical content: same
- * length, identity and timestamps, compared in this order. */
-static bool positioned_snapshots_equal(const struct platform_positioned_file_snapshot *a,
-                                       const struct platform_positioned_file_snapshot *b)
-{
-    if (a->size != b->size) return false;
-    if (a->volume != b->volume) return false;
-    if (a->file_low != b->file_low) return false;
-    if (a->file_high != b->file_high) return false;
-    if (a->modified_seconds != b->modified_seconds) return false;
-    if (a->modified_nanoseconds != b->modified_nanoseconds) return false;
-    if (a->changed_seconds != b->changed_seconds) return false;
-    if (a->changed_nanoseconds != b->changed_nanoseconds) return false;
-    return true;
-}
-
 /* Map the already-validated file, parse + digest-check the segment in it,
  * then confirm the file did not change while it was being validated. On
  * success *out owns the mapping and the file; on any failure every
@@ -488,7 +472,7 @@ static enum cseg_status map_and_verify_segment(struct platform_positioned_file *
     }
     struct platform_positioned_file_snapshot after;
     if (!platform_positioned_file_snapshot(&seg->file, &after) ||
-        !positioned_snapshots_equal(before, &after)) {
+        !platform_positioned_file_snapshot_equal(before, &after)) {
         platform_read_mapping_close(&seg->mapping);
         platform_positioned_file_close(&seg->file);
         free(seg);
@@ -740,7 +724,7 @@ static enum cseg_status manifest_read_stable(struct platform_positioned_file *fi
                                                 (size_t)before.size, 0);
     bool stable = got >= 0 && (uint64_t)got == before.size &&
         platform_positioned_file_snapshot(file, &after) &&
-        positioned_snapshots_equal(&before, &after);
+        platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(file);
     if (!stable) {
         free(buf);
