@@ -227,6 +227,92 @@ static int test_blog_validation_contracts(void)
     return failures;
 }
 
+static int test_blog_publication_anchor_plan(
+    struct node_db *publisher, struct blog_publish_result published)
+{
+    int failures = 0;
+    struct zcl_result result;
+    /* A real plan is identity-bound and reserves the maximum fee before
+     * returning. The service sees only signed transaction bytes through
+     * ports; the wallet key never crosses this boundary. */
+    struct blog_anchor_fixture anchor_fixture;
+    memset(&anchor_fixture, 0, sizeof(anchor_fixture));
+    anchor_fixture.ndb = publisher;
+    anchor_fixture.tip_height = 420;
+    memset(anchor_fixture.tip_hash, 0x44,
+           sizeof(anchor_fixture.tip_hash));
+    memset(anchor_fixture.initial_root, 0x31,
+           sizeof(anchor_fixture.initial_root));
+    memset(anchor_fixture.reserved_root, 0x32,
+           sizeof(anchor_fixture.reserved_root));
+    const struct chain_params *params = chain_params_get();
+    ASSERT(params != NULL);
+    ASSERT(wallet_identity_ensure(
+        publisher, params->consensus.hashGenesisBlock.data, "dev",
+        &anchor_fixture.identity));
+    wallet_lock_reset_for_test();
+    wallet_lock_note_encrypted_at_rest();
+    ASSERT(wallet_lock_unlock(NULL, NULL, "blog-anchor-test").ok);
+    struct blog_anchor_runtime anchor_runtime;
+    memset(&anchor_runtime, 0, sizeof(anchor_runtime));
+    anchor_runtime.node_db = publisher;
+    anchor_runtime.read_money = blog_anchor_fixture_money;
+    anchor_runtime.money_ctx = &anchor_fixture;
+    anchor_runtime.prepare = blog_anchor_fixture_prepare;
+    anchor_runtime.prepare_ctx = &anchor_fixture;
+    anchor_runtime.publish = blog_anchor_fixture_publish;
+    anchor_runtime.publish_ctx = &anchor_fixture;
+    anchor_runtime.tip_height = anchor_fixture.tip_height;
+    memcpy(anchor_runtime.tip_hash, anchor_fixture.tip_hash, 32);
+    anchor_runtime.maximum_fee_zat = 10000;
+    anchor_runtime.now_unix = 1700002000;
+    struct blog_anchor_request anchor_request;
+    memset(&anchor_request, 0, sizeof(anchor_request));
+    snprintf(anchor_request.wallet_scope,
+             sizeof(anchor_request.wallet_scope), "dev");
+    snprintf(anchor_request.blog_name, sizeof(anchor_request.blog_name),
+             "alice");
+    memcpy(anchor_request.event_id, published.post.event_id, 32);
+    snprintf(anchor_request.idempotency_key,
+             sizeof(anchor_request.idempotency_key), "alice-post-1");
+    struct blog_anchor_transaction_result anchor_plan;
+    result = blog_publication_anchor_plan(
+        &anchor_runtime, &anchor_request, &anchor_plan);
+    ASSERT(result.ok && anchor_plan.event_verified &&
+           !anchor_plan.broadcast &&
+           strcmp(anchor_plan.wallet_scope, "dev") == 0);
+    ASSERT(anchor_plan.maximum_fee_zat == 10000 &&
+           anchor_plan.reserved_zat == 10000 &&
+           anchor_plan.actual_fee_zat == 1000);
+    ASSERT(anchor_plan.anchor_script_len == published.anchor_script_len);
+    ASSERT(memcmp(anchor_plan.anchor_script, published.anchor_script,
+                  published.anchor_script_len) == 0);
+    ASSERT(anchor_fixture.prepares == 1 &&
+           vault_intent_reserved_total(
+               publisher, "dev",
+               anchor_fixture.identity.wallet_instance_id) == 10000);
+    struct blog_anchor_transaction_result anchor_replay;
+    ASSERT(blog_publication_anchor_plan(
+        &anchor_runtime, &anchor_request, &anchor_replay).ok);
+    ASSERT(anchor_replay.idempotent_replay &&
+           memcmp(anchor_replay.plan_id, anchor_plan.plan_id, 32) == 0 &&
+           anchor_fixture.prepares == 1);
+    result = blog_publication_anchor_commit(
+        &anchor_runtime, "prod", anchor_plan.plan_id, &anchor_replay);
+    ASSERT(!result.ok && anchor_fixture.publishes == 0);
+    result = blog_publication_anchor_commit(
+        &anchor_runtime, "dev", anchor_plan.plan_id, &anchor_replay);
+    ASSERT(result.ok && anchor_replay.broadcast &&
+           anchor_fixture.publishes == 1);
+    ASSERT(blog_publication_anchor_commit(
+        &anchor_runtime, "dev", anchor_plan.plan_id, &anchor_replay).ok);
+    ASSERT(anchor_replay.idempotent_replay &&
+           anchor_fixture.publishes == 1);
+    return failures;
+_test_next:
+    return failures;
+}
+
 static int test_blog_publication_slice(void)
 {
     int failures = 0;
@@ -327,82 +413,8 @@ static int test_blog_publication_slice(void)
         ASSERT(strcmp(anchor_name, "alice") == 0);
         ASSERT(memcmp(anchor_event_id, published.post.event_id, 32) == 0);
 
-        /* A real plan is identity-bound and reserves the maximum fee before
-         * returning. The service sees only signed transaction bytes through
-         * ports; the wallet key never crosses this boundary. */
-        struct blog_anchor_fixture anchor_fixture;
-        memset(&anchor_fixture, 0, sizeof(anchor_fixture));
-        anchor_fixture.ndb = &publisher;
-        anchor_fixture.tip_height = 420;
-        memset(anchor_fixture.tip_hash, 0x44,
-               sizeof(anchor_fixture.tip_hash));
-        memset(anchor_fixture.initial_root, 0x31,
-               sizeof(anchor_fixture.initial_root));
-        memset(anchor_fixture.reserved_root, 0x32,
-               sizeof(anchor_fixture.reserved_root));
-        const struct chain_params *params = chain_params_get();
-        ASSERT(params != NULL);
-        ASSERT(wallet_identity_ensure(
-            &publisher, params->consensus.hashGenesisBlock.data, "dev",
-            &anchor_fixture.identity));
-        wallet_lock_reset_for_test();
-        wallet_lock_note_encrypted_at_rest();
-        ASSERT(wallet_lock_unlock(NULL, NULL, "blog-anchor-test").ok);
-        struct blog_anchor_runtime anchor_runtime;
-        memset(&anchor_runtime, 0, sizeof(anchor_runtime));
-        anchor_runtime.node_db = &publisher;
-        anchor_runtime.read_money = blog_anchor_fixture_money;
-        anchor_runtime.money_ctx = &anchor_fixture;
-        anchor_runtime.prepare = blog_anchor_fixture_prepare;
-        anchor_runtime.prepare_ctx = &anchor_fixture;
-        anchor_runtime.publish = blog_anchor_fixture_publish;
-        anchor_runtime.publish_ctx = &anchor_fixture;
-        anchor_runtime.tip_height = anchor_fixture.tip_height;
-        memcpy(anchor_runtime.tip_hash, anchor_fixture.tip_hash, 32);
-        anchor_runtime.maximum_fee_zat = 10000;
-        anchor_runtime.now_unix = 1700002000;
-        struct blog_anchor_request anchor_request;
-        memset(&anchor_request, 0, sizeof(anchor_request));
-        snprintf(anchor_request.wallet_scope,
-                 sizeof(anchor_request.wallet_scope), "dev");
-        snprintf(anchor_request.blog_name, sizeof(anchor_request.blog_name),
-                 "alice");
-        memcpy(anchor_request.event_id, published.post.event_id, 32);
-        snprintf(anchor_request.idempotency_key,
-                 sizeof(anchor_request.idempotency_key), "alice-post-1");
-        struct blog_anchor_transaction_result anchor_plan;
-        result = blog_publication_anchor_plan(
-            &anchor_runtime, &anchor_request, &anchor_plan);
-        ASSERT(result.ok && anchor_plan.event_verified &&
-               !anchor_plan.broadcast &&
-               strcmp(anchor_plan.wallet_scope, "dev") == 0);
-        ASSERT(anchor_plan.maximum_fee_zat == 10000 &&
-               anchor_plan.reserved_zat == 10000 &&
-               anchor_plan.actual_fee_zat == 1000);
-        ASSERT(anchor_plan.anchor_script_len == published.anchor_script_len);
-        ASSERT(memcmp(anchor_plan.anchor_script, published.anchor_script,
-                      published.anchor_script_len) == 0);
-        ASSERT(anchor_fixture.prepares == 1 &&
-               vault_intent_reserved_total(
-                   &publisher, "dev",
-                   anchor_fixture.identity.wallet_instance_id) == 10000);
-        struct blog_anchor_transaction_result anchor_replay;
-        ASSERT(blog_publication_anchor_plan(
-            &anchor_runtime, &anchor_request, &anchor_replay).ok);
-        ASSERT(anchor_replay.idempotent_replay &&
-               memcmp(anchor_replay.plan_id, anchor_plan.plan_id, 32) == 0 &&
-               anchor_fixture.prepares == 1);
-        result = blog_publication_anchor_commit(
-            &anchor_runtime, "prod", anchor_plan.plan_id, &anchor_replay);
-        ASSERT(!result.ok && anchor_fixture.publishes == 0);
-        result = blog_publication_anchor_commit(
-            &anchor_runtime, "dev", anchor_plan.plan_id, &anchor_replay);
-        ASSERT(result.ok && anchor_replay.broadcast &&
-               anchor_fixture.publishes == 1);
-        ASSERT(blog_publication_anchor_commit(
-            &anchor_runtime, "dev", anchor_plan.plan_id, &anchor_replay).ok);
-        ASSERT(anchor_replay.idempotent_replay &&
-               anchor_fixture.publishes == 1);
+        failures += test_blog_publication_anchor_plan(&publisher, published);
+        if (failures) goto _test_next;
 
         uint8_t trailing[BLOG_ANCHOR_SCRIPT_MAX + 1];
         memcpy(trailing, published.anchor_script, published.anchor_script_len);
@@ -769,149 +781,246 @@ static int test_blog_rpc_registration(void)
     return !(describes_plan && explains_refusal);
 }
 
+static bool test_blog_safe_path_rejects_traversal(void)
+{
+    bool ok = !test_safe_path("../etc/passwd");
+    ok = ok && !test_safe_path("foo/../bar");
+    ok = ok && !test_safe_path("..hidden");
+    ok = ok && !test_safe_path("..");
+    ok = ok && !test_safe_path("a/b/../../c");
+    return ok;
+}
+
+static bool test_blog_safe_path_rejects_double_slash(void)
+{
+    bool ok = !test_safe_path("//etc/passwd");
+    ok = ok && !test_safe_path("//");
+    ok = ok && !test_safe_path("///foo");
+    return ok;
+}
+
+static bool test_blog_safe_path_accepts_valid(void)
+{
+    bool ok = test_safe_path("index.html");
+    ok = ok && test_safe_path("/about");
+    ok = ok && test_safe_path("posts/hello.html");
+    ok = ok && test_safe_path("a/b/c.css");
+    ok = ok && test_safe_path("style.css");
+    /* Empty and NULL must be rejected */
+    ok = ok && !test_safe_path("");
+    ok = ok && !test_safe_path(NULL);
+    return ok;
+}
+
+static bool test_blog_discover_onion_peers_empty(void)
+{
+    struct onion_peer peers[10];
+    bool ok = true;
+    /* Every datadir handed to production code is a per-run scratch dir
+     * under ./test-tmp, never "." — see the block comment below. */
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "blog_disc", "peers");
+    /* NULL checks */
+    int found = blog_discover_onion_peers(NULL, peers, 10);
+    ok = ok && (found == 0);
+    found = blog_discover_onion_peers(dir, NULL, 10);
+    ok = ok && (found == 0);
+    found = blog_discover_onion_peers(dir, peers, 0);
+    ok = ok && (found == 0);
+    /* A missing database is inert: discovery returns no peers and must
+     * not create node.db or run the boot/schema ceremony. Uses a
+     * test-tmp/ pid-tagged scratch dir (test_make_tmpdir), never the
+     * checkout root. */
+    found = blog_discover_onion_peers(dir, peers, 10);
+    ok = ok && (found == 0);
+    char db_path[512];
+    int db_path_len = snprintf(db_path, sizeof(db_path), "%s/node.db",
+                               dir);
+    ok = ok && db_path_len > 0 && (size_t)db_path_len < sizeof(db_path) &&
+         access(db_path, F_OK) != 0;
+    if (ok) {
+        int wal_len = snprintf(db_path, sizeof(db_path), "%s/node.db-wal",
+                               dir);
+        ok = wal_len > 0 && (size_t)wal_len < sizeof(db_path) &&
+             access(db_path, F_OK) != 0;
+    }
+    if (ok) {
+        int shm_len = snprintf(db_path, sizeof(db_path), "%s/node.db-shm",
+                               dir);
+        ok = shm_len > 0 && (size_t)shm_len < sizeof(db_path) &&
+             access(db_path, F_OK) != 0;
+    }
+    test_cleanup_tmpdir(dir);
+    return ok;
+}
+
+static bool test_blog_serve_missing_404(void)
+{
+    /* Use a temp directory with no blog/ subdirectory */
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "blog_serve", "404");
+    bool ok = true;
+    {
+        char out[4096];
+        memset(out, 0, sizeof(out));
+        size_t len = blog_serve(dir, "/nonexistent_page", out, sizeof(out));
+        if (len < sizeof(out)) out[len] = '\0';
+        ok = ok && (len > 0);
+        ok = ok && (strstr(out, "404") != NULL);
+        ok = ok && (strstr(out, "Not Found") != NULL);
+
+        /* Also test with a deeper path */
+        memset(out, 0, sizeof(out));
+        len = blog_serve(dir, "/deep/nested/path.html", out, sizeof(out));
+        if (len < sizeof(out)) out[len] = '\0';
+        ok = ok && (len > 0);
+        ok = ok && (strstr(out, "404") != NULL);
+
+        test_cleanup_tmpdir(dir);
+    }
+    return ok;
+}
+
+static bool test_blog_serve_traversal_403(void)
+{
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "blog_serve", "403");
+    bool ok = true;
+    {
+        char out[4096];
+        memset(out, 0, sizeof(out));
+        size_t len = blog_serve(dir, "/../../../etc/passwd",
+                                out, sizeof(out));
+        if (len < sizeof(out)) out[len] = '\0';
+        ok = ok && (len > 0);
+        ok = ok && (strstr(out, "403") != NULL);
+        test_cleanup_tmpdir(dir);
+    }
+    return ok;
+}
+
+static bool test_blog_serve_null_inputs(void)
+{
+    char out[4096];
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "blog_serve", "nullin");
+    /* NULL path */
+    size_t len = blog_serve(dir, NULL, out, sizeof(out));
+    bool ok = (len == 0);
+    /* NULL output buffer */
+    len = blog_serve(dir, "/index.html", NULL, sizeof(out));
+    ok = ok && (len == 0);
+    /* Buffer too small */
+    len = blog_serve(dir, "/index.html", out, 100);
+    ok = ok && (len == 0);
+    test_cleanup_tmpdir(dir);
+    return ok;
+}
+
+static bool test_blog_announce_rejects_invalid(void)
+{
+    /* "no_suffix" clears the argument guards, so the call reaches
+     * node_db_open("<datadir>/node.db") — which CREATES the file —
+     * before the .onion-suffix check rejects it. A per-run scratch
+     * datadir keeps that side effect inside ./test-tmp. */
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "blog_ann", "reject");
+    bool ok = !blog_auto_announce_onion(NULL, "test.onion");
+    ok = ok && !blog_auto_announce_onion(dir, NULL);
+    ok = ok && !blog_auto_announce_onion(dir, "");
+    ok = ok && !blog_auto_announce_onion(dir, "no_suffix");
+    test_cleanup_tmpdir(dir);
+    return ok;
+}
+
+static bool test_blog_announce_new_address(void)
+{
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "blog_ann", "onion");
+    bool ok = true;
+    {
+        const char *addr1 =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion";
+        ok = ok && blog_auto_announce_onion(dir, addr1);
+
+        /* Second call with same address returns false (no re-announce) */
+        ok = ok && !blog_auto_announce_onion(dir, addr1);
+
+        /* Different address announces successfully */
+        const char *addr2 =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion";
+        ok = ok && blog_auto_announce_onion(dir, addr2);
+
+        char db_path[1024];
+        snprintf(db_path, sizeof(db_path), "%s/node.db", dir);
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        ok = ok && node_db_open(&ndb, db_path);
+        if (ok) {
+            struct db_onion_announcement rows[4];
+            memset(rows, 0, sizeof(rows));
+            int count = db_onion_announcement_recent(&ndb, rows, 4);
+            ok = ok && (count >= 2);
+            ok = ok && db_onion_announcement_exists(&ndb, addr2);
+            ok = ok && rows[0].script_hex[0] != '\0';
+            node_db_close(&ndb);
+        }
+
+        /* Clean up: remove node.db and tmpdir */
+        test_cleanup_tmpdir(dir);
+    }
+    return ok;
+}
+
 int test_blog(void)
 {
     int failures = test_blog_rpc_registration();
 
     printf("blog: safe_path rejects .. traversal... ");
     {
-        bool ok = !test_safe_path("../etc/passwd");
-        ok = ok && !test_safe_path("foo/../bar");
-        ok = ok && !test_safe_path("..hidden");
-        ok = ok && !test_safe_path("..");
-        ok = ok && !test_safe_path("a/b/../../c");
+        bool ok = test_blog_safe_path_rejects_traversal();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
 
     printf("blog: safe_path rejects // prefix... ");
     {
-        bool ok = !test_safe_path("//etc/passwd");
-        ok = ok && !test_safe_path("//");
-        ok = ok && !test_safe_path("///foo");
+        bool ok = test_blog_safe_path_rejects_double_slash();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
 
     printf("blog: safe_path accepts valid paths... ");
     {
-        bool ok = test_safe_path("index.html");
-        ok = ok && test_safe_path("/about");
-        ok = ok && test_safe_path("posts/hello.html");
-        ok = ok && test_safe_path("a/b/c.css");
-        ok = ok && test_safe_path("style.css");
-        /* Empty and NULL must be rejected */
-        ok = ok && !test_safe_path("");
-        ok = ok && !test_safe_path(NULL);
+        bool ok = test_blog_safe_path_accepts_valid();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
 
     printf("blog: discover_onion_peers with empty/missing data... ");
     {
-        struct onion_peer peers[10];
-        bool ok = true;
-        /* Every datadir handed to production code is a per-run scratch dir
-         * under ./test-tmp, never "." — see the block comment below. */
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "blog_disc", "peers");
-        /* NULL checks */
-        int found = blog_discover_onion_peers(NULL, peers, 10);
-        ok = ok && (found == 0);
-        found = blog_discover_onion_peers(dir, NULL, 10);
-        ok = ok && (found == 0);
-        found = blog_discover_onion_peers(dir, peers, 0);
-        ok = ok && (found == 0);
-        /* A missing database is inert: discovery returns no peers and must
-         * not create node.db or run the boot/schema ceremony. Uses a
-         * test-tmp/ pid-tagged scratch dir (test_make_tmpdir), never the
-         * checkout root. */
-        found = blog_discover_onion_peers(dir, peers, 10);
-        ok = ok && (found == 0);
-        char db_path[512];
-        int db_path_len = snprintf(db_path, sizeof(db_path), "%s/node.db",
-                                   dir);
-        ok = ok && db_path_len > 0 && (size_t)db_path_len < sizeof(db_path) &&
-             access(db_path, F_OK) != 0;
-        if (ok) {
-            int wal_len = snprintf(db_path, sizeof(db_path), "%s/node.db-wal",
-                                   dir);
-            ok = wal_len > 0 && (size_t)wal_len < sizeof(db_path) &&
-                 access(db_path, F_OK) != 0;
-        }
-        if (ok) {
-            int shm_len = snprintf(db_path, sizeof(db_path), "%s/node.db-shm",
-                                   dir);
-            ok = shm_len > 0 && (size_t)shm_len < sizeof(db_path) &&
-                 access(db_path, F_OK) != 0;
-        }
-        test_cleanup_tmpdir(dir);
+        bool ok = test_blog_discover_onion_peers_empty();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
 
     printf("blog: serve returns 404 for missing files... ");
     {
-        /* Use a temp directory with no blog/ subdirectory */
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "blog_serve", "404");
-        bool ok = true;
-        {
-            char out[4096];
-            memset(out, 0, sizeof(out));
-            size_t len = blog_serve(dir, "/nonexistent_page", out, sizeof(out));
-            if (len < sizeof(out)) out[len] = '\0';
-            ok = ok && (len > 0);
-            ok = ok && (strstr(out, "404") != NULL);
-            ok = ok && (strstr(out, "Not Found") != NULL);
-
-            /* Also test with a deeper path */
-            memset(out, 0, sizeof(out));
-            len = blog_serve(dir, "/deep/nested/path.html", out, sizeof(out));
-            if (len < sizeof(out)) out[len] = '\0';
-            ok = ok && (len > 0);
-            ok = ok && (strstr(out, "404") != NULL);
-
-            test_cleanup_tmpdir(dir);
-        }
+        bool ok = test_blog_serve_missing_404();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
 
     printf("blog: serve returns 403 for path traversal... ");
     {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "blog_serve", "403");
-        bool ok = true;
-        {
-            char out[4096];
-            memset(out, 0, sizeof(out));
-            size_t len = blog_serve(dir, "/../../../etc/passwd",
-                                    out, sizeof(out));
-            if (len < sizeof(out)) out[len] = '\0';
-            ok = ok && (len > 0);
-            ok = ok && (strstr(out, "403") != NULL);
-            test_cleanup_tmpdir(dir);
-        }
+        bool ok = test_blog_serve_traversal_403();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
 
     printf("blog: serve handles NULL/empty inputs... ");
     {
-        char out[4096];
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "blog_serve", "nullin");
-        /* NULL path */
-        size_t len = blog_serve(dir, NULL, out, sizeof(out));
-        bool ok = (len == 0);
-        /* NULL output buffer */
-        len = blog_serve(dir, "/index.html", NULL, sizeof(out));
-        ok = ok && (len == 0);
-        /* Buffer too small */
-        len = blog_serve(dir, "/index.html", out, 100);
-        ok = ok && (len == 0);
-        test_cleanup_tmpdir(dir);
+        bool ok = test_blog_serve_null_inputs();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -928,57 +1037,14 @@ int test_blog(void)
 
     printf("blog: auto_announce_onion rejects invalid input... ");
     {
-        /* "no_suffix" clears the argument guards, so the call reaches
-         * node_db_open("<datadir>/node.db") — which CREATES the file —
-         * before the .onion-suffix check rejects it. A per-run scratch
-         * datadir keeps that side effect inside ./test-tmp. */
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "blog_ann", "reject");
-        bool ok = !blog_auto_announce_onion(NULL, "test.onion");
-        ok = ok && !blog_auto_announce_onion(dir, NULL);
-        ok = ok && !blog_auto_announce_onion(dir, "");
-        ok = ok && !blog_auto_announce_onion(dir, "no_suffix");
-        test_cleanup_tmpdir(dir);
+        bool ok = test_blog_announce_rejects_invalid();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
 
     printf("blog: auto_announce_onion announces new address... ");
     {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "blog_ann", "onion");
-        bool ok = true;
-        {
-            const char *addr1 =
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion";
-            ok = ok && blog_auto_announce_onion(dir, addr1);
-
-            /* Second call with same address returns false (no re-announce) */
-            ok = ok && !blog_auto_announce_onion(dir, addr1);
-
-            /* Different address announces successfully */
-            const char *addr2 =
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion";
-            ok = ok && blog_auto_announce_onion(dir, addr2);
-
-            char db_path[1024];
-            snprintf(db_path, sizeof(db_path), "%s/node.db", dir);
-            struct node_db ndb;
-            memset(&ndb, 0, sizeof(ndb));
-            ok = ok && node_db_open(&ndb, db_path);
-            if (ok) {
-                struct db_onion_announcement rows[4];
-                memset(rows, 0, sizeof(rows));
-                int count = db_onion_announcement_recent(&ndb, rows, 4);
-                ok = ok && (count >= 2);
-                ok = ok && db_onion_announcement_exists(&ndb, addr2);
-                ok = ok && rows[0].script_hex[0] != '\0';
-                node_db_close(&ndb);
-            }
-
-            /* Clean up: remove node.db and tmpdir */
-            test_cleanup_tmpdir(dir);
-        }
+        bool ok = test_blog_announce_new_address();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
