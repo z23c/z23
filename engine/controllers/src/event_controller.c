@@ -257,6 +257,50 @@ static void rpc_service_operation_filter_error_json(const char *message,
                      "write_safety=public_read_only");
 }
 
+/* Accepted key=value filters, one row per key, in the order the original
+ * if-chain tested them. "interface" is an alias row for
+ * preferred_interface and stays directly after it, so which key wins and
+ * which buffer receives the value are unchanged. The rows carry this
+ * call's buffers, so the table is const but not static. */
+struct rpc_service_operation_filter_field {
+    const char *key;
+    char *dest;
+    size_t dest_len;
+};
+
+static void rpc_service_operation_filter_store(
+    const char *key,
+    const char *value,
+    char *service,
+    size_t service_len,
+    char *write_safety,
+    size_t write_safety_len,
+    char *preferred_interface,
+    size_t preferred_interface_len,
+    char *status,
+    size_t status_len,
+    char *surface,
+    size_t surface_len)
+{
+    const struct rpc_service_operation_filter_field fields[] = {
+        { "service", service, service_len },
+        { "write_safety", write_safety, write_safety_len },
+        { "preferred_interface", preferred_interface,
+          preferred_interface_len },
+        { "interface", preferred_interface, preferred_interface_len },
+        { "status", status, status_len },
+        { "surface", surface, surface_len },
+    };
+
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        if (strcmp(key, fields[i].key) == 0 && fields[i].dest &&
+            fields[i].dest_len > 0) {
+            snprintf(fields[i].dest, fields[i].dest_len, "%s", value);
+            return;
+        }
+    }
+}
+
 static void rpc_service_operation_filter_arg(
     const char *arg,
     char *service,
@@ -287,19 +331,12 @@ static void rpc_service_operation_filter_arg(
     key[key_len] = '\0';
     value = eq + 1;
 
-    if (strcmp(key, "service") == 0 && service && service_len > 0)
-        snprintf(service, service_len, "%s", value);
-    else if (strcmp(key, "write_safety") == 0 &&
-             write_safety && write_safety_len > 0)
-        snprintf(write_safety, write_safety_len, "%s", value);
-    else if ((strcmp(key, "preferred_interface") == 0 ||
-              strcmp(key, "interface") == 0) &&
-             preferred_interface && preferred_interface_len > 0)
-        snprintf(preferred_interface, preferred_interface_len, "%s", value);
-    else if (strcmp(key, "status") == 0 && status && status_len > 0)
-        snprintf(status, status_len, "%s", value);
-    else if (strcmp(key, "surface") == 0 && surface && surface_len > 0)
-        snprintf(surface, surface_len, "%s", value);
+    rpc_service_operation_filter_store(key, value, service, service_len,
+                                       write_safety, write_safety_len,
+                                       preferred_interface,
+                                       preferred_interface_len,
+                                       status, status_len,
+                                       surface, surface_len);
 }
 
 bool rpc_service_operations(const struct json_value *params, bool help,

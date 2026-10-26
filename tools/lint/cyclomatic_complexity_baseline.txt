@@ -1070,7 +1070,6 @@ engine/controllers/src/dbquery_controller.c:dbquery_execute:35
 engine/controllers/src/diagnostics_block_index.c:diag_header_band_dump_state_json:19
 engine/controllers/src/diagnostics_block_index.c:find_block_index_by_key:18
 engine/controllers/src/diagnostics_mvp.c:mvp_build_status_json:31
-engine/controllers/src/event_controller.c:rpc_service_operation_filter_arg:23
 engine/controllers/src/event_healthcheck_controller.c:rpc_healthcheck_full:47
 engine/controllers/src/event_operator_snapshot_controller.c:operator_build_snapshot:23
 engine/controllers/src/explain_native_handlers.c:explain_build:26
