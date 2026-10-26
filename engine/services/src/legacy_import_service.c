@@ -891,8 +891,6 @@ static int legacy_import_execute(const char *legacy_datadir,
 
 /* Status arms stay in legacy_import_service_run so each LOG_* call keeps
  * that function's name. The passes return a code; this switch only logs. */
-#define LEGACY_IMPORT_STATUS_CASE(status, label) case status: goto label;
-
 int legacy_import_service_run(const char *legacy_datadir,
                               struct node_db *ndb,
                               struct wallet *w,
@@ -913,37 +911,40 @@ int legacy_import_service_run(const char *legacy_datadir,
     bool sapling_tx_open = st.sapling_tx_open;
 
     switch (code) {
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_OK,
-                              legacy_import_run_ok)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_OOM_FLAGS,
-                              legacy_import_run_oom_flags)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_ABORT_P1,
-                              legacy_import_run_abort_p1)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_THREAD_P1,
-                              legacy_import_run_thread_p1)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_ABORT_P2,
-                              legacy_import_run_abort_p2)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_UNSTABLE,
-                              legacy_import_run_unstable)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_PERSIST, cleanup)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_FCTX_OOM,
-                              legacy_import_run_fctx_oom)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_ABORT_P3A,
-                              legacy_import_run_abort_p3a)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_THREAD_P3A,
-                              legacy_import_run_thread_p3a)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_DCTX_OOM,
-                              legacy_import_run_dctx_oom)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_RESULTS_OOM,
-                              legacy_import_run_results_oom)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_ABORT_P3B,
-                              legacy_import_run_abort_p3b)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_THREAD_P3B,
-                              legacy_import_run_thread_p3b)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_BEGIN, cleanup)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_SAVE_OPEN,
-                              legacy_import_run_save_open)
-    LEGACY_IMPORT_STATUS_CASE(LEGACY_IMPORT_COMMIT, cleanup)
+    case LEGACY_IMPORT_OK:
+        goto legacy_import_run_ok;
+    case LEGACY_IMPORT_OOM_FLAGS:
+        goto legacy_import_run_oom_flags;
+    case LEGACY_IMPORT_ABORT_P1:
+        goto legacy_import_run_abort_p1;
+    case LEGACY_IMPORT_THREAD_P1:
+        goto legacy_import_run_thread_p1;
+    case LEGACY_IMPORT_ABORT_P2:
+        goto legacy_import_run_abort_p2;
+    case LEGACY_IMPORT_UNSTABLE:
+        goto legacy_import_run_unstable;
+    case LEGACY_IMPORT_PERSIST:
+        goto cleanup;
+    case LEGACY_IMPORT_FCTX_OOM:
+        goto legacy_import_run_fctx_oom;
+    case LEGACY_IMPORT_ABORT_P3A:
+        goto legacy_import_run_abort_p3a;
+    case LEGACY_IMPORT_THREAD_P3A:
+        goto legacy_import_run_thread_p3a;
+    case LEGACY_IMPORT_DCTX_OOM:
+        goto legacy_import_run_dctx_oom;
+    case LEGACY_IMPORT_RESULTS_OOM:
+        goto legacy_import_run_results_oom;
+    case LEGACY_IMPORT_ABORT_P3B:
+        goto legacy_import_run_abort_p3b;
+    case LEGACY_IMPORT_THREAD_P3B:
+        goto legacy_import_run_thread_p3b;
+    case LEGACY_IMPORT_BEGIN:
+        goto cleanup;
+    case LEGACY_IMPORT_SAVE_OPEN:
+        goto legacy_import_run_save_open;
+    case LEGACY_IMPORT_COMMIT:
+        goto cleanup;
     default:
         goto cleanup;
     }
@@ -1012,5 +1013,3 @@ cleanup:
     free(st.file_has_match);
     return ret;
 }
-
-#undef LEGACY_IMPORT_STATUS_CASE
