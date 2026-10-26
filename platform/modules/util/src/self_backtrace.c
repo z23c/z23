@@ -329,24 +329,6 @@ static int self_bt_open_log(char *path_out, size_t cap)
     return -1;
 }
 
-/* Arm the 100 ms per-thread response budget and wait for the handler's
- * sem_post, retrying while sem_timedwait reports EINTR. Returns
- * sem_timedwait's own result: 0 when the target responded, nonzero when it
- * never did. */
-static int self_bt_wait_target_response(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);  // platform-ok:sem_timedwait requires a raw CLOCK_REALTIME absolute deadline
-    ts.tv_nsec += 100L * 1000L * 1000L;  /* 100 ms budget per thread */
-    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
-
-    int w;
-    do {
-        w = sem_timedwait(&g_bt.done, &ts);
-    } while (w != 0 && errno == EINTR);
-    return w;
-}
-
 int self_backtrace_dump_all(char *path_out, size_t cap)
 {
     if (!atomic_load_explicit(&g_installed, memory_order_acquire))
@@ -414,7 +396,15 @@ int self_backtrace_dump_all(char *path_out, size_t cap)
             continue;
         }
 
-        int w = self_bt_wait_target_response();
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);  // platform-ok:sem_timedwait requires a raw CLOCK_REALTIME absolute deadline
+        ts.tv_nsec += 100L * 1000L * 1000L;  /* 100 ms budget per thread */
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+
+        int w;
+        do {
+            w = sem_timedwait(&g_bt.done, &ts);
+        } while (w != 0 && errno == EINTR);
 
         if (w != 0) {
             /* Blocked / signal-masked thread: it cannot hang the dump. */
