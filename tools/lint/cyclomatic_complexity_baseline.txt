@@ -31,8 +31,6 @@ contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_hand
 contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21
 contexts/commons/modules/commons_demo/src/demo.c:commons_demo_render:20
 contexts/commons/modules/vcs/src/moderation_attestation_object.c:attest_shape:21
-contexts/commons/modules/vcs/src/node_reproduce.c:vcs_node_receipt_decode:44
-contexts/commons/modules/vcs/src/node_reproduce.c:vcs_node_reproduce_compare:26
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_error_string:35
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_parse:33
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_validate:47

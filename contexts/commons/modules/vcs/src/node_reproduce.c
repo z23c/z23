@@ -127,38 +127,10 @@ static bool nr_hex64_set(const char *s)
 
 /* ── the compare ───────────────────────────────────────────────────────── */
 
-bool vcs_node_reproduce_compare(const struct vcs_node_receipt *received,
+static void nr_compare_coverage(const struct vcs_node_receipt *received,
                                 const struct vcs_node_receipt *rebuilt,
                                 struct vcs_node_repro_report *out)
 {
-    if (!out)
-        return false;
-    memset(out, 0, sizeof(*out));
-
-    if (!received || !rebuilt) {
-        nr_verdict(out, VCS_NODE_REPRO_RECEIPT_INVALID,
-                   "a receipt was not supplied");
-        return false;
-    }
-
-    /* THE REFUSAL THAT MAKES THIS WORTH RUNNING. Comparing a publisher's
-     * recorded hash against the same publisher's recorded hash is not a
-     * check; it is the publisher agreeing with themselves. One side must
-     * be what the user was handed, the other must be bytes this machine
-     * produced, and nothing else is accepted. */
-    if (received->producer != VCS_NODE_PRODUCER_RECEIVED ||
-        rebuilt->producer != VCS_NODE_PRODUCER_LOCAL_REBUILD) {
-        nr_verdict(out, VCS_NODE_REPRO_NOT_LOCAL,
-                   "refusing to compare %s against %s: one side must be the "
-                   "artifact you received and the other must be bytes this "
-                   "machine built",
-                   vcs_node_producer_string(
-                       (enum vcs_node_producer)received->producer),
-                   vcs_node_producer_string(
-                       (enum vcs_node_producer)rebuilt->producer));
-        return false;
-    }
-
     /* Coverage first, so it is populated on every exit below. */
     nr_gaps(out, "received", received);
     nr_gaps(out, "rebuilt", rebuilt);
@@ -174,7 +146,12 @@ bool vcs_node_reproduce_compare(const struct vcs_node_receipt *received,
     out->toolchain_agrees =
         out->toolchain_known &&
         strcmp(received->toolchain_id, rebuilt->toolchain_id) == 0;
+}
 
+static void nr_compare_rows(const struct vcs_node_receipt *received,
+                            const struct vcs_node_receipt *rebuilt,
+                            struct vcs_node_repro_report *out)
+{
     /* Rows over the UNION of both path sets. An artifact only one side
      * emitted is a reported gap, never a silent omission. */
     for (size_t i = 0; i < received->artifact_count; i++) {
@@ -217,6 +194,94 @@ bool vcs_node_reproduce_compare(const struct vcs_node_receipt *received,
                "this machine's build emitted it and the artifact you "
                "received does not contain it");
     }
+}
+
+static void nr_compare_diagnose(const struct vcs_node_receipt *received,
+                                const struct vcs_node_receipt *rebuilt,
+                                struct vcs_node_repro_report *out)
+{
+    /* Diagnosis, in evidence order. Source first: if we did not rebuild the
+     * same source we have said nothing about the publisher at all. */
+    if (!out->source_id_known) {
+        nr_verdict(out, VCS_NODE_REPRO_UNDIAGNOSED,
+                   "%u artifact(s) differ, but a source identity is missing "
+                   "on one side (received=%s built=%s) so this cannot say "
+                   "whether the source, the toolchain, or the claim is at "
+                   "fault",
+                   out->differed,
+                   nr_hex64_set(received->source_id) ? "recorded" : "absent",
+                   nr_hex64_set(rebuilt->source_id) ? "recorded" : "absent");
+        return;
+    }
+    if (!out->source_id_agrees) {
+        nr_verdict(out, VCS_NODE_REPRO_SOURCE_DIFFERS,
+                   "the source tree built here is not the source tree that "
+                   "artifact came from (received %.16s…, built %.16s…) — "
+                   "this says nothing about the publisher, only that a "
+                   "different experiment was run",
+                   received->source_id, rebuilt->source_id);
+        return;
+    }
+    if (!out->toolchain_known) {
+        nr_verdict(out, VCS_NODE_REPRO_UNDIAGNOSED,
+                   "same source, %u artifact(s) differ, and no toolchain "
+                   "identity was recorded on %s — a toolchain gap and a false "
+                   "publisher claim look identical from here",
+                   out->differed,
+                   nr_hex64_set(received->toolchain_id) ? "the rebuild"
+                                                        : "the artifact");
+        return;
+    }
+    if (!out->toolchain_agrees) {
+        nr_verdict(out, VCS_NODE_REPRO_TOOLCHAIN_DIFFERS,
+                   "same source, but your toolchain differs from the "
+                   "publisher's (%.16s… vs %.16s…): %u artifact(s) differ and "
+                   "that difference explains them",
+                   rebuilt->toolchain_id, received->toolchain_id,
+                   out->differed);
+        return;
+    }
+    nr_verdict(out, VCS_NODE_REPRO_CLAIM_FALSE,
+               "same source AND the same toolchain, and %u artifact(s) still "
+               "differ: every declared input agrees, so the artifact you "
+               "received is not what this source and toolchain produce",
+               out->differed);
+}
+
+bool vcs_node_reproduce_compare(const struct vcs_node_receipt *received,
+                                const struct vcs_node_receipt *rebuilt,
+                                struct vcs_node_repro_report *out)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+
+    if (!received || !rebuilt) {
+        nr_verdict(out, VCS_NODE_REPRO_RECEIPT_INVALID,
+                   "a receipt was not supplied");
+        return false;
+    }
+
+    /* THE REFUSAL THAT MAKES THIS WORTH RUNNING. Comparing a publisher's
+     * recorded hash against the same publisher's recorded hash is not a
+     * check; it is the publisher agreeing with themselves. One side must
+     * be what the user was handed, the other must be bytes this machine
+     * produced, and nothing else is accepted. */
+    if (received->producer != VCS_NODE_PRODUCER_RECEIVED ||
+        rebuilt->producer != VCS_NODE_PRODUCER_LOCAL_REBUILD) {
+        nr_verdict(out, VCS_NODE_REPRO_NOT_LOCAL,
+                   "refusing to compare %s against %s: one side must be the "
+                   "artifact you received and the other must be bytes this "
+                   "machine built",
+                   vcs_node_producer_string(
+                       (enum vcs_node_producer)received->producer),
+                   vcs_node_producer_string(
+                       (enum vcs_node_producer)rebuilt->producer));
+        return false;
+    }
+
+    nr_compare_coverage(received, rebuilt, out);
+    nr_compare_rows(received, rebuilt, out);
 
     if (out->compared == 0) {
         nr_verdict(out, VCS_NODE_REPRO_NO_ARTIFACTS,
@@ -241,52 +306,7 @@ bool vcs_node_reproduce_compare(const struct vcs_node_receipt *received,
         return true;
     }
 
-    /* Diagnosis, in evidence order. Source first: if we did not rebuild the
-     * same source we have said nothing about the publisher at all. */
-    if (!out->source_id_known) {
-        nr_verdict(out, VCS_NODE_REPRO_UNDIAGNOSED,
-                   "%u artifact(s) differ, but a source identity is missing "
-                   "on one side (received=%s built=%s) so this cannot say "
-                   "whether the source, the toolchain, or the claim is at "
-                   "fault",
-                   out->differed,
-                   nr_hex64_set(received->source_id) ? "recorded" : "absent",
-                   nr_hex64_set(rebuilt->source_id) ? "recorded" : "absent");
-        return false;
-    }
-    if (!out->source_id_agrees) {
-        nr_verdict(out, VCS_NODE_REPRO_SOURCE_DIFFERS,
-                   "the source tree built here is not the source tree that "
-                   "artifact came from (received %.16s…, built %.16s…) — "
-                   "this says nothing about the publisher, only that a "
-                   "different experiment was run",
-                   received->source_id, rebuilt->source_id);
-        return false;
-    }
-    if (!out->toolchain_known) {
-        nr_verdict(out, VCS_NODE_REPRO_UNDIAGNOSED,
-                   "same source, %u artifact(s) differ, and no toolchain "
-                   "identity was recorded on %s — a toolchain gap and a false "
-                   "publisher claim look identical from here",
-                   out->differed,
-                   nr_hex64_set(received->toolchain_id) ? "the rebuild"
-                                                        : "the artifact");
-        return false;
-    }
-    if (!out->toolchain_agrees) {
-        nr_verdict(out, VCS_NODE_REPRO_TOOLCHAIN_DIFFERS,
-                   "same source, but your toolchain differs from the "
-                   "publisher's (%.16s… vs %.16s…): %u artifact(s) differ and "
-                   "that difference explains them",
-                   rebuilt->toolchain_id, received->toolchain_id,
-                   out->differed);
-        return false;
-    }
-    nr_verdict(out, VCS_NODE_REPRO_CLAIM_FALSE,
-               "same source AND the same toolchain, and %u artifact(s) still "
-               "differ: every declared input agrees, so the artifact you "
-               "received is not what this source and toolchain produce",
-               out->differed);
+    nr_compare_diagnose(received, rebuilt, out);
     return false;
 }
 
@@ -366,9 +386,9 @@ static bool nr_u64(const char *s, uint64_t *out)
     return true;
 }
 
-bool vcs_node_receipt_decode(const char *text, size_t len,
-                             struct vcs_node_receipt *out, char *why,
-                             size_t why_cap)
+static bool nr_decode_check_input(const char *text, size_t len,
+                                  struct vcs_node_receipt *out, char *why,
+                                  size_t why_cap)
 {
     if (!out)
         return false;
@@ -384,6 +404,191 @@ bool vcs_node_receipt_decode(const char *text, size_t len,
                (unsigned)VCS_NODE_REPRO_MAX_WIRE_BYTES);
         return false;
     }
+    return true;
+}
+
+static bool nr_decode_schema_line(const char *line, const char *end,
+                                  char *why, size_t why_cap, size_t line_no)
+{
+    char schema[64];
+    if (!nr_rest(line, end, schema, sizeof(schema)) ||
+        strcmp(schema, VCS_NODE_REPRO_SCHEMA) != 0) {
+        nr_why(why, why_cap,
+               "line %zu: first directive must be %s", line_no,
+               VCS_NODE_REPRO_SCHEMA);
+        return false;
+    }
+    return true;
+}
+
+static bool nr_decode_producer_line(const char *cur, const char *end,
+                                    struct vcs_node_receipt *out, char *why,
+                                    size_t why_cap, size_t line_no)
+{
+    char v[32];
+    if (!nr_token(&cur, end, v, sizeof(v))) {
+        nr_why(why, why_cap, "line %zu: producer needs a value",
+               line_no);
+        return false;
+    }
+    if (strcmp(v, "received") == 0)
+        out->producer = VCS_NODE_PRODUCER_RECEIVED;
+    else if (strcmp(v, "local-rebuild") == 0)
+        out->producer = VCS_NODE_PRODUCER_LOCAL_REBUILD;
+    else {
+        nr_why(why, why_cap,
+               "line %zu: producer must be received or local-rebuild",
+               line_no);
+        return false;
+    }
+    return true;
+}
+
+static bool nr_decode_hex_identity(const char *key, const char *cur,
+                                   const char *end,
+                                   struct vcs_node_receipt *out, char *why,
+                                   size_t why_cap, size_t line_no)
+{
+    char v[80];
+    if (!nr_token(&cur, end, v, sizeof(v)) || !nr_hex64(v)) {
+        nr_why(why, why_cap,
+               "line %zu: %s must be 64 lowercase hex characters",
+               line_no, key);
+        return false;
+    }
+    char *dst = key[0] == 's' ? out->source_id : out->toolchain_id;
+    memcpy(dst, v, 65);
+    return true;
+}
+
+static bool nr_decode_artifact_line(const char *cur, const char *end,
+                                    struct vcs_node_receipt *out, char *why,
+                                    size_t why_cap, size_t line_no)
+{
+    if (out->artifact_count >= VCS_NODE_REPRO_MAX_ARTIFACTS) {
+        nr_why(why, why_cap,
+               "line %zu: more than %u artifacts; refusing rather "
+               "than dropping one", line_no,
+               (unsigned)VCS_NODE_REPRO_MAX_ARTIFACTS);
+        return false;
+    }
+    struct vcs_node_artifact *a = &out->artifacts[out->artifact_count];
+    char hex[80], size[32];
+    if (!nr_token(&cur, end, hex, sizeof(hex)) || !nr_hex64(hex) ||
+        !zcl_hex_decode_lower(hex, a->sha3, sizeof(a->sha3))) {
+        nr_why(why, why_cap,
+               "line %zu: artifact needs a 64-lowercase-hex sha3-256",
+               line_no);
+        return false;
+    }
+    if (!nr_token(&cur, end, size, sizeof(size)) ||
+        !nr_u64(size, &a->bytes)) {
+        nr_why(why, why_cap,
+               "line %zu: artifact needs a decimal byte count",
+               line_no);
+        return false;
+    }
+    if (!nr_rest(cur, end, a->path, sizeof(a->path)) || !a->path[0]) {
+        nr_why(why, why_cap,
+               "line %zu: artifact needs a relative path", line_no);
+        return false;
+    }
+    out->artifact_count++;
+    return true;
+}
+
+static bool nr_decode_unverified_line(const char *cur, const char *end,
+                                      struct vcs_node_receipt *out,
+                                      char *why, size_t why_cap,
+                                      size_t line_no)
+{
+    if (out->unverified_count >= VCS_NODE_REPRO_MAX_UNVERIFIED) {
+        nr_why(why, why_cap,
+               "line %zu: more than %u unverified components; "
+               "refusing rather than dropping one", line_no,
+               (unsigned)VCS_NODE_REPRO_MAX_UNVERIFIED);
+        return false;
+    }
+    struct vcs_node_unverified *u =
+        &out->unverified[out->unverified_count];
+    if (!nr_token(&cur, end, u->component, sizeof(u->component))) {
+        nr_why(why, why_cap,
+               "line %zu: unverified needs a component name",
+               line_no);
+        return false;
+    }
+    if (!nr_rest(cur, end, u->reason, sizeof(u->reason)) ||
+        !u->reason[0]) {
+        nr_why(why, why_cap,
+               "line %zu: unverified needs a reason — a component "
+               "named without one cannot be judged", line_no);
+        return false;
+    }
+    out->unverified_count++;
+    return true;
+}
+
+static bool nr_decode_directive(const char *key, const char *cur,
+                                const char *end, struct vcs_node_receipt *out,
+                                bool *saw_producer, char *why, size_t why_cap,
+                                size_t line_no)
+{
+    if (strcmp(key, "producer") == 0) {
+        if (!nr_decode_producer_line(cur, end, out, why, why_cap, line_no))
+            return false;
+        *saw_producer = true;
+    } else if (strcmp(key, "source_id") == 0 ||
+               strcmp(key, "toolchain") == 0) {
+        if (!nr_decode_hex_identity(key, cur, end, out, why, why_cap,
+                                    line_no))
+            return false;
+    } else if (strcmp(key, "toolchain_desc") == 0) {
+        if (!nr_rest(cur, end, out->toolchain_desc,
+                     sizeof(out->toolchain_desc))) {
+            nr_why(why, why_cap, "line %zu: toolchain_desc too long",
+                   line_no);
+            return false;
+        }
+    } else if (strcmp(key, "artifact") == 0) {
+        if (!nr_decode_artifact_line(cur, end, out, why, why_cap, line_no))
+            return false;
+    } else if (strcmp(key, "unverified") == 0) {
+        if (!nr_decode_unverified_line(cur, end, out, why, why_cap,
+                                       line_no))
+            return false;
+    } else {
+        /* A directive this build does not understand may be exactly the
+         * one that would have changed the verdict. Refuse. */
+        nr_why(why, why_cap, "line %zu: unknown directive '%s'", line_no,
+               key);
+        return false;
+    }
+    return true;
+}
+
+static bool nr_decode_check_complete(bool saw_schema, bool saw_producer,
+                                     char *why, size_t why_cap)
+{
+    if (!saw_schema) {
+        nr_why(why, why_cap, "empty receipt (no %s line)",
+               VCS_NODE_REPRO_SCHEMA);
+        return false;
+    }
+    if (!saw_producer) {
+        nr_why(why, why_cap,
+               "receipt names no producer; a receipt that does not say who "
+               "made the bytes cannot be compared");
+        return false;
+    }
+    return true;
+}
+
+bool vcs_node_receipt_decode(const char *text, size_t len,
+                             struct vcs_node_receipt *out, char *why,
+                             size_t why_cap)
+{
+    if (!nr_decode_check_input(text, len, out, why, why_cap))
+        return false;
 
     bool saw_schema = false;
     bool saw_producer = false;
@@ -405,14 +610,8 @@ bool vcs_node_receipt_decode(const char *text, size_t len,
             continue;
 
         if (!saw_schema) {
-            char schema[64];
-            if (!nr_rest(line, end, schema, sizeof(schema)) ||
-                strcmp(schema, VCS_NODE_REPRO_SCHEMA) != 0) {
-                nr_why(why, why_cap,
-                       "line %zu: first directive must be %s", line_no,
-                       VCS_NODE_REPRO_SCHEMA);
+            if (!nr_decode_schema_line(line, end, why, why_cap, line_no))
                 return false;
-            }
             saw_schema = true;
             continue;
         }
@@ -424,118 +623,12 @@ bool vcs_node_receipt_decode(const char *text, size_t len,
             return false;
         }
 
-        if (strcmp(key, "producer") == 0) {
-            char v[32];
-            if (!nr_token(&cur, end, v, sizeof(v))) {
-                nr_why(why, why_cap, "line %zu: producer needs a value",
-                       line_no);
-                return false;
-            }
-            if (strcmp(v, "received") == 0)
-                out->producer = VCS_NODE_PRODUCER_RECEIVED;
-            else if (strcmp(v, "local-rebuild") == 0)
-                out->producer = VCS_NODE_PRODUCER_LOCAL_REBUILD;
-            else {
-                nr_why(why, why_cap,
-                       "line %zu: producer must be received or local-rebuild",
-                       line_no);
-                return false;
-            }
-            saw_producer = true;
-        } else if (strcmp(key, "source_id") == 0 ||
-                   strcmp(key, "toolchain") == 0) {
-            char v[80];
-            if (!nr_token(&cur, end, v, sizeof(v)) || !nr_hex64(v)) {
-                nr_why(why, why_cap,
-                       "line %zu: %s must be 64 lowercase hex characters",
-                       line_no, key);
-                return false;
-            }
-            char *dst = key[0] == 's' ? out->source_id : out->toolchain_id;
-            memcpy(dst, v, 65);
-        } else if (strcmp(key, "toolchain_desc") == 0) {
-            if (!nr_rest(cur, end, out->toolchain_desc,
-                         sizeof(out->toolchain_desc))) {
-                nr_why(why, why_cap, "line %zu: toolchain_desc too long",
-                       line_no);
-                return false;
-            }
-        } else if (strcmp(key, "artifact") == 0) {
-            if (out->artifact_count >= VCS_NODE_REPRO_MAX_ARTIFACTS) {
-                nr_why(why, why_cap,
-                       "line %zu: more than %u artifacts; refusing rather "
-                       "than dropping one", line_no,
-                       (unsigned)VCS_NODE_REPRO_MAX_ARTIFACTS);
-                return false;
-            }
-            struct vcs_node_artifact *a =
-                &out->artifacts[out->artifact_count];
-            char hex[80], size[32];
-            if (!nr_token(&cur, end, hex, sizeof(hex)) || !nr_hex64(hex) ||
-                !zcl_hex_decode_lower(hex, a->sha3, sizeof(a->sha3))) {
-                nr_why(why, why_cap,
-                       "line %zu: artifact needs a 64-lowercase-hex sha3-256",
-                       line_no);
-                return false;
-            }
-            if (!nr_token(&cur, end, size, sizeof(size)) ||
-                !nr_u64(size, &a->bytes)) {
-                nr_why(why, why_cap,
-                       "line %zu: artifact needs a decimal byte count",
-                       line_no);
-                return false;
-            }
-            if (!nr_rest(cur, end, a->path, sizeof(a->path)) || !a->path[0]) {
-                nr_why(why, why_cap,
-                       "line %zu: artifact needs a relative path", line_no);
-                return false;
-            }
-            out->artifact_count++;
-        } else if (strcmp(key, "unverified") == 0) {
-            if (out->unverified_count >= VCS_NODE_REPRO_MAX_UNVERIFIED) {
-                nr_why(why, why_cap,
-                       "line %zu: more than %u unverified components; "
-                       "refusing rather than dropping one", line_no,
-                       (unsigned)VCS_NODE_REPRO_MAX_UNVERIFIED);
-                return false;
-            }
-            struct vcs_node_unverified *u =
-                &out->unverified[out->unverified_count];
-            if (!nr_token(&cur, end, u->component, sizeof(u->component))) {
-                nr_why(why, why_cap,
-                       "line %zu: unverified needs a component name",
-                       line_no);
-                return false;
-            }
-            if (!nr_rest(cur, end, u->reason, sizeof(u->reason)) ||
-                !u->reason[0]) {
-                nr_why(why, why_cap,
-                       "line %zu: unverified needs a reason — a component "
-                       "named without one cannot be judged", line_no);
-                return false;
-            }
-            out->unverified_count++;
-        } else {
-            /* A directive this build does not understand may be exactly the
-             * one that would have changed the verdict. Refuse. */
-            nr_why(why, why_cap, "line %zu: unknown directive '%s'", line_no,
-                   key);
+        if (!nr_decode_directive(key, cur, end, out, &saw_producer, why,
+                                 why_cap, line_no))
             return false;
-        }
     }
 
-    if (!saw_schema) {
-        nr_why(why, why_cap, "empty receipt (no %s line)",
-               VCS_NODE_REPRO_SCHEMA);
-        return false;
-    }
-    if (!saw_producer) {
-        nr_why(why, why_cap,
-               "receipt names no producer; a receipt that does not say who "
-               "made the bytes cannot be compared");
-        return false;
-    }
-    return true;
+    return nr_decode_check_complete(saw_schema, saw_producer, why, why_cap);
 }
 
 size_t vcs_node_receipt_encode(const struct vcs_node_receipt *receipt,
