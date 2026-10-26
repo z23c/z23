@@ -141,6 +141,125 @@ static void hp_save_repair_header(const struct block_index *pindex,
 
 /* ── Public pull-range ─────────────────────────────────────────── */
 
+/* Admits one fetched header. Returns false when it is rejected. Sets
+ * *inbox_full when the admit ring pushes back. */
+static bool hp_admit_fetched_header(struct main_state *ms,
+                                    const struct chain_params *params,
+                                    const struct block_header *hdr,
+                                    int *added, bool *inbox_full)
+{
+    struct validation_state vs;
+    validation_state_init(&vs);
+    struct block_index *pindex = NULL;
+    if (!accept_block_header(hdr, &vs, ms, params, &pindex)) {
+        atomic_fetch_add(&g_hp.headers_rejected, 1);
+        return false;
+    }
+    atomic_fetch_add(&g_hp.headers_added, 1);
+    (*added)++;
+    hp_save_repair_header(pindex, hdr);
+    if (pindex && pindex->nHeight > 0)
+        atomic_store(&g_hp.last_local_height, pindex->nHeight);
+    if (!hp_publish_header_admit(pindex, hdr))
+        *inbox_full = true;  /* backpressure: resume next tick */
+    return true;
+}
+
+/* Fetches height h alone and admits it. Returns true when the pull
+ * must stop. */
+static bool hp_pull_single_header(const char *host, int port,
+                                  const char *user, const char *pass,
+                                  int h, struct main_state *ms,
+                                  const struct chain_params *params,
+                                  int *added, bool *inbox_full)
+{
+    char err[160] = {0};
+    struct block_header hdr;
+    if (!legacy_header_rpc_fetch_one(host, port, user, pass, h,
+                                     &hdr, err, sizeof(err))) {
+        atomic_fetch_add(&g_hp.rpc_errors, 1);
+        return true;
+    }
+    if (!hp_admit_fetched_header(ms, params, &hdr, added, inbox_full))
+        return true;
+    return *inbox_full;
+}
+
+/* Admits a parsed batch in order. Returns true when the pull must stop. */
+static bool hp_admit_batch(struct main_state *ms,
+                           const struct chain_params *params,
+                           const struct block_header *hbuf, int parsed,
+                           int *added, bool *inbox_full)
+{
+    for (int i = 0; i < parsed; i++) {
+        if (!hp_admit_fetched_header(ms, params, &hbuf[i], added,
+                                     inbox_full))
+            return true;
+        if (*inbox_full)
+            return true;  /* backpressure: resume next tick */
+    }
+    return false;
+}
+
+/* Copies the RPC target and chain handles under g_hp.lock. Returns false,
+ * with the lock released, when the module is not initialized. */
+static bool hp_snapshot_pull_target(char host[64], int *port,
+                                    char user[64], char pass[128],
+                                    struct main_state **ms,
+                                    const struct chain_params **params)
+{
+    pthread_mutex_lock(&g_hp.lock);
+    if (!g_hp.initialized || !g_hp.ms || !g_hp.params) {
+        pthread_mutex_unlock(&g_hp.lock);
+        return false;
+    }
+    snprintf(host, 64, "%s",
+             g_hp.rpc_host[0] ? g_hp.rpc_host : HP_DEFAULT_HOST);
+    *port = g_hp.rpc_port ? g_hp.rpc_port : ZCLASSICD_RPC_DEFAULT_PORT;
+    snprintf(user, 64, "%s", g_hp.rpc_user);
+    snprintf(pass, 128, "%s", g_hp.rpc_password);
+    *ms = g_hp.ms;
+    *params = g_hp.params;
+    pthread_mutex_unlock(&g_hp.lock);
+    return true;
+}
+
+/* Clamp batch size. */
+static int hp_clamp_pull_batch(int max_headers)
+{
+    if (max_headers <= 0) max_headers = HP_DEFAULT_BATCH;
+    if (max_headers > HP_MAX_BATCH) max_headers = HP_MAX_BATCH;
+    return max_headers;
+}
+
+/* Local tip (header tip is the high-water mark for headers). */
+static int hp_local_header_tip(struct main_state *ms)
+{
+    int local_tip = 0;
+    if (ms->pindex_best_header)
+        local_tip = ms->pindex_best_header->nHeight;
+    else
+        local_tip = active_chain_height(&ms->chain_active);
+    if (local_tip < 0) local_tip = 0;
+    return local_tip;
+}
+
+static int hp_pull_end_height(int start_height, int max_headers,
+                              int remote_tip)
+{
+    int end_height = start_height + max_headers - 1;
+    if (end_height > remote_tip) end_height = remote_tip;
+    return end_height;
+}
+
+static int hp_batch_len(int h, int end_height)
+{
+    int n = end_height - h + 1;
+    if (n > LEGACY_HEADER_RPC_BATCH_MAX)
+        n = LEGACY_HEADER_RPC_BATCH_MAX;
+    return n;
+}
+
 struct zcl_result header_probe_pull_range(int start_height, int max_headers,
                                           int *out_added)
 {
@@ -149,27 +268,16 @@ struct zcl_result header_probe_pull_range(int start_height, int max_headers,
         return ZCL_ERR(-1, "pull_range: bad start_height=%d", start_height);
     }
 
-    pthread_mutex_lock(&g_hp.lock);
-    if (!g_hp.initialized || !g_hp.ms || !g_hp.params) {
-        pthread_mutex_unlock(&g_hp.lock);
-        return ZCL_ERR(-2, "pull_range: not initialized");
-    }
     char host[64], user[64], pass[128];
     int port;
-    snprintf(host, sizeof(host), "%s",
-             g_hp.rpc_host[0] ? g_hp.rpc_host : HP_DEFAULT_HOST);
-    port = g_hp.rpc_port ? g_hp.rpc_port : ZCLASSICD_RPC_DEFAULT_PORT;
-    snprintf(user, sizeof(user), "%s", g_hp.rpc_user);
-    snprintf(pass, sizeof(pass), "%s", g_hp.rpc_password);
-    struct main_state *ms = g_hp.ms;
-    const struct chain_params *params = g_hp.params;
-    pthread_mutex_unlock(&g_hp.lock);
+    struct main_state *ms = NULL;
+    const struct chain_params *params = NULL;
+    if (!hp_snapshot_pull_target(host, &port, user, pass, &ms, &params))
+        return ZCL_ERR(-2, "pull_range: not initialized");
 
     atomic_fetch_add(&g_hp.calls_total, 1);
 
-    /* Clamp batch size. */
-    if (max_headers <= 0) max_headers = HP_DEFAULT_BATCH;
-    if (max_headers > HP_MAX_BATCH) max_headers = HP_MAX_BATCH;
+    max_headers = hp_clamp_pull_batch(max_headers);
 
     /* Discover remote tip — bounds the loop and updates last_remote. */
     int remote_tip = -1;
@@ -183,17 +291,10 @@ struct zcl_result header_probe_pull_range(int start_height, int max_headers,
     }
     atomic_store(&g_hp.last_remote_height, remote_tip);
 
-    /* Local tip (header tip is the high-water mark for headers). */
-    int local_tip = 0;
-    if (ms->pindex_best_header)
-        local_tip = ms->pindex_best_header->nHeight;
-    else
-        local_tip = active_chain_height(&ms->chain_active);
-    if (local_tip < 0) local_tip = 0;
+    int local_tip = hp_local_header_tip(ms);
     atomic_store(&g_hp.last_local_height, local_tip);
 
-    int end_height = start_height + max_headers - 1;
-    if (end_height > remote_tip) end_height = remote_tip;
+    int end_height = hp_pull_end_height(start_height, max_headers, remote_tip);
     if (end_height < start_height) return ZCL_OK;  /* nothing to do */
 
     int added = 0;
@@ -210,9 +311,7 @@ struct zcl_result header_probe_pull_range(int start_height, int max_headers,
     }
 
     while (h <= end_height) {
-        int n = end_height - h + 1;
-        if (n > LEGACY_HEADER_RPC_BATCH_MAX)
-            n = LEGACY_HEADER_RPC_BATCH_MAX;
+        int n = hp_batch_len(h, end_height);
 
         int parsed = 0;
         if (!legacy_header_rpc_fetch_batch(host, port, user, pass,
@@ -222,56 +321,16 @@ struct zcl_result header_probe_pull_range(int start_height, int max_headers,
             /* Batch failed — fall back to single-call for this one
              * header so we still make some progress and surface a
              * precise error message. */
-            struct block_header hdr;
-            if (!legacy_header_rpc_fetch_one(host, port, user, pass, h,
-                                             &hdr, err, sizeof(err))) {
-                atomic_fetch_add(&g_hp.rpc_errors, 1);
+            if (hp_pull_single_header(host, port, user, pass, h, ms, params,
+                                      &added, &inbox_full)) {
                 break;
             }
-            struct validation_state vs;
-            validation_state_init(&vs);
-            struct block_index *pindex = NULL;
-            if (accept_block_header(&hdr, &vs, ms, params, &pindex)) {
-                atomic_fetch_add(&g_hp.headers_added, 1);
-                added++;
-                hp_save_repair_header(pindex, &hdr);
-                if (pindex && pindex->nHeight > 0)
-                    atomic_store(&g_hp.last_local_height,
-                                 pindex->nHeight);
-                if (!hp_publish_header_admit(pindex, &hdr)) {
-                    inbox_full = true;  /* backpressure: resume next tick */
-                    break;
-                }
-                h++;
-                continue;
-            }
-            atomic_fetch_add(&g_hp.headers_rejected, 1);
-            break;
+            h++;
+            continue;
         }
 
-        bool reject = false;
-        for (int i = 0; i < parsed; i++) {
-            struct validation_state vs;
-            validation_state_init(&vs);
-            struct block_index *pindex = NULL;
-            if (accept_block_header(&hbuf[i], &vs, ms, params, &pindex)) {
-                atomic_fetch_add(&g_hp.headers_added, 1);
-                added++;
-                hp_save_repair_header(pindex, &hbuf[i]);
-                if (pindex && pindex->nHeight > 0)
-                    atomic_store(&g_hp.last_local_height,
-                                 pindex->nHeight);
-                if (!hp_publish_header_admit(pindex, &hbuf[i])) {
-                    inbox_full = true;  /* backpressure: resume next tick */
-                    break;
-                }
-            } else {
-                atomic_fetch_add(&g_hp.headers_rejected, 1);
-                reject = true;
-                break;
-            }
-        }
-        if (reject || inbox_full) break;
+        if (hp_admit_batch(ms, params, hbuf, parsed, &added, &inbox_full))
+            break;
         if (parsed < n) {
             /* Partial batch — surface per-item decode/deserialize
              * failures as RPC errors so callers see the same

@@ -974,7 +974,6 @@ engine/services/src/consensus_state_publication_cas.c:persist_record:23
 engine/services/src/consensus_state_publication_decide.c:consensus_state_publication_cas_decide:22
 engine/services/src/consensus_state_publication_decide.c:manifest_complete_self_bound:19
 engine/services/src/gap_fill_service.c:gap_fill_pass:27
-engine/services/src/header_probe.c:header_probe_pull_range:34
 engine/services/src/legacy_import_service.c:legacy_import_service_run:66
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_init:31
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_stats_snapshot_impl:44
