@@ -27,6 +27,19 @@ static bool canvas_label_valid(const char *label)
     return length > 0 && length <= ZCL_PRESENT_WINDOW_CANVAS_LABEL_MAX;
 }
 
+static bool canvas_point_fields_valid(
+    const struct zcl_present_window_canvas_point_v1 *point)
+{
+    if ((point->flags &
+         ~(uint16_t)ZCL_PRESENT_WINDOW_CANVAS_POINT_READ_ONLY) != 0 ||
+        point->status > 4u ||
+        point->x > ZCL_PRESENT_WINDOW_CANVAS_COORD_MAX ||
+        point->y > ZCL_PRESENT_WINDOW_CANVAS_COORD_MAX ||
+        !canvas_label_valid(point->label))
+        return false;
+    return true;
+}
+
 bool zcl_present_window_canvas_validate_v1(
     const struct zcl_present_window_canvas_v1 *canvas,
     char *error, size_t error_cap)
@@ -42,12 +55,7 @@ bool zcl_present_window_canvas_validate_v1(
     for (uint32_t i = 0; i < canvas->point_count; i++) {
         const struct zcl_present_window_canvas_point_v1 *point =
             &canvas->points[i];
-        if ((point->flags &
-             ~(uint16_t)ZCL_PRESENT_WINDOW_CANVAS_POINT_READ_ONLY) != 0 ||
-            point->status > 4u ||
-            point->x > ZCL_PRESENT_WINDOW_CANVAS_COORD_MAX ||
-            point->y > ZCL_PRESENT_WINDOW_CANVAS_COORD_MAX ||
-            !canvas_label_valid(point->label))
+        if (!canvas_point_fields_valid(point))
             return canvas_error(error, error_cap,
                                 "presentation canvas point is invalid");
         editable += !(point->flags &
@@ -102,16 +110,12 @@ bool zcl_present_window_canvas_focus_step_v1(
     return true;
 }
 
-bool zcl_present_window_canvas_point_at_v1(
+static bool canvas_mouse_to_normalized(
     uint32_t source_width, uint32_t source_height,
     int32_t target_width, int32_t target_height,
     int32_t mouse_x, int32_t mouse_y,
     uint32_t *normalized_x, uint32_t *normalized_y)
 {
-    if (!normalized_x || !normalized_y || source_width == 0 ||
-        source_height == 0 || target_width <= 0 || target_height <= 0 ||
-        mouse_x < 0 || mouse_y < 0)
-        return false;
     uint32_t draw_width = (uint32_t)target_width;
     uint32_t draw_height = (uint32_t)((uint64_t)draw_width * source_height /
                                       source_width);
@@ -147,6 +151,22 @@ bool zcl_present_window_canvas_point_at_v1(
         ZCL_PRESENT_WINDOW_CANVAS_COORD_MAX /
         (ZCL_PRESENT_MODEL_CANVAS_HEIGHT - 1u));
     return true;
+}
+
+bool zcl_present_window_canvas_point_at_v1(
+    uint32_t source_width, uint32_t source_height,
+    int32_t target_width, int32_t target_height,
+    int32_t mouse_x, int32_t mouse_y,
+    uint32_t *normalized_x, uint32_t *normalized_y)
+{
+    if (!normalized_x || !normalized_y || source_width == 0 ||
+        source_height == 0 || target_width <= 0 || target_height <= 0 ||
+        mouse_x < 0 || mouse_y < 0)
+        return false;
+    return canvas_mouse_to_normalized(source_width, source_height,
+                                      target_width, target_height,
+                                      mouse_x, mouse_y,
+                                      normalized_x, normalized_y);
 }
 
 static struct zcl_present_color canvas_status(uint16_t status)
