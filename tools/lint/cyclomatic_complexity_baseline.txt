@@ -1703,7 +1703,6 @@ tests/harness/src/test_stage_repair_script_refill.c:test_stage_repair_script_ref
 tests/harness/src/test_stage_repair_tipfin_backfill.c:test_stage_repair_tipfin_backfill:258
 tests/harness/src/test_sticky_escalator.c:test_sticky_escalator:85
 tests/harness/src/test_store.c:test_store:327
-tests/harness/src/test_store_buyer.c:test_store_buyer:91
 tests/harness/src/test_store_e2e_gate.c:test_store_e2e_gate:59
 tests/harness/src/test_store_e2e_gate.c:test_store_e2e_shielded:55
 tests/harness/src/test_store_transparent_pay.c:test_store_transparent_pay:39

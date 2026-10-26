@@ -841,13 +841,499 @@ static int tsb_rpc_datadir_copy(const char *datadir, int64_t product_id)
     return !(before && copied && after);
 }
 
+/* ── 1. Sapling address routing follows the active chain ─────────── */
+static int tsb_zaddr_prefix_follows_chain(void)
+{
+    printf("store_buyer: z-address prefix follows the active chain... ");
+    bool ok = true;
+    chain_params_select(CHAIN_MAIN);
+    ok = ok && wallet_addr_is_sapling("zs1abcdefghijklmnop");
+    ok = ok && !wallet_addr_is_sapling("zregtestsapling1abcdef");
+    ok = ok && !wallet_addr_is_sapling(TSB_CUSTOMER);
+    chain_params_select(CHAIN_REGTEST);
+    ok = ok && wallet_addr_is_sapling("zregtestsapling1abcdef");
+    /* The old literal test accepted this on every chain; on regtest a
+     * "zs1..." string is not a local address and must not be routed to
+     * the shielded branch. */
+    ok = ok && !wallet_addr_is_sapling("zs1abcdefghijklmnop");
+    chain_params_select(CHAIN_TESTNET);
+    ok = ok && wallet_addr_is_sapling("ztestsapling1abcdef");
+    ok = ok && !wallet_addr_is_sapling("zs1abcdefghijklmnop");
+    /* The bech32 separator is required, so an HRP that is a prefix of a
+     * longer word cannot be mistaken for one of ours. */
+    ok = ok && !wallet_addr_is_sapling("ztestsaplingfoo");
+    ok = ok && !wallet_addr_is_sapling(NULL);
+    chain_params_select(CHAIN_MAIN);
+    if (ok) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* ── 2. A catalog is visible, and product 1 gets a file ──────────── */
+static int tsb_catalog_with_downloadable_file(const char *datadir,
+                                              int64_t *product_id)
+{
+    printf("store_buyer: catalog lists products with a downloadable file... ");
+    struct store_buyer_offer offers[8];
+    size_t n = 0;
+    struct node_db ndb;
+    bool ok = store_buyer_catalog(datadir, offers, 8, &n).ok;
+    ok = ok && n > 0;
+    if (ok)
+        *product_id = offers[0].product_id;
+    /* No file attached yet, so the buyer is told so honestly. */
+    ok = ok && !offers[0].has_content;
+
+    if (ok && tsb_open(datadir, &ndb)) {
+        ok = tsb_attach_blob(&ndb, *product_id, TSB_BLOB, sizeof(TSB_BLOB));
+        ok = ok && tsb_seed_tip(&ndb, 100);
+        node_db_close(&ndb);
+    } else {
+        ok = false;
+    }
+    /* ...and now it says there is one. */
+    if (ok) {
+        n = 0;
+        ok = store_buyer_catalog(datadir, offers, 8, &n).ok;
+        ok = ok && n > 0 && offers[0].has_content;
+    }
+    if (ok) {
+        printf("OK (product %lld)\n", (long long)*product_id);
+    } else {
+        printf("FAIL\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* Order, confirm the memo token is the order id, and seed its payment. */
+static const char *tsb_place_memo_and_pay(const char *datadir,
+                                          int64_t product_id,
+                                          const char *out_path,
+                                          struct store_buyer_order *paid)
+{
+    const char *step = "order";
+    bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
+                                out_path, false, paid).ok;
+    ok = ok && paid->purchase_id > 0 && paid->order_id > 0;
+    ok = ok && paid->payment_addr[0] != '\0';
+    if (ok) {
+        /* The memo the buyer records must be exactly the token the
+         * merchant's matcher looks for — not "something like" it. */
+        char want[64];
+        (void)snprintf(want, sizeof(want), "ZCL23ORDER:%lld",
+                       (long long)paid->order_id);
+        step = "memo format";
+        ok = strcmp(paid->memo, want) == 0;
+    }
+    if (ok) {
+        step = "seed payment";
+        struct node_db ndb;
+        ok = tsb_open(datadir, &ndb);
+        if (ok) {
+            ok = tsb_seed_note(&ndb, paid->payment_addr, paid->memo, 0x00,
+                               paid->amount_zatoshi, 97, 0x71);
+            node_db_close(&ndb);
+        }
+    }
+    return ok ? NULL : step;
+}
+
+/* Merchant credits the seeded note, then the buyer collects the file. */
+static const char *tsb_credit_and_collect_paid(
+    const char *datadir, const struct store_buyer_order *paid)
+{
+    const char *step = "merchant credits the order";
+    store_process_payments(datadir);
+    struct store_buyer_state state;
+    bool ok = store_buyer_refresh(datadir, paid->purchase_id, &state).ok;
+    ok = ok && state.confirmed_zatoshi >= paid->amount_zatoshi;
+    ok = ok && state.purchase.stage == STORE_PURCHASE_PAID;
+    ok = ok && state.ready_to_collect;
+    if (ok) {
+        step = "collect";
+        struct store_buyer_delivery got;
+        ok = store_buyer_collect(datadir, paid->purchase_id, NULL, &got).ok;
+        ok = ok && got.hash_verified;
+        ok = ok && got.bytes == (int64_t)sizeof(TSB_BLOB);
+    }
+    return ok ? NULL : step;
+}
+
+/* The file on disk is the blob, the temporary is gone, and the row is
+ * delivered. */
+static const char *tsb_verify_bought_file_delivered(
+    const char *datadir, const char *out_path, const char *part_path,
+    const struct store_buyer_order *paid)
+{
+    const char *step = "bytes on disk";
+    bool ok;
+    {
+        uint8_t buf[256];
+        long n = tsb_read_file(out_path, buf, sizeof(buf));
+        ok = n == (long)sizeof(TSB_BLOB) &&
+             memcmp(buf, TSB_BLOB, sizeof(TSB_BLOB)) == 0;
+        /* Atomic write: no temporary is left behind. */
+        ok = ok && !tsb_file_exists(part_path);
+    }
+    if (ok) {
+        step = "stage is delivered";
+        struct db_store_purchase rows[8];
+        size_t n = 0;
+        ok = store_buyer_list(datadir, rows, 8, &n).ok;
+        ok = ok && n >= 1;
+        ok = ok && rows[0].id == paid->purchase_id;
+        ok = ok && rows[0].stage == STORE_PURCHASE_DELIVERED;
+    }
+    return ok ? NULL : step;
+}
+
+/* ── 3. Happy path: order, pay, collect, verify ──────────────────── */
+static int tsb_confirmed_payment_verified_file(
+    const char *datadir, int64_t product_id, const char *out_path,
+    const char *part_path, struct store_buyer_order *paid)
+{
+    printf("store_buyer: order -> confirmed payment -> verified file... ");
+    memset(paid, 0, sizeof(*paid));
+    const char *step = tsb_place_memo_and_pay(datadir, product_id, out_path,
+                                              paid);
+    if (!step)
+        step = tsb_credit_and_collect_paid(datadir, paid);
+    if (!step)
+        step = tsb_verify_bought_file_delivered(datadir, out_path, part_path,
+                                                paid);
+    if (!step) {
+        printf("OK (purchase %lld, %zu bytes)\n",
+               (long long)paid->purchase_id, sizeof(TSB_BLOB));
+        return 0;
+    }
+    printf("FAIL (%s)\n", step);
+    return 1;
+}
+
+/* ── 4. A payment naming a DIFFERENT order does not unlock this one ─ */
+static int tsb_wrong_memo_does_not_unlock(
+    const char *datadir, int64_t product_id,
+    const struct store_buyer_order *paid, struct store_buyer_order *unpaid)
+{
+    printf("store_buyer: a wrong-order memo does not unlock a purchase... ");
+    memset(unpaid, 0, sizeof(*unpaid));
+    const char *step = "order";
+    char decoy_out[640];
+    (void)snprintf(decoy_out, sizeof(decoy_out), "%s/decoy.bin", datadir);
+    bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
+                                decoy_out, false, unpaid).ok;
+    ok = ok && unpaid->purchase_id != paid->purchase_id;
+    if (ok) {
+        /* Full value arrives at THIS order's one-time address, but the
+         * memo names the earlier order. An address-and-amount matcher
+         * would call that paid; the memo-bound one must not. */
+        step = "seed a decoy payment";
+        struct node_db ndb;
+        ok = tsb_open(datadir, &ndb);
+        if (ok) {
+            ok = tsb_seed_note(&ndb, unpaid->payment_addr, paid->memo, 0x00,
+                               unpaid->amount_zatoshi, 97, 0x72);
+            node_db_close(&ndb);
+        }
+    }
+    if (ok) {
+        step = "not credited";
+        store_process_payments(datadir);
+        struct store_buyer_state state;
+        ok = store_buyer_refresh(datadir, unpaid->purchase_id, &state).ok;
+        ok = ok && state.confirmed_zatoshi == 0;
+        ok = ok && state.purchase.stage != STORE_PURCHASE_PAID;
+        ok = ok && !state.ready_to_collect;
+    }
+    if (ok) {
+        step = "collect refuses by name";
+        struct store_buyer_delivery got;
+        ok = store_buyer_collect(datadir, unpaid->purchase_id, NULL,
+                                 &got).code
+            == STORE_BUYER_ERR_PAYMENT_NOT_CONFIRMED;
+        ok = ok && !tsb_file_exists(decoy_out);
+    }
+    if (ok) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (%s)\n", step);
+        return 1;
+    }
+    return 0;
+}
+
+/* ── 5. Mainnet refuses the spend; a test chain names the real reason ─ */
+static int tsb_mainnet_refuses_spend(const char *datadir,
+                                     int64_t purchase_id)
+{
+    printf("store_buyer: mainnet refuses the payment step... ");
+    struct store_buyer_payment pay;
+    chain_params_select(CHAIN_MAIN);
+    bool ok = store_buyer_prepare_payment(datadir, purchase_id,
+                                          TSB_CUSTOMER, &pay).code
+        == STORE_BUYER_ERR_MAINNET_REFUSED;
+    /* Nothing may be handed back when the answer is a refusal. */
+    ok = ok && pay.to_addr[0] == '\0' && pay.memo_hex[0] == '\0';
+    if (ok) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int tsb_missing_prover_refuses_pay(const char *datadir,
+                                          int64_t purchase_id)
+{
+    printf("store_buyer: a build with no proving backend refuses to pay... ");
+    struct store_buyer_payment pay;
+    chain_params_select(CHAIN_REGTEST);
+    struct zcl_result r =
+        store_buyer_prepare_payment(datadir, purchase_id, TSB_CUSTOMER, &pay);
+    bool ok;
+    if (!zclassic_sapling_prover_is_ready()) {
+        /* An unavailable native prover must refuse here rather than fail
+         * later inside coin selection—or, worse, quietly do nothing. */
+        ok = (r.code == STORE_BUYER_ERR_PROVER_UNAVAILABLE);
+        ok = ok && pay.memo_hex[0] == '\0';
+    } else {
+        /* A prover-linked build gets past that check; the next honest
+         * refusal is the empty wallet, never PROVER_UNAVAILABLE. */
+        ok = (r.code != STORE_BUYER_ERR_PROVER_UNAVAILABLE);
+    }
+    chain_params_select(CHAIN_MAIN);
+    if (ok) {
+        printf("OK (%s)\n", store_buyer_status_code(r.code));
+    } else {
+        printf("FAIL (got %s)\n", store_buyer_status_code(r.code));
+        return 1;
+    }
+    return 0;
+}
+
+/* ── 6. The old 0xF6 memo padding is not creditable ──────────────── */
+static int tsb_old_f6_memo_uncredited(const char *datadir,
+                                      int64_t product_id)
+{
+    printf("store_buyer: a memo padded the old way is not credited... ");
+    const char *step = "order";
+    struct store_buyer_order stale;
+    char stale_out[640];
+    (void)snprintf(stale_out, sizeof(stale_out), "%s/stale.bin", datadir);
+    bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
+                                stale_out, false, &stale).ok;
+    if (ok) {
+        /* Exactly the right token for exactly the right order, at the
+         * right address, for the right amount — padded with 0xF6, which
+         * is what the plain-text memo path used to emit. The merchant
+         * requires NUL or ';' after the token, so this is money that
+         * arrives and is never credited. That was a real, silent way to
+         * lose a buyer's payment. */
+        step = "seed a 0xF6-padded payment";
+        struct node_db ndb;
+        ok = tsb_open(datadir, &ndb);
+        if (ok) {
+            ok = tsb_seed_note(&ndb, stale.payment_addr, stale.memo, 0xF6,
+                               stale.amount_zatoshi, 97, 0x73);
+            node_db_close(&ndb);
+        }
+    }
+    if (ok) {
+        step = "not credited";
+        store_process_payments(datadir);
+        struct store_buyer_state state;
+        ok = store_buyer_refresh(datadir, stale.purchase_id, &state).ok;
+        ok = ok && state.confirmed_zatoshi == 0;
+        ok = ok && state.purchase.stage != STORE_PURCHASE_PAID;
+    }
+    if (ok) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (%s)\n", step);
+        return 1;
+    }
+    return 0;
+}
+
+/* Place the swapped-payload order and pay it with its own memo. */
+static const char *tsb_order_and_pay_swapped(const char *datadir,
+                                             int64_t product_id,
+                                             const char *swap_out,
+                                             struct store_buyer_order *swapped)
+{
+    const char *step = "order";
+    bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
+                                swap_out, false, swapped).ok;
+    if (ok) {
+        step = "pay it";
+        struct node_db ndb;
+        ok = tsb_open(datadir, &ndb);
+        if (ok) {
+            ok = tsb_seed_note(&ndb, swapped->payment_addr, swapped->memo,
+                               0x00, swapped->amount_zatoshi, 97, 0x74);
+            node_db_close(&ndb);
+        }
+    }
+    return ok ? NULL : step;
+}
+
+/* Credit that payment, then serve a different payload than ordered. */
+static const char *tsb_credit_and_swap_payload(
+    const char *datadir, int64_t product_id,
+    const struct store_buyer_order *swapped)
+{
+    const char *step = "credited";
+    store_process_payments(datadir);
+    struct store_buyer_state state;
+    bool ok = store_buyer_refresh(datadir, swapped->purchase_id, &state).ok;
+    ok = ok && state.purchase.stage == STORE_PURCHASE_PAID;
+    if (ok) {
+        /* The merchant now serves a DIFFERENT payload than the one this
+         * purchase agreed to buy. The buyer recorded the content hash at
+         * order time, so it can tell — this covers a swapped payload,
+         * not merely a corrupted transfer. */
+        step = "merchant swaps the payload";
+        struct node_db ndb;
+        ok = tsb_open(datadir, &ndb);
+        if (ok) {
+            ok = tsb_attach_blob(&ndb, product_id, TSB_SWAPPED,
+                                 sizeof(TSB_SWAPPED));
+            node_db_close(&ndb);
+        }
+    }
+    return ok ? NULL : step;
+}
+
+/* Collect names the hash mismatch and leaves neither file nor temporary. */
+static const char *tsb_refuse_hash_mismatch_unwritten(
+    const char *datadir, const char *swap_out, const char *swap_part,
+    const struct store_buyer_order *swapped)
+{
+    const char *step = "refused by name";
+    struct store_buyer_delivery got;
+    bool ok = store_buyer_collect(datadir, swapped->purchase_id, NULL,
+                                  &got).code == STORE_BUYER_ERR_HASH_MISMATCH;
+    if (ok) {
+        step = "nothing written";
+        ok = !tsb_file_exists(swap_out) && !tsb_file_exists(swap_part);
+    }
+    return ok ? NULL : step;
+}
+
+static const char *tsb_prior_delivery_intact(const char *out_path)
+{
+    /* The earlier, correct purchase keeps its file: a later refusal
+     * must not damage what a buyer already owns. */
+    uint8_t buf[256];
+    long n = tsb_read_file(out_path, buf, sizeof(buf));
+    bool ok = n == (long)sizeof(TSB_BLOB) &&
+              memcmp(buf, TSB_BLOB, sizeof(TSB_BLOB)) == 0;
+    return ok ? NULL : "already-delivered file untouched";
+}
+
+static const char *tsb_swapped_failure_recorded(
+    const char *datadir, const struct store_buyer_order *swapped)
+{
+    struct db_store_purchase rows[8];
+    size_t n = 0;
+    bool ok = store_buyer_list(datadir, rows, 8, &n).ok;
+    bool found = false;
+    for (size_t i = 0; ok && i < n; i++) {
+        if (rows[i].id != swapped->purchase_id)
+            continue;
+        found = true;
+        ok = rows[i].stage == STORE_PURCHASE_FAILED;
+        ok = ok && strstr(rows[i].last_error, "HASH_MISMATCH") != NULL;
+    }
+    ok = ok && found;
+    return ok ? NULL : "the refusal is recorded on the purchase";
+}
+
+static const char *tsb_hash_mismatch_reason_survives(
+    const char *datadir, const struct store_buyer_order *swapped)
+{
+    /* A status call must not erase why it stopped. The stage may go
+     * back to `paid` (the merchant WAS paid, so a retry is owed), but
+     * the reason has to survive or the operator is told a purchase is
+     * fine when its file was wrong. */
+    struct store_buyer_state state;
+    bool ok = store_buyer_refresh(datadir, swapped->purchase_id, &state).ok;
+    ok = ok && strstr(state.purchase.last_error, "HASH_MISMATCH");
+    ok = ok && state.purchase.stage == STORE_PURCHASE_PAID;
+    return ok ? NULL : "the reason survives a status call";
+}
+
+/* ── 7. Wrong bytes are refused, and nothing is written ──────────── */
+static int tsb_hash_mismatch_writes_nothing(const char *datadir,
+                                            int64_t product_id,
+                                            const char *out_path)
+{
+    printf("store_buyer: a content-hash mismatch writes nothing... ");
+    struct store_buyer_order swapped;
+    char swap_out[640];
+    char swap_part[384];
+    (void)snprintf(swap_out, sizeof(swap_out), "%s/swapped.bin", datadir);
+    (void)snprintf(swap_part, sizeof(swap_part), "%s.part", swap_out);
+
+    const char *step = tsb_order_and_pay_swapped(datadir, product_id,
+                                                 swap_out, &swapped);
+    if (!step)
+        step = tsb_credit_and_swap_payload(datadir, product_id, &swapped);
+    if (!step)
+        step = tsb_refuse_hash_mismatch_unwritten(datadir, swap_out,
+                                                  swap_part, &swapped);
+    if (!step)
+        step = tsb_prior_delivery_intact(out_path);
+    if (!step)
+        step = tsb_swapped_failure_recorded(datadir, &swapped);
+    if (!step)
+        step = tsb_hash_mismatch_reason_survives(datadir, &swapped);
+    if (!step) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (%s)\n", step);
+    return 1;
+}
+
+/* ── 8. Unknown ids are refused distinguishably ──────────────────── */
+static int tsb_unknown_ids_are_named(const char *datadir,
+                                     const char *out_path)
+{
+    printf("store_buyer: unknown product and purchase ids are named... ");
+    struct store_buyer_order o;
+    struct store_buyer_state s;
+    bool ok = store_buyer_order(datadir, 999999, TSB_CUSTOMER, out_path,
+                                false,
+                                &o).code == STORE_BUYER_ERR_UNKNOWN_PRODUCT;
+    ok = ok && store_buyer_refresh(datadir, 999999, &s).code == STORE_BUYER_ERR_UNKNOWN_PURCHASE;
+    ok = ok && strcmp(store_buyer_status_code(
+                          STORE_BUYER_ERR_UNKNOWN_PRODUCT),
+                      "UNKNOWN_PRODUCT") == 0;
+    ok = ok && strcmp(store_buyer_status_code(
+                          STORE_BUYER_ERR_HASH_MISMATCH),
+                      "HASH_MISMATCH") == 0;
+    if (ok) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        return 1;
+    }
+    return 0;
+}
+
 int test_store_buyer(void)
 {
     int failures = 0;
     char datadir[512];
     char out_path[640];
     char part_path[704];
-    struct node_db ndb;
 
     printf("\n=== store buyer (MVP #5, buying side) ===\n");
 
@@ -858,380 +1344,31 @@ int test_store_buyer(void)
     (void)snprintf(out_path, sizeof(out_path), "%s/bought.bin", datadir);
     (void)snprintf(part_path, sizeof(part_path), "%s.part", out_path);
 
-    /* ── 1. Sapling address routing follows the active chain ─────────── */
-    printf("store_buyer: z-address prefix follows the active chain... ");
-    {
-        bool ok = true;
-        chain_params_select(CHAIN_MAIN);
-        ok = ok && wallet_addr_is_sapling("zs1abcdefghijklmnop");
-        ok = ok && !wallet_addr_is_sapling("zregtestsapling1abcdef");
-        ok = ok && !wallet_addr_is_sapling(TSB_CUSTOMER);
-        chain_params_select(CHAIN_REGTEST);
-        ok = ok && wallet_addr_is_sapling("zregtestsapling1abcdef");
-        /* The old literal test accepted this on every chain; on regtest a
-         * "zs1..." string is not a local address and must not be routed to
-         * the shielded branch. */
-        ok = ok && !wallet_addr_is_sapling("zs1abcdefghijklmnop");
-        chain_params_select(CHAIN_TESTNET);
-        ok = ok && wallet_addr_is_sapling("ztestsapling1abcdef");
-        ok = ok && !wallet_addr_is_sapling("zs1abcdefghijklmnop");
-        /* The bech32 separator is required, so an HRP that is a prefix of a
-         * longer word cannot be mistaken for one of ours. */
-        ok = ok && !wallet_addr_is_sapling("ztestsaplingfoo");
-        ok = ok && !wallet_addr_is_sapling(NULL);
-        chain_params_select(CHAIN_MAIN);
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
-    }
+    failures += tsb_zaddr_prefix_follows_chain();
 
     if (!tsb_wire_merchant()) {
         printf("store_buyer: FAIL (could not seed a merchant wallet)\n");
         return failures + 1;
     }
 
-    /* ── 2. A catalog is visible, and product 1 gets a file ──────────── */
-    printf("store_buyer: catalog lists products with a downloadable file... ");
     int64_t product_id = 0;
-    {
-        struct store_buyer_offer offers[8];
-        size_t n = 0;
-        bool ok = store_buyer_catalog(datadir, offers, 8, &n).ok;
-        ok = ok && n > 0;
-        if (ok)
-            product_id = offers[0].product_id;
-        /* No file attached yet, so the buyer is told so honestly. */
-        ok = ok && !offers[0].has_content;
-
-        if (ok && tsb_open(datadir, &ndb)) {
-            ok = tsb_attach_blob(&ndb, product_id, TSB_BLOB, sizeof(TSB_BLOB));
-            ok = ok && tsb_seed_tip(&ndb, 100);
-            node_db_close(&ndb);
-        } else {
-            ok = false;
-        }
-        /* ...and now it says there is one. */
-        if (ok) {
-            n = 0;
-            ok = store_buyer_catalog(datadir, offers, 8, &n).ok;
-            ok = ok && n > 0 && offers[0].has_content;
-        }
-        if (ok) {
-            printf("OK (product %lld)\n", (long long)product_id);
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
-    }
-
+    failures += tsb_catalog_with_downloadable_file(datadir, &product_id);
     failures += tsb_rpc_datadir_copy(datadir, product_id);
 
-    /* ── 3. Happy path: order, pay, collect, verify ──────────────────── */
-    printf("store_buyer: order -> confirmed payment -> verified file... ");
     struct store_buyer_order paid_order;
-    memset(&paid_order, 0, sizeof(paid_order));
-    {
-        const char *step = "order";
-        bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
-                                    out_path, false, &paid_order).ok;
-        ok = ok && paid_order.purchase_id > 0 && paid_order.order_id > 0;
-        ok = ok && paid_order.payment_addr[0] != '\0';
-        if (ok) {
-            /* The memo the buyer records must be exactly the token the
-             * merchant's matcher looks for — not "something like" it. */
-            char want[64];
-            (void)snprintf(want, sizeof(want), "ZCL23ORDER:%lld",
-                           (long long)paid_order.order_id);
-            step = "memo format";
-            ok = strcmp(paid_order.memo, want) == 0;
-        }
-        if (ok) {
-            step = "seed payment";
-            ok = tsb_open(datadir, &ndb);
-            if (ok) {
-                ok = tsb_seed_note(&ndb, paid_order.payment_addr,
-                                   paid_order.memo, 0x00,
-                                   paid_order.amount_zatoshi, 97, 0x71);
-                node_db_close(&ndb);
-            }
-        }
-        if (ok) {
-            step = "merchant credits the order";
-            store_process_payments(datadir);
-            struct store_buyer_state state;
-            ok = store_buyer_refresh(datadir, paid_order.purchase_id,
-                                     &state).ok;
-            ok = ok && state.confirmed_zatoshi >= paid_order.amount_zatoshi;
-            ok = ok && state.purchase.stage == STORE_PURCHASE_PAID;
-            ok = ok && state.ready_to_collect;
-        }
-        if (ok) {
-            step = "collect";
-            struct store_buyer_delivery got;
-            ok = store_buyer_collect(datadir, paid_order.purchase_id, NULL,
-                                     &got).ok;
-            ok = ok && got.hash_verified;
-            ok = ok && got.bytes == (int64_t)sizeof(TSB_BLOB);
-        }
-        if (ok) {
-            step = "bytes on disk";
-            uint8_t buf[256];
-            long n = tsb_read_file(out_path, buf, sizeof(buf));
-            ok = n == (long)sizeof(TSB_BLOB) &&
-                 memcmp(buf, TSB_BLOB, sizeof(TSB_BLOB)) == 0;
-            /* Atomic write: no temporary is left behind. */
-            ok = ok && !tsb_file_exists(part_path);
-        }
-        if (ok) {
-            step = "stage is delivered";
-            struct db_store_purchase rows[8];
-            size_t n = 0;
-            ok = store_buyer_list(datadir, rows, 8, &n).ok;
-            ok = ok && n >= 1;
-            ok = ok && rows[0].id == paid_order.purchase_id;
-            ok = ok && rows[0].stage == STORE_PURCHASE_DELIVERED;
-        }
-        if (ok) {
-            printf("OK (purchase %lld, %zu bytes)\n",
-                   (long long)paid_order.purchase_id, sizeof(TSB_BLOB));
-        } else {
-            printf("FAIL (%s)\n", step);
-            failures++;
-        }
-    }
+    failures += tsb_confirmed_payment_verified_file(datadir, product_id,
+                                                    out_path, part_path,
+                                                    &paid_order);
 
-    /* ── 4. A payment naming a DIFFERENT order does not unlock this one ─ */
-    printf("store_buyer: a wrong-order memo does not unlock a purchase... ");
     struct store_buyer_order unpaid;
     memset(&unpaid, 0, sizeof(unpaid));
-    {
-        const char *step = "order";
-        char decoy_out[640];
-        (void)snprintf(decoy_out, sizeof(decoy_out), "%s/decoy.bin", datadir);
-        bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
-                                    decoy_out, false, &unpaid).ok;
-        ok = ok && unpaid.purchase_id != paid_order.purchase_id;
-        if (ok) {
-            /* Full value arrives at THIS order's one-time address, but the
-             * memo names the earlier order. An address-and-amount matcher
-             * would call that paid; the memo-bound one must not. */
-            step = "seed a decoy payment";
-            ok = tsb_open(datadir, &ndb);
-            if (ok) {
-                ok = tsb_seed_note(&ndb, unpaid.payment_addr,
-                                   paid_order.memo, 0x00,
-                                   unpaid.amount_zatoshi, 97, 0x72);
-                node_db_close(&ndb);
-            }
-        }
-        if (ok) {
-            step = "not credited";
-            store_process_payments(datadir);
-            struct store_buyer_state state;
-            ok = store_buyer_refresh(datadir, unpaid.purchase_id,
-                                     &state).ok;
-            ok = ok && state.confirmed_zatoshi == 0;
-            ok = ok && state.purchase.stage != STORE_PURCHASE_PAID;
-            ok = ok && !state.ready_to_collect;
-        }
-        if (ok) {
-            step = "collect refuses by name";
-            struct store_buyer_delivery got;
-            ok = store_buyer_collect(datadir, unpaid.purchase_id, NULL,
-                                     &got).code == STORE_BUYER_ERR_PAYMENT_NOT_CONFIRMED;
-            ok = ok && !tsb_file_exists(decoy_out);
-        }
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL (%s)\n", step);
-            failures++;
-        }
-    }
-
-    /* ── 5. Mainnet refuses the spend; a test chain names the real reason ─ */
-    printf("store_buyer: mainnet refuses the payment step... ");
-    {
-        struct store_buyer_payment pay;
-        chain_params_select(CHAIN_MAIN);
-        bool ok = store_buyer_prepare_payment(datadir, unpaid.purchase_id,
-                                              TSB_CUSTOMER, &pay).code == STORE_BUYER_ERR_MAINNET_REFUSED;
-        /* Nothing may be handed back when the answer is a refusal. */
-        ok = ok && pay.to_addr[0] == '\0' && pay.memo_hex[0] == '\0';
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
-    }
-
-    printf("store_buyer: a build with no proving backend refuses to pay... ");
-    {
-        struct store_buyer_payment pay;
-        chain_params_select(CHAIN_REGTEST);
-        struct zcl_result r =
-            store_buyer_prepare_payment(datadir, unpaid.purchase_id,
-                                        TSB_CUSTOMER, &pay);
-        bool ok;
-        if (!zclassic_sapling_prover_is_ready()) {
-            /* An unavailable native prover must refuse here rather than fail
-             * later inside coin selection—or, worse, quietly do nothing. */
-            ok = (r.code == STORE_BUYER_ERR_PROVER_UNAVAILABLE);
-            ok = ok && pay.memo_hex[0] == '\0';
-        } else {
-            /* A prover-linked build gets past that check; the next honest
-             * refusal is the empty wallet, never PROVER_UNAVAILABLE. */
-            ok = (r.code != STORE_BUYER_ERR_PROVER_UNAVAILABLE);
-        }
-        chain_params_select(CHAIN_MAIN);
-        if (ok) {
-            printf("OK (%s)\n", store_buyer_status_code(r.code));
-        } else {
-            printf("FAIL (got %s)\n", store_buyer_status_code(r.code));
-            failures++;
-        }
-    }
-
-    /* ── 6. The old 0xF6 memo padding is not creditable ──────────────── */
-    printf("store_buyer: a memo padded the old way is not credited... ");
-    {
-        const char *step = "order";
-        struct store_buyer_order stale;
-        char stale_out[640];
-        (void)snprintf(stale_out, sizeof(stale_out), "%s/stale.bin", datadir);
-        bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
-                                    stale_out, false, &stale).ok;
-        if (ok) {
-            /* Exactly the right token for exactly the right order, at the
-             * right address, for the right amount — padded with 0xF6, which
-             * is what the plain-text memo path used to emit. The merchant
-             * requires NUL or ';' after the token, so this is money that
-             * arrives and is never credited. That was a real, silent way to
-             * lose a buyer's payment. */
-            step = "seed a 0xF6-padded payment";
-            ok = tsb_open(datadir, &ndb);
-            if (ok) {
-                ok = tsb_seed_note(&ndb, stale.payment_addr, stale.memo, 0xF6,
-                                   stale.amount_zatoshi, 97, 0x73);
-                node_db_close(&ndb);
-            }
-        }
-        if (ok) {
-            step = "not credited";
-            store_process_payments(datadir);
-            struct store_buyer_state state;
-            ok = store_buyer_refresh(datadir, stale.purchase_id,
-                                     &state).ok;
-            ok = ok && state.confirmed_zatoshi == 0;
-            ok = ok && state.purchase.stage != STORE_PURCHASE_PAID;
-        }
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL (%s)\n", step);
-            failures++;
-        }
-    }
-
-    /* ── 7. Wrong bytes are refused, and nothing is written ──────────── */
-    printf("store_buyer: a content-hash mismatch writes nothing... ");
-    {
-        const char *step = "order";
-        struct store_buyer_order swapped;
-        char swap_out[640];
-        char swap_part[384];
-        (void)snprintf(swap_out, sizeof(swap_out), "%s/swapped.bin", datadir);
-        (void)snprintf(swap_part, sizeof(swap_part), "%s.part", swap_out);
-
-        bool ok = store_buyer_order(datadir, product_id, TSB_CUSTOMER,
-                                    swap_out, false, &swapped).ok;
-        if (ok) {
-            step = "pay it";
-            ok = tsb_open(datadir, &ndb);
-            if (ok) {
-                ok = tsb_seed_note(&ndb, swapped.payment_addr, swapped.memo,
-                                   0x00, swapped.amount_zatoshi, 97, 0x74);
-                node_db_close(&ndb);
-            }
-        }
-        if (ok) {
-            step = "credited";
-            store_process_payments(datadir);
-            struct store_buyer_state state;
-            ok = store_buyer_refresh(datadir, swapped.purchase_id,
-                                     &state).ok;
-            ok = ok && state.purchase.stage == STORE_PURCHASE_PAID;
-        }
-        if (ok) {
-            /* The merchant now serves a DIFFERENT payload than the one this
-             * purchase agreed to buy. The buyer recorded the content hash at
-             * order time, so it can tell — this covers a swapped payload,
-             * not merely a corrupted transfer. */
-            step = "merchant swaps the payload";
-            ok = tsb_open(datadir, &ndb);
-            if (ok) {
-                ok = tsb_attach_blob(&ndb, product_id, TSB_SWAPPED,
-                                     sizeof(TSB_SWAPPED));
-                node_db_close(&ndb);
-            }
-        }
-        if (ok) {
-            step = "refused by name";
-            struct store_buyer_delivery got;
-            ok = store_buyer_collect(datadir, swapped.purchase_id, NULL,
-                                     &got).code == STORE_BUYER_ERR_HASH_MISMATCH;
-        }
-        if (ok) {
-            step = "nothing written";
-            ok = !tsb_file_exists(swap_out) && !tsb_file_exists(swap_part);
-        }
-        if (ok) {
-            step = "already-delivered file untouched";
-            /* The earlier, correct purchase keeps its file: a later refusal
-             * must not damage what a buyer already owns. */
-            uint8_t buf[256];
-            long n = tsb_read_file(out_path, buf, sizeof(buf));
-            ok = n == (long)sizeof(TSB_BLOB) &&
-                 memcmp(buf, TSB_BLOB, sizeof(TSB_BLOB)) == 0;
-        }
-        if (ok) {
-            step = "the refusal is recorded on the purchase";
-            struct db_store_purchase rows[8];
-            size_t n = 0;
-            ok = store_buyer_list(datadir, rows, 8, &n).ok;
-            bool found = false;
-            for (size_t i = 0; ok && i < n; i++) {
-                if (rows[i].id != swapped.purchase_id)
-                    continue;
-                found = true;
-                ok = rows[i].stage == STORE_PURCHASE_FAILED;
-                ok = ok && strstr(rows[i].last_error, "HASH_MISMATCH") != NULL;
-            }
-            ok = ok && found;
-        }
-        if (ok) {
-            /* A status call must not erase why it stopped. The stage may go
-             * back to `paid` (the merchant WAS paid, so a retry is owed), but
-             * the reason has to survive or the operator is told a purchase is
-             * fine when its file was wrong. */
-            step = "the reason survives a status call";
-            struct store_buyer_state state;
-            ok = store_buyer_refresh(datadir, swapped.purchase_id,
-                                     &state).ok;
-            ok = ok && strstr(state.purchase.last_error, "HASH_MISMATCH");
-            ok = ok && state.purchase.stage == STORE_PURCHASE_PAID;
-        }
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL (%s)\n", step);
-            failures++;
-        }
-    }
+    failures += tsb_wrong_memo_does_not_unlock(datadir, product_id,
+                                               &paid_order, &unpaid);
+    failures += tsb_mainnet_refuses_spend(datadir, unpaid.purchase_id);
+    failures += tsb_missing_prover_refuses_pay(datadir, unpaid.purchase_id);
+    failures += tsb_old_f6_memo_uncredited(datadir, product_id);
+    failures += tsb_hash_mismatch_writes_nothing(datadir, product_id,
+                                                 out_path);
 
     /* ── 7b. A payment split across two memo-bound notes is credited ─── */
     failures += tsb_report("a payment split P-1 + 1 is credited once whole",
@@ -1255,28 +1392,7 @@ int test_store_buyer(void)
     failures += tsb_report("a stored tip below 3 prunes nothing",
                            tsb_low_tip_prunes_nothing());
 
-    /* ── 8. Unknown ids are refused distinguishably ──────────────────── */
-    printf("store_buyer: unknown product and purchase ids are named... ");
-    {
-        struct store_buyer_order o;
-        struct store_buyer_state s;
-        bool ok = store_buyer_order(datadir, 999999, TSB_CUSTOMER, out_path,
-                                    false,
-                                    &o).code == STORE_BUYER_ERR_UNKNOWN_PRODUCT;
-        ok = ok && store_buyer_refresh(datadir, 999999, &s).code == STORE_BUYER_ERR_UNKNOWN_PURCHASE;
-        ok = ok && strcmp(store_buyer_status_code(
-                              STORE_BUYER_ERR_UNKNOWN_PRODUCT),
-                          "UNKNOWN_PRODUCT") == 0;
-        ok = ok && strcmp(store_buyer_status_code(
-                              STORE_BUYER_ERR_HASH_MISMATCH),
-                          "HASH_MISMATCH") == 0;
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
-    }
+    failures += tsb_unknown_ids_are_named(datadir, out_path);
 
     /* ── 9. A seller's proof-of-work ask is bounded before solving ───── */
     failures += tsb_report("seller pow bits are bounded and strict",
