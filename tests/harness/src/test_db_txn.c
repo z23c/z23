@@ -608,10 +608,10 @@ static bool dt_failed_commit_insert(struct node_db *ndb, bool schema_ok,
     return commit_failed;
 }
 
-static bool dt_child_table_empty(struct node_db *ndb)
+static bool dt_child_table_empty(struct node_db *ndb, bool opened)
 {
     sqlite3_stmt *st = NULL;
-    bool count_ok = sqlite3_prepare_v2(ndb->db,
+    bool count_ok = opened && sqlite3_prepare_v2(ndb->db,
         "SELECT COUNT(*) FROM dt_child", -1, &st, NULL) == SQLITE_OK &&
         sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 0;
     sqlite3_finalize(st);
@@ -641,7 +641,7 @@ static int t_failed_commit_rolls_back(void)
 
     struct node_db_status status = {0};
     node_db_get_status(&ndb, &status);
-    bool count_ok = opened && dt_child_table_empty(&ndb);
+    bool count_ok = dt_child_table_empty(&ndb, opened);
 
     bool followup_ok = dt_commit_followup_txn(&ndb, opened);
     bool ok = opened && schema_ok && inserted && commit_failed && count_ok &&
