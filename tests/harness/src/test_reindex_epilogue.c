@@ -183,6 +183,227 @@ static int mkdir_p_re(const char *p)
     return (errno == EEXIST) ? 0 : -1;
 }
 
+#define ndb (*node_database)
+#define expect_count (*expected_count)
+#define TIP (*tip_height)
+static int re_check_full_replay_post_state(
+    int failures, sqlite3 *pdb, const int *tip_height,
+    struct node_db *node_database, const uint8_t *replay_nf,
+    const uint8_t *expect_root, const uint64_t *expected_count)
+{
+    /* ── POST-STATE assertions (the teeth). */
+
+    /* coins_kv reseeded from the mirror + migration stamp. */
+    RE_CHECK("post: coins_kv count == mirror count (4)",
+             coins_kv_count(pdb) == 4);
+    RE_CHECK("post: coins_kv proven-authority (migration stamp set)",
+             coins_kv_is_proven_authority(pdb, NULL));
+    {
+        int64_t cursor = -1;
+        bool found = false, row_found = false;
+        RE_CHECK("post: full reindex publishes all shielded completeness last",
+                 re_shielded_markers_are(pdb, 0) &&
+                 nullifier_kv_activation_cursor(pdb, &cursor, &found) &&
+                 found && cursor == 0);
+        RE_CHECK("post: completion publication preserves replayed nullifiers",
+                 nullifier_kv_get(pdb, replay_nf, NULLIFIER_POOL_SAPLING,
+                                  &row_found, NULL) && row_found);
+    }
+
+    /* coins_applied_height == tip+1 (dropped from the stale-HIGH 99). */
+    {
+        int32_t ca = -1; bool found = false;
+        bool ok = coins_kv_get_applied_height(pdb, &ca, &found);
+        RE_CHECK("post: coins_applied_height == tip+1",
+                 ok && found && ca == TIP + 1);
+    }
+
+    /* tip_finalize cursor == tip (#31, NEVER tip+1). */
+    RE_CHECK("post: tip_finalize cursor == tip (NOT tip+1)",
+             re_cursor(pdb, "tip_finalize") == TIP);
+
+    /* 8 upstream cursors == tip+1 (the next-height convention). */
+    RE_CHECK("post: utxo_apply cursor == tip+1",
+             re_cursor(pdb, "utxo_apply") == TIP + 1);
+    RE_CHECK("post: validate_headers cursor == tip+1",
+             re_cursor(pdb, "validate_headers") == TIP + 1);
+    RE_CHECK("post: header_admit cursor == tip+1",
+             re_cursor(pdb, "header_admit") == TIP + 1);
+    RE_CHECK("post: body_fetch cursor == tip+1",
+             re_cursor(pdb, "body_fetch") == TIP + 1);
+    RE_CHECK("post: body_persist cursor == tip+1",
+             re_cursor(pdb, "body_persist") == TIP + 1);
+    RE_CHECK("post: script_validate cursor == tip+1",
+             re_cursor(pdb, "script_validate") == TIP + 1);
+    RE_CHECK("post: proof_validate cursor == tip+1",
+             re_cursor(pdb, "proof_validate") == TIP + 1);
+
+    /* trusted_base_height == tip. */
+    RE_CHECK("post: reducer_trusted_base_height == tip",
+             re_trusted_base(pdb) == TIP);
+
+    /* utxo_sha3 stamp == control compute over the mirror. */
+    {
+        uint8_t got[32]; int32_t gh = -1; uint64_t gc = 0;
+        bool ld = utxo_commitment_sha3_load(ndb.db, got, &gh, &gc);
+        RE_CHECK("post: utxo_sha3 stamp present", ld);
+        RE_CHECK("post: utxo_sha3 == control compute",
+                 ld && memcmp(got, expect_root, 32) == 0 &&
+                 gc == expect_count && gh == TIP);
+    }
+
+    /* H* == replayed tip via reducer_frontier_compute_hstar (TIP is above the
+     * compiled finality anchor, so MAX(tip,anchor) == tip). */
+    {
+        int32_t hs = 0, sf = 0;
+        progress_store_tx_lock();
+        bool ok = reducer_frontier_compute_hstar(pdb, &hs, &sf);
+        progress_store_tx_unlock();
+        RE_CHECK("post: H* == replayed tip", ok && hs == TIP);
+    }
+
+    /* TEAR GONE: coins_applied (tip+1) is NOT above the utxo_apply frontier. */
+    {
+        int32_t ca = 0; bool found = false;
+        coins_kv_get_applied_height(pdb, &ca, &found);
+        int32_t ua = 0;
+        bool fok = reducer_frontier_log_frontier(pdb, "utxo_apply_log",
+                                                 "utxo_apply", &ua);
+        RE_CHECK("post: NO tear (coins_applied <= utxo_apply_frontier+1)",
+                 found && fok && ca <= ua + 1);
+    }
+    return failures;
+}
+#undef ndb
+#undef expect_count
+
+static int re_check_imported_snapshot_authority(
+    int failures, const int *tip_height)
+{
+    /* ── SNAPSHOT IMPORT: a verified snapshot import derives the same durable
+     * authority surface as the full replay path. */
+    test_reset_shared_globals();
+    blocker_module_init();
+    blocker_reset_for_testing();
+    seed_integrity_gate_reset_for_testing();
+    {
+        char sdir[256];
+        test_fmt_tmpdir(sdir, sizeof(sdir), "reindex_epi", "snapshot");
+        mkdir_p_re(sdir);
+        char snpath[600];
+        snprintf(snpath, sizeof(snpath), "%s/node.db", sdir);
+
+        struct node_db sndb;
+        bool sok = node_db_open(&sndb, snpath);
+        RE_CHECK("snapshot: node.db opens", sok);
+        if (sok) {
+            seed_integrity_gate_set_node_db_for_testing(&sndb);
+            bool sutxos_ok = true;
+            sutxos_ok &= re_insert_utxo(&sndb, 0x44, 0, 11000, 11, 1);
+            sutxos_ok &= re_insert_utxo(&sndb, 0x55, 0, 12000, 12, 0);
+            sutxos_ok &= re_insert_utxo(&sndb, 0x66, 0, 13000, 13, 0);
+            RE_CHECK("snapshot: utxos seeded", sutxos_ok);
+
+            uint8_t sexpect_root[32]; uint64_t sexpect_count = 0;
+            utxo_commitment_sha3_compute(sndb.db, sexpect_root,
+                                         &sexpect_count);
+            RE_CHECK("snapshot: control utxo_count == 3",
+                     sexpect_count == 3);
+
+            RE_CHECK("snapshot: progress_store opens",
+                     progress_store_open(sdir));
+            sqlite3 *spdb = progress_store_db();
+            RE_CHECK("snapshot: pdb handle", spdb != NULL);
+            RE_CHECK("snapshot: shielded history starts assisted/incomplete",
+                     shielded_history_reset_to_boundary(spdb, TIP));
+
+            struct main_state sms;
+            memset(&sms, 0, sizeof(sms));
+            main_state_init(&sms);
+            struct re_chain ssc; memset(&ssc, 0, sizeof(ssc));
+            RE_CHECK("snapshot: synthetic chain to tip",
+                     re_build_chain(&ssc, &sms, TIP));
+            RE_CHECK("snapshot: tip_finalize stage init",
+                     tip_finalize_stage_init(&sms));
+
+            const int32_t SNAP_STALE_HIGH = TIP + 777;
+            {
+                char *err = NULL;
+                bool seed_ok =
+                    sqlite3_exec(spdb, "BEGIN IMMEDIATE", NULL, NULL, &err)
+                        == SQLITE_OK &&
+                    coins_kv_set_applied_height_in_tx(spdb, SNAP_STALE_HIGH) &&
+                    sqlite3_exec(spdb, "COMMIT", NULL, NULL, &err)
+                        == SQLITE_OK;
+                if (err) sqlite3_free(err);
+                RE_CHECK("snapshot: precond coins_applied stale-HIGH set",
+                         seed_ok);
+            }
+            RE_CHECK("snapshot: precond stale tip_finalize cursor",
+                     re_set_cursor(spdb, "tip_finalize", 3));
+            RE_CHECK("snapshot: precond stale utxo_apply cursor",
+                     re_set_cursor(spdb, "utxo_apply", 3));
+
+            bool sderived = reindex_epilogue_derive_imported_snapshot(
+                &sndb, snpath, TIP, ssc.hash.data);
+            RE_CHECK("snapshot: imported epilogue returns true", sderived);
+
+            RE_CHECK("snapshot: coins_kv count == mirror count (3)",
+                     coins_kv_count(spdb) == 3);
+            RE_CHECK("snapshot: coins_kv proven-authority",
+                     coins_kv_is_proven_authority(spdb, NULL));
+            {
+                int64_t cursor = -1;
+                bool found = false;
+                RE_CHECK("snapshot: imported epilogue cannot publish shielded completeness",
+                         re_shielded_markers_are(spdb, TIP) &&
+                         nullifier_kv_activation_cursor(spdb, &cursor, &found) &&
+                         found && cursor == TIP);
+            }
+            {
+                int32_t ca = -1; bool found = false;
+                bool ok = coins_kv_get_applied_height(spdb, &ca, &found);
+                RE_CHECK("snapshot: coins_applied_height == tip+1",
+                         ok && found && ca == TIP + 1);
+            }
+            RE_CHECK("snapshot: tip_finalize cursor == tip",
+                     re_cursor(spdb, "tip_finalize") == TIP);
+            RE_CHECK("snapshot: utxo_apply cursor == tip+1",
+                     re_cursor(spdb, "utxo_apply") == TIP + 1);
+            RE_CHECK("snapshot: validate_headers cursor == tip+1",
+                     re_cursor(spdb, "validate_headers") == TIP + 1);
+            RE_CHECK("snapshot: reducer_trusted_base_height == tip",
+                     re_trusted_base(spdb) == TIP);
+            {
+                uint8_t got[32]; int32_t gh = -1; uint64_t gc = 0;
+                bool ld = utxo_commitment_sha3_load(sndb.db, got, &gh, &gc);
+                RE_CHECK("snapshot: utxo_sha3 stamp present", ld);
+                RE_CHECK("snapshot: utxo_sha3 == control compute",
+                         ld && memcmp(got, sexpect_root, 32) == 0 &&
+                         gc == sexpect_count && gh == TIP);
+            }
+            {
+                int32_t hs = 0, sf = 0;
+                progress_store_tx_lock();
+                bool ok = reducer_frontier_compute_hstar(spdb, &hs, &sf);
+                progress_store_tx_unlock();
+                RE_CHECK("snapshot: H* == imported tip", ok && hs == TIP);
+            }
+
+            tip_finalize_stage_shutdown();
+            main_state_free(&sms);
+            re_free_chain(&ssc);
+            progress_store_close();
+            seed_integrity_gate_reset_for_testing();
+            node_db_close(&sndb);
+        }
+        test_cleanup_tmpdir(sdir);
+    }
+    return failures;
+}
+
+#undef TIP
+
 int test_reindex_epilogue(void);
 int test_reindex_epilogue(void)
 {
@@ -303,87 +524,8 @@ int test_reindex_epilogue(void)
     bool derived = reindex_epilogue_derive(&ms, &ndb, dir);
     RE_CHECK("epilogue_derive returns true", derived);
 
-    /* ── POST-STATE assertions (the teeth). */
-
-    /* coins_kv reseeded from the mirror + migration stamp. */
-    RE_CHECK("post: coins_kv count == mirror count (4)",
-             coins_kv_count(pdb) == 4);
-    RE_CHECK("post: coins_kv proven-authority (migration stamp set)",
-             coins_kv_is_proven_authority(pdb, NULL));
-    {
-        int64_t cursor = -1;
-        bool found = false, row_found = false;
-        RE_CHECK("post: full reindex publishes all shielded completeness last",
-                 re_shielded_markers_are(pdb, 0) &&
-                 nullifier_kv_activation_cursor(pdb, &cursor, &found) &&
-                 found && cursor == 0);
-        RE_CHECK("post: completion publication preserves replayed nullifiers",
-                 nullifier_kv_get(pdb, replay_nf, NULLIFIER_POOL_SAPLING,
-                                  &row_found, NULL) && row_found);
-    }
-
-    /* coins_applied_height == tip+1 (dropped from the stale-HIGH 99). */
-    {
-        int32_t ca = -1; bool found = false;
-        bool ok = coins_kv_get_applied_height(pdb, &ca, &found);
-        RE_CHECK("post: coins_applied_height == tip+1",
-                 ok && found && ca == TIP + 1);
-    }
-
-    /* tip_finalize cursor == tip (#31, NEVER tip+1). */
-    RE_CHECK("post: tip_finalize cursor == tip (NOT tip+1)",
-             re_cursor(pdb, "tip_finalize") == TIP);
-
-    /* 8 upstream cursors == tip+1 (the next-height convention). */
-    RE_CHECK("post: utxo_apply cursor == tip+1",
-             re_cursor(pdb, "utxo_apply") == TIP + 1);
-    RE_CHECK("post: validate_headers cursor == tip+1",
-             re_cursor(pdb, "validate_headers") == TIP + 1);
-    RE_CHECK("post: header_admit cursor == tip+1",
-             re_cursor(pdb, "header_admit") == TIP + 1);
-    RE_CHECK("post: body_fetch cursor == tip+1",
-             re_cursor(pdb, "body_fetch") == TIP + 1);
-    RE_CHECK("post: body_persist cursor == tip+1",
-             re_cursor(pdb, "body_persist") == TIP + 1);
-    RE_CHECK("post: script_validate cursor == tip+1",
-             re_cursor(pdb, "script_validate") == TIP + 1);
-    RE_CHECK("post: proof_validate cursor == tip+1",
-             re_cursor(pdb, "proof_validate") == TIP + 1);
-
-    /* trusted_base_height == tip. */
-    RE_CHECK("post: reducer_trusted_base_height == tip",
-             re_trusted_base(pdb) == TIP);
-
-    /* utxo_sha3 stamp == control compute over the mirror. */
-    {
-        uint8_t got[32]; int32_t gh = -1; uint64_t gc = 0;
-        bool ld = utxo_commitment_sha3_load(ndb.db, got, &gh, &gc);
-        RE_CHECK("post: utxo_sha3 stamp present", ld);
-        RE_CHECK("post: utxo_sha3 == control compute",
-                 ld && memcmp(got, expect_root, 32) == 0 &&
-                 gc == expect_count && gh == TIP);
-    }
-
-    /* H* == replayed tip via reducer_frontier_compute_hstar (TIP is above the
-     * compiled finality anchor, so MAX(tip,anchor) == tip). */
-    {
-        int32_t hs = 0, sf = 0;
-        progress_store_tx_lock();
-        bool ok = reducer_frontier_compute_hstar(pdb, &hs, &sf);
-        progress_store_tx_unlock();
-        RE_CHECK("post: H* == replayed tip", ok && hs == TIP);
-    }
-
-    /* TEAR GONE: coins_applied (tip+1) is NOT above the utxo_apply frontier. */
-    {
-        int32_t ca = 0; bool found = false;
-        coins_kv_get_applied_height(pdb, &ca, &found);
-        int32_t ua = 0;
-        bool fok = reducer_frontier_log_frontier(pdb, "utxo_apply_log",
-                                                 "utxo_apply", &ua);
-        RE_CHECK("post: NO tear (coins_applied <= utxo_apply_frontier+1)",
-                 found && fok && ca <= ua + 1);
-    }
+    failures = re_check_full_replay_post_state(
+        failures, pdb, &TIP, &ndb, replay_nf, expect_root, &expect_count);
 
     tip_finalize_stage_shutdown();
     main_state_free(&ms);
@@ -393,125 +535,7 @@ int test_reindex_epilogue(void)
     node_db_close(&ndb);
     test_cleanup_tmpdir(dir);
 
-    /* ── SNAPSHOT IMPORT: a verified snapshot import derives the same durable
-     * authority surface as the full replay path. */
-    test_reset_shared_globals();
-    blocker_module_init();
-    blocker_reset_for_testing();
-    seed_integrity_gate_reset_for_testing();
-    {
-        char sdir[256];
-        test_fmt_tmpdir(sdir, sizeof(sdir), "reindex_epi", "snapshot");
-        mkdir_p_re(sdir);
-        char snpath[600];
-        snprintf(snpath, sizeof(snpath), "%s/node.db", sdir);
-
-        struct node_db sndb;
-        bool sok = node_db_open(&sndb, snpath);
-        RE_CHECK("snapshot: node.db opens", sok);
-        if (sok) {
-            seed_integrity_gate_set_node_db_for_testing(&sndb);
-            bool sutxos_ok = true;
-            sutxos_ok &= re_insert_utxo(&sndb, 0x44, 0, 11000, 11, 1);
-            sutxos_ok &= re_insert_utxo(&sndb, 0x55, 0, 12000, 12, 0);
-            sutxos_ok &= re_insert_utxo(&sndb, 0x66, 0, 13000, 13, 0);
-            RE_CHECK("snapshot: utxos seeded", sutxos_ok);
-
-            uint8_t sexpect_root[32]; uint64_t sexpect_count = 0;
-            utxo_commitment_sha3_compute(sndb.db, sexpect_root,
-                                         &sexpect_count);
-            RE_CHECK("snapshot: control utxo_count == 3",
-                     sexpect_count == 3);
-
-            RE_CHECK("snapshot: progress_store opens",
-                     progress_store_open(sdir));
-            sqlite3 *spdb = progress_store_db();
-            RE_CHECK("snapshot: pdb handle", spdb != NULL);
-            RE_CHECK("snapshot: shielded history starts assisted/incomplete",
-                     shielded_history_reset_to_boundary(spdb, TIP));
-
-            struct main_state sms;
-            memset(&sms, 0, sizeof(sms));
-            main_state_init(&sms);
-            struct re_chain ssc; memset(&ssc, 0, sizeof(ssc));
-            RE_CHECK("snapshot: synthetic chain to tip",
-                     re_build_chain(&ssc, &sms, TIP));
-            RE_CHECK("snapshot: tip_finalize stage init",
-                     tip_finalize_stage_init(&sms));
-
-            const int32_t SNAP_STALE_HIGH = TIP + 777;
-            {
-                char *err = NULL;
-                bool seed_ok =
-                    sqlite3_exec(spdb, "BEGIN IMMEDIATE", NULL, NULL, &err)
-                        == SQLITE_OK &&
-                    coins_kv_set_applied_height_in_tx(spdb, SNAP_STALE_HIGH) &&
-                    sqlite3_exec(spdb, "COMMIT", NULL, NULL, &err)
-                        == SQLITE_OK;
-                if (err) sqlite3_free(err);
-                RE_CHECK("snapshot: precond coins_applied stale-HIGH set",
-                         seed_ok);
-            }
-            RE_CHECK("snapshot: precond stale tip_finalize cursor",
-                     re_set_cursor(spdb, "tip_finalize", 3));
-            RE_CHECK("snapshot: precond stale utxo_apply cursor",
-                     re_set_cursor(spdb, "utxo_apply", 3));
-
-            bool sderived = reindex_epilogue_derive_imported_snapshot(
-                &sndb, snpath, TIP, ssc.hash.data);
-            RE_CHECK("snapshot: imported epilogue returns true", sderived);
-
-            RE_CHECK("snapshot: coins_kv count == mirror count (3)",
-                     coins_kv_count(spdb) == 3);
-            RE_CHECK("snapshot: coins_kv proven-authority",
-                     coins_kv_is_proven_authority(spdb, NULL));
-            {
-                int64_t cursor = -1;
-                bool found = false;
-                RE_CHECK("snapshot: imported epilogue cannot publish shielded completeness",
-                         re_shielded_markers_are(spdb, TIP) &&
-                         nullifier_kv_activation_cursor(spdb, &cursor, &found) &&
-                         found && cursor == TIP);
-            }
-            {
-                int32_t ca = -1; bool found = false;
-                bool ok = coins_kv_get_applied_height(spdb, &ca, &found);
-                RE_CHECK("snapshot: coins_applied_height == tip+1",
-                         ok && found && ca == TIP + 1);
-            }
-            RE_CHECK("snapshot: tip_finalize cursor == tip",
-                     re_cursor(spdb, "tip_finalize") == TIP);
-            RE_CHECK("snapshot: utxo_apply cursor == tip+1",
-                     re_cursor(spdb, "utxo_apply") == TIP + 1);
-            RE_CHECK("snapshot: validate_headers cursor == tip+1",
-                     re_cursor(spdb, "validate_headers") == TIP + 1);
-            RE_CHECK("snapshot: reducer_trusted_base_height == tip",
-                     re_trusted_base(spdb) == TIP);
-            {
-                uint8_t got[32]; int32_t gh = -1; uint64_t gc = 0;
-                bool ld = utxo_commitment_sha3_load(sndb.db, got, &gh, &gc);
-                RE_CHECK("snapshot: utxo_sha3 stamp present", ld);
-                RE_CHECK("snapshot: utxo_sha3 == control compute",
-                         ld && memcmp(got, sexpect_root, 32) == 0 &&
-                         gc == sexpect_count && gh == TIP);
-            }
-            {
-                int32_t hs = 0, sf = 0;
-                progress_store_tx_lock();
-                bool ok = reducer_frontier_compute_hstar(spdb, &hs, &sf);
-                progress_store_tx_unlock();
-                RE_CHECK("snapshot: H* == imported tip", ok && hs == TIP);
-            }
-
-            tip_finalize_stage_shutdown();
-            main_state_free(&sms);
-            re_free_chain(&ssc);
-            progress_store_close();
-            seed_integrity_gate_reset_for_testing();
-            node_db_close(&sndb);
-        }
-        test_cleanup_tmpdir(sdir);
-    }
+    failures = re_check_imported_snapshot_authority(failures, &TIP);
 
     /* ── NEGATIVE: empty/unreadable mirror + bad args -> false, no crash. */
     {
