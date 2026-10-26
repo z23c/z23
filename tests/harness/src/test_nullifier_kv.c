@@ -178,17 +178,9 @@ static int nk_replay_status_cases(sqlite3 *db)
     return failures;
 }
 
-int test_nullifier_kv(void);
-int test_nullifier_kv(void)
+static int nk_first_adoption_is_atomic(sqlite3 *db)
 {
     int failures = 0;
-    char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "nullifier_kv", "main");
-
-    NK_CHECK("progress_store opens", progress_store_open(dir));
-    sqlite3 *db = progress_store_db();
-    NK_CHECK("db handle", db != NULL);
-
     /* First adoption is atomic: a failed marker insert rolls schema creation back. */
     NK_CHECK("table absent before ensure", !nullifier_kv_table_exists(db));
     NK_CHECK("failure trigger installs",
@@ -204,7 +196,12 @@ int test_nullifier_kv(void)
     NK_CHECK("failure trigger drops",
              sqlite3_exec(db, "DROP TRIGGER fail_nf_marker", NULL, NULL,
                           NULL) == SQLITE_OK);
+    return failures;
+}
 
+static int nk_precreated_table_adoption_is_conservative(sqlite3 *db)
+{
+    int failures = 0;
     /* A precreated empty table with no marker at a nonzero reducer cursor
      * must stamp the unknown prefix, never infer completeness. */
     NK_CHECK("ensure_schema", nullifier_kv_ensure_schema(db));
@@ -235,10 +232,13 @@ int test_nullifier_kv(void)
     }
     NK_CHECK("ensure_schema idempotent", nullifier_kv_ensure_schema(db));
     NK_CHECK("count empty == 0", nk_count(db) == 0);
+    return failures;
+}
 
+static int nk_add_get_roundtrip_and_pool_separation(sqlite3 *db, uint8_t n1[32])
+{
+    int failures = 0;
     /* add/get round-trip: presence + revealing height. */
-    uint8_t n1[32];
-    nk_nf(n1, 0x11);
     NK_CHECK("add n1 sprout h=100",
              nullifier_kv_add(db, n1, NULLIFIER_POOL_SPROUT, 100));
     {
@@ -275,7 +275,12 @@ int test_nullifier_kv(void)
         NK_CHECK("pools keep separate heights",
                  fs && hs == 100 && fz && hz == 200);
     }
+    return failures;
+}
 
+static int nk_row_count_reports_each_pool(sqlite3 *db)
+{
+    int failures = 0;
     /* nullifier_kv_row_count: the per-pool diagnostic count backing
      * `dumpstate rom_compile`'s shielded_import.nullifier.*_imported —
      * agrees with the combined nk_count() and reports each pool
@@ -294,7 +299,12 @@ int test_nullifier_kv(void)
         NK_CHECK("row_count rejects an invalid pool",
                  !nullifier_kv_row_count(db, 2, &sprout_n));
     }
+    return failures;
+}
 
+static int nk_readd_replaces_height(sqlite3 *db, uint8_t n1[32])
+{
+    int failures = 0;
     /* INSERT OR REPLACE idempotence: re-adding the same (nf,pool) keeps ONE
      * row and takes the latest height. */
     NK_CHECK("re-add n1 sprout h=150",
@@ -307,7 +317,12 @@ int test_nullifier_kv(void)
                  nullifier_kv_get(db, n1, NULLIFIER_POOL_SPROUT, &found, &h));
         NK_CHECK("re-add replaced height", found && h == 150);
     }
+    return failures;
+}
 
+static int nk_delete_range_bounds_are_inclusive(sqlite3 *db)
+{
+    int failures = 0;
     /* delete_range EXACT BOUNDS: rows at 5/6/7; deleting [6,6] removes only
      * the middle; deleting [5,7] removes the rest. Both bounds INCLUSIVE. */
     {
@@ -340,7 +355,12 @@ int test_nullifier_kv(void)
         /* The h=100/150/200 rows from earlier sections are out of range. */
         NK_CHECK("out-of-range rows untouched", nk_count(db) == 2);
     }
+    return failures;
+}
 
+static int nk_combined_reset_boundary_rolls_back(sqlite3 *db, uint8_t n1[32])
+{
+    int failures = 0;
     /* Assisted snapshot/reset boundary is one transaction across BOTH pools.
      * A forced marker failure must restore prior anchors, marker, and rows. */
     NK_CHECK("bounded genesis replay seeds explicit complete control",
@@ -375,6 +395,12 @@ int test_nullifier_kv(void)
     NK_CHECK("combined reset failure trigger drops",
              sqlite3_exec(db, "DROP TRIGGER fail_nf_reset_marker",
                           NULL, NULL, NULL) == SQLITE_OK);
+    return failures;
+}
+
+static int nk_full_replay_publishes_atomically(sqlite3 *db, uint8_t n1[32])
+{
+    int failures = 0;
     const int64_t replay_target = 2;
     const int64_t replay_boundary = replay_target + 1;
     NK_CHECK("full replay starts all components positive/incomplete",
@@ -406,7 +432,7 @@ int test_nullifier_kv(void)
              !shielded_history_publish_full_replay_complete(
                  db, replay_target) &&
              nk_all_history_markers_are(db, replay_boundary));
-    retained = false;
+    bool retained = false;
     NK_CHECK("failed completion preserves rebuilt rows",
              nullifier_kv_get(db, n1, NULLIFIER_POOL_SAPLING,
                               &retained, NULL) && retained);
@@ -431,7 +457,12 @@ int test_nullifier_kv(void)
                  !nullifier_kv_activation_cursor(db, &cursor, &found) &&
                  !found);
     }
+    return failures;
+}
 
+static int nk_anchor_reset_primitives_pin_cursors(sqlite3 *db)
+{
+    int failures = 0;
     /* anchor_kv reset primitives: two typed entry points, same tables and
      * rows cleared, differing only in the adoption cursor and so in how a
      * later missing root is classified. Pins cursor value and classification. */
@@ -465,50 +496,90 @@ int test_nullifier_kv(void)
     NK_CHECK("mark_empty_below(0) is equivalent to mark_complete",
              anchor_kv_reset_mark_empty_below_in_tx(db, 0) &&
              ak_both_anchor_cursors_are(db, 0));
+    return failures;
+}
 
+static int nk_nullifier_reset_mark_complete_pins_cursor(sqlite3 *db)
+{
+    int failures = 0;
     /* nullifier_kv reset primitives: two typed entry points that differ only
      * in the adoption cursor stamped, and so in whether a pre-activation
      * nullifier can be proven fresh. Pins the DELETE, the cursor value, and
      * the classification it drives. */
+    uint8_t rc[32];
+    nk_nf(rc, 0x5E);
+    NK_CHECK("reset control row present",
+             nullifier_kv_add(db, rc, NULLIFIER_POOL_SAPLING, 9) &&
+             nk_count(db) > 0);
+    NK_CHECK("mark_complete clears the set and stamps cursor zero",
+             nk_reset_complete_tx(db) && nk_count(db) == 0 &&
+             nk_marker_is(db, "0"));
     {
-        uint8_t rc[32];
-        nk_nf(rc, 0x5E);
-        NK_CHECK("reset control row present",
-                 nullifier_kv_add(db, rc, NULLIFIER_POOL_SAPLING, 9) &&
-                 nk_count(db) > 0);
-        NK_CHECK("mark_complete clears the set and stamps cursor zero",
-                 nk_reset_complete_tx(db) && nk_count(db) == 0 &&
-                 nk_marker_is(db, "0"));
-        {
-            /* Complete (from-genesis) history: the durable cursor reads explicit
-             * zero, so no pre-activation nullifier prefix is claimed unknown. */
-            int64_t cursor = -1;
-            bool found = false;
-            NK_CHECK("complete history: activation cursor reads explicit zero",
-                     nullifier_kv_activation_cursor(db, &cursor, &found) &&
-                     found && cursor == 0);
-        }
-        NK_CHECK("mark_empty_below clears the set and stamps cursor N",
-                 nullifier_kv_add(db, rc, NULLIFIER_POOL_SAPLING, 9) &&
-                 nk_reset_empty_below_tx(db, 4242) && nk_count(db) == 0 &&
-                 nk_marker_is(db, "4242"));
-        {
-            /* Empty-below-N history: the durable cursor reads the positive gap
-             * boundary — the marker class the reducer fails closed on until a
-             * body replay backfills [0, N). */
-            int64_t cursor = -1;
-            bool found = false;
-            NK_CHECK("empty-below history: activation cursor reads positive N",
-                     nullifier_kv_activation_cursor(db, &cursor, &found) &&
-                     found && cursor == 4242);
-        }
-        /* A negative below-height is refused; zero is accepted and behaves as
-         * mark_complete. */
-        NK_CHECK("mark_empty_below refuses a negative height",
-                 !nk_reset_empty_below_tx(db, -1));
-        NK_CHECK("mark_empty_below(0) is equivalent to mark_complete",
-                 nk_reset_empty_below_tx(db, 0) && nk_marker_is(db, "0"));
+        /* Complete (from-genesis) history: the durable cursor reads explicit
+         * zero, so no pre-activation nullifier prefix is claimed unknown. */
+        int64_t cursor = -1;
+        bool found = false;
+        NK_CHECK("complete history: activation cursor reads explicit zero",
+                 nullifier_kv_activation_cursor(db, &cursor, &found) &&
+                 found && cursor == 0);
     }
+    return failures;
+}
+
+static int nk_nullifier_reset_mark_empty_below_pins_cursor(sqlite3 *db)
+{
+    int failures = 0;
+    uint8_t rc[32];
+    nk_nf(rc, 0x5E);
+    NK_CHECK("mark_empty_below clears the set and stamps cursor N",
+             nullifier_kv_add(db, rc, NULLIFIER_POOL_SAPLING, 9) &&
+             nk_reset_empty_below_tx(db, 4242) && nk_count(db) == 0 &&
+             nk_marker_is(db, "4242"));
+    {
+        /* Empty-below-N history: the durable cursor reads the positive gap
+         * boundary — the marker class the reducer fails closed on until a
+         * body replay backfills [0, N). */
+        int64_t cursor = -1;
+        bool found = false;
+        NK_CHECK("empty-below history: activation cursor reads positive N",
+                 nullifier_kv_activation_cursor(db, &cursor, &found) &&
+                 found && cursor == 4242);
+    }
+    /* A negative below-height is refused; zero is accepted and behaves as
+     * mark_complete. */
+    NK_CHECK("mark_empty_below refuses a negative height",
+             !nk_reset_empty_below_tx(db, -1));
+    NK_CHECK("mark_empty_below(0) is equivalent to mark_complete",
+             nk_reset_empty_below_tx(db, 0) && nk_marker_is(db, "0"));
+    return failures;
+}
+
+int test_nullifier_kv(void);
+int test_nullifier_kv(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "nullifier_kv", "main");
+
+    NK_CHECK("progress_store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    NK_CHECK("db handle", db != NULL);
+
+    failures += nk_first_adoption_is_atomic(db);
+    failures += nk_precreated_table_adoption_is_conservative(db);
+
+    uint8_t n1[32];
+    nk_nf(n1, 0x11);
+
+    failures += nk_add_get_roundtrip_and_pool_separation(db, n1);
+    failures += nk_row_count_reports_each_pool(db);
+    failures += nk_readd_replaces_height(db, n1);
+    failures += nk_delete_range_bounds_are_inclusive(db);
+    failures += nk_combined_reset_boundary_rolls_back(db, n1);
+    failures += nk_full_replay_publishes_atomically(db, n1);
+    failures += nk_anchor_reset_primitives_pin_cursors(db);
+    failures += nk_nullifier_reset_mark_complete_pins_cursor(db);
+    failures += nk_nullifier_reset_mark_empty_below_pins_cursor(db);
 
     failures += nk_replay_status_cases(db);
     progress_store_close();

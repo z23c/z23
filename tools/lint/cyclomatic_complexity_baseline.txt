@@ -1645,7 +1645,6 @@ tests/harness/src/test_node_character_wire.c:test_node_character_wire:83
 tests/harness/src/test_node_health_service.c:test_node_health_service:304
 tests/harness/src/test_nullifier_backfill_service.c:nbf_reader:16
 tests/harness/src/test_nullifier_backfill_service.c:test_nullifier_backfill_service:42
-tests/harness/src/test_nullifier_kv.c:test_nullifier_kv:48
 tests/harness/src/test_onion_bridge.c:test_onion_bridge:81
 tests/harness/src/test_onion_directory.c:od_durable_directory:16
 tests/harness/src/test_onion_directory.c:od_parse_relay_hints:26
