@@ -1095,8 +1095,6 @@ engine/services/src/anchor_selfmint.c:anchor_selfmint_snapshot_status:20
 engine/services/src/bg_validation_authority.c:bg_validation_authority_publish:24
 engine/services/src/bg_validation_proofs.c:bg_validation_verify_shielded_proofs:30
 engine/services/src/bg_validation_service.c:bg_validation_thread:24
-engine/services/src/binary_ab_fallback.c:binary_ab_promote:17
-engine/services/src/binary_ab_fallback.c:binary_ab_promote_stream:16
 engine/services/src/block_index_blocks_hydrate.c:load_block_index_from_blocks_table:63
 engine/services/src/block_index_integrity.c:bii_repair_post_activation_anchor:21
 engine/services/src/block_index_integrity.c:block_index_repair_heights_range:43

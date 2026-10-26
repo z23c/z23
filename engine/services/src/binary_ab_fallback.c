@@ -117,6 +117,36 @@ static bool binary_ab_install_staging(struct platform_private_file *output,
            platform_private_parent_flush(parent);
 }
 
+/* Copy the input stream into the staging file at rising offsets; the caller
+ * still checks ferror(input) so read failures are logged there. */
+static bool binary_ab_copy_stream_to_file(FILE *input,
+                                          struct platform_private_file *output)
+{
+    unsigned char buf[BINARY_AB_COPY_CHUNK];
+    uint64_t offset = 0;
+    size_t n = 0;
+    bool copy_ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), input)) > 0) {
+        if (UINT64_MAX - offset < n ||
+            !platform_private_file_write_at(output, buf, n, offset)) {
+            copy_ok = false;
+            break;
+        }
+        offset += n;
+    }
+    return copy_ok;
+}
+
+/* Retire the staging file when the promotion did not commit, then close the
+ * output handle either way. */
+static void binary_ab_retire_or_close_output(
+    struct platform_private_file *output, const char *staging, bool committed)
+{
+    if (!committed && output->native != (uintptr_t)-1)
+        (void)platform_private_file_retire(output, staging);
+    platform_private_file_close(output);
+}
+
 static bool binary_ab_promote_stream(const char *slots_dir, FILE *input,
                                      const char *source_name)
 {
@@ -140,18 +170,7 @@ static bool binary_ab_promote_stream(const char *slots_dir, FILE *input,
     if (!binary_ab_open_staging(dst, tmp, &output))
         LOG_FAIL("binary_ab", "promote: cannot create exclusive staging file");
 
-    unsigned char buf[BINARY_AB_COPY_CHUNK];
-    bool copy_ok = true;
-    uint64_t offset = 0;
-    size_t n = 0;
-    while ((n = fread(buf, 1, sizeof(buf), input)) > 0) {
-        if (UINT64_MAX - offset < n ||
-            !platform_private_file_write_at(&output, buf, n, offset)) {
-            copy_ok = false;
-            break;
-        }
-        offset += n;
-    }
+    bool copy_ok = binary_ab_copy_stream_to_file(input, &output);
     if (ferror(input)) {
         LOG_WARN("binary_ab", "promote: read(%s) failed: %s",
                  source_name, strerror(errno));
@@ -160,13 +179,33 @@ static bool binary_ab_promote_stream(const char *slots_dir, FILE *input,
 
     if (copy_ok)
         copy_ok = binary_ab_install_staging(&output, tmp, dst, parent);
-    if (!copy_ok && output.native != (uintptr_t)-1)
-        (void)platform_private_file_retire(&output, tmp);
-    platform_private_file_close(&output);
+    binary_ab_retire_or_close_output(&output, tmp, copy_ok);
     if (!copy_ok)
         return false;
     LOG_INFO("binary_ab", "promoted current binary to last-good slot (%s)", dst);
     return true;
+}
+
+/* Build "<slots_dir>/last-good" and resolve it and its parent directory.
+ * The 1024 literals match the dst/parent arrays the callers pass in, the
+ * same way binary_ab_open_staging passes a literal 1088 for staging. */
+static bool binary_ab_resolve_lastgood_destination(const char *slots_dir,
+                                                   char dst[1024],
+                                                   char parent[1024])
+{
+    char requested[1024];
+    int n = snprintf(requested, sizeof(requested), "%s/%s", slots_dir,
+                     BINARY_AB_LASTGOOD_BASENAME);
+    return n > 0 && (size_t)n < sizeof(requested) &&
+           platform_private_path_resolve(requested, dst, 1024, parent, 1024);
+}
+
+/* Open the source as a positioned file and require a regular executable. */
+static bool binary_ab_open_positioned_executable(
+    struct platform_positioned_file *file, const char *path)
+{
+    return platform_positioned_file_open(file, path) &&
+           platform_positioned_file_is_executable(file);
 }
 
 bool binary_ab_promote(const char *slots_dir, const char *current_path)
@@ -175,20 +214,14 @@ bool binary_ab_promote(const char *slots_dir, const char *current_path)
         LOG_FAIL("binary_ab", "promote: empty current_path");
     struct platform_positioned_file input;
     platform_positioned_file_init(&input);
-    if (!platform_positioned_file_open(&input, current_path) ||
-        !platform_positioned_file_is_executable(&input))
+    if (!binary_ab_open_positioned_executable(&input, current_path))
         LOG_FAIL("binary_ab", "promote: %s is not a regular executable",
                  current_path);
     uint64_t size = 0;
     bool ok = platform_positioned_file_size(&input, &size);
-    char requested[1024], dst[1024], parent[1024], tmp[1088];
-    int requested_len = snprintf(requested, sizeof(requested), "%s/%s",
-                                 slots_dir, BINARY_AB_LASTGOOD_BASENAME);
-    if (!ok || requested_len <= 0 ||
-        (size_t)requested_len >= sizeof(requested) ||
-        !platform_private_path_resolve(requested, dst, sizeof(dst), parent,
-                                       sizeof(parent)))
-        ok = false;
+    char dst[1024], parent[1024], tmp[1088];
+    if (ok)
+        ok = binary_ab_resolve_lastgood_destination(slots_dir, dst, parent);
     struct platform_private_file output;
     platform_private_file_init(&output);
     if (ok) ok = binary_ab_open_staging(dst, tmp, &output);
@@ -202,9 +235,7 @@ bool binary_ab_promote(const char *slots_dir, const char *current_path)
         offset += chunk;
     }
     if (ok) ok = binary_ab_install_staging(&output, tmp, dst, parent);
-    if (!ok && output.native != (uintptr_t)-1)
-        (void)platform_private_file_retire(&output, tmp);
-    platform_private_file_close(&output);
+    binary_ab_retire_or_close_output(&output, tmp, ok);
     platform_positioned_file_close(&input);
     return ok;
 }
