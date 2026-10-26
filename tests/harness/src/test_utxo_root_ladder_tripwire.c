@@ -126,47 +126,61 @@ static bool tw_seed_applied_column(sqlite3 *db, int32_t anchor, int32_t rh)
                              sizeof(one));
 }
 
-/* End-to-end proof that the fail-closed default caps H* (via the untouched
- * reducer_frontier fold) below the first divergent rung and refuses fold above
- * it, that the observe-only hatch does not, and that the happy path is
- * unchanged. Runs each case in its own datadir; restores the production floor
- * on exit. Returns the failure count. */
-static int tw_run_cap_sections(void)
+/* Open one cap section's fixture: its own datadir + progress store, the coin
+ * and reducer schemas, and the seeded applied column. `dir` receives the
+ * 256-byte datadir buffer (the caller cleans it up); *db_out is NULL when the
+ * store never opened. Returns false on any setup failure. */
+static bool tw_open_cap_fixture(const char *tag, char dir[256],
+                                sqlite3 **db_out, int32_t anchor, int32_t rh)
+{
+    test_make_tmpdir(dir, 256, tag, "main");
+    bool ok = progress_store_open(dir);
+    sqlite3 *db = ok ? progress_store_db() : NULL;
+    *db_out = db;
+    return ok && db && coins_kv_ensure_schema(db) && tw_build_cap_schema(db) &&
+           tw_seed_applied_column(db, anchor, rh);
+}
+
+/* True when utxo_apply_log has a row at `h` whose ok flag equals `expected`
+ * (no row at `h` => false). */
+static bool tw_utxo_apply_row_ok_equals(sqlite3 *db, int32_t h, int expected)
+{
+    int row_ok = -1;
+    bool found = false;
+    return tw_utxo_apply_ok_at(db, h, &row_ok, &found) && found &&
+           row_ok == expected;
+}
+
+/* Plant a first-byte-flipped copy of `rung`'s UTXO root as the store's
+ * boundary root at the rung's own height — the divergent-store shape. */
+static bool tw_plant_divergent_root(sqlite3 *db,
+                                    const struct utxo_root_ladder_entry *rung)
+{
+    uint8_t corrupted[32];
+    memcpy(corrupted, rung->utxo_root, 32);
+    corrupted[0] ^= 0xff;
+    return coins_kv_boundary_root_set(db, rung->height, corrupted);
+}
+
+/* ── Section A: fail-closed (default) caps H* below the divergent rung. ── */
+static int tw_cap_failclose_section(const struct utxo_root_ladder_entry *rung,
+                                    int32_t rh, int32_t anchor)
 {
     int failures = 0;
-    if (g_utxo_root_ladder_count == 0) {
-        printf("utxo_root_ladder_tripwire: cap sections SKIPPED (no compiled "
-              "ladder rungs)\n");
-        return 0;
-    }
-    const struct utxo_root_ladder_entry *rung = &g_utxo_root_ladder[0];
-    const int32_t rh = rung->height;
-    const int32_t anchor = rh - 5;   /* below the rung so the cap is observable */
-
-    /* Lower the fixture finality floor below the rung: at the real compiled
-     * floor the rung IS the floor and H* cannot cap below it. */
-    reducer_frontier_test_set_compiled_anchor(anchor);
-
-    /* ── Section A: fail-closed (default) caps H* below the divergent rung. ── */
     printf("utxo_root_ladder_tripwire: fail-closed default caps H* below the "
           "divergent rung + sets a DEPENDENCY blocker... ");
     {
         char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "utxo_ladder_cap_failclose", "main");
-        bool ok = progress_store_open(dir);
-        sqlite3 *db = ok ? progress_store_db() : NULL;
-        ok = ok && db && coins_kv_ensure_schema(db) && tw_build_cap_schema(db) &&
-             tw_seed_applied_column(db, anchor, rh);
+        sqlite3 *db = NULL;
+        bool ok = tw_open_cap_fixture("utxo_ladder_cap_failclose", dir, &db,
+                                      anchor, rh);
 
         int32_t base_h = -1;   /* baseline: contiguous ok=1 through rh+1 */
         ok = ok && reducer_frontier_log_frontier(db, "utxo_apply_log",
                                                  "utxo_apply", &base_h) &&
              base_h == rh + 1;
 
-        uint8_t corrupted[32];
-        memcpy(corrupted, rung->utxo_root, 32);
-        corrupted[0] ^= 0xff;
-        ok = ok && coins_kv_boundary_root_set(db, rh, corrupted);
+        ok = ok && tw_plant_divergent_root(db, rung);
 
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         unsetenv("ZCL_UTXO_LADDER_OBSERVE_ONLY");
@@ -174,9 +188,7 @@ static int tw_run_cap_sections(void)
 
         bool blk = blocker_exists(TRIPWIRE_BLOCKER_ID) &&
                    blocker_class_for(TRIPWIRE_BLOCKER_ID) == BLOCKER_DEPENDENCY;
-        int row_ok = -1; bool found = false;
-        bool cap_row = tw_utxo_apply_ok_at(db, rh, &row_ok, &found) &&
-                       found && row_ok == 0;
+        bool cap_row = tw_utxo_apply_row_ok_equals(db, rh, 0);
         int32_t capped_h = -1;
         bool capped = reducer_frontier_log_frontier(db, "utxo_apply_log",
                                                    "utxo_apply", &capped_h) &&
@@ -191,22 +203,23 @@ static int tw_run_cap_sections(void)
         progress_store_close();
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Section B: the observe-only escape hatch does NOT cap H*. ── */
+/* ── Section B: the observe-only escape hatch does NOT cap H*. ── */
+static int tw_cap_observe_only_section(const struct utxo_root_ladder_entry *rung,
+                                       int32_t rh, int32_t anchor)
+{
+    int failures = 0;
     printf("utxo_root_ladder_tripwire: ZCL_UTXO_LADDER_OBSERVE_ONLY keeps a "
           "PERMANENT blocker and does NOT cap H*... ");
     {
         char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "utxo_ladder_cap_observe", "main");
-        bool ok = progress_store_open(dir);
-        sqlite3 *db = ok ? progress_store_db() : NULL;
-        ok = ok && db && coins_kv_ensure_schema(db) && tw_build_cap_schema(db) &&
-             tw_seed_applied_column(db, anchor, rh);
+        sqlite3 *db = NULL;
+        bool ok = tw_open_cap_fixture("utxo_ladder_cap_observe", dir, &db,
+                                      anchor, rh);
 
-        uint8_t corrupted[32];
-        memcpy(corrupted, rung->utxo_root, 32);
-        corrupted[0] ^= 0xff;
-        ok = ok && coins_kv_boundary_root_set(db, rh, corrupted);
+        ok = ok && tw_plant_divergent_root(db, rung);
 
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         setenv("ZCL_UTXO_LADDER_OBSERVE_ONLY", "1", 1);
@@ -215,9 +228,7 @@ static int tw_run_cap_sections(void)
 
         bool blk = blocker_exists(TRIPWIRE_BLOCKER_ID) &&
                    blocker_class_for(TRIPWIRE_BLOCKER_ID) == BLOCKER_PERMANENT;
-        int row_ok = -1; bool found = false;
-        bool row_untouched = tw_utxo_apply_ok_at(db, rh, &row_ok, &found) &&
-                             found && row_ok == 1;   /* seeded ok=1, no cap */
+        bool row_untouched = tw_utxo_apply_row_ok_equals(db, rh, 1);   /* seeded ok=1, no cap */
         int32_t h = -1;
         bool uncapped = reducer_frontier_log_frontier(db, "utxo_apply_log",
                                                      "utxo_apply", &h) &&
@@ -232,18 +243,22 @@ static int tw_run_cap_sections(void)
         progress_store_close();
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Section C: happy path — a MATCHING rung sets no blocker, no cap. ── */
+/* ── Section C: happy path — a MATCHING rung sets no blocker, no cap. ── */
+static int tw_cap_happy_path_section(const struct utxo_root_ladder_entry *rung,
+                                     int32_t rh, int32_t anchor)
+{
+    int failures = 0;
     printf("utxo_root_ladder_tripwire: happy path (matching rung) sets no "
           "blocker and does NOT cap H*... ");
     {
         char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "utxo_ladder_cap_happy", "main");
-        bool ok = progress_store_open(dir);
-        sqlite3 *db = ok ? progress_store_db() : NULL;
-        ok = ok && db && coins_kv_ensure_schema(db) && tw_build_cap_schema(db) &&
-             tw_seed_applied_column(db, anchor, rh) &&
-             coins_kv_boundary_root_set(db, rh, rung->utxo_root);  /* CORRECT root */
+        sqlite3 *db = NULL;
+        bool ok = tw_open_cap_fixture("utxo_ladder_cap_happy", dir, &db,
+                                      anchor, rh);
+        ok = ok && coins_kv_boundary_root_set(db, rh, rung->utxo_root);  /* CORRECT root */
 
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         unsetenv("ZCL_UTXO_LADDER_OBSERVE_ONLY");
@@ -263,16 +278,41 @@ static int tw_run_cap_sections(void)
         progress_store_close();
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
+
+/* End-to-end proof that the fail-closed default caps H* (via the untouched
+ * reducer_frontier fold) below the first divergent rung and refuses fold above
+ * it, that the observe-only hatch does not, and that the happy path is
+ * unchanged. Runs each case in its own datadir; restores the production floor
+ * on exit. Returns the failure count. */
+static int tw_run_cap_sections(void)
+{
+    if (g_utxo_root_ladder_count == 0) {
+        printf("utxo_root_ladder_tripwire: cap sections SKIPPED (no compiled "
+              "ladder rungs)\n");
+        return 0;
+    }
+    const struct utxo_root_ladder_entry *rung = &g_utxo_root_ladder[0];
+    const int32_t rh = rung->height;
+    const int32_t anchor = rh - 5;   /* below the rung so the cap is observable */
+
+    /* Lower the fixture finality floor below the rung: at the real compiled
+     * floor the rung IS the floor and H* cannot cap below it. */
+    reducer_frontier_test_set_compiled_anchor(anchor);
+
+    int failures = 0;
+    failures += tw_cap_failclose_section(rung, rh, anchor);
+    failures += tw_cap_observe_only_section(rung, rh, anchor);
+    failures += tw_cap_happy_path_section(rung, rh, anchor);
 
     reducer_frontier_test_set_compiled_anchor(-1);   /* restore production floor */
     return failures;
 }
 
-int test_utxo_root_ladder_tripwire(void)
+static int tw_report_empty_results_section(void)
 {
     int failures = 0;
-
-    printf("\n=== test_utxo_root_ladder_tripwire ===\n");
 
     /* report() on an empty/NULL result set: nothing was examined, so this
      * is UNVERIFIED (no blocker) — NOT HEALTHY. This is one of the two
@@ -291,6 +331,12 @@ int test_utxo_root_ladder_tripwire(void)
             !blocker_exists(TRIPWIRE_BLOCKER_ID)) printf("OK\n");
         else { printf("FAIL (rc=%d)\n", (int)rc); failures++; }
     }
+    return failures;
+}
+
+static int tw_report_healthy_compared_section(void)
+{
+    int failures = 0;
 
     /* At least one rung genuinely FOUND + compared (compared > 0) and none
      * diverged: SILENT HEALTHY — normal daily operation for most nodes
@@ -315,6 +361,12 @@ int test_utxo_root_ladder_tripwire(void)
         else { printf("FAIL (rc=%d blocker=%d)\n", (int)rc,
                       (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); failures++; }
     }
+    return failures;
+}
+
+static int tw_fail_arm_vacuous_coverage_section(void)
+{
+    int failures = 0;
 
     /* THE FAIL-ARM: a result set where COVERAGE is zero (every examined
      * rung is NOT_YET_REACHED, compared==0) must report UNVERIFIED, never
@@ -357,6 +409,24 @@ int test_utxo_root_ladder_tripwire(void)
                       (int)old_logic_says_healthy, (int)rc,
                       (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); failures++; }
     }
+    return failures;
+}
+
+/* The fresh-store verdict: agreement held (verify_ok, nothing DIVERGENT) but
+ * coverage was zero, so report() must read UNVERIFIED and fire no blocker. */
+static bool tw_fresh_store_verdict_ok(bool verify_ok, bool coverage_zero,
+                                      enum utxo_root_ladder_tripwire_result rc)
+{
+    return verify_ok &&           /* no DIVERGENT — agreement holds */
+           coverage_zero &&       /* but nothing was actually compared */
+           rc == UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED &&
+           rc != UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY &&
+           !blocker_exists(TRIPWIRE_BLOCKER_ID);
+}
+
+static int tw_real_ladder_fresh_store_section(bool *aborted)
+{
+    int failures = 0;
 
     /* THE REAL SHIPPED LADDER, end-to-end: run the actual
      * utxo_root_ladder_verify_against_store() (not a synthetic literal)
@@ -386,11 +456,7 @@ int test_utxo_root_ladder_tripwire(void)
 
         bool coverage_zero = n > 0 && results[0].compared == 0 &&
                              results[0].total == g_utxo_root_ladder_count;
-        bool ok = verify_ok &&           /* no DIVERGENT — agreement holds */
-                  coverage_zero &&       /* but nothing was actually compared */
-                  rc == UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED &&
-                  rc != UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY &&
-                  !blocker_exists(TRIPWIRE_BLOCKER_ID);
+        bool ok = tw_fresh_store_verdict_ok(verify_ok, coverage_zero, rc);
 
         progress_store_close();
         test_rm_rf_recursive(dir);
@@ -403,6 +469,15 @@ int test_utxo_root_ladder_tripwire(void)
     } else {
         printf("SKIP (no compiled ladder rungs)\n");
     }
+    return failures;
+_test_next:
+    *aborted = true;
+    return failures;
+}
+
+static int tw_report_divergent_fires_section(void)
+{
+    int failures = 0;
 
     /* A synthetic DIVERGENT rung FIRES: by DEFAULT (fail-closed) an ESCALATING
      * BLOCKER_DEPENDENCY, and the reason names the exact divergent height. (db
@@ -426,7 +501,12 @@ int test_utxo_root_ladder_tripwire(void)
                       (int)blocker_exists(TRIPWIRE_BLOCKER_ID), cls);
                failures++; }
     }
-    blocker_clear(TRIPWIRE_BLOCKER_ID);
+    return failures;
+}
+
+static int tw_boundary_kill_switch_section(bool *aborted)
+{
+    int failures = 0;
 
     /* at_boundary(): the kill switch fully suppresses the check, even at a
      * real %100 boundary height against a genuinely corrupted store. */
@@ -459,6 +539,15 @@ int test_utxo_root_ladder_tripwire(void)
     } else {
         printf("OK (no compiled ladder rungs to corrupt)\n");
     }
+    return failures;
+_test_next:
+    *aborted = true;
+    return failures;
+}
+
+static int tw_boundary_fires_section(bool *aborted)
+{
+    int failures = 0;
 
     /* at_boundary(): with the kill switch OFF, a genuinely corrupted store
      * FIRES for real (end-to-end path, not just report()'s unit API). */
@@ -490,6 +579,15 @@ int test_utxo_root_ladder_tripwire(void)
     } else {
         printf("OK (no compiled ladder rungs to corrupt)\n");
     }
+    return failures;
+_test_next:
+    *aborted = true;
+    return failures;
+}
+
+static int tw_boundary_off_boundary_section(bool *aborted)
+{
+    int failures = 0;
 
     /* at_boundary(): off-boundary heights are a pure no-op — no db touch,
      * no evidence — even against the same corrupted store. */
@@ -520,6 +618,23 @@ int test_utxo_root_ladder_tripwire(void)
     } else {
         printf("OK (no compiled ladder rungs)\n");
     }
+    return failures;
+_test_next:
+    *aborted = true;
+    return failures;
+}
+
+/* True when the chain_linkage hold latch still reads exactly the pre-report
+ * values — the parity invariant every verdict must preserve. */
+static bool tw_linkage_latch_unchanged(bool hold_before, int refuse_before)
+{
+    return chain_linkage_hold_active() == hold_before &&
+           chain_linkage_hold_refuse_from() == refuse_before;
+}
+
+static int tw_linkage_parity_section(void)
+{
+    int failures = 0;
 
     /* HARD PARITY GUARD: the fail-close is enacted through the provable-tip
      * fold (an ok=0 utxo_apply_log verdict), NEVER through the chain_linkage
@@ -547,8 +662,7 @@ int test_utxo_root_ladder_tripwire(void)
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         enum utxo_root_ladder_tripwire_result rc_healthy =
             utxo_root_ladder_tripwire_report(NULL, healthy, 1);
-        ok = ok && (chain_linkage_hold_active() == hold_before);
-        ok = ok && (chain_linkage_hold_refuse_from() == refuse_before);
+        ok = ok && tw_linkage_latch_unchanged(hold_before, refuse_before);
         ok = ok && (rc_healthy == UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY);
         ok = ok && !blocker_exists(TRIPWIRE_BLOCKER_ID);
 
@@ -560,8 +674,7 @@ int test_utxo_root_ladder_tripwire(void)
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         enum utxo_root_ladder_tripwire_result rc_unverified =
             utxo_root_ladder_tripwire_report(NULL, unverified, 1);
-        ok = ok && (chain_linkage_hold_active() == hold_before);
-        ok = ok && (chain_linkage_hold_refuse_from() == refuse_before);
+        ok = ok && tw_linkage_latch_unchanged(hold_before, refuse_before);
         ok = ok && (rc_unverified == UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED);
         ok = ok && !blocker_exists(TRIPWIRE_BLOCKER_ID);
 
@@ -570,8 +683,7 @@ int test_utxo_root_ladder_tripwire(void)
         };
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         (void)utxo_root_ladder_tripwire_report(NULL, divergent, 1);
-        ok = ok && (chain_linkage_hold_active() == hold_before);
-        ok = ok && (chain_linkage_hold_refuse_from() == refuse_before);
+        ok = ok && tw_linkage_latch_unchanged(hold_before, refuse_before);
         /* Evidence exists, but it is a plain blocker — NOT a linkage HOLD. */
         ok = ok && blocker_exists(TRIPWIRE_BLOCKER_ID);
 
@@ -583,6 +695,34 @@ int test_utxo_root_ladder_tripwire(void)
                       chain_linkage_hold_refuse_from(),
                       (int)rc_healthy, (int)rc_unverified); failures++; }
     }
+    return failures;
+}
+
+int test_utxo_root_ladder_tripwire(void)
+{
+    int failures = 0;
+    bool aborted = false;
+
+    printf("\n=== test_utxo_root_ladder_tripwire ===\n");
+
+    failures += tw_report_empty_results_section();
+    failures += tw_report_healthy_compared_section();
+    failures += tw_fail_arm_vacuous_coverage_section();
+
+    failures += tw_real_ladder_fresh_store_section(&aborted);
+    if (aborted) goto _test_next;
+
+    failures += tw_report_divergent_fires_section();
+    blocker_clear(TRIPWIRE_BLOCKER_ID);
+
+    failures += tw_boundary_kill_switch_section(&aborted);
+    if (aborted) goto _test_next;
+    failures += tw_boundary_fires_section(&aborted);
+    if (aborted) goto _test_next;
+    failures += tw_boundary_off_boundary_section(&aborted);
+    if (aborted) goto _test_next;
+
+    failures += tw_linkage_parity_section();
 
     /* Fail-closed cap: prove the default stops advance (caps H*), the
      * observe-only hatch does not, and the happy path is unchanged. */
