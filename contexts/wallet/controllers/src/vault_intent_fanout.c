@@ -158,78 +158,94 @@ static bool vif_preflight(struct wallet_rpc_context *ctx, const char *scope,
     return true;
 }
 
-bool vault_intent_fanout_plan_rpc(const struct json_value *params, bool help,
-                                  struct json_value *result)
+struct vif_plan_input {
+    const char *scope;
+    const char *user_key;
+    int64_t recipient;
+    int64_t maximum_fee;
+    int64_t concurrency;
+};
+
+static struct vif_plan_input vif_parse_plan_input(
+    const struct json_value *params)
 {
-    if (help) {
-        json_set_str(result, "vault_intent_fanout_plan {wallet_scope,recipient_value_zat,maximum_fee_zat,concurrency,idempotency_key}\n");
-        return true;
-    }
     const struct json_value *input = json_at(params, 0);
-    const char *scope = input && input->type == JSON_OBJ
+    struct vif_plan_input in;
+    in.scope = input && input->type == JSON_OBJ
         ? json_get_str(json_get(input, "wallet_scope")) : NULL;
-    const char *user_key = input && input->type == JSON_OBJ
+    in.user_key = input && input->type == JSON_OBJ
         ? json_get_str(json_get(input, "idempotency_key")) : NULL;
-    int64_t recipient = input && input->type == JSON_OBJ
+    in.recipient = input && input->type == JSON_OBJ
         ? json_get_int(json_get(input, "recipient_value_zat")) : 0;
-    int64_t maximum_fee = input && input->type == JSON_OBJ
+    in.maximum_fee = input && input->type == JSON_OBJ
         ? json_get_int(json_get(input, "maximum_fee_zat")) : -1;
-    int64_t concurrency = input && input->type == JSON_OBJ
+    in.concurrency = input && input->type == JSON_OBJ
         ? json_get_int(json_get(input, "concurrency")) : 0;
-    if (!wallet_money_scope_valid(scope)) {
+    return in;
+}
+
+static bool vif_validate_plan(const struct vif_plan_input *in,
+                              int64_t *out_value, int64_t *out_total,
+                              struct json_value *result)
+{
+    if (!wallet_money_scope_valid(in->scope)) {
         vif_error(result, "WALLET_SCOPE_REQUIRED",
                   "wallet_scope must explicitly be dev, prod, or test");
-        return true;
+        return false;
     }
-    if (!vault_intent_idempotency_key_valid(user_key)) {
+    if (!vault_intent_idempotency_key_valid(in->user_key)) {
         vif_error(result, "IDEMPOTENCY_KEY_REQUIRED",
                   "idempotency_key must be 1..64 printable characters");
-        return true;
+        return false;
     }
-    if (recipient <= 0 || maximum_fee < 0 || concurrency < 2 ||
-        concurrency > VIF_MAX_OUTPUTS || recipient > INT64_MAX - maximum_fee) {
+    if (in->recipient <= 0 || in->maximum_fee < 0 || in->concurrency < 2 ||
+        in->concurrency > VIF_MAX_OUTPUTS ||
+        in->recipient > INT64_MAX - in->maximum_fee) {
         vif_error(result, "INVALID_FANOUT",
                   "positive recipient_value_zat, non-negative maximum_fee_zat, and concurrency 2..50 are required");
-        return true;
+        return false;
     }
-    int64_t output_value = recipient + maximum_fee;
+    int64_t output_value = in->recipient + in->maximum_fee;
     if (!MoneyRange(output_value) ||
-        output_value > INT64_MAX / concurrency ||
-        !MoneyRange(output_value * concurrency)) {
+        output_value > INT64_MAX / in->concurrency ||
+        !MoneyRange(output_value * in->concurrency)) {
         vif_error(result, "INVALID_FANOUT", "fanout amount is out of range");
-        return true;
+        return false;
     }
-    int64_t outputs_total = output_value * concurrency;
-    char internal_key[VAULT_INTENT_IDEMPOTENCY_MAX + 1];
-    vif_internal_key(scope, user_key, internal_key);
+    *out_value = output_value;
+    *out_total = output_value * in->concurrency;
+    return true;
+}
 
-    if (pthread_mutex_lock(&g_vif_mutex) != 0)
-        LOG_FAIL("vault_intent_fanout", "fanout mutex lock failed");
-    struct wallet_rpc_context *ctx = wallet_rpc_context_current();
-    if (!vault_intent_context_ready(ctx, result)) {
-        (void)pthread_mutex_unlock(&g_vif_mutex);
-        return true;
-    }
+static bool vif_replay_existing_plan(struct wallet_rpc_context *ctx,
+                                     const char *scope,
+                                     const char *internal_key,
+                                     int64_t concurrency, int64_t output_value,
+                                     int64_t outputs_total,
+                                     struct json_value *result)
+{
     struct vault_intent_row existing;
-    if (vault_intent_find_application_idempotency(ctx->node_db, scope,
-            VAULT_INTENT_TRANSPARENT_APPLICATION, internal_key, &existing)) {
-        bool same = existing.recipient_value_zat == outputs_total &&
-            vault_intent_transparent_shape_matches(
-                &existing, (size_t)concurrency, output_value);
-        if (same)
-            vif_render(result, &existing, (size_t)concurrency,
-                       output_value, true);
-        else
-            vif_error(result, "IDEMPOTENCY_CONFLICT",
-                      "that idempotency key already names a different fanout");
-        (void)pthread_mutex_unlock(&g_vif_mutex);
-        return true;
-    }
-    if (!vif_preflight(ctx, scope, outputs_total, result)) {
-        (void)pthread_mutex_unlock(&g_vif_mutex);
-        return true;
-    }
+    bool found = vault_intent_find_application_idempotency(
+        ctx->node_db, scope, VAULT_INTENT_TRANSPARENT_APPLICATION,
+        internal_key, &existing);
+    if (!found)
+        return false;
+    bool same = existing.recipient_value_zat == outputs_total &&
+        vault_intent_transparent_shape_matches(
+            &existing, (size_t)concurrency, output_value);
+    if (same)
+        vif_render(result, &existing, (size_t)concurrency,
+                   output_value, true);
+    else
+        vif_error(result, "IDEMPOTENCY_CONFLICT",
+                  "that idempotency key already names a different fanout");
+    return true;
+}
 
+static bool vif_stage_fanout_plan(const char *scope, const char *internal_key,
+                                  int64_t concurrency, int64_t output_value,
+                                  struct json_value *result)
+{
     struct json_value plan, effects;
     json_init(&plan); json_set_object(&plan);
     json_init(&effects); json_set_array(&effects);
@@ -261,28 +277,75 @@ bool vault_intent_fanout_plan_rpc(const struct json_value *params, bool help,
         vif_error(result, "DURABLE_ADDRESS_FAILED",
                   why[0] ? why
                          : "could not persist every private fanout destination");
-        (void)pthread_mutex_unlock(&g_vif_mutex);
-        return true;
+        return false;
     }
     (void)json_push_kv(&plan, "effects", &effects);
     json_free(&effects);
     (void)vif_continue_plan(&plan, result);
     json_free(&plan);
+    return true;
+}
 
+static bool vif_load_created_plan(struct wallet_rpc_context *ctx,
+                                  struct json_value *result,
+                                  struct vault_intent_row *row)
+{
     const char *plan_hex = json_get_bool(json_get(result, "ok"))
         ? json_get_str(json_get(result, "plan_id")) : NULL;
     uint8_t plan_id[32];
-    struct vault_intent_row row;
     if (!plan_hex || strlen(plan_hex) != 64 || !IsHex(plan_hex) ||
         ParseHex(plan_hex, plan_id, sizeof(plan_id)) != sizeof(plan_id) ||
-        !vault_intent_find(ctx->node_db, plan_id, &row)) {
+        !vault_intent_find(ctx->node_db, plan_id, row)) {
         if (json_get_bool(json_get(result, "ok")))
             vif_error(result, "PLAN_LOOKUP_FAILED",
                       "fanout plan was not recoverable after creation");
+        return false;
+    }
+    return true;
+}
+
+bool vault_intent_fanout_plan_rpc(const struct json_value *params, bool help,
+                                  struct json_value *result)
+{
+    if (help) {
+        json_set_str(result, "vault_intent_fanout_plan {wallet_scope,recipient_value_zat,maximum_fee_zat,concurrency,idempotency_key}\n");
+        return true;
+    }
+    struct vif_plan_input in = vif_parse_plan_input(params);
+    int64_t output_value, outputs_total;
+    if (!vif_validate_plan(&in, &output_value, &outputs_total, result))
+        return true;
+    char internal_key[VAULT_INTENT_IDEMPOTENCY_MAX + 1];
+    vif_internal_key(in.scope, in.user_key, internal_key);
+
+    if (pthread_mutex_lock(&g_vif_mutex) != 0)
+        LOG_FAIL("vault_intent_fanout", "fanout mutex lock failed");
+    struct wallet_rpc_context *ctx = wallet_rpc_context_current();
+    if (!vault_intent_context_ready(ctx, result)) {
         (void)pthread_mutex_unlock(&g_vif_mutex);
         return true;
     }
-    vif_render(result, &row, (size_t)concurrency, output_value, false);
+    if (vif_replay_existing_plan(ctx, in.scope, internal_key,
+                                 in.concurrency, output_value,
+                                 outputs_total, result)) {
+        (void)pthread_mutex_unlock(&g_vif_mutex);
+        return true;
+    }
+    if (!vif_preflight(ctx, in.scope, outputs_total, result)) {
+        (void)pthread_mutex_unlock(&g_vif_mutex);
+        return true;
+    }
+    if (!vif_stage_fanout_plan(in.scope, internal_key, in.concurrency,
+                               output_value, result)) {
+        (void)pthread_mutex_unlock(&g_vif_mutex);
+        return true;
+    }
+    struct vault_intent_row row;
+    if (!vif_load_created_plan(ctx, result, &row)) {
+        (void)pthread_mutex_unlock(&g_vif_mutex);
+        return true;
+    }
+    vif_render(result, &row, (size_t)in.concurrency, output_value, false);
     (void)pthread_mutex_unlock(&g_vif_mutex);
     return true;
 }

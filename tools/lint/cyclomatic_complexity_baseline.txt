@@ -616,7 +616,6 @@ contexts/wallet/controllers/src/vault_intent_controller.c:vi_build_prepared:20
 contexts/wallet/controllers/src/vault_intent_controller.c:vi_context_ready:22
 contexts/wallet/controllers/src/vault_intent_controller.c:vi_decode:25
 contexts/wallet/controllers/src/vault_intent_controller.c:vi_encode:16
-contexts/wallet/controllers/src/vault_intent_fanout.c:vault_intent_fanout_plan_rpc:40
 contexts/wallet/controllers/src/vault_intent_private.c:vault_intent_private_plan:35
 contexts/wallet/controllers/src/vault_intent_private.c:vip_decode:33
 contexts/wallet/controllers/src/vault_intent_private.c:vip_effect_parse:30
