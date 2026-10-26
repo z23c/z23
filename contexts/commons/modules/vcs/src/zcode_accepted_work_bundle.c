@@ -91,53 +91,37 @@ static bool accepted_add_proof_set(
     return ok;
 }
 
-enum vcs_zcode_accepted_work_bundle_result
-vcs_zcode_accepted_work_bundle_export(
-    const char *workspace, const uint8_t accepted_work_root[32],
-    int64_t now_unix, uint8_t **wire_out, size_t *wire_len,
+static bool accepted_collect_objects(
+    const char *workspace, const struct vcs_zcode_accepted_work_v1 *accepted,
+    struct accepted_bundle_object *objects, size_t *count)
+{
+    return accepted_object_add(
+            workspace, accepted->task_root, objects, count) &&
+        accepted_object_add(
+            workspace, accepted->candidate_root, objects, count) &&
+        accepted_object_add(
+            workspace, accepted->proof_policy_root, objects, count) &&
+        accepted_object_add(
+            workspace, accepted->frontier_root, objects, count) &&
+        accepted_object_add(
+            workspace, accepted->candidate_lane_root, objects, count) &&
+        accepted_object_add(
+            workspace, accepted->accepted_work_root, objects, count) &&
+        accepted_add_proof_set(
+            workspace, accepted->candidate_lane.proof_set_root,
+            objects, count) &&
+        accepted_add_proof_set(
+            workspace, accepted->proven.proof_set_root, objects, count);
+}
+
+static enum vcs_zcode_accepted_work_bundle_result accepted_finish_export(
+    const uint8_t accepted_work_root[32],
+    const struct vcs_zcode_accepted_work_v1 *accepted,
+    struct accepted_bundle_object *objects, size_t count,
+    uint8_t *task_authority, size_t task_authority_len,
+    uint8_t **wire_out, size_t *wire_len,
     struct vcs_zcode_accepted_work_v1 *accepted_out)
 {
-    if (wire_out) *wire_out = NULL;
-    if (wire_len) *wire_len = 0;
-    if (!workspace || !accepted_work_root || now_unix <= 0 ||
-        !wire_out || !wire_len)
-        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_NULL;
-    struct vcs_zcode_accepted_work_v1 accepted;
-    if (!vcs_zcode_accepted_work_resolve(
-            workspace, accepted_work_root, now_unix, &accepted))
-        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY;
-    struct accepted_bundle_object *objects = zcl_calloc(
-        ACCEPTED_BUNDLE_MAX_OBJECTS, sizeof(*objects),
-        "zcode.accepted_bundle.objects");
-    if (!objects) return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_ALLOC;
-    size_t count = 0;
-    bool ok = accepted_object_add(
-            workspace, accepted.task_root, objects, &count) &&
-        accepted_object_add(
-            workspace, accepted.candidate_root, objects, &count) &&
-        accepted_object_add(
-            workspace, accepted.proof_policy_root, objects, &count) &&
-        accepted_object_add(
-            workspace, accepted.frontier_root, objects, &count) &&
-        accepted_object_add(
-            workspace, accepted.candidate_lane_root, objects, &count) &&
-        accepted_object_add(
-            workspace, accepted.accepted_work_root, objects, &count) &&
-        accepted_add_proof_set(
-            workspace, accepted.candidate_lane.proof_set_root,
-            objects, &count) &&
-        accepted_add_proof_set(
-            workspace, accepted.proven.proof_set_root, objects, &count);
-    uint8_t *task_authority = NULL;
-    size_t task_authority_len = 0;
-    ok = ok && vcs_zcode_task_authority_bundle_export(
-            workspace, &accepted.task, &task_authority,
-            &task_authority_len) == VCS_ZCODE_TASK_AUTHORITY_OK;
-    if (!ok) {
-        free(task_authority);
-        accepted_objects_free(objects, count);
-        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_CAS;
-    }
     qsort(objects, count, sizeof(*objects), accepted_object_compare);
     size_t total = ACCEPTED_BUNDLE_HEADER_BYTES;
     for (size_t i = 0; i < count; i++) {
@@ -170,7 +154,7 @@ vcs_zcode_accepted_work_bundle_export(
     vcs_wr_u16le(wire + 10, 0);
     vcs_wr_u32le(wire + 12, (uint32_t)count);
     memcpy(wire + 16, accepted_work_root, 32);
-    memcpy(wire + 48, accepted.candidate.candidate_source_root, 32);
+    memcpy(wire + 48, accepted->candidate.candidate_source_root, 32);
     vcs_wr_u64le(wire + 80, task_authority_len);
     size_t off = ACCEPTED_BUNDLE_HEADER_BYTES;
     for (size_t i = 0; i < count; i++) {
@@ -189,8 +173,44 @@ vcs_zcode_accepted_work_bundle_export(
     }
     *wire_out = wire;
     *wire_len = total;
-    if (accepted_out) *accepted_out = accepted;
+    if (accepted_out) *accepted_out = *accepted;
     return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK;
+}
+
+enum vcs_zcode_accepted_work_bundle_result
+vcs_zcode_accepted_work_bundle_export(
+    const char *workspace, const uint8_t accepted_work_root[32],
+    int64_t now_unix, uint8_t **wire_out, size_t *wire_len,
+    struct vcs_zcode_accepted_work_v1 *accepted_out)
+{
+    if (wire_out) *wire_out = NULL;
+    if (wire_len) *wire_len = 0;
+    if (!workspace || !accepted_work_root || now_unix <= 0 ||
+        !wire_out || !wire_len)
+        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_NULL;
+    struct vcs_zcode_accepted_work_v1 accepted;
+    if (!vcs_zcode_accepted_work_resolve(
+            workspace, accepted_work_root, now_unix, &accepted))
+        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY;
+    struct accepted_bundle_object *objects = zcl_calloc(
+        ACCEPTED_BUNDLE_MAX_OBJECTS, sizeof(*objects),
+        "zcode.accepted_bundle.objects");
+    if (!objects) return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_ALLOC;
+    size_t count = 0;
+    bool ok = accepted_collect_objects(workspace, &accepted, objects, &count);
+    uint8_t *task_authority = NULL;
+    size_t task_authority_len = 0;
+    ok = ok && vcs_zcode_task_authority_bundle_export(
+            workspace, &accepted.task, &task_authority,
+            &task_authority_len) == VCS_ZCODE_TASK_AUTHORITY_OK;
+    if (!ok) {
+        free(task_authority);
+        accepted_objects_free(objects, count);
+        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_CAS;
+    }
+    return accepted_finish_export(accepted_work_root, &accepted,
+        objects, count, task_authority, task_authority_len,
+        wire_out, wire_len, accepted_out);
 }
 
 /* Everything from here to the matching #endif serves the import staging
@@ -198,11 +218,10 @@ vcs_zcode_accepted_work_bundle_export(
  * unguarded they would each be an unused static under -Werror there. */
 #if !defined(_WIN32)
 
-static enum vcs_zcode_accepted_work_bundle_result accepted_bundle_parse(
+static enum vcs_zcode_accepted_work_bundle_result accepted_check_header(
     const uint8_t accepted_work_root[32], const uint8_t source_root[32],
     const uint8_t *wire, size_t wire_len,
-    struct accepted_bundle_view *views, size_t *count_out,
-    const uint8_t **task_authority, size_t *task_authority_len)
+    uint32_t *count_out, uint64_t *authority_len_out)
 {
     if (wire_len < ACCEPTED_BUNDLE_HEADER_BYTES ||
         wire_len > VCS_ZCODE_ACCEPTED_WORK_BUNDLE_MAX_BYTES ||
@@ -217,6 +236,23 @@ static enum vcs_zcode_accepted_work_bundle_result accepted_bundle_parse(
     if (count == 0 || count > ACCEPTED_BUNDLE_MAX_OBJECTS ||
         authority_len64 == 0 || authority_len64 > SIZE_MAX)
         return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_LIMIT;
+    *count_out = count;
+    *authority_len_out = authority_len64;
+    return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK;
+}
+
+static enum vcs_zcode_accepted_work_bundle_result accepted_bundle_parse(
+    const uint8_t accepted_work_root[32], const uint8_t source_root[32],
+    const uint8_t *wire, size_t wire_len,
+    struct accepted_bundle_view *views, size_t *count_out,
+    const uint8_t **task_authority, size_t *task_authority_len)
+{
+    uint32_t count;
+    uint64_t authority_len64;
+    enum vcs_zcode_accepted_work_bundle_result result = accepted_check_header(
+        accepted_work_root, source_root, wire, wire_len,
+        &count, &authority_len64);
+    if (result != VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK) return result;
     size_t off = ACCEPTED_BUNDLE_HEADER_BYTES;
     bool found_accepted = false;
     for (uint32_t i = 0; i < count; i++) {
@@ -287,6 +323,61 @@ static uint32_t accepted_bundle_work_receipt_count(
     return receipts;
 }
 
+static enum vcs_zcode_accepted_work_bundle_result accepted_stage_import(
+    const char *workspace, const uint8_t accepted_work_root[32],
+    const uint8_t source_root[32], const struct accepted_bundle_view *views,
+    size_t count, int64_t accepted_unix,
+    const uint8_t *task_authority, size_t task_authority_len,
+    struct vcs_zcode_accepted_work_v1 *accepted)
+{
+    char scratch[] = "/tmp/zcl-accepted-work.XXXXXX";
+    if (!mkdtemp(scratch)) return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_CAS;
+    bool staged = accepted_bundle_store(scratch, views, count);
+    staged = staged && vcs_zcode_accepted_work_resolve(
+        scratch, accepted_work_root, accepted_unix, accepted);
+    staged = staged && memcmp(
+        accepted->candidate.candidate_source_root, source_root, 32) == 0;
+    staged = staged && vcs_zcode_task_authority_bundle_import(
+        scratch, &accepted->task, task_authority, task_authority_len) ==
+            VCS_ZCODE_TASK_AUTHORITY_OK;
+    struct zcl_result removed = zcl_tree_remove(scratch);
+    if (!removed.ok || !staged)
+        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY;
+    if (vcs_zcode_task_authority_bundle_validate_for_candidate(
+            workspace, &accepted->task, &accepted->candidate,
+            task_authority, task_authority_len) !=
+            VCS_ZCODE_TASK_AUTHORITY_OK)
+        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY;
+    return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK;
+}
+
+static enum vcs_zcode_accepted_work_bundle_result accepted_finish_import(
+    const char *workspace, const uint8_t accepted_work_root[32],
+    const uint8_t source_root[32], const struct accepted_bundle_view *views,
+    size_t count, int64_t accepted_unix,
+    const uint8_t *task_authority, size_t task_authority_len,
+    const struct vcs_zcode_accepted_work_v1 *accepted,
+    struct vcs_zcode_accepted_work_v1 *accepted_out,
+    uint32_t *object_count_out, uint32_t *work_receipt_count_out)
+{
+    if (!accepted_bundle_store(workspace, views, count) ||
+        vcs_zcode_task_authority_bundle_import(
+            workspace, &accepted->task, task_authority,
+            task_authority_len) != VCS_ZCODE_TASK_AUTHORITY_OK)
+        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_CAS;
+    struct vcs_zcode_accepted_work_v1 final;
+    if (!vcs_zcode_accepted_work_resolve(
+            workspace, accepted_work_root, accepted_unix, &final) ||
+        memcmp(final.candidate.candidate_source_root, source_root, 32) != 0)
+        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY;
+    if (accepted_out) *accepted_out = final;
+    if (object_count_out) *object_count_out = (uint32_t)count;
+    if (work_receipt_count_out)
+        *work_receipt_count_out = accepted_bundle_work_receipt_count(
+            views, count);
+    return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK;
+}
+
 #endif /* !_WIN32 */
 
 enum vcs_zcode_accepted_work_bundle_result
@@ -330,41 +421,15 @@ vcs_zcode_accepted_work_bundle_import(
             views, count, accepted_work_root, &accepted_unix))
         return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY;
 
-    char scratch[] = "/tmp/zcl-accepted-work.XXXXXX";
-    if (!mkdtemp(scratch)) return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_CAS;
-    bool staged = accepted_bundle_store(scratch, views, count);
     struct vcs_zcode_accepted_work_v1 accepted;
-    staged = staged && vcs_zcode_accepted_work_resolve(
-        scratch, accepted_work_root, accepted_unix, &accepted);
-    staged = staged && memcmp(
-        accepted.candidate.candidate_source_root, source_root, 32) == 0;
-    staged = staged && vcs_zcode_task_authority_bundle_import(
-        scratch, &accepted.task, task_authority, task_authority_len) ==
-            VCS_ZCODE_TASK_AUTHORITY_OK;
-    struct zcl_result removed = zcl_tree_remove(scratch);
-    if (!removed.ok || !staged)
-        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY;
-    if (vcs_zcode_task_authority_bundle_validate_for_candidate(
-            workspace, &accepted.task, &accepted.candidate,
-            task_authority, task_authority_len) !=
-            VCS_ZCODE_TASK_AUTHORITY_OK)
-        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY;
+    result = accepted_stage_import(workspace, accepted_work_root,
+        source_root, views, count, accepted_unix,
+        task_authority, task_authority_len, &accepted);
+    if (result != VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK) return result;
 
-    if (!accepted_bundle_store(workspace, views, count) ||
-        vcs_zcode_task_authority_bundle_import(
-            workspace, &accepted.task, task_authority,
-            task_authority_len) != VCS_ZCODE_TASK_AUTHORITY_OK)
-        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_CAS;
-    struct vcs_zcode_accepted_work_v1 final;
-    if (!vcs_zcode_accepted_work_resolve(
-            workspace, accepted_work_root, accepted_unix, &final) ||
-        memcmp(final.candidate.candidate_source_root, source_root, 32) != 0)
-        return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY;
-    if (accepted_out) *accepted_out = final;
-    if (object_count_out) *object_count_out = (uint32_t)count;
-    if (work_receipt_count_out)
-        *work_receipt_count_out = accepted_bundle_work_receipt_count(
-            views, count);
-    return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK;
+    return accepted_finish_import(workspace, accepted_work_root,
+        source_root, views, count, accepted_unix,
+        task_authority, task_authority_len, &accepted, accepted_out,
+        object_count_out, work_receipt_count_out);
 #endif
 }

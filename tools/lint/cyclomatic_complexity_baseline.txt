@@ -133,9 +133,6 @@ contexts/commons/modules/vcs/src/vcs_revert.c:vcs_revert:25
 contexts/commons/modules/vcs/src/vcs_seal.c:vcs_seal_load_globs:21
 contexts/commons/modules/vcs/src/vcs_walk.c:walk_dir:32
 contexts/commons/modules/vcs/src/zcode_accepted_work.c:vcs_zcode_accepted_work_resolve:28
-contexts/commons/modules/vcs/src/zcode_accepted_work_bundle.c:accepted_bundle_parse:21
-contexts/commons/modules/vcs/src/zcode_accepted_work_bundle.c:vcs_zcode_accepted_work_bundle_export:29
-contexts/commons/modules/vcs/src/zcode_accepted_work_bundle.c:vcs_zcode_accepted_work_bundle_import:24
 contexts/commons/modules/vcs/src/zcode_app_run_observation.c:vcs_zcode_app_run_observation_v1_validate:21
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_bid_dominates:18
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:45
