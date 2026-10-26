@@ -305,8 +305,8 @@ static bool she_hash_tx_under_two_branch_ids(const uint8_t *p2pkh,
     struct uint256 a, b;
     bool ok = she_sig(&sc, &tx, 0, SIGHASH_ALL, 50, branch_a, &a)
            && she_sig(&sc, &tx, 0, SIGHASH_ALL, 50, branch_b, &b);
+    *same_hash = ok && uint256_eq(&a, &b);
     she_free_tx(&tx);
-    *same_hash = uint256_eq(&a, &b);
     return ok;
 }
 
@@ -427,7 +427,20 @@ int test_sighash_edge(void)
                   rejected);
     }
 
-    /* 1b-e2e. See the comment inside she_sprout_single_e2e_eval_false. */
+    /* 1b-e2e. zclassicd parity pin — DO NOT "FIX" the reject into
+     *     Bitcoin's uint256(1) sentinel. zclassicd THROWS logic_error at
+     *     zclassic-cpp/src/script/interpreter.cpp:1158-1163 (Zcash
+     *     deleted the one-hash sentinel); CheckSig catches it at
+     *     :1197-1202 and returns false, so OP_CHECKSIG pushes false and
+     *     the script fails EVAL_FALSE — indistinguishable from any bad
+     *     signature. This case proves the c23 LOG_FAIL→false path lands
+     *     on the SAME observable verdict: a Sprout 1-vin/0-vout tx
+     *     spending a P2PK output, signed with SIGHASH_SINGLE over the
+     *     would-be sentinel hash uint256(1), must fail verify_script
+     *     with SCRIPT_ERR_EVAL_FALSE (push-false, not an abort). If a
+     *     future "fix" makes signature_hash return uint256(1)+true, the
+     *     signature below VERIFIES, OP_CHECKSIG pushes true, and this
+     *     test FAILS — implementing the sentinel forks from zclassicd. */
     {
         bool good = she_sprout_single_e2e_eval_false();
         SHE_CHECK("sprout SINGLE e2e: verify_script false + EVAL_FALSE "
