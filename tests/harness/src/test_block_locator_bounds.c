@@ -18,9 +18,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Writes the tolerance test's wire payload: height, compact count =
- * MAX_LOCATOR_HASHES + 1, that many 32-byte hashes (data[0] == i, rest
- * 0x5A), then the 32-byte hash_stop (0xA7) returned to the caller. */
 static bool write_oversized_locator_payload(struct byte_stream *s,
                                             unsigned char hash_stop[32])
 {
