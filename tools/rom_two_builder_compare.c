@@ -146,6 +146,46 @@ static void rtb_rom_state_root(const struct rtb_derived *d, int64_t height,
     sha3_256_finalize(&c, out);
 }
 
+/* A coins row passes the codec's shape rules: 32-byte txid, non-negative
+ * vout and height, and a 0/1 coinbase flag. */
+static int rtb_coins_row_wellformed(const void *txid, int txid_len,
+                                    int64_t vout, int64_t height,
+                                    int64_t is_cb)
+{
+    return txid != NULL && txid_len == 32 && vout >= 0 && height >= 0 &&
+           (is_cb == 0 || is_cb == 1);
+}
+
+/* Strict (txid,vout) order: the first row passes unconditionally; every
+ * later row must sort strictly after its predecessor. */
+static int rtb_coins_row_increasing(int have_prev,
+                                    const uint8_t prev_txid[32],
+                                    const void *txid, int64_t prev_vout,
+                                    int64_t vout)
+{
+    if (!have_prev)
+        return 1;
+    int cmp = memcmp(prev_txid, txid, 32);
+    return cmp < 0 || (cmp == 0 && prev_vout < vout);
+}
+
+/* Fold one coins row into the running commitment hash: txid(32) | vout LE4 |
+ * value LE8 | script_len LE4 | script | height LE4 | is_coinbase(1). */
+static void rtb_fold_coin_row(struct sha3_256_ctx *c, const void *txid,
+                              int64_t vout, int64_t value, const void *script,
+                              int script_len, int64_t height, int64_t is_cb)
+{
+    sha3_256_write(c, txid, 32);
+    rtb_u32le(c, (uint32_t)vout);
+    rtb_u64le(c, (uint64_t)value);
+    rtb_u32le(c, (uint32_t)(script ? script_len : 0));
+    if (script && script_len > 0)
+        sha3_256_write(c, script, (size_t)script_len);
+    rtb_u32le(c, (uint32_t)height);
+    sha3_256_write(c, is_cb ? (const unsigned char *)"\x01"
+                            : (const unsigned char *)"\x00", 1);
+}
+
 /* coins: strict (txid,vout) order is itself part of the canonical fold — a
  * bundle whose rows are not strictly increasing is rejected, mirroring the
  * production validator. */
@@ -175,35 +215,26 @@ static int rtb_derive_coins(sqlite3 *db, struct rtb_derived *d, char *err,
         int script_len = sqlite3_column_bytes(st, 3);
         int64_t height = sqlite3_column_int64(st, 4);
         int64_t is_cb = sqlite3_column_int64(st, 5);
-        if (!txid || sqlite3_column_bytes(st, 0) != 32 ||
-            vout < 0 || height < 0 || (is_cb != 0 && is_cb != 1)) {
+        if (!rtb_coins_row_wellformed(txid, sqlite3_column_bytes(st, 0),
+                                      vout, height, is_cb)) {
             snprintf(err, errlen, "coins row %" PRId64 ": malformed", count);
             sqlite3_finalize(st);
             return 0;
         }
-        if (have_prev) {
-            int cmp = memcmp(prev_txid, txid, 32);
-            if (cmp > 0 || (cmp == 0 && prev_vout >= vout)) {
-                snprintf(err, errlen,
-                         "coins row %" PRId64 ": not strictly increasing",
-                         count);
-                sqlite3_finalize(st);
-                return 0;
-            }
+        if (!rtb_coins_row_increasing(have_prev, prev_txid, txid, prev_vout,
+                                      vout)) {
+            snprintf(err, errlen,
+                     "coins row %" PRId64 ": not strictly increasing",
+                     count);
+            sqlite3_finalize(st);
+            return 0;
         }
         memcpy(prev_txid, txid, 32);
         prev_vout = vout;
         have_prev = 1;
 
-        sha3_256_write(&c, txid, 32);
-        rtb_u32le(&c, (uint32_t)vout);
-        rtb_u64le(&c, (uint64_t)value);
-        rtb_u32le(&c, (uint32_t)(script ? script_len : 0));
-        if (script && script_len > 0)
-            sha3_256_write(&c, script, (size_t)script_len);
-        rtb_u32le(&c, (uint32_t)height);
-        sha3_256_write(&c, is_cb ? (const unsigned char *)"\x01"
-                                 : (const unsigned char *)"\x00", 1);
+        rtb_fold_coin_row(&c, txid, vout, value, script, script_len, height,
+                          is_cb);
         count++;
         supply += value;
     }
@@ -216,6 +247,34 @@ static int rtb_derive_coins(sqlite3 *db, struct rtb_derived *d, char *err,
     d->utxo_count = count;
     d->total_supply = supply;
     return 1;
+}
+
+/* An anchors row passes the codec's shape rules: pool 0/1, 32-byte anchor,
+ * non-negative height, and a non-NULL tree. */
+static int rtb_anchor_row_wellformed(int64_t pool, const void *anchor,
+                                     int anchor_len, int64_t height,
+                                     const void *tree)
+{
+    if (pool != 0 && pool != 1)
+        return 0;
+    return anchor != NULL && anchor_len == 32 && height >= 0 &&
+           tree != NULL;
+}
+
+/* Three-way (pool,anchor) order against the previous row: negative when
+ * this row sorts strictly after it, >= 0 when strict order is violated.
+ * The first row always passes. */
+static int rtb_anchor_row_cmp(int have_prev, int64_t prev_pool,
+                              const uint8_t prev_anchor[32], int64_t pool,
+                              const void *anchor)
+{
+    if (!have_prev)
+        return -1;
+    if (prev_pool > pool)
+        return 1;
+    if (prev_pool < pool)
+        return -1;
+    return memcmp(prev_anchor, anchor, 32);
 }
 
 static int rtb_derive_anchors(sqlite3 *db, struct rtb_derived *d, char *err,
@@ -244,27 +303,20 @@ static int rtb_derive_anchors(sqlite3 *db, struct rtb_derived *d, char *err,
         int64_t height = sqlite3_column_int64(st, 2);
         const void *tree = sqlite3_column_blob(st, 3);
         int tree_len = sqlite3_column_bytes(st, 3);
-        if ((pool != 0 && pool != 1) || !anchor ||
-            sqlite3_column_bytes(st, 1) != 32 || height < 0 || !tree) {
+        if (!rtb_anchor_row_wellformed(pool, anchor,
+                                       sqlite3_column_bytes(st, 1), height,
+                                       tree)) {
             snprintf(err, errlen, "anchors row %" PRId64 ": malformed", count);
             sqlite3_finalize(st);
             return 0;
         }
-        if (have_prev) {
-            int cmp = 0;
-            if (prev_pool > pool)
-                cmp = 1;
-            else if (prev_pool < pool)
-                cmp = -1;
-            else
-                cmp = memcmp(prev_anchor, anchor, 32);
-            if (cmp >= 0) {
-                snprintf(err, errlen,
-                         "anchors row %" PRId64 ": not strictly increasing",
-                         count);
-                sqlite3_finalize(st);
-                return 0;
-            }
+        if (rtb_anchor_row_cmp(have_prev, prev_pool, prev_anchor, pool,
+                               anchor) >= 0) {
+            snprintf(err, errlen,
+                     "anchors row %" PRId64 ": not strictly increasing",
+                     count);
+            sqlite3_finalize(st);
+            return 0;
         }
         prev_pool = pool;
         memcpy(prev_anchor, anchor, 32);
