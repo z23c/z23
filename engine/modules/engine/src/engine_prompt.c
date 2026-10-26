@@ -150,6 +150,28 @@ static bool section_forbidden(const struct engine_prompt_section *s,
            && engine_wire_has_system_channel(wire);
 }
 
+/* Counts one required section and checks it is present and in order. */
+static void engine_prompt_audit_required_section(
+    const struct engine_prompt_section *s, const char *anywhere,
+    const char **cursor, struct engine_prompt_audit *a)
+{
+    a->required++;
+    if (!anywhere) {
+        if (!a->missing)
+            a->missing = s->id;
+        return;
+    }
+    a->present++;
+    const char *in_order = strstr(*cursor, s->marker);
+    if (!in_order) {
+        /* Present in the prompt but only before where it belongs. */
+        if (!a->misplaced)
+            a->misplaced = s->id;
+        return;
+    }
+    *cursor = in_order + strlen(s->marker);
+}
+
 bool engine_prompt_audit_text(enum engine_wire wire, const char *composed,
                               struct engine_prompt_audit *out)
 {
@@ -179,21 +201,7 @@ bool engine_prompt_audit_text(enum engine_wire wire, const char *composed,
             continue;
         }
 
-        a.required++;
-        if (!anywhere) {
-            if (!a.missing)
-                a.missing = s->id;
-            continue;
-        }
-        a.present++;
-        const char *in_order = strstr(cursor, s->marker);
-        if (!in_order) {
-            /* Present in the prompt but only before where it belongs. */
-            if (!a.misplaced)
-                a.misplaced = s->id;
-            continue;
-        }
-        cursor = in_order + strlen(s->marker);
+        engine_prompt_audit_required_section(s, anywhere, &cursor, &a);
     }
 
     if (out)
@@ -581,6 +589,19 @@ static unsigned kind_scan_limit(const char *task)
     return 8;
 }
 
+static void kind_copy_name(char *kind, size_t cap, const char *q,
+                           const char *end)
+{
+    while (*q == ' ' || *q == '\t')
+        q++;
+    size_t k = 0;
+    while (q < end && k + 1 < cap
+           && ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z')
+               || (*q >= '0' && *q <= '9') || *q == '-' || *q == '_'))
+        kind[k++] = *q++;
+    kind[k] = '\0';
+}
+
 const char *engine_prompt_kind_from_header(const char *task)
 {
     static char kind[64];
@@ -595,15 +616,7 @@ const char *engine_prompt_kind_from_header(const char *task)
         if (n == 0)
             break;                    /* the header ends at the first blank */
         if (strncmp(p, "kind:", 5) == 0) {
-            const char *q = p + 5;
-            while (*q == ' ' || *q == '\t')
-                q++;
-            size_t k = 0;
-            while (q < p + n && k + 1 < sizeof(kind)
-                   && ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z')
-                       || (*q >= '0' && *q <= '9') || *q == '-' || *q == '_'))
-                kind[k++] = *q++;
-            kind[k] = '\0';
+            kind_copy_name(kind, sizeof(kind), p + 5, p + n);
             return kind[0] ? kind : NULL;
         }
         if (!eol)
