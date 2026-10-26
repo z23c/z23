@@ -38,6 +38,8 @@ enum {
 
 struct api_catalog_expect {
     uint8_t op;
+    /* guard: 1 = the subject must exist; 2 = the first-level object
+     * (json_get(root, k0)) must exist before the subject is read. */
     uint8_t guard;
     uint8_t via;
     int8_t rel;
@@ -71,7 +73,7 @@ static bool api_catalog_str_nonempty(const char *str)
 static bool api_catalog_guard_rejects(uint8_t guard,
                                       const struct json_value *subject)
 {
-    return guard && !subject;
+    return guard == 1 && !subject;
 }
 
 static void api_catalog_terminate(uint8_t *buf, size_t n, size_t cap)
@@ -151,9 +153,12 @@ static bool api_catalog_count_ok(const struct json_value *root,
 static bool api_catalog_expect_row(const struct json_value *root,
                                    const struct api_catalog_expect *row)
 {
-    const struct json_value *subject = api_catalog_subject(root, row);
+    const struct json_value *subject;
     const char *str;
 
+    if (row->guard == 2 && !json_get(root, row->k0))
+        return false;
+    subject = api_catalog_subject(root, row);
     if (api_catalog_guard_rejects(row->guard, subject))
         return false;
     switch (row->op) {
@@ -340,13 +345,13 @@ static const struct api_catalog_expect k_service_catalog[] = {
     { .op = API_CATALOG_ARRAY, .guard = 1, .via = API_CATALOG_VIA_GET1,
       .k0 = "sovereign_ux", .field = "flow",
       .text = "prefer_direct_p2p_when_handshaked" },
-    { .op = API_CATALOG_STR, .guard = 1, .via = API_CATALOG_VIA_GET2,
+    { .op = API_CATALOG_STR, .guard = 2, .via = API_CATALOG_VIA_GET2,
       .k0 = "sovereign_ux", .k1 = "routes", .field = "service_catalog",
       .text = "/api/v1/service-catalog" },
-    { .op = API_CATALOG_STR, .guard = 1, .via = API_CATALOG_VIA_GET2,
+    { .op = API_CATALOG_STR, .guard = 2, .via = API_CATALOG_VIA_GET2,
       .k0 = "sovereign_ux", .k1 = "routes", .field = "names",
       .text = "/api/v1/names/{name}" },
-    { .op = API_CATALOG_STR, .guard = 1, .via = API_CATALOG_VIA_GET2,
+    { .op = API_CATALOG_STR, .guard = 2, .via = API_CATALOG_VIA_GET2,
       .k0 = "sovereign_ux", .k1 = "routes", .field = "name_services",
       .text = "/api/v1/names/{name}/services" },
     { .op = API_CATALOG_COUNT, .flags = API_CATALOG_F_TYPE,
@@ -851,13 +856,6 @@ static const struct api_catalog_expect k_resolve_directory[] = {
     { .op = API_CATALOG_BOOL, .field = "rpc_callable", .num = 0 },
 };
 
-static bool api_catalog_expect_n(bool ok, const struct json_value *root,
-                                 const struct api_catalog_expect *rows,
-                                 size_t n)
-{
-    return api_catalog_expect_all(ok, root, rows, n);
-}
-
 static bool api_catalog_bootstrap_matches(void)
 {
     static uint8_t bootstrap_resp[262144];
@@ -874,18 +872,18 @@ static bool api_catalog_bootstrap_matches(void)
                            bootstrap_resp, sizeof(bootstrap_resp));
     body = api_test_body(bootstrap_resp, n, sizeof(bootstrap_resp));
     ok = api_catalog_parse(true, &root, body, n);
-    ok = api_catalog_expect_n(ok, &root, k_bootstrap_status,
-                              sizeof k_bootstrap_status /
-                              sizeof k_bootstrap_status[0]);
+    ok = api_catalog_expect_all(ok, &root, k_bootstrap_status,
+                                sizeof k_bootstrap_status /
+                                sizeof k_bootstrap_status[0]);
     json_free(&root);
 
     n = api_handle_request("GET", "/api/v1/bootstrapstatus", NULL, 0,
                            bootstrap_resp, sizeof(bootstrap_resp));
     body = api_test_body(bootstrap_resp, n, sizeof(bootstrap_resp));
     ok = api_catalog_parse(ok, &root, body, n);
-    ok = api_catalog_expect_n(ok, &root, k_bootstrap_alias,
-                              sizeof k_bootstrap_alias /
-                              sizeof k_bootstrap_alias[0]);
+    ok = api_catalog_expect_all(ok, &root, k_bootstrap_alias,
+                                sizeof k_bootstrap_alias /
+                                sizeof k_bootstrap_alias[0]);
     json_free(&root);
     return ok;
 }
@@ -902,18 +900,18 @@ static bool api_catalog_protocols_matches(void)
                            protocols_resp, sizeof(protocols_resp));
     body = api_test_body(protocols_resp, n, sizeof(protocols_resp));
     ok = api_catalog_parse(true, &root, body, n);
-    ok = api_catalog_expect_n(ok, &root, k_protocols_index,
-                              sizeof k_protocols_index /
-                              sizeof k_protocols_index[0]);
+    ok = api_catalog_expect_all(ok, &root, k_protocols_index,
+                                sizeof k_protocols_index /
+                                sizeof k_protocols_index[0]);
     json_free(&root);
 
     n = api_handle_request("GET", "/api/v1/protocols/script_contracts",
                            NULL, 0, protocols_resp, sizeof(protocols_resp));
     body = api_test_body(protocols_resp, n, sizeof(protocols_resp));
     ok = api_catalog_parse(ok, &root, body, n);
-    ok = api_catalog_expect_n(ok, &root, k_script_contracts,
-                              sizeof k_script_contracts /
-                              sizeof k_script_contracts[0]);
+    ok = api_catalog_expect_all(ok, &root, k_script_contracts,
+                                sizeof k_script_contracts /
+                                sizeof k_script_contracts[0]);
     json_free(&root);
 
     n = api_handle_request("GET", "/api/v1/protocols/not_real",
@@ -937,9 +935,9 @@ static bool api_catalog_service_catalog_document(const char **catalog_body)
     body = api_test_body(catalog_resp, n, sizeof(catalog_resp));
     *catalog_body = body;
     ok = api_catalog_parse(true, &root, body, n);
-    ok = api_catalog_expect_n(ok, &root, k_service_catalog,
-                              sizeof k_service_catalog /
-                              sizeof k_service_catalog[0]);
+    ok = api_catalog_expect_all(ok, &root, k_service_catalog,
+                                sizeof k_service_catalog /
+                                sizeof k_service_catalog[0]);
     json_free(&root);
     return ok;
 }
@@ -956,9 +954,9 @@ static bool api_catalog_service_operations_index(
                            NULL, 0, ops_resp, sizeof(ops_resp));
     body = api_test_body(ops_resp, n, sizeof(ops_resp));
     ok = api_catalog_parse(ok, root, body, n);
-    ok = api_catalog_expect_n(ok, root, k_service_operations,
-                              sizeof k_service_operations /
-                              sizeof k_service_operations[0]);
+    ok = api_catalog_expect_all(ok, root, k_service_operations,
+                                sizeof k_service_operations /
+                                sizeof k_service_operations[0]);
     *operations = json_get(root, "operations");
     return ok;
 }
@@ -978,9 +976,9 @@ static bool api_catalog_service_operations_filtered(bool ok)
         NULL, 0, filtered_ops_resp, sizeof(filtered_ops_resp));
     body = api_test_body(filtered_ops_resp, n, sizeof(filtered_ops_resp));
     ok = api_catalog_parse(ok, &filtered_root, body, n);
-    ok = api_catalog_expect_n(ok, &filtered_root, k_filtered_operations,
-                              sizeof k_filtered_operations /
-                              sizeof k_filtered_operations[0]);
+    ok = api_catalog_expect_all(ok, &filtered_root, k_filtered_operations,
+                                sizeof k_filtered_operations /
+                                sizeof k_filtered_operations[0]);
     json_free(&filtered_root);
 
     n = api_handle_request("GET",
@@ -1048,8 +1046,9 @@ static bool api_catalog_service_member_show(bool ok)
                            NULL, 0, show_resp, sizeof(show_resp));
     body = api_test_body(show_resp, n, sizeof(show_resp));
     ok = api_catalog_parse(ok, &root, body, n);
-    ok = api_catalog_expect_n(ok, &root, k_znam_member,
-                              sizeof k_znam_member / sizeof k_znam_member[0]);
+    ok = api_catalog_expect_all(ok, &root, k_znam_member,
+                                sizeof k_znam_member /
+                                sizeof k_znam_member[0]);
     json_free(&root);
     return ok;
 }
@@ -1067,8 +1066,9 @@ static bool api_catalog_service_operation_show(bool ok)
                            NULL, 0, show_resp, sizeof(show_resp));
     body = api_test_body(show_resp, n, sizeof(show_resp));
     ok = api_catalog_parse(ok, &root, body, n);
-    ok = api_catalog_expect_n(ok, &root, k_resolve_name,
-                              sizeof k_resolve_name / sizeof k_resolve_name[0]);
+    ok = api_catalog_expect_all(ok, &root, k_resolve_name,
+                                sizeof k_resolve_name /
+                                sizeof k_resolve_name[0]);
     json_free(&root);
 
     n = api_handle_request("GET",
@@ -1077,9 +1077,9 @@ static bool api_catalog_service_operation_show(bool ok)
                            NULL, 0, show_resp, sizeof(show_resp));
     body = api_test_body(show_resp, n, sizeof(show_resp));
     ok = api_catalog_parse(ok, &root, body, n);
-    ok = api_catalog_expect_n(ok, &root, k_resolve_directory,
-                              sizeof k_resolve_directory /
-                              sizeof k_resolve_directory[0]);
+    ok = api_catalog_expect_all(ok, &root, k_resolve_directory,
+                                sizeof k_resolve_directory /
+                                sizeof k_resolve_directory[0]);
     json_free(&root);
 
     n = api_handle_request("GET",
