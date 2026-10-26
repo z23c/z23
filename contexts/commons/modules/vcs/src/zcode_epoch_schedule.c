@@ -19,7 +19,7 @@ static const uint8_t epoch_schedule_magic[8] = {
 };
 
 /* The error names are split across two switches to stay under the cap. */
-static const char *schedule_error_string_first(
+static const char *schedule_input_error_string(
     enum vcs_zcode_epoch_schedule_error error)
 {
     switch (error) {
@@ -36,7 +36,7 @@ static const char *schedule_error_string_first(
     return NULL;
 }
 
-static const char *schedule_error_string_rest(
+static const char *schedule_proposal_error_string(
     enum vcs_zcode_epoch_schedule_error error)
 {
     switch (error) {
@@ -55,8 +55,8 @@ static const char *schedule_error_string_rest(
 const char *vcs_zcode_epoch_schedule_error_string(
     enum vcs_zcode_epoch_schedule_error error)
 {
-    const char *name = schedule_error_string_first(error);
-    return name ? name : schedule_error_string_rest(error);
+    const char *name = schedule_input_error_string(error);
+    return name ? name : schedule_proposal_error_string(error);
 }
 
 enum vcs_zcode_epoch_schedule_class vcs_zcode_epoch_schedule_class_for_category(
@@ -514,7 +514,8 @@ static enum vcs_zcode_epoch_schedule_error schedule_award_loop(
 
 static enum vcs_zcode_epoch_schedule_error schedule_award_groups(
     struct vcs_zcode_epoch_schedule_proposal_v1 *out,
-    const struct schedule_evidence_row *rows, uint64_t total_weight)
+    const struct schedule_evidence_row *rows, uint64_t total_weight,
+    struct vcs_zcode_epoch_schedule_allocation **out_allocations)
 {
     struct vcs_zcode_epoch_schedule_allocation *allocations = zcl_calloc(
         out->eligible_count, sizeof(*allocations),
@@ -527,11 +528,7 @@ static enum vcs_zcode_epoch_schedule_error schedule_award_groups(
         free(allocations);
         return error;
     }
-    if (out->allocation_count == 0) {
-        free(allocations);
-    } else {
-        out->allocations = allocations;
-    }
+    *out_allocations = allocations;
     return VCS_ZCODE_EPOCH_SCHEDULE_OK;
 }
 
@@ -614,12 +611,13 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_propose_cas(
     uint64_t total_weight = 0;
     error = schedule_collect_evidence(projection, input->epoch, out, &rows,
                                       &total_weight);
-    vcs_zcode_commons_projection_free(projection);
     if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK) {
         free(rows);
+        vcs_zcode_commons_projection_free(projection);
         vcs_zcode_epoch_schedule_proposal_free(out);
         return error;
     }
+    vcs_zcode_commons_projection_free(projection);
 
     /* Non-issuance is not redistribution: no eligible evidence means the
      * whole budget stays unissued in the remaining pool. */
@@ -629,12 +627,18 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_propose_cas(
         return VCS_ZCODE_EPOCH_SCHEDULE_OK;
     }
     qsort(rows, out->eligible_count, sizeof(*rows), schedule_row_compare);
-    error = schedule_award_groups(out, rows, total_weight);
+    struct vcs_zcode_epoch_schedule_allocation *allocations = NULL;
+    error = schedule_award_groups(out, rows, total_weight, &allocations);
     free(rows);
     if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK) {
         vcs_zcode_epoch_schedule_proposal_free(out);
         return error;
     }
     out->unissued_atoms = out->budget_atoms - out->proposed_mint_atoms;
+    if (out->allocation_count == 0) {
+        free(allocations);
+    } else {
+        out->allocations = allocations;
+    }
     return VCS_ZCODE_EPOCH_SCHEDULE_OK;
 }
