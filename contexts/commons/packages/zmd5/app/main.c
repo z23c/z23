@@ -8,6 +8,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+static int finish_output(int written)
+{
+    if (written < 0 || fflush(stdout) != 0 || ferror(stdout)) {
+        fputs("zmd5: output write failed\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
 static int digest_stream(FILE *f, char out[ZMD5_HEX_LEN + 1])
 {
     zmd5 ctx;
@@ -32,8 +41,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "zmd5: error reading stdin\n");
             return 1;
         }
-        printf("%s\n", hex);
-        return 0;
+        return finish_output(printf("%s\n", hex));
     }
     int rc = 0;
     for (int i = 1; i < argc; i++) {
@@ -48,7 +56,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "zmd5: error reading %s\n", argv[i]);
             rc = 1;
         } else {
-            printf("%s  %s\n", hex, argv[i]);
+            rc |= finish_output(printf("%s  %s\n", hex, argv[i]));
         }
         fclose(f);
     }
