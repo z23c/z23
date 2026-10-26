@@ -253,6 +253,61 @@ static bool bm_stub_pass_validator(const struct block_index *bi,
     return true;
 }
 
+static bool bm_init_all_reducer_stages(struct main_state *ms)
+{
+    return header_admit_stage_init(ms) &&
+           validate_headers_stage_init(ms) &&
+           body_fetch_stage_init(ms) &&
+           body_persist_stage_init(ms) &&
+           script_validate_stage_init(ms) &&
+           proof_validate_stage_init(ms) &&
+           utxo_apply_stage_init(ms) &&
+           tip_finalize_stage_init(ms);
+}
+
+/* Synthetic HEADER-ONLY chain: heights 0..N-1, hash-chained via pprev, NO
+ * BLOCK_HAVE_DATA anywhere — mirrors an --importblockindex-style datadir
+ * that has the legacy header chain but no fetched bodies yet. */
+static void bm_build_header_only_chain(struct block_index *blocks,
+                                       struct uint256 *hashes, int n)
+{
+    for (int i = 0; i < n; i++) {
+        block_index_init(&blocks[i]);
+        memset(&hashes[i], 0, sizeof(hashes[i]));
+        hashes[i].data[0] = (uint8_t)(i & 0xFF);
+        hashes[i].data[1] = (uint8_t)((i >> 8) & 0xFF);
+        hashes[i].data[2] = 0xB4;  /* tag distinct from other fixtures */
+        blocks[i].phashBlock = &hashes[i];
+        blocks[i].hashBlock  = hashes[i];
+        blocks[i].nHeight = i;
+        blocks[i].nVersion = 4;
+        blocks[i].nBits = 0x1f07ffff;
+        if (i > 0) blocks[i].pprev = &blocks[i - 1];
+    }
+}
+
+/* Bounded reducer_kick_unbudgeted drive: kick until the frontier stalls
+ * (a kick advances nothing and the utxo_apply cursor stops moving) or the
+ * kick budget runs out. Returns whether the frontier converged. */
+static bool bm_drive_fold_until_frontier_stalls(struct chain_activation_controller *ctl,
+                                                int max_kicks,
+                                                uint64_t ua_prev,
+                                                int *kicks_run_out)
+{
+    int kicks_run = 0;
+    for (; kicks_run < max_kicks; kicks_run++) {
+        int advanced = reducer_kick_unbudgeted(ctl);
+        uint64_t ua_now = utxo_apply_stage_cursor();
+        if (advanced == 0 || ua_now == ua_prev) {
+            *kicks_run_out = kicks_run + 1;
+            return true;
+        }
+        ua_prev = ua_now;
+    }
+    *kicks_run_out = kicks_run;
+    return false;
+}
+
 /* ── Cell 2: -mint-anchor x headers-only (no bodies) → blocker_frontier_walled
  * header_admit / validate_headers
  * can march the whole backlog while body_fetch is walled at h=0. A bounded
@@ -287,35 +342,12 @@ static int bm_cell2_mint_anchor_headers_only(void)
     struct main_state ms;
     main_state_init(&ms);
 
-    /* Synthetic HEADER-ONLY chain: heights 0..N-1, hash-chained via pprev, NO
-     * BLOCK_HAVE_DATA anywhere — mirrors an --importblockindex-style datadir
-     * that has the legacy header chain but no fetched bodies yet. */
     static struct block_index bm_blocks[N];
     static struct uint256     bm_hashes[N];
-    for (int i = 0; i < N; i++) {
-        block_index_init(&bm_blocks[i]);
-        memset(&bm_hashes[i], 0, sizeof(bm_hashes[i]));
-        bm_hashes[i].data[0] = (uint8_t)(i & 0xFF);
-        bm_hashes[i].data[1] = (uint8_t)((i >> 8) & 0xFF);
-        bm_hashes[i].data[2] = 0xB4;  /* tag distinct from other fixtures */
-        bm_blocks[i].phashBlock = &bm_hashes[i];
-        bm_blocks[i].hashBlock  = bm_hashes[i];
-        bm_blocks[i].nHeight = i;
-        bm_blocks[i].nVersion = 4;
-        bm_blocks[i].nBits = 0x1f07ffff;
-        if (i > 0) bm_blocks[i].pprev = &bm_blocks[i - 1];
-    }
+    bm_build_header_only_chain(bm_blocks, bm_hashes, N);
     active_chain_move_window_tip(&ms.chain_active, &bm_blocks[N - 1]);
 
-    bool stages_ok =
-        header_admit_stage_init(&ms) &&
-        validate_headers_stage_init(&ms) &&
-        body_fetch_stage_init(&ms) &&
-        body_persist_stage_init(&ms) &&
-        script_validate_stage_init(&ms) &&
-        proof_validate_stage_init(&ms) &&
-        utxo_apply_stage_init(&ms) &&
-        tip_finalize_stage_init(&ms);
+    bool stages_ok = bm_init_all_reducer_stages(&ms);
     BM_CHECK("(2) all eight reducer stages init", stages_ok);
     validate_headers_stage_set_validator(bm_stub_pass_validator, NULL);
 
@@ -328,20 +360,11 @@ static int bm_cell2_mint_anchor_headers_only(void)
     activation_controller_init(&ctl, &ms, NULL, cp, netdir);
 
     uint64_t ua_before = utxo_apply_stage_cursor();
-    uint64_t ua_prev = ua_before;
     int kicks_run = 0;
-    bool frontier_converged = false;
     int64_t t0 = GetTimeMicros();
-    for (; kicks_run < BM_2_MAX_KICKS; kicks_run++) {
-        int advanced = reducer_kick_unbudgeted(&ctl);
-        uint64_t ua_now = utxo_apply_stage_cursor();
-        if (advanced == 0 || ua_now == ua_prev) {
-            frontier_converged = true;
-            kicks_run++;
-            break;
-        }
-        ua_prev = ua_now;
-    }
+    bool frontier_converged =
+        bm_drive_fold_until_frontier_stalls(&ctl, BM_2_MAX_KICKS, ua_before,
+                                            &kicks_run);
     int64_t elapsed_us = GetTimeMicros() - t0;
     uint64_t ua_after = utxo_apply_stage_cursor();
     uint64_t ha_after = header_admit_stage_cursor();
@@ -451,6 +474,38 @@ static bool bm_build_regtest_block(struct block *blk, int height,
     return true;
 }
 
+static void bm_install_genesis_anchor_tip(struct main_state *ms,
+                                          struct block_index *genesis)
+{
+    genesis->nHeight = 0;
+    genesis->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+    genesis->nTx = 1;
+    genesis->nChainTx = 1;
+    genesis->nChainWork = GetBlockProof(genesis);
+    active_chain_move_window_tip(&ms->chain_active, genesis);
+    ms->pindex_best_header = genesis;
+}
+
+static bool bm_build_and_mine_regtest_block(struct block *blk, bool stages_ok,
+                                            const struct uint256 *genesis_hash,
+                                            const struct chain_params *cp)
+{
+    return stages_ok &&
+           bm_build_regtest_block(blk, 1, genesis_hash, cp) &&
+           mine_block_pow(blk, 1, cp, 0);
+}
+
+static bool bm_write_admitted_body_to_disk(struct block *blk,
+                                           struct block_index *bi,
+                                           const char *netdir,
+                                           const unsigned char message_start[4])
+{
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    return write_block_to_disk(blk, &pos, netdir, message_start) &&
+           block_index_set_have_data_verified(bi, &pos, netdir);
+}
+
 /* ── Cell 3: -mint-anchor x imported+bodies → anchor_reached ─────────────
  * The healthy-fold path: mirrors test_mint_anchor_fresh_datadir.c scenario
  * (c). Proves the frontier-stall break exercised by cell 2 does NOT
@@ -490,25 +545,10 @@ static int bm_cell3_mint_anchor_imported_bodies(void)
     struct block_index *genesis = chainstate_insert_block_index(
         (struct chainstate *)&ms, &genesis_hash);
     BM_CHECK("(3) genesis inserted", genesis != NULL);
-    if (genesis) {
-        genesis->nHeight = 0;
-        genesis->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
-        genesis->nTx = 1;
-        genesis->nChainTx = 1;
-        genesis->nChainWork = GetBlockProof(genesis);
-        active_chain_move_window_tip(&ms.chain_active, genesis);
-        ms.pindex_best_header = genesis;
-    }
+    if (genesis)
+        bm_install_genesis_anchor_tip(&ms, genesis);
 
-    bool stages_ok =
-        header_admit_stage_init(&ms) &&
-        validate_headers_stage_init(&ms) &&
-        body_fetch_stage_init(&ms) &&
-        body_persist_stage_init(&ms) &&
-        script_validate_stage_init(&ms) &&
-        proof_validate_stage_init(&ms) &&
-        utxo_apply_stage_init(&ms) &&
-        tip_finalize_stage_init(&ms);
+    bool stages_ok = bm_init_all_reducer_stages(&ms);
     BM_CHECK("(3) all eight reducer stages init", stages_ok);
     BM_CHECK("(3) genesis utxo row seeded",
               bm_seed_genesis_utxo_apply_row(progress_store_db()));
@@ -520,9 +560,8 @@ static int bm_cell3_mint_anchor_imported_bodies(void)
     bool blocker_absent_at_end = false;
 
     struct block blk1;
-    bool built = stages_ok &&
-                 bm_build_regtest_block(&blk1, 1, &genesis_hash, cp) &&
-                 mine_block_pow(&blk1, 1, cp, 0);
+    bool built = bm_build_and_mine_regtest_block(&blk1, stages_ok,
+                                                 &genesis_hash, cp);
     BM_CHECK("(3) block 1 built + Equihash-mined", built);
 
     if (built) {
@@ -541,13 +580,9 @@ static int bm_cell3_mint_anchor_imported_bodies(void)
         BM_CHECK("(3) block 1 admitted", bi1 != NULL);
 
         bool persisted = false;
-        if (bi1) {
-            struct disk_block_pos pos;
-            disk_block_pos_init(&pos);
-            persisted = write_block_to_disk(&blk1, &pos, netdir,
-                                            cp->pchMessageStart) &&
-                        block_index_set_have_data_verified(bi1, &pos, netdir);
-        }
+        if (bi1)
+            persisted = bm_write_admitted_body_to_disk(&blk1, bi1, netdir,
+                                                       cp->pchMessageStart);
         BM_CHECK("(3) body persisted (this datadir HAS its bodies)", persisted);
 
         mint_fold_ceiling_set(1);
