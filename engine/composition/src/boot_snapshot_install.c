@@ -152,6 +152,58 @@ bool boot_snapshot_install_marker_blocks_resume(
            marker[48] != SNAPSHOT_INSTALL_COMPLETE;
 }
 
+static bool pending_install_marker_valid(
+    struct sqlite3 *db, const uint8_t artifact_sha256[32],
+    uint8_t marker[BOOT_SNAPSHOT_INSTALL_MARKER_BYTES])
+{
+    size_t len = 0;
+    bool found = false;
+    return progress_meta_get_blob_exact(
+               db, BOOT_SNAPSHOT_INSTALL_MARKER_KEY, marker,
+               BOOT_SNAPSHOT_INSTALL_MARKER_BYTES, &len, &found) && found &&
+           marker_identity_matches(marker, len, artifact_sha256) &&
+           marker[48] == SNAPSHOT_INSTALL_PENDING;
+}
+
+static bool store_completed_marker_in_tx(
+    struct sqlite3 *db, uint8_t marker[BOOT_SNAPSHOT_INSTALL_MARKER_BYTES],
+    const uint8_t artifact_sha256[32], bool embedded_frontier_verified,
+    uint64_t authority_generation)
+{
+    marker_encode(marker, artifact_sha256, SNAPSHOT_INSTALL_COMPLETE,
+                  embedded_frontier_verified, authority_generation);
+    return progress_meta_set_in_tx(db, BOOT_SNAPSHOT_INSTALL_MARKER_KEY,
+                                   marker, BOOT_SNAPSHOT_INSTALL_MARKER_BYTES);
+}
+
+static bool complete_marker_in_tx(
+    struct sqlite3 *db, const uint8_t artifact_sha256[32],
+    bool embedded_frontier_verified)
+{
+    char *err = NULL;
+    bool ok = true;
+    uint64_t authority_generation = 0;
+    uint8_t marker[BOOT_SNAPSHOT_INSTALL_MARKER_BYTES] = {0};
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK)
+        ok = false;
+    if (ok && !pending_install_marker_valid(db, artifact_sha256, marker))
+        ok = false;
+    if (ok && !coins_kv_get_authority_generation(
+                  db, &authority_generation))
+        ok = false;
+    if (ok)
+        ok = store_completed_marker_in_tx(
+            db, marker, artifact_sha256, embedded_frontier_verified,
+            authority_generation);
+    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK)
+        ok = false;
+    if (!ok)
+        (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    if (err)
+        sqlite3_free(err);
+    return ok;
+}
+
 bool boot_snapshot_install_marker_complete(
     struct sqlite3 *db, const uint8_t artifact_sha256[32],
     bool embedded_frontier_verified)
@@ -159,36 +211,9 @@ bool boot_snapshot_install_marker_complete(
     if (!db || !artifact_sha256)
         LOG_FAIL("boot", "snapshot install marker: invalid complete arguments");
 
-    char *err = NULL;
-    bool ok = true;
-    uint64_t authority_generation = 0;
-    uint8_t marker[BOOT_SNAPSHOT_INSTALL_MARKER_BYTES] = {0};
-    size_t len = 0;
-    bool found = false;
     progress_store_tx_lock();
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
-    if (ok && (!progress_meta_get_blob_exact(
-                   db, BOOT_SNAPSHOT_INSTALL_MARKER_KEY, marker,
-                   sizeof(marker), &len, &found) || !found ||
-               !marker_identity_matches(marker, len, artifact_sha256) ||
-               marker[48] != SNAPSHOT_INSTALL_PENDING))
-        ok = false;
-    if (ok && !coins_kv_get_authority_generation(
-                  db, &authority_generation))
-        ok = false;
-    if (ok) {
-        marker_encode(marker, artifact_sha256, SNAPSHOT_INSTALL_COMPLETE,
-                      embedded_frontier_verified, authority_generation);
-        if (!progress_meta_set_in_tx(db, BOOT_SNAPSHOT_INSTALL_MARKER_KEY,
-                                     marker, sizeof(marker))) ok = false;
-    }
-    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
-    if (!ok)
-        (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-    if (err)
-        sqlite3_free(err);
+    bool ok = complete_marker_in_tx(db, artifact_sha256,
+                                    embedded_frontier_verified);
     progress_store_tx_unlock();
     if (!ok)
         LOG_WARN("boot", "snapshot install marker: durable completion failed");
@@ -265,39 +290,63 @@ bool boot_snapshot_install_pending_artifact_matches(
     return blocked && matches;
 }
 
-bool boot_snapshot_install_resume_allowed(struct sqlite3 *db,
-    const struct uss_header *snapshot, const uint8_t artifact_sha256[32],
-    int32_t *applied, bool *install_pending, bool *marker_matches,
-    bool *embedded_frontier_verified)
+static void reset_resume_outputs(int32_t *applied, bool *install_pending,
+                                 bool *marker_matches,
+                                 bool *embedded_frontier_verified)
 {
     if (applied) *applied = -1;
     if (install_pending) *install_pending = true;
     if (marker_matches) *marker_matches = false;
     if (embedded_frontier_verified) *embedded_frontier_verified = false;
+}
+
+static bool complete_marker_generation_current(
+    struct sqlite3 *db, const uint8_t artifact_sha256[32],
+    bool *embedded_frontier_verified)
+{
+    uint8_t marker[BOOT_SNAPSHOT_INSTALL_MARKER_BYTES] = {0};
+    size_t len = 0;
+    bool found = false;
+    uint64_t authority_generation = 0;
+    bool valid = progress_meta_get_blob_exact(
+                     db, BOOT_SNAPSHOT_INSTALL_MARKER_KEY, marker,
+                     sizeof(marker), &len, &found) &&
+                 found &&
+                 marker_identity_matches(marker, len, artifact_sha256) &&
+                 marker[48] == SNAPSHOT_INSTALL_COMPLETE &&
+                 coins_kv_get_authority_generation(db, &authority_generation) &&
+                 get_u64_le(marker + 50) == authority_generation;
+    if (valid && embedded_frontier_verified)
+        *embedded_frontier_verified = marker[49] == 1;
+    return valid;
+}
+
+static bool resume_authority_proven_past_snapshot(
+    struct sqlite3 *db, const struct uss_header *snapshot, bool pending,
+    bool matches, int32_t *applied)
+{
+    return !pending && matches && coins_kv_is_proven_authority(db, applied) &&
+           *applied >= (int32_t)snapshot->height + 1;
+}
+
+bool boot_snapshot_install_resume_allowed(struct sqlite3 *db,
+    const struct uss_header *snapshot, const uint8_t artifact_sha256[32],
+    int32_t *applied, bool *install_pending, bool *marker_matches,
+    bool *embedded_frontier_verified)
+{
+    reset_resume_outputs(applied, install_pending, marker_matches,
+                         embedded_frontier_verified);
     if (!db || !snapshot || !artifact_sha256 || !applied) return false;
     bool matches = false;
     bool pending = boot_snapshot_install_marker_blocks_resume(
         db, artifact_sha256, &matches);
     if (install_pending) *install_pending = pending;
     if (marker_matches) *marker_matches = matches;
-    if (!pending && matches) {
-        uint8_t marker[BOOT_SNAPSHOT_INSTALL_MARKER_BYTES] = {0};
-        size_t len = 0;
-        bool found = false;
-        uint64_t authority_generation = 0;
-        if (!progress_meta_get_blob_exact(
-                db, BOOT_SNAPSHOT_INSTALL_MARKER_KEY, marker,
-                sizeof(marker), &len, &found) || !found ||
-            !marker_identity_matches(marker, len, artifact_sha256) ||
-            marker[48] != SNAPSHOT_INSTALL_COMPLETE ||
-            !coins_kv_get_authority_generation(db, &authority_generation) ||
-            get_u64_le(marker + 50) != authority_generation)
-            matches = false;
-        else if (embedded_frontier_verified)
-            *embedded_frontier_verified = marker[49] == 1;
-    }
-    return !pending && matches && coins_kv_is_proven_authority(db, applied) &&
-           *applied >= (int32_t)snapshot->height + 1;
+    if (!pending && matches)
+        matches = complete_marker_generation_current(
+            db, artifact_sha256, embedded_frontier_verified);
+    return resume_authority_proven_past_snapshot(
+        db, snapshot, pending, matches, applied);
 }
 
 bool boot_snapshot_anchor_hash_matches(const unsigned char *index_hash,
@@ -357,7 +406,7 @@ void boot_snapshot_install_gate_boot(bool progress_open,
                 "FATAL: progress_store unavailable; reducer cursors and "
                 "snapshot journal cannot be verified; REFUSING to boot\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                    "progress_store_unavailable");
+                "progress_store_unavailable");
         _exit(EXIT_FAILURE);
     }
     bool pending = true;
@@ -366,7 +415,7 @@ void boot_snapshot_install_gate_boot(bool progress_open,
                 "FATAL: snapshot install journal read failed; REFUSING "
                 "possibly partial state\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                    "snapshot_install_journal_read_failed");
+                "snapshot_install_journal_read_failed");
         _exit(EXIT_FAILURE);
     }
     if (!pending)
@@ -381,7 +430,7 @@ void boot_snapshot_install_gate_boot(bool progress_open,
                 "whole-artifact SHA256 is required and the artifact must "
                 "fully verify before recovery can resume\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                    "snapshot_install_pending_loader_mismatch_or_invalid");
+                "snapshot_install_pending_loader_mismatch_or_invalid");
         _exit(EXIT_FAILURE);
     }
 }
@@ -406,7 +455,7 @@ void boot_snapshot_install_require_complete(void)
                 "FATAL: snapshot loader returned with an incomplete install "
                 "journal; REFUSING normal boot\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                    "snapshot_install_loader_returned_pending");
+                "snapshot_install_loader_returned_pending");
         _exit(EXIT_FAILURE);
     }
 }

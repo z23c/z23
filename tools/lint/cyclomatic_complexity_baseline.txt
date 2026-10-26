@@ -681,8 +681,6 @@ engine/composition/src/boot_refold_staged.c:boot_snapshot_apply_to_coins_kv:19
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
 engine/composition/src/boot_services.c:app_init_services:109
 engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:55
-engine/composition/src/boot_snapshot_install.c:boot_snapshot_install_marker_complete:18
-engine/composition/src/boot_snapshot_install.c:boot_snapshot_install_resume_allowed:23
 engine/composition/src/boot_snapshot_offer.c:build_snapshot_offer_thread:33
 engine/composition/src/boot_snapshot_offer.c:snapshot_offer_state_has_replayed_history_at:27
 engine/composition/src/boot_tip_hooks.c:boot_process_block_commit_tip:21
