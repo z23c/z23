@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #define MAX_INPUT (64u * 1024u * 1024u)
 
@@ -87,15 +88,21 @@ static bool print_entries(const entry *entries, size_t shown) {
   return fflush(stdout) == 0 && !ferror(stdout);
 }
 
+static bool parse_top(const char *text, long *top) {
+  char *end;
+  errno = 0;
+  long value = strtol(text, &end, 10);
+  if (end == text || errno == ERANGE || *end != '\0' || value < 0)
+    return false;
+  *top = value;
+  return true;
+}
+
 int main(int argc, char **argv) {
   long top = 20;
-  if (argc > 1) {
-    char *end = nullptr;
-    top = strtol(argv[1], &end, 10);
-    if (*end != '\0' || top < 0) {
-      fprintf(stderr, "usage: wordfreq [n] < text\n");
-      return 2;
-    }
+  if (argc > 2 || (argc > 1 && !parse_top(argv[1], &top))) {
+    fprintf(stderr, "usage: wordfreq [n] < text\n");
+    return 2;
   }
 
   static char input[MAX_INPUT];

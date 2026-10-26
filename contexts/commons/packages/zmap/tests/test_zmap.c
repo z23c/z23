@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
 
 static FILE *cli_source, *cli_sink;
 static unsigned cli_output_flushes;
@@ -19,6 +21,7 @@ static int cli_fflush(FILE *stream) {
 #define printf(...) fprintf(cli_sink, __VA_ARGS__)
 #define fflush cli_fflush
 #define main zmap_cli_main
+#undef MAX_INPUT /* POSIX limits macro; the app defines its own byte bound. */
 #include "../app/main.c"
 #undef main
 #undef printf
@@ -461,7 +464,48 @@ static void test_cli_output(void) {
 #endif
 }
 
+static int cli_argument_case(int argc, const char *argument, int status,
+                              const char *want, bool stale_errno) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int bad = 1;
+  if (!source || !output) goto cleanup;
+  if (fputs("b a b c a\n", source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  cli_source = source; cli_sink = output; cli_output_flushes = 0;
+  char *args[] = {"wordfreq", (char *)argument, argc > 2 ? "extra" : NULL, NULL};
+  errno = stale_errno ? ERANGE : 0;
+  if (zmap_cli_main(argc, args) != status) goto cleanup;
+  if (status == 2 && (ftell(source) != 0 || cli_output_flushes != 0)) goto cleanup;
+  rewind(output);
+  char bytes[128];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  if (ferror(output) || n != strlen(want) || memcmp(bytes, want, n) != 0) goto cleanup;
+  bad = 0;
+cleanup:
+  return cli_output_cleanup(source, output, bad);
+}
+
+static void test_cli_arguments(void) {
+  const char *invalid[] = {"", " ", "999999999999999999999999999999999999",
+                            "-1", "1junk", "1 "};
+  for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++)
+    CHECK(cli_argument_case(2, invalid[i], 2, "", false) == 0);
+  CHECK(cli_argument_case(3, "1", 2, "", false) == 0);
+  const char *all = "      2 a\n      2 b\n      1 c\n";
+  CHECK(cli_argument_case(1, NULL, 0, all, false) == 0);
+  CHECK(cli_argument_case(2, "0", 0, all, false) == 0);
+  CHECK(cli_argument_case(2, "-0", 0, all, false) == 0);
+  CHECK(cli_argument_case(2, "1", 0, "      2 a\n", false) == 0);
+  CHECK(cli_argument_case(2, "+1", 0, "      2 a\n", false) == 0);
+  CHECK(cli_argument_case(2, " \t1", 0, "      2 a\n", false) == 0);
+  CHECK(cli_argument_case(2, "1", 0, "      2 a\n", true) == 0);
+  char maximum[3 * sizeof(long) + 1];
+  snprintf(maximum, sizeof maximum, "%ld", LONG_MAX);
+  CHECK(cli_argument_case(2, maximum, 0, all, false) == 0);
+}
+
 int main(void) {
+  test_cli_arguments();
   test_cli_output();
   test_cli_bound();
   test_cli_controls();
