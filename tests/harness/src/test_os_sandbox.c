@@ -190,7 +190,7 @@ static int c_macos_seatbelt_scope(void)
         int connect_errno = errno;
         close(sock);
         if (connected == 0 ||
-            (connect_errno != EACCES && connect_errno != EPERM))
+            (connect_errno != EPERM && connect_errno != EACCES))
             return 79;
     }
     return 0;
