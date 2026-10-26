@@ -137,11 +137,6 @@ contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_commit:60
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_build:18
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_persist:22
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_receipt_load:19
-contexts/commons/modules/vcs/src/package_score.c:score_scan_line:25
-contexts/commons/modules/vcs/src/package_score.c:score_unitizer_feed:18
-contexts/commons/modules/vcs/src/package_score.c:vcs_score_classify_path:23
-contexts/commons/modules/vcs/src/package_score.c:vcs_score_release_compute:38
-contexts/commons/modules/vcs/src/package_score.c:vcs_score_scan_file:23
 contexts/commons/modules/vcs/src/package_service.c:svc_credit:16
 contexts/commons/modules/vcs/src/package_service.c:svc_wire_decode:31
 contexts/commons/modules/vcs/src/package_service.c:vcs_service_book_load:41

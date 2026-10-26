@@ -88,6 +88,57 @@ static bool score_is_ws(uint8_t c)
     return c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v';
 }
 
+/* One step through a block comment: consumes a byte, or the closing
+ * marker and clears *in_block. Returns the next index. */
+static size_t score_block_step(const uint8_t *line, size_t len, size_t i,
+                               bool *in_block)
+{
+    if (line[i] == '*' && i + 1 < len && line[i + 1] == '/') {
+        *in_block = false;
+        return i + 2;
+    }
+    return i + 1;
+}
+
+/* Copies a string or character literal verbatim, starting at its opening
+ * quote line[*i_io]. Leaves *i_io past the closing quote (or at the line
+ * end) and returns the new cleaned length. */
+static size_t score_copy_literal(const uint8_t *line, size_t len, size_t *i_io,
+                                 uint8_t *cleaned_out, size_t cleaned)
+{
+    size_t i = *i_io;
+    uint8_t quote = line[i];
+    cleaned_out[cleaned++] = quote;
+    i++;
+    while (i < len) {
+        uint8_t d = line[i];
+        cleaned_out[cleaned++] = d;
+        i++;
+        if (d == '\\' && i < len) {
+            cleaned_out[cleaned++] = line[i];
+            i++;
+            continue;
+        }
+        if (d == quote)
+            break;
+    }
+    *i_io = i;
+    return cleaned;
+}
+
+static enum vcs_score_line_class score_line_class(bool saw_code,
+                                                  bool saw_comment,
+                                                  bool saw_nonbrace)
+{
+    if (!saw_code && !saw_comment)
+        return VCS_SCORE_LINE_BLANK;
+    if (!saw_code)
+        return VCS_SCORE_LINE_COMMENT_ONLY;
+    if (!saw_nonbrace)
+        return VCS_SCORE_LINE_BRACE_ONLY;
+    return VCS_SCORE_LINE_SEMANTIC;
+}
+
 /* Scan one physical line (no trailing '\n'; a trailing '\r' is handled
  * as whitespace). Carries the block-comment state. Reports the line
  * class; when the line is SEMANTIC or BRACE_ONLY its cleaned content
@@ -110,12 +161,7 @@ static void score_scan_line(const uint8_t *line, size_t len, bool *in_block,
     while (i < len) {
         uint8_t c = line[i];
         if (*in_block) {
-            if (c == '*' && i + 1 < len && line[i + 1] == '/') {
-                *in_block = false;
-                i += 2;
-            } else {
-                i++;
-            }
+            i = score_block_step(line, len, i, in_block);
             continue;
         }
         if (score_is_ws(c)) {
@@ -133,23 +179,9 @@ static void score_scan_line(const uint8_t *line, size_t len, bool *in_block,
             continue;
         }
         if (c == '"' || c == '\'') {
-            uint8_t quote = c;
             saw_code = true;
             saw_nonbrace = true;
-            cleaned_out[cleaned++] = c;
-            i++;
-            while (i < len) {
-                uint8_t d = line[i];
-                cleaned_out[cleaned++] = d;
-                i++;
-                if (d == '\\' && i < len) {
-                    cleaned_out[cleaned++] = line[i];
-                    i++;
-                    continue;
-                }
-                if (d == quote)
-                    break;
-            }
+            cleaned = score_copy_literal(line, len, &i, cleaned_out, cleaned);
             continue;
         }
         saw_code = true;
@@ -158,14 +190,7 @@ static void score_scan_line(const uint8_t *line, size_t len, bool *in_block,
         cleaned_out[cleaned++] = c;
         i++;
     }
-    if (!saw_code && !saw_comment)
-        out->cls = VCS_SCORE_LINE_BLANK;
-    else if (!saw_code)
-        out->cls = VCS_SCORE_LINE_COMMENT_ONLY;
-    else if (!saw_nonbrace)
-        out->cls = VCS_SCORE_LINE_BRACE_ONLY;
-    else
-        out->cls = VCS_SCORE_LINE_SEMANTIC;
+    out->cls = score_line_class(saw_code, saw_comment, saw_nonbrace);
     out->cleaned_len = cleaned;
 }
 
@@ -219,6 +244,32 @@ static bool score_has_ext(const char *base, const char *ext)
     return blen > elen && memcmp(base + blen - elen, ext, elen) == 0;
 }
 
+/* Walks the path segments: a vendored or generated directory excludes the
+ * file, and a test segment marks it as a test. */
+static enum vcs_score_exclude_reason score_path_segments(const char *path,
+                                                         bool *is_test)
+{
+    const char *seg = path;
+    while (*seg) {
+        const char *slash = strchr(seg, '/');
+        size_t slen = slash ? (size_t)(slash - seg) : strlen(seg);
+        if (score_segment_is(seg, slen, "vendor") ||
+            score_segment_is(seg, slen, "vendored") ||
+            score_segment_is(seg, slen, "third_party") ||
+            score_segment_is(seg, slen, "third-party"))
+            return VCS_SCORE_EXCLUDE_VENDORED;
+        if (score_segment_is(seg, slen, "generated"))
+            return VCS_SCORE_EXCLUDE_GENERATED_PATH;
+        if (score_segment_is(seg, slen, "test") ||
+            score_segment_is(seg, slen, "tests"))
+            *is_test = true;
+        if (!slash)
+            break;
+        seg = slash + 1;
+    }
+    return VCS_SCORE_EXCLUDE_NONE;
+}
+
 enum vcs_score_file_kind vcs_score_classify_path(
     const char *path, enum vcs_score_exclude_reason *reason_out)
 {
@@ -240,27 +291,11 @@ enum vcs_score_file_kind vcs_score_classify_path(
     }
 
     bool is_test = false;
-    const char *seg = path;
-    while (*seg) {
-        const char *slash = strchr(seg, '/');
-        size_t slen = slash ? (size_t)(slash - seg) : strlen(seg);
-        if (score_segment_is(seg, slen, "vendor") ||
-            score_segment_is(seg, slen, "vendored") ||
-            score_segment_is(seg, slen, "third_party") ||
-            score_segment_is(seg, slen, "third-party")) {
-            *reason_out = VCS_SCORE_EXCLUDE_VENDORED;
-            return VCS_SCORE_FILE_EXCLUDED;
-        }
-        if (score_segment_is(seg, slen, "generated")) {
-            *reason_out = VCS_SCORE_EXCLUDE_GENERATED_PATH;
-            return VCS_SCORE_FILE_EXCLUDED;
-        }
-        if (score_segment_is(seg, slen, "test") ||
-            score_segment_is(seg, slen, "tests"))
-            is_test = true;
-        if (!slash)
-            break;
-        seg = slash + 1;
+    enum vcs_score_exclude_reason seg_reason =
+        score_path_segments(path, &is_test);
+    if (seg_reason != VCS_SCORE_EXCLUDE_NONE) {
+        *reason_out = seg_reason;
+        return VCS_SCORE_FILE_EXCLUDED;
     }
     if (strncmp(base, "test_", 5) == 0)
         is_test = true;
@@ -476,22 +511,36 @@ static bool score_unitizer_push(struct score_unitizer *u, uint8_t c)
     return true;
 }
 
+/* Preprocessor line: flush any pending statement, then the whole
+ * line is one self-contained unit. */
+static bool score_unitizer_feed_pp(struct score_unitizer *u,
+                                   struct vcs_score_set *units,
+                                   const uint8_t *cleaned, size_t len)
+{
+    if (!score_unitizer_emit(u, units))
+        return false;
+    for (size_t i = 0; i < len; i++) {
+        if (!score_unitizer_push(u, cleaned[i]))
+            return false;
+    }
+    return score_unitizer_emit(u, units);
+}
+
+static void score_unitizer_track_paren(struct score_unitizer *u, uint8_t c)
+{
+    if (c == '(')
+        u->paren_depth++;
+    else if (c == ')' && u->paren_depth > 0)
+        u->paren_depth--;
+}
+
 static bool score_unitizer_feed(struct score_unitizer *u,
                                 struct vcs_score_set *units,
                                 const uint8_t *cleaned, size_t len,
                                 bool semantic)
 {
-    if (semantic && len > 0 && cleaned[0] == '#') {
-        /* Preprocessor line: flush any pending statement, then the whole
-         * line is one self-contained unit. */
-        if (!score_unitizer_emit(u, units))
-            return false;
-        for (size_t i = 0; i < len; i++) {
-            if (!score_unitizer_push(u, cleaned[i]))
-                return false;
-        }
-        return score_unitizer_emit(u, units);
-    }
+    if (semantic && len > 0 && cleaned[0] == '#')
+        return score_unitizer_feed_pp(u, units, cleaned, len);
     for (size_t i = 0; i < len; i++) {
         uint8_t c = cleaned[i];
         if (c == '{' || c == '}') {
@@ -504,14 +553,51 @@ static bool score_unitizer_feed(struct score_unitizer *u,
                 return false;
             continue;
         }
-        if (c == '(')
-            u->paren_depth++;
-        else if (c == ')' && u->paren_depth > 0)
-            u->paren_depth--;
+        score_unitizer_track_paren(u, c);
         if (!score_unitizer_push(u, c))
             return false;
     }
     return true;
+}
+
+/* Walks the physical lines of one file: tallies each line class into
+ * out->lines and feeds the cleaned text of code lines to the unitizer. */
+static bool score_scan_lines(const uint8_t *bytes, size_t len,
+                             uint8_t *cleaned, struct score_unitizer *u,
+                             struct vcs_score_file_scan *out)
+{
+    bool in_block = false;
+    size_t pos = 0;
+    bool ok = true;
+    while (ok && pos <= len) {
+        size_t start = pos;
+        while (pos < len && bytes[pos] != '\n')
+            pos++;
+        size_t line_len = pos - start;
+        bool last = pos >= len;
+        if (line_len == 0 && last && start == len)
+            break;
+        struct score_line_scan scan;
+        score_scan_line(bytes + start, line_len, &in_block, &scan, cleaned);
+        switch (scan.cls) {
+        case VCS_SCORE_LINE_SEMANTIC:
+            out->lines.semantic++;
+            ok = score_unitizer_feed(u, &out->units, cleaned,
+                                     scan.cleaned_len, true);
+            break;
+        case VCS_SCORE_LINE_BRACE_ONLY:
+            out->lines.brace_only++;
+            ok = score_unitizer_feed(u, &out->units, cleaned,
+                                     scan.cleaned_len, false);
+            break;
+        case VCS_SCORE_LINE_BLANK: out->lines.blank++; break;
+        case VCS_SCORE_LINE_COMMENT_ONLY: out->lines.comment_only++; break;
+        }
+        if (last)
+            break;
+        pos++;
+    }
+    return ok;
 }
 
 bool vcs_score_scan_file(const char *path, const uint8_t *bytes,
@@ -545,37 +631,7 @@ bool vcs_score_scan_file(const char *path, const uint8_t *bytes,
     }
     struct score_unitizer u;
     memset(&u, 0, sizeof(u));
-    bool in_block = false;
-    size_t pos = 0;
-    bool ok = true;
-    while (ok && pos <= len) {
-        size_t start = pos;
-        while (pos < len && bytes[pos] != '\n')
-            pos++;
-        size_t line_len = pos - start;
-        bool last = pos >= len;
-        if (line_len == 0 && last && start == len)
-            break;
-        struct score_line_scan scan;
-        score_scan_line(bytes + start, line_len, &in_block, &scan, cleaned);
-        switch (scan.cls) {
-        case VCS_SCORE_LINE_SEMANTIC:
-            out->lines.semantic++;
-            ok = score_unitizer_feed(&u, &out->units, cleaned,
-                                     scan.cleaned_len, true);
-            break;
-        case VCS_SCORE_LINE_BRACE_ONLY:
-            out->lines.brace_only++;
-            ok = score_unitizer_feed(&u, &out->units, cleaned,
-                                     scan.cleaned_len, false);
-            break;
-        case VCS_SCORE_LINE_BLANK: out->lines.blank++; break;
-        case VCS_SCORE_LINE_COMMENT_ONLY: out->lines.comment_only++; break;
-        }
-        if (last)
-            break;
-        pos++;
-    }
+    bool ok = score_scan_lines(bytes, len, cleaned, &u, out);
     /* A trailing unterminated statement still forms its unit. */
     if (ok)
         ok = score_unitizer_emit(&u, &out->units);
@@ -631,141 +687,146 @@ static int score_unit_ref_cmp(const void *a, const void *b)
     return (int)rb->is_test - (int)ra->is_test;
 }
 
-bool vcs_score_release_compute(const struct vcs_score_input_file *files,
-                               size_t file_count,
-                               const struct vcs_score_set *lineage,
-                               bool has_parent,
-                               struct vcs_score_release *out)
+/* Capacity for the unit-reference array: doubles, starting at 64. */
+static size_t score_refs_next_cap(size_t ref_cap)
 {
-    memset(out, 0, sizeof(*out));
-    if (!files && file_count > 0) {
-        LOG_FAIL(SCORE_LOG, "null files with count %zu", file_count);
-        return false;
-    }
-    if (lineage && !lineage->finalized) {
-        LOG_FAIL(SCORE_LOG, "lineage set not finalized");
-        return false;
-    }
+    return ref_cap ? ref_cap * 2u : 64u;
+}
 
-    struct vcs_score_file_scan *scans = NULL;
-    struct score_unit_ref *refs = NULL;
-    size_t ref_count = 0;
-    bool ok = false;
-    if (file_count > 0) {
-        scans = zcl_calloc(file_count, sizeof(*scans), "score_scans");
-        if (!scans) {
-            LOG_FAIL(SCORE_LOG, "alloc %zu file scans", file_count);
-            return false;
+/* Appends the units of one scanned file as references. False when the
+ * array cannot grow; the caller logs the attempted capacity. */
+static bool score_refs_add_file(struct score_unit_ref **refs,
+                                size_t *ref_count, size_t *ref_cap,
+                                const struct vcs_score_file_scan *scan,
+                                uint32_t file_index)
+{
+    bool is_test = scan->kind == VCS_SCORE_FILE_TEST;
+    for (size_t j = 0; j < scan->units.count; j++) {
+        if (*ref_count == *ref_cap) {
+            size_t ncap = score_refs_next_cap(*ref_cap);
+            struct score_unit_ref *nrefs =
+                zcl_realloc(*refs, ncap * sizeof(*nrefs),
+                            "score_unit_refs");
+            if (!nrefs)
+                return false;
+            *refs = nrefs;
+            *ref_cap = ncap;
         }
+        (*refs)[*ref_count].unit = scan->units.items[j];
+        (*refs)[*ref_count].file_index = file_index;
+        (*refs)[*ref_count].is_test = is_test;
+        (*ref_count)++;
     }
+    return true;
+}
 
-    size_t ref_cap = 0;
-    bool scanned_ok = true;
-    for (size_t i = 0; i < file_count && scanned_ok; i++) {
-        const struct vcs_score_input_file *f = &files[i];
-        struct vcs_score_file_report *rep = NULL;
-        if (out->file_report_count < VCS_SCORE_MAX_FILE_REPORTS) {
-            rep = &out->files[out->file_report_count++];
-            rep->path = f->path;
+static void score_release_tally_units(struct score_unit_ref *refs,
+                                      size_t ref_count,
+                                      const struct vcs_score_set *lineage,
+                                      struct vcs_score_release *out)
+{
+    if (ref_count > 1)
+        qsort(refs, ref_count, sizeof(*refs), score_unit_ref_cmp);
+    for (size_t i = 0; i < ref_count;) {
+        size_t j = i + 1;
+        while (j < ref_count && strcmp(refs[j].unit, refs[i].unit) == 0)
+            j++;
+        /* refs[i] is the representative: earliest file, test weight
+         * first. refs[i+1..j) are within-release duplicates. */
+        out->units_total++;
+        out->units_duplicate += (uint32_t)(j - i - 1u);
+        bool rewarded = lineage &&
+            vcs_score_set_contains(lineage, refs[i].unit,
+                                   strlen(refs[i].unit));
+        if (rewarded) {
+            out->units_already_rewarded++;
         } else {
-            out->file_reports_truncated = true;
-        }
-
-        if (f->declared_size > VCS_SCORE_MAX_FILE_BYTES) {
-            /* Never read: excluded by the manifest-declared size. */
-            if (rep) {
-                rep->kind = VCS_SCORE_FILE_EXCLUDED;
-                rep->reason = VCS_SCORE_EXCLUDE_OVERSIZE;
+            uint32_t points = refs[i].is_test
+                ? VCS_SCORE_TEST_LINE_POINTS
+                : VCS_SCORE_SOURCE_LINE_POINTS;
+            if (refs[i].is_test)
+                out->new_test_units++;
+            else
+                out->new_source_units++;
+            if (refs[i].file_index < out->file_report_count) {
+                struct vcs_score_file_report *rep =
+                    &out->files[refs[i].file_index];
+                rep->new_units++;
+                rep->points += points;
             }
-            out->files_excluded++;
-            continue;
         }
-        size_t len = f->bytes ? f->len : 0;
-        if (!vcs_score_scan_file(f->path, f->bytes, len, &scans[i])) {
-            LOG_FAIL(SCORE_LOG, "scan file %zu", i);
-            scanned_ok = false;
-            break;
-        }
-        const struct vcs_score_file_scan *scan = &scans[i];
-        if (rep) {
-            rep->kind = scan->kind;
-            rep->reason = scan->reason;
-            rep->lines = scan->lines;
-        }
-        if (scan->kind == VCS_SCORE_FILE_EXCLUDED) {
-            out->files_excluded++;
-            continue;
-        }
-        out->files_scored++;
-        out->semantic_lines += scan->lines.semantic;
-        out->blank_lines += scan->lines.blank;
-        out->comment_lines += scan->lines.comment_only;
-        out->brace_lines += scan->lines.brace_only;
-        bool is_test = scan->kind == VCS_SCORE_FILE_TEST;
-        for (size_t j = 0; j < scan->units.count; j++) {
-            if (ref_count == ref_cap) {
-                size_t ncap = ref_cap ? ref_cap * 2u : 64u;
-                struct score_unit_ref *nrefs =
-                    zcl_realloc(refs, ncap * sizeof(*nrefs),
-                                "score_unit_refs");
-                if (!nrefs) {
-                    LOG_FAIL(SCORE_LOG, "grow unit refs to %zu", ncap);
-                    scanned_ok = false;
-                    break;
-                }
-                refs = nrefs;
-                ref_cap = ncap;
-            }
-            refs[ref_count].unit = scan->units.items[j];
-            refs[ref_count].file_index = (uint32_t)i;
-            refs[ref_count].is_test = is_test;
-            ref_count++;
-        }
+        i = j;
     }
+}
 
-    if (scanned_ok) {
-        if (ref_count > 1)
-            qsort(refs, ref_count, sizeof(*refs), score_unit_ref_cmp);
-        for (size_t i = 0; i < ref_count;) {
-            size_t j = i + 1;
-            while (j < ref_count && strcmp(refs[j].unit, refs[i].unit) == 0)
-                j++;
-            /* refs[i] is the representative: earliest file, test weight
-             * first. refs[i+1..j) are within-release duplicates. */
-            out->units_total++;
-            out->units_duplicate += (uint32_t)(j - i - 1u);
-            bool rewarded = lineage &&
-                vcs_score_set_contains(lineage, refs[i].unit,
-                                       strlen(refs[i].unit));
-            if (rewarded) {
-                out->units_already_rewarded++;
-            } else {
-                uint32_t points = refs[i].is_test
-                    ? VCS_SCORE_TEST_LINE_POINTS
-                    : VCS_SCORE_SOURCE_LINE_POINTS;
-                if (refs[i].is_test)
-                    out->new_test_units++;
-                else
-                    out->new_source_units++;
-                if (refs[i].file_index < out->file_report_count) {
-                    struct vcs_score_file_report *rep =
-                        &out->files[refs[i].file_index];
-                    rep->new_units++;
-                    rep->points += points;
-                }
-            }
-            i = j;
-        }
-        ok = true;
+static bool score_release_files_invalid(
+    const struct vcs_score_input_file *files, size_t file_count)
+{
+    return !files && file_count > 0;
+}
+
+static bool score_lineage_unready(const struct vcs_score_set *lineage)
+{
+    return lineage && !lineage->finalized;
+}
+
+/* The report row for one input file, or NULL once the rows are full. */
+static struct vcs_score_file_report *score_release_report_slot(
+    struct vcs_score_release *out, const struct vcs_score_input_file *f)
+{
+    struct vcs_score_file_report *rep = NULL;
+    if (out->file_report_count < VCS_SCORE_MAX_FILE_REPORTS) {
+        rep = &out->files[out->file_report_count++];
+        rep->path = f->path;
+    } else {
+        out->file_reports_truncated = true;
     }
+    return rep;
+}
 
+static void score_release_skip_oversize(struct vcs_score_release *out,
+                                        struct vcs_score_file_report *rep)
+{
+    if (rep) {
+        rep->kind = VCS_SCORE_FILE_EXCLUDED;
+        rep->reason = VCS_SCORE_EXCLUDE_OVERSIZE;
+    }
+    out->files_excluded++;
+}
+
+static void score_release_report_scan(struct vcs_score_file_report *rep,
+                                      const struct vcs_score_file_scan *scan)
+{
+    if (rep) {
+        rep->kind = scan->kind;
+        rep->reason = scan->reason;
+        rep->lines = scan->lines;
+    }
+}
+
+static void score_release_tally_scan(struct vcs_score_release *out,
+                                     const struct vcs_score_file_scan *scan)
+{
+    out->files_scored++;
+    out->semantic_lines += scan->lines.semantic;
+    out->blank_lines += scan->lines.blank;
+    out->comment_lines += scan->lines.comment_only;
+    out->brace_lines += scan->lines.brace_only;
+}
+
+static void score_release_free_work(struct vcs_score_file_scan *scans,
+                                    size_t file_count,
+                                    struct score_unit_ref *refs)
+{
     for (size_t i = 0; i < file_count; i++)
         vcs_score_file_scan_free(&scans[i]);
     free(scans);
     free(refs);
-    if (!ok)
-        return false;
+}
 
+static void score_release_finish(struct vcs_score_release *out,
+                                 bool has_parent)
+{
     out->raw_line_points =
         out->new_source_units * VCS_SCORE_SOURCE_LINE_POINTS +
         out->new_test_units * VCS_SCORE_TEST_LINE_POINTS;
@@ -795,6 +856,74 @@ bool vcs_score_release_compute(const struct vcs_score_input_file *files,
         out->total = VCS_SCORE_MAX_TOTAL_PER_RELEASE;
         out->release_cap_applied = true;
     }
+}
+
+bool vcs_score_release_compute(const struct vcs_score_input_file *files,
+                               size_t file_count,
+                               const struct vcs_score_set *lineage,
+                               bool has_parent,
+                               struct vcs_score_release *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (score_release_files_invalid(files, file_count)) {
+        LOG_FAIL(SCORE_LOG, "null files with count %zu", file_count);
+        return false;
+    }
+    if (score_lineage_unready(lineage)) {
+        LOG_FAIL(SCORE_LOG, "lineage set not finalized");
+        return false;
+    }
+
+    struct vcs_score_file_scan *scans = NULL;
+    struct score_unit_ref *refs = NULL;
+    size_t ref_count = 0;
+    if (file_count > 0) {
+        scans = zcl_calloc(file_count, sizeof(*scans), "score_scans");
+        if (!scans) {
+            LOG_FAIL(SCORE_LOG, "alloc %zu file scans", file_count);
+            return false;
+        }
+    }
+
+    size_t ref_cap = 0;
+    bool scanned_ok = true;
+    for (size_t i = 0; i < file_count && scanned_ok; i++) {
+        const struct vcs_score_input_file *f = &files[i];
+        struct vcs_score_file_report *rep =
+            score_release_report_slot(out, f);
+        if (f->declared_size > VCS_SCORE_MAX_FILE_BYTES) {
+            /* Never read: excluded by the manifest-declared size. */
+            score_release_skip_oversize(out, rep);
+            continue;
+        }
+        size_t len = f->bytes ? f->len : 0;
+        if (!vcs_score_scan_file(f->path, f->bytes, len, &scans[i])) {
+            LOG_FAIL(SCORE_LOG, "scan file %zu", i);
+            scanned_ok = false;
+            break;
+        }
+        const struct vcs_score_file_scan *scan = &scans[i];
+        score_release_report_scan(rep, scan);
+        if (scan->kind == VCS_SCORE_FILE_EXCLUDED) {
+            out->files_excluded++;
+            continue;
+        }
+        score_release_tally_scan(out, scan);
+        if (!score_refs_add_file(&refs, &ref_count, &ref_cap, scan,
+                                 (uint32_t)i)) {
+            size_t ncap = score_refs_next_cap(ref_cap);
+            LOG_FAIL(SCORE_LOG, "grow unit refs to %zu", ncap);
+            scanned_ok = false;
+            break;
+        }
+    }
+
+    if (scanned_ok)
+        score_release_tally_units(refs, ref_count, lineage, out);
+    score_release_free_work(scans, file_count, refs);
+    if (!scanned_ok)
+        return false;
+    score_release_finish(out, has_parent);
     return true;
 }
 
