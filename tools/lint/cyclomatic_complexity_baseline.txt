@@ -1932,8 +1932,6 @@ tools/retrieval_eval.c:main:47
 tools/retrieval_eval.c:rank_root_mode:18
 tools/retrieval_eval.c:token_safe:32
 tools/serial_bench.c:main:34
-tools/simd_bench.c:bench_chacha_aead_row:32
-tools/simd_bench.c:main:26
 tools/zcc.c:epoch_authority_current:16
 tools/zcc.c:epoch_authority_open:23
 tools/zcc.c:epoch_compile_publish:22

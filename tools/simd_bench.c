@@ -894,6 +894,84 @@ static void chacha_time_tiers(struct bench *b, struct chacha_aead_ctx *ctx,
         record_tier_samples(&b->tier[active[i]], b, samples[active[i]]);
 }
 
+static void chacha_name_tiers(struct bench *b)
+{
+    for (int t = 0; t < b->ntiers; t++)
+        b->tier[t].name = g_chacha_tiers[t].name;
+}
+
+static void chacha_init_row_ctx(struct chacha_aead_ctx *ctx, int ntiers,
+                                size_t plen, size_t aad_len, bool open)
+{
+    for (int t = 0; t < ntiers; t++) {
+        ctx[t].plen = plen;
+        ctx[t].aad_len = aad_len;
+        ctx[t].sealed = g_chacha_sealed[t];
+        ctx[t].opened = g_chacha_opened[t];
+        ctx[t].open = open;
+        for (size_t i = 0; i < sizeof ctx[t].key; i++)
+            ctx[t].key[i] = (uint8_t)(i * 29u + 7u);
+        for (size_t i = 0; i < sizeof ctx[t].nonce; i++)
+            ctx[t].nonce[i] = (uint8_t)(i * 17u + 3u);
+    }
+}
+
+static bool chacha_verify_portable(struct bench *b,
+                                   struct chacha_aead_ctx *ctx,
+                                   size_t plen, size_t aad_len, bool open)
+{
+    b->tier[0].available =
+        chacha20_select_impl(CHACHA20_IMPL_PORTABLE) ==
+        CHACHA20_IMPL_PORTABLE;
+    bool portable_ok = b->tier[0].available &&
+        chacha20poly1305_encrypt(g_chacha_plain, plen,
+                                 g_chacha_aad, aad_len,
+                                 ctx[0].nonce, ctx[0].key,
+                                 ctx[0].sealed);
+    if (portable_ok && open) {
+        for (int t = 1; t < b->ntiers; t++)
+            memcpy(ctx[t].sealed, ctx[0].sealed, plen + POLY1305_TAG_SIZE);
+        portable_ok = chacha20poly1305_decrypt(
+            ctx[0].sealed, plen + POLY1305_TAG_SIZE,
+            g_chacha_aad, aad_len, ctx[0].nonce, ctx[0].key,
+            ctx[0].opened) &&
+            memcmp(ctx[0].opened, g_chacha_plain, plen) == 0;
+    }
+    b->tier[0].verified = portable_ok;
+    return portable_ok;
+}
+
+static void chacha_collect_verified_tiers(struct bench *b, int active[],
+                                          int *n, int *widest)
+{
+    for (int t = 0; t < b->ntiers; t++)
+        if (b->tier[t].available && b->tier[t].verified) {
+            active[(*n)++] = t;
+            *widest = t;
+        }
+}
+
+static void chacha_time_active_tiers(struct bench *b,
+                                     struct chacha_aead_ctx *ctx,
+                                     const int *active, int n, long inner,
+                                     bool *won)
+{
+    if (b->tier[0].verified && n > 1) {
+        chacha_time_tiers(b, ctx, active, n, inner, won);
+    } else if (b->tier[0].verified) {
+        chacha20_select_impl(CHACHA20_IMPL_PORTABLE);
+        time_tier(&b->tier[0], b, chacha_aead_body, &ctx[0]);
+    }
+}
+
+static int chacha_pick_gate_tier(int ntiers, int gate, int auto_impl)
+{
+    for (int t = 1; t < ntiers; t++)
+        if ((int)g_chacha_tiers[t].impl == auto_impl)
+            gate = t;
+    return gate;
+}
+
 static void bench_chacha_aead_row(const char *label, size_t plen,
                                   size_t aad_len, long inner, bool open)
 {
@@ -905,64 +983,25 @@ static void bench_chacha_aead_row(const char *label, size_t plen,
         .bytes_per_op = (double)plen,
         .ntiers = CHACHA_BENCH_NTIERS,
     };
-    for (int t = 0; t < b.ntiers; t++)
-        b.tier[t].name = g_chacha_tiers[t].name;
+    chacha_name_tiers(&b);
 
     struct chacha_aead_ctx ctx[MAX_TIERS];
     memset(ctx, 0, sizeof ctx);
-    for (int t = 0; t < b.ntiers; t++) {
-        ctx[t].plen = plen;
-        ctx[t].aad_len = aad_len;
-        ctx[t].sealed = g_chacha_sealed[t];
-        ctx[t].opened = g_chacha_opened[t];
-        ctx[t].open = open;
-        for (size_t i = 0; i < sizeof ctx[t].key; i++)
-            ctx[t].key[i] = (uint8_t)(i * 29u + 7u);
-        for (size_t i = 0; i < sizeof ctx[t].nonce; i++)
-            ctx[t].nonce[i] = (uint8_t)(i * 17u + 3u);
-    }
+    chacha_init_row_ctx(ctx, b.ntiers, plen, aad_len, open);
 
-    b.tier[0].available =
-        chacha20_select_impl(CHACHA20_IMPL_PORTABLE) ==
-        CHACHA20_IMPL_PORTABLE;
-    bool portable_ok = b.tier[0].available &&
-        chacha20poly1305_encrypt(g_chacha_plain, plen,
-                                 g_chacha_aad, aad_len,
-                                 ctx[0].nonce, ctx[0].key,
-                                 ctx[0].sealed);
-    if (portable_ok && open) {
-        for (int t = 1; t < b.ntiers; t++)
-            memcpy(ctx[t].sealed, ctx[0].sealed, plen + POLY1305_TAG_SIZE);
-        portable_ok = chacha20poly1305_decrypt(
-            ctx[0].sealed, plen + POLY1305_TAG_SIZE,
-            g_chacha_aad, aad_len, ctx[0].nonce, ctx[0].key,
-            ctx[0].opened) &&
-            memcmp(ctx[0].opened, g_chacha_plain, plen) == 0;
-    }
-    b.tier[0].verified = portable_ok;
+    bool portable_ok = chacha_verify_portable(&b, ctx, plen, aad_len, open);
     for (int t = 1; t < b.ntiers; t++)
         chacha_verify_tier(&b, ctx, t, plen, aad_len, open, portable_ok);
 
     int active[MAX_TIERS], n = 0, widest = 0;
-    for (int t = 0; t < b.ntiers; t++)
-        if (b.tier[t].available && b.tier[t].verified) {
-            active[n++] = t;
-            widest = t;
-        }
-    if (b.tier[0].verified && n > 1) {
-        chacha_time_tiers(&b, ctx, active, n, inner, won);
-    } else if (b.tier[0].verified) {
-        chacha20_select_impl(CHACHA20_IMPL_PORTABLE);
-        time_tier(&b.tier[0], &b, chacha_aead_body, &ctx[0]);
-    }
+    chacha_collect_verified_tiers(&b, active, &n, &widest);
+    chacha_time_active_tiers(&b, ctx, active, n, inner, won);
 
     /* The promotion gate judges the tier AUTO resolves to; while AUTO is
      * portable it judges the widest verified tier, i.e. the candidate. */
     int gate = widest;
     int auto_impl = chacha20_auto_impl();
-    for (int t = 1; t < b.ntiers; t++)
-        if ((int)g_chacha_tiers[t].impl == auto_impl)
-            gate = t;
+    gate = chacha_pick_gate_tier(b.ntiers, gate, auto_impl);
     chacha20_select_impl(CHACHA20_IMPL_AUTO);
     report(&b);
     if (g_require_chacha_wins &&
@@ -1332,29 +1371,77 @@ static int bench_preflight(void)
     return 0;
 }
 
-int main(int argc, char **argv)
+static bool bench_parse_option(const char *arg)
 {
-    for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--cpu=", 6) == 0)       g_pin_cpu = atoi(argv[i] + 6);
-        else if (strncmp(argv[i], "--reps=", 7) == 0) g_reps = atoi(argv[i] + 7);
-        else if (strcmp(argv[i], "--csv") == 0)       g_csv = true;
-        else if (strcmp(argv[i], "--chacha-only") == 0) g_chacha_only = true;
-        else if (strcmp(argv[i], "--allow-promoted-auto") == 0)
-            g_allow_promoted_auto = true;
-        else if (strcmp(argv[i], "--require-chacha-wins") == 0)
-            g_require_chacha_wins = true;
-        else if (strcmp(argv[i], "--self-test") == 0) return self_test();
-        else { usage(argv[0]); return 1; }
-    }
+    if (strncmp(arg, "--cpu=", 6) == 0)       g_pin_cpu = atoi(arg + 6);
+    else if (strncmp(arg, "--reps=", 7) == 0) g_reps = atoi(arg + 7);
+    else if (strcmp(arg, "--csv") == 0)       g_csv = true;
+    else if (strcmp(arg, "--chacha-only") == 0) g_chacha_only = true;
+    else if (strcmp(arg, "--allow-promoted-auto") == 0)
+        g_allow_promoted_auto = true;
+    else if (strcmp(arg, "--require-chacha-wins") == 0)
+        g_require_chacha_wins = true;
+    else
+        return false;
+    return true;
+}
+
+static void bench_clamp_reps(void)
+{
     if (g_reps < 3) g_reps = 3;
     if (g_reps > BENCH_MAX_REPS) g_reps = BENCH_MAX_REPS;
-    int refused = bench_preflight();
-    if (refused) return refused;
+}
 
+static void bench_default_pin(void)
+{
     /* Default pin: CPU 0. Deliberately a fixed, documented choice rather than
      * "wherever we happen to be" — comparability across runs matters more than
      * picking the fastest core, and the header states which CCD that is. */
     if (g_pin_cpu < 0) g_pin_cpu = 0;
+}
+
+static void bench_fill_input(unsigned char *buf, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        buf[i] = (unsigned char)(i * 131 + 17);
+}
+
+static void bench_run_hash_suite(unsigned char *msg)
+{
+    if (!g_chacha_only) {
+        bench_sha256(msg);
+        bench_sha512(msg);
+        bench_sha3_256_x4(msg);
+        bench_sha3_512_x4(msg);
+        bench_equihash_blake2b();
+    }
+}
+
+static void bench_run_field_suite(void)
+{
+    if (!g_chacha_only) {
+        bench_bn254(1);
+        bench_bn254(MONT_MAX_CHAINS);
+        bench_fr(1);
+        bench_fr(MONT_MAX_CHAINS);
+        bench_fp(1);
+        bench_fp(MONT_MAX_CHAINS);
+    }
+}
+
+int main(int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        if (bench_parse_option(argv[i])) continue;
+        if (strcmp(argv[i], "--self-test") == 0) return self_test();
+        usage(argv[0]);
+        return 1;
+    }
+    bench_clamp_reps();
+    int refused = bench_preflight();
+    if (refused) return refused;
+
+    bench_default_pin();
 
     bool pinned = pin_to_cpu(g_pin_cpu);
     struct cpu_topo topo;
@@ -1399,25 +1486,11 @@ int main(int argc, char **argv)
 
     /* Shared random-ish input buffer, identical across every tier. */
     static unsigned char buf[8192];
-    for (size_t i = 0; i < sizeof(buf); i++)
-        buf[i] = (unsigned char)(i * 131 + 17);
+    bench_fill_input(buf, sizeof(buf));
 
-    if (!g_chacha_only) {
-        bench_sha256(buf);
-        bench_sha512(buf);
-        bench_sha3_256_x4(buf);
-        bench_sha3_512_x4(buf);
-        bench_equihash_blake2b();
-    }
+    bench_run_hash_suite(buf);
     bench_chacha_aead();
-    if (!g_chacha_only) {
-        bench_bn254(1);
-        bench_bn254(MONT_MAX_CHAINS);
-        bench_fr(1);
-        bench_fr(MONT_MAX_CHAINS);
-        bench_fp(1);
-        bench_fp(MONT_MAX_CHAINS);
-    }
+    bench_run_field_suite();
 
     if (!g_csv) {
         double la[3];
