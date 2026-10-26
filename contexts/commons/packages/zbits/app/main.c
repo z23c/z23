@@ -28,10 +28,20 @@ static int parse_bits(const char *s, uint64_t *w, size_t *nbits) {
   return 0;
 }
 
-static void print_bits(const uint64_t *w, size_t nbits) {
+static int finish_output(int written, int status) {
+  if (written < 0 || fflush(stdout) != 0 || ferror(stdout)) {
+    fputs("zbits: output write failed\n", stderr);
+    return 1;
+  }
+  return status;
+}
+
+static int print_bits(const uint64_t *w, size_t nbits) {
   size_t i;
-  for (i = 0; i < nbits; i++) putchar(zbits_test(w, nbits, i) ? '1' : '0');
-  putchar('\n');
+  for (i = 0; i < nbits; i++)
+    if (putchar(zbits_test(w, nbits, i) ? '1' : '0') == EOF)
+      return finish_output(EOF, 0);
+  return finish_output(putchar('\n'), 0);
 }
 
 int main(int argc, char **argv) {
@@ -40,26 +50,21 @@ int main(int argc, char **argv) {
   if (argc < 3) goto usage;
   if (parse_bits(argv[2], a, &na) != 0) goto bad;
   if (strcmp(argv[1], "count") == 0 && argc == 3) {
-    printf("%zu\n", zbits_count(a, na));
-    return 0;
+    return finish_output(printf("%zu\n", zbits_count(a, na)), 0);
   }
   if (strcmp(argv[1], "first-set") == 0 && argc == 3) {
     size_t r = zbits_first_set(a, na);
     if (r == SIZE_MAX) {
-      printf("none\n");
-      return 1;
+      return finish_output(printf("none\n"), 1);
     }
-    printf("%zu\n", r);
-    return 0;
+    return finish_output(printf("%zu\n", r), 0);
   }
   if (strcmp(argv[1], "first-clear") == 0 && argc == 3) {
     size_t r = zbits_first_clear(a, na);
     if (r == SIZE_MAX) {
-      printf("none\n");
-      return 1;
+      return finish_output(printf("none\n"), 1);
     }
-    printf("%zu\n", r);
-    return 0;
+    return finish_output(printf("%zu\n", r), 0);
   }
   if (strcmp(argv[1], "rank") == 0 && argc == 4) {
     char *end = NULL;
@@ -68,13 +73,11 @@ int main(int argc, char **argv) {
     if (end == argv[3] || *end != '\0' || i < 0) goto bad;
     r = zbits_rank(a, na, (size_t)i);
     if (r == SIZE_MAX) goto bad;
-    printf("%zu\n", r);
-    return 0;
+    return finish_output(printf("%zu\n", r), 0);
   }
   if (strcmp(argv[1], "flip-all") == 0 && argc == 3) {
     zbits_flip_all(a, na);
-    print_bits(a, na);
-    return 0;
+    return print_bits(a, na);
   }
   if (argc == 4 && (strcmp(argv[1], "or") == 0 ||
                     strcmp(argv[1], "and") == 0 ||
@@ -85,8 +88,7 @@ int main(int argc, char **argv) {
         : strcmp(argv[1], "and") == 0 ? zbits_and(d, a, b, na)
                                       : zbits_andnot(d, a, b, na);
     if (e != ZBITS_OK) goto bad;
-    print_bits(d, na);
-    return 0;
+    return print_bits(d, na);
   }
 usage:
   fprintf(stderr,

@@ -5,6 +5,34 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_sink, *cli_errors;
+static FILE *cli_real_stdout(void) { return stdout; }
+static FILE *cli_real_stderr(void) { return stderr; }
+static unsigned cli_output_flushes;
+static int cli_fflush(FILE *stream) {
+  if (stream == cli_sink) cli_output_flushes++;
+  return fflush(stream);
+}
+#undef stdout
+#undef stderr
+#define stdout cli_sink
+#define stderr cli_errors
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define putchar(c) fputc((c), cli_sink)
+#define fflush cli_fflush
+#define main zbits_cli_main
+#include "../app/main.c"
+#undef main
+#undef putchar
+#undef fflush
+#undef printf
+#undef stderr
+#undef stdout
+/* UCRT exposes these streams only as macros. Restore test diagnostics and
+ * stream ownership through accessors captured before the app mappings. */
+#define stdout cli_real_stdout()
+#define stderr cli_real_stderr()
+
 static int g_fail = 0;
 #define CHECK(cond)                                                     \
   do {                                                                  \
@@ -208,7 +236,98 @@ static void test_count_ignores_storage_tail(void) {
   }
 }
 
+static int cli_run(FILE *output, FILE *errors, int argc, char **args) {
+  cli_sink = output; cli_errors = errors; cli_output_flushes = 0;
+  int rc = zbits_cli_main(argc, args);
+  cli_sink = stdout; cli_errors = stderr;
+  return rc;
+}
+
+static bool cli_text(FILE *stream, const char *want) {
+  rewind(stream);
+  char bytes[256];
+  size_t n = fread(bytes, 1, sizeof bytes, stream);
+  return !ferror(stream) && n == strlen(want) && memcmp(bytes, want, n) == 0;
+}
+
+static int cli_case(int argc, char **args, int status, const char *want,
+                     const char *diagnostic) {
+  FILE *output = tmpfile(), *errors = tmpfile();
+  int bad = 1;
+  if (!output || !errors) goto cleanup;
+  if (cli_run(output, errors, argc, args) != status) goto cleanup;
+  if (!want[0] && cli_output_flushes != 0) goto cleanup;
+  if (!cli_text(output, want) || !cli_text(errors, diagnostic)) goto cleanup;
+  bad = 0;
+cleanup:
+  if (output && fclose(output) != 0) bad = 1;
+  if (errors && fclose(errors) != 0) bad = 1;
+  return bad;
+}
+
+static int cli_sink_case(int argc, char **args, bool buffered) {
+#if defined(__linux__)
+  FILE *output = fopen(buffered ? "/dev/full" : "/dev/null", buffered ? "w" : "r");
+#elif defined(_WIN32)
+  FILE *output = fopen("NUL", "r");
+#else
+  FILE *output = fopen("/dev/null", "r");
+#endif
+  FILE *errors = tmpfile();
+  int bad = 1;
+  char buffer[4096];
+  if (!output || !errors) goto cleanup;
+  if (buffered && setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+  if (cli_run(output, errors, argc, args) != 1 || !ferror(output)) goto cleanup;
+  if (!cli_text(errors, "zbits: output write failed\n")) goto cleanup;
+  bad = 0;
+cleanup:
+  if (output) (void)fclose(output);
+  if (errors && fclose(errors) != 0) bad = 1;
+  return bad;
+}
+
+static void test_cli_output(void) {
+  const struct { char *op, *a, *b; int status; const char *want; } rows[] = {
+      {"count", "101", NULL, 0, "2\n"},
+      {"rank", "101", "2", 0, "1\n"},
+      {"first-set", "101", NULL, 0, "0\n"},
+      {"first-clear", "101", NULL, 0, "1\n"},
+      {"first-set", "000", NULL, 1, "none\n"},
+      {"first-clear", "111", NULL, 1, "none\n"},
+      {"flip-all", "101", NULL, 0, "010\n"},
+      {"or", "101", "010", 0, "111\n"},
+      {"and", "101", "110", 0, "100\n"},
+      {"andnot", "101", "110", 0, "001\n"}
+  };
+  for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+    char *args[] = {"zbits", rows[i].op, rows[i].a, rows[i].b, NULL};
+    int argc = rows[i].b ? 4 : 3;
+    CHECK(cli_case(argc, args, rows[i].status, rows[i].want, "") == 0);
+    CHECK(cli_sink_case(argc, args, false) == 0);
+#if defined(__linux__)
+    CHECK(cli_sink_case(argc, args, true) == 0);
+#endif
+  }
+}
+
+static void test_cli_errors(void) {
+  char *bad[] = {"zbits", "count", "10x", NULL};
+  CHECK(cli_case(3, bad, 1, "", "zbits: bad input\n") == 0);
+  char *rank[] = {"zbits", "rank", "101", "4", NULL};
+  CHECK(cli_case(4, rank, 1, "", "zbits: bad input\n") == 0);
+  const char *usage = "usage: zbits <count|first-set|first-clear|flip-all> BITS\n"
+      "       zbits rank BITS I\n       zbits <or|and|andnot> A B\n";
+  char *missing[] = {"zbits", "count", NULL};
+  CHECK(cli_case(2, missing, 2, "", usage) == 0);
+  char *comment_only[] = {"zbits", "xor-not", "101", "010", NULL};
+  CHECK(cli_case(4, comment_only, 2, "", usage) == 0);
+}
+
 int main(void) {
+  cli_sink = stdout; cli_errors = stderr;
+  test_cli_output();
+  test_cli_errors();
   test_count_ignores_storage_tail();
   test_basic();
   test_bulk();
