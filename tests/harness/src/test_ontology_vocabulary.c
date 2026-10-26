@@ -126,42 +126,62 @@ static bool tv_rule_zero(const struct zcl_ontology_horn_rule_v1 *rule)
            tv_root_zero(rule->evidence_root);
 }
 
+static bool tv_vocabulary_header_zero(
+    const struct zcl_ontology_vocabulary_v1 *vocabulary)
+{
+    return vocabulary->schema_version == 0 && vocabulary->reserved == 0 &&
+           tv_root_zero(vocabulary->vocabulary_root) &&
+           tv_root_zero(vocabulary->evidence_root) &&
+           tv_root_zero(vocabulary->universe_root) &&
+           tv_root_zero(vocabulary->context_root) &&
+           tv_root_zero(vocabulary->ontology_object_identity_root) &&
+           tv_root_zero(vocabulary->ontology_type_identity_root) &&
+           tv_root_zero(vocabulary->isa_predicate_root) &&
+           tv_root_zero(vocabulary->genls_predicate_root);
+}
+
+static bool tv_vocabulary_tables_zero(
+    const struct zcl_ontology_vocabulary_v1 *vocabulary)
+{
+    bool zero = true;
+    for (size_t i = 0; zero && i < ZCL_ONTOLOGY_VOCABULARY_TERM_COUNT; i++)
+        zero = tv_term_zero(&vocabulary->terms[i]);
+    for (size_t i = 0; zero && i < ZCL_ONTOLOGY_VOCABULARY_PREDICATE_COUNT;
+         i++)
+        zero = tv_predicate_zero(&vocabulary->predicates[i]);
+    for (size_t rule = 0; zero && rule < ZCL_ONTOLOGY_VOCABULARY_RULE_COUNT;
+         rule++) {
+        for (size_t node = 0;
+             zero && node < ZCL_ONTOLOGY_VOCABULARY_RULE_NODE_COUNT; node++)
+            zero = tv_formula_node_zero(
+                &vocabulary->rule_nodes[rule][node]);
+    }
+    return zero;
+}
+
+static bool tv_vocabulary_formulas_and_rules_zero(
+    const struct zcl_ontology_vocabulary_v1 *vocabulary)
+{
+    bool zero = true;
+    for (size_t i = 0; zero && i < ZCL_ONTOLOGY_VOCABULARY_FORMULA_COUNT;
+         i++)
+        zero = vocabulary->formula_order[i] == 0 &&
+               tv_root_zero(vocabulary->formula_roots[i]);
+    for (size_t i = 0; zero && i < sizeof(vocabulary->reserved_bytes); i++)
+        zero = vocabulary->reserved_bytes[i] == 0;
+    for (size_t i = 0; zero && i < ZCL_ONTOLOGY_VOCABULARY_RULE_COUNT; i++)
+        zero = tv_rule_zero(&vocabulary->rules[i]) &&
+               tv_root_zero(vocabulary->rule_roots[i]);
+    return zero;
+}
+
 static bool tv_vocabulary_zero(
     const struct zcl_ontology_vocabulary_v1 *vocabulary)
 {
-    if (vocabulary->schema_version != 0 || vocabulary->reserved != 0 ||
-        !tv_root_zero(vocabulary->vocabulary_root) ||
-        !tv_root_zero(vocabulary->evidence_root) ||
-        !tv_root_zero(vocabulary->universe_root) ||
-        !tv_root_zero(vocabulary->context_root) ||
-        !tv_root_zero(vocabulary->ontology_object_identity_root) ||
-        !tv_root_zero(vocabulary->ontology_type_identity_root) ||
-        !tv_root_zero(vocabulary->isa_predicate_root) ||
-        !tv_root_zero(vocabulary->genls_predicate_root))
+    if (!tv_vocabulary_header_zero(vocabulary) ||
+        !tv_vocabulary_tables_zero(vocabulary) ||
+        !tv_vocabulary_formulas_and_rules_zero(vocabulary))
         return false;
-    for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_TERM_COUNT; i++)
-        if (!tv_term_zero(&vocabulary->terms[i])) return false;
-    for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_PREDICATE_COUNT; i++)
-        if (!tv_predicate_zero(&vocabulary->predicates[i])) return false;
-    for (size_t rule = 0; rule < ZCL_ONTOLOGY_VOCABULARY_RULE_COUNT;
-         rule++) {
-        for (size_t node = 0;
-             node < ZCL_ONTOLOGY_VOCABULARY_RULE_NODE_COUNT; node++)
-            if (!tv_formula_node_zero(
-                    &vocabulary->rule_nodes[rule][node]))
-                return false;
-    }
-    for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_FORMULA_COUNT; i++) {
-        if (vocabulary->formula_order[i] != 0 ||
-            !tv_root_zero(vocabulary->formula_roots[i]))
-            return false;
-    }
-    for (size_t i = 0; i < sizeof(vocabulary->reserved_bytes); i++)
-        if (vocabulary->reserved_bytes[i] != 0) return false;
-    for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_RULE_COUNT; i++)
-        if (!tv_rule_zero(&vocabulary->rules[i]) ||
-            !tv_root_zero(vocabulary->rule_roots[i]))
-            return false;
     return true;
 }
 
