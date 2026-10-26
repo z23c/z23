@@ -1333,7 +1333,6 @@ engine/services/src/nullifier_backfill_service.c:nbf_reconcile_preloaded_nullifi
 engine/services/src/nullifier_backfill_service.c:nullifier_backfill_service_run:28
 engine/services/src/op_return_backfill_service.c:backfill_run_once_typed:36
 engine/services/src/op_return_backfill_service.c:zepoch_status_dump_state_json:17
-engine/services/src/operator_snapshot_service.c:operator_snapshot_classify:54
 engine/services/src/oracle_policy.c:oracle_policy_record_disagreement:20
 engine/services/src/overlay_transaction_intent_service.c:overlay_transaction_intent_commit:32
 engine/services/src/overlay_transaction_intent_service.c:overlay_transaction_intent_plan:25

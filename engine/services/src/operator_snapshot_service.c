@@ -151,6 +151,367 @@ const struct blocker_snapshot *operator_snapshot_dominant_blocker(
                                    capture->blocker_count);
 }
 
+enum operator_verdict_class {
+    OPERATOR_VERDICT_NONE = 0,
+    OPERATOR_VERDICT_HARD_BLOCKER,
+    OPERATOR_VERDICT_LATCH,
+    OPERATOR_VERDICT_CRITICAL,
+    OPERATOR_VERDICT_SECURITY,
+    OPERATOR_VERDICT_NOT_SERVING,
+    OPERATOR_VERDICT_MIRROR_GAP,
+    OPERATOR_VERDICT_TYPED_BLOCKER,
+    OPERATOR_VERDICT_CONDITION,
+    OPERATOR_VERDICT_NO_PEERS,
+    OPERATOR_VERDICT_NO_READY,
+    OPERATOR_VERDICT_CHAIN_VALUES,
+    OPERATOR_VERDICT_CHAIN_CHURN,
+    OPERATOR_VERDICT_CHAIN_BINDING,
+    OPERATOR_VERDICT_FRONTIER_ORDER,
+    OPERATOR_VERDICT_CHAIN_LINEAGE,
+    OPERATOR_VERDICT_PEER_STATE,
+    OPERATOR_VERDICT_DOWNLOAD,
+    OPERATOR_VERDICT_GAP_ACTIVE,
+    OPERATOR_VERDICT_GAP_IDLE,
+    OPERATOR_VERDICT_SYNC,
+    OPERATOR_VERDICT_INCOMPLETE,
+    OPERATOR_VERDICT_HEALTHY
+};
+
+/* Text for each class, in the original branch order. A null string leaves
+ * that verdict field unchanged. */
+struct operator_verdict_row {
+    enum operator_verdict_class kind;
+    const char *status;
+    const char *primary;
+    const char *next_action;
+    const char *next_command;
+    const char *next_command2;
+    bool healthy;
+};
+
+static const struct operator_verdict_row operator_verdict_rows[] = {
+    {
+        .kind = OPERATOR_VERDICT_HARD_BLOCKER,
+        .status = "operator_needed",
+        .primary = "typed_blocker_operator_needed",
+        .next_action = "inspect authoritative typed blockers",
+        .next_command = "z23 core sync blockers",
+        .next_command2 = "z23 dumpstate blocker",
+    },
+    {
+        .kind = OPERATOR_VERDICT_LATCH,
+        .status = "operator_needed",
+        .primary = "operator_needed",
+        .next_action = "inspect active conditions and operator latch",
+        .next_command = "z23 dumpstate condition_engine",
+        .next_command2 = "z23 getnodelog",
+    },
+    {
+        .kind = OPERATOR_VERDICT_CRITICAL,
+        .status = "operator_needed",
+        .primary = "critical_condition_unresolved",
+        .next_action = "inspect exhausted critical self-heal conditions",
+        .next_command = "z23 dumpstate condition_engine",
+        .next_command2 = "z23 getnodelog",
+    },
+    {
+        .kind = OPERATOR_VERDICT_SECURITY,
+        .status = "operator_needed",
+        .primary = "security_posture_review_required",
+        .next_action = "inspect security posture before serving",
+        .next_command = "z23 ops snapshot",
+        .next_command2 = "z23 dumpstate health",
+    },
+    {
+        .kind = OPERATOR_VERDICT_NOT_SERVING,
+        .status = "blocked",
+        .primary = "not_serving",
+        .next_action = "restore a published provable frontier",
+        .next_command = "z23 status",
+    },
+    {
+        .kind = OPERATOR_VERDICT_MIRROR_GAP,
+        .status = "degraded",
+        .primary = "mirror_same_height_hash_unavailable_or_mismatch",
+        .next_action =
+            "obtain exact same-height hashes and resolve the disagreement",
+        .next_command = "z23 core sync diagnose",
+        .next_command2 = "z23 dumpstate reducer_frontier",
+    },
+    {
+        .kind = OPERATOR_VERDICT_TYPED_BLOCKER,
+        .status = "degraded",
+        .primary = "typed_blocker_active",
+        .next_action = "inspect authoritative typed blockers",
+        .next_command = "z23 core sync blockers",
+    },
+    {
+        .kind = OPERATOR_VERDICT_CONDITION,
+        .status = "degraded",
+        .primary = "condition_active",
+        .next_action = "inspect active self-heal conditions",
+        .next_command = "z23 dumpstate condition_engine",
+    },
+    {
+        .kind = OPERATOR_VERDICT_NO_PEERS,
+        .status = "blocked",
+        .primary = "no_peers",
+        .next_action = "connect or inspect peers",
+        .next_command = "z23 core network peers list",
+    },
+    {
+        .kind = OPERATOR_VERDICT_NO_READY,
+        .status = "degraded",
+        .primary = "no_ready_peers",
+        .next_action = "restore at least one handshake-ready peer",
+        .next_command = "z23 core network peers list",
+    },
+    {
+        .kind = OPERATOR_VERDICT_CHAIN_VALUES,
+        .status = "degraded",
+        .primary = "chain_evidence_unavailable",
+        .next_action = "restore served and validated-header evidence",
+        .next_command = "z23 status",
+    },
+    {
+        .kind = OPERATOR_VERDICT_CHAIN_CHURN,
+        .status = "degraded",
+        .primary = "chain_evidence_churn",
+        .next_action = "retry after the frontier capture stabilizes",
+    },
+    {
+        .kind = OPERATOR_VERDICT_CHAIN_BINDING,
+        .status = "degraded",
+        .primary = "chain_binding_unavailable",
+        .next_action = "restore height/hash/work bindings",
+        .next_command = "z23 status",
+    },
+    {
+        .kind = OPERATOR_VERDICT_FRONTIER_ORDER,
+        .status = "degraded",
+        .primary = "chain_evidence_inconsistent",
+        .next_action = "inspect served/indexed/header ordering",
+        .next_command = "z23 core sync diagnose",
+    },
+    {
+        .kind = OPERATOR_VERDICT_CHAIN_LINEAGE,
+        .status = "degraded",
+        .primary = "chain_lineage_unproven",
+        .next_action = "inspect durable binding, ancestry, and chainwork",
+        .next_command = "z23 ops snapshot",
+    },
+    {
+        .kind = OPERATOR_VERDICT_PEER_STATE,
+        .status = "degraded",
+        .primary = "peer_state_unavailable",
+        .next_action = "restore a coherent peer snapshot",
+        .next_command = "z23 core network peers list",
+    },
+    {
+        .kind = OPERATOR_VERDICT_DOWNLOAD,
+        .status = "degraded",
+        .primary = "download_state_unavailable",
+        .next_action = "restore download-manager telemetry",
+        .next_command = "z23 core sync diagnose",
+    },
+    {
+        .kind = OPERATOR_VERDICT_GAP_ACTIVE,
+        .status = "catching_up",
+        .primary = "chain_gap",
+        .next_action = "wait for validated progress and recheck",
+        .next_command = "z23 core sync diagnose",
+        .next_command2 = "z23 getnodelog",
+    },
+    {
+        .kind = OPERATOR_VERDICT_GAP_IDLE,
+        .status = "degraded",
+        .primary = "download_queue_idle",
+        .next_action = "inspect sync/download progress",
+        .next_command = "z23 core sync diagnose",
+        .next_command2 = "z23 getnodelog",
+    },
+    {
+        .kind = OPERATOR_VERDICT_SYNC,
+        .status = "degraded",
+        .primary = "sync_not_at_tip",
+        .next_action = "inspect the raw sync state",
+        .next_command = "z23 core sync diagnose",
+    },
+    {
+        .kind = OPERATOR_VERDICT_INCOMPLETE,
+        .status = "degraded",
+        .primary = "snapshot_incomplete",
+    },
+    {
+        .kind = OPERATOR_VERDICT_HEALTHY,
+        .status = "healthy",
+        .primary = "none",
+        .next_action = "none",
+        .next_command = "",
+        .healthy = true,
+    },
+};
+
+static bool operator_snapshot_is_serving(const struct operator_capture *capture)
+{
+    return capture->chain.served.height_known &&
+           capture->chain.served.height > 0 &&
+           !capture->security_review_required;
+}
+
+static bool operator_snapshot_is_complete(
+    const struct operator_capture *capture,
+    bool chain_consistent,
+    bool peer_complete)
+{
+    return capture->critical_frontier_stable &&
+           operator_snapshot_chain_bindings_known(capture) &&
+           chain_consistent && peer_complete &&
+           capture->download_known && capture->sync_state_known &&
+           !operator_mirror_same_height_hash_gap(capture) &&
+           !capture->security_review_required;
+}
+
+static bool operator_snapshot_hard_blocker(
+    const struct operator_capture *capture)
+{
+    return capture->blocker_class_count[BLOCKER_PERMANENT] > 0 ||
+           capture->blocker_class_count[BLOCKER_RESOURCE] > 0;
+}
+
+static bool operator_snapshot_needs_operator(
+    const struct operator_capture *capture,
+    bool hard_typed_blocker)
+{
+    return capture->operator_latch_active || hard_typed_blocker ||
+           capture->conditions.unresolved_critical_count > 0 ||
+           capture->security_review_required;
+}
+
+static enum operator_verdict_class operator_snapshot_progress_class(
+    const struct operator_capture *capture,
+    const struct operator_verdict *verdict)
+{
+    if (verdict->gap > 0) {
+        if (capture->download_in_flight > 0 ||
+            capture->download_queued > 0)
+            return OPERATOR_VERDICT_GAP_ACTIVE;
+        return OPERATOR_VERDICT_GAP_IDLE;
+    }
+    if (!capture->sync_state_known || capture->sync_state != SYNC_AT_TIP)
+        return OPERATOR_VERDICT_SYNC;
+    if (!verdict->complete)
+        return OPERATOR_VERDICT_INCOMPLETE;
+    return OPERATOR_VERDICT_HEALTHY;
+}
+
+static enum operator_verdict_class operator_snapshot_evidence_class(
+    const struct operator_capture *capture,
+    const struct operator_verdict *verdict)
+{
+    if (!verdict->chain_values_known)
+        return OPERATOR_VERDICT_CHAIN_VALUES;
+    if (!capture->critical_frontier_stable)
+        return OPERATOR_VERDICT_CHAIN_CHURN;
+    if (!operator_snapshot_chain_bindings_known(capture))
+        return OPERATOR_VERDICT_CHAIN_BINDING;
+    if (!verdict->frontier_order_ok)
+        return OPERATOR_VERDICT_FRONTIER_ORDER;
+    if (!verdict->chain_consistent)
+        return OPERATOR_VERDICT_CHAIN_LINEAGE;
+    if (!capture->peers.available || capture->peers.stale ||
+        !capture->peers.direction_known || !capture->peers.ready_known)
+        return OPERATOR_VERDICT_PEER_STATE;
+    if (!capture->download_known)
+        return OPERATOR_VERDICT_DOWNLOAD;
+    return operator_snapshot_progress_class(capture, verdict);
+}
+
+static enum operator_verdict_class operator_snapshot_service_class(
+    const struct operator_capture *capture,
+    const struct operator_verdict *verdict)
+{
+    if (!verdict->serving)
+        return OPERATOR_VERDICT_NOT_SERVING;
+    if (operator_mirror_same_height_hash_gap(capture))
+        return OPERATOR_VERDICT_MIRROR_GAP;
+    if (capture->blocker_count > 0)
+        return OPERATOR_VERDICT_TYPED_BLOCKER;
+    if (capture->conditions.active_count > 0 ||
+        capture->conditions.unresolved_count > 0)
+        return OPERATOR_VERDICT_CONDITION;
+    if (capture->peers.available && capture->peers.peer_count == 0)
+        return OPERATOR_VERDICT_NO_PEERS;
+    if (capture->peers.available && capture->peers.ready_known &&
+        capture->peers.ready_count == 0)
+        return OPERATOR_VERDICT_NO_READY;
+    return operator_snapshot_evidence_class(capture, verdict);
+}
+
+static enum operator_verdict_class operator_snapshot_needed_class(
+    const struct operator_capture *capture,
+    const struct operator_verdict *verdict,
+    bool hard_typed_blocker)
+{
+    if (hard_typed_blocker)
+        return OPERATOR_VERDICT_HARD_BLOCKER;
+    if (capture->operator_latch_active)
+        return OPERATOR_VERDICT_LATCH;
+    if (capture->conditions.unresolved_critical_count > 0)
+        return OPERATOR_VERDICT_CRITICAL;
+    if (capture->security_review_required)
+        return OPERATOR_VERDICT_SECURITY;
+    return operator_snapshot_service_class(capture, verdict);
+}
+
+static const char *operator_snapshot_primary_override(
+    enum operator_verdict_class kind,
+    const struct operator_capture *capture,
+    const struct blocker_snapshot *dominant)
+{
+    if (kind == OPERATOR_VERDICT_HARD_BLOCKER && dominant)
+        return dominant->id;
+    if (kind == OPERATOR_VERDICT_LATCH &&
+        capture->operator_latch_detail[0])
+        return capture->operator_latch_detail;
+    if (kind == OPERATOR_VERDICT_SECURITY &&
+        capture->security_posture_status[0])
+        return capture->security_posture_status;
+    if (kind == OPERATOR_VERDICT_TYPED_BLOCKER && dominant)
+        return dominant->id;
+    return NULL;
+}
+
+static void operator_snapshot_apply_class(
+    struct operator_verdict *verdict,
+    enum operator_verdict_class kind,
+    const struct operator_capture *capture,
+    const struct blocker_snapshot *dominant)
+{
+    const char *primary = operator_snapshot_primary_override(
+        kind, capture, dominant);
+    int row_count = (int)(sizeof operator_verdict_rows /
+                          sizeof operator_verdict_rows[0]);
+    for (int i = 0; i < row_count; i++) {
+        const struct operator_verdict_row *row = &operator_verdict_rows[i];
+        if (row->kind != kind)
+            continue;
+        verdict->status = row->status;
+        verdict->primary = primary ? primary : row->primary;
+        if (kind == OPERATOR_VERDICT_SECURITY &&
+            capture->security_posture_next_action[0])
+            verdict->next_action = capture->security_posture_next_action;
+        else if (row->next_action)
+            verdict->next_action = row->next_action;
+        if (row->next_command)
+            verdict->next_command = row->next_command;
+        if (row->next_command2)
+            verdict->next_command2 = row->next_command2;
+        verdict->healthy = row->healthy;
+        return;
+    }
+}
+
 struct operator_verdict operator_snapshot_classify(
     const struct operator_capture *capture)
 {
@@ -166,9 +527,7 @@ struct operator_verdict operator_snapshot_classify(
     verdict.frontier_order_ok = operator_frontier_order_ok(capture);
     verdict.chain_consistent =
         chain_frontier_snapshot_consistent(&capture->chain);
-    verdict.serving = capture->chain.served.height_known &&
-                      capture->chain.served.height > 0 &&
-                      !capture->security_review_required;
+    verdict.serving = operator_snapshot_is_serving(capture);
     verdict.gap_known = capture->critical_frontier_stable &&
                         verdict.chain_consistent;
     if (verdict.gap_known) {
@@ -178,148 +537,15 @@ struct operator_verdict operator_snapshot_classify(
                             capture->chain.indexed.height;
     }
     bool peer_complete = operator_peer_snapshot_complete(capture);
-    verdict.complete = capture->critical_frontier_stable &&
-                       operator_snapshot_chain_bindings_known(capture) &&
-                       verdict.chain_consistent && peer_complete &&
-                       capture->download_known && capture->sync_state_known &&
-                       !operator_mirror_same_height_hash_gap(capture) &&
-                       !capture->security_review_required;
-    bool hard_typed_blocker =
-        capture->blocker_class_count[BLOCKER_PERMANENT] > 0 ||
-        capture->blocker_class_count[BLOCKER_RESOURCE] > 0;
-    verdict.operator_needed = capture->operator_latch_active ||
-                              hard_typed_blocker ||
-                              capture->conditions.unresolved_critical_count > 0 ||
-                              capture->security_review_required;
+    verdict.complete = operator_snapshot_is_complete(
+        capture, verdict.chain_consistent, peer_complete);
+    bool hard_typed_blocker = operator_snapshot_hard_blocker(capture);
+    verdict.operator_needed = operator_snapshot_needs_operator(
+        capture, hard_typed_blocker);
     const struct blocker_snapshot *dominant =
         operator_snapshot_dominant_blocker(capture);
-
-    if (hard_typed_blocker) {
-        verdict.status = "operator_needed";
-        verdict.primary = dominant ? dominant->id
-                                   : "typed_blocker_operator_needed";
-        verdict.next_action = "inspect authoritative typed blockers";
-        verdict.next_command = "z23 core sync blockers";
-        verdict.next_command2 = "z23 dumpstate blocker";
-    } else if (capture->operator_latch_active) {
-        verdict.status = "operator_needed";
-        verdict.primary = capture->operator_latch_detail[0]
-            ? capture->operator_latch_detail : "operator_needed";
-        verdict.next_action = "inspect active conditions and operator latch";
-        verdict.next_command = "z23 dumpstate condition_engine";
-        verdict.next_command2 = "z23 getnodelog";
-    } else if (capture->conditions.unresolved_critical_count > 0) {
-        verdict.status = "operator_needed";
-        verdict.primary = "critical_condition_unresolved";
-        verdict.next_action = "inspect exhausted critical self-heal conditions";
-        verdict.next_command = "z23 dumpstate condition_engine";
-        verdict.next_command2 = "z23 getnodelog";
-    } else if (capture->security_review_required) {
-        verdict.status = "operator_needed";
-        verdict.primary = capture->security_posture_status[0]
-            ? capture->security_posture_status
-            : "security_posture_review_required";
-        verdict.next_action = capture->security_posture_next_action[0]
-            ? capture->security_posture_next_action
-            : "inspect security posture before serving";
-        verdict.next_command = "z23 ops snapshot";
-        verdict.next_command2 = "z23 dumpstate health";
-    } else if (!verdict.serving) {
-        verdict.status = "blocked";
-        verdict.primary = "not_serving";
-        verdict.next_action = "restore a published provable frontier";
-        verdict.next_command = "z23 status";
-    } else if (operator_mirror_same_height_hash_gap(capture)) {
-        verdict.status = "degraded";
-        verdict.primary =
-            "mirror_same_height_hash_unavailable_or_mismatch";
-        verdict.next_action =
-            "obtain exact same-height hashes and resolve the disagreement";
-        verdict.next_command = "z23 core sync diagnose";
-        verdict.next_command2 = "z23 dumpstate reducer_frontier";
-    } else if (capture->blocker_count > 0) {
-        verdict.status = "degraded";
-        verdict.primary = dominant ? dominant->id : "typed_blocker_active";
-        verdict.next_action = "inspect authoritative typed blockers";
-        verdict.next_command = "z23 core sync blockers";
-    } else if (capture->conditions.active_count > 0 ||
-               capture->conditions.unresolved_count > 0) {
-        verdict.status = "degraded";
-        verdict.primary = "condition_active";
-        verdict.next_action = "inspect active self-heal conditions";
-        verdict.next_command = "z23 dumpstate condition_engine";
-    } else if (capture->peers.available && capture->peers.peer_count == 0) {
-        verdict.status = "blocked";
-        verdict.primary = "no_peers";
-        verdict.next_action = "connect or inspect peers";
-        verdict.next_command = "z23 core network peers list";
-    } else if (capture->peers.available && capture->peers.ready_known &&
-               capture->peers.ready_count == 0) {
-        verdict.status = "degraded";
-        verdict.primary = "no_ready_peers";
-        verdict.next_action = "restore at least one handshake-ready peer";
-        verdict.next_command = "z23 core network peers list";
-    } else if (!verdict.chain_values_known) {
-        verdict.status = "degraded";
-        verdict.primary = "chain_evidence_unavailable";
-        verdict.next_action = "restore served and validated-header evidence";
-        verdict.next_command = "z23 status";
-    } else if (!capture->critical_frontier_stable) {
-        verdict.status = "degraded";
-        verdict.primary = "chain_evidence_churn";
-        verdict.next_action = "retry after the frontier capture stabilizes";
-    } else if (!operator_snapshot_chain_bindings_known(capture)) {
-        verdict.status = "degraded";
-        verdict.primary = "chain_binding_unavailable";
-        verdict.next_action = "restore height/hash/work bindings";
-        verdict.next_command = "z23 status";
-    } else if (!verdict.frontier_order_ok) {
-        verdict.status = "degraded";
-        verdict.primary = "chain_evidence_inconsistent";
-        verdict.next_action = "inspect served/indexed/header ordering";
-        verdict.next_command = "z23 core sync diagnose";
-    } else if (!verdict.chain_consistent) {
-        verdict.status = "degraded";
-        verdict.primary = "chain_lineage_unproven";
-        verdict.next_action = "inspect durable binding, ancestry, and chainwork";
-        verdict.next_command = "z23 ops snapshot";
-    } else if (!capture->peers.available || capture->peers.stale ||
-               !capture->peers.direction_known ||
-               !capture->peers.ready_known) {
-        verdict.status = "degraded";
-        verdict.primary = "peer_state_unavailable";
-        verdict.next_action = "restore a coherent peer snapshot";
-        verdict.next_command = "z23 core network peers list";
-    } else if (!capture->download_known) {
-        verdict.status = "degraded";
-        verdict.primary = "download_state_unavailable";
-        verdict.next_action = "restore download-manager telemetry";
-        verdict.next_command = "z23 core sync diagnose";
-    } else if (verdict.gap > 0) {
-        bool active = capture->download_in_flight > 0 ||
-                      capture->download_queued > 0;
-        verdict.status = active ? "catching_up" : "degraded";
-        verdict.primary = active ? "chain_gap" : "download_queue_idle";
-        verdict.next_action = active
-            ? "wait for validated progress and recheck"
-            : "inspect sync/download progress";
-        verdict.next_command = "z23 core sync diagnose";
-        verdict.next_command2 = "z23 getnodelog";
-    } else if (!capture->sync_state_known ||
-               capture->sync_state != SYNC_AT_TIP) {
-        verdict.status = "degraded";
-        verdict.primary = "sync_not_at_tip";
-        verdict.next_action = "inspect the raw sync state";
-        verdict.next_command = "z23 core sync diagnose";
-    } else if (!verdict.complete) {
-        verdict.status = "degraded";
-        verdict.primary = "snapshot_incomplete";
-    } else {
-        verdict.status = "healthy";
-        verdict.primary = "none";
-        verdict.next_action = "none";
-        verdict.next_command = "";
-        verdict.healthy = true;
-    }
+    enum operator_verdict_class kind = operator_snapshot_needed_class(
+        capture, &verdict, hard_typed_blocker);
+    operator_snapshot_apply_class(&verdict, kind, capture, dominant);
     return verdict;
 }
