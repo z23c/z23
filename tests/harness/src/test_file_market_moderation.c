@@ -289,6 +289,55 @@ static bool mmt_rpc(struct rpc_table *t, const char *method,
     return ok;
 }
 
+/* True when obj's keyed field is the exact string value. */
+static bool mmt_kv_str_equals(const struct json_value *obj, const char *key,
+                              const char *value)
+{
+    const struct json_value *field = json_get(obj, key);
+    return field && field->type == JSON_STR &&
+           strcmp(json_get_str(field), value) == 0;
+}
+
+/* True when obj's keyed field is the JSON boolean false. */
+static bool mmt_kv_bool_false(const struct json_value *obj, const char *key)
+{
+    const struct json_value *v = json_get(obj, key);
+    return v && v->type == JSON_BOOL && !json_get_bool(v);
+}
+
+/* True when field is a JSON string of exactly 64 bytes. */
+static bool mmt_json_str_field_is_64(const struct json_value *field)
+{
+    return field && field->type == JSON_STR &&
+           strlen(json_get_str(field)) == 64;
+}
+
+/* True when token is a 64-byte string and is copied into dst. */
+static bool mmt_plan_token_copy(char *dst, size_t dst_size,
+                                const char *token)
+{
+    return token && strlen(token) == 64 &&
+           snprintf(dst, dst_size, "%s", token) == 64;
+}
+
+/* True when the fresh plan token differs from the stale one and is a
+ * 64-byte string; copies it into dst. */
+static bool mmt_replan_token_copy(char *dst, size_t dst_size,
+                                  const char *token, const char *stale)
+{
+    return token && strcmp(token, stale) != 0 &&
+           mmt_plan_token_copy(dst, dst_size, token);
+}
+
+/* True when the offer's listing row shows review_state. */
+static bool mmt_row_review_state_is(const struct json_value *listing,
+                                    const char *offer_id_hex,
+                                    const char *review_state)
+{
+    const char *rs = mmt_row_review(listing, offer_id_hex);
+    return rs && strcmp(rs, review_state) == 0;
+}
+
 static int test_mmt_view_filter(void)
 {
     int failures = 0;
@@ -338,9 +387,8 @@ static int test_mmt_view_filter(void)
         ASSERT_EQ(mmt_kv_int(&listing, "offer_count"), 0);
         ASSERT_EQ(mmt_kv_int(&listing, "hidden_count"), 3);
         ASSERT_EQ(mmt_offer_rows(&listing), 0);
-        const struct json_value *profile = json_get(&listing, "profile");
-        ASSERT(profile && profile->type == JSON_STR &&
-               strcmp(json_get_str(profile), "general-audience.v1") == 0);
+        ASSERT(mmt_kv_str_equals(&listing, "profile",
+                                 "general-audience.v1"));
         json_free(&listing);
 
         /* Curation marks: A reviewed_ok, B sensitive. Plan mints a token
@@ -355,17 +403,13 @@ static int test_mmt_view_filter(void)
          * into the JSON value does not survive a json_free. */
         const char *token_a = mmt_kv_str(&mark, "plan_token");
         char tok_a[65];
-        ASSERT(token_a && strlen(token_a) == 64 &&
-               snprintf(tok_a, sizeof(tok_a), "%s", token_a) == 64);
+        ASSERT(mmt_plan_token_copy(tok_a, sizeof(tok_a), token_a));
         ASSERT(!mmt_kv_bool(&mark, "committed"));
         ASSERT(strcmp(mmt_kv_str(&mark, "status"), "planned") == 0);
         ASSERT(strcmp(mmt_kv_str(&mark, "previous_review_state"),
                       "unreviewed") == 0);
-        const struct json_value *local = json_get(&mark, "local_only");
-        ASSERT(local && local->type == JSON_BOOL && json_get_bool(local));
-        const struct json_value *gossiped = json_get(&mark, "gossiped");
-        ASSERT(gossiped && gossiped->type == JSON_BOOL &&
-               !json_get_bool(gossiped));
+        ASSERT(mmt_kv_bool(&mark, "local_only"));
+        ASSERT(mmt_kv_bool_false(&mark, "gossiped"));
         /* The plan changed nothing: A is still unreviewed underneath. */
         ASSERT(market_moderation_review_state_for_offer_id(offer_a.offer_id) ==
                MARKET_REVIEW_UNREVIEWED);
@@ -437,9 +481,8 @@ static int test_mmt_view_filter(void)
         ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
         const char *stale_token = mmt_kv_str(&mark, "plan_token");
         char tok_c_stale[65];
-        ASSERT(stale_token && strlen(stale_token) == 64 &&
-               snprintf(tok_c_stale, sizeof(tok_c_stale), "%s",
-                        stale_token) == 64);
+        ASSERT(mmt_plan_token_copy(tok_c_stale, sizeof(tok_c_stale),
+                                   stale_token));
         json_free(&mark);
         ASSERT(market_moderation_set_review_state(
                    offer_c.offer_id, MARKET_REVIEW_SENSITIVE).ok);
@@ -454,10 +497,8 @@ static int test_mmt_view_filter(void)
         ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
         const char *fresh_token = mmt_kv_str(&mark, "plan_token");
         char tok_c_fresh[65];
-        ASSERT(fresh_token && strlen(fresh_token) == 64 &&
-               strcmp(fresh_token, tok_c_stale) != 0 &&
-               snprintf(tok_c_fresh, sizeof(tok_c_fresh), "%s",
-                        fresh_token) == 64);
+        ASSERT(mmt_replan_token_copy(tok_c_fresh, sizeof(tok_c_fresh),
+                                     fresh_token, tok_c_stale));
         ASSERT(strcmp(mmt_kv_str(&mark, "previous_review_state"),
                       "sensitive") == 0);
         snprintf(params, sizeof(params),
@@ -478,9 +519,8 @@ static int test_mmt_view_filter(void)
         ASSERT(mmt_rpc(&table, "zmarket_review_set", params, &mark));
         const char *race_token = mmt_kv_str(&mark, "plan_token");
         char tok_c_race[65];
-        ASSERT(race_token && strlen(race_token) == 64 &&
-               snprintf(tok_c_race, sizeof(tok_c_race), "%s", race_token) ==
-                   64);
+        ASSERT(mmt_plan_token_copy(tok_c_race, sizeof(tok_c_race),
+                                   race_token));
         json_free(&mark);
         struct mmt_review_interleave interleave = {
             .state = MARKET_REVIEW_SENSITIVE,
@@ -510,8 +550,7 @@ static int test_mmt_view_filter(void)
         ASSERT_EQ(mmt_kv_int(&listing, "offer_count"), 1);
         ASSERT_EQ(mmt_kv_int(&listing, "hidden_count"), 2);
         ASSERT_EQ(mmt_offer_rows(&listing), 1);
-        const char *rs = mmt_row_review(&listing, id_a);
-        ASSERT(rs && strcmp(rs, "reviewed_ok") == 0);
+        ASSERT(mmt_row_review_state_is(&listing, id_a, "reviewed_ok"));
         json_free(&listing);
 
         /* Open view: everything ingested, annotated per row. */
@@ -519,12 +558,9 @@ static int test_mmt_view_filter(void)
         ASSERT_EQ(mmt_kv_int(&listing, "offer_count"), 3);
         ASSERT_EQ(mmt_kv_int(&listing, "hidden_count"), 0);
         ASSERT_EQ(mmt_offer_rows(&listing), 3);
-        rs = mmt_row_review(&listing, id_a);
-        ASSERT(rs && strcmp(rs, "reviewed_ok") == 0);
-        rs = mmt_row_review(&listing, id_b);
-        ASSERT(rs && strcmp(rs, "sensitive") == 0);
-        rs = mmt_row_review(&listing, id_c);
-        ASSERT(rs && strcmp(rs, "unreviewed") == 0);
+        ASSERT(mmt_row_review_state_is(&listing, id_a, "reviewed_ok"));
+        ASSERT(mmt_row_review_state_is(&listing, id_b, "sensitive"));
+        ASSERT(mmt_row_review_state_is(&listing, id_c, "unreviewed"));
         json_free(&listing);
         ASSERT(mmt_rpc(&table, "zmarket_list", "[{\"profile\":\"open-view\"}]",
                        &listing));
@@ -546,9 +582,8 @@ static int test_mmt_view_filter(void)
         ASSERT_EQ(mmt_kv_int(rc, "unreviewed"), 1);
         ASSERT_EQ(mmt_kv_int(rc, "reviewed_ok"), 1);
         ASSERT_EQ(mmt_kv_int(rc, "sensitive"), 1);
-        const struct json_value *ap = json_get(&status, "active_profile");
-        ASSERT(ap && ap->type == JSON_STR &&
-               strcmp(json_get_str(ap), "general-audience.v1") == 0);
+        ASSERT(mmt_kv_str_equals(&status, "active_profile",
+                                 "general-audience.v1"));
         json_free(&status);
 
         /* Ingest unaffected: every hidden offer is still stored. */
@@ -574,11 +609,8 @@ static int test_mmt_view_filter(void)
         ASSERT(mmt_rpc(&table, "zmarket_moderation_profile_set",
                        "[\"open-view\",\"plan\"]", &plan));
         const struct json_value *token = json_get(&plan, "plan_token");
-        ASSERT(token && token->type == JSON_STR &&
-               strlen(json_get_str(token)) == 64);
-        const struct json_value *committed = json_get(&plan, "committed");
-        ASSERT(committed && committed->type == JSON_BOOL &&
-               !json_get_bool(committed));
+        ASSERT(mmt_json_str_field_is_64(token));
+        ASSERT(mmt_kv_bool_false(&plan, "committed"));
         char commit_params[256];
         snprintf(commit_params, sizeof(commit_params),
                  "[\"open-view\",\"commit\",\"%s\"]", json_get_str(token));
@@ -592,9 +624,7 @@ static int test_mmt_view_filter(void)
         json_free(&commit);
         ASSERT(mmt_rpc(&table, "zmarket_moderation_profile_set",
                        commit_params, &commit));
-        committed = json_get(&commit, "committed");
-        ASSERT(committed && committed->type == JSON_BOOL &&
-               json_get_bool(committed));
+        ASSERT(mmt_kv_bool(&commit, "committed"));
         json_free(&commit);
         ASSERT(market_moderation_active_profile() ==
                MARKET_MODERATION_PROFILE_OPEN);
@@ -625,9 +655,8 @@ static int test_mmt_view_filter(void)
         struct json_value dump;
         json_init(&dump);
         ASSERT(market_moderation_dump_state_json(&dump, NULL));
-        const struct json_value *dap = json_get(&dump, "active_profile");
-        ASSERT(dap && dap->type == JSON_STR &&
-               strcmp(json_get_str(dap), "general-audience.v1") == 0);
+        ASSERT(mmt_kv_str_equals(&dump, "active_profile",
+                                 "general-audience.v1"));
         const struct json_value *drc = json_get(&dump, "review_counts");
         ASSERT(drc && drc->type == JSON_OBJ &&
                mmt_kv_int(drc, "sensitive") == 1);
