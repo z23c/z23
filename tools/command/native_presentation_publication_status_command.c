@@ -149,12 +149,14 @@ static bool npps_publication_facts_unusable(
 
 static bool npps_download_complete(const struct json_value *download,
                                    bool download_found,
-                                   const char *download_state)
+                                   const char *download_state,
+                                   int64_t *fetched_bytes)
 {
     int64_t present_chunks = npps_int(download, "present_chunks");
     int64_t total_chunks = npps_int(download, "total_chunks");
     int64_t present_bytes = npps_int(download, "present_bytes");
     int64_t total_bytes = npps_int(download, "total_bytes");
+    *fetched_bytes = npps_int(download, "fetched_bytes");
     return download_found && download_state &&
         strcmp(download_state, "complete") == 0 && total_chunks > 0 &&
         present_chunks == total_chunks && total_bytes > 0 &&
@@ -250,9 +252,10 @@ bool zcl_native_presentation_publication_status_model_from_facts(
     bool download_found = npps_bool(package, "download_found");
     const struct json_value *download = npps_object(package, "download");
     const char *download_state = npps_str(download, "state");
-    int64_t fetched_bytes = npps_int(download, "fetched_bytes");
+    int64_t fetched_bytes = 0;
     bool download_complete = npps_download_complete(download, download_found,
-                                                    download_state);
+                                                    download_state,
+                                                    &fetched_bytes);
     bool exact_fetch = local_complete && peer_discovered && download_complete &&
                        fetched_bytes > 0;
     bool download_failed = npps_download_failed(download_found, download_state);
