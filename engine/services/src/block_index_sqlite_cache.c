@@ -36,8 +36,8 @@ static int bind_and_step_block_index_cache_row(sqlite3_stmt *ins,
 {
     struct bind_col { int col; bool is_blob; int val; const void *blob; };
     const struct bind_col cols[] = {
-        {1,  false, 0,                       p->phashBlock->data},
-        {2,  false, 0,                       prev},
+        {1,  true,  0,                       p->phashBlock->data},
+        {2,  true,  0,                       prev},
         {3,  false, p->nHeight,              NULL},
         {4,  false, (int)p->nBits,           NULL},
         {5,  false, (int)p->nTime,           NULL},
