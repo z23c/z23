@@ -51,32 +51,143 @@ static void seed_uniform(struct block_policy_estimator *e,
     }
 }
 
+/* Helper: report one check's outcome and count failures. */
+static void report_check_outcome(bool ok, int *failures)
+{
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
+}
+
+/* Helper: check that all-zero fees produce no estimate. */
+static bool zero_fees_produce_no_estimate(void)
+{
+    struct fee_rate min_fee = { .satoshis_per_k = 1000 };
+    struct block_policy_estimator est;
+    block_policy_estimator_init(&est, &min_fee);
+
+    /* Process 10 blocks with zero-fee txs */
+    for (unsigned int h = 1; h <= 10; h++) {
+        struct mempool_entry e = make_entry(0, 250, h - 1);
+        int uid = (int)h;
+        memcpy(e.tx.hash.data + 16, &uid, sizeof(uid));
+        policy_process_transaction(&est, &e, true);
+        policy_process_block(&est, h, &e, 1, true);
+    }
+
+    struct fee_rate r = policy_estimate_fee(&est, 2);
+    bool ok = (r.satoshis_per_k == 0);  /* no fee data → no estimate */
+
+    block_policy_estimator_free(&est);
+    return ok;
+}
+
+/* Helper: check the estimator on a bimodal fee distribution. */
+static bool bimodal_distribution_produces_estimate(void)
+{
+    struct fee_rate min_fee = { .satoshis_per_k = 1000 };
+    struct block_policy_estimator est;
+    block_policy_estimator_init(&est, &min_fee);
+
+    for (unsigned int h = 1; h <= 20; h++) {
+        struct mempool_entry entries[20];
+        for (int i = 0; i < 20; i++) {
+            /* Half at 1000 sat/kB, half at 1000000 sat/kB */
+            CAmount fee = (i < 10) ? 250 : 250000;  /* for 250-byte tx */
+            entries[i] = make_entry(fee, 250, h - 1);
+            int uid = (int)h * 1000 + i;
+            memcpy(entries[i].tx.hash.data + 16, &uid, sizeof(uid));
+            policy_process_transaction(&est, &entries[i], true);
+        }
+        policy_process_block(&est, h, entries, 20, true);
+    }
+
+    struct fee_rate r = policy_estimate_fee(&est, 2);
+    /* With mixed data the estimator should produce some valid estimate */
+    bool ok = (r.satoshis_per_k >= 0);
+
+    block_policy_estimator_free(&est);
+    return ok;
+}
+
+/* Helper: check that empty blocks do not crash and give no estimate. */
+static bool empty_blocks_produce_no_estimate(void)
+{
+    struct fee_rate min_fee = { .satoshis_per_k = 1000 };
+    struct block_policy_estimator est;
+    block_policy_estimator_init(&est, &min_fee);
+
+    /* Process 20 empty blocks */
+    for (unsigned int h = 1; h <= 20; h++)
+        policy_process_block(&est, h, NULL, 0, true);
+
+    struct fee_rate r = policy_estimate_fee(&est, 2);
+    bool ok = (r.satoshis_per_k == 0);  /* no data → no estimate */
+
+    block_policy_estimator_free(&est);
+    return ok;
+}
+
+/* Helper: check that decay converges old data toward zero. */
+static bool decay_converges_old_data_to_zero(void)
+{
+    struct fee_rate min_fee = { .satoshis_per_k = 1000 };
+    struct block_policy_estimator est;
+    block_policy_estimator_init(&est, &min_fee);
+
+    /* Seed with high-fee data */
+    seed_uniform(&est, 50000, 250, 20, 1, 10);
+
+    struct fee_rate r1 = policy_estimate_fee(&est, 2);
+
+    /* Process 200 empty blocks — decay erodes old data */
+    for (unsigned int h = 11; h <= 210; h++)
+        policy_process_block(&est, h, NULL, 0, true);
+
+    struct fee_rate r2 = policy_estimate_fee(&est, 2);
+
+    /* After many empty blocks, estimate should have decayed toward zero
+     * or become unavailable (-1 → 0). */
+    bool ok = (r2.satoshis_per_k <= r1.satoshis_per_k);
+
+    block_policy_estimator_free(&est);
+    return ok;
+}
+
+/* Helper: check monotonicity of estimates across conf_targets. */
+static bool estimates_are_monotonic_across_targets(void)
+{
+    struct fee_rate min_fee = { .satoshis_per_k = 1000 };
+    struct block_policy_estimator est;
+    block_policy_estimator_init(&est, &min_fee);
+
+    seed_uniform(&est, 5000, 250, 30, 1, 30);
+
+    bool ok = true;
+    CAmount prev = 0;
+    for (int t = 1; t <= (int)MAX_BLOCK_CONFIRMS; t++) {
+        struct fee_rate r = policy_estimate_fee(&est, t);
+        if (t == 1) {
+            prev = r.satoshis_per_k;
+        } else if (r.satoshis_per_k > 0 && prev > 0) {
+            /* Higher target should need <= fee */
+            if (r.satoshis_per_k > prev * 2) {
+                ok = false;  /* allow some tolerance, not strict */
+                break;
+            }
+            prev = r.satoshis_per_k;
+        }
+    }
+
+    block_policy_estimator_free(&est);
+    return ok;
+}
+
 int test_fee_estimation(void)
 {
     int failures = 0;
 
     /* ── 1. All-zero fees produce no estimate ─────────────── */
     printf("fee estimation: all-zero fees produce no estimate... ");
-    {
-        struct fee_rate min_fee = { .satoshis_per_k = 1000 };
-        struct block_policy_estimator est;
-        block_policy_estimator_init(&est, &min_fee);
-
-        /* Process 10 blocks with zero-fee txs */
-        for (unsigned int h = 1; h <= 10; h++) {
-            struct mempool_entry e = make_entry(0, 250, h - 1);
-            int uid = (int)h;
-            memcpy(e.tx.hash.data + 16, &uid, sizeof(uid));
-            policy_process_transaction(&est, &e, true);
-            policy_process_block(&est, h, &e, 1, true);
-        }
-
-        struct fee_rate r = policy_estimate_fee(&est, 2);
-        bool ok = (r.satoshis_per_k == 0);  /* no fee data → no estimate */
-
-        block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    report_check_outcome(zero_fees_produce_no_estimate(), &failures);
 
     /* ── 2. MAX_MONEY fee does not overflow ───────────────── */
     printf("fee estimation: MAX_MONEY fee does not overflow... ");
@@ -92,7 +203,7 @@ int test_fee_estimation(void)
         bool ok = (r.satoshis_per_k >= 0);
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     /* ── 3. Single-satoshi fees ───────────────────────────── */
@@ -109,36 +220,12 @@ int test_fee_estimation(void)
         bool ok = (r.satoshis_per_k >= 0);
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     /* ── 4. Bimodal distribution: half low, half high ─────── */
     printf("fee estimation: bimodal fee distribution... ");
-    {
-        struct fee_rate min_fee = { .satoshis_per_k = 1000 };
-        struct block_policy_estimator est;
-        block_policy_estimator_init(&est, &min_fee);
-
-        for (unsigned int h = 1; h <= 20; h++) {
-            struct mempool_entry entries[20];
-            for (int i = 0; i < 20; i++) {
-                /* Half at 1000 sat/kB, half at 1000000 sat/kB */
-                CAmount fee = (i < 10) ? 250 : 250000;  /* for 250-byte tx */
-                entries[i] = make_entry(fee, 250, h - 1);
-                int uid = (int)h * 1000 + i;
-                memcpy(entries[i].tx.hash.data + 16, &uid, sizeof(uid));
-                policy_process_transaction(&est, &entries[i], true);
-            }
-            policy_process_block(&est, h, entries, 20, true);
-        }
-
-        struct fee_rate r = policy_estimate_fee(&est, 2);
-        /* With mixed data the estimator should produce some valid estimate */
-        bool ok = (r.satoshis_per_k >= 0);
-
-        block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    report_check_outcome(bimodal_distribution_produces_estimate(), &failures);
 
     /* ── 5. Spam flood: 100 blocks of min-fee txs then 10 normal ── */
     printf("fee estimation: spam flood followed by normal blocks... ");
@@ -159,7 +246,7 @@ int test_fee_estimation(void)
         bool ok = (r.satoshis_per_k >= 0);
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     /* ── 6. Sudden fee spike ──────────────────────────────── */
@@ -180,26 +267,12 @@ int test_fee_estimation(void)
         bool ok = (r.satoshis_per_k >= 0);
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     /* ── 7. Empty blocks do not crash ─────────────────────── */
     printf("fee estimation: empty blocks do not crash... ");
-    {
-        struct fee_rate min_fee = { .satoshis_per_k = 1000 };
-        struct block_policy_estimator est;
-        block_policy_estimator_init(&est, &min_fee);
-
-        /* Process 20 empty blocks */
-        for (unsigned int h = 1; h <= 20; h++)
-            policy_process_block(&est, h, NULL, 0, true);
-
-        struct fee_rate r = policy_estimate_fee(&est, 2);
-        bool ok = (r.satoshis_per_k == 0);  /* no data → no estimate */
-
-        block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    report_check_outcome(empty_blocks_produce_no_estimate(), &failures);
 
     /* ── 8. Duplicate block heights are rejected ──────────── */
     printf("fee estimation: duplicate block heights rejected... ");
@@ -216,34 +289,12 @@ int test_fee_estimation(void)
         bool ok = (est.best_seen_height == bsh);
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     /* ── 9. Decay convergence: old data fades ─────────────── */
     printf("fee estimation: decay converges old data to zero... ");
-    {
-        struct fee_rate min_fee = { .satoshis_per_k = 1000 };
-        struct block_policy_estimator est;
-        block_policy_estimator_init(&est, &min_fee);
-
-        /* Seed with high-fee data */
-        seed_uniform(&est, 50000, 250, 20, 1, 10);
-
-        struct fee_rate r1 = policy_estimate_fee(&est, 2);
-
-        /* Process 200 empty blocks — decay erodes old data */
-        for (unsigned int h = 11; h <= 210; h++)
-            policy_process_block(&est, h, NULL, 0, true);
-
-        struct fee_rate r2 = policy_estimate_fee(&est, 2);
-
-        /* After many empty blocks, estimate should have decayed toward zero
-         * or become unavailable (-1 → 0). */
-        bool ok = (r2.satoshis_per_k <= r1.satoshis_per_k);
-
-        block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    report_check_outcome(decay_converges_old_data_to_zero(), &failures);
 
     /* ── 10. Varying tx sizes produce consistent per-kB rates ── */
     printf("fee estimation: varying tx sizes consistent per-kB... ");
@@ -272,7 +323,7 @@ int test_fee_estimation(void)
         bool ok = (r.satoshis_per_k >= 0);
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     /* ── 11. High conf_target with sparse data ────────────── */
@@ -289,37 +340,12 @@ int test_fee_estimation(void)
         bool ok = (r.satoshis_per_k >= 0);  /* must not crash */
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     /* ── 12. Monotonicity: higher target → lower or equal fee ── */
     printf("fee estimation: monotonicity across targets... ");
-    {
-        struct fee_rate min_fee = { .satoshis_per_k = 1000 };
-        struct block_policy_estimator est;
-        block_policy_estimator_init(&est, &min_fee);
-
-        seed_uniform(&est, 5000, 250, 30, 1, 30);
-
-        bool ok = true;
-        CAmount prev = 0;
-        for (int t = 1; t <= (int)MAX_BLOCK_CONFIRMS; t++) {
-            struct fee_rate r = policy_estimate_fee(&est, t);
-            if (t == 1) {
-                prev = r.satoshis_per_k;
-            } else if (r.satoshis_per_k > 0 && prev > 0) {
-                /* Higher target should need <= fee */
-                if (r.satoshis_per_k > prev * 2) {
-                    ok = false;  /* allow some tolerance, not strict */
-                    break;
-                }
-                prev = r.satoshis_per_k;
-            }
-        }
-
-        block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    report_check_outcome(estimates_are_monotonic_across_targets(), &failures);
 
     /* ── 13. Remove-then-re-add same hash ─────────────────── */
     printf("fee estimation: remove and re-add same tx hash... ");
@@ -340,7 +366,7 @@ int test_fee_estimation(void)
         bool ok = true;  /* must not crash or double-count */
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     /* ── 14. Negative fee (invalid) does not corrupt state ── */
@@ -359,7 +385,7 @@ int test_fee_estimation(void)
         bool ok = (r.satoshis_per_k >= 0);
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     /* ── 15. Rapid block height jumps ─────────────────────── */
@@ -378,7 +404,7 @@ int test_fee_estimation(void)
         bool ok = (r.satoshis_per_k >= 0);
 
         block_policy_estimator_free(&est);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        report_check_outcome(ok, &failures);
     }
 
     return failures;
