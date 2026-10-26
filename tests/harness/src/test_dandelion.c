@@ -21,7 +21,7 @@ static struct uint256 make_test_hash(uint8_t seed)
     return h;
 }
 
-int test_dandelion(void)
+static int check_dandelion_init_and_stem_decision(void)
 {
     int failures = 0;
 
@@ -95,6 +95,13 @@ int test_dandelion(void)
         dandelion_free(&ds);
     }
 
+    return failures;
+}
+
+static int check_dandelion_stem_peer_selection(void)
+{
+    int failures = 0;
+
     /* ── get_stem_peer round-robin ─────────────────────────────── */
     printf("dandelion_get_stem_peer round-robin... ");
     {
@@ -153,6 +160,13 @@ int test_dandelion(void)
         dandelion_free(&ds);
     }
 
+    return failures;
+}
+
+static int check_dandelion_stempool_membership(void)
+{
+    int failures = 0;
+
     /* ── stempool add / contains / remove ──────────────────────── */
     printf("dandelion_stempool basic ops... ");
     {
@@ -208,6 +222,13 @@ int test_dandelion(void)
         }
         dandelion_free(&ds);
     }
+
+    return failures;
+}
+
+static int check_dandelion_stempool_lifetime(void)
+{
+    int failures = 0;
 
     /* ── stempool embargo expiry ───────────────────────────────── */
     printf("dandelion_stempool embargo check... ");
@@ -272,6 +293,13 @@ int test_dandelion(void)
         dandelion_free(&ds);
     }
 
+    return failures;
+}
+
+static int check_dandelion_null_and_stats(void)
+{
+    int failures = 0;
+
     /* ── NULL safety ───────────────────────────────────────────── */
     printf("dandelion NULL safety... ");
     {
@@ -311,6 +339,13 @@ int test_dandelion(void)
         dandelion_free(&ds);
     }
 
+    return failures;
+}
+
+static int check_dandelion_shuffle_entropy(void)
+{
+    int failures = 0;
+
     /* ── stem shuffle is non-deterministic across calls ─────
      *
      * Each call draws fresh entropy, so back-to-back shuffles differ with
@@ -338,6 +373,28 @@ int test_dandelion(void)
         }
     }
 
+    return failures;
+}
+
+/* One 10k batch of the per-tx stem coin. Returns the stem count, or -1
+ * when the cryptographic RNG fails. The caller prints that failure. */
+static int count_dandelion_stem_coin_trials(int trials)
+{
+    int stem_count = 0;
+
+    for (int i = 0; i < trials; i++) {
+        bool stem;
+        if (!dandelion_test_should_stem_coin(&stem))
+            return -1;
+        if (stem) stem_count++;
+    }
+    return stem_count;
+}
+
+static int check_dandelion_fluff_coin_band(void)
+{
+    int failures = 0;
+
     /* ── per-tx fluff coin-flip is statistically uniform ────
      *
      * p_stem = 0.9, n = 10000: mean 9000, sigma 30, band [8910, 9090]
@@ -351,18 +408,13 @@ int test_dandelion(void)
         bool rng_ok = true;
         bool in_band = false;
         for (int a = 0; a < attempts && !in_band; a++) {
-            int stem_count = 0;
+            int stem_count;
             rng_ok = true;
-            for (int i = 0; i < trials; i++) {
-                bool stem;
-                if (!dandelion_test_should_stem_coin(&stem)) {
-                    rng_ok = false;
-                    break;
-                }
-                if (stem) stem_count++;
-            }
-            if (!rng_ok)
+            stem_count = count_dandelion_stem_coin_trials(trials);
+            if (stem_count < 0) {
+                rng_ok = false;
                 break;
+            }
             last_count = stem_count;
             if (stem_count >= 8910 && stem_count <= 9090)
                 in_band = true;
@@ -378,5 +430,19 @@ int test_dandelion(void)
         }
     }
 
+    return failures;
+}
+
+int test_dandelion(void)
+{
+    int failures = 0;
+
+    failures += check_dandelion_init_and_stem_decision();
+    failures += check_dandelion_stem_peer_selection();
+    failures += check_dandelion_stempool_membership();
+    failures += check_dandelion_stempool_lifetime();
+    failures += check_dandelion_null_and_stats();
+    failures += check_dandelion_shuffle_entropy();
+    failures += check_dandelion_fluff_coin_band();
     return failures;
 }
