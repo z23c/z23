@@ -205,56 +205,79 @@ static void zdsc_push_roots(struct json_value *data,
                            build->scan->votes_accepted);
 }
 
-void zcl_native_handle_zcode_science_discover(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static bool zdsc_valid_discover_filters(const char *search,
+                                        const char *category,
+                                        const char *hardware,
+                                        struct zcl_command_reply *reply,
+                                        const char *leaf)
 {
-    if (!request || !reply) return;
-    const char *leaf = "zcode.science.discover";
-    const char *search = zdsc_str(request->input, "search");
-    const char *category = zdsc_str(request->input, "category");
-    const char *hardware = zdsc_str(request->input, "hardware");
-    const char *genesis_hex = zdsc_str(request->input, "network_genesis_root");
     if (search && strlen(search) > ZDSC_SEARCH_MAX) {
         zdsc_fail(reply, "BAD_SEARCH",
                   "search must be at most 96 characters", leaf);
-        return;
+        return false;
     }
     if (category && category[0] && strcmp(category, "active") != 0 &&
         strcmp(category, "expired") != 0 &&
         strcmp(category, "retracted") != 0) {
         zdsc_fail(reply, "BAD_CATEGORY",
                   "category must be one of active, expired, retracted", leaf);
-        return;
+        return false;
     }
     if (hardware && hardware[0] && strlen(hardware) != 64) {
         zdsc_fail(reply, "BAD_HARDWARE",
                   "hardware must be a 64-hex hardware profile root", leaf);
-        return;
+        return false;
     }
-    uint8_t genesis[32];
-    const uint8_t *genesis_p = NULL;
-    if (genesis_hex && genesis_hex[0]) {
-        if (!zdsc_hex32(genesis_hex, genesis)) {
-            zdsc_fail(reply, "BAD_IDENTITY",
-                      "network_genesis_root must be 64 lowercase hex "
-                      "characters, e.g. 3f9a... (32 bytes hex-encoded)",
-                      leaf);
-            return;
-        }
-        genesis_p = genesis;
-    }
-    int64_t max = zdsc_int(request->input, "max", ZDSC_RENDER_DEFAULT);
-    if (max <= 0 || max > ZDSC_RENDER_MAX)
-        max = ZDSC_RENDER_MAX;
-    int64_t now = zdsc_now(request->input);
-    char ws[ZDSC_PATH_MAX];
-    const char *workspace = zdsc_workspace(request->input, ws, sizeof(ws));
-    if (!workspace) {
-        zdsc_fail(reply, "WORKSPACE_NOT_FOUND",
-                  "workspace must name an existing directory", leaf);
-        return;
-    }
+    return true;
+}
 
+static bool zdsc_parse_genesis_root(const char *genesis_hex,
+                                    uint8_t genesis[32],
+                                    const uint8_t **genesis_out,
+                                    struct zcl_command_reply *reply,
+                                    const char *leaf)
+{
+    if (!genesis_hex || !genesis_hex[0]) {
+        *genesis_out = NULL;
+        return true;
+    }
+    if (!zdsc_hex32(genesis_hex, genesis)) {
+        zdsc_fail(reply, "BAD_IDENTITY",
+                  "network_genesis_root must be 64 lowercase hex "
+                  "characters, e.g. 3f9a... (32 bytes hex-encoded)",
+                  leaf);
+        return false;
+    }
+    *genesis_out = genesis;
+    return true;
+}
+
+static int64_t zdsc_render_cap(int64_t max)
+{
+    if (max <= 0 || max > ZDSC_RENDER_MAX)
+        return ZDSC_RENDER_MAX;
+    return max;
+}
+
+static void zdsc_discover_filter_root(const char *search,
+                                      const char *category,
+                                      const char *hardware,
+                                      const uint8_t *genesis,
+                                      uint8_t filter_root[32])
+{
+    vcs_zcode_discovery_filter_policy_root(
+        search, (category && category[0]) ? category : NULL,
+        (hardware && hardware[0]) ? hardware : NULL, genesis, filter_root);
+}
+
+static bool zdsc_study_allowlist(struct sqlite3 *db, struct node_db *ndb,
+                                 const char *search, const char *category,
+                                 int64_t now,
+                                 uint8_t (**allowlist_out)[32],
+                                 size_t *allow_count_out,
+                                 struct zcl_command_reply *reply,
+                                 const char *leaf)
+{
     /* Filter FIRST, over the SQL projection: search (root/hypothesis
      * substring) and category (projection state at now). */
     char search_like[ZDSC_SEARCH_MAX * 2 + 4];
@@ -262,26 +285,20 @@ void zcl_native_handle_zcode_science_discover(
         zdsc_search_like(search, search_like, sizeof(search_like))
             ? search_like
             : NULL;
-    struct node_db ndb = {0};
-    struct sqlite3 *db = NULL;
-    if (!zcl_native_node_db_require_readonly(
-            zdsc_datadir(request->input), reply, "the science projection",
-            &db, &ndb))
-        return;
     struct db_zcode_science_entry *rows = zcl_malloc(
         sizeof(*rows) * ZDSC_STUDY_FILTER_MAX, "zcode.science.discover.rows");
     int row_count = 0;
     if (rows)
         row_count = db_zcode_science_study_list_filtered(
-            &ndb, search_like_p,
+            ndb, search_like_p,
             (category && category[0]) ? category : NULL, now, rows,
             ZDSC_STUDY_FILTER_MAX);
-    zcl_native_node_db_close_readonly(&db, &ndb);
+    zcl_native_node_db_close_readonly(&db, ndb);
     if (!rows) {
         zdsc_fail_run(reply, "ALLOCATION",
                       "the study filter could not allocate its row buffer",
                       leaf);
-        return;
+        return false;
     }
 
     /* The allowlist: filtered study roots, ascending. */
@@ -292,116 +309,122 @@ void zcl_native_handle_zcode_science_discover(
         free(rows);
         zdsc_fail_run(reply, "ALLOCATION",
                       "the study allowlist could not be allocated", leaf);
-        return;
+        return false;
     }
     size_t allow_count = 0;
     for (int i = 0; i < row_count; i++)
         if (zcl_hex_decode_lower(rows[i].root, allowlist[allow_count], 32))
             allow_count++;
     free(rows);
+    *allowlist_out = allowlist;
+    *allow_count_out = allow_count;
+    return true;
+}
 
-    struct zdsc_build build = {0};
-    build.index = vcs_zcode_science_index_build(workspace, now);
-    if (!build.index) {
+/* The hardware predicate: keep only studies with at least one projected
+ * result carrying the requested hardware profile root. */
+static size_t zdsc_filter_by_hardware(struct vcs_zcode_science_index *index,
+                                      const char *hardware,
+                                      uint8_t (*allowlist)[32],
+                                      size_t allow_count)
+{
+    if (!hardware || !hardware[0])
+        return allow_count;
+    size_t kept = 0;
+    for (size_t i = 0; i < allow_count; i++) {
+        char study_hex[65];
+        zdsc_hex(allowlist[i], study_hex);
+        bool match = false;
+        size_t results = vcs_zcode_science_index_result_count(index);
+        for (size_t r = 0; r < results && !match; r++) {
+            const struct vcs_zcode_science_index_result_entry *re =
+                vcs_zcode_science_index_result_at(index, r);
+            if (strcmp(re->study_root_hex, study_hex) == 0 &&
+                strcmp(re->hardware_profile_root_hex, hardware) == 0)
+                match = true;
+        }
+        if (match)
+            memcpy(allowlist[kept++], allowlist[i], 32);
+    }
+    return kept;
+}
+
+/* index -> hardware predicate -> sort -> scan -> assemble, taking
+ * ownership of the allowlist. Returns false (with an error body set) on
+ * failure. */
+static bool zdsc_discover_projection(struct zdsc_build *build,
+                                     const char *workspace, int64_t now,
+                                     const char *hardware,
+                                     uint8_t (*allowlist)[32],
+                                     size_t allow_count,
+                                     const uint8_t *genesis,
+                                     struct zcl_command_reply *reply,
+                                     const char *leaf)
+{
+    build->index = vcs_zcode_science_index_build(workspace, now);
+    if (!build->index) {
         free(allowlist);
         zdsc_fail_run(reply, "INDEX_BUILD_FAILED",
                       "the science index could not be built from the workspace CAS",
                       leaf);
-        return;
+        return false;
     }
-    /* The hardware predicate: keep only studies with at least one projected
-     * result carrying the requested hardware profile root. */
-    if (hardware && hardware[0]) {
-        size_t kept = 0;
-        for (size_t i = 0; i < allow_count; i++) {
-            char study_hex[65];
-            zdsc_hex(allowlist[i], study_hex);
-            bool match = false;
-            size_t results =
-                vcs_zcode_science_index_result_count(build.index);
-            for (size_t r = 0; r < results && !match; r++) {
-                const struct vcs_zcode_science_index_result_entry *re =
-                    vcs_zcode_science_index_result_at(build.index, r);
-                if (strcmp(re->study_root_hex, study_hex) == 0 &&
-                    strcmp(re->hardware_profile_root_hex, hardware) == 0)
-                    match = true;
-            }
-            if (match)
-                memcpy(allowlist[kept++], allowlist[i], 32);
-        }
-        allow_count = kept;
-    }
+    allow_count = zdsc_filter_by_hardware(build->index, hardware, allowlist,
+                                          allow_count);
     if (allow_count > 1)
         qsort(allowlist, allow_count, sizeof(*allowlist), zdsc_root_cmp);
-    build.scan = vcs_zcode_discovery_projection_scan(
-        workspace, build.index, allowlist, allow_count, genesis_p, now);
+    build->scan = vcs_zcode_discovery_projection_scan(
+        workspace, build->index, allowlist, allow_count, genesis, now);
     free(allowlist);
-    if (!build.scan) {
-        vcs_zcode_science_index_free(build.index);
+    if (!build->scan) {
+        vcs_zcode_science_index_free(build->index);
         zdsc_fail_run(reply, "SCAN_FAILED",
                       "the discovery scan could not be assembled", leaf);
-        return;
+        return false;
     }
-    memcpy(build.corpus_root, build.scan->corpus_root, 32);
+    memcpy(build->corpus_root, build->scan->corpus_root, 32);
     enum vcs_zcode_discovery_rank_error error =
-        vcs_zcode_discovery_projection_assemble(build.scan, &build.graph);
+        vcs_zcode_discovery_projection_assemble(build->scan, &build->graph);
     if (error != VCS_ZCODE_DISCOVERY_RANK_OK) {
         char detail[128];
         (void)snprintf(detail, sizeof(detail), "graph assembly failed: %s",
                        vcs_zcode_discovery_rank_error_string(error));
-        zdsc_build_free(&build);
+        zdsc_build_free(build);
         zdsc_fail_run(reply, "ASSEMBLE_FAILED", detail, leaf);
-        return;
+        return false;
     }
+    return true;
+}
 
-    uint8_t filter_root[32], zero_root[32] = {0};
-    vcs_zcode_discovery_filter_policy_root(
-        search, (category && category[0]) ? category : NULL,
-        (hardware && hardware[0]) ? hardware : NULL, genesis_p, filter_root);
-    if (build.graph.node_count == 0) {
-        /* The empty filtered corpus: roots are zero, every count honest. */
-        zdsc_push_roots(&reply->data, &build, zero_root, zero_root);
-        char filter_hex[65];
-        zdsc_hex(filter_root, filter_hex);
-        (void)json_push_kv_str(&reply->data, "filter_policy_root", filter_hex);
-        (void)json_push_kv_bool(&reply->data, "truncated", false);
-        (void)json_push_kv_int(&reply->data, "coverage_mass", 0);
-        (void)json_push_kv_int(&reply->data, "convergence_residual", 0);
-        struct json_value arr;
-        json_init(&arr);
-        json_set_array(&arr);
-        (void)json_push_kv(&reply->data, "entries", &arr);
-        json_free(&arr);
-        (void)json_push_kv_int(&reply->data, "count", 0);
-        zdsc_build_free(&build);
-        return;
-    }
+static void zdsc_reply_empty_corpus(struct zcl_command_reply *reply,
+                                    struct zdsc_build *build,
+                                    uint8_t filter_root[32])
+{
+    /* The empty filtered corpus: roots are zero, every count honest. */
+    uint8_t zero_root[32] = {0};
+    zdsc_push_roots(&reply->data, build, zero_root, zero_root);
+    char filter_hex[65];
+    zdsc_hex(filter_root, filter_hex);
+    (void)json_push_kv_str(&reply->data, "filter_policy_root", filter_hex);
+    (void)json_push_kv_bool(&reply->data, "truncated", false);
+    (void)json_push_kv_int(&reply->data, "coverage_mass", 0);
+    (void)json_push_kv_int(&reply->data, "convergence_residual", 0);
+    struct json_value arr;
+    json_init(&arr);
+    json_set_array(&arr);
+    (void)json_push_kv(&reply->data, "entries", &arr);
+    json_free(&arr);
+    (void)json_push_kv_int(&reply->data, "count", 0);
+}
 
-    struct vcs_zcode_discovery_rank_entry_v1 *entries = zcl_malloc(
-        sizeof(*entries) * build.graph.node_count,
-        "zcode.science.discover.entries");
-    if (!entries) {
-        zdsc_build_free(&build);
-        zdsc_fail_run(reply, "ALLOCATION",
-                      "the rank entry buffer could not be allocated", leaf);
-        return;
-    }
-    struct vcs_zcode_discovery_rank_result_v1 result;
-    uint64_t residual = 0;
-    error = vcs_zcode_discovery_projection_compute(
-        &build.graph, filter_root, entries, &result, &residual);
-    if (error != VCS_ZCODE_DISCOVERY_RANK_OK) {
-        char detail[128];
-        (void)snprintf(detail, sizeof(detail), "rank compute failed: %s",
-                       vcs_zcode_discovery_rank_error_string(error));
-        free(entries);
-        zdsc_build_free(&build);
-        zdsc_fail_run(reply, "RANK_FAILED", detail, leaf);
-        return;
-    }
-
-    size_t rendered = build.graph.node_count < (size_t)max
-                          ? build.graph.node_count
+static void zdsc_render_ranked_entries(
+    struct zcl_command_reply *reply, struct zdsc_build *build,
+    const struct vcs_zcode_discovery_rank_entry_v1 *entries,
+    const struct vcs_zcode_discovery_rank_result_v1 *result,
+    uint64_t residual, uint8_t filter_root[32], int64_t max)
+{
+    size_t rendered = build->graph.node_count < (size_t)max
+                          ? build->graph.node_count
                           : (size_t)max;
     uint64_t coverage = 0;
     struct json_value arr;
@@ -412,14 +435,14 @@ void zcl_native_handle_zcode_science_discover(
         /* The explanation: this node's direct citation count and seed
          * weight, by binary search on the ascending node array. */
         uint32_t direct_citations = 0, seed_weight = 0;
-        size_t lo = 0, hi = build.graph.node_count;
+        size_t lo = 0, hi = build->graph.node_count;
         while (lo < hi) {
             size_t mid = lo + (hi - lo) / 2;
             int cmp = memcmp(entries[i].property_root,
-                             build.graph.nodes[mid].property_root, 32);
+                             build->graph.nodes[mid].property_root, 32);
             if (cmp == 0) {
-                direct_citations = build.graph.in_degree[mid];
-                seed_weight = build.graph.node_seed_weight[mid];
+                direct_citations = build->graph.in_degree[mid];
+                seed_weight = build->graph.node_seed_weight[mid];
                 break;
             }
             if (cmp < 0)
@@ -442,21 +465,109 @@ void zcl_native_handle_zcode_science_discover(
         (void)json_push_back(&arr, &entry);
         json_free(&entry);
     }
-    zdsc_push_roots(&reply->data, &build, result.graph_root,
-                    result.seed_set_root);
+    zdsc_push_roots(&reply->data, build, result->graph_root,
+                    result->seed_set_root);
     char filter_hex[65];
     zdsc_hex(filter_root, filter_hex);
     (void)json_push_kv_str(&reply->data, "filter_policy_root", filter_hex);
     (void)json_push_kv_bool(&reply->data, "truncated",
-                            rendered < build.graph.node_count);
+                            rendered < build->graph.node_count);
     (void)json_push_kv_int(&reply->data, "coverage_mass", (int64_t)coverage);
     (void)json_push_kv_int(&reply->data, "convergence_residual",
                            (int64_t)residual);
     (void)json_push_kv(&reply->data, "entries", &arr);
     json_free(&arr);
     (void)json_push_kv_int(&reply->data, "count", (int64_t)rendered);
+}
+
+/* Compute and render the ranked reply (or the honest empty-corpus one);
+ * frees the build. Returns false (with an error body set) on failure. */
+static bool zdsc_reply_discover_rank(struct zcl_command_reply *reply,
+                                     struct zdsc_build *build, int64_t max,
+                                     uint8_t filter_root[32],
+                                     const char *leaf)
+{
+    if (build->graph.node_count == 0) {
+        zdsc_reply_empty_corpus(reply, build, filter_root);
+        zdsc_build_free(build);
+        return true;
+    }
+    struct vcs_zcode_discovery_rank_entry_v1 *entries = zcl_malloc(
+        sizeof(*entries) * build->graph.node_count,
+        "zcode.science.discover.entries");
+    if (!entries) {
+        zdsc_build_free(build);
+        zdsc_fail_run(reply, "ALLOCATION",
+                      "the rank entry buffer could not be allocated", leaf);
+        return false;
+    }
+    struct vcs_zcode_discovery_rank_result_v1 result;
+    uint64_t residual = 0;
+    enum vcs_zcode_discovery_rank_error error =
+        vcs_zcode_discovery_projection_compute(&build->graph, filter_root,
+                                               entries, &result, &residual);
+    if (error != VCS_ZCODE_DISCOVERY_RANK_OK) {
+        char detail[128];
+        (void)snprintf(detail, sizeof(detail), "rank compute failed: %s",
+                       vcs_zcode_discovery_rank_error_string(error));
+        free(entries);
+        zdsc_build_free(build);
+        zdsc_fail_run(reply, "RANK_FAILED", detail, leaf);
+        return false;
+    }
+    zdsc_render_ranked_entries(reply, build, entries, &result, residual,
+                               filter_root, max);
     free(entries);
-    zdsc_build_free(&build);
+    zdsc_build_free(build);
+    return true;
+}
+
+void zcl_native_handle_zcode_science_discover(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+    const char *leaf = "zcode.science.discover";
+    const char *search = zdsc_str(request->input, "search");
+    const char *category = zdsc_str(request->input, "category");
+    const char *hardware = zdsc_str(request->input, "hardware");
+    const char *genesis_hex = zdsc_str(request->input, "network_genesis_root");
+    if (!zdsc_valid_discover_filters(search, category, hardware, reply, leaf))
+        return;
+    uint8_t genesis[32];
+    const uint8_t *genesis_p = NULL;
+    if (!zdsc_parse_genesis_root(genesis_hex, genesis, &genesis_p, reply,
+                                 leaf))
+        return;
+    int64_t max =
+        zdsc_render_cap(zdsc_int(request->input, "max", ZDSC_RENDER_DEFAULT));
+    int64_t now = zdsc_now(request->input);
+    char ws[ZDSC_PATH_MAX];
+    const char *workspace = zdsc_workspace(request->input, ws, sizeof(ws));
+    if (!workspace) {
+        zdsc_fail(reply, "WORKSPACE_NOT_FOUND",
+                  "workspace must name an existing directory", leaf);
+        return;
+    }
+    struct node_db ndb = {0};
+    struct sqlite3 *db = NULL;
+    if (!zcl_native_node_db_require_readonly(
+            zdsc_datadir(request->input), reply, "the science projection",
+            &db, &ndb))
+        return;
+    uint8_t(*allowlist)[32] = NULL;
+    size_t allow_count = 0;
+    if (!zdsc_study_allowlist(db, &ndb, search, category, now, &allowlist,
+                              &allow_count, reply, leaf))
+        return;
+    struct zdsc_build build = {0};
+    if (!zdsc_discover_projection(&build, workspace, now, hardware, allowlist,
+                                  allow_count, genesis_p, reply, leaf))
+        return;
+    uint8_t filter_root[32];
+    zdsc_discover_filter_root(search, category, hardware, genesis_p,
+                              filter_root);
+    if (!zdsc_reply_discover_rank(reply, &build, max, filter_root, leaf))
+        return;
 }
 
 void zcl_native_handle_zcode_science_rank_snapshot(
