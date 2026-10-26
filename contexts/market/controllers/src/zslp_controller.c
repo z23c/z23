@@ -256,16 +256,60 @@ int64_t zslp_check_payment(const char *datadir,
                                        z_addr, min_amount);
 }
 
+/* True when both the runtime wallet and mempool exist, i.e. transfers take
+ * the on-chain broadcast path instead of credit-only fixture mode. */
+static bool zslp_wallet_and_mempool_ready(void)
+{
+    return zslp_controller_wallet() != NULL &&
+           zslp_controller_mempool() != NULL;
+}
+
+/* Raw-parameter pre-check shared by mint/send: datadir resolves, the token
+ * key passes validation and a recipient address is present. */
+static bool zslp_transfer_params_present(const char *datadir,
+                                         const char *token_id_hex,
+                                         const char *recipient_addr)
+{
+    return zslp_controller_datadir(datadir) != NULL &&
+           zslp_service_validate_token_key(token_id_hex).ok &&
+           recipient_addr != NULL;
+}
+
+/* Token id as used in log lines: the id itself, or the given fallback when
+ * no id was supplied. */
+static const char *zslp_token_id_or_fallback(const char *token_id_hex,
+                                             const char *fallback)
+{
+    return token_id_hex ? token_id_hex : fallback;
+}
+
+/* Zeroes the optional receipt up front so callers always see a defined
+ * result even when the operation fails early. */
+static void zslp_receipt_clear(struct zslp_tx_receipt *receipt)
+{
+    if (receipt)
+        memset(receipt, 0, sizeof(*receipt));
+}
+
+/* Records a successful broadcast in the optional receipt. */
+static void zslp_receipt_record_broadcast(struct zslp_tx_receipt *receipt,
+                                          const char *txid, int64_t fee_paid)
+{
+    if (receipt) {
+        snprintf(receipt->txid, sizeof(receipt->txid), "%s", txid);
+        receipt->fee_paid = fee_paid;
+        receipt->broadcast = true;
+    }
+}
+
 /* ── Token mint ──────────────────────────────────────────── */
 
 bool zslp_mint_with_receipt(const char *datadir, const char *token_id_hex,
                             const char *recipient_addr, uint64_t amount,
                             struct zslp_tx_receipt *receipt)
 {
-    if (receipt)
-        memset(receipt, 0, sizeof(*receipt));
-    bool strict_chain_addr = (zslp_controller_wallet() != NULL &&
-                              zslp_controller_mempool() != NULL);
+    zslp_receipt_clear(receipt);
+    bool strict_chain_addr = zslp_wallet_and_mempool_ready();
     struct zslp_token_transfer_request req = {
         .token_id = token_id_hex,
         .recipient_addr = recipient_addr,
@@ -273,9 +317,7 @@ bool zslp_mint_with_receipt(const char *datadir, const char *token_id_hex,
         .strict_chain_addr = strict_chain_addr
     };
     const char *validation_error = NULL;
-    if (!zslp_controller_datadir(datadir) ||
-        !zslp_service_validate_token_key(token_id_hex).ok ||
-        !recipient_addr)
+    if (!zslp_transfer_params_present(datadir, token_id_hex, recipient_addr))
         LOG_FAIL("zslp", "mint: invalid params (datadir=%p token=%p recipient=%p)",
                  (const void *)zslp_controller_datadir(datadir),
                  (const void *)token_id_hex, (const void *)recipient_addr);
@@ -286,14 +328,13 @@ bool zslp_mint_with_receipt(const char *datadir, const char *token_id_hex,
 
     /* Build and broadcast ZSLP MINT transaction on-chain */
     struct wallet *wallet = zslp_controller_wallet();
-    struct tx_mempool *mempool = zslp_controller_mempool();
-    if (!wallet || !mempool) {
+    if (!zslp_wallet_and_mempool_ready()) {
         /* Credit-only merchant-store fixture mode. Production balances are
          * chain-derived and never change before a transaction confirms. */
         if (!zslp_command_credit_transfer(zslp_controller_datadir(datadir),
                                           &req).ok)
             LOG_FAIL("zslp", "mint: fixture balance update failed token=%s",
-                     token_id_hex ? token_id_hex : "?");
+                     zslp_token_id_or_fallback(token_id_hex, "?"));
         return true;
     }
     if (!zslp_controller_validity_ready(NULL, "zslp_mint"))
@@ -303,7 +344,7 @@ bool zslp_mint_with_receipt(const char *datadir, const char *token_id_hex,
     uint256_set_hex(&token_id, token_id_hex);
     if (uint256_is_null(&token_id))
         LOG_FAIL("zslp", "mint: invalid token_id for broadcast: %s",
-                 token_id_hex ? token_id_hex : "(null)");
+                 zslp_token_id_or_fallback(token_id_hex, "(null)"));
 
     struct wallet_tx wtx;
     int64_t fee_paid = 0;
@@ -334,11 +375,7 @@ bool zslp_mint_with_receipt(const char *datadir, const char *token_id_hex,
     }
     printf("ZSLP MINT broadcast: token=%s amount=%llu to=%s txid=%s\n",
            token_id_hex, (unsigned long long)amount, recipient_addr, txid);
-    if (receipt) {
-        snprintf(receipt->txid, sizeof(receipt->txid), "%s", txid);
-        receipt->fee_paid = fee_paid;
-        receipt->broadcast = true;
-    }
+    zslp_receipt_record_broadcast(receipt, txid, fee_paid);
     transaction_free(&wtx.tx);
     return true;
 }
@@ -356,20 +393,16 @@ bool zslp_send_with_receipt(const char *datadir, const char *token_id_hex,
                             const char *to_addr, uint64_t amount,
                             struct zslp_tx_receipt *receipt)
 {
-    if (receipt)
-        memset(receipt, 0, sizeof(*receipt));
+    zslp_receipt_clear(receipt);
     struct wallet *wallet = zslp_controller_wallet();
-    struct tx_mempool *mempool = zslp_controller_mempool();
     struct zslp_token_transfer_request req = {
         .token_id = token_id_hex,
         .recipient_addr = to_addr,
         .amount = amount,
-        .strict_chain_addr = (wallet != NULL && mempool != NULL)
+        .strict_chain_addr = zslp_wallet_and_mempool_ready()
     };
     const char *validation_error = NULL;
-    if (!zslp_controller_datadir(datadir) ||
-        !zslp_service_validate_token_key(token_id_hex).ok ||
-        !to_addr)
+    if (!zslp_transfer_params_present(datadir, token_id_hex, to_addr))
         LOG_FAIL("zslp", "send: invalid params (datadir=%p token=%p to=%p)",
                  (const void *)zslp_controller_datadir(datadir),
                  (const void *)token_id_hex, (const void *)to_addr);
@@ -377,7 +410,7 @@ bool zslp_send_with_receipt(const char *datadir, const char *token_id_hex,
     if (validation_error)
         LOG_FAIL("zslp", "send: %s", validation_error);
 
-    if (!wallet || !mempool) {
+    if (!zslp_wallet_and_mempool_ready()) {
         /* No wallet (test mode) — just update SQLite balances */
         struct zcl_result r =
             zslp_command_credit_transfer(zslp_controller_datadir(datadir), &req);
@@ -392,7 +425,7 @@ bool zslp_send_with_receipt(const char *datadir, const char *token_id_hex,
     uint256_set_hex(&token_id, token_id_hex);
     if (uint256_is_null(&token_id))
         LOG_FAIL("zslp", "send: invalid token_id: %s",
-                 token_id_hex ? token_id_hex : "(null)");
+                 zslp_token_id_or_fallback(token_id_hex, "(null)"));
 
     struct wallet_tx wtx;
     int64_t fee_paid = 0;
@@ -421,11 +454,7 @@ bool zslp_send_with_receipt(const char *datadir, const char *token_id_hex,
     }
     printf("ZSLP SEND broadcast: token=%s amount=%llu to=%s txid=%s\n",
            token_id_hex, (unsigned long long)amount, to_addr, txid);
-    if (receipt) {
-        snprintf(receipt->txid, sizeof(receipt->txid), "%s", txid);
-        receipt->fee_paid = fee_paid;
-        receipt->broadcast = true;
-    }
+    zslp_receipt_record_broadcast(receipt, txid, fee_paid);
     transaction_free(&wtx.tx);
     return true;
 }
