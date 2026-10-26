@@ -1306,10 +1306,6 @@ tests/harness/src/test_block_index_topup.c:test_block_index_topup:53
 tests/harness/src/test_block_pruning.c:test_block_pruning:25
 tests/harness/src/test_block_scan.c:test_legacy_import_clear_rollback:18
 tests/harness/src/test_block_scan.c:test_wallet_scan_empty_replacement:34
-tests/harness/src/test_block_source_policy_status_json.c:t_decision_to_json_full_roundtrip:23
-tests/harness/src/test_block_source_policy_status_json.c:t_lag_observed_null_vs_int:16
-tests/harness/src/test_block_source_policy_status_json.c:t_selected_source_block_present:17
-tests/harness/src/test_block_source_policy_status_json.c:t_source_to_json_full_roundtrip:52
 tests/harness/src/test_block_status_event_restart_proof.c:rp_one_cycle:43
 tests/harness/src/test_block_status_event_restart_proof.c:test_block_status_event_restart_proof_platform_arm:21
 tests/harness/src/test_blocker.c:test_blocker:67

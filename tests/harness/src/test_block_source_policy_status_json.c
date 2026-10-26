@@ -209,6 +209,22 @@ static int t_non_mirror_lag_forced_true(void)
 
 /* ── 5. lag_observed: null when NOT known, actual lag when known ─────── */
 
+/* True when `key` is present in `out` and holds a JSON null — not an
+ * omitted key and not a sentinel int — the shape "lag_observed" must take
+ * when the lag is unknown. */
+static bool bspj_key_is_null(struct json_value *out, const char *key)
+{
+    const struct json_value *v = json_get(out, key);
+    return v != NULL && v->type == JSON_NULL && json_is_null(v);
+}
+
+/* True when `key` is present in `out` and holds the int `want`. */
+static bool bspj_key_is_int(struct json_value *out, const char *key, int want)
+{
+    const struct json_value *v = json_get(out, key);
+    return v != NULL && v->type == JSON_INT && json_get_int(v) == want;
+}
+
 static int t_lag_observed_null_vs_int(void)
 {
     int failures = 0;
@@ -223,10 +239,8 @@ static int t_lag_observed_null_vs_int(void)
         s.lag = 777; /* must be ignored when not known */
         struct json_value out = {0};
         bsp_source_to_json(&s, &out);
-        const struct json_value *lo = json_get(&out, "lag_observed");
-        const struct json_value *clo = json_get(&out, "candidate_lag_observed");
-        ok = ok && lo != NULL && lo->type == JSON_NULL && json_is_null(lo);
-        ok = ok && clo != NULL && clo->type == JSON_NULL && json_is_null(clo);
+        ok = ok && bspj_key_is_null(&out, "lag_observed");
+        ok = ok && bspj_key_is_null(&out, "candidate_lag_observed");
         json_free(&out);
     }
     /* Mirror source, lag_known=true -> "lag_observed" is the actual int
@@ -238,10 +252,8 @@ static int t_lag_observed_null_vs_int(void)
         s.lag = 4242;
         struct json_value out = {0};
         bsp_source_to_json(&s, &out);
-        const struct json_value *lo = json_get(&out, "lag_observed");
-        const struct json_value *clo = json_get(&out, "candidate_lag_observed");
-        ok = ok && lo != NULL && lo->type == JSON_INT && json_get_int(lo) == 4242;
-        ok = ok && clo != NULL && clo->type == JSON_INT && json_get_int(clo) == 4242;
+        ok = ok && bspj_key_is_int(&out, "lag_observed", 4242);
+        ok = ok && bspj_key_is_int(&out, "candidate_lag_observed", 4242);
         json_free(&out);
     }
     /* Non-mirror source with lag_known=false in the struct: since
@@ -255,8 +267,7 @@ static int t_lag_observed_null_vs_int(void)
         s.lag = 99;
         struct json_value out = {0};
         bsp_source_to_json(&s, &out);
-        const struct json_value *lo = json_get(&out, "lag_observed");
-        ok = ok && lo != NULL && lo->type == JSON_INT && json_get_int(lo) == 99;
+        ok = ok && bspj_key_is_int(&out, "lag_observed", 99);
         json_free(&out);
     }
     BSPJ_RUN("bsp_source_to_json: lag_observed is JSON null iff lag unknown, else the actual int lag", ok);
@@ -264,6 +275,105 @@ static int t_lag_observed_null_vs_int(void)
 }
 
 /* ── 6. bsp_source_to_json: full field round trip ─────────────────────── */
+
+/* Each bspj_source_json_* helper verifies one contiguous slice of the
+ * field round trip below, in the original check order, so every
+ * assertion keeps its meaning and position while no single function
+ * grows unbounded. */
+
+/* source/class/trust name keys. */
+static bool bspj_source_json_names_match(struct json_value *out,
+                                         const struct bsp_source_status *s)
+{
+    return strcmp(json_get_str(json_get(out, "source")), bsp_source_name(s->source)) == 0 &&
+           strcmp(json_get_str(json_get(out, "source_class")), "local_import") == 0 &&
+           strcmp(json_get_str(json_get(out, "candidate_source")), "local_import") == 0 &&
+           strcmp(json_get_str(json_get(out, "trust")), bsp_source_trust_name(s->source)) == 0 &&
+           strcmp(json_get_str(json_get(out, "candidate_trust")), bsp_source_trust_name(s->source)) == 0;
+}
+
+/* gate booleans, blocked_class and selection_blocker. */
+static bool bspj_source_json_flags_match(struct json_value *out,
+                                         const struct bsp_source_status *s)
+{
+    return json_get_bool(json_get(out, "available")) == s->available &&
+           json_get_bool(json_get(out, "healthy")) == s->healthy &&
+           json_get_bool(json_get(out, "blocked")) == s->blocked &&
+           strcmp(json_get_str(json_get(out, "blocked_class")),
+                  blocker_class_name(s->blocked_class)) == 0 &&
+           json_get_bool(json_get(out, "authorized")) == s->authorized &&
+           json_get_bool(json_get(out, "selectable")) == s->selectable &&
+           strcmp(json_get_str(json_get(out, "selection_blocker")), s->selection_reason) == 0;
+}
+
+/* height, the score decomposition and the failure counter. */
+static bool bspj_source_json_score_fields_match(struct json_value *out,
+                                                const struct bsp_source_status *s)
+{
+    return json_get_int(json_get(out, "height")) == s->height &&
+           json_get_int(json_get(out, "score")) == s->score &&
+           json_get_int(json_get(out, "score_base")) == s->score_base &&
+           json_get_int(json_get(out, "score_health")) == s->score_health &&
+           json_get_int(json_get(out, "score_height")) == s->score_height &&
+           json_get_int(json_get(out, "score_authorized")) == s->score_authorized &&
+           json_get_int(json_get(out, "score_redundancy_bonus")) == s->score_redundancy_bonus &&
+           json_get_int(json_get(out, "score_target_lag_penalty")) == s->score_target_lag_penalty &&
+           json_get_int(json_get(out, "score_failure_penalty")) == s->score_failure_penalty &&
+           json_get_int(json_get(out, "score_mirror_gate_penalty")) == s->score_mirror_gate_penalty &&
+           json_get_int(json_get(out, "failures")) == s->failures;
+}
+
+/* traffic totals and peer-health counters. */
+static bool bspj_source_json_peer_and_traffic_counts_match(struct json_value *out,
+                                                           const struct bsp_source_status *s)
+{
+    return json_get_int(json_get(out, "timeouts")) == s->timeouts &&
+           json_get_int(json_get(out, "outbound_total")) == s->outbound_total &&
+           json_get_int(json_get(out, "inbound_total")) == s->inbound_total &&
+           json_get_int(json_get(out, "healthy_peers")) == s->healthy_peers &&
+           json_get_int(json_get(out, "inbound_healthy_peers")) == s->inbound_healthy_peers &&
+           json_get_int(json_get(out, "total_healthy_peers")) == s->total_healthy_peers &&
+           json_get_int(json_get(out, "connecting_peers")) == s->connecting_peers &&
+           json_get_int(json_get(out, "handshake_incomplete")) == s->handshake_incomplete &&
+           json_get_int(json_get(out, "inbound_handshake_incomplete")) == s->inbound_handshake_incomplete &&
+           json_get_int(json_get(out, "peer_groups")) == s->peer_groups;
+}
+
+/* peer-group health and the addnode backoff counters. */
+static bool bspj_source_json_groups_and_addnode_match(struct json_value *out,
+                                                      const struct bsp_source_status *s)
+{
+    return json_get_int(json_get(out, "max_peer_group_size")) == s->max_peer_group_size &&
+           json_get_int(json_get(out, "healthy_peer_groups")) == s->healthy_peer_groups &&
+           json_get_int(json_get(out, "healthy_max_peer_group_size")) == s->healthy_max_peer_group_size &&
+           json_get_int(json_get(out, "addnode_count")) == s->addnode_count &&
+           json_get_int(json_get(out, "addnode_backoff_active")) == s->addnode_backoff_active &&
+           json_get_int(json_get(out, "addnode_backoff_max_sec")) == s->addnode_backoff_max_sec &&
+           json_get_int(json_get(out, "addnode_tcp_failures")) == s->addnode_tcp_failures &&
+           json_get_int(json_get(out, "addnode_protocol_failures")) == s->addnode_protocol_failures;
+}
+
+/* progress, lag and peer-id fields. */
+static bool bspj_source_json_progress_and_lag_match(struct json_value *out,
+                                                    const struct bsp_source_status *s)
+{
+    return json_get_int(json_get(out, "progress_current")) == s->progress_current &&
+           json_get_int(json_get(out, "progress_total")) == s->progress_total &&
+           json_get_int(json_get(out, "lag")) == s->lag &&
+           json_get_int(json_get(out, "candidate_lag")) == s->lag &&
+           json_get_int(json_get(out, "retry_count")) == s->retry_count &&
+           json_get_int(json_get(out, "distinct_peer_count")) == s->distinct_peer_count &&
+           json_get_int(json_get(out, "serving_peer_id")) == s->serving_peer_id;
+}
+
+/* free-text state/reason/blocker. */
+static bool bspj_source_json_text_fields_match(struct json_value *out,
+                                               const struct bsp_source_status *s)
+{
+    return strcmp(json_get_str(json_get(out, "state")), s->state) == 0 &&
+           strcmp(json_get_str(json_get(out, "reason")), s->reason) == 0 &&
+           strcmp(json_get_str(json_get(out, "blocker")), s->blocker) == 0;
+}
 
 static int t_source_to_json_full_roundtrip(void)
 {
@@ -274,58 +384,13 @@ static int t_source_to_json_full_roundtrip(void)
     bsp_source_to_json(&s, &out);
 
     bool ok = out.type == JSON_OBJ;
-    ok = ok && strcmp(json_get_str(json_get(&out, "source")), bsp_source_name(s.source)) == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "source_class")), "local_import") == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "candidate_source")), "local_import") == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "trust")), bsp_source_trust_name(s.source)) == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "candidate_trust")), bsp_source_trust_name(s.source)) == 0;
-    ok = ok && json_get_bool(json_get(&out, "available")) == s.available;
-    ok = ok && json_get_bool(json_get(&out, "healthy")) == s.healthy;
-    ok = ok && json_get_bool(json_get(&out, "blocked")) == s.blocked;
-    ok = ok && strcmp(json_get_str(json_get(&out, "blocked_class")),
-                       blocker_class_name(s.blocked_class)) == 0;
-    ok = ok && json_get_bool(json_get(&out, "authorized")) == s.authorized;
-    ok = ok && json_get_bool(json_get(&out, "selectable")) == s.selectable;
-    ok = ok && strcmp(json_get_str(json_get(&out, "selection_blocker")), s.selection_reason) == 0;
-    ok = ok && json_get_int(json_get(&out, "height")) == s.height;
-    ok = ok && json_get_int(json_get(&out, "score")) == s.score;
-    ok = ok && json_get_int(json_get(&out, "score_base")) == s.score_base;
-    ok = ok && json_get_int(json_get(&out, "score_health")) == s.score_health;
-    ok = ok && json_get_int(json_get(&out, "score_height")) == s.score_height;
-    ok = ok && json_get_int(json_get(&out, "score_authorized")) == s.score_authorized;
-    ok = ok && json_get_int(json_get(&out, "score_redundancy_bonus")) == s.score_redundancy_bonus;
-    ok = ok && json_get_int(json_get(&out, "score_target_lag_penalty")) == s.score_target_lag_penalty;
-    ok = ok && json_get_int(json_get(&out, "score_failure_penalty")) == s.score_failure_penalty;
-    ok = ok && json_get_int(json_get(&out, "score_mirror_gate_penalty")) == s.score_mirror_gate_penalty;
-    ok = ok && json_get_int(json_get(&out, "failures")) == s.failures;
-    ok = ok && json_get_int(json_get(&out, "timeouts")) == s.timeouts;
-    ok = ok && json_get_int(json_get(&out, "outbound_total")) == s.outbound_total;
-    ok = ok && json_get_int(json_get(&out, "inbound_total")) == s.inbound_total;
-    ok = ok && json_get_int(json_get(&out, "healthy_peers")) == s.healthy_peers;
-    ok = ok && json_get_int(json_get(&out, "inbound_healthy_peers")) == s.inbound_healthy_peers;
-    ok = ok && json_get_int(json_get(&out, "total_healthy_peers")) == s.total_healthy_peers;
-    ok = ok && json_get_int(json_get(&out, "connecting_peers")) == s.connecting_peers;
-    ok = ok && json_get_int(json_get(&out, "handshake_incomplete")) == s.handshake_incomplete;
-    ok = ok && json_get_int(json_get(&out, "inbound_handshake_incomplete")) == s.inbound_handshake_incomplete;
-    ok = ok && json_get_int(json_get(&out, "peer_groups")) == s.peer_groups;
-    ok = ok && json_get_int(json_get(&out, "max_peer_group_size")) == s.max_peer_group_size;
-    ok = ok && json_get_int(json_get(&out, "healthy_peer_groups")) == s.healthy_peer_groups;
-    ok = ok && json_get_int(json_get(&out, "healthy_max_peer_group_size")) == s.healthy_max_peer_group_size;
-    ok = ok && json_get_int(json_get(&out, "addnode_count")) == s.addnode_count;
-    ok = ok && json_get_int(json_get(&out, "addnode_backoff_active")) == s.addnode_backoff_active;
-    ok = ok && json_get_int(json_get(&out, "addnode_backoff_max_sec")) == s.addnode_backoff_max_sec;
-    ok = ok && json_get_int(json_get(&out, "addnode_tcp_failures")) == s.addnode_tcp_failures;
-    ok = ok && json_get_int(json_get(&out, "addnode_protocol_failures")) == s.addnode_protocol_failures;
-    ok = ok && json_get_int(json_get(&out, "progress_current")) == s.progress_current;
-    ok = ok && json_get_int(json_get(&out, "progress_total")) == s.progress_total;
-    ok = ok && json_get_int(json_get(&out, "lag")) == s.lag;
-    ok = ok && json_get_int(json_get(&out, "candidate_lag")) == s.lag;
-    ok = ok && json_get_int(json_get(&out, "retry_count")) == s.retry_count;
-    ok = ok && json_get_int(json_get(&out, "distinct_peer_count")) == s.distinct_peer_count;
-    ok = ok && json_get_int(json_get(&out, "serving_peer_id")) == s.serving_peer_id;
-    ok = ok && strcmp(json_get_str(json_get(&out, "state")), s.state) == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "reason")), s.reason) == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "blocker")), s.blocker) == 0;
+    ok = ok && bspj_source_json_names_match(&out, &s);
+    ok = ok && bspj_source_json_flags_match(&out, &s);
+    ok = ok && bspj_source_json_score_fields_match(&out, &s);
+    ok = ok && bspj_source_json_peer_and_traffic_counts_match(&out, &s);
+    ok = ok && bspj_source_json_groups_and_addnode_match(&out, &s);
+    ok = ok && bspj_source_json_progress_and_lag_match(&out, &s);
+    ok = ok && bspj_source_json_text_fields_match(&out, &s);
 
     json_free(&out);
     BSPJ_RUN("bsp_source_to_json: every field round-trips for a fully populated source", ok);
@@ -438,6 +503,44 @@ static int t_selected_source_block_bounds(void)
 
 /* ── 10. selected_source_* block: present + correct for a real source ─── */
 
+/* Each bspj_selected_source_* helper verifies one contiguous slice of the
+ * selected_source_* block below, in the original check order. */
+
+/* state/reason/blocker/selectable/selection_blocker text fields. */
+static bool bspj_selected_source_identity_matches(struct json_value *out,
+                                                  const struct bsp_source_status *sel)
+{
+    return strcmp(json_get_str(json_get(out, "selected_source_state")), sel->state) == 0 &&
+           strcmp(json_get_str(json_get(out, "selected_source_reason")), sel->reason) == 0 &&
+           strcmp(json_get_str(json_get(out, "selected_source_blocker")), sel->blocker) == 0 &&
+           json_get_bool(json_get(out, "selected_source_selectable")) == sel->selectable &&
+           strcmp(json_get_str(json_get(out, "selected_source_selection_blocker")), sel->selection_reason) == 0;
+}
+
+/* height and the selected score decomposition. */
+static bool bspj_selected_source_scores_match(struct json_value *out,
+                                              const struct bsp_source_status *sel)
+{
+    return json_get_int(json_get(out, "selected_source_height")) == sel->height &&
+           json_get_int(json_get(out, "selected_source_score_base")) == sel->score_base &&
+           json_get_int(json_get(out, "selected_source_score_health")) == sel->score_health &&
+           json_get_int(json_get(out, "selected_source_score_height")) == sel->score_height &&
+           json_get_int(json_get(out, "selected_source_score_authorized")) == sel->score_authorized &&
+           json_get_int(json_get(out, "selected_source_score_redundancy_bonus")) == sel->score_redundancy_bonus &&
+           json_get_int(json_get(out, "selected_source_score_target_lag_penalty")) == sel->score_target_lag_penalty &&
+           json_get_int(json_get(out, "selected_source_score_failure_penalty")) == sel->score_failure_penalty &&
+           json_get_int(json_get(out, "selected_source_score_mirror_gate_penalty")) == sel->score_mirror_gate_penalty;
+}
+
+/* healthy/available/blocked flags. */
+static bool bspj_selected_source_health_flags_match(struct json_value *out,
+                                                    const struct bsp_source_status *sel)
+{
+    return json_get_bool(json_get(out, "selected_source_healthy")) == sel->healthy &&
+           json_get_bool(json_get(out, "selected_source_available")) == sel->available &&
+           json_get_bool(json_get(out, "selected_source_blocked")) == sel->blocked;
+}
+
 static int t_selected_source_block_present(void)
 {
     int failures = 0;
@@ -448,24 +551,9 @@ static int t_selected_source_block_present(void)
     struct json_value out = {0};
     bsp_decision_to_json(&d, &out);
 
-    bool ok =
-        strcmp(json_get_str(json_get(&out, "selected_source_state")), sel->state) == 0 &&
-        strcmp(json_get_str(json_get(&out, "selected_source_reason")), sel->reason) == 0 &&
-        strcmp(json_get_str(json_get(&out, "selected_source_blocker")), sel->blocker) == 0 &&
-        json_get_bool(json_get(&out, "selected_source_selectable")) == sel->selectable &&
-        strcmp(json_get_str(json_get(&out, "selected_source_selection_blocker")), sel->selection_reason) == 0 &&
-        json_get_int(json_get(&out, "selected_source_height")) == sel->height &&
-        json_get_int(json_get(&out, "selected_source_score_base")) == sel->score_base &&
-        json_get_int(json_get(&out, "selected_source_score_health")) == sel->score_health &&
-        json_get_int(json_get(&out, "selected_source_score_height")) == sel->score_height &&
-        json_get_int(json_get(&out, "selected_source_score_authorized")) == sel->score_authorized &&
-        json_get_int(json_get(&out, "selected_source_score_redundancy_bonus")) == sel->score_redundancy_bonus &&
-        json_get_int(json_get(&out, "selected_source_score_target_lag_penalty")) == sel->score_target_lag_penalty &&
-        json_get_int(json_get(&out, "selected_source_score_failure_penalty")) == sel->score_failure_penalty &&
-        json_get_int(json_get(&out, "selected_source_score_mirror_gate_penalty")) == sel->score_mirror_gate_penalty &&
-        json_get_bool(json_get(&out, "selected_source_healthy")) == sel->healthy &&
-        json_get_bool(json_get(&out, "selected_source_available")) == sel->available &&
-        json_get_bool(json_get(&out, "selected_source_blocked")) == sel->blocked;
+    bool ok = bspj_selected_source_identity_matches(&out, sel) &&
+              bspj_selected_source_scores_match(&out, sel) &&
+              bspj_selected_source_health_flags_match(&out, sel);
 
     json_free(&out);
     BSPJ_RUN("bsp_decision_to_json: selected_source_* block matches d->sources[selected_source] for a real source", ok);
@@ -542,6 +630,55 @@ static int t_sources_array_self_heals_zeroed_source_field(void)
 
 /* ── 13. bsp_decision_to_json: full top-level field round trip ────────── */
 
+/* Each bspj_decision_json_* helper verifies one contiguous slice of the
+ * top-level round trip below, in the original check order. */
+
+/* decision/source/trust/authority name keys. */
+static bool bspj_decision_json_strings_match(struct json_value *out,
+                                             const struct bsp_decision *d)
+{
+    return strcmp(json_get_str(json_get(out, "decision")), bsp_decision_result_name(d->result)) == 0 &&
+           strcmp(json_get_str(json_get(out, "selected_source")), bsp_source_name(d->selected_source)) == 0 &&
+           strcmp(json_get_str(json_get(out, "candidate_source")), "local_import") == 0 &&
+           strcmp(json_get_str(json_get(out, "selected_source_trust")), bsp_source_trust_name(d->selected_source)) == 0 &&
+           strcmp(json_get_str(json_get(out, "candidate_trust")), bsp_source_trust_name(d->selected_source)) == 0 &&
+           strcmp(json_get_str(json_get(out, "authority")), "local_consensus_validation") == 0;
+}
+
+/* permission flags and the height fields. */
+static bool bspj_decision_json_flags_and_heights_match(struct json_value *out,
+                                                       const struct bsp_decision *d)
+{
+    return json_get_bool(json_get(out, "activation_allowed")) == d->activation_allowed &&
+           json_get_bool(json_get(out, "mirror_fallback_allowed")) == d->mirror_fallback_allowed &&
+           json_get_int(json_get(out, "local_height")) == d->local_height &&
+           json_get_int(json_get(out, "best_header_height")) == d->best_header_height &&
+           json_get_int(json_get(out, "target_height")) == d->target_height &&
+           json_get_int(json_get(out, "projection_height")) == d->projection_height &&
+           json_get_int(json_get(out, "projection_lag")) == d->projection_lag &&
+           json_get_bool(json_get(out, "projection_deferred")) == d->projection_deferred;
+}
+
+/* projection-state bookkeeping. */
+static bool bspj_decision_json_projection_match(struct json_value *out,
+                                                const struct bsp_decision *d)
+{
+    return strcmp(json_get_str(json_get(out, "projection_state")), d->projection_state) == 0 &&
+           json_get_int(json_get(out, "projection_deferred_total")) == d->projection_deferred_total &&
+           json_get_int(json_get(out, "last_projection_deferred_height")) == d->last_projection_deferred_height &&
+           json_get_int(json_get(out, "last_projection_deferred_time")) == d->last_projection_deferred_time &&
+           strcmp(json_get_str(json_get(out, "last_projection_deferred_reason")), d->last_projection_deferred_reason) == 0;
+}
+
+/* outcome: selected score plus reason/blocker text. */
+static bool bspj_decision_json_outcome_match(struct json_value *out,
+                                             const struct bsp_decision *d)
+{
+    return json_get_int(json_get(out, "selected_score")) == d->selected_score &&
+           strcmp(json_get_str(json_get(out, "reason")), d->reason) == 0 &&
+           strcmp(json_get_str(json_get(out, "blocker")), d->blocker) == 0;
+}
+
 static int t_decision_to_json_full_roundtrip(void)
 {
     int failures = 0;
@@ -552,28 +689,10 @@ static int t_decision_to_json_full_roundtrip(void)
     bsp_decision_to_json(&d, &out);
 
     bool ok = out.type == JSON_OBJ;
-    ok = ok && strcmp(json_get_str(json_get(&out, "decision")), bsp_decision_result_name(d.result)) == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "selected_source")), bsp_source_name(d.selected_source)) == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "candidate_source")), "local_import") == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "selected_source_trust")), bsp_source_trust_name(d.selected_source)) == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "candidate_trust")), bsp_source_trust_name(d.selected_source)) == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "authority")), "local_consensus_validation") == 0;
-    ok = ok && json_get_bool(json_get(&out, "activation_allowed")) == d.activation_allowed;
-    ok = ok && json_get_bool(json_get(&out, "mirror_fallback_allowed")) == d.mirror_fallback_allowed;
-    ok = ok && json_get_int(json_get(&out, "local_height")) == d.local_height;
-    ok = ok && json_get_int(json_get(&out, "best_header_height")) == d.best_header_height;
-    ok = ok && json_get_int(json_get(&out, "target_height")) == d.target_height;
-    ok = ok && json_get_int(json_get(&out, "projection_height")) == d.projection_height;
-    ok = ok && json_get_int(json_get(&out, "projection_lag")) == d.projection_lag;
-    ok = ok && json_get_bool(json_get(&out, "projection_deferred")) == d.projection_deferred;
-    ok = ok && strcmp(json_get_str(json_get(&out, "projection_state")), d.projection_state) == 0;
-    ok = ok && json_get_int(json_get(&out, "projection_deferred_total")) == d.projection_deferred_total;
-    ok = ok && json_get_int(json_get(&out, "last_projection_deferred_height")) == d.last_projection_deferred_height;
-    ok = ok && json_get_int(json_get(&out, "last_projection_deferred_time")) == d.last_projection_deferred_time;
-    ok = ok && strcmp(json_get_str(json_get(&out, "last_projection_deferred_reason")), d.last_projection_deferred_reason) == 0;
-    ok = ok && json_get_int(json_get(&out, "selected_score")) == d.selected_score;
-    ok = ok && strcmp(json_get_str(json_get(&out, "reason")), d.reason) == 0;
-    ok = ok && strcmp(json_get_str(json_get(&out, "blocker")), d.blocker) == 0;
+    ok = ok && bspj_decision_json_strings_match(&out, &d);
+    ok = ok && bspj_decision_json_flags_and_heights_match(&out, &d);
+    ok = ok && bspj_decision_json_projection_match(&out, &d);
+    ok = ok && bspj_decision_json_outcome_match(&out, &d);
 
     json_free(&out);
     BSPJ_RUN("bsp_decision_to_json: every top-level field round-trips for a fully populated decision", ok);
