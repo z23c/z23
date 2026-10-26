@@ -106,6 +106,27 @@ static bool read_key_0600(const char *path, uint8_t secret[32])
     return true;
 }
 
+static bool vcs_swarm_receipt_session_persist_key(const char *zcode_dir,
+                                                  const char *path,
+                                                  uint8_t secret[32])
+{
+    struct platform_private_file key;
+    struct platform_private_file_identity key_identity;
+    platform_private_file_init(&key);
+    bool created = platform_private_file_create(path, &key) &&
+                   platform_private_file_identity(&key, &key_identity);
+    bool persisted = created &&
+                     platform_private_file_write_at(&key, secret, 32, 0) &&
+                     platform_private_file_truncate(&key, 32) &&
+                     platform_private_file_flush(&key) &&
+                     platform_private_parent_flush(zcode_dir);
+    if (!persisted && created)
+        (void)platform_private_file_retire_if_identity(
+            &key, path, &key_identity);
+    platform_private_file_close(&key);
+    return persisted;
+}
+
 struct vcs_swarm_receipt_session *vcs_swarm_receipt_session_open(
     const char *zcode_dir)
 {
@@ -137,20 +158,8 @@ struct vcs_swarm_receipt_session *vcs_swarm_receipt_session_open(
             }
         } while (!secp256k1_ec_seckey_verify(probe, secret));
         secp256k1_context_destroy(probe);
-        struct platform_private_file key;
-        struct platform_private_file_identity key_identity;
-        platform_private_file_init(&key);
-        bool created = platform_private_file_create(path, &key) &&
-                       platform_private_file_identity(&key, &key_identity);
-        bool persisted = created &&
-                         platform_private_file_write_at(&key, secret, 32, 0) &&
-                         platform_private_file_truncate(&key, 32) &&
-                         platform_private_file_flush(&key) &&
-                         platform_private_parent_flush(zcode_dir);
-        if (!persisted && created)
-            (void)platform_private_file_retire_if_identity(
-                &key, path, &key_identity);
-        platform_private_file_close(&key);
+        bool persisted = vcs_swarm_receipt_session_persist_key(
+            zcode_dir, path, secret);
         if (!persisted) {
             memory_cleanse(secret, 32);
             LOG_NULL(SESSION_LOG, "receipt key: persist failed");
@@ -349,16 +358,95 @@ static enum vcs_swarm_receipt_status mark_settled(
     return st;
 }
 
-enum vcs_swarm_receipt_status vcs_swarm_receipt_session_handle(
-    struct vcs_swarm_receipt_session *s, struct vcs_service_book *book,
-    const struct vcs_swarm_transfer *xfer, uint64_t peer, int64_t day,
-    const uint8_t *wire, size_t len, uint8_t **reply, size_t *reply_len)
+static void vcs_swarm_receipt_session_clear_reply(uint8_t **reply,
+                                                  size_t *reply_len)
 {
     if (reply)
         *reply = NULL;
     if (reply_len)
         *reply_len = 0;
-    if (!s || !book || !xfer || !wire || peer == 0)
+}
+
+static bool vcs_swarm_receipt_session_args_valid(
+    const struct vcs_swarm_receipt_session *s,
+    const struct vcs_service_book *book,
+    const struct vcs_swarm_transfer *xfer, const uint8_t *wire,
+    uint64_t peer)
+{
+    return s && book && xfer && wire && peer != 0;
+}
+
+static bool vcs_swarm_receipt_session_party_roles(
+    const struct vcs_swarm_receipt_session *s,
+    const struct vcs_service_receipt *parsed, bool *local_up,
+    enum vcs_service_receipt_role *local_role,
+    enum vcs_service_receipt_role *remote_role,
+    const uint8_t **remote_pub)
+{
+    *local_up = memcmp(s->local_pub, parsed->uploader_pubkey, 33) == 0;
+    bool local_down =
+        memcmp(s->local_pub, parsed->downloader_pubkey, 33) == 0;
+    if (*local_up == local_down)
+        return false;
+    *local_role = *local_up ? VCS_SERVICE_RECEIPT_UPLOADER
+                            : VCS_SERVICE_RECEIPT_DOWNLOADER;
+    *remote_role = *local_up ? VCS_SERVICE_RECEIPT_DOWNLOADER
+                             : VCS_SERVICE_RECEIPT_UPLOADER;
+    *remote_pub = *local_up ? parsed->downloader_pubkey
+                            : parsed->uploader_pubkey;
+    return true;
+}
+
+static bool vcs_swarm_receipt_session_bind_remote(struct receipt_peer *p,
+                                                  const uint8_t *remote_pub)
+{
+    if (p && p->have_remote && memcmp(p->remote_pub, remote_pub, 33) != 0)
+        return false;
+    if (p && !p->have_remote) {
+        memcpy(p->remote_pub, remote_pub, 33);
+        p->have_remote = true;
+    }
+    return true;
+}
+
+static void vcs_swarm_receipt_session_sig_flags(
+    const struct vcs_service_receipt *parsed, bool local_up,
+    bool *sig_local, bool *sig_remote)
+{
+    *sig_local = local_up ? sig_present(parsed->uploader_signature)
+                          : sig_present(parsed->downloader_signature);
+    *sig_remote = local_up ? sig_present(parsed->downloader_signature)
+                           : sig_present(parsed->uploader_signature);
+}
+
+static bool vcs_swarm_receipt_session_counterparty_only(bool sig_local,
+                                                        bool sig_remote)
+{
+    return !sig_local && sig_remote;
+}
+
+static bool vcs_swarm_receipt_session_store_reply(
+    enum vcs_swarm_receipt_status st, const uint8_t *full, size_t len,
+    uint8_t **reply, size_t *reply_len)
+{
+    if (st != VCS_SWARM_RECEIPT_OK || !reply || !reply_len)
+        return true;
+    uint8_t *buf = zcl_malloc(len, "vcs_swarm_receipt_reply");
+    if (!buf)
+        return false;
+    memcpy(buf, full, len);
+    *reply = buf;
+    *reply_len = len;
+    return true;
+}
+
+enum vcs_swarm_receipt_status vcs_swarm_receipt_session_handle(
+    struct vcs_swarm_receipt_session *s, struct vcs_service_book *book,
+    const struct vcs_swarm_transfer *xfer, uint64_t peer, int64_t day,
+    const uint8_t *wire, size_t len, uint8_t **reply, size_t *reply_len)
+{
+    vcs_swarm_receipt_session_clear_reply(reply, reply_len);
+    if (!vcs_swarm_receipt_session_args_valid(s, book, xfer, wire, peer))
         LOG_RETURN(VCS_SWARM_RECEIPT_BAD_INPUT, SESSION_LOG,
                    "handle: null argument");
     struct vcs_service_receipt parsed;
@@ -367,25 +455,19 @@ enum vcs_swarm_receipt_status vcs_swarm_receipt_session_handle(
     if (perr != VCS_SERVICE_RECEIPT_OK)
         LOG_RETURN(VCS_SWARM_RECEIPT_UNVERIFIED, SESSION_LOG,
                    "handle: parse failed (%d)", (int)perr);
-    bool local_up = memcmp(s->local_pub, parsed.uploader_pubkey, 33) == 0;
-    bool local_down = memcmp(s->local_pub, parsed.downloader_pubkey, 33) == 0;
-    if (local_up == local_down)
+    bool local_up = false;
+    enum vcs_service_receipt_role local_role = VCS_SERVICE_RECEIPT_UPLOADER;
+    enum vcs_service_receipt_role remote_role = VCS_SERVICE_RECEIPT_UPLOADER;
+    const uint8_t *remote_pub = NULL;
+    if (!vcs_swarm_receipt_session_party_roles(s, &parsed, &local_up,
+                                               &local_role, &remote_role,
+                                               &remote_pub))
         LOG_RETURN(VCS_SWARM_RECEIPT_NOT_PARTY, SESSION_LOG,
                    "handle: local key is not exactly one endpoint");
-    enum vcs_service_receipt_role local_role = local_up
-        ? VCS_SERVICE_RECEIPT_UPLOADER : VCS_SERVICE_RECEIPT_DOWNLOADER;
-    enum vcs_service_receipt_role remote_role = local_up
-        ? VCS_SERVICE_RECEIPT_DOWNLOADER : VCS_SERVICE_RECEIPT_UPLOADER;
-    const uint8_t *remote_pub = local_up ? parsed.downloader_pubkey
-                                         : parsed.uploader_pubkey;
     struct receipt_peer *p = peer_find(s, peer, true);
-    if (p && p->have_remote && memcmp(p->remote_pub, remote_pub, 33) != 0)
+    if (!vcs_swarm_receipt_session_bind_remote(p, remote_pub))
         LOG_RETURN(VCS_SWARM_RECEIPT_NOT_PARTY, SESSION_LOG,
                    "handle: receipt endpoint is not this session's peer");
-    if (p && !p->have_remote) {
-        memcpy(p->remote_pub, remote_pub, 33);
-        p->have_remote = true;
-    }
     uint64_t local_bytes = local_up ? xfer->served : xfer->fetched;
     if (parsed.verified_bytes < local_bytes)
         return VCS_SWARM_RECEIPT_STALE;
@@ -394,14 +476,14 @@ enum vcs_swarm_receipt_status vcs_swarm_receipt_session_handle(
                    "handle: claimed %llu > local %llu",
                    (unsigned long long)parsed.verified_bytes,
                    (unsigned long long)local_bytes);
-    bool sig_local = local_up ? sig_present(parsed.uploader_signature)
-                              : sig_present(parsed.downloader_signature);
-    bool sig_remote = local_up ? sig_present(parsed.downloader_signature)
-                               : sig_present(parsed.uploader_signature);
+    bool sig_local = false;
+    bool sig_remote = false;
+    vcs_swarm_receipt_session_sig_flags(&parsed, local_up, &sig_local,
+                                        &sig_remote);
     if (sig_local && sig_remote)
         return mark_settled(p, vcs_swarm_receipt_accept(
                                    book, xfer, s->local_pub, day, wire, len));
-    if (sig_local || !sig_remote)
+    if (!vcs_swarm_receipt_session_counterparty_only(sig_local, sig_remote))
         LOG_RETURN(VCS_SWARM_RECEIPT_UNVERIFIED, SESSION_LOG,
                    "handle: expected counterparty-only offer");
     if (vcs_service_receipt_verify_role(&parsed, remote_role) !=
@@ -419,14 +501,9 @@ enum vcs_swarm_receipt_status vcs_swarm_receipt_session_handle(
                    "handle: complete serialize failed");
     enum vcs_swarm_receipt_status st = vcs_swarm_receipt_accept(
         book, xfer, s->local_pub, day, full, sizeof(full));
-    if (st == VCS_SWARM_RECEIPT_OK && reply && reply_len) {
-        uint8_t *buf = zcl_malloc(sizeof(full), "vcs_swarm_receipt_reply");
-        if (!buf)
-            LOG_RETURN(VCS_SWARM_RECEIPT_BAD_INPUT, SESSION_LOG,
-                       "handle: reply alloc failed");
-        memcpy(buf, full, sizeof(full));
-        *reply = buf;
-        *reply_len = sizeof(full);
-    }
+    if (!vcs_swarm_receipt_session_store_reply(st, full, sizeof(full), reply,
+                                               reply_len))
+        LOG_RETURN(VCS_SWARM_RECEIPT_BAD_INPUT, SESSION_LOG,
+                   "handle: reply alloc failed");
     return mark_settled(p, st);
 }
