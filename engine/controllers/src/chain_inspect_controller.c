@@ -512,24 +512,24 @@ static int load_block_file_mapping(struct platform_read_mapping *mapping,
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
         *cached_file = -1;
-        return -1;
+        LOG_ERR("chain_inspect", "open blk%05d.dat failed", file_number);
     }
     struct stat fst;
     if (fstat(fd, &fst) != 0) {
         close(fd);
-        return -1;
+        LOG_ERR("chain_inspect", "fstat blk%05d.dat failed", file_number);
     }
     if (fst.st_size <= 0 || (uintmax_t)fst.st_size > SIZE_MAX) {
         close(fd);
         *cached_file = -1;
-        return -1;
+        LOG_ERR("chain_inspect", "blk%05d.dat has unusable size", file_number);
     }
     bool mapped = platform_read_mapping_open(
         mapping, fd, (size_t)fst.st_size);
     if (!mapped) {
         close(fd);
         *cached_file = -1;
-        return -1;
+        LOG_ERR("chain_inspect", "mmap of blk%05d.dat failed", file_number);
     }
     *cached_fd = fd;
     *cached_file = file_number;
