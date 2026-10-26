@@ -1969,7 +1969,6 @@ tests/harness/src/test_tip_fork_stale.c:test_tip_fork_stale:56
 tests/harness/src/test_tip_stall_oracle_rebuild_condition.c:test_tip_stall_oracle_rebuild_condition:24
 tests/harness/src/test_transaction.c:test_transaction:127
 tests/harness/src/test_transaction_wire_evidence.c:test_transaction_wire_evidence:30
-tests/harness/src/test_tx_property.c:test_tx_property:104
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_persist_pair_defers_while_tx_open:21
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_persist_pair_inside_caller_transaction:19
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_rebuild_folds_forward_from_saved_height:24
