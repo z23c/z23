@@ -2834,6 +2834,102 @@ static int case_engine_unit_scrub_env_e2e(void)
              strstr(envtxt, "CLAUDE_CODE_FUTURE_MARKER=") == NULL);
     return failures;
 }
+
+static int codex_edit_kind_check(const char *path, const char *task,
+                                 const char *worktree, const char *state,
+                                 const char *dir, const char *args)
+{
+    int failures = 0;
+    char cmd[4096];
+    static char argtxt[8192];
+    (void)snprintf(cmd, sizeof(cmd),
+        "env PATH='%s' %s --engine gpt-sol --task %s --kind fix-gate "
+        "--no-group --yes-dispatch --worktree %s --state-dir %s2 --rounds 1 "
+        ">%s/run2.log 2>&1",
+        path, ENGINE_UNIT_BIN, task, worktree, state, dir);
+    TEST_DISCARD(system(cmd));
+    argtxt[0] = '\0';
+    EN_CHECK("an edit kind on gpt-sol keeps workspace-write",
+             read_whole_file(args, argtxt, sizeof(argtxt)) &&
+             strstr(argtxt, "-s workspace-write") != NULL &&
+             strstr(argtxt, "read-only") == NULL);
+    return failures;
+}
+
+/* A codex row on a review kind: read-only argv with -o, the reply decoded from
+ * the recorded last-message file (stdout is noise), and no OPENAI_API_KEY in
+ * the child. The same row on an edit kind keeps workspace-write. */
+static int case_engine_unit_codex_review_e2e(void)
+{
+    int failures = 0;
+    if (!engine_unit_binary_present()) {
+        printf("engine: FAIL (%s is required for the codex review e2e)\n",
+               ENGINE_UNIT_BIN);
+        return 1;
+    }
+    char rel_dir[512], dir[600];
+    test_make_tmpdir(rel_dir, sizeof(rel_dir), "engine_codex_review", "run");
+    if (!test_abs_path(rel_dir, dir, sizeof(dir))) {
+        printf("engine: FAIL (could not absolutize the codex review dir)\n");
+        return 1;
+    }
+    char bindir[700], fake[760], dump[700], args[700], task[700];
+    char state[700], worktree[700], reply[700], script[2048], cmd[4096];
+    char path[2048];
+    static char envtxt[64 * 1024], argtxt[8192], replytxt[1024];
+    (void)snprintf(bindir, sizeof(bindir), "%s/bin", dir);
+    (void)snprintf(fake, sizeof(fake), "%s/codex", bindir);
+    (void)snprintf(dump, sizeof(dump), "%s/child.env", dir);
+    (void)snprintf(args, sizeof(args), "%s/child.args", dir);
+    (void)snprintf(task, sizeof(task), "%s/task.txt", dir);
+    (void)snprintf(state, sizeof(state), "%s/state", dir);
+    (void)snprintf(worktree, sizeof(worktree), "%s/wt", dir);
+    (void)snprintf(reply, sizeof(reply), "%s/reply.txt", state);
+    mkdir(bindir, 0700);
+    mkdir(state, 0700);
+    mkdir(worktree, 0700);
+    (void)snprintf(script, sizeof(script),
+        "#!/bin/sh\nenv > '%s'\nprintf '%%s\\n' \"$*\" > '%s'\n"
+        "out=\nwhile [ $# -gt 0 ]; do\n"
+        "  if [ \"$1\" = -o ]; then out=\"$2\"; fi\n  shift\ndone\n"
+        "echo 'transcript noise, not the answer'\n"
+        "[ -n \"$out\" ] && printf 'LAST-MESSAGE-ONLY' > \"$out\"\nexit 0\n",
+        dump, args);
+    const bool ready = engine_test_git_init(worktree) &&
+        write_whole_file(task, "kind: review\n\nReview this fixture.\n") &&
+        write_whole_file(fake, script) && chmod(fake, 0755) == 0;
+    EN_CHECK("the codex review fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)snprintf(path, sizeof(path), "%s:%s", bindir,
+                   getenv("PATH") ? getenv("PATH") : "");
+    (void)snprintf(cmd, sizeof(cmd),
+        "env PATH='%s' OPENAI_API_KEY=sk-must-not-leak "
+        "%s --engine gpt-sol --task %s --no-group --yes-dispatch "
+        "--worktree %s --state-dir %s --rounds 1 >%s/run.log 2>&1",
+        path, ENGINE_UNIT_BIN, task, worktree, state, dir);
+    TEST_DISCARD(system(cmd));
+    envtxt[0] = argtxt[0] = replytxt[0] = '\0';
+    const bool ran = read_whole_file(dump, envtxt, sizeof(envtxt)) &&
+                     read_whole_file(args, argtxt, sizeof(argtxt));
+    EN_CHECK("the codex review child ran", ran);
+    if (!ran)
+        return failures + 1;
+    EN_CHECK("a review kind on gpt-sol runs codex read-only with -o",
+             strstr(argtxt, "-s read-only") != NULL &&
+             strstr(argtxt, "workspace-write") == NULL &&
+             strstr(argtxt, "-o ") != NULL &&
+             strstr(argtxt, "/state/last-message.txt") != NULL);
+    EN_CHECK("the reply is the last-message file, not stdout",
+             read_whole_file(reply, replytxt, sizeof(replytxt)) &&
+             strcmp(replytxt, "LAST-MESSAGE-ONLY") == 0);
+    EN_CHECK("OPENAI_API_KEY is absent from the codex child",
+             strstr(envtxt, "OPENAI_API_KEY") == NULL);
+
+    failures += codex_edit_kind_check(path, task, worktree, state, dir, args);
+    return failures;
+}
+
 #endif
 
 static int case_engine_unit_state_e2e(void)
@@ -6367,6 +6463,7 @@ int test_engine(void)
     failures += case_engine_unit_report_effect_e2e();
     failures += case_engine_unit_grok_projection_e2e();
     failures += case_engine_unit_scrub_env_e2e();
+    failures += case_engine_unit_codex_review_e2e();
     failures += case_claude_ledger_row_e2e();
     failures += case_gpt_dispatch_e2e();
 #endif

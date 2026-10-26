@@ -134,6 +134,9 @@ enum engine_cli_output {
     ENGINE_CLI_OUTPUT_PLAIN = 0,
     ENGINE_CLI_OUTPUT_GROK_JSON,
     ENGINE_CLI_OUTPUT_CLAUDE_JSON,
+    /* `codex exec -o FILE`: stdout is a transcript; FILE holds only the
+     * final message, which is the report. No usage is decoded. */
+    ENGINE_CLI_OUTPUT_CODEX_LAST_MESSAGE,
 };
 
 /* An argv slot the caller fills. Anything else in a row is a literal.
@@ -152,6 +155,8 @@ enum engine_cli_output {
 #define ENGINE_CLI_TURNS_TOKEN   "{turns}"
 #define ENGINE_CLI_RESUME_TOKEN  "{resume_session_id}"
 #define ENGINE_CLI_MODEL_TOKEN   "{model}"
+/* The file a report CLI writes its final message to (state-dir based). */
+#define ENGINE_CLI_LAST_MESSAGE_TOKEN "{last_message}"
 
 #define ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT "provider_default"
 
@@ -313,6 +318,8 @@ struct engine_cli_inputs {
     /* True for a report kind: the unit must change nothing, so a row with a
      * report_start_argv runs that read-only form instead. */
     bool read_only;
+    /* Absolute path for ENGINE_CLI_LAST_MESSAGE_TOKEN; NULL when unused. */
+    const char *last_message_path;
 };
 
 /* The closed effort vocabulary shared by HTTP requests, CLI argv, and

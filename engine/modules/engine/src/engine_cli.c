@@ -90,6 +90,8 @@ static const char *resolve(const char *slot,
     if (strcmp(slot, ENGINE_CLI_WORKDIR_TOKEN) == 0) return in->workdir;
     if (strcmp(slot, ENGINE_CLI_TURNS_TOKEN) == 0)   return in->turns;
     if (strcmp(slot, ENGINE_CLI_MODEL_TOKEN) == 0)   return in->model;
+    if (strcmp(slot, ENGINE_CLI_LAST_MESSAGE_TOKEN) == 0)
+        return in->last_message_path;
     if (strcmp(slot, ENGINE_CLI_RESUME_TOKEN) == 0) return in->resume_session_id;
     /* A brace-shaped slot this file does not know is not passed through as a
      * literal. A CLI receiving the six characters {mdoel} would treat them as

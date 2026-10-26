@@ -474,6 +474,19 @@ static void unit_scrub_agent_session_env(void)
 #endif
 }
 
+/* The codex rows bill the ChatGPT plan login. A pay-per-use OPENAI_API_KEY in
+ * the parent environment would make `codex exec` bill the API instead, so a
+ * row whose program is codex never passes it to the child. */
+static void unit_scrub_pay_per_use_key(const struct engine_vendor *v)
+{
+#if !defined(_WIN32)
+    if (v->program && strcmp(v->program, "codex") == 0)
+        (void)unsetenv("OPENAI_API_KEY");
+#else
+    (void)v;
+#endif
+}
+
 /* A CLI row owns its stdio transport choice. Both implementations exec the
  * exact argv with no shell and preserve the timeout observation; a vendor id
  * is never consulted here. */
@@ -482,6 +495,7 @@ static int run_cli(const struct engine_vendor *v, const char *const argv[],
                    bool *timed_out)
 {
     unit_scrub_agent_session_env();
+    unit_scrub_pay_per_use_key(v);
     if (v->cli_needs_tty) {
         if (cwd) return -1; /* the PTY launch has no cwd: refuse */
         return zcl_spawn_pty_capture_observed(
@@ -1346,6 +1360,26 @@ static bool dispatch_fixture(const struct engine_vendor *v, const char *path,
     return ok;
 }
 
+/* Where a report CLI is told to leave its final message. Any stale file from
+ * an earlier round is removed first, so a CLI that writes nothing can never
+ * be read as having said the previous round's words. */
+static const char *unit_last_message_path(const struct unit_opts *o,
+                                          char *buf, size_t cap)
+{
+    if (!o->state_dir || !o->state_dir[0] ||
+        (size_t)snprintf(buf, cap, "%s/last-message.txt", o->state_dir) >= cap)
+        return NULL;
+    (void)unlink(buf);
+    return buf;
+}
+
+/* The report is exactly the last-message file. A missing file is NULL, which
+ * the decoder refuses; stdout is never a stand-in for it. */
+static char *unit_last_message_body(const char *path, size_t *len)
+{
+    return path ? read_file(path, ENGINE_MAX_TEXT_BYTES, len) : NULL;
+}
+
 static enum engine_err unit_cli_reply_error(const struct engine_vendor *vendor,
                                             enum engine_prompt_effect effect,
                                             const char *body, size_t len, int rc,
@@ -1357,6 +1391,26 @@ static enum engine_err unit_cli_reply_error(const struct engine_vendor *vendor,
     if (rc != 0)
         return ENGINE_ERR_REFUSED;
     return decoded ? ENGINE_OK : ENGINE_ERR_PARSE;
+}
+
+/* Decode the reply once the child has exited. A codex row's report is its
+ * last-message file; every other row decodes the captured stdout. */
+static enum engine_err unit_cli_finish_reply(const struct engine_vendor *v,
+                                             const struct unit_opts *o,
+                                             const char *last_message,
+                                             const char *log, int rc,
+                                             struct engine_reply *reply)
+{
+    const enum engine_prompt_effect effect = engine_prompt_kind_effect(o->kind);
+    if (v->report_format != ENGINE_CLI_OUTPUT_CODEX_LAST_MESSAGE)
+        return unit_cli_reply_error(v, effect, log, strlen(log), rc, reply);
+    size_t len = 0;
+    char *body = effect == ENGINE_PROMPT_EFFECT_REPORT
+                     ? unit_last_message_body(last_message, &len) : NULL;
+    const enum engine_err err =
+        unit_cli_reply_error(v, effect, body, len, rc, reply);
+    free(body);
+    return err;
 }
 
 /* A subscription-backed agent CLI. It edits the worktree itself, so there is
@@ -1392,6 +1446,9 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
                           ? o->cli_turns : o->turns;
     char turn_cap[32];
     (void)snprintf(turn_cap, sizeof(turn_cap), "%d", turns > 0 ? turns : 1);
+    char last_message_buf[1024];
+    const char *last_message = unit_last_message_path(
+        o, last_message_buf, sizeof(last_message_buf));
     const struct engine_cli_inputs in = {
         .prompt  = prompt,
         .workdir = workdir,
@@ -1401,6 +1458,7 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         .resume_session_id = o->resume_session_id,
         .read_only = engine_prompt_kind_effect(o->kind) ==
                      ENGINE_PROMPT_EFFECT_REPORT,
+        .last_message_path = last_message,
     };
     const char *argv[ENGINE_CLI_ARGV_MAX];
     if (engine_cli_argv_build(v, &in, argv, ENGINE_CLI_ARGV_MAX) == 0) {
@@ -1477,8 +1535,7 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
     /* Edit delivery retains its diff-and-gate exit policy. A report needs
      * a successful child exit; parsed usage remains available on failure. */
     dr->http_status = 0;
-    dr->err = unit_cli_reply_error(v, engine_prompt_kind_effect(o->kind),
-                                   log, strlen(log), rc, &dr->reply);
+    dr->err = unit_cli_finish_reply(v, o, last_message, log, rc, &dr->reply);
     free(log);
     return dr->err == ENGINE_OK;
 }
@@ -2018,7 +2075,8 @@ static const char *unit_kind_failure(const struct engine_vendor *vendor,
     if (engine_prompt_kind_effect(kind) == ENGINE_PROMPT_EFFECT_REPORT &&
         vendor->wire == ENGINE_WIRE_LOCAL_CLI &&
         vendor->report_format != ENGINE_CLI_OUTPUT_GROK_JSON &&
-        vendor->report_format != ENGINE_CLI_OUTPUT_CLAUDE_JSON)
+        vendor->report_format != ENGINE_CLI_OUTPUT_CLAUDE_JSON &&
+        vendor->report_format != ENGINE_CLI_OUTPUT_CODEX_LAST_MESSAGE)
         return "selected CLI engine has no supported report decoder";
     return NULL;
 }

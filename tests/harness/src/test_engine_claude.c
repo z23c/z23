@@ -337,10 +337,10 @@ static int case_reply_text_cap(void)
 static int gpt_row_shape(const struct engine_vendor *v, const char *model)
 {
     int failures = 0;
-    EC_CHECK("gpt row is LOCAL_CLI/EDITS/PLAIN, costs money, retries 1",
+    EC_CHECK("gpt row is LOCAL_CLI/EDITS/CODEX_LAST_MESSAGE, costs money, retries 1",
              v->wire == ENGINE_WIRE_LOCAL_CLI &&
              v->delivery == ENGINE_DELIVERS_EDITS &&
-             v->report_format == ENGINE_CLI_OUTPUT_PLAIN &&
+             v->report_format == ENGINE_CLI_OUTPUT_CODEX_LAST_MESSAGE &&
              v->costs_money && v->max_retries == 1 && !v->is_default);
     EC_CHECK("gpt default model", strcmp(v->default_model, model) == 0);
     EC_CHECK("gpt program is codex, prompt is an argument",
@@ -450,16 +450,21 @@ static int case_read_only(void)
     struct engine_cli_inputs gin = {
         .prompt = "PROMPT-TEXT", .workdir = "/work/dir",
         .turns = "3", .model = "gpt-6.1-sol", .read_only = true,
+        .last_message_path = "/state/last-message.txt",
     };
     n = engine_cli_argv_build(g, &gin, argv, ENGINE_CLI_ARGV_MAX);
     EC_CHECK("codex report runs its sandbox read-only",
              argv_has(argv, n, "read-only", true) &&
              !argv_has(argv, n, "workspace-write", true));
+    EC_CHECK("codex report names the last-message file with -o",
+             argv_has(argv, n, "-o", true) &&
+             argv_has(argv, n, "/state/last-message.txt", true));
     gin.read_only = false;
     n = engine_cli_argv_build(g, &gin, argv, ENGINE_CLI_ARGV_MAX);
     EC_CHECK("codex edit keeps workspace-write",
              argv_has(argv, n, "workspace-write", true) &&
              !argv_has(argv, n, "read-only", true));
+    EC_CHECK("codex edit argv has no -o", !argv_has(argv, n, "-o", true));
 
     const struct engine_vendor *glm = engine_by_id("glm-cli");
     struct engine_cli_inputs gl = {

@@ -511,7 +511,8 @@ bool engine_cli_observation_parse(const struct engine_vendor *vendor,
     memset(out, 0, sizeof(*out));
     if (!vendor)
         LOG_FAIL("engine", "refusing CLI metadata without a vendor");
-    if (vendor->report_format == ENGINE_CLI_OUTPUT_PLAIN)
+    if (vendor->report_format == ENGINE_CLI_OUTPUT_PLAIN ||
+        vendor->report_format == ENGINE_CLI_OUTPUT_CODEX_LAST_MESSAGE)
         return true;
     if (vendor->report_format == ENGINE_CLI_OUTPUT_CLAUDE_JSON)
         return cli_observation_from_claude(body, len, out);
@@ -863,9 +864,26 @@ static bool cli_reply_root(const struct engine_vendor *vendor,
     return false;
 }
 
-bool engine_cli_reply_text(const struct engine_vendor *vendor,
-                           const char *body, size_t len,
-                           struct engine_reply *out)
+/* The codex last-message file IS the reply: no envelope, no framing. */
+static bool cli_reply_verbatim(const char *body, size_t len,
+                               struct engine_reply *out)
+{
+    if (!body || len > ENGINE_MAX_TEXT_BYTES)
+        LOG_FAIL("engine", "refusing a last message over the text cap");
+    char *copy = zcl_malloc(len + 1u, "engine_cli_reply_text");
+    if (!copy)
+        LOG_FAIL("engine", "cannot allocate %zu bytes of CLI reply text",
+                 len + 1u);
+    memcpy(copy, body, len);
+    copy[len] = '\0';
+    out->text = copy;
+    out->text_len = len;
+    return true;
+}
+
+static bool cli_reply_json_text(const struct engine_vendor *vendor,
+                                const char *body, size_t len,
+                                struct engine_reply *out)
 {
     if (!out || !vendor || out->text ||
         (vendor->report_format != ENGINE_CLI_OUTPUT_CLAUDE_JSON &&
@@ -905,4 +923,14 @@ bool engine_cli_reply_text(const struct engine_vendor *vendor,
     out->text = copy;
     out->text_len = text_len;
     return true;
+}
+
+bool engine_cli_reply_text(const struct engine_vendor *vendor,
+                           const char *body, size_t len,
+                           struct engine_reply *out)
+{
+    if (out && vendor && !out->text &&
+        vendor->report_format == ENGINE_CLI_OUTPUT_CODEX_LAST_MESSAGE)
+        return cli_reply_verbatim(body, len, out);
+    return cli_reply_json_text(vendor, body, len, out);
 }
