@@ -132,9 +132,6 @@ contexts/commons/modules/vcs/src/package_release.c:vcs_package_release_parse:38
 contexts/commons/modules/vcs/src/package_release.c:vcs_package_release_validate:16
 contexts/commons/modules/vcs/src/package_reproduce.c:vcs_package_reproduce_compare:21
 contexts/commons/modules/vcs/src/package_reproduce.c:vcs_package_reproduce_scan:36
-contexts/commons/modules/vcs/src/package_reuse.c:parse_exact_request:23
-contexts/commons/modules/vcs/src/package_reuse.c:semantic_score:17
-contexts/commons/modules/vcs/src/package_reuse.c:vcs_package_reuse_plan_build:28
 contexts/commons/modules/vcs/src/package_reward.c:reward_load_plan_dir:16
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_commit:60
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_build:18

@@ -51,12 +51,8 @@ static bool request_word(const char *word, size_t len)
     return true;
 }
 
-static void parse_exact_request(const char *goal, struct reuse_request *out)
+static const char *parse_skip_verb(const char *start)
 {
-    memset(out, 0, sizeof(*out));
-    if (!goal) return;
-    while (isspace((unsigned char)*goal)) goal++;
-    const char *start = goal;
     const char *space = strchr(start, ' ');
     if (space) {
         size_t verb_len = (size_t)(space - start);
@@ -67,15 +63,19 @@ static void parse_exact_request(const char *goal, struct reuse_request *out)
             while (isspace((unsigned char)*start)) start++;
         }
     }
-    const char *end = start + strlen(start);
+    return start;
+}
+
+static const char *parse_trim_end(const char *start, const char *end)
+{
     while (end > start && isspace((unsigned char)end[-1])) end--;
-    if (end == start || memchr(start, ' ', (size_t)(end - start))) return;
-    const char *at = memchr(start, '@', (size_t)(end - start));
-    size_t name_len = at ? (size_t)(at - start) : (size_t)(end - start);
-    size_t version_len = at ? (size_t)(end - at - 1) : 0;
-    if (name_len == 0 || name_len >= sizeof(out->name) ||
-        version_len >= sizeof(out->version) || (at && version_len == 0))
-        return;
+    return end;
+}
+
+static void parse_store_request(struct reuse_request *out, const char *start,
+                                size_t name_len, const char *at,
+                                size_t version_len)
+{
     memcpy(out->name, start, name_len); out->name[name_len] = '\0';
     if (at) {
         memcpy(out->version, at + 1, version_len);
@@ -84,12 +84,52 @@ static void parse_exact_request(const char *goal, struct reuse_request *out)
     out->exact = true;
 }
 
+static void parse_exact_request(const char *goal, struct reuse_request *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!goal) return;
+    while (isspace((unsigned char)*goal)) goal++;
+    const char *start = parse_skip_verb(goal);
+    const char *end = parse_trim_end(start, start + strlen(start));
+    if (end == start || memchr(start, ' ', (size_t)(end - start))) return;
+    const char *at = memchr(start, '@', (size_t)(end - start));
+    size_t name_len = at ? (size_t)(at - start) : (size_t)(end - start);
+    size_t version_len = at ? (size_t)(end - at - 1) : 0;
+    if (name_len == 0 || name_len >= sizeof(out->name) ||
+        version_len >= sizeof(out->version) || (at && version_len == 0))
+        return;
+    parse_store_request(out, start, name_len, at, version_len);
+}
+
 static bool request_matches_name(const struct reuse_request *request,
                                  const char *name)
 {
     if (!request->exact || !name) return false;
     return strcasecmp(request->name, name) == 0 ||
            strcasecmp(request->name, package_basename(name)) == 0;
+}
+
+static size_t semantic_next_word(const char **cursor, const char **word)
+{
+    const char *p = *cursor;
+    while (*p && !isalnum((unsigned char)*p)) p++;
+    *word = p;
+    while (isalnum((unsigned char)*p) || *p == '_') p++;
+    *cursor = p;
+    return (size_t)(p - *word);
+}
+
+static uint32_t semantic_add_token_score(
+    uint32_t score, const char *word, size_t len, const char *base,
+    const struct vcs_package_reuse_input *input)
+{
+    char token[96];
+    if (len >= sizeof(token)) len = sizeof(token) - 1u;
+    memcpy(token, word, len); token[len] = '\0';
+    if (base && ascii_contains_ci(base, token)) score += 80;
+    for (size_t i = 0; i < input->api_count; i++)
+        if (ascii_contains_ci(input->apis[i], token)) score += 30;
+    return score;
 }
 
 static uint32_t semantic_score(const char *goal,
@@ -103,17 +143,10 @@ static uint32_t semantic_score(const char *goal,
     if (base && ascii_contains_ci(goal, base)) score += 400;
     const char *p = goal;
     while (*p) {
-        while (*p && !isalnum((unsigned char)*p)) p++;
-        const char *word = p;
-        while (isalnum((unsigned char)*p) || *p == '_') p++;
-        size_t len = (size_t)(p - word);
+        const char *word;
+        size_t len = semantic_next_word(&p, &word);
         if (!request_word(word, len)) continue;
-        char token[96];
-        if (len >= sizeof(token)) len = sizeof(token) - 1u;
-        memcpy(token, word, len); token[len] = '\0';
-        if (base && ascii_contains_ci(base, token)) score += 80;
-        for (size_t i = 0; i < input->api_count; i++)
-            if (ascii_contains_ci(input->apis[i], token)) score += 30;
+        score = semantic_add_token_score(score, word, len, base, input);
     }
     return score;
 }
@@ -155,6 +188,58 @@ static void insert_selection(struct vcs_package_reuse_plan *out,
     out->selected[pos] = value; out->selected_count = count;
 }
 
+static void plan_record_candidate(struct vcs_package_reuse_plan *out,
+                                  const struct vcs_package_reuse_input *inputs,
+                                  size_t input_index, uint32_t score)
+{
+    out->compatible_matches++;
+    if (inputs[input_index].locked) score += 40;
+    if (inputs[input_index].installed) score += 20;
+    insert_selection(out, inputs, input_index, score);
+}
+
+static void plan_consider_input(struct vcs_package_reuse_plan *out,
+                                const char *goal,
+                                const struct reuse_request *request,
+                                const struct vcs_package_reuse_input *inputs,
+                                size_t i, size_t *exact_compatible)
+{
+    bool name_match = request_matches_name(request, inputs[i].package->name);
+    bool version_match = !request->has_version ||
+        strcmp(request->version, inputs[i].package->semver) == 0;
+    uint32_t score = semantic_score(goal, &inputs[i]);
+    if (name_match && !version_match) {
+        out->incompatible_matches++; return;
+    }
+    if (request->exact && !name_match) return;
+    if (!inputs[i].compatible) {
+        if (score > 0 || name_match) out->incompatible_matches++;
+        return;
+    }
+    if (name_match && version_match) {
+        score += 2000; (*exact_compatible)++;
+    }
+    if (score == 0) return;
+    plan_record_candidate(out, inputs, i, score);
+}
+
+static void plan_set_disposition(struct vcs_package_reuse_plan *out,
+                                 bool exact, size_t exact_compatible)
+{
+    if (exact && exact_compatible == 1) {
+        out->disposition = VCS_PACKAGE_REUSE_COMPLETE;
+        out->new_code_required = false;
+    } else if (exact && exact_compatible > 1) {
+        out->disposition = VCS_PACKAGE_REUSE_AMBIGUOUS;
+    } else if (out->selected_count > 0) {
+        out->disposition = VCS_PACKAGE_REUSE_PARTIAL;
+    } else if (out->incompatible_matches > 0) {
+        out->disposition = VCS_PACKAGE_REUSE_INCOMPATIBLE;
+    } else {
+        out->disposition = VCS_PACKAGE_REUSE_NONE;
+    }
+}
+
 bool vcs_package_reuse_plan_build(
     const char *goal, const struct vcs_package_reuse_input *inputs,
     size_t input_count, struct vcs_package_reuse_plan *out)
@@ -170,40 +255,10 @@ bool vcs_package_reuse_plan_build(
     for (size_t i = 0; i < input_count; i++) {
         if (!inputs[i].package ||
             inputs[i].api_count > VCS_PACKAGE_REUSE_MAX_APIS) return false;
-        bool name_match = request_matches_name(&request,
-                                               inputs[i].package->name);
-        bool version_match = !request.has_version ||
-            strcmp(request.version, inputs[i].package->semver) == 0;
-        uint32_t score = semantic_score(goal, &inputs[i]);
-        if (name_match && !version_match) {
-            out->incompatible_matches++; continue;
-        }
-        if (request.exact && !name_match) continue;
-        if (!inputs[i].compatible) {
-            if (score > 0 || name_match) out->incompatible_matches++;
-            continue;
-        }
-        if (name_match && version_match) {
-            score += 2000; exact_compatible++;
-        }
-        if (score == 0) continue;
-        out->compatible_matches++;
-        if (inputs[i].locked) score += 40;
-        if (inputs[i].installed) score += 20;
-        insert_selection(out, inputs, i, score);
+        plan_consider_input(out, goal, &request, inputs, i,
+                            &exact_compatible);
     }
-    if (request.exact && exact_compatible == 1) {
-        out->disposition = VCS_PACKAGE_REUSE_COMPLETE;
-        out->new_code_required = false;
-    } else if (request.exact && exact_compatible > 1) {
-        out->disposition = VCS_PACKAGE_REUSE_AMBIGUOUS;
-    } else if (out->selected_count > 0) {
-        out->disposition = VCS_PACKAGE_REUSE_PARTIAL;
-    } else if (out->incompatible_matches > 0) {
-        out->disposition = VCS_PACKAGE_REUSE_INCOMPATIBLE;
-    } else {
-        out->disposition = VCS_PACKAGE_REUSE_NONE;
-    }
+    plan_set_disposition(out, request.exact, exact_compatible);
     return true;
 }
 
