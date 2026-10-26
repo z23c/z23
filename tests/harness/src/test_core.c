@@ -17,24 +17,22 @@
 /* Test-only hook exposed by random.c via weak linkage, not a header. */
 extern void zcl_random_test_force_fail(bool on);
 
-int test_core(void)
-{
 #if defined(_WIN32)
-    /* Re-exec'd child lane for the RNG-failure abort case (Windows has no
-     * fork()): trip the forced-failure path and let abort() end the
-     * process. UCRT abort() exits with code 3, which the parent asserts. */
-    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
-    if (fork_role && fork_role[0]) {
-        if (strcmp(fork_role, "rng_abort") == 0) {
-            zcl_win_suppress_abort_dialog();
-            zcl_random_test_force_fail(true);
-            uint8_t b[32] = {0};
-            GetRandBytes(b, sizeof(b));
-            return 17; /* unreachable unless the silent zero-fill regresses */
-        }
-        return 97;
+static int test_core_windows_fork_role(const char *fork_role)
+{
+    if (strcmp(fork_role, "rng_abort") == 0) {
+        zcl_win_suppress_abort_dialog();
+        zcl_random_test_force_fail(true);
+        uint8_t b[32] = {0};
+        GetRandBytes(b, sizeof(b));
+        return 17; /* unreachable unless the silent zero-fill regresses */
     }
+    return 97;
+}
 #endif
+
+static int test_core_uint256_checks(void)
+{
     int failures = 0;
 
     printf("uint256 set/get hex roundtrip... ");
@@ -88,7 +86,12 @@ int test_core(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
 
+static int test_core_money_and_stream_roundtrip(void)
+{
+    int failures = 0;
 
     printf("MoneyRange accepts valid... ");
     {
@@ -130,6 +133,13 @@ int test_core(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_core_compact_edges_and_getrand(void)
+{
+    int failures = 0;
 
     printf("compact_size encoding edge cases... ");
     {
@@ -178,69 +188,109 @@ int test_core(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+#if defined(_WIN32)
+static int test_core_getrandbytes_abort_windows(void)
+{
+    int failures = 0;
+    /* Re-exec child runs the rng_abort role above; UCRT abort() exits
+     * with code 3 — the signal-death analogue of WTERMSIG==SIGABRT. */
+    void *hp = test_spawn_self_with_role("test_core", "rng_abort",
+                                         "test-tmp/rng_abort_child.log");
+    int wcode = hp ? test_self_child_wait(hp) : -1;
+    if (wcode == 3) {
+        printf("OK\n");
+    } else if (wcode == 17) {
+        printf("FAIL (child returned normally with %d — "
+               "silent zero-fill regression)\n", wcode);
+        failures++;
+    } else {
+        printf("FAIL (unexpected child exit %d)\n", wcode);
+        failures++;
+    }
+    return failures;
+}
+#else
+static int test_core_getrandbytes_abort_posix(void)
+{
+    int failures = 0;
+    pid_t pid = fork();
+    if (pid < 0) { printf("FAIL (fork: %s)\n", strerror(errno)); failures++; }
+    else if (pid == 0) {
+        /* Child: silence the abort noise so the parent terminal
+         * stays clean, then trip the forced-failure path. Writing
+         * to /dev/null (not close()) keeps fprintf(stderr, ...)
+         * valid inside abort's cleanup. */
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        zcl_random_test_force_fail(true);
+        uint8_t b[32] = {0};
+        GetRandBytes(b, sizeof(b));
+        /* Must never reach here. If we do, write a non-zero exit
+         * code so the parent flags a regression. */
+        _exit(17);
+    } else {
+        int status = 0;
+        if (waitpid(pid, &status, 0) != pid) {
+            printf("FAIL (waitpid)\n"); failures++;
+        } else if (WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT) {
+            printf("OK\n");
+#ifdef COVERAGE_BUILD
+        } else if (WIFEXITED(status) &&
+                   WEXITSTATUS(status) == (128 + SIGABRT)) {
+            /* The coverage runtime may intercept an aborting child,
+             * flush gcov state, and translate the fatal path into
+             * the conventional 128+signal exit code. That's still
+             * the intended "hard fail" behavior here. */
+            printf("OK\n");
+#endif
+        } else if (WIFEXITED(status)) {
+            printf("FAIL (child exited cleanly with %d — "
+                   "silent zero-fill regression)\n", WEXITSTATUS(status));
+            failures++;
+        } else {
+            printf("FAIL (unexpected status 0x%x)\n", status);
+            failures++;
+        }
+    }
+    return failures;
+}
+#endif
+
+static int test_core_getrandbytes_abort(void)
+{
     /* When every entropy source is unavailable, GetRandBytes must abort()
      * rather than zero-fill the output. A forked child forces the failure
      * and the parent asserts SIGABRT. */
     printf("GetRandBytes aborts on RNG failure (no silent zero-fill)... ");
-    {
 #if defined(_WIN32)
-        /* Re-exec child runs the rng_abort role above; UCRT abort() exits
-         * with code 3 — the signal-death analogue of WTERMSIG==SIGABRT. */
-        void *hp = test_spawn_self_with_role("test_core", "rng_abort",
-                                             "test-tmp/rng_abort_child.log");
-        int wcode = hp ? test_self_child_wait(hp) : -1;
-        if (wcode == 3) {
-            printf("OK\n");
-        } else if (wcode == 17) {
-            printf("FAIL (child returned normally with %d — "
-                   "silent zero-fill regression)\n", wcode);
-            failures++;
-        } else {
-            printf("FAIL (unexpected child exit %d)\n", wcode);
-            failures++;
-        }
+    return test_core_getrandbytes_abort_windows();
 #else
-        pid_t pid = fork();
-        if (pid < 0) { printf("FAIL (fork: %s)\n", strerror(errno)); failures++; }
-        else if (pid == 0) {
-            /* Child: silence the abort noise so the parent terminal
-             * stays clean, then trip the forced-failure path. Writing
-             * to /dev/null (not close()) keeps fprintf(stderr, ...)
-             * valid inside abort's cleanup. */
-            int devnull = open("/dev/null", O_WRONLY);
-            if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
-            zcl_random_test_force_fail(true);
-            uint8_t b[32] = {0};
-            GetRandBytes(b, sizeof(b));
-            /* Must never reach here. If we do, write a non-zero exit
-             * code so the parent flags a regression. */
-            _exit(17);
-        } else {
-            int status = 0;
-            if (waitpid(pid, &status, 0) != pid) {
-                printf("FAIL (waitpid)\n"); failures++;
-            } else if (WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT) {
-                printf("OK\n");
-#ifdef COVERAGE_BUILD
-            } else if (WIFEXITED(status) &&
-                       WEXITSTATUS(status) == (128 + SIGABRT)) {
-                /* The coverage runtime may intercept an aborting child,
-                 * flush gcov state, and translate the fatal path into
-                 * the conventional 128+signal exit code. That's still
-                 * the intended "hard fail" behavior here. */
-                printf("OK\n");
+    return test_core_getrandbytes_abort_posix();
 #endif
-            } else if (WIFEXITED(status)) {
-                printf("FAIL (child exited cleanly with %d — "
-                       "silent zero-fill regression)\n", WEXITSTATUS(status));
-                failures++;
-            } else {
-                printf("FAIL (unexpected status 0x%x)\n", status);
-                failures++;
-            }
-        }
-#endif
-    }
+}
+
+static int test_core_compact_value_roundtrip(uint64_t value)
+{
+    int failures = 0;
+    struct byte_stream ws;
+    stream_init(&ws, 64);
+    stream_write_compact_size(&ws, value);
+    struct byte_stream rs;
+    stream_init_from_data(&rs, ws.data, ws.size);
+    uint64_t val = 0;
+    bool ok = stream_read_compact_size(&rs, &val) && val == value;
+    stream_free(&ws);
+    if (ok) printf("OK\n");
+    else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
+    return failures;
+}
+
+static int test_core_rand_recover_and_compact_size(void)
+{
+    int failures = 0;
 
     /* And recovery: clearing the flag returns GetRandBytes to normal
      * behavior in the parent. */
@@ -259,46 +309,13 @@ int test_core(void)
      * compact_size: canonical encoding roundtrip
      * ================================================================ */
     printf("compact_size: small value roundtrip... ");
-    {
-        struct byte_stream ws;
-        stream_init(&ws, 64);
-        stream_write_compact_size(&ws, 42);
-        struct byte_stream rs;
-        stream_init_from_data(&rs, ws.data, ws.size);
-        uint64_t val = 0;
-        bool ok = stream_read_compact_size(&rs, &val) && val == 42;
-        stream_free(&ws);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
-    }
+    failures += test_core_compact_value_roundtrip(42);
 
     printf("compact_size: 16-bit value roundtrip... ");
-    {
-        struct byte_stream ws;
-        stream_init(&ws, 64);
-        stream_write_compact_size(&ws, 1000);
-        struct byte_stream rs;
-        stream_init_from_data(&rs, ws.data, ws.size);
-        uint64_t val = 0;
-        bool ok = stream_read_compact_size(&rs, &val) && val == 1000;
-        stream_free(&ws);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
-    }
+    failures += test_core_compact_value_roundtrip(1000);
 
     printf("compact_size: 32-bit value roundtrip... ");
-    {
-        struct byte_stream ws;
-        stream_init(&ws, 64);
-        stream_write_compact_size(&ws, 100000);
-        struct byte_stream rs;
-        stream_init_from_data(&rs, ws.data, ws.size);
-        uint64_t val = 0;
-        bool ok = stream_read_compact_size(&rs, &val) && val == 100000;
-        stream_free(&ws);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
-    }
+    failures += test_core_compact_value_roundtrip(100000);
 
     printf("compact_size: accepts non-canonical encoding (wire compat)... ");
     {
@@ -314,32 +331,17 @@ int test_core(void)
     }
 
     printf("compact_size: 64-bit value roundtrip... ");
-    {
-        struct byte_stream ws;
-        stream_init(&ws, 64);
-        stream_write_compact_size(&ws, 0x200000000ULL);
-        struct byte_stream rs;
-        stream_init_from_data(&rs, ws.data, ws.size);
-        uint64_t val = 0;
-        bool ok = stream_read_compact_size(&rs, &val) && val == 0x200000000ULL;
-        stream_free(&ws);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
-    }
+    failures += test_core_compact_value_roundtrip(0x200000000ULL);
 
     printf("compact_size: boundary value 253 roundtrip... ");
-    {
-        struct byte_stream ws;
-        stream_init(&ws, 64);
-        stream_write_compact_size(&ws, 253);
-        struct byte_stream rs;
-        stream_init_from_data(&rs, ws.data, ws.size);
-        uint64_t val = 0;
-        bool ok = stream_read_compact_size(&rs, &val) && val == 253;
-        stream_free(&ws);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
-    }
+    failures += test_core_compact_value_roundtrip(253);
+
+    return failures;
+}
+
+static int test_core_stream_grow_and_varint(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * stream_grow: overflow protection
@@ -388,3 +390,26 @@ int test_core(void)
 
     return failures;
 }
+
+int test_core(void)
+{
+#if defined(_WIN32)
+    /* Re-exec'd child lane for the RNG-failure abort case (Windows has no
+     * fork()): trip the forced-failure path and let abort() end the
+     * process. UCRT abort() exits with code 3, which the parent asserts. */
+    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
+    if (fork_role && fork_role[0]) {
+        return test_core_windows_fork_role(fork_role);
+    }
+#endif
+    int failures = 0;
+
+    failures += test_core_uint256_checks();
+    failures += test_core_money_and_stream_roundtrip();
+    failures += test_core_compact_edges_and_getrand();
+    failures += test_core_getrandbytes_abort();
+    failures += test_core_rand_recover_and_compact_size();
+    failures += test_core_stream_grow_and_varint();
+    return failures;
+}
+
