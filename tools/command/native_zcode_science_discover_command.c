@@ -271,20 +271,13 @@ static void zdsc_discover_filter_root(const char *search,
 }
 
 static bool zdsc_study_allowlist(struct sqlite3 *db, struct node_db *ndb,
-                                 const char *search, const char *category,
-                                 int64_t now,
+                                 const char *search_like_p,
+                                 const char *category, int64_t now,
                                  uint8_t (**allowlist_out)[32],
                                  size_t *allow_count_out,
                                  struct zcl_command_reply *reply,
                                  const char *leaf)
 {
-    /* Filter FIRST, over the SQL projection: search (root/hypothesis
-     * substring) and category (projection state at now). */
-    char search_like[ZDSC_SEARCH_MAX * 2 + 4];
-    const char *search_like_p =
-        zdsc_search_like(search, search_like, sizeof(search_like))
-            ? search_like
-            : NULL;
     struct db_zcode_science_entry *rows = zcl_malloc(
         sizeof(*rows) * ZDSC_STUDY_FILTER_MAX, "zcode.science.discover.rows");
     int row_count = 0;
@@ -548,6 +541,13 @@ void zcl_native_handle_zcode_science_discover(
                   "workspace must name an existing directory", leaf);
         return;
     }
+    /* Filter FIRST, over the SQL projection: search (root/hypothesis
+     * substring) and category (projection state at now). */
+    char search_like[ZDSC_SEARCH_MAX * 2 + 4];
+    const char *search_like_p =
+        zdsc_search_like(search, search_like, sizeof(search_like))
+            ? search_like
+            : NULL;
     struct node_db ndb = {0};
     struct sqlite3 *db = NULL;
     if (!zcl_native_node_db_require_readonly(
@@ -556,8 +556,8 @@ void zcl_native_handle_zcode_science_discover(
         return;
     uint8_t(*allowlist)[32] = NULL;
     size_t allow_count = 0;
-    if (!zdsc_study_allowlist(db, &ndb, search, category, now, &allowlist,
-                              &allow_count, reply, leaf))
+    if (!zdsc_study_allowlist(db, &ndb, search_like_p, category, now,
+                              &allowlist, &allow_count, reply, leaf))
         return;
     struct zdsc_build build = {0};
     if (!zdsc_discover_projection(&build, workspace, now, hardware, allowlist,
