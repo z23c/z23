@@ -5,6 +5,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+static FILE *real_source(void) { return stdin; }
+static FILE *real_sink(void) { return stdout; }
+#endif
 
 static FILE *cli_source, *cli_sink;
 #undef stdin
@@ -287,7 +294,90 @@ static void test_cli_read_error(void) {
   if (output) CHECK(fclose(output) == 0);
 }
 
-int main(void) {
+#if defined(_WIN32)
+struct win_cli_fds {
+  int input[2], output[2], saved[2], mode[2];
+};
+
+static bool win_cli_restore(struct win_cli_fds *f) {
+  bool ok = true;
+  for (int i = 0; i < 2; i++) {
+    if (f->saved[i] < 0) continue;
+    if (_dup2(f->saved[i], i) != 0) ok = false;
+    if (f->mode[i] != -1 && _setmode(i, f->mode[i]) == -1) ok = false;
+    if (_close(f->saved[i]) != 0) ok = false;
+    f->saved[i] = -1;
+  }
+  return ok;
+}
+
+static void win_cli_close(struct win_cli_fds *f) {
+  for (int i = 0; i < 2; i++) {
+    if (f->input[i] >= 0) _close(f->input[i]);
+    if (f->output[i] >= 0) _close(f->output[i]);
+  }
+}
+
+static bool win_cli_redirect(struct win_cli_fds *f, const void *data, unsigned n) {
+  if (_pipe(f->input, 256, _O_BINARY | _O_NOINHERIT) != 0) return false;
+  if (_pipe(f->output, 256, _O_BINARY | _O_NOINHERIT) != 0) return false;
+  if (_write(f->input[1], data, n) != (int)n) return false;
+  if (_close(f->input[1]) != 0) return false;
+  f->input[1] = -1;
+  for (int i = 0; i < 2; i++) {
+    f->saved[i] = _dup(i);
+    if (f->saved[i] < 0) return false;
+    f->mode[i] = _setmode(i, _O_TEXT);
+    if (f->mode[i] == -1) return false;
+  }
+  if (_dup2(f->input[0], 0) != 0 || _dup2(f->output[1], 1) != 0) return false;
+  return _setmode(0, _O_TEXT) != -1 && _setmode(1, _O_TEXT) != -1;
+}
+
+static int win_cli_binary(const char *exe, const char *operation,
+                           const void *data, unsigned n,
+                           const void *want, size_t want_len) {
+  struct win_cli_fds f = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}};
+  int bad = 1;
+  if (fflush(real_sink()) != 0) return 1;
+  if (!win_cli_redirect(&f, data, n)) goto cleanup;
+  const char *args[] = {"zhtml-test", "--cli", operation, NULL};
+  intptr_t rc = _spawnv(_P_WAIT, exe, args);
+  if (!win_cli_restore(&f)) goto cleanup;
+  if (_close(f.output[1]) != 0) goto cleanup;
+  f.output[1] = -1;
+  unsigned char got[128];
+  int size = _read(f.output[0], got, sizeof got);
+  if (rc == 0 && size >= 0 && (size_t)size == want_len &&
+      memcmp(got, want, want_len) == 0) bad = 0;
+cleanup:
+  if (!win_cli_restore(&f)) bad = 1;
+  win_cli_close(&f);
+  return bad;
+}
+
+static void test_cli_binary_process(const char *exe) {
+  static const unsigned char raw[] = {'A', 0, '\r', '\n', 0x1a, 'B', '&', '\n'};
+  static const unsigned char encoded[] = {'A', 0, '\r', '\n', 0x1a,
+                                         'B', '&', 'a', 'm', 'p', ';', '\n'};
+  CHECK(win_cli_binary(exe, "unescape", encoded, sizeof encoded,
+                       raw, sizeof raw) == 0);
+  CHECK(win_cli_binary(exe, "escape", raw, sizeof raw,
+                       encoded, sizeof encoded) == 0);
+}
+#endif
+
+int main(int argc, char **argv) {
+#if defined(_WIN32)
+  if (argc == 3 && strcmp(argv[1], "--cli") == 0) {
+    cli_source = real_source(); cli_sink = real_sink();
+    char *args[] = {argv[0], argv[2], NULL};
+    return zhtml_cli_main(2, args);
+  }
+  test_cli_binary_process(argv[0]);
+#else
+  (void)argc; (void)argv;
+#endif
   test_cli_splits();
   test_cli_entity_bounds();
   test_cli_controls();

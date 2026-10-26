@@ -8,6 +8,22 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
+static int binary_stream(FILE *stream) {
+#if defined(_WIN32)
+  if (_setmode(_fileno(stream), _O_BINARY) == -1) {
+    fprintf(stderr, "zhtml: cannot select binary stream mode\n");
+    return 1;
+  }
+#else
+  (void)stream;
+#endif
+  return 0;
+}
 
 static int malformed_stream(void) {
   fprintf(stderr, "zhtml: unescape: malformed entity\n");
@@ -91,6 +107,8 @@ int main(int argc, char **argv) {
     fprintf(stderr, "zhtml: unknown op '%s'\n", argv[1]);
     return 2;
   }
+  if (binary_stream(stdout)) return 1;
+  if (argc == 2 && binary_stream(stdin)) return 1;
   if (argc > 2) {
     int i, rc = 0;
     for (i = 2; i < argc; i++) {
