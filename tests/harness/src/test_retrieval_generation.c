@@ -83,50 +83,211 @@ static bool rg_root_any(const uint8_t root[32])
     return aggregate != 0;
 }
 
+struct rg_text_expect {
+    const char *observed;
+    const char *expected;
+};
+
+static int rg_projection_prepare(char *temporary, size_t temporary_n,
+                                 char *workspace, size_t workspace_n,
+                                 struct json_value *input,
+                                 struct zcl_native_dev_retrieval_snapshot *snapshot,
+                                 char *error_code, size_t error_code_n,
+                                 char *error_message, size_t error_message_n,
+                                 bool *ready_out)
+{
+    uint8_t expected[32];
+    char expected_hex[65];
+    bool ready = platform_temp_directory_create(
+            "z23-rg-bind-", temporary, temporary_n) &&
+        platform_directory_canonical_real(
+            temporary, workspace, workspace_n) &&
+        rg_write(workspace, "lib/net/src/generation.c", rg_source_a);
+    ready = ready && rg_manifest_root(workspace, expected);
+    if (ready) zcl_hex_encode(expected, sizeof(expected), expected_hex);
+    json_init(input);
+    json_set_object(input);
+    ready = ready && json_push_kv_str(input, "workspace", workspace) &&
+        json_push_kv_str(input, "expected_vcs_root", expected_hex) &&
+        json_push_kv_str(input, "task_id", "projection-binding") &&
+        json_push_kv_str(input, "query", "generation function");
+    *ready_out = ready;
+    return ready ? zcl_native_dev_retrieval_snapshot_compute(
+        input, snapshot, error_code, error_code_n,
+        error_message, error_message_n) : ZCL_COMMAND_EXIT_INTERNAL;
+}
+
+static bool rg_projection_view_roots(int rc, const char *workspace,
+                                     struct codeindex **index_out,
+                                     uint8_t source_root[32],
+                                     uint8_t projection_root[32])
+{
+    *index_out = rc == ZCL_COMMAND_EXIT_OK
+        ? codeindex_open_retrieval_view(workspace) : NULL;
+    return *index_out &&
+        codeindex_source_root_sha3(*index_out, source_root) &&
+        codeindex_retrieval_projection_root_sha3(*index_out, projection_root);
+}
+
+static bool rg_snapshot_roots_distinct(
+    bool ready, int rc, bool rooted,
+    const struct zcl_native_dev_retrieval_snapshot *snapshot)
+{
+    return ready && rc == ZCL_COMMAND_EXIT_OK && rooted &&
+        rg_root_any(snapshot->codeindex_source_root) &&
+        rg_root_any(snapshot->retrieval_projection_root) &&
+        memcmp(snapshot->codeindex_source_root,
+               snapshot->retrieval_projection_root, 32u) != 0;
+}
+
+static bool rg_snapshot_roots_match_view(
+    bool rooted, const struct zcl_native_dev_retrieval_snapshot *snapshot,
+    const uint8_t source_root[32], const uint8_t projection_root[32])
+{
+    return rooted &&
+        memcmp(snapshot->codeindex_source_root, source_root, 32u) == 0 &&
+        memcmp(snapshot->retrieval_projection_root, projection_root, 32u) == 0;
+}
+
+static bool rg_profile_features_ready(
+    bool rooted, enum zcl_retrieval_experiment_error profile_status,
+    const struct zcl_retrieval_profile_v1 *profile,
+    const struct zcl_native_dev_retrieval_snapshot *snapshot,
+    struct zcl_retrieval_feature_snapshot_v1 *feature_snapshot,
+    struct zcl_retrieval_feature_row_v1 *feature_rows, size_t *indices,
+    struct zcl_retrieval_profile_report *profile_report,
+    uint8_t profile_root[32], uint8_t feature_root[32],
+    uint8_t candidate_root[32])
+{
+    bool experiment_ready = rooted &&
+        profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        zcl_retrieval_context_feature_snapshot(
+            snapshot->codeindex_source_root,
+            snapshot->retrieval_projection_root, snapshot->query,
+            snapshot->bm25.rows, snapshot->bm25.count, snapshot->bm25.complete,
+            feature_snapshot, feature_rows,
+            ZCL_RETRIEVAL_EVAL_RANK_MAX) == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        zcl_retrieval_profile_project(
+            profile, feature_snapshot, feature_rows, indices,
+            ZCL_RETRIEVAL_EVAL_RANK_MAX, profile_report) ==
+                ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        zcl_retrieval_profile_root(profile, profile_root) ==
+            ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        zcl_retrieval_feature_snapshot_root(
+            feature_snapshot, feature_rows, feature_root) ==
+                ZCL_RETRIEVAL_EXPERIMENT_OK;
+    if (experiment_ready)
+        memcpy(candidate_root, profile_report->candidate_ranking_root,
+               sizeof(profile_report->candidate_ranking_root));
+    return experiment_ready;
+}
+
+static bool rg_push_experiment_identity(
+    bool experiment_ready, struct json_value *input,
+    const char *profile_wire_hex, const char *study_hex,
+    const char *preregistration_hex, const char *evaluator_hex,
+    const struct zcl_native_dev_retrieval_snapshot *snapshot,
+    const uint8_t profile_root[32], const uint8_t feature_root[32],
+    const uint8_t candidate_root[32], const uint8_t study[32],
+    const uint8_t preregistration[32], const uint8_t evaluator[32],
+    uint8_t proposal[32])
+{
+    return experiment_ready &&
+        json_push_kv_str(input, "profile_hex", profile_wire_hex) &&
+        json_push_kv_str(input, "study_root", study_hex) &&
+        json_push_kv_str(input, "preregistration_root",
+                         preregistration_hex) &&
+        json_push_kv_str(input, "evaluator_root", evaluator_hex) &&
+        zcl_retrieval_profile_proposal_input_root(
+            snapshot->source_root, snapshot->codeindex_source_root,
+            snapshot->retrieval_projection_root, snapshot->task_id,
+            snapshot->query, snapshot->bm25_ranking_root, profile_root,
+            feature_root, candidate_root, study, preregistration, evaluator,
+            proposal);
+}
+
+static bool rg_text_expects_match(const struct rg_text_expect *expect,
+                                  size_t count)
+{
+    bool matched = true;
+    for (size_t i = 0; i < count; i++)
+        matched = matched && expect[i].observed &&
+            strcmp(expect[i].observed, expect[i].expected) == 0;
+    return matched;
+}
+
+static bool rg_experiment_v3_evidence_bound(
+    bool experiment_ready, const struct zcl_command_reply *reply,
+    const char *schema, const struct rg_text_expect *expect, size_t count)
+{
+    return experiment_ready &&
+        reply->exit_code == ZCL_COMMAND_EXIT_OK &&
+        schema && strcmp(schema, "zcl.dev_retrieval_experiment.v3") == 0 &&
+        rg_text_expects_match(expect, count) &&
+        !json_get_bool(json_get(&reply->data, "quality_claim_available")) &&
+        !json_get_bool(json_get(&reply->data, "promotion_authorized"));
+}
+
+static bool rg_experiment_roots_repeat(
+    int exit_code, const char *second_proposal, const char *first_proposal,
+    const char *second_feature, const char *first_feature,
+    const char *second_candidate, const char *first_candidate)
+{
+    const struct rg_text_expect expect[] = {
+        {second_proposal, first_proposal},
+        {second_feature, first_feature},
+        {second_candidate, first_candidate},
+    };
+    return exit_code == ZCL_COMMAND_EXIT_OK &&
+        rg_text_expects_match(expect, sizeof(expect) / sizeof(expect[0]));
+}
+
+static bool rg_profile_feature_unavailable(
+    const struct zcl_command_reply *reply)
+{
+    return reply->exit_code != ZCL_COMMAND_EXIT_OK &&
+        strcmp(reply->error.code, "PROJECTION_REFUSED") == 0 &&
+        strstr(reply->error.message, "unavailable") != NULL &&
+        json_get(&reply->data, "candidate_ranking_root") == NULL &&
+        json_get(&reply->data, "proposal_input_root") == NULL;
+}
+
+static bool rg_profile_wire_refused(const struct zcl_command_reply *reply)
+{
+    return reply->exit_code != ZCL_COMMAND_EXIT_OK &&
+        strcmp(reply->error.code, "INVALID_PROFILE") == 0 &&
+        json_get(&reply->data, "source_root") == NULL;
+}
+
+static void rg_replace_profile_hex(struct json_value *input, const char *hex)
+{
+    for (size_t i = 0; i < input->num_children; i++)
+        if (strcmp(input->keys[i], "profile_hex") == 0)
+            json_set_str(&input->children[i], hex);
+}
+
 static int case_projection_binding(void)
 {
     int failures = 0;
     char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
     char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
-    bool ready = platform_temp_directory_create(
-            "z23-rg-bind-", temporary, sizeof(temporary)) &&
-        platform_directory_canonical_real(
-            temporary, workspace, sizeof(workspace)) &&
-        rg_write(workspace, "lib/net/src/generation.c", rg_source_a);
-    uint8_t expected[32];
-    ready = ready && rg_manifest_root(workspace, expected);
-    char expected_hex[65];
-    if (ready) zcl_hex_encode(expected, sizeof(expected), expected_hex);
-
     struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
-    ready = ready && json_push_kv_str(&input, "workspace", workspace) &&
-        json_push_kv_str(&input, "expected_vcs_root", expected_hex) &&
-        json_push_kv_str(&input, "task_id", "projection-binding") &&
-        json_push_kv_str(&input, "query", "generation function");
     struct zcl_native_dev_retrieval_snapshot snapshot = {0};
     char error_code[64] = {0}, error_message[256] = {0};
-    int rc = ready ? zcl_native_dev_retrieval_snapshot_compute(
+    bool ready = false;
+    int rc = rg_projection_prepare(
+        temporary, sizeof(temporary), workspace, sizeof(workspace),
         &input, &snapshot, error_code, sizeof(error_code),
-        error_message, sizeof(error_message)) : ZCL_COMMAND_EXIT_INTERNAL;
-
-    struct codeindex *index = rc == ZCL_COMMAND_EXIT_OK
-        ? codeindex_open_retrieval_view(workspace) : NULL;
-    uint8_t source_root[32], projection_root[32];
-    bool rooted = index && codeindex_source_root_sha3(index, source_root) &&
-        codeindex_retrieval_projection_root_sha3(index, projection_root);
+        error_message, sizeof(error_message), &ready);
+    struct codeindex *index = NULL;
+    uint8_t source_root[32] = {0}, projection_root[32] = {0};
+    bool rooted = rg_projection_view_roots(
+        rc, workspace, &index, source_root, projection_root);
     RG_CHECK("snapshot binds distinct source and logical projection roots",
-             ready && rc == ZCL_COMMAND_EXIT_OK && rooted &&
-             rg_root_any(snapshot.codeindex_source_root) &&
-             rg_root_any(snapshot.retrieval_projection_root) &&
-             memcmp(snapshot.codeindex_source_root,
-                    snapshot.retrieval_projection_root, 32u) != 0);
+             rg_snapshot_roots_distinct(ready, rc, rooted, &snapshot));
     RG_CHECK("snapshot roots reproduce the verified retrieval view",
-             rooted && memcmp(snapshot.codeindex_source_root,
-                              source_root, 32u) == 0 &&
-             memcmp(snapshot.retrieval_projection_root,
-                    projection_root, 32u) == 0);
+             rg_snapshot_roots_match_view(
+                 rooted, &snapshot, source_root, projection_root));
 
     struct zcl_retrieval_profile_v1 profile;
     zcl_retrieval_profile_init(&profile);
@@ -158,38 +319,15 @@ static int case_projection_binding(void)
         feature_rows[ZCL_RETRIEVAL_EVAL_RANK_MAX];
     size_t indices[ZCL_RETRIEVAL_EVAL_RANK_MAX];
     struct zcl_retrieval_profile_report profile_report;
-    bool experiment_ready = rooted &&
-        profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK &&
-        zcl_retrieval_context_feature_snapshot(
-            snapshot.codeindex_source_root,
-            snapshot.retrieval_projection_root, snapshot.query,
-            snapshot.bm25.rows, snapshot.bm25.count, snapshot.bm25.complete,
-            &feature_snapshot, feature_rows,
-            ZCL_RETRIEVAL_EVAL_RANK_MAX) == ZCL_RETRIEVAL_EXPERIMENT_OK &&
-        zcl_retrieval_profile_project(
-            &profile, &feature_snapshot, feature_rows, indices,
-            ZCL_RETRIEVAL_EVAL_RANK_MAX, &profile_report) ==
-                ZCL_RETRIEVAL_EXPERIMENT_OK &&
-        zcl_retrieval_profile_root(&profile, profile_root) ==
-            ZCL_RETRIEVAL_EXPERIMENT_OK &&
-        zcl_retrieval_feature_snapshot_root(
-            &feature_snapshot, feature_rows, feature_root) ==
-                ZCL_RETRIEVAL_EXPERIMENT_OK;
-    if (experiment_ready)
-        memcpy(candidate_root, profile_report.candidate_ranking_root,
-               sizeof(candidate_root));
-    experiment_ready = experiment_ready &&
-        json_push_kv_str(&input, "profile_hex", profile_wire_hex) &&
-        json_push_kv_str(&input, "study_root", study_hex) &&
-        json_push_kv_str(&input, "preregistration_root",
-                         preregistration_hex) &&
-        json_push_kv_str(&input, "evaluator_root", evaluator_hex) &&
-        zcl_retrieval_profile_proposal_input_root(
-            snapshot.source_root, snapshot.codeindex_source_root,
-            snapshot.retrieval_projection_root, snapshot.task_id,
-            snapshot.query, snapshot.bm25_ranking_root, profile_root,
-            feature_root, candidate_root, study, preregistration, evaluator,
-            proposal);
+    bool experiment_ready = rg_profile_features_ready(
+        rooted, profile_status, &profile, &snapshot, &feature_snapshot,
+        feature_rows, indices, &profile_report, profile_root, feature_root,
+        candidate_root);
+    experiment_ready = rg_push_experiment_identity(
+        experiment_ready, &input, profile_wire_hex, study_hex,
+        preregistration_hex, evaluator_hex, &snapshot, profile_root,
+        feature_root, candidate_root, study, preregistration, evaluator,
+        proposal);
     zcl_hex_encode(proposal, 32u, proposal_hex);
     struct zcl_command_request request = {.input = &input};
     struct zcl_command_reply reply;
@@ -213,21 +351,18 @@ static int case_projection_binding(void)
     zcl_hex_encode(profile_root, 32u, profile_root_hex);
     zcl_hex_encode(feature_root, 32u, feature_root_hex);
     zcl_hex_encode(candidate_root, 32u, first_candidate);
+    const struct rg_text_expect bound[] = {
+        {observed_source, source_hex},
+        {observed_projection, projection_hex},
+        {observed_proposal, proposal_hex},
+        {observed_profile, profile_root_hex},
+        {observed_feature, feature_root_hex},
+        {observed_candidate, first_candidate},
+    };
     RG_CHECK("experiment v3 binds profile and exact feature evidence",
-             experiment_ready && reply.exit_code == ZCL_COMMAND_EXIT_OK &&
-             schema && strcmp(schema, "zcl.dev_retrieval_experiment.v3") == 0 &&
-             observed_source && strcmp(observed_source, source_hex) == 0 &&
-             observed_projection &&
-             strcmp(observed_projection, projection_hex) == 0 &&
-             observed_proposal &&
-             strcmp(observed_proposal, proposal_hex) == 0 &&
-             observed_profile && strcmp(observed_profile, profile_root_hex) == 0 &&
-             observed_feature && strcmp(observed_feature, feature_root_hex) == 0 &&
-             observed_candidate && strcmp(observed_candidate,
-                                           first_candidate) == 0 &&
-             !json_get_bool(json_get(&reply.data,
-                                     "quality_claim_available")) &&
-             !json_get_bool(json_get(&reply.data, "promotion_authorized")));
+             rg_experiment_v3_evidence_bound(
+                 experiment_ready, &reply, schema, bound,
+                 sizeof(bound) / sizeof(bound[0])));
     char first_proposal[65], first_feature[65];
     snprintf(first_proposal, sizeof(first_proposal), "%s",
              observed_proposal ? observed_proposal : "");
@@ -245,10 +380,10 @@ static int case_projection_binding(void)
     const char *second_candidate = json_get_str(
         json_get(&reply.data, "candidate_ranking_root"));
     RG_CHECK("identical profile experiment is root-deterministic",
-             reply.exit_code == ZCL_COMMAND_EXIT_OK && second_proposal &&
-             strcmp(second_proposal, first_proposal) == 0 && second_feature &&
-             strcmp(second_feature, first_feature) == 0 && second_candidate &&
-             strcmp(second_candidate, first_candidate) == 0);
+             rg_experiment_roots_repeat(
+                 reply.exit_code, second_proposal, first_proposal,
+                 second_feature, first_feature, second_candidate,
+                 first_candidate));
     zcl_command_reply_free(&reply);
 
     profile.feature_mask |= ZCL_RETRIEVAL_FEATURE_BIT(
@@ -257,19 +392,13 @@ static int case_projection_binding(void)
     profile_status = zcl_retrieval_profile_serialize(&profile, profile_wire);
     if (profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK) {
         zcl_hex_encode(profile_wire, sizeof(profile_wire), profile_wire_hex);
-        for (size_t i = 0; i < input.num_children; i++)
-            if (strcmp(input.keys[i], "profile_hex") == 0)
-                json_set_str(&input.children[i], profile_wire_hex);
+        rg_replace_profile_hex(&input, profile_wire_hex);
     }
     zcl_command_reply_init(&reply, "zcl.dev_retrieval_experiment.v3");
     if (profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK)
         zcl_native_handle_dev_retrieval_experiment(&request, &reply);
     RG_CHECK("unobserved profile feature fails incomplete without candidate",
-             reply.exit_code != ZCL_COMMAND_EXIT_OK &&
-             strcmp(reply.error.code, "PROJECTION_REFUSED") == 0 &&
-             strstr(reply.error.message, "unavailable") != NULL &&
-             json_get(&reply.data, "candidate_ranking_root") == NULL &&
-             json_get(&reply.data, "proposal_input_root") == NULL);
+             rg_profile_feature_unavailable(&reply));
     zcl_command_reply_free(&reply);
 
     profile.feature_mask &= (uint16_t)~ZCL_RETRIEVAL_FEATURE_BIT(
@@ -279,27 +408,19 @@ static int case_projection_binding(void)
     if (profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK) {
         zcl_hex_encode(profile_wire, sizeof(profile_wire), profile_wire_hex);
         profile_wire_hex[1] = 'A';
-        for (size_t i = 0; i < input.num_children; i++)
-            if (strcmp(input.keys[i], "profile_hex") == 0)
-                json_set_str(&input.children[i], profile_wire_hex);
+        rg_replace_profile_hex(&input, profile_wire_hex);
     }
     zcl_command_reply_init(&reply, "zcl.dev_retrieval_experiment.v3");
     zcl_native_handle_dev_retrieval_experiment(&request, &reply);
     RG_CHECK("noncanonical uppercase profile wire is refused before ranking",
-             reply.exit_code != ZCL_COMMAND_EXIT_OK &&
-             strcmp(reply.error.code, "INVALID_PROFILE") == 0 &&
-             json_get(&reply.data, "source_root") == NULL);
+             rg_profile_wire_refused(&reply));
     zcl_command_reply_free(&reply);
 
-    for (size_t i = 0; i < input.num_children; i++)
-        if (strcmp(input.keys[i], "profile_hex") == 0)
-            json_set_str(&input.children[i], "00");
+    rg_replace_profile_hex(&input, "00");
     zcl_command_reply_init(&reply, "zcl.dev_retrieval_experiment.v3");
     zcl_native_handle_dev_retrieval_experiment(&request, &reply);
     RG_CHECK("wrong-size profile wire is refused before ranking",
-             reply.exit_code != ZCL_COMMAND_EXIT_OK &&
-             strcmp(reply.error.code, "INVALID_PROFILE") == 0 &&
-             json_get(&reply.data, "source_root") == NULL);
+             rg_profile_wire_refused(&reply));
     zcl_command_reply_free(&reply);
     codeindex_close(index);
     json_free(&input);
@@ -333,60 +454,118 @@ static bool rg_aba_hook(enum zcl_native_dev_retrieval_test_phase phase,
     return false;
 }
 
+struct rg_aba_setup {
+    bool same_size;
+    bool temp_created;
+    bool canonical;
+    bool source_written;
+    bool manifested;
+    bool ready;
+};
+
+static void rg_aba_bind_workspace(struct rg_aba_setup *setup,
+                                  char *temporary, size_t temporary_n,
+                                  char *workspace, size_t workspace_n,
+                                  char expected_hex[65])
+{
+    uint8_t expected[32];
+    setup->same_size = sizeof(rg_source_a) == sizeof(rg_source_b);
+    setup->temp_created = platform_temp_directory_create(
+        "z23-rg-", temporary, temporary_n);
+    setup->canonical = setup->temp_created &&
+        platform_directory_canonical_real(temporary, workspace, workspace_n);
+    setup->source_written = setup->canonical &&
+        rg_write(workspace, "lib/net/src/generation.c", rg_source_a);
+    setup->manifested = setup->source_written &&
+        rg_manifest_root(workspace, expected);
+    setup->ready = setup->same_size && setup->temp_created &&
+        setup->source_written && setup->canonical && setup->manifested;
+    if (setup->ready)
+        zcl_hex_encode(expected, sizeof(expected), expected_hex);
+}
+
+static int rg_aba_run_hooked_snapshot(
+    bool *ready, struct json_value *input, const char *workspace,
+    const char *expected_hex, struct rg_schedule *schedule,
+    struct zcl_native_dev_retrieval_snapshot *snapshot,
+    struct zcl_native_dev_retrieval_snapshot *sentinel,
+    char *error_code, size_t error_code_n,
+    char *error_message, size_t error_message_n)
+{
+    *ready = *ready &&
+        json_push_kv_str(input, "workspace", workspace) &&
+        json_push_kv_str(input, "expected_vcs_root", expected_hex) &&
+        json_push_kv_str(input, "task_id", "aba-generation") &&
+        json_push_kv_str(input, "query", "generation function");
+    zcl_native_dev_retrieval_test_set_hook(rg_aba_hook, schedule);
+    memset(sentinel, 0x6d, sizeof(*sentinel));
+    *snapshot = *sentinel;
+    int rc = *ready ? zcl_native_dev_retrieval_snapshot_compute(
+        input, snapshot, error_code, error_code_n,
+        error_message, error_message_n) : ZCL_COMMAND_EXIT_INTERNAL;
+    zcl_native_dev_retrieval_test_set_hook(NULL, NULL);
+    return rc;
+}
+
+static bool rg_aba_state_unexpected(bool ready, unsigned before_open,
+                                    unsigned before_post, int rc)
+{
+    return !ready || before_open != 1u || before_post != 1u ||
+        rc != ZCL_COMMAND_EXIT_INVALID;
+}
+
+static bool rg_aba_latches_reached(bool ready, unsigned before_open,
+                                   unsigned before_post)
+{
+    return ready && before_open == 1u && before_post == 1u;
+}
+
+static bool rg_aba_snapshot_refused(
+    int rc, const char *error_code,
+    const struct zcl_native_dev_retrieval_snapshot *snapshot,
+    const struct zcl_native_dev_retrieval_snapshot *sentinel)
+{
+    return rc == ZCL_COMMAND_EXIT_INVALID &&
+        strcmp(error_code,
+               "CODEINDEX_GENERATION_CHANGED_DURING_BENCHMARK") == 0 &&
+        memcmp(snapshot, sentinel, sizeof(*snapshot)) == 0;
+}
+
 static int case_aba_generation_join(void)
 {
     int failures = 0;
     char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
     char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
-    bool same_size = sizeof(rg_source_a) == sizeof(rg_source_b);
-    bool temp_created = platform_temp_directory_create(
-        "z23-rg-", temporary, sizeof(temporary));
-    bool canonical = temp_created && platform_directory_canonical_real(
-        temporary, workspace, sizeof(workspace));
-    bool source_written = canonical && rg_write(
-        workspace, "lib/net/src/generation.c", rg_source_a);
-    uint8_t expected[32];
-    bool manifested = source_written && rg_manifest_root(workspace, expected);
-    bool ready = same_size && temp_created && source_written && canonical &&
-        manifested;
     char expected_hex[65];
-    if (ready) zcl_hex_encode(expected, sizeof(expected), expected_hex);
-
+    struct rg_aba_setup setup;
+    rg_aba_bind_workspace(&setup, temporary, sizeof(temporary),
+                          workspace, sizeof(workspace), expected_hex);
     struct json_value input;
     json_init(&input);
     json_set_object(&input);
-    ready = ready && json_push_kv_str(&input, "workspace", workspace) &&
-        json_push_kv_str(&input, "expected_vcs_root", expected_hex) &&
-        json_push_kv_str(&input, "task_id", "aba-generation") &&
-        json_push_kv_str(&input, "query", "generation function");
     struct rg_schedule schedule = {.workspace = workspace};
-    zcl_native_dev_retrieval_test_set_hook(rg_aba_hook, &schedule);
     struct zcl_native_dev_retrieval_snapshot snapshot, sentinel;
-    memset(&sentinel, 0x6d, sizeof(sentinel));
-    snapshot = sentinel;
     char error_code[64] = {0}, error_message[256] = {0};
-    int rc = ready ? zcl_native_dev_retrieval_snapshot_compute(
-        &input, &snapshot, error_code, sizeof(error_code),
-        error_message, sizeof(error_message)) : ZCL_COMMAND_EXIT_INTERNAL;
-    zcl_native_dev_retrieval_test_set_hook(NULL, NULL);
-    if (!ready || schedule.before_open != 1u ||
-        schedule.before_post != 1u || rc != ZCL_COMMAND_EXIT_INVALID) {
+    int rc = rg_aba_run_hooked_snapshot(
+        &setup.ready, &input, workspace, expected_hex, &schedule,
+        &snapshot, &sentinel, error_code, sizeof(error_code),
+        error_message, sizeof(error_message));
+    if (rg_aba_state_unexpected(setup.ready, schedule.before_open,
+                                schedule.before_post, rc)) {
         printf("retrieval_generation: state ready=%d setup=%d/%d/%d/%d/%d "
                "before_open=%u "
                "before_post=%u rc=%d code=%s message=%s\n",
-               ready, same_size, temp_created, canonical, source_written,
-               manifested, schedule.before_open, schedule.before_post, rc,
+               setup.ready, setup.same_size, setup.temp_created,
+               setup.canonical, setup.source_written, setup.manifested,
+               schedule.before_open, schedule.before_post, rc,
                error_code[0] ? error_code : "(none)",
                error_message[0] ? error_message : "(none)");
     }
     RG_CHECK("A-B-A source schedule reaches both exact phase latches",
-             ready && schedule.before_open == 1u &&
-             schedule.before_post == 1u);
+             rg_aba_latches_reached(setup.ready, schedule.before_open,
+                                    schedule.before_post));
     RG_CHECK("mixed code-index generation refuses without snapshot output",
-             rc == ZCL_COMMAND_EXIT_INVALID &&
-             strcmp(error_code,
-                    "CODEINDEX_GENERATION_CHANGED_DURING_BENCHMARK") == 0 &&
-             memcmp(&snapshot, &sentinel, sizeof(snapshot)) == 0);
+             rg_aba_snapshot_refused(rc, error_code, &snapshot, &sentinel));
     json_free(&input);
     if (temporary[0]) dir_remove_tree(temporary);
     return failures;

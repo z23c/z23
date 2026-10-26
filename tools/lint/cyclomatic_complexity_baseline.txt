@@ -1652,8 +1652,6 @@ tests/harness/src/test_resident_launch_contract.c:rlc_stage_run:26
 tests/harness/src/test_resident_launch_contract.c:test_resident_launch_contract:23
 tests/harness/src/test_retrieval.c:case_gold_metrics:39
 tests/harness/src/test_retrieval.c:case_tokenizer:17
-tests/harness/src/test_retrieval_generation.c:case_aba_generation_join:25
-tests/harness/src/test_retrieval_generation.c:case_projection_binding:77
 tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
 tests/harness/src/test_robustness.c:test_robustness:104
 tests/harness/src/test_rom_fetch.c:rf_lat_conn_thread:18
