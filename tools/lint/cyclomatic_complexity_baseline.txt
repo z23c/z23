@@ -1503,7 +1503,6 @@ tests/harness/src/test_blocker_history.c:test_blocker_history:37
 tests/harness/src/test_blog.c:test_blog:60
 tests/harness/src/test_blog.c:test_blog_publication_slice:24
 tests/harness/src/test_bls12_381_adversarial.c:test_bls12_381_adversarial:29
-tests/harness/src/test_bn254.c:test_bn254:33
 tests/harness/src/test_body_fetch_missing_have_data_condition.c:test_body_fetch_missing_have_data_condition:105
 tests/harness/src/test_body_fetch_stage.c:test_body_fetch_stage_platform_arm:56
 tests/harness/src/test_boot_blocktree_cleanup.c:test_boot_blocktree_cleanup:18
