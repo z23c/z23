@@ -276,57 +276,24 @@ static void reference_anchor(const uint8_t leaf[32],
 /* Public entry point: standing differential parity oracle for the Sapling
  * spend circuit. Returns the number of failures (0 == green). Non-skippable, params-free. */
 int groth16_spend_parity_oracle(void);
-int groth16_spend_parity_oracle(void)
+#define pw (*pw_storage)
+#define cs (*cs_storage)
+#define probe (*probe_storage)
+#define label (*label_storage)
+#define flagged (*flag_storage)
+#define failures (*failure_count)
+#define sections (*sections_storage)
+#define shape0 (*shape_storage)
+#define nsec0 (*nsec_storage)
+#define have_shape0 (*have_shape_storage)
+#define nk_ref (*nk_ref_storage)
+#define pkd_ref (*pkd_ref_storage)
+#define cm_api (*cm_api_storage)
+static void parity_check_reference_boundaries(
+    unsigned c, const struct spend_section_shape (*sections_storage)[REF_NUM_SECTIONS],
+    size_t nsec,
+    bool *flag_storage, char (*label_storage)[160], int *failure_count)
 {
-    printf("\n--- H4: Sapling SPEND standing differential parity oracle ---\n");
-    int failures = 0;
-
-    /* Reference table self-consistency: strictly increasing, ending at the trace total. */
-    bool ref_monotone = true;
-    for (size_t i = 1; i < REF_NUM_SECTIONS; i++)
-        if (REF_SECTIONS[i].cum_constraints <= REF_SECTIONS[i - 1].cum_constraints)
-            ref_monotone = false;
-    PARITY_CHECK("reference section table is strictly increasing", ref_monotone);
-    PARITY_CHECK("reference table terminates at trace total (98777)",
-                 REF_SECTIONS[REF_NUM_SECTIONS - 1].cum_constraints
-                     == REF_TOTAL_CONSTRAINTS);
-
-    /* Canonical shape recorded from witness 0, used for the invariance check. */
-    struct spend_section_shape shape0[REF_NUM_SECTIONS];
-    size_t nsec0 = 0;
-    bool have_shape0 = false;
-
-    /* Track the first divergence for a single, precise flag line. */
-    bool flagged = false;
-    size_t max_ported = 0;
-
-    for (unsigned c = 0; c < CORPUS_N; c++) {
-        struct parity_witness pw;
-        build_corpus_witness(&pw, c);
-        char label[160];
-
-        snprintf(label, sizeof(label),
-                 "corpus[%u]: witness constructed (valid rk/ak points)", c);
-        PARITY_CHECK(label, pw.ok);
-        if (!pw.ok)
-            continue;
-
-        struct spend_section_shape sections[REF_NUM_SECTIONS];
-        size_t nsec = 0;
-        struct spend_wire_probe probe;
-        struct constraint_system cs;
-        cs_init(&cs);
-        bool synth = sapling_spend_synthesize_traced(
-            &cs, &pw.wit, &pw.pub, sections, REF_NUM_SECTIONS, &nsec, &probe);
-
-        snprintf(label, sizeof(label),
-                 "corpus[%u]: traced synthesis succeeded", c);
-        PARITY_CHECK(label, synth);
-        if (!synth) { cs_free(&cs); continue; }
-
-        if (nsec > max_ported)
-            max_ported = nsec;
-
         /* (A) Section-boundary parity vs the reference, auto-tightening: only
          *     the `nsec` recorded sections are diffed. */
         bool boundaries_ok = (nsec <= REF_NUM_SECTIONS);
@@ -347,7 +314,14 @@ int groth16_spend_parity_oracle(void)
                  "corpus[%u]: %zu section boundaries == reference trace",
                  c, nsec);
         PARITY_CHECK(label, boundaries_ok);
+}
 
+static void parity_check_corpus_shape_invariance(
+    unsigned c, const struct spend_section_shape (*sections_storage)[REF_NUM_SECTIONS],
+    size_t nsec, struct spend_section_shape (*shape_storage)[REF_NUM_SECTIONS],
+    size_t *nsec_storage, bool *have_shape_storage,
+    bool *flag_storage, char (*label_storage)[160], int *failure_count)
+{
         /* (B) Structural invariance across the corpus. */
         if (!have_shape0) {
             memcpy(shape0, sections, nsec * sizeof(sections[0]));
@@ -368,11 +342,14 @@ int groth16_spend_parity_oracle(void)
                      "corpus[%u]: R1CS shape witness-invariant vs corpus[0]", c);
             PARITY_CHECK(label, shape_same);
         }
+}
 
-        /* (C) Per-wire value parity. */
-        /* nk wire vs the librustzcash reference (the differential). */
-        uint8_t nk_ref[32];
-        const bool have_nk_ref = parity_reference_nk(pw.wit.nsk, nk_ref);
+static void parity_check_external_nk_wire(
+    unsigned c, const struct parity_witness *pw_storage,
+    const struct constraint_system *cs_storage, const struct spend_wire_probe *probe_storage,
+    const uint8_t (*nk_ref_storage)[32], bool have_nk_ref,
+    bool *flag_storage, char (*label_storage)[160], int *failure_count)
+{
         uint8_t nk_native[32];
         sapling_nsk_to_nk(pw.wit.nsk, nk_native);
         if (!have_nk_ref) {
@@ -400,7 +377,13 @@ int groth16_spend_parity_oracle(void)
                      c);
             PARITY_CHECK(label, nk_wire_ok);
         }
+}
 
+static void parity_check_signing_and_randomized_key_wires(
+    unsigned c, const struct parity_witness *pw_storage,
+    const struct constraint_system *cs_storage, const struct spend_wire_probe *probe_storage,
+    char (*label_storage)[160], int *failure_count)
+{
         /* ak wire vs the decoded witness ak (self-consistent, section 1). */
         struct fr akx, aky;
         bool ak_dec = decode_xy(pw.wit.ak, &akx, &aky);
@@ -422,7 +405,14 @@ int groth16_spend_parity_oracle(void)
         snprintf(label, sizeof(label),
                  "corpus[%u]: in-circuit rk wire == ak + [ar]G (section 4)", c);
         PARITY_CHECK(label, rk_wire_ok);
+}
 
+static bool parity_check_note_reference_points(
+    unsigned c, const struct parity_witness *pw_storage,
+    const struct constraint_system *cs_storage, const struct spend_wire_probe *probe_storage,
+    uint8_t (*pkd_ref_storage)[32],
+    bool *flag_storage, char (*label_storage)[160], int *failure_count)
+{
         /* Sections 11/13/14/17/20: the note-content points, per witness. pk_d
          * is the output of the circuit's only variable-base multiplication;
          * cv is the first public input past rk. References come from the
@@ -433,7 +423,7 @@ int groth16_spend_parity_oracle(void)
         sapling_crh_ivk(pw.wit.ak, nk_for_ivk, ivk_ref);
 
         struct jub_point gd_ref_pt;
-        uint8_t gd_ref[32], pkd_ref[32], cv_ref[32];
+        uint8_t gd_ref[32], cv_ref[32];
         bool refs_ok = sapling_diversifier_to_gd(&gd_ref_pt, pw.wit.diversifier);
         if (refs_ok) {
             jub_to_bytes(gd_ref, &gd_ref_pt);
@@ -487,11 +477,18 @@ int groth16_spend_parity_oracle(void)
                      c, note_points[np].what);
             PARITY_CHECK(label, ok);
         }
+    return refs_ok;
+}
 
+static bool parity_check_note_commitment_api_wire(
+    unsigned c, const struct parity_witness *pw_storage,
+    const struct constraint_system *cs_storage, const struct spend_wire_probe *probe_storage,
+    const uint8_t (*pkd_ref_storage)[32], bool refs_ok, uint8_t (*cm_api_storage)[32],
+    bool *flag_storage, char (*label_storage)[160], int *failure_count)
+{
         /* Section 20 tied to the production note-commitment API:
          * sapling_compute_cm() (the wallet/output-proof commitment; cmu is
          * its x-coordinate) must agree with the circuit's cm.x wire. */
-        uint8_t cm_api[32];
         bool cm_api_ok = refs_ok
                && sapling_compute_cm(pw.wit.diversifier, pkd_ref,
                                      pw.wit.value, pw.wit.rcm, cm_api);
@@ -511,7 +508,15 @@ int groth16_spend_parity_oracle(void)
                      "(section 20)", c);
             PARITY_CHECK(label, ok);
         }
+    return cm_api_ok;
+}
 
+static void parity_check_note_commitment_anchor_handover(
+    unsigned c, const struct parity_witness *pw_storage,
+    const struct constraint_system *cs_storage, const struct spend_wire_probe *probe_storage,
+    const uint8_t (*cm_api_storage)[32], bool cm_api_ok,
+    bool *flag_storage, char (*label_storage)[160], int *failure_count)
+{
         /* Sections 17..21 end to end: fold the witnessed authentication path
          * out of circuit from sapling_compute_cm()'s own leaf and require the
          * circuit's anchor wire to match; this checks the section 20 -> 21
@@ -538,7 +543,14 @@ int groth16_spend_parity_oracle(void)
                      "the circuit's own cm.x (sections 17..21)", c);
             PARITY_CHECK(label, ok);
         }
+}
 
+static void parity_check_compressed_key_representation(
+    unsigned c, const struct parity_witness *pw_storage,
+    const struct constraint_system *cs_storage, const struct spend_wire_probe *probe_storage,
+    const uint8_t (*nk_ref_storage)[32], bool have_nk_ref,
+    bool *flag_storage, char (*label_storage)[160], int *failure_count)
+{
         /* Sections 8/9: the EdwardsPoint::repr bit wires. repr's 256 bits
          * (y[0..255] then x[0]) are the point's 32-byte compressed encoding,
          * LSB first; for nk that is librustzcash's own output, so this is a
@@ -579,7 +591,12 @@ int groth16_spend_parity_oracle(void)
                      "nk (section 9)", c);
             PARITY_CHECK(label, nk_repr_ok);
         }
+}
 
+static void parity_check_honest_witness_satisfaction(
+    unsigned c, const struct constraint_system *cs_storage,
+    bool *flag_storage, char (*label_storage)[160], int *failure_count)
+{
         /* (E) R1CS SATISFACTION, the coefficient-level check: (A) compares
          *     counts and (C) probes three wires, neither sees a wrong
          *     coefficient in a correctly-shaped constraint. Assert A*B==C
@@ -596,7 +613,13 @@ int groth16_spend_parity_oracle(void)
                  "corpus[%u]: all %zu constraints satisfied by the witness "
                  "(A*B==C)", c, cs.num_constraints);
         PARITY_CHECK(label, sat_ok);
+}
 
+static void parity_check_witness_synthesis_determinism(
+    unsigned c, const struct parity_witness *pw_storage,
+    const struct constraint_system *cs_storage, char (*label_storage)[160],
+    int *failure_count)
+{
         /* (D) Determinism: re-synthesize, expect a byte-identical witness. */
         struct constraint_system cs2;
         cs_init(&cs2);
@@ -613,6 +636,105 @@ int groth16_spend_parity_oracle(void)
         PARITY_CHECK(label, det_ok);
 
         cs_free(&cs2);
+}
+
+#undef cm_api
+#undef pkd_ref
+#undef nk_ref
+#undef have_shape0
+#undef nsec0
+#undef shape0
+#undef sections
+#undef failures
+#undef flagged
+#undef label
+#undef probe
+#undef cs
+#undef pw
+
+int groth16_spend_parity_oracle(void)
+{
+    printf("\n--- H4: Sapling SPEND standing differential parity oracle ---\n");
+    int failures = 0;
+
+    /* Reference table self-consistency: strictly increasing, ending at the trace total. */
+    bool ref_monotone = true;
+    for (size_t i = 1; i < REF_NUM_SECTIONS; i++)
+        if (REF_SECTIONS[i].cum_constraints <= REF_SECTIONS[i - 1].cum_constraints)
+            ref_monotone = false;
+    PARITY_CHECK("reference section table is strictly increasing", ref_monotone);
+    PARITY_CHECK("reference table terminates at trace total (98777)",
+                 REF_SECTIONS[REF_NUM_SECTIONS - 1].cum_constraints
+                     == REF_TOTAL_CONSTRAINTS);
+
+    /* Canonical shape recorded from witness 0, used for the invariance check. */
+    struct spend_section_shape shape0[REF_NUM_SECTIONS];
+    size_t nsec0 = 0;
+    bool have_shape0 = false;
+
+    /* Track the first divergence for a single, precise flag line. */
+    bool flagged = false;
+    size_t max_ported = 0;
+
+    for (unsigned c = 0; c < CORPUS_N; c++) {
+        struct parity_witness pw;
+        build_corpus_witness(&pw, c);
+        char label[160];
+
+        snprintf(label, sizeof(label),
+                 "corpus[%u]: witness constructed (valid rk/ak points)", c);
+        PARITY_CHECK(label, pw.ok);
+        if (!pw.ok)
+            continue;
+
+        struct spend_section_shape sections[REF_NUM_SECTIONS];
+        size_t nsec = 0;
+        struct spend_wire_probe probe;
+        struct constraint_system cs;
+        cs_init(&cs);
+        bool synth = sapling_spend_synthesize_traced(
+            &cs, &pw.wit, &pw.pub, sections, REF_NUM_SECTIONS, &nsec, &probe);
+
+        snprintf(label, sizeof(label),
+                 "corpus[%u]: traced synthesis succeeded", c);
+        PARITY_CHECK(label, synth);
+        if (!synth) { cs_free(&cs); continue; }
+
+        if (nsec > max_ported)
+            max_ported = nsec;
+
+        parity_check_reference_boundaries(c, &sections, nsec, &flagged, &label, &failures);
+
+        parity_check_corpus_shape_invariance(c, &sections, nsec, &shape0,
+            &nsec0, &have_shape0, &flagged, &label, &failures);
+
+        /* (C) Per-wire value parity. */
+        /* nk wire vs the librustzcash reference (the differential). */
+        uint8_t nk_ref[32];
+        const bool have_nk_ref = parity_reference_nk(pw.wit.nsk, nk_ref);
+        parity_check_external_nk_wire(c, &pw, &cs, &probe, &nk_ref,
+            have_nk_ref, &flagged, &label, &failures);
+
+        parity_check_signing_and_randomized_key_wires(c, &pw, &cs, &probe,
+            &label, &failures);
+
+        uint8_t pkd_ref[32];
+        bool refs_ok = parity_check_note_reference_points(c, &pw, &cs, &probe,
+            &pkd_ref, &flagged, &label, &failures);
+
+        uint8_t cm_api[32];
+        bool cm_api_ok = parity_check_note_commitment_api_wire(c, &pw, &cs, &probe,
+            &pkd_ref, refs_ok, &cm_api, &flagged, &label, &failures);
+
+        parity_check_note_commitment_anchor_handover(c, &pw, &cs, &probe,
+            &cm_api, cm_api_ok, &flagged, &label, &failures);
+
+        parity_check_compressed_key_representation(c, &pw, &cs, &probe,
+            &nk_ref, have_nk_ref, &flagged, &label, &failures);
+
+        parity_check_honest_witness_satisfaction(c, &cs, &flagged, &label, &failures);
+
+        parity_check_witness_synthesis_determinism(c, &pw, &cs, &label, &failures);
         cs_free(&cs);
     }
 
