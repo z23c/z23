@@ -228,14 +228,6 @@ static bool story_collect_files(struct codeindex *ci, struct ci_file **out,
     return true;
 }
 
-static int search_text_check_args(struct ci_store *s, const char *q,
-                                  struct ci_search_hit *out, int cap)
-{
-    if (!s || !q || !q[0] || !out || cap <= 0)
-        LOG_ERR("codeindex", "bad arg to search_text");
-    return 0;
-}
-
 static bool search_text_prepare(struct ci_store *s, sqlite3_stmt **stmt)
 {
     static const char sql[] =
@@ -283,7 +275,8 @@ static bool search_text_fill_hit(sqlite3_stmt *stmt, struct ci_search_hit *hit)
 int ci_store_search_text(struct ci_store *s, const char *q,
                          struct ci_search_hit *out, int cap)
 {
-    if (search_text_check_args(s, q, out, cap) < 0) return -1;
+    if (!s || !q || !q[0] || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to search_text");
     ci_store_lock(s);
     sqlite3_stmt *stmt = NULL;
     if (!search_text_prepare(s, &stmt)) {
@@ -306,16 +299,10 @@ int ci_store_search_text(struct ci_store *s, const char *q,
     return n;
 }
 
-static int story_check_args(struct codeindex *ci, const char *query,
-                            struct ci_story_hit *out, int cap,
-                            size_t *corpus_files, bool *truncated)
+static void story_reset_outputs(size_t *corpus_files, bool *truncated)
 {
     if (corpus_files) *corpus_files = 0;
     if (truncated) *truncated = false;
-    if (!ci || !query || !query[0] || !out || cap <= 0 || !corpus_files ||
-        !truncated || cap == INT_MAX)
-        LOG_ERR("codeindex", "bad arg to search_story");
-    return 0;
 }
 
 static bool story_index_files(struct codeindex *ci, const struct ci_file *files,
@@ -377,8 +364,10 @@ int codeindex_search_story(struct codeindex *ci, const char *query,
                            struct ci_story_hit *out, int cap,
                            size_t *corpus_files, bool *truncated)
 {
-    if (story_check_args(ci, query, out, cap, corpus_files, truncated) < 0)
-        return -1;
+    story_reset_outputs(corpus_files, truncated);
+    if (!ci || !query || !query[0] || !out || cap <= 0 || !corpus_files ||
+        !truncated || cap == INT_MAX)
+        LOG_ERR("codeindex", "bad arg to search_story");
     struct ci_file *files = NULL;
     size_t file_count = 0;
     if (!story_collect_files(ci, &files, &file_count) || file_count == 0) {
