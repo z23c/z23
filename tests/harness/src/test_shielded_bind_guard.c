@@ -485,8 +485,6 @@ static int sbg_matching_bind_import_scenario(void)
     return failures;
 }
 
-/* Scenario C's two negative controls: datadirs on which the boot-time bind
- * mismatch must NOT fire (consistent datadir, commitment-free tail). */
 static int sbg_boot_no_mismatch_controls(void)
 {
     int failures = 0;
@@ -709,8 +707,6 @@ int test_shielded_bind_guard(void)
 {
     int failures = 0;
 
-    /* Each scenario helper runs its SBG_CHECKs in the original order and
-     * returns its own failure count. */
     failures += sbg_import_refusal_scenario();
     failures += sbg_matching_bind_import_scenario();
     failures += sbg_boot_mismatch_detection_scenario();
