@@ -202,8 +202,6 @@ static bool mfd_stub_pass_validator(const struct block_index *bi,
     return true;
 }
 
-/* All eight reducer stages, in pipeline order; both drive scenarios init the
- * same set before wiring up the chain_activation_controller. */
 static bool mfd_init_all_reducer_stages(struct main_state *ms)
 {
     return header_admit_stage_init(ms) &&
@@ -248,10 +246,6 @@ static void mfd_seed_header_only_chain(struct block_index *blocks,
     active_chain_move_window_tip(&ms->chain_active, &blocks[n - 1]);
 }
 
-/* Audit the registered frontier_walled blocker's snapshot: whether it was
- * found, whether its reason names the exact walled stage, and whether the
- * reason carries the stage cursors — printing the reason if either is
- * missing, exactly as the real drive loop's diagnosis would. */
 static void mfd_scan_walled_blocker_reason(bool *found, bool *wall_named,
                                            bool *cursors_carried)
 {
