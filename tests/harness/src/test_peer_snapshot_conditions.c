@@ -336,14 +336,6 @@ static int run_sync_violation_timer_resets_case(void)
     return failures;
 }
 
-static bool sync_violation_lag_snapshot_matches_rearm_expectations(
-    const struct condition_runtime_snapshot *snap)
-{
-    return snap->max_attempts == 1 && snap->attempts == 1 &&
-           snap->operator_needed_emitted && snap->cooldown_secs == 600 &&
-           snap->cooldown_max_rearms == 0;
-}
-
 static int run_sync_violation_rearms_on_cooldown_case(void)
 {
     int failures = 0;
@@ -386,7 +378,11 @@ static int run_sync_violation_rearms_on_cooldown_case(void)
     memset(&snap, 0, sizeof(snap));
     ok = ok && condition_engine_get_registered_snapshot(
         "sync_violation_lag", &snap);
-    ok = ok && sync_violation_lag_snapshot_matches_rearm_expectations(&snap);
+    ok = ok && snap.max_attempts == 1;
+    ok = ok && snap.attempts == 1;
+    ok = ok && snap.operator_needed_emitted;
+    ok = ok && snap.cooldown_secs == 600;
+    ok = ok && snap.cooldown_max_rearms == 0;
 
     /* The same fault persists well past the engine cooldown_secs (600) and
      * the remedy's SYNC_VIOLATION_COOLDOWN_SECS (3600), past max_attempts;
