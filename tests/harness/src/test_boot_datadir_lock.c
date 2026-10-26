@@ -200,361 +200,446 @@ static int test_boot_datadir_lock_owner_beacon_stable(void)
     return failures;
 }
 
+/* Result of the parent's refused acquire and the later reacquire. */
+struct bdl_contention_result {
+    bool child_ready;
+    bool parent_refused;
+    bool child_clean;
+    bool parent_reacquired;
+};
+
+/* Fork the lock owner. The child does not return. Pipes start at -1 so a
+ * failed pipe() is skipped by the parent's close path. */
+static pid_t bdl_spawn_lock_owner(const char *dir, int ready_pipe[2],
+                                  int release_pipe[2], bool *pipes_ok)
+{
+    ready_pipe[0] = -1;
+    ready_pipe[1] = -1;
+    release_pipe[0] = -1;
+    release_pipe[1] = -1;
+    *pipes_ok = pipe(ready_pipe) == 0;
+    if (*pipes_ok)
+        *pipes_ok = pipe(release_pipe) == 0;
+    pid_t child = *pipes_ok ? fork() : -1;
+    if (child == 0) {
+        close(ready_pipe[0]);
+        close(release_pipe[1]);
+        bdl_owner_hold(dir, ready_pipe[1], release_pipe[0]);
+    }
+    return child;
+}
+
+/* Close pipe ends still held here, in ready-then-release order. */
+static void bdl_close_unused_pipe_ends(int ready_pipe[2], int release_pipe[2])
+{
+    if (ready_pipe[0] >= 0) close(ready_pipe[0]);
+    if (ready_pipe[1] >= 0) close(ready_pipe[1]);
+    if (release_pipe[0] >= 0) close(release_pipe[0]);
+    if (release_pipe[1] >= 0) close(release_pipe[1]);
+}
+
+/* Parent side once the owner child is alive: refuse, release the child,
+ * then take the lock again and read the pid file. */
+static void bdl_reacquire_after_owner(pid_t child, const char *dir,
+                                      const char *pid_path,
+                                      int ready_pipe[2], int release_pipe[2],
+                                      struct bdl_contention_result *out)
+{
+    close(ready_pipe[1]);
+    close(release_pipe[0]);
+    char ready = 0;
+    out->child_ready = read(ready_pipe[0], &ready, 1) == 1 && ready == '1';
+    close(ready_pipe[0]);
+    out->parent_refused = false;
+    if (out->child_ready) {
+        out->parent_refused = !boot_datadir_lock_acquire(dir);
+        char release = '1';
+        (void)!write(release_pipe[1], &release, 1);
+    }
+    close(release_pipe[1]);
+    int status = 0;
+    out->child_clean = waitpid(child, &status, 0) == child &&
+                       WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    out->parent_reacquired = boot_datadir_lock_acquire(dir);
+    if (out->parent_reacquired) {
+        char buf[64];
+        out->parent_reacquired = bdl_read_file(pid_path, buf, sizeof(buf));
+        boot_datadir_lock_release();
+    }
+}
+
+/* A file used as -datadir, or as a parent of it, renders one typed block. */
+static bool bdl_notdir_refusal_matches(bool built, const char *path,
+                                       const char *lstat_needle,
+                                       const char *want_ls,
+                                       const char *detail)
+{
+    return built && !boot_datadir_lock_acquire(path) &&
+           bdl_render_is_typed_block("BOOT_DATADIR_NOT_A_DIRECTORY",
+                                     "datadir_lock") &&
+           bdl_render_has(lstat_needle) &&
+           bdl_render_has(want_ls) &&
+           bdl_render_has(detail);
+}
+
+static int bdl_check_acquire_writes_pid(void)
+{
+    int failures = 0;
+
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "basic");
+    char pid_path[512];
+    char buf[64];
+    snprintf(pid_path, sizeof(pid_path), "%s/zclassic23.pid", dir);
+
+    bool ok = boot_datadir_lock_acquire(dir);
+    bool read_ok = bdl_read_file(pid_path, buf, sizeof(buf));
+    char want[64];
+    snprintf(want, sizeof(want), "%ld\n", (long)getpid());
+    BDL_CHECK("acquire writes current pid",
+              ok && read_ok && strcmp(buf, want) == 0);
+
+    boot_datadir_lock_release();
+    BDL_CHECK("release retains reusable lock inode",
+              access(pid_path, F_OK) == 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bdl_check_concurrent_exclusion(void)
+{
+    int failures = 0;
+
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "concurrent");
+    char pid_path[512];
+    snprintf(pid_path, sizeof(pid_path), "%s/zclassic23.pid", dir);
+
+    int ready_pipe[2];
+    int release_pipe[2];
+    bool pipes_ok = false;
+    pid_t child = bdl_spawn_lock_owner(dir, ready_pipe, release_pipe,
+                                       &pipes_ok);
+    struct bdl_contention_result contended = {false, false, false, false};
+    if (child > 0) {
+        bdl_reacquire_after_owner(child, dir, pid_path, ready_pipe,
+                                  release_pipe, &contended);
+    } else {
+        bdl_close_unused_pipe_ends(ready_pipe, release_pipe);
+    }
+    BDL_CHECK("concurrent process excluded then release permits acquire",
+              pipes_ok && contended.child_ready && contended.parent_refused &&
+              contended.child_clean && contended.parent_reacquired);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bdl_check_stale_lock_reused(void)
+{
+    int failures = 0;
+
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "stale");
+    char pid_path[512];
+    char buf[64];
+    snprintf(pid_path, sizeof(pid_path), "%s/zclassic23.pid", dir);
+
+    bool ok = bdl_write_file(pid_path, "99999999\n");
+    ok = ok && boot_datadir_lock_acquire(dir);
+    ok = ok && bdl_read_file(pid_path, buf, sizeof(buf));
+    char want[64];
+    snprintf(want, sizeof(want), "%ld\n", (long)getpid());
+    BDL_CHECK("stale lock file is reused", ok && strcmp(buf, want) == 0);
+
+    boot_datadir_lock_release();
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bdl_check_symlink_lock_refused(void)
+{
+    int failures = 0;
+
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "symlink");
+    char pid_path[512];
+    char target_path[512];
+    char buf[64];
+    struct stat st;
+    snprintf(pid_path, sizeof(pid_path), "%s/zclassic23.pid", dir);
+    snprintf(target_path, sizeof(target_path), "%s/not-a-lock", dir);
+
+    bool ok = bdl_write_file(target_path, "do-not-touch\n");
+    ok = ok && symlink(target_path, pid_path) == 0;
+    ok = ok && !boot_datadir_lock_acquire(dir);
+    ok = ok && bdl_read_file(target_path, buf, sizeof(buf));
+    ok = ok && strcmp(buf, "do-not-touch\n") == 0;
+    ok = ok && lstat(pid_path, &st) == 0 && S_ISLNK(st.st_mode);
+    BDL_CHECK("symlink lock path is refused without touching target", ok);
+    boot_datadir_lock_release();
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bdl_check_symlink_datadir_refused(void)
+{
+    int failures = 0;
+
+    char parent[256];
+    test_make_tmpdir(parent, sizeof(parent), "boot_datadir_lock",
+                     "datadir_symlink");
+    char real_dir[512];
+    char alias_dir[512];
+    snprintf(real_dir, sizeof(real_dir), "%s/real", parent);
+    snprintf(alias_dir, sizeof(alias_dir), "%s/alias", parent);
+    bool ok = mkdir(real_dir, 0700) == 0 &&
+              symlink(real_dir, alias_dir) == 0 &&
+              !boot_datadir_lock_acquire(alias_dir);
+    BDL_CHECK("symlink datadir is refused", ok);
+    boot_datadir_lock_release();
+    test_rm_rf_recursive(parent);
+    return failures;
+}
+
+static int bdl_check_release_permits_reacquire(void)
+{
+    int failures = 0;
+
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "reacquire");
+    bool first = boot_datadir_lock_acquire(dir);
+    bool duplicate_refused = first && !boot_datadir_lock_acquire(dir);
+    boot_datadir_lock_release();
+    bool second = boot_datadir_lock_acquire(dir);
+    boot_datadir_lock_release();
+    BDL_CHECK("release is idempotent and permits reacquire",
+              first && duplicate_refused && second);
+    boot_datadir_lock_release();
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bdl_check_null_empty_datadir(void)
+{
+    int failures = 0;
+
+    BDL_CHECK("null datadir fails closed",
+              !boot_datadir_lock_acquire(NULL));
+    BDL_CHECK("empty datadir fails closed",
+              !boot_datadir_lock_acquire(""));
+    return failures;
+}
+
+static int bdl_check_null_typed_refusal(void)
+{
+    int failures = 0;
+
+    boot_error_reset_for_testing();
+    BDL_CHECK("null datadir refusal is a typed block",
+              !boot_datadir_lock_acquire(NULL) &&
+              bdl_render_is_typed_block("BOOT_DATADIR_UNSET",
+                                        "datadir_lock") &&
+              bdl_render_has("  next[1]:  z23 -datadir=") &&
+              bdl_render_has("            why: "));
+    BDL_CHECK("first FATAL code latches for the boot call site",
+              boot_error_reported() &&
+              strcmp(boot_error_first_code(),
+                     "BOOT_DATADIR_UNSET") == 0);
+    return failures;
+}
+
+static int bdl_check_missing_datadir_text(void)
+{
+    int failures = 0;
+
+    char parent[256];
+    test_make_tmpdir(parent, sizeof(parent), "boot_datadir_lock",
+                     "missing_datadir");
+    char absent[512];
+    char want_mkdir[600];
+    snprintf(absent, sizeof(absent), "%s/never-created", parent);
+    snprintf(want_mkdir, sizeof(want_mkdir), "next[1]:  mkdir -p %s",
+             absent);
+
+    boot_error_reset_for_testing();
+    bool refused = !boot_datadir_lock_acquire(absent);
+    BDL_CHECK("missing datadir names its code, parent and mkdir remedy",
+              refused &&
+              bdl_render_is_typed_block("BOOT_DATADIR_MISSING",
+                                        "datadir_lock") &&
+              bdl_render_has(want_mkdir) &&
+              bdl_render_has("parent=") &&
+              bdl_render_has("open_errno=No such file or directory"));
+    test_rm_rf_recursive(parent);
+    return failures;
+}
+
+static int bdl_check_symlink_datadir_text(void)
+{
+    int failures = 0;
+
+    char parent[256];
+    test_make_tmpdir(parent, sizeof(parent), "boot_datadir_lock",
+                     "symlink_text");
+    char real_dir[512];
+    char alias_dir[512];
+    char want_readlink[600];
+    snprintf(real_dir, sizeof(real_dir), "%s/real", parent);
+    snprintf(alias_dir, sizeof(alias_dir), "%s/alias", parent);
+    snprintf(want_readlink, sizeof(want_readlink),
+             "next[1]:  readlink -f %s", alias_dir);
+
+    boot_error_reset_for_testing();
+    bool built = mkdir(real_dir, 0700) == 0 &&
+                 symlink(real_dir, alias_dir) == 0;
+    bool refused = built && !boot_datadir_lock_acquire(alias_dir);
+    /* Linux answers open(O_DIRECTORY|O_NOFOLLOW) over a symlink with
+     * ENOTDIR, not ELOOP; the code assertion below keeps the
+     * classification honest. */
+    BDL_CHECK("symlinked datadir explains O_NOFOLLOW and how to resolve it",
+              refused &&
+              bdl_render_is_typed_block("BOOT_DATADIR_SYMLINK_REFUSED",
+                                        "datadir_lock") &&
+              bdl_render_has(want_readlink) &&
+              bdl_render_has("O_NOFOLLOW"));
+    boot_datadir_lock_release();
+    test_rm_rf_recursive(parent);
+    return failures;
+}
+
+static int bdl_check_notdir_text(void)
+{
+    int failures = 0;
+
+    /* ENOTDIR has three causes needing three answers. The symlink case is
+     * covered above; a PARENT that is a file must not send the operator to
+     * `ls -ld <datadir>`, since the datadir does not exist to list. */
+    char parent[256];
+    test_make_tmpdir(parent, sizeof(parent), "boot_datadir_lock",
+                     "notdir_text");
+    char plain[512];
+    char under[600];
+    char want_ls[600];
+    snprintf(plain, sizeof(plain), "%s/plainfile", parent);
+    snprintf(under, sizeof(under), "%s/sub", plain);
+    /* Both cases must list `plain`: in the first it is the datadir, in the
+     * second the datadir's parent. */
+    snprintf(want_ls, sizeof(want_ls), "next[1]:  ls -ld %s", plain);
+
+    bool built = bdl_write_file(plain, "not-a-directory\n");
+
+    boot_error_reset_for_testing();
+    bool self_ok = bdl_notdir_refusal_matches(built, plain, "path_lstat=ok",
+                                              want_ls,
+                                              "path itself is a file");
+    BDL_CHECK("a file as -datadir= says the path itself is the file",
+              self_ok);
+
+    boot_error_reset_for_testing();
+    bool parent_ok = bdl_notdir_refusal_matches(built, under,
+                                                "path_lstat=failed", want_ls,
+                                                "PARENT component");
+    BDL_CHECK("a file PARENT component points at the parent, not the path",
+              parent_ok);
+
+    test_rm_rf_recursive(parent);
+    return failures;
+}
+
+static int bdl_check_reenter_text(void)
+{
+    int failures = 0;
+
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "reenter_text");
+    boot_error_reset_for_testing();
+    bool first = boot_datadir_lock_acquire(dir);
+    bool refused = first && !boot_datadir_lock_acquire(dir);
+    /* No next[] here on purpose: re-entry is an internal ordering bug,
+     * and naming an operator command would be a guess. */
+    BDL_CHECK("re-entrant acquire is typed and suggests no false remedy",
+              refused &&
+              bdl_render_is_typed_block("BOOT_DATADIR_LOCK_REENTERED",
+                                        "datadir_lock") &&
+              !bdl_render_has("  next[1]:"));
+    boot_datadir_lock_release();
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bdl_check_held_pid_text(void)
+{
+    int failures = 0;
+
+    /* Cross-process contention: the message must carry the HOLDER's pid,
+     * which is the one fact that turns "cannot start" into an action. */
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "held_text");
+
+    int ready_pipe[2];
+    int release_pipe[2];
+    bool pipes_ok = false;
+    pid_t child = bdl_spawn_lock_owner(dir, ready_pipe, release_pipe,
+                                       &pipes_ok);
+    bool holder_named = false;
+    if (child > 0) {
+        close(ready_pipe[1]);
+        close(release_pipe[0]);
+        char ready = 0;
+        bool child_ready =
+            read(ready_pipe[0], &ready, 1) == 1 && ready == '1';
+        close(ready_pipe[0]);
+        if (child_ready) {
+            char want_pid[64];
+            char want_ps[64];
+            snprintf(want_pid, sizeof(want_pid), "holder_pid=%ld",
+                     (long)child);
+            snprintf(want_ps, sizeof(want_ps),
+                     "next[1]:  ps -o pid,lstart,cmd -p %ld", (long)child);
+            boot_error_reset_for_testing();
+            holder_named =
+                !boot_datadir_lock_acquire(dir) &&
+                bdl_render_is_typed_block("BOOT_DATADIR_LOCKED",
+                                          "datadir_lock") &&
+                bdl_render_has(want_pid) && bdl_render_has(want_ps);
+            char release = '1';
+            (void)!write(release_pipe[1], &release, 1);
+        }
+        close(release_pipe[1]);
+        int status = 0;
+        (void)waitpid(child, &status, 0);
+    } else {
+        bdl_close_unused_pipe_ends(ready_pipe, release_pipe);
+    }
+    BDL_CHECK("held datadir names the holding pid and how to inspect it",
+              pipes_ok && holder_named);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int test_boot_datadir_lock_platform_arm(void)
 {
     int failures = 0;
 
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "basic");
-        char pid_path[512];
-        char buf[64];
-        snprintf(pid_path, sizeof(pid_path), "%s/zclassic23.pid", dir);
+    failures += bdl_check_acquire_writes_pid();
 
-        bool ok = boot_datadir_lock_acquire(dir);
-        bool read_ok = bdl_read_file(pid_path, buf, sizeof(buf));
-        char want[64];
-        snprintf(want, sizeof(want), "%ld\n", (long)getpid());
-        BDL_CHECK("acquire writes current pid",
-                  ok && read_ok && strcmp(buf, want) == 0);
-
-        boot_datadir_lock_release();
-        BDL_CHECK("release retains reusable lock inode",
-                  access(pid_path, F_OK) == 0);
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "concurrent");
-        char pid_path[512];
-        char buf[64];
-        snprintf(pid_path, sizeof(pid_path), "%s/zclassic23.pid", dir);
-
-        int ready_pipe[2] = {-1, -1};
-        int release_pipe[2] = {-1, -1};
-        bool pipes_ok = pipe(ready_pipe) == 0;
-        if (pipes_ok)
-            pipes_ok = pipe(release_pipe) == 0;
-        pid_t child = pipes_ok ? fork() : -1;
-        if (child == 0) {
-            close(ready_pipe[0]);
-            close(release_pipe[1]);
-            bool locked = boot_datadir_lock_acquire(dir);
-            char ready = locked ? '1' : '0';
-            (void)!write(ready_pipe[1], &ready, 1);
-            close(ready_pipe[1]);
-            if (locked) {
-                char release = 0;
-                (void)!read(release_pipe[0], &release, 1);
-                boot_datadir_lock_release();
-            }
-            close(release_pipe[0]);
-            _exit(locked ? 0 : 1);
-        }
-
-        bool child_ready = false;
-        bool parent_refused = false;
-        bool child_clean = false;
-        bool parent_reacquired = false;
-        if (child > 0) {
-            close(ready_pipe[1]);
-            close(release_pipe[0]);
-            char ready = 0;
-            child_ready = read(ready_pipe[0], &ready, 1) == 1 && ready == '1';
-            close(ready_pipe[0]);
-            if (child_ready) {
-                parent_refused = !boot_datadir_lock_acquire(dir);
-                char release = '1';
-                (void)!write(release_pipe[1], &release, 1);
-            }
-            close(release_pipe[1]);
-            int status = 0;
-            child_clean = waitpid(child, &status, 0) == child &&
-                          WIFEXITED(status) && WEXITSTATUS(status) == 0;
-            parent_reacquired = boot_datadir_lock_acquire(dir);
-            if (parent_reacquired) {
-                parent_reacquired = bdl_read_file(pid_path, buf, sizeof(buf));
-                boot_datadir_lock_release();
-            }
-        } else {
-            if (ready_pipe[0] >= 0) close(ready_pipe[0]);
-            if (ready_pipe[1] >= 0) close(ready_pipe[1]);
-            if (release_pipe[0] >= 0) close(release_pipe[0]);
-            if (release_pipe[1] >= 0) close(release_pipe[1]);
-        }
-        BDL_CHECK("concurrent process excluded then release permits acquire",
-                  pipes_ok && child_ready && parent_refused && child_clean &&
-                  parent_reacquired);
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "stale");
-        char pid_path[512];
-        char buf[64];
-        snprintf(pid_path, sizeof(pid_path), "%s/zclassic23.pid", dir);
-
-        bool ok = bdl_write_file(pid_path, "99999999\n");
-        ok = ok && boot_datadir_lock_acquire(dir);
-        ok = ok && bdl_read_file(pid_path, buf, sizeof(buf));
-        char want[64];
-        snprintf(want, sizeof(want), "%ld\n", (long)getpid());
-        BDL_CHECK("stale lock file is reused", ok && strcmp(buf, want) == 0);
-
-        boot_datadir_lock_release();
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "symlink");
-        char pid_path[512];
-        char target_path[512];
-        char buf[64];
-        struct stat st;
-        snprintf(pid_path, sizeof(pid_path), "%s/zclassic23.pid", dir);
-        snprintf(target_path, sizeof(target_path), "%s/not-a-lock", dir);
-
-        bool ok = bdl_write_file(target_path, "do-not-touch\n");
-        ok = ok && symlink(target_path, pid_path) == 0;
-        ok = ok && !boot_datadir_lock_acquire(dir);
-        ok = ok && bdl_read_file(target_path, buf, sizeof(buf));
-        ok = ok && strcmp(buf, "do-not-touch\n") == 0;
-        ok = ok && lstat(pid_path, &st) == 0 && S_ISLNK(st.st_mode);
-        BDL_CHECK("symlink lock path is refused without touching target", ok);
-        boot_datadir_lock_release();
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        char parent[256];
-        test_make_tmpdir(parent, sizeof(parent), "boot_datadir_lock",
-                         "datadir_symlink");
-        char real_dir[512];
-        char alias_dir[512];
-        snprintf(real_dir, sizeof(real_dir), "%s/real", parent);
-        snprintf(alias_dir, sizeof(alias_dir), "%s/alias", parent);
-        bool ok = mkdir(real_dir, 0700) == 0 &&
-                  symlink(real_dir, alias_dir) == 0 &&
-                  !boot_datadir_lock_acquire(alias_dir);
-        BDL_CHECK("symlink datadir is refused", ok);
-        boot_datadir_lock_release();
-        test_rm_rf_recursive(parent);
-    }
-
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "reacquire");
-        bool first = boot_datadir_lock_acquire(dir);
-        bool duplicate_refused = first && !boot_datadir_lock_acquire(dir);
-        boot_datadir_lock_release();
-        bool second = boot_datadir_lock_acquire(dir);
-        boot_datadir_lock_release();
-        BDL_CHECK("release is idempotent and permits reacquire",
-                  first && duplicate_refused && second);
-        boot_datadir_lock_release();
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        BDL_CHECK("null datadir fails closed",
-                  !boot_datadir_lock_acquire(NULL));
-        BDL_CHECK("empty datadir fails closed",
-                  !boot_datadir_lock_acquire(""));
-    }
+    failures += bdl_check_concurrent_exclusion();
+    failures += bdl_check_stale_lock_reused();
+    failures += bdl_check_symlink_lock_refused();
+    failures += bdl_check_symlink_datadir_refused();
+    failures += bdl_check_release_permits_reacquire();
+    failures += bdl_check_null_empty_datadir();
 
     /* ── the refusal TEXT, not just the refusal ─────────────────────────
      * A pre-registry failure has one channel: stderr. Each case pins the code
      * AND the specific next command, so a remedy that stops naming a runnable
      * step fails here. */
-    {
-        boot_error_reset_for_testing();
-        BDL_CHECK("null datadir refusal is a typed block",
-                  !boot_datadir_lock_acquire(NULL) &&
-                  bdl_render_is_typed_block("BOOT_DATADIR_UNSET",
-                                            "datadir_lock") &&
-                  bdl_render_has("  next[1]:  z23 -datadir=") &&
-                  bdl_render_has("            why: "));
-        BDL_CHECK("first FATAL code latches for the boot call site",
-                  boot_error_reported() &&
-                  strcmp(boot_error_first_code(),
-                         "BOOT_DATADIR_UNSET") == 0);
-    }
-
-    {
-        char parent[256];
-        test_make_tmpdir(parent, sizeof(parent), "boot_datadir_lock",
-                         "missing_datadir");
-        char absent[512];
-        char want_mkdir[600];
-        snprintf(absent, sizeof(absent), "%s/never-created", parent);
-        snprintf(want_mkdir, sizeof(want_mkdir), "next[1]:  mkdir -p %s",
-                 absent);
-
-        boot_error_reset_for_testing();
-        bool refused = !boot_datadir_lock_acquire(absent);
-        BDL_CHECK("missing datadir names its code, parent and mkdir remedy",
-                  refused &&
-                  bdl_render_is_typed_block("BOOT_DATADIR_MISSING",
-                                            "datadir_lock") &&
-                  bdl_render_has(want_mkdir) &&
-                  bdl_render_has("parent=") &&
-                  bdl_render_has("open_errno=No such file or directory"));
-        test_rm_rf_recursive(parent);
-    }
-
-    {
-        char parent[256];
-        test_make_tmpdir(parent, sizeof(parent), "boot_datadir_lock",
-                         "symlink_text");
-        char real_dir[512];
-        char alias_dir[512];
-        char want_readlink[600];
-        snprintf(real_dir, sizeof(real_dir), "%s/real", parent);
-        snprintf(alias_dir, sizeof(alias_dir), "%s/alias", parent);
-        snprintf(want_readlink, sizeof(want_readlink),
-                 "next[1]:  readlink -f %s", alias_dir);
-
-        boot_error_reset_for_testing();
-        bool built = mkdir(real_dir, 0700) == 0 &&
-                     symlink(real_dir, alias_dir) == 0;
-        bool refused = built && !boot_datadir_lock_acquire(alias_dir);
-        /* Linux answers open(O_DIRECTORY|O_NOFOLLOW) over a symlink with
-         * ENOTDIR, not ELOOP; the code assertion below keeps the
-         * classification honest. */
-        BDL_CHECK("symlinked datadir explains O_NOFOLLOW and how to resolve it",
-                  refused &&
-                  bdl_render_is_typed_block("BOOT_DATADIR_SYMLINK_REFUSED",
-                                            "datadir_lock") &&
-                  bdl_render_has(want_readlink) &&
-                  bdl_render_has("O_NOFOLLOW"));
-        boot_datadir_lock_release();
-        test_rm_rf_recursive(parent);
-    }
-
-    {
-        /* ENOTDIR has three causes needing three answers. The symlink case is
-         * covered above; a PARENT that is a file must not send the operator to
-         * `ls -ld <datadir>`, since the datadir does not exist to list. */
-        char parent[256];
-        test_make_tmpdir(parent, sizeof(parent), "boot_datadir_lock",
-                         "notdir_text");
-        char plain[512];
-        char under[600];
-        char want_ls[600];
-        snprintf(plain, sizeof(plain), "%s/plainfile", parent);
-        snprintf(under, sizeof(under), "%s/sub", plain);
-        /* Both cases must list `plain`: in the first it is the datadir, in the
-         * second the datadir's parent. */
-        snprintf(want_ls, sizeof(want_ls), "next[1]:  ls -ld %s", plain);
-
-        bool built = bdl_write_file(plain, "not-a-directory\n");
-
-        boot_error_reset_for_testing();
-        bool self_ok = built && !boot_datadir_lock_acquire(plain) &&
-                       bdl_render_is_typed_block("BOOT_DATADIR_NOT_A_DIRECTORY",
-                                                 "datadir_lock") &&
-                       bdl_render_has("path_lstat=ok") &&
-                       bdl_render_has(want_ls) &&
-                       bdl_render_has("path itself is a file");
-        BDL_CHECK("a file as -datadir= says the path itself is the file",
-                  self_ok);
-
-        boot_error_reset_for_testing();
-        bool parent_ok = built && !boot_datadir_lock_acquire(under) &&
-                         bdl_render_is_typed_block(
-                             "BOOT_DATADIR_NOT_A_DIRECTORY", "datadir_lock") &&
-                         bdl_render_has("path_lstat=failed") &&
-                         bdl_render_has(want_ls) &&
-                         bdl_render_has("PARENT component");
-        BDL_CHECK("a file PARENT component points at the parent, not the path",
-                  parent_ok);
-
-        test_rm_rf_recursive(parent);
-    }
-
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "reenter_text");
-        boot_error_reset_for_testing();
-        bool first = boot_datadir_lock_acquire(dir);
-        bool refused = first && !boot_datadir_lock_acquire(dir);
-        /* No next[] here on purpose: re-entry is an internal ordering bug,
-         * and naming an operator command would be a guess. */
-        BDL_CHECK("re-entrant acquire is typed and suggests no false remedy",
-                  refused &&
-                  bdl_render_is_typed_block("BOOT_DATADIR_LOCK_REENTERED",
-                                            "datadir_lock") &&
-                  !bdl_render_has("  next[1]:"));
-        boot_datadir_lock_release();
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        /* Cross-process contention: the message must carry the HOLDER's pid,
-         * which is the one fact that turns "cannot start" into an action. */
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "boot_datadir_lock", "held_text");
-
-        int ready_pipe[2] = {-1, -1};
-        int release_pipe[2] = {-1, -1};
-        bool pipes_ok = pipe(ready_pipe) == 0 && pipe(release_pipe) == 0;
-        pid_t child = pipes_ok ? fork() : -1;
-        if (child == 0) {
-            close(ready_pipe[0]);
-            close(release_pipe[1]);
-            bool locked = boot_datadir_lock_acquire(dir);
-            char ready = locked ? '1' : '0';
-            (void)!write(ready_pipe[1], &ready, 1);
-            close(ready_pipe[1]);
-            if (locked) {
-                char release = 0;
-                (void)!read(release_pipe[0], &release, 1);
-                boot_datadir_lock_release();
-            }
-            close(release_pipe[0]);
-            _exit(locked ? 0 : 1);
-        }
-
-        bool holder_named = false;
-        if (child > 0) {
-            close(ready_pipe[1]);
-            close(release_pipe[0]);
-            char ready = 0;
-            bool child_ready =
-                read(ready_pipe[0], &ready, 1) == 1 && ready == '1';
-            close(ready_pipe[0]);
-            if (child_ready) {
-                char want_pid[64];
-                char want_ps[64];
-                snprintf(want_pid, sizeof(want_pid), "holder_pid=%ld",
-                         (long)child);
-                snprintf(want_ps, sizeof(want_ps),
-                         "next[1]:  ps -o pid,lstart,cmd -p %ld", (long)child);
-                boot_error_reset_for_testing();
-                holder_named =
-                    !boot_datadir_lock_acquire(dir) &&
-                    bdl_render_is_typed_block("BOOT_DATADIR_LOCKED",
-                                              "datadir_lock") &&
-                    bdl_render_has(want_pid) && bdl_render_has(want_ps);
-                char release = '1';
-                (void)!write(release_pipe[1], &release, 1);
-            }
-            close(release_pipe[1]);
-            int status = 0;
-            (void)waitpid(child, &status, 0);
-        } else {
-            if (ready_pipe[0] >= 0) close(ready_pipe[0]);
-            if (ready_pipe[1] >= 0) close(ready_pipe[1]);
-            if (release_pipe[0] >= 0) close(release_pipe[0]);
-            if (release_pipe[1] >= 0) close(release_pipe[1]);
-        }
-        BDL_CHECK("held datadir names the holding pid and how to inspect it",
-                  pipes_ok && holder_named);
-        test_rm_rf_recursive(dir);
-    }
+    failures += bdl_check_null_typed_refusal();
+    failures += bdl_check_missing_datadir_text();
+    failures += bdl_check_symlink_datadir_text();
+    failures += bdl_check_notdir_text();
+    failures += bdl_check_reenter_text();
+    failures += bdl_check_held_pid_text();
 
     failures += test_boot_datadir_lock_owner_beacon_stable();
 
