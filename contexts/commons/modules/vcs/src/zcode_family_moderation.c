@@ -124,23 +124,36 @@ enum vcs_zcode_commons_error vcs_zcode_family_policy_v1_root(
     return VCS_ZCODE_COMMONS_OK;
 }
 
+static bool family_coverage_incomplete(
+    const struct vcs_zcode_moderation_coverage_v1 *coverage)
+{
+    return !coverage ||
+           coverage->required_mask != VCS_ZCODE_COVERAGE_REQUIRED_MASK ||
+           coverage->completed_mask != coverage->required_mask ||
+           coverage->failure_mask != 0 || coverage->object_count == 0 ||
+           coverage->inspected_count != coverage->object_count ||
+           coverage->declared_bytes == 0 ||
+           coverage->inspected_bytes != coverage->declared_bytes;
+}
+
+static bool family_vote_axes_unknown(
+    enum vcs_zcode_moderation_audience_v1 audience,
+    enum vcs_zcode_moderation_behavior_v1 behavior)
+{
+    return audience > VCS_ZCODE_AUDIENCE_UNKNOWN ||
+           behavior > VCS_ZCODE_BEHAVIOR_UNKNOWN ||
+           audience == VCS_ZCODE_AUDIENCE_UNKNOWN ||
+           behavior == VCS_ZCODE_BEHAVIOR_UNKNOWN;
+}
+
 enum vcs_zcode_moderation_vote_v1 vcs_zcode_moderation_coverage_vote_v1(
     const struct vcs_zcode_moderation_coverage_v1 *coverage,
     enum vcs_zcode_moderation_audience_v1 audience,
     enum vcs_zcode_moderation_behavior_v1 behavior)
 {
-    if (!coverage ||
-        coverage->required_mask != VCS_ZCODE_COVERAGE_REQUIRED_MASK ||
-        coverage->completed_mask != coverage->required_mask ||
-        coverage->failure_mask != 0 || coverage->object_count == 0 ||
-        coverage->inspected_count != coverage->object_count ||
-        coverage->declared_bytes == 0 ||
-        coverage->inspected_bytes != coverage->declared_bytes)
+    if (family_coverage_incomplete(coverage))
         return VCS_ZCODE_MODERATION_VOTE_UNKNOWN;
-    if (audience > VCS_ZCODE_AUDIENCE_UNKNOWN ||
-        behavior > VCS_ZCODE_BEHAVIOR_UNKNOWN ||
-        audience == VCS_ZCODE_AUDIENCE_UNKNOWN ||
-        behavior == VCS_ZCODE_BEHAVIOR_UNKNOWN)
+    if (family_vote_axes_unknown(audience, behavior))
         return VCS_ZCODE_MODERATION_VOTE_UNKNOWN;
     if ((audience == VCS_ZCODE_AUDIENCE_GENERAL ||
          audience == VCS_ZCODE_AUDIENCE_CONTEXTUAL_SCIENCE) &&
@@ -148,6 +161,18 @@ enum vcs_zcode_moderation_vote_v1 vcs_zcode_moderation_coverage_vote_v1(
          behavior == VCS_ZCODE_BEHAVIOR_DUAL_USE))
         return VCS_ZCODE_MODERATION_VOTE_PASS;
     return VCS_ZCODE_MODERATION_VOTE_BLOCK;
+}
+
+static bool family_receipt_roots_unset(
+    const struct vcs_zcode_classification_receipt_v1 *receipt)
+{
+    return !zcl_bytes_any_set(receipt->request_root, 32) ||
+           !zcl_bytes_any_set(receipt->content_root, 32) ||
+           !zcl_bytes_any_set(receipt->policy_root, 32) ||
+           !zcl_bytes_any_set(receipt->classifier_manifest_root, 32) ||
+           !zcl_bytes_any_set(receipt->operator_group_root, 32) ||
+           !zcl_bytes_any_set(receipt->model_family_root, 32) ||
+           !zcl_bytes_any_set(receipt->signature, 32);
 }
 
 enum vcs_zcode_commons_error vcs_zcode_classification_receipt_v1_validate(
@@ -158,13 +183,7 @@ enum vcs_zcode_commons_error vcs_zcode_classification_receipt_v1_validate(
         return VCS_ZCODE_COMMONS_VERSION_ERROR;
     if (receipt->flags != VCS_ZCODE_COMMONS_REQUIRED_FLAGS)
         return VCS_ZCODE_COMMONS_FLAGS;
-    if (!zcl_bytes_any_set(receipt->request_root, 32) ||
-        !zcl_bytes_any_set(receipt->content_root, 32) ||
-        !zcl_bytes_any_set(receipt->policy_root, 32) ||
-        !zcl_bytes_any_set(receipt->classifier_manifest_root, 32) ||
-        !zcl_bytes_any_set(receipt->operator_group_root, 32) ||
-        !zcl_bytes_any_set(receipt->model_family_root, 32) ||
-        !zcl_bytes_any_set(receipt->signature, 32))
+    if (family_receipt_roots_unset(receipt))
         return VCS_ZCODE_COMMONS_ROOT;
     if (receipt->audience > VCS_ZCODE_AUDIENCE_UNKNOWN ||
         receipt->behavior > VCS_ZCODE_BEHAVIOR_UNKNOWN)
@@ -268,36 +287,41 @@ static enum vcs_zcode_moderation_tier_v1 family_tier(size_t groups)
     return VCS_ZCODE_MODERATION_TIER_RESILIENT_PASS;
 }
 
-enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
+static bool panel_service_skipped(
+    const struct vcs_zcode_moderation_service_v1 *service)
+{
+    return !service->eligible || service->related_to_publisher ||
+           !zcl_bytes_any_set(service->zid_root, 32) ||
+           !zcl_bytes_any_set(service->operator_group_root, 32) ||
+           !zcl_bytes_any_set(service->model_family_root, 32);
+}
+
+static void panel_selection_key(const uint8_t future_block_hash[32],
+                                const uint8_t zid_root[32],
+                                uint8_t selection_key[32])
+{
+    struct sha3_256_ctx sha;
+    static const char domain[] = VCS_ZCODE_CLASSIFICATION_PANEL_V1_DOMAIN;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, future_block_hash, 32);
+    sha3_256_write(&sha, zid_root, 32);
+    sha3_256_finalize(&sha, selection_key);
+}
+
+static size_t panel_collect_candidates(
     const struct vcs_zcode_moderation_service_v1 *services,
     size_t service_count, const uint8_t future_block_hash[32],
-    bool resilient_appeal,
-    struct vcs_zcode_classification_panel_v1 *out)
+    struct family_panel_candidate *candidates)
 {
-    if (out) memset(out, 0, sizeof(*out));
-    if ((!services && service_count > 0) || !future_block_hash || !out)
-        return VCS_ZCODE_COMMONS_NULL;
-    if (service_count > VCS_ZCODE_MODERATION_MAX_SERVICES ||
-        !zcl_bytes_any_set(future_block_hash, 32))
-        return VCS_ZCODE_COMMONS_LIMIT;
-    struct family_panel_candidate candidates[
-        VCS_ZCODE_MODERATION_MAX_SERVICES];
     size_t candidate_count = 0;
     for (size_t i = 0; i < service_count; i++) {
         const struct vcs_zcode_moderation_service_v1 *service = &services[i];
-        if (!service->eligible || service->related_to_publisher ||
-            !zcl_bytes_any_set(service->zid_root, 32) ||
-            !zcl_bytes_any_set(service->operator_group_root, 32) ||
-            !zcl_bytes_any_set(service->model_family_root, 32))
+        if (panel_service_skipped(service))
             continue;
-        struct sha3_256_ctx sha;
-        static const char domain[] = VCS_ZCODE_CLASSIFICATION_PANEL_V1_DOMAIN;
         uint8_t selection_key[32];
-        sha3_256_init(&sha);
-        sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-        sha3_256_write(&sha, future_block_hash, 32);
-        sha3_256_write(&sha, service->zid_root, 32);
-        sha3_256_finalize(&sha, selection_key);
+        panel_selection_key(future_block_hash, service->zid_root,
+                            selection_key);
         size_t group_at = service_group_index(
             services, candidates, candidate_count,
             service->operator_group_root);
@@ -312,19 +336,30 @@ enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
         memcpy(candidates[candidate_count].key, selection_key, 32);
         candidate_count++;
     }
-    qsort(candidates, candidate_count, sizeof(*candidates),
-          panel_candidate_compare);
-    out->eligible_operator_groups = candidate_count;
-    out->tier = family_tier(candidate_count);
-    if (resilient_appeal && candidate_count < 11)
-        return VCS_ZCODE_COMMONS_QUORUM;
-    size_t target = resilient_appeal ? 11u
+    return candidate_count;
+}
+
+static size_t panel_select_target(bool resilient_appeal,
+                                  size_t candidate_count)
+{
+    return resilient_appeal ? 11u
         : candidate_count >= 7 ? 7u : candidate_count;
-    out->required_votes = resilient_appeal ? 8u
+}
+
+static size_t panel_required_votes(bool resilient_appeal,
+                                   size_t candidate_count)
+{
+    return resilient_appeal ? 8u
         : candidate_count == 0 ? 1u
         : candidate_count <= 2 ? candidate_count
         : candidate_count >= 7 ? 5u : (2u * candidate_count + 2u) / 3u;
+}
 
+static void panel_select_members(
+    const struct vcs_zcode_moderation_service_v1 *services,
+    const struct family_panel_candidate *candidates, size_t candidate_count,
+    size_t target, struct vcs_zcode_classification_panel_v1 *out)
+{
     bool used[VCS_ZCODE_MODERATION_MAX_SERVICES] = {false};
     size_t diversity_target = target < 3u ? target : 3u;
     while (out->selected_count < diversity_target) {
@@ -349,6 +384,12 @@ enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
         used[i] = true;
         out->selected_indices[out->selected_count++] = candidates[i].index;
     }
+}
+
+static void panel_count_distinct_families(
+    const struct vcs_zcode_moderation_service_v1 *services,
+    struct vcs_zcode_classification_panel_v1 *out)
+{
     for (size_t i = 0; i < out->selected_count; i++) {
         const uint8_t *family =
             services[out->selected_indices[i]].model_family_root;
@@ -359,6 +400,13 @@ enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
                 family, 32) == 0;
         if (!seen) out->distinct_model_families++;
     }
+}
+
+static void panel_selection_root(
+    const struct vcs_zcode_moderation_service_v1 *services,
+    const uint8_t future_block_hash[32], size_t candidate_count,
+    struct vcs_zcode_classification_panel_v1 *out)
+{
     struct sha3_256_ctx sha;
     static const char root_domain[] = VCS_ZCODE_CLASSIFICATION_PANEL_V1_DOMAIN;
     sha3_256_init(&sha);
@@ -376,7 +424,53 @@ enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
         sha3_256_write(&sha, service->model_family_root, 32);
     }
     sha3_256_finalize(&sha, out->selection_root);
+}
+
+enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
+    const struct vcs_zcode_moderation_service_v1 *services,
+    size_t service_count, const uint8_t future_block_hash[32],
+    bool resilient_appeal,
+    struct vcs_zcode_classification_panel_v1 *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if ((!services && service_count > 0) || !future_block_hash || !out)
+        return VCS_ZCODE_COMMONS_NULL;
+    if (service_count > VCS_ZCODE_MODERATION_MAX_SERVICES ||
+        !zcl_bytes_any_set(future_block_hash, 32))
+        return VCS_ZCODE_COMMONS_LIMIT;
+    struct family_panel_candidate candidates[
+        VCS_ZCODE_MODERATION_MAX_SERVICES];
+    size_t candidate_count = panel_collect_candidates(
+        services, service_count, future_block_hash, candidates);
+    qsort(candidates, candidate_count, sizeof(*candidates),
+          panel_candidate_compare);
+    out->eligible_operator_groups = candidate_count;
+    out->tier = family_tier(candidate_count);
+    if (resilient_appeal && candidate_count < 11)
+        return VCS_ZCODE_COMMONS_QUORUM;
+    size_t target = panel_select_target(resilient_appeal, candidate_count);
+    out->required_votes =
+        panel_required_votes(resilient_appeal, candidate_count);
+    panel_select_members(services, candidates, candidate_count, target, out);
+    panel_count_distinct_families(services, out);
+    panel_selection_root(services, future_block_hash, candidate_count, out);
     return VCS_ZCODE_COMMONS_OK;
+}
+
+static void panel_tally_votes(const enum vcs_zcode_moderation_vote_v1 *votes,
+                              size_t vote_count, size_t *pass, size_t *block)
+{
+    for (size_t i = 0; i < vote_count; i++) {
+        *pass += votes[i] == VCS_ZCODE_MODERATION_VOTE_PASS;
+        *block += votes[i] == VCS_ZCODE_MODERATION_VOTE_BLOCK;
+    }
+}
+
+static enum vcs_zcode_commons_admission_state_v1 panel_mixed_state(
+    size_t pass, size_t block)
+{
+    return pass == 0 && block == 0 ? VCS_ZCODE_ADMISSION_UNKNOWN
+                                   : VCS_ZCODE_ADMISSION_CONFLICTED;
 }
 
 enum vcs_zcode_commons_admission_state_v1
@@ -391,10 +485,7 @@ vcs_zcode_classification_panel_v1_decide(
         vote_count != panel->selected_count)
         return VCS_ZCODE_ADMISSION_UNKNOWN;
     size_t pass = 0, block = 0;
-    for (size_t i = 0; i < vote_count; i++) {
-        pass += votes[i] == VCS_ZCODE_MODERATION_VOTE_PASS;
-        block += votes[i] == VCS_ZCODE_MODERATION_VOTE_BLOCK;
-    }
+    panel_tally_votes(votes, vote_count, &pass, &block);
     if (pass >= panel->required_votes) {
         switch (panel->tier) {
         case VCS_ZCODE_MODERATION_TIER_SELF_SCREENED:
@@ -413,8 +504,7 @@ vcs_zcode_classification_panel_v1_decide(
     }
     if (block >= panel->required_votes)
         return VCS_ZCODE_ADMISSION_RESTRICTED;
-    return pass == 0 && block == 0 ? VCS_ZCODE_ADMISSION_UNKNOWN
-                                   : VCS_ZCODE_ADMISSION_CONFLICTED;
+    return panel_mixed_state(pass, block);
 }
 
 bool vcs_zcode_commons_admission_is_default_visible_v1(
