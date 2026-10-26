@@ -274,7 +274,6 @@ contexts/commons/packages/zarg/tests/test_zarg.c:test_kat:29
 contexts/commons/packages/zb32/src/zb32.c:zb32_decode:25
 contexts/commons/packages/zbase58/src/zbase58.c:zbase58_decode:18
 contexts/commons/packages/zbase58/src/zbase58.c:zbase58_encode:16
-contexts/commons/packages/zbase64/app/main.c:main:20
 contexts/commons/packages/zbase64/src/zbase64.c:decode_with:29
 contexts/commons/packages/zbits/app/main.c:main:28
 contexts/commons/packages/zcidr/src/zcidr.c:zcidr_parse_v6:32
@@ -692,7 +691,7 @@ core/modules/validation/src/accept_to_mempool.c:accept_to_mempool_detailed:31
 core/modules/validation/src/block_successor.c:main_state_best_known_successor:24
 core/modules/validation/src/chainstate.c:active_chain_extend_window_have_data:48
 core/modules/validation/src/chainstate.c:select_most_work_eligible:27
-core/modules/validation/src/connect_block.c:connect_block:83
+core/modules/validation/src/connect_block.c:connect_block:81
 core/modules/validation/src/contextual_check_tx.c:contextual_check_transaction_impl:27
 core/modules/validation/src/process_block_invalidate.c:process_block_clear_invalid:17
 core/modules/validation/src/process_block_invalidate.c:process_block_invalidate:26
@@ -738,10 +737,10 @@ engine/composition/src/boot_params_gate.c:boot_params_gate_evaluate:16
 engine/composition/src/boot_refold_staged.c:boot_autodetect_bundle_snapshot:24
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_at_own_height_reset:113
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_resume_seed_from_authority:33
-engine/composition/src/boot_refold_staged.c:boot_refold_from_anchor_reset:34
+engine/composition/src/boot_refold_staged.c:boot_refold_from_anchor_reset:33
 engine/composition/src/boot_refold_staged.c:boot_snapshot_apply_to_coins_kv:19
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
-engine/composition/src/boot_services.c:app_init_services:110
+engine/composition/src/boot_services.c:app_init_services:109
 engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:55
 engine/composition/src/boot_snapshot_install.c:boot_snapshot_install_marker_complete:18
 engine/composition/src/boot_snapshot_install.c:boot_snapshot_install_resume_allowed:23
@@ -795,7 +794,7 @@ engine/composition/src/consensus_state_snapshot_export_write.c:write_proof_paren
 engine/composition/src/consensus_state_snapshot_export_write.c:write_source_receipt:17
 engine/composition/src/consensus_state_snapshot_install.c:artifact_evidence_open_impl:25
 engine/composition/src/consensus_state_snapshot_install.c:consensus_state_snapshot_install#2:22
-engine/composition/src/consensus_state_snapshot_install_activate.c:activate_apply_in_tx:38
+engine/composition/src/consensus_state_snapshot_install_activate.c:activate_apply_in_tx:37
 engine/composition/src/consensus_state_snapshot_install_activate.c:activate_stream_copy:16
 engine/composition/src/consensus_state_snapshot_install_activate.c:activate_verify_terminal_in_tx:16
 engine/composition/src/consensus_state_snapshot_install_activate.c:consensus_state_snapshot_install_activate:77
@@ -838,7 +837,7 @@ engine/controllers/src/snapshot_controller_txindex.c:build_tx_index_thread:54
 engine/controllers/src/snapshot_controller_txindex.c:snapshot_tx_index_build_from_block_files:16
 engine/controllers/src/status_native_handlers.c:zcl_native_status_body_full:45
 engine/controllers/src/sync_controller_blocks.c:advance_wallet_witnesses:26
-engine/controllers/src/sync_controller_blocks.c:node_db_sync_connect_block_local:44
+engine/controllers/src/sync_controller_blocks.c:node_db_sync_connect_block_local:42
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
 engine/controllers/src/sync_controller_sapling_tree_persist.c:sapling_tree_persist_pair_status:19
 engine/controllers/src/transaction_controller.c:rawtx_find_in_node_db:19
@@ -1125,7 +1124,7 @@ engine/services/src/sync_monitor.c:queue_body_target:17
 engine/services/src/sync_monitor.c:sync_monitor_local_header_refill:24
 engine/services/src/utxo_mirror_delta.c:utxo_mirror_delta_apply:54
 engine/services/src/utxo_parity_service.c:utxo_parity_tick_once:19
-engine/services/src/utxo_recovery_backfill.c:backfill_shielded_write:35
+engine/services/src/utxo_recovery_backfill.c:backfill_shielded_write:33
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_clamp_tip_to_header_frontier:30
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_relink_scrambled_ancestry:38
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_settle_finalized_floor:22
@@ -1875,7 +1874,7 @@ tools/engine_unit.c:compose_prompt:23
 tools/engine_unit.c:dispatch_cli:21
 tools/engine_unit.c:gate_feedback_from_log:30
 tools/engine_unit.c:load_attempt_state:18
-tools/engine_unit.c:main:148
+tools/engine_unit.c:main:147
 tools/engine_unit.c:parse_args:30
 tools/engine_unit.c:probe_cli:30
 tools/engine_unit.c:unit_ledger_row:17

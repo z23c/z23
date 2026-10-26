@@ -5,6 +5,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define main b64_cli_main
+#include "../app/main.c"
+#undef main
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -185,7 +189,113 @@ static void test_rejected_output_canaries(void) {
   }
 }
 
+static int cli_case(char *flag, const void *data, size_t size, int status,
+                    const void *expected, size_t expected_size) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (fwrite(data, 1, size, source) != size || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  char *argv[] = {"b64", flag, NULL};
+  if (cli_run(flag ? 2 : 1, argv, source, output) != status) goto cleanup;
+  rewind(output);
+  unsigned char bytes[256];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  if (ferror(output) || n != expected_size) goto cleanup;
+  if (n && memcmp(bytes, expected, n) != 0) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static void test_cli_vectors(void) {
+  const unsigned char binary[] = {255, 255};
+  CHECK(cli_case(NULL, binary, 2, 0, "//8=\n", 5) == 0);
+  CHECK(cli_case("-u", binary, 2, 0, "__8=\n", 5) == 0);
+  CHECK(cli_case("-d", "//8=\n", 5, 0, binary, 2) == 0);
+  CHECK(cli_case(NULL, "", 0, 0, "\n", 1) == 0);
+  CHECK(cli_case("-u", "", 0, 0, "\n", 1) == 0);
+  unsigned char plain[55];
+  char folded[78];
+  memset(plain, 'a', sizeof plain);
+  for (size_t i = 0; i < 72; i += 4) memcpy(folded + i, "YWFh", 4);
+  memcpy(folded + 72, "\nYQ==\n", 6);
+  CHECK(cli_case(NULL, plain, sizeof plain, 0, folded, sizeof folded) == 0);
+  CHECK(cli_case("-d", folded, sizeof folded, 0, plain, sizeof plain) == 0);
+  const char *bad[] = {"Zg== ", "Zg==\r\n", "Zh==", "Zg="};
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    CHECK(cli_case("-d", bad[i], strlen(bad[i]), 2, "", 0) == 0);
+}
+
+static bool cli_rejects_stream(char *flag, FILE *bad, FILE *good, bool input_error) {
+  char *argv[] = {"b64", flag, NULL};
+  FILE *source = input_error ? bad : good;
+  FILE *output = input_error ? good : bad;
+  return cli_run(flag ? 2 : 1, argv, source, output) == 2 && ferror(bad) &&
+         (!input_error || ftell(good) == 0);
+}
+
+static int cli_stream_error(char *flag, bool input_error) {
+#if defined(_WIN32)
+  const char *null_path = "NUL";
+#else
+  const char *null_path = "/dev/null";
+#endif
+  FILE *bad = fopen(null_path, input_error ? "w" : "r");
+  FILE *good = tmpfile();
+  int failed = 1;
+  if (!bad || !good) goto cleanup;
+  if (!input_error) {
+    if (fputs("Zg==", good) < 0 || fflush(good) != 0) goto cleanup;
+    rewind(good);
+  }
+  if (!cli_rejects_stream(flag, bad, good, input_error)) goto cleanup;
+  failed = 0;
+cleanup:
+  if (bad) (void)fclose(bad);
+  if (good && fclose(good) != 0) failed = 1;
+  return failed;
+}
+
+static bool cli_fill(FILE *f, size_t size) {
+  unsigned char zeros[4096] = {0};
+  while (size) {
+    size_t n = size < sizeof zeros ? size : sizeof zeros;
+    if (fwrite(zeros, 1, n, f) != n) return false;
+    size -= n;
+  }
+  if (fflush(f) != 0) return false;
+  rewind(f);
+  return true;
+}
+
+static int cli_bound_case(size_t size, size_t cap, bool expected) {
+  FILE *source = tmpfile();
+  if (!source) return 1;
+  size_t len = 0;
+  bool ok = cli_fill(source, size);
+  if (ok) ok = cli_read(source, input, cap, &len) == expected;
+  if (ok && expected) ok = len == size;
+  if (fclose(source) != 0) ok = false;
+  return ok ? 0 : 1;
+}
+
+static void test_cli_errors_and_bounds(void) {
+  CHECK(cli_stream_error(NULL, true) == 0);
+  CHECK(cli_stream_error(NULL, false) == 0);
+  CHECK(cli_stream_error("-u", false) == 0);
+  CHECK(cli_stream_error("-d", false) == 0);
+  CHECK(cli_bound_case(31, 32, true) == 0);
+  CHECK(cli_bound_case(32, 32, true) == 0);
+  CHECK(cli_bound_case(33, 32, false) == 0);
+  CHECK(cli_bound_case(MAX_INPUT, MAX_INPUT, true) == 0);
+}
+
 int main(void) {
+  test_cli_vectors();
+  test_cli_errors_and_bounds();
   test_rejected_output_canaries();
   test_rfc4648_vectors();
   test_urlsafe();

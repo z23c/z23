@@ -19,26 +19,18 @@
 
 static unsigned char input[MAX_INPUT];
 
-int main(int argc, char **argv) {
-  int decode = 0, url = 0;
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--decode") == 0)
-      decode = 1;
-    else if (strcmp(argv[i], "-u") == 0 || strcmp(argv[i], "--url") == 0)
-      url = 1;
-    else {
-      fprintf(stderr, "usage: b64 [-d|--decode] [-u|--url] < in > out\n");
-      return 2;
-    }
-  }
-
-  size_t len = fread(input, 1, sizeof(input), stdin);
-  if (ferror(stdin) || !feof(stdin)) {
+static bool cli_read(FILE *source, unsigned char *buffer, size_t cap, size_t *len) {
+  *len = fread(buffer, 1, cap, source);
+  if (*len == cap && !ferror(source))
+    (void)fgetc(source);
+  if (ferror(source) || !feof(source)) {
     fprintf(stderr, "b64: read error or input over 64 MiB bound\n");
-    return 2;
+    return false;
   }
+  return true;
+}
 
-  if (!decode) {
+static int cli_encode(size_t len, bool url, FILE *output) {
     size_t cap = zbase64_encode_len(len) + 1u;
     char *out = malloc(cap);
     if (!out) {
@@ -53,17 +45,18 @@ int main(int argc, char **argv) {
       return 2;
     }
     if (url) {
-      fputs(out, stdout);
-      fputc('\n', stdout);
+      ok = fputs(out, output) >= 0 && fputc('\n', output) != EOF;
     } else {
       size_t n = strlen(out);
-      for (size_t i = 0; i < n; i += 72)
-        printf("%.72s\n", out + i);
+      if (n == 0) ok = fputc('\n', output) != EOF;
+      for (size_t i = 0; ok && i < n; i += 72)
+        ok = fprintf(output, "%.72s\n", out + i) >= 0;
     }
     free(out);
-    return 0;
-  }
+    return ok ? 0 : 2;
+}
 
+static int cli_decode(size_t len, bool url, FILE *output) {
   /* Decode: strip the encoder's own line fold (bare newlines only); any
    * other whitespace remains an error. */
   size_t flat_len = 0;
@@ -88,7 +81,33 @@ int main(int argc, char **argv) {
     free(out);
     return 2;
   }
-  fwrite(out, 1, out_len, stdout);
+  ok = fwrite(out, 1, out_len, output) == out_len;
   free(out);
-  return 0;
+  return ok ? 0 : 2;
+}
+
+static int cli_run(int argc, char **argv, FILE *source, FILE *output) {
+  bool decode = false, url = false;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--decode") == 0)
+      decode = true;
+    else if (strcmp(argv[i], "-u") == 0 || strcmp(argv[i], "--url") == 0)
+      url = true;
+    else {
+      fprintf(stderr, "usage: b64 [-d|--decode] [-u|--url] < in > out\n");
+      return 2;
+    }
+  }
+  size_t len = 0;
+  if (!cli_read(source, input, sizeof input, &len)) return 2;
+  int rc = decode ? cli_decode(len, url, output) : cli_encode(len, url, output);
+  if (fflush(output) != 0 || ferror(output)) {
+    fputs("b64: stdout write failed\n", stderr);
+    return 2;
+  }
+  return rc;
+}
+
+int main(int argc, char **argv) {
+  return cli_run(argc, argv, stdin, stdout);
 }
