@@ -142,6 +142,23 @@ static bool column_text_equals(sqlite3_stmt *s, int column, const char *text)
     return stored && text && strcmp(stored, text) == 0;
 }
 
+static bool app_event_row_matches_event(
+    sqlite3_stmt *s, const struct zcl_app_signed_event_v1 *event)
+{
+    return column_text_equals(s, 0, event->app_id) &&
+        column_text_equals(s, 1, event->topic) &&
+        AR_COL_INT(s, 2) == (int64_t)event->kind &&
+        column_blob_equals(s, 3, event->chain_id, 32) &&
+        column_blob_equals(s, 4, event->author_key_id, 20) &&
+        column_blob_equals(s, 5, event->author_pubkey, 33) &&
+        AR_COL_INT(s, 6) == (int64_t)event->sequence &&
+        column_blob_equals(s, 7, event->previous_event_id, 32) &&
+        AR_COL_INT(s, 8) == (int64_t)event->created_at &&
+        column_blob_equals(s, 9, event->payload.data, event->payload.len) &&
+        column_blob_equals(s, 10, event->signature, event->signature_len) &&
+        AR_COL_INT(s, 11) == (int64_t)event->signature_len;
+}
+
 enum app_event_existing_state {
     APP_EVENT_ABSENT = 0,
     APP_EVENT_SAME = 1,
@@ -174,18 +191,7 @@ static enum app_event_existing_state app_event_existing(
         sqlite3_finalize(s);
         return APP_EVENT_READ_ERROR;
     }
-    bool same = column_text_equals(s, 0, event->app_id) &&
-        column_text_equals(s, 1, event->topic) &&
-        AR_COL_INT(s, 2) == (int64_t)event->kind &&
-        column_blob_equals(s, 3, event->chain_id, 32) &&
-        column_blob_equals(s, 4, event->author_key_id, 20) &&
-        column_blob_equals(s, 5, event->author_pubkey, 33) &&
-        AR_COL_INT(s, 6) == (int64_t)event->sequence &&
-        column_blob_equals(s, 7, event->previous_event_id, 32) &&
-        AR_COL_INT(s, 8) == (int64_t)event->created_at &&
-        column_blob_equals(s, 9, event->payload.data, event->payload.len) &&
-        column_blob_equals(s, 10, event->signature, event->signature_len) &&
-        AR_COL_INT(s, 11) == (int64_t)event->signature_len;
+    bool same = app_event_row_matches_event(s, event);
     sqlite3_finalize(s);
     return same ? APP_EVENT_SAME : APP_EVENT_CONFLICT;
 }
@@ -253,6 +259,27 @@ bool db_app_event_save(struct node_db *ndb,
     AR_FINISH_SAVE(cbs, record, true);
 }
 
+static bool app_event_column_widths_valid(sqlite3_stmt *s)
+{
+    return AR_COL_BYTES(s, 1) == 32 && AR_COL_BYTES(s, 5) == 32 &&
+        AR_COL_BYTES(s, 6) == 20 && AR_COL_BYTES(s, 7) == 33 &&
+        AR_COL_BYTES(s, 9) == 32;
+}
+
+static bool app_event_lengths_fit_buffers(
+    int payload_len, int signature_len, int signature_len_column,
+    const uint8_t *payload, size_t payload_capacity,
+    const void *payload_blob)
+{
+    return payload_len >= 0 &&
+        (size_t)payload_len <= ZCL_APP_EVENT_PAYLOAD_MAX &&
+        (size_t)payload_len <= payload_capacity &&
+        signature_len >= 8 &&
+        signature_len <= (int)ZCL_APP_EVENT_SIGNATURE_MAX &&
+        signature_len == signature_len_column &&
+        !(payload_len > 0 && (!payload || !payload_blob));
+}
+
 static bool app_event_read(sqlite3_stmt *s, struct db_app_event *out,
                            uint8_t *payload, size_t payload_capacity)
 {
@@ -262,15 +289,11 @@ static bool app_event_read(sqlite3_stmt *s, struct db_app_event *out,
     int signature_len = AR_COL_BYTES(s, 12);
     int signature_len_column = (int)AR_COL_INT(s, 13);
     const void *payload_blob = sqlite3_column_blob(s, 11);
-    if (AR_COL_BYTES(s, 1) != 32 || AR_COL_BYTES(s, 5) != 32 ||
-        AR_COL_BYTES(s, 6) != 20 || AR_COL_BYTES(s, 7) != 33 ||
-        AR_COL_BYTES(s, 9) != 32 || payload_len < 0 ||
-        (size_t)payload_len > ZCL_APP_EVENT_PAYLOAD_MAX ||
-        (size_t)payload_len > payload_capacity ||
-        signature_len < 8 ||
-        signature_len > (int)ZCL_APP_EVENT_SIGNATURE_MAX ||
-        signature_len != signature_len_column ||
-        (payload_len > 0 && (!payload || !payload_blob)))
+    bool row_ok = app_event_column_widths_valid(s) &&
+        app_event_lengths_fit_buffers(payload_len, signature_len,
+                                      signature_len_column, payload,
+                                      payload_capacity, payload_blob);
+    if (!row_ok)
         return false;
     memset(out, 0, sizeof(*out));
     out->receive_cursor = AR_COL_INT(s, 0);
