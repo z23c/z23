@@ -60,48 +60,47 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* External-gauge callback injected into the metrics thread: snapshots
- * sync state, UTXO count, tip-advance age, mirror lag, and peer counts. */
-static void boot_metrics_external_gauges(
-    struct metrics_external_gauges *out,
-    void *ctx)
+/* utxo_count gauge: live UTXO total from the open node DB, when present. */
+static void boot_metrics_fill_utxo_count(struct metrics_external_gauges *out,
+                                         struct boot_svc_ctx *svc)
 {
-    struct boot_svc_ctx *svc = ctx;
-    enum sync_state state;
-    struct legacy_mirror_sync_stats lms = {0};
-    struct node_health_snapshot nhs = {0};
-
-    if (!out)
-        return;
-
-    state = sync_get_state();
-    out->sync_state = (int)state;
-    snprintf(out->sync_state_name, sizeof(out->sync_state_name), "%s",
-             sync_state_name(state));
-
     if (svc && svc->node_db && svc->node_db->open)
         out->utxo_count = node_db_utxo_count(svc->node_db);
+}
 
-    out->tip_advance_age_seconds = sync_monitor_tip_advance_age();
+/* mirror_lag_* gauges: one snapshot of the legacy mirror sync service. */
+static void boot_metrics_fill_mirror_lag(struct metrics_external_gauges *out)
+{
+    struct legacy_mirror_sync_stats lms = {0};
 
     legacy_mirror_sync_stats_snapshot(&lms);
     out->mirror_lag_blocks = lms.enabled && lms.lag_known
                                   ? (int64_t)lms.lag : -1;
     out->mirror_lag_breach_seconds = lms.lag_breach_seconds;
     out->mirror_lag_critical_seconds = lms.lag_critical_seconds;
+}
+
+/* Per-network peer-count gauges from the node-health snapshot. */
+static void boot_metrics_fill_node_health(struct metrics_external_gauges *out,
+                                          struct boot_svc_ctx *svc)
+{
+    struct node_health_snapshot nhs = {0};
 
     if (svc && svc->state) {
         node_health_collect(&nhs, svc->node_db, svc->state);
         out->magicbean_peer_count = (int64_t)nhs.magicbean_peer_count;
         out->zclassic_c23_peer_count = (int64_t)nhs.zclassic_c23_peer_count;
     }
+}
 
-    /* header_gap_growing input: best-known header height minus served
-     * height H*. csr_header_height() is a cheap in-memory, lock-guarded
-     * read (see its doc comment — deliberately not csr_snapshot(), which
-     * also runs SQLite queries); reducer_frontier_provable_tip_cached()
-     * is a lock-free atomic. Both are safe to call from the metrics
-     * thread. -1 until the chain-state repository has a header tip. */
+/* header_gap_growing input: best-known header height minus served
+ * height H*. csr_header_height() is a cheap in-memory, lock-guarded
+ * read (see its doc comment — deliberately not csr_snapshot(), which
+ * also runs SQLite queries); reducer_frontier_provable_tip_cached()
+ * is a lock-free atomic. Both are safe to call from the metrics
+ * thread. -1 until the chain-state repository has a header tip. */
+static void boot_metrics_fill_header_gap(struct metrics_external_gauges *out)
+{
     out->header_gap_blocks = -1;
     {
         int64_t hh = csr_header_height(csr_instance());
@@ -110,16 +109,20 @@ static void boot_metrics_external_gauges(
             out->header_gap_blocks = hh - served;
         }
     }
+}
 
-    /* Per-reducer-stage telemetry (Phase E4): fixed 8-stage cursor +
-     * step_us_ewma snapshot, forwarded to engine/modules/metrics/src/stage_metrics.c
-     * by the metrics tick (engine/modules/metrics/src/metrics.c) since lib/ cannot
-     * include these app/jobs headers directly. Order MUST match
-     * metrics_stage_name()'s canonical order in
-     * engine/modules/metrics/include/metrics/stage_metrics.h — mirrors the same
-     * fixed-order rows[] pattern diag_profile_push_stage_ewma() uses in
-     * engine/controllers/src/diagnostics_registry.c for the `profile`
-     * command's stage_ewma block. */
+/* Per-reducer-stage telemetry (Phase E4): fixed 8-stage cursor +
+ * step_us_ewma snapshot, forwarded to engine/modules/metrics/src/stage_metrics.c
+ * by the metrics tick (engine/modules/metrics/src/metrics.c) since lib/ cannot
+ * include these app/jobs headers directly. Order MUST match
+ * metrics_stage_name()'s canonical order in
+ * engine/modules/metrics/include/metrics/stage_metrics.h — mirrors the same
+ * fixed-order rows[] pattern diag_profile_push_stage_ewma() uses in
+ * engine/controllers/src/diagnostics_registry.c for the `profile`
+ * command's stage_ewma block. */
+static void boot_metrics_fill_stage_telemetry(
+    struct metrics_external_gauges *out)
+{
     out->stage_cursor[0]       = (int64_t)header_admit_stage_cursor();
     out->stage_step_us_ewma[0] = header_admit_stage_step_us_ewma();
     out->stage_cursor[1]       = (int64_t)validate_headers_stage_cursor();
@@ -136,12 +139,17 @@ static void boot_metrics_external_gauges(
     out->stage_step_us_ewma[6] = utxo_apply_stage_step_us_ewma();
     out->stage_cursor[7]       = (int64_t)tip_finalize_stage_cursor();
     out->stage_step_us_ewma[7] = tip_finalize_stage_step_us_ewma();
+}
 
-    /* Active-chain tip + peer count. engine/modules/metrics used to call
-     * active_chain_tip() (core/modules/validation) and connman_get_node_count()
-     * (core/modules/net) straight from its tick, bypassing this seam; both reads
-     * belong here, where the boot context already owns cs_main and the
-     * connman. The tip read is under cs_main exactly as it was. */
+/* Active-chain tip + peer count. engine/modules/metrics used to call
+ * active_chain_tip() (core/modules/validation) and connman_get_node_count()
+ * (core/modules/net) straight from its tick, bypassing this seam; both reads
+ * belong here, where the boot context already owns cs_main and the
+ * connman. The tip read is under cs_main exactly as it was. */
+static void boot_metrics_fill_tip_and_connections(
+    struct metrics_external_gauges *out,
+    struct boot_svc_ctx *svc)
+{
     if (svc && svc->state) {
         zcl_mutex_lock(&svc->state->cs_main);
         struct block_index *tip = active_chain_tip(&svc->state->chain_active);
@@ -151,6 +159,34 @@ static void boot_metrics_external_gauges(
     }
     if (svc && svc->connman)
         out->connection_count = (int64_t)connman_get_node_count(svc->connman);
+}
+
+/* External-gauge callback injected into the metrics thread: snapshots
+ * sync state, UTXO count, tip-advance age, mirror lag, and peer counts. */
+static void boot_metrics_external_gauges(
+    struct metrics_external_gauges *out,
+    void *ctx)
+{
+    struct boot_svc_ctx *svc = ctx;
+    enum sync_state state;
+
+    if (!out)
+        return;
+
+    state = sync_get_state();
+    out->sync_state = (int)state;
+    snprintf(out->sync_state_name, sizeof(out->sync_state_name), "%s",
+             sync_state_name(state));
+
+    boot_metrics_fill_utxo_count(out, svc);
+
+    out->tip_advance_age_seconds = sync_monitor_tip_advance_age();
+
+    boot_metrics_fill_mirror_lag(out);
+    boot_metrics_fill_node_health(out, svc);
+    boot_metrics_fill_header_gap(out);
+    boot_metrics_fill_stage_telemetry(out);
+    boot_metrics_fill_tip_and_connections(out, svc);
 }
 
 /* Prometheus `zcl_rpc_*` counter source. engine/modules/metrics must not link against
