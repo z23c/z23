@@ -335,6 +335,34 @@ size_t api_json_ok(uint8_t *r, size_t max, const struct json_value *body)
 
 /* ── Compute functions (called ONLY from background thread) ── */
 
+/* One cache slot: allocate a temp buffer, run the compute function and,
+ * when the result validates, swap it into the cache under
+ * g_api_cache_mutex. `height_out` is non-NULL only for the HODL cache,
+ * which also records the tip height the snapshot was taken at; the temp
+ * buffer is freed whether or not it is stored. */
+static void api_cache_store_computed(
+    size_t (*compute)(uint8_t *buf, size_t max), size_t size,
+    const char *label, char *cache, size_t *cache_len,
+    int64_t *height_out)
+{
+    uint8_t *tmp = zcl_malloc(size, label);
+    if (tmp) {
+        size_t len = compute(tmp, size);
+        if (len > 0 && len < size &&
+            api_response_cacheable(tmp, len)) {
+            int64_t height = height_out
+                ? api_response_height(tmp, len) : 0;
+            pthread_mutex_lock(&g_api_cache_mutex);
+            memcpy(cache, tmp, len);
+            *cache_len = len;
+            if (height_out)
+                *height_out = height;
+            pthread_mutex_unlock(&g_api_cache_mutex);
+        }
+        free(tmp);
+    }
+}
+
 static void *api_cache_refresh_thread(void *arg)
 {
     (void)arg;
@@ -352,100 +380,53 @@ static void *api_cache_refresh_thread(void *arg)
         api_cache_supervisor_tick();
 
         /* Refresh /api/blocks every 30 seconds */
-        if (iteration % 3 == 0) {
-            uint8_t *tmp = zcl_malloc(API_BLOCKS_CACHE_SIZE, "api_blocks_tmp");
-            if (tmp) {
-                size_t len = compute_blocks(tmp, API_BLOCKS_CACHE_SIZE);
-                if (len > 0 && len < API_BLOCKS_CACHE_SIZE &&
-                    api_response_cacheable(tmp, len)) {
-                    pthread_mutex_lock(&g_api_cache_mutex);
-                    memcpy(g_api_blocks_cache, tmp, len);
-                    g_api_blocks_cache_len = len;
-                    pthread_mutex_unlock(&g_api_cache_mutex);
-                }
-                free(tmp);
-            }
-        }
+        if (iteration % 3 == 0)
+            api_cache_store_computed(compute_blocks,
+                                     API_BLOCKS_CACHE_SIZE,
+                                     "api_blocks_tmp",
+                                     g_api_blocks_cache,
+                                     &g_api_blocks_cache_len, NULL);
 
         /* Refresh /api/stats every 60 seconds */
-        if (iteration % 6 == 0) {
-            uint8_t *tmp = zcl_malloc(API_STATS_CACHE_SIZE, "api_stats_tmp");
-            if (tmp) {
-                size_t len = compute_stats(tmp, API_STATS_CACHE_SIZE);
-                if (len > 0 && len < API_STATS_CACHE_SIZE &&
-                    api_response_cacheable(tmp, len)) {
-                    pthread_mutex_lock(&g_api_cache_mutex);
-                    memcpy(g_api_stats_cache, tmp, len);
-                    g_api_stats_cache_len = len;
-                    pthread_mutex_unlock(&g_api_cache_mutex);
-                }
-                free(tmp);
-            }
-        }
+        if (iteration % 6 == 0)
+            api_cache_store_computed(compute_stats,
+                                     API_STATS_CACHE_SIZE,
+                                     "api_stats_tmp",
+                                     g_api_stats_cache,
+                                     &g_api_stats_cache_len, NULL);
 
         /* Refresh /api/supply every 60 seconds */
         if (iteration % 6 == 0) {
-            uint8_t *tmp = zcl_malloc(API_SUPPLY_CACHE_SIZE, "api_supply_tmp");
-            if (tmp) {
-                size_t len = compute_supply(tmp, API_SUPPLY_CACHE_SIZE);
-                if (len > 0 && len < API_SUPPLY_CACHE_SIZE &&
-                    api_response_cacheable(tmp, len)) {
-                    pthread_mutex_lock(&g_api_cache_mutex);
-                    memcpy(g_api_supply_cache, tmp, len);
-                    g_api_supply_cache_len = len;
-                    pthread_mutex_unlock(&g_api_cache_mutex);
-                }
-                free(tmp);
-            }
-            tmp = zcl_malloc(API_SUPPLY_CACHE_SIZE, "api_supply_legacy_tmp");
-            if (tmp) {
-                size_t len = compute_supply_legacy(tmp, API_SUPPLY_CACHE_SIZE);
-                if (len > 0 && len < API_SUPPLY_CACHE_SIZE &&
-                    api_response_cacheable(tmp, len)) {
-                    pthread_mutex_lock(&g_api_cache_mutex);
-                    memcpy(g_api_supply_legacy_cache, tmp, len);
-                    g_api_supply_legacy_cache_len = len;
-                    pthread_mutex_unlock(&g_api_cache_mutex);
-                }
-                free(tmp);
-            }
+            api_cache_store_computed(compute_supply,
+                                     API_SUPPLY_CACHE_SIZE,
+                                     "api_supply_tmp",
+                                     g_api_supply_cache,
+                                     &g_api_supply_cache_len, NULL);
+            api_cache_store_computed(compute_supply_legacy,
+                                     API_SUPPLY_CACHE_SIZE,
+                                     "api_supply_legacy_tmp",
+                                     g_api_supply_legacy_cache,
+                                     &g_api_supply_legacy_cache_len,
+                                     NULL);
         }
 
         /* Refresh /api/hodl every 60 seconds */
-        if (iteration % 6 == 0) {
-            uint8_t *tmp = zcl_malloc(API_HODL_CACHE_SIZE, "api_hodl_tmp");
-            if (tmp) {
-                size_t len = compute_hodl_cache_refresh(
-                    tmp, API_HODL_CACHE_SIZE);
-                if (len > 0 && len < API_HODL_CACHE_SIZE &&
-                    api_response_cacheable(tmp, len)) {
-                    int64_t height = api_response_height(tmp, len);
-                    pthread_mutex_lock(&g_api_cache_mutex);
-                    memcpy(g_api_hodl_cache, tmp, len);
-                    g_api_hodl_cache_len = len;
-                    g_api_hodl_cache_height = height;
-                    pthread_mutex_unlock(&g_api_cache_mutex);
-                }
-                free(tmp);
-            }
-        }
+        if (iteration % 6 == 0)
+            api_cache_store_computed(compute_hodl_cache_refresh,
+                                     API_HODL_CACHE_SIZE,
+                                     "api_hodl_tmp",
+                                     g_api_hodl_cache,
+                                     &g_api_hodl_cache_len,
+                                     &g_api_hodl_cache_height);
 
         /* Refresh /api/stats/deep every 300 seconds (30 iterations) */
-        if (iteration % 30 == 0) {
-            uint8_t *tmp = zcl_malloc(API_DEEP_STATS_CACHE_SIZE, "api_deep_stats_tmp");
-            if (tmp) {
-                size_t len = compute_deep_stats_cache_refresh(
-                    tmp, API_DEEP_STATS_CACHE_SIZE);
-                if (len > 0 && len < API_DEEP_STATS_CACHE_SIZE &&
-                    api_response_cacheable(tmp, len)) {
-                    pthread_mutex_lock(&g_api_cache_mutex);
-                    memcpy(g_api_deep_stats_cache, tmp, len);
-                    g_api_deep_stats_cache_len = len;
-                    pthread_mutex_unlock(&g_api_cache_mutex);
-                }
-                free(tmp);
-            }
-        }
+        if (iteration % 30 == 0)
+            api_cache_store_computed(compute_deep_stats_cache_refresh,
+                                     API_DEEP_STATS_CACHE_SIZE,
+                                     "api_deep_stats_tmp",
+                                     g_api_deep_stats_cache,
+                                     &g_api_deep_stats_cache_len,
+                                     NULL);
 
         if (iteration == 0)
             printf("API cache: initial refresh complete (blocks=%zu stats=%zu supply=%zu hodl=%zu)\n",
