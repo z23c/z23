@@ -44,19 +44,16 @@ static X509 *reparse(X509 *cert)
     return back;
 }
 
-int test_acme_challenge(void)
+/* Build, format and refusal legs for the key authorization. The refusal
+ * legs clobber authz. */
+static int check_key_authorization(uint8_t *thumbprint, char *authz,
+                                   size_t authz_size)
 {
     int failures = 0;
 
-    /* ── the key authorization ─────────────────────────────────────── */
-    uint8_t thumbprint[32];
-    for (size_t i = 0; i < 32; i++)
-        thumbprint[i] = (uint8_t)(i * 7 + 1);
-
-    char authz[512];
     AC_CHECK("key authorization builds",
              acme_key_authorization("evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ",
-                                    thumbprint, authz, sizeof(authz)));
+                                    thumbprint, authz, authz_size));
     {
         char expect[512];
         char b64[64];
@@ -70,21 +67,22 @@ int test_acme_challenge(void)
         AC_CHECK("a buffer too small for the key authorization is refused",
                  !acme_key_authorization("token", thumbprint, small, sizeof(small)));
         AC_CHECK("a token with a '.' is refused (it would forge the separator)",
-                 !acme_key_authorization("tok.en", thumbprint, authz, sizeof(authz)));
+                 !acme_key_authorization("tok.en", thumbprint, authz, authz_size));
         AC_CHECK("a token with a quote is refused",
-                 !acme_key_authorization("tok\"en", thumbprint, authz, sizeof(authz)));
+                 !acme_key_authorization("tok\"en", thumbprint, authz, authz_size));
         AC_CHECK("an empty token is refused",
-                 !acme_key_authorization("", thumbprint, authz, sizeof(authz)));
+                 !acme_key_authorization("", thumbprint, authz, authz_size));
         AC_CHECK("a NULL token is refused",
-                 !acme_key_authorization(NULL, thumbprint, authz, sizeof(authz)));
+                 !acme_key_authorization(NULL, thumbprint, authz, authz_size));
     }
+    return failures;
+}
 
-    /* Rebuild the good one — the refusal legs above clobbered the buffer. */
-    if (!acme_key_authorization("evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ", thumbprint,
-                                authz, sizeof(authz)))
-        return failures + 1;
+/* The challenge digest, and its definition as SHA-256 of the authorization. */
+static int check_challenge_digest(char *authz, uint8_t *digest)
+{
+    int failures = 0;
 
-    uint8_t digest[32];
     AC_CHECK("the challenge digest computes",
              acme_alpn_challenge_digest(authz, digest));
     {
@@ -93,6 +91,268 @@ int test_acme_challenge(void)
         AC_CHECK("the digest is exactly SHA-256 of the key authorization",
                  memcmp(digest, direct, 32) == 0);
     }
+    return failures;
+}
+
+/* The wire form's version, name constraint and self-signature. */
+static int check_wire_certificate_basics(X509 *wire, EVP_PKEY *key)
+{
+    int failures = 0;
+
+    AC_CHECK("the wire certificate is X.509 v3", X509_get_version(wire) == 2);
+    AC_CHECK("the subjectAltName covers the domain",
+             X509_check_host(wire, "node.example.org", 0, 0, NULL) == 1);
+    AC_CHECK("the subjectAltName does NOT cover another domain",
+             X509_check_host(wire, "other.example.org", 0, 0, NULL) != 1);
+    AC_CHECK("the certificate is self-signed by its own key",
+             X509_verify(wire, key) == 1);
+    return failures;
+}
+
+/* The extnValue payload: one DER OCTET STRING holding the digest. */
+static int check_extension_payload(ASN1_OCTET_STRING *raw, const uint8_t *digest)
+{
+    int failures = 0;
+    const unsigned char *p = ASN1_STRING_get0_data(raw);
+    const int n = ASN1_STRING_length(raw);
+    ASN1_OCTET_STRING *inner = d2i_ASN1_OCTET_STRING(NULL, &p, n);
+    AC_CHECK("the extension value is a DER OCTET STRING", inner != NULL);
+    AC_CHECK("the OCTET STRING holds exactly 32 bytes",
+             inner && ASN1_STRING_length(inner) == 32);
+    AC_CHECK("those 32 bytes are SHA-256 of the key authorization",
+             inner && ASN1_STRING_length(inner) == 32 &&
+             memcmp(ASN1_STRING_get0_data(inner), digest, 32) == 0);
+    /* The inner DER must consume the whole extnValue: trailing bytes
+     * after a well-formed OCTET STRING would be a second, unnoticed
+     * payload. */
+    AC_CHECK("nothing trails the OCTET STRING inside extnValue",
+             inner && p == ASN1_STRING_get0_data(raw) + n);
+    ASN1_OCTET_STRING_free(inner);
+    return failures;
+}
+
+/* The acmeIdentifier extension, read back off the wire form. */
+static int check_acme_identifier_extension(X509 *wire, const uint8_t *digest)
+{
+    int failures = 0;
+    ASN1_OBJECT *want = OBJ_txt2obj(ACME_ID_OID_TEXT, 1);
+    AC_CHECK("the acmeIdentifier OID resolves", want != NULL);
+    const int idx = want ? X509_get_ext_by_OBJ(wire, want, -1) : -1;
+    AC_CHECK("the wire certificate carries an extension at 1.3.6.1.5.5.7.1.31",
+             idx >= 0);
+    X509_EXTENSION *ext = idx >= 0 ? X509_get_ext(wire, idx) : NULL;
+    AC_CHECK("that extension is marked CRITICAL",
+             ext && X509_EXTENSION_get_critical(ext) == 1);
+
+    ASN1_OCTET_STRING *raw = ext ? X509_EXTENSION_get_data(ext) : NULL;
+    AC_CHECK("the extension carries a value", raw != NULL);
+    if (raw) {
+        failures += check_extension_payload(raw, digest);
+    } else {
+        failures += 4;
+    }
+    ASN1_OBJECT_free(want);
+    return failures;
+}
+
+/* A different key authorization must produce different payload bytes;
+ * otherwise the challenge would be answerable by anyone. */
+static int check_other_account_key_differs(const uint8_t *digest)
+{
+    int failures = 0;
+    char other_authz[512];
+    uint8_t other_thumb[32];
+    memset(other_thumb, 0xAB, sizeof(other_thumb));
+    X509 *c2 = NULL;
+    EVP_PKEY *k2 = NULL;
+    const bool ok =
+        acme_key_authorization("evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ",
+                               other_thumb, other_authz, sizeof(other_authz)) &&
+        acme_alpn_challenge_certificate("node.example.org", other_authz,
+                                        &c2, &k2);
+    uint8_t d2[32];
+    AC_CHECK("a different account key yields a different challenge digest",
+             ok && acme_alpn_challenge_digest(other_authz, d2) &&
+             memcmp(d2, digest, 32) != 0);
+    X509_free(c2);
+    EVP_PKEY_free(k2);
+    return failures;
+}
+
+/* Builder refusals for bad domains and an empty key authorization. */
+static int check_certificate_refusals(char *authz)
+{
+    int failures = 0;
+    X509 *c = (X509 *)1;
+    EVP_PKEY *k = (EVP_PKEY *)1;
+    AC_CHECK("a domain with a slash is refused",
+             !acme_alpn_challenge_certificate("node.example.org/x", authz, &c, &k) &&
+             c == NULL && k == NULL);
+    AC_CHECK("an empty domain is refused",
+             !acme_alpn_challenge_certificate("", authz, &c, &k));
+    AC_CHECK("a NULL domain is refused",
+             !acme_alpn_challenge_certificate(NULL, authz, &c, &k));
+    AC_CHECK("a label over 63 characters is refused",
+             !acme_alpn_challenge_certificate(
+                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                 ".example.org", authz, &c, &k));
+    AC_CHECK("an empty key authorization is refused",
+             !acme_alpn_challenge_certificate("node.example.org", "", &c, &k));
+    return failures;
+}
+
+/* Arm, re-arm, disarm, and the bad-domain refusal. */
+static int check_armed_state(char *authz)
+{
+    int failures = 0;
+    AC_CHECK("the responder starts disarmed", !acme_alpn_challenge_armed());
+    AC_CHECK("arming succeeds",
+             acme_alpn_challenge_arm("node.example.org", authz));
+    AC_CHECK("the responder reports armed", acme_alpn_challenge_armed());
+    AC_CHECK("re-arming for another name succeeds",
+             acme_alpn_challenge_arm("other.example.org", authz));
+    acme_alpn_challenge_disarm();
+    AC_CHECK("disarming clears the armed state", !acme_alpn_challenge_armed());
+    acme_alpn_challenge_disarm();
+    AC_CHECK("disarming twice is harmless", !acme_alpn_challenge_armed());
+    AC_CHECK("arming with a bad domain leaves the responder disarmed",
+             !acme_alpn_challenge_arm("bad domain", authz) &&
+             !acme_alpn_challenge_armed());
+    return failures;
+}
+
+/* Write, read back, and arm straight from the handoff file. */
+static int check_handoff_round_trip(char *path, char *authz)
+{
+    int failures = 0;
+    char domain[ACME_MAX_DOMAIN + 1];
+    char authz_back[ACME_MAX_KEY_AUTHZ];
+    AC_CHECK("reading an absent handoff file is not an error, just absent",
+             !acme_arm_file_read(path, domain, sizeof(domain), authz_back,
+                                 sizeof(authz_back)));
+    AC_CHECK("the worker writes the handoff pair",
+             acme_arm_file_write(path, "node.example.org", authz));
+    AC_CHECK("the node reads back exactly what the worker wrote",
+             acme_arm_file_read(path, domain, sizeof(domain), authz_back,
+                                sizeof(authz_back)) &&
+             strcmp(domain, "node.example.org") == 0 &&
+             strcmp(authz_back, authz) == 0);
+    AC_CHECK("arming straight from the handoff file works",
+             acme_alpn_challenge_arm_from_file(path) &&
+             acme_alpn_challenge_armed());
+    acme_alpn_challenge_disarm();
+    return failures;
+}
+
+/* Refusals caught at handoff write time. */
+static int check_handoff_write_refusals(char *path, char *authz)
+{
+    int failures = 0;
+    AC_CHECK("a handoff carrying a newline in a field is refused at write",
+             !acme_arm_file_write(path, "node.example.org", "bad\nvalue"));
+    AC_CHECK("a handoff carrying a shell metacharacter is refused at write",
+             !acme_arm_file_write(path, "node.example.org", "a;rm -rf /"));
+    AC_CHECK("a handoff with no domain is refused at write",
+             !acme_arm_file_write(path, "", authz));
+    return failures;
+}
+
+/* Refusals caught at handoff read time, from crafted files. */
+static int check_handoff_read_refusals(char *path)
+{
+    int failures = 0;
+    char domain[ACME_MAX_DOMAIN + 1];
+    char authz_back[ACME_MAX_KEY_AUTHZ];
+    {
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fputs("domain=node.example.org\n", f);
+            fclose(f);
+        }
+        AC_CHECK("a handoff missing the keyauth line is refused at read",
+                 !acme_arm_file_read(path, domain, sizeof(domain),
+                                     authz_back, sizeof(authz_back)) &&
+                 domain[0] == '\0');
+        AC_CHECK("and arming from it leaves the responder disarmed",
+                 !acme_alpn_challenge_arm_from_file(path) &&
+                 !acme_alpn_challenge_armed());
+    }
+    {
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fputs("domain=node.example.org\nkeyauth=has space\n", f);
+            fclose(f);
+        }
+        AC_CHECK("a handoff whose value carries a space is refused at read",
+                 !acme_arm_file_read(path, domain, sizeof(domain),
+                                     authz_back, sizeof(authz_back)));
+    }
+    return failures;
+}
+
+/* Clearing the handoff file, present or absent. */
+static int check_handoff_clearing(char *path)
+{
+    int failures = 0;
+    char domain[ACME_MAX_DOMAIN + 1];
+    char authz_back[ACME_MAX_KEY_AUTHZ];
+    AC_CHECK("clearing removes the handoff file",
+             acme_arm_file_clear(path) &&
+             !acme_arm_file_read(path, domain, sizeof(domain), authz_back,
+                                 sizeof(authz_back)));
+    AC_CHECK("clearing an already-absent handoff is harmless",
+             acme_arm_file_clear(path));
+    return failures;
+}
+
+/* The node/worker handoff file, on a throwaway directory. */
+static int check_handoff_file(char *authz)
+{
+    int failures = 0;
+    char dir[512];
+    char path[640];
+    test_make_tmpdir(dir, sizeof(dir), "acme_challenge", "handoff");
+    snprintf(path, sizeof(path), "%s/challenge.txt", dir);
+
+    failures += check_handoff_round_trip(path, authz);
+    failures += check_handoff_write_refusals(path, authz);
+    failures += check_handoff_read_refusals(path);
+    failures += check_handoff_clearing(path);
+    test_rm_rf(dir);
+    return failures;
+}
+
+/* The front-door install seam. */
+static int check_install_seam(void)
+{
+    int failures = 0;
+    AC_CHECK("installing on no TLS context is refused", !acme_alpn_install(NULL));
+    SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
+    AC_CHECK("the responder installs on a server context",
+             ctx && acme_alpn_install(ctx));
+    SSL_CTX_free(ctx);
+    return failures;
+}
+
+int test_acme_challenge(void)
+{
+    int failures = 0;
+
+    /* ── the key authorization ─────────────────────────────────────── */
+    uint8_t thumbprint[32];
+    for (size_t i = 0; i < 32; i++)
+        thumbprint[i] = (uint8_t)(i * 7 + 1);
+
+    char authz[512];
+    failures += check_key_authorization(thumbprint, authz, sizeof(authz));
+
+    /* Rebuild the good one — the refusal legs above clobbered the buffer. */
+    if (!acme_key_authorization("evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ", thumbprint,
+                                authz, sizeof(authz)))
+        return failures + 1;
+
+    uint8_t digest[32];
+    failures += check_challenge_digest(authz, digest);
 
     /* ── the certificate, read back from DER ───────────────────────── */
     X509 *cert = NULL;
@@ -114,177 +374,21 @@ int test_acme_challenge(void)
         return failures + 1;
     }
 
-    AC_CHECK("the wire certificate is X.509 v3", X509_get_version(wire) == 2);
-    AC_CHECK("the subjectAltName covers the domain",
-             X509_check_host(wire, "node.example.org", 0, 0, NULL) == 1);
-    AC_CHECK("the subjectAltName does NOT cover another domain",
-             X509_check_host(wire, "other.example.org", 0, 0, NULL) != 1);
-    AC_CHECK("the certificate is self-signed by its own key",
-             X509_verify(wire, key) == 1);
-
-    {
-        ASN1_OBJECT *want = OBJ_txt2obj(ACME_ID_OID_TEXT, 1);
-        AC_CHECK("the acmeIdentifier OID resolves", want != NULL);
-        const int idx = want ? X509_get_ext_by_OBJ(wire, want, -1) : -1;
-        AC_CHECK("the wire certificate carries an extension at 1.3.6.1.5.5.7.1.31",
-                 idx >= 0);
-        X509_EXTENSION *ext = idx >= 0 ? X509_get_ext(wire, idx) : NULL;
-        AC_CHECK("that extension is marked CRITICAL",
-                 ext && X509_EXTENSION_get_critical(ext) == 1);
-
-        ASN1_OCTET_STRING *raw = ext ? X509_EXTENSION_get_data(ext) : NULL;
-        AC_CHECK("the extension carries a value", raw != NULL);
-        if (raw) {
-            const unsigned char *p = ASN1_STRING_get0_data(raw);
-            const int n = ASN1_STRING_length(raw);
-            ASN1_OCTET_STRING *inner = d2i_ASN1_OCTET_STRING(NULL, &p, n);
-            AC_CHECK("the extension value is a DER OCTET STRING", inner != NULL);
-            AC_CHECK("the OCTET STRING holds exactly 32 bytes",
-                     inner && ASN1_STRING_length(inner) == 32);
-            AC_CHECK("those 32 bytes are SHA-256 of the key authorization",
-                     inner && ASN1_STRING_length(inner) == 32 &&
-                     memcmp(ASN1_STRING_get0_data(inner), digest, 32) == 0);
-            /* The inner DER must consume the whole extnValue: trailing bytes
-             * after a well-formed OCTET STRING would be a second, unnoticed
-             * payload. */
-            AC_CHECK("nothing trails the OCTET STRING inside extnValue",
-                     inner && p == ASN1_STRING_get0_data(raw) + n);
-            ASN1_OCTET_STRING_free(inner);
-        } else {
-            failures += 4;
-        }
-        ASN1_OBJECT_free(want);
-    }
-
-    {
-        /* A different key authorization must produce different payload bytes;
-         * otherwise the challenge would be answerable by anyone. */
-        char other_authz[512];
-        uint8_t other_thumb[32];
-        memset(other_thumb, 0xAB, sizeof(other_thumb));
-        X509 *c2 = NULL;
-        EVP_PKEY *k2 = NULL;
-        const bool ok =
-            acme_key_authorization("evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ",
-                                   other_thumb, other_authz, sizeof(other_authz)) &&
-            acme_alpn_challenge_certificate("node.example.org", other_authz,
-                                            &c2, &k2);
-        uint8_t d2[32];
-        AC_CHECK("a different account key yields a different challenge digest",
-                 ok && acme_alpn_challenge_digest(other_authz, d2) &&
-                 memcmp(d2, digest, 32) != 0);
-        X509_free(c2);
-        EVP_PKEY_free(k2);
-    }
+    failures += check_wire_certificate_basics(wire, key);
+    failures += check_acme_identifier_extension(wire, digest);
+    failures += check_other_account_key_differs(digest);
 
     /* ── refusals ──────────────────────────────────────────────────── */
-    {
-        X509 *c = (X509 *)1;
-        EVP_PKEY *k = (EVP_PKEY *)1;
-        AC_CHECK("a domain with a slash is refused",
-                 !acme_alpn_challenge_certificate("node.example.org/x", authz, &c, &k) &&
-                 c == NULL && k == NULL);
-        AC_CHECK("an empty domain is refused",
-                 !acme_alpn_challenge_certificate("", authz, &c, &k));
-        AC_CHECK("a NULL domain is refused",
-                 !acme_alpn_challenge_certificate(NULL, authz, &c, &k));
-        AC_CHECK("a label over 63 characters is refused",
-                 !acme_alpn_challenge_certificate(
-                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                     ".example.org", authz, &c, &k));
-        AC_CHECK("an empty key authorization is refused",
-                 !acme_alpn_challenge_certificate("node.example.org", "", &c, &k));
-    }
+    failures += check_certificate_refusals(authz);
 
     /* ── the armed state ───────────────────────────────────────────── */
-    {
-        AC_CHECK("the responder starts disarmed", !acme_alpn_challenge_armed());
-        AC_CHECK("arming succeeds",
-                 acme_alpn_challenge_arm("node.example.org", authz));
-        AC_CHECK("the responder reports armed", acme_alpn_challenge_armed());
-        AC_CHECK("re-arming for another name succeeds",
-                 acme_alpn_challenge_arm("other.example.org", authz));
-        acme_alpn_challenge_disarm();
-        AC_CHECK("disarming clears the armed state", !acme_alpn_challenge_armed());
-        acme_alpn_challenge_disarm();
-        AC_CHECK("disarming twice is harmless", !acme_alpn_challenge_armed());
-        AC_CHECK("arming with a bad domain leaves the responder disarmed",
-                 !acme_alpn_challenge_arm("bad domain", authz) &&
-                 !acme_alpn_challenge_armed());
-    }
+    failures += check_armed_state(authz);
 
     /* ── the node/worker handoff file ──────────────────────────────── */
-    {
-        char dir[512];
-        char path[640];
-        test_make_tmpdir(dir, sizeof(dir), "acme_challenge", "handoff");
-        snprintf(path, sizeof(path), "%s/challenge.txt", dir);
-
-        char domain[ACME_MAX_DOMAIN + 1];
-        char authz_back[ACME_MAX_KEY_AUTHZ];
-        AC_CHECK("reading an absent handoff file is not an error, just absent",
-                 !acme_arm_file_read(path, domain, sizeof(domain), authz_back,
-                                     sizeof(authz_back)));
-        AC_CHECK("the worker writes the handoff pair",
-                 acme_arm_file_write(path, "node.example.org", authz));
-        AC_CHECK("the node reads back exactly what the worker wrote",
-                 acme_arm_file_read(path, domain, sizeof(domain), authz_back,
-                                    sizeof(authz_back)) &&
-                 strcmp(domain, "node.example.org") == 0 &&
-                 strcmp(authz_back, authz) == 0);
-        AC_CHECK("arming straight from the handoff file works",
-                 acme_alpn_challenge_arm_from_file(path) &&
-                 acme_alpn_challenge_armed());
-        acme_alpn_challenge_disarm();
-
-        AC_CHECK("a handoff carrying a newline in a field is refused at write",
-                 !acme_arm_file_write(path, "node.example.org", "bad\nvalue"));
-        AC_CHECK("a handoff carrying a shell metacharacter is refused at write",
-                 !acme_arm_file_write(path, "node.example.org", "a;rm -rf /"));
-        AC_CHECK("a handoff with no domain is refused at write",
-                 !acme_arm_file_write(path, "", authz));
-
-        {
-            FILE *f = fopen(path, "wb");
-            if (f) {
-                fputs("domain=node.example.org\n", f);
-                fclose(f);
-            }
-            AC_CHECK("a handoff missing the keyauth line is refused at read",
-                     !acme_arm_file_read(path, domain, sizeof(domain),
-                                         authz_back, sizeof(authz_back)) &&
-                     domain[0] == '\0');
-            AC_CHECK("and arming from it leaves the responder disarmed",
-                     !acme_alpn_challenge_arm_from_file(path) &&
-                     !acme_alpn_challenge_armed());
-        }
-        {
-            FILE *f = fopen(path, "wb");
-            if (f) {
-                fputs("domain=node.example.org\nkeyauth=has space\n", f);
-                fclose(f);
-            }
-            AC_CHECK("a handoff whose value carries a space is refused at read",
-                     !acme_arm_file_read(path, domain, sizeof(domain),
-                                         authz_back, sizeof(authz_back)));
-        }
-        AC_CHECK("clearing removes the handoff file",
-                 acme_arm_file_clear(path) &&
-                 !acme_arm_file_read(path, domain, sizeof(domain), authz_back,
-                                     sizeof(authz_back)));
-        AC_CHECK("clearing an already-absent handoff is harmless",
-                 acme_arm_file_clear(path));
-        test_rm_rf(dir);
-    }
+    failures += check_handoff_file(authz);
 
     /* ── the front-door seam ───────────────────────────────────────── */
-    {
-        AC_CHECK("installing on no TLS context is refused", !acme_alpn_install(NULL));
-        SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
-        AC_CHECK("the responder installs on a server context",
-                 ctx && acme_alpn_install(ctx));
-        SSL_CTX_free(ctx);
-    }
+    failures += check_install_seam();
 
     X509_free(wire);
     X509_free(cert);
