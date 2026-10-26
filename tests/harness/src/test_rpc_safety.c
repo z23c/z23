@@ -626,16 +626,27 @@ static bool lu_seed_rows(struct node_db *ndb)
     return ok;
 }
 
-/* Every seeded row appears exactly once with its own amount. */
+/* Every seeded row appears exactly once with its own txid and amount. */
 static bool lu_rows_match_seed(const struct json_value *result)
 {
     bool seen[LU_ROWS] = {false};
     for (size_t i = 0; i < json_size(result); i++) {
         const struct json_value *e = json_at(result, i);
-        int64_t vout = json_get_int(json_get(e, "vout"));
+        const struct json_value *jv = json_get(e, "vout");
+        if (!jv || jv->type != JSON_INT)
+            return false;
+        int64_t vout = json_get_int(jv);
         if (vout < 0 || vout >= LU_ROWS || seen[vout])
             return false;
         seen[vout] = true;
+        struct uint256 want;
+        memset(want.data, 0x40 + (int)(vout & 0x3f), 32);
+        want.data[0] = (uint8_t)vout;
+        char want_hex[65];
+        uint256_get_hex(&want, want_hex);
+        const char *txid = json_get_str(json_get(e, "txid"));
+        if (!txid || strcmp(txid, want_hex) != 0)
+            return false;
         double sats = json_get_real(json_get(e, "amount")) * 1e8;
         if ((int64_t)(sats + 0.5) != 1000 + vout)
             return false;
