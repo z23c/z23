@@ -184,8 +184,6 @@ contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publicati
 contexts/commons/modules/vcs/src/zcode_dht_service_publication_drive.c:publication_drive_stores:23
 contexts/commons/modules/vcs/src/zcode_dht_service_session.c:vcs_zcode_dht_service_session_open:29
 contexts/commons/modules/vcs/src/zcode_dht_service_session.c:vcs_zcode_dht_service_sessions_reconcile:20
-contexts/commons/modules/vcs/src/zcode_epoch_creation_verify.c:epoch_verify_context:20
-contexts/commons/modules/vcs/src/zcode_epoch_creation_verify.c:vcs_zcode_epoch_creation_verify_cas:23
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_error_string:16
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_parse:37
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_propose_cas:30

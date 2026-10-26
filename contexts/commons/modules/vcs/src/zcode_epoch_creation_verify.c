@@ -15,8 +15,7 @@ static bool epoch_verify_equal(const uint8_t a[32], const uint8_t b[32])
     return memcmp(a, b, 32) == 0;
 }
 
-static enum vcs_zcode_epoch_creation_error epoch_verify_context(
-    const struct vcs_zcode_epoch_creation_set_v1 *set,
+static enum vcs_zcode_epoch_creation_error epoch_verify_context_inputs(
     const struct vcs_zcode_epoch_creation_validation_context *context)
 {
     if (!context || !context->workspace ||
@@ -27,6 +26,13 @@ static enum vcs_zcode_epoch_creation_error epoch_verify_context(
         !context->contribution_is_duplicate ||
         !context->award_atoms_for_creation || context->now_unix <= 0)
         return VCS_ZCODE_EPOCH_CREATION_CONTEXT;
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_verify_predecessor_roots(
+    const struct vcs_zcode_epoch_creation_set_v1 *set,
+    const struct vcs_zcode_epoch_creation_validation_context *context)
+{
     if (!epoch_verify_equal(set->network_genesis_root,
                             context->expected_network_genesis_root) ||
         !epoch_verify_equal(set->zc23_policy_root,
@@ -37,6 +43,20 @@ static enum vcs_zcode_epoch_creation_error epoch_verify_context(
     if (set->epoch == 0 &&
         !zcl_bytes_all_zero(context->expected_previous_epoch_creation_root, 32))
         return VCS_ZCODE_EPOCH_CREATION_PREDECESSOR;
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_verify_context(
+    const struct vcs_zcode_epoch_creation_set_v1 *set,
+    const struct vcs_zcode_epoch_creation_validation_context *context)
+{
+    enum vcs_zcode_epoch_creation_error error =
+        epoch_verify_context_inputs(context);
+    if (error != VCS_ZCODE_EPOCH_CREATION_OK)
+        return error;
+    error = epoch_verify_predecessor_roots(set, context);
+    if (error != VCS_ZCODE_EPOCH_CREATION_OK)
+        return error;
     if (set->actual_mint_atoms != context->observed_actual_mint_atoms)
         return VCS_ZCODE_EPOCH_CREATION_MINT;
     if (context->active_height < set->maturity_height ||
@@ -47,6 +67,87 @@ static enum vcs_zcode_epoch_creation_error epoch_verify_context(
         !context->anchor_is_active(context->callback_opaque,
                                    set->maturity_height, set->maturity_hash))
         return VCS_ZCODE_EPOCH_CREATION_REORG;
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_verify_load_attribution(
+    const struct vcs_zcode_epoch_creation_set_v1 *set,
+    const struct vcs_zcode_epoch_creation_validation_context *context,
+    size_t index, struct vcs_zcode_creation_attribution_v1 *attribution)
+{
+    uint8_t *wire = NULL; size_t wire_len = 0;
+    if (vcs_object_load_raw_bounded(
+            context->workspace, set->attribution_roots[index],
+            VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES,
+            &wire, &wire_len) != 0)
+        return VCS_ZCODE_EPOCH_CREATION_CAS;
+    uint8_t root[32];
+    enum vcs_zcode_creation_error creation_error =
+        vcs_zcode_creation_attribution_parse(wire, wire_len, attribution);
+    free(wire);
+    if (creation_error != VCS_ZCODE_CREATION_OK ||
+        vcs_zcode_creation_attribution_root(attribution, root) !=
+            VCS_ZCODE_CREATION_OK ||
+        !epoch_verify_equal(root, set->attribution_roots[index]) ||
+        attribution->epoch != set->epoch ||
+        !epoch_verify_equal(attribution->network_genesis_root,
+                            set->network_genesis_root) ||
+        !epoch_verify_equal(attribution->zc23_policy_root,
+                            set->zc23_policy_root))
+        return VCS_ZCODE_EPOCH_CREATION_ATTRIBUTION;
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_verify_award(
+    const struct vcs_zcode_epoch_creation_validation_context *context,
+    const struct vcs_zcode_creation_attribution_v1 *attribution,
+    uint64_t *expected_award)
+{
+    struct vcs_zcode_creation_attribution_v1 policy_attribution =
+        *attribution;
+    /* v1 has no security-specific structured finding root.  A caller
+     * may display SECURITY_FIX, but issuance must evaluate it as the
+     * ordinary born-red class so the label can never increase award. */
+    if (policy_attribution.category == VCS_ZCODE_CREATION_SECURITY_FIX)
+        policy_attribution.category = VCS_ZCODE_CREATION_BORN_RED_FIX;
+    if (!context->award_atoms_for_creation(
+            context->callback_opaque, &policy_attribution,
+            expected_award) ||
+        *expected_award == 0 || *expected_award != attribution->award_atoms)
+        return VCS_ZCODE_EPOCH_CREATION_ATTRIBUTION;
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_verify_creation(
+    const struct vcs_zcode_epoch_creation_set_v1 *set,
+    const struct vcs_zcode_epoch_creation_validation_context *context,
+    const struct vcs_zcode_creation_attribution_v1 *attribution,
+    uint64_t expected_award)
+{
+    struct vcs_zcode_creation_validation_context creation_context = {
+        .workspace = context->workspace,
+        .expected_network_genesis_root =
+            context->expected_network_genesis_root,
+        .expected_zc23_policy_root = context->expected_zc23_policy_root,
+        .expected_epoch = set->epoch,
+        .expected_award_atoms = expected_award,
+        .active_height = context->active_height,
+        .active_mtp = context->active_mtp,
+        .now_unix = context->now_unix,
+        .anchor_is_active = context->anchor_is_active,
+        .contribution_is_duplicate =
+            context->contribution_is_duplicate,
+        .binding_is_current = context->binding_is_current,
+        .continuity_is_duplicate = context->continuity_is_duplicate,
+        .callback_opaque = context->callback_opaque,
+    };
+    enum vcs_zcode_creation_error creation_error =
+        vcs_zcode_creation_attribution_verify_cas(attribution,
+                                                  &creation_context);
+    if (creation_error != VCS_ZCODE_CREATION_OK)
+        return creation_error == VCS_ZCODE_CREATION_DUPLICATE
+            ? VCS_ZCODE_EPOCH_CREATION_DUPLICATE
+            : VCS_ZCODE_EPOCH_CREATION_ATTRIBUTION;
     return VCS_ZCODE_EPOCH_CREATION_OK;
 }
 
@@ -71,31 +172,11 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_verify_cas(
             return VCS_ZCODE_EPOCH_CREATION_ALLOC;
     }
     for (size_t i = 0; i < set->attribution_count; i++) {
-        uint8_t *wire = NULL; size_t wire_len = 0;
-        if (vcs_object_load_raw_bounded(
-                context->workspace, set->attribution_roots[i],
-                VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES,
-                &wire, &wire_len) != 0) {
-            free(seen_candidates);
-            return VCS_ZCODE_EPOCH_CREATION_CAS;
-        }
         struct vcs_zcode_creation_attribution_v1 attribution;
-        uint8_t root[32];
-        enum vcs_zcode_creation_error creation_error =
-            vcs_zcode_creation_attribution_parse(wire, wire_len,
-                                                  &attribution);
-        free(wire);
-        if (creation_error != VCS_ZCODE_CREATION_OK ||
-            vcs_zcode_creation_attribution_root(&attribution, root) !=
-                VCS_ZCODE_CREATION_OK ||
-            !epoch_verify_equal(root, set->attribution_roots[i]) ||
-            attribution.epoch != set->epoch ||
-            !epoch_verify_equal(attribution.network_genesis_root,
-                                set->network_genesis_root) ||
-            !epoch_verify_equal(attribution.zc23_policy_root,
-                                set->zc23_policy_root)) {
+        error = epoch_verify_load_attribution(set, context, i, &attribution);
+        if (error != VCS_ZCODE_EPOCH_CREATION_OK) {
             free(seen_candidates);
-            return VCS_ZCODE_EPOCH_CREATION_ATTRIBUTION;
+            return error;
         }
         for (size_t j = 0; j < i; j++) {
             if (epoch_verify_equal(seen_candidates[j],
@@ -107,44 +188,16 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_verify_cas(
         memcpy(seen_candidates[i], attribution.candidate_root, 32);
 
         uint64_t expected_award = 0;
-        struct vcs_zcode_creation_attribution_v1 policy_attribution =
-            attribution;
-        /* v1 has no security-specific structured finding root.  A caller
-         * may display SECURITY_FIX, but issuance must evaluate it as the
-         * ordinary born-red class so the label can never increase award. */
-        if (policy_attribution.category == VCS_ZCODE_CREATION_SECURITY_FIX)
-            policy_attribution.category = VCS_ZCODE_CREATION_BORN_RED_FIX;
-        if (!context->award_atoms_for_creation(
-                context->callback_opaque, &policy_attribution,
-                &expected_award) ||
-            expected_award == 0 || expected_award != attribution.award_atoms) {
+        error = epoch_verify_award(context, &attribution, &expected_award);
+        if (error != VCS_ZCODE_EPOCH_CREATION_OK) {
             free(seen_candidates);
-            return VCS_ZCODE_EPOCH_CREATION_ATTRIBUTION;
+            return error;
         }
-        struct vcs_zcode_creation_validation_context creation_context = {
-            .workspace = context->workspace,
-            .expected_network_genesis_root =
-                context->expected_network_genesis_root,
-            .expected_zc23_policy_root = context->expected_zc23_policy_root,
-            .expected_epoch = set->epoch,
-            .expected_award_atoms = expected_award,
-            .active_height = context->active_height,
-            .active_mtp = context->active_mtp,
-            .now_unix = context->now_unix,
-            .anchor_is_active = context->anchor_is_active,
-            .contribution_is_duplicate =
-                context->contribution_is_duplicate,
-            .binding_is_current = context->binding_is_current,
-            .continuity_is_duplicate = context->continuity_is_duplicate,
-            .callback_opaque = context->callback_opaque,
-        };
-        creation_error = vcs_zcode_creation_attribution_verify_cas(
-            &attribution, &creation_context);
-        if (creation_error != VCS_ZCODE_CREATION_OK) {
+        error = epoch_verify_creation(set, context, &attribution,
+                                      expected_award);
+        if (error != VCS_ZCODE_EPOCH_CREATION_OK) {
             free(seen_candidates);
-            return creation_error == VCS_ZCODE_CREATION_DUPLICATE
-                ? VCS_ZCODE_EPOCH_CREATION_DUPLICATE
-                : VCS_ZCODE_EPOCH_CREATION_ATTRIBUTION;
+            return error;
         }
         if (!zcl_u64_add(sum, attribution.award_atoms, &sum)) {
             free(seen_candidates);
