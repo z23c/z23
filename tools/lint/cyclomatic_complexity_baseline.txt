@@ -2543,8 +2543,6 @@ tools/gen_utxo_root_ladder.c:main:35
 tools/gen_utxo_root_ladder.c:parse_cli:22
 tools/install/z23_bootstrap.c:bootstrap_main#2:39
 tools/install/z23_bootstrap.c:dns_attestation:16
-tools/jsonq.c:parse_path:21
-tools/jsonq.c:walk:24
 tools/ldb_verify_c23.c:main:54
 tools/lint/lintc/gate_git_scan_a.c:check_equihash_params_run:26
 tools/lint/lintc/gate_git_scan_a.c:check_framework_filename_suffix_run:18

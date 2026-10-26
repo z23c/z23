@@ -107,11 +107,63 @@ static int parse_array_index_digits(const char **cursor)
     return idx;
 }
 
+static bool path_denotes_root(const char *p)
+{
+    return !p || !*p || (p[0] == '.' && p[1] == '\0');
+}
+
+/* Parses one "[index]" segment starting at '[', stores it in s and
+ * advances the cursor past the ']' and any following '.'. Returns 0 on
+ * success, 1 when no digit follows '[', 2 when ']' is missing, or -1
+ * when parse_array_index_digits already reported the failure. */
+static int parse_index_segment(const char **cursor, path_seg *s)
+{
+    const char *p = *cursor + 1;
+    if (*p < '0' || *p > '9')
+        return 1;
+    int idx = parse_array_index_digits(&p);
+    if (idx < 0)
+        return -1;
+    if (*p != ']')
+        return 2;
+    p++;
+    s->kind = SEG_INDEX;
+    s->index = idx;
+    s->key_len = 0;
+    if (*p == '.')
+        p++;
+    *cursor = p;
+    return 0;
+}
+
+/* Parses one dotted key segment, stores it in s and advances the cursor
+ * past the key and any following '.'. Returns 0 on success, or 1 when
+ * the segment is empty or oversized. */
+static int parse_key_segment(const char **cursor, path_seg *s)
+{
+    const char *p = *cursor;
+    const char *start = p;
+    while (*p && *p != '.' && *p != '[')
+        p++;
+    size_t n = (size_t)(p - start);
+    if (n == 0 || n >= MAX_KEY)
+        return 1;
+    s->kind = SEG_KEY;
+    memcpy(s->key, start, n);
+    s->key[n] = '\0';
+    s->key_len = n;
+    s->index = 0;
+    if (*p == '.')
+        p++;
+    *cursor = p;
+    return 0;
+}
+
 static int parse_path(const char *path)
 {
     const char *p = path;
     g_nsegs = 0;
-    if (!p || !*p || (p[0] == '.' && p[1] == '\0'))
+    if (path_denotes_root(p))
         return 0;
     if (*p == '.')
         p++;
@@ -122,43 +174,25 @@ static int parse_path(const char *path)
         }
         path_seg *s = &g_segs[g_nsegs];
         if (*p == '[') {
-            p++;
-            if (*p < '0' || *p > '9') {
+            int rc = parse_index_segment(&p, s);
+            if (rc == 1) {
                 fputs("jsonq: expected array index\n", stderr);
                 return -1;
             }
-            int idx = parse_array_index_digits(&p);
-            if (idx < 0)
-                return -1;
-            if (*p != ']') {
+            if (rc == 2) {
                 fputs("jsonq: missing ]\n", stderr);
                 return -1;
             }
-            p++;
-            s->kind = SEG_INDEX;
-            s->index = idx;
-            s->key_len = 0;
+            if (rc < 0)
+                return -1;
             g_nsegs++;
-            if (*p == '.')
-                p++;
             continue;
         }
-        const char *start = p;
-        while (*p && *p != '.' && *p != '[')
-            p++;
-        size_t n = (size_t)(p - start);
-        if (n == 0 || n >= MAX_KEY) {
+        if (parse_key_segment(&p, s) != 0) {
             fputs("jsonq: empty or oversized path segment\n", stderr);
             return -1;
         }
-        s->kind = SEG_KEY;
-        memcpy(s->key, start, n);
-        s->key[n] = '\0';
-        s->key_len = n;
-        s->index = 0;
         g_nsegs++;
-        if (*p == '.')
-            p++;
     }
     return 0;
 }
@@ -432,6 +466,103 @@ static void bump_array(void)
         fr->have_key = false;
 }
 
+/* Sentinels for walk's helpers: WALK_CONTINUE means the walk must keep
+ * consuming events, RANK_INVALID means the frame stack is corrupt. The
+ * values cannot collide with walk's exit codes (-1, 0, 1, 2) or with the
+ * rank values child_match_rank produces (-1, 0, 1). */
+enum { WALK_CONTINUE = -2, RANK_INVALID = INT_MIN };
+
+/* Consumes the events that only move the frame stack: a key names the
+ * value the innermost frame awaits, and a close pops that frame. Returns
+ * 0 when the event was consumed, 1 when it is not a stack event, and 2
+ * on a structure error. */
+static int handle_stack_event(const char *text, const zjsonp_event *ev,
+                              int *matched)
+{
+    if (ev->kind == ZJRP_KEY) {
+        if (g_depth <= 0)
+            return 2;
+        frame *fr = &g_stack[g_depth - 1];
+        if (!decode_key(text, ev, fr->key, sizeof fr->key, &fr->key_len))
+            return 2;
+        fr->have_key = true;
+        return 0;
+    }
+    if (ev->kind == ZJRP_OBJ_CLOSE || ev->kind == ZJRP_ARR_CLOSE) {
+        if (g_depth <= 0)
+            return 2;
+        g_depth--;
+        *matched = g_depth > 0 ? g_depth - 1 : 0;
+        bump_array();
+        return 0;
+    }
+    return 1;
+}
+
+static bool is_open_event(const zjsonp_event *ev)
+{
+    return ev->kind == ZJRP_OBJ_OPEN || ev->kind == ZJRP_ARR_OPEN;
+}
+
+/* Ranks a value event against the path: 1 when it lies on the path, 0 or
+ * -1 when it does not, RANK_INVALID when the frame stack is corrupt. The
+ * document's first event is the whole match when the path is empty, and a
+ * descent point when it opens a container. */
+static int rank_event(bool first, bool is_open, int matched, bool *exact)
+{
+    if (first) {
+        if (g_nsegs == 0) {
+            *exact = true;
+            return 1;
+        }
+        if (is_open) {
+            *exact = false;
+            return 1;
+        }
+        return 0;
+    }
+    if (g_depth <= 0)
+        return RANK_INVALID;
+    return child_match_rank(&g_stack[g_depth - 1], matched, exact);
+}
+
+/* Steps past an event that is off the path: an open container is skipped
+ * whole, then the sibling position advances. */
+static int advance_unmatched(zjsonp *p, bool is_open)
+{
+    if (is_open) {
+        if (skip_container(p, p->depth) != 0)
+            return 2;
+    }
+    bump_array();
+    return WALK_CONTINUE;
+}
+
+/* Applies the command to the exactly matched event: containers go through
+ * finish_matched_container, scalars through handle_matched_scalar. */
+static int finish_matched_value(zjsonp *p, const char *text,
+                                const zjsonp_event *ev, bool is_open,
+                                cmd_kind cmd, const char *eq)
+{
+    if (is_open)
+        return finish_matched_container(p, text, ev, cmd, eq);
+    return handle_matched_scalar(text, ev, cmd, eq);
+}
+
+/* Pushes an open container that is a path prefix onto the frame stack. */
+static int descend_frame(const zjsonp_event *ev, bool at_root, int *matched)
+{
+    if (g_depth >= ZJRP_MAX_DEPTH)
+        return 2;
+    frame *fr = &g_stack[g_depth];
+    memset(fr, 0, sizeof *fr);
+    fr->is_array = ev->kind == ZJRP_ARR_OPEN;
+    g_depth++;
+    if (!at_root)
+        (*matched)++;
+    return WALK_CONTINUE;
+}
+
 static int walk(const char *text, size_t len, cmd_kind cmd, const char *eq)
 {
     zjsonp p;
@@ -450,70 +581,31 @@ static int walk(const char *text, size_t len, cmd_kind cmd, const char *eq)
                     zjsonp_status_name(st), zjsonp_pos(&p));
             return 2;
         }
-        if (ev.kind == ZJRP_KEY) {
-            if (g_depth <= 0)
-                return 2;
-            frame *fr = &g_stack[g_depth - 1];
-            if (!decode_key(text, &ev, fr->key, sizeof fr->key, &fr->key_len))
-                return 2;
-            fr->have_key = true;
+        int stacked = handle_stack_event(text, &ev, &matched);
+        if (stacked == 2)
+            return 2;
+        if (stacked == 0)
             continue;
-        }
-        if (ev.kind == ZJRP_OBJ_CLOSE || ev.kind == ZJRP_ARR_CLOSE) {
-            if (g_depth <= 0)
-                return 2;
-            g_depth--;
-            matched = g_depth > 0 ? g_depth - 1 : 0;
-            bump_array();
-            continue;
-        }
 
         bool exact = false;
-        bool is_open = ev.kind == ZJRP_OBJ_OPEN || ev.kind == ZJRP_ARR_OPEN;
+        bool is_open = is_open_event(&ev);
         bool at_root = first;
-        int rank;
-        if (first) {
-            first = false;
-            if (g_nsegs == 0) {
-                exact = true;
-                rank = 1;
-            } else if (is_open) {
-                exact = false;
-                rank = 1;
-            } else {
-                rank = 0;
-            }
-        } else if (g_depth <= 0) {
+        int rank = rank_event(first, is_open, matched, &exact);
+        first = false;
+        if (rank == RANK_INVALID)
             return 2;
-        } else {
-            rank = child_match_rank(&g_stack[g_depth - 1], matched, &exact);
-        }
 
-        if (rank <= 0) {
-            if (is_open) {
-                if (skip_container(&p, p.depth) != 0)
-                    return 2;
-            }
-            bump_array();
-            continue;
-        }
-        if (exact) {
-            if (is_open)
-                return finish_matched_container(&p, text, &ev, cmd, eq);
-            return handle_matched_scalar(text, &ev, cmd, eq);
-        }
-        if (!is_open) {
-            bump_array();
-            continue;
-        }
-        if (g_depth >= ZJRP_MAX_DEPTH)
-            return 2;
-        frame *fr = &g_stack[g_depth];
-        memset(fr, 0, sizeof *fr);
-        fr->is_array = ev.kind == ZJRP_ARR_OPEN;
-        g_depth++;
-        if (!at_root)
-            matched++;
+        int rc = WALK_CONTINUE;
+        if (rank <= 0)
+            rc = advance_unmatched(&p, is_open);
+        else if (exact)
+            rc = finish_matched_value(&p, text, &ev, is_open, cmd, eq);
+        else if (!is_open)
+            rc = advance_unmatched(&p, is_open);
+        else
+            rc = descend_frame(&ev, at_root, &matched);
+        if (rc != WALK_CONTINUE)
+            return rc;
     }
 }
 
