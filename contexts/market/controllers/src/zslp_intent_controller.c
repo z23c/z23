@@ -38,6 +38,98 @@ static struct zcl_result ztic_money(
                                        scope, out);
 }
 
+static bool ztic_prepare_arguments_valid(
+    struct wallet_rpc_context *ctx, const struct zslp_intent_request *request,
+    int64_t maximum_fee_zat, uint8_t *raw_tx, size_t *raw_tx_len,
+    uint8_t txid_out[32], int64_t *actual_fee_zat,
+    struct vault_intent_input *inputs, size_t *input_count)
+{
+    return ctx && ctx->wallet && request && raw_tx && raw_tx_len &&
+           txid_out && actual_fee_zat && inputs && input_count &&
+           maximum_fee_zat > 0;
+}
+
+static bool ztic_prepare_build_operation(
+    struct wallet_rpc_context *ctx, const struct zslp_intent_request *request,
+    struct uint256 *token_id, struct wallet_tx *wtx, int64_t *fee,
+    const char **why, struct zcl_result *built)
+{
+    if (request->operation != ZSLP_INTENT_GENESIS)
+        uint256_set_hex(token_id, request->token_id);
+    switch (request->operation) {
+    case ZSLP_INTENT_GENESIS:
+        *built = zslp_command_build_token_genesis_tx(
+            ctx->wallet, request->ticker, request->name, request->decimals,
+            request->supply, wtx, fee, why);
+        return true;
+    case ZSLP_INTENT_MINT:
+        *built = zslp_command_build_token_mint_tx(
+            ctx->wallet, token_id->data, request->recipient, request->units,
+            wtx, fee, why);
+        return true;
+    case ZSLP_INTENT_SEND:
+        *built = zslp_command_build_token_send_tx(
+            ctx->wallet, token_id->data, request->recipient, request->units,
+            wtx, fee, why);
+        return true;
+    case ZSLP_INTENT_BURN:
+        *built = zslp_command_build_token_burn_tx(
+            ctx->wallet, token_id->data, request->units, wtx, fee, why);
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ztic_prepare_fee_within_contract(int64_t fee,
+                                             int64_t maximum_fee_zat,
+                                             size_t num_vin,
+                                             size_t input_capacity)
+{
+    return fee >= 0 && fee <= maximum_fee_zat && num_vin > 0 &&
+           num_vin <= input_capacity;
+}
+
+static bool ztic_prepare_inputs_valid(struct wallet_rpc_context *ctx,
+                                      const struct zslp_intent_request *request,
+                                      struct wallet_tx *wtx,
+                                      struct uint256 *token_id, char *reason,
+                                      size_t reason_size)
+{
+    if (request->operation != ZSLP_INTENT_MINT &&
+        request->operation != ZSLP_INTENT_SEND &&
+        request->operation != ZSLP_INTENT_BURN)
+        return true;
+    enum zslp_ledger_role role = request->operation == ZSLP_INTENT_MINT
+        ? ZSLP_LEDGER_MINT_BATON : ZSLP_LEDGER_TOKEN;
+    return zslp_validity_inputs_match(ctx->node_db, &wtx->tx, token_id->data,
+                                      role, reason, reason_size);
+}
+
+static bool ztic_prepare_serialize_and_emit(
+    struct wallet_tx *wtx, uint8_t *raw_tx, size_t raw_capacity,
+    size_t *raw_tx_len, uint8_t txid_out[32], int64_t *actual_fee_zat,
+    int64_t fee, struct vault_intent_input *inputs, size_t *input_count)
+{
+    struct byte_stream stream;
+    stream_init(&stream, 1024);
+    bool serialized = transaction_serialize(&wtx->tx, &stream) &&
+                      stream.size <= raw_capacity;
+    if (serialized) {
+        memcpy(raw_tx, stream.data, stream.size);
+        *raw_tx_len = stream.size;
+        memcpy(txid_out, wtx->tx.hash.data, 32);
+        *actual_fee_zat = fee;
+        *input_count = wtx->tx.num_vin;
+        for (size_t i = 0; i < wtx->tx.num_vin; i++) {
+            memcpy(inputs[i].txid, wtx->tx.vin[i].prevout.hash.data, 32);
+            inputs[i].vout = wtx->tx.vin[i].prevout.n;
+        }
+    }
+    stream_free(&stream);
+    return serialized;
+}
+
 static struct zcl_result ztic_prepare(
     void *opaque, const struct zslp_intent_request *request,
     int64_t maximum_fee_zat, uint8_t *raw_tx, size_t raw_capacity,
@@ -46,9 +138,9 @@ static struct zcl_result ztic_prepare(
     size_t *input_count)
 {
     struct wallet_rpc_context *ctx = opaque;
-    if (!ctx || !ctx->wallet || !request || !raw_tx || !raw_tx_len ||
-        !txid_out || !actual_fee_zat || !inputs || !input_count ||
-        maximum_fee_zat <= 0)
+    if (!ztic_prepare_arguments_valid(ctx, request, maximum_fee_zat, raw_tx,
+                                      raw_tx_len, txid_out, actual_fee_zat,
+                                      inputs, input_count))
         return ZCL_ERR(-1, "ZSLP wallet prepare context is incomplete");
     if (request->operation != ZSLP_INTENT_GENESIS &&
         !zslp_controller_validity_ready(NULL, "zslp_intent_prepare"))
@@ -58,51 +150,22 @@ static struct zcl_result ztic_prepare(
     const char *why = NULL;
     struct zcl_result built;
     struct uint256 token_id; uint256_set_null(&token_id);
-    if (request->operation != ZSLP_INTENT_GENESIS)
-        uint256_set_hex(&token_id, request->token_id);
-    switch (request->operation) {
-    case ZSLP_INTENT_GENESIS:
-        built = zslp_command_build_token_genesis_tx(
-            ctx->wallet, request->ticker, request->name, request->decimals,
-            request->supply, &wtx, &fee, &why);
-        break;
-    case ZSLP_INTENT_MINT:
-        built = zslp_command_build_token_mint_tx(
-            ctx->wallet, token_id.data, request->recipient, request->units,
-            &wtx, &fee, &why);
-        break;
-    case ZSLP_INTENT_SEND:
-        built = zslp_command_build_token_send_tx(
-            ctx->wallet, token_id.data, request->recipient, request->units,
-            &wtx, &fee, &why);
-        break;
-    case ZSLP_INTENT_BURN:
-        built = zslp_command_build_token_burn_tx(
-            ctx->wallet, token_id.data, request->units, &wtx, &fee, &why);
-        break;
-    default:
+    if (!ztic_prepare_build_operation(ctx, request, &token_id, &wtx, &fee,
+                                      &why, &built))
         return ZCL_ERR(-3, "unknown ZSLP wallet operation");
-    }
     if (!built.ok)
         return ZCL_ERR(-4, "ZSLP exact transaction build failed: %s",
                        why ? why : built.message);
-    if (fee < 0 || fee > maximum_fee_zat || wtx.tx.num_vin == 0 ||
-        wtx.tx.num_vin > input_capacity) {
+    if (!ztic_prepare_fee_within_contract(fee, maximum_fee_zat, wtx.tx.num_vin,
+                                          input_capacity)) {
         transaction_free(&wtx.tx);
         return ZCL_ERR(-5, "ZSLP transaction exceeds fee or input contract");
     }
-    if (request->operation == ZSLP_INTENT_MINT ||
-        request->operation == ZSLP_INTENT_SEND ||
-        request->operation == ZSLP_INTENT_BURN) {
-        enum zslp_ledger_role role = request->operation == ZSLP_INTENT_MINT
-            ? ZSLP_LEDGER_MINT_BATON : ZSLP_LEDGER_TOKEN;
-        char reason[96];
-        if (!zslp_validity_inputs_match(ctx->node_db, &wtx.tx,
-                                        token_id.data, role, reason,
-                                        sizeof(reason))) {
-            transaction_free(&wtx.tx);
-            return ZCL_ERR(-6, "ZSLP selected inputs are not VALID: %s", reason);
-        }
+    char reason[96];
+    if (!ztic_prepare_inputs_valid(ctx, request, &wtx, &token_id, reason,
+                                   sizeof(reason))) {
+        transaction_free(&wtx.tx);
+        return ZCL_ERR(-6, "ZSLP selected inputs are not VALID: %s", reason);
     }
     struct zcl_result flushed = wallet_flush_from_context(ctx);
     if (!flushed.ok) {
@@ -110,22 +173,9 @@ static struct zcl_result ztic_prepare(
         return ZCL_ERR(-7, "ZSLP plan key persistence failed: %s",
                        flushed.message);
     }
-    struct byte_stream stream;
-    stream_init(&stream, 1024);
-    bool serialized = transaction_serialize(&wtx.tx, &stream) &&
-                      stream.size <= raw_capacity;
-    if (serialized) {
-        memcpy(raw_tx, stream.data, stream.size);
-        *raw_tx_len = stream.size;
-        memcpy(txid_out, wtx.tx.hash.data, 32);
-        *actual_fee_zat = fee;
-        *input_count = wtx.tx.num_vin;
-        for (size_t i = 0; i < wtx.tx.num_vin; i++) {
-            memcpy(inputs[i].txid, wtx.tx.vin[i].prevout.hash.data, 32);
-            inputs[i].vout = wtx.tx.vin[i].prevout.n;
-        }
-    }
-    stream_free(&stream);
+    bool serialized = ztic_prepare_serialize_and_emit(
+        &wtx, raw_tx, raw_capacity, raw_tx_len, txid_out, actual_fee_zat, fee,
+        inputs, input_count);
     transaction_free(&wtx.tx);
     return serialized ? ZCL_OK
                       : ZCL_ERR(-8, "prepared ZSLP transaction is too large");
@@ -245,6 +295,82 @@ static void ztic_render(const struct zslp_intent_result *intent,
     }
 }
 
+static const struct json_value *ztic_intent_input_object(
+    const struct json_value *params)
+{
+    return params && json_size(params) ? json_at(params, 0) : NULL;
+}
+
+static bool ztic_intent_scope_valid(const char *scope)
+{
+    static const char *const scopes[] = {"dev", "prod"};
+    if (!scope) return false;
+    for (size_t i = 0; i < sizeof(scopes) / sizeof(scopes[0]); i++) {
+        if (strcmp(scope, scopes[i]) == 0) return true;
+    }
+    return false;
+}
+
+static bool ztic_intent_parse_plan_id(const struct json_value *input,
+                                      uint8_t plan_id[32])
+{
+    const char *plan_hex = json_get_str(json_get(input, "plan_id"));
+    return plan_hex && strlen(plan_hex) == 64 && IsHex(plan_hex) &&
+           ParseHex(plan_hex, plan_id, 32) == 32;
+}
+
+static void ztic_intent_apply_operation(const char *operation,
+                                        struct zslp_intent_request *request)
+{
+    if (operation && strcmp(operation, "genesis") == 0)
+        request->operation = ZSLP_INTENT_GENESIS;
+    else if (operation && strcmp(operation, "mint") == 0)
+        request->operation = ZSLP_INTENT_MINT;
+    else if (operation && strcmp(operation, "send") == 0)
+        request->operation = ZSLP_INTENT_SEND;
+    else if (operation && strcmp(operation, "burn") == 0)
+        request->operation = ZSLP_INTENT_BURN;
+}
+
+static bool ztic_intent_plan_input_within_bounds(const char *idempotency,
+                                                 const char *ticker,
+                                                 const char *name,
+                                                 const char *token,
+                                                 const char *recipient)
+{
+    return idempotency && strlen(idempotency) <= VAULT_INTENT_IDEMPOTENCY_MAX &&
+           (!ticker || strlen(ticker) <= ZSLP_INTENT_TICKER_MAX) &&
+           (!name || strlen(name) <= ZSLP_INTENT_NAME_MAX) &&
+           (!token || strlen(token) <= 64) &&
+           (!recipient || strlen(recipient) <= ZSLP_INTENT_ADDRESS_MAX);
+}
+
+static void ztic_intent_fill_request_fields(struct zslp_intent_request *request,
+                                            const char *idempotency,
+                                            const char *ticker,
+                                            const char *name,
+                                            const char *token,
+                                            const char *recipient)
+{
+    snprintf(request->idempotency_key, sizeof(request->idempotency_key),
+             "%s", idempotency);
+    snprintf(request->ticker, sizeof(request->ticker), "%s",
+             ticker ? ticker : "");
+    snprintf(request->name, sizeof(request->name), "%s", name ? name : "");
+    snprintf(request->token_id, sizeof(request->token_id), "%s",
+             token ? token : "");
+    snprintf(request->recipient, sizeof(request->recipient), "%s",
+             recipient ? recipient : "");
+}
+
+static void ztic_intent_apply_decimals(const struct json_value *input,
+                                       struct zslp_intent_request *request)
+{
+    int64_t decimals = json_get_int_or(input, "decimals", -1);
+    if (decimals >= 0 && decimals <= UINT8_MAX)
+        request->decimals = (uint8_t)decimals;
+}
+
 static bool rpc_zslp_intent(const struct json_value *params, bool help,
                             struct json_value *result)
 {
@@ -254,15 +380,14 @@ static bool rpc_zslp_intent(const struct json_value *params, bool help,
             "zslp_intent commit {wallet_scope,plan_id,confirm:true}\n");
         return true;
     }
-    const struct json_value *input = params && json_size(params)
-        ? json_at(params, 0) : NULL;
+    const struct json_value *input = ztic_intent_input_object(params);
     if (!input || input->type != JSON_OBJ) {
         json_set_str(result, "zslp_intent requires one object");
         return false;
     }
     const char *scope = json_get_str(json_get(input, "wallet_scope"));
     bool confirm = json_get_bool_or(input, "confirm", false);
-    if (!scope || (strcmp(scope, "dev") != 0 && strcmp(scope, "prod") != 0)) {
+    if (!ztic_intent_scope_valid(scope)) {
         json_set_str(result, "zslp_intent requires wallet_scope=dev|prod");
         return false;
     }
@@ -272,10 +397,8 @@ static bool rpc_zslp_intent(const struct json_value *params, bool help,
     struct zslp_intent_result intent;
     struct zcl_result outcome;
     if (confirm) {
-        const char *plan_hex = json_get_str(json_get(input, "plan_id"));
         uint8_t plan_id[32];
-        if (!plan_hex || strlen(plan_hex) != 64 || !IsHex(plan_hex) ||
-            ParseHex(plan_hex, plan_id, sizeof(plan_id)) != 32) {
+        if (!ztic_intent_parse_plan_id(input, plan_id)) {
             json_set_str(result, "commit requires a 64-hex plan_id");
             return false;
         }
@@ -287,38 +410,19 @@ static bool rpc_zslp_intent(const struct json_value *params, bool help,
             json_get_str(json_get(input, "idempotency_key"));
         struct zslp_intent_request request; memset(&request, 0, sizeof(request));
         snprintf(request.wallet_scope, sizeof(request.wallet_scope), "%s", scope);
-        if (operation && strcmp(operation, "genesis") == 0)
-            request.operation = ZSLP_INTENT_GENESIS;
-        else if (operation && strcmp(operation, "mint") == 0)
-            request.operation = ZSLP_INTENT_MINT;
-        else if (operation && strcmp(operation, "send") == 0)
-            request.operation = ZSLP_INTENT_SEND;
-        else if (operation && strcmp(operation, "burn") == 0)
-            request.operation = ZSLP_INTENT_BURN;
+        ztic_intent_apply_operation(operation, &request);
         const char *ticker = json_get_str(json_get(input, "ticker"));
         const char *name = json_get_str(json_get(input, "name"));
         const char *token = json_get_str(json_get(input, "token_id"));
         const char *recipient = json_get_str(json_get(input, "to"));
-        if (!idempotency || strlen(idempotency) > VAULT_INTENT_IDEMPOTENCY_MAX ||
-            (ticker && strlen(ticker) > ZSLP_INTENT_TICKER_MAX) ||
-            (name && strlen(name) > ZSLP_INTENT_NAME_MAX) ||
-            (token && strlen(token) > 64) ||
-            (recipient && strlen(recipient) > ZSLP_INTENT_ADDRESS_MAX)) {
+        if (!ztic_intent_plan_input_within_bounds(idempotency, ticker, name,
+                                                  token, recipient)) {
             json_set_str(result, "ZSLP plan input exceeds bounds");
             return false;
         }
-        snprintf(request.idempotency_key, sizeof(request.idempotency_key),
-                 "%s", idempotency);
-        snprintf(request.ticker, sizeof(request.ticker), "%s",
-                 ticker ? ticker : "");
-        snprintf(request.name, sizeof(request.name), "%s", name ? name : "");
-        snprintf(request.token_id, sizeof(request.token_id), "%s",
-                 token ? token : "");
-        snprintf(request.recipient, sizeof(request.recipient), "%s",
-                 recipient ? recipient : "");
-        int64_t decimals = json_get_int_or(input, "decimals", -1);
-        if (decimals >= 0 && decimals <= UINT8_MAX)
-            request.decimals = (uint8_t)decimals;
+        ztic_intent_fill_request_fields(&request, idempotency, ticker, name,
+                                        token, recipient);
+        ztic_intent_apply_decimals(input, &request);
         (void)ztic_units(json_get(input, "supply"), &request.supply);
         (void)ztic_units(json_get(input, "units"), &request.units);
         outcome = zslp_transaction_intent_plan(&runtime, &request, &intent);
