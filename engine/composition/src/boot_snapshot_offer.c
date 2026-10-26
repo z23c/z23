@@ -199,6 +199,30 @@ void boot_snapshot_offer_test_set_publication_override(int value)
     atomic_store(&g_snapshot_offer_publication_override,
                  value < 0 ? -1 : value != 0 ? 1 : 0);
 }
+
+/* Test-only trust override for snapshot_offer_state_has_replayed_history_at.
+ * Returns -1 when no override is set and the caller must evaluate the real
+ * trust state; otherwise performs the override's out_hstar/reason side
+ * effects and returns 0 (not sovereign) or 1 (sovereign). */
+static int snapshot_offer_trust_override_apply(int32_t *out_hstar,
+                                               char *reason,
+                                               size_t reason_size)
+{
+    int override = atomic_load(&g_snapshot_offer_trust_override);
+    if (override < 0)
+        return -1;
+    if (!override) {
+        if (out_hstar)
+            *out_hstar = -1;
+        if (reason && reason_size)
+            (void)snprintf(reason, reason_size,
+                           "test_override_not_sovereign");
+        return 0;
+    }
+    if (out_hstar)
+        *out_hstar = INT32_MAX;
+    return 1;
+}
 #endif
 
 /* Phase-0 containment. The serving codecs still read node.db.utxos, while the
@@ -223,25 +247,79 @@ static bool snapshot_offer_payload_authority_is_bound(char *reason,
     return false;
 }
 
+/* Offer-advertisement trust bit: centralized through
+ * services/sync_trust_policy.h rather than reading the raw
+ * self-derived predicate directly. S = self_derived is unchanged;
+ * X = proven_authority && refold_marker mirrors bx_qualified's
+ * reading (engine/composition/src/bundle_exporter.c). By construction,
+ * SYNC_CAP_SEED_BUNDLE is granted iff S holds (ARTIFACT_VERIFIED
+ * and SOVEREIGN both carry it, no other state does), so this is
+ * behavior-preserving: the resulting bit equals the raw S value in
+ * every case, just resolved through the single policy table. */
+static bool snapshot_offer_transparent_self_derived(
+    sqlite3 *db, bool hstar_known, int32_t hstar,
+    char *transparent_reason, size_t transparent_reason_size)
+{
+    bool transparent_self_derived_raw = hstar_known &&
+        coins_kv_tip_is_self_derived(db, hstar, transparent_reason,
+                                     transparent_reason_size);
+    bool offer_proven = coins_kv_is_proven_authority(db, NULL);
+    bool offer_refold =
+        offer_proven && coins_kv_contains_refold_marker(db);
+    enum sync_trust_state offer_trust_state = sync_trust_derive(
+        offer_proven, offer_refold, transparent_self_derived_raw);
+    return sync_trust_cap_allowed(offer_trust_state,
+                                  SYNC_CAP_SEED_BUNDLE);
+}
+
+/* Reads the three shielded-pool activation cursors; true only when all three
+ * reads succeeded. Called under the caller's progress-store transaction. */
+static bool snapshot_offer_read_activation_cursors(
+    sqlite3 *db, int64_t *sprout_cursor, bool *sprout_found,
+    int64_t *sapling_cursor, bool *sapling_found,
+    int64_t *nullifier_cursor, bool *nullifier_found)
+{
+    return anchor_kv_activation_cursor(db, ANCHOR_POOL_SPROUT,
+                                       sprout_cursor, sprout_found) &&
+           anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING,
+                                       sapling_cursor, sapling_found) &&
+           nullifier_kv_activation_cursor(db, nullifier_cursor,
+                                          nullifier_found);
+}
+
+/* Records why a replayed-history check failed, in the original check order.
+ * Moved whole into one helper — the chain is not split, and its entries,
+ * order and default are unchanged. */
+static void snapshot_offer_write_withhold_reason(
+    bool hstar_known, bool transparent_self_derived,
+    const char *transparent_reason, bool cursors_read,
+    bool sprout_found, bool sapling_found, bool nullifier_found,
+    char *reason, size_t reason_size)
+{
+    if (!hstar_known)
+        (void)snprintf(reason, reason_size, "hstar_unavailable");
+    else if (!transparent_self_derived)
+        (void)snprintf(reason, reason_size, "transparent_%s",
+                       transparent_reason[0] ? transparent_reason
+                                             : "not_self_derived");
+    else if (!cursors_read || !sprout_found || !sapling_found ||
+             !nullifier_found)
+        (void)snprintf(reason, reason_size,
+                       "shielded_history_provenance_unknown");
+    else
+        (void)snprintf(reason, reason_size,
+                       "shielded_history_incomplete");
+}
+
 static bool snapshot_offer_state_has_replayed_history_at(int32_t *out_hstar,
                                                           char *reason,
                                                           size_t reason_size)
 {
 #ifdef ZCL_TESTING
-    int override = atomic_load(&g_snapshot_offer_trust_override);
-    if (override >= 0) {
-        if (!override) {
-            if (out_hstar)
-                *out_hstar = -1;
-            if (reason && reason_size)
-                (void)snprintf(reason, reason_size,
-                               "test_override_not_sovereign");
-            return false;
-        }
-        if (out_hstar)
-            *out_hstar = INT32_MAX;
-        return true;
-    }
+    int override = snapshot_offer_trust_override_apply(out_hstar, reason,
+                                                       reason_size);
+    if (override >= 0)
+        return override != 0;
 #endif
     sqlite3 *db = progress_store_db();
     if (!db) {
@@ -263,32 +341,13 @@ static bool snapshot_offer_state_has_replayed_history_at(int32_t *out_hstar,
     progress_store_tx_lock();
     bool hstar_known = reducer_frontier_compute_hstar(
         db, &hstar, &served_floor);
-    /* Offer-advertisement trust bit: centralized through
-     * services/sync_trust_policy.h rather than reading the raw
-     * self-derived predicate directly. S = self_derived is unchanged;
-     * X = proven_authority && refold_marker mirrors bx_qualified's
-     * reading (engine/composition/src/bundle_exporter.c). By construction,
-     * SYNC_CAP_SEED_BUNDLE is granted iff S holds (ARTIFACT_VERIFIED
-     * and SOVEREIGN both carry it, no other state does), so this is
-     * behavior-preserving: the resulting bit equals the raw S value in
-     * every case, just resolved through the single policy table. */
-    bool transparent_self_derived_raw = hstar_known &&
-        coins_kv_tip_is_self_derived(db, hstar, transparent_reason,
-                                     sizeof(transparent_reason));
-    bool offer_proven = coins_kv_is_proven_authority(db, NULL);
-    bool offer_refold =
-        offer_proven && coins_kv_contains_refold_marker(db);
-    enum sync_trust_state offer_trust_state = sync_trust_derive(
-        offer_proven, offer_refold, transparent_self_derived_raw);
-    bool transparent_self_derived = sync_trust_cap_allowed(
-        offer_trust_state, SYNC_CAP_SEED_BUNDLE);
-    bool cursors_read =
-        anchor_kv_activation_cursor(db, ANCHOR_POOL_SPROUT,
-                                    &sprout_cursor, &sprout_found) &&
-        anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING,
-                                    &sapling_cursor, &sapling_found) &&
-        nullifier_kv_activation_cursor(db, &nullifier_cursor,
-                                       &nullifier_found);
+    bool transparent_self_derived = snapshot_offer_transparent_self_derived(
+        db, hstar_known, hstar, transparent_reason,
+        sizeof(transparent_reason));
+    bool cursors_read = snapshot_offer_read_activation_cursors(
+        db, &sprout_cursor, &sprout_found,
+        &sapling_cursor, &sapling_found,
+        &nullifier_cursor, &nullifier_found);
     progress_store_tx_unlock();
 
     bool allowed = cursors_read && boot_snapshot_offer_trust_policy(
@@ -296,19 +355,10 @@ static bool snapshot_offer_state_has_replayed_history_at(int32_t *out_hstar,
         sprout_found, sprout_cursor, sapling_found, sapling_cursor,
         nullifier_found, nullifier_cursor);
     if (!allowed && reason && reason_size) {
-        if (!hstar_known)
-            (void)snprintf(reason, reason_size, "hstar_unavailable");
-        else if (!transparent_self_derived)
-            (void)snprintf(reason, reason_size, "transparent_%s",
-                           transparent_reason[0] ? transparent_reason
-                                                 : "not_self_derived");
-        else if (!cursors_read || !sprout_found || !sapling_found ||
-                 !nullifier_found)
-            (void)snprintf(reason, reason_size,
-                           "shielded_history_provenance_unknown");
-        else
-            (void)snprintf(reason, reason_size,
-                           "shielded_history_incomplete");
+        snapshot_offer_write_withhold_reason(
+            hstar_known, transparent_self_derived, transparent_reason,
+            cursors_read, sprout_found, sapling_found, nullifier_found,
+            reason, reason_size);
     }
     (void)served_floor;
     if (out_hstar)
@@ -397,6 +447,158 @@ done:
     return ok;
 }
 
+/* Export phase of the offer worker: resolves the sovereign block hash and
+ * runs the bounded consensus-snapshot exporter, reporting either outcome. */
+static void snapshot_offer_export_consensus_snapshot(const char *datadir,
+                                                     int32_t sovereign_height)
+{
+    printf("Exporting consensus snapshot (no wallet data)...\n");
+    uint8_t sovereign_hash[32] = {0};
+    struct zcl_result export_result = ZCL_ERR(
+        -1, "sovereign block hash unavailable at h=%d",
+        sovereign_height);
+    if (snapshot_offer_read_block_hash(datadir, sovereign_height,
+                                       sovereign_hash)) {
+        export_result = consensus_snapshot_export_service_run_bound(
+            datadir, sovereign_height, sovereign_hash);
+    }
+    if (export_result.ok) {
+        file_controller_refresh_manifest();
+        fs_server_refresh_manifest();
+        printf("Consensus snapshot ready for file service\n");
+    } else {
+        printf("Consensus snapshot export skipped/failed (%s)\n",
+               export_result.message);
+    }
+}
+
+/* Embed the peer-advertised header MMR root.  It proves membership in
+ * that advertised header history, but ZClassic headers do not commit
+ * the UTXO payload; never call this a consensus state binding. */
+static void snapshot_offer_embed_advertised_mmr_root(
+    struct snapshot_offer *offer)
+{
+    uint64_t mmr_leaves = 0;
+    if (!rpc_blockchain_mmr_snapshot(offer->mmr_root, &mmr_leaves, NULL) ||
+        mmr_leaves == 0) {
+        memset(offer->mmr_root, 0, 32);
+    }
+}
+
+/* Embed MMB root — replayed from leaf hash store via
+ * mmb_append_hash(), guaranteeing identical merge logic
+ * as mmb_prove() uses internally. */
+static void snapshot_offer_embed_replayed_mmb_root(struct snapshot_offer *offer)
+{
+    if (g_mmb_leaf_store.open && g_mmb_leaf_store.num_leaves > 0) {
+        const uint8_t (*lh)[32] = mmb_leaf_store_all(&g_mmb_leaf_store);
+        /* Replay through the snapshot anchor.  Heights are zero-based,
+         * so a snapshot at height H needs H+1 MMB leaves and a
+         * FlyClient chain_length of H+1. */
+        uint64_t replay_count = (uint64_t)offer->height + 1;
+        if (g_mmb_leaf_store.num_leaves < replay_count) {
+            printf("Fast sync: MMB leaf store short (%llu/%llu); "
+                   "snapshot offer unavailable\n",
+                   (unsigned long long)g_mmb_leaf_store.num_leaves,
+                   (unsigned long long)replay_count);
+            memset(offer->mmr_root, 0, 32);
+        } else if (lh && replay_count > 0) {
+            struct mmb replay;
+            mmb_init(&replay);
+            for (uint64_t i = 0; i < replay_count; i++)
+                mmb_append_hash(&replay, lh[i]);
+            mmb_root(&replay, offer->mmr_root);
+            printf("Fast sync: MMB root at h=%d (%llu/%llu leaves, "
+                   "%u peaks)\n", offer->height,
+                   (unsigned long long)replay.num_leaves,
+                   (unsigned long long)g_mmb_leaf_store.num_leaves,
+                   replay.num_mountains);
+        } else {
+            memset(offer->mmr_root, 0, 32);
+        }
+    } else {
+        memset(offer->mmr_root, 0, 32);
+        printf("Fast sync: WARNING — no MMB leaf store\n");
+    }
+}
+
+/* Pre-serializes the snapshot file through the node DB and reports whether a
+ * bounded RAM serving buffer materialized. */
+static void snapshot_offer_prebuild_serving_snapshot(
+    struct boot_svc_ctx *svc, const char *datadir,
+    struct snapshot_offer *offer, bool *serving_ready)
+{
+    struct node_db *ndb = boot_node_db(svc);
+    if (ndb && ndb->open) {
+        int64_t snap_count = fast_sync_prebuild_snapshot(
+            datadir, boot_serialize_utxo_snapshot, ndb);
+        if (snap_count > 0) {
+            /* Use the SHA3 computed during serialization */
+            uint8_t snap_sha3[32];
+            uint64_t snap_n = 0;
+            if (fast_sync_get_snapshot_sha3(snap_sha3, &snap_n)) {
+                memcpy(offer->utxo_root, snap_sha3, 32);
+                offer->num_utxos = snap_n;
+                printf("Snapshot: %llu UTXOs, SHA3 from file\n",
+                       (unsigned long long)snap_n);
+            }
+            int64_t snap_buf_size = 0;
+            *serving_ready =
+                fast_sync_get_snapshot_buf(&snap_buf_size) != NULL &&
+                snap_buf_size > 0;
+        }
+    }
+}
+
+/* True when the offer carries any non-zero byte in its root field. */
+static bool snapshot_offer_has_mmb_root(const struct snapshot_offer *offer)
+{
+    for (size_t i = 0; i < sizeof(offer->mmr_root); i++) {
+        if (offer->mmr_root[i] != 0)
+            return true;
+    }
+    return false;
+}
+
+/* Publishes the offer, or states exactly why it is withheld. */
+static void snapshot_offer_announce_publication(struct snapshot_offer *offer,
+                                                bool have_mmb_root,
+                                                bool snapshot_serving_ready)
+{
+    if (have_mmb_root && snapshot_serving_ready) {
+        msg_processor_update_offer(offer);
+        printf("Fast sync ready: h=%d, %llu UTXOs, MMB+MMR secured\n",
+               offer->height, (unsigned long long)offer->num_utxos);
+    } else if (have_mmb_root) {
+        printf("Fast sync: snapshot offer withheld "
+               "(disk-backed snapshot serving not enabled)\n");
+    } else {
+        printf("Fast sync: snapshot offer withheld (MMB root unavailable)\n");
+    }
+}
+
+/* Chunk-manifest phase of the offer worker; no-op without file service. */
+static void snapshot_offer_publish_chunk_manifest(const char *datadir,
+                                                  bool file_service_enabled)
+{
+    if (!file_service_enabled)
+        return;
+    printf("Building chunk sync manifest...\n");
+    struct sync_manifest chunk_manifest;
+    memset(&chunk_manifest, 0, sizeof(chunk_manifest));
+    if (fast_sync_build_manifest(datadir, &chunk_manifest)) {
+        int32_t manifest_height = chunk_manifest.height;
+        uint32_t num_chunks = chunk_manifest.num_chunks;
+        uint64_t num_utxos = chunk_manifest.num_utxos;
+        msg_processor_publish_manifest(&chunk_manifest);
+        printf("Chunk manifest ready: h=%d, %u chunks (%llu UTXOs)\n",
+               manifest_height, num_chunks,
+               (unsigned long long)num_utxos);
+    } else {
+        printf("Chunk manifest: not available yet\n");
+    }
+}
+
 static void *build_snapshot_offer_thread(void *arg)
 {
     struct boot_svc_ctx *svc = arg;
@@ -454,24 +656,8 @@ static void *build_snapshot_offer_thread(void *arg)
                           strcmp(export_snapshot, "0") == 0;
     /* Build on any profile unless explicitly opted out. */
     if (!export_opt_out) {
-        printf("Exporting consensus snapshot (no wallet data)...\n");
-        uint8_t sovereign_hash[32] = {0};
-        struct zcl_result export_result = ZCL_ERR(
-            -1, "sovereign block hash unavailable at h=%d",
-            sovereign_height);
-        if (snapshot_offer_read_block_hash(datadir, sovereign_height,
-                                           sovereign_hash)) {
-            export_result = consensus_snapshot_export_service_run_bound(
-                datadir, sovereign_height, sovereign_hash);
-        }
-        if (export_result.ok) {
-            file_controller_refresh_manifest();
-            fs_server_refresh_manifest();
-            printf("Consensus snapshot ready for file service\n");
-        } else {
-            printf("Consensus snapshot export skipped/failed (%s)\n",
-                   export_result.message);
-        }
+        snapshot_offer_export_consensus_snapshot(datadir,
+                                                 sovereign_height);
     } else {
         printf("Consensus snapshot export skipped on boot "
                "(ZCL_EXPORT_CONSENSUS_SNAPSHOT_ON_BOOT=0 — opt-out)\n");
@@ -489,113 +675,28 @@ static void *build_snapshot_offer_thread(void *arg)
      * height==0 fails the `tip_h > BLOCKS_PER_PIECE` guard and we skip it. */
     struct snapshot_offer offer = {0};
     if (fast_sync_build_offer(datadir, &offer)) {
-        /* Embed the peer-advertised header MMR root.  It proves membership in
-         * that advertised header history, but ZClassic headers do not commit
-         * the UTXO payload; never call this a consensus state binding. */
-        uint64_t mmr_leaves = 0;
-        if (!rpc_blockchain_mmr_snapshot(offer.mmr_root, &mmr_leaves, NULL) ||
-            mmr_leaves == 0) {
-            memset(offer.mmr_root, 0, 32);
-        }
+        snapshot_offer_embed_advertised_mmr_root(&offer);
 
-        /* Embed MMB root — replayed from leaf hash store via
-         * mmb_append_hash(), guaranteeing identical merge logic
-         * as mmb_prove() uses internally. */
-        if (g_mmb_leaf_store.open && g_mmb_leaf_store.num_leaves > 0) {
-            const uint8_t (*lh)[32] = mmb_leaf_store_all(&g_mmb_leaf_store);
-            /* Replay through the snapshot anchor.  Heights are zero-based,
-             * so a snapshot at height H needs H+1 MMB leaves and a
-             * FlyClient chain_length of H+1. */
-            uint64_t replay_count = (uint64_t)offer.height + 1;
-            if (g_mmb_leaf_store.num_leaves < replay_count) {
-                printf("Fast sync: MMB leaf store short (%llu/%llu); "
-                       "snapshot offer unavailable\n",
-                       (unsigned long long)g_mmb_leaf_store.num_leaves,
-                       (unsigned long long)replay_count);
-                memset(offer.mmb_root, 0, 32);
-            } else if (lh && replay_count > 0) {
-                struct mmb replay;
-                mmb_init(&replay);
-                for (uint64_t i = 0; i < replay_count; i++)
-                    mmb_append_hash(&replay, lh[i]);
-                mmb_root(&replay, offer.mmb_root);
-                printf("Fast sync: MMB root at h=%d (%llu/%llu leaves, "
-                       "%u peaks)\n", offer.height,
-                       (unsigned long long)replay.num_leaves,
-                       (unsigned long long)g_mmb_leaf_store.num_leaves,
-                       replay.num_mountains);
-            } else {
-                memset(offer.mmb_root, 0, 32);
-            }
-        } else {
-            memset(offer.mmb_root, 0, 32);
-            printf("Fast sync: WARNING — no MMB leaf store\n");
-        }
+        snapshot_offer_embed_replayed_mmb_root(&offer);
+
         /* Pre-serialize snapshot file and publish its SHA3 metadata.
          * The legacy zsnapshot offer is only advertised when an explicit
          * bounded RAM serving cache exists; otherwise peers should use the
          * chunk/file manifests below. */
         bool snapshot_serving_ready = false;
-        struct node_db *ndb = boot_node_db(svc);
-        if (ndb && ndb->open) {
-            int64_t snap_count = fast_sync_prebuild_snapshot(
-                datadir, boot_serialize_utxo_snapshot, ndb);
-            if (snap_count > 0) {
-                /* Use the SHA3 computed during serialization */
-                uint8_t snap_sha3[32];
-                uint64_t snap_n = 0;
-                if (fast_sync_get_snapshot_sha3(snap_sha3, &snap_n)) {
-                    memcpy(offer.utxo_root, snap_sha3, 32);
-                    offer.num_utxos = snap_n;
-                    printf("Snapshot: %llu UTXOs, SHA3 from file\n",
-                           (unsigned long long)snap_n);
-                }
-                int64_t snap_buf_size = 0;
-                snapshot_serving_ready =
-                    fast_sync_get_snapshot_buf(&snap_buf_size) != NULL &&
-                    snap_buf_size > 0;
-            }
-        }
+        snapshot_offer_prebuild_serving_snapshot(svc, datadir, &offer,
+                                                 &snapshot_serving_ready);
 
-        bool have_mmb_root = false;
-        for (size_t i = 0; i < sizeof(offer.mmb_root); i++) {
-            if (offer.mmb_root[i] != 0) {
-                have_mmb_root = true;
-                break;
-            }
-        }
-        if (have_mmb_root && snapshot_serving_ready) {
-            msg_processor_update_offer(&offer);
-            printf("Fast sync ready: h=%d, %llu UTXOs, MMB+MMR secured\n",
-                   offer.height, (unsigned long long)offer.num_utxos);
-        } else if (have_mmb_root) {
-            printf("Fast sync: snapshot offer withheld "
-                   "(disk-backed snapshot serving not enabled)\n");
-        } else {
-            printf("Fast sync: snapshot offer withheld (MMB root unavailable)\n");
-        }
+        bool have_mmb_root = snapshot_offer_has_mmb_root(&offer);
+        snapshot_offer_announce_publication(&offer, have_mmb_root,
+                                            snapshot_serving_ready);
     } else {
         printf("Fast sync: no snapshot available yet\n");
     }
 
     offer_checkpoint(&checkpoint);
 
-    if (file_service_enabled) {
-        printf("Building chunk sync manifest...\n");
-        struct sync_manifest chunk_manifest;
-        memset(&chunk_manifest, 0, sizeof(chunk_manifest));
-        if (fast_sync_build_manifest(datadir, &chunk_manifest)) {
-            int32_t manifest_height = chunk_manifest.height;
-            uint32_t num_chunks = chunk_manifest.num_chunks;
-            uint64_t num_utxos = chunk_manifest.num_utxos;
-            msg_processor_publish_manifest(&chunk_manifest);
-            printf("Chunk manifest ready: h=%d, %u chunks (%llu UTXOs)\n",
-                   manifest_height, num_chunks,
-                   (unsigned long long)num_utxos);
-        } else {
-            printf("Chunk manifest: not available yet\n");
-        }
-    }
+    snapshot_offer_publish_chunk_manifest(datadir, file_service_enabled);
 
     offer_checkpoint(&checkpoint);
     boot_try_publish_block_swarm(svc, datadir);
