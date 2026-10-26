@@ -26,21 +26,34 @@ static const char *kind_name(zjsonp_event_kind k) {
   return "?";
 }
 
-int main(void) {
-  size_t len = fread(input, 1, sizeof input, stdin);
-  if (ferror(stdin) || !feof(stdin)) {
+static bool cli_read(FILE *source, size_t *len) {
+  *len = fread(input, 1, sizeof input, source);
+  if (*len == sizeof input && !ferror(source))
+    (void)fgetc(source); /* Distinguish exact capacity from one extra byte. */
+  if (ferror(source) || !feof(source)) {
     fprintf(stderr, "zjsonp: read error or input over %d bytes\n",
             MAX_INPUT);
-    return 2;
+    return false;
   }
+  return true;
+}
+
+static int cli_run(FILE *source, FILE *output) {
+  size_t len;
+  if (!cli_read(source, &len)) return 2;
   zjsonp p;
   zjsonp_init(&p, input, len);
   unsigned depth = 0;
   for (;;) {
     zjsonp_event ev;
     zjsonp_status st = zjsonp_next(&p, &ev);
-    if (st == ZJRP_DONE)
+    if (st == ZJRP_DONE) {
+      if (fflush(output) != 0 || ferror(output)) {
+        fputs("zjsonp: stdout write failed\n", stderr);
+        return 2;
+      }
       return 0;
+    }
     if (st != ZJRP_OK) {
       fprintf(stderr, "zjsonp: %s at byte %zu\n",
               zjsonp_status_name(st), zjsonp_pos(&p));
@@ -49,13 +62,17 @@ int main(void) {
     if (ev.kind == ZJRP_OBJ_CLOSE || ev.kind == ZJRP_ARR_CLOSE)
       depth--;
     for (unsigned i = 0; i < depth; i++)
-      fputs("  ", stdout);
+      fputs("  ", output);
     if (ev.len)
-      printf("%s %.*s\n", kind_name(ev.kind), (int)ev.len,
+      fprintf(output, "%s %.*s\n", kind_name(ev.kind), (int)ev.len,
              input + ev.off);
     else
-      printf("%s\n", kind_name(ev.kind));
+      fprintf(output, "%s\n", kind_name(ev.kind));
     if (ev.kind == ZJRP_OBJ_OPEN || ev.kind == ZJRP_ARR_OPEN)
       depth++;
   }
+}
+
+int main(void) {
+  return cli_run(stdin, stdout);
 }

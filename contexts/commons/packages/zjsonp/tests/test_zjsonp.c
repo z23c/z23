@@ -8,6 +8,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define main zjsonp_cli_main
+#include "../app/main.c"
+#undef main
+
 #define CHECK(cond)                                                          \
   do {                                                                       \
     if (!(cond)) {                                                           \
@@ -471,11 +475,84 @@ static int test_negative_zero_integer(void) {
   return 0;
 }
 
+static bool cli_boundary_document(FILE *source, size_t size, char last) {
+  char spaces[4096];
+  memset(spaces, ' ', sizeof spaces);
+  if (fputc('0', source) == EOF) return false;
+  size -= 2;
+  while (size) {
+    size_t n = size < sizeof spaces ? size : sizeof spaces;
+    if (fwrite(spaces, 1, n, source) != n) return false;
+    size -= n;
+  }
+  if (fputc(last, source) == EOF || fflush(source) != 0) return false;
+  rewind(source);
+  return true;
+}
+
+static int cli_boundary_case(size_t size, char last, int expected) {
+  FILE *source = tmpfile();
+  FILE *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (!cli_boundary_document(source, size, last)) goto cleanup;
+  if (cli_run(source, output) != expected) goto cleanup;
+  if (expected == 2 && ftell(output) != 0) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static int test_cli_input_bound(void) {
+  CHECK(cli_boundary_case(MAX_INPUT - 1, ' ', 0) == 0);
+  CHECK(cli_boundary_case(MAX_INPUT, ' ', 0) == 0);
+  CHECK(cli_boundary_case(MAX_INPUT + 1, ' ', 2) == 0);
+  CHECK(cli_boundary_case(MAX_INPUT, 'x', 1) == 0);
+  return 0;
+}
+
+static bool cli_output_matches(FILE *source, FILE *output) {
+  if (cli_run(source, output) != 0) return false;
+  rewind(output);
+  char buf[64] = {0};
+  size_t n = fread(buf, 1, sizeof buf - 1, output);
+  return !ferror(output) && n == strlen("obj-open\nobj-close\n") &&
+         strcmp(buf, "obj-open\nobj-close\n") == 0;
+}
+
+static int test_cli_output(void) {
+  FILE *source = tmpfile();
+  FILE *output = tmpfile();
+  /* A compiler-mapped source path need not exist at the test's cwd. */
+#if defined(_WIN32)
+  FILE *readonly = fopen("NUL", "r");
+#else
+  FILE *readonly = fopen("/dev/null", "r");
+#endif
+  int failed = 1;
+  if (!source || !output || !readonly) goto cleanup;
+  if (fputs("{}", source) == EOF || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (!cli_output_matches(source, output)) goto cleanup;
+  rewind(source);
+  if (cli_run(source, readonly) != 2 || !ferror(readonly)) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  if (readonly) (void)fclose(readonly);
+  return failed;
+}
+
 int main(void) {
   struct {
     const char *name;
     int (*fn)(void);
   } tests[] = {
+      {"cli_output", test_cli_output},
+      {"cli_input_bound", test_cli_input_bound},
       {"terminal_syntax", test_terminal_syntax},
       {"negative_zero_integer", test_negative_zero_integer},
       {"kat", test_kat},       {"syntax_errors", test_syntax_errors},
