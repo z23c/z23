@@ -313,6 +313,61 @@ static bool topup_insert_new(struct topup_ctx *c, const struct uint256 *h,
     return true;
 }
 
+/* True when the loaded entry is a contentless stub that this row can
+ * hydrate: nBits==0, no HAVE_DATA, no nTx, and the row has a real header. */
+static bool topup_row_hydrates_stub(const struct block_index *bi,
+                                    const struct disk_block_index *dbi)
+{
+    bool stub = bi->nBits == 0 &&
+                !(bi->nStatus & BLOCK_HAVE_DATA) &&
+                bi->nTx == 0;
+    bool row_real = dbi->nHeight > 0 && dbi->nBits != 0;
+    return stub && row_real;
+}
+
+/* Copy the projection row's record onto a contentless stub and clear its
+ * links. */
+static void topup_hydrate_stub_fields(struct block_index *bi,
+                                      const struct disk_block_index *dbi)
+{
+    bi->nHeight              = dbi->nHeight;
+    bi->nFile                = dbi->nFile;
+    bi->nDataPos             = dbi->nDataPos;
+    bi->nUndoPos             = dbi->nUndoPos;
+    bi->nVersion             = dbi->nVersion;
+    bi->hashFinalSaplingRoot = dbi->hashFinalSaplingRoot;
+    bi->nTime                = dbi->nTime;
+    bi->nBits                = dbi->nBits;
+    topup_store_hdr(bi, &dbi->hashMerkleRoot, &dbi->nNonce);
+    bi->nStatus              = dbi->nStatus & ~BLOCK_FAILED_MASK;
+    bi->nCachedBranchId      = dbi->nCachedBranchId;
+    bi->nTx                  = dbi->nTx;
+    if (dbi->has_sprout_value) {
+        bi->nSproutValue     = dbi->nSproutValue;
+        bi->has_sprout_value = true;
+    }
+    bi->nSaplingValue        = dbi->nSaplingValue;
+    topup_seal_undo_bit(bi);
+    bi->pprev                = NULL;   /* re-linked below */
+    bi->pskip                = NULL;
+}
+
+/* Data availability: apply HAVE_DATA + positions the entry lacks. */
+static bool topup_apply_have_data(struct topup_ctx *c, struct block_index *bi,
+                                  const struct disk_block_index *dbi)
+{
+    bool file_adopted = false;
+    if ((dbi->nStatus & BLOCK_HAVE_DATA) &&
+        !(bi->nStatus & BLOCK_HAVE_DATA) && dbi->nFile >= 0) {
+        file_adopted = bi->nFile != dbi->nFile;
+        bi->nFile = dbi->nFile;
+        bi->nDataPos = dbi->nDataPos;
+        bi->nStatus |= BLOCK_HAVE_DATA;
+        c->data_applied++;
+    }
+    return file_adopted;
+}
+
 /* Fold one projection row into the map, raise-only. */
 static bool topup_row_cb(const uint8_t hash[32],
                          const struct disk_block_index *dbi,
@@ -343,33 +398,10 @@ static bool topup_row_cb(const uint8_t hash[32],
      * the projection row wholesale and track the entry like an insert so
      * the pprev-link + chainwork pass below covers it. */
     if (bi->nHeight != dbi->nHeight) {
-        bool stub = bi->nBits == 0 &&
-                    !(bi->nStatus & BLOCK_HAVE_DATA) &&
-                    bi->nTx == 0;
-        bool row_real = dbi->nHeight > 0 && dbi->nBits != 0;
-        if (stub && row_real &&
+        if (topup_row_hydrates_stub(bi, dbi) &&
             topup_row_admitted(c, hash, dbi)) {
             int stub_h = bi->nHeight;
-            bi->nHeight              = dbi->nHeight;
-            bi->nFile                = dbi->nFile;
-            bi->nDataPos             = dbi->nDataPos;
-            bi->nUndoPos             = dbi->nUndoPos;
-            bi->nVersion             = dbi->nVersion;
-            bi->hashFinalSaplingRoot = dbi->hashFinalSaplingRoot;
-            bi->nTime                = dbi->nTime;
-            bi->nBits                = dbi->nBits;
-            topup_store_hdr(bi, &dbi->hashMerkleRoot, &dbi->nNonce);
-            bi->nStatus              = dbi->nStatus & ~BLOCK_FAILED_MASK;
-            bi->nCachedBranchId      = dbi->nCachedBranchId;
-            bi->nTx                  = dbi->nTx;
-            if (dbi->has_sprout_value) {
-                bi->nSproutValue     = dbi->nSproutValue;
-                bi->has_sprout_value = true;
-            }
-            bi->nSaplingValue        = dbi->nSaplingValue;
-            topup_seal_undo_bit(bi);
-            bi->pprev                = NULL;   /* re-linked below */
-            bi->pskip                = NULL;
+            topup_hydrate_stub_fields(bi, dbi);
             c->stubs_hydrated++;
             if (c->stubs_hydrated <= 3)
                 LOG_INFO("block_index",
@@ -391,16 +423,7 @@ static bool topup_row_cb(const uint8_t hash[32],
         return true;
     }
 
-    /* Data availability: apply HAVE_DATA + positions the entry lacks. */
-    bool file_adopted = false;
-    if ((dbi->nStatus & BLOCK_HAVE_DATA) &&
-        !(bi->nStatus & BLOCK_HAVE_DATA) && dbi->nFile >= 0) {
-        file_adopted = bi->nFile != dbi->nFile;
-        bi->nFile = dbi->nFile;
-        bi->nDataPos = dbi->nDataPos;
-        bi->nStatus |= BLOCK_HAVE_DATA;
-        c->data_applied++;
-    }
+    bool file_adopted = topup_apply_have_data(c, bi, dbi);
 
     /* Undo availability, INDEPENDENT of the HAVE_DATA branch above — see
      * topup_apply_undo() for why that independence is the whole fix, and
@@ -541,6 +564,82 @@ static void topup_recover_ntx_from_disk(struct main_state *ms,
     *capped_out = capped;
 }
 
+static int topup_iterate_rows(struct block_index_projection *bip,
+                              const struct block_index_flat_identity *ident,
+                              bool have_identity, struct topup_ctx *ctx,
+                              bool *bounded)
+{
+    int iter_rc = 0;
+    if (have_identity) {
+        iter_rc = block_index_projection_iterate_dirty_if_bound(
+            bip, ident->payload_sha3, ident->payload_size,
+            ident->row_count, topup_row_cb, ctx);
+        *bounded = iter_rc == 1;
+    }
+    if (!*bounded && iter_rc >= 0)
+        iter_rc = block_index_projection_iterate_storage_order(
+            bip, topup_row_cb, ctx);
+    return iter_rc;
+}
+
+static int topup_link_pprev_pass(struct block_index_projection *bip,
+                                 struct main_state *ms, bool bounded,
+                                 const struct block_index_flat_identity *ident)
+{
+    return bounded
+        ? block_index_projection_iterate_dirty_if_bound(
+            bip, ident->payload_sha3, ident->payload_size,
+            ident->row_count, topup_link_pprev_cb, ms)
+        : block_index_projection_iterate_storage_order(
+            bip, topup_link_pprev_cb, ms);
+}
+
+static const char *topup_source_name(bool bounded)
+{
+    return bounded ? "bound-delta" : "full";
+}
+
+/* Collect the map's entries into sorted, height ASC, and run the canonical
+ * forward pass over them. Returns how many were collected. */
+static size_t topup_forward_pass_over_map(struct main_state *ms,
+                                          struct block_index **sorted,
+                                          size_t total)
+{
+    size_t n = 0, it = 0;
+    struct block_index *e;
+    while (block_map_next(&ms->map_block_index, &it, NULL, &e)) {
+        if (e && e->phashBlock && n < total)
+            sorted[n++] = e;
+    }
+    qsort(sorted, n, sizeof(*sorted), topup_cmp_height);
+    block_index_forward_pass(sorted, n);
+    return n;
+}
+
+/* One "position metadata happened" term: an application, a cleared
+ * stale pair, or a row that could not be used is each worth the line. */
+static bool topup_summary_due(const struct topup_ctx *ctx,
+                              size_t ntx_recovered, size_t ntx_unreadable,
+                              size_t ntx_capped)
+{
+    size_t pos_events = ctx->data_applied + topup_undo_events(&ctx->undo);
+    return ctx->inserted || pos_events || ctx->ntx_applied ||
+           ctx->valid_raised || ctx->height_conflicts ||
+           ctx->stubs_hydrated || ntx_recovered || ntx_unreadable ||
+           ntx_capped;
+}
+
+static void topup_recover_ntx_for_datadir(struct main_state *ms,
+                                          const char *datadir,
+                                          size_t *recovered_out,
+                                          size_t *unreadable_out,
+                                          size_t *capped_out)
+{
+    if (datadir && datadir[0])
+        topup_recover_ntx_from_disk(ms, datadir, recovered_out,
+                                    unreadable_out, capped_out);
+}
+
 bool block_index_projection_topup_with(struct block_index_projection *bip,
                                        struct main_state *ms,
                                        const char *datadir)
@@ -564,32 +663,19 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
     struct block_index_flat_identity identity;
     bool have_identity = block_index_flat_verified_identity(datadir,
                                                              &identity);
-    int iter_rc = 0;
     bool bounded = false;
-    if (have_identity) {
-        iter_rc = block_index_projection_iterate_dirty_if_bound(
-            bip, identity.payload_sha3, identity.payload_size,
-            identity.row_count, topup_row_cb, &ctx);
-        bounded = iter_rc == 1;
-    }
-    if (!bounded && iter_rc >= 0)
-        iter_rc = block_index_projection_iterate_storage_order(
-            bip, topup_row_cb, &ctx);
+    int iter_rc = topup_iterate_rows(bip, &identity, have_identity, &ctx,
+                                     &bounded);
     if (iter_rc < 0 || ctx.failed) {
         free(ctx.new_entries);
         LOG_FAIL("block_index", "topup: projection iterate failed after "
                  "%zu rows", ctx.rows);
     }
     printf("[boot] block index projection top-up source=%s rows=%zu\n",
-           bounded ? "bound-delta" : "full", ctx.rows);
+           topup_source_name(bounded), ctx.rows);
 
     if (ctx.inserted > 0 || ctx.stubs_hydrated > 0) {
-        int link_rc = bounded
-            ? block_index_projection_iterate_dirty_if_bound(
-                bip, identity.payload_sha3, identity.payload_size,
-                identity.row_count, topup_link_pprev_cb, ms)
-            : block_index_projection_iterate_storage_order(
-                bip, topup_link_pprev_cb, ms);
+        int link_rc = topup_link_pprev_pass(bip, ms, bounded, &identity);
         if (link_rc < 0) {
             free(ctx.new_entries);
             LOG_FAIL("block_index", "topup: pprev link iterate failed");
@@ -617,14 +703,7 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
             ? zcl_malloc(total * sizeof(*sorted), "topup.forward_pass")
             : NULL;
         if (sorted) {
-            size_t n = 0, it = 0;
-            struct block_index *e;
-            while (block_map_next(&ms->map_block_index, &it, NULL, &e)) {
-                if (e && e->phashBlock && n < total)
-                    sorted[n++] = e;
-            }
-            qsort(sorted, n, sizeof(*sorted), topup_cmp_height);
-            block_index_forward_pass(sorted, n);
+            size_t n = topup_forward_pass_over_map(ms, sorted, total);
             free(sorted);
             printf("[boot] topup: global forward pass after %zu stub "
                    "hydration(s) — %zu entries recomputed\n",
@@ -639,16 +718,10 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
     }
 
     size_t ntx_recovered = 0, ntx_unreadable = 0, ntx_capped = 0;
-    if (datadir && datadir[0])
-        topup_recover_ntx_from_disk(ms, datadir, &ntx_recovered,
-                                    &ntx_unreadable, &ntx_capped);
+    topup_recover_ntx_for_datadir(ms, datadir, &ntx_recovered,
+                                  &ntx_unreadable, &ntx_capped);
 
-    /* One "position metadata happened" term: an application, a cleared
-     * stale pair, or a row that could not be used is each worth the line. */
-    size_t pos_events = ctx.data_applied + topup_undo_events(&ctx.undo);
-    if (ctx.inserted || pos_events || ctx.ntx_applied ||
-        ctx.valid_raised || ctx.height_conflicts || ctx.stubs_hydrated ||
-        ntx_recovered || ntx_unreadable || ntx_capped) {
+    if (topup_summary_due(&ctx, ntx_recovered, ntx_unreadable, ntx_capped)) {
         printf("[boot] block index projection top-up: rows=%zu "
                "inserted=%zu data_applied=%zu undo_applied=%zu "
                "undo_cleared=%zu "
@@ -958,6 +1031,75 @@ static bool node_db_fold_window(struct nodedb_fold *f, int lo, int hi)
     return true;
 }
 
+/* Link pprev from the durable row for each inserted entry, then compute its
+ * chainwork and skip. Returns how many entries were linked to a parent. */
+static size_t node_db_link_new_entries(struct main_state *ms,
+                                       struct node_db *ndb,
+                                       struct block_index **new_entries,
+                                       size_t new_count)
+{
+    size_t linked = 0;
+    for (size_t i = 0; i < new_count; i++) {
+        struct block_index *bi = new_entries[i];
+        if (!bi->pprev) {
+            /* prev_hash from the durable row — re-read once (cheap; bounded
+             * to the inserted set). */
+            struct db_block blk;
+            if (db_block_find_by_height(ndb, bi->nHeight, &blk)) {
+                struct uint256 ph;
+                memcpy(ph.data, blk.prev_hash, 32);
+                struct block_index *pprev =
+                    block_map_find(&ms->map_block_index, &ph);
+                if (pprev) {
+                    bi->pprev = pprev;
+                    linked++;
+                }
+            }
+        }
+        struct arith_uint256 proof = GetBlockProof(bi);
+        if (bi->pprev)
+            arith_uint256_add(&bi->nChainWork, &bi->pprev->nChainWork, &proof);
+        else
+            bi->nChainWork = proof;
+        block_index_build_skip(bi);
+    }
+    return linked;
+}
+
+/* True when the node.db summary line has something worth reporting. */
+static bool node_db_summary_due(size_t inserted, size_t pos_events,
+                                size_t ntx_applied, size_t valid_raised,
+                                size_t height_conflicts)
+{
+    return inserted || pos_events || ntx_applied ||
+           valid_raised || height_conflicts;
+}
+
+/* The cold-import seed anchor: its recorded height and its hash. Returns 0
+ * when the height or the hash is absent or malformed. */
+static int64_t node_db_seed_anchor_read(struct node_db *ndb,
+                                        uint8_t anchor_hash[32])
+{
+    int64_t anchor_h = 0;
+    if (!node_db_state_get_int(ndb, "cold_import_seed_anchor_height",
+                               &anchor_h))
+        return 0;                             /* never cold-imported here */
+    if (anchor_h <= 0 || anchor_h > INT32_MAX)
+        return 0;
+    size_t hn = 0;
+    if (!node_db_state_get(ndb, "cold_import_seed_anchor_hash",
+                           anchor_hash, 32, &hn) ||
+        hn != 32)
+        return 0;
+    return anchor_h;
+}
+
+/* True when the anchor block is held in the map at exactly height h. */
+static bool node_db_anchor_held_at(const struct block_index *anchor, int h)
+{
+    return anchor && anchor->nHeight == h;
+}
+
 bool block_index_node_db_topup_with(struct main_state *ms,
                                     struct node_db *ndb,
                                     struct sqlite3 *progress_db,
@@ -973,17 +1115,9 @@ bool block_index_node_db_topup_with(struct main_state *ms,
     /* (1) Durable cold-import seed anchor present? Absent on EVERY normal /
      *     P2P-origin datadir (the producer only writes it in the ldb_import
      *     accepted branch). Strict no-op when missing/empty. */
-    int64_t anchor_h = 0;
-    if (!node_db_state_get_int(ndb, "cold_import_seed_anchor_height",
-                               &anchor_h))
-        return true;                          /* never cold-imported here */
-    if (anchor_h <= 0 || anchor_h > INT32_MAX)
-        return true;
     uint8_t anchor_hash[32];
-    size_t hn = 0;
-    if (!node_db_state_get(ndb, "cold_import_seed_anchor_hash",
-                           anchor_hash, sizeof(anchor_hash), &hn) ||
-        hn != sizeof(anchor_hash))
+    const int64_t anchor_h = node_db_seed_anchor_read(ndb, anchor_hash);
+    if (anchor_h <= 0)
         return true;
     const int H_seed = (int)anchor_h;
 
@@ -993,7 +1127,7 @@ bool block_index_node_db_topup_with(struct main_state *ms,
     struct uint256 ah;
     memcpy(ah.data, anchor_hash, 32);
     struct block_index *anchor = block_map_find(&ms->map_block_index, &ah);
-    if (!anchor || anchor->nHeight != H_seed) {
+    if (!node_db_anchor_held_at(anchor, H_seed)) {
         LOG_WARN("block_index",
                  "node.db topup: cold-import seed anchor not held at H=%d "
                  "(found=%d); skipping forward-extent fold",
@@ -1059,38 +1193,14 @@ bool block_index_node_db_topup_with(struct main_state *ms,
      *     and the contiguous chain below it are already in the map, so the
      *     bottom of the window links onto the seed anchor — which is exactly
      *     what stops the seed anchor being an orphan tip. */
-    size_t linked = 0;
-    for (size_t i = 0; i < new_count; i++) {
-        struct block_index *bi = new_entries[i];
-        if (!bi->pprev) {
-            /* prev_hash from the durable row — re-read once (cheap; bounded
-             * to the inserted set). */
-            struct db_block blk;
-            if (db_block_find_by_height(ndb, bi->nHeight, &blk)) {
-                struct uint256 ph;
-                memcpy(ph.data, blk.prev_hash, 32);
-                struct block_index *pprev =
-                    block_map_find(&ms->map_block_index, &ph);
-                if (pprev) {
-                    bi->pprev = pprev;
-                    linked++;
-                }
-            }
-        }
-        struct arith_uint256 proof = GetBlockProof(bi);
-        if (bi->pprev)
-            arith_uint256_add(&bi->nChainWork, &bi->pprev->nChainWork, &proof);
-        else
-            bi->nChainWork = proof;
-        block_index_build_skip(bi);
-    }
+    size_t linked = node_db_link_new_entries(ms, ndb, new_entries, new_count);
     free(new_entries);
 
     /* One "position metadata happened" term — see the projection top-up's
      * summary above. */
     size_t pos_events = data_applied + topup_undo_events(&undo);
-    if (inserted || pos_events || ntx_applied ||
-        valid_raised || height_conflicts) {
+    if (node_db_summary_due(inserted, pos_events, ntx_applied, valid_raised,
+                            height_conflicts)) {
         printf("[boot] block index node.db top-up: window=%d..%d "
                "inserted=%zu linked=%zu data_applied=%zu undo_applied=%zu "
                "undo_cleared=%zu "
