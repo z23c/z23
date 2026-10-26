@@ -16,6 +16,26 @@ static bool form_error(char *error, size_t cap, const char *message)
     return false;
 }
 
+static bool form_validate_field_value(
+    const struct zcl_present_window_form_field_v1 *field,
+    char *error, size_t error_cap)
+{
+    size_t length = 0;
+    while (length <= ZCL_PRESENT_WINDOW_FORM_VALUE_MAX &&
+           field->value[length]) {
+        unsigned char byte = (unsigned char)field->value[length];
+        if (byte < 0x20u || byte > 0x7eu)
+            return form_error(
+                error, error_cap,
+                "presentation form value is not printable ASCII");
+        length++;
+    }
+    if (length > ZCL_PRESENT_WINDOW_FORM_VALUE_MAX)
+        return form_error(error, error_cap,
+                          "presentation form value is oversized");
+    return true;
+}
+
 bool zcl_present_window_form_validate_v1(
     const struct zcl_present_window_form_v1 *form,
     char *error, size_t error_cap)
@@ -34,19 +54,8 @@ bool zcl_present_window_form_validate_v1(
                                       ZCL_PRESENT_WINDOW_FORM_READ_ONLY))
             return form_error(error, error_cap,
                               "presentation form flags are invalid");
-        size_t length = 0;
-        while (length <= ZCL_PRESENT_WINDOW_FORM_VALUE_MAX &&
-               field->value[length]) {
-            unsigned char byte = (unsigned char)field->value[length];
-            if (byte < 0x20u || byte > 0x7eu)
-                return form_error(
-                    error, error_cap,
-                    "presentation form value is not printable ASCII");
-            length++;
-        }
-        if (length > ZCL_PRESENT_WINDOW_FORM_VALUE_MAX)
-            return form_error(error, error_cap,
-                              "presentation form value is oversized");
+        if (!form_validate_field_value(field, error, error_cap))
+            return false;
         editable |= !(field->flags & ZCL_PRESENT_WINDOW_FORM_READ_ONLY);
     }
     if (!editable)
@@ -82,6 +91,22 @@ bool zcl_present_window_form_edit_v1(
     return true;
 }
 
+static uint32_t form_focus_advance(uint32_t candidate, uint32_t total,
+                                   int32_t delta)
+{
+    return delta > 0
+        ? (candidate + 1u == total ? 0u : candidate + 1u)
+        : (candidate == 0 ? total - 1u : candidate - 1u);
+}
+
+static bool form_focus_is_focusable(
+    const struct zcl_present_window_form_v1 *form, uint32_t candidate)
+{
+    return candidate >= form->field_count ||
+           !(form->fields[candidate].flags &
+             ZCL_PRESENT_WINDOW_FORM_READ_ONLY);
+}
+
 bool zcl_present_window_form_focus_step_v1(
     const struct zcl_present_window_form_v1 *form,
     uint32_t action_count, uint32_t current_focus, int32_t delta,
@@ -101,12 +126,8 @@ bool zcl_present_window_form_focus_step_v1(
         return false;
     uint32_t candidate = current_focus;
     for (uint32_t i = 0; i < total; i++) {
-        candidate = delta > 0
-            ? (candidate + 1u == total ? 0u : candidate + 1u)
-            : (candidate == 0 ? total - 1u : candidate - 1u);
-        if (candidate >= form->field_count ||
-            !(form->fields[candidate].flags &
-              ZCL_PRESENT_WINDOW_FORM_READ_ONLY)) {
+        candidate = form_focus_advance(candidate, total, delta);
+        if (form_focus_is_focusable(form, candidate)) {
             *next_focus = candidate;
             return true;
         }
