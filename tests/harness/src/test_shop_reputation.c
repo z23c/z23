@@ -278,6 +278,48 @@ static bool sr_store_receipt(const char *zcode_dir,
     return ok;
 }
 
+/* Build the package manifest (adding the declaration chunk member when
+ * decl is non-NULL), serialize it and return its root in root_out;
+ * chunk_hash_out receives the declaration chunk's hash for the CAS
+ * write. */
+static bool sr_serialize_decl_manifest(const char *decl, size_t decl_len,
+                                       uint8_t **wire_out,
+                                       size_t *wire_len_out,
+                                       uint8_t root_out[32],
+                                       uint8_t chunk_hash_out[32])
+{
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    bool ok = true;
+    if (decl) {
+        struct sha3_256_ctx sha;
+        sha3_256_init(&sha);
+        sha3_256_write(&sha, (const uint8_t *)decl, decl_len);
+        sha3_256_finalize(&sha, chunk_hash_out);
+        ok = vcs_package_manifest_add(&manifest, VCS_PACKAGE_DEPS_META_PATH,
+                                      VCS_PACKAGE_MODE_FILE, decl_len,
+                                      chunk_hash_out, 1);
+    }
+    if (ok)
+        ok = vcs_package_manifest_serialize(&manifest, wire_out,
+                                            wire_len_out);
+    if (ok)
+        ok = vcs_package_manifest_root(&manifest, root_out);
+    vcs_package_manifest_free(&manifest);
+    return ok;
+}
+
+/* Store bytes under <dir>/<name_hex>, creating dir first — the store's
+ * filing convention for its hex-named members. */
+static bool sr_store_hex_named_file(const char *dir, const char *name_hex,
+                                    const void *bytes, size_t len)
+{
+    char path[4400];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name_hex);
+    return sr_mkdir_p(dir) && n > 0 && (size_t)n < sizeof(path) &&
+           sr_write_file(path, bytes, len);
+}
+
 /* Persist one package's manifest + its zcode-package.json declaration
  * chunk (single-chunk member), so the declaration is locally readable
  * and root-committed. The manifest root — which IS the package root the
@@ -286,47 +328,27 @@ static bool sr_store_receipt(const char *zcode_dir,
 static bool sr_store_declaration(const char *zcode_dir,
                                  const char *decl, uint8_t root_out[32])
 {
-    struct vcs_package_manifest manifest;
-    vcs_package_manifest_init(&manifest);
     uint8_t chunk_hash[32];
-    bool ok = true;
     size_t decl_len = decl ? strlen(decl) : 0;
-    if (decl) {
-        struct sha3_256_ctx sha;
-        sha3_256_init(&sha);
-        sha3_256_write(&sha, (const uint8_t *)decl, decl_len);
-        sha3_256_finalize(&sha, chunk_hash);
-        ok = vcs_package_manifest_add(&manifest, VCS_PACKAGE_DEPS_META_PATH,
-                                      VCS_PACKAGE_MODE_FILE, decl_len,
-                                      chunk_hash, 1);
-    }
     uint8_t *wire = NULL;
     size_t wire_len = 0;
-    if (ok)
-        ok = vcs_package_manifest_serialize(&manifest, &wire, &wire_len);
-    if (ok)
-        ok = vcs_package_manifest_root(&manifest, root_out);
-    vcs_package_manifest_free(&manifest);
-    if (!ok)
+    if (!sr_serialize_decl_manifest(decl, decl_len, &wire, &wire_len,
+                                    root_out, chunk_hash))
         return false;
     char root_hex[65];
     zcl_hex_encode(root_out, 32, root_hex);
-    char dir[4400], path[4400];
+    char dir[4400];
     int n = snprintf(dir, sizeof(dir), "%s/manifests", zcode_dir);
-    ok = n > 0 && (size_t)n < sizeof(dir) && sr_mkdir_p(dir);
-    n = snprintf(path, sizeof(path), "%s/%s", dir, root_hex);
-    ok = ok && n > 0 && (size_t)n < sizeof(path) &&
-         sr_write_file(path, wire, wire_len);
+    bool ok = n > 0 && (size_t)n < sizeof(dir) &&
+              sr_store_hex_named_file(dir, root_hex, wire, wire_len);
     free(wire);
     if (ok && decl) {
         char chunk_hex[65];
         zcl_hex_encode(chunk_hash, 32, chunk_hex);
         n = snprintf(dir, sizeof(dir), "%s/cas/sha3/%.2s", zcode_dir,
                      chunk_hex);
-        ok = n > 0 && (size_t)n < sizeof(dir) && sr_mkdir_p(dir);
-        n = snprintf(path, sizeof(path), "%s/%s", dir, chunk_hex);
-        ok = ok && n > 0 && (size_t)n < sizeof(path) &&
-             sr_write_file(path, decl, decl_len);
+        ok = n > 0 && (size_t)n < sizeof(dir) &&
+             sr_store_hex_named_file(dir, chunk_hex, decl, decl_len);
     }
     return ok;
 }
@@ -416,6 +438,74 @@ static bool sr_row_is(const struct zcl_command_reply *reply,
 #define SR_SUBJECT_SEED 0x11
 #define SR_FOREIGN_SEED 0x66
 
+/* The subject's signed release over (package_root, recipe_root), stored
+ * backdated to SR_BASE_UNIX; its id is returned in release_id_out. */
+static bool sr_store_subject_release(
+    const char *zcode_dir, const uint8_t package_root[32],
+    const uint8_t recipe_root[32],
+    uint8_t release_id_out[VCS_PACKAGE_RELEASE_ID_BYTES])
+{
+    struct vcs_package_release rel;
+    return sr_release(&rel, SR_SUBJECT_SEED, 1, "alice/ring", package_root,
+                      recipe_root) &&
+           vcs_package_release_id(&rel, release_id_out) ==
+               VCS_PACKAGE_RELEASE_OK &&
+           sr_store_release(zcode_dir, &rel, SR_BASE_UNIX);
+}
+
+/* Two byte-identical output sets, distinct receipt ids. */
+static bool sr_store_subject_receipts(const char *zcode_dir,
+                                      const uint8_t package_root[32],
+                                      const uint8_t recipe_root[32])
+{
+    return sr_store_receipt(zcode_dir, package_root, recipe_root, "14.2.0",
+                            0x40) &&
+           sr_store_receipt(zcode_dir, package_root, recipe_root, "15.1.0",
+                            0x40);
+}
+
+/* Two distinct signer keys over the subject's package, plus one
+ * attestation over a FOREIGN package root that must not count. */
+static bool sr_store_subject_attestations(const char *zcode_dir,
+                                          const uint8_t package_root[32],
+                                          const uint8_t release_id[32],
+                                          const uint8_t recipe_root[32])
+{
+    uint8_t foreign_pkg[32], foreign_recipe[32], foreign_rel_id[32];
+    sr_pattern_root(0xf1, foreign_pkg);
+    sr_pattern_root(0xf2, foreign_recipe);
+    sr_pattern_root(0xf3, foreign_rel_id);
+    return sr_store_attestation(zcode_dir, package_root, release_id,
+                                recipe_root, 0x42) &&
+           sr_store_attestation(zcode_dir, package_root, release_id,
+                                recipe_root, 0x43) &&
+           sr_store_attestation(zcode_dir, foreign_pkg, foreign_rel_id,
+                                foreign_recipe, SR_FOREIGN_SEED);
+}
+
+/* The dependent package: bob's "bob/hammer" declares a root-committed
+ * dependency on the subject's package root. The declaration manifest
+ * is built first — its root IS the package root bob's release names. */
+static bool sr_store_dependent_package(const char *zcode_dir,
+                                       const uint8_t package_root[32])
+{
+    char subject_root_hex[65];
+    zcl_hex_encode(package_root, 32, subject_root_hex);
+    char decl[256];
+    int n = snprintf(decl, sizeof(decl),
+                     "{\"schema\":1,\"dependencies\":[{\"root\":\"%s\","
+                     "\"name\":\"alice/ring\",\"semver\":\"1.0.0\"}]}",
+                     subject_root_hex);
+    uint8_t bob_pkg[32], bob_recipe[32];
+    sr_pattern_root(0xb2, bob_recipe);
+    struct vcs_package_release bob_rel;
+    return n > 0 && (size_t)n < sizeof(decl) &&
+           sr_store_declaration(zcode_dir, decl, bob_pkg) &&
+           sr_release(&bob_rel, 0x22, 1, "bob/hammer", bob_pkg,
+                      bob_recipe) &&
+           sr_store_release(zcode_dir, &bob_rel, 0);
+}
+
 static bool sr_populate(const char *dir, char zcode_dir[4400],
                         uint8_t package_root[32], uint8_t recipe_root[32],
                         char publisher_hex[67])
@@ -431,57 +521,16 @@ static bool sr_populate(const char *dir, char zcode_dir[4400],
         return false;
     zcl_hex_encode(subject_pk.vch, 33, publisher_hex);
 
-    struct vcs_package_release rel;
-    if (!sr_release(&rel, SR_SUBJECT_SEED, 1, "alice/ring", package_root,
-                    recipe_root))
-        return false;
     uint8_t release_id[VCS_PACKAGE_RELEASE_ID_BYTES];
-    if (vcs_package_release_id(&rel, release_id) != VCS_PACKAGE_RELEASE_OK)
+    if (!sr_store_subject_release(zcode_dir, package_root, recipe_root,
+                                  release_id))
         return false;
-    if (!sr_store_release(zcode_dir, &rel, SR_BASE_UNIX))
+    if (!sr_store_subject_receipts(zcode_dir, package_root, recipe_root))
         return false;
-
-    /* Two byte-identical output sets, distinct receipt ids. */
-    if (!sr_store_receipt(zcode_dir, package_root, recipe_root, "14.2.0",
-                          0x40) ||
-        !sr_store_receipt(zcode_dir, package_root, recipe_root, "15.1.0",
-                          0x40))
+    if (!sr_store_subject_attestations(zcode_dir, package_root, release_id,
+                                       recipe_root))
         return false;
-
-    /* Two distinct signer keys over the subject's package, plus one
-     * attestation over a FOREIGN package root that must not count. */
-    if (!sr_store_attestation(zcode_dir, package_root, release_id,
-                              recipe_root, 0x42) ||
-        !sr_store_attestation(zcode_dir, package_root, release_id,
-                              recipe_root, 0x43))
-        return false;
-    uint8_t foreign_pkg[32], foreign_recipe[32], foreign_rel_id[32];
-    sr_pattern_root(0xf1, foreign_pkg);
-    sr_pattern_root(0xf2, foreign_recipe);
-    sr_pattern_root(0xf3, foreign_rel_id);
-    if (!sr_store_attestation(zcode_dir, foreign_pkg, foreign_rel_id,
-                              foreign_recipe, SR_FOREIGN_SEED))
-        return false;
-
-    /* The dependent package: bob's "bob/hammer" declares a root-committed
-     * dependency on the subject's package root. The declaration manifest
-     * is built first — its root IS the package root bob's release names. */
-    char subject_root_hex[65];
-    zcl_hex_encode(package_root, 32, subject_root_hex);
-    char decl[256];
-    n = snprintf(decl, sizeof(decl),
-                 "{\"schema\":1,\"dependencies\":[{\"root\":\"%s\","
-                 "\"name\":\"alice/ring\",\"semver\":\"1.0.0\"}]}",
-                 subject_root_hex);
-    if (n < 0 || (size_t)n >= sizeof(decl))
-        return false;
-    uint8_t bob_pkg[32], bob_recipe[32];
-    sr_pattern_root(0xb2, bob_recipe);
-    if (!sr_store_declaration(zcode_dir, decl, bob_pkg))
-        return false;
-    struct vcs_package_release bob_rel;
-    if (!sr_release(&bob_rel, 0x22, 1, "bob/hammer", bob_pkg, bob_recipe) ||
-        !sr_store_release(zcode_dir, &bob_rel, 0))
+    if (!sr_store_dependent_package(zcode_dir, package_root))
         return false;
 
     /* One settled simulated reward to the subject's key. */
