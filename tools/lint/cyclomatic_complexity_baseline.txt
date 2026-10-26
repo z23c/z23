@@ -2782,8 +2782,6 @@ tools/fingerprint_scan.c:main:155
 tools/fuzz/fuzz_p2p.c:fuzz_min_dispatch_payload:33
 tools/fuzz/fuzz_zcode_commons.c:LLVMFuzzerTestOneInput:23
 tools/fuzz/fuzz_zcode_commons.c:fuzz_hex_wire:16
-tools/gen_api_reference.c:block_counts:17
-tools/gen_api_reference.c:block_schemas:16
 tools/gen_utxo_root_ladder.c:main:35
 tools/gen_utxo_root_ladder.c:parse_cli:22
 tools/install/z23_bootstrap.c:bootstrap_main#2:39

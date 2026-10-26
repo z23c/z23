@@ -723,6 +723,39 @@ static void emit_leaf_table(FILE *f, const char *parent)
 
 /* ── generated blocks ───────────────────────────────────────────────────── */
 
+static void emit_def_file_counts(FILE *f)
+{
+    fputs("Per source file:\n\n", f);
+    fputs("| `.def` file | Entries | Branches | Leaves |\n|---|---|---|---|\n",
+          f);
+    for (size_t i = 0; i < ROW_COUNT; i++) {
+        bool seen = false;
+        for (size_t j = 0; j < i; j++) {
+            if (strcmp(g_rows[j].def_file, g_rows[i].def_file) == 0) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) {
+            continue;
+        }
+        size_t n = 0, b = 0, l = 0;
+        for (size_t j = 0; j < ROW_COUNT; j++) {
+            if (strcmp(g_rows[j].def_file, g_rows[i].def_file) != 0) {
+                continue;
+            }
+            n++;
+            if (g_rows[j].is_branch) {
+                b++;
+            } else {
+                l++;
+            }
+        }
+        fprintf(f, "| `%s` | %zu | %zu | %zu |\n", g_rows[i].def_file, n, b, l);
+    }
+    fputc('\n', f);
+}
+
 static void block_counts(FILE *f)
 {
     size_t branches = 0, leaves = 0, roots = 0;
@@ -775,35 +808,7 @@ static void block_counts(FILE *f)
     fprintf(f, "| Leaves requiring **owner** authority | %zu |\n", owner);
     fputc('\n', f);
 
-    fputs("Per source file:\n\n", f);
-    fputs("| `.def` file | Entries | Branches | Leaves |\n|---|---|---|---|\n",
-          f);
-    for (size_t i = 0; i < ROW_COUNT; i++) {
-        bool seen = false;
-        for (size_t j = 0; j < i; j++) {
-            if (strcmp(g_rows[j].def_file, g_rows[i].def_file) == 0) {
-                seen = true;
-                break;
-            }
-        }
-        if (seen) {
-            continue;
-        }
-        size_t n = 0, b = 0, l = 0;
-        for (size_t j = 0; j < ROW_COUNT; j++) {
-            if (strcmp(g_rows[j].def_file, g_rows[i].def_file) != 0) {
-                continue;
-            }
-            n++;
-            if (g_rows[j].is_branch) {
-                b++;
-            } else {
-                l++;
-            }
-        }
-        fprintf(f, "| `%s` | %zu | %zu | %zu |\n", g_rows[i].def_file, n, b, l);
-    }
-    fputc('\n', f);
+    emit_def_file_counts(f);
 }
 
 static void block_roots(FILE *f)
@@ -899,6 +904,33 @@ static void block_aliases(FILE *f)
     fputc('\n', f);
 }
 
+static bool schema_seen_before(size_t i)
+{
+    for (size_t j = 0; j < i; j++) {
+        if (!g_rows[j].is_branch &&
+            strcmp(g_rows[j].output_schema, g_rows[i].output_schema) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void emit_schema_leaf_paths(FILE *f, const char *schema)
+{
+    bool first = true;
+    for (size_t j = 0; j < ROW_COUNT; j++) {
+        if (g_rows[j].is_branch ||
+            strcmp(g_rows[j].output_schema, schema) != 0) {
+            continue;
+        }
+        if (!first) {
+            fputs(", ", f);
+        }
+        first = false;
+        emit_code(f, g_rows[j].path);
+    }
+}
+
 static void block_schemas(FILE *f)
 {
     fputs("| Output schema | Leaves |\n|---|---|\n", f);
@@ -906,15 +938,7 @@ static void block_schemas(FILE *f)
         if (g_rows[i].is_branch || g_rows[i].output_schema[0] == '\0') {
             continue;
         }
-        bool seen = false;
-        for (size_t j = 0; j < i; j++) {
-            if (!g_rows[j].is_branch &&
-                strcmp(g_rows[j].output_schema, g_rows[i].output_schema) == 0) {
-                seen = true;
-                break;
-            }
-        }
-        if (seen) {
+        if (schema_seen_before(i)) {
             continue;
         }
         size_t n = 0;
@@ -930,18 +954,7 @@ static void block_schemas(FILE *f)
         fputs("| ", f);
         emit_code(f, g_rows[i].output_schema);
         fputs(" | ", f);
-        bool first = true;
-        for (size_t j = 0; j < ROW_COUNT; j++) {
-            if (g_rows[j].is_branch ||
-                strcmp(g_rows[j].output_schema, g_rows[i].output_schema) != 0) {
-                continue;
-            }
-            if (!first) {
-                fputs(", ", f);
-            }
-            first = false;
-            emit_code(f, g_rows[j].path);
-        }
+        emit_schema_leaf_paths(f, g_rows[i].output_schema);
         fputs(" |\n", f);
     }
     fputc('\n', f);
