@@ -75,6 +75,17 @@ static bool api_service_operation_filter_matches(
     return true;
 }
 
+static void api_service_operation_counts_add_callable(
+    struct api_service_operation_counts *counts,
+    const struct api_service_operation_contract *op)
+{
+    if (op->rest_method && op->rest_method[0] &&
+        op->rest_route && op->rest_route[0])
+        counts->rest_callable_count++;
+    if (op->rpc_method && op->rpc_method[0])
+        counts->rpc_callable_count++;
+}
+
 static void api_service_operation_counts_add(
     struct api_service_operation_counts *counts,
     const struct api_service_operation_contract *op)
@@ -92,11 +103,7 @@ static void api_service_operation_counts_add(
         counts->operator_private_count++;
     if (op->destructive)
         counts->destructive_count++;
-    if (op->rest_method && op->rest_method[0] &&
-        op->rest_route && op->rest_route[0])
-        counts->rest_callable_count++;
-    if (op->rpc_method && op->rpc_method[0])
-        counts->rpc_callable_count++;
+    api_service_operation_counts_add_callable(counts, op);
     if (op->status && strcmp(op->status, "active") == 0)
         counts->active_count++;
     if (op->status && strcmp(op->status, "in_progress") == 0)
