@@ -561,6 +561,385 @@ static bool open_fixture(char *dir, size_t dir_n, const char *tag,
            seed_all_cursors(progress_store_db(), cursor_top);
 }
 
+static void tipfin_fill_hashes(struct uint256 *h, int n)
+{
+    for (int i = 1; i <= n; i++)
+        mk_hash(&h[i], A + i);
+}
+
+static bool tipfin_seed_upstream_range(sqlite3 *db, const struct uint256 *h,
+                                       int lo, int hi)
+{
+    bool seeded = true;
+    for (int i = lo; i <= hi; i++)
+        seeded = seeded && put_upstream_ok(db, A + i, &h[i]);
+    return seeded;
+}
+
+static bool tipfin_t2_tips_and_coins(sqlite3 *db, const struct uint256 *h)
+{
+    return put_tip(db, A + 1, "finalized", 1, &h[2]) &&
+           put_tip(db, A + 5, "finalized", 1, &h[6]) &&
+           put_tip(db, A + 6, "finalized", 1, &h[7]) &&
+           seed_coins_applied(db, A + 6);
+}
+
+static bool tipfin_t2_seed(sqlite3 *db, struct uint256 *h)
+{
+    tipfin_fill_hashes(h, 7);
+    return tipfin_seed_upstream_range(db, h, 1, 6) &&
+           /* Binder gap mid-span: the script hash at A+4 is NULL until pass 3,
+            * so G5 blocks p=A+3 and the witness record is observable. */
+           put_script(db, A + 4, 1, NULL) &&
+           tipfin_t2_tips_and_coins(db, h);
+}
+
+static bool tipfin_t2b_seed(sqlite3 *db, struct uint256 *h)
+{
+    tipfin_fill_hashes(h, 7);
+    return tipfin_seed_upstream_range(db, h, 1, 6) &&
+           tipfin_t2_tips_and_coins(db, h) &&
+           put_tipfin_marker(db, A + 2, &h[3]);
+}
+
+static bool tipfin_t2c_seed(sqlite3 *db, struct uint256 *h)
+{
+    return tipfin_t2b_seed(db, h) && put_tipfin_witness(db, A + 5, 9);
+}
+
+static bool tipfin_t3_upstream(sqlite3 *db, const struct uint256 *h)
+{
+    /* The REAL tear: the script row is missing at A+3, strictly below
+     * the coins frontier (A+5). Everything else is ok=1. */
+    bool seeded = true;
+    for (int i = 1; i <= 5; i++) {
+        seeded = seeded && put_validate(db, A + i, 1, &h[i]) &&
+                 put_header(db, A + i, &h[i]) &&
+                 put_simple(db, "body_persist_log", A + i, 1) &&
+                 put_proof(db, A + i, 1, &h[i]) &&
+                 put_utxo(db, A + i, 1, &h[i]);
+        if (i != 3)
+            seeded = seeded && put_script(db, A + i, 1, &h[i]);
+    }
+    return seeded;
+}
+
+static bool tipfin_t3_seed(sqlite3 *db, struct uint256 *h)
+{
+    tipfin_fill_hashes(h, 6);
+    return tipfin_t3_upstream(db, h) &&
+           put_tip(db, A + 1, "finalized", 1, &h[2]) &&
+           put_tip(db, A + 2, "finalized", 1, &h[3]) &&
+           seed_coins_applied(db, A + 5);
+}
+
+static bool tipfin_t4_anchor_tips(sqlite3 *db, const struct uint256 *h)
+{
+    return put_tip(db, A + 1, "finalized", 1, &h[2]) &&
+           put_tip(db, A + 4, "finalized", 1, &h[5]) &&
+           seed_coins_applied(db, A + 4);
+}
+
+static bool tipfin_t4a_seed(sqlite3 *db, struct uint256 *h)
+{
+    tipfin_fill_hashes(h, 5);
+    return tipfin_seed_upstream_range(db, h, 1, 4) &&
+           put_proof(db, A + 2, 0, &h[2]) &&
+           tipfin_t4_anchor_tips(db, h);
+}
+
+static bool tipfin_t4b_seed(sqlite3 *db, struct uint256 *h)
+{
+    tipfin_fill_hashes(h, 5);
+    return tipfin_seed_upstream_range(db, h, 1, 4) &&
+           put_tip(db, A + 1, "finalized", 1, &h[2]) &&
+           put_tip(db, A + 2, "utxo_count_diverged", 0, NULL) &&
+           put_tip(db, A + 4, "finalized", 1, &h[5]) &&
+           seed_coins_applied(db, A + 4);
+}
+
+static bool tipfin_t4_fork_seed(sqlite3 *db, struct uint256 *h,
+                                uint8_t flip, bool utxo_fork)
+{
+    tipfin_fill_hashes(h, 5);
+    struct uint256 fork_hash = h[2];
+    fork_hash.data[31] ^= flip;
+    return tipfin_seed_upstream_range(db, h, 1, 4) &&
+           (utxo_fork ? put_utxo(db, A + 2, 1, &fork_hash)
+                      : put_proof(db, A + 2, 1, &fork_hash)) &&
+           tipfin_t4_anchor_tips(db, h);
+}
+
+static bool tipfin_t9_seed(sqlite3 *db, struct uint256 *h, int c_at)
+{
+    tipfin_fill_hashes(h, 9);
+    /* A+1 .. C-1: all five logs ok=1 */
+    bool seeded = tipfin_seed_upstream_range(db, h, 1, 7);
+    /* At C: validate + body_persist present, script/proof/utxo rowless. */
+    seeded = seeded && put_header(db, c_at, &h[8]) &&
+             put_validate(db, c_at, 1, &h[8]) &&
+             put_simple(db, "body_persist_log", c_at, 1);
+    /* tip_finalize: rows through S-1, rowless span, anchor ok=1 at C. */
+    return seeded &&
+           put_tip(db, A + 1, "finalized", 1, &h[2]) &&
+           put_tip(db, A + 2, "finalized", 1, &h[3]) &&
+           put_tip(db, c_at, "anchor", 1, &h[8]) &&
+           seed_coins_applied(db, c_at);
+}
+
+static bool tipfin_t10_seed(sqlite3 *db, struct uint256 *h)
+{
+    tipfin_fill_hashes(h, 9);
+    /* all five logs ok=1 A+1 .. A+8 */
+    bool seeded = tipfin_seed_upstream_range(db, h, 1, 8);
+    /* tip_finalize: rows at A+1, rowless HOLE A+2..A+4, rows A+5..A+8. */
+    return seeded &&
+           put_tip(db, A + 1, "finalized", 1, &h[2]) &&
+           put_tip(db, A + 5, "finalized", 1, &h[6]) &&
+           put_tip(db, A + 6, "finalized", 1, &h[7]) &&
+           put_tip(db, A + 7, "finalized", 1, &h[8]) &&
+           put_tip(db, A + 8, "finalized", 1, &h[9]) &&
+           seed_coins_applied(db, A + 9);
+}
+
+/* floor < 0 skips served_floor; coins < 0 skips coins_applied_height.
+ * tear_mode 0 skips the tear bit, >0 requires it, <0 requires it clear. */
+static bool tipfin_snap_expect(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr,
+    int hstar, int floor, int coins, int tear_mode)
+{
+    bool ok = snapshot(db, rr) && rr->hstar == hstar;
+    if (floor >= 0)
+        ok = ok && rr->served_floor == floor;
+    if (coins >= 0)
+        ok = ok && rr->coins_applied_height == coins;
+    if (tear_mode != 0)
+        ok = ok && rr->refused_coin_tear == (tear_mode > 0);
+    return ok;
+}
+
+static bool tipfin_t2_dry_run(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled)
+{
+    return stage_reducer_frontier_try_tipfin_backfill(
+               db, false, rr, handled) &&
+           *handled && rr->repaired &&
+           rr->tipfin_backfill_height == A + 2 &&
+           tip_row_count(db) == 3 && marker_count(db) == 0;
+}
+
+static bool tipfin_t2_pass1_filled(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled)
+{
+    return stage_reducer_frontier_try_tipfin_backfill(
+               db, true, rr, handled) &&
+           *handled && rr->repaired && !rr->refused_coin_tear &&
+           rr->tipfin_backfill_count == 1 &&
+           rr->tipfin_backfill_height == A + 2;
+}
+
+static bool tipfin_row_matches(sqlite3 *db, int height,
+                               struct tip_row_view *row, int ok_flag,
+                               const char *status, const struct uint256 *hash,
+                               bool require_hash_flag)
+{
+    bool match = tip_row_at(db, height, row) && row->found &&
+                 row->ok == ok_flag;
+    if (status != NULL)
+        match = match && strcmp(row->status, status) == 0;
+    if (require_hash_flag)
+        match = match && row->has_hash;
+    if (hash != NULL)
+        match = match && memcmp(row->hash.data, hash->data, 32) == 0;
+    return match;
+}
+
+static bool tipfin_t2_pass1_witness(sqlite3 *db, bool *found, int32_t *wlast,
+                                    uint32_t *wtotal,
+                                    const struct uint256 *binder)
+{
+    return witness_at(db, found, wlast, wtotal) && *found &&
+           *wlast == A + 2 && *wtotal == 1 && marker_count(db) == 1 &&
+           tipfin_marker_is_one(db, A + 2, binder);
+}
+
+static bool tipfin_t2_pass2_blocked(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled)
+{
+    return stage_reducer_frontier_try_tipfin_backfill(
+               db, true, rr, handled) &&
+           !*handled && rr->tipfin_backfill_count == 0 &&
+           rr->tipfin_backfill_refused_reason == T_REFUSED_G5_BINDER_MISSING;
+}
+
+static bool tipfin_t2_pass2_witness(sqlite3 *db, bool *found, int32_t *wlast,
+                                    uint32_t *wtotal)
+{
+    return witness_at(db, found, wlast, wtotal) && *found &&
+           *wlast == A + 2 && *wtotal == 1 &&
+           tip_row_count(db) == 4;
+}
+
+static bool tipfin_backfill_span(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled,
+    int count, int height)
+{
+    return stage_reducer_frontier_try_tipfin_backfill(
+               db, true, rr, handled) &&
+           *handled && rr->tipfin_backfill_count == count &&
+           rr->tipfin_backfill_height == height;
+}
+
+static bool tipfin_t2_pass3_rows(sqlite3 *db, const struct uint256 *h,
+                                 struct tip_row_view *row)
+{
+    return tipfin_row_matches(db, A + 3, row, 1, NULL, &h[4], false) &&
+           tipfin_row_matches(db, A + 4, row, 1, NULL, &h[5], false);
+}
+
+static bool tipfin_witness_gone(sqlite3 *db, bool *found, int32_t *wlast,
+                                uint32_t *wtotal)
+{
+    return witness_at(db, found, wlast, wtotal) && !*found;
+}
+
+static bool tipfin_t2_span_done(sqlite3 *db, bool *found, int32_t *wlast,
+                                uint32_t *wtotal)
+{
+    return tipfin_witness_gone(db, found, wlast, wtotal) &&
+           marker_count(db) == 1;
+}
+
+static bool tipfin_t2_intact(sqlite3 *db, struct tip_row_view *row)
+{
+    return tip_row_count(db) == 6 &&
+           tipfin_row_matches(db, A + 1, row, 1, "finalized", NULL, false) &&
+           tipfin_row_matches(db, A + 5, row, 1, "finalized", NULL, false) &&
+           cursor_value(db, "tip_finalize") == A + 7 &&
+           cursor_value(db, "script_validate") == A + 7;
+}
+
+static bool tipfin_backfill_idle(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled)
+{
+    return stage_reducer_frontier_try_tipfin_backfill(
+               db, true, rr, handled) &&
+           !*handled &&
+           rr->tipfin_backfill_refused_reason == T_REFUSED_NONE;
+}
+
+static bool tipfin_marker_blocks(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled)
+{
+    return stage_reducer_frontier_try_tipfin_backfill(
+               db, true, rr, handled) &&
+           !*handled && !rr->repaired &&
+           rr->tipfin_backfill_marker_seen &&
+           rr->tipfin_backfill_refused_reason ==
+               STAGE_REPAIR_TIPFIN_REFUSED_G7_MARKER_SEEN &&
+           rr->tipfin_backfill_count == 0 &&
+           tip_row_count(db) == 3 && marker_count(db) == 1;
+}
+
+static bool tipfin_refused_at(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled,
+    int reason, int height, int log)
+{
+    return stage_reducer_frontier_try_tipfin_backfill(
+               db, true, rr, handled) &&
+           !*handled &&
+           rr->tipfin_backfill_refused_reason == reason &&
+           rr->tipfin_backfill_refused_height == height &&
+           rr->tipfin_backfill_refused_log == log;
+}
+
+static bool tipfin_refused_absent(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled,
+    struct tip_row_view *row, int reason, int height, int log)
+{
+    return tipfin_refused_at(db, rr, handled, reason, height, log) &&
+           tip_row_at(db, height, row) && !row->found;
+}
+
+static bool tipfin_fork_refused(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled,
+    struct tip_row_view *row, int log)
+{
+    return tipfin_snap_expect(db, rr, A + 1, -1, -1, 0) &&
+           stage_reducer_frontier_try_tipfin_backfill(
+               db, true, rr, handled) &&
+           !*handled &&
+           rr->tipfin_backfill_refused_reason ==
+               T_REFUSED_G3_MISSING_EVIDENCE &&
+           rr->tipfin_backfill_refused_log == log &&
+           tip_row_at(db, A + 2, row) && !row->found;
+}
+
+static bool tipfin_clamp_at(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled,
+    int script_at, int proof_at)
+{
+    return stage_reducer_frontier_try_unapplied_hole_clamp(
+               db, true, rr, handled) &&
+           cursor_value(db, "script_validate") == script_at &&
+           cursor_value(db, "proof_validate") == proof_at;
+}
+
+static bool tipfin_digest_same(sqlite3 *db,
+                               long long before[TIPFIN_DIGEST_N],
+                               long long after[TIPFIN_DIGEST_N])
+{
+    return digest_all(db, after) &&
+           memcmp(before, after,
+                  sizeof(long long) * (size_t)TIPFIN_DIGEST_N) == 0;
+}
+
+static bool tipfin_t9_refill(sqlite3 *db, int c_at, const struct uint256 *h)
+{
+    return put_script(db, c_at, 1, &h[8]) && put_proof(db, c_at, 1, &h[8]);
+}
+
+static bool tipfin_t9_reconcile_ok(sqlite3 *db, struct main_state *ms,
+                                   struct stage_reducer_frontier_reconcile_result *fin,
+                                   int c_at)
+{
+    return stage_reducer_frontier_reconcile_light(db, ms, fin) &&
+           !fin->refused_coin_tear &&
+           cursor_value(db, "tip_finalize") == c_at;
+}
+
+static bool tipfin_hstar_matches(bool okc, int32_t hs, int32_t sf,
+                                 int want_hs, int want_sf)
+{
+    return okc && hs == want_hs && sf == want_sf;
+}
+
+static bool tipfin_t10_filled(sqlite3 *db,
+    struct stage_reducer_frontier_reconcile_result *rr, bool *handled)
+{
+    return stage_reducer_frontier_try_tipfin_backfill(
+               db, true, rr, handled) &&
+           *handled && rr->repaired &&
+           rr->tipfin_backfill_count == 3 &&
+           rr->tipfin_backfill_height == A + 4;
+}
+
+static bool tipfin_t10_rows(sqlite3 *db, const struct uint256 *h,
+                            struct tip_row_view *row)
+{
+    return tipfin_row_matches(db, A + 2, row, 1, "finalize_backfill",
+                              &h[3], false) &&
+           tipfin_row_matches(db, A + 3, row, 1, NULL, &h[4], false) &&
+           tipfin_row_matches(db, A + 4, row, 1, NULL, &h[5], false);
+}
+
+static bool tipfin_t10_intact(sqlite3 *db, struct tip_row_view *row)
+{
+    return tip_row_count(db) == 8 &&
+           tipfin_row_matches(db, A + 5, row, 1, "finalized", NULL, false) &&
+           cursor_value(db, "tip_finalize") == A + 9;
+}
+
 int test_stage_repair_tipfin_backfill(void);
 int test_stage_repair_tipfin_backfill(void)
 {
@@ -602,34 +981,17 @@ int test_stage_repair_tipfin_backfill(void)
         sqlite3 *db = progress_store_db();
 
         struct uint256 h[8];
-        for (int i = 1; i <= 7; i++)
-            mk_hash(&h[i], A + i);
-
-        bool seeded = true;
-        for (int i = 1; i <= 6; i++)
-            seeded = seeded && put_upstream_ok(db, A + i, &h[i]);
-        /* Binder gap mid-span: the script hash at A+4 is NULL until pass 3,
-         * so G5 blocks p=A+3 and the witness record is observable. */
-        seeded = seeded && put_script(db, A + 4, 1, NULL);
-        seeded = seeded && put_tip(db, A + 1, "finalized", 1, &h[2]) &&
-                 put_tip(db, A + 5, "finalized", 1, &h[6]) &&
-                 put_tip(db, A + 6, "finalized", 1, &h[7]) &&
-                 seed_coins_applied(db, A + 6);
+        bool seeded = tipfin_t2_seed(db, h);
         TIPFIN_CHECK("T2 seed", seeded);
 
         struct stage_reducer_frontier_reconcile_result rr;
         bool handled = false;
         TIPFIN_CHECK("T2 snapshot torn",
-                     snapshot(db, &rr) && rr.hstar == A + 1 &&
-                     rr.served_floor == A + 6 && rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 1, A + 6, -1, 1));
 
         /* Dry run: reports the repair, mutates nothing. */
         TIPFIN_CHECK("T2 dry-run reports without mutating",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, false, &rr, &handled) &&
-                     handled && rr.repaired &&
-                     rr.tipfin_backfill_height == A + 2 &&
-                     tip_row_count(db) == 3 && marker_count(db) == 0);
+                     tipfin_t2_dry_run(db, &rr, &handled));
 
         /* Pass 1: backfills A+2, blocks at the A+4 binder gap. */
         bool found = false;
@@ -638,79 +1000,47 @@ int test_stage_repair_tipfin_backfill(void)
         TIPFIN_CHECK("T2 snapshot pass1", snapshot(db, &rr));
         handled = false;
         TIPFIN_CHECK("T2 pass1 backfills first hole",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     handled && rr.repaired && !rr.refused_coin_tear &&
-                     rr.tipfin_backfill_count == 1 &&
-                     rr.tipfin_backfill_height == A + 2);
+                     tipfin_t2_pass1_filled(db, &rr, &handled));
         struct tip_row_view row;
         TIPFIN_CHECK("T2 pass1 row hash-bound to h(p+1)",
-                     tip_row_at(db, A + 2, &row) && row.found &&
-                     row.ok == 1 &&
-                     strcmp(row.status, "finalize_backfill") == 0 &&
-                     row.has_hash &&
-                     memcmp(row.hash.data, h[3].data, 32) == 0);
+                     tipfin_row_matches(db, A + 2, &row, 1,
+                                        "finalize_backfill", &h[3], true));
         TIPFIN_CHECK("T2 pass1 witness created + marker recorded",
-                     witness_at(db, &found, &wlast, &wtotal) && found &&
-                     wlast == A + 2 && wtotal == 1 && marker_count(db) == 1 &&
-                     tipfin_marker_is_one(db, A + 2, &h[3]));
+                     tipfin_t2_pass1_witness(db, &found, &wlast, &wtotal,
+                                             &h[3]));
 
         /* Pass 2: binder still missing at A+4 — zero progress, named G5. */
         TIPFIN_CHECK("T2 snapshot pass2",
-                     snapshot(db, &rr) && rr.hstar == A + 2 &&
-                     rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 2, -1, -1, 1));
         handled = false;
         TIPFIN_CHECK("T2 pass2 blocked on missing binder",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     !handled && rr.tipfin_backfill_count == 0 &&
-                     rr.tipfin_backfill_refused_reason ==
-                         T_REFUSED_G5_BINDER_MISSING);
+                     tipfin_t2_pass2_blocked(db, &rr, &handled));
         TIPFIN_CHECK("T2 pass2 witness untouched",
-                     witness_at(db, &found, &wlast, &wtotal) && found &&
-                     wlast == A + 2 && wtotal == 1 &&
-                     tip_row_count(db) == 4);
+                     tipfin_t2_pass2_witness(db, &found, &wlast, &wtotal));
 
         /* Pass 3: binder restored — span completes, witness deleted. */
         TIPFIN_CHECK("T2 restore binder", put_script(db, A + 4, 1, &h[4]));
         TIPFIN_CHECK("T2 snapshot pass3",
-                     snapshot(db, &rr) && rr.hstar == A + 2);
+                     tipfin_snap_expect(db, &rr, A + 2, -1, -1, 0));
         handled = false;
         TIPFIN_CHECK("T2 pass3 completes span",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     handled && rr.tipfin_backfill_count == 2 &&
-                     rr.tipfin_backfill_height == A + 4);
+                     tipfin_backfill_span(db, &rr, &handled, 2, A + 4));
         TIPFIN_CHECK("T2 pass3 rows hash-bound",
-                     tip_row_at(db, A + 3, &row) && row.found && row.ok == 1 &&
-                     memcmp(row.hash.data, h[4].data, 32) == 0 &&
-                     tip_row_at(db, A + 4, &row) && row.found && row.ok == 1 &&
-                     memcmp(row.hash.data, h[5].data, 32) == 0);
+                     tipfin_t2_pass3_rows(db, h, &row));
         TIPFIN_CHECK("T2 pass3 witness deleted on span completion",
-                     witness_at(db, &found, &wlast, &wtotal) && !found &&
-                     marker_count(db) == 1);
+                     tipfin_t2_span_done(db, &found, &wlast, &wtotal));
 
         /* Zero deletions: 3 original rows + 3 backfilled, originals intact,
          * and the repair wrote no cursor. */
         TIPFIN_CHECK("T2 zero deletions, originals + cursors intact",
-                     tip_row_count(db) == 6 &&
-                     tip_row_at(db, A + 1, &row) && row.found &&
-                     row.ok == 1 && strcmp(row.status, "finalized") == 0 &&
-                     tip_row_at(db, A + 5, &row) && row.found &&
-                     row.ok == 1 && strcmp(row.status, "finalized") == 0 &&
-                     cursor_value(db, "tip_finalize") == A + 7 &&
-                     cursor_value(db, "script_validate") == A + 7);
+                     tipfin_t2_intact(db, &row));
 
         /* Healed: the coin-tear refusal clears arithmetically. */
         TIPFIN_CHECK("T2 post-heal pass reports no tear",
-                     snapshot(db, &rr) && rr.hstar == A + 6 &&
-                     !rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 6, -1, -1, -1));
         handled = false;
         TIPFIN_CHECK("T2 post-heal backfill not applicable",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     !handled &&
-                     rr.tipfin_backfill_refused_reason == T_REFUSED_NONE);
+                     tipfin_backfill_idle(db, &rr, &handled));
 
         progress_store_close();
         test_cleanup_tmpdir(dir);
@@ -723,33 +1053,15 @@ int test_stage_repair_tipfin_backfill(void)
         sqlite3 *db = progress_store_db();
 
         struct uint256 h[8];
-        for (int i = 1; i <= 7; i++)
-            mk_hash(&h[i], A + i);
-
-        bool seeded = true;
-        for (int i = 1; i <= 6; i++)
-            seeded = seeded && put_upstream_ok(db, A + i, &h[i]);
-        seeded = seeded && put_tip(db, A + 1, "finalized", 1, &h[2]) &&
-                 put_tip(db, A + 5, "finalized", 1, &h[6]) &&
-                 put_tip(db, A + 6, "finalized", 1, &h[7]) &&
-                 seed_coins_applied(db, A + 6) &&
-                 put_tipfin_marker(db, A + 2, &h[3]);
+        bool seeded = tipfin_t2b_seed(db, h);
         TIPFIN_CHECK("T2b seed pre-existing marker", seeded);
 
         struct stage_reducer_frontier_reconcile_result rr;
         bool handled = false;
         TIPFIN_CHECK("T2b snapshot torn",
-                     snapshot(db, &rr) && rr.hstar == A + 1 &&
-                     rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 1, -1, -1, 1));
         TIPFIN_CHECK("T2b marker refuses repeated span",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     !handled && !rr.repaired &&
-                     rr.tipfin_backfill_marker_seen &&
-                     rr.tipfin_backfill_refused_reason ==
-                         STAGE_REPAIR_TIPFIN_REFUSED_G7_MARKER_SEEN &&
-                     rr.tipfin_backfill_count == 0 &&
-                     tip_row_count(db) == 3 && marker_count(db) == 1);
+                     tipfin_marker_blocks(db, &rr, &handled));
 
         progress_store_close();
         test_cleanup_tmpdir(dir);
@@ -762,34 +1074,15 @@ int test_stage_repair_tipfin_backfill(void)
         sqlite3 *db = progress_store_db();
 
         struct uint256 h[8];
-        for (int i = 1; i <= 7; i++)
-            mk_hash(&h[i], A + i);
-
-        bool seeded = true;
-        for (int i = 1; i <= 6; i++)
-            seeded = seeded && put_upstream_ok(db, A + i, &h[i]);
-        seeded = seeded && put_tip(db, A + 1, "finalized", 1, &h[2]) &&
-                 put_tip(db, A + 5, "finalized", 1, &h[6]) &&
-                 put_tip(db, A + 6, "finalized", 1, &h[7]) &&
-                 seed_coins_applied(db, A + 6) &&
-                 put_tipfin_marker(db, A + 2, &h[3]) &&
-                 put_tipfin_witness(db, A + 5, 9);
+        bool seeded = tipfin_t2c_seed(db, h);
         TIPFIN_CHECK("T2c seed stale witness + marker", seeded);
 
         struct stage_reducer_frontier_reconcile_result rr;
         bool handled = false;
         TIPFIN_CHECK("T2c snapshot torn",
-                     snapshot(db, &rr) && rr.hstar == A + 1 &&
-                     rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 1, -1, -1, 1));
         TIPFIN_CHECK("T2c stale witness restarts G7 marker gate",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     !handled && !rr.repaired &&
-                     rr.tipfin_backfill_marker_seen &&
-                     rr.tipfin_backfill_refused_reason ==
-                         STAGE_REPAIR_TIPFIN_REFUSED_G7_MARKER_SEEN &&
-                     rr.tipfin_backfill_count == 0 &&
-                     tip_row_count(db) == 3 && marker_count(db) == 1);
+                     tipfin_marker_blocks(db, &rr, &handled));
 
         progress_store_close();
         test_cleanup_tmpdir(dir);
@@ -802,45 +1095,21 @@ int test_stage_repair_tipfin_backfill(void)
         sqlite3 *db = progress_store_db();
 
         struct uint256 h[7];
-        for (int i = 1; i <= 6; i++)
-            mk_hash(&h[i], A + i);
-
-        /* The REAL tear: the script row is missing at A+3, strictly below
-         * the coins frontier (A+5). Everything else is ok=1. */
-        bool seeded = true;
-        for (int i = 1; i <= 5; i++) {
-            seeded = seeded && put_validate(db, A + i, 1, &h[i]) &&
-                     put_header(db, A + i, &h[i]) &&
-                     put_simple(db, "body_persist_log", A + i, 1) &&
-                     put_proof(db, A + i, 1, &h[i]) &&
-                     put_utxo(db, A + i, 1, &h[i]);
-            if (i != 3)
-                seeded = seeded && put_script(db, A + i, 1, &h[i]);
-        }
-        seeded = seeded &&
-                 put_tip(db, A + 1, "finalized", 1, &h[2]) &&
-                 put_tip(db, A + 2, "finalized", 1, &h[3]) &&
-                 seed_coins_applied(db, A + 5);
+        bool seeded = tipfin_t3_seed(db, h);
         TIPFIN_CHECK("T3 seed", seeded);
 
         struct stage_reducer_frontier_reconcile_result rr;
         TIPFIN_CHECK("T3 snapshot pins at the tear",
-                     snapshot(db, &rr) && rr.hstar == A + 2 &&
-                     rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 2, -1, -1, 1));
 
         long long before[TIPFIN_DIGEST_N], after[TIPFIN_DIGEST_N];
         TIPFIN_CHECK("T3 digest before", digest_all(db, before));
 
         bool handled = false;
         TIPFIN_CHECK("T3 backfill refuses, names the binding log",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     !handled &&
-                     rr.tipfin_backfill_refused_reason ==
-                         T_REFUSED_G3_MISSING_EVIDENCE &&
-                     rr.tipfin_backfill_refused_height == A + 3 &&
-                     rr.tipfin_backfill_refused_log ==
-                         STAGE_REPAIR_TIPFIN_LOG_SCRIPT_VALIDATE);
+                     tipfin_refused_at(db, &rr, &handled,
+                                       T_REFUSED_G3_MISSING_EVIDENCE, A + 3,
+                                       STAGE_REPAIR_TIPFIN_LOG_SCRIPT_VALIDATE));
 
         /* FIX-2a must NOT clamp: the hole is strictly below the coins
          * frontier — the unapplied-hole clamp floor. */
@@ -848,14 +1117,10 @@ int test_stage_repair_tipfin_backfill(void)
         bool handled2 = false;
         TIPFIN_CHECK("T3 snapshot for clamp", snapshot(db, &rr2));
         TIPFIN_CHECK("T3 FIX-2a does not clamp below the frontier",
-                     stage_reducer_frontier_try_unapplied_hole_clamp(
-                         db, true, &rr2, &handled2) &&
-                     cursor_value(db, "script_validate") == A + 6 &&
-                     cursor_value(db, "proof_validate") == A + 6);
+                     tipfin_clamp_at(db, &rr2, &handled2, A + 6, A + 6));
 
         TIPFIN_CHECK("T3 cursors and logs byte-identical",
-                     digest_all(db, after) &&
-                     memcmp(before, after, sizeof(before)) == 0);
+                     tipfin_digest_same(db, before, after));
 
         progress_store_close();
         test_cleanup_tmpdir(dir);
@@ -869,41 +1134,24 @@ int test_stage_repair_tipfin_backfill(void)
         sqlite3 *db = progress_store_db();
 
         struct uint256 h[6];
-        for (int i = 1; i <= 5; i++)
-            mk_hash(&h[i], A + i);
-
-        bool seeded = true;
-        for (int i = 1; i <= 4; i++)
-            seeded = seeded && put_upstream_ok(db, A + i, &h[i]);
-        seeded = seeded &&
-                 put_proof(db, A + 2, 0, &h[2]) &&
-                 put_tip(db, A + 1, "finalized", 1, &h[2]) &&
-                 put_tip(db, A + 4, "finalized", 1, &h[5]) &&
-                 seed_coins_applied(db, A + 4);
+        bool seeded = tipfin_t4a_seed(db, h);
         TIPFIN_CHECK("T4a seed", seeded);
 
         struct stage_reducer_frontier_reconcile_result rr;
         TIPFIN_CHECK("T4a snapshot",
-                     snapshot(db, &rr) && rr.hstar == A + 1 &&
-                     rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 1, -1, -1, 1));
 
         long long before[TIPFIN_DIGEST_N], after[TIPFIN_DIGEST_N];
         TIPFIN_CHECK("T4a digest before", digest_all(db, before));
         bool handled = false;
         struct tip_row_view row;
         TIPFIN_CHECK("T4a G3 refuses on proof ok=0",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     !handled &&
-                     rr.tipfin_backfill_refused_reason ==
-                         T_REFUSED_G3_MISSING_EVIDENCE &&
-                     rr.tipfin_backfill_refused_height == A + 2 &&
-                     rr.tipfin_backfill_refused_log ==
-                         STAGE_REPAIR_TIPFIN_LOG_PROOF_VALIDATE &&
-                     tip_row_at(db, A + 2, &row) && !row.found);
+                     tipfin_refused_absent(
+                         db, &rr, &handled, &row,
+                         T_REFUSED_G3_MISSING_EVIDENCE, A + 2,
+                         STAGE_REPAIR_TIPFIN_LOG_PROOF_VALIDATE));
         TIPFIN_CHECK("T4a byte-identical",
-                     digest_all(db, after) &&
-                     memcmp(before, after, sizeof(before)) == 0);
+                     tipfin_digest_same(db, before, after));
 
         progress_store_close();
         test_cleanup_tmpdir(dir);
@@ -915,44 +1163,26 @@ int test_stage_repair_tipfin_backfill(void)
         sqlite3 *db = progress_store_db();
 
         struct uint256 h[6];
-        for (int i = 1; i <= 5; i++)
-            mk_hash(&h[i], A + i);
-
-        bool seeded = true;
-        for (int i = 1; i <= 4; i++)
-            seeded = seeded && put_upstream_ok(db, A + i, &h[i]);
-        seeded = seeded &&
-                 put_tip(db, A + 1, "finalized", 1, &h[2]) &&
-                 put_tip(db, A + 2, "utxo_count_diverged", 0, NULL) &&
-                 put_tip(db, A + 4, "finalized", 1, &h[5]) &&
-                 seed_coins_applied(db, A + 4);
+        bool seeded = tipfin_t4b_seed(db, h);
         TIPFIN_CHECK("T4b seed", seeded);
 
         struct stage_reducer_frontier_reconcile_result rr;
         TIPFIN_CHECK("T4b snapshot",
-                     snapshot(db, &rr) && rr.hstar == A + 1 &&
-                     rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 1, -1, -1, 1));
 
         long long before[TIPFIN_DIGEST_N], after[TIPFIN_DIGEST_N];
         TIPFIN_CHECK("T4b digest before", digest_all(db, before));
         bool handled = false;
         struct tip_row_view row;
         TIPFIN_CHECK("T4b G2 refuses on the ok=0 evidence row",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     !handled &&
-                     rr.tipfin_backfill_refused_reason ==
-                         T_REFUSED_G2_EVIDENCE_ROW &&
-                     rr.tipfin_backfill_refused_height == A + 2 &&
-                     rr.tipfin_backfill_refused_log ==
-                         STAGE_REPAIR_TIPFIN_LOG_TIP_FINALIZE);
+                     tipfin_refused_at(db, &rr, &handled,
+                                       T_REFUSED_G2_EVIDENCE_ROW, A + 2,
+                                       STAGE_REPAIR_TIPFIN_LOG_TIP_FINALIZE));
         TIPFIN_CHECK("T4b evidence row never overwritten",
-                     tip_row_at(db, A + 2, &row) && row.found &&
-                     row.ok == 0 &&
-                     strcmp(row.status, "utxo_count_diverged") == 0);
+                     tipfin_row_matches(db, A + 2, &row, 0,
+                                        "utxo_count_diverged", NULL, false));
         TIPFIN_CHECK("T4b byte-identical",
-                     digest_all(db, after) &&
-                     memcmp(before, after, sizeof(before)) == 0);
+                     tipfin_digest_same(db, before, after));
 
         progress_store_close();
         test_cleanup_tmpdir(dir);
@@ -961,30 +1191,18 @@ int test_stage_repair_tipfin_backfill(void)
     {
         char dir[256];
         TIPFIN_CHECK("T4c proof-fork setup",
-                     open_fixture(dir,sizeof(dir),"t4c_proof_fork",A+5));
-        sqlite3 *db=progress_store_db();
-        struct uint256 h[6],fork;
-        for(int i=1;i<=5;i++) mk_hash(&h[i],A+i);
-        fork=h[2]; fork.data[31]^=0x5au;
-        bool seeded=true;
-        for(int i=1;i<=4;i++) seeded=seeded&&put_upstream_ok(db,A+i,&h[i]);
-        seeded=seeded&&put_proof(db,A+2,1,&fork)&&
-               put_tip(db,A+1,"finalized",1,&h[2])&&
-               put_tip(db,A+4,"finalized",1,&h[5])&&
-               seed_coins_applied(db,A+4);
-        TIPFIN_CHECK("T4c proof-fork seed",seeded);
+                     open_fixture(dir, sizeof(dir), "t4c_proof_fork", A + 5));
+        sqlite3 *db = progress_store_db();
+        struct uint256 h[6];
+        bool seeded = tipfin_t4_fork_seed(db, h, 0x5au, false);
+        TIPFIN_CHECK("T4c proof-fork seed", seeded);
         struct stage_reducer_frontier_reconcile_result rr;
-        bool handled=false;
+        bool handled = false;
         struct tip_row_view row;
         TIPFIN_CHECK("T4c forked proof cannot authorize backfill",
-                     snapshot(db,&rr)&&rr.hstar==A+1&&
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db,true,&rr,&handled)&&!handled&&
-                     rr.tipfin_backfill_refused_reason==
-                         T_REFUSED_G3_MISSING_EVIDENCE&&
-                     rr.tipfin_backfill_refused_log==
-                         STAGE_REPAIR_TIPFIN_LOG_PROOF_VALIDATE&&
-                     tip_row_at(db,A+2,&row)&&!row.found);
+                     tipfin_fork_refused(
+                         db, &rr, &handled, &row,
+                         STAGE_REPAIR_TIPFIN_LOG_PROOF_VALIDATE));
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
@@ -992,30 +1210,18 @@ int test_stage_repair_tipfin_backfill(void)
     {
         char dir[256];
         TIPFIN_CHECK("T4d UTXO-fork setup",
-                     open_fixture(dir,sizeof(dir),"t4d_utxo_fork",A+5));
-        sqlite3 *db=progress_store_db();
-        struct uint256 h[6],fork;
-        for(int i=1;i<=5;i++) mk_hash(&h[i],A+i);
-        fork=h[2]; fork.data[31]^=0xa5u;
-        bool seeded=true;
-        for(int i=1;i<=4;i++) seeded=seeded&&put_upstream_ok(db,A+i,&h[i]);
-        seeded=seeded&&put_utxo(db,A+2,1,&fork)&&
-               put_tip(db,A+1,"finalized",1,&h[2])&&
-               put_tip(db,A+4,"finalized",1,&h[5])&&
-               seed_coins_applied(db,A+4);
-        TIPFIN_CHECK("T4d UTXO-fork seed",seeded);
+                     open_fixture(dir, sizeof(dir), "t4d_utxo_fork", A + 5));
+        sqlite3 *db = progress_store_db();
+        struct uint256 h[6];
+        bool seeded = tipfin_t4_fork_seed(db, h, 0xa5u, true);
+        TIPFIN_CHECK("T4d UTXO-fork seed", seeded);
         struct stage_reducer_frontier_reconcile_result rr;
-        bool handled=false;
+        bool handled = false;
         struct tip_row_view row;
         TIPFIN_CHECK("T4d forked UTXO cannot authorize backfill",
-                     snapshot(db,&rr)&&rr.hstar==A+1&&
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db,true,&rr,&handled)&&!handled&&
-                     rr.tipfin_backfill_refused_reason==
-                         T_REFUSED_G3_MISSING_EVIDENCE&&
-                     rr.tipfin_backfill_refused_log==
-                         STAGE_REPAIR_TIPFIN_LOG_UTXO_APPLY&&
-                     tip_row_at(db,A+2,&row)&&!row.found);
+                     tipfin_fork_refused(
+                         db, &rr, &handled, &row,
+                         STAGE_REPAIR_TIPFIN_LOG_UTXO_APPLY));
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
@@ -1035,82 +1241,48 @@ int test_stage_repair_tipfin_backfill(void)
         sqlite3 *db = progress_store_db();
 
         struct uint256 h[10];
-        for (int i = 1; i <= 9; i++)
-            mk_hash(&h[i], A + i);
-
-        bool seeded = true;
-        for (int i = 1; i <= 7; i++)  /* A+1 .. C-1: all five logs ok=1 */
-            seeded = seeded && put_upstream_ok(db, A + i, &h[i]);
-        /* At C: validate + body_persist present, script/proof/utxo rowless. */
-        seeded = seeded && put_header(db, C, &h[8]) &&
-                 put_validate(db, C, 1, &h[8]) &&
-                 put_simple(db, "body_persist_log", C, 1);
-        /* tip_finalize: rows through S-1, rowless span, anchor ok=1 at C. */
-        seeded = seeded &&
-                 put_tip(db, A + 1, "finalized", 1, &h[2]) &&
-                 put_tip(db, A + 2, "finalized", 1, &h[3]) &&
-                 put_tip(db, C, "anchor", 1, &h[8]) &&
-                 seed_coins_applied(db, C);
+        bool seeded = tipfin_t9_seed(db, h, C);
         TIPFIN_CHECK("T9 seed", seeded);
 
         struct stage_reducer_frontier_reconcile_result rr;
         TIPFIN_CHECK("T9 snapshot matches the live pin",
-                     snapshot(db, &rr) && rr.hstar == A + 2 &&
-                     rr.served_floor == C &&
-                     rr.coins_applied_height == C && rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 2, C, C, 1));
 
         /* Step 1 — FIX-2a clamps script/proof to the unapplied hole at C. */
         bool handled = false;
         TIPFIN_CHECK("T9 FIX-2a clamps script/proof to C",
-                     stage_reducer_frontier_try_unapplied_hole_clamp(
-                         db, true, &rr, &handled) &&
-                     cursor_value(db, "script_validate") == C &&
-                     cursor_value(db, "proof_validate") == C);
+                     tipfin_clamp_at(db, &rr, &handled, C, C));
 
         /* Step 2 — boundary ordering: before the refill at C, the backfill
          * stops at C-2 (G5 needs the script binder at C). */
         TIPFIN_CHECK("T9 snapshot pre-refill",
-                     snapshot(db, &rr) && rr.hstar == A + 2 &&
-                     rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, A + 2, -1, -1, 1));
         handled = false;
         TIPFIN_CHECK("T9 pre-refill pass stops below the boundary",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     handled && rr.tipfin_backfill_count == 4 &&
-                     rr.tipfin_backfill_height == C - 2);
+                     tipfin_backfill_span(db, &rr, &handled, 4, C - 2));
 
         /* Step 3 — simulated forward script/proof refill at C. */
-        TIPFIN_CHECK("T9 simulated refill at C",
-                     put_script(db, C, 1, &h[8]) &&
-                     put_proof(db, C, 1, &h[8]));
+        TIPFIN_CHECK("T9 simulated refill at C", tipfin_t9_refill(db, C, h));
 
         /* Step 4 — the boundary p=C-1 is written with both binders. */
         TIPFIN_CHECK("T9 snapshot at boundary",
-                     snapshot(db, &rr) && rr.hstar == C - 2 &&
-                     rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, C - 2, -1, -1, 1));
         handled = false;
         TIPFIN_CHECK("T9 boundary backfilled after refill",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     handled && rr.tipfin_backfill_count == 1 &&
-                     rr.tipfin_backfill_height == C - 1);
+                     tipfin_backfill_span(db, &rr, &handled, 1, C - 1));
         struct tip_row_view row;
         TIPFIN_CHECK("T9 boundary row carries the dual binder hash",
-                     tip_row_at(db, C - 1, &row) && row.found &&
-                     row.ok == 1 &&
-                     strcmp(row.status, "finalize_backfill") == 0 &&
-                     row.has_hash &&
-                     memcmp(row.hash.data, h[8].data, 32) == 0);
+                     tipfin_row_matches(db, C - 1, &row, 1,
+                                        "finalize_backfill", &h[8], true));
         bool found = false;
         int32_t wlast = -1;
         uint32_t wtotal = 0;
         TIPFIN_CHECK("T9 witness deleted when the span exhausts",
-                     witness_at(db, &found, &wlast, &wtotal) && !found);
+                     tipfin_witness_gone(db, &found, &wlast, &wtotal));
 
         /* Step 5 — H* converges to C-1; the tear clears ARITHMETICALLY. */
         TIPFIN_CHECK("T9 hstar converges, tear clears",
-                     snapshot(db, &rr) && rr.hstar == C - 1 &&
-                     !rr.refused_coin_tear);
+                     tipfin_snap_expect(db, &rr, C - 1, -1, -1, -1));
 
         /* Step 6 — the existing reconcile clamps tip_finalize to C.
          * OWN-frame (task #31, corrected): the clamp band is [hstar, hstar+1]
@@ -1131,9 +1303,7 @@ int test_stage_repair_tipfin_backfill(void)
         main_state_init(&ms);
         struct stage_reducer_frontier_reconcile_result fin;
         TIPFIN_CHECK("T9 reconcile clamps tip_finalize to C (served tip)",
-                     stage_reducer_frontier_reconcile_light(db, &ms, &fin) &&
-                     !fin.refused_coin_tear &&
-                     cursor_value(db, "tip_finalize") == C);
+                     tipfin_t9_reconcile_ok(db, &ms, &fin, C));
         main_state_free(&ms);
 
         progress_store_close();
@@ -1155,20 +1325,7 @@ int test_stage_repair_tipfin_backfill(void)
         sqlite3 *db = progress_store_db();
 
         struct uint256 h[10];
-        for (int i = 1; i <= 9; i++)
-            mk_hash(&h[i], A + i);
-
-        bool seeded = true;
-        for (int i = 1; i <= 8; i++)  /* all five logs ok=1 A+1 .. A+8 */
-            seeded = seeded && put_upstream_ok(db, A + i, &h[i]);
-        /* tip_finalize: rows at A+1, rowless HOLE A+2..A+4, rows A+5..A+8. */
-        seeded = seeded &&
-                 put_tip(db, A + 1, "finalized", 1, &h[2]) &&
-                 put_tip(db, A + 5, "finalized", 1, &h[6]) &&
-                 put_tip(db, A + 6, "finalized", 1, &h[7]) &&
-                 put_tip(db, A + 7, "finalized", 1, &h[8]) &&
-                 put_tip(db, A + 8, "finalized", 1, &h[9]) &&
-                 seed_coins_applied(db, A + 9);
+        bool seeded = tipfin_t10_seed(db, h);
         TIPFIN_CHECK("T10 seed", seeded);
 
         /* H* pins at the hole even though served_floor is far above it, and
@@ -1178,7 +1335,7 @@ int test_stage_repair_tipfin_backfill(void)
         bool okc = reducer_frontier_compute_hstar(db, &hs, &sf);
         progress_store_tx_unlock();
         TIPFIN_CHECK("T10 H* pins at the hole, served_floor ahead",
-                     okc && hs == A + 1 && sf == A + 8);
+                     tipfin_hstar_matches(okc, hs, sf, A + 1, A + 8));
 
         /* Model the production no-tear snapshot (read_frontier_snapshot uses the
          * utxo_apply OWN frontier for the tear, not the tip_finalize-pinned H*,
@@ -1196,35 +1353,22 @@ int test_stage_repair_tipfin_backfill(void)
 
         bool handled = false;
         TIPFIN_CHECK("T10 backfill fills the no-tear hole (pre-fix: handled=false)",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     handled && rr.repaired &&
-                     rr.tipfin_backfill_count == 3 &&
-                     rr.tipfin_backfill_height == A + 4);
+                     tipfin_t10_filled(db, &rr, &handled));
 
         struct tip_row_view row;
         TIPFIN_CHECK("T10 filled rows are hash-bound finalize_backfill",
-                     tip_row_at(db, A + 2, &row) && row.found && row.ok == 1 &&
-                     strcmp(row.status, "finalize_backfill") == 0 &&
-                     memcmp(row.hash.data, h[3].data, 32) == 0 &&
-                     tip_row_at(db, A + 3, &row) && row.found && row.ok == 1 &&
-                     memcmp(row.hash.data, h[4].data, 32) == 0 &&
-                     tip_row_at(db, A + 4, &row) && row.found && row.ok == 1 &&
-                     memcmp(row.hash.data, h[5].data, 32) == 0);
+                     tipfin_t10_rows(db, h, &row));
 
         /* H* climbs to served_floor: the log is now contiguous ok=1. */
         progress_store_tx_lock();
         okc = reducer_frontier_compute_hstar(db, &hs, &sf);
         progress_store_tx_unlock();
         TIPFIN_CHECK("T10 H* climbs to served_floor after the fill",
-                     okc && hs == A + 8 && sf == A + 8);
+                     tipfin_hstar_matches(okc, hs, sf, A + 8, A + 8));
 
         /* Originals intact (insert-only, non-destructive): 5 seeded + 3 filled. */
         TIPFIN_CHECK("T10 zero deletions, originals intact",
-                     tip_row_count(db) == 8 &&
-                     tip_row_at(db, A + 5, &row) && row.found && row.ok == 1 &&
-                     strcmp(row.status, "finalized") == 0 &&
-                     cursor_value(db, "tip_finalize") == A + 9);
+                     tipfin_t10_intact(db, &row));
 
         /* Re-run is a benign no-op: contiguous now, nothing to fill. */
         handled = false;
@@ -1235,10 +1379,7 @@ int test_stage_repair_tipfin_backfill(void)
         rr.coins_applied_height = A + 9;
         rr.refused_coin_tear = false;
         TIPFIN_CHECK("T10 healed log is not applicable (served_floor==hstar)",
-                     stage_reducer_frontier_try_tipfin_backfill(
-                         db, true, &rr, &handled) &&
-                     !handled &&
-                     rr.tipfin_backfill_refused_reason == T_REFUSED_NONE);
+                     tipfin_backfill_idle(db, &rr, &handled));
 
         progress_store_close();
         test_cleanup_tmpdir(dir);
