@@ -134,11 +134,129 @@ static double excess_sum(const struct zid_seniority_weight *w, size_t n)
     return s;
 }
 
-int test_zid_seniority(void)
+static bool zid_sen_multipliers_within_ceiling(
+    const struct zid_seniority_weight *out, int n, bool ok)
 {
-    int failures = 0;
-    const int32_t TIP = 3200000;
+    for (int i = 0; i < n && ok; i++)
+        ok = out[i].multiplier >= 1.0 &&
+             out[i].multiplier <= ZID_SENIORITY_MAX_MULT &&
+             !isnan(out[i].multiplier);
+    return ok;
+}
 
+static bool zid_sen_every_input_relay_present(
+    const struct zid_seniority_weight *out,
+    const struct zid_relay_registration *regs, int n, bool ok)
+{
+    for (int i = 0; i < n && ok; i++)
+        ok = zid_seniority_find(out, (size_t)n, regs[i].relay_id) != NULL;
+    return ok;
+}
+
+static bool zid_sen_combine_edge_values(void)
+{
+    bool ok = zid_seniority_combine(1.0, 1.0) == 1.0 &&
+              zid_seniority_combine(ZID_SENIORITY_MAX_MULT, 1.0) ==
+                  ZID_SENIORITY_MAX_MULT &&
+              zid_seniority_combine(1.0, ZID_SENIORITY_MAX_MULT) ==
+                  ZID_SENIORITY_MAX_MULT &&
+              zid_seniority_combine(ZID_SENIORITY_MAX_MULT,
+                                    ZID_SENIORITY_MAX_MULT) ==
+                  ZID_SENIORITY_MAX_MULT &&
+              /* out-of-range degrades to "no opinion", never to a
+               * penalty or an unbounded boost */
+              zid_seniority_combine(-5.0, 1.0) == 1.0 &&
+              zid_seniority_combine(1e9, 1.0) == ZID_SENIORITY_MAX_MULT &&
+              zid_seniority_combine(nan(""), 1.0) == 1.0 &&
+              zid_seniority_combine(1.0, nan("")) == 1.0;
+    return ok;
+}
+
+static bool zid_sen_combine_step_holds(double a, double b, double v, int j)
+{
+    bool ok = v >= a - 1e-12 && v >= b - 1e-12 &&
+              v <= ZID_SENIORITY_MAX_MULT + 1e-12 &&
+              v == zid_seniority_combine(b, a);   /* symmetric */
+    if (ok && j > 0) {
+        double prev = zid_seniority_combine(a,
+                            1.0 + 3.0 * (j - 1) / 20.0);
+        ok = v >= prev - 1e-12;
+    }
+    return ok;
+}
+
+static bool zid_sen_combine_grid_monotone(bool ok)
+{
+    /* Monotone non-decreasing in BOTH arguments, and never below either
+     * one — so neither signal can be used to pull a peer down. */
+    for (int i = 0; i <= 20 && ok; i++) {
+        for (int j = 0; j <= 20 && ok; j++) {
+            double a = 1.0 + 3.0 * i / 20.0;
+            double b = 1.0 + 3.0 * j / 20.0;
+            double v = zid_seniority_combine(a, b);
+            ok = zid_sen_combine_step_holds(a, b, v, j);
+        }
+    }
+    return ok;
+}
+
+static bool zid_sen_population_favours_senior(double avg0, double avg1,
+                                              double avg2, const int *wins,
+                                              int CLIENTS)
+{
+    return avg0 > avg1 && avg1 > avg2 &&
+           avg2 == 1.0 &&              /* fresh gets nothing, ever */
+           wins[0] > wins[1] && wins[1] > 0 && wins[2] == 0 &&
+           /* and the ancient relay does NOT own the network: it is
+            * the favourite often, not always. */
+           wins[0] < CLIENTS;
+}
+
+static bool zid_sen_production_seeds_differ(struct zdir_ctx *ca,
+                                            struct zdir_ctx *cb)
+{
+    uint8_t secret_a[32], secret_b[32], block_hash[32];
+    memset(secret_a, 0x11, sizeof(secret_a));
+    memset(secret_b, 0x22, sizeof(secret_b));
+    memset(block_hash, 0x33, sizeof(block_hash));
+
+    uint8_t key_a[32], key_b[32];
+    return zdir_client_key(key_a, secret_a) &&
+           zdir_client_key(key_b, secret_b) &&
+           zdir_epoch_seed(ca->seed, block_hash, key_a) &&
+           zdir_epoch_seed(cb->seed, block_hash, key_b) &&
+           memcmp(ca->seed, cb->seed, 32) != 0;
+}
+
+static bool zid_sen_production_ranks_complete(
+    const struct zid_relay_registration *regs, int n, int32_t tip,
+    struct zdir_ctx *ca, struct zdir_ctx *cb,
+    struct zid_seniority_weight *a, struct zid_seniority_weight *b,
+    struct zid_seniority_weight *a2)
+{
+    int ga = zid_seniority_rank(regs, (size_t)n, tip, zdir_draw, ca, a,
+                                (size_t)n);
+    int gb = zid_seniority_rank(regs, (size_t)n, tip, zdir_draw, cb, b,
+                                (size_t)n);
+    int ga2 = zid_seniority_rank(regs, (size_t)n, tip, zdir_draw, ca, a2,
+                                 (size_t)n);
+    return ga == n && gb == n && ga2 == n;
+}
+
+static void zid_sen_tally_client_disagreement(
+    const struct zid_seniority_weight *a,
+    const struct zid_seniority_weight *b, int n,
+    int *differing, int *top_a, int *top_b)
+{
+    for (int i = 0; i < n; i++) {
+        if (a[i].multiplier != b[i].multiplier) (*differing)++;
+        if (a[i].multiplier > a[*top_a].multiplier) *top_a = i;
+        if (b[i].multiplier > b[*top_b].multiplier) *top_b = i;
+    }
+}
+
+static int zid_sen_ceilings_agree(void)
+{
     printf("zid seniority: the advisory ceilings agree exactly... ");
     {
         /* The static asserts above pin the INTEGER parts of these ceilings;
@@ -149,9 +267,13 @@ int test_zid_seniority(void)
         bool ok = ZID_SENIORITY_MAX_MULT == ADDRMAN_REPUTATION_MAX_MULT &&
                   ZID_SENIORITY_OWNER_DECAY > 0.0 &&
                   ZID_SENIORITY_OWNER_DECAY < 1.0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_score_zero_below_age_floor(const int32_t TIP)
+{
     printf("zid seniority: score is exactly 0 below the age floor... ");
     {
         /* Not "small" — EXACTLY zero. This is the whole anti-Sybil claim:
@@ -165,9 +287,13 @@ int test_zid_seniority(void)
                   zid_seniority_score(TIP - ZID_SENIORITY_MIN_AGE_BLOCKS - 1,
                                       TIP) > 0.0;
         if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_score_refuses_bad_heights(const int32_t TIP)
+{
     printf("zid seniority: score refuses absent/future/negative heights... ");
     {
         bool ok = zid_seniority_score(-1, TIP) == 0.0 &&
@@ -177,9 +303,13 @@ int test_zid_seniority(void)
                    * an age, not a licence: bounded by the curve, never >1. */
                   zid_seniority_score(0, INT32_MAX) < 1.0;
         if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_old_relay_outweighs_day(const int32_t TIP)
+{
     printf("zid seniority: 100k-block-old relay outweighs a day-old one... ");
     {
         double day = zid_seniority_score(TIP - 576, TIP);       /* ~1 day */
@@ -193,9 +323,13 @@ int test_zid_seniority(void)
                       zid_seniority_score(TIP - 5001, TIP);
         if (ok) printf("OK\n");
         else { printf("FAIL (day=%f old=%f anc=%f)\n", day, old, ancient);
-               failures++; }
+               return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_fresh_burst_buys_zero(const int32_t TIP)
+{
     printf("zid seniority: 10,000 fresh relays buy exactly zero weight... ");
     {
         /* THE Sybil case. 200 distinct owners x 50 relays each, every one
@@ -225,9 +359,13 @@ int test_zid_seniority(void)
             ok = out[i].multiplier == 1.0 && out[i].mass == 0.0;
         if (ok) printf("OK\n");
         else { printf("FAIL (over=%d got=%d excess=%f)\n", over, got,
-                      excess_sum(out, (size_t)n)); failures++; }
+                      excess_sum(out, (size_t)n)); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_one_owner_counts_once(const int32_t TIP)
+{
     printf("zid seniority: one owner's 100 senior relays count ~once... ");
     {
         /* Every relay maximally aged and identical in every way except its
@@ -259,9 +397,13 @@ int test_zid_seniority(void)
                   mass_sum > single;   /* still worth more than one, barely */
         if (ok) printf("OK\n");
         else { printf("FAIL (got=%d mass=%f bound=%f with_mass=%d)\n",
-                      got, mass_sum, bound, with_mass); failures++; }
+                      got, mass_sum, bound, with_mass); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_unknown_owners_stay_unpooled(const int32_t TIP)
+{
     printf("zid seniority: withheld owner is never pooled with other "
            "unknowns... ");
     {
@@ -283,9 +425,13 @@ int test_zid_seniority(void)
             ok = out[i].owner_rank == 0 && !out[i].over_owner_quota &&
                  out[i].mass > 0.0;
         if (ok) printf("OK\n");
-        else { printf("FAIL (got=%d)\n", got); failures++; }
+        else { printf("FAIL (got=%d)\n", got); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_duplicate_ids_decay(const int32_t TIP)
+{
     printf("zid seniority: duplicate relay ids decay instead of "
            "double-counting... ");
     {
@@ -309,9 +455,13 @@ int test_zid_seniority(void)
         }
         if (ok) printf("OK\n");
         else { printf("FAIL (got=%d ranks=%d,%d,%d,%d)\n", got,
-                      ranks[0], ranks[1], ranks[2], ranks[3]); failures++; }
+                      ranks[0], ranks[1], ranks[2], ranks[3]); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_clients_disagree_on_favourite(const int32_t TIP)
+{
     printf("zid seniority: NO GLOBAL ANSWER — two clients disagree on the "
            "favourite... ");
     {
@@ -342,9 +492,13 @@ int test_zid_seniority(void)
                   differing == N;          /* and NOTHING in common */
         if (ok) printf("OK\n");
         else { printf("FAIL (top_a=%d top_b=%d differing=%d)\n",
-                      top_a, top_b, differing); failures++; }
+                      top_a, top_b, differing); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_same_client_rederives_table(const int32_t TIP)
+{
     printf("zid seniority: the same client rederives its table exactly... ");
     {
         enum { N = 32 };
@@ -367,9 +521,13 @@ int test_zid_seniority(void)
         int g3 = zid_seniority_rank(rev, N, TIP, fake_draw, &c3, c, N);
         ok = ok && g3 == N && memcmp(a, c, sizeof(a)) == 0;
         if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_senior_relays_win_more_often(const int32_t TIP)
+{
     printf("zid seniority: senior relays win more often across many "
            "clients... ");
     {
@@ -399,18 +557,18 @@ int test_zid_seniority(void)
         }
         double avg0 = sum[0] / CLIENTS, avg1 = sum[1] / CLIENTS,
                avg2 = sum[2] / CLIENTS;
-        bool ok = avg0 > avg1 && avg1 > avg2 &&
-                  avg2 == 1.0 &&              /* fresh gets nothing, ever */
-                  wins[0] > wins[1] && wins[1] > 0 && wins[2] == 0 &&
-                  /* and the ancient relay does NOT own the network: it is
-                   * the favourite often, not always. */
-                  wins[0] < CLIENTS;
+        bool ok = zid_sen_population_favours_senior(avg0, avg1, avg2, wins,
+                                                    CLIENTS);
         if (ok) printf("OK\n");
         else { printf("FAIL (avg=%.3f/%.3f/%.3f wins=%d/%d/%d)\n",
                       avg0, avg1, avg2, wins[0], wins[1], wins[2]);
-               failures++; }
+               return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_multipliers_stay_advisory(const int32_t TIP)
+{
     printf("zid seniority: ADVISORY — every multiplier stays in [1, 4] and "
            "nothing is dropped... ");
     {
@@ -435,10 +593,7 @@ int test_zid_seniority(void)
 
         int gmax = zid_seniority_rank(regs, N, TIP, max_draw, NULL, out, N);
         ok = ok && gmax == N;
-        for (int i = 0; i < N && ok; i++)
-            ok = out[i].multiplier >= 1.0 &&
-                 out[i].multiplier <= ZID_SENIORITY_MAX_MULT &&
-                 !isnan(out[i].multiplier);
+        ok = zid_sen_multipliers_within_ceiling(out, N, ok);
 
         /* A refused draw is a legitimate negative, not an exclusion. */
         struct fake_client refuser = { .seed = 1, .refuse = true };
@@ -449,52 +604,29 @@ int test_zid_seniority(void)
             ok = out[i].multiplier == 1.0;
 
         /* Every input relay is still present in the output. */
-        for (int i = 0; i < N && ok; i++)
-            ok = zid_seniority_find(out, N, regs[i].relay_id) != NULL;
+        ok = zid_sen_every_input_relay_present(out, regs, N, ok);
         if (ok) printf("OK\n");
         else { printf("FAIL (got=%d gmax=%d gref=%d)\n", got, gmax, gref);
-               failures++; }
+               return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_combine_is_monotone_bounded(void)
+{
     printf("zid seniority: combine is monotone, bounded, and never "
            "subtracts... ");
     {
-        bool ok = zid_seniority_combine(1.0, 1.0) == 1.0 &&
-                  zid_seniority_combine(ZID_SENIORITY_MAX_MULT, 1.0) ==
-                      ZID_SENIORITY_MAX_MULT &&
-                  zid_seniority_combine(1.0, ZID_SENIORITY_MAX_MULT) ==
-                      ZID_SENIORITY_MAX_MULT &&
-                  zid_seniority_combine(ZID_SENIORITY_MAX_MULT,
-                                        ZID_SENIORITY_MAX_MULT) ==
-                      ZID_SENIORITY_MAX_MULT &&
-                  /* out-of-range degrades to "no opinion", never to a
-                   * penalty or an unbounded boost */
-                  zid_seniority_combine(-5.0, 1.0) == 1.0 &&
-                  zid_seniority_combine(1e9, 1.0) == ZID_SENIORITY_MAX_MULT &&
-                  zid_seniority_combine(nan(""), 1.0) == 1.0 &&
-                  zid_seniority_combine(1.0, nan("")) == 1.0;
-
-        /* Monotone non-decreasing in BOTH arguments, and never below either
-         * one — so neither signal can be used to pull a peer down. */
-        for (int i = 0; i <= 20 && ok; i++) {
-            for (int j = 0; j <= 20 && ok; j++) {
-                double a = 1.0 + 3.0 * i / 20.0;
-                double b = 1.0 + 3.0 * j / 20.0;
-                double v = zid_seniority_combine(a, b);
-                ok = v >= a - 1e-12 && v >= b - 1e-12 &&
-                     v <= ZID_SENIORITY_MAX_MULT + 1e-12 &&
-                     v == zid_seniority_combine(b, a);   /* symmetric */
-                if (ok && j > 0) {
-                    double prev = zid_seniority_combine(a,
-                                        1.0 + 3.0 * (j - 1) / 20.0);
-                    ok = v >= prev - 1e-12;
-                }
-            }
-        }
+        bool ok = zid_sen_combine_edge_values();
+        ok = zid_sen_combine_grid_monotone(ok);
         if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_epoch_limits_reshuffle(void)
+{
     printf("zid seniority: ranking epoch rate-limits the reshuffle... ");
     {
         int32_t e = ZID_SENIORITY_EPOCH_BLOCKS;
@@ -511,9 +643,13 @@ int test_zid_seniority(void)
         for (int32_t h = e; h < 2 * e && ok; h++)
             ok = zid_seniority_epoch_height(h) == e;
         if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_rank_refuses_bad_input(const int32_t TIP)
+{
     printf("zid seniority: rank refuses bad input instead of guessing... ");
     {
         struct zid_relay_registration regs[2];
@@ -531,9 +667,13 @@ int test_zid_seniority(void)
                   zid_seniority_rank(regs, 0, TIP, fake_draw, &c, out, 2) == 0 &&
                   zid_seniority_find(NULL, 0, regs[0].relay_id) == NULL;
         if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int zid_sen_production_draw_no_global_answer(const int32_t TIP)
+{
     printf("zid seniority: the PRODUCTION draw (zdir) keeps the no-global-"
            "answer property... ");
     {
@@ -548,40 +688,48 @@ int test_zid_seniority(void)
             mk_relay(&regs[i], (uint8_t)(i + 1), (uint8_t)(i + 1),
                      TIP - 1000000);
 
-        uint8_t secret_a[32], secret_b[32], block_hash[32];
-        memset(secret_a, 0x11, sizeof(secret_a));
-        memset(secret_b, 0x22, sizeof(secret_b));
-        memset(block_hash, 0x33, sizeof(block_hash));
-
-        uint8_t key_a[32], key_b[32];
         struct zdir_ctx ca, cb;
-        bool ok = zdir_client_key(key_a, secret_a) &&
-                  zdir_client_key(key_b, secret_b) &&
-                  zdir_epoch_seed(ca.seed, block_hash, key_a) &&
-                  zdir_epoch_seed(cb.seed, block_hash, key_b) &&
-                  memcmp(ca.seed, cb.seed, 32) != 0;
-
-        int ga = 0, gb = 0, ga2 = 0;
-        if (ok) {
-            ga  = zid_seniority_rank(regs, N, TIP, zdir_draw, &ca, a, N);
-            gb  = zid_seniority_rank(regs, N, TIP, zdir_draw, &cb, b, N);
-            ga2 = zid_seniority_rank(regs, N, TIP, zdir_draw, &ca, a2, N);
-            ok = ga == N && gb == N && ga2 == N;
-        }
+        bool ok = zid_sen_production_seeds_differ(&ca, &cb);
 
         int differing = 0, top_a = 0, top_b = 0;
-        for (int i = 0; i < N && ok; i++) {
-            if (a[i].multiplier != b[i].multiplier) differing++;
-            if (a[i].multiplier > a[top_a].multiplier) top_a = i;
-            if (b[i].multiplier > b[top_b].multiplier) top_b = i;
+        if (ok) {
+            ok = zid_sen_production_ranks_complete(regs, N, TIP, &ca, &cb,
+                                                   a, b, a2);
+            if (ok)
+                zid_sen_tally_client_disagreement(a, b, N, &differing,
+                                                  &top_a, &top_b);
         }
         ok = ok && differing == N && top_a != top_b &&
              /* same client key + same epoch => same table, exactly */
              memcmp(a, a2, sizeof(a)) == 0;
         if (ok) printf("OK\n");
         else { printf("FAIL (differing=%d top_a=%d top_b=%d)\n",
-                      differing, top_a, top_b); failures++; }
+                      differing, top_a, top_b); return 1; }
     }
+    return 0;
+}
+
+int test_zid_seniority(void)
+{
+    int failures = 0;
+    const int32_t TIP = 3200000;
+
+    failures += zid_sen_ceilings_agree();
+    failures += zid_sen_score_zero_below_age_floor(TIP);
+    failures += zid_sen_score_refuses_bad_heights(TIP);
+    failures += zid_sen_old_relay_outweighs_day(TIP);
+    failures += zid_sen_fresh_burst_buys_zero(TIP);
+    failures += zid_sen_one_owner_counts_once(TIP);
+    failures += zid_sen_unknown_owners_stay_unpooled(TIP);
+    failures += zid_sen_duplicate_ids_decay(TIP);
+    failures += zid_sen_clients_disagree_on_favourite(TIP);
+    failures += zid_sen_same_client_rederives_table(TIP);
+    failures += zid_sen_senior_relays_win_more_often(TIP);
+    failures += zid_sen_multipliers_stay_advisory(TIP);
+    failures += zid_sen_combine_is_monotone_bounded();
+    failures += zid_sen_epoch_limits_reshuffle();
+    failures += zid_sen_rank_refuses_bad_input(TIP);
+    failures += zid_sen_production_draw_no_global_answer(TIP);
 
     printf("=== ZID seniority: %d failure(s) ===\n", failures);
     return failures;
