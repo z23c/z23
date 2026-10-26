@@ -331,7 +331,7 @@ static int64_t rungC_first_missing_body_height(struct main_state *ms)
     if (ndb && app_runtime_node_db_handle_open(ndb) && max_h >= 0 &&
         db_block_first_missing_connected_height(ndb, max_h, &mh) && mh >= 0)
         return mh;
-    return -1;
+    return -1; // raw-return-ok:first-missing-body-unnameable-sentinel
 }
 
 enum condition_remedy_result shielded_selfheal_run_named_remedy(void)
