@@ -107,6 +107,47 @@ static void emit_test_error_with_embedded_origin_text(void)
     LOG_ERROR("test_log_level", "existing origin=user-supplied-value in the message body");
 }
 
+/* Runs each of the six recognized level tokens through
+ * zcl_log_level_from_string() and returns how many fail to parse or to
+ * round-trip to their expected level. Split out of test_log_level() to
+ * keep its cyclomatic complexity under the cap; the LVL_CHECK reporting
+ * the outcome stays in the caller. */
+static int from_string_token_round_trip_failures(void)
+{
+    static const struct { const char *tok; enum zcl_log_level want; } cases[] = {
+        {"all",   ZCL_LOG_ALL},
+        {"info",  ZCL_LOG_INFO},
+        {"warn",  ZCL_LOG_WARN},
+        {"error", ZCL_LOG_ERROR},
+        {"fatal", ZCL_LOG_FATAL},
+        {"off",   ZCL_LOG_OFF},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        enum zcl_log_level got = (enum zcl_log_level)-1;
+        bool parsed = zcl_log_level_from_string(cases[i].tok, &got);
+        if (!parsed || got != cases[i].want)
+            failures++;
+    }
+    return failures;
+}
+
+/* Whether an emitted line begins with the ISO-8601 UTC timestamp
+ * ("YYYY-MM-DDTHH:MM:SSZ ") that the nodelog_controller.c contract
+ * requires. Split out of test_log_level() to keep its cyclomatic
+ * complexity under the cap. */
+static bool log_line_has_iso8601_utc_prefix(const char *buf)
+{
+    return strlen(buf) > 21 &&
+        isdigit((unsigned char)buf[0]) &&
+        isdigit((unsigned char)buf[1]) &&
+        isdigit((unsigned char)buf[2]) &&
+        isdigit((unsigned char)buf[3]) &&
+        buf[4] == '-' && buf[7] == '-' && buf[10] == 'T' &&
+        buf[13] == ':' && buf[16] == ':' && buf[19] == 'Z' &&
+        buf[20] == ' ';
+}
+
 static int test_log_origin_basename_inputs(void);
 static int test_log_level_origin_checks(void);
 
@@ -130,22 +171,8 @@ int test_log_level(void)
 
     /* ── zcl_log_level_from_string(): recognized tokens ── */
     {
-        static const struct { const char *tok; enum zcl_log_level want; } cases[] = {
-            {"all",   ZCL_LOG_ALL},
-            {"info",  ZCL_LOG_INFO},
-            {"warn",  ZCL_LOG_WARN},
-            {"error", ZCL_LOG_ERROR},
-            {"fatal", ZCL_LOG_FATAL},
-            {"off",   ZCL_LOG_OFF},
-        };
-        bool all_ok = true;
-        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-            enum zcl_log_level got = (enum zcl_log_level)-1;
-            if (!zcl_log_level_from_string(cases[i].tok, &got) ||
-                got != cases[i].want)
-                all_ok = false;
-        }
-        LVL_CHECK("from_string: all six tokens parse correctly", all_ok);
+        int token_failures = from_string_token_round_trip_failures();
+        LVL_CHECK("from_string: all six tokens parse correctly", token_failures == 0);
     }
 
     /* ── zcl_log_level_from_string(): rejects unknown, leaves *out alone ── */
@@ -204,14 +231,7 @@ int test_log_level(void)
         char buf[512];
         zcl_log_level_set(ZCL_LOG_ALL);
         bool captured = log_level_capture(emit_test_warn, buf, sizeof(buf));
-        bool iso_prefix = strlen(buf) > 21 &&
-            isdigit((unsigned char)buf[0]) &&
-            isdigit((unsigned char)buf[1]) &&
-            isdigit((unsigned char)buf[2]) &&
-            isdigit((unsigned char)buf[3]) &&
-            buf[4] == '-' && buf[7] == '-' && buf[10] == 'T' &&
-            buf[13] == ':' && buf[16] == ':' && buf[19] == 'Z' &&
-            buf[20] == ' ';
+        bool iso_prefix = log_line_has_iso8601_utc_prefix(buf);
         LVL_CHECK("LOG_WARN line starts with ISO-8601 UTC timestamp",
                   captured && iso_prefix);
         LVL_CHECK("LOG_WARN line carries the WARN level token",

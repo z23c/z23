@@ -1884,7 +1884,6 @@ tests/harness/src/test_kill9_recovery.c:p11_7mf_run_phase:60
 tests/harness/src/test_kill9_recovery.c:test_kill9_recovery:23
 tests/harness/src/test_kpi.c:case_table:16
 tests/harness/src/test_ldb_snapshot.c:test_ldb_snapshot:27
-tests/harness/src/test_log_level.c:test_log_level:23
 tests/harness/src/test_mailbox.c:test_mailbox:46
 tests/harness/src/test_mailbox_adoption.c:test_mailbox_adoption:23
 tests/harness/src/test_make_lint_gates.c:lint_entry_weight:31
