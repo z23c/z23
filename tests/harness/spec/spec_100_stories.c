@@ -183,6 +183,43 @@ static void add_token(sqlite3 *db) {
 /* Create a wallet in a specific state */
 enum wallet_state { WS_EMPTY, WS_TRANSPARENT, WS_MIXED, WS_SHIELDED, WS_WHALE };
 
+static void seed_transparent_wallet(sqlite3 *db) {
+    add_utxo(db, 1, 50000000);
+    add_utxo(db, 2, 30000000);
+    add_utxo(db, 3, 17491089);
+    add_zaddr(db);
+    for (int i = 0; i < 5; i++) add_tx(db, i, i%2);
+    for (int i = 0; i < 3; i++) add_peer(db, i);
+}
+
+static void seed_mixed_wallet(sqlite3 *db) {
+    add_utxo(db, 1, 50000000);
+    add_utxo(db, 2, 31491089);
+    add_note(db, 1, 16000000);
+    add_zaddr(db);
+    for (int i = 0; i < 15; i++) add_tx(db, i, i%2);
+    for (int i = 0; i < 8; i++) add_peer(db, i);
+    add_contact(db, "t1TestContact123456789012345", "Alice");
+}
+
+static void seed_shielded_wallet(sqlite3 *db) {
+    add_note(db, 1, 97491089);
+    add_zaddr(db);
+    for (int i = 0; i < 10; i++) add_tx(db, i, i%2);
+    for (int i = 0; i < 5; i++) add_peer(db, i);
+}
+
+static void seed_whale_wallet(sqlite3 *db) {
+    for (int i = 0; i < 20; i++) add_utxo(db, i, 500000000);
+    for (int i = 0; i < 5; i++) add_note(db, i, 200000000);
+    add_zaddr(db);
+    for (int i = 0; i < 60; i++) add_tx(db, i, i%3==0 ? 1 : 0);
+    for (int i = 0; i < 25; i++) add_peer(db, i);
+    add_contact(db, "t1Whale1234567890123456789012", "Bob");
+    add_contact(db, "t1Whale2234567890123456789012", "Carol");
+    add_token(db);
+}
+
 static bool make_wallet(enum wallet_state ws) {
     snprintf(_d, sizeof(_d), "/tmp/zcl100_XXXXXX");
     if (!mkdtemp(_d)) return false;
@@ -197,37 +234,16 @@ static bool make_wallet(enum wallet_state ws) {
     case WS_EMPTY:
         break;
     case WS_TRANSPARENT:
-        add_utxo(db, 1, 50000000);
-        add_utxo(db, 2, 30000000);
-        add_utxo(db, 3, 17491089);
-        add_zaddr(db);
-        for (int i = 0; i < 5; i++) add_tx(db, i, i%2);
-        for (int i = 0; i < 3; i++) add_peer(db, i);
+        seed_transparent_wallet(db);
         break;
     case WS_MIXED:
-        add_utxo(db, 1, 50000000);
-        add_utxo(db, 2, 31491089);
-        add_note(db, 1, 16000000);
-        add_zaddr(db);
-        for (int i = 0; i < 15; i++) add_tx(db, i, i%2);
-        for (int i = 0; i < 8; i++) add_peer(db, i);
-        add_contact(db, "t1TestContact123456789012345", "Alice");
+        seed_mixed_wallet(db);
         break;
     case WS_SHIELDED:
-        add_note(db, 1, 97491089);
-        add_zaddr(db);
-        for (int i = 0; i < 10; i++) add_tx(db, i, i%2);
-        for (int i = 0; i < 5; i++) add_peer(db, i);
+        seed_shielded_wallet(db);
         break;
     case WS_WHALE:
-        for (int i = 0; i < 20; i++) add_utxo(db, i, 500000000);
-        for (int i = 0; i < 5; i++) add_note(db, i, 200000000);
-        add_zaddr(db);
-        for (int i = 0; i < 60; i++) add_tx(db, i, i%3==0 ? 1 : 0);
-        for (int i = 0; i < 25; i++) add_peer(db, i);
-        add_contact(db, "t1Whale1234567890123456789012", "Bob");
-        add_contact(db, "t1Whale2234567890123456789012", "Carol");
-        add_token(db);
+        seed_whale_wallet(db);
         break;
     }
     sqlite3_close(db);
@@ -264,12 +280,7 @@ static void fail(const char *why) {
 
 /* ── The 100 stories ───────────────────────────────────── */
 
-int spec_100_stories(void)
-{
-    _story_num = 0;
-    _failures = 0;
-    printf("\n=== 100 USER STORIES ===\n\n");
-
+static void stories_empty_launch(void) {
     /* ════════════════════════════════════════════════════
      * STATE A: Empty wallet (new user, first launch)
      * ════════════════════════════════════════════════════ */
@@ -317,7 +328,9 @@ int spec_100_stories(void)
     G("/wallet/shield");
     RENDERED(200); CLEAN();
     if(!_skip) ok();
+}
 
+static void stories_empty_pulse(void) {
     STORY("New user: pulse returns valid JSON");
     G("/api/wallet/pulse");
     CHECK(_n > 5, "no pulse data");
@@ -326,7 +339,9 @@ int spec_100_stories(void)
     if(!_skip) ok();
 
     destroy_wallet();
+}
 
+static void stories_transparent_dashboard(void) {
     /* ════════════════════════════════════════════════════
      * STATE B: Transparent only (has funds, not shielded)
      * ════════════════════════════════════════════════════ */
@@ -376,7 +391,9 @@ int spec_100_stories(void)
     G("/wallet");
     CHECK(!H("untraceable"), "false untraceable claim");
     if(!_skip) ok();
+}
 
+static void stories_transparent_send_form(void) {
     STORY("Send: form has address and amount fields");
     G("/wallet/send");
     RENDERED(1000); CLEAN();
@@ -398,7 +415,9 @@ int spec_100_stories(void)
     G("/wallet/send");
     CHECK(H("active'>Send"), "Send not active");
     if(!_skip) ok();
+}
 
+static void stories_transparent_send_review(void) {
     STORY("Send: has JS validation");
     G("/wallet/send");
     CHECK(H("validateSend") || H("validate"), "no validation JS");
@@ -421,7 +440,9 @@ int spec_100_stories(void)
     RENDERED(200); CLEAN();
     CHECK(H("Invalid") || H("invalid") || H("short"), "no validation error");
     if(!_skip) ok();
+}
 
+static void stories_transparent_send_edges(void) {
     STORY("Send review: zero amount → error");
     P("/wallet/send/review", "address=t1ExampleAddr123456789012345&amount=0");
     RENDERED(200); CLEAN();
@@ -464,7 +485,9 @@ int spec_100_stories(void)
     G("/wallet/receive");
     CHECK(H("<svg"), "no QR SVG");
     if(!_skip) ok();
+}
 
+static void stories_transparent_receive_history(void) {
     STORY("Receive: copy button exists");
     G("/wallet/receive");
     CHECK(H("Copy") || H("copy") || H("clipboard"), "no copy");
@@ -500,7 +523,9 @@ int spec_100_stories(void)
     G("/wallet/history?page=0");
     RENDERED(200); CLEAN();
     if(!_skip) ok();
+}
 
+static void stories_transparent_history_queries(void) {
     STORY("History: page 1 works");
     G("/wallet/history?page=1");
     RENDERED(200); CLEAN();
@@ -550,7 +575,9 @@ int spec_100_stories(void)
     G("/wallet/history?q=<script>alert(1)</script>");
     CHECK(!H("<script>alert"), "XSS not escaped");
     if(!_skip) ok();
+}
 
+static void stories_transparent_node(void) {
     STORY("Node: command center loads");
     G("/wallet/node");
     RENDERED(1000); CLEAN();
@@ -582,7 +609,9 @@ int spec_100_stories(void)
     G("/wallet/node");
     CHECK(H("Tor") || H("tor"), "no Tor section");
     if(!_skip) ok();
+}
 
+static void stories_transparent_coins(void) {
     STORY("Node: quick actions present");
     G("/wallet/node");
     CHECK(H("Block Explorer") || H("/explorer"), "no explorer link");
@@ -594,7 +623,9 @@ int spec_100_stories(void)
     RENDERED(200); CLEAN();
     CHECK(H("Coin Audit") || H("ZCL") || H("UTXO"), "no coin data");
     if(!_skip) ok();
+}
 
+static void stories_transparent_shield(void) {
     STORY("Shield: form shows amount input");
     G("/wallet/shield");
     RENDERED(500); CLEAN();
@@ -615,7 +646,9 @@ int spec_100_stories(void)
     RENDERED(500); CLEAN();
     CHECK(H("0.97"), "full amount not shown");
     if(!_skip) ok();
+}
 
+static void stories_transparent_shield_post(void) {
     STORY("Shield: confirm POST (no zclassicd → error)");
     P("/wallet/shield/confirm", "amount=0.5");
     RENDERED(200); CLEAN();
@@ -646,7 +679,9 @@ int spec_100_stories(void)
     G("/wallet/tx/abcdef");
     RENDERED(200); CLEAN();
     if(!_skip) ok();
+}
 
+static void stories_transparent_tx_routes(void) {
     STORY("Tx detail: empty txid → handled");
     G("/wallet/tx/");
     RENDERED(200); CLEAN();
@@ -676,7 +711,9 @@ int spec_100_stories(void)
     if(!_skip) ok();
 
     destroy_wallet();
+}
 
+static void stories_mixed_balances(void) {
     /* ════════════════════════════════════════════════════
      * STATE C: Mixed (transparent + shielded)
      * ════════════════════════════════════════════════════ */
@@ -708,7 +745,9 @@ int spec_100_stories(void)
     CHECK(H("public + ") || H("public"), "no public balance shown");
     CHECK(H("16%") || H("17%") || H("private"), "no privacy % shown");
     if(!_skip) ok();
+}
 
+static void stories_mixed_history(void) {
     STORY("Mixed: history has 15 transactions");
     G("/wallet/history");
     RENDERED(1000); CLEAN();
@@ -720,7 +759,9 @@ int spec_100_stories(void)
     if(!_skip) ok();
 
     destroy_wallet();
+}
 
+static void stories_shielded(void) {
     /* ════════════════════════════════════════════════════
      * STATE D: Fully shielded
      * ════════════════════════════════════════════════════ */
@@ -763,7 +804,9 @@ int spec_100_stories(void)
     if(!_skip) ok();
 
     destroy_wallet();
+}
 
+static void stories_whale(void) {
     /* ════════════════════════════════════════════════════
      * STATE E: Whale (heavy wallet)
      * ════════════════════════════════════════════════════ */
@@ -808,7 +851,9 @@ int spec_100_stories(void)
     RENDERED(500); CLEAN();
     CHECK(H("50"), "amount not shown");
     if(!_skip) ok();
+}
 
+static void stories_whale_token_pulse(void) {
     STORY("Whale: token display works");
     G("/wallet");
     /* Token section may or may not show depending on join */
@@ -822,7 +867,9 @@ int spec_100_stories(void)
     if(!_skip) ok();
 
     destroy_wallet();
+}
 
+static void stories_nav_pages(void) {
     /* ════════════════════════════════════════════════════
      * CROSS-CUTTING: navigation consistency
      * ════════════════════════════════════════════════════ */
@@ -853,7 +900,9 @@ int spec_100_stories(void)
         G("/wallet/node"); a = a && H("active'>Node");
         CHECK(a, "wrong active tab"); }
     if(!_skip) ok();
+}
 
+static void stories_nav_paths(void) {
     STORY("Nav: dashboard → send → receive → back works");
     G("/wallet"); CHECK(_n > 500, "dashboard");
     G("/wallet/send"); CHECK(_n > 500, "send");
@@ -872,6 +921,34 @@ int spec_100_stories(void)
     if(!_skip) ok();
 
     destroy_wallet();
+}
+
+int spec_100_stories(void)
+{
+    _story_num = 0;
+    _failures = 0;
+    printf("\n=== 100 USER STORIES ===\n\n");
+
+    stories_empty_launch();
+    stories_empty_pulse();
+    stories_transparent_dashboard();
+    stories_transparent_send_form();
+    stories_transparent_send_review();
+    stories_transparent_send_edges();
+    stories_transparent_receive_history();
+    stories_transparent_history_queries();
+    stories_transparent_node();
+    stories_transparent_coins();
+    stories_transparent_shield();
+    stories_transparent_shield_post();
+    stories_transparent_tx_routes();
+    stories_mixed_balances();
+    stories_mixed_history();
+    stories_shielded();
+    stories_whale();
+    stories_whale_token_pulse();
+    stories_nav_pages();
+    stories_nav_paths();
 
     /* ════════════════════════════════════════════════════ */
     printf("\n=== %d / %d stories passed ===\n",
