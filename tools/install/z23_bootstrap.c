@@ -154,6 +154,7 @@ static void die(const char *fmt, ...)
     (void)fputs("z23-install: REFUSE: ", stderr);
     (void)vfprintf(stderr, fmt, ap);
     (void)fputc('\n', stderr);
+    va_end(ap);
     work_cleanup();
     exit(1);
 }
