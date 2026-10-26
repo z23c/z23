@@ -1260,18 +1260,10 @@ static int live_two_mib_output(void)
     return failures;
 }
 
-static int test_mesh_terminal_worker_platform_arm(void)
+/* Spawn-time config refusals, each judged by exact error code. */
+static int live_config_refusals(void)
 {
-    printf("\n=== mesh terminal worker tests ===\n");
     int failures = 0;
-
-    test_make_tmpdir(g_dir, sizeof g_dir, "terminal_worker_live", "live");
-    if (!test_abs_path(FBSH_BIN, g_fbsh, sizeof g_fbsh))
-        g_fbsh[0] = '\0';
-    struct stat st;
-    bool fbsh = g_fbsh[0] && stat(FBSH_BIN, &st) == 0 &&
-                (st.st_mode & S_IXUSR) != 0;
-
     /* ── config refusals (by name; no fbsh needed) ─────────────────── */
     {
         struct mesh_terminal_worker_config cfg;
@@ -1319,13 +1311,14 @@ static int test_mesh_terminal_worker_platform_arm(void)
                          "zero cols -> config");
     }
 
-    if (!fbsh) {
-        printf("mesh_terminal_worker: " FBSH_BIN
-               " not built — SKIP (live cases need `make fbsh`)\n");
-        printf("mesh_terminal_worker: %d failures\n", failures);
-        return failures;
-    }
+    return failures;
+}
 
+/* Live: round-trip a typed line through the caged fbsh and prove the kill
+ * empties the process-group census. */
+static int live_interactive_roundtrip(void)
+{
+    int failures = 0;
     /* ── live: interactive roundtrip + census ──────────────────────── */
     {
         struct mesh_terminal_worker_config cfg;
@@ -1350,7 +1343,7 @@ static int test_mesh_terminal_worker_platform_arm(void)
             failures = check(failures, found,
                              "shell executed the typed line (echo output)");
             if (!found) {
-                printf("  saw %.200s\n", saw);
+                printf("  saw %.100s\n", saw);
                 failures = check(failures, mesh_terminal_worker_alive(&w),
                                  "shell was alive during the drain");
             }
@@ -1369,6 +1362,13 @@ static int test_mesh_terminal_worker_platform_arm(void)
                          "input after kill -> not-running");
     }
 
+    return failures;
+}
+
+/* Live: a natural shell exit is reaped and named worker-exited. */
+static int live_natural_exit(void)
+{
+    int failures = 0;
     /* ── live: natural exit is reaped and named ────────────────────── */
     {
         struct mesh_terminal_worker_config cfg;
@@ -1403,18 +1403,14 @@ static int test_mesh_terminal_worker_platform_arm(void)
         mesh_terminal_worker_kill(&w);
     }
 
-    failures += live_exit_status();
-    failures += live_explicit_argv();
-    failures += live_dynamic_argv();
-    failures += live_orphan_descendant();
-    failures += live_custody_order();
-    failures += live_pid_namespace();
-    failures += live_inherited_fd_closed();
-    failures += live_high_inherited_fd_closed(false);
-    failures += live_high_inherited_fd_closed(true);
-    failures += live_signal_boundary();
-    failures += live_two_mib_output();
+    return failures;
+}
 
+/* Live: the input and output byte budgets end the session and empty the
+ * process group. */
+static int live_byte_budgets(void)
+{
+    int failures = 0;
     /* ── live: input byte budget ───────────────────────────────────── */
     {
         struct mesh_terminal_worker_config cfg;
@@ -1480,6 +1476,13 @@ static int test_mesh_terminal_worker_platform_arm(void)
         mesh_terminal_worker_kill(&w);
     }
 
+    return failures;
+}
+
+/* Live: the lifetime and idle budgets bite on the injected clock. */
+static int live_lifetime_and_idle_budgets(void)
+{
+    int failures = 0;
     /* ── lifetime + idle: injected clock, no sleeping ──────────────── */
     {
         struct mesh_terminal_worker_config cfg;
@@ -1525,6 +1528,14 @@ static int test_mesh_terminal_worker_platform_arm(void)
         mesh_terminal_worker_kill(&w);
     }
 
+    return failures;
+}
+
+/* Live: resize geometry bounds, then a confinement attack through the
+ * terminal. */
+static int live_resize_and_confinement(void)
+{
+    int failures = 0;
     /* ── live: resize bounds + confinement through the terminal ────── */
     {
         struct mesh_terminal_worker_config cfg;
@@ -1577,6 +1588,49 @@ static int test_mesh_terminal_worker_platform_arm(void)
                          os_sandbox_process_group_census(w.pgid) == 0,
                          "final kill emptied the group");
     }
+
+    return failures;
+}
+
+static int test_mesh_terminal_worker_platform_arm(void)
+{
+    printf("\n=== mesh terminal worker tests ===\n");
+    int failures = 0;
+
+    test_make_tmpdir(g_dir, sizeof g_dir, "terminal_worker_live", "live");
+    if (!test_abs_path(FBSH_BIN, g_fbsh, sizeof g_fbsh))
+        g_fbsh[0] = '\0';
+    struct stat st;
+    bool fbsh = g_fbsh[0] && stat(FBSH_BIN, &st) == 0 &&
+                (st.st_mode & S_IXUSR) != 0;
+
+    failures += live_config_refusals();
+
+    if (!fbsh) {
+        printf("mesh_terminal_worker: " FBSH_BIN
+               " not built — SKIP (live cases need `make fbsh`)\n");
+        printf("mesh_terminal_worker: %d failures\n", failures);
+        return failures;
+    }
+
+    failures += live_interactive_roundtrip();
+    failures += live_natural_exit();
+
+    failures += live_exit_status();
+    failures += live_explicit_argv();
+    failures += live_dynamic_argv();
+    failures += live_orphan_descendant();
+    failures += live_custody_order();
+    failures += live_pid_namespace();
+    failures += live_inherited_fd_closed();
+    failures += live_high_inherited_fd_closed(false);
+    failures += live_high_inherited_fd_closed(true);
+    failures += live_signal_boundary();
+    failures += live_two_mib_output();
+
+    failures += live_byte_budgets();
+    failures += live_lifetime_and_idle_budgets();
+    failures += live_resize_and_confinement();
 
     printf("mesh_terminal_worker: %d failures\n", failures);
     return failures;
