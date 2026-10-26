@@ -273,6 +273,67 @@ static bool rungA_nullifier_rederive(sqlite3 *db, struct main_state *ms,
     return false;
 }
 
+/* RUNG A (nullifier half) gate: attempt the populate-only re-derive only on a
+ * nullifier-only gap.  True iff the walker completed or made durable progress
+ * (the caller returns OK); *first_missing receives the exact blocked height on
+ * a missing local body. */
+static bool rungA_nullifier_attempt(enum shielded_gap_kind gap, sqlite3 *db,
+                                    struct main_state *ms,
+                                    int64_t *first_missing)
+{
+    return gap == SHIELDED_GAP_NULLIFIER_ONLY &&
+           rungA_nullifier_rederive(db, ms, first_missing);
+}
+
+/* RUNG A (anchor half) gate: an anchor-half gap with a reachable verified
+ * anchor artifact to arm the from-anchor/genesis refold from. */
+static bool rungA_anchor_rederive_ready(enum shielded_gap_kind gap)
+{
+    return (gap == SHIELDED_GAP_ANCHOR_ONLY || gap == SHIELDED_GAP_BOTH) &&
+           boot_refold_from_anchor_artifact_available(app_runtime_node_db(),
+                                                      NULL);
+}
+
+/* RUNG B solution gate: the checkpoint header's Equihash solution is durably
+ * available for the current sha3-utxo checkpoint (false when no checkpoint is
+ * configured). */
+static bool rungB_checkpoint_solution_durable(void)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    bool solution_ready = false;
+    if (cp) {
+        struct uint256 cph;
+        memcpy(cph.data, cp->block_hash, 32);
+        solution_ready =
+            checkpoint_header_solution_available(cp->height, &cph);
+    }
+    return solution_ready;
+}
+
+/* RUNG B arm outcome label for the install-on-next-boot report: ARMED,
+ * terminal budget exhaustion (not re-arming), or a failed arm. */
+static const char *rungB_install_outcome_label(int armed)
+{
+    if (armed > 0)
+        return "ARMED";
+    if (armed == BOOT_INSTALL_BUNDLE_TERMINAL)
+        return "budget-exhausted (not re-arming)";
+    return "failed to arm";
+}
+
+/* RUNG C evidence: the blocks-projection hole — the first missing connected
+ * body height in the active chain, or -1 when it cannot be named. */
+static int64_t rungC_first_missing_body_height(struct main_state *ms)
+{
+    struct node_db *ndb = app_runtime_node_db();
+    int max_h = active_chain_height(&ms->chain_active);
+    int mh = -1;
+    if (ndb && app_runtime_node_db_handle_open(ndb) && max_h >= 0 &&
+        db_block_first_missing_connected_height(ndb, max_h, &mh) && mh >= 0)
+        return mh;
+    return -1;
+}
+
 enum condition_remedy_result shielded_selfheal_run_named_remedy(void)
 {
     /* SEPARATE sovereign authorization — NOT the borrowed-import gate.  On a
@@ -291,8 +352,7 @@ enum condition_remedy_result shielded_selfheal_run_named_remedy(void)
     int64_t nullifier_missing = -1;
 
     /* RUNG A (nullifier half) — in-process populate-only re-derive. */
-    if (gap == SHIELDED_GAP_NULLIFIER_ONLY &&
-        rungA_nullifier_rederive(db, ms, &nullifier_missing))
+    if (rungA_nullifier_attempt(gap, db, ms, &nullifier_missing))
         return COND_REMEDY_OK;
 
     /* RUNG A (anchor half) — arm the from-anchor/genesis refold (the sovereign
@@ -303,8 +363,7 @@ enum condition_remedy_result shielded_selfheal_run_named_remedy(void)
      * artifact so the boot reset does not FATAL-refuse; the refold's own
      * boot-time body-span gate (boot_refold_body_span_contiguous -> refold.
      * body_gap) names any missing body, so arming is self-terminating. */
-    if ((gap == SHIELDED_GAP_ANCHOR_ONLY || gap == SHIELDED_GAP_BOTH) &&
-        boot_refold_from_anchor_artifact_available(app_runtime_node_db(), NULL)) {
+    if (rungA_anchor_rederive_ready(gap)) {
         sticky_escalator_note_stall("shielded-selfheal-anchor-rederive");
         LOG_WARN(SSL_SUBSYS,
                  "[condition:%s] Rung A(anchor): armed the from-anchor refold — "
@@ -331,14 +390,7 @@ enum condition_remedy_result shielded_selfheal_run_named_remedy(void)
          * first. This ladder is disabled on '-COPY-' datadirs, so the burn is
          * INVISIBLE to copy-proof and can only manifest live. */
         if (bundle) {
-            const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-            bool solution_ready = false;
-            if (cp) {
-                struct uint256 cph;
-                memcpy(cph.data, cp->block_hash, 32);
-                solution_ready =
-                    checkpoint_header_solution_available(cp->height, &cph);
-            }
+            bool solution_ready = rungB_checkpoint_solution_durable();
             if (!solution_ready) {
                 LOG_INFO(SSL_SUBSYS,
                          "[condition:%s] Rung B: staged bundle %s but the "
@@ -357,12 +409,7 @@ enum condition_remedy_result shielded_selfheal_run_named_remedy(void)
                      "[condition:%s] Rung B: %s checkpoint-verified install-on-"
                      "next-boot of %s (atomic keystone installer; rolls back on "
                      "any anomaly)",
-                     SSL_COND_NAME,
-                     armed > 0 ? "ARMED"
-                               : armed == BOOT_INSTALL_BUNDLE_TERMINAL
-                                     ? "budget-exhausted (not re-arming)"
-                                     : "failed to arm",
-                     bundle);
+                     SSL_COND_NAME, rungB_install_outcome_label(armed), bundle);
             free(bundle);
             if (armed > 0)
                 return COND_REMEDY_OK;   /* install runs on the next boot */
@@ -377,15 +424,7 @@ enum condition_remedy_result shielded_selfheal_run_named_remedy(void)
      * hook resets the budget ONLY while the heal cursor advances, so a genuinely
      * frozen node pages in bounded time and never re-spins the identical
      * no-op. */
-    int64_t body_missing = -1;
-    {
-        struct node_db *ndb = app_runtime_node_db();
-        int max_h = active_chain_height(&ms->chain_active);
-        int mh = -1;
-        if (ndb && app_runtime_node_db_handle_open(ndb) && max_h >= 0 &&
-            db_block_first_missing_connected_height(ndb, max_h, &mh) && mh >= 0)
-            body_missing = mh;
-    }
+    int64_t body_missing = rungC_first_missing_body_height(ms);
     int64_t need = shielded_selfheal_named_need(nullifier_missing, body_missing);
     atomic_store(&g_selfheal_named_height, need);
     selfheal_log_named_recipe(need);
