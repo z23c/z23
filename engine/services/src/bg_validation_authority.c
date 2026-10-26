@@ -140,10 +140,10 @@ static bool bgv_auth_frontier_stable(int verified, int chain_height,
                                      int32_t coins_height, int64_t skips,
                                      int chain_height_after)
 {
-    if (chain_height_after != chain_height)
+    if (!bg_validation_authority_claim_is_complete(
+            verified, chain_height, coins_height, skips, true))
         return false;
-    return bg_validation_authority_claim_is_complete(
-        verified, chain_height, coins_height, skips, true);
+    return chain_height_after == chain_height;
 }
 
 static bool bgv_auth_resolve_authority_root(
@@ -225,14 +225,14 @@ struct zcl_result bg_validation_authority_publish(
         return bgv_auth_refuse(reason);
     }
 
-    const char *origin = external_seeded ? "assisted_snapshot"
-                                          : "genesis_history";
     blocker_clear("bg_validation.full_history_unproven");
     event_emitf(EV_SYNC_STATE_CHANGE, 0,
                 "bg_validation authority published height=%d origin=%s",
-                chain_height, origin);
+                chain_height, external_seeded ? "assisted_snapshot" :
+                                                "genesis_history");
     LOG_INFO("bg_validation",
              "[bg-valid] durable full-validation authority published h=%d origin=%s",
-             chain_height, origin);
+             chain_height, external_seeded ? "assisted_snapshot" :
+                                             "genesis_history");
     return ZCL_OK;
 }
