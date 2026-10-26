@@ -51,7 +51,7 @@ static void free_simple_tx(struct transaction *tx)
     free(tx->vout);
 }
 
-int test_validation(void)
+static int test_validation_check_tx_inputs_outputs(void)
 {
     int failures = 0;
 
@@ -162,6 +162,13 @@ int test_validation(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_check_tx_versions_and_constants(void)
+{
+    int failures = 0;
+
     printf("check_transaction: rejects bad overwinter version... ");
     {
         struct transaction tx = make_simple_tx();
@@ -269,6 +276,13 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (%d)\n", MAX_BLOCK_SIZE); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_check_tx_shielded_rules(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * check_transaction: duplicate Sapling nullifiers
@@ -415,6 +429,13 @@ int test_validation(void)
             printf("OK\n");
         else { printf("FAIL (%s)\n", vs.reject_reason); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_check_tx_value_and_expiry(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * check_transaction: value_balance overflow
@@ -572,10 +593,17 @@ int test_validation(void)
         else { printf("FAIL (%s)\n", vs.reject_reason); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_contextual_check_tx(
+    const struct chain_params *mainparams)
+{
+    int failures = 0;
+
     /* ================================================================
      * contextual_check_transaction tests
      * ================================================================ */
-    const struct chain_params *mainparams = chain_params_get();
 
     printf("contextual_check_tx: sprout rejects overwinter tx... ");
     {
@@ -705,6 +733,13 @@ int test_validation(void)
         else { printf("FAIL (%s)\n", vs.reject_reason); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_joinsplit_and_is_expired_tx(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * check_transaction: vin empty but joinsplits exist is valid
      * ================================================================ */
@@ -802,6 +837,14 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_check_block_and_header(
+    const struct chain_params *mainparams)
+{
+    int failures = 0;
 
     /* ================================================================
      * check_block tests
@@ -949,6 +992,13 @@ int test_validation(void)
         else { printf("FAIL (%s)\n", vs.reject_reason); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_is_final_and_disconnect_block(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * is_final_tx tests
      * ================================================================ */
@@ -1093,6 +1143,13 @@ int test_validation(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_check_tx_limits_and_versions(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * connect_block: sigops limit
      * ================================================================ */
@@ -1225,6 +1282,14 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (%s)\n", vs.reject_reason); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_check_tx_balance_and_contextual(
+    const struct chain_params *mainparams)
+{
+    int failures = 0;
 
     /* ================================================================
      * check_transaction: value_balance < -MAX_MONEY rejected
@@ -1393,6 +1458,13 @@ int test_validation(void)
         else { printf("FAIL (%s)\n", vs.reject_reason); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_coinbase_vpub_and_block_sigops(void)
+{
+    int failures = 0;
+
     printf("check_transaction: coinbase rejects script too long (101)... ");
     {
         struct transaction tx;
@@ -1486,6 +1558,13 @@ int test_validation(void)
         if (ok) printf("OK (3 OP_CHECKSIG = %llu sigops)\n", (unsigned long long)count);
         else { printf("FAIL (expected 3, got %llu)\n", (unsigned long long)count); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_script_sigop_count_p2sh(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * script_get_sig_op_count_p2sh — redeem-script sigop counter
@@ -1611,6 +1690,14 @@ int test_validation(void)
 
     #undef BUILD_P2SH
 
+    return failures;
+}
+
+static int test_validation_header_expiry_and_size(
+    const struct chain_params *mainparams)
+{
+    int failures = 0;
+
     /* ================================================================
      * check_block_header: accepts valid version 4 header
      * ================================================================ */
@@ -1698,6 +1785,13 @@ int test_validation(void)
         else { printf("FAIL (soon@1008=%d not_soon@1000=%d)\n", soon, !not_soon); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_validation_state_flags(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * validation_state: DoS tracking
      * ================================================================ */
@@ -1722,6 +1816,13 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_block_map_init_and_iterate(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * block_map: init, insert, find, count, iterate
@@ -1781,6 +1882,13 @@ int test_validation(void)
         else { printf("FAIL (%d entries, expected 2)\n", count); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_block_map_snapshot(void)
+{
+    int failures = 0;
+
     printf("block_map: one-lock pointer snapshot... ");
     {
         struct block_map m;
@@ -1812,6 +1920,13 @@ int test_validation(void)
         if (ok) printf("OK (%zu entries)\n", snapshot_count);
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_active_chain_ops(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * active_chain: init, set_tip, tip, at, height, contains
@@ -1848,6 +1963,13 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_block_file_and_chainstate(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * block_file_info: add_block tracking
@@ -1900,6 +2022,13 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_tx_mempool_basic_ops(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * tx_mempool: init, size, add, exists, lookup, remove
@@ -2002,6 +2131,13 @@ int test_validation(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_tx_mempool_clear_and_query(void)
+{
+    int failures = 0;
+
     printf("tx_mempool: clear empties pool... ");
     {
         struct tx_mempool pool;
@@ -2079,6 +2215,13 @@ int test_validation(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_tx_mempool_removal_and_priority(void)
+{
+    int failures = 0;
+
     printf("tx_mempool: remove_without_branch_id filters correctly... ");
     {
         struct tx_mempool pool;
@@ -2137,6 +2280,13 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_tx_mempool_deltas_and_entry(void)
+{
+    int failures = 0;
 
     printf("tx_mempool: clear_prioritisation removes deltas... ");
     {
@@ -2199,6 +2349,13 @@ int test_validation(void)
         else { printf("FAIL (p1=%f p2=%f)\n", p1, p2); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_signature_hash_version(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * sighash: signature_hash_version
      * ================================================================ */
@@ -2239,6 +2396,13 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (%d)\n", v); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_precompute_tx_data(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * sighash: precompute_tx_data
@@ -2283,6 +2447,13 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_signature_hash_digests(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * sighash: signature_hash sprout
@@ -2430,6 +2601,13 @@ int test_validation(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_tx_sig_checker_checks(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * tx_sig_checker: init and check_lock_time
      * ================================================================ */
@@ -2528,6 +2706,13 @@ int test_validation(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_validation_make_sig_checker_and_allow_free(void)
+{
+    int failures = 0;
+
     printf("tx_make_sig_checker: creates valid checker vtable... ");
     {
         struct transaction tx = make_simple_tx();
@@ -2559,6 +2744,13 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_joinsplit_and_ed25519_sigs(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * JoinSplit Ed25519 signature enforcement
@@ -2598,6 +2790,13 @@ int test_validation(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_validation_consensus_coinbase_and_unspendable(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * CONSENSUS COMPATIBILITY: verified against ZClassic C++ source
@@ -2671,6 +2870,13 @@ int test_validation(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int test_validation_consensus_coins_spend_and_cleanup(void)
+{
+    int failures = 0;
+
     printf("consensus: coins_spend matches ZClassic Spend()... ");
     {
         struct coins c;
@@ -2713,6 +2919,13 @@ int test_validation(void)
         coins_free(&c);
     }
 
+    return failures;
+}
+
+static int test_validation_consensus_is_pruned(void)
+{
+    int failures = 0;
+
     printf("consensus: IsPruned matches ZClassic... ");
     {
         struct coins c;
@@ -2731,5 +2944,44 @@ int test_validation(void)
         coins_free(&c);
     }
 
+    return failures;
+}
+
+int test_validation(void)
+{
+    int failures = 0;
+
+    failures += test_validation_check_tx_inputs_outputs();
+    failures += test_validation_check_tx_versions_and_constants();
+    failures += test_validation_check_tx_shielded_rules();
+    failures += test_validation_check_tx_value_and_expiry();
+    const struct chain_params *mainparams = chain_params_get();
+    failures += test_validation_contextual_check_tx(mainparams);
+    failures += test_validation_joinsplit_and_is_expired_tx();
+    failures += test_validation_check_block_and_header(mainparams);
+    failures += test_validation_is_final_and_disconnect_block();
+    failures += test_validation_check_tx_limits_and_versions();
+    failures += test_validation_check_tx_balance_and_contextual(mainparams);
+    failures += test_validation_coinbase_vpub_and_block_sigops();
+    failures += test_validation_script_sigop_count_p2sh();
+    failures += test_validation_header_expiry_and_size(mainparams);
+    failures += test_validation_validation_state_flags();
+    failures += test_validation_block_map_init_and_iterate();
+    failures += test_validation_block_map_snapshot();
+    failures += test_validation_active_chain_ops();
+    failures += test_validation_block_file_and_chainstate();
+    failures += test_validation_tx_mempool_basic_ops();
+    failures += test_validation_tx_mempool_clear_and_query();
+    failures += test_validation_tx_mempool_removal_and_priority();
+    failures += test_validation_tx_mempool_deltas_and_entry();
+    failures += test_validation_signature_hash_version();
+    failures += test_validation_precompute_tx_data();
+    failures += test_validation_signature_hash_digests();
+    failures += test_validation_tx_sig_checker_checks();
+    failures += test_validation_make_sig_checker_and_allow_free();
+    failures += test_validation_joinsplit_and_ed25519_sigs();
+    failures += test_validation_consensus_coinbase_and_unspendable();
+    failures += test_validation_consensus_coins_spend_and_cleanup();
+    failures += test_validation_consensus_is_pruned();
     return failures;
 }
