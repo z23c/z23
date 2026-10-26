@@ -49,10 +49,6 @@ bool anchor_selfmint_resolve_path(const char *datadir, char *buf, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
-/* Full-verification stage of anchor_selfmint_snapshot_status: bind the whole
- * artifact to its own header hash, recompute the coins-only component, and
- * write the verdict (verification/error/next_action) into `out`. Every outcome
- * of this stage is terminal for the status flow, so this returns void. */
 static void anchor_status_verify_and_classify_snapshot(
     struct anchor_snapshot_status *out, const struct sha3_utxo_checkpoint *cp)
 {
@@ -337,4 +333,3 @@ void anchor_selfmint_hook_in_tx(struct sqlite3 *db, const char *datadir,
              cp->height, (unsigned long long)got_count, (long long)got_supply,
              sha3_hex, path);
 }
-
