@@ -111,15 +111,20 @@ static uint8_t lcg_byte(void)
     return (uint8_t)(lcg_state >> 24);
 }
 
+/* Fill len bytes of synthetic entropy from the deterministic LCG. */
+static void fill_entropy_with_lcg(uint8_t *entropy, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        entropy[i] = lcg_byte();
+}
+
 int wallet_mnemonic_retirement_cases(void);
 
-int test_domain_wallet_mnemonic(void)
+/* mnemonic_from_entropy: null entropy / null buf / null written / bad len. */
+static int check_from_entropy_contract_edges(void)
 {
-    int failures = wallet_mnemonic_retirement_cases();
+    int failures = 0;
 
-    /* ── Layer 1: contract / null-edge ────────────────────────────── */
-
-    /* mnemonic_from_entropy: null entropy / null buf / null written / bad len. */
     {
         char buf[256];
         size_t w = 0;
@@ -169,9 +174,16 @@ int test_domain_wallet_mnemonic(void)
                   !r.ok && r.code == DOMAIN_WALLET_MNEMONIC_ERR_BUF_TOO_SMALL);
     }
 
-    /* ── normalize: the one canonical form ────────────────────────
-     * Copy, paste and transcription variants of a phrase must normalise to
-     * the same bytes, so a pasted phrase cannot open a wrong empty wallet. */
+    return failures;
+}
+
+/* ── normalize: the one canonical form ────────────────────────
+ * Copy, paste and transcription variants of a phrase must normalise to
+ * the same bytes, so a pasted phrase cannot open a wrong empty wallet. */
+static int check_normalize_canonical_form(void)
+{
+    int failures = 0;
+
     {
         struct { const char *in, *want; } cases[] = {
             { "abandon about",        "abandon about" },
@@ -224,6 +236,14 @@ int test_domain_wallet_mnemonic(void)
         DWM_CHECK("normalize non-ASCII -> NON_ASCII (refused, not guessed)",
                   !r.ok && r.code == DOMAIN_WALLET_MNEMONIC_ERR_NON_ASCII);
     }
+
+    return failures;
+}
+
+static int check_non_ascii_refusal_reaches_callers(void)
+{
+    int failures = 0;
+
     {
         /* And the refusal reaches the two calls that matter, so no caller
          * can derive a seed from bytes this node cannot normalise. */
@@ -237,6 +257,14 @@ int test_domain_wallet_mnemonic(void)
         DWM_CHECK("validate refuses a non-ASCII phrase",
                   !v.ok && v.code == DOMAIN_WALLET_MNEMONIC_ERR_NON_ASCII);
     }
+
+    return failures;
+}
+
+static int check_sloppy_passphrase_seed_normalization(void)
+{
+    int failures = 0;
+
     {
         /* A sloppy spelling derives the canonical seed, and the canonical
          * vector still holds. */
@@ -265,7 +293,14 @@ int test_domain_wallet_mnemonic(void)
                   a.ok && b.ok && !bytes_equal(with_space, without, 64));
     }
 
-    /* mnemonic_to_entropy: null phrase / null out / tiny capacity. */
+    return failures;
+}
+
+/* mnemonic_to_entropy: null phrase / null out / tiny capacity. */
+static int check_to_entropy_contract_edges(void)
+{
+    int failures = 0;
+
     {
         uint8_t e[32];
         size_t el = 0;
@@ -297,7 +332,14 @@ int test_domain_wallet_mnemonic(void)
                   !r.ok && r.code == DOMAIN_WALLET_MNEMONIC_ERR_BUF_TOO_SMALL);
     }
 
-    /* mnemonic_validate / decode: unknown word + bad checksum + bad count. */
+    return failures;
+}
+
+/* mnemonic_validate / decode: unknown word + bad checksum + bad count. */
+static int check_validate_error_codes(void)
+{
+    int failures = 0;
+
     {
         struct zcl_result r = domain_wallet_mnemonic_validate(
                 "abandon abandon abandon abandon abandon abandon "
@@ -326,7 +368,14 @@ int test_domain_wallet_mnemonic(void)
                   !r.ok && r.code == DOMAIN_WALLET_MNEMONIC_ERR_NULL_PHRASE);
     }
 
-    /* to_seed: null phrase / null seed / tiny seed buf. */
+    return failures;
+}
+
+/* to_seed: null phrase / null seed / tiny seed buf. */
+static int check_to_seed_contract_edges(void)
+{
+    int failures = 0;
+
     {
         uint8_t seed[64];
         struct zcl_result r = domain_wallet_mnemonic_to_seed(
@@ -348,7 +397,14 @@ int test_domain_wallet_mnemonic(void)
                   !r.ok && r.code == DOMAIN_WALLET_MNEMONIC_ERR_BUF_TOO_SMALL);
     }
 
-    /* Bytes-needed table. */
+    return failures;
+}
+
+/* Bytes-needed table. */
+static int check_entropy_bytes_for_words_table(void)
+{
+    int failures = 0;
+
     DWM_CHECK("entropy_bytes_for_words(12) = 16",
               domain_wallet_mnemonic_entropy_bytes_for_words(12) == 16);
     DWM_CHECK("entropy_bytes_for_words(24) = 32",
@@ -358,7 +414,14 @@ int test_domain_wallet_mnemonic(void)
     DWM_CHECK("entropy_bytes_for_words(0)  = 0",
               domain_wallet_mnemonic_entropy_bytes_for_words(0) == 0);
 
-    /* Wordlist sanity. */
+    return failures;
+}
+
+/* Wordlist sanity. */
+static int check_wordlist_accessors(void)
+{
+    int failures = 0;
+
     DWM_CHECK("wordlist[0] == \"abandon\"",
               strcmp(domain_wallet_mnemonic_wordlist_get(0), "abandon") == 0);
     DWM_CHECK("wordlist[2047] == \"zoo\"",
@@ -381,9 +444,14 @@ int test_domain_wallet_mnemonic(void)
     DWM_CHECK("wordlist_find(NULL) = -1",
               domain_wallet_mnemonic_wordlist_find(NULL) == -1);
 
-    /* ── Layer 2: BIP39 standard vectors ──────────────────────────── */
+    return failures;
+}
 
-    /* TV1: 128-bit zero entropy → "abandon ... about". */
+/* TV1: 128-bit zero entropy → "abandon ... about". */
+static int check_bip39_vector_tv1(void)
+{
+    int failures = 0;
+
     {
         char phrase[256];
         size_t written = 0;
@@ -429,6 +497,13 @@ int test_domain_wallet_mnemonic(void)
                   r.ok && bytes_equal(seed, tv1_seed_empty, 64));
     }
 
+    return failures;
+}
+
+static int check_bip39_vectors_tv2_tv3(void)
+{
+    int failures = 0;
+
     /* TV2: 256-bit zero entropy → 24-word phrase. */
     {
         char phrase[256];
@@ -469,7 +544,12 @@ int test_domain_wallet_mnemonic(void)
                   r.ok && bytes_equal(seed, tv3_seed_trezor, 64));
     }
 
-    /* ── Layer 3: round-trip property over synthetic entropy ──────── */
+    return failures;
+}
+
+static int check_synthetic_round_trip(void)
+{
+    int failures = 0;
 
     {
         const size_t lens[] = { 16, 20, 24, 28, 32 };
@@ -479,8 +559,7 @@ int test_domain_wallet_mnemonic(void)
             size_t L = lens[li];
             for (int trial = 0; trial < 8; trial++) {
                 uint8_t entropy[32];
-                for (size_t i = 0; i < L; i++)
-                    entropy[i] = lcg_byte();
+                fill_entropy_with_lcg(entropy, L);
 
                 char phrase[512];
                 size_t written = 0;
@@ -494,8 +573,7 @@ int test_domain_wallet_mnemonic(void)
                         phrase, back, sizeof(back), &back_len);
                 if (!dec.ok || back_len != L
                     || !bytes_equal(entropy, back, L)) {
-                    all_ok = false;
-                    break;
+                    all_ok = false; break;
                 }
 
                 /* Validate accepts what from_entropy produces. */
@@ -508,10 +586,15 @@ int test_domain_wallet_mnemonic(void)
                   all_ok);
     }
 
-    /* ── Layer 4: wrapper-vs-domain regression seal ───────────────── */
+    return failures;
+}
 
-    /* Wrapper mnemonic_from_entropy must produce the same phrase as the
-     * pure domain function. */
+/* Wrapper mnemonic_from_entropy must produce the same phrase as the
+ * pure domain function. */
+static int check_wrapper_matches_domain_round(void)
+{
+    int failures = 0;
+
     {
         const size_t lens[] = { 16, 20, 24, 28, 32 };
         bool all_match = true;
@@ -520,7 +603,7 @@ int test_domain_wallet_mnemonic(void)
             size_t L = lens[li];
             for (int trial = 0; trial < 4; trial++) {
                 uint8_t entropy[32];
-                for (size_t i = 0; i < L; i++) entropy[i] = lcg_byte();
+                fill_entropy_with_lcg(entropy, L);
 
                 char phrase_wrap[512];
                 if (!mnemonic_from_entropy(entropy, L,
@@ -558,6 +641,39 @@ int test_domain_wallet_mnemonic(void)
         DWM_CHECK("wrapper vs domain: 5 lens × 4 trials byte-identical "
                   "(phrase + seed)", all_match);
     }
+
+    return failures;
+}
+
+int test_domain_wallet_mnemonic(void)
+{
+    int failures = wallet_mnemonic_retirement_cases();
+
+    /* ── Layer 1: contract / null-edge ────────────────────────────── */
+
+    failures += check_from_entropy_contract_edges();
+    failures += check_normalize_canonical_form();
+    failures += check_non_ascii_refusal_reaches_callers();
+    failures += check_sloppy_passphrase_seed_normalization();
+    failures += check_to_entropy_contract_edges();
+    failures += check_validate_error_codes();
+    failures += check_to_seed_contract_edges();
+
+    failures += check_entropy_bytes_for_words_table();
+    failures += check_wordlist_accessors();
+
+    /* ── Layer 2: BIP39 standard vectors ──────────────────────────── */
+
+    failures += check_bip39_vector_tv1();
+    failures += check_bip39_vectors_tv2_tv3();
+
+    /* ── Layer 3: round-trip property over synthetic entropy ──────── */
+
+    failures += check_synthetic_round_trip();
+
+    /* ── Layer 4: wrapper-vs-domain regression seal ───────────────── */
+
+    failures += check_wrapper_matches_domain_round();
 
     /* Wrapper wordlist_get/find delegate cleanly. */
     DWM_CHECK("wrapper wordlist_get[0] == domain wordlist_get[0]",
