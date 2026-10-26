@@ -242,26 +242,12 @@ static size_t exec_leaf(const struct zcl_command_registry *reg,
     return n;
 }
 
-static int check_summary_leaf_answers(void)
+/* The reply as bytes and an exit code, judged before anyone parses it:
+ * non-empty, inside the leaf's declared budget, and OK. */
+static int check_summary_reply_metrics(size_t n, size_t declared,
+                                       enum zcl_command_exit code)
 {
     int failures = 0;
-    tz_isolate("summary");
-    const struct zcl_command_registry *reg = zcl_command_catalog();
-    const struct zcl_command_spec *spec =
-        find_spec(reg, "ops.telemetry.zcode.summary");
-    TZ_CHECK("[leaf] ops.telemetry.zcode.summary is registered", spec != NULL);
-    if (!spec)
-        return failures;
-    TZ_CHECK("[leaf] it is READY with a handler",
-             spec->availability == ZCL_COMMAND_READY && spec->handler != NULL);
-
-    size_t declared = spec->budget_bytes > 0 ? (size_t)spec->budget_bytes
-                                             : ZCL_COMMAND_RESULT_BUDGET;
-    static char out[ZCL_COMMAND_LIST_BUDGET + 1];
-    memset(out, 0, sizeof(out));
-    enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
-    size_t n = exec_leaf(reg, "ops.telemetry.zcode.summary", out, sizeof(out),
-                         &code);
     /* Over budget is an EMPTY document, not a short one, so a zero length is
      * the budget failure and must be reported as such. */
     TZ_CHECK("[leaf] the reply is non-empty (a zero length means the "
@@ -269,18 +255,14 @@ static int check_summary_leaf_answers(void)
     TZ_CHECK("[leaf] the reply fits the leaf's declared budget",
              n > 0 && n <= declared);
     TZ_CHECK("[leaf] the exit code is OK", code == ZCL_COMMAND_EXIT_OK);
+    return failures;
+}
 
-    struct json_value doc;
-    json_init(&doc);
-    bool parsed = n > 0 && json_read(&doc, out, n);
-    TZ_CHECK("[leaf] the reply parses as JSON", parsed);
-    /* THE assertion: ok must be TRUE. An error envelope is also a valid,
-     * non-empty, parseable document — asserting anything weaker than this
-     * passes on a totally broken build. */
-    TZ_CHECK("[leaf] the machine envelope reports ok:true",
-             parsed && json_get(&doc, "ok") &&
-             json_get_bool(json_get(&doc, "ok")));
-    const struct json_value *data = parsed ? json_get(&doc, "data") : NULL;
+/* The served document's body, once the envelope said ok:true: it must BE
+ * the telemetry document, name the zcode domain, and serve no UNSET leaf. */
+static int check_summary_body_shape(const struct json_value *data)
+{
+    int failures = 0;
     TZ_CHECK("[leaf] the body IS the telemetry document",
              data && json_get(data, "schema") && json_get(data, "values") &&
              json_get(data, "health") && json_get(data, "completeness") &&
@@ -290,7 +272,16 @@ static int check_summary_leaf_answers(void)
              strcmp(json_get_str(json_get(data, "domain")), "zcode") == 0);
     TZ_CHECK("[leaf] no leaf is unset in the served document",
              data && json_get_int(dig2(data, "completeness", "unset")) == 0);
+    return failures;
+}
 
+/* The store-BUSY worst case, which the closed-path reply measured in the
+ * caller says nothing about. */
+static int check_summary_worst_case_budget(size_t n, size_t declared,
+                                           bool parsed,
+                                           const struct json_value *data)
+{
+    int failures = 0;
     /* ── the WORST-CASE budget proof ──────────────────────────────────
      * The measurement above is one state. The document grows with the
      * number of NON-present leaves, because those report provenance at
@@ -343,6 +334,44 @@ static int check_summary_leaf_answers(void)
                  "state, not just the one that happened to be measured)",
                  busy_bytes > 0 && busy_bytes + envelope <= declared);
     }
+    return failures;
+}
+
+static int check_summary_leaf_answers(void)
+{
+    int failures = 0;
+    tz_isolate("summary");
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec =
+        find_spec(reg, "ops.telemetry.zcode.summary");
+    TZ_CHECK("[leaf] ops.telemetry.zcode.summary is registered", spec != NULL);
+    if (!spec)
+        return failures;
+    TZ_CHECK("[leaf] it is READY with a handler",
+             spec->availability == ZCL_COMMAND_READY && spec->handler != NULL);
+
+    size_t declared = spec->budget_bytes > 0 ? (size_t)spec->budget_bytes
+                                             : ZCL_COMMAND_RESULT_BUDGET;
+    static char out[ZCL_COMMAND_LIST_BUDGET + 1];
+    memset(out, 0, sizeof(out));
+    enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+    size_t n = exec_leaf(reg, "ops.telemetry.zcode.summary", out, sizeof(out),
+                         &code);
+    failures += check_summary_reply_metrics(n, declared, code);
+
+    struct json_value doc;
+    json_init(&doc);
+    bool parsed = n > 0 && json_read(&doc, out, n);
+    TZ_CHECK("[leaf] the reply parses as JSON", parsed);
+    /* THE assertion: ok must be TRUE. An error envelope is also a valid,
+     * non-empty, parseable document — asserting anything weaker than this
+     * passes on a totally broken build. */
+    TZ_CHECK("[leaf] the machine envelope reports ok:true",
+             parsed && json_get(&doc, "ok") &&
+             json_get_bool(json_get(&doc, "ok")));
+    const struct json_value *data = parsed ? json_get(&doc, "data") : NULL;
+    failures += check_summary_body_shape(data);
+    failures += check_summary_worst_case_budget(n, declared, parsed, data);
     json_free(&doc);
     return failures;
 }
