@@ -229,12 +229,12 @@ bool checkpoint_rung_parse(const uint8_t *buf, size_t len,
 
 /* ── bundle derivation (read-only) ────────────────────────────────── */
 
-static bool coins_row_is_well_formed(const void *txid, int txid_len,
+static bool coins_row_is_well_formed(sqlite3_stmt *st, const void *txid,
                                      int64_t vout, int64_t height,
                                      int64_t is_cb)
 {
-    return txid != NULL && txid_len == 32 && vout >= 0 && height >= 0 &&
-           (is_cb == 0 || is_cb == 1);
+    return txid != NULL && sqlite3_column_bytes(st, 0) == 32 && vout >= 0 &&
+           height >= 0 && (is_cb == 0 || is_cb == 1);
 }
 
 static int coins_row_compare(const uint8_t prev_txid[32], int64_t prev_vout,
@@ -290,8 +290,7 @@ static bool rung_derive_coins(sqlite3 *db, struct checkpoint_rung *out)
         int script_len = sqlite3_column_bytes(st, 3);
         int64_t height = sqlite3_column_int64(st, 4);
         int64_t is_cb = sqlite3_column_int64(st, 5);
-        if (!coins_row_is_well_formed(txid, sqlite3_column_bytes(st, 0), vout,
-                                      height, is_cb)) {
+        if (!coins_row_is_well_formed(st, txid, vout, height, is_cb)) {
             ok = false;
             break;
         }
@@ -317,11 +316,12 @@ static bool rung_derive_coins(sqlite3 *db, struct checkpoint_rung *out)
     return true;
 }
 
-static bool anchors_row_is_well_formed(int64_t pool, const void *anchor,
-                                       int anchor_len, int64_t height,
+static bool anchors_row_is_well_formed(sqlite3_stmt *st, int64_t pool,
+                                       const void *anchor, int64_t height,
                                        const void *tree)
 {
-    return (pool == 0 || pool == 1) && anchor != NULL && anchor_len == 32 &&
+    return (pool == 0 || pool == 1) && anchor != NULL &&
+           sqlite3_column_bytes(st, 1) == 32 &&
            height >= 0 && tree != NULL;
 }
 
@@ -373,9 +373,7 @@ static bool rung_derive_anchors(sqlite3 *db, struct checkpoint_rung *out)
         int64_t height = sqlite3_column_int64(st, 2);
         const void *tree = sqlite3_column_blob(st, 3);
         int tree_len = sqlite3_column_bytes(st, 3);
-        if (!anchors_row_is_well_formed(pool, anchor,
-                                        sqlite3_column_bytes(st, 1), height,
-                                        tree)) {
+        if (!anchors_row_is_well_formed(st, pool, anchor, height, tree)) {
             ok = false;
             break;
         }
