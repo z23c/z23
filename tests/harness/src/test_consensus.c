@@ -5,96 +5,207 @@
 #include "consensus/upgrades.h"
 #include "chain/chainparams.h"
 
-int test_consensus(void)
+enum consensus_probe_kind {
+    CONSENSUS_PROBE_UPGRADE_ACTIVE = 0,
+    CONSENSUS_PROBE_ACTIVATION_HEIGHT = 1,
+};
+
+struct consensus_height_probe {
+    const char *label;
+    enum upgrade_index upgrade;
+    int nchecks;
+    int heights[3];
+    bool expect[3];
+};
+
+static int tally_consensus_height_probes(const struct consensus_params *params,
+                                          enum consensus_probe_kind kind,
+                                          const struct consensus_height_probe *rows,
+                                          int nrows)
 {
     int failures = 0;
 
-    const struct chain_params *chainparams = chain_params_get();
-    const struct consensus_params *params = &chainparams->consensus;
+    for (int i = 0; i < nrows; i++) {
+        printf("%s", rows[i].label);
+        bool ok = true;
+        int j = 0;
+        while (ok && j < rows[i].nchecks) {
+            bool got;
+            if (kind == CONSENSUS_PROBE_UPGRADE_ACTIVE) {
+                got = consensus_network_upgrade_active(params,
+                                                        rows[i].heights[j],
+                                                        rows[i].upgrade);
+            } else {
+                got = consensus_is_activation_height(rows[i].heights[j],
+                                                      params,
+                                                      rows[i].upgrade);
+            }
+            ok = (got == rows[i].expect[j]);
+            j++;
+        }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
 
-    /* ── Mainnet activation heights (from chainparams.c) ─── */
-    /* BASE_SPROUT: always active (0)
-     * UPGRADE_OVERWINTER: 476969
-     * UPGRADE_SAPLING: 476969
-     * UPGRADE_BUBBLES: 585318
-     * UPGRADE_DIFFADJ: 585322
-     * UPGRADE_BUTTERCUP: 707000 */
-
+static int check_network_upgrade_active(const struct consensus_params *params)
+{
     /* ── consensus_network_upgrade_active ────────────────── */
-
-    printf("consensus_network_upgrade_active: Sprout at height 0... ");
-    {
-        bool ok = consensus_network_upgrade_active(params, 0, BASE_SPROUT);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Sprout at height 1000000... ");
-    {
-        bool ok = consensus_network_upgrade_active(params, 1000000, BASE_SPROUT);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Overwinter before activation... ");
-    {
-        bool ok = !consensus_network_upgrade_active(params, 476968, UPGRADE_OVERWINTER);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Overwinter at activation... ");
-    {
-        bool ok = consensus_network_upgrade_active(params, 476969, UPGRADE_OVERWINTER);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Overwinter after activation... ");
-    {
-        bool ok = consensus_network_upgrade_active(params, 476970, UPGRADE_OVERWINTER);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Sapling at activation... ");
-    {
-        bool ok = consensus_network_upgrade_active(params, 476969, UPGRADE_SAPLING);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Sapling before activation... ");
-    {
-        bool ok = !consensus_network_upgrade_active(params, 476968, UPGRADE_SAPLING);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Bubbles at activation... ");
-    {
-        bool ok = consensus_network_upgrade_active(params, 585318, UPGRADE_BUBBLES);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Bubbles before activation... ");
-    {
-        bool ok = !consensus_network_upgrade_active(params, 585317, UPGRADE_BUBBLES);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Buttercup at activation (707000)... ");
-    {
-        bool ok = consensus_network_upgrade_active(params, 707000, UPGRADE_BUTTERCUP);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: Buttercup before activation... ");
-    {
-        bool ok = !consensus_network_upgrade_active(params, 706999, UPGRADE_BUTTERCUP);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_network_upgrade_active: TestDummy never active... ");
-    {
+    static const struct consensus_height_probe rows[] = {
+        {
+            .label = "consensus_network_upgrade_active: Sprout at height 0... ",
+            .upgrade = BASE_SPROUT,
+            .nchecks = 1,
+            .heights = {0, 0, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Sprout at height 1000000... ",
+            .upgrade = BASE_SPROUT,
+            .nchecks = 1,
+            .heights = {1000000, 0, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Overwinter before activation... ",
+            .upgrade = UPGRADE_OVERWINTER,
+            .nchecks = 1,
+            .heights = {476968, 0, 0},
+            .expect = {false, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Overwinter at activation... ",
+            .upgrade = UPGRADE_OVERWINTER,
+            .nchecks = 1,
+            .heights = {476969, 0, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Overwinter after activation... ",
+            .upgrade = UPGRADE_OVERWINTER,
+            .nchecks = 1,
+            .heights = {476970, 0, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Sapling at activation... ",
+            .upgrade = UPGRADE_SAPLING,
+            .nchecks = 1,
+            .heights = {476969, 0, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Sapling before activation... ",
+            .upgrade = UPGRADE_SAPLING,
+            .nchecks = 1,
+            .heights = {476968, 0, 0},
+            .expect = {false, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Bubbles at activation... ",
+            .upgrade = UPGRADE_BUBBLES,
+            .nchecks = 1,
+            .heights = {585318, 0, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Bubbles before activation... ",
+            .upgrade = UPGRADE_BUBBLES,
+            .nchecks = 1,
+            .heights = {585317, 0, 0},
+            .expect = {false, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Buttercup at activation (707000)... ",
+            .upgrade = UPGRADE_BUTTERCUP,
+            .nchecks = 1,
+            .heights = {707000, 0, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_network_upgrade_active: Buttercup before activation... ",
+            .upgrade = UPGRADE_BUTTERCUP,
+            .nchecks = 1,
+            .heights = {706999, 0, 0},
+            .expect = {false, false, false},
+        },
         /* UPGRADE_TESTDUMMY has nActivationHeight = -1 (NO_ACTIVATION) */
-        bool ok = !consensus_network_upgrade_active(params, 0, UPGRADE_TESTDUMMY);
-        ok = ok && !consensus_network_upgrade_active(params, 999999999, UPGRADE_TESTDUMMY);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+        {
+            .label = "consensus_network_upgrade_active: TestDummy never active... ",
+            .upgrade = UPGRADE_TESTDUMMY,
+            .nchecks = 2,
+            .heights = {0, 999999999, 0},
+            .expect = {false, false, false},
+        },
+    };
+    return tally_consensus_height_probes(params, CONSENSUS_PROBE_UPGRADE_ACTIVE,
+                                          rows,
+                                          (int)(sizeof rows / sizeof rows[0]));
+}
+
+static int check_activation_height(const struct consensus_params *params)
+{
+    /* ── consensus_is_activation_height ──────────────────── */
+    static const struct consensus_height_probe rows[] = {
+        {
+            .label = "consensus_is_activation_height: Sprout always false... ",
+            .upgrade = BASE_SPROUT,
+            .nchecks = 2,
+            .heights = {0, 1, 0},
+            .expect = {false, false, false},
+        },
+        {
+            .label = "consensus_is_activation_height: Overwinter at 476969... ",
+            .upgrade = UPGRADE_OVERWINTER,
+            .nchecks = 3,
+            .heights = {476969, 476968, 476970},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_is_activation_height: Sapling at 476969... ",
+            .upgrade = UPGRADE_SAPLING,
+            .nchecks = 1,
+            .heights = {476969, 0, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_is_activation_height: Bubbles at 585318... ",
+            .upgrade = UPGRADE_BUBBLES,
+            .nchecks = 2,
+            .heights = {585318, 585317, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_is_activation_height: DiffAdj at 585322... ",
+            .upgrade = UPGRADE_DIFFADJ,
+            .nchecks = 1,
+            .heights = {585322, 0, 0},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_is_activation_height: Buttercup at 707000... ",
+            .upgrade = UPGRADE_BUTTERCUP,
+            .nchecks = 3,
+            .heights = {707000, 706999, 707001},
+            .expect = {true, false, false},
+        },
+        {
+            .label = "consensus_is_activation_height: TestDummy never... ",
+            .upgrade = UPGRADE_TESTDUMMY,
+            .nchecks = 2,
+            .heights = {0, 999999, 0},
+            .expect = {false, false, false},
+        },
+    };
+    return tally_consensus_height_probes(params,
+                                          CONSENSUS_PROBE_ACTIVATION_HEIGHT,
+                                          rows,
+                                          (int)(sizeof rows / sizeof rows[0]));
+}
+
+static int check_subsidy_halving(const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* ── consensus_halving ───────────────────────────────── */
 
@@ -139,6 +250,13 @@ int test_consensus(void)
         if (ok) printf("OK (halving=%d)\n", halving); else { printf("FAIL (halving=%d)\n", halving); failures++; }
     }
 
+    return failures;
+}
+
+static int check_pow_target_spacing(const struct consensus_params *params)
+{
+    int failures = 0;
+
     /* ── consensus_pow_target_spacing ────────────────────── */
 
     printf("consensus_pow_target_spacing: pre-Buttercup... ");
@@ -168,6 +286,13 @@ int test_consensus(void)
         bool ok = (spacing == PRE_BUTTERCUP_POW_TARGET_SPACING);
         if (ok) printf("OK (%"PRId64"s)\n", spacing); else { printf("FAIL (%"PRId64")\n", spacing); failures++; }
     }
+
+    return failures;
+}
+
+static int check_current_epoch(const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* ── consensus_current_epoch ─────────────────────────── */
 
@@ -221,56 +346,12 @@ int test_consensus(void)
         if (ok) printf("OK\n"); else { printf("FAIL (epoch=%d)\n", epoch); failures++; }
     }
 
-    /* ── consensus_is_activation_height ──────────────────── */
+    return failures;
+}
 
-    printf("consensus_is_activation_height: Sprout always false... ");
-    {
-        bool ok = !consensus_is_activation_height(0, params, BASE_SPROUT);
-        ok = ok && !consensus_is_activation_height(1, params, BASE_SPROUT);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_is_activation_height: Overwinter at 476969... ");
-    {
-        bool ok = consensus_is_activation_height(476969, params, UPGRADE_OVERWINTER);
-        ok = ok && !consensus_is_activation_height(476968, params, UPGRADE_OVERWINTER);
-        ok = ok && !consensus_is_activation_height(476970, params, UPGRADE_OVERWINTER);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_is_activation_height: Sapling at 476969... ");
-    {
-        bool ok = consensus_is_activation_height(476969, params, UPGRADE_SAPLING);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_is_activation_height: Bubbles at 585318... ");
-    {
-        bool ok = consensus_is_activation_height(585318, params, UPGRADE_BUBBLES);
-        ok = ok && !consensus_is_activation_height(585317, params, UPGRADE_BUBBLES);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_is_activation_height: DiffAdj at 585322... ");
-    {
-        bool ok = consensus_is_activation_height(585322, params, UPGRADE_DIFFADJ);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_is_activation_height: Buttercup at 707000... ");
-    {
-        bool ok = consensus_is_activation_height(707000, params, UPGRADE_BUTTERCUP);
-        ok = ok && !consensus_is_activation_height(706999, params, UPGRADE_BUTTERCUP);
-        ok = ok && !consensus_is_activation_height(707001, params, UPGRADE_BUTTERCUP);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("consensus_is_activation_height: TestDummy never... ");
-    {
-        bool ok = !consensus_is_activation_height(0, params, UPGRADE_TESTDUMMY);
-        ok = ok && !consensus_is_activation_height(999999, params, UPGRADE_TESTDUMMY);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+static int check_activation_height_any(const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* ── consensus_is_activation_height_any ──────────────── */
 
@@ -291,6 +372,13 @@ int test_consensus(void)
         bool ok = !consensus_is_activation_height_any(500000, params);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_upgrade_state(const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* ── consensus_upgrade_state ─────────────────────────── */
 
@@ -321,6 +409,13 @@ int test_consensus(void)
         if (ok) printf("OK\n"); else { printf("FAIL (state=%d)\n", st); failures++; }
     }
 
+    return failures;
+}
+
+static int check_epoch_branch_id(const struct consensus_params *params)
+{
+    int failures = 0;
+
     /* ── consensus_current_epoch_branch_id ───────────────── */
 
     printf("consensus_current_epoch_branch_id: Sprout at height 0... ");
@@ -343,6 +438,13 @@ int test_consensus(void)
         bool ok = (bid == 0x930b540d); /* Buttercup branch id */
         if (ok) printf("OK\n"); else { printf("FAIL (0x%08x)\n", bid); failures++; }
     }
+
+    return failures;
+}
+
+static int check_next_epoch_and_activation(const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* ── consensus_next_epoch / consensus_next_activation_height ── */
 
@@ -375,6 +477,13 @@ int test_consensus(void)
         if (ok) printf("OK\n"); else { printf("FAIL (h=%d)\n", h); failures++; }
     }
 
+    return failures;
+}
+
+static int check_averaging_window_timespan(const struct consensus_params *params)
+{
+    int failures = 0;
+
     /* ── consensus_averaging_window_timespan ──────────────── */
 
     printf("consensus_averaging_window_timespan: pre-Buttercup... ");
@@ -393,6 +502,13 @@ int test_consensus(void)
         if (ok) printf("OK (%"PRId64")\n", ts); else { printf("FAIL (%"PRId64")\n", ts); failures++; }
     }
 
+    return failures;
+}
+
+static int check_known_branch_ids(void)
+{
+    int failures = 0;
+
     /* ── consensus_is_branch_id ──────────────────────────── */
 
     printf("consensus_is_branch_id: known branch ids... ");
@@ -403,6 +519,13 @@ int test_consensus(void)
         ok = ok && !consensus_is_branch_id(0xDEADBEEF); /* unknown */
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_consensus_param_constants(const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* ── Consensus constants ─────────────────────────────── */
 
@@ -429,6 +552,48 @@ int test_consensus(void)
         ok = ok && (consensus_subsidy_slow_start_shift(params) == 1);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_consensus(void)
+{
+    int failures = 0;
+
+    const struct chain_params *chainparams = chain_params_get();
+    const struct consensus_params *params = &chainparams->consensus;
+
+    /* ── Mainnet activation heights (from chainparams.c) ─── */
+    /* BASE_SPROUT: always active (0)
+     * UPGRADE_OVERWINTER: 476969
+     * UPGRADE_SAPLING: 476969
+     * UPGRADE_BUBBLES: 585318
+     * UPGRADE_DIFFADJ: 585322
+     * UPGRADE_BUTTERCUP: 707000 */
+
+    failures += check_network_upgrade_active(params);
+
+    failures += check_subsidy_halving(params);
+
+    failures += check_pow_target_spacing(params);
+
+    failures += check_current_epoch(params);
+
+    failures += check_activation_height(params);
+
+    failures += check_activation_height_any(params);
+
+    failures += check_upgrade_state(params);
+
+    failures += check_epoch_branch_id(params);
+
+    failures += check_next_epoch_and_activation(params);
+
+    failures += check_averaging_window_timespan(params);
+
+    failures += check_known_branch_ids();
+
+    failures += check_consensus_param_constants(params);
 
     return failures;
 }
