@@ -1238,8 +1238,6 @@ engine/models/src/query_builder.c:qb_where_lead:16
 engine/models/src/schema_migration.c:schema_migration_rollback_last:16
 engine/models/src/schema_migration.c:schema_migration_run_pending:17
 engine/modules/determinism/src/classify.c:zcl_det_classify:21
-engine/modules/determinism/src/verdict.c:zcl_det_parse_check_line:16
-engine/modules/determinism/src/verdict.c:zcl_det_transcript_scan:17
 engine/modules/engine/src/engine_cli.c:engine_cli_argv_build:29
 engine/modules/engine/src/engine_prompt.c:engine_prompt_audit_text:17
 engine/modules/engine/src/engine_prompt.c:engine_prompt_kind_from_header:21

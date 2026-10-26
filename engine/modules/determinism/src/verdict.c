@@ -121,6 +121,61 @@ static void extract_locator(const char *after_fail, char *out, size_t cap)
     copy_bounded(out, cap, p, (size_t)(end - p));
 }
 
+static const char *find_last_separator(const char *start)
+{
+    /* The separator the harness prints between a name and its outcome. Take
+     * the LAST occurrence so a name that itself contains "... " keeps its
+     * whole text and the suffix is always the outcome word. */
+    const char *sep = NULL;
+    for (const char *p = start; (p = strstr(p, "... ")) != NULL; p += 1)
+        sep = p;
+    return sep;
+}
+
+static bool name_has_control_char(const char *start, size_t name_len)
+{
+    /* A control character inside a "name" means the line is not a verdict
+     * line at all (a raw dump that happened to contain "... OK"). */
+    for (size_t i = 0; i < name_len; i++) {
+        unsigned char c = (unsigned char)start[i];
+        if (c < 0x20 || c == 0x7F) return true;
+    }
+    return false;
+}
+
+/* The outcome words that can follow the separator, in the order they have
+ * always been tested; no match means the suffix carries no verdict. */
+struct outcome_word {
+    const char *prefix;
+    size_t len;
+    enum zcl_det_outcome outcome;
+};
+
+static const struct outcome_word k_outcome_words[] = {
+    {"OK", 2, ZCL_DET_OUTCOME_PASS},
+    {"FAIL", 4, ZCL_DET_OUTCOME_FAIL},
+    {"SKIP (", 6, ZCL_DET_OUTCOME_SKIP},
+    {"UNOBSERVED (", 12, ZCL_DET_OUTCOME_UNOBSERVED},
+};
+
+/* The first outcome word that begins s, or NULL when s starts with none. */
+static const struct outcome_word *match_outcome_word(const char *s)
+{
+    const size_t n = sizeof(k_outcome_words) / sizeof(k_outcome_words[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (strncmp(s, k_outcome_words[i].prefix, k_outcome_words[i].len) == 0)
+            return &k_outcome_words[i];
+    }
+    return NULL;
+}
+
+static bool ok_outcome_is_bare(const char *suffix, size_t len)
+{
+    /* Only a bare OK counts. "OKAY, moving on" is chatter, not a verdict. */
+    const char *tail = skip_space(suffix + len);
+    return *tail == '\0' || *tail == '\r' || *tail == '\n';
+}
+
 bool zcl_det_parse_check_line(const char *line, struct zcl_det_check *out)
 {
     if (!line || !out) return false;
@@ -128,12 +183,7 @@ bool zcl_det_parse_check_line(const char *line, struct zcl_det_check *out)
 
     const char *start = skip_space(line);
 
-    /* The separator the harness prints between a name and its outcome. Take
-     * the LAST occurrence so a name that itself contains "... " keeps its
-     * whole text and the suffix is always the outcome word. */
-    const char *sep = NULL;
-    for (const char *p = start; (p = strstr(p, "... ")) != NULL; p += 1)
-        sep = p;
+    const char *sep = find_last_separator(start);
     if (!sep || sep == start) return false;
 
     const char *suffix = sep + 4;
@@ -141,29 +191,17 @@ bool zcl_det_parse_check_line(const char *line, struct zcl_det_check *out)
     char locator[ZCL_DET_LOCATOR_MAX];
     locator[0] = '\0';
 
-    if (strncmp(suffix, "OK", 2) == 0) {
-        /* Only a bare OK counts. "OKAY, moving on" is chatter, not a verdict. */
-        const char *tail = skip_space(suffix + 2);
-        if (*tail != '\0' && *tail != '\r' && *tail != '\n') return false;
-        outcome = ZCL_DET_OUTCOME_PASS;
-    } else if (strncmp(suffix, "FAIL", 4) == 0) {
-        outcome = ZCL_DET_OUTCOME_FAIL;
-        extract_locator(suffix + 4, locator, sizeof(locator));
-    } else if (strncmp(suffix, "SKIP (", 6) == 0) {
-        outcome = ZCL_DET_OUTCOME_SKIP;
-    } else if (strncmp(suffix, "UNOBSERVED (", 12) == 0) {
-        outcome = ZCL_DET_OUTCOME_UNOBSERVED;
-    } else {
-        return false;
+    const struct outcome_word *word = match_outcome_word(suffix);
+    if (!word) return false;
+    if (word->outcome == ZCL_DET_OUTCOME_PASS) {
+        if (!ok_outcome_is_bare(suffix, word->len)) return false;
+    } else if (word->outcome == ZCL_DET_OUTCOME_FAIL) {
+        extract_locator(suffix + word->len, locator, sizeof(locator));
     }
+    outcome = word->outcome;
 
     size_t name_len = (size_t)(sep - start);
-    /* A control character inside a "name" means the line is not a verdict
-     * line at all (a raw dump that happened to contain "... OK"). */
-    for (size_t i = 0; i < name_len; i++) {
-        unsigned char c = (unsigned char)start[i];
-        if (c < 0x20 || c == 0x7F) return false;
-    }
+    if (name_has_control_char(start, name_len)) return false;
 
     out->name_len = name_len;
     copy_bounded(out->name, sizeof(out->name), start, name_len);
@@ -326,6 +364,27 @@ bool zcl_det_parse_group_header(const char *line, char *out_group,
  * deterministic split, so it cannot manufacture a digest difference. */
 #define ZCL_DET_LINE_MAX 8192
 
+/* Close the group still open, if one is: finish its stream into the group's
+ * digest, fold its counts into the running stats and hand the group to the
+ * sink. Returns 0, or -1 when the stream or the sink failed, so the caller
+ * fails the scan exactly as it did inline. */
+static int flush_open_group(bool have_group, struct zcl_det_stream *stream,
+                            struct zcl_det_group_digest *current,
+                            struct zcl_det_scan_stats *stats,
+                            zcl_det_group_sink sink, void *ctx,
+                            uint64_t *dangling)
+{
+    if (!have_group) return 0;
+    if (!zcl_det_stream_finish(stream, current->digest,
+                               &current->check_count, dangling))
+        return -1;
+    stats->checks += current->check_count;
+    stats->dangling += *dangling;
+    if (current->check_count == 0) stats->groups_without_vector++;
+    if (!sink(ctx, current)) return -1;
+    return 0;
+}
+
 bool zcl_det_transcript_scan(FILE *in, zcl_det_group_sink sink, void *ctx,
                              struct zcl_det_scan_stats *stats)
 {
@@ -346,15 +405,9 @@ bool zcl_det_transcript_scan(FILE *in, zcl_det_group_sink sink, void *ctx,
         char group[ZCL_DET_GROUP_MAX];
         enum zcl_det_group_status status = ZCL_DET_GROUP_UNKNOWN;
         if (zcl_det_parse_group_header(line, group, sizeof(group), &status)) {
-            if (in_group) {
-                if (!zcl_det_stream_finish(&stream, current.digest,
-                                           &current.check_count, &dangling))
-                    return false;
-                local.checks += current.check_count;
-                local.dangling += dangling;
-                if (current.check_count == 0) local.groups_without_vector++;
-                if (!sink(ctx, &current)) return false;
-            }
+            if (flush_open_group(in_group, &stream, &current, &local, sink,
+                                 ctx, &dangling) != 0)
+                return false;
             memset(&current, 0, sizeof(current));
             copy_bounded(current.group, sizeof(current.group), group,
                          strlen(group));
@@ -371,17 +424,10 @@ bool zcl_det_transcript_scan(FILE *in, zcl_det_group_sink sink, void *ctx,
 
     if (ferror(in)) LOG_FAIL("determinism", "transcript read error");
 
-    if (in_group) {
-        if (!zcl_det_stream_finish(&stream, current.digest,
-                                   &current.check_count, &dangling))
-            return false;
-        local.checks += current.check_count;
-        local.dangling += dangling;
-        if (current.check_count == 0) local.groups_without_vector++;
-        if (!sink(ctx, &current)) return false;
-    }
+    if (flush_open_group(in_group, &stream, &current, &local, sink, ctx,
+                         &dangling) != 0)
+        return false;
 
     if (stats) *stats = local;
     return true;
 }
-
