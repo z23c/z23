@@ -287,7 +287,7 @@ static void bm_build_header_only_chain(struct block_index *blocks,
 }
 
 /* Bounded reducer_kick_unbudgeted drive: kick until the frontier stalls
- * (a kick advances nothing and the utxo_apply cursor stops moving) or the
+ * (a kick advances nothing or the utxo_apply cursor stops moving) or the
  * kick budget runs out. Returns whether the frontier converged. */
 static bool bm_drive_fold_until_frontier_stalls(struct chain_activation_controller *ctl,
                                                 int max_kicks,
