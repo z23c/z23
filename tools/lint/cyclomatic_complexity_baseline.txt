@@ -792,8 +792,6 @@ engine/jobs/src/stage_repair_coin_backfill_scan.c:coin_backfill_scan_step:69
 engine/jobs/src/stage_row_itag.c:stage_row_itag_backfill:33
 engine/jobs/src/tip_finalize_evidence.c:tip_finalize_chain_utxo_evidence_at:24
 engine/jobs/src/tip_finalize_evidence.c:tip_finalize_trusted_anchor_at:20
-engine/jobs/src/tip_finalize_post_step.c:tip_finalize_reconcile_wallet_body:21
-engine/jobs/src/tip_finalize_post_step.c:tip_finalize_run_post_finalize:23
 engine/jobs/src/tip_finalize_stage.c:is_canonical_header_successor:16
 engine/jobs/src/tip_finalize_stage.c:step_finalize:59
 engine/jobs/src/tip_finalize_visible_body.c:tip_finalize_reconcile_visible_cursor_body:21

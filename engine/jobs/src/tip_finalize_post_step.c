@@ -244,6 +244,61 @@ bool tip_finalize_run_mempool_reconcile(struct block_index *pindex_new)
     return true;
 }
 
+static bool tip_finalize_regtest_on_demand(void)
+{
+    const struct chain_params *cp_regtest = chain_params_get();
+    return cp_regtest && cp_regtest->fMineBlocksOnDemand;
+}
+
+static bool tip_finalize_wallet_confirm_enqueue_failed(
+    bool regtest_on_demand, bool wallet_involved, struct node_db *ndb,
+    const struct transaction *tx, struct wallet *wallet,
+    struct block_index *pindex_new)
+{
+    return !regtest_on_demand && wallet_involved && ndb &&
+           !node_db_sync_wallet_tx_confirmed_async(
+               ndb, tx, wallet, pindex_new->nHeight,
+               pindex_new->phashBlock->data, pindex_new->nTime);
+}
+
+static void tip_finalize_wallet_sapling_outputs(struct wallet *wallet,
+                                                struct node_db *ndb,
+                                                const struct transaction *tx,
+                                                const struct uint256 *txid,
+                                                int height)
+{
+    zcl_mutex_lock(&wallet->cs);
+    size_t notes_before = wallet->num_sapling_notes;
+    zcl_mutex_unlock(&wallet->cs);
+    wallet_try_sapling_decrypt(wallet, tx, txid);
+    if (ndb) {
+        size_t n_notes = 0;
+        struct sapling_received_note *snap =
+            wallet_copy_sapling_notes(wallet, &n_notes);
+        for (size_t ni = notes_before; ni < n_notes; ni++) {
+            struct sapling_received_note *note = &snap[ni];
+            node_db_sync_sapling_note(ndb,
+                note->txid.data, note->output_index,
+                (int64_t)note->value, note->rcm,
+                note->memo, 512, note->ivk,
+                note->diversifier, note->pk_d,
+                note->cm, note->nf, height);
+            zmsg_ingest_onchain_note(ndb, note->memo,
+                                     note->txid.data);
+        }
+        free(snap);
+    }
+}
+
+static bool tip_finalize_regtest_connect_enqueue_failed(
+    bool regtest_on_demand, struct node_db *ndb, const struct block *blk,
+    struct block_index *pindex_new, struct wallet *wallet)
+{
+    return ndb && regtest_on_demand &&
+           !node_db_sync_connect_block_async_with_wallet(
+               ndb, blk, pindex_new, wallet);
+}
+
 /* Idempotent wallet subset of post-finalize publication. A body can become
  * visible after another authority already published this height; in that
  * case MMR/MMB must not append twice, but wallet confirmation, Sapling note,
@@ -257,9 +312,7 @@ static void tip_finalize_reconcile_wallet_body(
 
     struct wallet *wallet = app_runtime_wallet();
     struct node_db *ndb = app_runtime_node_db();
-    const struct chain_params *cp_regtest = chain_params_get();
-    const bool regtest_on_demand =
-        cp_regtest && cp_regtest->fMineBlocksOnDemand;
+    const bool regtest_on_demand = tip_finalize_regtest_on_demand();
     if (!wallet)
         return;
 
@@ -269,10 +322,9 @@ static void tip_finalize_reconcile_wallet_body(
     for (size_t i = 0; i < blk->num_vtx; i++) {
         const struct transaction *tx = &blk->vtx[i];
         bool wallet_involved = wallet_sync_transaction(wallet, tx, pindex_new);
-        if (!regtest_on_demand && wallet_involved && ndb &&
-            !node_db_sync_wallet_tx_confirmed_async(
-                ndb, tx, wallet, pindex_new->nHeight,
-                pindex_new->phashBlock->data, pindex_new->nTime)) {
+        if (tip_finalize_wallet_confirm_enqueue_failed(
+                regtest_on_demand, wallet_involved, ndb, tx, wallet,
+                pindex_new)) {
             LOG_WARN("tip_finalize",
                      "wallet confirmation projection enqueue failed "
                      "at height %d tx %zu",
@@ -283,27 +335,8 @@ static void tip_finalize_reconcile_wallet_body(
             struct uint256 txid;
             if (!transaction_hash_serialized(tx, &txid))
                 continue;
-            zcl_mutex_lock(&wallet->cs);
-            size_t notes_before = wallet->num_sapling_notes;
-            zcl_mutex_unlock(&wallet->cs);
-            wallet_try_sapling_decrypt(wallet, tx, &txid);
-            if (ndb) {
-                size_t n_notes = 0;
-                struct sapling_received_note *snap =
-                    wallet_copy_sapling_notes(wallet, &n_notes);
-                for (size_t ni = notes_before; ni < n_notes; ni++) {
-                    struct sapling_received_note *note = &snap[ni];
-                    node_db_sync_sapling_note(ndb,
-                        note->txid.data, note->output_index,
-                        (int64_t)note->value, note->rcm,
-                        note->memo, 512, note->ivk,
-                        note->diversifier, note->pk_d,
-                        note->cm, note->nf, pindex_new->nHeight);
-                    zmsg_ingest_onchain_note(ndb, note->memo,
-                                             note->txid.data);
-                }
-                free(snap);
-            }
+            tip_finalize_wallet_sapling_outputs(wallet, ndb, tx, &txid,
+                                                pindex_new->nHeight);
         }
         if (tx->num_shielded_spend > 0)
             wallet_mark_sapling_nullifiers_spent(wallet, tx);
@@ -312,9 +345,8 @@ static void tip_finalize_reconcile_wallet_body(
     wallet->best_block_height = pindex_new->nHeight;
     zcl_mutex_unlock(&wallet->cs);
 
-    if (ndb && regtest_on_demand &&
-        !node_db_sync_connect_block_async_with_wallet(
-            ndb, blk, pindex_new, wallet)) {
+    if (tip_finalize_regtest_connect_enqueue_failed(
+            regtest_on_demand, ndb, blk, pindex_new, wallet)) {
         LOG_WARN("tip_finalize",
                  "regtest projection: async connect_block enqueue failed "
                  "at height %d", pindex_new->nHeight);
@@ -377,6 +409,48 @@ bool tip_finalize_run_wallet_mempool_reconcile(
     return true;
 }
 
+static bool tip_finalize_coinbase_label_differs(struct block_index *pindex_new,
+                                                const struct block *blk)
+{
+    if (pindex_new->nHeight >= 1 && pindex_new->phashBlock &&
+        blk->num_vtx > 0) {
+        struct uint256 body_hash;
+        block_get_hash(blk, &body_hash);
+        return uint256_eq(&body_hash, pindex_new->phashBlock) &&
+               !check_block_coinbase_height_matches(&blk->vtx[0],
+                                                    pindex_new->nHeight);
+    }
+    return false;
+}
+
+static void tip_finalize_note_projection_deferred(
+    struct block_index *pindex_new)
+{
+    struct node_db *ndb = app_runtime_node_db();
+    if (ndb)
+        block_source_policy_note_projection_deferred(
+            pindex_new->nHeight, "consensus_path");
+}
+
+static void tip_finalize_append_mmr(struct block_index *pindex_new)
+{
+    if (pindex_new->phashBlock)
+        rpc_blockchain_mmr_append(pindex_new->phashBlock->data);
+}
+
+static bool tip_finalize_boundary_fold_allowed(int height)
+{
+    extern _Atomic int g_deferred_proof_validation_below_height;
+    int defer_below = atomic_load(&g_deferred_proof_validation_below_height);
+    bool ibd_defer = (defer_below >= 0 && height <= defer_below);
+    /* Live catch-up: skip the O(N) boundary scan exactly like the
+     * IBD-defer posture (zero-sentinel leaf). Cheap: evaluated only
+     * at boundary heights; catchup_cadence_active() is two lock-free
+     * reads and touches no reducer-drive lock. */
+    bool catchup_defer = !ibd_defer && catchup_cadence_active();
+    return !ibd_defer && !catchup_defer;
+}
+
 void tip_finalize_run_post_finalize(struct block_index *pindex_new)
 {
     if (!pindex_new)
@@ -434,23 +508,16 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
      * is a mis-positioned/corrupt body — a different defect class, owned
      * by the have_data_unreadable machinery, and comparing ITS coinbase
      * against OUR label would be a false splice signal. */
-    if (pindex_new->nHeight >= 1 && pindex_new->phashBlock &&
-        blk->num_vtx > 0) {
-        struct uint256 body_hash;
-        block_get_hash(blk, &body_hash);
-        if (uint256_eq(&body_hash, pindex_new->phashBlock) &&
-            !check_block_coinbase_height_matches(&blk->vtx[0],
-                                                 pindex_new->nHeight)) {
-            char reason[160];
-            snprintf(reason, sizeof(reason),
-                     "coinbase-embedded height != our label h=%d (label "
-                     "shift detected at finalize; held before h=%d)",
-                     pindex_new->nHeight, pindex_new->nHeight + 1);
-            LOG_WARN("tip_finalize", "[validation_pack] %s", reason);
-            chain_linkage_hold_raise("coinbase_label",
-                                     "chain.coinbase_label_mismatch",
-                                     pindex_new->nHeight + 1, reason);
-        }
+    if (tip_finalize_coinbase_label_differs(pindex_new, blk)) {
+        char reason[160];
+        snprintf(reason, sizeof(reason),
+                 "coinbase-embedded height != our label h=%d (label "
+                 "shift detected at finalize; held before h=%d)",
+                 pindex_new->nHeight, pindex_new->nHeight + 1);
+        LOG_WARN("tip_finalize", "[validation_pack] %s", reason);
+        chain_linkage_hold_raise("coinbase_label",
+                                 "chain.coinbase_label_mismatch",
+                                 pindex_new->nHeight + 1, reason);
     }
 
     /* Wallet publication is idempotent and is also reused when this body
@@ -475,16 +542,10 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
      * DIAGNOSTIC counter. This is NOT a block reject: the tip already
      * advanced. Explicit import/catchup paths backfill the projection under
      * the DB service's write ownership. */
-    {
-        struct node_db *ndb = app_runtime_node_db();
-        if (ndb)
-            block_source_policy_note_projection_deferred(
-                pindex_new->nHeight, "consensus_path");
-    }
+    tip_finalize_note_projection_deferred(pindex_new);
 
     /* Append block hash to Merkle Mountain Range */
-    if (pindex_new->phashBlock)
-        rpc_blockchain_mmr_append(pindex_new->phashBlock->data);
+    tip_finalize_append_mmr(pindex_new);
 
     /* Append rich leaf to Merkle Mountain Belt (O(1) per block).
      *
@@ -523,16 +584,7 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
         uint8_t utxo_root[32] = {0};
         if (pindex_new->nHeight > 0 &&
             pindex_new->nHeight % MMR_COMMITMENT_INTERVAL == 0) {
-            extern _Atomic int g_deferred_proof_validation_below_height;
-            int defer_below = atomic_load(&g_deferred_proof_validation_below_height);
-            bool ibd_defer = (defer_below >= 0 &&
-                              pindex_new->nHeight <= defer_below);
-            /* Live catch-up: skip the O(N) boundary scan exactly like the
-             * IBD-defer posture (zero-sentinel leaf). Cheap: evaluated only
-             * at boundary heights; catchup_cadence_active() is two lock-free
-             * reads and touches no reducer-drive lock. */
-            bool catchup_defer = !ibd_defer && catchup_cadence_active();
-            if (!ibd_defer && !catchup_defer) {
+            if (tip_finalize_boundary_fold_allowed(pindex_new->nHeight)) {
                 sqlite3 *pdb = progress_store_db();
                 if (pdb && coins_kv_commitment(pdb, utxo_root) == 0) {
                     /* Persist before the leaf so a crash between append and
