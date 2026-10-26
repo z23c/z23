@@ -57,23 +57,36 @@ enum vcs_zcode_task_authority_result vcs_zcode_task_authority_bundle_export(
     return VCS_ZCODE_TASK_AUTHORITY_OK;
 }
 
+static bool task_authority_bundle_header_malformed(const uint8_t *wire,
+                                                   size_t wire_len)
+{
+    return wire_len < VCS_ZCODE_TASK_AUTHORITY_BUNDLE_HEADER_BYTES ||
+        memcmp(wire, task_authority_magic, 8) != 0 ||
+        vcs_rd_u16le(wire + 8) != VCS_ZCODE_TASK_AUTHORITY_BUNDLE_VERSION ||
+        vcs_rd_u16le(wire + 10) != 0;
+}
+
+static bool task_authority_bundle_lengths_inconsistent(
+    uint64_t lock_len64, uint64_t recipe_len64, size_t wire_len)
+{
+    return lock_len64 > VCS_PACKAGE_LOCK_MAX_WIRE_BYTES ||
+        recipe_len64 > VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES ||
+        lock_len64 + recipe_len64 +
+                VCS_ZCODE_TASK_AUTHORITY_BUNDLE_HEADER_BYTES != wire_len;
+}
+
 enum vcs_zcode_task_authority_result vcs_zcode_task_authority_bundle_import(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const uint8_t *wire, size_t wire_len)
 {
     if (!repo_root || !task || !wire)
         return VCS_ZCODE_TASK_AUTHORITY_NULL;
-    if (wire_len < VCS_ZCODE_TASK_AUTHORITY_BUNDLE_HEADER_BYTES ||
-        memcmp(wire, task_authority_magic, 8) != 0 ||
-        vcs_rd_u16le(wire + 8) != VCS_ZCODE_TASK_AUTHORITY_BUNDLE_VERSION ||
-        vcs_rd_u16le(wire + 10) != 0)
+    if (task_authority_bundle_header_malformed(wire, wire_len))
         return VCS_ZCODE_TASK_AUTHORITY_CAS;
     uint64_t lock_len64 = vcs_rd_u64le(wire + 12);
     uint64_t recipe_len64 = vcs_rd_u64le(wire + 20);
-    if (lock_len64 > VCS_PACKAGE_LOCK_MAX_WIRE_BYTES ||
-        recipe_len64 > VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES ||
-        lock_len64 + recipe_len64 +
-                VCS_ZCODE_TASK_AUTHORITY_BUNDLE_HEADER_BYTES != wire_len)
+    if (task_authority_bundle_lengths_inconsistent(lock_len64, recipe_len64,
+                                                   wire_len))
         return VCS_ZCODE_TASK_AUTHORITY_CAS;
     uint8_t lock_root[32], recipe_root[32]; size_t lock_len = (size_t)lock_len64;
     enum vcs_zcode_task_authority_result result =
@@ -102,17 +115,12 @@ vcs_zcode_task_authority_bundle_validate_for_candidate(
 {
     if (!repo_root || !task || !candidate || !wire)
         return VCS_ZCODE_TASK_AUTHORITY_NULL;
-    if (wire_len < VCS_ZCODE_TASK_AUTHORITY_BUNDLE_HEADER_BYTES ||
-        memcmp(wire, task_authority_magic, 8) != 0 ||
-        vcs_rd_u16le(wire + 8) != VCS_ZCODE_TASK_AUTHORITY_BUNDLE_VERSION ||
-        vcs_rd_u16le(wire + 10) != 0)
+    if (task_authority_bundle_header_malformed(wire, wire_len))
         return VCS_ZCODE_TASK_AUTHORITY_CAS;
     uint64_t lock_len64 = vcs_rd_u64le(wire + 12);
     uint64_t recipe_len64 = vcs_rd_u64le(wire + 20);
-    if (lock_len64 > VCS_PACKAGE_LOCK_MAX_WIRE_BYTES ||
-        recipe_len64 > VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES ||
-        lock_len64 + recipe_len64 +
-                VCS_ZCODE_TASK_AUTHORITY_BUNDLE_HEADER_BYTES != wire_len)
+    if (task_authority_bundle_lengths_inconsistent(lock_len64, recipe_len64,
+                                                   wire_len))
         return VCS_ZCODE_TASK_AUTHORITY_CAS;
     size_t lock_len = (size_t)lock_len64;
     const uint8_t *lock = wire + VCS_ZCODE_TASK_AUTHORITY_BUNDLE_HEADER_BYTES;
