@@ -367,10 +367,8 @@ static bool hr_attention(struct hr_fixture *f)
         &f->bid, &f->heuristic, &f->focus) == VCS_ZCODE_ATTENTION_OK;
 }
 
-static bool hr_fixture_build(const char *workspace, struct hr_fixture *f)
+static void hr_fixture_keypairs(struct hr_fixture *f)
 {
-    memset(f, 0, sizeof(*f));
-    hr_study_task_heuristic(f);
     uint8_t seed[32];
     hr_root(seed, 80);
     ed25519_keypair(f->evaluator_pubkey, f->evaluator_secret, seed);
@@ -378,6 +376,13 @@ static bool hr_fixture_build(const char *workspace, struct hr_fixture *f)
         hr_root(seed, (uint8_t)(81u + i));
         ed25519_keypair(f->pubkey[i], f->secret[i], seed);
     }
+}
+
+static bool hr_fixture_build(const char *workspace, struct hr_fixture *f)
+{
+    memset(f, 0, sizeof(*f));
+    hr_study_task_heuristic(f);
+    hr_fixture_keypairs(f);
     hr_result(&f->original, f, 60, 1300);
     if (!hr_store_study(workspace, &f->study, f->study_root) ||
         !hr_store_task(workspace, &f->task, f->task_root) ||
@@ -792,174 +797,223 @@ static bool hr_report_unchanged(
     return memcmp(report, sentinel, sizeof(*report)) == 0;
 }
 
-int test_zcode_heuristic_replication(void)
+static int hr_check_empty_policy_set(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report)
 {
     int failures = 0;
-    char workspace[160];
-    int n = snprintf(workspace, sizeof(workspace),
-        "test-tmp/zcode_heuristic_replication_%d", (int)getpid());
-    test_cleanup_tmpdir(workspace);
-    bool setup = n > 0 && (size_t)n < sizeof(workspace) &&
-        (mkdir("test-tmp", 0700) == 0 || access("test-tmp", F_OK) == 0) &&
-        mkdir(workspace, 0700) == 0 && vcs_object_store_init(workspace);
-    HR_CHECK("workspace-initializes", setup);
-    if (!setup) return failures + 1;
-
-    struct hr_fixture f;
-    bool built = hr_fixture_build(workspace, &f);
-    HR_CHECK("signed-science-fixture-builds", built);
-    if (!built) {
-        test_cleanup_tmpdir(workspace);
-        return failures + 1;
-    }
-
-    struct vcs_zcode_heuristic_replication_snapshot_v1 snapshot;
-    struct vcs_zcode_heuristic_replication_report report, sentinel;
-    memset(&sentinel, 0x6d, sizeof(sentinel));
-    hr_snapshot(&snapshot, &f, NULL, 0);
+    hr_snapshot(snapshot, f, NULL, 0);
     HR_CHECK("empty-policy-set-is-complete-below-threshold",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
-            VCS_ZCODE_ATTENTION_OK && report.complete && !report.qualified &&
-        report.reason ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
+            VCS_ZCODE_ATTENTION_OK && report->complete && !report->qualified &&
+        report->reason ==
             VCS_ZCODE_HEURISTIC_REPLICATION_REASON_BELOW_THRESHOLD &&
-        report.required_reproductions == 2 && report.validated_count == 0);
+        report->required_reproductions == 2 && report->validated_count == 0);
+    return failures;
+}
 
-    const size_t one[] = {0};
-    hr_snapshot(&snapshot, &f, one, 1);
+static int hr_check_single_signer_threshold(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    const size_t *one)
+{
+    int failures = 0;
+    hr_snapshot(snapshot, f, one, 1);
     HR_CHECK("threshold-minus-one-remains-undetermined",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
-            VCS_ZCODE_ATTENTION_OK && !report.qualified &&
-        report.replicated_count == 1 &&
-        report.reason ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
+            VCS_ZCODE_ATTENTION_OK && !report->qualified &&
+        report->replicated_count == 1 &&
+        report->reason ==
             VCS_ZCODE_HEURISTIC_REPLICATION_REASON_BELOW_THRESHOLD);
+    return failures;
+}
 
-    const size_t exact[] = {0, 1};
-    hr_snapshot(&snapshot, &f, exact, 2);
+static int hr_check_exact_signers_qualify(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    const size_t *exact)
+{
+    int failures = 0;
+    hr_snapshot(snapshot, f, exact, 2);
     HR_CHECK("exact-distinct-signer-threshold-qualifies-after-expiry",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
-            VCS_ZCODE_ATTENTION_OK && report.qualified &&
-        report.replicated_count == 2 &&
-        report.reason == VCS_ZCODE_HEURISTIC_REPLICATION_REASON_NONE &&
-        memcmp(report.study_root, f.study_root, 32) == 0 &&
-        memcmp(report.original_result_root, f.original_root, 32) == 0);
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
+            VCS_ZCODE_ATTENTION_OK && report->qualified &&
+        report->replicated_count == 2 &&
+        report->reason == VCS_ZCODE_HEURISTIC_REPLICATION_REASON_NONE &&
+        memcmp(report->study_root, f->study_root, 32) == 0 &&
+        memcmp(report->original_result_root, f->original_root, 32) == 0);
+    return failures;
+}
 
+static int hr_check_inconclusive_not_counted(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report)
+{
+    int failures = 0;
     const size_t inconclusive[] = {0, 2};
-    hr_snapshot(&snapshot, &f, inconclusive, 2);
+    hr_snapshot(snapshot, f, inconclusive, 2);
     HR_CHECK("inconclusive-is-valid-but-does-not-count",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
-            VCS_ZCODE_ATTENTION_OK && !report.qualified &&
-        report.replicated_count == 1 && report.inconclusive_count == 1 &&
-        report.reason ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
+            VCS_ZCODE_ATTENTION_OK && !report->qualified &&
+        report->replicated_count == 1 && report->inconclusive_count == 1 &&
+        report->reason ==
             VCS_ZCODE_HEURISTIC_REPLICATION_REASON_INCONCLUSIVE);
+    return failures;
+}
 
-    const size_t contradicted[] = {0, 1, 3};
-    hr_snapshot(&snapshot, &f, contradicted, 3);
+static int hr_check_contradiction_blocks(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    const size_t *contradicted)
+{
+    int failures = 0;
+    hr_snapshot(snapshot, f, contradicted, 3);
     HR_CHECK("contradiction-blocks-without-synthetic-retirement",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
-            VCS_ZCODE_ATTENTION_OK && !report.qualified &&
-        report.replicated_count == 2 && report.contradicted_count == 1 &&
-        report.reason ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
+            VCS_ZCODE_ATTENTION_OK && !report->qualified &&
+        report->replicated_count == 2 && report->contradicted_count == 1 &&
+        report->reason ==
             VCS_ZCODE_HEURISTIC_REPLICATION_REASON_CONTRADICTED);
+    return failures;
+}
 
-    hr_snapshot(&snapshot, &f, exact, 2);
-    memcpy(snapshot.statement_roots[1], snapshot.statement_roots[0], 32);
-    report = sentinel;
+static int hr_check_accepted_root_refusals(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    struct vcs_zcode_heuristic_replication_report *sentinel,
+    const size_t *exact,
+    uint8_t *missing)
+{
+    int failures = 0;
+    hr_snapshot(snapshot, f, exact, 2);
+    memcpy(snapshot->statement_roots[1], snapshot->statement_roots[0], 32);
+    *report = *sentinel;
     HR_CHECK("duplicate-accepted-root-refuses-atomically",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
-            VCS_ZCODE_ATTENTION_ORDER && hr_report_unchanged(&report, &sentinel));
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
+            VCS_ZCODE_ATTENTION_ORDER && hr_report_unchanged(report, sentinel));
 
-    hr_snapshot(&snapshot, &f, exact, 2);
-    snapshot.statement_roots[2][0] = 1;
-    report = sentinel;
+    hr_snapshot(snapshot, f, exact, 2);
+    snapshot->statement_roots[2][0] = 1;
+    *report = *sentinel;
     HR_CHECK("inactive-root-and-output-alias-refuse",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
-            VCS_ZCODE_ATTENTION_ROOT && hr_report_unchanged(&report, &sentinel) &&
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
+            VCS_ZCODE_ATTENTION_ROOT && hr_report_unchanged(report, sentinel) &&
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000,
-            (struct vcs_zcode_heuristic_replication_report *)&snapshot) ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000,
+            (struct vcs_zcode_heuristic_replication_report *)snapshot) ==
             VCS_ZCODE_ATTENTION_ALIAS);
 
-    hr_snapshot(&snapshot, &f, exact, 2);
-    uint8_t missing[32];
+    hr_snapshot(snapshot, f, exact, 2);
     hr_root(missing, 250);
-    memcpy(snapshot.statement_roots[0], missing, 32);
-    hr_sort(snapshot.statement_roots, 2);
-    report = sentinel;
+    memcpy(snapshot->statement_roots[0], missing, 32);
+    hr_sort(snapshot->statement_roots, 2);
+    *report = *sentinel;
     HR_CHECK("missing-policy-accepted-evidence-poisons-fold",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
-        hr_report_unchanged(&report, &sentinel));
+        hr_report_unchanged(report, sentinel));
+    return failures;
+}
 
-    struct hr_fixture duplicate_signer = f;
-    duplicate_signer.statement[1] = f.statement[1];
+static int hr_check_duplicate_signer_refusal(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    struct vcs_zcode_heuristic_replication_report *sentinel,
+    const size_t *exact,
+    struct vcs_zcode_science_relation_set_v1 *support)
+{
+    int failures = 0;
+    struct hr_fixture duplicate_signer = *f;
+    duplicate_signer.statement[1] = f->statement[1];
     memcpy(duplicate_signer.reproduction[1].reproducer_pubkey,
-           f.pubkey[0], 32);
+           f->pubkey[0], 32);
     bool replay_built = hr_store_reproduction(
         workspace, &duplicate_signer.reproduction[1],
         duplicate_signer.reproduction_root[1]);
     memcpy(duplicate_signer.statement[1].predicate_body_root,
            duplicate_signer.reproduction_root[1], 32);
-    memcpy(duplicate_signer.statement[1].signer_pubkey, f.pubkey[0], 32);
+    memcpy(duplicate_signer.statement[1].signer_pubkey, f->pubkey[0], 32);
     memset(duplicate_signer.statement[1].signature, 0, 64);
     replay_built = replay_built &&
         vcs_zcode_science_statement_seal(
-            &duplicate_signer.statement[1], f.secret[0], f.pubkey[0]) ==
+            &duplicate_signer.statement[1], f->secret[0], f->pubkey[0]) ==
             VCS_ZCODE_SCIENCE_OK;
-    struct vcs_zcode_science_relation_set_v1 support = {
-        .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
-        .row_count = 1,
-        .rows = {{.type = VCS_ZCODE_SCIENCE_RELATION_SUPPORT}},
-    };
-    memcpy(support.rows[0].statement_root, f.anchor_root, 32);
+    memcpy(support->rows[0].statement_root, f->anchor_root, 32);
     replay_built = replay_built && hr_store_statement(
-        workspace, &duplicate_signer.statement[1], &support,
+        workspace, &duplicate_signer.statement[1], support,
         duplicate_signer.statement_root[1]);
     HR_CHECK("duplicate-signer-fixture-builds", replay_built);
-    hr_snapshot(&snapshot, &duplicate_signer, exact, 2);
-    report = sentinel;
+    hr_snapshot(snapshot, &duplicate_signer, exact, 2);
+    *report = *sentinel;
     HR_CHECK("same-signer-cannot-satisfy-independence",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
-        hr_report_unchanged(&report, &sentinel));
+        hr_report_unchanged(report, sentinel));
+    return failures;
+}
 
-    struct hr_fixture self_signed = f;
-    self_signed.statement[0] = f.statement[0];
+static int hr_check_signer_identity_refusals(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    struct vcs_zcode_heuristic_replication_report *sentinel,
+    const size_t *one,
+    struct vcs_zcode_science_relation_set_v1 *support)
+{
+    int failures = 0;
+    struct hr_fixture self_signed = *f;
+    self_signed.statement[0] = f->statement[0];
     memcpy(self_signed.reproduction[0].reproducer_pubkey,
-           f.evaluator_pubkey, 32);
+           f->evaluator_pubkey, 32);
     bool self_built = hr_store_reproduction(
         workspace, &self_signed.reproduction[0],
         self_signed.reproduction_root[0]);
     memcpy(self_signed.statement[0].predicate_body_root,
            self_signed.reproduction_root[0], 32);
-    memcpy(self_signed.statement[0].signer_pubkey, f.evaluator_pubkey, 32);
+    memcpy(self_signed.statement[0].signer_pubkey, f->evaluator_pubkey, 32);
     memset(self_signed.statement[0].signature, 0, 64);
     self_built = self_built && vcs_zcode_science_statement_seal(
-        &self_signed.statement[0], f.evaluator_secret, f.evaluator_pubkey) ==
+        &self_signed.statement[0], f->evaluator_secret, f->evaluator_pubkey) ==
         VCS_ZCODE_SCIENCE_OK && hr_store_statement(
-            workspace, &self_signed.statement[0], &support,
+            workspace, &self_signed.statement[0], support,
             self_signed.statement_root[0]);
     HR_CHECK("evaluator-reproduction-fixture-builds", self_built);
-    hr_snapshot(&snapshot, &self_signed, one, 1);
-    report = sentinel;
+    hr_snapshot(snapshot, &self_signed, one, 1);
+    *report = *sentinel;
     HR_CHECK("evaluator-cannot-reproduce-own-result",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
-        hr_report_unchanged(&report, &sentinel));
+        hr_report_unchanged(report, sentinel));
 
-    struct hr_fixture mismatched_key = f;
-    mismatched_key.statement[0] = f.statement[0];
+    struct hr_fixture mismatched_key = *f;
+    mismatched_key.statement[0] = f->statement[0];
     memcpy(mismatched_key.reproduction[0].reproducer_pubkey,
-           f.pubkey[1], 32);
+           f->pubkey[1], 32);
     bool mismatch_built = hr_store_reproduction(
         workspace, &mismatched_key.reproduction[0],
         mismatched_key.reproduction_root[0]);
@@ -967,21 +1021,21 @@ int test_zcode_heuristic_replication(void)
            mismatched_key.reproduction_root[0], 32);
     memset(mismatched_key.statement[0].signature, 0, 64);
     mismatch_built = mismatch_built && vcs_zcode_science_statement_seal(
-        &mismatched_key.statement[0], f.secret[0], f.pubkey[0]) ==
+        &mismatched_key.statement[0], f->secret[0], f->pubkey[0]) ==
         VCS_ZCODE_SCIENCE_OK && hr_store_statement(
-            workspace, &mismatched_key.statement[0], &support,
+            workspace, &mismatched_key.statement[0], support,
             mismatched_key.statement_root[0]);
     HR_CHECK("declared-key-mismatch-fixture-builds", mismatch_built);
-    hr_snapshot(&snapshot, &mismatched_key, one, 1);
-    report = sentinel;
+    hr_snapshot(snapshot, &mismatched_key, one, 1);
+    *report = *sentinel;
     HR_CHECK("signed-envelope-authenticates-declared-reproducer",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
-        hr_report_unchanged(&report, &sentinel));
+        hr_report_unchanged(report, sentinel));
 
-    struct hr_fixture post_hoc_policy = f;
-    post_hoc_policy.statement[0] = f.statement[0];
+    struct hr_fixture post_hoc_policy = *f;
+    post_hoc_policy.statement[0] = f->statement[0];
     hr_root(post_hoc_policy.reproduction[0].comparison_policy_root, 251);
     bool post_hoc_policy_built = hr_store_reproduction(
         workspace, &post_hoc_policy.reproduction[0],
@@ -993,20 +1047,30 @@ int test_zcode_heuristic_replication(void)
     memset(post_hoc_policy.statement[0].signature, 0, 64);
     post_hoc_policy_built = post_hoc_policy_built &&
         vcs_zcode_science_statement_seal(
-            &post_hoc_policy.statement[0], f.secret[0], f.pubkey[0]) ==
+            &post_hoc_policy.statement[0], f->secret[0], f->pubkey[0]) ==
             VCS_ZCODE_SCIENCE_OK && hr_store_statement(
-                workspace, &post_hoc_policy.statement[0], &support,
+                workspace, &post_hoc_policy.statement[0], support,
                 post_hoc_policy.statement_root[0]);
     HR_CHECK("post-hoc-comparison-policy-fixture-builds",
              post_hoc_policy_built);
-    hr_snapshot(&snapshot, &post_hoc_policy, one, 1);
-    report = sentinel;
+    hr_snapshot(snapshot, &post_hoc_policy, one, 1);
+    *report = *sentinel;
     HR_CHECK("signed-post-hoc-comparison-policy-refuses-atomically",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
-        hr_report_unchanged(&report, &sentinel));
+        hr_report_unchanged(report, sentinel));
+    return failures;
+}
 
+static int hr_check_ineligible_anchor_refusals(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    struct vcs_zcode_heuristic_replication_report *sentinel)
+{
+    int failures = 0;
     const struct {
         uint8_t status;
         const char *fixture_name;
@@ -1024,20 +1088,31 @@ int test_zcode_heuristic_replication(void)
     };
     for (size_t i = 0;
          i < sizeof(ineligible_anchors) / sizeof(ineligible_anchors[0]); i++) {
-        struct hr_fixture ineligible_anchor = f;
+        struct hr_fixture ineligible_anchor = *f;
         bool ineligible_anchor_built = hr_rewrite_anchor_status(
             workspace, &ineligible_anchor, ineligible_anchors[i].status);
         HR_CHECK(ineligible_anchors[i].fixture_name,
                  ineligible_anchor_built);
-        hr_snapshot(&snapshot, &ineligible_anchor, NULL, 0);
-        report = sentinel;
+        hr_snapshot(snapshot, &ineligible_anchor, NULL, 0);
+        *report = *sentinel;
         HR_CHECK(ineligible_anchors[i].refusal_name,
             vcs_zcode_heuristic_replication_fold(
-                workspace, &f.heuristic, &f.action, &snapshot, 6000,
-                &report) == VCS_ZCODE_ATTENTION_EVIDENCE &&
-            hr_report_unchanged(&report, &sentinel));
+                workspace, &f->heuristic, &f->action, snapshot, 6000,
+                report) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+            hr_report_unchanged(report, sentinel));
     }
+    return failures;
+}
 
+static int hr_check_inconsistent_row_refusals(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    struct vcs_zcode_heuristic_replication_report *sentinel,
+    const size_t *one)
+{
+    int failures = 0;
     const struct {
         uint8_t status;
         uint8_t verdict;
@@ -1067,145 +1142,224 @@ int test_zcode_heuristic_replication(void)
     };
     for (size_t i = 0;
          i < sizeof(inconsistent_rows) / sizeof(inconsistent_rows[0]); i++) {
-        struct hr_fixture inconsistent = f;
+        struct hr_fixture inconsistent = *f;
         bool inconsistent_built = hr_rewrite_reproduced_status(
             workspace, &inconsistent, 0, inconsistent_rows[i].status,
             inconsistent_rows[i].verdict);
         HR_CHECK(inconsistent_rows[i].fixture_name, inconsistent_built);
-        hr_snapshot(&snapshot, &inconsistent, one, 1);
-        report = sentinel;
+        hr_snapshot(snapshot, &inconsistent, one, 1);
+        *report = *sentinel;
         HR_CHECK(inconsistent_rows[i].refusal_name,
             vcs_zcode_heuristic_replication_fold(
-                workspace, &f.heuristic, &f.action, &snapshot, 6000,
-                &report) == VCS_ZCODE_ATTENTION_EVIDENCE &&
-            hr_report_unchanged(&report, &sentinel));
+                workspace, &f->heuristic, &f->action, snapshot, 6000,
+                report) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+            hr_report_unchanged(report, sentinel));
     }
+    return failures;
+}
 
-    struct hr_fixture negative_contradiction = f;
+static int hr_check_negative_contradiction(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    const size_t *exact)
+{
+    int failures = 0;
+    struct hr_fixture negative_contradiction = *f;
     bool negative_contradiction_built = hr_rewrite_reproduced_status(
         workspace, &negative_contradiction, 1,
         VCS_ZCODE_BENCHMARK_NEGATIVE_RESULT,
         VCS_ZCODE_REPRODUCTION_CONTRADICTED);
     HR_CHECK("negative-contradiction-fixture-builds",
              negative_contradiction_built);
-    hr_snapshot(&snapshot, &negative_contradiction, exact, 2);
+    hr_snapshot(snapshot, &negative_contradiction, exact, 2);
     HR_CHECK("negative-result-is-an-honest-contradiction",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
-            VCS_ZCODE_ATTENTION_OK && !report.qualified &&
-        report.replicated_count == 1 && report.contradicted_count == 1 &&
-        report.reason ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
+            VCS_ZCODE_ATTENTION_OK && !report->qualified &&
+        report->replicated_count == 1 && report->contradicted_count == 1 &&
+        report->reason ==
             VCS_ZCODE_HEURISTIC_REPLICATION_REASON_CONTRADICTED);
+    return failures;
+}
 
-    struct hr_fixture replayed_result = f;
-    replayed_result.statement[1] = f.statement[1];
+static int hr_check_replayed_result_refusal(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    struct vcs_zcode_heuristic_replication_report *sentinel,
+    const size_t *exact,
+    struct vcs_zcode_science_relation_set_v1 *support)
+{
+    int failures = 0;
+    struct hr_fixture replayed_result = *f;
+    replayed_result.statement[1] = f->statement[1];
     memcpy(replayed_result.reproduction[1].reproduced_result_root,
-           f.reproduced_root[0], 32);
+           f->reproduced_root[0], 32);
     memcpy(replayed_result.reproduction[1].reproduced_environment_root,
-           f.reproduced[0].achieved_environment_root, 32);
+           f->reproduced[0].achieved_environment_root, 32);
     bool result_replay_built = hr_store_reproduction(
         workspace, &replayed_result.reproduction[1],
         replayed_result.reproduction_root[1]);
     memcpy(replayed_result.statement[1].predicate_body_root,
            replayed_result.reproduction_root[1], 32);
     memcpy(replayed_result.statement[1].provenance_root,
-           f.reproduced_root[0], 32);
+           f->reproduced_root[0], 32);
     memset(replayed_result.statement[1].signature, 0, 64);
     result_replay_built = result_replay_built &&
         vcs_zcode_science_statement_seal(
-            &replayed_result.statement[1], f.secret[1], f.pubkey[1]) ==
+            &replayed_result.statement[1], f->secret[1], f->pubkey[1]) ==
             VCS_ZCODE_SCIENCE_OK && hr_store_statement(
-                workspace, &replayed_result.statement[1], &support,
+                workspace, &replayed_result.statement[1], support,
                 replayed_result.statement_root[1]);
     HR_CHECK("replayed-result-fixture-builds", result_replay_built);
-    hr_snapshot(&snapshot, &replayed_result, exact, 2);
-    report = sentinel;
+    hr_snapshot(snapshot, &replayed_result, exact, 2);
+    *report = *sentinel;
     HR_CHECK("one-result-cannot-be-counted-by-two-signers",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
-        hr_report_unchanged(&report, &sentinel));
+        hr_report_unchanged(report, sentinel));
+    return failures;
+}
 
-    struct hr_fixture pre_study = f;
+static int hr_check_pre_study_refusal(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    struct vcs_zcode_heuristic_replication_report *sentinel)
+{
+    int failures = 0;
+    struct hr_fixture pre_study = *f;
     pre_study.original.started_unix = 900;
     bool pre_study_built = hr_store_result(
         workspace, &pre_study.original, pre_study.original_root);
     struct vcs_zcode_science_relation_set_v1 empty = {
         .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
     };
-    pre_study.anchor = f.anchor;
+    pre_study.anchor = f->anchor;
     memcpy(pre_study.anchor.provenance_root, pre_study.original_root, 32);
     memset(pre_study.anchor.signature, 0, 64);
     pre_study_built = pre_study_built &&
         vcs_zcode_science_statement_seal(
-            &pre_study.anchor, f.evaluator_secret, f.evaluator_pubkey) ==
+            &pre_study.anchor, f->evaluator_secret, f->evaluator_pubkey) ==
             VCS_ZCODE_SCIENCE_OK && hr_store_statement(
                 workspace, &pre_study.anchor, &empty, pre_study.anchor_root);
     HR_CHECK("pre-study-result-fixture-builds", pre_study_built);
-    hr_snapshot(&snapshot, &pre_study, NULL, 0);
-    report = sentinel;
+    hr_snapshot(snapshot, &pre_study, NULL, 0);
+    *report = *sentinel;
     HR_CHECK("pre-study-benchmark-cannot-qualify",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
+            workspace, &f->heuristic, &f->action, snapshot, 6000, report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
-        hr_report_unchanged(&report, &sentinel));
+        hr_report_unchanged(report, sentinel));
+    return failures;
+}
 
-    struct vcs_build_action_v1 noncanonical_action = f.action;
+static int hr_check_action_and_cutoff_refusals(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_replication_report *report,
+    struct vcs_zcode_heuristic_replication_report *sentinel,
+    const size_t *one)
+{
+    int failures = 0;
+    struct vcs_build_action_v1 noncanonical_action = f->action;
     noncanonical_action.flags_sha3[0] ^= 1u;
-    hr_snapshot(&snapshot, &f, NULL, 0);
-    report = sentinel;
+    hr_snapshot(snapshot, f, NULL, 0);
+    *report = *sentinel;
     HR_CHECK("noncanonical-action-cannot-qualify",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &noncanonical_action,
-            &snapshot, 6000, &report) == VCS_ZCODE_ATTENTION_EVIDENCE &&
-        hr_report_unchanged(&report, &sentinel));
+            workspace, &f->heuristic, &noncanonical_action,
+            snapshot, 6000, report) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+        hr_report_unchanged(report, sentinel));
 
-    hr_snapshot(&snapshot, &f, one, 1);
-    report = sentinel;
+    hr_snapshot(snapshot, f, one, 1);
+    *report = *sentinel;
     HR_CHECK("future-cutoff-refuses-atomically",
         vcs_zcode_heuristic_replication_fold(
-            workspace, &f.heuristic, &f.action, &snapshot, 1499, &report) ==
+            workspace, &f->heuristic, &f->action, snapshot, 1499, report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
-        hr_report_unchanged(&report, &sentinel));
+        hr_report_unchanged(report, sentinel));
+    return failures;
+}
 
-    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 lifecycle;
-    struct vcs_zcode_attention_qualified_report qualified, qualified_before;
-    size_t selected = SIZE_MAX;
-    hr_lifecycle_snapshot(&lifecycle, &f);
-    hr_snapshot(&snapshot, &f, exact, 2);
+static int hr_check_retained_frontier_states(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lifecycle,
+    struct vcs_zcode_attention_qualified_report *qualified,
+    size_t *selected,
+    const size_t *exact)
+{
+    int failures = 0;
+    hr_lifecycle_snapshot(lifecycle, f);
+    hr_snapshot(snapshot, f, exact, 2);
     HR_CHECK("retained-and-replicated-enters-attention-frontier",
-        hr_select(workspace, &f, &lifecycle, &snapshot, &selected,
-                  &qualified) == VCS_ZCODE_ATTENTION_OK && selected == 0 &&
-        qualified.verified_count == 1 && qualified.retained_count == 1 &&
-        qualified.qualified_count == 1 &&
-        qualified.choice.frontier.input_count == 1);
+        hr_select(workspace, f, lifecycle, snapshot, selected,
+                  qualified) == VCS_ZCODE_ATTENTION_OK && *selected == 0 &&
+        qualified->verified_count == 1 && qualified->retained_count == 1 &&
+        qualified->qualified_count == 1 &&
+        qualified->choice.frontier.input_count == 1);
+    return failures;
+}
 
-    hr_snapshot(&snapshot, &f, one, 1);
-    selected = SIZE_MAX;
+static int hr_check_retained_below_threshold(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lifecycle,
+    struct vcs_zcode_attention_qualified_report *qualified,
+    size_t *selected,
+    const size_t *one,
+    const size_t *contradicted)
+{
+    int failures = 0;
+    hr_snapshot(snapshot, f, one, 1);
+    *selected = SIZE_MAX;
     HR_CHECK("retained-below-threshold-is-ineligible-not-retired",
-        hr_select(workspace, &f, &lifecycle, &snapshot, &selected,
-                  &qualified) == VCS_ZCODE_ATTENTION_OK &&
-        selected == SIZE_MAX &&
-        qualified.retained_count == 1 && qualified.qualified_count == 0 &&
-        qualified.retained_unqualified_count == 1 &&
-        qualified.retired_count == 0);
+        hr_select(workspace, f, lifecycle, snapshot, selected,
+                  qualified) == VCS_ZCODE_ATTENTION_OK &&
+        *selected == SIZE_MAX &&
+        qualified->retained_count == 1 && qualified->qualified_count == 0 &&
+        qualified->retained_unqualified_count == 1 &&
+        qualified->retired_count == 0);
 
-    hr_snapshot(&snapshot, &f, contradicted, 3);
-    selected = SIZE_MAX;
+    hr_snapshot(snapshot, f, contradicted, 3);
+    *selected = SIZE_MAX;
     HR_CHECK("contradiction-blocks-attention-without-retirement",
-        hr_select(workspace, &f, &lifecycle, &snapshot, &selected,
-                  &qualified) == VCS_ZCODE_ATTENTION_OK &&
-        selected == SIZE_MAX &&
-        qualified.retained_unqualified_count == 1 &&
-        qualified.retired_count == 0);
+        hr_select(workspace, f, lifecycle, snapshot, selected,
+                  qualified) == VCS_ZCODE_ATTENTION_OK &&
+        *selected == SIZE_MAX &&
+        qualified->retained_unqualified_count == 1 &&
+        qualified->retired_count == 0);
+    return failures;
+}
 
+static int hr_check_retracted_row_ineligible(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lifecycle,
+    struct vcs_zcode_attention_qualified_report *qualified,
+    struct vcs_zcode_attention_qualified_report *qualified_before,
+    size_t *selected,
+    const size_t *exact,
+    uint8_t *missing)
+{
+    int failures = 0;
     struct vcs_zcode_science_relation_set_v1 retract_relations = {
         .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
         .row_count = 1,
         .rows = {{.type = VCS_ZCODE_SCIENCE_RELATION_RETRACTION}},
     };
-    memcpy(retract_relations.rows[0].statement_root, f.anchor_root, 32);
-    struct vcs_zcode_science_statement_v1 retraction = f.anchor;
+    memcpy(retract_relations.rows[0].statement_root, f->anchor_root, 32);
+    struct vcs_zcode_science_statement_v1 retraction = f->anchor;
     retraction.profile = VCS_ZCODE_SCIENCE_PROFILE_RETRACTION;
     retraction.relation_count = 1;
     retraction.relation_types = VCS_ZCODE_SCIENCE_RELATION_MASK(
@@ -1216,40 +1370,53 @@ int test_zcode_heuristic_replication(void)
     memset(retraction.signature, 0, sizeof(retraction.signature));
     uint8_t retraction_root[32];
     bool retraction_built = vcs_zcode_science_statement_seal(
-            &retraction, f.evaluator_secret, f.evaluator_pubkey) ==
+            &retraction, f->evaluator_secret, f->evaluator_pubkey) ==
             VCS_ZCODE_SCIENCE_OK &&
         hr_store_statement(workspace, &retraction, &retract_relations,
                            retraction_root);
-    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 retired = lifecycle;
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 retired = *lifecycle;
     retired.statement_count = 2;
     memcpy(retired.statement_roots[1], retraction_root, 32);
     hr_sort(retired.statement_roots, 2);
-    hr_snapshot(&snapshot, &f, exact, 2);
-    selected = SIZE_MAX;
+    hr_snapshot(snapshot, f, exact, 2);
+    *selected = SIZE_MAX;
     HR_CHECK("qualified-retracted-row-remains-ineligible",
         retraction_built &&
-        hr_select(workspace, &f, &retired, &snapshot, &selected,
-                  &qualified) == VCS_ZCODE_ATTENTION_OK &&
-        selected == SIZE_MAX && qualified.retained_count == 0 &&
-        qualified.qualified_count == 0 && qualified.retired_count == 1);
-    memcpy(snapshot.statement_roots[0], missing, 32);
-    hr_sort(snapshot.statement_roots, 2);
-    memset(&qualified, 0x7b, sizeof(qualified));
-    qualified_before = qualified;
+        hr_select(workspace, f, &retired, snapshot, selected,
+                  qualified) == VCS_ZCODE_ATTENTION_OK &&
+        *selected == SIZE_MAX && qualified->retained_count == 0 &&
+        qualified->qualified_count == 0 && qualified->retired_count == 1);
+    memcpy(snapshot->statement_roots[0], missing, 32);
+    hr_sort(snapshot->statement_roots, 2);
+    memset(qualified, 0x7b, sizeof(*qualified));
+    *qualified_before = *qualified;
     HR_CHECK("malformed-replication-in-retired-row-poisons-batch",
-        hr_select(workspace, &f, &retired, &snapshot, &selected,
-                  &qualified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
-        memcmp(&qualified, &qualified_before, sizeof(qualified)) == 0);
+        hr_select(workspace, f, &retired, snapshot, selected,
+                  qualified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+        memcmp(qualified, qualified_before, sizeof(*qualified)) == 0);
+    return failures;
+}
 
-    struct vcs_zcode_attention_bid_v1 generation_bids[2] = {f.bid, f.bid};
+static int hr_check_generation_duplicate_refusal(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lifecycle,
+    struct vcs_zcode_attention_qualified_report *qualified,
+    struct vcs_zcode_attention_qualified_report *qualified_before,
+    size_t *selected,
+    const size_t *exact)
+{
+    int failures = 0;
+    struct vcs_zcode_attention_bid_v1 generation_bids[2] = {f->bid, f->bid};
     struct vcs_zcode_heuristic_v1 generation_heuristics[2] = {
-        f.heuristic, f.heuristic
+        f->heuristic, f->heuristic
     };
     struct vcs_zcode_science_statement_v1 generation_anchors[2] = {
-        f.anchor, f.anchor
+        f->anchor, f->anchor
     };
     struct vcs_zcode_heuristic_lifecycle_snapshot_v1 generation_lifecycle[2];
-    struct vcs_build_action_v1 generation_actions[2] = {f.action, f.action};
+    struct vcs_build_action_v1 generation_actions[2] = {f->action, f->action};
     struct vcs_zcode_heuristic_replication_snapshot_v1 generation_replication[2];
     generation_bids[1].expected_user_value_bp++;
     (void)vcs_zcode_attention_bid_root(
@@ -1260,83 +1427,110 @@ int test_zcode_heuristic_replication(void)
         .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
     };
     bool generation_built = vcs_zcode_science_statement_seal(
-            &generation_anchors[1], f.evaluator_secret,
-            f.evaluator_pubkey) == VCS_ZCODE_SCIENCE_OK;
+            &generation_anchors[1], f->evaluator_secret,
+            f->evaluator_pubkey) == VCS_ZCODE_SCIENCE_OK;
     uint8_t second_anchor_root[32];
     generation_built = generation_built && hr_store_statement(
         workspace, &generation_anchors[1], &no_relations,
         second_anchor_root);
-    hr_lifecycle_snapshot(&generation_lifecycle[0], &f);
+    hr_lifecycle_snapshot(&generation_lifecycle[0], f);
     generation_lifecycle[1] = generation_lifecycle[0];
     memcpy(generation_lifecycle[1].anchor_statement_root,
            second_anchor_root, 32);
     memcpy(generation_lifecycle[1].statement_roots[0],
            second_anchor_root, 32);
-    hr_snapshot(&generation_replication[0], &f, exact, 2);
-    hr_snapshot(&generation_replication[1], &f, NULL, 0);
+    hr_snapshot(&generation_replication[0], f, exact, 2);
+    hr_snapshot(&generation_replication[1], f, NULL, 0);
     memcpy(generation_replication[1].anchor_statement_root,
            second_anchor_root, 32);
-    memset(&qualified, 0x7b, sizeof(qualified));
-    qualified_before = qualified;
-    selected = SIZE_MAX;
+    memset(qualified, 0x7b, sizeof(*qualified));
+    *qualified_before = *qualified;
+    *selected = SIZE_MAX;
     HR_CHECK("unqualified-generation-cannot-hide-retained-duplicate",
         generation_built &&
         vcs_zcode_attention_frontier_next_verified_with_lifecycle_and_replication(
             workspace, generation_bids, 2, generation_heuristics, NULL, 0,
             generation_anchors, generation_lifecycle, generation_actions,
-            generation_replication, &f.focus, f.bid.priority_policy_root,
-            lifecycle.local_policy_root, snapshot.local_policy_root,
-            f.bid.bid_evaluator_root, f.evaluator_pubkey, 6000,
-            &selected, 1, &qualified) == VCS_ZCODE_ATTENTION_DUPLICATE &&
-        selected == SIZE_MAX &&
-        memcmp(&qualified, &qualified_before, sizeof(qualified)) == 0);
+            generation_replication, &f->focus, f->bid.priority_policy_root,
+            lifecycle->local_policy_root, snapshot->local_policy_root,
+            f->bid.bid_evaluator_root, f->evaluator_pubkey, 6000,
+            selected, 1, qualified) == VCS_ZCODE_ATTENTION_DUPLICATE &&
+        *selected == SIZE_MAX &&
+        memcmp(qualified, qualified_before, sizeof(*qualified)) == 0);
+    return failures;
+}
 
-    hr_snapshot(&snapshot, &f, exact, 2);
-    memcpy(snapshot.statement_roots[0], missing, 32);
-    hr_sort(snapshot.statement_roots, 2);
-    memset(&qualified, 0x7b, sizeof(qualified));
-    qualified_before = qualified;
-    selected = SIZE_MAX;
+static int hr_check_accepted_replication_poison(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lifecycle,
+    struct vcs_zcode_attention_qualified_report *qualified,
+    struct vcs_zcode_attention_qualified_report *qualified_before,
+    size_t *selected,
+    const size_t *exact,
+    uint8_t *missing)
+{
+    int failures = 0;
+    hr_snapshot(snapshot, f, exact, 2);
+    memcpy(snapshot->statement_roots[0], missing, 32);
+    hr_sort(snapshot->statement_roots, 2);
+    memset(qualified, 0x7b, sizeof(*qualified));
+    *qualified_before = *qualified;
+    *selected = SIZE_MAX;
     HR_CHECK("malformed-accepted-replication-poisons-attention-atomically",
-        hr_select(workspace, &f, &lifecycle, &snapshot, &selected,
-                  &qualified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
-        selected == SIZE_MAX &&
-        memcmp(&qualified, &qualified_before, sizeof(qualified)) == 0);
+        hr_select(workspace, f, lifecycle, snapshot, selected,
+                  qualified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+        *selected == SIZE_MAX &&
+        memcmp(qualified, qualified_before, sizeof(*qualified)) == 0);
+    return failures;
+}
 
-    struct hr_experience_fixture experience;
-    struct zcl_experience_compilation_v1 compiled;
+static int hr_check_experience_compiler_replicated(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct hr_experience_fixture *experience,
+    struct zcl_experience_compilation_v1 *compiled)
+{
+    int failures = 0;
     bool experience_built = hr_experience_build(
-        workspace, &f, &experience);
+        workspace, f, experience);
     struct vcs_zcode_heuristic_replication_report experience_replication;
     HR_CHECK("experience-compiler-returns-only-replicated-predicate-lesson",
         experience_built && vcs_zcode_heuristic_replication_fold(
-            workspace, &experience.heuristic, &f.action,
-            &experience.replication, 6000, &experience_replication) ==
+            workspace, &experience->heuristic, &f->action,
+            &experience->replication, 6000, &experience_replication) ==
                 VCS_ZCODE_ATTENTION_OK &&
         zcl_experience_compile(
-            &experience.episode, &compiled) ==
+            &experience->episode, compiled) ==
                 ZCL_EXPERIENCE_COMPILATION_OK &&
-        compiled.captured && compiled.lesson_relevant &&
-        compiled.replication_qualified &&
-        compiled.replication_reason ==
+        compiled->captured && compiled->lesson_relevant &&
+        compiled->replication_qualified &&
+        compiled->replication_reason ==
             VCS_ZCODE_HEURISTIC_REPLICATION_REASON_NONE &&
-        compiled.replicated_count == 2 &&
-        compiled.required_reproductions == 2 &&
-        memcmp(compiled.outcome_predicate_root,
-               experience.claim_roots[0], 32) == 0 &&
-        memcmp(compiled.benchmark_action_root,
-               experience.story_event.action_root, 32) == 0 &&
-        memcmp(compiled.study_root, f.study_root, 32) == 0 &&
-        memcmp(compiled.original_result_root, f.original_root, 32) == 0 &&
-        memcmp(compiled.replication_snapshot_root,
+        compiled->replicated_count == 2 &&
+        compiled->required_reproductions == 2 &&
+        memcmp(compiled->outcome_predicate_root,
+               experience->claim_roots[0], 32) == 0 &&
+        memcmp(compiled->benchmark_action_root,
+               experience->story_event.action_root, 32) == 0 &&
+        memcmp(compiled->study_root, f->study_root, 32) == 0 &&
+        memcmp(compiled->original_result_root, f->original_root, 32) == 0 &&
+        memcmp(compiled->replication_snapshot_root,
                experience_replication.snapshot_root, 32) == 0);
+    return failures;
+}
 
-    struct zcl_experience_compilation_v1 zero_compilation = {0};
+static int hr_check_experience_below_threshold(
+    struct hr_experience_fixture *experience,
+    const struct zcl_experience_compilation_v1 *zero_compilation)
+{
+    int failures = 0;
     struct vcs_zcode_heuristic_replication_snapshot_v1 below =
-        experience.replication;
+        experience->replication;
     below.statement_count = 1;
     memset(below.statement_roots[1], 0, 32);
-    struct zcl_experience_episode_v1 below_episode = experience.episode;
+    struct zcl_experience_episode_v1 below_episode = experience->episode;
     below_episode.replication_acceptance = &below;
     struct zcl_experience_compilation_v1 below_compilation;
     HR_CHECK("experience-below-replication-threshold-captures-no-lesson",
@@ -1349,18 +1543,24 @@ int test_zcode_heuristic_replication(void)
         below_compilation.replicated_count == 1 &&
         below_compilation.required_reproductions == 2 &&
         memcmp(below_compilation.derived_rule_root,
-               zero_compilation.derived_rule_root, 32) == 0);
+               zero_compilation->derived_rule_root, 32) == 0);
+    return failures;
+}
 
+static int hr_check_experience_contradiction(
+    struct hr_experience_fixture *experience)
+{
+    int failures = 0;
     struct vcs_zcode_heuristic_replication_snapshot_v1
         contradicted_experience =
-        experience.replication;
+        experience->replication;
     memcpy(contradicted_experience.statement_roots[0],
-           experience.replication_statement_roots[0], 32);
+           experience->replication_statement_roots[0], 32);
     memcpy(contradicted_experience.statement_roots[1],
-           experience.replication_statement_roots[3], 32);
+           experience->replication_statement_roots[3], 32);
     hr_sort(contradicted_experience.statement_roots, 2);
     struct zcl_experience_episode_v1 contradicted_episode =
-        experience.episode;
+        experience->episode;
     contradicted_episode.replication_acceptance =
         &contradicted_experience;
     struct zcl_experience_compilation_v1 contradicted_compilation;
@@ -1374,27 +1574,42 @@ int test_zcode_heuristic_replication(void)
         contradicted_compilation.replication_reason ==
             VCS_ZCODE_HEURISTIC_REPLICATION_REASON_CONTRADICTED &&
         contradicted_compilation.replicated_count == 1);
+    return failures;
+}
 
+static int hr_check_experience_predicate_mutations(
+    struct hr_experience_fixture *experience,
+    const struct zcl_experience_compilation_v1 *zero_compilation)
+{
+    int failures = 0;
     bool predicate_mutations_refused = true;
     for (size_t i = 0; i < 32; i++) {
-        struct zcl_ontology_predicate_v1 predicate = experience.predicate;
+        struct zcl_ontology_predicate_v1 predicate = experience->predicate;
         predicate.term_root[i] ^= (uint8_t)(i + 1u);
-        struct zcl_experience_episode_v1 episode = experience.episode;
+        struct zcl_experience_episode_v1 episode = experience->episode;
         episode.outcome_predicate = &predicate;
         struct zcl_experience_compilation_v1 refused;
         memset(&refused, 0x5a, sizeof(refused));
         predicate_mutations_refused = predicate_mutations_refused &&
             zcl_experience_compile(&episode, &refused) ==
                 ZCL_EXPERIENCE_COMPILATION_REPORT &&
-            memcmp(&refused, &zero_compilation, sizeof(refused)) == 0;
+            memcmp(&refused, zero_compilation, sizeof(refused)) == 0;
     }
     HR_CHECK("experience-predicate-byte-mutation-property-refuses-all",
              predicate_mutations_refused);
+    return failures;
+}
 
-    struct vcs_build_action_v1 wrong_action = f.action;
+static int hr_check_experience_refusals(
+    struct hr_fixture *f,
+    struct hr_experience_fixture *experience,
+    const struct zcl_experience_compilation_v1 *zero_compilation)
+{
+    int failures = 0;
+    struct vcs_build_action_v1 wrong_action = f->action;
     wrong_action.source_sha256[0] ^= 1u;
     struct zcl_experience_episode_v1 wrong_action_episode =
-        experience.episode;
+        experience->episode;
     wrong_action_episode.benchmark_action = &wrong_action;
     struct zcl_experience_compilation_v1 refused_compilation;
     memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
@@ -1402,65 +1617,65 @@ int test_zcode_heuristic_replication(void)
         zcl_experience_compile(
             &wrong_action_episode, &refused_compilation) ==
                 ZCL_EXPERIENCE_COMPILATION_REPLICATION &&
-        memcmp(&refused_compilation, &zero_compilation,
+        memcmp(&refused_compilation, zero_compilation,
                sizeof(refused_compilation)) == 0);
 
-    struct vcs_zcode_attention_bid_v1 wrong_evidence_bid = experience.bid;
+    struct vcs_zcode_attention_bid_v1 wrong_evidence_bid = experience->bid;
     wrong_evidence_bid.evidence_root[0] ^= 1u;
     struct zcl_experience_episode_v1 wrong_evidence_episode =
-        experience.episode;
+        experience->episode;
     wrong_evidence_episode.attention_bid = &wrong_evidence_bid;
     memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
     HR_CHECK("experience-stale-original-result-bid-refuses-atomically",
         zcl_experience_compile(
             &wrong_evidence_episode, &refused_compilation) ==
                 ZCL_EXPERIENCE_COMPILATION_REPLICATION &&
-        memcmp(&refused_compilation, &zero_compilation,
+        memcmp(&refused_compilation, zero_compilation,
                sizeof(refused_compilation)) == 0);
 
     struct zcl_experience_episode_v1 stale_cutoff_episode =
-        experience.episode;
+        experience->episode;
     stale_cutoff_episode.observed_at_unix = 1400;
     memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
     HR_CHECK("experience-future-reproduction-at-stale-cutoff-refuses",
         zcl_experience_compile(
             &stale_cutoff_episode, &refused_compilation) ==
                 ZCL_EXPERIENCE_COMPILATION_REPLICATION &&
-        memcmp(&refused_compilation, &zero_compilation,
+        memcmp(&refused_compilation, zero_compilation,
                sizeof(refused_compilation)) == 0);
 
     struct vcs_zcode_heuristic_replication_snapshot_v1 wrong_replication =
-        experience.replication;
+        experience->replication;
     wrong_replication.statement_roots[0][0] ^= 1u;
     struct zcl_experience_episode_v1 wrong_replication_episode =
-        experience.episode;
+        experience->episode;
     wrong_replication_episode.replication_acceptance = &wrong_replication;
     memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
     HR_CHECK("experience-missing-accepted-reproduction-refuses-atomically",
         zcl_experience_compile(
             &wrong_replication_episode, &refused_compilation) ==
                 ZCL_EXPERIENCE_COMPILATION_REPLICATION &&
-        memcmp(&refused_compilation, &zero_compilation,
+        memcmp(&refused_compilation, zero_compilation,
                sizeof(refused_compilation)) == 0);
 
-    struct zcl_experience_episode_v1 incomplete_episode = experience.episode;
+    struct zcl_experience_episode_v1 incomplete_episode = experience->episode;
     incomplete_episode.outcome_predicate = NULL;
     memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
     HR_CHECK("experience-partial-scientific-bundle-fails-closed",
         zcl_experience_compile(&incomplete_episode, &refused_compilation) ==
             ZCL_EXPERIENCE_COMPILATION_NULL &&
-        memcmp(&refused_compilation, &zero_compilation,
+        memcmp(&refused_compilation, zero_compilation,
                sizeof(refused_compilation)) == 0);
 
     union {
         struct zcl_ontology_predicate_v1 predicate;
         struct zcl_experience_compilation_v1 output;
     } optional_alias;
-    optional_alias.predicate = experience.predicate;
+    optional_alias.predicate = experience->predicate;
     struct zcl_ontology_predicate_v1 optional_alias_before =
         optional_alias.predicate;
     struct zcl_experience_episode_v1 optional_alias_episode =
-        experience.episode;
+        experience->episode;
     optional_alias_episode.outcome_predicate = &optional_alias.predicate;
     HR_CHECK("experience-optional-evidence-alias-refuses-without-write",
         zcl_experience_compile(
@@ -1468,7 +1683,14 @@ int test_zcode_heuristic_replication(void)
                 ZCL_EXPERIENCE_COMPILATION_ALIAS &&
         memcmp(&optional_alias.predicate, &optional_alias_before,
                sizeof(optional_alias_before)) == 0);
+    return failures;
+}
 
+static int hr_check_experience_replica(
+    const char *workspace,
+    struct zcl_experience_compilation_v1 *compiled)
+{
+    int failures = 0;
     char experience_replica[192];
     int experience_replica_n = snprintf(
         experience_replica, sizeof(experience_replica), "%s.experience",
@@ -1488,24 +1710,129 @@ int test_zcode_heuristic_replication(void)
                                &replica_compiled) ==
             ZCL_EXPERIENCE_COMPILATION_OK &&
         replica_compiled.lesson_relevant &&
-        memcmp(&replica_compiled, &compiled, sizeof(compiled)) == 0;
+        memcmp(&replica_compiled, compiled, sizeof(*compiled)) == 0;
     HR_CHECK("experience-independent-workspace-reproduces-exact-view",
              experience_reproduced);
     test_cleanup_tmpdir(experience_replica);
+    return failures;
+}
 
-    memset(&qualified, 0x7b, sizeof(qualified));
+static int hr_check_empty_scientific_frontier(
+    const char *workspace,
+    struct hr_fixture *f,
+    struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lifecycle,
+    struct vcs_zcode_attention_qualified_report *qualified)
+{
+    int failures = 0;
+    memset(qualified, 0x7b, sizeof(*qualified));
     HR_CHECK("empty-scientific-frontier-has-exact-zero-counts",
         vcs_zcode_attention_frontier_next_verified_with_lifecycle_and_replication(
             workspace, NULL, 0, NULL, NULL, 0, NULL, NULL, NULL, NULL,
-            &f.focus, f.bid.priority_policy_root,
-            lifecycle.local_policy_root, snapshot.local_policy_root,
-            f.bid.bid_evaluator_root, f.evaluator_pubkey, 6000,
-            NULL, 0, &qualified) == VCS_ZCODE_ATTENTION_OK &&
-        qualified.verified_count == 0 && qualified.retained_count == 0 &&
-        qualified.qualified_count == 0 &&
-        qualified.retained_unqualified_count == 0 &&
-        qualified.retired_count == 0 &&
-        qualified.choice.frontier.input_count == 0);
+            &f->focus, f->bid.priority_policy_root,
+            lifecycle->local_policy_root, snapshot->local_policy_root,
+            f->bid.bid_evaluator_root, f->evaluator_pubkey, 6000,
+            NULL, 0, qualified) == VCS_ZCODE_ATTENTION_OK &&
+        qualified->verified_count == 0 && qualified->retained_count == 0 &&
+        qualified->qualified_count == 0 &&
+        qualified->retained_unqualified_count == 0 &&
+        qualified->retired_count == 0 &&
+        qualified->choice.frontier.input_count == 0);
+    return failures;
+}
+
+int test_zcode_heuristic_replication(void)
+{
+    int failures = 0;
+    char workspace[160];
+    int n = snprintf(workspace, sizeof(workspace),
+        "test-tmp/zcode_heuristic_replication_%d", (int)getpid());
+    test_cleanup_tmpdir(workspace);
+    bool setup = n > 0 && (size_t)n < sizeof(workspace) &&
+        (mkdir("test-tmp", 0700) == 0 || access("test-tmp", F_OK) == 0) &&
+        mkdir(workspace, 0700) == 0 && vcs_object_store_init(workspace);
+    HR_CHECK("workspace-initializes", setup);
+    if (!setup) return failures + 1;
+
+    struct hr_fixture f;
+    bool built = hr_fixture_build(workspace, &f);
+    HR_CHECK("signed-science-fixture-builds", built);
+    if (!built) {
+        test_cleanup_tmpdir(workspace);
+        return failures + 1;
+    }
+
+    struct vcs_zcode_heuristic_replication_snapshot_v1 snapshot;
+    struct vcs_zcode_heuristic_replication_report report, sentinel;
+    memset(&sentinel, 0x6d, sizeof(sentinel));
+    const size_t one[] = {0};
+    const size_t exact[] = {0, 1};
+    const size_t contradicted[] = {0, 1, 3};
+    uint8_t missing[32];
+    struct vcs_zcode_science_relation_set_v1 support = {
+        .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
+        .row_count = 1,
+        .rows = {{.type = VCS_ZCODE_SCIENCE_RELATION_SUPPORT}},
+    };
+
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 lifecycle;
+    struct vcs_zcode_attention_qualified_report qualified, qualified_before;
+    size_t selected = SIZE_MAX;
+
+    struct hr_experience_fixture experience;
+    struct zcl_experience_compilation_v1 compiled;
+    struct zcl_experience_compilation_v1 zero_compilation = {0};
+
+    failures += hr_check_empty_policy_set(workspace, &f, &snapshot, &report);
+    failures += hr_check_single_signer_threshold(workspace, &f, &snapshot,
+        &report, one);
+    failures += hr_check_exact_signers_qualify(workspace, &f, &snapshot,
+        &report, exact);
+    failures += hr_check_inconclusive_not_counted(workspace, &f, &snapshot,
+        &report);
+    failures += hr_check_contradiction_blocks(workspace, &f, &snapshot,
+        &report, contradicted);
+    failures += hr_check_accepted_root_refusals(workspace, &f, &snapshot,
+        &report, &sentinel, exact, missing);
+    failures += hr_check_duplicate_signer_refusal(workspace, &f, &snapshot,
+        &report, &sentinel, exact, &support);
+    failures += hr_check_signer_identity_refusals(workspace, &f, &snapshot,
+        &report, &sentinel, one, &support);
+    failures += hr_check_ineligible_anchor_refusals(workspace, &f, &snapshot,
+        &report, &sentinel);
+    failures += hr_check_inconsistent_row_refusals(workspace, &f, &snapshot,
+        &report, &sentinel, one);
+    failures += hr_check_negative_contradiction(workspace, &f, &snapshot,
+        &report, exact);
+    failures += hr_check_replayed_result_refusal(workspace, &f, &snapshot,
+        &report, &sentinel, exact, &support);
+    failures += hr_check_pre_study_refusal(workspace, &f, &snapshot,
+        &report, &sentinel);
+    failures += hr_check_action_and_cutoff_refusals(workspace, &f, &snapshot,
+        &report, &sentinel, one);
+    failures += hr_check_retained_frontier_states(workspace, &f, &snapshot,
+        &lifecycle, &qualified, &selected, exact);
+    failures += hr_check_retained_below_threshold(workspace, &f, &snapshot,
+        &lifecycle, &qualified, &selected, one, contradicted);
+    failures += hr_check_retracted_row_ineligible(workspace, &f, &snapshot,
+        &lifecycle, &qualified, &qualified_before, &selected, exact, missing);
+    failures += hr_check_generation_duplicate_refusal(workspace, &f,
+        &snapshot, &lifecycle, &qualified, &qualified_before, &selected,
+        exact);
+    failures += hr_check_accepted_replication_poison(workspace, &f, &snapshot,
+        &lifecycle, &qualified, &qualified_before, &selected, exact, missing);
+    failures += hr_check_experience_compiler_replicated(workspace, &f,
+        &experience, &compiled);
+    failures += hr_check_experience_below_threshold(&experience,
+        &zero_compilation);
+    failures += hr_check_experience_contradiction(&experience);
+    failures += hr_check_experience_predicate_mutations(&experience,
+        &zero_compilation);
+    failures += hr_check_experience_refusals(&f, &experience,
+        &zero_compilation);
+    failures += hr_check_experience_replica(workspace, &compiled);
+    failures += hr_check_empty_scientific_frontier(workspace, &f, &snapshot,
+        &lifecycle, &qualified);
 
     test_cleanup_tmpdir(workspace);
     return failures;

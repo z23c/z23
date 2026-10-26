@@ -1674,8 +1674,6 @@ tests/harness/src/test_zcode_dht_service.c:test_zcode_dht_service:18
 tests/harness/src/test_zcode_discovery_projection.c:zproj_mint_corpus:20
 tests/harness/src/test_zcode_heuristic_lifecycle.c:hlt_experience_episode:168
 tests/harness/src/test_zcode_heuristic_lifecycle.c:test_zcode_heuristic_lifecycle:45
-tests/harness/src/test_zcode_heuristic_replication.c:hr_fixture_build:16
-tests/harness/src/test_zcode_heuristic_replication.c:test_zcode_heuristic_replication:135
 tests/harness/src/test_zcode_moderation_attestation.c:test_composition_rule:18
 tests/harness/src/test_zcode_node_command.c:t_join_writes_config:54
 tests/harness/src/test_zcode_node_command.c:t_registry_contract:16
