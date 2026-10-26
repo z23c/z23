@@ -699,6 +699,80 @@ static bool event_log_write_pending_locked(event_log_t *log)
                                            &log->end_offset);
 }
 
+/* The staging half of event_log_append, called with the lock held: deferred
+ * mode buffers the whole record into the pending span; the barrier path first
+ * flushes any older buffered records and re-bases the record at the real end
+ * offset. Returns 1 when the record was buffered (append complete), 0 when
+ * the caller must run the durable writes, -1 when the append fails here. */
+static int event_log_append_stage_locked(event_log_t *log, const uint8_t *hdr,
+                                         const void *payload,
+                                         size_t payload_len, uint8_t *sent,
+                                         uint64_t *start_io, uint32_t crc)
+{
+    /* Deferred mode skips BOTH per-append fsync()s (batched to a later
+     * event_log_flush()), unless the kill switch forces per-append sync. */
+    bool defer = log->deferred_sync && !event_log_force_per_append_sync();
+    if (defer) {
+        size_t event_len = EVT_HDR_LEN + payload_len + EVT_SENTINEL_LEN;
+        if (!event_log_pending_prepare(&log->pending, event_len, &log->file,
+                                       &log->end_offset))
+            return -1;
+        uint8_t *dst = log->pending.data + log->pending.len;
+        memcpy(dst, hdr, EVT_HDR_LEN);
+        if (payload_len > 0)
+            memcpy(dst + EVT_HDR_LEN, payload, payload_len);
+        memcpy(dst + EVT_HDR_LEN + payload_len, sent, EVT_SENTINEL_LEN);
+        log->pending.len += event_len;
+        log->records++;
+        log->last_start = *start_io;
+        log->last_crc = crc;
+        log->dirty = true;
+        return 1;
+    }
+    /* From here the append pays the two-barrier price. Counted BEFORE the
+     * first pwrite so an append that dies inside a barrier still shows up as
+     * one that took this path — an uncounted failure would understate exactly
+     * the cost being attributed. */
+    atomic_fetch_add_explicit(&g_barrier_appends, 1u, memory_order_relaxed);
+
+    /* A caller that disabled deferred mode without flushing cannot overtake
+     * older buffered records. The immediate fsyncs below cover both spans. */
+    if (!event_log_write_pending_locked(log))
+        return -1;
+    *start_io = log->end_offset;
+    put_u64_le(sent + 8, *start_io);
+    return 0;
+}
+
+/* The durable half of event_log_append, called with the lock held: header and
+ * payload, a barrier, the sentinel, a second barrier. Returns 0 on success;
+ * on failure returns a code identifying the step so the caller can log its
+ * own message (1 = header pwrite, 2 = payload pwrite, 3 = first fsync,
+ * 4 = sentinel pwrite, 5 = second fsync). */
+static int event_log_write_durable_locked(event_log_t *log, const uint8_t *hdr,
+                                          const void *payload,
+                                          size_t payload_len,
+                                          const uint8_t *sent, uint64_t start)
+{
+    /* Durable body write: header + payload. */
+    if (full_pwrite(&log->file, hdr, EVT_HDR_LEN, start) < 0)
+        return 1;
+    if (payload_len > 0 &&
+        full_pwrite(&log->file, payload, payload_len,
+                    start + EVT_HDR_LEN) < 0)
+        return 2;
+    if (event_log_barrier(&log->file) < 0)
+        return 3;
+
+    /* Durable completion marker: sentinel. */
+    if (full_pwrite(&log->file, sent, EVT_SENTINEL_LEN,
+                    start + EVT_HDR_LEN + payload_len) < 0)
+        return 4;
+    if (event_log_barrier(&log->file) < 0)
+        return 5;
+    return 0;
+}
+
 uint64_t event_log_append(event_log_t *log,
                           enum event_log_type type,
                           const void *payload, size_t payload_len)
@@ -714,9 +788,6 @@ uint64_t event_log_append(event_log_t *log,
 
     pthread_mutex_lock(&log->lock);
     uint64_t start = log->end_offset + (uint64_t)log->pending.len;
-    /* Deferred mode skips BOTH per-append fsync()s (batched to a later
-     * event_log_flush()), unless the kill switch forces per-append sync. */
-    bool defer = log->deferred_sync && !event_log_force_per_append_sync();
 
     /* Build header. */
     uint8_t hdr[EVT_HDR_LEN];
@@ -730,84 +801,45 @@ uint64_t event_log_append(event_log_t *log,
     put_u64_le(sent + 0, EVENT_LOG_SENTINEL_MAGIC);
     put_u64_le(sent + 8, start);
 
-    if (defer) {
-        size_t event_len = EVT_HDR_LEN + payload_len + EVT_SENTINEL_LEN;
-        if (!event_log_pending_prepare(&log->pending, event_len, &log->file,
-                                       &log->end_offset)) {
-            pthread_mutex_unlock(&log->lock);
-            return UINT64_MAX;
-        }
-        uint8_t *dst = log->pending.data + log->pending.len;
-        memcpy(dst, hdr, EVT_HDR_LEN);
-        if (payload_len > 0)
-            memcpy(dst + EVT_HDR_LEN, payload, payload_len);
-        memcpy(dst + EVT_HDR_LEN + payload_len, sent, EVT_SENTINEL_LEN);
-        log->pending.len += event_len;
-        log->records++;
-        log->last_start = start;
-        log->last_crc = crc;
-        log->dirty = true;
+    int staged = event_log_append_stage_locked(log, hdr, payload, payload_len,
+                                               sent, &start, crc);
+    if (staged > 0) {
         pthread_mutex_unlock(&log->lock);
         atomic_fetch_add_explicit(&g_deferred_appends, 1u,
                                   memory_order_relaxed);
         return start;
     }
-    /* From here the append pays the two-barrier price. Counted BEFORE the
-     * first pwrite so an append that dies inside a barrier still shows up as
-     * one that took this path — an uncounted failure would understate exactly
-     * the cost being attributed. */
-    atomic_fetch_add_explicit(&g_barrier_appends, 1u, memory_order_relaxed);
-
-    /* A caller that disabled deferred mode without flushing cannot overtake
-     * older buffered records. The immediate fsyncs below cover both spans. */
-    if (!event_log_write_pending_locked(log)) {
+    if (staged < 0) {
         pthread_mutex_unlock(&log->lock);
         return UINT64_MAX;
     }
-    start = log->end_offset;
-    put_u64_le(sent + 8, start);
 
-    /* Durable body write: header + payload. */
-    if (full_pwrite(&log->file, hdr, EVT_HDR_LEN, start) < 0) {
+    int wrc = event_log_write_durable_locked(log, hdr, payload, payload_len,
+                                             sent, start);
+    if (wrc != 0) {
         pthread_mutex_unlock(&log->lock);
-        fprintf(stderr,  // obs-ok:event-log-append-failure
-                "[event_log] pwrite(hdr) failed at off=%llu: %s\n",
-                (unsigned long long)start, strerror(errno));
-        return UINT64_MAX;
-    }
-    if (payload_len > 0) {
-        if (full_pwrite(&log->file, payload, payload_len,
-                        start + EVT_HDR_LEN) < 0) {
-            pthread_mutex_unlock(&log->lock);
+        if (wrc == 1) {
+            fprintf(stderr,  // obs-ok:event-log-append-failure
+                    "[event_log] pwrite(hdr) failed at off=%llu: %s\n",
+                    (unsigned long long)start, strerror(errno));
+        } else if (wrc == 2) {
             fprintf(stderr,  // obs-ok:event-log-append-failure
                     "[event_log] pwrite(payload) failed at off=%llu: %s\n",
                     (unsigned long long)(start + EVT_HDR_LEN),
                     strerror(errno));
-            return UINT64_MAX;
+        } else if (wrc == 3) {
+            fprintf(stderr,  // obs-ok:event-log-append-failure
+                    "[event_log] fsync(hdr+payload) failed: %s\n",
+                    strerror(errno));
+        } else if (wrc == 4) {
+            fprintf(stderr,  // obs-ok:event-log-append-failure
+                    "[event_log] pwrite(sentinel) failed: %s\n",
+                    strerror(errno));
+        } else {
+            fprintf(stderr,  // obs-ok:event-log-append-failure
+                    "[event_log] fsync(sentinel) failed: %s\n",
+                    strerror(errno));
         }
-    }
-    if (event_log_barrier(&log->file) < 0) {
-        pthread_mutex_unlock(&log->lock);
-        fprintf(stderr,  // obs-ok:event-log-append-failure
-                "[event_log] fsync(hdr+payload) failed: %s\n",
-                strerror(errno));
-        return UINT64_MAX;
-    }
-
-    /* Durable completion marker: sentinel. */
-    if (full_pwrite(&log->file, sent, EVT_SENTINEL_LEN,
-                    start + EVT_HDR_LEN + payload_len) < 0) {
-        pthread_mutex_unlock(&log->lock);
-        fprintf(stderr,  // obs-ok:event-log-append-failure
-                "[event_log] pwrite(sentinel) failed: %s\n",
-                strerror(errno));
-        return UINT64_MAX;
-    }
-    if (event_log_barrier(&log->file) < 0) {
-        pthread_mutex_unlock(&log->lock);
-        fprintf(stderr,  // obs-ok:event-log-append-failure
-                "[event_log] fsync(sentinel) failed: %s\n",
-                strerror(errno));
         return UINT64_MAX;
     }
 
@@ -861,6 +893,63 @@ bool event_log_flush(event_log_t *log)
     return true;
 }
 
+/* Sentinel validation (cheap, catches in-flight corruption). Returns 0 when
+ * the sentinel at `sent_off` carries the magic and the record's own start
+ * offset `start`, 1 on a read error, 2 on a mismatch. */
+static int event_log_check_sentinel(struct platform_private_file *file,
+                                    uint64_t sent_off, uint64_t start)
+{
+    uint8_t sent[EVT_SENTINEL_LEN];
+    if (full_pread(file, sent, EVT_SENTINEL_LEN, sent_off) < 0)
+        return 1;
+    if (get_u64_le(sent + 0) != EVENT_LOG_SENTINEL_MAGIC ||
+        get_u64_le(sent + 8) != start)
+        return 2;
+    return 0;
+}
+
+/* Publish the header fields the caller asked for. */
+static void event_log_read_fill_outputs(enum event_log_type *type_out,
+                                        uint32_t type,
+                                        size_t *out_len, uint32_t plen)
+{
+    if (out_len) *out_len = plen;
+    if (type_out) *type_out = (enum event_log_type)type;
+}
+
+/* Read into caller buf if it fits; otherwise fail (caller must
+ * pre-size). Use a temp buffer so we can always validate CRC.
+ * Returns 0 on success; on failure returns a code identifying the step so
+ * the caller can log its own message (1 = allocation failed, 2 = pread
+ * failed, 3 = CRC mismatch, 4 = caller buffer too small). */
+static int event_log_read_payload(event_log_t *log, uint64_t offset,
+                                  uint32_t plen, uint32_t crc_d,
+                                  void *buf, size_t buf_cap)
+{
+    /* Empty-payload event — still validate sentinel below. */
+    if (plen == 0)
+        return 0;
+    uint8_t *tmp = (uint8_t *)zcl_malloc(plen, "event_log/read");
+    if (!tmp)
+        return 1;
+    if (full_pread(&log->file, tmp, plen, offset + EVT_HDR_LEN) < 0) {
+        free(tmp);
+        return 2;
+    }
+    uint32_t crc_c = crc32c(tmp, plen);
+    if (crc_c != crc_d) {
+        free(tmp);
+        return 3;
+    }
+    if (buf_cap < plen) {
+        free(tmp);
+        return 4;
+    }
+    if (buf) memcpy(buf, tmp, plen);
+    free(tmp);
+    return 0;
+}
+
 int event_log_read(event_log_t *log, uint64_t offset,
                    enum event_log_type *type_out,
                    void *buf, size_t buf_cap, size_t *out_len)
@@ -900,54 +989,78 @@ int event_log_read(event_log_t *log, uint64_t offset,
         return -1;
     }
 
-    if (out_len) *out_len = plen;
-    if (type_out) *type_out = (enum event_log_type)type;
+    event_log_read_fill_outputs(type_out, type, out_len, plen);
 
-    if (plen > 0) {
-        /* Read into caller buf if it fits; otherwise fail (caller must
-         * pre-size). Use a temp buffer so we can always validate CRC. */
-        uint8_t *tmp = (uint8_t *)zcl_malloc(plen, "event_log/read");
-        if (!tmp) return -1;
-        if (full_pread(&log->file, tmp, plen, offset + EVT_HDR_LEN) < 0) {
-            free(tmp);
-            return -1;
-        }
-        uint32_t crc_c = crc32c(tmp, plen);
-        if (crc_c != crc_d) {
-            free(tmp);
-            fprintf(stderr,  // obs-ok:event-log-read-failure
-                    "[event_log] read: CRC mismatch at off=%llu\n",
-                    (unsigned long long)offset);
-            return -1;
-        }
-        if (buf_cap < plen) {
-            free(tmp);
-            return -1;
-        }
-        if (buf) memcpy(buf, tmp, plen);
-        free(tmp);
-    } else {
-        /* Empty-payload event — still validate sentinel below. */
+    int prc = event_log_read_payload(log, offset, plen, crc_d, buf, buf_cap);
+    if (prc == 3) {
+        fprintf(stderr,  // obs-ok:event-log-read-failure
+                "[event_log] read: CRC mismatch at off=%llu\n",
+                (unsigned long long)offset);
+        return -1;
     }
+    if (prc != 0)
+        return -1;
 
     /* Validate sentinel. */
-    uint8_t sent[EVT_SENTINEL_LEN];
-    if (full_pread(&log->file, sent, EVT_SENTINEL_LEN,
-                   offset + EVT_HDR_LEN + plen) < 0) {
+    int src = event_log_check_sentinel(&log->file,
+                                       offset + EVT_HDR_LEN + plen, offset);
+    if (src == 1) {
         fprintf(stderr,  // obs-ok:event-log-read-failure
                 "[event_log] read: sentinel pread at off=%llu\n",
                 (unsigned long long)offset);
         return -1;
     }
-    uint64_t magic = get_u64_le(sent + 0);
-    uint64_t soff  = get_u64_le(sent + 8);
-    if (magic != EVENT_LOG_SENTINEL_MAGIC || soff != offset) {
+    if (src != 0) {
         fprintf(stderr,  // obs-ok:event-log-read-failure
                 "[event_log] read: bad sentinel at off=%llu\n",
                 (unsigned long long)offset);
         return -1;
     }
     return 0;
+}
+
+/* Read and validate the one record framed at `cursor` inside [0, end):
+ * bounded length, complete frame, payload CRC, then the sentinel. The payload
+ * lands in the caller's growable scratch buffer, grown here when too small.
+ * Returns 0 and fills *plen_out and *type_out on success; any nonzero
+ * return means the record does not validate and the stream stops there. */
+static int event_log_stream_read_record(struct platform_private_file *file,
+                                        uint64_t cursor, uint64_t end,
+                                        uint8_t **buf, size_t *cap,
+                                        uint32_t *plen_out,
+                                        uint32_t *type_out)
+{
+    uint8_t hdr[EVT_HDR_LEN];
+    if (full_pread(file, hdr, EVT_HDR_LEN, cursor) < 0)
+        return 1;
+    uint32_t plen = get_u32_le(hdr + 0);
+    uint32_t crcd = get_u32_le(hdr + 12);
+    if (plen > EVENT_LOG_MAX_PAYLOAD)
+        return 2;
+    if (cursor + EVT_HDR_LEN + plen + EVT_SENTINEL_LEN > end)
+        return 3;
+
+    if (plen > *cap) {
+        size_t ncap = *cap;
+        while (ncap < plen) ncap *= 2;
+        uint8_t *nbuf = (uint8_t *)realloc(*buf, ncap);  // raw-alloc-ok:event-log-scratch-grow
+        if (!nbuf)
+            return 4;
+        *buf = nbuf;
+        *cap = ncap;
+    }
+    if (plen > 0) {
+        if (full_pread(file, *buf, plen,
+                       cursor + EVT_HDR_LEN) < 0)
+            return 5;
+        uint32_t crcc = crc32c(*buf, plen);
+        if (crcc != crcd)
+            return 6;
+    }
+    *plen_out = plen;
+    *type_out = get_u32_le(hdr + 4);
+    return event_log_check_sentinel(file, cursor + EVT_HDR_LEN + plen,
+                                    cursor);
 }
 
 int event_log_stream(event_log_t *log, uint64_t start_offset,
@@ -965,55 +1078,10 @@ int event_log_stream(event_log_t *log, uint64_t start_offset,
     if (!buf) return -1;
 
     while (cursor + EVT_HDR_LEN + EVT_SENTINEL_LEN <= end) {
-        uint8_t hdr[EVT_HDR_LEN];
-        if (full_pread(&log->file, hdr, EVT_HDR_LEN, cursor) < 0) {
-            free(buf);
-            return -1;
-        }
-        uint32_t plen = get_u32_le(hdr + 0);
-        uint32_t type = get_u32_le(hdr + 4);
-        uint32_t crcd = get_u32_le(hdr + 12);
-        if (plen > EVENT_LOG_MAX_PAYLOAD) {
-            free(buf);
-            return -1;
-        }
-        if (cursor + EVT_HDR_LEN + plen + EVT_SENTINEL_LEN > end) {
-            free(buf);
-            return -1;
-        }
-
-        if (plen > cap) {
-            size_t ncap = cap;
-            while (ncap < plen) ncap *= 2;
-            uint8_t *nbuf = (uint8_t *)realloc(buf, ncap);  // raw-alloc-ok:event-log-scratch-grow
-            if (!nbuf) {
-                free(buf);
-                return -1;
-            }
-            buf = nbuf;
-            cap = ncap;
-        }
-        if (plen > 0) {
-            if (full_pread(&log->file, buf, plen,
-                           cursor + EVT_HDR_LEN) < 0) {
-                free(buf);
-                return -1;
-            }
-            uint32_t crcc = crc32c(buf, plen);
-            if (crcc != crcd) {
-                free(buf);
-                return -1;
-            }
-        }
-        /* Sentinel validation (cheap, catches in-flight corruption). */
-        uint8_t sent[EVT_SENTINEL_LEN];
-        if (full_pread(&log->file, sent, EVT_SENTINEL_LEN,
-                       cursor + EVT_HDR_LEN + plen) < 0) {
-            free(buf);
-            return -1;
-        }
-        if (get_u64_le(sent + 0) != EVENT_LOG_SENTINEL_MAGIC ||
-            get_u64_le(sent + 8) != cursor) {
+        uint32_t plen = 0;
+        uint32_t type = 0;
+        if (event_log_stream_read_record(&log->file, cursor, end,
+                                         &buf, &cap, &plen, &type) != 0) {
             free(buf);
             return -1;
         }
