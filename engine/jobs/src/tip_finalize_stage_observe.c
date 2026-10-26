@@ -383,6 +383,73 @@ const char *tip_finalize_observe_last_blocked_reason(void)
     return k_blocked_name[cls];
 }
 
+/* Clamp a raw g_last_blocked_class read to a valid k_blocked_name index;
+ * out-of-range classes report as TIP_FINALIZE_BLOCKED_NONE (""). */
+static int tip_finalize_clamp_blocked_class(int cls)
+{
+    if (cls < 0 || cls >= TIP_FINALIZE_BLOCKED_CLASS_N)
+        return TIP_FINALIZE_BLOCKED_NONE;
+    return cls;
+}
+
+/* Push "last_precondition_reason": snapshot g_last_precondition_reason under
+ * g_block_reason_mu, but only when a stage handle exists (unchanged gating). */
+static void tip_finalize_dump_push_precondition_reason(struct json_value *out,
+                                                       const stage_t *stage)
+{
+    char reason_buf[40] = "";
+    if (stage) {
+        ensure_mutexes_ready();
+        zcl_mutex_lock(&g_block_reason_mu);
+        snprintf(reason_buf, sizeof reason_buf, "%s",
+                 g_last_precondition_reason);
+        zcl_mutex_unlock(&g_block_reason_mu);
+    }
+    json_push_kv_str(out, "last_precondition_reason", reason_buf);
+}
+
+/* Push "last_blocked_reason" plus one blocked_<class>_total counter per
+ * blocked class (skipping NONE). */
+static void tip_finalize_dump_push_blocked_totals(struct json_value *out)
+{
+    int cls = tip_finalize_clamp_blocked_class(
+        atomic_load(&g_last_blocked_class));
+    json_push_kv_str(out, "last_blocked_reason", k_blocked_name[cls]);
+    for (int i = TIP_FINALIZE_BLOCKED_NONE + 1;
+         i < TIP_FINALIZE_BLOCKED_CLASS_N; i++) {
+        char blocked_key[64];
+        snprintf(blocked_key, sizeof blocked_key,
+                 "blocked_%s_total", k_blocked_name[i]);
+        json_push_kv_int(out, blocked_key,
+                         (int64_t)atomic_load(&g_blocked_class_total[i]));
+    }
+}
+
+/* Reserved `_health` key (see docs/work "Adding state introspection" +
+ * engine/controllers/src/diagnostics_health_rollup.c): { ok, reason }.
+ * Maps the already-computed "initialised" + accumulated error_count
+ * counters above — no new health logic. */
+static void tip_finalize_dump_push_health(struct json_value *out,
+                                          const stage_t *stage)
+{
+    bool initialised = (stage != NULL);
+    uint64_t errors = initialised ? stage_error_count(stage) : 0;
+    bool ok = initialised && errors == 0;
+    char reason_buf[128] = "";
+    if (!initialised) {
+        snprintf(reason_buf, sizeof(reason_buf),
+                 "tip_finalize stage not initialised");
+    } else if (errors > 0) {
+        int cls = tip_finalize_clamp_blocked_class(
+            atomic_load(&g_last_blocked_class));
+        snprintf(reason_buf, sizeof(reason_buf),
+                 "tip_finalize recorded %llu step error(s); "
+                 "last_blocked_reason=%s",
+                 (unsigned long long)errors, k_blocked_name[cls]);
+    }
+    diag_push_health(out, ok, reason_buf);
+}
+
 bool tip_finalize_observe_dump_state_json(struct json_value *out,
                                           const char *key,
                                           sqlite3 *db,
@@ -425,17 +492,7 @@ bool tip_finalize_observe_dump_state_json(struct json_value *out,
                      atomic_load(&g_last_precondition_height));
     json_push_kv_int(out, "precondition_repeat_count",
                      (int64_t)log_throttle_reps(&g_precondition_throttle));
-    {
-        char reason_buf[40] = "";
-        if (stage) {
-            ensure_mutexes_ready();
-            zcl_mutex_lock(&g_block_reason_mu);
-            snprintf(reason_buf, sizeof reason_buf, "%s",
-                     g_last_precondition_reason);
-            zcl_mutex_unlock(&g_block_reason_mu);
-        }
-        json_push_kv_str(out, "last_precondition_reason", reason_buf);
-    }
+    tip_finalize_dump_push_precondition_reason(out, stage);
     json_push_kv_int(out, "total_work_added_high",
                      (int64_t)atomic_load(&g_total_work_added_high));
     json_push_kv_int(out, "total_work_added_low",
@@ -447,50 +504,14 @@ bool tip_finalize_observe_dump_state_json(struct json_value *out,
                      last > 0 ? now - last : -1);
     json_push_kv_int(out, "last_blocked_unix",
                      atomic_load(&g_last_blocked_unix));
-    {
-        int cls = atomic_load(&g_last_blocked_class);
-        if (cls < 0 || cls >= TIP_FINALIZE_BLOCKED_CLASS_N)
-            cls = TIP_FINALIZE_BLOCKED_NONE;
-        json_push_kv_str(out, "last_blocked_reason", k_blocked_name[cls]);
-        for (int i = TIP_FINALIZE_BLOCKED_NONE + 1;
-             i < TIP_FINALIZE_BLOCKED_CLASS_N; i++) {
-            char blocked_key[64];
-            snprintf(blocked_key, sizeof blocked_key,
-                     "blocked_%s_total", k_blocked_name[i]);
-            json_push_kv_int(out, blocked_key,
-                             (int64_t)atomic_load(&g_blocked_class_total[i]));
-        }
-    }
+    tip_finalize_dump_push_blocked_totals(out);
     json_push_kv_int(out, "log_rows",
                      durable_snapshot
                          ? stage_log_row_count(db, STAGE_NAME,
                                                "tip_finalize_log")
                          : -1);
     stage_dump_counters(out, stage);
-
-    /* Reserved `_health` key (see docs/work "Adding state introspection" +
-     * engine/controllers/src/diagnostics_health_rollup.c): { ok, reason }.
-     * Maps the already-computed "initialised" + accumulated error_count
-     * counters above — no new health logic. */
-    {
-        bool initialised = (stage != NULL);
-        uint64_t errors = initialised ? stage_error_count(stage) : 0;
-        bool ok = initialised && errors == 0;
-        char reason_buf[128] = "";
-        if (!initialised) {
-            snprintf(reason_buf, sizeof(reason_buf),
-                     "tip_finalize stage not initialised");
-        } else if (errors > 0) {
-            int cls = atomic_load(&g_last_blocked_class);
-            if (cls < 0 || cls >= TIP_FINALIZE_BLOCKED_CLASS_N)
-                cls = TIP_FINALIZE_BLOCKED_NONE;
-            snprintf(reason_buf, sizeof(reason_buf),
-                     "tip_finalize recorded %llu step error(s); "
-                     "last_blocked_reason=%s",
-                     (unsigned long long)errors, k_blocked_name[cls]);
-        }
-        diag_push_health(out, ok, reason_buf);
-    }
+    tip_finalize_dump_push_health(out, stage);
     if (durable_snapshot)
         progress_store_tx_unlock();
     return true;
