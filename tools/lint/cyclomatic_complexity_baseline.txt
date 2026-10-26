@@ -137,9 +137,6 @@ contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_set_s
 contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_work_status:23
 contexts/commons/modules/vcs/src/zcode_heuristic_replication.c:hr_replication_row:30
 contexts/commons/modules/vcs/src/zcode_heuristic_replication.c:vcs_zcode_heuristic_replication_fold:36
-contexts/commons/modules/vcs/src/zcode_lane.c:lane_body:16
-contexts/commons/modules/vcs/src/zcode_lane.c:lane_fields:19
-contexts/commons/modules/vcs/src/zcode_lane.c:vcs_zcode_lane_receipt_parse:20
 contexts/commons/modules/vcs/src/zcode_patch.c:derive_change:16
 contexts/commons/modules/vcs/src/zcode_patch.c:vcs_zcode_patch_derive:16
 contexts/commons/modules/vcs/src/zcode_patch.c:vcs_zcode_patch_parse:19

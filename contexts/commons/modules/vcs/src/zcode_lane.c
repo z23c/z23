@@ -21,6 +21,29 @@ const char *vcs_zcode_lane_name(uint8_t lane)
     return "UNKNOWN";
 }
 
+static enum vcs_zcode_dev_error lane_check_roots_set(
+    const struct vcs_zcode_lane_receipt_v1 *receipt)
+{
+    if (!zcl_bytes_any_set(receipt->source_root, 32) ||
+        !zcl_bytes_any_set(receipt->task_root, 32) ||
+        !zcl_bytes_any_set(receipt->candidate_root, 32) ||
+        !zcl_bytes_any_set(receipt->proof_policy_root, 32) ||
+        !zcl_bytes_any_set(receipt->signer_pubkey, 32))
+        return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
+    return VCS_ZCODE_DEV_OK;
+}
+
+static enum vcs_zcode_dev_error lane_check_policy(
+    const struct vcs_zcode_lane_receipt_v1 *receipt)
+{
+    bool proof = zcl_bytes_any_set(receipt->proof_set_root, 32);
+    bool prior = zcl_bytes_any_set(receipt->prior_receipt_root, 32);
+    if ((receipt->lane == VCS_ZCODE_LANE_FRONTIER && (proof || prior)) ||
+        (receipt->lane != VCS_ZCODE_LANE_FRONTIER && (!proof || !prior)))
+        return VCS_ZCODE_DEV_ERR_POLICY;
+    return VCS_ZCODE_DEV_OK;
+}
+
 static enum vcs_zcode_dev_error lane_fields(
     const struct vcs_zcode_lane_receipt_v1 *receipt, bool signature)
 {
@@ -30,17 +53,10 @@ static enum vcs_zcode_dev_error lane_fields(
     if (receipt->lane < VCS_ZCODE_LANE_FRONTIER ||
         receipt->lane > VCS_ZCODE_LANE_PROVEN)
         return VCS_ZCODE_DEV_ERR_VERDICT;
-    if (!zcl_bytes_any_set(receipt->source_root, 32) ||
-        !zcl_bytes_any_set(receipt->task_root, 32) ||
-        !zcl_bytes_any_set(receipt->candidate_root, 32) ||
-        !zcl_bytes_any_set(receipt->proof_policy_root, 32) ||
-        !zcl_bytes_any_set(receipt->signer_pubkey, 32))
-        return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
-    bool proof = zcl_bytes_any_set(receipt->proof_set_root, 32);
-    bool prior = zcl_bytes_any_set(receipt->prior_receipt_root, 32);
-    if ((receipt->lane == VCS_ZCODE_LANE_FRONTIER && (proof || prior)) ||
-        (receipt->lane != VCS_ZCODE_LANE_FRONTIER && (!proof || !prior)))
-        return VCS_ZCODE_DEV_ERR_POLICY;
+    enum vcs_zcode_dev_error err = lane_check_roots_set(receipt);
+    if (err != VCS_ZCODE_DEV_OK) return err;
+    err = lane_check_policy(receipt);
+    if (err != VCS_ZCODE_DEV_OK) return err;
     if (receipt->created_unix <= 0)
         return VCS_ZCODE_DEV_ERR_TIME_ORDER;
     if (signature && !zcl_bytes_any_set(receipt->signature,
@@ -83,27 +99,33 @@ enum vcs_zcode_dev_error vcs_zcode_lane_receipt_validate_for_candidate(
     return VCS_ZCODE_DEV_OK;
 }
 
+static bool lane_write_body_fields(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_lane_receipt_v1 *receipt)
+{
+    static const uint8_t reserved[5] = {0};
+    return zcl_codec_write_bytes(writer, lane_magic, sizeof(lane_magic)) &&
+        zcl_codec_write_u16le(writer, receipt->schema_version) &&
+        zcl_codec_write_u8(writer, receipt->lane) &&
+        zcl_codec_write_bytes(writer, reserved, sizeof(reserved)) &&
+        zcl_codec_write_bytes(writer, receipt->source_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->task_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->candidate_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->proof_policy_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->proof_set_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->prior_receipt_root, 32) &&
+        zcl_codec_write_i64le(writer, receipt->created_unix) &&
+        zcl_codec_write_bytes(writer, receipt->signer_pubkey, 32);
+}
+
 static enum vcs_zcode_dev_error lane_body(
     const struct vcs_zcode_lane_receipt_v1 *receipt,
     uint8_t out[VCS_ZCODE_LANE_BODY_BYTES])
 {
     enum vcs_zcode_dev_error err = lane_fields(receipt, false);
     if (err != VCS_ZCODE_DEV_OK) return err;
-    static const uint8_t reserved[5] = {0};
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_LANE_BODY_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, lane_magic, sizeof(lane_magic)) &&
-        zcl_codec_write_u16le(&writer, receipt->schema_version) &&
-        zcl_codec_write_u8(&writer, receipt->lane) &&
-        zcl_codec_write_bytes(&writer, reserved, sizeof(reserved)) &&
-        zcl_codec_write_bytes(&writer, receipt->source_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->task_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->candidate_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->proof_policy_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->proof_set_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->prior_receipt_root, 32) &&
-        zcl_codec_write_i64le(&writer, receipt->created_unix) &&
-        zcl_codec_write_bytes(&writer, receipt->signer_pubkey, 32);
+    bool ok = lane_write_body_fields(&writer, receipt);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == VCS_ZCODE_LANE_BODY_BYTES
@@ -123,6 +145,24 @@ enum vcs_zcode_dev_error vcs_zcode_lane_receipt_serialize(
     return VCS_ZCODE_DEV_OK;
 }
 
+static bool lane_read_fields(struct zcl_codec_reader *reader,
+    struct vcs_zcode_lane_receipt_v1 *out, uint8_t reserved[5])
+{
+    return zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u8(reader, &out->lane) &&
+        zcl_codec_read_bytes(reader, reserved, 5) &&
+        zcl_codec_read_bytes(reader, out->source_root, 32) &&
+        zcl_codec_read_bytes(reader, out->task_root, 32) &&
+        zcl_codec_read_bytes(reader, out->candidate_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proof_policy_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proof_set_root, 32) &&
+        zcl_codec_read_bytes(reader, out->prior_receipt_root, 32) &&
+        zcl_codec_read_i64le(reader, &out->created_unix) &&
+        zcl_codec_read_bytes(reader, out->signer_pubkey, 32) &&
+        zcl_codec_read_bytes(reader, out->signature, 64) &&
+        zcl_codec_reader_finish(reader);
+}
+
 enum vcs_zcode_dev_error vcs_zcode_lane_receipt_parse(
     const uint8_t *wire, size_t wire_len,
     struct vcs_zcode_lane_receipt_v1 *out)
@@ -137,19 +177,7 @@ enum vcs_zcode_dev_error vcs_zcode_lane_receipt_parse(
     struct zcl_codec_reader reader;
     zcl_codec_reader_init(&reader, wire + sizeof(lane_magic),
                           wire_len - sizeof(lane_magic));
-    bool ok = zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u8(&reader, &out->lane) &&
-        zcl_codec_read_bytes(&reader, reserved, sizeof(reserved)) &&
-        zcl_codec_read_bytes(&reader, out->source_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->task_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->candidate_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_policy_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_set_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->prior_receipt_root, 32) &&
-        zcl_codec_read_i64le(&reader, &out->created_unix) &&
-        zcl_codec_read_bytes(&reader, out->signer_pubkey, 32) &&
-        zcl_codec_read_bytes(&reader, out->signature, 64) &&
-        zcl_codec_reader_finish(&reader);
+    bool ok = lane_read_fields(&reader, out, reserved);
     for (size_t i = 0; ok && i < sizeof(reserved); i++) ok = reserved[i] == 0;
     if (!ok) { memset(out, 0, sizeof(*out)); return VCS_ZCODE_DEV_ERR_WIRE_MAGIC; }
     return vcs_zcode_lane_receipt_validate(out);
