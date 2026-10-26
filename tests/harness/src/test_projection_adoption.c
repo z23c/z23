@@ -127,130 +127,162 @@ static void cleanup_db(const char *path)
     unlink(shm);
 }
 
+static bool projection_reads_tip_and_ratio(projection_t *p)
+{
+    char name[16];
+    double ratio = 0.0;
+    return projection_query_text(p, "SELECT name FROM facts", name, sizeof(name)) == 0 &&
+           strcmp(name, "tip") == 0 &&
+           projection_query_double(p, "SELECT ratio FROM facts", &ratio) == 0 &&
+           ratio > 1.24 && ratio < 1.26;
+}
+
+static int64_t query_height_readonly(const char *path)
+{
+    sqlite3 *db = NULL;
+    int64_t final_h = -1;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+        sqlite3_busy_timeout(db, 5000);
+        final_h = query_height(db);
+        sqlite3_close(db);
+    }
+    return final_h;
+}
+
+static int check_projection_query_text_and_double(void)
+{
+    int failures = 0;
+    char tmpl[] = "/tmp/zcl-projection-typed-XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (!dir) { failures++; printf("FAIL (mkdtemp)\n"); goto typed_done; }
+
+    char path[320];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                        NULL) != SQLITE_OK) {
+        failures++; printf("FAIL (open)\n"); goto typed_cleanup;
+    }
+    bool ok = exec_sql(db, "CREATE TABLE facts(name TEXT, ratio REAL)") &&
+              exec_sql(db, "INSERT INTO facts VALUES ('tip', 1.25)");
+    sqlite3_close(db);
+    if (!ok) { failures++; printf("FAIL (seed)\n"); goto typed_cleanup; }
+
+    projection_t *p = projection_open(path);
+    if (!p) { failures++; printf("FAIL (projection_open)\n"); goto typed_cleanup; }
+    ok = projection_reads_tip_and_ratio(p);
+    projection_close(p);
+    if (!ok) failures++;
+    printf("%s\n", ok ? "OK" : "FAIL");
+
+typed_cleanup:
+    cleanup_db(path);
+    rmdir(dir);
+typed_done:
+    ;
+    return failures;
+}
+
+static int check_chain_projection_best_heights(void)
+{
+    int failures = 0;
+    char tmpl[] = "/tmp/zcl-chain-projection-XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (!dir) { failures++; printf("FAIL (mkdtemp)\n"); goto chain_done; }
+
+    char path[320];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                        NULL) != SQLITE_OK) {
+        failures++; printf("FAIL (open)\n"); goto chain_cleanup;
+    }
+    bool ok = exec_sql(db, "CREATE TABLE blocks(height INTEGER NOT NULL, status INTEGER NOT NULL)") &&
+              exec_sql(db, "INSERT INTO blocks(height,status) VALUES (122,3),(123,3),(124,1)");
+    sqlite3_close(db);
+    if (!ok) { failures++; printf("FAIL (seed)\n"); goto chain_cleanup; }
+
+    node_rpc_client_init(dir, 0);
+    int64_t best = chain_projection_best_block_height();
+    int64_t hdr = chain_projection_best_header_height();
+    ok = (best == 123 && hdr == 124);
+    if (!ok) failures++;
+    printf("%s\n", ok ? "OK" : "FAIL");
+
+chain_cleanup:
+    cleanup_db(path);
+    rmdir(dir);
+chain_done:
+    ;
+    return failures;
+}
+
+static int check_projection_mvcc_under_load(void)
+{
+    int failures = 0;
+    char tmpl[] = "/tmp/zcl-projection-load-XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (!dir) { failures++; printf("FAIL (mkdtemp)\n"); goto load_done; }
+
+    char path[320];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    if (!create_projection_test_db(path)) {
+        failures++; printf("FAIL (seed)\n"); goto load_cleanup;
+    }
+
+    struct projection_load_state st = { .db_path = path };
+    atomic_init(&st.writer_done, false);
+    atomic_init(&st.reader_count, 0);
+    atomic_init(&st.reader_failures, 0);
+
+    pthread_t writer;
+    pthread_t readers[4];
+    bool ok = pthread_create(&writer, NULL, projection_writer_thread, &st) == 0;
+    for (int i = 0; i < 4; i++)
+        ok = ok && pthread_create(&readers[i], NULL,
+                                  projection_reader_thread, &st) == 0;
+    if (!ok) {
+        atomic_store(&st.writer_done, true);
+        failures++; printf("FAIL (pthread_create)\n"); goto load_cleanup;
+    }
+
+    pthread_join(writer, NULL);
+    for (int i = 0; i < 4; i++)
+        pthread_join(readers[i], NULL);
+
+    int64_t final_h = query_height_readonly(path);
+
+    ok = atomic_load(&st.reader_failures) == 0 &&
+         atomic_load(&st.reader_count) >= 100 &&
+         final_h == 1100;
+    if (!ok) failures++;
+    printf("%s\n", ok ? "OK" : "FAIL");
+
+load_cleanup:
+    cleanup_db(path);
+    rmdir(dir);
+load_done:
+    ;
+    return failures;
+}
+
 int test_projection_adoption(void)
 {
     int failures = 0;
     printf("\n=== projection_adoption tests ===\n");
 
     TEST("projection_query_text_and_double") {
-        char tmpl[] = "/tmp/zcl-projection-typed-XXXXXX";
-        char *dir = mkdtemp(tmpl);
-        if (!dir) { failures++; printf("FAIL (mkdtemp)\n"); goto typed_done; }
-
-        char path[320];
-        snprintf(path, sizeof(path), "%s/node.db", dir);
-        sqlite3 *db = NULL;
-        if (sqlite3_open_v2(path, &db,
-                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
-                            NULL) != SQLITE_OK) {
-            failures++; printf("FAIL (open)\n"); goto typed_cleanup;
-        }
-        bool ok = exec_sql(db, "CREATE TABLE facts(name TEXT, ratio REAL)") &&
-                  exec_sql(db, "INSERT INTO facts VALUES ('tip', 1.25)");
-        sqlite3_close(db);
-        if (!ok) { failures++; printf("FAIL (seed)\n"); goto typed_cleanup; }
-
-        projection_t *p = projection_open(path);
-        if (!p) { failures++; printf("FAIL (projection_open)\n"); goto typed_cleanup; }
-        char name[16];
-        double ratio = 0.0;
-        ok = projection_query_text(p, "SELECT name FROM facts", name, sizeof(name)) == 0 &&
-             strcmp(name, "tip") == 0 &&
-             projection_query_double(p, "SELECT ratio FROM facts", &ratio) == 0 &&
-             ratio > 1.24 && ratio < 1.26;
-        projection_close(p);
-        if (!ok) failures++;
-        printf("%s\n", ok ? "OK" : "FAIL");
-
-typed_cleanup:
-        cleanup_db(path);
-        rmdir(dir);
-typed_done:
-        ;
+        failures += check_projection_query_text_and_double();
     }
 
     TEST("chain_projection_best_heights") {
-        char tmpl[] = "/tmp/zcl-chain-projection-XXXXXX";
-        char *dir = mkdtemp(tmpl);
-        if (!dir) { failures++; printf("FAIL (mkdtemp)\n"); goto chain_done; }
-
-        char path[320];
-        snprintf(path, sizeof(path), "%s/node.db", dir);
-        sqlite3 *db = NULL;
-        if (sqlite3_open_v2(path, &db,
-                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
-                            NULL) != SQLITE_OK) {
-            failures++; printf("FAIL (open)\n"); goto chain_cleanup;
-        }
-        bool ok = exec_sql(db, "CREATE TABLE blocks(height INTEGER NOT NULL, status INTEGER NOT NULL)") &&
-                  exec_sql(db, "INSERT INTO blocks(height,status) VALUES (122,3),(123,3),(124,1)");
-        sqlite3_close(db);
-        if (!ok) { failures++; printf("FAIL (seed)\n"); goto chain_cleanup; }
-
-        node_rpc_client_init(dir, 0);
-        int64_t best = chain_projection_best_block_height();
-        int64_t hdr = chain_projection_best_header_height();
-        ok = (best == 123 && hdr == 124);
-        if (!ok) failures++;
-        printf("%s\n", ok ? "OK" : "FAIL");
-
-chain_cleanup:
-        cleanup_db(path);
-        rmdir(dir);
-chain_done:
-        ;
+        failures += check_chain_projection_best_heights();
     }
 
     TEST("projection_mvcc_under_load") {
-        char tmpl[] = "/tmp/zcl-projection-load-XXXXXX";
-        char *dir = mkdtemp(tmpl);
-        if (!dir) { failures++; printf("FAIL (mkdtemp)\n"); goto load_done; }
-
-        char path[320];
-        snprintf(path, sizeof(path), "%s/node.db", dir);
-        if (!create_projection_test_db(path)) {
-            failures++; printf("FAIL (seed)\n"); goto load_cleanup;
-        }
-
-        struct projection_load_state st = { .db_path = path };
-        atomic_init(&st.writer_done, false);
-        atomic_init(&st.reader_count, 0);
-        atomic_init(&st.reader_failures, 0);
-
-        pthread_t writer;
-        pthread_t readers[4];
-        bool ok = pthread_create(&writer, NULL, projection_writer_thread, &st) == 0;
-        for (int i = 0; i < 4; i++)
-            ok = ok && pthread_create(&readers[i], NULL,
-                                      projection_reader_thread, &st) == 0;
-        if (!ok) {
-            atomic_store(&st.writer_done, true);
-            failures++; printf("FAIL (pthread_create)\n"); goto load_cleanup;
-        }
-
-        pthread_join(writer, NULL);
-        for (int i = 0; i < 4; i++)
-            pthread_join(readers[i], NULL);
-
-        sqlite3 *db = NULL;
-        int64_t final_h = -1;
-        if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
-            sqlite3_busy_timeout(db, 5000);
-            final_h = query_height(db);
-            sqlite3_close(db);
-        }
-
-        ok = atomic_load(&st.reader_failures) == 0 &&
-             atomic_load(&st.reader_count) >= 100 &&
-             final_h == 1100;
-        if (!ok) failures++;
-        printf("%s\n", ok ? "OK" : "FAIL");
-
-load_cleanup:
-        cleanup_db(path);
-        rmdir(dir);
-load_done:
-        ;
+        failures += check_projection_mvcc_under_load();
     }
 
     printf("projection_adoption: %d failures\n", failures);

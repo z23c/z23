@@ -1788,7 +1788,6 @@ tests/harness/src/test_peer_snapshot_conditions.c:test_peer_snapshot_conditions:
 tests/harness/src/test_policy.c:test_policy:50
 tests/harness/src/test_process_headers_adversarial.c:test_process_headers_adversarial:55
 tests/harness/src/test_progress_store.c:test_progress_store:100
-tests/harness/src/test_projection_adoption.c:test_projection_adoption:30
 tests/harness/src/test_projection_replay_invariant.c:run_mempool:19
 tests/harness/src/test_proof_chain.c:pc_build_fixture:26
 tests/harness/src/test_proof_chain.c:pc_invariants:17
