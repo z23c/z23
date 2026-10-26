@@ -189,22 +189,10 @@ static enum vcs_reward_commit_error zr_settle(struct vcs_reward_ledger *l,
 
 /* ── 1. enqueue validation (record kinds, bands, evidence) ──────────── */
 
-static int t_enqueue(void)
+/* Queue checks: redelivery, category gates and the exact bands. */
+static int zr_enq_queue(struct vcs_reward_ledger *l)
 {
     int failures = 0;
-    char store[4400];
-    zr_store(store, sizeof(store), "enqueue");
-    zr_rm_rf("test-tmp/zr_enqueue_x"); /* no-op guard */
-    char datadir[4400];
-    snprintf(datadir, sizeof(datadir), "test-tmp/zr_enqueue_%ld",
-             (long)getpid());
-    zr_rm_rf(datadir);
-
-    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
-    ZR_CHECK("enqueue: empty store loads", l != NULL);
-    if (!l)
-        return failures + 1;
-
     uint8_t id[32], id2[32];
     ZR_CHECK("enqueue: auto new-package 508",
              zr_auto(l, 1, 1, VCS_REWARD_CATEGORY_NEW_PACKAGE, 508, 1,
@@ -251,6 +239,14 @@ static int t_enqueue(void)
                       7, id) == VCS_REWARD_ENQUEUE_OK &&
              zr_claim(l, 8, 1, VCS_REWARD_CATEGORY_MAINTENANCE_90_DAY, 100,
                       8, id) == VCS_REWARD_ENQUEUE_OK);
+    return failures;
+}
+
+/* Evidence root, points and the claim duplicate. */
+static int zr_enq_evidence(struct vcs_reward_ledger *l)
+{
+    int failures = 0;
+    uint8_t id[32], id2[32];
 
     /* Evidence root and points. */
     {
@@ -287,6 +283,13 @@ static int t_enqueue(void)
     ZR_CHECK("enqueue: same claim redelivered is a duplicate",
              zr_claim(l, 3, 1, VCS_REWARD_CATEGORY_SECURITY_FIX, 500, 3,
                       id2) == VCS_REWARD_ENQUEUE_DUPLICATE);
+    return failures;
+}
+
+/* Category strings and the band reflection of the scoring table. */
+static int zr_enq_names(void)
+{
+    int failures = 0;
 
     /* Strings + band reflection (frozen names from the scoring table). */
     ZR_CHECK("enqueue: category strings are the scoring-table names",
@@ -310,9 +313,13 @@ static int t_enqueue(void)
         ZR_CHECK("enqueue: security-fix band reflects the table",
                  lo == 500 && hi == 5000 && !automatic);
     }
-    vcs_reward_ledger_free(l);
+    return failures;
+}
 
-    /* The placeholder token id is the frozen 32 ASCII bytes. */
+/* The placeholder token id is the frozen 32 ASCII bytes. */
+static int zr_enq_placeholder(void)
+{
+    int failures = 0;
     {
         const uint8_t *id_bytes = vcs_reward_placeholder_token_id();
         char hex[65];
@@ -323,36 +330,56 @@ static int t_enqueue(void)
                  strlen(VCS_REWARD_PLACEHOLDER_TOKEN_ID_TEXT) == 32 &&
                  strlen(hex) == 64);
     }
+    return failures;
+}
+
+static int t_enqueue(void)
+{
+    int failures = 0;
+    char store[4400];
+    zr_store(store, sizeof(store), "enqueue");
+    zr_rm_rf("test-tmp/zr_enqueue_x"); /* no-op guard */
+    char datadir[4400];
+    snprintf(datadir, sizeof(datadir), "test-tmp/zr_enqueue_%ld",
+             (long)getpid());
+    zr_rm_rf(datadir);
+
+    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
+    ZR_CHECK("enqueue: empty store loads", l != NULL);
+    if (!l)
+        return failures + 1;
+
+    failures += zr_enq_queue(l);
+    failures += zr_enq_evidence(l);
+    failures += zr_enq_names();
+    vcs_reward_ledger_free(l);
+
+    failures += zr_enq_placeholder();
     zr_rm_rf(datadir);
     return failures;
 }
 
 /* ── 2. replay + 3. roundtrip (library) ─────────────────────────────── */
 
-static int t_roundtrip(void)
+static int zr_rt_queue(const char *store, uint8_t id_auto1[32],
+                       uint8_t id_auto2[32], uint8_t id_claim[32])
 {
     int failures = 0;
-    char store[4400], datadir[4400];
-    zr_store(store, sizeof(store), "roundtrip");
-    snprintf(datadir, sizeof(datadir), "test-tmp/zr_roundtrip_%ld",
-             (long)getpid());
-    zr_rm_rf(datadir);
-
-    uint8_t id_auto1[32], id_auto2[32], id_claim[32];
-    {
-        struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
-        ZR_CHECK("roundtrip: two autos + one claim queue",
-                 zr_auto(l, 10, 10, VCS_REWARD_CATEGORY_NEW_PACKAGE, 600,
-                         10, id_auto1) == VCS_REWARD_ENQUEUE_OK &&
-                 zr_auto(l, 11, 11, VCS_REWARD_CATEGORY_PACKAGE_UPDATE,
-                         250, 11, id_auto2) == VCS_REWARD_ENQUEUE_OK &&
-                 zr_claim(l, 12, 12, VCS_REWARD_CATEGORY_REVIEW, 200, 12,
-                          id_claim) == VCS_REWARD_ENQUEUE_OK);
-        vcs_reward_ledger_free(l);
-    }
-
-    /* Replay: the wires rebuild exactly. */
     struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
+    ZR_CHECK("roundtrip: two autos + one claim queue",
+             zr_auto(l, 10, 10, VCS_REWARD_CATEGORY_NEW_PACKAGE, 600,
+                     10, id_auto1) == VCS_REWARD_ENQUEUE_OK &&
+             zr_auto(l, 11, 11, VCS_REWARD_CATEGORY_PACKAGE_UPDATE,
+                     250, 11, id_auto2) == VCS_REWARD_ENQUEUE_OK &&
+             zr_claim(l, 12, 12, VCS_REWARD_CATEGORY_REVIEW, 200, 12,
+                      id_claim) == VCS_REWARD_ENQUEUE_OK);
+    vcs_reward_ledger_free(l);
+    return failures;
+}
+
+static int zr_rt_replay(struct vcs_reward_ledger *l, uint8_t id_claim[32])
+{
+    int failures = 0;
     struct vcs_reward_queue_tally tally;
     vcs_reward_queue_tally(l, &tally);
     ZR_CHECK("roundtrip: replay tallies 3 queued",
@@ -368,8 +395,13 @@ static int t_roundtrip(void)
                  e->category == VCS_REWARD_CATEGORY_REVIEW &&
                  e->state == VCS_REWARD_STATE_QUEUED);
     }
+    return failures;
+}
 
-    /* Plan: the claim is blocked, the autos planned. */
+static int zr_rt_plan(struct vcs_reward_ledger *l, uint8_t id_claim[32],
+                      uint8_t plan_id[32])
+{
+    int failures = 0;
     struct vcs_reward_plan plan;
     ZR_CHECK("roundtrip: plan builds",
              vcs_reward_plan_build(l, 100, &plan));
@@ -388,7 +420,6 @@ static int t_roundtrip(void)
         ZR_CHECK("roundtrip: blocked row names owner-review-required",
                  claim_blocked);
     }
-    uint8_t plan_id[32];
     memcpy(plan_id, plan.plan_id, 32);
     ZR_CHECK("roundtrip: plan persists",
              vcs_reward_plan_persist(l, &plan) ==
@@ -408,10 +439,14 @@ static int t_roundtrip(void)
                      VCS_REWARD_PLAN_PERSIST_DUPLICATE);
         vcs_reward_plan_free(&again);
     }
-    vcs_reward_ledger_free(l);
+    return failures;
+}
 
-    /* Derived planned states survive a reload. */
-    l = vcs_reward_ledger_load(store);
+static int zr_rt_planned(struct vcs_reward_ledger *l, uint8_t id_auto1[32],
+                         uint8_t plan_id[32])
+{
+    int failures = 0;
+    struct vcs_reward_queue_tally tally;
     vcs_reward_queue_tally(l, &tally);
     ZR_CHECK("roundtrip: planned states derive after reload",
              tally.planned == 2 && tally.queued == 1);
@@ -422,8 +457,12 @@ static int t_roundtrip(void)
                  e && e->state == VCS_REWARD_STATE_PLANNED &&
                  memcmp(e->planned_by, plan_id, 32) == 0);
     }
+    return failures;
+}
 
-    /* Commit, then receipt. */
+static int zr_rt_commit(struct vcs_reward_ledger *l, uint8_t plan_id[32])
+{
+    int failures = 0;
     struct vcs_reward_commit_result result;
     char detail[256];
     ZR_CHECK("roundtrip: commit settles",
@@ -447,10 +486,16 @@ static int t_roundtrip(void)
         ZR_CHECK("roundtrip: receipt rows sum to the batch", sum == 850);
     }
     vcs_reward_receipt_free(&receipt);
-    vcs_reward_ledger_free(l);
+    return failures;
+}
 
-    /* Settled states + facts are durable. */
-    l = vcs_reward_ledger_load(store);
+static int zr_rt_settled(struct vcs_reward_ledger *l, uint8_t id_auto2[32],
+                         uint8_t plan_id[32])
+{
+    int failures = 0;
+    struct vcs_reward_queue_tally tally;
+    struct vcs_reward_commit_result result;
+    char detail[256];
     vcs_reward_queue_tally(l, &tally);
     ZR_CHECK("roundtrip: settled tallies after reload",
              tally.settled == 2 && tally.queued == 1 &&
@@ -471,11 +516,47 @@ static int t_roundtrip(void)
                                sizeof(detail)) ==
                  VCS_REWARD_COMMIT_ALREADY_SETTLED &&
              vcs_reward_ledger_fact_count(l) == 2);
+    struct vcs_reward_receipt receipt;
     ZR_CHECK("roundtrip: receipt still the original batch",
              vcs_reward_receipt_load(l, plan_id, &receipt) ==
                  VCS_REWARD_RECEIPT_OK &&
              receipt.points_total == 850);
     vcs_reward_receipt_free(&receipt);
+    return failures;
+}
+
+static int t_roundtrip(void)
+{
+    int failures = 0;
+    char store[4400], datadir[4400];
+    zr_store(store, sizeof(store), "roundtrip");
+    snprintf(datadir, sizeof(datadir), "test-tmp/zr_roundtrip_%ld",
+             (long)getpid());
+    zr_rm_rf(datadir);
+
+    uint8_t id_auto1[32], id_auto2[32], id_claim[32];
+    failures += zr_rt_queue(store, id_auto1, id_auto2, id_claim);
+
+    /* Replay: the wires rebuild exactly. */
+    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
+    failures += zr_rt_replay(l, id_claim);
+
+    /* Plan: the claim is blocked, the autos planned. */
+    uint8_t plan_id[32];
+    failures += zr_rt_plan(l, id_claim, plan_id);
+    vcs_reward_ledger_free(l);
+
+    /* Derived planned states survive a reload. */
+    l = vcs_reward_ledger_load(store);
+    failures += zr_rt_planned(l, id_auto1, plan_id);
+
+    /* Commit, then receipt. */
+    failures += zr_rt_commit(l, plan_id);
+    vcs_reward_ledger_free(l);
+
+    /* Settled states + facts are durable. */
+    l = vcs_reward_ledger_load(store);
+    failures += zr_rt_settled(l, id_auto2, plan_id);
     vcs_reward_ledger_free(l);
     zr_rm_rf(datadir);
     return failures;
@@ -483,17 +564,12 @@ static int t_roundtrip(void)
 
 /* ── 4. crash between commit and ledger write: replay-safe ──────────── */
 
-static int t_crash_replay(void)
+/* Fixture: settle three autos, then read back the original receipt. */
+static int zr_crash_settle(const char *store, uint8_t plan_id[32],
+                           struct vcs_reward_receipt *before)
 {
     int failures = 0;
-    char store[4400], datadir[4400];
-    zr_store(store, sizeof(store), "crash");
-    snprintf(datadir, sizeof(datadir), "test-tmp/zr_crash_%ld",
-             (long)getpid());
-    zr_rm_rf(datadir);
-
     struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
-    uint8_t plan_id[32];
     struct vcs_reward_commit_result result;
     ZR_CHECK("crash: fixture settles",
              zr_auto(l, 20, 20, VCS_REWARD_CATEGORY_NEW_PACKAGE, 700, 20,
@@ -509,11 +585,67 @@ static int t_crash_replay(void)
 
     /* The receipt of the completed commit. */
     l = vcs_reward_ledger_load(store);
-    struct vcs_reward_receipt before;
     ZR_CHECK("crash: original receipt",
-             vcs_reward_receipt_load(l, plan_id, &before) ==
+             vcs_reward_receipt_load(l, plan_id, before) ==
                  VCS_REWARD_RECEIPT_OK);
     vcs_reward_ledger_free(l);
+    return failures;
+}
+
+/* Re-commit after the simulated crash: resume, never double-pay. */
+static int zr_crash_resume(const char *store, uint8_t plan_id[32],
+                           struct vcs_reward_receipt *before, char *path,
+                           size_t path_size)
+{
+    int failures = 0;
+    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
+    struct vcs_reward_commit_result result;
+    ZR_CHECK("crash: replay sees facts without the commit record",
+             vcs_reward_ledger_fact_count(l) == 3);
+    memset(&result, 0, sizeof(result));
+    ZR_CHECK("crash: re-commit resumes with the identical outcome",
+             vcs_reward_commit(l, plan_id, &result, path /*detail*/,
+                               path_size) == VCS_REWARD_COMMIT_OK &&
+             result.resumed && result.settled_count == 3 &&
+             result.points_settled == 1150);
+    ZR_CHECK("crash: no duplicated facts after resume",
+             vcs_reward_ledger_fact_count(l) == 3);
+    struct vcs_reward_receipt after;
+    ZR_CHECK("crash: receipt identical across the resume",
+             vcs_reward_receipt_load(l, plan_id, &after) ==
+                 VCS_REWARD_RECEIPT_OK &&
+             after.day == before->day &&
+             after.settled_count == before->settled_count &&
+             after.points_total == before->points_total &&
+             after.row_count == before->row_count &&
+             memcmp(after.rows[0].entry_id, before->rows[0].entry_id,
+                    32) == 0 &&
+             after.rows[0].points == before->rows[0].points &&
+             memcmp(after.token_id, before->token_id, 32) == 0);
+    vcs_reward_receipt_free(before);
+    vcs_reward_receipt_free(&after);
+
+    /* And the resumed commit is itself idempotent now. */
+    ZR_CHECK("crash: third commit is ALREADY_SETTLED",
+             vcs_reward_commit(l, plan_id, &result, path, path_size) ==
+                 VCS_REWARD_COMMIT_ALREADY_SETTLED &&
+             vcs_reward_ledger_fact_count(l) == 3);
+    vcs_reward_ledger_free(l);
+    return failures;
+}
+
+static int t_crash_replay(void)
+{
+    int failures = 0;
+    char store[4400], datadir[4400];
+    zr_store(store, sizeof(store), "crash");
+    snprintf(datadir, sizeof(datadir), "test-tmp/zr_crash_%ld",
+             (long)getpid());
+    zr_rm_rf(datadir);
+
+    uint8_t plan_id[32];
+    struct vcs_reward_receipt before;
+    failures += zr_crash_settle(store, plan_id, &before);
 
     /* Simulate the crash: facts + queue transitions durable, the commit
      * record (written LAST) lost. Re-commit must resume, not double-pay. */
@@ -523,55 +655,19 @@ static int t_crash_replay(void)
     ZR_CHECK("crash: commit record deleted (the simulated crash)",
              unlink(path) == 0);
 
-    l = vcs_reward_ledger_load(store);
-    ZR_CHECK("crash: replay sees facts without the commit record",
-             vcs_reward_ledger_fact_count(l) == 3);
-    memset(&result, 0, sizeof(result));
-    ZR_CHECK("crash: re-commit resumes with the identical outcome",
-             vcs_reward_commit(l, plan_id, &result, path /*detail*/,
-                               sizeof(path)) == VCS_REWARD_COMMIT_OK &&
-             result.resumed && result.settled_count == 3 &&
-             result.points_settled == 1150);
-    ZR_CHECK("crash: no duplicated facts after resume",
-             vcs_reward_ledger_fact_count(l) == 3);
-    struct vcs_reward_receipt after;
-    ZR_CHECK("crash: receipt identical across the resume",
-             vcs_reward_receipt_load(l, plan_id, &after) ==
-                 VCS_REWARD_RECEIPT_OK &&
-             after.day == before.day &&
-             after.settled_count == before.settled_count &&
-             after.points_total == before.points_total &&
-             after.row_count == before.row_count &&
-             memcmp(after.rows[0].entry_id, before.rows[0].entry_id, 32) ==
-                 0 &&
-             after.rows[0].points == before.rows[0].points &&
-             memcmp(after.token_id, before.token_id, 32) == 0);
-    vcs_reward_receipt_free(&before);
-    vcs_reward_receipt_free(&after);
-
-    /* And the resumed commit is itself idempotent now. */
-    ZR_CHECK("crash: third commit is ALREADY_SETTLED",
-             vcs_reward_commit(l, plan_id, &result, path, sizeof(path)) ==
-                 VCS_REWARD_COMMIT_ALREADY_SETTLED &&
-             vcs_reward_ledger_fact_count(l) == 3);
-    vcs_reward_ledger_free(l);
+    failures += zr_crash_resume(store, plan_id, &before, path,
+                                sizeof(path));
     zr_rm_rf(datadir);
     return failures;
 }
 
 /* ── 5. period caps read the durable ledger ─────────────────────────── */
 
-static int t_caps_from_ledger(void)
+/* Weekly cap: 9800 settles on day 100; day 101 clamps to 200; day
+ * 102 exhausts (deferred); day 107 leaves the trailing window. */
+static int zr_caps_day100(const char *store)
 {
     int failures = 0;
-    char store[4400], datadir[4400];
-    zr_store(store, sizeof(store), "caps");
-    snprintf(datadir, sizeof(datadir), "test-tmp/zr_caps_%ld",
-             (long)getpid());
-    zr_rm_rf(datadir);
-
-    /* Weekly cap: 9800 settles on day 100; day 101 clamps to 200; day
-     * 102 exhausts (deferred); day 107 leaves the trailing window. */
     struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
     uint8_t id[32], plan_id[32];
     struct vcs_reward_commit_result result;
@@ -583,8 +679,15 @@ static int t_caps_from_ledger(void)
              zr_settle(l, 100, plan_id, &result) == VCS_REWARD_COMMIT_OK &&
              result.points_settled == 9800);
     vcs_reward_ledger_free(l);
+    return failures;
+}
 
-    l = vcs_reward_ledger_load(store);
+static int zr_caps_day101(const char *store)
+{
+    int failures = 0;
+    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
+    uint8_t id[32];
+    struct vcs_reward_commit_result result;
     ZR_CHECK("caps: candidate queues for day 101",
              zr_auto(l, 32, 30, VCS_REWARD_CATEGORY_PACKAGE_UPDATE, 500, 32,
                      id) == VCS_REWARD_ENQUEUE_OK);
@@ -604,8 +707,15 @@ static int t_caps_from_ledger(void)
              result.points_settled == 200);
     vcs_reward_plan_free(&plan);
     vcs_reward_ledger_free(l);
+    return failures;
+}
 
-    l = vcs_reward_ledger_load(store);
+static int zr_caps_window(const char *store)
+{
+    int failures = 0;
+    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
+    uint8_t id[32];
+    struct vcs_reward_plan plan;
     ZR_CHECK("caps: candidate queues for day 102",
              zr_auto(l, 33, 30, VCS_REWARD_CATEGORY_PACKAGE_UPDATE, 500, 33,
                      id) == VCS_REWARD_ENQUEUE_OK);
@@ -626,10 +736,16 @@ static int t_caps_from_ledger(void)
              !plan.rows[0].weekly_cap_clamped);
     vcs_reward_plan_free(&plan);
     vcs_reward_ledger_free(l);
+    return failures;
+}
 
-    /* Daily release-count cap: the 11th same-day release defers. */
-    zr_rm_rf(datadir);
-    l = vcs_reward_ledger_load(store);
+static int zr_caps_daily(const char *store)
+{
+    int failures = 0;
+    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
+    uint8_t id[32];
+    struct vcs_reward_plan plan;
+    struct vcs_reward_commit_result result;
     for (uint8_t i = 0; i < 11; i++) {
         ZR_CHECK("caps: daily fixture entry queues",
                  zr_auto(l, (uint8_t)(40 + i), 40,
@@ -666,6 +782,25 @@ static int t_caps_from_ledger(void)
              plan.planned_count == 1 && plan.rows[0].points_settled == 100);
     vcs_reward_plan_free(&plan);
     vcs_reward_ledger_free(l);
+    return failures;
+}
+
+static int t_caps_from_ledger(void)
+{
+    int failures = 0;
+    char store[4400], datadir[4400];
+    zr_store(store, sizeof(store), "caps");
+    snprintf(datadir, sizeof(datadir), "test-tmp/zr_caps_%ld",
+             (long)getpid());
+    zr_rm_rf(datadir);
+
+    failures += zr_caps_day100(store);
+    failures += zr_caps_day101(store);
+    failures += zr_caps_window(store);
+
+    /* Daily release-count cap: the 11th same-day release defers. */
+    zr_rm_rf(datadir);
+    failures += zr_caps_daily(store);
     zr_rm_rf(datadir);
     return failures;
 }
@@ -776,34 +911,26 @@ static bool zr_rows_have(const struct json_value *arr, const char *key,
     return false;
 }
 
-static int t_commands(void)
+static int zr_cmd_seed(const char *store)
 {
     int failures = 0;
-    char datadir[4400], store[4400];
-    snprintf(datadir, sizeof(datadir), "test-tmp/zr_cmd_%ld",
-             (long)getpid());
-    snprintf(store, sizeof(store), "%s/zcode", datadir);
-    zr_rm_rf(datadir);
-    ZR_CHECK("commands: datadir created", zr_mkdir_p(store));
+    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
+    uint8_t id[32];
+    ZR_CHECK("commands: fixture queues",
+             zr_auto(l, 60, 60, VCS_REWARD_CATEGORY_NEW_PACKAGE, 900,
+                     60, id) == VCS_REWARD_ENQUEUE_OK &&
+             zr_auto(l, 61, 61, VCS_REWARD_CATEGORY_PACKAGE_UPDATE,
+                     400, 61, id) == VCS_REWARD_ENQUEUE_OK &&
+             zr_claim(l, 62, 61, VCS_REWARD_CATEGORY_SECURITY_FIX,
+                      1200, 62, id) == VCS_REWARD_ENQUEUE_OK);
+    vcs_reward_ledger_free(l);
+    return failures;
+}
 
-    /* Seed the queue through the library (two autos + one claim). */
-    uint8_t pub1[33], pub2[33];
-    zr_pub(60, pub1);
-    zr_pub(61, pub2);
-    {
-        struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
-        uint8_t id[32];
-        ZR_CHECK("commands: fixture queues",
-                 zr_auto(l, 60, 60, VCS_REWARD_CATEGORY_NEW_PACKAGE, 900,
-                         60, id) == VCS_REWARD_ENQUEUE_OK &&
-                 zr_auto(l, 61, 61, VCS_REWARD_CATEGORY_PACKAGE_UPDATE,
-                         400, 61, id) == VCS_REWARD_ENQUEUE_OK &&
-                 zr_claim(l, 62, 61, VCS_REWARD_CATEGORY_SECURITY_FIX,
-                          1200, 62, id) == VCS_REWARD_ENQUEUE_OK);
-        vcs_reward_ledger_free(l);
-    }
-
-    /* queue: tallies + rows + claim evidence root. */
+/* queue: tallies + rows + claim evidence root. */
+static int zr_cmd_queue(const char *datadir)
+{
+    int failures = 0;
     {
         struct zr_cmd c;
         zr_cmd_init(&c, datadir);
@@ -845,9 +972,14 @@ static int t_commands(void)
                  strcmp(c.reply.error.code, "BAD_STATE_FILTER") == 0);
         zr_cmd_free(&c);
     }
+    return failures;
+}
 
-    /* plan: input validation, exclusions named, determinism. */
-    char plan_hex[65];
+/* plan: input validation, exclusions named, determinism. */
+static int zr_cmd_plan(const char *datadir, char *plan_hex,
+                       size_t plan_hex_size)
+{
+    int failures = 0;
     {
         struct zr_cmd c;
         zr_cmd_init(&c, datadir);
@@ -882,7 +1014,7 @@ static int t_commands(void)
                                        "points_total")) == 1300 &&
                  json_get_bool(json_get(&c.reply.data, "simulated")));
         if (pid)
-            snprintf(plan_hex, sizeof(plan_hex), "%s", pid);
+            snprintf(plan_hex, plan_hex_size, "%s", pid);
         const struct json_value *exclusions =
             json_get(&c.reply.data, "exclusions");
         ZR_CHECK("commands: plan names owner-review-required",
@@ -908,21 +1040,29 @@ static int t_commands(void)
                                         "already_persisted")));
         zr_cmd_free(&c);
     }
+    return failures;
+}
 
-    /* queue: planned states derive from the persisted plan. */
-    {
-        struct zr_cmd c;
-        zr_cmd_init(&c, datadir);
-        zcl_native_handle_zcode_reward_queue(&c.request, &c.reply);
-        const struct json_value *tallies =
-            json_get(&c.reply.data, "tallies");
-        ZR_CHECK("commands: queue tallies 2 planned after planning",
-                 json_get_int(json_get(tallies, "planned")) == 2 &&
-                 json_get_int(json_get(tallies, "queued")) == 1);
-        zr_cmd_free(&c);
-    }
+/* queue: planned states derive from the persisted plan. */
+static int zr_cmd_queue_planned(const char *datadir)
+{
+    int failures = 0;
+    struct zr_cmd c;
+    zr_cmd_init(&c, datadir);
+    zcl_native_handle_zcode_reward_queue(&c.request, &c.reply);
+    const struct json_value *tallies =
+        json_get(&c.reply.data, "tallies");
+    ZR_CHECK("commands: queue tallies 2 planned after planning",
+             json_get_int(json_get(tallies, "planned")) == 2 &&
+             json_get_int(json_get(tallies, "queued")) == 1);
+    zr_cmd_free(&c);
+    return failures;
+}
 
-    /* commit: rejections first, then the settle. */
+/* commit: rejections first, then the settle. */
+static int zr_cmd_commit(const char *datadir, const char *plan_hex)
+{
+    int failures = 0;
     {
         struct zr_cmd c;
         zr_cmd_init(&c, datadir);
@@ -971,8 +1111,13 @@ static int t_commands(void)
                  strcmp(c.reply.error.code, "ALREADY_SETTLED") == 0);
         zr_cmd_free(&c);
     }
+    return failures;
+}
 
-    /* receipt: the durable evidence. */
+/* receipt: the durable evidence. */
+static int zr_cmd_receipt(const char *datadir, const char *plan_hex)
+{
+    int failures = 0;
     {
         struct zr_cmd c;
         zr_cmd_init(&c, datadir);
@@ -1026,74 +1171,118 @@ static int t_commands(void)
                  strcmp(c3.reply.error.code, "UNKNOWN_PLAN") == 0);
         zr_cmd_free(&c3);
     }
+    return failures;
+}
 
-    /* queue after settlement: the claim still waits for owner review. */
-    {
-        struct zr_cmd c;
-        zr_cmd_init(&c, datadir);
-        zcl_native_handle_zcode_reward_queue(&c.request, &c.reply);
-        const struct json_value *tallies =
-            json_get(&c.reply.data, "tallies");
-        ZR_CHECK("commands: post-settle tallies",
-                 json_get_int(json_get(tallies, "settled")) == 2 &&
-                 json_get_int(json_get(tallies, "queued")) == 1 &&
-                 json_get_int(json_get(&c.reply.data,
-                                       "settled_facts")) == 2);
-        zr_cmd_free(&c);
-    }
+/* queue after settlement: the claim still waits for owner review. */
+static int zr_cmd_queue_post(const char *datadir)
+{
+    int failures = 0;
+    struct zr_cmd c;
+    zr_cmd_init(&c, datadir);
+    zcl_native_handle_zcode_reward_queue(&c.request, &c.reply);
+    const struct json_value *tallies =
+        json_get(&c.reply.data, "tallies");
+    ZR_CHECK("commands: post-settle tallies",
+             json_get_int(json_get(tallies, "settled")) == 2 &&
+             json_get_int(json_get(tallies, "queued")) == 1 &&
+             json_get_int(json_get(&c.reply.data,
+                                   "settled_facts")) == 2);
+    zr_cmd_free(&c);
+    return failures;
+}
 
-    /* contributor.show surfaces the ledger facts exactly. */
-    {
-        char pub1_hex[67], pub2_hex[67];
-        zr_hex_enc(pub1, 33, pub1_hex);
-        zr_hex_enc(pub2, 33, pub2_hex);
-        struct zr_cmd c;
-        zr_cmd_init(&c, datadir);
-        (void)json_push_kv_str(&c.input, "pubkey", pub1_hex);
-        zcl_native_handle_zcode_contributor_show(&c.request, &c.reply);
-        const struct json_value *rw = json_get(&c.reply.data, "rewards");
-        ZR_CHECK("commands: contributor earned_score from the ledger",
-                 rw && json_get_int(json_get(rw, "earned_score")) == 900 &&
-                 json_get_int(json_get(rw, "settled_entries")) == 1 &&
-                 json_get_int(json_get(rw, "queued_entries")) == 0 &&
-                 json_get_int(json_get(rw, "rejected_entries")) == 0 &&
-                 json_get_bool(json_get(rw, "simulated")));
-        ZR_CHECK("commands: earned_score and token facts stay separate",
-                 rw && json_get_int(json_get(
-                           rw, "token_rewards_received")) == 900 &&
-                 json_get(rw, "balance") == NULL &&
-                 json_get(rw, "current_token_balance") == NULL);
-        zr_cmd_free(&c);
+/* contributor.show surfaces the ledger facts exactly. */
+static int zr_cmd_contrib_pub1(const char *datadir, uint8_t pub1[33])
+{
+    int failures = 0;
+    char pub1_hex[67];
+    zr_hex_enc(pub1, 33, pub1_hex);
+    struct zr_cmd c;
+    zr_cmd_init(&c, datadir);
+    (void)json_push_kv_str(&c.input, "pubkey", pub1_hex);
+    zcl_native_handle_zcode_contributor_show(&c.request, &c.reply);
+    const struct json_value *rw = json_get(&c.reply.data, "rewards");
+    ZR_CHECK("commands: contributor earned_score from the ledger",
+             rw && json_get_int(json_get(rw, "earned_score")) == 900 &&
+             json_get_int(json_get(rw, "settled_entries")) == 1 &&
+             json_get_int(json_get(rw, "queued_entries")) == 0 &&
+             json_get_int(json_get(rw, "rejected_entries")) == 0 &&
+             json_get_bool(json_get(rw, "simulated")));
+    ZR_CHECK("commands: earned_score and token facts stay separate",
+             rw && json_get_int(json_get(
+                       rw, "token_rewards_received")) == 900 &&
+             json_get(rw, "balance") == NULL &&
+             json_get(rw, "current_token_balance") == NULL);
+    zr_cmd_free(&c);
+    return failures;
+}
 
-        struct zr_cmd c2;
-        zr_cmd_init(&c2, datadir);
-        (void)json_push_kv_str(&c2.input, "pubkey", pub2_hex);
-        zcl_native_handle_zcode_contributor_show(&c2.request, &c2.reply);
-        const struct json_value *rw2 = json_get(&c2.reply.data, "rewards");
-        ZR_CHECK("commands: second contributor reflects queued + settled",
-                 rw2 && json_get_int(json_get(rw2, "earned_score")) ==
-                            400 &&
-                 json_get_int(json_get(rw2, "settled_entries")) == 1 &&
-                 json_get_int(json_get(rw2, "queued_entries")) == 1 &&
-                 json_get_int(json_get(rw2, "queued_points")) == 1200);
-        zr_cmd_free(&c2);
+/* The second key with queued facts, then a key with no facts at all. */
+static int zr_cmd_contrib_rest(const char *datadir, uint8_t pub2[33])
+{
+    int failures = 0;
+    char pub2_hex[67];
+    zr_hex_enc(pub2, 33, pub2_hex);
+    struct zr_cmd c2;
+    zr_cmd_init(&c2, datadir);
+    (void)json_push_kv_str(&c2.input, "pubkey", pub2_hex);
+    zcl_native_handle_zcode_contributor_show(&c2.request, &c2.reply);
+    const struct json_value *rw2 = json_get(&c2.reply.data, "rewards");
+    ZR_CHECK("commands: second contributor reflects queued + settled",
+             rw2 && json_get_int(json_get(rw2, "earned_score")) ==
+                        400 &&
+             json_get_int(json_get(rw2, "settled_entries")) == 1 &&
+             json_get_int(json_get(rw2, "queued_entries")) == 1 &&
+             json_get_int(json_get(rw2, "queued_points")) == 1200);
+    zr_cmd_free(&c2);
 
-        /* A key with no facts at all: zeros, stable schema. */
-        uint8_t pub3[33];
-        zr_pub(63, pub3);
-        char pub3_hex[67];
-        zr_hex_enc(pub3, 33, pub3_hex);
-        struct zr_cmd c3;
-        zr_cmd_init(&c3, datadir);
-        (void)json_push_kv_str(&c3.input, "pubkey", pub3_hex);
-        zcl_native_handle_zcode_contributor_show(&c3.request, &c3.reply);
-        const struct json_value *rw3 = json_get(&c3.reply.data, "rewards");
-        ZR_CHECK("commands: unknown contributor shows zero facts",
-                 rw3 && json_get_int(json_get(rw3, "earned_score")) == 0 &&
-                 json_get_int(json_get(rw3, "queued_entries")) == 0 &&
-                 !json_get_bool(json_get(&c3.reply.data, "has_published")));
-        zr_cmd_free(&c3);
-    }
+    /* A key with no facts at all: zeros, stable schema. */
+    uint8_t pub3[33];
+    zr_pub(63, pub3);
+    char pub3_hex[67];
+    zr_hex_enc(pub3, 33, pub3_hex);
+    struct zr_cmd c3;
+    zr_cmd_init(&c3, datadir);
+    (void)json_push_kv_str(&c3.input, "pubkey", pub3_hex);
+    zcl_native_handle_zcode_contributor_show(&c3.request, &c3.reply);
+    const struct json_value *rw3 = json_get(&c3.reply.data, "rewards");
+    ZR_CHECK("commands: unknown contributor shows zero facts",
+             rw3 && json_get_int(json_get(rw3, "earned_score")) == 0 &&
+             json_get_int(json_get(rw3, "queued_entries")) == 0 &&
+             !json_get_bool(json_get(&c3.reply.data, "has_published")));
+    zr_cmd_free(&c3);
+    return failures;
+}
+
+static int t_commands(void)
+{
+    int failures = 0;
+    char datadir[4400], store[4400];
+    snprintf(datadir, sizeof(datadir), "test-tmp/zr_cmd_%ld",
+             (long)getpid());
+    snprintf(store, sizeof(store), "%s/zcode", datadir);
+    zr_rm_rf(datadir);
+    ZR_CHECK("commands: datadir created", zr_mkdir_p(store));
+
+    /* Seed the queue through the library (two autos + one claim). */
+    uint8_t pub1[33], pub2[33];
+    zr_pub(60, pub1);
+    zr_pub(61, pub2);
+    failures += zr_cmd_seed(store);
+
+    failures += zr_cmd_queue(datadir);
+
+    char plan_hex[65];
+    failures += zr_cmd_plan(datadir, plan_hex, sizeof(plan_hex));
+    failures += zr_cmd_queue_planned(datadir);
+
+    failures += zr_cmd_commit(datadir, plan_hex);
+    failures += zr_cmd_receipt(datadir, plan_hex);
+    failures += zr_cmd_queue_post(datadir);
+
+    failures += zr_cmd_contrib_pub1(datadir, pub1);
+    failures += zr_cmd_contrib_rest(datadir, pub2);
     zr_rm_rf(datadir);
     return failures;
 }

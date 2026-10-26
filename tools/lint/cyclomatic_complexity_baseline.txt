@@ -874,11 +874,6 @@ tests/harness/src/test_zcode_package_dev_focus.c:zpd_real_focus_preedit_acceptan
 tests/harness/src/test_zcode_package_dev_focus.c:zpf_exec_clean_agent_acceptance:16
 tests/harness/src/test_zcode_package_dev_focus.c:zpf_process_reload_focus:36
 tests/harness/src/test_zcode_package_dev_focus.c:zpf_spawn_exec_agent:20
-tests/harness/src/test_zcode_reward.c:t_caps_from_ledger:23
-tests/harness/src/test_zcode_reward.c:t_commands:50
-tests/harness/src/test_zcode_reward.c:t_crash_replay:17
-tests/harness/src/test_zcode_reward.c:t_enqueue:17
-tests/harness/src/test_zcode_reward.c:t_roundtrip:38
 tests/harness/src/test_zcode_score_receipt.c:score_store_vertical:24
 tests/harness/src/test_zcode_score_receipt.c:score_transport_package:18
 tests/harness/src/test_zcode_score_receipt.c:shadow_protocol_package_vertical:49
