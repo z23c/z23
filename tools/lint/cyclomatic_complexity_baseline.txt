@@ -582,9 +582,6 @@ contexts/market/services/src/store_buyer_pay.c:sb_write_atomic:16
 contexts/market/services/src/store_buyer_pay.c:store_buyer_collect:19
 contexts/market/services/src/store_buyer_pay.c:store_buyer_prepare_payment:20
 contexts/messaging/models/src/zmsg.c:db_zmsg_inbox_window:32
-contexts/naming/controllers/src/zdir_intent_controller.c:rpc_zdir_intent:25
-contexts/naming/controllers/src/zdir_intent_controller.c:zdic_build_script:18
-contexts/naming/controllers/src/zdir_intent_controller.c:zdic_prepare:25
 contexts/naming/controllers/src/znam_intent_controller.c:rpc_znam_intent:30
 contexts/naming/controllers/src/znam_intent_controller.c:znic_prepare:30
 contexts/naming/controllers/src/znam_intent_native_handler.c:znin_run:36

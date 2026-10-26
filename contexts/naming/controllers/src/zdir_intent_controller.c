@@ -54,6 +54,50 @@ static struct zcl_result zdic_money(
                                        scope, out);
 }
 
+static struct zcl_result zdic_build_register_script(
+    const struct overlay_intent_request *request, char *hostname,
+    uint8_t *script, size_t capacity, size_t *script_len,
+    char owner[ONION_DIRECTORY_ADDRESS_MAX], bool known,
+    const struct db_onion_directory *previous)
+{
+    bool has_key = request->semantics[0] == 1;
+    size_t expected = ZDIR_INTENT_KEY_OFFSET +
+                      (has_key ? ZDIR_PUBKEY_LEN : 0);
+    if (request->semantics_len != expected)
+        return ZCL_ERR(-3, "ZDIR register semantic length is invalid");
+    if (known) {
+        if (!previous->owner_address[0])
+            return ZCL_ERR(-4, "ZDIR row has no provable owner");
+        snprintf(owner, ONION_DIRECTORY_ADDRESS_MAX, "%s",
+                 previous->owner_address);
+    }
+    *script_len = zdir_build_register(
+        script, capacity, hostname,
+        has_key ? request->semantics + ZDIR_INTENT_KEY_OFFSET : NULL);
+    return ZCL_OK;
+}
+
+static struct zcl_result zdic_build_deregister_script(
+    const struct overlay_intent_request *request, char *hostname,
+    uint8_t *script, size_t capacity, size_t *script_len,
+    char owner[ONION_DIRECTORY_ADDRESS_MAX], bool known,
+    const struct db_onion_directory *previous)
+{
+    if (request->semantics[0] != 0 ||
+        request->semantics_len != ZDIR_INTENT_KEY_OFFSET)
+        return ZCL_ERR(-5, "ZDIR deregister semantic payload is invalid");
+    if (!known)
+        return ZCL_ERR(-6, "ZDIR hostname is not registered");
+    if (strcmp(previous->status, ONION_DIRECTORY_STATUS_RETIRED) == 0)
+        return ZCL_ERR(-7, "ZDIR hostname is already retired");
+    if (!previous->owner_address[0])
+        return ZCL_ERR(-8, "ZDIR row has no provable owner");
+    snprintf(owner, ONION_DIRECTORY_ADDRESS_MAX, "%s",
+             previous->owner_address);
+    *script_len = zdir_build_deregister(script, capacity, hostname);
+    return ZCL_OK;
+}
+
 static struct zcl_result zdic_build_script(
     const struct overlay_intent_request *request, uint8_t *script,
     size_t capacity, size_t *script_len,
@@ -73,39 +117,79 @@ static struct zcl_result zdic_build_script(
     struct db_onion_directory previous;
     memset(&previous, 0, sizeof(previous));
     bool known = db_onion_directory_find(ctx->node_db, hostname, &previous);
-    if (strcmp(request->operation, "register") == 0) {
-        bool has_key = request->semantics[0] == 1;
-        size_t expected = ZDIR_INTENT_KEY_OFFSET +
-                          (has_key ? ZDIR_PUBKEY_LEN : 0);
-        if (request->semantics_len != expected)
-            return ZCL_ERR(-3, "ZDIR register semantic length is invalid");
-        if (known) {
-            if (!previous.owner_address[0])
-                return ZCL_ERR(-4, "ZDIR row has no provable owner");
-            snprintf(owner, ONION_DIRECTORY_ADDRESS_MAX, "%s",
-                     previous.owner_address);
-        }
-        *script_len = zdir_build_register(
-            script, capacity, hostname,
-            has_key ? request->semantics + ZDIR_INTENT_KEY_OFFSET : NULL);
-    } else if (strcmp(request->operation, "deregister") == 0) {
-        if (request->semantics[0] != 0 ||
-            request->semantics_len != ZDIR_INTENT_KEY_OFFSET)
-            return ZCL_ERR(-5, "ZDIR deregister semantic payload is invalid");
-        if (!known)
-            return ZCL_ERR(-6, "ZDIR hostname is not registered");
-        if (strcmp(previous.status, ONION_DIRECTORY_STATUS_RETIRED) == 0)
-            return ZCL_ERR(-7, "ZDIR hostname is already retired");
-        if (!previous.owner_address[0])
-            return ZCL_ERR(-8, "ZDIR row has no provable owner");
-        snprintf(owner, ONION_DIRECTORY_ADDRESS_MAX, "%s",
-                 previous.owner_address);
-        *script_len = zdir_build_deregister(script, capacity, hostname);
-    } else {
-        return ZCL_ERR(-9, "ZDIR operation is invalid");
-    }
+    struct zcl_result built;
+    if (strcmp(request->operation, "register") == 0)
+        built = zdic_build_register_script(
+            request, hostname, script, capacity, script_len, owner, known,
+            &previous);
+    else if (strcmp(request->operation, "deregister") == 0)
+        built = zdic_build_deregister_script(
+            request, hostname, script, capacity, script_len, owner, known,
+            &previous);
+    else
+        built = ZCL_ERR(-9, "ZDIR operation is invalid");
+    if (!built.ok)
+        return built;
     return *script_len > 0
         ? ZCL_OK : ZCL_ERR(-10, "ZDIR OP_RETURN builder refused the request");
+}
+
+static bool zdic_prepare_context_complete(
+    struct wallet_rpc_context *ctx, const struct overlay_intent_request *request,
+    const uint8_t *raw_tx, const size_t *raw_tx_len, const uint8_t *txid_out,
+    const int64_t *actual_fee_zat, const struct vault_intent_input *inputs,
+    const size_t *input_count, int64_t maximum_fee_zat)
+{
+    return ctx && ctx->wallet && ctx->node_db && request && raw_tx &&
+           raw_tx_len && txid_out && actual_fee_zat && inputs && input_count &&
+           maximum_fee_zat > 0;
+}
+
+static struct zcl_result zdic_prepare_funding_tx(
+    struct wallet_rpc_context *ctx, char owner[ONION_DIRECTORY_ADDRESS_MAX],
+    struct wallet_tx *wtx, int64_t *fee)
+{
+    const char *why = NULL;
+    struct zcl_result built = owner[0]
+        ? zslp_command_build_owner_base_tx(ctx->wallet, owner, wtx, fee, &why)
+        : zslp_command_build_genesis_base_tx(ctx->wallet, wtx, fee, &why);
+    if (!built.ok)
+        return ZCL_ERR(-12, "ZDIR funding/owner input build failed: %s",
+                       why ? why : built.message);
+    return ZCL_OK;
+}
+
+static bool zdic_prepare_tx_within_contract(const struct wallet_tx *wtx,
+                                            int64_t fee,
+                                            int64_t maximum_fee_zat,
+                                            size_t input_capacity)
+{
+    return fee >= 0 && fee <= maximum_fee_zat && wtx->tx.num_vin > 0 &&
+           wtx->tx.num_vin <= input_capacity;
+}
+
+static bool zdic_prepare_serialize_tx(struct wallet_tx *wtx, uint8_t *raw_tx,
+                                      size_t raw_capacity, size_t *raw_tx_len)
+{
+    struct byte_stream stream;
+    stream_init(&stream, 1024);
+    bool serialized = transaction_serialize(&wtx->tx, &stream) &&
+                      stream.size <= raw_capacity;
+    if (serialized) {
+        memcpy(raw_tx, stream.data, stream.size);
+        *raw_tx_len = stream.size;
+    }
+    stream_free(&stream);
+    return serialized;
+}
+
+static void zdic_prepare_copy_inputs(struct vault_intent_input *inputs,
+                                     const struct wallet_tx *wtx)
+{
+    for (size_t i = 0; i < wtx->tx.num_vin; i++) {
+        memcpy(inputs[i].txid, wtx->tx.vin[i].prevout.hash.data, 32);
+        inputs[i].vout = wtx->tx.vin[i].prevout.n;
+    }
 }
 
 static struct zcl_result zdic_prepare(
@@ -116,9 +200,9 @@ static struct zcl_result zdic_prepare(
     size_t *input_count)
 {
     struct wallet_rpc_context *ctx = opaque;
-    if (!ctx || !ctx->wallet || !ctx->node_db || !request || !raw_tx ||
-        !raw_tx_len || !txid_out || !actual_fee_zat || !inputs ||
-        !input_count || maximum_fee_zat <= 0)
+    if (!zdic_prepare_context_complete(ctx, request, raw_tx, raw_tx_len,
+                                       txid_out, actual_fee_zat, inputs,
+                                       input_count, maximum_fee_zat))
         return ZCL_ERR(-11, "ZDIR prepare context is incomplete");
     uint8_t script[ZDIR_SCRIPT_MAX];
     size_t script_len = 0;
@@ -127,21 +211,18 @@ static struct zcl_result zdic_prepare(
         request, script, sizeof(script), &script_len, owner, ctx));
     struct wallet_tx wtx; memset(&wtx, 0, sizeof(wtx));
     int64_t fee = 0;
-    const char *why = NULL;
-    struct zcl_result built = owner[0]
-        ? zslp_command_build_owner_base_tx(ctx->wallet, owner, &wtx, &fee, &why)
-        : zslp_command_build_genesis_base_tx(ctx->wallet, &wtx, &fee, &why);
-    if (!built.ok)
-        return ZCL_ERR(-12, "ZDIR funding/owner input build failed: %s",
-                       why ? why : built.message);
+    struct zcl_result funding =
+        zdic_prepare_funding_tx(ctx, owner, &wtx, &fee);
+    if (!funding.ok)
+        return funding;
     struct zcl_result prepared = zslp_command_prepare_with_op_return(
         ctx->wallet, &wtx, script, script_len);
     if (!prepared.ok) {
         transaction_free(&wtx.tx);
         return ZCL_ERR(-13, "ZDIR exact signing failed: %s", prepared.message);
     }
-    if (fee < 0 || fee > maximum_fee_zat || wtx.tx.num_vin == 0 ||
-        wtx.tx.num_vin > input_capacity) {
+    if (!zdic_prepare_tx_within_contract(&wtx, fee, maximum_fee_zat,
+                                         input_capacity)) {
         transaction_free(&wtx.tx);
         return ZCL_ERR(-14, "ZDIR transaction exceeds fee or input contract");
     }
@@ -151,22 +232,14 @@ static struct zcl_result zdic_prepare(
         return ZCL_ERR(-15, "ZDIR plan key persistence failed: %s",
                        flushed.message);
     }
-    struct byte_stream stream;
-    stream_init(&stream, 1024);
-    bool serialized = transaction_serialize(&wtx.tx, &stream) &&
-                      stream.size <= raw_capacity;
+    bool serialized = zdic_prepare_serialize_tx(&wtx, raw_tx, raw_capacity,
+                                                raw_tx_len);
     if (serialized) {
-        memcpy(raw_tx, stream.data, stream.size);
-        *raw_tx_len = stream.size;
         memcpy(txid_out, wtx.tx.hash.data, 32);
         *actual_fee_zat = fee;
         *input_count = wtx.tx.num_vin;
-        for (size_t i = 0; i < wtx.tx.num_vin; i++) {
-            memcpy(inputs[i].txid, wtx.tx.vin[i].prevout.hash.data, 32);
-            inputs[i].vout = wtx.tx.vin[i].prevout.n;
-        }
+        zdic_prepare_copy_inputs(inputs, &wtx);
     }
-    stream_free(&stream);
     transaction_free(&wtx.tx);
     return serialized ? ZCL_OK
                       : ZCL_ERR(-16, "prepared ZDIR transaction is too large");
@@ -258,6 +331,54 @@ static void zdic_render(const struct overlay_intent_result *intent,
     }
 }
 
+static const struct json_value *zdic_rpc_input_object(
+    const struct json_value *params)
+{
+    const struct json_value *input =
+        params && json_size(params) ? json_at(params, 0) : NULL;
+    return input && input->type == JSON_OBJ ? input : NULL;
+}
+
+static bool zdic_wallet_scope_valid(const char *scope)
+{
+    return scope && (strcmp(scope, "dev") == 0 || strcmp(scope, "prod") == 0);
+}
+
+static int zdic_plan_id_parse_status(const struct json_value *input,
+                                     uint8_t out[32])
+{
+    const char *plan_hex = json_get_str(json_get(input, "plan_id"));
+    if (!plan_hex || strlen(plan_hex) != 64 || !IsHex(plan_hex) ||
+        ParseHex(plan_hex, out, 32) != 32)
+        return -1;
+    return 0;
+}
+
+static bool zdic_plan_fields_valid(const char *operation, const char *hostname,
+                                   const char *idempotency)
+{
+    return operation && hostname && onion_hostname_valid(hostname) &&
+           idempotency;
+}
+
+static int zdic_plan_semantics_fill(const char *operation, const char *pubkey,
+                                    struct overlay_intent_request *request)
+{
+    if (strcmp(operation, "register") == 0) {
+        if (pubkey && pubkey[0]) {
+            if (!zdic_parse_key(pubkey,
+                                request->semantics + ZDIR_INTENT_KEY_OFFSET))
+                return -1;
+            request->semantics[0] = 1;
+            request->semantics_len += ZDIR_PUBKEY_LEN;
+        }
+        return 0;
+    }
+    if (strcmp(operation, "deregister") != 0)
+        return -2;
+    return 0;
+}
+
 static bool rpc_zdir_intent(const struct json_value *params, bool help,
                             struct json_value *result)
 {
@@ -267,15 +388,14 @@ static bool rpc_zdir_intent(const struct json_value *params, bool help,
             "zdir_intent commit {wallet_scope,plan_id,confirm:true}\n");
         return true;
     }
-    const struct json_value *input = params && json_size(params)
-        ? json_at(params, 0) : NULL;
-    if (!input || input->type != JSON_OBJ) {
+    const struct json_value *input = zdic_rpc_input_object(params);
+    if (!input) {
         json_set_str(result, "zdir_intent requires one object");
         return false;
     }
     const char *scope = json_get_str(json_get(input, "wallet_scope"));
     bool confirm = json_get_bool_or(input, "confirm", false);
-    if (!scope || (strcmp(scope, "dev") != 0 && strcmp(scope, "prod") != 0)) {
+    if (!zdic_wallet_scope_valid(scope)) {
         json_set_str(result, "zdir_intent requires wallet_scope=dev|prod");
         return false;
     }
@@ -285,10 +405,8 @@ static bool rpc_zdir_intent(const struct json_value *params, bool help,
     struct overlay_intent_result intent;
     struct zcl_result outcome;
     if (confirm) {
-        const char *plan_hex = json_get_str(json_get(input, "plan_id"));
         uint8_t plan_id[32];
-        if (!plan_hex || strlen(plan_hex) != 64 || !IsHex(plan_hex) ||
-            ParseHex(plan_hex, plan_id, sizeof(plan_id)) != 32) {
+        if (zdic_plan_id_parse_status(input, plan_id) != 0) {
             json_set_str(result, "ZDIR commit requires a 64-hex plan_id");
             return false;
         }
@@ -300,8 +418,7 @@ static bool rpc_zdir_intent(const struct json_value *params, bool help,
         const char *pubkey = json_get_str(json_get(input, "pubkey"));
         const char *idempotency =
             json_get_str(json_get(input, "idempotency_key"));
-        if (!operation || !hostname || !onion_hostname_valid(hostname) ||
-            !idempotency) {
+        if (!zdic_plan_fields_valid(operation, hostname, idempotency)) {
             json_set_str(result, "ZDIR plan requires a valid operation, hostname, and idempotency_key");
             return false;
         }
@@ -310,17 +427,13 @@ static bool rpc_zdir_intent(const struct json_value *params, bool help,
         memcpy(request.semantics + ZDIR_INTENT_HOST_OFFSET, hostname,
                ZDIR_HOSTNAME_LEN);
         request.semantics_len = ZDIR_INTENT_KEY_OFFSET;
-        if (strcmp(operation, "register") == 0) {
-            if (pubkey && pubkey[0]) {
-                if (!zdic_parse_key(pubkey,
-                        request.semantics + ZDIR_INTENT_KEY_OFFSET)) {
-                    json_set_str(result, "ZDIR pubkey must be 64 non-zero hex characters");
-                    return false;
-                }
-                request.semantics[0] = 1;
-                request.semantics_len += ZDIR_PUBKEY_LEN;
-            }
-        } else if (strcmp(operation, "deregister") != 0) {
+        int semantics_status = zdic_plan_semantics_fill(operation, pubkey,
+                                                        &request);
+        if (semantics_status == -1) {
+            json_set_str(result, "ZDIR pubkey must be 64 non-zero hex characters");
+            return false;
+        }
+        if (semantics_status == -2) {
             json_set_str(result, "ZDIR operation must be register or deregister");
             return false;
         }
