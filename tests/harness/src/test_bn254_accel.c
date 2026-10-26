@@ -109,6 +109,74 @@ static int check_pair(const uint64_t a[4], const uint64_t b[4],
     return 0;
 }
 
+/* Runs every ordered pair of the boundary vectors through check_pair and
+ * returns the number of mismatches. */
+static int run_boundary_vector_checks(bool adx)
+{
+    uint64_t zero[4] = {0, 0, 0, 0};
+    uint64_t one[4]  = {1, 0, 0, 0};
+    uint64_t qm1[4]; memcpy(qm1, Q, 32); u256_sub_inplace(qm1, one);
+    uint64_t qm2[4]; memcpy(qm2, qm1, 32); u256_sub_inplace(qm2, one);
+
+    const uint64_t *vecs[] = { zero, one, qm1, qm2, R, R2 };
+    int nv = (int)(sizeof(vecs) / sizeof(vecs[0]));
+    int bad = 0;
+    for (int i = 0; i < nv; i++)
+        for (int j = 0; j < nv; j++)
+            bad += check_pair(vecs[i], vecs[j], adx);
+    return bad;
+}
+
+/* Drives count random vectors (seeded splitmix64) through check_pair; when
+ * squaring is set each vector is multiplied by itself (the fp_sq hot case).
+ * Returns the number of mismatches found. */
+static int run_random_mul_corpus(uint64_t seed, int count, bool squaring,
+                                 bool adx)
+{
+    uint64_t s = seed;
+    int bad = 0;
+    for (int k = 0; k < count; k++) {
+        uint64_t a[4], b[4];
+        rand_fq(a, &s);
+        if (squaring) {
+            bad += check_pair(a, a, adx);
+        } else {
+            rand_fq(b, &s);
+            bad += check_pair(a, b, adx);
+        }
+        if (bad >= 4) break;   /* stop spamming once clearly broken */
+    }
+    return bad;
+}
+
+typedef void (*mont_mul_fn)(uint64_t r[4], const uint64_t a[4],
+                            const uint64_t b[4]);
+
+/* Times n dependent-chain multiplications (acc = acc * b) with mul; returns
+ * ns per multiply. */
+static double time_dependent_chain(mont_mul_fn mul, uint64_t acc[4],
+                                   const uint64_t b[4], int n)
+{
+    int64_t t0 = platform_time_monotonic_us();
+    for (int k = 0; k < n; k++)
+        mul(acc, acc, b);
+    int64_t t1 = platform_time_monotonic_us();
+    return (double)(t1 - t0) * 1000.0 / (double)n;
+}
+
+/* Times n rounds of lanes data-independent multiplications with mul; returns
+ * ns per multiply. */
+static double time_independent_lanes(mont_mul_fn mul, uint64_t la[][4],
+                                     uint64_t lb[][4], int lanes, int n)
+{
+    int64_t t0 = platform_time_monotonic_us();
+    for (int k = 0; k < n; k++)
+        for (int l = 0; l < lanes; l++)
+            mul(la[l], la[l], lb[l]);
+    int64_t t1 = platform_time_monotonic_us();
+    return (double)(t1 - t0) * 1000.0 / ((double)n * lanes);
+}
+
 int test_bn254_accel(void);
 int test_bn254_accel(void)
 {
@@ -125,17 +193,7 @@ int test_bn254_accel(void)
     /* ── Boundary vectors ─────────────────────────────────────────── */
     printf("boundary vectors... ");
     {
-        uint64_t zero[4] = {0, 0, 0, 0};
-        uint64_t one[4]  = {1, 0, 0, 0};
-        uint64_t qm1[4]; memcpy(qm1, Q, 32); u256_sub_inplace(qm1, one);
-        uint64_t qm2[4]; memcpy(qm2, qm1, 32); u256_sub_inplace(qm2, one);
-
-        const uint64_t *vecs[] = { zero, one, qm1, qm2, R, R2 };
-        int nv = (int)(sizeof(vecs) / sizeof(vecs[0]));
-        int bad = 0;
-        for (int i = 0; i < nv; i++)
-            for (int j = 0; j < nv; j++)
-                bad += check_pair(vecs[i], vecs[j], adx);
+        int bad = run_boundary_vector_checks(adx);
         if (bad) { failures += bad; printf("FAIL (%d)\n", bad); }
         else printf("OK\n");
     }
@@ -143,15 +201,8 @@ int test_bn254_accel(void)
     /* ── Large random corpus ──────────────────────────────────────── */
     printf("random corpus (200000 vectors)... ");
     {
-        uint64_t s = 0xB19254ACCE1D0001ULL;
-        int bad = 0;
-        for (int k = 0; k < 200000; k++) {
-            uint64_t a[4], b[4];
-            rand_fq(a, &s);
-            rand_fq(b, &s);
-            bad += check_pair(a, b, adx);
-            if (bad >= 4) break;   /* stop spamming once clearly broken */
-        }
+        int bad = run_random_mul_corpus(0xB19254ACCE1D0001ULL, 200000,
+                                        false, adx);
         if (bad) { failures += bad; printf("FAIL (%d)\n", bad); }
         else printf("OK\n");
     }
@@ -159,14 +210,8 @@ int test_bn254_accel(void)
     /* ── Squaring path (a == b), a common hot case (fp_sq) ─────────── */
     printf("squaring corpus (50000 vectors)... ");
     {
-        uint64_t s = 0x5340F1EEDCA5B002ULL;
-        int bad = 0;
-        for (int k = 0; k < 50000; k++) {
-            uint64_t a[4];
-            rand_fq(a, &s);
-            bad += check_pair(a, a, adx);
-            if (bad >= 4) break;
-        }
+        int bad = run_random_mul_corpus(0x5340F1EEDCA5B002ULL, 50000,
+                                        true, adx);
         if (bad) { failures += bad; printf("FAIL (%d)\n", bad); }
         else printf("OK\n");
     }
@@ -181,21 +226,13 @@ int test_bn254_accel(void)
         rand_fq(b, &s);
         memcpy(acc, a, 32);
 
-        int64_t t0, t1;
         /* portable */
-        t0 = platform_time_monotonic_us();
-        for (int k = 0; k < N; k++)
-            bn254_accel_mont_mul_portable(acc, acc, b);
-        t1 = platform_time_monotonic_us();
-        double ns_port = (double)(t1 - t0) * 1000.0 / (double)N;
+        double ns_port = time_dependent_chain(bn254_accel_mont_mul_portable,
+                                              acc, b, N);
 
         /* dispatched (BMI2+ADX where available) */
         memcpy(acc, a, 32);
-        t0 = platform_time_monotonic_us();
-        for (int k = 0; k < N; k++)
-            bn_fq_mont_mul_accel(acc, acc, b);
-        t1 = platform_time_monotonic_us();
-        double ns_disp = (double)(t1 - t0) * 1000.0 / (double)N;
+        double ns_disp = time_dependent_chain(bn_fq_mont_mul_accel, acc, b, N);
 
         printf("  dependent-chain (latency-bound):\n");
         printf("    portable : %.2f ns/mul\n", ns_port);
@@ -211,20 +248,12 @@ int test_bn254_accel(void)
         uint64_t la[LANES][4], lb[LANES][4];
         for (int l = 0; l < LANES; l++) { rand_fq(la[l], &s); rand_fq(lb[l], &s); }
 
-        t0 = platform_time_monotonic_us();
-        for (int k = 0; k < N; k++)
-            for (int l = 0; l < LANES; l++)
-                bn254_accel_mont_mul_portable(la[l], la[l], lb[l]);
-        t1 = platform_time_monotonic_us();
-        double tp_port = (double)(t1 - t0) * 1000.0 / ((double)N * LANES);
+        double tp_port = time_independent_lanes(bn254_accel_mont_mul_portable,
+                                                la, lb, LANES, N);
 
         for (int l = 0; l < LANES; l++) { rand_fq(la[l], &s); }
-        t0 = platform_time_monotonic_us();
-        for (int k = 0; k < N; k++)
-            for (int l = 0; l < LANES; l++)
-                bn_fq_mont_mul_accel(la[l], la[l], lb[l]);
-        t1 = platform_time_monotonic_us();
-        double tp_disp = (double)(t1 - t0) * 1000.0 / ((double)N * LANES);
+        double tp_disp = time_independent_lanes(bn_fq_mont_mul_accel,
+                                                la, lb, LANES, N);
 
         printf("  independent-lanes (throughput-bound):\n");
         printf("    portable : %.2f ns/mul\n", tp_port);
