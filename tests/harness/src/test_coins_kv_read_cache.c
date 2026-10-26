@@ -255,22 +255,38 @@ static int ckr_check_absent_reads(sqlite3 *db, sqlite3_stmt **c_prevout,
     return failures;
 }
 
-/* Repeated cached prevout reads at strided key indexes must stay
- * byte-identical to fresh, through one reused statement or a re-prepared
- * one after finalize. */
-static int ckr_check_repeated_reads(sqlite3 *db, uint8_t txids[CKR_N][32],
-                                    sqlite3_stmt **c_prevout, int reps,
-                                    int stride, const char *name)
+/* (3) reuse determinism: the SAME cached stmt, many repeats. */
+static int ckr_check_reuse_reads(sqlite3 *db, uint8_t txids[CKR_N][32],
+                                 sqlite3_stmt **c_prevout)
 {
     int failures = 0;
-    int mismatch = 0;
-    for (int r = 0; r < reps; r++) {
-        int i = (r * stride) % CKR_N;
+    int repeat_mismatch = 0;
+    for (int rep = 0; rep < 500; rep++) {
+        int i = (rep * 131) % CKR_N;
         uint32_t vout = (uint32_t)(i % 4);
         if (!ckr_prevout_reads_match(db, c_prevout, txids[i], vout))
-            mismatch++;
+            repeat_mismatch++;
     }
-    CKR_CHECK(name, mismatch == 0);
+    CKR_CHECK("reuse: repeated cached reads stay byte-identical to fresh",
+              repeat_mismatch == 0);
+    return failures;
+}
+
+/* (5) after the finalize, a fresh cache pointer re-prepares and returns the
+ * same bytes. */
+static int ckr_check_reprepare_reads(sqlite3 *db, uint8_t txids[CKR_N][32],
+                                     sqlite3_stmt **c_prevout)
+{
+    int failures = 0;
+    int reprep_mismatch = 0;
+    for (int i = 0; i < 200; i++) {
+        int idx = (i * 271) % CKR_N;
+        uint32_t vout = (uint32_t)(idx % 4);
+        if (!ckr_prevout_reads_match(db, c_prevout, txids[idx], vout))
+            reprep_mismatch++;
+    }
+    CKR_CHECK("re-prepare after finalize returns identical bytes",
+              reprep_mismatch == 0);
     return failures;
 }
 
@@ -361,8 +377,7 @@ int test_coins_kv_read_cache(void)
     failures += ckr_check_absent_reads(db, &c_prevout, &c_exists);
 
     /* ── (3) reuse determinism: the SAME cached stmt, many repeats ── */
-    failures += ckr_check_repeated_reads(db, txids, &c_prevout, 500, 131,
-              "reuse: repeated cached reads stay byte-identical to fresh");
+    failures += ckr_check_reuse_reads(db, txids, &c_prevout);
 
     /* ── (4) interleaved WRITE: a cached read then a same-connection write
      *        must not wedge (the post-read reset released the row lock) ── */
@@ -373,8 +388,7 @@ int test_coins_kv_read_cache(void)
     sqlite3_finalize(c_prevout); c_prevout = NULL;
     sqlite3_finalize(c_get);     c_get = NULL;
     sqlite3_finalize(c_exists);  c_exists = NULL;
-    failures += ckr_check_repeated_reads(db, txids, &c_prevout, 200, 271,
-              "re-prepare after finalize returns identical bytes");
+    failures += ckr_check_reprepare_reads(db, txids, &c_prevout);
 
     /* NULL-arg guards return false, never crash. */
     CKR_CHECK("cached get_prevout NULL cache returns false",
