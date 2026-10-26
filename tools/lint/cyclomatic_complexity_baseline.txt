@@ -1162,7 +1162,6 @@ tests/harness/src/test_sha3_512_x4.c:test_sha3_512_x4:41
 tests/harness/src/test_sha3_windows.c:test_sha3_windows:28
 tests/harness/src/test_shop_reputation.c:sr_populate:17
 tests/harness/src/test_shop_reputation.c:sr_store_declaration:18
-tests/harness/src/test_shutdown_stagewatch.c:test_shutdown_stagewatch:50
 tests/harness/src/test_sighash_malleability.c:test_sighash_malleability:55
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_a_consensus_accept:60
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_b_wallet_rpc:33
