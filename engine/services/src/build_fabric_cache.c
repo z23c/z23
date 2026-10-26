@@ -122,6 +122,29 @@ static bool bfc_source_identity_valid(
     return ok && memcmp(checked_id, expected_source_id, 32) == 0;
 }
 
+static bool bfc_input_wires_current(
+    const char *workspace, uint8_t root[32], uint8_t source_id[32],
+    uint8_t source[32], uint8_t toolchain[32], uint8_t task_root[32],
+    uint8_t candidate_root[32], uint8_t policy[32], uint8_t *task_wire,
+    size_t task_len, uint8_t *candidate_wire, size_t candidate_len)
+{
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_candidate_v1 candidate;
+    return vcs_zcode_task_parse(task_wire, task_len, &task) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_parse(candidate_wire, candidate_len,
+                                  &candidate) == VCS_ZCODE_DEV_OK &&
+        bfc_candidate_structure_valid(
+            &task, &candidate, task_root, candidate_root) &&
+        memcmp(task.toolchain_capsule_root, toolchain, 32) == 0 &&
+        memcmp(task.proof_policy_root, policy, 32) == 0 &&
+        memcmp(candidate.candidate_source_root, source, 32) == 0 &&
+        bfc_source_identity_valid(workspace, source, source_id) &&
+        vcs_zcode_action_input_verify_cas(
+            workspace, root, &task, &candidate, VCS_ZCODE_WORK_BUILD) ==
+            (int)VCS_ZCODE_DEV_OK;
+}
+
 static bool bfc_input_current(const char *workspace,
                               const struct db_build_job *job,
                               const struct db_build_action *action)
@@ -147,21 +170,10 @@ static bool bfc_input_current(const char *workspace,
         free(candidate_wire); free(task_wire);
         return false;
     }
-    struct vcs_zcode_task_v1 task;
-    struct vcs_zcode_candidate_v1 candidate;
-    bool ok = vcs_zcode_task_parse(task_wire, task_len, &task) ==
-            VCS_ZCODE_DEV_OK &&
-        vcs_zcode_candidate_parse(candidate_wire, candidate_len, &candidate) ==
-            VCS_ZCODE_DEV_OK &&
-        bfc_candidate_structure_valid(
-            &task, &candidate, task_root, candidate_root) &&
-        memcmp(task.toolchain_capsule_root, toolchain, 32) == 0 &&
-        memcmp(task.proof_policy_root, policy, 32) == 0 &&
-        memcmp(candidate.candidate_source_root, source, 32) == 0 &&
-        bfc_source_identity_valid(workspace, source, source_id) &&
-        vcs_zcode_action_input_verify_cas(
-            workspace, root, &task, &candidate, VCS_ZCODE_WORK_BUILD) ==
-            VCS_ZCODE_ACTION_INPUT_OK;
+    bool ok = bfc_input_wires_current(
+        workspace, root, source_id, source, toolchain, task_root,
+        candidate_root, policy, task_wire, task_len, candidate_wire,
+        candidate_len);
     free(candidate_wire); free(task_wire);
     return ok;
 }
@@ -262,15 +274,11 @@ static bool bfc_file_matches(const char *path, const uint8_t *bytes, size_t len)
     return ok;
 }
 
-static bool bfc_publish(const char *destination, const uint8_t *bytes,
-                        size_t len)
+static bool bfc_publish_paths_prepare(char *resolved, char *parent,
+                                      char *staging, const char *destination)
 {
-    char *resolved = zcl_malloc(BFC_PATH_CAP, "build.cache.destination");
-    char *parent = zcl_malloc(BFC_PATH_CAP, "build.cache.parent");
-    char *staging = zcl_malloc(BFC_PATH_CAP, "build.cache.staging");
     uint8_t nonce[16];
-    bool ok = resolved && parent && staging &&
-        platform_private_destination_resolve(
+    bool ok = platform_private_destination_resolve(
             destination, resolved, BFC_PATH_CAP, parent, BFC_PATH_CAP) &&
         bfc_existing_destination_safe(resolved) &&
         zcl_random_secret_bytes(nonce, sizeof(nonce), "build_cache_staging");
@@ -278,20 +286,42 @@ static bool bfc_publish(const char *destination, const uint8_t *bytes,
     if (ok) zcl_hex_encode(nonce, sizeof(nonce), nonce_hex);
     int n = ok ? snprintf(staging, BFC_PATH_CAP, "%s.z23-cache-%s.tmp",
                           resolved, nonce_hex) : -1;
-    ok = ok && n > 0 && n < BFC_PATH_CAP;
+    return ok && n > 0 && n < BFC_PATH_CAP;
+}
+
+static bool bfc_publish_staged_bytes(struct platform_private_file *file,
+                                     char *staging, char *resolved,
+                                     const uint8_t *bytes, size_t len)
+{
+    return platform_private_file_write_at(file, bytes, len, 0) &&
+        platform_private_file_truncate(file, len) &&
+        platform_private_file_replace(file, staging, resolved);
+}
+
+static void bfc_publish_retire_staging(struct platform_private_file *file,
+                                       char *staging)
+{
+    if (!platform_private_file_retire(file, staging))
+        platform_private_file_close(file);
+}
+
+static bool bfc_publish(const char *destination, const uint8_t *bytes,
+                        size_t len)
+{
+    char *resolved = zcl_malloc(BFC_PATH_CAP, "build.cache.destination");
+    char *parent = zcl_malloc(BFC_PATH_CAP, "build.cache.parent");
+    char *staging = zcl_malloc(BFC_PATH_CAP, "build.cache.staging");
+    bool ok = resolved && parent && staging &&
+        bfc_publish_paths_prepare(resolved, parent, staging, destination);
     struct platform_private_file file;
     platform_private_file_init(&file);
     bool created = ok && platform_private_file_create(staging, &file);
-    bool replaced = created &&
-        platform_private_file_write_at(&file, bytes, len, 0) &&
-        platform_private_file_truncate(&file, len) &&
-        platform_private_file_replace(&file, staging, resolved);
+    bool replaced = created && bfc_publish_staged_bytes(
+        &file, staging, resolved, bytes, len);
     ok = replaced && platform_private_parent_flush(parent) &&
          bfc_file_matches(resolved, bytes, len);
-    if (created && !replaced) {
-        if (!platform_private_file_retire(&file, staging))
-            platform_private_file_close(&file);
-    }
+    if (created && !replaced)
+        bfc_publish_retire_staging(&file, staging);
     free(staging); free(parent); free(resolved);
     return ok;
 }
@@ -303,41 +333,101 @@ static struct zcl_result bfc_corrupt(
     return ZCL_ERR(-1, "exact build cache refused: %s", detail);
 }
 
+static void bfc_report_reset(struct build_fabric_cache_report *report)
+{
+    if (report) memset(report, 0, sizeof(*report));
+}
+
+static bool bfc_restore_args_valid(
+    struct node_db *ndb, const char *workspace,
+    struct vcs_package_store *store, const struct db_build_job *expected_job,
+    const struct db_build_action *expected_action, const char *destination,
+    const struct build_fabric_cache_report *report)
+{
+    return ndb && ndb->open && workspace && store && expected_job &&
+        expected_action && destination && report;
+}
+
+static bool bfc_restore_expected_plan_valid(
+    const char *workspace, const struct db_build_job *expected_job,
+    const struct db_build_action *expected_action)
+{
+    return strcmp(expected_action->kind, VCS_BUILD_ACTION_KIND_V1) == 0 &&
+        expected_action->task_root_sha3[0] != '\0' &&
+        bfc_plan_current(expected_job, expected_action) &&
+        bfc_input_current(workspace, expected_job, expected_action);
+}
+
+/* Classification of the durable rows behind the requested plan. */
+enum bfc_restore_record {
+    BFC_RESTORE_RECORD_ABSENT,    /* no durable action or job rows */
+    BFC_RESTORE_RECORD_DIFFERS,   /* durable plan conflicts with request */
+    BFC_RESTORE_RECORD_INACTIVE,  /* durable action is not accepted */
+    BFC_RESTORE_RECORD_ACCEPTED,  /* durable accepted action found */
+};
+
+static enum bfc_restore_record bfc_restore_durable_record(
+    struct node_db *ndb, const struct db_build_job *expected_job,
+    const struct db_build_action *expected_action,
+    struct db_build_job *job, struct db_build_action *action)
+{
+    if (!db_build_action_find(ndb, expected_action->action_id, action) ||
+        !db_build_job_find(ndb, expected_job->job_id, job))
+        return BFC_RESTORE_RECORD_ABSENT;
+    if (!bfc_job_same(job, expected_job) ||
+        !bfc_action_same(action, expected_action) ||
+        !bfc_plan_current(job, action))
+        return BFC_RESTORE_RECORD_DIFFERS;
+    if (strcmp(action->state, "ACCEPTED") != 0 || !action->output_root_sha3[0])
+        return BFC_RESTORE_RECORD_INACTIVE;
+    return BFC_RESTORE_RECORD_ACCEPTED;
+}
+
+static bool bfc_restore_action_roots_decode(
+    const struct db_build_action *action, uint8_t action_root[32],
+    uint8_t output_root[32])
+{
+    return zcl_hex_decode_lower(action->action_id, action_root, 32) &&
+        zcl_hex_decode_lower(action->output_root_sha3, output_root, 32);
+}
+
+static bool bfc_restore_output_published(
+    const char *destination, const uint8_t *bytes, size_t len)
+{
+    return (bfc_existing_destination_safe(destination) &&
+            bfc_file_matches(destination, bytes, len)) ||
+        bfc_publish(destination, bytes, len);
+}
+
 struct zcl_result build_fabric_cache_restore(
     struct node_db *ndb, const char *workspace,
     struct vcs_package_store *store, const struct db_build_job *expected_job,
     const struct db_build_action *expected_action, const char *destination,
     struct build_fabric_cache_report *report)
 {
-    if (report) memset(report, 0, sizeof(*report));
-    if (!ndb || !ndb->open || !workspace || !store || !expected_job ||
-        !expected_action || !destination || !report)
+    bfc_report_reset(report);
+    if (!bfc_restore_args_valid(
+            ndb, workspace, store, expected_job, expected_action,
+            destination, report))
         return ZCL_ERR(-1, "exact build cache requires plan, store, and output");
     report->disposition = BUILD_FABRIC_CACHE_MISS;
-    if (strcmp(expected_action->kind, VCS_BUILD_ACTION_KIND_V1) != 0 ||
-        !expected_action->task_root_sha3[0] ||
-        !bfc_plan_current(expected_job, expected_action) ||
-        !bfc_input_current(workspace, expected_job, expected_action))
+    if (!bfc_restore_expected_plan_valid(
+            workspace, expected_job, expected_action))
         return bfc_corrupt(report, "current immutable plan is invalid");
     struct db_build_action action;
     struct db_build_job job;
-    if (!db_build_action_find(ndb, expected_action->action_id, &action) ||
-        !db_build_job_find(ndb, expected_job->job_id, &job))
-        return ZCL_OK;
-    if (!bfc_job_same(&job, expected_job) ||
-        !bfc_action_same(&action, expected_action) ||
-        !bfc_plan_current(&job, &action))
+    enum bfc_restore_record record = bfc_restore_durable_record(
+        ndb, expected_job, expected_action, &job, &action);
+    if (record == BFC_RESTORE_RECORD_ABSENT) return ZCL_OK;
+    if (record == BFC_RESTORE_RECORD_DIFFERS)
         return bfc_corrupt(report, "durable plan differs from requested plan");
-    if (strcmp(action.state, "ACCEPTED") != 0 ||
-        !action.output_root_sha3[0])
-        return ZCL_OK;
+    if (record == BFC_RESTORE_RECORD_INACTIVE) return ZCL_OK;
     if (!bfc_has_one_accepted_receipt(ndb, workspace, &job, &action, NULL))
         return bfc_corrupt(report,
                            "accepted action lacks one canonical local receipt");
     uint8_t action_root[32], output_root[32], *bytes = NULL;
     size_t len = 0;
-    if (!zcl_hex_decode_lower(action.action_id, action_root, 32) ||
-        !zcl_hex_decode_lower(action.output_root_sha3, output_root, 32))
+    if (!bfc_restore_action_roots_decode(&action, action_root, output_root))
         return bfc_corrupt(report, "accepted action roots are malformed");
     enum vcs_zcode_work_output_result got = vcs_zcode_work_output_get(
         store, output_root, action_root, &bytes, &len);
@@ -345,9 +435,7 @@ struct zcl_result build_fabric_cache_restore(
     if (got != VCS_ZCODE_WORK_OUTPUT_OK)
         return bfc_corrupt(report,
                            vcs_zcode_work_output_result_string(got));
-    bool published = bfc_existing_destination_safe(destination) &&
-        bfc_file_matches(destination, bytes, len);
-    if (!published) published = bfc_publish(destination, bytes, len);
+    bool published = bfc_restore_output_published(destination, bytes, len);
     free(bytes);
     if (!published)
         return bfc_corrupt(report, "atomic output publication failed");

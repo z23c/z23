@@ -1272,9 +1272,6 @@ engine/services/src/block_sync_service.c:syncsvc_plan_periodic_tip_state:21
 engine/services/src/blog_anchor_transaction_service.c:blog_anchor_payload_decode:17
 engine/services/src/blog_anchor_transaction_service.c:blog_publication_anchor_commit:30
 engine/services/src/blog_anchor_transaction_service.c:blog_publication_anchor_plan:31
-engine/services/src/build_fabric_cache.c:bfc_input_current:17
-engine/services/src/build_fabric_cache.c:bfc_publish:19
-engine/services/src/build_fabric_cache.c:build_fabric_cache_restore:29
 engine/services/src/build_fabric_evidence.c:bf_count_kind:16
 engine/services/src/build_fabric_evidence.c:bf_package_evidence_wire:17
 engine/services/src/build_fabric_evidence.c:build_fabric_receipt_observe_remote:42
