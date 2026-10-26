@@ -92,6 +92,120 @@ static bool admission_delegation_authority_failure(
            reason == MESH_PAIRING_DELEGATION_INVALID;
 }
 
+static bool admission_context_missing(
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const struct mesh_private_object_offer_v1 *offer,
+    const struct noise_transport_snapshot *session,
+    const struct vcs_zcode_dht_delegation *source_delegation,
+    const uint8_t local_master_pubkey[32],
+    const uint8_t local_noise_static[32], uint64_t now_unix)
+{
+    return !ndb || !ndb->open || !network_genesis || !offer || !session ||
+           !source_delegation || !local_master_pubkey || !local_noise_static ||
+           now_unix == 0 || now_unix > (uint64_t)INT64_MAX;
+}
+
+/* Each admission_*_refusal helper returns the reason for the first failed
+ * check, or MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT when every check in
+ * its phase passes. */
+static enum mesh_private_object_admission_reason admission_identity_refusal(
+    const struct mesh_private_object_offer_v1 *offer,
+    const struct noise_transport_snapshot *session,
+    const struct vcs_zcode_dht_delegation *delegation)
+{
+    if (mesh_private_object_offer_v1_validate(offer) !=
+        MESH_PRIVATE_OBJECT_PROTO_OK)
+        return MESH_PRIVATE_OBJECT_ADMISSION_OFFER_INVALID;
+    if (!admission_session_matches(offer, session))
+        return MESH_PRIVATE_OBJECT_ADMISSION_SESSION_MISMATCH;
+    if (!admission_delegation_matches(offer, delegation))
+        return MESH_PRIVATE_OBJECT_ADMISSION_DELEGATION_INVALID;
+    return MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT;
+}
+
+static enum mesh_private_object_admission_reason admission_pairing_refusal(
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const struct mesh_private_object_offer_v1 *offer,
+    const struct vcs_zcode_dht_delegation *delegation,
+    const char *pairing_id, uint64_t now_unix,
+    struct db_mesh_pairing *pairing)
+{
+    if (!db_mesh_pairing_find(ndb, pairing_id, pairing) ||
+        !admission_pairing_matches(offer, pairing, delegation, now_unix))
+        return MESH_PRIVATE_OBJECT_ADMISSION_PAIRING_INVALID;
+    enum mesh_pairing_reason delegated =
+        mesh_pairing_service_authorize_delegation(
+            ndb, network_genesis, pairing_id, delegation,
+            offer->source_noise_static, (int64_t)now_unix);
+    if (delegated != MESH_PAIRING_OK)
+        return admission_delegation_authority_failure(delegated)
+                   ? MESH_PRIVATE_OBJECT_ADMISSION_DELEGATION_INVALID
+                   : MESH_PRIVATE_OBJECT_ADMISSION_PAIRING_INVALID;
+    return MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT;
+}
+
+static enum mesh_private_object_admission_reason admission_grant_refusal(
+    struct node_db *ndb, const char *grant_id, const char *pairing_id,
+    const struct mesh_private_object_offer_v1 *offer,
+    struct db_mesh_capability_grant *grant)
+{
+    if (!db_mesh_capability_grant_find(ndb, grant_id, grant))
+        return MESH_PRIVATE_OBJECT_ADMISSION_GRANT_INVALID;
+    if (memcmp(grant->pairing_id, pairing_id, MESH_PAIRING_ID_HEX + 1) != 0 ||
+        !admission_grant_exact(offer, grant))
+        return MESH_PRIVATE_OBJECT_ADMISSION_LIMIT_MISMATCH;
+    return MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT;
+}
+
+static bool admission_target_mismatch(
+    const struct mesh_private_object_offer_v1 *offer,
+    const struct db_mesh_capability_grant *grant,
+    const uint8_t local_master_pubkey[32],
+    const uint8_t local_noise_static[32])
+{
+    return memcmp(offer->target_master_pubkey, local_master_pubkey, 32) != 0 ||
+           memcmp(offer->target_noise_static, local_noise_static, 32) != 0 ||
+           memcmp(grant->target_master_pubkey, local_master_pubkey, 32) != 0 ||
+           memcmp(grant->target_noise_static, local_noise_static, 32) != 0;
+}
+
+static bool admission_window_mismatch(
+    const struct mesh_private_object_offer_v1 *offer,
+    const struct db_mesh_capability_grant *grant, uint64_t now_unix)
+{
+    return now_unix < offer->issued_unix || now_unix >= offer->expires_unix ||
+           offer->issued_unix < (uint64_t)grant->not_before ||
+           offer->expires_unix > (uint64_t)grant->expires_at ||
+           offer->expires_unix - offer->issued_unix > grant->wall_limit_seconds;
+}
+
+static bool admission_request_id_mismatch(
+    const struct mesh_private_object_offer_v1 *offer,
+    const struct db_mesh_capability_grant *grant)
+{
+    uint8_t expected_request[32];
+    return mesh_private_object_offer_request_id_v1_derive(
+               offer, grant->nonce, expected_request) !=
+               MESH_PRIVATE_OBJECT_PROTO_OK ||
+           memcmp(expected_request, offer->request_id, 32) != 0;
+}
+
+static enum mesh_private_object_admission_reason admission_claim_reason(
+    enum mesh_capability_claim_result claimed)
+{
+    static const struct {
+        enum mesh_capability_claim_result claimed;
+        enum mesh_private_object_admission_reason reason;
+    } rows[] = {
+        {MESH_CAPABILITY_CLAIM_NEW, MESH_PRIVATE_OBJECT_ADMISSION_NEW},
+        {MESH_CAPABILITY_CLAIM_RESUME, MESH_PRIVATE_OBJECT_ADMISSION_RESUME},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        if (rows[i].claimed == claimed)
+            return rows[i].reason;
+    return MESH_PRIVATE_OBJECT_ADMISSION_CLAIM_REFUSED;
+}
+
 struct zcl_result mesh_private_object_admit_offer(
     struct node_db *ndb, const uint8_t network_genesis[32],
     const struct mesh_private_object_offer_v1 *offer,
@@ -105,60 +219,35 @@ struct zcl_result mesh_private_object_admit_offer(
         return ZCL_ERR(-1, "private-object admission requires output");
     memset(out, 0, sizeof(*out));
     out->reason = MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT;
-    if (!ndb || !ndb->open || !network_genesis || !offer || !session ||
-        !source_delegation || !local_master_pubkey || !local_noise_static ||
-        now_unix == 0 || now_unix > (uint64_t)INT64_MAX)
+    if (admission_context_missing(ndb, network_genesis, offer, session,
+                                  source_delegation, local_master_pubkey,
+                                  local_noise_static, now_unix))
         return ZCL_ERR(-1, "private-object admission context unavailable");
-    if (mesh_private_object_offer_v1_validate(offer) !=
-        MESH_PRIVATE_OBJECT_PROTO_OK)
-        return admission_refuse(out, MESH_PRIVATE_OBJECT_ADMISSION_OFFER_INVALID);
-    if (!admission_session_matches(offer, session))
-        return admission_refuse(
-            out, MESH_PRIVATE_OBJECT_ADMISSION_SESSION_MISMATCH);
-    if (!admission_delegation_matches(offer, source_delegation))
-        return admission_refuse(
-            out, MESH_PRIVATE_OBJECT_ADMISSION_DELEGATION_INVALID);
-
+    enum mesh_private_object_admission_reason refusal =
+        admission_identity_refusal(offer, session, source_delegation);
+    if (refusal != MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT)
+        return admission_refuse(out, refusal);
     char pairing_id[MESH_PAIRING_ID_HEX + 1];
     zcl_hex_encode(offer->pairing_id, 32, pairing_id);
     struct db_mesh_pairing pairing;
-    if (!db_mesh_pairing_find(ndb, pairing_id, &pairing) ||
-        !admission_pairing_matches(
-            offer, &pairing, source_delegation, now_unix))
-        return admission_refuse(
-            out, MESH_PRIVATE_OBJECT_ADMISSION_PAIRING_INVALID);
-    enum mesh_pairing_reason delegated =
-        mesh_pairing_service_authorize_delegation(
-            ndb, network_genesis, pairing_id, source_delegation,
-            offer->source_noise_static, (int64_t)now_unix);
-    if (delegated != MESH_PAIRING_OK)
-        return admission_refuse(
-            out, admission_delegation_authority_failure(delegated)
-                     ? MESH_PRIVATE_OBJECT_ADMISSION_DELEGATION_INVALID
-                     : MESH_PRIVATE_OBJECT_ADMISSION_PAIRING_INVALID);
+    refusal = admission_pairing_refusal(ndb, network_genesis, offer,
+                                        source_delegation, pairing_id,
+                                        now_unix, &pairing);
+    if (refusal != MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT)
+        return admission_refuse(out, refusal);
     char grant_id[MESH_CAPABILITY_GRANT_ID_HEX + 1];
     zcl_hex_encode(offer->grant_id, 32, grant_id);
     struct db_mesh_capability_grant grant;
-    if (!db_mesh_capability_grant_find(ndb, grant_id, &grant))
-        return admission_refuse(out, MESH_PRIVATE_OBJECT_ADMISSION_GRANT_INVALID);
-    if (memcmp(grant.pairing_id, pairing_id, MESH_PAIRING_ID_HEX + 1) != 0 ||
-        !admission_grant_exact(offer, &grant))
-        return admission_refuse(out, MESH_PRIVATE_OBJECT_ADMISSION_LIMIT_MISMATCH);
-    if (memcmp(offer->target_master_pubkey, local_master_pubkey, 32) != 0 ||
-        memcmp(offer->target_noise_static, local_noise_static, 32) != 0 ||
-        memcmp(grant.target_master_pubkey, local_master_pubkey, 32) != 0 ||
-        memcmp(grant.target_noise_static, local_noise_static, 32) != 0)
+    refusal = admission_grant_refusal(ndb, grant_id, pairing_id, offer,
+                                      &grant);
+    if (refusal != MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT)
+        return admission_refuse(out, refusal);
+    if (admission_target_mismatch(offer, &grant, local_master_pubkey,
+                                  local_noise_static))
         return admission_refuse(out, MESH_PRIVATE_OBJECT_ADMISSION_TARGET_MISMATCH);
-    if (now_unix < offer->issued_unix || now_unix >= offer->expires_unix ||
-        offer->issued_unix < (uint64_t)grant.not_before ||
-        offer->expires_unix > (uint64_t)grant.expires_at ||
-        offer->expires_unix - offer->issued_unix > grant.wall_limit_seconds)
+    if (admission_window_mismatch(offer, &grant, now_unix))
         return admission_refuse(out, MESH_PRIVATE_OBJECT_ADMISSION_TIME_MISMATCH);
-    uint8_t expected_request[32];
-    if (mesh_private_object_offer_request_id_v1_derive(
-            offer, grant.nonce, expected_request) !=
-            MESH_PRIVATE_OBJECT_PROTO_OK ||
-        memcmp(expected_request, offer->request_id, 32) != 0)
+    if (admission_request_id_mismatch(offer, &grant))
         return admission_refuse(out, MESH_PRIVATE_OBJECT_ADMISSION_NONCE_MISMATCH);
     if (mesh_private_object_offer_v1_root(offer, out->offer_root) !=
         MESH_PRIVATE_OBJECT_PROTO_OK)
@@ -171,11 +260,6 @@ struct zcl_result mesh_private_object_admit_offer(
     enum mesh_capability_claim_result claimed = db_mesh_capability_grant_claim(
         ndb, grant_id, out->transfer_id, pairing.revocation_generation,
         grant.revocation_generation, (int64_t)now_unix);
-    if (claimed == MESH_CAPABILITY_CLAIM_NEW)
-        out->reason = MESH_PRIVATE_OBJECT_ADMISSION_NEW;
-    else if (claimed == MESH_CAPABILITY_CLAIM_RESUME)
-        out->reason = MESH_PRIVATE_OBJECT_ADMISSION_RESUME;
-    else
-        out->reason = MESH_PRIVATE_OBJECT_ADMISSION_CLAIM_REFUSED;
+    out->reason = admission_claim_reason(claimed);
     return ZCL_OK;
 }
