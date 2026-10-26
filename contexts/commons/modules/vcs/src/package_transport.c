@@ -94,6 +94,72 @@ void vcs_package_transport_free(struct vcs_package_transport *transport)
     memset(transport, 0, sizeof(*transport));
 }
 
+static bool transport_release_rejected(
+    const uint8_t *release_wire, size_t release_wire_len,
+    struct vcs_package_transport *out)
+{
+    return vcs_package_release_parse(release_wire, release_wire_len,
+                                  &out->release) !=
+            VCS_PACKAGE_RELEASE_OK ||
+        vcs_package_release_verify(&out->release) != VCS_PACKAGE_RELEASE_OK ||
+        vcs_package_release_id(&out->release, out->release_id) !=
+            VCS_PACKAGE_RELEASE_OK;
+}
+
+static bool transport_binding_rejected(
+    const struct vcs_package_transport *out, const uint8_t recipe_root[32],
+    const struct vcs_package_publish_report *report)
+{
+    return memcmp(out->release.package_root, out->package_root, 32) != 0 ||
+        memcmp(out->release.recipe_root, recipe_root, 32) != 0 ||
+        report->failure_count != 0 || !report->recipe_ok;
+}
+
+static bool transport_copy_failed(
+    const uint8_t *release_wire, size_t release_wire_len,
+    const uint8_t *recipe_wire, size_t recipe_wire_len,
+    const uint8_t *package_manifest_wire, size_t package_manifest_wire_len,
+    struct vcs_package_transport *out)
+{
+    return !transport_copy(&out->release_wire, &out->release_wire_len,
+                        release_wire, release_wire_len,
+                        "vcs.package.transport.release") ||
+        !transport_copy(&out->recipe_wire, &out->recipe_wire_len,
+                        recipe_wire, recipe_wire_len,
+                        "vcs.package.transport.recipe") ||
+        !transport_copy(&out->package_manifest_wire,
+                        &out->package_manifest_wire_len,
+                        package_manifest_wire, package_manifest_wire_len,
+                        "vcs.package.transport.manifest");
+}
+
+static bool transport_metadata_rejected(
+    const uint8_t *release_wire, size_t release_wire_len,
+    const uint8_t *recipe_wire, size_t recipe_wire_len,
+    const uint8_t *package_manifest_wire, size_t package_manifest_wire_len,
+    struct vcs_package_transport *out)
+{
+    return !vcs_package_content_add_file(
+            &out->transport_manifest, VCS_PACKAGE_TRANSPORT_RELEASE_PATH,
+            VCS_PACKAGE_MODE_FILE, release_wire, release_wire_len) ||
+        !vcs_package_content_add_file(
+            &out->transport_manifest, VCS_PACKAGE_TRANSPORT_RECIPE_PATH,
+            VCS_PACKAGE_MODE_FILE, recipe_wire, recipe_wire_len) ||
+        !vcs_package_content_add_file(
+            &out->transport_manifest, VCS_PACKAGE_TRANSPORT_MANIFEST_PATH,
+            VCS_PACKAGE_MODE_FILE, package_manifest_wire,
+            package_manifest_wire_len);
+}
+
+static bool transport_manifest_rejected(struct vcs_package_transport *out)
+{
+    return !vcs_package_manifest_serialize(
+            &out->transport_manifest, &out->transport_manifest_wire,
+            &out->transport_manifest_wire_len) ||
+        !vcs_package_manifest_root(&out->transport_manifest,
+                                   out->transport_root);
+}
+
 enum vcs_package_transport_result vcs_package_transport_build(
     const uint8_t *release_wire, size_t release_wire_len,
     const uint8_t *recipe_wire, size_t recipe_wire_len,
@@ -105,12 +171,7 @@ enum vcs_package_transport_result vcs_package_transport_build(
                    "null package transport input");
     vcs_package_transport_free(out);
     vcs_package_transport_init(out);
-    if (vcs_package_release_parse(release_wire, release_wire_len,
-                                  &out->release) !=
-            VCS_PACKAGE_RELEASE_OK ||
-        vcs_package_release_verify(&out->release) != VCS_PACKAGE_RELEASE_OK ||
-        vcs_package_release_id(&out->release, out->release_id) !=
-            VCS_PACKAGE_RELEASE_OK)
+    if (transport_release_rejected(release_wire, release_wire_len, out))
         LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_RELEASE,
                    "vcs.package.transport", "signed release rejected");
 
@@ -143,69 +204,37 @@ enum vcs_package_transport_result vcs_package_transport_build(
                                         &out->source_manifest,
                                         &recipe, &report);
     vcs_package_recipe_free(&recipe);
-    if (memcmp(out->release.package_root, out->package_root, 32) != 0 ||
-        memcmp(out->release.recipe_root, recipe_root, 32) != 0 ||
-        report.failure_count != 0 || !report.recipe_ok)
+    if (transport_binding_rejected(out, recipe_root, &report))
         LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_BINDING,
                    "vcs.package.transport",
                    "release/manifest/recipe binding rejected");
     memcpy(out->recipe_root, recipe_root, 32);
 
-    if (!transport_copy(&out->release_wire, &out->release_wire_len,
-                        release_wire, release_wire_len,
-                        "vcs.package.transport.release") ||
-        !transport_copy(&out->recipe_wire, &out->recipe_wire_len,
-                        recipe_wire, recipe_wire_len,
-                        "vcs.package.transport.recipe") ||
-        !transport_copy(&out->package_manifest_wire,
-                        &out->package_manifest_wire_len,
-                        package_manifest_wire, package_manifest_wire_len,
-                        "vcs.package.transport.manifest"))
+    if (transport_copy_failed(release_wire, release_wire_len,
+            recipe_wire, recipe_wire_len, package_manifest_wire,
+            package_manifest_wire_len, out))
         LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_ALLOC,
                    "vcs.package.transport", "carrier wire allocation");
 
-    if (!vcs_package_content_add_file(
-            &out->transport_manifest, VCS_PACKAGE_TRANSPORT_RELEASE_PATH,
-            VCS_PACKAGE_MODE_FILE, release_wire, release_wire_len) ||
-        !vcs_package_content_add_file(
-            &out->transport_manifest, VCS_PACKAGE_TRANSPORT_RECIPE_PATH,
-            VCS_PACKAGE_MODE_FILE, recipe_wire, recipe_wire_len) ||
-        !vcs_package_content_add_file(
-            &out->transport_manifest, VCS_PACKAGE_TRANSPORT_MANIFEST_PATH,
-            VCS_PACKAGE_MODE_FILE, package_manifest_wire,
-            package_manifest_wire_len))
+    if (transport_metadata_rejected(release_wire, release_wire_len,
+            recipe_wire, recipe_wire_len, package_manifest_wire,
+            package_manifest_wire_len, out))
         LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_MANIFEST,
                    "vcs.package.transport", "carrier metadata manifest");
     if (!transport_add_sources(&out->transport_manifest,
                                &out->source_manifest))
         LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_PATH,
                    "vcs.package.transport", "carrier source path");
-    if (!vcs_package_manifest_serialize(
-            &out->transport_manifest, &out->transport_manifest_wire,
-            &out->transport_manifest_wire_len) ||
-        !vcs_package_manifest_root(&out->transport_manifest,
-                                   out->transport_root))
+    if (transport_manifest_rejected(out))
         LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_MANIFEST,
                    "vcs.package.transport", "carrier manifest root");
     return VCS_PACKAGE_TRANSPORT_OK;
 }
 
-enum vcs_package_transport_result vcs_package_transport_store(
+static enum vcs_package_transport_result transport_store_metadata(
     struct vcs_package_store *store,
-    const struct vcs_package_transport *transport,
-    const char *source_dir)
+    const struct vcs_package_transport *transport, const uint8_t root[32])
 {
-    if (!store || !transport || !source_dir)
-        LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_NULL, "vcs.package.transport",
-                   "null carrier publication input");
-    uint8_t root[32];
-    if (vcs_package_store_put_manifest(
-            store, transport->transport_manifest_wire,
-            transport->transport_manifest_wire_len, root) !=
-            VCS_PACKAGE_STORE_OK ||
-        memcmp(root, transport->transport_root, 32) != 0)
-        LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_STORE,
-                   "vcs.package.transport", "store carrier manifest");
     enum vcs_package_transport_result result =
         vcs_package_content_put_file(
             store, root, VCS_PACKAGE_TRANSPORT_RELEASE_PATH,
@@ -225,6 +254,15 @@ enum vcs_package_transport_result vcs_package_transport_store(
                      transport->package_manifest_wire_len) ==
                          VCS_PACKAGE_STORE_OK
             ? VCS_PACKAGE_TRANSPORT_OK : VCS_PACKAGE_TRANSPORT_ERR_STORE;
+    return result;
+}
+
+static enum vcs_package_transport_result transport_store_sources(
+    struct vcs_package_store *store,
+    const struct vcs_package_transport *transport,
+    const char *source_dir, const uint8_t root[32],
+    enum vcs_package_transport_result result)
+{
     uint8_t *buffer = NULL;
     if (result == VCS_PACKAGE_TRANSPORT_OK &&
         transport->source_manifest.count != 0) {
@@ -261,6 +299,28 @@ enum vcs_package_transport_result vcs_package_transport_store(
         }
     }
     free(buffer);
+    return result;
+}
+
+enum vcs_package_transport_result vcs_package_transport_store(
+    struct vcs_package_store *store,
+    const struct vcs_package_transport *transport,
+    const char *source_dir)
+{
+    if (!store || !transport || !source_dir)
+        LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_NULL, "vcs.package.transport",
+                   "null carrier publication input");
+    uint8_t root[32];
+    if (vcs_package_store_put_manifest(
+            store, transport->transport_manifest_wire,
+            transport->transport_manifest_wire_len, root) !=
+            VCS_PACKAGE_STORE_OK ||
+        memcmp(root, transport->transport_root, 32) != 0)
+        LOG_RETURN(VCS_PACKAGE_TRANSPORT_ERR_STORE,
+                   "vcs.package.transport", "store carrier manifest");
+    enum vcs_package_transport_result result =
+        transport_store_metadata(store, transport, root);
+    result = transport_store_sources(store, transport, source_dir, root, result);
     struct vcs_package_store_status status;
     if (result != VCS_PACKAGE_TRANSPORT_OK ||
         !vcs_package_store_package_status(store, root, &status) ||
@@ -350,6 +410,40 @@ static enum vcs_package_store_result transport_admit_or_reuse_release(
     return vcs_package_store_put_release(store, release, accept);
 }
 
+static bool transport_read_metadata(
+    struct vcs_package_store *store, const uint8_t transport_root[32],
+    const struct vcs_package_manifest *outer,
+    uint8_t **release_wire, size_t *release_len,
+    uint8_t **recipe_wire, size_t *recipe_len,
+    uint8_t **manifest_wire, size_t *manifest_len)
+{
+    return transport_read_file(
+                    store, transport_root, outer,
+                    VCS_PACKAGE_TRANSPORT_RELEASE_PATH,
+                    release_wire, release_len) &&
+        transport_read_file(store, transport_root, outer,
+                            VCS_PACKAGE_TRANSPORT_RECIPE_PATH,
+                            recipe_wire, recipe_len) &&
+        transport_read_file(store, transport_root, outer,
+                            VCS_PACKAGE_TRANSPORT_MANIFEST_PATH,
+                            manifest_wire, manifest_len);
+}
+
+static enum vcs_package_transport_result transport_check_closure(
+    const struct vcs_package_transport *expected,
+    const uint8_t transport_root[32],
+    const uint8_t *outer_wire, size_t outer_wire_len,
+    enum vcs_package_transport_result result)
+{
+    if (result == VCS_PACKAGE_TRANSPORT_OK &&
+        (memcmp(expected->transport_root, transport_root, 32) != 0 ||
+         expected->transport_manifest_wire_len != outer_wire_len ||
+         memcmp(expected->transport_manifest_wire, outer_wire,
+                outer_wire_len) != 0))
+        result = VCS_PACKAGE_TRANSPORT_ERR_BINDING;
+    return result;
+}
+
 enum vcs_package_transport_result vcs_package_transport_import(
     struct vcs_package_store *store, const uint8_t transport_root[32],
     struct vcs_package_transport_import *receipt)
@@ -368,16 +462,9 @@ enum vcs_package_transport_result vcs_package_transport_import(
         return opened;
     uint8_t *release_wire = NULL, *recipe_wire = NULL, *manifest_wire = NULL;
     size_t release_len = 0, recipe_len = 0, manifest_len = 0;
-    bool read = transport_read_file(
-                    store, transport_root, &outer,
-                    VCS_PACKAGE_TRANSPORT_RELEASE_PATH,
-                    &release_wire, &release_len) &&
-        transport_read_file(store, transport_root, &outer,
-                            VCS_PACKAGE_TRANSPORT_RECIPE_PATH,
-                            &recipe_wire, &recipe_len) &&
-        transport_read_file(store, transport_root, &outer,
-                            VCS_PACKAGE_TRANSPORT_MANIFEST_PATH,
-                            &manifest_wire, &manifest_len);
+    bool read = transport_read_metadata(store, transport_root, &outer,
+        &release_wire, &release_len, &recipe_wire, &recipe_len,
+        &manifest_wire, &manifest_len);
     if (!read) {
         free(manifest_wire); free(recipe_wire); free(release_wire);
         free(outer_wire); vcs_package_manifest_free(&outer);
@@ -390,12 +477,8 @@ enum vcs_package_transport_result vcs_package_transport_import(
         release_wire, release_len, recipe_wire, recipe_len,
         manifest_wire, manifest_len, &expected);
     free(manifest_wire); free(recipe_wire); free(release_wire);
-    if (result == VCS_PACKAGE_TRANSPORT_OK &&
-        (memcmp(expected.transport_root, transport_root, 32) != 0 ||
-         expected.transport_manifest_wire_len != outer_wire_len ||
-         memcmp(expected.transport_manifest_wire, outer_wire,
-                outer_wire_len) != 0))
-        result = VCS_PACKAGE_TRANSPORT_ERR_BINDING;
+    result = transport_check_closure(&expected, transport_root,
+                                     outer_wire, outer_wire_len, result);
     free(outer_wire);
     vcs_package_manifest_free(&outer);
     if (result != VCS_PACKAGE_TRANSPORT_OK) {
