@@ -172,10 +172,10 @@ static bool index_one_tx_block(struct node_db *ndb, struct transaction *tx,
 /* Boot the deterministic simulator and open the in-memory node database —
  * the shared state every step of the story below runs on. Returns 0 on
  * success, 1 on failure (main's exit codes).
- * Post-condition: *db is zeroed before the first failure return. */
+ * Post-condition: *db is zeroed before node_db_open(); on a simnet_init
+ * failure it is left untouched. */
 static int open_simnet_and_node_db(struct simnet *sim, struct node_db *db)
 {
-    memset(db, 0, sizeof(*db));
     /* Select a chain network before any chain/consensus code runs —
      * connect_block and the coinbase subsidy schedule read their parameters
      * through chain_params_get(), which asserts one was chosen. */
@@ -183,6 +183,7 @@ static int open_simnet_and_node_db(struct simnet *sim, struct node_db *db)
 
     if (!simnet_init(sim)) { fprintf(stderr, "simnet_init failed\n"); return 1; }
 
+    memset(db, 0, sizeof(*db));
     if (!node_db_open(db, ":memory:")) {
         fprintf(stderr, "node_db_open failed\n"); return 1;
     }
@@ -192,14 +193,13 @@ static int open_simnet_and_node_db(struct simnet *sim, struct node_db *db)
 /* Step [1/4]: mature a coinbase, then split it into the two owner-distinct
  * P2PKH starting coins ("alice" and "mallory") and fold that block into the
  * projection. `fund_txid` returns the funding tx's hash for later spends.
- * Post-condition: *fund_tx_proj is transaction_init()'d before the first
- * failure return, so transaction_free() is safe on every exit path. */
+ * Post-condition: *fund_tx_proj is transaction_init()'d once both maturity
+ * mints succeed, before any later failure return. */
 static int fund_alice_and_mallory_wallets(struct simnet *sim, struct node_db *db,
                                           struct transaction *fund_tx,
                                           struct transaction *fund_tx_proj,
                                           struct uint256 *fund_txid)
 {
-    transaction_init(fund_tx_proj);
     printf("[1/4] minting a coinbase and 100 blocks to reach coinbase "
           "maturity, then funding alice + mallory from it...\n");
     struct uint256 cb_txid;
@@ -209,6 +209,7 @@ static int fund_alice_and_mallory_wallets(struct simnet *sim, struct node_db *db
     if (!simnet_mint_to_height(sim, 200)) {
         fprintf(stderr, "mint to maturity height failed\n"); return 1;
     }
+    transaction_init(fund_tx_proj);
     if (!build_fund_tx(fund_tx, &cb_txid, 0, 400000, 400000)) {
         fprintf(stderr, "build fund tx failed\n"); return 1;
     }
