@@ -75,15 +75,154 @@ enum txindex_read_status txindex_projection_classify(bool found, int64_t cursor,
 }
 
 /* ── one bounded fold batch (tx lock held by caller) ────────────────── */
-static int tx_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
+
+/* One batch's fold progress: how far it got, what stopped it, and the
+ * monotonic clock the wall-time budget is measured against. */
+struct tx_fold_state {
+    int64_t start_us;
+    int64_t last_good;
+    int64_t blocked_h;
+    int     folded;
+    int     total_added;
+    bool    blocked;
+};
+
+/* First-use schema bring-up: create the projection tables once, then seed
+ * the row counter from what is already persisted. Returns 0 when the schema
+ * is ready (or already was), -1 when it cannot be ensured. */
+static int tx_init_schema_once(sqlite3 *db)
 {
-    if (!atomic_load(&g_tx_schema_ready)) {
-        if (!txindex_projection_ensure_schema(db))
-            return 0;
+    if (atomic_load(&g_tx_schema_ready))
+        return 0;
+    bool ok = txindex_projection_ensure_schema(db);
+    if (ok) {
         int64_t rc0 = txindex_projection_row_count(db);
         atomic_store(&g_tx_rows, rc0 >= 0 ? rc0 : 0);
         atomic_store(&g_tx_schema_ready, true);
     }
+    return ok ? 0 : -1;
+}
+
+/* Deep-rewind recovery: drop the projection, recreate the empty schema and
+ * clear every derived artifact (cursor, rows, digest) so the next batch
+ * rederives from height 0. */
+static void tx_reset_after_deep_rewind(sqlite3 *db)
+{
+    if (txindex_projection_drop(db) && txindex_projection_ensure_schema(db)) {
+        atomic_fetch_add(&g_tx_resets, 1);
+        atomic_store(&g_tx_cursor, -1);
+        atomic_store(&g_tx_rows, 0);
+        pthread_mutex_lock(&g_tx_digest_lock);
+        g_tx_digest_hex[0] = '\0';
+        pthread_mutex_unlock(&g_tx_digest_lock);
+    }
+}
+
+/* Load the persisted fold digest. A projection that has folded nothing yet
+ * chains on top of an all-zero seed digest. Returns 0 on success, -1 when
+ * the digest row cannot be read. */
+static int tx_load_fold_digest(sqlite3 *db, uint8_t digest[32])
+{
+    bool dfound = false;
+    bool ok = txindex_projection_get_digest(db, digest, &dfound);
+    if (ok && !dfound)
+        memset(digest, 0, 32);
+    return ok ? 0 : -1;
+}
+
+/* Fold up to TXINDEX_BATCH_BLOCKS verified bodies above the cursor,
+ * chaining each into the running digest. Stops at the first absent body
+ * (coverage floor), the first DB error, or a spent wall-time budget. */
+static struct tx_fold_state tx_fold_batch(struct main_state *ms, sqlite3 *db,
+                                          const char *datadir, int64_t cursor,
+                                          int64_t hstar, uint8_t digest[32])
+{
+    struct tx_fold_state fs = {
+        .start_us = platform_time_monotonic_us(),
+        .last_good = cursor,
+        .blocked_h = -1,
+        .folded = 0,
+        .total_added = 0,
+        .blocked = false,
+    };
+    for (int64_t h = cursor + 1; h <= hstar && fs.folded < TXINDEX_BATCH_BLOCKS;
+         h++) {
+        struct block_index *bi = active_chain_at(&ms->chain_active, (int)h);
+        struct block blk;
+        block_init(&blk);
+        if (!index_fold_read_body(&blk, bi, h, datadir)) {
+            block_free(&blk);
+            fs.blocked = true;
+            fs.blocked_h = h;
+            /* Name the floor: below the snapshot seed this is a structural
+             * DEPENDENCY (bodies never downloaded), above it a transient gap. */
+            index_fold_note_absent_body("txindex", "txindex", db, h);
+            break;                          /* body absent — coverage floor */
+        }
+        /* The indexed hash, not the body header: genesis folds an empty
+         * body (index_fold_read_body) whose header is blank. */
+        struct uint256 bh = *bi->phashBlock;
+        int added = 0;
+        bool put_ok = txindex_projection_put_block(db, &blk, (int)h, bh.data,
+                                                   digest, &added);
+        block_free(&blk);
+        if (!put_ok) {
+            fs.blocked = true;
+            fs.blocked_h = h;
+            break;                          /* real DB error — surface + stop */
+        }
+        fs.total_added += added;
+        fs.last_good = h;
+        fs.folded++;
+        if (platform_time_monotonic_us() - fs.start_us >= TXINDEX_BATCH_US)
+            break;                          /* wall-time budget spent */
+    }
+    return fs;
+}
+
+/* Persist the folded cursor and digest, then commit the batch. When nothing
+ * folded, or the cursor write or the COMMIT fails, roll the whole batch
+ * back. Returns 0 when committed, -1 when rolled back. */
+static int tx_commit_fold(sqlite3 *db, const struct tx_fold_state *fs,
+                          uint8_t digest[32])
+{
+    bool ok = fs->folded > 0 &&
+              txindex_projection_set_cursor(db, fs->last_good, digest) &&
+              sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok)
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    return ok ? 0 : -1;
+}
+
+/* Publish the finished batch to the dumpstate snapshot: blocker state,
+ * pacing stats and, on commit, the advanced cursor, lifetime counters and
+ * the fold digest. Returns the batch's committed contribution. */
+static int tx_publish_batch_outcome(bool commit, const struct tx_fold_state *fs,
+                                    int64_t elapsed_us, uint8_t digest[32])
+{
+    if (commit && !fs->blocked)
+        index_fold_clear_seed_blocker("txindex");
+    atomic_store(&g_tx_blocked, fs->blocked);
+    atomic_store(&g_tx_blocked_height, fs->blocked ? fs->blocked_h : -1);
+    atomic_store(&g_tx_last_batch_blocks, commit ? fs->folded : 0);
+    atomic_store(&g_tx_last_batch_us, elapsed_us);
+    if (commit) {
+        atomic_store(&g_tx_cursor, fs->last_good);
+        atomic_fetch_add(&g_tx_blocks_folded, fs->folded);
+        atomic_fetch_add(&g_tx_rows, fs->total_added);
+        char hex[65];
+        HexStr(digest, 32, false, hex, sizeof(hex));
+        pthread_mutex_lock(&g_tx_digest_lock);
+        memcpy(g_tx_digest_hex, hex, sizeof(hex));
+        pthread_mutex_unlock(&g_tx_digest_lock);
+    }
+    return commit ? fs->folded : 0;
+}
+
+static int tx_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
+{
+    if (tx_init_schema_once(db) != 0)
+        return 0;
 
     int64_t cursor = -1;
     (void)txindex_projection_get_cursor(db, &cursor);
@@ -96,14 +235,7 @@ static int tx_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
      * projection folded as a forward-only digest chain cannot partially unwind,
      * so drop-and-rederive from height 0 (cheap, rebuildable by construction). */
     if (hstar >= 0 && cursor > hstar) {
-        if (txindex_projection_drop(db) && txindex_projection_ensure_schema(db)) {
-            atomic_fetch_add(&g_tx_resets, 1);
-            atomic_store(&g_tx_cursor, -1);
-            atomic_store(&g_tx_rows, 0);
-            pthread_mutex_lock(&g_tx_digest_lock);
-            g_tx_digest_hex[0] = '\0';
-            pthread_mutex_unlock(&g_tx_digest_lock);
-        }
+        tx_reset_after_deep_rewind(db);
         return 0;
     }
     if (cursor >= hstar) {                  /* caught up to the finalized tip */
@@ -121,81 +253,19 @@ static int tx_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
         return 0;
 
     uint8_t digest[32];
-    bool dfound = false;
-    if (!txindex_projection_get_digest(db, digest, &dfound))
+    if (tx_load_fold_digest(db, digest) != 0)
         return 0;
-    if (!dfound)
-        memset(digest, 0, 32);
 
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
         LOG_WARN("txindex", "[txindex] BEGIN failed: %s", sqlite3_errmsg(db));
         return 0;
     }
 
-    int64_t start_us = platform_time_monotonic_us();
-    int folded = 0, total_added = 0;
-    bool blocked = false;
-    int64_t blocked_h = -1, last_good = cursor;
-
-    for (int64_t h = cursor + 1; h <= hstar && folded < TXINDEX_BATCH_BLOCKS;
-         h++) {
-        struct block_index *bi = active_chain_at(&ms->chain_active, (int)h);
-        struct block blk;
-        block_init(&blk);
-        if (!index_fold_read_body(&blk, bi, h, datadir)) {
-            block_free(&blk);
-            blocked = true;
-            blocked_h = h;
-            /* Name the floor: below the snapshot seed this is a structural
-             * DEPENDENCY (bodies never downloaded), above it a transient gap. */
-            index_fold_note_absent_body("txindex", "txindex", db, h);
-            break;                          /* body absent — coverage floor */
-        }
-        /* The indexed hash, not the body header: genesis folds an empty
-         * body (index_fold_read_body) whose header is blank. */
-        struct uint256 bh = *bi->phashBlock;
-        int added = 0;
-        bool put_ok = txindex_projection_put_block(db, &blk, (int)h, bh.data,
-                                                   digest, &added);
-        block_free(&blk);
-        if (!put_ok) {
-            blocked = true;
-            blocked_h = h;
-            break;                          /* real DB error — surface + stop */
-        }
-        total_added += added;
-        last_good = h;
-        folded++;
-        if (platform_time_monotonic_us() - start_us >= TXINDEX_BATCH_US)
-            break;                          /* wall-time budget spent */
-    }
-
-    bool commit = false;
-    if (folded > 0 && txindex_projection_set_cursor(db, last_good, digest) &&
-        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK) {
-        commit = true;
-    }
-    if (!commit)
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-
-    int64_t elapsed = platform_time_monotonic_us() - start_us;
-    if (commit && !blocked)
-        index_fold_clear_seed_blocker("txindex");
-    atomic_store(&g_tx_blocked, blocked);
-    atomic_store(&g_tx_blocked_height, blocked ? blocked_h : -1);
-    atomic_store(&g_tx_last_batch_blocks, commit ? folded : 0);
-    atomic_store(&g_tx_last_batch_us, elapsed);
-    if (commit) {
-        atomic_store(&g_tx_cursor, last_good);
-        atomic_fetch_add(&g_tx_blocks_folded, folded);
-        atomic_fetch_add(&g_tx_rows, total_added);
-        char hex[65];
-        HexStr(digest, 32, false, hex, sizeof(hex));
-        pthread_mutex_lock(&g_tx_digest_lock);
-        memcpy(g_tx_digest_hex, hex, sizeof(hex));
-        pthread_mutex_unlock(&g_tx_digest_lock);
-    }
-    return commit ? folded : 0;
+    struct tx_fold_state fs = tx_fold_batch(ms, db, datadir, cursor, hstar,
+                                            digest);
+    bool commit = tx_commit_fold(db, &fs, digest) == 0;
+    int64_t elapsed = platform_time_monotonic_us() - fs.start_us;
+    return tx_publish_batch_outcome(commit, &fs, elapsed, digest);
 }
 
 int txindex_projection_service_tick_once(void)
