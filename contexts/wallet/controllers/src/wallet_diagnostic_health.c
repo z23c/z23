@@ -57,6 +57,188 @@
 
 /* wallet-diagnostic health RPCs: read-only inspection of wallet state. */
 
+static void accounting_sum_outputs(const struct wallet *w,
+                                   const struct transaction *tx,
+                                   int64_t *out_to_mine,
+                                   int64_t *out_to_other)
+{
+    for (size_t j = 0; j < tx->num_vout; j++) {
+        if (wallet_is_mine(w, &tx->vout[j]))
+            *out_to_mine += tx->vout[j].value;
+        else
+            *out_to_other += tx->vout[j].value;
+    }
+}
+
+static void accounting_sum_inputs(const struct wallet *w,
+                                  const struct wallet_tx *wtx,
+                                  const struct transaction *tx,
+                                  int64_t *total_in, int *missing_inputs)
+{
+    if (wtx->from_me) {
+        for (size_t j = 0; j < tx->num_vin; j++) {
+            const struct wallet_tx *prev = wallet_get_tx(w,
+                &tx->vin[j].prevout.hash);
+            if (prev) {
+                uint32_t n = tx->vin[j].prevout.n;
+                if (n < prev->tx.num_vout) {
+                    int64_t v = prev->tx.vout[n].value;
+                    *total_in += v;
+                }
+            } else {
+                (*missing_inputs)++;
+            }
+        }
+    }
+}
+
+/* Track shielded value flows:
+ * JoinSplit: vpub_old = transparent→shielded, vpub_new = shielded→transparent
+ * Sapling: value_balance > 0 means shielded→transparent, < 0 means transparent→shielded
+ */
+static void accounting_shielded_flows(const struct transaction *tx,
+                                      int64_t *to_shielded,
+                                      int64_t *from_shielded)
+{
+    for (size_t j = 0; j < tx->num_joinsplit; j++) {
+        *to_shielded += tx->v_joinsplit[j].vpub_old;
+        *from_shielded += tx->v_joinsplit[j].vpub_new;
+    }
+    if (tx->value_balance < 0)
+        *to_shielded += -tx->value_balance;
+    else if (tx->value_balance > 0)
+        *from_shielded += tx->value_balance;
+}
+
+/* Fee = total_transparent_in + from_shielded - value_out
+ * Note: transaction_get_value_out() already includes shielded sends
+ * (vpub_old, negative value_balance), so no separate to_shielded subtraction */
+static int64_t accounting_tx_fee(const struct wallet_tx *wtx,
+                                 const struct transaction *tx,
+                                 int64_t total_in, int64_t from_shielded)
+{
+    int64_t tx_fee = 0;
+    if (wtx->from_me && total_in > 0) {
+        int64_t value_out = (int64_t)transaction_get_value_out(tx);
+        tx_fee = total_in + from_shielded - value_out;
+        if (tx_fee < 0) tx_fee = 0;
+    }
+    return tx_fee;
+}
+
+static void accounting_emit_flow_amounts(struct json_value *entry,
+                                         int64_t ext_in, int64_t ext_out,
+                                         int64_t internal, int64_t tx_fee,
+                                         int64_t to_shielded,
+                                         int64_t from_shielded,
+                                         int64_t total_in)
+{
+    char s[32];
+    if (ext_in > 0) {
+        format_amount(ext_in, s, sizeof(s));
+        json_push_kv_real(entry, "external_in", strtod(s, NULL));
+    }
+    if (ext_out > 0) {
+        format_amount(ext_out, s, sizeof(s));
+        json_push_kv_real(entry, "external_out", strtod(s, NULL));
+    }
+    if (internal > 0) {
+        format_amount(internal, s, sizeof(s));
+        json_push_kv_real(entry, "internal", strtod(s, NULL));
+    }
+    if (tx_fee > 0) {
+        format_amount(tx_fee, s, sizeof(s));
+        json_push_kv_real(entry, "fee", strtod(s, NULL));
+    }
+    if (to_shielded > 0) {
+        format_amount(to_shielded, s, sizeof(s));
+        json_push_kv_real(entry, "to_shielded", strtod(s, NULL));
+    }
+    if (from_shielded > 0) {
+        format_amount(from_shielded, s, sizeof(s));
+        json_push_kv_real(entry, "from_shielded", strtod(s, NULL));
+    }
+    if (total_in > 0) {
+        format_amount(total_in, s, sizeof(s));
+        json_push_kv_real(entry, "total_in", strtod(s, NULL));
+    }
+}
+
+static void accounting_note_missing_input(const struct wallet *w,
+                                          const struct transaction *tx,
+                                          struct json_value *entry,
+                                          int missing_inputs)
+{
+    if (missing_inputs > 0) {
+        json_push_kv_int(entry, "missing_inputs", missing_inputs);
+        /* Show first missing input prevout for debugging */
+        for (size_t j = 0; j < tx->num_vin && j < 1; j++) {
+            const struct wallet_tx *prev = wallet_get_tx(w,
+                &tx->vin[j].prevout.hash);
+            if (!prev) {
+                char pi[65];
+                uint256_get_hex(&tx->vin[j].prevout.hash, pi);
+                json_push_kv_str(entry, "missing_prevout", pi);
+            }
+        }
+    }
+}
+
+static void accounting_output_details(const struct wallet *w,
+                                      const struct wallet_tx *wtx,
+                                      const struct transaction *tx,
+                                      const unsigned char *pk_pfx,
+                                      size_t pk_pfx_len,
+                                      const unsigned char *sc_pfx,
+                                      size_t sc_pfx_len,
+                                      struct json_value *entry)
+{
+    struct json_value details = {0};
+    json_init(&details);
+    json_set_array(&details);
+    char s[32];
+    for (size_t j = 0; j < tx->num_vout; j++) {
+        bool is_mine = wallet_is_mine(w, &tx->vout[j]);
+        struct tx_destination dest;
+        char addr[128];
+        addr[0] = '\0';
+        if (script_extract_destination(
+                &tx->vout[j].script_pub_key, &dest))
+            encode_destination(&dest, pk_pfx, pk_pfx_len,
+                               sc_pfx, sc_pfx_len, addr, sizeof(addr));
+
+        struct json_value d = {0};
+        json_init(&d);
+        json_set_object(&d);
+        json_push_kv_int(&d, "vout", (int64_t)j);
+        if (addr[0])
+            json_push_kv_str(&d, "address", addr);
+        format_amount(tx->vout[j].value, s, sizeof(s));
+        json_push_kv_real(&d, "value", strtod(s, NULL));
+        json_push_kv_bool(&d, "ismine", is_mine);
+        if (wtx->from_me)
+            json_push_kv_str(&d, "flow",
+                is_mine ? "internal" : "external_out");
+        else if (is_mine)
+            json_push_kv_str(&d, "flow", "external_in");
+        json_push_back(&details, &d);
+        json_free(&d);
+    }
+    json_push_kv(entry, "outputs", &details);
+    json_free(&details);
+}
+
+static int64_t accounting_utxo_balance(const struct wallet *w)
+{
+    int64_t utxo_balance = 0;
+    struct coin_entry coins[4096];
+    size_t nc = 0;
+    wallet_available_coins(w, coins, &nc, 4096, false, false);
+    for (size_t i = 0; i < nc; i++)
+        utxo_balance += coins[i].wtx->tx.vout[coins[i].i].value;
+    return utxo_balance;
+}
+
 bool rpc_getwalletaccounting(const struct json_value *params,
                                     bool help, struct json_value *result)
 {
@@ -103,58 +285,19 @@ bool rpc_getwalletaccounting(const struct json_value *params,
         /* Sum outputs by destination type */
         int64_t out_to_mine = 0;     /* outputs to our addresses */
         int64_t out_to_other = 0;    /* outputs to external addresses */
-
-        for (size_t j = 0; j < tx->num_vout; j++) {
-            if (wallet_is_mine(ctx->wallet, &tx->vout[j]))
-                out_to_mine += tx->vout[j].value;
-            else
-                out_to_other += tx->vout[j].value;
-        }
+        accounting_sum_outputs(ctx->wallet, tx, &out_to_mine, &out_to_other);
 
         /* Fee and input analysis (only for our sends) */
-        int64_t tx_fee = 0;
         int64_t total_in = 0;
-
         int missing_inputs = 0;
-        if (wtx->from_me) {
-            for (size_t j = 0; j < tx->num_vin; j++) {
-                const struct wallet_tx *prev = wallet_get_tx(ctx->wallet,
-                    &tx->vin[j].prevout.hash);
-                if (prev) {
-                    uint32_t n = tx->vin[j].prevout.n;
-                    if (n < prev->tx.num_vout) {
-                        int64_t v = prev->tx.vout[n].value;
-                        total_in += v;
-                    }
-                } else {
-                    missing_inputs++;
-                }
-            }
-        }
+        accounting_sum_inputs(ctx->wallet, wtx, tx, &total_in,
+                              &missing_inputs);
 
-        /* Track shielded value flows:
-         * JoinSplit: vpub_old = transparent→shielded, vpub_new = shielded→transparent
-         * Sapling: value_balance > 0 means shielded→transparent, < 0 means transparent→shielded
-         */
         int64_t to_shielded = 0;
         int64_t from_shielded = 0;
-        for (size_t j = 0; j < tx->num_joinsplit; j++) {
-            to_shielded += tx->v_joinsplit[j].vpub_old;
-            from_shielded += tx->v_joinsplit[j].vpub_new;
-        }
-        if (tx->value_balance < 0)
-            to_shielded += -tx->value_balance;
-        else if (tx->value_balance > 0)
-            from_shielded += tx->value_balance;
+        accounting_shielded_flows(tx, &to_shielded, &from_shielded);
 
-        /* Fee = total_transparent_in + from_shielded - value_out
-         * Note: transaction_get_value_out() already includes shielded sends
-         * (vpub_old, negative value_balance), so no separate to_shielded subtraction */
-        if (wtx->from_me && total_in > 0) {
-            int64_t value_out = (int64_t)transaction_get_value_out(tx);
-            tx_fee = total_in + from_shielded - value_out;
-            if (tx_fee < 0) tx_fee = 0;
-        }
+        int64_t tx_fee = accounting_tx_fee(wtx, tx, total_in, from_shielded);
 
         /* Classify flows:
          * For from_me txs:
@@ -193,96 +336,22 @@ bool rpc_getwalletaccounting(const struct json_value *params,
         json_push_kv_int(&entry, "confirmations", wtx->confirms);
         json_push_kv_bool(&entry, "from_me", wtx->from_me);
 
-        char s[32];
-        if (ext_in > 0) {
-            format_amount(ext_in, s, sizeof(s));
-            json_push_kv_real(&entry, "external_in", strtod(s, NULL));
-        }
-        if (ext_out > 0) {
-            format_amount(ext_out, s, sizeof(s));
-            json_push_kv_real(&entry, "external_out", strtod(s, NULL));
-        }
-        if (internal > 0) {
-            format_amount(internal, s, sizeof(s));
-            json_push_kv_real(&entry, "internal", strtod(s, NULL));
-        }
-        if (tx_fee > 0) {
-            format_amount(tx_fee, s, sizeof(s));
-            json_push_kv_real(&entry, "fee", strtod(s, NULL));
-        }
-        if (to_shielded > 0) {
-            format_amount(to_shielded, s, sizeof(s));
-            json_push_kv_real(&entry, "to_shielded", strtod(s, NULL));
-        }
-        if (from_shielded > 0) {
-            format_amount(from_shielded, s, sizeof(s));
-            json_push_kv_real(&entry, "from_shielded", strtod(s, NULL));
-        }
-        if (total_in > 0) {
-            format_amount(total_in, s, sizeof(s));
-            json_push_kv_real(&entry, "total_in", strtod(s, NULL));
-        }
-        if (missing_inputs > 0) {
-            json_push_kv_int(&entry, "missing_inputs", missing_inputs);
-            /* Show first missing input prevout for debugging */
-            for (size_t j = 0; j < tx->num_vin && j < 1; j++) {
-                const struct wallet_tx *prev = wallet_get_tx(ctx->wallet,
-                    &tx->vin[j].prevout.hash);
-                if (!prev) {
-                    char pi[65];
-                    uint256_get_hex(&tx->vin[j].prevout.hash, pi);
-                    json_push_kv_str(&entry, "missing_prevout", pi);
-                }
-            }
-        }
+        accounting_emit_flow_amounts(&entry, ext_in, ext_out, internal,
+                                     tx_fee, to_shielded, from_shielded,
+                                     total_in);
+        accounting_note_missing_input(ctx->wallet, tx, &entry,
+                                      missing_inputs);
 
         /* Output details */
-        struct json_value details = {0};
-        json_init(&details);
-        json_set_array(&details);
-        for (size_t j = 0; j < tx->num_vout; j++) {
-            bool is_mine = wallet_is_mine(ctx->wallet, &tx->vout[j]);
-            struct tx_destination dest;
-            char addr[128];
-            addr[0] = '\0';
-            if (script_extract_destination(
-                    &tx->vout[j].script_pub_key, &dest))
-                encode_destination(&dest, pk_pfx, pk_pfx_len,
-                                   sc_pfx, sc_pfx_len, addr, sizeof(addr));
-
-            struct json_value d = {0};
-            json_init(&d);
-            json_set_object(&d);
-            json_push_kv_int(&d, "vout", (int64_t)j);
-            if (addr[0])
-                json_push_kv_str(&d, "address", addr);
-            format_amount(tx->vout[j].value, s, sizeof(s));
-            json_push_kv_real(&d, "value", strtod(s, NULL));
-            json_push_kv_bool(&d, "ismine", is_mine);
-            if (wtx->from_me)
-                json_push_kv_str(&d, "flow",
-                    is_mine ? "internal" : "external_out");
-            else if (is_mine)
-                json_push_kv_str(&d, "flow", "external_in");
-            json_push_back(&details, &d);
-            json_free(&d);
-        }
-        json_push_kv(&entry, "outputs", &details);
-        json_free(&details);
+        accounting_output_details(ctx->wallet, wtx, tx, pk_pfx, pk_pfx_len,
+                                  sc_pfx, sc_pfx_len, &entry);
 
         json_push_back(&tx_list, &entry);
         json_free(&entry);
     }
 
     /* Compute actual UTXO balance */
-    int64_t utxo_balance = 0;
-    {
-        struct coin_entry coins[4096];
-        size_t nc = 0;
-        wallet_available_coins(ctx->wallet, coins, &nc, 4096, false, false);
-        for (size_t i = 0; i < nc; i++)
-            utxo_balance += coins[i].wtx->tx.vout[coins[i].i].value;
-    }
+    int64_t utxo_balance = accounting_utxo_balance(ctx->wallet);
 
     char s[32];
     format_amount(total_external_in, s, sizeof(s));
@@ -480,6 +549,78 @@ bool rpc_getchaincoins(const struct json_value *params, bool help,
     coins_free(&chain_coins);
     return true;
 }
+struct utxo_trace_probe {
+    bool in_wallet;
+    bool in_chain;
+    bool chain_available;
+    int64_t value;
+    int height;
+    char spent_by_hex[65];
+};
+
+static void trace_utxo_probe_wallet_db(struct wallet_rpc_context *ctx,
+                                       const struct uint256 *txid, int vout,
+                                       struct utxo_trace_probe *probe)
+{
+    if (wallet_ctx_db_ready(ctx)) {
+        struct db_wallet_utxo wu;
+        if (db_wallet_utxo_find(ctx->node_db, txid->data, (uint32_t)vout,
+                                &wu)) {
+            probe->in_wallet = true;
+            probe->value = wu.value;
+            probe->height = wu.height;
+            if (wu.is_spent) {
+                struct uint256 spent_hash;
+                memcpy(spent_hash.data, wu.spent_txid, 32);
+                uint256_get_hex(&spent_hash, probe->spent_by_hex);
+            }
+        }
+    }
+}
+
+static void trace_utxo_probe_chainstate(struct wallet_rpc_context *ctx,
+                                        const struct uint256 *txid, int vout,
+                                        struct utxo_trace_probe *probe)
+{
+    if (ctx->coins_tip) {
+        struct coins chain_coins;
+        coins_init(&chain_coins);
+        probe->in_chain = coins_view_cache_get_coins(ctx->coins_tip, txid,
+                                                     &chain_coins);
+        if (probe->in_chain) {
+            probe->chain_available = coins_is_available(&chain_coins,
+                                                        (unsigned int)vout);
+            if (probe->chain_available
+                && (unsigned int)vout < chain_coins.num_vout) {
+                if (probe->value == 0)
+                    probe->value = chain_coins.vout[vout].value;
+                probe->height = chain_coins.height;
+            }
+        }
+        coins_free(&chain_coins);
+    }
+}
+
+static void trace_utxo_probe_wallet_tx(struct wallet_rpc_context *ctx,
+                                       const struct uint256 *txid, int vout,
+                                       struct utxo_trace_probe *probe)
+{
+    if (wallet_ctx_db_ready(ctx) && probe->value == 0) {
+        struct db_wallet_tx dbtx;
+        if (db_wallet_tx_find(ctx->node_db, txid->data, &dbtx)) {
+            struct transaction tx;
+            if (wallet_db_tx_deserialize(&dbtx, &tx)) {
+                if ((size_t)vout < tx.num_vout)
+                    probe->value = tx.vout[vout].value;
+                transaction_free(&tx);
+            }
+            if (!probe->height && dbtx.has_block)
+                probe->height = dbtx.block_height;
+            db_wallet_tx_free(&dbtx);
+        }
+    }
+}
+
 bool rpc_traceutxo(const struct json_value *params, bool help,
                             struct json_value *result)
 {
@@ -502,76 +643,31 @@ bool rpc_traceutxo(const struct json_value *params, bool help,
             ctx->main_state, result, "traceutxo", "Chainstate lookup"))
         return false;
 
-    bool in_wallet = false;
-    bool in_chain = false;
-    bool chain_available = false;
-    int64_t value = 0;
-    int height = 0;
-    char spent_by_hex[65];
-    spent_by_hex[0] = '\0';
+    struct utxo_trace_probe probe = {0};
 
     /* Check wallet DB */
-    if (wallet_ctx_db_ready(ctx)) {
-        struct db_wallet_utxo wu;
-        if (db_wallet_utxo_find(ctx->node_db, txid.data, (uint32_t)vout, &wu)) {
-            in_wallet = true;
-            value = wu.value;
-            height = wu.height;
-            if (wu.is_spent) {
-                struct uint256 spent_hash;
-                memcpy(spent_hash.data, wu.spent_txid, 32);
-                uint256_get_hex(&spent_hash, spent_by_hex);
-            }
-        }
-    }
+    trace_utxo_probe_wallet_db(ctx, &txid, vout, &probe);
 
     /* Check chainstate */
-    if (ctx->coins_tip) {
-        struct coins chain_coins;
-        coins_init(&chain_coins);
-        in_chain = coins_view_cache_get_coins(ctx->coins_tip, &txid, &chain_coins);
-        if (in_chain) {
-            chain_available = coins_is_available(&chain_coins,
-                                                  (unsigned int)vout);
-            if (chain_available && (unsigned int)vout < chain_coins.num_vout) {
-                if (value == 0)
-                    value = chain_coins.vout[vout].value;
-                height = chain_coins.height;
-            }
-        }
-        coins_free(&chain_coins);
-    }
+    trace_utxo_probe_chainstate(ctx, &txid, vout, &probe);
 
     /* Check wallet tx for creation details */
-    if (wallet_ctx_db_ready(ctx) && value == 0) {
-        struct db_wallet_tx dbtx;
-        if (db_wallet_tx_find(ctx->node_db, txid.data, &dbtx)) {
-            struct transaction tx;
-            if (wallet_db_tx_deserialize(&dbtx, &tx)) {
-                if ((size_t)vout < tx.num_vout)
-                    value = tx.vout[vout].value;
-                transaction_free(&tx);
-            }
-            if (!height && dbtx.has_block)
-                height = dbtx.block_height;
-            db_wallet_tx_free(&dbtx);
-        }
-    }
+    trace_utxo_probe_wallet_tx(ctx, &txid, vout, &probe);
 
     /* Determine verdict */
     const char *status;
-    if (chain_available)
+    if (probe.chain_available)
         status = "unspent_verified";
-    else if (in_chain && !chain_available)
+    else if (probe.in_chain && !probe.chain_available)
         status = "spent";
-    else if (in_wallet && !in_chain)
+    else if (probe.in_wallet && !probe.in_chain)
         status = "phantom";
     else
         status = "unknown";
 
     wallet_view_utxo_trace(result, txid_str, (uint32_t)vout, status,
-                           value, height,
-                           spent_by_hex[0] ? spent_by_hex : NULL,
-                           in_wallet, in_chain);
+                           probe.value, probe.height,
+                           probe.spent_by_hex[0] ? probe.spent_by_hex : NULL,
+                           probe.in_wallet, probe.in_chain);
     return true;
 }

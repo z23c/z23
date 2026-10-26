@@ -637,8 +637,6 @@ contexts/wallet/controllers/src/vault_intent_private.c:vip_parse:20
 contexts/wallet/controllers/src/wallet_controller.c:rpc_listunspent:23
 contexts/wallet/controllers/src/wallet_controller_multisig.c:rpc_sendmany:20
 contexts/wallet/controllers/src/wallet_diagnostic_audit.c:rpc_walletaudit:24
-contexts/wallet/controllers/src/wallet_diagnostic_health.c:rpc_getwalletaccounting:35
-contexts/wallet/controllers/src/wallet_diagnostic_health.c:rpc_traceutxo:25
 contexts/wallet/controllers/src/wallet_diagnostic_keys.c:rpc_getbalanceflow:30
 contexts/wallet/controllers/src/wallet_diagnostic_keys.c:rpc_listwallettxdetail:21
 contexts/wallet/controllers/src/wallet_diagnostic_ledger.c:rpc_walletledger:109
