@@ -37,6 +37,150 @@ static void bf_worker_id_from_pubkey(const uint8_t pubkey[32],
     zcl_hex_encode(digest, sizeof(digest), out);
 }
 
+static bool bf_remote_inputs_incomplete(
+    struct node_db *ndb, const char *workspace,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_result_v1 *result, const char *receipt_id,
+    int64_t now)
+{
+    return !ndb || !ndb->open || !workspace || !workspace[0] || !request ||
+        !result || !receipt_id || now < 0;
+}
+
+static bool bf_remote_result_invalid(
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_result_v1 *result, const uint8_t *signer)
+{
+    return !vcs_zcode_work_request_verify(request) ||
+        !vcs_zcode_work_result_verify(request, result, signer);
+}
+
+static bool bf_remote_action_missing(
+    struct node_db *ndb, const struct vcs_zcode_work_result_v1 *result,
+    char action_id[65], struct db_build_action *action)
+{
+    zcl_hex_encode(result->action_root, 32, action_id);
+    return !db_build_action_find(ndb, action_id, action) ||
+        strcmp(action->task_root_sha3, "") == 0 ||
+        strcmp(action->candidate_root_sha3, "") == 0;
+}
+
+static bool bf_remote_work_kind_conflicts(
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_result_v1 *result,
+    const struct db_build_action *action)
+{
+    uint8_t expected_kind = vcs_build_action_v1_work_kind(action->kind);
+    return expected_kind == 0 || request->work_kind != expected_kind ||
+        result->receipt.work_kind != expected_kind;
+}
+
+static bool bf_remote_roots_conflict(
+    const struct db_build_action *action,
+    const struct vcs_zcode_work_result_v1 *result)
+{
+    uint8_t expected[32];
+    return !zcl_hex_decode_lower(action->task_root_sha3, expected, 32) ||
+        memcmp(expected, result->task_root, 32) != 0 ||
+        !zcl_hex_decode_lower(action->candidate_root_sha3, expected, 32) ||
+        memcmp(expected, result->candidate_root, 32) != 0 ||
+        !zcl_hex_decode_lower(action->input_root_sha3, expected, 32) ||
+        memcmp(expected, result->receipt.input_root, 32) != 0 ||
+        !zcl_hex_decode_lower(action->proof_policy_root_sha3, expected, 32) ||
+        memcmp(expected, result->receipt.proof_policy_root, 32) != 0;
+}
+
+static bool bf_store_remote_receipt(
+    const char *workspace, const struct vcs_zcode_work_receipt_v1 *receipt,
+    uint8_t work_root[32])
+{
+    uint8_t work_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    return vcs_zcode_work_receipt_serialize(receipt, work_wire) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_id(receipt, work_root) == VCS_ZCODE_DEV_OK &&
+        vcs_object_store_init(workspace) &&
+        vcs_object_put_addressed(workspace, work_root, work_wire,
+                                 sizeof(work_wire));
+}
+
+static bool bf_remote_prior_matches(const struct db_build_receipt *prior,
+                                    const char *action_id,
+                                    const char *receipt_id)
+{
+    return strcmp(prior->action_id, action_id) == 0 &&
+        strcmp(prior->work_receipt_sha3, receipt_id) == 0;
+}
+
+static bool bf_remote_worker_prepare(struct node_db *ndb,
+                                     const uint8_t *signer,
+                                     const char *action_kind, int64_t now,
+                                     struct db_build_worker *worker,
+                                     char worker_id[65])
+{
+    bf_worker_id_from_pubkey(signer, worker_id);
+    if (db_build_worker_find(ndb, worker_id, worker)) {
+        char signer_hex[65];
+        zcl_hex_encode(signer, 32, signer_hex);
+        if (strcmp(worker->signer_pubkey, signer_hex) != 0)
+            return false;
+        worker->last_seen_at = now;
+    } else {
+        memset(worker, 0, sizeof(*worker));
+        (void)snprintf(worker->worker_id, sizeof(worker->worker_id), "%s",
+                       worker_id);
+        zcl_hex_encode(signer, 32, worker->signer_pubkey);
+        (void)snprintf(worker->capabilities, sizeof(worker->capabilities),
+                       "p2p-observed,%s", action_kind);
+        worker->last_seen_at = now;
+    }
+    return true;
+}
+
+static bool bf_fill_remote_observation(
+    const struct vcs_zcode_work_result_v1 *result,
+    const struct db_build_action *action, const char *receipt_id,
+    const char *action_id, const char *worker_id,
+    struct db_build_receipt *observed)
+{
+    (void)snprintf(observed->receipt_id, sizeof(observed->receipt_id), "%s",
+                   receipt_id);
+    (void)snprintf(observed->action_id, sizeof(observed->action_id), "%s",
+                   action_id);
+    (void)snprintf(observed->job_id, sizeof(observed->job_id), "%s",
+                   action->job_id);
+    (void)snprintf(observed->worker_id, sizeof(observed->worker_id), "%s",
+                   worker_id);
+    zcl_hex_encode(result->receipt.lease_id, 32, observed->lease_id);
+    (void)snprintf(observed->action_sha3, sizeof(observed->action_sha3),
+                   "%s", action_id);
+    zcl_hex_encode(result->output_root, 32, observed->output_sha3);
+    if (strcmp(action->kind, VCS_BUILD_ACTION_KIND_V1) == 0) {
+        if (memcmp(result->receipt.evidence_root,
+                   (const uint8_t[32]){0}, 32) == 0)
+            return false;
+        zcl_hex_encode(result->receipt.evidence_root, 32,
+                       observed->observation_sha3);
+    }
+    (void)snprintf(observed->work_receipt_sha3,
+                   sizeof(observed->work_receipt_sha3), "%s", receipt_id);
+    zcl_hex_encode(result->receipt.signature, 64, observed->signature);
+    (void)snprintf(observed->confinement, sizeof(observed->confinement),
+                   "p2p-untrusted;facts-in-work-receipt");
+    (void)snprintf(observed->trust_state, sizeof(observed->trust_state),
+                   "REMOTE_OBSERVED");
+    observed->exit_status = result->receipt.exit_status;
+    observed->created_at = result->receipt.finished_unix;
+    return true;
+}
+
+static bool bf_save_remote_observation(
+    struct node_db *ndb, const struct db_build_worker *worker,
+    const struct db_build_receipt *observed)
+{
+    return db_build_worker_save(ndb, worker) &&
+        db_build_receipt_save(ndb, observed) && node_db_commit(ndb);
+}
+
 struct zcl_result build_fabric_receipt_observe_remote(
     struct node_db *ndb, const char *workspace,
     const struct vcs_zcode_work_request_v1 *request,
@@ -44,104 +188,43 @@ struct zcl_result build_fabric_receipt_observe_remote(
     char receipt_id[BUILD_FABRIC_ID_HEX + 1])
 {
     if (receipt_id) receipt_id[0] = '\0';
-    if (!ndb || !ndb->open || !workspace || !workspace[0] || !request ||
-        !result || !receipt_id || now < 0)
+    if (bf_remote_inputs_incomplete(ndb, workspace, request, result,
+                                    receipt_id, now))
         return ZCL_ERR(-1, "remote receipt observation requires complete inputs");
     const uint8_t *signer = result->receipt.signer_pubkey;
-    if (!vcs_zcode_work_request_verify(request) ||
-        !vcs_zcode_work_result_verify(request, result, signer))
+    if (bf_remote_result_invalid(request, result, signer))
         return ZCL_ERR(-1, "remote result signature or request binding is invalid");
     char action_id[65];
-    zcl_hex_encode(result->action_root, 32, action_id);
     struct db_build_action action;
-    if (!db_build_action_find(ndb, action_id, &action) ||
-        strcmp(action.task_root_sha3, "") == 0 ||
-        strcmp(action.candidate_root_sha3, "") == 0)
+    if (bf_remote_action_missing(ndb, result, action_id, &action))
         return ZCL_ERR(-1, "remote result has no matching local ZBuild action");
-    uint8_t expected_kind = vcs_build_action_v1_work_kind(action.kind);
-    if (expected_kind == 0 || request->work_kind != expected_kind ||
-        result->receipt.work_kind != expected_kind)
+    if (bf_remote_work_kind_conflicts(request, result, &action))
         return ZCL_ERR(-1, "remote receipt work kind conflicts with the fixed action");
-    uint8_t expected[32];
-    if (!zcl_hex_decode_lower(action.task_root_sha3, expected, 32) ||
-        memcmp(expected, result->task_root, 32) != 0 ||
-        !zcl_hex_decode_lower(action.candidate_root_sha3, expected, 32) ||
-        memcmp(expected, result->candidate_root, 32) != 0 ||
-        !zcl_hex_decode_lower(action.input_root_sha3, expected, 32) ||
-        memcmp(expected, result->receipt.input_root, 32) != 0 ||
-        !zcl_hex_decode_lower(action.proof_policy_root_sha3, expected, 32) ||
-        memcmp(expected, result->receipt.proof_policy_root, 32) != 0)
+    if (bf_remote_roots_conflict(&action, result))
         return ZCL_ERR(-1, "remote receipt conflicts with the local action");
-    uint8_t work_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
     uint8_t work_root[32];
-    if (vcs_zcode_work_receipt_serialize(&result->receipt, work_wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_work_receipt_id(&result->receipt, work_root) !=
-            VCS_ZCODE_DEV_OK ||
-        !vcs_object_store_init(workspace) ||
-        !vcs_object_put_addressed(workspace, work_root, work_wire,
-                                  sizeof(work_wire)))
+    if (!bf_store_remote_receipt(workspace, &result->receipt, work_root))
         return ZCL_ERR(-1, "remote canonical receipt could not enter CAS");
     zcl_hex_encode(work_root, 32, receipt_id);
     struct db_build_receipt prior;
     if (db_build_receipt_find(ndb, receipt_id, &prior)) {
-        if (strcmp(prior.action_id, action_id) == 0 &&
-            strcmp(prior.work_receipt_sha3, receipt_id) == 0)
+        if (bf_remote_prior_matches(&prior, action_id, receipt_id))
             return ZCL_OK;
         return ZCL_ERR(-1, "remote receipt id collides with different evidence");
     }
     struct db_build_worker worker;
     char worker_id[65];
-    bf_worker_id_from_pubkey(signer, worker_id);
-    if (db_build_worker_find(ndb, worker_id, &worker)) {
-        char signer_hex[65];
-        zcl_hex_encode(signer, 32, signer_hex);
-        if (strcmp(worker.signer_pubkey, signer_hex) != 0)
-            return ZCL_ERR(-1, "remote signer collides with a worker identity");
-        worker.last_seen_at = now;
-    } else {
-        memset(&worker, 0, sizeof(worker));
-        (void)snprintf(worker.worker_id, sizeof(worker.worker_id), "%s",
-                       worker_id);
-        zcl_hex_encode(signer, 32, worker.signer_pubkey);
-        (void)snprintf(worker.capabilities, sizeof(worker.capabilities),
-                       "p2p-observed,%s", action.kind);
-        worker.last_seen_at = now;
-    }
+    if (!bf_remote_worker_prepare(ndb, signer, action.kind, now, &worker,
+                                  worker_id))
+        return ZCL_ERR(-1, "remote signer collides with a worker identity");
     struct db_build_receipt observed = {0};
-    (void)snprintf(observed.receipt_id, sizeof(observed.receipt_id), "%s",
-                   receipt_id);
-    (void)snprintf(observed.action_id, sizeof(observed.action_id), "%s",
-                   action_id);
-    (void)snprintf(observed.job_id, sizeof(observed.job_id), "%s",
-                   action.job_id);
-    (void)snprintf(observed.worker_id, sizeof(observed.worker_id), "%s",
-                   worker_id);
-    zcl_hex_encode(result->receipt.lease_id, 32, observed.lease_id);
-    (void)snprintf(observed.action_sha3, sizeof(observed.action_sha3), "%s",
-                   action_id);
-    zcl_hex_encode(result->output_root, 32, observed.output_sha3);
-    if (strcmp(action.kind, VCS_BUILD_ACTION_KIND_V1) == 0) {
-        if (memcmp(result->receipt.evidence_root,
-                   (const uint8_t[32]){0}, 32) == 0)
-            return ZCL_ERR(-1,
-                           "remote compile receipt lacks an observation root");
-        zcl_hex_encode(result->receipt.evidence_root, 32,
-                       observed.observation_sha3);
-    }
-    (void)snprintf(observed.work_receipt_sha3,
-                   sizeof(observed.work_receipt_sha3), "%s", receipt_id);
-    zcl_hex_encode(result->receipt.signature, 64, observed.signature);
-    (void)snprintf(observed.confinement, sizeof(observed.confinement),
-                   "p2p-untrusted;facts-in-work-receipt");
-    (void)snprintf(observed.trust_state, sizeof(observed.trust_state),
-                   "REMOTE_OBSERVED");
-    observed.exit_status = result->receipt.exit_status;
-    observed.created_at = result->receipt.finished_unix;
+    if (!bf_fill_remote_observation(result, &action, receipt_id, action_id,
+                                    worker_id, &observed))
+        return ZCL_ERR(-1,
+                       "remote compile receipt lacks an observation root");
     if (!node_db_begin(ndb))
         return ZCL_ERR(-1, "cannot begin remote receipt observation");
-    bool ok = db_build_worker_save(ndb, &worker) &&
-              db_build_receipt_save(ndb, &observed) && node_db_commit(ndb);
+    bool ok = bf_save_remote_observation(ndb, &worker, &observed);
     if (!ok) {
         if (!node_db_rollback(ndb))
             LOG_ERROR("build_fabric", "remote receipt save and rollback failed");
@@ -265,6 +348,21 @@ static bool bf_package_result_matches(
             ? (int)package->test_exit_code : 1);
 }
 
+static bool bf_manifest_binds_receipt(
+    const uint8_t *manifest_wire, size_t manifest_len,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    struct vcs_build_artifact_manifest_v1 *manifest)
+{
+    uint8_t checked[32];
+    return vcs_build_artifact_manifest_v1_parse(
+            manifest_wire, manifest_len, manifest) &&
+        vcs_build_artifact_manifest_v1_root(manifest, checked) &&
+        memcmp(checked, receipt->output_root, 32) == 0 &&
+        memcmp(manifest->action_sha3, receipt->action_root, 32) == 0 &&
+        manifest->total_bytes > 0 &&
+        manifest->total_bytes <= VCS_PACKAGE_BUILD_MAX_WIRE_BYTES;
+}
+
 static bool bf_package_evidence_wire(
     const char *workspace, const struct vcs_zcode_work_receipt_v1 *receipt,
     uint8_t **out, size_t *out_len)
@@ -277,14 +375,8 @@ static bool bf_package_evidence_wire(
             workspace, receipt->output_root, VCS_BUILD_ARTIFACT_WIRE_MAX,
             &manifest_wire, &manifest_len) == 0) {
         struct vcs_build_artifact_manifest_v1 manifest;
-        uint8_t checked[32];
-        bool manifest_ok = vcs_build_artifact_manifest_v1_parse(
-                manifest_wire, manifest_len, &manifest) &&
-            vcs_build_artifact_manifest_v1_root(&manifest, checked) &&
-            memcmp(checked, receipt->output_root, 32) == 0 &&
-            memcmp(manifest.action_sha3, receipt->action_root, 32) == 0 &&
-            manifest.total_bytes > 0 &&
-            manifest.total_bytes <= VCS_PACKAGE_BUILD_MAX_WIRE_BYTES;
+        bool manifest_ok = bf_manifest_binds_receipt(
+                manifest_wire, manifest_len, receipt, &manifest);
         free(manifest_wire);
         if (!manifest_ok)
             LOG_FAIL("zcode.evidence", "artifact manifest does not bind receipt");
@@ -442,6 +534,16 @@ static bool bf_has_local_match(
     const struct bf_verified_receipt *valid, size_t valid_count,
     size_t remote_index);
 
+static bool bf_signer_listed(uint8_t signers[][32], size_t count,
+                             const uint8_t pubkey[32])
+{
+    bool listed = false;
+    for (size_t j = 0; j < count; j++)
+        if (memcmp(signers[j], pubkey, 32) == 0)
+            listed = true;
+    return listed;
+}
+
 static size_t bf_count_kind(
     const struct bf_verified_receipt *valid, size_t valid_count,
     uint8_t work_kind, const uint8_t *required_output, bool independent)
@@ -461,12 +563,8 @@ static size_t bf_count_kind(
             (required_output && memcmp(valid[i].evidence_output,
                                        required_output, 32) != 0))
             continue;
-        bool duplicate = false;
-        if (independent)
-            for (size_t j = 0; j < count; j++)
-                if (memcmp(signers[j], valid[i].receipt.signer_pubkey,
-                           32) == 0)
-                    duplicate = true;
+        bool duplicate = independent &&
+            bf_signer_listed(signers, count, valid[i].receipt.signer_pubkey);
         if (!duplicate) {
             memcpy(signers[count], valid[i].receipt.signer_pubkey, 32);
             count++;
