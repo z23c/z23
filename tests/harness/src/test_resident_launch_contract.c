@@ -378,14 +378,7 @@ struct rlc_file {
     size_t len;
 };
 
-/* Publish one package (manifest + CAS chunks + recipe + signed release)
- * into <datadir>/zcode — the za_publish_ex idiom of test_zcode_add.c. */
-static bool rlc_publish(const char *zcode, const char *name,
-                        const char *semver, uint64_t sequence,
-                        const struct rlc_file *files, size_t file_count,
-                        const char *header_path, const char *source_path,
-                        const char *test_path, const char *include_dir,
-                        const char *program_path, uint8_t root_out[32])
+static bool rlc_publish_dirs(const char *zcode)
 {
     char dir[4400];
     const char *subs[] = { "manifests", "releases", "recipes", "cas/sha3" };
@@ -394,7 +387,14 @@ static bool rlc_publish(const char *zcode, const char *name,
         if (!rlc_mkdir_p(dir))
             return false;
     }
+    return true;
+}
 
+static bool rlc_publish_manifest(const char *zcode,
+                                 const struct rlc_file *files,
+                                 size_t file_count, uint8_t root_out[32],
+                                 uint8_t **mwire, size_t *mlen)
+{
     struct vcs_package_manifest m;
     vcs_package_manifest_init(&m);
     bool ok = true;
@@ -420,25 +420,24 @@ static bool rlc_publish(const char *zcode, const char *name,
     }
     if (ok)
         ok = vcs_package_manifest_root(&m, root_out);
-    uint8_t *mwire = NULL;
-    size_t mlen = 0;
     if (ok)
-        ok = vcs_package_manifest_serialize(&m, &mwire, &mlen);
+        ok = vcs_package_manifest_serialize(&m, mwire, mlen);
     vcs_package_manifest_free(&m);
-    if (!ok)
-        return false;
-    char root_hex[65];
-    zcl_hex_encode(root_out, 32, root_hex);
-    char path[4500];
-    (void)snprintf(path, sizeof(path), "%s/manifests/%s", zcode, root_hex);
-    ok = rlc_write_file(path, mwire, mlen);
-    free(mwire);
-    if (!ok)
-        return false;
+    return ok;
+}
 
+static bool rlc_publish_recipe(const struct rlc_file *files, size_t file_count,
+                               const char *header_path,
+                               const char *source_path,
+                               const char *test_path,
+                               const char *include_dir,
+                               const char *program_path,
+                               uint8_t recipe_root[32], uint8_t **rwire,
+                               size_t *rlen)
+{
     struct vcs_package_recipe r;
     vcs_package_recipe_init(&r);
-    ok = vcs_package_recipe_add_header(&r, header_path, NULL);
+    bool ok = vcs_package_recipe_add_header(&r, header_path, NULL);
     for (size_t i = 0; i < file_count && ok; i++) {
         size_t path_len = strlen(files[i].path);
         if (strcmp(files[i].path, header_path) != 0 && path_len > 2u &&
@@ -455,15 +454,48 @@ static bool rlc_publish(const char *zcode, const char *name,
           vcs_package_recipe_add_program(&r, program_path, NULL));
     vcs_package_recipe_set_test_limits(&r, 0, 60,
                                        UINT64_C(64) * 1024u * 1024u);
-    uint8_t recipe_root[32];
-    uint8_t *rwire = NULL;
-    size_t rlen = 0;
     if (ok)
         ok = vcs_package_recipe_root(&r, recipe_root) ==
                  VCS_PACKAGE_RECIPE_OK &&
-             vcs_package_recipe_serialize(&r, &rwire, &rlen) ==
+             vcs_package_recipe_serialize(&r, rwire, rlen) ==
                  VCS_PACKAGE_RECIPE_OK;
     vcs_package_recipe_free(&r);
+    return ok;
+}
+
+/* Publish one package (manifest + CAS chunks + recipe + signed release)
+ * into <datadir>/zcode — the za_publish_ex idiom of test_zcode_add.c. */
+static bool rlc_publish(const char *zcode, const char *name,
+                        const char *semver, uint64_t sequence,
+                        const struct rlc_file *files, size_t file_count,
+                        const char *header_path, const char *source_path,
+                        const char *test_path, const char *include_dir,
+                        const char *program_path, uint8_t root_out[32])
+{
+    bool ok = rlc_publish_dirs(zcode);
+    if (!ok)
+        return false;
+    uint8_t *mwire = NULL;
+    size_t mlen = 0;
+    ok = rlc_publish_manifest(zcode, files, file_count, root_out, &mwire,
+                              &mlen);
+    if (!ok)
+        return false;
+    char root_hex[65];
+    zcl_hex_encode(root_out, 32, root_hex);
+    char path[4500];
+    (void)snprintf(path, sizeof(path), "%s/manifests/%s", zcode, root_hex);
+    ok = rlc_write_file(path, mwire, mlen);
+    free(mwire);
+    if (!ok)
+        return false;
+
+    uint8_t recipe_root[32];
+    uint8_t *rwire = NULL;
+    size_t rlen = 0;
+    ok = rlc_publish_recipe(files, file_count, header_path, source_path,
+                            test_path, include_dir, program_path,
+                            recipe_root, &rwire, &rlen);
     if (!ok)
         return false;
     char rhex[65];
@@ -1328,6 +1360,20 @@ static void rlc_call_serving(struct rlc_call *c,
 }
 
 
+static bool rlc_fixture_roundtrip_ok(struct resident_launch *launch,
+                                     struct resident_result_header *header,
+                                     unsigned char *payload,
+                                     size_t payload_cap, char *error,
+                                     size_t error_size)
+{
+    return rlc_send_frame(launch, "fixture-roundtrip") &&
+           resident_result_read(launch, header, payload, payload_cap,
+                                30000, error, error_size) &&
+           header->payload_len == strlen("fixture-roundtrip") &&
+           memcmp(payload, "fixture-roundtrip",
+                  strlen("fixture-roundtrip")) == 0;
+}
+
 /* ── stage 0: reference-child fixture self-check (platform seam only) ─────
  * Proves the fixture speaks the exact wire of the consumer (READY gate, one
  * nonce-bound run frame round-trip, cancel/reap). NOT part of the contract. */
@@ -1366,12 +1412,9 @@ static int rlc_fixture_selfcheck(const char *child,
     error[0] = '\0';
     RLC_CHECK("stage 0 (fixture): one run frame round-trips the exact "
               "payload",
-              rlc_send_frame(&launch, "fixture-roundtrip") &&
-              resident_result_read(&launch, &header, payload, sizeof(payload),
-                                   30000, error, sizeof(error)) &&
-              header.payload_len == strlen("fixture-roundtrip") &&
-              memcmp(payload, "fixture-roundtrip",
-                     strlen("fixture-roundtrip")) == 0);
+              rlc_fixture_roundtrip_ok(&launch, &header, payload,
+                                       sizeof(payload), error,
+                                       sizeof(error)));
     error[0] = '\0';
     RLC_CHECK("stage 0 (fixture): cancel reaps the reference child",
               resident_launch_cancel(&launch, 300, error, sizeof(error)) &&
@@ -1432,6 +1475,30 @@ static int rlc_fixture_selfcheck(const char *child,
     return failures;
 }
 
+static bool rlc_stage_run_launch_ok(bool ran, const struct rlc_call *c,
+                                    const char *sha3_hex)
+{
+    return ran && rlc_ok(c) &&
+           strcmp(rlc_str(c, "artifact_sha3"), sha3_hex) == 0 &&
+           (strcmp(rlc_str(c, "mapped_proof"), "fexecve_inode") == 0 ||
+            strcmp(rlc_str(c, "mapped_proof"), "proc_exe_triple") == 0 ||
+            strcmp(rlc_str(c, "mapped_proof"), "cdhash_suspended") == 0) &&
+           rlc_hex64(rlc_str(c, "nonce")) &&
+           rlc_int(c, "start_token") > 0;
+}
+
+static bool rlc_stage_run_result_ok(bool ran, const struct rlc_call *c)
+{
+    return ran && rlc_ok(c) && rlc_str(c, "result")[0] &&
+           strcmp(rlc_str(c, "program"), RLC_ZTASKS_PROGRAM) == 0 &&
+           rlc_int(c, "pid") > 0 &&
+           rlc_int(c, "verification_us") >= 0 &&
+           rlc_int(c, "first_result_us") >= 0 &&
+           rlc_int(c, "completed_us") >= 0 &&
+           rlc_bool(c, "child_reaped") &&
+           rlc_str(c, "next_action")[0];
+}
+
 /* ── stages b/c/d: verified launch, fd-3 frame, observable result ──────── */
 
 static int rlc_stage_run(const struct zcl_command_spec *spec,
@@ -1451,27 +1518,14 @@ static int rlc_stage_run(const struct zcl_command_spec *spec,
                c.reply.error.code, c.reply.error.message);
     RLC_CHECK("stage b: the launch verified the mapped image (accepted "
               "digest + mapped proof + launch nonce in the receipt)",
-              ran && rlc_ok(&c) &&
-              strcmp(rlc_str(&c, "artifact_sha3"), sha3_hex) == 0 &&
-              (strcmp(rlc_str(&c, "mapped_proof"), "fexecve_inode") == 0 ||
-               strcmp(rlc_str(&c, "mapped_proof"), "proc_exe_triple") == 0 ||
-               strcmp(rlc_str(&c, "mapped_proof"), "cdhash_suspended") == 0) &&
-              rlc_hex64(rlc_str(&c, "nonce")) &&
-              rlc_int(&c, "start_token") > 0);
+              rlc_stage_run_launch_ok(ran, &c, sha3_hex));
     RLC_CHECK("stage c: the child spoke z23-res-run-v1 on fd 3 (READY gate "
               "+ one bounded frame round-trip: empty list renders exactly)",
               ran && rlc_ok(&c) &&
               strcmp(rlc_str(&c, "result"), "No tasks yet.\n") == 0);
     RLC_CHECK("stage d: the result is observable through the product reply "
               "(payload + resident pid + bounded timings + reaped child)",
-              ran && rlc_ok(&c) && rlc_str(&c, "result")[0] &&
-              strcmp(rlc_str(&c, "program"), RLC_ZTASKS_PROGRAM) == 0 &&
-              rlc_int(&c, "pid") > 0 &&
-              rlc_int(&c, "verification_us") >= 0 &&
-              rlc_int(&c, "first_result_us") >= 0 &&
-              rlc_int(&c, "completed_us") >= 0 &&
-              rlc_bool(&c, "child_reaped") &&
-              rlc_str(&c, "next_action")[0]);
+              rlc_stage_run_result_ok(ran, &c));
     if (ran && rlc_ok(&c))
         printf("resident_launch_contract: invocation timings "
                "verification_us=%lld first_result_us=%lld "
@@ -1630,6 +1684,128 @@ static bool rlc_failed_activation_isolated(const struct zcl_command_spec *spec,
     return ok;
 }
 
+static bool rlc_f_trap_accept_pending(bool ran, const struct rlc_call *acc_n,
+                                      const struct rlc_binding *n)
+{
+    return ran && rlc_ok(acc_n) &&
+           strcmp(rlc_str(acc_n, "pending_sha3"), n->sha3) == 0 &&
+           strcmp(rlc_str(acc_n, "pending_receipt_id"),
+                  n->receipt_hex) == 0 &&
+           rlc_hex64(rlc_str(acc_n, "candidate_nonce")) &&
+           rlc_int(acc_n, "candidate_start_token") > 0 &&
+           rlc_int(acc_n, "generation") >= 0;
+}
+
+static bool rlc_f_trap_activate_serves(bool ran,
+                                       const struct rlc_call *act_n,
+                                       bool ran_inv_n,
+                                       const struct rlc_call *inv_n,
+                                       const struct rlc_binding *n)
+{
+    return ran && rlc_ok(act_n) &&
+           strcmp(rlc_str(act_n, "serving_sha3"), n->sha3) == 0 &&
+           strcmp(rlc_str(act_n, "serving_receipt_id"),
+                  n->receipt_hex) == 0 &&
+           rlc_int(act_n, "generation") == 1 &&
+           ran_inv_n && rlc_ok(inv_n) &&
+           strcmp(rlc_str(inv_n, "artifact_sha3"), n->sha3) == 0 &&
+           strcmp(rlc_str(inv_n, "result"), "No tasks yet.\n") == 0;
+}
+
+static bool rlc_f_trap_candidate_ready(bool ran,
+                                       const struct rlc_call *acc_n1,
+                                       const struct rlc_binding *n1,
+                                       bool ran_pre,
+                                       const struct rlc_call *inv_pre,
+                                       const struct rlc_binding *n)
+{
+    return ran && rlc_ok(acc_n1) &&
+           strcmp(rlc_str(acc_n1, "pending_sha3"), n1->sha3) == 0 &&
+           rlc_hex64(rlc_str(acc_n1, "candidate_nonce")) &&
+           rlc_int(acc_n1, "candidate_start_token") > 0 &&
+           ran_pre && rlc_ok(inv_pre) &&
+           strcmp(rlc_str(inv_pre, "artifact_sha3"), n->sha3) == 0 &&
+           strcmp(rlc_str(inv_pre, "result"), "No tasks yet.\n") == 0;
+}
+
+static bool rlc_f_trap_atomic_switch(bool ran, const struct rlc_call *act_n1,
+                                     bool ran_inv_n1,
+                                     const struct rlc_call *inv_n1,
+                                     const struct rlc_binding *n,
+                                     const struct rlc_binding *n1)
+{
+    return ran && rlc_ok(act_n1) &&
+           strcmp(rlc_str(act_n1, "switched_from_sha3"), n->sha3) == 0 &&
+           strcmp(rlc_str(act_n1, "serving_sha3"), n1->sha3) == 0 &&
+           rlc_int(act_n1, "generation") == 2 &&
+           rlc_no_children() &&
+           ran_inv_n1 && rlc_ok(inv_n1) &&
+           strcmp(rlc_str(inv_n1, "artifact_sha3"), n1->sha3) == 0 &&
+           strcmp(rlc_str(inv_n1, "result"),
+                  "No tasks yet (0.3.0).\n") == 0;
+}
+
+static bool rlc_f_trap_stale_refused(bool ran, const struct rlc_call *stale,
+                                     bool ran_post,
+                                     const struct rlc_call *inv_post,
+                                     const struct rlc_binding *n1)
+{
+    return ran && !rlc_ok(stale) &&
+           strstr(stale->reply.error.evidence, n1->sha3) != NULL &&
+           ran_post && rlc_ok(inv_post) &&
+           strcmp(rlc_str(inv_post, "artifact_sha3"), n1->sha3) == 0;
+}
+
+static bool rlc_f_trap_supersede_pending(bool ok_x, bool ok_y,
+                                         const struct rlc_call *acc_y,
+                                         const struct zcl_command_spec *spec,
+                                         const char *datadir,
+                                         const struct rlc_binding *n,
+                                         const struct rlc_binding *n2)
+{
+    return ok_x && ok_y &&
+           strcmp(rlc_str(acc_y, "pending_sha3"), n2->sha3) == 0 &&
+           strcmp(rlc_str(acc_y, "superseded_sha3"), n->sha3) == 0 &&
+           rlc_no_children() &&
+           rlc_activate_pending_and_verify(spec, datadir, n2, 3,
+                                           "No tasks yet (0.4.0).\n");
+}
+
+static bool rlc_f_trap_rollback_broken(bool ran_acc_b,
+                                       const struct rlc_call *acc_b,
+                                       bool ran_act_b,
+                                       const struct rlc_call *act_b,
+                                       bool corrupted, bool ran_broken,
+                                       const struct rlc_call *inv_broken)
+{
+    return ran_acc_b && rlc_ok(acc_b) && ran_act_b && rlc_ok(act_b) &&
+           corrupted && ran_broken && !rlc_ok(inv_broken);
+}
+
+static bool rlc_f_trap_rollback_restored(bool ran,
+                                         const struct rlc_call *roll,
+                                         bool ran_a,
+                                         const struct rlc_call *inv_a,
+                                         const struct rlc_binding *n2)
+{
+    return ran && rlc_ok(roll) &&
+           strcmp(rlc_str(roll, "serving_sha3"), n2->sha3) == 0 &&
+           ran_a && rlc_ok(inv_a) &&
+           strcmp(rlc_str(inv_a, "artifact_sha3"), n2->sha3) == 0 &&
+           strcmp(rlc_str(inv_a, "result"),
+                  "No tasks yet (0.4.0).\n") == 0;
+}
+
+static bool rlc_f_trap_restart_serves(bool ran,
+                                      const struct rlc_call *inv_restart,
+                                      const struct rlc_binding *n2)
+{
+    return ran && rlc_ok(inv_restart) &&
+           strcmp(rlc_str(inv_restart, "artifact_sha3"), n2->sha3) == 0 &&
+           strcmp(rlc_str(inv_restart, "result"),
+                  "No tasks yet (0.4.0).\n") == 0;
+}
+
 static int rlc_stage_f_trap(const struct zcl_command_spec *spec,
                             const char *datadir,
                             const struct rlc_binding *n,
@@ -1656,13 +1832,7 @@ static int rlc_stage_f_trap(const struct zcl_command_spec *spec,
     RLC_CHECK("stage f trap 1: accept admits N as the pending candidate "
               "through the fd3 READY+probe gate and records it (MISSING: "
               "serving generation record)",
-              ran && rlc_ok(&acc_n) &&
-              strcmp(rlc_str(&acc_n, "pending_sha3"), n->sha3) == 0 &&
-              strcmp(rlc_str(&acc_n, "pending_receipt_id"),
-                     n->receipt_hex) == 0 &&
-              rlc_hex64(rlc_str(&acc_n, "candidate_nonce")) &&
-              rlc_int(&acc_n, "candidate_start_token") > 0 &&
-              rlc_int(&acc_n, "generation") >= 0);
+              rlc_f_trap_accept_pending(ran, &acc_n, n));
     rlc_end(&acc_n);
 
     /* f2 — activate N: the authoritative serving generation answers. */
@@ -1679,14 +1849,8 @@ static int rlc_stage_f_trap(const struct zcl_command_spec *spec,
     RLC_CHECK("stage f trap 2: activate installs N as the authoritative "
               "serving generation and a serving invoke answers N's exact "
               "digest (MISSING: authoritative serving record + activate)",
-              ran && rlc_ok(&act_n) &&
-              strcmp(rlc_str(&act_n, "serving_sha3"), n->sha3) == 0 &&
-              strcmp(rlc_str(&act_n, "serving_receipt_id"),
-                     n->receipt_hex) == 0 &&
-              rlc_int(&act_n, "generation") == 1 &&
-              ran_inv_n && rlc_ok(&inv_n) &&
-              strcmp(rlc_str(&inv_n, "artifact_sha3"), n->sha3) == 0 &&
-              strcmp(rlc_str(&inv_n, "result"), "No tasks yet.\n") == 0);
+              rlc_f_trap_activate_serves(ran, &act_n, ran_inv_n, &inv_n,
+                                         n));
     rlc_end(&act_n);
     rlc_end(&inv_n);
 
@@ -1706,13 +1870,8 @@ static int rlc_stage_f_trap(const struct zcl_command_spec *spec,
               "BEFORE any switch — accepted as pending while the serving "
               "invoke still answers N (MISSING: candidate acceptance "
               "before switch)",
-              ran && rlc_ok(&acc_n1) &&
-              strcmp(rlc_str(&acc_n1, "pending_sha3"), n1->sha3) == 0 &&
-              rlc_hex64(rlc_str(&acc_n1, "candidate_nonce")) &&
-              rlc_int(&acc_n1, "candidate_start_token") > 0 &&
-              ran_pre && rlc_ok(&inv_pre) &&
-              strcmp(rlc_str(&inv_pre, "artifact_sha3"), n->sha3) == 0 &&
-              strcmp(rlc_str(&inv_pre, "result"), "No tasks yet.\n") == 0);
+              rlc_f_trap_candidate_ready(ran, &acc_n1, n1, ran_pre,
+                                         &inv_pre, n));
     rlc_end(&acc_n1);
     rlc_end(&inv_pre);
 
@@ -1732,15 +1891,8 @@ static int rlc_stage_f_trap(const struct zcl_command_spec *spec,
               "transition naming both digests, generation +1, the old "
               "resident reaped, and only N+1 answers afterwards (MISSING: "
               "atomic switch)",
-              ran && rlc_ok(&act_n1) &&
-              strcmp(rlc_str(&act_n1, "switched_from_sha3"), n->sha3) == 0 &&
-              strcmp(rlc_str(&act_n1, "serving_sha3"), n1->sha3) == 0 &&
-              rlc_int(&act_n1, "generation") == 2 &&
-              rlc_no_children() &&
-              ran_inv_n1 && rlc_ok(&inv_n1) &&
-              strcmp(rlc_str(&inv_n1, "artifact_sha3"), n1->sha3) == 0 &&
-              strcmp(rlc_str(&inv_n1, "result"),
-                     "No tasks yet (0.3.0).\n") == 0);
+              rlc_f_trap_atomic_switch(ran, &act_n1, ran_inv_n1, &inv_n1,
+                                       n, n1));
     rlc_end(&act_n1);
     rlc_end(&inv_n1);
 
@@ -1761,10 +1913,8 @@ static int rlc_stage_f_trap(const struct zcl_command_spec *spec,
               "is refused and cannot regain authority — evidence names the "
               "authoritative serving digest, which keeps serving "
               "(MISSING: stale authority refusal)",
-              ran && !rlc_ok(&stale) &&
-              strstr(stale.reply.error.evidence, n1->sha3) != NULL &&
-              ran_post && rlc_ok(&inv_post) &&
-              strcmp(rlc_str(&inv_post, "artifact_sha3"), n1->sha3) == 0);
+              rlc_f_trap_stale_refused(ran, &stale, ran_post, &inv_post,
+                                       n1));
     rlc_end(&stale);
     rlc_end(&inv_post);
 
@@ -1781,12 +1931,8 @@ static int rlc_stage_f_trap(const struct zcl_command_spec *spec,
               "the supersession, nothing leaks, and the successor then "
               "activates into serving (MISSING: pending supersession + "
               "successor activate)",
-              ok_x && ok_y &&
-              strcmp(rlc_str(&acc_y, "pending_sha3"), n2->sha3) == 0 &&
-              strcmp(rlc_str(&acc_y, "superseded_sha3"), n->sha3) == 0 &&
-              rlc_no_children() &&
-              rlc_activate_pending_and_verify(spec, datadir, n2, 3,
-                                              "No tasks yet (0.4.0).\n"));
+              rlc_f_trap_supersede_pending(ok_x, ok_y, &acc_y, spec,
+                                           datadir, n, n2));
     rlc_end(&acc_x);
     rlc_end(&acc_y);
 
@@ -1830,15 +1976,9 @@ static int rlc_stage_f_trap(const struct zcl_command_spec *spec,
     RLC_CHECK("stage f trap 8: A serving → B accepted → B activated → "
               "forced B failure → EXACT A restored (same 64-hex digest) "
               "→ A produces a valid result (MISSING: atomic rollback)",
-              ran_acc_b && rlc_ok(&acc_b) &&
-              ran_act_b && rlc_ok(&act_b) && corrupted &&
-              ran_broken && !rlc_ok(&inv_broken) &&
-              ran && rlc_ok(&roll) &&
-              strcmp(rlc_str(&roll, "serving_sha3"), n2->sha3) == 0 &&
-              ran_a && rlc_ok(&inv_a) &&
-              strcmp(rlc_str(&inv_a, "artifact_sha3"), n2->sha3) == 0 &&
-              strcmp(rlc_str(&inv_a, "result"),
-                     "No tasks yet (0.4.0).\n") == 0);
+              rlc_f_trap_rollback_broken(ran_acc_b, &acc_b, ran_act_b, &act_b,
+                                         corrupted, ran_broken, &inv_broken) &&
+              rlc_f_trap_rollback_restored(ran, &roll, ran_a, &inv_a, n2));
     rlc_end(&acc_b);
     rlc_end(&act_b);
     rlc_end(&inv_broken);
@@ -1857,10 +1997,7 @@ static int rlc_stage_f_trap(const struct zcl_command_spec *spec,
     RLC_CHECK("stage f trap 9: after a consumer restart the same "
               "authoritative serving generation still serves (MISSING: "
               "product-state persistence of the serving record)",
-              ran && rlc_ok(&inv_restart) &&
-              strcmp(rlc_str(&inv_restart, "artifact_sha3"), n2->sha3) == 0 &&
-              strcmp(rlc_str(&inv_restart, "result"),
-                     "No tasks yet (0.4.0).\n") == 0);
+              rlc_f_trap_restart_serves(ran, &inv_restart, n2));
     rlc_end(&inv_restart);
     return failures;
 }
@@ -2193,6 +2330,45 @@ static int rlc_ztasks_lifecycle_rollback(const char *base,
     return failures;
 }
 
+static bool rlc_artifact_rederives(const struct zcl_result *ar,
+                                   const struct package_resident_artifact *art,
+                                   const char *ztasks_sha3)
+{
+    struct stat st;
+    return ar->ok &&
+           strcmp(art->accepted.image_sha3_hex, ztasks_sha3) == 0 &&
+           art->accepted.image_size > 0 &&
+           stat(art->locator, &st) == 0 &&
+           (st.st_mode & 0111) != 0;
+}
+
+static bool rlc_install_generation_ladder(const char *base, const char *zcode,
+                                          struct rlc_binding *n1,
+                                          struct rlc_binding *n2,
+                                          struct rlc_binding *b)
+{
+    return rlc_install_ztasks_variant(base, zcode, "0.3.0", 3,
+                                      "No tasks yet (0.3.0).",
+                                      RLC_PREVIEW_OK, n1) &&
+           rlc_install_ztasks_variant(base, zcode, "0.4.0", 4,
+                                      "No tasks yet (0.4.0).",
+                                      RLC_PREVIEW_OK, n2) &&
+           rlc_install_ztasks_variant(base, zcode, "0.5.0", 5,
+                                      "No tasks yet (0.5.0).",
+                                      RLC_PREVIEW_OK, b);
+}
+
+static bool rlc_generation_ladder_ok(bool variants, const char *ztasks_sha3,
+                                     const struct rlc_binding *n1,
+                                     const struct rlc_binding *n2,
+                                     const struct rlc_binding *b)
+{
+    return variants &&
+           strcmp(n1->sha3, ztasks_sha3) != 0 &&
+           strcmp(n2->sha3, n1->sha3) != 0 &&
+           strcmp(b->sha3, n2->sha3) != 0;
+}
+
 int test_resident_launch_contract(void)
 {
     int failures = 0;
@@ -2267,14 +2443,9 @@ int test_resident_launch_contract(void)
         struct package_resident_artifact artifact;
         struct zcl_result ar = package_resident_artifact_read(
             base, ztasks_root, ztasks_receipt, RLC_ZTASKS_PROGRAM, &artifact);
-        struct stat st;
         RLC_CHECK("stage a: the accepted-artifact record re-derives from the "
                   "installed receipt (receipt-bound digest + locator triple)",
-                  ar.ok &&
-                  strcmp(artifact.accepted.image_sha3_hex, ztasks_sha3) == 0 &&
-                  artifact.accepted.image_size > 0 &&
-                  stat(artifact.locator, &st) == 0 &&
-                  (st.st_mode & 0111) != 0);
+                  rlc_artifact_rederives(&ar, &artifact, ztasks_sha3));
 
         failures += rlc_stage_run(spec, base, ztasks_root_hex,
                                   ztasks_receipt_hex, ztasks_sha3);
@@ -2304,19 +2475,12 @@ int test_resident_launch_contract(void)
          * installed through the real lifecycle, playing N+1 / N+2 / B against N. */
         struct rlc_binding n1, n2, b;
         bool variants =
-            rlc_install_ztasks_variant(base, zcode, "0.3.0", 3,
-                                       "No tasks yet (0.3.0).", RLC_PREVIEW_OK, &n1) &&
-            rlc_install_ztasks_variant(base, zcode, "0.4.0", 4,
-                                       "No tasks yet (0.4.0).", RLC_PREVIEW_OK, &n2) &&
-            rlc_install_ztasks_variant(base, zcode, "0.5.0", 5,
-                                       "No tasks yet (0.5.0).", RLC_PREVIEW_OK, &b);
+            rlc_install_generation_ladder(base, zcode, &n1, &n2, &b);
         RLC_CHECK("stage f setup: three edited ztasks generations (N+1, "
                   "N+2, B) install through the real lifecycle with "
                   "distinct artifact digests",
-                  variants &&
-                  strcmp(n1.sha3, ztasks_sha3) != 0 &&
-                  strcmp(n2.sha3, n1.sha3) != 0 &&
-                  strcmp(b.sha3, n2.sha3) != 0);
+                  rlc_generation_ladder_ok(variants, ztasks_sha3, &n1, &n2,
+                                           &b));
         if (variants) {
             struct rlc_binding n;
             rlc_binding_fill(&n, ztasks_root, ztasks_receipt, ztasks_sha3);
