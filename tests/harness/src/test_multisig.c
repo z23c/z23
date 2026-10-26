@@ -33,10 +33,10 @@ static bool multisig_script_layout_matches(int required, int total,
 {
     struct privkey keys[3];
     struct pubkey pks[3];
-    for (int i = 0; i < total; i++) {
+    for (int i = 0; i < total; i++)
         privkey_make_new(&keys[i], true);
+    for (int i = 0; i < total; i++)
         privkey_get_pubkey(&keys[i], &pks[i]);
-    }
 
     struct script s;
     script_for_multisig(&s, required, pks, total);
@@ -212,16 +212,17 @@ static bool compute_redeem_script_sighash(struct script *redeem,
  * scriptSig under construction. */
 static bool append_multisig_signature(struct script *ss,
                                       struct privkey *key,
-                                      struct uint256 *sighash)
+                                      struct uint256 *sighash,
+                                      bool ok)
 {
     unsigned char sig[SIGNATURE_SIZE + 1];
     size_t siglen = 0;
-    bool signed_ok = privkey_sign(key, sighash, sig, &siglen);
+    ok = ok && privkey_sign(key, sighash, sig, &siglen);
     sig[siglen++] = 0x01; /* SIGHASH_ALL */
     ss->data[ss->size++] = (unsigned char)siglen;
     memcpy(&ss->data[ss->size], sig, siglen);
     ss->size += siglen;
-    return signed_ok;
+    return ok;
 }
 
 /* Appends <len> <redeemScript> to the scriptSig under construction. */
@@ -297,7 +298,7 @@ static bool p2sh_two_of_two_signs_valid_script_sig(void)
 
     for (int i = 0; i < 2 && ok; i++) {
         struct privkey *key = (i == 0) ? &k1 : &k2;
-        ok = ok && append_multisig_signature(ss, key, &sighash);
+        ok = append_multisig_signature(ss, key, &sighash, ok);
     }
 
     /* Append redeem script */
@@ -355,7 +356,7 @@ static bool one_of_two_multisig_signs_with_single_key(void)
     ss->size = 0;
     ss->data[ss->size++] = OP_0;
 
-    ok = ok && append_multisig_signature(ss, &k1, &sighash);
+    ok = append_multisig_signature(ss, &k1, &sighash, ok);
 
     append_redeem_script_to_script_sig(ss, &redeem);
 
