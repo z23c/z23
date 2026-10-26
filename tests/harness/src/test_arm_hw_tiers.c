@@ -96,12 +96,10 @@ static void hex32(const uint8_t *d, char out[65])
     out[64] = '\0';
 }
 
-int test_arm_hw_tiers(void)
+/* Leg 1: sha256 hardware-tier reachability. Returns the failure count (0/1). */
+static int check_sha256_reachability(void)
 {
-    printf("\n=== arm_hw_tiers (arm64 hardware tier reachability) ===\n");
     int failures = 0;
-
-    /* ── 1. sha256 reachability — the regression guard ───────────────── */
     if (host_has("hw.optional.arm.FEAT_SHA256")) {
         printf("arm_hw_tiers: FEAT_SHA256 advertised, tier selected... ");
         int installed = sha256_select_impl(SHA256_IMPL_SHANI);
@@ -141,8 +139,14 @@ int test_arm_hw_tiers(void)
             failures++;
         }
     }
+    return failures;
+}
 
-    /* ── 2. FIPS-180-4 KATs through the ACTIVE dispatch ──────────────── */
+/* Leg 2: FIPS-180-4 known-answer tests through the active dispatch.
+ * Returns the failure count (0/1). */
+static int check_sha256_kats(void)
+{
+    int failures = 0;
     printf("arm_hw_tiers: FIPS-180-4 KATs through the active dispatch... ");
     {
         static const struct { const char *msg; size_t len; const char *want; } kat[] = {
@@ -171,8 +175,14 @@ int test_arm_hw_tiers(void)
         if (kat_fail == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", kat_fail); failures++; }
     }
+    return failures;
+}
 
-    /* ── 3. portable vs selected-hardware parity, bounded ───────────── */
+/* Leg 3: bounded portable-vs-selected-hardware parity sweep. Returns the
+ * failure count (0/1). */
+static int check_sha256_parity(void)
+{
+    int failures = 0;
     printf("arm_hw_tiers: portable vs selected parity over random lengths... ");
     {
         int diff_fail = 0;
@@ -196,8 +206,13 @@ int test_arm_hw_tiers(void)
         else { printf("FAIL (%d)\n", diff_fail); failures++; }
         sha256_select_impl(SHA256_IMPL_AUTO);
     }
+    return failures;
+}
 
-    /* ── 4. crc32c reachability ──────────────────────────────────────── */
+/* Leg 4: crc32c hardware-tier reachability. Returns the failure count (0/1). */
+static int check_crc32c_reachability(void)
+{
+    int failures = 0;
     if (host_has("hw.optional.arm.FEAT_CRC32")) {
         printf("arm_hw_tiers: FEAT_CRC32 advertised, tier active... ");
         (void)zcl_crc32c("", 0);   /* force the once-only probe + self-check */
@@ -232,8 +247,14 @@ int test_arm_hw_tiers(void)
             failures++;
         }
     }
+    return failures;
+}
 
-    /* ── 5. active tier vs reference table over the width boundaries ─── */
+/* Leg 5: crc32c active tier vs the software reference across the 8/4/1-byte
+ * boundaries. Returns the failure count (0/1). */
+static int check_crc32c_parity(void)
+{
+    int failures = 0;
     printf("arm_hw_tiers: crc32c active vs software reference, 0..300+odd... ");
     {
         int diff_fail = 0;
@@ -260,8 +281,14 @@ int test_arm_hw_tiers(void)
             else { printf("FAIL (%d)\n", diff_fail); failures++; }
         }
     }
+    return failures;
+}
 
-    /* ── 6. Teeth — the comparator catches a planted wrong answer ────── */
+/* Leg 6: teeth — the comparator must catch a planted wrong answer.
+ * Returns the failure count (0/1). */
+static int check_comparator_teeth(void)
+{
+    int failures = 0;
     printf("arm_hw_tiers: teeth (published digest hits, mutants miss)... ");
     {
         const char *want = "ba7816bf8f01cfea414140de5dae2223"
@@ -287,6 +314,31 @@ int test_arm_hw_tiers(void)
             failures++;
         }
     }
+    return failures;
+}
+
+int test_arm_hw_tiers(void)
+{
+    printf("\n=== arm_hw_tiers (arm64 hardware tier reachability) ===\n");
+    int failures = 0;
+
+    /* ── 1. sha256 reachability — the regression guard ───────────────── */
+    failures += check_sha256_reachability();
+
+    /* ── 2. FIPS-180-4 KATs through the ACTIVE dispatch ──────────────── */
+    failures += check_sha256_kats();
+
+    /* ── 3. portable vs selected-hardware parity, bounded ───────────── */
+    failures += check_sha256_parity();
+
+    /* ── 4. crc32c reachability ──────────────────────────────────────── */
+    failures += check_crc32c_reachability();
+
+    /* ── 5. active tier vs reference table over the width boundaries ─── */
+    failures += check_crc32c_parity();
+
+    /* ── 6. Teeth — the comparator catches a planted wrong answer ────── */
+    failures += check_comparator_teeth();
 
     /* ── honest tier report (evidence, not a gate) ───────────────────── */
     printf("arm_hw_tiers: sha256=%s crc32c=%s\n",

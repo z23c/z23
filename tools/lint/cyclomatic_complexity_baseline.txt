@@ -1535,7 +1535,6 @@ tests/harness/src/test_api_msg_routes.c:api_msg_routes_focused_tests:88
 tests/harness/src/test_api_openapi.c:api_openapi_focused_tests:221
 tests/harness/src/test_api_routes.c:api_route_table_focused_tests:236
 tests/harness/src/test_api_supply.c:api_supply_focused_tests:23
-tests/harness/src/test_arm_hw_tiers.c:test_arm_hw_tiers:30
 tests/harness/src/test_atomic_commit_ordering.c:test_atomic_commit_ordering:16
 tests/harness/src/test_binary_ab_fallback.c:ab_run_nodectl:26
 tests/harness/src/test_binary_ab_fallback.c:test_binary_ab_fallback_posix_arm:79
