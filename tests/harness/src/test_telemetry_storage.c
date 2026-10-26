@@ -121,17 +121,12 @@ static const char *finding_state(const struct json_value *doc,
 
 /* ── 1. every leaf carries meaning ──────────────────────────────────────── */
 
-static int check_meaning_rows(void)
+/* Sweep every leaf of the schema against the field table, counting the rows
+ * that are missing or half-written, and assert each count empty. */
+static int check_leaf_meaning_coverage(
+    const struct telemetry_domain_schema *s)
 {
     int failures = 0;
-    const struct telemetry_domain_schema *s = telemetry_domain_find("storage");
-    TS_CHECK("[storage] the domain is registered", s != NULL);
-    if (!s)
-        return failures;
-
-    TS_CHECK("[storage] the table declares more than the frozen meta group",
-             s->leaf_count > 1 && s->group_count >= 3);
-
     int no_row = 0, no_means = 0, no_implies = 0, no_next = 0;
     for (size_t i = 0; i < s->leaf_count; i++) {
         const struct telemetry_leaf *lf = &s->leaves[i];
@@ -155,6 +150,21 @@ static int check_meaning_rows(void)
              no_implies == 0);
     TS_CHECK("[storage] every judged leaf names the next command",
              no_next == 0);
+    return failures;
+}
+
+static int check_meaning_rows(void)
+{
+    int failures = 0;
+    const struct telemetry_domain_schema *s = telemetry_domain_find("storage");
+    TS_CHECK("[storage] the domain is registered", s != NULL);
+    if (!s)
+        return failures;
+
+    TS_CHECK("[storage] the table declares more than the frozen meta group",
+             s->leaf_count > 1 && s->group_count >= 3);
+
+    failures += check_leaf_meaning_coverage(s);
 
     /* The two rows that carry an absolute threshold are the only ones allowed
      * to, and both are pinned to the node's own configured default. A silent
@@ -365,6 +375,52 @@ static const struct zcl_command_spec *spec_for(const char *path)
     return reg ? zcl_command_registry_find(reg, path, NULL) : NULL;
 }
 
+/* What an ok:true envelope owes beyond the verdict: the rendered domain
+ * itself, and a page descriptor that admits anything the byte contract made
+ * it drop. */
+static int check_ok_envelope_payload(const char *path,
+                                     const struct json_value *env, size_t n)
+{
+    int failures = 0;
+    char label[192];
+    /* The reply must actually carry the rendered domain, not just a
+     * successful-looking envelope around nothing. */
+    const struct json_value *data = json_get(env, "data");
+    const char *sch = json_get_str(json_get(data, "schema"));
+    snprintf(label, sizeof label,
+             "[storage] %s carries the rendered storage domain", path);
+    TS_CHECK(label, data && data->type == JSON_OBJ && sch &&
+                    strcmp(sch, "zcl.telemetry.storage.v1") == 0 &&
+                    json_get(data, "values") != NULL);
+
+    /* The shared projector fits whole top-level sections into the byte
+     * contract and states what it could not fit. A dropped section is
+     * acceptable; a dropped section presented as a complete answer is not,
+     * so the page descriptor must exist and must carry a resume cursor
+     * whenever it truncated. */
+    const struct json_value *page = json_get(data, "_page");
+    bool trunc = json_get_bool(json_get(page, "truncated"));
+    snprintf(label, sizeof label,
+             "[storage] %s states its own paging, and a truncated page "
+             "always carries a resume cursor", path);
+    TS_CHECK(label, page != NULL && page->type == JSON_OBJ &&
+                    (!trunc || json_get(page, "next_cursor") != NULL));
+    /* Measured, not assumed. When the projector drops a section it names
+     * the resume index; printing the section it stopped AT is the only way
+     * a reader learns WHICH part of the document did not fit, and this
+     * lane deliberately does not step the view down to make it fit — the
+     * shared budget helper owns that. */
+    long long total = json_get_int(json_get(page, "total_fields"));
+    long long inc = json_get_int(json_get(page, "included"));
+    printf("  [storage] %s envelope: %zu bytes (contract %u), "
+           "sections %lld/%lld truncated=%s values=%s health=%s\n", path, n,
+           (unsigned)ZCL_COMMAND_RESULT_BUDGET, inc, total,
+           trunc ? "yes" : "no",
+           json_get(data, "values") ? "yes" : "DROPPED",
+           json_get(data, "health") ? "yes" : "DROPPED");
+    return failures;
+}
+
 /* Dispatch one leaf through the real catalog and report the envelope. */
 static int exec_leaf(const char *path, const char *view, bool want_ok,
                      size_t *out_bytes)
@@ -417,43 +473,8 @@ static int exec_leaf(const char *path, const char *view, bool want_ok,
     }
     TS_CHECK(label, got == want_ok);
 
-    if (want_ok) {
-        /* The reply must actually carry the rendered domain, not just a
-         * successful-looking envelope around nothing. */
-        const struct json_value *data = json_get(&env, "data");
-        const char *sch = json_get_str(json_get(data, "schema"));
-        snprintf(label, sizeof label,
-                 "[storage] %s carries the rendered storage domain", path);
-        TS_CHECK(label, data && data->type == JSON_OBJ && sch &&
-                        strcmp(sch, "zcl.telemetry.storage.v1") == 0 &&
-                        json_get(data, "values") != NULL);
-
-        /* The shared projector fits whole top-level sections into the byte
-         * contract and states what it could not fit. A dropped section is
-         * acceptable; a dropped section presented as a complete answer is not,
-         * so the page descriptor must exist and must carry a resume cursor
-         * whenever it truncated. */
-        const struct json_value *page = json_get(data, "_page");
-        bool trunc = json_get_bool(json_get(page, "truncated"));
-        snprintf(label, sizeof label,
-                 "[storage] %s states its own paging, and a truncated page "
-                 "always carries a resume cursor", path);
-        TS_CHECK(label, page != NULL && page->type == JSON_OBJ &&
-                        (!trunc || json_get(page, "next_cursor") != NULL));
-        /* Measured, not assumed. When the projector drops a section it names
-         * the resume index; printing the section it stopped AT is the only way
-         * a reader learns WHICH part of the document did not fit, and this
-         * lane deliberately does not step the view down to make it fit — the
-         * shared budget helper owns that. */
-        long long total = json_get_int(json_get(page, "total_fields"));
-        long long inc = json_get_int(json_get(page, "included"));
-        printf("  [storage] %s envelope: %zu bytes (contract %u), "
-               "sections %lld/%lld truncated=%s values=%s health=%s\n", path, n,
-               (unsigned)ZCL_COMMAND_RESULT_BUDGET, inc, total,
-               trunc ? "yes" : "no",
-               json_get(data, "values") ? "yes" : "DROPPED",
-               json_get(data, "health") ? "yes" : "DROPPED");
-    }
+    if (want_ok)
+        failures += check_ok_envelope_payload(path, &env, n);
     json_free(&env);
     return failures;
 }
