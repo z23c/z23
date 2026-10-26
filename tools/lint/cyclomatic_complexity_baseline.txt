@@ -1357,9 +1357,6 @@ engine/modules/storage/src/dbwrapper.c:db_wrapper_ensure_directory:16
 engine/modules/storage/src/dbwrapper.c:db_wrapper_open:35
 engine/modules/storage/src/disk_block_io.c:open_disk_file:18
 engine/modules/storage/src/disk_block_io.c:write_block_to_disk:22
-engine/modules/storage/src/disk_block_io_repair.c:block_index_repair_pos_from_disk:20
-engine/modules/storage/src/disk_block_io_repair.c:disk_block_frame_header_valid:16
-engine/modules/storage/src/disk_block_io_repair.c:repair_scan_one_file:18
 engine/modules/storage/src/event_log.c:event_log_append:16
 engine/modules/storage/src/event_log.c:event_log_read:17
 engine/modules/storage/src/event_log.c:event_log_stream:19
