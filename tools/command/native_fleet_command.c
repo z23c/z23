@@ -122,6 +122,54 @@ static size_t fleet_collect_pairs(const struct json_value *input,
     return n; /* ascending by construction, which is the canonical order */
 }
 
+/* The row's kind: named, in the closed vocabulary, and writable. */
+static bool fleet_ledger_add_kind(struct zcl_command_reply *reply,
+                                  const struct json_value *input,
+                                  const char **kind_name, uint8_t *kind)
+{
+    const struct json_value *v = json_get(input, "kind");
+    *kind_name = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    *kind = 0;
+    if (!*kind_name || !zcl_fleet_kind_from_name(*kind_name, kind)) {
+        fleet_refuse(reply, "LEDGER_KIND_UNKNOWN",
+                     "kind is one of usage, task or vitals", "input.kind",
+                     false);
+        return false;
+    }
+    if (!zcl_fleet_kind_writable(*kind)) {
+        fleet_refuse(reply, "LEDGER_KIND_NOT_WRITABLE",
+                     "this kind is reserved and nothing writes it yet",
+                     "input.kind", false);
+        return false;
+    }
+    return true;
+}
+
+/* The row's subject, read by name within the vocabulary of its kind. */
+static bool fleet_ledger_add_subject(struct zcl_command_reply *reply,
+                                     const struct json_value *input,
+                                     uint8_t kind, const char **subject_name,
+                                     uint16_t *subject)
+{
+    const struct json_value *v = json_get(input, "subject");
+    *subject_name = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    *subject = 0;
+    if (!*subject_name ||
+        !zcl_fleet_subject_from_name(kind, *subject_name, subject)) {
+        /* A vitals subject outside the declared catalog gets the catalog's
+         * own refusal token: a number whose id nobody wrote down is not a
+         * metric, and storing it would make it look like one. */
+        bool vitals = kind == ZCL_FLEET_KIND_VITALS;
+        fleet_refuse(reply, vitals ? "VITAL_UNKNOWN" : "LEDGER_SUBJECT_UNKNOWN",
+                     vitals ? "subject is a metric id from the declared fleet "
+                              "vitals catalog"
+                            : "subject is not in this kind's vocabulary",
+                     "input.subject", false);
+        return false;
+    }
+    return true;
+}
+
 void zcl_native_handle_fleet_ledger_add(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -134,40 +182,17 @@ void zcl_native_handle_fleet_ledger_add(
                      "kind and subject are required", "input", false);
         return;
     }
-    const struct json_value *v = json_get(request->input, "kind");
-    const char *kind_name = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    const char *kind_name = NULL;
     uint8_t kind = 0;
-    if (!kind_name || !zcl_fleet_kind_from_name(kind_name, &kind)) {
-        fleet_refuse(reply, "LEDGER_KIND_UNKNOWN",
-                     "kind is one of usage, task or vitals", "input.kind",
-                     false);
+    if (!fleet_ledger_add_kind(reply, request->input, &kind_name, &kind))
         return;
-    }
-    if (!zcl_fleet_kind_writable(kind)) {
-        fleet_refuse(reply, "LEDGER_KIND_NOT_WRITABLE",
-                     "this kind is reserved and nothing writes it yet",
-                     "input.kind", false);
-        return;
-    }
-    v = json_get(request->input, "subject");
-    const char *subject_name =
-        v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    const char *subject_name = NULL;
     uint16_t subject = 0;
-    if (!subject_name ||
-        !zcl_fleet_subject_from_name(kind, subject_name, &subject)) {
-        /* A vitals subject outside the declared catalog gets the catalog's
-         * own refusal token: a number whose id nobody wrote down is not a
-         * metric, and storing it would make it look like one. */
-        bool vitals = kind == ZCL_FLEET_KIND_VITALS;
-        fleet_refuse(reply, vitals ? "VITAL_UNKNOWN" : "LEDGER_SUBJECT_UNKNOWN",
-                     vitals ? "subject is a metric id from the declared fleet "
-                              "vitals catalog"
-                            : "subject is not in this kind's vocabulary",
-                     "input.subject", false);
+    if (!fleet_ledger_add_subject(reply, request->input, kind, &subject_name,
+                                  &subject))
         return;
-    }
     const char *note = NULL;
-    v = json_get(request->input, "note");
+    const struct json_value *v = json_get(request->input, "note");
     if (v && v->type == JSON_STR)
         note = json_get_str(v);
 
@@ -350,6 +375,111 @@ static bool fleet_quota_for(const struct zcl_fleet_ledger *ledger,
     return false;
 }
 
+static bool fleet_usage_days(struct zcl_command_reply *reply,
+                             const struct json_value *input,
+                             struct zcl_fleet_query *query)
+{
+    const struct json_value *v = json_get(input, "days");
+    if (!v)
+        return true;
+    long long want = v->type == JSON_INT ? json_get_int(v) : -1;
+    if (want < 1 || want > (long long)ZCL_FLEET_INDEX_DAYS) {
+        fleet_refuse(reply, "LEDGER_WINDOW_EXCEEDED",
+                     "days is between 1 and the index window; a "
+                     "longer window is refused rather than answered "
+                     "from days the index does not hold",
+                     "input.days", false);
+        return false;
+    }
+    query->days = (uint32_t)want;
+    return true;
+}
+
+static bool fleet_usage_provider(struct zcl_command_reply *reply,
+                                 const struct json_value *input,
+                                 struct zcl_fleet_query *query)
+{
+    const struct json_value *v = json_get(input, "provider");
+    if (!v || v->type != JSON_STR)
+        return true;
+    if (!zcl_fleet_subject_from_name(ZCL_FLEET_KIND_USAGE, json_get_str(v),
+                                     &query->subject)) {
+        fleet_refuse(reply, "LEDGER_SUBJECT_UNKNOWN",
+                     "provider is not one this ledger records",
+                     "input.provider", false);
+        return false;
+    }
+    query->have_subject = true;
+    return true;
+}
+
+static bool fleet_usage_box(struct zcl_command_reply *reply,
+                            const struct json_value *input,
+                            struct zcl_fleet_query *query)
+{
+    const struct json_value *v = json_get(input, "box");
+    if (!v || v->type != JSON_STR)
+        return true;
+    const char *hex = json_get_str(v);
+    if (!hex || strlen(hex) != 64 ||
+        !zcl_hex_decode_lower(hex, query->box_id, 32)) {
+        fleet_refuse(reply, "BOX_INVALID",
+                     "box is a 64-character lowercase hex box id",
+                     "input.box", false);
+        return false;
+    }
+    query->have_box = true;
+    return true;
+}
+
+static bool fleet_usage_parse(struct zcl_command_reply *reply,
+                              const struct json_value *input,
+                              struct zcl_fleet_query *query)
+{
+    return fleet_usage_days(reply, input, query) &&
+           fleet_usage_provider(reply, input, query) &&
+           fleet_usage_box(reply, input, query);
+}
+
+/* One usage row: its box, provider and the measurements it carried. */
+static void fleet_usage_row(const struct zcl_fleet_ledger *ledger,
+                            const struct zcl_fleet_bucket *bucket, int64_t now,
+                            struct json_value *rows)
+{
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    fleet_push_box(&row, bucket->box_id);
+    const char *provider =
+        zcl_fleet_subject_name(ZCL_FLEET_KIND_USAGE, bucket->subject);
+    (void)json_push_kv_str(&row, "provider", provider ? provider : "");
+    (void)json_push_kv_int(&row, "rows", (int64_t)bucket->rows);
+    /* Only the keys a row actually carried. An absent measurement is
+     * absent from the answer, never reported as zero. */
+    for (uint8_t k = 1; k <= ZCL_FLEET_PAIR_KEY_MAX; k++) {
+        if (bucket->state[k] != ZCL_FLEET_FIELD_PRESENT)
+            continue;
+        const char *name = zcl_fleet_pair_name(k);
+        if (name)
+            (void)json_push_kv_int(&row, name, bucket->value[k]);
+    }
+    int64_t limit = 0;
+    if (fleet_quota_for(ledger, bucket->subject, now, &limit) &&
+        bucket->state[ZCL_FLEET_PAIR_TOKENS_IN] == ZCL_FLEET_FIELD_PRESENT) {
+        int64_t spent = bucket->value[ZCL_FLEET_PAIR_TOKENS_IN] +
+                        (bucket->state[ZCL_FLEET_PAIR_TOKENS_OUT] ==
+                                 ZCL_FLEET_FIELD_PRESENT
+                             ? bucket->value[ZCL_FLEET_PAIR_TOKENS_OUT]
+                             : 0);
+        /* Basis points, not a float: this tree keeps no floating point
+         * on a path a second machine has to agree with. */
+        (void)json_push_kv_int(&row, "week_pct_bp",
+                               (spent * 10000) / limit);
+    }
+    (void)json_push_back(rows, &row);
+    json_free(&row);
+}
+
 void zcl_native_handle_fleet_usage(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
@@ -361,45 +491,9 @@ void zcl_native_handle_fleet_usage(const struct zcl_command_request *request,
     query.kind = ZCL_FLEET_KIND_USAGE;
     query.days = FLEET_USAGE_DAYS_DEFAULT;
 
-    if (request && request->input) {
-        const struct json_value *v = json_get(request->input, "days");
-        if (v) {
-            long long want = v->type == JSON_INT ? json_get_int(v) : -1;
-            if (want < 1 || want > (long long)ZCL_FLEET_INDEX_DAYS) {
-                fleet_refuse(reply, "LEDGER_WINDOW_EXCEEDED",
-                             "days is between 1 and the index window; a "
-                             "longer window is refused rather than answered "
-                             "from days the index does not hold",
-                             "input.days", false);
-                return;
-            }
-            query.days = (uint32_t)want;
-        }
-        v = json_get(request->input, "provider");
-        if (v && v->type == JSON_STR) {
-            if (!zcl_fleet_subject_from_name(ZCL_FLEET_KIND_USAGE,
-                                             json_get_str(v),
-                                             &query.subject)) {
-                fleet_refuse(reply, "LEDGER_SUBJECT_UNKNOWN",
-                             "provider is not one this ledger records",
-                             "input.provider", false);
-                return;
-            }
-            query.have_subject = true;
-        }
-        v = json_get(request->input, "box");
-        if (v && v->type == JSON_STR) {
-            const char *hex = json_get_str(v);
-            if (!hex || strlen(hex) != 64 ||
-                !zcl_hex_decode_lower(hex, query.box_id, 32)) {
-                fleet_refuse(reply, "BOX_INVALID",
-                             "box is a 64-character lowercase hex box id",
-                             "input.box", false);
-                return;
-            }
-            query.have_box = true;
-        }
-    }
+    if (request && request->input &&
+        !fleet_usage_parse(reply, request->input, &query))
+        return;
 
     char dir[512];
     if (!fleet_dir(dir, sizeof dir)) {
@@ -450,42 +544,8 @@ void zcl_native_handle_fleet_usage(const struct zcl_command_request *request,
     struct json_value rows;
     json_init(&rows);
     json_set_array(&rows);
-    for (size_t i = 0; i < count; i++) {
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        fleet_push_box(&row, buckets[i].box_id);
-        const char *provider =
-            zcl_fleet_subject_name(ZCL_FLEET_KIND_USAGE, buckets[i].subject);
-        (void)json_push_kv_str(&row, "provider", provider ? provider : "");
-        (void)json_push_kv_int(&row, "rows", (int64_t)buckets[i].rows);
-        /* Only the keys a row actually carried. An absent measurement is
-         * absent from the answer, never reported as zero. */
-        for (uint8_t k = 1; k <= ZCL_FLEET_PAIR_KEY_MAX; k++) {
-            if (buckets[i].state[k] != ZCL_FLEET_FIELD_PRESENT)
-                continue;
-            const char *name = zcl_fleet_pair_name(k);
-            if (name)
-                (void)json_push_kv_int(&row, name, buckets[i].value[k]);
-        }
-        int64_t limit = 0;
-        if (fleet_quota_for(ledger, buckets[i].subject, query.now_unix,
-                            &limit) &&
-            buckets[i].state[ZCL_FLEET_PAIR_TOKENS_IN] ==
-                ZCL_FLEET_FIELD_PRESENT) {
-            int64_t spent = buckets[i].value[ZCL_FLEET_PAIR_TOKENS_IN] +
-                            (buckets[i].state[ZCL_FLEET_PAIR_TOKENS_OUT] ==
-                                     ZCL_FLEET_FIELD_PRESENT
-                                 ? buckets[i].value[ZCL_FLEET_PAIR_TOKENS_OUT]
-                                 : 0);
-            /* Basis points, not a float: this tree keeps no floating point
-             * on a path a second machine has to agree with. */
-            (void)json_push_kv_int(&row, "week_pct_bp",
-                                   (spent * 10000) / limit);
-        }
-        (void)json_push_back(&rows, &row);
-        json_free(&row);
-    }
+    for (size_t i = 0; i < count; i++)
+        fleet_usage_row(ledger, &buckets[i], query.now_unix, &rows);
     free(buckets);
     uint64_t overflow = zcl_fleet_ledger_index_overflow(ledger);
     zcl_fleet_ledger_close(ledger);
@@ -524,10 +584,47 @@ static int fleet_host_index(const char *id)
     return -1;
 }
 
+/* The CPU rows: load, core count and the cores left free by that load. */
+static void fleet_host_cpu(int64_t load, int64_t cores,
+                           int64_t v[ZCL_FLEET_HOST_N],
+                           bool p[ZCL_FLEET_HOST_N])
+{
+    int64_t load_ceil = load >= 0 ? (load + 99) / 100 : 0;
+    p[0] = load >= 0; v[0] = load;
+    p[1] = cores > 0; v[1] = cores;
+    p[2] = load >= 0 && cores > 0;
+    v[2] = p[2] && cores > load_ceil ? cores - load_ceil : 0;
+}
+
+/* The memory rows: used and total system memory, and this node's RSS. */
+static void fleet_host_memory(bool mem_ok, const struct os_proc_mem *mem,
+                              int64_t v[ZCL_FLEET_HOST_N],
+                              bool p[ZCL_FLEET_HOST_N])
+{
+    const int64_t mib = 1024 * 1024;
+    p[3] = mem_ok && mem->sys_total_bytes >= 0 && mem->sys_avail_bytes >= 0 &&
+           mem->sys_total_bytes >= mem->sys_avail_bytes;
+    v[3] = p[3] ? (mem->sys_total_bytes - mem->sys_avail_bytes) / mib : 0;
+    p[4] = mem_ok && mem->sys_total_bytes >= 0;
+    v[4] = p[4] ? mem->sys_total_bytes / mib : 0;
+    p[8] = mem_ok && mem->rss_bytes >= 0;
+    v[8] = p[8] ? mem->rss_bytes / mib : 0;
+}
+
+/* The disk rows: free GiB and free percent of the datadir's volume. */
+static void fleet_host_disk(bool disk, uint64_t d_avail, uint64_t d_total,
+                            int64_t v[ZCL_FLEET_HOST_N],
+                            bool p[ZCL_FLEET_HOST_N])
+{
+    const int64_t gib = (int64_t)1024 * 1024 * 1024;
+    p[5] = disk; v[5] = disk ? (int64_t)(d_avail / (uint64_t)gib) : 0;
+    p[6] = disk && d_total > 0 && d_avail <= UINT64_MAX / 100ull;
+    v[6] = p[6] ? (int64_t)((d_avail * 100ull) / d_total) : 0;
+}
+
 void zcl_fleet_host_snapshot(const char *datadir, int64_t v[ZCL_FLEET_HOST_N],
                               bool p[ZCL_FLEET_HOST_N])
 {
-    const int64_t mib = 1024 * 1024, gib = mib * 1024;
     int64_t load = os_proc_load1_centi();
     int64_t cores = (int64_t)platform_logical_cpu_count();
     struct os_proc_mem mem = { .rss_bytes = -1, .sys_total_bytes = -1,
@@ -536,22 +633,55 @@ void zcl_fleet_host_snapshot(const char *datadir, int64_t v[ZCL_FLEET_HOST_N],
     int64_t up = os_proc_system_uptime_seconds();
     uint64_t d_avail = 0, d_total = 0;
     bool disk = datadir && platform_disk_space(datadir, &d_avail, &d_total);
-    int64_t load_ceil = load >= 0 ? (load + 99) / 100 : 0;
-    p[0] = load >= 0; v[0] = load;
-    p[1] = cores > 0; v[1] = cores;
-    p[2] = load >= 0 && cores > 0;
-    v[2] = p[2] && cores > load_ceil ? cores - load_ceil : 0;
-    p[3] = mem_ok && mem.sys_total_bytes >= 0 && mem.sys_avail_bytes >= 0 &&
-           mem.sys_total_bytes >= mem.sys_avail_bytes;
-    v[3] = p[3] ? (mem.sys_total_bytes - mem.sys_avail_bytes) / mib : 0;
-    p[4] = mem_ok && mem.sys_total_bytes >= 0;
-    v[4] = p[4] ? mem.sys_total_bytes / mib : 0;
-    p[5] = disk; v[5] = disk ? (int64_t)(d_avail / (uint64_t)gib) : 0;
-    p[6] = disk && d_total > 0 && d_avail <= UINT64_MAX / 100ull;
-    v[6] = p[6] ? (int64_t)((d_avail * 100ull) / d_total) : 0;
+    fleet_host_cpu(load, cores, v, p);
+    fleet_host_memory(mem_ok, &mem, v, p);
+    fleet_host_disk(disk, d_avail, d_total, v, p);
     p[7] = up >= 0; v[7] = up;
-    p[8] = mem_ok && mem.rss_bytes >= 0;
-    v[8] = p[8] ? mem.rss_bytes / mib : 0;
+}
+
+/* The one metric id asked for, or NULL when the request names none. */
+static const char *fleet_vitals_want(const struct zcl_command_request *request)
+{
+    const char *want = NULL;
+    if (request && request->input) {
+        const struct json_value *v = json_get(request->input, "id");
+        if (v && v->type == JSON_STR)
+            want = json_get_str(v);
+    }
+    return want;
+}
+
+static bool fleet_vitals_subjects(struct zcl_command_reply *reply,
+                                  const char *ids[], size_t nids,
+                                  uint16_t subjects[])
+{
+    for (size_t i = 0; i < nids; i++) {
+        if (!zcl_fleet_subject_from_name(ZCL_FLEET_KIND_VITALS, ids[i],
+                                         &subjects[i])) {
+            fleet_refuse(reply, "VITAL_UNKNOWN",
+                         "subject is a metric id from the declared fleet "
+                         "vitals catalog",
+                         ids[i], false);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* One vitals row: this box's value for the metric, or an absent row when
+ * the box did not measure it. */
+static enum zcl_fleet_status fleet_vitals_append_one(
+    struct zcl_fleet_ledger *ledger, const char *id, uint16_t subject,
+    const int64_t values[], const bool present[], uint8_t seed[32],
+    uint64_t *seq)
+{
+    int idx = fleet_host_index(id);
+    bool have = idx >= 0 && present[idx];
+    struct zcl_fleet_pair pair = { ZCL_FLEET_PAIR_VALUE,
+                                   have ? values[idx] : 0 };
+    return zcl_fleet_ledger_append(
+        ledger, ZCL_FLEET_KIND_VITALS, subject, have ? &pair : NULL,
+        have ? 1u : 0u, NULL, NULL, seed, seq);
 }
 
 void zcl_native_handle_fleet_vitals_sample(
@@ -561,12 +691,7 @@ void zcl_native_handle_fleet_vitals_sample(
     if (!reply)
         return;
     zcl_command_reply_init(reply, "zcl.fleet_vitals_sample.v1");
-    const char *want = NULL;
-    if (request && request->input) {
-        const struct json_value *v = json_get(request->input, "id");
-        if (v && v->type == JSON_STR)
-            want = json_get_str(v);
-    }
+    const char *want = fleet_vitals_want(request);
     const char *ids[FLEET_HOST_N];
     uint16_t subjects[FLEET_HOST_N];
     size_t nids = FLEET_HOST_N;
@@ -575,16 +700,8 @@ void zcl_native_handle_fleet_vitals_sample(
         ids[0] = want;
         nids = 1;
     }
-    for (size_t i = 0; i < nids; i++) {
-        if (!zcl_fleet_subject_from_name(ZCL_FLEET_KIND_VITALS, ids[i],
-                                         &subjects[i])) {
-            fleet_refuse(reply, "VITAL_UNKNOWN",
-                         "subject is a metric id from the declared fleet "
-                         "vitals catalog",
-                         ids[i], false);
-            return;
-        }
-    }
+    if (!fleet_vitals_subjects(reply, ids, nids, subjects))
+        return;
 
     char dir[512];
     uint8_t box_id[32], signer[32], seed[32];
@@ -615,14 +732,9 @@ void zcl_native_handle_fleet_vitals_sample(
     uint64_t first = 0, last = 0;
     size_t wrote = 0;
     for (size_t i = 0; i < nids; i++) {
-        int idx = fleet_host_index(ids[i]);
-        bool have = idx >= 0 && present[idx];
-        struct zcl_fleet_pair pair = { ZCL_FLEET_PAIR_VALUE,
-                                       have ? values[idx] : 0 };
         uint64_t seq = 0;
-        enum zcl_fleet_status status = zcl_fleet_ledger_append(
-            ledger, ZCL_FLEET_KIND_VITALS, subjects[i],
-            have ? &pair : NULL, have ? 1u : 0u, NULL, NULL, seed, &seq);
+        enum zcl_fleet_status status = fleet_vitals_append_one(
+            ledger, ids[i], subjects[i], values, present, seed, &seq);
         if (status != ZCL_FLEET_OK) {
             memset(seed, 0, sizeof seed);
             zcl_fleet_ledger_close(ledger);
@@ -793,6 +905,101 @@ static void fleet_experiment_write(struct zcl_command_reply *reply,
     reply->error.mutated = true;
 }
 
+/* The task a row is filed under: `task_id`, or `note` when only that is
+ * passed. Shared so predict and result refuse a missing one identically. */
+static bool fleet_experiment_task_id(struct zcl_command_reply *reply,
+                                     const struct json_value *input,
+                                     const char **task_id)
+{
+    *task_id = fleet_input_str(json_get(input, "task_id"));
+    const char *note = fleet_input_str(json_get(input, "note"));
+    if (!*task_id)
+        *task_id = note;
+    if (!*task_id) {
+        fleet_refuse(reply, "MISSING_INPUT", "task_id is required",
+                     "input.task_id", false);
+        return false;
+    }
+    return true;
+}
+
+/* An optional integer measurement: added as a pair when passed, refused by
+ * name when passed but not representable, and absent otherwise. */
+static bool fleet_count_pair(struct zcl_command_reply *reply,
+                             const struct json_value *input, const char *field,
+                             uint8_t key, struct zcl_fleet_pair *pairs,
+                             size_t *n)
+{
+    int64_t number = 0;
+    if (fleet_input_i64(json_get(input, field), &number) &&
+        !fleet_pair_add(pairs, n, key, number)) {
+        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
+        return false;
+    }
+    return true;
+}
+
+/* The four fields a prediction must carry, each checked against the closed
+ * vocabulary before any of them is added as a pair. */
+static bool fleet_predict_core(struct zcl_command_reply *reply,
+                               const struct json_value *input,
+                               struct zcl_fleet_pair *pairs, size_t *n)
+{
+    uint8_t task_class = 0, harness = 0, model = 0, effort = 0;
+    if (!fleet_enum_stored(json_get(input, "task_class"), "task_class",
+                           &task_class)) {
+        fleet_refuse_enum(reply, "task_class", "input.task_class");
+        return false;
+    }
+    if (!fleet_enum_stored(json_get(input, "harness"), "harness", &harness)) {
+        fleet_refuse_enum(reply, "harness", "input.harness");
+        return false;
+    }
+    if (!fleet_enum_stored(json_get(input, "model"), "model", &model)) {
+        fleet_refuse_enum(reply, "model", "input.model");
+        return false;
+    }
+    if (!fleet_enum_stored(json_get(input, "effort"), "effort", &effort)) {
+        fleet_refuse_enum(reply, "effort", "input.effort");
+        return false;
+    }
+    if (!fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_TASK_CLASS, task_class) ||
+        !fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_HARNESS, harness) ||
+        !fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_MODEL, model) ||
+        !fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_EFFORT, effort)) {
+        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
+        return false;
+    }
+    return true;
+}
+
+/* The optional measurements a prediction may carry: tokens, wall time and
+ * an outcome, in that order. */
+static bool fleet_predict_measures(struct zcl_command_reply *reply,
+                                   const struct json_value *input,
+                                   struct zcl_fleet_pair *pairs, size_t *n)
+{
+    if (!fleet_count_pair(reply, input, "tokens", ZCL_FLEET_PAIR_TOKENS_IN,
+                          pairs, n) ||
+        !fleet_count_pair(reply, input, "wall_s", ZCL_FLEET_PAIR_WALL_S,
+                          pairs, n))
+        return false;
+    const struct json_value *outcome_v = json_get(input, "outcome");
+    if (outcome_v) {
+        uint8_t outcome = 0;
+        if (!fleet_enum_stored(outcome_v, "outcome", &outcome)) {
+            fleet_refuse_enum(reply, "outcome", "input.outcome");
+            return false;
+        }
+        if (!fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_OUTCOME, outcome)) {
+            fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row",
+                         false);
+            return false;
+        }
+    }
+    return true;
+}
+
 void zcl_native_handle_fleet_experiment_predict(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -805,76 +1012,110 @@ void zcl_native_handle_fleet_experiment_predict(
                      false);
         return;
     }
-    const char *task_id = fleet_input_str(json_get(request->input, "task_id"));
-    const char *note = fleet_input_str(json_get(request->input, "note"));
-    if (!task_id)
-        task_id = note;
-    if (!task_id) {
-        fleet_refuse(reply, "MISSING_INPUT", "task_id is required",
-                     "input.task_id", false);
+    const char *task_id = NULL;
+    if (!fleet_experiment_task_id(reply, request->input, &task_id))
         return;
-    }
     const char *story = fleet_input_str(json_get(request->input, "story"));
-
-    uint8_t task_class = 0, harness = 0, model = 0, effort = 0;
-    if (!fleet_enum_stored(json_get(request->input, "task_class"), "task_class",
-                           &task_class)) {
-        fleet_refuse_enum(reply, "task_class", "input.task_class");
-        return;
-    }
-    if (!fleet_enum_stored(json_get(request->input, "harness"), "harness",
-                           &harness)) {
-        fleet_refuse_enum(reply, "harness", "input.harness");
-        return;
-    }
-    if (!fleet_enum_stored(json_get(request->input, "model"), "model",
-                           &model)) {
-        fleet_refuse_enum(reply, "model", "input.model");
-        return;
-    }
-    if (!fleet_enum_stored(json_get(request->input, "effort"), "effort",
-                           &effort)) {
-        fleet_refuse_enum(reply, "effort", "input.effort");
-        return;
-    }
 
     struct zcl_fleet_pair pairs[ZCL_FLEET_PAIRS_MAX];
     size_t n = 0;
-    if (!fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TASK_CLASS, task_class) ||
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_HARNESS, harness) ||
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_MODEL, model) ||
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_EFFORT, effort)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
+    if (!fleet_predict_core(reply, request->input, pairs, &n))
         return;
-    }
     if (!fleet_experiment_add_executor(reply, request->input, pairs, &n))
         return;
-    int64_t number = 0;
-    if (fleet_input_i64(json_get(request->input, "tokens"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TOKENS_IN, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
+    if (!fleet_predict_measures(reply, request->input, pairs, &n))
         return;
-    }
-    if (fleet_input_i64(json_get(request->input, "wall_s"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_WALL_S, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
-    const struct json_value *outcome_v = json_get(request->input, "outcome");
-    if (outcome_v) {
-        uint8_t outcome = 0;
-        if (!fleet_enum_stored(outcome_v, "outcome", &outcome)) {
-            fleet_refuse_enum(reply, "outcome", "input.outcome");
-            return;
-        }
-        if (!fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_OUTCOME, outcome)) {
-            fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row",
-                         false);
-            return;
-        }
-    }
     fleet_experiment_write(reply, ZCL_FLEET_EXPERIMENT_PREDICT, "predict",
                            pairs, n, task_id, story);
+}
+
+/* The three fields every result carries, checked and added as pairs. */
+static bool fleet_result_core(struct zcl_command_reply *reply,
+                              const struct json_value *input,
+                              struct zcl_fleet_pair *pairs, size_t *n)
+{
+    uint8_t task_class = 0, model = 0, outcome = 0;
+    if (!fleet_enum_stored(json_get(input, "task_class"), "task_class",
+                           &task_class)) {
+        fleet_refuse_enum(reply, "task_class", "input.task_class");
+        return false;
+    }
+    if (!fleet_enum_stored(json_get(input, "model"), "model", &model)) {
+        fleet_refuse_enum(reply, "model", "input.model");
+        return false;
+    }
+    if (!fleet_enum_stored(json_get(input, "outcome"), "outcome", &outcome)) {
+        fleet_refuse_enum(reply, "outcome", "input.outcome");
+        return false;
+    }
+    if (!fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_TASK_CLASS, task_class) ||
+        !fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_MODEL, model) ||
+        !fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_OUTCOME, outcome)) {
+        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
+        return false;
+    }
+    return true;
+}
+
+/* The optional harness and effort, each checked before it is added. */
+static bool fleet_result_optional(struct zcl_command_reply *reply,
+                                  const struct json_value *input,
+                                  struct zcl_fleet_pair *pairs, size_t *n)
+{
+    const struct json_value *harness_v = json_get(input, "harness");
+    if (harness_v) {
+        uint8_t harness = 0;
+        if (!fleet_enum_stored(harness_v, "harness", &harness)) {
+            fleet_refuse_enum(reply, "harness", "input.harness");
+            return false;
+        }
+        if (!fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_HARNESS, harness)) {
+            fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row",
+                         false);
+            return false;
+        }
+    }
+    const struct json_value *effort_v = json_get(input, "effort");
+    if (effort_v) {
+        uint8_t effort = 0;
+        if (!fleet_enum_stored(effort_v, "effort", &effort)) {
+            fleet_refuse_enum(reply, "effort", "input.effort");
+            return false;
+        }
+        if (!fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_EFFORT, effort)) {
+            fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row",
+                         false);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The measured numbers a result may carry, in the order they are checked. */
+static bool fleet_result_counts(struct zcl_command_reply *reply,
+                                const struct json_value *input,
+                                struct zcl_fleet_pair *pairs, size_t *n)
+{
+    return fleet_count_pair(reply, input, "in", ZCL_FLEET_PAIR_TOKENS_IN,
+                            pairs, n) &&
+           fleet_count_pair(reply, input, "out", ZCL_FLEET_PAIR_TOKENS_OUT,
+                            pairs, n) &&
+           fleet_count_pair(reply, input, "cache",
+                            ZCL_FLEET_PAIR_TOKENS_CACHED, pairs, n) &&
+           fleet_count_pair(reply, input, "reasoning",
+                            ZCL_FLEET_PAIR_TOKENS_REASONING, pairs, n) &&
+           fleet_count_pair(reply, input, "tool_uses",
+                            ZCL_FLEET_PAIR_TOOL_USES, pairs, n) &&
+           fleet_count_pair(reply, input, "turns", ZCL_FLEET_PAIR_TURNS,
+                            pairs, n) &&
+           fleet_count_pair(reply, input, "wall_s", ZCL_FLEET_PAIR_WALL_S,
+                            pairs, n) &&
+           fleet_count_pair(reply, input, "added",
+                            ZCL_FLEET_PAIR_LINES_ADDED, pairs, n) &&
+           fleet_count_pair(reply, input, "removed",
+                            ZCL_FLEET_PAIR_LINES_REMOVED, pairs, n) &&
+           fleet_count_pair(reply, input, "defects", ZCL_FLEET_PAIR_DEFECTS,
+                            pairs, n);
 }
 
 void zcl_native_handle_fleet_experiment_result(
@@ -889,123 +1130,21 @@ void zcl_native_handle_fleet_experiment_result(
                      false);
         return;
     }
-    const char *task_id = fleet_input_str(json_get(request->input, "task_id"));
-    const char *note = fleet_input_str(json_get(request->input, "note"));
-    if (!task_id)
-        task_id = note;
-    if (!task_id) {
-        fleet_refuse(reply, "MISSING_INPUT", "task_id is required",
-                     "input.task_id", false);
+    const char *task_id = NULL;
+    if (!fleet_experiment_task_id(reply, request->input, &task_id))
         return;
-    }
     const char *story = fleet_input_str(json_get(request->input, "story"));
-
-    uint8_t task_class = 0, model = 0, outcome = 0;
-    if (!fleet_enum_stored(json_get(request->input, "task_class"), "task_class",
-                           &task_class)) {
-        fleet_refuse_enum(reply, "task_class", "input.task_class");
-        return;
-    }
-    if (!fleet_enum_stored(json_get(request->input, "model"), "model",
-                           &model)) {
-        fleet_refuse_enum(reply, "model", "input.model");
-        return;
-    }
-    if (!fleet_enum_stored(json_get(request->input, "outcome"), "outcome",
-                           &outcome)) {
-        fleet_refuse_enum(reply, "outcome", "input.outcome");
-        return;
-    }
 
     struct zcl_fleet_pair pairs[ZCL_FLEET_PAIRS_MAX];
     size_t n = 0;
-    if (!fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TASK_CLASS, task_class) ||
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_MODEL, model) ||
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_OUTCOME, outcome)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
+    if (!fleet_result_core(reply, request->input, pairs, &n))
         return;
-    }
-
-    const struct json_value *harness_v = json_get(request->input, "harness");
-    if (harness_v) {
-        uint8_t harness = 0;
-        if (!fleet_enum_stored(harness_v, "harness", &harness)) {
-            fleet_refuse_enum(reply, "harness", "input.harness");
-            return;
-        }
-        if (!fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_HARNESS, harness)) {
-            fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row",
-                         false);
-            return;
-        }
-    }
-    const struct json_value *effort_v = json_get(request->input, "effort");
-    if (effort_v) {
-        uint8_t effort = 0;
-        if (!fleet_enum_stored(effort_v, "effort", &effort)) {
-            fleet_refuse_enum(reply, "effort", "input.effort");
-            return;
-        }
-        if (!fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_EFFORT, effort)) {
-            fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row",
-                         false);
-            return;
-        }
-    }
+    if (!fleet_result_optional(reply, request->input, pairs, &n))
+        return;
     if (!fleet_experiment_add_executor(reply, request->input, pairs, &n))
         return;
-
-    int64_t number = 0;
-    if (fleet_input_i64(json_get(request->input, "in"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TOKENS_IN, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
+    if (!fleet_result_counts(reply, request->input, pairs, &n))
         return;
-    }
-    if (fleet_input_i64(json_get(request->input, "out"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TOKENS_OUT, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
-    if (fleet_input_i64(json_get(request->input, "cache"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TOKENS_CACHED, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
-    if (fleet_input_i64(json_get(request->input, "reasoning"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TOKENS_REASONING, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
-    if (fleet_input_i64(json_get(request->input, "tool_uses"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TOOL_USES, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
-    if (fleet_input_i64(json_get(request->input, "turns"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TURNS, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
-    if (fleet_input_i64(json_get(request->input, "wall_s"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_WALL_S, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
-    if (fleet_input_i64(json_get(request->input, "added"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_LINES_ADDED, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
-    if (fleet_input_i64(json_get(request->input, "removed"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_LINES_REMOVED, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
-    if (fleet_input_i64(json_get(request->input, "defects"), &number) &&
-        !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_DEFECTS, number)) {
-        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
-        return;
-    }
     fleet_experiment_write(reply, ZCL_FLEET_EXPERIMENT_RESULT, "result", pairs,
                            n, task_id, story);
 }
@@ -1019,6 +1158,137 @@ static void fleet_exp_absent_or_i64(char *out, size_t cap, uint8_t have,
         (void)snprintf(out, cap, "%lld", (long long)value);
 }
 
+/* The optional class and model filters: each passed filter must be in the
+ * closed vocabulary, or the query is refused by that field's name. */
+static bool fleet_stats_filters(struct zcl_command_reply *reply,
+                                const struct json_value *input,
+                                bool *have_class, uint8_t *want_class,
+                                bool *have_model, uint8_t *want_model)
+{
+    const struct json_value *v = json_get(input, "task_class");
+    if (v) {
+        if (!fleet_enum_stored(v, "task_class", want_class)) {
+            fleet_refuse_enum(reply, "task_class", "input.task_class");
+            return false;
+        }
+        *have_class = true;
+    }
+    v = json_get(input, "model");
+    if (v) {
+        if (!fleet_enum_stored(v, "model", want_model)) {
+            fleet_refuse_enum(reply, "model", "input.model");
+            return false;
+        }
+        *have_model = true;
+    }
+    return true;
+}
+
+static bool fleet_stats_wanted(const struct zcl_fleet_experiment_group *g,
+                               bool have_class, uint8_t want_class,
+                               bool have_model, uint8_t want_model)
+{
+    if (have_class && g->task_class != want_class)
+        return false;
+    return !(have_model && g->model != want_model);
+}
+
+/* One group's row in the JSON answer. */
+static void fleet_stats_row(struct json_value *rows,
+                            const struct zcl_fleet_experiment_group *g,
+                            const char *class_name, const char *model_name,
+                            int64_t land_bp, uint8_t have_land)
+{
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_str(&row, "task_class",
+                           class_name ? class_name : "");
+    (void)json_push_kv_str(&row, "model", model_name ? model_name : "");
+    (void)json_push_kv_int(&row, "predicts", (int64_t)g->predicts);
+    (void)json_push_kv_int(&row, "results", (int64_t)g->results);
+    (void)json_push_kv_int(&row, "lands", (int64_t)g->lands);
+    if (have_land)
+        (void)json_push_kv_int(&row, "land_bp", land_bp);
+    if (g->have_median_wall)
+        (void)json_push_kv_int(&row, "median_wall_s", g->median_wall_s);
+    if (g->have_median_tokens)
+        (void)json_push_kv_int(&row, "median_tokens", g->median_tokens);
+    if (g->have_pred_actual)
+        (void)json_push_kv_int(&row, "pred_actual_bp", g->pred_actual_bp);
+    (void)json_push_kv_int(&row, "unpredicted", (int64_t)g->unpredicted);
+    (void)json_push_back(rows, &row);
+    json_free(&row);
+}
+
+/* One group's line in the text answer, kept only while it fits. */
+static void fleet_stats_line(char *text, size_t cap, size_t *tlen,
+                             const struct zcl_fleet_experiment_group *g,
+                             const char *class_name, const char *model_name,
+                             int64_t land_bp, uint8_t have_land)
+{
+    char wall[32], toks[32], ratio[32], land[32];
+    fleet_exp_absent_or_i64(wall, sizeof wall, g->have_median_wall,
+                            g->median_wall_s);
+    fleet_exp_absent_or_i64(toks, sizeof toks, g->have_median_tokens,
+                            g->median_tokens);
+    fleet_exp_absent_or_i64(ratio, sizeof ratio, g->have_pred_actual,
+                            g->pred_actual_bp);
+    fleet_exp_absent_or_i64(land, sizeof land, have_land, land_bp);
+    int wrote = snprintf(
+        text + *tlen, cap - *tlen,
+        "%s %s predicts=%llu results=%llu lands=%llu land_bp=%s "
+        "median_wall_s=%s median_tokens=%s pred_actual_bp=%s "
+        "unpredicted=%llu\n",
+        class_name ? class_name : "", model_name ? model_name : "",
+        (unsigned long long)g->predicts,
+        (unsigned long long)g->results,
+        (unsigned long long)g->lands, land, wall, toks, ratio,
+        (unsigned long long)g->unpredicted);
+    if (wrote > 0 && (size_t)wrote < cap - *tlen)
+        *tlen += (size_t)wrote;
+}
+
+static void fleet_stats_group(struct json_value *rows, char *text, size_t cap,
+                              size_t *tlen,
+                              const struct zcl_fleet_experiment_group *g)
+{
+    const char *class_name =
+        zcl_fleet_experiment_enum_name("task_class", g->task_class);
+    const char *model_name = zcl_fleet_experiment_enum_name("model", g->model);
+    int64_t land_bp = 0;
+    uint8_t have_land = 0;
+    if (g->results > 0) {
+        land_bp = (int64_t)((g->lands * 10000ull) / g->results);
+        have_land = 1;
+    }
+    fleet_stats_row(rows, g, class_name, model_name, land_bp, have_land);
+    fleet_stats_line(text, cap, tlen, g, class_name, model_name, land_bp,
+                     have_land);
+}
+
+/* The totals line that closes the text answer. */
+static void fleet_stats_total(char *text, size_t cap, size_t *tlen,
+                              uint64_t t_predicts, uint64_t t_results,
+                              uint64_t t_lands, uint64_t t_unpred)
+{
+    char land_total[32];
+    if (t_results > 0)
+        fleet_exp_absent_or_i64(land_total, sizeof land_total, 1,
+                                (int64_t)((t_lands * 10000ull) / t_results));
+    else
+        fleet_exp_absent_or_i64(land_total, sizeof land_total, 0, 0);
+    int wrote = snprintf(text + *tlen, cap - *tlen,
+                         "total predicts=%llu results=%llu lands=%llu "
+                         "land_bp=%s unpredicted=%llu\n",
+                         (unsigned long long)t_predicts,
+                         (unsigned long long)t_results,
+                         (unsigned long long)t_lands, land_total,
+                         (unsigned long long)t_unpred);
+    if (wrote > 0 && (size_t)wrote < cap - *tlen)
+        *tlen += (size_t)wrote;
+}
+
 void zcl_native_handle_fleet_experiment_stats(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -1028,24 +1298,10 @@ void zcl_native_handle_fleet_experiment_stats(
     zcl_command_reply_init(reply, "zcl.fleet_experiment_stats.v1");
     bool have_class = false, have_model = false;
     uint8_t want_class = 0, want_model = 0;
-    if (request && request->input) {
-        const struct json_value *v = json_get(request->input, "task_class");
-        if (v) {
-            if (!fleet_enum_stored(v, "task_class", &want_class)) {
-                fleet_refuse_enum(reply, "task_class", "input.task_class");
-                return;
-            }
-            have_class = true;
-        }
-        v = json_get(request->input, "model");
-        if (v) {
-            if (!fleet_enum_stored(v, "model", &want_model)) {
-                fleet_refuse_enum(reply, "model", "input.model");
-                return;
-            }
-            have_model = true;
-        }
-    }
+    if (request && request->input &&
+        !fleet_stats_filters(reply, request->input, &have_class, &want_class,
+                             &have_model, &want_model))
+        return;
 
     char dir[512];
     if (!fleet_dir(dir, sizeof dir)) {
@@ -1093,87 +1349,17 @@ void zcl_native_handle_fleet_experiment_stats(
     text[0] = 0;
     uint64_t t_predicts = 0, t_results = 0, t_lands = 0, t_unpred = 0;
     for (size_t i = 0; i < count; i++) {
-        if (have_class && groups[i].task_class != want_class)
+        if (!fleet_stats_wanted(&groups[i], have_class, want_class,
+                                have_model, want_model))
             continue;
-        if (have_model && groups[i].model != want_model)
-            continue;
-        const char *class_name =
-            zcl_fleet_experiment_enum_name("task_class", groups[i].task_class);
-        const char *model_name =
-            zcl_fleet_experiment_enum_name("model", groups[i].model);
-        int64_t land_bp = 0;
-        uint8_t have_land = 0;
-        if (groups[i].results > 0) {
-            land_bp =
-                (int64_t)((groups[i].lands * 10000ull) / groups[i].results);
-            have_land = 1;
-        }
-        char wall[32], toks[32], ratio[32], land[32];
-        fleet_exp_absent_or_i64(wall, sizeof wall, groups[i].have_median_wall,
-                                groups[i].median_wall_s);
-        fleet_exp_absent_or_i64(toks, sizeof toks, groups[i].have_median_tokens,
-                                groups[i].median_tokens);
-        fleet_exp_absent_or_i64(ratio, sizeof ratio, groups[i].have_pred_actual,
-                                groups[i].pred_actual_bp);
-        fleet_exp_absent_or_i64(land, sizeof land, have_land, land_bp);
-
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_str(&row, "task_class",
-                               class_name ? class_name : "");
-        (void)json_push_kv_str(&row, "model", model_name ? model_name : "");
-        (void)json_push_kv_int(&row, "predicts", (int64_t)groups[i].predicts);
-        (void)json_push_kv_int(&row, "results", (int64_t)groups[i].results);
-        (void)json_push_kv_int(&row, "lands", (int64_t)groups[i].lands);
-        if (have_land)
-            (void)json_push_kv_int(&row, "land_bp", land_bp);
-        if (groups[i].have_median_wall)
-            (void)json_push_kv_int(&row, "median_wall_s",
-                                   groups[i].median_wall_s);
-        if (groups[i].have_median_tokens)
-            (void)json_push_kv_int(&row, "median_tokens",
-                                   groups[i].median_tokens);
-        if (groups[i].have_pred_actual)
-            (void)json_push_kv_int(&row, "pred_actual_bp",
-                                   groups[i].pred_actual_bp);
-        (void)json_push_kv_int(&row, "unpredicted",
-                               (int64_t)groups[i].unpredicted);
-        (void)json_push_back(&rows, &row);
-        json_free(&row);
-
-        int wrote = snprintf(
-            text + tlen, sizeof text - tlen,
-            "%s %s predicts=%llu results=%llu lands=%llu land_bp=%s "
-            "median_wall_s=%s median_tokens=%s pred_actual_bp=%s "
-            "unpredicted=%llu\n",
-            class_name ? class_name : "", model_name ? model_name : "",
-            (unsigned long long)groups[i].predicts,
-            (unsigned long long)groups[i].results,
-            (unsigned long long)groups[i].lands, land, wall, toks, ratio,
-            (unsigned long long)groups[i].unpredicted);
-        if (wrote > 0 && (size_t)wrote < sizeof text - tlen)
-            tlen += (size_t)wrote;
+        fleet_stats_group(&rows, text, sizeof text, &tlen, &groups[i]);
         t_predicts += groups[i].predicts;
         t_results += groups[i].results;
         t_lands += groups[i].lands;
         t_unpred += groups[i].unpredicted;
     }
-    char land_total[32];
-    if (t_results > 0)
-        fleet_exp_absent_or_i64(land_total, sizeof land_total, 1,
-                                (int64_t)((t_lands * 10000ull) / t_results));
-    else
-        fleet_exp_absent_or_i64(land_total, sizeof land_total, 0, 0);
-    int wrote = snprintf(text + tlen, sizeof text - tlen,
-                         "total predicts=%llu results=%llu lands=%llu "
-                         "land_bp=%s unpredicted=%llu\n",
-                         (unsigned long long)t_predicts,
-                         (unsigned long long)t_results,
-                         (unsigned long long)t_lands, land_total,
-                         (unsigned long long)t_unpred);
-    if (wrote > 0 && (size_t)wrote < sizeof text - tlen)
-        tlen += (size_t)wrote;
+    fleet_stats_total(text, sizeof text, &tlen, t_predicts, t_results,
+                      t_lands, t_unpred);
     (void)tlen;
     (void)unmatched;
 
