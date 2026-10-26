@@ -574,9 +574,6 @@ tests/harness/src/test_consensus_state_snapshot_export.c:cse_run_rung_ladder_tes
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_receipt_version:23
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_source:24
 tests/harness/src/test_consensus_state_snapshot_export.c:test_consensus_state_snapshot_export_platform_arm:186
-tests/harness/src/test_core_seal_interop.c:csi_dialect_discriminates:23
-tests/harness/src/test_core_seal_interop.c:csi_real_sections:37
-tests/harness/src/test_core_seal_interop.c:csi_synthetic_tree:27
 tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24
 tests/harness/src/test_dev_platform.c:run_failure_store_fixture:59
 tests/harness/src/test_dev_platform.c:run_hotswap_artifact_cache_fixture:79

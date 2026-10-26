@@ -423,181 +423,103 @@ static void csi_explain(const struct ci_merkle *m,
 
 /* ── 1: the real sealed sections, count derived from the manifest ───── */
 
-static void csi_real_sections(void)
+static bool csi_manifest_has_section_tree_root(const struct manifest_view *mv)
 {
-    printf("\n  -- the real sealed sections, over a mirror of the sealed "
-           "file set --\n");
+    return mv->nsec > 0 && mv->have_tree && mv->have_root && mv->nfile > 0;
+}
 
-    char cwd[PATH_MAX];
-    if (!getcwd(cwd, sizeof(cwd))) {
-        CSI_CHECK("getcwd", false);
-        return;
-    }
-
-    struct manifest_view mv;
-    int rc = read_manifest("core/MANIFEST.sha3", &mv);
-    CSI_CHECK("core/MANIFEST.sha3 parses", rc == 0);
-    if (rc != 0) {
-        manifest_view_free(&mv);
-        return;
-    }
-    CSI_CHECK("manifest carries SECTION, TREE and ROOT",
-              mv.nsec > 0 && mv.have_tree && mv.have_root && mv.nfile > 0);
-    printf("     manifest: %zu sealed files, %zu SECTION lines\n", mv.nfile,
-           mv.nsec);
-
-    csi_rmrf(CSI_WORK);
-
-    /* Mirror the sealed set: same repo-relative paths, same bytes. */
-    bool mirrored = true;
-    char **list = calloc(mv.nfile ? mv.nfile : 1, sizeof(char *));
+static char **csi_calloc_paths(size_t n)
+{
+    char **list = calloc(n ? n : 1, sizeof(char *));
     if (!list)
         die("out of memory");
-    for (size_t i = 0; i < mv.nfile && mirrored; i++) {
-        char dst[PATH_MAX];
-        snprintf(dst, sizeof(dst), "%s/%s", CSI_MIRROR, mv.file[i].path);
-        mirrored = csi_copy_file(mv.file[i].path, dst);
-        if (!mirrored)
-            fprintf(stderr, "core_seal_interop: cannot mirror %s\n",
-                    mv.file[i].path);
-        list[i] = mv.file[i].path;
-    }
-    CSI_CHECK("every sealed file mirrored into the scratch tree", mirrored);
-    if (!mirrored)
-        goto done;
+    return list;
+}
 
-    CSI_CHECK("NUL path list written",
-              csi_write_nul_list(CSI_LIST, list, mv.nfile));
+static bool csi_sealer_covers_mirror(bool ran, const struct csi_seal_run *seal,
+                                     size_t nfile)
+{
+    return ran && seal->nents == nfile;
+}
 
-    char mirror_abs[PATH_MAX], list_abs[PATH_MAX];
-    snprintf(mirror_abs, sizeof(mirror_abs), "%s/%s", cwd, CSI_MIRROR);
-    snprintf(list_abs, sizeof(list_abs), "%s/%s", cwd, CSI_LIST);
-
-    /* Implementation A: tools/core_seal.c, over the mirror. */
-    struct csi_seal_run seal;
-    bool ran = csi_run_sealer(mirror_abs, list_abs, &seal);
-    CSI_CHECK("sealer ran over the mirror", ran && seal.nents == mv.nfile);
-    if (!ran)
-        goto done;
-
-    /* Implementation B: codeindex over the same mirror (build_cold, no
-     * snapshot). */
-    struct ci_merkle *m = ci_merkle_build_cold(mirror_abs, NULL);
-    CSI_CHECK("codeindex built the mirror", m != NULL);
-    if (!m) {
-        csi_seal_run_free(&seal);
-        goto done;
-    }
-
-    /* A faithful mirror (every file hashes to the manifest digest) must
-     * reproduce the manifest's SECTION/TREE/ROOT lines byte for byte. The
-     * cross-implementation leg stays unconditional; only manifest equality is
-     * conditioned. */
+static bool csi_mirror_is_faithful(const struct csi_seal_run *seal,
+                                   const struct manifest_view *mv)
+{
     bool faithful = true;
-    for (size_t i = 0; i < seal.nents && faithful; i++) {
+    for (size_t i = 0; i < seal->nents && faithful; i++) {
         char hex[HEXSZ];
-        zcl_hex_encode(seal.ents[i].hash, HSZ, hex);
+        zcl_hex_encode(seal->ents[i].hash, HSZ, hex);
         /* mv.file[] and seal.ents[] are both path-sorted over the same set. */
-        faithful = strcmp(seal.ents[i].path, mv.file[i].path) == 0 &&
-                   strcmp(hex, mv.file[i].hex) == 0;
+        faithful = strcmp(seal->ents[i].path, mv->file[i].path) == 0 &&
+                   strcmp(hex, mv->file[i].hex) == 0;
     }
-    printf("     mirror reproduces the manifest's per-file digests: %s\n",
-           faithful ? "yes" : "NO (core/ edited since the last `make core-seal`)");
+    return faithful;
+}
 
+static void csi_check_manifest_roots(bool faithful,
+                                     const struct csi_seal_run *seal,
+                                     const struct manifest_view *mv)
+{
     if (faithful) {
         char tree_hex[HEXSZ], root_hex[HEXSZ];
-        zcl_hex_encode(seal.tree, HSZ, tree_hex);
-        zcl_hex_encode(seal.root, HSZ, root_hex);
+        zcl_hex_encode(seal->tree, HSZ, tree_hex);
+        zcl_hex_encode(seal->root, HSZ, root_hex);
         CSI_CHECK("sealer reproduces the manifest TREE line",
-                  strcmp(tree_hex, mv.tree_hex) == 0);
+                  strcmp(tree_hex, mv->tree_hex) == 0);
         CSI_CHECK("sealer reproduces the manifest ROOT line",
-                  strcmp(root_hex, mv.root_hex) == 0);
+                  strcmp(root_hex, mv->root_hex) == 0);
     }
+}
 
-    /* One node per sealed directory, plus the root node "". */
-    CSI_CHECK("sealer emits one node per SECTION line, plus the root",
-              seal.nnodes == mv.nsec + 1);
+static bool csi_node_agrees(struct ci_merkle *m, const char *dir,
+                            const struct dnode *sn, struct ci_merkle_node *cn,
+                            bool *found)
+{
+    (void)ci_merkle_node(m, dir, cn, found);
+    return *found && memcmp(sn->digest, cn->digest.bytes, HSZ) == 0;
+}
 
-    printf("\n     %-42s %6s %6s  %s\n", "section", "sealed", "indexed",
-           "verdict");
-    size_t comparable = 0, agreed = 0, disagreed = 0, skipped = 0;
-    for (size_t s = 0; s < mv.nsec; s++) {
-        const char *dir = mv.sec[s].name;
-        struct csi_verdict v = csi_classify(m, &seal, dir);
-        const struct dnode *sn = csi_seal_node(&seal, dir);
-        if (!sn) {
-            printf("     %-42s %6u %6u  NO SEALER NODE\n", dir, v.sealed_files,
-                   v.indexed_files);
-            csi_failures++;
-            continue;
-        }
-        if (!v.comparable) {
-            printf("     %-42s %6u %6u  input sets differ - not compared\n",
-                   dir, v.sealed_files, v.indexed_files);
-            csi_explain(m, &seal, dir);
-            skipped++;
-            continue;
-        }
-        struct ci_merkle_node cn;
-        bool found = false;
-        (void)ci_merkle_node(m, dir, &cn, &found);
-        bool same = found && memcmp(sn->digest, cn.digest.bytes, HSZ) == 0;
-        comparable++;
-        if (same) {
-            agreed++;
-            /* A faithful mirror must also match the manifest's hex. */
-            if (faithful) {
-                char hex[HEXSZ];
-                zcl_hex_encode(sn->digest, HSZ, hex);
-                if (strcmp(hex, mv.sec[s].hex) != 0) {
-                    printf("     %-42s  MANIFEST HEX MISMATCH\n", dir);
-                    csi_failures++;
-                }
-            }
-            printf("     %-42s %6u %6u  AGREE\n", dir, v.sealed_files,
-                   v.indexed_files);
-        } else {
-            disagreed++;
-            char a[HEXSZ], b[HEXSZ];
-            zcl_hex_encode(sn->digest, HSZ, a);
-            if (found)
-                ci_merkle_hex(&cn.digest, b);
-            else
-                snprintf(b, sizeof(b), "<absent>");
-            printf("     %-42s %6u %6u  *** DISAGREE ***\n", dir,
-                   v.sealed_files, v.indexed_files);
-            printf("        core_seal : %s\n", a);
-            printf("        codeindex : %s\n", b);
-        }
-    }
+static bool csi_manifest_hex_differs(bool faithful,
+                                     const unsigned char digest[HSZ],
+                                     const char *want)
+{
+    if (!faithful)
+        return false;
+    char hex[HEXSZ];
+    zcl_hex_encode(digest, HSZ, hex);
+    return strcmp(hex, want) != 0;
+}
 
-    printf("\n     compared %zu of %zu sections; %zu agreed, %zu disagreed, "
-           "%zu not comparable\n",
-           comparable, mv.nsec, agreed, disagreed, skipped);
+static void csi_node_hex_or_absent(bool found, struct ci_merkle_node *cn,
+                                   char *b, size_t cap)
+{
+    if (found)
+        ci_merkle_hex(&cn->digest, b);
+    else
+        snprintf(b, cap, "<absent>");
+}
 
-    CSI_CHECK("every comparable section agrees", disagreed == 0);
-    CSI_CHECK("at least 90% of sections were genuinely comparable",
-              mv.nsec > 0 &&
-              comparable * 100U >=
-                  mv.nsec * CSI_MIN_COMPARABLE_PERCENT);
+static bool csi_comparable_floor_met(const struct manifest_view *mv,
+                                     size_t comparable)
+{
+    return mv->nsec > 0 &&
+           comparable * 100U >= mv->nsec * CSI_MIN_COMPARABLE_PERCENT;
+}
 
-    /* The whole-tree roots must differ because some sealed files are not
-     * indexable source; equality would mean the input sets converged. */
-    struct csi_verdict rootv = csi_classify(m, &seal, "");
-    struct ci_merkle_node croot;
-    bool rootfound = false;
-    (void)ci_merkle_root(m, &croot);
-    (void)ci_merkle_node(m, "", &croot, &rootfound);
-    printf("     whole-tree root: sealed %u files, codeindex indexed %u of "
-           "them\n", rootv.sealed_files, rootv.indexed_files);
-    CSI_CHECK("the whole-tree roots are correctly NOT comparable",
-              !rootv.comparable && rootv.indexed_files < rootv.sealed_files);
+static bool csi_roots_incomparable(const struct csi_verdict *v)
+{
+    return !v->comparable && v->indexed_files < v->sealed_files;
+}
 
+static void csi_cross_fold_comparable(struct ci_merkle *m,
+                                      const struct csi_seal_run *seal,
+                                      const struct manifest_view *mv)
+{
     /* Cross-implementation fold: re-fold codeindex's proof children for a
      * comparable section through the sealer's node_digest. */
-    for (size_t s = 0; s < mv.nsec; s++) {
-        const char *dir = mv.sec[s].name;
-        struct csi_verdict v = csi_classify(m, &seal, dir);
+    for (size_t s = 0; s < mv->nsec; s++) {
+        const char *dir = mv->sec[s].name;
+        struct csi_verdict v = csi_classify(m, seal, dir);
         if (!v.comparable)
             continue;
         struct ci_merkle_proof *p = ci_merkle_proof_alloc();
@@ -626,6 +548,154 @@ static void csi_real_sections(void)
         ci_merkle_proof_free(p);
         break;
     }
+}
+
+static void csi_real_sections(void)
+{
+    printf("\n  -- the real sealed sections, over a mirror of the sealed "
+           "file set --\n");
+
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        CSI_CHECK("getcwd", false);
+        return;
+    }
+
+    struct manifest_view mv;
+    int rc = read_manifest("core/MANIFEST.sha3", &mv);
+    CSI_CHECK("core/MANIFEST.sha3 parses", rc == 0);
+    if (rc != 0) {
+        manifest_view_free(&mv);
+        return;
+    }
+    CSI_CHECK("manifest carries SECTION, TREE and ROOT",
+              csi_manifest_has_section_tree_root(&mv));
+    printf("     manifest: %zu sealed files, %zu SECTION lines\n", mv.nfile,
+           mv.nsec);
+
+    csi_rmrf(CSI_WORK);
+
+    /* Mirror the sealed set: same repo-relative paths, same bytes. */
+    bool mirrored = true;
+    char **list = csi_calloc_paths(mv.nfile);
+    for (size_t i = 0; i < mv.nfile && mirrored; i++) {
+        char dst[PATH_MAX];
+        snprintf(dst, sizeof(dst), "%s/%s", CSI_MIRROR, mv.file[i].path);
+        mirrored = csi_copy_file(mv.file[i].path, dst);
+        if (!mirrored)
+            fprintf(stderr, "core_seal_interop: cannot mirror %s\n",
+                    mv.file[i].path);
+        list[i] = mv.file[i].path;
+    }
+    CSI_CHECK("every sealed file mirrored into the scratch tree", mirrored);
+    if (!mirrored)
+        goto done;
+
+    CSI_CHECK("NUL path list written",
+              csi_write_nul_list(CSI_LIST, list, mv.nfile));
+
+    char mirror_abs[PATH_MAX], list_abs[PATH_MAX];
+    snprintf(mirror_abs, sizeof(mirror_abs), "%s/%s", cwd, CSI_MIRROR);
+    snprintf(list_abs, sizeof(list_abs), "%s/%s", cwd, CSI_LIST);
+
+    /* Implementation A: tools/core_seal.c, over the mirror. */
+    struct csi_seal_run seal;
+    bool ran = csi_run_sealer(mirror_abs, list_abs, &seal);
+    CSI_CHECK("sealer ran over the mirror",
+              csi_sealer_covers_mirror(ran, &seal, mv.nfile));
+    if (!ran)
+        goto done;
+
+    /* Implementation B: codeindex over the same mirror (build_cold, no
+     * snapshot). */
+    struct ci_merkle *m = ci_merkle_build_cold(mirror_abs, NULL);
+    CSI_CHECK("codeindex built the mirror", m != NULL);
+    if (!m) {
+        csi_seal_run_free(&seal);
+        goto done;
+    }
+
+    /* A faithful mirror (every file hashes to the manifest digest) must
+     * reproduce the manifest's SECTION/TREE/ROOT lines byte for byte. The
+     * cross-implementation leg stays unconditional; only manifest equality is
+     * conditioned. */
+    bool faithful = csi_mirror_is_faithful(&seal, &mv);
+    printf("     mirror reproduces the manifest's per-file digests: %s\n",
+           faithful ? "yes" : "NO (core/ edited since the last `make core-seal`)");
+
+    csi_check_manifest_roots(faithful, &seal, &mv);
+
+    /* One node per sealed directory, plus the root node "". */
+    CSI_CHECK("sealer emits one node per SECTION line, plus the root",
+              seal.nnodes == mv.nsec + 1);
+
+    printf("\n     %-42s %6s %6s  %s\n", "section", "sealed", "indexed",
+           "verdict");
+    size_t comparable = 0, agreed = 0, disagreed = 0, skipped = 0;
+    for (size_t s = 0; s < mv.nsec; s++) {
+        const char *dir = mv.sec[s].name;
+        struct csi_verdict v = csi_classify(m, &seal, dir);
+        const struct dnode *sn = csi_seal_node(&seal, dir);
+        if (!sn) {
+            printf("     %-42s %6u %6u  NO SEALER NODE\n", dir, v.sealed_files,
+                   v.indexed_files);
+            csi_failures++;
+            continue;
+        }
+        if (!v.comparable) {
+            printf("     %-42s %6u %6u  input sets differ - not compared\n",
+                   dir, v.sealed_files, v.indexed_files);
+            csi_explain(m, &seal, dir);
+            skipped++;
+            continue;
+        }
+        struct ci_merkle_node cn;
+        bool found = false;
+        bool same = csi_node_agrees(m, dir, sn, &cn, &found);
+        comparable++;
+        if (same) {
+            agreed++;
+            /* A faithful mirror must also match the manifest's hex. */
+            if (csi_manifest_hex_differs(faithful, sn->digest,
+                                         mv.sec[s].hex)) {
+                printf("     %-42s  MANIFEST HEX MISMATCH\n", dir);
+                csi_failures++;
+            }
+            printf("     %-42s %6u %6u  AGREE\n", dir, v.sealed_files,
+                   v.indexed_files);
+        } else {
+            disagreed++;
+            char a[HEXSZ], b[HEXSZ];
+            zcl_hex_encode(sn->digest, HSZ, a);
+            csi_node_hex_or_absent(found, &cn, b, sizeof(b));
+            printf("     %-42s %6u %6u  *** DISAGREE ***\n", dir,
+                   v.sealed_files, v.indexed_files);
+            printf("        core_seal : %s\n", a);
+            printf("        codeindex : %s\n", b);
+        }
+    }
+
+    printf("\n     compared %zu of %zu sections; %zu agreed, %zu disagreed, "
+           "%zu not comparable\n",
+           comparable, mv.nsec, agreed, disagreed, skipped);
+
+    CSI_CHECK("every comparable section agrees", disagreed == 0);
+    CSI_CHECK("at least 90% of sections were genuinely comparable",
+              csi_comparable_floor_met(&mv, comparable));
+
+    /* The whole-tree roots must differ because some sealed files are not
+     * indexable source; equality would mean the input sets converged. */
+    struct csi_verdict rootv = csi_classify(m, &seal, "");
+    struct ci_merkle_node croot;
+    bool rootfound = false;
+    (void)ci_merkle_root(m, &croot);
+    (void)ci_merkle_node(m, "", &croot, &rootfound);
+    printf("     whole-tree root: sealed %u files, codeindex indexed %u of "
+           "them\n", rootv.sealed_files, rootv.indexed_files);
+    CSI_CHECK("the whole-tree roots are correctly NOT comparable",
+              csi_roots_incomparable(&rootv));
+
+    csi_cross_fold_comparable(m, &seal, &mv);
 
     ci_merkle_free(m);
     csi_seal_run_free(&seal);
@@ -650,6 +720,69 @@ static const char *const csi_synth_files[] = {
     "core/modules/validation/src/v.c",
 };
 
+static bool csi_synth_write_fixture(char **list, size_t n)
+{
+    bool built = true;
+    for (size_t i = 0; i < n && built; i++) {
+        char dst[PATH_MAX], body[256];
+        snprintf(dst, sizeof(dst), "%s/%s", CSI_SYNTH, csi_synth_files[i]);
+        /* Distinct content and lengths, so the u64le size field is
+         * exercised. */
+        snprintf(body, sizeof(body), "/* %s */\n%*sint x%zu(void){return %zu;}\n",
+                 csi_synth_files[i], (int)i, "", i, i);
+        built = csi_write_file(dst, body);
+        list[i] = (char *)csi_synth_files[i];
+    }
+    return built;
+}
+
+static bool csi_synth_leaf_agrees(struct ci_merkle *m, const struct entry *e)
+{
+    struct ci_merkle_leaf l;
+    bool found = false;
+    return ci_merkle_leaf(m, e->path, &l, &found) && found &&
+           memcmp(e->leaf, l.digest.bytes, HSZ) == 0;
+}
+
+static bool csi_synth_node_agrees(struct ci_merkle *m,
+                                  const struct dnode *nd)
+{
+    struct ci_merkle_node cn;
+    bool found = false;
+    return ci_merkle_node(m, nd->path, &cn, &found) && found &&
+           memcmp(nd->digest, cn.digest.bytes, HSZ) == 0;
+}
+
+static bool csi_synth_same_set(const struct csi_verdict *v, size_t n)
+{
+    return v->comparable && v->sealed_files == (uint32_t)n &&
+           v->indexed_files == (uint32_t)n;
+}
+
+static void csi_synth_check_trap(struct ci_merkle *m)
+{
+    /* The two candidate ordering rules disagree for this fixture, so the
+     * agreement above is not order-insensitivity. */
+    struct ci_merkle_proof *p = ci_merkle_proof_alloc();
+    if (p) {
+        struct zcl_sha3_digest d;
+        bool found = false;
+        if (ci_merkle_prove(m, "core/ab.c", p, &d, &found) && found &&
+            p->nlevels > 0) {
+            const struct ci_merkle_proof_level *lv = &p->level[0];
+            unsigned char canon[HSZ], bare[HSZ];
+            csi_fold(CSI_V_CANONICAL, lv->path, &p->children[lv->first_child],
+                     lv->nchildren, canon);
+            csi_fold(CSI_V_ORDER_BARE_NAME, lv->path,
+                     &p->children[lv->first_child], lv->nchildren, bare);
+            CSI_CHECK("the ab.c / ab/ / ab_z.c ordering trap is live "
+                      "(key order != bare-name order)",
+                      lv->nchildren >= 3 && memcmp(canon, bare, HSZ) != 0);
+        }
+        ci_merkle_proof_free(p);
+    }
+}
+
 static void csi_synthetic_tree(void)
 {
     printf("\n  -- synthetic tree: identical input sets, so the ROOTS must "
@@ -663,20 +796,10 @@ static void csi_synthetic_tree(void)
 
     csi_rmrf(CSI_SYNTH);
     size_t n = sizeof(csi_synth_files) / sizeof(csi_synth_files[0]);
-    bool built = true;
     char **list = calloc(n, sizeof(char *));
     if (!list)
         die("out of memory");
-    for (size_t i = 0; i < n && built; i++) {
-        char dst[PATH_MAX], body[256];
-        snprintf(dst, sizeof(dst), "%s/%s", CSI_SYNTH, csi_synth_files[i]);
-        /* Distinct content and lengths, so the u64le size field is
-         * exercised. */
-        snprintf(body, sizeof(body), "/* %s */\n%*sint x%zu(void){return %zu;}\n",
-                 csi_synth_files[i], (int)i, "", i, i);
-        built = csi_write_file(dst, body);
-        list[i] = (char *)csi_synth_files[i];
-    }
+    bool built = csi_synth_write_fixture(list, n);
     CSI_CHECK("synthetic fixture written", built);
     if (!built) {
         free(list);
@@ -711,16 +834,12 @@ static void csi_synthetic_tree(void)
     /* Same set, proved rather than assumed. */
     struct csi_verdict rootv = csi_classify(m, &seal, "");
     CSI_CHECK("both implementations saw the identical file set",
-              rootv.comparable && rootv.sealed_files == (uint32_t)n &&
-                  rootv.indexed_files == (uint32_t)n);
+              csi_synth_same_set(&rootv, n));
 
     /* Every leaf. */
     size_t leaf_same = 0;
     for (size_t i = 0; i < seal.nents; i++) {
-        struct ci_merkle_leaf l;
-        bool found = false;
-        if (ci_merkle_leaf(m, seal.ents[i].path, &l, &found) && found &&
-            memcmp(seal.ents[i].leaf, l.digest.bytes, HSZ) == 0)
+        if (csi_synth_leaf_agrees(m, &seal.ents[i]))
             leaf_same++;
         else
             printf("     LEAF DISAGREE: %s\n", seal.ents[i].path);
@@ -730,10 +849,7 @@ static void csi_synthetic_tree(void)
     /* Every directory node, root included. */
     size_t node_same = 0;
     for (size_t i = 0; i < seal.nnodes; i++) {
-        struct ci_merkle_node cn;
-        bool found = false;
-        if (ci_merkle_node(m, seal.nodes[i].path, &cn, &found) && found &&
-            memcmp(seal.nodes[i].digest, cn.digest.bytes, HSZ) == 0)
+        if (csi_synth_node_agrees(m, &seal.nodes[i]))
             node_same++;
         else
             printf("     NODE DISAGREE: '%s'\n", seal.nodes[i].path);
@@ -758,26 +874,7 @@ static void csi_synthetic_tree(void)
     CSI_CHECK("the whole-tree roots are byte-identical",
               rf && memcmp(seal.tree, croot.digest.bytes, HSZ) == 0);
 
-    /* The two candidate ordering rules disagree for this fixture, so the
-     * agreement above is not order-insensitivity. */
-    struct ci_merkle_proof *p = ci_merkle_proof_alloc();
-    if (p) {
-        struct zcl_sha3_digest d;
-        bool found = false;
-        if (ci_merkle_prove(m, "core/ab.c", p, &d, &found) && found &&
-            p->nlevels > 0) {
-            const struct ci_merkle_proof_level *lv = &p->level[0];
-            unsigned char canon[HSZ], bare[HSZ];
-            csi_fold(CSI_V_CANONICAL, lv->path, &p->children[lv->first_child],
-                     lv->nchildren, canon);
-            csi_fold(CSI_V_ORDER_BARE_NAME, lv->path,
-                     &p->children[lv->first_child], lv->nchildren, bare);
-            CSI_CHECK("the ab.c / ab/ / ab_z.c ordering trap is live "
-                      "(key order != bare-name order)",
-                      lv->nchildren >= 3 && memcmp(canon, bare, HSZ) != 0);
-        }
-        ci_merkle_proof_free(p);
-    }
+    csi_synth_check_trap(m);
 
     ci_merkle_free(m);
     csi_seal_run_free(&seal);
@@ -785,6 +882,58 @@ static void csi_synthetic_tree(void)
 }
 
 /* ── 3: the equality above is sensitive to every clause of the dialect ── */
+
+static bool csi_sealer_leaf_matches(const char *root_abs,
+                                    const unsigned char want[HSZ])
+{
+    /* Canonical, via the sealer's own hash_file(). */
+    char saved[PATH_MAX];
+    unsigned char flat[HSZ], leaf[HSZ];
+    uint64_t sz = 0;
+    bool ok = getcwd(saved, sizeof(saved)) != NULL &&
+              chdir(root_abs) == 0;
+    if (ok) {
+        ok = hash_file("core/ab.c", flat, leaf, &sz) == 0;
+        if (chdir(saved) != 0)
+            ok = false;
+    }
+    return ok && memcmp(leaf, want, HSZ) == 0;
+}
+
+static bool csi_leaf_no_nul_differs(const char *full, const struct stat *st,
+                                    const unsigned char want[HSZ])
+{
+    /* Same bytes, leaf domain hashed without its NUL. */
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    unsigned char tag = MERKLE_TAG_LEAF;
+    sha3_256_write(&ctx, &tag, 1);
+    sha3_256_write(&ctx, (const unsigned char *)merkle_leaf_domain,
+                   strlen(merkle_leaf_domain));
+    sha3_256_write(&ctx, (const unsigned char *)"core/ab.c",
+                   strlen("core/ab.c") + 1);
+    write_u64le(&ctx, (uint64_t)st->st_size);
+    int fd = open(full, O_RDONLY | O_CLOEXEC);
+    bool read_ok = fd >= 0;
+    unsigned char buf[65536];
+    while (read_ok) {
+        ssize_t got = read(fd, buf, sizeof(buf));
+        if (got < 0) {
+            if (errno == EINTR)
+                continue;
+            read_ok = false;
+            break;
+        }
+        if (got == 0)
+            break;
+        sha3_256_write(&ctx, buf, (size_t)got);
+    }
+    if (fd >= 0)
+        close(fd);
+    unsigned char wrong[HSZ];
+    sha3_256_finalize(&ctx, wrong);
+    return read_ok && memcmp(wrong, want, HSZ) != 0;
+}
 
 static void csi_dialect_discriminates(void)
 {
@@ -851,51 +1000,11 @@ static void csi_dialect_discriminates(void)
         snprintf(full, sizeof(full), "%s/core/ab.c", root_abs);
         struct stat st;
         if (stat(full, &st) == 0) {
-            /* Canonical, via the sealer's own hash_file(). */
-            char saved[PATH_MAX];
-            unsigned char flat[HSZ], leaf[HSZ];
-            uint64_t sz = 0;
-            bool ok = getcwd(saved, sizeof(saved)) != NULL &&
-                      chdir(root_abs) == 0;
-            if (ok) {
-                ok = hash_file("core/ab.c", flat, leaf, &sz) == 0;
-                if (chdir(saved) != 0)
-                    ok = false;
-            }
             CSI_CHECK("sealer's hash_file MATCHES codeindex's leaf digest",
-                      ok && memcmp(leaf, l.digest.bytes, HSZ) == 0);
+                      csi_sealer_leaf_matches(root_abs, l.digest.bytes));
 
-            /* Same bytes, leaf domain hashed without its NUL. */
-            struct sha3_256_ctx ctx;
-            sha3_256_init(&ctx);
-            unsigned char tag = MERKLE_TAG_LEAF;
-            sha3_256_write(&ctx, &tag, 1);
-            sha3_256_write(&ctx, (const unsigned char *)merkle_leaf_domain,
-                           strlen(merkle_leaf_domain));
-            sha3_256_write(&ctx, (const unsigned char *)"core/ab.c",
-                           strlen("core/ab.c") + 1);
-            write_u64le(&ctx, (uint64_t)st.st_size);
-            int fd = open(full, O_RDONLY | O_CLOEXEC);
-            bool read_ok = fd >= 0;
-            unsigned char buf[65536];
-            while (read_ok) {
-                ssize_t got = read(fd, buf, sizeof(buf));
-                if (got < 0) {
-                    if (errno == EINTR)
-                        continue;
-                    read_ok = false;
-                    break;
-                }
-                if (got == 0)
-                    break;
-                sha3_256_write(&ctx, buf, (size_t)got);
-            }
-            if (fd >= 0)
-                close(fd);
-            unsigned char wrong[HSZ];
-            sha3_256_finalize(&ctx, wrong);
             CSI_CHECK("a leaf domain without its NUL FAILS to match",
-                      read_ok && memcmp(wrong, l.digest.bytes, HSZ) != 0);
+                      csi_leaf_no_nul_differs(full, &st, l.digest.bytes));
         }
     }
 
