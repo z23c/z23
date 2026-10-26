@@ -308,7 +308,7 @@ static void check_send_flow(void)
     CHECK("NULL body → no crash", _len > 0);
 }
 
-static void check_receive_page(void)
+static void bot_check_receive_page(void)
 {
     GET("/wallet/receive");
 
@@ -400,7 +400,7 @@ static void check_tx_detail_page(void)
     CHECK("short txid → error", _len > 200);
 }
 
-static void check_pulse_api(void)
+static void bot_check_pulse_api(void)
 {
     GET("/api/wallet/pulse");
 
@@ -475,7 +475,7 @@ int main(int argc, char **argv)
 
     /* ═══ RECEIVE ═══ */
     SECTION("Receive page");
-    check_receive_page();
+    bot_check_receive_page();
 
     /* ═══ HISTORY ═══ */
     SECTION("History");
@@ -500,7 +500,7 @@ int main(int argc, char **argv)
 
     /* ═══ PULSE API ═══ */
     SECTION("Pulse API");
-    check_pulse_api();
+    bot_check_pulse_api();
 
     /* ═══ UNKNOWN ROUTES ═══ */
     SECTION("Unknown routes");
