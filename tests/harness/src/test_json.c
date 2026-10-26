@@ -453,13 +453,9 @@ static int json_number_cases(void)
     return failures;
 }
 
-int test_json(void)
+static int json_parse_atom_cases(void)
 {
-    int failures = json_unicode_cases() + json_number_cases() + json_heap_accounting_cases() + json_checked_copy_cases() + json_growth_cases() + json_append_target_cases() + cgo_decoder_tests() + cgo_passive_tests() + cga_goal_tests();
-
-    printf("json parse failures retire copied strings and partial trees... ");
-    extern int json_failure_retirement_case(void);
-    failures += json_failure_retirement_case();
+    int failures = 0;
 
     printf("json parse integer... ");
     {
@@ -495,6 +491,13 @@ int test_json(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int json_parse_collection_cases(void)
+{
+    int failures = 0;
+
     printf("json parse array... ");
     {
         struct json_value v;
@@ -515,6 +518,13 @@ int test_json(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int json_build_and_nested_object_cases(void)
+{
+    int failures = 0;
 
     printf("json build object + write... ");
     {
@@ -542,6 +552,13 @@ int test_json(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int json_parse_empty_value_cases(void)
+{
+    int failures = 0;
 
     /* ── Edge cases ────────────────────────────────────────── */
 
@@ -571,6 +588,13 @@ int test_json(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int json_parse_number_form_cases(void)
+{
+    int failures = 0;
 
     printf("json parse negative integer... ");
     {
@@ -603,6 +627,13 @@ int test_json(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int json_parse_escape_cases(void)
+{
+    int failures = 0;
+
     printf("json parse string with escapes... ");
     {
         const char *s = "\"hello\\nworld\\t!\"";
@@ -627,6 +658,13 @@ int test_json(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int json_parse_boundary_cases(void)
+{
+    int failures = 0;
 
     printf("json reject truncated input... ");
     {
@@ -666,6 +704,13 @@ int test_json(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); json_free(&v); failures++; }
     }
 
+    return failures;
+}
+
+static int json_parse_deeply_nested_array_case(void)
+{
+    int failures = 0;
+
     printf("json parse deeply nested array... ");
     {
         /* [[[[42]]]] — 4 levels deep */
@@ -685,6 +730,13 @@ int test_json(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int json_parse_large_array_case(void)
+{
+    int failures = 0;
+
     printf("json parse large array (100 elements)... ");
     {
         char buf[512];
@@ -702,6 +754,13 @@ int test_json(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int json_write_read_roundtrip_case(void)
+{
+    int failures = 0;
 
     printf("json write + read roundtrip... ");
     {
@@ -728,6 +787,13 @@ int test_json(void)
         json_free(&v2);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int json_nesting_limit_and_copy_cases(void)
+{
+    int failures = 0;
 
     printf("json reject nesting beyond depth limit... ");
     {
@@ -775,20 +841,33 @@ int test_json(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static bool json_accessors_null_zero_values(void)
+{
+    bool ok = true;
+    ok = ok && (json_at(NULL, 0) == NULL);
+    ok = ok && (json_get_str(NULL)[0] == '\0');
+    ok = ok && (json_get_int(NULL) == 0);
+    ok = ok && (json_get_real(NULL) == 0.0);
+    ok = ok && (json_get_bool(NULL) == false);
+    ok = ok && (json_is_null(NULL) == true);
+    ok = ok && (json_size(NULL) == 0);
+    ok = ok && (json_empty(NULL) == true);
+    return ok;
+}
+
+static int json_accessors_null_safe_case(void)
+{
+    int failures = 0;
+
     printf("json accessors NULL-safe (missing RPC param must not crash)... ");
     {
         /* json_get_str(json_at(params, N)) on an ABSENT param N gets NULL from
          * json_at(). Every read accessor
          * must treat NULL as the type's zero value, never dereference it. */
-        bool ok = true;
-        ok = ok && (json_at(NULL, 0) == NULL);
-        ok = ok && (json_get_str(NULL)[0] == '\0');
-        ok = ok && (json_get_int(NULL) == 0);
-        ok = ok && (json_get_real(NULL) == 0.0);
-        ok = ok && (json_get_bool(NULL) == false);
-        ok = ok && (json_is_null(NULL) == true);
-        ok = ok && (json_size(NULL) == 0);
-        ok = ok && (json_empty(NULL) == true);
+        bool ok = json_accessors_null_zero_values();
         /* The exact crash idiom on an empty params array. */
         struct json_value arr;
         json_init(&arr);
@@ -800,6 +879,29 @@ int test_json(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+int test_json(void)
+{
+    int failures = json_unicode_cases() + json_number_cases() + json_heap_accounting_cases() + json_checked_copy_cases() + json_growth_cases() + json_append_target_cases() + cgo_decoder_tests() + cgo_passive_tests() + cga_goal_tests();
+
+    printf("json parse failures retire copied strings and partial trees... ");
+    extern int json_failure_retirement_case(void);
+    failures += json_failure_retirement_case();
+
+    failures += json_parse_atom_cases();
+    failures += json_parse_collection_cases();
+    failures += json_build_and_nested_object_cases();
+    failures += json_parse_empty_value_cases();
+    failures += json_parse_number_form_cases();
+    failures += json_parse_escape_cases();
+    failures += json_parse_boundary_cases();
+    failures += json_parse_deeply_nested_array_case();
+    failures += json_parse_large_array_case();
+    failures += json_write_read_roundtrip_case();
+    failures += json_nesting_limit_and_copy_cases();
+    failures += json_accessors_null_safe_case();
 
     printf("json_valid is json_read's grammar with no allocation... ");
     failures += json_valid_case();
