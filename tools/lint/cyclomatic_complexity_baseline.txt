@@ -60,11 +60,6 @@ contexts/commons/modules/vcs/src/zcode_focus.c:vcs_zcode_focus_compose:16
 contexts/commons/modules/vcs/src/zcode_focus.c:vcs_zcode_focus_parse:28
 contexts/commons/modules/vcs/src/zcode_focus.c:vcs_zcode_focus_serialize:27
 contexts/commons/modules/vcs/src/zcode_focus.c:vcs_zcode_focus_validate:24
-contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_authority_status:18
-contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_parse:19
-contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_serialize:16
-contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_set_status:21
-contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_work_status:23
 contexts/commons/modules/vcs/src/zcode_patronage.c:patronage_body:28
 contexts/commons/modules/vcs/src/zcode_patronage.c:patronage_fields:38
 contexts/commons/modules/vcs/src/zcode_patronage.c:vcs_zcode_patronage_error_string:21

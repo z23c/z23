@@ -54,6 +54,22 @@ enum vcs_zcode_focus_error vcs_zcode_focus_claim_validate_at(
         ? VCS_ZCODE_FOCUS_OK : VCS_ZCODE_FOCUS_EXPIRED;
 }
 
+static bool claim_write_fields(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_focus_claim_v1 *claim)
+{
+    return zcl_codec_write_bytes(writer, claim_magic, 8) &&
+        zcl_codec_write_u16le(writer, claim->schema_version) &&
+        zcl_codec_write_u16le(writer, claim->flags) &&
+        zcl_codec_write_u32le(writer, claim->reserved) &&
+        zcl_codec_write_u64le(writer, (uint64_t)claim->created_unix) &&
+        zcl_codec_write_u64le(writer, (uint64_t)claim->expires_unix) &&
+        zcl_codec_write_bytes(writer, claim->situation_root, 32) &&
+        zcl_codec_write_bytes(writer, claim->claimant_root, 32) &&
+        zcl_codec_write_bytes(writer, claim->write_scope_root, 32) &&
+        zcl_codec_write_bytes(writer, claim->intent_root, 32) &&
+        zcl_codec_write_bytes(writer, claim->evidence_plan_root, 32);
+}
+
 enum vcs_zcode_focus_error vcs_zcode_focus_claim_serialize(
     const struct vcs_zcode_focus_claim_v1 *claim,
     uint8_t out[VCS_ZCODE_FOCUS_CLAIM_WIRE_BYTES])
@@ -63,21 +79,33 @@ enum vcs_zcode_focus_error vcs_zcode_focus_claim_serialize(
     if (error != VCS_ZCODE_FOCUS_OK) return error;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_FOCUS_CLAIM_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, claim_magic, 8) &&
-        zcl_codec_write_u16le(&writer, claim->schema_version) &&
-        zcl_codec_write_u16le(&writer, claim->flags) &&
-        zcl_codec_write_u32le(&writer, claim->reserved) &&
-        zcl_codec_write_u64le(&writer, (uint64_t)claim->created_unix) &&
-        zcl_codec_write_u64le(&writer, (uint64_t)claim->expires_unix) &&
-        zcl_codec_write_bytes(&writer, claim->situation_root, 32) &&
-        zcl_codec_write_bytes(&writer, claim->claimant_root, 32) &&
-        zcl_codec_write_bytes(&writer, claim->write_scope_root, 32) &&
-        zcl_codec_write_bytes(&writer, claim->intent_root, 32) &&
-        zcl_codec_write_bytes(&writer, claim->evidence_plan_root, 32);
+    bool ok = claim_write_fields(&writer, claim);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == VCS_ZCODE_FOCUS_CLAIM_WIRE_BYTES
         ? VCS_ZCODE_FOCUS_OK : VCS_ZCODE_FOCUS_SHAPE;
+}
+
+static bool claim_read_header(struct zcl_codec_reader *reader,
+    struct vcs_zcode_focus_claim_v1 *out, uint8_t magic[8],
+    uint64_t *created, uint64_t *expires)
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u16le(reader, &out->flags) &&
+        zcl_codec_read_u32le(reader, &out->reserved) &&
+        zcl_codec_read_u64le(reader, created) &&
+        zcl_codec_read_u64le(reader, expires);
+}
+
+static bool claim_read_roots(struct zcl_codec_reader *reader,
+    struct vcs_zcode_focus_claim_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->situation_root, 32) &&
+        zcl_codec_read_bytes(reader, out->claimant_root, 32) &&
+        zcl_codec_read_bytes(reader, out->write_scope_root, 32) &&
+        zcl_codec_read_bytes(reader, out->intent_root, 32) &&
+        zcl_codec_read_bytes(reader, out->evidence_plan_root, 32);
 }
 
 enum vcs_zcode_focus_error vcs_zcode_focus_claim_parse(
@@ -91,17 +119,8 @@ enum vcs_zcode_focus_error vcs_zcode_focus_claim_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8]; uint64_t created, expires;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u16le(&reader, &out->flags) &&
-        zcl_codec_read_u32le(&reader, &out->reserved) &&
-        zcl_codec_read_u64le(&reader, &created) &&
-        zcl_codec_read_u64le(&reader, &expires) &&
-        zcl_codec_read_bytes(&reader, out->situation_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->claimant_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->write_scope_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->intent_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->evidence_plan_root, 32) &&
+    bool ok = claim_read_header(&reader, out, magic, &created, &expires) &&
+        claim_read_roots(&reader, out) &&
         zcl_codec_reader_finish(&reader) &&
         memcmp(magic, claim_magic, 8) == 0 &&
         created <= INT64_MAX && expires <= INT64_MAX;
@@ -155,7 +174,7 @@ enum zcl_ontology_status vcs_zcode_focus_claim_disjoint_status(
         ? ZCL_ONTOLOGY_DISPROVED : ZCL_ONTOLOGY_PROVED;
 }
 
-enum zcl_ontology_status vcs_zcode_focus_claim_authority_status(
+static enum zcl_ontology_status claim_authority_inputs(
     const struct vcs_zcode_focus_v1 *focus,
     const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_write_scope_v1 *task_scope,
@@ -171,6 +190,16 @@ enum zcl_ontology_status vcs_zcode_focus_claim_authority_status(
         vcs_zcode_write_scope_validate(claim_scope) !=
             VCS_ZCODE_WRITE_SCOPE_OK)
         return ZCL_ONTOLOGY_INCOMPLETE;
+    return ZCL_ONTOLOGY_PROVED;
+}
+
+static enum zcl_ontology_status claim_authority_binding(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_write_scope_v1 *task_scope,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const struct vcs_zcode_write_scope_v1 *claim_scope)
+{
     uint8_t task_root[32], task_scope_root[32], claim_scope_root[32];
     uint8_t situation_root[32];
     if (vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
@@ -187,6 +216,22 @@ enum zcl_ontology_status vcs_zcode_focus_claim_authority_status(
         memcmp(task->source_root, focus->source_universe_root, 32) != 0 ||
         memcmp(task->goal_root, focus->goal_root, 32) != 0)
         return ZCL_ONTOLOGY_INCOMPLETE;
+    return ZCL_ONTOLOGY_PROVED;
+}
+
+enum zcl_ontology_status vcs_zcode_focus_claim_authority_status(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_write_scope_v1 *task_scope,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const struct vcs_zcode_write_scope_v1 *claim_scope, int64_t now_unix)
+{
+    enum zcl_ontology_status status = claim_authority_inputs(
+        focus, task, task_scope, claim, claim_scope, now_unix);
+    if (status != ZCL_ONTOLOGY_PROVED) return status;
+    status = claim_authority_binding(focus, task, task_scope, claim,
+                                     claim_scope);
+    if (status != ZCL_ONTOLOGY_PROVED) return status;
     for (size_t i = 0; i < claim_scope->count; i++)
         if (!vcs_zcode_write_scope_contains(task_scope,
                                              claim_scope->paths[i]))
@@ -194,19 +239,13 @@ enum zcl_ontology_status vcs_zcode_focus_claim_authority_status(
     return ZCL_ONTOLOGY_PROVED;
 }
 
-enum zcl_ontology_status vcs_zcode_focus_claim_set_status(
+static enum zcl_ontology_status claim_set_roots(
     const struct vcs_zcode_focus_v1 *focus,
     const struct vcs_zcode_focus_claim_v1 *claims,
     const struct vcs_zcode_write_scope_v1 *scopes,
-    size_t claim_count, int64_t now_unix)
+    size_t claim_count, int64_t now_unix, uint8_t (*roots)[32])
 {
-    if (vcs_zcode_focus_validate(focus) != VCS_ZCODE_FOCUS_OK ||
-        claim_count != focus->claim_count ||
-        claim_count > VCS_ZCODE_FOCUS_MAX_CLAIMS ||
-        (claim_count > 0 && (!claims || !scopes)))
-        return ZCL_ONTOLOGY_INCOMPLETE;
     uint8_t situation_root[32];
-    uint8_t roots[VCS_ZCODE_FOCUS_MAX_CLAIMS][32];
     if (vcs_zcode_focus_situation_root(focus, situation_root) !=
         VCS_ZCODE_FOCUS_OK)
         return ZCL_ONTOLOGY_INCOMPLETE;
@@ -223,16 +262,40 @@ enum zcl_ontology_status vcs_zcode_focus_claim_set_status(
             (i > 0 && memcmp(roots[i - 1u], roots[i], 32) >= 0))
             return ZCL_ONTOLOGY_INCOMPLETE;
     }
-    uint8_t set_root[32];
-    if (vcs_zcode_focus_claim_set_root(roots, claim_count, set_root) !=
-            VCS_ZCODE_FOCUS_OK ||
-        memcmp(set_root, focus->claim_set_root, 32) != 0)
-        return ZCL_ONTOLOGY_INCOMPLETE;
+    return ZCL_ONTOLOGY_PROVED;
+}
+
+static enum zcl_ontology_status claim_set_overlap(
+    const struct vcs_zcode_write_scope_v1 *scopes, size_t claim_count)
+{
     for (size_t i = 0; i < claim_count; i++)
         for (size_t j = i + 1u; j < claim_count; j++)
             if (vcs_zcode_write_scope_overlaps(&scopes[i], &scopes[j]))
                 return ZCL_ONTOLOGY_DISPROVED;
     return ZCL_ONTOLOGY_PROVED;
+}
+
+enum zcl_ontology_status vcs_zcode_focus_claim_set_status(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_focus_claim_v1 *claims,
+    const struct vcs_zcode_write_scope_v1 *scopes,
+    size_t claim_count, int64_t now_unix)
+{
+    if (vcs_zcode_focus_validate(focus) != VCS_ZCODE_FOCUS_OK ||
+        claim_count != focus->claim_count ||
+        claim_count > VCS_ZCODE_FOCUS_MAX_CLAIMS ||
+        (claim_count > 0 && (!claims || !scopes)))
+        return ZCL_ONTOLOGY_INCOMPLETE;
+    uint8_t roots[VCS_ZCODE_FOCUS_MAX_CLAIMS][32];
+    uint8_t set_root[32];
+    enum zcl_ontology_status status = claim_set_roots(
+        focus, claims, scopes, claim_count, now_unix, roots);
+    if (status != ZCL_ONTOLOGY_PROVED) return status;
+    if (vcs_zcode_focus_claim_set_root(roots, claim_count, set_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        memcmp(set_root, focus->claim_set_root, 32) != 0)
+        return ZCL_ONTOLOGY_INCOMPLETE;
+    return claim_set_overlap(scopes, claim_count);
 }
 
 enum zcl_ontology_status vcs_zcode_focus_claim_membership_status(
@@ -256,6 +319,39 @@ enum zcl_ontology_status vcs_zcode_focus_claim_membership_status(
         if (memcmp(claim_root, claim_roots[i], 32) == 0)
             return ZCL_ONTOLOGY_PROVED;
     return ZCL_ONTOLOGY_DISPROVED;
+}
+
+static bool claim_work_roots_bound(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const struct vcs_zcode_work_request_v1 *request,
+    const uint8_t request_root[32])
+{
+    return memcmp(request_root, claim->intent_root, 32) == 0 &&
+        memcmp(request->task_root, focus->task_root, 32) == 0 &&
+        memcmp(request->proof_policy_root,
+               claim->evidence_plan_root, 32) == 0 &&
+        memcmp(request->proof_policy_root, task->proof_policy_root, 32) == 0 &&
+        memcmp(request->toolchain_capsule_root,
+               task->toolchain_capsule_root, 32) == 0;
+}
+
+static bool claim_work_limits_bound(
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_admission_v1 *admission,
+    int64_t now_unix)
+{
+    return request->max_cpu_seconds <= task->max_cpu_seconds &&
+        request->max_memory_bytes <= task->max_memory_bytes &&
+        request->max_output_bytes <= task->max_output_bytes &&
+        request->deadline_unix <= task->expires_unix &&
+        claim->expires_unix <= request->deadline_unix &&
+        now_unix < admission->deadline_unix &&
+        claim->expires_unix <= admission->deadline_unix &&
+        admission->deadline_unix <= request->deadline_unix;
 }
 
 enum zcl_ontology_status vcs_zcode_focus_claim_work_status(
@@ -288,20 +384,8 @@ enum zcl_ontology_status vcs_zcode_focus_claim_work_status(
     uint8_t request_root[32];
     if (!vcs_zcode_work_request_id(request, request_root))
         return ZCL_ONTOLOGY_INCOMPLETE;
-    bool bound = memcmp(request_root, claim->intent_root, 32) == 0 &&
-        memcmp(request->task_root, focus->task_root, 32) == 0 &&
-        memcmp(request->proof_policy_root,
-               claim->evidence_plan_root, 32) == 0 &&
-        memcmp(request->proof_policy_root, task->proof_policy_root, 32) == 0 &&
-        memcmp(request->toolchain_capsule_root,
-               task->toolchain_capsule_root, 32) == 0 &&
-        request->max_cpu_seconds <= task->max_cpu_seconds &&
-        request->max_memory_bytes <= task->max_memory_bytes &&
-        request->max_output_bytes <= task->max_output_bytes &&
-        request->deadline_unix <= task->expires_unix &&
-        claim->expires_unix <= request->deadline_unix &&
-        now_unix < admission->deadline_unix &&
-        claim->expires_unix <= admission->deadline_unix &&
-        admission->deadline_unix <= request->deadline_unix;
+    bool bound = claim_work_roots_bound(focus, task, claim, request,
+                                        request_root) &&
+        claim_work_limits_bound(task, claim, request, admission, now_unix);
     return bound ? ZCL_ONTOLOGY_PROVED : ZCL_ONTOLOGY_DISPROVED;
 }
