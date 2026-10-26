@@ -75,28 +75,6 @@ static bool sss_recompute_matches(bool ok, bool ok_again, uint8_t *out,
     return ok && ok_again && memcmp(out, out_again, 32) == 0;
 }
 
-/* A different rcv yields a different cv (hiding). */
-static bool sss_cv_differs_under_fresh_rcv(uint64_t value, uint8_t *cv)
-{
-    uint8_t rcv2[32], cv2[32];
-    bool s = sapling_generate_r(rcv2);
-    bool c = s && sapling_value_commit(value, rcv2, cv2);
-    return c && memcmp(cv, cv2, 32) != 0;
-}
-
-/* The SAME note at a DIFFERENT position yields a DIFFERENT nf —
- * the position binding that prevents replaying one note's nf. */
-static bool sss_nf_differs_at_next_leaf(uint8_t *nf, uint8_t *d,
-                                        uint8_t *pk_d, uint64_t value,
-                                        uint8_t *rcm, uint8_t *ak,
-                                        uint8_t *nk, uint64_t position)
-{
-    uint8_t nf_pos[32];
-    bool ok = sapling_compute_nf(d, pk_d, value, rcm, ak, nk,
-                                 position + 1, nf_pos);
-    return ok && memcmp(nf, nf_pos, 32) != 0;
-}
-
 /* The sig must NOT verify under the given verification key. */
 static bool sss_sig_rejected_under(bool sign_ok, uint8_t *vk, uint8_t *msg,
                                    uint8_t *sig)
@@ -205,8 +183,14 @@ int test_shielded_spend_slice(void)
     SSS_CHECK("value commitment cv built", cv_ok && cv_ok2);
     SSS_CHECK("cv is deterministic in (value, rcv)",
               sss_recompute_matches(cv_ok, cv_ok2, cv, cv_again));
-    SSS_CHECK("cv differs under fresh rcv (binding randomness used)",
-              sss_cv_differs_under_fresh_rcv(SPEND_VALUE, cv));
+    {
+        /* A different rcv yields a different cv (hiding). */
+        uint8_t rcv2[32], cv2[32];
+        bool s = sapling_generate_r(rcv2);
+        bool c = s && sapling_value_commit(SPEND_VALUE, rcv2, cv2);
+        SSS_CHECK("cv differs under fresh rcv (binding randomness used)",
+                  c && memcmp(cv, cv2, 32) != 0);
+    }
 
     /* ── (3) NULLIFIER DERIVATION: nf = BLAKE2s("Zcash_nf", nk || rho),
      * rho = cm_full + position·NullifierPosition. Deterministic in
@@ -219,9 +203,15 @@ int test_shielded_spend_slice(void)
     SSS_CHECK("nullifier nf derived", nf_ok && nf_ok2);
     SSS_CHECK("nf is deterministic in (note, position)",
               sss_recompute_matches(nf_ok, nf_ok2, nf, nf_again));
-    SSS_CHECK("nf is position-bound (differs at a different leaf)",
-              sss_nf_differs_at_next_leaf(nf, d, pk_d, SPEND_VALUE, rcm,
-                                          ak, nk, POSITION));
+    {
+        /* The SAME note at a DIFFERENT position yields a DIFFERENT nf —
+         * the position binding that prevents replaying one note's nf. */
+        uint8_t nf_pos[32];
+        bool ok = sapling_compute_nf(d, pk_d, SPEND_VALUE, rcm, ak, nk,
+                                     POSITION + 1, nf_pos);
+        SSS_CHECK("nf is position-bound (differs at a different leaf)",
+                  ok && memcmp(nf, nf_pos, 32) != 0);
+    }
 
     /* ── (4) SPEND-AUTH: rk = ak + ar·G_spendauth; the spend authorization
      * signature is RedJubjub_sign(rsk = ask + ar, sighash) and must verify
