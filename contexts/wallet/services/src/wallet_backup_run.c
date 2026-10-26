@@ -284,12 +284,15 @@ static struct zcl_result wbs_verify_all_tables(
 static void wbs_report_backup_success(
     struct wallet_backup_store_port *store, const char *dst_path,
     const char *missing, int verified,
+    struct wbs_verify_out *vout,
     char *out_path, int64_t *out_key_count)
 {
     int64_t dst_key_count =
         store->count_rows_in_file(store->self, dst_path, "wallet_keys");
     if (dst_key_count < 0)
         dst_key_count = 0;
+
+    vout->tables_verified = verified;
 
     struct platform_file_metadata metadata;
     int64_t bytes = platform_file_metadata_read(dst_path, &metadata) ==
@@ -375,10 +378,8 @@ struct zcl_result wbs_run_once_impl(const char *backup_dir,
     if (!verify_r.ok)
         return verify_r;
 
-    vout->tables_verified = verified;
-
     wbs_report_backup_success(&store, dst_path, vout->missing, verified,
-                              out_path, out_key_count);
+                              vout, out_path, out_key_count);
 
     return ZCL_OK;
 }
