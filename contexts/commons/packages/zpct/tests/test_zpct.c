@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define main zpct_cli_main
+#include "../app/main.c"
+#undef main
+
 static int g_fail = 0;
 #define CHECK(cond)                                                     \
   do {                                                                  \
@@ -198,7 +202,92 @@ static void test_error_termination(void) {
   }
 }
 
+static bool cli_output_matches(FILE *output, const void *expected, size_t size) {
+  if (ftell(output) != (long)size) return false;
+  rewind(output);
+  const unsigned char *bytes = expected;
+  for (size_t i = 0; i < size; i++)
+    if (fgetc(output) != bytes[i]) return false;
+  return fgetc(output) == EOF && !ferror(output);
+}
+
+static int cli_stream_case(const void *wire, size_t size, int status,
+                            const void *expected, size_t expected_size) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (fwrite(wire, 1, size, source) != size || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  char *argv[] = {"zpct", "decode", NULL};
+  if (cli_run(2, argv, source, output) != status) goto cleanup;
+  if (expected && !cli_output_matches(output, expected, expected_size)) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static void test_cli_stream_boundaries(void) {
+  char wire[12320], expected[12320];
+  const size_t prefixes[] = {4094, 4095, 12287};
+  for (size_t i = 0; i < sizeof prefixes / sizeof prefixes[0]; i++) {
+    size_t n = prefixes[i];
+    memset(wire, 'a', n);
+    memcpy(wire + n, "%41%00%42", 9);
+    memset(expected, 'a', n);
+    memcpy(expected + n, "A\0B", 3);
+    CHECK(cli_stream_case(wire, n + 9, 0, expected, n + 3) == 0);
+  }
+  const char *bad[] = {"%", "%4", "%GG", "%4G", "%A%", "%%41"};
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    CHECK(cli_stream_case(bad[i], strlen(bad[i]), 1, NULL, 0) == 0);
+    memset(wire, 'a', 4095);
+    size_t n = strlen(bad[i]);
+    memcpy(wire + 4095, bad[i], n);
+    CHECK(cli_stream_case(wire, 4095 + n, 1, NULL, 0) == 0);
+  }
+}
+
+static int cli_output_error(const char *path, const char *access,
+                             char *mode, bool argument) {
+  FILE *source = tmpfile(), *output = fopen(path, access);
+  char buffer[4096];
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+  if (fputs("%41", source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  char *argv[] = {"zpct", mode, "%41", NULL};
+  if (cli_run(argument ? 3 : 2, argv, source, output) != 1 || !ferror(output))
+    goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output) (void)fclose(output);
+  return failed;
+}
+
+static void test_cli_output_errors(void) {
+#if defined(_WIN32)
+  const char *null_path = "NUL";
+#else
+  const char *null_path = "/dev/null";
+#endif
+  char *modes[] = {"encode", "decode"};
+  for (size_t i = 0; i < sizeof modes / sizeof modes[0]; i++) {
+    for (int argument = 0; argument < 2; argument++) {
+      CHECK(cli_output_error(null_path, "r", modes[i], argument != 0) == 0);
+#if defined(__linux__)
+      CHECK(cli_output_error("/dev/full", "w", modes[i], argument != 0) == 0);
+#endif
+    }
+  }
+}
+
 int main(void) {
+  test_cli_stream_boundaries();
+  test_cli_output_errors();
   test_error_termination();
   test_kat();
   test_roundtrip();

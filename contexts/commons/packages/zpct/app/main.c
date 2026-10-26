@@ -10,34 +10,65 @@
 #include <stdio.h>
 #include <string.h>
 
-static int do_stream(int decode, zpct_set set) {
-  unsigned char in[4096];
-  char out[sizeof(in) * 3 + 1];
-  size_t n;
-  int rc = 0;
-  while ((n = fread(in, 1, sizeof(in), stdin)) > 0) {
-    size_t need = decode ? zpct_decode(out, sizeof(out), in, n, NULL)
-                         : zpct_encode(out, sizeof(out), in, n, set);
-    if (need == SIZE_MAX || need >= sizeof(out)) {
-      fprintf(stderr, "zpct: %s: %s\n", decode ? "decode" : "encode",
-              decode ? "malformed percent sequence" : "output overflow");
-      rc = 1;
-      break;
-    }
-    /* Decoded output may contain NULs: write raw bytes. */
-    if (fwrite(out, 1, need, stdout) != need) {
-      fprintf(stderr, "zpct: write error\n");
-      return 1;
-    }
-  }
-  if (ferror(stdin)) {
-    fprintf(stderr, "zpct: error reading stdin\n");
+/* A suffix can need one more read; malformed complete prefixes still go
+ * through the strict decoder immediately. Never retain more than two bytes. */
+static size_t stream_decode_prefix(const unsigned char *in, size_t n) {
+  if (n && in[n - 1] == '%') return n - 1;
+  if (n >= 2 && in[n - 2] == '%') return n - 2;
+  return n;
+}
+
+static int finish_output(FILE *output, int rc) {
+  if (fflush(output) != 0 || ferror(output)) {
+    fputs("zpct: write error\n", stderr);
     return 1;
   }
   return rc;
 }
 
-int main(int argc, char **argv) {
+static int do_stream(int decode, zpct_set set, FILE *source, FILE *output) {
+  enum { CHUNK = 4096 };
+  unsigned char in[CHUNK + 2];
+  char out[sizeof(in) * 3 + 1];
+  size_t n, pending = 0;
+  while ((n = fread(in + pending, 1, CHUNK, source)) > 0) {
+    size_t total = pending + n;
+    size_t used = decode ? stream_decode_prefix(in, total) : total;
+    size_t need = decode ? zpct_decode(out, sizeof(out), in, used, NULL)
+                         : zpct_encode(out, sizeof(out), in, used, set);
+    if (need == SIZE_MAX || need >= sizeof(out)) {
+      fprintf(stderr, "zpct: %s: %s\n", decode ? "decode" : "encode",
+              decode ? "malformed percent sequence" : "output overflow");
+      return 1;
+    }
+    /* Decoded output may contain NULs: write raw bytes. */
+    if (fwrite(out, 1, need, output) != need) {
+      fprintf(stderr, "zpct: write error\n");
+      return 1;
+    }
+    pending = total - used;
+    memmove(in, in + used, pending);
+  }
+  if (ferror(source)) {
+    fprintf(stderr, "zpct: error reading stdin\n");
+    return 1;
+  }
+  if (pending) {
+    fputs("zpct: decode: malformed percent sequence at EOF\n", stderr);
+    return 1;
+  }
+  return 0;
+}
+
+static int write_argument(FILE *output, const char *bytes, size_t size) {
+  if (fwrite(bytes, 1, size, output) != size || fputc('\n', output) == EOF) {
+    fputs("zpct: write error\n", stderr);
+    return 1;
+  }
+  return 0;
+}
+
+static int cli_run(int argc, char **argv, FILE *source, FILE *output) {
   int decode;
   zpct_set set = ZPCT_UNRESERVED;
   int arg0 = 2;
@@ -73,10 +104,13 @@ int main(int argc, char **argv) {
         rc = 1;
         continue;
       }
-      if (fwrite(buf, 1, need, stdout) != need) return 1;
-      putchar('\n');
+      if (write_argument(output, buf, need) != 0) return 1;
     }
-    return rc;
+    return finish_output(output, rc);
   }
-  return do_stream(decode, set);
+  return finish_output(output, do_stream(decode, set, source, output));
+}
+
+int main(int argc, char **argv) {
+  return cli_run(argc, argv, stdin, stdout);
 }
