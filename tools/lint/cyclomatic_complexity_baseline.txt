@@ -1230,10 +1230,6 @@ tests/harness/src/test_zcode_package_dev_focus.c:zpf_exec_clean_agent_acceptance
 tests/harness/src/test_zcode_package_dev_focus.c:zpf_process_reload_focus:36
 tests/harness/src/test_zcode_package_dev_focus.c:zpf_spawn_exec_agent:20
 tests/harness/src/test_zcode_public_shape.c:t_ps_dependency_closure:27
-tests/harness/src/test_zcode_rank.c:t_commands:58
-tests/harness/src/test_zcode_rank.c:t_period_boundaries:29
-tests/harness/src/test_zcode_rank.c:t_projection:35
-tests/harness/src/test_zcode_rank.c:t_windows:59
 tests/harness/src/test_zcode_reward.c:t_caps_from_ledger:23
 tests/harness/src/test_zcode_reward.c:t_commands:50
 tests/harness/src/test_zcode_reward.c:t_crash_replay:17

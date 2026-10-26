@@ -192,11 +192,11 @@ static void zk_table_dump(const struct vcs_rank_projection *p,
 
 /* ── 1. window arithmetic (pure; adversarial edges first) ───────────── */
 
-static int t_windows(void)
+/* The day boundary is exact: 23:59:59 vs 00:00:00. */
+static int zk_windows_day_edges(void)
 {
     int failures = 0;
 
-    /* The day boundary is exact: 23:59:59 vs 00:00:00. */
     ZK_CHECK("windows: unix 0 is day 0", vcs_rank_day_from_unix(0) == 0);
     ZK_CHECK("windows: 23:59:59 is still day 0",
              vcs_rank_day_from_unix(86399) == 0);
@@ -206,8 +206,14 @@ static int t_windows(void)
              vcs_rank_day_from_unix(-1) == -1 &&
              vcs_rank_day_from_unix(-86400) == -1 &&
              vcs_rank_day_from_unix(-86401) == -2);
+    return failures;
+}
 
-    /* Civil anchors + roundtrip identity across the epoch. */
+/* Civil anchors + roundtrip identity across the epoch. */
+static int zk_windows_civil_roundtrip(void)
+{
+    int failures = 0;
+
     ZK_CHECK("windows: 1970-01-01 is day 0",
              vcs_rank_day_from_civil(1970, 1, 1) == 0);
     {
@@ -223,15 +229,27 @@ static int t_windows(void)
         }
         ZK_CHECK("windows: civil roundtrip identity", rt);
     }
+    return failures;
+}
 
-    /* ISO weekday: day 0 (1970-01-01) was a Thursday. */
+/* ISO weekday: day 0 (1970-01-01) was a Thursday. */
+static int zk_windows_iso_weekday(void)
+{
+    int failures = 0;
+
     ZK_CHECK("windows: day 0 is Thursday",
              vcs_rank_iso_weekday(0) == 4 &&
              vcs_rank_iso_weekday(3) == 7 /* 1970-01-04 Sunday */ &&
              vcs_rank_iso_weekday(4) == 1 /* 1970-01-05 Monday */ &&
              vcs_rank_iso_weekday(-3) == 1 /* 1969-12-29 Monday */);
+    return failures;
+}
 
-    /* ISO weeks crossing the Gregorian year. */
+/* ISO weeks crossing the Gregorian year. */
+static int zk_windows_iso_weeks(void)
+{
+    int failures = 0;
+
     {
         int64_t iso_year = 0;
         unsigned iso_week = 0;
@@ -252,8 +270,14 @@ static int t_windows(void)
         ZK_CHECK("windows: 2021-01-04 is ISO 2021-W01",
                  iso_year == 2021 && iso_week == 1);
     }
+    return failures;
+}
 
-    /* Daily window. */
+/* Daily window. */
+static int zk_windows_daily_window(void)
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w;
         int64_t day = vcs_rank_day_from_civil(2024, 7, 27);
@@ -265,8 +289,14 @@ static int t_windows(void)
                  !vcs_rank_window_contains(&w, day - 1) &&
                  !vcs_rank_window_contains(&w, day + 1));
     }
+    return failures;
+}
 
-    /* Weekly window: Monday..Sunday, crossing the Gregorian year. */
+/* Weekly window: Monday..Sunday, crossing the Gregorian year. */
+static int zk_windows_weekly_window(void)
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w;
         int64_t friday = vcs_rank_day_from_civil(2021, 1, 1);
@@ -283,8 +313,14 @@ static int t_windows(void)
                  !vcs_rank_window_contains(
                      &w, vcs_rank_day_from_civil(2021, 1, 4)));
     }
+    return failures;
+}
 
-    /* Monthly windows: exact lengths. */
+/* Monthly windows: exact lengths. */
+static int zk_windows_monthly_windows(void)
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w;
         ZK_CHECK("windows: leap February has 29 days",
@@ -318,8 +354,14 @@ static int t_windows(void)
                  w.last_day == vcs_rank_day_from_civil(2024, 12, 31) &&
                  w.last_day + 1 == vcs_rank_day_from_civil(2025, 1, 1));
     }
+    return failures;
+}
 
-    /* All-time is unbounded and contains everything. */
+/* All-time is unbounded and contains everything. */
+static int zk_windows_all_time(void)
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w;
         ZK_CHECK("windows: all-time is unbounded",
@@ -331,8 +373,14 @@ static int t_windows(void)
         ZK_CHECK("windows: invalid period rejected",
                  !vcs_rank_window_for((enum vcs_rank_period)77, 0, &w));
     }
+    return failures;
+}
 
-    /* Category names, availability, and the reward-category mapping. */
+/* Category names, availability, and the reward-category mapping. */
+static int zk_windows_category_names(void)
+{
+    int failures = 0;
+
     {
         ZK_CHECK("windows: P2P categories named unavailable",
                  !vcs_rank_category_available(
@@ -356,6 +404,15 @@ static int t_windows(void)
                  vcs_rank_category_from_string("overall", &c) &&
                  c == VCS_RANK_CATEGORY_OVERALL &&
                  !vcs_rank_category_from_string("bogus", &c));
+    }
+    return failures;
+}
+
+static int zk_windows_category_mapping(void)
+{
+    int failures = 0;
+
+    {
         ZK_CHECK("windows: reward categories map to rank categories",
                  vcs_rank_category_from_reward(
                      VCS_REWARD_CATEGORY_NEW_PACKAGE) ==
@@ -387,25 +444,46 @@ static int t_windows(void)
     return failures;
 }
 
-/* ── 2/3/5. the pure projection core ────────────────────────────────── */
-
-static int t_projection(void)
+static int t_windows(void)
 {
     int failures = 0;
 
-    /* Three contributors on adjacent days; B and C tie on points with
-     * C holding the lexicographically smaller pubkey. */
-    uint8_t pub_a[33], pub_b[33], pub_c[33];
+    failures += zk_windows_day_edges();
+    failures += zk_windows_civil_roundtrip();
+    failures += zk_windows_iso_weekday();
+    failures += zk_windows_iso_weeks();
+    failures += zk_windows_daily_window();
+    failures += zk_windows_weekly_window();
+    failures += zk_windows_monthly_windows();
+    failures += zk_windows_all_time();
+    failures += zk_windows_category_names();
+    failures += zk_windows_category_mapping();
+    return failures;
+}
+
+/* ── 2/3/5. the pure projection core ────────────────────────────────── */
+
+/* Three contributors on adjacent days; B and C tie on points with
+ * C holding the lexicographically smaller pubkey. */
+static int zk_projection_fixture_keys(uint8_t pub_a[33], uint8_t pub_b[33],
+                                      uint8_t pub_c[33])
+{
+    int failures = 0;
+
     zk_pub(10, pub_a);
     zk_pub(30, pub_b); /* larger pubkey bytes */
     zk_pub(20, pub_c); /* smaller than B, ties B on points */
     ZK_CHECK("projection: fixture key order",
              memcmp(pub_c, pub_b, 33) < 0 &&
              memcmp(pub_a, pub_c, 33) < 0);
+    return failures;
+}
 
-    struct vcs_rank_fact_input facts[8];
+static size_t zk_projection_fill_facts(struct vcs_rank_fact_input *facts,
+                                       uint8_t pub_a[33], uint8_t pub_b[33],
+                                       uint8_t pub_c[33])
+{
     size_t n = 0;
-    memset(facts, 0, sizeof(facts));
     memcpy(facts[n].contributor, pub_a, 33);
     facts[n].category = VCS_RANK_CATEGORY_NEW_PACKAGES;
     facts[n].points = 100;
@@ -448,8 +526,67 @@ static int t_projection(void)
     facts[n].points = 900;
     facts[n].day = 10;
     n++;
+    return n;
+}
 
-    /* Daily window day 10: C is absent (settled day 11). */
+/* Daily window day 10: the rank table and its facts accounting. */
+static int zk_projection_daily_table(struct vcs_rank_projection *p,
+                                     struct vcs_rank_entry *rows,
+                                     uint8_t pub_a[33], uint8_t pub_b[33])
+{
+    int failures = 0;
+
+    size_t total =
+        vcs_rank_table(p, VCS_RANK_CATEGORY_OVERALL, rows, 4);
+    ZK_CHECK("projection: daily table ranks B then A",
+             total == 2 && rows[0].rank == 1 &&
+                 rows[0].points == 150 &&
+                 memcmp(rows[0].contributor, pub_b, 33) == 0 &&
+                 rows[1].rank == 2 && rows[1].points == 100 &&
+                 memcmp(rows[1].contributor, pub_a, 33) == 0);
+    ZK_CHECK("projection: facts accounted exactly",
+             vcs_rank_projection_facts_used(p) == 2 &&
+             vcs_rank_projection_facts_dropped(p) == 6 &&
+             vcs_rank_projection_contributor_count(p) == 2);
+    return failures;
+}
+
+/* Daily window day 10: unavailable categories, filters and rows. */
+static int zk_projection_daily_filters(struct vcs_rank_projection *p,
+                                       struct vcs_rank_entry *rows,
+                                       uint8_t pub_b[33])
+{
+    int failures = 0;
+
+    ZK_CHECK("projection: unavailable categories rank nobody",
+             vcs_rank_table(p,
+                            VCS_RANK_CATEGORY_VERIFIED_BYTES_SERVED,
+                            rows, 4) == 0 &&
+             vcs_rank_table(p,
+                            VCS_RANK_CATEGORY_DISTINCT_PACKAGE_USERS,
+                            rows, 4) == 0);
+    ZK_CHECK("projection: category filter ranks only its facts",
+             vcs_rank_table(p, VCS_RANK_CATEGORY_SECURITY_FIXES,
+                            rows, 4) == 1 &&
+                 rows[0].points == 150 &&
+                 memcmp(rows[0].contributor, pub_b, 33) == 0);
+    ZK_CHECK("projection: rows keep the unavailable zeros honest",
+             rows[0].category_points[
+                 VCS_RANK_CATEGORY_VERIFIED_BYTES_SERVED] == 0 &&
+             rows[0].category_points[
+                 VCS_RANK_CATEGORY_DISTINCT_PACKAGE_USERS] == 0);
+    ZK_CHECK("projection: separate facts, no balance field",
+             rows[0].earned_score == 150 &&
+             rows[0].token_rewards_received == 150);
+    return failures;
+}
+
+/* Daily window day 10: C is absent (settled day 11). */
+static int zk_projection_daily(struct vcs_rank_fact_input *facts, size_t n,
+                               uint8_t pub_a[33], uint8_t pub_b[33])
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w;
         (void)vcs_rank_window_for(VCS_RANK_PERIOD_DAILY, 10, &w);
@@ -458,44 +595,75 @@ static int t_projection(void)
         ZK_CHECK("projection: daily build", p != NULL);
         if (p) {
             struct vcs_rank_entry rows[4];
-            size_t total =
-                vcs_rank_table(p, VCS_RANK_CATEGORY_OVERALL, rows, 4);
-            ZK_CHECK("projection: daily table ranks B then A",
-                     total == 2 && rows[0].rank == 1 &&
-                         rows[0].points == 150 &&
-                         memcmp(rows[0].contributor, pub_b, 33) == 0 &&
-                         rows[1].rank == 2 && rows[1].points == 100 &&
-                         memcmp(rows[1].contributor, pub_a, 33) == 0);
-            ZK_CHECK("projection: facts accounted exactly",
-                     vcs_rank_projection_facts_used(p) == 2 &&
-                     vcs_rank_projection_facts_dropped(p) == 6 &&
-                     vcs_rank_projection_contributor_count(p) == 2);
-            ZK_CHECK("projection: unavailable categories rank nobody",
-                     vcs_rank_table(p,
-                                    VCS_RANK_CATEGORY_VERIFIED_BYTES_SERVED,
-                                    rows, 4) == 0 &&
-                     vcs_rank_table(p,
-                                    VCS_RANK_CATEGORY_DISTINCT_PACKAGE_USERS,
-                                    rows, 4) == 0);
-            ZK_CHECK("projection: category filter ranks only its facts",
-                     vcs_rank_table(p, VCS_RANK_CATEGORY_SECURITY_FIXES,
-                                    rows, 4) == 1 &&
-                         rows[0].points == 150 &&
-                         memcmp(rows[0].contributor, pub_b, 33) == 0);
-            ZK_CHECK("projection: rows keep the unavailable zeros honest",
-                     rows[0].category_points[
-                         VCS_RANK_CATEGORY_VERIFIED_BYTES_SERVED] == 0 &&
-                     rows[0].category_points[
-                         VCS_RANK_CATEGORY_DISTINCT_PACKAGE_USERS] == 0);
-            ZK_CHECK("projection: separate facts, no balance field",
-                     rows[0].earned_score == 150 &&
-                     rows[0].token_rewards_received == 150);
+            failures += zk_projection_daily_table(p, rows, pub_a, pub_b);
+            failures += zk_projection_daily_filters(p, rows, pub_b);
             vcs_rank_projection_free(p);
         }
     }
+    return failures;
+}
 
-    /* All-time: the deterministic tie-break (C before B on equal
-     * points), overall sums categories, single-contributor ranks. */
+/* All-time: the rank table and its tie-break order. */
+static int zk_projection_all_time_ranks(struct vcs_rank_projection *p,
+                                        uint8_t pub_a[33], uint8_t pub_b[33],
+                                        uint8_t pub_c[33])
+{
+    int failures = 0;
+
+    struct vcs_rank_entry rows[4];
+    size_t total =
+        vcs_rank_table(p, VCS_RANK_CATEGORY_OVERALL, rows, 4);
+    /* A: 100 + 500 (bugs-fixed day 99) = 600; B: 150; C: 150.
+     * Order: A, then the tie — C's smaller pubkey wins. */
+    ZK_CHECK("projection: overall sums categories",
+             total == 3 && rows[0].points == 600 &&
+                 memcmp(rows[0].contributor, pub_a, 33) == 0 &&
+                 rows[0].category_points[
+                     VCS_RANK_CATEGORY_BUGS_FIXED] == 500 &&
+                 rows[0].category_points[
+                     VCS_RANK_CATEGORY_NEW_PACKAGES] == 100);
+    ZK_CHECK("projection: tie-break is pubkey ascending",
+             rows[1].rank == 2 && rows[1].points == 150 &&
+                 memcmp(rows[1].contributor, pub_c, 33) == 0 &&
+                 rows[2].rank == 3 && rows[2].points == 150 &&
+                 memcmp(rows[2].contributor, pub_b, 33) == 0);
+    return failures;
+}
+
+/* All-time: single-contributor rank lookups. */
+static int zk_projection_all_time_lookups(struct vcs_rank_projection *p,
+                                          uint8_t pub_b[33],
+                                          uint8_t pub_c[33])
+{
+    int failures = 0;
+
+    struct vcs_rank_entry one;
+    ZK_CHECK("projection: contributor rank lookup",
+             vcs_rank_contributor(p, VCS_RANK_CATEGORY_OVERALL,
+                                  pub_c, &one) &&
+                 one.rank == 2 && one.points == 150);
+    ZK_CHECK("projection: contributor rank in a category",
+             vcs_rank_contributor(p,
+                                  VCS_RANK_CATEGORY_SECURITY_FIXES,
+                                  pub_b, &one) &&
+                 one.rank == 1);
+    ZK_CHECK("projection: unranked contributor named",
+             !vcs_rank_contributor(p, VCS_RANK_CATEGORY_BUGS_FIXED,
+                                   pub_b, &one) &&
+             !vcs_rank_contributor(
+                 p, VCS_RANK_CATEGORY_VERIFIED_BYTES_SERVED, pub_b,
+                 &one));
+    return failures;
+}
+
+/* All-time: the deterministic tie-break (C before B on equal
+ * points), overall sums categories, single-contributor ranks. */
+static int zk_projection_all_time(struct vcs_rank_fact_input *facts, size_t n,
+                                  uint8_t pub_a[33], uint8_t pub_b[33],
+                                  uint8_t pub_c[33])
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w;
         (void)vcs_rank_window_for(VCS_RANK_PERIOD_ALL_TIME, 0, &w);
@@ -503,44 +671,21 @@ static int t_projection(void)
             vcs_rank_projection_from_facts(facts, n, &w);
         ZK_CHECK("projection: all-time build", p != NULL);
         if (p) {
-            struct vcs_rank_entry rows[4];
-            size_t total =
-                vcs_rank_table(p, VCS_RANK_CATEGORY_OVERALL, rows, 4);
-            /* A: 100 + 500 (bugs-fixed day 99) = 600; B: 150; C: 150.
-             * Order: A, then the tie — C's smaller pubkey wins. */
-            ZK_CHECK("projection: overall sums categories",
-                     total == 3 && rows[0].points == 600 &&
-                         memcmp(rows[0].contributor, pub_a, 33) == 0 &&
-                         rows[0].category_points[
-                             VCS_RANK_CATEGORY_BUGS_FIXED] == 500 &&
-                         rows[0].category_points[
-                             VCS_RANK_CATEGORY_NEW_PACKAGES] == 100);
-            ZK_CHECK("projection: tie-break is pubkey ascending",
-                     rows[1].rank == 2 && rows[1].points == 150 &&
-                         memcmp(rows[1].contributor, pub_c, 33) == 0 &&
-                         rows[2].rank == 3 && rows[2].points == 150 &&
-                         memcmp(rows[2].contributor, pub_b, 33) == 0);
-            struct vcs_rank_entry one;
-            ZK_CHECK("projection: contributor rank lookup",
-                     vcs_rank_contributor(p, VCS_RANK_CATEGORY_OVERALL,
-                                          pub_c, &one) &&
-                         one.rank == 2 && one.points == 150);
-            ZK_CHECK("projection: contributor rank in a category",
-                     vcs_rank_contributor(p,
-                                          VCS_RANK_CATEGORY_SECURITY_FIXES,
-                                          pub_b, &one) &&
-                         one.rank == 1);
-            ZK_CHECK("projection: unranked contributor named",
-                     !vcs_rank_contributor(p, VCS_RANK_CATEGORY_BUGS_FIXED,
-                                           pub_b, &one) &&
-                     !vcs_rank_contributor(
-                         p, VCS_RANK_CATEGORY_VERIFIED_BYTES_SERVED, pub_b,
-                         &one));
+            failures += zk_projection_all_time_ranks(p, pub_a, pub_b,
+                                                     pub_c);
+            failures += zk_projection_all_time_lookups(p, pub_b, pub_c);
             vcs_rank_projection_free(p);
         }
     }
+    return failures;
+}
 
-    /* Zero-activity period: honestly empty. */
+/* Zero-activity period: honestly empty. */
+static int zk_projection_zero_activity(struct vcs_rank_fact_input *facts,
+                                       size_t n)
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w;
         (void)vcs_rank_window_for(VCS_RANK_PERIOD_DAILY, 12345, &w);
@@ -554,8 +699,15 @@ static int t_projection(void)
                                     0) == 0);
         vcs_rank_projection_free(p);
     }
+    return failures;
+}
 
-    /* Same inputs, same projection (determinism). */
+/* Same inputs, same projection (determinism). */
+static int zk_projection_determinism(struct vcs_rank_fact_input *facts,
+                                     size_t n)
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w;
         (void)vcs_rank_window_for(VCS_RANK_PERIOD_ALL_TIME, 0, &w);
@@ -573,6 +725,24 @@ static int t_projection(void)
         vcs_rank_projection_free(p1);
         vcs_rank_projection_free(p2);
     }
+    return failures;
+}
+
+static int t_projection(void)
+{
+    int failures = 0;
+
+    uint8_t pub_a[33], pub_b[33], pub_c[33];
+    failures += zk_projection_fixture_keys(pub_a, pub_b, pub_c);
+
+    struct vcs_rank_fact_input facts[8];
+    memset(facts, 0, sizeof(facts));
+    size_t n = zk_projection_fill_facts(facts, pub_a, pub_b, pub_c);
+
+    failures += zk_projection_daily(facts, n, pub_a, pub_b);
+    failures += zk_projection_all_time(facts, n, pub_a, pub_b, pub_c);
+    failures += zk_projection_zero_activity(facts, n);
+    failures += zk_projection_determinism(facts, n);
     return failures;
 }
 
@@ -743,24 +913,13 @@ static int t_rebuild(void)
 
 /* ── 4. period boundaries over settled facts ────────────────────────── */
 
-static int t_period_boundaries(void)
+/* Settle four facts on the boundary days and close the ledger. */
+static int zk_bounds_settle_facts(char *store, int64_t sunday,
+                                  int64_t monday, int64_t leap_day,
+                                  int64_t march_1)
 {
     int failures = 0;
-    char store[4400];
-    snprintf(store, sizeof(store), "test-tmp/zk_bounds_%ld/zcode",
-             (long)getpid());
-    char datadir[4400];
-    snprintf(datadir, sizeof(datadir), "test-tmp/zk_bounds_%ld",
-             (long)getpid());
-    zk_rm_rf(datadir);
 
-    /* E1 settles on the Sunday of ISO 2020-W53 (2021-01-03); E2 settles
-     * on the Monday of ISO 2021-W01 (2021-01-04). E3 settles on the leap
-     * day 2024-02-29; E4 on 2024-03-01. */
-    int64_t sunday = vcs_rank_day_from_civil(2021, 1, 3);
-    int64_t monday = vcs_rank_day_from_civil(2021, 1, 4);
-    int64_t leap_day = vcs_rank_day_from_civil(2024, 2, 29);
-    int64_t march_1 = vcs_rank_day_from_civil(2024, 3, 1);
     {
         struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
         uint8_t id[32];
@@ -782,12 +941,15 @@ static int t_period_boundaries(void)
                  zk_settle(l, march_1) == VCS_REWARD_COMMIT_OK);
         vcs_reward_ledger_free(l);
     }
+    return failures;
+}
 
-    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
-    ZK_CHECK("bounds: four durable facts",
-             vcs_reward_ledger_fact_count(l) == 4);
+/* The fact accessor round-trips day/category/points. */
+static int zk_bounds_fact_accessor(struct vcs_reward_ledger *l,
+                                   int64_t sunday, int64_t monday)
+{
+    int failures = 0;
 
-    /* The fact accessor round-trips day/category/points. */
     {
         bool seen_sunday = false, seen_monday = false;
         for (size_t i = 0; i < vcs_reward_ledger_fact_count(l); i++) {
@@ -803,9 +965,16 @@ static int t_period_boundaries(void)
         ZK_CHECK("bounds: fact accessor round-trips",
                  seen_sunday && seen_monday);
     }
+    return failures;
+}
 
-    /* ISO week edge: the week of the Sunday holds E1 only; the week of
-     * the Monday holds E2 only. */
+/* ISO week edge: the week of the Sunday holds E1 only; the week of
+ * the Monday holds E2 only. */
+static int zk_bounds_adjacent_weeks(struct vcs_reward_ledger *l,
+                                    int64_t sunday, int64_t monday)
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w0, w1;
         (void)vcs_rank_window_for(VCS_RANK_PERIOD_WEEKLY, sunday, &w0);
@@ -830,9 +999,16 @@ static int t_period_boundaries(void)
         vcs_rank_projection_free(p0);
         vcs_rank_projection_free(p1);
     }
+    return failures;
+}
 
-    /* Month edge: February 2024 holds the leap-day fact; March holds
-     * the March-1 fact; the daily edge holds each on its own day. */
+/* Month edge: February 2024 holds the leap-day fact; March holds
+ * the March-1 fact; the daily edge holds each on its own day. */
+static int zk_bounds_month_and_day_edges(struct vcs_reward_ledger *l,
+                                         int64_t leap_day, int64_t march_1)
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window feb, mar, day_w;
         (void)vcs_rank_window_for(VCS_RANK_PERIOD_MONTHLY, leap_day, &feb);
@@ -867,8 +1043,14 @@ static int t_period_boundaries(void)
         vcs_rank_projection_free(pm);
         vcs_rank_projection_free(pd);
     }
+    return failures;
+}
 
-    /* A period with no activity: honestly empty. */
+/* A period with no activity: honestly empty. */
+static int zk_bounds_zero_activity(struct vcs_reward_ledger *l)
+{
+    int failures = 0;
+
     {
         struct vcs_rank_window w;
         (void)vcs_rank_window_for(VCS_RANK_PERIOD_DAILY,
@@ -882,6 +1064,37 @@ static int t_period_boundaries(void)
                                     0) == 0);
         vcs_rank_projection_free(p);
     }
+    return failures;
+}
+
+static int t_period_boundaries(void)
+{
+    int failures = 0;
+    char store[4400];
+    snprintf(store, sizeof(store), "test-tmp/zk_bounds_%ld/zcode",
+             (long)getpid());
+    char datadir[4400];
+    snprintf(datadir, sizeof(datadir), "test-tmp/zk_bounds_%ld",
+             (long)getpid());
+    zk_rm_rf(datadir);
+
+    /* E1 settles on the Sunday of ISO 2020-W53 (2021-01-03); E2 settles
+     * on the Monday of ISO 2021-W01 (2021-01-04). E3 settles on the leap
+     * day 2024-02-29; E4 on 2024-03-01. */
+    int64_t sunday = vcs_rank_day_from_civil(2021, 1, 3);
+    int64_t monday = vcs_rank_day_from_civil(2021, 1, 4);
+    int64_t leap_day = vcs_rank_day_from_civil(2024, 2, 29);
+    int64_t march_1 = vcs_rank_day_from_civil(2024, 3, 1);
+    failures += zk_bounds_settle_facts(store, sunday, monday, leap_day,
+                                       march_1);
+
+    struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
+    ZK_CHECK("bounds: four durable facts",
+             vcs_reward_ledger_fact_count(l) == 4);
+    failures += zk_bounds_fact_accessor(l, sunday, monday);
+    failures += zk_bounds_adjacent_weeks(l, sunday, monday);
+    failures += zk_bounds_month_and_day_edges(l, leap_day, march_1);
+    failures += zk_bounds_zero_activity(l);
     vcs_reward_ledger_free(l);
     zk_rm_rf(datadir);
     return failures;
@@ -911,25 +1124,26 @@ static void zk_cmd_free(struct zk_cmd *c)
     json_free(&c->input);
 }
 
-static int t_commands(void)
+/* Three contributors settle on day 20000 (two tie on 400 with the
+ * tie-break deciding), one more on day 20007. */
+static int zk_commands_fixture_keys(uint8_t pub1[33], uint8_t pub2[33],
+                                    uint8_t pub3[33], uint8_t pub4[33])
 {
     int failures = 0;
-    char datadir[4400], store[4400];
-    snprintf(datadir, sizeof(datadir), "test-tmp/zk_cmd_%ld",
-             (long)getpid());
-    snprintf(store, sizeof(store), "%s/zcode", datadir);
-    zk_rm_rf(datadir);
-    ZK_CHECK("commands: datadir created", zk_mkdir_p(store));
 
-    /* Three contributors settle on day 20000 (two tie on 400 with the
-     * tie-break deciding), one more on day 20007. */
-    uint8_t pub1[33], pub2[33], pub3[33], pub4[33];
     zk_pub(81, pub1);
     zk_pub(83, pub2); /* ties pub3 at 400, larger pubkey */
     zk_pub(82, pub3); /* ties pub2 at 400, smaller pubkey */
     zk_pub(84, pub4);
     ZK_CHECK("commands: fixture key order",
              memcmp(pub3, pub2, 33) < 0);
+    return failures;
+}
+
+static int zk_commands_settle(char *store)
+{
+    int failures = 0;
+
     {
         struct vcs_reward_ledger *l = vcs_reward_ledger_load(store);
         uint8_t id[32];
@@ -947,8 +1161,85 @@ static int t_commands(void)
                  zk_settle(l, 20007) == VCS_REWARD_COMMIT_OK);
         vcs_reward_ledger_free(l);
     }
+    return failures;
+}
 
-    /* daily: rows ranked, tie-break applied, window explicit. */
+static int zk_commands_daily_window(const struct json_value *window)
+{
+    int failures = 0;
+
+    ZK_CHECK("commands: daily window is explicit",
+             window &&
+             json_get_int(json_get(window, "first_day")) == 20000 &&
+             json_get_int(json_get(window, "last_day")) == 20000 &&
+             json_get_int(json_get(window, "days")) == 1 &&
+             json_get_int(json_get(window, "year")) == 2024 &&
+             json_get_int(json_get(window, "month")) == 10 &&
+             json_get_int(json_get(window, "day_of_month")) == 4 &&
+             json_get_bool(json_get(window, "bounded")));
+    return failures;
+}
+
+static int zk_commands_daily_ranking(struct zk_cmd *c,
+                                     const struct json_value *rows)
+{
+    int failures = 0;
+
+    ZK_CHECK("commands: daily rows ranked with the tie-break",
+             json_get_int(json_get(&c->reply.data, "total_ranked")) ==
+                 3 &&
+             rows && json_at(rows, 0) && json_at(rows, 2) &&
+             json_get_int(json_get(json_at(rows, 0), "rank")) == 1 &&
+             json_get_int(json_get(json_at(rows, 0), "points")) ==
+                 900 &&
+             json_get_int(json_get(json_at(rows, 1), "rank")) == 2 &&
+             json_get_int(json_get(json_at(rows, 2), "rank")) == 3 &&
+             json_get_int(json_get(json_at(rows, 1), "points")) ==
+                 400 &&
+             json_get_int(json_get(json_at(rows, 2), "points")) ==
+                 400);
+    return failures;
+}
+
+static int zk_commands_daily_tie(const struct json_value *rows,
+                                 uint8_t pub3[33])
+{
+    int failures = 0;
+
+    const char *second =
+        json_get_str(json_get(json_at(rows, 1), "contributor"));
+    char pub3_hex[67];
+    zk_hex_enc(pub3, 33, pub3_hex);
+    ZK_CHECK("commands: tie resolved by pubkey ascending",
+             second && strcmp(second, pub3_hex) == 0);
+    return failures;
+}
+
+static int zk_commands_daily_facts(struct zk_cmd *c,
+                                   const struct json_value *rows)
+{
+    int failures = 0;
+
+    ZK_CHECK("commands: rows keep the facts separate",
+             json_get_int(json_get(json_at(rows, 0),
+                                   "earned_score")) == 900 &&
+             json_get_int(json_get(json_at(rows, 0),
+                                   "token_rewards_received")) == 900);
+    ZK_CHECK("commands: balance honestly unavailable",
+             strcmp(json_get_str(json_get(&c->reply.data,
+                                          "current_token_balance"))
+                        ? json_get_str(json_get(
+                              &c->reply.data, "current_token_balance"))
+                        : "",
+                    "unavailable") == 0);
+    return failures;
+}
+
+/* daily: rows ranked, tie-break applied, window explicit. */
+static int zk_commands_daily(const char *datadir, uint8_t pub3[33])
+{
+    int failures = 0;
+
     {
         struct zk_cmd c;
         zk_cmd_init(&c, datadir);
@@ -957,51 +1248,21 @@ static int t_commands(void)
         const struct json_value *window =
             json_get(&c.reply.data, "window");
         const struct json_value *rows = json_get(&c.reply.data, "rows");
-        ZK_CHECK("commands: daily window is explicit",
-                 window &&
-                 json_get_int(json_get(window, "first_day")) == 20000 &&
-                 json_get_int(json_get(window, "last_day")) == 20000 &&
-                 json_get_int(json_get(window, "days")) == 1 &&
-                 json_get_int(json_get(window, "year")) == 2024 &&
-                 json_get_int(json_get(window, "month")) == 10 &&
-                 json_get_int(json_get(window, "day_of_month")) == 4 &&
-                 json_get_bool(json_get(window, "bounded")));
-        ZK_CHECK("commands: daily rows ranked with the tie-break",
-                 json_get_int(json_get(&c.reply.data, "total_ranked")) ==
-                     3 &&
-                 rows && json_at(rows, 0) && json_at(rows, 2) &&
-                 json_get_int(json_get(json_at(rows, 0), "rank")) == 1 &&
-                 json_get_int(json_get(json_at(rows, 0), "points")) ==
-                     900 &&
-                 json_get_int(json_get(json_at(rows, 1), "rank")) == 2 &&
-                 json_get_int(json_get(json_at(rows, 2), "rank")) == 3 &&
-                 json_get_int(json_get(json_at(rows, 1), "points")) ==
-                     400 &&
-                 json_get_int(json_get(json_at(rows, 2), "points")) ==
-                     400);
-        const char *second =
-            json_get_str(json_get(json_at(rows, 1), "contributor"));
-        char pub3_hex[67];
-        zk_hex_enc(pub3, 33, pub3_hex);
-        ZK_CHECK("commands: tie resolved by pubkey ascending",
-                 second && strcmp(second, pub3_hex) == 0);
-        ZK_CHECK("commands: rows keep the facts separate",
-                 json_get_int(json_get(json_at(rows, 0),
-                                       "earned_score")) == 900 &&
-                 json_get_int(json_get(json_at(rows, 0),
-                                       "token_rewards_received")) == 900);
-        ZK_CHECK("commands: balance honestly unavailable",
-                 strcmp(json_get_str(json_get(&c.reply.data,
-                                              "current_token_balance"))
-                            ? json_get_str(json_get(
-                                  &c.reply.data, "current_token_balance"))
-                            : "",
-                        "unavailable") == 0);
+        failures += zk_commands_daily_window(window);
+        failures += zk_commands_daily_ranking(&c, rows);
+        failures += zk_commands_daily_tie(rows, pub3);
+        failures += zk_commands_daily_facts(&c, rows);
         zk_cmd_free(&c);
     }
+    return failures;
+}
 
-    /* weekly/monthly/all: window descriptors. 20000 = 2024-10-04, a
-     * Friday of ISO 2024-W40; day 20007 is the Friday of W41. */
+/* weekly/monthly/all: window descriptors. 20000 = 2024-10-04, a
+ * Friday of ISO 2024-W40; day 20007 is the Friday of W41. */
+static int zk_commands_weekly_window(const char *datadir)
+{
+    int failures = 0;
+
     {
         struct zk_cmd c;
         zk_cmd_init(&c, datadir);
@@ -1018,6 +1279,13 @@ static int t_commands(void)
                                        "total_ranked")) == 3);
         zk_cmd_free(&c);
     }
+    return failures;
+}
+
+static int zk_commands_monthly_window(const char *datadir)
+{
+    int failures = 0;
+
     {
         struct zk_cmd c;
         zk_cmd_init(&c, datadir);
@@ -1034,6 +1302,13 @@ static int t_commands(void)
                                        "total_ranked")) == 4);
         zk_cmd_free(&c);
     }
+    return failures;
+}
+
+static int zk_commands_all_time_window(const char *datadir)
+{
+    int failures = 0;
+
     {
         struct zk_cmd c;
         zk_cmd_init(&c, datadir);
@@ -1051,8 +1326,14 @@ static int t_commands(void)
                                   "unavailable_categories"), 0));
         zk_cmd_free(&c);
     }
+    return failures;
+}
 
-    /* category filter + rejection naming. */
+/* category filter + rejection naming. */
+static int zk_commands_category_filter(const char *datadir)
+{
+    int failures = 0;
+
     {
         struct zk_cmd c;
         zk_cmd_init(&c, datadir);
@@ -1068,6 +1349,13 @@ static int t_commands(void)
                                         "category_available")));
         zk_cmd_free(&c);
     }
+    return failures;
+}
+
+static int zk_commands_bad_category(const char *datadir)
+{
+    int failures = 0;
+
     {
         struct zk_cmd c;
         zk_cmd_init(&c, datadir);
@@ -1077,6 +1365,13 @@ static int t_commands(void)
                  strcmp(c.reply.error.code, "BAD_CATEGORY") == 0);
         zk_cmd_free(&c);
     }
+    return failures;
+}
+
+static int zk_commands_unavailable_category(const char *datadir)
+{
+    int failures = 0;
+
     {
         struct zk_cmd c;
         zk_cmd_init(&c, datadir);
@@ -1092,8 +1387,14 @@ static int t_commands(void)
                  json_get_int(json_get(&c.reply.data, "rendered")) == 0);
         zk_cmd_free(&c);
     }
+    return failures;
+}
 
-    /* paging + breakdown. */
+/* paging + breakdown. */
+static int zk_commands_paging(const char *datadir)
+{
+    int failures = 0;
+
     {
         struct zk_cmd c;
         zk_cmd_init(&c, datadir);
@@ -1125,6 +1426,13 @@ static int t_commands(void)
                  json_get_int(json_get(json_at(rows2, 0), "rank")) == 2);
         zk_cmd_free(&c2);
     }
+    return failures;
+}
+
+static int zk_commands_breakdown(const char *datadir)
+{
+    int failures = 0;
+
     {
         struct zk_cmd c;
         zk_cmd_init(&c, datadir);
@@ -1144,8 +1452,15 @@ static int t_commands(void)
                      0);
         zk_cmd_free(&c);
     }
+    return failures;
+}
 
-    /* contributor.show: current-period ranks from the same projection. */
+/* contributor.show: current-period ranks from the same projection. */
+static int zk_commands_contributor_show(const char *datadir,
+                                        uint8_t pub1[33])
+{
+    int failures = 0;
+
     {
         char pub1_hex[67];
         zk_hex_enc(pub1, 33, pub1_hex);
@@ -1187,6 +1502,32 @@ static int t_commands(void)
                                        "total_ranked")) == 0);
         zk_cmd_free(&c2);
     }
+    return failures;
+}
+
+static int t_commands(void)
+{
+    int failures = 0;
+    char datadir[4400], store[4400];
+    snprintf(datadir, sizeof(datadir), "test-tmp/zk_cmd_%ld",
+             (long)getpid());
+    snprintf(store, sizeof(store), "%s/zcode", datadir);
+    zk_rm_rf(datadir);
+    ZK_CHECK("commands: datadir created", zk_mkdir_p(store));
+
+    uint8_t pub1[33], pub2[33], pub3[33], pub4[33];
+    failures += zk_commands_fixture_keys(pub1, pub2, pub3, pub4);
+    failures += zk_commands_settle(store);
+    failures += zk_commands_daily(datadir, pub3);
+    failures += zk_commands_weekly_window(datadir);
+    failures += zk_commands_monthly_window(datadir);
+    failures += zk_commands_all_time_window(datadir);
+    failures += zk_commands_category_filter(datadir);
+    failures += zk_commands_bad_category(datadir);
+    failures += zk_commands_unavailable_category(datadir);
+    failures += zk_commands_paging(datadir);
+    failures += zk_commands_breakdown(datadir);
+    failures += zk_commands_contributor_show(datadir, pub1);
     zk_rm_rf(datadir);
     return failures;
 }
