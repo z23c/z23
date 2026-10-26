@@ -275,20 +275,6 @@ static size_t boot_credential_read_secret(
     return off;
 }
 
-/* Field-wise stability check: the credential did not change during read. */
-static bool boot_credential_snapshot_unchanged(
-    const struct platform_positioned_file_snapshot *before,
-    const struct platform_positioned_file_snapshot *after)
-{
-    return before->size == after->size &&
-        before->modified_seconds == after->modified_seconds &&
-        before->modified_nanoseconds == after->modified_nanoseconds &&
-        before->changed_seconds == after->changed_seconds &&
-        before->changed_nanoseconds == after->changed_nanoseconds &&
-        before->volume == after->volume && before->file_low == after->file_low &&
-        before->file_high == after->file_high;
-}
-
 struct zcl_result wallet_lock_register_boot_credential(void)
 {
     const char *dir = getenv("CREDENTIALS_DIRECTORY");
@@ -320,7 +306,7 @@ struct zcl_result wallet_lock_register_boot_credential(void)
     size_t need = (size_t)before.size;
     size_t off = boot_credential_read_secret(&credential, secret, need);
     bool stable = platform_positioned_file_snapshot(&credential, &after) &&
-        boot_credential_snapshot_unchanged(&before, &after);
+        platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&credential);
     if (off != need || !stable || memchr(secret, '\0', need) != NULL) {
         memory_cleanse(secret, sizeof(secret));
