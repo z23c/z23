@@ -448,9 +448,8 @@ static bool name_pair_write(struct name_pair *p, const char *root,
 }
 
 /* The stamped install shim, exactly as the public-install tree serves it. */
-static bool shim_fixture_written(const char *path)
+static bool shim_fixture_written(FILE *f)
 {
-    FILE *f = fopen(path, "wb");
     return f != NULL && fwrite("#!/bin/sh\necho z23-install\n", 1, 27,
                                f) == 27 &&
            fclose(f) == 0;
@@ -530,6 +529,7 @@ int test_https_sni_select(void)
     {
         char install_root[640];
         char shim[768];
+        FILE *f;
 
         SN_CHECK("GET / without a public-install tree is the explorer redirect",
                  http_get_shows("/", "Location: /explorer", NULL, NULL));
@@ -537,8 +537,9 @@ int test_https_sni_select(void)
         SN_CHECK("public-install directory is created",
                  mkdir(install_root, 0700) == 0);
         snprintf(shim, sizeof(shim), "%s/install.sh", install_root);
+        f = fopen(shim, "wb");
         SN_CHECK("stamped shim fixture is written",
-                 shim_fixture_written(shim));
+                 shim_fixture_written(f));
         https_server_set_public_install_root(install_root);
         SN_CHECK("GET / with a public-install tree serves the shim",
                  http_get_shows("/", "HTTP/1.1 200 OK", "echo z23-install",
