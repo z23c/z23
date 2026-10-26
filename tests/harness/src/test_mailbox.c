@@ -76,12 +76,11 @@ static long mbx_timeout_scale(void)
     return (v >= 1 && v <= 100) ? v : 1;
 }
 
-int test_mailbox(void)
+/* create/destroy: input validation plus the capacity/depth/closed accessors.
+ * Returns the number of failed checks. */
+static int mbx_check_create_destroy(void)
 {
-    printf("\n=== mailbox tests ===\n");
     int failures = 0;
-
-    /* ── create / destroy / validation ──────────────────────────── */
     {
         mailbox_t *m = mailbox_create(16, sizeof(int));
         MBX_CHECK("create OK", m != NULL);
@@ -96,8 +95,14 @@ int test_mailbox(void)
                   mailbox_create(16, 0) == NULL);
         mailbox_destroy(NULL);  /* must not crash */
     }
+    return failures;
+}
 
-    /* ── SPSC: 1000 messages preserve FIFO order ────────────────── */
+/* SPSC: 1000 sends then 1000 recvs must come back in the same order.
+ * Returns the number of failed checks. */
+static int mbx_check_spsc_fifo(void)
+{
+    int failures = 0;
     {
         mailbox_t *m = mailbox_create(1000, sizeof(int));
         for (int i = 0; i < 1000; i++) {
@@ -129,8 +134,14 @@ int test_mailbox(void)
                   mailbox_recv_count(m) == 1000);
         mailbox_destroy(m);
     }
+    return failures;
+}
 
-    /* ── overflow: ring full ─────────────────────────────────── */
+/* Overflow: a full ring refuses the next send and counts it as dropped.
+ * Returns the number of failed checks. */
+static int mbx_check_overflow(void)
+{
+    int failures = 0;
     {
         mailbox_t *m = mailbox_create(4, sizeof(int));
         int v = 0;
@@ -153,8 +164,14 @@ int test_mailbox(void)
                   mailbox_try_send(m, &v));
         mailbox_destroy(m);
     }
+    return failures;
+}
 
-    /* ── close: send fails, drain still works ────────────────── */
+/* close: sends are refused once closed, queued messages still drain.
+ * Returns the number of failed checks. */
+static int mbx_check_close(void)
+{
+    int failures = 0;
     {
         mailbox_t *m = mailbox_create(8, sizeof(int));
         int v = 42;
@@ -176,13 +193,58 @@ int test_mailbox(void)
                   !mailbox_try_recv(m, &got));
         mailbox_destroy(m);
     }
+    return failures;
+}
 
-    /* ── Single-threaded MPSC shape: same accounting, no scheduler ─────
-     * The 4-producer case below can only ever prove the counters agree once
-     * the producers are joined. This case proves the SAME accounting with the
-     * threads removed entirely, so if the concurrent case ever degenerates
-     * (producers aborted, ring never filled) the group still has a case that
-     * genuinely exercises interleaved send/recv across a wrapping ring. */
+/* Decode a (tid, seq) message and record it in seen[][]. Every received
+ * message counts toward *drained whether or not its fields are in range. */
+static void mbx_track_message(uint64_t msg, int seen[4][256], int *drained)
+{
+    const int N_PROD = 4;
+    const int PER    = 256;
+    int tid = (int)(msg >> 32);
+    int seq = (int)(msg & 0xffffffffu);
+    if (tid >= 0 && tid < N_PROD && seq >= 0 && seq < PER)
+        seen[tid][seq]++;
+    (*drained)++;
+}
+
+/* True only when every (tid, seq) slot was received exactly once. */
+static bool mbx_seen_each_message_once(const int seen[4][256])
+{
+    const int N_PROD = 4;
+    const int PER    = 256;
+    for (int t = 0; t < N_PROD; t++)
+        for (int s = 0; s < PER; s++)
+            if (seen[t][s] != 1) return false;
+    return true;
+}
+
+/* Offer messages from the four virtual producers in round-robin order until
+ * the ring stops accepting; advances next[] and *done_prod. */
+static void mbx_offer_round_robin(mailbox_t *m, int next[4], int *done_prod)
+{
+    const int N_PROD = 4;
+    const int PER    = 256;
+    bool progressed = true;
+    while (progressed) {
+        progressed = false;
+        for (int t = 0; t < N_PROD; t++) {
+            if (next[t] >= PER) continue;
+            uint64_t msg = ((uint64_t)t << 32) | (uint64_t)next[t];
+            if (mailbox_try_send(m, &msg)) {
+                progressed = true;
+                if (++next[t] == PER) (*done_prod)++;
+            }
+        }
+    }
+}
+
+/* Single-threaded MPSC shape: the threaded case's send/recv accounting with
+ * the scheduler removed entirely. Returns the number of failed checks. */
+static int mbx_check_mpsc_single_threaded(void)
+{
+    int failures = 0;
     {
         const int N_PROD = 4;
         const int PER    = 256;
@@ -200,34 +262,15 @@ int test_mailbox(void)
             /* Fill the ring to capacity before draining, so this case really
              * does wrap it (16 times over) rather than tiptoeing along an
              * always-near-empty buffer. */
-            bool progressed = true;
-            while (progressed) {
-                progressed = false;
-                for (int t = 0; t < N_PROD; t++) {
-                    if (next[t] >= PER) continue;
-                    uint64_t msg = ((uint64_t)t << 32) | (uint64_t)next[t];
-                    if (mailbox_try_send(m, &msg)) {
-                        progressed = true;
-                        if (++next[t] == PER) done_prod++;
-                    }
-                }
-            }
+            mbx_offer_round_robin(m, next, &done_prod);
             uint64_t got;
-            while (mailbox_try_recv(m, &got)) {
-                int tid = (int)(got >> 32);
-                int seq = (int)(got & 0xffffffffu);
-                if (tid >= 0 && tid < N_PROD && seq >= 0 && seq < PER)
-                    seen[tid][seq]++;
-                drained++;
-            }
+            while (mailbox_try_recv(m, &got))
+                mbx_track_message(got, seen, &drained);
         }
 
         MBX_CHECK("MPSC (single-threaded) drained every message",
                   drained == target);
-        bool no_dup_no_miss = true;
-        for (int t = 0; t < N_PROD && no_dup_no_miss; t++)
-            for (int s = 0; s < PER; s++)
-                if (seen[t][s] != 1) { no_dup_no_miss = false; break; }
+        bool no_dup_no_miss = mbx_seen_each_message_once(seen);
         MBX_CHECK("MPSC (single-threaded) no duplicates / no misses",
                   no_dup_no_miss);
         MBX_CHECK("MPSC (single-threaded) sent_count=target",
@@ -236,14 +279,63 @@ int test_mailbox(void)
                   mailbox_recv_count(m) == (size_t)target);
         mailbox_destroy(m);
     }
+    return failures;
+}
 
-    /* ── MPSC: 4 producers × 256 = 1024 messages, no loss ──────
-     * Every assertion here is made AFTER the producers are joined and the ring
-     * is drained, so none of them depends on which thread won any particular
-     * race — only on the totals, which are forced once the producers have
-     * finished. The consumer loop below is bounded by real elapsed time (not a
-     * spin count) and tells the producers to give up when it expires, so a
-     * genuine wedge fails an assertion instead of hanging the suite. */
+/* Launch the producer threads; returns how many actually started. */
+static int mbx_start_producers(mailbox_t *m, pthread_t threads[4],
+                               struct producer_args args[4],
+                               _Atomic bool *abort_flag)
+{
+    const int N_PROD = 4;
+    const int PER    = 256;
+    int started = 0;
+    for (int i = 0; i < N_PROD; i++) {
+        args[i].m = m;
+        args[i].tid = i;
+        args[i].count = PER;
+        args[i].abort_flag = abort_flag;
+        atomic_store(&args[i].sent, 0);
+        if (pthread_create(&threads[i], NULL, producer_thread,
+                           &args[i]) == 0)
+            started++;
+    }
+    return started;
+}
+
+/* Consume until target messages arrive or the deadline passes; sets
+ * *timed_out when the deadline wins and returns the drained count. */
+static int mbx_drain_until_deadline(mailbox_t *m, int seen[4][256],
+                                    int target, long deadline,
+                                    bool *timed_out)
+{
+    int drained = 0;
+    while (drained < target) {
+        uint64_t msg;
+        if (mailbox_try_recv(m, &msg)) {
+            mbx_track_message(msg, seen, &drained);
+        } else {
+            if (mbx_now_ms() > deadline) { *timed_out = true; break; }
+            sched_yield();
+        }
+    }
+    return drained;
+}
+
+/* Consume whatever the ring still holds; returns the updated drained total. */
+static int mbx_drain_stragglers(mailbox_t *m, int seen[4][256], int drained)
+{
+    uint64_t leftover;
+    while (mailbox_try_recv(m, &leftover))
+        mbx_track_message(leftover, seen, &drained);
+    return drained;
+}
+
+/* Threaded MPSC: totals are asserted only after the producers are joined.
+ * Returns the number of failed checks. */
+static int mbx_check_mpsc_threaded(void)
+{
+    int failures = 0;
     {
         const int N_PROD = 4;
         const int PER    = 256;
@@ -252,17 +344,7 @@ int test_mailbox(void)
         _Atomic bool abort_flag = false;
         pthread_t threads[4];
         struct producer_args args[4];
-        int started = 0;
-        for (int i = 0; i < N_PROD; i++) {
-            args[i].m = m;
-            args[i].tid = i;
-            args[i].count = PER;
-            args[i].abort_flag = &abort_flag;
-            atomic_store(&args[i].sent, 0);
-            if (pthread_create(&threads[i], NULL, producer_thread,
-                               &args[i]) == 0)
-                started++;
-        }
+        int started = mbx_start_producers(m, threads, args, &abort_flag);
         MBX_CHECK("MPSC all producers started", started == N_PROD);
 
         /* Consumer drains 1024 messages, tracking what's seen. */
@@ -274,20 +356,8 @@ int test_mailbox(void)
          * wedge detector, not a schedule the producers have to keep. */
         const long deadline = mbx_now_ms() + 30000L * mbx_timeout_scale();
         bool timed_out = false;
-        while (drained < target) {
-            uint64_t msg;
-            if (mailbox_try_recv(m, &msg)) {
-                int tid = (int)(msg >> 32);
-                int seq = (int)(msg & 0xffffffffu);
-                if (tid >= 0 && tid < N_PROD && seq >= 0 && seq < PER) {
-                    seen[tid][seq]++;
-                }
-                drained++;
-            } else {
-                if (mbx_now_ms() > deadline) { timed_out = true; break; }
-                sched_yield();
-            }
-        }
+        drained = mbx_drain_until_deadline(m, seen, target, deadline,
+                                           &timed_out);
         MBX_CHECK("MPSC consumer drained without hitting the wedge deadline",
                   !timed_out);
 
@@ -295,15 +365,7 @@ int test_mailbox(void)
         for (int i = 0; i < started; i++) pthread_join(threads[i], NULL);
 
         /* Drain any stragglers post-join. */
-        uint64_t leftover;
-        while (mailbox_try_recv(m, &leftover)) {
-            int tid = (int)(leftover >> 32);
-            int seq = (int)(leftover & 0xffffffffu);
-            if (tid >= 0 && tid < N_PROD && seq >= 0 && seq < PER) {
-                seen[tid][seq]++;
-            }
-            drained++;
-        }
+        drained = mbx_drain_stragglers(m, seen, drained);
 
         /* Post-join: every producer has returned, so these totals are fixed
          * and no longer depend on the scheduler. */
@@ -311,13 +373,7 @@ int test_mailbox(void)
         for (int i = 0; i < started; i++) offered += atomic_load(&args[i].sent);
         MBX_CHECK("MPSC every producer offered its full run", offered == target);
         MBX_CHECK("MPSC drained 1024", drained == target);
-        bool no_dup_no_miss = true;
-        for (int t = 0; t < N_PROD; t++) {
-            for (int s = 0; s < PER; s++) {
-                if (seen[t][s] != 1) { no_dup_no_miss = false; break; }
-            }
-            if (!no_dup_no_miss) break;
-        }
+        bool no_dup_no_miss = mbx_seen_each_message_once(seen);
         MBX_CHECK("MPSC no duplicates / no misses", no_dup_no_miss);
         MBX_CHECK("MPSC sent_count=target",
                   mailbox_sent_count(m) == (size_t)target);
@@ -325,6 +381,42 @@ int test_mailbox(void)
                   mailbox_recv_count(m) == (size_t)target);
         mailbox_destroy(m);
     }
+    return failures;
+}
+
+int test_mailbox(void)
+{
+    printf("\n=== mailbox tests ===\n");
+    int failures = 0;
+
+    /* ── create / destroy / validation ──────────────────────────── */
+    failures += mbx_check_create_destroy();
+
+    /* ── SPSC: 1000 messages preserve FIFO order ────────────────── */
+    failures += mbx_check_spsc_fifo();
+
+    /* ── overflow: ring full ─────────────────────────────────── */
+    failures += mbx_check_overflow();
+
+    /* ── close: send fails, drain still works ────────────────── */
+    failures += mbx_check_close();
+
+    /* ── Single-threaded MPSC shape: same accounting, no scheduler ─────
+     * The 4-producer case below can only ever prove the counters agree once
+     * the producers are joined. This case proves the SAME accounting with the
+     * threads removed entirely, so if the concurrent case ever degenerates
+     * (producers aborted, ring never filled) the group still has a case that
+     * genuinely exercises interleaved send/recv across a wrapping ring. */
+    failures += mbx_check_mpsc_single_threaded();
+
+    /* ── MPSC: 4 producers × 256 = 1024 messages, no loss ──────
+     * Every assertion here is made AFTER the producers are joined and the ring
+     * is drained, so none of them depends on which thread won any particular
+     * race — only on the totals, which are forced once the producers have
+     * finished. The consumer loop below is bounded by real elapsed time (not a
+     * spin count) and tells the producers to give up when it expires, so a
+     * genuine wedge fails an assertion instead of hanging the suite. */
+    failures += mbx_check_mpsc_threaded();
 
     if (failures == 0) {
         printf("=== mailbox tests: ALL PASS ===\n\n");
