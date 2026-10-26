@@ -446,26 +446,6 @@ static void arm_canary_stale_logs_locked(struct canary_kind_slot *slot,
     }
 }
 
-struct canary_log_display {
-    const char *running_source;
-    const char *running_artifact;
-    const char *source_id;
-    const char *artifact;
-};
-
-static void canary_log_display_labels(const char *running_source_id,
-                                     const char *running_artifact,
-                                     const char *source_id,
-                                     const char *artifact,
-                                     struct canary_log_display *out)
-{
-    out->running_source = running_source_id ? running_source_id : "-";
-    out->running_artifact =
-        running_artifact && running_artifact[0] ? running_artifact : "-";
-    out->source_id = source_id[0] ? source_id : "-";
-    out->artifact = artifact[0] ? artifact : "-";
-}
-
 /* Parse one sentinel and fold its verdict into the kind slot. Corrupt/torn
  * JSON is skipped and logged once per file mtime — it NEVER raises alone. */
 static void process_sentinel(const char *dir, const char *name)
@@ -526,16 +506,15 @@ static void process_sentinel(const char *dir, const char *name)
     pthread_mutex_unlock(&g_watch.lock);
     json_free(&v);
 
-    struct canary_log_display labels = {0};
-    canary_log_display_labels(id.running_source_id, id.running_artifact,
-                              snap.source_id, snap.artifact, &labels);
     if (snap.stale_build)
         LOG_INFO("canary_watch", "[canary_watch] ignoring STALE cross-binary "
                  "verdict kind=%s source_id=%s (running=%s) artifact=%s "
                  "(running_artifact=%s) reason=%s "
                  "— latch unchanged", snap.kind, snap.source_id,
-                 labels.running_source, snap.artifact,
-                 labels.running_artifact, snap.reason);
+                 id.running_source_id ? id.running_source_id : "-",
+                 snap.artifact,
+                 id.running_artifact && id.running_artifact[0]
+                     ? id.running_artifact : "-", snap.reason);
     if (snap.stale_run)
         LOG_INFO("canary_watch", "[canary_watch] ignoring STALE pre-start "
                  "verdict kind=%s started_ts=%lld process_start=%lld "
@@ -547,7 +526,8 @@ static void process_sentinel(const char *dir, const char *name)
                  "clear/unknown verdict kind=%s source_id=%s artifact=%s "
                  "started_ts=%lld "
                  "process_start=%lld — FAIL latch preserved", snap.kind,
-                 labels.source_id, labels.artifact,
+                 snap.source_id[0] ? snap.source_id : "-",
+                 snap.artifact[0] ? snap.artifact : "-",
                  (long long)snap.started_ts, (long long)snap.process_start);
 }
 
