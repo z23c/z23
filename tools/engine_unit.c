@@ -1425,6 +1425,15 @@ static enum engine_err unit_cli_finish_reply(const struct engine_vendor *v,
  * headlessly rather than the one that narrates a plan; and a timeout is
  * reported as a timeout. No shell is invoked — zcl_spawn_capture execs argv
  * directly, so the prompt path never passes through metacharacter expansion. */
+/* The turn cap a CLI row is given: its own cap when one was set, else the
+ * unit's, and never below one. */
+static void unit_cli_turn_cap(const struct unit_opts *o, char *buf, size_t cap)
+{
+    const int turns = (o->cli_turns_set && o->cli_turns > 0)
+                          ? o->cli_turns : o->turns;
+    (void)snprintf(buf, cap, "%d", turns > 0 ? turns : 1);
+}
+
 static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
                          const char *prompt_text, const char *model,
                          const char *workdir, int timeout_ms,
@@ -1444,10 +1453,8 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
                  "a CLI engine reads its prompt from a file: pass --state-dir "
                  "so one can be written");
     }
-    const int turns = (o->cli_turns_set && o->cli_turns > 0)
-                          ? o->cli_turns : o->turns;
     char turn_cap[32];
-    (void)snprintf(turn_cap, sizeof(turn_cap), "%d", turns > 0 ? turns : 1);
+    unit_cli_turn_cap(o, turn_cap, sizeof(turn_cap));
     char last_message_buf[1024];
     const char *last_message = unit_last_message_path(
         o, last_message_buf, sizeof(last_message_buf));

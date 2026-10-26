@@ -448,7 +448,7 @@ tools/dev/devloop_hotswap_build.c:hs_hotfork_build:80
 tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:75
 tools/engine_unit.c:append_unit_receipt:25
 tools/engine_unit.c:compose_prompt:23
-tools/engine_unit.c:dispatch_cli:21
+tools/engine_unit.c:dispatch_cli:20
 tools/engine_unit.c:gate_feedback_from_log:30
 tools/engine_unit.c:load_attempt_state:18
 tools/engine_unit.c:main:147
