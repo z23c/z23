@@ -105,6 +105,113 @@ static bool sign_refund_input(const uint8_t *contract, size_t clen,
     return true;
 }
 
+/* Case 1 (redeem happy path): build the claim transaction with the
+ * production service and the real secret, then require the signed input to
+ * spend the P2SH contract, pay funding minus fee and use nLockTime 0.
+ * Prints the case verdict and returns its failure count (0 or 1). */
+static int redeem_happy_path_failures(struct swap_settle_ctx *c,
+                                      struct privkey *key,
+                                      struct pubkey *pub,
+                                      uint8_t *secret,
+                                      const struct script *p2sh_spk,
+                                      int64_t fund, int64_t fee)
+{
+    struct transaction tx;
+    transaction_init(&tx);
+    struct zcl_result r =
+        swap_settlement_build_redeem(c, key, pub, secret, &tx);
+    bool ok = r.ok &&
+              htlc_spend_ok(&tx.vin[0].script_sig, p2sh_spk, &tx, fund) &&
+              tx.vout[0].value == fund - fee &&
+              tx.lock_time == 0;
+    if (r.ok) transaction_free(&tx);
+    if (ok) { printf("OK\n"); return 0; }
+    printf("FAIL (r.ok=%d msg=%s)\n", r.ok, r.message);
+    return 1;
+}
+
+/* Cases 4/5 (adversarial refunds): the caller has already pre-built tx with
+ * the hostile nLockTime/sequence; sign it by hand, then require the
+ * interpreter to REJECT the spend. Prints the case verdict, frees tx and
+ * returns the failure count (0 or 1). */
+static int signed_refund_rejected_failures(const uint8_t *contract,
+                                           size_t clen,
+                                           const struct privkey *key,
+                                           const struct pubkey *pub,
+                                           const struct script *p2sh_spk,
+                                           int64_t amount,
+                                           struct transaction *tx)
+{
+    bool signed_ok = sign_refund_input(contract, clen, key, pub, amount, tx);
+    bool ok = signed_ok &&
+              !htlc_spend_ok(&tx->vin[0].script_sig, p2sh_spk, tx, amount);
+    transaction_free(tx);
+    if (ok) { printf("OK\n"); return 0; }
+    printf("FAIL (signed=%d)\n", signed_ok);
+    return 1;
+}
+
+/* Case 8 (state transitions): save a PENDING contract, advance it to FUNDED
+ * and REDEEMED through the AR database, and require both transitions plus
+ * the revealed secret to persist. Prints the case verdict and returns the
+ * failure count (0 or 1). */
+static int swap_state_transitions_failures(uint8_t *secret,
+                                           uint8_t *secret_hash,
+                                           uint8_t *contract, size_t clen,
+                                           int64_t fund, uint32_t locktime)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
+        printf("FAIL (open)\n");
+        return 1;
+    }
+    sqlite3_exec(db,
+        "CREATE TABLE zswp_contracts("
+        "swap_id TEXT PRIMARY KEY, role INTEGER, state INTEGER,"
+        "chain INTEGER, secret_hash BLOB, secret BLOB,"
+        "amount INTEGER, locktime INTEGER,"
+        "my_address TEXT, counter_address TEXT,"
+        "funding_txid BLOB, funding_vout INTEGER,"
+        "redeem_script BLOB, redeem_script_len INTEGER,"
+        "p2sh_address TEXT, created_at INTEGER)",
+        NULL, NULL, NULL);
+    struct node_db ndb = { .db = db, .open = true };
+
+    struct swap_contract sw = {0};
+    swap_compute_id("t1me", "t1them", secret_hash, sw.swap_id);
+    sw.role = SWAP_INITIATOR;
+    sw.state = SWAP_PENDING;
+    sw.chain = SWAP_CHAIN_ZCL;
+    memcpy(sw.secret_hash, secret_hash, 32);
+    sw.amount = fund;
+    sw.locktime = locktime;
+    snprintf(sw.my_address, sizeof(sw.my_address), "t1me");
+    snprintf(sw.counter_address, sizeof(sw.counter_address), "t1them");
+    memcpy(sw.redeem_script, contract, clen);
+    sw.redeem_script_len = clen;
+    snprintf(sw.p2sh_address, sizeof(sw.p2sh_address), "t3contract");
+    sw.created_at = 1700000000;
+
+    bool save_ok = db_swap_save(&ndb, &sw);
+    bool fund_ok = db_swap_update_state(&ndb, sw.swap_id,
+                                        SWAP_FUNDED, NULL);
+    struct swap_contract after_fund = {0};
+    db_swap_find(&ndb, sw.swap_id, &after_fund);
+    bool redeem_ok = db_swap_update_state(&ndb, sw.swap_id,
+                                          SWAP_REDEEMED, secret);
+    struct swap_contract after_redeem = {0};
+    db_swap_find(&ndb, sw.swap_id, &after_redeem);
+
+    bool persisted = save_ok && fund_ok && after_fund.state == SWAP_FUNDED &&
+                     redeem_ok && after_redeem.state == SWAP_REDEEMED &&
+                     after_redeem.has_secret &&
+                     memcmp(after_redeem.secret, secret, 32) == 0;
+    if (persisted) printf("OK\n");
+    else printf("FAIL\n");
+    sqlite3_close(db);
+    return !persisted;
+}
+
 int test_swap_settlement(void)
 {
     int failures = 0;
@@ -165,17 +272,8 @@ int test_swap_settlement(void)
     {
         struct swap_settle_ctx c = base;
         c.dest_spk = redeemer_spk;
-        struct transaction tx;
-        transaction_init(&tx);
-        struct zcl_result r =
-            swap_settlement_build_redeem(&c, &rkey, &rpub, secret, &tx);
-        bool ok = r.ok &&
-                  htlc_spend_ok(&tx.vin[0].script_sig, &p2sh_spk, &tx, FUND) &&
-                  tx.vout[0].value == FUND - FEE &&
-                  tx.lock_time == 0;
-        if (r.ok) transaction_free(&tx);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (r.ok=%d msg=%s)\n", r.ok, r.message); failures++; }
+        failures += redeem_happy_path_failures(&c, &rkey, &rpub, secret,
+                                               &p2sh_spk, FUND, FEE);
     }
 
     /* ── 2. Redeem with WRONG secret is rejected ── */
@@ -231,13 +329,9 @@ int test_swap_settlement(void)
         tx.vout[0].value = FUND - FEE;
         tx.vout[0].script_pub_key = refunder_spk;
 
-        bool signed_ok = sign_refund_input(contract, clen, &fkey, &fpub,
-                                           FUND, &tx);
-        bool ok = signed_ok &&
-                  !htlc_spend_ok(&tx.vin[0].script_sig, &p2sh_spk, &tx, FUND);
-        transaction_free(&tx);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (signed=%d)\n", signed_ok); failures++; }
+        failures += signed_refund_rejected_failures(contract, clen, &fkey,
+                                                    &fpub, &p2sh_spk, FUND,
+                                                    &tx);
     }
 
     /* ── 5. Refund with a FINAL sequence is rejected (CLTV skipped) ── */
@@ -255,13 +349,9 @@ int test_swap_settlement(void)
         tx.vout[0].value = FUND - FEE;
         tx.vout[0].script_pub_key = refunder_spk;
 
-        bool signed_ok = sign_refund_input(contract, clen, &fkey, &fpub,
-                                           FUND, &tx);
-        bool ok = signed_ok &&
-                  !htlc_spend_ok(&tx.vin[0].script_sig, &p2sh_spk, &tx, FUND);
-        transaction_free(&tx);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (signed=%d)\n", signed_ok); failures++; }
+        failures += signed_refund_rejected_failures(contract, clen, &fkey,
+                                                    &fpub, &p2sh_spk, FUND,
+                                                    &tx);
     }
 
     /* ── 6. Refund service refuses a zero locktime ── */
@@ -294,58 +384,8 @@ int test_swap_settlement(void)
 
     /* ── 8. State transitions persist: PENDING -> FUNDED -> REDEEMED ── */
     printf("swap state transitions persist via AR save... ");
-    {
-        sqlite3 *db = NULL;
-        if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
-            printf("FAIL (open)\n"); failures++;
-        } else {
-            sqlite3_exec(db,
-                "CREATE TABLE zswp_contracts("
-                "swap_id TEXT PRIMARY KEY, role INTEGER, state INTEGER,"
-                "chain INTEGER, secret_hash BLOB, secret BLOB,"
-                "amount INTEGER, locktime INTEGER,"
-                "my_address TEXT, counter_address TEXT,"
-                "funding_txid BLOB, funding_vout INTEGER,"
-                "redeem_script BLOB, redeem_script_len INTEGER,"
-                "p2sh_address TEXT, created_at INTEGER)",
-                NULL, NULL, NULL);
-            struct node_db ndb = { .db = db, .open = true };
-
-            struct swap_contract sw = {0};
-            swap_compute_id("t1me", "t1them", secret_hash, sw.swap_id);
-            sw.role = SWAP_INITIATOR;
-            sw.state = SWAP_PENDING;
-            sw.chain = SWAP_CHAIN_ZCL;
-            memcpy(sw.secret_hash, secret_hash, 32);
-            sw.amount = FUND;
-            sw.locktime = LOCKTIME;
-            snprintf(sw.my_address, sizeof(sw.my_address), "t1me");
-            snprintf(sw.counter_address, sizeof(sw.counter_address), "t1them");
-            memcpy(sw.redeem_script, contract, clen);
-            sw.redeem_script_len = clen;
-            snprintf(sw.p2sh_address, sizeof(sw.p2sh_address), "t3contract");
-            sw.created_at = 1700000000;
-
-            bool save_ok = db_swap_save(&ndb, &sw);
-            bool fund_ok = db_swap_update_state(&ndb, sw.swap_id,
-                                                SWAP_FUNDED, NULL);
-            struct swap_contract after_fund = {0};
-            db_swap_find(&ndb, sw.swap_id, &after_fund);
-            bool redeem_ok = db_swap_update_state(&ndb, sw.swap_id,
-                                                  SWAP_REDEEMED, secret);
-            struct swap_contract after_redeem = {0};
-            db_swap_find(&ndb, sw.swap_id, &after_redeem);
-
-            if (save_ok && fund_ok && after_fund.state == SWAP_FUNDED &&
-                redeem_ok && after_redeem.state == SWAP_REDEEMED &&
-                after_redeem.has_secret &&
-                memcmp(after_redeem.secret, secret, 32) == 0)
-                printf("OK\n");
-            else { printf("FAIL\n"); failures++; }
-
-            sqlite3_close(db);
-        }
-    }
+    failures += swap_state_transitions_failures(secret, secret_hash, contract,
+                                                clen, FUND, LOCKTIME);
 
     printf("\n%d swap-settlement test(s) failed\n", failures);
     return failures;

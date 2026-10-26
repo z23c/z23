@@ -1963,7 +1963,6 @@ tests/harness/src/test_store_transparent_pay.c:tstp_exact_chain_payment:62
 tests/harness/src/test_strong_params.c:test_strong_params:59
 tests/harness/src/test_supervisor.c:test_supervisor:84
 tests/harness/src/test_supervisor_production_tree.c:test_supervisor_production_tree:43
-tests/harness/src/test_swap_settlement.c:test_swap_settlement:28
 tests/harness/src/test_sync_rate_below_floor.c:test_sync_rate_below_floor:36
 tests/harness/src/test_sync_reduce_fuzz.c:check_step:33
 tests/harness/src/test_sync_reduce_fuzz.c:is_progress_event:21
