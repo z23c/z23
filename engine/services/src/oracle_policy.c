@@ -129,8 +129,7 @@ static void op_ring_push(int height, int64_t at_unix)
     if (g_op.ring_count < OP_RING_SIZE) g_op.ring_count++;
 }
 
-/* Find first/last height in live window for the event payload.
- * Caller must hold g_op.lock. */
+/* Find first/last height in live window for the event payload. */
 static void op_live_height_range(int64_t now, int *first_h, int *last_h)
 {
     int64_t cutoff = now - (int64_t)g_op.window_secs;
@@ -151,16 +150,17 @@ static void op_apply_state_transition(int height, int prefix_end, int distinct,
 {
     enum oracle_policy_state cur =
         (enum oracle_policy_state)atomic_load(&g_op.state);
-    if (cur == OP_PANIC) return;
-    if (prefix_end >= 0 && height <= prefix_end) {
-        atomic_store(&g_op.state, OP_PANIC);
-        *transition_panic = true;
-        atomic_fetch_add(&g_op.total_panics, 1);
-    } else if (cur != OP_HALTED &&
-               distinct >= g_op.halt_distinct_heights) {
-        atomic_store(&g_op.state, OP_HALTED);
-        *transition_halt = true;
-        atomic_fetch_add(&g_op.total_halts, 1);
+    if (cur != OP_PANIC) {
+        if (prefix_end >= 0 && height <= prefix_end) {
+            atomic_store(&g_op.state, OP_PANIC);
+            *transition_panic = true;
+            atomic_fetch_add(&g_op.total_panics, 1);
+        } else if (cur != OP_HALTED &&
+                   distinct >= g_op.halt_distinct_heights) {
+            atomic_store(&g_op.state, OP_HALTED);
+            *transition_halt = true;
+            atomic_fetch_add(&g_op.total_halts, 1);
+        }
     }
 }
 
