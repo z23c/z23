@@ -18,6 +18,12 @@
 
 static char input[MAX_INPUT];
 
+static bool read_input(FILE *source, size_t *length) {
+  *length = fread(input, 1, sizeof input, source);
+  int extra = *length == sizeof input ? fgetc(source) : EOF;
+  return !ferror(source) && extra == EOF;
+}
+
 int main(int argc, char **argv) {
   if (argc != 2) {
     fprintf(stderr, "usage: zrange RANGE < versions\n");
@@ -29,8 +35,8 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  size_t len = fread(input, 1, sizeof(input), stdin);
-  if (ferror(stdin) || !feof(stdin)) {
+  size_t len;
+  if (!read_input(stdin, &len)) {
     fprintf(stderr, "zrange: read error or input over 16 MiB bound\n");
     return 2;
   }

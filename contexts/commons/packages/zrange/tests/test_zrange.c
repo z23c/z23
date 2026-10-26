@@ -7,6 +7,16 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_source, *cli_sink;
+#undef stdin
+#define stdin cli_source
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define main zrange_cli_main
+#include "../app/main.c"
+#undef main
+#undef printf
+#undef stdin
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -187,7 +197,75 @@ static void test_null_wrapper_state(void) {
   CHECK(!zrange_parse(NULL, &parsed) && memcmp(&parsed, zero, sizeof parsed) == 0);
 }
 
+static bool cli_result(FILE *source, FILE *output, int status, const char *want) {
+  cli_source = source;
+  cli_sink = output;
+  char *args[] = {"zrange", "=1.2.3", NULL};
+  if (zrange_cli_main(2, args) != status) return false;
+  rewind(output);
+  char bytes[32];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  return !ferror(output) && n == strlen(want) && memcmp(bytes, want, n) == 0;
+}
+
+static bool cli_padding(FILE *source, size_t count) {
+  char bytes[4096];
+  memset(bytes, '\n', sizeof bytes);
+  while (count) {
+    size_t n = count < sizeof bytes ? count : sizeof bytes;
+    if (fwrite(bytes, 1, n, source) != n) return false;
+    count -= n;
+  }
+  return true;
+}
+
+static bool cli_payload(FILE *source, size_t length, const char *version, bool tail) {
+  size_t n = strlen(version);
+  if (length < n) return false;
+  if (tail)
+    return cli_padding(source, length - n) && fputs(version, source) >= 0;
+  return fputs(version, source) >= 0 && cli_padding(source, length - n);
+}
+
+static int cli_bound_case(size_t length, const char *prefix, int status, bool tail) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int bad = 1;
+  if (!source || !output) goto cleanup;
+  if (!cli_payload(source, length, prefix, tail) ||
+      fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (!cli_result(source, output, status, status == 0 ? "1.2.3\n" : "")) goto cleanup;
+  bad = 0;
+cleanup:
+  if (source && fclose(source) != 0) bad = 1;
+  if (output && fclose(output) != 0) bad = 1;
+  return bad;
+}
+
+static void test_cli_bound(void) {
+  CHECK(cli_bound_case(MAX_INPUT - 1, "1.2.3\n", 0, false) == 0);
+  CHECK(cli_bound_case(MAX_INPUT, "1.2.3\n", 0, false) == 0);
+  CHECK(cli_bound_case(MAX_INPUT + 1, "1.2.3\n", 2, false) == 0);
+  CHECK(cli_bound_case(MAX_INPUT, "2.0.0\n", 1, false) == 0);
+  CHECK(cli_bound_case(MAX_INPUT, "1.2.3", 0, true) == 0);
+  CHECK(cli_bound_case(6, "1.2.3\n", 0, false) == 0);
+  CHECK(cli_bound_case(5, "1.2.3", 0, false) == 0);
+#if defined(_WIN32)
+  FILE *source = fopen("NUL", "w");
+#else
+  FILE *source = fopen("/dev/null", "w");
+#endif
+  FILE *output = tmpfile();
+  if (source && output) {
+    CHECK(cli_result(source, output, 2, ""));
+    CHECK(ferror(source));
+  } else CHECK(false);
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+}
+
 int main(void) {
+  test_cli_bound();
   test_null_wrapper_state();
   test_explicit_operators();
   test_caret_expansions();
