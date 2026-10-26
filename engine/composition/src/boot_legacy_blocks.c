@@ -92,6 +92,17 @@ static bool boot_legacy_blocks_dir(char *out, size_t out_n,
     return n >= 0 && (size_t)n < out_n;
 }
 
+static const char *boot_legacy_default_suffix(int i, const char *appdata,
+                                              const char *home)
+{
+    const char *suffix = "/.zclassic";
+    if (i == 0 && appdata)
+        suffix = "/Zclassic";
+    else if (i == 1 && home)
+        suffix = "/Library/Application Support/Zclassic";
+    return suffix;
+}
+
 bool boot_legacy_default_blocks_dir(char *out, size_t out_n)
 {
     if (!out || out_n == 0)
@@ -112,11 +123,7 @@ bool boot_legacy_default_blocks_dir(char *out, size_t out_n)
 
     for (int i = 0; i < nbases; i++) {
         const char *base = bases[i];
-        const char *suffix = "/.zclassic";
-        if (i == 0 && appdata)
-            suffix = "/Zclassic";
-        else if (i == 1 && home)
-            suffix = "/Library/Application Support/Zclassic";
+        const char *suffix = boot_legacy_default_suffix(i, appdata, home);
 
         int n = snprintf(out, out_n, "%s%s/blocks", base, suffix);
         if (n < 0 || (size_t)n >= out_n)
@@ -191,6 +198,32 @@ static bool boot_link_or_copy_import_block_file(const char *src,
     return false;
 }
 
+static bool boot_legacy_file_path_pair(char *src, size_t src_n,
+                                       char *dst, size_t dst_n,
+                                       const char *legacy_blocks_dir,
+                                       const char *dst_blocks_dir,
+                                       const char *prefix, int file_index)
+{
+    return boot_legacy_file_path(src, src_n, legacy_blocks_dir, prefix,
+                                 file_index) &&
+           boot_legacy_file_path(dst, dst_n, dst_blocks_dir, prefix,
+                                 file_index);
+}
+
+static int boot_import_rev_block_file_failures(const char *src_path,
+                                               const char *dst_path,
+                                               int file_index)
+{
+    struct platform_positioned_file_snapshot src_st;
+    if (!boot_file_snapshot(src_path, &src_st))
+        return 0;
+    if (!boot_link_or_copy_import_block_file(src_path, dst_path, "rev",
+                                             file_index,
+                                             (long long)src_st.size, false))
+        return 1;
+    return 0;
+}
+
 struct boot_legacy_block_file_import_result
 boot_legacy_import_block_files(const char *legacy_blocks_dir,
                                const char *datadir,
@@ -211,10 +244,10 @@ boot_legacy_import_block_files(const char *legacy_blocks_dir,
 
     for (int fi = 0; fi < max_files; fi++) {
         char src_path[1200], dst_path[1200];
-        if (!boot_legacy_file_path(src_path, sizeof(src_path),
-                                   legacy_blocks_dir, "blk", fi) ||
-            !boot_legacy_file_path(dst_path, sizeof(dst_path),
-                                   dst_blocks_dir, "blk", fi)) {
+        if (!boot_legacy_file_path_pair(src_path, sizeof(src_path),
+                                        dst_path, sizeof(dst_path),
+                                        legacy_blocks_dir, dst_blocks_dir,
+                                        "blk", fi)) {
             result.truncated_path = true;
             break;
         }
@@ -240,19 +273,15 @@ boot_legacy_import_block_files(const char *legacy_blocks_dir,
                 (long long)src_st.size, true))
             index_failures++;
 
-        if (!boot_legacy_file_path(src_path, sizeof(src_path),
-                                   legacy_blocks_dir, "rev", fi) ||
-            !boot_legacy_file_path(dst_path, sizeof(dst_path),
-                                   dst_blocks_dir, "rev", fi)) {
+        if (!boot_legacy_file_path_pair(src_path, sizeof(src_path),
+                                        dst_path, sizeof(dst_path),
+                                        legacy_blocks_dir, dst_blocks_dir,
+                                        "rev", fi)) {
             result.truncated_path = true;
             break;
         }
-        if (boot_file_snapshot(src_path, &src_st)) {
-            if (!boot_link_or_copy_import_block_file(
-                    src_path, dst_path, "rev", fi,
-                    (long long)src_st.size, false))
-                index_failures++;
-        }
+        index_failures +=
+            boot_import_rev_block_file_failures(src_path, dst_path, fi);
 
         if (index_failures > 0) {
             result.failures += index_failures;
