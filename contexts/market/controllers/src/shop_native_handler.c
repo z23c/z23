@@ -239,7 +239,8 @@ static bool shop_status_frozen_kat(const void *opaque, char *why,
     return true;
 }
 
-static const struct zcl_hotswap_service_contract k_shop_status_contract = { /* hotswap-static-ok: leaf registration tables are immutable */    .service_id = SHOP_STATUS_VIEW_SERVICE_ID,
+static const struct zcl_hotswap_service_contract k_shop_status_contract = { /* hotswap-static-ok: leaf registration tables are immutable */
+    .service_id = SHOP_STATUS_VIEW_SERVICE_ID,
     .source_tu = "contexts/market/services/src/shop_status_view_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct shop_status_view_service_v1),
@@ -285,8 +286,7 @@ static void shop_push_snapshot(struct json_value *into,
     struct json_value tor;
     json_init(&tor);
     json_set_object(&tor);
-    (void)json_push_kv_str(&tor, "build",
-                           view->tor_build);
+    (void)json_push_kv_str(&tor, "build", view->tor_build);
     (void)json_push_kv_bool(&tor, "identity_present", view->address[0] != 0);
     if (view->address[0])
         (void)json_push_kv_str(&tor, "address", view->address);
@@ -469,6 +469,172 @@ static void shop_init_plan(const char *datadir,
                            SHOP_REMEDY_INIT);
 }
 
+/* What the store step of a confirmed init produced: the product row count
+ * before and after store_ensure_schema ran the loader, and whether an
+ * empty store was filled by the demo seeds rather than products.json. */
+struct sh_commit_counts {
+    int products_before;
+    int products_loaded;
+    bool demo_seeded;
+};
+
+/* The confirmed-commit steps below: each gate returns true when it has
+ * already failed the reply through sh_fail (the caller returns
+ * immediately); false means the step succeeded and the commit proceeds.
+ * sh_fail still owns every LOG_ERROR, so the emitted log lines are
+ * unchanged. */
+static bool sh_commit_refuse_unready(const struct shop_snapshot *snap,
+                                     struct zcl_command_reply *reply)
+{
+    /* Commit. Custody gates BEFORE anything is minted or written: the
+     * most dangerous misconfiguration (keys plaintext on disk) is named
+     * first, even on a stub-Tor build where step 2 would otherwise mask
+     * it. */
+    if (snap->wallet != SHOP_WALLET_ENCRYPTED) {
+        const char *code = snap->wallet == SHOP_WALLET_PLAINTEXT
+            ? "WALLET_NOT_ENCRYPTED"
+            : snap->wallet == SHOP_WALLET_ABSENT
+                ? "WALLET_ABSENT" : "WALLET_UNAVAILABLE";
+        sh_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
+                code, "custody", SHOP_WALLET_RECIPE,
+                shop_wallet_posture_name(snap->wallet));
+        return true;
+    }
+    if (!snap->tor_real) {
+        sh_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                "TOR_STUB_BUILD", "tor", SHOP_REMEDY_TOR, "tor_stub");
+        return true;
+    }
+    return false;
+}
+
+/* Persistent identity: mint on first init, reuse after. A short or
+ * corrupt seed is a named refusal inside onion_identity_ensure, never
+ * a silent remint. */
+static bool sh_commit_ensure_identity(const char *datadir,
+                                      bool *identity_created,
+                                      struct zcl_command_reply *reply)
+{
+    uint8_t seed[32];
+    char address[64];
+    if (!onion_identity_ensure(datadir, seed, address, sizeof(address),
+                               identity_created)) {
+        sh_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "IDENTITY_FAILED", "identity",
+                "the persistent onion identity exists but is unreadable or "
+                "corrupt — inspect <datadir>/tor_data/onion_service/"
+                "identity_seed (it is never silently reminted)",
+                datadir);
+        return true;
+    }
+    memset(seed, 0, sizeof(seed));
+    return false;
+}
+
+static bool sh_copy_input_products_json(const char *datadir,
+                                        const char *input,
+                                        struct zcl_command_reply *reply)
+{
+    if (input && input[0]) {
+        char err[160] = "";
+        if (!shop_provision_products_json(datadir, input, err, sizeof(err))) {
+            sh_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                    ZCL_COMMAND_EXIT_INVALID, "INPUT_UNREADABLE", "provision",
+                    "the --input products.json could not be provisioned",
+                    err);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool sh_commit_load_store(const char *datadir, const char *input,
+                                 const struct shop_snapshot *snap,
+                                 struct sh_commit_counts *counts,
+                                 struct zcl_command_reply *reply)
+{
+    /* Store schema + products, through the same loader the /store surface
+     * uses, against the same node.db it serves from. The file must already
+     * exist: node_db_open_runtime would happily mint one on a mistyped
+     * datadir, so a missing file is named instead. */
+    char db_path[1024];
+    if (!shop_internal_path_join(db_path, sizeof(db_path), datadir,
+                                 "node.db")) {
+        sh_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "DATADIR_PATH_TOO_LONG", "normalize",
+                "datadir path is too long to address node.db", datadir);
+        return true;
+    }
+    struct stat st;
+    if (stat(db_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        sh_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                "STORE_NOT_INITIALISED", "schema",
+                "no node.db at this datadir — boot the node once to create "
+                "the store schema, then re-run init", db_path);
+        return true;
+    }
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open_runtime(&ndb, db_path, "shop.init")) {
+        sh_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                "STORE_NOT_INITIALISED", "schema",
+                "node.db exists but could not be opened for the store",
+                db_path);
+        return true;
+    }
+    counts->products_before = db_store_product_count(&ndb);
+    bool had_products_json = snap->products_json_present;
+    store_ensure_schema(ndb.db, datadir);
+    int products_after = db_store_product_count(&ndb);
+    node_db_close(&ndb);
+    counts->products_loaded = products_after - counts->products_before;
+    /* products.json present and a still-empty store means the loader
+     * found nothing valid; a repopulated store with no products.json
+     * means the demo seeds fell back. Both are named, neither is silent. */
+    counts->demo_seeded = counts->products_before == 0 && products_after > 0 &&
+                          !had_products_json && !(input && input[0]);
+    return false;
+}
+
+/* The verification block describes what the operator now HAS, so
+ * re-collect rather than trusting the pre-mutation snapshot. */
+static void sh_commit_report_success(const char *datadir,
+                                     const struct shop_snapshot *snap,
+                                     const char *input,
+                                     const struct sh_commit_counts *counts,
+                                     bool identity_created,
+                                     struct zcl_command_reply *reply)
+{
+    struct shop_snapshot after;
+    shop_snapshot_collect(datadir, &after);
+    struct shop_status_view_result_v1 view;
+    if (!shop_status_render(&after, &view)) {
+        sh_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "SHOP_STATUS_VIEW_FAILED", "render",
+                "the pure storefront view refused the committed posture",
+                datadir);
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "mode", "commit");
+    (void)json_push_kv_str(&reply->data, "datadir", datadir);
+    (void)json_push_kv_bool(&reply->data, "identity_created",
+                            identity_created);
+    (void)json_push_kv_int(&reply->data, "products_loaded",
+                           counts->products_loaded);
+    (void)json_push_kv_bool(&reply->data, "demo_products_seeded",
+                            counts->demo_seeded);
+    if (input && input[0] && counts->products_before > 0)
+        (void)json_push_kv_str(&reply->data, "products_note",
+            "products.json was copied but the products table is not empty; "
+            "the loader only provisions an empty store");
+    if (!snap->identity_present)
+        (void)json_push_kv_str(&reply->data, "persistence_note",
+            SHOP_REMEDY_PERSIST);
+    shop_push_snapshot(&reply->data, &view);
+    shop_push_verification(&reply->data, &view);
+    reply->error.mutated = true;
+}
+
 void zcl_native_handle_shop_init(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
@@ -492,98 +658,22 @@ void zcl_native_handle_shop_init(const struct zcl_command_request *request,
         return;
     }
 
-    /* Commit. Custody gates BEFORE anything is minted or written: the
-     * most dangerous misconfiguration (keys plaintext on disk) is named
-     * first, even on a stub-Tor build where step 2 would otherwise mask
-     * it. */
-    if (snap.wallet != SHOP_WALLET_ENCRYPTED) {
-        const char *code = snap.wallet == SHOP_WALLET_PLAINTEXT
-            ? "WALLET_NOT_ENCRYPTED"
-            : snap.wallet == SHOP_WALLET_ABSENT
-                ? "WALLET_ABSENT" : "WALLET_UNAVAILABLE";
-        sh_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
-                code, "custody", SHOP_WALLET_RECIPE,
-                shop_wallet_posture_name(snap.wallet));
+    if (sh_commit_refuse_unready(&snap, reply))
         return;
-    }
-    if (!snap.tor_real) {
-        sh_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                "TOR_STUB_BUILD", "tor", SHOP_REMEDY_TOR, "tor_stub");
-        return;
-    }
 
-    /* Persistent identity: mint on first init, reuse after. A short or
-     * corrupt seed is a named refusal inside onion_identity_ensure, never
-     * a silent remint. */
-    uint8_t seed[32];
-    char address[64];
     bool identity_created = false;
-    if (!onion_identity_ensure(datadir, seed, address, sizeof(address),
-                               &identity_created)) {
-        sh_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                "IDENTITY_FAILED", "identity",
-                "the persistent onion identity exists but is unreadable or "
-                "corrupt — inspect <datadir>/tor_data/onion_service/"
-                "identity_seed (it is never silently reminted)",
-                datadir);
+    if (sh_commit_ensure_identity(datadir, &identity_created, reply))
         return;
-    }
-    memset(seed, 0, sizeof(seed));
 
     /* --input products.json, copied before the schema step so the loader
      * provisions it. */
     const char *input = json_get_str_or(request->input, "input", NULL);
-    if (input && input[0]) {
-        char err[160] = "";
-        if (!shop_provision_products_json(datadir, input, err, sizeof(err))) {
-            sh_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                    ZCL_COMMAND_EXIT_INVALID, "INPUT_UNREADABLE", "provision",
-                    "the --input products.json could not be provisioned",
-                    err);
-            return;
-        }
-    }
+    if (sh_copy_input_products_json(datadir, input, reply))
+        return;
 
-    /* Store schema + products, through the same loader the /store surface
-     * uses, against the same node.db it serves from. The file must already
-     * exist: node_db_open_runtime would happily mint one on a mistyped
-     * datadir, so a missing file is named instead. */
-    char db_path[1024];
-    if (!shop_internal_path_join(db_path, sizeof(db_path), datadir,
-                                 "node.db")) {
-        sh_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "DATADIR_PATH_TOO_LONG", "normalize",
-                "datadir path is too long to address node.db", datadir);
+    struct sh_commit_counts counts;
+    if (sh_commit_load_store(datadir, input, &snap, &counts, reply))
         return;
-    }
-    struct stat st;
-    if (stat(db_path, &st) != 0 || !S_ISREG(st.st_mode)) {
-        sh_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                "STORE_NOT_INITIALISED", "schema",
-                "no node.db at this datadir — boot the node once to create "
-                "the store schema, then re-run init", db_path);
-        return;
-    }
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    if (!node_db_open_runtime(&ndb, db_path, "shop.init")) {
-        sh_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                "STORE_NOT_INITIALISED", "schema",
-                "node.db exists but could not be opened for the store",
-                db_path);
-        return;
-    }
-    int products_before = db_store_product_count(&ndb);
-    bool had_products_json = snap.products_json_present;
-    store_ensure_schema(ndb.db, datadir);
-    int products_after = db_store_product_count(&ndb);
-    node_db_close(&ndb);
-    int products_loaded = products_after - products_before;
-    /* products.json present and a still-empty store means the loader
-     * found nothing valid; a repopulated store with no products.json
-     * means the demo seeds fell back. Both are named, neither is silent. */
-    bool demo_seeded = products_before == 0 && products_after > 0 &&
-                       !had_products_json && !(input && input[0]);
 
     char err[160] = "";
     if (!shop_announce_directory_app(datadir, err, sizeof(err))) {
@@ -594,35 +684,8 @@ void zcl_native_handle_shop_init(const struct zcl_command_request *request,
         return;
     }
 
-    /* The verification block describes what the operator now HAS, so
-     * re-collect rather than trusting the pre-mutation snapshot. */
-    struct shop_snapshot after;
-    shop_snapshot_collect(datadir, &after);
-    struct shop_status_view_result_v1 view;
-    if (!shop_status_render(&after, &view)) {
-        sh_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "SHOP_STATUS_VIEW_FAILED", "render",
-                "the pure storefront view refused the committed posture",
-                datadir);
-        return;
-    }
-    (void)json_push_kv_str(&reply->data, "mode", "commit");
-    (void)json_push_kv_str(&reply->data, "datadir", datadir);
-    (void)json_push_kv_bool(&reply->data, "identity_created",
-                            identity_created);
-    (void)json_push_kv_int(&reply->data, "products_loaded", products_loaded);
-    (void)json_push_kv_bool(&reply->data, "demo_products_seeded",
-                            demo_seeded);
-    if (input && input[0] && products_before > 0)
-        (void)json_push_kv_str(&reply->data, "products_note",
-            "products.json was copied but the products table is not empty; "
-            "the loader only provisions an empty store");
-    if (!snap.identity_present)
-        (void)json_push_kv_str(&reply->data, "persistence_note",
-            SHOP_REMEDY_PERSIST);
-    shop_push_snapshot(&reply->data, &view);
-    shop_push_verification(&reply->data, &view);
-    reply->error.mutated = true;
+    sh_commit_report_success(datadir, &snap, input, &counts,
+                             identity_created, reply);
 }
 
 /* ── Hot-swappable leaves ──────────────────────────────────────────────────
