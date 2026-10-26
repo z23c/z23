@@ -174,6 +174,47 @@ static int directory_watcher_fork_reused_fd(const char *root)
     return ok ? 0 : 1;
 }
 
+/* Writes one byte through a fresh descriptor opened with the probe's flags,
+ * preserving the open/write/close short-circuit order of the original chains.
+ * Returns 0 when every step succeeded, 1 on the first failure. */
+static int directory_watcher_filtered_write_file(
+    const char *path, int flags, const char *data)
+{
+    int fd = open(path, flags, 0600);
+    if (fd < 0)
+        return 1;
+    if (write(fd, data, 1) != 1)
+        return 1;
+    if (close(fd) != 0)
+        return 1;
+    return 0;
+}
+
+/* Writes one byte and then requires the watcher to report expected within
+ * timeout_ms; returns 0 only when both steps behaved as the probe needs. */
+static int directory_watcher_filtered_write_and_wait(
+    struct platform_directory_watcher *watcher, const char *path, int flags,
+    const char *data, int timeout_ms, int expected)
+{
+    if (directory_watcher_filtered_write_file(path, flags, data) != 0)
+        return 1;
+    if (platform_directory_watcher_wait(watcher, timeout_ms, NULL, NULL) !=
+        expected)
+        return 1;
+    return 0;
+}
+
+/* Removes the probe's files and directories in the original order; returns 0
+ * only when every unlink and rmdir succeeded. */
+static int directory_watcher_filtered_cleanup(
+    const char *hidden, const char *excluded, const char *visible,
+    const char *ignored, const char *root)
+{
+    return unlink(hidden) == 0 && unlink(excluded) == 0 &&
+           unlink(visible) == 0 &&
+           rmdir(ignored) == 0 && rmdir(root) == 0 ? 0 : 1;
+}
+
 static int directory_watcher_filtered_probe(const char *root)
 {
     char ignored[1200], hidden[1200], excluded[1200], visible[1200], swap[1200];
@@ -184,8 +225,8 @@ static int directory_watcher_filtered_probe(const char *root)
     (void)snprintf(swap, sizeof(swap), "%s/swap.tmp", root);
     if (mkdir(ignored, 0700) != 0)
         return 1;
-    int fd = open(excluded, O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0 || write(fd, "x", 1) != 1 || close(fd) != 0)
+    if (directory_watcher_filtered_write_file(
+            excluded, O_CREAT | O_EXCL | O_WRONLY, "x") != 0)
         return 1;
 
     struct platform_directory_watcher watcher;
@@ -194,43 +235,34 @@ static int directory_watcher_filtered_probe(const char *root)
             &watcher, root, skip_ignored, include_source_file, NULL))
         return 1;
 
-    fd = open(hidden, O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0 || write(fd, "x", 1) != 1 || close(fd) != 0)
-        return 1;
-    if (platform_directory_watcher_wait(&watcher, 100, NULL, NULL) !=
-        PLATFORM_DIRECTORY_WATCH_TIMEOUT)
+    if (directory_watcher_filtered_write_and_wait(
+            &watcher, hidden, O_CREAT | O_EXCL | O_WRONLY, "x", 100,
+            PLATFORM_DIRECTORY_WATCH_TIMEOUT) != 0)
         return 1;
 
-    fd = open(excluded, O_WRONLY | O_APPEND);
-    if (fd < 0 || write(fd, "y", 1) != 1 || close(fd) != 0)
-        return 1;
-    if (platform_directory_watcher_wait(&watcher, 100, NULL, NULL) !=
-        PLATFORM_DIRECTORY_WATCH_TIMEOUT)
+    if (directory_watcher_filtered_write_and_wait(
+            &watcher, excluded, O_WRONLY | O_APPEND, "y", 100,
+            PLATFORM_DIRECTORY_WATCH_TIMEOUT) != 0)
         return 1;
 
-    fd = open(visible, O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0 || write(fd, "x", 1) != 1 || close(fd) != 0)
+    if (directory_watcher_filtered_write_and_wait(
+            &watcher, visible, O_CREAT | O_EXCL | O_WRONLY, "x", 2000,
+            PLATFORM_DIRECTORY_WATCH_CHANGED) != 0)
         return 1;
-    if (platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) !=
-        PLATFORM_DIRECTORY_WATCH_CHANGED)
-        return 1;
-    fd = open(swap, O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0 || write(fd, "z", 1) != 1 || close(fd) != 0 ||
+    if (directory_watcher_filtered_write_file(
+            swap, O_CREAT | O_EXCL | O_WRONLY, "z") != 0 ||
         rename(swap, visible) != 0)
         return 1;
     if (platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) !=
         PLATFORM_DIRECTORY_WATCH_CHANGED)
         return 1;
-    fd = open(visible, O_WRONLY | O_APPEND);
-    if (fd < 0 || write(fd, "y", 1) != 1 || close(fd) != 0)
-        return 1;
-    if (platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) !=
-        PLATFORM_DIRECTORY_WATCH_CHANGED)
+    if (directory_watcher_filtered_write_and_wait(
+            &watcher, visible, O_WRONLY | O_APPEND, "y", 2000,
+            PLATFORM_DIRECTORY_WATCH_CHANGED) != 0)
         return 1;
     platform_directory_watcher_close(&watcher);
-    return unlink(hidden) == 0 && unlink(excluded) == 0 &&
-           unlink(visible) == 0 &&
-           rmdir(ignored) == 0 && rmdir(root) == 0 ? 0 : 1;
+    return directory_watcher_filtered_cleanup(
+        hidden, excluded, visible, ignored, root);
 }
 #endif
 

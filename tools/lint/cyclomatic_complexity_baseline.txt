@@ -1598,7 +1598,6 @@ tests/harness/src/test_dev_proof_signer.c:dps_git_rig:16
 tests/harness/src/test_devagent_mail.c:test_devagent_mail:36
 tests/harness/src/test_devagent_queue.c:test_devagent_queue:28
 tests/harness/src/test_devagent_triage.c:test_devagent_triage:20
-tests/harness/src/test_directory_watcher.c:directory_watcher_filtered_probe:32
 tests/harness/src/test_disk_block_io.c:test_deferred_sync_byte_identical:18
 tests/harness/src/test_domain_consensus_check_block.c:test_domain_consensus_check_block:39
 tests/harness/src/test_domain_consensus_coinbase.c:test_domain_consensus_coinbase:53
