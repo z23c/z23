@@ -1214,9 +1214,13 @@ static bool present_pages_hover_live(const struct present_pages_run *run)
 static int32_t present_pages_hover_key_step(const RGFW_event *event,
     uint32_t item_count, bool *absolute, uint32_t *next_hover)
 {
-    if (event->key.value == RGFW_right || event->key.value == RGFW_down)
+    if (event->key.value == RGFW_right)
         return 1;
-    if (event->key.value == RGFW_left || event->key.value == RGFW_up)
+    if (event->key.value == RGFW_left)
+        return -1;
+    if (event->key.value == RGFW_down)
+        return 1;
+    if (event->key.value == RGFW_up)
         return -1;
     if (event->key.value == RGFW_pageDown)
         return 7;
