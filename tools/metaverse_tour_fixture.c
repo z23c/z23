@@ -149,11 +149,178 @@ static bool mtf_add_file(struct vcs_package_manifest *m, const char *dir,
                                     hash, 1);
 }
 
-int main(int argc, char **argv)
+enum mtf_command {
+    MTF_COMMAND_FIXTURE,
+    MTF_COMMAND_PUBKEY,
+    MTF_COMMAND_USAGE,
+};
+
+static enum mtf_command mtf_parse_command(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "pubkey") == 0)
+        return MTF_COMMAND_PUBKEY;
+    if (argc != 7 || strcmp(argv[1], "fixture") != 0)
+        return MTF_COMMAND_USAGE;
+    return MTF_COMMAND_FIXTURE;
+}
+
+/* Returns 0 when argv[5]/argv[6] parse, 1 for a bad key seed byte,
+ * 2 for a bad seq; the caller reports the message. */
+static int mtf_parse_fixture_args(char **argv, uint8_t *key_seed,
+                                  unsigned long *seq)
+{
+    if (strlen(argv[5]) != 2 ||
+        !zcl_hex_decode_lower(argv[5], key_seed, 1))
+        return 1;
+    char *end = NULL;
+    *seq = strtoul(argv[6], &end, 10);
+    if (!end || *end || *seq == 0)
+        return 2;
+    return 0;
+}
+
+static bool mtf_add_package_files(struct vcs_package_manifest *m,
+                                  const char *dir)
+{
+    return mtf_add_file(m, dir, "LICENSE",
+                        "MIT License\n\nPermission is hereby granted.\n") &&
+           mtf_add_file(m, dir, "include/ring.h",
+                        "#pragma once\nstruct ring { unsigned head, tail; };\n") &&
+           mtf_add_file(m, dir, "src/ring.c",
+                        "#include \"ring.h\"\nint ring_push(void) { return 0; }\n");
+}
+
+static bool mtf_serialize_manifest(struct vcs_package_manifest *m,
+                                   uint8_t **wire, size_t *wire_len,
+                                   uint8_t *root)
+{
+    return vcs_package_manifest_serialize(m, wire, wire_len) &&
+           vcs_package_manifest_root(m, root);
+}
+
+static bool mtf_recipe_add_public_header(struct vcs_package_recipe *recipe,
+                                         const char *path)
+{
+    bool ok = vcs_package_recipe_add_header(recipe, path, NULL);
+    const char *slash = strrchr(path, '/');
+    if (ok && slash) {
+        char idir[1024];
+        snprintf(idir, sizeof(idir), "%.*s", (int)(slash - path), path);
+        enum vcs_package_recipe_error rerr = VCS_PACKAGE_RECIPE_OK;
+        ok = vcs_package_recipe_add_include_dir(recipe, idir, &rerr) ||
+             rerr == VCS_PACKAGE_RECIPE_ERR_LIST_ORDER;
+    }
+    return ok;
+}
+
+static bool mtf_recipe_add_file(struct vcs_package_recipe *recipe,
+                                const char *path)
+{
+    size_t len = strlen(path);
+    if (len > 2 && strcmp(path + len - 2, ".h") == 0)
+        return mtf_recipe_add_public_header(recipe, path);
+    if (len > 2 && strcmp(path + len - 2, ".c") == 0)
+        return vcs_package_recipe_add_source(recipe, path, NULL);
+    return true;
+}
+
+static bool mtf_build_recipe(struct vcs_package_manifest *manifest,
+                             struct vcs_package_recipe *recipe,
+                             uint8_t *recipe_root, uint8_t **recipe_wire,
+                             size_t *recipe_wire_len)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < manifest->count; i++) {
+        ok = mtf_recipe_add_file(recipe, manifest->files[i].path);
+    }
+    if (ok)
+        ok = vcs_package_recipe_add_define(recipe, "ZCL_FIXTURE=1", NULL) &&
+             vcs_package_recipe_add_library(recipe,
+                                            VCS_PACKAGE_RECIPE_LIB_LIBC,
+                                            NULL);
+    vcs_package_recipe_set_test_limits(recipe, 0, 60,
+                                       UINT64_C(64) * 1024u * 1024u);
+    if (ok)
+        ok = vcs_package_recipe_root(recipe, recipe_root) ==
+                 VCS_PACKAGE_RECIPE_OK &&
+             vcs_package_recipe_serialize(recipe, recipe_wire,
+                                          recipe_wire_len) ==
+                 VCS_PACKAGE_RECIPE_OK;
+    return ok;
+}
+
+static bool mtf_build_release(struct vcs_package_release *release,
+                              uint8_t key_seed, const char *name,
+                              const char *license, uint64_t seq,
+                              const uint8_t *package_root,
+                              const uint8_t *recipe_root,
+                              uint8_t **release_wire,
+                              size_t *release_wire_len)
+{
+    struct privkey sk;
+    struct pubkey pk;
+    bool ok = mtf_keypair(key_seed, &sk, &pk);
+    if (ok) {
+        release->schema_version = VCS_PACKAGE_RELEASE_VERSION;
+        snprintf(release->name, sizeof(release->name), "%s", name);
+        snprintf(release->semver, sizeof(release->semver), "1.0.0");
+        memcpy(release->package_root, package_root, 32);
+        release->has_parent = false;
+        memcpy(release->publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
+        release->publisher_sequence = seq;
+        ok = mtf_t1_reward(release->reward_address,
+                           sizeof(release->reward_address));
+    }
+    if (ok) {
+        snprintf(release->license, sizeof(release->license), "%s", license);
+        memcpy(release->recipe_root, recipe_root, 32);
+        release->has_znam = false;
+        ok = vcs_package_accept_chain_id(release->chain_id,
+                                         sizeof(release->chain_id));
+    }
+    if (ok)
+        ok = mtf_sign(release, &sk);
+    memory_cleanse(&sk, sizeof(sk));
+    if (ok)
+        ok = vcs_package_release_serialize(release, release_wire,
+                                           release_wire_len) ==
+                 VCS_PACKAGE_RELEASE_OK;
+    return ok;
+}
+
+static bool mtf_print_fixture_json(uint8_t *release_wire,
+                                   size_t release_wire_len,
+                                   uint8_t *manifest_wire,
+                                   size_t manifest_wire_len,
+                                   uint8_t *recipe_wire,
+                                   size_t recipe_wire_len,
+                                   const uint8_t *package_root)
+{
+    char *release_hex = mtf_hex(release_wire, release_wire_len);
+    char *manifest_hex = mtf_hex(manifest_wire, manifest_wire_len);
+    char *recipe_hex = mtf_hex(recipe_wire, recipe_wire_len);
+    char root_hex[65];
+    zcl_hex_encode(package_root, 32, root_hex);
+    bool ok = release_hex && manifest_hex && recipe_hex;
+    if (ok)
+        printf("{\"release_hex\":\"%s\",\"manifest_hex\":\"%s\","
+               "\"recipe_hex\":\"%s\",\"package_root\":\"%s\"}\n",
+               release_hex, manifest_hex, recipe_hex, root_hex);
+    free(release_hex);
+    free(manifest_hex);
+    free(recipe_hex);
+    free(release_wire);
+    free(manifest_wire);
+    free(recipe_wire);
+    return ok;
+}
+
+int main(int argc, char **argv)
+{
+    enum mtf_command cmd = mtf_parse_command(argc, argv);
+    if (cmd == MTF_COMMAND_PUBKEY)
         return mtf_pubkey(argv[2]);
-    if (argc != 7 || strcmp(argv[1], "fixture") != 0) {
+    if (cmd == MTF_COMMAND_USAGE) {
         fprintf(stderr,
                 "usage: %s pubkey <64-lower-hex-seed>\n"
                 "       %s fixture <pkgdir> <name> <license> "
@@ -165,14 +332,13 @@ int main(int argc, char **argv)
     const char *name = argv[3];
     const char *license = argv[4];
     uint8_t key_seed = 0;
-    if (strlen(argv[5]) != 2 ||
-        !zcl_hex_decode_lower(argv[5], &key_seed, 1)) {
+    unsigned long seq = 0;
+    int argerr = mtf_parse_fixture_args(argv, &key_seed, &seq);
+    if (argerr == 1) {
         fprintf(stderr, "key seed must be one lowercase hex byte\n");
         return 2;
     }
-    char *end = NULL;
-    unsigned long seq = strtoul(argv[6], &end, 10);
-    if (!end || *end || seq == 0) {
+    if (argerr == 2) {
         fprintf(stderr, "seq must be a positive integer\n");
         return 2;
     }
@@ -191,12 +357,7 @@ int main(int argc, char **argv)
     (void)mkdir(dir, 0700);
     struct vcs_package_manifest manifest;
     vcs_package_manifest_init(&manifest);
-    if (!mtf_add_file(&manifest, dir, "LICENSE",
-                      "MIT License\n\nPermission is hereby granted.\n") ||
-        !mtf_add_file(&manifest, dir, "include/ring.h",
-                      "#pragma once\nstruct ring { unsigned head, tail; };\n") ||
-        !mtf_add_file(&manifest, dir, "src/ring.c",
-                      "#include \"ring.h\"\nint ring_push(void) { return 0; }\n")) {
+    if (!mtf_add_package_files(&manifest, dir)) {
         fprintf(stderr, "package fixture files failed\n");
         vcs_package_manifest_free(&manifest);
         return 2;
@@ -204,9 +365,8 @@ int main(int argc, char **argv)
     uint8_t *manifest_wire = NULL;
     size_t manifest_wire_len = 0;
     uint8_t package_root[32];
-    if (!vcs_package_manifest_serialize(&manifest, &manifest_wire,
-                                        &manifest_wire_len) ||
-        !vcs_package_manifest_root(&manifest, package_root)) {
+    if (!mtf_serialize_manifest(&manifest, &manifest_wire,
+                                &manifest_wire_len, package_root)) {
         fprintf(stderr, "manifest serialize/root failed\n");
         vcs_package_manifest_free(&manifest);
         return 2;
@@ -217,43 +377,11 @@ int main(int argc, char **argv)
      * 64 MiB — the same shape test_zcode_publish proves. */
     struct vcs_package_recipe recipe;
     vcs_package_recipe_init(&recipe);
-    bool ok = true;
-    for (size_t i = 0; ok && i < manifest.count; i++) {
-        const char *path = manifest.files[i].path;
-        size_t len = strlen(path);
-        if (len > 2 && strcmp(path + len - 2, ".h") == 0) {
-            ok = vcs_package_recipe_add_header(&recipe, path, NULL);
-            const char *slash = strrchr(path, '/');
-            if (ok && slash) {
-                char idir[1024];
-                snprintf(idir, sizeof(idir), "%.*s", (int)(slash - path),
-                         path);
-                enum vcs_package_recipe_error rerr = VCS_PACKAGE_RECIPE_OK;
-                if (!vcs_package_recipe_add_include_dir(&recipe, idir,
-                                                        &rerr) &&
-                    rerr != VCS_PACKAGE_RECIPE_ERR_LIST_ORDER)
-                    ok = false;
-            }
-        } else if (len > 2 && strcmp(path + len - 2, ".c") == 0) {
-            ok = vcs_package_recipe_add_source(&recipe, path, NULL);
-        }
-    }
-    if (ok)
-        ok = vcs_package_recipe_add_define(&recipe, "ZCL_FIXTURE=1", NULL) &&
-             vcs_package_recipe_add_library(&recipe,
-                                            VCS_PACKAGE_RECIPE_LIB_LIBC,
-                                            NULL);
-    vcs_package_recipe_set_test_limits(&recipe, 0, 60,
-                                       UINT64_C(64) * 1024u * 1024u);
     uint8_t recipe_root[32];
     uint8_t *recipe_wire = NULL;
     size_t recipe_wire_len = 0;
-    if (ok)
-        ok = vcs_package_recipe_root(&recipe, recipe_root) ==
-                 VCS_PACKAGE_RECIPE_OK &&
-             vcs_package_recipe_serialize(&recipe, &recipe_wire,
-                                          &recipe_wire_len) ==
-                 VCS_PACKAGE_RECIPE_OK;
+    bool ok = mtf_build_recipe(&manifest, &recipe, recipe_root, &recipe_wire,
+                               &recipe_wire_len);
     vcs_package_recipe_free(&recipe);
     if (!ok) {
         fprintf(stderr, "recipe build failed\n");
@@ -264,36 +392,11 @@ int main(int argc, char **argv)
 
     struct vcs_package_release release;
     memset(&release, 0, sizeof(release));
-    struct privkey sk;
-    struct pubkey pk;
-    ok = mtf_keypair(key_seed, &sk, &pk);
-    if (ok) {
-        release.schema_version = VCS_PACKAGE_RELEASE_VERSION;
-        snprintf(release.name, sizeof(release.name), "%s", name);
-        snprintf(release.semver, sizeof(release.semver), "1.0.0");
-        memcpy(release.package_root, package_root, 32);
-        release.has_parent = false;
-        memcpy(release.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
-        release.publisher_sequence = (uint64_t)seq;
-        ok = mtf_t1_reward(release.reward_address,
-                           sizeof(release.reward_address));
-    }
-    if (ok) {
-        snprintf(release.license, sizeof(release.license), "%s", license);
-        memcpy(release.recipe_root, recipe_root, 32);
-        release.has_znam = false;
-        ok = vcs_package_accept_chain_id(release.chain_id,
-                                         sizeof(release.chain_id));
-    }
-    if (ok)
-        ok = mtf_sign(&release, &sk);
-    memory_cleanse(&sk, sizeof(sk));
     uint8_t *release_wire = NULL;
     size_t release_wire_len = 0;
-    if (ok)
-        ok = vcs_package_release_serialize(&release, &release_wire,
-                                           &release_wire_len) ==
-                 VCS_PACKAGE_RELEASE_OK;
+    ok = mtf_build_release(&release, key_seed, name, license, (uint64_t)seq,
+                           package_root, recipe_root, &release_wire,
+                           &release_wire_len);
     if (!ok) {
         fprintf(stderr, "release build/sign failed\n");
         vcs_package_manifest_free(&manifest);
@@ -302,22 +405,9 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    char *release_hex = mtf_hex(release_wire, release_wire_len);
-    char *manifest_hex = mtf_hex(manifest_wire, manifest_wire_len);
-    char *recipe_hex = mtf_hex(recipe_wire, recipe_wire_len);
-    char root_hex[65];
-    zcl_hex_encode(package_root, 32, root_hex);
-    ok = release_hex && manifest_hex && recipe_hex;
-    if (ok)
-        printf("{\"release_hex\":\"%s\",\"manifest_hex\":\"%s\","
-               "\"recipe_hex\":\"%s\",\"package_root\":\"%s\"}\n",
-               release_hex, manifest_hex, recipe_hex, root_hex);
-    free(release_hex);
-    free(manifest_hex);
-    free(recipe_hex);
-    free(release_wire);
-    free(manifest_wire);
-    free(recipe_wire);
+    ok = mtf_print_fixture_json(release_wire, release_wire_len, manifest_wire,
+                                manifest_wire_len, recipe_wire,
+                                recipe_wire_len, package_root);
     vcs_package_manifest_free(&manifest);
     if (!ok) {
         fprintf(stderr, "hex encode failed\n");
