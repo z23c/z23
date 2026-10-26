@@ -896,9 +896,6 @@ engine/composition/src/boot_bundle_fetch.c:boot_bundle_fetch_download:18
 engine/composition/src/boot_bundle_fetch.c:boot_bundle_fetch_maybe:22
 engine/composition/src/boot_bundle_fetch_seeds.c:bbf_add_connect_seed:19
 engine/composition/src/boot_bundle_fetch_seeds.c:bbf_assemble_seeds:17
-engine/composition/src/boot_cold_start.c:cold_start_drive:16
-engine/composition/src/boot_cold_start.c:cold_start_receipt_load:25
-engine/composition/src/boot_cold_start.c:cold_start_receipt_write:26
 engine/composition/src/boot_datadir_lock.c:boot_datadir_lock_acquire#2:42
 engine/composition/src/boot_endpoint_records.c:ber_read_record_file:23
 engine/composition/src/boot_endpoint_records.c:boot_endpoint_records_load:21

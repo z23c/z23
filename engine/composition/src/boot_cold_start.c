@@ -102,15 +102,86 @@ static void cold_start_singleline(const char *in, char *out, size_t out_n)
 {
     cold_start_singleline_bounded(in, in ? strlen(in) : 0, out, out_n);
 }
+/* True iff `datadir` is NULL or empty. */
+static bool cold_start_datadir_missing(const char *datadir)
+{
+    return !datadir || !datadir[0];
+}
+/* Format "<datadir>/coldstart" into `dir`. Returns the snprintf length, or -1
+ * if the path did not fit. */
+static int cold_start_receipt_dir_path(const char *datadir, char *dir, size_t n)
+{
+    int dn = snprintf(dir, n, "%s/coldstart", datadir);
+    if (dn < 0 || (size_t)dn >= n)
+        return -1;
+    return dn;
+}
+/* Single-line the refusal reason (when refused) and format the whole receipt
+ * body into `content`. Returns the snprintf length, or -1 if it did not fit. */
+static int cold_start_receipt_content(enum cold_start_stage stage,
+                                      const char *param, bool refused,
+                                      const char *reason, char *reason_line,
+                                      size_t reason_n, char *content,
+                                      size_t content_n)
+{
+    cold_start_singleline(refused ? reason : NULL, reason_line, reason_n);
+    int cn = snprintf(content, content_n,
+                      "magic=%s\nversion=%d\nstage=%s\noutcome=%s\n"
+                      "has_param=%d\nparam=%s\nreason=%s\n",
+                      COLD_START_MAGIC, COLD_START_VERSION,
+                      cold_start_stage_name(stage),
+                      refused ? "refused" : "ok",
+                      (param && param[0]) ? 1 : 0,
+                      (param && param[0]) ? param : "",
+                      reason_line);
+    if (cn < 0 || (size_t)cn >= content_n)
+        return -1;
+    return cn;
+}
+/* Create the nonce-named staging file next to `resolved`, trying up to 64
+ * temp names. Returns 1 when staged, 0 when no name could be created, and
+ * -1 when a temp path does not fit. */
+static int cold_start_receipt_staging_create(const char *resolved, char *tmp,
+                                             size_t tmp_n,
+                                             struct platform_private_file *staging)
+{
+    for (unsigned attempt = 0; attempt < 64; attempt++) {
+        uint64_t nonce = atomic_fetch_add_explicit(
+            &g_cold_start_receipt_nonce, 1, memory_order_relaxed);
+        int tn = snprintf(tmp, tmp_n, "%s.tmp.%016llx", resolved,
+                          (unsigned long long)nonce);
+        if (tn < 0 || (size_t)tn >= tmp_n)
+            return -1;
+        if (platform_private_file_create(tmp, staging))
+            return 1;
+    }
+    return 0;
+}
+/* Durable-commit the staged file over `resolved` (write, flush, atomic
+ * replace, parent sync). Always closes `staging`; on failure also removes
+ * the temp file. Returns 0 on success, -1 on failure. */
+static int cold_start_receipt_commit(struct platform_private_file *staging,
+                                     const char *content, size_t len,
+                                     const char *tmp, const char *resolved,
+                                     const char *parent)
+{
+    bool ok = platform_private_file_write_at(staging, content, len, 0) &&
+              platform_private_file_flush(staging) &&
+              platform_private_file_replace(staging, tmp, resolved) &&
+              platform_private_parent_flush(parent);
+    platform_private_file_close(staging);
+    if (!ok)
+        (void)platform_private_file_unlink_missing_ok(tmp);
+    return ok ? 0 : -1;
+}
 bool cold_start_receipt_write(const char *datadir, enum cold_start_stage stage,
                               const char *param, bool refused,
                               const char *reason)
 {
-    if (!datadir || !datadir[0])
+    if (cold_start_datadir_missing(datadir))
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: empty datadir");
     char dir[PATH_MAX];
-    int dn = snprintf(dir, sizeof(dir), "%s/coldstart", datadir);
-    if (dn < 0 || (size_t)dn >= sizeof(dir))
+    if (cold_start_receipt_dir_path(datadir, dir, sizeof(dir)) < 0)
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: coldstart dir path too long");
     if (!platform_private_directory_ensure(dir))
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: private directory refused");
@@ -123,44 +194,25 @@ bool cold_start_receipt_write(const char *datadir, enum cold_start_stage stage,
                                        sizeof(parent)))
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: path resolution failed");
     char reason_line[COLD_START_REASON_MAX];
-    cold_start_singleline(refused ? reason : NULL, reason_line,
-                          sizeof(reason_line));
     char content[PATH_MAX + COLD_START_REASON_MAX + 192];
-    int cn = snprintf(content, sizeof(content),
-                      "magic=%s\nversion=%d\nstage=%s\noutcome=%s\n"
-                      "has_param=%d\nparam=%s\nreason=%s\n",
-                      COLD_START_MAGIC, COLD_START_VERSION,
-                      cold_start_stage_name(stage),
-                      refused ? "refused" : "ok",
-                      (param && param[0]) ? 1 : 0,
-                      (param && param[0]) ? param : "",
-                      reason_line);
-    if (cn < 0 || (size_t)cn >= sizeof(content))
+    int cn = cold_start_receipt_content(stage, param, refused, reason,
+                                        reason_line, sizeof(reason_line),
+                                        content, sizeof(content));
+    if (cn < 0)
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: content build failed");
     struct platform_private_file staging;
     platform_private_file_init(&staging);
     char tmp[PATH_MAX];
-    bool created = false;
-    for (unsigned attempt = 0; attempt < 64 && !created; attempt++) {
-        uint64_t nonce = atomic_fetch_add_explicit(
-            &g_cold_start_receipt_nonce, 1, memory_order_relaxed);
-        int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%016llx", resolved,
-                          (unsigned long long)nonce);
-        if (tn < 0 || (size_t)tn >= sizeof(tmp))
-            LOG_FAIL(COLD_START_SUBSYS, "receipt write: tmp path too long");
-        created = platform_private_file_create(tmp, &staging);
-    }
-    if (!created)
+    int staged = cold_start_receipt_staging_create(resolved, tmp, sizeof(tmp),
+                                                   &staging);
+    if (staged < 0)
+        LOG_FAIL(COLD_START_SUBSYS, "receipt write: tmp path too long");
+    if (staged == 0)
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: staging create failed");
-    bool ok = platform_private_file_write_at(&staging, content, (size_t)cn, 0) &&
-              platform_private_file_flush(&staging) &&
-              platform_private_file_replace(&staging, tmp, resolved) &&
-              platform_private_parent_flush(parent);
-    platform_private_file_close(&staging);
-    if (!ok) {
-        (void)platform_private_file_unlink_missing_ok(tmp);
+    int stored = cold_start_receipt_commit(&staging, content, (size_t)cn, tmp,
+                                           resolved, parent);
+    if (stored != 0)
         LOG_FAIL(COLD_START_SUBSYS, "receipt write: durable replacement failed");
-    }
     LOG_INFO(COLD_START_SUBSYS, "stage '%s' %s receipt written (%s)",
              cold_start_stage_name(stage), refused ? "REFUSAL" : "success", path);
     return true;
@@ -195,6 +247,60 @@ static bool cold_start_receipt_field(const char *buf, const char *key,
     }
     return false;
 }
+/* True iff two snapshots of the same file describe identical state — size,
+ * timestamps and file identity — i.e. nothing rewrote it in between. */
+static bool cold_start_snapshots_match(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    /* One row per snapshot member, as {before, after}; a mismatch on any row
+     * means the file was rewritten between the two snapshots. */
+    const uint64_t member[][2] = {
+        { (uint64_t)before->size,      (uint64_t)after->size },
+        { (uint64_t)before->modified_seconds,
+          (uint64_t)after->modified_seconds },
+        { (uint64_t)before->modified_nanoseconds,
+          (uint64_t)after->modified_nanoseconds },
+        { (uint64_t)before->changed_seconds,
+          (uint64_t)after->changed_seconds },
+        { (uint64_t)before->changed_nanoseconds,
+          (uint64_t)after->changed_nanoseconds },
+        { (uint64_t)before->volume,    (uint64_t)after->volume },
+        { (uint64_t)before->file_low,  (uint64_t)after->file_low },
+        { (uint64_t)before->file_high, (uint64_t)after->file_high },
+    };
+    for (size_t i = 0; i < sizeof(member) / sizeof(member[0]); i++)
+        if (member[i][0] != member[i][1])
+            return false;
+    return true;
+}
+/* Open the receipt at `path` and read it into `buf`, trusting the bytes only
+ * if the file is private, its body is non-empty and fits `buf_n`, and a
+ * second snapshot matches the first (no torn read or concurrent replace).
+ * Returns the byte count read, or -1; the file is closed either way. */
+static int64_t cold_start_receipt_read_stable(const char *path, char *buf,
+                                              size_t buf_n)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before;
+    struct platform_positioned_file_snapshot after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        return -1;
+    bool valid = platform_positioned_file_is_private(&file) &&
+                 platform_positioned_file_snapshot(&file, &before) &&
+                 before.size > 0 && before.size < buf_n;
+    int64_t r = valid ? platform_positioned_file_read(
+                            &file, buf, (size_t)before.size, 0)
+                      : -1;
+    bool stable = valid && r == (int64_t)before.size &&
+                  platform_positioned_file_snapshot(&file, &after) &&
+                  cold_start_snapshots_match(&before, &after);
+    platform_positioned_file_close(&file);
+    if (!stable)
+        return -1;
+    return r;
+}
 /* Read + validate a receipt into `buf`: true iff it exists, carries the magic,
  * and its parameter matches `param` (both-NULL equal). Leaves the raw receipt in
  * `buf` for the caller to inspect `outcome`. */
@@ -205,30 +311,8 @@ static bool cold_start_receipt_load(const char *datadir,
     char path[PATH_MAX];
     if (cold_start_receipt_path(datadir, stage, path, sizeof(path)) < 0)
         return false;
-    struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before;
-    struct platform_positioned_file_snapshot after;
-    platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path))
-        return false;
-    bool valid = platform_positioned_file_is_private(&file) &&
-                 platform_positioned_file_snapshot(&file, &before) &&
-                 before.size > 0 && before.size < buf_n;
-    int64_t r = valid ? platform_positioned_file_read(
-                            &file, buf, (size_t)before.size, 0)
-                      : -1;
-    bool stable = valid && r == (int64_t)before.size &&
-                  platform_positioned_file_snapshot(&file, &after) &&
-                  before.size == after.size &&
-                  before.modified_seconds == after.modified_seconds &&
-                  before.modified_nanoseconds == after.modified_nanoseconds &&
-                  before.changed_seconds == after.changed_seconds &&
-                  before.changed_nanoseconds == after.changed_nanoseconds &&
-                  before.volume == after.volume &&
-                  before.file_low == after.file_low &&
-                  before.file_high == after.file_high;
-    platform_positioned_file_close(&file);
-    if (!stable)
+    int64_t r = cold_start_receipt_read_stable(path, buf, buf_n);
+    if (r < 0)
         return false;
     buf[(size_t)r] = '\0';
     char magic[32];
@@ -304,17 +388,33 @@ void cold_start_reason_copy(char *dst, size_t dst_n, const char *src)
 {
     cold_start_singleline(src, dst, dst_n);
 }
+/* Clear the optional reason buffer (NULL or zero length means "absent"). */
+static void cold_start_reason_reset(char *reason, size_t reason_n)
+{
+    if (reason && reason_n)
+        reason[0] = '\0';
+}
+/* Record the stage the driver has reached, when the caller asked for it. */
+static void cold_start_report_reached(enum cold_start_stage *out_reached,
+                                      enum cold_start_stage stage)
+{
+    if (out_reached)
+        *out_reached = stage;
+}
+/* True iff the plan cannot drive anything: NULL plan or no usable datadir. */
+static bool cold_start_plan_datadir_missing(const struct cold_start_plan *plan)
+{
+    return !plan || !plan->datadir || !plan->datadir[0];
+}
 enum cold_start_result cold_start_drive(const struct cold_start_plan *plan,
                                         cold_start_stage_runner_fn runner,
                                         void *user,
                                         enum cold_start_stage *out_reached,
                                         char *reason, size_t reason_n)
 {
-    if (reason && reason_n)
-        reason[0] = '\0';
-    if (out_reached)
-        *out_reached = COLD_START_STAGE_SERVE;
-    if (!plan || !plan->datadir || !plan->datadir[0]) {
+    cold_start_reason_reset(reason, reason_n);
+    cold_start_report_reached(out_reached, COLD_START_STAGE_SERVE);
+    if (cold_start_plan_datadir_missing(plan)) {
         cold_start_reason_copy(reason, reason_n, "empty plan/datadir");
         LOG_WARN(COLD_START_SUBSYS, "drive: empty plan/datadir");
         return COLD_START_TRANSIENT;
@@ -328,8 +428,7 @@ enum cold_start_result cold_start_drive(const struct cold_start_plan *plan,
      * prep stage to "success receipt present" — at most prep-count + 1 loops. */
     for (int guard = 0; guard <= COLD_START_PREP_STAGE_COUNT; guard++) {
         enum cold_start_stage next = cold_start_plan_next(plan);
-        if (out_reached)
-            *out_reached = next;
+        cold_start_report_reached(out_reached, next);
         if (next == COLD_START_STAGE_SERVE)
             return COLD_START_OK;
         const char *param = cold_start_stage_param(plan, next);
