@@ -62,6 +62,117 @@ bool body_history_verdict_is_proven(const struct body_history_verdict *v)
     return v && body_history_status_is_proven(v->status);
 }
 
+/* Clip a measured range down to the evaluation window [lo, hi], in place. */
+static void bh_clip_range_to_window(int64_t *rlo, int64_t *rhi,
+                                    int64_t lo, int64_t hi)
+{
+    if (*rlo < lo)
+        *rlo = lo;
+    if (*rhi > hi)
+        *rhi = hi;
+}
+
+/* Everything in [gap_lo, gap_hi] was never probed: remember the first such
+ * height, unless an earlier gap already supplied one. */
+static void bh_note_unmeasured_gap(struct body_history_verdict *v,
+                                   int64_t gap_lo, int64_t gap_hi)
+{
+    if (gap_lo <= gap_hi && v->lowest_unmeasured < 0)
+        v->lowest_unmeasured = gap_lo;
+}
+
+/* Intersect the window-clipped probed range [rlo, rhi] with `held`, walking
+ * held->ranges from h_idx onward (the caller keeps the monotone cursor).
+ * *hcur enters as the range start and leaves on the first height of the
+ * range that `held` does not cover. Returns the number of heights in the
+ * range that `held` also claims, and records the first probed-but-absent
+ * height in *lowest_missing. */
+static int64_t bh_count_held_in_range(const struct body_coverage_map *held,
+                                      size_t h_idx, int64_t rlo, int64_t rhi,
+                                      int64_t *lowest_missing, int64_t *hcur)
+{
+    int64_t held_in_range = 0;
+
+    for (size_t j = h_idx; j < held->count; j++) {
+        int64_t hlo = held->ranges[j].lo;
+        int64_t hhi = held->ranges[j].hi;
+        if (hlo > rhi)
+            break;
+        if (hhi < *hcur)
+            continue;
+        if (hlo > *hcur && *lowest_missing < 0)
+            *lowest_missing = *hcur;
+        int64_t a = hlo > rlo ? hlo : rlo;
+        int64_t b = hhi < rhi ? hhi : rhi;
+        if (b >= a)
+            held_in_range += b - a + 1;
+        if (hhi + 1 > *hcur)
+            *hcur = hhi + 1;
+    }
+    return held_in_range;
+}
+
+/* Single linear merge of the two maps' range arrays; allocates nothing.
+ * Sums the window-clipped probed heights into *probed_in_w and the
+ * probed-and-held heights into *held_in_w, and records the lowest
+ * probed-but-absent and lowest never-probed heights in the verdict. */
+static void bh_walk_measured_ranges(const struct body_coverage_map *held,
+                                    const struct body_coverage_map *measured,
+                                    int64_t lo, int64_t hi,
+                                    struct body_history_verdict *out,
+                                    int64_t *probed_in_w, int64_t *held_in_w)
+{
+    int64_t cursor = lo;      /* first window height not yet accounted for */
+    size_t h_idx = 0;         /* monotone cursor into held->ranges */
+
+    for (size_t i = 0; i < measured->count; i++) {
+        int64_t rlo = measured->ranges[i].lo;
+        int64_t rhi = measured->ranges[i].hi;
+        if (rhi < lo)
+            continue;
+        if (rlo > hi)
+            break;            /* sorted: nothing further can overlap */
+        bh_clip_range_to_window(&rlo, &rhi, lo, hi);
+
+        /* Everything between the previous measured range and this one was
+         * never probed. */
+        bh_note_unmeasured_gap(out, cursor, rlo - 1);
+
+        *probed_in_w += rhi - rlo + 1;
+
+        /* Intersect [rlo, rhi] with `held`. A gap here is a height the
+         * census looked at and found no body for — a KNOWN missing body,
+         * as opposed to a height nobody looked at. */
+        while (h_idx < held->count && held->ranges[h_idx].hi < rlo)
+            h_idx++;
+        int64_t hcur = rlo;
+        *held_in_w += bh_count_held_in_range(held, h_idx, rlo, rhi,
+                                             &out->lowest_missing, &hcur);
+        if (hcur <= rhi && out->lowest_missing < 0)
+            out->lowest_missing = hcur;
+
+        if (rhi + 1 > cursor)
+            cursor = rhi + 1;
+    }
+    bh_note_unmeasured_gap(out, cursor, hi);
+}
+
+/* Order matters and is deliberate:
+ *   a positively-found hole is the strongest, most actionable fact;
+ *   otherwise any unprobed height keeps us at UNKNOWN;
+ *   COMPLETE requires BOTH "probed everything" and "held everything".
+ * The verdict carries both counts, so INCOMPLETE never hides a
+ * simultaneous unmeasured remainder. */
+static enum body_history_status bh_status_from_counts(int64_t missing_count,
+                                                      int64_t unmeasured_count)
+{
+    if (missing_count > 0)
+        return BODY_HISTORY_INCOMPLETE;
+    if (unmeasured_count > 0)
+        return BODY_HISTORY_UNKNOWN;
+    return BODY_HISTORY_COMPLETE;
+}
+
 bool body_history_evaluate(const struct body_coverage_map *held,
                            const struct body_coverage_map *measured,
                            int64_t lo, int64_t hi,
@@ -97,56 +208,8 @@ bool body_history_evaluate(const struct body_coverage_map *held,
      * and allocates nothing. */
     int64_t probed_in_w = 0;
     int64_t held_in_w = 0;
-    int64_t cursor = lo;      /* first window height not yet accounted for */
-    size_t h_idx = 0;         /* monotone cursor into held->ranges */
-
-    for (size_t i = 0; i < measured->count; i++) {
-        int64_t rlo = measured->ranges[i].lo;
-        int64_t rhi = measured->ranges[i].hi;
-        if (rhi < lo)
-            continue;
-        if (rlo > hi)
-            break;            /* sorted: nothing further can overlap */
-        if (rlo < lo) rlo = lo;
-        if (rhi > hi) rhi = hi;
-
-        /* Everything between the previous measured range and this one was
-         * never probed. */
-        if (rlo > cursor && out->lowest_unmeasured < 0)
-            out->lowest_unmeasured = cursor;
-
-        probed_in_w += rhi - rlo + 1;
-
-        /* Intersect [rlo, rhi] with `held`. A gap here is a height the
-         * census looked at and found no body for — a KNOWN missing body,
-         * as opposed to a height nobody looked at. */
-        while (h_idx < held->count && held->ranges[h_idx].hi < rlo)
-            h_idx++;
-        int64_t hcur = rlo;
-        for (size_t j = h_idx; j < held->count; j++) {
-            int64_t hlo = held->ranges[j].lo;
-            int64_t hhi = held->ranges[j].hi;
-            if (hlo > rhi)
-                break;
-            if (hhi < hcur)
-                continue;
-            if (hlo > hcur && out->lowest_missing < 0)
-                out->lowest_missing = hcur;
-            int64_t a = hlo > rlo ? hlo : rlo;
-            int64_t b = hhi < rhi ? hhi : rhi;
-            if (b >= a)
-                held_in_w += b - a + 1;
-            if (hhi + 1 > hcur)
-                hcur = hhi + 1;
-        }
-        if (hcur <= rhi && out->lowest_missing < 0)
-            out->lowest_missing = hcur;
-
-        if (rhi + 1 > cursor)
-            cursor = rhi + 1;
-    }
-    if (cursor <= hi && out->lowest_unmeasured < 0)
-        out->lowest_unmeasured = cursor;
+    bh_walk_measured_ranges(held, measured, lo, hi, out,
+                            &probed_in_w, &held_in_w);
 
     out->held_count = held_in_w;
     out->missing_count = probed_in_w - held_in_w;
@@ -166,18 +229,8 @@ bool body_history_evaluate(const struct body_coverage_map *held,
         return false;
     }
 
-    /* Order matters and is deliberate:
-     *   a positively-found hole is the strongest, most actionable fact;
-     *   otherwise any unprobed height keeps us at UNKNOWN;
-     *   COMPLETE requires BOTH "probed everything" and "held everything".
-     * The verdict carries both counts, so INCOMPLETE never hides a
-     * simultaneous unmeasured remainder. */
-    if (out->missing_count > 0)
-        out->status = BODY_HISTORY_INCOMPLETE;
-    else if (out->unmeasured_count > 0)
-        out->status = BODY_HISTORY_UNKNOWN;
-    else
-        out->status = BODY_HISTORY_COMPLETE;
+    out->status = bh_status_from_counts(out->missing_count,
+                                        out->unmeasured_count);
 
     return true;
 }
@@ -295,36 +348,55 @@ size_t body_history_census_probe_window(int64_t lo, int64_t hi,
     return (size_t)span;
 }
 
-bool body_history_census_fold(struct body_history_census *c,
-                              struct body_coverage_map *held,
-                              struct body_coverage_map *measured,
-                              int64_t lo,
-                              const uint8_t *classes, size_t n,
-                              struct body_history_pass_result *out)
+/* Outcome of folding a pass of probe classifications into the coverage
+ * maps: either every run landed, or the run that failed says which map
+ * update could not be applied. */
+enum bh_fold_outcome {
+    BH_FOLD_DONE = 0,
+    BH_FOLD_HAVE_INSERT_FAILED,
+    BH_FOLD_MISSING_RECORD_FAILED,
+    BH_FOLD_DEMOTE_FAILED
+};
+
+/* End (exclusive) of the maximal equal-classification run starting at i. */
+static size_t bh_run_end(const uint8_t *classes, size_t i, size_t n)
 {
-    struct body_history_pass_result res;
-    memset(&res, 0, sizeof(res));
-    res.lo = -1;
-    res.hi = -1;
+    uint8_t cls = classes[i];
+    size_t j = i + 1;
+    while (j < n && classes[j] == cls)
+        j++;
+    return j;
+}
+
+/* Hand a pass result to a caller's optional out-parameter. */
+static void bh_publish_pass_result(struct body_history_pass_result *out,
+                                   const struct body_history_pass_result *res)
+{
     if (out)
-        *out = res;
+        *out = *res;
+}
 
-    if (!c || !held || !measured || !classes)
-        LOG_FAIL("body_history", "fold: null census, map or classes");
-    if (lo < 0 || n == 0)
-        return true; /* nothing to fold; measured stays as it was */
-
-    res.lo = lo;
-    res.hi = lo + (int64_t)n - 1;
+/* Fold the pass's classification runs into the maps and accumulate the
+ * per-pass counters into *res. Returns BH_FOLD_DONE, or the outcome of the
+ * run whose map update failed, with that run's bounds left in *fail_lo and
+ * *fail_hi. */
+static enum bh_fold_outcome bh_fold_class_runs(
+        struct body_coverage_map *held,
+        struct body_coverage_map *measured,
+        int64_t lo,
+        const uint8_t *classes, size_t n,
+        struct body_history_pass_result *res,
+        int64_t *fail_lo, int64_t *fail_hi)
+{
+    res->lo = lo;
+    res->hi = lo + (int64_t)n - 1;
 
     /* Coalesce equal-classification runs into range inserts so a contiguous
      * chain costs a couple of inserts per pass, not one per height. */
     size_t i = 0;
     while (i < n) {
         uint8_t cls = classes[i];
-        size_t j = i + 1;
-        while (j < n && classes[j] == cls)
-            j++;
+        size_t j = bh_run_end(classes, i, n);
         int64_t rlo = lo + (int64_t)i;
         int64_t rhi = lo + (int64_t)j - 1;
         int64_t run = rhi - rlo + 1;
@@ -332,12 +404,13 @@ bool body_history_census_fold(struct body_history_census *c,
         switch (cls) {
         case BODY_HISTORY_PROBE_HAVE:
             if (!body_coverage_insert(held, rlo, rhi) ||
-                !body_coverage_insert(measured, rlo, rhi))
-                LOG_FAIL("body_history",
-                         "fold: insert have [%lld..%lld] failed",
-                         (long long)rlo, (long long)rhi);
-            res.have += run;
-            res.examined += run;
+                !body_coverage_insert(measured, rlo, rhi)) {
+                *fail_lo = rlo;
+                *fail_hi = rhi;
+                return BH_FOLD_HAVE_INSERT_FAILED;
+            }
+            res->have += run;
+            res->examined += run;
             break;
         case BODY_HISTORY_PROBE_MISSING:
             /* Measured — we looked and it was definitively absent. The body
@@ -353,12 +426,13 @@ bool body_history_census_fold(struct body_history_census *c,
              * "removed from held, not yet in measured", which reads as
              * unmeasured, which holds the verdict at UNKNOWN. */
             if (!body_coverage_remove(held, rlo, rhi) ||
-                !body_coverage_insert(measured, rlo, rhi))
-                LOG_FAIL("body_history",
-                         "fold: record missing [%lld..%lld] failed",
-                         (long long)rlo, (long long)rhi);
-            res.missing += run;
-            res.examined += run;
+                !body_coverage_insert(measured, rlo, rhi)) {
+                *fail_lo = rlo;
+                *fail_hi = rhi;
+                return BH_FOLD_MISSING_RECORD_FAILED;
+            }
+            res->missing += run;
+            res->examined += run;
             break;
         default:
             /* INDETERMINATE: enters NEITHER map, and is REMOVED from
@@ -376,23 +450,61 @@ bool body_history_census_fold(struct body_history_census *c,
              * is gone. Clearing `measured` alone moves the height to
              * unmeasured, which holds the verdict at UNKNOWN — the honest
              * answer — without inventing a hole for the fetcher to chase. */
-            if (!body_coverage_remove(measured, rlo, rhi))
-                LOG_FAIL("body_history",
-                         "fold: demote unreadable [%lld..%lld] failed",
-                         (long long)rlo, (long long)rhi);
-            res.indeterminate += run;
+            if (!body_coverage_remove(measured, rlo, rhi)) {
+                *fail_lo = rlo;
+                *fail_hi = rhi;
+                return BH_FOLD_DEMOTE_FAILED;
+            }
+            res->indeterminate += run;
             break;
         }
         i = j;
     }
+    return BH_FOLD_DONE;
+}
+
+bool body_history_census_fold(struct body_history_census *c,
+                              struct body_coverage_map *held,
+                              struct body_coverage_map *measured,
+                              int64_t lo,
+                              const uint8_t *classes, size_t n,
+                              struct body_history_pass_result *out)
+{
+    struct body_history_pass_result res;
+    memset(&res, 0, sizeof(res));
+    res.lo = -1;
+    res.hi = -1;
+    bh_publish_pass_result(out, &res);
+
+    if (!c || !held || !measured || !classes)
+        LOG_FAIL("body_history", "fold: null census, map or classes");
+    if (lo < 0 || n == 0)
+        return true; /* nothing to fold; measured stays as it was */
+
+    int64_t fail_lo = -1;
+    int64_t fail_hi = -1;
+    enum bh_fold_outcome outcome =
+        bh_fold_class_runs(held, measured, lo, classes, n, &res,
+                           &fail_lo, &fail_hi);
+    if (outcome == BH_FOLD_HAVE_INSERT_FAILED)
+        LOG_FAIL("body_history",
+                 "fold: insert have [%lld..%lld] failed",
+                 (long long)fail_lo, (long long)fail_hi);
+    else if (outcome == BH_FOLD_MISSING_RECORD_FAILED)
+        LOG_FAIL("body_history",
+                 "fold: record missing [%lld..%lld] failed",
+                 (long long)fail_lo, (long long)fail_hi);
+    else if (outcome == BH_FOLD_DEMOTE_FAILED)
+        LOG_FAIL("body_history",
+                 "fold: demote unreadable [%lld..%lld] failed",
+                 (long long)fail_lo, (long long)fail_hi);
 
     c->heights_examined += (uint64_t)res.examined;
     c->heights_have += (uint64_t)res.have;
     c->heights_missing += (uint64_t)res.missing;
     c->heights_indeterminate += (uint64_t)res.indeterminate;
 
-    if (out)
-        *out = res;
+    bh_publish_pass_result(out, &res);
     return true;
 }
 
