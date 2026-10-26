@@ -8,6 +8,25 @@
 #include "models/store_blob.h"
 #include "util/safe_alloc.h"
 
+/* Store `got` bytes from `buf` as a content-addressed blob (an empty
+ * optional string becomes NULL) and stamp the blob hash on the product
+ * row. Returns true only when both the blob store and the product stamp
+ * succeeded. */
+static bool store_put_payload_blob(struct node_db *ndb,
+                                   int64_t product_id, uint8_t *buf,
+                                   size_t got, const char *content_type,
+                                   const char *filename)
+{
+    uint8_t hash[32];
+    const char *blob_type =
+        content_type && content_type[0] ? content_type : NULL;
+    const char *blob_name =
+        filename && filename[0] ? filename : NULL;
+    bool stored = db_store_blob_put(ndb, buf, got, blob_type,
+                                    blob_name, hash);
+    return stored && db_store_product_save_content(ndb, product_id, hash);
+}
+
 /* Attach a file payload to a just-saved product from a `content_path`
  * (a filesystem path under the operator's control, e.g. referenced from
  * products.json). Reads up to STORE_BLOB_INLINE_MAX bytes, stores them as
@@ -45,14 +64,10 @@ static void store_attach_content_from_path(struct node_db *ndb,
         return;
     }
 
-    uint8_t hash[32];
-    if (db_store_blob_put(ndb, buf, got,
-                          content_type && content_type[0] ? content_type : NULL,
-                          filename && filename[0] ? filename : NULL, hash)) {
-        if (db_store_product_save_content(ndb, product_id, hash))
-            printf("Store: attached %zu-byte payload to product %lld\n",
-                   got, (long long)product_id);
-    }
+    if (store_put_payload_blob(ndb, product_id, buf, got,
+                               content_type, filename))
+        printf("Store: attached %zu-byte payload to product %lld\n",
+               got, (long long)product_id);
     free(buf);
 }
 
@@ -88,6 +103,117 @@ static bool extract_str_field(const char *p, const char *end,
     return true;
 }
 
+/* Return a pointer just past the ':' (and blanks) that follow `key` (a
+ * quoted JSON key) inside the object slice [p, end), or NULL when the
+ * key does not appear in the slice. Numeric field parsing reads its
+ * value from the returned pointer. */
+static const char *json_value_text(const char *p, const char *end,
+                                   const char *key)
+{
+    const char *q = strstr(p, key);
+    if (!q || q >= end)
+        return NULL;
+    q += strlen(key);
+    while (*q == ':' || *q == ' ')
+        q++;
+    return q;
+}
+
+/* Parse one {...} product object spanning [p, end): extract its fields,
+ * save it when it has a name and a positive price, and attach any file
+ * payload the object names. Returns 1 when the product was saved, 0 when
+ * it was skipped or the save failed. */
+static int store_load_json_product(sqlite3 *db, const char *p,
+                                   const char *end)
+{
+    /* Extract fields with simple string search */
+    /* token[65]: the canonical token key is a 64-hex-char txid;
+     * extract_str_field refuses values that do not fit +NUL, so
+     * token[64] silently DROPPED a full-txid token_id here and
+     * the product loaded unbound. */
+    char name[256] = "", desc[1024] = "", token[65] = "";
+    char content_path[1024] = "", content_type[128] = "";
+    char content_filename[256] = "";
+    double price_zcl = 0.0;
+    int tokens = 1;
+
+    extract_str_field(p, end, "\"name\"", name, sizeof(name));
+    extract_str_field(p, end, "\"description\"",
+                      desc, sizeof(desc));
+    extract_str_field(p, end, "\"token_id\"",
+                      token, sizeof(token));
+    /* price_zcl */
+    const char *q = json_value_text(p, end, "\"price_zcl\"");
+    if (q)
+        price_zcl = strtod(q, NULL);
+    /* tokens_per_purchase */
+    q = json_value_text(p, end, "\"tokens_per_purchase\"");
+    if (q) {
+        long tval = strtol(q, NULL, 10);
+        tokens = (tval > 0 && tval <= 10000) ? (int)tval : 1;
+    }
+    /* Optional file payload: path, MIME type, download name */
+    extract_str_field(p, end, "\"content_path\"",
+                      content_path, sizeof(content_path));
+    extract_str_field(p, end, "\"content_type\"",
+                      content_type, sizeof(content_type));
+    extract_str_field(p, end, "\"content_filename\"",
+                      content_filename, sizeof(content_filename));
+
+    if (name[0] && price_zcl > 0) {
+        struct node_db ndb;
+        struct db_store_product product;
+        memset(&ndb, 0, sizeof(ndb));
+        ndb.db = db;
+        ndb.open = true;
+        memset(&product, 0, sizeof(product));
+        snprintf(product.name, sizeof(product.name), "%s", name);
+        snprintf(product.description, sizeof(product.description), "%s", desc);
+        snprintf(product.token_id, sizeof(product.token_id), "%s", token);
+        product.price_zatoshi =
+            (int64_t)(price_zcl * (double)ZATOSHI_PER_ZCL);
+        product.tokens_per_purchase = tokens;
+        product.active = true;
+        bool saved = db_store_product_save(&ndb, &product);
+        if (saved && content_path[0]) {
+            int64_t pid = sqlite3_last_insert_rowid(db);
+            store_attach_content_from_path(&ndb, pid, content_path,
+                                           content_type,
+                                           content_filename);
+        }
+        return saved;
+    }
+    return 0;
+}
+
+/* Load products from the products.json array at `json_path`, saving
+ * every well-formed product object found in the file. Returns the number
+ * of products saved, or -1 when the file cannot be opened. */
+static int store_load_products_json_file(sqlite3 *db, const char *json_path)
+{
+    FILE *f = fopen(json_path, "r");
+    if (!f)
+        return -1;
+    /* Parse simple JSON array of products:
+     * [{"name":"...","description":"...","price_zcl":0.01,
+     *   "token_id":"...","tokens_per_purchase":1}, ...] */
+    char buf[16384];
+    size_t len = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[len] = '\0';
+    fclose(f);
+
+    /* Simple JSON array parser — find each {...} object */
+    const char *p = buf;
+    int loaded = 0;
+    while ((p = strchr(p, '{')) != NULL) {
+        const char *end = strchr(p, '}');
+        if (!end) break;
+        loaded += store_load_json_product(db, p, end);
+        p = end + 1;
+    }
+    return loaded;
+}
+
 /* Ensure store tables exist */
 void store_ensure_schema(sqlite3 *db, const char *datadir)
 {
@@ -100,88 +226,8 @@ void store_ensure_schema(sqlite3 *db, const char *datadir)
     if (empty && datadir) {
         char json_path[1024];
         snprintf(json_path, sizeof(json_path), "%s/store/products.json", datadir);
-        FILE *f = fopen(json_path, "r");
-        if (f) {
-            /* Parse simple JSON array of products:
-             * [{"name":"...","description":"...","price_zcl":0.01,
-             *   "token_id":"...","tokens_per_purchase":1}, ...] */
-            char buf[16384];
-            size_t len = fread(buf, 1, sizeof(buf) - 1, f);
-            buf[len] = '\0';
-            fclose(f);
-
-            /* Simple JSON array parser — find each {...} object */
-            const char *p = buf;
-            int loaded = 0;
-            while ((p = strchr(p, '{')) != NULL) {
-                const char *end = strchr(p, '}');
-                if (!end) break;
-
-                /* Extract fields with simple string search */
-                /* token[65]: the canonical token key is a 64-hex-char txid;
-                 * extract_str_field refuses values that do not fit +NUL, so
-                 * token[64] silently DROPPED a full-txid token_id here and
-                 * the product loaded unbound. */
-                char name[256] = "", desc[1024] = "", token[65] = "";
-                char content_path[1024] = "", content_type[128] = "";
-                char content_filename[256] = "";
-                double price_zcl = 0.0;
-                int tokens = 1;
-
-                extract_str_field(p, end, "\"name\"", name, sizeof(name));
-                extract_str_field(p, end, "\"description\"",
-                                  desc, sizeof(desc));
-                extract_str_field(p, end, "\"token_id\"",
-                                  token, sizeof(token));
-                /* price_zcl */
-                const char *q = strstr(p, "\"price_zcl\"");
-                if (q && q < end) {
-                    q += 11; while (*q == ':' || *q == ' ') q++;
-                    price_zcl = strtod(q, NULL);
-                }
-                /* tokens_per_purchase */
-                q = strstr(p, "\"tokens_per_purchase\"");
-                if (q && q < end) {
-                    q += 20; while (*q == ':' || *q == ' ') q++;
-                    long tval = strtol(q, NULL, 10);
-                    tokens = (tval > 0 && tval <= 10000) ? (int)tval : 1;
-                }
-                /* Optional file payload: path, MIME type, download name */
-                extract_str_field(p, end, "\"content_path\"",
-                                  content_path, sizeof(content_path));
-                extract_str_field(p, end, "\"content_type\"",
-                                  content_type, sizeof(content_type));
-                extract_str_field(p, end, "\"content_filename\"",
-                                  content_filename, sizeof(content_filename));
-
-                if (name[0] && price_zcl > 0) {
-                    struct node_db ndb;
-                    struct db_store_product product;
-                    memset(&ndb, 0, sizeof(ndb));
-                    ndb.db = db;
-                    ndb.open = true;
-                    memset(&product, 0, sizeof(product));
-                    snprintf(product.name, sizeof(product.name), "%s", name);
-                    snprintf(product.description, sizeof(product.description), "%s", desc);
-                    snprintf(product.token_id, sizeof(product.token_id), "%s", token);
-                    product.price_zatoshi =
-                        (int64_t)(price_zcl * (double)ZATOSHI_PER_ZCL);
-                    product.tokens_per_purchase = tokens;
-                    product.active = true;
-                    if (!db_store_product_save(&ndb, &product)) {
-                        p = end + 1;
-                        continue;
-                    }
-                    if (content_path[0]) {
-                        int64_t pid = sqlite3_last_insert_rowid(db);
-                        store_attach_content_from_path(&ndb, pid, content_path,
-                                                       content_type,
-                                                       content_filename);
-                    }
-                    loaded++;
-                }
-                p = end + 1;
-            }
+        int loaded = store_load_products_json_file(db, json_path);
+        if (loaded >= 0) {
             if (loaded > 0)
                 printf("Store: loaded %d products from %s\n", loaded, json_path);
             else

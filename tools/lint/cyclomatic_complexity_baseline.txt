@@ -909,8 +909,6 @@ engine/controllers/src/snapshot_controller_import.c:import_block_index_thread:37
 engine/controllers/src/snapshot_controller_txindex.c:build_tx_index_thread:54
 engine/controllers/src/snapshot_controller_txindex.c:snapshot_tx_index_build_from_block_files:16
 engine/controllers/src/status_native_handlers.c:zcl_native_status_body_full:45
-engine/controllers/src/store_controller_schema.c:store_attach_content_from_path:17
-engine/controllers/src/store_controller_schema.c:store_ensure_schema:24
 engine/controllers/src/sync_controller_blocks.c:advance_wallet_witnesses:26
 engine/controllers/src/sync_controller_blocks.c:node_db_sync_connect_block_local:44
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
