@@ -42,6 +42,67 @@ bool self_backtrace_install(void)
     return true;
 }
 
+/* Try up to 1000 attempt-suffixed candidates under datadir; the first one that
+ * formats in bounds, resolves to a private path, and is created exclusively
+ * wins. On success path/parent receive the chosen locations and *file the open
+ * handle. Returns true once a log file has been created. */
+static bool self_bt_win_create_log(const char *datadir, int64_t now,
+                                   char *path, size_t path_cap,
+                                   char *parent, size_t parent_cap,
+                                   struct platform_private_file *file)
+{
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 1000 && !created; attempt++) {
+        char candidate[4300];
+        int written = snprintf(candidate, sizeof(candidate),
+                               "%s/backtrace-%lld-%u.log", datadir,
+                               (long long)now, attempt);
+        created = written > 0 && (size_t)written < sizeof(candidate) &&
+                  platform_private_path_resolve(candidate, path, path_cap,
+                                                parent, parent_cap) &&
+                  platform_private_file_create(path, file);
+    }
+    return created;
+}
+
+/* Render the report header plus one "#i frame" line per captured frame into
+ * report (cap bytes), stopping before overflow. Returns the number of bytes
+ * used. */
+static int self_bt_win_render_report(char *report, size_t cap, int64_t now,
+                                     void **frames, USHORT count)
+{
+    int used = snprintf(report, cap,
+                        "=== self-backtrace ts=%lld pid=%lu tid=%lu ===\n"
+                        "[current-thread-only: cross-thread suspension refused]\n",
+                        (long long)now, (unsigned long)GetCurrentProcessId(),
+                        (unsigned long)GetCurrentThreadId());
+    for (USHORT i = 0; used > 0 && (size_t)used < cap && i < count;
+         i++) {
+        int n = snprintf(report + used, cap - (size_t)used,
+                         "#%u %p\n", (unsigned)i, frames[i]);
+        if (n < 0 || (size_t)n >= cap - (size_t)used) break;
+        used += n;
+    }
+    return used;
+}
+
+/* Persist the rendered report: write at offset 0, truncate to size, flush and
+ * close the file, then flush the parent directory. Returns true when every
+ * step succeeded. */
+static bool self_bt_win_write_report(struct platform_private_file *file,
+                                     const char *report, int used,
+                                     const char *parent)
+{
+    bool ok = used > 0 && platform_private_file_write_at(
+                              file, report, (size_t)used, 0) &&
+              platform_private_file_truncate(file, (uint64_t)used) &&
+              platform_private_file_flush(file);
+    platform_private_file_close(file);
+    if (ok)
+        ok = platform_private_parent_flush(parent);
+    return ok;
+}
+
 int self_backtrace_dump_all(char *path_out, size_t cap)
 {
     if (path_out && cap) path_out[0] = '\0';
@@ -61,18 +122,9 @@ int self_backtrace_dump_all(char *path_out, size_t cap)
     char path[4300] = "", parent[4096] = "";
     struct platform_private_file file;
     platform_private_file_init(&file);
-    bool created = false;
     int64_t now = platform_time_wall_unix();
-    for (unsigned attempt = 0; attempt < 1000 && !created; attempt++) {
-        char candidate[4300];
-        int written = snprintf(candidate, sizeof(candidate),
-                               "%s/backtrace-%lld-%u.log", datadir,
-                               (long long)now, attempt);
-        created = written > 0 && (size_t)written < sizeof(candidate) &&
-                  platform_private_path_resolve(candidate, path, sizeof(path),
-                                                parent, sizeof(parent)) &&
-                  platform_private_file_create(path, &file);
-    }
+    bool created = self_bt_win_create_log(datadir, now, path, sizeof(path),
+                                          parent, sizeof(parent), &file);
     if (!created) {
         atomic_flag_clear_explicit(&g_dump_in_progress, memory_order_release);
         return -1;
@@ -81,25 +133,9 @@ int self_backtrace_dump_all(char *path_out, size_t cap)
     void *frames[64];
     USHORT count = CaptureStackBackTrace(0, 64, frames, NULL);
     char report[4096];
-    int used = snprintf(report, sizeof(report),
-                        "=== self-backtrace ts=%lld pid=%lu tid=%lu ===\n"
-                        "[current-thread-only: cross-thread suspension refused]\n",
-                        (long long)now, (unsigned long)GetCurrentProcessId(),
-                        (unsigned long)GetCurrentThreadId());
-    for (USHORT i = 0; used > 0 && (size_t)used < sizeof(report) && i < count;
-         i++) {
-        int n = snprintf(report + used, sizeof(report) - (size_t)used,
-                         "#%u %p\n", (unsigned)i, frames[i]);
-        if (n < 0 || (size_t)n >= sizeof(report) - (size_t)used) break;
-        used += n;
-    }
-    bool ok = used > 0 && platform_private_file_write_at(
-                              &file, report, (size_t)used, 0) &&
-              platform_private_file_truncate(&file, (uint64_t)used) &&
-              platform_private_file_flush(&file);
-    platform_private_file_close(&file);
-    if (ok)
-        ok = platform_private_parent_flush(parent);
+    int used = self_bt_win_render_report(report, sizeof(report), now, frames,
+                                         count);
+    bool ok = self_bt_win_write_report(&file, report, used, parent);
     if (!ok) {
         (void)platform_private_file_unlink_missing_ok(path);
         atomic_flag_clear_explicit(&g_dump_in_progress, memory_order_release);
@@ -293,6 +329,24 @@ static int self_bt_open_log(char *path_out, size_t cap)
     return -1;
 }
 
+/* Arm the 100 ms per-thread response budget and wait for the handler's
+ * sem_post, retrying while sem_timedwait reports EINTR. Returns
+ * sem_timedwait's own result: 0 when the target responded, nonzero when it
+ * never did. */
+static int self_bt_wait_target_response(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);  // platform-ok:sem_timedwait requires a raw CLOCK_REALTIME absolute deadline
+    ts.tv_nsec += 100L * 1000L * 1000L;  /* 100 ms budget per thread */
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+
+    int w;
+    do {
+        w = sem_timedwait(&g_bt.done, &ts);
+    } while (w != 0 && errno == EINTR);
+    return w;
+}
+
 int self_backtrace_dump_all(char *path_out, size_t cap)
 {
     if (!atomic_load_explicit(&g_installed, memory_order_acquire))
@@ -360,15 +414,7 @@ int self_backtrace_dump_all(char *path_out, size_t cap)
             continue;
         }
 
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);  // platform-ok:sem_timedwait requires a raw CLOCK_REALTIME absolute deadline
-        ts.tv_nsec += 100L * 1000L * 1000L;  /* 100 ms budget per thread */
-        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
-
-        int w;
-        do {
-            w = sem_timedwait(&g_bt.done, &ts);
-        } while (w != 0 && errno == EINTR);
+        int w = self_bt_wait_target_response();
 
         if (w != 0) {
             /* Blocked / signal-masked thread: it cannot hang the dump. */
