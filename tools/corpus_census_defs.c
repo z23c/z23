@@ -288,17 +288,6 @@ static bool def_field_scope_kind(struct scope_def *def, const char *value,
     return true;
 }
 
-static bool def_field_scope_spdx(struct scope_def *def, const char *value,
-                                 size_t line_no)
-{
-    if (!shell_safe(value) ||
-        !(def->spdx = dup_str(value, "corpus.spdx"))) {
-        LOG_ERROR(CENSUS_LOG, "line %zu: bad spdx", line_no);
-        return false;
-    }
-    return true;
-}
-
 static bool def_field_scope_src(struct scope_def *def, const char *value,
                                 size_t line_no)
 {
@@ -325,7 +314,7 @@ static bool def_parse_scope_field(struct scope_def *def, size_t field,
     if (field == 1 && key_value(t, "kind", &value))
         return def_field_scope_kind(def, value, line_no);
     if (field == 2 && key_value(t, "spdx", &value))
-        return def_field_scope_spdx(def, value, line_no);
+        return def_field_package_spdx(def, value, line_no);
     if (field == 3 && key_value(t, "src", &value))
         return def_field_scope_src(def, value, line_no);
     if (field >= 3 && !*seen_tests && key_value(t, "tests", &value)) {
