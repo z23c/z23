@@ -497,7 +497,6 @@ contexts/commons/views/src/zcode_view_pages.c:zcode_view_leaderboard:21
 contexts/commons/views/src/zcode_view_pages.c:zcode_view_publisher:38
 contexts/explorer/controllers/src/explorer_controller.c:explorer_handle_request:46
 contexts/explorer/controllers/src/explorer_controller.c:rpc_call:22
-contexts/explorer/controllers/src/explorer_controller_address.c:serve_search:37
 contexts/explorer/controllers/src/explorer_controller_tx.c:serve_tx:52
 contexts/explorer/controllers/src/explorer_controller_tx.c:serve_tx_rpc:43
 contexts/explorer/controllers/src/name_site_controller.c:name_controller_compose_register:20
