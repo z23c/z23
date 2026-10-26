@@ -590,35 +590,51 @@ static struct zcl_result lane_advance_replay_context(
     return ZCL_OK;
 }
 
-static struct zcl_result lane_advance_transition_gate(
-    const char *workspace, const struct db_zcode_lane_receipt *prior,
-    bool have_prior, int target_lane, int64_t now,
+static struct zcl_result lane_advance_authority_gate(
+    struct node_db *ndb, int target_lane, int64_t now,
+    const uint8_t signer_pubkey[32],
     const struct vcs_zcode_task_v1 *task,
-    const struct vcs_zcode_candidate_v1 *candidate,
-    const struct vcs_zcode_proof_policy_v1 *policy,
-    const uint8_t signer_pubkey[32])
+    const struct vcs_zcode_candidate_v1 *candidate)
+{
+    if (memcmp(candidate->author_pubkey, signer_pubkey, 32) != 0)
+        return ZCL_ERR(-1, "lane-signer-is-not-candidate-work-authority");
+    /* FRONTIER admission precedes the first build-worker claim, so its
+     * candidate-author key is pinned above but is not live-ledger-approved
+     * until execution begins. Any proof-bearing promotion must use the
+     * current, non-revoked worker authority. */
+    if (target_lane != VCS_ZCODE_LANE_FRONTIER &&
+        !accepted_signer_current(ndb, signer_pubkey, now, NULL))
+        return ZCL_ERR(-1, "lane-signer-unapproved-expired-or-revoked");
+    if (vcs_zcode_candidate_validate_for_task(task, candidate, now) !=
+            VCS_ZCODE_DEV_OK)
+        return ZCL_ERR(-1, "lane-candidate-stale-or-expired");
+    return ZCL_OK;
+}
+
+static struct zcl_result lane_advance_sequence_gate(
+    int target_lane, bool have_prior,
+    const struct db_zcode_lane_receipt *prior)
 {
     if ((!have_prior && target_lane != VCS_ZCODE_LANE_FRONTIER) ||
         (have_prior && target_lane != prior->lane + 1))
         return ZCL_ERR(-1, "lane-transition-must-be-sequential");
-    if (have_prior)
-        ZCL_CHECK(lane_prior_validate(
-            workspace, prior, task, candidate, policy, signer_pubkey));
+    return ZCL_OK;
+}
+
+static struct zcl_result lane_advance_time_gate(
+    bool have_prior, const struct db_zcode_lane_receipt *prior, int64_t now)
+{
     if (have_prior && now < prior->created_at)
         return ZCL_ERR(-1, "lane-promotion-time-precedes-prior-receipt");
     return ZCL_OK;
 }
 
 static struct zcl_result lane_advance_proof_gate(
-    struct node_db *ndb, const char *workspace, const char *action_id,
-    int target_lane, int64_t now,
-    const struct vcs_zcode_proof_policy_v1 *policy,
-    struct build_fabric_proof_evaluation *evaluation)
+    int target_lane, const struct vcs_zcode_proof_policy_v1 *policy,
+    const struct build_fabric_proof_evaluation *evaluation)
 {
     if (target_lane == VCS_ZCODE_LANE_FRONTIER)
         return ZCL_OK;
-    ZCL_CHECK(build_fabric_proof_evaluate(
-        ndb, workspace, action_id, now, evaluation));
     bool candidate_ready = evaluation->compile_satisfied &&
         (!(policy->required_proofs & VCS_ZCODE_PROOF_TEST) ||
          evaluation->test_satisfied);
@@ -629,6 +645,7 @@ static struct zcl_result lane_advance_proof_gate(
         return ZCL_ERR(-1, "proven-proof-policy-unsatisfied");
     return ZCL_OK;
 }
+
 
 static struct zcl_result lane_receipt_nonfrontier_roots(
     int target_lane, const struct build_fabric_proof_evaluation *evaluation,
@@ -723,6 +740,57 @@ static struct zcl_result lane_projection_store_and_verify(
     return ZCL_OK;
 }
 
+static struct zcl_result lane_advance_receipt(
+    const char *workspace, int target_lane,
+    const struct db_build_action *action,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_proof_policy_v1 *policy,
+    const struct build_fabric_proof_evaluation *evaluation,
+    const struct db_zcode_lane_receipt *prior,
+    const uint8_t signer_secret[32], const uint8_t signer_pubkey[32],
+    struct vcs_zcode_lane_receipt_v1 *receipt, char root_hex[65])
+{
+    struct zcl_result proof = lane_advance_proof_gate(
+        target_lane, policy, evaluation);
+    if (!proof.ok) return proof;
+    memcpy(receipt->source_root, candidate->candidate_source_root, 32);
+    (void)zcl_hex_decode_lower(action->task_root_sha3, receipt->task_root, 32);
+    (void)zcl_hex_decode_lower(
+        action->candidate_root_sha3, receipt->candidate_root, 32);
+    (void)zcl_hex_decode_lower(
+        action->proof_policy_root_sha3, receipt->proof_policy_root, 32);
+    struct zcl_result roots = lane_receipt_nonfrontier_roots(
+        target_lane, evaluation, prior, receipt);
+    if (!roots.ok) return roots;
+    struct zcl_result sealed = lane_receipt_seal_or_refuse(
+        receipt, signer_secret, signer_pubkey, task, candidate, policy);
+    if (!sealed.ok) return sealed;
+    return lane_receipt_store_cas(workspace, receipt, root_hex);
+}
+
+static struct zcl_result lane_advance_project(
+    struct node_db *ndb, int target_lane, int64_t now,
+    const struct db_build_action *action,
+    const struct build_fabric_proof_evaluation *evaluation,
+    const struct db_zcode_lane_receipt *prior, const char *source_hex,
+    const uint8_t signer_pubkey[32], const char *root_hex,
+    const struct vcs_zcode_lane_receipt_v1 *receipt,
+    const struct zcode_lane_view_result_v1 *target_view,
+    uint32_t view_generation, struct zcode_lane_status *out)
+{
+    struct db_zcode_lane_receipt row = { .lane = target_lane,
+                                        .created_at = now };
+    lane_advance_row_fill(target_lane, action, evaluation, prior, source_hex,
+                          signer_pubkey, root_hex, &row);
+    struct db_zcode_lane_receipt stored;
+    struct zcl_result projected = lane_projection_store_and_verify(
+        ndb, &row, root_hex, receipt, &stored);
+    if (!projected.ok) return projected;
+    lane_status_from_row(&stored, target_view, view_generation, out);
+    return ZCL_OK;
+}
+
 // long-function-ok:promotion-transaction — proof evaluation, prior-chain
 // verification, CAS write, and model projection form one fail-closed ritual.
 struct zcl_result zcode_lane_advance(
@@ -746,18 +814,9 @@ struct zcl_result zcode_lane_advance(
     struct vcs_zcode_proof_policy_v1 policy;
     ZCL_CHECK(lane_load_context(
         workspace, &action, &task, &candidate, &policy));
-    if (memcmp(candidate.author_pubkey, signer_pubkey, 32) != 0)
-        return ZCL_ERR(-1, "lane-signer-is-not-candidate-work-authority");
-    /* FRONTIER admission precedes the first build-worker claim, so its
-     * candidate-author key is pinned above but is not live-ledger-approved
-     * until execution begins. Any proof-bearing promotion must use the
-     * current, non-revoked worker authority. */
-    if (target_lane != VCS_ZCODE_LANE_FRONTIER &&
-        !accepted_signer_current(ndb, signer_pubkey, now, NULL))
-        return ZCL_ERR(-1, "lane-signer-unapproved-expired-or-revoked");
-    if (vcs_zcode_candidate_validate_for_task(&task, &candidate, now) !=
-            VCS_ZCODE_DEV_OK)
-        return ZCL_ERR(-1, "lane-candidate-stale-or-expired");
+    struct zcl_result authority = lane_advance_authority_gate(
+        ndb, target_lane, now, signer_pubkey, &task, &candidate);
+    if (!authority.ok) return authority;
     char source_hex[65];
     zcl_hex_encode(candidate.candidate_source_root, 32, source_hex);
     struct db_zcode_lane_receipt prior;
@@ -772,41 +831,33 @@ struct zcl_result zcode_lane_advance(
         lane_status_from_row(&prior, &target_view, view_generation, out);
         return ZCL_OK;
     }
-    ZCL_CHECK(lane_advance_transition_gate(
-        workspace, &prior, have_prior, target_lane, now, &task, &candidate,
-        &policy, signer_pubkey));
+    struct zcl_result sequence = lane_advance_sequence_gate(
+        target_lane, have_prior, &prior);
+    if (!sequence.ok) return sequence;
+    if (have_prior)
+        ZCL_CHECK(lane_prior_validate(
+            workspace, &prior, &task, &candidate, &policy, signer_pubkey));
+    struct zcl_result timing = lane_advance_time_gate(
+        have_prior, &prior, now);
+    if (!timing.ok) return timing;
     struct build_fabric_proof_evaluation evaluation = {0};
-    ZCL_CHECK(lane_advance_proof_gate(
-        ndb, workspace, action_id, target_lane, now, &policy, &evaluation));
+    if (target_lane != VCS_ZCODE_LANE_FRONTIER)
+        ZCL_CHECK(build_fabric_proof_evaluate(
+            ndb, workspace, action_id, now, &evaluation));
     struct vcs_zcode_lane_receipt_v1 receipt = {
         .schema_version = VCS_ZCODE_DEV_VERSION,
         .lane = (uint8_t)target_lane,
         .created_unix = now,
     };
-    memcpy(receipt.source_root, candidate.candidate_source_root, 32);
-    (void)zcl_hex_decode_lower(action.task_root_sha3, receipt.task_root, 32);
-    (void)zcl_hex_decode_lower(
-        action.candidate_root_sha3, receipt.candidate_root, 32);
-    (void)zcl_hex_decode_lower(
-        action.proof_policy_root_sha3, receipt.proof_policy_root, 32);
-    ZCL_CHECK(lane_receipt_nonfrontier_roots(
-        target_lane, &evaluation, &prior, &receipt));
-    ZCL_CHECK(lane_receipt_seal_or_refuse(
-        &receipt, signer_secret, signer_pubkey, &task, &candidate, &policy));
     char root_hex[65];
-    struct zcl_result cas = lane_receipt_store_cas(workspace, &receipt,
-                                                   root_hex);
-    if (!cas.ok)
-        return cas;
-    struct db_zcode_lane_receipt row = { .lane = target_lane,
-                                        .created_at = now };
-    lane_advance_row_fill(target_lane, &action, &evaluation, &prior,
-                          source_hex, signer_pubkey, root_hex, &row);
-    struct db_zcode_lane_receipt stored;
-    ZCL_CHECK(lane_projection_store_and_verify(
-        ndb, &row, root_hex, &receipt, &stored));
-    lane_status_from_row(&stored, &target_view, view_generation, out);
-    return ZCL_OK;
+    struct zcl_result committed = lane_advance_receipt(
+        workspace, target_lane, &action, &task, &candidate, &policy,
+        &evaluation, &prior, signer_secret, signer_pubkey, &receipt,
+        root_hex);
+    if (!committed.ok) return committed;
+    return lane_advance_project(ndb, target_lane, now, &action, &evaluation,
+                                &prior, source_hex, signer_pubkey, root_hex,
+                                &receipt, &target_view, view_generation, out);
 }
 
 static bool lane_view_frozen_kat(const void *opaque, char *why,
