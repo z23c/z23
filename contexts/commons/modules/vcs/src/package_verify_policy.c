@@ -122,6 +122,41 @@ bool vcs_verifier_policy_contains(const struct vcs_verifier_policy *policy,
     return false;
 }
 
+static size_t vcs_verifier_policy_scan_line(const char *text,
+                                            size_t text_len, size_t *pos)
+{
+    size_t start = *pos;
+    size_t i = start;
+    while (i < text_len && text[i] != '\n')
+        i++;
+    size_t len = i - start;
+    if (len > 0 && text[start + len - 1] == '\r')
+        len--;
+    if (i < text_len)
+        i++; /* consume the newline */
+    *pos = i;
+    return len;
+}
+
+static enum vcs_verifier_policy_error vcs_verifier_policy_add_text_key(
+    struct vcs_verifier_policy *policy, const char *line, size_t len)
+{
+    if (len != 66)
+        return VCS_VERIFIER_POLICY_ERR_KEY_GRAMMAR;
+    uint8_t key[33];
+    for (size_t b = 0; b < 33; b++) {
+        int hi = zcl_hex_nibble(line[2 * b], true);
+        int lo = zcl_hex_nibble(line[2 * b + 1], true);
+        if (hi < 0 || lo < 0)
+            return VCS_VERIFIER_POLICY_ERR_KEY_GRAMMAR;
+        key[b] = (uint8_t)((hi << 4) | lo);
+    }
+    enum vcs_verifier_policy_error aerr = VCS_VERIFIER_POLICY_OK;
+    if (!vcs_verifier_policy_add(policy, key, &aerr))
+        return aerr;
+    return VCS_VERIFIER_POLICY_OK;
+}
+
 bool vcs_verifier_policy_parse_text(struct vcs_verifier_policy *policy,
                                     const char *text, size_t text_len,
                                     enum vcs_verifier_policy_error *err_out,
@@ -136,41 +171,16 @@ bool vcs_verifier_policy_parse_text(struct vcs_verifier_policy *policy,
     size_t i = 0;
     while (i < text_len) {
         size_t start = i;
-        while (i < text_len && text[i] != '\n')
-            i++;
-        size_t len = i - start;
-        if (len > 0 && text[start + len - 1] == '\r')
-            len--;
-        if (i < text_len)
-            i++; /* consume the newline */
+        size_t len = vcs_verifier_policy_scan_line(text, text_len, &i);
         if (len == 0 || text[start] == '#') {
             line++;
             continue;
         }
-        if (len != 66) {
+        enum vcs_verifier_policy_error kerr =
+            vcs_verifier_policy_add_text_key(policy, text + start, len);
+        if (kerr != VCS_VERIFIER_POLICY_OK) {
             if (err_out)
-                *err_out = VCS_VERIFIER_POLICY_ERR_KEY_GRAMMAR;
-            if (line_out)
-                *line_out = line;
-            return false;
-        }
-        uint8_t key[33];
-        for (size_t b = 0; b < 33; b++) {
-            int hi = zcl_hex_nibble(text[start + 2 * b], true);
-            int lo = zcl_hex_nibble(text[start + 2 * b + 1], true);
-            if (hi < 0 || lo < 0) {
-                if (err_out)
-                    *err_out = VCS_VERIFIER_POLICY_ERR_KEY_GRAMMAR;
-                if (line_out)
-                    *line_out = line;
-                return false;
-            }
-            key[b] = (uint8_t)((hi << 4) | lo);
-        }
-        enum vcs_verifier_policy_error aerr = VCS_VERIFIER_POLICY_OK;
-        if (!vcs_verifier_policy_add(policy, key, &aerr)) {
-            if (err_out)
-                *err_out = aerr;
+                *err_out = kerr;
             if (line_out)
                 *line_out = line;
             return false;
@@ -230,6 +240,55 @@ static void quorum_row(struct vcs_verify_quorum *out,
     }
 }
 
+static enum vcs_verify_row_rule vcs_verify_candidate_rule(
+    const struct vcs_package_attest *a, const uint8_t package_root[32],
+    const uint8_t recipe_root[32], const uint8_t publisher_pubkey[33],
+    const struct vcs_verifier_policy *policy,
+    uint8_t(*signer_store)[VCS_PACKAGE_ATTEST_PUBKEY_BYTES],
+    size_t store_used)
+{
+    if (vcs_package_attest_verify(a) != VCS_PACKAGE_ATTEST_OK)
+        return VCS_VERIFY_ROW_ATTESTATION_INVALID;
+    if (memcmp(a->package_root, package_root, 32) != 0)
+        return VCS_VERIFY_ROW_PACKAGE_ROOT_MISMATCH;
+    if (memcmp(a->recipe_root, recipe_root, 32) != 0)
+        return VCS_VERIFY_ROW_RECIPE_ROOT_MISMATCH;
+    if (memcmp(a->verifier_pubkey, publisher_pubkey, 33) == 0)
+        return VCS_VERIFY_ROW_SELF_VERIFICATION;
+    if (!vcs_verifier_policy_contains(policy, a->verifier_pubkey))
+        return VCS_VERIFY_ROW_SIGNER_NOT_APPROVED;
+    /* A signer counts at most once TOTAL: the first eligible
+     * attestation stands and any later one by the same key is a named
+     * duplicate (an equivocating signer cannot fill two class buckets
+     * either). */
+    bool seen = false;
+    for (size_t s = 0; s < store_used; s++)
+        if (memcmp(signer_store[s], a->verifier_pubkey, 33) == 0) {
+            seen = true;
+            break;
+        }
+    if (seen)
+        return VCS_VERIFY_ROW_DUPLICATE_SIGNER;
+    return VCS_VERIFY_ROW_COUNTED;
+}
+
+static uint8_t vcs_verify_pick_best_class(const size_t class_counts[6],
+                                          size_t *best_out)
+{
+    /* The class with the most distinct signers wins; ties break low. */
+    uint8_t best_class = 0;
+    size_t best = 0;
+    for (uint8_t cls = VCS_PACKAGE_ATTEST_RESULT_BUILD_PASS;
+         cls <= VCS_PACKAGE_ATTEST_RESULT_SANITIZER_FAIL; cls++) {
+        if (class_counts[cls] > best) {
+            best = class_counts[cls];
+            best_class = cls;
+        }
+    }
+    *best_out = best;
+    return best_class;
+}
+
 void vcs_verify_evaluate(const struct vcs_verify_candidate *candidates,
                          size_t candidate_count,
                          const uint8_t package_root[32],
@@ -276,43 +335,11 @@ void vcs_verify_evaluate(const struct vcs_verify_candidate *candidates,
         memcpy(row.verifier_pubkey, a->verifier_pubkey, 33);
         row.has_pubkey = true;
         row.result_class = a->result_class;
-        if (vcs_package_attest_verify(a) != VCS_PACKAGE_ATTEST_OK) {
-            row.rule = VCS_VERIFY_ROW_ATTESTATION_INVALID;
-            quorum_row(out, &row);
-            continue;
-        }
-        if (memcmp(a->package_root, package_root, 32) != 0) {
-            row.rule = VCS_VERIFY_ROW_PACKAGE_ROOT_MISMATCH;
-            quorum_row(out, &row);
-            continue;
-        }
-        if (memcmp(a->recipe_root, recipe_root, 32) != 0) {
-            row.rule = VCS_VERIFY_ROW_RECIPE_ROOT_MISMATCH;
-            quorum_row(out, &row);
-            continue;
-        }
-        if (memcmp(a->verifier_pubkey, publisher_pubkey, 33) == 0) {
-            row.rule = VCS_VERIFY_ROW_SELF_VERIFICATION;
-            quorum_row(out, &row);
-            continue;
-        }
-        if (!vcs_verifier_policy_contains(policy, a->verifier_pubkey)) {
-            row.rule = VCS_VERIFY_ROW_SIGNER_NOT_APPROVED;
-            quorum_row(out, &row);
-            continue;
-        }
-        /* A signer counts at most once TOTAL: the first eligible
-         * attestation stands and any later one by the same key is a named
-         * duplicate (an equivocating signer cannot fill two class buckets
-         * either). */
-        bool seen = false;
-        for (size_t s = 0; s < store_used; s++)
-            if (memcmp(signer_store[s], a->verifier_pubkey, 33) == 0) {
-                seen = true;
-                break;
-            }
-        if (seen) {
-            row.rule = VCS_VERIFY_ROW_DUPLICATE_SIGNER;
+        enum vcs_verify_row_rule rule = vcs_verify_candidate_rule(
+            a, package_root, recipe_root, publisher_pubkey, policy,
+            signer_store, store_used);
+        if (rule != VCS_VERIFY_ROW_COUNTED) {
+            row.rule = rule;
             quorum_row(out, &row);
             continue;
         }
@@ -323,16 +350,8 @@ void vcs_verify_evaluate(const struct vcs_verify_candidate *candidates,
         quorum_row(out, &row);
     }
 
-    /* The class with the most distinct signers wins; ties break low. */
-    uint8_t best_class = 0;
     size_t best = 0;
-    for (uint8_t cls = VCS_PACKAGE_ATTEST_RESULT_BUILD_PASS;
-         cls <= VCS_PACKAGE_ATTEST_RESULT_SANITIZER_FAIL; cls++) {
-        if (class_counts[cls] > best) {
-            best = class_counts[cls];
-            best_class = cls;
-        }
-    }
+    uint8_t best_class = vcs_verify_pick_best_class(class_counts, &best);
     out->quorum_signers = (uint32_t)best;
     out->quorum_reached = best >= VCS_VERIFY_QUORUM_REQUIRED;
     out->quorum_class = out->quorum_reached ? best_class : 0;

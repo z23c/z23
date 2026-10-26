@@ -88,8 +88,6 @@ contexts/commons/modules/vcs/src/package_swarm_receipt_session.c:vcs_swarm_recei
 contexts/commons/modules/vcs/src/package_swarm_receipt_session.c:vcs_swarm_receipt_session_open:20
 contexts/commons/modules/vcs/src/package_swarm_record.c:vcs_swarm_record_load:16
 contexts/commons/modules/vcs/src/package_swarm_stalled.c:vcs_swarm_engine_unadvertised_roots:16
-contexts/commons/modules/vcs/src/package_verify_policy.c:vcs_verifier_policy_parse_text:24
-contexts/commons/modules/vcs/src/package_verify_policy.c:vcs_verify_evaluate:22
 contexts/commons/modules/vcs/src/source_bundle.c:source_bundle_decode:33
 contexts/commons/modules/vcs/src/source_bundle.c:vcs_source_bundle_create:28
 contexts/commons/modules/vcs/src/source_bundle.c:vcs_source_bundle_import:18
