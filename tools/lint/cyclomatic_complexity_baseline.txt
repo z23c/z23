@@ -1173,8 +1173,6 @@ engine/jobs/src/psc_range_fold.c:psc_compile_range:22
 engine/jobs/src/refold_progress.c:refold_progress_dump_state_json:17
 engine/jobs/src/rom_compile_status.c:push_layers:22
 engine/jobs/src/rom_compile_status.c:push_shielded_import:22
-engine/jobs/src/script_validate_log_store.c:script_validate_body_persist_log_at:17
-engine/jobs/src/script_validate_log_store.c:script_validate_log_insert:16
 engine/jobs/src/script_validate_stage.c:step_validate:31
 engine/jobs/src/script_validate_stage.c:sv_hold_unresolved:16
 engine/jobs/src/seal_rewind_executor.c:seal_rewind_to_nearest:23

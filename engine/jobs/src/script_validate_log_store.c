@@ -191,6 +191,30 @@ bool script_validate_log_ensure_schema(sqlite3 *db)
     return ok;
 }
 
+/* A body_persist_log row's (source, ok) pair is trusted only when it spells
+ * one of the canonical folded statuses below, byte-exactly, with no NUL
+ * bytes and room for the terminator. */
+static bool sv_body_persist_source_canonical(const unsigned char *src,
+                                             int source_size, int ok_value,
+                                             int source_cap)
+{
+    static const struct { int ok; const char *text; int len; } canon[] = {
+        { 1, "verified",         8 },
+        { 0, "upstream_failed", 15 },
+    };
+    bool text_ok = src && source_size > 0 && source_size < source_cap &&
+        !memchr(src, '\0', (size_t)source_size);
+    bool canonical = false;
+    if (text_ok) {
+        for (size_t i = 0; i < sizeof(canon) / sizeof(canon[0]); i++) {
+            if (canon[i].ok == ok_value && canon[i].len == source_size &&
+                memcmp(src, canon[i].text, (size_t)source_size) == 0)
+                canonical = true;
+        }
+    }
+    return canonical;
+}
+
 int script_validate_body_persist_log_at(sqlite3 *db, int height,
                                         struct body_persist_row *out)
 {
@@ -214,13 +238,8 @@ int script_validate_body_persist_log_at(sqlite3 *db, int height,
         int source_size = src ? sqlite3_column_bytes(st, 0) : -1;
         int ok_value = ok_type == SQLITE_INTEGER
             ? sqlite3_column_int(st, 1) : -1;
-        bool source_ok = src && source_size > 0 &&
-            source_size < (int)sizeof(out->source) &&
-            !memchr(src, '\0', (size_t)source_size) &&
-            ((ok_value == 1 && source_size == 8 &&
-              memcmp(src, "verified", 8) == 0) ||
-             (ok_value == 0 && source_size == 15 &&
-              memcmp(src, "upstream_failed", 15) == 0));
+        bool source_ok = sv_body_persist_source_canonical(
+            src, source_size, ok_value, (int)sizeof(out->source));
         if (!source_ok) {
             LOG_WARN("script_validate",
                      "[script_validate] malformed body_persist_log row h=%d",
@@ -286,6 +305,47 @@ int script_validate_log_verdict_at(sqlite3 *db, int height,
     return found;
 }
 
+/* Bind the script_validate_log INSERT columns 1-10: the fixed scalars, the
+ * optional first-failure fields (NULL when absent), the wall-clock
+ * validated_at, and the reorg-proof block hash. The caller binds the
+ * source-epoch and itag columns itself so it can check the epoch bind's
+ * result code exactly as before. */
+static void sv_log_insert_bind(sqlite3_stmt *stmt, int height,
+                               const char *status, bool ok,
+                               size_t tx_count, size_t input_count,
+                               const struct uint256 *first_failure_txid,
+                               int first_failure_vin,
+                               ScriptError first_failure_serror,
+                               const struct uint256 *block_hash)
+{
+    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)height);
+    sqlite3_bind_text (stmt, 2, status, -1, SQLITE_STATIC);
+    sqlite3_bind_int  (stmt, 3, ok ? 1 : 0);
+    sqlite3_bind_int64(stmt, 4, (sqlite3_int64)tx_count);
+    sqlite3_bind_int64(stmt, 5, (sqlite3_int64)input_count);
+    if (first_failure_txid)
+        sqlite3_bind_blob(stmt, 6, first_failure_txid->data, 32,
+                          SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 6);
+    if (first_failure_vin >= 0)
+        sqlite3_bind_int(stmt, 7, first_failure_vin);
+    else
+        sqlite3_bind_null(stmt, 7);
+    /* SCRIPT_ERR_OK persists as NULL so the column is never misread. */
+    if (first_failure_serror != SCRIPT_ERR_OK)
+        sqlite3_bind_int(stmt, 8, (int)first_failure_serror);
+    else
+        sqlite3_bind_null(stmt, 8);
+    sqlite3_bind_int64(stmt, 9, (sqlite3_int64)platform_time_wall_unix());
+    /* Bind the block's own hash so tip_finalize can prove an ok=1 row is THIS
+     * block's verdict (reorg-safe); NULL before the candidate is resolved. */
+    if (block_hash)
+        sqlite3_bind_blob(stmt, 10, block_hash->data, 32, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 10);
+}
+
 bool script_validate_log_insert(sqlite3 *db, int height,
                                 const char *status, bool ok,
                                 size_t tx_count, size_t input_count,
@@ -318,32 +378,9 @@ bool script_validate_log_insert(sqlite3 *db, int height,
         return false;
     }
     int rc;
-    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)height);
-    sqlite3_bind_text (stmt, 2, status, -1, SQLITE_STATIC);
-    sqlite3_bind_int  (stmt, 3, ok ? 1 : 0);
-    sqlite3_bind_int64(stmt, 4, (sqlite3_int64)tx_count);
-    sqlite3_bind_int64(stmt, 5, (sqlite3_int64)input_count);
-    if (first_failure_txid)
-        sqlite3_bind_blob(stmt, 6, first_failure_txid->data, 32,
-                          SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 6);
-    if (first_failure_vin >= 0)
-        sqlite3_bind_int(stmt, 7, first_failure_vin);
-    else
-        sqlite3_bind_null(stmt, 7);
-    /* SCRIPT_ERR_OK persists as NULL so the column is never misread. */
-    if (first_failure_serror != SCRIPT_ERR_OK)
-        sqlite3_bind_int(stmt, 8, (int)first_failure_serror);
-    else
-        sqlite3_bind_null(stmt, 8);
-    sqlite3_bind_int64(stmt, 9, (sqlite3_int64)platform_time_wall_unix());
-    /* Bind the block's own hash so tip_finalize can prove an ok=1 row is THIS
-     * block's verdict (reorg-safe); NULL before the candidate is resolved. */
-    if (block_hash)
-        sqlite3_bind_blob(stmt, 10, block_hash->data, 32, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 10);
+    sv_log_insert_bind(stmt, height, status, ok, tx_count, input_count,
+                       first_failure_txid, first_failure_vin,
+                       first_failure_serror, block_hash);
     if (source_epoch_found)
         rc = sqlite3_bind_blob(stmt, 11, source_epoch,
                                (int)sizeof(source_epoch), SQLITE_STATIC);
