@@ -100,6 +100,122 @@ static const char *HP_VALID_HDR_HEX =
 
 static const char *HP_MALFORMED_HEX = "deadbeef";
 
+static size_t hp_mock_read_request(platform_socket_t cfd, char *buf,
+                                   size_t cap)
+{
+    /* buf MUST start terminated: every branch below calls strstr(buf, ...)
+     * and the read loop can exit with got == 0 (recv timeout or hangup). */
+    buf[0] = '\0';
+    size_t got = 0;
+    /* Matches LRC_TIMEOUT_SECS in engine/modules/rpc/src/legacy_rpc_client.c
+     * (5s); a shorter ceiling makes the mock fail before the client. */
+    (void)platform_socket_set_receive_timeout(cfd, 5000);
+    for (;;) {
+        int n = platform_socket_receive(cfd, buf + got, cap - 1 - got);
+        if (n <= 0) break;
+        got += (size_t)n;
+        buf[got] = '\0';
+        /* Stop reading once we have body + a chunk after the
+         * \r\n\r\n separator. (Tiny test bodies fit in 1 recv.) */
+        if (strstr(buf, "\r\n\r\n")) break;
+        if (got >= cap - 1) break;
+    }
+    return got;
+}
+
+static const char *hp_mock_find_method(const char *buf)
+{
+    const char *method = NULL;
+    if (strstr(buf, "\"getblockcount\""))      method = "getblockcount";
+    else if (strstr(buf, "\"getblockhash\""))  method = "getblockhash";
+    else if (strstr(buf, "\"getblockheader\""))method = "getblockheader";
+    return method;
+}
+
+static int hp_mock_count_batch(const char *json_body)
+{
+    int depth = 0;
+    int batch_n = 0;
+    for (const char *p = json_body; *p; p++) {
+        if (*p == '[') depth++;
+        else if (*p == ']') depth--;
+        else if (*p == '{' && depth == 1) batch_n++;
+    }
+    if (batch_n < 1) batch_n = 1;
+    return batch_n;
+}
+
+static int hp_mock_build_elem(struct hp_mock *m, const char *method,
+                              char *elem, size_t cap)
+{
+    int el = 0;
+    if (method && strcmp(method, "getblockcount") == 0) {
+        el = snprintf(elem, cap,
+            "{\"result\":%d,\"error\":null,\"id\":\"zcl-hp\"}",
+            m->remote_tip);
+    } else if (method && strcmp(method, "getblockhash") == 0) {
+        int seq = atomic_fetch_add(&m->requests_served, 1) + 1;
+        char hash_hex[65];
+        for (int i = 0; i < 64; i++)
+            hash_hex[i] = "0123456789abcdef"[seq & 0xf];
+        hash_hex[64] = '\0';
+        (void)seq;
+        el = snprintf(elem, cap,
+            "{\"result\":\"%s\",\"error\":null,\"id\":\"zcl-hp\"}",
+            hash_hex);
+    } else if (method && strcmp(method, "getblockheader") == 0) {
+        const char *hex = m->malformed_header
+                              ? HP_MALFORMED_HEX
+                              : HP_VALID_HDR_HEX;
+        el = snprintf(elem, cap,
+            "{\"result\":\"%s\",\"error\":null,\"id\":\"zcl-hp\"}",
+            hex);
+    } else {
+        el = snprintf(elem, cap,
+            "{\"result\":null,\"error\":{\"code\":-1,"
+            "\"message\":\"unknown method\"},\"id\":\"zcl-hp\"}");
+    }
+    return el;
+}
+
+static int hp_mock_build_body(char *body, size_t cap, bool is_batch,
+                              int batch_n, const char *elem, int el)
+{
+    int bl = 0;
+    if (!is_batch) {
+        bl = snprintf(body, cap, "%s\n", elem);
+    } else {
+        int off = 0;
+        body[off++] = '[';
+        for (int i = 0; i < batch_n && off + el + 2 < (int)cap; i++) {
+            if (i) body[off++] = ',';
+            memcpy(body + off, elem, (size_t)el);
+            off += el;
+        }
+        if (off + 2 < (int)cap) {
+            body[off++] = ']';
+            body[off++] = '\n';
+        }
+        bl = off;
+    }
+    return bl;
+}
+
+static void hp_mock_send_reply(platform_socket_t cfd, const char *body,
+                               int bl)
+{
+    char hdr[256];
+    int hl = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: engine/application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
+        "\r\n", bl);
+    (void)platform_socket_send_all(cfd, hdr, (size_t)hl);
+    (void)platform_socket_send_all(cfd, body, (size_t)bl);
+    platform_socket_close(cfd);
+}
+
 static void *hp_mock_loop(void *arg)  /* raw-pthread-ok: test-local */
 {
     struct hp_mock *m = arg;
@@ -112,35 +228,15 @@ static void *hp_mock_loop(void *arg)  /* raw-pthread-ok: test-local */
                                                        &cl);
         if (cfd == PLATFORM_SOCKET_INVALID) break;
 
-        /* buf MUST start terminated: every branch below calls strstr(buf, ...)
-         * and the read loop can exit with got == 0 (recv timeout or hangup). */
         char buf[8192];
-        buf[0] = '\0';
-        size_t got = 0;
-        /* Matches LRC_TIMEOUT_SECS in engine/modules/rpc/src/legacy_rpc_client.c
-         * (5s); a shorter ceiling makes the mock fail before the client. */
-        (void)platform_socket_set_receive_timeout(cfd, 5000);
-        for (;;) {
-            int n = platform_socket_receive(cfd, buf + got,
-                                            sizeof(buf) - 1 - got);
-            if (n <= 0) break;
-            got += (size_t)n;
-            buf[got] = '\0';
-            /* Stop reading once we have body + a chunk after the
-             * \r\n\r\n separator. (Tiny test bodies fit in 1 recv.) */
-            if (strstr(buf, "\r\n\r\n")) break;
-            if (got >= sizeof(buf) - 1) break;
-        }
+        size_t got = hp_mock_read_request(cfd, buf, sizeof(buf));
         if (got == 0) {
             /* Nothing arrived — answering would be answering noise. */
             platform_socket_close(cfd);
             continue;
         }
 
-        const char *method = NULL;
-        if (strstr(buf, "\"getblockcount\""))      method = "getblockcount";
-        else if (strstr(buf, "\"getblockhash\""))  method = "getblockhash";
-        else if (strstr(buf, "\"getblockheader\""))method = "getblockheader";
+        const char *method = hp_mock_find_method(buf);
 
         /* Detect JSON-RPC array body (batched). Count items by
          * counting top-level "{" inside the JSON body. */
@@ -148,77 +244,19 @@ static void *hp_mock_loop(void *arg)  /* raw-pthread-ok: test-local */
         const char *json_body = body_sep ? body_sep + 4 : buf;
         bool is_batch = (json_body[0] == '[');
         int batch_n = 0;
-        if (is_batch) {
-            int depth = 0;
-            for (const char *p = json_body; *p; p++) {
-                if (*p == '[') depth++;
-                else if (*p == ']') depth--;
-                else if (*p == '{' && depth == 1) batch_n++;
-            }
-            if (batch_n < 1) batch_n = 1;
-        }
+        if (is_batch) batch_n = hp_mock_count_batch(json_body);
 
         /* Build one element body for the response. is_batch wraps it
          * in [] with batch_n copies. */
         char elem[8192];
-        int el = 0;
-        if (method && strcmp(method, "getblockcount") == 0) {
-            el = snprintf(elem, sizeof(elem),
-                "{\"result\":%d,\"error\":null,\"id\":\"zcl-hp\"}",
-                m->remote_tip);
-        } else if (method && strcmp(method, "getblockhash") == 0) {
-            int seq = atomic_fetch_add(&m->requests_served, 1) + 1;
-            char hash_hex[65];
-            for (int i = 0; i < 64; i++)
-                hash_hex[i] = "0123456789abcdef"[seq & 0xf];
-            hash_hex[64] = '\0';
-            (void)seq;
-            el = snprintf(elem, sizeof(elem),
-                "{\"result\":\"%s\",\"error\":null,\"id\":\"zcl-hp\"}",
-                hash_hex);
-        } else if (method && strcmp(method, "getblockheader") == 0) {
-            const char *hex = m->malformed_header
-                                  ? HP_MALFORMED_HEX
-                                  : HP_VALID_HDR_HEX;
-            el = snprintf(elem, sizeof(elem),
-                "{\"result\":\"%s\",\"error\":null,\"id\":\"zcl-hp\"}",
-                hex);
-        } else {
-            el = snprintf(elem, sizeof(elem),
-                "{\"result\":null,\"error\":{\"code\":-1,"
-                "\"message\":\"unknown method\"},\"id\":\"zcl-hp\"}");
-        }
+        int el = hp_mock_build_elem(m, method, elem, sizeof(elem));
 
         /* Assemble final body — either single object or array. */
         char body[65536];
-        int bl = 0;
-        if (!is_batch) {
-            bl = snprintf(body, sizeof(body), "%s\n", elem);
-        } else {
-            int off = 0;
-            body[off++] = '[';
-            for (int i = 0; i < batch_n && off + el + 2 < (int)sizeof(body); i++) {
-                if (i) body[off++] = ',';
-                memcpy(body + off, elem, (size_t)el);
-                off += el;
-            }
-            if (off + 2 < (int)sizeof(body)) {
-                body[off++] = ']';
-                body[off++] = '\n';
-            }
-            bl = off;
-        }
+        int bl = hp_mock_build_body(body, sizeof(body), is_batch, batch_n,
+                                    elem, el);
 
-        char hdr[256];
-        int hl = snprintf(hdr, sizeof(hdr),
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: engine/application/json\r\n"
-            "Content-Length: %d\r\n"
-            "Connection: close\r\n"
-            "\r\n", bl);
-        (void)platform_socket_send_all(cfd, hdr, (size_t)hl);
-        (void)platform_socket_send_all(cfd, body, (size_t)bl);
-        platform_socket_close(cfd);
+        hp_mock_send_reply(cfd, body, bl);
         /* Don't fetch_add here — getblockhash branch already does so
          * for its sequence counter. Counting "requests_served" exactly
          * isn't load-bearing for the asserts. */
