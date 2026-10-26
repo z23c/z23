@@ -475,11 +475,9 @@ static bool vd_put_lane(
         vd_put_object(dir, root, wire, sizeof(wire));
 }
 
-static bool vd_accepted_fixture_create(
-    const char *dir, const uint8_t source_root[32], int64_t now,
-    uint8_t signer_seed, struct vd_accepted_fixture *fixture)
+static bool vd_accepted_fixture_put_policy(
+    const char *dir, struct vd_accepted_fixture *fixture)
 {
-    memset(fixture, 0, sizeof(*fixture));
     struct vcs_zcode_proof_policy_v1 *policy = &fixture->accepted.policy;
     *policy = (struct vcs_zcode_proof_policy_v1) {
         .schema_version = VCS_ZCODE_DEV_VERSION,
@@ -498,9 +496,13 @@ static bool vd_accepted_fixture_create(
         !vd_put_object(dir, fixture->accepted.proof_policy_root,
                        policy_wire, sizeof(policy_wire)))
         return false;
-    struct vcs_zcode_task_v1 *task = &fixture->accepted.task;
-    task->schema_version = VCS_ZCODE_DEV_VERSION;
-    memcpy(task->source_root, source_root, 32);
+    return true;
+}
+
+static bool vd_accepted_fixture_store_authority(
+    const char *dir, const uint8_t source_root[32],
+    struct vcs_zcode_task_v1 *task)
+{
     struct vcs_package_lock lock;
     vcs_package_lock_init(&lock);
     lock.count = 1;
@@ -534,7 +536,14 @@ static bool vd_accepted_fixture_create(
     free(recipe_wire);
     vcs_package_recipe_free(&recipe);
     free(lock_wire);
-    if (!task_authority) return false;
+    return task_authority;
+}
+
+static bool vd_accepted_fixture_put_task(
+    const char *dir, int64_t now, uint8_t signer_seed,
+    struct vd_accepted_fixture *fixture)
+{
+    struct vcs_zcode_task_v1 *task = &fixture->accepted.task;
     vd_root(task->toolchain_capsule_root, 0x21);
     vd_root(task->write_scope_root, 0x31);
     memcpy(task->proof_policy_root,
@@ -556,6 +565,13 @@ static bool vd_accepted_fixture_create(
         !vd_put_object(dir, fixture->accepted.task_root,
                        task_wire, sizeof(task_wire)))
         return false;
+    return true;
+}
+
+static bool vd_accepted_fixture_put_candidate(
+    const char *dir, const uint8_t source_root[32], int64_t now,
+    uint8_t signer_seed, struct vd_accepted_fixture *fixture)
+{
     uint8_t seed[32];
     vd_root(seed, signer_seed);
     ed25519_keypair(fixture->signer_pubkey,
@@ -579,6 +595,14 @@ static bool vd_accepted_fixture_create(
         !vd_put_object(dir, fixture->accepted.candidate_root,
                        candidate_wire, sizeof(candidate_wire)))
         return false;
+    return true;
+}
+
+static bool vd_accepted_fixture_put_proof_set(
+    const char *dir, int64_t now, struct vd_accepted_fixture *fixture)
+{
+    struct vcs_zcode_task_v1 *task = &fixture->accepted.task;
+    struct vcs_zcode_candidate_v1 *candidate = &fixture->accepted.candidate;
     uint8_t receipt_roots[2][32];
     if (!vd_put_work_receipt(
             dir, task, candidate, fixture->accepted.task_root,
@@ -609,6 +633,13 @@ static bool vd_accepted_fixture_create(
         !vd_put_object(dir, fixture->accepted.proof_set_root,
                        proof_wire, proof_len))
         return false;
+    return true;
+}
+
+static bool vd_accepted_fixture_put_lanes(
+    const char *dir, const uint8_t source_root[32], int64_t now,
+    struct vd_accepted_fixture *fixture)
+{
     struct vcs_zcode_lane_receipt_v1 lane = {
         .schema_version = VCS_ZCODE_DEV_VERSION,
         .lane = VCS_ZCODE_LANE_FRONTIER,
@@ -646,6 +677,27 @@ static bool vd_accepted_fixture_create(
     memcpy(fixture->accepted.expected_signer,
            fixture->signer_pubkey, 32);
     return true;
+}
+
+static bool vd_accepted_fixture_create(
+    const char *dir, const uint8_t source_root[32], int64_t now,
+    uint8_t signer_seed, struct vd_accepted_fixture *fixture)
+{
+    memset(fixture, 0, sizeof(*fixture));
+    if (!vd_accepted_fixture_put_policy(dir, fixture)) return false;
+    struct vcs_zcode_task_v1 *task = &fixture->accepted.task;
+    task->schema_version = VCS_ZCODE_DEV_VERSION;
+    memcpy(task->source_root, source_root, 32);
+    if (!vd_accepted_fixture_store_authority(dir, source_root, task))
+        return false;
+    if (!vd_accepted_fixture_put_task(dir, now, signer_seed, fixture))
+        return false;
+    if (!vd_accepted_fixture_put_candidate(dir, source_root, now,
+                                           signer_seed, fixture))
+        return false;
+    if (!vd_accepted_fixture_put_proof_set(dir, now, fixture))
+        return false;
+    return vd_accepted_fixture_put_lanes(dir, source_root, now, fixture);
 }
 
 struct captured_commit {
@@ -829,6 +881,186 @@ static int t_initial_anchor_deferred(const char *dir)
     return failures;
 }
 
+static int vd_publication_check_drive_cycle(
+    const char *dir, const char *source_id,
+    struct vcs_devloop_anchor_result ar)
+{
+    int failures = 0;
+    char drive_commit_hex[65], drive_proof_hex[65], drive_job_hex[65];
+    zcl_hex_encode(ar.commit_id, 32, drive_commit_hex);
+    zcl_hex_encode(ar.proof_receipt_root, 32, drive_proof_hex);
+    zcl_hex_encode(ar.publication_job_root, 32, drive_job_hex);
+    char drive_cycle[2048], drive_why[160] = {0};
+    int drive_cycle_len = snprintf(
+        drive_cycle, sizeof(drive_cycle),
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
+        "\"status\":\"passed\",\"action\":\"verify\","
+        "\"reason\":\"fixture\",\"phase\":\"verify\","
+        "\"runtime_published\":false,\"elapsed_ms\":17,"
+        "\"proof_complete\":true,"
+        "\"proof_scope\":\"source_wide_compile_tests_lint_fast\","
+        "\"source_id_sha256\":\"%s\",\"vcs_commit\":\"%s\","
+        "\"proof_receipt_root\":\"%s\","
+        "\"publication_status\":\"QUEUED\","
+        "\"publication_job_root\":\"%s\","
+        "\"publication_enqueue_us\":41,\"files\":[]}",
+        source_id, drive_commit_hex, drive_proof_hex, drive_job_hex);
+    VD_CHECK("drive: exact cycle fixture renders within bound",
+             drive_cycle_len > 0 &&
+             (size_t)drive_cycle_len < sizeof(drive_cycle));
+    VD_CHECK("drive: exact cycle fixture persists",
+             drive_cycle_len > 0 &&
+             zcl_devloop_cycle_state_write(
+                 dir, drive_cycle, (size_t)drive_cycle_len,
+                 drive_why, sizeof(drive_why)));
+    struct json_value drive_input;
+    json_init(&drive_input);
+    json_set_object(&drive_input);
+    (void)json_push_kv_int(&drive_input, "after_epoch", 0);
+    (void)json_push_kv_int(&drive_input, "timeout_ms", 1);
+    struct zcl_command_context drive_context = {
+        .source_root = dir,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OPERATOR,
+        .dev_build = true,
+    };
+    struct zcl_command_request drive_request = {
+        .context = &drive_context,
+        .input = &drive_input,
+    };
+    struct zcl_command_reply drive_reply;
+    zcl_command_reply_init(&drive_reply, "zcl.dev_drive.v1");
+    zcl_native_handle_dev_drive(&drive_request, &drive_reply);
+    VD_CHECK("drive: compact warm-service result passes",
+             drive_reply.exit_code == ZCL_COMMAND_EXIT_OK);
+    VD_CHECK("drive: exact proof is never dropped",
+             json_get_bool(json_get(&drive_reply.data, "proof_complete")));
+    VD_CHECK("drive: every fallback names why it was not live",
+             strcmp(json_get_str(json_get(
+                        &drive_reply.data, "why_not_live")),
+                    "fixture") == 0);
+    VD_CHECK("drive: exact ZVCS root is projected",
+             strcmp(json_get_str(json_get(
+                        &drive_reply.data, "zvcs_commit_root")),
+                    drive_commit_hex) == 0);
+    VD_CHECK("drive: job root moves without agent hash handling",
+             strcmp(json_get_str(json_get(
+                        &drive_reply.data, "publication_job_root")),
+                    drive_job_hex) == 0);
+    VD_CHECK("drive: restart-safe blocker is verified and compact",
+             strcmp(json_get_str(json_get(&drive_reply.data, "blocker")),
+                    "human_proven_work_and_offline_publisher_signature_required") == 0);
+    VD_CHECK("drive: one exact next action is present",
+             json_get_str(json_get(&drive_reply.data, "next_command")) != NULL);
+    zcl_command_reply_free(&drive_reply);
+    json_free(&drive_input);
+    return failures;
+}
+
+static int vd_publication_check_accepted_bundle(
+    const char *dir, struct vcs_devloop_publication_job job,
+    int64_t accepted_now, struct vd_accepted_fixture *fixture)
+{
+    int failures = 0;
+    uint8_t *accepted_wire = NULL;
+    size_t accepted_wire_len = 0;
+    struct vcs_zcode_accepted_work_v1 exported;
+    VD_CHECK("publication: accepted work exports as closed authority bundle",
+             vcs_zcode_accepted_work_bundle_export(
+                 dir, fixture->accepted.accepted_work_root, accepted_now,
+                 &accepted_wire, &accepted_wire_len, &exported) ==
+                 VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK &&
+             accepted_wire_len > 0 &&
+             memcmp(exported.expected_signer,
+                    fixture->signer_pubkey, 32) == 0);
+    char accepted_consumer[512];
+    test_make_tmpdir(accepted_consumer, sizeof(accepted_consumer),
+                     "vcs_devloop", "accepted-authority-consumer");
+    struct vcs_source_bundle_sharded accepted_source;
+    vcs_source_bundle_sharded_init(&accepted_source);
+    VD_CHECK("publication: accepted source stages without Git",
+             vcs_source_bundle_sharded_create(
+                 dir, job.source_tree_root, &accepted_source) ==
+                 VCS_SOURCE_BUNDLE_OK &&
+             vcs_source_bundle_sharded_import(
+                 &accepted_source, job.source_tree_root, accepted_consumer,
+                 NULL) == VCS_SOURCE_BUNDLE_OK);
+    struct vcs_zcode_accepted_work_v1 imported;
+    uint32_t authority_objects = 0, authority_receipts = 0;
+    VD_CHECK("publication: fresh consumer rederives full accepted authority",
+             accepted_wire &&
+             vcs_zcode_accepted_work_bundle_import(
+                 accepted_consumer, fixture->accepted.accepted_work_root,
+                 job.source_tree_root, accepted_wire, accepted_wire_len,
+                 &imported, &authority_objects, &authority_receipts) ==
+                 VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK &&
+             authority_objects >= 9 && authority_receipts == 2 &&
+             memcmp(imported.expected_signer,
+                    fixture->signer_pubkey, 32) == 0);
+    failures += vd_test_accepted_bundle_retry(
+        accepted_consumer, fixture, job.source_tree_root,
+        accepted_wire, accepted_wire_len, accepted_now);
+    failures += vd_test_accepted_candidate_job_retry(
+        accepted_consumer, &accepted_source, fixture,
+        job.source_tree_root, accepted_now);
+    uint8_t wrong_accepted_root[32];
+    memcpy(wrong_accepted_root, fixture->accepted.accepted_work_root, 32);
+    wrong_accepted_root[0] ^= 1u;
+    VD_CHECK("publication: caller-selected wrong accepted root is refused",
+             vcs_zcode_accepted_work_bundle_import(
+                 accepted_consumer, wrong_accepted_root,
+                 job.source_tree_root, accepted_wire, accepted_wire_len,
+                 NULL, NULL, NULL) ==
+                 VCS_ZCODE_ACCEPTED_WORK_BUNDLE_SHAPE);
+    if (accepted_wire_len > 0) accepted_wire[accepted_wire_len - 1u] ^= 1u;
+    VD_CHECK("publication: corrupt task authority is refused",
+             vcs_zcode_accepted_work_bundle_import(
+                 accepted_consumer, fixture->accepted.accepted_work_root,
+                 job.source_tree_root, accepted_wire, accepted_wire_len,
+                 NULL, NULL, NULL) != VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK);
+    free(accepted_wire);
+    vcs_source_bundle_sharded_free(&accepted_source);
+    return failures;
+}
+
+static int vd_publication_check_forged_contexts(
+    const char *dir, struct vd_accepted_fixture *fixture,
+    struct vcs_devloop_anchor_result ar, int64_t accepted_now,
+    uint8_t rejected_progress_root[32], bool *reused)
+{
+    int failures = 0;
+    struct vcs_zcode_lane_receipt_v1 forged;
+    uint8_t forged_root[32];
+    static const char *const context_names[] = {
+        "correct source but different task refused",
+        "correct source but different candidate refused",
+        "changed proof policy refused",
+        "changed proof set refused",
+        "missing predecessor refused",
+        "forged predecessor root refused",
+    };
+    for (size_t i = 0; i < sizeof(context_names) / sizeof(context_names[0]);
+         i++) {
+        forged = fixture->accepted.proven;
+        if (i == 0) vd_root(forged.task_root, 0xe1);
+        if (i == 1) vd_root(forged.candidate_root, 0xe2);
+        if (i == 2) vd_root(forged.proof_policy_root, 0xe3);
+        if (i == 3) vd_root(forged.proof_set_root, 0xe4);
+        if (i == 4) vd_root(forged.prior_receipt_root, 0xe5);
+        if (i == 5)
+            memcpy(forged.prior_receipt_root,
+                   fixture->accepted.frontier_root, 32);
+        VD_CHECK("publication: forged-context receipt stores",
+                 vd_put_lane(dir, &forged, fixture->signer_secret,
+                             fixture->signer_pubkey, forged_root));
+        *reused = true;
+        VD_CHECK(context_names[i],
+                 !vcs_devloop_publication_advance_proven_work(
+                     dir, ar.publication_job_root, forged_root, accepted_now,
+                     rejected_progress_root, reused));
+    }
+    return failures;
+}
+
 /* A complete source-wide proof becomes a small durable publication job. The
  * queue stores only immutable roots; package/network/wallet work is strictly
  * out of the foreground anchor path. */
@@ -919,73 +1151,7 @@ static int t_publication_enqueue(const char *dir)
     VD_CHECK("publication: phase retry preserves exact receipt root",
              memcmp(progress_root, retried_progress_root, 32) == 0);
 
-    char drive_commit_hex[65], drive_proof_hex[65], drive_job_hex[65];
-    zcl_hex_encode(ar.commit_id, 32, drive_commit_hex);
-    zcl_hex_encode(ar.proof_receipt_root, 32, drive_proof_hex);
-    zcl_hex_encode(ar.publication_job_root, 32, drive_job_hex);
-    char drive_cycle[2048], drive_why[160] = {0};
-    int drive_cycle_len = snprintf(
-        drive_cycle, sizeof(drive_cycle),
-        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
-        "\"status\":\"passed\",\"action\":\"verify\","
-        "\"reason\":\"fixture\",\"phase\":\"verify\","
-        "\"runtime_published\":false,\"elapsed_ms\":17,"
-        "\"proof_complete\":true,"
-        "\"proof_scope\":\"source_wide_compile_tests_lint_fast\","
-        "\"source_id_sha256\":\"%s\",\"vcs_commit\":\"%s\","
-        "\"proof_receipt_root\":\"%s\","
-        "\"publication_status\":\"QUEUED\","
-        "\"publication_job_root\":\"%s\","
-        "\"publication_enqueue_us\":41,\"files\":[]}",
-        source_id, drive_commit_hex, drive_proof_hex, drive_job_hex);
-    VD_CHECK("drive: exact cycle fixture renders within bound",
-             drive_cycle_len > 0 &&
-             (size_t)drive_cycle_len < sizeof(drive_cycle));
-    VD_CHECK("drive: exact cycle fixture persists",
-             drive_cycle_len > 0 &&
-             zcl_devloop_cycle_state_write(
-                 dir, drive_cycle, (size_t)drive_cycle_len,
-                 drive_why, sizeof(drive_why)));
-    struct json_value drive_input;
-    json_init(&drive_input);
-    json_set_object(&drive_input);
-    (void)json_push_kv_int(&drive_input, "after_epoch", 0);
-    (void)json_push_kv_int(&drive_input, "timeout_ms", 1);
-    struct zcl_command_context drive_context = {
-        .source_root = dir,
-        .authority_ceiling = ZCL_COMMAND_AUTH_OPERATOR,
-        .dev_build = true,
-    };
-    struct zcl_command_request drive_request = {
-        .context = &drive_context,
-        .input = &drive_input,
-    };
-    struct zcl_command_reply drive_reply;
-    zcl_command_reply_init(&drive_reply, "zcl.dev_drive.v1");
-    zcl_native_handle_dev_drive(&drive_request, &drive_reply);
-    VD_CHECK("drive: compact warm-service result passes",
-             drive_reply.exit_code == ZCL_COMMAND_EXIT_OK);
-    VD_CHECK("drive: exact proof is never dropped",
-             json_get_bool(json_get(&drive_reply.data, "proof_complete")));
-    VD_CHECK("drive: every fallback names why it was not live",
-             strcmp(json_get_str(json_get(
-                        &drive_reply.data, "why_not_live")),
-                    "fixture") == 0);
-    VD_CHECK("drive: exact ZVCS root is projected",
-             strcmp(json_get_str(json_get(
-                        &drive_reply.data, "zvcs_commit_root")),
-                    drive_commit_hex) == 0);
-    VD_CHECK("drive: job root moves without agent hash handling",
-             strcmp(json_get_str(json_get(
-                        &drive_reply.data, "publication_job_root")),
-                    drive_job_hex) == 0);
-    VD_CHECK("drive: restart-safe blocker is verified and compact",
-             strcmp(json_get_str(json_get(&drive_reply.data, "blocker")),
-                    "human_proven_work_and_offline_publisher_signature_required") == 0);
-    VD_CHECK("drive: one exact next action is present",
-             json_get_str(json_get(&drive_reply.data, "next_command")) != NULL);
-    zcl_command_reply_free(&drive_reply);
-    json_free(&drive_input);
+    failures += vd_publication_check_drive_cycle(dir, source_id, ar);
 
     const int64_t accepted_now = 1700000000;
     struct vd_accepted_fixture fixture;
@@ -997,64 +1163,8 @@ static int t_publication_enqueue(const char *dir)
              vcs_zcode_accepted_work_resolve(
                  dir, fixture.accepted.accepted_work_root,
                  accepted_now, &resolved));
-    uint8_t *accepted_wire = NULL;
-    size_t accepted_wire_len = 0;
-    struct vcs_zcode_accepted_work_v1 exported;
-    VD_CHECK("publication: accepted work exports as closed authority bundle",
-             vcs_zcode_accepted_work_bundle_export(
-                 dir, fixture.accepted.accepted_work_root, accepted_now,
-                 &accepted_wire, &accepted_wire_len, &exported) ==
-                 VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK &&
-             accepted_wire_len > 0 &&
-             memcmp(exported.expected_signer,
-                    fixture.signer_pubkey, 32) == 0);
-    char accepted_consumer[512];
-    test_make_tmpdir(accepted_consumer, sizeof(accepted_consumer),
-                     "vcs_devloop", "accepted-authority-consumer");
-    struct vcs_source_bundle_sharded accepted_source;
-    vcs_source_bundle_sharded_init(&accepted_source);
-    VD_CHECK("publication: accepted source stages without Git",
-             vcs_source_bundle_sharded_create(
-                 dir, job.source_tree_root, &accepted_source) ==
-                 VCS_SOURCE_BUNDLE_OK &&
-             vcs_source_bundle_sharded_import(
-                 &accepted_source, job.source_tree_root, accepted_consumer,
-                 NULL) == VCS_SOURCE_BUNDLE_OK);
-    struct vcs_zcode_accepted_work_v1 imported;
-    uint32_t authority_objects = 0, authority_receipts = 0;
-    VD_CHECK("publication: fresh consumer rederives full accepted authority",
-             accepted_wire &&
-             vcs_zcode_accepted_work_bundle_import(
-                 accepted_consumer, fixture.accepted.accepted_work_root,
-                 job.source_tree_root, accepted_wire, accepted_wire_len,
-                 &imported, &authority_objects, &authority_receipts) ==
-                 VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK &&
-             authority_objects >= 9 && authority_receipts == 2 &&
-             memcmp(imported.expected_signer,
-                    fixture.signer_pubkey, 32) == 0);
-    failures += vd_test_accepted_bundle_retry(
-        accepted_consumer, &fixture, job.source_tree_root,
-        accepted_wire, accepted_wire_len, accepted_now);
-    failures += vd_test_accepted_candidate_job_retry(
-        accepted_consumer, &accepted_source, &fixture,
-        job.source_tree_root, accepted_now);
-    uint8_t wrong_accepted_root[32];
-    memcpy(wrong_accepted_root, fixture.accepted.accepted_work_root, 32);
-    wrong_accepted_root[0] ^= 1u;
-    VD_CHECK("publication: caller-selected wrong accepted root is refused",
-             vcs_zcode_accepted_work_bundle_import(
-                 accepted_consumer, wrong_accepted_root,
-                 job.source_tree_root, accepted_wire, accepted_wire_len,
-                 NULL, NULL, NULL) ==
-                 VCS_ZCODE_ACCEPTED_WORK_BUNDLE_SHAPE);
-    if (accepted_wire_len > 0) accepted_wire[accepted_wire_len - 1u] ^= 1u;
-    VD_CHECK("publication: corrupt task authority is refused",
-             vcs_zcode_accepted_work_bundle_import(
-                 accepted_consumer, fixture.accepted.accepted_work_root,
-                 job.source_tree_root, accepted_wire, accepted_wire_len,
-                 NULL, NULL, NULL) != VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK);
-    free(accepted_wire);
-    vcs_source_bundle_sharded_free(&accepted_source);
+    failures += vd_publication_check_accepted_bundle(
+        dir, job, accepted_now, &fixture);
     uint8_t rejected_progress_root[32];
     reused = true;
     VD_CHECK("publication: valid compile/test CANDIDATE remains waiting",
@@ -1091,34 +1201,8 @@ static int t_publication_enqueue(const char *dir)
                  dir, forged_root, accepted_now, &resolved));
     memset(attacker_secret, 0, sizeof(attacker_secret));
 
-    static const char *const context_names[] = {
-        "correct source but different task refused",
-        "correct source but different candidate refused",
-        "changed proof policy refused",
-        "changed proof set refused",
-        "missing predecessor refused",
-        "forged predecessor root refused",
-    };
-    for (size_t i = 0; i < sizeof(context_names) / sizeof(context_names[0]);
-         i++) {
-        forged = fixture.accepted.proven;
-        if (i == 0) vd_root(forged.task_root, 0xe1);
-        if (i == 1) vd_root(forged.candidate_root, 0xe2);
-        if (i == 2) vd_root(forged.proof_policy_root, 0xe3);
-        if (i == 3) vd_root(forged.proof_set_root, 0xe4);
-        if (i == 4) vd_root(forged.prior_receipt_root, 0xe5);
-        if (i == 5)
-            memcpy(forged.prior_receipt_root,
-                   fixture.accepted.frontier_root, 32);
-        VD_CHECK("publication: forged-context receipt stores",
-                 vd_put_lane(dir, &forged, fixture.signer_secret,
-                             fixture.signer_pubkey, forged_root));
-        reused = true;
-        VD_CHECK(context_names[i],
-                 !vcs_devloop_publication_advance_proven_work(
-                     dir, ar.publication_job_root, forged_root, accepted_now,
-                     rejected_progress_root, &reused));
-    }
+    failures += vd_publication_check_forged_contexts(
+        dir, &fixture, ar, accepted_now, rejected_progress_root, &reused);
     VD_CHECK("publication: stale accepted work refused",
              !vcs_devloop_publication_advance_proven_work(
                  dir, ar.publication_job_root,
