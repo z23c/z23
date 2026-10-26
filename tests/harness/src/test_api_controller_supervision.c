@@ -39,64 +39,109 @@ static bool find_snapshot(const char *name, struct supervisor_snapshot *out)
     return false;
 }
 
+static bool cache_stop_interrupts_utxo_scan(void)
+{
+    /* A cache stop must interrupt a long read without allowing the rows read
+     * before SQLITE_INTERRUPT to become a seemingly valid partial snapshot. */
+    bool ok = true;
+    sqlite3 *db = NULL;
+    ok = ok && sqlite3_open(":memory:", &db) == SQLITE_OK;
+    ok = ok && sqlite3_exec(db,
+        "CREATE TABLE utxos(height INTEGER, value INTEGER);"
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL "
+        "SELECT x+1 FROM n WHERE x<5000) "
+        "INSERT INTO utxos SELECT x, x FROM n;",
+        NULL, NULL, NULL) == SQLITE_OK;
+
+    _Atomic int running = 1;
+    ok = ok && api_cache_test_sqlite_progress(&running) == 0;
+    atomic_store(&running, 0);
+    ok = ok && api_cache_test_sqlite_progress(&running) == 1;
+    sqlite3_progress_handler(db, 1000, api_cache_test_sqlite_progress,
+                             &running);
+    struct hodl_wave_snapshot hodl;
+    bool scanned = hodl_wave_scan_current_utxos(db, 5000, &hodl);
+    sqlite3_progress_handler(db, 0, NULL, NULL);
+    ok = ok && !scanned &&
+         strcmp(hodl.status, "UTXO index scan interrupted") == 0;
+    if (db)
+        sqlite3_close(db);
+    return ok;
+}
+
+static bool cache_refresh_thread_supervision_ok(void)
+{
+    /* ── Cache-refresh thread ─────────────────────────────────────── */
+    bool ok = true;
+    blocker_clear("api_cache_refresh_stalled");
+
+    api_cache_test_register_supervisor();
+    ok = ok && api_cache_test_supervisor_id() != SUPERVISOR_INVALID_ID;
+
+    struct supervisor_snapshot snap;
+    bool found = find_snapshot("op.api_cache_refresh", &snap);
+    ok = ok && found;
+    ok = ok && found && snap.deadline_secs == 120;
+    ok = ok && found && snap.period_secs == 0;
+
+    ok = ok && !blocker_exists("api_cache_refresh_stalled");
+    api_cache_test_force_stall();
+    ok = ok && blocker_exists("api_cache_refresh_stalled");
+    ok = ok && blocker_class_for("api_cache_refresh_stalled") ==
+             BLOCKER_TRANSIENT;
+
+    blocker_clear("api_cache_refresh_stalled");
+    return ok;
+}
+
+static bool supervisor_children_distinct_ok(void)
+{
+    /* ── Both children distinct, both in the op domain (dumpstate
+     * supervisor visibility). ─────────────── */
+    bool ok = true;
+    ok = ok && api_cache_test_supervisor_id() !=
+             api_lookup_test_supervisor_id();
+
+    struct supervisor_snapshot cache_snap, lookup_snap;
+    ok = ok && find_snapshot("op.api_cache_refresh", &cache_snap);
+    ok = ok && find_snapshot("op.api_lookup", &lookup_snap);
+    return ok;
+}
+
+static bool stop_restart_rearms_supervision_ok(void)
+{
+    /* Stop/restart reuses the registered children. Prove that quiesce's
+     * deadline=0 is temporary and each next generation re-arms supervision. */
+    bool ok = true;
+    api_cache_supervisor_quiesce();
+    api_lookup_supervisor_quiesce();
+    struct supervisor_snapshot cache_snap, lookup_snap;
+    ok = ok && find_snapshot("op.api_cache_refresh", &cache_snap) &&
+         cache_snap.deadline_secs == 0;
+    ok = ok && find_snapshot("op.api_lookup", &lookup_snap) &&
+         lookup_snap.deadline_secs == 0;
+
+    api_cache_test_register_supervisor();
+    api_lookup_test_register_supervisor();
+    ok = ok && find_snapshot("op.api_cache_refresh", &cache_snap) &&
+         cache_snap.deadline_secs == 120;
+    ok = ok && find_snapshot("op.api_lookup", &lookup_snap) &&
+         lookup_snap.deadline_secs == 60;
+    return ok;
+}
+
 int api_controller_supervision_focused_tests(void)
 {
     printf("\n=== api_controller supervision-coverage tests (#13) ===\n");
     int failures = 0;
 
-    /* A cache stop must interrupt a long read without allowing the rows read
-     * before SQLITE_INTERRUPT to become a seemingly valid partial snapshot. */
-    {
-        bool ok = true;
-        sqlite3 *db = NULL;
-        ok = ok && sqlite3_open(":memory:", &db) == SQLITE_OK;
-        ok = ok && sqlite3_exec(db,
-            "CREATE TABLE utxos(height INTEGER, value INTEGER);"
-            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL "
-            "SELECT x+1 FROM n WHERE x<5000) "
-            "INSERT INTO utxos SELECT x, x FROM n;",
-            NULL, NULL, NULL) == SQLITE_OK;
+    bool scan_ok = cache_stop_interrupts_utxo_scan();
+    ACS_CHECK("cache stop interrupts UTXO scan without partial success",
+              scan_ok);
 
-        _Atomic int running = 1;
-        ok = ok && api_cache_test_sqlite_progress(&running) == 0;
-        atomic_store(&running, 0);
-        ok = ok && api_cache_test_sqlite_progress(&running) == 1;
-        sqlite3_progress_handler(db, 1000, api_cache_test_sqlite_progress,
-                                 &running);
-        struct hodl_wave_snapshot hodl;
-        bool scanned = hodl_wave_scan_current_utxos(db, 5000, &hodl);
-        sqlite3_progress_handler(db, 0, NULL, NULL);
-        ok = ok && !scanned &&
-             strcmp(hodl.status, "UTXO index scan interrupted") == 0;
-        if (db)
-            sqlite3_close(db);
-        ACS_CHECK("cache stop interrupts UTXO scan without partial success", ok);
-    }
-
-    /* ── Cache-refresh thread ─────────────────────────────────────── */
-    {
-        bool ok = true;
-        blocker_clear("api_cache_refresh_stalled");
-
-        api_cache_test_register_supervisor();
-        ok = ok && api_cache_test_supervisor_id() != SUPERVISOR_INVALID_ID;
-
-        struct supervisor_snapshot snap;
-        bool found = find_snapshot("op.api_cache_refresh", &snap);
-        ok = ok && found;
-        ok = ok && found && snap.deadline_secs == 120;
-        ok = ok && found && snap.period_secs == 0;
-
-        ok = ok && !blocker_exists("api_cache_refresh_stalled");
-        api_cache_test_force_stall();
-        ok = ok && blocker_exists("api_cache_refresh_stalled");
-        ok = ok && blocker_class_for("api_cache_refresh_stalled") ==
-                         BLOCKER_TRANSIENT;
-
-        blocker_clear("api_cache_refresh_stalled");
-        ACS_CHECK("api cache-refresh thread registered + names blocker on stall",
-                  ok);
-    }
+    bool cache_thread_ok = cache_refresh_thread_supervision_ok();
+    ACS_CHECK("api cache-refresh thread registered + names blocker on stall",
+              cache_thread_ok);
 
     /* ── Lookup-worker thread ─────────────────────────────────────── */
     {
@@ -116,47 +161,19 @@ int api_controller_supervision_focused_tests(void)
         api_lookup_test_force_stall();
         ok = ok && blocker_exists("api_lookup_stalled");
         ok = ok && blocker_class_for("api_lookup_stalled") ==
-                         BLOCKER_TRANSIENT;
+                 BLOCKER_TRANSIENT;
 
         blocker_clear("api_lookup_stalled");
         ACS_CHECK("api lookup-worker thread registered + names blocker on stall",
                   ok);
     }
 
-    /* ── Both children distinct, both in the op domain (dumpstate
-     * supervisor visibility). ─────────────── */
-    {
-        bool ok = true;
-        ok = ok && api_cache_test_supervisor_id() !=
-                         api_lookup_test_supervisor_id();
+    bool children_ok = supervisor_children_distinct_ok();
+    ACS_CHECK("cache + lookup are distinct, both-visible supervisor children",
+              children_ok);
 
-        struct supervisor_snapshot cache_snap, lookup_snap;
-        ok = ok && find_snapshot("op.api_cache_refresh", &cache_snap);
-        ok = ok && find_snapshot("op.api_lookup", &lookup_snap);
-        ACS_CHECK("cache + lookup are distinct, both-visible supervisor children",
-                  ok);
-    }
-
-    /* Stop/restart reuses the registered children. Prove that quiesce's
-     * deadline=0 is temporary and each next generation re-arms supervision. */
-    {
-        bool ok = true;
-        api_cache_supervisor_quiesce();
-        api_lookup_supervisor_quiesce();
-        struct supervisor_snapshot cache_snap, lookup_snap;
-        ok = ok && find_snapshot("op.api_cache_refresh", &cache_snap) &&
-             cache_snap.deadline_secs == 0;
-        ok = ok && find_snapshot("op.api_lookup", &lookup_snap) &&
-             lookup_snap.deadline_secs == 0;
-
-        api_cache_test_register_supervisor();
-        api_lookup_test_register_supervisor();
-        ok = ok && find_snapshot("op.api_cache_refresh", &cache_snap) &&
-             cache_snap.deadline_secs == 120;
-        ok = ok && find_snapshot("op.api_lookup", &lookup_snap) &&
-             lookup_snap.deadline_secs == 60;
-        ACS_CHECK("stop/restart re-arms both existing supervisor children", ok);
-    }
+    bool rearm_ok = stop_restart_rearms_supervision_ok();
+    ACS_CHECK("stop/restart re-arms both existing supervisor children", rearm_ok);
 
     return failures;
 }
