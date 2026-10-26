@@ -1957,7 +1957,6 @@ tests/harness/src/test_utxo_activation_paused.c:seed_reducer_frontier_owner_rows
 tests/harness/src/test_utxo_activation_paused.c:test_utxo_activation_paused:190
 tests/harness/src/test_utxo_apply_stage.c:test_utxo_apply_stage:183
 tests/harness/src/test_utxo_apply_value_balance.c:test_utxo_apply_value_balance:95
-tests/harness/src/test_utxo_commitment.c:test_utxo_commitment:56
 tests/harness/src/test_utxo_mirror_sync.c:test_utxo_mirror_sync:34
 tests/harness/src/test_utxo_recovery_service.c:test_utxo_recovery_service:298
 tests/harness/src/test_utxo_root_ladder.c:test_utxo_root_ladder:17

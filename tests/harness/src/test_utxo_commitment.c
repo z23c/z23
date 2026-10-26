@@ -47,10 +47,9 @@ static int test_block_swarm_peer_manifest_cap(void)
     return failures;
 }
 
-int test_utxo_commitment(void)
+static int test_utxo_commitment_init_is_zero(void)
 {
     int failures = 0;
-
     printf("utxo_commitment: init is zero... ");
     {
         struct utxo_commitment uc;
@@ -60,7 +59,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_utxo_commitment_add_remove_zero(void)
+{
+    int failures = 0;
     printf("utxo_commitment: add then remove returns to zero... ");
     {
         struct utxo_commitment uc;
@@ -81,7 +85,12 @@ int test_utxo_commitment(void)
                        nonzero, back_to_zero, (unsigned long long)uc.count);
                failures++; }
     }
+    return failures;
+}
 
+static int test_utxo_commitment_order_independent(void)
+{
+    int failures = 0;
     printf("utxo_commitment: order independent... ");
     {
         uint8_t txid1[32], txid2[32];
@@ -103,7 +112,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_utxo_commitment_different_hashes(void)
+{
+    int failures = 0;
     printf("utxo_commitment: different UTXOs produce different hashes... ");
     {
         struct utxo_commitment a, b;
@@ -119,7 +133,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_utxo_commitment_serialize_roundtrip(void)
+{
+    int failures = 0;
     printf("utxo_commitment: serialize/deserialize roundtrip... ");
     {
         struct utxo_commitment uc;
@@ -138,7 +157,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_utxo_commitment_rejects_short(void)
+{
+    int failures = 0;
     printf("utxo_commitment: deserialize rejects short buffer... ");
     {
         struct utxo_commitment uc;
@@ -147,7 +171,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_utxo_commitment_merge_combines(void)
+{
+    int failures = 0;
     printf("utxo_commitment: merge combines two sets... ");
     {
         uint8_t txid1[32], txid2[32];
@@ -172,7 +201,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_utxo_commitment_large_set(void)
+{
+    int failures = 0;
     printf("utxo_commitment: large set add/remove consistency... ");
     {
         struct utxo_commitment uc;
@@ -205,7 +239,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_utxo_commitment_skip_flag(void)
+{
+    int failures = 0;
     TEST("utxo_commitment skip flag bypasses add/remove") {
         struct utxo_commitment uc;
         utxo_commitment_init(&uc);
@@ -245,9 +284,12 @@ int test_utxo_commitment(void)
         ASSERT(is_zero);
         PASS();
     } _test_next:;
+    return failures;
+}
 
-    /* ── Block swarm tests ────────────────────────────────── */
-
+static int test_piece_hash_repeat_matches(void)
+{
+    int failures = 0;
     printf("block_piece_hash deterministic... ");
     {
         uint8_t hashes[2][32];
@@ -260,7 +302,12 @@ int test_utxo_commitment(void)
         if (memcmp(h1, h2, 32) == 0) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_piece_hash_changes_with_index(void)
+{
+    int failures = 0;
     printf("block_piece_hash differs by index... ");
     {
         uint8_t hashes[1][32];
@@ -272,7 +319,12 @@ int test_utxo_commitment(void)
         if (memcmp(h0, h1, 32) != 0) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_block_swarm_init_and_free(void)
+{
+    int failures = 0;
     printf("block_swarm init and free... ");
     {
         struct block_piece_manifest m = {
@@ -293,7 +345,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_block_swarm_assign_sequential(void)
+{
+    int failures = 0;
     printf("block_swarm assign sequential... ");
     {
         struct block_piece_manifest m = {
@@ -319,7 +376,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_block_swarm_receive_completes(void)
+{
+    int failures = 0;
     printf("block_swarm receive completes... ");
     {
         struct block_piece_manifest m = {
@@ -341,7 +403,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_block_swarm_timeout_requeues(void)
+{
+    int failures = 0;
     printf("block_swarm timeout re-queues... ");
     {
         struct block_piece_manifest m = {
@@ -367,7 +434,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_block_swarm_fail_allows_retry(void)
+{
+    int failures = 0;
     printf("block_swarm fail allows retry... ");
     {
         struct block_piece_manifest m = {
@@ -391,7 +463,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_block_swarm_bitmap_serialize(void)
+{
+    int failures = 0;
     printf("block_swarm bitmap serialize... ");
     {
         struct block_piece_manifest m = {
@@ -416,7 +493,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (bitmap=0x%02x)\n", bitmap[0]); failures++; }
     }
+    return failures;
+}
 
+static int test_swarm_prefers_rarest_piece(void)
+{
+    int failures = 0;
     printf("block_swarm rarest-first... ");
     {
         struct block_piece_manifest m = {
@@ -440,7 +522,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (got piece %d)\n", pi); failures++; }
     }
+    return failures;
+}
 
+static int test_block_swarm_endgame_mode(void)
+{
+    int failures = 0;
     printf("block_swarm endgame mode... ");
     {
         struct block_piece_manifest m = {
@@ -467,7 +554,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_block_swarm_bitmap_peer_filter(void)
+{
+    int failures = 0;
     printf("block_swarm bitmap peer filtering... ");
     {
         struct block_piece_manifest m = {
@@ -488,7 +580,12 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (got piece %d)\n", pi); failures++; }
     }
+    return failures;
+}
 
+static int test_block_swarm_short_bitmap(void)
+{
+    int failures = 0;
     printf("block_swarm short-bitmap assign stays bounded... ");
     {
         struct block_piece_manifest m = {
@@ -518,7 +615,37 @@ int test_utxo_commitment(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (none=%d thru=%d all=%d)\n", pi_none, pi_thru, pi_all); failures++; }
     }
+    return failures;
+}
 
+int test_utxo_commitment(void)
+{
+    int failures = 0;
+
+    failures += test_utxo_commitment_init_is_zero();
+    failures += test_utxo_commitment_add_remove_zero();
+    failures += test_utxo_commitment_order_independent();
+    failures += test_utxo_commitment_different_hashes();
+    failures += test_utxo_commitment_serialize_roundtrip();
+    failures += test_utxo_commitment_rejects_short();
+    failures += test_utxo_commitment_merge_combines();
+    failures += test_utxo_commitment_large_set();
+    failures += test_utxo_commitment_skip_flag();
+
+    /* ── Block swarm tests ────────────────────────────────── */
+
+    failures += test_piece_hash_repeat_matches();
+    failures += test_piece_hash_changes_with_index();
+    failures += test_block_swarm_init_and_free();
+    failures += test_block_swarm_assign_sequential();
+    failures += test_block_swarm_receive_completes();
+    failures += test_block_swarm_timeout_requeues();
+    failures += test_block_swarm_fail_allows_retry();
+    failures += test_block_swarm_bitmap_serialize();
+    failures += test_swarm_prefers_rarest_piece();
+    failures += test_block_swarm_endgame_mode();
+    failures += test_block_swarm_bitmap_peer_filter();
+    failures += test_block_swarm_short_bitmap();
     failures += test_block_swarm_peer_manifest_cap();
     return failures;
 }
