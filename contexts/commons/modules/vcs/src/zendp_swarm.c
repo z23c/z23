@@ -32,7 +32,7 @@ const char *zendp_anchor_state_string(enum zendp_anchor_state s)
     return "unknown";
 }
 
-const char *zendp_result_string(enum zendp_result r)
+static const char *zendp_result_string_local(enum zendp_result r)
 {
     switch (r) {
     case ZENDP_OK:                    return "ok";
@@ -45,6 +45,13 @@ const char *zendp_result_string(enum zendp_result r)
     case ZENDP_ERR_ABSENT:            return "no-local-witness";
     case ZENDP_ERR_DECODE:            return "doc-decode-failed";
     case ZENDP_ERR_VERIFY:            return "verify-failed";
+    default:                          return NULL;
+    }
+}
+
+static const char *zendp_result_string_peer(enum zendp_result r)
+{
+    switch (r) {
     case ZENDP_ERR_BODY:              return "not-a-zide-body";
     case ZENDP_ERR_KEY_MISMATCH:      return "signed-by-another-identity";
     case ZENDP_ERR_STALE:             return "seq-does-not-supersede";
@@ -55,8 +62,14 @@ const char *zendp_result_string(enum zendp_result r)
     case ZENDP_ERR_NOT_ANCHORED:      return "key-not-anchored-on-chain";
     case ZENDP_ERR_ROTATED:           return "key-rotated-away";
     case ZENDP_ERR_REVOKED:           return "key-revoked";
+    default:                          return "unknown";
     }
-    return "unknown";
+}
+
+const char *zendp_result_string(enum zendp_result r)
+{
+    const char *s = zendp_result_string_local(r);
+    return s ? s : zendp_result_string_peer(r);
 }
 
 /* One lock for every directory this module touches, plus the port.
@@ -461,6 +474,30 @@ enum zendp_result zendp_global_revalidate(struct zendp_revalidation *out)
 
 /* ── publish ───────────────────────────────────────────────────────── */
 
+/* Stale when a held entry exists and doc does not supersede it. */
+static bool zendp_publish_stale(struct zendp_directory *dir,
+                                const struct zid_doc *doc, uint64_t *cur_seq)
+{
+    pthread_mutex_lock(&g_lock);
+    const struct zendp_entry *cur =
+        dir_by_pubkey_locked(dir, doc->master_pubkey);
+    bool stale = cur && !zid_doc_supersedes(doc, &cur->doc);
+    *cur_seq = cur ? cur->doc.seq : 0;
+    pthread_mutex_unlock(&g_lock);
+    return stale;
+}
+
+static void zendp_publish_copy_outputs(uint8_t out_root[32],
+                                       uint8_t out_pubkey[32],
+                                       const uint8_t root[32],
+                                       const uint8_t pubkey[32])
+{
+    if (out_root)
+        memcpy(out_root, root, 32);
+    if (out_pubkey)
+        memcpy(out_pubkey, pubkey, 32);
+}
+
 enum zendp_result zendp_publish_to(struct vcs_package_store *store,
                                    struct zendp_directory *dir,
                                    const struct zendp *ep, uint64_t seq,
@@ -508,12 +545,8 @@ enum zendp_result zendp_publish_to(struct vcs_package_store *store,
     zendp_record_key(record_key, doc.master_pubkey, period);
 
     /* Monotonic FIRST, so a stale republish never reaches the store. */
-    pthread_mutex_lock(&g_lock);
-    const struct zendp_entry *cur =
-        dir_by_pubkey_locked(dir, doc.master_pubkey);
-    bool stale = cur && !zid_doc_supersedes(&doc, &cur->doc);
-    uint64_t cur_seq = cur ? cur->doc.seq : 0;
-    pthread_mutex_unlock(&g_lock);
+    uint64_t cur_seq = 0;
+    bool stale = zendp_publish_stale(dir, &doc, &cur_seq);
     if (stale)
         LOG_RETURN(ZENDP_ERR_STALE, ZEP_LOG,
                    "publish: seq %llu does not supersede the held seq %llu — "
@@ -547,10 +580,7 @@ enum zendp_result zendp_publish_to(struct vcs_package_store *store,
     if (r != ZENDP_OK)
         return r;
 
-    if (out_root)
-        memcpy(out_root, root, 32);
-    if (out_pubkey)
-        memcpy(out_pubkey, doc.master_pubkey, 32);
+    zendp_publish_copy_outputs(out_root, out_pubkey, root, doc.master_pubkey);
     return ZENDP_OK;
 }
 
