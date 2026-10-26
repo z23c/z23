@@ -19,6 +19,26 @@ static bool record_zero(const uint8_t *value, size_t length)
   return !zcl_bytes_any_set(value, length);
 }
 
+static const char *record_authority_error_string(
+    enum vcs_zcode_dht_record_error error)
+{
+  switch (error) {
+  case VCS_ZCODE_DHT_RECORD_WINDOW: return "validity-window";
+  case VCS_ZCODE_DHT_RECORD_DELEGATION_WINDOW:
+    return "delegation-window-coverage";
+  case VCS_ZCODE_DHT_RECORD_NOT_YET_VALID: return "not-yet-valid";
+  case VCS_ZCODE_DHT_RECORD_EXPIRED: return "expired";
+  case VCS_ZCODE_DHT_RECORD_DELEGATION: return "delegation";
+  case VCS_ZCODE_DHT_RECORD_NETWORK: return "wrong-network";
+  case VCS_ZCODE_DHT_RECORD_PROVIDER_ID: return "provider-id";
+  case VCS_ZCODE_DHT_RECORD_SIGNER: return "delegated-signer";
+  case VCS_ZCODE_DHT_RECORD_SIGNATURE: return "record-signature";
+  case VCS_ZCODE_DHT_RECORD_CHAIN: return "chain-authorization";
+  default: break;
+  }
+  return "unknown";
+}
+
 const char *vcs_zcode_dht_record_error_string(
     enum vcs_zcode_dht_record_error error)
 {
@@ -33,19 +53,9 @@ const char *vcs_zcode_dht_record_error_string(
   case VCS_ZCODE_DHT_RECORD_ROOT: return "root-shape";
   case VCS_ZCODE_DHT_RECORD_OWNER_GROUP: return "owner-group";
   case VCS_ZCODE_DHT_RECORD_SEQUENCE: return "record-sequence";
-  case VCS_ZCODE_DHT_RECORD_WINDOW: return "validity-window";
-  case VCS_ZCODE_DHT_RECORD_DELEGATION_WINDOW:
-    return "delegation-window-coverage";
-  case VCS_ZCODE_DHT_RECORD_NOT_YET_VALID: return "not-yet-valid";
-  case VCS_ZCODE_DHT_RECORD_EXPIRED: return "expired";
-  case VCS_ZCODE_DHT_RECORD_DELEGATION: return "delegation";
-  case VCS_ZCODE_DHT_RECORD_NETWORK: return "wrong-network";
-  case VCS_ZCODE_DHT_RECORD_PROVIDER_ID: return "provider-id";
-  case VCS_ZCODE_DHT_RECORD_SIGNER: return "delegated-signer";
-  case VCS_ZCODE_DHT_RECORD_SIGNATURE: return "record-signature";
-  case VCS_ZCODE_DHT_RECORD_CHAIN: return "chain-authorization";
+  default: break;
   }
-  return "unknown";
+  return record_authority_error_string(error);
 }
 
 static size_t namespace_length(const char name[VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES])
@@ -120,18 +130,9 @@ static uint64_t max_window(enum vcs_zcode_dht_record_kind kind)
   return 0;
 }
 
-static enum vcs_zcode_dht_record_error record_shape(
+static enum vcs_zcode_dht_record_error record_kind_roots(
     const struct vcs_zcode_dht_record *record)
 {
-  if (!record)
-    return VCS_ZCODE_DHT_RECORD_NULL;
-  if (!max_window(record->kind))
-    return VCS_ZCODE_DHT_RECORD_KIND;
-  if (!namespace_valid(record->namespace_name, NULL))
-    return VCS_ZCODE_DHT_RECORD_NAMESPACE;
-  if (!zcl_bytes_any_set(record->network_genesis, 32) ||
-      !zcl_bytes_any_set(record->transport_root, 32))
-    return VCS_ZCODE_DHT_RECORD_ROOT;
   if (record->kind == VCS_ZCODE_DHT_RECORD_POINTER) {
     if (!zcl_bytes_any_set(record->semantic_root, 32) ||
         !record_zero(record->owner_group, 32))
@@ -152,6 +153,24 @@ static enum vcs_zcode_dht_record_error record_shape(
   } else if (!record_zero(record->owner_group, 32)) {
     return VCS_ZCODE_DHT_RECORD_OWNER_GROUP;
   }
+  return VCS_ZCODE_DHT_RECORD_OK;
+}
+
+static enum vcs_zcode_dht_record_error record_shape(
+    const struct vcs_zcode_dht_record *record)
+{
+  if (!record)
+    return VCS_ZCODE_DHT_RECORD_NULL;
+  if (!max_window(record->kind))
+    return VCS_ZCODE_DHT_RECORD_KIND;
+  if (!namespace_valid(record->namespace_name, NULL))
+    return VCS_ZCODE_DHT_RECORD_NAMESPACE;
+  if (!zcl_bytes_any_set(record->network_genesis, 32) ||
+      !zcl_bytes_any_set(record->transport_root, 32))
+    return VCS_ZCODE_DHT_RECORD_ROOT;
+  enum vcs_zcode_dht_record_error error = record_kind_roots(record);
+  if (error != VCS_ZCODE_DHT_RECORD_OK)
+    return error;
   if (!zcl_bytes_any_set(record->provider_node_id, 32))
     return VCS_ZCODE_DHT_RECORD_PROVIDER_ID;
   if (!record->sequence || record->sequence > (uint64_t)INT64_MAX)
@@ -416,6 +435,20 @@ enum vcs_zcode_dht_record_error vcs_zcode_dht_record_parse(
   return VCS_ZCODE_DHT_RECORD_OK;
 }
 
+static enum vcs_zcode_dht_record_error record_persisted_binding(
+    const struct vcs_zcode_dht_record *parsed,
+    const struct vcs_zcode_dht_record_verify_context *verify)
+{
+  if (memcmp(parsed->network_genesis, verify->network_genesis, 32) != 0)
+    return VCS_ZCODE_DHT_RECORD_NETWORK;
+  enum vcs_zcode_dht_record_error error = record_delegation_binding(parsed);
+  if (error != VCS_ZCODE_DHT_RECORD_OK)
+    return error;
+  if (verify->now_unix < parsed->not_before)
+    return VCS_ZCODE_DHT_RECORD_NOT_YET_VALID;
+  return VCS_ZCODE_DHT_RECORD_OK;
+}
+
 enum vcs_zcode_dht_record_error vcs_zcode_dht_record_parse_persisted(
     const uint8_t *wire, size_t wire_len,
     const struct vcs_zcode_dht_record_verify_context *verify,
@@ -437,13 +470,9 @@ enum vcs_zcode_dht_record_error vcs_zcode_dht_record_parse_persisted(
       record_read_unsigned(wire, &parsed, &unsigned_len);
   if (error != VCS_ZCODE_DHT_RECORD_OK)
     return error;
-  if (memcmp(parsed.network_genesis, verify->network_genesis, 32) != 0)
-    return VCS_ZCODE_DHT_RECORD_NETWORK;
-  error = record_delegation_binding(&parsed);
+  error = record_persisted_binding(&parsed, verify);
   if (error != VCS_ZCODE_DHT_RECORD_OK)
     return error;
-  if (verify->now_unix < parsed.not_before)
-    return VCS_ZCODE_DHT_RECORD_NOT_YET_VALID;
   uint64_t signature_time = verify->now_unix < parsed.expiry
                                 ? verify->now_unix
                                 : parsed.not_before;
