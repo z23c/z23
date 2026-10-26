@@ -40,6 +40,7 @@
 #include "platform/socket_compat.h"
 #include "config/cli_lane_defaults.h"
 #include "util/spawn.h"
+#include "test/test_timing_budget.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -820,9 +821,16 @@ static bool cas_capture_bind_refusal(const char *root, uint16_t port,
         "-nolegacyimport", "-nobgvalidation", "-nofilesync", "-showmetrics=0", NULL,
     };
     /* The native capture owns its child group and bounded reap. Nonzero is
-     * expected, but timeout, truncation or unobserved status never qualify. */
+     * expected, but timeout, truncation or unobserved status never qualify.
+     * The deadline only bounds a wedged child: a full node boot (select_chain
+     * alone took 1.8 s) reaches the P2P bind late on a host at load 120+,
+     * and a fixed 20 s kill truncated the log mid-boot (exit=137 timeout=1).
+     * It scales with measured host load like every other wall-clock budget
+     * in the harness; the refusal assertions below are untouched. */
+    struct test_budget deadline = test_budget_scale(20u * 1000u * 1000u);
+    int deadline_ms = (int)(deadline.effective_us / 1000u);
     struct zcl_result capture =
-        zcl_spawn_capture_binary_merged(argv, out, cap-1, 20000, observed);
+        zcl_spawn_capture_binary_merged(argv, out, cap-1, deadline_ms, observed);
     bool complete_refusal = observed->exit_observed && observed->exit_code == 1 &&
         observed->eof && !observed->timed_out && !observed->overflow;
     /* Expected exit 1 makes capture.ok false; the observation is authority. */
