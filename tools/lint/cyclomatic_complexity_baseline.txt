@@ -89,9 +89,6 @@ contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:4
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:79
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_assemble:27
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_process_scope:56
-contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_decode:16
-contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_from_selection:18
-contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_validate:28
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:creation_write:33
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation_attribution_parse:37
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation_attribution_validate:21

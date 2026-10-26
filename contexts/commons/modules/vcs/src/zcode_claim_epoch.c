@@ -51,7 +51,7 @@ void vcs_zcode_claim_epoch_free(
     memset(proposal, 0, sizeof(*proposal));
 }
 
-enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_validate(
+static enum vcs_zcode_claim_epoch_error claim_epoch_validate_header(
     const struct vcs_zcode_claim_epoch_proposal_v2 *proposal)
 {
     if (!proposal) return VCS_ZCODE_CLAIM_EPOCH_NULL;
@@ -72,6 +72,12 @@ enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_validate(
                           proposal->deferred_count + proposal->invalid_count;
     if (classified != proposal->claim_count)
         return VCS_ZCODE_CLAIM_EPOCH_COUNT;
+    return VCS_ZCODE_CLAIM_EPOCH_OK;
+}
+
+static enum vcs_zcode_claim_epoch_error claim_epoch_validate_accounting(
+    const struct vcs_zcode_claim_epoch_proposal_v2 *proposal)
+{
     uint64_t accounted = 0;
     if (!zcl_u64_add(proposal->selected_atoms,
                      proposal->expired_capacity_atoms, &accounted) ||
@@ -83,6 +89,17 @@ enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_validate(
         proposal->lineage_cap_atoms != proposal->recipient_cap_atoms ||
         proposal->first_category >= VCS_ZCODE_COMMONS_CATEGORY_COUNT)
         return VCS_ZCODE_CLAIM_EPOCH_SELECTION;
+    return VCS_ZCODE_CLAIM_EPOCH_OK;
+}
+
+enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_validate(
+    const struct vcs_zcode_claim_epoch_proposal_v2 *proposal)
+{
+    enum vcs_zcode_claim_epoch_error error =
+        claim_epoch_validate_header(proposal);
+    if (error != VCS_ZCODE_CLAIM_EPOCH_OK) return error;
+    error = claim_epoch_validate_accounting(proposal);
+    if (error != VCS_ZCODE_CLAIM_EPOCH_OK) return error;
     if (!zcl_bytes_any_set(proposal->policy_root, 32) ||
         !zcl_bytes_any_set(proposal->claim_projection_root, 32) ||
         !zcl_bytes_any_set(proposal->epoch_selection_root, 32))
@@ -148,6 +165,53 @@ enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_encode(
     return VCS_ZCODE_CLAIM_EPOCH_OK;
 }
 
+static enum vcs_zcode_claim_epoch_error claim_epoch_decode_fields(
+    struct vcs_zcode_claim_epoch_proposal_v2 *decoded,
+    const uint8_t *wire, size_t wire_len, size_t *off_out)
+{
+    size_t off = 8;
+    decoded->schema_version = zcl_read_u16_le(wire + off); off += 2;
+    decoded->flags = zcl_read_u16_le(wire + off); off += 2;
+    decoded->epoch = zcl_read_u64_le(wire + off); off += 8;
+    decoded->cutoff_height = zcl_read_u64_le(wire + off); off += 8;
+    decoded->cutoff_mtp = (int64_t)zcl_read_u64_le(wire + off); off += 8;
+    decoded->epoch_capacity_atoms = zcl_read_u64_le(wire + off); off += 8;
+    decoded->selected_atoms = zcl_read_u64_le(wire + off); off += 8;
+    decoded->expired_capacity_atoms = zcl_read_u64_le(wire + off); off += 8;
+    decoded->recipient_cap_atoms = zcl_read_u64_le(wire + off); off += 8;
+    decoded->lineage_cap_atoms = zcl_read_u64_le(wire + off); off += 8;
+    decoded->claim_count = zcl_read_u32_le(wire + off); off += 4;
+    decoded->selected_count = zcl_read_u32_le(wire + off); off += 4;
+    decoded->deferred_count = zcl_read_u32_le(wire + off); off += 4;
+    decoded->invalid_count = zcl_read_u32_le(wire + off); off += 4;
+    decoded->first_category = wire[off++];
+    for (size_t i = 0; i < 7; i++)
+        if (wire[off + i] != 0)
+            return VCS_ZCODE_CLAIM_EPOCH_RESERVED;
+    off += 7;
+    memcpy(decoded->previous_epoch_root, wire + off, 32); off += 32;
+    memcpy(decoded->policy_root, wire + off, 32); off += 32;
+    memcpy(decoded->claim_projection_root, wire + off, 32); off += 32;
+    memcpy(decoded->epoch_selection_root, wire + off, 32); off += 32;
+    size_t expected = VCS_ZCODE_CLAIM_EPOCH_HEADER_BYTES +
+                      (size_t)decoded->selected_count * 32u;
+    if (decoded->selected_count > VCS_ZCODE_CLAIM_EPOCH_MAX_SELECTED ||
+        expected != wire_len)
+        return VCS_ZCODE_CLAIM_EPOCH_SIZE;
+    if (decoded->selected_count != 0) {
+        decoded->selected_claim_roots = zcl_calloc(
+            decoded->selected_count, sizeof(*decoded->selected_claim_roots),
+            "ZCODE_claim_epoch_roots");
+        if (!decoded->selected_claim_roots)
+            return VCS_ZCODE_CLAIM_EPOCH_ALLOC;
+        memcpy(decoded->selected_claim_roots, wire + off,
+               (size_t)decoded->selected_count * 32u);
+        off += (size_t)decoded->selected_count * 32u;
+    }
+    *off_out = off;
+    return VCS_ZCODE_CLAIM_EPOCH_OK;
+}
+
 enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_decode(
     struct vcs_zcode_claim_epoch_proposal_v2 *out,
     const uint8_t *wire, size_t wire_len)
@@ -161,47 +225,11 @@ enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_decode(
         return VCS_ZCODE_CLAIM_EPOCH_MAGIC;
     struct vcs_zcode_claim_epoch_proposal_v2 decoded;
     vcs_zcode_claim_epoch_init(&decoded);
-    size_t off = 8;
-    decoded.schema_version = zcl_read_u16_le(wire + off); off += 2;
-    decoded.flags = zcl_read_u16_le(wire + off); off += 2;
-    decoded.epoch = zcl_read_u64_le(wire + off); off += 8;
-    decoded.cutoff_height = zcl_read_u64_le(wire + off); off += 8;
-    decoded.cutoff_mtp = (int64_t)zcl_read_u64_le(wire + off); off += 8;
-    decoded.epoch_capacity_atoms = zcl_read_u64_le(wire + off); off += 8;
-    decoded.selected_atoms = zcl_read_u64_le(wire + off); off += 8;
-    decoded.expired_capacity_atoms = zcl_read_u64_le(wire + off); off += 8;
-    decoded.recipient_cap_atoms = zcl_read_u64_le(wire + off); off += 8;
-    decoded.lineage_cap_atoms = zcl_read_u64_le(wire + off); off += 8;
-    decoded.claim_count = zcl_read_u32_le(wire + off); off += 4;
-    decoded.selected_count = zcl_read_u32_le(wire + off); off += 4;
-    decoded.deferred_count = zcl_read_u32_le(wire + off); off += 4;
-    decoded.invalid_count = zcl_read_u32_le(wire + off); off += 4;
-    decoded.first_category = wire[off++];
-    for (size_t i = 0; i < 7; i++)
-        if (wire[off + i] != 0)
-            return VCS_ZCODE_CLAIM_EPOCH_RESERVED;
-    off += 7;
-    memcpy(decoded.previous_epoch_root, wire + off, 32); off += 32;
-    memcpy(decoded.policy_root, wire + off, 32); off += 32;
-    memcpy(decoded.claim_projection_root, wire + off, 32); off += 32;
-    memcpy(decoded.epoch_selection_root, wire + off, 32); off += 32;
-    size_t expected = VCS_ZCODE_CLAIM_EPOCH_HEADER_BYTES +
-                      (size_t)decoded.selected_count * 32u;
-    if (decoded.selected_count > VCS_ZCODE_CLAIM_EPOCH_MAX_SELECTED ||
-        expected != wire_len)
-        return VCS_ZCODE_CLAIM_EPOCH_SIZE;
-    if (decoded.selected_count != 0) {
-        decoded.selected_claim_roots = zcl_calloc(
-            decoded.selected_count, sizeof(*decoded.selected_claim_roots),
-            "ZCODE_claim_epoch_roots");
-        if (!decoded.selected_claim_roots)
-            return VCS_ZCODE_CLAIM_EPOCH_ALLOC;
-        memcpy(decoded.selected_claim_roots, wire + off,
-               (size_t)decoded.selected_count * 32u);
-        off += (size_t)decoded.selected_count * 32u;
-    }
+    size_t off = 0;
     enum vcs_zcode_claim_epoch_error error =
-        vcs_zcode_claim_epoch_validate(&decoded);
+        claim_epoch_decode_fields(&decoded, wire, wire_len, &off);
+    if (error != VCS_ZCODE_CLAIM_EPOCH_OK) return error;
+    error = vcs_zcode_claim_epoch_validate(&decoded);
     if (error != VCS_ZCODE_CLAIM_EPOCH_OK || off != wire_len) {
         vcs_zcode_claim_epoch_free(&decoded);
         return error != VCS_ZCODE_CLAIM_EPOCH_OK
@@ -232,21 +260,13 @@ enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_root(
     return VCS_ZCODE_CLAIM_EPOCH_OK;
 }
 
-enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_from_selection(
+static enum vcs_zcode_claim_epoch_error claim_epoch_copy_selection(
     const struct vcs_zcode_epoch_selection_v2 *input,
     const uint8_t policy_root[32],
     const uint8_t claim_projection_root[32],
     const struct vcs_zcode_epoch_selection_result_v2 *result,
     struct vcs_zcode_claim_epoch_proposal_v2 *out)
 {
-    if (out) vcs_zcode_claim_epoch_init(out);
-    if (!input || !policy_root || !claim_projection_root || !result || !out ||
-        (input->claim_count != 0 && !input->claims) ||
-        input->claim_count > UINT32_MAX ||
-        result->selected_count > UINT32_MAX ||
-        result->deferred_count > UINT32_MAX ||
-        result->invalid_count > UINT32_MAX)
-        return VCS_ZCODE_CLAIM_EPOCH_NULL;
     out->schema_version = VCS_ZCODE_CLAIM_EPOCH_VERSION;
     out->flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
     out->epoch = input->epoch;
@@ -289,4 +309,23 @@ enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_from_selection(
     if (error != VCS_ZCODE_CLAIM_EPOCH_OK)
         vcs_zcode_claim_epoch_free(out);
     return error;
+}
+
+enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_from_selection(
+    const struct vcs_zcode_epoch_selection_v2 *input,
+    const uint8_t policy_root[32],
+    const uint8_t claim_projection_root[32],
+    const struct vcs_zcode_epoch_selection_result_v2 *result,
+    struct vcs_zcode_claim_epoch_proposal_v2 *out)
+{
+    if (out) vcs_zcode_claim_epoch_init(out);
+    if (!input || !policy_root || !claim_projection_root || !result || !out ||
+        (input->claim_count != 0 && !input->claims) ||
+        input->claim_count > UINT32_MAX ||
+        result->selected_count > UINT32_MAX ||
+        result->deferred_count > UINT32_MAX ||
+        result->invalid_count > UINT32_MAX)
+        return VCS_ZCODE_CLAIM_EPOCH_NULL;
+    return claim_epoch_copy_selection(input, policy_root,
+                                      claim_projection_root, result, out);
 }
