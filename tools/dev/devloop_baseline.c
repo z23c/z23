@@ -80,6 +80,52 @@ static void baseline_worker(const char *repo_root, const char *log_path)
                 result.error[0] ? result.error : "unknown error");
     _exit(result.status == VCS_DEVLOOP_ANCHOR_OK ? 0 : 1);
 }
+
+/* The launcher's immediate child from the first fork: detach into a new
+ * session, fork again, and exit so the launcher can reap this child right
+ * away — the grandchild is the actual baseline worker. */
+static void setsid_and_fork_baseline_worker(const char *repo_root,
+                                            const char *log_path)
+{
+    if (setsid() < 0)
+        _exit(1);
+    pid_t worker = fork();
+    if (worker < 0)
+        _exit(1);
+    if (worker > 0)
+        _exit(0);
+
+    baseline_worker(repo_root, log_path);
+}
+
+/* Reap the intermediate child, retrying the wait only on EINTR, and report
+ * whether the detach mechanics themselves succeeded; the worker's own
+ * outcome lands in the bootstrap log, not here. */
+static bool reap_baseline_launcher(pid_t launcher)
+{
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(launcher, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    return waited == launcher && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+}
+#endif
+
+#ifdef ZCL_DEV_BUILD
+/* Build the baseline's .zvcs directory and bootstrap log paths in the
+ * caller's PATH_MAX buffers. Returns the bootstrap-log snprintf's own
+ * length, or -1 when the directory path cannot be built; the caller keeps
+ * the original length and truncation checks on the returned value. */
+static int build_baseline_paths(const char *repo_root, char *dir,
+                                char *log_path)
+{
+    int n = snprintf(dir, PATH_MAX, "%s/.zvcs", repo_root);
+    if (n <= 0 || (size_t)n >= PATH_MAX)
+        return -1;
+    return snprintf(log_path, PATH_MAX, "%s/bootstrap.log", dir);
+}
 #endif
 
 bool zcl_devloop_baseline_launch(const char *repo_root)
@@ -94,10 +140,7 @@ bool zcl_devloop_baseline_launch(const char *repo_root)
     return false;
 #else
     char dir[PATH_MAX], log_path[PATH_MAX];
-    int n = snprintf(dir, sizeof(dir), "%s/.zvcs", repo_root);
-    if (n <= 0 || (size_t)n >= sizeof(dir))
-        return false;
-    n = snprintf(log_path, sizeof(log_path), "%s/bootstrap.log", dir);
+    int n = build_baseline_paths(repo_root, dir, log_path);
     if (n <= 0 || (size_t)n >= sizeof(log_path))
         return false;
 
@@ -129,25 +172,10 @@ bool zcl_devloop_baseline_launch(const char *repo_root)
                 strerror(errno));
         return false;
     }
-    if (launcher == 0) {
-        if (setsid() < 0)
-            _exit(1);
-        pid_t worker = fork();
-        if (worker < 0)
-            _exit(1);
-        if (worker > 0)
-            _exit(0);
+    if (launcher == 0)
+        setsid_and_fork_baseline_worker(repo_root, log_path);
 
-        baseline_worker(repo_root, log_path);
-    }
-
-    int status = 0;
-    pid_t waited;
-    do {
-        waited = waitpid(launcher, &status, 0);
-    } while (waited < 0 && errno == EINTR);
-    return waited == launcher && WIFEXITED(status) &&
-           WEXITSTATUS(status) == 0;
+    return reap_baseline_launcher(launcher);
 #endif
 #endif
 }
