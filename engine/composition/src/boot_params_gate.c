@@ -50,6 +50,31 @@ static const char *const kRequiredParams[] = {
     "sprout-groth16.params", "sprout-verifying.key",
 };
 
+/* Names the first required parameter file that is absent or unreadable, or
+ * the no-directory marker; the full path of a missing file goes to
+ * missing_path. */
+static const char *
+boot_params_gate_find_missing(const struct app_context *ctx,
+                              const char *params_dir, char *missing_path,
+                              size_t missing_len)
+{
+    const char *missing = NULL;
+    if (!ctx->params_dir) {
+        missing = "(no -paramsdir configured)";
+    } else {
+        for (size_t i = 0; i < sizeof(kRequiredParams) / sizeof(kRequiredParams[0]); i++) {
+            char p[1100];
+            snprintf(p, sizeof(p), "%s/%s", params_dir, kRequiredParams[i]);
+            if (access(p, R_OK) != 0) {
+                missing = kRequiredParams[i];
+                snprintf(missing_path, missing_len, "%s", p);
+                break;
+            }
+        }
+    }
+    return missing;
+}
+
 enum boot_params_gate_result
 boot_params_gate_evaluate(const struct app_context *ctx,
                           const struct chain_params *params,
@@ -64,19 +89,8 @@ boot_params_gate_evaluate(const struct app_context *ctx,
 
     const char *missing = NULL;
     char missing_path[1100] = {0};
-    if (!ctx->params_dir) {
-        missing = "(no -paramsdir configured)";
-    } else {
-        for (size_t i = 0; i < sizeof(kRequiredParams) / sizeof(kRequiredParams[0]); i++) {
-            char p[1100];
-            snprintf(p, sizeof(p), "%s/%s", params_dir, kRequiredParams[i]);
-            if (access(p, R_OK) != 0) {
-                missing = kRequiredParams[i];
-                snprintf(missing_path, sizeof(missing_path), "%s", p);
-                break;
-            }
-        }
-    }
+    missing = boot_params_gate_find_missing(ctx, params_dir, missing_path,
+                                            sizeof(missing_path));
     if (!missing)
         return BOOT_PARAMS_GATE_PRESENT;
 
