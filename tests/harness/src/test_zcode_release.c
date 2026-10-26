@@ -245,6 +245,57 @@ static void zr_verify(const char *doc_hex, const char *proof_hex,
 
 /* ── 1. seed-file permission contract ──────────────────────────────── */
 
+static bool zr_perms_verdict(const struct zr_cmd *c, bool accept, bool set)
+{
+    if (accept)
+        return set && zr_ok(&c->reply) && zr_str(&c->reply, "doc_hex");
+    /* Refused, named, and with the exact remedy in the message. */
+    return set && c->reply.status == ZCL_COMMAND_STATUS_FAILED &&
+           c->reply.exit_code == ZCL_COMMAND_EXIT_INVALID &&
+           zr_code_is(&c->reply, "BAD_SEED_FILE") &&
+           strstr(c->reply.error.message, "chmod 600") != NULL &&
+           !zr_str(&c->reply, "doc_hex");
+}
+
+static bool zr_perms_sign_mode(const struct zr_fixture *f, mode_t mode,
+                               bool accept, struct zr_cmd *c)
+{
+    bool set = chmod(f->seedfile, mode) == 0;
+    zr_cmd_init(c);
+    (void)json_push_kv_str(&c->input, "datadir", f->datadir);
+    (void)json_push_kv_str(&c->input, "name", "pkg");
+    (void)json_push_kv_str(&c->input, "version", "1.0.0");
+    char root_hex[65];
+    uint8_t root[32];
+    memset(root, 0x22, 32);
+    HexStr(root, 32, false, root_hex, sizeof(root_hex));
+    (void)json_push_kv_str(&c->input, "root", root_hex);
+    (void)json_push_kv_str(&c->input, "seed_file", f->seedfile);
+    zcl_native_handle_zcode_release_sign(&c->request, &c->reply);
+    return zr_perms_verdict(c, accept, set);
+}
+
+static bool zr_perms_short_seed(const struct zr_fixture *f, struct zr_cmd *c)
+{
+    char bad[320];
+    snprintf(bad, sizeof(bad), "%s/bad.hex", f->datadir);
+    bool set = zr_write_seed(bad, "not hex at all, not 64 chars either!!",
+                             0600);
+    zr_cmd_init(c);
+    (void)json_push_kv_str(&c->input, "datadir", f->datadir);
+    (void)json_push_kv_str(&c->input, "name", "pkg");
+    (void)json_push_kv_str(&c->input, "version", "1.0.0");
+    char root_hex[65];
+    uint8_t root[32];
+    memset(root, 0x22, 32);
+    HexStr(root, 32, false, root_hex, sizeof(root_hex));
+    (void)json_push_kv_str(&c->input, "root", root_hex);
+    (void)json_push_kv_str(&c->input, "seed_file", bad);
+    zcl_native_handle_zcode_release_sign(&c->request, &c->reply);
+    return set && zr_code_is(&c->reply, "BAD_SEED_FILE") &&
+           !zr_str(&c->reply, "doc_hex");
+}
+
 static int test_zr_seed_perms(void)
 {
     int failures = 0;
@@ -267,31 +318,8 @@ static int test_zr_seed_perms(void)
         printf("zcode_release seed: mode %04o is %s... ",
                (unsigned)cases[i].mode, cases[i].accept ? "accepted"
                                                         : "REFUSED");
-        bool set = chmod(f.seedfile, cases[i].mode) == 0;
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_str(&c.input, "name", "pkg");
-        (void)json_push_kv_str(&c.input, "version", "1.0.0");
-        char root_hex[65];
-        uint8_t root[32];
-        memset(root, 0x22, 32);
-        HexStr(root, 32, false, root_hex, sizeof(root_hex));
-        (void)json_push_kv_str(&c.input, "root", root_hex);
-        (void)json_push_kv_str(&c.input, "seed_file", f.seedfile);
-        zcl_native_handle_zcode_release_sign(&c.request, &c.reply);
-
-        bool ok;
-        if (cases[i].accept) {
-            ok = set && zr_ok(&c.reply) && zr_str(&c.reply, "doc_hex");
-        } else {
-            /* Refused, named, and with the exact remedy in the message. */
-            ok = set && c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                 c.reply.exit_code == ZCL_COMMAND_EXIT_INVALID &&
-                 zr_code_is(&c.reply, "BAD_SEED_FILE") &&
-                 strstr(c.reply.error.message, "chmod 600") != NULL &&
-                 !zr_str(&c.reply, "doc_hex");
-        }
+        bool ok = zr_perms_sign_mode(&f, cases[i].mode, cases[i].accept, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -300,24 +328,8 @@ static int test_zr_seed_perms(void)
      * the file is a master key, so every rejection path is a refusal. */
     printf("zcode_release seed: a short/non-hex seed file is refused... ");
     {
-        char bad[320];
-        snprintf(bad, sizeof(bad), "%s/bad.hex", f.datadir);
-        bool set = zr_write_seed(bad, "not hex at all, not 64 chars either!!",
-                                 0600);
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_str(&c.input, "name", "pkg");
-        (void)json_push_kv_str(&c.input, "version", "1.0.0");
-        char root_hex[65];
-        uint8_t root[32];
-        memset(root, 0x22, 32);
-        HexStr(root, 32, false, root_hex, sizeof(root_hex));
-        (void)json_push_kv_str(&c.input, "root", root_hex);
-        (void)json_push_kv_str(&c.input, "seed_file", bad);
-        zcl_native_handle_zcode_release_sign(&c.request, &c.reply);
-        bool ok = set && zr_code_is(&c.reply, "BAD_SEED_FILE") &&
-                  !zr_str(&c.reply, "doc_hex");
+        bool ok = zr_perms_short_seed(&f, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -345,6 +357,58 @@ static bool zr_json_contains(const struct json_value *v, const char *needle)
     return hit;
 }
 
+static bool zr_hygiene_sign_reply(struct zr_fixture *f, struct zr_cmd *c)
+{
+    zr_cmd_init(c);
+    (void)json_push_kv_str(&c->input, "datadir", f->datadir);
+    (void)json_push_kv_str(&c->input, "name", "sovereign");
+    (void)json_push_kv_str(&c->input, "version", "1.2.3");
+    char root_hex[65];
+    uint8_t root[32];
+    memset(root, 0x44, 32);
+    HexStr(root, 32, false, root_hex, sizeof(root_hex));
+    (void)json_push_kv_str(&c->input, "root", root_hex);
+    (void)json_push_kv_str(&c->input, "seed_file", f->seedfile);
+    zcl_native_handle_zcode_release_sign(&c->request, &c->reply);
+
+    /* The pubkey the seed derives — proof the seed WAS used. */
+    uint8_t pk[32], sk[32];
+    ed25519_keypair(pk, sk, f->seed);
+    char pk_hex[65];
+    HexStr(pk, 32, false, pk_hex, sizeof(pk_hex));
+
+    /* Uppercase form too: a hex-case slip would still be a leak. */
+    char seed_upper[65];
+    for (int i = 0; i < 64; i++) {
+        char ch = f->seed_hex[i];
+        seed_upper[i] = (ch >= 'a' && ch <= 'f') ? (char)(ch - 32) : ch;
+    }
+    seed_upper[64] = '\0';
+
+    return zr_ok(&c->reply) &&
+           zr_str_is(&c->reply, "master_pubkey", pk_hex) &&
+           !zr_json_contains(&c->reply.data, f->seed_hex) &&
+           !zr_json_contains(&c->reply.data, seed_upper) &&
+           /* the error envelope is a string surface too */
+           strstr(c->reply.error.message, f->seed_hex) == NULL &&
+           strstr(c->reply.error.evidence, f->seed_hex) == NULL;
+}
+
+static bool zr_hygiene_zid_file(const struct zr_fixture *f)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/zcode/releases/sovereign-1.2.3.zid",
+             f->datadir);
+    int fd = open(path, O_RDONLY);
+    char buf[4096];
+    ssize_t n = fd >= 0 ? read(fd, buf, sizeof(buf) - 1) : -1;
+    if (fd >= 0)
+        close(fd);
+    if (n > 0)
+        buf[n] = '\0';
+    return n > 0 && strstr(buf, f->seed_hex) == NULL;
+}
+
 static int test_zr_seed_hygiene(void)
 {
     int failures = 0;
@@ -358,39 +422,7 @@ static int test_zr_seed_hygiene(void)
            "yet the doc is signed by the key it derives... ");
     {
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_str(&c.input, "name", "sovereign");
-        (void)json_push_kv_str(&c.input, "version", "1.2.3");
-        char root_hex[65];
-        uint8_t root[32];
-        memset(root, 0x44, 32);
-        HexStr(root, 32, false, root_hex, sizeof(root_hex));
-        (void)json_push_kv_str(&c.input, "root", root_hex);
-        (void)json_push_kv_str(&c.input, "seed_file", f.seedfile);
-        zcl_native_handle_zcode_release_sign(&c.request, &c.reply);
-
-        /* The pubkey the seed derives — proof the seed WAS used. */
-        uint8_t pk[32], sk[32];
-        ed25519_keypair(pk, sk, f.seed);
-        char pk_hex[65];
-        HexStr(pk, 32, false, pk_hex, sizeof(pk_hex));
-
-        /* Uppercase form too: a hex-case slip would still be a leak. */
-        char seed_upper[65];
-        for (int i = 0; i < 64; i++) {
-            char ch = f.seed_hex[i];
-            seed_upper[i] = (ch >= 'a' && ch <= 'f') ? (char)(ch - 32) : ch;
-        }
-        seed_upper[64] = '\0';
-
-        bool ok = zr_ok(&c.reply) &&
-                  zr_str_is(&c.reply, "master_pubkey", pk_hex) &&
-                  !zr_json_contains(&c.reply.data, f.seed_hex) &&
-                  !zr_json_contains(&c.reply.data, seed_upper) &&
-                  /* the error envelope is a string surface too */
-                  strstr(c.reply.error.message, f.seed_hex) == NULL &&
-                  strstr(c.reply.error.evidence, f.seed_hex) == NULL;
+        bool ok = zr_hygiene_sign_reply(&f, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -398,17 +430,7 @@ static int test_zr_seed_hygiene(void)
     printf("zcode_release hygiene: the saved .zid file holds the doc, never "
            "the seed... ");
     {
-        char path[512];
-        snprintf(path, sizeof(path), "%s/zcode/releases/sovereign-1.2.3.zid",
-                 f.datadir);
-        int fd = open(path, O_RDONLY);
-        char buf[4096];
-        ssize_t n = fd >= 0 ? read(fd, buf, sizeof(buf) - 1) : -1;
-        if (fd >= 0)
-            close(fd);
-        if (n > 0)
-            buf[n] = '\0';
-        bool ok = n > 0 && strstr(buf, f.seed_hex) == NULL;
+        bool ok = zr_hygiene_zid_file(&f);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -499,6 +521,70 @@ static int test_zr_batch_determinism(void)
 
 /* ── 4/5. batch load failure + missing directory ───────────────────── */
 
+static bool zr_load_write_file(const char *path, const char *text, size_t len)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    bool wrote = fd >= 0 && write(fd, text, len) == (ssize_t)len;
+    if (fd >= 0)
+        close(fd);
+    return wrote;
+}
+
+static void zr_load_anchor(const struct zr_fixture *f, struct zr_cmd *c)
+{
+    zr_cmd_init(c);
+    (void)json_push_kv_str(&c->input, "datadir", f->datadir);
+    (void)json_push_kv_int(&c->input, "tip", 5);
+    zcl_native_handle_zcode_release_anchor(&c->request, &c->reply);
+}
+
+static bool zr_load_no_releases(const struct zr_fixture *f, struct zr_cmd *c)
+{
+    zr_load_anchor(f, c);
+    return c->reply.status == ZCL_COMMAND_STATUS_FAILED &&
+           zr_code_is(&c->reply, "NO_RELEASES") &&
+           c->reply.error.retryable &&
+           !zr_code_is(&c->reply, "BATCH_LOAD");
+}
+
+static bool zr_load_one_release(const struct zr_fixture *f, const char *good,
+                                struct zr_cmd *c)
+{
+    zr_load_anchor(f, c);
+    return good && zr_ok(&c->reply) && zr_int(&c->reply, "releases", -1) == 1;
+}
+
+static bool zr_load_junk_anchor(const struct zr_fixture *f, bool wrote,
+                                struct zr_cmd *c)
+{
+    zr_load_anchor(f, c);
+    return wrote && c->reply.status == ZCL_COMMAND_STATUS_FAILED &&
+           zr_code_is(&c->reply, "BATCH_LOAD") &&
+           strstr(c->reply.error.message, "junk-9.9.9.zid") != NULL &&
+           /* and it did NOT quietly anchor the surviving one */
+           zr_int(&c->reply, "releases", -1) == -1;
+}
+
+static bool zr_load_junk_prove(const struct zr_fixture *f, struct zr_cmd *p)
+{
+    zr_cmd_init(p);
+    (void)json_push_kv_str(&p->input, "datadir", f->datadir);
+    (void)json_push_kv_str(&p->input, "name", "good");
+    (void)json_push_kv_str(&p->input, "version", "1.0.0");
+    (void)json_push_kv_str(&p->input, "domain", "never-anchored");
+    zcl_native_handle_zcode_release_prove(&p->request, &p->reply);
+    return zr_code_is(&p->reply, "BATCH_LOAD") &&
+           strstr(p->reply.error.message, "junk-9.9.9.zid") != NULL;
+}
+
+static bool zr_load_note_ignored(const struct zr_fixture *f, const char *note,
+                                 struct zr_cmd *c)
+{
+    bool wrote = zr_load_write_file(note, "not a doc\n", 10);
+    zr_load_anchor(f, c);
+    return wrote && zr_ok(&c->reply) && zr_int(&c->reply, "releases", -1) == 1;
+}
+
 static int test_zr_batch_load(void)
 {
     int failures = 0;
@@ -515,14 +601,7 @@ static int test_zr_batch_load(void)
            "a BATCH_LOAD error... ");
     {
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "tip", 5);
-        zcl_native_handle_zcode_release_anchor(&c.request, &c.reply);
-        bool ok = c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                  zr_code_is(&c.reply, "NO_RELEASES") &&
-                  c.reply.error.retryable &&
-                  !zr_code_is(&c.reply, "BATCH_LOAD");
+        bool ok = zr_load_no_releases(&f, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -531,12 +610,7 @@ static int test_zr_batch_load(void)
     printf("zcode_release load: one signed release makes a batch of 1... ");
     {
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "tip", 5);
-        zcl_native_handle_zcode_release_anchor(&c.request, &c.reply);
-        bool ok = good && zr_ok(&c.reply) &&
-                  zr_int(&c.reply, "releases", -1) == 1;
+        bool ok = zr_load_one_release(&f, good, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -550,35 +624,17 @@ static int test_zr_batch_load(void)
         char junk[512];
         snprintf(junk, sizeof(junk), "%s/zcode/releases/junk-9.9.9.zid",
                  f.datadir);
-        int fd = open(junk, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        bool wrote = fd >= 0 && write(fd, "deadbeef\n", 9) == 9;
-        if (fd >= 0)
-            close(fd);
+        bool wrote = zr_load_write_file(junk, "deadbeef\n", 9);
 
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "tip", 5);
-        zcl_native_handle_zcode_release_anchor(&c.request, &c.reply);
-        bool ok = wrote && c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                  zr_code_is(&c.reply, "BATCH_LOAD") &&
-                  strstr(c.reply.error.message, "junk-9.9.9.zid") != NULL &&
-                  /* and it did NOT quietly anchor the surviving one */
-                  zr_int(&c.reply, "releases", -1) == -1;
+        bool ok = zr_load_junk_anchor(&f, wrote, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
 
         /* prove takes the same load path and must refuse identically. */
         printf("zcode_release load: prove refuses the same junk file... ");
         struct zr_cmd p;
-        zr_cmd_init(&p);
-        (void)json_push_kv_str(&p.input, "datadir", f.datadir);
-        (void)json_push_kv_str(&p.input, "name", "good");
-        (void)json_push_kv_str(&p.input, "version", "1.0.0");
-        (void)json_push_kv_str(&p.input, "domain", "never-anchored");
-        zcl_native_handle_zcode_release_prove(&p.request, &p.reply);
-        bool pok = zr_code_is(&p.reply, "BATCH_LOAD") &&
-                   strstr(p.reply.error.message, "junk-9.9.9.zid") != NULL;
+        bool pok = zr_load_junk_prove(&f, &p);
         if (pok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&p);
 
@@ -591,17 +647,8 @@ static int test_zr_batch_load(void)
     {
         char note[512];
         snprintf(note, sizeof(note), "%s/zcode/releases/NOTES.txt", f.datadir);
-        int fd = open(note, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        bool wrote = fd >= 0 && write(fd, "not a doc\n", 10) == 10;
-        if (fd >= 0)
-            close(fd);
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "tip", 5);
-        zcl_native_handle_zcode_release_anchor(&c.request, &c.reply);
-        bool ok = wrote && zr_ok(&c.reply) &&
-                  zr_int(&c.reply, "releases", -1) == 1;
+        bool ok = zr_load_note_ignored(&f, note, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -636,6 +683,43 @@ static int zr_expect_verify_code(const char *what, const char *doc_hex,
     return 1;
 }
 
+static bool zr_verr_control(const char *good, struct zr_cmd *c)
+{
+    zr_verify(good ? good : "", NULL, NULL, c);
+    return good && zr_ok(&c->reply) && zr_bool(&c->reply, "valid") == 1 &&
+           zr_str_is(&c->reply, "name", "ctl") &&
+           zr_str_is(&c->reply, "version", "1.0.0") &&
+           c->reply.error.code[0] == '\0';
+}
+
+static bool zr_verr_flip_sig(const char *good, char *tampered)
+{
+    uint8_t wire[ZID_DOC_MAX];
+    size_t n = good ? (size_t)ParseHex(good, wire, sizeof(wire)) : 0;
+    if (n > 64) {
+        wire[n - 1] ^= 0x01;
+        HexStr(wire, n, false, tampered, ZID_DOC_MAX * 2 + 1);
+        return true;
+    }
+    return false;
+}
+
+static bool zr_verr_nonrelease_hex(struct zr_fixture *f, int64_t now,
+                                   char *hex)
+{
+    struct zid_doc doc;
+    const uint8_t body[] = "ZIDX not a release record at all";
+    bool signed_ok = zid_doc_sign(&doc, body, (uint16_t)sizeof(body) - 1,
+                                  1, (uint64_t)(now + 86400), f->seed);
+    uint8_t wire[ZID_DOC_MAX];
+    size_t n = signed_ok ? zid_doc_encode(wire, sizeof(wire), &doc) : 0;
+    if (n > 0) {
+        HexStr(wire, n, false, hex, ZID_DOC_MAX * 2 + 1);
+        return true;
+    }
+    return false;
+}
+
 static int test_zr_verify_errors(void)
 {
     int failures = 0;
@@ -654,11 +738,7 @@ static int test_zr_verify_errors(void)
     printf("zcode_release verify: a well-formed unexpired doc is valid... ");
     {
         struct zr_cmd c;
-        zr_verify(good ? good : "", NULL, NULL, &c);
-        bool ok = good && zr_ok(&c.reply) && zr_bool(&c.reply, "valid") == 1 &&
-                  zr_str_is(&c.reply, "name", "ctl") &&
-                  zr_str_is(&c.reply, "version", "1.0.0") &&
-                  c.reply.error.code[0] == '\0';
+        bool ok = zr_verr_control(good, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -679,12 +759,8 @@ static int test_zr_verify_errors(void)
      * the signature check can reject it. */
     printf("zcode_release verify: fixture for a tampered signature... ");
     {
-        uint8_t wire[ZID_DOC_MAX];
-        size_t n = good ? (size_t)ParseHex(good, wire, sizeof(wire)) : 0;
-        if (n > 64) {
-            wire[n - 1] ^= 0x01;
-            char tampered[ZID_DOC_MAX * 2 + 1];
-            HexStr(wire, n, false, tampered, sizeof(tampered));
+        char tampered[ZID_DOC_MAX * 2 + 1];
+        if (zr_verr_flip_sig(good, tampered)) {
             printf("OK\n");
             failures += zr_expect_verify_code("a doc with a flipped signature "
                                               "byte", tampered,
@@ -697,15 +773,8 @@ static int test_zr_verify_errors(void)
      * else" case, and it must never be reported as a bad signature. */
     printf("zcode_release verify: fixture for a non-release body... ");
     {
-        struct zid_doc doc;
-        const uint8_t body[] = "ZIDX not a release record at all";
-        bool signed_ok = zid_doc_sign(&doc, body, (uint16_t)sizeof(body) - 1,
-                                      1, (uint64_t)(now + 86400), f.seed);
-        uint8_t wire[ZID_DOC_MAX];
-        size_t n = signed_ok ? zid_doc_encode(wire, sizeof(wire), &doc) : 0;
-        if (n > 0) {
-            char hex[ZID_DOC_MAX * 2 + 1];
-            HexStr(wire, n, false, hex, sizeof(hex));
+        char hex[ZID_DOC_MAX * 2 + 1];
+        if (zr_verr_nonrelease_hex(&f, now, hex)) {
             printf("OK\n");
             failures += zr_expect_verify_code("a signed doc whose body is not "
                                               "ZIDR", hex,
@@ -757,6 +826,185 @@ static int test_zr_verify_errors(void)
 
 /* ── 7. prove/verify round-trip + inclusion vs signature ───────────── */
 
+static void zr_prove_request(const struct zr_fixture *f, const char *name,
+                             const char *version, const char *domain,
+                             struct zr_cmd *c)
+{
+    zr_cmd_init(c);
+    (void)json_push_kv_str(&c->input, "datadir", f->datadir);
+    (void)json_push_kv_str(&c->input, "name", name);
+    (void)json_push_kv_str(&c->input, "version", version);
+    if (domain)
+        (void)json_push_kv_str(&c->input, "domain", domain);
+    zcl_native_handle_zcode_release_prove(&c->request, &c->reply);
+}
+
+static bool zr_prove_anchor(const struct zr_fixture *f, const char *docs[3],
+                            char anchored_root[65], struct zr_cmd *c)
+{
+    zr_cmd_init(c);
+    (void)json_push_kv_str(&c->input, "datadir", f->datadir);
+    (void)json_push_kv_int(&c->input, "tip", 4242);
+    zcl_native_handle_zcode_release_anchor(&c->request, &c->reply);
+    const char *r = zr_str(&c->reply, "domain_root");
+    bool ok = docs[0] && docs[1] && docs[2] && zr_ok(&c->reply) && r &&
+              zr_int(&c->reply, "releases", -1) == 3 &&
+              zr_bool(&c->reply, "domain_stored") == 1;
+    if (r)
+        snprintf(anchored_root, 65, "%s", r);
+    return ok;
+}
+
+static bool zr_prove_record_digests(const char *docs[3],
+                                    uint8_t digests[3][32])
+{
+    bool built = true;
+    for (int i = 0; i < 3 && built; i++) {
+        uint8_t wire[ZID_DOC_MAX];
+        size_t n = docs[i] ? (size_t)ParseHex(docs[i], wire, sizeof(wire))
+                           : 0;
+        built = n > 0;
+        if (built)
+            zid_record_digest(digests[i], wire, n);
+    }
+    return built;
+}
+
+static void zr_prove_sort_digests(uint8_t digests[3][32])
+{
+    /* Byte-sort (three elements: an explicit insertion sort). */
+    for (int i = 1; i < 3; i++)
+        for (int j = i; j > 0 &&
+             memcmp(digests[j - 1], digests[j], 32) > 0; j--) {
+            uint8_t t[32];
+            memcpy(t, digests[j - 1], 32);
+            memcpy(digests[j - 1], digests[j], 32);
+            memcpy(digests[j], t, 32);
+        }
+}
+
+static bool zr_prove_root_matches(bool built, uint8_t digests[3][32],
+                                  const char *anchored_root)
+{
+    uint8_t root[32];
+    char root_hex[65] = {0};
+    if (built && zid_tree_root_from_digests(
+                     (const uint8_t (*)[32])digests, 3, root))
+        HexStr(root, 32, false, root_hex, sizeof(root_hex));
+    return built && root_hex[0] &&
+           strcmp(root_hex, anchored_root) == 0;
+}
+
+static bool zr_prove_stored(const struct zr_fixture *f,
+                            const char *anchored_root, char *proof_b,
+                            char *proof_root, struct zr_cmd *c)
+{
+    zr_prove_request(f, "bravo", "2.0.0", NULL, c);
+    const char *p = zr_str(&c->reply, "proof");
+    const char *r = zr_str(&c->reply, "domain_root");
+    if (p)
+        snprintf(proof_b, ZID_PROOF_WIRE_MAX * 2 + 1, "%s", p);
+    if (r)
+        snprintf(proof_root, 65, "%s", r);
+    return zr_ok(&c->reply) && p && r &&
+           zr_str_is(&c->reply, "source", "domain_table") &&
+           zr_int(&c->reply, "num_leaves", -1) == 3 &&
+           strcmp(proof_root, anchored_root) == 0;
+}
+
+static bool zr_prove_roundtrip(const char *doc_b, const char *proof_b,
+                               const char *proof_root, struct zr_cmd *c)
+{
+    zr_verify(doc_b ? doc_b : "", proof_b, proof_root, c);
+    return zr_ok(&c->reply) && zr_bool(&c->reply, "valid") == 1 &&
+           zr_bool(&c->reply, "batch_included") == 1 &&
+           zr_str_is(&c->reply, "batch_root", proof_root) &&
+           zr_int(&c->reply, "batch_num_leaves", -1) == 3 &&
+           zr_str_is(&c->reply, "name", "bravo");
+}
+
+static bool zr_prove_tampered(const char *doc_b, const char *proof_b,
+                              const char *proof_root, struct zr_cmd *c)
+{
+    char bad[ZID_PROOF_WIRE_MAX * 2 + 1];
+    snprintf(bad, sizeof(bad), "%s", proof_b);
+    size_t n = strlen(bad);
+    /* Flip the last sibling nibble — a well-formed wire that no longer
+     * folds to the root. */
+    bad[n - 1] = (bad[n - 1] == 'a') ? 'b' : 'a';
+    zr_verify(doc_b ? doc_b : "", bad, proof_root, c);
+    return n > 0 && c->reply.status == ZCL_COMMAND_STATUS_FAILED &&
+           zr_code_is(&c->reply, "NOT_IN_BATCH") &&
+           zr_bool(&c->reply, "batch_included") == 0 &&
+           /* the signature verdict is still reported */
+           zr_bool(&c->reply, "valid") == 1;
+}
+
+static bool zr_prove_stale_root(const char *doc_b, const char *proof_b,
+                                const char *proof_root, struct zr_cmd *c)
+{
+    char wrong[65];
+    snprintf(wrong, sizeof(wrong), "%s", proof_root);
+    wrong[0] = (wrong[0] == '0') ? '1' : '0';
+    zr_verify(doc_b ? doc_b : "", proof_b, wrong, c);
+    return zr_code_is(&c->reply, "NOT_IN_BATCH") &&
+           zr_bool(&c->reply, "batch_included") == 0;
+}
+
+static bool zr_prove_wrong_leaf(const char *doc_a, const char *proof_b,
+                                const char *proof_root, struct zr_cmd *c)
+{
+    /* alpha's doc against bravo's proof: valid signature, wrong leaf. */
+    zr_verify(doc_a ? doc_a : "", proof_b, proof_root, c);
+    return zr_code_is(&c->reply, "NOT_IN_BATCH") &&
+           zr_bool(&c->reply, "valid") == 1 &&   /* signature: good */
+           zr_bool(&c->reply, "batch_included") == 0 && /* batch: no */
+           zr_str_is(&c->reply, "name", "alpha") &&
+           zr_str(&c->reply, "record_digest") != NULL;
+}
+
+static bool zr_prove_bad_signature(const char *doc_b, const char *proof_b,
+                                   const char *proof_root)
+{
+    uint8_t wire[ZID_DOC_MAX];
+    size_t n = doc_b ? (size_t)ParseHex(doc_b, wire, sizeof(wire)) : 0;
+    bool ok = false;
+    if (n > 64) {
+        wire[n - 1] ^= 0x01;
+        char tampered[ZID_DOC_MAX * 2 + 1];
+        HexStr(wire, n, false, tampered, sizeof(tampered));
+        struct zr_cmd c;
+        zr_verify(tampered, proof_b, proof_root, &c);
+        ok = zr_code_is(&c.reply, "BAD_SIGNATURE") &&
+             zr_bool(&c.reply, "valid") == 0 &&
+             zr_bool(&c.reply, "batch_included") == -1;
+        zr_cmd_free(&c);
+    }
+    return ok;
+}
+
+static bool zr_prove_release_not_found(const struct zr_fixture *f,
+                                       struct zr_cmd *c)
+{
+    zr_prove_request(f, "bravo", "9.9.9", NULL, c);
+    return zr_code_is(&c->reply, "RELEASE_NOT_FOUND");
+}
+
+static bool zr_prove_fallback(const struct zr_fixture *f, struct zr_cmd *c)
+{
+    zr_prove_request(f, "bravo", "2.0.0", "zdesc", c);
+    return zr_ok(&c->reply) &&
+           zr_str_is(&c->reply, "source", "release_dir") &&
+           zr_bool(&c->reply, "anchored") == 0 &&
+           zr_str_is(&c->reply, "domain", "zdesc");
+}
+
+static bool zr_prove_bad_domain(const struct zr_fixture *f, struct zr_cmd *c)
+{
+    zr_prove_request(f, "bravo", "2.0.0", "Not A Domain", c);
+    return zr_code_is(&c->reply, "BAD_DOMAIN");
+}
+
 static int test_zr_prove_verify(void)
 {
     int failures = 0;
@@ -773,16 +1021,8 @@ static int test_zr_prove_verify(void)
     char anchored_root[65] = {0};
     {
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "tip", 4242);
-        zcl_native_handle_zcode_release_anchor(&c.request, &c.reply);
-        const char *r = zr_str(&c.reply, "domain_root");
-        bool ok = doc_a && doc_b && doc_c && zr_ok(&c.reply) && r &&
-                  zr_int(&c.reply, "releases", -1) == 3 &&
-                  zr_bool(&c.reply, "domain_stored") == 1;
-        if (r)
-            snprintf(anchored_root, sizeof(anchored_root), "%s", r);
+        const char *docs[3] = {doc_a, doc_b, doc_c};
+        bool ok = zr_prove_anchor(&f, docs, anchored_root, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -797,31 +1037,9 @@ static int test_zr_prove_verify(void)
     {
         const char *docs[3] = {doc_a, doc_b, doc_c};
         uint8_t digests[3][32];
-        bool built = true;
-        for (int i = 0; i < 3 && built; i++) {
-            uint8_t wire[ZID_DOC_MAX];
-            size_t n = docs[i] ? (size_t)ParseHex(docs[i], wire, sizeof(wire))
-                               : 0;
-            built = n > 0;
-            if (built)
-                zid_record_digest(digests[i], wire, n);
-        }
-        /* Byte-sort (three elements: an explicit insertion sort). */
-        for (int i = 1; i < 3; i++)
-            for (int j = i; j > 0 &&
-                 memcmp(digests[j - 1], digests[j], 32) > 0; j--) {
-                uint8_t t[32];
-                memcpy(t, digests[j - 1], 32);
-                memcpy(digests[j - 1], digests[j], 32);
-                memcpy(digests[j], t, 32);
-            }
-        uint8_t root[32];
-        char root_hex[65] = {0};
-        if (built && zid_tree_root_from_digests(
-                         (const uint8_t (*)[32])digests, 3, root))
-            HexStr(root, 32, false, root_hex, sizeof(root_hex));
-        bool ok = built && root_hex[0] &&
-                  strcmp(root_hex, anchored_root) == 0;
+        bool built = zr_prove_record_digests(docs, digests);
+        zr_prove_sort_digests(digests);
+        bool ok = zr_prove_root_matches(built, digests, anchored_root);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -833,19 +1051,7 @@ static int test_zr_prove_verify(void)
            "root equals the anchored root... ");
     {
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_str(&c.input, "name", "bravo");
-        (void)json_push_kv_str(&c.input, "version", "2.0.0");
-        zcl_native_handle_zcode_release_prove(&c.request, &c.reply);
-        const char *p = zr_str(&c.reply, "proof");
-        const char *r = zr_str(&c.reply, "domain_root");
-        if (p) snprintf(proof_b, sizeof(proof_b), "%s", p);
-        if (r) snprintf(proof_root, sizeof(proof_root), "%s", r);
-        bool ok = zr_ok(&c.reply) && p && r &&
-                  zr_str_is(&c.reply, "source", "domain_table") &&
-                  zr_int(&c.reply, "num_leaves", -1) == 3 &&
-                  strcmp(proof_root, anchored_root) == 0;
+        bool ok = zr_prove_stored(&f, anchored_root, proof_b, proof_root, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -854,44 +1060,23 @@ static int test_zr_prove_verify(void)
            "round-trips... ");
     {
         struct zr_cmd c;
-        zr_verify(doc_b ? doc_b : "", proof_b, proof_root, &c);
-        bool ok = zr_ok(&c.reply) && zr_bool(&c.reply, "valid") == 1 &&
-                  zr_bool(&c.reply, "batch_included") == 1 &&
-                  zr_str_is(&c.reply, "batch_root", proof_root) &&
-                  zr_int(&c.reply, "batch_num_leaves", -1) == 3 &&
-                  zr_str_is(&c.reply, "name", "bravo");
+        bool ok = zr_prove_roundtrip(doc_b, proof_b, proof_root, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
 
     printf("zcode_release prove: a tampered proof gives NOT_IN_BATCH... ");
     {
-        char bad[sizeof(proof_b)];
-        snprintf(bad, sizeof(bad), "%s", proof_b);
-        size_t n = strlen(bad);
-        /* Flip the last sibling nibble — a well-formed wire that no longer
-         * folds to the root. */
-        bad[n - 1] = (bad[n - 1] == 'a') ? 'b' : 'a';
         struct zr_cmd c;
-        zr_verify(doc_b ? doc_b : "", bad, proof_root, &c);
-        bool ok = n > 0 && c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                  zr_code_is(&c.reply, "NOT_IN_BATCH") &&
-                  zr_bool(&c.reply, "batch_included") == 0 &&
-                  /* the signature verdict is still reported */
-                  zr_bool(&c.reply, "valid") == 1;
+        bool ok = zr_prove_tampered(doc_b, proof_b, proof_root, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
 
     printf("zcode_release prove: a stale root gives NOT_IN_BATCH... ");
     {
-        char wrong[65];
-        snprintf(wrong, sizeof(wrong), "%s", proof_root);
-        wrong[0] = (wrong[0] == '0') ? '1' : '0';
         struct zr_cmd c;
-        zr_verify(doc_b ? doc_b : "", proof_b, wrong, &c);
-        bool ok = zr_code_is(&c.reply, "NOT_IN_BATCH") &&
-                  zr_bool(&c.reply, "batch_included") == 0;
+        bool ok = zr_prove_stale_root(doc_b, proof_b, proof_root, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -904,13 +1089,7 @@ static int test_zr_prove_verify(void)
            "batch reports BOTH facts separately... ");
     {
         struct zr_cmd c;
-        /* alpha's doc against bravo's proof: valid signature, wrong leaf. */
-        zr_verify(doc_a ? doc_a : "", proof_b, proof_root, &c);
-        bool ok = zr_code_is(&c.reply, "NOT_IN_BATCH") &&
-                  zr_bool(&c.reply, "valid") == 1 &&   /* signature: good */
-                  zr_bool(&c.reply, "batch_included") == 0 && /* batch: no */
-                  zr_str_is(&c.reply, "name", "alpha") &&
-                  zr_str(&c.reply, "record_digest") != NULL;
+        bool ok = zr_prove_wrong_leaf(doc_a, proof_b, proof_root, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -920,20 +1099,7 @@ static int test_zr_prove_verify(void)
     printf("zcode_release prove: an invalid signature is rejected before any "
            "batch verdict is published... ");
     {
-        uint8_t wire[ZID_DOC_MAX];
-        size_t n = doc_b ? (size_t)ParseHex(doc_b, wire, sizeof(wire)) : 0;
-        bool ok = false;
-        if (n > 64) {
-            wire[n - 1] ^= 0x01;
-            char tampered[ZID_DOC_MAX * 2 + 1];
-            HexStr(wire, n, false, tampered, sizeof(tampered));
-            struct zr_cmd c;
-            zr_verify(tampered, proof_b, proof_root, &c);
-            ok = zr_code_is(&c.reply, "BAD_SIGNATURE") &&
-                 zr_bool(&c.reply, "valid") == 0 &&
-                 zr_bool(&c.reply, "batch_included") == -1;
-            zr_cmd_free(&c);
-        }
+        bool ok = zr_prove_bad_signature(doc_b, proof_b, proof_root);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -941,12 +1107,7 @@ static int test_zr_prove_verify(void)
            "is RELEASE_NOT_FOUND... ");
     {
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_str(&c.input, "name", "bravo");
-        (void)json_push_kv_str(&c.input, "version", "9.9.9");
-        zcl_native_handle_zcode_release_prove(&c.request, &c.reply);
-        bool ok = zr_code_is(&c.reply, "RELEASE_NOT_FOUND");
+        bool ok = zr_prove_release_not_found(&f, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -957,16 +1118,7 @@ static int test_zr_prove_verify(void)
            "release dir and labels the source... ");
     {
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_str(&c.input, "name", "bravo");
-        (void)json_push_kv_str(&c.input, "version", "2.0.0");
-        (void)json_push_kv_str(&c.input, "domain", "zdesc");
-        zcl_native_handle_zcode_release_prove(&c.request, &c.reply);
-        bool ok = zr_ok(&c.reply) &&
-                  zr_str_is(&c.reply, "source", "release_dir") &&
-                  zr_bool(&c.reply, "anchored") == 0 &&
-                  zr_str_is(&c.reply, "domain", "zdesc");
+        bool ok = zr_prove_fallback(&f, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -974,13 +1126,7 @@ static int test_zr_prove_verify(void)
     printf("zcode_release prove: an invalid domain name is BAD_DOMAIN... ");
     {
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_str(&c.input, "name", "bravo");
-        (void)json_push_kv_str(&c.input, "version", "2.0.0");
-        (void)json_push_kv_str(&c.input, "domain", "Not A Domain");
-        zcl_native_handle_zcode_release_prove(&c.request, &c.reply);
-        bool ok = zr_code_is(&c.reply, "BAD_DOMAIN");
+        bool ok = zr_prove_bad_domain(&f, &c);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
@@ -993,6 +1139,77 @@ static int test_zr_prove_verify(void)
 }
 
 /* ── 8. exact command bytes mined and projected ───────────────────── */
+
+static bool zr_mined_emit_anchor(const struct zr_fixture *f, const char *doc,
+                                 char root_hex[65], char script_hex[257],
+                                 struct zr_cmd *c)
+{
+    zr_cmd_init(c);
+    (void)json_push_kv_str(&c->input, "datadir", f->datadir);
+    (void)json_push_kv_int(&c->input, "tip", 4242);
+    zcl_native_handle_zcode_release_anchor(&c->request, &c->reply);
+    const char *root = zr_str(&c->reply, "domain_root");
+    const char *script = zr_str(&c->reply, "op_return_hex");
+    bool ok = doc && zr_ok(&c->reply) && root && strlen(root) == 64 &&
+              script && strlen(script) > 0 &&
+              strlen(script) < 257 &&
+              zr_int(&c->reply, "releases", -1) == 1 &&
+              zr_bool(&c->reply, "domain_stored") == 1 &&
+              zr_bool(&c->reply, "anchor_recorded") == 0;
+    if (ok) {
+        snprintf(root_hex, 65, "%s", root);
+        snprintf(script_hex, 257, "%s", script);
+    }
+    return ok;
+}
+
+static bool zr_mined_decode(const char *root_hex, const char *script_hex,
+                            size_t script_len, uint8_t root[32],
+                            uint8_t script[128], struct zanc_message *message)
+{
+    return strlen(root_hex) == 64 && IsHex(root_hex) &&
+           ParseHex(root_hex, root, 32) == 32 &&
+           script_len > 0 && script_len <= 128 && IsHex(script_hex) &&
+           ParseHex(script_hex, script, 128) == script_len &&
+           zanc_parse(script, script_len, message);
+}
+
+static bool zr_mined_bind_ok(bool decoded, const struct zanc_message *message,
+                             const uint8_t *root)
+{
+    return decoded && message->hash_type == ZANC_HASH_SHA3_256 &&
+           memcmp(message->digest, root, 32) == 0 &&
+           strcmp(message->label, "zcode@4242") == 0;
+}
+
+static bool zr_mined_tx_ok(bool mined_ok,
+                           const struct transaction_lab_simnet_receipt *mined)
+{
+    return mined_ok && mined->mined_height >= 200 &&
+           mined->transaction.num_vout == 2 && mined->change_zat == 800000;
+}
+
+static bool zr_mined_find_anchor(struct node_db *ndb, bool db_open,
+                                 bool mined_ok,
+                                 struct transaction_lab_simnet_receipt *mined,
+                                 uint8_t *root, struct zanc_anchor *anchor)
+{
+    bool projected = db_open && mined_ok &&
+                     transaction_lab_simnet_project(ndb, mined);
+    memset(anchor, 0, sizeof(*anchor));
+    return projected &&
+           db_zanc_find_by_digest(ndb, ZANC_HASH_SHA3_256, root, anchor);
+}
+
+static bool zr_mined_anchor_ok(bool found, const struct zanc_anchor *anchor,
+                               const struct transaction_lab_simnet_receipt
+                                   *mined)
+{
+    return found && anchor->height == mined->mined_height &&
+           memcmp(anchor->txid, mined->txid.data,
+                  sizeof(anchor->txid)) == 0 &&
+           strcmp(anchor->label, "zcode@4242") == 0;
+}
 
 static int test_zr_mined_anchor(void)
 {
@@ -1014,26 +1231,8 @@ static int test_zr_mined_anchor(void)
            "anchor... ");
     {
         struct zr_cmd c;
-        zr_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "tip", 4242);
-        zcl_native_handle_zcode_release_anchor(&c.request, &c.reply);
-        const char *root = zr_str(&c.reply, "domain_root");
-        const char *script = zr_str(&c.reply, "op_return_hex");
-        bool ok = doc && zr_ok(&c.reply) && root && strlen(root) == 64 &&
-                  script && strlen(script) > 0 &&
-                  strlen(script) < sizeof(script_hex) &&
-                  zr_int(&c.reply, "releases", -1) == 1 &&
-                  zr_bool(&c.reply, "domain_stored") == 1 &&
-                  zr_bool(&c.reply, "anchor_recorded") == 0;
-        if (ok) {
-            snprintf(root_hex, sizeof(root_hex), "%s", root);
-            snprintf(script_hex, sizeof(script_hex), "%s", script);
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
+        bool ok = zr_mined_emit_anchor(&f, doc, root_hex, script_hex, &c);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         zr_cmd_free(&c);
     }
 
@@ -1041,15 +1240,10 @@ static int test_zr_mined_anchor(void)
     uint8_t script[128];
     size_t script_len = strlen(script_hex) / 2;
     struct zanc_message message;
-    bool decoded = strlen(root_hex) == 64 && IsHex(root_hex) &&
-        ParseHex(root_hex, root, sizeof(root)) == sizeof(root) &&
-        script_len > 0 && script_len <= sizeof(script) && IsHex(script_hex) &&
-        ParseHex(script_hex, script, sizeof(script)) == script_len &&
-        zanc_parse(script, script_len, &message);
+    bool decoded = zr_mined_decode(root_hex, script_hex, script_len, root,
+                                   script, &message);
     printf("zcode_release simnet: exact command bytes bind root and label... ");
-    if (decoded && message.hash_type == ZANC_HASH_SHA3_256 &&
-        memcmp(message.digest, root, sizeof(root)) == 0 &&
-        strcmp(message.label, "zcode@4242") == 0)
+    if (zr_mined_bind_ok(decoded, &message, root))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 
@@ -1058,24 +1252,18 @@ static int test_zr_mined_anchor(void)
         script, script_len, &mined);
     printf("zcode_release simnet: exact ZANC transaction enters a block "
            "through connect_block... ");
-    if (mined_ok && mined.mined_height >= 200 &&
-        mined.transaction.num_vout == 2 && mined.change_zat == 800000)
+    if (zr_mined_tx_ok(mined_ok, &mined))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 
     struct node_db ndb;
     memset(&ndb, 0, sizeof(ndb));
     bool db_open = node_db_open(&ndb, ":memory:");
-    bool projected = db_open && mined_ok &&
-        transaction_lab_simnet_project(&ndb, &mined);
     struct zanc_anchor anchor;
-    memset(&anchor, 0, sizeof(anchor));
-    bool found = projected && db_zanc_find_by_digest(
-        &ndb, ZANC_HASH_SHA3_256, root, &anchor);
+    bool found = zr_mined_find_anchor(&ndb, db_open, mined_ok, &mined, root,
+                                      &anchor);
     printf("zcode_release simnet: mined bytes rebuild the ZANC projection... ");
-    if (found && anchor.height == mined.mined_height &&
-        memcmp(anchor.txid, mined.txid.data, sizeof(anchor.txid)) == 0 &&
-        strcmp(anchor.label, "zcode@4242") == 0)
+    if (zr_mined_anchor_ok(found, &anchor, &mined))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 
