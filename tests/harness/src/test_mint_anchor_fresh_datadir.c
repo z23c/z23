@@ -202,6 +202,20 @@ static bool mfd_stub_pass_validator(const struct block_index *bi,
     return true;
 }
 
+/* All eight reducer stages, in pipeline order; both drive scenarios init the
+ * same set before wiring up the chain_activation_controller. */
+static bool mfd_init_all_reducer_stages(struct main_state *ms)
+{
+    return header_admit_stage_init(ms) &&
+           validate_headers_stage_init(ms) &&
+           body_fetch_stage_init(ms) &&
+           body_persist_stage_init(ms) &&
+           script_validate_stage_init(ms) &&
+           proof_validate_stage_init(ms) &&
+           utxo_apply_stage_init(ms) &&
+           tip_finalize_stage_init(ms);
+}
+
 /* ── Scenario (b): synthetic imported datadir, headers-only, NO bodies ───
  * A bounded number of reducer_kick_unbudgeted calls must converge (frontier
  * stops moving) inside the wall-clock budget, then the drive loop's
@@ -210,6 +224,52 @@ static bool mfd_stub_pass_validator(const struct block_index *bi,
 
 #define MFD_B_BUDGET_US   (30ll * 1000 * 1000) /* 30s */
 #define MFD_B_MAX_KICKS   8
+
+/* Synthetic HEADER-ONLY chain: heights 0..N-1, hash-chained via pprev, NO
+ * BLOCK_HAVE_DATA anywhere — mirrors an --importblockindex-style datadir
+ * that has the legacy header chain but no fetched bodies yet. */
+static void mfd_seed_header_only_chain(struct block_index *blocks,
+                                       struct uint256 *hashes, int n,
+                                       struct main_state *ms)
+{
+    for (int i = 0; i < n; i++) {
+        block_index_init(&blocks[i]);
+        memset(&hashes[i], 0, sizeof(hashes[i]));
+        hashes[i].data[0] = (uint8_t)(i & 0xFF);
+        hashes[i].data[1] = (uint8_t)((i >> 8) & 0xFF);
+        hashes[i].data[2] = 0xE2;  /* tag distinct from other fixtures */
+        blocks[i].phashBlock = &hashes[i];
+        blocks[i].hashBlock  = hashes[i];
+        blocks[i].nHeight = i;
+        blocks[i].nVersion = 4;
+        blocks[i].nBits = 0x1f07ffff;
+        if (i > 0) blocks[i].pprev = &blocks[i - 1];
+    }
+    active_chain_move_window_tip(&ms->chain_active, &blocks[n - 1]);
+}
+
+/* Audit the registered frontier_walled blocker's snapshot: whether it was
+ * found, whether its reason names the exact walled stage, and whether the
+ * reason carries the stage cursors — printing the reason if either is
+ * missing, exactly as the real drive loop's diagnosis would. */
+static void mfd_scan_walled_blocker_reason(bool *found, bool *wall_named,
+                                           bool *cursors_carried)
+{
+    struct blocker_snapshot snaps[BLOCKER_CAP];
+    int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].id, "mint_fold.frontier_walled") != 0)
+            continue;
+        *found = true;
+        *wall_named = strstr(snaps[i].reason, "wall=body_fetch") != NULL;
+        *cursors_carried =
+            strstr(snaps[i].reason, "ha=") != NULL &&
+            strstr(snaps[i].reason, "ua=") != NULL &&
+            strstr(snaps[i].reason, "tf=") != NULL;
+        if (!*wall_named || !*cursors_carried)
+            printf("  >> (b) blocker reason: %s\n", snaps[i].reason);
+    }
+}
 
 static int test_mfd_scenario_b_headers_no_bodies_walls_frontier(void)
 {
@@ -236,35 +296,11 @@ static int test_mfd_scenario_b_headers_no_bodies_walls_frontier(void)
     struct main_state ms;
     main_state_init(&ms);
 
-    /* Synthetic HEADER-ONLY chain: heights 0..N-1, hash-chained via pprev, NO
-     * BLOCK_HAVE_DATA anywhere — mirrors an --importblockindex-style datadir
-     * that has the legacy header chain but no fetched bodies yet. */
     static struct block_index mfd_blocks[N];
     static struct uint256     mfd_hashes[N];
-    for (int i = 0; i < N; i++) {
-        block_index_init(&mfd_blocks[i]);
-        memset(&mfd_hashes[i], 0, sizeof(mfd_hashes[i]));
-        mfd_hashes[i].data[0] = (uint8_t)(i & 0xFF);
-        mfd_hashes[i].data[1] = (uint8_t)((i >> 8) & 0xFF);
-        mfd_hashes[i].data[2] = 0xE2;  /* tag distinct from other fixtures */
-        mfd_blocks[i].phashBlock = &mfd_hashes[i];
-        mfd_blocks[i].hashBlock  = mfd_hashes[i];
-        mfd_blocks[i].nHeight = i;
-        mfd_blocks[i].nVersion = 4;
-        mfd_blocks[i].nBits = 0x1f07ffff;
-        if (i > 0) mfd_blocks[i].pprev = &mfd_blocks[i - 1];
-    }
-    active_chain_move_window_tip(&ms.chain_active, &mfd_blocks[N - 1]);
+    mfd_seed_header_only_chain(mfd_blocks, mfd_hashes, N, &ms);
 
-    bool stages_ok =
-        header_admit_stage_init(&ms) &&
-        validate_headers_stage_init(&ms) &&
-        body_fetch_stage_init(&ms) &&
-        body_persist_stage_init(&ms) &&
-        script_validate_stage_init(&ms) &&
-        proof_validate_stage_init(&ms) &&
-        utxo_apply_stage_init(&ms) &&
-        tip_finalize_stage_init(&ms);
+    bool stages_ok = mfd_init_all_reducer_stages(&ms);
     MFD_CHECK("(b) all eight reducer stages init", stages_ok);
     validate_headers_stage_set_validator(mfd_stub_pass_validator, NULL);
 
@@ -332,21 +368,8 @@ static int test_mfd_scenario_b_headers_no_bodies_walls_frontier(void)
               blocker_class_for("mint_fold.frontier_walled") ==
                   (int)BLOCKER_PERMANENT);
     {
-        struct blocker_snapshot snaps[BLOCKER_CAP];
-        int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
         bool found = false, wall_named = false, cursors_carried = false;
-        for (int i = 0; i < n; i++) {
-            if (strcmp(snaps[i].id, "mint_fold.frontier_walled") != 0)
-                continue;
-            found = true;
-            wall_named = strstr(snaps[i].reason, "wall=body_fetch") != NULL;
-            cursors_carried =
-                strstr(snaps[i].reason, "ha=") != NULL &&
-                strstr(snaps[i].reason, "ua=") != NULL &&
-                strstr(snaps[i].reason, "tf=") != NULL;
-            if (!wall_named || !cursors_carried)
-                printf("  >> (b) blocker reason: %s\n", snaps[i].reason);
-        }
+        mfd_scan_walled_blocker_reason(&found, &wall_named, &cursors_carried);
         MFD_CHECK("(b) blocker names the exact walled stage (body_fetch)",
                   found && wall_named);
         MFD_CHECK("(b) blocker reason carries all eight stage cursors",
@@ -474,15 +497,7 @@ static int test_mfd_scenario_c_headers_and_bodies_reaches_ceiling(void)
         ms.pindex_best_header = genesis;
     }
 
-    bool stages_ok =
-        header_admit_stage_init(&ms) &&
-        validate_headers_stage_init(&ms) &&
-        body_fetch_stage_init(&ms) &&
-        body_persist_stage_init(&ms) &&
-        script_validate_stage_init(&ms) &&
-        proof_validate_stage_init(&ms) &&
-        utxo_apply_stage_init(&ms) &&
-        tip_finalize_stage_init(&ms);
+    bool stages_ok = mfd_init_all_reducer_stages(&ms);
     MFD_CHECK("(c) all eight reducer stages init", stages_ok);
     MFD_CHECK("(c) genesis utxo row seeded",
               mfd_seed_genesis_utxo_apply_row(progress_store_db()));
