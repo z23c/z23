@@ -663,10 +663,6 @@ contexts/wallet/controllers/src/wallet_view_sync.c:wv_sync_wallet_from_zclassicd
 contexts/wallet/domain/src/mnemonic.c:mnemonic_decode_core:18
 contexts/wallet/modules/wallet/src/wallet.c:wallet_create_transaction_multi:16
 contexts/wallet/modules/wallet/src/wallet.c:wallet_sync_transaction:17
-contexts/wallet/modules/wallet/src/wallet_coin_selection.c:wallet_available_coins_ex:20
-contexts/wallet/modules/wallet/src/wallet_coin_selection.c:wallet_create_transaction_selected:36
-contexts/wallet/modules/wallet/src/wallet_coin_selection.c:wallet_liquidity_plan_compute:42
-contexts/wallet/modules/wallet/src/wallet_coin_selection.c:wallet_select_coins:33
 contexts/wallet/modules/wallet/src/wallet_rescan.c:wallet_scan_one_block:16
 contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_close:23
 contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_flush_scope_r:66
