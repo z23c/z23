@@ -36,14 +36,17 @@ static int read_sample(sqlite3 *db, const char *sql,
     return found;
 }
 
-int cure_progress_read_eta_samples(
-    sqlite3 *db, int64_t min_window_seconds,
-    struct cure_progress_sample *older, struct cure_progress_sample *newer)
+static bool eta_samples_args_invalid(sqlite3 *db,
+                                     const struct cure_progress_sample *older,
+                                     const struct cure_progress_sample *newer,
+                                     int64_t min_window_seconds)
 {
-    if (!db || !older || !newer || min_window_seconds < 1)
-        return -1;
-    memset(older, 0, sizeof(*older));
-    memset(newer, 0, sizeof(*newer));
+    return !db || !older || !newer || min_window_seconds < 1;
+}
+
+static int read_newer_eta_sample(sqlite3 *db,
+                                 struct cure_progress_sample *newer)
+{
     int got = read_sample(
         db, "SELECT height, applied_at FROM utxo_apply_log "
             "WHERE ok=1 AND applied_at>0 ORDER BY height DESC LIMIT 1",
@@ -53,6 +56,30 @@ int cure_progress_read_eta_samples(
     if (newer->height < 0 || newer->height > INT32_MAX ||
         newer->time_unix <= 0)
         return -1;
+    return 1;
+}
+
+static bool eta_samples_window_invalid(const struct cure_progress_sample *older,
+                                       const struct cure_progress_sample *newer,
+                                       int64_t min_window_seconds)
+{
+    return older->height < 0 || older->height > INT32_MAX ||
+           older->height >= newer->height || older->time_unix <= 0 ||
+           older->time_unix >= newer->time_unix ||
+           newer->time_unix - older->time_unix < min_window_seconds;
+}
+
+int cure_progress_read_eta_samples(
+    sqlite3 *db, int64_t min_window_seconds,
+    struct cure_progress_sample *older, struct cure_progress_sample *newer)
+{
+    if (eta_samples_args_invalid(db, older, newer, min_window_seconds))
+        return -1;
+    memset(older, 0, sizeof(*older));
+    memset(newer, 0, sizeof(*newer));
+    int got = read_newer_eta_sample(db, newer);
+    if (got <= 0)
+        return got;
 
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db,
@@ -78,10 +105,7 @@ int cure_progress_read_eta_samples(
     }
     sqlite3_finalize(st);
     if (got == 1 &&
-        (older->height < 0 || older->height > INT32_MAX ||
-         older->height >= newer->height || older->time_unix <= 0 ||
-         older->time_unix >= newer->time_unix ||
-         newer->time_unix - older->time_unix < min_window_seconds))
+        eta_samples_window_invalid(older, newer, min_window_seconds))
         return -1;
     return got;
 }
