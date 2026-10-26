@@ -1130,10 +1130,6 @@ tests/harness/src/test_pv_lookahead.c:test_pv_lookahead:39
 tests/harness/src/test_reducer_frontier_reconcile_light.c:make_fixture_block_readable:20
 tests/harness/src/test_reducer_frontier_reconcile_light.c:test_reducer_frontier_reconcile_light:369
 tests/harness/src/test_reducer_reconcile_witness.c:test_reducer_reconcile_witness:62
-tests/harness/src/test_reducer_step_drain_harness.c:test_mint_fold_livelock:39
-tests/harness/src/test_reducer_step_drain_harness.c:test_reducer_drain_spin_contract:16
-tests/harness/src/test_reducer_step_drain_harness.c:test_reducer_ondemand_genesis_seed:19
-tests/harness/src/test_reducer_step_drain_harness.c:test_reducer_step_drain_harness:53
 tests/harness/src/test_refold_from_anchor_artifact_reachable.c:test_refold_from_anchor_artifact_reachable:17
 tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
 tests/harness/src/test_robustness.c:test_robustness:104
