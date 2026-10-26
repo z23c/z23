@@ -185,6 +185,80 @@ static int check_list_rename_preserves_bit(void)
 
 /* ── 4. one kind, one name, one authority, exactly one adapter row ──────── */
 
+static size_t count_adapter_rows_for_kind(enum metaverse_kind kind)
+{
+    size_t rows = 0;
+    for (size_t i = 0; i < metaverse_adapter_count(); i++) {
+        const struct metaverse_adapter *a = metaverse_adapter_at(i);
+        if (a && a->kind == kind) rows++;
+    }
+    return rows;
+}
+
+/* A row is either wired (list+show) or an explicit gap naming a reason. */
+static bool adapter_row_is_wired_or_stated_gap(
+    const struct metaverse_adapter *a)
+{
+    bool wired = (a->list != NULL && a->show != NULL);
+    bool stated_gap = (a->unavailable_reason != NULL &&
+                       a->unavailable_reason[0] != '\0' &&
+                       a->list == NULL && a->show == NULL);
+    return wired != stated_gap;
+}
+
+static void check_kind_strings_valid(enum metaverse_kind kind, const char *name,
+                                     const char *auth, bool *names_ok,
+                                     bool *authorities_ok)
+{
+    if (!name || !name[0] || strcmp(name, "unknown") == 0) *names_ok = false;
+    if (!auth || !auth[0] || strcmp(auth, "unknown") == 0)
+        *authorities_ok = false;
+    if (name && metaverse_kind_from_name(name) != kind) *names_ok = false;
+}
+
+static void check_kind_strings_distinct_from_earlier_kinds(
+    enum metaverse_kind kind, const char *name, const char *auth,
+    bool *names_ok, bool *authorities_ok)
+{
+    for (int j = METAVERSE_KIND_UNKNOWN + 1; j < (int)kind; j++) {
+        enum metaverse_kind other = (enum metaverse_kind)j;
+        if (name && strcmp(name, metaverse_kind_name(other)) == 0)
+            *names_ok = false;
+        if (auth && strcmp(auth, metaverse_kind_authority(other)) == 0)
+            *authorities_ok = false;
+    }
+}
+
+static void check_one_kind_row(enum metaverse_kind kind, bool *exactly_one_row,
+                               bool *rows_are_readers_or_stated_gaps,
+                               bool *names_ok, bool *authorities_ok)
+{
+    size_t rows = count_adapter_rows_for_kind(kind);
+    if (rows != 1) *exactly_one_row = false;
+    if (metaverse_adapter_for(kind) == NULL) *exactly_one_row = false;
+
+    const struct metaverse_adapter *a = metaverse_adapter_for(kind);
+    if (a && !adapter_row_is_wired_or_stated_gap(a))
+        *rows_are_readers_or_stated_gaps = false;
+
+    const char *name = metaverse_kind_name(kind);
+    const char *auth = metaverse_kind_authority(kind);
+    check_kind_strings_valid(kind, name, auth, names_ok, authorities_ok);
+    check_kind_strings_distinct_from_earlier_kinds(kind, name, auth,
+                                                   names_ok, authorities_ok);
+}
+
+static bool adapter_registry_has_no_stray_kinds(void)
+{
+    /* The registry must not carry a row for a kind that does not exist. */
+    bool no_stray_rows = true;
+    for (size_t i = 0; i < metaverse_adapter_count(); i++) {
+        const struct metaverse_adapter *a = metaverse_adapter_at(i);
+        if (!a || !metaverse_kind_valid(a->kind)) no_stray_rows = false;
+    }
+    return no_stray_rows;
+}
+
 static int check_kind_rows_are_singular(void)
 {
     int failures = 0;
@@ -198,40 +272,9 @@ static int check_kind_rows_are_singular(void)
     bool names_ok = true, authorities_ok = true;
 
     for (int k = METAVERSE_KIND_UNKNOWN + 1; k < METAVERSE_KIND_COUNT; k++) {
-        enum metaverse_kind kind = (enum metaverse_kind)k;
-
-        size_t rows = 0;
-        for (size_t i = 0; i < metaverse_adapter_count(); i++) {
-            const struct metaverse_adapter *a = metaverse_adapter_at(i);
-            if (a && a->kind == kind) rows++;
-        }
-        if (rows != 1) exactly_one_row = false;
-        if (metaverse_adapter_for(kind) == NULL) exactly_one_row = false;
-
-        const struct metaverse_adapter *a = metaverse_adapter_for(kind);
-        if (a) {
-            /* A row is either wired (list+show) or an explicit gap naming a reason. */
-            bool wired = (a->list != NULL && a->show != NULL);
-            bool stated_gap = (a->unavailable_reason != NULL &&
-                               a->unavailable_reason[0] != '\0' &&
-                               a->list == NULL && a->show == NULL);
-            if (wired == stated_gap) rows_are_readers_or_stated_gaps = false;
-        }
-
-        const char *name = metaverse_kind_name(kind);
-        const char *auth = metaverse_kind_authority(kind);
-        if (!name || !name[0] || strcmp(name, "unknown") == 0) names_ok = false;
-        if (!auth || !auth[0] || strcmp(auth, "unknown") == 0)
-            authorities_ok = false;
-        if (name && metaverse_kind_from_name(name) != kind) names_ok = false;
-
-        for (int j = METAVERSE_KIND_UNKNOWN + 1; j < k; j++) {
-            enum metaverse_kind other = (enum metaverse_kind)j;
-            if (name && strcmp(name, metaverse_kind_name(other)) == 0)
-                names_ok = false;
-            if (auth && strcmp(auth, metaverse_kind_authority(other)) == 0)
-                authorities_ok = false;
-        }
+        check_one_kind_row((enum metaverse_kind)k, &exactly_one_row,
+                           &rows_are_readers_or_stated_gaps, &names_ok,
+                           &authorities_ok);
     }
 
     VB_CHECK("every kind has exactly one adapter row", exactly_one_row);
@@ -240,13 +283,8 @@ static int check_kind_rows_are_singular(void)
     VB_CHECK("every kind has one unique wire name that round-trips", names_ok);
     VB_CHECK("every kind names one distinct authority source", authorities_ok);
 
-    /* The registry must not carry a row for a kind that does not exist. */
-    bool no_stray_rows = true;
-    for (size_t i = 0; i < metaverse_adapter_count(); i++) {
-        const struct metaverse_adapter *a = metaverse_adapter_at(i);
-        if (!a || !metaverse_kind_valid(a->kind)) no_stray_rows = false;
-    }
-    VB_CHECK("the registry carries no row for an invalid kind", no_stray_rows);
+    VB_CHECK("the registry carries no row for an invalid kind",
+             adapter_registry_has_no_stray_kinds());
 
     VB_CHECK("UNKNOWN is not a kind and has no row",
              !metaverse_kind_valid(METAVERSE_KIND_UNKNOWN) &&
