@@ -133,241 +133,272 @@ static const struct json_value *tsor_json_condition(
     return NULL;
 }
 
+/* Check every detail field the engine dumps for a witnessed non-fork heal,
+ * in dump order. A NULL detail fails the first check, so — as in the
+ * original short-circuit chain — no field of a NULL detail is read. */
+static bool tsor_dump_detail_matches_expected(const struct json_value *detail,
+                                              int tip_h)
+{
+    bool ok = detail != NULL;
+    ok = ok &&
+         json_get_int(json_get(detail, "tip_height_at_detect")) == tip_h;
+    ok = ok &&
+         json_get_int(json_get(detail, "best_header_at_detect")) ==
+         tip_h + 5;
+    ok = ok &&
+         json_get_int(json_get(detail, "oracle_height_at_detect")) ==
+         tip_h + 5;
+    ok = ok &&
+         json_get_int(json_get(detail, "current_tip_height")) ==
+         tip_h + 1;
+    ok = ok &&
+         json_get_int(json_get(detail, "last_rebuild_from")) ==
+         tip_h - 2;
+    ok = ok && json_get_bool(json_get(detail, "last_rebuild_ok"));
+    ok = ok &&
+         json_get_int(json_get(detail, "last_witness_tip_height")) ==
+         tip_h + 1;
+    ok = ok && json_get_bool(json_get(
+        detail, "last_witness_tip_advanced"));
+    ok = ok &&
+         json_get_int(json_get(detail, "stall_secs")) == 120;
+    ok = ok &&
+         json_get_int(json_get(detail, "min_gap_blocks")) == 2;
+    ok = ok && json_get(detail, "remedy_contract") != NULL;
+    return ok;
+}
+
+/* ── 1. Non-fork stall + oracle ahead → detect TRUE, remedy rebuilds
+ *      from tip-2, witness confirms advancement. ─────────────────── */
+static int tsor_case_nonfork_oracle_ahead(int tip_h)
+{
+    int failures = 0;
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    atomic_store(&g_stub_oracle_ok, true);
+    atomic_store(&g_stub_oracle_height, tip_h + 5); /* oracle ahead */
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 hashes[256];
+    struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
+
+    /* Higher-work header chain extending the canonical tip (no fork). */
+    struct uint256 hdr_h[8];
+    struct block_index *best_header =
+        tsor_build_header_chain(&ms, hdr_h, tip, tip_h);
+    ms.pindex_best_header = best_header;
+
+    condition_engine_set_main_state(&ms);
+    /* Model a successful heal: rebuild advances the active tip onto the
+     * canonical header chain's tip+1. */
+    g_advance_ms = &ms;
+    g_advance_to = block_index_get_ancestor(best_header, tip_h + 1);
+
+    register_tip_stall_oracle_rebuild();
+    tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
+                                            stub_rebuild);
+    tip_stall_oracle_rebuild_test_force_stall(tip_h, 400);
+
+    condition_engine_tick();
+
+    bool ok = (best_header != NULL && g_advance_to != NULL);
+    ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 1;
+    ok = ok && tip_stall_oracle_rebuild_test_last_rebuild_from()
+                   == tip_h - 2;
+    ok = ok && condition_engine_get_active_count() == 0; /* witnessed */
+    struct json_value dump;
+    json_init(&dump);
+    json_set_object(&dump);
+    ok = ok && condition_engine_dump_state_json(&dump, NULL);
+    const struct json_value *cond = tsor_json_condition(
+        &dump, "tip_stall_oracle_rebuild");
+    const struct json_value *detail = cond ? json_get(cond, "detail")
+                                           : NULL;
+    ok = ok && tsor_dump_detail_matches_expected(detail, tip_h);
+    json_free(&dump);
+    TSOR_CHECK("non-fork stall + oracle ahead -> rebuild from tip-2, "
+               "witnessed", ok);
+
+    condition_engine_set_main_state(NULL);
+    g_advance_ms = NULL; g_advance_to = NULL;
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    main_state_free(&ms);
+    return failures;
+}
+
+/* ── 2. Oracle unreachable → detect FALSE, NO rebuild. ──────────── */
+static int tsor_case_oracle_unreachable(int tip_h)
+{
+    int failures = 0;
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    atomic_store(&g_stub_oracle_ok, false); /* oracle down */
+    atomic_store(&g_stub_oracle_height, 0);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 hashes[256];
+    struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
+    struct uint256 hdr_h[8];
+    struct block_index *best_header =
+        tsor_build_header_chain(&ms, hdr_h, tip, tip_h);
+    ms.pindex_best_header = best_header;
+
+    condition_engine_set_main_state(&ms);
+    register_tip_stall_oracle_rebuild();
+    tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
+                                            stub_rebuild);
+    tip_stall_oracle_rebuild_test_force_stall(tip_h, 400);
+
+    condition_engine_tick();
+
+    bool ok = condition_engine_get_active_count() == 0;
+    ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 0;
+    TSOR_CHECK("oracle unreachable -> detect false, NO rebuild", ok);
+
+    condition_engine_set_main_state(NULL);
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    main_state_free(&ms);
+    return failures;
+}
+
+/* ── 3. Stale FORK present → detect FALSE (defer to tip_fork_stale). ─ */
+static int tsor_case_stale_fork_present(int tip_h)
+{
+    int failures = 0;
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    atomic_store(&g_stub_oracle_ok, true);
+    atomic_store(&g_stub_oracle_height, tip_h + 5);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 hashes[256];
+    struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
+
+    /* A data-bearing child of the active tip at tip+1 with LOW chainwork
+     * (the stale fork the node keeps retrying). */
+    struct uint256 stale_h;
+    (void)tsor_insert(&ms, &stale_h, 1, tip_h + 1, tip,
+        (uint64_t)(tip_h + 2),
+        BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA);
+
+    /* Higher-work header chain branching off the SAME tip — its tip+1 is
+     * a DIFFERENT (header-only) block, so the stale child is OFF it. */
+    struct uint256 hdr_h[8];
+    struct block_index *best_header =
+        tsor_build_header_chain(&ms, hdr_h, tip, tip_h);
+    ms.pindex_best_header = best_header;
+
+    condition_engine_set_main_state(&ms);
+    register_tip_stall_oracle_rebuild();
+    tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
+                                            stub_rebuild);
+    tip_stall_oracle_rebuild_test_force_stall(tip_h, 400);
+
+    condition_engine_tick();
+
+    /* The stale child is OFF the best-header chain -> tip_fork_stale's
+     * job. We must NOT fire. */
+    bool ok = block_index_get_ancestor(best_header, tip_h + 1) != NULL;
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 0;
+    TSOR_CHECK("stale fork at tip+1 -> detect false (defer to "
+               "tip_fork_stale)", ok);
+
+    condition_engine_set_main_state(NULL);
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    main_state_free(&ms);
+    return failures;
+}
+
+/* ── 4. No higher-work header chain (normal at-tip) → detect FALSE. ── */
+static int tsor_case_no_higher_work_header(int tip_h)
+{
+    int failures = 0;
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    atomic_store(&g_stub_oracle_ok, true);
+    atomic_store(&g_stub_oracle_height, tip_h); /* oracle == tip */
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 hashes[256];
+    struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
+    ms.pindex_best_header = tip; /* no more-work header */
+
+    condition_engine_set_main_state(&ms);
+    register_tip_stall_oracle_rebuild();
+    tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
+                                            stub_rebuild);
+    tip_stall_oracle_rebuild_test_force_stall(tip_h, 400);
+
+    condition_engine_tick();
+
+    bool ok = condition_engine_get_active_count() == 0;
+    ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 0;
+    TSOR_CHECK("no higher-work header chain -> detect false", ok);
+
+    condition_engine_set_main_state(NULL);
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    main_state_free(&ms);
+    return failures;
+}
+
+/* ── 5. Tip not stalled (fresh advance) → detect FALSE. ─────────── */
+static int tsor_case_tip_not_stalled(int tip_h)
+{
+    int failures = 0;
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    atomic_store(&g_stub_oracle_ok, true);
+    atomic_store(&g_stub_oracle_height, tip_h + 5);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 hashes[256];
+    struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
+    struct uint256 hdr_h[8];
+    struct block_index *best_header =
+        tsor_build_header_chain(&ms, hdr_h, tip, tip_h);
+    ms.pindex_best_header = best_header;
+
+    condition_engine_set_main_state(&ms);
+    register_tip_stall_oracle_rebuild();
+    tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
+                                            stub_rebuild);
+    /* Do NOT force a stall — first tick only arms the no-advance timer. */
+
+    condition_engine_tick();
+
+    bool ok = condition_engine_get_active_count() == 0;
+    ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 0;
+    TSOR_CHECK("tip not stalled (no sustained window) -> detect false",
+               ok);
+
+    condition_engine_set_main_state(NULL);
+    condition_engine_reset_for_testing();
+    tip_stall_oracle_rebuild_test_reset();
+    main_state_free(&ms);
+    return failures;
+}
+
 int test_tip_stall_oracle_rebuild_condition(void)
 {
     printf("\n=== tip_stall_oracle_rebuild condition tests ===\n");
     int failures = 0;
     const int TIP_H = 100;
 
-    /* ── 1. Non-fork stall + oracle ahead → detect TRUE, remedy rebuilds
-     *      from tip-2, witness confirms advancement. ─────────────────── */
-    {
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        atomic_store(&g_stub_oracle_ok, true);
-        atomic_store(&g_stub_oracle_height, TIP_H + 5); /* oracle ahead */
-
-        struct main_state ms;
-        main_state_init(&ms);
-        struct uint256 hashes[256];
-        struct block_index *tip = tsor_build_main(&ms, hashes, TIP_H);
-
-        /* Higher-work header chain extending the canonical tip (no fork). */
-        struct uint256 hdr_h[8];
-        struct block_index *best_header =
-            tsor_build_header_chain(&ms, hdr_h, tip, TIP_H);
-        ms.pindex_best_header = best_header;
-
-        condition_engine_set_main_state(&ms);
-        /* Model a successful heal: rebuild advances the active tip onto the
-         * canonical header chain's tip+1. */
-        g_advance_ms = &ms;
-        g_advance_to = block_index_get_ancestor(best_header, TIP_H + 1);
-
-        register_tip_stall_oracle_rebuild();
-        tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
-                                                stub_rebuild);
-        tip_stall_oracle_rebuild_test_force_stall(TIP_H, 400);
-
-        condition_engine_tick();
-
-        bool ok = (best_header != NULL && g_advance_to != NULL);
-        ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 1;
-        ok = ok && tip_stall_oracle_rebuild_test_last_rebuild_from()
-                       == TIP_H - 2;
-        ok = ok && condition_engine_get_active_count() == 0; /* witnessed */
-        struct json_value dump;
-        json_init(&dump);
-        json_set_object(&dump);
-        ok = ok && condition_engine_dump_state_json(&dump, NULL);
-        const struct json_value *cond = tsor_json_condition(
-            &dump, "tip_stall_oracle_rebuild");
-        const struct json_value *detail = cond ? json_get(cond, "detail")
-                                               : NULL;
-        ok = ok && detail != NULL;
-        ok = ok &&
-             json_get_int(json_get(detail, "tip_height_at_detect")) == TIP_H;
-        ok = ok &&
-             json_get_int(json_get(detail, "best_header_at_detect")) ==
-             TIP_H + 5;
-        ok = ok &&
-             json_get_int(json_get(detail, "oracle_height_at_detect")) ==
-             TIP_H + 5;
-        ok = ok &&
-             json_get_int(json_get(detail, "current_tip_height")) ==
-             TIP_H + 1;
-        ok = ok &&
-             json_get_int(json_get(detail, "last_rebuild_from")) ==
-             TIP_H - 2;
-        ok = ok && json_get_bool(json_get(detail, "last_rebuild_ok"));
-        ok = ok &&
-             json_get_int(json_get(detail, "last_witness_tip_height")) ==
-             TIP_H + 1;
-        ok = ok && json_get_bool(json_get(
-            detail, "last_witness_tip_advanced"));
-        ok = ok &&
-             json_get_int(json_get(detail, "stall_secs")) == 120;
-        ok = ok &&
-             json_get_int(json_get(detail, "min_gap_blocks")) == 2;
-        ok = ok && json_get(detail, "remedy_contract") != NULL;
-        json_free(&dump);
-        TSOR_CHECK("non-fork stall + oracle ahead -> rebuild from tip-2, "
-                   "witnessed", ok);
-
-        condition_engine_set_main_state(NULL);
-        g_advance_ms = NULL; g_advance_to = NULL;
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        main_state_free(&ms);
-    }
-
-    /* ── 2. Oracle unreachable → detect FALSE, NO rebuild. ──────────── */
-    {
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        atomic_store(&g_stub_oracle_ok, false); /* oracle down */
-        atomic_store(&g_stub_oracle_height, 0);
-
-        struct main_state ms;
-        main_state_init(&ms);
-        struct uint256 hashes[256];
-        struct block_index *tip = tsor_build_main(&ms, hashes, TIP_H);
-        struct uint256 hdr_h[8];
-        struct block_index *best_header =
-            tsor_build_header_chain(&ms, hdr_h, tip, TIP_H);
-        ms.pindex_best_header = best_header;
-
-        condition_engine_set_main_state(&ms);
-        register_tip_stall_oracle_rebuild();
-        tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
-                                                stub_rebuild);
-        tip_stall_oracle_rebuild_test_force_stall(TIP_H, 400);
-
-        condition_engine_tick();
-
-        bool ok = condition_engine_get_active_count() == 0;
-        ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 0;
-        TSOR_CHECK("oracle unreachable -> detect false, NO rebuild", ok);
-
-        condition_engine_set_main_state(NULL);
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        main_state_free(&ms);
-    }
-
-    /* ── 3. Stale FORK present → detect FALSE (defer to tip_fork_stale). ─ */
-    {
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        atomic_store(&g_stub_oracle_ok, true);
-        atomic_store(&g_stub_oracle_height, TIP_H + 5);
-
-        struct main_state ms;
-        main_state_init(&ms);
-        struct uint256 hashes[256];
-        struct block_index *tip = tsor_build_main(&ms, hashes, TIP_H);
-
-        /* A data-bearing child of the active tip at tip+1 with LOW chainwork
-         * (the stale fork the node keeps retrying). */
-        struct uint256 stale_h;
-        (void)tsor_insert(&ms, &stale_h, 1, TIP_H + 1, tip,
-            (uint64_t)(TIP_H + 2),
-            BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA);
-
-        /* Higher-work header chain branching off the SAME tip — its tip+1 is
-         * a DIFFERENT (header-only) block, so the stale child is OFF it. */
-        struct uint256 hdr_h[8];
-        struct block_index *best_header =
-            tsor_build_header_chain(&ms, hdr_h, tip, TIP_H);
-        ms.pindex_best_header = best_header;
-
-        condition_engine_set_main_state(&ms);
-        register_tip_stall_oracle_rebuild();
-        tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
-                                                stub_rebuild);
-        tip_stall_oracle_rebuild_test_force_stall(TIP_H, 400);
-
-        condition_engine_tick();
-
-        /* The stale child is OFF the best-header chain -> tip_fork_stale's
-         * job. We must NOT fire. */
-        bool ok = block_index_get_ancestor(best_header, TIP_H + 1) != NULL;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 0;
-        TSOR_CHECK("stale fork at tip+1 -> detect false (defer to "
-                   "tip_fork_stale)", ok);
-
-        condition_engine_set_main_state(NULL);
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        main_state_free(&ms);
-    }
-
-    /* ── 4. No higher-work header chain (normal at-tip) → detect FALSE. ── */
-    {
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        atomic_store(&g_stub_oracle_ok, true);
-        atomic_store(&g_stub_oracle_height, TIP_H); /* oracle == tip */
-
-        struct main_state ms;
-        main_state_init(&ms);
-        struct uint256 hashes[256];
-        struct block_index *tip = tsor_build_main(&ms, hashes, TIP_H);
-        ms.pindex_best_header = tip; /* no more-work header */
-
-        condition_engine_set_main_state(&ms);
-        register_tip_stall_oracle_rebuild();
-        tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
-                                                stub_rebuild);
-        tip_stall_oracle_rebuild_test_force_stall(TIP_H, 400);
-
-        condition_engine_tick();
-
-        bool ok = condition_engine_get_active_count() == 0;
-        ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 0;
-        TSOR_CHECK("no higher-work header chain -> detect false", ok);
-
-        condition_engine_set_main_state(NULL);
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        main_state_free(&ms);
-    }
-
-    /* ── 5. Tip not stalled (fresh advance) → detect FALSE. ─────────── */
-    {
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        atomic_store(&g_stub_oracle_ok, true);
-        atomic_store(&g_stub_oracle_height, TIP_H + 5);
-
-        struct main_state ms;
-        main_state_init(&ms);
-        struct uint256 hashes[256];
-        struct block_index *tip = tsor_build_main(&ms, hashes, TIP_H);
-        struct uint256 hdr_h[8];
-        struct block_index *best_header =
-            tsor_build_header_chain(&ms, hdr_h, tip, TIP_H);
-        ms.pindex_best_header = best_header;
-
-        condition_engine_set_main_state(&ms);
-        register_tip_stall_oracle_rebuild();
-        tip_stall_oracle_rebuild_test_set_stubs(stub_oracle_height,
-                                                stub_rebuild);
-        /* Do NOT force a stall — first tick only arms the no-advance timer. */
-
-        condition_engine_tick();
-
-        bool ok = condition_engine_get_active_count() == 0;
-        ok = ok && tip_stall_oracle_rebuild_test_rebuild_calls() == 0;
-        TSOR_CHECK("tip not stalled (no sustained window) -> detect false",
-                   ok);
-
-        condition_engine_set_main_state(NULL);
-        condition_engine_reset_for_testing();
-        tip_stall_oracle_rebuild_test_reset();
-        main_state_free(&ms);
-    }
+    failures += tsor_case_nonfork_oracle_ahead(TIP_H);
+    failures += tsor_case_oracle_unreachable(TIP_H);
+    failures += tsor_case_stale_fork_present(TIP_H);
+    failures += tsor_case_no_higher_work_header(TIP_H);
+    failures += tsor_case_tip_not_stalled(TIP_H);
 
     return failures;
 }

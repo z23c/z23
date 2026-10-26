@@ -1630,7 +1630,6 @@ tests/harness/src/test_test_netaddr_classify.c:test_get_group:17
 tests/harness/src/test_testcache.c:test_testcache:130
 tests/harness/src/test_tip_agreement_watch.c:test_tip_agreement_watch:220
 tests/harness/src/test_tip_finalize_stage.c:test_tip_finalize_stage:158
-tests/harness/src/test_tip_stall_oracle_rebuild_condition.c:test_tip_stall_oracle_rebuild_condition:24
 tests/harness/src/test_transaction_wire_evidence.c:test_transaction_wire_evidence:30
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_persist_pair_defers_while_tx_open:21
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_persist_pair_inside_caller_transaction:19
