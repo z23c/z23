@@ -113,8 +113,10 @@ static int spawn_pty_capture_observed_platform(
     const char *const argv[], char *buf, size_t cap, int timeout_ms,
     bool *timed_out)
 {
-    return spawn_capture_merged_observed_platform(
-        argv, buf, cap, timeout_ms, timed_out);
+    (void)argv; (void)timeout_ms;
+    if (buf && cap > 0) buf[0] = '\0';
+    if (timed_out) *timed_out = false;
+    return -1;
 }
 
 #else
