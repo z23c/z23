@@ -407,7 +407,6 @@ static int test_profile_and_verdict_binding(void)
 /* 3. Composition: who said what, and every fail-closed path.               */
 /* ---------------------------------------------------------------------- */
 
-/* Gather the operator-listed trusted keys from the built attestations. */
 static void mod_trusted_keys_from_attestations(
     uint8_t (*trusted)[32],
     const struct zcl_moderation_attestation_v1 *attestations, size_t count)
@@ -416,7 +415,6 @@ static void mod_trusted_keys_from_attestations(
         memcpy(trusted[i], attestations[i].signer_pubkey, 32);
 }
 
-/* Feed every source twice: the duplicate-gossip fixture. */
 static void mod_double_attestation_sources(
     struct zcl_moderation_source_v1 out[8],
     const struct zcl_moderation_source_v1 src[4])
@@ -427,7 +425,6 @@ static void mod_double_attestation_sources(
     }
 }
 
-/* Copy the four quorum sources ahead of this node's own sign-off. */
 static void mod_copy_attestation_sources(
     struct zcl_moderation_source_v1 out[4],
     const struct zcl_moderation_source_v1 src[4])
@@ -515,8 +512,6 @@ static int test_composition_rule(void)
         for (size_t i = 0; i < 3; i++) {
             const struct zcl_moderation_signer_verdict_v1 *found =
                 zcl_moderation_composition_signer_find_v1(quorum, trusted[i]);
-            /* One signer row of a reached quorum: trusted, chain-linked, at
-             * sequence 1 and saying reviewed_ok. */
             ASSERT(found && found->trusted && !found->self &&
                    found->chain_linked && found->sequence == 1u &&
                    found->verdict == ZCL_MODERATION_VERDICT_REVIEWED_OK);
@@ -607,8 +602,6 @@ static int test_composition_rule(void)
                                             &own),
                   ZCL_MODERATION_OK);
         tally = zcl_moderation_composition_tally_v1(own);
-        /* The tally of an own-hidden composition: not served, self present,
-         * and the trusted quorum still reached behind it. */
         ASSERT(!tally.serve && tally.self_present && tally.threshold_met);
         ASSERT_EQ((int)tally.self_verdict, (int)ZCL_MODERATION_VERDICT_HIDDEN);
         ASSERT_EQ((int)tally.reason, (int)ZCL_MODERATION_REASON_SELF_HIDDEN);
