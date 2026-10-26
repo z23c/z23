@@ -407,22 +407,32 @@ static int test_profile_and_verdict_binding(void)
 /* 3. Composition: who said what, and every fail-closed path.               */
 /* ---------------------------------------------------------------------- */
 
-/* One signer row of a reached quorum: trusted, chain-linked, at sequence 1
- * and saying reviewed_ok. */
-static bool mod_signer_row_is_trusted_quorum_ok(
-    const struct zcl_moderation_signer_verdict_v1 *found)
+/* Gather the operator-listed trusted keys from the built attestations. */
+static void mod_trusted_keys_from_attestations(
+    uint8_t (*trusted)[32],
+    const struct zcl_moderation_attestation_v1 *attestations, size_t count)
 {
-    return found && found->trusted && !found->self &&
-           found->chain_linked && found->sequence == 1u &&
-           found->verdict == ZCL_MODERATION_VERDICT_REVIEWED_OK;
+    for (size_t i = 0; i < count; i++)
+        memcpy(trusted[i], attestations[i].signer_pubkey, 32);
 }
 
-/* The tally of an own-hidden composition: not served, self present, and the
- * trusted quorum still reached behind it. */
-static bool mod_tally_is_self_hidden_with_quorum(
-    const struct zcl_moderation_tally_v1 *tally)
+/* Feed every source twice: the duplicate-gossip fixture. */
+static void mod_double_attestation_sources(
+    struct zcl_moderation_source_v1 out[8],
+    const struct zcl_moderation_source_v1 src[4])
 {
-    return !tally->serve && tally->self_present && tally->threshold_met;
+    for (size_t i = 0; i < 4; i++) {
+        out[i] = src[i];
+        out[i + 4u] = src[i];
+    }
+}
+
+/* Copy the four quorum sources ahead of this node's own sign-off. */
+static void mod_copy_attestation_sources(
+    struct zcl_moderation_source_v1 out[4],
+    const struct zcl_moderation_source_v1 src[4])
+{
+    for (size_t i = 0; i < 4; i++) out[i] = src[i];
 }
 
 static int test_composition_rule(void)
@@ -468,8 +478,7 @@ static int test_composition_rule(void)
             ASSERT(mod_source(&src[i], &att[i]));
         }
         uint8_t trusted[3][32];
-        for (size_t i = 0; i < 3; i++)
-            memcpy(trusted[i], att[i].signer_pubkey, 32);
+        mod_trusted_keys_from_attestations(trusted, att, 3);
 
         /* A WHITELIST WOULD SERVE HERE AND THIS MUST NOT: three well-signed
          * reviewed_ok statements, none of them from a key this operator
@@ -506,7 +515,11 @@ static int test_composition_rule(void)
         for (size_t i = 0; i < 3; i++) {
             const struct zcl_moderation_signer_verdict_v1 *found =
                 zcl_moderation_composition_signer_find_v1(quorum, trusted[i]);
-            ASSERT(mod_signer_row_is_trusted_quorum_ok(found));
+            /* One signer row of a reached quorum: trusted, chain-linked, at
+             * sequence 1 and saying reviewed_ok. */
+            ASSERT(found && found->trusted && !found->self &&
+                   found->chain_linked && found->sequence == 1u &&
+                   found->verdict == ZCL_MODERATION_VERDICT_REVIEWED_OK);
         }
         /* Signers come out in ascending pubkey order — stable evidence. */
         for (size_t i = 1;
@@ -540,10 +553,7 @@ static int test_composition_rule(void)
 
         /* DUPLICATE GOSSIP is one statement, not two votes. */
         struct zcl_moderation_source_v1 doubled[8];
-        for (size_t i = 0; i < 4; i++) {
-            doubled[i] = src[i];
-            doubled[i + 4u] = src[i];
-        }
+        mod_double_attestation_sources(doubled, src);
         struct zcl_moderation_composition *deduped = NULL;
         ASSERT_EQ(zcl_moderation_compose_v1(&twoof3, content, doubled, 8,
                                             &deduped),
@@ -588,7 +598,7 @@ static int test_composition_rule(void)
                         ZCL_MODERATION_VERDICT_HIDDEN, 1, NULL, 0x51));
         struct zcl_moderation_source_v1 with_self[5];
         memset(with_self, 0, sizeof(with_self));
-        for (size_t i = 0; i < 4; i++) with_self[i] = src[i];
+        mod_copy_attestation_sources(with_self, src);
         ASSERT(mod_source(&with_self[4], &self_hide));
         struct zcl_moderation_local_policy_v1 selfish =
             mod_local_policy(profile, self_hide.signer_pubkey, trusted, 3, 2);
@@ -597,7 +607,9 @@ static int test_composition_rule(void)
                                             &own),
                   ZCL_MODERATION_OK);
         tally = zcl_moderation_composition_tally_v1(own);
-        ASSERT(mod_tally_is_self_hidden_with_quorum(&tally));
+        /* The tally of an own-hidden composition: not served, self present,
+         * and the trusted quorum still reached behind it. */
+        ASSERT(!tally.serve && tally.self_present && tally.threshold_met);
         ASSERT_EQ((int)tally.self_verdict, (int)ZCL_MODERATION_VERDICT_HIDDEN);
         ASSERT_EQ((int)tally.reason, (int)ZCL_MODERATION_REASON_SELF_HIDDEN);
 
