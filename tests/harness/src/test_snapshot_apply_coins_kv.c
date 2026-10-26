@@ -113,6 +113,61 @@ static bool sa_flip_body_byte(const char *path)
     return ok;
 }
 
+static bool sa_schema_ready(sqlite3 *db)
+{
+    return db && coins_kv_ensure_schema(db);
+}
+
+static bool sa_opened_with_expected_count(const struct uss_handle *h,
+                                          const struct uss_header *hdr,
+                                          uint64_t expected)
+{
+    return h != NULL && hdr->count == expected;
+}
+
+static bool sa_applied_exact_count(sqlite3 *db, struct uss_handle *h,
+                                   uint64_t count, uint64_t expected)
+{
+    struct boot_snapshot_apply_result ar = {0};
+    return boot_snapshot_apply_to_coins_kv(db, h, count, &ar) &&
+           ar.inserted == expected &&
+           ar.emitted == (int64_t)expected;
+}
+
+static bool sa_commitment_matches_root(sqlite3 *db, const uint8_t root[32])
+{
+    uint8_t got_root[32] = {0};
+    return coins_kv_commitment(db, got_root) == 0 &&
+           memcmp(got_root, root, 32) == 0;
+}
+
+static bool sa_reset_destination_empty(sqlite3 *db)
+{
+    return db && coins_kv_reset_for_reseed(db) && coins_kv_count(db) == 0;
+}
+
+static bool sa_wrong_count_rolls_back(sqlite3 *db, struct uss_handle *h,
+                                      uint64_t count, uint64_t expected)
+{
+    struct boot_snapshot_apply_result ar = {0};
+    return !boot_snapshot_apply_to_coins_kv(db, h, count + 1, &ar) &&
+           ar.inserted == expected &&
+           ar.emitted == (int64_t)expected &&
+           coins_kv_count(db) == 0 &&
+           !sa_migration_stamp_present(db);
+}
+
+static bool sa_refused_body_sha3_mismatch(const struct uss_handle *h,
+                                          const char *err)
+{
+    return h == NULL && strcmp(err, "body sha3 mismatch") == 0;
+}
+
+static bool sa_refusal_left_coins_kv_empty(sqlite3 *db)
+{
+    return db && coins_kv_count(db) == 0 && !sa_migration_stamp_present(db);
+}
+
 int test_snapshot_apply_coins_kv(void)
 {
     printf("\n=== snapshot_apply_coins_kv ===\n");
@@ -132,7 +187,7 @@ int test_snapshot_apply_coins_kv(void)
     bool opened = progress_store_open(dir);
     SA_CHECK("progress store opens", opened);
     sqlite3 *pdb = opened ? progress_store_db() : NULL;
-    SA_CHECK("coins_kv schema", pdb && coins_kv_ensure_schema(pdb));
+    SA_CHECK("coins_kv schema", sa_schema_ready(pdb));
     SA_CHECK("destination starts empty", pdb && coins_kv_count(pdb) == 0);
 
     struct uss_header hdr;
@@ -140,19 +195,14 @@ int test_snapshot_apply_coins_kv(void)
     struct uss_handle *h = uss_open(snap_path, true, expected_root,
                                     &hdr, err, sizeof(err));
     SA_CHECK("uss_open verifies body SHA3 and expected root",
-             h != NULL && hdr.count == expected_count);
+             sa_opened_with_expected_count(h, &hdr, expected_count));
     if (h && pdb) {
-        struct boot_snapshot_apply_result ar = {0};
         SA_CHECK("production helper applies exact count",
-                 boot_snapshot_apply_to_coins_kv(pdb, h, hdr.count, &ar) &&
-                 ar.inserted == expected_count &&
-                 ar.emitted == (int64_t)expected_count);
-        uint8_t got_root[32] = {0};
+                 sa_applied_exact_count(pdb, h, hdr.count, expected_count));
         SA_CHECK("destination count matches snapshot",
                  coins_kv_count(pdb) == (int64_t)expected_count);
         SA_CHECK("destination commitment matches snapshot root",
-                 coins_kv_commitment(pdb, got_root) == 0 &&
-                 memcmp(got_root, expected_root, 32) == 0);
+                 sa_commitment_matches_root(pdb, expected_root));
         SA_CHECK("migration stamp committed with coins",
                  sa_migration_stamp_present(pdb));
         uss_close(h);
@@ -161,36 +211,28 @@ int test_snapshot_apply_coins_kv(void)
     }
 
     SA_CHECK("reset destination before mismatch test",
-             pdb && coins_kv_reset_for_reseed(pdb) &&
-             coins_kv_count(pdb) == 0);
+             sa_reset_destination_empty(pdb));
     h = uss_open(snap_path, true, expected_root, &hdr, err, sizeof(err));
     SA_CHECK("uss_open still verifies clean snapshot", h != NULL);
     if (h && pdb) {
-        struct boot_snapshot_apply_result ar = {0};
         SA_CHECK("wrong expected count rolls back",
-                 !boot_snapshot_apply_to_coins_kv(pdb, h, hdr.count + 1, &ar) &&
-                 ar.inserted == expected_count &&
-                 ar.emitted == (int64_t)expected_count &&
-                 coins_kv_count(pdb) == 0 &&
-                 !sa_migration_stamp_present(pdb));
+                 sa_wrong_count_rolls_back(pdb, h, hdr.count, expected_count));
         uss_close(h);
     } else if (h) {
         uss_close(h);
     }
 
     SA_CHECK("reset destination before tamper test",
-             pdb && coins_kv_reset_for_reseed(pdb) &&
-             coins_kv_count(pdb) == 0);
+             sa_reset_destination_empty(pdb));
     SA_CHECK("snapshot body tampered", sa_flip_body_byte(snap_path));
     err[0] = '\0';
     h = uss_open(snap_path, true, expected_root, &hdr, err, sizeof(err));
     SA_CHECK("tampered snapshot refused before apply",
-             h == NULL && strcmp(err, "body sha3 mismatch") == 0);
+             sa_refused_body_sha3_mismatch(h, err));
     if (h)
         uss_close(h);
     SA_CHECK("tampered refusal leaves coins_kv empty",
-             pdb && coins_kv_count(pdb) == 0 &&
-             !sa_migration_stamp_present(pdb));
+             sa_refusal_left_coins_kv_empty(pdb));
 
     progress_store_close();
     test_cleanup_tmpdir(dir);

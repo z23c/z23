@@ -1943,7 +1943,6 @@ tests/harness/src/test_simnet_wallet_import_backup.c:part1_import_rescan_spend:5
 tests/harness/src/test_simnet_wire_ibd.c:swi_run_malformed_body:18
 tests/harness/src/test_simnet_zmsg_onchain.c:test_simnet_zmsg_onchain:33
 tests/harness/src/test_slp.c:test_slp:176
-tests/harness/src/test_snapshot_apply_coins_kv.c:test_snapshot_apply_coins_kv:27
 tests/harness/src/test_soak_attestation.c:test_sync_benchmark_receipt_wellformed:27
 tests/harness/src/test_sovereignty_guard.c:test_sovereignty_guard:63
 tests/harness/src/test_sprout_groth16_kat.c:test_sprout_groth16_kat:26
