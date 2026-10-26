@@ -161,24 +161,9 @@ static int ai_genesis_body_folds_empty(const char *dir)
     return failures;
 }
 
-int test_address_index(void);
-int test_address_index(void)
+static int ai_check_enable_gate(void)
 {
     int failures = 0;
-    char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "address_index", "main");
-
-    AI_CHECK("progress_store opens", progress_store_open(dir));
-    /* Wave A2 split: the address_index fold + keyed dumper query run on the
-     * projection handle. Open it (same physical file) so the dumper assertions
-     * below observe the rows the raw primitives commit. */
-    AI_CHECK("projection_store opens", projection_store_open(dir));
-    /* A4/A3 physical split: address_index is a projection table written and read
-     * through the projection handle (progress.kv), a DIFFERENT file from the
-     * consensus.db kernel. Fold + dump on that handle so they see the same rows. */
-    sqlite3 *db = projection_store_db();
-    AI_CHECK("db handle", db != NULL);
-
     /* OMNISCIENCE default: with no -addressindex arg the projection is ON so a
      * plain boot builds the script-appearance catalog. */
     {
@@ -205,7 +190,12 @@ int test_address_index(void)
         ParseParameters(1, noargs);
         address_index_enabled_reset_for_test();
     }
+    return failures;
+}
 
+static int ai_check_schema_bootstrap(sqlite3 *db)
+{
+    int failures = 0;
     /* Cursor read before schema exists is a clean cursor=-1 (not an error). */
     {
         int64_t c = 999;
@@ -215,88 +205,32 @@ int test_address_index(void)
 
     AI_CHECK("ensure_schema", address_index_ensure_schema(db));
     AI_CHECK("ensure_schema idempotent", address_index_ensure_schema(db));
+    return failures;
+}
 
-    /* ── scripts (exercise every classification branch) ──────────── */
-    unsigned char scA[25]; /* P2PKH */
-    scA[0] = 0x76; scA[1] = 0xa9; scA[2] = 20;
-    for (int i = 0; i < 20; i++) scA[3 + i] = (unsigned char)(0x10 + i);
-    scA[23] = 0x88; scA[24] = 0xac;
-
-    unsigned char scB[8] = { 0x6a, 'Z','N','A','M', 0x01, 0x02, 0x03 }; /* OP_RETURN */
-    unsigned char scC[5] = { 0x51, 0x52, 0x53, 0x54, 0x55 };            /* nonstandard */
-    unsigned char scD[25]; /* another P2PKH */
-    scD[0] = 0x76; scD[1] = 0xa9; scD[2] = 20;
-    for (int i = 0; i < 20; i++) scD[3 + i] = (unsigned char)(0xA0 + i);
-    scD[23] = 0x88; scD[24] = 0xac;
-
-    uint8_t shA[32], shB[32], shC[32], shD[32];
-    address_index_scripthash(scA, sizeof(scA), shA);
-    address_index_scripthash(scB, sizeof(scB), shB);
-    address_index_scripthash(scC, sizeof(scC), shC);
-    address_index_scripthash(scD, sizeof(scD), shD);
-
+static int ai_check_scripthash_identity(const unsigned char *scA,
+                                        size_t lenA, const uint8_t shA[32],
+                                        const uint8_t shB[32],
+                                        const uint8_t shC[32],
+                                        const uint8_t shD[32])
+{
+    int failures = 0;
     /* scripthash is exactly sha3_256(scriptPubKey), and distinct per script. */
     {
         uint8_t ref[32];
-        sha3_256(scA, sizeof(scA), ref);
+        sha3_256(scA, lenA, ref);
         AI_CHECK("scripthash == sha3_256(script)", memcmp(shA, ref, 32) == 0);
         AI_CHECK("distinct scripthashes",
                  memcmp(shA, shB, 32) && memcmp(shA, shC, 32) &&
                  memcmp(shA, shD, 32) && memcmp(shB, shC, 32));
     }
+    return failures;
+}
 
-    /* ── block 100: coinbase(A) + tx_p(B,C) ──────────────────────── */
-    struct block blk100; block_init(&blk100);
-    blk100.num_vtx = 2;
-    blk100.vtx = zcl_calloc(2, sizeof(struct transaction), "b100");
-    transaction_init(&blk100.vtx[0]);
-    transaction_init(&blk100.vtx[1]);
-    ai_set_txid(&blk100.vtx[0], 0xC0); /* coinbase, txid CB */
-    ai_set_txid(&blk100.vtx[1], 0x50); /* txid P */
-    ai_set_spend(&blk100.vtx[0], NULL, 0);            /* coinbase null prevout */
-    {
-        struct uint256 dummy; uint256_set_null(&dummy); dummy.data[0] = 0x77;
-        ai_set_spend(&blk100.vtx[1], &dummy, 0);      /* spends a non-indexed prevout */
-    }
-    {
-        int64_t vA[1] = { 1000 };
-        const unsigned char *sA[1] = { scA }; size_t lA[1] = { sizeof(scA) };
-        ai_set_vouts(&blk100.vtx[0], 1, vA, sA, lA);
-        int64_t vBC[2] = { 0, 2000 };
-        const unsigned char *sBC[2] = { scB, scC };
-        size_t lBC[2] = { sizeof(scB), sizeof(scC) };
-        ai_set_vouts(&blk100.vtx[1], 2, vBC, sBC, lBC);
-    }
-
-    /* ── block 101: tx_s spends (CB,0) -> creates D ───────────────── */
-    struct block blk101; block_init(&blk101);
-    blk101.num_vtx = 1;
-    blk101.vtx = zcl_calloc(1, sizeof(struct transaction), "b101");
-    transaction_init(&blk101.vtx[0]);
-    ai_set_txid(&blk101.vtx[0], 0x51); /* txid S */
-    ai_set_spend(&blk101.vtx[0], &blk100.vtx[0].hash, 0); /* spends A's output */
-    {
-        int64_t vD[1] = { 900 };
-        const unsigned char *sD[1] = { scD }; size_t lD[1] = { sizeof(scD) };
-        ai_set_vouts(&blk101.vtx[0], 1, vD, sD, lD);
-    }
-
-    /* Fold ascending, maintaining the running digest. */
-    uint8_t digest[32]; memset(digest, 0, 32);
-    int added100 = 0, added101 = 0;
-    AI_CHECK("put block 100",
-             address_index_put_block(db, &blk100, 100, digest, &added100));
-    AI_CHECK("block 100 added 3 rows", added100 == 3);
-    uint8_t digest_after_100[32]; memcpy(digest_after_100, digest, 32);
-    AI_CHECK("digest advanced after block 100",
-             memcmp(digest_after_100, (uint8_t[32]){0}, 32) != 0);
-    AI_CHECK("put block 101",
-             address_index_put_block(db, &blk101, 101, digest, &added101));
-    AI_CHECK("block 101 added 1 row", added101 == 1);
-    AI_CHECK("digest advanced after block 101",
-             memcmp(digest, digest_after_100, 32) != 0);
-    uint8_t digest_full[32]; memcpy(digest_full, digest, 32);
-
+static int ai_check_spent_appearance(sqlite3 *db, const uint8_t shA[32],
+                                     const struct block *blk101)
+{
+    int failures = 0;
     /* ── appearance + spent-link correctness ─────────────────────── */
     {
         int64_t bal = -1;
@@ -313,13 +247,22 @@ int test_address_index(void)
                  n == 1 && json_get_int(json_get(&row, "spent_height")) == 101);
         /* spent_by_txid must equal S (block101 tx0). */
         char shex[65];
-        HexStr(blk101.vtx[0].hash.data, 32, false, shex, sizeof(shex));
+        HexStr(blk101->vtx[0].hash.data, 32, false, shex, sizeof(shex));
         AI_CHECK("A: spent_by == S",
                  n == 1 &&
                  strcmp(json_get_str(json_get(&row, "spent_by_txid")), shex) == 0);
         AI_CHECK("A: balance 0 (spent)", bal == 0);
         if (n == 1) json_free(&row);
     }
+    return failures;
+}
+
+static int ai_check_remaining_appearances(sqlite3 *db,
+                                          const uint8_t shB[32],
+                                          const uint8_t shC[32],
+                                          const uint8_t shD[32])
+{
+    int failures = 0;
     {
         int64_t bal = -1;
         struct json_value row;
@@ -351,10 +294,15 @@ int test_address_index(void)
         AI_CHECK("absent scripthash -> 0 rows",
                  ai_query(db, shX, &bal, NULL) == 0 && bal == 0);
     }
+    return failures;
+}
 
-    /* Row count reflects the 4 outputs across both blocks. */
-    AI_CHECK("row_count == 4", address_index_row_count(db) == 4);
-
+static int ai_check_idempotent_refold(sqlite3 *db,
+                                      const struct block *blk100,
+                                      const uint8_t digest[32],
+                                      const uint8_t shA[32])
+{
+    int failures = 0;
     /* ── idempotent re-fold PRESERVES rows + spent links ─────────── */
     /* Row writes are INSERT OR IGNORE, so re-folding a block adds no rows and
      * never clobbers a spent link recorded by a later block (the digest is a
@@ -364,7 +312,7 @@ int test_address_index(void)
         uint8_t d2[32]; memcpy(d2, digest, 32);
         int added = -1;
         AI_CHECK("re-put block 100 idempotent (rows)",
-                 address_index_put_block(db, &blk100, 100, d2, &added));
+                 address_index_put_block(db, blk100, 100, d2, &added));
         AI_CHECK("re-put added 0 rows (IGNORE)", added == 0);
         int64_t bal = -1;
         struct json_value row;
@@ -374,7 +322,13 @@ int test_address_index(void)
         AI_CHECK("A balance still 0 after re-put", bal == 0);
         if (n == 1) json_free(&row);
     }
+    return failures;
+}
 
+static int ai_check_cursor_digest_persist(sqlite3 *db,
+                                          const uint8_t digest_full[32])
+{
+    int failures = 0;
     /* ── cursor + digest persist round-trip ──────────────────────── */
     AI_CHECK("set_cursor", address_index_set_cursor(db, 101, digest_full));
     {
@@ -386,7 +340,15 @@ int test_address_index(void)
                  address_index_get_digest(db, dg, &found) && found &&
                  memcmp(dg, digest_full, 32) == 0);
     }
+    return failures;
+}
 
+static int ai_check_drop_and_rederive(sqlite3 *db,
+                                      const struct block *blk100,
+                                      const struct block *blk101,
+                                      const uint8_t digest_full[32])
+{
+    int failures = 0;
     /* ── drop-and-rederive is deterministic (rebuildable) ────────── */
     AI_CHECK("drop", address_index_drop(db));
     AI_CHECK("row_count 0 after drop", address_index_row_count(db) == 0);
@@ -400,15 +362,20 @@ int test_address_index(void)
         uint8_t d[32]; memset(d, 0, 32);
         int a1 = 0, a2 = 0;
         AI_CHECK("refold block 100",
-                 address_index_put_block(db, &blk100, 100, d, &a1));
+                 address_index_put_block(db, blk100, 100, d, &a1));
         AI_CHECK("refold block 101",
-                 address_index_put_block(db, &blk101, 101, d, &a2));
+                 address_index_put_block(db, blk101, 101, d, &a2));
         AI_CHECK("rederived digest identical",
                  memcmp(d, digest_full, 32) == 0);
         AI_CHECK("rederived row_count == 4",
                  address_index_row_count(db) == 4);
     }
+    return failures;
+}
 
+static int ai_check_dump_state_queries(const uint8_t shC[32])
+{
+    int failures = 0;
     /* ── dumpstate keyed query smoke test ────────────────────────── */
     {
         char hex[65];
@@ -438,7 +405,12 @@ int test_address_index(void)
                  json_get(&out, "error") != NULL);
         json_free(&out);
     }
+    return failures;
+}
 
+static int ai_check_fold_throughput(sqlite3 *db)
+{
+    int failures = 0;
     /* ── throughput measurement on a synthetic fixture ───────────── */
     {
         AI_CHECK("drop for perf fixture", address_index_drop(db));
@@ -489,7 +461,12 @@ int test_address_index(void)
                total_rows, N, (double)elapsed_us / 1000.0, rps, bps);
         AI_CHECK("perf: nonzero throughput", rps > 0);
     }
+    return failures;
+}
 
+static int ai_check_backfill_safety(sqlite3 *db, const char *dir)
+{
+    int failures = 0;
     /* ── backfill safety rails (index_fold_guard) ────────────────
      * These are the always-on hardening: never fill the disk, never spin below
      * a snapshot-seed floor — both surface a NAMED typed blocker. */
@@ -618,6 +595,121 @@ int test_address_index(void)
 
         blocker_reset_for_testing();
     }
+    return failures;
+}
+
+int test_address_index(void);
+int test_address_index(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "address_index", "main");
+
+    AI_CHECK("progress_store opens", progress_store_open(dir));
+    /* Wave A2 split: the address_index fold + keyed dumper query run on the
+     * projection handle. Open it (same physical file) so the dumper assertions
+     * below observe the rows the raw primitives commit. */
+    AI_CHECK("projection_store opens", projection_store_open(dir));
+    /* A4/A3 physical split: address_index is a projection table written and read
+     * through the projection handle (progress.kv), a DIFFERENT file from the
+     * consensus.db kernel. Fold + dump on that handle so they see the same rows. */
+    sqlite3 *db = projection_store_db();
+    AI_CHECK("db handle", db != NULL);
+
+    failures += ai_check_enable_gate();
+    failures += ai_check_schema_bootstrap(db);
+
+    /* ── scripts (exercise every classification branch) ──────────── */
+    unsigned char scA[25]; /* P2PKH */
+    scA[0] = 0x76; scA[1] = 0xa9; scA[2] = 20;
+    for (int i = 0; i < 20; i++) scA[3 + i] = (unsigned char)(0x10 + i);
+    scA[23] = 0x88; scA[24] = 0xac;
+
+    unsigned char scB[8] = { 0x6a, 'Z','N','A','M', 0x01, 0x02, 0x03 }; /* OP_RETURN */
+    unsigned char scC[5] = { 0x51, 0x52, 0x53, 0x54, 0x55 };            /* nonstandard */
+    unsigned char scD[25]; /* another P2PKH */
+    scD[0] = 0x76; scD[1] = 0xa9; scD[2] = 20;
+    for (int i = 0; i < 20; i++) scD[3 + i] = (unsigned char)(0xA0 + i);
+    scD[23] = 0x88; scD[24] = 0xac;
+
+    uint8_t shA[32], shB[32], shC[32], shD[32];
+    address_index_scripthash(scA, sizeof(scA), shA);
+    address_index_scripthash(scB, sizeof(scB), shB);
+    address_index_scripthash(scC, sizeof(scC), shC);
+    address_index_scripthash(scD, sizeof(scD), shD);
+
+    failures += ai_check_scripthash_identity(scA, sizeof(scA), shA, shB,
+                                             shC, shD);
+
+    /* ── block 100: coinbase(A) + tx_p(B,C) ──────────────────────── */
+    struct block blk100; block_init(&blk100);
+    blk100.num_vtx = 2;
+    blk100.vtx = zcl_calloc(2, sizeof(struct transaction), "b100");
+    transaction_init(&blk100.vtx[0]);
+    transaction_init(&blk100.vtx[1]);
+    ai_set_txid(&blk100.vtx[0], 0xC0); /* coinbase, txid CB */
+    ai_set_txid(&blk100.vtx[1], 0x50); /* txid P */
+    ai_set_spend(&blk100.vtx[0], NULL, 0);            /* coinbase null prevout */
+    {
+        struct uint256 dummy; uint256_set_null(&dummy); dummy.data[0] = 0x77;
+        ai_set_spend(&blk100.vtx[1], &dummy, 0);      /* spends a non-indexed prevout */
+    }
+    {
+        int64_t vA[1] = { 1000 };
+        const unsigned char *sA[1] = { scA }; size_t lA[1] = { sizeof(scA) };
+        ai_set_vouts(&blk100.vtx[0], 1, vA, sA, lA);
+        int64_t vBC[2] = { 0, 2000 };
+        const unsigned char *sBC[2] = { scB, scC };
+        size_t lBC[2] = { sizeof(scB), sizeof(scC) };
+        ai_set_vouts(&blk100.vtx[1], 2, vBC, sBC, lBC);
+    }
+
+    /* ── block 101: tx_s spends (CB,0) -> creates D ───────────────── */
+    struct block blk101; block_init(&blk101);
+    blk101.num_vtx = 1;
+    blk101.vtx = zcl_calloc(1, sizeof(struct transaction), "b101");
+    transaction_init(&blk101.vtx[0]);
+    ai_set_txid(&blk101.vtx[0], 0x51); /* txid S */
+    ai_set_spend(&blk101.vtx[0], &blk100.vtx[0].hash, 0); /* spends A's output */
+    {
+        int64_t vD[1] = { 900 };
+        const unsigned char *sD[1] = { scD }; size_t lD[1] = { sizeof(scD) };
+        ai_set_vouts(&blk101.vtx[0], 1, vD, sD, lD);
+    }
+
+    /* Fold ascending, maintaining the running digest. */
+    uint8_t digest[32]; memset(digest, 0, 32);
+    int added100 = 0, added101 = 0;
+    AI_CHECK("put block 100",
+             address_index_put_block(db, &blk100, 100, digest, &added100));
+    AI_CHECK("block 100 added 3 rows", added100 == 3);
+    uint8_t digest_after_100[32]; memcpy(digest_after_100, digest, 32);
+    AI_CHECK("digest advanced after block 100",
+             memcmp(digest_after_100, (uint8_t[32]){0}, 32) != 0);
+    AI_CHECK("put block 101",
+             address_index_put_block(db, &blk101, 101, digest, &added101));
+    AI_CHECK("block 101 added 1 row", added101 == 1);
+    AI_CHECK("digest advanced after block 101",
+             memcmp(digest, digest_after_100, 32) != 0);
+    uint8_t digest_full[32]; memcpy(digest_full, digest, 32);
+
+    failures += ai_check_spent_appearance(db, shA, &blk101);
+    failures += ai_check_remaining_appearances(db, shB, shC, shD);
+
+    /* Row count reflects the 4 outputs across both blocks. */
+    AI_CHECK("row_count == 4", address_index_row_count(db) == 4);
+
+    failures += ai_check_idempotent_refold(db, &blk100, digest, shA);
+
+    failures += ai_check_cursor_digest_persist(db, digest_full);
+
+    failures += ai_check_drop_and_rederive(db, &blk100, &blk101, digest_full);
+
+    failures += ai_check_dump_state_queries(shC);
+
+    failures += ai_check_fold_throughput(db);
+
+    failures += ai_check_backfill_safety(db, dir);
 
     /* cleanup */
     for (size_t i = 0; i < blk100.num_vtx; i++)
