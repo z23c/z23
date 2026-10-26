@@ -301,6 +301,76 @@ bool platform_toolchain_prepare_archive_objects(const char *const paths[],
     return true;
 }
 
+#if defined(__APPLE__)
+/* Reads the decimal member size in hdr[48..57]; false on malformed or
+ * overflowing text. */
+static bool tc_archive_parse_member_size(const char *hdr,
+                                         unsigned long long *member_size)
+{
+    bool saw_digit = false;
+    bool saw_padding = false;
+    for (size_t i = 0; i < 10; i++) {
+        unsigned char ch = (unsigned char)hdr[48 + i];
+        if (ch >= '0' && ch <= '9' && !saw_padding) {
+            unsigned digit = (unsigned)(ch - '0');
+            if (*member_size > (ULLONG_MAX - digit) / 10)
+                return false;
+            *member_size = *member_size * 10 + digit;
+            saw_digit = true;
+        } else if (ch == ' ' && saw_digit) {
+            saw_padding = true;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Normalizes the header of the member at *off and advances *off past its
+ * payload and pad byte. False on a malformed or truncated member. */
+static bool tc_normalize_archive_member(char *buf, ssize_t total, off_t *off)
+{
+    if (total - *off < 60)
+        return false;
+    char *hdr = buf + *off;
+    if (hdr[58] != '`' || hdr[59] != '\n')
+        return false;
+    unsigned long long member_size = 0;
+    if (!tc_archive_parse_member_size(hdr, &member_size))
+        return false;
+    *off += 60;
+    if (member_size > (unsigned long long)(total - *off))
+        return false;
+    /* date field starts at offset 16 and is 12 bytes. */
+    memset(hdr + 16, ' ', 12);
+    hdr[16] = '0';
+    memcpy(hdr + 40, "100644  ", 8);
+    off_t payload_size = (off_t)member_size;
+    *off += payload_size;
+    if (payload_size % 2 != 0) {
+        if (*off >= total)
+            return false;
+        (*off)++;
+    }
+    return true;
+}
+
+/* Rewinds fd to the start and writes the buffer back over the original. */
+static bool tc_normalize_write_image(int fd, char *buf, ssize_t total)
+{
+    if (lseek(fd, 0, SEEK_SET) != 0)
+        return false;
+    off_t written = 0;
+    while (written < total) {
+        ssize_t w = write(fd, buf + written, (size_t)(total - written));
+        if (w <= 0)
+            return false;
+        written += w;
+    }
+    return true;
+}
+#endif
+
 bool platform_toolchain_normalize_archive(const char *path)
 {
 #if defined(__APPLE__)
@@ -347,74 +417,16 @@ bool platform_toolchain_normalize_archive(const char *path)
      * Header layout: name[16] date[12] uid[6] gid[6] mode[8] size[10] `\n[2]. */
     off_t off = (off_t)(sizeof(magic) - 1);
     while (off < total) {
-        if (total - off < 60) {
+        if (!tc_normalize_archive_member(buf, total, &off)) {
             free(buf);
             close(fd);
             return false;
-        }
-        char *hdr = buf + off;
-        if (hdr[58] != '`' || hdr[59] != '\n') {
-            free(buf);
-            close(fd);
-            return false;
-        }
-        unsigned long long member_size = 0;
-        bool saw_digit = false;
-        bool saw_padding = false;
-        for (size_t i = 0; i < 10; i++) {
-            unsigned char ch = (unsigned char)hdr[48 + i];
-            if (ch >= '0' && ch <= '9' && !saw_padding) {
-                unsigned digit = (unsigned)(ch - '0');
-                if (member_size > (ULLONG_MAX - digit) / 10) {
-                    free(buf);
-                    close(fd);
-                    return false;
-                }
-                member_size = member_size * 10 + digit;
-                saw_digit = true;
-            } else if (ch == ' ' && saw_digit) {
-                saw_padding = true;
-            } else {
-                free(buf);
-                close(fd);
-                return false;
-            }
-        }
-        off += 60;
-        if (member_size > (unsigned long long)(total - off)) {
-            free(buf);
-            close(fd);
-            return false;
-        }
-        /* date field starts at offset 16 and is 12 bytes. */
-        memset(hdr + 16, ' ', 12);
-        hdr[16] = '0';
-        memcpy(hdr + 40, "100644  ", 8);
-        off_t payload_size = (off_t)member_size;
-        off += payload_size;
-        if (payload_size % 2 != 0) {
-            if (off >= total) {
-                free(buf);
-                close(fd);
-                return false;
-            }
-            off++;
         }
     }
-    if (lseek(fd, 0, SEEK_SET) != 0) {
+    if (!tc_normalize_write_image(fd, buf, total)) {
         free(buf);
         close(fd);
         return false;
-    }
-    off_t written = 0;
-    while (written < total) {
-        ssize_t w = write(fd, buf + written, (size_t)(total - written));
-        if (w <= 0) {
-            free(buf);
-            close(fd);
-            return false;
-        }
-        written += w;
     }
     free(buf);
     close(fd);
@@ -558,20 +570,12 @@ static bool tc_capture_runtime_files(platform_toolchain_query_fn query_fn,
 }
 #endif
 
-bool platform_toolchain_capture_descriptor(
+#if defined(__linux__)
+static bool tc_capture_descriptor_linux(
     platform_toolchain_query_fn query_fn,
     void *query_ctx,
     struct platform_toolchain_descriptor *out)
 {
-    if (!query_fn || !out)
-        return false;
-    memset(out, 0, sizeof(*out));
-
-    if (!platform_toolchain_canonical_target(
-            out->target, sizeof(out->target)))
-        return false;
-
-#if defined(__linux__)
     const char *compiler = "/usr/bin/cc";
     if (!tc_resolve_tool(compiler, out->compiler_driver,
                          sizeof(out->compiler_driver)))
@@ -610,8 +614,13 @@ bool platform_toolchain_capture_descriptor(
         return false;
 
     return true;
-
+}
 #elif defined(__APPLE__)
+static bool tc_capture_descriptor_apple(
+    platform_toolchain_query_fn query_fn,
+    void *query_ctx,
+    struct platform_toolchain_descriptor *out)
+{
     const char *compiler = "/usr/bin/cc";
     if (!tc_copy_string(out->platform_contract,
                         sizeof(out->platform_contract),
@@ -652,6 +661,26 @@ bool platform_toolchain_capture_descriptor(
         return false;
 
     return true;
+}
+#endif
+
+bool platform_toolchain_capture_descriptor(
+    platform_toolchain_query_fn query_fn,
+    void *query_ctx,
+    struct platform_toolchain_descriptor *out)
+{
+    if (!query_fn || !out)
+        return false;
+    memset(out, 0, sizeof(*out));
+
+    if (!platform_toolchain_canonical_target(
+            out->target, sizeof(out->target)))
+        return false;
+
+#if defined(__linux__)
+    return tc_capture_descriptor_linux(query_fn, query_ctx, out);
+#elif defined(__APPLE__)
+    return tc_capture_descriptor_apple(query_fn, query_ctx, out);
 #else
     (void)query_fn;
     (void)query_ctx;
