@@ -90,7 +90,146 @@ static void aii_cleanup(const char *dir)
     rmdir(dir);
 }
 
+/* ── Byte-level mutation helpers ────────────────────────────── */
+
+/* Overwrite len bytes at offset in an existing file; a no-op when
+ * the file cannot be opened. */
+static void aii_overwrite_bytes_at(const char *path, long offset,
+                                    const void *data, size_t len)
+{
+    FILE *f = fopen(path, "r+b");
+    if (f) {
+        fseek(f, offset, SEEK_SET);
+        fwrite(data, 1, len, f);
+        fclose(f);
+    }
+}
+
+/* Append a 256-byte zero pad to the end of path; a no-op when the
+ * file cannot be opened. */
+static void aii_append_zero_pad(const char *path)
+{
+    FILE *f = fopen(path, "ab");
+    if (f) {
+        uint8_t pad[256] = {0};
+        fwrite(pad, 1, sizeof(pad), f);
+        fclose(f);
+    }
+}
+
+/* True when any entry name in dir contains ".corrupt.". */
+static bool aii_dir_has_corrupt_entry(const char *dir)
+{
+    bool renamed_exists = false;
+    DIR *d = opendir(dir);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (strstr(ent->d_name, ".corrupt.")) {
+                renamed_exists = true;
+                break;
+            }
+        }
+        closedir(d);
+    }
+    return renamed_exists;
+}
+
 /* ── Tests ──────────────────────────────────────────────────── */
+
+/* Case 1: no body file in the datadir. Returns the failure count. */
+static int aii_case_body_missing(void)
+{
+    int failures = 0;
+    printf("aii: body missing... ");
+    char dir[256]; aii_tmp_dir(dir, sizeof(dir), "body_missing");
+    char err[256] = {0};
+    enum aii_verdict v = aii_verify(dir, err, sizeof(err));
+    bool ok = v == AII_BODY_MISSING;
+    aii_cleanup(dir);
+    if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", aii_verdict_name(v)); failures++; }
+    return failures;
+}
+
+/* Case 2: first-run upgrade path (body present, no sidecar). */
+static int aii_case_sidecar_missing_accepted(void)
+{
+    int failures = 0;
+    printf("aii: sidecar missing is accepted... ");
+    char dir[256]; aii_tmp_dir(dir, sizeof(dir), "side_missing");
+    uint8_t body[] = {0xAB, 0xCD, 0xEF, 0x12, 0x34};
+    aii_write_body(dir, body, sizeof(body));
+    char err[256] = {0};
+    enum aii_verdict v = aii_verify(dir, err, sizeof(err));
+    bool ok = v == AII_SIDECAR_MISSING;
+    aii_cleanup(dir);
+    if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", aii_verdict_name(v)); failures++; }
+    return failures;
+}
+
+/* Case 3: write the sidecar, then verify reports AII_OK. */
+static int aii_case_write_and_verify(void)
+{
+    int failures = 0;
+    printf("aii: write sidecar + verify ok... ");
+    char dir[256]; aii_tmp_dir(dir, sizeof(dir), "write_ok");
+    uint8_t body[4096];
+    for (size_t i = 0; i < sizeof(body); i++) body[i] = (uint8_t)(i * 7 + 1);
+    aii_write_body(dir, body, sizeof(body));
+
+    bool wrote = aii_write_sidecar(dir).ok;
+    char side[1024];
+    snprintf(side, sizeof(side), "%s/peers.dat.sha3", dir);
+    bool exists = aii_file_exists(side);
+
+    char err[256] = {0};
+    enum aii_verdict v = aii_verify(dir, err, sizeof(err));
+    bool ok = wrote && exists && v == AII_OK;
+
+    struct stat st;
+    if (stat(side, &st) == 0) ok = ok && st.st_size == AII_SIDECAR_BYTES;
+
+    aii_cleanup(dir);
+    if (ok) printf("OK\n"); else { printf("FAIL (wrote=%d exists=%d verdict=%s)\n", wrote, exists, aii_verdict_name(v)); failures++; }
+    return failures;
+}
+
+/* Case 10: repeated sidecar writes are idempotent. */
+static int aii_case_overwrite_idempotent(void)
+{
+    int failures = 0;
+    printf("aii: sidecar overwrite is idempotent... ");
+    char dir[256]; aii_tmp_dir(dir, sizeof(dir), "rewrite");
+    uint8_t body[128];
+    for (size_t i = 0; i < sizeof(body); i++) body[i] = (uint8_t)i;
+    aii_write_body(dir, body, sizeof(body));
+
+    bool w1 = aii_write_sidecar(dir).ok;
+    bool w2 = aii_write_sidecar(dir).ok;
+    bool w3 = aii_write_sidecar(dir).ok;
+    enum aii_verdict v = aii_verify(dir, NULL, 0);
+    bool ok = w1 && w2 && w3 && v == AII_OK;
+    aii_cleanup(dir);
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Case 11: the verdict-to-name strings must stay stable. */
+static int aii_case_verdict_names(void)
+{
+    int failures = 0;
+    printf("aii: verdict name table stable... ");
+    bool ok = true;
+    ok = ok && strcmp(aii_verdict_name(AII_OK), "ok") == 0;
+    ok = ok && strcmp(aii_verdict_name(AII_HASH_MISMATCH), "hash_mismatch") == 0;
+    ok = ok && strcmp(aii_verdict_name(AII_SIDECAR_MISSING), "sidecar_missing") == 0;
+    ok = ok && strcmp(aii_verdict_name(AII_BODY_MISSING), "body_missing") == 0;
+    ok = ok && strcmp(aii_verdict_name(AII_SIDECAR_STALE), "sidecar_stale") == 0;
+    ok = ok && strcmp(aii_verdict_name(AII_SIDECAR_BAD_MAGIC), "sidecar_bad_magic") == 0;
+    ok = ok && strcmp(aii_verdict_name(AII_SIDECAR_UNSUPPORTED), "sidecar_unsupported") == 0;
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
 
 int test_addrman_integrity(void);
 
@@ -100,52 +239,13 @@ int test_addrman_integrity(void)
     aii_install_observer();
 
     /* ── 1. body missing ───────────────────────────────────── */
-    printf("aii: body missing... ");
-    {
-        char dir[256]; aii_tmp_dir(dir, sizeof(dir), "body_missing");
-        char err[256] = {0};
-        enum aii_verdict v = aii_verify(dir, err, sizeof(err));
-        bool ok = v == AII_BODY_MISSING;
-        aii_cleanup(dir);
-        if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", aii_verdict_name(v)); failures++; }
-    }
+    failures += aii_case_body_missing();
 
     /* ── 2. sidecar missing (first-run upgrade path) ────────── */
-    printf("aii: sidecar missing is accepted... ");
-    {
-        char dir[256]; aii_tmp_dir(dir, sizeof(dir), "side_missing");
-        uint8_t body[] = {0xAB, 0xCD, 0xEF, 0x12, 0x34};
-        aii_write_body(dir, body, sizeof(body));
-        char err[256] = {0};
-        enum aii_verdict v = aii_verify(dir, err, sizeof(err));
-        bool ok = v == AII_SIDECAR_MISSING;
-        aii_cleanup(dir);
-        if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", aii_verdict_name(v)); failures++; }
-    }
+    failures += aii_case_sidecar_missing_accepted();
 
     /* ── 3. write sidecar + verify OK ──────────────────────── */
-    printf("aii: write sidecar + verify ok... ");
-    {
-        char dir[256]; aii_tmp_dir(dir, sizeof(dir), "write_ok");
-        uint8_t body[4096];
-        for (size_t i = 0; i < sizeof(body); i++) body[i] = (uint8_t)(i * 7 + 1);
-        aii_write_body(dir, body, sizeof(body));
-
-        bool wrote = aii_write_sidecar(dir).ok;
-        char side[1024];
-        snprintf(side, sizeof(side), "%s/peers.dat.sha3", dir);
-        bool exists = aii_file_exists(side);
-
-        char err[256] = {0};
-        enum aii_verdict v = aii_verify(dir, err, sizeof(err));
-        bool ok = wrote && exists && v == AII_OK;
-
-        struct stat st;
-        if (stat(side, &st) == 0) ok = ok && st.st_size == AII_SIDECAR_BYTES;
-
-        aii_cleanup(dir);
-        if (ok) printf("OK\n"); else { printf("FAIL (wrote=%d exists=%d verdict=%s)\n", wrote, exists, aii_verdict_name(v)); failures++; }
-    }
+    failures += aii_case_write_and_verify();
 
     /* ── 4. detect byte-level corruption (hash mismatch) ────── */
     printf("aii: detect hash mismatch... ");
@@ -159,13 +259,8 @@ int test_addrman_integrity(void)
         /* Flip a single byte in the middle. */
         char body_path[1024];
         snprintf(body_path, sizeof(body_path), "%s/peers.dat", dir);
-        FILE *f = fopen(body_path, "r+b");
-        if (f) {
-            fseek(f, 500, SEEK_SET);
-            uint8_t tainted = 0xFF;
-            fwrite(&tainted, 1, 1, f);
-            fclose(f);
-        }
+        uint8_t tainted = 0xFF;
+        aii_overwrite_bytes_at(body_path, 500, &tainted, 1);
 
         char err[256] = {0};
         enum aii_verdict v = aii_verify(dir, err, sizeof(err));
@@ -208,12 +303,8 @@ int test_addrman_integrity(void)
         /* Flip the first byte of the sidecar magic. */
         char side[1024];
         snprintf(side, sizeof(side), "%s/peers.dat.sha3", dir);
-        FILE *f = fopen(side, "r+b");
-        if (f) {
-            uint8_t bogus = 'X';
-            fwrite(&bogus, 1, 1, f);
-            fclose(f);
-        }
+        uint8_t bogus = 'X';
+        aii_overwrite_bytes_at(side, 0, &bogus, 1);
 
         char err[256] = {0};
         enum aii_verdict v = aii_verify(dir, err, sizeof(err));
@@ -232,13 +323,8 @@ int test_addrman_integrity(void)
 
         char side[1024];
         snprintf(side, sizeof(side), "%s/peers.dat.sha3", dir);
-        FILE *f = fopen(side, "r+b");
-        if (f) {
-            fseek(f, 4, SEEK_SET);
-            uint32_t v99 = 99;
-            fwrite(&v99, sizeof(v99), 1, f);
-            fclose(f);
-        }
+        uint32_t v99 = 99;
+        aii_overwrite_bytes_at(side, 4, &v99, sizeof(v99));
 
         char err[256] = {0};
         enum aii_verdict v = aii_verify(dir, err, sizeof(err));
@@ -267,18 +353,7 @@ int test_addrman_integrity(void)
         bool event_emitted = atomic_load(&g_ev_corrupt) >= 1;
 
         /* At least one .corrupt.* file must exist now. */
-        bool renamed_exists = false;
-        DIR *d = opendir(dir);
-        if (d) {
-            struct dirent *ent;
-            while ((ent = readdir(d)) != NULL) {
-                if (strstr(ent->d_name, ".corrupt.")) {
-                    renamed_exists = true;
-                    break;
-                }
-            }
-            closedir(d);
-        }
+        bool renamed_exists = aii_dir_has_corrupt_entry(dir);
 
         bool ok = body_gone && side_gone && event_emitted && renamed_exists;
         aii_cleanup(dir);
@@ -299,12 +374,7 @@ int test_addrman_integrity(void)
         /* Append bytes to body after sidecar was committed. */
         char body_path[1024];
         snprintf(body_path, sizeof(body_path), "%s/peers.dat", dir);
-        FILE *f = fopen(body_path, "ab");
-        if (f) {
-            uint8_t pad[256] = {0};
-            fwrite(pad, 1, sizeof(pad), f);
-            fclose(f);
-        }
+        aii_append_zero_pad(body_path);
 
         char err[256] = {0};
         enum aii_verdict v = aii_verify(dir, err, sizeof(err));
@@ -314,35 +384,10 @@ int test_addrman_integrity(void)
     }
 
     /* ── 10. write sidecar is idempotent ────────────────────── */
-    printf("aii: sidecar overwrite is idempotent... ");
-    {
-        char dir[256]; aii_tmp_dir(dir, sizeof(dir), "rewrite");
-        uint8_t body[128];
-        for (size_t i = 0; i < sizeof(body); i++) body[i] = (uint8_t)i;
-        aii_write_body(dir, body, sizeof(body));
-
-        bool w1 = aii_write_sidecar(dir).ok;
-        bool w2 = aii_write_sidecar(dir).ok;
-        bool w3 = aii_write_sidecar(dir).ok;
-        enum aii_verdict v = aii_verify(dir, NULL, 0);
-        bool ok = w1 && w2 && w3 && v == AII_OK;
-        aii_cleanup(dir);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += aii_case_overwrite_idempotent();
 
     /* ── 11. verdict names stable ───────────────────────────── */
-    printf("aii: verdict name table stable... ");
-    {
-        bool ok = true;
-        ok = ok && strcmp(aii_verdict_name(AII_OK), "ok") == 0;
-        ok = ok && strcmp(aii_verdict_name(AII_HASH_MISMATCH), "hash_mismatch") == 0;
-        ok = ok && strcmp(aii_verdict_name(AII_SIDECAR_MISSING), "sidecar_missing") == 0;
-        ok = ok && strcmp(aii_verdict_name(AII_BODY_MISSING), "body_missing") == 0;
-        ok = ok && strcmp(aii_verdict_name(AII_SIDECAR_STALE), "sidecar_stale") == 0;
-        ok = ok && strcmp(aii_verdict_name(AII_SIDECAR_BAD_MAGIC), "sidecar_bad_magic") == 0;
-        ok = ok && strcmp(aii_verdict_name(AII_SIDECAR_UNSUPPORTED), "sidecar_unsupported") == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += aii_case_verdict_names();
 
     event_clear_observers(EV_ADDRMAN_CORRUPT);
     return failures + ZCL_TEST_SETUP_FAILURES();
