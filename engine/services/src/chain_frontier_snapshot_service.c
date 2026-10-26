@@ -109,6 +109,61 @@ static bool chain_frontier_ancestor_relation(
     return uint256_eq(ancestor->phashBlock, lower->phashBlock);
 }
 
+static void chain_frontier_record_authority_match(
+    struct chain_frontier_snapshot *snapshot,
+    struct block_index *served,
+    struct uint256 *authority_hash,
+    int32_t hstar)
+{
+    snapshot->authority_matches_served = snapshot->authority_pair_known &&
+        served && served->nHeight == hstar && served->phashBlock &&
+        uint256_eq(authority_hash, served->phashBlock);
+    if (!snapshot->authority_matches_served)
+        snapshot->served.binding_known = false;
+}
+
+static bool chain_frontier_work_known(
+    struct block_index *served,
+    struct block_index *indexed,
+    struct block_index *header)
+{
+    return served && indexed && header &&
+        !arith_uint256_is_zero(&served->nChainWork) &&
+        !arith_uint256_is_zero(&indexed->nChainWork) &&
+        !arith_uint256_is_zero(&header->nChainWork);
+}
+
+static bool chain_frontier_work_monotone(
+    struct block_index *served,
+    struct block_index *indexed,
+    struct block_index *header,
+    bool work_known)
+{
+    int served_indexed_work = work_known
+        ? arith_uint256_compare(&served->nChainWork, &indexed->nChainWork) : 0;
+    int indexed_header_work = work_known
+        ? arith_uint256_compare(&indexed->nChainWork, &header->nChainWork) : 0;
+    return work_known &&
+        (served->nHeight == indexed->nHeight
+            ? served_indexed_work == 0 : served_indexed_work < 0) &&
+        (indexed->nHeight == header->nHeight
+            ? indexed_header_work == 0 : indexed_header_work < 0);
+}
+
+static void chain_frontier_summarize_validity(
+    struct chain_frontier_snapshot *snapshot)
+{
+    snapshot->validity_known = snapshot->served.status_known &&
+        snapshot->indexed.status_known && snapshot->header.status_known;
+    snapshot->validity_sufficient = snapshot->validity_known &&
+        snapshot->served.validity_sufficient &&
+        snapshot->indexed.validity_sufficient &&
+        snapshot->header.validity_sufficient;
+    snapshot->failure_free = snapshot->validity_known &&
+        snapshot->served.failure_free && snapshot->indexed.failure_free &&
+        snapshot->header.failure_free;
+}
+
 void chain_frontier_snapshot_collect(struct chain_frontier_snapshot *out,
                                      struct main_state *main)
 {
@@ -155,11 +210,8 @@ void chain_frontier_snapshot_collect(struct chain_frontier_snapshot *out,
         snapshot.served.height_known = true;
         snapshot.served.height = hstar;
     }
-    snapshot.authority_matches_served = snapshot.authority_pair_known &&
-        served && served->nHeight == hstar && served->phashBlock &&
-        uint256_eq(&authority_hash, served->phashBlock);
-    if (!snapshot.authority_matches_served)
-        snapshot.served.binding_known = false;
+    chain_frontier_record_authority_match(&snapshot, served, &authority_hash,
+                                          hstar);
 
     bool served_indexed_known = false;
     bool indexed_header_known = false;
@@ -168,28 +220,10 @@ void chain_frontier_snapshot_collect(struct chain_frontier_snapshot *out,
     snapshot.indexed_ancestor_header = chain_frontier_ancestor_relation(
         indexed, header, &indexed_header_known);
     snapshot.ancestry_known = served_indexed_known && indexed_header_known;
-    snapshot.work_known = served && indexed && header &&
-        !arith_uint256_is_zero(&served->nChainWork) &&
-        !arith_uint256_is_zero(&indexed->nChainWork) &&
-        !arith_uint256_is_zero(&header->nChainWork);
-    int served_indexed_work = snapshot.work_known
-        ? arith_uint256_compare(&served->nChainWork, &indexed->nChainWork) : 0;
-    int indexed_header_work = snapshot.work_known
-        ? arith_uint256_compare(&indexed->nChainWork, &header->nChainWork) : 0;
-    snapshot.work_monotone = snapshot.work_known &&
-        (served->nHeight == indexed->nHeight
-            ? served_indexed_work == 0 : served_indexed_work < 0) &&
-        (indexed->nHeight == header->nHeight
-            ? indexed_header_work == 0 : indexed_header_work < 0);
-    snapshot.validity_known = snapshot.served.status_known &&
-        snapshot.indexed.status_known && snapshot.header.status_known;
-    snapshot.validity_sufficient = snapshot.validity_known &&
-        snapshot.served.validity_sufficient &&
-        snapshot.indexed.validity_sufficient &&
-        snapshot.header.validity_sufficient;
-    snapshot.failure_free = snapshot.validity_known &&
-        snapshot.served.failure_free && snapshot.indexed.failure_free &&
-        snapshot.header.failure_free;
+    snapshot.work_known = chain_frontier_work_known(served, indexed, header);
+    snapshot.work_monotone = chain_frontier_work_monotone(
+        served, indexed, header, snapshot.work_known);
+    chain_frontier_summarize_validity(&snapshot);
     *out = snapshot;
 }
 
@@ -206,16 +240,11 @@ static bool chain_frontier_value_equal(const struct chain_frontier_value *a,
            strcmp(a->chain_work, b->chain_work) == 0;
 }
 
-bool chain_frontier_snapshot_equal(const struct chain_frontier_snapshot *a,
-                                   const struct chain_frontier_snapshot *b)
+static bool chain_frontier_snapshot_evidence_equal(
+    const struct chain_frontier_snapshot *a,
+    const struct chain_frontier_snapshot *b)
 {
-    return a && b && a->context_known == b->context_known &&
-        a->hstar_published == b->hstar_published &&
-        a->authority_pair_known == b->authority_pair_known &&
-        a->durable_authority_known == b->durable_authority_known &&
-        a->authority_matches_served == b->authority_matches_served &&
-        a->authority_source == b->authority_source &&
-        a->ancestry_known == b->ancestry_known &&
+    return a->ancestry_known == b->ancestry_known &&
         a->served_ancestor_indexed == b->served_ancestor_indexed &&
         a->indexed_ancestor_header == b->indexed_ancestor_header &&
         a->work_known == b->work_known &&
@@ -226,6 +255,18 @@ bool chain_frontier_snapshot_equal(const struct chain_frontier_snapshot *a,
         chain_frontier_value_equal(&a->served, &b->served) &&
         chain_frontier_value_equal(&a->indexed, &b->indexed) &&
         chain_frontier_value_equal(&a->header, &b->header);
+}
+
+bool chain_frontier_snapshot_equal(const struct chain_frontier_snapshot *a,
+                                   const struct chain_frontier_snapshot *b)
+{
+    return a && b && a->context_known == b->context_known &&
+        a->hstar_published == b->hstar_published &&
+        a->authority_pair_known == b->authority_pair_known &&
+        a->durable_authority_known == b->durable_authority_known &&
+        a->authority_matches_served == b->authority_matches_served &&
+        a->authority_source == b->authority_source &&
+        chain_frontier_snapshot_evidence_equal(a, b);
 }
 
 bool chain_frontier_snapshot_values_known(
