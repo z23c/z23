@@ -887,8 +887,6 @@ engine/composition/src/boot_legacy_blocks.c:boot_legacy_import_block_files:18
 engine/composition/src/boot_loop_guard.c:boot_loop_guard_check:16
 engine/composition/src/boot_mesh_game.c:mesh_game_compose:21
 engine/composition/src/boot_mesh_game.c:mesh_game_parse:24
-engine/composition/src/boot_mesh_machines.c:boot_mesh_machines_refresh:31
-engine/composition/src/boot_mesh_machines.c:mesh_machine_derive_state:25
 engine/composition/src/boot_mesh_pairing.c:boot_mesh_pairing_reason_code:20
 engine/composition/src/boot_mesh_status_refresh.c:refresh_begin_one:16
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:39
