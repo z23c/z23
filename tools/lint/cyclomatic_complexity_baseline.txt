@@ -1006,9 +1006,6 @@ engine/services/src/chain_evidence_persistence_service.c:chain_evidence_state_se
 engine/services/src/chain_evidence_reconstruct.c:cec_reconcile_startup:32
 engine/services/src/chain_evidence_reconstruct.c:cec_reconstruct_active_tip_evidence:35
 engine/services/src/chain_evidence_snapshot.c:chain_evidence_controller_snapshot:46
-engine/services/src/chain_restore_disk_repair.c:chain_restore_read_header_at_index:19
-engine/services/src/chain_restore_disk_repair.c:chain_restore_rebuild_active_chain_from_disk:24
-engine/services/src/chain_restore_disk_repair.c:chain_restore_scan_block_files:18
 engine/services/src/chain_restore_repair.c:chain_restore_backfill_nbits_from_disk:20
 engine/services/src/chain_restore_repair.c:chain_restore_finalize:19
 engine/services/src/chain_restore_repair.c:chain_restore_log_first_mismatch:19

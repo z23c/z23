@@ -43,6 +43,30 @@ static void chain_restore_disk_store_slot(struct active_chain *c, int h,
     zcl_mutex_unlock(&c->write_lock);
 }
 
+static bool chain_restore_decode_index_header(
+    const struct block_index *bi, const unsigned char *buf, size_t nread,
+    struct block_header *hdr, struct uint256 *disk_hash_out,
+    bool *hash_matches_out)
+{
+    struct byte_stream s;
+    stream_init_from_data(&s, buf, nread);
+    block_header_init(hdr);
+    bool ok = block_header_deserialize(hdr, &s);
+    stream_free(&s);
+    if (!ok)
+        return false;
+
+    struct uint256 disk_hash;
+    block_header_get_hash(hdr, &disk_hash);
+    if (disk_hash_out)
+        *disk_hash_out = disk_hash;
+    if (hash_matches_out)
+        *hash_matches_out = !bi->phashBlock ||
+            uint256_cmp(&disk_hash, bi->phashBlock) == 0;
+
+    return true;
+}
+
 static bool chain_restore_read_header_at_index(
     const struct block_index *bi,
     const char *datadir,
@@ -80,23 +104,8 @@ static bool chain_restore_read_header_at_index(
     if (nread < 4 + 32 + 32 + 32 + 4 + 4 + 32 + 1)
         return false;
 
-    struct byte_stream s;
-    stream_init_from_data(&s, buf, nread);
-    block_header_init(hdr);
-    bool ok = block_header_deserialize(hdr, &s);
-    stream_free(&s);
-    if (!ok)
-        return false;
-
-    struct uint256 disk_hash;
-    block_header_get_hash(hdr, &disk_hash);
-    if (disk_hash_out)
-        *disk_hash_out = disk_hash;
-    if (hash_matches_out)
-        *hash_matches_out = !bi->phashBlock ||
-            uint256_cmp(&disk_hash, bi->phashBlock) == 0;
-
-    return true;
+    return chain_restore_decode_index_header(bi, buf, nread, hdr,
+                                             disk_hash_out, hash_matches_out);
 }
 
 /* Shared argument guard for the two public disk-backed rebuild walks. */
@@ -105,6 +114,82 @@ static bool chain_restore_disk_walk_args_ok(const struct main_state *ms,
                                             const char *datadir)
 {
     return ms && tip && datadir && datadir[0];
+}
+
+static bool chain_restore_repair_disk_hash(
+    struct main_state *ms, struct block_index *tip, struct active_chain *c,
+    const struct uint256 *disk_hash, int h, struct block_index **cur,
+    int *read_errors, int *stop_height, char (*stop_reason)[160],
+    int *repaired_hashes)
+{
+            struct block_index *replacement =
+                block_map_find(&ms->map_block_index, disk_hash);
+            if (!replacement) {
+                (*read_errors)++;
+                *stop_height = h;
+                char got_hex[65] = {0};
+                char want_hex[65] = {0};
+                uint256_get_hex(disk_hash, got_hex);
+                if ((*cur)->phashBlock)
+                    uint256_get_hex((*cur)->phashBlock, want_hex);
+                snprintf(*stop_reason, sizeof(*stop_reason),
+                         "disk_hash_unindexed got=%s want=%s",
+                         got_hex, want_hex[0] ? want_hex : "<null>");
+                return false;
+            }
+
+            if (replacement != *cur) {
+                replacement->nFile = (*cur)->nFile;
+                replacement->nDataPos = (*cur)->nDataPos;
+                replacement->nStatus |= (*cur)->nStatus & BLOCK_HAVE_DATA;
+                replacement->nHeight = h;
+                replacement->pskip = NULL;
+                *cur = replacement;
+            }
+            /* Option A: point phashBlock at cur's own stable per-node
+             * hash storage rather than into the reallocatable bucket
+             * array. Seed it from the disk hash. */
+            (*cur)->hashBlock = *disk_hash;
+            (*cur)->phashBlock = &(*cur)->hashBlock;
+            if (h < tip->nHeight && c->chain[h + 1])
+                c->chain[h + 1]->pprev = *cur;
+            (*repaired_hashes)++;
+    return true;
+}
+
+static bool chain_restore_link_disk_parent(
+    struct main_state *ms, const struct block_header *hdr, int h,
+    struct block_index **cur, int *read_errors, int *stop_height,
+    char (*stop_reason)[160], int *repaired_heights)
+{
+        struct block_index *prev =
+            block_map_find(&ms->map_block_index, &hdr->hashPrevBlock);
+        if (!prev) {
+            (*read_errors)++;
+            *stop_height = h;
+            char prev_hex[65] = {0};
+            uint256_get_hex(&hdr->hashPrevBlock, prev_hex);
+            snprintf(*stop_reason, sizeof(*stop_reason),
+                     "prev_lookup_failed prev=%s found=0 want_h=%d",
+                     prev_hex, h - 1);
+            return false;
+        }
+        if (prev->nHeight != h - 1) {
+            prev->nHeight = h - 1;
+            prev->pskip = NULL;
+            (*repaired_heights)++;
+        }
+        (*cur)->pprev = prev;
+        if ((*cur)->pskip == NULL)
+            block_index_build_skip(*cur);
+        *cur = prev;
+    return true;
+}
+
+static bool chain_restore_disk_walk_continues(
+    int h, const struct block_index *cur)
+{
+    return h >= 0 && cur && !thread_registry_shutdown_requested();
 }
 
 int chain_restore_rebuild_active_chain_from_disk(
@@ -155,7 +240,7 @@ int chain_restore_rebuild_active_chain_from_disk(
      * noise next to the per-height pread, and aborts immediately so the
      * zcl_chain_fix join cannot hang on this O(chain) walk. */
     for (int h = tip->nHeight;
-         h >= 0 && cur && !thread_registry_shutdown_requested(); h--) {
+         chain_restore_disk_walk_continues(h, cur); h--) {
         boot_scan_bump(scan_ctr);
         if (cur->nHeight != h) {
             read_errors++;
@@ -176,38 +261,10 @@ int chain_restore_rebuild_active_chain_from_disk(
             break;
         }
         if (!hash_matches) {
-            struct block_index *replacement =
-                block_map_find(&ms->map_block_index, &disk_hash);
-            if (!replacement) {
-                read_errors++;
-                stop_height = h;
-                char got_hex[65] = {0};
-                char want_hex[65] = {0};
-                uint256_get_hex(&disk_hash, got_hex);
-                if (cur->phashBlock)
-                    uint256_get_hex(cur->phashBlock, want_hex);
-                snprintf(stop_reason, sizeof(stop_reason),
-                         "disk_hash_unindexed got=%s want=%s",
-                         got_hex, want_hex[0] ? want_hex : "<null>");
+            if (!chain_restore_repair_disk_hash(ms, tip, c, &disk_hash, h,
+                                                &cur, &read_errors, &stop_height,
+                                                &stop_reason, &repaired_hashes))
                 break;
-            }
-
-            if (replacement != cur) {
-                replacement->nFile = cur->nFile;
-                replacement->nDataPos = cur->nDataPos;
-                replacement->nStatus |= cur->nStatus & BLOCK_HAVE_DATA;
-                replacement->nHeight = h;
-                replacement->pskip = NULL;
-                cur = replacement;
-            }
-            /* Option A: point phashBlock at cur's own stable per-node
-             * hash storage rather than into the reallocatable bucket
-             * array. Seed it from the disk hash. */
-            cur->hashBlock = disk_hash;
-            cur->phashBlock = &cur->hashBlock;
-            if (h < tip->nHeight && c->chain[h + 1])
-                c->chain[h + 1]->pprev = cur;
-            repaired_hashes++;
         }
 
         chain_restore_disk_store_slot(c, h, cur);
@@ -218,27 +275,10 @@ int chain_restore_rebuild_active_chain_from_disk(
             break;
         }
 
-        struct block_index *prev =
-            block_map_find(&ms->map_block_index, &hdr.hashPrevBlock);
-        if (!prev) {
-            read_errors++;
-            stop_height = h;
-            char prev_hex[65] = {0};
-            uint256_get_hex(&hdr.hashPrevBlock, prev_hex);
-            snprintf(stop_reason, sizeof(stop_reason),
-                     "prev_lookup_failed prev=%s found=0 want_h=%d",
-                     prev_hex, h - 1);
+        if (!chain_restore_link_disk_parent(ms, &hdr, h, &cur, &read_errors,
+                                             &stop_height, &stop_reason,
+                                             &repaired_heights))
             break;
-        }
-        if (prev->nHeight != h - 1) {
-            prev->nHeight = h - 1;
-            prev->pskip = NULL;
-            repaired_heights++;
-        }
-        cur->pprev = prev;
-        if (cur->pskip == NULL)
-            block_index_build_skip(cur);
-        cur = prev;
     }
 
     if (cached)
@@ -365,29 +405,10 @@ static bool chain_restore_scan_args_ok(const char *datadir,
     return datadir && datadir[0] && map;
 }
 
-static bool chain_restore_scan_block_files(
-    const char *datadir,
-    struct chain_restore_disk_pos_map *map)
+static bool chain_restore_index_block_file(
+    FILE *f, const unsigned char *magic, int file_num,
+    struct chain_restore_disk_pos_map *map, int *blocks)
 {
-    if (!chain_restore_scan_args_ok(datadir, map))
-        return false; // raw-return-ok:pure-arg-validation-predicate
-    const struct chain_params *cp = chain_params_get();
-    const unsigned char *magic = cp->pchMessageStart;
-    int files = 0;
-    int blocks = 0;
-
-    /* Poll once per blk file: a full scan is O(all blocks on disk) and must
-     * not pin a shutdown behind the remaining files. */
-    for (int file_num = 0;
-         file_num < 9999 && !thread_registry_shutdown_requested();
-         file_num++) {
-        char path[576];
-        snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-                 datadir, file_num);
-        FILE *f = fopen(path, "rb");
-        if (!f)
-            break;
-        files++;
         unsigned char prefix[8];
         while (fread(prefix, 1, sizeof(prefix), f) == sizeof(prefix)) {
             if (memcmp(prefix, magic, 4) != 0) {
@@ -424,14 +445,43 @@ static bool chain_restore_scan_block_files(
                 block_header_get_hash(&hdr, &hash);
                 if (!chain_restore_disk_pos_map_put(map, &hash, file_num,
                                                     (unsigned int)data_pos)) {
-                    fclose(f);
                     return false;
                 }
-                blocks++;
+                (*blocks)++;
             }
             long next_pos = data_pos + (long)block_size;
             if (fseek(f, next_pos, SEEK_SET) != 0)
                 break;
+        }
+    return true;
+}
+
+static bool chain_restore_scan_block_files(
+    const char *datadir,
+    struct chain_restore_disk_pos_map *map)
+{
+    if (!chain_restore_scan_args_ok(datadir, map))
+        return false; // raw-return-ok:pure-arg-validation-predicate
+    const struct chain_params *cp = chain_params_get();
+    const unsigned char *magic = cp->pchMessageStart;
+    int files = 0;
+    int blocks = 0;
+
+    /* Poll once per blk file: a full scan is O(all blocks on disk) and must
+     * not pin a shutdown behind the remaining files. */
+    for (int file_num = 0;
+         file_num < 9999 && !thread_registry_shutdown_requested();
+         file_num++) {
+        char path[576];
+        snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
+                 datadir, file_num);
+        FILE *f = fopen(path, "rb");
+        if (!f)
+            break;
+        files++;
+        if (!chain_restore_index_block_file(f, magic, file_num, map, &blocks)) {
+            fclose(f);
+            return false;
         }
         fclose(f);
     }
