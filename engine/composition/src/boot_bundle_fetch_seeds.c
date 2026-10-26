@@ -114,6 +114,21 @@ static bool bbf_host_already_seeded(const struct rom_fetch_peer *peers,
     return false;
 }
 
+/* Copy host_port into host, dropping a trailing ":<port>" when it is a pure
+ * decimal 1..65535 suffix. */
+static void bbf_copy_connect_host(char *host, size_t hostsz,
+                                  const char *host_port)
+{
+    snprintf(host, hostsz, "%s", host_port);
+    char *host_colon = strrchr(host, ':');
+    if (host_colon) {
+        char *end = NULL;
+        long p = strtol(host_colon + 1, &end, 10);
+        if (end && *end == '\0' && p >= 1 && p <= 65535)
+            *host_colon = '\0';
+    }
+}
+
 /* Derive a file-service seed from ONE `-connect=` value.
  *
  * `-connect` means the peer the operator named. A custom port is never
@@ -137,14 +152,7 @@ static bool bbf_add_connect_seed(struct rom_fetch_peer *peers, size_t *np,
     /* Extract the host once so we can check for an explicit -fileservice seed
      * on the same host before adding an auto-derived port. */
     char host[128];
-    snprintf(host, sizeof(host), "%s", host_port);
-    char *host_colon = strrchr(host, ':');
-    if (host_colon) {
-        char *end = NULL;
-        long p = strtol(host_colon + 1, &end, 10);
-        if (end && *end == '\0' && p >= 1 && p <= 65535)
-            *host_colon = '\0';
-    }
+    bbf_copy_connect_host(host, sizeof(host), host_port);
     if (!host[0] || strlen(host) >= sizeof(peers[0].addr))
         return false;
 
@@ -208,6 +216,25 @@ static void bbf_add_clearnet_seeds(const struct app_context *ctx,
         bbf_add_peer(peers, np, cap, ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[i]);
 }
 
+/* Offer every advertised peer endpoint the registered provider returns, at
+ * the port the peer named; peers with no advertised port are skipped. */
+static void bbf_add_advertised_peer_seeds(struct rom_fetch_peer *peers,
+                                          size_t *np, size_t cap)
+{
+    struct boot_bundle_peer_seed found[BBF_PEER_SOURCE_MAX];
+    memset(found, 0, sizeof(found));
+    size_t n = g_peer_source(g_peer_source_ctx, found,
+                             sizeof(found) / sizeof(found[0]));
+    if (n > sizeof(found) / sizeof(found[0]))
+        n = sizeof(found) / sizeof(found[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (found[i].port == 0)
+            continue; /* peer never advertised a file service */
+        bbf_add_peer_at_port(peers, np, cap, found[i].host,
+                             found[i].port);
+    }
+}
+
 size_t bbf_assemble_seeds(const struct app_context *ctx,
                           struct rom_fetch_peer *peers, size_t cap,
                           bool *out_explicit_first)
@@ -265,20 +292,8 @@ size_t bbf_assemble_seeds(const struct app_context *ctx,
      * identical transport-MAC + per-chunk SHA3 + whole-file SHA3 path an
      * operator-named seed rides, and the install still binds to the compiled
      * checkpoint. */
-    if (g_peer_source && bbf_clearnet_allowed(ctx)) {
-        struct boot_bundle_peer_seed found[BBF_PEER_SOURCE_MAX];
-        memset(found, 0, sizeof(found));
-        size_t n = g_peer_source(g_peer_source_ctx, found,
-                                 sizeof(found) / sizeof(found[0]));
-        if (n > sizeof(found) / sizeof(found[0]))
-            n = sizeof(found) / sizeof(found[0]);
-        for (size_t i = 0; i < n; i++) {
-            if (found[i].port == 0)
-                continue; /* peer never advertised a file service */
-            bbf_add_peer_at_port(peers, &np, cap, found[i].host,
-                                 found[i].port);
-        }
-    }
+    if (g_peer_source && bbf_clearnet_allowed(ctx))
+        bbf_add_advertised_peer_seeds(peers, &np, cap);
     return np;
 }
 
