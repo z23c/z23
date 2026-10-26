@@ -265,26 +265,36 @@ bool zcl_devloop_path_is_sealed_core(const char *path)
     return path && strncmp(path, "core/", 5) == 0;
 }
 
+static bool path_is_build_or_vcs(const char *path)
+{
+    size_t len = strlen(path);
+    return path[len - 1] == '~' || strstr(path, ".swp") ||
+        strstr(path, ".tmp") || strstr(path, "/build/") ||
+        strncmp(path, "build/", 6) == 0 ||
+        strncmp(path, ".git/", 5) == 0;
+}
+
+/* Transient lint/shape-gate fixtures: test_make_lint_gates.c writes
+ * `_*fixture*` .c files under app/, lib/, and domain/ to exercise the
+ * path gates, then deletes them. A leading-underscore basename that
+ * mentions "fixture" is never a real edit; reacting to it fires a phantom
+ * reload cycle on every test-suite run (the file is already gone by the
+ * time the cycle rebuilds). No tracked source matches this shape — the
+ * real fixture sources under tests/harness/fixtures/ have no leading '_'. */
+static bool path_is_lint_fixture(const char *base)
+{
+    return base[0] == '_' && strstr(base, "fixture");
+}
+
 bool zcl_devloop_path_is_relevant(const char *path)
 {
     if (!path || !path[0])
         return false;
-    size_t len = strlen(path);
-    if (path[len - 1] == '~' || strstr(path, ".swp") ||
-        strstr(path, ".tmp") || strstr(path, "/build/") ||
-        strncmp(path, "build/", 6) == 0 ||
-        strncmp(path, ".git/", 5) == 0)
+    if (path_is_build_or_vcs(path))
         return false;
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
-    /* Transient lint/shape-gate fixtures: test_make_lint_gates.c writes
-     * `_*fixture*` .c files under app/, lib/, and domain/ to exercise the
-     * path gates, then deletes them. A leading-underscore basename that
-     * mentions "fixture" is never a real edit; reacting to it fires a phantom
-     * reload cycle on every test-suite run (the file is already gone by the
-     * time the cycle rebuilds). No tracked source matches this shape — the
-     * real fixture sources under tests/harness/fixtures/ have no leading '_'. */
-    if (base[0] == '_' && strstr(base, "fixture"))
+    if (path_is_lint_fixture(base))
         return false;
     if (strcmp(base, "Makefile") == 0)
         return true;
@@ -509,6 +519,22 @@ static bool plan_selects_full_group(const struct zcl_devloop_plan *plan,
     return false;
 }
 
+static bool plan_dims_all_settled(const struct zcl_devloop_plan *plan,
+                                  const char **out_reason)
+{
+    for (int d = 0; d < ZCL_DEVLOOP_DIM__COUNT; d++) {
+        enum zcl_devloop_dim_status st = plan->dims[d].status;
+        if (st == ZCL_DEVLOOP_DIM_COMPLETE ||
+            st == ZCL_DEVLOOP_DIM_NOT_APPLICABLE)
+            continue;
+        if (out_reason)
+            *out_reason = plan->dims[d].reason ? plan->dims[d].reason
+                                               : "incomplete";
+        return false;
+    }
+    return true;
+}
+
 bool zcl_devloop_plan_proof_admissible(const struct zcl_devloop_plan *plan,
                                        const char **out_reason)
 {
@@ -526,16 +552,8 @@ bool zcl_devloop_plan_proof_admissible(const struct zcl_devloop_plan *plan,
         if (out_reason) *out_reason = "unknown-test-group";
         return false;
     }
-    for (int d = 0; d < ZCL_DEVLOOP_DIM__COUNT; d++) {
-        enum zcl_devloop_dim_status st = plan->dims[d].status;
-        if (st == ZCL_DEVLOOP_DIM_COMPLETE ||
-            st == ZCL_DEVLOOP_DIM_NOT_APPLICABLE)
-            continue;
-        if (out_reason)
-            *out_reason = plan->dims[d].reason ? plan->dims[d].reason
-                                               : "incomplete";
+    if (!plan_dims_all_settled(plan, out_reason))
         return false;
-    }
     /* A group in the plan that the ledger could not explain is itself an
      * unproven claim: the plan cannot say what covers what. */
     if (plan->selections_truncated) {
@@ -656,11 +674,83 @@ static void plan_take_rule_groups(struct zcl_devloop_plan *out,
         plan_take_path_group(out, own_group, dim, path);
 }
 
+static bool plan_files_args_invalid(const struct zcl_devloop_plan *out,
+                                    const char *const *files,
+                                    size_t file_count)
+{
+    return !out || (file_count > 0 && !files) ||
+        file_count > ZCL_DEVLOOP_MAX_FILES;
+}
+
+static void plan_take_consensus_group(struct zcl_devloop_plan *out,
+                                      const char *const *files,
+                                      const char *consensus_via)
+{
+    /* The consensus-surface route is a hardcoded prefix list — an explicit,
+     * hand-authored, non-derivable mapping, exactly like the .def rules. It
+     * already drives foreground_proof, but it named no group in any array, so
+     * a reader saw "0 test groups" for a change to consensus crypto. Name it. */
+    if (out->consensus_risk)
+        plan_take_path_group(out, "consensus_parity",
+                             ZCL_DEVLOOP_DIM_OPAQUE,
+                             consensus_via ? consensus_via : files[0]);
+}
+
+static void plan_set_hotswap_batch(
+    struct zcl_devloop_plan *out, const char *const *files, size_t file_count,
+    const struct hotswap_eligible_entry *batch_hotswap)
+{
+    out->action = ZCL_DEVLOOP_HOTSWAP;
+    out->action_name = "hotswap";
+    out->reason = file_count == 1
+        ? "single_stateless_provider"
+        : (zcl_hotswap_service_source_for_path(files[0])
+            ? "single_service_island_batch"
+            : "single_stateless_island_batch");
+    /* A frozen fail-fast story is the direct behavioral owner. Generic
+     * islands retain the loader/simnet owner, but this service must never
+     * make an agent infer its story from a broad hot-swap suite. */
+    out->proof_group = strcmp(batch_hotswap->probe, "dev.test.story") == 0
+        ? "transaction_intent" : "hotswap_simnet";
+    out->probe_tool = batch_hotswap->probe;
+}
+
+static void plan_set_reload_outcome(struct zcl_devloop_plan *out,
+                                    bool all_hotswap)
+{
+    out->action = ZCL_DEVLOOP_RELOAD;
+    out->action_name = "reload";
+    snprintf(out->proof_group_storage, sizeof(out->proof_group_storage), "%s",
+             out->consensus_risk
+                ? "consensus_parity"
+                : (out->path_groups_len > 0
+                    ? out->path_groups[0]
+                    : "make_lint_gates"));
+    out->proof_group = out->proof_group_storage;
+    out->reason = out->consensus_risk
+        ? "consensus_or_chain_state_is_never_swappable"
+        : (all_hotswap
+            ? "multi_provider_generation_not_yet_admitted"
+            : "state_or_abi_contract_requires_process_reload");
+}
+
+static void plan_note_file_risk(struct zcl_devloop_plan *out,
+                                const char *path, const char **consensus_via)
+{
+    bool sealed = zcl_devloop_path_is_sealed_core(path);
+    out->sealed_core = out->sealed_core || sealed;
+    /* A sealed-core file is always heaviest-proof: even core/math (not in
+     * the legacy consensus_risk prefix list) decides block/tx validity. */
+    bool crisk = sealed || path_is_consensus_risk(path);
+    if (crisk && !*consensus_via)
+        *consensus_via = path;
+    out->consensus_risk = out->consensus_risk || crisk;
+}
+
 bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
                             struct zcl_devloop_plan *out)
 {
-    if (!out || (file_count > 0 && !files) ||
-        file_count > ZCL_DEVLOOP_MAX_FILES)
+    if (plan_files_args_invalid(out, files, file_count))
         return false;
 
     memset(out, 0, sizeof(*out));
@@ -697,14 +787,7 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
             batch_hotswap = entry;
         else if (entry != batch_hotswap)
             one_hotswap_owner = false;
-        bool sealed = zcl_devloop_path_is_sealed_core(files[i]);
-        out->sealed_core = out->sealed_core || sealed;
-        /* A sealed-core file is always heaviest-proof: even core/math (not in
-         * the legacy consensus_risk prefix list) decides block/tx validity. */
-        bool crisk = sealed || path_is_consensus_risk(files[i]);
-        if (crisk && !consensus_via)
-            consensus_via = files[i];
-        out->consensus_risk = out->consensus_risk || crisk;
+        plan_note_file_risk(out, files[i], &consensus_via);
         /* An audited test translation unit is its own exact path floor. Its
          * runner and helper dependencies do not make the test source itself
          * an owner of every broad rule that happens to match its contents. */
@@ -718,50 +801,18 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
     }
     out->docs_only = all_docs;
 
-    /* The consensus-surface route is a hardcoded prefix list — an explicit,
-     * hand-authored, non-derivable mapping, exactly like the .def rules. It
-     * already drives foreground_proof, but it named no group in any array, so
-     * a reader saw "0 test groups" for a change to consensus crypto. Name it. */
-    if (out->consensus_risk)
-        plan_take_path_group(out, "consensus_parity",
-                             ZCL_DEVLOOP_DIM_OPAQUE,
-                             consensus_via ? consensus_via : files[0]);
+    plan_take_consensus_group(out, files, consensus_via);
 
     if (all_docs) {
         out->reason = "documentation_only";
         return true;
     }
     if (all_hotswap && one_hotswap_owner && batch_hotswap) {
-        out->action = ZCL_DEVLOOP_HOTSWAP;
-        out->action_name = "hotswap";
-        out->reason = file_count == 1
-            ? "single_stateless_provider"
-            : (zcl_hotswap_service_source_for_path(files[0])
-                ? "single_service_island_batch"
-                : "single_stateless_island_batch");
-        /* A frozen fail-fast story is the direct behavioral owner. Generic
-         * islands retain the loader/simnet owner, but this service must never
-         * make an agent infer its story from a broad hot-swap suite. */
-        out->proof_group = strcmp(batch_hotswap->probe, "dev.test.story") == 0
-            ? "transaction_intent" : "hotswap_simnet";
-        out->probe_tool = batch_hotswap->probe;
+        plan_set_hotswap_batch(out, files, file_count, batch_hotswap);
         return true;
     }
 
-    out->action = ZCL_DEVLOOP_RELOAD;
-    out->action_name = "reload";
-    snprintf(out->proof_group_storage, sizeof(out->proof_group_storage), "%s",
-             out->consensus_risk
-                ? "consensus_parity"
-                : (out->path_groups_len > 0
-                    ? out->path_groups[0]
-                    : "make_lint_gates"));
-    out->proof_group = out->proof_group_storage;
-    out->reason = out->consensus_risk
-        ? "consensus_or_chain_state_is_never_swappable"
-        : (all_hotswap
-            ? "multi_provider_generation_not_yet_admitted"
-            : "state_or_abi_contract_requires_process_reload");
+    plan_set_reload_outcome(out, all_hotswap);
     return true;
 }
 
@@ -1099,12 +1150,126 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
     return true;
 }
 
+static bool plan_closure_args_invalid(const struct zcl_devloop_plan *plan,
+                                      const char *const *files,
+                                      size_t file_count)
+{
+    return !plan || (file_count > 0 && !files) ||
+        file_count > ZCL_DEVLOOP_MAX_FILES;
+}
+
+static void plan_count_closure_dims(const char *const *files,
+                                    size_t file_count,
+                                    size_t *semantic_count,
+                                    size_t *include_count)
+{
+    for (size_t i = 0; i < file_count; i++) {
+        *semantic_count += path_semantic_applies(files[i]) ? 1u : 0u;
+        *include_count += path_include_applies(files[i]) ? 1u : 0u;
+    }
+}
+
+static struct codeindex *plan_closure_open_index(
+    struct zcl_devloop_plan *plan, const char *root, bool snapshot)
+{
+    struct codeindex *ci = snapshot ? codeindex_open_existing(root) : NULL;
+    if (snapshot && ci)
+        plan->closure_snapshot = true;
+    if (!ci)
+        ci = codeindex_open(root);
+    return ci;
+}
+
+static void plan_closure_unavailable(struct zcl_devloop_plan *plan,
+                                     size_t semantic_count,
+                                     size_t include_count, const char *reason)
+{
+    if (semantic_count > 0)
+        plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
+                     ZCL_DEVLOOP_DIM_UNAVAILABLE, reason);
+    if (include_count > 0)
+        plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
+                     ZCL_DEVLOOP_DIM_UNAVAILABLE, reason);
+    plan->closure_truncated = true;
+}
+
+static void plan_closure_copy_changed(char (*changed)[256],
+                                      const char *const *files,
+                                      size_t file_count)
+{
+    size_t semantic_index = 0;
+    for (size_t i = 0; i < file_count; i++)
+        if (path_semantic_applies(files[i]))
+            snprintf(changed[semantic_index++], 256, "%s", files[i]);
+}
+
+static void plan_closure_include_begin(struct zcl_devloop_plan *plan,
+                                       size_t include_count)
+{
+    if (include_count > 0)
+        plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
+                     ZCL_DEVLOOP_DIM_COMPLETE, "");
+    /* The universal closure already contains every group this dimension could
+     * name, so walking it cannot widen the answer — only delay it. */
+    if (include_count > 0 && plan->closure_universal)
+        plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
+}
+
+static bool plan_closure_include_walk(struct zcl_devloop_plan *plan,
+                                      struct codeindex *ci,
+                                      const char *const *files,
+                                      size_t file_count,
+                                      char (*impacted)[256],
+                                      int closure_file_cap)
+{
+    for (size_t i = 0; i < file_count && !plan->closure_universal; i++) {
+        if (!path_include_applies(files[i]))
+            continue;
+        enum codeindex_include_dim idim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+        int nd = codeindex_reverse_includes(ci, files[i], impacted,
+                                            closure_file_cap,
+                                            &idim);
+        if (nd < 0) {
+            plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
+                         ZCL_DEVLOOP_DIM_UNAVAILABLE, "closure-query-error");
+            return false;
+        }
+        if (!plan_include_verdict(plan, ci, files[i], idim, nd,
+                                  closure_file_cap))
+            return false;
+        /* What fit is still folded in: a universal answer keeps the partial
+         * evidence, and the loop ends because universal already covers it. */
+        for (int d = 0; d < nd; d++) {
+            if (!plan_fold_reached_file(plan, impacted[d],
+                                        ZCL_DEVLOOP_DIM_INCLUDE)) {
+                plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
+                break;
+            }
+        }
+    }
+    return true;
+}
+
+static bool plan_closure_is_truncated(const struct zcl_devloop_plan *plan)
+{
+    /* Back-compat: the single boolean older readers still parse. It now means
+     * "at least one applicable graph dimension is refusing", and it no longer
+     * implies closure_groups is empty. NOT_APPLICABLE is complete evidence. */
+    enum zcl_devloop_dim_status semantic_status =
+        plan->dims[ZCL_DEVLOOP_DIM_SEMANTIC].status;
+    enum zcl_devloop_dim_status include_status =
+        plan->dims[ZCL_DEVLOOP_DIM_INCLUDE].status;
+    return semantic_status == ZCL_DEVLOOP_DIM_INCOMPLETE ||
+        semantic_status == ZCL_DEVLOOP_DIM_UNAVAILABLE ||
+        include_status == ZCL_DEVLOOP_DIM_INCOMPLETE ||
+        include_status == ZCL_DEVLOOP_DIM_UNAVAILABLE;
+}
+
 static bool plan_add_closure(const char *repo_root,
                              const char *const *files, size_t file_count,
                              struct zcl_devloop_plan *plan, bool snapshot)
 {
-    if (!plan || (file_count > 0 && !files) ||
-        file_count > ZCL_DEVLOOP_MAX_FILES)
+    if (plan_closure_args_invalid(plan, files, file_count))
         return false;
 
     plan->closure_attempted = true;
@@ -1130,47 +1295,29 @@ static bool plan_add_closure(const char *repo_root,
 
     size_t semantic_count = 0;
     size_t include_count = 0;
-    for (size_t i = 0; i < file_count; i++) {
-        semantic_count += path_semantic_applies(files[i]) ? 1u : 0u;
-        include_count += path_include_applies(files[i]) ? 1u : 0u;
-    }
+    plan_count_closure_dims(files, file_count, &semantic_count,
+                            &include_count);
     if (semantic_count == 0 && include_count == 0) {
         plan->closure_truncated = false;
         return true;
     }
 
     const char *root = (repo_root && repo_root[0]) ? repo_root : ".";
-    struct codeindex *ci = snapshot ? codeindex_open_existing(root) : NULL;
-    if (snapshot && ci)
-        plan->closure_snapshot = true;
-    if (!ci)
-        ci = codeindex_open(root);
+    struct codeindex *ci = plan_closure_open_index(plan, root, snapshot);
     if (!ci) {
         /* No index: the path floor still stands and its tests still run, but
          * neither graph dimension was consulted. Say UNAVAILABLE — the old
          * code returned here silently, which read as "asked, found nothing". */
-        if (semantic_count > 0)
-            plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
-                         ZCL_DEVLOOP_DIM_UNAVAILABLE, "no-code-index");
-        if (include_count > 0)
-            plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
-                         ZCL_DEVLOOP_DIM_UNAVAILABLE, "no-code-index");
-        plan->closure_truncated = true;
+        plan_closure_unavailable(plan, semantic_count, include_count,
+                                 "no-code-index");
         return true;
     }
 
     bool ok = true;
     int closure_file_cap = plan_closure_file_cap(ci, file_count);
     if (closure_file_cap < 0) {
-        if (semantic_count > 0)
-            plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
-                         ZCL_DEVLOOP_DIM_UNAVAILABLE,
-                         "source-corpus-count-unavailable");
-        if (include_count > 0)
-            plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
-                         ZCL_DEVLOOP_DIM_UNAVAILABLE,
-                         "source-corpus-count-unavailable");
-        plan->closure_truncated = true;
+        plan_closure_unavailable(plan, semantic_count, include_count,
+                                 "source-corpus-count-unavailable");
         codeindex_close(ci);
         return true;
     }
@@ -1183,10 +1330,7 @@ static bool plan_add_closure(const char *repo_root,
         ok = false;
         goto out;
     }
-    size_t semantic_index = 0;
-    for (size_t i = 0; i < file_count; i++)
-        if (path_semantic_applies(files[i]))
-            snprintf(changed[semantic_index++], 256, "%s", files[i]);
+    plan_closure_copy_changed(changed, files, file_count);
 
     /* ── dimension SEMANTIC: the reverse-caller blast radius ── */
     if (semantic_count > 0 &&
@@ -1201,55 +1345,12 @@ static bool plan_add_closure(const char *repo_root,
      * an enum, a typedef, and an X-macro registry define no callable symbol,
      * so they have an empty reverse-caller closure while every file that
      * includes them recompiles. */
-    if (include_count > 0)
-        plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
-                     ZCL_DEVLOOP_DIM_COMPLETE, "");
-    /* The universal closure already contains every group this dimension could
-     * name, so walking it cannot widen the answer — only delay it. */
-    if (include_count > 0 && plan->closure_universal)
-        plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
-    for (size_t i = 0; i < file_count && !plan->closure_universal; i++) {
-        if (!path_include_applies(files[i]))
-            continue;
-        enum codeindex_include_dim idim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
-        int nd = codeindex_reverse_includes(ci, files[i], impacted,
-                                            closure_file_cap,
-                                            &idim);
-        if (nd < 0) {
-            plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
-                         ZCL_DEVLOOP_DIM_UNAVAILABLE, "closure-query-error");
-            ok = false;
-            goto out;
-        }
-        if (!plan_include_verdict(plan, ci, files[i], idim, nd,
-                                  closure_file_cap)) {
-            ok = false;
-            goto out;
-        }
-        /* What fit is still folded in: a universal answer keeps the partial
-         * evidence, and the loop ends because universal already covers it. */
-        for (int d = 0; d < nd; d++) {
-            if (!plan_fold_reached_file(plan, impacted[d],
-                                        ZCL_DEVLOOP_DIM_INCLUDE)) {
-                plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
-                break;
-            }
-        }
-    }
+    plan_closure_include_begin(plan, include_count);
+    ok = plan_closure_include_walk(plan, ci, files, file_count, impacted,
+                                   closure_file_cap);
 
 out:
-    /* Back-compat: the single boolean older readers still parse. It now means
-     * "at least one applicable graph dimension is refusing", and it no longer
-     * implies closure_groups is empty. NOT_APPLICABLE is complete evidence. */
-    enum zcl_devloop_dim_status semantic_status =
-        plan->dims[ZCL_DEVLOOP_DIM_SEMANTIC].status;
-    enum zcl_devloop_dim_status include_status =
-        plan->dims[ZCL_DEVLOOP_DIM_INCLUDE].status;
-    plan->closure_truncated =
-        semantic_status == ZCL_DEVLOOP_DIM_INCOMPLETE ||
-        semantic_status == ZCL_DEVLOOP_DIM_UNAVAILABLE ||
-        include_status == ZCL_DEVLOOP_DIM_INCOMPLETE ||
-        include_status == ZCL_DEVLOOP_DIM_UNAVAILABLE;
+    plan->closure_truncated = plan_closure_is_truncated(plan);
     free(changed);
     free(impacted);
     codeindex_close(ci);
