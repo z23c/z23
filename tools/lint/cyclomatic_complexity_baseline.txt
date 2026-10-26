@@ -2040,7 +2040,6 @@ tests/harness/src/test_utxo_recovery_service.c:test_utxo_recovery_service:298
 tests/harness/src/test_utxo_root_ladder.c:test_utxo_root_ladder:17
 tests/harness/src/test_utxo_root_ladder_tripwire.c:test_utxo_root_ladder_tripwire:44
 tests/harness/src/test_utxo_root_ladder_tripwire.c:tw_run_cap_sections:42
-tests/harness/src/test_utxo_snapshot_loader.c:test_utxo_snapshot_loader:80
 tests/harness/src/test_validate_headers_stage.c:test_validate_headers_stage:59
 tests/harness/src/test_validate_script_hash_split_repair.c:test_validate_script_hash_split_repair:90
 tests/harness/src/test_validation.c:test_validation:249
