@@ -394,7 +394,14 @@ static bool orchestration_env(const char *entry)
         "INVOCATION_ID=", "CODEX_TOOL_CALL_ID=",
         "JOURNAL_STREAM=", "SHLVL=", "OLDPWD=", "_=",
         "SSH_CONNECTION=", "SSH_CLIENT=", "SSH_TTY=", "XDG_SESSION_ID=",
-        "CLAUDE_", "CLAUDECODE=", "AI_AGENT="
+        "CLAUDE_", "CLAUDECODE=", "AI_AGENT=",
+        /* systemd gives every service its own values (2026-10-26: 0 hits in
+         * 1161 compiles across 13 gate units, each with its own
+         * MEMORY_PRESSURE_WATCH cgroup path), and the test fixture locators
+         * are runtime inputs that only some runs export. */
+        "MEMORY_PRESSURE_WATCH=", "MEMORY_PRESSURE_WRITE=",
+        "SYSTEMD_EXEC_PID=", "MANAGERPID=", "SSH_AUTH_SOCK=",
+        "EXACT_ONLY_MATCHED=", "ZCL_TEST_"
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strncmp(entry, names[i], strlen(names[i])) == 0)

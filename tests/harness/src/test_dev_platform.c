@@ -5142,6 +5142,13 @@ static bool dp_zcc_env_compile(const char *zcc, const char *cache,
             (void)setenv("DEVBUILD_CLASS", "normal", 1);
         (void)setenv("SSH_CONNECTION", value, 1);
         (void)setenv("XDG_SESSION_ID", value, 1);
+        (void)setenv("MEMORY_PRESSURE_WATCH", value, 1);
+        (void)setenv("SYSTEMD_EXEC_PID", value, 1);
+        (void)setenv("MANAGERPID", value, 1);
+        if (salt == 1)
+            (void)unsetenv("ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL");
+        else
+            (void)setenv("ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL", value, 1);
         (void)setenv("SHLVL", value, 1);
         (void)setenv("OLDPWD", value, 1);
         (void)setenv("_", value, 1);
