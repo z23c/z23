@@ -1109,8 +1109,6 @@ engine/jobs/src/utxo_apply_delta.c:utxo_apply_compute_block_delta:61
 engine/jobs/src/utxo_apply_delta_reorg.c:utxo_apply_reorg_unwind_if_needed:39
 engine/jobs/src/utxo_apply_delta_repair.c:prove_exact_future_coin_suffix:19
 engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:42
-engine/jobs/src/utxo_apply_nullifiers.c:check_and_insert_nullifiers_impl:16
-engine/jobs/src/utxo_apply_nullifiers.c:shielded_history_preflight:27
 engine/jobs/src/utxo_apply_stage.c:step_apply:64
 engine/jobs/src/validate_headers_stage.c:recheck_failed_rows:53
 engine/jobs/src/validate_headers_stage.c:step_validate:23

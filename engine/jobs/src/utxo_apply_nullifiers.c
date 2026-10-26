@@ -113,6 +113,78 @@ static bool shielded_history_hold(sqlite3 *db,
     return true;
 }
 
+/* One scan of the block: the first shielded tx of each kind and whether the
+ * block needs each pool's history at all. */
+struct shielded_preflight_scan {
+    const struct transaction *first_spend;
+    const struct transaction *first_sprout;
+    const struct transaction *first_sapling;
+    bool needs_sprout;
+    bool needs_sapling;
+};
+
+static void shielded_preflight_scan_transactions(
+    const struct block *blk, struct shielded_preflight_scan *scan)
+{
+    for (size_t i = 0; i < blk->num_vtx; i++) {
+        const struct transaction *tx = &blk->vtx[i];
+        bool sprout = tx->num_joinsplit > 0;
+        bool sapling = tx->num_shielded_spend > 0;
+        scan->needs_sprout = scan->needs_sprout || sprout;
+        scan->needs_sapling = scan->needs_sapling || sapling;
+        if (!scan->first_sprout && sprout)
+            scan->first_sprout = tx;
+        if (!scan->first_sapling && sapling)
+            scan->first_sapling = tx;
+        if (!scan->first_spend && (sprout || sapling))
+            scan->first_spend = tx;
+    }
+}
+
+/* Outcome of the anchor-pool completeness probe below. */
+enum shielded_anchor_probe_result {
+    SHIELDED_ANCHOR_PROBE_OK,
+    SHIELDED_ANCHOR_PROBE_GAP,
+    SHIELDED_ANCHOR_PROBE_ERROR
+};
+
+/* Reads the Sprout then the Sapling anchor activation markers (zclassicd's
+ * order; a Sprout gap is decided before the Sapling marker is read) and
+ * reports the first pool whose history prefix is incomplete, along with the
+ * offending tx and its hold kind. */
+static enum shielded_anchor_probe_result shielded_anchor_history_probe(
+    sqlite3 *db, bool needs_sprout, bool needs_sapling,
+    const struct transaction *first_sprout,
+    const struct transaction *first_sapling,
+    const struct transaction **gap_tx, const char **gap_kind)
+{
+    if (needs_sprout) {
+        int64_t cursor = 0;
+        bool found = false;
+        if (!anchor_kv_activation_cursor(db, ANCHOR_POOL_SPROUT, &cursor,
+                                         &found))
+            return SHIELDED_ANCHOR_PROBE_ERROR;
+        if (!found || cursor > 0) {
+            *gap_tx = first_sprout;
+            *gap_kind = "sprout-anchor-history-gap";
+            return SHIELDED_ANCHOR_PROBE_GAP;
+        }
+    }
+    if (needs_sapling) {
+        int64_t cursor = 0;
+        bool found = false;
+        if (!anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING, &cursor,
+                                         &found))
+            return SHIELDED_ANCHOR_PROBE_ERROR;
+        if (!found || cursor > 0) {
+            *gap_tx = first_sapling;
+            *gap_kind = "sapling-anchor-history-gap";
+            return SHIELDED_ANCHOR_PROBE_GAP;
+        }
+    }
+    return SHIELDED_ANCHOR_PROBE_OK;
+}
+
 static bool shielded_history_preflight(sqlite3 *db, const struct block *blk,
                                        int height,
                                        struct delta_summary *summary)
@@ -123,55 +195,27 @@ static bool shielded_history_preflight(sqlite3 *db, const struct block *blk,
         return false;
     }
 
-    const struct transaction *first_spend = NULL;
-    const struct transaction *first_sprout = NULL;
-    const struct transaction *first_sapling = NULL;
-    bool needs_sprout = false;
-    bool needs_sapling = false;
-    for (size_t i = 0; i < blk->num_vtx; i++) {
-        const struct transaction *tx = &blk->vtx[i];
-        bool sprout = tx->num_joinsplit > 0;
-        bool sapling = tx->num_shielded_spend > 0;
-        needs_sprout = needs_sprout || sprout;
-        needs_sapling = needs_sapling || sapling;
-        if (!first_sprout && sprout)
-            first_sprout = tx;
-        if (!first_sapling && sapling)
-            first_sapling = tx;
-        if (!first_spend && (sprout || sapling))
-            first_spend = tx;
-    }
-    if (!first_spend)
+    struct shielded_preflight_scan scan = {0};
+    shielded_preflight_scan_transactions(blk, &scan);
+    if (!scan.first_spend)
         return true;
 
     /* A seeded current frontier is enough to keep folding outputs, but it is
      * NOT proof that every older membership root exists.  A positive adoption
      * cursor therefore holds spends even when their particular root happens to
      * be present (or is the protocol-defined empty root). */
-    if (needs_sprout) {
-        int64_t cursor = 0;
-        bool found = false;
-        if (!anchor_kv_activation_cursor(db, ANCHOR_POOL_SPROUT, &cursor,
-                                         &found))
-            return false;
-        if (!found || cursor > 0) {
-            return shielded_history_hold(
-                db, summary, first_sprout, "sprout-anchor-history-gap",
-                UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID);
-        }
-    }
-    if (needs_sapling) {
-        int64_t cursor = 0;
-        bool found = false;
-        if (!anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING, &cursor,
-                                         &found))
-            return false;
-        if (!found || cursor > 0) {
-            return shielded_history_hold(
-                db, summary, first_sapling, "sapling-anchor-history-gap",
-                UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID);
-        }
-    }
+    const struct transaction *gap_tx = NULL;
+    const char *gap_kind = NULL;
+    enum shielded_anchor_probe_result anchor =
+        shielded_anchor_history_probe(db, scan.needs_sprout,
+                                      scan.needs_sapling, scan.first_sprout,
+                                      scan.first_sapling, &gap_tx,
+                                      &gap_kind);
+    if (anchor == SHIELDED_ANCHOR_PROBE_ERROR)
+        return false;
+    if (anchor == SHIELDED_ANCHOR_PROBE_GAP)
+        return shielded_history_hold(db, summary, gap_tx, gap_kind,
+                                     UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID);
 
     int64_t nf_cursor = 0;
     bool nf_found = false;
@@ -183,7 +227,7 @@ static bool shielded_history_preflight(sqlite3 *db, const struct block *blk,
     }
     if (!nf_found || nf_cursor > 0)
         return shielded_history_hold(
-            db, summary, first_spend, "nullifier-history-gap",
+            db, summary, scan.first_spend, "nullifier-history-gap",
             UTXO_APPLY_NF_GAP_BLOCKER_ID);
     return true;
 }
@@ -368,6 +412,59 @@ static bool nf_check_one(sqlite3 *db, const uint8_t nf[32], int pool,
     return true;
 }
 
+/* Upper bound on the block's nullifier entries (accumulator size). */
+static size_t nf_count_block_nullifiers(const struct block *blk)
+{
+    size_t total = 0;
+    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
+        const struct transaction *tx = &blk->vtx[ti];
+        total += tx->num_joinsplit * ZC_NUM_JS_INPUTS;
+        total += tx->num_shielded_spend;
+    }
+    return total;
+}
+
+/* Pass-1 outcome for one tx: keep going, consensus-reject (summary->ok is
+ * already false), or a store error (already logged below nullifier_kv). */
+enum nf_pass1_result {
+    NF_PASS1_CONTINUE,
+    NF_PASS1_REJECT,
+    NF_PASS1_STORE_ERROR
+};
+
+/* Pass 1 for one tx: check every Sprout JoinSplit nullifier, then every
+ * Sapling spend nullifier, against the durable set + the EARLIER-tx
+ * accumulator, appending each clean one; then index the tx's entries. */
+static enum nf_pass1_result nf_pass1_accumulate_tx(
+    sqlite3 *db, const struct transaction *tx, struct nf_seen_index *seen,
+    struct nf_entry *acc, size_t *n, struct delta_summary *summary)
+{
+    size_t tx_first = *n;   /* entries below this are EARLIER txs */
+    for (size_t i = 0; i < tx->num_joinsplit; i++) {
+        for (size_t j = 0; j < ZC_NUM_JS_INPUTS; j++) {
+            if (!nf_check_one(db,
+                              tx->v_joinsplit[i].nullifiers[j].data,
+                              NULLIFIER_POOL_SPROUT, &tx->hash,
+                              seen, acc, n, summary))
+                return NF_PASS1_STORE_ERROR;
+            if (!summary->ok)
+                return NF_PASS1_REJECT;
+        }
+    }
+    for (size_t i = 0; i < tx->num_shielded_spend; i++) {
+        if (!nf_check_one(db,
+                          tx->v_shielded_spend[i].nullifier.data,
+                          NULLIFIER_POOL_SAPLING, &tx->hash,
+                          seen, acc, n, summary))
+            return NF_PASS1_STORE_ERROR;
+        if (!summary->ok)
+            return NF_PASS1_REJECT;
+    }
+    if (!nf_index_insert_range(seen, acc, tx_first, *n))
+        return NF_PASS1_STORE_ERROR;
+    return NF_PASS1_CONTINUE;
+}
+
 /* NOT inside utxo_apply_compute_block_delta on purpose: repair dry-runs call
  * the delta builder in throwaway txns where in-range nullifier rows still
  * exist and would false-fail an otherwise-valid repair. TWO-PASS so a
@@ -379,12 +476,7 @@ static bool check_and_insert_nullifiers_impl(struct sqlite3 *db,
                                              int height,
                                              struct delta_summary *summary)
 {
-    size_t total = 0;
-    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
-        const struct transaction *tx = &blk->vtx[ti];
-        total += tx->num_joinsplit * ZC_NUM_JS_INPUTS;
-        total += tx->num_shielded_spend;
-    }
+    size_t total = nf_count_block_nullifiers(blk);
     if (total == 0)
         return true;
 
@@ -408,36 +500,13 @@ static bool check_and_insert_nullifiers_impl(struct sqlite3 *db,
     size_t n = 0;
     for (size_t ti = 0; ti < blk->num_vtx; ti++) {
         const struct transaction *tx = &blk->vtx[ti];
-        size_t tx_first = n;   /* entries below this are EARLIER txs */
-        for (size_t i = 0; i < tx->num_joinsplit; i++) {
-            for (size_t j = 0; j < ZC_NUM_JS_INPUTS; j++) {
-                if (!nf_check_one(db,
-                                  tx->v_joinsplit[i].nullifiers[j].data,
-                                  NULLIFIER_POOL_SPROUT, &tx->hash,
-                                  &seen, acc, &n, summary)) {
-                    nf_acc_free(acc, &seen);
-                    return false;
-                }
-                if (!summary->ok) {
-                    nf_acc_free(acc, &seen);
-                    return true;
-                }
-            }
+        enum nf_pass1_result r = nf_pass1_accumulate_tx(db, tx, &seen, acc,
+                                                        &n, summary);
+        if (r == NF_PASS1_REJECT) {
+            nf_acc_free(acc, &seen);
+            return true;
         }
-        for (size_t i = 0; i < tx->num_shielded_spend; i++) {
-            if (!nf_check_one(db,
-                              tx->v_shielded_spend[i].nullifier.data,
-                              NULLIFIER_POOL_SAPLING, &tx->hash,
-                              &seen, acc, &n, summary)) {
-                nf_acc_free(acc, &seen);
-                return false;
-            }
-            if (!summary->ok) {
-                nf_acc_free(acc, &seen);
-                return true;
-            }
-        }
-        if (!nf_index_insert_range(&seen, acc, tx_first, n)) {
+        if (r == NF_PASS1_STORE_ERROR) {
             nf_acc_free(acc, &seen);
             return false;
         }
