@@ -517,8 +517,6 @@ contexts/explorer/modules/presentation/src/presentation_form.c:zcl_present_windo
 contexts/explorer/modules/presentation/src/presentation_input.c:zcl_present_window_hover_at_v1:19
 contexts/explorer/views/src/explorer_factoids_records.c:factoids_emit_section_5_records:19
 contexts/explorer/views/src/explorer_network_view.c:explorer_view_network:17
-contexts/explorer/views/src/explorer_pages_hodl_snapshot.c:hodl_view_disk_cache_read:33
-contexts/explorer/views/src/explorer_pages_hodl_snapshot.c:hodl_view_disk_cache_save:27
 contexts/explorer/views/src/explorer_tx_view.c:explorer_view_tx:27
 contexts/market/controllers/src/file_market_controller.c:market_purchase_code:18
 contexts/market/controllers/src/file_market_controller.c:rpc_zmarket_purchase_plan:28
