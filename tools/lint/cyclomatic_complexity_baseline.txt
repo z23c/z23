@@ -1439,8 +1439,6 @@ tests/harness/src/test_zdir_write_path.c:t_owner_proof:17
 tests/harness/src/test_zid.c:test_ed25519_batch:40
 tests/harness/src/test_zid.c:test_zid:205
 tests/harness/src/test_zid.c:test_zid_domain_store:75
-tests/harness/src/testcache.c:testcache_open_mode:27
-tests/harness/src/testcache.c:testcache_probe_group_internal:25
 tools/acme/acme_jws.c:acme_es256_sign:16
 tools/acme/acme_jws.c:acme_jws_body:16
 tools/acme/acme_jws.c:acme_jws_protected_header:19

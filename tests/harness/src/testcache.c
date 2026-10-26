@@ -1412,35 +1412,75 @@ static bool trc_compute_key(struct testcache *tc, const char *group_name,
     return true;
 }
 
-static struct testcache *testcache_open_mode(
-    const char *repo_root, const char *const *changed_sources,
-    size_t changed_source_count, bool snapshot_mode)
+/* The repo root: the caller's path, else ZCL_DEV_SOURCE_ROOT, else ".". */
+static const char *trc_open_select_root(const char *repo_root)
 {
     const char *root = repo_root;
     if (!root || !root[0]) {
         const char *env = getenv("ZCL_DEV_SOURCE_ROOT");
         root = (env && env[0]) ? env : ".";
     }
+    return root;
+}
 
-    if ((changed_source_count > 0 && !changed_sources) ||
-        changed_source_count > TRC_CHANGED_MAX)
+/* The store root: ZCL_TESTCACHE_STORE_ROOT when non-empty, else the root. */
+static const char *trc_open_select_store(const char *root)
+{
+    const char *configured_store = getenv("ZCL_TESTCACHE_STORE_ROOT");
+    return configured_store && configured_store[0]
+        ? configured_store : root;
+}
+
+static bool trc_open_changed_set_invalid(const char *const *changed_sources,
+                                         size_t changed_source_count)
+{
+    return (changed_source_count > 0 && !changed_sources) ||
+           changed_source_count > TRC_CHANGED_MAX;
+}
+
+/* True when src does not fit in dst (cap bytes), or snprintf failed. */
+static bool trc_open_path_overflows(char *dst, size_t cap, const char *src)
+{
+    int n = snprintf(dst, cap, "%s", src);
+    return n < 0 || (size_t)n >= cap;
+}
+
+static bool trc_open_changed_path_invalid(const char *path, size_t cap)
+{
+    return !path || !path[0] || path[0] == '/' || strstr(path, "..") ||
+           strlen(path) >= cap;
+}
+
+static void trc_open_load_depfiles(struct testcache *tc)
+{
+    if (!codeindex_depfile_graph(tc->root, &tc->dep_count,
+                                 &tc->dep_newest_ns)) {
+        tc->dep_count = 0;
+        tc->dep_newest_ns = 0;
+    }
+}
+
+static struct testcache *testcache_open_mode(
+    const char *repo_root, const char *const *changed_sources,
+    size_t changed_source_count, bool snapshot_mode)
+{
+    const char *root = trc_open_select_root(repo_root);
+
+    if (trc_open_changed_set_invalid(changed_sources, changed_source_count))
         LOG_NULL("testcache", "invalid changed source set");
 
     struct testcache *tc = zcl_calloc(1, sizeof(*tc), "testcache");
     if (!tc)
         LOG_NULL("testcache", "alloc handle failed");
 
-    int n = snprintf(tc->root, sizeof(tc->root), "%s", root);
-    if (n < 0 || (size_t)n >= sizeof(tc->root)) {
+    if (trc_open_path_overflows(tc->root, sizeof(tc->root), root)) {
         free(tc);
         LOG_NULL("testcache", "root path overflow");
     }
 
-    const char *configured_store = getenv("ZCL_TESTCACHE_STORE_ROOT");
-    const char *store_root = configured_store && configured_store[0]
-        ? configured_store : root;
-    n = snprintf(tc->store_root, sizeof(tc->store_root), "%s", store_root);
-    if (n < 0 || (size_t)n >= sizeof(tc->store_root)) {
+    const char *store_root = trc_open_select_store(root);
+    if (trc_open_path_overflows(tc->store_root, sizeof(tc->store_root),
+                                store_root)) {
         free(tc);
         LOG_NULL("testcache", "store root path overflow");
     }
@@ -1468,19 +1508,14 @@ static struct testcache *testcache_open_mode(
     tc->snapshot_mode = snapshot_mode;
     for (size_t i = 0; i < changed_source_count; i++) {
         const char *path = changed_sources[i];
-        if (!path || !path[0] || path[0] == '/' || strstr(path, "..") ||
-            strlen(path) >= sizeof(tc->changed[0])) {
+        if (trc_open_changed_path_invalid(path, sizeof(tc->changed[0]))) {
             testcache_close(tc);
             LOG_NULL("testcache", "invalid changed source path");
         }
         snprintf(tc->changed[tc->changed_count++],
                  sizeof(tc->changed[0]), "%s", path);
     }
-    if (!codeindex_depfile_graph(tc->root, &tc->dep_count,
-                                 &tc->dep_newest_ns)) {
-        tc->dep_count = 0;
-        tc->dep_newest_ns = 0;
-    }
+    trc_open_load_depfiles(tc);
 
     tc->ci = snapshot_mode ? codeindex_open_existing(tc->root)
                            : codeindex_open(tc->root);
@@ -1627,6 +1662,117 @@ static void trc_key_refusal(const struct testcache *tc, bool harness_incomplete,
     snprintf(out->reason, sizeof(out->reason), "%s", reason);
 }
 
+static bool trc_probe_contract_refused(enum zcl_test_proof_contract contract,
+                                       bool activated, const char **env_name,
+                                       const char **env_value,
+                                       struct testcache_probe *out)
+{
+    if (activated &&
+        (!zcl_test_proof_contract_environment(contract, env_name,
+                                               env_value) ||
+         contract == ZCL_TEST_PROOF_NONE || !*env_name || !*env_value)) {
+        out->code = TESTCACHE_R_PROOF_CONTRACT_INVALID;
+        snprintf(out->reason, sizeof(out->reason),
+                 "invalid activated proof contract");
+        return true;
+    }
+    return false;
+}
+
+static bool trc_probe_handle_refused(const struct testcache *tc,
+                                     const char *group_name,
+                                     struct testcache_probe *out)
+{
+    if (!tc || !tc->ci || !group_name || !group_name[0]) {
+        out->code = TESTCACHE_R_NO_HANDLE;
+        snprintf(out->reason, sizeof(out->reason), "no cache handle");
+        return true;
+    }
+    if (strlen(group_name) > ZCL_DEV_VERDICT_LEAF_GROUP_MAX) {
+        out->code = TESTCACHE_R_GROUP_UNADMISSIBLE;
+        snprintf(out->reason, sizeof(out->reason),
+                 "group exceeds signed observation name bound");
+        return true;
+    }
+    return false;
+}
+
+static bool trc_probe_inputs_refused(const struct testcache *tc,
+                                     const char *group_name,
+                                     struct testcache_probe *out)
+{
+    if (group_reads_external_inputs(group_name)) {
+        out->code = TESTCACHE_R_EXTERNAL_INPUT;
+        snprintf(out->reason, sizeof(out->reason), "external-input denylist");
+        return true;
+    }
+
+    /* No depfiles means the include closure is unknown. Even a freshly run
+     * proof cannot mint a reusable key from that incomplete input set. */
+    if (tc->dep_count == 0) {
+        out->code = TESTCACHE_R_NO_INCLUDE_GRAPH;
+        snprintf(out->reason, sizeof(out->reason),
+                 "no depfiles under build/ (include graph absent)");
+        return true;
+    }
+    return false;
+}
+
+static bool trc_probe_closure_refused(struct testcache *tc,
+                                      const char *group_name, int *nc,
+                                      struct testcache_probe *out)
+{
+    bool truncated = false, root_found = false;
+    *nc = codeindex_forward_closure(tc->ci, group_name, tc->closure,
+                                    TRC_MAX_CLOSURE, &truncated, &root_found);
+    tc->stats.closure_queries++;
+    if (*nc < 0) {
+        out->code = TESTCACHE_R_CLOSURE_ERROR;
+        snprintf(out->reason, sizeof(out->reason), "closure query error");
+        return true;
+    }
+    if (!root_found) {
+        out->code = TESTCACHE_R_ENTRY_UNRESOLVED;
+        snprintf(out->reason, sizeof(out->reason), "entry symbol unresolved");
+        return true;
+    }
+    if (truncated) {
+        out->code = TESTCACHE_R_TRUNCATED;
+        snprintf(out->reason, sizeof(out->reason),
+                 "closure truncated (%d files, cap hit)", *nc);
+        return true;
+    }
+    if (*nc == 0) {
+        out->code = TESTCACHE_R_EMPTY_CLOSURE;
+        snprintf(out->reason, sizeof(out->reason), "empty closure");
+        return true;
+    }
+    return false;
+}
+
+/* A verified snapshot describes the generation immediately before the
+ * resident edit. It is sound for an unchanged group's closure. If that
+ * closure reaches any edited TU, run the group fresh: the edit may have
+ * changed its outgoing call/include edges, so the old closure is not a
+ * complete cache key for it. */
+static bool trc_probe_changed_refused(const struct testcache *tc, int nc,
+                                      struct testcache_probe *out)
+{
+    if (tc->snapshot_mode) {
+        for (int i = 0; i < nc; i++) {
+            for (size_t c = 0; c < tc->changed_count; c++) {
+                if (strcmp(tc->closure[i], tc->changed[c]) != 0)
+                    continue;
+                out->code = TESTCACHE_R_CHANGED_INPUT;
+                snprintf(out->reason, sizeof(out->reason),
+                         "closure reaches changed source");
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /* Populate *out for group_name. Fail-safe: any failure => uncacheable. */
 static void testcache_probe_group_internal(
     struct testcache *tc, const char *group_name,
@@ -1636,85 +1782,19 @@ static void testcache_probe_group_internal(
     memset(out, 0, sizeof(*out));
     const char *env_name = NULL;
     const char *env_value = NULL;
-    if (activated &&
-        (!zcl_test_proof_contract_environment(contract, &env_name,
-                                               &env_value) ||
-         contract == ZCL_TEST_PROOF_NONE || !env_name || !env_value)) {
-        out->code = TESTCACHE_R_PROOF_CONTRACT_INVALID;
-        snprintf(out->reason, sizeof(out->reason),
-                 "invalid activated proof contract");
+    if (trc_probe_contract_refused(contract, activated, &env_name,
+                                   &env_value, out))
         return;
-    }
-    if (!tc || !tc->ci || !group_name || !group_name[0]) {
-        out->code = TESTCACHE_R_NO_HANDLE;
-        snprintf(out->reason, sizeof(out->reason), "no cache handle");
+    if (trc_probe_handle_refused(tc, group_name, out))
         return;
-    }
-    if (strlen(group_name) > ZCL_DEV_VERDICT_LEAF_GROUP_MAX) {
-        out->code = TESTCACHE_R_GROUP_UNADMISSIBLE;
-        snprintf(out->reason, sizeof(out->reason),
-                 "group exceeds signed observation name bound");
+    if (trc_probe_inputs_refused(tc, group_name, out))
         return;
-    }
 
-    if (group_reads_external_inputs(group_name)) {
-        out->code = TESTCACHE_R_EXTERNAL_INPUT;
-        snprintf(out->reason, sizeof(out->reason), "external-input denylist");
+    int nc = 0;
+    if (trc_probe_closure_refused(tc, group_name, &nc, out))
         return;
-    }
-
-    /* No depfiles means the include closure is unknown. Even a freshly run
-     * proof cannot mint a reusable key from that incomplete input set. */
-    if (tc->dep_count == 0) {
-        out->code = TESTCACHE_R_NO_INCLUDE_GRAPH;
-        snprintf(out->reason, sizeof(out->reason),
-                 "no depfiles under build/ (include graph absent)");
+    if (trc_probe_changed_refused(tc, nc, out))
         return;
-    }
-
-    bool truncated = false, root_found = false;
-    int nc = codeindex_forward_closure(tc->ci, group_name, tc->closure,
-                                       TRC_MAX_CLOSURE, &truncated, &root_found);
-    tc->stats.closure_queries++;
-    if (nc < 0) {
-        out->code = TESTCACHE_R_CLOSURE_ERROR;
-        snprintf(out->reason, sizeof(out->reason), "closure query error");
-        return;
-    }
-    if (!root_found) {
-        out->code = TESTCACHE_R_ENTRY_UNRESOLVED;
-        snprintf(out->reason, sizeof(out->reason), "entry symbol unresolved");
-        return;
-    }
-    if (truncated) {
-        out->code = TESTCACHE_R_TRUNCATED;
-        snprintf(out->reason, sizeof(out->reason),
-                 "closure truncated (%d files, cap hit)", nc);
-        return;
-    }
-    if (nc == 0) {
-        out->code = TESTCACHE_R_EMPTY_CLOSURE;
-        snprintf(out->reason, sizeof(out->reason), "empty closure");
-        return;
-    }
-
-    /* A verified snapshot describes the generation immediately before the
-     * resident edit. It is sound for an unchanged group's closure. If that
-     * closure reaches any edited TU, run the group fresh: the edit may have
-     * changed its outgoing call/include edges, so the old closure is not a
-     * complete cache key for it. */
-    if (tc->snapshot_mode) {
-        for (int i = 0; i < nc; i++) {
-            for (size_t c = 0; c < tc->changed_count; c++) {
-                if (strcmp(tc->closure[i], tc->changed[c]) != 0)
-                    continue;
-                out->code = TESTCACHE_R_CHANGED_INPUT;
-                snprintf(out->reason, sizeof(out->reason),
-                         "closure reaches changed source");
-                return;
-            }
-        }
-    }
 
     /* The exec rail: a cacheable closure that execs a repo script, make, or
      * the test image itself decides its verdict from bytes the key never
