@@ -214,6 +214,61 @@ static bool at_first_sighting(const struct db_agent_session *rows, int upto,
     return true;
 }
 
+static void at_note_expiry(struct at_grants *g,
+                           const struct db_agent_session *r, int64_t now)
+{
+    if (r->expires_at == 0) {
+        g->never_expire++;
+    } else {
+        int64_t left = r->expires_at - now;
+        if (left < 0)
+            left = 0;
+        if (!g->have_soonest || left < g->soonest) {
+            g->have_soonest = true;
+            g->soonest = left;
+        }
+    }
+}
+
+static void at_note_max_limits(struct at_grants *g,
+                               const struct db_agent_session *r)
+{
+    if (r->max_per_tx_zat > g->max_tx)
+        g->max_tx = r->max_per_tx_zat;
+    if (r->max_per_window_zat > g->max_window)
+        g->max_window = r->max_per_window_zat;
+}
+
+static void at_note_oldest_age(struct at_grants *g,
+                               const struct db_agent_session *r, int64_t now)
+{
+    if (r->created_at > 0) {
+        int64_t age = now - r->created_at;
+        if (age < 0)
+            age = 0;
+        if (!g->have_oldest || age > g->oldest_age) {
+            g->have_oldest = true;
+            g->oldest_age = age;
+        }
+    }
+}
+
+static void at_note_permille(struct at_grants *g,
+                             const struct db_agent_session *r, int64_t spent)
+{
+    if (r->max_per_window_zat > 0) {
+        int64_t pm = (spent / r->max_per_window_zat) * 1000 +
+                     ((spent % r->max_per_window_zat) * 1000) /
+                         r->max_per_window_zat;
+        if (pm > 1000)
+            pm = 1000;
+        if (!g->have_permille || pm > g->permille) {
+            g->have_permille = true;
+            g->permille = pm;
+        }
+    }
+}
+
 static void at_scan(const struct db_agent_session *rows, int n, int64_t now,
                     struct at_grants *g)
 {
@@ -234,45 +289,14 @@ static void at_scan(const struct db_agent_session *rows, int n, int64_t now,
             g->holders++;
         if (r->recipient_allowlist[0] == '\0')
             g->any_recipient++;
-        if (r->expires_at == 0) {
-            g->never_expire++;
-        } else {
-            int64_t left = r->expires_at - now;
-            if (left < 0)
-                left = 0;
-            if (!g->have_soonest || left < g->soonest) {
-                g->have_soonest = true;
-                g->soonest = left;
-            }
-        }
-        if (r->max_per_tx_zat > g->max_tx)
-            g->max_tx = r->max_per_tx_zat;
-        if (r->max_per_window_zat > g->max_window)
-            g->max_window = r->max_per_window_zat;
-        if (r->created_at > 0) {
-            int64_t age = now - r->created_at;
-            if (age < 0)
-                age = 0;
-            if (!g->have_oldest || age > g->oldest_age) {
-                g->have_oldest = true;
-                g->oldest_age = age;
-            }
-        }
+        at_note_expiry(g, r, now);
+        at_note_max_limits(g, r);
+        at_note_oldest_age(g, r, now);
         int64_t spent = at_effective_spend(r, now);
         g->spent_total += spent;
         if (spent > 0)
             g->with_spend++;
-        if (r->max_per_window_zat > 0) {
-            int64_t pm = (spent / r->max_per_window_zat) * 1000 +
-                         ((spent % r->max_per_window_zat) * 1000) /
-                             r->max_per_window_zat;
-            if (pm > 1000)
-                pm = 1000;
-            if (!g->have_permille || pm > g->permille) {
-                g->have_permille = true;
-                g->permille = pm;
-            }
-        }
+        at_note_permille(g, r, spent);
     }
 }
 
