@@ -124,6 +124,72 @@ static bool leaf_has_acme_identifier(X509 *leaf, uint8_t digest[32])
     return true;
 }
 
+/* A TCP connection to the live listener on `port`, or
+ * PLATFORM_SOCKET_INVALID. A socket whose connect fails is closed here, so
+ * a caller only ever closes what it is handed. */
+static platform_socket_t listener_socket_connect(int port)
+{
+    const platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM,
+                                                      0, true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
+        return fd;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((uint16_t)port);
+    if (platform_socket_connect(fd, (struct sockaddr *)&addr,
+                                sizeof(addr)) == 0)
+        return fd;
+    platform_socket_close(fd);
+    return PLATFORM_SOCKET_INVALID;
+}
+
+/* The client half of one TLS session on a connected socket: the context,
+ * the SSL, the SNI name (when one is sent), an optional acme-tls/1 offer,
+ * and SSL_connect itself. `*ctx_out` and `*ssl_out` receive what was
+ * created even on failure, so the caller frees exactly what it would
+ * have. Returns 0 when the handshake completed, -1 when it did not. */
+static int tls_client_session_open(int fd, const char *sni,
+                                   bool offer_acme_alpn,
+                                   SSL_CTX **ctx_out, SSL **ssl_out)
+{
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    SSL *ssl = ctx ? SSL_new(ctx) : NULL;
+    *ctx_out = ctx;
+    *ssl_out = ssl;
+    if (!ssl || SSL_set_fd(ssl, fd) != 1)
+        return -1;
+    if (sni && !SSL_set_tlsext_host_name(ssl, sni))
+        return -1;
+    if (offer_acme_alpn) {
+        /* One-byte length prefix, then the protocol name. */
+        static const unsigned char offer[] = {
+            (unsigned char)(sizeof(ACME_ALPN_PROTOCOL) - 1),
+            'a', 'c', 'm', 'e', '-', 't', 'l', 's', '/', '1'
+        };
+        if (SSL_set_alpn_protos(ssl, offer, (unsigned)sizeof(offer)) != 0)
+            return -1;
+    }
+    if (SSL_connect(ssl) != 1) {
+        ERR_clear_error();
+        return -1;
+    }
+    return 0;
+}
+
+/* Record the protocol the server selected, if any, in `out->alpn`. */
+static void served_alpn_record(SSL *ssl, struct served *out)
+{
+    const unsigned char *sel = NULL;
+    unsigned sel_len = 0;
+    SSL_get0_alpn_selected(ssl, &sel, &sel_len);
+    if (sel && sel_len > 0 && sel_len < sizeof(out->alpn)) {
+        memcpy(out->alpn, sel, sel_len);
+        out->alpn[sel_len] = '\0';
+    }
+}
+
 /* Connect, handshake, record what came back. `sni` NULL sends no
  * server_name extension (old client / bare IP). Returns false when the
  * handshake did not complete, which a name mismatch produces. */
@@ -141,48 +207,15 @@ static bool handshake(const char *sni, bool offer_acme_alpn,
     SSL *ssl = NULL;
     X509 *leaf = NULL;
 
-    const platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM,
-                                                      0, true, false);
+    const platform_socket_t fd = listener_socket_connect(port);
     if (fd == PLATFORM_SOCKET_INVALID)
         return false;
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons((uint16_t)port);
-    if (platform_socket_connect(fd, (struct sockaddr *)&addr,
-                                sizeof(addr)) != 0)
+
+    if (tls_client_session_open((int)(intptr_t)fd, sni, offer_acme_alpn,
+                                &ctx, &ssl) != 0)
         goto done;
 
-    ctx = SSL_CTX_new(TLS_client_method());
-    ssl = ctx ? SSL_new(ctx) : NULL;
-    if (!ssl || SSL_set_fd(ssl, (int)(intptr_t)fd) != 1)
-        goto done;
-    if (sni && !SSL_set_tlsext_host_name(ssl, sni))
-        goto done;
-    if (offer_acme_alpn) {
-        /* One-byte length prefix, then the protocol name. */
-        static const unsigned char offer[] = {
-            (unsigned char)(sizeof(ACME_ALPN_PROTOCOL) - 1),
-            'a', 'c', 'm', 'e', '-', 't', 'l', 's', '/', '1'
-        };
-        if (SSL_set_alpn_protos(ssl, offer, (unsigned)sizeof(offer)) != 0)
-            goto done;
-    }
-    if (SSL_connect(ssl) != 1) {
-        ERR_clear_error();
-        goto done;
-    }
-
-    {
-        const unsigned char *sel = NULL;
-        unsigned sel_len = 0;
-        SSL_get0_alpn_selected(ssl, &sel, &sel_len);
-        if (sel && sel_len > 0 && sel_len < sizeof(out->alpn)) {
-            memcpy(out->alpn, sel, sel_len);
-            out->alpn[sel_len] = '\0';
-        }
-    }
+    served_alpn_record(ssl, out);
 
     leaf = SSL_get1_peer_certificate(ssl);
     if (!leaf)
@@ -318,6 +351,28 @@ static bool served_cn(const char *sni, char *out, size_t out_len)
     return true;
 }
 
+/* True when a browser-shaped client for `sni` is served a leaf whose
+ * subject CN is exactly `want`. */
+static bool served_cn_is(const char *sni, const char *want)
+{
+    char cn[256] = "";
+    const bool got = served_cn(sni, cn, sizeof(cn));
+    return got && strcmp(cn, want) == 0;
+}
+
+/* GET `url` over the live listener: true when the response contains
+ * `present` and `also` (either may be NULL to skip that requirement) and
+ * does not contain `absent` (NULL to skip). */
+static bool http_get_shows(const char *url, const char *present,
+                           const char *also, const char *absent)
+{
+    char resp[1024];
+    const bool got = http_get(url, resp, sizeof(resp));
+    return got && (present == NULL || strstr(resp, present) != NULL) &&
+           (also == NULL || strstr(resp, also) != NULL) &&
+           (absent == NULL || strstr(resp, absent) == NULL);
+}
+
 /* ── writing a test certificate pair ─────────────────────────────────────
  *
  * Deliberately NOT acme_selfsigned_write(), which writes the BOOT
@@ -392,6 +447,37 @@ static bool name_pair_write(struct name_pair *p, const char *root,
     return pair_write(p->cert, p->key, cn);
 }
 
+/* The stamped install shim, exactly as the public-install tree serves it. */
+static bool shim_fixture_written(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    return f != NULL && fwrite("#!/bin/sh\necho z23-install\n", 1, 27,
+                               f) == 27 &&
+           fclose(f) == 0;
+}
+
+/* True when a handshake for `sni` — with or without acme-tls/1 offered —
+ * completes on an ordinary (non-challenge) certificate whose subject CN is
+ * `cn`, recorded in `*out`. */
+static bool handshake_serves_ordinary(const char *sni, bool offer_acme_alpn,
+                                      const char *cn, struct served *out)
+{
+    const bool got = handshake(sni, offer_acme_alpn, out);
+    return got && !out->acme_identifier && strcmp(out->cn, cn) == 0;
+}
+
+/* True when a handshake `got` was answered with a challenge certificate
+ * whose acmeIdentifier digest is `want` — and, when `stale` is not NULL,
+ * is not the earlier validation's `stale` digest. */
+static bool challenge_digest_served(bool got, const struct served *s,
+                                    const uint8_t want[32],
+                                    const uint8_t stale[32])
+{
+    return got && s->acme_identifier &&
+           memcmp(s->acme_digest, want, 32) == 0 &&
+           (stale == NULL || memcmp(s->acme_digest, stale, 32) != 0);
+}
+
 int test_https_sni_select(void)
 {
     int failures = 0;
@@ -434,48 +520,35 @@ int test_https_sni_select(void)
     }
 
     {
-        char cn[256] = "";
         SN_CHECK("with no name configured, a client asking for one is still "
                  "served the default certificate",
-                 served_cn(ALPHA, cn, sizeof(cn)) &&
-                 strcmp(cn, DEFAULT_CN) == 0);
-        cn[0] = '\0';
+                 served_cn_is(ALPHA, DEFAULT_CN));
         SN_CHECK("and a client that sends no name at all is too",
-                 served_cn(NULL, cn, sizeof(cn)) &&
-                 strcmp(cn, DEFAULT_CN) == 0);
+                 served_cn_is(NULL, DEFAULT_CN));
     }
 
     {
-        char resp[1024];
         char install_root[640];
         char shim[768];
-        FILE *f;
 
         SN_CHECK("GET / without a public-install tree is the explorer redirect",
-                 http_get("/", resp, sizeof(resp)) &&
-                 strstr(resp, "Location: /explorer") != NULL);
+                 http_get_shows("/", "Location: /explorer", NULL, NULL));
         snprintf(install_root, sizeof(install_root), "%s/public-install", dir);
         SN_CHECK("public-install directory is created",
                  mkdir(install_root, 0700) == 0);
         snprintf(shim, sizeof(shim), "%s/install.sh", install_root);
-        f = fopen(shim, "wb");
         SN_CHECK("stamped shim fixture is written",
-                 f != NULL && fwrite("#!/bin/sh\necho z23-install\n", 1, 27,
-                                     f) == 27 &&
-                 fclose(f) == 0);
+                 shim_fixture_written(shim));
         https_server_set_public_install_root(install_root);
         SN_CHECK("GET / with a public-install tree serves the shim",
-                 http_get("/", resp, sizeof(resp)) &&
-                 strstr(resp, "HTTP/1.1 200 OK") != NULL &&
-                 strstr(resp, "echo z23-install") != NULL);
+                 http_get_shows("/", "HTTP/1.1 200 OK", "echo z23-install",
+                                NULL));
         SN_CHECK("GET /explorer is not captured by the install tree",
-                 http_get("/explorer", resp, sizeof(resp)) &&
-                 strstr(resp, "echo z23-install") == NULL);
+                 http_get_shows("/explorer", NULL, NULL, "echo z23-install"));
         failures += sn_site_home_first();
         https_server_set_public_install_root(NULL);
         SN_CHECK("clearing the install root restores the explorer redirect",
-                 http_get("/", resp, sizeof(resp)) &&
-                 strstr(resp, "Location: /explorer") != NULL);
+                 http_get_shows("/", "Location: /explorer", NULL, NULL));
     }
 
     /* ── one configured name ───────────────────────────────────────── */
@@ -489,20 +562,15 @@ int test_https_sni_select(void)
              !https_server_certificate_refresh());
 
     {
-        char cn[256] = "";
         SN_CHECK("a client asking for that name is served THAT name's "
                  "certificate",
-                 served_cn(ALPHA, cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
-        cn[0] = '\0';
+                 served_cn_is(ALPHA, ALPHA));
         SN_CHECK("a client asking for a name nobody configured completes its "
                  "handshake on the default certificate",
-                 served_cn(STRANGER, cn, sizeof(cn)) &&
-                 strcmp(cn, DEFAULT_CN) == 0);
-        cn[0] = '\0';
+                 served_cn_is(STRANGER, DEFAULT_CN));
         SN_CHECK("a client that sends no name is served the default "
                  "certificate",
-                 served_cn(NULL, cn, sizeof(cn)) &&
-                 strcmp(cn, DEFAULT_CN) == 0);
+                 served_cn_is(NULL, DEFAULT_CN));
     }
 
     /* ── a second name, added to a running listener ─────────────────── */
@@ -514,25 +582,19 @@ int test_https_sni_select(void)
              https_server_certificate_refresh());
 
     {
-        char cn[256] = "";
         SN_CHECK("the first name still gets the first certificate",
-                 served_cn(ALPHA, cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
-        cn[0] = '\0';
+                 served_cn_is(ALPHA, ALPHA));
         SN_CHECK("the second name gets the second certificate",
-                 served_cn(BRAVO, cn, sizeof(cn)) && strcmp(cn, BRAVO) == 0);
-        cn[0] = '\0';
+                 served_cn_is(BRAVO, BRAVO));
         SN_CHECK("and the default is still the default",
-                 served_cn(NULL, cn, sizeof(cn)) &&
-                 strcmp(cn, DEFAULT_CN) == 0);
+                 served_cn_is(NULL, DEFAULT_CN));
     }
 
     /* ── the name is matched case-insensitively, as SNI is ─────────── */
     {
-        char cn[256] = "";
         SN_CHECK("the same name in a different case selects the same "
                  "certificate",
-                 served_cn("ALPHA.Example", cn, sizeof(cn)) &&
-                 strcmp(cn, ALPHA) == 0);
+                 served_cn_is("ALPHA.Example", ALPHA));
     }
 
     /* ── TLS-ALPN-01 outranks SNI ──────────────────────────────────── */
@@ -541,8 +603,7 @@ int test_https_sni_select(void)
         struct served s;
         SN_CHECK("an ordinary client is served a certificate that is NOT a "
                  "challenge certificate",
-                 handshake(ALPHA, false, &s) && !s.acme_identifier &&
-                 strcmp(s.cn, ALPHA) == 0);
+                 handshake_serves_ordinary(ALPHA, false, ALPHA, &s));
 
         SN_CHECK("a validation is armed for the configured name",
                  acme_alpn_challenge_arm(ALPHA, "token.thumbprint"));
@@ -567,8 +628,7 @@ int test_https_sni_select(void)
         memset(&s, 0, sizeof(s));
         SN_CHECK("with nothing armed, that same name is served its own "
                  "certificate again",
-                 handshake(ALPHA, false, &s) && !s.acme_identifier &&
-                 strcmp(s.cn, ALPHA) == 0);
+                 handshake_serves_ordinary(ALPHA, false, ALPHA, &s));
 
         /* A scanner offering acme-tls/1 with no validation in flight must
          * not be handed a challenge certificate, and must not be refused
@@ -577,8 +637,8 @@ int test_https_sni_select(void)
         memset(&s, 0, sizeof(s));
         SN_CHECK("acme-tls/1 offered with nothing armed gets the name's "
                  "ordinary certificate and no ALPN",
-                 handshake(ALPHA, true, &s) && !s.acme_identifier &&
-                 strcmp(s.cn, ALPHA) == 0 && s.alpn[0] == '\0');
+                 handshake_serves_ordinary(ALPHA, true, ALPHA, &s) &&
+                 s.alpn[0] == '\0');
     }
 
     /* ── a renewal never reuses a stale challenge ─────────────────────
@@ -601,8 +661,7 @@ int test_https_sni_select(void)
         const bool got_first = handshake(ALPHA, true, &first);
         SN_CHECK("the first validation is served a challenge certificate "
                  "carrying the FIRST digest",
-                 got_first && first.acme_identifier &&
-                 memcmp(first.acme_digest, want_a, 32) == 0);
+                 challenge_digest_served(got_first, &first, want_a, NULL));
         SN_CHECK("that validation leaves the responder disarmed",
                  !acme_alpn_challenge_armed());
 
@@ -613,9 +672,8 @@ int test_https_sni_select(void)
         const bool got_second = handshake(ALPHA, true, &second);
         SN_CHECK("the renewal's validation is served a challenge certificate "
                  "carrying the SECOND digest, not the first one's",
-                 got_second && second.acme_identifier &&
-                 memcmp(second.acme_digest, want_b, 32) == 0 &&
-                 memcmp(second.acme_digest, want_a, 32) != 0);
+                 challenge_digest_served(got_second, &second, want_b,
+                                         want_a));
         SN_CHECK("the renewal leaves the responder disarmed too",
                  !acme_alpn_challenge_armed());
     }
@@ -629,17 +687,12 @@ int test_https_sni_select(void)
         SN_CHECK("the front door adopts it with no restart",
                  https_server_certificate_refresh());
 
-        char cn[256] = "";
         SN_CHECK("that name now serves the renewed certificate",
-                 served_cn(ALPHA, cn, sizeof(cn)) &&
-                 strcmp(cn, ALPHA_RENEWED_CN) == 0);
-        cn[0] = '\0';
+                 served_cn_is(ALPHA, ALPHA_RENEWED_CN));
         SN_CHECK("the other name is untouched",
-                 served_cn(BRAVO, cn, sizeof(cn)) && strcmp(cn, BRAVO) == 0);
-        cn[0] = '\0';
+                 served_cn_is(BRAVO, BRAVO));
         SN_CHECK("and so is the default",
-                 served_cn(NULL, cn, sizeof(cn)) &&
-                 strcmp(cn, DEFAULT_CN) == 0);
+                 served_cn_is(NULL, DEFAULT_CN));
         SN_CHECK("and a further look finds nothing more to do",
                  !https_server_certificate_refresh());
     }
@@ -653,9 +706,8 @@ int test_https_sni_select(void)
         SN_CHECK("a name with no key path is refused",
                  !https_server_watch_certificate_for_name(BRAVO, bravo.cert,
                                                           ""));
-        char cn[256] = "";
         SN_CHECK("and the listener is still serving every name it had",
-                 served_cn(BRAVO, cn, sizeof(cn)) && strcmp(cn, BRAVO) == 0);
+                 served_cn_is(BRAVO, BRAVO));
     }
 
     https_server_stop();

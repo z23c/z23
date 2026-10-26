@@ -643,8 +643,6 @@ tests/harness/src/test_fold_inram_crash_proof.c:fip_setup:25
 tests/harness/src/test_helpers.c:test_abs_path:19
 tests/harness/src/test_helpers.c:test_spawn_capture_env:23
 tests/harness/src/test_helpers.c:test_spawn_capture_kill:42
-tests/harness/src/test_https_sni_select.c:handshake:19
-tests/harness/src/test_https_sni_select.c:test_https_sni_select:39
 tests/harness/src/test_keys.c:test_keys:27
 tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
 tests/harness/src/test_merkle_tree.c:test_merkle_tree_scale:149
