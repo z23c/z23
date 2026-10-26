@@ -17,6 +17,134 @@
 
 #include "views/explorer_factoids_internal.h"
 
+/* Fill one per-year count series (indexed by year-2016) from a two-column
+ * (year, count) GROUP BY query. When max_yr is non-NULL it is raised to the
+ * highest in-range year seen, so the year loop knows where to stop. */
+static void factoids_collect_year_counts(sqlite3 *db, const char *sql,
+                                         int64_t years[20], int *max_yr)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
+        while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            int yr = sqlite3_column_int(s, 0);
+            int idx = yr - 2016;
+            if (idx >= 0 && idx < 20) {
+                years[idx] = sqlite3_column_int64(s, 1);
+                if (max_yr != NULL && yr > *max_yr)
+                    *max_yr = yr;
+            }
+        }
+        sqlite3_finalize(s);
+    }
+}
+
+/* Fetch the earliest ZSLP token's ticker, name and genesis height into the
+ * caller's buffers (HTML-escaped). Buffers and *genesis_height keep their
+ * caller-initialised values when the table is empty or the query fails. */
+static void factoids_load_first_zslp_token(sqlite3 *db, char *ticker,
+                                           size_t ticker_cap, char *name,
+                                           size_t name_cap,
+                                           int64_t *genesis_height)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT ticker, name, genesis_height FROM zslp_tokens "
+            "ORDER BY genesis_height ASC LIMIT 1",
+            -1, &s, NULL) == SQLITE_OK && s) {
+        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            const char *tk = (const char *)sqlite3_column_text(s, 0);
+            const char *nm = (const char *)sqlite3_column_text(s, 1);
+            html_escape(ticker, ticker_cap, tk ? tk : "?");
+            html_escape(name, name_cap, nm ? nm : "?");
+            *genesis_height = sqlite3_column_int64(s, 2);
+        }
+        sqlite3_finalize(s);
+    }
+}
+
+/* Emit the "First 10 Tokens" table (header, escaped rows, footer) and
+ * return the advanced offset. */
+static size_t factoids_emit_zslp_first_tokens(uint8_t *buf, size_t cap,
+                                              size_t off, sqlite3 *db)
+{
+    char *r = (char *)buf;
+    size_t max = cap;
+
+    APPEND(off, r, max,
+        "<h3>First 10 Tokens</h3>"
+        "<table class='txlist'>"
+        "<tr><th>Ticker</th><th>Name</th><th>Decimals</th>"
+        "<th>Genesis Block</th><th>Token ID</th></tr>");
+    {
+        sqlite3_stmt *s = NULL;
+        const char *sql = "SELECT ticker, name, decimals, genesis_height, hex(token_id) "
+                          "FROM zslp_tokens ORDER BY genesis_height ASC LIMIT 10";
+        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
+            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+                const char *ticker = (const char *)sqlite3_column_text(s, 0);
+                const char *name = (const char *)sqlite3_column_text(s, 1);
+                int dec = sqlite3_column_int(s, 2);
+                int64_t gh = sqlite3_column_int64(s, 3);
+                const char *tid = (const char *)sqlite3_column_text(s, 4);
+                /* ticker + name come from attacker-controlled OP_RETURN
+                 * bytes; HTML-escape before emitting. */
+                char esc_ticker[64], esc_name[256];
+                html_escape(esc_ticker, sizeof(esc_ticker),
+                            ticker ? ticker : "?");
+                html_escape(esc_name, sizeof(esc_name), name ? name : "?");
+                APPEND(off, r, max,
+                    "<tr><td>%s</td><td>%s</td><td>%d</td>"
+                    "<td><a href='/explorer/block/%" PRId64 "'>%" PRId64 "</a></td>"
+                    "<td><code>%.16s...</code></td></tr>",
+                    esc_ticker, esc_name, dec,
+                    gh, gh, tid ? tid : "?");
+            }
+            sqlite3_finalize(s);
+        }
+    }
+    APPEND(off, r, max, "</table>");
+    return off;
+}
+
+/* Emit the "UTXOs by script type" table (header, one row per script type,
+ * footer) and return the advanced offset. */
+static size_t factoids_emit_dust_script_types(uint8_t *buf, size_t cap,
+                                              size_t off, sqlite3 *db)
+{
+    char *r = (char *)buf;
+    size_t max = cap;
+
+    APPEND(off, r, max,
+        "<h3>UTXOs by script type</h3>"
+        "<table class='txlist'>"
+        "<tr><th>Type</th><th>UTXOs</th><th>Value (ZCL)</th></tr>");
+    {
+        sqlite3_stmt *s = NULL;
+        const char *sql =
+            "SELECT script_type, count(*), COALESCE(SUM(value),0) FROM utxos "
+            "GROUP BY script_type ORDER BY count(*) DESC";
+        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
+            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+                int st = sqlite3_column_int(s, 0);
+                int64_t n = sqlite3_column_int64(s, 1);
+                int64_t v = sqlite3_column_int64(s, 2);
+                const char *label =
+                    st == 0 ? "P2PKH" : st == 1 ? "P2SH" :
+                    st == 2 ? "OP_RETURN" : st == 3 ? "MULTISIG" : "OTHER";
+                char n_s[32], v_s2[64];
+                fmt_comma(n_s, sizeof(n_s), n);
+                fmt_zcl(v_s2, sizeof(v_s2), v);
+                APPEND(off, r, max,
+                    "<tr><td>%s</td><td>%s</td><td>%s</td></tr>",
+                    label, n_s, v_s2);
+            }
+            sqlite3_finalize(s);
+        }
+    }
+    APPEND(off, r, max, "</table>");
+    return off;
+}
+
 size_t factoids_emit_section_8_privacy(uint8_t *buf, size_t cap, size_t off,
                                        sqlite3 *db)
 {
@@ -134,86 +262,47 @@ size_t factoids_emit_section_8_privacy(uint8_t *buf, size_t cap, size_t off,
         int64_t ss_yrs[20] = {0}, so_yrs[20] = {0};
         int64_t sv_yrs[20] = {0};  /* net sapling value */
         int max_yr = 2016;
-        sqlite3_stmt *s = NULL;
 
         /* Blocks per year */
-        if (sqlite3_prepare_v2(db,
-                "SELECT CAST(strftime('%Y', time, 'unixepoch') AS INTEGER), "
-                "count(*) FROM blocks WHERE time > 0 GROUP BY 1 ORDER BY 1",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int yr = sqlite3_column_int(s, 0);
-                int idx = yr - 2016;
-                if (idx >= 0 && idx < 20) {
-                    blk_yrs[idx] = sqlite3_column_int64(s, 1);
-                    if (yr > max_yr) max_yr = yr;
-                }
-            }
-            sqlite3_finalize(s); s = NULL;
-        }
+        factoids_collect_year_counts(db,
+            "SELECT CAST(strftime('%Y', time, 'unixepoch') AS INTEGER), "
+            "count(*) FROM blocks WHERE time > 0 GROUP BY 1 ORDER BY 1",
+            blk_yrs, &max_yr);
 
         /* JoinSplits per year */
-        if (sqlite3_prepare_v2(db,
-                "SELECT CAST(strftime('%Y', b.time, 'unixepoch') AS INTEGER), "
-                "count(*) FROM joinsplits j "
-                "JOIN blocks b ON j.block_height = b.height "
-                "WHERE b.time > 0 GROUP BY 1 ORDER BY 1",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int idx = sqlite3_column_int(s, 0) - 2016;
-                if (idx >= 0 && idx < 20)
-                    js_yrs[idx] = sqlite3_column_int64(s, 1);
-            }
-            sqlite3_finalize(s); s = NULL;
-        }
+        factoids_collect_year_counts(db,
+            "SELECT CAST(strftime('%Y', b.time, 'unixepoch') AS INTEGER), "
+            "count(*) FROM joinsplits j "
+            "JOIN blocks b ON j.block_height = b.height "
+            "WHERE b.time > 0 GROUP BY 1 ORDER BY 1",
+            js_yrs, NULL);
 
         /* Sapling spends per year */
-        if (sqlite3_prepare_v2(db,
-                "SELECT CAST(strftime('%Y', b.time, 'unixepoch') AS INTEGER), "
-                "count(*) FROM sapling_spends sp "
-                "JOIN blocks b ON sp.block_height = b.height "
-                "WHERE b.time > 0 GROUP BY 1 ORDER BY 1",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int idx = sqlite3_column_int(s, 0) - 2016;
-                if (idx >= 0 && idx < 20)
-                    ss_yrs[idx] = sqlite3_column_int64(s, 1);
-            }
-            sqlite3_finalize(s); s = NULL;
-        }
+        factoids_collect_year_counts(db,
+            "SELECT CAST(strftime('%Y', b.time, 'unixepoch') AS INTEGER), "
+            "count(*) FROM sapling_spends sp "
+            "JOIN blocks b ON sp.block_height = b.height "
+            "WHERE b.time > 0 GROUP BY 1 ORDER BY 1",
+            ss_yrs, NULL);
 
         /* Sapling outputs per year */
-        if (sqlite3_prepare_v2(db,
-                "SELECT CAST(strftime('%Y', b.time, 'unixepoch') AS INTEGER), "
-                "count(*) FROM sapling_outputs so "
-                "JOIN blocks b ON so.block_height = b.height "
-                "WHERE b.time > 0 GROUP BY 1 ORDER BY 1",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int idx = sqlite3_column_int(s, 0) - 2016;
-                if (idx >= 0 && idx < 20)
-                    so_yrs[idx] = sqlite3_column_int64(s, 1);
-            }
-            sqlite3_finalize(s); s = NULL;
-        }
+        factoids_collect_year_counts(db,
+            "SELECT CAST(strftime('%Y', b.time, 'unixepoch') AS INTEGER), "
+            "count(*) FROM sapling_outputs so "
+            "JOIN blocks b ON so.block_height = b.height "
+            "WHERE b.time > 0 GROUP BY 1 ORDER BY 1",
+            so_yrs, NULL);
 
         /* Net shielding volume per year. Convention (verified against
          * running zclassicd valuePools): blocks.sapling_value stores
          * pool-balance deltas in "positive = into pool" sign, so
          * "Net Shielded" = SUM(sapling_value) directly — positive when
          * the year was a net shield-in, negative when net unshield. */
-        if (sqlite3_prepare_v2(db,
-                "SELECT CAST(strftime('%Y', time, 'unixepoch') AS INTEGER), "
-                "SUM(sapling_value) FROM blocks "
-                "WHERE sapling_value != 0 AND time > 0 GROUP BY 1 ORDER BY 1",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int idx = sqlite3_column_int(s, 0) - 2016;
-                if (idx >= 0 && idx < 20)
-                    sv_yrs[idx] = sqlite3_column_int64(s, 1);
-            }
-            sqlite3_finalize(s); s = NULL;
-        }
+        factoids_collect_year_counts(db,
+            "SELECT CAST(strftime('%Y', time, 'unixepoch') AS INTEGER), "
+            "SUM(sapling_value) FROM blocks "
+            "WHERE sapling_value != 0 AND time > 0 GROUP BY 1 ORDER BY 1",
+            sv_yrs, NULL);
 
         /* Reliability gate for the Net Shielded column. The cumulative
          * whole-chain pool balance is SUM(blocks.sapling_value); a pool
@@ -311,22 +400,9 @@ size_t factoids_emit_section_9_zslp(uint8_t *buf, size_t cap, size_t off,
          * attacker-controlled OP_RETURN bytes — HTML-escape before emit. */
         char first_ticker[64] = "?", first_name[256] = "?";
         int64_t first_genesis = 0;
-        {
-            sqlite3_stmt *s = NULL;
-            if (sqlite3_prepare_v2(db,
-                    "SELECT ticker, name, genesis_height FROM zslp_tokens "
-                    "ORDER BY genesis_height ASC LIMIT 1",
-                    -1, &s, NULL) == SQLITE_OK && s) {
-                if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                    const char *tk = (const char *)sqlite3_column_text(s, 0);
-                    const char *nm = (const char *)sqlite3_column_text(s, 1);
-                    html_escape(first_ticker, sizeof(first_ticker), tk ? tk : "?");
-                    html_escape(first_name, sizeof(first_name), nm ? nm : "?");
-                    first_genesis = sqlite3_column_int64(s, 2);
-                }
-                sqlite3_finalize(s);
-            }
-        }
+        factoids_load_first_zslp_token(db, first_ticker, sizeof(first_ticker),
+                                       first_name, sizeof(first_name),
+                                       &first_genesis);
 
         double died_pct = total_tokens > 0
             ? (double)genesis_only * 100.0 / (double)total_tokens : 0.0;
@@ -375,39 +451,7 @@ size_t factoids_emit_section_9_zslp(uint8_t *buf, size_t cap, size_t off,
     }
 
     /* First 10 tokens */
-    APPEND(off, r, max,
-        "<h3>First 10 Tokens</h3>"
-        "<table class='txlist'>"
-        "<tr><th>Ticker</th><th>Name</th><th>Decimals</th>"
-        "<th>Genesis Block</th><th>Token ID</th></tr>");
-    {
-        sqlite3_stmt *s = NULL;
-        const char *sql = "SELECT ticker, name, decimals, genesis_height, hex(token_id) "
-                          "FROM zslp_tokens ORDER BY genesis_height ASC LIMIT 10";
-        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                const char *ticker = (const char *)sqlite3_column_text(s, 0);
-                const char *name = (const char *)sqlite3_column_text(s, 1);
-                int dec = sqlite3_column_int(s, 2);
-                int64_t gh = sqlite3_column_int64(s, 3);
-                const char *tid = (const char *)sqlite3_column_text(s, 4);
-                /* ticker + name come from attacker-controlled OP_RETURN
-                 * bytes; HTML-escape before emitting. */
-                char esc_ticker[64], esc_name[256];
-                html_escape(esc_ticker, sizeof(esc_ticker),
-                            ticker ? ticker : "?");
-                html_escape(esc_name, sizeof(esc_name), name ? name : "?");
-                APPEND(off, r, max,
-                    "<tr><td>%s</td><td>%s</td><td>%d</td>"
-                    "<td><a href='/explorer/block/%" PRId64 "'>%" PRId64 "</a></td>"
-                    "<td><code>%.16s...</code></td></tr>",
-                    esc_ticker, esc_name, dec,
-                    gh, gh, tid ? tid : "?");
-            }
-            sqlite3_finalize(s);
-        }
-    }
-    APPEND(off, r, max, "</table>");
+    off = factoids_emit_zslp_first_tokens(buf, cap, off, db);
 
     /* Most active tokens */
     APPEND(off, r, max,
@@ -696,34 +740,7 @@ size_t factoids_emit_section_11_dust(uint8_t *buf, size_t cap, size_t off,
     }
 
     /* Script-type split */
-    APPEND(off, r, max,
-        "<h3>UTXOs by script type</h3>"
-        "<table class='txlist'>"
-        "<tr><th>Type</th><th>UTXOs</th><th>Value (ZCL)</th></tr>");
-    {
-        sqlite3_stmt *s = NULL;
-        const char *sql =
-            "SELECT script_type, count(*), COALESCE(SUM(value),0) FROM utxos "
-            "GROUP BY script_type ORDER BY count(*) DESC";
-        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int st = sqlite3_column_int(s, 0);
-                int64_t n = sqlite3_column_int64(s, 1);
-                int64_t v = sqlite3_column_int64(s, 2);
-                const char *label =
-                    st == 0 ? "P2PKH" : st == 1 ? "P2SH" :
-                    st == 2 ? "OP_RETURN" : st == 3 ? "MULTISIG" : "OTHER";
-                char n_s[32], v_s2[64];
-                fmt_comma(n_s, sizeof(n_s), n);
-                fmt_zcl(v_s2, sizeof(v_s2), v);
-                APPEND(off, r, max,
-                    "<tr><td>%s</td><td>%s</td><td>%s</td></tr>",
-                    label, n_s, v_s2);
-            }
-            sqlite3_finalize(s);
-        }
-    }
-    APPEND(off, r, max, "</table>");
+    off = factoids_emit_dust_script_types(buf, cap, off, db);
     return off;
 }
 
