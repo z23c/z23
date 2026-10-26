@@ -496,6 +496,112 @@ static int sf_registry_whitelist(void)
     return failures;
 }
 
+/* Passed plan-mode reply that mutated nothing. */
+static bool sf_reply_is_pure_plan(const struct zcl_command_reply *reply)
+{
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+           strcmp(sf_str(&reply->data, "mode"), "plan") == 0 &&
+           !reply->error.mutated;
+}
+
+/* Plan JSON whose artifact_verified flag is true. */
+static bool sf_plan_shows_verified_artifact(const struct json_value *planned)
+{
+    return planned && json_get_bool(json_get(planned, "artifact_verified"));
+}
+
+/* Commit reply reporting a 64-char fulfill_id. */
+static bool sf_reply_committed_with_fulfill_id(
+    const struct zcl_command_reply *reply)
+{
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+           reply->error.mutated &&
+           strlen(sf_str(&reply->data, "fulfill_id")) == 64;
+}
+
+/* Passed, non-mutating reply with the already-key flag true. */
+static bool sf_reply_reports_already_done(
+    const struct zcl_command_reply *reply, const char *already_key)
+{
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+           json_get_bool(json_get(&reply->data, already_key)) &&
+           !reply->error.mutated;
+}
+
+/* Blocked reply carrying exactly this error code. */
+static bool sf_reply_blocked_with(const struct zcl_command_reply *reply,
+                                  const char *code)
+{
+    return reply->status == ZCL_COMMAND_STATUS_BLOCKED &&
+           strcmp(reply->error.code, code) == 0;
+}
+
+/* Status reply with evidence valid and profile-hidden. */
+static bool sf_status_reply_evidence_valid_hidden(
+    const struct zcl_command_reply *reply)
+{
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+           json_get_bool(json_get(&reply->data, "evidence_valid_now")) &&
+           !json_get_bool(json_get(&reply->data,
+                                   "visible_under_profile"));
+}
+
+/* Status reply naming hidden_by_profile and the review action. */
+static bool sf_status_reply_names_review_action(
+    const struct zcl_command_reply *reply)
+{
+    return strcmp(sf_str(&reply->data, "readiness"),
+                  "hidden_by_profile") == 0 &&
+           strcmp(sf_str(&reply->data, "next_action"),
+                  "app shop want fulfill review") == 0;
+}
+
+/* List reply with one match kept hidden, none rendered. */
+static bool sf_list_reply_hides_unreviewed_claim(
+    const struct zcl_command_reply *reply)
+{
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+           json_get_int(json_get(&reply->data, "rendered")) == 0 &&
+           json_get_int(json_get(&reply->data, "hidden_by_profile")) == 1 &&
+           json_get_int(json_get(&reply->data, "total_matching")) == 1;
+}
+
+/* Review commit reply whose review_state is reviewed_ok. */
+static bool sf_review_commit_marks_reviewed_ok(
+    const struct zcl_command_reply *reply)
+{
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+           reply->error.mutated &&
+           strcmp(sf_str(&reply->data, "review_state"),
+                  "reviewed_ok") == 0;
+}
+
+/* Passed list reply rendering exactly the expected count. */
+static bool sf_list_reply_renders_count(
+    const struct zcl_command_reply *reply, int expected)
+{
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+           json_get_int(json_get(&reply->data, "rendered")) == expected;
+}
+
+/* Want status reply exposing a fulfillment count of one. */
+static bool sf_want_status_reply_counts_fulfillments(
+    const struct zcl_command_reply *reply)
+{
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+           json_get_bool(json_get(&reply->data,
+                                  "fulfillment_count_available")) &&
+           json_get_int(json_get(&reply->data,
+                                 "fulfillment_count")) == 1;
+}
+
+/* Passed reply that mutated state. */
+static bool sf_reply_committed(const struct zcl_command_reply *reply)
+{
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+           reply->error.mutated;
+}
+
 static int sf_flow(void)
 {
     int failures = 0;
@@ -520,13 +626,10 @@ static int sf_flow(void)
                   false);
     sf_call(zcl_native_handle_shop_want_fulfill_post, &input, &reply);
     SF_CHECK("post plan passes without mutation",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             strcmp(sf_str(&reply.data, "mode"), "plan") == 0 &&
-             !reply.error.mutated);
+             sf_reply_is_pure_plan(&reply));
     const struct json_value *planned = json_get(&reply.data, "fulfillment");
     SF_CHECK("plan renders independently verified artifact facts",
-             planned && json_get_bool(json_get(planned,
-                                               "artifact_verified")));
+             sf_plan_shows_verified_artifact(planned));
     char planned_id[65];
     (void)snprintf(planned_id, sizeof(planned_id), "%s",
                    planned ? sf_str(planned, "fulfill_id") : "");
@@ -537,9 +640,7 @@ static int sf_flow(void)
                   true);
     sf_call(zcl_native_handle_shop_want_fulfill_post, &input, &reply);
     SF_CHECK("commit persists the signed claim",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             reply.error.mutated &&
-             strlen(sf_str(&reply.data, "fulfill_id")) == 64);
+             sf_reply_committed_with_fulfill_id(&reply));
     char fulfill_id[65];
     (void)snprintf(fulfill_id, sizeof(fulfill_id), "%s",
                    sf_str(&reply.data, "fulfill_id"));
@@ -552,9 +653,7 @@ static int sf_flow(void)
                      SF_NOW + 600, true);
     sf_call(zcl_native_handle_shop_want_fulfill_post, &input, &reply);
     SF_CHECK("stale byte-identical repost remains idempotent",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_bool(json_get(&reply.data, "already_posted")) &&
-             !reply.error.mutated &&
+             sf_reply_reports_already_done(&reply, "already_posted") &&
              strcmp(sf_str(&reply.data, "fulfill_id"), fulfill_id) == 0);
     zcl_command_reply_free(&reply);
     json_free(&input);
@@ -564,8 +663,7 @@ static int sf_flow(void)
                   true);
     sf_call(zcl_native_handle_shop_want_fulfill_post, &input, &reply);
     SF_CHECK("seller nonce replay is refused by name",
-             reply.status == ZCL_COMMAND_STATUS_BLOCKED &&
-             strcmp(reply.error.code, "FULFILL_NONCE_REPLAY") == 0);
+             sf_reply_blocked_with(&reply, "FULFILL_NONCE_REPLAY"));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -576,8 +674,7 @@ static int sf_flow(void)
                   true);
     sf_call(zcl_native_handle_shop_want_fulfill_post, &input, &reply);
     SF_CHECK("wrong want binding is WANT_NOT_FOUND",
-             reply.status == ZCL_COMMAND_STATUS_BLOCKED &&
-             strcmp(reply.error.code, "WANT_NOT_FOUND") == 0);
+             sf_reply_blocked_with(&reply, "WANT_NOT_FOUND"));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -589,9 +686,7 @@ static int sf_flow(void)
     (void)json_push_kv_str(&input, "build_receipt_id", missing_receipt);
     sf_call(zcl_native_handle_shop_want_fulfill_post, &input, &reply);
     SF_CHECK("unverifiable receipt is refused",
-             reply.status == ZCL_COMMAND_STATUS_BLOCKED &&
-             strcmp(reply.error.code,
-                    "FULFILLMENT_EVIDENCE_UNVERIFIED") == 0);
+             sf_reply_blocked_with(&reply, "FULFILLMENT_EVIDENCE_UNVERIFIED"));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -601,15 +696,9 @@ static int sf_flow(void)
     (void)json_push_kv_int(&input, "now_unix", SF_NOW);
     sf_call(zcl_native_handle_shop_want_fulfill_status, &input, &reply);
     SF_CHECK("status re-verifies evidence",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_bool(json_get(&reply.data, "evidence_valid_now")) &&
-             !json_get_bool(json_get(&reply.data,
-                                     "visible_under_profile")));
+             sf_status_reply_evidence_valid_hidden(&reply));
     SF_CHECK("hidden status names one local review action",
-             strcmp(sf_str(&reply.data, "readiness"),
-                    "hidden_by_profile") == 0 &&
-             strcmp(sf_str(&reply.data, "next_action"),
-                    "app shop want fulfill review") == 0);
+             sf_status_reply_names_review_action(&reply));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -619,10 +708,7 @@ static int sf_flow(void)
     (void)json_push_kv_int(&input, "now_unix", SF_NOW);
     sf_call(zcl_native_handle_shop_want_fulfill_list, &input, &reply);
     SF_CHECK("default view hides an unreviewed claim without deleting it",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_int(json_get(&reply.data, "rendered")) == 0 &&
-             json_get_int(json_get(&reply.data, "hidden_by_profile")) == 1 &&
-             json_get_int(json_get(&reply.data, "total_matching")) == 1);
+             sf_list_reply_hides_unreviewed_claim(&reply));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -632,17 +718,12 @@ static int sf_flow(void)
     (void)json_push_kv_str(&input, "review_state", "reviewed_ok");
     sf_call(zcl_native_handle_shop_want_fulfill_review, &input, &reply);
     SF_CHECK("local review plan does not mutate",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             strcmp(sf_str(&reply.data, "mode"), "plan") == 0 &&
-             !reply.error.mutated);
+             sf_reply_is_pure_plan(&reply));
     zcl_command_reply_free(&reply);
     (void)json_push_kv_bool(&input, "confirm", true);
     sf_call(zcl_native_handle_shop_want_fulfill_review, &input, &reply);
     SF_CHECK("local review commit marks the claim reviewed_ok",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             reply.error.mutated &&
-             strcmp(sf_str(&reply.data, "review_state"),
-                    "reviewed_ok") == 0);
+             sf_review_commit_marks_reviewed_ok(&reply));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -652,8 +733,7 @@ static int sf_flow(void)
     (void)json_push_kv_int(&input, "now_unix", SF_NOW);
     sf_call(zcl_native_handle_shop_want_fulfill_list, &input, &reply);
     SF_CHECK("reviewed claim is visible under the default profile",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_int(json_get(&reply.data, "rendered")) == 1);
+             sf_list_reply_renders_count(&reply, 1));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -664,11 +744,7 @@ static int sf_flow(void)
     (void)json_push_kv_str(&input, "profile", "open-view");
     sf_call(zcl_native_handle_shop_want_status, &input, &reply);
     SF_CHECK("want status counts fulfillment claims",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_bool(json_get(&reply.data,
-                                    "fulfillment_count_available")) &&
-             json_get_int(json_get(&reply.data,
-                                   "fulfillment_count")) == 1);
+             sf_want_status_reply_counts_fulfillments(&reply));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -679,8 +755,7 @@ static int sf_flow(void)
     (void)json_push_kv_int(&input, "now_unix", SF_NOW + 7200);
     sf_call(zcl_native_handle_shop_want_fulfill_list, &input, &reply);
     SF_CHECK("expired claim leaves the active comparison list",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_int(json_get(&reply.data, "rendered")) == 0);
+             sf_list_reply_renders_count(&reply, 0));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -694,8 +769,7 @@ static int sf_flow(void)
     (void)json_push_kv_bool(&input, "confirm", true);
     sf_call(zcl_native_handle_shop_want_fulfill_withdraw, &input, &reply);
     SF_CHECK("wrong seller cannot withdraw",
-             reply.status == ZCL_COMMAND_STATUS_BLOCKED &&
-             strcmp(reply.error.code, "WRONG_SELLER_KEY") == 0);
+             sf_reply_blocked_with(&reply, "WRONG_SELLER_KEY"));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
@@ -708,21 +782,16 @@ static int sf_flow(void)
     (void)json_push_kv_int(&input, "now_unix", SF_NOW + 11);
     sf_call(zcl_native_handle_shop_want_fulfill_withdraw, &input, &reply);
     SF_CHECK("owner withdrawal plan is non-mutating",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             strcmp(sf_str(&reply.data, "mode"), "plan") == 0 &&
-             !reply.error.mutated);
+             sf_reply_is_pure_plan(&reply));
     zcl_command_reply_free(&reply);
     (void)json_push_kv_bool(&input, "confirm", true);
     sf_call(zcl_native_handle_shop_want_fulfill_withdraw, &input, &reply);
     SF_CHECK("owner withdrawal commit mutates once",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             reply.error.mutated);
+             sf_reply_committed(&reply));
     zcl_command_reply_free(&reply);
     sf_call(zcl_native_handle_shop_want_fulfill_withdraw, &input, &reply);
     SF_CHECK("owner withdrawal is idempotent",
-             reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             json_get_bool(json_get(&reply.data, "already_withdrawn")) &&
-             !reply.error.mutated);
+             sf_reply_reports_already_done(&reply, "already_withdrawn"));
     zcl_command_reply_free(&reply);
     json_free(&input);
 
