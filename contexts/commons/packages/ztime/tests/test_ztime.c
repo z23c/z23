@@ -7,6 +7,29 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_sink;
+static unsigned cli_output_flushes;
+static int cli_fflush(FILE *stream) {
+  if (stream == cli_sink) cli_output_flushes++;
+  return fflush(stream);
+}
+static int cli_puts(const char *text) {
+  if (fputs(text, cli_sink) == EOF) return EOF;
+  return fputc('\n', cli_sink);
+}
+#undef stdout
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define puts cli_puts
+#define fflush cli_fflush
+#define main ztime_cli_main
+#include "../app/main.c"
+#undef main
+#undef puts
+#undef fflush
+#undef printf
+#undef stdout
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -252,7 +275,78 @@ static void test_civil_from_overflow_days(void) {
   }
 }
 
+static int cli_case(int argc, char **args, int status, const char *want) {
+  FILE *output = tmpfile();
+  if (!output) return 1;
+  cli_sink = output; cli_output_flushes = 0;
+  int bad = ztime_cli_main(argc, args) != status;
+  if (!want[0] && cli_output_flushes != 0) bad = 1;
+  rewind(output);
+  char bytes[256];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  if (ferror(output) || n != strlen(want) || memcmp(bytes, want, n) != 0) bad = 1;
+  if (fclose(output) != 0) bad = 1;
+  return bad;
+}
+
+static int cli_sink_case(char *mode, char *value, bool buffered) {
+#if defined(__linux__)
+  FILE *output = fopen(buffered ? "/dev/full" : "/dev/null", buffered ? "w" : "r");
+#elif defined(_WIN32)
+  FILE *output = fopen("NUL", "r");
+#else
+  FILE *output = fopen("/dev/null", "r");
+#endif
+  if (!output) return 1;
+  char buffer[4096];
+  if (buffered && setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) {
+    fclose(output);
+    return 1;
+  }
+  cli_sink = output;
+  char *args[] = {"ztime", mode, value, NULL};
+  int bad = ztime_cli_main(3, args) != 1 || !ferror(output);
+  if (buffered) (void)fclose(output);
+  else if (fclose(output) != 0) bad = 1;
+  return bad;
+}
+
+static void test_cli_output(void) {
+  char *parse[] = {"ztime", "parse", "1970-01-01T00:00:00Z",
+      "1970-01-01T00:00:00.5Z", "1970-01-01T00:00:01Z", NULL};
+  CHECK(cli_case(5, parse, 0, "0\n0.500000000\n1\n") == 0);
+  char *format[] = {"ztime", "format", "0", "1", NULL};
+  CHECK(cli_case(4, format, 0,
+        "1970-01-01T00:00:00Z\n1970-01-01T00:00:01Z\n") == 0);
+  for (int buffered = 0; buffered < 2; buffered++) {
+#if !defined(__linux__)
+    if (buffered) continue;
+#endif
+    CHECK(cli_sink_case("parse", parse[2], buffered) == 0);
+    CHECK(cli_sink_case("parse", parse[3], buffered) == 0);
+    CHECK(cli_sink_case("format", format[2], buffered) == 0);
+  }
+}
+
+static void test_cli_errors(void) {
+  char *parse[] = {"ztime", "parse", "bad", "1970-01-01T00:00:00Z",
+      "also-bad", "1970-01-01T00:00:00.5Z", NULL};
+  CHECK(cli_case(6, parse, 1, "0\n0.500000000\n") == 0);
+  char *format[] = {"ztime", "format", "bad", "0", "also-bad", "1", NULL};
+  CHECK(cli_case(6, format, 1,
+        "1970-01-01T00:00:00Z\n1970-01-01T00:00:01Z\n") == 0);
+  char *invalid[] = {"ztime", "parse", "bad", "also-bad", NULL};
+  CHECK(cli_case(4, invalid, 1, "") == 0);
+  invalid[1] = "format";
+  CHECK(cli_case(4, invalid, 1, "") == 0);
+  CHECK(cli_case(2, invalid, 2, "") == 0);
+  invalid[1] = "unknown";
+  CHECK(cli_case(4, invalid, 2, "") == 0);
+}
+
 int main(void) {
+  test_cli_output();
+  test_cli_errors();
     test_civil_from_overflow_days();
     test_civil_range_rejection();
   test_parse_kats();

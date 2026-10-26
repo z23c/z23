@@ -14,8 +14,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int finish_output(int bad, bool wrote, bool failed) {
+  if (wrote && (failed || fflush(stdout) != 0 || ferror(stdout))) {
+    fprintf(stderr, "ztime: output write failed\n");
+    return 1;
+  }
+  return bad;
+}
+
 static int do_parse(int argc, char **argv) {
   int bad = 0;
+  bool wrote = false, failed = false;
   for (int i = 2; i < argc; i++) {
     ztime_instant it;
     if (!ztime_parse(argv[i], &it)) {
@@ -23,16 +32,18 @@ static int do_parse(int argc, char **argv) {
       bad = 1;
       continue;
     }
-    if (it.nanos)
-      printf("%lld.%09u\n", (long long)it.unix_secs, it.nanos);
-    else
-      printf("%lld\n", (long long)it.unix_secs);
+    int written = it.nanos
+        ? printf("%lld.%09u\n", (long long)it.unix_secs, it.nanos)
+        : printf("%lld\n", (long long)it.unix_secs);
+    wrote = true;
+    failed |= written < 0;
   }
-  return bad;
+  return finish_output(bad, wrote, failed);
 }
 
 static int do_format(int argc, char **argv) {
   int bad = 0;
+  bool wrote = false, failed = false;
   for (int i = 2; i < argc; i++) {
     char *end = NULL;
     long long secs = strtoll(argv[i], &end, 10);
@@ -48,9 +59,10 @@ static int do_format(int argc, char **argv) {
       bad = 1;
       continue;
     }
-    puts(buf);
+    wrote = true;
+    failed |= puts(buf) == EOF;
   }
-  return bad;
+  return finish_output(bad, wrote, failed);
 }
 
 int main(int argc, char **argv) {
