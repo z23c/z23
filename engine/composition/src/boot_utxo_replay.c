@@ -82,6 +82,133 @@ _Atomic int g_utxo_replay_height = 0;
  * both boot.c (the pre-restore probe — the authoritative call site) and
  * this file (the late-receive path) share one implementation. */
 
+static void utxo_replay_resolve_snapshot_hash(struct node_db *ndb_restore,
+                                              struct uint256 *cb_hash,
+                                              const char **cb_evidence)
+{
+    /* Wave 2: locate the snapshot block from the DERIVED coins-best
+     * (coins_kv's own co-committed state) first; the node_state
+     * 'coins_best_block' key is only the legacy (!found) fallback. */
+    {
+        int32_t d_h = -1;
+        uint8_t d_hash[32];
+        bool d_hf = false;
+        if (reducer_frontier_derive_coins_best_now(&d_h, d_hash,
+                                                   &d_hf) && d_hf) {
+            memcpy(cb_hash->data, d_hash, 32);
+            *cb_evidence = "derived_coins_best";
+        }
+    }
+    if (uint256_is_null(cb_hash)) {
+        uint8_t cb_buf[32] = {0};
+        size_t cb_len = 0;
+        if (node_db_state_get(ndb_restore, "coins_best_block",
+                              cb_buf, sizeof(cb_buf), &cb_len) &&
+            cb_len == 32)
+            memcpy(cb_hash->data, cb_buf, 32);
+    }
+}
+
+/* Commit the snapshot block as the new tip via csr, when the block
+ * index already contains it. */
+static void utxo_replay_commit_snapshot_tip(struct boot_svc_ctx *svc,
+                                            struct uint256 *cb_hash,
+                                            const char *cb_evidence)
+{
+    struct block_index *snap_block = block_map_find(
+        &svc->state->map_block_index, cb_hash);
+    if (snap_block && snap_block->nHeight > 0) {
+        struct chain_state_rollback_authorization rollback_auth = {
+            .source = CSR_ROLLBACK_SOURCE_SNAPSHOT,
+            .decision = POLICY_ALLOW,
+            .from_height = active_chain_height(
+                &svc->state->chain_active),
+            .to_height = snap_block->nHeight,
+            .max_depth = INT64_MAX,
+            .evidence_class = cb_evidence,
+            .reason = "utxo_replay_snapshot_restore",
+        };
+        struct chain_state_commit commit = {
+            .new_tip = snap_block,
+            .new_coins_best = *cb_hash,
+            .expected_utxo_count = 0,
+            .update_header_tip = false,
+            .rollback_auth = &rollback_auth,
+            .wallet_scan_height = -1,
+            .reason = "utxo_replay_snapshot_restore",
+        };
+        enum csr_result rc = csr_commit_tip(csr_instance(), &commit);
+        if (rc == CSR_OK) {
+            printf("UTXO replay: restored chain state from snapshot "
+                   "at h=%d\n", snap_block->nHeight);
+        } else {
+            fprintf(stderr, // obs-ok:pre-existing-diagnostic
+                    "UTXO replay: csr rejected snapshot restore "
+                    "(%s) h=%d\n", csr_result_name(rc),
+                    snap_block->nHeight);
+        }
+    } else if (!snap_block) {
+        printf("UTXO replay: coins_best_block not in index "
+               "(waiting for P2P headers)\n");
+    }
+}
+
+static void utxo_replay_restore_chain_state(struct boot_svc_ctx *svc)
+{
+    /* ── Restore chain state from coins_best_block ──────────────
+     * After snapshot import (file or P2P), coins_best_block in SQLite
+     * points to the snapshot height, but the in-memory g_coins_tip and
+     * active chain are still at genesis. We must advance both so the reducer
+     * activation path starts from the snapshot height, not genesis.
+     * Without this, connect_block fails at height 1 with BIP30 because
+     * the snapshot's UTXOs include block 1's unspent coinbase. */
+    struct node_db *ndb_restore = boot_node_db(svc);
+    if (ndb_restore && ndb_restore->open) {
+        struct uint256 cb_hash;
+        uint256_set_null(&cb_hash);
+        const char *cb_evidence = "snapshot_coins_best_block";
+        utxo_replay_resolve_snapshot_hash(ndb_restore, &cb_hash,
+                                          &cb_evidence);
+        if (!uint256_is_null(&cb_hash))
+            utxo_replay_commit_snapshot_tip(svc, &cb_hash, cb_evidence);
+    }
+}
+
+static void utxo_replay_enter_ibd_turbo(struct boot_svc_ctx *svc,
+                                        struct db_service **dbsvc_out,
+                                        struct node_db **ndb_out)
+{
+    /* IBD turbo: skip non-essential work during replay */
+    struct db_service *dbsvc = boot_db_service(svc);
+    struct node_db *ndb = boot_node_db(svc);
+    if (dbsvc) {
+        db_service_ibd_turbo_mode(dbsvc);
+        db_service_set_sync_batch_size(dbsvc, 1000);
+    } else if (ndb && ndb->open) {
+        node_db_ibd_turbo_mode(ndb);
+        node_db_set_sync_batch_size(ndb, 1000);
+    }
+    *dbsvc_out = dbsvc;
+    *ndb_out = ndb;
+}
+
+/* Flush pending writes and leave IBD turbo mode. */
+static void utxo_replay_restore_normal_db_mode(struct db_service *dbsvc,
+                                               struct node_db *ndb)
+{
+    if (dbsvc) {
+        if (!db_service_flush_write(dbsvc))
+            fprintf(stderr, "UTXO replay: flush before normal mode failed\n");
+        db_service_normal_mode(dbsvc);
+        db_service_set_sync_batch_size(dbsvc, 100);
+    } else if (ndb && ndb->open) {
+        if (!node_db_sync_flush(ndb))
+            fprintf(stderr, "UTXO replay: flush before normal mode failed\n");
+        node_db_normal_mode(ndb);
+        node_db_set_sync_batch_size(ndb, 100);
+    }
+}
+
 static void *background_utxo_replay(void *arg)
 {
     struct boot_svc_ctx *svc = arg;
@@ -104,92 +231,11 @@ static void *background_utxo_replay(void *arg)
     printf("UTXO replay: starting background chain validation...\n");
     fflush(stdout);
 
-    /* ── Restore chain state from coins_best_block ──────────────
-     * After snapshot import (file or P2P), coins_best_block in SQLite
-     * points to the snapshot height, but the in-memory g_coins_tip and
-     * active chain are still at genesis. We must advance both so the reducer
-     * activation path starts from the snapshot height, not genesis.
-     * Without this, connect_block fails at height 1 with BIP30 because
-     * the snapshot's UTXOs include block 1's unspent coinbase. */
-    struct node_db *ndb_restore = boot_node_db(svc);
-    if (ndb_restore && ndb_restore->open) {
-        /* Wave 2: locate the snapshot block from the DERIVED coins-best
-         * (coins_kv's own co-committed state) first; the node_state
-         * 'coins_best_block' key is only the legacy (!found) fallback. */
-        struct uint256 cb_hash;
-        uint256_set_null(&cb_hash);
-        const char *cb_evidence = "snapshot_coins_best_block";
-        {
-            int32_t d_h = -1;
-            uint8_t d_hash[32];
-            bool d_hf = false;
-            if (reducer_frontier_derive_coins_best_now(&d_h, d_hash,
-                                                       &d_hf) && d_hf) {
-                memcpy(cb_hash.data, d_hash, 32);
-                cb_evidence = "derived_coins_best";
-            }
-        }
-        if (uint256_is_null(&cb_hash)) {
-            uint8_t cb_buf[32] = {0};
-            size_t cb_len = 0;
-            if (node_db_state_get(ndb_restore, "coins_best_block",
-                                  cb_buf, sizeof(cb_buf), &cb_len) &&
-                cb_len == 32)
-                memcpy(cb_hash.data, cb_buf, 32);
-        }
-        {
-            if (!uint256_is_null(&cb_hash)) {
-                struct block_index *snap_block = block_map_find(
-                    &svc->state->map_block_index, &cb_hash);
-                if (snap_block && snap_block->nHeight > 0) {
-                    struct chain_state_rollback_authorization rollback_auth = {
-                        .source = CSR_ROLLBACK_SOURCE_SNAPSHOT,
-                        .decision = POLICY_ALLOW,
-                        .from_height = active_chain_height(
-                            &svc->state->chain_active),
-                        .to_height = snap_block->nHeight,
-                        .max_depth = INT64_MAX,
-                        .evidence_class = cb_evidence,
-                        .reason = "utxo_replay_snapshot_restore",
-                    };
-                    struct chain_state_commit commit = {
-                        .new_tip = snap_block,
-                        .new_coins_best = cb_hash,
-                        .expected_utxo_count = 0,
-                        .update_header_tip = false,
-                        .rollback_auth = &rollback_auth,
-                        .wallet_scan_height = -1,
-                        .reason = "utxo_replay_snapshot_restore",
-                    };
-                    enum csr_result rc = csr_commit_tip(csr_instance(),
-                                                        &commit);
-                    if (rc == CSR_OK) {
-                        printf("UTXO replay: restored chain state from snapshot "
-                               "at h=%d\n", snap_block->nHeight);
-                    } else {
-                        fprintf(stderr, // obs-ok:pre-existing-diagnostic
-                                "UTXO replay: csr rejected snapshot restore "
-                                "(%s) h=%d\n", csr_result_name(rc),
-                                snap_block->nHeight);
-                    }
-                } else if (!snap_block) {
-                    printf("UTXO replay: coins_best_block not in index "
-                           "(waiting for P2P headers)\n");
-                }
-            }
-        }
-    }
+    utxo_replay_restore_chain_state(svc);
 
-    /* IBD turbo: skip non-essential work during replay */
-    struct db_service *dbsvc = boot_db_service(svc);
-    struct node_db *ndb = boot_node_db(svc);
-    if (dbsvc) {
-        db_service_ibd_turbo_mode(dbsvc);
-        db_service_set_sync_batch_size(dbsvc, 1000);
-    } else if (ndb && ndb->open) {
-        node_db_ibd_turbo_mode(ndb);
-        node_db_set_sync_batch_size(ndb, 1000);
-    }
+    struct db_service *dbsvc = NULL;
+    struct node_db *ndb = NULL;
+    utxo_replay_enter_ibd_turbo(svc, &dbsvc, &ndb);
     /* Flush every 500 blocks even during IBD to limit UTXO loss on
      * SIGKILL. Previous value of 100000 meant a SIGKILL during boot
      * could lose 100K blocks of UTXO state, requiring full re-sync. */
@@ -204,17 +250,7 @@ static void *background_utxo_replay(void *arg)
 
     /* Restore normal flush policy */
     set_flush_policy(3600, 500000, 500);
-    if (dbsvc) {
-        if (!db_service_flush_write(dbsvc))
-            fprintf(stderr, "UTXO replay: flush before normal mode failed\n");
-        db_service_normal_mode(dbsvc);
-        db_service_set_sync_batch_size(dbsvc, 100);
-    } else if (ndb && ndb->open) {
-        if (!node_db_sync_flush(ndb))
-            fprintf(stderr, "UTXO replay: flush before normal mode failed\n");
-        node_db_normal_mode(ndb);
-        node_db_set_sync_batch_size(ndb, 100);
-    }
+    utxo_replay_restore_normal_db_mode(dbsvc, ndb);
 
     int tip = active_chain_height(&svc->state->chain_active);
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;

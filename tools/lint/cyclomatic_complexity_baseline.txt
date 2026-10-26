@@ -934,7 +934,6 @@ engine/composition/src/boot_snapshot_offer.c:build_snapshot_offer_thread:33
 engine/composition/src/boot_snapshot_offer.c:snapshot_offer_state_has_replayed_history_at:27
 engine/composition/src/boot_tip_hooks.c:boot_process_block_commit_tip:21
 engine/composition/src/boot_tip_hooks.c:boot_process_block_restore_mempool:56
-engine/composition/src/boot_utxo_replay.c:background_utxo_replay:29
 engine/composition/src/boot_zcode_dht_frame_auth.c:boot_zcode_dht_frame_classify:20
 engine/composition/src/boot_zcode_dht_frame_auth.c:boot_zcode_dht_offence:16
 engine/composition/src/boot_zcode_dht_rpc.c:rpc_publish_impl:46
