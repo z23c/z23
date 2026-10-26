@@ -107,14 +107,16 @@ static int check_registries_agree(void)
              telemetry_provider_count() == telemetry_domain_count());
 
     struct registry_defects d = count_provider_registry_defects();
+    size_t mismatched = d.mismatched, no_fill = d.no_fill,
+           no_schema = d.no_schema, zero_size = d.zero_size;
     TL_CHECK("[rollup] provider i and schema i name the SAME domain, in the "
              "same order — a domain cannot be registered in one and not the "
-             "other", d.mismatched == 0);
-    TL_CHECK("[rollup] every domain has a collector adapter", d.no_fill == 0);
+             "other", mismatched == 0);
+    TL_CHECK("[rollup] every domain has a collector adapter", no_fill == 0);
     TL_CHECK("[rollup] every provider points at its own domain's schema",
-             d.no_schema == 0);
+             no_schema == 0);
     TL_CHECK("[rollup] every provider declares a non-zero snapshot size",
-             d.zero_size == 0);
+             zero_size == 0);
 
     /* The shared buffer a rollup allocates must fit the largest domain, or
      * telemetry_provider_collect refuses that domain rather than truncating
@@ -243,22 +245,24 @@ static int check_domain_rows(const struct json_value *doc, const char *what)
         return failures;
 
     struct domain_row_defects d = count_domain_row_defects(arr);
+    size_t bad_name = d.bad_name, bad_health = d.bad_health,
+           silent_unknown = d.silent_unknown, has_prose = d.has_prose;
     (void)snprintf(label, sizeof label,
                    "[rollup] %s rows are in registry order and name their own "
                    "domain", what);
-    TL_CHECK(label, d.bad_name == 0);
+    TL_CHECK(label, bad_name == 0);
     (void)snprintf(label, sizeof label,
                    "[rollup] %s reports health as one of the four enum "
                    "tokens, never prose", what);
-    TL_CHECK(label, d.bad_health == 0);
+    TL_CHECK(label, bad_health == 0);
     (void)snprintf(label, sizeof label,
                    "[rollup] %s: an uncollected domain always states a reason "
                    "and is never called ok", what);
-    TL_CHECK(label, d.silent_unknown == 0);
+    TL_CHECK(label, silent_unknown == 0);
     (void)snprintf(label, sizeof label,
                    "[rollup] %s carries no per-field prose — eight domains of "
                    "it would empty the reply, not truncate it", what);
-    TL_CHECK(label, d.has_prose == 0);
+    TL_CHECK(label, has_prose == 0);
     return failures;
 }
 
