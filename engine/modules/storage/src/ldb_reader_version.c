@@ -652,7 +652,7 @@ static bool collect_wal_numbers(const char *dir, const struct ldb_version *v,
             *logs = nl;
             cap = ncap;
         }
-        (*nlogs)++;
+        (*logs)[(*nlogs)++] = number;
     }
     closedir(d);
     return true;
