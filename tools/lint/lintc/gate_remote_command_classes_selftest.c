@@ -117,15 +117,6 @@ static void rcc_st_probe(struct rcc_st_ctx *s, const char *name, int want,
     }
 }
 
-static int rcc_st_variant(struct rcc_st_ctx *s, const char *rel,
-                          const char *text)
-{
-    char p[8192];
-    if (ovf(snprintf(p, sizeof p, "%s/%s", s->root, rel), sizeof p))
-        return 1;
-    return csr_write(p, text) != 0;
-}
-
 /* The consumer-side proof: an absent leaf, and a row whose class token is
  * unknown, both resolve to NEVER; only an exact permit class resolves to a
  * permit. */
@@ -165,7 +156,7 @@ int check_remote_command_classes_selftest(void)
                  s.base_table);
     rcc_st_resolver(&s);
 
-    rcc_st_variant(&s, "missing.def",
+    rcc_st_write(&s, "missing.def",
         "REMOTE_COMMAND_CLASS(\"mini.alpha\", REMOTE_CLASS_READ_ONLY, "
         "\"bounded read\")\n"
         "REMOTE_COMMAND_CLASS(\"mini.beta\", REMOTE_CLASS_NEVER, \"\")\n");
@@ -173,11 +164,11 @@ int check_remote_command_classes_selftest(void)
     snprintf(p_missing, sizeof p_missing, "%s/missing.def", s.root);
     rcc_st_probe(&s, "an explicit NEVER row still passes", 0, p_missing);
 
-    rcc_st_variant(&s, "orphan.def",
+    rcc_st_write(&s, "orphan.def",
         "REMOTE_COMMAND_CLASS(\"mini.alpha\", REMOTE_CLASS_READ_ONLY, "
         "\"bounded read\")\n"
         "REMOTE_COMMAND_CLASS(\"mini.gone\", REMOTE_CLASS_NEVER, \"\")\n");
-    rcc_st_variant(&s, "orphan_permit.def",
+    rcc_st_write(&s, "orphan_permit.def",
         "REMOTE_COMMAND_CLASS(\"mini.alpha\", REMOTE_CLASS_READ_ONLY, "
         "\"bounded read\")\n"
         "REMOTE_COMMAND_CLASS(\"mini.gone\", REMOTE_CLASS_READ_ONLY, "
@@ -191,7 +182,7 @@ int check_remote_command_classes_selftest(void)
     snprintf(p_orphan, sizeof p_orphan, "%s/orphan.def", s.root);
     rcc_st_probe(&s, "stale row fails", 1, p_orphan);
 
-    rcc_st_variant(&s, "dupe.def",
+    rcc_st_write(&s, "dupe.def",
         "REMOTE_COMMAND_CLASS(\"mini.alpha\", REMOTE_CLASS_READ_ONLY, "
         "\"bounded read\")\n"
         "REMOTE_COMMAND_CLASS(\"mini.alpha\", REMOTE_CLASS_READ_ONLY, "
@@ -200,14 +191,14 @@ int check_remote_command_classes_selftest(void)
     snprintf(p_dupe, sizeof p_dupe, "%s/dupe.def", s.root);
     rcc_st_probe(&s, "duplicate row fails", 1, p_dupe);
 
-    rcc_st_variant(&s, "badclass.def",
+    rcc_st_write(&s, "badclass.def",
         "REMOTE_COMMAND_CLASS(\"mini.alpha\", REMOTE_CLASS_MAYBE, "
         "\"bounded read\")\n");
     char p_badclass[8192];
     snprintf(p_badclass, sizeof p_badclass, "%s/badclass.def", s.root);
     rcc_st_probe(&s, "unknown class token fails", 1, p_badclass);
 
-    rcc_st_variant(&s, "noreason.def",
+    rcc_st_write(&s, "noreason.def",
         "REMOTE_COMMAND_CLASS(\"mini.alpha\", REMOTE_CLASS_READ_ONLY, "
         "\"\")\n");
     char p_noreason[8192];
@@ -216,7 +207,7 @@ int check_remote_command_classes_selftest(void)
 
     /* A bare quote in the reason prose: still parses, still non-empty,
      * still a known class token — and would not compile. */
-    rcc_st_variant(&s, "strayquote.def",
+    rcc_st_write(&s, "strayquote.def",
         "REMOTE_COMMAND_CLASS(\"mini.alpha\", REMOTE_CLASS_READ_ONLY, "
         "\"a bounded \"peek\" only\")\n");
     char p_strayquote[8192];
