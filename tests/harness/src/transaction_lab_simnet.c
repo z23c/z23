@@ -54,6 +54,42 @@ static bool transaction_lab_build_op_return(
     return true;
 }
 
+static bool transaction_lab_mine_args_invalid(
+    const uint8_t *op_return, size_t op_return_len,
+    const uint8_t owner_hash160[20], int32_t target_height,
+    const struct transaction_lab_simnet_receipt *out)
+{
+    return !op_return || op_return_len == 0 || !owner_hash160 || !out ||
+        target_height <= COINBASE_MATURITY;
+}
+
+static bool transaction_lab_mint_funding_and_advance(
+    struct simnet *sim, const uint8_t owner_hash160[20],
+    int32_t target_height, struct uint256 *funding_txid,
+    int32_t *funding_height)
+{
+    uint256_set_null(funding_txid);
+    struct script funding_script;
+    transaction_lab_p2pkh_script(&funding_script, owner_hash160);
+    int32_t funding_target = target_height - COINBASE_MATURITY;
+    bool ready = funding_target > simnet_tip_height(sim) &&
+        simnet_mint_to_height(sim, funding_target - 1) &&
+        simnet_mint_coinbase_to(
+            sim, &funding_script, TXLAB_FUND_ZAT, funding_txid);
+    *funding_height = simnet_tip_height(sim);
+    return ready && target_height >= *funding_height + COINBASE_MATURITY &&
+        simnet_mint_to_height(sim, target_height - 1);
+}
+
+static bool transaction_lab_change_output_matches(
+    struct simnet *sim, const struct uint256 *funding_txid,
+    const struct uint256 *txid, int64_t *change)
+{
+    return !simnet_coin_exists(sim, funding_txid) &&
+        simnet_coin_value(sim, txid, 1, change) &&
+        *change == TXLAB_CHANGE_ZAT;
+}
+
 bool transaction_lab_simnet_mine_op_return(
     const uint8_t *op_return, size_t op_return_len,
     struct transaction_lab_simnet_receipt *out)
@@ -70,8 +106,8 @@ bool transaction_lab_simnet_mine_owned_op_return_at(
     const uint8_t owner_hash160[20], int32_t target_height,
     struct transaction_lab_simnet_receipt *out)
 {
-    if (!op_return || op_return_len == 0 || !owner_hash160 || !out ||
-        target_height <= COINBASE_MATURITY)
+    if (transaction_lab_mine_args_invalid(
+            op_return, op_return_len, owner_hash160, target_height, out))
         return false;
     memset(out, 0, sizeof(*out));
     transaction_init(&out->transaction);
@@ -80,17 +116,10 @@ bool transaction_lab_simnet_mine_owned_op_return_at(
     if (!simnet_init(&sim))
         return false;
     struct uint256 funding_txid;
-    uint256_set_null(&funding_txid);
-    struct script funding_script;
-    transaction_lab_p2pkh_script(&funding_script, owner_hash160);
-    int32_t funding_target = target_height - COINBASE_MATURITY;
-    bool ready = funding_target > simnet_tip_height(&sim) &&
-        simnet_mint_to_height(&sim, funding_target - 1) &&
-        simnet_mint_coinbase_to(
-            &sim, &funding_script, TXLAB_FUND_ZAT, &funding_txid);
-    int32_t funding_height = simnet_tip_height(&sim);
-    ready = ready && target_height >= funding_height + COINBASE_MATURITY &&
-        simnet_mint_to_height(&sim, target_height - 1);
+    int32_t funding_height;
+    bool ready = transaction_lab_mint_funding_and_advance(
+        &sim, owner_hash160, target_height, &funding_txid,
+        &funding_height);
 
     struct transaction tx;
     transaction_init(&tx);
@@ -102,9 +131,8 @@ bool transaction_lab_simnet_mine_owned_op_return_at(
     struct uint256 txid = built ? tx.hash : (struct uint256){0};
     bool mined = copied && simnet_mint_txs(&sim, &tx, 1);
     int64_t change = 0;
-    bool proved = mined && !simnet_coin_exists(&sim, &funding_txid) &&
-        simnet_coin_value(&sim, &txid, 1, &change) &&
-        change == TXLAB_CHANGE_ZAT;
+    bool proved = mined && transaction_lab_change_output_matches(
+        &sim, &funding_txid, &txid, &change);
     if (proved) {
         out->txid = txid;
         out->funding_txid = funding_txid;

@@ -2307,7 +2307,6 @@ tests/harness/src/test_znam.c:test_znam:228
 tests/harness/src/test_znam.c:test_znam_wallet_sweep:27
 tests/harness/src/testcache.c:testcache_open_mode:27
 tests/harness/src/testcache.c:testcache_probe_group_internal:25
-tests/harness/src/transaction_lab_simnet.c:transaction_lab_simnet_mine_owned_op_return_at:21
 tools/acme/acme_jws.c:acme_es256_sign:16
 tools/acme/acme_jws.c:acme_jws_body:16
 tools/acme/acme_jws.c:acme_jws_protected_header:19
