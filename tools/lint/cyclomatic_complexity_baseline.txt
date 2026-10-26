@@ -2287,7 +2287,6 @@ tests/harness/src/test_wallet_destruction_drill.c:act1_transparent:73
 tests/harness/src/test_wallet_destruction_drill.c:act2_bodyless_restore_must_fail_loud:29
 tests/harness/src/test_wallet_destruction_drill.c:act3_shielded:61
 tests/harness/src/test_wallet_destruction_drill.c:act4_recovery_phrase:26
-tests/harness/src/test_wallet_funds_safety.c:test_wallet_funds_safety:85
 tests/harness/src/test_wallet_phrase_never_logged.c:t_a_real_terminal_gets_the_words_and_the_warning:19
 tests/harness/src/test_wallet_phrase_never_logged.c:t_canonical_service_first_boot_creates_a_wallet:18
 tests/harness/src/test_wallet_phrase_never_logged.c:t_creation_refuses_and_leaves_nothing:16
