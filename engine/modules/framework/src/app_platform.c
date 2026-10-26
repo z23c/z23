@@ -106,6 +106,33 @@ static bool event_token_len(const char *value, size_t max_len,
     return true;
 }
 
+static bool event_version_ok(const struct zcl_app_signed_event_v1 *event)
+{
+    return event->struct_size >= sizeof(*event) &&
+        event->version == ZCL_APP_SIGNED_EVENT_V1;
+}
+
+static bool event_tokens_ok(const struct zcl_app_signed_event_v1 *event,
+                            size_t *alen, size_t *tlen)
+{
+    return event_token_len(event->app_id, ZCL_APP_ID_MAX, alen) &&
+        event_token_len(event->topic, ZCL_APP_TOPIC_MAX, tlen);
+}
+
+static bool event_link_ok(const struct zcl_app_signed_event_v1 *event)
+{
+    bool has_previous = zcl_bytes_any_set(event->previous_event_id,
+                                          sizeof(event->previous_event_id));
+    return !((event->sequence == 1 && has_previous) ||
+             (event->sequence > 1 && !has_previous));
+}
+
+static bool event_payload_ok(const struct zcl_app_signed_event_v1 *event)
+{
+    return event->payload.len <= ZCL_APP_EVENT_PAYLOAD_MAX &&
+        (event->payload.len == 0 || event->payload.data != NULL);
+}
+
 static bool event_content_validate(const struct zcl_app_signed_event_v1 *event,
                                    size_t *app_len, size_t *topic_len,
                                    char *why, size_t why_sz)
@@ -113,24 +140,20 @@ static bool event_content_validate(const struct zcl_app_signed_event_v1 *event,
     size_t alen = 0, tlen = 0;
     if (!event)
         return reject(why, why_sz, "signed event is null");
-    if (event->struct_size < sizeof(*event) ||
-        event->version != ZCL_APP_SIGNED_EVENT_V1)
+    if (!event_version_ok(event))
         return reject(why, why_sz, "signed event version mismatch");
-    if (!event_token_len(event->app_id, ZCL_APP_ID_MAX, &alen) ||
-        !event_token_len(event->topic, ZCL_APP_TOPIC_MAX, &tlen))
+    if (!event_tokens_ok(event, &alen, &tlen))
         return reject(why, why_sz, "invalid signed event app or topic");
     if (event->kind == 0 || event->sequence == 0 || event->created_at == 0)
         return reject(why, why_sz, "invalid event kind, sequence, or time");
     if (!zcl_bytes_any_set(event->chain_id, sizeof(event->chain_id)))
         return reject(why, why_sz, "event chain id is empty");
-    bool has_previous = zcl_bytes_any_set(event->previous_event_id,
-                                      sizeof(event->previous_event_id));
-    if ((event->sequence == 1 && has_previous) ||
-        (event->sequence > 1 && !has_previous))
-        return reject(why, why_sz, "event sequence and previous id disagree");
-    if (event->payload.len > ZCL_APP_EVENT_PAYLOAD_MAX ||
-        (event->payload.len > 0 && !event->payload.data))
-        return reject(why, why_sz, "event payload is invalid or oversized");
+    if (!event_link_ok(event))
+        return reject(why, why_sz,
+                      "event sequence and previous id disagree");
+    if (!event_payload_ok(event))
+        return reject(why, why_sz,
+                      "event payload is invalid or oversized");
     if (app_len)
         *app_len = alen;
     if (topic_len)
@@ -161,6 +184,26 @@ static size_t event_unsigned_size(
         ZCL_APP_EVENT_PUBKEY_SIZE + 8 + 8 + 32 + 4 + event->payload.len;
 }
 
+static bool event_scope_shape_ok(const struct zcl_app_event_scope_v1 *scope,
+                                 size_t framed_signature_len)
+{
+    return scope && scope->struct_size >= sizeof(*scope) &&
+        scope->max_event_bytes != 0 && framed_signature_len != 0 &&
+        framed_signature_len <= ZCL_APP_EVENT_SIGNATURE_MAX;
+}
+
+static bool event_scope_lens_ok(const struct zcl_app_event_scope_v1 *scope,
+                                const struct zcl_app_signed_event_v1 *event,
+                                size_t *event_app_len, size_t *event_topic_len,
+                                size_t *scope_app_len, size_t *scope_topic_len)
+{
+    return event_token_len(scope->app_id, ZCL_APP_ID_MAX, scope_app_len) &&
+        event_token_len(scope->topic, ZCL_APP_TOPIC_MAX, scope_topic_len) &&
+        zcl_bytes_any_set(scope->chain_id, sizeof(scope->chain_id)) &&
+        event_token_len(event->app_id, ZCL_APP_ID_MAX, event_app_len) &&
+        event_token_len(event->topic, ZCL_APP_TOPIC_MAX, event_topic_len);
+}
+
 static bool event_scope_validate(const struct zcl_app_signed_event_v1 *event,
                                  const struct zcl_app_event_scope_v1 *scope,
                                  size_t framed_signature_len,
@@ -168,15 +211,9 @@ static bool event_scope_validate(const struct zcl_app_signed_event_v1 *event,
 {
     size_t event_app_len = 0, event_topic_len = 0;
     size_t scope_app_len = 0, scope_topic_len = 0;
-    if (!scope || scope->struct_size < sizeof(*scope) ||
-        scope->max_event_bytes == 0 ||
-        framed_signature_len == 0 ||
-        framed_signature_len > ZCL_APP_EVENT_SIGNATURE_MAX ||
-        !event_token_len(scope->app_id, ZCL_APP_ID_MAX, &scope_app_len) ||
-        !event_token_len(scope->topic, ZCL_APP_TOPIC_MAX, &scope_topic_len) ||
-        !zcl_bytes_any_set(scope->chain_id, sizeof(scope->chain_id)) ||
-        !event_token_len(event->app_id, ZCL_APP_ID_MAX, &event_app_len) ||
-        !event_token_len(event->topic, ZCL_APP_TOPIC_MAX, &event_topic_len))
+    if (!event_scope_shape_ok(scope, framed_signature_len) ||
+        !event_scope_lens_ok(scope, event, &event_app_len, &event_topic_len,
+                             &scope_app_len, &scope_topic_len))
         return reject(why, why_sz, "event scope is invalid");
     if (event_app_len != scope_app_len ||
         event_topic_len != scope_topic_len ||
@@ -398,7 +435,21 @@ static void event_signing_digest(const uint8_t event_id[32],
     sha3_256_finalize(&hash, digest->data);
 }
 
-static bool event_signature_is_canonical(const uint8_t *sig, size_t len)
+static bool event_sig_frame_ok(const uint8_t *sig, size_t len)
+{
+    return sig && len >= 8 && len <= ZCL_APP_EVENT_SIGNATURE_MAX &&
+        sig[0] == 0x30 && sig[1] == len - 2 && sig[2] == 0x02;
+}
+
+static bool event_sig_r_ok(const uint8_t *sig, size_t len)
+{
+    size_t len_r = sig[3];
+    return len_r != 0 && len_r <= 33 && len_r <= len - 7 &&
+        (sig[4] & 0x80) == 0 &&
+        !(len_r > 1 && sig[4] == 0 && (sig[5] & 0x80) == 0);
+}
+
+static bool event_sig_s_value_ok(const uint8_t *s, size_t len_s)
 {
     static const uint8_t half_order[32] = {
         0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -406,24 +457,6 @@ static bool event_signature_is_canonical(const uint8_t *sig, size_t len)
         0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d,
         0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
     };
-    if (!sig || len < 8 || len > ZCL_APP_EVENT_SIGNATURE_MAX ||
-        sig[0] != 0x30 || sig[1] != len - 2 || sig[2] != 0x02)
-        return false;
-    size_t len_r = sig[3];
-    if (len_r == 0 || len_r > 33 || len_r > len - 7 ||
-        (sig[4] & 0x80) != 0 ||
-        (len_r > 1 && sig[4] == 0 && (sig[5] & 0x80) == 0))
-        return false;
-    size_t start_s = 4 + len_r;
-    if (sig[start_s] != 0x02)
-        return false;
-    size_t len_s = sig[start_s + 1];
-    if (len_s == 0 || len_s > 33 || start_s + 2 + len_s != len ||
-        (sig[start_s + 2] & 0x80) != 0 ||
-        (len_s > 1 && sig[start_s + 2] == 0 &&
-         (sig[start_s + 3] & 0x80) == 0))
-        return false;
-    const uint8_t *s = sig + start_s + 2;
     if (len_s == 33) {
         if (s[0] != 0)
             return false;
@@ -433,6 +466,64 @@ static bool event_signature_is_canonical(const uint8_t *sig, size_t len)
     uint8_t s_value[32] = {0};
     memcpy(s_value + sizeof(s_value) - len_s, s, len_s);
     return memcmp(s_value, half_order, sizeof(s_value)) <= 0;
+}
+
+static bool event_sig_s_ok(const uint8_t *sig, size_t len)
+{
+    size_t start_s = 4 + sig[3];
+    size_t len_s = sig[start_s + 1];
+    return sig[start_s] == 0x02 &&
+        len_s != 0 && len_s <= 33 && start_s + 2 + len_s == len &&
+        (sig[start_s + 2] & 0x80) == 0 &&
+        !(len_s > 1 && sig[start_s + 2] == 0 &&
+          (sig[start_s + 3] & 0x80) == 0) &&
+        event_sig_s_value_ok(sig + start_s + 2, len_s);
+}
+
+static bool event_signature_is_canonical(const uint8_t *sig, size_t len)
+{
+    return event_sig_frame_ok(sig, len) && event_sig_r_ok(sig, len) &&
+        event_sig_s_ok(sig, len);
+}
+
+static bool event_sign_candidate(
+    struct zcl_app_signed_event_v1 *candidate,
+    const struct zcl_app_event_signing_binding_v1 *binding,
+    struct privkey *key, char *why, size_t why_sz)
+{
+    struct pubkey pubkey;
+    if (!privkey_is_valid(key) || !privkey_is_compressed(key) ||
+        !privkey_get_pubkey(key, &pubkey) ||
+        pubkey.size != ZCL_APP_EVENT_PUBKEY_SIZE) {
+        return reject(why, why_sz,
+                      "publishing key must be valid and compressed");
+    }
+    memcpy(candidate->author_pubkey, pubkey.vch,
+           sizeof(candidate->author_pubkey));
+    struct key_id key_id = pubkey_get_id(&pubkey);
+    if (memcmp(key_id.id.data, binding->author_key_id,
+               sizeof(binding->author_key_id)) != 0)
+        return reject(why, why_sz, "publishing key principal mismatch");
+    memcpy(candidate->author_key_id, key_id.id.data,
+           sizeof(candidate->author_key_id));
+
+    size_t app_len = 0, topic_len = 0;
+    if (!event_base_validate(candidate, &app_len, &topic_len, why, why_sz))
+        return false;
+    if (!zcl_app_signed_event_v1_id(candidate, candidate->event_id,
+                                    why, why_sz))
+        return false;
+    struct uint256 digest;
+    event_signing_digest(candidate->event_id, &digest);
+    size_t signature_len = sizeof(candidate->signature);
+    if (!privkey_sign(key, &digest, candidate->signature, &signature_len) ||
+        !event_signature_is_canonical(candidate->signature, signature_len)) {
+        return reject(why, why_sz,
+                      "event signature failed canonical validation");
+    }
+    candidate->signature_len = (uint32_t)signature_len;
+    return event_scope_validate(candidate, &binding->scope, signature_len,
+                                why, why_sz);
 }
 
 bool zcl_app_signed_event_v1_sign_wallet(
@@ -488,46 +579,9 @@ bool zcl_app_signed_event_v1_sign_wallet(
         return reject(why, why_sz, "publishing key is not wallet-owned");
     }
 
-    bool ok = false;
-    struct pubkey pubkey;
-    if (!privkey_is_valid(&key) || !privkey_is_compressed(&key) ||
-        !privkey_get_pubkey(&key, &pubkey) ||
-        pubkey.size != ZCL_APP_EVENT_PUBKEY_SIZE) {
-        reject(why, why_sz, "publishing key must be valid and compressed");
-        goto out;
-    }
-    memcpy(candidate.author_pubkey, pubkey.vch,
-           sizeof(candidate.author_pubkey));
-    struct key_id key_id = pubkey_get_id(&pubkey);
-    if (memcmp(key_id.id.data, binding->author_key_id,
-               sizeof(binding->author_key_id)) != 0) {
-        reject(why, why_sz, "publishing key principal mismatch");
-        goto out;
-    }
-    memcpy(candidate.author_key_id, key_id.id.data,
-           sizeof(candidate.author_key_id));
-
-    if (!event_base_validate(&candidate, &app_len, &topic_len, why, why_sz))
-        goto out;
-    if (!zcl_app_signed_event_v1_id(&candidate, candidate.event_id,
-                                    why, why_sz))
-        goto out;
-    struct uint256 digest;
-    event_signing_digest(candidate.event_id, &digest);
-    size_t signature_len = sizeof(candidate.signature);
-    if (!privkey_sign(&key, &digest, candidate.signature, &signature_len) ||
-        !event_signature_is_canonical(candidate.signature, signature_len)) {
-        reject(why, why_sz, "event signature failed canonical validation");
-        goto out;
-    }
-    candidate.signature_len = (uint32_t)signature_len;
-    if (!event_scope_validate(&candidate, &binding->scope, signature_len,
-                              why, why_sz))
-        goto out;
-    *out_event = candidate;
-    ok = true;
-
-out:
+    bool ok = event_sign_candidate(&candidate, binding, &key, why, why_sz);
+    if (ok)
+        *out_event = candidate;
     memory_cleanse(&key, sizeof(key));
     if (!ok)
         memset(out_event, 0, sizeof(*out_event));
@@ -594,16 +648,10 @@ const char *zcl_app_capability_name(uint64_t cap)
     }
 }
 
-bool zcl_app_manifest_v1_validate(const struct zcl_app_manifest_v1 *m,
-                                  uint64_t host_caps,
-                                  const char *expected_build,
-                                  char *why,
-                                  size_t why_sz)
+static bool zcl_app_manifest_v1_identity_ok(
+    const struct zcl_app_manifest_v1 *m, const char *expected_build,
+    char *why, size_t why_sz)
 {
-    if (why && why_sz > 0)
-        why[0] = 0;
-    if (!m)
-        return reject(why, why_sz, "manifest is null");
     if (m->struct_size < sizeof(*m) ||
         m->manifest_version != ZCL_APP_MANIFEST_V1 ||
         m->required_host_abi != ZCL_APP_HOST_ABI_V1)
@@ -618,6 +666,13 @@ bool zcl_app_manifest_v1_validate(const struct zcl_app_manifest_v1 *m,
         return reject(why, why_sz, "build identity mismatch");
     if (!valid_sha256(m->content_sha256))
         return reject(why, why_sz, "invalid content sha256");
+    return true;
+}
+
+static bool zcl_app_manifest_v1_tables_ok(
+    const struct zcl_app_manifest_v1 *m, uint64_t host_caps,
+    char *why, size_t why_sz)
+{
     if ((m->required_capabilities & ~host_caps) != 0)
         return reject(why, why_sz, "required host capability is unavailable");
     if (m->route_count > 0 && !m->routes)
@@ -626,7 +681,12 @@ bool zcl_app_manifest_v1_validate(const struct zcl_app_manifest_v1 *m,
         return reject(why, why_sz, "topic table missing");
     if (!m->self_test || !m->quiesce)
         return reject(why, why_sz, "self-test or quiescence hook missing");
+    return true;
+}
 
+static bool zcl_app_manifest_v1_routes_ok(
+    const struct zcl_app_manifest_v1 *m, char *why, size_t why_sz)
+{
     for (size_t i = 0; i < m->route_count; i++) {
         const struct zcl_app_route_v1 *route = &m->routes[i];
         if (route->struct_size < sizeof(*route) || !route->handler ||
@@ -637,9 +697,16 @@ bool zcl_app_manifest_v1_validate(const struct zcl_app_manifest_v1 *m,
         for (size_t j = 0; j < i; j++) {
             if (strcmp(route->method, m->routes[j].method) == 0 &&
                 strcmp(route->path, m->routes[j].path) == 0)
-                return reject(why, why_sz, "duplicate app route at index %zu", i);
+                return reject(why, why_sz,
+                              "duplicate app route at index %zu", i);
         }
     }
+    return true;
+}
+
+static bool zcl_app_manifest_v1_topics_ok(
+    const struct zcl_app_manifest_v1 *m, char *why, size_t why_sz)
+{
     for (size_t i = 0; i < m->topic_count; i++) {
         const struct zcl_app_topic_v1 *topic = &m->topics[i];
         if (topic->struct_size < sizeof(*topic) ||
@@ -652,13 +719,43 @@ bool zcl_app_manifest_v1_validate(const struct zcl_app_manifest_v1 *m,
                               "duplicate app topic at index %zu", i);
         }
     }
+    return true;
+}
+
+static bool zcl_app_manifest_v1_state_ok(
+    const struct zcl_app_manifest_v1 *m, char *why, size_t why_sz)
+{
     if (m->state_schema_version > 0) {
         if (!(m->required_capabilities & ZCL_APP_CAP_RESIDENT_STATE))
-            return reject(why, why_sz, "state schema lacks resident_state capability");
-        if (!m->migration || m->migration->struct_size < sizeof(*m->migration) ||
+            return reject(why, why_sz,
+                          "state schema lacks resident_state capability");
+        if (!m->migration ||
+            m->migration->struct_size < sizeof(*m->migration) ||
             !m->migration->prepare || !m->migration->commit ||
             !m->migration->abort)
-            return reject(why, why_sz, "stateful app lacks transactional migration hooks");
+            return reject(why, why_sz,
+                          "stateful app lacks transactional migration hooks");
     }
     return true;
+}
+
+bool zcl_app_manifest_v1_validate(const struct zcl_app_manifest_v1 *m,
+                                  uint64_t host_caps,
+                                  const char *expected_build,
+                                  char *why,
+                                  size_t why_sz)
+{
+    if (why && why_sz > 0)
+        why[0] = 0;
+    if (!m)
+        return reject(why, why_sz, "manifest is null");
+    if (!zcl_app_manifest_v1_identity_ok(m, expected_build, why, why_sz))
+        return false;
+    if (!zcl_app_manifest_v1_tables_ok(m, host_caps, why, why_sz))
+        return false;
+    if (!zcl_app_manifest_v1_routes_ok(m, why, why_sz))
+        return false;
+    if (!zcl_app_manifest_v1_topics_ok(m, why, why_sz))
+        return false;
+    return zcl_app_manifest_v1_state_ok(m, why, why_sz);
 }

@@ -906,11 +906,6 @@ engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_experiment_stats:
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_query:30
 engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_decode:20
 engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_validate:36
-engine/modules/framework/src/app_platform.c:event_content_validate:19
-engine/modules/framework/src/app_platform.c:event_scope_validate:17
-engine/modules/framework/src/app_platform.c:event_signature_is_canonical:24
-engine/modules/framework/src/app_platform.c:zcl_app_manifest_v1_validate:45
-engine/modules/framework/src/app_platform.c:zcl_app_signed_event_v1_sign_wallet:22
 engine/modules/framework/src/condition.c:condition_tick_one:28
 engine/modules/hotswap/src/hotswap_activate.c:activate_from_sealed_fd:21
 engine/modules/hotswap/src/hotswap_activate.c:hotswap_module_admit:46
