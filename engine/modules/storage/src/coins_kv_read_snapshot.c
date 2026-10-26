@@ -140,23 +140,27 @@ struct coins_kv_read_snapshot *coins_kv_read_snapshot_open(
     return snapshot;
 }
 
-static bool snapshot_row_columns_valid(int txid_type, const void *txid,
-                                       int txid_len, bool scalar_types,
-                                       int script_type, const void *script,
-                                       int script_len)
+static bool snapshot_row_key_valid(int txid_type, const void *txid,
+                                   int txid_len, bool scalar_types,
+                                   int64_t vout, int64_t value)
 {
     return txid_type == SQLITE_BLOB && txid && txid_len == 32 && scalar_types &&
-           script_type == SQLITE_BLOB && script_len >= 0 &&
+           vout >= 0 && vout <= UINT32_MAX && MoneyRange(value);
+}
+
+static bool snapshot_row_script_valid(int script_type, const void *script,
+                                      int script_len)
+{
+    return script_type == SQLITE_BLOB && script_len >= 0 &&
            (script_len == 0 || script != NULL) &&
            script_len <= MAX_SCRIPT_SIZE;
 }
 
-static bool snapshot_row_scalars_in_range(
-    const struct coins_kv_read_snapshot *snapshot, int64_t vout,
-    int64_t value, int64_t height, int64_t coinbase)
+static bool snapshot_row_meta_in_range(
+    const struct coins_kv_read_snapshot *snapshot, int64_t height,
+    int64_t coinbase)
 {
-    return vout >= 0 && vout <= UINT32_MAX && MoneyRange(value) &&
-           height >= 0 && height < snapshot->applied_height &&
+    return height >= 0 && height < snapshot->applied_height &&
            coinbase >= 0 && coinbase <= 1;
 }
 
@@ -173,10 +177,10 @@ static bool snapshot_row_valid(struct coins_kv_read_snapshot *snapshot,
                         sqlite3_column_type(snapshot->rows, 2) == SQLITE_INTEGER &&
                         sqlite3_column_type(snapshot->rows, 4) == SQLITE_INTEGER &&
                         sqlite3_column_type(snapshot->rows, 5) == SQLITE_INTEGER;
-    return snapshot_row_columns_valid(txid_type, txid, txid_len, scalar_types,
-                                      script_type, script, script_len) &&
-           snapshot_row_scalars_in_range(snapshot, vout, value, height,
-                                         coinbase);
+    return snapshot_row_key_valid(txid_type, txid, txid_len, scalar_types,
+                                  vout, value) &&
+           snapshot_row_script_valid(script_type, script, script_len) &&
+           snapshot_row_meta_in_range(snapshot, height, coinbase);
 }
 
 static bool snapshot_next_state_invalid(
