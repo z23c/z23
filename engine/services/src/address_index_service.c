@@ -60,8 +60,6 @@ static char g_ai_digest_hex[65];
 static struct liveness_contract g_ai_contract;
 static _Atomic supervisor_child_id g_ai_id = SUPERVISOR_INVALID_ID;
 
-/* Latch schema readiness once and snapshot the surviving row count so
- * dumpstate reports honestly before the first fold. */
 static void ai_mark_schema_ready(sqlite3 *db)
 {
     int64_t rc0 = address_index_row_count(db);
@@ -90,8 +88,6 @@ static bool ai_reset_after_deep_rewind(sqlite3 *db, int64_t hstar,
     return false;
 }
 
-/* Fold one bounded run of pending blocks, reporting fold counts, blocker
- * state and the last fully folded height through the out-parameters. */
 static void ai_fold_pending_blocks(struct main_state *ms, const char *datadir,
                                    sqlite3 *db, int64_t cursor, int64_t hstar,
                                    uint8_t digest[32], int64_t start_us,
@@ -111,7 +107,7 @@ static void ai_fold_pending_blocks(struct main_state *ms, const char *datadir,
             /* Name the floor: below the snapshot seed this is a structural
              * DEPENDENCY (bodies never downloaded), above it a transient gap. */
             index_fold_note_absent_body("address_index", "address_index",
-                                        db, h);
+                                            db, h);
             break;                          /* body absent — coverage floor */
         }
         int added = 0;
@@ -131,7 +127,6 @@ static void ai_fold_pending_blocks(struct main_state *ms, const char *datadir,
     }
 }
 
-/* Persist the folded cursor + digest and commit, or roll the batch back. */
 static bool ai_try_commit_fold(sqlite3 *db, int folded, int64_t last_good,
                                uint8_t digest[32])
 {
@@ -145,7 +140,6 @@ static bool ai_try_commit_fold(sqlite3 *db, int folded, int64_t last_good,
     return commit;
 }
 
-/* Publish per-batch observables (blocker latch, counters, timing). */
 static void ai_publish_batch_stats(bool commit, int folded, bool blocked,
                                    int64_t blocked_h, int64_t elapsed)
 {
@@ -157,7 +151,6 @@ static void ai_publish_batch_stats(bool commit, int folded, bool blocked,
     atomic_store(&g_ai_last_batch_us, elapsed);
 }
 
-/* Publish committed-batch observables (cursor, lifetime counters, digest). */
 static void ai_publish_fold_result(int64_t last_good, int folded,
                                    int total_added, uint8_t digest[32])
 {
@@ -309,8 +302,7 @@ static void ai_dump_status(struct json_value *out)
     json_push_kv_int(out, "ticks", atomic_load(&g_ai_ticks));
     json_push_kv_int(out, "last_batch_blocks",
                      atomic_load(&g_ai_last_batch_blocks));
-    json_push_kv_int(out, "last_batch_us",
-                     atomic_load(&g_ai_last_batch_us));
+    json_push_kv_int(out, "last_batch_us", atomic_load(&g_ai_last_batch_us));
     json_push_kv_int(out, "resets", atomic_load(&g_ai_resets));
     json_push_kv_bool(out, "registered", atomic_load(&g_ai_registered));
     bool blocked = atomic_load(&g_ai_blocked);
