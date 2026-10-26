@@ -2806,8 +2806,6 @@ tools/miner/gpu_equihash.c:gpu_equihash_solve_native:64
 tools/mint_v2_snapshot.c:main:72
 tools/native_ui_driver.c:main:72
 tools/p2_invariant_check.c:main:33
-tools/postmortem_to_scenario.c:p2s_derive_boot_phase:18
-tools/postmortem_to_scenario.c:postmortem_to_scenario_convert:16
 tools/rebuild_recent.c:frame_block:16
 tools/rebuild_recent.c:main:33
 tools/retrieval_eval.c:main:47

@@ -266,6 +266,60 @@ static int p2s_read_tape_seed_slot(const char *cap_dir, uint64_t *seed_out)
 
 /* ── Boot-phase best-effort derivation ────────────────────────────────── */
 
+/* Copies the bare stage word starting at `stage` (up to the first space,
+ * newline, CR, or end of string) into `dst`, NUL-terminated and capped at
+ * dst_cap bytes total. */
+static void p2s_copy_stage_token(const char *stage, char *dst, size_t dst_cap)
+{
+    size_t i = 0;
+    while (stage[i] && stage[i] != ' ' && stage[i] != '\n' &&
+           stage[i] != '\r' && i + 1 < dst_cap) {
+        dst[i] = stage[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+/* Reads `<cap_dir>/log.txt`, when present and readable, and leaves the
+ * stage word of the LAST "[boot-stage] X -> Y" trace line in
+ * `last_stage` (which the caller pre-clears to ""). */
+static void p2s_read_last_boot_stage(const char *cap_dir, char *last_stage,
+                                     size_t last_stage_cap)
+{
+    char path[560];
+    int n = snprintf(path, sizeof(path), "%s/log.txt", cap_dir);
+    if (n < 0 || (size_t)n >= sizeof(path)) return;
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return;
+
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        const char *tag = strstr(line, "[boot-stage] ");
+        if (!tag) continue;
+        const char *arrow = strstr(tag, " -> ");
+        if (!arrow) continue;
+        const char *stage = arrow + 4;
+        p2s_copy_stage_token(stage, last_stage, last_stage_cap);
+    }
+    fclose(fp);
+}
+
+/* Real `enum boot_stage` name -> chaos-DSL boot_phase. One table, scanned
+ * in order with strcmp: a NULL phase marks a stage with no meaningful DSL
+ * equivalent (derivation reports failure); any stage not listed falls
+ * through to the DSL's own default in p2s_derive_boot_phase(). */
+static const struct {
+    const char *stage;
+    const char *phase;
+} p2s_boot_stage_dsl[] = {
+    { "network_ready",      "listening" },
+    { "services_running",   "listening" },
+    { "ready",              "listening" },
+    { "shutdown_requested", NULL },
+    { "shutdown_complete",  NULL },
+};
+
 /* Scans a capsule's log.txt tail for the LAST "[boot-stage] X -> Y" trace
  * line (platform/modules/util/src/boot_phase.c: boot_stage_advance_to()) and maps the
  * real `enum boot_stage` name (platform/modules/util/include/util/boot_phase.h) to the
@@ -276,42 +330,17 @@ static int p2s_read_tape_seed_slot(const char *cap_dir, uint64_t *seed_out)
  * node never reached a logged boot-stage transition before the crash. */
 static bool p2s_derive_boot_phase(const char *cap_dir, char *out, size_t out_cap)
 {
-    char path[560];
-    int n = snprintf(path, sizeof(path), "%s/log.txt", cap_dir);
-    if (n < 0 || (size_t)n >= sizeof(path)) return false;
-
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return false;
-
-    char line[512];
     char last_stage[64];
     last_stage[0] = '\0';
-    while (fgets(line, sizeof(line), fp)) {
-        const char *tag = strstr(line, "[boot-stage] ");
-        if (!tag) continue;
-        const char *arrow = strstr(tag, " -> ");
-        if (!arrow) continue;
-        const char *stage = arrow + 4;
-        size_t i = 0;
-        while (stage[i] && stage[i] != ' ' && stage[i] != '\n' &&
-               stage[i] != '\r' && i + 1 < sizeof(last_stage)) {
-            last_stage[i] = stage[i];
-            i++;
-        }
-        last_stage[i] = '\0';
-    }
-    fclose(fp);
+    p2s_read_last_boot_stage(cap_dir, last_stage, sizeof(last_stage));
     if (!last_stage[0]) return false;
 
-    if (strcmp(last_stage, "network_ready") == 0 ||
-        strcmp(last_stage, "services_running") == 0 ||
-        strcmp(last_stage, "ready") == 0) {
-        snprintf(out, out_cap, "listening");
+    for (size_t i = 0; i < sizeof(p2s_boot_stage_dsl) / sizeof(p2s_boot_stage_dsl[0]); i++) {
+        if (strcmp(last_stage, p2s_boot_stage_dsl[i].stage) != 0) continue;
+        if (!p2s_boot_stage_dsl[i].phase)
+            return false; /* no meaningful DSL equivalent */
+        snprintf(out, out_cap, "%s", p2s_boot_stage_dsl[i].phase);
         return true;
-    }
-    if (strcmp(last_stage, "shutdown_requested") == 0 ||
-        strcmp(last_stage, "shutdown_complete") == 0) {
-        return false; /* no meaningful DSL equivalent */
     }
     /* init / datadir_locked / crypto_ready / db_open / wallet_loaded /
      * block_index_loaded / chain_tip_resolved: pre-network stages, all
@@ -485,6 +514,60 @@ static void p2s_render_skeleton(const struct postmortem_to_scenario_stats *st,
         "expect      no_crash\n");
 }
 
+/* ── Convert-step helpers ────────────────────────────────────────────── */
+
+/* True when a required path argument is absent or empty. */
+static bool p2s_path_arg_missing(const char *s)
+{
+    return s == NULL || *s == '\0';
+}
+
+/* Fills st->boot_phase from the capsule log when a stage can be derived,
+ * and with the DSL's own default otherwise. */
+static void p2s_set_boot_phase(const char *cap_dir,
+                               struct postmortem_to_scenario_stats *st)
+{
+    st->boot_phase_derived =
+        p2s_derive_boot_phase(cap_dir, st->boot_phase, sizeof(st->boot_phase));
+    if (!st->boot_phase_derived)
+        snprintf(st->boot_phase, sizeof(st->boot_phase), "idb_complete");
+}
+
+/* Uses the caller's --out path when given, else the default
+ * repro_<seed>.scenario location derived from the tape's seed slot. */
+static void p2s_set_out_path(struct postmortem_to_scenario_stats *st,
+                             const char *out_path_in)
+{
+    if (out_path_in && *out_path_in) {
+        snprintf(st->out_path, sizeof(st->out_path), "%s", out_path_in);
+    } else {
+        snprintf(st->out_path, sizeof(st->out_path),
+                 "tools/sim/scenarios/repro_%016" PRIx64 ".scenario",
+                 st->seed_slot);
+    }
+}
+
+/* Writes `len` bytes of `text` to `path`, freeing `text` on every path.
+ * Returns 0 on success, 1 when fopen failed (errno saved to *open_errno
+ * at the moment of failure), or 2 on a short write or close failure; the
+ * caller keeps every error message. */
+static int p2s_write_output_file(const char *path, char *text, size_t len,
+                                 int *open_errno)
+{
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        *open_errno = errno;
+        free(text);
+        return 1;
+    }
+    size_t wrote = fwrite(text, 1, len, fp);
+    int close_rc = fclose(fp);
+    free(text);
+    if (wrote != len || close_rc != 0)
+        return 2;
+    return 0;
+}
+
 /* ── Public entry point ───────────────────────────────────────────────── */
 
 int postmortem_to_scenario_convert(const char *cap_dir_in, const char *out_path_in,
@@ -495,7 +578,7 @@ int postmortem_to_scenario_convert(const char *cap_dir_in, const char *out_path_
     struct postmortem_to_scenario_stats *st = stats_out ? stats_out : &local_stats;
     memset(st, 0, sizeof(*st));
 
-    if (!cap_dir_in || !*cap_dir_in)
+    if (p2s_path_arg_missing(cap_dir_in))
         return p2s_errf(err_out, err_cap, "capsule path is required");
 
     struct stat cst;
@@ -538,18 +621,8 @@ int postmortem_to_scenario_convert(const char *cap_dir_in, const char *out_path_
             "skeleton will have a seed but no event inventory\n", cap_dir_in);
     }
 
-    st->boot_phase_derived =
-        p2s_derive_boot_phase(cap_dir_in, st->boot_phase, sizeof(st->boot_phase));
-    if (!st->boot_phase_derived)
-        snprintf(st->boot_phase, sizeof(st->boot_phase), "idb_complete");
-
-    if (out_path_in && *out_path_in) {
-        snprintf(st->out_path, sizeof(st->out_path), "%s", out_path_in);
-    } else {
-        snprintf(st->out_path, sizeof(st->out_path),
-                 "tools/sim/scenarios/repro_%016" PRIx64 ".scenario",
-                 st->seed_slot);
-    }
+    p2s_set_boot_phase(cap_dir_in, st);
+    p2s_set_out_path(st, out_path_in);
 
     char *text = (char *)zcl_malloc(P2S_OUTPUT_BUF_CAP,
                                     "postmortem_to_scenario.output");
@@ -558,18 +631,14 @@ int postmortem_to_scenario_convert(const char *cap_dir_in, const char *out_path_
     size_t off = 0;
     p2s_render_skeleton(st, text, P2S_OUTPUT_BUF_CAP, &off);
 
-    FILE *fp = fopen(st->out_path, "wb");
-    if (!fp) {
-        int e = errno;
-        free(text);
+    int open_errno = 0;
+    int wrc = p2s_write_output_file(st->out_path, text, off, &open_errno);
+    if (wrc == 1) {
         return p2s_errf(err_out, err_cap,
             "failed to open output '%s' for write: %s",
-            st->out_path, strerror(e));
+            st->out_path, strerror(open_errno));
     }
-    size_t wrote = fwrite(text, 1, off, fp);
-    int close_rc = fclose(fp);
-    free(text);
-    if (wrote != off || close_rc != 0) {
+    if (wrc == 2) {
         return p2s_errf(err_out, err_cap,
             "short write or close failure on '%s'", st->out_path);
     }
