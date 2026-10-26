@@ -212,13 +212,9 @@ static const struct transaction *cb_tx_at(const struct cb_chain *ch, int h)
     return &ch->bodies[h].vtx[1];
 }
 
-/* (Re)build the body at height h from the chain config. bodies[h] must be
- * block_init'd or previously built (it is freed first). The prev-link uses
- * the CURRENT hashes[h-1], so callers rebuilding a suffix update hashes
- * progressively. */
-static bool cb_build_body(struct cb_chain *ch, int h)
+static void cb_init_body_header(const struct cb_chain *ch, int h,
+                                struct block *b)
 {
-    struct block *b = &ch->bodies[h];
     block_free(b);
     block_init(b);
     b->header.nVersion = 4;
@@ -227,124 +223,181 @@ static bool cb_build_body(struct cb_chain *ch, int h)
     b->header.nBits = 0x1f07ffff;
     if (h > 0)
         b->header.hashPrevBlock = ch->hashes[h - 1];
+}
 
-    struct transaction extra, extra2;
-    bool have_extra = false, have_extra2 = false;
-    transaction_init(&extra);
-    transaction_init(&extra2);
-
-    if (h == CB_CREATOR) {
-        struct outpoint in;
-        cb_fake_outpoint(&in, 0xAA);
-        int64_t vals[12];
-        vals[0] = ch->ta0_value;
-        for (int i = 1; i < 12; i++)
-            vals[i] = 2000 + i;
-        have_extra = cb_make_spend_tx(&extra, &in, 1, vals, 12, 0xA0);
-        if (!have_extra) return false;
-        if (ch->variant == CBV_TA0_EMPTY_SCRIPT) {
-            /* Zero-length scriptPubKey on the lost coin; the txid must be
-             * recomputed over the emptied script (TG-F4). */
-            extra.vout[0].script_pub_key.size = 0;
-            transaction_compute_hash(&extra);
-        }
-        if (ch->variant == CBV_TA0_CREATOR_SPEND) {
-            /* vtx[2] spends (T_A,0) INSIDE the creator block: the scan's
-             * very first iteration (h == floor == creator) must see it. */
-            struct outpoint in2 = { .hash = extra.hash, .n = 0 };
-            int64_t v2[1] = { 700 };
-            have_extra2 = cb_make_spend_tx(&extra2, &in2, 1, v2, 1, 0xDA);
-            if (!have_extra2) {
-                transaction_free(&extra);
-                return false;
-            }
-        }
-    } else if (h == CB_CREATOR_B) {
-        struct outpoint in;
-        cb_fake_outpoint(&in, 0xBB);
-        int64_t vals[2] = { 3000, 3001 };
-        have_extra = cb_make_spend_tx(&extra, &in, 1, vals, 2, 0xB0);
-        if (!have_extra) return false;
-    } else if (h == CB_MID && ch->midspend) {
-        const struct transaction *ta = cb_tx_at(ch, CB_CREATOR);
-        if (!ta) return false;
-        struct outpoint in = { .hash = ta->hash, .n = 0 };
-        int64_t vals[1] = { 400 };
-        have_extra = cb_make_spend_tx(&extra, &in, 1, vals, 1, 0xD0);
-        if (!have_extra) return false;
-    } else if (h == CB_DELTA_CREATOR) {
-        struct outpoint in;
-        cb_fake_outpoint(&in, 0xCC);
-        int64_t vals[1] = { 4000 };
-        have_extra = cb_make_spend_tx(&extra, &in, 1, vals, 1, 0xE0);
-        if (!have_extra) return false;
-    } else if (h == CB_HOLE) {
-        const struct transaction *ta = cb_tx_at(ch, CB_CREATOR);
-        const struct transaction *tb = cb_tx_at(ch, CB_CREATOR_B);
-        const struct transaction *tc = cb_tx_at(ch, CB_DELTA_CREATOR);
-        const struct transaction *cb5 =
-            (CB_CREATOR < ch->n && ch->bodies[CB_CREATOR].num_vtx >= 1)
-                ? &ch->bodies[CB_CREATOR].vtx[0] : NULL;
-        if (!ta || !tb || !tc || !cb5) return false;
-        struct outpoint ins[10];
-        size_t nin = 0;
-        switch (ch->variant) {
-        case CBV_TA0:
-        case CBV_TA0_CREATOR_SPEND:
-        case CBV_TA0_EMPTY_SCRIPT:
-            ins[0].hash = ta->hash; ins[0].n = 0; nin = 1;
-            break;
-        case CBV_TA0_TB0:
-            ins[0].hash = ta->hash; ins[0].n = 0;
-            ins[1].hash = tb->hash; ins[1].n = 0; nin = 2;
-            break;
-        case CBV_TA0_TC0:
-            ins[0].hash = ta->hash; ins[0].n = 0;
-            ins[1].hash = tc->hash; ins[1].n = 0; nin = 2;
-            break;
-        case CBV_CB5:
-            ins[0].hash = cb5->hash; ins[0].n = 0; nin = 1;
-            break;
-        case CBV_TA0_TO_9:
-            for (uint32_t i = 0; i < 10; i++) {
-                ins[i].hash = ta->hash;
-                ins[i].n = i;
-            }
-            nin = 10;
-            break;
-        case CBV_BOGUS:
-            cb_bogus_txid(&ins[0].hash); ins[0].n = 0; nin = 1;
-            break;
-        }
-        int64_t vals[1] = { 500 };
-        have_extra = cb_make_spend_tx(&extra, ins, nin, vals, 1, 0xF0);
-        if (!have_extra) return false;
-    } else if (h == CB_HOLE2) {
-        const struct transaction *ta = cb_tx_at(ch, CB_CREATOR);
-        if (!ta) return false;
-        struct outpoint in = { .hash = ta->hash, .n = 0 };
-        int64_t vals[1] = { 600 };
-        have_extra = cb_make_spend_tx(&extra, &in, 1, vals, 1, 0xF8);
-        if (!have_extra) return false;
+static bool cb_build_creator_extra(const struct cb_chain *ch,
+                                   struct transaction *extra,
+                                   struct transaction *extra2,
+                                   bool *have_extra, bool *have_extra2)
+{
+    struct outpoint in;
+    cb_fake_outpoint(&in, 0xAA);
+    int64_t vals[12];
+    vals[0] = ch->ta0_value;
+    for (int i = 1; i < 12; i++)
+        vals[i] = 2000 + i;
+    *have_extra = cb_make_spend_tx(extra, &in, 1, vals, 12, 0xA0);
+    if (!*have_extra) return false;
+    if (ch->variant == CBV_TA0_EMPTY_SCRIPT) {
+        /* Zero-length scriptPubKey on the lost coin; the txid must be
+         * recomputed over the emptied script (TG-F4). */
+        extra->vout[0].script_pub_key.size = 0;
+        transaction_compute_hash(extra);
     }
+    if (ch->variant == CBV_TA0_CREATOR_SPEND) {
+        /* vtx[2] spends (T_A,0) INSIDE the creator block: the scan's
+         * very first iteration (h == floor == creator) must see it. */
+        struct outpoint in2 = { .hash = extra->hash, .n = 0 };
+        int64_t v2[1] = { 700 };
+        *have_extra2 = cb_make_spend_tx(extra2, &in2, 1, v2, 1, 0xDA);
+        if (!*have_extra2) {
+            transaction_free(extra);
+            return false;
+        }
+    }
+    return true;
+}
 
+static bool cb_build_creator_b_extra(struct transaction *extra,
+                                     bool *have_extra)
+{
+    struct outpoint in;
+    cb_fake_outpoint(&in, 0xBB);
+    int64_t vals[2] = { 3000, 3001 };
+    *have_extra = cb_make_spend_tx(extra, &in, 1, vals, 2, 0xB0);
+    return *have_extra;
+}
+
+static bool cb_build_mid_extra(const struct cb_chain *ch,
+                               struct transaction *extra, bool *have_extra)
+{
+    const struct transaction *ta = cb_tx_at(ch, CB_CREATOR);
+    if (!ta) return false;
+    struct outpoint in = { .hash = ta->hash, .n = 0 };
+    int64_t vals[1] = { 400 };
+    *have_extra = cb_make_spend_tx(extra, &in, 1, vals, 1, 0xD0);
+    return *have_extra;
+}
+
+static bool cb_build_delta_extra(struct transaction *extra, bool *have_extra)
+{
+    struct outpoint in;
+    cb_fake_outpoint(&in, 0xCC);
+    int64_t vals[1] = { 4000 };
+    *have_extra = cb_make_spend_tx(extra, &in, 1, vals, 1, 0xE0);
+    return *have_extra;
+}
+
+static size_t cb_hole_spend_inputs(enum cb_variant variant,
+                                   const struct transaction *ta,
+                                   const struct transaction *tb,
+                                   const struct transaction *tc,
+                                   const struct transaction *cb5,
+                                   struct outpoint ins[10])
+{
+    size_t nin = 0;
+    switch (variant) {
+    case CBV_TA0:
+    case CBV_TA0_CREATOR_SPEND:
+    case CBV_TA0_EMPTY_SCRIPT:
+        ins[0].hash = ta->hash; ins[0].n = 0; nin = 1;
+        break;
+    case CBV_TA0_TB0:
+        ins[0].hash = ta->hash; ins[0].n = 0;
+        ins[1].hash = tb->hash; ins[1].n = 0; nin = 2;
+        break;
+    case CBV_TA0_TC0:
+        ins[0].hash = ta->hash; ins[0].n = 0;
+        ins[1].hash = tc->hash; ins[1].n = 0; nin = 2;
+        break;
+    case CBV_CB5:
+        ins[0].hash = cb5->hash; ins[0].n = 0; nin = 1;
+        break;
+    case CBV_TA0_TO_9:
+        for (uint32_t i = 0; i < 10; i++) {
+            ins[i].hash = ta->hash;
+            ins[i].n = i;
+        }
+        nin = 10;
+        break;
+    case CBV_BOGUS:
+        cb_bogus_txid(&ins[0].hash); ins[0].n = 0; nin = 1;
+        break;
+    }
+    return nin;
+}
+
+static bool cb_build_hole_extra(const struct cb_chain *ch,
+                                struct transaction *extra, bool *have_extra)
+{
+    const struct transaction *ta = cb_tx_at(ch, CB_CREATOR);
+    const struct transaction *tb = cb_tx_at(ch, CB_CREATOR_B);
+    const struct transaction *tc = cb_tx_at(ch, CB_DELTA_CREATOR);
+    const struct transaction *cb5 =
+        (CB_CREATOR < ch->n && ch->bodies[CB_CREATOR].num_vtx >= 1)
+            ? &ch->bodies[CB_CREATOR].vtx[0] : NULL;
+    if (!ta || !tb || !tc || !cb5) return false;
+    struct outpoint ins[10];
+    size_t nin = cb_hole_spend_inputs(ch->variant, ta, tb, tc, cb5, ins);
+    int64_t vals[1] = { 500 };
+    *have_extra = cb_make_spend_tx(extra, ins, nin, vals, 1, 0xF0);
+    return *have_extra;
+}
+
+static bool cb_build_hole2_extra(const struct cb_chain *ch,
+                                 struct transaction *extra, bool *have_extra)
+{
+    const struct transaction *ta = cb_tx_at(ch, CB_CREATOR);
+    if (!ta) return false;
+    struct outpoint in = { .hash = ta->hash, .n = 0 };
+    int64_t vals[1] = { 600 };
+    *have_extra = cb_make_spend_tx(extra, &in, 1, vals, 1, 0xF8);
+    return *have_extra;
+}
+
+static bool cb_build_extra_txs(struct cb_chain *ch, int h,
+                               struct transaction *extra,
+                               struct transaction *extra2,
+                               bool *have_extra, bool *have_extra2)
+{
+    if (h == CB_CREATOR)
+        return cb_build_creator_extra(ch, extra, extra2, have_extra,
+                                      have_extra2);
+    if (h == CB_CREATOR_B)
+        return cb_build_creator_b_extra(extra, have_extra);
+    if (h == CB_MID && ch->midspend)
+        return cb_build_mid_extra(ch, extra, have_extra);
+    if (h == CB_DELTA_CREATOR)
+        return cb_build_delta_extra(extra, have_extra);
+    if (h == CB_HOLE)
+        return cb_build_hole_extra(ch, extra, have_extra);
+    if (h == CB_HOLE2)
+        return cb_build_hole2_extra(ch, extra, have_extra);
+    return true;
+}
+
+static bool cb_assemble_body(struct cb_chain *ch, int h, struct block *b,
+                             struct transaction *extra,
+                             struct transaction *extra2, bool have_extra,
+                             bool have_extra2)
+{
     size_t ntx = 1 + (have_extra ? 1u : 0u) + (have_extra2 ? 1u : 0u);
     b->vtx = zcl_calloc(ntx, sizeof(struct transaction), "cb_test_vtx");
     if (!b->vtx) {
-        if (have_extra) transaction_free(&extra);
-        if (have_extra2) transaction_free(&extra2);
+        if (have_extra) transaction_free(extra);
+        if (have_extra2) transaction_free(extra2);
         return false;
     }
     b->num_vtx = ntx;
     if (!cb_make_coinbase(&b->vtx[0], h)) {
-        if (have_extra) transaction_free(&extra);
-        if (have_extra2) transaction_free(&extra2);
+        if (have_extra) transaction_free(extra);
+        if (have_extra2) transaction_free(extra2);
         return false;
     }
     if (have_extra)
-        b->vtx[1] = extra;   /* ownership moves into the block */
+        b->vtx[1] = *extra;   /* ownership moves into the block */
     if (have_extra2)
-        b->vtx[2] = extra2;  /* only ever set together with have_extra */
+        b->vtx[2] = *extra2;  /* only ever set together with have_extra */
 
     struct uint256 txids[3];
     for (size_t i = 0; i < ntx; i++)
@@ -352,6 +405,27 @@ static bool cb_build_body(struct cb_chain *ch, int h)
     b->header.hashMerkleRoot = compute_merkle_root(txids, ntx);
     block_get_hash(b, &ch->hashes[h]);
     return true;
+}
+
+/* (Re)build the body at height h from the chain config. bodies[h] must be
+ * block_init'd or previously built (it is freed first). The prev-link uses
+ * the CURRENT hashes[h-1], so callers rebuilding a suffix update hashes
+ * progressively. */
+static bool cb_build_body(struct cb_chain *ch, int h)
+{
+    struct block *b = &ch->bodies[h];
+    cb_init_body_header(ch, h, b);
+
+    struct transaction extra, extra2;
+    bool have_extra = false, have_extra2 = false;
+    transaction_init(&extra);
+    transaction_init(&extra2);
+
+    if (!cb_build_extra_txs(ch, h, &extra, &extra2, &have_extra,
+                            &have_extra2))
+        return false;
+    return cb_assemble_body(ch, h, b, &extra, &extra2, have_extra,
+                            have_extra2);
 }
 
 static bool cb_chain_build_range(struct cb_chain *ch, int from)
@@ -669,9 +743,8 @@ static bool cb_save_tx_row(struct node_db *ndb, const struct uint256 *txid,
     return db_tx_save(ndb, &row);
 }
 
-static bool cb_seed_store(struct cbf *fx)
+static bool cb_seed_schemas(sqlite3 *db)
 {
-    sqlite3 *db = fx->db;
     if (!progress_meta_table_ensure(db) ||
         !coins_kv_ensure_schema(db) ||
         !created_outputs_index_ensure_schema(db))
@@ -703,7 +776,11 @@ static bool cb_seed_store(struct cbf *fx)
             " height INTEGER PRIMARY KEY, status TEXT, ok INTEGER NOT NULL,"
             " tip_hash BLOB)"))
         return false;
+    return true;
+}
 
+static bool cb_seed_cursors(sqlite3 *db)
+{
     if (!cb_seed_cursor(db, "validate_headers", CB_HOLE + 2) ||
         !cb_seed_cursor(db, "body_fetch", CB_HOLE + 2) ||
         !cb_seed_cursor(db, "body_persist", CB_HOLE + 1) ||
@@ -711,6 +788,16 @@ static bool cb_seed_store(struct cbf *fx)
         !cb_seed_cursor(db, "proof_validate", CB_HOLE + 1) ||
         !cb_seed_cursor(db, "utxo_apply", CB_FRONTIER) ||
         !cb_seed_cursor(db, "tip_finalize", CB_FRONTIER))
+        return false;
+    return true;
+}
+
+static bool cb_seed_store(struct cbf *fx)
+{
+    sqlite3 *db = fx->db;
+    if (!cb_seed_schemas(db))
+        return false;
+    if (!cb_seed_cursors(db))
         return false;
 
     /* Delta window: contiguous utxo_apply_log + inverse-delta rows in
@@ -735,11 +822,10 @@ static bool cb_seed_store(struct cbf *fx)
     return fx->tip_rows_before >= 0;
 }
 
-static bool cb_setup(struct cbf *fx, const char *tag, uint32_t salt,
-                     enum cb_variant variant, int64_t ta0_value,
-                     bool midspend, bool seed_baseline_coin)
+static bool cb_setup_stores(struct cbf *fx, const char *tag, uint32_t salt,
+                            enum cb_variant variant, int64_t ta0_value,
+                            bool midspend)
 {
-    memset(fx, 0, sizeof(*fx));
     if (!cb_chain_init(&fx->chain, salt, variant, ta0_value, midspend))
         return false;
 
@@ -754,6 +840,16 @@ static bool cb_setup(struct cbf *fx, const char *tag, uint32_t salt,
     if (!node_db_open(&fx->ndb, ":memory:"))
         return false;
     fx->ndb_open = true;
+    return true;
+}
+
+static bool cb_setup(struct cbf *fx, const char *tag, uint32_t salt,
+                     enum cb_variant variant, int64_t ta0_value,
+                     bool midspend, bool seed_baseline_coin)
+{
+    memset(fx, 0, sizeof(*fx));
+    if (!cb_setup_stores(fx, tag, salt, variant, ta0_value, midspend))
+        return false;
 
     /* txindex rows. tx_index is deliberately WRONG for T_A (it is vtx[1]) —
      * the design forbids trusting row.tx_index; the creator must be located
@@ -921,24 +1017,8 @@ static bool cb_coin_present(sqlite3 *db, const struct cbf *fx, int creator_h,
 
 /* ── Cases ─────────────────────────────────────────────────────────── */
 
-/* Case 1: happy path — detect, multi-chunk prev-linked scan via the internal
- * scan-step (small chunks force >= 2 resumes through the persisted record),
- * terminal linkage to the hole hash, then the insert transaction. */
-static int cb_case_happy(void)
+static int cb_happy_detect(int failures, struct cbf *fx, int64_t coins_before)
 {
-    int failures = 0;
-    struct cbf *fx = zcl_malloc(sizeof(*fx), "cb_test_fx");
-    if (!fx) return 1;
-    CBT("happy: setup", cb_setup(fx, "happy", 1, CBV_TA0, CB_TA0_VALUE,
-                                 false, true));
-
-    const struct transaction *ta = cb_tx_at(&fx->chain, CB_CREATOR);
-    int64_t coins_before = coins_kv_count(fx->db);
-
-    /* STEP 3: the stale-script replay no longer uses a write-once marker
-     * (termination is the body-vs-row delta), so coin_backfill no longer seeds
-     * or clears one. */
-
     /* Detect (apply=false): applicable, no scan, no writes. */
     struct coin_backfill_result det;
     memset(&det, 0, sizeof(det));
@@ -952,15 +1032,12 @@ static int cb_case_happy(void)
     CBT("happy: detect writes nothing",
         coins_kv_count(fx->db) == coins_before &&
         cb_marker_count(fx->db, "coin_backfill.scan") == 0);
+    return failures;
+}
 
-    /* Multi-chunk chain-bound scan through the internal seam: max_blocks=3
-     * over [5..13] forces several persisted-record resumes. */
-    struct coin_backfill_outpoint *set =
-        zcl_malloc(sizeof(*set), "cb_test_set");
-    CBT("happy: set alloc", set != NULL);
-    if (!set) { cb_teardown(fx); free(fx); return failures + 1; }
-    cb_fill_outpoint(set, fx, CB_CREATOR, 1, 0, false);
-
+static int cb_happy_scan_chunks(int failures, struct cbf *fx,
+                                struct coin_backfill_outpoint *set)
+{
     int next = -1, spent = -1, ip_count = 0, last_next = -1;
     uint8_t spender[32];
     enum coin_backfill_scan_verdict v = COIN_SCAN_IN_PROGRESS;
@@ -981,7 +1058,11 @@ static int cb_case_happy(void)
         ip_count >= 2 && monotonic);
     CBT("happy: scan record persisted while in flight",
         cb_marker_count(fx->db, "coin_backfill.scan") == 1);
+    return failures;
+}
 
+static int cb_happy_apply_result(int failures, struct cbf *fx)
+{
     /* Apply: the CLEAN proof is consumed by the insert transaction. */
     struct coin_backfill_result res;
     int st = cb_try_until(fx, &res);
@@ -993,7 +1074,13 @@ static int cb_case_happy(void)
         res.creator_floor == CB_CREATOR &&
         res.delta_horizon == CB_HORIZON &&
         res.scan_top_height == CB_TOP);
+    return failures;
+}
 
+static int cb_happy_coin_inserted(int failures, struct cbf *fx,
+                                  const struct transaction *ta,
+                                  int64_t coins_before)
+{
     /* The coin: exact value, height, script, non-coinbase. */
     int64_t value = 0;
     uint8_t script[64];
@@ -1011,7 +1098,12 @@ static int cb_case_happy(void)
     coins_free(&c);
     CBT("happy: exactly one new coin", coins_kv_count(fx->db) ==
         coins_before + 1);
+    return failures;
+}
 
+static int cb_happy_markers(int failures, struct cbf *fx,
+                            const struct transaction *ta)
+{
     /* Markers + record bookkeeping. */
     char op_hex[65];
     char op_key[192];
@@ -1028,7 +1120,11 @@ static int cb_case_happy(void)
         found);
     CBT("happy: scan record consumed",
         cb_marker_count(fx->db, "coin_backfill.scan") == 0);
+    return failures;
+}
 
+static int cb_happy_cursors_untouched(int failures, struct cbf *fx)
+{
     /* Cursors and logs untouched; tip_finalize_log rows never deleted. */
     CBT("happy: cursors untouched",
         cb_cursor(fx->db, "script_validate") == CB_HOLE + 1 &&
@@ -1041,11 +1137,56 @@ static int cb_case_happy(void)
     CBT("happy: no tip_finalize_log rows deleted",
         cb_query_int(fx->db, "SELECT COUNT(*) FROM tip_finalize_log") ==
             fx->tip_rows_before);
+    return failures;
+}
 
+static int cb_happy_rerun(int failures, struct cbf *fx)
+{
     /* Re-run: the coin now resolves -> NOT_APPLICABLE fall-through. */
-    st = cb_try_until(fx, &res);
+    struct coin_backfill_result res;
+    int st = cb_try_until(fx, &res);
     CBT("happy: re-run is NOT_APPLICABLE",
         st == COIN_BACKFILL_NOT_APPLICABLE);
+    return failures;
+}
+
+/* Case 1: happy path — detect, multi-chunk prev-linked scan via the internal
+ * scan-step (small chunks force >= 2 resumes through the persisted record),
+ * terminal linkage to the hole hash, then the insert transaction. */
+/* Case 1: happy path — detect, multi-chunk prev-linked scan via the internal
+ * scan-step (small chunks force >= 2 resumes through the persisted record),
+ * terminal linkage to the hole hash, then the insert transaction. */
+static int cb_case_happy(void)
+{
+    int failures = 0;
+    struct cbf *fx = zcl_malloc(sizeof(*fx), "cb_test_fx");
+    if (!fx) return 1;
+    CBT("happy: setup", cb_setup(fx, "happy", 1, CBV_TA0, CB_TA0_VALUE,
+                                 false, true));
+
+    const struct transaction *ta = cb_tx_at(&fx->chain, CB_CREATOR);
+    int64_t coins_before = coins_kv_count(fx->db);
+
+    /* STEP 3: the stale-script replay no longer uses a write-once marker
+     * (termination is the body-vs-row delta), so coin_backfill no longer seeds
+     * or clears one. */
+
+    failures = cb_happy_detect(failures, fx, coins_before);
+
+    /* Multi-chunk chain-bound scan through the internal seam: max_blocks=3
+     * over [5..13] forces several persisted-record resumes. */
+    struct coin_backfill_outpoint *set =
+        zcl_malloc(sizeof(*set), "cb_test_set");
+    CBT("happy: set alloc", set != NULL);
+    if (!set) { cb_teardown(fx); free(fx); return failures + 1; }
+    cb_fill_outpoint(set, fx, CB_CREATOR, 1, 0, false);
+
+    failures = cb_happy_scan_chunks(failures, fx, set);
+    failures = cb_happy_apply_result(failures, fx);
+    failures = cb_happy_coin_inserted(failures, fx, ta, coins_before);
+    failures = cb_happy_markers(failures, fx, ta);
+    failures = cb_happy_cursors_untouched(failures, fx);
+    failures = cb_happy_rerun(failures, fx);
 
     free(set);
     cb_teardown(fx);
@@ -1155,9 +1296,8 @@ static int cb_case_spent(void)
     return failures;
 }
 
-static int cb_case_refusal_marker_decoder_contract(void)
+static int cb_refusal_active_v2_markers(int failures)
 {
-    int failures = 0;
     bool active = true;
     bool legacy_spent = true;
     bool legacy_txindex = true;
@@ -1172,6 +1312,15 @@ static int cb_case_refusal_marker_decoder_contract(void)
             (const uint8_t *)"txindex_miss:v2", 15, &active, &legacy_spent,
             &legacy_txindex) &&
         active && !legacy_spent && !legacy_txindex);
+    return failures;
+}
+
+static int cb_refusal_active_unversioned_markers(int failures)
+{
+    bool active = true;
+    bool legacy_spent = true;
+    bool legacy_txindex = true;
+
     CBT("marker_decode: unprovable is active",
         coin_backfill_refusal_marker_decode((const uint8_t *)"unprovable", 10,
                                             &active, &legacy_spent,
@@ -1187,6 +1336,18 @@ static int cb_case_refusal_marker_decoder_contract(void)
                                             &active, &legacy_spent,
                                             &legacy_txindex) &&
         active && !legacy_spent && !legacy_txindex);
+    return failures;
+}
+
+static int cb_case_refusal_marker_decoder_contract(void)
+{
+    int failures = 0;
+    bool active = true;
+    bool legacy_spent = true;
+    bool legacy_txindex = true;
+
+    failures = cb_refusal_active_v2_markers(failures);
+    failures = cb_refusal_active_unversioned_markers(failures);
 
     CBT("marker_decode: legacy spent is reproof-only",
         coin_backfill_refusal_marker_decode((const uint8_t *)"spent", 5,
@@ -2077,6 +2238,105 @@ static int cb_case_dispatch_order(void)
     return failures;
 }
 
+static int cb_rebind_partial_scan(int failures, struct cbf *fx,
+                                  struct coin_backfill_outpoint *set)
+{
+    struct uint256 old_hole_hash = fx->chain.hashes[CB_HOLE];
+    int next = -1, spent = -1;
+    uint8_t spender[32];
+    enum coin_backfill_scan_verdict v =
+        cb_scan(fx, &old_hole_hash, set, 1, CB_CREATOR, CB_TOP,
+                CB_FRONTIER, 3, &next, &spent, spender);
+    /* The persisted lineage must already cover the fork height (7), so
+     * the post-reorg resume's FIRST block fails the prev-link. */
+    CBT("rebind_a: partial scan persisted past the fork height",
+        v == COIN_SCAN_IN_PROGRESS && next > CB_CREATOR_B);
+
+    /* Reorg the scanned prefix (fork below the resume point). */
+    CBT("rebind_a: reorg from h=7",
+        cb_chain_reorg_from(&fx->chain, CB_CREATOR_B));
+    v = cb_scan(fx, &old_hole_hash, set, 1, CB_CREATOR, CB_TOP,
+                CB_FRONTIER, 3, &next, &spent, spender);
+    CBT("rebind_a: resume prev-link mismatch -> CHAIN_REBOUND",
+        v == COIN_SCAN_CHAIN_REBOUND);
+    CBT("rebind_a: no insert against a mixed-branch proof",
+        !cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0));
+
+    /* Recovery: the hole row re-binds to the new branch (same block
+     * content re-failed there), the scan restarts and completes. */
+    CBT("rebind_a: rebind hole row to the new branch",
+        cb_update_hole_hash(fx->db, CB_HOLE,
+                            &fx->chain.hashes[CB_HOLE]));
+    struct coin_backfill_result res;
+    int st = cb_try_until(fx, &res);
+    CBT("rebind_a: bounded restart recovers and repairs",
+        st == COIN_BACKFILL_REPAIRED &&
+        cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0));
+    return failures;
+}
+
+static int cb_rebind_hole_reorg(int failures, struct cbf *fx,
+                                struct coin_backfill_outpoint *set)
+{
+    struct uint256 old_hole_hash = fx->chain.hashes[CB_HOLE];
+    int next = -1, spent = -1;
+    uint8_t spender[32];
+    enum coin_backfill_scan_verdict v = COIN_SCAN_IN_PROGRESS;
+    for (int i = 0; i < 20 && v == COIN_SCAN_IN_PROGRESS; i++)
+        v = cb_scan(fx, &old_hole_hash, set, 1, CB_CREATOR, CB_TOP,
+                    CB_FRONTIER, 64, &next, &spent, spender);
+    CBT("rebind_b: scan CLEAN before the reorg", v == COIN_SCAN_CLEAN);
+
+    CBT("rebind_b: reorg H itself",
+        cb_chain_reorg_from(&fx->chain, CB_HOLE));
+    struct coin_backfill_result res;
+    int st = cb_try_until(fx, &res);
+    CBT("rebind_b: insert refused after H reorg (hole-hash re-check)",
+        cb_is_refusal(st) && res.inserted_count == 0 &&
+        !cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0));
+    return failures;
+}
+
+static int cb_rebind_frontier_swap(int failures, struct cbf *fx,
+                                   struct coin_backfill_outpoint *set)
+{
+    struct uint256 hole_hash = fx->chain.hashes[CB_HOLE];
+    int next = -1, spent = -1;
+    uint8_t spender[32];
+    enum coin_backfill_scan_verdict v = COIN_SCAN_IN_PROGRESS;
+    for (int i = 0; i < 20 && v == COIN_SCAN_IN_PROGRESS; i++)
+        v = cb_scan(fx, &hole_hash, set, 1, CB_CREATOR, CB_TOP,
+                    CB_FRONTIER, 64, &next, &spent, spender);
+    CBT("rebind_c: scan CLEAN before the swap", v == COIN_SCAN_CLEAN);
+
+    /* Swap ONLY frontier-1: H still matches the hole row, but the
+     * insert-time active hash at scan_top no longer equals the
+     * persisted top_hash. */
+    CBT("rebind_c: swap frontier-1 block",
+        cb_chain_swap_one(&fx->chain, CB_TOP));
+    struct coin_backfill_result res;
+    memset(&res, 0, sizeof(res));
+    bool ok = stage_repair_coin_backfill_try(fx->db, &fx->ms, &fx->io,
+                                             true, &res);
+    CBT("rebind_c: top_hash mismatch -> ROLLBACK, no insert",
+        ok && res.status != COIN_BACKFILL_REPAIRED &&
+        res.inserted_count == 0 &&
+        !cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0));
+
+    /* And it must never insert on subsequent ticks against the torn io. */
+    bool never_inserted = true;
+    for (int i = 0; i < 5 && never_inserted; i++) {
+        memset(&res, 0, sizeof(res));
+        if (!stage_repair_coin_backfill_try(fx->db, &fx->ms, &fx->io,
+                                            true, &res))
+            break;
+        never_inserted = res.status != COIN_BACKFILL_REPAIRED &&
+                         !cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0);
+    }
+    CBT("rebind_c: refuses-by-delay, never a torn insert", never_inserted);
+    return failures;
+}
+
 /* Case 12: ADVERSARIAL — chain rebind on resume (kill-9 + reorg, B1).
  * (a) reorg of the already-scanned prefix breaks the resume prev-link ->
  *     CHAIN_REBOUND, restart from floor, never an insert over a mixed proof;
@@ -2100,37 +2360,7 @@ static int cb_case_chain_rebind(void)
         if (!set) { cb_teardown(fx); free(fx); return failures + 1; }
         cb_fill_outpoint(set, fx, CB_CREATOR, 1, 0, false);
 
-        struct uint256 old_hole_hash = fx->chain.hashes[CB_HOLE];
-        int next = -1, spent = -1;
-        uint8_t spender[32];
-        enum coin_backfill_scan_verdict v =
-            cb_scan(fx, &old_hole_hash, set, 1, CB_CREATOR, CB_TOP,
-                    CB_FRONTIER, 3, &next, &spent, spender);
-        /* The persisted lineage must already cover the fork height (7), so
-         * the post-reorg resume's FIRST block fails the prev-link. */
-        CBT("rebind_a: partial scan persisted past the fork height",
-            v == COIN_SCAN_IN_PROGRESS && next > CB_CREATOR_B);
-
-        /* Reorg the scanned prefix (fork below the resume point). */
-        CBT("rebind_a: reorg from h=7",
-            cb_chain_reorg_from(&fx->chain, CB_CREATOR_B));
-        v = cb_scan(fx, &old_hole_hash, set, 1, CB_CREATOR, CB_TOP,
-                    CB_FRONTIER, 3, &next, &spent, spender);
-        CBT("rebind_a: resume prev-link mismatch -> CHAIN_REBOUND",
-            v == COIN_SCAN_CHAIN_REBOUND);
-        CBT("rebind_a: no insert against a mixed-branch proof",
-            !cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0));
-
-        /* Recovery: the hole row re-binds to the new branch (same block
-         * content re-failed there), the scan restarts and completes. */
-        CBT("rebind_a: rebind hole row to the new branch",
-            cb_update_hole_hash(fx->db, CB_HOLE,
-                                &fx->chain.hashes[CB_HOLE]));
-        struct coin_backfill_result res;
-        int st = cb_try_until(fx, &res);
-        CBT("rebind_a: bounded restart recovers and repairs",
-            st == COIN_BACKFILL_REPAIRED &&
-            cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0));
+        failures = cb_rebind_partial_scan(failures, fx, set);
 
         free(set);
         cb_teardown(fx);
@@ -2150,22 +2380,7 @@ static int cb_case_chain_rebind(void)
         if (!set) { cb_teardown(fx); free(fx); return failures + 1; }
         cb_fill_outpoint(set, fx, CB_CREATOR, 1, 0, false);
 
-        struct uint256 old_hole_hash = fx->chain.hashes[CB_HOLE];
-        int next = -1, spent = -1;
-        uint8_t spender[32];
-        enum coin_backfill_scan_verdict v = COIN_SCAN_IN_PROGRESS;
-        for (int i = 0; i < 20 && v == COIN_SCAN_IN_PROGRESS; i++)
-            v = cb_scan(fx, &old_hole_hash, set, 1, CB_CREATOR, CB_TOP,
-                        CB_FRONTIER, 64, &next, &spent, spender);
-        CBT("rebind_b: scan CLEAN before the reorg", v == COIN_SCAN_CLEAN);
-
-        CBT("rebind_b: reorg H itself",
-            cb_chain_reorg_from(&fx->chain, CB_HOLE));
-        struct coin_backfill_result res;
-        int st = cb_try_until(fx, &res);
-        CBT("rebind_b: insert refused after H reorg (hole-hash re-check)",
-            cb_is_refusal(st) && res.inserted_count == 0 &&
-            !cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0));
+        failures = cb_rebind_hole_reorg(failures, fx, set);
 
         free(set);
         cb_teardown(fx);
@@ -2185,40 +2400,7 @@ static int cb_case_chain_rebind(void)
         if (!set) { cb_teardown(fx); free(fx); return failures + 1; }
         cb_fill_outpoint(set, fx, CB_CREATOR, 1, 0, false);
 
-        struct uint256 hole_hash = fx->chain.hashes[CB_HOLE];
-        int next = -1, spent = -1;
-        uint8_t spender[32];
-        enum coin_backfill_scan_verdict v = COIN_SCAN_IN_PROGRESS;
-        for (int i = 0; i < 20 && v == COIN_SCAN_IN_PROGRESS; i++)
-            v = cb_scan(fx, &hole_hash, set, 1, CB_CREATOR, CB_TOP,
-                        CB_FRONTIER, 64, &next, &spent, spender);
-        CBT("rebind_c: scan CLEAN before the swap", v == COIN_SCAN_CLEAN);
-
-        /* Swap ONLY frontier-1: H still matches the hole row, but the
-         * insert-time active hash at scan_top no longer equals the
-         * persisted top_hash. */
-        CBT("rebind_c: swap frontier-1 block",
-            cb_chain_swap_one(&fx->chain, CB_TOP));
-        struct coin_backfill_result res;
-        memset(&res, 0, sizeof(res));
-        bool ok = stage_repair_coin_backfill_try(fx->db, &fx->ms, &fx->io,
-                                                 true, &res);
-        CBT("rebind_c: top_hash mismatch -> ROLLBACK, no insert",
-            ok && res.status != COIN_BACKFILL_REPAIRED &&
-            res.inserted_count == 0 &&
-            !cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0));
-
-        /* And it must never insert on subsequent ticks against the torn io. */
-        bool never_inserted = true;
-        for (int i = 0; i < 5 && never_inserted; i++) {
-            memset(&res, 0, sizeof(res));
-            if (!stage_repair_coin_backfill_try(fx->db, &fx->ms, &fx->io,
-                                                true, &res))
-                break;
-            never_inserted = res.status != COIN_BACKFILL_REPAIRED &&
-                             !cb_coin_present(fx->db, fx, CB_CREATOR, 1, 0);
-        }
-        CBT("rebind_c: refuses-by-delay, never a torn insert", never_inserted);
+        failures = cb_rebind_frontier_swap(failures, fx, set);
 
         free(set);
         cb_teardown(fx);
