@@ -150,6 +150,19 @@ static bool ncrawl_env_falsy(const char *e)
                  e[0] == 'n' || e[0] == 'N');
 }
 
+/* Parse one integer env override: write *out only when the value is non-empty
+ * and within [lo, hi]; return false and leave *out untouched otherwise. */
+static bool ncrawl_env_int_in_range(const char *e, int lo, int hi, int *out)
+{
+    if (!e || !e[0])
+        return false;
+    int v = atoi(e);
+    if (v < lo || v > hi)
+        return false;
+    *out = v;
+    return true;
+}
+
 static void ncrawl_config_from_env(struct network_crawler_config *cfg)
 {
     /* ON by default (omniscience directive); both the -netcrawl CLI flag and
@@ -166,72 +179,50 @@ static void ncrawl_config_from_env(struct network_crawler_config *cfg)
     if (GetArg("-netcrawl", NULL))            /* flag present → it decides */
         cfg->enabled = GetBoolArg("-netcrawl", true);
     const char *iv = getenv("ZCL_NETCRAWL_INTERVAL_SECS");
-    if (iv && iv[0]) {
-        int v = atoi(iv);
-        if (v >= 5 && v <= 86400)
-            cfg->round_interval_secs = v;
-    }
+    int v;
+    if (ncrawl_env_int_in_range(iv, 5, 86400, &v))
+        cfg->round_interval_secs = v;
     const char *pr = getenv("ZCL_NETCRAWL_MAX_PER_ROUND");
-    if (pr && pr[0]) {
-        int v = atoi(pr);
-        if (v >= 1 && v <= NCRAWL_MAX_PER_ROUND)
-            cfg->max_per_round = v;
-    }
+    if (ncrawl_env_int_in_range(pr, 1, NCRAWL_MAX_PER_ROUND, &v))
+        cfg->max_per_round = v;
     const char *mc = getenv("ZCL_NETCRAWL_MAX_CONCURRENT");
-    if (mc && mc[0]) {
-        int v = atoi(mc);
-        if (v >= 1 && v <= NCRAWL_MAX_CONCURRENT)
-            cfg->max_concurrent = v;
-    }
+    if (ncrawl_env_int_in_range(mc, 1, NCRAWL_MAX_CONCURRENT, &v))
+        cfg->max_concurrent = v;
     const char *op = getenv("ZCL_NETCRAWL_ONION_PER_ROUND");
-    if (op && op[0]) {
-        int v = atoi(op);
-        if (v >= 0 && v <= NCRAWL_MAX_ONION_PER_ROUND)
-            cfg->onion_max_per_round = v;
-    }
+    if (ncrawl_env_int_in_range(op, 0, NCRAWL_MAX_ONION_PER_ROUND, &v))
+        cfg->onion_max_per_round = v;
     const char *oc = getenv("ZCL_NETCRAWL_ONION_CONCURRENT");
-    if (oc && oc[0]) {
-        int v = atoi(oc);
-        if (v >= 1 && v <= NCRAWL_MAX_ONION_CONCURRENT)
-            cfg->onion_max_concurrent = v;
-    }
+    if (ncrawl_env_int_in_range(oc, 1, NCRAWL_MAX_ONION_CONCURRENT, &v))
+        cfg->onion_max_concurrent = v;
     const char *ot = getenv("ZCL_NETCRAWL_ONION_TIMEOUT_MS");
-    if (ot && ot[0]) {
-        int v = atoi(ot);
-        if (v >= 100 && v <= 120000)
-            cfg->onion_timeout_ms = v;
-    }
+    if (ncrawl_env_int_in_range(ot, 100, 120000, &v))
+        cfg->onion_timeout_ms = v;
     const char *ob = getenv("ZCL_NETCRAWL_ONION_BUDGET_MS");
-    if (ob && ob[0]) {
-        int v = atoi(ob);
-        if (v >= 0 && v <= 240000)
-            cfg->onion_round_budget_ms = v;
-    }
+    if (ncrawl_env_int_in_range(ob, 0, 240000, &v))
+        cfg->onion_round_budget_ms = v;
+}
+
+/* Clamp one int knob into its hard bound [lo, hi]. */
+static void ncrawl_clamp_int(int *v, int lo, int hi)
+{
+    if (*v < lo)
+        *v = lo;
+    if (*v > hi)
+        *v = hi;
 }
 
 /* Clamp every knob into its hard bound (defensive: env + cfg both untrusted). */
 static void ncrawl_clamp(struct network_crawler_config *c)
 {
-    if (c->round_interval_secs < 5) c->round_interval_secs = 5;
-    if (c->round_interval_secs > 86400) c->round_interval_secs = 86400;
-    if (c->max_per_round < 1) c->max_per_round = 1;
-    if (c->max_per_round > NCRAWL_MAX_PER_ROUND) c->max_per_round = NCRAWL_MAX_PER_ROUND;
-    if (c->max_concurrent < 1) c->max_concurrent = 1;
-    if (c->max_concurrent > NCRAWL_MAX_CONCURRENT) c->max_concurrent = NCRAWL_MAX_CONCURRENT;
-    if (c->connect_timeout_ms < 100) c->connect_timeout_ms = 100;
-    if (c->connect_timeout_ms > 60000) c->connect_timeout_ms = 60000;
-    if (c->handshake_timeout_ms < 100) c->handshake_timeout_ms = 100;
-    if (c->handshake_timeout_ms > 60000) c->handshake_timeout_ms = 60000;
-    if (c->onion_max_per_round < 0) c->onion_max_per_round = 0;
-    if (c->onion_max_per_round > NCRAWL_MAX_ONION_PER_ROUND)
-        c->onion_max_per_round = NCRAWL_MAX_ONION_PER_ROUND;
-    if (c->onion_max_concurrent < 1) c->onion_max_concurrent = 1;
-    if (c->onion_max_concurrent > NCRAWL_MAX_ONION_CONCURRENT)
-        c->onion_max_concurrent = NCRAWL_MAX_ONION_CONCURRENT;
-    if (c->onion_timeout_ms < 100) c->onion_timeout_ms = 100;
-    if (c->onion_timeout_ms > 120000) c->onion_timeout_ms = 120000;
-    if (c->onion_round_budget_ms < 0) c->onion_round_budget_ms = 0;
-    if (c->onion_round_budget_ms > 240000) c->onion_round_budget_ms = 240000;
+    ncrawl_clamp_int(&c->round_interval_secs, 5, 86400);
+    ncrawl_clamp_int(&c->max_per_round, 1, NCRAWL_MAX_PER_ROUND);
+    ncrawl_clamp_int(&c->max_concurrent, 1, NCRAWL_MAX_CONCURRENT);
+    ncrawl_clamp_int(&c->connect_timeout_ms, 100, 60000);
+    ncrawl_clamp_int(&c->handshake_timeout_ms, 100, 60000);
+    ncrawl_clamp_int(&c->onion_max_per_round, 0, NCRAWL_MAX_ONION_PER_ROUND);
+    ncrawl_clamp_int(&c->onion_max_concurrent, 1, NCRAWL_MAX_ONION_CONCURRENT);
+    ncrawl_clamp_int(&c->onion_timeout_ms, 100, 120000);
+    ncrawl_clamp_int(&c->onion_round_budget_ms, 0, 240000);
 }
 
 /* ── bounded census table ────────────────────────────────────────────── */
