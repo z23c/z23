@@ -179,6 +179,100 @@ static bool sync_save_advanced_witnesses(
     return ok;
 }
 
+static void sync_mark_notes_with_witness(struct node_db *ndb,
+                                         struct db_sapling_note *wnotes,
+                                         int nw, bool *has_witness)
+{
+    for (int i = 0; i < nw; i++) {
+        uint8_t *wblob = NULL;
+        size_t wlen = 0;
+        int wh = 0;
+        has_witness[i] = db_sapling_note_load_witness(ndb,
+            wnotes[i].txid, wnotes[i].output_index,
+            &wblob, &wlen, &wh) && wblob;
+        if (wblob) free(wblob);
+    }
+}
+
+static void sync_deserialize_note_witnesses(
+    struct node_db *ndb, struct incremental_merkle_tree *tree,
+    struct db_sapling_note *wnotes, int nw, const bool *has_witness,
+    struct incremental_witness *witnesses, int *witness_idx,
+    int *num_with_witness)
+{
+    for (int i = 0; i < nw; i++) {
+        if (!has_witness[i]) continue;
+        uint8_t *wblob = NULL;
+        size_t wlen = 0;
+        int wh = 0;
+        if (!db_sapling_note_load_witness(ndb,
+                wnotes[i].txid, wnotes[i].output_index,
+                &wblob, &wlen, &wh) || !wblob)
+            continue;
+        struct byte_stream ws;
+        stream_init_from_data(&ws, wblob, wlen);
+        if (incremental_witness_deserialize(&witnesses[*num_with_witness],
+                &ws, SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH,
+                tree->combine, tree->uncommitted)) {
+            witness_idx[*num_with_witness] = i;
+            (*num_with_witness)++;
+        }
+        free(wblob);
+    }
+}
+
+static bool sync_append_block_outputs(
+    struct node_db *ndb, struct wallet *wallet, const struct block *blk,
+    struct incremental_merkle_tree *tree, int height,
+    struct db_sapling_note *wnotes, int nw, bool *has_witness,
+    struct incremental_witness *witnesses, int *witness_idx,
+    int *num_with_witness, bool *ok)
+{
+    bool has_sapling_outputs = false;
+    /* Append each Sapling output commitment */
+    for (size_t i = 0; i < blk->num_vtx; i++) {
+        const struct transaction *tx = &blk->vtx[i];
+        for (size_t j = 0; j < tx->num_shielded_output; j++) {
+            const struct uint256 *cm = &tx->v_shielded_output[j].cm;
+
+            /* Advance all existing witnesses */
+            for (int wi = 0; wi < *num_with_witness; wi++)
+                incremental_witness_append(&witnesses[wi], cm);
+
+            /* Append to tree */
+            incremental_tree_append(tree, cm);
+            has_sapling_outputs = true;
+
+            /* Check if cm matches a wallet note without a witness */
+            for (int wi = 0; wi < nw; wi++) {
+                if (has_witness[wi]) continue;
+                if (memcmp(wnotes[wi].cm, cm->data, 32) != 0) continue;
+                /* Create initial witness from current tree state */
+                struct incremental_witness iw;
+                incremental_witness_init(&iw, tree);
+                struct byte_stream iwout;
+                stream_init(&iwout, 2048);
+                incremental_witness_serialize(&iw, &iwout);
+                bool saved = sync_wallet_note_save_witness(
+                    ndb, wallet, &wnotes[wi], &iw,
+                    iwout.data, iwout.size, height);
+                if (!saved)
+                    *ok = false;
+                stream_free(&iwout);
+                has_witness[wi] = true;
+                /* Add to witness advancement array for subsequent cms */
+                if (witnesses) {
+                    witnesses[*num_with_witness] = iw;
+                    witness_idx[*num_with_witness] = wi;
+                    (*num_with_witness)++;
+                }
+                break;
+            }
+        }
+    }
+    return has_sapling_outputs;
+}
+
 /* Advance Sapling commitment tree and all wallet witnesses for one block.
  * Creates initial witnesses for wallet notes whose cm appears in this block.
  * Saves updated tree and witnesses to SQLite. */
@@ -205,15 +299,7 @@ bool advance_wallet_witnesses(struct node_db *ndb,
         free(wnotes);
         LOG_FAIL("sync", "advance_wallet_witnesses: has_witness calloc failed (%d notes)", nw);
     }
-    for (int i = 0; i < nw; i++) {
-        uint8_t *wblob = NULL;
-        size_t wlen = 0;
-        int wh = 0;
-        has_witness[i] = db_sapling_note_load_witness(ndb,
-            wnotes[i].txid, wnotes[i].output_index,
-            &wblob, &wlen, &wh) && wblob;
-        if (wblob) free(wblob);
-    }
+    sync_mark_notes_with_witness(ndb, wnotes, nw, has_witness);
 
     /* Deserialize existing witnesses for advancement */
     struct incremental_witness *witnesses = NULL;
@@ -227,70 +313,15 @@ bool advance_wallet_witnesses(struct node_db *ndb,
             free(has_witness); free(wnotes);
             LOG_FAIL("sync", "advance_wallet_witnesses: witness array calloc failed (%d notes)", nw);
         }
-        for (int i = 0; i < nw; i++) {
-            if (!has_witness[i]) continue;
-            uint8_t *wblob = NULL;
-            size_t wlen = 0;
-            int wh = 0;
-            if (!db_sapling_note_load_witness(ndb,
-                    wnotes[i].txid, wnotes[i].output_index,
-                    &wblob, &wlen, &wh) || !wblob)
-                continue;
-            struct byte_stream ws;
-            stream_init_from_data(&ws, wblob, wlen);
-            if (incremental_witness_deserialize(&witnesses[num_with_witness],
-                    &ws, SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH,
-                    tree->combine, tree->uncommitted)) {
-                witness_idx[num_with_witness] = i;
-                num_with_witness++;
-            }
-            free(wblob);
-        }
+        sync_deserialize_note_witnesses(ndb, tree, wnotes, nw, has_witness,
+                                        witnesses, witness_idx,
+                                        &num_with_witness);
     }
 
-    /* Append each Sapling output commitment */
-    bool has_sapling_outputs = false;
     bool ok = true;
-    for (size_t i = 0; i < blk->num_vtx; i++) {
-        const struct transaction *tx = &blk->vtx[i];
-        for (size_t j = 0; j < tx->num_shielded_output; j++) {
-            const struct uint256 *cm = &tx->v_shielded_output[j].cm;
-
-            /* Advance all existing witnesses */
-            for (int wi = 0; wi < num_with_witness; wi++)
-                incremental_witness_append(&witnesses[wi], cm);
-
-            /* Append to tree */
-            incremental_tree_append(tree, cm);
-            has_sapling_outputs = true;
-
-            /* Check if cm matches a wallet note without a witness */
-            for (int wi = 0; wi < nw; wi++) {
-                if (has_witness[wi]) continue;
-                if (memcmp(wnotes[wi].cm, cm->data, 32) != 0) continue;
-                /* Create initial witness from current tree state */
-                struct incremental_witness iw;
-                incremental_witness_init(&iw, tree);
-                struct byte_stream iwout;
-                stream_init(&iwout, 2048);
-                incremental_witness_serialize(&iw, &iwout);
-                bool saved = sync_wallet_note_save_witness(
-                    ndb, wallet, &wnotes[wi], &iw,
-                    iwout.data, iwout.size, height);
-                if (!saved)
-                    ok = false;
-                stream_free(&iwout);
-                has_witness[wi] = true;
-                /* Add to witness advancement array for subsequent cms */
-                if (witnesses) {
-                    witnesses[num_with_witness] = iw;
-                    witness_idx[num_with_witness] = wi;
-                    num_with_witness++;
-                }
-                break;
-            }
-        }
-    }
+    bool has_sapling_outputs = sync_append_block_outputs(
+        ndb, wallet, blk, tree, height, wnotes, nw, has_witness,
+        witnesses, witness_idx, &num_with_witness, &ok);
 
     if (!sync_save_advanced_witnesses(ndb, wallet, wnotes, witnesses,
                                       witness_idx, num_with_witness,
@@ -320,32 +351,17 @@ bool advance_wallet_witnesses(struct node_db *ndb,
     return ok;
 }
 
-static bool node_db_sync_connect_block_local(struct node_db *ndb,
-                                             const struct block *blk,
-                                             const struct block_index *pindex,
-                                             struct wallet *wallet)
+static bool node_db_sync_connect_block_args_invalid(
+    struct node_db *ndb, const struct block *blk,
+    const struct block_index *pindex)
 {
-    bool tx_active = false;
-    const char *fail_reason = "unknown";
+    return !ndb || !ndb->open || !blk || !pindex || !pindex->phashBlock;
+}
 
-    if (!ndb || !ndb->open || !blk || !pindex || !pindex->phashBlock)
-        LOG_FAIL("sync", "connect_block_local: invalid args (ndb=%p, blk=%p, pindex=%p)",
-                 (void *)ndb, (void *)blk, (void *)pindex);
-
-    /* Reserve the writer before the canonical-conflict read. A deferred
-     * transaction can retain a stale WAL snapshot if another handle writes
-     * between that read and the insert; retrying the insert cannot refresh
-     * that snapshot. Keep reservation and rollback in the existing lifecycle. */
-    if (!ndb->sync_in_batch) {
-        if (!node_db_begin_immediate(ndb))
-            LOG_FAIL("sync", "connect_block_local: BEGIN failed");
-        ndb->sync_in_batch = true;
-        ndb->sync_pending_blocks = 0;
-        tx_active = true;
-    } else {
-        tx_active = true;
-    }
-
+static const char *node_db_sync_index_block_rows(
+    struct node_db *ndb, const struct block *blk,
+    const struct block_index *pindex)
+{
     /* 1. Index the block header */
     struct db_block db_blk;
     memset(&db_blk, 0, sizeof(db_blk));
@@ -373,8 +389,7 @@ static bool node_db_sync_connect_block_local(struct node_db *ndb,
                                   &db_blk.sapling_value);
 
     if (!db_block_save_canonical(ndb, &db_blk)) {
-        fail_reason = "db_block_save_canonical";
-        goto fail;
+        return "db_block_save_canonical";
     }
 
     /* 2. Index each transaction and update UTXOs */
@@ -394,8 +409,7 @@ static bool node_db_sync_connect_block_local(struct node_db *ndb,
         db_tx.is_coinbase = (i == 0);
 
         if (!db_tx_save(ndb, &db_tx)) {
-            fail_reason = "db_tx_save";
-            goto fail;
+            return "db_tx_save";
         }
 
         /* UTXOs are managed by coins_view_sqlite (the canonical UTXO store).
@@ -406,36 +420,146 @@ static bool node_db_sync_connect_block_local(struct node_db *ndb,
         for (size_t j = 0; j < tx->num_shielded_spend; j++) {
             sqlite3_stmt *ns = ndb->stmt_nullifier_insert;
             if (!ns) {
-                fail_reason = "stmt_nullifier_insert_missing";
-                goto fail;
+                return "stmt_nullifier_insert_missing";
             }
             sqlite3_reset(ns);
             if (sqlite3_bind_blob(ns, 1,
                     tx->v_shielded_spend[j].nullifier.data,
                     32, SQLITE_STATIC) != SQLITE_OK) {
-                fail_reason = "nullifier_bind";
-                goto fail;
+                return "nullifier_bind";
             }
             if (AR_STEP_WRITE(ns) != SQLITE_DONE) {
-                fail_reason = "nullifier_insert";
-                goto fail;
+                return "nullifier_insert";
             }
         }
+    }
+    return NULL;
+}
+
+static void node_db_sync_load_sapling_tree(struct node_db *ndb,
+                                           struct incremental_merkle_tree *tree)
+{
+    sapling_tree_init(tree);
+    uint8_t tree_buf[8192];
+    size_t tree_len = 0;
+    if (node_db_state_get(ndb, "sapling_tree", tree_buf, sizeof(tree_buf), &tree_len)
+        && tree_len > 0) {
+        struct byte_stream ts;
+        stream_init_from_data(&ts, tree_buf, tree_len);
+        sapling_tree_init(tree);
+        incremental_tree_deserialize(tree, &ts);
+    }
+}
+
+/* Arm the live pause flag only for a substantial tree (one
+ * that had genuinely accumulated notes). The same atomic is
+ * utxo_apply's pause seam, so setting it on a small or empty
+ * tree (regtest, early history — where a header-root/empty-
+ * tree mismatch is spurious and benign) would idle the fold
+ * forever with no rebuild in flight and no named blocker. */
+static void node_db_sync_arm_substantial_tree_pause(size_t tsize)
+{
+    if (tsize >= 500000 &&
+        !atomic_load(&g_sapling_tree_rebuilding))
+        atomic_store(&g_sapling_tree_rebuilding, true);
+}
+
+static const char *node_db_sync_commit_block_state(
+    struct node_db *ndb, struct incremental_merkle_tree *tree,
+    const struct block_index *pindex, bool *tx_active)
+{
+    /* Store tree state per-block for disconnect */
+    struct byte_stream ts;
+    stream_init(&ts, 4096);
+    incremental_tree_serialize(tree, &ts);
+    if (!db_block_update_sapling_tree_data(ndb, pindex->phashBlock->data,
+                                           ts.data, ts.size)) {
+        stream_free(&ts);
+        return "sapling_tree_update";
+    }
+    stream_free(&ts);
+
+    /* 4. Update chain tip in state table */
+    if (!node_db_sync_set_tip(ndb,
+            pindex->phashBlock->data, pindex->nHeight)) {
+        return "set_tip";
+    }
+
+    /* Batch mode: commit only when batch_size reached */
+    ndb->sync_pending_blocks++;
+    int batch = ndb->sync_batch_size > 0 ? ndb->sync_batch_size : 1;
+    if (ndb->sync_pending_blocks >= batch) {
+        if (!node_db_commit(ndb)) {
+            return "commit";
+        }
+        ndb->sync_in_batch = false;
+        ndb->sync_pending_blocks = 0;
+        *tx_active = false;
+    }
+    return NULL;
+}
+
+static int node_db_sync_fail_sqlite_rc(struct node_db *ndb)
+{
+    return (ndb && ndb->last_sqlite_rc != SQLITE_OK)
+        ? ndb->last_sqlite_rc
+        : ((ndb && ndb->db) ? sqlite3_errcode(ndb->db) : SQLITE_MISUSE);
+}
+
+static void node_db_sync_fail_last_op(struct node_db *ndb, char *last_op,
+                                      size_t last_op_size)
+{
+    snprintf(last_op, last_op_size, "%s",
+             (ndb && ndb->last_op[0]) ? ndb->last_op : "n/a");
+}
+
+static void node_db_sync_abort_block_batch(struct node_db *ndb,
+                                           bool tx_active, int sqlite_rc)
+{
+    if (tx_active)
+        node_db_rollback(ndb);
+    ndb->sync_in_batch = false;
+    ndb->sync_pending_blocks = 0;
+    if (sqlite_rc == SQLITE_BUSY || sqlite_rc == SQLITE_LOCKED)
+        mirror_consensus_record_blocker("db-writer-busy");
+}
+
+static bool node_db_sync_connect_block_local(struct node_db *ndb,
+                                             const struct block *blk,
+                                             const struct block_index *pindex,
+                                             struct wallet *wallet)
+{
+    bool tx_active = false;
+    const char *fail_reason = "unknown";
+
+    if (node_db_sync_connect_block_args_invalid(ndb, blk, pindex))
+        LOG_FAIL("sync", "connect_block_local: invalid args (ndb=%p, blk=%p, pindex=%p)",
+                 (void *)ndb, (void *)blk, (void *)pindex);
+
+    /* Reserve the writer before the canonical-conflict read. A deferred
+     * transaction can retain a stale WAL snapshot if another handle writes
+     * between that read and the insert; retrying the insert cannot refresh
+     * that snapshot. Keep reservation and rollback in the existing lifecycle. */
+    if (!ndb->sync_in_batch) {
+        if (!node_db_begin_immediate(ndb))
+            LOG_FAIL("sync", "connect_block_local: BEGIN failed");
+        ndb->sync_in_batch = true;
+        ndb->sync_pending_blocks = 0;
+        tx_active = true;
+    } else {
+        tx_active = true;
+    }
+
+    const char *index_reason = node_db_sync_index_block_rows(ndb, blk, pindex);
+    if (index_reason) {
+        fail_reason = index_reason;
+        goto fail;
     }
 
     /* 3. Update Sapling commitment tree + maintain wallet witnesses */
     {
         struct incremental_merkle_tree tree;
-        sapling_tree_init(&tree);
-        uint8_t tree_buf[8192];
-        size_t tree_len = 0;
-        if (node_db_state_get(ndb, "sapling_tree", tree_buf, sizeof(tree_buf), &tree_len)
-            && tree_len > 0) {
-            struct byte_stream ts;
-            stream_init_from_data(&ts, tree_buf, tree_len);
-            sapling_tree_init(&tree);
-            incremental_tree_deserialize(&tree, &ts);
-        }
+        node_db_sync_load_sapling_tree(ndb, &tree);
 
         if (!advance_wallet_witnesses(ndb, blk, &tree, pindex->nHeight,
                                       wallet)) {
@@ -485,65 +609,25 @@ static bool node_db_sync_connect_block_local(struct node_db *ndb,
                     LOG_WARN("sync", "Sapling tree mismatch " "at h=%d (size=%zu) — will rebuild at next boot", pindex->nHeight, tsize);
                     fflush(stderr);
                 }
-                /* Arm the live pause flag only for a substantial tree (one
-                 * that had genuinely accumulated notes). The same atomic is
-                 * utxo_apply's pause seam, so setting it on a small or empty
-                 * tree (regtest, early history — where a header-root/empty-
-                 * tree mismatch is spurious and benign) would idle the fold
-                 * forever with no rebuild in flight and no named blocker. */
-                if (tsize >= 500000 &&
-                    !atomic_load(&g_sapling_tree_rebuilding))
-                    atomic_store(&g_sapling_tree_rebuilding, true);
+                node_db_sync_arm_substantial_tree_pause(tsize);
             }
         }
 
-        /* Store tree state per-block for disconnect */
-        struct byte_stream ts;
-        stream_init(&ts, 4096);
-        incremental_tree_serialize(&tree, &ts);
-        if (!db_block_update_sapling_tree_data(ndb, pindex->phashBlock->data,
-                                               ts.data, ts.size)) {
-            fail_reason = "sapling_tree_update";
-            stream_free(&ts);
+        const char *commit_reason = node_db_sync_commit_block_state(
+            ndb, &tree, pindex, &tx_active);
+        if (commit_reason) {
+            fail_reason = commit_reason;
             goto fail;
         }
-        stream_free(&ts);
     }
 
-    /* 4. Update chain tip in state table */
-    if (!node_db_sync_set_tip(ndb,
-            pindex->phashBlock->data, pindex->nHeight)) {
-        fail_reason = "set_tip";
-        goto fail;
-    }
-
-    /* Batch mode: commit only when batch_size reached */
-    ndb->sync_pending_blocks++;
-    int batch = ndb->sync_batch_size > 0 ? ndb->sync_batch_size : 1;
-    if (ndb->sync_pending_blocks >= batch) {
-        if (!node_db_commit(ndb)) {
-            fail_reason = "commit";
-            goto fail;
-        }
-        ndb->sync_in_batch = false;
-        ndb->sync_pending_blocks = 0;
-        tx_active = false;
-    }
     return true;
 
 fail:
-    int sqlite_rc = (ndb && ndb->last_sqlite_rc != SQLITE_OK)
-        ? ndb->last_sqlite_rc
-        : ((ndb && ndb->db) ? sqlite3_errcode(ndb->db) : SQLITE_MISUSE);
+    int sqlite_rc = node_db_sync_fail_sqlite_rc(ndb);
     char last_op[64];
-    snprintf(last_op, sizeof(last_op), "%s",
-             (ndb && ndb->last_op[0]) ? ndb->last_op : "n/a");
-    if (tx_active)
-        node_db_rollback(ndb);
-    ndb->sync_in_batch = false;
-    ndb->sync_pending_blocks = 0;
-    if (sqlite_rc == SQLITE_BUSY || sqlite_rc == SQLITE_LOCKED)
-        mirror_consensus_record_blocker("db-writer-busy");
+    node_db_sync_fail_last_op(ndb, last_op, sizeof(last_op));
+    node_db_sync_abort_block_batch(ndb, tx_active, sqlite_rc);
     LOG_FAIL("sync", "connect_block_local: failed at height %d "
              "reason=%s sqlite_rc=%d sqlite_msg=%s last_op=%s",
              pindex->nHeight, fail_reason,
