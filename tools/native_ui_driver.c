@@ -177,13 +177,12 @@ static const struct ui_driver_key_entry ui_driver_key_table[] = {
     {"1", XK_1},
     {"tab", XK_Tab},
     {"enter", XK_Return},
+    {"pagedown", XK_Page_Down},
+    {"pageup", XK_Page_Up},
     {"left", XK_Left},
     {"right", XK_Right},
     {"up", XK_Up},
     {"down", XK_Down},
-    {"pagedown", XK_Page_Down},
-    {"pageup", XK_Page_Up},
-    /* "escape" maps to NoSymbol: it closes the window instead of sending a key. */
     {"escape", NoSymbol},
 };
 
