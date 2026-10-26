@@ -171,6 +171,142 @@ static bool build_htlc_spend(struct transaction *tx,
     return true;
 }
 
+/* Swap leg A — the redeem path. Funds a P2SH HTLC payable to bob's pkh,
+ * spends it immediately down the claim branch (secret in the scriptSig),
+ * then reads that secret back out of the settled transaction exactly as
+ * the counterparty on the other chain would. Narrates its own progress
+ * and failure lines; returns 0 on success or 1 on the first failed step,
+ * which main propagates as the process exit status. */
+static int demonstrate_redeem_path(struct simnet *sim,
+                                   struct simnet_wallet *alice,
+                                   struct simnet_wallet *bob,
+                                   const uint8_t bob_pkh[20],
+                                   const uint8_t alice_pkh[20])
+{
+    printf("\n[2/4] leg A: fund an HTLC redeemable by bob, then redeem it...\n");
+
+    uint32_t redeem_locktime = (uint32_t)(simnet_tip_height(sim) + 3);
+    struct script redeem_p2sh;
+    uint8_t redeem_contract[HTLC_CONTRACT_SIZE], redeem_secret[32];
+    if (!build_htlc(redeem_locktime, bob_pkh, alice_pkh,
+                    &redeem_p2sh, redeem_contract, redeem_secret)) {
+        fprintf(stderr, "FAIL: could not build redeem-path HTLC script\n");
+        return 1;
+    }
+    printf("      secret   = %02x%02x%02x%02x...(32 bytes, from htlc_generate_secret;"
+           " real CSPRNG, so this DIFFERS on every run — see file header)\n",
+           redeem_secret[0], redeem_secret[1], redeem_secret[2], redeem_secret[3]);
+
+    struct simnet_tx_result htlc_fund;
+    if (!simnet_wallet_send(alice, &redeem_p2sh, 180000, &htlc_fund) ||
+        !simnet_mempool_mint(sim) ||
+        !simnet_coin_value(sim, &htlc_fund.txid, 0, NULL)) {
+        fprintf(stderr, "FAIL: HTLC funding output did not land in the UTXO set\n");
+        return 1;
+    }
+    printf("      HTLC funded: txid:0 holds 180000 zatoshi behind the P2SH contract\n");
+
+    struct transaction redeem_tx;
+    if (!build_htlc_spend(&redeem_tx, &htlc_fund.txid, simnet_wallet_script(bob),
+                          180000, redeem_contract, redeem_secret,
+                          /*refund=*/false, redeem_locktime)) {
+        fprintf(stderr, "FAIL: could not build redeem scriptSig\n");
+        return 1;
+    }
+    struct simnet_mempool_result redeem_reject;
+    if (!simnet_mempool_add(sim, &redeem_tx, &redeem_reject)) {
+        fprintf(stderr, "FAIL: redeem tx rejected: %s\n",
+                simnet_mempool_reject_name(redeem_reject.reason));
+        return 1;
+    }
+    if (!simnet_mempool_mint(sim) ||
+        !simnet_coin_value(sim, &redeem_tx.hash, 0, NULL)) {
+        fprintf(stderr, "FAIL: redeem tx did not mint/settle\n");
+        return 1;
+    }
+    printf("      redeem accepted+mined at height %d — bob now holds the coin\n",
+           simnet_tip_height(sim));
+
+    /* This is the step a real cross-chain counterparty performs: read the
+     * secret back out of the settled redeem transaction's scriptSig, so it
+     * can be reused to redeem the matching leg on the OTHER chain. */
+    const uint8_t *sig_bytes = redeem_tx.vin[0].script_sig.data;
+    size_t sig_len = redeem_tx.vin[0].script_sig.size;
+    uint8_t extracted_secret[32];
+    if (!htlc_extract_secret(sig_bytes, sig_len, extracted_secret) ||
+        memcmp(extracted_secret, redeem_secret, 32) != 0) {
+        fprintf(stderr, "FAIL: htlc_extract_secret did not recover the original secret\n");
+        return 1;
+    }
+    printf("      htlc_extract_secret recovered the exact secret from the on-chain scriptSig\n");
+    transaction_free(&redeem_tx);
+    return 0;
+}
+
+/* Swap leg B — the refund path. Funds a second HTLC from alice's wallet,
+ * proves the CLTV timeout still refuses the refund spend before the
+ * locktime height, then advances the chain past that height and settles
+ * the refund back to alice. Narrates its own progress and failure lines;
+ * returns 0 on success or 1 on the first failed step, which main
+ * propagates as the process exit status. */
+static int demonstrate_refund_path(struct simnet *sim,
+                                   struct simnet_wallet *alice,
+                                   const uint8_t bob_pkh[20],
+                                   const uint8_t alice_pkh[20])
+{
+    printf("\n[3/4] leg B: fund an HTLC, let the timeout pass, refund it...\n");
+    uint32_t refund_locktime = (uint32_t)(simnet_tip_height(sim) + 3);
+    struct script refund_p2sh;
+    uint8_t refund_contract[HTLC_CONTRACT_SIZE], refund_secret[32];
+    if (!build_htlc(refund_locktime, bob_pkh, alice_pkh,
+                    &refund_p2sh, refund_contract, refund_secret)) {
+        fprintf(stderr, "FAIL: could not build refund-path HTLC script\n");
+        return 1;
+    }
+
+    struct simnet_tx_result htlc_fund2;
+    if (!simnet_wallet_send(alice, &refund_p2sh, 160000, &htlc_fund2) ||
+        !simnet_mempool_mint(sim)) {
+        fprintf(stderr, "FAIL: second HTLC funding did not settle\n");
+        return 1;
+    }
+
+    struct transaction refund_tx;
+    if (!build_htlc_spend(&refund_tx, &htlc_fund2.txid, simnet_wallet_script(alice),
+                          160000, refund_contract, refund_secret,
+                          /*refund=*/true, refund_locktime)) {
+        fprintf(stderr, "FAIL: could not build refund scriptSig\n");
+        return 1;
+    }
+
+    /* Before the locktime height, the refund must be rejected as
+     * non-final — this is the CLTV guarantee that keeps Bob's redeem
+     * window exclusive until the timeout genuinely expires. */
+    struct simnet_mempool_result early_reject;
+    bool accepted_early = simnet_mempool_add(sim, &refund_tx, &early_reject);
+    if (accepted_early || early_reject.reason != SIMNET_MEMPOOL_REJECT_NONFINAL) {
+        fprintf(stderr, "FAIL: refund before locktime was not rejected as NONFINAL\n");
+        return 1;
+    }
+    printf("      refund before height %u correctly rejected (%s)\n",
+           refund_locktime, simnet_mempool_reject_name(early_reject.reason));
+
+    if (!simnet_mint_to_height(sim, (int)refund_locktime)) {
+        fprintf(stderr, "FAIL: could not advance chain to the locktime height\n");
+        return 1;
+    }
+    if (!simnet_mempool_add(sim, &refund_tx, NULL) ||
+        !simnet_mempool_mint(sim) ||
+        !simnet_coin_value(sim, &refund_tx.hash, 0, NULL)) {
+        fprintf(stderr, "FAIL: refund after locktime did not settle\n");
+        return 1;
+    }
+    printf("      refund accepted+mined at height %d — alice reclaimed the coin\n",
+           simnet_tip_height(sim));
+    transaction_free(&refund_tx);
+    return 0;
+}
+
 int main(void)
 {
     printf("=== 06_htlc_swap: HTLC atomic-swap contract lifecycle ===\n\n");
@@ -206,119 +342,18 @@ int main(void)
     printf("      alice balance = %lld zatoshi at height %d\n",
            (long long)simnet_wallet_balance(alice), simnet_tip_height(&sim));
 
-    /* ── Leg A: redeem path — Bob knows the secret and claims immediately. */
-    printf("\n[2/4] leg A: fund an HTLC redeemable by bob, then redeem it...\n");
+    /* Stand-in pkhs shared by both swap legs: bob redeems, alice refunds. */
     uint8_t bob_pkh[20], alice_pkh[20];
     memset(bob_pkh, 0x11, sizeof(bob_pkh));   /* stand-in recipient pkh */
     memset(alice_pkh, 0x71, sizeof(alice_pkh)); /* stand-in refunder pkh */
 
-    uint32_t redeem_locktime = (uint32_t)(simnet_tip_height(&sim) + 3);
-    struct script redeem_p2sh;
-    uint8_t redeem_contract[HTLC_CONTRACT_SIZE], redeem_secret[32];
-    if (!build_htlc(redeem_locktime, bob_pkh, alice_pkh,
-                    &redeem_p2sh, redeem_contract, redeem_secret)) {
-        fprintf(stderr, "FAIL: could not build redeem-path HTLC script\n");
+    /* ── Leg A: redeem path — Bob knows the secret and claims immediately. */
+    if (demonstrate_redeem_path(&sim, alice, bob, bob_pkh, alice_pkh) != 0)
         return 1;
-    }
-    printf("      secret   = %02x%02x%02x%02x...(32 bytes, from htlc_generate_secret;"
-           " real CSPRNG, so this DIFFERS on every run — see file header)\n",
-           redeem_secret[0], redeem_secret[1], redeem_secret[2], redeem_secret[3]);
-
-    struct simnet_tx_result htlc_fund;
-    if (!simnet_wallet_send(alice, &redeem_p2sh, 180000, &htlc_fund) ||
-        !simnet_mempool_mint(&sim) ||
-        !simnet_coin_value(&sim, &htlc_fund.txid, 0, NULL)) {
-        fprintf(stderr, "FAIL: HTLC funding output did not land in the UTXO set\n");
-        return 1;
-    }
-    printf("      HTLC funded: txid:0 holds 180000 zatoshi behind the P2SH contract\n");
-
-    struct transaction redeem_tx;
-    if (!build_htlc_spend(&redeem_tx, &htlc_fund.txid, simnet_wallet_script(bob),
-                          180000, redeem_contract, redeem_secret,
-                          /*refund=*/false, redeem_locktime)) {
-        fprintf(stderr, "FAIL: could not build redeem scriptSig\n");
-        return 1;
-    }
-    struct simnet_mempool_result redeem_reject;
-    if (!simnet_mempool_add(&sim, &redeem_tx, &redeem_reject)) {
-        fprintf(stderr, "FAIL: redeem tx rejected: %s\n",
-                simnet_mempool_reject_name(redeem_reject.reason));
-        return 1;
-    }
-    if (!simnet_mempool_mint(&sim) ||
-        !simnet_coin_value(&sim, &redeem_tx.hash, 0, NULL)) {
-        fprintf(stderr, "FAIL: redeem tx did not mint/settle\n");
-        return 1;
-    }
-    printf("      redeem accepted+mined at height %d — bob now holds the coin\n",
-           simnet_tip_height(&sim));
-
-    /* This is the step a real cross-chain counterparty performs: read the
-     * secret back out of the settled redeem transaction's scriptSig, so it
-     * can be reused to redeem the matching leg on the OTHER chain. */
-    const uint8_t *sig_bytes = redeem_tx.vin[0].script_sig.data;
-    size_t sig_len = redeem_tx.vin[0].script_sig.size;
-    uint8_t extracted_secret[32];
-    if (!htlc_extract_secret(sig_bytes, sig_len, extracted_secret) ||
-        memcmp(extracted_secret, redeem_secret, 32) != 0) {
-        fprintf(stderr, "FAIL: htlc_extract_secret did not recover the original secret\n");
-        return 1;
-    }
-    printf("      htlc_extract_secret recovered the exact secret from the on-chain scriptSig\n");
-    transaction_free(&redeem_tx);
 
     /* ── Leg B: refund path — nobody redeems; alice reclaims after timeout. */
-    printf("\n[3/4] leg B: fund an HTLC, let the timeout pass, refund it...\n");
-    uint32_t refund_locktime = (uint32_t)(simnet_tip_height(&sim) + 3);
-    struct script refund_p2sh;
-    uint8_t refund_contract[HTLC_CONTRACT_SIZE], refund_secret[32];
-    if (!build_htlc(refund_locktime, bob_pkh, alice_pkh,
-                    &refund_p2sh, refund_contract, refund_secret)) {
-        fprintf(stderr, "FAIL: could not build refund-path HTLC script\n");
+    if (demonstrate_refund_path(&sim, alice, bob_pkh, alice_pkh) != 0)
         return 1;
-    }
-
-    struct simnet_tx_result htlc_fund2;
-    if (!simnet_wallet_send(alice, &refund_p2sh, 160000, &htlc_fund2) ||
-        !simnet_mempool_mint(&sim)) {
-        fprintf(stderr, "FAIL: second HTLC funding did not settle\n");
-        return 1;
-    }
-
-    struct transaction refund_tx;
-    if (!build_htlc_spend(&refund_tx, &htlc_fund2.txid, simnet_wallet_script(alice),
-                          160000, refund_contract, refund_secret,
-                          /*refund=*/true, refund_locktime)) {
-        fprintf(stderr, "FAIL: could not build refund scriptSig\n");
-        return 1;
-    }
-
-    /* Before the locktime height, the refund must be rejected as
-     * non-final — this is the CLTV guarantee that keeps Bob's redeem
-     * window exclusive until the timeout genuinely expires. */
-    struct simnet_mempool_result early_reject;
-    bool accepted_early = simnet_mempool_add(&sim, &refund_tx, &early_reject);
-    if (accepted_early || early_reject.reason != SIMNET_MEMPOOL_REJECT_NONFINAL) {
-        fprintf(stderr, "FAIL: refund before locktime was not rejected as NONFINAL\n");
-        return 1;
-    }
-    printf("      refund before height %u correctly rejected (%s)\n",
-           refund_locktime, simnet_mempool_reject_name(early_reject.reason));
-
-    if (!simnet_mint_to_height(&sim, (int)refund_locktime)) {
-        fprintf(stderr, "FAIL: could not advance chain to the locktime height\n");
-        return 1;
-    }
-    if (!simnet_mempool_add(&sim, &refund_tx, NULL) ||
-        !simnet_mempool_mint(&sim) ||
-        !simnet_coin_value(&sim, &refund_tx.hash, 0, NULL)) {
-        fprintf(stderr, "FAIL: refund after locktime did not settle\n");
-        return 1;
-    }
-    printf("      refund accepted+mined at height %d — alice reclaimed the coin\n",
-           simnet_tip_height(&sim));
-    transaction_free(&refund_tx);
 
     printf("\n[4/4] both HTLC settlement paths proved through real connect_block()\n");
     printf("      redeem path : secret-holder claims any time before or after timeout\n");
