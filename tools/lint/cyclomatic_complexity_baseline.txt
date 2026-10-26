@@ -1090,8 +1090,6 @@ engine/jobs/src/stage_anchor.c:stage_anchor_cap_target_at_log_frontier:29
 engine/jobs/src/stage_rederive_range.c:stage_rederive_range:30
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:54
 engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:34
-engine/jobs/src/stage_repair_coin_backfill_creator.c:coin_backfill_enumerate_unresolved_prevouts:21
-engine/jobs/src/stage_repair_coin_backfill_creator.c:coin_backfill_resolve_creator:28
 engine/jobs/src/stage_repair_coin_backfill_scan.c:coin_backfill_scan_step:69
 engine/jobs/src/stage_repair_rewind.c:poison_mode_unlocked:20
 engine/jobs/src/stage_repair_rewind.c:stage_repair_header_solution_poison_rewind:30

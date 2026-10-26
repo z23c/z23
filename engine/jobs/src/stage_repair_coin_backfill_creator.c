@@ -25,6 +25,62 @@
 #include <stdio.h>
 #include <string.h>
 
+/* What coins_kv says about one prevout: a live row covering that vout, a row
+ * present at an unusable height (metadata tear), or nothing usable. */
+enum coin_backfill_coin_row_state {
+    COIN_BACKFILL_ROW_LIVE,            /* usable row: prevout already known */
+    COIN_BACKFILL_ROW_UNUSABLE_HEIGHT, /* metadata tear: refuse, do not mint */
+    COIN_BACKFILL_ROW_MISS             /* no row, or this vout not live */
+};
+
+/* The validator's intra-block resolution: an earlier tx in this same block
+ * already creates the prevout. Pure read. */
+static bool coin_backfill_prevout_created_intra_block(
+    const struct block *blk, size_t tx_index, const struct outpoint *op)
+{
+    for (size_t j = 0; j < tx_index; j++)
+        if (uint256_cmp(&blk->vtx[j].hash, &op->hash) == 0)
+            return true;
+    return false;
+}
+
+/* Fetch op's coins_kv row and classify it; the row is always freed. When a
+ * row is present its HEIGHT is reported through *out_height. */
+static enum coin_backfill_coin_row_state coin_backfill_classify_coin_row(
+    sqlite3 *db, const struct outpoint *op, int hole_height, int frontier,
+    int *out_height)
+{
+    struct coins c;
+    coins_init(&c);
+    if (!coins_kv_get_coins(db, op->hash.data, &c)) {
+        coins_free(&c);
+        return COIN_BACKFILL_ROW_MISS;
+    }
+    bool height_ok = c.height < frontier && c.height <= hole_height;
+    bool usable = height_ok && op->n < c.num_vout &&
+                  !tx_out_is_null(&c.vout[op->n]);
+    int h = c.height;
+    coins_free(&c);
+    *out_height = h;
+    if (usable)
+        return COIN_BACKFILL_ROW_LIVE;
+    if (!height_ok)
+        return COIN_BACKFILL_ROW_UNUSABLE_HEIGHT;
+    /* height fine, this vout not live: validator-miss -> U */
+    return COIN_BACKFILL_ROW_MISS;
+}
+
+/* True when the candidate set already holds this exact outpoint. */
+static bool coin_backfill_set_contains_outpoint(
+    const struct coin_backfill_outpoint *set, int n, const struct outpoint *op)
+{
+    for (int k = 0; k < n; k++)
+        if (memcmp(set[k].txid, op->hash.data, 32) == 0 &&
+            set[k].vout == op->n)
+            return true;
+    return false;
+}
+
 /* G5 enumeration — mirrors the validator's exact resolution order/semantics
  * (script_validate_created_index_prevout, script_validate_stage_prevout.c):
  * intra-block earlier tx, then created_outputs over [frontier..H], then
@@ -48,11 +104,7 @@ bool coin_backfill_enumerate_unresolved_prevouts(
         for (size_t vi = 0; vi < tx->num_vin; vi++) {
             const struct outpoint *op = &tx->vin[vi].prevout;
 
-            bool resolved = false;
-            for (size_t j = 0; j < i && !resolved; j++)
-                if (uint256_cmp(&blk->vtx[j].hash, &op->hash) == 0)
-                    resolved = true;
-            if (resolved)
+            if (coin_backfill_prevout_created_intra_block(blk, i, op))
                 continue;
 
             int64_t value = 0;
@@ -63,32 +115,19 @@ bool coin_backfill_enumerate_unresolved_prevouts(
                     script, sizeof(script), &slen, &created_h))
                 continue;
 
-            struct coins c;
-            coins_init(&c);
-            if (coins_kv_get_coins(db, op->hash.data, &c)) {
-                bool height_ok = c.height < frontier &&
-                                 c.height <= hole_height;
-                bool usable = height_ok && op->n < c.num_vout &&
-                              !tx_out_is_null(&c.vout[op->n]);
-                int ch = c.height;
-                coins_free(&c);
-                if (usable)
-                    continue;
-                if (!height_ok) {
-                    snprintf(reason, 64, "coin_present_unusable h=%d", ch);
-                    return true;
-                }
-                /* height fine, this vout not live: validator-miss -> U */
-            } else {
-                coins_free(&c);
+            int coin_height = 0;
+            enum coin_backfill_coin_row_state coin_row =
+                coin_backfill_classify_coin_row(db, op, hole_height, frontier,
+                                                &coin_height);
+            if (coin_row == COIN_BACKFILL_ROW_LIVE)
+                continue;
+            if (coin_row == COIN_BACKFILL_ROW_UNUSABLE_HEIGHT) {
+                snprintf(reason, 64, "coin_present_unusable h=%d",
+                         coin_height);
+                return true;
             }
 
-            bool dup = false;
-            for (int k = 0; k < *out_n && !dup; k++)
-                if (memcmp(set[k].txid, op->hash.data, 32) == 0 &&
-                    set[k].vout == op->n)
-                    dup = true;
-            if (dup)
+            if (coin_backfill_set_contains_outpoint(set, *out_n, op))
                 continue;
             if (*out_n >= COIN_BACKFILL_MAX_OUTPOINTS) {
                 snprintf(reason, 64, "too_many_unresolved");
@@ -223,6 +262,123 @@ static bool creator_resolve_via_active_fallback(
     return false;
 }
 
+/* A txindex row height that cannot name an active-chain creator for this
+ * hole. */
+static bool creator_txindex_height_invalid(int h, int frontier,
+                                           int hole_height)
+{
+    return h <= 0 || h >= frontier || h > hole_height;
+}
+
+/* Refresh the cached creator block for height h unless it is already loaded;
+ * returns the read_block result verbatim. The caller owns loaded_h and the
+ * cache block's lifetime. */
+static bool creator_load_block(const struct coin_backfill_io *io, int h,
+                               struct block *blk, struct uint256 *hash,
+                               int loaded_h)
+{
+    if (h == loaded_h)
+        return true;
+    block_free(blk);
+    block_init(blk);
+    return io->read_block(io->user, h, blk, hash);
+}
+
+/* First tx in blk whose hash equals txid, or NULL. */
+static const struct transaction *creator_find_tx_in_block(
+    const struct block *blk, const unsigned char *txid)
+{
+    for (size_t i = 0; i < blk->num_vtx; i++)
+        if (memcmp(blk->vtx[i].hash.data, txid, 32) == 0)
+            return &blk->vtx[i];
+    return NULL;
+}
+
+/* Track the lowest creator height seen so far (-1 = none yet). */
+static void creator_note_floor(int *out_floor, int h)
+{
+    if (*out_floor < 0 || h < *out_floor)
+        *out_floor = h;
+}
+
+/* Per-outpoint outcome for the loop in coin_backfill_resolve_creator: keep
+ * going, or stop the whole set (the refusing path already set reason). */
+enum coin_backfill_resolve_step {
+    COIN_BACKFILL_STEP_NEXT,
+    COIN_BACKFILL_STEP_STOP
+};
+
+/* Resolve one outpoint: txindex hint -> hash-verified block -> fill, with the
+ * bounded active-chain fallback at each refusing step. */
+static enum coin_backfill_resolve_step creator_resolve_outpoint(
+    const struct coin_backfill_io *io, int hole_height, int frontier,
+    int delta_horizon, struct coin_backfill_outpoint *op, struct block *cblk,
+    struct uint256 *chash, int *loaded_h, int *out_floor, char reason[64],
+    enum coin_backfill_terminal_class *out_tc)
+{
+    struct db_tx_index row;
+    char hex[65];
+    coin_backfill_txid_hex(op->txid, hex);
+    if (!db_tx_find(io->ndb, op->txid, &row)) {
+        char terminal_reason[64];
+        snprintf(terminal_reason, sizeof(terminal_reason),
+                 "txindex_miss tx=%.16s", hex);
+        if (!creator_resolve_via_active_fallback(
+                io, hole_height, frontier, delta_horizon, op,
+                terminal_reason,
+                COIN_BACKFILL_TC_TERMINAL_IF_TXINDEX_COMPLETE, reason,
+                out_tc))
+            return COIN_BACKFILL_STEP_STOP;
+        creator_note_floor(out_floor, op->creator_height);
+        return COIN_BACKFILL_STEP_NEXT;
+    }
+    int ch = row.block_height;
+    if (creator_txindex_height_invalid(ch, frontier, hole_height)) {
+        char terminal_reason[64];
+        snprintf(terminal_reason, sizeof(terminal_reason),
+                 "creator_height_invalid h=%d", ch);
+        if (!creator_resolve_via_active_fallback(
+                io, hole_height, frontier, delta_horizon, op,
+                terminal_reason, COIN_BACKFILL_TC_TERMINAL, reason, out_tc))
+            return COIN_BACKFILL_STEP_STOP;
+        creator_note_floor(out_floor, op->creator_height);
+        return COIN_BACKFILL_STEP_NEXT;
+    }
+    if (creator_load_block(io, ch, cblk, chash, *loaded_h)) {
+        *loaded_h = ch;
+    } else {
+        char terminal_reason[64];
+        snprintf(terminal_reason, sizeof(terminal_reason),
+                 "creator_block_unreadable h=%d", ch);
+        if (!creator_resolve_via_active_fallback(
+                io, hole_height, frontier, delta_horizon, op,
+                terminal_reason, COIN_BACKFILL_TC_RETRYABLE, reason,
+                out_tc))
+            return COIN_BACKFILL_STEP_STOP;
+        creator_note_floor(out_floor, op->creator_height);
+        *loaded_h = -1;
+        return COIN_BACKFILL_STEP_NEXT;
+    }
+    const struct transaction *tx = creator_find_tx_in_block(cblk, op->txid);
+    if (!tx) {
+        char terminal_reason[64];
+        snprintf(terminal_reason, sizeof(terminal_reason),
+                 "creator_txid_mismatch h=%d", ch);
+        if (!creator_resolve_via_active_fallback(
+                io, hole_height, frontier, delta_horizon, op,
+                terminal_reason, COIN_BACKFILL_TC_TERMINAL, reason,
+                out_tc))
+            return COIN_BACKFILL_STEP_STOP;
+        creator_note_floor(out_floor, op->creator_height);
+        *loaded_h = -1;
+        return COIN_BACKFILL_STEP_NEXT;
+    }
+    if (!creator_fill_from_tx(op, tx, ch, hole_height, reason, out_tc))
+        return COIN_BACKFILL_STEP_STOP;
+    creator_note_floor(out_floor, ch);
+    return COIN_BACKFILL_STEP_NEXT;
+}
+
 /* G7 + G8 — per-u creator resolution. The txindex row is only a HINT: the
  * authority is the hash-verified active-chain block at row.block_height
  * containing a tx whose RECOMPUTED double-SHA256 equals the wanted txid
@@ -257,83 +413,11 @@ void coin_backfill_resolve_creator(
     }
 
     for (int k = 0; k < n; k++) {
-        struct db_tx_index row;
-        char hex[65];
-        coin_backfill_txid_hex(set[k].txid, hex);
-        if (!db_tx_find(io->ndb, set[k].txid, &row)) {
-            char terminal_reason[64];
-            snprintf(terminal_reason, sizeof(terminal_reason),
-                     "txindex_miss tx=%.16s", hex);
-            if (creator_resolve_via_active_fallback(
-                    io, hole_height, frontier, delta_horizon, &set[k],
-                    terminal_reason,
-                    COIN_BACKFILL_TC_TERMINAL_IF_TXINDEX_COMPLETE,
-                    reason, out_tc)) {
-                if (*out_floor < 0 || set[k].creator_height < *out_floor)
-                    *out_floor = set[k].creator_height;
-                continue;
-            }
+        if (creator_resolve_outpoint(io, hole_height, frontier,
+                                     delta_horizon, &set[k], &cblk, &chash,
+                                     &loaded_h, out_floor, reason,
+                                     out_tc) == COIN_BACKFILL_STEP_STOP)
             break;
-        }
-        int ch = row.block_height;
-        if (ch <= 0 || ch >= frontier || ch > hole_height) {
-            char terminal_reason[64];
-            snprintf(terminal_reason, sizeof(terminal_reason),
-                     "creator_height_invalid h=%d", ch);
-            if (creator_resolve_via_active_fallback(
-                    io, hole_height, frontier, delta_horizon, &set[k],
-                    terminal_reason, COIN_BACKFILL_TC_TERMINAL,
-                    reason, out_tc)) {
-                if (*out_floor < 0 || set[k].creator_height < *out_floor)
-                    *out_floor = set[k].creator_height;
-                continue;
-            }
-            break;
-        }
-        if (ch != loaded_h) {
-            block_free(&cblk);
-            block_init(&cblk);
-            if (!io->read_block(io->user, ch, &cblk, &chash)) {
-                char terminal_reason[64];
-                snprintf(terminal_reason, sizeof(terminal_reason),
-                         "creator_block_unreadable h=%d", ch);
-                if (creator_resolve_via_active_fallback(
-                        io, hole_height, frontier, delta_horizon, &set[k],
-                        terminal_reason, COIN_BACKFILL_TC_RETRYABLE,
-                        reason, out_tc)) {
-                    if (*out_floor < 0 || set[k].creator_height < *out_floor)
-                        *out_floor = set[k].creator_height;
-                    loaded_h = -1;
-                    continue;
-                }
-                break;
-            }
-            loaded_h = ch;
-        }
-        const struct transaction *tx = NULL;
-        for (size_t i = 0; i < cblk.num_vtx && !tx; i++)
-            if (memcmp(cblk.vtx[i].hash.data, set[k].txid, 32) == 0)
-                tx = &cblk.vtx[i];
-        if (!tx) {
-            char terminal_reason[64];
-            snprintf(terminal_reason, sizeof(terminal_reason),
-                     "creator_txid_mismatch h=%d", ch);
-            if (creator_resolve_via_active_fallback(
-                    io, hole_height, frontier, delta_horizon, &set[k],
-                    terminal_reason, COIN_BACKFILL_TC_TERMINAL,
-                    reason, out_tc)) {
-                if (*out_floor < 0 || set[k].creator_height < *out_floor)
-                    *out_floor = set[k].creator_height;
-                loaded_h = -1;
-                continue;
-            }
-            break;
-        }
-        if (!creator_fill_from_tx(&set[k], tx, ch, hole_height, reason,
-                                  out_tc))
-            break;
-        if (*out_floor < 0 || ch < *out_floor)
-            *out_floor = ch;
     }
     block_free(&cblk);
 }
