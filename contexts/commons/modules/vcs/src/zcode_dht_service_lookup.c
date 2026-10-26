@@ -88,6 +88,32 @@ struct service_peer *vcs_zcode_dht_lookup_peer_for_node(
   return NULL;
 }
 
+/* Returns the index where a new candidate's shift ends, or the candidate
+ * capacity when a full table has no evictable slot for it. */
+static uint32_t lookup_insert_end_index(const struct service_lookup *l,
+                                        uint32_t at) {
+  uint32_t end = l->candidate_count;
+  if (l->candidate_count == VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES) {
+    if (at >= VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES)
+      return VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES;
+    /* An in-flight entry remains addressable even after closer discoveries
+     * push it outside the active frontier.  Evict the farthest non-flight
+     * entry at or after the insertion point instead.  At most alpha entries
+     * can be in flight, so a valid service lookup always has such a slot. */
+    bool found = false;
+    for (uint32_t i = VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES; i-- > at;) {
+      if (l->candidates[i].state != VCS_ZCODE_DHT_CANDIDATE_IN_FLIGHT) {
+        end = i;
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+      return VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES;
+  }
+  return end;
+}
+
 bool vcs_zcode_dht_lookup_insert(
     struct service_lookup *l, const uint8_t id[32],
     enum vcs_zcode_dht_candidate_state state, uint64_t peer_id) {
@@ -112,25 +138,9 @@ bool vcs_zcode_dht_lookup_insert(
          !vcs_zcode_dht_lookup_closer_id(id, l->candidates[at].node_id,
                                          l->target))
     at++;
-  uint32_t end = l->candidate_count;
-  if (l->candidate_count == VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES) {
-    if (at >= VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES)
-      return false;
-    /* An in-flight entry remains addressable even after closer discoveries
-     * push it outside the active frontier.  Evict the farthest non-flight
-     * entry at or after the insertion point instead.  At most alpha entries
-     * can be in flight, so a valid service lookup always has such a slot. */
-    bool found = false;
-    for (uint32_t i = VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES; i-- > at;) {
-      if (l->candidates[i].state != VCS_ZCODE_DHT_CANDIDATE_IN_FLIGHT) {
-        end = i;
-        found = true;
-        break;
-      }
-    }
-    if (!found)
-      return false;
-  }
+  uint32_t end = lookup_insert_end_index(l, at);
+  if (end == VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES)
+    return false;
   if (end > at)
     memmove(&l->candidates[at + 1], &l->candidates[at],
             (end - at) * sizeof(l->candidates[0]));
@@ -192,6 +202,57 @@ void vcs_zcode_dht_lookup_assess(struct vcs_zcode_dht_service *s,
                 : VCS_ZCODE_DHT_TERMINATION_NO_AUTHENTICATED_RESULT);
 }
 
+/* Launches one query to the first authenticated frontier candidate (not this
+ * node) with a connected peer that accepts the send; true when launched. */
+static bool lookup_launch_ready_query(struct vcs_zcode_dht_service *s,
+                                      struct service_lookup *lookup,
+                                      size_t lookup_index,
+                                      struct vcs_zcode_dht_time now) {
+  for (uint32_t i = 0; i < lookup->candidate_count; i++) {
+    if (!vcs_zcode_dht_lookup_candidate_in_frontier(lookup, i))
+      continue;
+    struct lookup_candidate *candidate = &lookup->candidates[i];
+    if (candidate->state != VCS_ZCODE_DHT_CANDIDATE_AUTHENTICATED)
+      continue;
+    if (memcmp(candidate->node_id, s->self_id, 32) == 0) {
+      candidate->state = VCS_ZCODE_DHT_CANDIDATE_RESPONDED;
+      continue;
+    }
+    struct service_peer *peer =
+        vcs_zcode_dht_lookup_peer_for_node(s, candidate->node_id);
+    if (!peer) {
+      candidate->state = VCS_ZCODE_DHT_CANDIDATE_UNREACHABLE;
+      continue;
+    }
+    bool new_round = lookup->queries_pending == 0;
+    candidate->state = VCS_ZCODE_DHT_CANDIDATE_QUERIED;
+    if (!vcs_zcode_dht_service_send_find(
+            s, peer, QUERY_LOOKUP, lookup->id, lookup->target, NULL,
+            now.monotonic_s)) {
+      candidate->state = VCS_ZCODE_DHT_CANDIDATE_FAILED;
+      continue;
+    }
+    candidate->state = VCS_ZCODE_DHT_CANDIDATE_IN_FLIGHT;
+    candidate->peer_id = peer->peer_id;
+    lookup->queries_sent++;
+    lookup->queries_pending++;
+    if (new_round) {
+      lookup->rounds++;
+      s->lookup_rounds++;
+      if (!lookup->first_query_mono) {
+        lookup->first_query_mono = now.monotonic_s;
+        if (now.monotonic_s >= lookup->started_mono)
+          s->lookup_queue_wait_s +=
+              now.monotonic_s - lookup->started_mono;
+      }
+    }
+    s->scheduler_cursor =
+        (uint32_t)((lookup_index + 1) % VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS);
+    return true;
+  }
+  return false;
+}
+
 void vcs_zcode_dht_lookup_schedule(struct vcs_zcode_dht_service *s,
                                    struct vcs_zcode_dht_time now) {
   if (!s || !s->enabled)
@@ -205,49 +266,7 @@ void vcs_zcode_dht_lookup_schedule(struct vcs_zcode_dht_service *s,
       if (!lookup->used || lookup->completed ||
           lookup->queries_pending >= VCS_ZCODE_DHT_ALPHA)
         continue;
-      for (uint32_t i = 0; i < lookup->candidate_count; i++) {
-        if (!vcs_zcode_dht_lookup_candidate_in_frontier(lookup, i))
-          continue;
-        struct lookup_candidate *candidate = &lookup->candidates[i];
-        if (candidate->state != VCS_ZCODE_DHT_CANDIDATE_AUTHENTICATED)
-          continue;
-        if (memcmp(candidate->node_id, s->self_id, 32) == 0) {
-          candidate->state = VCS_ZCODE_DHT_CANDIDATE_RESPONDED;
-          continue;
-        }
-        struct service_peer *peer =
-            vcs_zcode_dht_lookup_peer_for_node(s, candidate->node_id);
-        if (!peer) {
-          candidate->state = VCS_ZCODE_DHT_CANDIDATE_UNREACHABLE;
-          continue;
-        }
-        bool new_round = lookup->queries_pending == 0;
-        candidate->state = VCS_ZCODE_DHT_CANDIDATE_QUERIED;
-        if (!vcs_zcode_dht_service_send_find(
-                s, peer, QUERY_LOOKUP, lookup->id, lookup->target, NULL,
-                now.monotonic_s)) {
-          candidate->state = VCS_ZCODE_DHT_CANDIDATE_FAILED;
-          continue;
-        }
-        candidate->state = VCS_ZCODE_DHT_CANDIDATE_IN_FLIGHT;
-        candidate->peer_id = peer->peer_id;
-        lookup->queries_sent++;
-        lookup->queries_pending++;
-        if (new_round) {
-          lookup->rounds++;
-          s->lookup_rounds++;
-          if (!lookup->first_query_mono) {
-            lookup->first_query_mono = now.monotonic_s;
-            if (now.monotonic_s >= lookup->started_mono)
-              s->lookup_queue_wait_s +=
-                  now.monotonic_s - lookup->started_mono;
-          }
-        }
-        s->scheduler_cursor =
-            (uint32_t)((lookup_index + 1) % VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS);
-        launched = true;
-        break;
-      }
+      launched = lookup_launch_ready_query(s, lookup, lookup_index, now);
       if (launched)
         break;
       vcs_zcode_dht_lookup_assess(s, lookup);
