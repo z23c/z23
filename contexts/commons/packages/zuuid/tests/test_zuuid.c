@@ -11,6 +11,95 @@
     } \
 } while (0)
 
+/* The CLI already depends on sys/random.h; keep its fixtures Linux-only
+ * so the library tests below remain portable. */
+#ifdef __linux__
+#include <sys/random.h>
+static FILE *cli_sink, *cli_errors;
+static unsigned cli_rng_calls, cli_flushes;
+static ssize_t cli_random(void *buf, size_t n, unsigned flags)
+{
+    (void)flags;
+    memset(buf, 0, n);
+    cli_rng_calls++;
+    return (ssize_t)n;
+}
+static int cli_puts(const char *s)
+{
+    return fputs(s, cli_sink) == EOF ? EOF : fputc('\n', cli_sink);
+}
+[[maybe_unused]] static int cli_flush(FILE *f) { cli_flushes++; return fflush(f); }
+#undef stdout
+#undef stderr
+#define stdout cli_sink
+#define stderr cli_errors
+#define puts cli_puts
+#define fflush cli_flush
+#define getrandom cli_random
+#define main zuuid_cli_main
+#include "../app/main.c"
+#undef main
+#undef getrandom
+#undef fflush
+#undef puts
+#undef stderr
+#undef stdout
+
+static void cli_verify(FILE *sink, FILE *errors, const char *want, unsigned kind)
+{
+    if (kind == 0) {
+        char actual[128] = {0}; rewind(sink);
+        CHECK(fread(actual, 1, sizeof actual - 1, sink) == strlen(want));
+        CHECK(strcmp(actual, want) == 0);
+    } else {
+        char message[128] = {0}; rewind(errors);
+        CHECK(ferror(sink));
+        CHECK(fread(message, 1, sizeof message - 1, errors) > 0);
+        CHECK(strstr(message, "zuuid: write error"));
+    }
+}
+
+static FILE *cli_open_sink(unsigned kind)
+{
+    if (kind == 0) return tmpfile();
+    return fopen(kind == 1 ? "/dev/null" : "/dev/full", kind == 1 ? "r" : "w");
+}
+
+static void test_cli_output(void)
+{
+    static const char *ops[] = {"nil", "parse", "new"};
+    static const char *want[] = {
+        "00000000-0000-0000-0000-000000000000\n",
+        "f81d4fae-7dec-11d0-a765-00a0c91e6bf6\n",
+        "00000000-0000-4000-8000-000000000000\n"
+        "00000000-0000-4000-8000-000000000000\n"
+        "00000000-0000-4000-8000-000000000000\n"
+    };
+    for (unsigned op = 0; op < 3; op++) {
+        for (unsigned step = 0; step < 3; step++) {
+            unsigned kind = (step + 1) % 3;
+            FILE *sink = cli_open_sink(kind);
+            FILE *errors = tmpfile();
+            CHECK(sink && errors);
+            char buffer[4096];
+            if (kind == 2) { CHECK(setvbuf(sink, buffer, _IOFBF, sizeof buffer) == 0); }
+            cli_sink = sink; cli_errors = errors;
+            cli_rng_calls = cli_flushes = 0;
+            char *args[] = {"zuuid", (char *)ops[op],
+                op == 1 ? "F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6" : "3", NULL};
+            if (op == 0) args[2] = NULL;
+            CHECK(zuuid_cli_main(op == 0 ? 2 : 3, args) == (kind ? 1 : 0));
+            CHECK(cli_rng_calls == (op == 2 ? (kind == 1 ? 1u : 3u) : 0u));
+            CHECK(cli_flushes == (kind == 1 ? 0u : 1u));
+            cli_verify(sink, errors, want[op], kind);
+            CHECK(fclose(errors) == 0);
+            if (kind == 0) { CHECK(fclose(sink) == 0); }
+            else (void)fclose(sink);
+        }
+    }
+}
+#endif
+
 static void test_nil(void)
 {
     zuuid n = zuuid_nil();
@@ -207,6 +296,9 @@ static void test_err_str(void)
 
 int main(void)
 {
+#ifdef __linux__
+    test_cli_output();
+#endif
     test_nil();
     test_parse_strict();
     test_parse_lenient();

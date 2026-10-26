@@ -33,6 +33,30 @@ static int os_rng(void *ctx, uint8_t *buf, size_t n)
     return 0;
 }
 
+static int write_line(const char *s)
+{
+    if (puts(s) == EOF) {
+        fprintf(stderr, "zuuid: write error\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int finish_output(void)
+{
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        fprintf(stderr, "zuuid: write error\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int write_single_line(const char *s)
+{
+    if (write_line(s)) return 1;
+    return finish_output();
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -44,8 +68,7 @@ int main(int argc, char **argv)
         zuuid n = zuuid_nil();
         char s[ZUUID_STR_LEN];
         zuuid_format(&n, s);
-        puts(s);
-        return 0;
+        return write_single_line(s);
     }
 
     if (strcmp(argv[1], "new") == 0) {
@@ -66,9 +89,9 @@ int main(int argc, char **argv)
             }
             char s[ZUUID_STR_LEN];
             zuuid_format(&u, s);
-            puts(s);
+            if (write_line(s)) return 1;
         }
-        return 0;
+        return finish_output();
     }
 
     if (strcmp(argv[1], "parse") == 0) {
@@ -84,8 +107,7 @@ int main(int argc, char **argv)
         }
         char s[ZUUID_STR_LEN];
         zuuid_format(&u, s);
-        puts(s);
-        return 0;
+        return write_single_line(s);
     }
 
     fprintf(stderr, "usage: zuuid <new [count]|parse <text>|nil>\n");
