@@ -160,6 +160,477 @@ static void pdf_make_sprout_tx(struct transaction *tx, uint16_t tag)
     transaction_compute_hash(tx);
 }
 
+/* Relay-path fixture shared by the NOT SCORED / STILL BOUNDED cases: a
+ * mempool over an empty coin view, the net manager the processor reports
+ * into, and a non-localhost peer the processor charges. */
+struct pdf_relay_fixture {
+    struct tx_mempool pool;
+    struct coins_view null_view;
+    struct coins_view_cache coins;
+    struct net_manager nm;
+    struct p2p_node node;
+    struct msg_processor mp;
+};
+
+/* Build one relay-path fixture around `ms` / `cp` with a peer named
+ * `peer_name`. */
+static void pdf_relay_fixture_init(struct pdf_relay_fixture *fx,
+                                   const struct chain_params *cp,
+                                   struct main_state *ms,
+                                   const char *peer_name)
+{
+    tx_mempool_init(&fx->pool, 0);
+    memset(&fx->null_view, 0, sizeof(fx->null_view));
+    coins_view_cache_init(&fx->coins, &fx->null_view);
+    memset(&fx->nm, 0, sizeof(fx->nm));
+    pdf_setup_node(&fx->node, peer_name);
+
+    fx->mp = (struct msg_processor){0};
+    fx->mp.mempool = &fx->pool;
+    fx->mp.coins_tip = &fx->coins;
+    fx->mp.main_state = ms;
+    fx->mp.params = cp;
+    fx->mp.net_mgr = &fx->nm;
+}
+
+/* Tear a relay-path fixture down again. */
+static void pdf_relay_fixture_free(struct pdf_relay_fixture *fx)
+{
+    coins_view_cache_free(&fx->coins);
+    tx_mempool_free(&fx->pool);
+}
+
+/* Report one relay-path outcome: the accept result must be `expected`, the
+ * mempool must still be empty, and the peer's ban-score must be exactly
+ * `expected_score`. Returns the failure count for this check. */
+static int pdf_check_relay_outcome(enum tx_accept_result ar,
+                                   enum tx_accept_result expected,
+                                   struct pdf_relay_fixture *fx,
+                                   int expected_score)
+{
+    int failures = 0;
+
+    bool ok = (ar == expected);
+    ok = ok && (tx_mempool_size(&fx->pool) == 0);
+    ok = ok && (atomic_load(&fx->node.misbehavior) == expected_score);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (ar=%d size=%zu score=%d)\n", (int)ar,
+               tx_mempool_size(&fx->pool), atomic_load(&fx->node.misbehavior));
+        failures++;
+    }
+    return failures;
+}
+
+/* Stage one "block" frame of declared `size` through the header and data
+ * reads; *hn and *dn receive the two return codes. */
+static void pdf_stage_block_frame(struct net_message *msg,
+                                  const unsigned char *magic, uint32_t size,
+                                  int *hn, int *dn)
+{
+    struct msg_header hdr;
+    msg_header_init_full(&hdr, magic, "block", size);
+
+    *hn = net_message_read_header(msg, (const char *)&hdr,
+                                  MSG_HEADER_SIZE);
+    unsigned char payload[256];
+    memset(payload, 0x00, sizeof(payload));
+    *dn = net_message_read_data(msg, (const char *)payload,
+                                sizeof(payload));
+}
+
+/* Case 1, first half: with no verifying keys installed, the same shielded
+ * transaction reports UNVERIFIABLE and the bool wrapper still answers
+ * false. */
+static int pdf_case_no_keys_unverifiable(const struct consensus_params *consensus,
+                                         int sap_height, bool had_params)
+{
+    int failures = 0;
+
+    if (had_params)
+        sapling_free_params();
+
+    struct transaction tx;
+    pdf_make_shielded_tx(&tx, sap_height, 0x01);
+
+    struct validation_state st;
+    validation_state_init(&st);
+    enum contextual_check_verdict v =
+        contextual_check_transaction_verdict(&tx, &st, consensus,
+                                             sap_height, 100);
+
+    /* And the bool wrapper must STILL say false: unverifiable is not
+     * an acceptance. This is the no-weakening half of case 1. */
+    struct validation_state st2;
+    validation_state_init(&st2);
+    bool accepted = contextual_check_transaction(&tx, &st2, consensus,
+                                                 sap_height, 100);
+
+    bool ok = (v == CONTEXTUAL_CHECK_UNVERIFIABLE) && !accepted &&
+              (st.dos == 0);
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (verdict=%d accepted=%d dos=%d reason=%s)\n",
+               (int)v, (int)accepted, st.dos, st.reject_reason);
+        failures++;
+    }
+    transaction_free(&tx);
+    return failures;
+}
+
+/* Case 1, second half: with verifying keys installed, the forged proof is
+ * the sender's fault and must be a genuine REJECT. */
+static int pdf_case_keys_present_reject(const struct consensus_params *consensus,
+                                        int sap_height)
+{
+    int failures = 0;
+    bool installed = sapling_install_embedded_vks();
+    if (!installed) {
+        /* No key material available in this build at all — the
+         * distinction under test cannot be exercised. Say so rather
+         * than passing vacuously. */
+        printf("FAIL (no embedded verifying keys to install)\n");
+        failures++;
+    } else {
+        struct transaction tx;
+        pdf_make_shielded_tx(&tx, sap_height, 0x02);
+
+        struct validation_state st;
+        validation_state_init(&st);
+        enum contextual_check_verdict v =
+            contextual_check_transaction_verdict(&tx, &st, consensus,
+                                                 sap_height, 100);
+        bool accepted = contextual_check_transaction(&tx, &st, consensus,
+                                                     sap_height, 100);
+
+        /* A forged proof is the SENDER's fault: REJECT, full DoS
+         * score, and still not accepted. */
+        bool ok = (v == CONTEXTUAL_CHECK_REJECT) && !accepted;
+        if (ok) printf("OK\n");
+        else {
+            printf("FAIL (verdict=%d accepted=%d reason=%s)\n",
+                   (int)v, (int)accepted, st.reject_reason);
+            failures++;
+        }
+        transaction_free(&tx);
+    }
+    return failures;
+}
+
+/* Case 2, first half: a shielded transaction that is structurally wrong for
+ * its height is still a REJECT with no verifying keys installed. */
+static int pdf_case_structural_invalid_still_reject(
+    const struct consensus_params *consensus, int sap_height)
+{
+    int failures = 0;
+    sapling_free_params();
+
+    struct transaction tx;
+    /* Sapling-versioned, but presented at height 1 where Sapling is
+     * not active: rejected by the structural rules regardless of any
+     * proof. */
+    pdf_make_shielded_tx(&tx, sap_height, 0x03);
+
+    struct validation_state st;
+    validation_state_init(&st);
+    enum contextual_check_verdict v =
+        contextual_check_transaction_verdict(&tx, &st, consensus, 1, 100);
+
+    bool ok = (v == CONTEXTUAL_CHECK_REJECT);
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (verdict=%d reason=%s)\n", (int)v, st.reject_reason);
+        failures++;
+    }
+    transaction_free(&tx);
+    return failures;
+}
+
+/* Case 2, second half: a transparent transaction needs no verifying keys,
+ * so the availability gate must never fire for it. */
+static int pdf_case_transparent_never_unverifiable(
+    const struct consensus_params *consensus, int sap_height)
+{
+    int failures = 0;
+    /* Keys still absent. A transaction with no shielded components
+     * needs none, so the gate must not fire for it. */
+    struct transaction tx;
+    transaction_init(&tx);
+    transaction_alloc(&tx, 1, 1);
+    tx.overwintered = true;
+    tx.version = SAPLING_TX_VERSION;
+    tx.version_group_id = SAPLING_VERSION_GROUP_ID;
+    tx.expiry_height = (uint32_t)(sap_height + 100);
+    memset(tx.vin[0].prevout.hash.data, 0x11, 32);
+    tx.vin[0].prevout.n = 0;
+    tx.vin[0].sequence = 0xFFFFFFFF;
+    tx.vin[0].script_sig.size = 0;
+    tx.vout[0].value = COIN;
+    tx.vout[0].script_pub_key.size = 0;
+    transaction_compute_hash(&tx);
+
+    struct validation_state st;
+    validation_state_init(&st);
+    enum contextual_check_verdict v =
+        contextual_check_transaction_verdict(&tx, &st, consensus,
+                                             sap_height, 100);
+    bool unverifiable_claimed =
+        contextual_check_tx_proofs_unverifiable(&tx, sap_height);
+
+    bool ok = (v != CONTEXTUAL_CHECK_UNVERIFIABLE) && !unverifiable_claimed;
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (verdict=%d predicate=%d)\n",
+               (int)v, (int)unverifiable_claimed);
+        failures++;
+    }
+    transaction_free(&tx);
+    return failures;
+}
+
+/* Case 3, first half: a genuinely invalid transaction is rejected AND
+ * scored at the relay path. */
+static int pdf_case_invalid_tx_scored(const struct chain_params *cp,
+                                      struct main_state *ms)
+{
+    sapling_free_params();
+
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_guilty");
+
+    /* Forbidden negative output value — unambiguously the sender's
+     * doing, and nothing to do with proof verification. */
+    struct transaction tx;
+    transaction_init(&tx);
+    transaction_alloc(&tx, 1, 1);
+    memset(tx.vin[0].prevout.hash.data, 0xAA, 32);
+    tx.vin[0].prevout.n = 0;
+    tx.vin[0].sequence = 0xFFFFFFFF;
+    tx.vout[0].value = -1;
+    transaction_compute_hash(&tx);
+
+    enum tx_accept_result ar = msg_tx_accept(&fx.mp, &fx.node, &tx);
+
+    int failures = pdf_check_relay_outcome(
+        ar, TX_ACCEPT_INVALID, &fx,
+        peer_offence_weight(PEER_OFFENCE_INVALID_MESSAGE));
+
+    transaction_free(&tx);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Case 3, second half: a valid-shaped shielded transaction we cannot verify
+ * is rejected but NOT scored. */
+static int pdf_case_unverifiable_tx_not_scored(const struct chain_params *cp,
+                                               struct main_state *ms)
+{
+    sapling_free_params();
+
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_innocent");
+
+    /* A Sprout JoinSplit: structurally fine at the fixture's tip, so the
+     * only thing standing in the way is our absent verifying keys. */
+    struct transaction tx;
+    pdf_make_sprout_tx(&tx, 0x10);
+
+    enum tx_accept_result ar = msg_tx_accept(&fx.mp, &fx.node, &tx);
+
+    /* Rejected (never relayed, never in the mempool) but the sender
+     * pays nothing for our missing keys. */
+    int failures = pdf_check_relay_outcome(ar, TX_ACCEPT_UNVERIFIABLE, &fx,
+                                           0);
+
+    transaction_free(&tx);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Case 4: an unverifiable flood stays unscored only up to the per-peer
+ * window cap; past it the volume itself is scored. */
+static int pdf_case_unverifiable_flood_bounded(const struct chain_params *cp,
+                                               struct main_state *ms)
+{
+    int failures = 0;
+    sapling_free_params();
+
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_flooder");
+
+    bool all_unverifiable = true;
+    int score_at_cap = -1;
+
+    for (unsigned i = 0; i <= TX_UNVERIFIABLE_WINDOW_MAX; i++) {
+        struct transaction tx;
+        pdf_make_sprout_tx(&tx, (uint16_t)i);
+
+        enum tx_accept_result ar = msg_tx_accept(&fx.mp, &fx.node, &tx);
+        if (ar != TX_ACCEPT_UNVERIFIABLE)
+            all_unverifiable = false;
+
+        /* Everything up to and including the cap stays unscored. */
+        if (i + 1 == TX_UNVERIFIABLE_WINDOW_MAX)
+            score_at_cap = atomic_load(&fx.node.misbehavior);
+
+        transaction_free(&tx);
+    }
+
+    int final_score = atomic_load(&fx.node.misbehavior);
+    bool ok = all_unverifiable;
+    ok = ok && (score_at_cap == 0);   /* honest volume stays free */
+    ok = ok && (final_score > 0);     /* past the cap it is not */
+    ok = ok && (tx_mempool_size(&fx.pool) == 0);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (all_unv=%d at_cap=%d final=%d size=%zu)\n",
+               (int)all_unverifiable, score_at_cap, final_score,
+               tx_mempool_size(&fx.pool));
+        failures++;
+    }
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Case 5, first half: a legal message we cannot afford to stage is refused
+ * but not charged to the peer. */
+static int pdf_case_framing_unaffordable_not_scored(
+    const struct chain_params *cp)
+{
+    int failures = 0;
+    /* Squeeze the process-wide budget so an ordinary message cannot be
+     * staged. Nothing about the peer's bytes changes. */
+    setenv("ZCL_MAX_RECVBUFFER_TOTAL_BYTES", "1024", 1);
+
+    struct net_manager nm;
+    memset(&nm, 0, sizeof(nm));
+    struct p2p_node node;
+    pdf_setup_node(&node, "pdf_squeezed");
+
+    const unsigned char *magic = cp->pchMessageStart;
+    struct net_message msg;
+    net_message_init(&msg, magic);
+
+    /* 64 KiB: comfortably legal on the wire (the protocol cap is 2 MB),
+     * but far over the 1 KiB budget we just imposed on ourselves. */
+    int hn, dn;
+    pdf_stage_block_frame(&msg, magic, 65536, &hn, &dn);
+
+    /* Refused (the resource bound still holds) but attributed to us. */
+    bool ok = (hn == (int)MSG_HEADER_SIZE);
+    ok = ok && (dn == NET_FRAME_ERR_LOCAL);
+    ok = ok && (atomic_load(&node.framing_offence) ==
+                (int)PEER_OFFENCE_NONE);
+
+    p2p_node_score_framing_offence(&nm, &node);
+    ok = ok && (atomic_load(&node.misbehavior) == 0);
+
+    net_message_free(&msg);
+    unsetenv("ZCL_MAX_RECVBUFFER_TOTAL_BYTES");
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (hn=%d dn=%d offence=%d score=%d)\n", hn, dn,
+               atomic_load(&node.framing_offence),
+               atomic_load(&node.misbehavior));
+        failures++;
+    }
+    return failures;
+}
+
+/* Case 5, second half: an over-the-protocol-cap message is refused AND
+ * scored, because the declared size is the peer's doing. */
+static int pdf_case_framing_over_cap_scored(const struct chain_params *cp)
+{
+    int failures = 0;
+    /* Budget restored to its default. The only thing wrong now is the
+     * peer's declared size, which IS the peer's doing. */
+    struct net_message msg;
+    const unsigned char *magic = cp->pchMessageStart;
+    net_message_init(&msg, magic);
+
+    int hn, dn;
+    pdf_stage_block_frame(&msg, magic, 3u * 1024 * 1024, &hn, &dn);
+
+    bool ok = (hn == (int)MSG_HEADER_SIZE);
+    ok = ok && (dn == NET_FRAME_ERR_PEER);
+
+    net_message_free(&msg);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (hn=%d dn=%d)\n", hn, dn);
+        failures++;
+    }
+    return failures;
+}
+
+/* Case 6: no production path may map a wall-clock deadline onto ban-score,
+ * while a genuinely forged header still does score. */
+static int pdf_case_timeout_never_scored(void)
+{
+    int failures = 0;
+    /* Honest about its own reach: driving the real span scheduler to a
+     * timeout needs a live msg_processor, a claimed span and a wound-on
+     * clock, which this fixture does not build. What IS checkable here,
+     * is a source
+     * invariant: no production file may pair PEER_OFFENCE_TIMEOUT with
+     * peer_scoring_record. If someone reintroduces "you were slow, have
+     * some ban-score" anywhere, this fails.
+     *
+     * The enum itself deliberately stays — removing it would just push
+     * the next author to reach for a different offence for the same
+     * bad reason. */
+    /* Two counts from ONE search root. `sentinel` must be non-zero:
+     * it proves the search actually reached the source tree. Without
+     * it, running from a different working directory would make grep
+     * match nothing, `hits` would read 0, and this case would pass
+     * while checking absolutely nothing. */
+    int sentinel = -1, hits = -1;
+    FILE *fs = popen(
+        "grep -rl 'peer_scoring_record' --include=*.c "
+        "core/modules/net/src 2>/dev/null | wc -l", "r");
+    if (fs) {
+        if (fscanf(fs, "%d", &sentinel) != 1)
+            sentinel = -1;
+        pclose(fs);
+    }
+    FILE *f = popen(
+        "grep -rn 'PEER_OFFENCE_TIMEOUT' --include=*.c "
+        "core/modules/net/src engine/services/src engine/composition/src 2>/dev/null "
+        "| grep 'peer_scoring_record' | wc -l", "r");
+    if (f) {
+        if (fscanf(f, "%d", &hits) != 1)
+            hits = -1;
+        pclose(f);
+    }
+
+    struct net_manager nm;
+    memset(&nm, 0, sizeof(nm));
+    struct p2p_node node;
+    pdf_setup_node(&node, "pdf_slow_hdd");
+    /* A genuinely forged header must still bite, so "slow is free"
+     * cannot be mistaken for "headers are unpoliced". */
+    peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_HEADER,
+                        "forged header");
+    bool genuine_still_scores = (atomic_load(&node.misbehavior) > 0);
+
+    /* sentinel > 0 proves we could see the tree; hits == 0 is the
+     * property under test. A wrong cwd fails here rather than
+     * reporting an unearned pass. */
+    bool ok = (sentinel > 0) && (hits == 0) && genuine_still_scores;
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (sentinel=%d timeout_scoring_sites=%d "
+               "genuine_scores=%d)\n",
+               sentinel, hits, (int)genuine_still_scores);
+        failures++;
+    }
+    return failures;
+}
+
 int test_peer_dos_fairness(void)
 {
     int failures = 0;
@@ -177,70 +648,11 @@ int test_peer_dos_fairness(void)
      * 1. THE TYPE — same transaction, two different reasons for `false`.
      * ================================================================ */
     printf("shielded tx + no verifying keys -> UNVERIFIABLE (not rejected as invalid)... ");
-    {
-        if (had_params)
-            sapling_free_params();
-
-        struct transaction tx;
-        pdf_make_shielded_tx(&tx, sap_height, 0x01);
-
-        struct validation_state st;
-        validation_state_init(&st);
-        enum contextual_check_verdict v =
-            contextual_check_transaction_verdict(&tx, &st, consensus,
-                                                 sap_height, 100);
-
-        /* And the bool wrapper must STILL say false: unverifiable is not
-         * an acceptance. This is the no-weakening half of case 1. */
-        struct validation_state st2;
-        validation_state_init(&st2);
-        bool accepted = contextual_check_transaction(&tx, &st2, consensus,
-                                                     sap_height, 100);
-
-        bool ok = (v == CONTEXTUAL_CHECK_UNVERIFIABLE) && !accepted &&
-                  (st.dos == 0);
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (verdict=%d accepted=%d dos=%d reason=%s)\n",
-                   (int)v, (int)accepted, st.dos, st.reject_reason);
-            failures++;
-        }
-        transaction_free(&tx);
-    }
+    failures += pdf_case_no_keys_unverifiable(consensus, sap_height,
+                                              had_params);
 
     printf("shielded tx + verifying keys present -> genuine REJECT... ");
-    {
-        bool installed = sapling_install_embedded_vks();
-        if (!installed) {
-            /* No key material available in this build at all — the
-             * distinction under test cannot be exercised. Say so rather
-             * than passing vacuously. */
-            printf("FAIL (no embedded verifying keys to install)\n");
-            failures++;
-        } else {
-            struct transaction tx;
-            pdf_make_shielded_tx(&tx, sap_height, 0x02);
-
-            struct validation_state st;
-            validation_state_init(&st);
-            enum contextual_check_verdict v =
-                contextual_check_transaction_verdict(&tx, &st, consensus,
-                                                     sap_height, 100);
-            bool accepted = contextual_check_transaction(&tx, &st, consensus,
-                                                         sap_height, 100);
-
-            /* A forged proof is the SENDER's fault: REJECT, full DoS
-             * score, and still not accepted. */
-            bool ok = (v == CONTEXTUAL_CHECK_REJECT) && !accepted;
-            if (ok) printf("OK\n");
-            else {
-                printf("FAIL (verdict=%d accepted=%d reason=%s)\n",
-                       (int)v, (int)accepted, st.reject_reason);
-                failures++;
-            }
-            transaction_free(&tx);
-        }
-    }
+    failures += pdf_case_keys_present_reject(consensus, sap_height);
 
     /* ================================================================
      * 2. NOT WEAKENED — the availability gate must not swallow a verdict
@@ -249,65 +661,12 @@ int test_peer_dos_fairness(void)
      *    no verifying keys, because the structural rules run first.
      * ================================================================ */
     printf("structurally invalid shielded tx + no keys -> still REJECT... ");
-    {
-        sapling_free_params();
-
-        struct transaction tx;
-        /* Sapling-versioned, but presented at height 1 where Sapling is
-         * not active: rejected by the structural rules regardless of any
-         * proof. */
-        pdf_make_shielded_tx(&tx, sap_height, 0x03);
-
-        struct validation_state st;
-        validation_state_init(&st);
-        enum contextual_check_verdict v =
-            contextual_check_transaction_verdict(&tx, &st, consensus, 1, 100);
-
-        bool ok = (v == CONTEXTUAL_CHECK_REJECT);
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (verdict=%d reason=%s)\n", (int)v, st.reject_reason);
-            failures++;
-        }
-        transaction_free(&tx);
-    }
+    failures += pdf_case_structural_invalid_still_reject(consensus,
+                                                         sap_height);
 
     printf("transparent tx never reports UNVERIFIABLE... ");
-    {
-        /* Keys still absent. A transaction with no shielded components
-         * needs none, so the gate must not fire for it. */
-        struct transaction tx;
-        transaction_init(&tx);
-        transaction_alloc(&tx, 1, 1);
-        tx.overwintered = true;
-        tx.version = SAPLING_TX_VERSION;
-        tx.version_group_id = SAPLING_VERSION_GROUP_ID;
-        tx.expiry_height = (uint32_t)(sap_height + 100);
-        memset(tx.vin[0].prevout.hash.data, 0x11, 32);
-        tx.vin[0].prevout.n = 0;
-        tx.vin[0].sequence = 0xFFFFFFFF;
-        tx.vin[0].script_sig.size = 0;
-        tx.vout[0].value = COIN;
-        tx.vout[0].script_pub_key.size = 0;
-        transaction_compute_hash(&tx);
-
-        struct validation_state st;
-        validation_state_init(&st);
-        enum contextual_check_verdict v =
-            contextual_check_transaction_verdict(&tx, &st, consensus,
-                                                 sap_height, 100);
-        bool unverifiable_claimed =
-            contextual_check_tx_proofs_unverifiable(&tx, sap_height);
-
-        bool ok = (v != CONTEXTUAL_CHECK_UNVERIFIABLE) && !unverifiable_claimed;
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (verdict=%d predicate=%d)\n",
-                   (int)v, (int)unverifiable_claimed);
-            failures++;
-        }
-        transaction_free(&tx);
-    }
+    failures += pdf_case_transparent_never_unverifiable(consensus,
+                                                        sap_height);
 
     /* ================================================================
      * 3. NOT SCORED — the relay path. Two peers, same node, same message
@@ -322,101 +681,10 @@ int test_peer_dos_fairness(void)
     main_state_init(&pdf_main_state);
 
     printf("genuinely invalid tx -> rejected AND scored... ");
-    {
-        sapling_free_params();
-
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-        struct net_manager nm;
-        memset(&nm, 0, sizeof(nm));
-        struct p2p_node node;
-        pdf_setup_node(&node, "pdf_guilty");
-
-        struct msg_processor mp = {0};
-        mp.mempool = &pool;
-        mp.coins_tip = &coins;
-        mp.main_state = &pdf_main_state;
-        mp.params = cp;
-        mp.net_mgr = &nm;
-
-        /* Forbidden negative output value — unambiguously the sender's
-         * doing, and nothing to do with proof verification. */
-        struct transaction tx;
-        transaction_init(&tx);
-        transaction_alloc(&tx, 1, 1);
-        memset(tx.vin[0].prevout.hash.data, 0xAA, 32);
-        tx.vin[0].prevout.n = 0;
-        tx.vin[0].sequence = 0xFFFFFFFF;
-        tx.vout[0].value = -1;
-        transaction_compute_hash(&tx);
-
-        enum tx_accept_result ar = msg_tx_accept(&mp, &node, &tx);
-
-        bool ok = (ar == TX_ACCEPT_INVALID);
-        ok = ok && (tx_mempool_size(&pool) == 0);
-        ok = ok && (atomic_load(&node.misbehavior) ==
-                    peer_offence_weight(PEER_OFFENCE_INVALID_MESSAGE));
-
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (ar=%d size=%zu score=%d)\n", (int)ar,
-                   tx_mempool_size(&pool), atomic_load(&node.misbehavior));
-            failures++;
-        }
-        transaction_free(&tx);
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-    }
+    failures += pdf_case_invalid_tx_scored(cp, &pdf_main_state);
 
     printf("valid-shaped shielded tx we cannot verify -> rejected, NOT scored... ");
-    {
-        sapling_free_params();
-
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-        struct net_manager nm;
-        memset(&nm, 0, sizeof(nm));
-        struct p2p_node node;
-        pdf_setup_node(&node, "pdf_innocent");
-
-        struct msg_processor mp = {0};
-        mp.mempool = &pool;
-        mp.coins_tip = &coins;
-        mp.main_state = &pdf_main_state;
-        mp.params = cp;
-        mp.net_mgr = &nm;
-
-        /* A Sprout JoinSplit: structurally fine at the fixture's tip, so the
-         * only thing standing in the way is our absent verifying keys. */
-        struct transaction tx;
-        pdf_make_sprout_tx(&tx, 0x10);
-
-        enum tx_accept_result ar = msg_tx_accept(&mp, &node, &tx);
-
-        /* Rejected (never relayed, never in the mempool) but the sender
-         * pays nothing for our missing keys. */
-        bool ok = (ar == TX_ACCEPT_UNVERIFIABLE);
-        ok = ok && (tx_mempool_size(&pool) == 0);
-        ok = ok && (atomic_load(&node.misbehavior) == 0);
-
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (ar=%d size=%zu score=%d)\n", (int)ar,
-                   tx_mempool_size(&pool), atomic_load(&node.misbehavior));
-            failures++;
-        }
-        transaction_free(&tx);
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-    }
+    failures += pdf_case_unverifiable_tx_not_scored(cp, &pdf_main_state);
 
     /* ================================================================
      * 4. STILL BOUNDED — the inverse risk. If "we could not verify it"
@@ -425,61 +693,7 @@ int test_peer_dos_fairness(void)
      *    window cap the volume itself is scored.
      * ================================================================ */
     printf("unverifiable flood is bounded by the per-peer rate cap... ");
-    {
-        sapling_free_params();
-
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-        struct net_manager nm;
-        memset(&nm, 0, sizeof(nm));
-        struct p2p_node node;
-        pdf_setup_node(&node, "pdf_flooder");
-
-        struct msg_processor mp = {0};
-        mp.mempool = &pool;
-        mp.coins_tip = &coins;
-        mp.main_state = &pdf_main_state;
-        mp.params = cp;
-        mp.net_mgr = &nm;
-
-        bool all_unverifiable = true;
-        int score_at_cap = -1;
-
-        for (unsigned i = 0; i <= TX_UNVERIFIABLE_WINDOW_MAX; i++) {
-            struct transaction tx;
-            pdf_make_sprout_tx(&tx, (uint16_t)i);
-
-            enum tx_accept_result ar = msg_tx_accept(&mp, &node, &tx);
-            if (ar != TX_ACCEPT_UNVERIFIABLE)
-                all_unverifiable = false;
-
-            /* Everything up to and including the cap stays unscored. */
-            if (i + 1 == TX_UNVERIFIABLE_WINDOW_MAX)
-                score_at_cap = atomic_load(&node.misbehavior);
-
-            transaction_free(&tx);
-        }
-
-        int final_score = atomic_load(&node.misbehavior);
-        bool ok = all_unverifiable;
-        ok = ok && (score_at_cap == 0);   /* honest volume stays free */
-        ok = ok && (final_score > 0);     /* past the cap it is not */
-        ok = ok && (tx_mempool_size(&pool) == 0);
-
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (all_unv=%d at_cap=%d final=%d size=%zu)\n",
-                   (int)all_unverifiable, score_at_cap, final_score,
-                   tx_mempool_size(&pool));
-            failures++;
-        }
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-    }
+    failures += pdf_case_unverifiable_flood_bounded(cp, &pdf_main_state);
 
     /* ================================================================
      * 5. FRAMING LAYER. net_message_read_data refuses a frame for three
@@ -491,82 +705,10 @@ int test_peer_dos_fairness(void)
      *    over-the-protocol-cap must still score.
      * ================================================================ */
     printf("framing: legal message we cannot afford -> refused, NOT scored... ");
-    {
-        /* Squeeze the process-wide budget so an ordinary message cannot be
-         * staged. Nothing about the peer's bytes changes. */
-        setenv("ZCL_MAX_RECVBUFFER_TOTAL_BYTES", "1024", 1);
-
-        struct net_manager nm;
-        memset(&nm, 0, sizeof(nm));
-        struct p2p_node node;
-        pdf_setup_node(&node, "pdf_squeezed");
-
-        const unsigned char *magic = cp->pchMessageStart;
-        struct net_message msg;
-        net_message_init(&msg, magic);
-
-        struct msg_header hdr;
-        /* 64 KiB: comfortably legal on the wire (the protocol cap is 2 MB),
-         * but far over the 1 KiB budget we just imposed on ourselves. */
-        msg_header_init_full(&hdr, magic, "block", 65536);
-
-        int hn = net_message_read_header(&msg, (const char *)&hdr,
-                                         MSG_HEADER_SIZE);
-        unsigned char payload[256];
-        memset(payload, 0x00, sizeof(payload));
-        int dn = net_message_read_data(&msg, (const char *)payload,
-                                       sizeof(payload));
-
-        /* Refused (the resource bound still holds) but attributed to us. */
-        bool ok = (hn == (int)MSG_HEADER_SIZE);
-        ok = ok && (dn == NET_FRAME_ERR_LOCAL);
-        ok = ok && (atomic_load(&node.framing_offence) ==
-                    (int)PEER_OFFENCE_NONE);
-
-        p2p_node_score_framing_offence(&nm, &node);
-        ok = ok && (atomic_load(&node.misbehavior) == 0);
-
-        net_message_free(&msg);
-        unsetenv("ZCL_MAX_RECVBUFFER_TOTAL_BYTES");
-
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (hn=%d dn=%d offence=%d score=%d)\n", hn, dn,
-                   atomic_load(&node.framing_offence),
-                   atomic_load(&node.misbehavior));
-            failures++;
-        }
-    }
+    failures += pdf_case_framing_unaffordable_not_scored(cp);
 
     printf("framing: over-the-protocol-cap message -> still refused AND scored... ");
-    {
-        /* Budget restored to its default. The only thing wrong now is the
-         * peer's declared size, which IS the peer's doing. */
-        struct net_message msg;
-        const unsigned char *magic = cp->pchMessageStart;
-        net_message_init(&msg, magic);
-
-        struct msg_header hdr;
-        msg_header_init_full(&hdr, magic, "block", 3u * 1024 * 1024);
-
-        int hn = net_message_read_header(&msg, (const char *)&hdr,
-                                         MSG_HEADER_SIZE);
-        unsigned char payload[256];
-        memset(payload, 0x00, sizeof(payload));
-        int dn = net_message_read_data(&msg, (const char *)payload,
-                                       sizeof(payload));
-
-        bool ok = (hn == (int)MSG_HEADER_SIZE);
-        ok = ok && (dn == NET_FRAME_ERR_PEER);
-
-        net_message_free(&msg);
-
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (hn=%d dn=%d)\n", hn, dn);
-            failures++;
-        }
-    }
+    failures += pdf_case_framing_over_cap_scored(cp);
 
     /* ================================================================
      * 6. SLOWNESS IS NOT MISBEHAVIOUR. A missed wall-clock span deadline is an
@@ -575,64 +717,7 @@ int test_peer_dos_fairness(void)
      *    score the peer.
      * ================================================================ */
     printf("no production path maps a wall-clock deadline onto ban-score... ");
-    {
-        /* Honest about its own reach: driving the real span scheduler to a
-         * timeout needs a live msg_processor, a claimed span and a wound-on
-         * clock, which this fixture does not build. What IS checkable here,
-         * is a source
-         * invariant: no production file may pair PEER_OFFENCE_TIMEOUT with
-         * peer_scoring_record. If someone reintroduces "you were slow, have
-         * some ban-score" anywhere, this fails.
-         *
-         * The enum itself deliberately stays — removing it would just push
-         * the next author to reach for a different offence for the same
-         * bad reason. */
-        /* Two counts from ONE search root. `sentinel` must be non-zero:
-         * it proves the search actually reached the source tree. Without
-         * it, running from a different working directory would make grep
-         * match nothing, `hits` would read 0, and this case would pass
-         * while checking absolutely nothing. */
-        int sentinel = -1, hits = -1;
-        FILE *fs = popen(
-            "grep -rl 'peer_scoring_record' --include=*.c "
-            "core/modules/net/src 2>/dev/null | wc -l", "r");
-        if (fs) {
-            if (fscanf(fs, "%d", &sentinel) != 1)
-                sentinel = -1;
-            pclose(fs);
-        }
-        FILE *f = popen(
-            "grep -rn 'PEER_OFFENCE_TIMEOUT' --include=*.c "
-            "core/modules/net/src engine/services/src engine/composition/src 2>/dev/null "
-            "| grep 'peer_scoring_record' | wc -l", "r");
-        if (f) {
-            if (fscanf(f, "%d", &hits) != 1)
-                hits = -1;
-            pclose(f);
-        }
-
-        struct net_manager nm;
-        memset(&nm, 0, sizeof(nm));
-        struct p2p_node node;
-        pdf_setup_node(&node, "pdf_slow_hdd");
-        /* A genuinely forged header must still bite, so "slow is free"
-         * cannot be mistaken for "headers are unpoliced". */
-        peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_HEADER,
-                            "forged header");
-        bool genuine_still_scores = (atomic_load(&node.misbehavior) > 0);
-
-        /* sentinel > 0 proves we could see the tree; hits == 0 is the
-         * property under test. A wrong cwd fails here rather than
-         * reporting an unearned pass. */
-        bool ok = (sentinel > 0) && (hits == 0) && genuine_still_scores;
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (sentinel=%d timeout_scoring_sites=%d "
-                   "genuine_scores=%d)\n",
-                   sentinel, hits, (int)genuine_still_scores);
-            failures++;
-        }
-    }
+    failures += pdf_case_timeout_never_scored();
 
     main_state_free(&pdf_main_state);
 
