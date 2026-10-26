@@ -466,28 +466,38 @@ bool platform_private_file_identity(struct platform_private_file *f,
   return true;
 }
 
-bool platform_private_path_resolve(const char *path, char *resolved, size_t rs,
-                                   char *parent, size_t ps) {
-  wchar_t input[32768], full[32768];
+static bool pf_resolve_input_refused(const char *path, wchar_t *input) {
   if (!path || !(path[0] && path[1] == ':' &&
                  (path[2] == '\\' || path[2] == '/')))
-    return false;
+    return true;
   if (!pf_wide(path, input))
-    return false;
+    return true;
+  return false;
+}
+
+static wchar_t *pf_wide_leaf(wchar_t *input) {
   wchar_t *leaf = wcsrchr(input, L'\\');
   wchar_t *slash = wcsrchr(input, L'/');
   if (!leaf || (slash && slash > leaf))
     leaf = slash;
+  return leaf;
+}
+
+static bool pf_leaf_name_refused(const wchar_t *leaf) {
   if (!leaf || !leaf[1] || wcscmp(leaf + 1, L".") == 0 ||
       wcscmp(leaf + 1, L"..") == 0)
-    return false;
-  wchar_t leaf_copy[32768];
-  size_t leaf_length = wcslen(leaf + 1);
-  if (leaf_length >= 32768)
-    return false;
+    return true;
+  return false;
+}
+
+static bool pf_leaf_chars_refused(const wchar_t *leaf, size_t leaf_length) {
   if (leaf[leaf_length] == L'.' || leaf[leaf_length] == L' ' ||
       wcspbrk(leaf + 1, L"<>:\"/\\|?*") != NULL)
-    return false;
+    return true;
+  return false;
+}
+
+static bool pf_leaf_reserved_name(const wchar_t *leaf) {
   wchar_t reserved[16];
   size_t stem = wcscspn(leaf + 1, L".");
   if (stem < sizeof(reserved) / sizeof(reserved[0])) {
@@ -499,49 +509,89 @@ bool platform_private_path_resolve(const char *path, char *resolved, size_t rs,
         (stem == 4 && (wcsncmp(reserved, L"COM", 3) == 0 ||
                        wcsncmp(reserved, L"LPT", 3) == 0) &&
          reserved[3] >= L'1' && reserved[3] <= L'9'))
-      return false;
+      return true;
   }
-  wmemcpy(leaf_copy, leaf + 1, leaf_length + 1);
-  bool drive_root = (leaf == input + 2 && input[1] == L':') ||
-                    (leaf == input + 6 && wcsncmp(input, L"\\\\?\\", 4) == 0 &&
-                     input[5] == L':');
+  return false;
+}
+
+static bool pf_leaf_drive_root(const wchar_t *input, const wchar_t *leaf) {
+  return (leaf == input + 2 && input[1] == L':') ||
+         (leaf == input + 6 && wcsncmp(input, L"\\\\?\\", 4) == 0 &&
+          input[5] == L':');
+}
+
+static void pf_cut_to_parent(wchar_t *leaf, bool drive_root) {
   *leaf = L'\0';
   if (drive_root) {
     leaf[0] = L'\\';
     leaf[1] = L'\0';
   }
-  HANDLE h = CreateFileW(
-      input, FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-      NULL);
+}
+
+static bool pf_reject_non_directory(HANDLE h) {
   BY_HANDLE_FILE_INFORMATION info;
   if (h == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(h, &info) ||
       !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
       (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
     if (h != INVALID_HANDLE_VALUE)
       CloseHandle(h);
-    return false;
+    return true;
   }
+  return false;
+}
+
+static bool pf_parent_utf8_refused(const wchar_t *full, char *parent,
+                                   size_t ps) {
+  if (wcsncmp(full, L"\\\\?\\UNC\\", 8) == 0) {
+    wchar_t unc[32768] = L"\\\\";
+    size_t length = wcslen(full + 8);
+    if (length + 3 >= 32768)
+      return true;
+    wmemcpy(unc + 2, full + 8, length + 1);
+    if (!pf_utf8(unc, parent, ps))
+      return true;
+  } else {
+    const wchar_t *canonical =
+        wcsncmp(full, L"\\\\?\\", 4) == 0 ? full + 4 : full;
+    if (!pf_utf8(canonical, parent, ps))
+      return true;
+  }
+  return false;
+}
+
+bool platform_private_path_resolve(const char *path, char *resolved, size_t rs,
+                                   char *parent, size_t ps) {
+  wchar_t input[32768], full[32768];
+  if (pf_resolve_input_refused(path, input))
+    return false;
+  wchar_t *leaf = pf_wide_leaf(input);
+  if (pf_leaf_name_refused(leaf))
+    return false;
+  wchar_t leaf_copy[32768];
+  size_t leaf_length = wcslen(leaf + 1);
+  if (leaf_length >= 32768)
+    return false;
+  if (pf_leaf_chars_refused(leaf, leaf_length))
+    return false;
+  if (pf_leaf_reserved_name(leaf))
+    return false;
+  wmemcpy(leaf_copy, leaf + 1, leaf_length + 1);
+  bool drive_root = pf_leaf_drive_root(input, leaf);
+  pf_cut_to_parent(leaf, drive_root);
+  HANDLE h = CreateFileW(
+      input, FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+      NULL);
+  if (pf_reject_non_directory(h))
+    return false;
   DWORD n = GetFinalPathNameByHandleW(h, full, 32768,
                                       FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
   CloseHandle(h);
   if (!n || n >= 32768)
     return false;
-  if (wcsncmp(full, L"\\\\?\\UNC\\", 8) == 0) {
-    wchar_t unc[32768] = L"\\\\";
-    size_t length = wcslen(full + 8);
-    if (length + 3 >= 32768)
-      return false;
-    wmemcpy(unc + 2, full + 8, length + 1);
-    if (!pf_utf8(unc, parent, ps))
-      return false;
-  } else {
-    const wchar_t *canonical =
-        wcsncmp(full, L"\\\\?\\", 4) == 0 ? full + 4 : full;
-    if (!pf_utf8(canonical, parent, ps))
-      return false;
-  }
+  if (pf_parent_utf8_refused(full, parent, ps))
+    return false;
   size_t used = strlen(parent);
   char leaf_utf8[32768];
   if (!pf_utf8(leaf_copy, leaf_utf8, sizeof(leaf_utf8)))
@@ -561,15 +611,8 @@ bool platform_private_path_absent(const char *path) {
   return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 
-bool platform_private_file_link_no_clobber(
-    const char *s, const char *d,
-    const struct platform_private_file_identity *sid, bool *same) {
-  if (!sid || !same)
-    return false;
-  wchar_t ws[32768], wd[32768];
-  *same = false;
-  if (!pf_wide(s, ws) || !pf_wide(d, wd))
-    return false;
+static bool pf_link_source_refused(
+    const wchar_t *ws, const struct platform_private_file_identity *sid) {
   HANDLE source =
       CreateFileW(ws, FILE_READ_ATTRIBUTES,
                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
@@ -584,7 +627,33 @@ bool platform_private_file_link_no_clobber(
                     source_info.nFileIndexLow) == sid->file;
   if (source != INVALID_HANDLE_VALUE)
     CloseHandle(source);
-  if (!source_ok)
+  return !source_ok;
+}
+
+static bool pf_link_identity_matches(
+    HANDLE h, const struct platform_private_file_identity *sid) {
+  BY_HANDLE_FILE_INFORMATION info = {0};
+  bool ok = GetFileInformationByHandle(h, &info) &&
+            (info.dwFileAttributes &
+             (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+  struct platform_private_file_identity did = {
+      .volume = info.dwVolumeSerialNumber,
+      .file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow};
+  bool identity_matches = ok && did.volume == sid->volume &&
+                          did.file == sid->file;
+  return identity_matches;
+}
+
+bool platform_private_file_link_no_clobber(
+    const char *s, const char *d,
+    const struct platform_private_file_identity *sid, bool *same) {
+  if (!sid || !same)
+    return false;
+  wchar_t ws[32768], wd[32768];
+  *same = false;
+  if (!pf_wide(s, ws) || !pf_wide(d, wd))
+    return false;
+  if (pf_link_source_refused(ws, sid))
     return false;
   bool created = CreateHardLinkW(wd, ws, NULL) != 0;
   DWORD link_error = created ? ERROR_SUCCESS : GetLastError();
@@ -597,15 +666,7 @@ bool platform_private_file_link_no_clobber(
                   OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   if (h == INVALID_HANDLE_VALUE)
     return false;
-  BY_HANDLE_FILE_INFORMATION info = {0};
-  bool ok = GetFileInformationByHandle(h, &info) &&
-            (info.dwFileAttributes &
-             (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
-  struct platform_private_file_identity did = {
-      .volume = info.dwVolumeSerialNumber,
-      .file = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow};
-  bool identity_matches = ok && did.volume == sid->volume &&
-                          did.file == sid->file;
+  bool identity_matches = pf_link_identity_matches(h, sid);
   *same = !created && identity_matches;
   if (created && !identity_matches) {
     FILE_DISPOSITION_INFO disposition = {.DeleteFile = TRUE};
@@ -952,16 +1013,27 @@ bool platform_private_path_absent(const char *p) {
   struct stat st;
   return lstat(p, &st) != 0 && (errno == ENOENT || errno == ENOTDIR);
 }
+static bool pf_link_source_refused(
+    const char *s, const struct platform_private_file_identity *si) {
+  struct stat source;
+  if (lstat(s, &source) || !S_ISREG(source.st_mode) ||
+      (uint64_t)source.st_dev != si->volume ||
+      (uint64_t)source.st_ino != si->file)
+    return true;
+  return false;
+}
+static bool pf_link_identity_matches(
+    const struct stat *st, const struct platform_private_file_identity *si) {
+  return S_ISREG(st->st_mode) && (uint64_t)st->st_dev == si->volume &&
+         (uint64_t)st->st_ino == si->file;
+}
 bool platform_private_file_link_no_clobber(
     const char *s, const char *d,
     const struct platform_private_file_identity *si, bool *same) {
   if (!s || !d || !si || !same)
     return false;
   *same = false;
-  struct stat source;
-  if (lstat(s, &source) || !S_ISREG(source.st_mode) ||
-      (uint64_t)source.st_dev != si->volume ||
-      (uint64_t)source.st_ino != si->file)
+  if (pf_link_source_refused(s, si))
     return false;
   bool created = link(s, d) == 0;
   if (!created && errno != EEXIST)
@@ -969,8 +1041,7 @@ bool platform_private_file_link_no_clobber(
   struct stat st;
   if (lstat(d, &st))
     return false;
-  bool identity_matches = S_ISREG(st.st_mode) &&
-      (uint64_t)st.st_dev == si->volume && (uint64_t)st.st_ino == si->file;
+  bool identity_matches = pf_link_identity_matches(&st, si);
   *same = !created && identity_matches;
   if (created && !identity_matches)
     (void)unlink(d);
