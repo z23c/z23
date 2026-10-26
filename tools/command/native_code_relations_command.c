@@ -120,12 +120,207 @@ static void relation_command_transports(struct json_value *relations,
                       "exact_command_registry_row");
 }
 
+static bool relation_query_missing(const char *query)
+{
+    return !query || !query[0];
+}
+
+static const char *relation_context_source_root(
+    const struct zcl_command_request *request)
+{
+    if (request->context && request->context->source_root &&
+        request->context->source_root[0])
+        return request->context->source_root;
+    return NULL;
+}
+
+static bool relation_lookup_symbol(struct codeindex *index, const char *query,
+                                   bool by_id, struct ci_symbol *symbol,
+                                   bool *found)
+{
+    return by_id
+        ? codeindex_symbol_by_id(index, query, symbol, found)
+        : codeindex_symbol(index, query, symbol, found);
+}
+
+static void relation_reply_unknown(struct zcl_command_reply *reply,
+                                   const char *query, struct codeindex *index)
+{
+    (void)json_push_kv_str(&reply->data, "query", query);
+    (void)json_push_kv_bool(&reply->data, "found", false);
+    (void)json_push_kv_str(&reply->data, "status", "UNKNOWN");
+    (void)json_push_kv_bool(&reply->data, "complete", false);
+    struct json_value missing;
+    json_init(&missing); json_set_array(&missing);
+    relation_push_line(&missing, "closed_world_declaration_coverage");
+    relation_push_line(&missing, "generated_and_platform_configuration_coverage");
+    (void)json_push_kv(&reply->data, "missing_dimensions", &missing);
+    json_free(&missing);
+    (void)json_push_kv_str(&reply->data, "summary",
+                           "no declaration resolved; scanner absence is not closed-world proof");
+    codeindex_close(index);
+}
+
+static void relation_push_symbol_facts(struct json_value *relations,
+                                       int *count, bool *truncated,
+                                       const struct ci_symbol *symbol,
+                                       const char *symbol_id)
+{
+    relation_push(relations, count, truncated, "isa", "c23.declaration",
+                  symbol_id, "ontology_type", relation_c23_type(symbol->kind),
+                  "exact_index_kind");
+    char span[320];
+    if (symbol->def_path[0]) {
+        (void)snprintf(span, sizeof(span), "%s:%d", symbol->def_path,
+                       symbol->def_line);
+        relation_push(relations, count, truncated,
+                      "has_definition_occurrence", "c23.declaration", symbol_id,
+                      "source_span", span, "exact_index_location");
+    }
+    if (symbol->decl_path[0]) {
+        (void)snprintf(span, sizeof(span), "%s:%d", symbol->decl_path,
+                       symbol->decl_line);
+        relation_push(relations, count, truncated,
+                      "has_declaration_occurrence", "c23.declaration",
+                      symbol_id, "source_span", span, "exact_index_location");
+    }
+    if (symbol->group[0])
+        relation_push(relations, count, truncated, "member_of_source_group",
+                      "c23.declaration", symbol_id, "source_group",
+                      symbol->group, "exact_index_group");
+}
+
+static const struct zcl_command_registry *relation_command_registry(
+    const struct zcl_command_request *request)
+{
+    return request->context && request->context->registry
+        ? request->context->registry : zcl_command_catalog();
+}
+
+static void relation_push_handler_commands(struct json_value *relations,
+                                           int *count, bool *truncated,
+                                           const struct ci_symbol *symbol,
+                                           const char *symbol_id,
+                                           const struct zcl_command_registry *registry,
+                                           int *command_count,
+                                           int *command_total)
+{
+    const struct zcl_command_handler_index *handlers =
+        zcl_command_handler_index();
+    const bool external_function = symbol->kind == 'T' &&
+        strncmp(symbol_id, "fn:external:", 12) == 0;
+    for (size_t i = 0; external_function && handlers &&
+                       i < handlers->count; i++) {
+        if (strcmp(handlers->entries[i].handler_name, symbol->name) != 0)
+            continue;
+        (*command_total)++;
+        if (*command_count >= CODE_RELATION_COMMAND_CAP) {
+            *truncated = true;
+            continue;
+        }
+        const char *command = handlers->entries[i].path;
+        const struct zcl_command_spec *spec =
+            zcl_command_registry_find(registry, command, NULL);
+        if (!spec) continue;
+        (*command_count)++;
+        relation_push(relations, count, truncated,
+                      "declared_handler_for_command", "c23.declaration",
+                      symbol_id, "command", command, "exact_def_handler_name");
+        relation_push(relations, count, truncated, "declares_scope",
+                      "command", command, "command_scope",
+                      zcl_command_scope_name(spec->scope),
+                      "exact_command_registry_row");
+        relation_push(relations, count, truncated, "declares_authority",
+                      "command", command, "authority",
+                      zcl_command_authority_name(spec->authority),
+                      "exact_command_registry_row");
+        relation_push(relations, count, truncated, "declares_effect",
+                      "command", command, "effect",
+                      zcl_command_effect_name(spec->effect),
+                      "exact_command_registry_row");
+        relation_command_lanes(relations, count, truncated, command,
+                               spec->allowed_lanes);
+        relation_command_transports(relations, count, truncated, command,
+                                    spec->transports);
+    }
+}
+
+static const char *relation_symbol_path(const struct ci_symbol *symbol)
+{
+    return symbol->def_path[0] ? symbol->def_path : symbol->decl_path;
+}
+
+static void relation_push_route_groups(struct json_value *relations,
+                                       int *count, bool *truncated,
+                                       const char *symbol_id,
+                                       const struct agent_impact_acc *proof,
+                                       const char *route)
+{
+    if (proof->groups_len == 0)
+        relation_push(relations, count, truncated,
+                      "routes_path_change_to_test_group", "c23.declaration",
+                      symbol_id, "test_group", route,
+                      "exact_shared_rule_path_floor");
+    for (size_t i = 0; i < proof->groups_len; i++)
+        relation_push(relations, count, truncated,
+                      "routes_path_change_to_test_group", "c23.declaration",
+                      symbol_id, "test_group", proof->groups[i],
+                      "exact_shared_rule_path_floor");
+}
+
+static void relation_reply_subject(struct zcl_command_reply *reply,
+                                   const char *query, bool by_id,
+                                   const char *symbol_id,
+                                   const char *source_hex)
+{
+    (void)json_push_kv_bool(&reply->data, "found", true);
+    (void)json_push_kv_str(&reply->data, "query", query);
+    (void)json_push_kv_str(&reply->data, "resolution",
+                           by_id ? "exact_stable_id" : "legacy_name_primary");
+    (void)json_push_kv_str(&reply->data, "subject", symbol_id);
+    (void)json_push_kv_str(&reply->data, "codeindex_source_root_sha3",
+                           source_hex);
+    (void)json_push_kv_str(&reply->data, "source_root_domain",
+                           "zcl.codeindex.source_root.v4");
+    (void)json_push_kv_str(&reply->data, "source_scope",
+                           "codeindex_governed_source_path_enumeration");
+}
+
+static void relation_route_root_hex(const uint8_t *source_root,
+                                    const char *path, const char *route,
+                                    const struct agent_impact_acc *proof,
+                                    char route_hex[65])
+{
+    struct sha3_256_ctx route_sha;
+    uint8_t route_root[32];
+    static const char route_domain[] = "zcl.code_impact_route_projection.v1";
+    sha3_256_init(&route_sha);
+    sha3_256_write(&route_sha, (const uint8_t *)route_domain,
+                   sizeof(route_domain));
+    sha3_256_write(&route_sha, source_root, 32);
+    sha3_256_write(&route_sha, (const uint8_t *)path, strlen(path) + 1);
+    sha3_256_write(&route_sha, (const uint8_t *)route, strlen(route) + 1);
+    for (size_t i = 0; i < proof->groups_len; i++)
+        sha3_256_write(&route_sha, (const uint8_t *)proof->groups[i],
+                       strlen(proof->groups[i]) + 1);
+    sha3_256_finalize(&route_sha, route_root);
+    zcl_hex_encode(route_root, sizeof(route_root), route_hex);
+}
+
+static const char *relation_truncation_reason(bool truncated,
+                                              int command_total,
+                                              int command_count)
+{
+    return truncated ? (command_total > command_count
+                           ? "command_cap" : "relation_cap") : "";
+}
+
 void zcl_native_handle_code_relations(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
     const char *query = json_get_str(json_get(request->input, "name"));
-    if (!query || !query[0]) {
+    if (relation_query_missing(query)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "MISSING_NAME",
                                "normalize", false, false,
@@ -134,13 +329,11 @@ void zcl_native_handle_code_relations(
         return;
     }
 
-    const char *root = ".";
-    if (request->context && request->context->source_root &&
-        request->context->source_root[0])
-        root = request->context->source_root;
-    else {
+    const char *root = relation_context_source_root(request);
+    if (!root) {
         const char *environment_root = getenv("ZCL_DEV_SOURCE_ROOT");
         if (environment_root && environment_root[0]) root = environment_root;
+        else root = ".";
     }
     struct codeindex *index = codeindex_open_source_view(root);
     if (!index) {
@@ -154,9 +347,8 @@ void zcl_native_handle_code_relations(
     struct ci_symbol symbol;
     bool found = false;
     const bool by_id = strchr(query, ':') != NULL;
-    bool lookup_ok = by_id
-        ? codeindex_symbol_by_id(index, query, &symbol, &found)
-        : codeindex_symbol(index, query, &symbol, &found);
+    bool lookup_ok = relation_lookup_symbol(index, query, by_id, &symbol,
+                                            &found);
     if (!lookup_ok) {
         codeindex_close(index);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -167,19 +359,7 @@ void zcl_native_handle_code_relations(
         return;
     }
     if (!found) {
-        (void)json_push_kv_str(&reply->data, "query", query);
-        (void)json_push_kv_bool(&reply->data, "found", false);
-        (void)json_push_kv_str(&reply->data, "status", "UNKNOWN");
-        (void)json_push_kv_bool(&reply->data, "complete", false);
-        struct json_value missing;
-        json_init(&missing); json_set_array(&missing);
-        relation_push_line(&missing, "closed_world_declaration_coverage");
-        relation_push_line(&missing, "generated_and_platform_configuration_coverage");
-        (void)json_push_kv(&reply->data, "missing_dimensions", &missing);
-        json_free(&missing);
-        (void)json_push_kv_str(&reply->data, "summary",
-                               "no declaration resolved; scanner absence is not closed-world proof");
-        codeindex_close(index);
+        relation_reply_unknown(reply, query, index);
         return;
     }
 
@@ -198,8 +378,7 @@ void zcl_native_handle_code_relations(
     zcl_hex_encode(source_root, sizeof(source_root), source_hex);
 
     const struct zcl_command_registry *registry =
-        request->context && request->context->registry
-            ? request->context->registry : zcl_command_catalog();
+        relation_command_registry(request);
     char registry_digest[72];
     zcl_command_registry_digest(registry, registry_digest);
 
@@ -207,96 +386,23 @@ void zcl_native_handle_code_relations(
     json_init(&relations); json_set_array(&relations);
     int relation_count = 0;
     bool truncated = false;
-    relation_push(&relations, &relation_count, &truncated, "isa",
-                  "c23.declaration", symbol_id, "ontology_type",
-                  relation_c23_type(symbol.kind), "exact_index_kind");
-    char span[320];
-    if (symbol.def_path[0]) {
-        (void)snprintf(span, sizeof(span), "%s:%d", symbol.def_path,
-                       symbol.def_line);
-        relation_push(&relations, &relation_count, &truncated,
-                      "has_definition_occurrence", "c23.declaration", symbol_id,
-                      "source_span", span, "exact_index_location");
-    }
-    if (symbol.decl_path[0]) {
-        (void)snprintf(span, sizeof(span), "%s:%d", symbol.decl_path,
-                       symbol.decl_line);
-        relation_push(&relations, &relation_count, &truncated,
-                      "has_declaration_occurrence", "c23.declaration", symbol_id,
-                      "source_span", span, "exact_index_location");
-    }
-    if (symbol.group[0])
-        relation_push(&relations, &relation_count, &truncated,
-                      "member_of_source_group", "c23.declaration", symbol_id,
-                      "source_group", symbol.group, "exact_index_group");
-
-    const struct zcl_command_handler_index *handlers =
-        zcl_command_handler_index();
+    relation_push_symbol_facts(&relations, &relation_count, &truncated, &symbol,
+                               symbol_id);
     int command_count = 0;
     int command_total = 0;
-    const bool external_function = symbol.kind == 'T' &&
-        strncmp(symbol_id, "fn:external:", 12) == 0;
-    for (size_t i = 0; external_function && handlers &&
-                       i < handlers->count; i++) {
-        if (strcmp(handlers->entries[i].handler_name, symbol.name) != 0)
-            continue;
-        command_total++;
-        if (command_count >= CODE_RELATION_COMMAND_CAP) {
-            truncated = true;
-            continue;
-        }
-        const char *command = handlers->entries[i].path;
-        const struct zcl_command_spec *spec =
-            zcl_command_registry_find(registry, command, NULL);
-        if (!spec) continue;
-        command_count++;
-        relation_push(&relations, &relation_count, &truncated,
-                      "declared_handler_for_command", "c23.declaration", symbol_id,
-                      "command", command, "exact_def_handler_name");
-        relation_push(&relations, &relation_count, &truncated,
-                      "declares_scope", "command", command, "command_scope",
-                      zcl_command_scope_name(spec->scope),
-                      "exact_command_registry_row");
-        relation_push(&relations, &relation_count, &truncated,
-                      "declares_authority", "command", command,
-                      "authority", zcl_command_authority_name(spec->authority),
-                      "exact_command_registry_row");
-        relation_push(&relations, &relation_count, &truncated,
-                      "declares_effect", "command", command, "effect",
-                      zcl_command_effect_name(spec->effect),
-                      "exact_command_registry_row");
-        relation_command_lanes(&relations, &relation_count, &truncated,
-                               command, spec->allowed_lanes);
-        relation_command_transports(&relations, &relation_count, &truncated,
-                                    command, spec->transports);
-    }
+    relation_push_handler_commands(&relations, &relation_count, &truncated,
+                                   &symbol, symbol_id, registry, &command_count,
+                                   &command_total);
 
-    const char *path = symbol.def_path[0] ? symbol.def_path : symbol.decl_path;
+    const char *path = relation_symbol_path(&symbol);
     struct agent_impact_acc proof = {0};
     bool consensus_risk = false;
     const char *route = zcl_native_code_route_for_path(
         path, &proof, &consensus_risk);
-    if (proof.groups_len == 0)
-        relation_push(&relations, &relation_count, &truncated,
-                      "routes_path_change_to_test_group", "c23.declaration", symbol_id,
-                      "test_group", route, "exact_shared_rule_path_floor");
-    for (size_t i = 0; i < proof.groups_len; i++)
-        relation_push(&relations, &relation_count, &truncated,
-                      "routes_path_change_to_test_group", "c23.declaration", symbol_id,
-                      "test_group", proof.groups[i],
-                      "exact_shared_rule_path_floor");
+    relation_push_route_groups(&relations, &relation_count, &truncated,
+                               symbol_id, &proof, route);
 
-    (void)json_push_kv_bool(&reply->data, "found", true);
-    (void)json_push_kv_str(&reply->data, "query", query);
-    (void)json_push_kv_str(&reply->data, "resolution",
-                           by_id ? "exact_stable_id" : "legacy_name_primary");
-    (void)json_push_kv_str(&reply->data, "subject", symbol_id);
-    (void)json_push_kv_str(&reply->data, "codeindex_source_root_sha3",
-                           source_hex);
-    (void)json_push_kv_str(&reply->data, "source_root_domain",
-                           "zcl.codeindex.source_root.v4");
-    (void)json_push_kv_str(&reply->data, "source_scope",
-                           "codeindex_governed_source_path_enumeration");
+    relation_reply_subject(reply, query, by_id, symbol_id, source_hex);
     char relation_json[ZCL_COMMAND_LIST_BUDGET + 1];
     size_t relation_bytes = json_write(&relations, relation_json,
                                        sizeof(relation_json));
@@ -327,21 +433,8 @@ void zcl_native_handle_code_relations(
     sha3_256_finalize(&relation_sha, relation_root);
     zcl_hex_encode(relation_root, sizeof(relation_root), relation_hex);
 
-    struct sha3_256_ctx route_sha;
-    uint8_t route_root[32];
     char route_hex[65];
-    static const char route_domain[] = "zcl.code_impact_route_projection.v1";
-    sha3_256_init(&route_sha);
-    sha3_256_write(&route_sha, (const uint8_t *)route_domain,
-                   sizeof(route_domain));
-    sha3_256_write(&route_sha, source_root, sizeof(source_root));
-    sha3_256_write(&route_sha, (const uint8_t *)path, strlen(path) + 1);
-    sha3_256_write(&route_sha, (const uint8_t *)route, strlen(route) + 1);
-    for (size_t i = 0; i < proof.groups_len; i++)
-        sha3_256_write(&route_sha, (const uint8_t *)proof.groups[i],
-                       strlen(proof.groups[i]) + 1);
-    sha3_256_finalize(&route_sha, route_root);
-    zcl_hex_encode(route_root, sizeof(route_root), route_hex);
+    relation_route_root_hex(source_root, path, route, &proof, route_hex);
 
     (void)json_push_kv_str(&reply->data, "registry_digest", registry_digest);
     (void)json_push_kv_str(&reply->data, "registry_digest_coverage",
@@ -382,8 +475,8 @@ void zcl_native_handle_code_relations(
     (void)json_push_kv_int(&reply->data, "command_total", command_total);
     (void)json_push_kv_bool(&reply->data, "truncated", truncated);
     (void)json_push_kv_str(&reply->data, "truncation_reason",
-                           truncated ? (command_total > command_count
-                               ? "command_cap" : "relation_cap") : "");
+                           relation_truncation_reason(truncated, command_total,
+                                                      command_count));
     (void)json_push_kv_str(&reply->data, "proof_state",
                            "REQUIRED_UNOBSERVED");
     (void)json_push_kv_bool(&reply->data, "consensus_risk", consensus_risk);
