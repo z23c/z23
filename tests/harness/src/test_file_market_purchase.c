@@ -1008,7 +1008,6 @@ int file_market_purchase_tests(void)
 {
     int failures = 0;
     struct purchase_test_run run;
-    memset(&run, 0, sizeof(run));
     bool ready = purchase_test_fixture_ready(&run);
     PURCHASE_CHECK("authenticated offer, identity, and encrypted fixture", ready);
     if (!ready) goto cleanup;
