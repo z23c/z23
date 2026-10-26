@@ -11,22 +11,58 @@
 #include <string.h>
 #include <windows.h>
 
-int main(void)
+static int create_refusal_scratch_dir(wchar_t *dir)
 {
-    wchar_t temp[MAX_PATH], dir[MAX_PATH], marker[MAX_PATH];
+    wchar_t temp[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp) ||
         swprintf(dir, MAX_PATH, L"%lsz23-export-refuse-%lu", temp,
                  (unsigned long)GetCurrentProcessId()) <= 0 ||
         !CreateDirectoryW(dir, NULL))
-        return 1;
-    (void)swprintf(marker, MAX_PATH, L"%ls\\sentinel", dir);
-    const char expected[] = "unchanged";
+        return -1;
+    return 0;
+}
+
+static int write_sentinel_marker(const wchar_t *marker, const char *expected,
+                                 size_t expected_len)
+{
     DWORD amount = 0;
     HANDLE file = CreateFileW(marker, GENERIC_WRITE, 0, NULL, CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE ||
-        !WriteFile(file, expected, sizeof(expected), &amount, NULL) ||
-        amount != sizeof(expected) || !CloseHandle(file))
+        !WriteFile(file, expected, expected_len, &amount, NULL) ||
+        amount != expected_len || !CloseHandle(file))
+        return -1;
+    return 0;
+}
+
+static bool every_export_surface_refuses(
+    struct consensus_state_snapshot_export_request *request,
+    struct consensus_export_output_binding *output,
+    struct consensus_state_bundle_manifest *manifest,
+    struct consensus_state_export_result *result)
+{
+    sqlite3 *destination = (sqlite3 *)(uintptr_t)1;
+    return !consensus_export_output_open(request, output, result) &&
+           output->dirfd == -1 && output->temp_fd == -1 &&
+           !consensus_export_open_temp(output, &destination, result) &&
+           destination == NULL &&
+           !consensus_export_prove_write((sqlite3 *)(uintptr_t)1, request,
+                                         output, manifest, result) &&
+           !consensus_export_finalize_temp(output, manifest,
+                                           request->cancel_requested, result) &&
+           !consensus_state_snapshot_export((sqlite3 *)(uintptr_t)1, request,
+                                            result) &&
+           result->status == CONSENSUS_EXPORT_REFUSED;
+}
+
+int main(void)
+{
+    wchar_t dir[MAX_PATH], marker[MAX_PATH];
+    if (create_refusal_scratch_dir(dir) != 0)
+        return 1;
+    (void)swprintf(marker, MAX_PATH, L"%ls\\sentinel", dir);
+    const char expected[] = "unchanged";
+    if (write_sentinel_marker(marker, expected, sizeof(expected)) != 0)
         return 1;
 
     struct consensus_state_snapshot_export_request request = {
@@ -34,24 +70,13 @@ int main(void)
     struct consensus_export_output_binding output;
     struct consensus_state_export_result result = {0};
     struct consensus_state_bundle_manifest manifest = {0};
-    sqlite3 *destination = (sqlite3 *)(uintptr_t)1;
-    bool refused =
-        !consensus_export_output_open(&request, &output, &result) &&
-        output.dirfd == -1 && output.temp_fd == -1 &&
-        !consensus_export_open_temp(&output, &destination, &result) &&
-        destination == NULL &&
-        !consensus_export_prove_write((sqlite3 *)(uintptr_t)1, &request,
-                                      &output, &manifest, &result) &&
-        !consensus_export_finalize_temp(&output, &manifest,
-                                        request.cancel_requested, &result) &&
-        !consensus_state_snapshot_export((sqlite3 *)(uintptr_t)1, &request,
-                                         &result) &&
-        result.status == CONSENSUS_EXPORT_REFUSED;
+    bool refused = every_export_surface_refuses(&request, &output, &manifest,
+                                                &result);
 
     char actual[sizeof(expected)] = {0};
-    file = CreateFileW(marker, GENERIC_READ, FILE_SHARE_READ, NULL,
-                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    amount = 0;
+    HANDLE file = CreateFileW(marker, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD amount = 0;
     bool unchanged = file != INVALID_HANDLE_VALUE &&
                      ReadFile(file, actual, sizeof(actual), &amount, NULL) &&
                      amount == sizeof(actual) &&
