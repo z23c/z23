@@ -516,7 +516,6 @@ static int health_test_log_head_gap_degrades(void)
     return failures;
 }
 
-/* Snapshot when the reducer log head is unknown: blocked, not degraded. */
 static bool health_test_unknown_log_head_snapshot_ok(
     const struct node_health_snapshot *health)
 {
