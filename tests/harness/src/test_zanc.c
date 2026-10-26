@@ -53,12 +53,20 @@ static bool call_anchor_obj(struct rpc_table *t, const char *method,
     return ok;
 }
 
-int test_zanc(void)
+static bool zanc_sha3_labeled_anchor_ok(size_t len, const uint8_t *buf,
+                                        const uint8_t *digest)
+{
+    struct zanc_message m;
+    return len > 0 && zanc_parse(buf, len, &m) &&
+           m.version == ZANC_VERSION &&
+           m.hash_type == ZANC_HASH_SHA3_256 &&
+           memcmp(m.digest, digest, 32) == 0 &&
+           strcmp(m.label, "zclassic23@1.0") == 0;
+}
+
+static int zanc_codec_roundtrip_failures(void)
 {
     int failures = 0;
-    printf("\n=== ZANC Tests ===\n");
-
-    /* ── Codec: build + parse round-trip ──────────────────────────── */
 
     printf("zanc build+parse SHA3 with label roundtrip... ");
     {
@@ -67,12 +75,7 @@ int test_zanc(void)
         uint8_t buf[128];
         size_t len = zanc_build_anchor(buf, sizeof(buf), ZANC_HASH_SHA3_256,
                                        digest, "zclassic23@1.0");
-        struct zanc_message m;
-        bool ok = len > 0 && zanc_parse(buf, len, &m) &&
-                  m.version == ZANC_VERSION &&
-                  m.hash_type == ZANC_HASH_SHA3_256 &&
-                  memcmp(m.digest, digest, 32) == 0 &&
-                  strcmp(m.label, "zclassic23@1.0") == 0;
+        bool ok = zanc_sha3_labeled_anchor_ok(len, buf, digest);
         if (ok) printf("OK\n");
         else { printf("FAIL (len=%zu)\n", len); failures++; }
     }
@@ -92,7 +95,12 @@ int test_zanc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Codec: pedantic negatives ────────────────────────────────── */
+    return failures;
+}
+
+static int zanc_codec_parse_reject_failures(void)
+{
+    int failures = 0;
 
     printf("zanc_parse: reject NULL/empty... ");
     {
@@ -145,6 +153,13 @@ int test_zanc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int zanc_codec_cap_label_failures(void)
+{
+    int failures = 0;
+
     printf("zanc_build: maximal anchor fits the 223-byte relay cap... ");
     {
         uint8_t digest[32]; mk_digest(digest, 0x33);
@@ -196,6 +211,13 @@ int test_zanc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int zanc_codec_framing_label_failures(void)
+{
+    int failures = 0;
+
     printf("zanc_parse: reject trailing bytes... ");
     {
         uint8_t digest[32]; mk_digest(digest, 0x22);
@@ -226,7 +248,22 @@ int test_zanc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Projection: save / find_by_digest / list ─────────────────── */
+    return failures;
+}
+
+static bool zanc_projection_row_ok(bool save_ok, bool find_ok,
+                                  const struct zanc_anchor *got, int count,
+                                  const struct zanc_anchor *list,
+                                  bool miss_ok, bool type_miss)
+{
+    return save_ok && find_ok && got->height == 1000 &&
+           strcmp(got->label, "pkg@1") == 0 && count == 2 &&
+           list[0].height == 2000 && miss_ok && type_miss;
+}
+
+static int zanc_db_projection_failures(void)
+{
+    int failures = 0;
 
     printf("zanc DB save+find_by_digest+list... ");
     {
@@ -264,9 +301,8 @@ int test_zanc(void)
             bool type_miss = !db_zanc_find_by_digest(&ndb, ZANC_HASH_SHA2_256,
                                                      a.digest, &miss);
 
-            if (save_ok && find_ok && got.height == 1000 &&
-                strcmp(got.label, "pkg@1") == 0 && count == 2 &&
-                list[0].height == 2000 && miss_ok && type_miss)
+            if (zanc_projection_row_ok(save_ok, find_ok, &got, count, list,
+                                       miss_ok, type_miss))
                 printf("OK\n");
             else {
                 printf("FAIL (save=%d find=%d h=%d count=%d miss=%d tmiss=%d)\n",
@@ -292,9 +328,49 @@ int test_zanc(void)
         }
     }
 
-    /* ── RPC verify/list hit + miss ───────────────────────────────── */
+    return failures;
+}
 
-    printf("\n=== ZANC RPC verify/list ===\n");
+static int zanc_rpc_verify_hit_miss_failures(struct rpc_table *t,
+                                            const char *hex)
+{
+    int failures = 0;
+
+    /* verify: hit */
+    {
+        struct json_value obj = {0}, r = {0};
+        json_set_object(&obj);
+        json_push_kv_str(&obj, "digest", hex);
+        json_push_kv_str(&obj, "hash_type", "sha3");
+        printf("anchor_verify: digest hit... ");
+        bool ok = call_anchor_obj(t, "anchor_verify", &obj, &r);
+        const struct json_value *an = json_get(&r, "anchored");
+        if (ok && an && json_get_bool(an)) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+        json_free(&obj); json_free(&r);
+    }
+
+    /* verify: miss */
+    {
+        struct json_value obj = {0}, r = {0};
+        json_set_object(&obj);
+        json_push_kv_str(&obj, "digest",
+            "0000000000000000000000000000000000000000000000000000000000000000");
+        printf("anchor_verify: digest miss... ");
+        bool ok = call_anchor_obj(t, "anchor_verify", &obj, &r);
+        const struct json_value *an = json_get(&r, "anchored");
+        if (ok && an && !json_get_bool(an)) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+        json_free(&obj); json_free(&r);
+    }
+
+    return failures;
+}
+
+static int zanc_rpc_surface_failures(void)
+{
+    int failures = 0;
+
     {
         sqlite3 *db = NULL;
         struct node_db ndb = {0};
@@ -317,33 +393,7 @@ int test_zanc(void)
             char hex[65];
             HexStr(a.digest, 32, false, hex, sizeof(hex));
 
-            /* verify: hit */
-            {
-                struct json_value obj = {0}, r = {0};
-                json_set_object(&obj);
-                json_push_kv_str(&obj, "digest", hex);
-                json_push_kv_str(&obj, "hash_type", "sha3");
-                printf("anchor_verify: digest hit... ");
-                bool ok = call_anchor_obj(&t, "anchor_verify", &obj, &r);
-                const struct json_value *an = json_get(&r, "anchored");
-                if (ok && an && json_get_bool(an)) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&obj); json_free(&r);
-            }
-
-            /* verify: miss */
-            {
-                struct json_value obj = {0}, r = {0};
-                json_set_object(&obj);
-                json_push_kv_str(&obj, "digest",
-                    "0000000000000000000000000000000000000000000000000000000000000000");
-                printf("anchor_verify: digest miss... ");
-                bool ok = call_anchor_obj(&t, "anchor_verify", &obj, &r);
-                const struct json_value *an = json_get(&r, "anchored");
-                if (ok && an && !json_get_bool(an)) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&obj); json_free(&r);
-            }
+            failures += zanc_rpc_verify_hit_miss_failures(&t, hex);
 
             /* verify: bad digest length */
             {
@@ -391,15 +441,35 @@ int test_zanc(void)
         }
     }
 
-    /* ── Digest-of-file correctness (known vectors) ───────────────── */
+    return failures;
+}
 
-    printf("\n=== ZANC file digest vectors ===\n");
+static bool zanc_write_abc_close(int fd)
+{
+    bool wrote = fd >= 0 && write(fd, "abc", 3) == 3;
+    if (fd >= 0)
+        close(fd);
+    return wrote;
+}
+
+static bool zanc_abc_digest_hex_ok(const char *s2, const char *s3)
+{
+    return s2 && s3 &&
+           strcmp(s2, "ba7816bf8f01cfea414140de5dae2223"
+                      "b00361a396177a9cb410ff61f20015ad") == 0 &&
+           strcmp(s3, "3a985da74fe225b2045c172d6bd390bd"
+                      "855f086e3e9d525b46bfe24511431532") == 0;
+}
+
+static int zanc_file_digest_failures(void)
+{
+    int failures = 0;
+
     printf("anchor_verify file: SHA2-256/SHA3-256 of \"abc\"... ");
     {
         char path[] = "/tmp/zanc_test_XXXXXX";
         int fd = mkstemp(path);
-        bool wrote = fd >= 0 && write(fd, "abc", 3) == 3;
-        if (fd >= 0) close(fd);
+        bool wrote = zanc_write_abc_close(fd);
 
         struct node_db ndb = {0};
         sqlite3 *db = NULL;
@@ -416,11 +486,7 @@ int test_zanc(void)
                   call_anchor_obj(&t, "anchor_verify", &obj, &r);
         const char *s2 = ok ? json_get_str(json_get(&r, "sha2_256")) : NULL;
         const char *s3 = ok ? json_get_str(json_get(&r, "sha3_256")) : NULL;
-        bool pass = s2 && s3 &&
-            strcmp(s2, "ba7816bf8f01cfea414140de5dae2223"
-                       "b00361a396177a9cb410ff61f20015ad") == 0 &&
-            strcmp(s3, "3a985da74fe225b2045c172d6bd390bd"
-                       "855f086e3e9d525b46bfe24511431532") == 0;
+        bool pass = zanc_abc_digest_hex_ok(s2, s3);
         if (pass) printf("OK\n");
         else {
             printf("FAIL (s2=%s s3=%s)\n", s2 ? s2 : "(null)",
@@ -432,6 +498,33 @@ int test_zanc(void)
         if (opened) sqlite3_close(db);
         if (wrote) unlink(path);
     }
+
+    return failures;
+}
+
+int test_zanc(void)
+{
+    int failures = 0;
+    printf("\n=== ZANC Tests ===\n");
+
+    /* ── Codec: build + parse round-trip ──────────────────────────── */
+    failures += zanc_codec_roundtrip_failures();
+
+    /* ── Codec: pedantic negatives ────────────────────────────────── */
+    failures += zanc_codec_parse_reject_failures();
+    failures += zanc_codec_cap_label_failures();
+    failures += zanc_codec_framing_label_failures();
+
+    /* ── Projection: save / find_by_digest / list ─────────────────── */
+    failures += zanc_db_projection_failures();
+
+    /* ── RPC verify/list hit + miss ───────────────────────────────── */
+    printf("\n=== ZANC RPC verify/list ===\n");
+    failures += zanc_rpc_surface_failures();
+
+    /* ── Digest-of-file correctness (known vectors) ───────────────── */
+    printf("\n=== ZANC file digest vectors ===\n");
+    failures += zanc_file_digest_failures();
 
     printf("\n%d ZANC test(s) failed\n", failures);
     return failures;
