@@ -482,8 +482,6 @@ contexts/commons/services/src/metaverse_space_scout_service.c:metaverse_space_sc
 contexts/commons/services/src/package_lifecycle_install.c:package_lifecycle_installed_programs:21
 contexts/commons/services/src/package_lifecycle_install.c:pkgl_activate:16
 contexts/commons/services/src/package_lifecycle_install.c:pkgl_build_and_install:34
-contexts/commons/services/src/package_lifecycle_reproduce.c:pkgl_reproduce_run:26
-contexts/commons/services/src/package_lifecycle_reproduce.c:pkgl_run_reproduce_worker:18
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_materialize_package:28
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_rm_rf:16
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_verify_package:28

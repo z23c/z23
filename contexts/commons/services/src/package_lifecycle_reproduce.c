@@ -140,6 +140,74 @@ static void pkgl_fast_stats_consume(
     }
 }
 
+/* One --dep=<hex>,<installed-dir> argv slot per committed dependency root,
+ * each locked root still required to be installed exactly as the install
+ * receipt committed it; the caller owns dep_args. */
+static struct zcl_result pkgl_reproduce_dep_slots(
+    const struct pkgl_ctx *ctx,
+    const struct vcs_package_build_receipt *reference, char *dep_args,
+    size_t dep_stride, const char **argv, size_t *argc)
+{
+    for (size_t i = 0; i < reference->dep_count; i++) {
+        char dep_hex[65];
+        zcl_hex_encode(reference->dep_roots[i], 32, dep_hex);
+        char install[PKGL_PATH_MAX];
+        struct zcl_result ir = pkgl_installed_dir(
+            ctx, reference->dep_roots[i], install, sizeof(install));
+        if (!ir.ok)
+            return ir;
+        bool present = false;
+        struct zcl_result er = pkgl_exists(install, &present);
+        if (!er.ok || !present)
+            return er.ok
+                ? ZCL_ERR(-1, "locked dependency %s is no longer installed",
+                          dep_hex)
+                : er;
+        char *slot = dep_args + dep_stride * i;
+        (void)snprintf(slot, dep_stride, "--dep=%s,%s", dep_hex, install);
+        argv[(*argc)++] = slot;
+    }
+    return ZCL_OK;
+}
+
+/* The worker run's tail: a completed cache-fed run's stats line is
+ * consumed into the report, exit 4 is named as the host's isolation
+ * boundary, and any other failure is trimmed to one line of detail. */
+static struct zcl_result pkgl_reproduce_worker_exit(
+    int rc, char *out, bool use_fast,
+    struct package_lifecycle_reproduce_report *rep,
+    bool *full_isolation_unavailable)
+{
+    if (use_fast) {
+        rep->fast_cache_used = true;
+        /* The stats line is printed only by a run that completed, so a
+         * refused rebuild honestly reports the all-zero outcome. */
+        if (rc == 0)
+            pkgl_fast_stats_consume(rep, out);
+    }
+    if (rc != 0) {
+        /* Exit 4 is the fixed verifier's documented fail-closed response to
+         * --require-full-isolation on a host with no qualified backend. Name
+         * that platform boundary instead of reducing it to an opaque worker
+         * number; no output or receipt is admitted either way. */
+        if (rc == 4) {
+            *full_isolation_unavailable = true;
+            return ZCL_ERR(
+                -1,
+                "full package-build isolation is unavailable on this host; "
+                "the rebuild did not run and no reproduction receipt was "
+                "filed");
+        }
+        /* Trim the captured stdout to one line for the operator's detail. */
+        char *nl = strchr(out, '\n');
+        if (nl)
+            *nl = '\0';
+        return ZCL_ERR(-1, "rebuild worker exit %d%s%s", rc,
+                       out[0] ? ": " : "", out);
+    }
+    return ZCL_OK;
+}
+
 /* Rebuild one installed root under the standard profile in candidate mode.
  * The dependency argv comes from the reference (install) receipt's own
  * committed set — never from a re-derived lock — so the rebuild is fed
@@ -206,28 +274,11 @@ static struct zcl_result pkgl_run_reproduce_worker(
     argv[argc++] = cpu_arg;
     argv[argc++] = emit_arg;
     argv[argc++] = lock_arg;
-    for (size_t i = 0; i < reference->dep_count; i++) {
-        char dep_hex[65];
-        zcl_hex_encode(reference->dep_roots[i], 32, dep_hex);
-        char install[PKGL_PATH_MAX];
-        struct zcl_result ir = pkgl_installed_dir(
-            ctx, reference->dep_roots[i], install, sizeof(install));
-        if (!ir.ok) {
-            free(dep_args);
-            return ir;
-        }
-        bool present = false;
-        struct zcl_result er = pkgl_exists(install, &present);
-        if (!er.ok || !present) {
-            free(dep_args);
-            return er.ok
-                ? ZCL_ERR(-1, "locked dependency %s is no longer installed",
-                          dep_hex)
-                : er;
-        }
-        char *slot = dep_args + dep_stride * i;
-        (void)snprintf(slot, dep_stride, "--dep=%s,%s", dep_hex, install);
-        argv[argc++] = slot;
+    struct zcl_result dr = pkgl_reproduce_dep_slots(
+        ctx, reference, dep_args, dep_stride, argv, &argc);
+    if (!dr.ok) {
+        free(dep_args);
+        return dr;
     }
     /* The cache flag sits where the factory's second-receipt run puts it:
      * after the committed dependency set, before the isolation demand. */
@@ -243,34 +294,8 @@ static struct zcl_result pkgl_run_reproduce_worker(
     char out[8192];
     int rc = zcl_spawn_capture(argv, out, sizeof(out), PKGL_BUILD_TIMEOUT_MS);
     free(dep_args);
-    if (use_fast) {
-        rep->fast_cache_used = true;
-        /* The stats line is printed only by a run that completed, so a
-         * refused rebuild honestly reports the all-zero outcome. */
-        if (rc == 0)
-            pkgl_fast_stats_consume(rep, out);
-    }
-    if (rc != 0) {
-        /* Exit 4 is the fixed verifier's documented fail-closed response to
-         * --require-full-isolation on a host with no qualified backend. Name
-         * that platform boundary instead of reducing it to an opaque worker
-         * number; no output or receipt is admitted either way. */
-        if (rc == 4) {
-            *full_isolation_unavailable = true;
-            return ZCL_ERR(
-                -1,
-                "full package-build isolation is unavailable on this host; "
-                "the rebuild did not run and no reproduction receipt was "
-                "filed");
-        }
-        /* Trim the captured stdout to one line for the operator's detail. */
-        char *nl = strchr(out, '\n');
-        if (nl)
-            *nl = '\0';
-        return ZCL_ERR(-1, "rebuild worker exit %d%s%s", rc,
-                       out[0] ? ": " : "", out);
-    }
-    return ZCL_OK;
+    return pkgl_reproduce_worker_exit(rc, out, use_fast, rep,
+                                      full_isolation_unavailable);
 }
 
 /* Read, parse, and re-hash the receipt that travels with the install. */
@@ -308,21 +333,15 @@ static struct zcl_result pkgl_reproduce_reference(
     return ZCL_OK;
 }
 
-// long-function-ok:one-reproduce-transaction — the reference load, the
-// input re-verification, the confined rebuild, the byte-identity compare,
-// and the conditional filing are ONE transaction: a split would create a
-// reachable state where a second receipt exists without the MATCH and
-// distinct-id gates having been applied to it.
-static struct zcl_result pkgl_reproduce_run(
+/* Reproduction is a fact about an install: the reference receipt is the
+ * one that travels with the installed tree. */
+static struct zcl_result pkgl_reproduce_locate_installed(
     const struct pkgl_ctx *ctx, const uint8_t root[32],
-    const struct vcs_package_release *release, const char *fast_cache,
-    struct package_lifecycle_reproduce_report *out)
+    const struct vcs_package_release *release, char *installed,
+    size_t installed_size, struct package_lifecycle_reproduce_report *out)
 {
-    /* Reproduction is a fact about an install: the reference receipt is the
-     * one that travels with the installed tree. */
-    char installed[PKGL_PATH_MAX];
     struct zcl_result r = pkgl_installed_dir(ctx, root, installed,
-                                             sizeof(installed));
+                                             installed_size);
     bool present = false;
     if (r.ok)
         r = pkgl_exists(installed, &present);
@@ -333,9 +352,19 @@ static struct zcl_result pkgl_reproduce_run(
             out, "not-installed",
             ZCL_ERR(-1, "%s is not installed on this node — install it "
                         "before asking for a reproduction", release->name));
+    return ZCL_OK;
+}
 
-    struct vcs_package_build_receipt reference;
-    r = pkgl_reproduce_reference(installed, root, release, &reference,
+/* Load the reference receipt, then re-verify every committed input against
+ * it before anything reaches the worker. */
+static struct zcl_result pkgl_reproduce_verify_inputs(
+    const struct pkgl_ctx *ctx, const uint8_t root[32],
+    const struct vcs_package_release *release, const char *installed,
+    struct vcs_package_build_receipt *reference,
+    struct package_lifecycle_reproduce_report *out)
+{
+    struct zcl_result r =
+        pkgl_reproduce_reference(installed, root, release, reference,
                                  out->reference_receipt_id);
     if (!r.ok)
         return pkgl_reproduce_refused(out, "installed-receipt-invalid", r);
@@ -349,20 +378,28 @@ static struct zcl_result pkgl_reproduce_run(
     if (!r.ok)
         return pkgl_reproduce_refused(
             out, rule[0] ? rule : "package-verify-failed", r);
+    return ZCL_OK;
+}
 
-    struct pkgl_reproduce_paths p;
-    r = pkgl_reproduce_paths_init(ctx, root, release->recipe_root, &p);
-    if (!r.ok)
-        return pkgl_reproduce_refused(out, "worker-missing", r);
-    ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work), "stale reproduce work is replaced");
+/* Materialize the committed source from the CAS and run the confined
+ * standard-profile rebuild over it, refusing with the worker's own
+ * result. */
+static struct zcl_result pkgl_reproduce_confined_rebuild(
+    const struct pkgl_ctx *ctx, const uint8_t root[32],
+    const struct vcs_package_release *release, const char *fast_cache,
+    struct pkgl_reproduce_paths *p,
+    const struct vcs_package_build_receipt *reference,
+    struct package_lifecycle_reproduce_report *out)
+{
+    ZCL_IGNORE_RESULT(pkgl_rm_rf(p->work), "stale reproduce work is replaced");
     bool full_isolation_unavailable = false;
-    r = pkgl_materialize_package(ctx, root, p.src);
+    struct zcl_result r = pkgl_materialize_package(ctx, root, p->src);
     if (r.ok)
-        r = pkgl_run_reproduce_worker(ctx, &p, release->name, &reference,
+        r = pkgl_run_reproduce_worker(ctx, p, release->name, reference,
                                       fast_cache, out,
                                       &full_isolation_unavailable);
     if (!r.ok) {
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work),
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p->work),
                           "failed reproduce work removed");
         return pkgl_reproduce_refused(
             out,
@@ -370,36 +407,28 @@ static struct zcl_result pkgl_reproduce_run(
                                        : "build-failed",
             r);
     }
+    return ZCL_OK;
+}
 
-    /* The rebuild's own account of what it produced. */
-    char report_path[PKGL_PATH_MAX];
-    int n = snprintf(report_path, sizeof(report_path), "%s/build-report",
-                     p.emit);
-    if (n <= 0 || (size_t)n >= sizeof(report_path)) {
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work), "failed reproduce work removed");
-        return pkgl_reproduce_refused(
-            out, "build-report-path", ZCL_ERR(-1, "emit path too long"));
-    }
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    r = pkgl_read_file(report_path, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES, &wire,
-                       &wire_len);
-    if (!r.ok) {
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work), "failed reproduce work removed");
-        return pkgl_reproduce_refused(out, "build-report-missing", r);
-    }
+/* Parse the rebuild's receipt, record the compare verdict, and hold the
+ * two gates — MATCH on every committed output and a DISTINCT receipt id —
+ * before any second receipt is allowed to exist for filing. */
+static struct zcl_result pkgl_reproduce_compare_rebuild(
+    struct vcs_package_build_receipt *reference, uint8_t *wire,
+    size_t wire_len, char *work, uint8_t rebuild_id[32],
+    struct package_lifecycle_reproduce_report *out)
+{
     struct vcs_package_build_receipt rebuild;
     enum vcs_package_build_error berr =
         vcs_package_build_parse(wire, wire_len, &rebuild);
-    uint8_t rebuild_id[32];
-    memset(rebuild_id, 0, sizeof(rebuild_id));
+    memset(rebuild_id, 0, 32);
     if (berr == VCS_PACKAGE_BUILD_OK &&
         vcs_package_build_id(&rebuild, rebuild_id) != VCS_PACKAGE_BUILD_OK)
         berr = VCS_PACKAGE_BUILD_ERR_ROOT;
     struct vcs_reproduce_verdict verdict;
     memset(&verdict, 0, sizeof(verdict));
     if (berr == VCS_PACKAGE_BUILD_OK) {
-        vcs_package_reproduce_compare(&reference, &rebuild, &verdict);
+        vcs_package_reproduce_compare(reference, &rebuild, &verdict);
         out->matched = verdict.reproduced;
         out->compare_rule = verdict.rule;
         (void)snprintf(out->compare_detail, sizeof(out->compare_detail),
@@ -408,7 +437,7 @@ static struct zcl_result pkgl_reproduce_run(
     if (berr != VCS_PACKAGE_BUILD_OK || !verdict.reproduced ||
         memcmp(rebuild_id, out->reference_receipt_id, 32) == 0) {
         free(wire);
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work), "failed reproduce work removed");
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(work), "failed reproduce work removed");
         if (berr != VCS_PACKAGE_BUILD_OK)
             return pkgl_reproduce_refused(
                 out, "build-report-invalid",
@@ -428,15 +457,22 @@ static struct zcl_result pkgl_reproduce_run(
                         "receipt id — no second build event exists"));
     }
     memcpy(out->receipt_id, rebuild_id, 32);
+    return ZCL_OK;
+}
 
-    /* File the second receipt by its exact id, with the install path's
-     * atomic-write discipline. */
+/* File the second receipt by its exact id, with the install path's
+ * atomic-write discipline. */
+static struct zcl_result pkgl_reproduce_file_receipt(
+    const struct pkgl_ctx *ctx, struct pkgl_reproduce_paths *p,
+    const uint8_t rebuild_id[32], uint8_t *wire, size_t wire_len,
+    struct package_lifecycle_reproduce_report *out)
+{
     char id_hex[65];
     zcl_hex_encode(rebuild_id, 32, id_hex);
     char rel[96];
     (void)snprintf(rel, sizeof(rel), "receipts/%s", id_hex);
     char filed[PKGL_PATH_MAX];
-    r = pkgl_join(ctx, rel, filed, sizeof(filed));
+    struct zcl_result r = pkgl_join(ctx, rel, filed, sizeof(filed));
     if (r.ok) {
         char parent[PKGL_PATH_MAX];
         (void)snprintf(parent, sizeof(parent), "%s", filed);
@@ -451,11 +487,70 @@ static struct zcl_result pkgl_reproduce_run(
     if (r.ok)
         r = pkgl_write_atomic(filed, wire, wire_len);
     free(wire);
-    ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work), "reproduce work is not kept");
+    ZCL_IGNORE_RESULT(pkgl_rm_rf(p->work), "reproduce work is not kept");
     if (!r.ok)
         return pkgl_reproduce_refused(out, "receipt-write", r);
     out->filed = true;
     return ZCL_OK;
+}
+
+// long-function-ok:one-reproduce-transaction — the reference load, the
+// input re-verification, the confined rebuild, the byte-identity compare,
+// and the conditional filing are ONE transaction: a split would create a
+// reachable state where a second receipt exists without the MATCH and
+// distinct-id gates having been applied to it.
+static struct zcl_result pkgl_reproduce_run(
+    const struct pkgl_ctx *ctx, const uint8_t root[32],
+    const struct vcs_package_release *release, const char *fast_cache,
+    struct package_lifecycle_reproduce_report *out)
+{
+    char installed[PKGL_PATH_MAX];
+    struct zcl_result r = pkgl_reproduce_locate_installed(
+        ctx, root, release, installed, sizeof(installed), out);
+    if (!r.ok)
+        return r;
+
+    struct vcs_package_build_receipt reference;
+    r = pkgl_reproduce_verify_inputs(ctx, root, release, installed,
+                                     &reference, out);
+    if (!r.ok)
+        return r;
+
+    struct pkgl_reproduce_paths p;
+    r = pkgl_reproduce_paths_init(ctx, root, release->recipe_root, &p);
+    if (!r.ok)
+        return pkgl_reproduce_refused(out, "worker-missing", r);
+    r = pkgl_reproduce_confined_rebuild(ctx, root, release, fast_cache, &p,
+                                        &reference, out);
+    if (!r.ok)
+        return r;
+
+    /* The rebuild's own account of what it produced. */
+    char report_path[PKGL_PATH_MAX];
+    int n = snprintf(report_path, sizeof(report_path), "%s/build-report",
+                     p.emit);
+    if (n <= 0 || (size_t)n >= sizeof(report_path)) {
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work), "failed reproduce work removed");
+        return pkgl_reproduce_refused(
+            out, "build-report-path", ZCL_ERR(-1, "emit path too long"));
+    }
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    r = pkgl_read_file(report_path, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES, &wire,
+                       &wire_len);
+    if (!r.ok) {
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work), "failed reproduce work removed");
+        return pkgl_reproduce_refused(out, "build-report-missing", r);
+    }
+
+    uint8_t rebuild_id[32];
+    r = pkgl_reproduce_compare_rebuild(&reference, wire, wire_len, p.work,
+                                       rebuild_id, out);
+    if (!r.ok)
+        return r;
+
+    return pkgl_reproduce_file_receipt(ctx, &p, rebuild_id, wire, wire_len,
+                                       out);
 }
 
 struct zcl_result package_lifecycle_reproduce(
