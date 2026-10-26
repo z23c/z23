@@ -292,6 +292,166 @@ struct zat_row {
 };
 
 
+/* Reads the optional maximum_records input into cap. Returns false only for
+ * a non-positive integer; an absent or non-integer value leaves cap alone. */
+static bool zat_pull_row_cap(const struct zcl_command_request *request,
+                             uint32_t *cap)
+{
+    const struct json_value *mv = json_get(request->input, "maximum_records");
+    if (mv && mv->type == JSON_INT) {
+        int64_t want = json_get_int(mv);
+        if (want <= 0)
+            return false;
+        *cap = want > (int64_t)ZAT_ROWS_CEILING ? ZAT_ROWS_CEILING
+                                                : (uint32_t)want;
+    }
+    return true;
+}
+
+static void zat_pull_collect_rows(struct json_value *pointers, size_t seen,
+                                  struct zat_row *rows, uint32_t cap,
+                                  uint32_t *distinct, bool *truncated)
+{
+    for (size_t i = 0; i < seen; i++) {
+        const struct json_value *record = json_at(pointers, i);
+        const char *transport =
+            record ? json_get_str(json_get(record, "transport_root")) : NULL;
+        if (!transport || strlen(transport) != 64)
+            continue;
+        bool duplicate = false;
+        for (uint32_t j = 0; j < *distinct; j++)
+            if (strcmp(rows[j].transport_root, transport) == 0) {
+                duplicate = true;
+                break;
+            }
+        if (duplicate)
+            continue;
+        if (*distinct >= cap) {
+            *truncated = true;
+            break;
+        }
+        (void)snprintf(rows[*distinct].transport_root,
+                       sizeof(rows[*distinct].transport_root), "%s",
+                       transport);
+        (void)snprintf(rows[*distinct].fetch_outcome,
+                       sizeof(rows[*distinct].fetch_outcome), "%s",
+                       "not-attempted");
+        (void)snprintf(rows[*distinct].admit_rule,
+                       sizeof(rows[*distinct].admit_rule), "%s",
+                       "not-attempted");
+        rows[*distinct].result_class = "";
+        (*distinct)++;
+    }
+}
+
+static void zat_pull_admit_row(struct vcs_package_store *store,
+                               const char *zcode_dir,
+                               const uint8_t *package_root,
+                               struct zat_row *row, uint32_t *admitted,
+                               uint32_t *filed, uint32_t *refused)
+{
+    uint8_t transport_root[32];
+    if (!zcl_hex_decode_lower(row->transport_root, transport_root, 32)) {
+        (void)snprintf(row->admit_rule, sizeof(row->admit_rule), "%s",
+                       "pointer-transport-root-not-canonical-hex");
+        (*refused)++;
+        return;
+    }
+    struct vcs_package_attest_transport_outcome outcome;
+    memset(&outcome, 0, sizeof(outcome));
+
+    /* expect_package_root is the caller's root and is NEVER NULL. This
+     * single argument is the whole reason a hostile pointer in this
+     * namespace cannot poison a package's evidence: an attestation
+     * whose package_root differs is refused ERR_BINDING and not filed.
+     * Do not "simplify" it to NULL. */
+    enum vcs_package_attest_transport_result r =
+        vcs_package_attest_transport_admit(store, zcode_dir,
+                                           transport_root, package_root,
+                                           &outcome);
+    zat_rule_string(&outcome, r, row->admit_rule);
+    if (r != VCS_PACKAGE_ATTEST_TRANSPORT_OK) {
+        (*refused)++;
+        return;
+    }
+    row->admitted = true;
+    row->filed = outcome.filed;
+    row->already_present = outcome.already_present;
+    (*admitted)++;
+    *filed += outcome.filed ? 1u : 0u;
+    zcl_hex_encode(outcome.attestation_id, sizeof(outcome.attestation_id),
+                   row->attestation_id);
+    zcl_hex_encode(outcome.attestation.verifier_pubkey,
+                   sizeof(outcome.attestation.verifier_pubkey),
+                   row->signer_pubkey);
+    row->result_class = vcs_package_attest_result_string(
+        outcome.attestation.result_class);
+}
+
+/* Two very different dead ends, never merged into one "not found":
+ * nobody has attested this package yet, versus somebody has and
+ * nobody reachable is serving the bytes. The next step differs
+ * completely — wait for a verifier, or fix reachability. */
+static void zat_pull_status(uint32_t distinct, uint32_t fetched,
+                            uint32_t admitted, const char **status,
+                            const char **blocker)
+{
+    *status = "ATTESTATIONS_ADMITTED";
+    *blocker = "";
+    if (distinct == 0) {
+        *status = "NO_ATTESTATION_POINTERS";
+        *blocker = "no_pointer_record_names_an_attestation_for_this_package_"
+                   "root";
+    } else if (admitted == 0) {
+        /* Only once NOTHING landed is it honest to name a dead end, and
+         * only then does it matter which one. admitted is tested BEFORE
+         * fetched because admission above is deliberately unconditional:
+         * a blob this node already holds is admitted and filed even when
+         * provider discovery served nothing. Testing fetched first would
+         * print "no authenticated provider served the attestation bytes"
+         * in a reply that also says filed=1, sending an operator to
+         * repair reachability that was never broken. */
+        if (fetched == 0) {
+            *status = "ATTESTATION_BYTES_UNREACHABLE";
+            *blocker = "pointers_exist_but_no_authenticated_provider_served_"
+                       "the_attestation_bytes";
+        } else {
+            *status = "ATTESTATIONS_REFUSED";
+            *blocker = "every_fetched_attestation_failed_a_named_admission_"
+                       "rule";
+        }
+    }
+}
+
+static void zat_pull_fill_rows(struct json_value *list,
+                               const struct zat_row *rows, uint32_t distinct)
+{
+    json_init(list);
+    json_set_array(list);
+    for (uint32_t i = 0; i < distinct; i++) {
+        const struct zat_row *row = &rows[i];
+        struct json_value entry;
+        json_init(&entry);
+        json_set_object(&entry);
+        (void)json_push_kv_str(&entry, "transport_root", row->transport_root);
+        (void)json_push_kv_str(&entry, "fetch_outcome", row->fetch_outcome);
+        (void)json_push_kv_bool(&entry, "fetched", row->fetched);
+        (void)json_push_kv_str(&entry, "admit_result", row->admit_rule);
+        (void)json_push_kv_bool(&entry, "admitted", row->admitted);
+        (void)json_push_kv_str(&entry, "attestation_id",
+                               row->attestation_id);
+        (void)json_push_kv_str(&entry, "signer_pubkey", row->signer_pubkey);
+        (void)json_push_kv_str(&entry, "result_class",
+                               row->result_class ? row->result_class : "");
+        (void)json_push_kv_bool(&entry, "filed", row->filed);
+        (void)json_push_kv_bool(&entry, "already_present",
+                                row->already_present);
+        (void)json_push_back(list, &entry);
+        json_free(&entry);
+    }
+}
+
+
 void zcl_native_handle_zcode_package_attest_pull(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -311,21 +471,15 @@ void zcl_native_handle_zcode_package_attest_pull(
     zcl_hex_encode(package_root, 32, package_hex);
 
     uint32_t cap = ZAT_ROWS_DEFAULT;
-    const struct json_value *mv = json_get(request->input, "maximum_records");
-    if (mv && mv->type == JSON_INT) {
-        int64_t want = json_get_int(mv);
-        if (want <= 0) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID,
-                                   "BAD_MAXIMUM_RECORDS", "normalize", false,
-                                   false,
-                                   "maximum_records must be a positive "
-                                   "integer",
-                                   "zcode.package.attest.pull");
-            return;
-        }
-        cap = want > (int64_t)ZAT_ROWS_CEILING ? ZAT_ROWS_CEILING
-                                               : (uint32_t)want;
+    if (!zat_pull_row_cap(request, &cap)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "BAD_MAXIMUM_RECORDS", "normalize", false,
+                               false,
+                               "maximum_records must be a positive "
+                               "integer",
+                               "zcode.package.attest.pull");
+        return;
     }
 
     struct json_value pointers;
@@ -333,10 +487,6 @@ void zcl_native_handle_zcode_package_attest_pull(
                             package_hex, &pointers))
         return;
 
-    /* Distinct transport roots, in discovery order, bounded. N independent
-     * verifiers publish N pointers at this one key; duplicates of the same
-     * blob (a republished sequence, a second provider) collapse here so a
-     * verifier cannot consume the row budget by republishing. */
     size_t seen = json_size(&pointers);
     struct zat_row *rows = zcl_calloc(cap, sizeof(*rows), "zat_pull_rows");
     if (!rows) {
@@ -349,36 +499,11 @@ void zcl_native_handle_zcode_package_attest_pull(
     }
     uint32_t distinct = 0;
     bool truncated = false;
-    for (size_t i = 0; i < seen; i++) {
-        const struct json_value *record = json_at(&pointers, i);
-        const char *transport =
-            record ? json_get_str(json_get(record, "transport_root")) : NULL;
-        if (!transport || strlen(transport) != 64)
-            continue;
-        bool duplicate = false;
-        for (uint32_t j = 0; j < distinct; j++)
-            if (strcmp(rows[j].transport_root, transport) == 0) {
-                duplicate = true;
-                break;
-            }
-        if (duplicate)
-            continue;
-        if (distinct >= cap) {
-            truncated = true;
-            break;
-        }
-        (void)snprintf(rows[distinct].transport_root,
-                       sizeof(rows[distinct].transport_root), "%s",
-                       transport);
-        (void)snprintf(rows[distinct].fetch_outcome,
-                       sizeof(rows[distinct].fetch_outcome), "%s",
-                       "not-attempted");
-        (void)snprintf(rows[distinct].admit_rule,
-                       sizeof(rows[distinct].admit_rule), "%s",
-                       "not-attempted");
-        rows[distinct].result_class = "";
-        distinct++;
-    }
+    /* Distinct transport roots, in discovery order, bounded. N independent
+     * verifiers publish N pointers at this one key; duplicates of the same
+     * blob (a republished sequence, a second provider) collapse here so a
+     * verifier cannot consume the row budget by republishing. */
+    zat_pull_collect_rows(&pointers, seen, rows, cap, &distinct, &truncated);
     json_free(&pointers);
 
     bool own_store = false;
@@ -413,74 +538,14 @@ void zcl_native_handle_zcode_package_attest_pull(
          * are actually here, and its refusal names the rule. A row that
          * fails stays in the report; the sweep continues so one bad or
          * unreachable pointer cannot cost the other verifiers' evidence. */
-        uint8_t transport_root[32];
-        if (!zcl_hex_decode_lower(row->transport_root, transport_root, 32)) {
-            (void)snprintf(row->admit_rule, sizeof(row->admit_rule), "%s",
-                           "pointer-transport-root-not-canonical-hex");
-            refused++;
-            continue;
-        }
-        struct vcs_package_attest_transport_outcome outcome;
-        memset(&outcome, 0, sizeof(outcome));
-
-        /* expect_package_root is the caller's root and is NEVER NULL. This
-         * single argument is the whole reason a hostile pointer in this
-         * namespace cannot poison a package's evidence: an attestation
-         * whose package_root differs is refused ERR_BINDING and not filed.
-         * Do not "simplify" it to NULL. */
-        enum vcs_package_attest_transport_result r =
-            vcs_package_attest_transport_admit(store, zcode_dir,
-                                               transport_root, package_root,
-                                               &outcome);
-        zat_rule_string(&outcome, r, row->admit_rule);
-        if (r != VCS_PACKAGE_ATTEST_TRANSPORT_OK) {
-            refused++;
-            continue;
-        }
-        row->admitted = true;
-        row->filed = outcome.filed;
-        row->already_present = outcome.already_present;
-        admitted++;
-        filed += outcome.filed ? 1u : 0u;
-        zcl_hex_encode(outcome.attestation_id, sizeof(outcome.attestation_id),
-                       row->attestation_id);
-        zcl_hex_encode(outcome.attestation.verifier_pubkey,
-                       sizeof(outcome.attestation.verifier_pubkey),
-                       row->signer_pubkey);
-        row->result_class = vcs_package_attest_result_string(
-            outcome.attestation.result_class);
+        zat_pull_admit_row(store, zcode_dir, package_root, row,
+                           &admitted, &filed, &refused);
     }
     ztl_close_store(store, own_store);
 
-    /* Two very different dead ends, never merged into one "not found":
-     * nobody has attested this package yet, versus somebody has and
-     * nobody reachable is serving the bytes. The next step differs
-     * completely — wait for a verifier, or fix reachability. */
-    const char *status = "ATTESTATIONS_ADMITTED";
-    const char *blocker = "";
-    if (distinct == 0) {
-        status = "NO_ATTESTATION_POINTERS";
-        blocker = "no_pointer_record_names_an_attestation_for_this_package_"
-                  "root";
-    } else if (admitted == 0) {
-        /* Only once NOTHING landed is it honest to name a dead end, and
-         * only then does it matter which one. admitted is tested BEFORE
-         * fetched because admission above is deliberately unconditional:
-         * a blob this node already holds is admitted and filed even when
-         * provider discovery served nothing. Testing fetched first would
-         * print "no authenticated provider served the attestation bytes"
-         * in a reply that also says filed=1, sending an operator to
-         * repair reachability that was never broken. */
-        if (fetched == 0) {
-            status = "ATTESTATION_BYTES_UNREACHABLE";
-            blocker = "pointers_exist_but_no_authenticated_provider_served_"
-                      "the_attestation_bytes";
-        } else {
-            status = "ATTESTATIONS_REFUSED";
-            blocker = "every_fetched_attestation_failed_a_named_admission_"
-                      "rule";
-        }
-    }
+    const char *status;
+    const char *blocker;
+    zat_pull_status(distinct, fetched, admitted, &status, &blocker);
 
     (void)json_push_kv_str(&reply->data, "package_root", package_hex);
     (void)json_push_kv_str(&reply->data, "namespace",
@@ -499,29 +564,7 @@ void zcl_native_handle_zcode_package_attest_pull(
     (void)json_push_kv_bool(&reply->data, "rows_truncated", truncated);
 
     struct json_value list;
-    json_init(&list);
-    json_set_array(&list);
-    for (uint32_t i = 0; i < distinct; i++) {
-        const struct zat_row *row = &rows[i];
-        struct json_value entry;
-        json_init(&entry);
-        json_set_object(&entry);
-        (void)json_push_kv_str(&entry, "transport_root", row->transport_root);
-        (void)json_push_kv_str(&entry, "fetch_outcome", row->fetch_outcome);
-        (void)json_push_kv_bool(&entry, "fetched", row->fetched);
-        (void)json_push_kv_str(&entry, "admit_result", row->admit_rule);
-        (void)json_push_kv_bool(&entry, "admitted", row->admitted);
-        (void)json_push_kv_str(&entry, "attestation_id",
-                               row->attestation_id);
-        (void)json_push_kv_str(&entry, "signer_pubkey", row->signer_pubkey);
-        (void)json_push_kv_str(&entry, "result_class",
-                               row->result_class ? row->result_class : "");
-        (void)json_push_kv_bool(&entry, "filed", row->filed);
-        (void)json_push_kv_bool(&entry, "already_present",
-                                row->already_present);
-        (void)json_push_back(&list, &entry);
-        json_free(&entry);
-    }
+    zat_pull_fill_rows(&list, rows, distinct);
     (void)json_push_kv(&reply->data, "rows", &list);
     json_free(&list);
     free(rows);
@@ -551,6 +594,67 @@ void zcl_native_handle_zcode_package_attest_pull(
 }
 
 /* ── zcode package attest admit ─────────────────────────────────────── */
+
+/* Names the reply code, message and exit class for one refused admit. */
+static void zat_admit_refusal_verdict(
+    enum vcs_package_attest_transport_result r,
+    const struct vcs_package_attest_transport_outcome *outcome,
+    const char **code, const char **why, enum zcl_command_exit *exit_code)
+{
+    /* One code per rule, never "something went wrong". */
+    *code = "ADMIT_REFUSED";
+    *why = "the delivered bytes were not admitted";
+    *exit_code = ZCL_COMMAND_EXIT_INVALID;
+    if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB &&
+        outcome->blob_error == VCS_BLOB_ERR_ABSENT) {
+        *code = "ATTESTATION_BYTES_ABSENT";
+        /* Kept under the 192-byte reply message bound: an operator
+         * instruction that truncates mid-word stops being an
+         * instruction. */
+        *why = "this node holds no blob at that transport root; fetch it "
+               "first with zcode package fetch, or use zcode package "
+               "attest pull to discover and fetch it from a package root";
+    } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB) {
+        *code = "BLOB_REFUSED";
+        *why = "the blob layer refused the delivered bytes: the tracked "
+               "root is not a one-file blob, does not hash back to its "
+               "root, or exceeds the canonical attestation wire bound";
+    } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST) {
+        *code = "ATTESTATION_INVALID";
+        *why = "the delivered bytes are not a canonical ZCLATT wire, or "
+               "the embedded verifier signature does not verify";
+    /* Deliberately no ERR_ID branch: it is structurally unreachable
+     * here. ERR_ID comes only from the OFFER path, where the caller
+     * names the filename and it can disagree with the id recomputed
+     * from the bytes. This leaf calls _admit(), which derives the id
+     * from the wire and files at that same derived id, so there is
+     * nothing to mismatch. Naming an id check we do not perform would
+     * tell a reader this leaf verifies more than it does. */
+    } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING) {
+        *code = "PACKAGE_ROOT_BINDING";
+        *why = "the delivered attestation names a different package_root "
+               "than the one you asked about, so nothing was filed: it is "
+               "not evidence about your package";
+    } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT) {
+        *code = "STORE_CONFLICT";
+        *why = "a different or unreadable object already occupies this "
+               "attestation id — impossible for honest wires, since the "
+               "id is the content hash, so this fails closed";
+        *exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+    } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_STORE) {
+        *code = "STORE_WRITE";
+        *why = "the attestation could not be filed under "
+               "<datadir>/zcode/attestations";
+        *exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+    } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_PATH) {
+        *code = "DATADIR_TOO_LONG";
+        *why = "datadir path too long";
+    } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ALLOC) {
+        *code = "ALLOC";
+        *why = "attestation wire buffer";
+        *exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+    }
+}
 
 /* The third leaf, and the one that decouples the transport from the DHT.
  *
@@ -645,59 +749,10 @@ void zcl_native_handle_zcode_package_attest_admit(
     zcl_hex_encode(transport_root, 32, transport_hex);
 
     if (r != VCS_PACKAGE_ATTEST_TRANSPORT_OK) {
-        /* One code per rule, never "something went wrong". */
-        const char *code = "ADMIT_REFUSED";
-        const char *why = "the delivered bytes were not admitted";
-        enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INVALID;
-        if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB &&
-            outcome.blob_error == VCS_BLOB_ERR_ABSENT) {
-            code = "ATTESTATION_BYTES_ABSENT";
-            /* Kept under the 192-byte reply message bound: an operator
-             * instruction that truncates mid-word stops being an
-             * instruction. */
-            why = "this node holds no blob at that transport root; fetch it "
-                  "first with zcode package fetch, or use zcode package "
-                  "attest pull to discover and fetch it from a package root";
-        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BLOB) {
-            code = "BLOB_REFUSED";
-            why = "the blob layer refused the delivered bytes: the tracked "
-                  "root is not a one-file blob, does not hash back to its "
-                  "root, or exceeds the canonical attestation wire bound";
-        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ATTEST) {
-            code = "ATTESTATION_INVALID";
-            why = "the delivered bytes are not a canonical ZCLATT wire, or "
-                  "the embedded verifier signature does not verify";
-        /* Deliberately no ERR_ID branch: it is structurally unreachable
-         * here. ERR_ID comes only from the OFFER path, where the caller
-         * names the filename and it can disagree with the id recomputed
-         * from the bytes. This leaf calls _admit(), which derives the id
-         * from the wire and files at that same derived id, so there is
-         * nothing to mismatch. Naming an id check we do not perform would
-         * tell a reader this leaf verifies more than it does. */
-        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_BINDING) {
-            code = "PACKAGE_ROOT_BINDING";
-            why = "the delivered attestation names a different package_root "
-                  "than the one you asked about, so nothing was filed: it is "
-                  "not evidence about your package";
-        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT) {
-            code = "STORE_CONFLICT";
-            why = "a different or unreadable object already occupies this "
-                  "attestation id — impossible for honest wires, since the "
-                  "id is the content hash, so this fails closed";
-            exit_code = ZCL_COMMAND_EXIT_INTERNAL;
-        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_STORE) {
-            code = "STORE_WRITE";
-            why = "the attestation could not be filed under "
-                  "<datadir>/zcode/attestations";
-            exit_code = ZCL_COMMAND_EXIT_INTERNAL;
-        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_PATH) {
-            code = "DATADIR_TOO_LONG";
-            why = "datadir path too long";
-        } else if (r == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_ALLOC) {
-            code = "ALLOC";
-            why = "attestation wire buffer";
-            exit_code = ZCL_COMMAND_EXIT_INTERNAL;
-        }
+        const char *code;
+        const char *why;
+        enum zcl_command_exit exit_code;
+        zat_admit_refusal_verdict(r, &outcome, &code, &why, &exit_code);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, exit_code,
                                code, "execute", false, false, why, rule);
         return;
