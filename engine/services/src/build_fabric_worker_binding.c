@@ -74,6 +74,104 @@ bool bfw_binding_current(
                expected_action->context_root_sha3) == 0;
 }
 
+/* Stage outcomes for the ZCODE context load: BFW_ZCODE_STAGE_OK means a
+ * stage passed; every other code names the check that failed, so
+ * bfw_load_zcode_context can refuse with the matching reason. */
+enum bfw_zcode_stage {
+    BFW_ZCODE_STAGE_OK = 0,
+    BFW_ZCODE_STAGE_CAS_MISS,
+    BFW_ZCODE_STAGE_STALE,
+    BFW_ZCODE_STAGE_TOOLCHAIN_STALE,
+    BFW_ZCODE_STAGE_SOURCE_STALE
+};
+
+static bool bfw_decode_zcode_context_roots(
+    const struct db_build_action *action, uint8_t task_root[32],
+    uint8_t candidate_root[32], uint8_t policy_root[32])
+{
+    return zcl_hex_decode_lower(action->task_root_sha3, task_root, 32) &&
+        zcl_hex_decode_lower(action->candidate_root_sha3,
+                             candidate_root, 32) &&
+        zcl_hex_decode_lower(action->proof_policy_root_sha3,
+                             policy_root, 32);
+}
+
+static bool bfw_load_and_parse_zcode_task(const char *workspace,
+                                          uint8_t task_root[32],
+                                          struct vcs_zcode_task_v1 *task)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool loaded = vcs_object_load_raw(workspace, task_root, &wire,
+                                      &wire_len) == 0 &&
+        vcs_zcode_task_parse(wire, wire_len, task) == VCS_ZCODE_DEV_OK;
+    free(wire);
+    return loaded;
+}
+
+static bool bfw_zcode_task_fresh(struct vcs_zcode_task_v1 *task,
+                                 const uint8_t task_root[32], int64_t now)
+{
+    uint8_t checked[32];
+    return vcs_zcode_task_root(task, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(checked, task_root, 32) == 0 &&
+        vcs_zcode_task_validate_at(task, now) == VCS_ZCODE_DEV_OK;
+}
+
+static enum bfw_zcode_stage bfw_load_verified_zcode_candidate(
+    const char *workspace, uint8_t candidate_root[32],
+    struct vcs_zcode_task_v1 *task, int64_t now,
+    struct vcs_zcode_candidate_v1 *candidate)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (vcs_object_load_raw(workspace, candidate_root, &wire, &wire_len) != 0 ||
+        vcs_zcode_candidate_parse(wire, wire_len, candidate) !=
+            VCS_ZCODE_DEV_OK) {
+        free(wire);
+        return BFW_ZCODE_STAGE_CAS_MISS;
+    }
+    free(wire);
+    uint8_t checked[32];
+    if (vcs_zcode_candidate_root(candidate, checked) != VCS_ZCODE_DEV_OK ||
+        memcmp(checked, candidate_root, 32) != 0 ||
+        vcs_zcode_candidate_validate_for_task(task, candidate, now) !=
+            VCS_ZCODE_DEV_OK)
+        return BFW_ZCODE_STAGE_STALE;
+    return BFW_ZCODE_STAGE_OK;
+}
+
+static enum bfw_zcode_stage bfw_load_verified_zcode_policy_and_job_binding(
+    const char *workspace, uint8_t policy_root[32],
+    struct vcs_zcode_task_v1 *task,
+    struct vcs_zcode_candidate_v1 *candidate,
+    const struct db_build_job *job,
+    struct vcs_zcode_proof_policy_v1 *policy)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (vcs_object_load_raw(workspace, policy_root, &wire, &wire_len) != 0 ||
+        vcs_zcode_proof_policy_parse(wire, wire_len, policy) !=
+            VCS_ZCODE_DEV_OK) {
+        free(wire);
+        return BFW_ZCODE_STAGE_CAS_MISS;
+    }
+    free(wire);
+    uint8_t checked[32];
+    if (vcs_zcode_proof_policy_root(policy, checked) != VCS_ZCODE_DEV_OK ||
+        memcmp(checked, policy_root, 32) != 0 ||
+        memcmp(task->proof_policy_root, policy_root, 32) != 0)
+        return BFW_ZCODE_STAGE_STALE;
+    char root_hex[65];
+    zcl_hex_encode(task->toolchain_capsule_root, 32, root_hex);
+    if (strcmp(root_hex, job->toolchain_sha3) != 0)
+        return BFW_ZCODE_STAGE_TOOLCHAIN_STALE;
+    zcl_hex_encode(candidate->candidate_source_root, 32, root_hex);
+    if (strcmp(root_hex, job->source_cas_sha3) != 0)
+        return BFW_ZCODE_STAGE_SOURCE_STALE;
+    return BFW_ZCODE_STAGE_OK;
+}
+
 struct zcl_result bfw_load_zcode_context(
     const char *workspace, const struct db_build_job *job,
     const struct db_build_action *action, int64_t now,
@@ -84,60 +182,34 @@ struct zcl_result bfw_load_zcode_context(
     *present = false;
     if (!action->task_root_sha3[0]) return ZCL_OK;
     uint8_t task_root[32], candidate_root[32], policy_root[32];
-    if (!zcl_hex_decode_lower(action->task_root_sha3, task_root, 32) ||
-        !zcl_hex_decode_lower(action->candidate_root_sha3,
-                              candidate_root, 32) ||
-        !zcl_hex_decode_lower(action->proof_policy_root_sha3,
-                              policy_root, 32))
+    if (!bfw_decode_zcode_context_roots(action, task_root,
+                                        candidate_root, policy_root))
         return ZCL_ERR(-1, "zcode-context-roots-invalid");
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    if (vcs_object_load_raw(workspace, task_root, &wire, &wire_len) != 0 ||
-        vcs_zcode_task_parse(wire, wire_len, task) != VCS_ZCODE_DEV_OK) {
-        free(wire);
+    if (!bfw_load_and_parse_zcode_task(workspace, task_root, task))
         return ZCL_ERR(-1, "zcode-task-cas-miss-or-corrupt");
-    }
-    free(wire); wire = NULL; wire_len = 0;
-    uint8_t checked[32];
-    if (vcs_zcode_task_root(task, checked) != VCS_ZCODE_DEV_OK ||
-        memcmp(checked, task_root, 32) != 0 ||
-        vcs_zcode_task_validate_at(task, now) != VCS_ZCODE_DEV_OK)
+    if (!bfw_zcode_task_fresh(task, task_root, now))
         return ZCL_ERR(-1, "zcode-task-stale-or-expired");
-    if (vcs_object_load_raw(workspace, candidate_root, &wire, &wire_len) != 0 ||
-        vcs_zcode_candidate_parse(wire, wire_len, candidate) !=
-            VCS_ZCODE_DEV_OK) {
-        free(wire);
+    enum bfw_zcode_stage candidate_stage = bfw_load_verified_zcode_candidate(
+        workspace, candidate_root, task, now, candidate);
+    if (candidate_stage == BFW_ZCODE_STAGE_CAS_MISS)
         return ZCL_ERR(-1, "zcode-candidate-cas-miss-or-corrupt");
-    }
-    free(wire); wire = NULL; wire_len = 0;
-    if (vcs_zcode_candidate_root(candidate, checked) != VCS_ZCODE_DEV_OK ||
-        memcmp(checked, candidate_root, 32) != 0 ||
-        vcs_zcode_candidate_validate_for_task(task, candidate, now) !=
-            VCS_ZCODE_DEV_OK)
+    if (candidate_stage == BFW_ZCODE_STAGE_STALE)
         return ZCL_ERR(-1, "zcode-candidate-stale");
     enum vcs_zcode_patch_result patch_verified = vcs_zcode_patch_verify_cas(
         workspace, task, candidate);
     if (patch_verified != VCS_ZCODE_PATCH_OK)
         return ZCL_ERR(-1, "zcode-patch-refused: %s",
                        vcs_zcode_patch_result_string(patch_verified));
-    if (vcs_object_load_raw(workspace, policy_root, &wire, &wire_len) != 0 ||
-        vcs_zcode_proof_policy_parse(wire, wire_len, policy) !=
-            VCS_ZCODE_DEV_OK) {
-        free(wire);
+    enum bfw_zcode_stage policy_stage =
+        bfw_load_verified_zcode_policy_and_job_binding(
+            workspace, policy_root, task, candidate, job, policy);
+    if (policy_stage == BFW_ZCODE_STAGE_CAS_MISS)
         return ZCL_ERR(-1, "zcode-proof-policy-cas-miss-or-corrupt");
-    }
-    free(wire);
-    if (vcs_zcode_proof_policy_root(policy, checked) != VCS_ZCODE_DEV_OK ||
-        memcmp(checked, policy_root, 32) != 0 ||
-        memcmp(task->proof_policy_root, policy_root, 32) != 0)
+    if (policy_stage == BFW_ZCODE_STAGE_STALE)
         return ZCL_ERR(-1, "zcode-proof-policy-stale");
-    char root_hex[65];
-    zcl_hex_encode(task->toolchain_capsule_root, 32, root_hex);
-    if (strcmp(root_hex, job->toolchain_sha3) != 0) {
+    if (policy_stage == BFW_ZCODE_STAGE_TOOLCHAIN_STALE)
         return ZCL_ERR(-1, "zcode-toolchain-stale");
-    }
-    zcl_hex_encode(candidate->candidate_source_root, 32, root_hex);
-    if (strcmp(root_hex, job->source_cas_sha3) != 0)
+    if (policy_stage == BFW_ZCODE_STAGE_SOURCE_STALE)
         return ZCL_ERR(-1, "zcode-candidate-source-stale");
     *present = true;
     return ZCL_OK;

@@ -1391,7 +1391,6 @@ engine/services/src/build_fabric_evidence_parse.c:build_fabric_fuzz_evidence_par
 engine/services/src/build_fabric_evidence_parse.c:build_fabric_test_evidence_parse:19
 engine/services/src/build_fabric_worker.c:bfw_paths_init:30
 engine/services/src/build_fabric_worker.c:build_fabric_worker_execute:118
-engine/services/src/build_fabric_worker_binding.c:bfw_load_zcode_context:23
 engine/services/src/build_fabric_worker_feedback.c:build_fabric_worker_feedback_capture:39
 engine/services/src/canary_sentinel_watch.c:process_sentinel:56
 engine/services/src/chain_evidence_authority_service.c:chain_evidence_controller_import_snapshot_evidence:30
