@@ -8,7 +8,7 @@
  * the important zclassicd semantics: forged roots fail, historical roots
  * pass, Sprout same-transaction intermediate roots pass, incomplete imported
  * history fails closed with a distinct verdict, and anchor writes are atomic
- * with reducer commit/rollback/reorg handling.*/
+ * with reducer commit/rollback/reorg handling. */
 
 #include "test/test_core.h"
 
@@ -346,7 +346,7 @@ static int test_reducer_atomicity(void)
     L7_CHECK("begin committed shared rewind", sql_ok(db, "BEGIN IMMEDIATE"));
     L7_CHECK("shared reducer rewind succeeds",
              utxo_apply_delete_rows_above(db, 50, 50));
-    L7_CHECK("commit shared rewind", sql_ok(db, "COMMIT"));
+    L7_CHECK("commit shared reducer rewind", sql_ok(db, "COMMIT"));
     L7_CHECK("committed rewind removes abandoned anchor",
              anchor_kv_get(db, ANCHOR_POOL_SPROUT, &expected_root,
                            NULL, NULL) == ANCHOR_KV_MISSING);
