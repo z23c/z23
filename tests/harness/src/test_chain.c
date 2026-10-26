@@ -51,7 +51,7 @@ static bool block_index_fresh_has_no_ext(void)
            memcmp(&got_n, &zero_u, sizeof(zero_u)) == 0;
 }
 
-int test_chain(void)
+static int test_chain_proof_of_work(void)
 {
     int failures = 0;
 
@@ -90,6 +90,13 @@ int test_chain(void)
         }
     }
 
+    return failures;
+}
+
+static int test_chain_checkpoint_estimates(void)
+{
+    int failures = 0;
+
     printf("checkpoints... ");
     {
         struct checkpoint_entry entries[] = {
@@ -117,6 +124,13 @@ int test_chain(void)
         }
     }
 
+    return failures;
+}
+
+static int test_chain_params_mainnet(void)
+{
+    int failures = 0;
+
     printf("chainparams mainnet... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -132,6 +146,13 @@ int test_chain(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_params_testnet(void)
+{
+    int failures = 0;
+
     printf("chainparams testnet... ");
     {
         chain_params_select(CHAIN_TESTNET);
@@ -145,6 +166,13 @@ int test_chain(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_params_regtest(void)
+{
+    int failures = 0;
+
     printf("chainparams regtest... ");
     {
         chain_params_select(CHAIN_REGTEST);
@@ -156,6 +184,13 @@ int test_chain(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_chain_params_address_roundtrip(void)
+{
+    int failures = 0;
 
     printf("chainparams address roundtrip via params... ");
     {
@@ -177,6 +212,13 @@ int test_chain(void)
             else { printf("FAIL\n"); failures++; }
         } else { printf("FAIL (encode)\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_chain_block_subsidy_transitions(void)
+{
+    int failures = 0;
 
     printf("get_block_subsidy slow start... ");
     {
@@ -216,6 +258,13 @@ int test_chain(void)
         else { printf("FAIL (%" PRId64 ")\n", s); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_block_map_insert_find(void)
+{
+    int failures = 0;
+
     printf("block_map insert/find... ");
     {
         struct block_map bm;
@@ -247,6 +296,13 @@ int test_chain(void)
         block_map_free(&bm);
     }
 
+    return failures;
+}
+
+static int test_chain_active_chain_set_tip(void)
+{
+    int failures = 0;
+
     printf("active_chain set_tip... ");
     {
         struct block_index b0, b1, b2;
@@ -277,6 +333,13 @@ int test_chain(void)
         active_chain_free(&ac);
     }
 
+    return failures;
+}
+
+static int test_chain_chainstate_insert(void)
+{
+    int failures = 0;
+
     printf("chainstate init/insert... ");
     {
         struct chainstate cs;
@@ -294,6 +357,13 @@ int test_chain(void)
         }
         chainstate_free(&cs);
     }
+
+    return failures;
+}
+
+static int test_chain_block_tree_db_flags(void)
+{
+    int failures = 0;
 
     printf("block_tree_db flags... ");
     {
@@ -327,6 +397,13 @@ int test_chain(void)
         test_rm_rf(dbdir);
     }
 
+    return failures;
+}
+
+static int test_chain_block_tree_db_reindex(void)
+{
+    int failures = 0;
+
     printf("block_tree_db reindex... ");
     {
         char dbdir[512];
@@ -356,6 +433,13 @@ int test_chain(void)
         test_rm_rf(dbdir);
     }
 
+    return failures;
+}
+
+static int test_chain_is_final_tx(void)
+{
+    int failures = 0;
+
     printf("is_final_tx... ");
     {
         struct transaction tx;
@@ -383,6 +467,13 @@ int test_chain(void)
         }
     }
 
+    return failures;
+}
+
+static int test_chain_tx_expiry_and_state_message(void)
+{
+    int failures = 0;
+
     printf("is_expiring_soon_tx... ");
     {
         struct transaction tx;
@@ -406,6 +497,13 @@ int test_chain(void)
         else { printf("FAIL (%s)\n", buf); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_main_constants(void)
+{
+    int failures = 0;
+
     printf("main_constants... ");
     {
         if (MAX_BLOCK_SIZE == 2000000 &&
@@ -417,6 +515,13 @@ int test_chain(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_chain_disk_block_io_roundtrip(void)
+{
+    int failures = 0;
 
     printf("disk_block_io write/read roundtrip... ");
     {
@@ -466,6 +571,13 @@ int test_chain(void)
         test_rm_rf(tmpdir);
     }
 
+    return failures;
+}
+
+static int test_chain_main_state_defaults(void)
+{
+    int failures = 0;
+
     printf("main_state init/free... ");
     {
         struct main_state ms;
@@ -494,6 +606,13 @@ int test_chain(void)
         else { printf("FAIL\n"); failures++; }
         main_state_free(&ms);
     }
+
+    return failures;
+}
+
+static int test_chain_coins_view_cache(void)
+{
+    int failures = 0;
 
     printf("coins_view_cache... ");
     {
@@ -525,6 +644,13 @@ int test_chain(void)
         else { printf("FAIL\n"); failures++; }
         coins_view_cache_free(&cache);
     }
+
+    return failures;
+}
+
+static int test_chain_coins_view_db_roundtrip(void)
+{
+    int failures = 0;
 
     printf("coins_view_db write/read... ");
     {
@@ -568,6 +694,13 @@ int test_chain(void)
         test_rm_rf(dbdir);
     }
 
+    return failures;
+}
+
+static int test_chain_update_coins(void)
+{
+    int failures = 0;
+
     printf("update_coins... ");
     {
         struct coins_view null_view = { NULL, NULL };
@@ -601,6 +734,13 @@ int test_chain(void)
         transaction_free(&coinbase_tx);
         coins_view_cache_free(&cache);
     }
+
+    return failures;
+}
+
+static int test_chain_disk_block_index_roundtrip(void)
+{
+    int failures = 0;
 
     printf("disk_block_index roundtrip... ");
     {
@@ -642,6 +782,13 @@ int test_chain(void)
         } else { printf("FAIL (ser)\n"); failures++; }
         stream_free(&s);
     }
+
+    return failures;
+}
+
+static int test_chain_block_tree_db_body_position(void)
+{
+    int failures = 0;
 
     printf("block_tree_db load preserves exact body position... ");
     {
@@ -695,6 +842,13 @@ int test_chain(void)
         test_rm_rf(path);
     }
 
+    return failures;
+}
+
+static int test_chain_block_tree_db_boot_pump(void)
+{
+    int failures = 0;
+
     printf("block_tree_db guts load pumps boot-liveness marker... ");
     {
         /* A multi-million row LevelDB index walk with no boot-progress pump
@@ -736,6 +890,13 @@ int test_chain(void)
             block_tree_db_close(&btdb);
         test_rm_rf(path);
     }
+
+    return failures;
+}
+
+static int test_chain_block_serialize_roundtrip(void)
+{
+    int failures = 0;
 
     printf("block serialize/deserialize roundtrip... ");
     {
@@ -788,6 +949,13 @@ int test_chain(void)
         stream_free(&s);
         block_free(&b);
     }
+
+    return failures;
+}
+
+static int test_chain_equihash_solution_validation(void)
+{
+    int failures = 0;
 
     printf("equihash(96,5) valid solution... ");
     {
@@ -861,6 +1029,13 @@ int test_chain(void)
         }
     }
 
+    return failures;
+}
+
+static int test_chain_equihash_solution_size(void)
+{
+    int failures = 0;
+
     printf("check_equihash_solution size validation... ");
     {
         const struct chain_params *p = chain_params_get();
@@ -886,9 +1061,13 @@ int test_chain(void)
         }
     }
 
-    /* Skip equihash solver by default — takes ~20s and 3.25GB RAM.
-     * Run with EQUIHASH_TEST=1 to enable. */
-    if (getenv("EQUIHASH_TEST")) {
+    return failures;
+}
+
+static int test_chain_equihash_solver_solution(void)
+{
+    int failures = 0;
+
     printf("equihash solver (192,7) finds valid solution... ");
     {
         struct equihash_params ep;
@@ -938,7 +1117,13 @@ int test_chain(void)
             printf("SKIP (insufficient memory)\n");
         }
     }
-    } /* end EQUIHASH_TEST guard */
+
+    return failures;
+}
+
+static int test_chain_equihash_solver_cancel(void)
+{
+    int failures = 0;
 
     printf("equihash solver cancellation is immediate... ");
     {
@@ -954,6 +1139,13 @@ int test_chain(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_chain_check_block_header(void)
+{
+    int failures = 0;
 
     printf("check_block_header version too low... ");
     {
@@ -990,6 +1182,13 @@ int test_chain(void)
         }
     }
 
+    return failures;
+}
+
+static int test_chain_check_block_merkle_mismatch(void)
+{
+    int failures = 0;
+
     printf("check_block merkle root mismatch... ");
     {
         const struct chain_params *p = chain_params_get();
@@ -1016,6 +1215,13 @@ int test_chain(void)
         }
         block_free(&b);
     }
+
+    return failures;
+}
+
+static int test_chain_check_block_valid_merkle(void)
+{
+    int failures = 0;
 
     printf("check_block valid with correct merkle root... ");
     {
@@ -1047,6 +1253,13 @@ int test_chain(void)
         block_free(&b);
     }
 
+    return failures;
+}
+
+static int test_chain_check_block_no_coinbase(void)
+{
+    int failures = 0;
+
     printf("check_block no coinbase... ");
     {
         const struct chain_params *p = chain_params_get();
@@ -1073,6 +1286,13 @@ int test_chain(void)
         }
         block_free(&b);
     }
+
+    return failures;
+}
+
+static int test_chain_contextual_check_header(void)
+{
+    int failures = 0;
 
     printf("contextual_check_block_header genesis bypass... ");
     {
@@ -1152,6 +1372,13 @@ int test_chain(void)
         }
     }
 
+    return failures;
+}
+
+static int test_chain_contextual_check_block_bip34(void)
+{
+    int failures = 0;
+
     printf("contextual_check_block BIP34 height... ");
     {
         const struct chain_params *p = chain_params_get();
@@ -1216,6 +1443,13 @@ int test_chain(void)
         block_free(&b);
     }
 
+    return failures;
+}
+
+static int test_chain_merkle_mutated(void)
+{
+    int failures = 0;
+
     printf("compute_merkle_root_mutated no false positive... ");
     {
         struct uint256 a, b_hash, c, d;
@@ -1251,7 +1485,12 @@ int test_chain(void)
         }
     }
 
-    /* ── Consensus upgrade activation tests ─────────────────── */
+    return failures;
+}
+
+static int test_chain_upgrade_activation_sprout_to_sapling(void)
+{
+    int failures = 0;
 
     printf("Upgrade activation: Sprout always active... ");
     {
@@ -1281,6 +1520,13 @@ int test_chain(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_upgrade_activation_bubbles_to_buttercup(void)
+{
+    int failures = 0;
+
     printf("Upgrade activation: Bubbles at 585318... ");
     {
         const struct chain_params *p = chain_params_get();
@@ -1307,6 +1553,13 @@ int test_chain(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_chain_branch_id_epochs(void)
+{
+    int failures = 0;
 
     printf("Branch ID: Sprout epoch... ");
     {
@@ -1352,6 +1605,13 @@ int test_chain(void)
             printf("OK\n");
         else { printf("FAIL (got 0x%08x)\n", bid); failures++; }
     }
+
+    return failures;
+}
+
+static int test_chain_subsidy_by_height(void)
+{
+    int failures = 0;
 
     printf("Subsidy: genesis block... ");
     {
@@ -1401,6 +1661,13 @@ int test_chain(void)
         else { printf("FAIL (got %lld, expected 78125000)\n", (long long)sub); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_halving_and_pow_spacing(void)
+{
+    int failures = 0;
+
     printf("Halving: pre-Buttercup count... ");
     {
         const struct chain_params *p = chain_params_get();
@@ -1437,6 +1704,13 @@ int test_chain(void)
         else { printf("FAIL (got %lld)\n", (long long)sp); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_equihash_params_by_height(void)
+{
+    int failures = 0;
+
     printf("Equihash params: pre-Bubbles N=200 K=9... ");
     {
         const struct chain_params *p = chain_params_get();
@@ -1456,6 +1730,13 @@ int test_chain(void)
             printf("OK\n");
         else { printf("FAIL (got N=%u K=%u)\n", n, k); failures++; }
     }
+
+    return failures;
+}
+
+static int test_chain_equihash_solution_size_gate(void)
+{
+    int failures = 0;
 
     printf("Equihash solution size gate: Bubbles boundary... ");
     {
@@ -1508,6 +1789,13 @@ int test_chain(void)
         }
     }
 
+    return failures;
+}
+
+static int test_chain_founders_reward_and_window(void)
+{
+    int failures = 0;
+
     printf("Founders reward last height... ");
     {
         const struct chain_params *p = chain_params_get();
@@ -1535,7 +1823,13 @@ int test_chain(void)
         else { printf("FAIL (got %lld)\n", (long long)ts); failures++; }
     }
 
-    /* ── zcl_total_supply_zatoshi: cross-check vs per-block subsidy ── */
+    return failures;
+}
+
+static int test_chain_supply_fixed_heights(void)
+{
+    int failures = 0;
+
     printf("Supply: block 0 = 0... ");
     {
         int64_t s = zcl_total_supply_zatoshi(0);
@@ -1578,13 +1872,20 @@ int test_chain(void)
         else { printf("FAIL (sum=%lld, computed=%lld)\n", (long long)sum, (long long)computed); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_supply_buttercup_boundary(void)
+{
+    int failures = 0;
+
     printf("Supply: pre-Buttercup boundary (706999)... ");
     {
         /* Block 0 = 0, blocks 1-706999 = 706999 * 12.5 ZCL */
         int64_t expected = 706999LL * 1250000000LL;
         int64_t computed = zcl_total_supply_zatoshi(706999);
         if (computed == expected) printf("OK\n");
-        else { printf("FAIL (computed=%lld, expected=%lld)\n", (long long)computed, (long long)expected); failures++; }
+        else { printf("FAIL (computed=%lld, expected %lld)\n", (long long)computed, (long long)expected); failures++; }
     }
 
     printf("Supply: at Buttercup (707000)... ");
@@ -1596,7 +1897,7 @@ int test_chain(void)
         int64_t expected = pre + post;
         int64_t computed = zcl_total_supply_zatoshi(707000);
         if (computed == expected) printf("OK\n");
-        else { printf("FAIL (computed=%lld, expected=%lld)\n", (long long)computed, (long long)expected); failures++; }
+        else { printf("FAIL (computed=%lld, expected %lld)\n", (long long)computed, (long long)expected); failures++; }
     }
 
     printf("Supply: cross-check Buttercup boundary (707000-707100)... ");
@@ -1611,6 +1912,13 @@ int test_chain(void)
         else { printf("FAIL (sum=%lld, computed=%lld, diff=%lld)\n",
             (long long)sum, (long long)computed, (long long)(sum - computed)); failures++; }
     }
+
+    return failures;
+}
+
+static int test_chain_supply_era_boundary(void)
+{
+    int failures = 0;
 
     printf("Supply: second halving boundary (2387001)... ");
     {
@@ -1635,6 +1943,13 @@ int test_chain(void)
         else { printf("FAIL (sum=%lld, computed=%lld, diff=%lld)\n",
             (long long)sum, (long long)computed, (long long)(sum - computed)); failures++; }
     }
+
+    return failures;
+}
+
+static int test_chain_supply_monotonic_and_capped(void)
+{
+    int failures = 0;
 
     printf("Supply: never exceeds MAX_MONEY (21M ZCL)... ");
     {
@@ -1666,7 +1981,12 @@ int test_chain(void)
         else { printf("FAIL (non-monotonic)\n"); failures++; }
     }
 
-    /* ── Boot SQLite fallback: block_map height=0 detection ── */
+    return failures;
+}
+
+static int test_chain_boot_block_map_mismatch(void)
+{
+    int failures = 0;
 
     printf("boot: block_map height=0 non-genesis detected... ");
     {
@@ -1738,6 +2058,13 @@ int test_chain(void)
         block_map_free(&bm);
     }
 
+    return failures;
+}
+
+static int test_chain_boot_block_map_height(void)
+{
+    int failures = 0;
+
     printf("boot: block_map height>0 not flagged as mismatch... ");
     {
         /* Normal case: coins tip at height 3056896, found correctly */
@@ -1765,6 +2092,13 @@ int test_chain(void)
         free(bi);
         block_map_free(&bm);
     }
+
+    return failures;
+}
+
+static int test_chain_boot_sqlite_lookup(void)
+{
+    int failures = 0;
 
     printf("boot: SQLite block lookup by hash... ");
     {
@@ -1840,7 +2174,13 @@ int test_chain(void)
         test_rm_rf(ddir);
     }
 
-    /* ── Checkpoint helpers (testable API over the inlined scan) ── */
+    return failures;
+}
+
+static int test_chain_checkpoint_hash_lookup(void)
+{
+    int failures = 0;
+
     printf("checkpoints_hash_at_height: exact match... ");
     {
         struct checkpoint_entry entries[3];
@@ -1878,6 +2218,13 @@ int test_chain(void)
         bool ok = !found;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_chain_checkpoint_validate(void)
+{
+    int failures = 0;
 
     printf("checkpoints_last_height... ");
     {
@@ -1940,6 +2287,13 @@ int test_chain(void)
         if (rejected) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_checkpoint_mainnet_data(void)
+{
+    int failures = 0;
+
     printf("checkpoints: mainnet chainparams are loaded + non-zero... ");
     {
         chain_params_select(CHAIN_MAIN);
@@ -1961,6 +2315,13 @@ int test_chain(void)
         if (ok) printf("OK\n"); else { printf("FAIL (entries=%d)\n", cp->nEntries); failures++; }
     }
 
+    return failures;
+}
+
+static int test_chain_checkpoint_null_safe(void)
+{
+    int failures = 0;
+
     printf("checkpoints: NULL-safe... ");
     {
         bool ok = true;
@@ -1971,9 +2332,13 @@ int test_chain(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
-    /* skip_contextual gate must fire when the PoW averaging window cannot be
-     * walked back contiguously from pindex_prev (e.g. a FlyClient snapshot
-     * whose block_index does not reach the 17-block window). */
+    return failures;
+}
+
+static int test_chain_skip_contextual_complete_and_sparse(void)
+{
+    int failures = 0;
+
     printf("skip_contextual: complete retarget+MTP window, no skip... ");
     {
         struct consensus_params cp = { .nPowAveragingWindow = 17 };
@@ -2033,6 +2398,13 @@ int test_chain(void)
         }
         active_chain_free(&ms.chain_active);
     }
+
+    return failures;
+}
+
+static int test_chain_skip_contextual_broken_and_null(void)
+{
+    int failures = 0;
 
     printf("skip_contextual: broken pprev at tip, MUST skip... ");
     {
@@ -2115,6 +2487,13 @@ int test_chain(void)
         active_chain_free(&ms.chain_active);
     }
 
+    return failures;
+}
+
+static int test_chain_block_index_sizeof(void)
+{
+    int failures = 0;
+
     printf("block_index sizeof and memory audit... ");
     {
         size_t sz = sizeof(struct block_index);
@@ -2126,145 +2505,320 @@ int test_chain(void)
         if (ok) printf("OK\n"); else { printf("FAIL (sz=%zu)\n", sz); failures++; }
     }
 
+    return failures;
+}
+
+/* Folds the perm/dep classification assertions into ok. */
+static bool block_failed_class_checks_perm_dep(struct block_index *perm,
+                                               struct block_index *dep,
+                                               bool ok)
+{
+    ok = ok && block_is_permanently_failed(perm);
+    ok = ok && !block_is_dependency_failed(perm);
+    ok = ok && !block_is_transiently_failed(perm);
+    ok = ok && block_has_any_failure(perm);
+
+    ok = ok && !block_is_permanently_failed(dep);
+    ok = ok && block_is_dependency_failed(dep);
+    ok = ok && !block_is_transiently_failed(dep);
+    ok = ok && block_has_any_failure(dep);
+    return ok;
+}
+
+/* Folds the trans/clean classification assertions into ok. */
+static bool block_failed_class_checks_trans_clean(struct block_index *trans,
+                                                  struct block_index *clean,
+                                                  bool ok)
+{
+    ok = ok && !block_is_permanently_failed(trans);
+    ok = ok && !block_is_dependency_failed(trans);
+    ok = ok && block_is_transiently_failed(trans);
+    ok = ok && block_has_any_failure(trans);
+
+    ok = ok && !block_has_any_failure(clean);
+    ok = ok && block_index_is_valid(clean, BLOCK_VALID_TREE);
+    return ok;
+}
+
+/* Folds the mixed-entry and validity assertions into ok. */
+static bool block_failed_class_checks_mixed(struct block_index *mixed,
+                                            struct block_index *perm,
+                                            struct block_index *trans,
+                                            bool ok)
+{
+    ok = ok && block_is_permanently_failed(mixed);
+    ok = ok && block_is_transiently_failed(mixed);
+    ok = ok && block_has_any_failure(mixed);
+    ok = ok && !block_index_is_valid(perm, BLOCK_VALID_TREE);
+    ok = ok && !block_index_is_valid(trans, BLOCK_VALID_TREE);
+    return ok;
+}
+
+/* Folds the NULL-safety and mask assertions into ok. */
+static bool block_failed_class_checks_null_mask(bool ok)
+{
+    /* NULL-safety: every typed helper must tolerate NULL. */
+    ok = ok && !block_is_permanently_failed(NULL);
+    ok = ok && !block_is_dependency_failed(NULL);
+    ok = ok && !block_is_transiently_failed(NULL);
+    ok = ok && !block_has_any_failure(NULL);
+
+    /* BLOCK_FAILED_MASK preserved at legacy value (VALID|CHILD) for
+     * on-disk compatibility; ANY_MASK widens to include TRANSIENT. */
+    ok = ok && (BLOCK_FAILED_MASK == (BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD));
+    ok = ok && (BLOCK_FAILED_ANY_MASK ==
+                (BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD | BLOCK_FAILED_TRANSIENT));
+    return ok;
+}
+
+static int test_chain_block_failed_classification(void)
+{
+    int failures = 0;
+
+    printf("block_failed typed classification... ");
+    struct block_index perm, dep, trans, clean, mixed;
+    block_index_init(&perm);
+    block_index_init(&dep);
+    block_index_init(&trans);
+    block_index_init(&clean);
+    block_index_init(&mixed);
+
+    perm.nStatus  = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA | BLOCK_FAILED_VALID;
+    dep.nStatus   = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA | BLOCK_FAILED_CHILD;
+    trans.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA | BLOCK_FAILED_TRANSIENT;
+    clean.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    mixed.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
+                    BLOCK_FAILED_VALID | BLOCK_FAILED_TRANSIENT;
+
+    bool ok = true;
+    ok = block_failed_class_checks_perm_dep(&perm, &dep, ok);
+    ok = block_failed_class_checks_trans_clean(&trans, &clean, ok);
+    ok = block_failed_class_checks_mixed(&mixed, &perm, &trans, ok);
+    ok = block_failed_class_checks_null_mask(ok);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
+/* Folds the bi status load/mutate assertions into ok. */
+static bool block_index_status_mutation_checks(struct block_index *bi,
+                                               bool ok)
+{
+    ok = ok && block_index_status_load(bi) == BLOCK_VALID_TREE;
+
+    unsigned int old =
+        block_index_status_fetch_or(bi, BLOCK_HAVE_DATA | BLOCK_FAILED_CHILD);
+    ok = ok && old == BLOCK_VALID_TREE;
+    ok = ok && block_is_dependency_failed(bi);
+    ok = ok && !block_index_is_valid(bi, BLOCK_VALID_TREE);
+
+    old = block_index_status_clear_bits(bi, BLOCK_FAILED_CHILD);
+    ok = ok && (old & BLOCK_FAILED_CHILD) != 0;
+    ok = ok && !block_is_dependency_failed(bi);
+
+    unsigned int now =
+        block_index_status_set_valid_level(bi, BLOCK_VALID_SCRIPTS);
+    ok = ok && (now & BLOCK_VALID_MASK) == BLOCK_VALID_SCRIPTS;
+    ok = ok && block_index_is_valid(bi, BLOCK_VALID_SCRIPTS);
+    return ok;
+}
+
+/* Folds the NULL block_index status assertions into ok. */
+static bool block_index_status_null_checks(bool ok)
+{
+    ok = ok && block_index_status_load(NULL) == 0;
+    ok = ok && block_index_status_fetch_or(NULL, BLOCK_HAVE_DATA) == 0;
+    ok = ok && block_index_status_clear_bits(NULL, BLOCK_HAVE_DATA) == 0;
+    ok = ok &&
+         block_index_status_set_valid_level(NULL, BLOCK_VALID_TREE) == 0;
+    return ok;
+}
+
+static int test_chain_block_index_status_helpers(void)
+{
+    int failures = 0;
+
+    printf("block_index atomic status helpers... ");
+    struct block_index bi;
+    block_index_init(&bi);
+    bi.nStatus = BLOCK_VALID_TREE;
+
+    bool ok = true;
+    ok = block_index_status_mutation_checks(&bi, ok);
+    ok = block_index_status_null_checks(ok);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
+/* Folds the HAVE_DATA snapshot assertions into ok (mutates bi). */
+static bool block_index_disk_pos_data_checks(struct block_index *bi, bool ok)
+{
+    struct disk_block_pos pos;
+    unsigned int status = 0;
+
+    disk_block_pos_init(&pos);
+    ok = ok && !block_index_disk_pos_snapshot(bi, &pos, &status);
+    ok = ok && status == 0;
+
+    block_index_disk_pos_store(bi, 7, 12345);
+    disk_block_pos_init(&pos);
+    ok = ok && !block_index_disk_pos_snapshot(bi, &pos, &status);
+
+    block_index_status_fetch_or(bi, BLOCK_HAVE_DATA);
+    disk_block_pos_init(&pos);
+    ok = ok && block_index_disk_pos_snapshot(bi, &pos, &status);
+    ok = ok && (status & BLOCK_HAVE_DATA) != 0;
+    ok = ok && pos.nFile == 7;
+    ok = ok && pos.nPos == 12345;
+    return ok;
+}
+
+/* Folds the HAVE_UNDO snapshot assertions into ok (mutates bi). */
+static bool block_index_disk_pos_undo_checks(struct block_index *bi, bool ok)
+{
+    struct disk_block_pos pos;
+    unsigned int status = 0;
+
+    __atomic_store_n(&bi->nUndoPos, 67890u, __ATOMIC_RELAXED);
+    block_index_status_fetch_or(bi, BLOCK_HAVE_UNDO);
+    disk_block_pos_init(&pos);
+    ok = ok && block_index_undo_pos_snapshot(bi, &pos, &status);
+    ok = ok && (status & BLOCK_HAVE_UNDO) != 0;
+    ok = ok && pos.nFile == 7;
+    ok = ok && pos.nPos == 67890u;
+    return ok;
+}
+
+/* Folds the NULL/cleared snapshot assertions into ok (mutates bi). */
+static bool block_index_disk_pos_null_arg_checks(struct block_index *bi,
+                                                 bool ok)
+{
+    struct disk_block_pos pos;
+
+    block_index_status_clear_bits(bi, BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
+    disk_block_pos_init(&pos);
+    ok = ok && !block_index_disk_pos_snapshot(bi, &pos, NULL);
+    ok = ok && !block_index_undo_pos_snapshot(bi, &pos, NULL);
+
+    ok = ok && !block_index_disk_pos_snapshot(NULL, &pos, NULL);
+    ok = ok && !block_index_disk_pos_snapshot(bi, NULL, NULL);
+    ok = ok && !block_index_undo_pos_snapshot(NULL, &pos, NULL);
+    ok = ok && !block_index_undo_pos_snapshot(bi, NULL, NULL);
+    return ok;
+}
+
+static int test_chain_block_index_disk_pos(void)
+{
+    int failures = 0;
+
+    printf("block_index disk position snapshot helpers... ");
+    struct block_index bi;
+    block_index_init(&bi);
+
+    bool ok = true;
+    ok = block_index_disk_pos_data_checks(&bi, ok);
+    ok = block_index_disk_pos_undo_checks(&bi, ok);
+    ok = block_index_disk_pos_null_arg_checks(&bi, ok);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
+int test_chain(void)
+{
+    int failures = 0;
+
+    failures += test_chain_proof_of_work();
+    failures += test_chain_checkpoint_estimates();
+    failures += test_chain_params_mainnet();
+    failures += test_chain_params_testnet();
+    failures += test_chain_params_regtest();
+    failures += test_chain_params_address_roundtrip();
+    failures += test_chain_block_subsidy_transitions();
+    failures += test_chain_block_map_insert_find();
+    failures += test_chain_active_chain_set_tip();
+    failures += test_chain_chainstate_insert();
+    failures += test_chain_block_tree_db_flags();
+    failures += test_chain_block_tree_db_reindex();
+    failures += test_chain_is_final_tx();
+    failures += test_chain_tx_expiry_and_state_message();
+    failures += test_chain_main_constants();
+    failures += test_chain_disk_block_io_roundtrip();
+    failures += test_chain_main_state_defaults();
+    failures += test_chain_coins_view_cache();
+    failures += test_chain_coins_view_db_roundtrip();
+    failures += test_chain_update_coins();
+    failures += test_chain_disk_block_index_roundtrip();
+    failures += test_chain_block_tree_db_body_position();
+    failures += test_chain_block_tree_db_boot_pump();
+    failures += test_chain_block_serialize_roundtrip();
+    failures += test_chain_equihash_solution_validation();
+    failures += test_chain_equihash_solution_size();
+
+    /* Skip equihash solver by default — takes ~20s and 3.25GB RAM.
+     * Run with EQUIHASH_TEST=1 to enable. */
+    if (getenv("EQUIHASH_TEST")) {
+        failures += test_chain_equihash_solver_solution();
+    } /* end EQUIHASH_TEST guard */
+
+    failures += test_chain_equihash_solver_cancel();
+    failures += test_chain_check_block_header();
+    failures += test_chain_check_block_merkle_mismatch();
+    failures += test_chain_check_block_valid_merkle();
+    failures += test_chain_check_block_no_coinbase();
+    failures += test_chain_contextual_check_header();
+    failures += test_chain_contextual_check_block_bip34();
+    failures += test_chain_merkle_mutated();
+
+    /* ── Consensus upgrade activation tests ─────────────────── */
+    failures += test_chain_upgrade_activation_sprout_to_sapling();
+    failures += test_chain_upgrade_activation_bubbles_to_buttercup();
+    failures += test_chain_branch_id_epochs();
+    failures += test_chain_subsidy_by_height();
+    failures += test_chain_halving_and_pow_spacing();
+    failures += test_chain_equihash_params_by_height();
+    failures += test_chain_equihash_solution_size_gate();
+    failures += test_chain_founders_reward_and_window();
+
+    /* ── zcl_total_supply_zatoshi: cross-check vs per-block subsidy ── */
+    failures += test_chain_supply_fixed_heights();
+    failures += test_chain_supply_buttercup_boundary();
+    failures += test_chain_supply_era_boundary();
+    failures += test_chain_supply_monotonic_and_capped();
+
+    /* ── Boot SQLite fallback: block_map height=0 detection ── */
+    failures += test_chain_boot_block_map_mismatch();
+    failures += test_chain_boot_block_map_height();
+    failures += test_chain_boot_sqlite_lookup();
+
+    /* ── Checkpoint helpers (testable API over the inlined scan) ── */
+    failures += test_chain_checkpoint_hash_lookup();
+    failures += test_chain_checkpoint_validate();
+    failures += test_chain_checkpoint_mainnet_data();
+    failures += test_chain_checkpoint_null_safe();
+
+    /* skip_contextual gate must fire when the PoW averaging window cannot be
+     * walked back contiguously from pindex_prev (e.g. a FlyClient snapshot
+     * whose block_index does not reach the 17-block window). */
+    failures += test_chain_skip_contextual_complete_and_sparse();
+    failures += test_chain_skip_contextual_broken_and_null();
+
+    failures += test_chain_block_index_sizeof();
+
     /* Typed BLOCK_FAILED classification: PERMANENT (VALID), DEPENDENCY
      * (CHILD), TRANSIENT. block_has_any_failure() catches all three;
      * block_index_is_valid() rejects all three; each predicate answers for its
      * own class only. */
-    printf("block_failed typed classification... ");
-    {
-        struct block_index perm, dep, trans, clean, mixed;
-        block_index_init(&perm);
-        block_index_init(&dep);
-        block_index_init(&trans);
-        block_index_init(&clean);
-        block_index_init(&mixed);
-
-        perm.nStatus  = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA | BLOCK_FAILED_VALID;
-        dep.nStatus   = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA | BLOCK_FAILED_CHILD;
-        trans.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA | BLOCK_FAILED_TRANSIENT;
-        clean.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
-        mixed.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA |
-                        BLOCK_FAILED_VALID | BLOCK_FAILED_TRANSIENT;
-
-        bool ok = true;
-        ok = ok && block_is_permanently_failed(&perm);
-        ok = ok && !block_is_dependency_failed(&perm);
-        ok = ok && !block_is_transiently_failed(&perm);
-        ok = ok && block_has_any_failure(&perm);
-
-        ok = ok && !block_is_permanently_failed(&dep);
-        ok = ok && block_is_dependency_failed(&dep);
-        ok = ok && !block_is_transiently_failed(&dep);
-        ok = ok && block_has_any_failure(&dep);
-
-        ok = ok && !block_is_permanently_failed(&trans);
-        ok = ok && !block_is_dependency_failed(&trans);
-        ok = ok && block_is_transiently_failed(&trans);
-        ok = ok && block_has_any_failure(&trans);
-
-        ok = ok && !block_has_any_failure(&clean);
-        ok = ok && block_index_is_valid(&clean, BLOCK_VALID_TREE);
-
-        ok = ok && block_is_permanently_failed(&mixed);
-        ok = ok && block_is_transiently_failed(&mixed);
-        ok = ok && block_has_any_failure(&mixed);
-        ok = ok && !block_index_is_valid(&perm, BLOCK_VALID_TREE);
-        ok = ok && !block_index_is_valid(&trans, BLOCK_VALID_TREE);
-
-        /* NULL-safety: every typed helper must tolerate NULL. */
-        ok = ok && !block_is_permanently_failed(NULL);
-        ok = ok && !block_is_dependency_failed(NULL);
-        ok = ok && !block_is_transiently_failed(NULL);
-        ok = ok && !block_has_any_failure(NULL);
-
-        /* BLOCK_FAILED_MASK preserved at legacy value (VALID|CHILD) for
-         * on-disk compatibility; ANY_MASK widens to include TRANSIENT. */
-        ok = ok && (BLOCK_FAILED_MASK == (BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD));
-        ok = ok && (BLOCK_FAILED_ANY_MASK ==
-                    (BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD | BLOCK_FAILED_TRANSIENT));
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("block_index atomic status helpers... ");
-    {
-        struct block_index bi;
-        block_index_init(&bi);
-        bi.nStatus = BLOCK_VALID_TREE;
-
-        bool ok = true;
-        ok = ok && block_index_status_load(&bi) == BLOCK_VALID_TREE;
-
-        unsigned int old =
-            block_index_status_fetch_or(&bi, BLOCK_HAVE_DATA | BLOCK_FAILED_CHILD);
-        ok = ok && old == BLOCK_VALID_TREE;
-        ok = ok && block_is_dependency_failed(&bi);
-        ok = ok && !block_index_is_valid(&bi, BLOCK_VALID_TREE);
-
-        old = block_index_status_clear_bits(&bi, BLOCK_FAILED_CHILD);
-        ok = ok && (old & BLOCK_FAILED_CHILD) != 0;
-        ok = ok && !block_is_dependency_failed(&bi);
-
-        unsigned int now =
-            block_index_status_set_valid_level(&bi, BLOCK_VALID_SCRIPTS);
-        ok = ok && (now & BLOCK_VALID_MASK) == BLOCK_VALID_SCRIPTS;
-        ok = ok && block_index_is_valid(&bi, BLOCK_VALID_SCRIPTS);
-
-        ok = ok && block_index_status_load(NULL) == 0;
-        ok = ok && block_index_status_fetch_or(NULL, BLOCK_HAVE_DATA) == 0;
-        ok = ok && block_index_status_clear_bits(NULL, BLOCK_HAVE_DATA) == 0;
-        ok = ok &&
-             block_index_status_set_valid_level(NULL, BLOCK_VALID_TREE) == 0;
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("block_index disk position snapshot helpers... ");
-    {
-        struct block_index bi;
-        block_index_init(&bi);
-        struct disk_block_pos pos;
-        unsigned int status = 0;
-        bool ok = true;
-
-        disk_block_pos_init(&pos);
-        ok = ok && !block_index_disk_pos_snapshot(&bi, &pos, &status);
-        ok = ok && status == 0;
-
-        block_index_disk_pos_store(&bi, 7, 12345);
-        disk_block_pos_init(&pos);
-        ok = ok && !block_index_disk_pos_snapshot(&bi, &pos, &status);
-
-        block_index_status_fetch_or(&bi, BLOCK_HAVE_DATA);
-        disk_block_pos_init(&pos);
-        ok = ok && block_index_disk_pos_snapshot(&bi, &pos, &status);
-        ok = ok && (status & BLOCK_HAVE_DATA) != 0;
-        ok = ok && pos.nFile == 7;
-        ok = ok && pos.nPos == 12345;
-
-        __atomic_store_n(&bi.nUndoPos, 67890u, __ATOMIC_RELAXED);
-        block_index_status_fetch_or(&bi, BLOCK_HAVE_UNDO);
-        disk_block_pos_init(&pos);
-        ok = ok && block_index_undo_pos_snapshot(&bi, &pos, &status);
-        ok = ok && (status & BLOCK_HAVE_UNDO) != 0;
-        ok = ok && pos.nFile == 7;
-        ok = ok && pos.nPos == 67890u;
-
-        block_index_status_clear_bits(&bi, BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
-        disk_block_pos_init(&pos);
-        ok = ok && !block_index_disk_pos_snapshot(&bi, &pos, NULL);
-        ok = ok && !block_index_undo_pos_snapshot(&bi, &pos, NULL);
-
-        ok = ok && !block_index_disk_pos_snapshot(NULL, &pos, NULL);
-        ok = ok && !block_index_disk_pos_snapshot(&bi, NULL, NULL);
-        ok = ok && !block_index_undo_pos_snapshot(NULL, &pos, NULL);
-        ok = ok && !block_index_undo_pos_snapshot(&bi, NULL, NULL);
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    failures += test_chain_block_failed_classification();
+    failures += test_chain_block_index_status_helpers();
+    failures += test_chain_block_index_disk_pos();
 
     return failures;
 }
