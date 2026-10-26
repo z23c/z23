@@ -119,6 +119,51 @@ static int op_count_distinct_live(int64_t now)
     return distinct;
 }
 
+/* Append one disagreement record to the ring, advancing head/count.
+ * Caller must hold g_op.lock. */
+static void op_ring_push(int height, int64_t at_unix)
+{
+    g_op.ring[g_op.ring_head].height  = height;
+    g_op.ring[g_op.ring_head].at_unix = at_unix;
+    g_op.ring_head = (g_op.ring_head + 1) % OP_RING_SIZE;
+    if (g_op.ring_count < OP_RING_SIZE) g_op.ring_count++;
+}
+
+/* Find first/last height in live window for the event payload.
+ * Caller must hold g_op.lock. */
+static void op_live_height_range(int64_t now, int *first_h, int *last_h)
+{
+    int64_t cutoff = now - (int64_t)g_op.window_secs;
+    for (int i = 0; i < g_op.ring_count; i++) {
+        struct op_record *r = &g_op.ring[i];
+        if (r->at_unix < cutoff) continue;
+        if (*first_h < 0 || r->height < *first_h) *first_h = r->height;
+        if (*last_h  < 0 || r->height > *last_h)  *last_h  = r->height;
+    }
+}
+
+/* Decide and apply the one-way HALTED/PANIC transition for a
+ * disagreement at `height`; sets the matching transition flag.
+ * Caller must hold g_op.lock. */
+static void op_apply_state_transition(int height, int prefix_end, int distinct,
+                                      bool *transition_panic,
+                                      bool *transition_halt)
+{
+    enum oracle_policy_state cur =
+        (enum oracle_policy_state)atomic_load(&g_op.state);
+    if (cur == OP_PANIC) return;
+    if (prefix_end >= 0 && height <= prefix_end) {
+        atomic_store(&g_op.state, OP_PANIC);
+        *transition_panic = true;
+        atomic_fetch_add(&g_op.total_panics, 1);
+    } else if (cur != OP_HALTED &&
+               distinct >= g_op.halt_distinct_heights) {
+        atomic_store(&g_op.state, OP_HALTED);
+        *transition_halt = true;
+        atomic_fetch_add(&g_op.total_halts, 1);
+    }
+}
+
 void oracle_policy_record_disagreement(int height,
                                         const char *our_hash_hex,
                                         const char *their_hash_hex)
@@ -139,37 +184,12 @@ void oracle_policy_record_disagreement(int height,
     bool transition_halt  = false;
 
     pthread_mutex_lock(&g_op.lock);
-    g_op.ring[g_op.ring_head].height  = height;
-    g_op.ring[g_op.ring_head].at_unix = now;
-    g_op.ring_head = (g_op.ring_head + 1) % OP_RING_SIZE;
-    if (g_op.ring_count < OP_RING_SIZE) g_op.ring_count++;
-
+    op_ring_push(height, now);
     prefix_end = g_op.evidence_prefix_end_height;
     distinct = op_count_distinct_live(now);
-
-    /* Find first/last height in live window for the event payload. */
-    int64_t cutoff = now - (int64_t)g_op.window_secs;
-    for (int i = 0; i < g_op.ring_count; i++) {
-        struct op_record *r = &g_op.ring[i];
-        if (r->at_unix < cutoff) continue;
-        if (first_h < 0 || r->height < first_h) first_h = r->height;
-        if (last_h  < 0 || r->height > last_h)  last_h  = r->height;
-    }
-
-    enum oracle_policy_state cur =
-        (enum oracle_policy_state)atomic_load(&g_op.state);
-    if (cur != OP_PANIC) {
-        if (prefix_end >= 0 && height <= prefix_end) {
-            atomic_store(&g_op.state, OP_PANIC);
-            transition_panic = true;
-            atomic_fetch_add(&g_op.total_panics, 1);
-        } else if (cur != OP_HALTED &&
-                   distinct >= g_op.halt_distinct_heights) {
-            atomic_store(&g_op.state, OP_HALTED);
-            transition_halt = true;
-            atomic_fetch_add(&g_op.total_halts, 1);
-        }
-    }
+    op_live_height_range(now, &first_h, &last_h);
+    op_apply_state_transition(height, prefix_end, distinct,
+                              &transition_panic, &transition_halt);
     pthread_mutex_unlock(&g_op.lock);
 
     if (transition_panic) {
