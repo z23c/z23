@@ -15,6 +15,13 @@
 #include <stdbool.h>
 #include <string.h>
 
+/* Readiness probes in contract order: the first row not yet reached names
+ * the first incomplete stage. */
+struct onion_stage_row {
+    bool reached;
+    const char *incomplete_stage;
+};
+
 const char *network_onion_first_incomplete_stage(
     bool tor_enabled, bool tor_requested, bool dial_ready,
     const struct onion_stream_stages *stream,
@@ -22,19 +29,24 @@ const char *network_onion_first_incomplete_stage(
 {
     if (!stream || !peer) return "invalid_snapshot";
     if (!tor_requested && !tor_enabled) return "tor_disabled";
-    if (!tor_enabled) return "tor_unavailable";
-    if (!dial_ready) return "tor_dial_not_ready";
-    if (stream->dial_started == 0) return "dial_not_started";
-    if (stream->stream_queued == 0) return "stream_not_queued";
-    if (stream->circuit_ready == 0) return "circuit_not_ready";
-    if (stream->bridge_up == 0) return "bridge_not_up";
-    if (peer->connected == 0) return "p2p_not_connected";
-    if (peer->version_sent == 0) return "version_not_sent";
-    if (stream->bytes_to_peer == 0) return "p2p_bytes_not_sent";
-    if (stream->bytes_from_peer == 0) return "p2p_bytes_not_received";
-    if (peer->version_received == 0) return "version_not_received";
-    if (peer->verack_received == 0) return "verack_not_received";
-    if (peer->handshake_complete == 0) return "handshake_not_complete";
+    const struct onion_stage_row stage_rows[] = {
+        { tor_enabled, "tor_unavailable" },
+        { dial_ready, "tor_dial_not_ready" },
+        { stream->dial_started != 0, "dial_not_started" },
+        { stream->stream_queued != 0, "stream_not_queued" },
+        { stream->circuit_ready != 0, "circuit_not_ready" },
+        { stream->bridge_up != 0, "bridge_not_up" },
+        { peer->connected != 0, "p2p_not_connected" },
+        { peer->version_sent != 0, "version_not_sent" },
+        { stream->bytes_to_peer != 0, "p2p_bytes_not_sent" },
+        { stream->bytes_from_peer != 0, "p2p_bytes_not_received" },
+        { peer->version_received != 0, "version_not_received" },
+        { peer->verack_received != 0, "verack_not_received" },
+        { peer->handshake_complete != 0, "handshake_not_complete" },
+    };
+    for (size_t i = 0; i < sizeof(stage_rows) / sizeof(stage_rows[0]); i++)
+        if (!stage_rows[i].reached)
+            return stage_rows[i].incomplete_stage;
     return "complete";
 }
 
@@ -145,6 +157,44 @@ static void push_recent_onion_dials(struct json_value *result)
     json_free(&recent);
 }
 
+/* Setup steps in operator-fix order: the first blocked row names the
+ * setup state to report. */
+struct onion_setup_row {
+    bool blocked;
+    const char *setup_state;
+};
+
+static const char *onion_status_bootstrap_state_name(
+    bool tor_enabled, bool tor_requested, bool tor_ready,
+    bool service_ready, bool address_valid, bool ready)
+{
+    return ready ? "ready" :
+           !tor_requested ? "disabled" :
+           !tor_enabled ? "unavailable" :
+           !tor_ready ? "bootstrapping" :
+           !service_ready ? "publishing" :
+           !address_valid ? "invalid_address" :
+           "address_mismatch";
+}
+
+static const char *onion_status_setup_state_name(
+    bool tor_requested, bool tor_enabled,
+    const struct tor_onion_port_map *port_map)
+{
+    const struct onion_setup_row setup_rows[] = {
+        { !tor_requested, "enable_tor" },
+        { !tor_enabled, "tor_start_failed" },
+        { !port_map->persistent_identity, "enable_persistent_identity" },
+        { !port_map->p2p_route_expected, "configure_p2p_port" },
+        { port_map->state == TOR_ONION_PORT_MAP_FAILED, "inspect_tor_log" },
+        { !port_map->p2p_route_installed, "wait_for_registration" },
+    };
+    for (size_t i = 0; i < sizeof(setup_rows) / sizeof(setup_rows[0]); i++)
+        if (setup_rows[i].blocked)
+            return setup_rows[i].setup_state;
+    return "ready";
+}
+
 bool network_onion_status_rpc(const struct json_value *params, bool help,
                               struct json_value *result)
 {
@@ -169,26 +219,16 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
      * process whose thread never started or already exited is unavailable
      * — mesh self-dial of a published onion then fails closed instead of
      * looking like a no-onion node (version_verack_incomplete:state=absent). */
-    const char *state = ready ? "ready" :
-                        !tor_requested ? "disabled" :
-                        !tor_enabled ? "unavailable" :
-                        !tor_ready ? "bootstrapping" :
-                        !service_ready ? "publishing" :
-                        !address_valid ? "invalid_address" :
-                        "address_mismatch";
+    const char *state = onion_status_bootstrap_state_name(
+        tor_enabled, tor_requested, tor_ready, service_ready,
+        address_valid, ready);
     const char *address = service_ready ? service_address :
                           tor_address ? tor_address : "";
     struct tor_onion_port_map port_map;
     tor_integration_port_map_snapshot(&port_map);
     bool p2p_publish_ready = port_map.p2p_route_installed;
-    const char *setup_state =
-        !tor_requested ? "enable_tor" :
-        !tor_enabled ? "tor_start_failed" :
-        !port_map.persistent_identity ? "enable_persistent_identity" :
-        !port_map.p2p_route_expected ? "configure_p2p_port" :
-        port_map.state == TOR_ONION_PORT_MAP_FAILED ? "inspect_tor_log" :
-        !p2p_publish_ready ? "wait_for_registration" :
-        "ready";
+    const char *setup_state = onion_status_setup_state_name(
+        tor_requested, tor_enabled, &port_map);
 
     json_set_object(result);
     json_push_kv_str(result, "schema", "zcl.onion_status.v1");

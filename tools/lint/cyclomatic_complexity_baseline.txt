@@ -1124,8 +1124,6 @@ engine/controllers/src/legacy_import_scan.c:extract_height_raw:23
 engine/controllers/src/legacy_import_scan.c:legacy_import_decrypt_thread:22
 engine/controllers/src/legacy_import_scan.c:legacy_import_sapling_filter_thread:18
 engine/controllers/src/name_gateway_controller.c:name_gateway_host_from_target:24
-engine/controllers/src/network_onion_controller.c:network_onion_first_incomplete_stage:18
-engine/controllers/src/network_onion_controller.c:network_onion_status_rpc:21
 engine/controllers/src/network_snapshot_loader_contract.c:network_push_snapshot_loader_status:31
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
 engine/controllers/src/nodelog_controller.c:line_level:22
