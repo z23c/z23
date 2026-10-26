@@ -253,8 +253,7 @@ struct block_index *chain_restore_execute(
 
     struct block_index *target = NULL;
     int resolved = chain_restore_resolve_plan_target(plan, ms, &target);
-    if (resolved == CHAIN_RESTORE_EXEC_ANCHOR_FAILED ||
-        resolved == CHAIN_RESTORE_EXEC_ANCHOR_CREATED)
+    if (resolved == CHAIN_RESTORE_EXEC_ANCHOR_CREATED)
         printf("Chain restore: anchor at h=%d\n", plan->anchor_height);
     if (resolved == CHAIN_RESTORE_EXEC_ANCHOR_FAILED)
         LOG_NULL("chain_restore", "anchor creation failed at h=%d",
