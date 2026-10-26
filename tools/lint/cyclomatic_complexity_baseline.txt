@@ -1497,5 +1497,4 @@ tools/zcc.c:scan_entries:27
 tools/zcc.c:zcc_dispatch:36
 tools/zcl-nodectl.c:cmd_launch:30
 tools/zcl-nodectl.c:main:16
-tools/zcode_dev_signer.c:main:36
 tools/zcode_package_registry_check.c:main:40

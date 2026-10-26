@@ -239,40 +239,79 @@ static void signer_usage(void)
             "  z23-package-sign --sign --key-fd N --digest-fd N --signature-fd N\n");
 }
 
+struct signer_options {
+    const char *generate;
+    const char *sign_digest;
+    bool show_public, sign;
+    int key_fd, digest_fd, signature_fd;
+};
+
+static bool signer_parse_mode_option(int argc, char **argv, int *i,
+                                     struct signer_options *opt)
+{
+    if (strcmp(argv[*i], "--generate") == 0 && *i + 1 < argc)
+        opt->generate = argv[++*i];
+    else if (strcmp(argv[*i], "--public") == 0)
+        opt->show_public = true;
+    else if (strcmp(argv[*i], "--sign") == 0)
+        opt->sign = true;
+    else if (strcmp(argv[*i], "--sign-digest") == 0 && *i + 1 < argc)
+        opt->sign_digest = argv[++*i];
+    else
+        return false;
+    return true;
+}
+
+static bool signer_parse_fd_option(int argc, char **argv, int *i,
+                                   struct signer_options *opt)
+{
+    if (strcmp(argv[*i], "--key-fd") == 0 && *i + 1 < argc &&
+        signer_fd_number(argv[++*i], &opt->key_fd))
+        return true;
+    if (strcmp(argv[*i], "--digest-fd") == 0 && *i + 1 < argc &&
+        signer_fd_number(argv[++*i], &opt->digest_fd))
+        return true;
+    return strcmp(argv[*i], "--signature-fd") == 0 && *i + 1 < argc &&
+           signer_fd_number(argv[++*i], &opt->signature_fd);
+}
+
+static bool signer_options_valid(const struct signer_options *opt)
+{
+    unsigned modes = (opt->generate ? 1u : 0u) + (opt->show_public ? 1u : 0u) +
+                     (opt->sign ? 1u : 0u) + (opt->sign_digest ? 1u : 0u);
+    return !(modes != 1u ||
+             ((opt->show_public || opt->sign || opt->sign_digest) &&
+              opt->key_fd < 0) ||
+             (opt->sign && (opt->digest_fd < 0 || opt->signature_fd < 0)) ||
+             (opt->sign_digest &&
+              (opt->digest_fd >= 0 || opt->signature_fd >= 0)));
+}
+
+static int signer_run_mode(const struct signer_options *opt,
+                           secp256k1_context *ctx)
+{
+    return opt->generate ? signer_generate(opt->generate, ctx) :
+           opt->show_public ? signer_show_public(opt->key_fd, ctx) :
+           opt->sign_digest ?
+               signer_sign_hex(opt->key_fd, opt->sign_digest, ctx) :
+           signer_sign(opt->key_fd, opt->digest_fd, opt->signature_fd, ctx);
+}
+
 int main(int argc, char **argv)
 {
-    const char *generate = NULL;
-    const char *sign_digest = NULL;
-    bool show_public = false, sign = false;
-    int key_fd = -1, digest_fd = -1, signature_fd = -1;
+    struct signer_options opt = {.key_fd = -1, .digest_fd = -1,
+                                 .signature_fd = -1};
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--generate") == 0 && i + 1 < argc)
-            generate = argv[++i];
-        else if (strcmp(argv[i], "--public") == 0)
-            show_public = true;
-        else if (strcmp(argv[i], "--sign") == 0)
-            sign = true;
-        else if (strcmp(argv[i], "--sign-digest") == 0 && i + 1 < argc)
-            sign_digest = argv[++i];
-        else if (strcmp(argv[i], "--key-fd") == 0 && i + 1 < argc &&
-                 signer_fd_number(argv[++i], &key_fd))
+        if (signer_parse_mode_option(argc, argv, &i, &opt))
             ;
-        else if (strcmp(argv[i], "--digest-fd") == 0 && i + 1 < argc &&
-                 signer_fd_number(argv[++i], &digest_fd))
-            ;
-        else if (strcmp(argv[i], "--signature-fd") == 0 && i + 1 < argc &&
-                 signer_fd_number(argv[++i], &signature_fd))
+        else if (signer_parse_fd_option(argc, argv, &i, &opt))
             ;
         else {
             signer_usage();
             return 2;
         }
     }
-    unsigned modes = (generate ? 1u : 0u) + (show_public ? 1u : 0u) +
-                     (sign ? 1u : 0u) + (sign_digest ? 1u : 0u);
-    if (modes != 1u || ((show_public || sign || sign_digest) && key_fd < 0) ||
-        (sign && (digest_fd < 0 || signature_fd < 0)) ||
-        (sign_digest && (digest_fd >= 0 || signature_fd >= 0))) {
+    if (!signer_options_valid(&opt)) {
         signer_usage();
         return 2;
     }
@@ -280,10 +319,7 @@ int main(int argc, char **argv)
         SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
     if (!ctx)
         return 1;
-    int rc = generate ? signer_generate(generate, ctx) :
-             show_public ? signer_show_public(key_fd, ctx) :
-             sign_digest ? signer_sign_hex(key_fd, sign_digest, ctx) :
-             signer_sign(key_fd, digest_fd, signature_fd, ctx);
+    int rc = signer_run_mode(&opt, ctx);
     secp256k1_context_destroy(ctx);
     return rc;
 }
