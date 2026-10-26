@@ -455,6 +455,26 @@ static bool bfr_find_stage_last_ms(const struct json_value *stages,
     return found;
 }
 
+/* Single pass over a dump's "stages" array recording the last_ms and presence
+ * of both chained submark rows (one scan, as the original loop did). */
+static void bfr_find_submark_pair(const struct json_value *stages,
+                                  int64_t *ms_one, bool *found_one,
+                                  int64_t *ms_two, bool *found_two)
+{
+    size_t n = stages ? json_size(stages) : 0;
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *row = json_at(stages, i);
+        const char *stage = row ? json_get_str(json_get(row, "stage")) : NULL;
+        if (stage && strcmp(stage, "tm_test_submark_one") == 0) {
+            *ms_one = json_get_int(json_get(row, "last_ms"));
+            *found_one = true;
+        } else if (stage && strcmp(stage, "tm_test_submark_two") == 0) {
+            *ms_two = json_get_int(json_get(row, "last_ms"));
+            *found_two = true;
+        }
+    }
+}
+
 /* Verify the recorded ms values of the two chained submarks against the
  * clock windows the test observed around the calls. */
 static int bfr_check_submark_recorded_bounds(int64_t t0, int64_t t1, int64_t t2,
@@ -503,8 +523,8 @@ static int bfr_test_boot_submark_recording(struct node_db *ndb)
                   ok && stages && json_size(stages) == 2);
 
         int64_t ms_one = -1, ms_two = -1;
-        bool found_one = bfr_find_stage_last_ms(stages, "tm_test_submark_one", &ms_one);
-        bool found_two = bfr_find_stage_last_ms(stages, "tm_test_submark_two", &ms_two);
+        bool found_one = false, found_two = false;
+        bfr_find_submark_pair(stages, &ms_one, &found_one, &ms_two, &found_two);
         failures += bfr_check_submark_recorded_bounds(t0, t1, t2, ms_one,
                                                       ms_two, found_one,
                                                       found_two);
