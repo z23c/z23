@@ -1437,7 +1437,6 @@ tools/acme/tls_client.c:parse_status_line:16
 tools/acme/tls_client.c:tls_client_fetch:50
 tools/acme/tls_client.c:tls_client_response_parse_bounded:27
 tools/acme/tls_client.c:tls_client_url_parse:33
-tools/arena_hud.c:arena_hud_compose:24
 tools/arena_present.c:main:42
 tools/arena_runner.c:ar_run_match:23
 tools/arena_runner.c:ar_verify_replay:19

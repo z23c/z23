@@ -174,6 +174,136 @@ static void ah_health(struct zcl_present_canvas *c, int x, int y,
                                  pl->team == 0 ? ah_red : ah_blue);
 }
 
+static void ah_draw_header(struct zcl_present_canvas *c, const zdog_match *m,
+                           const char *red, const char *blue,
+                           const char *cam, const char *speed)
+{
+    zcl_present_canvas_fill_rect(c, 0, 0, ARENA_HUD_WIDTH, 92u, ah_panel);
+    zcl_present_canvas_fill_rect(c, 0, 90, ARENA_HUD_WIDTH, 2u, ah_edge);
+
+    char score[8];
+    (void)snprintf(score, sizeof(score), "%u", m->score[0]);
+    ah_text(c, 28, 10, score, 48u, ah_red, true);
+    ah_text(c, 28, 62, red, 16u, ah_red, false);
+
+    (void)snprintf(score, sizeof(score), "%u", m->score[1]);
+    uint32_t bw = ah_width(score, 48u, true);
+    ah_text(c, (int32_t)ARENA_HUD_WIDTH - 28 - (int32_t)bw, 10, score,
+            48u, ah_blue, true);
+    uint32_t blw = ah_width(blue, 16u, false);
+    ah_text(c, (int32_t)ARENA_HUD_WIDTH - 28 - (int32_t)blw, 62, blue,
+            16u, ah_blue, false);
+
+    const unsigned secs = (unsigned)(m->tick / 60u);
+    char clock[48];
+    (void)snprintf(clock, sizeof(clock), "T+%02u:%02u  %s", secs / 60u,
+                   secs % 60u, speed);
+    uint32_t cw = ah_width(clock, 22u, true);
+    ah_text(c, (int32_t)(ARENA_HUD_WIDTH / 2u) - (int32_t)cw / 2, 14,
+            clock, 22u, ah_green, true);
+
+    char cam_line[40];
+    (void)snprintf(cam_line, sizeof(cam_line), "CAMERA  %s", cam);
+    uint32_t camw = ah_width(cam_line, 16u, true);
+    ah_text(c, (int32_t)(ARENA_HUD_WIDTH / 2u) - (int32_t)camw / 2, 44,
+            cam_line, 16u, ah_ink, true);
+
+    ah_text(c, (int32_t)(ARENA_HUD_WIDTH / 2u) - 52, 66, "Z23 ARENA", 18u,
+            ah_green, true);
+}
+
+static void ah_draw_banner(struct zcl_present_canvas *c, const zdog_match *m)
+{
+    if (m->phase == ZDOG_PHASE_DONE) {
+        char banner[40];
+        (void)snprintf(banner, sizeof(banner), "%s  %u-%u",
+                       ah_winner(m->winner), m->score[0], m->score[1]);
+        const struct zcl_present_color bc =
+            m->winner == ZDOG_WINNER_BLUE
+                ? ah_blue
+                : (m->winner == ZDOG_WINNER_RED ? ah_red : ah_dim);
+        uint32_t tw = ah_width(banner, 48u, true);
+        const int32_t bx =
+            (int32_t)(ARENA_HUD_WIDTH / 2u) - (int32_t)tw / 2;
+        zcl_present_canvas_fill_rect(c, bx - 24, 250, tw + 48u, 72u,
+                                     ah_panel);
+        zcl_present_canvas_stroke_rect(c, bx - 24, 250, tw + 48u, 72u,
+                                       2u, bc);
+        ah_text(c, bx, 262, banner, 48u, bc, true);
+    }
+}
+
+static void ah_draw_hosted(struct zcl_present_canvas *c, uint8_t *rgb,
+                           const arena_hud_in *in, zdogview_frame *hosted)
+{
+    zdogview_render_scene(in->m, in->seed, in->kills, in->num_kills, hosted);
+    const int hx = 16, hy = (int)ARENA_HUD_HEIGHT - (int)ZDOGVIEW_HEIGHT - 52;
+    zcl_present_canvas_fill_rect(c, hx - 4, hy - 24,
+                                 (uint32_t)ZDOGVIEW_WIDTH + 8u,
+                                 (uint32_t)ZDOGVIEW_HEIGHT + 30u, ah_panel);
+    ah_text(c, hx, hy - 22, "C23 HOSTED VIEW", 14u, ah_green, true);
+    ah_blit(rgb, hx, hy, hosted->rgb, ZDOGVIEW_WIDTH, ZDOGVIEW_HEIGHT);
+    zcl_present_canvas_stroke_rect(c, hx - 1, hy - 1,
+                                   (uint32_t)ZDOGVIEW_WIDTH + 2u,
+                                   (uint32_t)ZDOGVIEW_HEIGHT + 2u, 1u, ah_edge);
+    free(hosted);
+}
+
+static void ah_draw_plane_panel(struct zcl_present_canvas *c,
+                                const zdog_match *m, unsigned follow,
+                                const char *red, const char *blue)
+{
+    const zdog_plane *pl = &m->planes[follow];
+    const int px = 352, py = (int)ARENA_HUD_HEIGHT - 86;
+    char plane_line[96];
+    (void)snprintf(plane_line, sizeof(plane_line), "PLANE %u/%u  %s",
+                   follow + 1u, (unsigned)m->num_planes,
+                   pl->team == 0 ? red : blue);
+    ah_text(c, px, py, plane_line, 16u, ah_dim, false);
+    char tel[80];
+    (void)snprintf(tel, sizeof(tel), "ALT %5dm   SPD %3dm/s   HDG %3ddeg",
+                   (int)(pl->y / 1000), pl->speed / 1000,
+                   (int)((uint32_t)pl->yaw * 360u / 65536u));
+    ah_text(c, px, py + 22, tel, 16u, ah_green, false);
+    ah_health(c, px, py + 46, pl);
+    char hull[24];
+    if (pl->alive)
+        (void)snprintf(hull, sizeof(hull), "HULL %d", pl->health);
+    else
+        (void)snprintf(hull, sizeof(hull), "DESTROYED");
+    ah_text(c, px + 232, py + 44, hull, 14u,
+            pl->alive ? ah_dim : ah_red, true);
+
+    const int cx = (int)ARENA_HUD_WIDTH - 28;
+    const char *help1 = "TAB plane   C camera   SPACE pause   F step";
+    const char *help2 = "arrows seek 1s   PGUP/PGDN 10s   +/- speed   ESC quit";
+    uint32_t h1 = ah_width(help1, 14u, false);
+    uint32_t h2 = ah_width(help2, 14u, false);
+    ah_text(c, cx - (int32_t)h1, py, help1, 14u, ah_dim, false);
+    ah_text(c, cx - (int32_t)h2, py + 22, help2, 14u, ah_dim, false);
+}
+
+static void ah_draw_roots(struct zcl_present_canvas *c, const arena_hud_in *in)
+{
+    char roots[160];
+    char rr[ARENA_HUD_ROOT_LEN * 2u + 1u];
+    char sr[ARENA_HUD_ROOT_LEN * 2u + 1u];
+    rr[0] = 0;
+    sr[0] = 0;
+    if (in->replay_root)
+        zcl_hex_encode(in->replay_root, ARENA_HUD_ROOT_LEN, rr);
+    if (in->state_root)
+        zcl_hex_encode(in->state_root, ARENA_HUD_ROOT_LEN, sr);
+    (void)snprintf(roots, sizeof(roots),
+                   "VERIFIED  replay %.16s..  state %.16s..  tick %llu/%llu",
+                   rr[0] ? rr : "unknown", sr[0] ? sr : "unknown",
+                   (unsigned long long)in->m->tick,
+                   (unsigned long long)in->recorded_ticks);
+    uint32_t rw = ah_width(roots, 14u, false);
+    ah_text(c, (int32_t)(ARENA_HUD_WIDTH / 2u) - (int32_t)rw / 2,
+            (int32_t)ARENA_HUD_HEIGHT - 28, roots, 14u, ah_green, false);
+}
+
 int arena_hud_compose(const arena_hud_in *in, uint8_t *rgb)
 {
     if (!in || !rgb || !in->m) {
@@ -223,121 +353,17 @@ int arena_hud_compose(const arena_hud_in *in, uint8_t *rgb)
     if (follow >= m->num_planes)
         follow = 0;
 
-    zcl_present_canvas_fill_rect(&canvas, 0, 0, ARENA_HUD_WIDTH, 92u, ah_panel);
-    zcl_present_canvas_fill_rect(&canvas, 0, 90, ARENA_HUD_WIDTH, 2u, ah_edge);
-
-    char score[8];
-    (void)snprintf(score, sizeof(score), "%u", m->score[0]);
-    ah_text(&canvas, 28, 10, score, 48u, ah_red, true);
-    ah_text(&canvas, 28, 62, red, 16u, ah_red, false);
-
-    (void)snprintf(score, sizeof(score), "%u", m->score[1]);
-    uint32_t bw = ah_width(score, 48u, true);
-    ah_text(&canvas, (int32_t)ARENA_HUD_WIDTH - 28 - (int32_t)bw, 10, score,
-            48u, ah_blue, true);
-    uint32_t blw = ah_width(blue, 16u, false);
-    ah_text(&canvas, (int32_t)ARENA_HUD_WIDTH - 28 - (int32_t)blw, 62, blue,
-            16u, ah_blue, false);
-
-    const unsigned secs = (unsigned)(m->tick / 60u);
-    char clock[48];
-    (void)snprintf(clock, sizeof(clock), "T+%02u:%02u  %s", secs / 60u,
-                   secs % 60u, speed);
-    uint32_t cw = ah_width(clock, 22u, true);
-    ah_text(&canvas, (int32_t)(ARENA_HUD_WIDTH / 2u) - (int32_t)cw / 2, 14,
-            clock, 22u, ah_green, true);
-
-    char cam_line[40];
-    (void)snprintf(cam_line, sizeof(cam_line), "CAMERA  %s", cam);
-    uint32_t camw = ah_width(cam_line, 16u, true);
-    ah_text(&canvas, (int32_t)(ARENA_HUD_WIDTH / 2u) - (int32_t)camw / 2, 44,
-            cam_line, 16u, ah_ink, true);
-
-    ah_text(&canvas, (int32_t)(ARENA_HUD_WIDTH / 2u) - 52, 66, "Z23 ARENA", 18u,
-            ah_green, true);
-
+    ah_draw_header(&canvas, m, red, blue, cam, speed);
     ah_minimap(&canvas, m, follow);
-
-    if (m->phase == ZDOG_PHASE_DONE) {
-        char banner[40];
-        (void)snprintf(banner, sizeof(banner), "%s  %u-%u",
-                       ah_winner(m->winner), m->score[0], m->score[1]);
-        const struct zcl_present_color bc =
-            m->winner == ZDOG_WINNER_BLUE
-                ? ah_blue
-                : (m->winner == ZDOG_WINNER_RED ? ah_red : ah_dim);
-        uint32_t tw = ah_width(banner, 48u, true);
-        const int32_t bx =
-            (int32_t)(ARENA_HUD_WIDTH / 2u) - (int32_t)tw / 2;
-        zcl_present_canvas_fill_rect(&canvas, bx - 24, 250, tw + 48u, 72u,
-                                     ah_panel);
-        zcl_present_canvas_stroke_rect(&canvas, bx - 24, 250, tw + 48u, 72u,
-                                       2u, bc);
-        ah_text(&canvas, bx, 262, banner, 48u, bc, true);
-    }
+    ah_draw_banner(&canvas, m);
 
     zdogview_frame *hosted = zcl_malloc(sizeof(*hosted), "arena_hud.hosted");
     if (!hosted) {
         ah_err("cannot allocate the hosted 320x180 inset", NULL);
         return ARENA_HUD_FAIL;
     }
-    zdogview_render_scene(m, in->seed, in->kills, in->num_kills, hosted);
-    const int hx = 16, hy = (int)ARENA_HUD_HEIGHT - (int)ZDOGVIEW_HEIGHT - 52;
-    zcl_present_canvas_fill_rect(&canvas, hx - 4, hy - 24,
-                                 (uint32_t)ZDOGVIEW_WIDTH + 8u,
-                                 (uint32_t)ZDOGVIEW_HEIGHT + 30u, ah_panel);
-    ah_text(&canvas, hx, hy - 22, "C23 HOSTED VIEW", 14u, ah_green, true);
-    ah_blit(rgb, hx, hy, hosted->rgb, ZDOGVIEW_WIDTH, ZDOGVIEW_HEIGHT);
-    zcl_present_canvas_stroke_rect(&canvas, hx - 1, hy - 1,
-                                   (uint32_t)ZDOGVIEW_WIDTH + 2u,
-                                   (uint32_t)ZDOGVIEW_HEIGHT + 2u, 1u, ah_edge);
-    free(hosted);
-
-    const zdog_plane *pl = &m->planes[follow];
-    const int px = 352, py = (int)ARENA_HUD_HEIGHT - 86;
-    char plane_line[96];
-    (void)snprintf(plane_line, sizeof(plane_line), "PLANE %u/%u  %s",
-                   follow + 1u, (unsigned)m->num_planes,
-                   pl->team == 0 ? red : blue);
-    ah_text(&canvas, px, py, plane_line, 16u, ah_dim, false);
-    char tel[80];
-    (void)snprintf(tel, sizeof(tel), "ALT %5dm   SPD %3dm/s   HDG %3ddeg",
-                   (int)(pl->y / 1000), pl->speed / 1000,
-                   (int)((uint32_t)pl->yaw * 360u / 65536u));
-    ah_text(&canvas, px, py + 22, tel, 16u, ah_green, false);
-    ah_health(&canvas, px, py + 46, pl);
-    char hull[24];
-    if (pl->alive)
-        (void)snprintf(hull, sizeof(hull), "HULL %d", pl->health);
-    else
-        (void)snprintf(hull, sizeof(hull), "DESTROYED");
-    ah_text(&canvas, px + 232, py + 44, hull, 14u,
-            pl->alive ? ah_dim : ah_red, true);
-
-    const int cx = (int)ARENA_HUD_WIDTH - 28;
-    const char *help1 = "TAB plane   C camera   SPACE pause   F step";
-    const char *help2 = "arrows seek 1s   PGUP/PGDN 10s   +/- speed   ESC quit";
-    uint32_t h1 = ah_width(help1, 14u, false);
-    uint32_t h2 = ah_width(help2, 14u, false);
-    ah_text(&canvas, cx - (int32_t)h1, py, help1, 14u, ah_dim, false);
-    ah_text(&canvas, cx - (int32_t)h2, py + 22, help2, 14u, ah_dim, false);
-
-    char roots[160];
-    char rr[ARENA_HUD_ROOT_LEN * 2u + 1u];
-    char sr[ARENA_HUD_ROOT_LEN * 2u + 1u];
-    rr[0] = 0;
-    sr[0] = 0;
-    if (in->replay_root)
-        zcl_hex_encode(in->replay_root, ARENA_HUD_ROOT_LEN, rr);
-    if (in->state_root)
-        zcl_hex_encode(in->state_root, ARENA_HUD_ROOT_LEN, sr);
-    (void)snprintf(roots, sizeof(roots),
-                   "VERIFIED  replay %.16s..  state %.16s..  tick %llu/%llu",
-                   rr[0] ? rr : "unknown", sr[0] ? sr : "unknown",
-                   (unsigned long long)m->tick,
-                   (unsigned long long)in->recorded_ticks);
-    uint32_t rw = ah_width(roots, 14u, false);
-    ah_text(&canvas, (int32_t)(ARENA_HUD_WIDTH / 2u) - (int32_t)rw / 2,
-            (int32_t)ARENA_HUD_HEIGHT - 28, roots, 14u, ah_green, false);
+    ah_draw_hosted(&canvas, rgb, in, hosted);
+    ah_draw_plane_panel(&canvas, m, follow, red, blue);
+    ah_draw_roots(&canvas, in);
     return ARENA_HUD_OK;
 }
