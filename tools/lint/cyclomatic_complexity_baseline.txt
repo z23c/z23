@@ -1672,7 +1672,6 @@ tests/harness/src/test_file_market_delivery.c:delivery_handshake_rejects_partial
 tests/harness/src/test_file_market_delivery.c:file_market_delivery_tests:112
 tests/harness/src/test_file_market_moderation.c:test_mmt_view_filter:38
 tests/harness/src/test_file_market_offer.c:file_market_offer_tests:76
-tests/harness/src/test_file_market_payment.c:file_market_payment_tests:69
 tests/harness/src/test_file_market_purchase.c:file_market_purchase_tests:103
 tests/harness/src/test_file_market_purchase.c:purchase_fetch:17
 tests/harness/src/test_file_market_purchase.c:purchase_send:18
