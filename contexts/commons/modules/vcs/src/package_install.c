@@ -39,7 +39,7 @@ const char *vcs_package_lifecycle_state_string(
     return "unknown-state";
 }
 
-const char *vcs_package_install_error_string(
+static const char *install_error_string_codec(
     enum vcs_package_install_error error)
 {
     switch (error) {
@@ -51,6 +51,14 @@ const char *vcs_package_install_error_string(
     case VCS_PACKAGE_INSTALL_ERR_WIRE_TRUNCATED: return "wire-truncated";
     case VCS_PACKAGE_INSTALL_ERR_WIRE_TRAILING: return "wire-trailing";
     case VCS_PACKAGE_INSTALL_ERR_WIRE_OVERSIZE: return "wire-oversize";
+    default: return NULL;
+    }
+}
+
+static const char *install_error_string_content(
+    enum vcs_package_install_error error)
+{
+    switch (error) {
     case VCS_PACKAGE_INSTALL_ERR_ROOT: return "all-zero-root";
     case VCS_PACKAGE_INSTALL_ERR_STEP_COUNT: return "step-count-bound";
     case VCS_PACKAGE_INSTALL_ERR_STEP_ORDER: return "steps-not-build-order";
@@ -58,8 +66,15 @@ const char *vcs_package_install_error_string(
     case VCS_PACKAGE_INSTALL_ERR_STATE: return "lifecycle-state";
     case VCS_PACKAGE_INSTALL_ERR_EXPIRY: return "plan-expiry";
     case VCS_PACKAGE_INSTALL_ERR_GEN_COUNT: return "generation-count-bound";
+    default: return "unknown-error";
     }
-    return "unknown-error";
+}
+
+const char *vcs_package_install_error_string(
+    enum vcs_package_install_error error)
+{
+    const char *name = install_error_string_codec(error);
+    return name ? name : install_error_string_content(error);
 }
 
 void vcs_package_plan_init(struct vcs_package_plan *plan)
@@ -97,20 +112,9 @@ static bool install_field_ok(const char *s, size_t cap, bool allow_empty)
     return true;
 }
 
-enum vcs_package_install_error vcs_package_plan_validate(
+static enum vcs_package_install_error install_validate_steps(
     const struct vcs_package_plan *plan)
 {
-    if (!plan)
-        LOG_RETURN(VCS_PACKAGE_INSTALL_ERR_NULL, INSTALL_LOG,
-                   "null add plan to validate");
-    if (install_root_is_zero(plan->target_root) ||
-        install_root_is_zero(plan->lock_root))
-        return VCS_PACKAGE_INSTALL_ERR_ROOT;
-    if (plan->step_count == 0 ||
-        plan->step_count > VCS_PACKAGE_LOCK_MAX_NODES)
-        return VCS_PACKAGE_INSTALL_ERR_STEP_COUNT;
-    if (plan->expires_unix <= plan->created_unix)
-        return VCS_PACKAGE_INSTALL_ERR_EXPIRY;
     size_t depth_zero = 0;
     for (size_t i = 0; i < plan->step_count; i++) {
         const struct vcs_package_plan_step *s = &plan->steps[i];
@@ -136,6 +140,23 @@ enum vcs_package_install_error vcs_package_plan_validate(
         memcmp(last->root, plan->target_root, 32) != 0)
         return VCS_PACKAGE_INSTALL_ERR_STEP_ORDER;
     return VCS_PACKAGE_INSTALL_OK;
+}
+
+enum vcs_package_install_error vcs_package_plan_validate(
+    const struct vcs_package_plan *plan)
+{
+    if (!plan)
+        LOG_RETURN(VCS_PACKAGE_INSTALL_ERR_NULL, INSTALL_LOG,
+                   "null add plan to validate");
+    if (install_root_is_zero(plan->target_root) ||
+        install_root_is_zero(plan->lock_root))
+        return VCS_PACKAGE_INSTALL_ERR_ROOT;
+    if (plan->step_count == 0 ||
+        plan->step_count > VCS_PACKAGE_LOCK_MAX_NODES)
+        return VCS_PACKAGE_INSTALL_ERR_STEP_COUNT;
+    if (plan->expires_unix <= plan->created_unix)
+        return VCS_PACKAGE_INSTALL_ERR_EXPIRY;
+    return install_validate_steps(plan);
 }
 
 bool vcs_package_plan_expired(const struct vcs_package_plan *plan,
@@ -230,38 +251,10 @@ static bool install_rd_str(const uint8_t *wire, size_t wire_len, size_t *o,
     return true;
 }
 
-enum vcs_package_install_error vcs_package_plan_parse(
-    const uint8_t *wire, size_t wire_len, struct vcs_package_plan *out)
+static enum vcs_package_install_error install_parse_steps(
+    const uint8_t *wire, size_t wire_len, size_t o, uint16_t count,
+    struct vcs_package_plan *out)
 {
-    if (!wire || !out)
-        LOG_RETURN(VCS_PACKAGE_INSTALL_ERR_NULL, INSTALL_LOG,
-                   "null argument parsing an add plan");
-    vcs_package_plan_init(out);
-    if (wire_len > VCS_PACKAGE_PLAN_MAX_WIRE_BYTES)
-        return VCS_PACKAGE_INSTALL_ERR_WIRE_OVERSIZE;
-    const size_t head = VCS_PACKAGE_PLAN_WIRE_MAGIC_BYTES + 2u + 64u + 16u + 2u;
-    if (wire_len < head)
-        return VCS_PACKAGE_INSTALL_ERR_WIRE_TRUNCATED;
-    if (memcmp(wire, plan_wire_magic, sizeof(plan_wire_magic)) != 0)
-        return VCS_PACKAGE_INSTALL_ERR_WIRE_MAGIC;
-    size_t o = sizeof(plan_wire_magic);
-    if (vcs_rd_u16le(wire + o) != VCS_PACKAGE_PLAN_VERSION)
-        return VCS_PACKAGE_INSTALL_ERR_WIRE_VERSION;
-    o += 2;
-    memcpy(out->target_root, wire + o, 32);
-    o += 32;
-    memcpy(out->lock_root, wire + o, 32);
-    o += 32;
-    out->created_unix = (int64_t)vcs_rd_u64le(wire + o);
-    o += 8;
-    out->expires_unix = (int64_t)vcs_rd_u64le(wire + o);
-    o += 8;
-    uint16_t count = vcs_rd_u16le(wire + o);
-    o += 2;
-    if (count > VCS_PACKAGE_LOCK_MAX_NODES) {
-        vcs_package_plan_init(out);
-        return VCS_PACKAGE_INSTALL_ERR_STEP_COUNT;
-    }
     for (uint16_t i = 0; i < count; i++) {
         struct vcs_package_plan_step s;
         memset(&s, 0, sizeof(s));
@@ -305,6 +298,41 @@ enum vcs_package_install_error vcs_package_plan_parse(
         return verr;
     }
     return VCS_PACKAGE_INSTALL_OK;
+}
+
+enum vcs_package_install_error vcs_package_plan_parse(
+    const uint8_t *wire, size_t wire_len, struct vcs_package_plan *out)
+{
+    if (!wire || !out)
+        LOG_RETURN(VCS_PACKAGE_INSTALL_ERR_NULL, INSTALL_LOG,
+                   "null argument parsing an add plan");
+    vcs_package_plan_init(out);
+    if (wire_len > VCS_PACKAGE_PLAN_MAX_WIRE_BYTES)
+        return VCS_PACKAGE_INSTALL_ERR_WIRE_OVERSIZE;
+    const size_t head = VCS_PACKAGE_PLAN_WIRE_MAGIC_BYTES + 2u + 64u + 16u + 2u;
+    if (wire_len < head)
+        return VCS_PACKAGE_INSTALL_ERR_WIRE_TRUNCATED;
+    if (memcmp(wire, plan_wire_magic, sizeof(plan_wire_magic)) != 0)
+        return VCS_PACKAGE_INSTALL_ERR_WIRE_MAGIC;
+    size_t o = sizeof(plan_wire_magic);
+    if (vcs_rd_u16le(wire + o) != VCS_PACKAGE_PLAN_VERSION)
+        return VCS_PACKAGE_INSTALL_ERR_WIRE_VERSION;
+    o += 2;
+    memcpy(out->target_root, wire + o, 32);
+    o += 32;
+    memcpy(out->lock_root, wire + o, 32);
+    o += 32;
+    out->created_unix = (int64_t)vcs_rd_u64le(wire + o);
+    o += 8;
+    out->expires_unix = (int64_t)vcs_rd_u64le(wire + o);
+    o += 8;
+    uint16_t count = vcs_rd_u16le(wire + o);
+    o += 2;
+    if (count > VCS_PACKAGE_LOCK_MAX_NODES) {
+        vcs_package_plan_init(out);
+        return VCS_PACKAGE_INSTALL_ERR_STEP_COUNT;
+    }
+    return install_parse_steps(wire, wire_len, o, count, out);
 }
 
 enum vcs_package_install_error vcs_package_plan_id(
@@ -462,17 +490,11 @@ bool vcs_package_generations_previous(const struct vcs_package_generations *g,
     return false;
 }
 
-bool vcs_package_name_split(
+static bool install_name_split_parts(
     const char *name,
     char publisher_out[VCS_PACKAGE_RELEASE_NAME_MAX + 1u],
     char package_out[VCS_PACKAGE_RELEASE_NAME_MAX + 1u])
 {
-    if (!publisher_out || !package_out)
-        return false;
-    publisher_out[0] = '\0';
-    package_out[0] = '\0';
-    if (!name)
-        return false;
     const char *slash = strchr(name, '/');
     if (!slash || slash == name || slash[1] == '\0' ||
         strchr(slash + 1, '/') != NULL)
@@ -495,4 +517,18 @@ bool vcs_package_name_split(
     (void)snprintf(package_out, VCS_PACKAGE_RELEASE_NAME_MAX + 1u, "%s",
                    slash + 1);
     return true;
+}
+
+bool vcs_package_name_split(
+    const char *name,
+    char publisher_out[VCS_PACKAGE_RELEASE_NAME_MAX + 1u],
+    char package_out[VCS_PACKAGE_RELEASE_NAME_MAX + 1u])
+{
+    if (!publisher_out || !package_out)
+        return false;
+    publisher_out[0] = '\0';
+    package_out[0] = '\0';
+    if (!name)
+        return false;
+    return install_name_split_parts(name, publisher_out, package_out);
 }
