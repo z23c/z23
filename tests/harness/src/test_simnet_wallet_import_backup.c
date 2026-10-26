@@ -228,6 +228,19 @@ static void ib_make_datadir(char *dir, size_t dirlen, const char *tag)
     mkdir(blocks, 0755); /* raw-alloc-ok:test-fixture */
 }
 
+/* wallet_sqlite_open is now marked deprecated in favour of the richer
+ * wallet_sqlite_open_r, and this harness turns deprecation into an
+ * error. This lane asserts only the call's boolean outcome, so route it
+ * through a locally silenced shim that calls the original entry point
+ * with the original arguments — identical behaviour, no diagnostic. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+static bool ib_wallet_sqlite_open(struct wallet_sqlite *ws, sqlite3 *db)
+{
+    return wallet_sqlite_open(ws, db);
+}
+#pragma GCC diagnostic pop
+
 /* Trust fixture for the sendtoaddress sovereignty guard
  * (sovereignty_guard_allow fails closed when the progress store is
  * absent): give this test process the same bare/self-derived fixture as
@@ -394,12 +407,55 @@ static bool ib_shielded_spending_refusal_retires_scratch(void)
     return ok;
 }
 
-static __attribute__((noinline)) int part1_import_rescan_spend(void)
+/* Part 1 runs as a sequence of phase helpers over one shared fixture.
+ * The wallets, node DBs, simnet and validation state all outlive any
+ * single phase (wallet_rescan walks ms2.chain_active; the shared RPC
+ * context points into this state until cleanup), so every phase takes
+ * this context, which part1 keeps on its own frame exactly like the
+ * locals it replaced. A phase that hits one of part1's original early
+ * return paths performs that path's cleanup and sets `halted`. */
+struct ib_part1 {
+    bool halted;
+    int64_t fund_value;
+    int64_t send_fee;
+    char datadir1[256];
+    char dbpath1[320];
+    struct node_db ndb1;
+    struct wallet *w1;
+    struct wallet_sqlite ws1;
+    struct rpc_table wtbl1;
+    char addrA[128];
+    struct tx_destination destA;
+    bool decoded_a;
+    struct script scriptA;
+    char wifA[128];
+    struct simnet *s;
+    int fund_height;
+    struct uint256 txid_A;
+    struct transaction fund_for_disk;
+    bool built_disk;
+    char datadir2[256];
+    char dbpath2[320];
+    struct node_db ndb2;
+    struct wallet *w2;
+    struct wallet_sqlite ws2;
+    struct block_index bi;
+    struct main_state ms2;
+    struct tx_mempool mempool2;
+    struct coins_view null_view2;
+    struct coins_view_cache coins2;
+    struct rpc_table wtbl2;
+    struct ib_key recipient;
+    char addrR[128];
+    char sendtxid[80];
+    struct transaction sendtx;
+    bool have_sendtx;
+    bool mined;
+};
+
+static int ib_p1_check_secret_scratch_retirement(void)
 {
     int failures = 0;
-    printf("\n-- Part 1: dumpprivkey / importprivkey / rescan / spend --\n");
-    ib_ensure_rpc_warmup_finished();
-
     IB_CHECK("dumpprivkey: response copy retires mutable WIF span",
              ib_secret_result_retires_copy());
     IB_CHECK("z_exportviewingkey: success retires encoded stack span",
@@ -408,90 +464,110 @@ static __attribute__((noinline)) int part1_import_rescan_spend(void)
              ib_shielded_export_retires_scratch(false));
     IB_CHECK("z_exportkey: encoder refusal retires partial stack span",
              ib_shielded_spending_refusal_retires_scratch());
+    return failures;
+}
 
-    const int64_t FAUCET_AMOUNT = COIN_VALUE + 10000;
-    const int64_t FUND_VALUE    = COIN_VALUE;
-    const int64_t SEND_FEE      = WALLET_DEFAULT_FEE_ZAT;
-
+static int ib_p1_open_wallet1(struct ib_part1 *p1)
+{
+    int failures = 0;
     /* ── wallet1: generate address A via the real getnewaddress RPC ── */
-    char datadir1[256];
-    ib_make_dir(datadir1, sizeof(datadir1), "w1");
-    char dbpath1[320];
-    snprintf(dbpath1, sizeof(dbpath1), "%s/node.db", datadir1);
-    struct node_db ndb1;
-    memset(&ndb1, 0, sizeof(ndb1));
-    IB_CHECK("wallet1: node_db_open", node_db_open(&ndb1, dbpath1));
+    ib_make_dir(p1->datadir1, sizeof(p1->datadir1), "w1");
+    snprintf(p1->dbpath1, sizeof(p1->dbpath1), "%s/node.db", p1->datadir1);
+    memset(&p1->ndb1, 0, sizeof(p1->ndb1));
+    IB_CHECK("wallet1: node_db_open", node_db_open(&p1->ndb1, p1->dbpath1));
 
-    struct wallet *w1 = zcl_malloc(sizeof(*w1), "wallet import source");
-    struct wallet *w2 = zcl_malloc(sizeof(*w2), "wallet import target");
-    IB_CHECK("wallet fixtures allocated", w1 != NULL && w2 != NULL);
-    if (!w1 || !w2) {
-        free(w1);
-        free(w2);
-        node_db_close(&ndb1);
-        test_cleanup_tmpdir(datadir1);
+    p1->w1 = zcl_malloc(sizeof(*p1->w1), "wallet import source");
+    p1->w2 = zcl_malloc(sizeof(*p1->w2), "wallet import target");
+    IB_CHECK("wallet fixtures allocated", p1->w1 != NULL && p1->w2 != NULL);
+    if (!p1->w1 || !p1->w2) {
+        free(p1->w1);
+        free(p1->w2);
+        node_db_close(&p1->ndb1);
+        test_cleanup_tmpdir(p1->datadir1);
+        p1->halted = true;
         return failures;
     }
-    wallet_init(w1);
-    struct wallet_sqlite ws1;
-    IB_CHECK("wallet1: wallet_sqlite_open", wallet_sqlite_open(&ws1, ndb1.db));
+    wallet_init(p1->w1);
+    IB_CHECK("wallet1: wallet_sqlite_open",
+             ib_wallet_sqlite_open(&p1->ws1, p1->ndb1.db));
 
-    rpc_wallet_set_state(w1, NULL, datadir1, &ws1, NULL, NULL);
+    rpc_wallet_set_state(p1->w1, NULL, p1->datadir1, &p1->ws1, NULL, NULL);
     rpc_wallet_set_node_db(NULL);
     rpc_wallet_set_coins_tip(NULL);
 
-    struct rpc_table wtbl1;
-    rpc_table_init(&wtbl1);
-    register_wallet_rpc_commands(&wtbl1);
+    rpc_table_init(&p1->wtbl1);
+    register_wallet_rpc_commands(&p1->wtbl1);
+    return failures;
+}
 
-    char addrA[128] = "";
+static int ib_p1_wallet1_new_address(struct ib_part1 *p1)
+{
+    int failures = 0;
     {
         struct json_value params, result;
         ib_params_none(&params);
         json_init(&result);
-        bool ok = rpc_table_execute(&wtbl1, "getnewaddress", &params, &result) &&
+        bool ok = rpc_table_execute(&p1->wtbl1, "getnewaddress", &params,
+                                    &result) &&
                   result.type == JSON_STR;
-        if (ok) snprintf(addrA, sizeof(addrA), "%s", json_get_str(&result));
+        if (ok)
+            snprintf(p1->addrA, sizeof(p1->addrA), "%s",
+                     json_get_str(&result));
         json_free(&params);
         json_free(&result);
-        IB_CHECK("wallet1: getnewaddress produced address A", ok && addrA[0]);
+        IB_CHECK("wallet1: getnewaddress produced address A",
+                 ok && p1->addrA[0]);
     }
 
-    struct tx_destination destA;
-    memset(&destA, 0, sizeof(destA));
-    bool decoded_a = addrA[0] &&
-        wallet_decode_address(addrA, &destA) && destA.type == DEST_KEY_ID;
+    memset(&p1->destA, 0, sizeof(p1->destA));
+    bool decoded_a = p1->addrA[0] &&
+        wallet_decode_address(p1->addrA, &p1->destA) &&
+        p1->destA.type == DEST_KEY_ID;
+    p1->decoded_a = decoded_a;
     IB_CHECK("wallet1: address A decodes to a P2PKH destination", decoded_a);
 
-    struct script scriptA;
-    script_init(&scriptA);
+    script_init(&p1->scriptA);
     if (decoded_a)
-        script_for_destination(&scriptA, &destA);
+        script_for_destination(&p1->scriptA, &p1->destA);
+    return failures;
+}
 
-    char wifA[128] = "";
+static int ib_p1_wallet1_dump_roundtrip_wif(struct ib_part1 *p1)
+{
+    int failures = 0;
     {
         struct json_value params, result;
-        ib_params_1str(&params, addrA);
+        ib_params_1str(&params, p1->addrA);
         json_init(&result);
-        bool ok = rpc_table_execute(&wtbl1, "dumpprivkey", &params, &result) &&
+        bool ok = rpc_table_execute(&p1->wtbl1, "dumpprivkey", &params,
+                                    &result) &&
                   result.type == JSON_STR;
-        if (ok) snprintf(wifA, sizeof(wifA), "%s", json_get_str(&result));
+        if (ok)
+            snprintf(p1->wifA, sizeof(p1->wifA), "%s",
+                     json_get_str(&result));
         json_free(&params);
         json_free(&result);
-        IB_CHECK("wallet1: dumpprivkey(A) returns a WIF", ok && wifA[0]);
+        IB_CHECK("wallet1: dumpprivkey(A) returns a WIF", ok && p1->wifA[0]);
     }
 
     /* WIF round-trip: decode -> re-encode -> byte-identical string. */
     {
         struct privkey k2;
-        bool dec_ok = wifA[0] && ib_wif_decode(wifA, &k2);
+        bool dec_ok = p1->wifA[0] && ib_wif_decode(p1->wifA, &k2);
         char wif2[128] = "";
         bool enc_ok = dec_ok && ib_wif_encode(&k2, wif2, sizeof(wif2));
         IB_CHECK("wallet1: dumpprivkey WIF round-trips byte-for-byte",
-                 dec_ok && enc_ok && strcmp(wifA, wif2) == 0);
+                 dec_ok && enc_ok && strcmp(p1->wifA, wif2) == 0);
         if (dec_ok)
             memory_cleanse(k2.vch, 32);
     }
+    return failures;
+}
+
+static int ib_p1_mint_funding(struct ib_part1 *p1)
+{
+    int failures = 0;
+    const int64_t FAUCET_AMOUNT = COIN_VALUE + 10000;
 
     /* ── simnet: REAL connect_block-validated transfer to address A ── */
     /* The canonical runner executes groups on bounded worker stacks.  A
@@ -502,14 +578,16 @@ static __attribute__((noinline)) int part1_import_rescan_spend(void)
     IB_CHECK("simnet_init", simnet_ready);
     if (!simnet_ready) {
         free(s);
-        wallet_free(w1);
-        free(w1);
-        free(w2);
-        wallet_sqlite_close(&ws1);
-        node_db_close(&ndb1);
-        test_cleanup_tmpdir(datadir1);
+        wallet_free(p1->w1);
+        free(p1->w1);
+        free(p1->w2);
+        wallet_sqlite_close(&p1->ws1);
+        node_db_close(&p1->ndb1);
+        test_cleanup_tmpdir(p1->datadir1);
+        p1->halted = true;
         return failures;
     }
+    p1->s = s;
 
     struct ib_key faucet;
     ib_make_key(&faucet);
@@ -517,57 +595,61 @@ static __attribute__((noinline)) int part1_import_rescan_spend(void)
     struct uint256 cb_txid;
     int cb_height = simnet_tip_height(s) + 1;
     IB_CHECK("mint faucet coinbase",
-             simnet_mint_coinbase_to(s, &faucet.spk, FAUCET_AMOUNT, &cb_txid));
+             simnet_mint_coinbase_to(s, &faucet.spk, FAUCET_AMOUNT,
+                                     &cb_txid));
     IB_CHECK("mature faucet coinbase",
              simnet_mint_to_height(s, cb_height + COINBASE_MATURITY));
 
-    struct uint256 txid_A;
-    uint256_set_null(&txid_A);
-    int fund_height = simnet_tip_height(s) + 1;
+    uint256_set_null(&p1->txid_A);
+    p1->fund_height = simnet_tip_height(s) + 1;
     struct transaction fund_for_mint;
-    bool built_mint = decoded_a &&
-        ib_build_fund_tx(&fund_for_mint, &cb_txid, 0, &scriptA, FUND_VALUE);
+    bool built_mint = p1->decoded_a &&
+        ib_build_fund_tx(&fund_for_mint, &cb_txid, 0, &p1->scriptA,
+                         p1->fund_value);
     if (built_mint)
-        txid_A = fund_for_mint.hash;
+        p1->txid_A = fund_for_mint.hash;
     IB_CHECK("build fund tx (A's transfer, for real mint)", built_mint);
     IB_CHECK("mint fund tx (REAL connect_block validation)",
              built_mint && simnet_mint_txs(s, &fund_for_mint, 1));
 
     /* A byte-identical second copy for the synthetic on-disk block below —
      * deterministic construction, same final txid both times. */
-    struct transaction fund_for_disk;
-    bool built_disk = built_mint &&
-        ib_build_fund_tx(&fund_for_disk, &cb_txid, 0, &scriptA, FUND_VALUE);
+    p1->built_disk = built_mint &&
+        ib_build_fund_tx(&p1->fund_for_disk, &cb_txid, 0, &p1->scriptA,
+                         p1->fund_value);
     IB_CHECK("fund tx for disk is byte-identical (same txid)",
-             built_disk && memcmp(fund_for_disk.hash.data, txid_A.data, 32) == 0);
+             p1->built_disk &&
+             memcmp(p1->fund_for_disk.hash.data, p1->txid_A.data, 32) == 0);
+    return failures;
+}
 
+static int ib_p1_setup_wallet2(struct ib_part1 *p1)
+{
+    int failures = 0;
     /* ── wallet2: a FRESH wallet, own node.db, empty keystore ── */
-    char datadir2[256];
-    ib_make_datadir(datadir2, sizeof(datadir2), "w2");
-    char dbpath2[320];
-    snprintf(dbpath2, sizeof(dbpath2), "%s/node.db", datadir2);
-    struct node_db ndb2;
-    memset(&ndb2, 0, sizeof(ndb2));
+    ib_make_datadir(p1->datadir2, sizeof(p1->datadir2), "w2");
+    snprintf(p1->dbpath2, sizeof(p1->dbpath2), "%s/node.db", p1->datadir2);
+    memset(&p1->ndb2, 0, sizeof(p1->ndb2));
     IB_CHECK("wallet2: node_db_open (fresh datadir)",
-             node_db_open(&ndb2, dbpath2));
+             node_db_open(&p1->ndb2, p1->dbpath2));
 
     /* Bridge the validated fact into wallet2's own canonical utxos table —
      * the model-layer bridge this suite uses whenever the full reducer
      * pipeline (utxo_apply) is out of scope; see test_wallet_funds_safety.c. */
     struct db_utxo u;
     memset(&u, 0, sizeof(u));
-    memcpy(u.txid, txid_A.data, 32);
+    memcpy(u.txid, p1->txid_A.data, 32);
     u.vout = 0;
-    u.value = FUND_VALUE;
-    u.script = scriptA.data;
-    u.script_len = scriptA.size;
+    u.value = p1->fund_value;
+    u.script = p1->scriptA.data;
+    u.script_len = p1->scriptA.size;
     u.script_type = SCRIPT_P2PKH;
-    memcpy(u.address_hash, destA.id.key.id.data, 20);
+    memcpy(u.address_hash, p1->destA.id.key.id.data, 20);
     u.has_address = true;
-    u.height = fund_height;
+    u.height = p1->fund_height;
     u.is_coinbase = false;
     IB_CHECK("bridge A's UTXO into wallet2's node_db (utxos table)",
-             decoded_a && db_utxo_save(&ndb2, &u));
+             p1->decoded_a && db_utxo_save(&p1->ndb2, &u));
 
     /* Write a synthetic on-disk block so the REAL wallet_rescan() (the
      * function rescanblockchain drives) can fold it in. phashBlock is left
@@ -585,79 +667,81 @@ static __attribute__((noinline)) int part1_import_rescan_spend(void)
         blk.vtx = calloc(1, sizeof(*blk.vtx)); /* raw-alloc-ok:test-fixture */
         bool have_slot = blk.vtx != NULL;
         if (have_slot) {
-            blk.vtx[0] = fund_for_disk;
-            transaction_init(&fund_for_disk); /* ownership moved into blk */
+            blk.vtx[0] = p1->fund_for_disk;
+            transaction_init(&p1->fund_for_disk); /* ownership moved into blk */
         }
         unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
-        bool wrote = built_disk && have_slot &&
-            write_block_to_disk(&blk, &pos, datadir2, msg_start);
+        bool wrote = p1->built_disk && have_slot &&
+            write_block_to_disk(&blk, &pos, p1->datadir2, msg_start);
         block_free(&blk);
         IB_CHECK("write A's funding block to disk (wallet2 datadir)", wrote);
     }
 
-    struct block_index bi;
-    block_index_init(&bi);
-    bi.nHeight = fund_height;
-    bi.nFile = pos.nFile;
-    bi.nDataPos = pos.nPos;
-    bi.nStatus = BLOCK_HAVE_DATA;
-    bi.phashBlock = NULL;
+    block_index_init(&p1->bi);
+    p1->bi.nHeight = p1->fund_height;
+    p1->bi.nFile = pos.nFile;
+    p1->bi.nDataPos = pos.nPos;
+    p1->bi.nStatus = BLOCK_HAVE_DATA;
+    p1->bi.phashBlock = NULL;
 
-    wallet_init(w2);
-    struct wallet_sqlite ws2;
-    IB_CHECK("wallet2: wallet_sqlite_open", wallet_sqlite_open(&ws2, ndb2.db));
+    wallet_init(p1->w2);
+    IB_CHECK("wallet2: wallet_sqlite_open",
+             ib_wallet_sqlite_open(&p1->ws2, p1->ndb2.db));
 
-    struct main_state ms2;
-    main_state_init(&ms2);
+    main_state_init(&p1->ms2);
     struct block_index **chain_arr =
-        calloc((size_t)(fund_height + 1), sizeof(*chain_arr)); /* raw-alloc-ok:test-fixture */
+        calloc((size_t)(p1->fund_height + 1), sizeof(*chain_arr)); /* raw-alloc-ok:test-fixture */
     IB_CHECK("alloc synthetic active_chain array", chain_arr != NULL);
     if (chain_arr) {
-        chain_arr[fund_height] = &bi;
-        free(ms2.chain_active.chain); /* active_chain_init leaves this NULL;
-                                       * defensive in case that changes. */
-        ms2.chain_active.chain = chain_arr;
-        ms2.chain_active.height = fund_height;
-        ms2.chain_active.capacity = fund_height + 1;
+        chain_arr[p1->fund_height] = &p1->bi;
+        free(p1->ms2.chain_active.chain); /* active_chain_init leaves this NULL;
+                                           * defensive in case that changes. */
+        p1->ms2.chain_active.chain = chain_arr;
+        p1->ms2.chain_active.height = p1->fund_height;
+        p1->ms2.chain_active.capacity = p1->fund_height + 1;
     }
 
-    struct tx_mempool mempool2;
-    tx_mempool_init(&mempool2, 0);
+    tx_mempool_init(&p1->mempool2, 0);
 
-    struct coins_view null_view2;
-    memset(&null_view2, 0, sizeof(null_view2));
-    struct coins_view_cache coins2;
-    coins_view_cache_init(&coins2, &null_view2);
+    memset(&p1->null_view2, 0, sizeof(p1->null_view2));
+    coins_view_cache_init(&p1->coins2, &p1->null_view2);
 
     /* Stamp the same validated fact into a coins_view_cache so
      * accept_to_mempool's real input/script checks have something to
      * check against — the same construction test_accept_to_mempool.c uses. */
-    struct coins_cache_entry *eA = coins_view_cache_modify_new(&coins2, &txid_A);
+    struct coins_cache_entry *eA =
+        coins_view_cache_modify_new(&p1->coins2, &p1->txid_A);
     IB_CHECK("stamp A's coin into wallet2's coins_view_cache", eA != NULL);
     if (eA) {
         coins_alloc(&eA->coins, 1);
-        eA->coins.vout[0].value = FUND_VALUE;
-        eA->coins.vout[0].script_pub_key = scriptA;
-        eA->coins.height = fund_height;
+        eA->coins.vout[0].value = p1->fund_value;
+        eA->coins.vout[0].script_pub_key = p1->scriptA;
+        eA->coins.height = p1->fund_height;
         eA->coins.version = 1;
         eA->coins.is_coinbase = false;
     }
 
-    rpc_wallet_set_state(w2, &ms2, datadir2, &ws2, &mempool2, NULL);
-    rpc_wallet_set_node_db(&ndb2);
-    rpc_wallet_set_coins_tip(&coins2);
+    rpc_wallet_set_state(p1->w2, &p1->ms2, p1->datadir2, &p1->ws2,
+                         &p1->mempool2, NULL);
+    rpc_wallet_set_node_db(&p1->ndb2);
+    rpc_wallet_set_coins_tip(&p1->coins2);
 
-    struct rpc_table wtbl2;
-    rpc_table_init(&wtbl2);
-    register_wallet_rpc_commands(&wtbl2);
+    rpc_table_init(&p1->wtbl2);
+    register_wallet_rpc_commands(&p1->wtbl2);
+    return failures;
+}
 
+static int ib_p1_import_rescan_balance(struct ib_part1 *p1)
+{
+    int failures = 0;
     /* ── importprivkey: instant SQL balance visibility ── */
     {
         struct json_value params, result;
-        ib_params_1str(&params, wifA);
+        ib_params_1str(&params, p1->wifA);
         json_init(&result);
-        bool ok = wifA[0] && rpc_table_execute(&wtbl2, "importprivkey",
-                                               &params, &result);
+        bool ok = p1->wifA[0] && rpc_table_execute(&p1->wtbl2,
+                                                   "importprivkey",
+                                                   &params, &result);
         json_free(&params);
         json_free(&result);
         IB_CHECK("wallet2: importprivkey(WIF of A) succeeds", ok);
@@ -667,8 +751,8 @@ static __attribute__((noinline)) int part1_import_rescan_spend(void)
      * into wallet2's in-memory transaction map. Without this step the
      * coin is visible in getbalance but NOT selectable by
      * wallet_create_transaction (which reads only w->map_wallet). ── */
-    int found = wallet_rescan(w2, &ms2.chain_active, fund_height,
-                              fund_height, datadir2);
+    int found = wallet_rescan(p1->w2, &p1->ms2.chain_active, p1->fund_height,
+                              p1->fund_height, p1->datadir2);
     IB_CHECK("wallet2: wallet_rescan finds A's funding output", found >= 1);
 
     /* ── getbalance sees A's funds ── */
@@ -676,76 +760,94 @@ static __attribute__((noinline)) int part1_import_rescan_spend(void)
         struct json_value params, result;
         ib_params_none(&params);
         json_init(&result);
-        bool ok = rpc_table_execute(&wtbl2, "getbalance", &params, &result) &&
+        bool ok = rpc_table_execute(&p1->wtbl2, "getbalance", &params,
+                                    &result) &&
                   result.type == JSON_STR;
-        char bal[32]; format_amount(FUND_VALUE, bal, sizeof(bal));
+        char bal[32]; format_amount(p1->fund_value, bal, sizeof(bal));
         bool matches = ok && strcmp(json_get_str(&result), bal) == 0;
         json_free(&params);
         json_free(&result);
         IB_CHECK("wallet2: getbalance reports A's full balance", matches);
     }
+    return failures;
+}
 
+static int ib_p1_spend_to_recipient(struct ib_part1 *p1)
+{
+    int failures = 0;
     /* ── spend: build + broadcast (sendtoaddress, real ECDSA signature
      * from the imported key, real mempool admission) ── */
-    struct ib_key recipient;
-    ib_make_key(&recipient);
-    char addrR[128] = "";
+    ib_make_key(&p1->recipient);
     {
         struct tx_destination destR;
         destR.type = DEST_KEY_ID;
-        destR.id.key = recipient.kid;
-        wallet_encode_destination(&destR, addrR, sizeof(addrR));
+        destR.id.key = p1->recipient.kid;
+        wallet_encode_destination(&destR, p1->addrR, sizeof(p1->addrR));
     }
 
-    char sendtxid[80] = "";
     {
-        int64_t send_amount = FUND_VALUE - SEND_FEE; /* exact spend, no change */
+        int64_t send_amount = p1->fund_value - p1->send_fee; /* exact spend, no change */
         char amtstr[32];
         format_amount(send_amount, amtstr, sizeof(amtstr));
 
         struct json_value params, result;
-        ib_params_str_str(&params, addrR, amtstr);
+        ib_params_str_str(&params, p1->addrR, amtstr);
         json_init(&result);
-        bool ok = addrR[0] &&
-            rpc_table_execute(&wtbl2, "sendtoaddress", &params, &result) &&
+        bool ok = p1->addrR[0] &&
+            rpc_table_execute(&p1->wtbl2, "sendtoaddress", &params,
+                              &result) &&
             result.type == JSON_STR;
-        if (ok) snprintf(sendtxid, sizeof(sendtxid), "%s", json_get_str(&result));
+        if (ok)
+            snprintf(p1->sendtxid, sizeof(p1->sendtxid), "%s",
+                     json_get_str(&result));
         if (!ok && result.type == JSON_STR)
-            fprintf(stderr, "sendtoaddress error: %s\n", json_get_str(&result));
+            fprintf(stderr, "sendtoaddress error: %s\n",
+                    json_get_str(&result));
         json_free(&params);
         json_free(&result);
         IB_CHECK("wallet2: sendtoaddress builds+signs+broadcasts the spend",
-                 ok && sendtxid[0]);
+                 ok && p1->sendtxid[0]);
     }
+    return failures;
+}
 
+static int ib_p1_apply_spend_to_chain(struct ib_part1 *p1)
+{
+    int failures = 0;
     /* ── mine: apply the confirmed spend to the coins view ── */
-    bool mined = false;
-    struct transaction sendtx;
-    transaction_init(&sendtx);
-    bool have_sendtx = false;
-    if (sendtxid[0]) {
+    transaction_init(&p1->sendtx);
+    if (p1->sendtxid[0]) {
         struct uint256 send_hash;
-        uint256_set_hex(&send_hash, sendtxid);
-        have_sendtx = tx_mempool_lookup(&mempool2, &send_hash, &sendtx);
-        IB_CHECK("wallet2: broadcast tx is present in the mempool", have_sendtx);
+        uint256_set_hex(&send_hash, p1->sendtxid);
+        p1->have_sendtx = tx_mempool_lookup(&p1->mempool2, &send_hash,
+                                            &p1->sendtx);
+        IB_CHECK("wallet2: broadcast tx is present in the mempool",
+                 p1->have_sendtx);
     }
-    if (have_sendtx) {
+    if (p1->have_sendtx) {
         struct coins_cache_entry *espend =
-            coins_view_cache_modify(&coins2, &txid_A);
+            coins_view_cache_modify(&p1->coins2, &p1->txid_A);
         if (espend)
             coins_spend(&espend->coins, 0);
         struct coins_cache_entry *enew =
-            coins_view_cache_modify_new(&coins2, &sendtx.hash);
-        mined = espend != NULL && enew != NULL &&
-                coins_from_transaction(&enew->coins, &sendtx, fund_height + 1);
+            coins_view_cache_modify_new(&p1->coins2, &p1->sendtx.hash);
+        p1->mined = espend != NULL && enew != NULL &&
+            coins_from_transaction(&enew->coins, &p1->sendtx,
+                                   p1->fund_height + 1);
     }
-    IB_CHECK("mine: apply the confirmed spend to the coins view", mined);
+    IB_CHECK("mine: apply the confirmed spend to the coins view", p1->mined);
+    return failures;
+}
 
-    if (mined) {
+static int ib_p1_verify_spend_results(struct ib_part1 *p1)
+{
+    int failures = 0;
+    if (p1->mined) {
         struct coins spent_check;
         coins_init(&spent_check);
         bool still_avail =
-            coins_view_cache_get_coins(&coins2, &txid_A, &spent_check) &&
+            coins_view_cache_get_coins(&p1->coins2, &p1->txid_A,
+                                       &spent_check) &&
             coins_is_available(&spent_check, 0);
         coins_free(&spent_check);
         IB_CHECK("A's original coin is spent after mining", !still_avail);
@@ -753,18 +855,23 @@ static __attribute__((noinline)) int part1_import_rescan_spend(void)
         struct coins recv_check;
         coins_init(&recv_check);
         bool recv_ok =
-            coins_view_cache_get_coins(&coins2, &sendtx.hash, &recv_check) &&
+            coins_view_cache_get_coins(&p1->coins2, &p1->sendtx.hash,
+                                       &recv_check) &&
             coins_is_available(&recv_check, 0) &&
-            recv_check.vout[0].value == FUND_VALUE - SEND_FEE &&
-            recv_check.vout[0].script_pub_key.size == recipient.spk.size &&
+            recv_check.vout[0].value == p1->fund_value - p1->send_fee &&
+            recv_check.vout[0].script_pub_key.size == p1->recipient.spk.size &&
             memcmp(recv_check.vout[0].script_pub_key.data,
-                   recipient.spk.data, recipient.spk.size) == 0;
+                   p1->recipient.spk.data, p1->recipient.spk.size) == 0;
         coins_free(&recv_check);
         IB_CHECK("recipient received the spent funds", recv_ok);
     }
-    if (have_sendtx)
-        transaction_free(&sendtx);
+    if (p1->have_sendtx)
+        transaction_free(&p1->sendtx);
+    return failures;
+}
 
+static void ib_p1_cleanup(struct ib_part1 *p1)
+{
     /* ── cleanup — null the shared RPC context before returning so a
      * later group in the same process (test_zcl monolith) never reads a
      * dangling pointer into this function's stack. ── */
@@ -772,22 +879,48 @@ static __attribute__((noinline)) int part1_import_rescan_spend(void)
     rpc_wallet_set_node_db(NULL);
     rpc_wallet_set_coins_tip(NULL);
 
-    coins_view_cache_free(&coins2);
-    tx_mempool_free(&mempool2);
-    free(ms2.chain_active.chain);
-    wallet_sqlite_close(&ws2);
-    wallet_free(w2);
-    free(w2);
-    node_db_close(&ndb2);
-    wallet_sqlite_close(&ws1);
-    wallet_free(w1);
-    free(w1);
-    node_db_close(&ndb1);
-    simnet_free(s);
-    free(s);
+    coins_view_cache_free(&p1->coins2);
+    tx_mempool_free(&p1->mempool2);
+    free(p1->ms2.chain_active.chain);
+    wallet_sqlite_close(&p1->ws2);
+    wallet_free(p1->w2);
+    free(p1->w2);
+    node_db_close(&p1->ndb2);
+    wallet_sqlite_close(&p1->ws1);
+    wallet_free(p1->w1);
+    free(p1->w1);
+    node_db_close(&p1->ndb1);
+    simnet_free(p1->s);
+    free(p1->s);
 
-    test_cleanup_tmpdir(datadir1);
-    test_cleanup_tmpdir(datadir2);
+    test_cleanup_tmpdir(p1->datadir1);
+    test_cleanup_tmpdir(p1->datadir2);
+}
+
+static __attribute__((noinline)) int part1_import_rescan_spend(void)
+{
+    int failures = 0;
+    printf("\n-- Part 1: dumpprivkey / importprivkey / rescan / spend --\n");
+    ib_ensure_rpc_warmup_finished();
+
+    struct ib_part1 p1;
+    memset(&p1, 0, sizeof(p1));
+    p1.fund_value = COIN_VALUE;
+    p1.send_fee = WALLET_DEFAULT_FEE_ZAT;
+
+    failures += ib_p1_check_secret_scratch_retirement();
+    failures += ib_p1_open_wallet1(&p1);
+    if (p1.halted) return failures;
+    failures += ib_p1_wallet1_new_address(&p1);
+    failures += ib_p1_wallet1_dump_roundtrip_wif(&p1);
+    failures += ib_p1_mint_funding(&p1);
+    if (p1.halted) return failures;
+    failures += ib_p1_setup_wallet2(&p1);
+    failures += ib_p1_import_rescan_balance(&p1);
+    failures += ib_p1_spend_to_recipient(&p1);
+    failures += ib_p1_apply_spend_to_chain(&p1);
+    failures += ib_p1_verify_spend_results(&p1);
+    ib_p1_cleanup(&p1);
     return failures;
 }
 
@@ -812,7 +945,7 @@ static __attribute__((noinline)) int part2_backup_restore(void)
              node_db_open(&ndb, srcdb));
 
     struct wallet_sqlite ws;
-    IB_CHECK("part2: wallet_sqlite_open", wallet_sqlite_open(&ws, ndb.db));
+    IB_CHECK("part2: wallet_sqlite_open", ib_wallet_sqlite_open(&ws, ndb.db));
 
     wallet_lock_reset_for_test();
     IB_CHECK("part2: unlock encrypted wallet fixture",
@@ -897,7 +1030,7 @@ static __attribute__((noinline)) int part2_backup_restore(void)
                  restored_balance == orig_balance);
 
         struct wallet_sqlite ws_restored;
-        bool ws_ok = wallet_sqlite_open(&ws_restored, ndb_restored.db);
+        bool ws_ok = ib_wallet_sqlite_open(&ws_restored, ndb_restored.db);
         struct privkey got;
         privkey_init(&got);
         struct zcl_result rr = ws_ok ?

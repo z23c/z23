@@ -1416,7 +1416,6 @@ tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_a_consensus_accept:60
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_b_wallet_rpc:33
 tests/harness/src/test_simnet_txkit.c:test_simnet_txkit:38
 tests/harness/src/test_simnet_txkit.c:txk_build_multisig_spend:18
-tests/harness/src/test_simnet_wallet_import_backup.c:part1_import_rescan_spend:52
 tests/harness/src/test_soak_attestation.c:test_sync_benchmark_receipt_wellformed:27
 tests/harness/src/test_sprout_groth16_kat.c:test_sprout_groth16_kat:26
 tests/harness/src/test_sprout_phgr13_kat.c:test_sprout_phgr13_kat:28
