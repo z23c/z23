@@ -309,24 +309,31 @@ static bool exec_runner_reap(pid_t pid, int64_t deadline, int *status)
 }
 /* Judge the child's exit and the byte count, then decode the samples. */
 static struct zcl_result exec_runner_verdict(int status, size_t got,
-                                             size_t expect, const uint8_t *buf,
+                                             size_t expect, uint8_t *buf,
                                              uint64_t measured,
                                              uint64_t *samples)
 {
     /* The child's own verdict outranks the byte count: a killed or failed
      * child is a killed/failed RUN, not a protocol mismatch. */
-    if (!WIFEXITED(status))
+    if (!WIFEXITED(status)) {
+        free(buf);
         return ZCL_ERR(-1, "executor-run-child-killed: signal %d",
                        WIFSIGNALED(status) ? WTERMSIG(status) : -1);
-    if (WEXITSTATUS(status) != 0)
+    }
+    if (WEXITSTATUS(status) != 0) {
+        free(buf);
         return ZCL_ERR(-1, "executor-run-child-failed: exit %d",
                        WEXITSTATUS(status));
-    if (got != expect)
+    }
+    if (got != expect) {
+        free(buf);
         return ZCL_ERR(-1, "executor-run-protocol-error");
+    }
     /* The pipe carried the samples (fork is copy-on-write); the final
      * marker byte is the kernel's dead-code sink. */
     for (uint64_t i = 0; i < measured; i++)
         samples[i] = zcl_read_u64_le(buf + 8u * i);
+    free(buf);
     return ZCL_OK;
 }
 /* Parent side: fork the confined child, collect exactly 8*measured+1
@@ -377,10 +384,7 @@ static struct zcl_result exec_runner_fork(const char *bench_dir,
         free(buf);
         return ZCL_ERR(-1, "executor-run-timeout");
     }
-    struct zcl_result verdict =
-        exec_runner_verdict(status, got, expect, buf, measured, samples);
-    free(buf);
-    return verdict;
+    return exec_runner_verdict(status, got, expect, buf, measured, samples);
 }
 
 /* The sandbox canary self-check (zcode_benchmark_executor_sandbox_selfcheck
@@ -667,22 +671,28 @@ static struct zcl_result exec_run_prepare(
 /* Confinement: self-check first, refuse on any failure, then run the
  * fixed action under the kind's fixed resource policy. */
 static struct zcl_result exec_run_confine(
-    const struct zcode_benchmark_execute_request *req, char *bench_dir,
-    size_t cap)
+    const struct zcode_benchmark_execute_request *req, struct exec_context *ctx,
+    char *bench_dir, size_t cap)
 {
     int n = snprintf(bench_dir, cap, "%s/.zvcs/bench", req->workspace);
-    if (n <= 0 || (size_t)n >= cap)
+    if (n <= 0 || (size_t)n >= cap) {
+        exec_context_free(ctx);
         return ZCL_ERR(-1, "executor-bench-dir-invalid");
-    if (mkdir(bench_dir, 0700) != 0 && errno != EEXIST)
+    }
+    if (mkdir(bench_dir, 0700) != 0 && errno != EEXIST) {
+        exec_context_free(ctx);
         return ZCL_ERR(-1, "executor-bench-dir-failed");
+    }
     struct zcl_result (*selfcheck)(const char *) =
         req->hooks && req->hooks->sandbox_selfcheck
             ? req->hooks->sandbox_selfcheck
             : zcode_benchmark_executor_sandbox_selfcheck;
     struct zcl_result check = selfcheck(bench_dir);
-    if (!check.ok)
+    if (!check.ok) {
+        exec_context_free(ctx);
         return ZCL_ERR(-1, "executor-sandbox-selfcheck-failed: %s",
                        check.message);
+    }
     return ZCL_OK;
 }
 static uint8_t exec_run_status(const struct exec_context *ctx)
@@ -692,7 +702,8 @@ static uint8_t exec_run_status(const struct exec_context *ctx)
                : VCS_ZCODE_BENCHMARK_OBSERVED;
 }
 /* Allocate the sample buffer and run the confined child into it. The
- * fixed kind's resource policy is applied first. */
+ * fixed kind's resource policy is applied first. Every failure releases
+ * the context before its error is built. */
 static struct zcl_result exec_run_sample(const char *bench_dir, bool is_repro,
                                          struct exec_context *ctx,
                                          uint64_t **samples)
@@ -707,19 +718,24 @@ static struct zcl_result exec_run_sample(const char *bench_dir, bool is_repro,
     };
     const char *policy_text = exec_policy_by_kind[is_repro ? 1 : 0];
     struct exec_resource_limits limits;
-    if (!exec_policy_parse(policy_text, &limits) || limits.network_allowed)
+    if (!exec_policy_parse(policy_text, &limits) || limits.network_allowed) {
+        exec_context_free(ctx);
         return ZCL_ERR(-1, "executor-resource-policy-invalid");
+    }
     uint64_t measured = ctx->method.measured_samples;
     uint64_t *buf =
         zcl_malloc(8u * (size_t)measured, "zcode.bench.samples");
-    if (!buf)
+    if (!buf) {
+        exec_context_free(ctx);
         return ZCL_ERR(-1, "executor-samples-alloc-failed");
+    }
     struct zcl_result ran = exec_runner_fork(
         bench_dir, ctx->workload.payload, (size_t)ctx->workload.payload_len,
         ctx->method.warmup_samples, measured, &limits, buf);
     if (!ran.ok) {
         /* Crash discipline: nothing was stored, nothing is admitted. */
         free(buf);
+        exec_context_free(ctx);
         return ran;
     }
     *samples = buf;
@@ -733,22 +749,25 @@ struct exec_wires {
     uint8_t *payload;
     size_t payload_len;
 };
-static struct zcl_result exec_run_profile(struct exec_context *ctx,
-                                          struct zcode_benchmark_run_out *out,
-                                          struct exec_wires *w)
+/* The artifact steps return the failure text, or NULL on success. The
+ * caller releases every buffer and the context before it builds the
+ * error, so no error is constructed ahead of a free. */
+static const char *exec_run_profile(struct exec_context *ctx,
+                                    struct zcode_benchmark_run_out *out,
+                                    struct exec_wires *w)
 {
     if (vcs_zcode_hardware_profile_serialize(&ctx->profile, w->profile) !=
             VCS_ZCODE_SCIENCE_OK ||
         vcs_zcode_hardware_profile_root(&ctx->profile,
                                         out->hardware_profile_root) !=
             VCS_ZCODE_SCIENCE_OK)
-        return ZCL_ERR(-1, "executor-profile-serialize-failed");
-    return ZCL_OK;
+        return "executor-profile-serialize-failed";
+    return NULL;
 }
-static struct zcl_result exec_run_manifest(struct exec_context *ctx,
-                                           uint64_t measured,
-                                           struct zcode_benchmark_run_out *out,
-                                           struct exec_wires *w)
+static const char *exec_run_manifest(struct exec_context *ctx,
+                                     uint64_t measured,
+                                     struct zcode_benchmark_run_out *out,
+                                     struct exec_wires *w)
 {
     struct vcs_zcode_raw_sample_manifest_v1 manifest;
     memset(&manifest, 0, sizeof(manifest));
@@ -765,12 +784,12 @@ static struct zcl_result exec_run_manifest(struct exec_context *ctx,
         vcs_zcode_raw_sample_manifest_v1_root(&manifest,
                                               out->manifest_root) !=
             VCS_ZCODE_RECEIPT_OK)
-        return ZCL_ERR(-1, "executor-manifest-failed");
-    return ZCL_OK;
+        return "executor-manifest-failed";
+    return NULL;
 }
-static struct zcl_result exec_run_payload(uint64_t *samples, uint64_t measured,
-                                          struct zcode_benchmark_run_out *out,
-                                          struct exec_wires *w)
+static const char *exec_run_payload(uint64_t *samples, uint64_t measured,
+                                    struct zcode_benchmark_run_out *out,
+                                    struct exec_wires *w)
 {
     w->payload_len = VCS_ZCODE_SAMPLE_PAYLOAD_HEADER_BYTES + 8u * (size_t)measured;
     w->payload = zcl_malloc(w->payload_len, "zcode.bench.payload_wire");
@@ -781,15 +800,15 @@ static struct zcl_result exec_run_payload(uint64_t *samples, uint64_t measured,
         vcs_zcode_sample_payload_v1_root(w->payload, w->payload_len,
                                          out->sample_payload_root) !=
             VCS_ZCODE_RECEIPT_OK)
-        return ZCL_ERR(-1, "executor-sample-payload-failed");
-    return ZCL_OK;
+        return "executor-sample-payload-failed";
+    return NULL;
 }
-static struct zcl_result exec_run_evidence(const uint8_t action_root[32],
-                                           uint8_t status,
-                                           const uint64_t *sorted,
-                                           uint64_t measured,
-                                           struct zcode_benchmark_run_out *out,
-                                           struct exec_wires *w)
+static const char *exec_run_evidence(const uint8_t action_root[32],
+                                     uint8_t status,
+                                     const uint64_t *sorted,
+                                     uint64_t measured,
+                                     struct zcode_benchmark_run_out *out,
+                                     struct exec_wires *w)
 {
     memset(&out->evidence, 0, sizeof(out->evidence));
     out->evidence.schema_version = VCS_ZCODE_BENCHMARK_EVIDENCE_VERSION;
@@ -807,32 +826,30 @@ static struct zcl_result exec_run_evidence(const uint8_t action_root[32],
         vcs_zcode_benchmark_evidence_v1_root(&out->evidence,
                                              out->evidence_root) !=
             VCS_ZCODE_RECEIPT_OK)
-        return ZCL_ERR(-1, "executor-evidence-failed");
-    return ZCL_OK;
+        return "executor-evidence-failed";
+    return NULL;
 }
 /* Compose the artifacts. */
-static struct zcl_result exec_run_artifacts(struct exec_context *ctx,
-                                            const uint8_t action_root[32],
-                                            uint64_t *samples,
-                                            uint64_t *sorted,
-                                            struct zcode_benchmark_run_out *out,
-                                            struct exec_wires *w)
+static const char *exec_run_artifacts(struct exec_context *ctx,
+                                      const uint8_t action_root[32],
+                                      uint64_t *samples,
+                                      uint64_t *sorted,
+                                      struct zcode_benchmark_run_out *out,
+                                      struct exec_wires *w)
 {
     uint64_t measured = ctx->method.measured_samples;
-    struct zcl_result step = exec_run_profile(ctx, out, w);
-    if (!step.ok)
-        return step;
-    step = exec_run_manifest(ctx, measured, out, w);
-    if (!step.ok)
-        return step;
-    step = exec_run_payload(samples, measured, out, w);
-    if (!step.ok)
-        return step;
-    return exec_run_evidence(action_root, exec_run_status(ctx), sorted,
-                             measured, out, w);
+    const char *err = exec_run_profile(ctx, out, w);
+    if (!err)
+        err = exec_run_manifest(ctx, measured, out, w);
+    if (!err)
+        err = exec_run_payload(samples, measured, out, w);
+    if (!err)
+        err = exec_run_evidence(action_root, exec_run_status(ctx), sorted,
+                                measured, out, w);
+    return err;
 }
 /* Compose the attempt's own result (v2 wire) for a first run. */
-static struct zcl_result exec_run_result_v2(
+static const char *exec_run_result_v2(
     const struct zcode_benchmark_execute_request *req,
     struct exec_context *ctx, const uint8_t action_root[32],
     struct zcode_benchmark_run_out *out, const struct exec_wires *w)
@@ -860,14 +877,14 @@ static struct zcl_result exec_run_result_v2(
             VCS_ZCODE_SCIENCE_OK ||
         vcs_zcode_benchmark_result_v2_root(r, out->result_root) !=
             VCS_ZCODE_SCIENCE_OK)
-        return ZCL_ERR(-1, "executor-result-compose-failed");
+        return "executor-result-compose-failed";
     out->result_wire_len = VCS_ZCODE_BENCHMARK_RESULT_V2_WIRE_BYTES;
     memcpy(out->method_wire, ctx->method_wire, sizeof(out->method_wire));
     memcpy(out->profile_wire, w->profile, sizeof(out->profile_wire));
-    return ZCL_OK;
+    return NULL;
 }
 /* Compose the reproduced v1 result for a reproduction run. */
-static struct zcl_result exec_run_result_v1(
+static const char *exec_run_result_v1(
     const struct zcode_benchmark_execute_request *req,
     struct exec_context *ctx, const uint8_t action_root[32],
     struct zcode_benchmark_run_out *out)
@@ -893,14 +910,14 @@ static struct zcl_result exec_run_result_v1(
             VCS_ZCODE_SCIENCE_OK ||
         vcs_zcode_benchmark_result_root(r, out->reproduced_root) !=
             VCS_ZCODE_SCIENCE_OK)
-        return ZCL_ERR(-1, "executor-result-compose-failed");
+        return "executor-result-compose-failed";
     out->result_wire_len = VCS_ZCODE_BENCHMARK_RESULT_WIRE_BYTES;
-    return ZCL_OK;
+    return NULL;
 }
 /* The verdict compares the two sample distributions under the
  * method's tolerance: a slower candidate is a CONTRADICTED
  * observation, never an execution failure. */
-static struct zcl_result exec_run_verdict(
+static const char *exec_run_verdict(
     const struct zcode_benchmark_execute_request *req,
     const struct exec_context *ctx,
     const struct vcs_zcode_benchmark_result_v1 *original,
@@ -920,7 +937,7 @@ static struct zcl_result exec_run_verdict(
         memcmp(echecked, original->evidence_root, 32) == 0;
     free(ewire);
     if (!eok)
-        return ZCL_ERR(-1, "executor-original-evidence-not-in-cas");
+        return "executor-original-evidence-not-in-cas";
     uint64_t a = original_evidence.median_ns, b = out->evidence.median_ns;
     uint64_t lo = a < b ? a : b;
     uint64_t delta = a > b ? a - b : b - a;
@@ -932,10 +949,10 @@ static struct zcl_result exec_run_verdict(
                            ? VCS_ZCODE_REPRODUCTION_REPLICATED
                            : VCS_ZCODE_REPRODUCTION_CONTRADICTED;
     }
-    return ZCL_OK;
+    return NULL;
 }
 /* Compose the reproduction record that binds original and reproduced. */
-static struct zcl_result exec_run_reproduction(
+static const char *exec_run_reproduction(
     const struct zcode_benchmark_execute_request *req,
     const struct exec_context *ctx,
     const struct vcs_zcode_benchmark_result_v1 *original,
@@ -948,7 +965,7 @@ static struct zcl_result exec_run_reproduction(
     if (!exec_hex32(req->original_result_root_hex,
                     rep->original_result_root) ||
         !zcl_bytes_any_set(rep->original_result_root, 32))
-        return ZCL_ERR(-1, "executor-original-root-invalid");
+        return "executor-original-root-invalid";
     memcpy(rep->reproduced_result_root, out->reproduced_root, 32);
     memcpy(rep->comparison_policy_root, ctx->method_root, 32);
     memcpy(rep->original_environment_root,
@@ -962,24 +979,23 @@ static struct zcl_result exec_run_reproduction(
             VCS_ZCODE_SCIENCE_OK ||
         vcs_zcode_reproduction_root(rep, out->reproduction_root) !=
             VCS_ZCODE_SCIENCE_OK)
-        return ZCL_ERR(-1, "executor-reproduction-compose-failed");
-    return ZCL_OK;
+        return "executor-reproduction-compose-failed";
+    return NULL;
 }
 /* A reproduction composes its reproduced result, the verdict against the
  * original, and the reproduction record, in that order. */
-static struct zcl_result exec_run_reproduce(
+static const char *exec_run_reproduce(
     const struct zcode_benchmark_execute_request *req,
     struct exec_context *ctx, const uint8_t action_root[32],
     const struct vcs_zcode_benchmark_result_v1 *original,
     struct zcode_benchmark_run_out *out)
 {
-    struct zcl_result step = exec_run_result_v1(req, ctx, action_root, out);
-    if (!step.ok)
-        return step;
-    step = exec_run_verdict(req, ctx, original, out);
-    if (!step.ok)
-        return step;
-    return exec_run_reproduction(req, ctx, original, out);
+    const char *err = exec_run_result_v1(req, ctx, action_root, out);
+    if (!err)
+        err = exec_run_verdict(req, ctx, original, out);
+    if (!err)
+        err = exec_run_reproduction(req, ctx, original, out);
+    return err;
 }
 /* Store the auxiliary objects. The finished evidence wire itself
  * enters CAS only via the S3 confirm:true commit — except the
@@ -1024,20 +1040,20 @@ static struct zcl_result exec_run_finish(
     qsort(sorted, (size_t)measured, 8, exec_u64_cmp);
     struct exec_wires w;
     memset(&w, 0, sizeof(w));
-    struct zcl_result composed =
+    const char *err =
         exec_run_artifacts(ctx, action_root, samples, sorted, out, &w);
     /* Compose the result wire(s). */
-    if (composed.ok)
-        composed = is_repro
+    if (!err)
+        err = is_repro
             ? exec_run_reproduce(req, ctx, action_root, original, out)
             : exec_run_result_v2(req, ctx, action_root, out, &w);
-    bool stored = composed.ok && exec_run_store(req, is_repro, out, &w);
+    bool stored = !err && exec_run_store(req, is_repro, out, &w);
     free(w.payload);
     free(sorted);
     free(samples);
     exec_context_free(ctx);
-    if (!composed.ok)
-        return composed;
+    if (err)
+        return ZCL_ERR(-1, "%s", err);
     if (!stored)
         return ZCL_ERR(-1, "executor-artifact-store-failed");
     return ZCL_OK;
@@ -1072,18 +1088,14 @@ struct zcl_result zcode_benchmark_executor_run(
         return prepared;
     char bench_dir[EXEC_PATH_MAX];
     struct zcl_result confined =
-        exec_run_confine(req, bench_dir, sizeof(bench_dir));
-    if (!confined.ok) {
-        exec_context_free(&ctx);
+        exec_run_confine(req, &ctx, bench_dir, sizeof(bench_dir));
+    if (!confined.ok)
         return confined;
-    }
     uint64_t *samples = NULL;
     struct zcl_result ran =
         exec_run_sample(bench_dir, is_repro, &ctx, &samples);
-    if (!ran.ok) {
-        exec_context_free(&ctx);
+    if (!ran.ok)
         return ran;
-    }
     return exec_run_finish(req, is_repro, orig, &ctx, action_root, samples,
                            out);
 }
