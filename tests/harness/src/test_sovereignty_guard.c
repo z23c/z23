@@ -64,6 +64,138 @@ static bool sg_set_applied(sqlite3 *db, int32_t h)
     return ok;
 }
 
+static bool sg_coins_schema_ready(sqlite3 *db)
+{
+    return db && coins_kv_ensure_schema(db);
+}
+
+static bool sg_meta_read_absent(sqlite3 *db, const char *key,
+                                uint8_t *blob, size_t cap,
+                                size_t *n, bool *found)
+{
+    return progress_meta_get_blob_exact(db, key, blob, cap, n, found)
+           && !*found;
+}
+
+static bool sg_meta_raw_full(sqlite3 *db, const char *key,
+                             uint8_t *raw, size_t cap,
+                             size_t *n, bool *found)
+{
+    return progress_meta_get_blob_exact(db, key, raw, cap, n, found)
+           && *found && *n == cap;
+}
+
+static bool sg_raw_same(size_t n1, const uint8_t *raw1,
+                        size_t n2, const uint8_t *raw2)
+{
+    return n1 == n2 && memcmp(raw1, raw2, n1) == 0;
+}
+
+static bool sg_json_str_eq(const struct json_value *v, const char *expect)
+{
+    return v && strcmp(json_get_str(v), expect) == 0;
+}
+
+static bool sg_gated_flag_is(const struct json_value *gated, const char *key,
+                             bool expect)
+{
+    return gated && (json_get_bool(json_get(gated, key)) == expect);
+}
+
+static bool sg_stamp_present(const struct json_value *stamp)
+{
+    return stamp && !json_is_null(stamp);
+}
+
+static bool sg_stamp_epoch_is(const struct json_value *stamp, int64_t epoch)
+{
+    return stamp && !json_is_null(stamp) &&
+           json_get_int(json_get(stamp, "epoch")) == epoch;
+}
+
+static bool sg_stamp_field_nonempty(const struct json_value *stamp,
+                                    const char *field)
+{
+    return stamp &&
+           strlen(json_get_str(json_get(stamp, field))) > 0;
+}
+
+static void sg_capture_stamp_epochs(const struct json_value *t_ready,
+                                    const struct json_value *t_sovereign,
+                                    int64_t *ready_epoch, int64_t *sov_epoch)
+{
+    if (t_ready)
+        *ready_epoch = json_get_int(json_get(t_ready, "epoch"));
+    if (t_sovereign)
+        *sov_epoch = json_get_int(json_get(t_sovereign, "epoch"));
+}
+
+static bool sg_rpc_body_has(const struct json_value *result,
+                            const char *needle)
+{
+    return result->type == JSON_STR &&
+           strstr(json_get_str(result), needle) != NULL;
+}
+
+static bool sg_rpc_failed_without(const struct rpc_table *tbl,
+                                  const char *method,
+                                  const struct json_value *params,
+                                  struct json_value *result,
+                                  const char *needle)
+{
+    return !rpc_table_execute(tbl, method, params, result) &&
+           result->type == JSON_STR &&
+           strstr(json_get_str(result), needle) == NULL;
+}
+
+static void sg_terminate_page(uint8_t *page, size_t cap, size_t n)
+{
+    page[n < cap ? n : cap - 1] = '\0';
+}
+
+static bool sg_page_substrings_match(const char *page, size_t n,
+                                     const char *a, bool a_present,
+                                     const char *b, bool b_present)
+{
+    return n > 0 &&
+           (strstr(page, a) != NULL) == a_present &&
+           (strstr(page, b) != NULL) == b_present;
+}
+
+static bool sg_page_has_any(const char *page, size_t n,
+                            const char *a, const char *b, const char *c)
+{
+    return n > 0 &&
+           (strstr(page, a) != NULL ||
+            strstr(page, b) != NULL ||
+            strstr(page, c) != NULL);
+}
+
+static bool sg_export_cap_matches_gated(const struct json_value *caps,
+                                        const struct json_value *gated)
+{
+    const struct json_value *exp_cap =
+        caps ? json_get(caps, "export_bundle") : NULL;
+    return exp_cap && gated &&
+           json_get_bool(json_get(exp_cap, "allowed")) ==
+           json_get_bool(json_get(gated, "snapshot_bundle_export_allowed"));
+}
+
+static bool sg_mine_spend_seed_agree(const struct json_value *caps)
+{
+    const struct json_value *mine_cap =
+        caps ? json_get(caps, "mine") : NULL;
+    const struct json_value *spend_cap =
+        caps ? json_get(caps, "wallet_spend") : NULL;
+    const struct json_value *seed_cap =
+        caps ? json_get(caps, "seed_bundle") : NULL;
+    return mine_cap && spend_cap && seed_cap &&
+           json_get_bool(json_get(mine_cap, "allowed")) ==
+               json_get_bool(json_get(spend_cap, "allowed")) &&
+           json_get_bool(json_get(spend_cap, "allowed")) ==
+               json_get_bool(json_get(seed_cap, "allowed"));
+}
+
 int test_sovereignty_guard(void);
 int test_sovereignty_guard(void)
 {
@@ -75,7 +207,7 @@ int test_sovereignty_guard(void)
     SG_CHECK("progress_store opens", progress_store_open(dir));
     sqlite3 *db = progress_store_db();
     SG_CHECK("db handle", db != NULL);
-    SG_CHECK("coins_kv schema", db && coins_kv_ensure_schema(db));
+    SG_CHECK("coins_kv schema", sg_coins_schema_ready(db));
 
     /* Pin H*=50 for the whole test — a real boot only ever advances this
      * cached atomic under progress_store_tx_lock at the tip_finalize sites;
@@ -100,13 +232,11 @@ int test_sovereignty_guard(void)
         size_t n = 0;
         bool found = false;
         SG_CHECK("t_ready absent before first observation",
-                 progress_meta_get_blob_exact(db, SOVEREIGNTY_T_READY_KEY,
-                                              blob, sizeof(blob), &n,
-                                              &found) && !found);
+                 sg_meta_read_absent(db, SOVEREIGNTY_T_READY_KEY,
+                                     blob, sizeof(blob), &n, &found));
         SG_CHECK("t_sovereign absent before first observation",
-                 progress_meta_get_blob_exact(db, SOVEREIGNTY_T_SOVEREIGN_KEY,
-                                              blob, sizeof(blob), &n,
-                                              &found) && !found);
+                 sg_meta_read_absent(db, SOVEREIGNTY_T_SOVEREIGN_KEY,
+                                     blob, sizeof(blob), &n, &found));
     }
 
     /* ── bare: applied==hstar+1, no migration stamp yet. G-SOV part 3's
@@ -130,26 +260,22 @@ int test_sovereignty_guard(void)
         SG_CHECK("bare: dumper ok", sovereignty_dump_state_json(&out, NULL));
         const struct json_value *tm = json_get(&out, "trust_mode");
         SG_CHECK("bare: trust_mode == bare",
-                 tm && strcmp(json_get_str(tm), "bare") == 0);
+                 sg_json_str_eq(tm, "bare"));
         const struct json_value *gated = json_get(&out, "gated");
         SG_CHECK("bare: tip_following_allowed",
-                 gated &&
-                 json_get_bool(json_get(gated, "tip_following_allowed")));
+                 sg_gated_flag_is(gated, "tip_following_allowed", true));
         const struct json_value *t_ready = json_get(&out, "t_ready");
         const struct json_value *t_sovereign = json_get(&out, "t_sovereign");
         SG_CHECK("bare: t_ready stamped (non-null)",
-                 t_ready && !json_is_null(t_ready));
+                 sg_stamp_present(t_ready));
         SG_CHECK("bare: t_sovereign stamped (non-null)",
-                 t_sovereign && !json_is_null(t_sovereign));
-        if (t_ready)
-            ready_epoch1 = json_get_int(json_get(t_ready, "epoch"));
-        if (t_sovereign)
-            sov_epoch1 = json_get_int(json_get(t_sovereign, "epoch"));
+                 sg_stamp_present(t_sovereign));
+        sg_capture_stamp_epochs(t_ready, t_sovereign,
+                                &ready_epoch1, &sov_epoch1);
         SG_CHECK("bare: t_ready epoch > 0", ready_epoch1 > 0);
         SG_CHECK("bare: t_sovereign epoch > 0", sov_epoch1 > 0);
         SG_CHECK("bare: t_ready has a non-empty iso8601 string",
-                 t_ready &&
-                 strlen(json_get_str(json_get(t_ready, "iso8601"))) > 0);
+                 sg_stamp_field_nonempty(t_ready, "iso8601"));
         json_free(&out);
     }
 
@@ -164,9 +290,8 @@ int test_sovereignty_guard(void)
         bool f1 = false;
         bool f2 = false;
         SG_CHECK("t_sovereign raw read #1",
-                 progress_meta_get_blob_exact(db, SOVEREIGNTY_T_SOVEREIGN_KEY,
-                                              raw1, sizeof(raw1), &n1, &f1) &&
-                 f1 && n1 == sizeof(raw1));
+                 sg_meta_raw_full(db, SOVEREIGNTY_T_SOVEREIGN_KEY,
+                                  raw1, sizeof(raw1), &n1, &f1));
         char reason[96] = {0};
         sovereignty_guard_allow("mint", reason, sizeof(reason));
         sovereignty_guard_allow("wallet_spend", reason, sizeof(reason));
@@ -174,12 +299,11 @@ int test_sovereignty_guard(void)
         sovereignty_dump_state_json(&redump, NULL);
         json_free(&redump);
         SG_CHECK("t_sovereign raw read #2 (after re-evaluation)",
-                 progress_meta_get_blob_exact(db, SOVEREIGNTY_T_SOVEREIGN_KEY,
-                                              raw2, sizeof(raw2), &n2, &f2) &&
-                 f2 && n2 == sizeof(raw2));
+                 sg_meta_raw_full(db, SOVEREIGNTY_T_SOVEREIGN_KEY,
+                                  raw2, sizeof(raw2), &n2, &f2));
         SG_CHECK("t_sovereign byte-identical across re-evaluation (never "
                  "rewritten)",
-                 n1 == n2 && memcmp(raw1, raw2, n1) == 0);
+                 sg_raw_same(n1, raw1, n2, raw2));
     }
 
     /* ── borrowed: stamp migration (proven_authority=true), no self_folded
@@ -202,25 +326,21 @@ int test_sovereignty_guard(void)
         SG_CHECK("borrowed: dumper ok", sovereignty_dump_state_json(&out, NULL));
         const struct json_value *tm = json_get(&out, "trust_mode");
         SG_CHECK("borrowed: trust_mode == release_assisted",
-                 tm && strcmp(json_get_str(tm), "release_assisted") == 0);
+                 sg_json_str_eq(tm, "release_assisted"));
         const struct json_value *posture =
             json_get(&out, "authority_posture");
         SG_CHECK("borrowed: authority_posture == proven_but_not_self_folded",
-                 posture && strcmp(json_get_str(posture),
-                                   "proven_but_not_self_folded") == 0);
+                 sg_json_str_eq(posture, "proven_but_not_self_folded"));
         const struct json_value *gated = json_get(&out, "gated");
         SG_CHECK("borrowed: mint_mining_allowed == false",
-                 gated &&
-                 !json_get_bool(json_get(gated, "mint_mining_allowed")));
+                 sg_gated_flag_is(gated, "mint_mining_allowed", false));
         SG_CHECK("borrowed: wallet_spend_allowed == false",
-                 gated &&
-                 !json_get_bool(json_get(gated, "wallet_spend_allowed")));
+                 sg_gated_flag_is(gated, "wallet_spend_allowed", false));
         SG_CHECK("borrowed: snapshot_bundle_export_allowed == false",
-                 gated && !json_get_bool(json_get(gated,
-                                         "snapshot_bundle_export_allowed")));
+                 sg_gated_flag_is(gated, "snapshot_bundle_export_allowed",
+                                  false));
         SG_CHECK("borrowed: tip_following_allowed stays true (not gated)",
-                 gated &&
-                 json_get_bool(json_get(gated, "tip_following_allowed")));
+                 sg_gated_flag_is(gated, "tip_following_allowed", true));
 
         /* Regression semantics: this posture no longer holds S (self_derived
          * is false — borrowed_stamped && !self_folded), so trust_st dropped
@@ -231,12 +351,10 @@ int test_sovereignty_guard(void)
         const struct json_value *t_ready = json_get(&out, "t_ready");
         const struct json_value *t_sovereign = json_get(&out, "t_sovereign");
         SG_CHECK("borrowed: t_ready still stamped, unchanged (monotonic)",
-                 t_ready && !json_is_null(t_ready) &&
-                 json_get_int(json_get(t_ready, "epoch")) == ready_epoch1);
+                 sg_stamp_epoch_is(t_ready, ready_epoch1));
         SG_CHECK("borrowed: t_sovereign survives the posture regression "
                  "unchanged (first-reached, not current)",
-                 t_sovereign && !json_is_null(t_sovereign) &&
-                 json_get_int(json_get(t_sovereign, "epoch")) == sov_epoch1);
+                 sg_stamp_epoch_is(t_sovereign, sov_epoch1));
         json_free(&out);
     }
 
@@ -260,15 +378,13 @@ int test_sovereignty_guard(void)
         SG_CHECK("borrowed: sendtoaddress RPC refused",
                  !rpc_table_execute(&tbl, "sendtoaddress", &params, &result));
         SG_CHECK("borrowed: sendtoaddress body names release_assisted",
-                 result.type == JSON_STR &&
-                 strstr(json_get_str(&result), "release_assisted") != NULL);
+                 sg_rpc_body_has(&result, "release_assisted"));
         json_free(&result);
         json_init(&result);
         SG_CHECK("borrowed: sendmany RPC refused",
                  !rpc_table_execute(&tbl, "sendmany", &params, &result));
         SG_CHECK("borrowed: sendmany body names release_assisted",
-                 result.type == JSON_STR &&
-                 strstr(json_get_str(&result), "release_assisted") != NULL);
+                 sg_rpc_body_has(&result, "release_assisted"));
         json_free(&result);
         json_init(&result);
         /* zslp_send's usage/arity gate runs before the sovereignty guard
@@ -292,8 +408,7 @@ int test_sovereignty_guard(void)
         SG_CHECK("borrowed: zslp_send RPC refused",
                  !rpc_table_execute(&tbl, "zslp_send", &params, &result));
         SG_CHECK("borrowed: zslp_send body names release_assisted",
-                 result.type == JSON_STR &&
-                 strstr(json_get_str(&result), "release_assisted") != NULL);
+                 sg_rpc_body_has(&result, "release_assisted"));
         json_free(&result);
         json_free(&params);
     }
@@ -319,16 +434,16 @@ int test_sovereignty_guard(void)
         memset(page, 0, 4096);
         size_t n = serve_send_confirm(page, sizeof(page),
                                       (const uint8_t *)body, strlen(body));
-        page[n < sizeof(page) ? n : sizeof(page) - 1] = '\0';
+        sg_terminate_page(page, sizeof(page), n);
         SG_CHECK("borrowed: web-UI send form refuses, naming release_assisted",
-                 n > 0 &&
-                 strstr((const char *)page, "release_assisted") != NULL &&
-                 strstr((const char *)page, "Spend Refused") != NULL);
+                 sg_page_substrings_match((const char *)page, n,
+                                          "release_assisted", true,
+                                          "Spend Refused", true));
         /* And it never reached the send path. */
         SG_CHECK("borrowed: web-UI send form never reached the send path",
-                 n > 0 &&
-                 strstr((const char *)page, "Node Offline") == NULL &&
-                 strstr((const char *)page, "Send Failed") == NULL);
+                 sg_page_substrings_match((const char *)page, n,
+                                          "Node Offline", false,
+                                          "Send Failed", false));
     }
 
     /* ── sovereign: stamp self_folded — everything unlocks. */
@@ -347,17 +462,15 @@ int test_sovereignty_guard(void)
                  sovereignty_dump_state_json(&out, NULL));
         const struct json_value *tm = json_get(&out, "trust_mode");
         SG_CHECK("sovereign: trust_mode == sovereign",
-                 tm && strcmp(json_get_str(tm), "sovereign") == 0);
+                 sg_json_str_eq(tm, "sovereign"));
         const struct json_value *gated = json_get(&out, "gated");
         SG_CHECK("sovereign: mint_mining_allowed == true",
-                 gated &&
-                 json_get_bool(json_get(gated, "mint_mining_allowed")));
+                 sg_gated_flag_is(gated, "mint_mining_allowed", true));
         SG_CHECK("sovereign: wallet_spend_allowed == true",
-                 gated &&
-                 json_get_bool(json_get(gated, "wallet_spend_allowed")));
+                 sg_gated_flag_is(gated, "wallet_spend_allowed", true));
         SG_CHECK("sovereign: snapshot_bundle_export_allowed == true",
-                 gated && json_get_bool(json_get(gated,
-                                        "snapshot_bundle_export_allowed")));
+                 sg_gated_flag_is(gated, "snapshot_bundle_export_allowed",
+                                  true));
 
         /* v2 schema + central trust→capability table view. Assert only the
          * hstar-INDEPENDENT invariants: the dumper's self_derived (part 2) needs
@@ -373,38 +486,20 @@ int test_sovereignty_guard(void)
          *     own (possibly hstar-nondeterministic) trust_st resolves to. */
         const struct json_value *schema = json_get(&out, "schema");
         SG_CHECK("sovereign: schema == zcl.sovereignty.v2",
-                 schema && strcmp(json_get_str(schema),
-                                  "zcl.sovereignty.v2") == 0);
+                 sg_json_str_eq(schema, "zcl.sovereignty.v2"));
         const struct json_value *caps = json_get(&out, "capabilities");
-        const struct json_value *exp_cap =
-            caps ? json_get(caps, "export_bundle") : NULL;
         SG_CHECK("sovereign: capabilities.export_bundle.allowed == "
                  "gated.snapshot_bundle_export_allowed",
-                 exp_cap && gated &&
-                 json_get_bool(json_get(exp_cap, "allowed")) ==
-                 json_get_bool(json_get(gated,
-                                        "snapshot_bundle_export_allowed")));
-        const struct json_value *mine_cap =
-            caps ? json_get(caps, "mine") : NULL;
-        const struct json_value *spend_cap =
-            caps ? json_get(caps, "wallet_spend") : NULL;
-        const struct json_value *seed_cap =
-            caps ? json_get(caps, "seed_bundle") : NULL;
+                 sg_export_cap_matches_gated(caps, gated));
         SG_CHECK("sovereign: mine/spend/seed caps all agree (== S)",
-                 mine_cap && spend_cap && seed_cap &&
-                 json_get_bool(json_get(mine_cap, "allowed")) ==
-                     json_get_bool(json_get(spend_cap, "allowed")) &&
-                 json_get_bool(json_get(spend_cap, "allowed")) ==
-                     json_get_bool(json_get(seed_cap, "allowed")));
+                 sg_mine_spend_seed_agree(caps));
         const struct json_value *t_ready = json_get(&out, "t_ready");
         const struct json_value *t_sovereign = json_get(&out, "t_sovereign");
         SG_CHECK("sovereign: t_ready epoch unchanged since bare (monotonic)",
-                 t_ready && !json_is_null(t_ready) &&
-                 json_get_int(json_get(t_ready, "epoch")) == ready_epoch1);
+                 sg_stamp_epoch_is(t_ready, ready_epoch1));
         SG_CHECK("sovereign: t_sovereign epoch unchanged since bare (never "
                  "rewritten, even back inside SOVEREIGN again)",
-                 t_sovereign && !json_is_null(t_sovereign) &&
-                 json_get_int(json_get(t_sovereign, "epoch")) == sov_epoch1);
+                 sg_stamp_epoch_is(t_sovereign, sov_epoch1));
         json_free(&out);
     }
 
@@ -422,9 +517,8 @@ int test_sovereignty_guard(void)
         json_init(&result);
         json_set_array(&params);
         SG_CHECK("sovereign: sendtoaddress failure is NOT release_assisted",
-                 !rpc_table_execute(&tbl, "sendtoaddress", &params, &result) &&
-                 result.type == JSON_STR &&
-                 strstr(json_get_str(&result), "release_assisted") == NULL);
+                 sg_rpc_failed_without(&tbl, "sendtoaddress", &params, &result,
+                                       "release_assisted"));
         json_free(&result);
         json_init(&result);
         /* Same well-formed dummy triple as the borrowed block — gets past
@@ -446,9 +540,8 @@ int test_sovereignty_guard(void)
             json_push_back(&params, &amt);
         }
         SG_CHECK("sovereign: zslp_send failure is NOT release_assisted",
-                 !rpc_table_execute(&tbl, "zslp_send", &params, &result) &&
-                 result.type == JSON_STR &&
-                 strstr(json_get_str(&result), "release_assisted") == NULL);
+                 sg_rpc_failed_without(&tbl, "zslp_send", &params, &result,
+                                       "release_assisted"));
         json_free(&result);
         json_free(&params);
     }
@@ -465,16 +558,15 @@ int test_sovereignty_guard(void)
         memset(page, 0, 4096);
         size_t n = serve_send_confirm(page, sizeof(page),
                                       (const uint8_t *)body, strlen(body));
-        page[n < sizeof(page) ? n : sizeof(page) - 1] = '\0';
+        sg_terminate_page(page, sizeof(page), n);
         SG_CHECK("sovereign: web-UI send form is no longer refused",
-                 n > 0 &&
-                 strstr((const char *)page, "Spend Refused") == NULL &&
-                 strstr((const char *)page, "release_assisted") == NULL);
+                 sg_page_substrings_match((const char *)page, n,
+                                          "Spend Refused", false,
+                                          "release_assisted", false));
         SG_CHECK("sovereign: web-UI send form degrades to node-absent",
-                 n > 0 &&
-                 (strstr((const char *)page, "Node Offline") != NULL ||
-                  strstr((const char *)page, "Send Failed") != NULL ||
-                  strstr((const char *)page, "Unknown Response") != NULL));
+                 sg_page_has_any((const char *)page, n,
+                                 "Node Offline", "Send Failed",
+                                 "Unknown Response"));
     }
 
     /* ── NULL-input hardening. */
