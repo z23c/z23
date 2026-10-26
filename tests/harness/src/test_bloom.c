@@ -4,7 +4,7 @@
 #include "bloom/merkle.h"
 #include "net/msgprocessor.h"
 
-int test_bloom(void)
+static int bloom_test_filter_init(void)
 {
     int failures = 0;
 
@@ -20,6 +20,12 @@ int test_bloom(void)
         }
         bloom_filter_free(&f);
     }
+    return failures;
+}
+
+static int bloom_test_insert_contains(void)
+{
+    int failures = 0;
 
     printf("bloom_filter insert/contains... ");
     {
@@ -41,6 +47,12 @@ int test_bloom(void)
         }
         bloom_filter_free(&f);
     }
+    return failures;
+}
+
+static int bloom_test_uint256_insert_contains(void)
+{
+    int failures = 0;
 
     printf("bloom_filter uint256 insert/contains... ");
     {
@@ -60,6 +72,12 @@ int test_bloom(void)
         }
         bloom_filter_free(&f);
     }
+    return failures;
+}
+
+static int bloom_test_filter_clear(void)
+{
+    int failures = 0;
 
     printf("bloom_filter_clear... ");
     {
@@ -74,6 +92,12 @@ int test_bloom(void)
         else { printf("FAIL\n"); failures++; }
         bloom_filter_free(&f);
     }
+    return failures;
+}
+
+static int bloom_test_size_constraints(void)
+{
+    int failures = 0;
 
     printf("bloom_filter size constraints... ");
     {
@@ -85,6 +109,12 @@ int test_bloom(void)
         else { printf("FAIL\n"); failures++; }
         bloom_filter_free(&f);
     }
+    return failures;
+}
+
+static int bloom_test_false_positive_rate(void)
+{
+    int failures = 0;
 
     printf("bloom_filter false positive rate... ");
     {
@@ -118,6 +148,12 @@ int test_bloom(void)
         }
         bloom_filter_free(&f);
     }
+    return failures;
+}
+
+static int bloom_test_filter_reset(void)
+{
+    int failures = 0;
 
     printf("bloom_filter_reset... ");
     {
@@ -132,6 +168,12 @@ int test_bloom(void)
         else { printf("FAIL\n"); failures++; }
         bloom_filter_free(&f);
     }
+    return failures;
+}
+
+static int bloom_test_merkle_root_one(void)
+{
+    int failures = 0;
 
     printf("compute_merkle_root single tx... ");
     {
@@ -142,6 +184,12 @@ int test_bloom(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int bloom_test_merkle_root_two(void)
+{
+    int failures = 0;
 
     printf("compute_merkle_root two txs... ");
     {
@@ -155,6 +203,12 @@ int test_bloom(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int bloom_test_merkle_root_four(void)
+{
+    int failures = 0;
 
     printf("compute_merkle_root four txs... ");
     {
@@ -170,6 +224,12 @@ int test_bloom(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int bloom_test_merkle_root_odd(void)
+{
+    int failures = 0;
 
     printf("compute_merkle_root three txs (odd)... ");
     {
@@ -185,6 +245,12 @@ int test_bloom(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int bloom_test_merkle_root_mutated(void)
+{
+    int failures = 0;
 
     printf("compute_merkle_root_mutated no dupes... ");
     {
@@ -198,6 +264,12 @@ int test_bloom(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int bloom_test_partial_merkle_one(void)
+{
+    int failures = 0;
 
     printf("partial_merkle_tree build/extract... ");
     {
@@ -227,6 +299,12 @@ int test_bloom(void)
         }
         merkle_tree_free(&tree);
     }
+    return failures;
+}
+
+static int bloom_test_partial_merkle_many(void)
+{
+    int failures = 0;
 
     printf("partial_merkle_tree multiple matches... ");
     {
@@ -255,6 +333,12 @@ int test_bloom(void)
         }
         merkle_tree_free(&tree);
     }
+    return failures;
+}
+
+static int bloom_test_merkle_hash_stable(void)
+{
+    int failures = 0;
 
     printf("merkle_hash_pair deterministic... ");
     {
@@ -267,6 +351,12 @@ int test_bloom(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int bloom_test_merkle_hash_order(void)
+{
+    int failures = 0;
 
     printf("merkle_hash_pair order matters... ");
     {
@@ -279,6 +369,12 @@ int test_bloom(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int bloom_test_bip37_flag(void)
+{
+    int failures = 0;
 
     /* ── BIP37 gating tests ─────────────────────────────────────── */
 
@@ -325,6 +421,12 @@ int test_bloom(void)
         else { printf("FAIL\n"); failures++; }
         unsetenv("ZCL_ENABLE_BIP37");
     }
+    return failures;
+}
+
+static int bloom_test_node_bloom_service(void)
+{
+    int failures = 0;
 
     printf("NODE_BLOOM not in services when BIP37 off... ");
     {
@@ -346,6 +448,12 @@ int test_bloom(void)
         else { printf("FAIL\n"); failures++; }
         unsetenv("ZCL_ENABLE_BIP37");
     }
+    return failures;
+}
+
+static int bloom_test_dispatch_filters(void)
+{
+    int failures = 0;
 
     printf("dispatch table has filterload entry... ");
     {
@@ -391,6 +499,12 @@ int test_bloom(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int bloom_test_hash_func_clamp(void)
+{
+    int failures = 0;
 
     /* ── rolling_bloom must clamp MAX_BLOOM_HASH_FUNCS ────────── */
 
@@ -446,6 +560,33 @@ int test_bloom(void)
         }
         bloom_filter_free(&f);
     }
+    return failures;
+}
+
+int test_bloom(void)
+{
+    int failures = 0;
+
+    failures += bloom_test_filter_init();
+    failures += bloom_test_insert_contains();
+    failures += bloom_test_uint256_insert_contains();
+    failures += bloom_test_filter_clear();
+    failures += bloom_test_size_constraints();
+    failures += bloom_test_false_positive_rate();
+    failures += bloom_test_filter_reset();
+    failures += bloom_test_merkle_root_one();
+    failures += bloom_test_merkle_root_two();
+    failures += bloom_test_merkle_root_four();
+    failures += bloom_test_merkle_root_odd();
+    failures += bloom_test_merkle_root_mutated();
+    failures += bloom_test_partial_merkle_one();
+    failures += bloom_test_partial_merkle_many();
+    failures += bloom_test_merkle_hash_stable();
+    failures += bloom_test_merkle_hash_order();
+    failures += bloom_test_bip37_flag();
+    failures += bloom_test_node_bloom_service();
+    failures += bloom_test_dispatch_filters();
+    failures += bloom_test_hash_func_clamp();
 
     return failures;
 }
