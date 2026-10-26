@@ -139,9 +139,6 @@ contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:4
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:79
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_assemble:27
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_process_scope:56
-contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c:assignment_shape:26
-contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c:vcs_zcode_c23_corpus_rules_v1_validate:21
-contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c:vcs_zcode_c23_error_string:17
 contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:bundle_parse_parts:17
 contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:bundle_validate_authority:18
 contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:vcs_zcode_candidate_bundle_export:27

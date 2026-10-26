@@ -17,6 +17,22 @@ static const uint8_t rules_magic[8] = {'Z','C','C','R','1',0,0,0};
 static const char assignment_signature_domain[] =
     "zcl.zcode.source_assignment.signature.v1";
 
+static const char *corpus_policy_error_string(enum vcs_zcode_c23_error error)
+{
+    switch (error) {
+    case VCS_ZCODE_C23_ORDER: return "canonical-order";
+    case VCS_ZCODE_C23_POLICY: return "census-policy";
+    case VCS_ZCODE_C23_TIME: return "chain-time";
+    case VCS_ZCODE_C23_SIGNATURE: return "signature";
+    case VCS_ZCODE_C23_OVERFLOW: return "arithmetic-overflow";
+    case VCS_ZCODE_C23_CURSOR: return "root-cursor";
+    case VCS_ZCODE_C23_ANCESTRY: return "checkpoint-ancestry";
+    case VCS_ZCODE_C23_PROOF: return "external-proof";
+    default: break;
+    }
+    return "unknown-c23-corpus-error";
+}
+
 const char *vcs_zcode_c23_error_string(enum vcs_zcode_c23_error error)
 {
     switch (error) {
@@ -28,16 +44,9 @@ const char *vcs_zcode_c23_error_string(enum vcs_zcode_c23_error error)
     case VCS_ZCODE_C23_FLAGS: return "flags";
     case VCS_ZCODE_C23_ENUM: return "closed-enum";
     case VCS_ZCODE_C23_ROOT: return "root";
-    case VCS_ZCODE_C23_ORDER: return "canonical-order";
-    case VCS_ZCODE_C23_POLICY: return "census-policy";
-    case VCS_ZCODE_C23_TIME: return "chain-time";
-    case VCS_ZCODE_C23_SIGNATURE: return "signature";
-    case VCS_ZCODE_C23_OVERFLOW: return "arithmetic-overflow";
-    case VCS_ZCODE_C23_CURSOR: return "root-cursor";
-    case VCS_ZCODE_C23_ANCESTRY: return "checkpoint-ancestry";
-    case VCS_ZCODE_C23_PROOF: return "external-proof";
+    default: break;
     }
-    return "unknown-c23-corpus-error";
+    return corpus_policy_error_string(error);
 }
 
 bool vcs_zcode_source_kind_counts_v1(uint16_t source_kind)
@@ -47,14 +56,9 @@ bool vcs_zcode_source_kind_counts_v1(uint16_t source_kind)
            source_kind == VCS_ZCODE_SOURCE_CANONICAL_IMPORT;
 }
 
-static enum vcs_zcode_c23_error assignment_shape(
-    const struct vcs_zcode_source_assignment_v1 *assignment,
-    bool require_signature)
+static enum vcs_zcode_c23_error assignment_required_fields(
+    const struct vcs_zcode_source_assignment_v1 *assignment)
 {
-    if (!assignment) return VCS_ZCODE_C23_NULL;
-    if (assignment->schema_version != 1) return VCS_ZCODE_C23_VERSION;
-    if (assignment->flags != VCS_ZCODE_C23_CORPUS_REQUIRED_FLAGS)
-        return VCS_ZCODE_C23_FLAGS;
     if (assignment->source_kind < VCS_ZCODE_SOURCE_HUMAN_AUTHORED ||
         assignment->source_kind > VCS_ZCODE_SOURCE_VENDOR_MATERIAL ||
         assignment->reserved != 0)
@@ -68,6 +72,12 @@ static enum vcs_zcode_c23_error assignment_shape(
         !zcl_bytes_any_set(assignment->assignment_evidence_root, 32) ||
         !zcl_bytes_any_set(assignment->signer_pubkey, 32))
         return VCS_ZCODE_C23_ROOT;
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error assignment_upstream_fields(
+    const struct vcs_zcode_source_assignment_v1 *assignment)
+{
     bool has_upstream_source =
         zcl_bytes_any_set(assignment->upstream_source_root, 32);
     bool has_upstream_author =
@@ -83,6 +93,21 @@ static enum vcs_zcode_c23_error assignment_shape(
     } else if (has_upstream_source || has_upstream_author) {
         return VCS_ZCODE_C23_POLICY;
     }
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error assignment_shape(
+    const struct vcs_zcode_source_assignment_v1 *assignment,
+    bool require_signature)
+{
+    if (!assignment) return VCS_ZCODE_C23_NULL;
+    if (assignment->schema_version != 1) return VCS_ZCODE_C23_VERSION;
+    if (assignment->flags != VCS_ZCODE_C23_CORPUS_REQUIRED_FLAGS)
+        return VCS_ZCODE_C23_FLAGS;
+    enum vcs_zcode_c23_error error = assignment_required_fields(assignment);
+    if (error != VCS_ZCODE_C23_OK) return error;
+    error = assignment_upstream_fields(assignment);
+    if (error != VCS_ZCODE_C23_OK) return error;
     if (require_signature && !zcl_bytes_any_set(assignment->signature, 64))
         return VCS_ZCODE_C23_SIGNATURE;
     return VCS_ZCODE_C23_OK;
@@ -256,13 +281,9 @@ void vcs_zcode_c23_corpus_rules_v1_default(
                  rules->permissive_license_policy_root);
 }
 
-enum vcs_zcode_c23_error vcs_zcode_c23_corpus_rules_v1_validate(
+static enum vcs_zcode_c23_error corpus_rules_policy_fields(
     const struct vcs_zcode_c23_corpus_rules_v1 *rules)
 {
-    if (!rules) return VCS_ZCODE_C23_NULL;
-    if (rules->schema_version != 1) return VCS_ZCODE_C23_VERSION;
-    if (rules->flags != VCS_ZCODE_C23_CORPUS_REQUIRED_FLAGS)
-        return VCS_ZCODE_C23_FLAGS;
     if (rules->extension_mask != VCS_ZCODE_C23_EXTENSION_MASK ||
         rules->overlap_threshold_bps !=
             VCS_ZCODE_C23_OVERLAP_THRESHOLD_BPS ||
@@ -284,6 +305,18 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_rules_v1_validate(
         rules->required_evidence_mask !=
             VCS_ZCODE_C23_EVIDENCE_REQUIRED_MASK)
         return VCS_ZCODE_C23_POLICY;
+    return VCS_ZCODE_C23_OK;
+}
+
+enum vcs_zcode_c23_error vcs_zcode_c23_corpus_rules_v1_validate(
+    const struct vcs_zcode_c23_corpus_rules_v1 *rules)
+{
+    if (!rules) return VCS_ZCODE_C23_NULL;
+    if (rules->schema_version != 1) return VCS_ZCODE_C23_VERSION;
+    if (rules->flags != VCS_ZCODE_C23_CORPUS_REQUIRED_FLAGS)
+        return VCS_ZCODE_C23_FLAGS;
+    enum vcs_zcode_c23_error error = corpus_rules_policy_fields(rules);
+    if (error != VCS_ZCODE_C23_OK) return error;
     if (!zcl_bytes_any_set(rules->syntax_profile_root, 32) ||
         !zcl_bytes_any_set(rules->semantic_unitizer_root, 32) ||
         !zcl_bytes_any_set(rules->permissive_license_policy_root, 32))
