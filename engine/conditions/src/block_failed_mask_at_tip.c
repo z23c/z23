@@ -142,15 +142,9 @@ static void remember_validate_repair_owner(int repair_height, int mode,
     }
 }
 
-static int reducer_frontier_owner_reason(
+static int reducer_frontier_owner_repair_family_reason(
     const struct stage_reducer_frontier_reconcile_result *rr)
 {
-    if (!rr)
-        return RFO_NONE;
-    if (rr->refused_coin_tear)
-        return RFO_COIN_TEAR;
-    if (rr->refused_coin_unknown)
-        return RFO_COIN_UNKNOWN;
     if (rr->value_overflow_repair_owner_refused ||
         rr->value_overflow_repair_genuinely_invalid ||
         rr->value_overflow_repair_marker_seen)
@@ -162,6 +156,21 @@ static int reducer_frontier_owner_reason(
     if (rr->coin_backfill_attempted || rr->coin_backfill_owner_refused ||
         rr->coin_backfill_genuinely_invalid)
         return RFO_COIN_BACKFILL;
+    return RFO_NONE;
+}
+
+static int reducer_frontier_owner_reason(
+    const struct stage_reducer_frontier_reconcile_result *rr)
+{
+    if (!rr)
+        return RFO_NONE;
+    if (rr->refused_coin_tear)
+        return RFO_COIN_TEAR;
+    if (rr->refused_coin_unknown)
+        return RFO_COIN_UNKNOWN;
+    int repair_family = reducer_frontier_owner_repair_family_reason(rr);
+    if (repair_family != RFO_NONE)
+        return repair_family;
     if (rr->tipfin_backfill_refused_reason != 0 ||
         rr->tipfin_backfill_count > 0 ||
         rr->tipfin_backfill_marker_seen)
@@ -398,19 +407,10 @@ static bool witness_block_failed_mask_at_tip(int64_t target_at_detect)
     return find_failed_next(ms, (int)target) == NULL;
 }
 
-static bool detail_block_failed_mask_at_tip(struct json_value *out)
+static bool detail_push_detect_and_owner_state(struct json_value *out,
+                                               int validate_owner,
+                                               const char *delegated_owner)
 {
-    if (!out)
-        return false;
-
-    int validate_owner = atomic_load(&g_validate_repair_owner_height);
-    int reducer_target = atomic_load(&g_reducer_owner_target);
-    const char *delegated_owner = "none";
-    if (reducer_target >= 0)
-        delegated_owner = "reducer_frontier_reconcile_light";
-    else if (validate_owner >= 0)
-        delegated_owner = "stale_validate_headers_repair";
-
     bool ok = true;
     ok = ok && json_push_kv_int(out, "block_target_height",
                                 atomic_load(&g_target_at_detect));
@@ -426,6 +426,12 @@ static bool detail_block_failed_mask_at_tip(struct json_value *out)
     ok = ok && json_push_kv_int(out, "validate_repair_owner_mode",
                                 atomic_load(&g_validate_repair_owner_mode));
     ok = ok && json_push_kv_str(out, "delegated_owner", delegated_owner);
+    return ok;
+}
+
+static bool detail_push_remedy_witness_state(struct json_value *out)
+{
+    bool ok = true;
     ok = ok && json_push_kv_int(out, "last_remedy_target_height",
                                 atomic_load(&g_last_remedy_target));
     ok = ok && json_push_kv_str(
@@ -449,6 +455,13 @@ static bool detail_block_failed_mask_at_tip(struct json_value *out)
     ok = ok && json_push_kv_str(
         out, "remedy_contract",
         "height_not_found is accepted only for no_advance; final success requires delegated owner, target failure cleared, or observed tip advance");
+    return ok;
+}
+
+static bool detail_push_reducer_owner_state(struct json_value *out,
+                                            int reducer_target)
+{
+    bool ok = true;
     ok = ok && json_push_kv_int(out, "reducer_frontier_owner_target",
                                 reducer_target);
     ok = ok && json_push_kv_int(out, "reducer_frontier_owner_hstar",
@@ -456,6 +469,27 @@ static bool detail_block_failed_mask_at_tip(struct json_value *out)
     ok = ok && json_push_kv_str(
         out, "reducer_frontier_owner_reason",
         reducer_owner_reason_name(atomic_load(&g_reducer_owner_reason)));
+    return ok;
+}
+
+static bool detail_block_failed_mask_at_tip(struct json_value *out)
+{
+    if (!out)
+        return false;
+
+    int validate_owner = atomic_load(&g_validate_repair_owner_height);
+    int reducer_target = atomic_load(&g_reducer_owner_target);
+    const char *delegated_owner = "none";
+    if (reducer_target >= 0)
+        delegated_owner = "reducer_frontier_reconcile_light";
+    else if (validate_owner >= 0)
+        delegated_owner = "stale_validate_headers_repair";
+
+    bool ok = true;
+    ok = ok && detail_push_detect_and_owner_state(out, validate_owner,
+                                                  delegated_owner);
+    ok = ok && detail_push_remedy_witness_state(out);
+    ok = ok && detail_push_reducer_owner_state(out, reducer_target);
     return ok;
 }
 
