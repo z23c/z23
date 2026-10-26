@@ -2323,8 +2323,6 @@ tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_check:19
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_status:17
 tools/command/native_devagent.c:dva_code_mask:17
 tools/command/native_devagent.c:zcl_devagent_mutate_line:29
-tools/command/native_devagent_command.c:zcl_native_handle_dev_agent_ready:25
-tools/command/native_devagent_command.c:zcl_native_handle_dev_agent_test:25
 tools/command/native_devagent_hot.c:zcl_native_handle_dev_agent_hot:38
 tools/command/native_devagent_mail.c:dvm_has_ipv4:17
 tools/command/native_devagent_mutate_command.c:zcl_native_handle_dev_agent_mutate:42

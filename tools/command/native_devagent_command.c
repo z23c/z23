@@ -154,6 +154,117 @@ static size_t dva_count_missing(const char *root, const char *const *rel,
     return missing;
 }
 
+/* The single reason this checkout is not shippable yet, and the exact
+ * command that fixes it, in verdict order. `NONE` plus the fast-CI script
+ * is the all-gates-passed answer. */
+static void dva_ready_blocker(bool can_link, bool can_link_real_tor,
+                              bool tor_real, bool node_binary,
+                              bool test_runner, const char **blocker,
+                              char *next_action, size_t next_cap)
+{
+    *blocker = "NONE";
+    (void)snprintf(next_action, next_cap,
+                   "./tools/agent_fast_ci.sh verify-change");
+    if (!can_link) {
+        *blocker = "VENDOR_ARCHIVES_MISSING";
+        (void)snprintf(next_action, next_cap, "make worktree-prime");
+    } else if (!can_link_real_tor) {
+        *blocker = "TOR_ARCHIVES_MISSING";
+        (void)snprintf(next_action, next_cap, "make worktree-prime");
+    } else if (!tor_real) {
+        *blocker = "BINARY_LINKED_TOR_STUB";
+        (void)snprintf(next_action, next_cap,
+                       "make -j\"$(getconf _NPROCESSORS_ONLN)\" z23 "
+                       "(the archives are here now; this binary predates them)");
+    } else if (!node_binary) {
+        *blocker = "NODE_BINARY_NOT_BUILT";
+        (void)snprintf(next_action, next_cap,
+                       "make -j\"$(getconf _NPROCESSORS_ONLN)\" z23 "
+                       "(the archives are here; the candidate is not on disk)");
+    } else if (!test_runner) {
+        *blocker = "TEST_RUNNER_NOT_BUILT";
+        (void)snprintf(next_action, next_cap,
+                       "make -j\"$(getconf _NPROCESSORS_ONLN)\" test_parallel");
+    }
+}
+
+/* The seven reported rows, in report order. Counts and first-missing names
+ * come from the caller; every detail string is the one the reply has always
+ * carried. */
+static void dva_ready_push_checks(struct json_value *checks,
+                                  size_t vendor_missing,
+                                  const char *first_vendor, size_t tor_missing,
+                                  const char *first_tor, bool sqlite_amalgam,
+                                  bool submodule, bool tor_real,
+                                  bool node_binary, bool test_runner)
+{
+    char detail[192];
+    (void)snprintf(detail, sizeof(detail), "%zu of %zu archives missing%s%s",
+                   vendor_missing,
+                   sizeof(g_vendor_archives) / sizeof(g_vendor_archives[0]),
+                   vendor_missing ? "; first: " : "",
+                   vendor_missing ? first_vendor : "");
+    (void)dva_push_check(checks, "vendor_archives", vendor_missing == 0,
+                         detail);
+    (void)dva_push_check(checks, "vendor_sqlite3_amalgam", sqlite_amalgam,
+                         sqlite_amalgam ? "vendor/sqlite3.c present"
+                                        : "vendor/sqlite3.c absent — the "
+                                          "Windows cross-build has no rule for it");
+    (void)dva_push_check(checks, "tor_submodule_initialized", submodule,
+                         submodule ? "vendor/tor is a populated submodule"
+                                   : "vendor/tor is an empty gitlink; a git "
+                                     "worktree does not inherit submodules");
+    (void)snprintf(detail, sizeof(detail), "%zu of %zu archives missing%s%s",
+                   tor_missing,
+                   sizeof(g_tor_archives) / sizeof(g_tor_archives[0]),
+                   tor_missing ? "; first: " : "",
+                   tor_missing ? first_tor : "");
+    (void)dva_push_check(checks, "tor_archives", tor_missing == 0, detail);
+    (void)dva_push_check(checks, "linked_tor_is_real", tor_real,
+                         tor_real ? "this binary linked vendor/tor/libtor.a"
+                                  : "this binary linked libtor_stub.a — it "
+                                    "passes every test and the ship step "
+                                    "refuses its candidate");
+    (void)dva_push_check(checks, "node_binary_built", node_binary,
+                         node_binary ? "build/bin/z23 is executable"
+                                     : "build/bin/z23 absent");
+    (void)dva_push_check(checks, "test_runner_built", test_runner,
+                         test_runner ? "build/bin/test_parallel is executable"
+                                     : "build/bin/test_parallel absent");
+}
+
+/* The envelope: verdict booleans, the checks array (ownership moves into the
+ * reply here), the blocker, and the human reading of shippable. */
+static void dva_ready_push_summary(struct zcl_command_reply *reply,
+                                   const char *root, bool can_link,
+                                   bool can_link_real_tor, bool shippable,
+                                   bool tor_real, const char *blocker,
+                                   const char *next_action,
+                                   struct json_value *checks)
+{
+    (void)json_push_kv_str(&reply->data, "schema", "zcl.agent_ready.v1");
+    (void)json_push_kv_str(&reply->data, "checkout_root", root);
+    (void)json_push_kv_str(&reply->data, "tor_build",
+                           tor_real ? "real_tor" : "tor_stub");
+    (void)json_push_kv_bool(&reply->data, "can_link", can_link);
+    (void)json_push_kv_bool(&reply->data, "can_link_real_tor",
+                            can_link_real_tor);
+    (void)json_push_kv_bool(&reply->data, "shippable", shippable);
+    (void)json_push_kv_str(&reply->data, "blocker", blocker);
+    (void)json_push_kv(&reply->data, "checks", checks);
+    json_free(checks);
+    (void)json_push_kv_str(&reply->data, "next_action", next_action);
+    (void)json_push_kv_str(
+        &reply->data, "means",
+        shippable
+            ? "the archives a real-Tor link needs are here, build/bin/z23 "
+              "exists, and the ANSWERING binary linked real Tor — run this "
+              "through the z23 you just built, or tor_build describes a "
+              "different binary than the one on disk"
+            : "this checkout cannot produce a shippable candidate yet; "
+              "next_action names the exact fix");
+}
+
 void zcl_native_handle_dev_agent_ready(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -195,87 +306,18 @@ void zcl_native_handle_dev_agent_ready(
 
     const char *blocker = "NONE";
     char next_action[256];
-    (void)snprintf(next_action, sizeof(next_action),
-                   "./tools/agent_fast_ci.sh verify-change");
-    if (!can_link) {
-        blocker = "VENDOR_ARCHIVES_MISSING";
-        (void)snprintf(next_action, sizeof(next_action), "make worktree-prime");
-    } else if (!can_link_real_tor) {
-        blocker = "TOR_ARCHIVES_MISSING";
-        (void)snprintf(next_action, sizeof(next_action), "make worktree-prime");
-    } else if (!tor_real) {
-        blocker = "BINARY_LINKED_TOR_STUB";
-        (void)snprintf(next_action, sizeof(next_action),
-                       "make -j\"$(getconf _NPROCESSORS_ONLN)\" z23 "
-                       "(the archives are here now; this binary predates them)");
-    } else if (!node_binary) {
-        blocker = "NODE_BINARY_NOT_BUILT";
-        (void)snprintf(next_action, sizeof(next_action),
-                       "make -j\"$(getconf _NPROCESSORS_ONLN)\" z23 "
-                       "(the archives are here; the candidate is not on disk)");
-    } else if (!test_runner) {
-        blocker = "TEST_RUNNER_NOT_BUILT";
-        (void)snprintf(next_action, sizeof(next_action),
-                       "make -j\"$(getconf _NPROCESSORS_ONLN)\" test_parallel");
-    }
+    dva_ready_blocker(can_link, can_link_real_tor, tor_real, node_binary,
+                      test_runner, &blocker, next_action, sizeof(next_action));
 
     struct json_value checks;
     json_init(&checks);
     json_set_array(&checks);
-    char detail[192];
-    (void)snprintf(detail, sizeof(detail), "%zu of %zu archives missing%s%s",
-                   vendor_missing,
-                   sizeof(g_vendor_archives) / sizeof(g_vendor_archives[0]),
-                   vendor_missing ? "; first: " : "",
-                   vendor_missing ? first_vendor : "");
-    (void)dva_push_check(&checks, "vendor_archives", vendor_missing == 0, detail);
-    (void)dva_push_check(&checks, "vendor_sqlite3_amalgam", sqlite_amalgam,
-                         sqlite_amalgam ? "vendor/sqlite3.c present"
-                                        : "vendor/sqlite3.c absent — the "
-                                          "Windows cross-build has no rule for it");
-    (void)dva_push_check(&checks, "tor_submodule_initialized", submodule,
-                         submodule ? "vendor/tor is a populated submodule"
-                                   : "vendor/tor is an empty gitlink; a git "
-                                     "worktree does not inherit submodules");
-    (void)snprintf(detail, sizeof(detail), "%zu of %zu archives missing%s%s",
-                   tor_missing,
-                   sizeof(g_tor_archives) / sizeof(g_tor_archives[0]),
-                   tor_missing ? "; first: " : "",
-                   tor_missing ? first_tor : "");
-    (void)dva_push_check(&checks, "tor_archives", tor_missing == 0, detail);
-    (void)dva_push_check(&checks, "linked_tor_is_real", tor_real,
-                         tor_real ? "this binary linked vendor/tor/libtor.a"
-                                  : "this binary linked libtor_stub.a — it "
-                                    "passes every test and the ship step "
-                                    "refuses its candidate");
-    (void)dva_push_check(&checks, "node_binary_built", node_binary,
-                         node_binary ? "build/bin/z23 is executable"
-                                     : "build/bin/z23 absent");
-    (void)dva_push_check(&checks, "test_runner_built", test_runner,
-                         test_runner ? "build/bin/test_parallel is executable"
-                                     : "build/bin/test_parallel absent");
+    dva_ready_push_checks(&checks, vendor_missing, first_vendor, tor_missing,
+                          first_tor, sqlite_amalgam, submodule, tor_real,
+                          node_binary, test_runner);
 
-    (void)json_push_kv_str(&reply->data, "schema", "zcl.agent_ready.v1");
-    (void)json_push_kv_str(&reply->data, "checkout_root", root);
-    (void)json_push_kv_str(&reply->data, "tor_build",
-                           tor_real ? "real_tor" : "tor_stub");
-    (void)json_push_kv_bool(&reply->data, "can_link", can_link);
-    (void)json_push_kv_bool(&reply->data, "can_link_real_tor",
-                            can_link_real_tor);
-    (void)json_push_kv_bool(&reply->data, "shippable", shippable);
-    (void)json_push_kv_str(&reply->data, "blocker", blocker);
-    (void)json_push_kv(&reply->data, "checks", &checks);
-    json_free(&checks);
-    (void)json_push_kv_str(&reply->data, "next_action", next_action);
-    (void)json_push_kv_str(
-        &reply->data, "means",
-        shippable
-            ? "the archives a real-Tor link needs are here, build/bin/z23 "
-              "exists, and the ANSWERING binary linked real Tor — run this "
-              "through the z23 you just built, or tor_build describes a "
-              "different binary than the one on disk"
-            : "this checkout cannot produce a shippable candidate yet; "
-              "next_action names the exact fix");
+    dva_ready_push_summary(reply, root, can_link, can_link_real_tor, shippable,
+                           tor_real, blocker, next_action, &checks);
 }
 
 /* ── dev.agent.test ─────────────────────────────────────────────────────── */
@@ -445,6 +487,167 @@ static void dva_stack_limits(struct json_value *data)
 #endif
 }
 
+/* True when the query cannot name even one canonical group: an explicit
+ * --exact that does not resolve, or a substring no catalog row contains.
+ * A selector that matches nothing must never look like a pass. */
+static bool dva_test_group_unresolved(bool want_exact, bool exact_ok,
+                                      size_t matches)
+{
+    return (want_exact && !exact_ok) || (matches == 0 && !exact_ok);
+}
+
+/* Refuse an unresolvable group with real neighbouring group names, so the
+ * fix costs one call instead of a `--list` round trip. */
+static void dva_test_refuse_unknown_group(struct zcl_command_reply *reply,
+                                          const char *group, bool want_exact)
+{
+    char one[96], list[256], next[256], msg[192];
+    dva_suggestions(group, one, sizeof(one), list, sizeof(list));
+    if (one[0])
+        (void)snprintf(next, sizeof(next),
+                       "z23 dev agent test --group=%s", one);
+    else
+        (void)snprintf(next, sizeof(next),
+                       "build/bin/test_parallel --list  (nothing in the "
+                       "registered catalog resembles '%s')", group);
+    (void)snprintf(msg, sizeof(msg),
+                   want_exact
+                       ? "'%s' is not one canonical registered test group"
+                       : "no registered test group contains '%s'; a "
+                         "selector that matches nothing must never look "
+                         "like a pass",
+                   group);
+    dva_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+               "UNKNOWN_TEST_GROUP", "resolve", msg,
+               list[0] ? list : "no catalog row shares this prefix", next);
+}
+
+/* --no-cache is not an option here. A cached verdict is a claim about an
+ * earlier binary; this command exists to answer "did it run NOW". */
+static void dva_run_set_command(struct dva_run *run, bool use_exact,
+                                const char *full, const char *group)
+{
+    (void)snprintf(run->selector, sizeof(run->selector), "--%s=%s",
+                   use_exact ? "exact" : "only", use_exact ? full : group);
+    (void)snprintf(run->command_line, sizeof(run->command_line), "%s %s %s",
+                   run->runner, run->selector, "--no-cache");
+}
+
+/* Absent means "as long as a focused group plausibly needs"; a supplied
+ * value is honoured, never silently replaced by the default. */
+static int64_t dva_test_clamp_timeout(const struct json_value *input)
+{
+    int64_t timeout_ms = dva_int(input, "timeout_ms", 900000);
+    if (timeout_ms < 1000)
+        timeout_ms = 1000;
+    if (timeout_ms > 3600000)
+        timeout_ms = 3600000;
+    return timeout_ms;
+}
+
+/* True only when the transcript proves a real, passing run; on false the
+ * reply has already been refused. On success `verdict_line` receives the
+ * one-line summary every remaining path prints verbatim. */
+static bool dva_test_verdict_proven(struct zcl_command_reply *reply,
+                                    const struct dva_run *run,
+                                    const struct zcl_devagent_verdict *v,
+                                    char *verdict_line, size_t verdict_cap)
+{
+    if (!v->present) {
+        char msg[192];
+        (void)snprintf(msg, sizeof(msg),
+                       "the runner printed no SUITE VERDICT line (exit %d%s); "
+                       "nothing about this run may be read as a pass",
+                       run->exit_code,
+                       run->truncated ? ", output truncated" : "");
+        dva_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                   "NO_SUITE_VERDICT", "verify", msg, run->command_line,
+                   run->command_line);
+        return false;
+    }
+    (void)snprintf(verdict_line, verdict_cap,
+                   "mode=%s groups_ran=%lld groups_failed=%lld "
+                   "groups_gated=%lld groups_cached=%lld self_skips=%lld "
+                   "env_unobserved=%lld",
+                   v->mode, v->groups_ran, v->groups_failed, v->groups_gated,
+                   v->groups_cached, v->self_skips, v->env_unobserved);
+    if (v->groups_ran <= 0) {
+        char msg[192];
+        (void)snprintf(msg, sizeof(msg),
+                       "selector '%s' executed 0 groups (%lld gated, %lld "
+                       "served from cache) — a group that did not run is not "
+                       "a pass",
+                       run->selector, v->groups_gated, v->groups_cached);
+        dva_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                   "NO_GROUP_RAN", "verify", msg, verdict_line,
+                   "ZCL_STRESS_TESTS=1 ZCL_PARAMS_TESTS=1 z23 dev agent test "
+                   "--group=<name> --exact=true  (a gated group needs its "
+                   "opt-in env before it executes)");
+        return false;
+    }
+    if (v->groups_failed > 0) {
+        char msg[192];
+        (void)snprintf(msg, sizeof(msg),
+                       "%lld of %lld executed group(s) FAILED",
+                       v->groups_failed, v->groups_ran);
+        char next[256];
+        (void)snprintf(next, sizeof(next), "%s --verbose", run->command_line);
+        dva_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                   "TEST_GROUP_FAILED", "verify", msg, verdict_line, next);
+        return false;
+    }
+    return true;
+}
+
+/* The success envelope: the matched group names as evidence, the runner's
+ * own numbers, and the fields an agent reads first. */
+static void dva_test_push_run(struct zcl_command_reply *reply, const char *root,
+                              const struct dva_run *run, const char *group,
+                              const char *full, bool use_exact, size_t matches,
+                              const struct zcl_devagent_verdict *v,
+                              const char *verdict_line)
+{
+    struct json_value matched;
+    json_init(&matched);
+    json_set_array(&matched);
+    (void)dva_catalog_matches(use_exact ? full : group, &matched, 16);
+
+    (void)json_push_kv_str(&reply->data, "schema", "zcl.agent_test_run.v1");
+    (void)json_push_kv_str(&reply->data, "checkout_root", root);
+    (void)json_push_kv_str(&reply->data, "runner", run->runner);
+    (void)json_push_kv_str(&reply->data, "command", run->command_line);
+    (void)json_push_kv_str(&reply->data, "selector",
+                           use_exact ? "exact" : "only");
+    (void)json_push_kv_str(&reply->data, "group_query", group);
+    if (use_exact)
+        (void)json_push_kv_str(&reply->data, "group_resolved", full);
+    (void)json_push_kv_int(&reply->data, "catalog_matches", (int64_t)matches);
+    (void)json_push_kv(&reply->data, "matched_groups", &matched);
+    json_free(&matched);
+    (void)json_push_kv_str(&reply->data, "mode", v->mode);
+    (void)json_push_kv_int(&reply->data, "groups_ran", v->groups_ran);
+    (void)json_push_kv_int(&reply->data, "groups_failed",
+                           v->groups_failed);
+    (void)json_push_kv_int(&reply->data, "groups_gated", v->groups_gated);
+    (void)json_push_kv_int(&reply->data, "groups_cached",
+                           v->groups_cached);
+    (void)json_push_kv_int(&reply->data, "groups_total", v->groups_total);
+    (void)json_push_kv_int(&reply->data, "self_skips", v->self_skips);
+    (void)json_push_kv_int(&reply->data, "env_unobserved",
+                           v->env_unobserved);
+    (void)json_push_kv_bool(&reply->data, "hotswap_module", v->hotswap);
+    (void)json_push_kv_str(&reply->data, "toolkey", v->toolkey);
+    (void)json_push_kv_int(&reply->data, "runner_exit_code", run->exit_code);
+    dva_stack_limits(&reply->data);
+    (void)json_push_kv_str(&reply->data, "verdict_line", verdict_line);
+    (void)json_push_kv_str(
+        &reply->data, "means",
+        "groups_ran is the only field that proves execution; self_skips and "
+        "env_unobserved legs did not assert their gated contract");
+    (void)json_push_kv_str(&reply->data, "next_action",
+                           "./tools/agent_fast_ci.sh verify-change");
+}
+
 void zcl_native_handle_dev_agent_test(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -471,26 +674,8 @@ void zcl_native_handle_dev_agent_test(
     bool exact_ok = zcl_test_group_resolve_exact(group, full);
     size_t matches = dva_catalog_matches(group, NULL, 0);
 
-    if ((want_exact && !exact_ok) || (matches == 0 && !exact_ok)) {
-        char one[96], list[256], next[256], msg[192];
-        dva_suggestions(group, one, sizeof(one), list, sizeof(list));
-        if (one[0])
-            (void)snprintf(next, sizeof(next),
-                           "z23 dev agent test --group=%s", one);
-        else
-            (void)snprintf(next, sizeof(next),
-                           "build/bin/test_parallel --list  (nothing in the "
-                           "registered catalog resembles '%s')", group);
-        (void)snprintf(msg, sizeof(msg),
-                       want_exact
-                           ? "'%s' is not one canonical registered test group"
-                           : "no registered test group contains '%s'; a "
-                             "selector that matches nothing must never look "
-                             "like a pass",
-                       group);
-        dva_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                   "UNKNOWN_TEST_GROUP", "resolve", msg,
-                   list[0] ? list : "no catalog row shares this prefix", next);
+    if (dva_test_group_unresolved(want_exact, exact_ok, matches)) {
+        dva_test_refuse_unknown_group(reply, group, want_exact);
         return;
     }
 
@@ -516,111 +701,19 @@ void zcl_native_handle_dev_agent_test(
     /* Exact beats substring whenever the query resolves: an exact selector
      * cannot silently drag in a neighbouring group. */
     bool use_exact = want_exact || exact_ok;
-    (void)snprintf(run.selector, sizeof(run.selector), "--%s=%s",
-                   use_exact ? "exact" : "only", use_exact ? full : group);
+    dva_run_set_command(&run, use_exact, full, group);
 
-    /* --no-cache is not an option here. A cached verdict is a claim about an
-     * earlier binary; this command exists to answer "did it run NOW". */
-    (void)snprintf(run.command_line, sizeof(run.command_line), "%s %s %s",
-                   run.runner, run.selector, "--no-cache");
-
-    /* Absent means "as long as a focused group plausibly needs"; a supplied
-     * value is honoured, never silently replaced by the default. */
-    int64_t timeout_ms = dva_int(input, "timeout_ms", 900000);
-    if (timeout_ms < 1000)
-        timeout_ms = 1000;
-    if (timeout_ms > 3600000)
-        timeout_ms = 3600000;
+    int64_t timeout_ms = dva_test_clamp_timeout(input);
 
     struct zcl_devagent_verdict verdict;
     run.exit_code = zcl_devagent_run_group(root, run.selector, (int)timeout_ms,
                                            &verdict, &run.truncated);
-    bool parsed = verdict.present;
-
-    if (!parsed) {
-        char msg[192];
-        (void)snprintf(msg, sizeof(msg),
-                       "the runner printed no SUITE VERDICT line (exit %d%s); "
-                       "nothing about this run may be read as a pass",
-                       run.exit_code, run.truncated ? ", output truncated" : "");
-        dva_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                   "NO_SUITE_VERDICT", "verify", msg, run.command_line,
-                   run.command_line);
-        return;
-    }
 
     char verdict_line[256];
-    (void)snprintf(verdict_line, sizeof(verdict_line),
-                   "mode=%s groups_ran=%lld groups_failed=%lld "
-                   "groups_gated=%lld groups_cached=%lld self_skips=%lld "
-                   "env_unobserved=%lld",
-                   verdict.mode, verdict.groups_ran, verdict.groups_failed,
-                   verdict.groups_gated, verdict.groups_cached,
-                   verdict.self_skips, verdict.env_unobserved);
-
-    if (verdict.groups_ran <= 0) {
-        char msg[192];
-        (void)snprintf(msg, sizeof(msg),
-                       "selector '%s' executed 0 groups (%lld gated, %lld "
-                       "served from cache) — a group that did not run is not "
-                       "a pass", run.selector, verdict.groups_gated,
-                       verdict.groups_cached);
-        dva_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                   "NO_GROUP_RAN", "verify", msg, verdict_line,
-                   "ZCL_STRESS_TESTS=1 ZCL_PARAMS_TESTS=1 z23 dev agent test "
-                   "--group=<name> --exact=true  (a gated group needs its "
-                   "opt-in env before it executes)");
+    if (!dva_test_verdict_proven(reply, &run, &verdict, verdict_line,
+                                 sizeof(verdict_line)))
         return;
-    }
-    if (verdict.groups_failed > 0) {
-        char msg[192];
-        (void)snprintf(msg, sizeof(msg),
-                       "%lld of %lld executed group(s) FAILED",
-                       verdict.groups_failed, verdict.groups_ran);
-        char next[256];
-        (void)snprintf(next, sizeof(next), "%s --verbose", run.command_line);
-        dva_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                   "TEST_GROUP_FAILED", "verify", msg, verdict_line, next);
-        return;
-    }
 
-    struct json_value matched;
-    json_init(&matched);
-    json_set_array(&matched);
-    (void)dva_catalog_matches(use_exact ? full : group, &matched, 16);
-
-    (void)json_push_kv_str(&reply->data, "schema", "zcl.agent_test_run.v1");
-    (void)json_push_kv_str(&reply->data, "checkout_root", root);
-    (void)json_push_kv_str(&reply->data, "runner", run.runner);
-    (void)json_push_kv_str(&reply->data, "command", run.command_line);
-    (void)json_push_kv_str(&reply->data, "selector",
-                           use_exact ? "exact" : "only");
-    (void)json_push_kv_str(&reply->data, "group_query", group);
-    if (use_exact)
-        (void)json_push_kv_str(&reply->data, "group_resolved", full);
-    (void)json_push_kv_int(&reply->data, "catalog_matches", (int64_t)matches);
-    (void)json_push_kv(&reply->data, "matched_groups", &matched);
-    json_free(&matched);
-    (void)json_push_kv_str(&reply->data, "mode", verdict.mode);
-    (void)json_push_kv_int(&reply->data, "groups_ran", verdict.groups_ran);
-    (void)json_push_kv_int(&reply->data, "groups_failed",
-                           verdict.groups_failed);
-    (void)json_push_kv_int(&reply->data, "groups_gated", verdict.groups_gated);
-    (void)json_push_kv_int(&reply->data, "groups_cached",
-                           verdict.groups_cached);
-    (void)json_push_kv_int(&reply->data, "groups_total", verdict.groups_total);
-    (void)json_push_kv_int(&reply->data, "self_skips", verdict.self_skips);
-    (void)json_push_kv_int(&reply->data, "env_unobserved",
-                           verdict.env_unobserved);
-    (void)json_push_kv_bool(&reply->data, "hotswap_module", verdict.hotswap);
-    (void)json_push_kv_str(&reply->data, "toolkey", verdict.toolkey);
-    (void)json_push_kv_int(&reply->data, "runner_exit_code", run.exit_code);
-    dva_stack_limits(&reply->data);
-    (void)json_push_kv_str(&reply->data, "verdict_line", verdict_line);
-    (void)json_push_kv_str(
-        &reply->data, "means",
-        "groups_ran is the only field that proves execution; self_skips and "
-        "env_unobserved legs did not assert their gated contract");
-    (void)json_push_kv_str(&reply->data, "next_action",
-                           "./tools/agent_fast_ci.sh verify-change");
+    dva_test_push_run(reply, root, &run, group, full, use_exact, matches,
+                      &verdict, verdict_line);
 }
