@@ -51,7 +51,7 @@ static enum vcs_zcode_dht_record_store_result store_error(
   return result;
 }
 
-const char *vcs_zcode_dht_record_store_result_string(
+static const char *store_verdict_string(
     enum vcs_zcode_dht_record_store_result result)
 {
   switch (result) {
@@ -66,12 +66,25 @@ const char *vcs_zcode_dht_record_store_result_string(
   case VCS_ZCODE_DHT_RECORD_STORE_PROVIDER_CAP: return "provider-cap";
   case VCS_ZCODE_DHT_RECORD_STORE_CONFLICT_CAP: return "conflict-cap";
   case VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP: return "global-cap";
+  default: break;
+  }
+  return NULL;
+}
+
+const char *vcs_zcode_dht_record_store_result_string(
+    enum vcs_zcode_dht_record_store_result result)
+{
+  const char *verdict = store_verdict_string(result);
+  if (verdict)
+    return verdict;
+  switch (result) {
   case VCS_ZCODE_DHT_RECORD_STORE_NO_SLOT:
     return "no free publication slot";
   case VCS_ZCODE_DHT_RECORD_STORE_SCOPE:
     return "agent scope authority is unavailable";
   case VCS_ZCODE_DHT_RECORD_STORE_IO: return "io";
   case VCS_ZCODE_DHT_RECORD_STORE_CORRUPT: return "corrupt";
+  default: break;
   }
   return "unknown";
 }
@@ -216,9 +229,10 @@ static bool put_is_stale(const struct vcs_zcode_dht_record_store *store,
   return true;
 }
 
-enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
-    struct vcs_zcode_dht_record_store *store,
-    const struct vcs_zcode_dht_record *record, uint64_t now_unix)
+static enum vcs_zcode_dht_record_store_result put_check_input(
+    const struct vcs_zcode_dht_record_store *store,
+    const struct vcs_zcode_dht_record *record, uint64_t now_unix,
+    uint8_t wire[VCS_ZCODE_DHT_RECORD_WIRE_BYTES])
 {
   if (!store || !record ||
       memcmp(store->network_genesis, record->network_genesis, 32) != 0)
@@ -227,23 +241,26 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
   if (now_unix >= record->expiry)
     return VCS_ZCODE_DHT_RECORD_STORE_EXPIRED;
-  uint8_t wire[VCS_ZCODE_DHT_RECORD_WIRE_BYTES];
   if (vcs_zcode_dht_record_encode(record, wire) !=
       VCS_ZCODE_DHT_RECORD_OK)
     return VCS_ZCODE_DHT_RECORD_STORE_INVALID;
+  return VCS_ZCODE_DHT_RECORD_STORE_OK;
+}
 
-  /* One pass gathers the complete admission decision over the same live
-   * set load() would rebuild at now_unix. Expired rows influence neither
-   * sequence/conflict verdicts nor capacity. Each live counter carries its
-   * own would-be-superseded drop so post-removal arithmetic needs no second
-   * scan. Every same-stream-older row shares root and provider with the
-   * incoming record (stream equality implies both), so one superseded flag
-   * feeds all three drops. */
-  uint64_t max_sequence = 0;
-  size_t conflicts = 0;
-  size_t glob_live = 0, glob_drop = 0;
-  size_t root_live = 0, root_drop = 0;
-  size_t provider_live = 0, provider_drop = 0;
+struct put_tally {
+  uint64_t max_sequence;
+  size_t conflicts;
+  size_t glob_live, glob_drop;
+  size_t root_live, root_drop;
+  size_t provider_live, provider_drop;
+};
+
+static enum vcs_zcode_dht_record_store_result put_tally_live_rows(
+    const struct vcs_zcode_dht_record_store *store,
+    const struct vcs_zcode_dht_record *record,
+    const uint8_t wire[VCS_ZCODE_DHT_RECORD_WIRE_BYTES], uint64_t now_unix,
+    struct put_tally *tally)
+{
   for (size_t i = 0; i < store->count; i++) {
     const struct record_store_entry *entry = &store->entries[i];
     const struct vcs_zcode_dht_record *existing = &entry->record;
@@ -255,11 +272,11 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
         vcs_zcode_dht_record_contradicts(existing, record);
     bool superseded = false;
     if (same_stream) {
-      if (existing->sequence > max_sequence)
-        max_sequence = existing->sequence;
+      if (existing->sequence > tally->max_sequence)
+        tally->max_sequence = existing->sequence;
       if (existing->sequence == record->sequence) {
-        conflicts++;
-        if (memcmp(entry->wire, wire, sizeof(wire)) == 0)
+        tally->conflicts++;
+        if (memcmp(entry->wire, wire, VCS_ZCODE_DHT_RECORD_WIRE_BYTES) == 0)
           return VCS_ZCODE_DHT_RECORD_STORE_DUPLICATE;
       }
       /* A contradicted observation is preserved, never superseded: a newer
@@ -267,38 +284,63 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
        * re-derive to, so newest-first substitution would let one provider
        * rewrite evidence by publishing again. */
       superseded = existing->sequence < record->sequence && !contradicts;
-      conflicts += contradicts;
+      tally->conflicts += contradicts;
     }
-    glob_live++;
+    tally->glob_live++;
     if (memcmp(record_root(existing), record_root(record), 32) == 0) {
-      root_live++;
+      tally->root_live++;
       if (superseded)
-        root_drop++;
+        tally->root_drop++;
     }
     if (memcmp(existing->provider_node_id, record->provider_node_id,
                32) == 0) {
-      provider_live++;
+      tally->provider_live++;
       if (superseded)
-        provider_drop++;
+        tally->provider_drop++;
     }
     if (superseded)
-      glob_drop++;
+      tally->glob_drop++;
   }
-  if (put_is_stale(store, record, now_unix, max_sequence))
+  return VCS_ZCODE_DHT_RECORD_STORE_OK;
+}
+
+enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
+    struct vcs_zcode_dht_record_store *store,
+    const struct vcs_zcode_dht_record *record, uint64_t now_unix)
+{
+  uint8_t wire[VCS_ZCODE_DHT_RECORD_WIRE_BYTES];
+  enum vcs_zcode_dht_record_store_result input =
+      put_check_input(store, record, now_unix, wire);
+  if (input != VCS_ZCODE_DHT_RECORD_STORE_OK)
+    return input;
+
+  /* One pass gathers the complete admission decision over the same live
+   * set load() would rebuild at now_unix. Expired rows influence neither
+   * sequence/conflict verdicts nor capacity. Each live counter carries its
+   * own would-be-superseded drop so post-removal arithmetic needs no second
+   * scan. Every same-stream-older row shares root and provider with the
+   * incoming record (stream equality implies both), so one superseded flag
+   * feeds all three drops. */
+  struct put_tally tally = {0};
+  enum vcs_zcode_dht_record_store_result scan =
+      put_tally_live_rows(store, record, wire, now_unix, &tally);
+  if (scan != VCS_ZCODE_DHT_RECORD_STORE_OK)
+    return scan;
+  if (put_is_stale(store, record, now_unix, tally.max_sequence))
     return VCS_ZCODE_DHT_RECORD_STORE_STALE;
   /* Every counted conflict is a same-slot collision this admission
    * retains or a preserved contradiction; both consume the same bounded
    * conflict budget. */
-  if (conflicts >= VCS_ZCODE_DHT_RECORD_STORE_MAX_CONFLICTS)
+  if (tally.conflicts >= VCS_ZCODE_DHT_RECORD_STORE_MAX_CONFLICTS)
     return VCS_ZCODE_DHT_RECORD_STORE_CONFLICT_CAP;
-  bool newer = max_sequence && record->sequence > max_sequence;
-  if (glob_live - (newer ? glob_drop : 0) >=
+  bool newer = tally.max_sequence && record->sequence > tally.max_sequence;
+  if (tally.glob_live - (newer ? tally.glob_drop : 0) >=
       VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS)
     return VCS_ZCODE_DHT_RECORD_STORE_GLOBAL_CAP;
-  if (root_live - (newer ? root_drop : 0) >=
+  if (tally.root_live - (newer ? tally.root_drop : 0) >=
       VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT)
     return VCS_ZCODE_DHT_RECORD_STORE_ROOT_CAP;
-  if (provider_live - (newer ? provider_drop : 0) >=
+  if (tally.provider_live - (newer ? tally.provider_drop : 0) >=
       VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_PROVIDER)
     return VCS_ZCODE_DHT_RECORD_STORE_PROVIDER_CAP;
 
@@ -310,8 +352,8 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_put(
   entry->record = *record;
   memcpy(entry->wire, wire, sizeof(entry->wire));
   qsort(store->entries, store->count, sizeof(*store->entries), entry_compare);
-  return conflicts ? VCS_ZCODE_DHT_RECORD_STORE_CONFLICT
-                   : VCS_ZCODE_DHT_RECORD_STORE_ADDED;
+  return tally.conflicts ? VCS_ZCODE_DHT_RECORD_STORE_CONFLICT
+                         : VCS_ZCODE_DHT_RECORD_STORE_ADDED;
 }
 
 size_t vcs_zcode_dht_record_store_count(
@@ -468,6 +510,27 @@ static bool store_paths(const char *datadir, char directory[1400],
   return true;
 }
 
+static bool store_stage_wire_file(uint8_t *wire, size_t bytes,
+                                  const char *path, const char *temporary)
+{
+  struct platform_private_file staged;
+  struct platform_private_file_identity staged_identity;
+  platform_private_file_init(&staged);
+  bool created = platform_private_file_create(temporary, &staged) &&
+                 platform_private_file_identity(&staged, &staged_identity);
+  bool ok = created &&
+            platform_private_file_write_at(&staged, wire, bytes, 0) &&
+            platform_private_file_truncate(&staged, bytes) &&
+            platform_private_file_flush(&staged) &&
+            platform_private_file_replace(&staged, temporary, path);
+  free(wire);
+  if (!ok && created)
+    (void)platform_private_file_retire_if_identity(
+        &staged, temporary, &staged_identity);
+  platform_private_file_close(&staged);
+  return ok;
+}
+
 enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_save(
     const struct vcs_zcode_dht_record_store *store, const char *datadir,
     char *error_out, size_t error_capacity)
@@ -508,22 +571,7 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_save(
                        VCS_ZCODE_DHT_RECORD_STORE_IO,
                        "record store temp path too long");
   }
-  struct platform_private_file staged;
-  struct platform_private_file_identity staged_identity;
-  platform_private_file_init(&staged);
-  bool created = platform_private_file_create(temporary, &staged) &&
-                 platform_private_file_identity(&staged, &staged_identity);
-  bool ok = created &&
-            platform_private_file_write_at(&staged, wire, bytes, 0) &&
-            platform_private_file_truncate(&staged, bytes) &&
-            platform_private_file_flush(&staged) &&
-            platform_private_file_replace(&staged, temporary, path);
-  free(wire);
-  if (!ok && created)
-    (void)platform_private_file_retire_if_identity(
-        &staged, temporary, &staged_identity);
-  platform_private_file_close(&staged);
-  if (!ok) {
+  if (!store_stage_wire_file(wire, bytes, path, temporary)) {
     return store_error(error_out, error_capacity,
                        VCS_ZCODE_DHT_RECORD_STORE_IO,
                        "record store temp write failed");
@@ -538,71 +586,57 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_save(
   return VCS_ZCODE_DHT_RECORD_STORE_OK;
 }
 
-enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_load(
-    struct vcs_zcode_dht_record_store *store, const char *datadir,
-    const struct vcs_zcode_dht_record_verify_context *verify,
-    char *error_out, size_t error_capacity)
+static bool store_load_context_ok(
+    const struct vcs_zcode_dht_record_store *store,
+    const struct vcs_zcode_dht_record_verify_context *verify)
 {
-  if (!store || !verify ||
-      memcmp(store->network_genesis, verify->network_genesis, 32) != 0)
-    return store_error(error_out, error_capacity,
-                       VCS_ZCODE_DHT_RECORD_STORE_INVALID,
-                       "record store load context is invalid");
-  char directory[1400], path[1500];
-  if (!store_paths(datadir, directory, path, error_out, error_capacity))
-    return VCS_ZCODE_DHT_RECORD_STORE_IO;
-  struct platform_positioned_file file;
-  struct platform_positioned_file_snapshot before, after;
-  platform_positioned_file_init(&file);
-  if (!platform_positioned_file_open(&file, path)) {
-    if (platform_private_path_absent(path))
-      return VCS_ZCODE_DHT_RECORD_STORE_OK;
-    return store_error(error_out, error_capacity,
-                       VCS_ZCODE_DHT_RECORD_STORE_IO,
-                       "cannot open DHT record store");
-  }
+  return store && verify &&
+         memcmp(store->network_genesis, verify->network_genesis, 32) == 0;
+}
+
+static bool store_load_size_ok(struct platform_positioned_file *file,
+                               struct platform_positioned_file_snapshot *before)
+{
   size_t max_bytes = VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES +
                      VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS *
                          VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
-  if (!platform_positioned_file_is_private(&file) ||
-      !platform_positioned_file_snapshot(&file, &before) ||
-      before.size < VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES ||
-      before.size > max_bytes) {
-    platform_positioned_file_close(&file);
-    return store_error(error_out, error_capacity,
-                       VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
-                       "DHT record store size or mode is invalid");
-  }
-  size_t bytes = (size_t)before.size;
-  uint8_t *wire = zcl_malloc(bytes, "dht.record_store.load");
-  if (!wire) {
-    platform_positioned_file_close(&file);
-    return store_error(error_out, error_capacity,
-                       VCS_ZCODE_DHT_RECORD_STORE_IO,
-                       "record store load allocation failed");
-  }
-  bool read_ok = platform_positioned_file_read(&file, wire, bytes, 0) ==
+  return platform_positioned_file_is_private(file) &&
+         platform_positioned_file_snapshot(file, before) &&
+         before->size >= VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES &&
+         before->size <= max_bytes;
+}
+
+static bool store_load_read_file(
+    struct platform_positioned_file *file, uint8_t *wire, size_t bytes,
+    struct platform_positioned_file_snapshot *before)
+{
+  struct platform_positioned_file_snapshot after;
+  bool read_ok = platform_positioned_file_read(file, wire, bytes, 0) ==
                      (int64_t)bytes &&
-                 platform_positioned_file_snapshot(&file, &after) &&
-                 platform_positioned_file_snapshot_equal(&before, &after);
-  platform_positioned_file_close(&file);
-  if (!read_ok || memcmp(wire, record_store_magic, 8) != 0 ||
-      zcl_read_u32_le(wire + 8) != RECORD_STORE_VERSION ||
-      memcmp(wire + 16, store->network_genesis, 32) != 0) {
-    free(wire);
-    return store_error(error_out, error_capacity,
-                       VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
-                       "DHT record store header is invalid");
-  }
-  uint32_t count = zcl_read_u32_le(wire + 12);
-  if (count > VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS ||
-      bytes != VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES +
-                   (size_t)count * VCS_ZCODE_DHT_RECORD_WIRE_BYTES) {
-    free(wire);
-    return store_error(error_out, error_capacity,
-                       VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
-                       "DHT record store count is invalid");
-  }
+                 platform_positioned_file_snapshot(file, &after) &&
+                 platform_positioned_file_snapshot_equal(before, &after);
+  platform_positioned_file_close(file);
+  return read_ok;
+}
+
+static bool store_load_header_ok(
+    const uint8_t *wire, const struct vcs_zcode_dht_record_store *store,
+    bool read_ok)
+{
+  return read_ok && memcmp(wire, record_store_magic, 8) == 0 &&
+         zcl_read_u32_le(wire + 8) == RECORD_STORE_VERSION &&
+         memcmp(wire + 16, store->network_genesis, 32) == 0;
+}
+
+static bool store_load_count_ok(size_t bytes, uint32_t count)
+{
+  return count <= VCS_ZCODE_DHT_RECORD_STORE_MAX_RECORDS &&
+         bytes == VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES +
+                      (size_t)count * VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
+}
+
+static bool store_load_digest_ok(const uint8_t *wire, size_t bytes)
+{
   uint8_t digest[32];
   struct sha3_256_ctx sha;
   sha3_256_init(&sha);
@@ -613,20 +647,14 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_load(
   sha3_256_write(&sha, wire + VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES,
                  bytes - VCS_ZCODE_DHT_RECORD_STORE_HEADER_BYTES);
   sha3_256_finalize(&sha, digest);
-  if (memcmp(digest, wire + 48, 32) != 0) {
-    free(wire);
-    return store_error(error_out, error_capacity,
-                       VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
-                       "DHT record store digest is invalid");
-  }
-  struct vcs_zcode_dht_record_store *temporary =
-      vcs_zcode_dht_record_store_create(store->network_genesis);
-  if (!temporary) {
-    free(wire);
-    return store_error(error_out, error_capacity,
-                       VCS_ZCODE_DHT_RECORD_STORE_IO,
-                       "record store rebuild allocation failed");
-  }
+  return memcmp(digest, wire + 48, 32) == 0;
+}
+
+static bool store_load_rebuild(
+    const uint8_t *wire, uint32_t count,
+    const struct vcs_zcode_dht_record_verify_context *verify,
+    struct vcs_zcode_dht_record_store *temporary)
+{
   bool valid = true;
   for (uint32_t i = 0; valid && i < count; i++) {
     const uint8_t *record_wire =
@@ -653,6 +681,74 @@ enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_load(
         added != VCS_ZCODE_DHT_RECORD_STORE_CONFLICT)
       valid = false;
   }
+  return valid;
+}
+
+enum vcs_zcode_dht_record_store_result vcs_zcode_dht_record_store_load(
+    struct vcs_zcode_dht_record_store *store, const char *datadir,
+    const struct vcs_zcode_dht_record_verify_context *verify,
+    char *error_out, size_t error_capacity)
+{
+  if (!store_load_context_ok(store, verify))
+    return store_error(error_out, error_capacity,
+                       VCS_ZCODE_DHT_RECORD_STORE_INVALID,
+                       "record store load context is invalid");
+  char directory[1400], path[1500];
+  if (!store_paths(datadir, directory, path, error_out, error_capacity))
+    return VCS_ZCODE_DHT_RECORD_STORE_IO;
+  struct platform_positioned_file file;
+  struct platform_positioned_file_snapshot before;
+  platform_positioned_file_init(&file);
+  if (!platform_positioned_file_open(&file, path)) {
+    if (platform_private_path_absent(path))
+      return VCS_ZCODE_DHT_RECORD_STORE_OK;
+    return store_error(error_out, error_capacity,
+                       VCS_ZCODE_DHT_RECORD_STORE_IO,
+                       "cannot open DHT record store");
+  }
+  if (!store_load_size_ok(&file, &before)) {
+    platform_positioned_file_close(&file);
+    return store_error(error_out, error_capacity,
+                       VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
+                       "DHT record store size or mode is invalid");
+  }
+  size_t bytes = (size_t)before.size;
+  uint8_t *wire = zcl_malloc(bytes, "dht.record_store.load");
+  if (!wire) {
+    platform_positioned_file_close(&file);
+    return store_error(error_out, error_capacity,
+                       VCS_ZCODE_DHT_RECORD_STORE_IO,
+                       "record store load allocation failed");
+  }
+  bool read_ok = store_load_read_file(&file, wire, bytes, &before);
+  if (!store_load_header_ok(wire, store, read_ok)) {
+    free(wire);
+    return store_error(error_out, error_capacity,
+                       VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
+                       "DHT record store header is invalid");
+  }
+  uint32_t count = zcl_read_u32_le(wire + 12);
+  if (!store_load_count_ok(bytes, count)) {
+    free(wire);
+    return store_error(error_out, error_capacity,
+                       VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
+                       "DHT record store count is invalid");
+  }
+  if (!store_load_digest_ok(wire, bytes)) {
+    free(wire);
+    return store_error(error_out, error_capacity,
+                       VCS_ZCODE_DHT_RECORD_STORE_CORRUPT,
+                       "DHT record store digest is invalid");
+  }
+  struct vcs_zcode_dht_record_store *temporary =
+      vcs_zcode_dht_record_store_create(store->network_genesis);
+  if (!temporary) {
+    free(wire);
+    return store_error(error_out, error_capacity,
+                       VCS_ZCODE_DHT_RECORD_STORE_IO,
+                       "record store rebuild allocation failed");
+  }
+  bool valid = store_load_rebuild(wire, count, verify, temporary);
   free(wire);
   if (!valid) {
     vcs_zcode_dht_record_store_free(temporary);

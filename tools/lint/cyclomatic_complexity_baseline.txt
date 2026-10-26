@@ -222,10 +222,6 @@ contexts/commons/modules/vcs/src/zcode_dht_delegation.c:vcs_zcode_dht_delegation
 contexts/commons/modules/vcs/src/zcode_dht_record.c:record_shape:25
 contexts/commons/modules/vcs/src/zcode_dht_record.c:vcs_zcode_dht_record_error_string:21
 contexts/commons/modules/vcs/src/zcode_dht_record.c:vcs_zcode_dht_record_parse_persisted:16
-contexts/commons/modules/vcs/src/zcode_dht_record_store.c:vcs_zcode_dht_record_store_load:33
-contexts/commons/modules/vcs/src/zcode_dht_record_store.c:vcs_zcode_dht_record_store_put:29
-contexts/commons/modules/vcs/src/zcode_dht_record_store.c:vcs_zcode_dht_record_store_result_string:16
-contexts/commons/modules/vcs/src/zcode_dht_record_store.c:vcs_zcode_dht_record_store_save:18
 contexts/commons/modules/vcs/src/zcode_dht_service_discovery.c:discovery_drive_children:26
 contexts/commons/modules/vcs/src/zcode_dht_service_lookup.c:vcs_zcode_dht_lookup_insert:18
 contexts/commons/modules/vcs/src/zcode_dht_service_lookup.c:vcs_zcode_dht_lookup_schedule:19
