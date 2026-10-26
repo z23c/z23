@@ -57,13 +57,9 @@ static bool market_test_refuse_persist(const struct file_offer *offer,
     return false;
 }
 
-int test_file_market(void)
+static int market_case_offer_roundtrip(void)
 {
     int failures = 0;
-
-    printf("\n=== File Market Tests ===\n");
-
-    /* ── File offer serialize/deserialize roundtrip ────────────── */
 
     printf("file_offer serialize+deserialize roundtrip... ");
     {
@@ -105,8 +101,12 @@ int test_file_market(void)
         }
         stream_free(&ws);
     }
+    return failures;
+}
 
-    /* ── File challenge serialize/deserialize roundtrip ────────── */
+static int market_case_signed_wire(void)
+{
+    int failures = 0;
 
     printf("signed paid offer: exact wire roundtrip and verification... ");
     {
@@ -131,6 +131,12 @@ int test_file_market(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int market_case_signed_total(void)
+{
+    int failures = 0;
 
     printf("signed paid offer: exact integer total and money cap... ");
     {
@@ -144,6 +150,12 @@ int test_file_market(void)
         if (made && exact && capped) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int market_case_signed_reject(void)
+{
+    int failures = 0;
 
     printf("signed paid offer: tamper, wrong network, and expiry rejected... ");
     {
@@ -170,6 +182,12 @@ int test_file_market(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int market_case_ingress_dedup(void)
+{
+    int failures = 0;
 
     printf("signed paid offer ingress: verify, dedup, and cross-network drop... ");
     {
@@ -192,6 +210,40 @@ int test_file_market(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static bool market_case_encode_offer_wires(const struct file_offer *first_offer,
+                                           uint8_t *first_wire,
+                                           const struct file_offer *refreshed,
+                                           uint8_t *refresh_wire)
+{
+    return file_offer_auth_encode(first_offer, first_wire) ==
+               FILE_OFFER_AUTH_OK &&
+           file_offer_auth_encode(refreshed, refresh_wire) ==
+               FILE_OFFER_AUTH_OK;
+}
+
+static bool market_case_seal_takeover_offer(struct file_offer *attacker,
+                                            uint8_t *attacker_wire,
+                                            const struct file_offer *refreshed)
+{
+    uint8_t attacker_seed[32];
+    bool made_attacker = market_test_signed_offer(
+        attacker, 0x36, 107, 4002);
+    memcpy(attacker->root_hash, refreshed->root_hash,
+           sizeof(attacker->root_hash));
+    memset(attacker_seed, 0x36 ^ 0x5a, sizeof(attacker_seed));
+    return made_attacker &&
+        file_offer_auth_seal(attacker, attacker_seed) ==
+            FILE_OFFER_AUTH_OK &&
+        file_offer_auth_encode(attacker, attacker_wire) ==
+            FILE_OFFER_AUTH_OK;
+}
+
+static int market_case_ingress_refresh(void)
+{
+    int failures = 0;
 
     printf("signed paid offer ingress: seller refresh replaces, takeover and replay refuse... ");
     {
@@ -202,11 +254,8 @@ int test_file_market(void)
             &first_offer, 0x35, 105, 4000);
         bool made_refresh = market_test_signed_offer(
             &refreshed, 0x35, 106, 4001);
-        bool encoded =
-            file_offer_auth_encode(&first_offer, first_wire) ==
-                FILE_OFFER_AUTH_OK &&
-            file_offer_auth_encode(&refreshed, refresh_wire) ==
-                FILE_OFFER_AUTH_OK;
+        bool encoded = market_case_encode_offer_wires(
+            &first_offer, first_wire, &refreshed, refresh_wire);
         enum file_market_offer_ingest first = file_market_ingest_offer_wire(
             first_wire, sizeof(first_wire), first_offer.network_genesis,
             88, 4002, NULL);
@@ -218,17 +267,8 @@ int test_file_market(void)
             89, 4004, NULL);
         struct file_offer attacker;
         uint8_t attacker_wire[FILE_MARKET_OFFER_WIRE_BYTES];
-        uint8_t attacker_seed[32];
-        bool made_attacker = market_test_signed_offer(
-            &attacker, 0x36, 107, 4002);
-        memcpy(attacker.root_hash, refreshed.root_hash,
-               sizeof(attacker.root_hash));
-        memset(attacker_seed, 0x36 ^ 0x5a, sizeof(attacker_seed));
-        bool attacker_sealed = made_attacker &&
-            file_offer_auth_seal(&attacker, attacker_seed) ==
-                FILE_OFFER_AUTH_OK &&
-            file_offer_auth_encode(&attacker, attacker_wire) ==
-                FILE_OFFER_AUTH_OK;
+        bool attacker_sealed = market_case_seal_takeover_offer(
+            &attacker, attacker_wire, &refreshed);
         enum file_market_offer_ingest takeover =
             file_market_ingest_offer_wire(
                 attacker_wire, sizeof(attacker_wire),
@@ -243,6 +283,12 @@ int test_file_market(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int market_case_ingress_persist_refuse(void)
+{
+    int failures = 0;
 
     printf("signed paid offer ingress: persistence refusal never enters cache... ");
     {
@@ -259,6 +305,12 @@ int test_file_market(void)
             printf("OK\n");
         else { printf("FAIL (result=%d absent=%d)\n", got, absent); failures++; }
     }
+    return failures;
+}
+
+static int market_case_unsigned_fields(void)
+{
+    int failures = 0;
 
     printf("unsigned offer ownership: only freshness and port may change... ");
     {
@@ -294,6 +346,12 @@ int test_file_market(void)
         if (immutable && refresh) printf("OK\n");
         else { printf("FAIL (immutable=%d refresh=%d)\n", immutable, refresh); failures++; }
     }
+    return failures;
+}
+
+static int market_case_peer_offer_cap(void)
+{
+    int failures = 0;
 
     printf("signed paid offer ingress: bounded fresh offers per peer... ");
     {
@@ -316,6 +374,12 @@ int test_file_market(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int market_case_peer_invalid_cap(void)
+{
+    int failures = 0;
 
     printf("signed paid offer ingress: invalid attempts are CPU-bounded... ");
     {
@@ -337,6 +401,12 @@ int test_file_market(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int market_case_legacy_rpc(void)
+{
+    int failures = 0;
 
     printf("legacy market writes: fail closed without cache or session mutation... ");
     {
@@ -384,6 +454,12 @@ int test_file_market(void)
         if (assembled && offer_refused && buy_refused) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int market_case_unsigned_paid_reject(void)
+{
+    int failures = 0;
 
     printf("legacy unsigned paid offer is rejected from the cache... ");
     {
@@ -397,8 +473,12 @@ int test_file_market(void)
         if (!file_market_add_offer(&offer)) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── File challenge serialize/deserialize roundtrip ────────── */
+static int market_case_challenge_roundtrip(void)
+{
+    int failures = 0;
 
     printf("file_challenge serialize+deserialize roundtrip... ");
     {
@@ -422,8 +502,12 @@ int test_file_market(void)
         } else { printf("FAIL\n"); failures++; }
         stream_free(&ws);
     }
+    return failures;
+}
 
-    /* ── File proof serialize/deserialize roundtrip ────────────── */
+static int market_case_proof_roundtrip(void)
+{
+    int failures = 0;
 
     printf("file_proof serialize+deserialize roundtrip... ");
     {
@@ -449,8 +533,12 @@ int test_file_market(void)
         } else { printf("FAIL\n"); failures++; }
         stream_free(&ws);
     }
+    return failures;
+}
 
-    /* ── File payment serialize/deserialize roundtrip ──────────── */
+static int market_case_payment_roundtrip(void)
+{
+    int failures = 0;
 
     printf("file_payment serialize+deserialize roundtrip... ");
     {
@@ -489,8 +577,12 @@ int test_file_market(void)
         } else { printf("FAIL\n"); failures++; }
         stream_free(&ws);
     }
+    return failures;
+}
 
-    /* ── Offer with long filename ─────────────────────────────── */
+static int market_case_long_filename(void)
+{
+    int failures = 0;
 
     printf("file_offer: long filename truncated to 255... ");
     {
@@ -517,8 +609,12 @@ int test_file_market(void)
         else { printf("FAIL\n"); failures++; }
         stream_free(&ws);
     }
+    return failures;
+}
 
-    /* ── Offer with empty filename ────────────────────────────── */
+static int market_case_empty_filename(void)
+{
+    int failures = 0;
 
     printf("file_offer: empty filename... ");
     {
@@ -544,8 +640,12 @@ int test_file_market(void)
         else { printf("FAIL\n"); failures++; }
         stream_free(&ws);
     }
+    return failures;
+}
 
-    /* ── In-memory offer cache ────────────────────────────────── */
+static int market_case_cache_insert(void)
+{
+    int failures = 0;
 
     printf("file_market_add_offer: add new offer... ");
     {
@@ -583,6 +683,12 @@ int test_file_market(void)
         if (!file_market_add_offer(&offer)) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int market_case_cache_query(void)
+{
+    int failures = 0;
 
     printf("file_market_find_offer: find by root_hash... ");
     {
@@ -618,6 +724,12 @@ int test_file_market(void)
         if (count >= 1) printf("OK (count=%d)\n", count);
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int market_case_cache_refresh(void)
+{
+    int failures = 0;
 
     printf("file_market_add_offer: update existing (same hash)... ");
     {
@@ -647,8 +759,12 @@ int test_file_market(void)
         if (pruned >= 0) printf("OK (pruned=%d)\n", pruned);
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── num_chunks overflow guard ──────────────────────── */
+static int market_case_num_chunks_in_range(void)
+{
+    int failures = 0;
 
     printf("num_chunks: 0 bytes -> 0 chunks... ");
     {
@@ -693,6 +809,12 @@ int test_file_market(void)
         if (ok && n == UINT32_MAX) printf("OK\n");
         else { printf("FAIL (ok=%d n=%u)\n", ok, n); failures++; }
     }
+    return failures;
+}
+
+static int market_case_num_chunks_rejected(void)
+{
+    int failures = 0;
 
     printf("num_chunks: UINT32_MAX * CHUNK_SIZE + 1 rejected "
            "(pre-fix wrapped to 0)... ");
@@ -734,8 +856,124 @@ int test_file_market(void)
         if (!ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── SQLite persistence ───────────────────────────────────── */
+static int market_case_db_save_find(struct node_db *ndb,
+                                    struct file_offer *offer,
+                                    int64_t now)
+{
+    int failures = 0;
+    bool made = market_test_signed_offer(offer, 0xAA, 404, now);
+
+    bool save = db_file_offer_save(ndb, offer);
+    struct file_offer found = {0};
+    bool find = db_file_offer_find(ndb, offer->root_hash, &found);
+    struct file_offer list[10];
+    int count = db_file_offer_list(ndb, list, 10);
+
+    if (made && save && find &&
+        strcmp(found.filename, offer->filename) == 0 &&
+        memcmp(found.offer_id, offer->offer_id, 32) == 0 &&
+        count == 1) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (save=%d find=%d count=%d)\n", save, find, count);
+        failures++;
+    }
+    return failures;
+}
+
+static int market_case_db_cross_seller(struct node_db *ndb, int64_t now)
+{
+    int failures = 0;
+
+    printf("file_market DB signed listing refuses cross-seller takeover... ");
+    struct file_offer honest, attacker;
+    uint8_t rogue_seed[32], rogue_secret[32];
+    memset(rogue_seed, 0x77, sizeof(rogue_seed));
+    bool pair_made = market_test_signed_offer(&honest, 0xC1, 501, now) &&
+        market_test_signed_offer(&attacker, 0xC2, 502, now) &&
+        db_file_offer_save(ndb, &honest);
+    /* Same content root, attacker's own signature and payment
+     * address: a valid offer that must not re-key a root an accepted
+     * listing already owns. */
+    memcpy(attacker.root_hash, honest.root_hash, 32);
+    snprintf(attacker.filename, sizeof(attacker.filename), "%s",
+             honest.filename);
+    ed25519_keypair(attacker.seller_pubkey, rogue_secret, rogue_seed);
+    bool attack_refused = pair_made &&
+        file_offer_auth_seal(&attacker, rogue_seed) ==
+            FILE_OFFER_AUTH_OK &&
+        !db_file_offer_save(ndb, &attacker);
+    struct file_offer listing = {0};
+    bool listing_intact = attack_refused &&
+        db_file_offer_find(ndb, honest.root_hash, &listing) &&
+        memcmp(listing.seller_pubkey, honest.seller_pubkey,
+               32) == 0 &&
+        memcmp(listing.offer_id, honest.offer_id, 32) == 0;
+    if (attack_refused && listing_intact) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (refused=%d intact=%d)\n", attack_refused,
+               listing_intact);
+        failures++;
+    }
+    return failures;
+}
+
+static int market_case_db_free_refresh(struct node_db *ndb, int64_t now)
+{
+    int failures = 0;
+
+    printf("file_market DB unsigned rows take only byte-identical refreshes... ");
+    struct file_offer free_row;
+    memset(&free_row, 0, sizeof(free_row));
+    memset(free_row.root_hash, 0xE1, sizeof(free_row.root_hash));
+    snprintf(free_row.filename, sizeof(free_row.filename),
+             "free.dat");
+    free_row.size_bytes = 101;
+    free_row.num_chunks = 1;
+    free_row.ttl = FILE_MARKET_MAX_TTL;
+    free_row.last_seen = now;
+    bool free_saved = db_file_offer_save(ndb, &free_row);
+    struct file_offer free_poison = free_row;
+    snprintf(free_poison.filename,
+             sizeof(free_poison.filename), "evil.dat");
+    bool poison_refused = free_saved &&
+        !db_file_offer_save(ndb, &free_poison);
+    struct file_offer free_refresh = free_row;
+    free_refresh.last_seen = now + 5;
+    free_refresh.peer_port = 19001;
+    bool refresh_allowed = poison_refused &&
+        db_file_offer_save(ndb, &free_refresh);
+    if (poison_refused && refresh_allowed) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (poison=%d refresh=%d)\n", poison_refused,
+               refresh_allowed);
+        failures++;
+    }
+    return failures;
+}
+
+static int market_case_db_prune(struct node_db *ndb, struct file_offer *offer)
+{
+    int failures = 0;
+
+    /* Prune old entries */
+    printf("file_market DB prune... ");
+    offer->last_seen = 1;  /* very old */
+    db_file_offer_save(ndb, offer);
+    int pruned = db_file_offer_prune(ndb, 60);
+    if (pruned >= 0) printf("OK (pruned=%d)\n", pruned);
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int market_case_db(void)
+{
+    int failures = 0;
 
     printf("file_market DB save+find+list+prune roundtrip... ");
     {
@@ -760,96 +998,65 @@ int test_file_market(void)
 
             struct file_offer offer;
             int64_t now = (int64_t)platform_time_wall_time_t();
-            bool made = market_test_signed_offer(&offer, 0xAA, 404, now);
-
-            bool save = db_file_offer_save(&ndb, &offer);
-            struct file_offer found = {0};
-            bool find = db_file_offer_find(&ndb, offer.root_hash, &found);
-            struct file_offer list[10];
-            int count = db_file_offer_list(&ndb, list, 10);
-
-            if (made && save && find &&
-                strcmp(found.filename, offer.filename) == 0 &&
-                memcmp(found.offer_id, offer.offer_id, 32) == 0 &&
-                count == 1) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (save=%d find=%d count=%d)\n", save, find, count);
-                failures++;
-            }
-
-            printf("file_market DB signed listing refuses cross-seller takeover... ");
-            struct file_offer honest, attacker;
-            uint8_t rogue_seed[32], rogue_secret[32];
-            memset(rogue_seed, 0x77, sizeof(rogue_seed));
-            bool pair_made = market_test_signed_offer(&honest, 0xC1, 501, now) &&
-                market_test_signed_offer(&attacker, 0xC2, 502, now) &&
-                db_file_offer_save(&ndb, &honest);
-            /* Same content root, attacker's own signature and payment
-             * address: a valid offer that must not re-key a root an accepted
-             * listing already owns. */
-            memcpy(attacker.root_hash, honest.root_hash, 32);
-            snprintf(attacker.filename, sizeof(attacker.filename), "%s",
-                     honest.filename);
-            ed25519_keypair(attacker.seller_pubkey, rogue_secret, rogue_seed);
-            bool attack_refused = pair_made &&
-                file_offer_auth_seal(&attacker, rogue_seed) ==
-                    FILE_OFFER_AUTH_OK &&
-                !db_file_offer_save(&ndb, &attacker);
-            struct file_offer listing = {0};
-            bool listing_intact = attack_refused &&
-                db_file_offer_find(&ndb, honest.root_hash, &listing) &&
-                memcmp(listing.seller_pubkey, honest.seller_pubkey,
-                       32) == 0 &&
-                memcmp(listing.offer_id, honest.offer_id, 32) == 0;
-            if (attack_refused && listing_intact) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (refused=%d intact=%d)\n", attack_refused,
-                       listing_intact);
-                failures++;
-            }
-
-            printf("file_market DB unsigned rows take only byte-identical refreshes... ");
-            struct file_offer free_row;
-            memset(&free_row, 0, sizeof(free_row));
-            memset(free_row.root_hash, 0xE1, sizeof(free_row.root_hash));
-            snprintf(free_row.filename, sizeof(free_row.filename),
-                     "free.dat");
-            free_row.size_bytes = 101;
-            free_row.num_chunks = 1;
-            free_row.ttl = FILE_MARKET_MAX_TTL;
-            free_row.last_seen = now;
-            bool free_saved = db_file_offer_save(&ndb, &free_row);
-            struct file_offer free_poison = free_row;
-            snprintf(free_poison.filename,
-                     sizeof(free_poison.filename), "evil.dat");
-            bool poison_refused = free_saved &&
-                !db_file_offer_save(&ndb, &free_poison);
-            struct file_offer free_refresh = free_row;
-            free_refresh.last_seen = now + 5;
-            free_refresh.peer_port = 19001;
-            bool refresh_allowed = poison_refused &&
-                db_file_offer_save(&ndb, &free_refresh);
-            if (poison_refused && refresh_allowed) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (poison=%d refresh=%d)\n", poison_refused,
-                       refresh_allowed);
-                failures++;
-            }
-
-            /* Prune old entries */
-            printf("file_market DB prune... ");
-            offer.last_seen = 1;  /* very old */
-            db_file_offer_save(&ndb, &offer);
-            int pruned = db_file_offer_prune(&ndb, 60);
-            if (pruned >= 0) printf("OK (pruned=%d)\n", pruned);
-            else { printf("FAIL\n"); failures++; }
+            failures += market_case_db_save_find(&ndb, &offer, now);
+            failures += market_case_db_cross_seller(&ndb, now);
+            failures += market_case_db_free_refresh(&ndb, now);
+            failures += market_case_db_prune(&ndb, &offer);
 
             sqlite3_close(db);
         }
     }
+    return failures;
+}
+
+int test_file_market(void)
+{
+    int failures = 0;
+
+    printf("\n=== File Market Tests ===\n");
+
+    /* ── File offer serialize/deserialize roundtrip ────────────── */
+    failures += market_case_offer_roundtrip();
+
+    /* ── File challenge serialize/deserialize roundtrip ────────── */
+    failures += market_case_signed_wire();
+    failures += market_case_signed_total();
+    failures += market_case_signed_reject();
+    failures += market_case_ingress_dedup();
+    failures += market_case_ingress_refresh();
+    failures += market_case_ingress_persist_refuse();
+    failures += market_case_unsigned_fields();
+    failures += market_case_peer_offer_cap();
+    failures += market_case_peer_invalid_cap();
+    failures += market_case_legacy_rpc();
+    failures += market_case_unsigned_paid_reject();
+
+    /* ── File challenge serialize/deserialize roundtrip ────────── */
+    failures += market_case_challenge_roundtrip();
+
+    /* ── File proof serialize/deserialize roundtrip ────────────── */
+    failures += market_case_proof_roundtrip();
+
+    /* ── File payment serialize/deserialize roundtrip ──────────── */
+    failures += market_case_payment_roundtrip();
+
+    /* ── Offer with long filename ─────────────────────────────── */
+    failures += market_case_long_filename();
+
+    /* ── Offer with empty filename ────────────────────────────── */
+    failures += market_case_empty_filename();
+
+    /* ── In-memory offer cache ────────────────────────────────── */
+    failures += market_case_cache_insert();
+    failures += market_case_cache_query();
+    failures += market_case_cache_refresh();
+
+    /* ── num_chunks overflow guard ──────────────────────── */
+    failures += market_case_num_chunks_in_range();
+    failures += market_case_num_chunks_rejected();
+
+    /* ── SQLite persistence ───────────────────────────────────── */
+    failures += market_case_db();
 
     failures += file_market_payment_tests();
     failures += file_market_delivery_tests();

@@ -1505,7 +1505,6 @@ tests/harness/src/test_fastobj_carrier.c:test_fastobj_carrier_platform_arm:166
 tests/harness/src/test_file_controller.c:test_file_export_snapshot_success:22
 tests/harness/src/test_file_controller.c:test_manifest_build_includes_snapshot:21
 tests/harness/src/test_file_controller.c:test_manifest_status_reports_export_readiness:19
-tests/harness/src/test_file_market.c:test_file_market:149
 tests/harness/src/test_file_market_delivery.c:delivery_handshake_capture_has_no_session_key:34
 tests/harness/src/test_file_market_delivery.c:delivery_handshake_rejects_partial_record_on_deadline:16
 tests/harness/src/test_file_market_delivery.c:file_market_delivery_tests:112
