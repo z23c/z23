@@ -70,6 +70,21 @@ static bool body_fetch_skipped_invalid(sqlite3 *db, int height, bool *out)
     return true;
 }
 
+/* Maps a validate_headers row to the poison mode its failure reason implies:
+ * SOLUTIONLESS or HASH_MISMATCH for the two repairable validate failures,
+ * NONE for anything else (ok rows, other reasons, no row). */
+static enum stage_repair_header_solution_poison
+validate_row_poison_mode(const struct validate_row *vh)
+{
+    if (vh->found && vh->ok == 0 &&
+        strcmp(vh->fail_reason, STAGE_REPAIR_SOLUTIONLESS_REASON) == 0)
+        return STAGE_REPAIR_POISON_VALIDATE_SOLUTIONLESS;
+    if (vh->found && vh->ok == 0 &&
+        strcmp(vh->fail_reason, STAGE_REPAIR_HASH_MISMATCH_REASON) == 0)
+        return STAGE_REPAIR_POISON_VALIDATE_HASH_MISMATCH;
+    return STAGE_REPAIR_POISON_NONE;
+}
+
 static enum stage_repair_header_solution_poison
 poison_mode_unlocked(sqlite3 *db, int height)
 {
@@ -80,12 +95,10 @@ poison_mode_unlocked(sqlite3 *db, int height)
     if (!stage_repair_read_validate_row(db, height, &vh))
         return STAGE_REPAIR_POISON_NONE;
 
-    if (vh.found && vh.ok == 0 &&
-        strcmp(vh.fail_reason, STAGE_REPAIR_SOLUTIONLESS_REASON) == 0)
-        return STAGE_REPAIR_POISON_VALIDATE_SOLUTIONLESS;
-    if (vh.found && vh.ok == 0 &&
-        strcmp(vh.fail_reason, STAGE_REPAIR_HASH_MISMATCH_REASON) == 0)
-        return STAGE_REPAIR_POISON_VALIDATE_HASH_MISMATCH;
+    enum stage_repair_header_solution_poison mode =
+        validate_row_poison_mode(&vh);
+    if (mode != STAGE_REPAIR_POISON_NONE)
+        return mode;
 
     bool skipped = false;
     if (!body_fetch_skipped_invalid(db, height, &skipped))
@@ -95,13 +108,7 @@ poison_mode_unlocked(sqlite3 *db, int height)
         return STAGE_REPAIR_POISON_NONE;
     if (vh.found && vh.ok == 1)
         return STAGE_REPAIR_POISON_DOWNSTREAM_STALE;
-    if (vh.found && vh.ok == 0 &&
-        strcmp(vh.fail_reason, STAGE_REPAIR_SOLUTIONLESS_REASON) == 0)
-        return STAGE_REPAIR_POISON_VALIDATE_SOLUTIONLESS;
-    if (vh.found && vh.ok == 0 &&
-        strcmp(vh.fail_reason, STAGE_REPAIR_HASH_MISMATCH_REASON) == 0)
-        return STAGE_REPAIR_POISON_VALIDATE_HASH_MISMATCH;
-    return STAGE_REPAIR_POISON_NONE;
+    return validate_row_poison_mode(&vh);
 }
 
 enum stage_repair_header_solution_poison
@@ -270,37 +277,116 @@ static bool table_has_success_at_or_above(sqlite3 *db, const char *table,
     return true;
 }
 
-bool stage_repair_header_solution_poison_rewind(
-    sqlite3 *db,
-    int height,
-    int active_tip_height,
+/* True when the poison rewind argument triple cannot describe a rewind. */
+static bool poison_rewind_args_invalid(sqlite3 *db, int height,
+                                       int active_tip_height)
+{
+    return !db || height < 0 || active_tip_height < -1;
+}
+
+/* Ensures the schema the rewind needs before the transaction opens: the stage
+ * tables, and `nullifiers`, which the delete list covers. Returns 0 when the
+ * schema is ready, -1 when an ensure call failed; each ensure logs its own
+ * failure, the caller decides what to do with the status. */
+static int poison_rewind_ensure_base_schema(sqlite3 *db)
+{
+    /* The delete list below includes `nullifiers`; ensure it exists so a
+     * datadir that predates the table (stage init not yet run) does not fail
+     * the whole rewind on "no such table". Idempotent. */
+    if (!stage_table_ensure(db))
+        return -1;
+    if (!nullifier_kv_ensure_schema(db))
+        return -1;  /* nullifier_kv logged the failure */
+    return 0;
+}
+
+/* Frees a sqlite3_exec error string when one was returned. */
+static void poison_rewind_free_exec_err(char *err)
+{
+    if (err)
+        sqlite3_free(err);
+}
+
+/* The message text for a failed sqlite3_exec; never NULL. */
+static const char *poison_rewind_exec_err_message(const char *err)
+{
+    return err ? err : "(no message)";
+}
+
+/* Zeroes the caller's result struct when one was passed. */
+static void poison_rewind_result_init(
     struct stage_repair_header_solution_result *out)
 {
     if (out)
         memset(out, 0, sizeof(*out));
-    if (!db || height < 0 || active_tip_height < -1)
-        LOG_FAIL("stage_repair", "header poison rewind invalid args");
-    if (height != active_tip_height + 1) {
-        LOG_WARN("stage_repair",
-                 "[stage_repair] reject non-frontier repair h=%d active_tip=%d",
-                 height, active_tip_height);
-        return false;
-    }
-    if (!stage_table_ensure(db))
-        return false;
-    /* The delete list below includes `nullifiers`; ensure it exists so a
-     * datadir that predates the table (stage init not yet run) does not fail
-     * the whole rewind on "no such table". Idempotent. */
-    if (!nullifier_kv_ensure_schema(db))
-        return false;  /* nullifier_kv logged the failure */
-    if (!anchor_kv_ensure_schema(db)) {
-        LOG_WARN("stage_repair",
-                 "[stage_repair] header poison rewind could not ensure "
-                 "anchor schema h=%d active_tip=%d",
-                 height, active_tip_height);
-        return false;
-    }
+}
 
+/* Records the rewind target and poison mode when a result was passed. */
+static void poison_rewind_result_note_target(
+    struct stage_repair_header_solution_result *out,
+    int height,
+    enum stage_repair_header_solution_poison mode)
+{
+    if (out) {
+        out->target_height = height;
+        out->mode = mode;
+    }
+}
+
+/* Records the completed rewind's outcome when a result was passed. */
+static void poison_rewind_result_note_repaired(
+    struct stage_repair_header_solution_result *out,
+    int deleted,
+    int rewound)
+{
+    if (out) {
+        out->repaired = true;
+        out->deleted_rows = deleted;
+        out->rewound_cursors = rewound;
+    }
+}
+
+/* The ~47279 regression guard: scans every success_checked_logs table for an
+ * ok=1 row at/above `height`. Returns 1 with the offending table's name in
+ * *out_table when such a row exists, 0 when every table is clear, -1 when a
+ * check itself failed. */
+static int poison_rewind_success_guard(sqlite3 *db, int height,
+                                       const char **out_table)
+{
+    static const char *const success_checked_logs[] = {
+        "body_fetch_log",
+        "body_persist_log",
+        "script_validate_log",
+        "proof_validate_log",
+        "utxo_apply_log",
+        "tip_finalize_log",
+    };
+    for (size_t i = 0;
+         i < sizeof(success_checked_logs) / sizeof(success_checked_logs[0]);
+         i++) {
+        bool has_success = false;
+        if (!table_has_success_at_or_above(db, success_checked_logs[i],
+                                           height, &has_success))
+            return -1;
+        if (has_success) {
+            *out_table = success_checked_logs[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Deletes the poisoned validate row and every downstream log at/above
+ * `height`, forces the downstream stage cursors back down to `height` and
+ * co-writes the utxo_apply frontier, all inside the caller's open BEGIN
+ * IMMEDIATE. Returns rows deleted, or -1 on failure (the caller rolls back);
+ * *rewound_cursors gains one per stage cursor forced. */
+static int rewind_poisoned_stages(
+    sqlite3 *db,
+    enum stage_repair_header_solution_poison mode,
+    int height,
+    int *rewound_cursors)
+{
     /* tip_finalize_log is DELIBERATELY ABSENT here: doctrine forbids deleting
      * tip_finalize_log rows (a prior deletion collapsed the public tip to
      * ~47279). The frontier rewind below rewinds the tip_finalize *cursor*
@@ -332,87 +418,28 @@ bool stage_repair_header_solution_poison_rewind(
         "utxo_apply",
         "tip_finalize",
     };
-    static const char *const success_checked_logs[] = {
-        "body_fetch_log",
-        "body_persist_log",
-        "script_validate_log",
-        "proof_validate_log",
-        "utxo_apply_log",
-        "tip_finalize_log",
-    };
-
-    progress_store_tx_lock();
-    char *err = NULL;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) !=
-        SQLITE_OK) {
-        LOG_WARN("stage_repair",
-                 "[stage_repair] BEGIN failed: %s",
-                 err ? err : "(no message)");
-        if (err) sqlite3_free(err);
-        progress_store_tx_unlock();
-        return false;
-    }
-
-    enum stage_repair_header_solution_poison mode =
-        poison_mode_unlocked(db, height);
-    if (out) {
-        out->target_height = height;
-        out->mode = mode;
-    }
-    if (mode == STAGE_REPAIR_POISON_NONE) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        return true;
-    }
-    if (mode == STAGE_REPAIR_POISON_VALIDATE_HASH_MISMATCH) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        LOG_WARN("stage_repair",
-                 "[stage_repair] source-hash mismatch h=%d is repaired by "
-                 "hash-bound header backfill + validate_headers recheck, "
-                 "not destructive poison_rewind",
-                 height);
-        return true;
-    }
-
-    for (size_t i = 0;
-         i < sizeof(success_checked_logs) / sizeof(success_checked_logs[0]);
-         i++) {
-        bool has_success = false;
-        if (!table_has_success_at_or_above(db, success_checked_logs[i],
-                                           height, &has_success))
-            goto rollback;
-        if (has_success) {
-            LOG_WARN("stage_repair",
-                     "[stage_repair] reject repair h=%d: %s has successful "
-                     "rows at/above frontier",
-                     height, success_checked_logs[i]);
-            goto rollback;
-        }
-    }
 
     int deleted = 0;
-    int rewound = 0;
     if (mode == STAGE_REPAIR_POISON_VALIDATE_SOLUTIONLESS) {
         int n = delete_from_table(db, "validate_headers_log", height);
-        if (n < 0) goto rollback;
+        if (n < 0) return -1;
         deleted += n;
         if (!stage_repair_force_stage_cursor(db, "validate_headers", height))
-            goto rollback;
-        rewound++;
+            return -1;
+        (*rewound_cursors)++;
     }
 
     for (size_t i = 0; i < sizeof(downstream_logs) / sizeof(downstream_logs[0]);
          i++) {
         int n = delete_from_table(db, downstream_logs[i], height);
-        if (n < 0) goto rollback;
+        if (n < 0) return -1;
         deleted += n;
     }
     for (size_t i = 0;
          i < sizeof(downstream_stages) / sizeof(downstream_stages[0]); i++) {
         if (!stage_repair_force_stage_cursor(db, downstream_stages[i], height))
-            goto rollback;
-        rewound++;
+            return -1;
+        (*rewound_cursors)++;
     }
 
     /* THIRD production writer of the utxo_apply stage cursor (after the forward
@@ -436,24 +463,95 @@ bool stage_repair_header_solution_poison_rewind(
      * A PLAIN set (the rewind decreases the frontier); ROLLBACK on failure
      * exactly like the surrounding writes (goto rollback). */
     if (!utxo_apply_frontier_set_in_tx(db, height))
+        return -1;
+    return deleted;
+}
+
+bool stage_repair_header_solution_poison_rewind(
+    sqlite3 *db,
+    int height,
+    int active_tip_height,
+    struct stage_repair_header_solution_result *out)
+{
+    poison_rewind_result_init(out);
+    if (poison_rewind_args_invalid(db, height, active_tip_height))
+        LOG_FAIL("stage_repair", "header poison rewind invalid args");
+    if (height != active_tip_height + 1) {
+        LOG_WARN("stage_repair",
+                 "[stage_repair] reject non-frontier repair h=%d active_tip=%d",
+                 height, active_tip_height);
+        return false;
+    }
+    if (poison_rewind_ensure_base_schema(db) != 0)
+        return false;
+    if (!anchor_kv_ensure_schema(db)) {
+        LOG_WARN("stage_repair",
+                 "[stage_repair] header poison rewind could not ensure "
+                 "anchor schema h=%d active_tip=%d",
+                 height, active_tip_height);
+        return false;
+    }
+
+    progress_store_tx_lock();
+    char *err = NULL;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) !=
+        SQLITE_OK) {
+        LOG_WARN("stage_repair",
+                 "[stage_repair] BEGIN failed: %s",
+                 poison_rewind_exec_err_message(err));
+        poison_rewind_free_exec_err(err);
+        progress_store_tx_unlock();
+        return false;
+    }
+
+    enum stage_repair_header_solution_poison mode =
+        poison_mode_unlocked(db, height);
+    poison_rewind_result_note_target(out, height, mode);
+    if (mode == STAGE_REPAIR_POISON_NONE) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        progress_store_tx_unlock();
+        return true;
+    }
+    if (mode == STAGE_REPAIR_POISON_VALIDATE_HASH_MISMATCH) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        progress_store_tx_unlock();
+        LOG_WARN("stage_repair",
+                 "[stage_repair] source-hash mismatch h=%d is repaired by "
+                 "hash-bound header backfill + validate_headers recheck, "
+                 "not destructive poison_rewind",
+                 height);
+        return true;
+    }
+
+    const char *blocked_table = NULL;
+    int guard = poison_rewind_success_guard(db, height, &blocked_table);
+    if (guard > 0) {
+        LOG_WARN("stage_repair",
+                 "[stage_repair] reject repair h=%d: %s has successful "
+                 "rows at/above frontier",
+                 height, blocked_table);
+        goto rollback;
+    }
+    if (guard < 0)
+        goto rollback;
+
+    int rewound = 0;
+    int deleted = rewind_poisoned_stages(db, mode, height, &rewound);
+    if (deleted < 0)
         goto rollback;
 
     if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("stage_repair",
                  "[stage_repair] COMMIT failed: %s",
-                 err ? err : "(no message)");
-        if (err) sqlite3_free(err);
+                 poison_rewind_exec_err_message(err));
+        poison_rewind_free_exec_err(err);
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         progress_store_tx_unlock();
         return false;
     }
     progress_store_tx_unlock();
 
-    if (out) {
-        out->repaired = true;
-        out->deleted_rows = deleted;
-        out->rewound_cursors = rewound;
-    }
+    poison_rewind_result_note_repaired(out, deleted, rewound);
     LOG_WARN("stage_repair",
              "[stage_repair] header-solution poison repaired h=%d mode=%d "
              "deleted=%d rewound=%d",
