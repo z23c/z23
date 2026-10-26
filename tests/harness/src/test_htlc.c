@@ -8,13 +8,9 @@
 #include "models/database.h"
 #include "models/swap_contract.h"
 
-int test_htlc(void)
+static int htlc_test_parse_chains(void)
 {
     int failures = 0;
-
-    printf("\n=== HTLC / Atomic Swap Tests ===\n");
-
-    /* ── Chain parsing ────────────────────────────────────────── */
 
     printf("swap_parse_chain: zcl... ");
     if (swap_parse_chain("zcl") == SWAP_CHAIN_ZCL) printf("OK\n");
@@ -56,7 +52,12 @@ int test_htlc(void)
     if (swap_parse_chain("eth") == -1) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 
-    /* ── Chain params ─────────────────────────────────────────── */
+    return failures;
+}
+
+static int htlc_test_chain_params(void)
+{
+    int failures = 0;
 
     printf("swap_get_chain_params: ZCL has 2-byte prefix... ");
     {
@@ -78,7 +79,61 @@ int test_htlc(void)
     if (swap_get_chain_params(99) == NULL) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 
-    /* ── HTLC script builder ──────────────────────────────────── */
+    return failures;
+}
+
+/* One row of the HTLC redeem-script layout checked by the opcode test.
+ * kind 0 is a single opcode byte, 1 is the 32-byte secret hash, 2 is the
+ * 20-byte recipient pubkey hash. Rows stay in script order. */
+struct htlc_script_expect {
+    int kind;
+    size_t off;
+    uint8_t byte;
+};
+
+enum {
+    HTLC_SCRIPT_BYTE = 0,
+    HTLC_SCRIPT_SECRET = 1,
+    HTLC_SCRIPT_RECIPIENT = 2
+};
+
+static bool htlc_script_key_opcodes_ok(const uint8_t *script, size_t len,
+                                      const struct htlc_params *params)
+{
+    static const struct htlc_script_expect rows[] = {
+        { HTLC_SCRIPT_BYTE, 0, 0x63 },             /* OP_IF */
+        { HTLC_SCRIPT_BYTE, 1, 0x82 },             /* OP_SIZE */
+        { HTLC_SCRIPT_BYTE, 5, 0xa8 },             /* OP_SHA256 */
+        { HTLC_SCRIPT_BYTE, 6, 0x20 },             /* OP_DATA_32 */
+        { HTLC_SCRIPT_SECRET, 7, 0 },
+        { HTLC_SCRIPT_BYTE, 39, 0x88 },            /* OP_EQUALVERIFY */
+        { HTLC_SCRIPT_BYTE, 40, 0x76 },            /* OP_DUP */
+        { HTLC_SCRIPT_BYTE, 41, 0xa9 },            /* OP_HASH160 */
+        { HTLC_SCRIPT_BYTE, 42, 0x14 },            /* OP_DATA_20 */
+        { HTLC_SCRIPT_RECIPIENT, 43, 0 },
+        { HTLC_SCRIPT_BYTE, 63, 0x67 },            /* OP_ELSE */
+        { HTLC_SCRIPT_BYTE, 64, 0x04 },            /* OP_DATA_4 */
+        { HTLC_SCRIPT_BYTE, 69, 0xb1 },            /* OP_CLTV */
+        { HTLC_SCRIPT_BYTE, 70, 0x75 },            /* OP_DROP */
+        { HTLC_SCRIPT_BYTE, 94, 0x68 },            /* OP_ENDIF */
+        { HTLC_SCRIPT_BYTE, 95, 0x88 },            /* OP_EQUALVERIFY */
+        { HTLC_SCRIPT_BYTE, 96, 0xac },            /* OP_CHECKSIG */
+    };
+    bool ok = len == 97;
+    for (size_t i = 0; ok && i < sizeof rows / sizeof rows[0]; i++) {
+        if (rows[i].kind == HTLC_SCRIPT_BYTE)
+            ok = script[rows[i].off] == rows[i].byte;
+        else if (rows[i].kind == HTLC_SCRIPT_SECRET)
+            ok = memcmp(script + rows[i].off, params->secret_hash, 32) == 0;
+        else
+            ok = memcmp(script + rows[i].off, params->recipient_pkh, 20) == 0;
+    }
+    return ok;
+}
+
+static int htlc_test_build_script(void)
+{
+    int failures = 0;
 
     printf("htlc_build_script: produces 97-byte script... ");
     {
@@ -108,24 +163,7 @@ int test_htlc(void)
         size_t len = htlc_build_script(&params, script, sizeof(script));
 
         /* Check key opcodes */
-        bool ok = (len == 97) &&
-                  (script[0] == 0x63) &&            /* OP_IF */
-                  (script[1] == 0x82) &&            /* OP_SIZE */
-                  (script[5] == 0xa8) &&            /* OP_SHA256 */
-                  (script[6] == 0x20) &&            /* OP_DATA_32 */
-                  (memcmp(script + 7, params.secret_hash, 32) == 0) &&
-                  (script[39] == 0x88) &&           /* OP_EQUALVERIFY */
-                  (script[40] == 0x76) &&           /* OP_DUP */
-                  (script[41] == 0xa9) &&           /* OP_HASH160 */
-                  (script[42] == 0x14) &&           /* OP_DATA_20 */
-                  (memcmp(script + 43, params.recipient_pkh, 20) == 0) &&
-                  (script[63] == 0x67) &&           /* OP_ELSE */
-                  (script[64] == 0x04) &&           /* OP_DATA_4 */
-                  (script[69] == 0xb1) &&           /* OP_CLTV */
-                  (script[70] == 0x75) &&           /* OP_DROP */
-                  (script[94] == 0x68) &&           /* OP_ENDIF */
-                  (script[95] == 0x88) &&           /* OP_EQUALVERIFY */
-                  (script[96] == 0xac);             /* OP_CHECKSIG */
+        bool ok = htlc_script_key_opcodes_ok(script, len, &params);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -161,7 +199,12 @@ int test_htlc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Secret generation + extraction ───────────────────────── */
+    return failures;
+}
+
+static int htlc_test_secrets(void)
+{
+    int failures = 0;
 
     printf("htlc_generate_secret: produces valid secret+hash... ");
     {
@@ -227,7 +270,12 @@ int test_htlc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Redeem/Refund ScriptSig builders ─────────────────────── */
+    return failures;
+}
+
+static int htlc_test_scriptsigs(void)
+{
+    int failures = 0;
 
     printf("htlc_build_redeem_scriptsig: builds valid scriptsig... ");
     {
@@ -280,7 +328,12 @@ int test_htlc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Swap ID computation ──────────────────────────────────── */
+    return failures;
+}
+
+static int htlc_test_swap_ids(void)
+{
+    int failures = 0;
 
     printf("swap_compute_id: deterministic... ");
     {
@@ -305,26 +358,45 @@ int test_htlc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── P2SH address generation ──────────────────────────────── */
+    return failures;
+}
+
+/* check_prefix false accepts any non-empty address. detail_fail selects the
+ * original failure line that prints ok and addr. */
+static int htlc_check_built_p2sh(enum swap_chain chain, bool check_prefix,
+                                char expect, bool detail_fail)
+{
+    struct htlc_params params = {0};
+    memset(params.secret_hash, 0xAA, 32);
+    memset(params.recipient_pkh, 0xBB, 20);
+    memset(params.refunder_pkh, 0xCC, 20);
+    params.locktime = 100000;
+
+    uint8_t script[128];
+    size_t slen = htlc_build_script(&params, script, sizeof(script));
+
+    char addr[64] = {0};
+    bool ok = htlc_p2sh_address(script, slen, chain,
+                                addr, sizeof(addr));
+    if (ok && strlen(addr) > 0 &&
+        (!check_prefix || addr[0] == expect)) {
+        printf("OK (%s)\n", addr);
+        return 0;
+    }
+    if (detail_fail) {
+        printf("FAIL (ok=%d addr=%s)\n", ok, addr);
+        return 1;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+static int htlc_test_p2sh_zcl_and_invalid(void)
+{
+    int failures = 0;
 
     printf("htlc_p2sh_address: ZCL address... ");
-    {
-        struct htlc_params params = {0};
-        memset(params.secret_hash, 0xAA, 32);
-        memset(params.recipient_pkh, 0xBB, 20);
-        memset(params.refunder_pkh, 0xCC, 20);
-        params.locktime = 100000;
-
-        uint8_t script[128];
-        size_t slen = htlc_build_script(&params, script, sizeof(script));
-
-        char addr[64] = {0};
-        bool ok = htlc_p2sh_address(script, slen, SWAP_CHAIN_ZCL,
-                                    addr, sizeof(addr));
-        if (ok && strlen(addr) > 0 && addr[0] == 't')
-            printf("OK (%s)\n", addr);
-        else { printf("FAIL (ok=%d addr=%s)\n", ok, addr); failures++; }
-    }
+    failures += htlc_check_built_p2sh(SWAP_CHAIN_ZCL, true, 't', true);
 
     printf("htlc_p2sh_address: invalid chain returns false... ");
     {
@@ -335,7 +407,35 @@ int test_htlc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── SQLite persistence ───────────────────────────────────── */
+    return failures;
+}
+
+static bool htlc_saved_swap_matches(bool save_ok, bool find_ok,
+                                   const struct swap_contract *found,
+                                   int count, int count_pending,
+                                   int count_funded)
+{
+    return save_ok && find_ok &&
+           strcmp(found->swap_id, "abc123def456") == 0 &&
+           found->role == SWAP_INITIATOR &&
+           found->state == SWAP_PENDING &&
+           found->amount == 100000000 &&
+           count == 1 && count_pending == 1 && count_funded == 0;
+}
+
+static bool htlc_updated_swap_matches(bool update_ok,
+                                     const struct swap_contract *after,
+                                     bool update2,
+                                     const struct swap_contract *redeemed)
+{
+    return update_ok && after->state == SWAP_FUNDED &&
+           update2 && redeemed->state == SWAP_REDEEMED &&
+           redeemed->has_secret;
+}
+
+static int htlc_test_db_roundtrip(void)
+{
+    int failures = 0;
 
     printf("htlc DB save+find+list+update roundtrip... ");
     {
@@ -396,15 +496,10 @@ int test_htlc(void)
             struct swap_contract redeemed = {0};
             db_swap_find(&ndb, "abc123def456", &redeemed);
 
-            if (save_ok && find_ok &&
-                strcmp(found.swap_id, "abc123def456") == 0 &&
-                found.role == SWAP_INITIATOR &&
-                found.state == SWAP_PENDING &&
-                found.amount == 100000000 &&
-                count == 1 && count_pending == 1 && count_funded == 0 &&
-                update_ok && after.state == SWAP_FUNDED &&
-                update2 && redeemed.state == SWAP_REDEEMED &&
-                redeemed.has_secret) {
+            if (htlc_saved_swap_matches(save_ok, find_ok, &found,
+                                       count, count_pending, count_funded) &&
+                htlc_updated_swap_matches(update_ok, &after,
+                                         update2, &redeemed)) {
                 printf("OK\n");
             } else {
                 printf("FAIL\n");
@@ -429,66 +524,28 @@ int test_htlc(void)
         }
     }
 
-    /* ── Cross-chain P2SH addresses ─────────────────────────────── */
+    return failures;
+}
+
+static int htlc_test_p2sh_other_chains(void)
+{
+    int failures = 0;
 
     printf("htlc_p2sh_address: BTC address starts with '3'... ");
-    {
-        struct htlc_params params = {0};
-        memset(params.secret_hash, 0xAA, 32);
-        memset(params.recipient_pkh, 0xBB, 20);
-        memset(params.refunder_pkh, 0xCC, 20);
-        params.locktime = 100000;
-
-        uint8_t script[128];
-        size_t slen = htlc_build_script(&params, script, sizeof(script));
-
-        char addr[64] = {0};
-        bool ok = htlc_p2sh_address(script, slen, SWAP_CHAIN_BTC,
-                                    addr, sizeof(addr));
-        if (ok && strlen(addr) > 0 && addr[0] == '3')
-            printf("OK (%s)\n", addr);
-        else { printf("FAIL (ok=%d addr=%s)\n", ok, addr); failures++; }
-    }
+    failures += htlc_check_built_p2sh(SWAP_CHAIN_BTC, true, '3', true);
 
     printf("htlc_p2sh_address: LTC address... ");
-    {
-        struct htlc_params params = {0};
-        memset(params.secret_hash, 0xAA, 32);
-        memset(params.recipient_pkh, 0xBB, 20);
-        memset(params.refunder_pkh, 0xCC, 20);
-        params.locktime = 100000;
-
-        uint8_t script[128];
-        size_t slen = htlc_build_script(&params, script, sizeof(script));
-
-        char addr[64] = {0};
-        bool ok = htlc_p2sh_address(script, slen, SWAP_CHAIN_LTC,
-                                    addr, sizeof(addr));
-        if (ok && strlen(addr) > 0)
-            printf("OK (%s)\n", addr);
-        else { printf("FAIL\n"); failures++; }
-    }
+    failures += htlc_check_built_p2sh(SWAP_CHAIN_LTC, false, 0, false);
 
     printf("htlc_p2sh_address: DOGE address... ");
-    {
-        struct htlc_params params = {0};
-        memset(params.secret_hash, 0xAA, 32);
-        memset(params.recipient_pkh, 0xBB, 20);
-        memset(params.refunder_pkh, 0xCC, 20);
-        params.locktime = 100000;
+    failures += htlc_check_built_p2sh(SWAP_CHAIN_DOGE, false, 0, false);
 
-        uint8_t script[128];
-        size_t slen = htlc_build_script(&params, script, sizeof(script));
+    return failures;
+}
 
-        char addr[64] = {0};
-        bool ok = htlc_p2sh_address(script, slen, SWAP_CHAIN_DOGE,
-                                    addr, sizeof(addr));
-        if (ok && strlen(addr) > 0)
-            printf("OK (%s)\n", addr);
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    /* ── Same contract → same P2SH across rebuilds ────────────── */
+static int htlc_test_p2sh_deterministic(void)
+{
+    int failures = 0;
 
     printf("htlc_p2sh_address: deterministic output... ");
     {
@@ -511,7 +568,12 @@ int test_htlc(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Full swap simulation: initiate → participate → redeem → extract ── */
+    return failures;
+}
+
+static int htlc_test_full_swap(void)
+{
+    int failures = 0;
 
     printf("htlc full swap: end-to-end secret exchange... ");
     {
@@ -571,6 +633,48 @@ int test_htlc(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_htlc(void)
+{
+    int failures = 0;
+
+    printf("\n=== HTLC / Atomic Swap Tests ===\n");
+
+    /* ── Chain parsing ────────────────────────────────────────── */
+    failures += htlc_test_parse_chains();
+
+    /* ── Chain params ─────────────────────────────────────────── */
+    failures += htlc_test_chain_params();
+
+    /* ── HTLC script builder ──────────────────────────────────── */
+    failures += htlc_test_build_script();
+
+    /* ── Secret generation + extraction ───────────────────────── */
+    failures += htlc_test_secrets();
+
+    /* ── Redeem/Refund ScriptSig builders ─────────────────────── */
+    failures += htlc_test_scriptsigs();
+
+    /* ── Swap ID computation ──────────────────────────────────── */
+    failures += htlc_test_swap_ids();
+
+    /* ── P2SH address generation ──────────────────────────────── */
+    failures += htlc_test_p2sh_zcl_and_invalid();
+
+    /* ── SQLite persistence ───────────────────────────────────── */
+    failures += htlc_test_db_roundtrip();
+
+    /* ── Cross-chain P2SH addresses ─────────────────────────────── */
+    failures += htlc_test_p2sh_other_chains();
+
+    /* ── Same contract → same P2SH across rebuilds ────────────── */
+    failures += htlc_test_p2sh_deterministic();
+
+    /* ── Full swap simulation: initiate → participate → redeem → extract ── */
+    failures += htlc_test_full_swap();
 
     printf("\n%d HTLC test(s) failed\n", failures);
     return failures;

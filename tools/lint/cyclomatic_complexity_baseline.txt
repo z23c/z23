@@ -1537,7 +1537,6 @@ tests/harness/src/test_header_sync_stall.c:test_header_sync_stall:44
 tests/harness/src/test_helpers.c:test_abs_path:19
 tests/harness/src/test_helpers.c:test_spawn_capture_env:23
 tests/harness/src/test_helpers.c:test_spawn_capture_kill:42
-tests/harness/src/test_htlc.c:test_htlc:95
 tests/harness/src/test_https_sni_select.c:handshake:19
 tests/harness/src/test_https_sni_select.c:http_get:17
 tests/harness/src/test_https_sni_select.c:test_https_sni_select:39
