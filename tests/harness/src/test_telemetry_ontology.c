@@ -27,7 +27,7 @@
     do { \
         printf("%s... ", (name)); \
         if (cond) { printf("OK\n"); } \
-        else { printf("FAIL (%s)\n", #cond); } \
+        else { printf("FAIL (%s)\n", #cond); failures++; } \
     } while (0)
 
 /* The healthy live node's peer_lifecycle summary, verbatim. */
@@ -111,6 +111,11 @@ static int check_table_shape(void)
              telemetry_subsystem_covered("network") &&
              telemetry_subsystem_covered("fast_sync") &&
              telemetry_subsystem_covered("sync_rate"));
+
+    TO_CHECK("[ontology] an uncovered subsystem is reported as uncovered, "
+             "never silently empty",
+             !telemetry_subsystem_covered("no_such_subsystem") &&
+             !telemetry_subsystem_covered(""));
 
     /* Every row states what it counts, and every JUDGED row also states what
      * an unhealthy value implies and where to look next. A row that carries a
