@@ -11,6 +11,29 @@ enum { MAX_LINE = 4096, OUT_CAP = 1 << 20 };
 static char out[OUT_CAP];
 static char line[MAX_LINE];
 
+static bool complete_line(size_t n) {
+  if (n != sizeof line - 1 || line[n - 1] == '\n') return true;
+  int extra = fgetc(stdin);
+  if (extra != EOF) {
+    fprintf(stderr, "zjson: line exceeds %d bytes\n", MAX_LINE - 1);
+    return false;
+  }
+  if (ferror(stdin)) {
+    fprintf(stderr, "zjson: read failed\n");
+    return false;
+  }
+  return true;
+}
+
+static int write_output(size_t len) {
+  if (fwrite(out, 1, len, stdout) != len || fputc('\n', stdout) == EOF ||
+      fflush(stdout) != 0 || ferror(stdout)) {
+    fprintf(stderr, "zjson: write failed\n");
+    return 1;
+  }
+  return 0;
+}
+
 int main(void) {
   zjson w;
   zjson_init(&w, out, sizeof out);
@@ -19,10 +42,7 @@ int main(void) {
   unsigned long members = 0;
   while (fgets(line, sizeof line, stdin)) {
     size_t n = strlen(line);
-    if (n == sizeof line - 1 && line[n - 1] != '\n' && !feof(stdin)) {
-      fprintf(stderr, "zjson: line exceeds %d bytes\n", MAX_LINE - 1);
-      return 1;
-    }
+    if (!complete_line(n)) return 1;
     if (n && line[n - 1] == '\n')
       line[--n] = '\0';
     char *tab = strchr(line, '\t');
@@ -35,6 +55,10 @@ int main(void) {
     members++;
   }
 
+  if (ferror(stdin)) {
+    fprintf(stderr, "zjson: read failed\n");
+    return 1;
+  }
   zjson_obj_close(&w);
   size_t len = 0;
   zjson_status st = zjson_finish(&w, &len);
@@ -42,10 +66,6 @@ int main(void) {
     fprintf(stderr, "zjson: %s\n", zjson_status_name(st));
     return 1;
   }
-  if (fwrite(out, 1, len, stdout) != len || fputc('\n', stdout) == EOF) {
-    fprintf(stderr, "zjson: write failed\n");
-    return 1;
-  }
   (void)members;
-  return 0;
+  return write_output(len);
 }

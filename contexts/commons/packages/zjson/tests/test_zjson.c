@@ -44,6 +44,36 @@
 #undef snprintf
 #undef localeconv
 
+/* Keep the writer namespace/witness intact; the CLI only uses its ordinary
+ * object/string paths. The injected read failure follows one real fgets. */
+static FILE *cli_source, *cli_sink;
+static bool cli_fail_read, cli_read_failed;
+static unsigned cli_reads;
+static char *cli_fgets(char *dst, int cap, FILE *source) {
+  if (source == cli_source && cli_fail_read && cli_reads++ > 0) {
+    cli_read_failed = true;
+    return NULL;
+  }
+  return fgets(dst, cap, source);
+}
+static int cli_ferror(FILE *stream) {
+  if (stream == cli_source && cli_read_failed) return 1;
+  return ferror(stream);
+}
+#undef stdin
+#undef stdout
+#define stdin cli_source
+#define stdout cli_sink
+#define fgets cli_fgets
+#define ferror cli_ferror
+#define main zjson_cli_main
+#include "../app/main.c"
+#undef main
+#undef fgets
+#undef ferror
+#undef stdout
+#undef stdin
+
 static int expect(zjson *w, const char *want);
 /* Controlled libc fixture: no locale installation or global locale change. */
 static const char *test_radix = ".";
@@ -557,11 +587,117 @@ static int test_stress(void) {
   return 0;
 }
 
+static bool cli_capture(FILE *source, FILE *output, int status,
+                         const char *want, size_t want_len, bool fail_read) {
+  cli_source = source; cli_sink = output;
+  cli_fail_read = fail_read; cli_read_failed = false; cli_reads = 0;
+  int rc = zjson_cli_main();
+  cli_fail_read = false;
+  if (rc != status || (fail_read && !cli_read_failed)) return false;
+  if (!want) return true;
+  rewind(output);
+  char got[8192];
+  size_t n = fread(got, 1, sizeof got, output);
+  return !ferror(output) && n == want_len && memcmp(got, want, n) == 0;
+}
+
+static int cli_close(FILE *source, FILE *output, int bad) {
+  if (source && fclose(source) != 0) bad = 1;
+  if (output && fclose(output) != 0) bad = 1;
+  return bad;
+}
+
+static int cli_data(const char *data, size_t len, int status,
+                     const char *want, size_t want_len, bool fail_read) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int bad = 1;
+  if (!source || !output) goto cleanup;
+  if (fwrite(data, 1, len, source) != len || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (!cli_capture(source, output, status, want, want_len, fail_read)) goto cleanup;
+  bad = 0;
+cleanup:
+  return cli_close(source, output, bad);
+}
+
+static int test_cli_lines(void) {
+  for (size_t length = 4094; length <= 4096; length++) {
+    for (unsigned newline = 0; newline < 2; newline++) {
+      char text[4096], want[4110];
+      memset(text, 'x', length);
+      text[0] = 'k'; text[1] = '\t';
+      if (newline) text[length - 1] = '\n';
+      size_t value_len = length - 2 - newline;
+      memcpy(want, "{\"k\":\"", 6);
+      memset(want + 6, 'x', value_len);
+      memcpy(want + 6 + value_len, "\"}\n", 3);
+      CHECK(cli_data(text, length, length <= 4095 ? 0 : 1,
+                     length <= 4095 ? want : "", length <= 4095 ? value_len + 9 : 0,
+                     false) == 0);
+    }
+  }
+  return 0;
+}
+
+static int test_cli_reads(void) {
+  CHECK(cli_data("k\tv\n", 4, 1, "", 0, true) == 0);
+  CHECK(cli_data("k\tv\nbad\n", 8, 1, "", 0, false) == 0);
+#if defined(_WIN32)
+  FILE *source = fopen("NUL", "w");
+#else
+  FILE *source = fopen("/dev/null", "w");
+#endif
+  FILE *output = tmpfile();
+  bool ok = source && output && cli_capture(source, output, 1, "", 0, false) &&
+      ferror(source);
+  return cli_close(source, output, ok ? 0 : 1);
+}
+
+static int cli_sink_case(bool empty, bool buffered) {
+  FILE *source = tmpfile();
+#if defined(__linux__)
+  FILE *output = fopen(buffered ? "/dev/full" : "/dev/null", buffered ? "w" : "r");
+#elif defined(_WIN32)
+  FILE *output = fopen("NUL", "r");
+#else
+  FILE *output = fopen("/dev/null", "r");
+#endif
+  int bad = 1;
+  char buffer[4096];
+  if (!source || !output) goto cleanup;
+  if (buffered && setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+  if (fputs(empty ? "" : "k\tv\n", source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (!cli_capture(source, output, 1, NULL, 0, false) || !ferror(output)) goto cleanup;
+  bad = 0;
+cleanup:
+  if (source && fclose(source) != 0) bad = 1;
+  if (output) (void)fclose(output);
+  return bad;
+}
+
+static int test_cli_output(void) {
+  CHECK(cli_data("", 0, 0, "{}\n", 3, false) == 0);
+  CHECK(cli_data("k\tv\n", 4, 0, "{\"k\":\"v\"}\n", 10, false) == 0);
+  CHECK(cli_sink_case(false, false) == 0);
+  CHECK(cli_sink_case(true, false) == 0);
+#if defined(__linux__)
+  CHECK(cli_sink_case(false, true) == 0);
+  CHECK(cli_sink_case(true, true) == 0);
+#endif
+  return 0;
+}
+
+static int test_cli(void) {
+  return test_cli_lines() + test_cli_reads() + test_cli_output();
+}
+
 int main(void) {
   struct {
     const char *name;
     int (*fn)(void);
   } tests[] = {
+      {"cli", test_cli},
       {"locale_formatter", test_locale_formatter},
       {"kat_basics", test_kat_basics},   {"escapes", test_escapes},
       {"numbers", test_numbers},         {"state_errors", test_state_errors},
