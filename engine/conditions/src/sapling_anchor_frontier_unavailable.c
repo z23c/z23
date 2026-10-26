@@ -352,6 +352,42 @@ static bool tier1b_datadir(char *out, size_t cap)
     return true;
 }
 
+/* Locate the co-located zclassicd chainstate under $HOME (the same path the
+ * legacy import uses).  False when HOME is unset, the path does not fit, or
+ * the directory is absent. */
+static bool tier1b_chainstate_path(char *cs_path, size_t cap)
+{
+    const char *home = getenv("HOME");
+    if (!home || !home[0])
+        return false;
+    int n = snprintf(cs_path, cap, "%s/.zclassic/chainstate", home);
+    if (n < 0 || (size_t)n >= cap)
+        return false;
+    struct stat st;
+    if (stat(cs_path, &st) != 0)
+        return false;
+    return true;
+}
+
+/* Safe-window floor + the exact frontier height the fold consumes next.
+ * We seed ONLY at H* = stall_height-1: that frontier (== the tree after
+ * block H*) is precisely what fold_sapling needs at stall_height.  Seeding
+ * any lower would skip the leaves added between there and H* and the fold
+ * would fail closed on the mismatch. */
+static bool tier1b_frontier_seed_height(sqlite3 *db, int64_t stall_height,
+                                        int64_t *seed_h)
+{
+    int64_t activation = 0;
+    bool found = false;
+    if (!anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING, &activation,
+                                     &found) || !found)
+        return false;
+    *seed_h = stall_height - 1;
+    if (*seed_h < activation || *seed_h >= stall_height)
+        return false;
+    return true;
+}
+
 /* Tier 1b: borrow the exact post-H* Sapling frontier from the co-located LIVE
  * zclassicd chainstate, verify it against our own PoW-committed header, and
  * seed it.  Returns true only if a header-verified frontier was written. */
@@ -363,29 +399,12 @@ static bool tier1b_borrow_verified_frontier(sqlite3 *db, struct main_state *ms,
 
     /* Borrow source: the co-located zclassicd chainstate (same path the legacy
      * import uses).  Absent => no borrow possible. */
-    const char *home = getenv("HOME");
-    if (!home || !home[0])
-        return false;
     char cs_path[1024];
-    int n = snprintf(cs_path, sizeof(cs_path), "%s/.zclassic/chainstate", home);
-    if (n < 0 || (size_t)n >= sizeof(cs_path))
-        return false;
-    struct stat st;
-    if (stat(cs_path, &st) != 0)
+    if (!tier1b_chainstate_path(cs_path, sizeof(cs_path)))
         return false;
 
-    /* Safe-window floor + the exact frontier height the fold consumes next.
-     * We seed ONLY at H* = stall_height-1: that frontier (== the tree after
-     * block H*) is precisely what fold_sapling needs at stall_height.  Seeding
-     * any lower would skip the leaves added between there and H* and the fold
-     * would fail closed on the mismatch. */
-    int64_t activation = 0;
-    bool found = false;
-    if (!anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING, &activation,
-                                     &found) || !found)
-        return false;
-    int64_t seed_h = stall_height - 1;
-    if (seed_h < activation || seed_h >= stall_height)
+    int64_t seed_h = 0;
+    if (!tier1b_frontier_seed_height(db, stall_height, &seed_h))
         return false;
 
     const struct block_index *bi = active_chain_at(&ms->chain_active,
@@ -405,7 +424,7 @@ static bool tier1b_borrow_verified_frontier(sqlite3 *db, struct main_state *ms,
     if (!tier1b_datadir(datadir, sizeof(datadir)))
         return false;  // raw-return-ok:no writable datadir for the borrow copy — falls through to tier2/3
     char import_path[1200];
-    n = snprintf(import_path, sizeof(import_path), "%s/anchor_borrow_tmp",
+    int n = snprintf(import_path, sizeof(import_path), "%s/anchor_borrow_tmp",
                  datadir);
     if (n < 0 || (size_t)n >= sizeof(import_path))
         return false;
