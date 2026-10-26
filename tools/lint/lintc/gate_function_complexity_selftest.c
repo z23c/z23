@@ -273,10 +273,39 @@ static int cyc_st_pp_splice(void)
         | cyc_st_two(crlf, "splice", 2, "splice_tail", 2);
 }
 
+/* A function-like macro defined in a .c file is measured like a function:
+ * control flow moved into a macro cannot dodge the cap. The standard
+ * do { ... } while (0) wrapper's while is no decision point; object-like
+ * macros are not functions. */
+static int cyc_st_macro(void)
+{
+    static const char over[] =
+        "#define BIG(x) do { \\\n"
+        "    if (x == 0) goto a; \\\n"
+        "    switch (x) { \\\n"
+        "    case 1: goto a; case 2: goto a; case 3: goto a; \\\n"
+        "    case 4: goto a; case 5: goto a; case 6: goto a; \\\n"
+        "    case 7: goto a; case 8: goto a; case 9: goto a; \\\n"
+        "    case 10: goto a; case 11: goto a; case 12: goto a; \\\n"
+        "    case 13: goto a; case 14: goto a; case 15: goto a; \\\n"
+        "    default: break; } \\\n"
+        "} while (0)\n"
+        "int user(int v) { BIG(v); return 0; }\n";
+    static const char wrap[] =
+        "#define LOGIT(x) do { printf(\"%d\", (x)); } while (0)\n";
+    static const char calm[] =
+        "#define PICK(a, b) ((a) > (b) ? (a) : (b))\n"
+        "#define FLAG 1 && 2 && 3 && 4 && 5 && 6 && 7 && 8 && 9 && 10 && 11 \\\n"
+        "    && 12 && 13 && 14 && 15 && 16 && 17\n";
+    return cyc_st_two(over, "BIG", 17, "user", 1)
+        | cyc_st_one(wrap, "LOGIT", 1)
+        | cyc_st_one(calm, "PICK", 2);
+}
+
 static int cyc_st_metric(void)
 {
     int bad = cyc_st_logic_ops() | cyc_st_pp_cond() | cyc_st_pp_hidden()
-        | cyc_st_pp_desync() | cyc_st_pp_splice();
+        | cyc_st_pp_desync() | cyc_st_pp_splice() | cyc_st_macro();
     /* exactly at the cap passes the cap: 14 decision points -> M=15 */
     bad |= cyc_st_one("int cap15(int x)\n{\n"
                       "    int r = 0;\n"

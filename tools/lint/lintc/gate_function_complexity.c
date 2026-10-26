@@ -43,6 +43,12 @@
  * RATCHET enforces the baseline; FAIL fails every over-cap function and
  * ignores the baseline.
  *
+ * Function-like macros: a `#define NAME(...)` in a .c file is measured as a
+ * function named NAME over its whole spliced body, with the same decision
+ * points and the same cap, so control flow moved into a macro cannot dodge
+ * the gate. The closing while of a `do { ... } while (0)` wrapper is no
+ * decision point. Object-like macros and headers are not measured.
+ *
  * The selftest lives in gate_function_complexity_selftest.c.
  */
 #ifndef _POSIX_C_SOURCE
@@ -110,6 +116,13 @@ struct cyc_lx {
     char head_name[CYC_NAME];
     char cand[CYC_NAME];
     int cand_ok, cand_line;
+    /* A function-like macro body being measured as if it were a function.
+     * mac_tail holds the last significant code characters, so a closing
+     * `while (0)` can be recognised; it is not part of the preprocessor
+     * snapshot because a macro never straddles a conditional. */
+    int mac, mac_m, mac_line, mac_do;
+    char mac_name[CYC_NAME];
+    char mac_tail[9];
 };
 
 static int cyc_is_ident(int c)
@@ -277,16 +290,27 @@ static int cyc_is_kw(const char *t, const char *kw)
     return strcmp(t, kw) == 0;
 }
 
+/* One decision point: inside a function body, or inside the body of a
+ * function-like macro being measured. */
+static void cyc_decide(struct cyc_lx *lx)
+{
+    if (lx->mac)
+        lx->mac_m++;
+    else if (lx->in_func && !cyc_off(lx))
+        lx->m++;
+}
+
 static void cyc_tok_end(struct cyc_lx *lx)
 {
     if (lx->toklen <= 0)
         return;
     if (!lx->tok_ovf) {
         lx->tok[lx->toklen] = '\0';
-        if (lx->in_func && !cyc_off(lx)
-            && (cyc_is_kw(lx->tok, "if") || cyc_is_kw(lx->tok, "for")
-                || cyc_is_kw(lx->tok, "while") || cyc_is_kw(lx->tok, "case")))
-            lx->m++;
+        if (cyc_is_kw(lx->tok, "if") || cyc_is_kw(lx->tok, "for")
+            || cyc_is_kw(lx->tok, "while") || cyc_is_kw(lx->tok, "case"))
+            cyc_decide(lx);
+        if (lx->mac && cyc_is_kw(lx->tok, "do") && lx->mac_m == 1)
+            lx->mac_do = 1;
         memcpy(lx->last_tok, lx->tok, (size_t)lx->toklen + 1);
         lx->last_sig = 'i';
     }
@@ -438,14 +462,12 @@ static void cyc_c_logic(struct cyc_lx *lx, const char *line, ssize_t n,
     (*i)++;
     if (*i + 1 < n && line[*i + 1] == '=')
         return;
-    if (lx->in_func && !cyc_off(lx))
-        lx->m++;
+    cyc_decide(lx);
 }
 
 static void cyc_c_quest(struct cyc_lx *lx)
 {
-    if (lx->in_func && !cyc_off(lx))
-        lx->m++;
+    cyc_decide(lx);
 }
 
 static void cyc_c_other(struct cyc_lx *lx)
@@ -484,12 +506,78 @@ static int cyc_punct(struct cyc_lx *lx, const struct cyc_emit *em,
     return 0;
 }
 
+/* Copy the identifier after `#define ` into name; returns 1 when a
+ * parenthesis touches it (a function-like macro). */
+static int cyc_mac_name(const char *line, ssize_t n, char *name)
+{
+    ssize_t i = 0;
+    while (i < n && line[i] != 'd')
+        i++;
+    i += 6;
+    while (i < n && (line[i] == ' ' || line[i] == '\t'))
+        i++;
+    size_t k = 0;
+    while (i < n && cyc_is_ident((unsigned char)line[i]) && k + 1 < CYC_NAME)
+        name[k++] = line[i++];
+    name[k] = '\0';
+    return k > 0 && i < n && line[i] == '(';
+}
+
+/* `#define NAME(` with the paren touching the name opens a function-like
+ * macro; an object-like macro or a #define of anything else does not. The
+ * logical line (backslash splices included) is measured as a function:
+ * decision points in the body count against the same cap, so control flow
+ * cannot be hidden by moving it into a file-local macro that expands inside
+ * the function. Returns 1 when a macro was opened. */
+static int cyc_mac_open(struct cyc_lx *lx, const char *line, ssize_t n,
+                        int lineno)
+{
+    char w[16];
+    if (lx->state != LX_CODE || lx->pp || !cyc_pp_word(line, n, w, sizeof w)
+        || strcmp(w, "define") != 0)
+        return 0;
+    if (!cyc_mac_name(line, n, lx->mac_name))
+        return 0;
+    lx->mac = 1;
+    lx->mac_m = 1;
+    lx->mac_do = 0;
+    lx->mac_line = lineno;
+    memset(lx->mac_tail, 0, sizeof lx->mac_tail);
+    return 1;
+}
+
+static void cyc_mac_tail(struct cyc_lx *lx, char c)
+{
+    size_t len = sizeof lx->mac_tail - 1;
+    if (!lx->mac || c == ';' || c == ' ' || c == '\t' || c == '\n'
+        || c == '\r' || c == '\\')
+        return;
+    memmove(lx->mac_tail, lx->mac_tail + 1, len - 1);
+    lx->mac_tail[len - 1] = c;
+}
+
+/* The directive ended: report the macro like a function. The closing
+ * `while (0)` of the standard `do { ... } while (0)` wrapper is no
+ * decision point. */
+static int cyc_mac_close(struct cyc_lx *lx, const struct cyc_emit *em)
+{
+    if (!lx->mac || lx->pp)
+        return 0;
+    cyc_tok_end(lx);
+    lx->mac = 0;
+    if (lx->mac_do && strcmp(lx->mac_tail, "while(0)") == 0)
+        lx->mac_m--;
+    return em->on_func(em->path, lx->mac_name, lx->mac_line, lx->mac_m,
+                       em->ctx);
+}
+
 /* Feed one code-state character. Returns 0 or the callback/die rc. */
 static int cyc_code_char(struct cyc_lx *lx, const struct cyc_emit *em,
                          const struct cyc_span *s, char c)
 {
     if (lx->sol && c == '#')
         lx->pp = 1;
+    cyc_mac_tail(lx, c);
     if (cyc_is_ident((unsigned char)c)) {
         cyc_ident_char(lx, c);
         return 0;
@@ -577,6 +665,7 @@ static int cyc_feed_line(struct cyc_lx *lx, const struct cyc_emit *em,
                          const char *line, ssize_t n, int lineno)
 {
     int pprc = cyc_pp_cond(lx, em->path, line, n, lineno);
+    (void)cyc_mac_open(lx, line, n, lineno);
     if (pprc)
         return pprc;
     for (ssize_t i = 0; i < n; i++) {
@@ -601,7 +690,7 @@ static int cyc_feed_line(struct cyc_lx *lx, const struct cyc_emit *em,
             return rc;
     }
     cyc_eol(lx, line, n);
-    return 0;
+    return cyc_mac_close(lx, em);
 }
 
 int cyc_scan_text(const char *text, const char *path,
