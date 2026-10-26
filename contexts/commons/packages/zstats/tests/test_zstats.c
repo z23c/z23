@@ -1,5 +1,8 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
  * Exercise streaming statistics, count refusal and the pinned merge contract. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "zstats/zstats.h"
 #include <float.h>
 #include <math.h>
@@ -8,6 +11,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #define CHECK(cond) do { \
     if (!(cond)) { \
@@ -609,6 +618,8 @@ static bool test_add_contract(const char *selected)
     return found;
 }
 
+static void test_cli(void);
+
 int main(void)
 {
     const char *add_row = getenv("ZSTATS_ADD_ROW");
@@ -638,6 +649,7 @@ int main(void)
         else return 2;
         return 0;
     }
+    test_cli();
     CHECK(test_add_contract(NULL));
     for (unsigned row = 1; row <= 27; row++) test_merge_contract(row);
     test_nonfinite_merge(NULL);
@@ -651,4 +663,367 @@ int main(void)
     test_fuzz_vs_reference();
     puts("test_zstats: all groups passed (empty known repeated merge fuzz)");
     return 0;
+}
+
+static FILE *cli_source, *cli_sink, *cli_errors, *cli_failure_sink;
+static size_t cli_writes, cli_fail_at, cli_flushes;
+static bool cli_close_after_value, cli_close_before_scan, cli_descriptor_closed, cli_source_closed;
+static size_t cli_scan_values;
+static size_t cli_read_bytes, cli_close_after_bytes;
+static size_t cli_realloc_calls, cli_fail_allocation, cli_live_allocations;
+static void *cli_token_pointer;
+static FILE *real_stdin(void) { return stdin; }
+static FILE *real_stdout(void) { return stdout; }
+static FILE *real_stderr(void) { return stderr; }
+static int cli_printf(const char *format, ...)
+{
+    if (++cli_writes >= cli_fail_at && cli_fail_at) cli_sink = cli_failure_sink;
+    va_list args;
+    va_start(args, format);
+    int result = vfprintf(cli_sink, format, args);
+    va_end(args);
+    return result;
+}
+static void cli_close_descriptor(void)
+{
+#ifdef _WIN32
+    CHECK(_close(_fileno(cli_source)) == 0);
+#else
+    CHECK(close(fileno(cli_source)) == 0);
+#endif
+    cli_descriptor_closed = true;
+}
+static int cli_getc(FILE *stream)
+{
+    int byte = fgetc(stream);
+    if (byte != EOF) {
+        cli_read_bytes++;
+        bool after_bytes = cli_close_after_bytes && cli_read_bytes == cli_close_after_bytes;
+        if (!cli_descriptor_closed && (after_bytes || (cli_close_after_value && byte == ' ')))
+            cli_close_descriptor();
+    }
+    return byte;
+}
+static void cli_add(zstats *s, double value)
+{
+    cli_scan_values++;
+    zstats_add(s, value);
+}
+static void *cli_realloc(void *pointer, size_t size)
+{
+    if (++cli_realloc_calls == cli_fail_allocation) return NULL;
+    bool initial = pointer == NULL;
+    void *grown = realloc(pointer, size); // raw-alloc-ok:token-allocation-failure-fixture
+    if (grown) {
+        if (initial) cli_live_allocations++;
+        cli_token_pointer = grown;
+    }
+    return grown;
+}
+static void cli_free(void *pointer)
+{
+    if (pointer) {
+        CHECK(cli_live_allocations == 1 && pointer == cli_token_pointer);
+        cli_live_allocations--;
+        cli_token_pointer = NULL;
+    }
+    free(pointer);
+}
+[[maybe_unused]] static int cli_flush(FILE *stream)
+{
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin cli_source
+#define stdout cli_sink
+#define stderr cli_errors
+#define printf cli_printf
+#define fgetc cli_getc
+#define zstats_add cli_add
+#define realloc cli_realloc
+#define free cli_free
+#define fflush cli_flush
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef fflush
+#undef free
+#undef realloc
+#undef zstats_add
+#undef fgetc
+#undef printf
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin real_stdin()
+#define stdout real_stdout()
+#define stderr real_stderr()
+
+static FILE *cli_input_bytes(const void *text, size_t n)
+{
+    FILE *source = tmpfile();
+    CHECK(source != NULL);
+    CHECK(setvbuf(source, NULL, _IONBF, 0) == 0);
+    CHECK(fwrite(text, 1, n, source) == n && fflush(source) == 0);
+    rewind(source);
+    return source;
+}
+static FILE *cli_input(const char *text)
+{
+    return cli_input_bytes(text, strlen(text));
+}
+static int cli_invoke(FILE *source, FILE *sink, FILE *errors, int argc, char **args)
+{
+    cli_source = source;
+    cli_sink = sink;
+    cli_errors = errors;
+    cli_writes = cli_flushes = cli_scan_values = cli_read_bytes = cli_realloc_calls = 0;
+    CHECK(cli_live_allocations == 0);
+    cli_descriptor_closed = cli_source_closed = false;
+    if (cli_close_before_scan) cli_close_descriptor();
+    errno = ERANGE;
+    int rc = embedded_cli_main(argc, args);
+    CHECK(cli_live_allocations == 0);
+    /* No new descriptor may be allocated while this FILE retains its now
+     * closed descriptor number. Retire it immediately after the invocation. */
+    if (cli_descriptor_closed) {
+        CHECK(ferror(source));
+        CHECK(fclose(source) == EOF);
+        cli_source_closed = true;
+    }
+    cli_source = stdin;
+    cli_sink = stdout;
+    cli_errors = stderr;
+    return rc;
+}
+static void cli_bytes(FILE *stream, const char *want)
+{
+    char bytes[512];
+    rewind(stream);
+    size_t n = fread(bytes, 1, sizeof bytes, stream);
+    CHECK(!ferror(stream) && n == strlen(want) && !memcmp(bytes, want, n));
+}
+static void cli_message(FILE *stream, const char *want)
+{
+    char bytes[256];
+    rewind(stream);
+    size_t n = fread(bytes, 1, sizeof bytes - 1, stream);
+    bytes[n] = 0;
+    CHECK(!ferror(stream) && strstr(bytes, want) != NULL);
+}
+static void cli_normal(void)
+{
+    const char *want = "n      2\nmin    1\nmax    2\nmean   1.5\nstddev 0.5\ntotal  3\n";
+    FILE *source = cli_input("1 2"), *sink = tmpfile(), *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    char *stdin_args[] = {"zstats", NULL};
+    CHECK(cli_invoke(source, sink, errors, 1, stdin_args) == 0);
+    CHECK(cli_writes == 6 && cli_flushes == 1);
+    cli_bytes(sink, want);
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+    source = cli_input(""); sink = tmpfile(); errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    char *args[] = {"zstats", "1", "2", NULL};
+    CHECK(cli_invoke(source, sink, errors, 3, args) == 0);
+    cli_bytes(sink, want);
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_empty_and_bad(void)
+{
+    FILE *source = cli_input(""), *sink = tmpfile(), *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    char *args[] = {"zstats", NULL};
+    CHECK(cli_invoke(source, sink, errors, 1, args) == 0);
+    cli_bytes(sink, "n      0\nmin    0\nmax    0\nmean   0\nstddev 0\ntotal  0\n");
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+    source = cli_input(""); sink = tmpfile(); errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    char *bad[] = {"zstats", "garbage", NULL};
+    CHECK(cli_invoke(source, sink, errors, 2, bad) == 2);
+    CHECK(cli_writes == 0 && cli_flushes == 0 && ftell(sink) == 0);
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_nonfinite(void)
+{
+    for (int from_stdin = 0; from_stdin < 2; from_stdin++) {
+        FILE *source = cli_input("nan inf -inf -0");
+        FILE *sink = tmpfile(), *errors = tmpfile();
+        CHECK(sink != NULL && errors != NULL);
+        char *args[] = {"zstats", "nan", "inf", "-inf", "-0", NULL};
+        CHECK(cli_invoke(source, sink, errors, from_stdin ? 1 : 5, args) == 0);
+        CHECK(cli_writes == 6 && cli_flushes == 1);
+        char first[64];
+        rewind(sink);
+        CHECK(fgets(first, sizeof first, sink) != NULL && strcmp(first, "n      4\n") == 0);
+        CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+    }
+}
+static void cli_read_failure(bool prefix)
+{
+    FILE *source = cli_input(prefix ? "1 " : "");
+    FILE *sink = tmpfile(), *errors = tmpfile();
+    CHECK(source != NULL && sink != NULL && errors != NULL);
+    cli_close_after_value = prefix;
+    cli_close_before_scan = !prefix;
+    char *args[] = {"zstats", NULL};
+    int rc = cli_invoke(source, sink, errors, 1, args);
+    CHECK(rc == 1);
+    cli_close_after_value = false;
+    cli_close_before_scan = false;
+    CHECK(cli_writes == 0 && cli_flushes == 0 && ftell(sink) == 0);
+    CHECK(cli_source_closed && cli_scan_values == (prefix ? 1u : 0u));
+    cli_message(errors, "read error");
+    CHECK(fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_write_failure(size_t target, bool buffered)
+{
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *source = cli_input(""), *sink = tmpfile(), *errors = tmpfile();
+    FILE *bad = fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r");
+    CHECK(sink != NULL && errors != NULL && bad != NULL);
+    char buffer[4096];
+    if (buffered) { CHECK(setvbuf(bad, buffer, _IOFBF, sizeof buffer) == 0); }
+    cli_failure_sink = bad;
+    cli_fail_at = target;
+    char *args[] = {"zstats", "1", "2", NULL};
+    CHECK(cli_invoke(source, sink, errors, 3, args) == 1 && ferror(bad));
+    cli_fail_at = 0;
+    cli_failure_sink = NULL;
+    CHECK(cli_writes == (buffered ? 6u : target));
+    cli_message(errors, "write error");
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+    (void)fclose(bad);
+}
+static void test_cli_parsing(void);
+
+static void test_cli(void)
+{
+    test_cli_parsing();
+    cli_read_failure(false);
+    cli_read_failure(true);
+    cli_normal();
+    cli_empty_and_bad();
+    cli_nonfinite();
+    for (size_t target = 1; target <= 6; target++) {
+        cli_write_failure(target, false);
+#ifdef __linux__
+        cli_write_failure(target, true);
+#endif
+    }
+}
+
+static void cli_bad_input(const void *bytes, size_t n)
+{
+    FILE *source = cli_input_bytes(bytes, n), *sink = tmpfile(), *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    char *args[] = {"zstats", NULL};
+    CHECK(cli_invoke(source, sink, errors, 1, args) == 2);
+    CHECK(cli_writes == 0 && cli_flushes == 0 && ftell(sink) == 0);
+    cli_message(errors, "bad number");
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_bad_arguments(void)
+{
+    const char *bad[] = {"", " \t", "1junk", "1 ", "1e9999", "1e-9999"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        FILE *source = cli_input(""), *sink = tmpfile(), *errors = tmpfile();
+        CHECK(sink != NULL && errors != NULL);
+        char *args[] = {"zstats", "1", (char *)bad[i], NULL};
+        CHECK(cli_invoke(source, sink, errors, 3, args) == 2);
+        CHECK(cli_writes == 0 && cli_flushes == 0 && ftell(sink) == 0);
+        CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+    }
+}
+static void cli_complete_tokens(void)
+{
+    const char *bad[] = {"1 bad 2", "1-2", "3+4", "+", "1e", "1 2junk", "1 1e9999", "1 1e-9999"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) cli_bad_input(bad[i], strlen(bad[i]));
+    const char nul[] = {'1', ' ', '2', 0, '3'};
+    cli_bad_input(nul, sizeof nul);
+}
+static void cli_valid_numbers(void)
+{
+    for (int from_stdin = 0; from_stdin < 2; from_stdin++) {
+        FILE *source = cli_input(" \t0x1p0\v+2\f\r\n"), *sink = tmpfile(), *errors = tmpfile();
+        CHECK(sink != NULL && errors != NULL);
+        char *args[] = {"zstats", " \t0x1p0", "+2", NULL};
+        CHECK(cli_invoke(source, sink, errors, from_stdin ? 1 : 3, args) == 0);
+        cli_bytes(sink, "n      2\nmin    1\nmax    2\nmean   1.5\nstddev 0.5\ntotal  3\n");
+        CHECK(cli_realloc_calls == (from_stdin ? 1u : 0u));
+        CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+    }
+    FILE *source = cli_input(" \t\r\n\v\f"), *sink = tmpfile(), *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    char *args[] = {"zstats", NULL};
+    CHECK(cli_invoke(source, sink, errors, 1, args) == 0 && cli_realloc_calls == 0);
+    cli_bytes(sink, "n      0\nmin    0\nmax    0\nmean   0\nstddev 0\ntotal  0\n");
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_long_token(void)
+{
+    static char text[65538];
+    memset(text, '0', sizeof text - 2);
+    text[sizeof text - 2] = '1';
+    text[sizeof text - 1] = 0;
+    FILE *source = cli_input(text), *sink = tmpfile(), *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    char *args[] = {"zstats", NULL};
+    CHECK(cli_invoke(source, sink, errors, 1, args) == 0);
+    CHECK(cli_realloc_calls > 1);
+    cli_bytes(sink, "n      1\nmin    1\nmax    1\nmean   1\nstddev 0\ntotal  1\n");
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_token_allocation_failures(void)
+{
+    char text[516];
+    memcpy(text, "1 ", 2);
+    memset(text + 2, '0', 512);
+    text[514] = '2'; text[515] = 0;
+    for (size_t fail = 1; fail <= 2; fail++) {
+        FILE *source = cli_input(text), *sink = tmpfile(), *errors = tmpfile();
+        CHECK(sink != NULL && errors != NULL);
+        char *args[] = {"zstats", NULL};
+        cli_fail_allocation = fail;
+        CHECK(cli_invoke(source, sink, errors, 1, args) == 1);
+        cli_fail_allocation = 0;
+        CHECK(cli_realloc_calls == fail && cli_scan_values == (fail == 1 ? 0u : 1u));
+        CHECK(cli_writes == 0 && cli_flushes == 0 && ftell(sink) == 0);
+        cli_message(errors, "cannot allocate input token");
+        CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+    }
+    struct input_token impossible = {.len = SIZE_MAX};
+    cli_realloc_calls = 0;
+    CHECK(!token_append(&impossible, '1'));
+    CHECK(cli_realloc_calls == 0 && impossible.data == NULL && impossible.len == SIZE_MAX);
+}
+static void cli_partial_token_error(const char *text, size_t bytes, size_t values)
+{
+    FILE *source = cli_input(text), *sink = tmpfile(), *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    char *args[] = {"zstats", NULL};
+    cli_close_after_bytes = bytes;
+    CHECK(cli_invoke(source, sink, errors, 1, args) == 1);
+    cli_close_after_bytes = 0;
+    CHECK(cli_source_closed && cli_scan_values == values);
+    CHECK(cli_writes == 0 && cli_flushes == 0 && ftell(sink) == 0);
+    cli_message(errors, "read error");
+    CHECK(fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void test_cli_parsing(void)
+{
+    cli_bad_arguments();
+    cli_complete_tokens();
+    cli_valid_numbers();
+    cli_long_token();
+    cli_token_allocation_failures();
+    cli_partial_token_error("1 2", 3, 1);
+    cli_partial_token_error("+", 1, 0);
+    cli_partial_token_error("1", 1, 0);
 }

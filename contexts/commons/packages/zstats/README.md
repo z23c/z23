@@ -41,6 +41,18 @@ zstats 2 4 4 4 5 5 7 9
 seq 1 100 | zstats
 ```
 
+Arguments must each contain one complete number; leading whitespace is
+accepted. Stdin contains whitespace-separated complete numbers. Decimal and
+hexadecimal floating-point numbers, signed zero, and literal `nan`/`inf` are
+accepted under the library's numerical policies. Concatenations such as
+`1-2` and `3+4`, embedded NUL bytes, trailing junk, and numeric overflow or
+underflow are errors. Stdin tokens have no fixed length limit; one reusable
+buffer grows with checked allocation.
+
+Exit 0 prints the six-line summary, including for empty input. Invalid
+numbers exit 2 without a summary. Read, allocation, or output failures exit
+1; read and allocation failures also produce no summary.
+
 ## License
 
 Apache-2.0. See LICENSE.
