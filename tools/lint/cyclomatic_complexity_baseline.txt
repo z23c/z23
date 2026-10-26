@@ -68,8 +68,6 @@ contexts/commons/modules/vcs/src/package_release.c:release_semver_valid_n:21
 contexts/commons/modules/vcs/src/package_release.c:vcs_package_release_error_string:24
 contexts/commons/modules/vcs/src/package_release.c:vcs_package_release_parse:38
 contexts/commons/modules/vcs/src/package_release.c:vcs_package_release_validate:16
-contexts/commons/modules/vcs/src/package_reproduce.c:vcs_package_reproduce_compare:21
-contexts/commons/modules/vcs/src/package_reproduce.c:vcs_package_reproduce_scan:36
 contexts/commons/modules/vcs/src/package_reward.c:reward_load_plan_dir:16
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_commit:60
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_build:18
