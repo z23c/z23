@@ -22,51 +22,76 @@
 #include <string.h>
 #include <windows.h>
 
-int main(void)
+static const char payload[] = "stable-copy-payload";
+
+/* Every path this program creates under the private data directory. */
+struct copy_paths {
+    char source[1024];
+    char target[1024];
+    char directory_target[1024];
+    char refused_tree[1024];
+    char block_marker[1024];
+};
+
+static bool create_private_datadir(char *datadir, size_t datadir_size)
 {
-    char temp[MAX_PATH], datadir[MAX_PATH];
+    char temp[MAX_PATH];
     DWORD n = GetTempPathA(sizeof(temp), temp);
-    if (!n || n >= sizeof(temp) ||
-        snprintf(datadir, sizeof(datadir), "%sz23-file-ops-copy-%lu", temp,
-                 (unsigned long)GetCurrentProcessId()) <= 0)
-        return 2;
-    if (!platform_private_directory_ensure(datadir))
-        return 2;
-    char source[1024], target[1024], directory_target[1024];
-    char refused_tree[1024], block_marker[1024];
-    if (snprintf(source, sizeof(source), "%s/source.bin", datadir) <= 0 ||
-        snprintf(target, sizeof(target), "%s/target.bin", datadir) <= 0 ||
-        snprintf(directory_target, sizeof(directory_target), "%s/directory",
-                 datadir) <= 0 ||
-        snprintf(refused_tree, sizeof(refused_tree), "%s/refused-tree",
-                 datadir) <= 0 ||
-        snprintf(block_marker, sizeof(block_marker), "%s/blk00000.dat",
-                 datadir) <= 0)
-        return 3;
-    struct platform_private_file file;
-    platform_private_file_init(&file);
-    static const char payload[] = "stable-copy-payload";
-    if (!platform_private_file_create(source, &file) ||
-        !platform_private_file_write_at(&file, payload, sizeof(payload), 0) ||
-        !platform_private_file_flush(&file))
-        return 4;
-    platform_private_file_close(&file);
-    if (!platform_private_directory_ensure(directory_target) ||
-        file_copy(source, directory_target) || !file_copy(source, target))
-        return 5;
-    if (dir_copy(datadir, refused_tree) ||
-        !platform_private_path_absent(refused_tree) ||
-        !file_copy(source, block_marker))
-        return 6;
-    block_files_clean(datadir);
-    dir_remove_tree(datadir);
+    return n != 0 && n < sizeof(temp) &&
+           snprintf(datadir, datadir_size, "%sz23-file-ops-copy-%lu", temp,
+                    (unsigned long)GetCurrentProcessId()) > 0 &&
+           platform_private_directory_ensure(datadir);
+}
+
+static bool build_copy_paths(const char *datadir, struct copy_paths *paths)
+{
+    return snprintf(paths->source, sizeof(paths->source), "%s/source.bin",
+                    datadir) > 0 &&
+           snprintf(paths->target, sizeof(paths->target), "%s/target.bin",
+                    datadir) > 0 &&
+           snprintf(paths->directory_target, sizeof(paths->directory_target),
+                    "%s/directory", datadir) > 0 &&
+           snprintf(paths->refused_tree, sizeof(paths->refused_tree),
+                    "%s/refused-tree", datadir) > 0 &&
+           snprintf(paths->block_marker, sizeof(paths->block_marker),
+                    "%s/blk00000.dat", datadir) > 0;
+}
+
+static bool payload_file_written(const char *source,
+                                 struct platform_private_file *file)
+{
+    return platform_private_file_create(source, file) &&
+           platform_private_file_write_at(file, payload, sizeof(payload), 0) &&
+           platform_private_file_flush(file);
+}
+
+static bool file_copy_refuses_directory_destination(
+    const struct copy_paths *paths)
+{
+    return platform_private_directory_ensure(paths->directory_target) &&
+           !file_copy(paths->source, paths->directory_target) &&
+           file_copy(paths->source, paths->target);
+}
+
+static bool dir_copy_refuses_without_creating_tree(const char *datadir,
+    const struct copy_paths *paths)
+{
+    return !dir_copy(datadir, paths->refused_tree) &&
+           platform_private_path_absent(paths->refused_tree) &&
+           file_copy(paths->source, paths->block_marker);
+}
+
+static bool block_marker_survived_cleanup(const char *block_marker)
+{
     struct platform_positioned_file sentinel;
     platform_positioned_file_init(&sentinel);
-    bool sentinel_present =
-        platform_positioned_file_open(&sentinel, block_marker);
+    bool present = platform_positioned_file_open(&sentinel, block_marker);
     platform_positioned_file_close(&sentinel);
-    if (!sentinel_present)
-        return 7;
+    return present;
+}
+
+static bool copied_target_is_private_and_identical(const char *target)
+{
     struct platform_positioned_file copied;
     char actual[sizeof(payload)];
     platform_positioned_file_init(&copied);
@@ -76,15 +101,39 @@ int main(void)
                                              0) == (int64_t)sizeof(actual) &&
               memcmp(actual, payload, sizeof(payload)) == 0;
     platform_positioned_file_close(&copied);
-    if (!ok)
+    return ok;
+}
+
+int main(void)
+{
+    char datadir[MAX_PATH];
+    if (!create_private_datadir(datadir, sizeof(datadir)))
+        return 2;
+    struct copy_paths paths;
+    if (!build_copy_paths(datadir, &paths))
+        return 3;
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!payload_file_written(paths.source, &file))
+        return 4;
+    platform_private_file_close(&file);
+    if (!file_copy_refuses_directory_destination(&paths))
+        return 5;
+    if (!dir_copy_refuses_without_creating_tree(datadir, &paths))
+        return 6;
+    block_files_clean(datadir);
+    dir_remove_tree(datadir);
+    if (!block_marker_survived_cleanup(paths.block_marker))
+        return 7;
+    if (!copied_target_is_private_and_identical(paths.target))
         return 8;
 
     /* Best-effort cleanup: every assertion above is already decided, and the
      * Windows tree-removal path is the refusal this program just proved. */
-    (void)DeleteFileA(source);
-    (void)DeleteFileA(target);
-    (void)DeleteFileA(block_marker);
-    (void)RemoveDirectoryA(directory_target);
+    (void)DeleteFileA(paths.source);
+    (void)DeleteFileA(paths.target);
+    (void)DeleteFileA(paths.block_marker);
+    (void)RemoveDirectoryA(paths.directory_target);
     (void)RemoveDirectoryA(datadir);
     puts("file_ops_copy_windows_acceptance: PASS");
     return 0;

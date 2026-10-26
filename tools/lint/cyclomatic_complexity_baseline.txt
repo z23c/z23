@@ -1580,7 +1580,6 @@ tests/harness/spec/spec_user_journeys.c:spec_user_journeys:27
 tests/harness/src/build_release_regression_fixture.c:test_build_release_regression_fixture:43
 tests/harness/src/codeindex_freshness_windows_acceptance.c:main:22
 tests/harness/src/codeindex_freshness_windows_acceptance.c:mutation_acceptance:32
-tests/harness/src/file_ops_copy_windows_acceptance.c:main:24
 tests/harness/src/groth16_spend_parity.c:groth16_spend_parity_oracle:75
 tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
 tests/harness/src/lint_gate_deploy_contracts.c:t_canonical_deploy_proof_binding_contract:26
