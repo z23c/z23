@@ -256,6 +256,66 @@ static const char *record_state_name(
   return "pending";
 }
 
+static void record_classify_discovery(
+    const struct vcs_zcode_dht_record_discovery_result *discovery,
+    bool conflicted[VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS],
+    bool superseded[VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS],
+    uint32_t *conflict_count, uint32_t *superseded_count,
+    uint32_t *usable_count) {
+  for (uint32_t i = 0; i < discovery->record_count; i++) {
+    conflicted[i] = vcs_zcode_dht_record_conflicted_at(
+        discovery->records, discovery->record_count, i);
+    superseded[i] = !conflicted[i] && vcs_zcode_dht_record_superseded_at(
+        discovery->records, discovery->record_count, i);
+    *conflict_count += conflicted[i];
+    *superseded_count += superseded[i];
+    *usable_count += !conflicted[i] && !superseded[i];
+  }
+}
+
+static bool record_evidence_wire_duplicate(
+    enum vcs_zcode_dht_record_kind kind,
+    const uint8_t provider_node_id[32], const uint8_t owner_group[32],
+    const uint8_t evidence_providers[RECORD_PUBLIC_EVIDENCE_WIRES_MAX][32],
+    const uint8_t evidence_groups[RECORD_PUBLIC_EVIDENCE_WIRES_MAX][32],
+    uint32_t evidence_wire_count) {
+  bool duplicate = false;
+  for (uint32_t j = 0; j < evidence_wire_count && !duplicate; j++)
+    duplicate = memcmp(provider_node_id, evidence_providers[j], 32) == 0 ||
+                ((kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
+                  kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK) &&
+                 memcmp(owner_group, evidence_groups[j], 32) == 0);
+  return duplicate;
+}
+
+static bool record_claim_evidence_wire(
+    const struct vcs_zcode_dht_record_discovery_result *discovery,
+    uint32_t index, bool include_evidence_wires, bool conflicted,
+    bool superseded,
+    uint8_t evidence_providers[RECORD_PUBLIC_EVIDENCE_WIRES_MAX][32],
+    uint8_t evidence_groups[RECORD_PUBLIC_EVIDENCE_WIRES_MAX][32],
+    uint32_t *evidence_wire_count) {
+  if (include_evidence_wires && !conflicted && !superseded &&
+      (discovery->records[index].kind == VCS_ZCODE_DHT_RECORD_PROVIDER ||
+       discovery->records[index].kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
+       discovery->records[index].kind ==
+           VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK) &&
+      *evidence_wire_count < RECORD_PUBLIC_EVIDENCE_WIRES_MAX &&
+      !record_evidence_wire_duplicate(
+          discovery->records[index].kind,
+          discovery->records[index].provider_node_id,
+          discovery->records[index].owner_group, evidence_providers,
+          evidence_groups, *evidence_wire_count)) {
+    memcpy(evidence_providers[*evidence_wire_count],
+           discovery->records[index].provider_node_id, 32);
+    memcpy(evidence_groups[*evidence_wire_count],
+           discovery->records[index].owner_group, 32);
+    (*evidence_wire_count)++;
+    return true;
+  }
+  return false;
+}
+
 static void record_result_json(
     struct json_value *result,
     const struct vcs_zcode_dht_record_discovery_result *discovery,
@@ -290,15 +350,9 @@ static void record_result_json(
   bool conflicted[VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS] = {false};
   bool superseded[VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS] = {false};
   uint32_t conflict_count = 0, superseded_count = 0, usable_count = 0;
-  for (uint32_t i = 0; i < discovery->record_count; i++) {
-    conflicted[i] = vcs_zcode_dht_record_conflicted_at(
-        discovery->records, discovery->record_count, i);
-    superseded[i] = !conflicted[i] && vcs_zcode_dht_record_superseded_at(
-        discovery->records, discovery->record_count, i);
-    conflict_count += conflicted[i];
-    superseded_count += superseded[i];
-    usable_count += !conflicted[i] && !superseded[i];
-  }
+  record_classify_discovery(discovery, conflicted, superseded,
+                            &conflict_count, &superseded_count,
+                            &usable_count);
   json_push_kv_int(result, "usable_count", usable_count);
   json_push_kv_int(result, "superseded_count", superseded_count);
   uint8_t evidence_providers[RECORD_PUBLIC_EVIDENCE_WIRES_MAX][32];
@@ -308,34 +362,9 @@ static void record_result_json(
   json_init(&rows);
   json_set_array(&rows);
   for (uint32_t i = 0; i < discovery->record_count; i++) {
-    bool include_wire = false;
-    if (include_evidence_wires && !conflicted[i] && !superseded[i] &&
-        (discovery->records[i].kind == VCS_ZCODE_DHT_RECORD_PROVIDER ||
-         discovery->records[i].kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
-         discovery->records[i].kind ==
-             VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK) &&
-        evidence_wire_count < RECORD_PUBLIC_EVIDENCE_WIRES_MAX) {
-      include_wire = true;
-      for (uint32_t j = 0; j < evidence_wire_count; j++)
-        if (memcmp(discovery->records[i].provider_node_id,
-                   evidence_providers[j], 32) == 0 ||
-            ((discovery->records[i].kind ==
-                  VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
-              discovery->records[i].kind ==
-                  VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK) &&
-             memcmp(discovery->records[i].owner_group,
-                    evidence_groups[j], 32) == 0)) {
-          include_wire = false;
-          break;
-        }
-      if (include_wire) {
-        memcpy(evidence_providers[evidence_wire_count],
-               discovery->records[i].provider_node_id, 32);
-        memcpy(evidence_groups[evidence_wire_count],
-               discovery->records[i].owner_group, 32);
-        evidence_wire_count++;
-      }
-    }
+    bool include_wire = record_claim_evidence_wire(
+        discovery, i, include_evidence_wires, conflicted[i], superseded[i],
+        evidence_providers, evidence_groups, &evidence_wire_count);
     struct json_value row;
     json_init(&row);
     record_row_json(
