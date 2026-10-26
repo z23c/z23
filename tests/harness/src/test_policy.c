@@ -5,7 +5,7 @@
 #include "policy/fees.h"
 #include <math.h>
 
-int test_policy(void)
+static int check_tx_confirm_stats_init(void)
 {
     int failures = 0;
 
@@ -21,6 +21,13 @@ int test_policy(void)
         ok = ok && (s.decay == DEFAULT_DECAY);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_tx_confirm_stats_setup(void)
+{
+    int failures = 0;
 
     /* ── tx_confirm_stats_setup ────────────────────────────── */
 
@@ -43,6 +50,13 @@ int test_policy(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         tx_confirm_stats_free(&s);
     }
+
+    return failures;
+}
+
+static int check_tx_confirm_stats_find_bucket(void)
+{
+    int failures = 0;
 
     /* ── tx_confirm_stats_find_bucket ──────────────────────── */
 
@@ -94,6 +108,13 @@ int test_policy(void)
         tx_confirm_stats_free(&s);
     }
 
+    return failures;
+}
+
+static int check_tx_confirm_stats_max_confirms_and_new_tx(void)
+{
+    int failures = 0;
+
     /* ── tx_confirm_stats_max_confirms ─────────────────────── */
 
     printf("tx_confirm_stats_max_confirms... ");
@@ -123,6 +144,13 @@ int test_policy(void)
         if (ok) printf("OK\n"); else { printf("FAIL (bi=%u)\n", bi); failures++; }
         tx_confirm_stats_free(&s);
     }
+
+    return failures;
+}
+
+static int check_tx_confirm_stats_record(void)
+{
+    int failures = 0;
 
     /* ── tx_confirm_stats_record ───────────────────────────── */
 
@@ -156,6 +184,13 @@ int test_policy(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         tx_confirm_stats_free(&s);
     }
+
+    return failures;
+}
+
+static int check_tx_confirm_stats_update_averages_and_clear_current(void)
+{
+    int failures = 0;
 
     /* ── tx_confirm_stats_update_averages ──────────────────── */
 
@@ -192,6 +227,13 @@ int test_policy(void)
         tx_confirm_stats_free(&s);
     }
 
+    return failures;
+}
+
+static int check_tx_confirm_stats_remove_tx_and_estimate_median(void)
+{
+    int failures = 0;
+
     /* ── tx_confirm_stats_remove_tx ────────────────────────── */
 
     printf("tx_confirm_stats_remove_tx: decrements unconf... ");
@@ -225,6 +267,13 @@ int test_policy(void)
         tx_confirm_stats_free(&s);
     }
 
+    return failures;
+}
+
+static int check_tx_confirm_stats_lifecycle(void)
+{
+    int failures = 0;
+
     /* ── tx_confirm_stats lifecycle: init, setup, free ─────── */
 
     printf("tx_confirm_stats: init/setup/free lifecycle... ");
@@ -239,6 +288,13 @@ int test_policy(void)
         /* If we got here without crash, lifecycle works */
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int check_fee_rate_helpers(void)
+{
+    int failures = 0;
 
     /* ── fee_rate helpers ──────────────────────────────────── */
 
@@ -298,6 +354,13 @@ int test_policy(void)
         if (ok) printf("OK\n"); else { printf("FAIL (%" PRId64 ")\n", fee); failures++; }
     }
 
+    return failures;
+}
+
+static int check_policy_constants(void)
+{
+    int failures = 0;
+
     /* ── Constants sanity ──────────────────────────────────── */
 
     printf("policy constants... ");
@@ -309,6 +372,24 @@ int test_policy(void)
         ok = ok && (PRI_SPACING == 2.0);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_policy(void)
+{
+    int failures = 0;
+
+    failures += check_tx_confirm_stats_init();
+    failures += check_tx_confirm_stats_setup();
+    failures += check_tx_confirm_stats_find_bucket();
+    failures += check_tx_confirm_stats_max_confirms_and_new_tx();
+    failures += check_tx_confirm_stats_record();
+    failures += check_tx_confirm_stats_update_averages_and_clear_current();
+    failures += check_tx_confirm_stats_remove_tx_and_estimate_median();
+    failures += check_tx_confirm_stats_lifecycle();
+    failures += check_fee_rate_helpers();
+    failures += check_policy_constants();
 
     return failures;
 }
