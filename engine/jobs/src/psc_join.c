@@ -260,13 +260,18 @@ static void psc_join_reduce(const struct psc_shard_out *out, int s_shards,
     }
 }
 
-/* Concatenate the per-shard live-coin arrays into one flat array. */
-static struct psc_coin *psc_join_merge_coins(const struct psc_shard_out *out,
-                                             int s_shards, size_t total)
+/* Concatenate the per-shard live-coin arrays into one flat array. On OOM with
+ * a non-empty total it reports "internal" and returns -1; otherwise it hands
+ * back the merged coins and returns 0. */
+static int psc_join_merge_coins(const struct psc_shard_out *out, int s_shards,
+                                size_t total, char reject[48],
+                                struct psc_coin **out_coins, size_t *out_count)
 {
     struct psc_coin *coins = total
         ? zcl_malloc(total * sizeof(*coins), "psc_coins") : NULL;
-    if (coins) {
+    if (total && !coins) {
+        if (reject) snprintf(reject, 48, "internal");
+    } else {
         size_t w = 0;
         for (int s = 0; s < s_shards; s++) {
             if (out[s].n)
@@ -274,8 +279,11 @@ static struct psc_coin *psc_join_merge_coins(const struct psc_shard_out *out,
                        out[s].n * sizeof(*coins));
             w += out[s].n;
         }
+        *out_coins = coins;
+        *out_count = total;
+        return 0;
     }
-    return coins;
+    return -1;
 }
 
 /* Report the reduce result: fill reject/reject_height, or hand back the
@@ -292,15 +300,8 @@ static int psc_join_report(struct psc_join_ctx *ctx, size_t total,
         if (reject) snprintf(reject, 48, "%s", best_kind);
         if (reject_height) *reject_height = best_height;
     } else {
-        struct psc_coin *coins = psc_join_merge_coins(ctx->out, ctx->s_shards,
-                                                      total);
-        if (total && !coins) {
-            if (reject) snprintf(reject, 48, "internal");
-        } else {
-            *out_coins = coins;
-            *out_count = total;
-            return 0;
-        }
+        return psc_join_merge_coins(ctx->out, ctx->s_shards, total, reject,
+                                    out_coins, out_count);
     }
     return -1;
 }
