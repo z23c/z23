@@ -274,29 +274,27 @@ done:
     return found;
 }
 
-static bool local_export_fail(char *reason, size_t reason_size,
-                              const char *code)
-{
-    if (reason && reason_size)
-        snprintf(reason, reason_size, "%s", code);
-    return false;
-}
-
-static const char *local_export_locate(
+static bool local_export_locate(
     const char *datadir, char *body_path, size_t body_size,
-    char *proof_path, size_t proof_size,
+    char *proof_path, size_t proof_size, char *reason, size_t reason_size,
     struct platform_positioned_file_snapshot *body_snapshot,
     struct platform_positioned_file_snapshot *proof_snapshot)
 {
     if (!export_path(body_path, body_size, datadir,
                      "consensus_snapshot.db") ||
         !export_path(proof_path, proof_size, datadir,
-                     LOCAL_EXPORT_PROOF_NAME))
-        return "local_export_path_invalid"; /* raw-return-ok:bounded policy reason returned */
+                     LOCAL_EXPORT_PROOF_NAME)) {
+        if (reason && reason_size)
+            snprintf(reason, reason_size, "local_export_path_invalid");
+        return false; /* raw-return-ok:bounded policy reason returned */
+    }
     if (!snapshot_named_file(body_path, body_snapshot) ||
-        !snapshot_named_file(proof_path, proof_snapshot))
-        return "local_export_proof_missing"; /* raw-return-ok:missing proof is expected policy */
-    return NULL;
+        !snapshot_named_file(proof_path, proof_snapshot)) {
+        if (reason && reason_size)
+            snprintf(reason, reason_size, "local_export_proof_missing");
+        return false; /* raw-return-ok:missing proof is expected policy */
+    }
+    return true;
 }
 
 static bool local_export_cache_take(
@@ -318,31 +316,55 @@ static bool local_export_cache_take(
     return cached;
 }
 
-static const char *local_export_verify_opened(
+static bool local_export_verify_final(
     const char *body_path, const char *proof_path,
+    char *reason, size_t reason_size,
+    const struct platform_positioned_file_snapshot *opened_body,
+    const struct platform_positioned_file_snapshot *opened_proof)
+{
+    struct platform_positioned_file_snapshot final_body_snapshot;
+    struct platform_positioned_file_snapshot final_proof_snapshot;
+    if (!snapshot_named_file(body_path, &final_body_snapshot) ||
+        !snapshot_named_file(proof_path, &final_proof_snapshot) ||
+        !snapshot_identity_equal(opened_body, &final_body_snapshot) ||
+        !snapshot_identity_equal(opened_proof, &final_proof_snapshot)) {
+        if (reason && reason_size)
+            snprintf(reason, reason_size, "local_export_identity_changed");
+        return false;
+    }
+    return true;
+}
+
+static bool local_export_verify_opened(
+    const char *body_path, const char *proof_path,
+    char *reason, size_t reason_size,
     struct local_export_proof *proof,
     struct platform_positioned_file_snapshot *opened_body,
     struct platform_positioned_file_snapshot *opened_proof)
 {
     uint8_t got_sha3[32];
     uint64_t got_size = 0;
-    if (!read_local_export_proof(proof_path, proof, opened_proof))
-        return "local_export_proof_malformed"; /* raw-return-ok:bounded policy reason returned */
+    if (!read_local_export_proof(proof_path, proof, opened_proof)) {
+        if (reason && reason_size)
+            snprintf(reason, reason_size, "local_export_proof_malformed");
+        return false; /* raw-return-ok:bounded policy reason returned */
+    }
     if (!hash_regular_file(body_path, got_sha3, &got_size, opened_body) ||
         got_size != proof->body_size ||
-        memcmp(got_sha3, proof->body_sha3, 32) != 0)
-        return "local_export_digest_mismatch"; /* raw-return-ok:bounded policy reason returned */
+        memcmp(got_sha3, proof->body_sha3, 32) != 0) {
+        if (reason && reason_size)
+            snprintf(reason, reason_size, "local_export_digest_mismatch");
+        return false; /* raw-return-ok:bounded policy reason returned */
+    }
     if (!sqlite_has_bound_block(body_path, proof->state_height,
-                                proof->state_block_hash))
-        return "local_export_state_mismatch"; /* raw-return-ok:bounded policy reason returned */
-    struct platform_positioned_file_snapshot final_body_snapshot;
-    struct platform_positioned_file_snapshot final_proof_snapshot;
-    if (!snapshot_named_file(body_path, &final_body_snapshot) ||
-        !snapshot_named_file(proof_path, &final_proof_snapshot) ||
-        !snapshot_identity_equal(opened_body, &final_body_snapshot) ||
-        !snapshot_identity_equal(opened_proof, &final_proof_snapshot))
-        return "local_export_identity_changed";
-    return NULL;
+                                proof->state_block_hash)) {
+        if (reason && reason_size)
+            snprintf(reason, reason_size, "local_export_state_mismatch");
+        return false; /* raw-return-ok:bounded policy reason returned */
+    }
+    return local_export_verify_final(body_path, proof_path, reason,
+                                     reason_size, opened_body,
+                                     opened_proof);
 }
 
 static void local_export_cache_store(
@@ -368,11 +390,12 @@ static bool load_verified_local_export(const char *datadir,
 {
     char body_path[640], proof_path[640];
     struct platform_positioned_file_snapshot body_snapshot, proof_snapshot;
-    const char *fail = local_export_locate(
-        datadir, body_path, sizeof(body_path), proof_path, sizeof(proof_path),
-        &body_snapshot, &proof_snapshot);
-    if (fail)
-        return local_export_fail(reason, reason_size, fail);
+    if (!local_export_locate(datadir, body_path, sizeof(body_path),
+                             proof_path, sizeof(proof_path),
+                             reason, reason_size,
+                             &body_snapshot, &proof_snapshot))
+        return false; /* raw-return-ok:bounded policy reason returned */
+
 
     if (local_export_cache_take(datadir, &body_snapshot, &proof_snapshot,
                                 out))
@@ -381,11 +404,11 @@ static bool load_verified_local_export(const char *datadir,
     struct local_export_proof proof;
     struct platform_positioned_file_snapshot opened_proof_snapshot;
     struct platform_positioned_file_snapshot opened_body_snapshot;
-    fail = local_export_verify_opened(
-        body_path, proof_path, &proof, &opened_body_snapshot,
-        &opened_proof_snapshot);
-    if (fail)
-        return local_export_fail(reason, reason_size, fail);
+    if (!local_export_verify_opened(body_path, proof_path, reason, reason_size,
+                                    &proof, &opened_body_snapshot,
+                                    &opened_proof_snapshot))
+        return false; /* raw-return-ok:bounded policy reason returned */
+
 
     local_export_cache_store(datadir, &opened_body_snapshot,
                              &opened_proof_snapshot, &proof);
