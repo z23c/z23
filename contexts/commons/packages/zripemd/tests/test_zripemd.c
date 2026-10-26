@@ -5,6 +5,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+static FILE *cli_sink;
+#undef stdout
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define main zripemd_cli_main
+#include "../app/main.c"
+#undef main
+#undef printf
+#undef stdout
+
 static int failures;
 
 static void check(int cond, const char *name)
@@ -93,8 +103,65 @@ static void test_byte_at_a_time(void)
     check(memcmp(got, want, sizeof got) == 0, "byte at a time");
 }
 
+static int cli_case(FILE *output, int argc, char **args, int status,
+                    const char *want)
+{
+    cli_sink = output;
+    if (zripemd_cli_main(argc, args) != status) return 1;
+    if (!want) return 0;
+    rewind(output);
+    char bytes[160];
+    size_t n = fread(bytes, 1, sizeof bytes, output);
+    return ferror(output) || n != strlen(want) || memcmp(bytes, want, n) != 0;
+}
+
+static int cli_output_case(int argc, char **args, const char *want)
+{
+    FILE *output = tmpfile();
+    if (!output) return 1;
+    int bad = cli_case(output, argc, args, 0, want);
+    if (fclose(output) != 0) bad = 1;
+#if defined(_WIN32)
+    output = fopen("NUL", "r");
+#else
+    output = fopen("/dev/null", "r");
+#endif
+    if (!output) return 1;
+    bad |= cli_case(output, argc, args, 1, NULL);
+    if (fclose(output) != 0) bad = 1;
+#if defined(__linux__)
+    output = fopen("/dev/full", "w");
+    if (!output) return 1;
+    char buffer[4096];
+    if (setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) {
+        fclose(output);
+        return 1;
+    }
+    bad |= cli_case(output, argc, args, 1, NULL);
+    (void)fclose(output);
+#endif
+    return bad;
+}
+
+static void test_cli_output(void)
+{
+    char *args[] = {"zripemd", "abc", "", NULL};
+    check(cli_output_case(2, args,
+          "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc  abc\n") == 0,
+          "CLI single argument output and errors");
+    check(cli_output_case(3, args,
+          "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc  abc\n"
+          "9c1185a5c5e9fc54612808977ee8f548b2258d31  \n") == 0,
+          "CLI multiple argument output and errors");
+    FILE *output = tmpfile();
+    if (!output) { check(0, "CLI usage fixture"); return; }
+    check(cli_case(output, 1, args, 2, "") == 0, "CLI usage without output");
+    check(fclose(output) == 0, "CLI usage fixture close");
+}
+
 int main(void)
 {
+    test_cli_output();
     test_standard_vectors();
     test_million_a();
     test_incremental_split();

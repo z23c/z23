@@ -1,4 +1,4 @@
-/* zripemd demo: hash each argument (or stdin lines) with RIPEMD-160. */
+/* zripemd demo: hash each argument with RIPEMD-160. */
 #include "zripemd/zripemd.h"
 
 #include <stdio.h>
@@ -14,7 +14,14 @@ int main(int argc, char **argv)
     }
     for (int i = 1; i < argc; i++) {
         zripemd160_hex(argv[i], strlen(argv[i]), hex);
-        printf("%s  %s\n", hex, argv[i]);
+        if (printf("%s  %s\n", hex, argv[i]) < 0)
+            goto output_error;
     }
+    if (fflush(stdout) != 0 || ferror(stdout))
+        goto output_error;
     return 0;
+
+output_error:
+    fputs("zripemd: output write failed\n", stderr);
+    return 1;
 }
