@@ -53,6 +53,32 @@ static void (*g_before_remedy_recheck_fn)(void);
 static void (*g_before_remedy_queue_fn)(void);
 #endif
 
+/* A candidate target-height entry: the exact height, hashed, carrying no
+ * recorded failure, and — when a parent height is expected and known —
+ * linked to that parent. */
+static bool block_index_is_target_candidate(struct block_index *bi,
+                                            int target,
+                                            struct block_index *prev)
+{
+    return bi && bi->nHeight == target && bi->phashBlock &&
+        !block_has_any_failure(bi) &&
+        (target == 0 || !prev || bi->pprev == prev);
+}
+
+/* Fallback scan of the block map: the first entry at the target height that
+ * passes the same candidate checks as the active chain. */
+static struct block_index *block_map_find_target_candidate(
+    struct main_state *ms, int target, struct block_index *prev)
+{
+    struct block_index *bi = NULL;
+    size_t iter = 0;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
+        if (block_index_is_target_candidate(bi, target, prev))
+            return bi;
+    }
+    return NULL;
+}
+
 static struct block_index *active_target_index_locked(struct main_state *ms,
                                                       int target)
 {
@@ -63,21 +89,10 @@ static struct block_index *active_target_index_locked(struct main_state *ms,
     struct block_index *prev = target > 0
         ? active_chain_at(&ms->chain_active, target - 1)
         : NULL;
-    if (bi && bi->nHeight == target && bi->phashBlock &&
-        !block_has_any_failure(bi) &&
-        (target == 0 || !prev || bi->pprev == prev))
+    if (block_index_is_target_candidate(bi, target, prev))
         return bi;
 
-    size_t iter = 0;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
-        if (!bi || bi->nHeight != target || !bi->phashBlock ||
-            block_has_any_failure(bi))
-            continue;
-        if (target > 0 && prev && bi->pprev != prev)
-            continue;
-        return bi;
-    }
-    return NULL;
+    return block_map_find_target_candidate(ms, target, prev);
 }
 
 static struct block_index *active_target_for_hash_locked(
@@ -184,6 +199,41 @@ static int frontier_missing_target(sqlite3 *db, struct main_state *ms,
     return BFMHD_FRONTIER_NONE;
 }
 
+/* Candidate 2 evaluation: adopt the reducer's select-idle height when it is
+ * lower than any frontier target already found. */
+static void consider_select_idle_candidate(struct main_state *ms,
+    bool tip_recent, int *target, struct uint256 *target_hash,
+    enum bfmhd_target_route *route)
+{
+    if (!tip_recent && g_select_idle_is_read_failure_fn()) {
+        int64_t ua_h = g_select_idle_height_fn();
+        if (ua_h >= 0 && (*target < 0 || ua_h < *target) &&
+            active_target_missing_data(ms, (int)ua_h, target_hash)) {
+            *target = (int)ua_h;
+            *route = BFMHD_TARGET_ACTIVE_FRONTIER;
+        }
+    }
+}
+
+/* Candidate 3 evaluation: adopt a recorded body-read failure when its height
+ * is lower than the current target and the active entry still lacks data. */
+static void consider_recorded_read_failure_candidate(
+    struct main_state *ms, int *target, struct uint256 *target_hash,
+    enum bfmhd_target_route *route)
+{
+    struct reducer_frontier_body_read_note note;
+    if (reducer_frontier_body_read_note_snapshot(&note)) {
+        struct uint256 active_hash;
+        if (note.height >= 0 && (*target < 0 || note.height < *target) &&
+            active_target_missing_data(ms, note.height, &active_hash) &&
+            uint256_eq(&active_hash, &note.block_hash)) {
+            *target = note.height;
+            *target_hash = note.block_hash;
+            *route = BFMHD_TARGET_ACTIVE_FRONTIER;
+        }
+    }
+}
+
 static bool detect_body_fetch_missing_have_data(void)
 {
     int64_t tip_age = sync_monitor_tip_advance_age();
@@ -215,14 +265,8 @@ static bool detect_body_fetch_missing_have_data(void)
      * candidate above never matches it (body_fetch's own cursor has long
      * since passed that height), so this is the path that re-queues the P2P
      * fetch for it. Prefer the lower of the two candidates. */
-    if (!tip_recent && g_select_idle_is_read_failure_fn()) {
-        int64_t ua_h = g_select_idle_height_fn();
-        if (ua_h >= 0 && (target < 0 || ua_h < target) &&
-            active_target_missing_data(ms, (int)ua_h, &target_hash)) {
-            target = (int)ua_h;
-            route = BFMHD_TARGET_ACTIVE_FRONTIER;
-        }
-    }
+    consider_select_idle_candidate(ms, tip_recent, &target, &target_hash,
+                                   &route);
 
     /* Candidate 3: a canonical read failure explicitly recorded by the
      * reducer or background full validator. The sibling
@@ -230,17 +274,8 @@ static bool detect_body_fetch_missing_have_data(void)
      * false HAVE_DATA flag, so it is the durable handoff to peer refetch.
      * Unlike speculative frontier repair, explicit disk-failure evidence is
      * actionable even while the live tip is advancing. */
-    struct reducer_frontier_body_read_note note;
-    if (reducer_frontier_body_read_note_snapshot(&note)) {
-        struct uint256 active_hash;
-        if (note.height >= 0 && (target < 0 || note.height < target) &&
-            active_target_missing_data(ms, note.height, &active_hash) &&
-            uint256_eq(&active_hash, &note.block_hash)) {
-            target = note.height;
-            target_hash = note.block_hash;
-            route = BFMHD_TARGET_ACTIVE_FRONTIER;
-        }
-    }
+    consider_recorded_read_failure_candidate(ms, &target, &target_hash,
+                                             &route);
 
     if (target < 0)
         return false;
