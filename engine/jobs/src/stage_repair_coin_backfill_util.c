@@ -433,10 +433,10 @@ static int height_probe_have(sqlite3_stmt *st, int h, bool *have)
 {
     if (sqlite3_reset(st) != SQLITE_OK ||
         sqlite3_bind_int(st, 1, h) != SQLITE_OK)
-        return -1;
+        return -1; // raw-return-ok:caller-logs-horizon-walk-failure
     int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
     if (rc != SQLITE_ROW && rc != SQLITE_DONE)
-        return -1;
+        return -1; // raw-return-ok:caller-logs-horizon-walk-failure
     *have = rc == SQLITE_ROW;
     return 0;
 }
