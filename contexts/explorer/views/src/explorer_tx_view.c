@@ -177,15 +177,9 @@ size_t explorer_view_tx_not_found(const char *safe_param,
 
 /* ── Native: Transaction Detail ────────────────────────────── */
 
-size_t explorer_view_tx(const struct explorer_tx_view_data *d,
-                        uint8_t *r, size_t max)
+static size_t explorer_tx_summary_card(const struct explorer_tx_view_data *d,
+                                       uint8_t *r, size_t max, size_t off)
 {
-    if (!d) return 0;
-    size_t off = 0;
-
-    APPEND(off, r, max, EXPLORER_HEADER("Transaction"));
-    off += explorer_emit_nav((char *)r + off, max - off, NULL);
-
     APPEND(off, r, max,
         "<h2>Transaction</h2>"
         "<div class='card'><div class='grid'>"
@@ -220,7 +214,12 @@ size_t explorer_view_tx(const struct explorer_tx_view_data *d,
             d->value_balance);
 
     APPEND(off, r, max, "</div></div>");
+    return off;
+}
 
+static size_t explorer_tx_input_rows(const struct explorer_tx_view_data *d,
+                                     uint8_t *r, size_t max, size_t off)
+{
     /* Inputs */
     APPEND(off, r, max, "<h2>Inputs (%zu)</h2><div class='io-box'>", d->num_vin);
     for (size_t i = 0; i < d->num_in_rows && off + 512 < max; i++) {
@@ -250,7 +249,12 @@ size_t explorer_view_tx(const struct explorer_tx_view_data *d,
         }
     }
     APPEND(off, r, max, "</div>");
+    return off;
+}
 
+static size_t explorer_tx_output_rows(const struct explorer_tx_view_data *d,
+                                      uint8_t *r, size_t max, size_t off)
+{
     /* Outputs */
     APPEND(off, r, max, "<h2>Outputs (%zu)</h2><div class='io-box'>", d->num_vout);
     for (size_t i = 0; i < d->num_out_rows && off + 512 < max; i++) {
@@ -283,27 +287,12 @@ size_t explorer_view_tx(const struct explorer_tx_view_data *d,
         "<div class='io-idx'></div><div class='io-addr'>Total</div>"
         "<div class='io-val'>%s ZCL</div></div>", d->total_out);
     APPEND(off, r, max, "</div>");
+    return off;
+}
 
-    /* Shielded data */
-    if (d->num_shielded_spend > 0 || d->num_shielded_output > 0 || d->num_joinsplit > 0) {
-        APPEND(off, r, max, "<h2>Shielded Data</h2><div class='card'><div class='grid'>");
-        if (d->num_shielded_spend > 0)
-            APPEND(off, r, max,
-                "<div class='label'>Sapling Spends</div><div class='val'>%zu</div>",
-                d->num_shielded_spend);
-        if (d->num_shielded_output > 0)
-            APPEND(off, r, max,
-                "<div class='label'>Sapling Outputs</div><div class='val'>%zu</div>",
-                d->num_shielded_output);
-        if (d->num_joinsplit > 0)
-            APPEND(off, r, max,
-                "<div class='label'>JoinSplits</div><div class='val'>%zu</div>"
-                "<div class='label'>vpub_old (t&rarr;z)</div><div class='val amount'>%s ZCL</div>"
-                "<div class='label'>vpub_new (z&rarr;t)</div><div class='val amount'>%s ZCL</div>",
-                d->num_joinsplit, d->joinsplit_in, d->joinsplit_out);
-        APPEND(off, r, max, "</div></div>");
-    }
-
+static size_t explorer_tx_slp_card(const struct explorer_tx_view_data *d,
+                                   uint8_t *r, size_t max, size_t off)
+{
     /* ZSLP token data */
     if (d->slp.kind != EXPLORER_TX_SLP_NONE) {
         APPEND(off, r, max,
@@ -346,6 +335,43 @@ size_t explorer_view_tx(const struct explorer_tx_view_data *d,
 
         APPEND(off, r, max, "</div></div>");
     }
+    return off;
+}
+
+size_t explorer_view_tx(const struct explorer_tx_view_data *d,
+                        uint8_t *r, size_t max)
+{
+    if (!d) return 0;
+    size_t off = 0;
+
+    APPEND(off, r, max, EXPLORER_HEADER("Transaction"));
+    off += explorer_emit_nav((char *)r + off, max - off, NULL);
+
+    off = explorer_tx_summary_card(d, r, max, off);
+    off = explorer_tx_input_rows(d, r, max, off);
+    off = explorer_tx_output_rows(d, r, max, off);
+
+    /* Shielded data */
+    if (d->num_shielded_spend > 0 || d->num_shielded_output > 0 || d->num_joinsplit > 0) {
+        APPEND(off, r, max, "<h2>Shielded Data</h2><div class='card'><div class='grid'>");
+        if (d->num_shielded_spend > 0)
+            APPEND(off, r, max,
+                "<div class='label'>Sapling Spends</div><div class='val'>%zu</div>",
+                d->num_shielded_spend);
+        if (d->num_shielded_output > 0)
+            APPEND(off, r, max,
+                "<div class='label'>Sapling Outputs</div><div class='val'>%zu</div>",
+                d->num_shielded_output);
+        if (d->num_joinsplit > 0)
+            APPEND(off, r, max,
+                "<div class='label'>JoinSplits</div><div class='val'>%zu</div>"
+                "<div class='label'>vpub_old (t&rarr;z)</div><div class='val amount'>%s ZCL</div>"
+                "<div class='label'>vpub_new (z&rarr;t)</div><div class='val amount'>%s ZCL</div>",
+                d->num_joinsplit, d->joinsplit_in, d->joinsplit_out);
+        APPEND(off, r, max, "</div></div>");
+    }
+
+    off = explorer_tx_slp_card(d, r, max, off);
 
     APPEND(off, r, max, EXPLORER_FOOTER);
     return off;
