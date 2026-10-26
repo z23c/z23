@@ -122,28 +122,18 @@ static bool decode_hex(const char *hex, uint8_t *out, size_t cap,
     else { printf("FAIL\n"); failures++; }         \
 } while (0)
 
-int test_transaction_wire_evidence(void)
+#define tx (*transaction_storage)
+#define output (*output_storage)
+static bool wire_evidence_check_exact_encoding(
+    const struct wire_evidence_case *fixture,
+    struct transaction *transaction_storage, struct byte_stream *output_storage)
 {
-    printf("\n=== Canonical transaction wire/script evidence ===\n");
-    int failures = 0;
-    bool all_fixtures = true;
-    bool saw_types[TX_NULL_DATA + 1] = {false};
-
-    chain_params_select(CHAIN_MAIN);
-    const struct chain_params *params = chain_params_get();
-    WIRE_CHECK("mainnet chain parameters are available", params != NULL);
-    if (!params)
-        return failures;
-
-    for (size_t i = 0; i < sizeof(k_cases) / sizeof(k_cases[0]); i++) {
-        const struct wire_evidence_case *fixture = &k_cases[i];
         uint8_t raw[512];
         size_t raw_len = 0;
         bool ok = decode_hex(fixture->raw_hex, raw, sizeof(raw), &raw_len);
 
         struct byte_stream input;
         stream_init_from_data(&input, raw, raw_len);
-        struct transaction tx;
         transaction_init(&tx);
         ok = ok && transaction_deserialize(&tx, &input) &&
              stream_remaining(&input) == 0;
@@ -154,11 +144,18 @@ int test_transaction_wire_evidence(void)
         ok = ok && strcmp(txid, fixture->txid) == 0 &&
              fixture->output_index < tx.num_vout;
 
-        struct byte_stream output;
         stream_init(&output, raw_len + 16);
         ok = ok && transaction_serialize(&tx, &output) &&
              output.size == raw_len && memcmp(output.data, raw, raw_len) == 0;
 
+    return ok;
+}
+#undef output
+
+static bool wire_evidence_check_script_and_validation(
+    bool ok, const struct wire_evidence_case *fixture,
+    const struct chain_params *params, struct transaction *transaction_storage)
+{
         enum txnouttype type = TX_NONSTANDARD;
         unsigned char solutions[20][65];
         size_t solution_sizes[20];
@@ -181,6 +178,58 @@ int test_transaction_wire_evidence(void)
         validation_state_init(&contextual);
         ok = ok && contextual_check_transaction(
             &tx, &contextual, &params->consensus, fixture->height, 100);
+    return ok;
+}
+#undef tx
+
+#define v3 (*transaction_storage)
+static bool wire_evidence_prepare_v3_and_check_before_activation(
+    const struct chain_params *params, struct transaction *transaction_storage,
+    bool *ready)
+{
+    uint8_t v1_raw[128];
+    size_t v1_len = 0;
+    transaction_init(&v3);
+    struct byte_stream v1_stream;
+    bool v3_ready = decode_hex(k_cases[0].raw_hex, v1_raw, sizeof(v1_raw),
+                               &v1_len);
+    stream_init_from_data(&v1_stream, v1_raw, v1_len);
+    v3_ready = v3_ready && transaction_deserialize(&v3, &v1_stream);
+    v3.overwintered = true;
+    v3.version = OVERWINTER_TX_VERSION;
+    v3.version_group_id = OVERWINTER_VERSION_GROUP_ID;
+    v3.expiry_height = 476969;
+
+    struct validation_state before_activation;
+    validation_state_init(&before_activation);
+    bool rejects_before = v3_ready && !contextual_check_transaction(
+        &v3, &before_activation, &params->consensus, 476968, 100) &&
+        strcmp(before_activation.reject_reason,
+               "tx-overwinter-not-active") == 0;
+    *ready = v3_ready;
+    return rejects_before;
+}
+#undef v3
+
+int test_transaction_wire_evidence(void)
+{
+    printf("\n=== Canonical transaction wire/script evidence ===\n");
+    int failures = 0;
+    bool all_fixtures = true;
+    bool saw_types[TX_NULL_DATA + 1] = {false};
+
+    chain_params_select(CHAIN_MAIN);
+    const struct chain_params *params = chain_params_get();
+    WIRE_CHECK("mainnet chain parameters are available", params != NULL);
+    if (!params)
+        return failures;
+
+    for (size_t i = 0; i < sizeof(k_cases) / sizeof(k_cases[0]); i++) {
+        const struct wire_evidence_case *fixture = &k_cases[i];
+        struct transaction tx;
+        struct byte_stream output;
+        bool ok = wire_evidence_check_exact_encoding(fixture, &tx, &output);
+        ok = wire_evidence_check_script_and_validation(ok, fixture, params, &tx);
 
         printf("canonical %s: exact wire, txid, class, and context... ",
                fixture->label);
@@ -212,26 +261,10 @@ int test_transaction_wire_evidence(void)
      * wire-era discriminator.  There is no mainnet height between these two
      * checks: v3 is premature immediately before activation and its group id
      * is invalid as soon as Sapling activates. */
-    uint8_t v1_raw[128];
-    size_t v1_len = 0;
     struct transaction v3;
-    transaction_init(&v3);
-    struct byte_stream v1_stream;
-    bool v3_ready = decode_hex(k_cases[0].raw_hex, v1_raw, sizeof(v1_raw),
-                               &v1_len);
-    stream_init_from_data(&v1_stream, v1_raw, v1_len);
-    v3_ready = v3_ready && transaction_deserialize(&v3, &v1_stream);
-    v3.overwintered = true;
-    v3.version = OVERWINTER_TX_VERSION;
-    v3.version_group_id = OVERWINTER_VERSION_GROUP_ID;
-    v3.expiry_height = 476969;
-
-    struct validation_state before_activation;
-    validation_state_init(&before_activation);
-    bool rejects_before = v3_ready && !contextual_check_transaction(
-        &v3, &before_activation, &params->consensus, 476968, 100) &&
-        strcmp(before_activation.reject_reason,
-               "tx-overwinter-not-active") == 0;
+    bool v3_ready;
+    bool rejects_before = wire_evidence_prepare_v3_and_check_before_activation(
+        params, &v3, &v3_ready);
     WIRE_CHECK("v3 is rejected immediately before mainnet activation",
                rejects_before);
 
