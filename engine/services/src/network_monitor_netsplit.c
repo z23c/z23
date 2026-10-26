@@ -69,12 +69,12 @@ struct nm_tip_cluster {
 static bool nm_hash_hex_valid(const char *h)
 {
     if (!h || strlen(h) != PEER_OBS_TIP_HEX)
-        return false;
+        return false;   // raw-return-ok:pure-predicate-caller-skips-the-vote
     for (int i = 0; i < PEER_OBS_TIP_HEX; i++) {
         char c = h[i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
               (c >= 'A' && c <= 'F')))
-            return false;
+            return false;   // raw-return-ok:pure-predicate-caller-skips-the-vote
     }
     return true;
 }
@@ -114,7 +114,7 @@ static int nm_find_cluster_by_hash(const struct nm_tip_cluster *cl,
         if (strcmp(cl[k].hash, hash) == 0)
             return k;
     }
-    return -1;
+    return -1;   // raw-return-ok:not-found-is-a-normal-answer-not-an-error
 }
 
 /* Fold observation `i` into the cluster ledger. Every early return below is
@@ -367,7 +367,7 @@ bool network_monitor_netsplit_dump_state_json(struct json_value *out,
 {
     (void)key;
     if (!out)
-        return false;
+        LOG_FAIL("network_monitor", "dump_state_json: out is NULL");
     json_set_object(out);
 
     struct network_partition_view pv;

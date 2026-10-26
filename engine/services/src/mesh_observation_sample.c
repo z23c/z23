@@ -281,13 +281,13 @@ static bool mo_our_hash_at(int64_t height, char out[MESH_OBS_HEXHASH])
 {
     out[0] = '\0';
     if (height < 0)
-        return false;
+        return false;   // raw-return-ok:negative-height-verifies-nothing-not-an-error
     struct main_state *ms = sync_monitor_main_state();
     if (!ms)
-        return false;
+        LOG_FAIL("mesh_observation", "our-hash lookup: main state not wired");
     struct block_index *bi = active_chain_at(&ms->chain_active, (int)height);
     if (!bi || !bi->phashBlock)
-        return false;
+        return false;   // raw-return-ok:height-not-held-is-documented-no-verdict
     uint256_get_hex(bi->phashBlock, out);
     return true;
 }
@@ -595,7 +595,7 @@ bool mesh_observation_public_disabled(void)
 bool mesh_observation_snapshot(struct mesh_observation *out)
 {
     if (!out)
-        return false;
+        LOG_FAIL("mesh_observation", "snapshot: out is NULL");
     mo_ensure_lock();
     bool got = false;
     zcl_mutex_lock(&g_mo.lock);
@@ -650,7 +650,7 @@ static void *mo_thread_fn(void *arg)
         }
         platform_sleep_ms(200);
     }
-    return NULL;
+    return NULL;   // raw-return-ok:thread-exit-value-is-never-read
 }
 
 struct zcl_result mesh_observation_register_sampler(void)
