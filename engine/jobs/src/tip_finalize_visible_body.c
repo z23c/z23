@@ -49,6 +49,43 @@ void tip_finalize_visible_body_note_reconciled(int32_t height,
     g_last_mempool_reconcile_hash = *hash;
 }
 
+/* Validate the caller's handles and the stage cursor, yielding the height
+ * and raw cursor it names. */
+static bool tip_finalize_visible_body_cursor_valid(
+    struct sqlite3 *db, struct stage *stage, struct main_state *ms,
+    int32_t *height, uint64_t *cursor)
+{
+    if (!db || !stage || !ms) return false;
+    *cursor = stage_cursor(stage);
+    if (*cursor > INT32_MAX) return false;
+    *height = (int32_t)*cursor;
+    return true;
+}
+
+/* Find the block index at the height, falling back to the block map through
+ * a hash read at the previous height when the active chain has no entry. */
+static struct block_index *tip_finalize_visible_body_lookup_block(
+    struct sqlite3 *db, struct main_state *ms, int32_t height)
+{
+    struct block_index *bi = active_chain_at(&ms->chain_active, height);
+    if (!bi && height > 0) {
+        struct uint256 hash;
+        if (tip_finalize_stage_block_hash_at(db, height - 1, hash.data))
+            bi = block_map_find(&ms->map_block_index, &hash);
+    }
+    return bi;
+}
+
+/* A body is usable when its index exists, carries a block hash, sits at the
+ * cursor height and passes the precondition checks. */
+static const char *tip_finalize_visible_body_block_reason(
+    const struct block_index *bi, int32_t height)
+{
+    if (!bi || !bi->phashBlock || bi->nHeight != height)
+        return "index_unusable";
+    return tip_finalize_precondition_block_reason(bi);
+}
+
 /* A header-only lookahead can advance the cursor before the successor body
  * arrives. Reconcile the newly visible body once per process identity. If
  * served-tip authority still trails it, finish publication; otherwise run
@@ -58,18 +95,14 @@ void tip_finalize_visible_body_note_reconciled(int32_t height,
 bool tip_finalize_reconcile_visible_cursor_body(
     struct sqlite3 *db, struct stage *stage, struct main_state *ms)
 {
-    if (!db || !stage || !ms) return false;
-    uint64_t cursor = stage_cursor(stage);
-    if (cursor > INT32_MAX) return false;
-    int32_t height = (int32_t)cursor;
-    struct block_index *bi = active_chain_at(&ms->chain_active, height);
-    if (!bi && height > 0) {
-        struct uint256 hash;
-        if (tip_finalize_stage_block_hash_at(db, height - 1, hash.data))
-            bi = block_map_find(&ms->map_block_index, &hash);
-    }
-    if (!bi || !bi->phashBlock || bi->nHeight != height ||
-        tip_finalize_precondition_block_reason(bi) != NULL)
+    uint64_t cursor = 0;
+    int32_t height = 0;
+    if (!tip_finalize_visible_body_cursor_valid(db, stage, ms, &height,
+                                                &cursor))
+        return false;
+    struct block_index *bi =
+        tip_finalize_visible_body_lookup_block(db, ms, height);
+    if (tip_finalize_visible_body_block_reason(bi, height) != NULL)
         return false;
 
     /* A header witness proves the parent, not this body's transition. */
