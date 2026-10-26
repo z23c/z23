@@ -115,7 +115,9 @@ static size_t macos_rules(struct os_sandbox_path_rule rules[6])
     return n;
 }
 
-static int c_macos_seatbelt_scope(void)
+/* Enter the package Seatbelt scope, then create and write the granted
+ * output file (failure codes 70-73). */
+static int macos_seatbelt_write_granted_output(void)
 {
     struct os_sandbox_path_rule rules[6];
     size_t count = macos_rules(rules);
@@ -128,28 +130,52 @@ static int c_macos_seatbelt_scope(void)
     int fd = open(allowed_file, O_CREAT | O_WRONLY | O_TRUNC, 0600);
     if (fd < 0) return 72;
     if (write(fd, "ok", 2) != 2 || close(fd) != 0) return 73;
-    fd = open(g_macos_denied, O_RDONLY);
+    return 0;
+}
+
+/* Opening the denied path must be refused with EPERM/EACCES (74/75). */
+static int macos_seatbelt_denied_open_refused(void)
+{
+    int fd = open(g_macos_denied, O_RDONLY);
     if (fd >= 0) { close(fd); return 74; }
     if (errno != EPERM && errno != EACCES) return 75;
+    return 0;
+}
+
+/* An AF_INET connect outside the grant must be refused at socket() or
+ * connect() with EPERM/EACCES (failure codes 76/77). */
+static int macos_seatbelt_inet_connect_refused(void)
+{
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         if (errno != EPERM && errno != EACCES) return 76;
-    } else {
-        struct sockaddr_in address;
-        memset(&address, 0, sizeof(address));
-        address.sin_family = AF_INET;
-        address.sin_port = htons(9);
-        address.sin_addr.s_addr = htonl(UINT32_C(0x7f000001));
-        errno = 0;
-        int connected = connect(sock, (const struct sockaddr *)&address,
-                                sizeof(address));
-        int connect_errno = errno;
-        close(sock);
-        if (connected == 0 ||
-            (connect_errno != EPERM && connect_errno != EACCES))
-            return 77;
+        return 0;
     }
-    sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(9);
+    address.sin_addr.s_addr = htonl(UINT32_C(0x7f000001));
+    errno = 0;
+    int connected = connect(sock, (const struct sockaddr *)&address,
+                            sizeof(address));
+    int connect_errno = errno;
+    close(sock);
+    if (connected == 0 ||
+        (connect_errno != EPERM && connect_errno != EACCES))
+        return 77;
+    return 0;
+}
+
+static int c_macos_seatbelt_scope(void)
+{
+    int rc = macos_seatbelt_write_granted_output();
+    if (rc) return rc;
+    rc = macos_seatbelt_denied_open_refused();
+    if (rc) return rc;
+    rc = macos_seatbelt_inet_connect_refused();
+    if (rc) return rc;
+    int sock = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (sock < 0) {
         if (errno != EPERM && errno != EACCES) return 78;
     } else {
@@ -164,7 +190,7 @@ static int c_macos_seatbelt_scope(void)
         int connect_errno = errno;
         close(sock);
         if (connected == 0 ||
-            (connect_errno != EPERM && connect_errno != EACCES))
+            (connect_errno != EACCES && connect_errno != EPERM))
             return 79;
     }
     return 0;
