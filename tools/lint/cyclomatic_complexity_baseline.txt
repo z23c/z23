@@ -1881,10 +1881,6 @@ tests/harness/src/test_zcode_score_receipt.c:score_store_vertical:24
 tests/harness/src/test_zcode_score_receipt.c:score_transport_package:18
 tests/harness/src/test_zcode_score_receipt.c:shadow_protocol_package_vertical:49
 tests/harness/src/test_zcode_score_receipt.c:test_reproduction_qualification:59
-tests/harness/src/test_zcode_site.c:t_development_public:16
-tests/harness/src/test_zcode_site.c:t_downloads:24
-tests/harness/src/test_zcode_site.c:t_routes_and_agreement:67
-tests/harness/src/test_zcode_site.c:zs_commit_one:22
 tests/harness/src/test_zcode_swarm_complete.c:sc_t_announce_on_complete:17
 tests/harness/src/test_zcode_swarm_net.c:zwn_author_storage_ack:18
 tests/harness/src/test_zcode_swarm_net.c:zwn_discover_transport:49

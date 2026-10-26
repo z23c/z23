@@ -229,6 +229,51 @@ static void zs_cmd_free(struct zs_cmd *c)
     json_free(&c->input);
 }
 
+/* Write the LICENSE and src/x.c fixture bytes; closes both streams. */
+static bool zs_write_fixture_files(FILE *f, FILE *g, const char *lic_text,
+                                   const char *source)
+{
+    bool ok = f && g;
+    if (ok)
+        ok = fwrite(lic_text, 1, strlen(lic_text), f) == strlen(lic_text);
+    if (f)
+        fclose(f);
+    if (ok)
+        ok = fwrite(source, 1, strlen(source), g) == strlen(source);
+    if (g)
+        fclose(g);
+    return ok;
+}
+
+/* Hash the two fixture files and add them to the package manifest. */
+static bool zs_add_manifest_files(struct vcs_package_manifest *manifest,
+                                  const char *lic_text, const char *source)
+{
+    uint8_t lic_hash[32];
+    uint8_t src_hash[32];
+    return vcs_package_chunk_hash((const uint8_t *)lic_text,
+                                  strlen(lic_text), lic_hash) &&
+           vcs_package_chunk_hash((const uint8_t *)source,
+                                  strlen(source), src_hash) &&
+           vcs_package_manifest_add(manifest, "LICENSE",
+                                    VCS_PACKAGE_MODE_FILE,
+                                    strlen(lic_text), lic_hash, 1) &&
+           vcs_package_manifest_add(manifest, "src/x.c",
+                                    VCS_PACKAGE_MODE_FILE,
+                                    strlen(source), src_hash, 1);
+}
+
+/* Lowercase hex of the package root into the caller's 65-byte buffer. */
+static void zs_fill_root_hex(const uint8_t root[32], char root_hex_out[65])
+{
+    static const char hexd[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        root_hex_out[2 * i]     = hexd[(root[i] >> 4) & 0xf];
+        root_hex_out[2 * i + 1] = hexd[root[i] & 0xf];
+    }
+    root_hex_out[64] = '\0';
+}
+
 /* Commit one small package; root_hex_out (65) gets the package root.
  * Returns the license text via lic_out (its bytes are chunk (0,0)). */
 static unsigned g_zs_week_seq = 0;
@@ -260,28 +305,9 @@ static bool zs_commit_one(const char *dd, uint8_t key_seed, uint64_t seq,
     char srcpath[512];
     snprintf(srcpath, sizeof(srcpath), "%s/x.c", srcdir);
     FILE *g = fopen(srcpath, "wb");
-    bool ok = f && g;
-    uint8_t lic_hash[32];
-    uint8_t src_hash[32];
+    bool ok = zs_write_fixture_files(f, g, lic_out, source);
     if (ok)
-        ok = fwrite(lic_out, 1, strlen(lic_out), f) == strlen(lic_out);
-    if (f)
-        fclose(f);
-    if (ok)
-        ok = fwrite(source, 1, strlen(source), g) == strlen(source);
-    if (g)
-        fclose(g);
-    if (ok)
-        ok = vcs_package_chunk_hash((const uint8_t *)lic_out,
-                                    strlen(lic_out), lic_hash) &&
-             vcs_package_chunk_hash((const uint8_t *)source,
-                                    strlen(source), src_hash) &&
-             vcs_package_manifest_add(&manifest, "LICENSE",
-                                      VCS_PACKAGE_MODE_FILE,
-                                      strlen(lic_out), lic_hash, 1) &&
-             vcs_package_manifest_add(&manifest, "src/x.c",
-                                      VCS_PACKAGE_MODE_FILE,
-                                      strlen(source), src_hash, 1);
+        ok = zs_add_manifest_files(&manifest, lic_out, source);
     uint8_t *m_wire = NULL;
     size_t m_wire_len = 0;
     uint8_t root[32];
@@ -324,14 +350,8 @@ static bool zs_commit_one(const char *dd, uint8_t key_seed, uint64_t seq,
         ok = c.reply.status == ZCL_COMMAND_STATUS_PASSED;
         zs_cmd_free(&c);
     }
-    if (ok && root_hex_out) {
-        static const char hexd[] = "0123456789abcdef";
-        for (int i = 0; i < 32; i++) {
-            root_hex_out[2 * i]     = hexd[(root[i] >> 4) & 0xf];
-            root_hex_out[2 * i + 1] = hexd[root[i] & 0xf];
-        }
-        root_hex_out[64] = '\0';
-    }
+    if (ok && root_hex_out)
+        zs_fill_root_hex(root, root_hex_out);
     free(r_hex);
     free(m_hex);
     free(r_wire);
@@ -483,6 +503,17 @@ static const char *zs_get(const char *dd, const char *path, size_t *len_out)
 
 /* ══ 1+2. route coverage + projection agreement ═══════════════════════ */
 
+/* The declared Content-Length matches the body after the header block. */
+static bool zs_length_describes_body(const char *response)
+{
+    const char *payload = strstr(response, "\r\n\r\n");
+    const char *length_header = strstr(response, "Content-Length: ");
+    unsigned long declared = 0;
+    return payload && length_header &&
+           sscanf(length_header, "Content-Length: %lu", &declared) == 1 &&
+           declared == strlen(payload + 4);
+}
+
 static int t_development_public(void)
 {
     int failures = 0;
@@ -508,13 +539,8 @@ static int t_development_public(void)
     r = zs_get("private-fleet-canary-C", "/zcode/develop/", &other_len);
     ZS_CHECK("development trailing slash resolves the same page",
              len == other_len && memcmp(first, r, len + 1) == 0);
-    const char *payload = strstr(first, "\r\n\r\n");
-    const char *length_header = strstr(first, "Content-Length: ");
-    unsigned long declared = 0;
     ZS_CHECK("development HTTP length describes the complete body",
-             payload && length_header &&
-             sscanf(length_header, "Content-Length: %lu", &declared) == 1 &&
-             declared == strlen(payload + 4));
+             zs_length_describes_body(first));
     free(first);
     uint8_t small[33];
     memset(small, 0x5a, sizeof(small));
@@ -523,6 +549,135 @@ static int t_development_public(void)
     ZS_CHECK("small HTTP response refuses rather than returning an oversized length",
              n == 0 && small[32] == 0x5a);
     return failures;
+}
+
+/* Null-safe readers over the command projections: a missing parent gives
+ * NULL (or -1 for an integer), exactly as the inline ternaries did. */
+static const struct json_value *zs_json_at0(const struct json_value *arr)
+{
+    return arr ? json_at(arr, 0) : NULL;
+}
+
+static const struct json_value *zs_json_child(const struct json_value *obj,
+                                              const char *key)
+{
+    return obj ? json_get(obj, key) : NULL;
+}
+
+static const char *zs_json_str(const struct json_value *obj, const char *key)
+{
+    return obj ? json_get_str(json_get(obj, key)) : NULL;
+}
+
+static int64_t zs_json_int(const struct json_value *obj, const char *key)
+{
+    return obj ? json_get_int(json_get(obj, key)) : -1;
+}
+
+/* Route-page predicates: each is one ZS_CHECK condition, unchanged. */
+static bool zs_landing_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "Build, verify, and share exact C23 software") &&
+           strstr(r, "Browse exact packages") &&
+           strstr(r, "1") /* counts */;
+}
+
+static bool zs_packages_ok(const char *r, size_t len, const char *root_hex)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "alice/demo") && strstr(r, root_hex);
+}
+
+static bool zs_package_envelope_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "What it does") &&
+           strstr(r, "Try it") &&
+           strstr(r, "Change it") &&
+           strstr(r, "Tell your agent") &&
+           !strstr(r, "Workshop") &&
+           strstr(r, "What changed") &&
+           strstr(r, "Verify") &&
+           strstr(r, "Use and share");
+}
+
+static bool zs_package_sections_ok(const char *r)
+{
+    return strstr(r, "No runnable example is published") &&
+           strstr(r, "<details") &&
+           strstr(r, "Signed release envelope") &&
+           strstr(r, "publisher signature") &&
+           strstr(r, "Verifier attestations") &&
+           strstr(r, "LICENSE");
+}
+
+static bool zs_publisher_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "Contributor profile") &&
+           strstr(r, "ZCODE Score") && strstr(r, "first-package");
+}
+
+static bool zs_leaderboard_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "Daily") && strstr(r, "All-time");
+}
+
+/* Every leaderboard period route renders the rankings page. */
+static bool zs_leaderboard_periods_ok(const char *dd)
+{
+    const char *periods[] = {"daily", "weekly", "monthly", "all"};
+    char route[160];
+    size_t len = 0;
+    bool period_ok = true;
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(route, sizeof(route), "/zcode/leaderboard/%s",
+                 periods[i]);
+        const char *r = zs_get(dd, route, &len);
+        if (!(len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+              strstr(r, "ZCODE Rankings")))
+            period_ok = false;
+    }
+    return period_ok;
+}
+
+static bool zs_badges_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "ZCODE Badges") && strstr(r, "first-package");
+}
+
+/* Projection-agreement predicates: each is one ZS_CHECK condition. */
+static bool zs_search_agrees(const struct zs_cmd *c, const char *r,
+                             const char *name, const char *semver,
+                             const char *root)
+{
+    return name && semver && root && strstr(r, name) &&
+           strstr(r, semver) && strstr(r, root) &&
+           json_get_int(json_get(&c->reply.data, "total_matches")) == 1;
+}
+
+static bool zs_show_agrees(const char *r, int64_t bytes, int64_t files,
+                           const char *bytes_str)
+{
+    return bytes > 0 && files == 2 && strstr(r, bytes_str) &&
+           strstr(r, "LICENSE") && strstr(r, "src/x.c");
+}
+
+static bool zs_contributor_agrees(const char *r, int64_t score, int64_t rank,
+                                  const char *score_str, const char *rank_str)
+{
+    return score == 100 && rank == 1 && strstr(r, score_str) &&
+           strstr(r, rank_str);
+}
+
+static bool zs_leaderboard_agrees(const char *r, int64_t points,
+                                  const char *pub_hex, const char *score_str)
+{
+    return points == 100 && strstr(r, pub_hex) /* publisher link */ &&
+           strstr(r, ">#1<") && strstr(r, score_str);
 }
 
 static int t_routes_and_agreement(const char *dd)
@@ -541,65 +696,33 @@ static int t_routes_and_agreement(const char *dd)
 
     /* Route coverage. */
     const char *r = zs_get(dd, "/zcode", &len);
-    ZS_CHECK("route /zcode: 200 + landing",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "Build, verify, and share exact C23 software") &&
-             strstr(r, "Browse exact packages") &&
-             strstr(r, "1") /* counts */);
+    ZS_CHECK("route /zcode: 200 + landing", zs_landing_ok(r, len));
 
     r = zs_get(dd, "/zcode/packages", &len);
     ZS_CHECK("route /zcode/packages: 200 + row",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "alice/demo") && strstr(r, root_hex));
+             zs_packages_ok(r, len, root_hex));
 
     char route[160];
     snprintf(route, sizeof(route), "/zcode/package/%s", root_hex);
     r = zs_get(dd, route, &len);
     ZS_CHECK("route /zcode/package/<root>: 200 + envelope + signature",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "What it does") &&
-             strstr(r, "Try it") &&
-             strstr(r, "Change it") &&
-             strstr(r, "Tell your agent") &&
-             !strstr(r, "Workshop") &&
-             strstr(r, "What changed") &&
-             strstr(r, "Verify") &&
-             strstr(r, "Use and share") &&
-             strstr(r, "No runnable example is published") &&
-             strstr(r, "<details") &&
-             strstr(r, "Signed release envelope") &&
-             strstr(r, "publisher signature") &&
-             strstr(r, "Verifier attestations") &&
-             strstr(r, "LICENSE"));
+             zs_package_envelope_ok(r, len) && zs_package_sections_ok(r));
 
     snprintf(route, sizeof(route), "/zcode/publisher/%s", pub_hex);
     r = zs_get(dd, route, &len);
     ZS_CHECK("route /zcode/publisher/<key>: 200 + score + badge",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "Contributor profile") &&
-             strstr(r, "ZCODE Score") && strstr(r, "first-package"));
+             zs_publisher_ok(r, len));
 
     r = zs_get(dd, "/zcode/leaderboard", &len);
     ZS_CHECK("route /zcode/leaderboard: 200 selector",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "Daily") && strstr(r, "All-time"));
+             zs_leaderboard_ok(r, len));
 
-    const char *periods[] = {"daily", "weekly", "monthly", "all"};
-    bool period_ok = true;
-    for (size_t i = 0; i < 4; i++) {
-        snprintf(route, sizeof(route), "/zcode/leaderboard/%s",
-                 periods[i]);
-        r = zs_get(dd, route, &len);
-        if (!(len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-              strstr(r, "ZCODE Rankings")))
-            period_ok = false;
-    }
+    bool period_ok = zs_leaderboard_periods_ok(dd);
     ZS_CHECK("route /zcode/leaderboard/<all four periods>: 200", period_ok);
 
     r = zs_get(dd, "/zcode/badges", &len);
     ZS_CHECK("route /zcode/badges: 200 + badge row",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "ZCODE Badges") && strstr(r, "first-package"));
+             zs_badges_ok(r, len));
 
     /* ── projection agreement: commands vs pages over the same store ── */
 
@@ -610,19 +733,13 @@ static int t_routes_and_agreement(const char *dd)
     (void)json_push_kv_str(&c.input, "keyword", "demo");
     zcl_native_handle_zcode_package_search(&c.request, &c.reply);
     const struct json_value *rows = json_get(&c.reply.data, "results");
-    const struct json_value *row0 = rows ? json_at(rows, 0) : NULL;
-    const char *cmd_name =
-        row0 ? json_get_str(json_get(row0, "name")) : NULL;
-    const char *cmd_semver =
-        row0 ? json_get_str(json_get(row0, "semver")) : NULL;
-    const char *cmd_root =
-        row0 ? json_get_str(json_get(row0, "package_root")) : NULL;
+    const struct json_value *row0 = zs_json_at0(rows);
+    const char *cmd_name = zs_json_str(row0, "name");
+    const char *cmd_semver = zs_json_str(row0, "semver");
+    const char *cmd_root = zs_json_str(row0, "package_root");
     r = zs_get(dd, "/zcode/packages?q=demo", &len);
     ZS_CHECK("agreement: search row == packages page",
-             cmd_name && cmd_semver && cmd_root &&
-             strstr(r, cmd_name) && strstr(r, cmd_semver) &&
-             strstr(r, cmd_root) &&
-             json_get_int(json_get(&c.reply.data, "total_matches")) == 1);
+             zs_search_agrees(&c, r, cmd_name, cmd_semver, cmd_root));
     zs_cmd_free(&c);
 
     /* zcode.package.show ↔ /zcode/package/<root> (byte/file counts). */
@@ -638,8 +755,7 @@ static int t_routes_and_agreement(const char *dd)
     snprintf(route, sizeof(route), "/zcode/package/%s", root_hex);
     r = zs_get(dd, route, &len);
     ZS_CHECK("agreement: show counts == package page",
-             cmd_bytes > 0 && cmd_files == 2 && strstr(r, bytes_str) &&
-             strstr(r, "LICENSE") && strstr(r, "src/x.c"));
+             zs_show_agrees(r, cmd_bytes, cmd_files, bytes_str));
     zs_cmd_free(&c);
 
     /* zcode.contributor.show ↔ /zcode/publisher/<key> (earned score). */
@@ -648,15 +764,11 @@ static int t_routes_and_agreement(const char *dd)
     (void)json_push_kv_str(&c.input, "pubkey", pub_hex);
     zcl_native_handle_zcode_contributor_show(&c.request, &c.reply);
     const struct json_value *rewards = json_get(&c.reply.data, "rewards");
-    int64_t cmd_score =
-        rewards ? json_get_int(json_get(rewards, "earned_score")) : -1;
+    int64_t cmd_score = zs_json_int(rewards, "earned_score");
     const struct json_value *ranks = json_get(&c.reply.data, "rankings");
-    const struct json_value *rank_periods =
-        ranks ? json_get(ranks, "periods") : NULL;
-    const struct json_value *overall =
-        rank_periods ? json_get(rank_periods, "all-time") : NULL;
-    int64_t cmd_rank =
-        overall ? json_get_int(json_get(overall, "rank")) : -1;
+    const struct json_value *rank_periods = zs_json_child(ranks, "periods");
+    const struct json_value *overall = zs_json_child(rank_periods, "all-time");
+    int64_t cmd_rank = zs_json_int(overall, "rank");
     snprintf(route, sizeof(route), "/zcode/publisher/%s", pub_hex);
     r = zs_get(dd, route, &len);
     char score_str[24], rank_str[24];
@@ -665,8 +777,8 @@ static int t_routes_and_agreement(const char *dd)
     snprintf(rank_str, sizeof(rank_str), "#%llu",
              (unsigned long long)cmd_rank);
     ZS_CHECK("agreement: contributor score + rank == publisher page",
-             cmd_score == 100 && cmd_rank == 1 && strstr(r, score_str) &&
-             strstr(r, rank_str));
+             zs_contributor_agrees(r, cmd_score, cmd_rank, score_str,
+                                   rank_str));
     zs_cmd_free(&c);
 
     /* zcode.leaderboard.all ↔ /zcode/leaderboard/all. */
@@ -674,16 +786,72 @@ static int t_routes_and_agreement(const char *dd)
     (void)json_push_kv_str(&c.input, "datadir", dd);
     zcl_native_handle_zcode_leaderboard_all(&c.request, &c.reply);
     const struct json_value *lb_rows = json_get(&c.reply.data, "rows");
-    const struct json_value *lb0 = lb_rows ? json_at(lb_rows, 0) : NULL;
-    int64_t cmd_points =
-        lb0 ? json_get_int(json_get(lb0, "points")) : -1;
+    const struct json_value *lb0 = zs_json_at0(lb_rows);
+    int64_t cmd_points = zs_json_int(lb0, "points");
     r = zs_get(dd, "/zcode/leaderboard/all", &len);
     ZS_CHECK("agreement: leaderboard.all row == rankings page",
-             cmd_points == 100 && strstr(r, pub_hex) /* publisher link */ &&
-             strstr(r, ">#1<") && strstr(r, score_str));
+             zs_leaderboard_agrees(r, cmd_points, pub_hex, score_str));
     zs_cmd_free(&c);
 
     return failures;
+}
+
+/* The manifest route's headers: 200, attachment and nosniff. */
+static bool zs_manifest_headers_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "Content-Type: engine/application/octet-stream") &&
+           strstr(r, "Content-Disposition: attachment; filename="
+                     "\"zcode-manifest-") &&
+           strstr(r, "X-Content-Type-Options: nosniff");
+}
+
+/* The persisted manifest wire bytes for root_hex. The buffer is always
+ * allocated; *len_out is the number of bytes read. */
+static uint8_t *zs_read_manifest_disk(const char *dd, const char *root_hex,
+                                      size_t *len_out)
+{
+    char mpath[512];
+    snprintf(mpath, sizeof(mpath), "%s/zcode/manifests/%s", dd, root_hex);
+    FILE *f = fopen(mpath, "rb");
+    uint8_t *disk = malloc(VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES);
+    *len_out = (f && disk)
+        ? fread(disk, 1, VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES, f) : 0;
+    if (f)
+        fclose(f);
+    return disk;
+}
+
+/* The chunk route's body is exactly the chunk bytes, as an attachment. */
+static bool zs_chunk_bytes_ok(const char *r, size_t len, const char *body,
+                              const char *lic)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "Content-Disposition: attachment") && body &&
+           (size_t)(r + len - (body + 4)) == strlen(lic) &&
+           memcmp(body + 4, lic, strlen(lic)) == 0;
+}
+
+/* Corrupt the CAS object: a named integrity failure, never bytes. */
+static int zs_corrupt_chunk_object(const char *dd, const char *lic)
+{
+    char cpath[512];
+    uint8_t hash[32];
+    (void)vcs_package_chunk_hash((const uint8_t *)lic, strlen(lic), hash);
+    char hh[65];
+    for (size_t i = 0; i < 32; i++)
+        snprintf(hh + 2 * i, 3, "%02x", hash[i]);
+    snprintf(cpath, sizeof(cpath), "%s/zcode/cas/sha3/%02x/%s", dd,
+             hash[0], hh);
+    FILE *f = fopen(cpath, "r+b");
+    int corrupt_ok = 0;
+    if (f) {
+        int ch = fgetc(f);
+        rewind(f);
+        fputc(ch ^ 0xff, f);
+        corrupt_ok = fclose(f) == 0;
+    }
+    return corrupt_ok;
 }
 
 /* ══ 3. downloads: exact bytes + attachment semantics ════════════════ */
@@ -698,21 +866,11 @@ static int t_downloads(const char *dd, const char *root_hex,
     /* Manifest: exact persisted wire bytes, attachment semantics. */
     snprintf(route, sizeof(route), "/zcode/download/%s", root_hex);
     const char *r = zs_get(dd, route, &len);
-    bool hdr_ok = len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-                  strstr(r, "Content-Type: engine/application/octet-stream") &&
-                  strstr(r, "Content-Disposition: attachment; filename="
-                            "\"zcode-manifest-") &&
-                  strstr(r, "X-Content-Type-Options: nosniff");
+    bool hdr_ok = zs_manifest_headers_ok(r, len);
     ZS_CHECK("download manifest: 200 + attachment + nosniff", hdr_ok);
 
-    char mpath[512];
-    snprintf(mpath, sizeof(mpath), "%s/zcode/manifests/%s", dd, root_hex);
-    FILE *f = fopen(mpath, "rb");
-    uint8_t *disk = malloc(VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES);
-    size_t disk_len = (f && disk)
-        ? fread(disk, 1, VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES, f) : 0;
-    if (f)
-        fclose(f);
+    size_t disk_len = 0;
+    uint8_t *disk = zs_read_manifest_disk(dd, root_hex, &disk_len);
     const char *body = strstr(r, "\r\n\r\n");
     ZS_CHECK("download manifest: exact CAS bytes",
              body && disk_len > 0 &&
@@ -726,10 +884,7 @@ static int t_downloads(const char *dd, const char *root_hex,
     r = zs_get(dd, route, &len);
     body = strstr(r, "\r\n\r\n");
     ZS_CHECK("download chunk 0/0: exact chunk bytes + attachment",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "Content-Disposition: attachment") && body &&
-             (size_t)(r + len - (body + 4)) == strlen(lic) &&
-             memcmp(body + 4, lic, strlen(lic)) == 0);
+             zs_chunk_bytes_ok(r, len, body, lic));
 
     /* Chunk (1,0) = src/x.c. */
     snprintf(route, sizeof(route), "/zcode/download/%s/1/0", root_hex);
@@ -744,23 +899,7 @@ static int t_downloads(const char *dd, const char *root_hex,
     ZS_CHECK("download chunk 0/9: 404",
              len > 0 && strstr(r, "HTTP/1.1 404") == r);
 
-    /* Corrupt the CAS object: a named integrity failure, never bytes. */
-    char cpath[512];
-    uint8_t hash[32];
-    (void)vcs_package_chunk_hash((const uint8_t *)lic, strlen(lic), hash);
-    char hh[65];
-    for (size_t i = 0; i < 32; i++)
-        snprintf(hh + 2 * i, 3, "%02x", hash[i]);
-    snprintf(cpath, sizeof(cpath), "%s/zcode/cas/sha3/%02x/%s", dd,
-             hash[0], hh);
-    f = fopen(cpath, "r+b");
-    int corrupt_ok = 0;
-    if (f) {
-        int ch = fgetc(f);
-        rewind(f);
-        fputc(ch ^ 0xff, f);
-        corrupt_ok = fclose(f) == 0;
-    }
+    int corrupt_ok = zs_corrupt_chunk_object(dd, lic);
     snprintf(route, sizeof(route), "/zcode/download/%s/0/0", root_hex);
     r = zs_get(dd, route, &len);
     ZS_CHECK("download corrupted chunk: 500 integrity, no bytes",
