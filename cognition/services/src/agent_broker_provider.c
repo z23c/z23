@@ -132,6 +132,70 @@ static bool scope_from_canonical(const struct metaverse_grant *g,
     return true;
 }
 
+/* The fail-closed configuration refusals, in their binding order: each one
+ * refuses by name before anything is minted or read. Returns true when the
+ * configuration refused, false when binding may proceed. */
+static bool bind_config_refused(const struct broker_provider_ctx *c,
+                                char *why, size_t why_cap)
+{
+    if (!c->composed) {
+        refuse(why, why_cap,
+               "the broker provider was never composed: no configuration and "
+               "therefore no authority");
+        return true;
+    }
+    if (c->grant_id[0] && c->grant_spec[0]) {
+        refuse(why, why_cap,
+               "--grant-id= and --grant-spec= were both given; the operator "
+               "must name ONE authority, not two");
+        return true;
+    }
+    if (!c->grant_id[0] && !c->grant_spec[0]) {
+        /* THE FAIL-CLOSED DEFAULT. Registration by itself is not
+         * provisioning: with no operator-selected grant source there is no
+         * authority, and the broker serves named refusals rather than
+         * inventing a default grant nobody issued. */
+        refuse(why, why_cap,
+               "no --grant-id= and no --grant-spec=: this broker is UNGRANTED "
+               "(registering a provider grants nothing)");
+        return true;
+    }
+    if (!c->datadir[0]) {
+        refuse(why, why_cap,
+               "no -datadir=DIR: the broker will not guess a datadir, because "
+               "the guess would be the operator's live node");
+        return true;
+    }
+    return false;
+}
+
+/* Resolve the operator's ONE named authority into `id`: mint a fresh grant and
+ * its custody bindings from --grant-spec=, or copy --grant-id=. Returns NULL
+ * when the identity resolved, otherwise the fallback refusal text the caller
+ * records when the spec itself was refused. */
+static const char *bind_resolve_grant_identity(struct broker_provider_ctx *c,
+                                               char *id, size_t id_cap,
+                                               char *why, size_t why_cap)
+{
+    if (c->grant_spec[0]) {
+        /* MINTED HERE AND NOWHERE EARLIER. bind runs after the confined child
+         * has been forked, so the grant this creates was never in the child's
+         * copy-on-write image. */
+        if (!broker_provider_mint_from_spec(c->grant_spec, id, id_cap, why,
+                                            why_cap))
+            return "the grant specification was refused";
+        snprintf(c->source, sizeof(c->source), "grant-spec");
+        if (!broker_provider_money_from_spec(
+                c->grant_spec, c->money, AGENT_MONEY_BINDINGS_MAX,
+                &c->money_count, why, why_cap))
+            return "custody bindings were refused";
+    } else {
+        snprintf(id, id_cap, "%s", c->grant_id);
+        snprintf(c->source, sizeof(c->source), "grant-id");
+    }
+    return NULL;
+}
+
 static bool provider_bind(void *ctx, struct agent_authority_ref *out,
                           char *why, size_t why_cap)
 {
@@ -142,58 +206,16 @@ static bool provider_bind(void *ctx, struct agent_authority_ref *out,
     c->bound = false;
     c->refusal[0] = '\0';
 
-    if (!c->composed) {
-        refuse(why, why_cap,
-               "the broker provider was never composed: no configuration and "
-               "therefore no authority");
+    if (bind_config_refused(c, why, why_cap))
         return false;
-    }
-    if (c->grant_id[0] && c->grant_spec[0]) {
-        refuse(why, why_cap,
-               "--grant-id= and --grant-spec= were both given; the operator "
-               "must name ONE authority, not two");
-        return false;
-    }
-    if (!c->grant_id[0] && !c->grant_spec[0]) {
-        /* THE FAIL-CLOSED DEFAULT. Registration by itself is not
-         * provisioning: with no operator-selected grant source there is no
-         * authority, and the broker serves named refusals rather than
-         * inventing a default grant nobody issued. */
-        refuse(why, why_cap,
-               "no --grant-id= and no --grant-spec=: this broker is UNGRANTED "
-               "(registering a provider grants nothing)");
-        return false;
-    }
-    if (!c->datadir[0]) {
-        refuse(why, why_cap,
-               "no -datadir=DIR: the broker will not guess a datadir, because "
-               "the guess would be the operator's live node");
-        return false;
-    }
 
     char id[METAVERSE_GRANT_ID_LEN + 1];
-    if (c->grant_spec[0]) {
-        /* MINTED HERE AND NOWHERE EARLIER. bind runs after the confined child
-         * has been forked, so the grant this creates was never in the child's
-         * copy-on-write image. */
-        if (!broker_provider_mint_from_spec(c->grant_spec, id, sizeof(id), why,
-                                            why_cap)) {
-            snprintf(c->refusal, sizeof(c->refusal), "%s",
-                     why && why[0] ? why : "the grant specification was "
-                                           "refused");
-            return false;
-        }
-        snprintf(c->source, sizeof(c->source), "grant-spec");
-        if (!broker_provider_money_from_spec(
-                c->grant_spec, c->money, AGENT_MONEY_BINDINGS_MAX,
-                &c->money_count, why, why_cap)) {
-            snprintf(c->refusal, sizeof(c->refusal), "%s",
-                     why && why[0] ? why : "custody bindings were refused");
-            return false;
-        }
-    } else {
-        snprintf(id, sizeof(id), "%s", c->grant_id);
-        snprintf(c->source, sizeof(c->source), "grant-id");
+    const char *identity_refusal =
+        bind_resolve_grant_identity(c, id, sizeof(id), why, why_cap);
+    if (identity_refusal) {
+        snprintf(c->refusal, sizeof(c->refusal), "%s",
+                 why && why[0] ? why : identity_refusal);
+        return false;
     }
 
     struct metaverse_grant g;
@@ -256,75 +278,45 @@ static int32_t status_from_reason(enum property_grant_reason r)
     }
 }
 
-/* One authorize attempt over one snapshot. `*moved` is set when the store
- * changed under the decision, which is the caller's cue to retry once. */
-static int32_t authorize_attempt(const struct broker_provider_ctx *c,
-                                 const struct agent_authority_ref *ref,
-                                 const struct mvap_verb_row *row,
-                                 const struct mvap_request *req, bool *moved)
+/* The PURE canonical evaluation of one request over one snapshot, query form
+ * and action form. Returns MVAP_OK with the verdict in `*verdict`, or the
+ * wire status to answer instead when the request itself cannot be asked. */
+static int32_t canonical_verdict_from_request(
+    const struct agent_authority_ref *ref, const struct mvap_verb_row *row,
+    const struct mvap_request *req,
+    struct property_grant_authority_snapshot *snap,
+    const struct metaverse_grant **anc, size_t anc_count,
+    enum metaverse_grant_verdict *verdict)
 {
-    (void)c;
-    *moved = false;
-
-    struct property_grant_authority_snapshot snap;
-    enum property_grant_reason r =
-        property_grant_service_snapshot(ref->canonical_grant_id, &snap);
-    if (r != PROPERTY_GRANT_OK)
-        return status_from_reason(r);
-
-    const struct metaverse_grant *anc[METAVERSE_GRANT_MAX_DEPTH];
-    size_t anc_count = property_grant_snapshot_ancestors(&snap, anc);
-
-    /* The PURE decision, with no lock held. The clock comes from the snapshot,
-     * so expiry is measured against the same instant the recheck validates —
-     * not against a second reading that could straddle it. */
-    enum metaverse_grant_verdict verdict;
     if (row->verb_class == MVAP_VERB_CLASS_QUERY) {
         /* A canonical query request has no value column, so an amount on a
          * read cannot be silently dropped: it is a bad request. */
         if (req->value_zats != 0)
             return MVAP_ERR_BAD_REQUEST;
         struct metaverse_query_request qreq;
-        if (!mvap_request_to_query_request(req, ref->principal, snap.now_unix,
-                                           snap.height, &qreq))
+        if (!mvap_request_to_query_request(req, ref->principal, snap->now_unix,
+                                           snap->height, &qreq))
             return MVAP_ERR_BAD_REQUEST;
-        verdict = metaverse_grant_query_check(&snap.grant,
-                                              anc_count ? anc : NULL,
-                                              anc_count, &qreq);
+        *verdict = metaverse_grant_query_check(&snap->grant,
+                                               anc_count ? anc : NULL,
+                                               anc_count, &qreq);
     } else {
         struct metaverse_action_request areq;
-        if (!mvap_request_to_action_request(req, ref->principal, snap.now_unix,
-                                            snap.height, &areq))
+        if (!mvap_request_to_action_request(req, ref->principal, snap->now_unix,
+                                            snap->height, &areq))
             return MVAP_ERR_BAD_REQUEST;
-        verdict = metaverse_grant_check(&snap.grant, anc_count ? anc : NULL,
-                                        anc_count, &areq);
+        *verdict = metaverse_grant_check(&snap->grant, anc_count ? anc : NULL,
+                                         anc_count, &areq);
     }
+    return MVAP_OK;
+}
 
-    /* CONFIRM THE STATE HELD. Before this line the verdict is a computation
-     * over a copy; after it, and only if it passed, the verdict is a statement
-     * about the store. */
-    r = property_grant_service_recheck(&snap);
-    if (r == PROPERTY_GRANT_AUTHORITY_CHANGED) {
-        *moved = true;
-        return MVAP_ERR_AUTHORITY_CHANGED;
-    }
-    if (r != PROPERTY_GRANT_OK)
-        return status_from_reason(r);
-
-    if (verdict != METAVERSE_GRANT_OK)
-        return mvap_status_from_grant_verdict(verdict);
-
-    /* Delegation needs a child grant the wire cannot carry, so the canonical
-     * delegation check is unreachable from here. What IS checkable is whether
-     * the live grant permits delegating at all. Read from the snapshot that
-     * the recheck just validated, never from a session copy. */
-    enum metaverse_action action;
-    if (mvap_verb_row_action(row, &action) &&
-        action == METAVERSE_ACTION_DELEGATE &&
-        (!snap.grant.delegation_allowed ||
-         snap.grant.max_delegation_depth == 0))
-        return MVAP_ERR_DENIED_DELEGATION;
-
+/* The named refusals that do not consult the grant, applied after the verdict
+ * and the recheck, in their binding order. Returns MVAP_OK when none
+ * applies. */
+static int32_t post_verdict_refusal_status(const struct mvap_verb_row *row,
+                                           const struct mvap_request *req)
+{
     /* A verb that does not accept the all-zero "no specific property" id is
      * refused by name, from the join table's own column. The session's
      * confinement check (agent_broker_scope_check) says the same thing a step
@@ -362,6 +354,62 @@ static int32_t authorize_attempt(const struct broker_provider_ctx *c,
         return MVAP_ERR_QUERY_UNAVAILABLE;
 
     return MVAP_OK;
+}
+
+/* One authorize attempt over one snapshot. `*moved` is set when the store
+ * changed under the decision, which is the caller's cue to retry once. */
+static int32_t authorize_attempt(const struct broker_provider_ctx *c,
+                                 const struct agent_authority_ref *ref,
+                                 const struct mvap_verb_row *row,
+                                 const struct mvap_request *req, bool *moved)
+{
+    (void)c;
+    *moved = false;
+
+    struct property_grant_authority_snapshot snap;
+    enum property_grant_reason r =
+        property_grant_service_snapshot(ref->canonical_grant_id, &snap);
+    if (r != PROPERTY_GRANT_OK)
+        return status_from_reason(r);
+
+    const struct metaverse_grant *anc[METAVERSE_GRANT_MAX_DEPTH];
+    size_t anc_count = property_grant_snapshot_ancestors(&snap, anc);
+
+    /* The PURE decision, with no lock held. The clock comes from the snapshot,
+     * so expiry is measured against the same instant the recheck validates —
+     * not against a second reading that could straddle it. */
+    enum metaverse_grant_verdict verdict;
+    int32_t eval = canonical_verdict_from_request(ref, row, req, &snap, anc,
+                                                  anc_count, &verdict);
+    if (eval != MVAP_OK)
+        return eval;
+
+    /* CONFIRM THE STATE HELD. Before this line the verdict is a computation
+     * over a copy; after it, and only if it passed, the verdict is a statement
+     * about the store. */
+    r = property_grant_service_recheck(&snap);
+    if (r == PROPERTY_GRANT_AUTHORITY_CHANGED) {
+        *moved = true;
+        return MVAP_ERR_AUTHORITY_CHANGED;
+    }
+    if (r != PROPERTY_GRANT_OK)
+        return status_from_reason(r);
+
+    if (verdict != METAVERSE_GRANT_OK)
+        return mvap_status_from_grant_verdict(verdict);
+
+    /* Delegation needs a child grant the wire cannot carry, so the canonical
+     * delegation check is unreachable from here. What IS checkable is whether
+     * the live grant permits delegating at all. Read from the snapshot that
+     * the recheck just validated, never from a session copy. */
+    enum metaverse_action action;
+    if (mvap_verb_row_action(row, &action) &&
+        action == METAVERSE_ACTION_DELEGATE &&
+        (!snap.grant.delegation_allowed ||
+         snap.grant.max_delegation_depth == 0))
+        return MVAP_ERR_DENIED_DELEGATION;
+
+    return post_verdict_refusal_status(row, req);
 }
 
 static int32_t provider_authorize(void *ctx,

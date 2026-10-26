@@ -62,8 +62,6 @@ cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_receipt_v1_mat
 cognition/modules/session/src/mesh_terminal_worker.c:mesh_terminal_worker_spawn_platform_arm#2:26
 cognition/modules/session/src/zses.c:zses_invite_decode_json:23
 cognition/modules/session/src/zses.c:zses_pick_endpoint:25
-cognition/services/src/agent_broker_provider.c:authorize_attempt:20
-cognition/services/src/agent_broker_provider.c:provider_bind:20
 cognition/services/src/dev_reflex_policy_service.c:handoff_validate:24
 cognition/services/src/dev_reflex_policy_service.c:project_cycle:59
 cognition/services/src/experience_compilation_service.c:experience_compile_checked:41
