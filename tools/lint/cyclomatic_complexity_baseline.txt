@@ -953,7 +953,6 @@ engine/composition/src/boot_zcode_dht_rpc.c:rpc_publish_impl:46
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_swarm_frame:32
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_admit:23
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_publish_results:20
-engine/composition/src/boot_zcode_swarm_dht.c:boot_zcode_swarm_discovery_tick:27
 engine/composition/src/consensus_state_install_runtime.c:consensus_state_install_from_bundle#2:64
 engine/composition/src/consensus_state_install_runtime.c:icb_datadir_open_classify:17
 engine/composition/src/consensus_state_install_runtime.c:icb_read_source_receipt:24

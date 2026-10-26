@@ -201,6 +201,123 @@ static size_t apply_route(const uint8_t root[32], const uint64_t *ids,
     return offered;
 }
 
+/* Reap leases whose root left the work list (completed, failed, or
+ * newly advertised by anyone). The cancel cannot wait for a grace:
+ * polls stop for absent roots, so every unpolled second of grace is
+ * one more second a discovery slot sits stranded for the whole lane.
+ * Advertisements persist, so the root does not flicker back and the
+ * old flapping worry bought nothing worth eight slots' silence. */
+static void reap_absent_leases(const uint8_t roots[][32], size_t stalled)
+{
+    for (size_t i = 0; i < SWARM_DISCOVERY_MAX_LEASES; i++) {
+        struct swarm_discovery_lease *lease = &s_leases[i];
+        if (!lease->used ||
+            root_known(roots, stalled, lease->root))
+            continue;
+        /* Free the DHT operation slot with the lease so an adopted root
+         * hands its capacity to the next waiting demand at once. */
+        boot_zcode_dht_record_discovery_cancel(lease->operation_id,
+                                               lease->generation);
+        lease->used = false;
+    }
+}
+
+/* Leases currently holding one of the discovery slots. */
+static size_t count_discovering_leases(void)
+{
+    size_t active = 0;
+    for (size_t i = 0; i < SWARM_DISCOVERY_MAX_LEASES; i++)
+        active +=
+            s_leases[i].used && s_leases[i].state == LEASE_DISCOVERING;
+    return active;
+}
+
+/* Flip a lease into DISCOVERING and fire its begin() adapter. Returns
+ * the adapter's own begin() result; the caller parks the lease on a
+ * false return. */
+static bool lease_start_discovery(struct swarm_discovery_lease *lease,
+                                  uint64_t now_mono)
+{
+    lease->state = LEASE_DISCOVERING;
+    lease->next_mono = now_mono;
+    return s_ops->begin(s_ops->ctx, lease->root, now_mono,
+                        &lease->operation_id, &lease->generation);
+}
+
+/* Take a root with no lease yet into a free slot and start discovery. */
+static void adopt_root_for_discovery(const uint8_t root[32],
+                                     uint64_t now_mono, size_t *active)
+{
+    if (*active >= SWARM_DISCOVERY_MAX_LEASES)
+        return; /* honest cap: existing work advances first */
+    struct swarm_discovery_lease *fresh = NULL;
+    for (size_t i = 0; i < SWARM_DISCOVERY_MAX_LEASES && !fresh; i++)
+        if (!s_leases[i].used)
+            fresh = &s_leases[i];
+    if (!fresh)
+        return;
+    fresh->used = true;
+    memcpy(fresh->root, root, 32);
+    fresh->attempts = 0;
+    if (!lease_start_discovery(fresh, now_mono)) {
+        fresh->state = LEASE_RETRY;
+        fresh->next_mono =
+            now_mono + retry_delay(fresh->attempts++);
+    } else {
+        (*active)++;
+    }
+}
+
+/* Advance one DISCOVERING lease by a single poll: gate on the poll
+ * period, then park on retry or apply the completed route. */
+static void poll_discovering_lease(struct swarm_discovery_lease *lease,
+                                   uint64_t now_mono, size_t *active)
+{
+    if (now_mono < lease->next_mono)
+        return;
+    lease->next_mono = now_mono + SWARM_DISCOVERY_POLL_PERIOD_S;
+    int state = s_ops->poll(s_ops->ctx, lease->operation_id,
+                            lease->generation, now_mono);
+    if (state == VCS_ZCODE_DHT_RECORD_OPERATION_PENDING)
+        return;
+    (*active)--;
+    if (state != VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE) {
+        lease->state = LEASE_RETRY;
+        lease->next_mono =
+            now_mono + retry_delay(lease->attempts++);
+        return;
+    }
+    uint64_t ids[VCS_ZCODE_DHT_K];
+    uint64_t expires_at[VCS_ZCODE_DHT_K];
+    size_t count = 0;
+    if (s_ops->route(s_ops->ctx, lease->root, now_mono, ids, expires_at,
+                     VCS_ZCODE_DHT_K, &count) &&
+        apply_route(lease->root, ids, expires_at, count) > 0) {
+        /* Parked on RECHECK; stall-reap drops it when the root
+         * gets advertised (by us or anyone). */
+        lease->next_mono =
+            now_mono + SWARM_DISCOVERY_APPLIED_RECHECK_S;
+    } else {
+        lease->next_mono = now_mono + SWARM_DISCOVERY_ENROLL_WAIT_S;
+    }
+}
+
+/* Restart a parked RETRY lease once its backoff has expired and a
+ * discovery slot is free. */
+static void retry_lease_when_due(struct swarm_discovery_lease *lease,
+                                 uint64_t now_mono, size_t *active)
+{
+    if (now_mono < lease->next_mono ||
+        *active >= SWARM_DISCOVERY_MAX_LEASES)
+        return;
+    if (!lease_start_discovery(lease, now_mono)) {
+        lease->next_mono =
+            now_mono + retry_delay(lease->attempts++);
+    } else {
+        (*active)++;
+    }
+}
+
 void boot_zcode_swarm_discovery_tick(uint64_t now_mono)
 {
     if (!s_ops)
@@ -214,100 +331,23 @@ void boot_zcode_swarm_discovery_tick(uint64_t now_mono)
         vcs_swarm_engine_unadvertised_roots(engine, roots,
                                             SWARM_DISCOVERY_MAX_ROOTS);
 
-    /* Reap leases whose root left the work list (completed, failed, or
-     * newly advertised by anyone). The cancel cannot wait for a grace:
-     * polls stop for absent roots, so every unpolled second of grace is
-     * one more second a discovery slot sits stranded for the whole lane.
-     * Advertisements persist, so the root does not flicker back and the
-     * old flapping worry bought nothing worth eight slots' silence. */
-    for (size_t i = 0; i < SWARM_DISCOVERY_MAX_LEASES; i++) {
-        struct swarm_discovery_lease *lease = &s_leases[i];
-        if (!lease->used ||
-            root_known(roots, stalled, lease->root))
-            continue;
-        /* Free the DHT operation slot with the lease so an adopted root
-         * hands its capacity to the next waiting demand at once. */
-        boot_zcode_dht_record_discovery_cancel(lease->operation_id,
-                                               lease->generation);
-        lease->used = false;
-    }
+    reap_absent_leases(roots, stalled);
 
-    size_t active = 0;
-    for (size_t i = 0; i < SWARM_DISCOVERY_MAX_LEASES; i++)
-        active +=
-            s_leases[i].used && s_leases[i].state == LEASE_DISCOVERING;
+    size_t active = count_discovering_leases();
 
     for (size_t r = 0; r < stalled; r++) {
         struct swarm_discovery_lease *lease = lease_for(roots[r]);
         if (!lease) {
-            if (active >= SWARM_DISCOVERY_MAX_LEASES)
-                continue; /* honest cap: existing work advances first */
-            struct swarm_discovery_lease *fresh = NULL;
-            for (size_t i = 0; i < SWARM_DISCOVERY_MAX_LEASES && !fresh;
-                 i++)
-                if (!s_leases[i].used)
-                    fresh = &s_leases[i];
-            if (!fresh)
-                continue;
-            fresh->used = true;
-            memcpy(fresh->root, roots[r], 32);
-            fresh->attempts = 0;
-            fresh->state = LEASE_DISCOVERING;
-            fresh->next_mono = now_mono;
-            if (!s_ops->begin(s_ops->ctx, fresh->root, now_mono,
-                              &fresh->operation_id, &fresh->generation)) {
-                fresh->state = LEASE_RETRY;
-                fresh->next_mono =
-                    now_mono + retry_delay(fresh->attempts++);
-            } else {
-                active++;
-            }
+            adopt_root_for_discovery(roots[r], now_mono, &active);
             continue;
         }
 
         switch (lease->state) {
         case LEASE_DISCOVERING:
-            if (now_mono < lease->next_mono)
-                break;
-            lease->next_mono = now_mono + SWARM_DISCOVERY_POLL_PERIOD_S;
-            int state = s_ops->poll(s_ops->ctx, lease->operation_id,
-                                    lease->generation, now_mono);
-            if (state == VCS_ZCODE_DHT_RECORD_OPERATION_PENDING)
-                break;
-            active--;
-            if (state != VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE) {
-                lease->state = LEASE_RETRY;
-                lease->next_mono =
-                    now_mono + retry_delay(lease->attempts++);
-                break;
-            }
-            uint64_t ids[VCS_ZCODE_DHT_K];
-            uint64_t expires_at[VCS_ZCODE_DHT_K];
-            size_t count = 0;
-            if (s_ops->route(s_ops->ctx, lease->root, now_mono, ids, expires_at,
-                             VCS_ZCODE_DHT_K, &count) &&
-                apply_route(lease->root, ids, expires_at, count) > 0) {
-                /* Parked on RECHECK; stall-reap drops it when the root
-                 * gets advertised (by us or anyone). */
-                lease->next_mono =
-                    now_mono + SWARM_DISCOVERY_APPLIED_RECHECK_S;
-            } else {
-                lease->next_mono = now_mono + SWARM_DISCOVERY_ENROLL_WAIT_S;
-            }
+            poll_discovering_lease(lease, now_mono, &active);
             break;
         case LEASE_RETRY:
-            if (now_mono < lease->next_mono || active >=
-                                                   SWARM_DISCOVERY_MAX_LEASES)
-                break;
-            lease->state = LEASE_DISCOVERING;
-            lease->next_mono = now_mono;
-            if (!s_ops->begin(s_ops->ctx, lease->root, now_mono,
-                              &lease->operation_id, &lease->generation)) {
-                lease->next_mono =
-                    now_mono + retry_delay(lease->attempts++);
-            } else {
-                active++;
-            }
+            retry_lease_when_due(lease, now_mono, &active);
             break;
         case LEASE_IDLE:
             lease->used = false;
