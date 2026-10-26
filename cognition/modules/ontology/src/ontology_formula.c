@@ -608,7 +608,7 @@ bool zcl_ontology_derivation_v1_root(
     return true;
 }
 
-static bool horn_derivation_reason_part_0(uint8_t reason)
+static bool horn_derivation_budget_or_missing_clock_reason(uint8_t reason)
 {
     switch (reason) {
     case ZCL_ONTOLOGY_REASON_FACT_BUDGET:
@@ -623,7 +623,7 @@ static bool horn_derivation_reason_part_0(uint8_t reason)
     }
 }
 
-static bool horn_derivation_reason_part_1(uint8_t reason)
+static bool horn_derivation_invalid_clock_or_query_reason(uint8_t reason)
 {
     switch (reason) {
     case ZCL_ONTOLOGY_REASON_TIME_SOURCE_REGRESSED:
@@ -640,8 +640,8 @@ static bool horn_derivation_reason_part_1(uint8_t reason)
 
 static bool horn_derivation_reason_valid(uint8_t reason)
 {
-    return horn_derivation_reason_part_0(reason) ||
-           horn_derivation_reason_part_1(reason);
+    return horn_derivation_budget_or_missing_clock_reason(reason) ||
+           horn_derivation_invalid_clock_or_query_reason(reason);
 }
 
 static bool horn_derivation_status_valid(
