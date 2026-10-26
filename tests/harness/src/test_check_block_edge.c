@@ -113,56 +113,164 @@ static void cbe_build_block(struct block *b,
     }
 }
 
-int test_check_block_edge(void)
+/* Section 1: a coinbase-only block rides the merkle count==1 fast-path.
+ * Returns the number of failed checks. */
+static int cbe_check_single_tx_block(void)
 {
     int failures = 0;
     char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
     int  dos;
 
+    struct transaction txs[1];
+    cbe_coinbase_tx(&txs[0], 0x71);
+    struct block b;
+    cbe_build_block(&b, txs, 1);
+
+    /* The merkle root of a 1-tx block IS the single txid. */
+    CBE_CHECK("1-tx block: merkle root == sole txid",
+              uint256_eq(&b.header.hashMerkleRoot, &txs[0].hash));
+
+    /* Merkle check accepts (no mutation possible with one leaf). */
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result rm =
+        domain_consensus_check_block_merkle_root(
+            &b, reason, sizeof(reason), &dos);
+    CBE_CHECK("1-tx block: merkle -> OK, no mutation",
+              rm.ok && reason[0] == '\0' && dos == 0);
+
+    /* size+coinbase accepts a lone coinbase. */
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result rs =
+        domain_consensus_check_block_size_and_coinbase(
+            &b, reason, sizeof(reason), &dos);
+    CBE_CHECK("1-tx block: size+coinbase -> OK",
+              rs.ok && reason[0] == '\0' && dos == 0);
+
+    /* Now corrupt the header merkle root: a 1-tx block whose header
+     * does not encode the sole txid must reject bad-txnmrklroot. */
+    b.header.hashMerkleRoot.data[5] ^= 0x80;
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result rmbad =
+        domain_consensus_check_block_merkle_root(
+            &b, reason, sizeof(reason), &dos);
+    CBE_CHECK("1-tx block: corrupted header -> bad-txnmrklroot dos=100",
+              !rmbad.ok &&
+              rmbad.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_TXNMRKLROOT &&
+              strcmp(reason, "bad-txnmrklroot") == 0 &&
+              dos == 100);
+
+    for (size_t i = 0; i < 1; i++) transaction_free(&txs[i]);
+    return failures;
+}
+
+/* Check the merkle-root verdict for an n-leaf list (coinbase first,
+ * then n-1 distinct non-coinbase txs, markers base..base+n-1). When
+ * dup_final_pair is true the last leaf is overwritten with an explicit
+ * duplicate of its neighbour, which must be rejected as CVE-2012-2459
+ * malleability; when false the distinct leaves (legitimate odd-tree
+ * padding included) must pass clean. Returns the number of failed
+ * checks. */
+static int cbe_check_merkle_txid_list(size_t n, uint8_t base,
+                                      bool dup_final_pair,
+                                      const char *desc)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
+    struct transaction txs[6];   /* largest list used below: 6 leaves */
+
+    cbe_coinbase_tx(&txs[0], base);
+    for (size_t i = 1; i < n; i++)
+        cbe_noncoinbase_tx(&txs[i], (uint8_t)(base + i));
+    if (dup_final_pair) {
+        /* C,C as the final base-level pair */
+        /* E,E as the final base-level pair */
+        txs[n - 1].hash = txs[n - 2].hash;
+    }
+    struct block b;
+    cbe_build_block(&b, txs, n);
+
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result r =
+        domain_consensus_check_block_merkle_root(
+            &b, reason, sizeof(reason), &dos);
+    if (dup_final_pair) {
+        CBE_CHECK(desc,
+                  !r.ok &&
+                  r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_TXNS_DUP &&
+                  strcmp(reason, "bad-txns-duplicate") == 0 &&
+                  dos == 100);
+    } else {
+        CBE_CHECK(desc, r.ok && reason[0] == '\0' && dos == 0);
+    }
+
+    for (size_t i = 0; i < n; i++) transaction_free(&txs[i]);
+    return failures;
+}
+
+/* Check the aggregate-sigops verdict for a 1-tx coinbase block carrying
+ * exactly `total` legacy sigops. Returns the number of failed checks. */
+static int cbe_check_sigops_total(unsigned int total, uint8_t marker,
+                                  const char *desc, bool expect_reject)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
+
+    /* Helper: build a 1-tx coinbase block whose total legacy sigops is
+     * exactly `total` by laying down `total` OP_CHECKSIG bytes split
+     * across enough 10000-byte vout scripts. Returns the block + tx by
+     * out-params; caller frees the tx. */
+    #define OP_CHECKSIG_BYTE ((unsigned char)0xac)
+    #define SIGOPS_PER_SCRIPT 10000u
+
+    const size_t n_out = (total + SIGOPS_PER_SCRIPT - 1) / SIGOPS_PER_SCRIPT;
+    struct transaction tx;
+    transaction_init(&tx);
+    transaction_alloc(&tx, 1, n_out);
+    outpoint_set_null(&tx.vin[0].prevout);
+    tx.vin[0].sequence = UINT32_MAX;
+    unsigned int remaining = total;
+    for (size_t o = 0; o < n_out; o++) {
+        unsigned int here = remaining < SIGOPS_PER_SCRIPT
+                                ? remaining : SIGOPS_PER_SCRIPT;
+        tx.vout[o].value = 0;
+        tx.vout[o].script_pub_key.size = here;
+        memset(tx.vout[o].script_pub_key.data, OP_CHECKSIG_BYTE, here);
+        remaining -= here;
+    }
+    memset(tx.hash.data, 0, 32);
+    tx.hash.data[0] = marker;
+
+    struct block b;
+    cbe_build_block(&b, &tx, 1);
+
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result r =
+        domain_consensus_check_block_sigops(
+            &b, reason, sizeof(reason), &dos);
+    if (expect_reject) {
+        CBE_CHECK(desc,
+                  !r.ok &&
+                  r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_BLK_SIGOPS &&
+                  strcmp(reason, "bad-blk-sigops") == 0 &&
+                  dos == 100);
+    } else {
+        CBE_CHECK(desc, r.ok && reason[0] == '\0' && dos == 0);
+    }
+
+    transaction_free(&tx);
+    return failures;
+}
+
+int test_check_block_edge(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * 1. Single-tx (coinbase-only) block — merkle count==1 fast-path.
      * ================================================================ */
-    {
-        struct transaction txs[1];
-        cbe_coinbase_tx(&txs[0], 0x71);
-        struct block b;
-        cbe_build_block(&b, txs, 1);
-
-        /* The merkle root of a 1-tx block IS the single txid. */
-        CBE_CHECK("1-tx block: merkle root == sole txid",
-                  uint256_eq(&b.header.hashMerkleRoot, &txs[0].hash));
-
-        /* Merkle check accepts (no mutation possible with one leaf). */
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result rm =
-            domain_consensus_check_block_merkle_root(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("1-tx block: merkle -> OK, no mutation",
-                  rm.ok && reason[0] == '\0' && dos == 0);
-
-        /* size+coinbase accepts a lone coinbase. */
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result rs =
-            domain_consensus_check_block_size_and_coinbase(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("1-tx block: size+coinbase -> OK",
-                  rs.ok && reason[0] == '\0' && dos == 0);
-
-        /* Now corrupt the header merkle root: a 1-tx block whose header
-         * does not encode the sole txid must reject bad-txnmrklroot. */
-        b.header.hashMerkleRoot.data[5] ^= 0x80;
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result rmbad =
-            domain_consensus_check_block_merkle_root(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("1-tx block: corrupted header -> bad-txnmrklroot dos=100",
-                  !rmbad.ok &&
-                  rmbad.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_TXNMRKLROOT &&
-                  strcmp(reason, "bad-txnmrklroot") == 0 &&
-                  dos == 100);
-
-        for (size_t i = 0; i < 1; i++) transaction_free(&txs[i]);
-    }
+    failures += cbe_check_single_tx_block();
 
     /* ================================================================
      * 2. CVE-2012-2459 at deeper tree levels.
@@ -172,55 +280,13 @@ int test_check_block_edge(void)
      * code pads the last (even-positioned) pair with an identical leaf
      * at the base level of a 2-level tree, which the mutation detector
      * flags. Coinbase first, rest non-coinbase; tx[3].hash == tx[2].hash. */
-    {
-        struct transaction txs[4];
-        cbe_coinbase_tx(&txs[0], 0x10);
-        cbe_noncoinbase_tx(&txs[1], 0x11);
-        cbe_noncoinbase_tx(&txs[2], 0x12);
-        cbe_noncoinbase_tx(&txs[3], 0x13);
-        txs[3].hash = txs[2].hash;   /* C,C as the final base-level pair */
-        struct block b;
-        cbe_build_block(&b, txs, 4);
-
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result r =
-            domain_consensus_check_block_merkle_root(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("4-leaf [A,B,C,C] -> bad-txns-duplicate dos=100",
-                  !r.ok &&
-                  r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_TXNS_DUP &&
-                  strcmp(reason, "bad-txns-duplicate") == 0 &&
-                  dos == 100);
-
-        for (size_t i = 0; i < 4; i++) transaction_free(&txs[i]);
-    }
+    failures += cbe_check_merkle_txid_list(
+        4, 0x10, true, "4-leaf [A,B,C,C] -> bad-txns-duplicate dos=100");
 
     /* 6 leaves, final pair an explicit duplicate: [A,B,C,D,E,E]. Three
      * base-level pairs; the duplication is at the last. */
-    {
-        struct transaction txs[6];
-        cbe_coinbase_tx(&txs[0], 0x20);
-        cbe_noncoinbase_tx(&txs[1], 0x21);
-        cbe_noncoinbase_tx(&txs[2], 0x22);
-        cbe_noncoinbase_tx(&txs[3], 0x23);
-        cbe_noncoinbase_tx(&txs[4], 0x24);
-        cbe_noncoinbase_tx(&txs[5], 0x25);
-        txs[5].hash = txs[4].hash;   /* E,E as the final base-level pair */
-        struct block b;
-        cbe_build_block(&b, txs, 6);
-
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result r =
-            domain_consensus_check_block_merkle_root(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("6-leaf [A,B,C,D,E,E] -> bad-txns-duplicate dos=100",
-                  !r.ok &&
-                  r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_TXNS_DUP &&
-                  strcmp(reason, "bad-txns-duplicate") == 0 &&
-                  dos == 100);
-
-        for (size_t i = 0; i < 6; i++) transaction_free(&txs[i]);
-    }
+    failures += cbe_check_merkle_txid_list(
+        6, 0x20, true, "6-leaf [A,B,C,D,E,E] -> bad-txns-duplicate dos=100");
 
     /* ================================================================
      * 3. CVE negative controls — legitimate odd-tree padding MUST NOT
@@ -230,67 +296,19 @@ int test_check_block_edge(void)
 
     /* 3 leaves [A,B,C]: normal odd padding (the genuine last leaf C is
      * duplicated by the tree-walk, which is NOT a malleability flag). */
-    {
-        struct transaction txs[3];
-        cbe_coinbase_tx(&txs[0], 0x30);
-        cbe_noncoinbase_tx(&txs[1], 0x31);
-        cbe_noncoinbase_tx(&txs[2], 0x32);
-        struct block b;
-        cbe_build_block(&b, txs, 3);
-
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result r =
-            domain_consensus_check_block_merkle_root(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("3-leaf [A,B,C] distinct -> merkle OK (no false dup)",
-                  r.ok && reason[0] == '\0' && dos == 0);
-
-        for (size_t i = 0; i < 3; i++) transaction_free(&txs[i]);
-    }
+    failures += cbe_check_merkle_txid_list(
+        3, 0x30, false, "3-leaf [A,B,C] distinct -> merkle OK (no false dup)");
 
     /* 5 leaves [A,B,C,D,E] all distinct -> OK. */
-    {
-        struct transaction txs[5];
-        cbe_coinbase_tx(&txs[0], 0x40);
-        cbe_noncoinbase_tx(&txs[1], 0x41);
-        cbe_noncoinbase_tx(&txs[2], 0x42);
-        cbe_noncoinbase_tx(&txs[3], 0x43);
-        cbe_noncoinbase_tx(&txs[4], 0x44);
-        struct block b;
-        cbe_build_block(&b, txs, 5);
-
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result r =
-            domain_consensus_check_block_merkle_root(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("5-leaf [A,B,C,D,E] distinct -> merkle OK (no false dup)",
-                  r.ok && reason[0] == '\0' && dos == 0);
-
-        for (size_t i = 0; i < 5; i++) transaction_free(&txs[i]);
-    }
+    failures += cbe_check_merkle_txid_list(
+        5, 0x40, false,
+        "5-leaf [A,B,C,D,E] distinct -> merkle OK (no false dup)");
 
     /* 6 leaves [A,B,C,D,E,F] all distinct -> OK (the even-count sibling
      * of the [A,B,C,D,E,E] positive case above). */
-    {
-        struct transaction txs[6];
-        cbe_coinbase_tx(&txs[0], 0x50);
-        cbe_noncoinbase_tx(&txs[1], 0x51);
-        cbe_noncoinbase_tx(&txs[2], 0x52);
-        cbe_noncoinbase_tx(&txs[3], 0x53);
-        cbe_noncoinbase_tx(&txs[4], 0x54);
-        cbe_noncoinbase_tx(&txs[5], 0x55);
-        struct block b;
-        cbe_build_block(&b, txs, 6);
-
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result r =
-            domain_consensus_check_block_merkle_root(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("6-leaf [A,B,C,D,E,F] distinct -> merkle OK (no false dup)",
-                  r.ok && reason[0] == '\0' && dos == 0);
-
-        for (size_t i = 0; i < 6; i++) transaction_free(&txs[i]);
-    }
+    failures += cbe_check_merkle_txid_list(
+        6, 0x50, false,
+        "6-leaf [A,B,C,D,E,F] distinct -> merkle OK (no false dup)");
 
     /* ================================================================
      * 4. Aggregate sigops boundary: MAX_BLOCK_SIGOPS == 20000.
@@ -299,82 +317,20 @@ int test_check_block_edge(void)
      *    multiple vout scripts on a single coinbase tx.
      * ================================================================ */
 
-    /* Helper: build a 1-tx coinbase block whose total legacy sigops is
-     * exactly `total` by laying down `total` OP_CHECKSIG bytes split
-     * across enough 10000-byte vout scripts. Returns the block + tx by
-     * out-params; caller frees the tx. */
-    #define OP_CHECKSIG_BYTE ((unsigned char)0xac)
-    #define SIGOPS_PER_SCRIPT 10000u
-
     /* --- exactly 20000 sigops -> ACCEPT --- */
     {
         const unsigned int total = 20000u;          /* == limit */
-        const size_t n_out = (total + SIGOPS_PER_SCRIPT - 1) / SIGOPS_PER_SCRIPT;
-        struct transaction tx;
-        transaction_init(&tx);
-        transaction_alloc(&tx, 1, n_out);
-        outpoint_set_null(&tx.vin[0].prevout);
-        tx.vin[0].sequence = UINT32_MAX;
-        unsigned int remaining = total;
-        for (size_t o = 0; o < n_out; o++) {
-            unsigned int here = remaining < SIGOPS_PER_SCRIPT
-                                    ? remaining : SIGOPS_PER_SCRIPT;
-            tx.vout[o].value = 0;
-            tx.vout[o].script_pub_key.size = here;
-            memset(tx.vout[o].script_pub_key.data, OP_CHECKSIG_BYTE, here);
-            remaining -= here;
-        }
-        memset(tx.hash.data, 0, 32);
-        tx.hash.data[0] = 0x60;
-
-        struct block b;
-        cbe_build_block(&b, &tx, 1);
-
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result r =
-            domain_consensus_check_block_sigops(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("sigops == 20000 (limit) -> OK",
-                  r.ok && reason[0] == '\0' && dos == 0);
-
-        transaction_free(&tx);
+        failures += cbe_check_sigops_total(
+            total, 0x60, "sigops == 20000 (limit) -> OK", false);
     }
 
     /* --- exactly 20001 sigops -> REJECT bad-blk-sigops dos=100 --- */
     {
         const unsigned int total = 20001u;          /* limit + 1 */
-        const size_t n_out = (total + SIGOPS_PER_SCRIPT - 1) / SIGOPS_PER_SCRIPT;
-        struct transaction tx;
-        transaction_init(&tx);
-        transaction_alloc(&tx, 1, n_out);
-        outpoint_set_null(&tx.vin[0].prevout);
-        tx.vin[0].sequence = UINT32_MAX;
-        unsigned int remaining = total;
-        for (size_t o = 0; o < n_out; o++) {
-            unsigned int here = remaining < SIGOPS_PER_SCRIPT
-                                    ? remaining : SIGOPS_PER_SCRIPT;
-            tx.vout[o].value = 0;
-            tx.vout[o].script_pub_key.size = here;
-            memset(tx.vout[o].script_pub_key.data, OP_CHECKSIG_BYTE, here);
-            remaining -= here;
-        }
-        memset(tx.hash.data, 0, 32);
-        tx.hash.data[0] = 0x61;
-
-        struct block b;
-        cbe_build_block(&b, &tx, 1);
-
-        reason[0] = '\xff'; dos = -1;
-        struct zcl_result r =
-            domain_consensus_check_block_sigops(
-                &b, reason, sizeof(reason), &dos);
-        CBE_CHECK("sigops == 20001 (over limit) -> bad-blk-sigops dos=100",
-                  !r.ok &&
-                  r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_BLK_SIGOPS &&
-                  strcmp(reason, "bad-blk-sigops") == 0 &&
-                  dos == 100);
-
-        transaction_free(&tx);
+        failures += cbe_check_sigops_total(
+            total, 0x61,
+            "sigops == 20001 (over limit) -> bad-blk-sigops dos=100",
+            true);
     }
 
     return failures;
