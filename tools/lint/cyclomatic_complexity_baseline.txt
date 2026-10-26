@@ -1714,9 +1714,6 @@ tools/lint/lintc/gate_git_scan_a.c:check_simd_os_support_run:29
 tools/lint/lintc/gate_git_scan_a.c:edr_line:25
 tools/lint/lintc/gate_git_scan_a.c:ffs_scan_room:22
 tools/lint/lintc/gate_git_scan_a.c:nak_scan_file:17
-tools/lint/lintc/gate_source_fences.c:check_honest_witness_run:21
-tools/lint/lintc/gate_source_fences.c:check_mint_skip_crypto_offline_only_run:24
-tools/lint/lintc/gate_source_fences.c:hw_on_file:17
 tools/mind/mind_resident.c:mind_serve_posix:34
 tools/mint_v2_snapshot.c:main:72
 tools/native_ui_driver.c:main:72

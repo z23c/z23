@@ -219,6 +219,16 @@ static int hw_slurp(const char *path, char *buf, size_t cap)
     return 0;
 }
 
+static int hw_line_has_cr(const char *line, size_t n)
+{
+    return n && line[n - 1] == '\r';
+}
+
+static int hw_name_baselined(const struct hw_acc *a, const char *name)
+{
+    return strcmp(a->mode, "RATCHET") == 0 && sr_has(a->base, name);
+}
+
 static int hw_on_file(const char *path, void *ctx)
 {
     struct hw_acc *a = ctx;
@@ -236,7 +246,7 @@ static int hw_on_file(const char *path, void *ctx)
             return die("z23-lint: derived buffer overflow\n", "");
         memcpy(line, p, n);
         line[n] = '\0';
-        if (n && line[n - 1] == '\r')
+        if (hw_line_has_cr(line, n))
             line[n - 1] = '\0';
         if (hw_name_from_line(&a->re->sig, line, name, sizeof name)) {
             a->scanned++;
@@ -248,7 +258,7 @@ static int hw_on_file(const char *path, void *ctx)
                 if (rc) { a->failed = 1; return rc; }
                 const char *reason = hw_reason(code, a->re);
                 if (reason[0]) {
-                    if (strcmp(a->mode, "RATCHET") == 0 && sr_has(a->base, name))
+                    if (hw_name_baselined(a, name))
                         a->baselined++;
                     else {
                         a->violations++;
@@ -282,6 +292,34 @@ static int hw_direct_c(const char *dir)
     return hit;
 }
 
+static int hw_report_scan(
+    struct hw_acc *acc, const char *mode, struct hw_re *re)
+{
+    if (printf("[check_honest_witness] scanned %d witness(es) in %s\n",
+               acc->scanned, k_hw_cond) < 0
+        || printf("[check_honest_witness] %d violation(s) found (mode: %s)\n",
+                  acc->violations, mode) < 0) {
+        hw_drop(re);
+        return die("z23-lint: write failed\n", "");
+    }
+    if (acc->baselined > 0
+        && printf("[check_honest_witness] %d baselined violation(s) ignored\n",
+                  acc->baselined) < 0) {
+        hw_drop(re);
+        return die("z23-lint: write failed\n", "");
+    }
+    if (puts("[check_honest_witness] an honest witness reads OBSERVABLE progress (tip/cursor/H*/block_map/SELECT), never poison-absence or FSM state") == EOF
+        || puts("[check_honest_witness] document a reviewed exception with // honest-witness-ok:<reason>; baseline at tools/lint/honest_witness_baseline.txt (ratchet may only shrink)") == EOF) {
+        hw_drop(re);
+        return die("z23-lint: write failed\n", "");
+    }
+    hw_drop(re);
+    if (acc->violations > 0
+        && (strcmp(mode, "FAIL") == 0 || strcmp(mode, "RATCHET") == 0))
+        return 1;
+    return 0;
+}
+
 int check_honest_witness_run(int argc, char **argv)
 {
     (void)argc;
@@ -312,29 +350,7 @@ int check_honest_witness_run(int argc, char **argv)
         hw_drop(&re);
         return 2;
     }
-    if (printf("[check_honest_witness] scanned %d witness(es) in %s\n",
-               acc.scanned, k_hw_cond) < 0
-        || printf("[check_honest_witness] %d violation(s) found (mode: %s)\n",
-                  acc.violations, mode) < 0) {
-        hw_drop(&re);
-        return die("z23-lint: write failed\n", "");
-    }
-    if (acc.baselined > 0
-        && printf("[check_honest_witness] %d baselined violation(s) ignored\n",
-                  acc.baselined) < 0) {
-        hw_drop(&re);
-        return die("z23-lint: write failed\n", "");
-    }
-    if (puts("[check_honest_witness] an honest witness reads OBSERVABLE progress (tip/cursor/H*/block_map/SELECT), never poison-absence or FSM state") == EOF
-        || puts("[check_honest_witness] document a reviewed exception with // honest-witness-ok:<reason>; baseline at tools/lint/honest_witness_baseline.txt (ratchet may only shrink)") == EOF) {
-        hw_drop(&re);
-        return die("z23-lint: write failed\n", "");
-    }
-    hw_drop(&re);
-    if (acc.violations > 0
-        && (strcmp(mode, "FAIL") == 0 || strcmp(mode, "RATCHET") == 0))
-        return 1;
-    return 0;
+    return hw_report_scan(&acc, mode, &re);
 }
 
 static int hw_case(struct hw_re *re, const char *src, const char *name,
@@ -598,6 +614,47 @@ static int msc_resolve_root(int argc, char **argv, char *root, size_t cap)
     return 0;
 }
 
+static int msc_collect_scan(struct msc_set *scan)
+{
+    int rc = 0;
+    for (size_t i = 0; i < sizeof k_msc_roots / sizeof k_msc_roots[0]; i++) {
+        if (!sf_dir(k_msc_roots[i]))
+            continue;
+        rc = walk_src(k_msc_roots[i], 0, msc_on_file, scan);
+        if (rc) return rc;
+    }
+    return 0;
+}
+
+static int msc_report_fence(size_t used, const char *hits, const struct msc_set *scan)
+{
+    if (used == 0) {
+        if (printf("check_mint_skip_crypto_offline_only: OK — %s called only from the offline mint driver TUs (scanned %d files)\n",
+                   k_msc_setter, scan->count) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 0;
+    }
+    if (printf("\ncheck_mint_skip_crypto_offline_only: FAIL — OFFLINE-ONLY FENCE violated\n"
+               "\n"
+               "%s() was called outside the offline -mint-anchor mint driver. The\n"
+               "crypto pass-through is SOUND only for PRODUCING the fingerprint-certified\n"
+               "anchor snapshot offline; arming it anywhere a running node can reach it is a\n"
+               "signature/proof bypass on the live chain.\n"
+               "\n"
+               "Offending call site(s):\n", k_msc_setter) < 0
+        || fputs(hits, stdout) == EOF
+        || printf("\nFIX: only the offline mint driver may call %s. Allowed TUs:\n",
+                  k_msc_setter) < 0)
+        return die("z23-lint: write failed\n", "");
+    for (size_t i = 0; i < sizeof k_msc_allow / sizeof k_msc_allow[0]; i++)
+        if (printf("  - %s\n", k_msc_allow[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    if (puts("If you genuinely added a new mint-driver TU, add it to ALLOW in this gate") == EOF
+        || puts("deliberately AND keep it gated under ctx->mint_anchor — never relax the fence.") == EOF)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
 int check_mint_skip_crypto_offline_only_run(int argc, char **argv)
 {
     char root[4096];
@@ -610,12 +667,8 @@ int check_mint_skip_crypto_offline_only_run(int argc, char **argv)
     }
     static struct msc_set scan;
     scan.count = 0;
-    for (size_t i = 0; i < sizeof k_msc_roots / sizeof k_msc_roots[0]; i++) {
-        if (!sf_dir(k_msc_roots[i]))
-            continue;
-        rc = walk_src(k_msc_roots[i], 0, msc_on_file, &scan);
-        if (rc) return rc;
-    }
+    rc = msc_collect_scan(&scan);
+    if (rc) return rc;
     if (scan.count == 0) {
         fputs("check_mint_skip_crypto_offline_only: FAIL — empty scan set (no .c found)\n"
               "  This gate must scan a non-empty set; refusing to pass silently.\n",
@@ -659,31 +712,7 @@ int check_mint_skip_crypto_offline_only_run(int argc, char **argv)
         if (rc) { regfree(&re); return rc; }
     }
     regfree(&re);
-    if (used == 0) {
-        if (printf("check_mint_skip_crypto_offline_only: OK — %s called only from the offline mint driver TUs (scanned %d files)\n",
-                   k_msc_setter, scan.count) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 0;
-    }
-    if (printf("\ncheck_mint_skip_crypto_offline_only: FAIL — OFFLINE-ONLY FENCE violated\n"
-               "\n"
-               "%s() was called outside the offline -mint-anchor mint driver. The\n"
-               "crypto pass-through is SOUND only for PRODUCING the fingerprint-certified\n"
-               "anchor snapshot offline; arming it anywhere a running node can reach it is a\n"
-               "signature/proof bypass on the live chain.\n"
-               "\n"
-               "Offending call site(s):\n", k_msc_setter) < 0
-        || fputs(hits, stdout) == EOF
-        || printf("\nFIX: only the offline mint driver may call %s. Allowed TUs:\n",
-                  k_msc_setter) < 0)
-        return die("z23-lint: write failed\n", "");
-    for (size_t i = 0; i < sizeof k_msc_allow / sizeof k_msc_allow[0]; i++)
-        if (printf("  - %s\n", k_msc_allow[i]) < 0)
-            return die("z23-lint: write failed\n", "");
-    if (puts("If you genuinely added a new mint-driver TU, add it to ALLOW in this gate") == EOF
-        || puts("deliberately AND keep it gated under ctx->mint_anchor — never relax the fence.") == EOF)
-        return die("z23-lint: write failed\n", "");
-    return 1;
+    return msc_report_fence(used, hits, &scan);
 }
 
 int check_mint_skip_crypto_offline_only_selftest(void)
