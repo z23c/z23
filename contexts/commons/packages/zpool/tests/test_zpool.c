@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <limits.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -308,6 +309,7 @@ static void cli_child(FILE **files, char **args, enum cli_fault fault) {
   }
   if (fault == CLI_READ_ERROR && close(STDIN_FILENO) != 0) _Exit(125);
   if (fault == CLI_WRITE_ERROR && close(STDOUT_FILENO) != 0) _Exit(125);
+  errno = ERANGE;
   int rc = zpool_cli_main(3, args);
   if (fflush(stderr) == EOF) _Exit(125);
   _Exit(rc);
@@ -408,7 +410,44 @@ static void test_cli_refusals(void) {
   cli_case("16", "1", "a\n", CLI_WRITE_ERROR, 2, "", "zpool: write error\n");
 }
 
+static void cli_bad_index(const char *index) {
+  for (int free_op = 0; free_op < 2; free_op++) {
+    char ops[256], diagnostic[256];
+    char op = free_op ? 'f' : 'o';
+    int n = snprintf(ops, sizeof ops, "s\n%c %s\n", op, index);
+    int d = snprintf(diagnostic, sizeof diagnostic, "zpool: bad op '%c %s\n'", op, index);
+    if (n < 0 || (size_t)n >= sizeof ops || d < 0 || (size_t)d >= sizeof diagnostic) exit(2);
+    cli_case("16", "2", ops, CLI_OK, 2, "s -> free 2/2\n", diagnostic);
+  }
+}
+
+static void cli_bad_numbers(const char *text) {
+  cli_case(text, "2", "s\n", CLI_OK, 2, "", "zpool: BLOCK_SIZE must be 1..64\n");
+  cli_case("16", text, "s\n", CLI_OK, 2, "", "zpool: BLOCK_COUNT must be 1..4096\n");
+  cli_bad_index(text);
+}
+
+static void test_cli_numeric_signs(void) {
+  char negative_max[64], whitespace_negative[64], overflow[64];
+  int a = snprintf(negative_max, sizeof negative_max, "-%lu", ULONG_MAX);
+  int b = snprintf(whitespace_negative, sizeof whitespace_negative, " \t-%lu", ULONG_MAX);
+  int c = snprintf(overflow, sizeof overflow, "%lu0", ULONG_MAX);
+  if (a < 0 || b < 0 || c < 0 || (size_t)a >= sizeof negative_max ||
+      (size_t)b >= sizeof whitespace_negative || (size_t)c >= sizeof overflow) exit(2);
+  const char *bad[] = {negative_max, whitespace_negative, overflow, "-1", "", " \t", "1junk"};
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) cli_bad_numbers(bad[i]);
+  cli_case(" \t+16", " +2", "a\no -0\nf -0\ns\n", CLI_OK, 0,
+           "a -> 0\no 0 -> live\nf 0 -> ok\ns -> free 2/2\n", "");
+  cli_case("16", "2", "a\no +0\nf \t+0\n", CLI_OK, 0,
+           "a -> 0\no 0 -> live\nf 0 -> ok\n", "");
+  unsigned long index = ULONG_MAX;
+  errno = ERANGE;
+  CHECK(parse_index(" -0\n", 2, &index) && index == 0);
+  CHECK(errno != ERANGE);
+}
+
 int main(void) {
+  test_cli_numeric_signs();
   test_cli_capacity();
   test_cli_bounds();
   test_cli_sizing();

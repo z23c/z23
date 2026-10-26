@@ -21,6 +21,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <errno.h>
 
 #define MAX_BLOCK 64u
 #define MAX_BLOCKS 4096u
@@ -37,10 +39,24 @@ static bool init_pool(zpool *pool, size_t block_size, size_t count) {
   return zpool_init(pool, arena, stride * count, block_size);
 }
 
-static bool parse_index(const char *text, size_t count, unsigned long *index) {
+static bool parse_unsigned(const char *text, unsigned long *result, char **tail) {
+  const char *sign = text;
+  while (isspace((unsigned char)*sign)) sign++;
+  bool negative = *sign == '-';
+  errno = 0;
   char *end = NULL;
   unsigned long value = strtoul(text, &end, 10);
-  if (end == text || (*end && *end != '\n') || value >= count) return false;
+  if (end == text || errno == ERANGE || (negative && value != 0)) return false;
+  *result = value;
+  *tail = end;
+  return true;
+}
+
+static bool parse_index(const char *text, size_t count, unsigned long *index) {
+  char *end;
+  unsigned long value;
+  if (!parse_unsigned(text, &value, &end) ||
+      (*end && *end != '\n') || value >= count) return false;
   *index = value;
   return true;
 }
@@ -68,13 +84,13 @@ int main(int argc, char **argv) {
     return 2;
   }
   char *end = NULL;
-  unsigned long bs = strtoul(argv[1], &end, 10);
-  if (!end || *end || bs < 1 || bs > 64) {
+  unsigned long bs;
+  if (!parse_unsigned(argv[1], &bs, &end) || *end || bs < 1 || bs > 64) {
     fprintf(stderr, "zpool: BLOCK_SIZE must be 1..64\n");
     return 2;
   }
-  unsigned long bc = strtoul(argv[2], &end, 10);
-  if (!end || *end || bc < 1 || bc > MAX_BLOCKS) {
+  unsigned long bc;
+  if (!parse_unsigned(argv[2], &bc, &end) || *end || bc < 1 || bc > MAX_BLOCKS) {
     fprintf(stderr, "zpool: BLOCK_COUNT must be 1..%u\n", MAX_BLOCKS);
     return 2;
   }
