@@ -171,6 +171,20 @@ static int64_t badge_get_i64le(const uint8_t *p)
 
 /* ── error strings ──────────────────────────────────────────────────── */
 
+static const char *badge_error_string_signature(enum vcs_badge_error error)
+{
+    switch (error) {
+    case VCS_BADGE_ERR_EVIDENCE_ROOT: return "evidence-root-zero";
+    case VCS_BADGE_ERR_POLICY_ID: return "policy-id-zero";
+    case VCS_BADGE_ERR_SEQUENCE: return "sequence-zero";
+    case VCS_BADGE_ERR_RECIPIENT: return "recipient-pubkey";
+    case VCS_BADGE_ERR_ISSUER: return "issuer-pubkey";
+    case VCS_BADGE_ERR_SIG_LOW_S: return "signature-low-s";
+    case VCS_BADGE_ERR_SIG_VERIFY: return "signature-verify";
+    default: return "unknown-error";
+    }
+}
+
 const char *vcs_badge_error_string(enum vcs_badge_error error)
 {
     switch (error) {
@@ -182,15 +196,8 @@ const char *vcs_badge_error_string(enum vcs_badge_error error)
     case VCS_BADGE_ERR_WIRE_OVERSIZE: return "wire-length";
     case VCS_BADGE_ERR_TYPE: return "badge-type";
     case VCS_BADGE_ERR_PERIOD: return "achievement-period";
-    case VCS_BADGE_ERR_EVIDENCE_ROOT: return "evidence-root-zero";
-    case VCS_BADGE_ERR_POLICY_ID: return "policy-id-zero";
-    case VCS_BADGE_ERR_SEQUENCE: return "sequence-zero";
-    case VCS_BADGE_ERR_RECIPIENT: return "recipient-pubkey";
-    case VCS_BADGE_ERR_ISSUER: return "issuer-pubkey";
-    case VCS_BADGE_ERR_SIG_LOW_S: return "signature-low-s";
-    case VCS_BADGE_ERR_SIG_VERIFY: return "signature-verify";
+    default: return badge_error_string_signature(error);
     }
-    return "unknown-error";
 }
 
 const char *vcs_badge_persist_error_string(
@@ -849,6 +856,43 @@ uint64_t vcs_badge_store_max_sequence(const struct vcs_badge_store *s,
     return max_seq;
 }
 
+static size_t badge_store_contributor_count(
+    const struct vcs_badge_store *s, const struct vcs_badge_policy *policy,
+    const uint8_t contributor[33])
+{
+    size_t total = 0;
+    for (size_t i = 0; i < s->badge_count; i++) {
+        const struct vcs_badge *b = &s->badges[i].badge;
+        if (memcmp(b->recipient, contributor, 33) == 0 &&
+            vcs_badge_recognized(b, policy))
+            total++;
+    }
+    return total;
+}
+
+static const struct vcs_badge *badge_store_contributor_next_badge(
+    const struct vcs_badge_store *s, const struct vcs_badge_policy *policy,
+    const uint8_t contributor[33], bool have_last, uint64_t last_seq)
+{
+    const struct vcs_badge *best = NULL;
+    const uint8_t *best_id = NULL;
+    for (size_t i = 0; i < s->badge_count; i++) {
+        const struct vcs_badge *b = &s->badges[i].badge;
+        if (memcmp(b->recipient, contributor, 33) != 0 ||
+            !vcs_badge_recognized(b, policy))
+            continue;
+        if (have_last && b->sequence <= last_seq)
+            continue;
+        if (!best || b->sequence < best->sequence ||
+            (b->sequence == best->sequence &&
+             badge_id_cmp(s->badges[i].id, best_id) < 0)) {
+            best = b;
+            best_id = s->badges[i].id;
+        }
+    }
+    return best;
+}
+
 size_t vcs_badge_store_contributor_badges(
     const struct vcs_badge_store *s, const struct vcs_badge_policy *policy,
     const uint8_t contributor[33], struct vcs_badge *out, size_t cap)
@@ -858,35 +902,15 @@ size_t vcs_badge_store_contributor_badges(
     /* Selection sort by (sequence, badge id) over the recognized set —
      * the store is ascending by id, so a stable pass ordering by
      * sequence yields issuance order deterministically. */
-    size_t total = 0;
-    for (size_t i = 0; i < s->badge_count; i++) {
-        const struct vcs_badge *b = &s->badges[i].badge;
-        if (memcmp(b->recipient, contributor, 33) == 0 &&
-            vcs_badge_recognized(b, policy))
-            total++;
-    }
+    size_t total = badge_store_contributor_count(s, policy, contributor);
     if (!out || cap == 0)
         return total;
     size_t written = 0;
     uint64_t last_seq = 0;
     bool have_last = false;
     while (written < cap && written < total) {
-        const struct vcs_badge *best = NULL;
-        const uint8_t *best_id = NULL;
-        for (size_t i = 0; i < s->badge_count; i++) {
-            const struct vcs_badge *b = &s->badges[i].badge;
-            if (memcmp(b->recipient, contributor, 33) != 0 ||
-                !vcs_badge_recognized(b, policy))
-                continue;
-            if (have_last && b->sequence <= last_seq)
-                continue;
-            if (!best || b->sequence < best->sequence ||
-                (b->sequence == best->sequence &&
-                 badge_id_cmp(s->badges[i].id, best_id) < 0)) {
-                best = b;
-                best_id = s->badges[i].id;
-            }
-        }
+        const struct vcs_badge *best = badge_store_contributor_next_badge(
+            s, policy, contributor, have_last, last_seq);
         if (!best)
             break;
         out[written++] = *best;
@@ -1062,6 +1086,15 @@ static void badge_plan_id_compute(const struct vcs_badge_plan *plan,
     sha3_256_finalize(&c, out);
 }
 
+static size_t badge_plan_first_duplicate_row(
+    const struct vcs_badge_plan *plan)
+{
+    for (size_t i = 1; i < plan->row_count; i++)
+        if (badge_plan_row_cmp(&plan->rows[i - 1], &plan->rows[i]) == 0)
+            return i;
+    return plan->row_count;
+}
+
 bool vcs_badge_plan_assemble(const uint8_t policy_id[32],
                              const uint8_t issuer_pubkey[33],
                              int64_t planned_day,
@@ -1096,9 +1129,9 @@ bool vcs_badge_plan_assemble(const uint8_t policy_id[32],
     qsort(out->rows, out->row_count, sizeof(out->rows[0]),
           badge_plan_row_cmp);
     /* The canonical order forbids exact duplicate rows. */
-    for (size_t i = 1; i < out->row_count; i++)
-        if (badge_plan_row_cmp(&out->rows[i - 1], &out->rows[i]) == 0)
-            LOG_RETURN(false, BADGE_LOG, "duplicate plan row %zu", i);
+    size_t i = badge_plan_first_duplicate_row(out);
+    if (i < out->row_count)
+        LOG_RETURN(false, BADGE_LOG, "duplicate plan row %zu", i);
     badge_plan_id_compute(out, out->plan_id);
     return true;
 }

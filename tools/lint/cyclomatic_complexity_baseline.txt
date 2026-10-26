@@ -67,9 +67,6 @@ contexts/commons/modules/vcs/src/node_reproduce.c:vcs_node_reproduce_compare:26
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_error_string:35
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_parse:33
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_validate:47
-contexts/commons/modules/vcs/src/package_badge.c:vcs_badge_error_string:16
-contexts/commons/modules/vcs/src/package_badge.c:vcs_badge_plan_assemble:16
-contexts/commons/modules/vcs/src/package_badge.c:vcs_badge_store_contributor_badges:21
 contexts/commons/modules/vcs/src/package_badge_eligible.c:belig_facts_ledger:17
 contexts/commons/modules/vcs/src/package_badge_eligible.c:belig_facts_publish:16
 contexts/commons/modules/vcs/src/package_badge_eligible.c:vcs_badge_evaluate:44
