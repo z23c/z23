@@ -31,16 +31,31 @@ static const char *wallet_name(enum shop_status_wallet_v1 wallet)
     return NULL;
 }
 
-static bool render(const struct shop_status_view_input_v1 *input,
-                   struct shop_status_view_result_v1 *out)
+static int shop_status_view_input_valid(
+    const struct shop_status_view_input_v1 *input,
+    const struct shop_status_view_result_v1 *out)
 {
-    if (!input || !out || !wallet_name(input->wallet) ||
-        (input->identity_present && !input->address[0]))
-        return false;
-    memset(out, 0, sizeof(*out));
-    out->shop_live = input->tor_real && input->identity_present &&
+    if (!input || !out)
+        return -1;
+    if (wallet_name(input->wallet) &&
+        (!input->identity_present || input->address[0]))
+        return 0;
+    return -1;
+}
+
+static bool shop_status_view_is_live(
+    const struct shop_status_view_input_v1 *input)
+{
+    return input->tor_real && input->identity_present &&
         input->wallet == SHOP_STATUS_WALLET_ENCRYPTED &&
         input->node_db_present && input->store_schema && input->announced;
+}
+
+static void shop_status_view_fill_fields(
+    const struct shop_status_view_input_v1 *input,
+    struct shop_status_view_result_v1 *out)
+{
+    out->shop_live = shop_status_view_is_live(input);
     (void)snprintf(out->tor_build, sizeof(out->tor_build), "%s",
                    input->tor_real ? "real_tor" : "tor_stub");
     (void)snprintf(out->address, sizeof(out->address), "%s", input->address);
@@ -56,7 +71,56 @@ static bool render(const struct shop_status_view_input_v1 *input,
     if (input->identity_present)
         (void)snprintf(out->shop_url, sizeof(out->shop_url),
                        "http://%s.onion/store", input->address);
+}
 
+static bool shop_status_view_wallet_gap(
+    const struct shop_status_view_input_v1 *input, const char **gap,
+    const char **remedy)
+{
+    if (input->wallet == SHOP_STATUS_WALLET_PLAINTEXT) {
+        *gap = "wallet_plaintext_at_rest";
+        *remedy = SHOP_STATUS_WALLET_RECIPE;
+        return true;
+    }
+    if (input->wallet == SHOP_STATUS_WALLET_ABSENT) {
+        *gap = "wallet_absent";
+        *remedy = SHOP_STATUS_WALLET_RECIPE;
+        return true;
+    }
+    if (input->wallet == SHOP_STATUS_WALLET_UNREADABLE) {
+        *gap = "wallet_unreadable";
+        *remedy = "boot the node once to create node.db, then re-run "
+                  "z23 app shop status";
+        return true;
+    }
+    return false;
+}
+
+static bool shop_status_view_storage_gap(
+    const struct shop_status_view_input_v1 *input, const char **gap,
+    const char **remedy)
+{
+    if (!input->node_db_present) {
+        *gap = "node_db_missing";
+        *remedy = "boot the node once: node.db and the store schema are "
+                  "created on first boot";
+        return true;
+    }
+    if (!input->store_schema) {
+        *gap = "store_schema_missing";
+        *remedy = SHOP_STATUS_REMEDY_INIT;
+        return true;
+    }
+    return false;
+}
+
+static bool render(const struct shop_status_view_input_v1 *input,
+                   struct shop_status_view_result_v1 *out)
+{
+    if (shop_status_view_input_valid(input, out) != 0)
+        return false;
+    memset(out, 0, sizeof(*out));
+    shop_status_view_fill_fields(input, out);
     if (!input->tor_real &&
         !add_gap(out, "tor_stub_build", SHOP_STATUS_REMEDY_TOR))
         return false;
@@ -65,26 +129,14 @@ static bool render(const struct shop_status_view_input_v1 *input,
                  SHOP_STATUS_REMEDY_INIT " mints the persistent identity; then "
                  SHOP_STATUS_REMEDY_PERSIST))
         return false;
-    if (input->wallet == SHOP_STATUS_WALLET_PLAINTEXT &&
-        !add_gap(out, "wallet_plaintext_at_rest", SHOP_STATUS_WALLET_RECIPE))
+    const char *gap = NULL;
+    const char *remedy = NULL;
+    if (shop_status_view_wallet_gap(input, &gap, &remedy) &&
+        !add_gap(out, gap, remedy))
         return false;
-    if (input->wallet == SHOP_STATUS_WALLET_ABSENT &&
-        !add_gap(out, "wallet_absent", SHOP_STATUS_WALLET_RECIPE))
+    if (shop_status_view_storage_gap(input, &gap, &remedy) &&
+        !add_gap(out, gap, remedy))
         return false;
-    if (input->wallet == SHOP_STATUS_WALLET_UNREADABLE &&
-        !add_gap(out, "wallet_unreadable",
-                 "boot the node once to create node.db, then re-run "
-                 "z23 app shop status"))
-        return false;
-    if (!input->node_db_present) {
-        if (!add_gap(out, "node_db_missing",
-                     "boot the node once: node.db and the store schema are "
-                     "created on first boot"))
-            return false;
-    } else if (!input->store_schema &&
-               !add_gap(out, "store_schema_missing", SHOP_STATUS_REMEDY_INIT)) {
-        return false;
-    }
     if (!input->announced &&
         !add_gap(out, "shop_not_announced",
                  SHOP_STATUS_REMEDY_INIT
