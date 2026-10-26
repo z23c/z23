@@ -1307,9 +1307,6 @@ engine/services/src/op_return_backfill_service.c:zepoch_status_dump_state_json:1
 engine/services/src/oracle_policy.c:oracle_policy_record_disagreement:20
 engine/services/src/overlay_transaction_intent_service.c:overlay_transaction_intent_commit:32
 engine/services/src/overlay_transaction_intent_service.c:overlay_transaction_intent_plan:25
-engine/services/src/property_catalog_service.c:pc_znam_list:17
-engine/services/src/property_catalog_service.c:pc_zslp_list:18
-engine/services/src/property_catalog_service.c:property_catalog_list_with_sources:31
 engine/services/src/property_grant_commit.c:commit_attempt:35
 engine/services/src/recovery_policy.c:policy_load_from_env:16
 engine/services/src/reindex_epilogue.c:derive_authority_from_node_db_utxos:35

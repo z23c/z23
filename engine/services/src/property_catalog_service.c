@@ -75,6 +75,31 @@ static enum metaverse_source_lookup pc_znam_find(void *opaque,
     return METAVERSE_SOURCE_FOUND;
 }
 
+/* The ZNAM and ZSLP list sources share one contract for their outputs:
+ * clear them first, then judge the bounds once. Each source keeps its own
+ * LOG_FAIL so the refusal names the kind that was asked. */
+static void pc_list_clear_outputs(size_t *written_out, size_t *total_out,
+                                  bool *truncated_out)
+{
+    if (written_out)
+        *written_out = 0;
+    if (total_out)
+        *total_out = 0;
+    if (truncated_out)
+        *truncated_out = false;
+}
+
+static bool pc_list_args_invalid(const struct node_db *ndb,
+                                 const void *out, size_t out_cap,
+                                 const size_t *written_out,
+                                 const size_t *total_out,
+                                 const bool *truncated_out)
+{
+    return !ndb || !written_out || !total_out || !truncated_out ||
+           (!out && out_cap > 0) ||
+           out_cap > PROPERTY_CATALOG_PAGE_MAX;
+}
+
 static bool pc_znam_list(void *opaque, struct metaverse_znam_record *out,
                          size_t out_cap, size_t *written_out,
                          size_t *total_out, bool *truncated_out)
@@ -85,14 +110,9 @@ static bool pc_znam_list(void *opaque, struct metaverse_znam_record *out,
     size_t want;
     int got;
 
-    if (written_out)
-        *written_out = 0;
-    if (total_out)
-        *total_out = 0;
-    if (truncated_out)
-        *truncated_out = false;
-    if (!ndb || !written_out || !total_out || !truncated_out ||
-        (!out && out_cap > 0) || out_cap > PROPERTY_CATALOG_PAGE_MAX)
+    pc_list_clear_outputs(written_out, total_out, truncated_out);
+    if (pc_list_args_invalid(ndb, out, out_cap, written_out, total_out,
+                             truncated_out))
         LOG_FAIL(PC_LOG, "ZNAM list source received invalid bounds/outputs");
     if (!db_znam_count(ndb, &total))
         LOG_FAIL(PC_LOG, "canonical ZNAM registry count failed");
@@ -174,14 +194,9 @@ static bool pc_zslp_list(void *opaque, struct metaverse_zslp_record *out,
     size_t want;
     int got;
 
-    if (written_out)
-        *written_out = 0;
-    if (total_out)
-        *total_out = 0;
-    if (truncated_out)
-        *truncated_out = false;
-    if (!ndb || !written_out || !total_out || !truncated_out ||
-        (!out && out_cap > 0) || out_cap > PROPERTY_CATALOG_PAGE_MAX)
+    pc_list_clear_outputs(written_out, total_out, truncated_out);
+    if (pc_list_args_invalid(ndb, out, out_cap, written_out, total_out,
+                             truncated_out))
         LOG_FAIL(PC_LOG, "ZSLP list source received invalid bounds/outputs");
     if (!db_zslp_asset_count(ndb, &total))
         LOG_FAIL(PC_LOG, "canonical ZSLP asset count failed");
@@ -265,6 +280,160 @@ static void pc_row_begin(struct property_catalog_kind_row *row,
                                    : "adapter row has no reader and no reason");
 }
 
+/* A query may be absent (no filter, full page) or name UNKNOWN
+ * (unrestricted); any other kind it names must be a real property kind. */
+static bool pc_query_kind_ok(const struct property_catalog_query *q)
+{
+    return !q || q->kind == METAVERSE_KIND_UNKNOWN ||
+           metaverse_kind_valid(q->kind);
+}
+
+/* Adopt the query's kind filter and the tighter of the two limits. */
+static void pc_query_apply(const struct property_catalog_query *q,
+                           enum metaverse_kind *filter, size_t *limit)
+{
+    if (!q)
+        return;
+    *filter = q->kind;
+    if (q->limit && q->limit < *limit)
+        *limit = q->limit;
+}
+
+/* An adapter with no store gate is open by definition; otherwise the gate
+ * answers. The caller keeps the failure path and its reporting. */
+static bool pc_store_open_ok(const struct metaverse_adapter *adapter,
+                             struct metaverse_adapter_ctx *ctx, char *reason,
+                             size_t reason_cap)
+{
+    if (!adapter->store_ready)
+        return true;
+    return adapter->store_ready(ctx, reason, reason_cap);
+}
+
+static void pc_row_note_store_failure(struct property_catalog_kind_row *row,
+                                      struct property_catalog_page *out,
+                                      const char *ready_reason)
+{
+    snprintf(row->unavailable_reason_buf,
+             sizeof(row->unavailable_reason_buf), "%s",
+             ready_reason);
+    row->available = false;
+    row->unavailable_reason = row->unavailable_reason_buf;
+    /* The top-level disclosure is necessarily a summary when
+     * several independent authorities fail.  Preserve the first
+     * precise failure; each kind row always keeps its own. */
+    if (out->store_read)
+        snprintf(out->store_reason, sizeof(out->store_reason),
+                 "%s", ready_reason);
+    out->store_read = false;
+}
+
+/* How many more items still fit on the page under the caller's limit. */
+static size_t pc_page_room(size_t limit, size_t written)
+{
+    return limit > written ? limit - written : 0;
+}
+
+/* Record the report fields both listing paths take identically. */
+static void pc_row_take_report(
+    struct property_catalog_kind_row *row,
+    struct property_catalog_page *out,
+    const struct metaverse_adapter_list_report *report)
+{
+    row->total = report->total;
+    row->integrity_checked = true;
+    row->integrity_ok = report->integrity_ok;
+    row->integrity_gap_count = report->integrity_gap_count;
+    snprintf(row->integrity_reason,
+             sizeof(row->integrity_reason), "%s",
+             report->integrity_reason);
+    out->total_across_kinds += report->total;
+}
+
+/* Fold a row's integrity verdict into the page-level disclosure. */
+static void pc_page_note_row_integrity(
+    struct property_catalog_page *out,
+    const struct property_catalog_kind_row *row)
+{
+    if (!row->integrity_ok) {
+        out->integrity_ok = false;
+        out->integrity_gap_count += row->integrity_gap_count;
+        if (out->integrity_reason[0] == '\0')
+            snprintf(out->integrity_reason,
+                     sizeof(out->integrity_reason), "%s: %s",
+                     row->kind_name, row->integrity_reason[0]
+                                         ? row->integrity_reason
+                                         : "source integrity failed");
+    }
+}
+
+/* Sweep one adapter row: kind filter, availability, the store gate, then
+ * the listing itself. Every return here mirrors a `continue` of the
+ * caller's loop; the hard failures stay with the caller. */
+static void pc_scan_adapter_row(struct metaverse_adapter_ctx *ctx,
+                                const struct metaverse_adapter *adapter,
+                                enum metaverse_kind filter, size_t limit,
+                                struct property_catalog_page *out,
+                                struct property_catalog_kind_row *row)
+{
+    struct metaverse_adapter_list_report report;
+    char ready_reason[sizeof(row->unavailable_reason_buf)];
+    size_t room;
+
+    /* A filtered-out kind still gets its row, marked as not scanned:
+     * the reader must be able to tell "we did not look" from "there is
+     * nothing there". */
+    if (filter != METAVERSE_KIND_UNKNOWN && adapter->kind != filter) {
+        row->available = false;
+        row->unavailable_reason = "not scanned: excluded by the kind "
+                                  "filter";
+        return;
+    }
+    if (!row->available)
+        return;
+
+    /* Ask whether the authority can be READ before asking what it
+     * holds. A store that is present and unopenable must not come
+     * back through the counting path, because every count there is
+     * zero and zero is the same number an empty node reports. */
+    if (!pc_store_open_ok(adapter, ctx, ready_reason,
+                          sizeof(ready_reason))) {
+        pc_row_note_store_failure(row, out, ready_reason);
+        return;
+    }
+
+    room = pc_page_room(limit, out->count);
+    memset(&report, 0, sizeof(report));
+    if (room == 0) {
+        /* The page is full but the inventory question is still owed an
+         * honest answer, so ask for the total with a zero-width page. */
+        (void)adapter->list(ctx, NULL, 0, &report);
+        row->written   = 0;
+        row->truncated = report.total > 0 || report.truncated;
+        pc_row_take_report(row, out, &report);
+        if (row->truncated)
+            out->truncated = true;
+    } else {
+        row->written = adapter->list(
+            ctx, &out->items[out->count], room, &report);
+        row->truncated = report.truncated;
+        pc_row_take_report(row, out, &report);
+        out->count += row->written;
+        if (report.truncated)
+            out->truncated = true;
+    }
+    pc_page_note_row_integrity(out, row);
+}
+
+/* Count the kinds that could not be projected at all. */
+static void pc_page_count_unavailable(struct property_catalog_page *out)
+{
+    for (size_t i = 0; i < out->kind_count; i++) {
+        if (!out->kinds[i].available)
+            out->unavailable_kinds++;
+    }
+}
+
 struct zcl_result property_catalog_list_with_sources(
     const char *datadir, const struct property_catalog_query *q,
     const struct property_catalog_sources *sources,
@@ -286,15 +455,10 @@ struct zcl_result property_catalog_list_with_sources(
     if (!datadir || !*datadir)
         return ZCL_ERR(-2, "property_catalog_list: datadir is %s",
                        datadir ? "empty" : "NULL");
-    if (q) {
-        if (q->kind != METAVERSE_KIND_UNKNOWN &&
-            !metaverse_kind_valid(q->kind))
-            return ZCL_ERR(-3, "property_catalog_list: kind %d is not a "
-                               "property kind", (int)q->kind);
-        filter = q->kind;
-        if (q->limit && q->limit < limit)
-            limit = q->limit;
-    }
+    if (!pc_query_kind_ok(q))
+        return ZCL_ERR(-3, "property_catalog_list: kind %d is not a "
+                           "property kind", (int)q->kind);
+    pc_query_apply(q, &filter, &limit);
     if (!pc_ctx_init(&ctx, datadir, zcode_dir, sizeof(zcode_dir), sources,
                      &znam_source, &zslp_source))
         return ZCL_ERR(-4, "property_catalog_list: datadir path too long "
@@ -304,8 +468,6 @@ struct zcl_result property_catalog_list_with_sources(
     for (size_t i = 0; i < rows; i++) {
         const struct metaverse_adapter *adapter = metaverse_adapter_at(i);
         struct property_catalog_kind_row *row;
-        size_t room;
-        struct metaverse_adapter_list_report report;
 
         if (!adapter)
             return ZCL_ERR(-5, "property_catalog_list: adapter row %zu is "
@@ -316,94 +478,10 @@ struct zcl_result property_catalog_list_with_sources(
                                "than property kinds");
         row = &out->kinds[out->kind_count++];
         pc_row_begin(row, adapter);
-
-        /* A filtered-out kind still gets its row, marked as not scanned:
-         * the reader must be able to tell "we did not look" from "there is
-         * nothing there". */
-        if (filter != METAVERSE_KIND_UNKNOWN && adapter->kind != filter) {
-            row->available = false;
-            row->unavailable_reason = "not scanned: excluded by the kind "
-                                      "filter";
-            continue;
-        }
-        if (!row->available)
-            continue;
-
-        /* Ask whether the authority can be READ before asking what it
-         * holds. A store that is present and unopenable must not come
-         * back through the counting path, because every count there is
-         * zero and zero is the same number an empty node reports. */
-        if (adapter->store_ready) {
-            char ready_reason[sizeof(row->unavailable_reason_buf)];
-
-            if (!adapter->store_ready(&ctx, ready_reason,
-                                      sizeof(ready_reason))) {
-                snprintf(row->unavailable_reason_buf,
-                         sizeof(row->unavailable_reason_buf), "%s",
-                         ready_reason);
-                row->available = false;
-                row->unavailable_reason = row->unavailable_reason_buf;
-                /* The top-level disclosure is necessarily a summary when
-                 * several independent authorities fail.  Preserve the first
-                 * precise failure; each kind row always keeps its own. */
-                if (out->store_read)
-                    snprintf(out->store_reason, sizeof(out->store_reason),
-                             "%s", ready_reason);
-                out->store_read = false;
-                continue;
-            }
-        }
-
-        room = limit > out->count ? limit - out->count : 0;
-        memset(&report, 0, sizeof(report));
-        if (room == 0) {
-            /* The page is full but the inventory question is still owed an
-             * honest answer, so ask for the total with a zero-width page. */
-            (void)adapter->list(&ctx, NULL, 0, &report);
-            row->total     = report.total;
-            row->written   = 0;
-            row->truncated = report.total > 0 || report.truncated;
-            row->integrity_checked = true;
-            row->integrity_ok = report.integrity_ok;
-            row->integrity_gap_count = report.integrity_gap_count;
-            snprintf(row->integrity_reason,
-                     sizeof(row->integrity_reason), "%s",
-                     report.integrity_reason);
-            out->total_across_kinds += report.total;
-            if (row->truncated)
-                out->truncated = true;
-        } else {
-            row->written = adapter->list(
-                &ctx, &out->items[out->count], room, &report);
-            row->total = report.total;
-            row->truncated = report.truncated;
-            row->integrity_checked = true;
-            row->integrity_ok = report.integrity_ok;
-            row->integrity_gap_count = report.integrity_gap_count;
-            snprintf(row->integrity_reason,
-                     sizeof(row->integrity_reason), "%s",
-                     report.integrity_reason);
-            out->count += row->written;
-            out->total_across_kinds += report.total;
-            if (report.truncated)
-                out->truncated = true;
-        }
-        if (!row->integrity_ok) {
-            out->integrity_ok = false;
-            out->integrity_gap_count += row->integrity_gap_count;
-            if (out->integrity_reason[0] == '\0')
-                snprintf(out->integrity_reason,
-                         sizeof(out->integrity_reason), "%s: %s",
-                         row->kind_name, row->integrity_reason[0]
-                                             ? row->integrity_reason
-                                             : "source integrity failed");
-        }
+        pc_scan_adapter_row(&ctx, adapter, filter, limit, out, row);
     }
 
-    for (size_t i = 0; i < out->kind_count; i++) {
-        if (!out->kinds[i].available)
-            out->unavailable_kinds++;
-    }
+    pc_page_count_unavailable(out);
     if (out->kind_count != rows)
         return ZCL_ERR(-7, "property_catalog_list: %zu of %zu kinds produced "
                            "a row", out->kind_count, rows);
