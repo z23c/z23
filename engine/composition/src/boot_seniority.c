@@ -219,14 +219,11 @@ static double bsen_bandwidth_multiplier(const struct peer_reputation *rep)
     return bandwidth_mult;
 }
 
-/* T5.2: on-chain seniority, per-client, owner-capped, epoch-keyed. Returns
- * the multiplier this address earns through its on-chain binding and
- * reports the binding row that answered for it (SIZE_MAX when none did) so
- * the caller can mark it seen. */
 static double bsen_seniority_multiplier(struct boot_seniority_pass *pass,
                                         const uint8_t ip[16], uint16_t port,
                                         size_t *bidx_out)
 {
+    /* T5.2: on-chain seniority, per-client, owner-capped, epoch-keyed. */
     double seniority_mult = 1.0;
     size_t bidx = SIZE_MAX;
     if (pass->table_n && pass->bindings_n) {
@@ -370,8 +367,6 @@ static bool bsen_epoch_seed(const struct addr_man *am, int32_t epoch_height,
 
 /* ── Table build ───────────────────────────────────────────────────── */
 
-/* Fill regs[0..n) from the on-chain identity projection, page by page.
- * Returns the number of rows filled; a short page ends the sweep. */
 static size_t bsen_load_registrations(struct boot_svc_ctx *svc,
                                       struct zid_relay_registration *regs,
                                       size_t n)
@@ -404,9 +399,6 @@ static size_t bsen_load_registrations(struct boot_svc_ctx *svc,
     return filled;
 }
 
-/* Rank `filled` registrations into tbl[0..n) against the live tip, keyed by
- * this client's epoch draw. Returns the ranked row count, 0 when there is
- * nothing to rank or the epoch seed could not be derived. */
 static size_t bsen_rank_registrations(struct zid_relay_registration *regs,
                                       size_t filled, const struct addr_man *am,
                                       int32_t epoch_height,
