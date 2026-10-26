@@ -257,6 +257,593 @@ static int tstp_order_status(const char *datadir, int64_t order_id)
     return status;
 }
 
+enum {
+    TSTP_PAY_EXACT = 0,
+    TSTP_PAY_TIMES_10 = 1,
+    TSTP_PAY_TIMES_5 = 2,
+    TSTP_PAY_SHORT = 3
+};
+
+enum {
+    TSTP_GATE_NONE = 0,
+    TSTP_GATE_PRICE = 1,
+    TSTP_GATE_BALANCE = 2
+};
+
+struct tstp_pay_scale {
+    int code;
+    int64_t factor;
+    int64_t deduct;
+};
+
+static const struct tstp_pay_scale tstp_pay_scales[] = {
+    { TSTP_PAY_EXACT, 1, 0 },
+    { TSTP_PAY_TIMES_10, 10, 0 },
+    { TSTP_PAY_TIMES_5, 5, 0 },
+    { TSTP_PAY_SHORT, 1, 1 },
+};
+
+struct tstp_matrix_case {
+    const char *lead;
+    uint8_t first_tag;
+    uint8_t second_tag;
+    uint8_t tx_tag;
+    int height;
+    bool coinbase;
+    int value_code;
+    int expect;
+    int gate;
+};
+
+static const struct tstp_matrix_case tstp_matrix_cases[] = {
+    /* ── 1. A confirmed transparent payment credits its order ───────────
+     *
+     * THE regression this group holds. Before transparent orders existed the
+     * merchant reconciled every order by hunting for a Sapling note, so this
+     * order stayed PENDING no matter how much transparent value arrived. */
+    /* Confirmed: height 50 is well under the tip-3 ceiling of 97. */
+    {
+        .lead = "store_transparent_pay: a confirmed t-payment credits the order"
+                "... ",
+        .first_tag = 0xA1,
+        .second_tag = 0,
+        .tx_tag = 0xE1,
+        .height = 50,
+        .coinbase = false,
+        .value_code = TSTP_PAY_EXACT,
+        .expect = STORE_ORDER_SENT,
+        .gate = TSTP_GATE_NONE,
+    },
+    /* ── 2. A payment to ANOTHER order's address does not credit this one ─
+     *
+     * The money assertion. The one-time address IS the order bind, so an
+     * order whose own address was never paid must stay unpaid even while the
+     * wallet is holding a perfectly good confirmed payment for a different
+     * order. */
+    /* Real, confirmed, sufficient — but paid to a DIFFERENT address. */
+    {
+        .lead = "store_transparent_pay: another order's payment does not credit"
+                "... ",
+        .first_tag = 0xB2,
+        .second_tag = 0xB3,
+        .tx_tag = 0xE2,
+        .height = 50,
+        .coinbase = false,
+        .value_code = TSTP_PAY_TIMES_10,
+        .expect = STORE_ORDER_PENDING,
+        .gate = TSTP_GATE_NONE,
+    },
+    /* ── 3. Value too shallow to be confirmed does not credit ───────────
+     *
+     * The reorg control: the merchant mints tokens it cannot take back, so
+     * it must not act on value that a short reorg could still remove. */
+    /* Height 99 is above the tip-3 ceiling of 97 — one confirmation. */
+    {
+        .lead = "store_transparent_pay: an unconfirmed payment does not credit"
+                "... ",
+        .first_tag = 0xC4,
+        .second_tag = 0,
+        .tx_tag = 0xE3,
+        .height = 99,
+        .coinbase = false,
+        .value_code = TSTP_PAY_EXACT,
+        .expect = STORE_ORDER_PENDING,
+        .gate = TSTP_GATE_NONE,
+    },
+    /* ── 4. Block subsidy at the order address is not a payment ─────────
+     *
+     * A coinbase output crediting the order address is the merchant paying
+     * itself, not a buyer paying. Counting it would hand out the goods for
+     * free to whoever asked for an order while a block was being mined. */
+    {
+        .lead = "store_transparent_pay: coinbase at the order address is not a "
+                "payment... ",
+        .first_tag = 0xD5,
+        .second_tag = 0,
+        .tx_tag = 0xE4,
+        .height = 50,
+        .coinbase = true,
+        .value_code = TSTP_PAY_TIMES_5,
+        .expect = STORE_ORDER_PENDING,
+        .gate = TSTP_GATE_NONE,
+    },
+    /* ── 5. Underpaying does not credit ─────────────────────────────── */
+    {
+        .lead = "store_transparent_pay: an underpayment does not credit... ",
+        .first_tag = 0xE6,
+        .second_tag = 0,
+        .tx_tag = 0xE5,
+        .height = 50,
+        .coinbase = false,
+        .value_code = TSTP_PAY_SHORT,
+        .expect = STORE_ORDER_PENDING,
+        .gate = TSTP_GATE_PRICE,
+    },
+    /* ── 6. Crediting is idempotent across a re-run ─────────────────────
+     *
+     * The reconcile runs every 30 s forever. An order it already credited
+     * must not be credited a second time, and a restart mid-flight must land
+     * on the same answer — the durable order status is what makes a crashed
+     * merchant resume rather than double-deliver. */
+    {
+        .lead = "store_transparent_pay: re-running the reconcile does not "
+                "re-credit... ",
+        .first_tag = 0xF7,
+        .second_tag = 0,
+        .tx_tag = 0xE6,
+        .height = 50,
+        .coinbase = false,
+        .value_code = TSTP_PAY_EXACT,
+        .expect = STORE_ORDER_SENT,
+        .gate = TSTP_GATE_BALANCE,
+    },
+};
+
+static int64_t tstp_pay_amount(int code, int64_t price)
+{
+    for (size_t i = 0; i < sizeof(tstp_pay_scales) / sizeof(tstp_pay_scales[0]);
+         i++) {
+        if (tstp_pay_scales[i].code == code)
+            return price * tstp_pay_scales[i].factor -
+                   tstp_pay_scales[i].deduct;
+    }
+    return price;
+}
+
+/* Derive the order address (and, for the cross-address case, the address
+ * that is actually paid), place the pending order, and seed the UTXO. The
+ * projection database is closed here, before reconciliation, as each case
+ * did before. */
+static bool tstp_matrix_prepare(struct node_db *ndb, int64_t product_id,
+                                int64_t price,
+                                const struct tstp_matrix_case *k,
+                                int64_t *order_id)
+{
+    char first_addr[128] = "";
+    char second_addr[128] = "";
+    uint8_t first_h160[20];
+    uint8_t second_h160[20];
+    bool ok = tstp_taddr_for(k->first_tag, first_addr, sizeof(first_addr),
+                             first_h160);
+    bool split = k->second_tag != 0;
+
+    if (split)
+        ok = ok && tstp_taddr_for(k->second_tag, second_addr,
+                                  sizeof(second_addr), second_h160);
+    if (ok) {
+        const char *order_addr = split ? second_addr : first_addr;
+        *order_id = tstp_place_order(ndb, product_id, order_addr, price);
+        ok = *order_id > 0;
+    }
+    if (k->gate == TSTP_GATE_PRICE)
+        ok = ok && price > 1;
+    ok = ok && tstp_seed_utxo(ndb, first_h160,
+                              tstp_pay_amount(k->value_code, price),
+                              k->height, k->coinbase, k->tx_tag);
+    node_db_close(ndb);
+    return ok;
+}
+
+static bool tstp_matrix_credit(const char *datadir, int64_t order_id,
+                               const struct tstp_matrix_case *k)
+{
+    store_process_payments(datadir);
+    bool ok = tstp_order_status(datadir, order_id) == k->expect;
+    if (ok && k->gate == TSTP_GATE_BALANCE) {
+        uint64_t after_first = zslp_balance(datadir, "", TSTP_CUSTOMER);
+        /* Whatever the first pass credited, a second pass must leave
+         * alone: the order is no longer PENDING, so it is not scanned. */
+        store_process_payments(datadir);
+        ok = tstp_order_status(datadir, order_id) == STORE_ORDER_SENT &&
+             zslp_balance(datadir, "", TSTP_CUSTOMER) == after_first;
+    }
+    return ok;
+}
+
+enum {
+    TSTP_CHAIN_CATALOG = 0,
+    TSTP_CHAIN_OPEN,
+    TSTP_CHAIN_IDENTITIES,
+    TSTP_CHAIN_ORDER,
+    TSTP_CHAIN_SIM,
+    TSTP_CHAIN_FAUCET,
+    TSTP_CHAIN_FUNDING,
+    TSTP_CHAIN_WALLETS,
+    TSTP_CHAIN_SEED,
+    TSTP_CHAIN_COIN,
+    TSTP_CHAIN_TRUST,
+    TSTP_CHAIN_SEND,
+    TSTP_CHAIN_CAPTURE,
+    TSTP_CHAIN_CONNECT,
+    TSTP_CHAIN_PROJECT,
+    TSTP_CHAIN_RECONCILE,
+    TSTP_CHAIN_STEPS
+};
+
+struct tstp_chain_result {
+    bool check_ok;
+    bool stop;
+};
+
+struct tstp_chain {
+    char datadir[256];
+    char trustdir[256];
+    struct node_db ndb;
+    bool ndb_open;
+    struct store_buyer_offer offers[8];
+    size_t offer_count;
+    struct privkey payer_key;
+    struct privkey merchant_key;
+    struct key_id payer_id;
+    struct key_id merchant_id;
+    struct script payer_script;
+    struct script merchant_script;
+    char payer_address[128];
+    char merchant_address[128];
+    int64_t price;
+    int64_t order_id;
+    struct simnet sim;
+    bool sim_ready;
+    int64_t funding_value;
+    struct uint256 coinbase_txid;
+    struct transaction funding_tx;
+    struct wallet_tx funding_wallet_tx;
+    struct uint256 funding_txid;
+    struct wallet *payer;
+    struct wallet *merchant;
+    bool payer_ready;
+    bool merchant_ready;
+    struct main_state main_state;
+    bool main_ready;
+    struct tx_mempool mempool;
+    bool mempool_ready;
+    struct coins_view null_view;
+    struct coins_view_cache coins_tip;
+    bool coins_ready;
+    char payment_txid_hex[65];
+    char send_error[256];
+    struct uint256 payment_txid;
+    struct transaction payment_tx;
+    struct transaction mined_payment;
+    bool have_mined_payment;
+    bool exact_shape;
+    int payment_height;
+    bool projected;
+    bool tip_ready;
+};
+
+static const char *const tstp_chain_labels[TSTP_CHAIN_STEPS] = {
+    "chain: merchant catalog is ready",
+    "chain: merchant projection database opens",
+    "chain: payer and one-time merchant address derive",
+    "chain: pending order binds the one-time address",
+    "chain: isolated consensus chain initializes",
+    "chain: isolated faucet output matures",
+    "chain: exact payer funding outpoint enters a block",
+    "chain: isolated payer and merchant wallets allocate",
+    "chain: payer owns the exact confirmed funding coin",
+    "chain: mempool sees the same isolated funding coin",
+    "chain: isolated self-derived spend guard opens",
+    "chain: real store transparent sender signs and admits",
+    "chain: captured bytes bind exact order output and fee",
+    "chain: exact signed payment passes connect_block",
+    "chain: production wallet projection recovers exact payment",
+    "chain: merchant reconciliation fulfills the bound order",
+};
+
+static void tstp_chain_free_unseeded_funding(int step, struct tstp_chain *c)
+{
+    if (step == TSTP_CHAIN_FUNDING || step == TSTP_CHAIN_WALLETS)
+        transaction_free(&c->funding_wallet_tx.tx);
+}
+
+static void tstp_chain_release(struct tstp_chain *c)
+{
+    rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);
+    rpc_wallet_set_node_db(NULL);
+    rpc_wallet_set_coins_tip(NULL);
+    reducer_frontier_provable_tip_reset();
+    progress_store_close();
+    if (c->have_mined_payment)
+        transaction_free(&c->mined_payment);
+    if (c->coins_ready)
+        coins_view_cache_free(&c->coins_tip);
+    if (c->mempool_ready)
+        tx_mempool_free(&c->mempool);
+    if (c->main_ready)
+        main_state_free(&c->main_state);
+    if (c->merchant_ready)
+        wallet_free(c->merchant);
+    if (c->payer_ready)
+        wallet_free(c->payer);
+    free(c->merchant);
+    free(c->payer);
+    if (c->sim_ready)
+        simnet_free(&c->sim);
+    if (c->ndb_open)
+        node_db_close(&c->ndb);
+    memory_cleanse(c->payer_key.vch, sizeof(c->payer_key.vch));
+    memory_cleanse(c->merchant_key.vch, sizeof(c->merchant_key.vch));
+    test_cleanup_tmpdir(c->datadir);
+    test_cleanup_tmpdir(c->trustdir);
+}
+
+static struct tstp_chain_result tstp_chain_through_order(int step,
+                                                        struct tstp_chain *c)
+{
+    if (step == TSTP_CHAIN_CATALOG) {
+        bool catalog_ok = store_buyer_catalog(c->datadir, c->offers, 8,
+                                               &c->offer_count).ok &&
+                          c->offer_count > 0;
+        return (struct tstp_chain_result){
+            .check_ok = catalog_ok,
+            .stop = !catalog_ok,
+        };
+    }
+    if (step == TSTP_CHAIN_OPEN) {
+        bool opened = tstp_open(c->datadir, &c->ndb);
+        return (struct tstp_chain_result){
+            .check_ok = opened,
+            .stop = !opened,
+        };
+    }
+    if (step == TSTP_CHAIN_IDENTITIES) {
+        c->ndb_open = true;
+        tstp_key(&c->payer_key, 0x31);
+        tstp_key(&c->merchant_key, 0x52);
+        bool identities_ok =
+            tstp_key_identity(&c->payer_key, &c->payer_id, &c->payer_script,
+                              c->payer_address, sizeof(c->payer_address)) &&
+            tstp_key_identity(&c->merchant_key, &c->merchant_id,
+                              &c->merchant_script, c->merchant_address,
+                              sizeof(c->merchant_address));
+        return (struct tstp_chain_result){
+            .check_ok = identities_ok,
+            .stop = !identities_ok,
+        };
+    }
+    c->price = c->offers[0].price_zatoshi;
+    c->order_id = tstp_place_order(&c->ndb, c->offers[0].product_id,
+                                   c->merchant_address, c->price);
+    return (struct tstp_chain_result){
+        .check_ok = c->order_id > 0 && c->price > 0,
+        .stop = c->order_id <= 0 || c->price <= 0,
+    };
+}
+
+static struct tstp_chain_result tstp_chain_through_fund(int step,
+                                                       struct tstp_chain *c)
+{
+    if (step == TSTP_CHAIN_SIM) {
+        bool sim_ok = simnet_init(&c->sim);
+        return (struct tstp_chain_result){
+            .check_ok = sim_ok,
+            .stop = !sim_ok,
+        };
+    }
+    if (step == TSTP_CHAIN_FAUCET) {
+        c->sim_ready = true;
+        c->funding_value = c->price + TSTP_FEE_ZAT;
+        int coinbase_height = simnet_tip_height(&c->sim) + 1;
+        bool faucet_ok = simnet_mint_coinbase_to(
+                             &c->sim, &c->payer_script,
+                             c->funding_value + TSTP_FEE_ZAT,
+                             &c->coinbase_txid) &&
+                         simnet_mint_to_height(
+                             &c->sim, coinbase_height + COINBASE_MATURITY);
+        return (struct tstp_chain_result){
+            .check_ok = faucet_ok,
+            .stop = !faucet_ok,
+        };
+    }
+    transaction_init(&c->funding_tx);
+    bool funding_built = tstp_build_funding_tx(
+        &c->funding_tx, &c->coinbase_txid, &c->payer_script, c->funding_value);
+    memset(&c->funding_wallet_tx, 0, sizeof(c->funding_wallet_tx));
+    transaction_init(&c->funding_wallet_tx.tx);
+    bool funding_copied = funding_built &&
+        transaction_copy(&c->funding_wallet_tx.tx, &c->funding_tx);
+    c->funding_txid = funding_built
+        ? c->funding_tx.hash : (struct uint256){0};
+    bool funding_mined = funding_copied &&
+        simnet_mint_txs(&c->sim, &c->funding_tx, 1);
+    if (funding_built && !funding_copied)
+        transaction_free(&c->funding_tx);
+    return (struct tstp_chain_result){
+        .check_ok = funding_mined &&
+            simnet_coin_value(&c->sim, &c->funding_txid, 0, NULL),
+        .stop = !funding_mined,
+    };
+}
+
+static struct tstp_chain_result tstp_chain_through_trust(int step,
+                                                        struct tstp_chain *c)
+{
+    if (step == TSTP_CHAIN_WALLETS) {
+        c->payer = zcl_malloc(sizeof(*c->payer), "store payment payer wallet");
+        c->merchant = zcl_malloc(sizeof(*c->merchant),
+                                 "store payment merchant wallet");
+        bool wallets_allocated = c->payer && c->merchant;
+        return (struct tstp_chain_result){
+            .check_ok = wallets_allocated,
+            .stop = !wallets_allocated,
+        };
+    }
+    if (step == TSTP_CHAIN_SEED) {
+        wallet_init(c->payer);
+        c->payer_ready = true;
+        wallet_init(c->merchant);
+        c->merchant_ready = true;
+        c->funding_wallet_tx.confirms = 1;
+        c->funding_wallet_tx.time_received = 1;
+        bool payer_seeded =
+            keystore_add_key(&c->payer->keystore, &c->payer_key) &&
+            wallet_add_to_wallet(c->payer, &c->funding_wallet_tx);
+        transaction_free(&c->funding_wallet_tx.tx);
+        bool merchant_seeded =
+            keystore_add_key(&c->merchant->keystore, &c->merchant_key);
+        c->payer->best_block_height = simnet_tip_height(&c->sim);
+        return (struct tstp_chain_result){
+            .check_ok = payer_seeded && merchant_seeded,
+            .stop = !payer_seeded || !merchant_seeded,
+        };
+    }
+    if (step == TSTP_CHAIN_COIN) {
+        main_state_init(&c->main_state);
+        c->main_ready = true;
+        tx_mempool_init(&c->mempool, 0);
+        c->mempool_ready = true;
+        memset(&c->null_view, 0, sizeof(c->null_view));
+        coins_view_cache_init(&c->coins_tip, &c->null_view);
+        c->coins_ready = true;
+        struct coins_cache_entry *funding_entry =
+            coins_view_cache_modify_new(&c->coins_tip, &c->funding_txid);
+        bool coin_stamped = funding_entry != NULL;
+        if (funding_entry) {
+            coins_alloc(&funding_entry->coins, 1);
+            funding_entry->coins.vout[0].value = c->funding_value;
+            funding_entry->coins.vout[0].script_pub_key = c->payer_script;
+            funding_entry->coins.height = simnet_tip_height(&c->sim);
+            funding_entry->coins.version = 1;
+            funding_entry->coins.is_coinbase = false;
+        }
+        return (struct tstp_chain_result){
+            .check_ok = coin_stamped,
+            .stop = !coin_stamped,
+        };
+    }
+    bool trust_ok = tstp_open_trust_fixture(c->trustdir);
+    return (struct tstp_chain_result){
+        .check_ok = trust_ok,
+        .stop = !trust_ok,
+    };
+}
+
+static struct tstp_chain_result tstp_chain_send(struct tstp_chain *c)
+{
+    rpc_wallet_set_state(c->payer, &c->main_state, c->datadir, NULL,
+                         &c->mempool, NULL);
+    rpc_wallet_set_node_db(NULL);
+    rpc_wallet_set_coins_tip(&c->coins_tip);
+    bool sent = wallet_direct_sendtoaddress(
+        c->merchant_address, c->price, c->payment_txid_hex,
+        sizeof(c->payment_txid_hex), c->send_error, sizeof(c->send_error));
+    return (struct tstp_chain_result){
+        .check_ok = sent && c->payment_txid_hex[0],
+        .stop = !sent,
+    };
+}
+
+static struct tstp_chain_result tstp_chain_capture(struct tstp_chain *c)
+{
+    uint256_set_hex(&c->payment_txid, c->payment_txid_hex);
+    transaction_init(&c->payment_tx);
+    bool captured = tx_mempool_lookup(&c->mempool, &c->payment_txid,
+                                      &c->payment_tx) &&
+                    transaction_copy(&c->mined_payment, &c->payment_tx);
+    c->have_mined_payment = captured;
+    bool exact_shape = captured && c->payment_tx.num_vin == 1 &&
+        c->payment_tx.num_vout == 1 &&
+        uint256_eq(&c->payment_tx.vin[0].prevout.hash, &c->funding_txid) &&
+        c->payment_tx.vin[0].prevout.n == 0 &&
+        c->payment_tx.vout[0].value == c->price &&
+        c->payment_tx.vout[0].script_pub_key.size == c->merchant_script.size &&
+        memcmp(c->payment_tx.vout[0].script_pub_key.data,
+               c->merchant_script.data, c->merchant_script.size) == 0;
+    c->exact_shape = exact_shape;
+    return (struct tstp_chain_result){
+        .check_ok = exact_shape && c->funding_value - c->price == TSTP_FEE_ZAT,
+        .stop = false,
+    };
+}
+
+static struct tstp_chain_result tstp_chain_connect(struct tstp_chain *c)
+{
+    bool mined = c->exact_shape && simnet_mint_txs(&c->sim, &c->payment_tx, 1);
+    if (mined)
+        transaction_init(&c->payment_tx); /* ownership moved into simnet */
+    else
+        transaction_free(&c->payment_tx);
+    c->payment_height = simnet_tip_height(&c->sim);
+    int64_t paid_value = 0;
+    bool chain_settled = mined &&
+        !simnet_coin_value(&c->sim, &c->funding_txid, 0, NULL) &&
+        simnet_coin_value(&c->sim, &c->payment_txid, 0, &paid_value) &&
+        paid_value == c->price;
+    return (struct tstp_chain_result){
+        .check_ok = chain_settled,
+        .stop = !chain_settled,
+    };
+}
+
+static struct tstp_chain_result tstp_chain_project(struct tstp_chain *c)
+{
+    bool block_recorded = tstp_seed_tip(&c->ndb, c->payment_height);
+    c->projected = block_recorded && node_db_sync_wallet_tx(
+        &c->ndb, &c->mined_payment, c->merchant, c->payment_height);
+    c->tip_ready = tstp_seed_tip(&c->ndb, c->payment_height + 3);
+    int64_t confirmed = c->projected && c->tip_ready
+        ? store_confirmed_payment(&c->ndb, c->merchant_address, c->order_id,
+                                  c->payment_height)
+        : 0;
+    return (struct tstp_chain_result){
+        .check_ok = c->projected && c->tip_ready && confirmed == c->price,
+        .stop = false,
+    };
+}
+
+static struct tstp_chain_result tstp_chain_reconcile(struct tstp_chain *c)
+{
+    node_db_close(&c->ndb);
+    c->ndb_open = false;
+    if (c->projected && c->tip_ready)
+        store_process_payments(c->datadir);
+    return (struct tstp_chain_result){
+        .check_ok = c->projected && c->tip_ready &&
+            tstp_order_status(c->datadir, c->order_id) == STORE_ORDER_SENT,
+        .stop = false,
+    };
+}
+
+static struct tstp_chain_result tstp_chain_step(int step, struct tstp_chain *c)
+{
+    if (step <= TSTP_CHAIN_ORDER)
+        return tstp_chain_through_order(step, c);
+    if (step <= TSTP_CHAIN_FUNDING)
+        return tstp_chain_through_fund(step, c);
+    if (step <= TSTP_CHAIN_TRUST)
+        return tstp_chain_through_trust(step, c);
+    if (step == TSTP_CHAIN_SEND)
+        return tstp_chain_send(c);
+    if (step == TSTP_CHAIN_CAPTURE)
+        return tstp_chain_capture(c);
+    if (step == TSTP_CHAIN_CONNECT)
+        return tstp_chain_connect(c);
+    if (step == TSTP_CHAIN_PROJECT)
+        return tstp_chain_project(c);
+    return tstp_chain_reconcile(c);
+}
+
 /* Exact production path:
  *
  *   wallet_direct_sendtoaddress -> mempool validation -> connect_block
@@ -269,261 +856,28 @@ static int tstp_order_status(const char *datadir, int64_t order_id)
 static int tstp_exact_chain_payment(void)
 {
     int failures = 0;
-    char datadir[256], trustdir[256];
-    struct node_db ndb;
-    bool ndb_open = false;
-    struct simnet sim;
-    bool sim_ready = false;
-    struct wallet *payer = NULL, *merchant = NULL;
-    bool payer_ready = false, merchant_ready = false;
-    struct main_state main_state;
-    bool main_ready = false;
-    struct tx_mempool mempool;
-    bool mempool_ready = false;
-    struct coins_view null_view;
-    struct coins_view_cache coins_tip;
-    bool coins_ready = false;
-    struct transaction mined_payment;
-    transaction_init(&mined_payment);
-    bool have_mined_payment = false;
-    struct privkey payer_key = {0}, merchant_key = {0};
+    struct tstp_chain chain = {0};
 
+    transaction_init(&chain.mined_payment);
     printf("\n-- exact wallet-built store payment through chain + reconcile --\n");
-    test_make_tmpdir(datadir, sizeof(datadir),
+    test_make_tmpdir(chain.datadir, sizeof(chain.datadir),
                      "store_transparent_pay_chain", "merchant");
-    test_make_tmpdir(trustdir, sizeof(trustdir),
+    test_make_tmpdir(chain.trustdir, sizeof(chain.trustdir),
                      "store_transparent_pay_chain", "trust");
-
-    struct store_buyer_offer offers[8];
-    size_t offer_count = 0;
-    bool catalog_ok = store_buyer_catalog(datadir, offers, 8,
-                                           &offer_count).ok &&
-                      offer_count > 0;
-    TSTP_CHECK("chain: merchant catalog is ready", catalog_ok);
-    if (!catalog_ok)
-        goto cleanup;
-
-    bool opened = tstp_open(datadir, &ndb);
-    TSTP_CHECK("chain: merchant projection database opens", opened);
-    if (!opened)
-        goto cleanup;
-    ndb_open = true;
-
-    tstp_key(&payer_key, 0x31);
-    tstp_key(&merchant_key, 0x52);
-    struct key_id payer_id, merchant_id;
-    struct script payer_script, merchant_script;
-    char payer_address[128] = "", merchant_address[128] = "";
-    bool identities_ok =
-        tstp_key_identity(&payer_key, &payer_id, &payer_script,
-                          payer_address, sizeof(payer_address)) &&
-        tstp_key_identity(&merchant_key, &merchant_id, &merchant_script,
-                          merchant_address, sizeof(merchant_address));
-    TSTP_CHECK("chain: payer and one-time merchant address derive",
-               identities_ok);
-    if (!identities_ok)
-        goto cleanup;
-
-    int64_t price = offers[0].price_zatoshi;
-    int64_t order_id = tstp_place_order(&ndb, offers[0].product_id,
-                                         merchant_address, price);
-    TSTP_CHECK("chain: pending order binds the one-time address",
-               order_id > 0 && price > 0);
-    if (order_id <= 0 || price <= 0)
-        goto cleanup;
-
-    bool sim_ok = simnet_init(&sim);
-    TSTP_CHECK("chain: isolated consensus chain initializes", sim_ok);
-    if (!sim_ok)
-        goto cleanup;
-    sim_ready = true;
-
-    int64_t funding_value = price + TSTP_FEE_ZAT;
-    struct uint256 coinbase_txid;
-    int coinbase_height = simnet_tip_height(&sim) + 1;
-    bool faucet_ok = simnet_mint_coinbase_to(
-                         &sim, &payer_script,
-                         funding_value + TSTP_FEE_ZAT, &coinbase_txid) &&
-                     simnet_mint_to_height(
-                         &sim, coinbase_height + COINBASE_MATURITY);
-    TSTP_CHECK("chain: isolated faucet output matures", faucet_ok);
-    if (!faucet_ok)
-        goto cleanup;
-
-    struct transaction funding_tx;
-    transaction_init(&funding_tx);
-    bool funding_built = tstp_build_funding_tx(
-        &funding_tx, &coinbase_txid, &payer_script, funding_value);
-    struct wallet_tx funding_wallet_tx;
-    memset(&funding_wallet_tx, 0, sizeof(funding_wallet_tx));
-    transaction_init(&funding_wallet_tx.tx);
-    bool funding_copied = funding_built &&
-        transaction_copy(&funding_wallet_tx.tx, &funding_tx);
-    struct uint256 funding_txid = funding_built
-        ? funding_tx.hash : (struct uint256){0};
-    bool funding_mined = funding_copied &&
-        simnet_mint_txs(&sim, &funding_tx, 1);
-    if (funding_built && !funding_copied)
-        transaction_free(&funding_tx);
-    TSTP_CHECK("chain: exact payer funding outpoint enters a block",
-               funding_mined &&
-               simnet_coin_value(&sim, &funding_txid, 0, NULL));
-    if (!funding_mined) {
-        transaction_free(&funding_wallet_tx.tx);
-        goto cleanup;
+    for (int step = 0; step < TSTP_CHAIN_STEPS; step++) {
+        struct tstp_chain_result result = tstp_chain_step(step, &chain);
+        TSTP_CHECK(tstp_chain_labels[step], result.check_ok);
+        if (result.stop) {
+            tstp_chain_free_unseeded_funding(step, &chain);
+            break;
+        }
     }
-
-    payer = zcl_malloc(sizeof(*payer), "store payment payer wallet");
-    merchant = zcl_malloc(sizeof(*merchant), "store payment merchant wallet");
-    bool wallets_allocated = payer && merchant;
-    TSTP_CHECK("chain: isolated payer and merchant wallets allocate",
-               wallets_allocated);
-    if (!wallets_allocated) {
-        transaction_free(&funding_wallet_tx.tx);
-        goto cleanup;
-    }
-    wallet_init(payer);
-    payer_ready = true;
-    wallet_init(merchant);
-    merchant_ready = true;
-    funding_wallet_tx.confirms = 1;
-    funding_wallet_tx.time_received = 1;
-    bool payer_seeded = keystore_add_key(&payer->keystore, &payer_key) &&
-                        wallet_add_to_wallet(payer, &funding_wallet_tx);
-    transaction_free(&funding_wallet_tx.tx);
-    bool merchant_seeded =
-        keystore_add_key(&merchant->keystore, &merchant_key);
-    payer->best_block_height = simnet_tip_height(&sim);
-    TSTP_CHECK("chain: payer owns the exact confirmed funding coin",
-               payer_seeded && merchant_seeded);
-    if (!payer_seeded || !merchant_seeded)
-        goto cleanup;
-
-    main_state_init(&main_state);
-    main_ready = true;
-    tx_mempool_init(&mempool, 0);
-    mempool_ready = true;
-    memset(&null_view, 0, sizeof(null_view));
-    coins_view_cache_init(&coins_tip, &null_view);
-    coins_ready = true;
-    struct coins_cache_entry *funding_entry =
-        coins_view_cache_modify_new(&coins_tip, &funding_txid);
-    bool coin_stamped = funding_entry != NULL;
-    if (funding_entry) {
-        coins_alloc(&funding_entry->coins, 1);
-        funding_entry->coins.vout[0].value = funding_value;
-        funding_entry->coins.vout[0].script_pub_key = payer_script;
-        funding_entry->coins.height = simnet_tip_height(&sim);
-        funding_entry->coins.version = 1;
-        funding_entry->coins.is_coinbase = false;
-    }
-    TSTP_CHECK("chain: mempool sees the same isolated funding coin",
-               coin_stamped);
-    if (!coin_stamped)
-        goto cleanup;
-
-    bool trust_ok = tstp_open_trust_fixture(trustdir);
-    TSTP_CHECK("chain: isolated self-derived spend guard opens", trust_ok);
-    if (!trust_ok)
-        goto cleanup;
-
-    rpc_wallet_set_state(payer, &main_state, datadir, NULL, &mempool, NULL);
-    rpc_wallet_set_node_db(NULL);
-    rpc_wallet_set_coins_tip(&coins_tip);
-
-    char payment_txid_hex[65] = "";
-    char send_error[256] = "";
-    bool sent = wallet_direct_sendtoaddress(
-        merchant_address, price, payment_txid_hex,
-        sizeof(payment_txid_hex), send_error, sizeof(send_error));
-    TSTP_CHECK("chain: real store transparent sender signs and admits",
-               sent && payment_txid_hex[0]);
-    if (!sent)
-        goto cleanup;
-
-    struct uint256 payment_txid;
-    uint256_set_hex(&payment_txid, payment_txid_hex);
-    struct transaction payment_tx;
-    transaction_init(&payment_tx);
-    bool captured = tx_mempool_lookup(&mempool, &payment_txid, &payment_tx) &&
-                    transaction_copy(&mined_payment, &payment_tx);
-    have_mined_payment = captured;
-    bool exact_shape = captured && payment_tx.num_vin == 1 &&
-        payment_tx.num_vout == 1 &&
-        uint256_eq(&payment_tx.vin[0].prevout.hash, &funding_txid) &&
-        payment_tx.vin[0].prevout.n == 0 &&
-        payment_tx.vout[0].value == price &&
-        payment_tx.vout[0].script_pub_key.size == merchant_script.size &&
-        memcmp(payment_tx.vout[0].script_pub_key.data,
-               merchant_script.data, merchant_script.size) == 0;
-    TSTP_CHECK("chain: captured bytes bind exact order output and fee",
-               exact_shape && funding_value - price == TSTP_FEE_ZAT);
-
-    bool mined = exact_shape && simnet_mint_txs(&sim, &payment_tx, 1);
-    if (mined)
-        transaction_init(&payment_tx); /* ownership moved into simnet */
-    else
-        transaction_free(&payment_tx);
-    int payment_height = simnet_tip_height(&sim);
-    int64_t paid_value = 0;
-    bool chain_settled = mined &&
-        !simnet_coin_value(&sim, &funding_txid, 0, NULL) &&
-        simnet_coin_value(&sim, &payment_txid, 0, &paid_value) &&
-        paid_value == price;
-    TSTP_CHECK("chain: exact signed payment passes connect_block",
-               chain_settled);
-    if (!chain_settled)
-        goto cleanup;
-
-    bool block_recorded = tstp_seed_tip(&ndb, payment_height);
-    bool projected = block_recorded && node_db_sync_wallet_tx(
-        &ndb, &mined_payment, merchant, payment_height);
-    bool tip_ready = tstp_seed_tip(&ndb, payment_height + 3);
-    int64_t confirmed = projected && tip_ready
-        ? store_confirmed_payment(&ndb, merchant_address, order_id,
-                                  payment_height)
-        : 0;
-    TSTP_CHECK("chain: production wallet projection recovers exact payment",
-               projected && tip_ready && confirmed == price);
-    node_db_close(&ndb);
-    ndb_open = false;
-
-    if (projected && tip_ready)
-        store_process_payments(datadir);
-    TSTP_CHECK("chain: merchant reconciliation fulfills the bound order",
-               projected && tip_ready &&
-               tstp_order_status(datadir, order_id) == STORE_ORDER_SENT);
-
-cleanup:
-    rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);
-    rpc_wallet_set_node_db(NULL);
-    rpc_wallet_set_coins_tip(NULL);
-    reducer_frontier_provable_tip_reset();
-    progress_store_close();
-    if (have_mined_payment)
-        transaction_free(&mined_payment);
-    if (coins_ready)
-        coins_view_cache_free(&coins_tip);
-    if (mempool_ready)
-        tx_mempool_free(&mempool);
-    if (main_ready)
-        main_state_free(&main_state);
-    if (merchant_ready)
-        wallet_free(merchant);
-    if (payer_ready)
-        wallet_free(payer);
-    free(merchant);
-    free(payer);
-    if (sim_ready)
-        simnet_free(&sim);
-    if (ndb_open)
-        node_db_close(&ndb);
-    memory_cleanse(payer_key.vch, sizeof(payer_key.vch));
-    memory_cleanse(merchant_key.vch, sizeof(merchant_key.vch));
-    test_cleanup_tmpdir(datadir);
-    test_cleanup_tmpdir(trustdir);
+    tstp_chain_release(&chain);
     return failures;
 }
+
+
+
 
 int test_store_transparent_pay(void)
 {
@@ -564,34 +918,18 @@ int test_store_transparent_pay(void)
         return failures + 1;
     }
 
-    /* ── 1. A confirmed transparent payment credits its order ───────────
-     *
-     * THE regression this group holds. Before transparent orders existed the
-     * merchant reconciled every order by hunting for a Sapling note, so this
-     * order stayed PENDING no matter how much transparent value arrived. */
-    printf("store_transparent_pay: a confirmed t-payment credits the order"
-           "... ");
-    {
-        char addr[128] = "";
-        uint8_t h160[20];
+    for (size_t i = 0;
+         i < sizeof(tstp_matrix_cases) / sizeof(tstp_matrix_cases[0]); i++) {
+        const struct tstp_matrix_case *k = &tstp_matrix_cases[i];
         int64_t order_id = 0;
-        bool ok = tstp_taddr_for(0xA1, addr, sizeof(addr), h160);
 
-        if (ok) {
-            order_id = tstp_place_order(&ndb, product_id, addr, price);
-            ok = order_id > 0;
-        }
-        /* Confirmed: height 50 is well under the tip-3 ceiling of 97. */
-        ok = ok && tstp_seed_utxo(&ndb, h160, price, 50, false, 0xE1);
-        node_db_close(&ndb);
-
-        if (ok) {
-            store_process_payments(datadir);
-            ok = tstp_order_status(datadir, order_id) == STORE_ORDER_SENT;
-        }
-        if (ok) {
+        printf("%s", k->lead);
+        bool ok = tstp_matrix_prepare(&ndb, product_id, price, k, &order_id);
+        if (ok)
+            ok = tstp_matrix_credit(datadir, order_id, k);
+        if (ok)
             printf("OK\n");
-        } else {
+        else {
             printf("FAIL\n");
             failures++;
         }
@@ -601,198 +939,7 @@ int test_store_transparent_pay(void)
         }
     }
 
-    /* ── 2. A payment to ANOTHER order's address does not credit this one ─
-     *
-     * The money assertion. The one-time address IS the order bind, so an
-     * order whose own address was never paid must stay unpaid even while the
-     * wallet is holding a perfectly good confirmed payment for a different
-     * order. */
-    printf("store_transparent_pay: another order's payment does not credit"
-           "... ");
-    {
-        char paid_addr[128] = "", unpaid_addr[128] = "";
-        uint8_t paid_h160[20], unpaid_h160[20];
-        int64_t unpaid_order = 0;
-        bool ok = tstp_taddr_for(0xB2, paid_addr, sizeof(paid_addr),
-                                 paid_h160);
-        ok = ok && tstp_taddr_for(0xB3, unpaid_addr, sizeof(unpaid_addr),
-                                  unpaid_h160);
-        if (ok) {
-            unpaid_order = tstp_place_order(&ndb, product_id, unpaid_addr,
-                                            price);
-            ok = unpaid_order > 0;
-        }
-        /* Real, confirmed, sufficient — but paid to a DIFFERENT address. */
-        ok = ok && tstp_seed_utxo(&ndb, paid_h160, price * 10, 50, false,
-                                  0xE2);
-        node_db_close(&ndb);
 
-        if (ok) {
-            store_process_payments(datadir);
-            ok = tstp_order_status(datadir, unpaid_order) ==
-                 STORE_ORDER_PENDING;
-        }
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
-        if (!tstp_open(datadir, &ndb)) {
-            printf("store_transparent_pay: FAIL (could not reopen node.db)\n");
-            return failures + 1;
-        }
-    }
-
-    /* ── 3. Value too shallow to be confirmed does not credit ───────────
-     *
-     * The reorg control: the merchant mints tokens it cannot take back, so
-     * it must not act on value that a short reorg could still remove. */
-    printf("store_transparent_pay: an unconfirmed payment does not credit"
-           "... ");
-    {
-        char addr[128] = "";
-        uint8_t h160[20];
-        int64_t order_id = 0;
-        bool ok = tstp_taddr_for(0xC4, addr, sizeof(addr), h160);
-
-        if (ok) {
-            order_id = tstp_place_order(&ndb, product_id, addr, price);
-            ok = order_id > 0;
-        }
-        /* Height 99 is above the tip-3 ceiling of 97 — one confirmation. */
-        ok = ok && tstp_seed_utxo(&ndb, h160, price, 99, false, 0xE3);
-        node_db_close(&ndb);
-
-        if (ok) {
-            store_process_payments(datadir);
-            ok = tstp_order_status(datadir, order_id) == STORE_ORDER_PENDING;
-        }
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
-        if (!tstp_open(datadir, &ndb)) {
-            printf("store_transparent_pay: FAIL (could not reopen node.db)\n");
-            return failures + 1;
-        }
-    }
-
-    /* ── 4. Block subsidy at the order address is not a payment ─────────
-     *
-     * A coinbase output crediting the order address is the merchant paying
-     * itself, not a buyer paying. Counting it would hand out the goods for
-     * free to whoever asked for an order while a block was being mined. */
-    printf("store_transparent_pay: coinbase at the order address is not a "
-           "payment... ");
-    {
-        char addr[128] = "";
-        uint8_t h160[20];
-        int64_t order_id = 0;
-        bool ok = tstp_taddr_for(0xD5, addr, sizeof(addr), h160);
-
-        if (ok) {
-            order_id = tstp_place_order(&ndb, product_id, addr, price);
-            ok = order_id > 0;
-        }
-        ok = ok && tstp_seed_utxo(&ndb, h160, price * 5, 50, true, 0xE4);
-        node_db_close(&ndb);
-
-        if (ok) {
-            store_process_payments(datadir);
-            ok = tstp_order_status(datadir, order_id) == STORE_ORDER_PENDING;
-        }
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
-        if (!tstp_open(datadir, &ndb)) {
-            printf("store_transparent_pay: FAIL (could not reopen node.db)\n");
-            return failures + 1;
-        }
-    }
-
-    /* ── 5. Underpaying does not credit ─────────────────────────────── */
-    printf("store_transparent_pay: an underpayment does not credit... ");
-    {
-        char addr[128] = "";
-        uint8_t h160[20];
-        int64_t order_id = 0;
-        bool ok = tstp_taddr_for(0xE6, addr, sizeof(addr), h160);
-
-        if (ok) {
-            order_id = tstp_place_order(&ndb, product_id, addr, price);
-            ok = order_id > 0;
-        }
-        ok = ok && price > 1;
-        ok = ok && tstp_seed_utxo(&ndb, h160, price - 1, 50, false, 0xE5);
-        node_db_close(&ndb);
-
-        if (ok) {
-            store_process_payments(datadir);
-            ok = tstp_order_status(datadir, order_id) == STORE_ORDER_PENDING;
-        }
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
-        if (!tstp_open(datadir, &ndb)) {
-            printf("store_transparent_pay: FAIL (could not reopen node.db)\n");
-            return failures + 1;
-        }
-    }
-
-    /* ── 6. Crediting is idempotent across a re-run ─────────────────────
-     *
-     * The reconcile runs every 30 s forever. An order it already credited
-     * must not be credited a second time, and a restart mid-flight must land
-     * on the same answer — the durable order status is what makes a crashed
-     * merchant resume rather than double-deliver. */
-    printf("store_transparent_pay: re-running the reconcile does not "
-           "re-credit... ");
-    {
-        char addr[128] = "";
-        uint8_t h160[20];
-        int64_t order_id = 0;
-        bool ok = tstp_taddr_for(0xF7, addr, sizeof(addr), h160);
-
-        if (ok) {
-            order_id = tstp_place_order(&ndb, product_id, addr, price);
-            ok = order_id > 0;
-        }
-        ok = ok && tstp_seed_utxo(&ndb, h160, price, 50, false, 0xE6);
-        node_db_close(&ndb);
-
-        if (ok) {
-            store_process_payments(datadir);
-            ok = tstp_order_status(datadir, order_id) == STORE_ORDER_SENT;
-        }
-        if (ok) {
-            uint64_t after_first =
-                zslp_balance(datadir, "", TSTP_CUSTOMER);
-            /* Whatever the first pass credited, a second pass must leave
-             * alone: the order is no longer PENDING, so it is not scanned. */
-            store_process_payments(datadir);
-            ok = tstp_order_status(datadir, order_id) == STORE_ORDER_SENT &&
-                 zslp_balance(datadir, "", TSTP_CUSTOMER) == after_first;
-        }
-        if (ok) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n");
-            failures++;
-        }
-        if (!tstp_open(datadir, &ndb)) {
-            printf("store_transparent_pay: FAIL (could not reopen node.db)\n");
-            return failures + 1;
-        }
-    }
 
     node_db_close(&ndb);
     return failures;
