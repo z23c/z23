@@ -186,7 +186,7 @@ static bool pcas_race_wait_for_temp_open(struct pcas_race_ctx *race)
 
 /* Release the parked writer A, join it, then reload whatever it published. */
 static struct zcl_result pcas_race_finish_writer_a(
-    struct pcas_race_ctx *race, pthread_t a_thread, bool thread_ok,
+    struct pcas_race_ctx *race, const pthread_t *a_thread, bool thread_ok,
     struct consensus_state_publication_decision_record *loaded)
 {
     if (thread_ok) {
@@ -194,7 +194,7 @@ static struct zcl_result pcas_race_finish_writer_a(
         race->release_a = true;
         pthread_cond_broadcast(&race->cv);
         pthread_mutex_unlock(&race->lock);
-        (void)pthread_join(a_thread, NULL);
+        (void)pthread_join(*a_thread, NULL);
     }
     consensus_state_publication_cas_test_set_after_temp_open_hook(NULL, NULL);
     return thread_ok && race->a_result.ok
@@ -533,7 +533,7 @@ static int check_concurrent_writer_race(
                memcmp(race_loaded.decision_digest,
                       b_rec.decision_digest, 32) == 0);
     struct zcl_result a_loaded = pcas_race_finish_writer_a(
-        &race, a_thread, thread_ok, &race_loaded);
+        &race, &a_thread, thread_ok, &race_loaded);
     PCAS_CHECK("concurrent writer A completes without clobber race",
                thread_ok && race.a_result.ok && a_loaded.ok &&
                memcmp(race_loaded.decision_digest,
