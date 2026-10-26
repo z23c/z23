@@ -58,15 +58,6 @@ static void zp_nul_terminate_output(char *output, size_t cap, size_t n)
     output[n < cap ? n : cap - 1] = 0;
 }
 
-static bool zp_command_output_ok(struct json_value *root,
-                                 const char *output, size_t n,
-                                 enum zcl_command_exit exit_code)
-{
-    return n > 0 && exit_code == ZCL_COMMAND_EXIT_OK &&
-           json_read(root, output, n) &&
-           json_get_bool(json_get(root, "ok"));
-}
-
 int test_zpay(void)
 {
     int failures = 0;
@@ -201,7 +192,9 @@ int test_zpay(void)
         zp_nul_terminate_output(output, sizeof(output), n);
         struct json_value root;
         json_init(&root);
-        ASSERT(zp_command_output_ok(&root, output, n, exit_code));
+        ASSERT(n > 0 && exit_code == ZCL_COMMAND_EXIT_OK &&
+               json_read(&root, output, n) &&
+               json_get_bool(json_get(&root, "ok")));
         const struct json_value *data = json_get(&root, "data");
         const char *memo_hex = data ?
             json_get_str(json_get(data, "memo_hex")) : NULL;
@@ -229,7 +222,9 @@ int test_zpay(void)
         json_free(&input);
         zp_nul_terminate_output(output, sizeof(output), n);
         json_init(&root);
-        ASSERT(zp_command_output_ok(&root, output, n, exit_code));
+        ASSERT(n > 0 && exit_code == ZCL_COMMAND_EXIT_OK &&
+               json_read(&root, output, n) &&
+               json_get_bool(json_get(&root, "ok")));
         data = json_get(&root, "data");
         ASSERT(data && json_get_bool(json_get(data, "current")));
         ASSERT(json_get_bool(json_get(data, "network_matches")));
