@@ -91,6 +91,7 @@ bool lint_gates_group_requires_quiet_pool(const char *group_name)
 #include "devloop.h"
 #include "dev_proof_observation.h"
 #include "test/testcache.h"
+#include "util/spawn.h"
 #include <fcntl.h>
 
 /* Builder shell identities distinguish background dispatch from the serial
@@ -526,6 +527,141 @@ int repo_path(char *out, size_t outsz, const char *rel)
     return snprintf(out, outsz, "%s/%s", root, rel) >= (int)outsz ? -1 : 0;
 }
 
+static int tmpl_capture(const char *const args[], const char *cwd, char *out, size_t cap)
+{
+    struct sigaction saved, normal = {.sa_handler = SIG_DFL};
+    out[0] = '\0';
+    if (sigemptyset(&normal.sa_mask) != 0 || sigaction(SIGCHLD, &normal, &saved) != 0)
+        return -1;
+    bool timeout = false;
+    int rc = zcl_spawn_capture_merged_in_dir_observed(args, cwd, out, cap, 60000, &timeout);
+    if (sigaction(SIGCHLD, &saved, NULL) != 0) return -1;
+    return timeout || strlen(out) == cap - 1u ? -1 : rc;
+}
+
+static bool tmpl_fixture_file(const char *root, const char *rel, const char *text)
+{
+    char path[PATH_MAX + 32];
+    int n = snprintf(path, sizeof path, "%s/%s", root, rel);
+    return n > 0 && (size_t)n < sizeof path && write_file(path, text) == 0;
+}
+
+static bool tmpl_build_fixture(const char *root)
+{
+    const char *cc = getenv("CC");
+    const char *rels[] = {"tools/gen_templates.c", "platform/modules/base/src/safe_alloc.c",
+                         "platform/modules/platform/src/path_replace.c"};
+    const char *dirs[] = {"platform/modules/base/include", "platform/modules/util/include",
+                         "platform/modules/platform/include"};
+    char sources[3][PATH_MAX], paths[3][PATH_MAX], inc[3][PATH_MAX + 2];
+    char binary[PATH_MAX + 32], out[4096];
+    snprintf(binary, sizeof binary, "%s/generator", root);
+    for (size_t i = 0; i < 3; i++) {
+        if (repo_path(sources[i], sizeof sources[i], rels[i]) != 0 ||
+            repo_path(paths[i], sizeof paths[i], dirs[i]) != 0) return false;
+        snprintf(inc[i], sizeof inc[i], "-I%s", paths[i]);
+    }
+    const char *args[] = {cc && *cc ? cc : "cc", "-std=c23", "-O2", "-Wall", "-Wextra",
+        inc[0], inc[1], inc[2], "-o", binary, sources[0], sources[1], sources[2], NULL};
+    int rc = tmpl_capture(args, NULL, out, sizeof out);
+    if (rc != 0) fprintf(stderr, "template fixture compile rc%d: %s\n", rc, out);
+    return rc == 0;
+}
+
+static bool tmpl_no_stages(const char *root)
+{
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof path, "%s/build/identity", root);
+    DIR *d = opendir(path);
+    if (!d) return false;
+    bool empty = true;
+    struct dirent *ent;
+    errno = 0;
+    while ((ent = readdir(d)) != NULL)
+        if (strcmp(ent->d_name, ".") != 0 && strcmp(ent->d_name, "..") != 0) empty = false;
+    if (errno != 0) empty = false;
+    if (closedir(d) != 0) empty = false;
+    return empty;
+}
+
+static bool tmpl_root_case(const char *root, const char *input, const char *css,
+                           int expected, const char *token)
+{
+    static const char sentinel[] = "original output sentinel\n";
+    if (!tmpl_fixture_file(root, "out.h", sentinel)) return false;
+    const char *args[] = {"./generator", input, "out.h", css, NULL};
+    char out[4096], path[PATH_MAX + 32], *bytes = NULL;
+    int rc = tmpl_capture(args, root, out, sizeof out);
+    if (rc != expected) {
+        fprintf(stderr, "template root %s rc%d expected%d: %s\n", input, rc, expected, out);
+        return false;
+    }
+    const char *diagnostic = token ? token : "cannot open template directory";
+    if (expected != 0 && (!strstr(out, diagnostic) || !strstr(out, input)))
+        return false;
+    snprintf(path, sizeof path, "%s/out.h", root);
+    if (read_entire_file(path, &bytes) != 0) return false;
+    bool ok = expected ? strcmp(bytes, sentinel) == 0 : strstr(bytes, token) != NULL;
+    free(bytes);
+    return ok && tmpl_no_stages(root);
+}
+
+/* A dangling selected name forces the same read_file failure as EACCES,
+ * including when tests run as root. It sorts after good.chtml, so a stage
+ * already contains a valid template when the required read fails. */
+static bool tmpl_selected_read_case(const char *root)
+{
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof path, "%s/templates/z-blocked.chtml", root);
+    if (symlink("not-present", path) != 0) return false;
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return false; }
+    if (errno != ENOENT) return false;
+    if (!tmpl_root_case(root, "templates", NULL, 1,
+                        "cannot read template templates/z-blocked.chtml")) return false;
+    if (unlink(path) != 0 ||
+        !tmpl_fixture_file(root, "templates/z-blocked.chtml", "<p>blocked</p>\n"))
+        return false;
+    if (!tmpl_root_case(root, "templates", NULL, 0, "TMPL_PARTIAL_COUNT 2")) return false;
+    snprintf(path, sizeof path, "%s/out.h", root);
+    char *bytes = NULL;
+    if (read_entire_file(path, &bytes) != 0) return false;
+    bool both = strstr(bytes, "TMPL_GOOD[]") && strstr(bytes, "TMPL_Z_BLOCKED[]");
+    free(bytes);
+    if (!both) return false;
+    /* Optional CSS keeps its existing skip-on-read-failure behavior. */
+    snprintf(path, sizeof path, "%s/css/z-blocked.ccss", root);
+    if (symlink("not-present", path) != 0) return false;
+    return tmpl_root_case(root, "templates", "css", 0, "TMPL_PARTIAL_COUNT 2");
+}
+
+static int t_template_required_root(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], path[PATH_MAX + 32];
+    if (!test_mkdtemp(root, sizeof root, "template_root")) return 1;
+    TEST("gen_templates actual CLI refuses unavailable roots and selected reads without replacing output or leaking stages") {
+        const char *dirs[] = {"build", "build/identity", "templates", "empty", "css"};
+        for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+            snprintf(path, sizeof path, "%s/%s", root, dirs[i]);
+            ASSERT(mkdir(path, 0700) == 0);
+        }
+        ASSERT(tmpl_fixture_file(root, "templates/good.chtml", "<p>good</p>\n"));
+        ASSERT(tmpl_fixture_file(root, "blocker", "regular file\n"));
+        ASSERT(tmpl_build_fixture(root));
+        ASSERT(tmpl_root_case(root, "templates", NULL, 0, "TMPL_GOOD[]"));
+        ASSERT(tmpl_root_case(root, "empty", NULL, 0, "TMPL_PARTIAL_COUNT 0"));
+        ASSERT(tmpl_root_case(root, "absent", NULL, 1, NULL));
+        ASSERT(tmpl_root_case(root, "blocker/child", NULL, 1, NULL));
+        ASSERT(tmpl_root_case(root, "templates", "absent-css", 0, "TMPL_GOOD[]"));
+        ASSERT(tmpl_root_case(root, "templates", "css", 0, "TMPL_GOOD[]"));
+        ASSERT(tmpl_selected_read_case(root));
+        PASS();
+    } _test_next:;
+    if (test_rm_rf_recursive(root) != 0) failures++;
+    return failures;
+}
+
 /* ── The one entry table ──────────────────────────────────────────────────
  * Every check appears here exactly once, tagged with the lane it needs. The
  * partition below is a pure function of this table, so adding a check is a
@@ -552,6 +688,7 @@ struct lint_gate_entry {
 #define H_(f) { (f), LINT_LANE_HEAVY }
 #define X_(f) { (f), LINT_LANE_EXCLUSIVE }
 static const struct lint_gate_entry g_lint_gate_entries[] = {
+    S_(t_template_required_root),
     N_(t_receipt_overlap),
     N_(t_receipt_contract),
     N_(t_receipt_signals),

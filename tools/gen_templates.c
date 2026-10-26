@@ -586,10 +586,12 @@ static void track_template_name(const char *name_base, const char *name_upper,
     tmpl_name_count++;
 }
 
+enum { TEMPLATE_DIR_UNAVAILABLE = -1, TEMPLATE_INPUT_UNREADABLE = -2 };
+
 static int process_dir(const char *dir, const char *ext, const char *prefix,
-                       bool minify, FILE *out) {
+                       bool minify, bool required_read, FILE *out) {
     DIR *d = opendir(dir);
-    if (!d) return 0;
+    if (!d) return TEMPLATE_DIR_UNAVAILABLE;
 
     int count = 0;
     size_t ext_len = strlen(ext);
@@ -632,6 +634,10 @@ static int process_dir(const char *dir, const char *ext, const char *prefix,
         size_t flen = 0;
         char *buf = read_file(path, &flen);
         if (!buf) {
+            if (required_read) {
+                fprintf(stderr, "gen_templates: cannot read template %s\n", path);
+                return TEMPLATE_INPUT_UNREADABLE;
+            }
             fprintf(stderr, "gen_templates: skipping %s\n", d_name);
             continue;
         }
@@ -760,11 +766,20 @@ int main(int argc, char **argv) {
         "#ifndef ZCL_VIEWS_WALLET_TEMPLATES_GEN_H\n"
         "#define ZCL_VIEWS_WALLET_TEMPLATES_GEN_H\n\n");
 
-    int tmpl_count = process_dir(tmpl_dir, ".chtml", "TMPL", false, out);
+    int tmpl_count = process_dir(tmpl_dir, ".chtml", "TMPL", false, true, out);
+    if (tmpl_count < 0) {
+        if (tmpl_count == TEMPLATE_DIR_UNAVAILABLE)
+            fprintf(stderr, "gen_templates: cannot open template directory %s: %s\n",
+                    tmpl_dir, strerror(errno));
+        (void)fclose(out);
+        (void)remove(tmp_path);
+        return 1;
+    }
 
     int css_count = 0;
     if (css_dir)
-        css_count = process_dir(css_dir, ".ccss", "CSS", true, out);
+        css_count = process_dir(css_dir, ".ccss", "CSS", true, false, out);
+    if (css_count < 0) css_count = 0;
 
     /* Generate partial registry for {{> name}} lookups */
     fprintf(out, "#include \"util/template.h\"\n\n");
