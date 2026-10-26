@@ -200,29 +200,6 @@ static void pdf_relay_fixture_free(struct pdf_relay_fixture *fx)
     tx_mempool_free(&fx->pool);
 }
 
-/* Report one relay-path outcome: the accept result must be `expected`, the
- * mempool must still be empty, and the peer's ban-score must be exactly
- * `expected_score`. Returns the failure count for this check. */
-static int pdf_check_relay_outcome(enum tx_accept_result ar,
-                                   enum tx_accept_result expected,
-                                   struct pdf_relay_fixture *fx,
-                                   int expected_score)
-{
-    int failures = 0;
-
-    bool ok = (ar == expected);
-    ok = ok && (tx_mempool_size(&fx->pool) == 0);
-    ok = ok && (atomic_load(&fx->node.misbehavior) == expected_score);
-
-    if (ok) printf("OK\n");
-    else {
-        printf("FAIL (ar=%d size=%zu score=%d)\n", (int)ar,
-               tx_mempool_size(&fx->pool), atomic_load(&fx->node.misbehavior));
-        failures++;
-    }
-    return failures;
-}
-
 /* Stage one "block" frame of declared `size` through the header and data
  * reads; *hn and *dn receive the two return codes. */
 static void pdf_stage_block_frame(struct net_message *msg,
@@ -396,6 +373,7 @@ static int pdf_case_invalid_tx_scored(const struct chain_params *cp,
 {
     sapling_free_params();
 
+    int failures = 0;
     struct pdf_relay_fixture fx;
     pdf_relay_fixture_init(&fx, cp, ms, "pdf_guilty");
 
@@ -412,10 +390,17 @@ static int pdf_case_invalid_tx_scored(const struct chain_params *cp,
 
     enum tx_accept_result ar = msg_tx_accept(&fx.mp, &fx.node, &tx);
 
-    int failures = pdf_check_relay_outcome(
-        ar, TX_ACCEPT_INVALID, &fx,
-        peer_offence_weight(PEER_OFFENCE_INVALID_MESSAGE));
+    bool ok = (ar == TX_ACCEPT_INVALID);
+    ok = ok && (tx_mempool_size(&fx.pool) == 0);
+    ok = ok && (atomic_load(&fx.node.misbehavior) ==
+                peer_offence_weight(PEER_OFFENCE_INVALID_MESSAGE));
 
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (ar=%d size=%zu score=%d)\n", (int)ar,
+               tx_mempool_size(&fx.pool), atomic_load(&fx.node.misbehavior));
+        failures++;
+    }
     transaction_free(&tx);
     pdf_relay_fixture_free(&fx);
     return failures;
@@ -426,6 +411,7 @@ static int pdf_case_invalid_tx_scored(const struct chain_params *cp,
 static int pdf_case_unverifiable_tx_not_scored(const struct chain_params *cp,
                                                struct main_state *ms)
 {
+    int failures = 0;
     sapling_free_params();
 
     struct pdf_relay_fixture fx;
@@ -440,9 +426,16 @@ static int pdf_case_unverifiable_tx_not_scored(const struct chain_params *cp,
 
     /* Rejected (never relayed, never in the mempool) but the sender
      * pays nothing for our missing keys. */
-    int failures = pdf_check_relay_outcome(ar, TX_ACCEPT_UNVERIFIABLE, &fx,
-                                           0);
+    bool ok = (ar == TX_ACCEPT_UNVERIFIABLE);
+    ok = ok && (tx_mempool_size(&fx.pool) == 0);
+    ok = ok && (atomic_load(&fx.node.misbehavior) == 0);
 
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (ar=%d size=%zu score=%d)\n", (int)ar,
+               tx_mempool_size(&fx.pool), atomic_load(&fx.node.misbehavior));
+        failures++;
+    }
     transaction_free(&tx);
     pdf_relay_fixture_free(&fx);
     return failures;
