@@ -115,7 +115,8 @@ static int alloc_worker_arrays(struct worker_ctx **workers_out,
                               sizeof(bool), "bg_valid created");
     if (*workers_out && *threads_out && *created_out)
         return 0;
-    return -1;
+    LOG_ERR("bg.validation", "worker array allocation failed (nthreads=%d)",
+            nthreads);
 }
 
 /* Give each worker a contiguous range of items; the first (count % nthreads)
