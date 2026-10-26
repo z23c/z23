@@ -165,6 +165,64 @@ struct prr_fixture {
     int n_blocks;
 };
 
+/* Initialise all eight reducer stages in pipeline order; short-circuits at
+ * the first stage that fails, exactly as the inline chain did. */
+static bool prr_stages_init_all(struct main_state *ms)
+{
+    return header_admit_stage_init(ms) &&
+           validate_headers_stage_init(ms) &&
+           body_fetch_stage_init(ms) &&
+           body_persist_stage_init(ms) &&
+           script_validate_stage_init(ms) &&
+           proof_validate_stage_init(ms) &&
+           utxo_apply_stage_init(ms) &&
+           tip_finalize_stage_init(ms);
+}
+
+/* One height of prr_setup's chain build: build the block, mine it, admit
+ * its header, persist its body to the real blocks/ dir, then advance the
+ * fixture tip. *prev_hash is the parent hash on entry and this block's hash
+ * on exit. Returns 0, or -1 on the same failures the inline loop bailed on
+ * (with the same block_free calls on the same paths). */
+static int prr_mine_and_persist_height(struct prr_fixture *fx, int height,
+                                       struct uint256 *prev_hash)
+{
+    struct block blk;
+    if (!prr_build_regtest_block(&blk, height, prev_hash, fx->cp)) return -1;
+    if (!mine_block_pow(&blk, height, fx->cp, 0)) { block_free(&blk); return -1; }
+
+    struct uint256 hh;
+    block_get_hash(&blk, &hh);
+
+    struct block_index *bi = add_to_block_index(&fx->ms, &blk.header);
+    if (!bi || !bi->phashBlock) { block_free(&blk); return -1; }
+    if ((bi->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE)
+        bi->nStatus = (bi->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TREE;
+    fx->ms.pindex_best_header = bi;
+
+    struct header_admit_msg m;
+    memset(&m, 0, sizeof(m));
+    m.hash = hh;
+    m.has_header = true;
+    m.header = blk.header;
+    m.height = -1;
+    if (!mailbox_header_admit_push(&m)) { block_free(&blk); return -1; }
+    (void)header_admit_stage_drain(50);
+
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    bool persisted = write_block_to_disk(&blk, &pos, fx->netdir,
+                                         fx->cp->pchMessageStart) &&
+                     block_index_set_have_data_verified(bi, &pos, fx->netdir);
+    block_free(&blk);
+    if (!persisted) return -1;
+
+    *prev_hash = hh;
+    fx->tip_bi = bi;
+    memcpy(fx->tip_hash, hh.data, 32);
+    return 0;
+}
+
 /* Build genesis + n_blocks regtest blocks on a REAL datadir, initialise all
  * eight reducer stages, admit headers, persist bodies. Slim copy of
  * test_fold_inram_crash_proof.c:fip_setup; drives utxo_apply directly. */
@@ -201,16 +259,7 @@ static bool prr_setup(const char *dir, int n_blocks, struct prr_fixture *fx)
     active_chain_move_window_tip(&fx->ms.chain_active, genesis);
     fx->ms.pindex_best_header = genesis;
 
-    bool stages_ok =
-        header_admit_stage_init(&fx->ms) &&
-        validate_headers_stage_init(&fx->ms) &&
-        body_fetch_stage_init(&fx->ms) &&
-        body_persist_stage_init(&fx->ms) &&
-        script_validate_stage_init(&fx->ms) &&
-        proof_validate_stage_init(&fx->ms) &&
-        utxo_apply_stage_init(&fx->ms) &&
-        tip_finalize_stage_init(&fx->ms);
-    if (!stages_ok) return false;
+    if (!prr_stages_init_all(&fx->ms)) return false;
 
     if (!prr_seed_genesis_utxo_apply_row(progress_store_db())) return false;
     if (!tip_finalize_stage_seed_anchor(0, genesis_hash.data, false)) return false;
@@ -219,39 +268,7 @@ static bool prr_setup(const char *dir, int n_blocks, struct prr_fixture *fx)
 
     struct uint256 prev_hash = genesis_hash;
     for (int h = 1; h <= n_blocks; h++) {
-        struct block blk;
-        if (!prr_build_regtest_block(&blk, h, &prev_hash, fx->cp)) return false;
-        if (!mine_block_pow(&blk, h, fx->cp, 0)) { block_free(&blk); return false; }
-
-        struct uint256 hh;
-        block_get_hash(&blk, &hh);
-
-        struct block_index *bi = add_to_block_index(&fx->ms, &blk.header);
-        if (!bi || !bi->phashBlock) { block_free(&blk); return false; }
-        if ((bi->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE)
-            bi->nStatus = (bi->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TREE;
-        fx->ms.pindex_best_header = bi;
-
-        struct header_admit_msg m;
-        memset(&m, 0, sizeof(m));
-        m.hash = hh;
-        m.has_header = true;
-        m.header = blk.header;
-        m.height = -1;
-        if (!mailbox_header_admit_push(&m)) { block_free(&blk); return false; }
-        (void)header_admit_stage_drain(50);
-
-        struct disk_block_pos pos;
-        disk_block_pos_init(&pos);
-        bool persisted = write_block_to_disk(&blk, &pos, fx->netdir,
-                                             fx->cp->pchMessageStart) &&
-                         block_index_set_have_data_verified(bi, &pos, fx->netdir);
-        block_free(&blk);
-        if (!persisted) return false;
-
-        prev_hash = hh;
-        fx->tip_bi = bi;
-        memcpy(fx->tip_hash, hh.data, 32);
+        if (prr_mine_and_persist_height(fx, h, &prev_hash) != 0) return false;
     }
     return true;
 }
@@ -310,6 +327,94 @@ static void prr_hex(const uint8_t d[32], char out[65])
     out[64] = '\0';
 }
 
+/* The serial fold is complete only when prr_serial_fold succeeded AND the
+ * utxo_apply cursor has advanced past every height (genesis + N blocks). */
+static bool prr_serial_fold_reached_tip(bool serial_ok)
+{
+    return serial_ok &&
+           utxo_apply_stage_cursor() == (uint64_t)(PRR_N_BLOCKS + 1);
+}
+
+/* The durable serial reference is usable when the commitment encoded, the
+ * coin count equals the block count, and the supply query ran. */
+static bool prr_serial_reference_valid(int commit_rc, int64_t count,
+                                       bool supply_ok)
+{
+    return commit_rc == 0 && count == PRR_N_BLOCKS && supply_ok;
+}
+
+/* One (K,S) point of the parallel sweep: recompile genesis..N through the
+ * PRODUCTION provider and diff the terminal SHA3/count/supply against the
+ * durable serial reference. Returns the number of failed checks. */
+static int prr_check_parallel_ks_combo(struct prr_fixture *fx, int k, int s,
+                                       bool last, const char *serial_hex,
+                                       int64_t serial_count,
+                                       int64_t serial_supply,
+                                       double *best_us_per_blk)
+{
+    int failures = 0;
+    struct psc_prod_source src = { .ms = &fx->ms, .datadir = fx->netdir };
+    struct psc_range_result r;
+    bool ran = psc_compile_range(1, PRR_N_BLOCKS, k, s,
+                                 psc_prod_block_provider, &src, &r);
+    char name[96];
+    snprintf(name, sizeof(name), "PSC prod-provider compile clean (K=%d,S=%d)",
+             k, s);
+    PRR_CHECK(name, ran && r.ok);
+    if (!ran || !r.ok) return failures;
+
+    printf("  %-4d %-4d %-12llu %-12.0f %-12.0f %-10.3f\n",
+           k, s, (unsigned long long)r.events_total,
+           r.extract_us, r.join_us, r.total_us / (double)PRR_N_BLOCKS);
+    if (last)
+        *best_us_per_blk = r.total_us / (double)PRR_N_BLOCKS;
+
+    char phex[65]; prr_hex(r.terminal_sha3, phex);
+    snprintf(name, sizeof(name), "terminal SHA3 == durable coins_kv (K=%d,S=%d)",
+             k, s);
+    PRR_CHECK(name, strcmp(phex, serial_hex) == 0);
+    if (strcmp(phex, serial_hex) != 0)
+        printf("    >> durable=%s parallel=%s\n", serial_hex, phex);
+    snprintf(name, sizeof(name), "coin count == durable (K=%d,S=%d)", k, s);
+    PRR_CHECK(name, (int64_t)r.terminal_count == serial_count);
+    snprintf(name, sizeof(name), "supply == durable (K=%d,S=%d)", k, s);
+    PRR_CHECK(name, r.terminal_supply == serial_supply);
+    return failures;
+}
+
+/* True when psc_audit_run returned call_ok and the audit ran to the expected
+ * verdict with the expected parallel and durable coin counts; shared by the
+ * full-range MATCH and the short-range MISMATCH assertions. */
+static bool prr_audit_result_equals_expected(const struct psc_audit_result *ar,
+                                             bool call_ok, bool want_match,
+                                             uint64_t want_parallel,
+                                             int64_t want_durable)
+{
+    return call_ok && ar->ran && ar->match == want_match &&
+           ar->parallel_count == want_parallel &&
+           ar->durable_count == want_durable;
+}
+
+/* dumpstate psc fields expected right after the full-range MATCH audit:
+ * has_run and match true, parallel_count == N. */
+static bool prr_dumpstate_fields_show_match(bool dumped,
+                                            const struct json_value *has_run,
+                                            const struct json_value *jm,
+                                            const struct json_value *jc)
+{
+    return dumped && has_run && json_get_bool(has_run) &&
+           jm && json_get_bool(jm) &&
+           jc && json_get_int(jc) == PRR_N_BLOCKS;
+}
+
+/* dumpstate psc fields expected right after the short-range MISMATCH audit:
+ * match false. */
+static bool prr_dumpstate_fields_show_mismatch(bool dumped,
+                                               const struct json_value *jm)
+{
+    return dumped && jm && !json_get_bool(jm);
+}
+
 int test_psc_real_range(void);
 int test_psc_real_range(void)
 {
@@ -335,7 +440,7 @@ int test_psc_real_range(void)
     double serial_utxo_us = 0;
     bool serial_ok = prr_serial_fold(&fx, &serial_utxo_us);
     PRR_CHECK("serial fold applied every block (utxo_apply cursor == N+1)",
-              serial_ok && utxo_apply_stage_cursor() == (uint64_t)(PRR_N_BLOCKS + 1));
+              prr_serial_fold_reached_tip(serial_ok));
 
     sqlite3 *db = progress_store_db();
     uint8_t serial_sha3[32] = {0};
@@ -344,7 +449,8 @@ int test_psc_real_range(void)
     int64_t serial_supply = 0;
     bool supply_ok = prr_durable_supply(db, &serial_supply);
     PRR_CHECK("durable coins_kv commitment + count + supply computed",
-              serial_commit_rc == 0 && serial_count == PRR_N_BLOCKS && supply_ok);
+              prr_serial_reference_valid(serial_commit_rc, serial_count,
+                                         supply_ok));
     char serial_hex[65]; prr_hex(serial_sha3, serial_hex);
 
     /* The active-chain window spans [1,N] for the provider's active_chain_at
@@ -360,32 +466,11 @@ int test_psc_real_range(void)
     printf("\n  %-4s %-4s %-12s %-12s %-12s %-10s\n",
            "K", "S", "events", "extract_us", "join_us", "us/blk");
     for (size_t i = 0; i < sizeof(Ks)/sizeof(Ks[0]); i++) {
-        struct psc_prod_source src = { .ms = &fx.ms, .datadir = fx.netdir };
-        struct psc_range_result r;
-        bool ran = psc_compile_range(1, PRR_N_BLOCKS, Ks[i], Ss[i],
-                                     psc_prod_block_provider, &src, &r);
-        char name[96];
-        snprintf(name, sizeof(name), "PSC prod-provider compile clean (K=%d,S=%d)",
-                 Ks[i], Ss[i]);
-        PRR_CHECK(name, ran && r.ok);
-        if (!ran || !r.ok) continue;
-
-        printf("  %-4d %-4d %-12llu %-12.0f %-12.0f %-10.3f\n",
-               Ks[i], Ss[i], (unsigned long long)r.events_total,
-               r.extract_us, r.join_us, r.total_us / (double)PRR_N_BLOCKS);
-        if (i == sizeof(Ks)/sizeof(Ks[0]) - 1)
-            best_parallel_us_per_blk = r.total_us / (double)PRR_N_BLOCKS;
-
-        char phex[65]; prr_hex(r.terminal_sha3, phex);
-        snprintf(name, sizeof(name), "terminal SHA3 == durable coins_kv (K=%d,S=%d)",
-                 Ks[i], Ss[i]);
-        PRR_CHECK(name, strcmp(phex, serial_hex) == 0);
-        if (strcmp(phex, serial_hex) != 0)
-            printf("    >> durable=%s parallel=%s\n", serial_hex, phex);
-        snprintf(name, sizeof(name), "coin count == durable (K=%d,S=%d)", Ks[i], Ss[i]);
-        PRR_CHECK(name, (int64_t)r.terminal_count == serial_count);
-        snprintf(name, sizeof(name), "supply == durable (K=%d,S=%d)", Ks[i], Ss[i]);
-        PRR_CHECK(name, r.terminal_supply == serial_supply);
+        bool last = i == sizeof(Ks)/sizeof(Ks[0]) - 1;
+        failures += prr_check_parallel_ks_combo(&fx, Ks[i], Ss[i], last,
+                                                serial_hex, serial_count,
+                                                serial_supply,
+                                                &best_parallel_us_per_blk);
     }
 
     printf("\n  MEASUREMENT (real on-disk %d-block regtest fold):\n", PRR_N_BLOCKS);
@@ -399,9 +484,9 @@ int test_psc_real_range(void)
     struct psc_audit_result ar;
     bool match = psc_audit_run(&fx.ms, fx.netdir, 1, PRR_N_BLOCKS, 0, 0, &ar);
     PRR_CHECK("psc_audit_run full range reports MATCH",
-              match && ar.ran && ar.match &&
-              ar.parallel_count == (uint64_t)PRR_N_BLOCKS &&
-              ar.durable_count == serial_count);
+              prr_audit_result_equals_expected(&ar, match, true,
+                                               (uint64_t)PRR_N_BLOCKS,
+                                               serial_count));
     {
         struct json_value js; memset(&js, 0, sizeof(js));
         bool dumped = psc_dump_state_json(&js, NULL);
@@ -409,9 +494,7 @@ int test_psc_real_range(void)
         const struct json_value *jm = json_get(&js, "match");
         const struct json_value *jc = json_get(&js, "parallel_count");
         PRR_CHECK("dumpstate psc reflects the MATCH audit",
-                  dumped && has_run && json_get_bool(has_run) &&
-                  jm && json_get_bool(jm) &&
-                  jc && json_get_int(jc) == PRR_N_BLOCKS);
+                  prr_dumpstate_fields_show_match(dumped, has_run, jm, jc));
         json_free(&js);
     }
 
@@ -419,15 +502,15 @@ int test_psc_real_range(void)
     struct psc_audit_result ar2;
     bool match2 = psc_audit_run(&fx.ms, fx.netdir, 1, PRR_N_BLOCKS - 1, 0, 0, &ar2);
     PRR_CHECK("psc_audit_run short range reports MISMATCH",
-              !match2 && ar2.ran && !ar2.match &&
-              ar2.parallel_count == (uint64_t)(PRR_N_BLOCKS - 1) &&
-              ar2.durable_count == serial_count);
+              prr_audit_result_equals_expected(&ar2, !match2, false,
+                                               (uint64_t)(PRR_N_BLOCKS - 1),
+                                               serial_count));
     {
         struct json_value js; memset(&js, 0, sizeof(js));
         bool dumped = psc_dump_state_json(&js, NULL);
         const struct json_value *jm = json_get(&js, "match");
         PRR_CHECK("dumpstate psc reflects the MISMATCH audit",
-                  dumped && jm && !json_get_bool(jm));
+                  prr_dumpstate_fields_show_mismatch(dumped, jm));
         json_free(&js);
     }
 
