@@ -179,13 +179,9 @@ static bool no_coins_present(struct block *blocks,
 
 /* ── Test implementation ─────────────────────────────────── */
 
-int test_reorg_safety(void)
-{
-    printf("\n=== reorg safety test (50-block fork) ===\n");
-    int failures = 0;
-
-    /* ── Storage for both chains ─────────────────────────── */
-
+/* Long-lived state threaded through every phase of the reorg safety
+ * test: both synthetic chains plus the UTXO cache they connect to. */
+struct reorg_test_state {
     struct block   a_blocks[CHAIN_LEN + 1];
     struct uint256 a_hashes[CHAIN_LEN + 1];
     struct block_index a_idx[CHAIN_LEN + 1];
@@ -193,6 +189,19 @@ int test_reorg_safety(void)
     struct block   b_blocks[CHAIN_LEN + 1];
     struct uint256 b_hashes[CHAIN_LEN + 1];
     struct block_index b_idx[CHAIN_LEN + 1];
+
+    struct coins_view_cache cache;
+};
+
+static int reorg_build_chain_a(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct block *a_blocks = st->a_blocks;
+    struct uint256 *a_hashes = st->a_hashes;
+    struct block_index *a_idx = st->a_idx;
+    struct block *b_blocks = st->b_blocks;
+    struct uint256 *b_hashes = st->b_hashes;
+    struct block_index *b_idx = st->b_idx;
 
     /* ── Build genesis (shared) ──────────────────────────── */
 
@@ -213,12 +222,11 @@ int test_reorg_safety(void)
 
     /* ── UTXO cache ──────────────────────────────────────── */
 
-    struct coins_view_cache cache;
     struct coins_view null_view;
     memset(&null_view, 0, sizeof(null_view));
-    coins_view_cache_init(&cache, &null_view);
+    coins_view_cache_init(&st->cache, &null_view);
 
-    update_coins(&a_blocks[0].vtx[0], &cache, 0);
+    update_coins(&a_blocks[0].vtx[0], &st->cache, 0);
 
     /* ── 1. Build chain A (50 blocks) ────────────────────── */
 
@@ -235,14 +243,26 @@ int test_reorg_safety(void)
         a_idx[h].nChainTx = a_idx[h - 1].nChainTx + 1;
         arith_uint256_set_u64(&a_idx[h].nChainWork, (uint64_t)(h + 1));
 
-        update_coins(&a_blocks[h].vtx[0], &cache, h);
+        update_coins(&a_blocks[h].vtx[0], &st->cache, h);
     }
 
     RG_CHECK("reorg: chain A built with 51 UTXOs",
-             (int)cache.commitment.count == CHAIN_LEN + 1);
+             (int)st->cache.commitment.count == CHAIN_LEN + 1);
 
     RG_CHECK("reorg: all chain A coinbases present",
-             all_coins_present(a_blocks, &cache, 0, CHAIN_LEN));
+             all_coins_present(a_blocks, &st->cache, 0, CHAIN_LEN));
+
+    return failures;
+}
+
+static int reorg_build_chain_b(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct uint256 *a_hashes = st->a_hashes;
+    struct block_index *a_idx = st->a_idx;
+    struct block *b_blocks = st->b_blocks;
+    struct uint256 *b_hashes = st->b_hashes;
+    struct block_index *b_idx = st->b_idx;
 
     /* ── 2. Build chain B (diverges at height 1) ─────────── */
 
@@ -265,431 +285,588 @@ int test_reorg_safety(void)
              arith_uint256_compare(&b_idx[CHAIN_LEN].nChainWork,
                                     &a_idx[CHAIN_LEN].nChainWork) > 0);
 
+    return failures;
+}
+
+static int reorg_check_rollback_policy_allowed(void)
+{
+    int failures = 0;
+
     /* ── 3. recovery_policy allows 49-block rollback ─────── */
 
-    {
-        struct recovery_policy policy;
-        policy_set_defaults(&policy);
-        enum policy_decision d = policy_check_block_rollback(
-            &policy, CHAIN_LEN, FORK_HEIGHT, "test_reorg_safety");
-        RG_CHECK("reorg: recovery_policy allows 49-block rollback",
-                 d == POLICY_ALLOW);
-    }
+    struct recovery_policy policy;
+    policy_set_defaults(&policy);
+    enum policy_decision d = policy_check_block_rollback(
+        &policy, CHAIN_LEN, FORK_HEIGHT, "test_reorg_safety");
+    RG_CHECK("reorg: recovery_policy allows 49-block rollback",
+             d == POLICY_ALLOW);
+
+    return failures;
+}
+
+static int reorg_disconnect_chain_a(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct block *a_blocks = st->a_blocks;
+    struct block_index *a_idx = st->a_idx;
 
     /* ── 4. Disconnect chain A (h=50..1) ─────────────────── */
 
     RG_CHECK("reorg: disconnect 50 chain-A blocks",
-             disconnect_range(a_blocks, a_idx, &cache, CHAIN_LEN, 0));
+             disconnect_range(a_blocks, a_idx, &st->cache, CHAIN_LEN, 0));
 
     RG_CHECK("reorg: genesis coinbase survives disconnect",
-             coins_view_cache_have_coins(&cache, &a_blocks[0].vtx[0].hash));
+             coins_view_cache_have_coins(&st->cache, &a_blocks[0].vtx[0].hash));
 
     RG_CHECK("reorg: no chain A orphan UTXOs after disconnect",
-             no_coins_present(a_blocks, &cache, 1, CHAIN_LEN));
+             no_coins_present(a_blocks, &st->cache, 1, CHAIN_LEN));
 
     /* After disconnect, cache should have only genesis (size ~1, may
      * include erased tombstones depending on hash map implementation,
      * but have_coins must return false for erased entries). */
 
+    return failures;
+}
+
+static int reorg_connect_chain_b(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct block *a_blocks = st->a_blocks;
+    struct block *b_blocks = st->b_blocks;
+
     /* ── 5. Connect chain B (h=1..50) ────────────────────── */
 
-    connect_range(b_blocks, &cache, 1, CHAIN_LEN);
+    connect_range(b_blocks, &st->cache, 1, CHAIN_LEN);
 
     RG_CHECK("reorg: all chain B coinbases present (no UTXO loss)",
-             all_coins_present(b_blocks, &cache, 1, CHAIN_LEN));
+             all_coins_present(b_blocks, &st->cache, 1, CHAIN_LEN));
 
     RG_CHECK("reorg: no chain A orphan UTXOs remain",
-             no_coins_present(a_blocks, &cache, 1, CHAIN_LEN));
+             no_coins_present(a_blocks, &st->cache, 1, CHAIN_LEN));
+
+    return failures;
+}
+
+static int reorg_check_csr_accepts_b_tip(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct uint256 *a_hashes = st->a_hashes;
+    struct block_index *a_idx = st->a_idx;
+    struct uint256 *b_hashes = st->b_hashes;
+    struct block_index *b_idx = st->b_idx;
 
     /* ── 6. CSR accepts the reorged tip ──────────────────── */
 
+    struct block_map bm;
+    struct active_chain chain;
+    struct block_index *header_tip = NULL;
+
+    block_map_init(&bm);
+    active_chain_init(&chain);
+
+    test_block_map_insert(&bm, &a_hashes[0], &a_idx[0]);
+    for (int h = 1; h <= CHAIN_LEN; h++)
+        test_block_map_insert(&bm, &b_hashes[h], &b_idx[h]);
+
+    active_chain_move_window_tip(&chain, &b_idx[CHAIN_LEN]);
+    st->cache.hash_block = *b_idx[CHAIN_LEN].phashBlock;
+
+    struct chain_state_repository csr;
+    csr_init(&csr, &bm, &chain, &header_tip, &st->cache, NULL, NULL);
+
+    struct chain_state_commit commit;
+    memset(&commit, 0, sizeof(commit));
+    commit.new_tip = &b_idx[CHAIN_LEN];
+    commit.new_coins_best = *b_idx[CHAIN_LEN].phashBlock;
+    commit.expected_utxo_count = -1;
+    commit.update_header_tip = true;
+    commit.wallet_scan_height = -1;
+    commit.reason = "test_reorg_safety.chain_b_tip";
+
+    enum csr_result r = csr_commit_tip(&csr, &commit);
+    RG_CHECK("reorg: CSR accepts chain B tip commit", r == CSR_OK);
+
+    csr_free(&csr);
+    active_chain_free(&chain);
+    block_map_free(&bm);
+
+    return failures;
+}
+
+/* Run the committing db_txn scope, then verify its insert persisted.
+ * Returns 0 on success, 1 on failure. */
+static int reorg_db_txn_commit_and_verify(struct node_db *ndb)
+{
+    bool db_ok = true;
+
+    sqlite3_exec(ndb->db,
+        "CREATE TABLE reorg_test(id INTEGER PRIMARY KEY, val TEXT)",
+        NULL, NULL, NULL);
+
+    /* Transaction that commits */
     {
-        struct block_map bm;
-        struct active_chain chain;
-        struct block_index *header_tip = NULL;
-
-        block_map_init(&bm);
-        active_chain_init(&chain);
-
-        test_block_map_insert(&bm, &a_hashes[0], &a_idx[0]);
-        for (int h = 1; h <= CHAIN_LEN; h++)
-            test_block_map_insert(&bm, &b_hashes[h], &b_idx[h]);
-
-        active_chain_move_window_tip(&chain, &b_idx[CHAIN_LEN]);
-        cache.hash_block = *b_idx[CHAIN_LEN].phashBlock;
-
-        struct chain_state_repository csr;
-        csr_init(&csr, &bm, &chain, &header_tip, &cache, NULL, NULL);
-
-        struct chain_state_commit commit;
-        memset(&commit, 0, sizeof(commit));
-        commit.new_tip = &b_idx[CHAIN_LEN];
-        commit.new_coins_best = *b_idx[CHAIN_LEN].phashBlock;
-        commit.expected_utxo_count = -1;
-        commit.update_header_tip = true;
-        commit.wallet_scan_height = -1;
-        commit.reason = "test_reorg_safety.chain_b_tip";
-
-        enum csr_result r = csr_commit_tip(&csr, &commit);
-        RG_CHECK("reorg: CSR accepts chain B tip commit", r == CSR_OK);
-
-        csr_free(&csr);
-        active_chain_free(&chain);
-        block_map_free(&bm);
+        DB_TXN_SCOPE(txn, ndb, "reorg_commit");
+        db_ok = db_ok && (txn != NULL);
+        if (txn) {
+            sqlite3_exec(ndb->db,
+                "INSERT INTO reorg_test VALUES(1, 'kept')",
+                NULL, NULL, NULL);
+            db_ok = db_ok && db_txn_commit(txn);
+        }
     }
+
+    /* Verify committed data persisted */
+    if (db_ok) {
+        sqlite3_stmt *st = NULL;
+        sqlite3_prepare_v2(ndb->db,
+            "SELECT val FROM reorg_test WHERE id=1", -1, &st, NULL);
+        db_ok = db_ok && (sqlite3_step(st) == SQLITE_ROW);
+        if (db_ok)
+            db_ok = db_ok &&
+                (strcmp((const char *)sqlite3_column_text(st, 0),
+                        "kept") == 0);
+        sqlite3_finalize(st);
+    }
+
+    return db_ok ? 0 : 1;
+}
+
+/* Run the auto-rolling-back db_txn scope, then verify its insert was
+ * reverted. `db_ok` carries the verdict of earlier phases; returns 0 on
+ * success, 1 on failure. */
+static int reorg_db_txn_rollback_and_verify(struct node_db *ndb, bool db_ok)
+{
+    /* Transaction that auto-rolls-back */
+    {
+        DB_TXN_SCOPE(txn2, ndb, "reorg_rollback");
+        db_ok = db_ok && (txn2 != NULL);
+        if (txn2) {
+            sqlite3_exec(ndb->db,
+                "INSERT INTO reorg_test VALUES(2, 'vanish')",
+                NULL, NULL, NULL);
+        }
+    }
+
+    /* Verify rolled-back data is gone */
+    if (db_ok) {
+        sqlite3_stmt *st = NULL;
+        sqlite3_prepare_v2(ndb->db,
+            "SELECT COUNT(*) FROM reorg_test WHERE id=2",
+            -1, &st, NULL);
+        db_ok = db_ok && (sqlite3_step(st) == SQLITE_ROW);
+        if (db_ok)
+            db_ok = db_ok && (sqlite3_column_int(st, 0) == 0);
+        sqlite3_finalize(st);
+    }
+
+    return db_ok ? 0 : 1;
+}
+
+static int reorg_check_db_txn_semantics(void)
+{
+    int failures = 0;
 
     /* ── 7. db_txn scoped commit/rollback during reorg ───── */
 
-    {
-        struct node_db ndb;
-        memset(&ndb, 0, sizeof(ndb));
-        int rc = sqlite3_open(":memory:", &ndb.db);
-        bool db_ok = (rc == SQLITE_OK);
-        if (db_ok) {
-            ndb.open = true;
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    int rc = sqlite3_open(":memory:", &ndb.db);
+    bool db_ok = (rc == SQLITE_OK);
+    if (db_ok) {
+        ndb.open = true;
 
-            sqlite3_exec(ndb.db,
-                "CREATE TABLE reorg_test(id INTEGER PRIMARY KEY, val TEXT)",
-                NULL, NULL, NULL);
+        db_ok = (reorg_db_txn_commit_and_verify(&ndb) == 0);
+        db_ok = (reorg_db_txn_rollback_and_verify(&ndb, db_ok) == 0);
 
-            /* Transaction that commits */
-            {
-                DB_TXN_SCOPE(txn, &ndb, "reorg_commit");
-                db_ok = db_ok && (txn != NULL);
-                if (txn) {
-                    sqlite3_exec(ndb.db,
-                        "INSERT INTO reorg_test VALUES(1, 'kept')",
-                        NULL, NULL, NULL);
-                    db_ok = db_ok && db_txn_commit(txn);
-                }
-            }
-
-            /* Verify committed data persisted */
-            if (db_ok) {
-                sqlite3_stmt *st = NULL;
-                sqlite3_prepare_v2(ndb.db,
-                    "SELECT val FROM reorg_test WHERE id=1", -1, &st, NULL);
-                db_ok = db_ok && (sqlite3_step(st) == SQLITE_ROW);
-                if (db_ok)
-                    db_ok = db_ok &&
-                        (strcmp((const char *)sqlite3_column_text(st, 0),
-                                "kept") == 0);
-                sqlite3_finalize(st);
-            }
-
-            /* Transaction that auto-rolls-back */
-            {
-                DB_TXN_SCOPE(txn2, &ndb, "reorg_rollback");
-                db_ok = db_ok && (txn2 != NULL);
-                if (txn2) {
-                    sqlite3_exec(ndb.db,
-                        "INSERT INTO reorg_test VALUES(2, 'vanish')",
-                        NULL, NULL, NULL);
-                }
-            }
-
-            /* Verify rolled-back data is gone */
-            if (db_ok) {
-                sqlite3_stmt *st = NULL;
-                sqlite3_prepare_v2(ndb.db,
-                    "SELECT COUNT(*) FROM reorg_test WHERE id=2",
-                    -1, &st, NULL);
-                db_ok = db_ok && (sqlite3_step(st) == SQLITE_ROW);
-                if (db_ok)
-                    db_ok = db_ok && (sqlite3_column_int(st, 0) == 0);
-                sqlite3_finalize(st);
-            }
-
-            sqlite3_close(ndb.db);
-        }
-        RG_CHECK("reorg: db_txn commit persists, auto-rollback reverts", db_ok);
+        sqlite3_close(ndb.db);
     }
+    RG_CHECK("reorg: db_txn commit persists, auto-rollback reverts", db_ok);
+
+    return failures;
+}
+
+static int reorg_reverse_reorg(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct block *a_blocks = st->a_blocks;
+    struct block *b_blocks = st->b_blocks;
+    struct block_index *b_idx = st->b_idx;
 
     /* ── 8. Reverse reorg: undo B, re-apply A ────────────── */
 
     RG_CHECK("reorg: disconnect 50 chain-B blocks",
-             disconnect_range(b_blocks, b_idx, &cache, CHAIN_LEN, 0));
+             disconnect_range(b_blocks, b_idx, &st->cache, CHAIN_LEN, 0));
 
     /* After disconnecting B, only genesis remains structurally */
     RG_CHECK("reorg: genesis survives B disconnect",
-             coins_view_cache_have_coins(&cache, &a_blocks[0].vtx[0].hash));
+             coins_view_cache_have_coins(&st->cache, &a_blocks[0].vtx[0].hash));
 
     RG_CHECK("reorg: no B coins after B disconnect",
-             no_coins_present(b_blocks, &cache, 1, CHAIN_LEN));
+             no_coins_present(b_blocks, &st->cache, 1, CHAIN_LEN));
 
     /* Re-apply chain A */
-    connect_range(a_blocks, &cache, 1, CHAIN_LEN);
+    connect_range(a_blocks, &st->cache, 1, CHAIN_LEN);
 
     RG_CHECK("reorg: all chain A coins restored after reverse reorg",
-             all_coins_present(a_blocks, &cache, 0, CHAIN_LEN));
+             all_coins_present(a_blocks, &st->cache, 0, CHAIN_LEN));
 
     RG_CHECK("reorg: no B orphans after reverse reorg",
-             no_coins_present(b_blocks, &cache, 1, CHAIN_LEN));
+             no_coins_present(b_blocks, &st->cache, 1, CHAIN_LEN));
+
+    return failures;
+}
+
+static int reorg_stress_rapid_cycles(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct block *a_blocks = st->a_blocks;
+    struct block_index *a_idx = st->a_idx;
+    struct block *b_blocks = st->b_blocks;
+    struct block_index *b_idx = st->b_idx;
 
     /* ── 9. Stress: 5 rapid back-and-forth reorg cycles ─── */
 
-    {
-        bool ok = true;
-        for (int cycle = 0; cycle < 5 && ok; cycle++) {
-            /* A → B */
-            ok = ok && disconnect_range(a_blocks, a_idx, &cache, CHAIN_LEN, 0);
-            if (ok) connect_range(b_blocks, &cache, 1, CHAIN_LEN);
-            ok = ok && all_coins_present(b_blocks, &cache, 1, CHAIN_LEN);
-            ok = ok && no_coins_present(a_blocks, &cache, 1, CHAIN_LEN);
+    bool ok = true;
+    for (int cycle = 0; cycle < 5 && ok; cycle++) {
+        /* A → B */
+        ok = ok && disconnect_range(a_blocks, a_idx, &st->cache, CHAIN_LEN, 0);
+        if (ok) connect_range(b_blocks, &st->cache, 1, CHAIN_LEN);
+        ok = ok && all_coins_present(b_blocks, &st->cache, 1, CHAIN_LEN);
+        ok = ok && no_coins_present(a_blocks, &st->cache, 1, CHAIN_LEN);
 
-            /* B → A */
-            ok = ok && disconnect_range(b_blocks, b_idx, &cache, CHAIN_LEN, 0);
-            if (ok) connect_range(a_blocks, &cache, 1, CHAIN_LEN);
-            ok = ok && all_coins_present(a_blocks, &cache, 0, CHAIN_LEN);
-            ok = ok && no_coins_present(b_blocks, &cache, 1, CHAIN_LEN);
-        }
-        RG_CHECK("reorg: 5 rapid reorg cycles preserve UTXO integrity", ok);
+        /* B → A */
+        ok = ok && disconnect_range(b_blocks, b_idx, &st->cache, CHAIN_LEN, 0);
+        if (ok) connect_range(a_blocks, &st->cache, 1, CHAIN_LEN);
+        ok = ok && all_coins_present(a_blocks, &st->cache, 0, CHAIN_LEN);
+        ok = ok && no_coins_present(b_blocks, &st->cache, 1, CHAIN_LEN);
     }
+    RG_CHECK("reorg: 5 rapid reorg cycles preserve UTXO integrity", ok);
+
+    return failures;
+}
+
+static int reorg_check_rollback_policy_rejected(void)
+{
+    int failures = 0;
 
     /* ── 10. recovery_policy rejects too-deep rollback ───── */
 
-    {
-        struct recovery_policy policy;
-        policy_set_defaults(&policy);
-        policy.max_block_rollback = 10;
-        enum policy_decision d = policy_check_block_rollback(
-            &policy, CHAIN_LEN, FORK_HEIGHT, "test_reorg_safety.deep");
-        RG_CHECK("reorg: recovery_policy rejects rollback exceeding cap",
-                 d == POLICY_REFUSE_TOO_LARGE);
-    }
+    struct recovery_policy policy;
+    policy_set_defaults(&policy);
+    policy.max_block_rollback = 10;
+    enum policy_decision d = policy_check_block_rollback(
+        &policy, CHAIN_LEN, FORK_HEIGHT, "test_reorg_safety.deep");
+    RG_CHECK("reorg: recovery_policy rejects rollback exceeding cap",
+             d == POLICY_REFUSE_TOO_LARGE);
+
+    return failures;
+}
+
+static int reorg_check_csr_rejects_bad_coins_hash(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct uint256 *a_hashes = st->a_hashes;
+    struct block_index *a_idx = st->a_idx;
 
     /* ── 11. CSR rejects commit with mismatched coins hash ─ */
 
-    {
-        struct block_map bm;
-        struct active_chain chain;
-        struct block_index *header_tip = NULL;
+    struct block_map bm;
+    struct active_chain chain;
+    struct block_index *header_tip = NULL;
 
-        block_map_init(&bm);
-        active_chain_init(&chain);
+    block_map_init(&bm);
+    active_chain_init(&chain);
 
-        test_block_map_insert(&bm, &a_hashes[0], &a_idx[0]);
-        test_block_map_insert(&bm, &a_hashes[CHAIN_LEN], &a_idx[CHAIN_LEN]);
-        active_chain_move_window_tip(&chain, &a_idx[CHAIN_LEN]);
+    test_block_map_insert(&bm, &a_hashes[0], &a_idx[0]);
+    test_block_map_insert(&bm, &a_hashes[CHAIN_LEN], &a_idx[CHAIN_LEN]);
+    active_chain_move_window_tip(&chain, &a_idx[CHAIN_LEN]);
 
-        struct chain_state_repository csr;
-        csr_init(&csr, &bm, &chain, &header_tip, &cache, NULL, NULL);
+    struct chain_state_repository csr;
+    csr_init(&csr, &bm, &chain, &header_tip, &st->cache, NULL, NULL);
 
-        struct uint256 wrong_hash;
-        memset(&wrong_hash, 0xDE, sizeof(wrong_hash));
-        cache.hash_block = wrong_hash;
+    struct uint256 wrong_hash;
+    memset(&wrong_hash, 0xDE, sizeof(wrong_hash));
+    st->cache.hash_block = wrong_hash;
 
-        struct chain_state_commit bad;
-        memset(&bad, 0, sizeof(bad));
-        bad.new_tip = &a_idx[CHAIN_LEN];
-        bad.new_coins_best = *a_idx[CHAIN_LEN].phashBlock;
-        bad.expected_utxo_count = -1;
-        bad.wallet_scan_height = -1;
-        bad.reason = "test_reorg_safety.bad_hash";
+    struct chain_state_commit bad;
+    memset(&bad, 0, sizeof(bad));
+    bad.new_tip = &a_idx[CHAIN_LEN];
+    bad.new_coins_best = *a_idx[CHAIN_LEN].phashBlock;
+    bad.expected_utxo_count = -1;
+    bad.wallet_scan_height = -1;
+    bad.reason = "test_reorg_safety.bad_hash";
 
-        enum csr_result r = csr_commit_tip(&csr, &bad);
-        RG_CHECK("reorg: CSR rejects mismatched coins hash", r != CSR_OK);
+    enum csr_result r = csr_commit_tip(&csr, &bad);
+    RG_CHECK("reorg: CSR rejects mismatched coins hash", r != CSR_OK);
 
-        csr_free(&csr);
-        active_chain_free(&chain);
-        block_map_free(&bm);
-    }
+    csr_free(&csr);
+    active_chain_free(&chain);
+    block_map_free(&bm);
+
+    return failures;
+}
+
+static int reorg_check_spend_undo_restores_input(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct block *a_blocks = st->a_blocks;
+    struct block_index *a_idx = st->a_idx;
 
     /* ── 12. Non-coinbase spend undo restores spent input ── */
 
-    {
-        struct coins_view_cache sc;
-        struct coins_view nv;
-        memset(&nv, 0, sizeof(nv));
-        coins_view_cache_init(&sc, &nv);
+    struct coins_view_cache sc;
+    struct coins_view nv;
+    memset(&nv, 0, sizeof(nv));
+    coins_view_cache_init(&sc, &nv);
 
-        update_coins(&a_blocks[0].vtx[0], &sc, 0);
+    update_coins(&a_blocks[0].vtx[0], &sc, 0);
 
-        /* Spend genesis coinbase */
-        struct transaction spend;
-        memset(&spend, 0, sizeof(spend));
-        spend.version = 1;
-        spend.num_vin = 1;
-        spend.vin = zcl_calloc(1, sizeof(struct tx_in), "spend_vin");
-        spend.vin[0].prevout.hash = a_blocks[0].vtx[0].hash;
-        spend.vin[0].prevout.n = 0;
-        uint8_t sig[] = {0x48};
-        script_set(&spend.vin[0].script_sig, sig, 1);
-        spend.vin[0].sequence = 0xFFFFFFFF;
-        spend.num_vout = 1;
-        spend.vout = zcl_calloc(1, sizeof(struct tx_out), "spend_vout");
-        spend.vout[0].value = 999999000LL;
-        uint8_t pk[] = {0x76, 0xa9, 0x14};
-        script_set(&spend.vout[0].script_pub_key, pk, 3);
-        transaction_compute_hash(&spend);
+    /* Spend genesis coinbase */
+    struct transaction spend;
+    memset(&spend, 0, sizeof(spend));
+    spend.version = 1;
+    spend.num_vin = 1;
+    spend.vin = zcl_calloc(1, sizeof(struct tx_in), "spend_vin");
+    spend.vin[0].prevout.hash = a_blocks[0].vtx[0].hash;
+    spend.vin[0].prevout.n = 0;
+    uint8_t sig[] = {0x48};
+    script_set(&spend.vin[0].script_sig, sig, 1);
+    spend.vin[0].sequence = 0xFFFFFFFF;
+    spend.num_vout = 1;
+    spend.vout = zcl_calloc(1, sizeof(struct tx_out), "spend_vout");
+    spend.vout[0].value = 999999000LL;
+    uint8_t pk[] = {0x76, 0xa9, 0x14};
+    script_set(&spend.vout[0].script_pub_key, pk, 3);
+    transaction_compute_hash(&spend);
 
-        struct tx_undo txundo;
-        memset(&txundo, 0, sizeof(txundo));
-        bool spend_ok = update_coins_with_undo(&spend, &sc, &txundo, 1);
+    struct tx_undo txundo;
+    memset(&txundo, 0, sizeof(txundo));
+    bool spend_ok = update_coins_with_undo(&spend, &sc, &txundo, 1);
 
-        /* Block: coinbase + spend */
-        struct transaction cb1 = make_coinbase_seeded(1, 0xCC);
-        struct block sblk;
-        memset(&sblk, 0, sizeof(sblk));
-        sblk.num_vtx = 2;
-        sblk.vtx = zcl_calloc(2, sizeof(struct transaction), "spend_block_vtx");
-        sblk.vtx[0] = cb1;
-        sblk.vtx[1] = spend;
+    /* Block: coinbase + spend */
+    struct transaction cb1 = make_coinbase_seeded(1, 0xCC);
+    struct block sblk;
+    memset(&sblk, 0, sizeof(sblk));
+    sblk.num_vtx = 2;
+    sblk.vtx = zcl_calloc(2, sizeof(struct transaction), "spend_block_vtx");
+    sblk.vtx[0] = cb1;
+    sblk.vtx[1] = spend;
 
-        struct block_undo bu;
-        block_undo_init(&bu);
-        block_undo_alloc(&bu, 1);
-        bu.vtxundo[0] = txundo;
+    struct block_undo bu;
+    block_undo_init(&bu);
+    block_undo_alloc(&bu, 1);
+    bu.vtxundo[0] = txundo;
 
-        struct block_index bi;
-        block_index_init(&bi);
-        bi.nHeight = 1;
-        bi.pprev = &a_idx[0];
+    struct block_index bi;
+    block_index_init(&bi);
+    bi.nHeight = 1;
+    bi.pprev = &a_idx[0];
 
-        struct validation_state vs;
-        validation_state_init(&vs);
-        spend_ok = spend_ok && disconnect_block(&sblk, &vs, &bi, &sc, &bu);
+    struct validation_state vs;
+    validation_state_init(&vs);
+    spend_ok = spend_ok && disconnect_block(&sblk, &vs, &bi, &sc, &bu);
 
-        /* Genesis coinbase restored */
-        spend_ok = spend_ok &&
-            coins_view_cache_have_coins(&sc, &a_blocks[0].vtx[0].hash);
+    /* Genesis coinbase restored */
+    spend_ok = spend_ok &&
+        coins_view_cache_have_coins(&sc, &a_blocks[0].vtx[0].hash);
 
-        RG_CHECK("reorg: non-coinbase spend undo restores input", spend_ok);
+    RG_CHECK("reorg: non-coinbase spend undo restores input", spend_ok);
 
-        block_undo_free(&bu);
-        free(sblk.vtx);
-        free_tx(&cb1);
-        free_tx(&spend);
-        coins_view_cache_free(&sc);
-    }
+    block_undo_free(&bu);
+    free(sblk.vtx);
+    free_tx(&cb1);
+    free_tx(&spend);
+    coins_view_cache_free(&sc);
+
+    return failures;
+}
+
+static int reorg_check_forward_commitment_walk(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct block *a_blocks = st->a_blocks;
 
     /* ── 13. Commitment tracks correctly during forward walk ─ */
 
-    {
-        /* Fresh cache to verify commitment accuracy in connect path */
-        struct coins_view_cache fc;
-        struct coins_view fnv;
-        memset(&fnv, 0, sizeof(fnv));
-        coins_view_cache_init(&fc, &fnv);
+    /* Fresh cache to verify commitment accuracy in connect path */
+    struct coins_view_cache fc;
+    struct coins_view fnv;
+    memset(&fnv, 0, sizeof(fnv));
+    coins_view_cache_init(&fc, &fnv);
 
-        bool distinct = true;
-        struct utxo_commitment prev_commit = fc.commitment;
+    bool distinct = true;
+    struct utxo_commitment prev_commit = fc.commitment;
 
-        for (int h = 0; h <= CHAIN_LEN && distinct; h++) {
-            update_coins(&a_blocks[h].vtx[0], &fc, h);
-            if (utxo_commitment_equal(&fc.commitment, &prev_commit))
-                distinct = false;
-            prev_commit = fc.commitment;
-        }
-        RG_CHECK("reorg: each height has distinct commitment", distinct);
-        RG_CHECK("reorg: forward commitment count matches",
-                 (int)fc.commitment.count == CHAIN_LEN + 1);
-
-        coins_view_cache_free(&fc);
+    for (int h = 0; h <= CHAIN_LEN && distinct; h++) {
+        update_coins(&a_blocks[h].vtx[0], &fc, h);
+        if (utxo_commitment_equal(&fc.commitment, &prev_commit))
+            distinct = false;
+        prev_commit = fc.commitment;
     }
+    RG_CHECK("reorg: each height has distinct commitment", distinct);
+    RG_CHECK("reorg: forward commitment count matches",
+             (int)fc.commitment.count == CHAIN_LEN + 1);
+
+    coins_view_cache_free(&fc);
+
+    return failures;
+}
+
+static int reorg_check_partial_reorg(struct reorg_test_state *st)
+{
+    int failures = 0;
+    struct block *a_blocks = st->a_blocks;
+    struct block_index *a_idx = st->a_idx;
+    struct block *b_blocks = st->b_blocks;
 
     /* ── 14. Partial reorg (disconnect 25 of 50) ─────────── */
 
-    {
-        struct coins_view_cache pc;
-        struct coins_view pnv;
-        memset(&pnv, 0, sizeof(pnv));
-        coins_view_cache_init(&pc, &pnv);
+    struct coins_view_cache pc;
+    struct coins_view pnv;
+    memset(&pnv, 0, sizeof(pnv));
+    coins_view_cache_init(&pc, &pnv);
 
-        /* Build chain A */
-        for (int h = 0; h <= CHAIN_LEN; h++)
-            update_coins(&a_blocks[h].vtx[0], &pc, h);
+    /* Build chain A */
+    for (int h = 0; h <= CHAIN_LEN; h++)
+        update_coins(&a_blocks[h].vtx[0], &pc, h);
 
-        /* Disconnect top 25 blocks */
-        bool ok = disconnect_range(a_blocks, a_idx, &pc, CHAIN_LEN, 25);
-        ok = ok && all_coins_present(a_blocks, &pc, 0, 25);
-        ok = ok && no_coins_present(a_blocks, &pc, 26, CHAIN_LEN);
+    /* Disconnect top 25 blocks */
+    bool ok = disconnect_range(a_blocks, a_idx, &pc, CHAIN_LEN, 25);
+    ok = ok && all_coins_present(a_blocks, &pc, 0, 25);
+    ok = ok && no_coins_present(a_blocks, &pc, 26, CHAIN_LEN);
 
-        /* Connect 25 B blocks on top */
-        for (int h = 26; h <= CHAIN_LEN; h++)
-            update_coins(&b_blocks[h].vtx[0], &pc, h);
+    /* Connect 25 B blocks on top */
+    for (int h = 26; h <= CHAIN_LEN; h++)
+        update_coins(&b_blocks[h].vtx[0], &pc, h);
 
-        ok = ok && all_coins_present(b_blocks, &pc, 26, CHAIN_LEN);
-        ok = ok && all_coins_present(a_blocks, &pc, 0, 25);
+    ok = ok && all_coins_present(b_blocks, &pc, 26, CHAIN_LEN);
+    ok = ok && all_coins_present(a_blocks, &pc, 0, 25);
 
-        RG_CHECK("reorg: partial reorg (25 of 50) preserves lower chain", ok);
+    RG_CHECK("reorg: partial reorg (25 of 50) preserves lower chain", ok);
 
-        coins_view_cache_free(&pc);
+    coins_view_cache_free(&pc);
+
+    return failures;
+}
+
+/* Build genesis → blk1 → blk2 into the provided arrays and connect each
+ * coinbase into `tc`. */
+static void reorg_build_three_block_chain(struct block *tblks,
+                                          struct uint256 *thash,
+                                          struct block_index *tidx,
+                                          struct coins_view_cache *tc)
+{
+    for (int h = 0; h < 3; h++) {
+        const struct uint256 *prev = h ? &thash[h - 1] : NULL;
+        make_block_seeded(&tblks[h], h, prev, 0xDD);
+        block_header_get_hash(&tblks[h].header, &thash[h]);
+        block_index_init(&tidx[h]);
+        tidx[h].nHeight = h;
+        tidx[h].phashBlock = &thash[h];
+        tidx[h].pprev = h ? &tidx[h - 1] : NULL;
+        tidx[h].nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        tidx[h].nTx = 1;
+        tidx[h].nChainTx = (uint32_t)(h + 1);
+        arith_uint256_set_u64(&tidx[h].nChainWork, (uint64_t)(h + 1));
+        update_coins(&tblks[h].vtx[0], tc, h);
     }
+}
+
+static int reorg_check_three_block_disconnect(void)
+{
+    int failures = 0;
 
     /* ── 15. 3-block chain: disconnect tip restores UTXO set ─ */
 
-    {
-        struct coins_view_cache tc;
-        struct coins_view tnv;
-        memset(&tnv, 0, sizeof(tnv));
-        coins_view_cache_init(&tc, &tnv);
+    struct coins_view_cache tc;
+    struct coins_view tnv;
+    memset(&tnv, 0, sizeof(tnv));
+    coins_view_cache_init(&tc, &tnv);
 
-        /* Build 3-block chain: genesis → blk1 → blk2 */
-        struct block tblks[3];
-        struct uint256 thash[3];
-        struct block_index tidx[3];
+    /* Build 3-block chain: genesis → blk1 → blk2 */
+    struct block tblks[3];
+    struct uint256 thash[3];
+    struct block_index tidx[3];
 
-        for (int h = 0; h < 3; h++) {
-            const struct uint256 *prev = h ? &thash[h - 1] : NULL;
-            make_block_seeded(&tblks[h], h, prev, 0xDD);
-            block_header_get_hash(&tblks[h].header, &thash[h]);
-            block_index_init(&tidx[h]);
-            tidx[h].nHeight = h;
-            tidx[h].phashBlock = &thash[h];
-            tidx[h].pprev = h ? &tidx[h - 1] : NULL;
-            tidx[h].nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
-            tidx[h].nTx = 1;
-            tidx[h].nChainTx = (uint32_t)(h + 1);
-            arith_uint256_set_u64(&tidx[h].nChainWork, (uint64_t)(h + 1));
-            update_coins(&tblks[h].vtx[0], &tc, h);
-        }
+    reorg_build_three_block_chain(tblks, thash, tidx, &tc);
 
-        /* All 3 coinbases exist */
-        bool ok = true;
-        for (int h = 0; h < 3; h++)
-            ok = ok && coins_view_cache_have_coins(&tc, &tblks[h].vtx[0].hash);
-        RG_CHECK("reorg: 3-block chain has all 3 coinbase UTXOs", ok);
+    /* All 3 coinbases exist */
+    bool ok = true;
+    for (int h = 0; h < 3; h++)
+        ok = ok && coins_view_cache_have_coins(&tc, &tblks[h].vtx[0].hash);
+    RG_CHECK("reorg: 3-block chain has all 3 coinbase UTXOs", ok);
 
-        /* Disconnect tip (blk2) */
-        struct block_undo bu2;
-        block_undo_init(&bu2);
-        struct validation_state vs2;
-        validation_state_init(&vs2);
-        ok = disconnect_block(&tblks[2], &vs2, &tidx[2], &tc, &bu2);
-        block_undo_free(&bu2);
-        RG_CHECK("reorg: disconnect tip of 3-block chain succeeds", ok);
+    /* Disconnect tip (blk2) */
+    struct block_undo bu2;
+    block_undo_init(&bu2);
+    struct validation_state vs2;
+    validation_state_init(&vs2);
+    ok = disconnect_block(&tblks[2], &vs2, &tidx[2], &tc, &bu2);
+    block_undo_free(&bu2);
+    RG_CHECK("reorg: disconnect tip of 3-block chain succeeds", ok);
 
-        /* blk2 coinbase gone, blk0 and blk1 coinbases remain */
-        ok = !coins_view_cache_have_coins(&tc, &tblks[2].vtx[0].hash);
-        ok = ok && coins_view_cache_have_coins(&tc, &tblks[0].vtx[0].hash);
-        ok = ok && coins_view_cache_have_coins(&tc, &tblks[1].vtx[0].hash);
-        RG_CHECK("reorg: after disconnect tip, created outputs gone, prior UTXOs remain", ok);
+    /* blk2 coinbase gone, blk0 and blk1 coinbases remain */
+    ok = !coins_view_cache_have_coins(&tc, &tblks[2].vtx[0].hash);
+    ok = ok && coins_view_cache_have_coins(&tc, &tblks[0].vtx[0].hash);
+    ok = ok && coins_view_cache_have_coins(&tc, &tblks[1].vtx[0].hash);
+    RG_CHECK("reorg: after disconnect tip, created outputs gone, prior UTXOs remain", ok);
 
-        /* Disconnect blk1 */
-        struct block_undo bu1;
-        block_undo_init(&bu1);
-        struct validation_state vs1;
-        validation_state_init(&vs1);
-        ok = disconnect_block(&tblks[1], &vs1, &tidx[1], &tc, &bu1);
-        block_undo_free(&bu1);
-        ok = ok && !coins_view_cache_have_coins(&tc, &tblks[1].vtx[0].hash);
-        ok = ok && coins_view_cache_have_coins(&tc, &tblks[0].vtx[0].hash);
-        RG_CHECK("reorg: after 2 disconnects, only genesis UTXO remains", ok);
+    /* Disconnect blk1 */
+    struct block_undo bu1;
+    block_undo_init(&bu1);
+    struct validation_state vs1;
+    validation_state_init(&vs1);
+    ok = disconnect_block(&tblks[1], &vs1, &tidx[1], &tc, &bu1);
+    block_undo_free(&bu1);
+    ok = ok && !coins_view_cache_have_coins(&tc, &tblks[1].vtx[0].hash);
+    ok = ok && coins_view_cache_have_coins(&tc, &tblks[0].vtx[0].hash);
+    RG_CHECK("reorg: after 2 disconnects, only genesis UTXO remains", ok);
 
-        for (int h = 0; h < 3; h++)
-            free_block(&tblks[h]);
-        coins_view_cache_free(&tc);
-    }
+    for (int h = 0; h < 3; h++)
+        free_block(&tblks[h]);
+    coins_view_cache_free(&tc);
 
+    return failures;
+}
+
+static void reorg_free_chains(struct reorg_test_state *st)
+{
     /* ── Cleanup ─────────────────────────────────────────── */
 
-    coins_view_cache_free(&cache);
+    coins_view_cache_free(&st->cache);
 
     for (int h = 0; h <= CHAIN_LEN; h++)
-        free_block(&a_blocks[h]);
+        free_block(&st->a_blocks[h]);
     for (int h = 1; h <= CHAIN_LEN; h++)
-        free_block(&b_blocks[h]);
+        free_block(&st->b_blocks[h]);
+}
+
+/* Runs every reorg safety phase in order and sums their failures. */
+int test_reorg_safety(void)
+{
+    printf("\n=== reorg safety test (50-block fork) ===\n");
+    int failures = 0;
+
+    /* ── Storage for both chains ─────────────────────────── */
+
+    struct reorg_test_state st;
+
+    failures += reorg_build_chain_a(&st);
+    failures += reorg_build_chain_b(&st);
+    failures += reorg_check_rollback_policy_allowed();
+    failures += reorg_disconnect_chain_a(&st);
+    failures += reorg_connect_chain_b(&st);
+    failures += reorg_check_csr_accepts_b_tip(&st);
+    failures += reorg_check_db_txn_semantics();
+    failures += reorg_reverse_reorg(&st);
+    failures += reorg_stress_rapid_cycles(&st);
+    failures += reorg_check_rollback_policy_rejected();
+    failures += reorg_check_csr_rejects_bad_coins_hash(&st);
+    failures += reorg_check_spend_undo_restores_input(&st);
+    failures += reorg_check_forward_commitment_walk(&st);
+    failures += reorg_check_partial_reorg(&st);
+    failures += reorg_check_three_block_disconnect();
+    reorg_free_chains(&st);
 
     printf("=== reorg safety: %d failures ===\n", failures);
     return failures;
