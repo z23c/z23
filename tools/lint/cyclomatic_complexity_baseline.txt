@@ -1880,7 +1880,6 @@ tests/harness/src/test_mint_skip_crypto.c:stage_rows_match:25
 tests/harness/src/test_mint_skip_crypto.c:test_mint_anchor_lane_containment:27
 tests/harness/src/test_mint_skip_crypto.c:test_normal_boot_preflight_killed_wal:27
 tests/harness/src/test_mint_skip_crypto.c:test_source_epoch_authority_types:16
-tests/harness/src/test_mirror_divergence_locator.c:test_mirror_divergence_locator:23
 tests/harness/src/test_mmr.c:test_mmr:45
 tests/harness/src/test_mnemonic.c:test_mnemonic:45
 tests/harness/src/test_models_app.c:test_model_app:145
