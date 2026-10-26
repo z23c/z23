@@ -723,12 +723,11 @@ void qb_set_unix_now(struct qb *q, enum qb_column c)
 
 /* ── WHERE ───────────────────────────────────────────────────────────── */
 
-/* Move the statement into its WHERE section, closing whatever came before,
- * then emit the connector for the next predicate. */
-static bool qb_where_lead(struct qb *q)
+/* Close the section that precedes WHERE for this verb, moving the
+ * statement into its WHERE section; a verb that has no WHERE clause (or
+ * an unstarted statement) latches the failure instead. */
+static void qb_where_open_section(struct qb *q)
 {
-    if (q->failed)
-        return false;
     switch (q->verb) {
     case QB_VERB_SELECT:
         if (q->stage == QB_STAGE_PROJECTION)
@@ -738,7 +737,7 @@ static bool qb_where_lead(struct qb *q)
         if (q->stage == QB_STAGE_SET) {
             if (q->n_sets == 0) {
                 qb_fail(q, "UPDATE with no SET assignments");
-                return false;
+                return;
             }
             q->stage = QB_STAGE_WHERE;
         }
@@ -747,18 +746,17 @@ static bool qb_where_lead(struct qb *q)
         break;
     case QB_VERB_INSERT:
         qb_fail(q, "INSERT has no WHERE clause");
-        return false;
+        return;
     default:
         qb_fail(q, "predicate before any statement verb");
-        return false;
+        return;
     }
-    if (q->failed)
-        return false;
-    if (q->stage != QB_STAGE_WHERE) {
-        qb_fail(q, "WHERE predicate after the statement tail was opened");
-        return false;
-    }
+}
 
+/* Emit the connector for the next predicate: the opening WHERE, an AND
+ * between top-level terms, or the open group's own conjunction. */
+static void qb_where_connector(struct qb *q)
+{
     if (q->group_open) {
         if (q->group_terms == 0) {
             qb_puts(q, q->n_where++ == 0 ? " WHERE (" : " AND (");
@@ -769,6 +767,23 @@ static bool qb_where_lead(struct qb *q)
     } else {
         qb_puts(q, q->n_where++ == 0 ? " WHERE " : " AND ");
     }
+}
+
+/* Move the statement into its WHERE section, closing whatever came before,
+ * then emit the connector for the next predicate. */
+static bool qb_where_lead(struct qb *q)
+{
+    if (q->failed)
+        return false;
+    qb_where_open_section(q);
+    if (q->failed)
+        return false;
+    if (q->stage != QB_STAGE_WHERE) {
+        qb_fail(q, "WHERE predicate after the statement tail was opened");
+        return false;
+    }
+
+    qb_where_connector(q);
     return !q->failed;
 }
 
@@ -1071,6 +1086,42 @@ int qb_bind_count(const struct qb *q)
     return q ? q->nbinds : 0;
 }
 
+/* Bind one collected value at the 1-based parameter position `pos`.
+ * Returns the sqlite3 result code; a kind outside the closed set reports
+ * SQLITE_MISUSE. */
+static int qb_bind_one(sqlite3_stmt *s, int pos, const struct qb_bind *b)
+{
+    switch (b->kind) {
+    case QB_BIND_INT:
+        return sqlite3_bind_int64(s, pos, b->i);
+    case QB_BIND_DOUBLE:
+        return sqlite3_bind_double(s, pos, b->d);
+    case QB_BIND_TEXT:
+        return sqlite3_bind_text(s, pos, (const char *)b->p, (int)b->n,
+                                 SQLITE_TRANSIENT);
+    case QB_BIND_BLOB:
+        return sqlite3_bind_blob(s, pos, b->p, (int)b->n, SQLITE_TRANSIENT);
+    case QB_BIND_NULL:
+        return sqlite3_bind_null(s, pos);
+    default:
+        return SQLITE_MISUSE;
+    }
+}
+
+/* Bind every collected value in order. Returns SQLITE_OK when all bound;
+ * on the first failure returns that bind's result code with *pos set to
+ * its 1-based parameter position. */
+static int qb_bind_all(sqlite3_stmt *s, const struct qb *q, int *pos)
+{
+    for (int i = 0; i < q->nbinds; i++) {
+        *pos = i + 1;
+        int rc = qb_bind_one(s, *pos, &q->binds[i]);
+        if (rc != SQLITE_OK)
+            return rc;
+    }
+    return SQLITE_OK;
+}
+
 bool qb_prepare_db(sqlite3 *db, struct qb *q, sqlite3_stmt **out)
 {
     if (out)
@@ -1103,36 +1154,12 @@ bool qb_prepare_db(sqlite3 *db, struct qb *q, sqlite3_stmt **out)
                  "collected %d | sql=%s", want, q->nbinds, sql);
     }
 
-    for (int i = 0; i < q->nbinds; i++) {
-        const struct qb_bind *b = &q->binds[i];
-        int pos = i + 1;
-        int rc = SQLITE_OK;
-        switch (b->kind) {
-        case QB_BIND_INT:
-            rc = sqlite3_bind_int64(s, pos, b->i);
-            break;
-        case QB_BIND_DOUBLE:
-            rc = sqlite3_bind_double(s, pos, b->d);
-            break;
-        case QB_BIND_TEXT:
-            rc = sqlite3_bind_text(s, pos, (const char *)b->p, (int)b->n,
-                                   SQLITE_TRANSIENT);
-            break;
-        case QB_BIND_BLOB:
-            rc = sqlite3_bind_blob(s, pos, b->p, (int)b->n, SQLITE_TRANSIENT);
-            break;
-        case QB_BIND_NULL:
-            rc = sqlite3_bind_null(s, pos);
-            break;
-        default:
-            rc = SQLITE_MISUSE;
-            break;
-        }
-        if (rc != SQLITE_OK) {
-            sqlite3_finalize(s);
-            LOG_FAIL("models", "bind %d failed rc=%d: %s | sql=%s", pos, rc,
-                     sqlite3_errmsg(db), sql);
-        }
+    int pos = 0;
+    int rc = qb_bind_all(s, q, &pos);
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(s);
+        LOG_FAIL("models", "bind %d failed rc=%d: %s | sql=%s", pos, rc,
+                 sqlite3_errmsg(db), sql);
     }
 
     *out = s;
