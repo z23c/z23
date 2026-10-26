@@ -45,12 +45,6 @@ contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_rm_rf:16
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_verify_package:28
-contexts/commons/services/src/zcode_benchmark_executor.c:exec_context_load:25
-contexts/commons/services/src/zcode_benchmark_executor.c:exec_policy_parse:24
-contexts/commons/services/src/zcode_benchmark_executor.c:exec_runner_fork:32
-contexts/commons/services/src/zcode_benchmark_executor.c:exec_verify_samples:28
-contexts/commons/services/src/zcode_benchmark_executor.c:zcode_benchmark_executor_run:77
-contexts/commons/services/src/zcode_benchmark_executor.c:zcode_benchmark_executor_verify_receipt:23
 contexts/commons/services/src/zcode_lane_service.c:zcode_lane_advance:53
 contexts/explorer/controllers/src/explorer_controller.c:rpc_call:22
 contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:31
