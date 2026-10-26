@@ -478,7 +478,7 @@ static int validate_header_precheck(const struct block_index *bi,
 {
     if (!bi || !bi->phashBlock) {
         snprintf(out_reason, out_reason_size, "null-block-index");
-        return -1;
+        return -1;  // raw-return-ok:verdict-reason-in-out_reason
     }
 
     /* (0) Genesis is exempt from contextual header checks — its validity is
@@ -490,7 +490,7 @@ static int validate_header_precheck(const struct block_index *bi,
     const struct chain_params *cp = chain_params_get();
     if (!cp) {
         snprintf(out_reason, out_reason_size, "no-chain-params");
-        return -1;
+        return -1;  // raw-return-ok:verdict-reason-in-out_reason
     }
     *cp_out = cp;
     if (uint256_eq(bi->phashBlock, &cp->consensus.hashGenesisBlock))
@@ -499,7 +499,7 @@ static int validate_header_precheck(const struct block_index *bi,
     /* (1) version. */
     if (bi->nVersion < MIN_BLOCK_VERSION) {
         snprintf(out_reason, out_reason_size, "version-too-low");
-        return -1;
+        return -1;  // raw-return-ok:verdict-reason-in-out_reason
     }
     return 0;
 }
