@@ -172,7 +172,7 @@ size_t serve_send(uint8_t *r, size_t max) {
         "'Invalid characters';return;}"
         "this.style.borderColor='#34d399';"
         "setTimeout(function(){document.getElementById('addr')"
-        ".style.borderColor='';},1500);});"
+        ".style.borderColor='';},1500);}});"
         /* Loading overlay on submit */
         "document.getElementById('review-btn').addEventListener('click',"
         "function(e){if(!validateSend()){e.preventDefault();return;}"
@@ -325,8 +325,7 @@ size_t serve_send_review(uint8_t *r, size_t max,
 
 /* Shielded send: delegate to zclassicd z_sendmany.
  * Try z-address first (z→z, fully private), fall back to
- * t-address (t→z, sender visible on-chain).
- * Fills txid_result on success, or error_msg on failure. */
+ * t-address (t→z, sender visible on-chain). */
 static bool send_shielded_via_zsendmany(const char *address, double amount,
                                         char *txid_result, size_t txid_size,
                                         char *error_msg, size_t error_size) {
