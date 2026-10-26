@@ -58,6 +58,58 @@ static bool descriptor_present(uint32_t mode, const uint8_t blob[32])
     return mode != 0 && !zcl_bytes_all_zero(blob, 32);
 }
 
+static enum vcs_zcode_patch_result patch_validate_modified(
+    const struct vcs_zcode_patch_change_v1 *change)
+{
+    bool old_present = descriptor_present(change->old_mode, change->old_blob);
+    bool new_present = descriptor_present(change->new_mode, change->new_blob);
+    if (!old_present || !new_present ||
+        (change->old_mode == change->new_mode &&
+         memcmp(change->old_blob, change->new_blob, 32) == 0))
+        return VCS_ZCODE_PATCH_SHAPE;
+    return VCS_ZCODE_PATCH_OK;
+}
+
+static enum vcs_zcode_patch_result patch_validate_kind(
+    const struct vcs_zcode_patch_change_v1 *change)
+{
+    bool old_present = descriptor_present(change->old_mode, change->old_blob);
+    bool new_present = descriptor_present(change->new_mode, change->new_blob);
+    if (change->kind == VCS_DIFF_ADDED &&
+        (!descriptor_absent(change->old_mode, change->old_size,
+                            change->old_blob) || !new_present))
+        return VCS_ZCODE_PATCH_SHAPE;
+    if (change->kind == VCS_DIFF_REMOVED &&
+        (!old_present ||
+         !descriptor_absent(change->new_mode, change->new_size,
+                            change->new_blob)))
+        return VCS_ZCODE_PATCH_SHAPE;
+    if (change->kind == VCS_DIFF_MODIFIED)
+        return patch_validate_modified(change);
+    if (change->kind != VCS_DIFF_ADDED &&
+        change->kind != VCS_DIFF_REMOVED &&
+        change->kind != VCS_DIFF_MODIFIED)
+        return VCS_ZCODE_PATCH_SHAPE;
+    return VCS_ZCODE_PATCH_OK;
+}
+
+static enum vcs_zcode_patch_result patch_validate_change(
+    const struct vcs_zcode_patch_v1 *patch, size_t i, uint64_t *content_bytes)
+{
+    const struct vcs_zcode_patch_change_v1 *change = &patch->changes[i];
+    if (!change->path || !vcs_package_path_valid(change->path) ||
+        (i > 0 && strcmp(patch->changes[i - 1u].path, change->path) >= 0))
+        return VCS_ZCODE_PATCH_SHAPE;
+    enum vcs_zcode_patch_result result = patch_validate_kind(change);
+    if (result != VCS_ZCODE_PATCH_OK) return result;
+    if (descriptor_present(change->new_mode, change->new_blob)) {
+        if (UINT64_MAX - *content_bytes < change->new_size)
+            return VCS_ZCODE_PATCH_LIMIT;
+        *content_bytes += change->new_size;
+    }
+    return VCS_ZCODE_PATCH_OK;
+}
+
 enum vcs_zcode_patch_result vcs_zcode_patch_validate(
     const struct vcs_zcode_patch_v1 *patch)
 {
@@ -70,34 +122,9 @@ enum vcs_zcode_patch_result vcs_zcode_patch_validate(
         return VCS_ZCODE_PATCH_SHAPE;
     uint64_t content_bytes = 0;
     for (size_t i = 0; i < patch->count; i++) {
-        const struct vcs_zcode_patch_change_v1 *change = &patch->changes[i];
-        if (!change->path || !vcs_package_path_valid(change->path) ||
-            (i > 0 && strcmp(patch->changes[i - 1u].path, change->path) >= 0))
-            return VCS_ZCODE_PATCH_SHAPE;
-        bool old_present = descriptor_present(change->old_mode,
-                                                change->old_blob);
-        bool new_present = descriptor_present(change->new_mode,
-                                                change->new_blob);
-        if ((change->kind == VCS_DIFF_ADDED &&
-             (!descriptor_absent(change->old_mode, change->old_size,
-                                 change->old_blob) || !new_present)) ||
-            (change->kind == VCS_DIFF_REMOVED &&
-             (!old_present ||
-              !descriptor_absent(change->new_mode, change->new_size,
-                                 change->new_blob))) ||
-            (change->kind == VCS_DIFF_MODIFIED &&
-             (!old_present || !new_present ||
-              (change->old_mode == change->new_mode &&
-               memcmp(change->old_blob, change->new_blob, 32) == 0))) ||
-            (change->kind != VCS_DIFF_ADDED &&
-             change->kind != VCS_DIFF_REMOVED &&
-             change->kind != VCS_DIFF_MODIFIED))
-            return VCS_ZCODE_PATCH_SHAPE;
-        if (new_present) {
-            if (UINT64_MAX - content_bytes < change->new_size)
-                return VCS_ZCODE_PATCH_LIMIT;
-            content_bytes += change->new_size;
-        }
+        enum vcs_zcode_patch_result result =
+            patch_validate_change(patch, i, &content_bytes);
+        if (result != VCS_ZCODE_PATCH_OK) return result;
     }
     if (content_bytes != patch->content_bytes)
         return VCS_ZCODE_PATCH_SHAPE;
@@ -112,27 +139,12 @@ struct derive_context {
     enum vcs_zcode_patch_result result;
 };
 
-static void derive_change(enum vcs_diff_kind kind, const struct vcs_entry *old,
-                          const struct vcs_entry *new_entry, void *user)
+static void derive_append_change(struct derive_context *ctx,
+                                 enum vcs_diff_kind kind,
+                                 const struct vcs_entry *old,
+                                 const struct vcs_entry *new_entry,
+                                 const char *path, uint64_t added_bytes)
 {
-    struct derive_context *ctx = user;
-    if (ctx->result != VCS_ZCODE_PATCH_OK) return;
-    const char *path = new_entry ? new_entry->path : old->path;
-    if (!vcs_zcode_write_scope_contains(ctx->scope, path)) {
-        ctx->result = VCS_ZCODE_PATCH_SCOPE;
-        return;
-    }
-    if (ctx->patch->count >= ctx->max_changed_files ||
-        ctx->patch->count >= VCS_ZCODE_PATCH_MAX_CHANGES) {
-        ctx->result = VCS_ZCODE_PATCH_LIMIT;
-        return;
-    }
-    uint64_t added_bytes = new_entry ? new_entry->size : 0;
-    if (UINT64_MAX - ctx->patch->content_bytes < added_bytes ||
-        ctx->patch->content_bytes + added_bytes > ctx->max_patch_bytes) {
-        ctx->result = VCS_ZCODE_PATCH_LIMIT;
-        return;
-    }
     if (ctx->patch->count == ctx->patch->cap) {
         size_t next_cap = ctx->patch->cap ? ctx->patch->cap * 2u : 8u;
         if (next_cap > ctx->max_changed_files)
@@ -172,6 +184,43 @@ static void derive_change(enum vcs_diff_kind kind, const struct vcs_entry *old,
     ctx->patch->count++;
 }
 
+static void derive_change(enum vcs_diff_kind kind, const struct vcs_entry *old,
+                          const struct vcs_entry *new_entry, void *user)
+{
+    struct derive_context *ctx = user;
+    if (ctx->result != VCS_ZCODE_PATCH_OK) return;
+    const char *path = new_entry ? new_entry->path : old->path;
+    if (!vcs_zcode_write_scope_contains(ctx->scope, path)) {
+        ctx->result = VCS_ZCODE_PATCH_SCOPE;
+        return;
+    }
+    if (ctx->patch->count >= ctx->max_changed_files ||
+        ctx->patch->count >= VCS_ZCODE_PATCH_MAX_CHANGES) {
+        ctx->result = VCS_ZCODE_PATCH_LIMIT;
+        return;
+    }
+    uint64_t added_bytes = new_entry ? new_entry->size : 0;
+    if (UINT64_MAX - ctx->patch->content_bytes < added_bytes ||
+        ctx->patch->content_bytes + added_bytes > ctx->max_patch_bytes) {
+        ctx->result = VCS_ZCODE_PATCH_LIMIT;
+        return;
+    }
+    derive_append_change(ctx, kind, old, new_entry, path, added_bytes);
+}
+
+static enum vcs_zcode_patch_result derive_check_roots(
+    struct vcs_manifest *base, const uint8_t base_root[32],
+    struct vcs_manifest *candidate, const uint8_t candidate_root[32])
+{
+    uint8_t actual_base[32], actual_candidate[32];
+    if (!vcs_manifest_tree_hash(base, actual_base) ||
+        !vcs_manifest_tree_hash(candidate, actual_candidate) ||
+        memcmp(actual_base, base_root, 32) != 0 ||
+        memcmp(actual_candidate, candidate_root, 32) != 0)
+        return VCS_ZCODE_PATCH_MANIFEST_MISMATCH;
+    return VCS_ZCODE_PATCH_OK;
+}
+
 enum vcs_zcode_patch_result vcs_zcode_patch_derive(
     struct vcs_manifest *base, const uint8_t base_root[32],
     struct vcs_manifest *candidate, const uint8_t candidate_root[32],
@@ -182,12 +231,9 @@ enum vcs_zcode_patch_result vcs_zcode_patch_derive(
     if (!base || !base_root || !candidate || !candidate_root || !scope || !out)
         return VCS_ZCODE_PATCH_NULL;
     vcs_zcode_patch_init(out);
-    uint8_t actual_base[32], actual_candidate[32];
-    if (!vcs_manifest_tree_hash(base, actual_base) ||
-        !vcs_manifest_tree_hash(candidate, actual_candidate) ||
-        memcmp(actual_base, base_root, 32) != 0 ||
-        memcmp(actual_candidate, candidate_root, 32) != 0)
-        return VCS_ZCODE_PATCH_MANIFEST_MISMATCH;
+    enum vcs_zcode_patch_result roots =
+        derive_check_roots(base, base_root, candidate, candidate_root);
+    if (roots != VCS_ZCODE_PATCH_OK) return roots;
     if (max_changed_files == 0 ||
         max_changed_files > VCS_ZCODE_PATCH_MAX_CHANGES || max_patch_bytes == 0)
         return VCS_ZCODE_PATCH_LIMIT;
@@ -252,6 +298,34 @@ enum vcs_zcode_patch_result vcs_zcode_patch_serialize(
     return VCS_ZCODE_PATCH_OK;
 }
 
+static enum vcs_zcode_patch_result patch_parse_change(
+    const uint8_t *wire, size_t wire_len, size_t *off_io,
+    struct vcs_zcode_patch_change_v1 *change)
+{
+    size_t off = *off_io;
+    if (wire_len - off < VCS_ZCODE_PATCH_CHANGE_FIXED_BYTES)
+        return VCS_ZCODE_PATCH_SHAPE;
+    change->kind = (enum vcs_diff_kind)wire[off++];
+    if (wire[off++] != 0) return VCS_ZCODE_PATCH_SHAPE;
+    uint16_t path_len = vcs_rd_u16le(wire + off); off += 2;
+    change->old_mode = vcs_rd_u32le(wire + off); off += 4;
+    change->old_size = vcs_rd_u64le(wire + off); off += 8;
+    memcpy(change->old_blob, wire + off, 32); off += 32;
+    change->new_mode = vcs_rd_u32le(wire + off); off += 4;
+    change->new_size = vcs_rd_u64le(wire + off); off += 8;
+    memcpy(change->new_blob, wire + off, 32); off += 32;
+    if (path_len == 0 || path_len > VCS_PACKAGE_PATH_MAX ||
+        path_len > wire_len - off)
+        return VCS_ZCODE_PATCH_SHAPE;
+    change->path = zcl_malloc((size_t)path_len + 1u,
+                              "zcode.patch.parse.path");
+    if (!change->path) return VCS_ZCODE_PATCH_ALLOC;
+    memcpy(change->path, wire + off, path_len);
+    change->path[path_len] = '\0'; off += path_len;
+    *off_io = off;
+    return VCS_ZCODE_PATCH_OK;
+}
+
 enum vcs_zcode_patch_result vcs_zcode_patch_parse(
     const uint8_t *wire, size_t wire_len, struct vcs_zcode_patch_v1 *out)
 {
@@ -274,37 +348,20 @@ enum vcs_zcode_patch_result vcs_zcode_patch_parse(
     out->cap = count;
     size_t off = VCS_ZCODE_PATCH_HEADER_BYTES;
     for (size_t i = 0; i < count; i++) {
-        if (wire_len - off < VCS_ZCODE_PATCH_CHANGE_FIXED_BYTES) goto shape;
-        struct vcs_zcode_patch_change_v1 *change = &out->changes[i];
-        change->kind = (enum vcs_diff_kind)wire[off++];
-        if (wire[off++] != 0) goto shape;
-        uint16_t path_len = vcs_rd_u16le(wire + off); off += 2;
-        change->old_mode = vcs_rd_u32le(wire + off); off += 4;
-        change->old_size = vcs_rd_u64le(wire + off); off += 8;
-        memcpy(change->old_blob, wire + off, 32); off += 32;
-        change->new_mode = vcs_rd_u32le(wire + off); off += 4;
-        change->new_size = vcs_rd_u64le(wire + off); off += 8;
-        memcpy(change->new_blob, wire + off, 32); off += 32;
-        if (path_len == 0 || path_len > VCS_PACKAGE_PATH_MAX ||
-            path_len > wire_len - off)
-            goto shape;
-        change->path = zcl_malloc((size_t)path_len + 1u,
-                                  "zcode.patch.parse.path");
-        if (!change->path) {
+        enum vcs_zcode_patch_result result = patch_parse_change(
+            wire, wire_len, &off, &out->changes[i]);
+        if (result != VCS_ZCODE_PATCH_OK) {
             vcs_zcode_patch_free(out);
-            return VCS_ZCODE_PATCH_ALLOC;
+            return result;
         }
-        memcpy(change->path, wire + off, path_len);
-        change->path[path_len] = '\0'; off += path_len;
         out->count++;
     }
     if (off != wire_len ||
-        vcs_zcode_patch_validate(out) != VCS_ZCODE_PATCH_OK)
-        goto shape;
+        vcs_zcode_patch_validate(out) != VCS_ZCODE_PATCH_OK) {
+        vcs_zcode_patch_free(out);
+        return VCS_ZCODE_PATCH_SHAPE;
+    }
     return VCS_ZCODE_PATCH_OK;
-shape:
-    vcs_zcode_patch_free(out);
-    return VCS_ZCODE_PATCH_SHAPE;
 }
 
 enum vcs_zcode_patch_result vcs_zcode_patch_root(
@@ -343,11 +400,10 @@ static bool patch_changed_blobs_verify(
     return true;
 }
 
-enum vcs_zcode_patch_result vcs_zcode_patch_verify_cas(
+static enum vcs_zcode_patch_result patch_verify_stored(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate)
 {
-    if (!repo_root || !task || !candidate) return VCS_ZCODE_PATCH_NULL;
     uint8_t *wire = NULL; size_t wire_len = 0; uint8_t checked_root[32];
     struct vcs_zcode_patch_v1 stored;
     if (vcs_object_load_raw(repo_root, candidate->patch_root,
@@ -357,7 +413,7 @@ enum vcs_zcode_patch_result vcs_zcode_patch_verify_cas(
         free(wire);
         return VCS_ZCODE_PATCH_CAS;
     }
-    free(wire); wire = NULL; wire_len = 0;
+    free(wire);
     bool stored_valid = vcs_zcode_patch_root(&stored, checked_root) ==
             VCS_ZCODE_PATCH_OK &&
         memcmp(checked_root, candidate->patch_root, 32) == 0 &&
@@ -368,20 +424,41 @@ enum vcs_zcode_patch_result vcs_zcode_patch_verify_cas(
         stored.content_bytes <= task->max_patch_bytes;
     vcs_zcode_patch_free(&stored);
     if (!stored_valid) return VCS_ZCODE_PATCH_MANIFEST_MISMATCH;
+    return VCS_ZCODE_PATCH_OK;
+}
 
-    struct vcs_zcode_write_scope_v1 scope;
+static enum vcs_zcode_patch_result patch_verify_scope(
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    struct vcs_zcode_write_scope_v1 *scope)
+{
+    uint8_t *wire = NULL; size_t wire_len = 0; uint8_t checked_root[32];
     if (vcs_object_load_raw(repo_root, task->write_scope_root,
                             &wire, &wire_len) != 0 ||
-        vcs_zcode_write_scope_parse(wire, wire_len, &scope) !=
+        vcs_zcode_write_scope_parse(wire, wire_len, scope) !=
             VCS_ZCODE_WRITE_SCOPE_OK) {
         free(wire);
         return VCS_ZCODE_PATCH_CAS;
     }
     free(wire);
-    if (vcs_zcode_write_scope_root(&scope, checked_root) !=
+    if (vcs_zcode_write_scope_root(scope, checked_root) !=
             VCS_ZCODE_WRITE_SCOPE_OK ||
         memcmp(checked_root, task->write_scope_root, 32) != 0)
         return VCS_ZCODE_PATCH_CAS;
+    return VCS_ZCODE_PATCH_OK;
+}
+
+enum vcs_zcode_patch_result vcs_zcode_patch_verify_cas(
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate)
+{
+    if (!repo_root || !task || !candidate) return VCS_ZCODE_PATCH_NULL;
+    enum vcs_zcode_patch_result result =
+        patch_verify_stored(repo_root, task, candidate);
+    if (result != VCS_ZCODE_PATCH_OK) return result;
+    struct vcs_zcode_write_scope_v1 scope;
+    result = patch_verify_scope(repo_root, task, &scope);
+    if (result != VCS_ZCODE_PATCH_OK) return result;
+    uint8_t checked_root[32];
     struct vcs_manifest base, candidate_manifest;
     if (!vcs_tree_load(repo_root, task->source_root, &base))
         return VCS_ZCODE_PATCH_CAS;
@@ -391,7 +468,7 @@ enum vcs_zcode_patch_result vcs_zcode_patch_verify_cas(
         return VCS_ZCODE_PATCH_CAS;
     }
     struct vcs_zcode_patch_v1 derived;
-    enum vcs_zcode_patch_result result = vcs_zcode_patch_derive(
+    result = vcs_zcode_patch_derive(
         &base, task->source_root, &candidate_manifest,
         candidate->candidate_source_root, &scope, task->max_changed_files,
         task->max_patch_bytes, &derived);
