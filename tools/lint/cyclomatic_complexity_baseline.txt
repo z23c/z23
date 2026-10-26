@@ -1231,8 +1231,6 @@ engine/modules/hotswap/src/hotswap_manifest_validate.c:hotswap_manifest_v2_valid
 engine/modules/hotswap/src/hotswap_sealed_image.c:si_copy_exact:18
 engine/modules/hotswap/src/hotswap_service.c:zcl_hotswap_service_activate_so_any:22
 engine/modules/hotswap/src/hotswap_service.c:zcl_hotswap_service_publish:30
-engine/modules/rpc/src/client.c:rpc_call_local:20
-engine/modules/rpc/src/client.c:rpc_cli_print_json_result:17
 engine/modules/rpc/src/httpserver.c:rpc_http_start:40
 engine/modules/rpc/src/legacy_header_client.c:legacy_header_rpc_fetch_batch:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_call_with_timeout:29

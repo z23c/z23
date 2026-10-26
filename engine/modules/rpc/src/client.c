@@ -269,6 +269,27 @@ static int rpc_cli_print_json_value(const struct json_value *value,
     return 0;
 }
 
+/* Prints one JSON-RPC result value: scalar types map to plain text, every
+ * other type falls back to serialized JSON via rpc_cli_print_json_value. */
+static int rpc_cli_print_result_value(const struct json_value *res,
+                                      FILE *out, FILE *err)
+{
+    if (res->type == JSON_STR) {
+        fprintf(out, "%s\n", json_get_str(res));
+    } else if (res->type == JSON_INT) {
+        fprintf(out, "%lld\n", (long long)json_get_int(res));
+    } else if (res->type == JSON_REAL) {
+        fprintf(out, "%.8f\n", json_get_real(res));
+    } else if (res->type == JSON_BOOL) {
+        fprintf(out, "%s\n", json_get_bool(res) ? "true" : "false");
+    } else if (res->type == JSON_NULL) {
+        fprintf(out, "null\n");
+    } else {
+        return rpc_cli_print_json_value(res, out, err);
+    }
+    return 0;
+}
+
 int rpc_cli_print_json_result(const char *json_str, FILE *out, FILE *err)
 {
     if (!out)
@@ -308,22 +329,53 @@ int rpc_cli_print_json_result(const char *json_str, FILE *out, FILE *err)
         return 1;
     }
 
-    int rc = 0;
-    if (res->type == JSON_STR) {
-        fprintf(out, "%s\n", json_get_str(res));
-    } else if (res->type == JSON_INT) {
-        fprintf(out, "%lld\n", (long long)json_get_int(res));
-    } else if (res->type == JSON_REAL) {
-        fprintf(out, "%.8f\n", json_get_real(res));
-    } else if (res->type == JSON_BOOL) {
-        fprintf(out, "%s\n", json_get_bool(res) ? "true" : "false");
-    } else if (res->type == JSON_NULL) {
-        fprintf(out, "null\n");
-    } else {
-        rc = rpc_cli_print_json_value(res, out, err);
-    }
+    int rc = rpc_cli_print_result_value(res, out, err);
     json_free(&v);
     return rc;
+}
+
+/* True when rpc_call_local's arguments fall outside the ranges the local
+ * HTTP request path can handle. */
+static bool rpc_call_local_args_invalid(int port, const char *creds,
+                                        const char *method,
+                                        const char *params_json, char *out,
+                                        size_t outmax)
+{
+    return port < 1 || port > UINT16_MAX || !creds || !method ||
+           !params_json || !out || outmax == 0;
+}
+
+/* Opens and connects a TCP socket to the local node's RPC port, with the
+ * receive/send timeouts rpc_call_local has always used. Returns
+ * PLATFORM_SOCKET_INVALID on failure, after closing the socket itself. */
+static platform_socket_t rpc_connect_local_socket(int port)
+{
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                   true, false);
+    if (sock == PLATFORM_SOCKET_INVALID) return PLATFORM_SOCKET_INVALID;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    if (platform_socket_parse_address(AF_INET, "127.0.0.1",
+                                      &addr.sin_addr) != 1) {
+        platform_socket_close(sock);
+        return PLATFORM_SOCKET_INVALID;
+    }
+    addr.sin_port = htons((uint16_t)port);
+
+    if (platform_socket_set_receive_timeout(sock, 30000) != 0 ||
+        platform_socket_set_send_timeout(sock, 30000) != 0) {
+        platform_socket_close(sock);
+        return PLATFORM_SOCKET_INVALID;
+    }
+
+    if (platform_socket_connect(sock, (struct sockaddr *)&addr,
+                                sizeof(addr)) != 0) {
+        platform_socket_close(sock);
+        return PLATFORM_SOCKET_INVALID;
+    }
+    return sock;
 }
 
 /* ── Shared RPC caller for local node communication ────────────── */
@@ -332,35 +384,12 @@ int rpc_call_local(int port, const char *creds,
                    const char *method, const char *params_json,
                    char *out, size_t outmax)
 {
-    if (port < 1 || port > UINT16_MAX || !creds || !method || !params_json ||
-        !out || outmax == 0)
+    if (rpc_call_local_args_invalid(port, creds, method, params_json, out,
+                                    outmax))
         return -1;
 
-    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
-                                                   true, false);
+    platform_socket_t sock = rpc_connect_local_socket(port);
     if (sock == PLATFORM_SOCKET_INVALID) return -1;
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    if (platform_socket_parse_address(AF_INET, "127.0.0.1",
-                                      &addr.sin_addr) != 1) {
-        platform_socket_close(sock);
-        return -1;
-    }
-    addr.sin_port = htons((uint16_t)port);
-
-    if (platform_socket_set_receive_timeout(sock, 30000) != 0 ||
-        platform_socket_set_send_timeout(sock, 30000) != 0) {
-        platform_socket_close(sock);
-        return -1;
-    }
-
-    if (platform_socket_connect(sock, (struct sockaddr *)&addr,
-                                sizeof(addr)) != 0) {
-        platform_socket_close(sock);
-        return -1;
-    }
 
     char body[4096];
     int blen = snprintf(body, sizeof(body),
