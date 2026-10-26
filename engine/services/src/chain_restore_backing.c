@@ -95,8 +95,7 @@ static bool chain_restore_read_block_with_net_retry(
      * the retry is a cheap no-op. */
     char net_dir[2048];
     GetDataDir(true, net_dir, sizeof(net_dir));
-    const bool same_dir = strcmp(net_dir, datadir) == 0;
-    if (!net_dir[0] || same_dir)
+    if (!net_dir[0] || strcmp(net_dir, datadir) == 0)
         return false;  // raw-return-ok:predicate-negative
     return read_block_from_disk_index_pread(blk, tip, net_dir);
 }
