@@ -94,6 +94,33 @@ static enum yardsale_wallet_status yw_build_buyer_accept(
     return YARDSALE_WALLET_OK;
 }
 
+static enum yardsale_wallet_status yw_check_planned_buy_inputs(
+    struct wallet *w, const struct zswap_buyer_accept *buyer,
+    struct json_value *out)
+{
+    for (size_t i = 0; i < buyer->num_inputs; i++) {
+        struct coin_entry coin;
+        bool seen = false;
+        memset(&coin, 0, sizeof(coin));
+        if (!yw_find_coin(w, buyer->inputs[i].txid,
+                          buyer->inputs[i].vout, false, &coin, &seen).ok)
+            return yw_fail(out, YARDSALE_WALLET_ERR_INPUT_CONFLICT,
+                           "a planned ZCL input is no longer a "
+                           "confirmed spendable wallet coin");
+        const struct tx_out *txout =
+            &coin.wtx->tx.vout[buyer->inputs[i].vout];
+        if (txout->value != buyer->inputs[i].value_sats ||
+            txout->script_pub_key.size != buyer->inputs[i].script_len ||
+            memcmp(txout->script_pub_key.data,
+                   buyer->inputs[i].script_pub_key,
+                   buyer->inputs[i].script_len) != 0)
+            return yw_fail(out, YARDSALE_WALLET_ERR_INPUT_CONFLICT,
+                           "a planned ZCL input changed since "
+                           "planning");
+    }
+    return YARDSALE_WALLET_OK;
+}
+
 static enum yardsale_wallet_status yw_buy_commit(
     struct wallet *w, struct node_db *ndb, struct yw_plan *p,
     const uint8_t ad_root[32], int64_t now_unix, struct json_value *out)
@@ -130,26 +157,10 @@ static enum yardsale_wallet_status yw_buy_commit(
 
     /* Every planned input must still be a confirmed spendable wallet
      * coin with the exact planned script and value. */
-    for (size_t i = 0; i < buyer.num_inputs; i++) {
-        struct coin_entry coin;
-        bool seen = false;
-        memset(&coin, 0, sizeof(coin));
-        if (!yw_find_coin(w, buyer.inputs[i].txid,
-                          buyer.inputs[i].vout, false, &coin, &seen).ok)
-            return yw_fail(out, YARDSALE_WALLET_ERR_INPUT_CONFLICT,
-                           "a planned ZCL input is no longer a "
-                           "confirmed spendable wallet coin");
-        const struct tx_out *txout =
-            &coin.wtx->tx.vout[buyer.inputs[i].vout];
-        if (txout->value != buyer.inputs[i].value_sats ||
-            txout->script_pub_key.size != buyer.inputs[i].script_len ||
-            memcmp(txout->script_pub_key.data,
-                   buyer.inputs[i].script_pub_key,
-                   buyer.inputs[i].script_len) != 0)
-            return yw_fail(out, YARDSALE_WALLET_ERR_INPUT_CONFLICT,
-                           "a planned ZCL input changed since "
-                           "planning");
-    }
+    enum yardsale_wallet_status checked =
+        yw_check_planned_buy_inputs(w, &buyer, out);
+    if (checked != YARDSALE_WALLET_OK)
+        return checked;
 
     /* Claim the durable plan before key access or the outbound accept. Two
      * confirmations may validate concurrently, but only one can perform the
@@ -225,6 +236,71 @@ static enum yardsale_wallet_status yw_buy_commit(
     return YARDSALE_WALLET_OK;
 }
 
+/* Render the stored, still-unexpired PLANNED buy as the plan stage. */
+static enum yardsale_wallet_status yw_render_planned_buy(
+    const struct yw_plan *p, int64_t now_unix, struct json_value *out)
+{
+    uint8_t raw[YW_PAYLOAD_RAW_MAX];
+    size_t raw_len = 0;
+    uint8_t root[32];
+    struct zswap_buyer_accept buyer;
+    if (!yw_payload_decode(p->row.payload_hex, raw, sizeof(raw),
+                           &raw_len).ok ||
+        !yw_parse_buyer_payload(raw, raw_len, root, &buyer).ok)
+        return yw_fail(out, YARDSALE_WALLET_ERR_INTERNAL,
+                       "the stored plan payload failed to parse");
+    struct zswap_yardsale_ad ad;
+    json_set_object(out);
+    yw_render_plan_head(out, YARDSALE_PLAN_KIND_BUY, p->plan_root_hex,
+                        p->request_hex, p->row.expires_unix);
+    json_push_kv_str(out, "stage", "plan");
+    json_push_kv_bool(out, "committed", false);
+    yw_render_buyer_terms(out, &buyer,
+                          yw_live_ad(root, now_unix, &ad).ok
+                              ? &ad : NULL);
+    json_push_kv_str(out, "confirm_hint",
+                     "re-run with \"confirm\":true before "
+                     "plan_expires_unix to flood the accept");
+    return YARDSALE_WALLET_OK;
+}
+
+/* Find the live sign, build the buyer accept and persist it as the plan. */
+static enum yardsale_wallet_status yw_store_fresh_buy_plan(
+    struct wallet *w, struct node_db *ndb, struct yw_plan *p,
+    const uint8_t ad_root[32], int64_t now_unix,
+    struct zswap_yardsale_ad *ad, struct zswap_buyer_accept *buyer,
+    struct json_value *out)
+{
+    if (!yw_live_ad(ad_root, now_unix, ad).ok)
+        return yw_fail(out, YARDSALE_WALLET_ERR_AD_UNKNOWN,
+                       "no live sign with that root in this node's "
+                       "yardsale");
+    enum yardsale_wallet_status st =
+        yw_build_buyer_accept(w, ad, buyer, out);
+    if (st != YARDSALE_WALLET_OK)
+        return st;
+
+    uint8_t ser[YW_PAYLOAD_RAW_MAX];
+    size_t ser_len = 0;
+    if (zswap_buyer_accept_serialize(buyer, ser, sizeof(ser),
+                                     &ser_len) != ZSWAP_ASSEMBLY_OK)
+        return yw_fail(out, YARDSALE_WALLET_ERR_INTERNAL,
+                       "the buyer accept failed canonical serialization");
+    uint8_t raw[YW_PAYLOAD_RAW_MAX];
+    if (32 + ser_len > sizeof(raw))
+        return yw_fail(out, YARDSALE_WALLET_ERR_INTERNAL,
+                       "the plan payload exceeds its bound");
+    memcpy(raw, ad_root, 32);
+    memcpy(raw + 32, ser, ser_len);
+    char payload_hex[YARDSALE_PLAN_PAYLOAD_HEX_MAX];
+    zcl_hex_encode(raw, 32 + ser_len, payload_hex);
+    if (!yw_plan_store(p, ndb, YARDSALE_PLAN_KIND_BUY, payload_hex,
+                       now_unix).ok)
+        return yw_fail(out, YARDSALE_WALLET_ERR_DB,
+                       "the plan ledger could not persist the plan");
+    return YARDSALE_WALLET_OK;
+}
+
 enum yardsale_wallet_status yardsale_wallet_buy(
     struct wallet *w, struct node_db *ndb,
     const uint8_t ad_root[32], bool confirm, int64_t now_unix,
@@ -266,60 +342,16 @@ enum yardsale_wallet_status yardsale_wallet_buy(
     if (p.exists &&
         strcmp(p.row.state, YARDSALE_PLAN_STATE_PLANNED) == 0 &&
         now_unix < p.row.expires_unix) {
-        uint8_t raw[YW_PAYLOAD_RAW_MAX];
-        size_t raw_len = 0;
-        uint8_t root[32];
-        struct zswap_buyer_accept buyer;
-        if (!yw_payload_decode(p.row.payload_hex, raw, sizeof(raw),
-                               &raw_len).ok ||
-            !yw_parse_buyer_payload(raw, raw_len, root, &buyer).ok)
-            return yw_fail(out, YARDSALE_WALLET_ERR_INTERNAL,
-                           "the stored plan payload failed to parse");
-        struct zswap_yardsale_ad ad;
-        json_set_object(out);
-        yw_render_plan_head(out, YARDSALE_PLAN_KIND_BUY, p.plan_root_hex,
-                            p.request_hex, p.row.expires_unix);
-        json_push_kv_str(out, "stage", "plan");
-        json_push_kv_bool(out, "committed", false);
-        yw_render_buyer_terms(out, &buyer,
-                              yw_live_ad(root, now_unix, &ad).ok
-                                  ? &ad : NULL);
-        json_push_kv_str(out, "confirm_hint",
-                         "re-run with \"confirm\":true before "
-                         "plan_expires_unix to flood the accept");
-        return YARDSALE_WALLET_OK;
+        return yw_render_planned_buy(&p, now_unix, out);
     }
 
     /* Fresh plan (first request, or an expired row being re-planned). */
     struct zswap_yardsale_ad ad;
-    if (!yw_live_ad(ad_root, now_unix, &ad).ok)
-        return yw_fail(out, YARDSALE_WALLET_ERR_AD_UNKNOWN,
-                       "no live sign with that root in this node's "
-                       "yardsale");
     struct zswap_buyer_accept buyer;
-    enum yardsale_wallet_status st =
-        yw_build_buyer_accept(w, &ad, &buyer, out);
+    enum yardsale_wallet_status st = yw_store_fresh_buy_plan(
+        w, ndb, &p, ad_root, now_unix, &ad, &buyer, out);
     if (st != YARDSALE_WALLET_OK)
         return st;
-
-    uint8_t ser[YW_PAYLOAD_RAW_MAX];
-    size_t ser_len = 0;
-    if (zswap_buyer_accept_serialize(&buyer, ser, sizeof(ser),
-                                     &ser_len) != ZSWAP_ASSEMBLY_OK)
-        return yw_fail(out, YARDSALE_WALLET_ERR_INTERNAL,
-                       "the buyer accept failed canonical serialization");
-    uint8_t raw[YW_PAYLOAD_RAW_MAX];
-    if (32 + ser_len > sizeof(raw))
-        return yw_fail(out, YARDSALE_WALLET_ERR_INTERNAL,
-                       "the plan payload exceeds its bound");
-    memcpy(raw, ad_root, 32);
-    memcpy(raw + 32, ser, ser_len);
-    char payload_hex[YARDSALE_PLAN_PAYLOAD_HEX_MAX];
-    zcl_hex_encode(raw, 32 + ser_len, payload_hex);
-    if (!yw_plan_store(&p, ndb, YARDSALE_PLAN_KIND_BUY, payload_hex,
-                       now_unix).ok)
-        return yw_fail(out, YARDSALE_WALLET_ERR_DB,
-                       "the plan ledger could not persist the plan");
 
     json_set_object(out);
     yw_render_plan_head(out, YARDSALE_PLAN_KIND_BUY, p.plan_root_hex,
