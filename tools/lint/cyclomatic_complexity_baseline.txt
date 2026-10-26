@@ -1841,7 +1841,6 @@ tests/harness/src/test_store_e2e_gate.c:test_store_e2e_gate:59
 tests/harness/src/test_store_e2e_gate.c:test_store_e2e_shielded:55
 tests/harness/src/test_store_transparent_pay.c:test_store_transparent_pay:39
 tests/harness/src/test_store_transparent_pay.c:tstp_exact_chain_payment:62
-tests/harness/src/test_strong_params.c:test_strong_params:59
 tests/harness/src/test_supervisor.c:test_supervisor:84
 tests/harness/src/test_supervisor_production_tree.c:test_supervisor_production_tree:43
 tests/harness/src/test_sync_rate_below_floor.c:test_sync_rate_below_floor:36

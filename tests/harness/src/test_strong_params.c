@@ -61,11 +61,9 @@ static void make_empty_arr(struct json_value *arr)
     json_set_array(arr);
 }
 
-int test_strong_params(void)
+static int strong_params_check_init_require_str(void)
 {
     int failures = 0;
-
-    printf("\n=== Strong Params Tests ===\n");
 
     /* ── rpc_params_init ──────────────────────────────────────── */
 
@@ -128,6 +126,13 @@ int test_strong_params(void)
         json_free(&arr);
     }
 
+    return failures;
+}
+
+static int strong_params_check_require_int(void)
+{
+    int failures = 0;
+
     /* ── rpc_require_int ──────────────────────────────────────── */
 
     printf("rpc_require_int: from JSON_INT... ");
@@ -188,6 +193,13 @@ int test_strong_params(void)
         json_free(&arr);
     }
 
+    return failures;
+}
+
+static int strong_params_check_require_bool(void)
+{
+    int failures = 0;
+
     /* ── rpc_require_bool ─────────────────────────────────────── */
 
     printf("rpc_require_bool: from JSON_BOOL... ");
@@ -234,6 +246,13 @@ int test_strong_params(void)
         json_free(&arr);
     }
 
+    return failures;
+}
+
+static int strong_params_check_permit_str(void)
+{
+    int failures = 0;
+
     /* ── rpc_permit_str ───────────────────────────────────────── */
 
     printf("rpc_permit_str: returns default on missing... ");
@@ -279,6 +298,13 @@ int test_strong_params(void)
         else { printf("FAIL\n"); failures++; }
         json_free(&arr);
     }
+
+    return failures;
+}
+
+static int strong_params_check_permit_int_bool(void)
+{
+    int failures = 0;
 
     /* ── rpc_permit_int ───────────────────────────────────────── */
 
@@ -368,6 +394,13 @@ int test_strong_params(void)
         json_free(&arr);
     }
 
+    return failures;
+}
+
+static int strong_params_check_amount_units(void)
+{
+    int failures = 0;
+
     /* ── rpc_require_amount ───────────────────────────────────── */
 
     printf("rpc_require_amount: from integer (whole ZCL)... ");
@@ -445,6 +478,13 @@ int test_strong_params(void)
         json_free(&arr);
     }
 
+    return failures;
+}
+
+static int strong_params_check_amount_negative(void)
+{
+    int failures = 0;
+
     /* Negative fractional string with integer part 0 ("-0.5"): the sign must
      * NOT be dropped (regression — it used to parse to +0.5 ZCL and execute a
      * real send). The result must be negative so the satoshis<0 guard fires. */
@@ -504,6 +544,13 @@ int test_strong_params(void)
         json_free(&arr);
     }
 
+    return failures;
+}
+
+static int strong_params_check_amount_positive_missing(void)
+{
+    int failures = 0;
+
     /* Positive decimal still parses correctly (no sign regression). */
     printf("rpc_require_amount: positive \"0.5\" still parses... ");
     {
@@ -531,6 +578,24 @@ int test_strong_params(void)
         else { printf("FAIL\n"); failures++; }
         json_free(&arr);
     }
+
+    return failures;
+}
+
+int test_strong_params(void)
+{
+    int failures = 0;
+
+    printf("\n=== Strong Params Tests ===\n");
+
+    failures += strong_params_check_init_require_str();
+    failures += strong_params_check_require_int();
+    failures += strong_params_check_require_bool();
+    failures += strong_params_check_permit_str();
+    failures += strong_params_check_permit_int_bool();
+    failures += strong_params_check_amount_units();
+    failures += strong_params_check_amount_negative();
+    failures += strong_params_check_amount_positive_missing();
 
     /* ── rpc_params_expect ────────────────────────────────────── */
 
