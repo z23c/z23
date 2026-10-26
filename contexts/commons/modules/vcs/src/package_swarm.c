@@ -229,59 +229,87 @@ static bool read_object(const uint8_t *wire, size_t wire_len,
     return true;
 }
 
+static bool vcs_package_swarm_header_valid(const uint8_t *wire,
+                                           size_t wire_len)
+{
+    return wire && wire_len >= VCS_PACKAGE_SWARM_HEADER_BYTES &&
+           wire_len <= VCS_PACKAGE_SWARM_MAX_WIRE_BYTES &&
+           memcmp(wire, package_swarm_magic,
+                  sizeof(package_swarm_magic)) == 0 &&
+           vcs_rd_u16le(wire + 4) == VCS_PACKAGE_SWARM_VERSION &&
+           wire[7] == 0;
+}
+
+static bool vcs_package_swarm_parse_announce(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_package_swarm_message *out, size_t *out_off)
+{
+    if (wire_len != SWARM_ANNOUNCE_BYTES)
+        return false;
+    size_t off = VCS_PACKAGE_SWARM_HEADER_BYTES;
+    struct vcs_package_swarm_announce *a = &out->body.announce;
+    memcpy(a->package_root, wire + off, 32);
+    off += 32;
+    a->manifest_bytes = vcs_rd_u32le(wire + off);
+    off += 4;
+    a->file_count = vcs_rd_u32le(wire + off);
+    off += 4;
+    a->total_bytes = vcs_rd_u64le(wire + off);
+    off += 8;
+    a->total_chunks = vcs_rd_u32le(wire + off);
+    off += 4;
+    if (!announce_valid(a))
+        return false;
+    *out_off = off;
+    return true;
+}
+
+static bool vcs_package_swarm_parse_data(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_package_swarm_message *out, size_t *out_off)
+{
+    size_t off = VCS_PACKAGE_SWARM_HEADER_BYTES;
+    if (wire_len < SWARM_DATA_FIXED_BYTES ||
+        !read_object(wire, wire_len, &out->body.data.object, &off))
+        return false;
+    uint32_t data_len = vcs_rd_u32le(wire + off);
+    off += 4;
+    if ((size_t)data_len != wire_len - off)
+        return false;
+    out->body.data.bytes = wire + off;
+    out->body.data.bytes_len = data_len;
+    off += data_len;
+    if (!data_valid(&out->body.data))
+        return false;
+    *out_off = off;
+    return true;
+}
+
 bool vcs_package_swarm_parse(const uint8_t *wire, size_t wire_len,
                              struct vcs_package_swarm_message *out)
 {
     if (!out)
         LOG_FAIL("vcs.swarm", "null package swarm parse output");
     memset(out, 0, sizeof(*out));
-    if (!wire || wire_len < VCS_PACKAGE_SWARM_HEADER_BYTES ||
-        wire_len > VCS_PACKAGE_SWARM_MAX_WIRE_BYTES ||
-        memcmp(wire, package_swarm_magic, sizeof(package_swarm_magic)) != 0 ||
-        vcs_rd_u16le(wire + 4) != VCS_PACKAGE_SWARM_VERSION || wire[7] != 0)
+    if (!vcs_package_swarm_header_valid(wire, wire_len))
         LOG_FAIL("vcs.swarm", "invalid package swarm header");
 
     out->type = wire[6];
     size_t off = VCS_PACKAGE_SWARM_HEADER_BYTES;
     switch (out->type) {
-    case VCS_PACKAGE_SWARM_ANNOUNCE: {
-        if (wire_len != SWARM_ANNOUNCE_BYTES)
-            goto reject;
-        struct vcs_package_swarm_announce *a = &out->body.announce;
-        memcpy(a->package_root, wire + off, 32);
-        off += 32;
-        a->manifest_bytes = vcs_rd_u32le(wire + off);
-        off += 4;
-        a->file_count = vcs_rd_u32le(wire + off);
-        off += 4;
-        a->total_bytes = vcs_rd_u64le(wire + off);
-        off += 8;
-        a->total_chunks = vcs_rd_u32le(wire + off);
-        off += 4;
-        if (!announce_valid(a))
+    case VCS_PACKAGE_SWARM_ANNOUNCE:
+        if (!vcs_package_swarm_parse_announce(wire, wire_len, out, &off))
             goto reject;
         break;
-    }
     case VCS_PACKAGE_SWARM_WANT:
         if (wire_len != SWARM_OBJECT_BYTES ||
             !read_object(wire, wire_len, &out->body.want, &off))
             goto reject;
         break;
-    case VCS_PACKAGE_SWARM_DATA: {
-        if (wire_len < SWARM_DATA_FIXED_BYTES ||
-            !read_object(wire, wire_len, &out->body.data.object, &off))
-            goto reject;
-        uint32_t data_len = vcs_rd_u32le(wire + off);
-        off += 4;
-        if ((size_t)data_len != wire_len - off)
-            goto reject;
-        out->body.data.bytes = wire + off;
-        out->body.data.bytes_len = data_len;
-        off += data_len;
-        if (!data_valid(&out->body.data))
+    case VCS_PACKAGE_SWARM_DATA:
+        if (!vcs_package_swarm_parse_data(wire, wire_len, out, &off))
             goto reject;
         break;
-    }
     case VCS_PACKAGE_SWARM_CANCEL:
         if (wire_len != SWARM_CANCEL_BYTES)
             goto reject;
@@ -304,6 +332,20 @@ reject:
     LOG_FAIL("vcs.swarm", "noncanonical package swarm payload");
 }
 
+static bool vcs_package_swarm_data_mismatches_want(
+    const struct vcs_package_swarm_object *expected_want,
+    const struct vcs_package_swarm_object *actual)
+{
+    return expected_want->request_id != actual->request_id ||
+           expected_want->object_kind != actual->object_kind ||
+           expected_want->file_index != actual->file_index ||
+           expected_want->chunk_index != actual->chunk_index ||
+           memcmp(expected_want->package_root, actual->package_root,
+                  32) != 0 ||
+           memcmp(expected_want->expected_hash, actual->expected_hash,
+                  32) != 0;
+}
+
 bool vcs_package_swarm_verify_data(
     const struct vcs_package_manifest *manifest,
     const struct vcs_package_swarm_object *expected_want,
@@ -312,12 +354,7 @@ bool vcs_package_swarm_verify_data(
     if (!object_valid(expected_want) || !data_valid(data))
         LOG_FAIL("vcs.swarm", "invalid package swarm data");
     const struct vcs_package_swarm_object *actual = &data->object;
-    if (expected_want->request_id != actual->request_id ||
-        expected_want->object_kind != actual->object_kind ||
-        expected_want->file_index != actual->file_index ||
-        expected_want->chunk_index != actual->chunk_index ||
-        memcmp(expected_want->package_root, actual->package_root, 32) != 0 ||
-        memcmp(expected_want->expected_hash, actual->expected_hash, 32) != 0)
+    if (vcs_package_swarm_data_mismatches_want(expected_want, actual))
         LOG_FAIL("vcs.swarm", "DATA does not match outstanding WANT");
     if (data->object.object_kind == VCS_PACKAGE_SWARM_OBJECT_MANIFEST) {
         struct vcs_package_manifest parsed;
