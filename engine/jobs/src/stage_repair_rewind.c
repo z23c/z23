@@ -293,10 +293,13 @@ static int poison_rewind_ensure_base_schema(sqlite3 *db)
     /* The delete list below includes `nullifiers`; ensure it exists so a
      * datadir that predates the table (stage init not yet run) does not fail
      * the whole rewind on "no such table". Idempotent. */
-    if (!stage_table_ensure(db))
-        return -1;
+    if (!stage_table_ensure(db)) {
+        LOG_ERR("stage_repair",
+                "[stage_repair] poison rewind: stage table ensure failed");
+        return -1;  // raw-return-ok:logged-above
+    }
     if (!nullifier_kv_ensure_schema(db))
-        return -1;  /* nullifier_kv logged the failure */
+        return -1;  // raw-return-ok:nullifier_kv_ensure_schema logged the failure
     return 0;
 }
 
@@ -367,7 +370,7 @@ static int poison_rewind_success_guard(sqlite3 *db, int height,
         bool has_success = false;
         if (!table_has_success_at_or_above(db, success_checked_logs[i],
                                            height, &has_success))
-            return -1;
+            return -1;  // raw-return-ok:table_has_success_at_or_above logged
         if (has_success) {
             *out_table = success_checked_logs[i];
             return 1;
@@ -422,23 +425,23 @@ static int rewind_poisoned_stages(
     int deleted = 0;
     if (mode == STAGE_REPAIR_POISON_VALIDATE_SOLUTIONLESS) {
         int n = delete_from_table(db, "validate_headers_log", height);
-        if (n < 0) return -1;
+        if (n < 0) return -1;  // raw-return-ok:delete_from_table logged
         deleted += n;
         if (!stage_repair_force_stage_cursor(db, "validate_headers", height))
-            return -1;
+            return -1;  // raw-return-ok:stage_repair_force_stage_cursor logged
         (*rewound_cursors)++;
     }
 
     for (size_t i = 0; i < sizeof(downstream_logs) / sizeof(downstream_logs[0]);
          i++) {
         int n = delete_from_table(db, downstream_logs[i], height);
-        if (n < 0) return -1;
+        if (n < 0) return -1;  // raw-return-ok:delete_from_table logged
         deleted += n;
     }
     for (size_t i = 0;
          i < sizeof(downstream_stages) / sizeof(downstream_stages[0]); i++) {
         if (!stage_repair_force_stage_cursor(db, downstream_stages[i], height))
-            return -1;
+            return -1;  // raw-return-ok:stage_repair_force_stage_cursor logged
         (*rewound_cursors)++;
     }
 
@@ -462,8 +465,12 @@ static int rewind_poisoned_stages(
      * co-write makes frontier == cursor hold by construction on this path too.
      * A PLAIN set (the rewind decreases the frontier); ROLLBACK on failure
      * exactly like the surrounding writes (goto rollback). */
-    if (!utxo_apply_frontier_set_in_tx(db, height))
-        return -1;
+    if (!utxo_apply_frontier_set_in_tx(db, height)) {
+        LOG_ERR("stage_repair",
+                "[stage_repair] poison rewind: utxo_apply frontier set failed h=%d",
+                height);
+        return -1;  // raw-return-ok:logged-above
+    }
     return deleted;
 }
 
