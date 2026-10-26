@@ -78,12 +78,11 @@ static struct block_index *tip_finalize_visible_body_lookup_block(
 
 /* A body is usable when its index exists, carries a block hash, sits at the
  * cursor height and passes the precondition checks. */
-static const char *tip_finalize_visible_body_block_reason(
+static bool tip_finalize_visible_body_block_usable(
     const struct block_index *bi, int32_t height)
 {
-    if (!bi || !bi->phashBlock || bi->nHeight != height)
-        return "index_unusable";
-    return tip_finalize_precondition_block_reason(bi);
+    if (!bi || !bi->phashBlock || bi->nHeight != height) return false;
+    return tip_finalize_precondition_block_reason(bi) == NULL;
 }
 
 /* A header-only lookahead can advance the cursor before the successor body
@@ -102,7 +101,7 @@ bool tip_finalize_reconcile_visible_cursor_body(
         return false;
     struct block_index *bi =
         tip_finalize_visible_body_lookup_block(db, ms, height);
-    if (tip_finalize_visible_body_block_reason(bi, height) != NULL)
+    if (!tip_finalize_visible_body_block_usable(bi, height))
         return false;
 
     /* A header witness proves the parent, not this body's transition. */
