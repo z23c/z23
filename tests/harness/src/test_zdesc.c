@@ -393,10 +393,6 @@ static void zd_fixture_close(struct zd_fixture *f)
     test_rm_rf(f->datadir);
 }
 
-/* The state the phases of the end-to-end case below hand to each
- * other: the fixture, the scratch directory the accept checks share,
- * the published descriptor and its fetched copy, the two times and
- * the signed wire image the tamper and window phases reuse. */
 struct zd_e2e_ctx {
     struct zd_fixture f;
     struct zdesc_directory tdir;
@@ -409,9 +405,6 @@ struct zd_e2e_ctx {
     size_t wire_len;
 };
 
-/* e2e phase 1: publish seq 7, prove the record is indexed under the
- * blinded key and the doc verifies, and leave the doc's wire image in
- * the context for the later phases. */
 static int zd_check_e2e_publish_indexing(struct zd_e2e_ctx *c)
 {
     int failures = 0;
@@ -446,8 +439,6 @@ static int zd_check_e2e_publish_indexing(struct zd_e2e_ctx *c)
     return failures;
 }
 
-/* e2e phase 2: the blob root is derivable from the doc bytes alone,
- * and the descriptor fetches back from the stored bytes and verifies. */
 static int zd_check_e2e_wire_and_fetch(struct zd_e2e_ctx *c)
 {
     int failures = 0;
@@ -468,8 +459,6 @@ static int zd_check_e2e_wire_and_fetch(struct zd_e2e_ctx *c)
     return failures;
 }
 
-/* A flipped byte anywhere in the stored wire fails verification, and a
- * foreign identity is refused by name. */
 static int zd_check_tamper_and_key_mismatch(struct zd_e2e_ctx *c)
 {
     int failures = 0;
@@ -499,8 +488,6 @@ static int zd_check_tamper_and_key_mismatch(struct zd_e2e_ctx *c)
     return failures;
 }
 
-/* The doc's and the body's validity windows, enforced at fetch, accept
- * and sign time. */
 static int zd_check_validity_window(struct zd_e2e_ctx *c)
 {
     int failures = 0;
@@ -529,7 +516,6 @@ static int zd_check_validity_window(struct zd_e2e_ctx *c)
     return failures;
 }
 
-/* A lower or an equal seq can never displace the held descriptor. */
 static int zd_check_replay_refusal(struct zd_e2e_ctx *c)
 {
     int failures = 0;
@@ -565,7 +551,6 @@ static int zd_check_replay_refusal(struct zd_e2e_ctx *c)
     return failures;
 }
 
-/* Rotation: a strictly higher seq replaces the held descriptor. */
 static int zd_check_rotate_to_higher_seq(struct zd_e2e_ctx *c)
 {
     int failures = 0;
