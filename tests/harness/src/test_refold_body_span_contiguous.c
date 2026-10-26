@@ -211,7 +211,7 @@ int test_refold_body_span_contiguous(void)
         blocker_reset_for_testing();
     }
 
-    /* C7: LOCAL body rebind on a gap. ──────────────────────────────────
+    /* ── C7: LOCAL body rebind on a gap. ──────────────────────────────────
      * A gap triggers scan_block_files_mark_data ONCE, only when the rebind
      * datadir is set AND local blk*.dat exist. The scan over a dummy file
      * marks nothing, so the gap persists and the blocker is still raised;
