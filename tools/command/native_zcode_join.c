@@ -103,6 +103,58 @@ enum zcl_join_signal zcl_join_readiness_outstanding(
     return ZCL_JOIN_SIGNAL_CONFIRMED;
 }
 
+static bool zcl_join_verdict_object_push(
+    struct json_value *data, const struct zcl_join_verdict *verdict)
+{
+    struct json_value v;
+    json_init(&v);
+    json_set_object(&v);
+    bool ok =
+        json_push_kv_str(&v, "reachable",
+                         zcl_join_signal_name(verdict->reachable)) &&
+        json_push_kv_str(&v, "responsive",
+                         zcl_join_signal_name(verdict->responsive)) &&
+        json_push_kv_str(&v, "fresh",
+                         zcl_join_signal_name(verdict->fresh)) &&
+        json_push_kv_str(&v, "serving",
+                         zcl_join_signal_name(verdict->serving)) &&
+        /* Speed sits BESIDE the dimensions, in its own clearly named
+         * telemetry sub-object, so no reader can mistake it for one of
+         * them. -1 means not measured, which is neither fast nor slow. */
+        json_push_kv_int(&v, "latency_ms", verdict->latency_ms) &&
+        json_push_kv_int(&v, "data_age_s", verdict->data_age_s) &&
+        json_push_kv_bool(&v, "speed_is_telemetry_not_a_gate", true) &&
+        json_push_kv_str(&v, "vantage",
+                         verdict->vantage ? verdict->vantage : "") &&
+        json_push_kv(data, "verdict", &v);
+    json_free(&v);
+    return ok;
+}
+
+static bool zcl_join_announcement_object_push(
+    struct json_value *data, const struct zcl_join_readiness *ready)
+{
+    struct json_value r;
+    json_init(&r);
+    json_set_object(&r);
+    bool ok =
+        json_push_kv_str(&r, "state", zcl_join_readiness_state(ready)) &&
+        json_push_kv_str(&r, "state_signal",
+                         zcl_join_signal_name(
+                             zcl_join_readiness_outstanding(ready))) &&
+        json_push_kv_str(&r, "descriptor_published",
+                         zcl_join_signal_name(ready->descriptor_published)) &&
+        json_push_kv_str(&r, "rendezvous_established",
+                         zcl_join_signal_name(ready->rendezvous_established)) &&
+        json_push_kv_str(&r, "circuit_built",
+                         zcl_join_signal_name(ready->circuit_built)) &&
+        json_push_kv_str(&r, "listener_accepting",
+                         zcl_join_signal_name(ready->listener_accepting)) &&
+        json_push_kv(data, "announcement", &r);
+    json_free(&r);
+    return ok;
+}
+
 bool zcl_join_verdict_push_json(struct json_value *data,
                                 const struct zcl_join_verdict *verdict,
                                 const struct zcl_join_readiness *ready)
@@ -110,51 +162,11 @@ bool zcl_join_verdict_push_json(struct json_value *data,
     if (!data)
         LOG_FAIL("zcode.join", "verdict_push_json: data is NULL");
     if (verdict) {
-        struct json_value v;
-        json_init(&v);
-        json_set_object(&v);
-        bool ok =
-            json_push_kv_str(&v, "reachable",
-                             zcl_join_signal_name(verdict->reachable)) &&
-            json_push_kv_str(&v, "responsive",
-                             zcl_join_signal_name(verdict->responsive)) &&
-            json_push_kv_str(&v, "fresh",
-                             zcl_join_signal_name(verdict->fresh)) &&
-            json_push_kv_str(&v, "serving",
-                             zcl_join_signal_name(verdict->serving)) &&
-            /* Speed sits BESIDE the dimensions, in its own clearly named
-             * telemetry sub-object, so no reader can mistake it for one of
-             * them. -1 means not measured, which is neither fast nor slow. */
-            json_push_kv_int(&v, "latency_ms", verdict->latency_ms) &&
-            json_push_kv_int(&v, "data_age_s", verdict->data_age_s) &&
-            json_push_kv_bool(&v, "speed_is_telemetry_not_a_gate", true) &&
-            json_push_kv_str(&v, "vantage",
-                             verdict->vantage ? verdict->vantage : "") &&
-            json_push_kv(data, "verdict", &v);
-        json_free(&v);
-        if (!ok)
+        if (!zcl_join_verdict_object_push(data, verdict))
             LOG_FAIL("zcode.join", "verdict_push_json: verdict refused");
     }
     if (ready) {
-        struct json_value r;
-        json_init(&r);
-        json_set_object(&r);
-        bool ok =
-            json_push_kv_str(&r, "state", zcl_join_readiness_state(ready)) &&
-            json_push_kv_str(&r, "state_signal",
-                             zcl_join_signal_name(
-                                 zcl_join_readiness_outstanding(ready))) &&
-            json_push_kv_str(&r, "descriptor_published",
-                             zcl_join_signal_name(ready->descriptor_published)) &&
-            json_push_kv_str(&r, "rendezvous_established",
-                             zcl_join_signal_name(ready->rendezvous_established)) &&
-            json_push_kv_str(&r, "circuit_built",
-                             zcl_join_signal_name(ready->circuit_built)) &&
-            json_push_kv_str(&r, "listener_accepting",
-                             zcl_join_signal_name(ready->listener_accepting)) &&
-            json_push_kv(data, "announcement", &r);
-        json_free(&r);
-        if (!ok)
+        if (!zcl_join_announcement_object_push(data, ready))
             LOG_FAIL("zcode.join", "verdict_push_json: announcement refused");
     }
     return true;
