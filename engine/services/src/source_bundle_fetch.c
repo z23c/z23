@@ -343,19 +343,97 @@ static void sbf_note_substitution(const struct sbf_candidate *c)
                                       "source-root-mismatch");
 }
 
+/* Null every out-param before any check runs, so even the bad-arguments
+ * refusal leaves the caller's outputs defined rather than stale. */
+static void sbf_init_outputs(uint8_t **wire_out, size_t *wire_len_out,
+                             struct source_bundle_fetch_metrics *metrics)
+{
+    if (wire_out) *wire_out = NULL;
+    if (wire_len_out) *wire_len_out = 0;
+    if (metrics) memset(metrics, 0, sizeof(*metrics));
+}
+
+/* The caller-facing argument contract in one predicate: at least one peer
+ * inside the array cap, a content root, a non-empty staging directory that
+ * fits SBF_PATH_MAX, and both out-params. Same conditions in the same
+ * short-circuit order as before, so strlen() never sees a NULL staging_dir;
+ * the caller logs the named refusal. */
+static bool sbf_arguments_valid(const struct rom_fetch_peer *peers,
+                                size_t npeers, const uint8_t source_root[32],
+                                const char *staging_dir, uint8_t **wire_out,
+                                size_t *wire_len_out)
+{
+    return peers && npeers != 0 &&
+           npeers <= SOURCE_BUNDLE_FETCH_MAX_PEERS && source_root &&
+           staging_dir && staging_dir[0] && wire_out && wire_len_out &&
+           strlen(staging_dir) < SBF_PATH_MAX;
+}
+
+/* The discovery sweep: walk the caller's peer list, ask every usable peer
+ * what it seeds and fold offers for `source_root` into the candidate set,
+ * counting peers asked and peers offering into the metrics counters. `limit`
+ * leaves one candidate slot free for each peer not asked yet, so one peer
+ * flooding the listing cannot starve the rest; the sweep stops at the
+ * whole-call budget, not at the peer count. */
+static void sbf_discover_candidates(const struct rom_fetch_peer *peers,
+                                    size_t npeers,
+                                    const uint8_t source_root[32],
+                                    struct sbf_candidate *cands,
+                                    size_t *ncands, int64_t start_us,
+                                    uint32_t *asked, uint32_t *offering)
+{
+    for (size_t i = 0; i < npeers; i++) {
+        if (!peers[i].addr[0] || peers[i].port == 0)
+            continue;
+        if (!sbf_budget_left(start_us))
+            break;
+        (*asked)++;
+        size_t peers_after = npeers - i - 1u;
+        size_t limit = SOURCE_BUNDLE_FETCH_MAX_CANDIDATES;
+        if (peers_after < limit)
+            limit -= peers_after;
+        if (sbf_discover_peer(&peers[i], source_root, cands, ncands, limit))
+            (*offering)++;
+    }
+}
+
+/* Record the discovery counters — written before any refusal, so a no-peer
+ * outcome still reports how many peers were asked. */
+static void sbf_metrics_note_discovery(
+    struct source_bundle_fetch_metrics *metrics, uint32_t asked,
+    uint32_t offering)
+{
+    if (!metrics) return;
+    metrics->peers_asked = asked;
+    metrics->peers_offering = offering;
+}
+
+/* Record the terminal metrics of an ACCEPTED call: candidate counts, the root
+ * check's own last refusal reason (from any earlier, refused candidate), the
+ * delivered wire size and the bundle-level metrics from the verify. */
+static void sbf_metrics_note_accepted(
+    struct source_bundle_fetch_metrics *metrics, uint32_t tried,
+    uint32_t refused, enum vcs_source_bundle_result last_refusal,
+    size_t wire_len, struct vcs_source_bundle_metrics bm)
+{
+    if (!metrics) return;
+    metrics->candidates_tried = tried;
+    metrics->candidates_refused = refused;
+    metrics->last_refusal = last_refusal;
+    metrics->wire_bytes = (uint64_t)wire_len;
+    metrics->bundle = bm;
+}
+
 enum source_bundle_fetch_result source_bundle_fetch(
     const struct rom_fetch_peer *peers, size_t npeers,
     const uint8_t source_root[32], const char *staging_dir,
     uint8_t **wire_out, size_t *wire_len_out,
     struct source_bundle_fetch_metrics *metrics)
 {
-    if (wire_out) *wire_out = NULL;
-    if (wire_len_out) *wire_len_out = 0;
-    if (metrics) memset(metrics, 0, sizeof(*metrics));
+    sbf_init_outputs(wire_out, wire_len_out, metrics);
 
-    if (!peers || npeers == 0 || npeers > SOURCE_BUNDLE_FETCH_MAX_PEERS ||
-        !source_root || !staging_dir || !staging_dir[0] || !wire_out ||
-        !wire_len_out || strlen(staging_dir) >= SBF_PATH_MAX)
+    if (!sbf_arguments_valid(peers, npeers, source_root, staging_dir,
+                             wire_out, wire_len_out))
         LOG_RETURN(SOURCE_BUNDLE_FETCH_ERR_ARGS, SBF_SUBSYS,
                    "bad arguments (peers=%zu staging_dir=%s)", npeers,
                    staging_dir ? staging_dir : "(null)");
@@ -365,23 +443,9 @@ enum source_bundle_fetch_result source_bundle_fetch(
     size_t ncands = 0;
     uint32_t asked = 0, offering = 0;
 
-    for (size_t i = 0; i < npeers; i++) {
-        if (!peers[i].addr[0] || peers[i].port == 0)
-            continue;
-        if (!sbf_budget_left(start_us))
-            break;
-        asked++;
-        size_t peers_after = npeers - i - 1u;
-        size_t limit = SOURCE_BUNDLE_FETCH_MAX_CANDIDATES;
-        if (peers_after < limit)
-            limit -= peers_after;
-        if (sbf_discover_peer(&peers[i], source_root, cands, &ncands, limit))
-            offering++;
-    }
-    if (metrics) {
-        metrics->peers_asked = asked;
-        metrics->peers_offering = offering;
-    }
+    sbf_discover_candidates(peers, npeers, source_root, cands, &ncands,
+                            start_us, &asked, &offering);
+    sbf_metrics_note_discovery(metrics, asked, offering);
 
     if (ncands == 0) {
         /* A NAMED refusal, never a hang: nobody advertised this root. The
@@ -436,13 +500,8 @@ enum source_bundle_fetch_result source_bundle_fetch(
 
         *wire_out = wire;
         *wire_len_out = wire_len;
-        if (metrics) {
-            metrics->candidates_tried = tried;
-            metrics->candidates_refused = refused;
-            metrics->last_refusal = last_refusal;
-            metrics->wire_bytes = (uint64_t)wire_len;
-            metrics->bundle = bm;
-        }
+        sbf_metrics_note_accepted(metrics, tried, refused, last_refusal,
+                                  wire_len, bm);
         LOG_INFO(SBF_SUBSYS, "accepted a %zu-byte source bundle after %u "
                  "candidate(s), %u refused", wire_len, tried, refused);
         return SOURCE_BUNDLE_FETCH_OK;
