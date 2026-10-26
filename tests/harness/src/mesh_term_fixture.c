@@ -45,6 +45,32 @@ static bool mesh_term_seed_block(struct node_db *ndb, int height,
 
 static const unsigned char MESH_TERM_TEST_MAGIC[4] = {0x24, 0xe9, 0x27, 0x64};
 
+/* Drives the three remaining XX wire messages between the transports and
+ * checks every expected length. The caller owns msg1 and both transports;
+ * the helper frees the buffers the feeds allocate. */
+static bool mesh_term_wire_messages_exchanged(struct noise_transport *ini,
+                                              struct noise_transport *res,
+                                              const uint8_t *msg1,
+                                              size_t msg1_len)
+{
+    uint8_t *w1 = NULL, *w2 = NULL, *w3 = NULL, *p = NULL;
+    size_t w1l = 0, w2l = 0, w3l = 0, pl = 0;
+    bool ok = noise_transport_feed(res, msg1, msg1_len, &w2, &w2l, &p,
+                                   &pl) &&
+              w2l == 1200 && pl == 0 &&
+              noise_transport_feed(ini, w2, w2l, &w3, &w3l, &p,
+                                   &pl) &&
+              w3l == 64 && pl == 0 &&
+              noise_transport_feed(res, w3, w3l, &w1, &w1l, &p,
+                                   &pl) &&
+              w1l == 0 && pl == 0;
+    free(w1);
+    free(w2);
+    free(w3);
+    free(p);
+    return ok;
+}
+
 /* Full XX handshake between two in-process transports; both sides
  * ESTABLISHED on return. */
 static bool mesh_term_handshake(const uint8_t ini_priv[32],
@@ -52,8 +78,8 @@ static bool mesh_term_handshake(const uint8_t ini_priv[32],
                                 struct noise_transport **ini_out,
                                 struct noise_transport **res_out)
 {
-    uint8_t *msg1 = NULL, *w1 = NULL, *w2 = NULL, *w3 = NULL, *p = NULL;
-    size_t msg1_len = 0, w1l = 0, w2l = 0, w3l = 0, pl = 0;
+    uint8_t *msg1 = NULL;
+    size_t msg1_len = 0;
     struct noise_transport *ini =
         noise_transport_begin(true, ini_priv, MESH_TERM_TEST_MAGIC, &msg1,
                               &msg1_len);
@@ -61,19 +87,10 @@ static bool mesh_term_handshake(const uint8_t ini_priv[32],
         noise_transport_begin(false, res_priv, MESH_TERM_TEST_MAGIC, NULL,
                               NULL);
     bool ok = ini && res && msg1 && msg1_len == 1216 &&
-              noise_transport_feed(res, msg1, msg1_len, &w2, &w2l, &p,
-                                   &pl) &&
-              w2l == 1200 && pl == 0 &&
-              noise_transport_feed(ini, w2, w2l, &w3, &w3l, &p, &pl) &&
-              w3l == 64 && pl == 0 &&
-              noise_transport_feed(res, w3, w3l, &w1, &w1l, &p, &pl) &&
-              w1l == 0 && pl == 0 && ini->state == NOISE_ESTABLISHED &&
+              mesh_term_wire_messages_exchanged(ini, res, msg1, msg1_len) &&
+              ini->state == NOISE_ESTABLISHED &&
               res->state == NOISE_ESTABLISHED;
     free(msg1);
-    free(w1);
-    free(w2);
-    free(w3);
-    free(p);
     if (!ok) {
         noise_transport_free(ini);
         noise_transport_free(res);
@@ -116,6 +133,47 @@ bool mesh_term_capsule_text(const uint8_t *capsule, size_t capsule_len,
     return true;
 }
 
+/* One responder Noise static serves both peer sessions; each handshake
+ * is an independent transport pair over it. */
+static bool mesh_term_sessions_established(struct mesh_term_fixture *f,
+                                           const char *req_a,
+                                           const char *req_b,
+                                           const char *respdir,
+                                           uint8_t a_priv[32],
+                                           uint8_t b_priv[32],
+                                           uint8_t resp_noise_priv[32])
+{
+    char error[160];
+    return platform_private_directory_create(req_a) &&
+           platform_private_directory_create(req_b) &&
+           platform_private_directory_create(respdir) &&
+           v2_identity_load_or_create(req_a, a_priv,
+                                      f->status_peer.noise_pub,
+                                      error, sizeof(error)) &&
+           v2_identity_load_or_create(req_b, b_priv,
+                                      f->term_peer.noise_pub,
+                                      error, sizeof(error)) &&
+           v2_identity_load_or_create(respdir, resp_noise_priv,
+                                      f->resp_noise_pub, error,
+                                      sizeof(error)) &&
+           mesh_term_handshake(a_priv, resp_noise_priv,
+                               &f->status_peer.ini, &f->res_status) &&
+           mesh_term_handshake(b_priv, resp_noise_priv,
+                               &f->term_peer.ini, &f->res_term);
+}
+
+/* The session binding is genuinely shared, and each responder-side
+ * snapshot names the requesting peer's identity-file static. */
+static bool mesh_term_responder_snaps_bound(const struct mesh_term_fixture *f)
+{
+    return f->status_peer.res_snap.established &&
+           f->term_peer.res_snap.established &&
+           memcmp(f->status_peer.res_snap.remote_static,
+                  f->status_peer.noise_pub, 32) == 0 &&
+           memcmp(f->term_peer.res_snap.remote_static,
+                  f->term_peer.noise_pub, 32) == 0;
+}
+
 bool mesh_term_fixture_open(struct mesh_term_fixture *f, const char *dir)
 {
     memset(f, 0, sizeof(*f));
@@ -124,27 +182,11 @@ bool mesh_term_fixture_open(struct mesh_term_fixture *f, const char *dir)
     snprintf(req_a, sizeof(req_a), "%s/reqA", dir);
     snprintf(req_b, sizeof(req_b), "%s/reqB", dir);
     snprintf(respdir, sizeof(respdir), "%s/resp", dir);
-    char error[160];
     uint8_t a_priv[32], b_priv[32], resp_noise_priv[32];
 
-    /* One responder Noise static serves both peer sessions; each handshake
-     * is an independent transport pair over it. */
-    bool ok = platform_private_directory_create(req_a) &&
-              platform_private_directory_create(req_b) &&
-              platform_private_directory_create(respdir) &&
-              v2_identity_load_or_create(req_a, a_priv,
-                                         f->status_peer.noise_pub,
-                                         error, sizeof(error)) &&
-              v2_identity_load_or_create(req_b, b_priv,
-                                         f->term_peer.noise_pub,
-                                         error, sizeof(error)) &&
-              v2_identity_load_or_create(respdir, resp_noise_priv,
-                                         f->resp_noise_pub, error,
-                                         sizeof(error)) &&
-              mesh_term_handshake(a_priv, resp_noise_priv,
-                                  &f->status_peer.ini, &f->res_status) &&
-              mesh_term_handshake(b_priv, resp_noise_priv,
-                                  &f->term_peer.ini, &f->res_term);
+    bool ok = mesh_term_sessions_established(f, req_a, req_b, respdir,
+                                             a_priv, b_priv,
+                                             resp_noise_priv);
     memory_cleanse(a_priv, sizeof(a_priv));
     memory_cleanse(b_priv, sizeof(b_priv));
     memory_cleanse(resp_noise_priv, sizeof(resp_noise_priv));
@@ -154,14 +196,7 @@ bool mesh_term_fixture_open(struct mesh_term_fixture *f, const char *dir)
                                   &f->status_peer.res_snap) ||
         !noise_transport_snapshot(f->res_term, &f->term_peer.res_snap))
         return false;
-    /* The session binding is genuinely shared, and each responder-side
-     * snapshot names the requesting peer's identity-file static. */
-    if (!f->status_peer.res_snap.established ||
-        !f->term_peer.res_snap.established ||
-        memcmp(f->status_peer.res_snap.remote_static, f->status_peer.noise_pub,
-               32) != 0 ||
-        memcmp(f->term_peer.res_snap.remote_static, f->term_peer.noise_pub,
-               32) != 0)
+    if (!mesh_term_responder_snaps_bound(f))
         return false;
 
     if (!node_db_open(&f->ndb, path))
