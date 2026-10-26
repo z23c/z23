@@ -10,10 +10,8 @@
 
 #include "test/spec_helpers.h"
 
-int spec_user_journeys(void)
+static void journey_new_user_explores_wallet(void)
 {
-    wallet_view_init(NULL);
-
     FEATURE("Journey: New user explores the wallet") {
         STORY("user opens wallet, sees balance, explores tabs") {
             GIVEN("user lands on dashboard")
@@ -56,7 +54,10 @@ int spec_user_journeys(void)
             PASS();
         }
     }
+}
 
+static void journey_user_sends_zcl(void)
+{
     FEATURE("Journey: User sends ZCL") {
         STORY("send form → review → (validation error path)") {
             GIVEN("user opens send page")
@@ -86,7 +87,10 @@ int spec_user_journeys(void)
             PASS();
         }
     }
+}
 
+static void journey_user_shields_funds_for_privacy(void)
+{
     FEATURE("Journey: User shields funds for privacy") {
         STORY("shield form → review → back to dashboard") {
             GIVEN("user opens shield page")
@@ -112,7 +116,10 @@ int spec_user_journeys(void)
             PASS();
         }
     }
+}
 
+static void journey_user_investigates_a_transaction(void)
+{
     FEATURE("Journey: User investigates a transaction") {
         STORY("history → tx detail → back to history") {
             GIVEN("user opens history")
@@ -134,7 +141,10 @@ int spec_user_journeys(void)
             PASS();
         }
     }
+}
 
+static void journey_user_audits_their_coins(void)
+{
     FEATURE("Journey: User audits their coins") {
         STORY("dashboard → node → coins → back") {
             GIVEN("user starts at dashboard")
@@ -161,7 +171,10 @@ int spec_user_journeys(void)
             PASS();
         }
     }
+}
 
+static void journey_user_checks_privacy_status(void)
+{
     FEATURE("Journey: User checks privacy status") {
         STORY("dashboard privacy meter → shield → back") {
             GIVEN("user sees dashboard")
@@ -181,7 +194,10 @@ int spec_user_journeys(void)
             PASS();
         }
     }
+}
 
+static void journey_user_receives_funds(void)
+{
     FEATURE("Journey: User receives funds") {
         STORY("receive page → copy address → explore tabs") {
             GIVEN("user opens receive")
@@ -202,6 +218,19 @@ int spec_user_journeys(void)
             PASS();
         }
     }
+}
+
+int spec_user_journeys(void)
+{
+    wallet_view_init(NULL);
+
+    journey_new_user_explores_wallet();
+    journey_user_sends_zcl();
+    journey_user_shields_funds_for_privacy();
+    journey_user_investigates_a_transaction();
+    journey_user_audits_their_coins();
+    journey_user_checks_privacy_status();
+    journey_user_receives_funds();
 
     SPEC_SUMMARY();
     return SPEC_FAILURES();

@@ -1517,7 +1517,6 @@ tests/harness/spec/spec_data_hooks.c:spec_data_hooks:41
 tests/harness/spec/spec_render_audit.c:spec_render_audit:97
 tests/harness/spec/spec_smoke.c:spec_smoke:66
 tests/harness/spec/spec_state_machine.c:spec_state_machine:39
-tests/harness/spec/spec_user_journeys.c:spec_user_journeys:27
 tests/harness/src/build_release_regression_fixture.c:test_build_release_regression_fixture:43
 tests/harness/src/codeindex_freshness_windows_acceptance.c:main:22
 tests/harness/src/codeindex_freshness_windows_acceptance.c:mutation_acceptance:32
