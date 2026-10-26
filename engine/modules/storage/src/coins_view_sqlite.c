@@ -1276,22 +1276,25 @@ static void coins_flush_write_best_and_commitment(
     }
 }
 
-static int coins_flush_read_post_stats(sqlite3 *db, int64_t *max_h,
-                                      int64_t *count)
+/* Prepare and step the post-commit stats query.  Returns -1 when the
+ * prepare failed (nothing to finalize), 0 when no row came back, 1 when
+ * a row was read.  The caller owns *out_stmt and finalizes it after its
+ * success log, as the original code did. */
+static int coins_flush_read_post_stats(sqlite3 *db, sqlite3_stmt **out_stmt,
+                                      int64_t *max_h, int64_t *count)
 {
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(db,
             "SELECT IFNULL(MAX(height), -1), COUNT(*) FROM utxos",
             -1, &s, NULL) != SQLITE_OK)
-        return 0;
-    int have = 0;
+        return -1;
+    *out_stmt = s;
     if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
         *max_h = sqlite3_column_int64(s, 0);
         *count = sqlite3_column_int64(s, 1);
-        have = 1;
+        return 1;
     }
-    sqlite3_finalize(s);
-    return have;
+    return 0;
 }
 
 static int coins_flush_tip_written(const struct uint256 *hash_block)
@@ -1421,12 +1424,17 @@ bool coins_view_sqlite_batch_write( // one-write-path-ok:coins-sqlite-writer-imp
     {
         int64_t max_h = 0;
         int64_t count = 0;
-        if (coins_flush_read_post_stats(cvs->db, &max_h, &count)) {
-            int tip_h = coins_flush_tip_written(hash_block); /* presence flag; hash itself not resolved here */
-            printf("[coins] flush ok: max_height=%lld utxos=%lld "
-                   "tip_written=%d wrote=%zu deleted=%zu\n",
-                   (long long)max_h, (long long)count, tip_h,
-                   tally.entries_written, tally.entries_deleted);
+        sqlite3_stmt *s = NULL;
+        int have = coins_flush_read_post_stats(cvs->db, &s, &max_h, &count);
+        if (have >= 0) {
+            if (have == 1) {
+                int tip_h = coins_flush_tip_written(hash_block); /* presence flag; hash itself not resolved here */
+                printf("[coins] flush ok: max_height=%lld utxos=%lld "
+                       "tip_written=%d wrote=%zu deleted=%zu\n",
+                       (long long)max_h, (long long)count, tip_h,
+                       tally.entries_written, tally.entries_deleted);
+            }
+            sqlite3_finalize(s);
         }
     }
 
