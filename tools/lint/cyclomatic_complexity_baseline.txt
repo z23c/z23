@@ -2440,9 +2440,6 @@ tools/lint/lintc/gate_source_fences.c:check_mint_skip_crypto_offline_only_run:24
 tools/lint/lintc/gate_source_fences.c:hw_on_file:17
 tools/metaverse_tour_fixture.c:main:40
 tools/mind/mind_resident.c:mind_serve_posix:34
-tools/mind/mind_state.c:heartbeat_json:30
-tools/mind/mind_state.c:zcl_mind_heartbeat_read:22
-tools/mind/mind_state.c:zcl_mind_registry_load:17
 tools/miner/gpu_equihash.c:gpu_equihash_solve_native:64
 tools/mint_v2_snapshot.c:main:72
 tools/native_ui_driver.c:main:72

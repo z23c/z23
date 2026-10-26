@@ -94,6 +94,33 @@ static char *mind_slurp(const char *path, size_t *len_out)
     return buf;
 }
 
+/* Drop trailing newline characters in place; returns the shortened length. */
+static size_t mind_trim_eol(char *line)
+{
+    size_t n = strlen(line);
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+        line[--n] = '\0';
+    return n;
+}
+
+/* Classify one post-header registry line: 1 a root was taken, 0 the line is
+ * skipped, -1 the registry is full and loading stops. */
+static int mind_registry_root_line(const char *line,
+                                   struct zcl_mind_registry *out)
+{
+    const char *tag = ZCL_MIND_CHECKOUT_MAGIC " ";
+    size_t taglen = strlen(tag);
+    if (strncmp(line, tag, taglen) != 0) return 0;
+    const char *root = line + taglen;
+    if (!platform_path_is_absolute(root)) return 0;
+    if (out->count >= ZCL_MIND_CHECKOUTS_MAX) return -1;
+    size_t rl = strlen(root);
+    if (rl == 0 || rl >= ZCL_MIND_PATH_MAX) return 0;
+    memcpy(out->roots[out->count], root, rl + 1u);
+    out->count++;
+    return 1;
+}
+
 /* ── the registry ────────────────────────────────────────────────────────
  * One header line naming the schema, then one line per checkout:
  *
@@ -115,25 +142,14 @@ bool zcl_mind_registry_load(struct zcl_mind_registry *out)
     char line[ZCL_MIND_PATH_MAX + 64];
     bool header = false;
     while (fgets(line, (int)sizeof(line), f)) {
-        size_t n = strlen(line);
-        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
-            line[--n] = '\0';
+        size_t n = mind_trim_eol(line);
         if (n == 0 || line[0] == '#') continue;
         if (!header) {
             header = strcmp(line, ZCL_MIND_REGISTRY_MAGIC) == 0;
             if (!header) break;            /* not our file: claim nothing */
             continue;
         }
-        const char *tag = ZCL_MIND_CHECKOUT_MAGIC " ";
-        size_t taglen = strlen(tag);
-        if (strncmp(line, tag, taglen) != 0) continue;
-        const char *root = line + taglen;
-        if (!platform_path_is_absolute(root)) continue;
-        if (out->count >= ZCL_MIND_CHECKOUTS_MAX) break;
-        size_t rl = strlen(root);
-        if (rl == 0 || rl >= ZCL_MIND_PATH_MAX) continue;
-        memcpy(out->roots[out->count], root, rl + 1u);
-        out->count++;
+        if (mind_registry_root_line(line, out) < 0) break;
     }
     (void)fclose(f);
     return header;
@@ -161,52 +177,80 @@ bool zcl_mind_registry_write(const struct zcl_mind_registry *reg)
 }
 
 /* ── the heartbeat ── */
+static bool heartbeat_doc_scalars_json(const struct zcl_mind_heartbeat *beat,
+                                       struct json_value *doc)
+{
+    return json_push_kv_str(doc, "schema", ZCL_MIND_HEARTBEAT_SCHEMA) &&
+           json_push_kv_int(doc, "pid", beat->pid) &&
+           json_push_kv_int(doc, "started_unix", beat->started_unix) &&
+           json_push_kv_int(doc, "beat_unix", beat->beat_unix) &&
+           json_push_kv_int(doc, "last_rebuild_ms", beat->last_rebuild_ms);
+}
+
+static bool heartbeat_row_index_json(const struct zcl_mind_checkout *c,
+                                     struct json_value *row, bool ok)
+{
+    return ok &&
+           json_push_kv_str(row, "root", c->root) &&
+           json_push_kv_str(row, "index_root", c->index_root) &&
+           json_push_kv_int(row, "index_age_s", c->index_age_s) &&
+           json_push_kv_int(row, "last_rebuild_ms", c->last_rebuild_ms) &&
+           json_push_kv_int(row, "last_rebuild_unix", c->last_rebuild_unix) &&
+           json_push_kv_int(row, "rebuilds", c->rebuilds);
+}
+
+static bool heartbeat_row_stats_json(const struct zcl_mind_checkout *c,
+                                     struct json_value *row, bool ok)
+{
+    return ok &&
+           json_push_kv_bool(row, "indexed", c->indexed) &&
+           json_push_kv_bool(row, "stale", c->stale) &&
+           json_push_kv_int(row, "files", c->files) &&
+           json_push_kv_int(row, "symbols", c->symbols) &&
+           json_push_kv_int(row, "includes", c->includes) &&
+           json_push_kv_int(row, "refs", c->refs) &&
+           json_push_kv_int(row, "index_bytes", c->index_bytes) &&
+           json_push_kv_int(row, "build_cold_ms", c->build_cold_ms) &&
+           json_push_kv_int(row, "build_cold_files", c->build_cold_files);
+}
+
+static bool heartbeat_checkout_json(const struct zcl_mind_checkout *c,
+                                    struct json_value *row, bool ok)
+{
+    struct json_value groups;
+    json_init(&groups);
+    json_set_array(&groups);
+    for (size_t g = 0; ok && g < c->group_count; g++) {
+        struct json_value grow;
+        json_init(&grow);
+        json_set_object(&grow);
+        ok = json_push_kv_str(&grow, "name", c->groups[g].name) &&
+             json_push_kv_int(&grow, "files", c->groups[g].files) &&
+             json_push_back(&groups, &grow);
+        json_free(&grow);
+    }
+    ok = ok && json_push_kv(row, "groups", &groups);
+    json_free(&groups);
+    ok = heartbeat_row_index_json(c, row, ok);
+    ok = heartbeat_row_stats_json(c, row, ok);
+    return ok;
+}
+
 static bool heartbeat_json(const struct zcl_mind_heartbeat *beat,
                            struct json_value *doc)
 {
     json_init(doc);
     json_set_object(doc);
-    bool ok = json_push_kv_str(doc, "schema", ZCL_MIND_HEARTBEAT_SCHEMA) &&
-              json_push_kv_int(doc, "pid", beat->pid) &&
-              json_push_kv_int(doc, "started_unix", beat->started_unix) &&
-              json_push_kv_int(doc, "beat_unix", beat->beat_unix) &&
-              json_push_kv_int(doc, "last_rebuild_ms", beat->last_rebuild_ms);
+    bool ok = heartbeat_doc_scalars_json(beat, doc);
     struct json_value rows;
     json_init(&rows);
     json_set_array(&rows);
     for (size_t i = 0; ok && i < beat->checkout_count; i++) {
         const struct zcl_mind_checkout *c = &beat->checkouts[i];
-        struct json_value row, groups;
+        struct json_value row;
         json_init(&row);
         json_set_object(&row);
-        json_init(&groups);
-        json_set_array(&groups);
-        for (size_t g = 0; ok && g < c->group_count; g++) {
-            struct json_value grow;
-            json_init(&grow);
-            json_set_object(&grow);
-            ok = json_push_kv_str(&grow, "name", c->groups[g].name) &&
-                 json_push_kv_int(&grow, "files", c->groups[g].files) &&
-                 json_push_back(&groups, &grow);
-            json_free(&grow);
-        }
-        ok = ok && json_push_kv(&row, "groups", &groups);
-        json_free(&groups);
-        ok = ok && json_push_kv_str(&row, "root", c->root) &&
-             json_push_kv_str(&row, "index_root", c->index_root) &&
-             json_push_kv_int(&row, "index_age_s", c->index_age_s) &&
-             json_push_kv_int(&row, "last_rebuild_ms", c->last_rebuild_ms) &&
-             json_push_kv_int(&row, "last_rebuild_unix", c->last_rebuild_unix) &&
-             json_push_kv_int(&row, "rebuilds", c->rebuilds) &&
-             json_push_kv_bool(&row, "indexed", c->indexed) &&
-             json_push_kv_bool(&row, "stale", c->stale) &&
-             json_push_kv_int(&row, "files", c->files) &&
-             json_push_kv_int(&row, "symbols", c->symbols) &&
-             json_push_kv_int(&row, "includes", c->includes) &&
-             json_push_kv_int(&row, "refs", c->refs) &&
-             json_push_kv_int(&row, "index_bytes", c->index_bytes) &&
-             json_push_kv_int(&row, "build_cold_ms", c->build_cold_ms) &&
-             json_push_kv_int(&row, "build_cold_files", c->build_cold_files) &&
+        ok = heartbeat_checkout_json(c, &row, ok) &&
              json_push_back(&rows, &row);
         json_free(&row);
     }
@@ -257,6 +301,49 @@ static void doc_str(const struct json_value *obj, const char *key, char *out,
     out[n] = '\0';
 }
 
+static void heartbeat_read_checkout(const struct json_value *row,
+                                    struct zcl_mind_checkout *c)
+{
+    doc_str(row, "root", c->root, sizeof(c->root));
+    doc_str(row, "index_root", c->index_root, sizeof(c->index_root));
+    c->index_age_s = doc_int(row, "index_age_s");
+    c->last_rebuild_ms = doc_int(row, "last_rebuild_ms");
+    c->last_rebuild_unix = doc_int(row, "last_rebuild_unix");
+    c->rebuilds = doc_int(row, "rebuilds");
+    c->indexed = doc_bool(row, "indexed");
+    c->stale = doc_bool(row, "stale");
+    c->files = doc_int(row, "files");
+    c->symbols = doc_int(row, "symbols");
+    c->includes = doc_int(row, "includes");
+    c->refs = doc_int(row, "refs");
+    c->index_bytes = doc_int(row, "index_bytes");
+    c->build_cold_ms = doc_int(row, "build_cold_ms");
+    c->build_cold_files = doc_int(row, "build_cold_files");
+    const struct json_value *groups = json_get(row, "groups");
+    size_t gn = groups && groups->type == JSON_ARR ? json_size(groups) : 0;
+    for (size_t g = 0; g < gn && c->group_count < ZCL_MIND_GROUPS_MAX; g++) {
+        const struct json_value *grow = json_at(groups, g);
+        if (!grow || grow->type != JSON_OBJ) continue;
+        struct zcl_mind_group_row *dst = &c->groups[c->group_count++];
+        doc_str(grow, "name", dst->name, sizeof(dst->name));
+        dst->files = doc_int(grow, "files");
+    }
+}
+
+static void heartbeat_read_checkouts(const struct json_value *doc,
+                                     struct zcl_mind_heartbeat *out)
+{
+    const struct json_value *rows = json_get(doc, "checkouts");
+    size_t count = rows && rows->type == JSON_ARR ? json_size(rows) : 0;
+    for (size_t i = 0; i < count && out->checkout_count < ZCL_MIND_CHECKOUTS_MAX;
+         i++) {
+        const struct json_value *row = json_at(rows, i);
+        if (!row || row->type != JSON_OBJ) continue;
+        struct zcl_mind_checkout *c = &out->checkouts[out->checkout_count++];
+        heartbeat_read_checkout(row, c);
+    }
+}
+
 bool zcl_mind_heartbeat_read(struct zcl_mind_heartbeat *out)
 {
     if (!out) return false;
@@ -279,38 +366,7 @@ bool zcl_mind_heartbeat_read(struct zcl_mind_heartbeat *out)
     out->started_unix = doc_int(&doc, "started_unix");
     out->beat_unix = doc_int(&doc, "beat_unix");
     out->last_rebuild_ms = doc_int(&doc, "last_rebuild_ms");
-    const struct json_value *rows = json_get(&doc, "checkouts");
-    size_t count = rows && rows->type == JSON_ARR ? json_size(rows) : 0;
-    for (size_t i = 0; i < count && out->checkout_count < ZCL_MIND_CHECKOUTS_MAX;
-         i++) {
-        const struct json_value *row = json_at(rows, i);
-        if (!row || row->type != JSON_OBJ) continue;
-        struct zcl_mind_checkout *c = &out->checkouts[out->checkout_count++];
-        doc_str(row, "root", c->root, sizeof(c->root));
-        doc_str(row, "index_root", c->index_root, sizeof(c->index_root));
-        c->index_age_s = doc_int(row, "index_age_s");
-        c->last_rebuild_ms = doc_int(row, "last_rebuild_ms");
-        c->last_rebuild_unix = doc_int(row, "last_rebuild_unix");
-        c->rebuilds = doc_int(row, "rebuilds");
-        c->indexed = doc_bool(row, "indexed");
-        c->stale = doc_bool(row, "stale");
-        c->files = doc_int(row, "files");
-        c->symbols = doc_int(row, "symbols");
-        c->includes = doc_int(row, "includes");
-        c->refs = doc_int(row, "refs");
-        c->index_bytes = doc_int(row, "index_bytes");
-        c->build_cold_ms = doc_int(row, "build_cold_ms");
-        c->build_cold_files = doc_int(row, "build_cold_files");
-        const struct json_value *groups = json_get(row, "groups");
-        size_t gn = groups && groups->type == JSON_ARR ? json_size(groups) : 0;
-        for (size_t g = 0; g < gn && c->group_count < ZCL_MIND_GROUPS_MAX; g++) {
-            const struct json_value *grow = json_at(groups, g);
-            if (!grow || grow->type != JSON_OBJ) continue;
-            struct zcl_mind_group_row *dst = &c->groups[c->group_count++];
-            doc_str(grow, "name", dst->name, sizeof(dst->name));
-            dst->files = doc_int(grow, "files");
-        }
-    }
+    heartbeat_read_checkouts(&doc, out);
     json_free(&doc);
     return true;
 }
