@@ -133,11 +133,11 @@ static bool money_apply_binding_row(const struct json_value *wallets, size_t i,
 {
     const struct json_value *w = json_at(wallets, i);
     const char *scope = w ? json_get_str(json_get(w, "scope")) : NULL;
+    int slot = money_scope_slot(scope);
     const char *wid = w ? json_get_str(json_get(w, "wallet_instance_id")) : NULL;
     const char *gen = w ? json_get_str(json_get(w, "network_genesis")) : NULL;
     const char *dd = w ? json_get_str(json_get(w, "node_datadir")) : NULL;
     int64_t port = w ? json_get_int(json_get(w, "rpc_port")) : 0;
-    int slot = money_scope_slot(scope);
     bool ok = money_binding_fields_valid(slot, rows, wid, gen, dd, port);
     if (ok) {
         struct agent_money_binding *b = &rows[slot].binding;
