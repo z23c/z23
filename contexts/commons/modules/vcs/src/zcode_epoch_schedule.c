@@ -18,7 +18,8 @@ static const uint8_t epoch_schedule_magic[8] = {
     'Z', 'C', 'E', 'S', 'P', 'O', '\r', '\n'
 };
 
-const char *vcs_zcode_epoch_schedule_error_string(
+/* The error names are split across two switches to stay under the cap. */
+static const char *schedule_error_string_first(
     enum vcs_zcode_epoch_schedule_error error)
 {
     switch (error) {
@@ -30,6 +31,15 @@ const char *vcs_zcode_epoch_schedule_error_string(
     case VCS_ZCODE_EPOCH_SCHEDULE_SCHEMA: return "schema-version";
     case VCS_ZCODE_EPOCH_SCHEDULE_RESERVED: return "reserved-field";
     case VCS_ZCODE_EPOCH_SCHEDULE_EPOCH: return "schedule-epoch";
+    default: break;
+    }
+    return NULL;
+}
+
+static const char *schedule_error_string_rest(
+    enum vcs_zcode_epoch_schedule_error error)
+{
+    switch (error) {
     case VCS_ZCODE_EPOCH_SCHEDULE_PREDECESSOR: return "schedule-predecessor";
     case VCS_ZCODE_EPOCH_SCHEDULE_CAP: return "schedule-cap";
     case VCS_ZCODE_EPOCH_SCHEDULE_SUM: return "schedule-sum";
@@ -37,8 +47,16 @@ const char *vcs_zcode_epoch_schedule_error_string(
     case VCS_ZCODE_EPOCH_SCHEDULE_CLASS: return "schedule-class";
     case VCS_ZCODE_EPOCH_SCHEDULE_OVERFLOW: return "checked-overflow";
     case VCS_ZCODE_EPOCH_SCHEDULE_CAS: return "cas-object";
+    default: break;
     }
     return "unknown-epoch-schedule-error";
+}
+
+const char *vcs_zcode_epoch_schedule_error_string(
+    enum vcs_zcode_epoch_schedule_error error)
+{
+    const char *name = schedule_error_string_first(error);
+    return name ? name : schedule_error_string_rest(error);
 }
 
 enum vcs_zcode_epoch_schedule_class vcs_zcode_epoch_schedule_class_for_category(
@@ -105,13 +123,9 @@ void vcs_zcode_epoch_schedule_proposal_free(
     memset(proposal, 0, sizeof(*proposal));
 }
 
-enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_validate(
+static enum vcs_zcode_epoch_schedule_error schedule_validate_lineage(
     const struct vcs_zcode_epoch_schedule_proposal_v1 *proposal)
 {
-    if (!proposal)
-        return VCS_ZCODE_EPOCH_SCHEDULE_NULL;
-    if (proposal->schema_version != VCS_ZCODE_EPOCH_SCHEDULE_VERSION)
-        return VCS_ZCODE_EPOCH_SCHEDULE_SCHEMA;
     if (proposal->epoch == 0)
         return VCS_ZCODE_EPOCH_SCHEDULE_EPOCH;
     bool has_previous =
@@ -119,7 +133,12 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_validate(
     if ((proposal->epoch == 1 && has_previous) ||
         (proposal->epoch != 1 && !has_previous))
         return VCS_ZCODE_EPOCH_SCHEDULE_PREDECESSOR;
+    return VCS_ZCODE_EPOCH_SCHEDULE_OK;
+}
 
+static enum vcs_zcode_epoch_schedule_error schedule_validate_cap(
+    const struct vcs_zcode_epoch_schedule_proposal_v1 *proposal)
+{
     uint64_t expected_budget = 0;
     if (vcs_zc23_schedule_epoch_budget_atoms(
             proposal->already_emitted_atoms, &expected_budget) !=
@@ -131,6 +150,12 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_validate(
                      proposal->proposed_mint_atoms, &emitted_after) ||
         emitted_after > VCS_ZC23_SCHEDULE_CAP_ATOMS)
         return VCS_ZCODE_EPOCH_SCHEDULE_CAP;
+    return VCS_ZCODE_EPOCH_SCHEDULE_OK;
+}
+
+static enum vcs_zcode_epoch_schedule_error schedule_validate_counts(
+    const struct vcs_zcode_epoch_schedule_proposal_v1 *proposal)
+{
     if (proposal->proposed_mint_atoms > proposal->budget_atoms ||
         proposal->unissued_atoms !=
             proposal->budget_atoms - proposal->proposed_mint_atoms ||
@@ -143,7 +168,12 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_validate(
             VCS_ZCODE_EPOCH_SCHEDULE_MAX_ALLOCATIONS ||
         (proposal->allocation_count != 0 && !proposal->allocations))
         return VCS_ZCODE_EPOCH_SCHEDULE_ORDER;
+    return VCS_ZCODE_EPOCH_SCHEDULE_OK;
+}
 
+static enum vcs_zcode_epoch_schedule_error schedule_validate_awards(
+    const struct vcs_zcode_epoch_schedule_proposal_v1 *proposal)
+{
     uint64_t award_sum = 0;
     for (size_t i = 0; i < proposal->allocation_count; i++) {
         const struct vcs_zcode_epoch_schedule_allocation *allocation =
@@ -175,6 +205,60 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_validate(
     return VCS_ZCODE_EPOCH_SCHEDULE_OK;
 }
 
+enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_validate(
+    const struct vcs_zcode_epoch_schedule_proposal_v1 *proposal)
+{
+    if (!proposal)
+        return VCS_ZCODE_EPOCH_SCHEDULE_NULL;
+    if (proposal->schema_version != VCS_ZCODE_EPOCH_SCHEDULE_VERSION)
+        return VCS_ZCODE_EPOCH_SCHEDULE_SCHEMA;
+    enum vcs_zcode_epoch_schedule_error error =
+        schedule_validate_lineage(proposal);
+    if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK)
+        return error;
+    error = schedule_validate_cap(proposal);
+    if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK)
+        return error;
+    error = schedule_validate_counts(proposal);
+    if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK)
+        return error;
+    return schedule_validate_awards(proposal);
+}
+
+static bool schedule_write_header(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_epoch_schedule_proposal_v1 *proposal)
+{
+    return zcl_codec_write_bytes(writer, epoch_schedule_magic, 8) &&
+        zcl_codec_write_u16le(writer, proposal->schema_version) &&
+        zcl_codec_write_u16le(writer, 0) &&
+        zcl_codec_write_u64le(writer, proposal->epoch) &&
+        zcl_codec_write_u32le(writer, proposal->evidence_count) &&
+        zcl_codec_write_u32le(writer, proposal->eligible_count) &&
+        zcl_codec_write_u32le(writer, proposal->preservation_skipped) &&
+        zcl_codec_write_u32le(writer, (uint32_t)proposal->allocation_count) &&
+        zcl_codec_write_u64le(writer, proposal->budget_atoms) &&
+        zcl_codec_write_u64le(writer, proposal->already_emitted_atoms) &&
+        zcl_codec_write_u64le(writer, proposal->proposed_mint_atoms) &&
+        zcl_codec_write_u64le(writer, proposal->unissued_atoms) &&
+        zcl_codec_write_bytes(writer, proposal->previous_proposal_root, 32);
+}
+
+static bool schedule_write_rows(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_epoch_schedule_proposal_v1 *proposal)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < proposal->allocation_count; i++) {
+        const struct vcs_zcode_epoch_schedule_allocation *allocation =
+            &proposal->allocations[i];
+        ok = zcl_codec_write_bytes(
+                 writer, allocation->contributor_binding_root, 32) &&
+             zcl_codec_write_u16le(writer, allocation->schedule_class) &&
+             zcl_codec_write_u16le(writer, 0) &&
+             zcl_codec_write_u64le(writer, allocation->award_atoms);
+    }
+    return ok;
+}
+
 enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_serialize(
     const struct vcs_zcode_epoch_schedule_proposal_v1 *proposal,
     uint8_t **out, size_t *out_len)
@@ -199,28 +283,8 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_serialize(
         return VCS_ZCODE_EPOCH_SCHEDULE_ALLOC;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, wire, wire_len);
-    bool ok = zcl_codec_write_bytes(&writer, epoch_schedule_magic, 8) &&
-        zcl_codec_write_u16le(&writer, proposal->schema_version) &&
-        zcl_codec_write_u16le(&writer, 0) &&
-        zcl_codec_write_u64le(&writer, proposal->epoch) &&
-        zcl_codec_write_u32le(&writer, proposal->evidence_count) &&
-        zcl_codec_write_u32le(&writer, proposal->eligible_count) &&
-        zcl_codec_write_u32le(&writer, proposal->preservation_skipped) &&
-        zcl_codec_write_u32le(&writer, (uint32_t)proposal->allocation_count) &&
-        zcl_codec_write_u64le(&writer, proposal->budget_atoms) &&
-        zcl_codec_write_u64le(&writer, proposal->already_emitted_atoms) &&
-        zcl_codec_write_u64le(&writer, proposal->proposed_mint_atoms) &&
-        zcl_codec_write_u64le(&writer, proposal->unissued_atoms) &&
-        zcl_codec_write_bytes(&writer, proposal->previous_proposal_root, 32);
-    for (size_t i = 0; ok && i < proposal->allocation_count; i++) {
-        const struct vcs_zcode_epoch_schedule_allocation *allocation =
-            &proposal->allocations[i];
-        ok = zcl_codec_write_bytes(
-                 &writer, allocation->contributor_binding_root, 32) &&
-             zcl_codec_write_u16le(&writer, allocation->schedule_class) &&
-             zcl_codec_write_u16le(&writer, 0) &&
-             zcl_codec_write_u64le(&writer, allocation->award_atoms);
-    }
+    bool ok = schedule_write_header(&writer, proposal) &&
+        schedule_write_rows(&writer, proposal);
     size_t written = 0;
     if (!ok || !zcl_codec_writer_finish(&writer, &written) ||
         written != wire_len) {
@@ -230,6 +294,72 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_serialize(
     *out = wire;
     *out_len = wire_len;
     return VCS_ZCODE_EPOCH_SCHEDULE_OK;
+}
+
+static enum vcs_zcode_epoch_schedule_error schedule_check_size(
+    uint32_t count, size_t wire_len)
+{
+    size_t rows_bytes = 0, expected = 0;
+    if (count > VCS_ZCODE_EPOCH_SCHEDULE_MAX_ALLOCATIONS ||
+        !zcl_size_mul(count, VCS_ZCODE_EPOCH_SCHEDULE_ALLOCATION_BYTES,
+                      &rows_bytes) ||
+        !zcl_size_add(VCS_ZCODE_EPOCH_SCHEDULE_HEADER_BYTES, rows_bytes,
+                      &expected) || expected != wire_len)
+        return VCS_ZCODE_EPOCH_SCHEDULE_WIRE_SIZE;
+    return VCS_ZCODE_EPOCH_SCHEDULE_OK;
+}
+
+static enum vcs_zcode_epoch_schedule_error schedule_parse_header(
+    struct zcl_codec_reader *reader, size_t wire_len,
+    struct vcs_zcode_epoch_schedule_proposal_v1 *out, uint8_t magic[8],
+    uint16_t *reserved16, uint32_t *count)
+{
+    bool ok = zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u16le(reader, reserved16) &&
+        zcl_codec_read_u64le(reader, &out->epoch) &&
+        zcl_codec_read_u32le(reader, &out->evidence_count) &&
+        zcl_codec_read_u32le(reader, &out->eligible_count) &&
+        zcl_codec_read_u32le(reader, &out->preservation_skipped) &&
+        zcl_codec_read_u32le(reader, count) &&
+        zcl_codec_read_u64le(reader, &out->budget_atoms) &&
+        zcl_codec_read_u64le(reader, &out->already_emitted_atoms) &&
+        zcl_codec_read_u64le(reader, &out->proposed_mint_atoms) &&
+        zcl_codec_read_u64le(reader, &out->unissued_atoms) &&
+        zcl_codec_read_bytes(reader, out->previous_proposal_root, 32);
+    if (!ok)
+        return VCS_ZCODE_EPOCH_SCHEDULE_WIRE_SIZE;
+    return schedule_check_size(*count, wire_len);
+}
+
+static enum vcs_zcode_epoch_schedule_error schedule_parse_rows(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_epoch_schedule_proposal_v1 *out, uint32_t count)
+{
+    if (count != 0) {
+        out->allocations = zcl_calloc(
+            count, sizeof(*out->allocations),
+            "zcode_epoch_schedule_allocations");
+        if (!out->allocations)
+            return VCS_ZCODE_EPOCH_SCHEDULE_ALLOC;
+    }
+    out->allocation_count = count;
+    bool ok = true;
+    for (size_t i = 0; ok && i < count; i++) {
+        uint16_t row_reserved = 0;
+        ok = zcl_codec_read_bytes(
+                 reader, out->allocations[i].contributor_binding_root,
+                 32) &&
+             zcl_codec_read_u16le(reader,
+                                  &out->allocations[i].schedule_class) &&
+             zcl_codec_read_u16le(reader, &row_reserved) &&
+             zcl_codec_read_u64le(reader,
+                                  &out->allocations[i].award_atoms);
+        if (ok && row_reserved != 0)
+            return VCS_ZCODE_EPOCH_SCHEDULE_RESERVED;
+    }
+    return ok ? VCS_ZCODE_EPOCH_SCHEDULE_OK
+              : VCS_ZCODE_EPOCH_SCHEDULE_WIRE_SIZE;
 }
 
 enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_parse(
@@ -244,57 +374,20 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_parse(
         wire_len > VCS_ZCODE_EPOCH_SCHEDULE_MAX_WIRE_BYTES)
         return VCS_ZCODE_EPOCH_SCHEDULE_WIRE_SIZE;
     struct zcl_codec_reader reader;
-    uint8_t magic[8]; uint16_t reserved16; uint32_t count;
+    uint8_t magic[8]; uint16_t reserved16 = 0; uint32_t count = 0;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u16le(&reader, &reserved16) &&
-        zcl_codec_read_u64le(&reader, &out->epoch) &&
-        zcl_codec_read_u32le(&reader, &out->evidence_count) &&
-        zcl_codec_read_u32le(&reader, &out->eligible_count) &&
-        zcl_codec_read_u32le(&reader, &out->preservation_skipped) &&
-        zcl_codec_read_u32le(&reader, &count) &&
-        zcl_codec_read_u64le(&reader, &out->budget_atoms) &&
-        zcl_codec_read_u64le(&reader, &out->already_emitted_atoms) &&
-        zcl_codec_read_u64le(&reader, &out->proposed_mint_atoms) &&
-        zcl_codec_read_u64le(&reader, &out->unissued_atoms) &&
-        zcl_codec_read_bytes(&reader, out->previous_proposal_root, 32);
-    size_t rows_bytes = 0, expected = 0;
-    if (!ok || count > VCS_ZCODE_EPOCH_SCHEDULE_MAX_ALLOCATIONS ||
-        !zcl_size_mul(count, VCS_ZCODE_EPOCH_SCHEDULE_ALLOCATION_BYTES,
-                      &rows_bytes) ||
-        !zcl_size_add(VCS_ZCODE_EPOCH_SCHEDULE_HEADER_BYTES, rows_bytes,
-                      &expected) || expected != wire_len) {
+    enum vcs_zcode_epoch_schedule_error error = schedule_parse_header(
+        &reader, wire_len, out, magic, &reserved16, &count);
+    if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK) {
         vcs_zcode_epoch_schedule_proposal_free(out);
-        return VCS_ZCODE_EPOCH_SCHEDULE_WIRE_SIZE;
+        return error;
     }
-    if (count != 0) {
-        out->allocations = zcl_calloc(
-            count, sizeof(*out->allocations),
-            "zcode_epoch_schedule_allocations");
-        if (!out->allocations) {
-            vcs_zcode_epoch_schedule_proposal_free(out);
-            return VCS_ZCODE_EPOCH_SCHEDULE_ALLOC;
-        }
+    error = schedule_parse_rows(&reader, out, count);
+    if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK) {
+        vcs_zcode_epoch_schedule_proposal_free(out);
+        return error;
     }
-    out->allocation_count = count;
-    for (size_t i = 0; ok && i < count; i++) {
-        uint16_t row_reserved = 0;
-        ok = zcl_codec_read_bytes(
-                 &reader, out->allocations[i].contributor_binding_root,
-                 32) &&
-             zcl_codec_read_u16le(&reader,
-                                  &out->allocations[i].schedule_class) &&
-             zcl_codec_read_u16le(&reader, &row_reserved) &&
-             zcl_codec_read_u64le(&reader,
-                                  &out->allocations[i].award_atoms);
-        if (ok && row_reserved != 0) {
-            vcs_zcode_epoch_schedule_proposal_free(out);
-            return VCS_ZCODE_EPOCH_SCHEDULE_RESERVED;
-        }
-    }
-    ok = ok && zcl_codec_reader_finish(&reader);
-    if (!ok) {
+    if (!zcl_codec_reader_finish(&reader)) {
         vcs_zcode_epoch_schedule_proposal_free(out);
         return VCS_ZCODE_EPOCH_SCHEDULE_WIRE_SIZE;
     }
@@ -306,8 +399,7 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_parse(
         vcs_zcode_epoch_schedule_proposal_free(out);
         return VCS_ZCODE_EPOCH_SCHEDULE_RESERVED;
     }
-    enum vcs_zcode_epoch_schedule_error error =
-        vcs_zcode_epoch_schedule_validate(out);
+    error = vcs_zcode_epoch_schedule_validate(out);
     if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK)
         vcs_zcode_epoch_schedule_proposal_free(out);
     return error;
@@ -386,6 +478,105 @@ static enum vcs_zcode_epoch_schedule_error schedule_check_predecessor(
               : VCS_ZCODE_EPOCH_SCHEDULE_PREDECESSOR;
 }
 
+static enum vcs_zcode_epoch_schedule_error schedule_award_loop(
+    struct vcs_zcode_epoch_schedule_proposal_v1 *out,
+    const struct schedule_evidence_row *rows, uint64_t total_weight,
+    struct vcs_zcode_epoch_schedule_allocation *allocations)
+{
+    for (size_t i = 0; i < out->eligible_count;) {
+        size_t group_end = i + 1;
+        uint64_t group_weight = rows[i].weight;
+        while (group_end < out->eligible_count &&
+               schedule_row_compare(&rows[i], &rows[group_end]) == 0) {
+            if (!zcl_u64_add(group_weight, rows[group_end].weight,
+                             &group_weight))
+                return VCS_ZCODE_EPOCH_SCHEDULE_OVERFLOW;
+            group_end++;
+        }
+        uint64_t scaled = 0;
+        if (!zcl_u64_mul(out->budget_atoms, group_weight, &scaled))
+            return VCS_ZCODE_EPOCH_SCHEDULE_OVERFLOW;
+        uint64_t award = scaled / total_weight;
+        if (award != 0) {
+            struct vcs_zcode_epoch_schedule_allocation *allocation =
+                &allocations[out->allocation_count];
+            memcpy(allocation->contributor_binding_root,
+                   rows[i].contributor_binding_root, 32);
+            allocation->schedule_class = rows[i].schedule_class;
+            allocation->award_atoms = award;
+            out->allocation_count++;
+            out->proposed_mint_atoms += award;
+        }
+        i = group_end;
+    }
+    return VCS_ZCODE_EPOCH_SCHEDULE_OK;
+}
+
+static enum vcs_zcode_epoch_schedule_error schedule_award_groups(
+    struct vcs_zcode_epoch_schedule_proposal_v1 *out,
+    const struct schedule_evidence_row *rows, uint64_t total_weight)
+{
+    struct vcs_zcode_epoch_schedule_allocation *allocations = zcl_calloc(
+        out->eligible_count, sizeof(*allocations),
+        "zcode_epoch_schedule_allocations");
+    if (!allocations)
+        return VCS_ZCODE_EPOCH_SCHEDULE_ALLOC;
+    enum vcs_zcode_epoch_schedule_error error =
+        schedule_award_loop(out, rows, total_weight, allocations);
+    if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK) {
+        free(allocations);
+        return error;
+    }
+    if (out->allocation_count == 0) {
+        free(allocations);
+    } else {
+        out->allocations = allocations;
+    }
+    return VCS_ZCODE_EPOCH_SCHEDULE_OK;
+}
+
+static enum vcs_zcode_epoch_schedule_error schedule_collect_evidence(
+    struct vcs_zcode_commons_projection *projection, uint64_t epoch,
+    struct vcs_zcode_epoch_schedule_proposal_v1 *out,
+    struct schedule_evidence_row **rows, uint64_t *total_weight)
+{
+    size_t creation_count =
+        vcs_zcode_commons_projection_creation_count(projection);
+    if (creation_count != 0) {
+        *rows = zcl_calloc(creation_count, sizeof(**rows),
+                           "zcode_epoch_schedule_rows");
+        if (!*rows)
+            return VCS_ZCODE_EPOCH_SCHEDULE_ALLOC;
+    }
+    for (size_t i = 0; i < creation_count; i++) {
+        const struct vcs_zcode_commons_creation_entry *entry =
+            vcs_zcode_commons_projection_creation_at(projection, i);
+        if (!entry || entry->epoch != epoch)
+            continue;
+        if (out->evidence_count == UINT32_MAX)
+            return VCS_ZCODE_EPOCH_SCHEDULE_OVERFLOW;
+        out->evidence_count++;
+        enum vcs_zcode_epoch_schedule_class schedule_class =
+            vcs_zcode_epoch_schedule_class_for_category(entry->category);
+        if (schedule_class == VCS_ZCODE_EPOCH_SCHEDULE_CLASS_PRESERVATION) {
+            out->preservation_skipped++;
+            continue;
+        }
+        uint64_t weight = 0;
+        if (schedule_class == 0 ||
+            !vcs_zcode_epoch_schedule_class_weight(schedule_class, &weight) ||
+            !zcl_u64_add(*total_weight, weight, total_weight))
+            return VCS_ZCODE_EPOCH_SCHEDULE_OVERFLOW;
+        struct schedule_evidence_row *row = &(*rows)[out->eligible_count];
+        memcpy(row->contributor_binding_root,
+               entry->contributor_binding_root, 32);
+        row->schedule_class = (uint16_t)schedule_class;
+        row->weight = weight;
+        out->eligible_count++;
+    }
+    return VCS_ZCODE_EPOCH_SCHEDULE_OK;
+}
+
 enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_propose_cas(
     const struct vcs_zcode_epoch_schedule_input *input,
     struct vcs_zcode_epoch_schedule_proposal_v1 *out)
@@ -419,55 +610,16 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_propose_cas(
         return error;
     }
 
-    size_t creation_count =
-        vcs_zcode_commons_projection_creation_count(projection);
     struct schedule_evidence_row *rows = NULL;
-    if (creation_count != 0) {
-        rows = zcl_calloc(creation_count, sizeof(*rows),
-                          "zcode_epoch_schedule_rows");
-        if (!rows) {
-            vcs_zcode_commons_projection_free(projection);
-            vcs_zcode_epoch_schedule_proposal_free(out);
-            return VCS_ZCODE_EPOCH_SCHEDULE_ALLOC;
-        }
-    }
     uint64_t total_weight = 0;
-    for (size_t i = 0; i < creation_count; i++) {
-        const struct vcs_zcode_commons_creation_entry *entry =
-            vcs_zcode_commons_projection_creation_at(projection, i);
-        if (!entry || entry->epoch != input->epoch)
-            continue;
-        if (out->evidence_count == UINT32_MAX) {
-            free(rows);
-            vcs_zcode_commons_projection_free(projection);
-            vcs_zcode_epoch_schedule_proposal_free(out);
-            return VCS_ZCODE_EPOCH_SCHEDULE_OVERFLOW;
-        }
-        out->evidence_count++;
-        enum vcs_zcode_epoch_schedule_class schedule_class =
-            vcs_zcode_epoch_schedule_class_for_category(entry->category);
-        if (schedule_class == VCS_ZCODE_EPOCH_SCHEDULE_CLASS_PRESERVATION) {
-            out->preservation_skipped++;
-            continue;
-        }
-        uint64_t weight = 0;
-        if (schedule_class == 0 ||
-            !vcs_zcode_epoch_schedule_class_weight(schedule_class,
-                                                   &weight) ||
-            !zcl_u64_add(total_weight, weight, &total_weight)) {
-            free(rows);
-            vcs_zcode_commons_projection_free(projection);
-            vcs_zcode_epoch_schedule_proposal_free(out);
-            return VCS_ZCODE_EPOCH_SCHEDULE_OVERFLOW;
-        }
-        memcpy(rows[out->eligible_count].contributor_binding_root,
-               entry->contributor_binding_root, 32);
-        rows[out->eligible_count].schedule_class =
-            (uint16_t)schedule_class;
-        rows[out->eligible_count].weight = weight;
-        out->eligible_count++;
-    }
+    error = schedule_collect_evidence(projection, input->epoch, out, &rows,
+                                      &total_weight);
     vcs_zcode_commons_projection_free(projection);
+    if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK) {
+        free(rows);
+        vcs_zcode_epoch_schedule_proposal_free(out);
+        return error;
+    }
 
     /* Non-issuance is not redistribution: no eligible evidence means the
      * whole budget stays unissued in the remaining pool. */
@@ -477,55 +629,12 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_propose_cas(
         return VCS_ZCODE_EPOCH_SCHEDULE_OK;
     }
     qsort(rows, out->eligible_count, sizeof(*rows), schedule_row_compare);
-
-    struct vcs_zcode_epoch_schedule_allocation *allocations = zcl_calloc(
-        out->eligible_count, sizeof(*allocations),
-        "zcode_epoch_schedule_allocations");
-    if (!allocations) {
-        free(rows);
-        vcs_zcode_epoch_schedule_proposal_free(out);
-        return VCS_ZCODE_EPOCH_SCHEDULE_ALLOC;
-    }
-    for (size_t i = 0; i < out->eligible_count;) {
-        size_t group_end = i + 1;
-        uint64_t group_weight = rows[i].weight;
-        while (group_end < out->eligible_count &&
-               schedule_row_compare(&rows[i], &rows[group_end]) == 0) {
-            if (!zcl_u64_add(group_weight, rows[group_end].weight,
-                             &group_weight)) {
-                free(allocations);
-                free(rows);
-                vcs_zcode_epoch_schedule_proposal_free(out);
-                return VCS_ZCODE_EPOCH_SCHEDULE_OVERFLOW;
-            }
-            group_end++;
-        }
-        uint64_t scaled = 0;
-        if (!zcl_u64_mul(out->budget_atoms, group_weight, &scaled)) {
-            free(allocations);
-            free(rows);
-            vcs_zcode_epoch_schedule_proposal_free(out);
-            return VCS_ZCODE_EPOCH_SCHEDULE_OVERFLOW;
-        }
-        uint64_t award = scaled / total_weight;
-        if (award != 0) {
-            struct vcs_zcode_epoch_schedule_allocation *allocation =
-                &allocations[out->allocation_count];
-            memcpy(allocation->contributor_binding_root,
-                   rows[i].contributor_binding_root, 32);
-            allocation->schedule_class = rows[i].schedule_class;
-            allocation->award_atoms = award;
-            out->allocation_count++;
-            out->proposed_mint_atoms += award;
-        }
-        i = group_end;
-    }
+    error = schedule_award_groups(out, rows, total_weight);
     free(rows);
-    out->unissued_atoms = out->budget_atoms - out->proposed_mint_atoms;
-    if (out->allocation_count == 0) {
-        free(allocations);
-    } else {
-        out->allocations = allocations;
+    if (error != VCS_ZCODE_EPOCH_SCHEDULE_OK) {
+        vcs_zcode_epoch_schedule_proposal_free(out);
+        return error;
     }
+    out->unissued_atoms = out->budget_atoms - out->proposed_mint_atoms;
     return VCS_ZCODE_EPOCH_SCHEDULE_OK;
 }
