@@ -204,47 +204,48 @@ int db_market_payment_claim_prune_unconfirmed_for_offer(
     return ok ? sqlite3_changes(ndb->db) : 0;
 }
 
-enum market_payment_authority_state db_market_payment_observe_authority(
+/* Argument gate for db_market_payment_observe_authority: mirrors its original
+ * short-circuit order without logging, so the caller reports the failure. */
+static bool market_payment_authority_inputs_valid(
     struct node_db *ndb, const struct file_payment *payment,
     const char *seller_address,
     const uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES],
     int tip_height, const uint8_t tip_hash[32],
-    struct market_payment_authority_observation *out)
+    const struct market_payment_authority_observation *out)
 {
-    if (out)
-        memset(out, 0, sizeof(*out));
-    if (!ndb || !ndb->open || !payment || !seller_address ||
-        !seller_address[0] || !memo || tip_height < 0 || !tip_hash || !out) {
-        LOG_ERR("market", "payment authority observation has invalid inputs");
-        return MARKET_PAYMENT_AUTHORITY_UNKNOWN;
-    }
+    return ndb && ndb->open && payment && seller_address &&
+        seller_address[0] && memo && tip_height >= 0 && tip_hash && out;
+}
 
-    /* The active in-memory tip and SQLite canonical projection must name the
-     * same block. Otherwise an absent payment is ambiguous, never pending or
-     * zero. */
+/* Counts canonical blocks at the observed tip; -1 when prepare fails so the
+ * caller can log the SQLite error itself. */
+static int market_payment_authority_tip_match_count(
+    struct node_db *ndb, const uint8_t tip_hash[32], int tip_height)
+{
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(ndb->db,
             "SELECT COUNT(*) FROM blocks "
             "WHERE hash=? AND height=? AND status>=3",
-            -1, &s, NULL) != SQLITE_OK || !s) {
-        LOG_ERR("market", "payment authority tip query prepare failed: %s",
-                sqlite3_errmsg(ndb->db));
-        return MARKET_PAYMENT_AUTHORITY_UNKNOWN;
-    }
+            -1, &s, NULL) != SQLITE_OK || !s)
+        return -1;
     AR_BIND_BLOB(s, 1, tip_hash, 32);
     AR_BIND_INT(s, 2, tip_height);
     int tip_matches = 0;
     if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
         tip_matches = sqlite3_column_int(s, 0);
     sqlite3_finalize(s);
-    if (tip_matches != 1)
-        return MARKET_PAYMENT_AUTHORITY_UNKNOWN;
+    return tip_matches;
+}
 
-    /* One exact locally-decrypted Sapling output, in the transaction row for
-     * a canonical block, is the receipt authority. spent_txid is deliberately
-     * ignored: later spending the seller's received note does not revoke the
-     * historical purchase. */
-    s = NULL;
+/* Counts exact locally-decrypted seller notes and records the receipt
+ * placement when any match; -1 when prepare fails. */
+static int market_payment_authority_exact_note_count(
+    struct node_db *ndb, const struct file_payment *payment,
+    const char *seller_address,
+    const uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES],
+    struct market_payment_authority_observation *out)
+{
+    sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(ndb->db,
             "SELECT COUNT(*),MIN(n.output_index),MIN(n.block_height),"
             "MIN(b.time) FROM wallet_sapling_notes n "
@@ -254,11 +255,8 @@ enum market_payment_authority_state db_market_payment_observe_authority(
             "AND b.height=t.block_height AND b.status>=3 "
             "WHERE n.txid=? AND n.address=? AND n.value=? "
             "AND n.memo=? AND n.source='local'",
-            -1, &s, NULL) != SQLITE_OK || !s) {
-        LOG_ERR("market", "payment authority exact-note query failed: %s",
-                sqlite3_errmsg(ndb->db));
-        return MARKET_PAYMENT_AUTHORITY_UNKNOWN;
-    }
+            -1, &s, NULL) != SQLITE_OK || !s)
+        return -1;
     AR_BIND_BLOB(s, 1, payment->txid, 32);
     AR_BIND_TEXT(s, 2, seller_address);
     AR_BIND_INT(s, 3, payment->amount_zat);
@@ -273,22 +271,81 @@ enum market_payment_authority_state db_market_payment_observe_authority(
         }
     }
     sqlite3_finalize(s);
-    if (exact_count == 1) {
-        if (out->block_height <= 0 || out->block_height > tip_height)
-            return MARKET_PAYMENT_AUTHORITY_CONFLICTED;
-        out->confirmations = tip_height - out->block_height + 1;
-        out->state = out->confirmations >=
-            (int)FILE_MARKET_PAYMENT_MIN_CONFIRMATIONS
-            ? MARKET_PAYMENT_AUTHORITY_CONFIRMED
-            : MARKET_PAYMENT_AUTHORITY_PENDING;
-        return out->state;
+    return exact_count;
+}
+
+/* Settles the authority state of one exact note against the current tip. */
+static enum market_payment_authority_state
+market_payment_authority_classify_exact_note(
+    struct market_payment_authority_observation *out, int tip_height)
+{
+    if (out->block_height <= 0 || out->block_height > tip_height)
+        return MARKET_PAYMENT_AUTHORITY_CONFLICTED;
+    out->confirmations = tip_height - out->block_height + 1;
+    out->state = out->confirmations >=
+        (int)FILE_MARKET_PAYMENT_MIN_CONFIRMATIONS
+        ? MARKET_PAYMENT_AUTHORITY_CONFIRMED
+        : MARKET_PAYMENT_AUTHORITY_PENDING;
+    return out->state;
+}
+
+/* State for a claim whose transaction is canonical yet holds no exact
+ * seller note. */
+static enum market_payment_authority_state
+market_payment_authority_classify_canonical_tx(int canonical_tx)
+{
+    return canonical_tx > 0
+        ? MARKET_PAYMENT_AUTHORITY_CONFLICTED
+        : MARKET_PAYMENT_AUTHORITY_PENDING;
+}
+
+enum market_payment_authority_state db_market_payment_observe_authority(
+    struct node_db *ndb, const struct file_payment *payment,
+    const char *seller_address,
+    const uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES],
+    int tip_height, const uint8_t tip_hash[32],
+    struct market_payment_authority_observation *out)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+    if (!market_payment_authority_inputs_valid(
+            ndb, payment, seller_address, memo, tip_height, tip_hash, out)) {
+        LOG_ERR("market", "payment authority observation has invalid inputs");
+        return MARKET_PAYMENT_AUTHORITY_UNKNOWN;
     }
+
+    /* The active in-memory tip and SQLite canonical projection must name the
+     * same block. Otherwise an absent payment is ambiguous, never pending or
+     * zero. */
+    int tip_matches = market_payment_authority_tip_match_count(
+        ndb, tip_hash, tip_height);
+    if (tip_matches < 0) {
+        LOG_ERR("market", "payment authority tip query prepare failed: %s",
+                sqlite3_errmsg(ndb->db));
+        return MARKET_PAYMENT_AUTHORITY_UNKNOWN;
+    }
+    if (tip_matches != 1)
+        return MARKET_PAYMENT_AUTHORITY_UNKNOWN;
+
+    /* One exact locally-decrypted Sapling output, in the transaction row for
+     * a canonical block, is the receipt authority. spent_txid is deliberately
+     * ignored: later spending the seller's received note does not revoke the
+     * historical purchase. */
+    int exact_count = market_payment_authority_exact_note_count(
+        ndb, payment, seller_address, memo, out);
+    if (exact_count < 0) {
+        LOG_ERR("market", "payment authority exact-note query failed: %s",
+                sqlite3_errmsg(ndb->db));
+        return MARKET_PAYMENT_AUTHORITY_UNKNOWN;
+    }
+    if (exact_count == 1)
+        return market_payment_authority_classify_exact_note(out, tip_height);
     if (exact_count > 1)
         return MARKET_PAYMENT_AUTHORITY_CONFLICTED;
 
     /* If the claimed tx is already canonical but contains no exact seller
      * note, this claim can never become true at a later confirmation depth. */
-    s = NULL;
+    sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(ndb->db,
             "SELECT COUNT(*) FROM transactions t JOIN blocks b "
             "ON b.hash=t.block_hash AND b.height=t.block_height "
@@ -303,8 +360,6 @@ enum market_payment_authority_state db_market_payment_observe_authority(
     if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
         canonical_tx = sqlite3_column_int(s, 0);
     sqlite3_finalize(s);
-    out->state = canonical_tx > 0
-        ? MARKET_PAYMENT_AUTHORITY_CONFLICTED
-        : MARKET_PAYMENT_AUTHORITY_PENDING;
+    out->state = market_payment_authority_classify_canonical_tx(canonical_tx);
     return out->state;
 }
