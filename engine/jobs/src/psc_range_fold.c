@@ -301,7 +301,7 @@ bool psc_compile_range(uint32_t lo, uint32_t hi, int k_workers, int s_shards,
                        struct psc_range_result *out)
 {
     if (!psc_prepare_range(lo, hi, &k_workers, &s_shards, provider, out))
-        return false;
+        return false;  // raw-return-ok:reject_kind-names-the-refusal
 
     int64_t t0 = platform_time_monotonic_us();
 
