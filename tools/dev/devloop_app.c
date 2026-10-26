@@ -110,7 +110,62 @@ static bool resolve_root(const char *requested, char out[PATH_MAX])
     return platform_directory_canonical_real(requested, out, PATH_MAX);
 }
 
+/* "true"/"false" literal for a JSON bool field. */
+static const char *devbuf_json_bool(bool value)
+{
+    return value ? "true" : "false";
+}
+
 /* ── describe ──────────────────────────────────────────────────────────── */
+static void describe_append_capabilities(struct devbuf *b,
+                                         const struct zcl_app_definition_v1 *d)
+{
+    static const uint64_t capability_bits[] = {
+        ZCL_APP_CAP_CHAIN_READ, ZCL_APP_CAP_SIGNED_EVENTS,
+        ZCL_APP_CAP_RESIDENT_STATE, ZCL_APP_CAP_WEB_ROUTES,
+        ZCL_APP_CAP_ONION_BINDING, ZCL_APP_CAP_ZNAM_BINDING,
+        ZCL_APP_CAP_P2P_TOPICS, ZCL_APP_CAP_WALLET_REQUESTS,
+        ZCL_APP_CAP_SCHEDULED_JOBS, ZCL_APP_CAP_CLOCK, ZCL_APP_CAP_RANDOM,
+    };
+    bool comma = false;
+    for (size_t i = 0;
+         i < sizeof(capability_bits) / sizeof(capability_bits[0]); i++) {
+        if ((d->required_capabilities & capability_bits[i]) == 0)
+            continue;
+        if (comma) devbuf_addf(b, ",");
+        devbuf_addstr(b, zcl_app_capability_name(capability_bits[i]));
+        comma = true;
+    }
+}
+
+static void describe_append_topics(struct devbuf *b,
+                                   const struct zcl_app_definition_v1 *d)
+{
+    devbuf_addf(b, "],\"topics\":[");
+    for (size_t i = 0; i < d->topic_count; i++) {
+        if (i) devbuf_addf(b, ",");
+        devbuf_addf(b, "{\"name\":");
+        devbuf_addstr(b, d->topics[i].name);
+        devbuf_addf(b, ",\"wire_version\":%u,\"max_event_bytes\":%u}",
+                    d->topics[i].wire_version, d->topics[i].max_event_bytes);
+    }
+}
+
+static void describe_append_bindings(struct devbuf *b,
+                                     const struct zcl_app_definition_v1 *d)
+{
+    devbuf_addf(b, "],\"bindings\":{\"web\":");
+    devbuf_addstr(b, d->mount_count ? d->mounts[0].path : "");
+    devbuf_addf(b, ",\"web_mounts\":[");
+    for (size_t i = 0; i < d->mount_count; i++) {
+        if (i) devbuf_addf(b, ",");
+        devbuf_addstr(b, d->mounts[i].path);
+    }
+    devbuf_addf(b, "],\"onion\":%s,\"znam\":",
+                devbuf_json_bool(d->onion_enabled));
+    devbuf_addstr(b, d->znam_declared ? d->znam : "");
+}
+
 size_t zcl_devloop_app_describe_json(const char *repo_root, const char *app_id,
                                      char *out, size_t out_sz)
 {
@@ -139,46 +194,14 @@ size_t zcl_devloop_app_describe_json(const char *repo_root, const char *app_id,
                     "\"core_owns_truth_apps_consume_capabilities\","
                     "\"capabilities\":[",
                 definition.definition_version);
-    static const uint64_t capability_bits[] = {
-        ZCL_APP_CAP_CHAIN_READ, ZCL_APP_CAP_SIGNED_EVENTS,
-        ZCL_APP_CAP_RESIDENT_STATE, ZCL_APP_CAP_WEB_ROUTES,
-        ZCL_APP_CAP_ONION_BINDING, ZCL_APP_CAP_ZNAM_BINDING,
-        ZCL_APP_CAP_P2P_TOPICS, ZCL_APP_CAP_WALLET_REQUESTS,
-        ZCL_APP_CAP_SCHEDULED_JOBS, ZCL_APP_CAP_CLOCK, ZCL_APP_CAP_RANDOM,
-    };
-    bool comma = false;
-    for (size_t i = 0;
-         i < sizeof(capability_bits) / sizeof(capability_bits[0]); i++) {
-        if ((definition.required_capabilities & capability_bits[i]) == 0)
-            continue;
-        if (comma) devbuf_addf(&b, ",");
-        devbuf_addstr(&b, zcl_app_capability_name(capability_bits[i]));
-        comma = true;
-    }
+    describe_append_capabilities(&b, &definition);
     devbuf_addf(&b, "],\"resources\":[");
     for (size_t i = 0; i < definition.resource_count; i++) {
         if (i) devbuf_addf(&b, ",");
         devbuf_addstr(&b, definition.resources[i].name);
     }
-    devbuf_addf(&b, "],\"topics\":[");
-    for (size_t i = 0; i < definition.topic_count; i++) {
-        if (i) devbuf_addf(&b, ",");
-        devbuf_addf(&b, "{\"name\":");
-        devbuf_addstr(&b, definition.topics[i].name);
-        devbuf_addf(&b, ",\"wire_version\":%u,\"max_event_bytes\":%u}",
-                    definition.topics[i].wire_version,
-                    definition.topics[i].max_event_bytes);
-    }
-    devbuf_addf(&b, "],\"bindings\":{\"web\":");
-    devbuf_addstr(&b, definition.mount_count ? definition.mounts[0].path : "");
-    devbuf_addf(&b, ",\"web_mounts\":[");
-    for (size_t i = 0; i < definition.mount_count; i++) {
-        if (i) devbuf_addf(&b, ",");
-        devbuf_addstr(&b, definition.mounts[i].path);
-    }
-    devbuf_addf(&b, "],\"onion\":%s,\"znam\":",
-                definition.onion_enabled ? "true" : "false");
-    devbuf_addstr(&b, definition.znam_declared ? definition.znam : "");
+    describe_append_topics(&b, &definition);
+    describe_append_bindings(&b, &definition);
     devbuf_addf(&b, "},\"state_schema_version\":%u,\"simulations\":[",
                 definition.state_schema_version);
     for (size_t i = 0; i < definition.simulation_count; i++) {
@@ -303,6 +326,24 @@ int zcl_devloop_app_plan(const char *repo_root, const char *app_id,
 }
 
 /* ── simulate ──────────────────────────────────────────────────────────── */
+static bool social_sim_reports_identical(const struct zcl_social_sim_report *a,
+                                         const struct zcl_social_sim_report *b)
+{
+    if (a->transcript != b->transcript)
+        return false;
+    if (a->deliveries != b->deliveries)
+        return false;
+    if (a->rejected_invalid != b->rejected_invalid)
+        return false;
+    if (a->real_secp256k1_verified != b->real_secp256k1_verified)
+        return false;
+    if (a->tampered_payload_rejected != b->tampered_payload_rejected)
+        return false;
+    if (a->wrong_author_rejected != b->wrong_author_rejected)
+        return false;
+    return a->forged_event_id_distinct == b->forged_event_id_distinct;
+}
+
 size_t zcl_devloop_app_simulate_json(const char *app_id, uint64_t seed,
                                      char *out, size_t out_sz)
 {
@@ -312,17 +353,8 @@ size_t zcl_devloop_app_simulate_json(const char *app_id, uint64_t seed,
     struct zcl_social_sim_report first, replay;
     bool first_ok = zcl_social_app_sim_run(seed, &first);
     bool replay_ok = zcl_social_app_sim_run(seed, &replay);
-    bool identical = replay_ok && first.transcript == replay.transcript &&
-                     first.deliveries == replay.deliveries &&
-                     first.rejected_invalid == replay.rejected_invalid &&
-                     first.real_secp256k1_verified ==
-                         replay.real_secp256k1_verified &&
-                     first.tampered_payload_rejected ==
-                         replay.tampered_payload_rejected &&
-                     first.wrong_author_rejected ==
-                         replay.wrong_author_rejected &&
-                     first.forged_event_id_distinct ==
-                         replay.forged_event_id_distinct;
+    bool identical =
+        replay_ok && social_sim_reports_identical(&first, &replay);
     int64_t elapsed_us = platform_time_monotonic_us() - started_us;
     bool ok = first_ok && identical;
 
@@ -347,15 +379,15 @@ size_t zcl_devloop_app_simulate_json(const char *app_id, uint64_t seed,
                 ok ? "passed" : "failed", (unsigned long long)seed,
                 (unsigned long long)first.transcript, (long long)elapsed_us,
                 first.deliveries, first.rejected_invalid,
-                first.censorship_bypassed ? "true" : "false",
-                first.partition_rejoin_converged ? "true" : "false",
-                first.late_joiner_caught_up ? "true" : "false",
-                first.invalid_signature_rejected ? "true" : "false",
-                first.real_secp256k1_verified ? "true" : "false",
-                first.tampered_payload_rejected ? "true" : "false",
-                first.wrong_author_rejected ? "true" : "false",
-                first.forged_event_id_distinct ? "true" : "false",
-                identical ? "true" : "false");
+                devbuf_json_bool(first.censorship_bypassed),
+                devbuf_json_bool(first.partition_rejoin_converged),
+                devbuf_json_bool(first.late_joiner_caught_up),
+                devbuf_json_bool(first.invalid_signature_rejected),
+                devbuf_json_bool(first.real_secp256k1_verified),
+                devbuf_json_bool(first.tampered_payload_rejected),
+                devbuf_json_bool(first.wrong_author_rejected),
+                devbuf_json_bool(first.forged_event_id_distinct),
+                devbuf_json_bool(identical));
     return b.ok ? b.len : 0;
 }
 
