@@ -124,6 +124,8 @@ static ztoml_err ztoml__basic_string(ztoml *t, ztoml_ev *ev) {
       continue;
     }
     if (c == '"') {
+      if (ztoml_str_decode(t->doc + content, i - content, NULL, 0) == SIZE_MAX)
+        return ztoml__fail(t, ZTOML_ERR_SYNTAX, start);
       ev->kind = ZTOML_EV_VALUE;
       ev->vtype = ZTOML_V_STR_BASIC;
       ev->ptr = t->doc + content;

@@ -380,11 +380,50 @@ static int baseline_main(void) {
   printf("test_ztoml: all groups passed (kat types arr err decode null fuzz)\n");
   return 0;
 }
+static void test_basic_escape_validation(void) {
+  static const char *bad[] = {
+    "k=\"\\q\"", "k=\"\\u12\"", "k=\"\\u12xz\"",
+    "k=\"\\U0000xyz0\"", "k=\"\\uD800\"", "k=\"\\uDC00\"",
+    "k=\"\\U00110000\"", "k=[\"\\q\"]"
+  };
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    evlog log;
+    CHECK(parse_all(bad[i], &log) == ZTOML_ERR_SYNTAX);
+    for (size_t j = 0; j < log.n && j < 64; j++)
+      CHECK(log.ev[j].kind != ZTOML_EV_VALUE);
+    ztoml t;
+    ztoml_ev ev;
+    CHECK(ztoml_init(&t, bad[i], strlen(bad[i])) == ZTOML_OK);
+    ztoml_err e;
+    do { e = ztoml_next(&t, &ev); }
+    while (e == ZTOML_OK && ev.kind != ZTOML_EV_DONE);
+    CHECK(e == ZTOML_ERR_SYNTAX);
+    size_t offset = t.err_off;
+    CHECK(offset < strlen(bad[i]) && bad[i][offset] == '"');
+    CHECK(ztoml_next(&t, &ev) == ZTOML_ERR_SYNTAX && t.err_off == offset);
+  }
+}
+
+static void test_basic_escape_controls(void) {
+  const char *doc = "k=\"a\\n\\u0041\\U0001F600\"";
+  evlog log = {0};
+  CHECK(parse_all(doc, &log) == ZTOML_OK);
+  CHECK(log.n == 3 && log.ev[1].vtype == ZTOML_V_STR_BASIC);
+  CHECK(log.ev[1].ptr == doc + 3);
+  CHECK(slice_eq(&log.ev[1], "a\\n\\u0041\\U0001F600"));
+  CHECK(parse_all("k='\\q'", &log) == ZTOML_OK);
+  CHECK(log.ev[1].vtype == ZTOML_V_STR_LIT && slice_eq(&log.ev[1], "\\q"));
+  CHECK(parse_all("k=\"\\\\q\"", &log) == ZTOML_OK);
+  CHECK(slice_eq(&log.ev[1], "\\\\q"));
+}
+
 static void test_escaped_physical_newline(void) {
   evlog log;
   CHECK(parse_all("k=\"a\\\nb\"", &log) == ZTOML_ERR_SYNTAX);
 }
 int main(void) {
+  test_basic_escape_validation();
+  test_basic_escape_controls();
   test_escaped_physical_newline();
   return baseline_main() || g_fail;
 }
