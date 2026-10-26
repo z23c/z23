@@ -991,7 +991,6 @@ engine/controllers/src/app_native_handlers.c:native_inbox_index_valid:21
 engine/controllers/src/app_write_native_handlers.c:awn_run:37
 engine/controllers/src/app_write_native_handlers.c:zcl_native_handle_message_send:36
 engine/controllers/src/blockchain_controller_chain.c:rpc_getblockchaininfo:34
-engine/controllers/src/blog_anchor_native_handler.c:zcl_native_handle_blog_anchor:34
 engine/controllers/src/blog_controller.c:blog_discover_onion_peers_wallet:28
 engine/controllers/src/dbquery_controller.c:dbquery_execute:35
 engine/controllers/src/diagnostics_block_index.c:diag_header_band_dump_state_json:19
