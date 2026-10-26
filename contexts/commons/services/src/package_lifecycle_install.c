@@ -482,6 +482,145 @@ static struct zcl_result pkgl_run_worker(const struct pkgl_ctx *ctx,
     return ZCL_OK;
 }
 
+static struct zcl_result pkgl_build_parse_report(
+    const struct pkgl_build_paths *p, struct package_lifecycle_step *step,
+    struct vcs_package_build_receipt *receipt)
+{
+    /* The worker's own account of what it produced. */
+    char report[PKGL_PATH_MAX];
+    int n = snprintf(report, sizeof(report), "%s/build-report", p->emit);
+    if (n <= 0 || (size_t)n >= sizeof(report)) {
+        pkgl_step_fail(step, "build-report-path", "emit path too long");
+        return ZCL_ERR(-1, "emit path too long");
+    }
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    struct zcl_result rr = pkgl_read_file(
+        report, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES, &wire, &wire_len);
+    if (!rr.ok) {
+        pkgl_step_fail(step, "build-report-missing", rr.message);
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p->emit), "unusable build work removed");
+        return rr;
+    }
+    enum vcs_package_build_error berr =
+        vcs_package_build_parse(wire, wire_len, receipt);
+    free(wire);
+    if (berr != VCS_PACKAGE_BUILD_OK) {
+        pkgl_step_fail(step, "build-report-invalid",
+                       vcs_package_build_error_string(berr));
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p->emit), "unusable build work removed");
+        return ZCL_ERR(-1, "build report: %s",
+                       vcs_package_build_error_string(berr));
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result pkgl_build_install_outputs(
+    const struct pkgl_build_paths *p,
+    const struct vcs_package_build_receipt *receipt,
+    struct package_lifecycle_step *step)
+{
+    /* Re-hash and install ONLY what the receipt declares. An artifact the
+     * worker produced but did not commit to simply never lands. */
+    char src[PKGL_PATH_MAX];
+    char dst[PKGL_PATH_MAX];
+    for (size_t i = 0; i < receipt->output_count; i++) {
+        const struct vcs_package_build_output *o = &receipt->outputs[i];
+        int sn = snprintf(src, sizeof(src), "%s/%s", p->emit, o->path);
+        int dn = snprintf(dst, sizeof(dst), "%s/%s", p->stage, o->path);
+        if (sn <= 0 || (size_t)sn >= sizeof(src) || dn <= 0 ||
+            (size_t)dn >= sizeof(dst)) {
+            pkgl_step_fail(step, "output-path-too-long", o->path);
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(p->stage), "aborted install removed");
+            return ZCL_ERR(-1, "output path too long: %s", o->path);
+        }
+        uint8_t got[32];
+        uint64_t bytes = 0;
+        struct zcl_result cr = pkgl_copy_hashed(src, dst, got, &bytes);
+        if (!cr.ok) {
+            pkgl_step_fail(step, "output-missing", cr.message);
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(p->stage), "aborted install removed");
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(p->emit), "aborted build removed");
+            return cr;
+        }
+        if (bytes != o->bytes || memcmp(got, o->sha3, 32) != 0) {
+            pkgl_step_fail(step, "output-hash-mismatch", o->path);
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(p->stage), "aborted install removed");
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(p->emit), "aborted build removed");
+            return ZCL_ERR(-1,
+                           "%s does not match the hash the build receipt "
+                           "commits — refusing to install it", o->path);
+        }
+        struct zcl_result moded = pkgl_apply_output_mode(dst, o->path);
+        if (!moded.ok) {
+            pkgl_step_fail(step, "output-mode", moded.message);
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(p->stage), "aborted install removed");
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(p->emit), "aborted build removed");
+            return moded;
+        }
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result pkgl_build_file_receipt(
+    const struct pkgl_ctx *ctx, const struct pkgl_build_paths *p,
+    struct vcs_package_build_receipt *receipt, uint8_t receipt_id[32],
+    struct package_lifecycle_step *step)
+{
+    char src[PKGL_PATH_MAX];
+    char dst[PKGL_PATH_MAX];
+    /* The receipt travels with the install and is also filed by its id, so
+     * "what produced this tree" is answerable from either end. */
+    uint8_t *rwire = NULL;
+    size_t rwire_len = 0;
+    if (vcs_package_build_serialize(receipt, &rwire, &rwire_len) !=
+        VCS_PACKAGE_BUILD_OK) {
+        pkgl_step_fail(step, "receipt-serialize", "cannot re-encode receipt");
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p->stage), "aborted install removed");
+        return ZCL_ERR(-1, "cannot re-encode the build receipt");
+    }
+    if (vcs_package_build_id(receipt, receipt_id) != VCS_PACKAGE_BUILD_OK) {
+        free(rwire);
+        pkgl_step_fail(step, "receipt-id", "cannot compute receipt id");
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p->stage), "aborted install removed");
+        return ZCL_ERR(-1, "cannot compute the build receipt id");
+    }
+    int dst_len = snprintf(dst, sizeof(dst), "%s/build-report", p->stage);
+    if (dst_len <= 0 || (size_t)dst_len >= sizeof(dst)) {
+        free(rwire);
+        pkgl_step_fail(step, "receipt-store", "build report path is too long");
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p->stage), "aborted install removed");
+        return ZCL_ERR(-1, "build report path is too long");
+    }
+    struct zcl_result sw = pkgl_write_atomic(dst, rwire, rwire_len);
+    if (sw.ok) {
+        char id_hex[65];
+        zcl_hex_encode(receipt_id, 32, id_hex);
+        (void)snprintf(src, sizeof(src), "receipts/%s", id_hex);
+        struct zcl_result jr =
+            pkgl_receipt_path(ctx, src, dst, sizeof(dst));
+        if (jr.ok) {
+            char *slash = strrchr(dst, '/');
+            if (slash) {
+                *slash = '\0';
+                sw = pkgl_mkdir_p(dst);
+                *slash = '/';
+            }
+            if (sw.ok)
+                sw = pkgl_write_atomic(dst, rwire, rwire_len);
+        } else {
+            sw = jr;
+        }
+    }
+    free(rwire);
+    if (!sw.ok) {
+        pkgl_step_fail(step, "receipt-write", sw.message);
+        ZCL_IGNORE_RESULT(pkgl_rm_rf(p->stage), "aborted install removed");
+        return sw;
+    }
+    return ZCL_OK;
+}
+
 // long-function-ok:one-install-transaction — the emit, the receipt
 // cross-check, the per-output re-hash and the atomic rename are ONE
 // transaction; a split would create a reachable state where some outputs
@@ -524,32 +663,10 @@ struct zcl_result pkgl_build_and_install(
         return wr;
     }
 
-    /* The worker's own account of what it produced. */
-    char report[PKGL_PATH_MAX];
-    int n = snprintf(report, sizeof(report), "%s/build-report", p.emit);
-    if (n <= 0 || (size_t)n >= sizeof(report)) {
-        pkgl_step_fail(step, "build-report-path", "emit path too long");
-        return ZCL_ERR(-1, "emit path too long");
-    }
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    struct zcl_result rr = pkgl_read_file(
-        report, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES, &wire, &wire_len);
-    if (!rr.ok) {
-        pkgl_step_fail(step, "build-report-missing", rr.message);
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.emit), "unusable build work removed");
-        return rr;
-    }
     struct vcs_package_build_receipt receipt;
-    enum vcs_package_build_error berr =
-        vcs_package_build_parse(wire, wire_len, &receipt);
-    free(wire);
-    if (berr != VCS_PACKAGE_BUILD_OK) {
-        pkgl_step_fail(step, "build-report-invalid",
-                       vcs_package_build_error_string(berr));
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.emit), "unusable build work removed");
-        return ZCL_ERR(-1, "build report: %s",
-                       vcs_package_build_error_string(berr));
+    struct zcl_result rp = pkgl_build_parse_report(&p, step, &receipt);
+    if (!rp.ok) {
+        return rp;
     }
     struct zcl_result mr = pkgl_receipt_matches(&receipt, root, release,
                                                 lock_root, dep_roots,
@@ -573,96 +690,17 @@ struct zcl_result pkgl_build_and_install(
     }
     step->state = VCS_PACKAGE_LIFECYCLE_TESTED;
 
-    /* Re-hash and install ONLY what the receipt declares. An artifact the
-     * worker produced but did not commit to simply never lands. */
     ZCL_CHECK(pkgl_mkdir_p(p.stage));
-    char src[PKGL_PATH_MAX];
-    char dst[PKGL_PATH_MAX];
-    for (size_t i = 0; i < receipt.output_count; i++) {
-        const struct vcs_package_build_output *o = &receipt.outputs[i];
-        int sn = snprintf(src, sizeof(src), "%s/%s", p.emit, o->path);
-        int dn = snprintf(dst, sizeof(dst), "%s/%s", p.stage, o->path);
-        if (sn <= 0 || (size_t)sn >= sizeof(src) || dn <= 0 ||
-            (size_t)dn >= sizeof(dst)) {
-            pkgl_step_fail(step, "output-path-too-long", o->path);
-            ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
-            return ZCL_ERR(-1, "output path too long: %s", o->path);
-        }
-        uint8_t got[32];
-        uint64_t bytes = 0;
-        struct zcl_result cr = pkgl_copy_hashed(src, dst, got, &bytes);
-        if (!cr.ok) {
-            pkgl_step_fail(step, "output-missing", cr.message);
-            ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
-            ZCL_IGNORE_RESULT(pkgl_rm_rf(p.emit), "aborted build removed");
-            return cr;
-        }
-        if (bytes != o->bytes || memcmp(got, o->sha3, 32) != 0) {
-            pkgl_step_fail(step, "output-hash-mismatch", o->path);
-            ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
-            ZCL_IGNORE_RESULT(pkgl_rm_rf(p.emit), "aborted build removed");
-            return ZCL_ERR(-1,
-                           "%s does not match the hash the build receipt "
-                           "commits — refusing to install it", o->path);
-        }
-        struct zcl_result moded = pkgl_apply_output_mode(dst, o->path);
-        if (!moded.ok) {
-            pkgl_step_fail(step, "output-mode", moded.message);
-            ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
-            ZCL_IGNORE_RESULT(pkgl_rm_rf(p.emit), "aborted build removed");
-            return moded;
-        }
+    struct zcl_result ob = pkgl_build_install_outputs(&p, &receipt, step);
+    if (!ob.ok) {
+        return ob;
     }
 
-    /* The receipt travels with the install and is also filed by its id, so
-     * "what produced this tree" is answerable from either end. */
-    uint8_t *rwire = NULL;
-    size_t rwire_len = 0;
-    if (vcs_package_build_serialize(&receipt, &rwire, &rwire_len) !=
-        VCS_PACKAGE_BUILD_OK) {
-        pkgl_step_fail(step, "receipt-serialize", "cannot re-encode receipt");
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
-        return ZCL_ERR(-1, "cannot re-encode the build receipt");
-    }
     uint8_t receipt_id[32];
-    if (vcs_package_build_id(&receipt, receipt_id) != VCS_PACKAGE_BUILD_OK) {
-        free(rwire);
-        pkgl_step_fail(step, "receipt-id", "cannot compute receipt id");
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
-        return ZCL_ERR(-1, "cannot compute the build receipt id");
-    }
-    int dst_len = snprintf(dst, sizeof(dst), "%s/build-report", p.stage);
-    if (dst_len <= 0 || (size_t)dst_len >= sizeof(dst)) {
-        free(rwire);
-        pkgl_step_fail(step, "receipt-store", "build report path is too long");
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
-        return ZCL_ERR(-1, "build report path is too long");
-    }
-    struct zcl_result sw = pkgl_write_atomic(dst, rwire, rwire_len);
-    if (sw.ok) {
-        char id_hex[65];
-        zcl_hex_encode(receipt_id, 32, id_hex);
-        (void)snprintf(src, sizeof(src), "receipts/%s", id_hex);
-        struct zcl_result jr =
-            pkgl_receipt_path(ctx, src, dst, sizeof(dst));
-        if (jr.ok) {
-            char *slash = strrchr(dst, '/');
-            if (slash) {
-                *slash = '\0';
-                sw = pkgl_mkdir_p(dst);
-                *slash = '/';
-            }
-            if (sw.ok)
-                sw = pkgl_write_atomic(dst, rwire, rwire_len);
-        } else {
-            sw = jr;
-        }
-    }
-    free(rwire);
-    if (!sw.ok) {
-        pkgl_step_fail(step, "receipt-write", sw.message);
-        ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
-        return sw;
+    struct zcl_result fr =
+        pkgl_build_file_receipt(ctx, &p, &receipt, receipt_id, step);
+    if (!fr.ok) {
+        return fr;
     }
 
     /* Atomic activation of THIS root's tree: rename, never in-place edit. */
@@ -1013,6 +1051,19 @@ static struct zcl_result pkgl_prepare_generation_log(
     return ZCL_OK;
 }
 
+static void pkgl_activate_note_previous(
+    const struct vcs_package_generations *gens, bool already_active,
+    uint8_t prev_root_out[32], bool *had_previous_out)
+{
+    if (gens->count > 0 && !already_active) {
+        memcpy(prev_root_out, gens->items[gens->count - 1].root, 32);
+        *had_previous_out = true;
+    } else if (already_active) {
+        *had_previous_out =
+            vcs_package_generations_previous(gens, prev_root_out);
+    }
+}
+
 struct zcl_result pkgl_activate(const struct pkgl_ctx *ctx, const char *name,
                                 const uint8_t root[32], int64_t now_unix,
                                 uint8_t prev_root_out[32],
@@ -1033,13 +1084,8 @@ struct zcl_result pkgl_activate(const struct pkgl_ctx *ctx, const char *name,
     ZCL_CHECK(pkgl_generations_load(ctx, name, &gens));
     bool already_active =
         gens.count > 0 && memcmp(gens.items[gens.count - 1].root, root, 32) == 0;
-    if (gens.count > 0 && !already_active) {
-        memcpy(prev_root_out, gens.items[gens.count - 1].root, 32);
-        *had_previous_out = true;
-    } else if (already_active) {
-        *had_previous_out =
-            vcs_package_generations_previous(&gens, prev_root_out);
-    }
+    pkgl_activate_note_previous(&gens, already_active, prev_root_out,
+                                had_previous_out);
 
     /* The package's persistent data directory is created before the swap
      * and is never removed by an install, an update, or a rollback — those
@@ -1127,6 +1173,49 @@ static struct zcl_result pkgl_programs_check_install(
     return ZCL_OK;
 }
 
+static struct zcl_result pkgl_programs_resolve_dir(
+    const char *installed, struct package_lifecycle_programs *out)
+{
+    /* An operator is handed a path to RUN, so report the resolved absolute
+     * one: a relative datadir would otherwise produce a command that only
+     * works from whichever directory the node happened to be started in. */
+#ifdef _WIN32
+    int n = snprintf(out->install_dir, sizeof(out->install_dir), "%s",
+                     installed);
+    if (n <= 0 || (size_t)n >= sizeof(out->install_dir))
+        return ZCL_ERR(-1, "installed directory path is too long");
+    return ZCL_OK;
+#else
+    char resolved[PKGL_PATH_MAX];
+    if (!realpath(installed, resolved))
+        return ZCL_ERR(-1, "cannot resolve %s: %s", installed,
+                       strerror(errno));
+    int n = snprintf(out->install_dir, sizeof(out->install_dir), "%s",
+                     resolved);
+    if (n <= 0 || (size_t)n >= sizeof(out->install_dir))
+        return ZCL_ERR(-1, "installed directory path is too long");
+    return ZCL_OK;
+#endif
+}
+
+static struct zcl_result pkgl_programs_collect_bins(
+    const struct vcs_package_build_receipt *receipt,
+    struct package_lifecycle_programs *out)
+{
+    for (size_t i = 0; i < receipt->output_count; i++) {
+        const char *path = receipt->outputs[i].path;
+        if (strncmp(path, "bin/", 4) != 0)
+            continue;
+        if (out->count >= PACKAGE_LIFECYCLE_MAX_PROGRAMS)
+            return ZCL_ERR(-1, "receipt names more than %u programs",
+                           (unsigned)PACKAGE_LIFECYCLE_MAX_PROGRAMS);
+        (void)snprintf(out->output[out->count],
+                       sizeof(out->output[out->count]), "%s", path);
+        out->count++;
+    }
+    return ZCL_OK;
+}
+
 struct zcl_result package_lifecycle_installed_programs(
     const char *datadir, const uint8_t root[32],
     struct package_lifecycle_programs *out)
@@ -1148,28 +1237,8 @@ struct zcl_result package_lifecycle_installed_programs(
     if (r.ok && !present)
         r = ZCL_ERR(-1, "this package root is not installed under %s",
                     ctx.datadir);
-    /* An operator is handed a path to RUN, so report the resolved absolute
-     * one: a relative datadir would otherwise produce a command that only
-     * works from whichever directory the node happened to be started in. */
-    if (r.ok) {
-#ifdef _WIN32
-        int n = snprintf(out->install_dir, sizeof(out->install_dir), "%s",
-                         installed);
-        if (n <= 0 || (size_t)n >= sizeof(out->install_dir))
-            r = ZCL_ERR(-1, "installed directory path is too long");
-#else
-        char resolved[PKGL_PATH_MAX];
-        if (!realpath(installed, resolved))
-            r = ZCL_ERR(-1, "cannot resolve %s: %s", installed,
-                        strerror(errno));
-        else {
-            int n = snprintf(out->install_dir, sizeof(out->install_dir),
-                             "%s", resolved);
-            if (n <= 0 || (size_t)n >= sizeof(out->install_dir))
-                r = ZCL_ERR(-1, "installed directory path is too long");
-        }
-#endif
-    }
+    if (r.ok)
+        r = pkgl_programs_resolve_dir(installed, out);
     char report[PKGL_PATH_MAX];
     if (r.ok) {
         int n = snprintf(report, sizeof(report), "%s/build-report", installed);
@@ -1193,18 +1262,7 @@ struct zcl_result package_lifecycle_installed_programs(
     if (parsed != VCS_PACKAGE_BUILD_OK)
         return ZCL_ERR(-1, "installed receipt: %s",
                        vcs_package_build_error_string(parsed));
-    for (size_t i = 0; i < receipt.output_count; i++) {
-        const char *path = receipt.outputs[i].path;
-        if (strncmp(path, "bin/", 4) != 0)
-            continue;
-        if (out->count >= PACKAGE_LIFECYCLE_MAX_PROGRAMS)
-            return ZCL_ERR(-1, "receipt names more than %u programs",
-                           (unsigned)PACKAGE_LIFECYCLE_MAX_PROGRAMS);
-        (void)snprintf(out->output[out->count],
-                       sizeof(out->output[out->count]), "%s", path);
-        out->count++;
-    }
-    return ZCL_OK;
+    return pkgl_programs_collect_bins(&receipt, out);
 }
 struct zcl_result pkgl_declared_host_executable(
     const struct package_lifecycle_declared_output *handle)
