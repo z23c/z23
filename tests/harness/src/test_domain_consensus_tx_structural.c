@@ -180,7 +180,9 @@ static bool verdicts_match(const struct domain_verdict *d,
     return true;
 }
 
-int test_domain_consensus_tx_structural(void)
+/* Contract checks on argument handling: NULL tx is a typed error, and a
+ * NULL out_failure pointer is tolerated on success. */
+static int check_tx_structural_null_contracts(void)
 {
     int failures = 0;
 
@@ -205,6 +207,15 @@ int test_domain_consensus_tx_structural(void)
                   r.ok && r.code == 0);
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+/* Acceptance of a plain 1-in-1-out tx, then rejection of the degenerate
+ * no-input and no-output shapes. */
+static int check_simple_and_empty_tx_shapes(void)
+{
+    int failures = 0;
 
     /* --- shape: simple 1-in 1-out tx is structurally valid --- */
     {
@@ -247,6 +258,15 @@ int test_domain_consensus_tx_structural(void)
         DCS_CHECK("vin only: verdicts agree", verdicts_match(&d, &l));
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+/* Output-value rejection shapes: negative value, single value above
+ * MAX_MONEY, and a running total that exceeds MAX_MONEY. */
+static int check_vout_value_shapes(void)
+{
+    int failures = 0;
 
     /* --- shape: negative output value --- */
     {
@@ -294,6 +314,15 @@ int test_domain_consensus_tx_structural(void)
                   verdicts_match(&d, &l));
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+/* Duplicate-prevout rejection plus the coinbase scriptSig length
+ * boundary (accepted middle, too-short and too-long tails). */
+static int check_duplicate_and_coinbase_shapes(void)
+{
+    int failures = 0;
 
     /* --- shape: duplicate transparent inputs --- */
     {
@@ -349,6 +378,14 @@ int test_domain_consensus_tx_structural(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+/* Non-coinbase null prevout rejection and the too-low tx version. */
+static int check_prevout_and_version_shapes(void)
+{
+    int failures = 0;
+
     /* --- shape: non-coinbase with null prevout (legacy: bad-txns-prevout-null) --- */
     {
         struct transaction tx;
@@ -382,6 +419,15 @@ int test_domain_consensus_tx_structural(void)
                   verdicts_match(&d, &l));
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+/* Overwintered-header rejections: bad version-group-id, too-high
+ * expiry_height, and a nonzero valueBalance without shielded io. */
+static int check_overwinter_and_value_balance_shapes(void)
+{
+    int failures = 0;
 
     /* --- shape: overwintered with bad version-group-id --- */
     {
@@ -434,6 +480,234 @@ int test_domain_consensus_tx_structural(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+/* Build a 1-in/11-out tx and converge the 11th output's script size
+ * until the tx serializes to EXACTLY the 102000 cap. */
+static int build_tx_pinned_at_sapling_size_cap(struct transaction *tx)
+{
+    int failures = 0;
+
+    build_simple_tx(tx, 1, 11, 1 * COIN);
+    /* First 10 outputs carry maximum-size scripts (~10 KB each); the
+     * 11th is the tunable remainder used to hit the cap exactly. */
+    for (size_t i = 0; i < 10; i++) {
+        memset(tx->vout[i].script_pub_key.data, 0x51, MAX_SCRIPT_SIZE);
+        tx->vout[i].script_pub_key.size = MAX_SCRIPT_SIZE;
+    }
+    memset(tx->vout[10].script_pub_key.data, 0x51, MAX_SCRIPT_SIZE);
+    tx->vout[10].script_pub_key.size = 0;
+
+    /* Grow the final script until the tx serializes to EXACTLY the cap:
+     * seed near the target, then converge against the serializer. */
+    size_t base = transaction_serialize_size(tx);   /* < cap */
+    size_t need = (size_t)MAX_TX_SIZE_AFTER_SAPLING - base;
+    tx->vout[10].script_pub_key.size = (need > 2) ? need - 2 : 0;
+    while (transaction_serialize_size(tx) < MAX_TX_SIZE_AFTER_SAPLING)
+        tx->vout[10].script_pub_key.size++;
+    while (transaction_serialize_size(tx) > MAX_TX_SIZE_AFTER_SAPLING)
+        tx->vout[10].script_pub_key.size--;
+
+    DCS_CHECK("tx-size: serializer lands exactly on the 102000 cap",
+              transaction_serialize_size(tx) == MAX_TX_SIZE_AFTER_SAPLING);
+    return failures;
+}
+
+/* Verdicts for a tx at exactly the cap: the strict-GT comparison
+ * accepts it in both domain and legacy. */
+static int check_tx_at_sapling_cap_verdicts(struct transaction *tx)
+{
+    int failures = 0;
+    struct domain_verdict d = run_domain(tx);
+    struct legacy_verdict l = run_legacy(tx);
+    DCS_CHECK("tx-size == 102000: domain accepts (strict GT, matches zclassicd)",
+              d.ok);
+    DCS_CHECK("tx-size == 102000: verdicts agree", verdicts_match(&d, &l));
+    return failures;
+}
+
+/* Grow the tx one byte past the cap: STANDALONE and BLOCK contexts both
+ * reject it. */
+static int check_tx_one_byte_over_sapling_cap(struct transaction *tx)
+{
+    int failures = 0;
+
+    /* One byte over the cap -> consensus reject. */
+    tx->vout[10].script_pub_key.size++;
+    DCS_CHECK("tx-size: serializer one byte past the cap",
+              transaction_serialize_size(tx) ==
+                  (size_t)MAX_TX_SIZE_AFTER_SAPLING + 1);
+    {
+        struct domain_verdict d = run_domain(tx);
+        struct legacy_verdict l = run_legacy(tx);
+        DCS_CHECK("tx-size == 102001: domain rejects bad-txns-oversize",
+                  !d.ok && d.reason &&
+                  strcmp(d.reason, "bad-txns-oversize") == 0);
+        DCS_CHECK("tx-size == 102001: verdicts agree", verdicts_match(&d, &l));
+    }
+    /* BLOCK context is not a blanket loosening: a synthetic 102001 tx is
+     * rejected in BOTH contexts. */
+    {
+        struct domain_verdict db = run_domain_block(tx);
+        DCS_CHECK("tx-size == 102001: BLOCK context also rejects (not grandfathered)",
+                  !db.ok && db.reason &&
+                  strcmp(db.reason, "bad-txns-oversize") == 0);
+    }
+    return failures;
+}
+
+/* Invariants of the generated oversize-grandfather artifact itself:
+ * count, strict txid ordering, and size bounds. */
+static int check_oversize_grandfather_table_invariants(void)
+{
+    int failures = 0;
+
+    /* --- table invariants: the generated artifact itself --- */
+    DCS_CHECK("grandfather table: count == 413",
+              OVERSIZE_GRANDFATHER_COUNT == 413u);
+    bool sorted = true, sizes_ok = true;
+    for (size_t i = 0; i < OVERSIZE_GRANDFATHER_COUNT; i++) {
+        uint32_t sz = g_oversize_grandfather[i].size;
+        if (sz <= 102000u || sz >= 2000000u || sz > 1922197u)
+            sizes_ok = false;
+        if (i > 0 &&
+            memcmp(g_oversize_grandfather[i - 1].txid,
+                   g_oversize_grandfather[i].txid, 32) >= 0)
+            sorted = false;
+    }
+    DCS_CHECK("grandfather table: strictly ascending by memcmp (bsearch-able, no dups)",
+              sorted);
+    DCS_CHECK("grandfather table: every size in (102000, 2000000) and <= max 1922197",
+              sizes_ok);
+    return failures;
+}
+
+/* --- predicate unit: exact {txid, size} match semantics --- */
+static int check_oversize_grandfather_predicate(void)
+{
+    int failures = 0;
+
+    struct uint256 first, last;
+    uint256_set_hex(&first,
+        "e3eeb123a79945cc74e6107422b124dc130ddd4b61fe5c74087317c256c79700");
+    uint256_set_hex(&last,
+        "e28d84f48ac642252519ad7d1ca6009cc2eb0ad2c5aaf5d0761c9105518a1db9");
+    DCS_CHECK("predicate: (e3eeb123, 125811) -> true (first violation, h=478544)",
+              domain_consensus_tx_oversize_grandfathered(&first, 125811));
+    DCS_CHECK("predicate: (e3eeb123, 125810) -> false (size must match exactly)",
+              !domain_consensus_tx_oversize_grandfathered(&first, 125810));
+    DCS_CHECK("predicate: (e28d84f4, 108629) -> true (last violation, h=1968856)",
+              domain_consensus_tx_oversize_grandfathered(&last, 108629));
+    struct uint256 flipped = first;
+    flipped.data[0] ^= 0x01;
+    DCS_CHECK("predicate: one-bit-different txid -> false",
+              !domain_consensus_tx_oversize_grandfathered(&flipped, 125811));
+    DCS_CHECK("predicate: NULL txid -> false",
+              !domain_consensus_tx_oversize_grandfathered(NULL, 125811));
+    return failures;
+}
+
+/* The deserialized 478544 fixture must keep its identity: size and
+ * computed txid. */
+static int check_478544_kat_fixture_identity(struct transaction *tx)
+{
+    int failures = 0;
+
+    DCS_CHECK("478544 KAT: serialize_size == 125811",
+              transaction_serialize_size(tx) == 125811u);
+    char hex[65];
+    uint256_get_hex(&tx->hash, hex);
+    DCS_CHECK("478544 KAT: computed txid == e3eeb123... (pins fixture identity)",
+              strcmp(hex,
+                     "e3eeb123a79945cc74e6107422b124dc130ddd4b6"
+                     "1fe5c74087317c256c79700") == 0);
+    return failures;
+}
+
+/* The 478544 fixture across domain contexts: BLOCK accepts (grandfather
+ * excuse applies in-block only), STANDALONE strictly rejects. */
+static int check_478544_kat_context_verdicts(struct transaction *tx)
+{
+    int failures = 0;
+
+    /* In-block: accepted (the false-reject that FATALed the live
+     * reindex at block 478544 is fixed). */
+    {
+        struct domain_verdict d = run_domain_block(tx);
+        DCS_CHECK("478544 KAT: BLOCK context accepts", d.ok);
+    }
+    /* Standalone (mempool/relay): still strictly rejected, like
+     * zclassicd would reject it as a NEW tx today. */
+    {
+        struct domain_verdict d = run_domain(tx);
+        DCS_CHECK("478544 KAT: STANDALONE context rejects bad-txns-oversize dos=100",
+                  !d.ok && d.dos == 100 && d.reason &&
+                  strcmp(d.reason, "bad-txns-oversize") == 0);
+    }
+    return failures;
+}
+
+/* Wrapper parity: core/modules/validation mirrors both contexts. */
+static int check_478544_kat_wrapper_parity(struct transaction *tx)
+{
+    int failures = 0;
+
+    struct validation_state st;
+    validation_state_init(&st);
+    DCS_CHECK("478544 KAT: check_transaction (standalone wrapper) rejects",
+              !check_transaction(tx, &st));
+    struct validation_state st2;
+    validation_state_init(&st2);
+    DCS_CHECK("478544 KAT: check_transaction_in_block accepts",
+              check_transaction_in_block(tx, &st2));
+    return failures;
+}
+
+/* Mempool gate: the structural check fires FIRST, so the
+ * grandfathered tx still cannot enter the mempool as new. */
+static int check_478544_kat_mempool_gate(struct transaction *tx)
+{
+    int failures = 0;
+
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+    enum mempool_accept_result r =
+        accept_to_mempool(&pool, NULL, NULL, NULL, tx);
+    DCS_CHECK("478544 KAT: accept_to_mempool -> INVALID (strict gate first)",
+              r == MEMPOOL_ACCEPT_INVALID &&
+              tx_mempool_size(&pool) == 0);
+    tx_mempool_free(&pool);
+    return failures;
+}
+
+/* Tamper KAT: flip a serialized field without recomputing
+ * tx->hash; the domain derives the txid from the bytes, so the
+ * tampered tx is rejected in-block. */
+static int check_478544_kat_tamper_rejection(struct transaction *tx)
+{
+    int failures = 0;
+
+    tx->lock_time ^= 1u;
+    struct domain_verdict d = run_domain_block(tx);
+    DCS_CHECK("478544 KAT: tampered bytes (stale tx->hash) -> BLOCK context rejects",
+              !d.ok && d.reason &&
+              strcmp(d.reason, "bad-txns-oversize") == 0);
+    tx->lock_time ^= 1u;
+    return failures;
+}
+
+int test_domain_consensus_tx_structural(void)
+{
+    int failures = 0;
+
+    failures += check_tx_structural_null_contracts();
+    failures += check_simple_and_empty_tx_shapes();
+    failures += check_vout_value_shapes();
+    failures += check_duplicate_and_coinbase_shapes();
+    failures += check_prevout_and_version_shapes();
+    failures += check_overwinter_and_value_balance_shapes();
+
     /* --- shape: tx serialize-size boundary (MAX_TX_SIZE_AFTER_SAPLING) ---
      * zclassicd rejects GetSerializeSize(tx) > 102000 as "bad-txns-oversize"
      * (DoS 100) on block connect (main.cpp ContextualCheckTransaction). The
@@ -441,57 +715,9 @@ int test_domain_consensus_tx_structural(void)
      * tx is sized with the real serializer as ground truth. */
     {
         struct transaction tx;
-        build_simple_tx(&tx, 1, 11, 1 * COIN);
-        /* First 10 outputs carry maximum-size scripts (~10 KB each); the
-         * 11th is the tunable remainder used to hit the cap exactly. */
-        for (size_t i = 0; i < 10; i++) {
-            memset(tx.vout[i].script_pub_key.data, 0x51, MAX_SCRIPT_SIZE);
-            tx.vout[i].script_pub_key.size = MAX_SCRIPT_SIZE;
-        }
-        memset(tx.vout[10].script_pub_key.data, 0x51, MAX_SCRIPT_SIZE);
-        tx.vout[10].script_pub_key.size = 0;
-
-        /* Grow the final script until the tx serializes to EXACTLY the cap:
-         * seed near the target, then converge against the serializer. */
-        size_t base = transaction_serialize_size(&tx);   /* < cap */
-        size_t need = (size_t)MAX_TX_SIZE_AFTER_SAPLING - base;
-        tx.vout[10].script_pub_key.size = (need > 2) ? need - 2 : 0;
-        while (transaction_serialize_size(&tx) < MAX_TX_SIZE_AFTER_SAPLING)
-            tx.vout[10].script_pub_key.size++;
-        while (transaction_serialize_size(&tx) > MAX_TX_SIZE_AFTER_SAPLING)
-            tx.vout[10].script_pub_key.size--;
-
-        DCS_CHECK("tx-size: serializer lands exactly on the 102000 cap",
-                  transaction_serialize_size(&tx) == MAX_TX_SIZE_AFTER_SAPLING);
-        {
-            struct domain_verdict d = run_domain(&tx);
-            struct legacy_verdict l = run_legacy(&tx);
-            DCS_CHECK("tx-size == 102000: domain accepts (strict GT, matches zclassicd)",
-                      d.ok);
-            DCS_CHECK("tx-size == 102000: verdicts agree", verdicts_match(&d, &l));
-        }
-
-        /* One byte over the cap -> consensus reject. */
-        tx.vout[10].script_pub_key.size++;
-        DCS_CHECK("tx-size: serializer one byte past the cap",
-                  transaction_serialize_size(&tx) ==
-                      (size_t)MAX_TX_SIZE_AFTER_SAPLING + 1);
-        {
-            struct domain_verdict d = run_domain(&tx);
-            struct legacy_verdict l = run_legacy(&tx);
-            DCS_CHECK("tx-size == 102001: domain rejects bad-txns-oversize",
-                      !d.ok && d.reason &&
-                      strcmp(d.reason, "bad-txns-oversize") == 0);
-            DCS_CHECK("tx-size == 102001: verdicts agree", verdicts_match(&d, &l));
-        }
-        /* BLOCK context is not a blanket loosening: a synthetic 102001 tx is
-         * rejected in BOTH contexts. */
-        {
-            struct domain_verdict db = run_domain_block(&tx);
-            DCS_CHECK("tx-size == 102001: BLOCK context also rejects (not grandfathered)",
-                      !db.ok && db.reason &&
-                      strcmp(db.reason, "bad-txns-oversize") == 0);
-        }
+        failures += build_tx_pinned_at_sapling_size_cap(&tx);
+        failures += check_tx_at_sapling_cap_verdicts(&tx);
+        failures += check_tx_one_byte_over_sapling_cap(&tx);
         transaction_free(&tx);
     }
 
@@ -499,46 +725,8 @@ int test_domain_consensus_tx_structural(void)
      * The canonical chain carries 413 post-Sapling txs above the 102000 cap
      * (heights 478544..1968856); exactly those are excused, in-block only. */
 
-    /* --- table invariants: the generated artifact itself --- */
-    {
-        DCS_CHECK("grandfather table: count == 413",
-                  OVERSIZE_GRANDFATHER_COUNT == 413u);
-        bool sorted = true, sizes_ok = true;
-        for (size_t i = 0; i < OVERSIZE_GRANDFATHER_COUNT; i++) {
-            uint32_t sz = g_oversize_grandfather[i].size;
-            if (sz <= 102000u || sz >= 2000000u || sz > 1922197u)
-                sizes_ok = false;
-            if (i > 0 &&
-                memcmp(g_oversize_grandfather[i - 1].txid,
-                       g_oversize_grandfather[i].txid, 32) >= 0)
-                sorted = false;
-        }
-        DCS_CHECK("grandfather table: strictly ascending by memcmp (bsearch-able, no dups)",
-                  sorted);
-        DCS_CHECK("grandfather table: every size in (102000, 2000000) and <= max 1922197",
-                  sizes_ok);
-    }
-
-    /* --- predicate unit: exact {txid, size} match semantics --- */
-    {
-        struct uint256 first, last;
-        uint256_set_hex(&first,
-            "e3eeb123a79945cc74e6107422b124dc130ddd4b61fe5c74087317c256c79700");
-        uint256_set_hex(&last,
-            "e28d84f48ac642252519ad7d1ca6009cc2eb0ad2c5aaf5d0761c9105518a1db9");
-        DCS_CHECK("predicate: (e3eeb123, 125811) -> true (first violation, h=478544)",
-                  domain_consensus_tx_oversize_grandfathered(&first, 125811));
-        DCS_CHECK("predicate: (e3eeb123, 125810) -> false (size must match exactly)",
-                  !domain_consensus_tx_oversize_grandfathered(&first, 125810));
-        DCS_CHECK("predicate: (e28d84f4, 108629) -> true (last violation, h=1968856)",
-                  domain_consensus_tx_oversize_grandfathered(&last, 108629));
-        struct uint256 flipped = first;
-        flipped.data[0] ^= 0x01;
-        DCS_CHECK("predicate: one-bit-different txid -> false",
-                  !domain_consensus_tx_oversize_grandfathered(&flipped, 125811));
-        DCS_CHECK("predicate: NULL txid -> false",
-                  !domain_consensus_tx_oversize_grandfathered(NULL, 125811));
-    }
+    failures += check_oversize_grandfather_table_invariants();
+    failures += check_oversize_grandfather_predicate();
 
     /* --- golden KAT: the REAL canonical tx from block 478544 --- */
     {
@@ -549,63 +737,11 @@ int test_domain_consensus_tx_structural(void)
         bool des = transaction_deserialize(&tx, &s);
         DCS_CHECK("478544 KAT: canonical fixture deserializes", des);
         if (des) {
-            DCS_CHECK("478544 KAT: serialize_size == 125811",
-                      transaction_serialize_size(&tx) == 125811u);
-            char hex[65];
-            uint256_get_hex(&tx.hash, hex);
-            DCS_CHECK("478544 KAT: computed txid == e3eeb123... (pins fixture identity)",
-                      strcmp(hex,
-                             "e3eeb123a79945cc74e6107422b124dc130ddd4b6"
-                             "1fe5c74087317c256c79700") == 0);
-
-            /* In-block: accepted (the false-reject that FATALed the live
-             * reindex at block 478544 is fixed). */
-            {
-                struct domain_verdict d = run_domain_block(&tx);
-                DCS_CHECK("478544 KAT: BLOCK context accepts", d.ok);
-            }
-            /* Standalone (mempool/relay): still strictly rejected, like
-             * zclassicd would reject it as a NEW tx today. */
-            {
-                struct domain_verdict d = run_domain(&tx);
-                DCS_CHECK("478544 KAT: STANDALONE context rejects bad-txns-oversize dos=100",
-                          !d.ok && d.dos == 100 && d.reason &&
-                          strcmp(d.reason, "bad-txns-oversize") == 0);
-            }
-            /* Wrapper parity: core/modules/validation mirrors both contexts. */
-            {
-                struct validation_state st;
-                validation_state_init(&st);
-                DCS_CHECK("478544 KAT: check_transaction (standalone wrapper) rejects",
-                          !check_transaction(&tx, &st));
-                struct validation_state st2;
-                validation_state_init(&st2);
-                DCS_CHECK("478544 KAT: check_transaction_in_block accepts",
-                          check_transaction_in_block(&tx, &st2));
-            }
-            /* Mempool gate: the structural check fires FIRST, so the
-             * grandfathered tx still cannot enter the mempool as new. */
-            {
-                struct tx_mempool pool;
-                tx_mempool_init(&pool, 0);
-                enum mempool_accept_result r =
-                    accept_to_mempool(&pool, NULL, NULL, NULL, &tx);
-                DCS_CHECK("478544 KAT: accept_to_mempool -> INVALID (strict gate first)",
-                          r == MEMPOOL_ACCEPT_INVALID &&
-                          tx_mempool_size(&pool) == 0);
-                tx_mempool_free(&pool);
-            }
-            /* Tamper KAT: flip a serialized field without recomputing
-             * tx->hash; the domain derives the txid from the bytes, so the
-             * tampered tx is rejected in-block. */
-            {
-                tx.lock_time ^= 1u;
-                struct domain_verdict d = run_domain_block(&tx);
-                DCS_CHECK("478544 KAT: tampered bytes (stale tx->hash) -> BLOCK context rejects",
-                          !d.ok && d.reason &&
-                          strcmp(d.reason, "bad-txns-oversize") == 0);
-                tx.lock_time ^= 1u;
-            }
+            failures += check_478544_kat_fixture_identity(&tx);
+            failures += check_478544_kat_context_verdicts(&tx);
+            failures += check_478544_kat_wrapper_parity(&tx);
+            failures += check_478544_kat_mempool_gate(&tx);
+            failures += check_478544_kat_tamper_rejection(&tx);
         }
         transaction_free(&tx);
     }
