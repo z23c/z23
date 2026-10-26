@@ -567,7 +567,7 @@ static void dac_commit(const struct zcl_command_request *request,
         json_get_str(json_get(request->input, "source_mutation_sha256"));
     const char *cas = json_get_str(json_get(request->input, "source_cas_sha3"));
     const char *expected = json_get_str(
-        request->input, "expected_current_generation");
+        json_get(request->input, "expected_current_generation"));
     const struct json_value *expires_value =
         json_get(request->input, "expires_unix");
     int64_t expires = expires_value ? json_get_int(expires_value) : 0;
