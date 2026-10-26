@@ -34,13 +34,17 @@ volatile sig_atomic_t g_shutdown_requested = 0;
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
+static bool fuzz_hex_wire_is_space(uint8_t byte)
+{
+    return byte == ' ' || byte == '\n' || byte == '\r' || byte == '\t';
+}
+
 static bool fuzz_hex_wire(const uint8_t *text, size_t text_len,
                           uint8_t *wire, size_t wire_cap, size_t *wire_len)
 {
     size_t digits = 0;
     for (size_t i = 0; i < text_len; i++) {
-        if (text[i] == ' ' || text[i] == '\n' || text[i] == '\r' ||
-            text[i] == '\t')
+        if (fuzz_hex_wire_is_space(text[i]))
             continue;
         if (zcl_hex_nibble((char)text[i], true) < 0) return false;
         digits++;
@@ -50,8 +54,7 @@ static bool fuzz_hex_wire(const uint8_t *text, size_t text_len,
     size_t out = 0;
     int high = -1;
     for (size_t i = 0; i < text_len; i++) {
-        if (text[i] == ' ' || text[i] == '\n' || text[i] == '\r' ||
-            text[i] == '\t')
+        if (fuzz_hex_wire_is_space(text[i]))
             continue;
         int nibble = zcl_hex_nibble((char)text[i], true);
         if (high < 0) {
@@ -65,17 +68,32 @@ static bool fuzz_hex_wire(const uint8_t *text, size_t text_len,
     return true;
 }
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+static uint8_t fuzz_select_parser_arm(uint8_t selector)
 {
-    if (size == 0 || size > FUZZ_ZCODE_COMMONS_MAX_INPUT)
-        return 0;
+    return selector >= '0' && selector <= '9'
+        ? (uint8_t)(selector - '0')
+        : (uint8_t)(selector % FUZZ_ZCODE_COMMONS_ARMS);
+}
 
-    const uint8_t arm = data[0] >= '0' && data[0] <= '9'
-        ? (uint8_t)(data[0] - '0')
-        : (uint8_t)(data[0] % FUZZ_ZCODE_COMMONS_ARMS);
-    const uint8_t *wire = data + 1;
-    const size_t wire_len = size - 1;
+struct fuzz_wire_view {
+    const uint8_t *buf;
+    size_t len;
+};
 
+static struct fuzz_wire_view fuzz_select_wire_or_hex(const uint8_t *wire,
+                                                     size_t wire_len,
+                                                     const uint8_t *decoded,
+                                                     size_t decoded_len,
+                                                     bool hex)
+{
+    if (hex)
+        return (struct fuzz_wire_view){ decoded, decoded_len };
+    return (struct fuzz_wire_view){ wire, wire_len };
+}
+
+static void fuzz_dispatch_parser_arm(uint8_t arm, const uint8_t *wire,
+                                     size_t wire_len)
+{
     switch (arm) {
     case 0: {
         struct vcs_zcode_creation_attribution_v1 out;
@@ -115,8 +133,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         size_t decoded_len = 0;
         bool hex = fuzz_hex_wire(wire, wire_len, decoded, sizeof(decoded),
                                  &decoded_len);
-        (void)vcs_zcode_approved_reproducer_set_parse(
-            hex ? decoded : wire, hex ? decoded_len : wire_len, &out);
+        struct fuzz_wire_view view =
+            fuzz_select_wire_or_hex(wire, wire_len, decoded, decoded_len,
+                                    hex);
+        (void)vcs_zcode_approved_reproducer_set_parse(view.buf, view.len,
+                                                      &out);
         break;
     }
     case 7: {
@@ -125,8 +146,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         size_t decoded_len = 0;
         bool hex = fuzz_hex_wire(wire, wire_len, decoded, sizeof(decoded),
                                  &decoded_len);
-        (void)vcs_zcode_policy_candidate_parse(
-            hex ? decoded : wire, hex ? decoded_len : wire_len, &out);
+        struct fuzz_wire_view view =
+            fuzz_select_wire_or_hex(wire, wire_len, decoded, decoded_len,
+                                    hex);
+        (void)vcs_zcode_policy_candidate_parse(view.buf, view.len, &out);
         break;
     }
     case 8: {
@@ -135,8 +158,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         size_t decoded_len = 0;
         bool hex = fuzz_hex_wire(wire, wire_len, decoded, sizeof(decoded),
                                  &decoded_len);
-        (void)vcs_zcode_reproduction_request_parse(
-            hex ? decoded : wire, hex ? decoded_len : wire_len, &out);
+        struct fuzz_wire_view view =
+            fuzz_select_wire_or_hex(wire, wire_len, decoded, decoded_len,
+                                    hex);
+        (void)vcs_zcode_reproduction_request_parse(view.buf, view.len, &out);
         break;
     }
     case 9: {
@@ -145,10 +170,24 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         size_t decoded_len = 0;
         bool hex = fuzz_hex_wire(wire, wire_len, decoded, sizeof(decoded),
                                  &decoded_len);
-        (void)vcs_c23_seed_parse(
-            hex ? decoded : wire, hex ? decoded_len : wire_len, &out);
+        struct fuzz_wire_view view =
+            fuzz_select_wire_or_hex(wire, wire_len, decoded, decoded_len,
+                                    hex);
+        (void)vcs_c23_seed_parse(view.buf, view.len, &out);
         break;
     }
     }
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+    if (size == 0 || size > FUZZ_ZCODE_COMMONS_MAX_INPUT)
+        return 0;
+
+    const uint8_t arm = fuzz_select_parser_arm(data[0]);
+    const uint8_t *wire = data + 1;
+    const size_t wire_len = size - 1;
+
+    fuzz_dispatch_parser_arm(arm, wire, wire_len);
     return 0;
 }
