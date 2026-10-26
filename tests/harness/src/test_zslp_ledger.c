@@ -179,6 +179,54 @@ static void fixture_set_projection_tip(struct node_db *ndb, int64_t h)
     (void)node_db_state_set_int(ndb, "sync_projection_tip_height", h);
 }
 
+static bool open_in_memory_node_db(struct node_db *ndb)
+{
+    return node_db_open(ndb, ":memory:") && ndb->open;
+}
+
+/* spent < 0 skips the spent-row comparison. */
+static bool ledger_row_counts_are(struct node_db *ndb, int rows, int unspent,
+                                  int spent, int *got_rows, int *got_unspent,
+                                  int *got_spent)
+{
+    int n = count_rows(ndb, "SELECT COUNT(*) FROM zslp_ledger");
+    int u = (int)zslp_ledger_unspent_count(ndb);
+    int sp = count_rows(ndb,
+        "SELECT COUNT(*) FROM zslp_ledger WHERE spent_by_txid IS NOT NULL");
+    *got_rows = n;
+    *got_unspent = u;
+    *got_spent = sp;
+    return n == rows && u == unspent && (spent < 0 || sp == spent);
+}
+
+static bool ledger_balances_are(struct node_db *ndb, const uint8_t token[32],
+                                const uint8_t *const addrs[2],
+                                const int64_t wants[2], int64_t gots[2])
+{
+    bool ok = true;
+    for (int i = 0; i < 2; i++) {
+        gots[i] = zslp_ledger_balance(ndb, token, addrs[i]);
+        ok = ok && gots[i] == wants[i];
+    }
+    return ok;
+}
+
+static bool genesis_outpoint_spent_by(struct node_db *ndb)
+{
+    sqlite3_stmt *s = NULL;
+    int ok = 0;
+    sqlite3_prepare_v2(ndb->db,
+      "SELECT spent_by_txid FROM zslp_ledger WHERE txid=? AND vout=1",
+      -1, &s, NULL);
+    sqlite3_bind_blob(s, 1, g_txid_genesis, 32, SQLITE_STATIC);
+    if (sqlite3_step(s) == SQLITE_ROW &&  // raw-sql-ok:test-readonly-check
+        sqlite3_column_bytes(s, 0) == 32 &&
+        memcmp(sqlite3_column_blob(s, 0), g_txid_send, 32) == 0)
+        ok = 1;
+    sqlite3_finalize(s);
+    return ok != 0;
+}
+
 static int test_backfill_ledger(void)
 {
     int failures = 0;
@@ -187,7 +235,7 @@ static int test_backfill_ledger(void)
 
     printf("zslp_ledger: open in-memory node.db (schema v%d)... ",
            NODE_DB_MAX_SCHEMA);
-    if (node_db_open(&ndb, ":memory:") && ndb.open) printf("OK\n");
+    if (open_in_memory_node_db(&ndb)) printf("OK\n");
     else { printf("FAIL\n"); return 1; }
 
     printf("zslp_ledger: schema_version is %d... ", NODE_DB_MAX_SCHEMA);
@@ -211,9 +259,8 @@ static int test_backfill_ledger(void)
       else { printf("FAIL (folded=%d)\n", folded); failures++; } }
 
     printf("zslp_ledger: GENESIS created 1 unspent outpoint row... ");
-    { int n = count_rows(&ndb, "SELECT COUNT(*) FROM zslp_ledger");
-      int u = (int)zslp_ledger_unspent_count(&ndb);
-      if (n == 1 && u == 1) printf("OK\n");
+    { int n, u, sp;
+      if (ledger_row_counts_are(&ndb, 1, 1, -1, &n, &u, &sp)) printf("OK\n");
       else { printf("FAIL (rows=%d unspent=%d)\n", n, u); failures++; } }
 
     printf("zslp_ledger: holder balance(T,addrA) == 1000 (GENESIS)... ");
@@ -235,31 +282,21 @@ static int test_backfill_ledger(void)
 
     printf("zslp_ledger: SEND created 2 rows, GENESIS marked spent "
            "(3 total, 2 unspent)... ");
-    { int n = count_rows(&ndb, "SELECT COUNT(*) FROM zslp_ledger");
-      int u = (int)zslp_ledger_unspent_count(&ndb);
-      int sp = count_rows(&ndb,
-          "SELECT COUNT(*) FROM zslp_ledger WHERE spent_by_txid IS NOT NULL");
-      if (n == 3 && u == 2 && sp == 1) printf("OK\n");
+    { int n, u, sp;
+      if (ledger_row_counts_are(&ndb, 3, 2, 1, &n, &u, &sp)) printf("OK\n");
       else { printf("FAIL (rows=%d unspent=%d spent=%d)\n", n, u, sp); failures++; } }
 
     printf("zslp_ledger: balance sums UNSPENT only — addrA==600 "
            "(1000 GENESIS spent + 600 SEND), addrB==400... ");
-    { int64_t ba = zslp_ledger_balance(&ndb, g_token, g_addr_a);
-      int64_t bb = zslp_ledger_balance(&ndb, g_token, g_addr_b);
-      if (ba == 600 && bb == 400) printf("OK\n");
-      else { printf("FAIL (addrA=%lld addrB=%lld)\n", (long long)ba, (long long)bb); failures++; } }
+    { const uint8_t *const addrs[2] = {g_addr_a, g_addr_b};
+      const int64_t wants[2] = {600, 400};
+      int64_t gots[2];
+      if (ledger_balances_are(&ndb, g_token, addrs, wants, gots)) printf("OK\n");
+      else { printf("FAIL (addrA=%lld addrB=%lld)\n", (long long)gots[0],
+                    (long long)gots[1]); failures++; } }
 
     printf("zslp_ledger: GENESIS outpoint spent_by == txid_send... ");
-    { sqlite3_stmt *s = NULL; int ok = 0;
-      sqlite3_prepare_v2(ndb.db,
-        "SELECT spent_by_txid FROM zslp_ledger WHERE txid=? AND vout=1",
-        -1, &s, NULL);
-      sqlite3_bind_blob(s, 1, g_txid_genesis, 32, SQLITE_STATIC);
-      if (sqlite3_step(s) == SQLITE_ROW &&  // raw-sql-ok:test-readonly-check
-          sqlite3_column_bytes(s, 0) == 32 &&
-          memcmp(sqlite3_column_blob(s, 0), g_txid_send, 32) == 0)
-          ok = 1;
-      sqlite3_finalize(s);
+    { int ok = genesis_outpoint_spent_by(&ndb);
       if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
 
     printf("zslp_ledger: idempotent once caught up (second run folds 0)... ");
@@ -450,6 +487,49 @@ static void ins_watch_only(struct node_db *ndb, const uint8_t hash160[20],
     sqlite3_finalize(s);
 }
 
+static bool wallet_sweep_holds_one(struct node_db *ndb,
+                                   struct zslp_wallet_token held[8],
+                                   const uint8_t addr[20], int64_t want,
+                                   int *got_rows, int64_t *got_per_addr)
+{
+    int n = zslp_ledger_wallet_tokens(ndb, held, 8);
+    int64_t per_addr = zslp_ledger_balance(ndb, g_token, addr);
+    *got_rows = n;
+    *got_per_addr = per_addr;
+    return n == 1 && memcmp(held[0].token_id, g_token, 32) == 0 &&
+           held[0].balance == want && held[0].balance == per_addr &&
+           held[0].utxo_count == 1;
+}
+
+static bool wallet_sweep_totals_match(struct node_db *ndb,
+                                      struct zslp_wallet_token held[8],
+                                      int64_t want_balance, int64_t want_utxos,
+                                      int64_t want_total, int64_t want_addrs,
+                                      int *got_rows, int64_t *got_addrs,
+                                      int64_t *got_total)
+{
+    int n = zslp_ledger_wallet_tokens(ndb, held, 8);
+    int64_t a = zslp_ledger_wallet_address_count(ndb);
+    int64_t total = zslp_ledger_wallet_balance(ndb, g_token);
+    *got_rows = n;
+    *got_addrs = a;
+    *got_total = total;
+    return n == 1 && held[0].balance == want_balance &&
+           held[0].utxo_count == want_utxos && total == want_total &&
+           a == want_addrs;
+}
+
+static bool wallet_sweep_unspent_only(struct node_db *ndb, int64_t want_total,
+                                      int64_t want_rows, int64_t *got_total,
+                                      int64_t *got_rows)
+{
+    int64_t total = zslp_ledger_wallet_balance(ndb, g_token);
+    int64_t rows = zslp_ledger_count(ndb);
+    *got_total = total;
+    *got_rows = rows;
+    return total == want_total && rows == want_rows;
+}
+
 static int test_wallet_wide_sweep(void)
 {
     int failures = 0;
@@ -457,7 +537,7 @@ static int test_wallet_wide_sweep(void)
     memset(&ndb, 0, sizeof(ndb));
 
     printf("zslp_ledger wallet: open in-memory node.db... ");
-    if (node_db_open(&ndb, ":memory:") && ndb.open) printf("OK\n");
+    if (open_in_memory_node_db(&ndb)) printf("OK\n");
     else { printf("FAIL\n"); return 1; }
 
     seed_fixture(&ndb);
@@ -484,11 +564,9 @@ static int test_wallet_wide_sweep(void)
 
     printf("zslp_ledger wallet: one owned address folds to that address's "
            "balance (600)... ");
-    { int n = zslp_ledger_wallet_tokens(&ndb, held, 8);
-      int64_t per_addr = zslp_ledger_balance(&ndb, g_token, g_addr_a);
-      if (n == 1 && memcmp(held[0].token_id, g_token, 32) == 0 &&
-          held[0].balance == 600 && held[0].balance == per_addr &&
-          held[0].utxo_count == 1) printf("OK\n");
+    { int n; int64_t per_addr;
+      if (wallet_sweep_holds_one(&ndb, held, g_addr_a, 600, &n, &per_addr))
+          printf("OK\n");
       else { printf("FAIL (rows=%d bal=%lld per_addr=%lld utxos=%lld)\n", n,
                     (long long)held[0].balance, (long long)per_addr,
                     (long long)held[0].utxo_count); failures++; } }
@@ -499,11 +577,9 @@ static int test_wallet_wide_sweep(void)
 
     printf("zslp_ledger wallet: watch-only address joins the fold — "
            "600 + 400 == 1000 across 2 outpoints... ");
-    { int n = zslp_ledger_wallet_tokens(&ndb, held, 8);
-      int64_t a = zslp_ledger_wallet_address_count(&ndb);
-      int64_t total = zslp_ledger_wallet_balance(&ndb, g_token);
-      if (n == 1 && held[0].balance == 1000 && held[0].utxo_count == 2 &&
-          total == 1000 && a == 2) printf("OK\n");
+    { int n; int64_t a, total;
+      if (wallet_sweep_totals_match(&ndb, held, 1000, 2, 1000, 2,
+                                    &n, &a, &total)) printf("OK\n");
       else { printf("FAIL (rows=%d bal=%lld utxos=%lld total=%lld addrs=%lld)\n",
                     n, (long long)held[0].balance,
                     (long long)held[0].utxo_count, (long long)total,
@@ -513,9 +589,9 @@ static int test_wallet_wide_sweep(void)
      * report 1600; a debit-correct one reports 1000. */
     printf("zslp_ledger wallet: sweep counts UNSPENT rows only "
            "(spent GENESIS excluded)... ");
-    { int64_t total = zslp_ledger_wallet_balance(&ndb, g_token);
-      int64_t rows = zslp_ledger_count(&ndb);
-      if (total == 1000 && rows == 3) printf("OK\n");
+    { int64_t total, rows;
+      if (wallet_sweep_unspent_only(&ndb, 1000, 3, &total, &rows))
+          printf("OK\n");
       else { printf("FAIL (total=%lld rows=%lld)\n", (long long)total,
                     (long long)rows); failures++; } }
 
@@ -564,12 +640,45 @@ static void seed_send_decl(struct node_db *ndb, const uint8_t txid[32],
         }
 }
 
+/* Fold every fixture height (0..4) into the running digest, stopping at the
+ * first height that fails to apply. */
+static bool fold_fixture_heights(struct node_db *ndb)
+{
+    uint8_t digest[32] = {0}, next[32];
+    bool ok = true;
+    for (int h = 0; h <= 4; h++) {
+        ok = zslp_ledger_apply_height(ndb, h, digest, next);
+        if (!ok)
+            break;
+        memcpy(digest, next, sizeof(digest));
+    }
+    return ok;
+}
+
+static bool strict_validity_reason_is(struct node_db *ndb,
+                                      const uint8_t txid[32],
+                                      enum zslp_validity_status want,
+                                      const char *want_reason, char *reason,
+                                      size_t reason_size)
+{
+    return zslp_validity_get(ndb, txid, reason, reason_size) == want &&
+           strcmp(reason, want_reason) == 0;
+}
+
+static bool strict_summary_matches(struct node_db *ndb, const uint8_t token[32],
+                                   struct zslp_token_validity_summary *summary)
+{
+    return zslp_validity_token_summary(ndb, token, summary) &&
+           summary->total_minted == 1000 && summary->total_burned == 150 &&
+           summary->circulating_supply == 850;
+}
+
 static int test_strict_validity_rejections(void)
 {
     int failures = 0;
     struct node_db ndb;
     memset(&ndb, 0, sizeof(ndb));
-    if (!node_db_open(&ndb, ":memory:") || !ndb.open) return 1;
+    if (!open_in_memory_node_db(&ndb)) return 1;
     seed_fixture(&ndb);
 
     uint8_t inflation[32], forged_mint[32], second_genesis[32];
@@ -620,47 +729,41 @@ static int test_strict_validity_rejections(void)
     seed_send_decl(&ndb, missing_child, 4, g_token, missing_q, 1);
     ins_input(&ndb, missing_child, 0, missing_parent, 1, 4);
 
-    uint8_t digest[32] = {0}, next[32];
-    for (int h = 0; h <= 4; h++) {
-        if (!zslp_ledger_apply_height(&ndb, h, digest, next)) {
-            failures++;
-            break;
-        }
-        memcpy(digest, next, sizeof(digest));
-    }
+    if (!fold_fixture_heights(&ndb))
+        failures++;
 
     char reason[96];
     printf("zslp strict: inflationary SEND is INVALID and creates no output... ");
-    bool ok = zslp_validity_get(&ndb, inflation, reason, sizeof(reason)) ==
-                  ZSLP_VALIDITY_INVALID &&
-              strcmp(reason, "send_output_exceeds_input") == 0 &&
+    bool ok = strict_validity_reason_is(&ndb, inflation, ZSLP_VALIDITY_INVALID,
+                                        "send_output_exceeds_input", reason,
+                                        sizeof(reason)) &&
               count_rows(&ndb,
                 "SELECT COUNT(*) FROM zslp_ledger WHERE txid=x'3333333333333333333333333333333333333333333333333333333333333333'") == 0;
     if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", reason); failures++; }
 
     printf("zslp strict: forged MINT without current baton is INVALID... ");
-    ok = zslp_validity_get(&ndb, forged_mint, reason, sizeof(reason)) ==
-             ZSLP_VALIDITY_INVALID &&
-         strcmp(reason, "mint_baton_lineage_invalid") == 0;
+    ok = strict_validity_reason_is(&ndb, forged_mint, ZSLP_VALIDITY_INVALID,
+                                   "mint_baton_lineage_invalid", reason,
+                                   sizeof(reason));
     if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", reason); failures++; }
 
     printf("zslp strict: SEND mixing valid token ids is INVALID... ");
-    ok = zslp_validity_get(&ndb, mixed, reason, sizeof(reason)) ==
-             ZSLP_VALIDITY_INVALID && strcmp(reason, "mixed_token_inputs") == 0;
+    ok = strict_validity_reason_is(&ndb, mixed, ZSLP_VALIDITY_INVALID,
+                                   "mixed_token_inputs", reason,
+                                   sizeof(reason));
     if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", reason); failures++; }
 
     printf("zslp strict: missing declared ancestry remains UNKNOWN... ");
-    ok = zslp_validity_get(&ndb, missing_child, reason, sizeof(reason)) ==
-             ZSLP_VALIDITY_UNKNOWN && strcmp(reason, "send_parent_unknown") == 0;
+    ok = strict_validity_reason_is(&ndb, missing_child, ZSLP_VALIDITY_UNKNOWN,
+                                   "send_parent_unknown", reason,
+                                   sizeof(reason));
     if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", reason); failures++; }
 
     printf("zslp strict: conservative SEND records the explicit burn... ");
     struct zslp_token_validity_summary summary;
-    ok = zslp_validity_get(&ndb, burn, reason, sizeof(reason)) ==
-             ZSLP_VALIDITY_VALID && strcmp(reason, "valid_send") == 0 &&
-         zslp_validity_token_summary(&ndb, g_token, &summary) &&
-         summary.total_minted == 1000 && summary.total_burned == 150 &&
-         summary.circulating_supply == 850;
+    ok = strict_validity_reason_is(&ndb, burn, ZSLP_VALIDITY_VALID,
+                                   "valid_send", reason, sizeof(reason)) &&
+         strict_summary_matches(&ndb, g_token, &summary);
     if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", reason); failures++; }
 
     node_db_close(&ndb);

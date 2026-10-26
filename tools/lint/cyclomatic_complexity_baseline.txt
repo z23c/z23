@@ -2328,9 +2328,6 @@ tests/harness/src/test_zid.c:test_zid:205
 tests/harness/src/test_zid.c:test_zid_domain_store:75
 tests/harness/src/test_znam.c:test_znam:228
 tests/harness/src/test_znam.c:test_znam_wallet_sweep:27
-tests/harness/src/test_zslp_ledger.c:test_backfill_ledger:20
-tests/harness/src/test_zslp_ledger.c:test_strict_validity_rejections:20
-tests/harness/src/test_zslp_ledger.c:test_wallet_wide_sweep:20
 tests/harness/src/testcache.c:testcache_open_mode:27
 tests/harness/src/testcache.c:testcache_probe_group_internal:25
 tests/harness/src/transaction_lab_simnet.c:transaction_lab_simnet_mine_owned_op_return_at:21
