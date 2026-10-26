@@ -59,51 +59,52 @@ static void remove_family(struct platform_directory_transaction *dir,
     }
 }
 
-int main(void)
+static bool create_mint_refusal_datadir(wchar_t dir[MAX_PATH],
+                                        char utf8[MAX_PATH * 3])
 {
-    wchar_t temp[MAX_PATH], dir[MAX_PATH], marker[MAX_PATH];
-    char utf8[MAX_PATH * 3];
-    if (!GetTempPathW(MAX_PATH, temp) ||
-        swprintf(dir, MAX_PATH, L"%lsz23-mint-refuse-%lu", temp,
-                 (unsigned long)GetCurrentProcessId()) <= 0 ||
-        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, dir, -1,
-                             utf8, sizeof(utf8), NULL, NULL) ||
-        !platform_private_directory_create(utf8))
-        return 1;
-    (void)swprintf(marker, MAX_PATH, L"%ls\\sentinel", dir);
+    wchar_t temp[MAX_PATH];
+    return GetTempPathW(MAX_PATH, temp) &&
+           swprintf(dir, MAX_PATH, L"%lsz23-mint-refuse-%lu", temp,
+                    (unsigned long)GetCurrentProcessId()) > 0 &&
+           WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, dir, -1,
+                               utf8, MAX_PATH * 3, NULL, NULL) &&
+           platform_private_directory_create(utf8);
+}
+
+static bool create_mint_refusal_sentinel(const wchar_t *marker)
+{
+    const char expected[] = "unchanged";
     HANDLE file = CreateFileW(marker, GENERIC_WRITE, 0, NULL, CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL, NULL);
-    const char expected[] = "unchanged";
     DWORD written = 0;
-    if (file == INVALID_HANDLE_VALUE ||
-        !WriteFile(file, expected, sizeof(expected), &written, NULL) ||
-        written != sizeof(expected) || !CloseHandle(file))
-        return 1;
-    if (!boot_mint_anchor_normal_boot_preflight(utf8) ||
-        boot_mint_anchor_preflight_run_all(utf8, NULL))
-        return 1;
+    return file != INVALID_HANDLE_VALUE &&
+           WriteFile(file, expected, sizeof(expected), &written, NULL) &&
+           written == sizeof(expected) && CloseHandle(file);
+}
 
-    struct platform_directory_transaction transaction;
-    platform_directory_transaction_init(&transaction);
+static bool create_mint_projection_databases(
+    struct platform_directory_transaction *transaction, const char *datadir)
+{
     const char *projection_schema =
         "CREATE TABLE address_index(key BLOB PRIMARY KEY,value BLOB);"
         "CREATE INDEX address_index_value ON address_index(value);"
         "CREATE TABLE address_index_state(id INTEGER PRIMARY KEY);"
         "CREATE TABLE txindex(key BLOB PRIMARY KEY,value BLOB);"
         "CREATE TABLE txindex_state(id INTEGER PRIMARY KEY);";
-    if (!platform_directory_transaction_open(&transaction, utf8) ||
-        !create_private_sqlite(&transaction, utf8, "consensus.db", "") ||
-        !create_private_sqlite(&transaction, utf8, "progress.kv",
-                               projection_schema) ||
-        !boot_mint_anchor_normal_boot_preflight(utf8))
-        return 1;
+    return platform_directory_transaction_open(transaction, datadir) &&
+           create_private_sqlite(transaction, datadir, "consensus.db", "") &&
+           create_private_sqlite(transaction, datadir, "progress.kv",
+                                 projection_schema) &&
+           boot_mint_anchor_normal_boot_preflight(datadir);
+}
 
+static bool add_kernel_table_to_projection(const char *datadir)
+{
     char projection_path[MAX_PATH * 3];
-    if (snprintf(projection_path, sizeof(projection_path), "%s/progress.kv",
-                 utf8) <= 0)
-        return 1;
+    bool ok = snprintf(projection_path, sizeof(projection_path),
+                       "%s/progress.kv", datadir) > 0;
     sqlite3 *projection = NULL;
-    bool opened = sqlite3_open_v2(
+    bool opened = ok && sqlite3_open_v2(
         projection_path, &projection,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) == SQLITE_OK;
     bool wrote_kernel = opened &&
@@ -111,21 +112,49 @@ int main(void)
                      NULL, NULL, NULL) == SQLITE_OK;
     if (projection && sqlite3_close(projection) != SQLITE_OK)
         wrote_kernel = false;
-    if (!wrote_kernel || boot_mint_anchor_normal_boot_preflight(utf8))
-        return 1;
+    return wrote_kernel;
+}
 
-    remove_family(&transaction, "consensus.db");
-    remove_family(&transaction, "progress.kv");
-    platform_directory_transaction_close(&transaction);
+static bool mint_refusal_sentinel_unchanged(const wchar_t *marker)
+{
+    const char expected[] = "unchanged";
     char actual[sizeof(expected)] = {0};
-    file = CreateFileW(marker, GENERIC_READ, FILE_SHARE_READ, NULL,
-                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE file = CreateFileW(marker, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     DWORD read = 0;
     bool unchanged = file != INVALID_HANDLE_VALUE &&
                      ReadFile(file, actual, sizeof(actual), &read, NULL) &&
                      read == sizeof(actual) &&
                      memcmp(actual, expected, sizeof(expected)) == 0;
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    return unchanged;
+}
+
+int main(void)
+{
+    wchar_t dir[MAX_PATH], marker[MAX_PATH];
+    char utf8[MAX_PATH * 3];
+    if (!create_mint_refusal_datadir(dir, utf8))
+        return 1;
+    (void)swprintf(marker, MAX_PATH, L"%ls\\sentinel", dir);
+    if (!create_mint_refusal_sentinel(marker))
+        return 1;
+    if (!boot_mint_anchor_normal_boot_preflight(utf8) ||
+        boot_mint_anchor_preflight_run_all(utf8, NULL))
+        return 1;
+
+    struct platform_directory_transaction transaction;
+    platform_directory_transaction_init(&transaction);
+    if (!create_mint_projection_databases(&transaction, utf8))
+        return 1;
+    if (!add_kernel_table_to_projection(utf8) ||
+        boot_mint_anchor_normal_boot_preflight(utf8))
+        return 1;
+
+    remove_family(&transaction, "consensus.db");
+    remove_family(&transaction, "progress.kv");
+    platform_directory_transaction_close(&transaction);
+    bool unchanged = mint_refusal_sentinel_unchanged(marker);
     DeleteFileW(marker);
     platform_private_directory_remove_empty(utf8);
     if (!unchanged)
