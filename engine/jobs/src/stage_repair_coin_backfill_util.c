@@ -309,6 +309,31 @@ void coin_backfill_persist_terminal_refusal(
                  "(refusing anyway)", height);
 }
 
+/* Load the stepped LIMIT 1 hole row out of the script_validate_log scan:
+ * height, status text, and the 32-byte block hash when the column has one. */
+static void hole_scan_load_row(sqlite3_stmt *st, int *out_height,
+                               char status_out[32], struct uint256 *hash_out,
+                               bool *hash_found)
+{
+    *out_height = sqlite3_column_int(st, 0);
+    const unsigned char *s = sqlite3_column_text(st, 1);
+    snprintf(status_out, 32, "%s", s ? (const char *)s : "");
+    if (sqlite3_column_bytes(st, 2) == 32 && sqlite3_column_blob(st, 2)) {
+        memcpy(hash_out->data, sqlite3_column_blob(st, 2), 32);
+        *hash_found = true;
+    }
+}
+
+/* Admission test for the pending-prevout HOLD against the SQL scan result:
+ * present, settled at or below the frozen cursor, and lower than (or
+ * replacing) the scanned hole. */
+static bool pending_prevout_is_lower_hole(bool pend_found, int pend_h,
+                                          int cursor, int sql_height)
+{
+    return pend_found && pend_h > 0 && pend_h <= cursor &&
+           (sql_height < 0 || pend_h < sql_height);
+}
+
 bool find_lowest_prevout_unresolved_hole_unlocked(
     struct sqlite3 *db, int cursor, const char *wanted_status, int *out_height,
     char status_out[32], struct uint256 *hash_out, bool *hash_found)
@@ -349,15 +374,9 @@ bool find_lowest_prevout_unresolved_hole_unlocked(
     }
 
     int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
-    if (rc == SQLITE_ROW) {
-        *out_height = sqlite3_column_int(st, 0);
-        const unsigned char *s = sqlite3_column_text(st, 1);
-        snprintf(status_out, 32, "%s", s ? (const char *)s : "");
-        if (sqlite3_column_bytes(st, 2) == 32 && sqlite3_column_blob(st, 2)) {
-            memcpy(hash_out->data, sqlite3_column_blob(st, 2), 32);
-            *hash_found = true;
-        }
-    } else if (rc != SQLITE_DONE) {
+    if (rc == SQLITE_ROW)
+        hole_scan_load_row(st, out_height, status_out, hash_out, hash_found);
+    else if (rc != SQLITE_DONE) {
         sqlite3_finalize(st);
         LOG_FAIL("coin_backfill",
                  "[coin_backfill] hole step failed rc=%d: %s",
@@ -388,8 +407,8 @@ bool find_lowest_prevout_unresolved_hole_unlocked(
          * hole the signal exists to surface; the torn gate's cursor=ceiling+1
          * keeps hole_h < cursor regardless. A pend_h ABOVE the cursor (not yet a
          * settled frontier) is still excluded. */
-        if (pend_found && pend_h > 0 && pend_h <= cursor &&
-            (*out_height < 0 || pend_h < *out_height)) {
+        if (pending_prevout_is_lower_hole(pend_found, pend_h, cursor,
+                                          *out_height)) {
             *out_height = pend_h;
             snprintf(status_out, 32, "prevout_unresolved");
             *hash_out = pend_hash;
@@ -404,6 +423,23 @@ bool find_lowest_prevout_unresolved_hole_unlocked(
  * this many steps the horizon is reported as unbounded (-1) and the repair
  * REFUSES rather than guessing a permissive floor. */
 #define COIN_BACKFILL_HORIZON_WALK_MAX 262144
+
+/* Rebind a prepared `SELECT 1 ... WHERE height = ?` statement to h and step
+ * it once. Returns 0 with *have set to the row/no-row answer on a clean
+ * SQLITE_ROW/SQLITE_DONE step, -1 on a reset/bind/step failure — the caller
+ * aborts the walk and logs (treating a failed probe as "no row" would fake
+ * a gap). */
+static int height_probe_have(sqlite3_stmt *st, int h, bool *have)
+{
+    if (sqlite3_reset(st) != SQLITE_OK ||
+        sqlite3_bind_int(st, 1, h) != SQLITE_OK)
+        return -1;
+    int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        return -1;
+    *have = rc == SQLITE_ROW;
+    return 0;
+}
 
 bool utxo_apply_log_contiguous_floor(struct sqlite3 *db, int cursor,
                                      int *out_floor)
@@ -435,29 +471,16 @@ bool utxo_apply_log_contiguous_floor(struct sqlite3 *db, int cursor,
             floor = -1; /* unbounded walk: refuse rather than guess */
             break;
         }
-        if (sqlite3_reset(log_st) != SQLITE_OK ||
-            sqlite3_bind_int(log_st, 1, h) != SQLITE_OK) {
+        bool have = false;
+        if (height_probe_have(log_st, h, &have) != 0) {
             sql_ok = false; /* a NULL-bound param would fake a gap at h */
             break;
         }
-        int rc = sqlite3_step(log_st);  // raw-sql-ok:progress-kv-kernel-store
-        if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
-            sql_ok = false;
-            break;
-        }
-        bool have = rc == SQLITE_ROW;
         if (have) {
-            if (sqlite3_reset(delta_st) != SQLITE_OK ||
-                sqlite3_bind_int(delta_st, 1, h) != SQLITE_OK) {
+            if (height_probe_have(delta_st, h, &have) != 0) {
                 sql_ok = false;
                 break;
             }
-            rc = sqlite3_step(delta_st);  // raw-sql-ok:progress-kv-kernel-store
-            if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
-                sql_ok = false;
-                break;
-            }
-            have = rc == SQLITE_ROW;
         }
         if (!have)
             break;
