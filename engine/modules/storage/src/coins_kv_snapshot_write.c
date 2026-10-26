@@ -47,6 +47,104 @@ static void le64(uint8_t b[8], uint64_t v)
  * oversized script falls back to a heap buffer). */
 enum { SNAP_SCRIPT_INLINE_CAP = 1024 };
 
+/* Outcome of streaming one coins row into a snapshot body.  The row helpers
+ * below report one of these; stream_coins_body logs the failures. */
+enum snap_row_status {
+    SNAP_ROW_WRITTEN,    /* record serialised, written to the file and folded */
+    SNAP_ROW_SKIPPED,    /* row carries no canonical 32-byte txid: not in set */
+    SNAP_ROW_OOM,        /* heap record buffer for an oversized script failed */
+    SNAP_ROW_SERIALISE,  /* the shared per-record encoder rejected the row */
+    SNAP_ROW_FWRITE      /* the record fwrite to the temp file failed */
+};
+
+/* Serialise ONE (txid,vout) row with the SAME per-record encoder as
+ * coins_kv_commitment, then stream the record to BOTH `out` and the sponge
+ * `ctx`.  Returns SNAP_ROW_WRITTEN, SNAP_ROW_SERIALISE or SNAP_ROW_FWRITE;
+ * the caller logs the failure. */
+static enum snap_row_status snapshot_emit_record(FILE *out,
+                                                 struct sha3_256_ctx *ctx,
+                                                 uint8_t *rec, size_t cap,
+                                                 const uint8_t *txid,
+                                                 uint32_t vout, int64_t value,
+                                                 const uint8_t *script,
+                                                 uint32_t slen,
+                                                 int32_t height, int cb_int)
+{
+    size_t rec_len = 0;
+    if (!utxo_sha3_serialize_record(rec, cap, &rec_len, txid, vout, value,
+                                    script, slen, (uint32_t)height,
+                                    (uint8_t)(cb_int ? 1 : 0)))
+        return SNAP_ROW_SERIALISE;
+    if (fwrite(rec, 1, rec_len, out) != rec_len)
+        return SNAP_ROW_FWRITE;
+    sha3_256_write(ctx, rec, rec_len);
+    return SNAP_ROW_WRITTEN;
+}
+
+/* Stream ONE stepped coins row: re-read its columns, skip it when it has no
+ * canonical 32-byte txid, size the inline/heap record buffer for its script,
+ * then emit the record.  Always reports the row's effective script length in
+ * *eff_slen_out (the OOM log needs it) and, on SNAP_ROW_WRITTEN, its value in
+ * *value_out.  Returns the row status; the caller logs the failures. */
+static enum snap_row_status snapshot_stream_row(FILE *out,
+                                                struct sha3_256_ctx *ctx,
+                                                sqlite3_stmt *s,
+                                                uint32_t *eff_slen_out,
+                                                int64_t *value_out)
+{
+    const uint8_t *txid = (const uint8_t *)sqlite3_column_blob(s, 0);
+    int txid_len = sqlite3_column_bytes(s, 0);
+    if (!txid || txid_len < 32) return SNAP_ROW_SKIPPED;
+
+    uint32_t vout   = (uint32_t)sqlite3_column_int(s, 1);
+    int64_t  value  = sqlite3_column_int64(s, 2);
+    const uint8_t *script = (const uint8_t *)sqlite3_column_blob(s, 3);
+    int script_len = sqlite3_column_bytes(s, 3);
+    int32_t  height_c = sqlite3_column_int(s, 4);
+    int cb_int = sqlite3_column_int(s, 5);
+
+    const uint8_t *eff_script = (script_len > 0) ? script : NULL;
+    uint32_t eff_slen = (uint32_t)(script_len > 0 ? script_len : 0);
+    *eff_slen_out = eff_slen;
+
+    uint8_t inline_buf[UTXO_SHA3_RECORD_MAX(SNAP_SCRIPT_INLINE_CAP)];
+    uint8_t *rec = inline_buf;
+    uint8_t *heap = NULL;
+    size_t cap = sizeof(inline_buf);
+    if (eff_slen > SNAP_SCRIPT_INLINE_CAP) {
+        cap = UTXO_SHA3_RECORD_MAX(eff_slen);
+        heap = zcl_malloc(cap, "coins_kv_snapshot_record");
+        if (!heap) return SNAP_ROW_OOM;
+        rec = heap;
+    }
+    enum snap_row_status emitted = snapshot_emit_record(
+        out, ctx, rec, cap, txid, vout, value, eff_script, eff_slen,
+        height_c, cb_int);
+    if (emitted != SNAP_ROW_WRITTEN) {
+        if (heap) free(heap);
+        return emitted;
+    }
+    if (heap) free(heap);
+
+    *value_out = value;
+    return SNAP_ROW_WRITTEN;
+}
+
+/* Publish a completed snapshot's results through the caller's optional
+ * out-params: the body SHA3 (only when both sha3 sides are given — the
+ * streaming body has no final digest yet) plus the count/total_supply
+ * totals.  Nothing is written unless the body completed (`ok`). */
+static void snapshot_publish_results(bool ok, const uint8_t *body_sha3,
+                                     uint64_t count, int64_t total_supply,
+                                     uint8_t out_sha3[32], uint64_t *out_count,
+                                     int64_t *out_total_supply)
+{
+    if (!ok) return;
+    if (out_sha3) memcpy(out_sha3, body_sha3, 32);
+    if (out_count) *out_count = count;
+    if (out_total_supply) *out_total_supply = total_supply;
+}
+
 /* Stream every coins row in canonical (txid,vout) order to BOTH `out` and the
  * SHA3 sponge `ctx`, using the SAME per-record encoder as coins_kv_commitment,
  * so file body == SHA3 input == coins_kv_commitment input.  On success sets
@@ -69,54 +167,27 @@ static bool stream_coins_body(FILE *out, sqlite3 *db, struct sha3_256_ctx *ctx,
     bool ok = true;
     int rc;
     while (ok && (rc = sqlite3_step(s)) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
-        const uint8_t *txid = (const uint8_t *)sqlite3_column_blob(s, 0);
-        int txid_len = sqlite3_column_bytes(s, 0);
-        if (!txid || txid_len < 32) continue;
-
-        uint32_t vout   = (uint32_t)sqlite3_column_int(s, 1);
-        int64_t  value  = sqlite3_column_int64(s, 2);
-        const uint8_t *script = (const uint8_t *)sqlite3_column_blob(s, 3);
-        int script_len = sqlite3_column_bytes(s, 3);
-        int32_t  height_c = sqlite3_column_int(s, 4);
-        int cb_int = sqlite3_column_int(s, 5);
-
-        const uint8_t *eff_script = (script_len > 0) ? script : NULL;
-        uint32_t eff_slen = (uint32_t)(script_len > 0 ? script_len : 0);
-
-        uint8_t inline_buf[UTXO_SHA3_RECORD_MAX(SNAP_SCRIPT_INLINE_CAP)];
-        uint8_t *rec = inline_buf;
-        uint8_t *heap = NULL;
-        size_t cap = sizeof(inline_buf);
-        if (eff_slen > SNAP_SCRIPT_INLINE_CAP) {
-            cap = UTXO_SHA3_RECORD_MAX(eff_slen);
-            heap = zcl_malloc(cap, "coins_kv_snapshot_record");
-            if (!heap) {
-                LOG_WARN("coins_kv", "snapshot_write: oom for script_len=%u",
-                         eff_slen);
-                ok = false;
-                break;
-            }
-            rec = heap;
+        uint32_t eff_slen = 0;
+        int64_t value = 0;
+        enum snap_row_status row =
+            snapshot_stream_row(out, ctx, s, &eff_slen, &value);
+        if (row == SNAP_ROW_SKIPPED) continue;
+        if (row == SNAP_ROW_OOM) {
+            LOG_WARN("coins_kv", "snapshot_write: oom for script_len=%u",
+                     eff_slen);
+            ok = false;
+            break;
         }
-        size_t rec_len = 0;
-        if (!utxo_sha3_serialize_record(rec, cap, &rec_len, txid, vout, value,
-                                        eff_script, eff_slen,
-                                        (uint32_t)height_c,
-                                        (uint8_t)(cb_int ? 1 : 0))) {
+        if (row == SNAP_ROW_SERIALISE) {
             LOG_WARN("coins_kv", "snapshot_write: serialise failed");
-            if (heap) free(heap);
             ok = false;
             break;
         }
-        if (fwrite(rec, 1, rec_len, out) != rec_len) {
+        if (row == SNAP_ROW_FWRITE) {
             LOG_WARN("coins_kv", "snapshot_write: record fwrite failed");
-            if (heap) free(heap);
             ok = false;
             break;
         }
-        sha3_256_write(ctx, rec, rec_len);
-        if (heap) free(heap);
-
         total_supply += value;
         count++;
     }
@@ -124,10 +195,8 @@ static bool stream_coins_body(FILE *out, sqlite3 *db, struct sha3_256_ctx *ctx,
         ok = false;
     sqlite3_finalize(s);
 
-    if (ok) {
-        if (count_out)  *count_out = count;
-        if (supply_out) *supply_out = total_supply;
-    }
+    snapshot_publish_results(ok, NULL, count, total_supply, NULL,
+                             count_out, supply_out);
     return ok;
 }
 
@@ -211,13 +280,20 @@ static bool snapshot_append_shielded(FILE *out, struct sha3_256_ctx *ctx,
     return snapshot_shielded_write(out, ctx, sh);
 }
 
+/* A snapshot write needs a live db handle and a non-empty destination path;
+ * the caller reports the rejection. */
+static bool snapshot_write_args_invalid(sqlite3 *db, const char *out_path)
+{
+    return !db || !out_path || !out_path[0];
+}
+
 bool coins_kv_snapshot_write(sqlite3 *db, const char *out_path,
                              int32_t height, const uint8_t anchor_block_hash[32],
                              const struct snapshot_shielded *shielded_or_null,
                              uint8_t out_sha3[32], uint64_t *out_count,
                              int64_t *out_total_supply)
 {
-    if (!db || !out_path || !out_path[0]) {
+    if (snapshot_write_args_invalid(db, out_path)) {
         LOG_FAIL("coins_kv", "snapshot_write: null db/path");
         return false;
     }
@@ -282,8 +358,7 @@ bool coins_kv_snapshot_write(sqlite3 *db, const char *out_path,
                            anchor_block_hash, count, total_supply, body_sha3))
         return false;
 
-    if (out_sha3) memcpy(out_sha3, body_sha3, 32);
-    if (out_count) *out_count = count;
-    if (out_total_supply) *out_total_supply = total_supply;
+    snapshot_publish_results(true, body_sha3, count, total_supply, out_sha3,
+                             out_count, out_total_supply);
     return true;
 }
