@@ -190,6 +190,91 @@ static bool bsr_save_identity(struct node_db *ndb, const uint8_t pk[32],
 
 /* ── (1)-(5): two epochs, one addrman ──────────────────────────────── */
 
+/* Predicates the epoch-roll case hands to BSR_CHECK. Each one evaluates
+ * exactly the expression it replaced, over the same operands in the same
+ * order with the same short-circuits, so every check keeps its position,
+ * its side effects and its message. */
+
+static bool bsr_append_banked_session(event_log_t *log,
+                                      struct ev_peer_session_closed *ev)
+{
+    uint8_t payload[EV_PEER_SESSION_CLOSED_LEN];
+    return ev_peer_session_closed_serialize(ev, payload) &&
+           event_log_append(log, EV_PEER_SESSION_CLOSED, payload,
+                            sizeof(payload)) != UINT64_MAX;
+}
+
+/* True when all three addresses read the untouched baseline and no
+ * reputation table has been published yet. */
+static bool bsr_addrman_reads_baseline_everywhere(struct addr_man *am,
+                                                  const uint8_t ip_a[16],
+                                                  const uint8_t ip_c[16],
+                                                  const uint8_t ip_bandwidth[16])
+{
+    return bsr_weight_of(am, ip_a) == 1.0 &&
+           bsr_weight_of(am, ip_c) == 1.0 &&
+           bsr_weight_of(am, ip_bandwidth) == 1.0 &&
+           addrman_reputation_weight_count(am) == 0;
+}
+
+/* A real boost that never exceeds the published ceiling. */
+static bool bsr_boost_is_bounded(double w)
+{
+    return w > 1.0 && w <= ADDRMAN_REPUTATION_MAX_MULT;
+}
+
+/* Truncate the on-chain identities and rewrite only relay C's, so the
+ * ranking holds exactly one row and relay A is out of it. */
+static bool bsr_ranking_now_has_only_relay_c(struct node_db *ndb,
+                                             const uint8_t pk_c[32])
+{
+    return db_zid_identity_truncate(ndb) &&
+           bsr_save_identity(ndb, pk_c,
+                             "t1CtwoOwnerAddressCCCCCCCCCCCCCCC") &&
+           db_zid_identity_count(ndb) == 1;
+}
+
+/* Both epochs' multipliers stay inside the legal band. */
+static bool bsr_multipliers_all_in_bounds(double a1, double c1, double b1,
+                                          double a2, double c2, double b2)
+{
+    bool bounded = true;
+    const double seen[6] = { a1, c1, b1, a2, c2, b2 };
+    for (size_t i = 0; i < 6; i++)
+        if (!(seen[i] >= 1.0 && seen[i] <= ADDRMAN_REPUTATION_MAX_MULT))
+            bounded = false;
+    return bounded;
+}
+
+/* An address the table dropped must land on the PLAIN chance — the same
+ * number an addrman that never heard of this subsystem would produce. */
+static bool bsr_dropped_address_keeps_plain_chance(struct addr_man *am,
+                                                   const struct addr_info *e)
+{
+    double plain = e ? addr_info_get_chance(NULL, e, 1000000) : -1.0;
+    return e && plain > 0.0 &&
+           addr_info_get_chance(am, e, 1000000) == plain;
+}
+
+/* Every entry still scores a positive chance: nothing was excluded. */
+static bool bsr_no_address_excluded(struct addr_man *am,
+                                    const struct addr_info *e_a,
+                                    const struct addr_info *e_c,
+                                    const struct addr_info *e_b)
+{
+    return e_a && e_c && e_b &&
+           addr_info_get_chance(am, e_a, 1000000) > 0.0 &&
+           addr_info_get_chance(am, e_c, 1000000) > 0.0 &&
+           addr_info_get_chance(am, e_b, 1000000) > 0.0;
+}
+
+static bool bsr_boost_raises_chance(struct addr_man *am,
+                                    const struct addr_info *e)
+{
+    return e && addr_info_get_chance(am, e, 1000000) >
+                   addr_info_get_chance(NULL, e, 1000000);
+}
+
 static int bsr_case_epoch_roll(void)
 {
     int failures = 0;
@@ -216,7 +301,6 @@ static int bsr_case_epoch_roll(void)
     }
     {
         struct ev_peer_session_closed ev;
-        uint8_t payload[EV_PEER_SESSION_CLOSED_LEN];
         memset(&ev, 0, sizeof(ev));
         memcpy(ev.ip_v4_or_v6, ip_bandwidth, 16);
         ev.port = 8033;
@@ -229,9 +313,7 @@ static int bsr_case_epoch_roll(void)
         ev.avg_latency_us = 9000;
         ev.last_useful_time = 1700000000;
         BSR_CHECK("a banked session is appended",
-                  ev_peer_session_closed_serialize(&ev, payload) &&
-                  event_log_append(log, EV_PEER_SESSION_CLOSED, payload,
-                                   sizeof(payload)) != UINT64_MAX);
+                  bsr_append_banked_session(log, &ev));
         BSR_CHECK("the peers projection folds it",
                   peers_projection_catch_up(proj) != UINT64_MAX);
     }
@@ -277,10 +359,8 @@ static int bsr_case_epoch_roll(void)
     boot_active_svc()->node_db = &ndb;
 
     BSR_CHECK("an addrman with nothing published reads exactly 1.0 everywhere",
-              bsr_weight_of(&am, ip_a) == 1.0 &&
-              bsr_weight_of(&am, ip_c) == 1.0 &&
-              bsr_weight_of(&am, ip_bandwidth) == 1.0 &&
-              addrman_reputation_weight_count(&am) == 0);
+              bsr_addrman_reads_baseline_everywhere(&am, ip_a, ip_c,
+                                                    ip_bandwidth));
 
     /* ── EPOCH ONE ─────────────────────────────────────────────────── */
 
@@ -298,9 +378,9 @@ static int bsr_case_epoch_roll(void)
 
     /* (1) */
     BSR_CHECK("(1) relay A earns a bounded boost in epoch one",
-              a1 > 1.0 && a1 <= ADDRMAN_REPUTATION_MAX_MULT);
+              bsr_boost_is_bounded(a1));
     BSR_CHECK("(1) relay C earns a bounded boost in epoch one",
-              c1 > 1.0 && c1 <= ADDRMAN_REPUTATION_MAX_MULT);
+              bsr_boost_is_bounded(c1));
     /* (4), first half: the bandwidth-only address, exactly 3.4. */
     BSR_CHECK("(4) the bandwidth-only address is boosted to exactly 3.4",
               fabs(b1 - 3.4) < 1e-12);
@@ -310,10 +390,7 @@ static int bsr_case_epoch_roll(void)
     /* Relay A LEAVES THE RANKING: its anchored identity is gone from the
      * projection, so the rebuild computes nothing for it. */
     BSR_CHECK("relay A leaves the ranking",
-              db_zid_identity_truncate(&ndb) &&
-              bsr_save_identity(&ndb, pk_c,
-                                "t1CtwoOwnerAddressCCCCCCCCCCCCCCC") &&
-              db_zid_identity_count(&ndb) == 1);
+              bsr_ranking_now_has_only_relay_c(&ndb, pk_c));
 
     /* Relay C KEEPS its anchor but LOSES its endpoint record: nothing signs
      * for its address any more, so it has no binding to be weighed through. */
@@ -349,13 +426,8 @@ static int bsr_case_epoch_roll(void)
               addrman_reputation_weight_count(&am) == 1);
 
     /* (5) Bounds and non-exclusion, on the addrman itself. */
-    bool bounded = true;
-    const double seen[6] = { a1, c1, b1, a2, c2, b2 };
-    for (size_t i = 0; i < 6; i++)
-        if (!(seen[i] >= 1.0 && seen[i] <= ADDRMAN_REPUTATION_MAX_MULT))
-            bounded = false;
     BSR_CHECK("(5) every multiplier in both epochs is inside [1.0, 4.0]",
-              bounded);
+              bsr_multipliers_all_in_bounds(a1, c1, b1, a2, c2, b2));
     BSR_CHECK("(5) no address was removed by either rebuild",
               addrman_size(&am) == size_before && size_before == 3);
 
@@ -364,22 +436,13 @@ static int bsr_case_epoch_roll(void)
     const struct addr_info *e_b = bsr_entry_of(&am, ip_bandwidth);
     BSR_CHECK("(5) every address is still present after two rebuilds",
               e_a && e_c && e_b);
-    /* An address the table dropped must land on the PLAIN chance — the same
-     * number an addrman that never heard of this subsystem would produce. */
-    double plain = e_a ? addr_info_get_chance(NULL, e_a, 1000000) : -1.0;
     BSR_CHECK("(5) a dropped address falls back to its unweighted dial chance",
-              e_a && plain > 0.0 &&
-              addr_info_get_chance(&am, e_a, 1000000) == plain);
+              bsr_dropped_address_keeps_plain_chance(&am, e_a));
     BSR_CHECK("(5) and no address is excluded — every chance is positive",
-              e_a && e_c && e_b &&
-              addr_info_get_chance(&am, e_a, 1000000) > 0.0 &&
-              addr_info_get_chance(&am, e_c, 1000000) > 0.0 &&
-              addr_info_get_chance(&am, e_b, 1000000) > 0.0);
+              bsr_no_address_excluded(&am, e_a, e_c, e_b));
     /* The one address still in the table is still boosted above plain. */
     BSR_CHECK("(5) the surviving boost still raises, never lowers, a chance",
-              e_b &&
-              addr_info_get_chance(&am, e_b, 1000000) >
-                  addr_info_get_chance(NULL, e_b, 1000000));
+              bsr_boost_raises_chance(&am, e_b));
 
     /* ── EPOCH THREE: everything goes ──────────────────────────────── */
 
