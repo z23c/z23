@@ -81,18 +81,111 @@ static void noic_merge(struct json_value *dst, const struct json_value *src)
     }
 }
 
+static bool noic_request_usable(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply,
+                                const char *rpc_method, const char *operation)
+{
+    return request && request->spec && reply && rpc_method && operation;
+}
+
+static bool noic_scope_valid(const char *scope)
+{
+    static const char *const noic_allowed_scopes[] = { "dev", "prod" };
+    if (!scope) return false;
+    for (size_t i = 0; i < sizeof(noic_allowed_scopes) /
+                              sizeof(noic_allowed_scopes[0]); i++)
+        if (strcmp(scope, noic_allowed_scopes[i]) == 0) return true;
+    return false;
+}
+
+static bool noic_intent_inputs_missing(bool confirm, const char *plan_id,
+                                       bool has_idempotency,
+                                       bool operation_inputs_present)
+{
+    if (confirm) return !plan_id || strlen(plan_id) != 64;
+    return !has_idempotency || !operation_inputs_present;
+}
+
+static void noic_build_forwarded(const struct zcl_command_request *request,
+                                 const char *operation, bool confirm,
+                                 struct json_value *forwarded)
+{
+    for (size_t i = 0; i < request->input->num_children; i++) {
+        const char *key = request->input->keys ? request->input->keys[i] : NULL;
+        if (key && key[0])
+            (void)json_push_kv(forwarded, key, &request->input->children[i]);
+    }
+    if (!confirm) (void)json_push_kv_str(forwarded, "operation", operation);
+}
+
+static bool noic_body_refused(const struct json_value *body,
+                              const char **message)
+{
+    return noic_rpc_error(body, message) || body->type != JSON_OBJ;
+}
+
+static void noic_format_refusal_message(char *message, size_t size,
+                                        const char *error)
+{
+    snprintf(message, size, "%s",
+             error && error[0] ? error : "overlay intent reported an error");
+}
+
+static const char *noic_expected_status(bool confirm)
+{
+    return confirm ? "broadcast" : "planned";
+}
+
+static bool noic_status_matches(const char *status, const char *expected)
+{
+    return status && strcmp(status, expected) == 0;
+}
+
+static void noic_format_status_message(char *message, size_t size,
+                                       const char *expected,
+                                       const char *status)
+{
+    snprintf(message, size, "overlay intent expected %s, got %s", expected,
+             status && status[0] ? status : "absent");
+}
+
+static void noic_stage_reply(struct zcl_command_reply *reply,
+                             const struct json_value *body, const char *scope,
+                             bool confirm)
+{
+    if (!confirm) {
+        const char *durable = json_get_str(json_get(body, "plan_id"));
+        struct json_value commit;
+        json_init(&commit); json_set_object(&commit);
+        (void)json_push_kv_str(&commit, "wallet_scope", scope);
+        (void)json_push_kv_str(&commit, "plan_id", durable ? durable : "");
+        (void)json_push_kv_bool(&commit, "confirm", true);
+        char encoded[256];
+        size_t wrote = json_write(&commit, encoded, sizeof(encoded));
+        json_free(&commit);
+        if (wrote == 0 || wrote >= sizeof(encoded))
+            snprintf(encoded, sizeof(encoded), "{\"confirm\":true}");
+        (void)json_push_kv_str(&reply->data, "stage", "plan");
+        (void)json_push_kv_bool(&reply->data, "committed", false);
+        (void)json_push_kv_str(&reply->data, "commit_input", encoded);
+    } else {
+        (void)json_push_kv_str(&reply->data, "stage", "committed");
+        (void)json_push_kv_bool(&reply->data, "committed", true);
+    }
+}
+
 void zcl_native_overlay_intent_run(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply, const char *rpc_method,
     const char *operation, bool operation_inputs_present)
 {
-    if (!request || !request->spec || !reply || !rpc_method || !operation)
+    if (!noic_request_usable(request, reply, rpc_method, operation))
         return;
     const char *path = request->spec->path;
     const char *scope = json_get_str(json_get(request->input, "wallet_scope"));
     bool confirm = json_get_bool_or(request->input, "confirm", false);
     const char *plan_id = json_get_str(json_get(request->input, "plan_id"));
-    if (!scope || (strcmp(scope, "dev") != 0 && strcmp(scope, "prod") != 0)) {
+    if (!noic_scope_valid(scope)) {
         noic_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                   "WALLET_SCOPE_REQUIRED", "normalize",
                   "wallet_scope must explicitly be dev or prod", path);
@@ -100,8 +193,8 @@ void zcl_native_overlay_intent_run(
     }
     bool has_idempotency =
         json_get_str(json_get(request->input, "idempotency_key")) != NULL;
-    if ((confirm && (!plan_id || strlen(plan_id) != 64)) ||
-        (!confirm && (!has_idempotency || !operation_inputs_present))) {
+    if (noic_intent_inputs_missing(confirm, plan_id, has_idempotency,
+                                   operation_inputs_present)) {
         noic_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                   "MISSING_INPUT", "normalize",
                   confirm
@@ -112,12 +205,7 @@ void zcl_native_overlay_intent_run(
     }
     struct json_value forwarded;
     json_init(&forwarded); json_set_object(&forwarded);
-    for (size_t i = 0; i < request->input->num_children; i++) {
-        const char *key = request->input->keys ? request->input->keys[i] : NULL;
-        if (key && key[0])
-            (void)json_push_kv(&forwarded, key, &request->input->children[i]);
-    }
-    if (!confirm) (void)json_push_kv_str(&forwarded, "operation", operation);
+    noic_build_forwarded(request, operation, confirm, &forwarded);
     struct rpc_arg_builder args;
     rpc_arg_builder_init(&args);
     rpc_arg_builder_push_value(&args, &forwarded);
@@ -150,47 +238,26 @@ void zcl_native_overlay_intent_run(
         return;
     }
     const char *error = NULL;
-    if (noic_rpc_error(&body, &error) || body.type != JSON_OBJ) {
+    if (noic_body_refused(&body, &error)) {
         char message[256];
-        snprintf(message, sizeof(message), "%s",
-                 error && error[0] ? error : "overlay intent reported an error");
+        noic_format_refusal_message(message, sizeof(message), error);
         json_free(&body);
         noic_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
                   "OVERLAY_INTENT_REFUSED", "execute", message, rpc_method);
         return;
     }
     const char *status = json_get_str(json_get(&body, "status"));
-    const char *expected = confirm ? "broadcast" : "planned";
-    if (!status || strcmp(status, expected) != 0) {
+    const char *expected = noic_expected_status(confirm);
+    if (!noic_status_matches(status, expected)) {
         char message[192];
-        snprintf(message, sizeof(message),
-                 "overlay intent expected %s, got %s", expected,
-                 status && status[0] ? status : "absent");
+        noic_format_status_message(message, sizeof(message), expected, status);
         json_free(&body);
         noic_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
                   "OVERLAY_INTENT_INCOMPLETE", "execute", message, rpc_method);
         return;
     }
     noic_merge(&reply->data, &body);
-    if (!confirm) {
-        const char *durable = json_get_str(json_get(&body, "plan_id"));
-        struct json_value commit;
-        json_init(&commit); json_set_object(&commit);
-        (void)json_push_kv_str(&commit, "wallet_scope", scope);
-        (void)json_push_kv_str(&commit, "plan_id", durable ? durable : "");
-        (void)json_push_kv_bool(&commit, "confirm", true);
-        char encoded[256];
-        size_t wrote = json_write(&commit, encoded, sizeof(encoded));
-        json_free(&commit);
-        if (wrote == 0 || wrote >= sizeof(encoded))
-            snprintf(encoded, sizeof(encoded), "{\"confirm\":true}");
-        (void)json_push_kv_str(&reply->data, "stage", "plan");
-        (void)json_push_kv_bool(&reply->data, "committed", false);
-        (void)json_push_kv_str(&reply->data, "commit_input", encoded);
-    } else {
-        (void)json_push_kv_str(&reply->data, "stage", "committed");
-        (void)json_push_kv_bool(&reply->data, "committed", true);
-    }
+    noic_stage_reply(reply, &body, scope, confirm);
     json_free(&body);
     reply->error.mutated = true; /* plan atomically reserves custody */
 }
