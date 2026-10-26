@@ -65,86 +65,93 @@ static bool blb_path(char *out, size_t out_n, const char *dir,
     return n >= 0 && (size_t)n < out_n;
 }
 
+struct blb_stage {
+    char root[256];
+    char legacy_blocks[512];
+    char datadir[512];
+    char p[512];
+    char dest_blk[512];
+    char dest_rev[512];
+};
+
+static bool blb_stage_block_pair(struct blb_stage *s, const char *tag,
+                                 const char *blk_text, bool seed_dest_blk)
+{
+    test_make_tmpdir(s->root, sizeof(s->root), "boot_legacy_blocks", tag);
+    bool ok = blb_make_blocks_dirs(s->root, s->legacy_blocks,
+                                   sizeof(s->legacy_blocks),
+                                   s->datadir, sizeof(s->datadir));
+    ok = ok && blb_path(s->p, sizeof(s->p), s->legacy_blocks,
+                        "blk00000.dat") &&
+         blb_write_file(s->p, blk_text);
+    ok = ok && blb_path(s->p, sizeof(s->p), s->legacy_blocks,
+                        "rev00000.dat") &&
+         blb_write_file(s->p, "rev0");
+    ok = ok && blb_path(s->dest_blk, sizeof(s->dest_blk), s->datadir,
+                        "blocks/blk00000.dat");
+    if (seed_dest_blk)
+        ok = ok && blb_write_file(s->dest_blk, blk_text);
+    ok = ok && blb_path(s->dest_rev, sizeof(s->dest_rev), s->datadir,
+                        "blocks/rev00000.dat");
+    return ok;
+}
+
+static bool blb_import_pair_reaches_dest(struct blb_stage *s)
+{
+    bool ok = blb_stage_block_pair(s, "import", "blk0", false);
+    struct boot_legacy_block_file_import_result r =
+        boot_legacy_import_block_files(s->legacy_blocks, s->datadir, 4);
+    return ok && r.destination_ready && r.source_available &&
+           !r.truncated_path && r.failures == 0 &&
+           access(s->dest_blk, F_OK) == 0 &&
+           access(s->dest_rev, F_OK) == 0;
+}
+
+static bool blb_import_pair_skips_existing_blk(struct blb_stage *s)
+{
+    bool ok = blb_stage_block_pair(s, "skip", "same", true);
+    struct boot_legacy_block_file_import_result r =
+        boot_legacy_import_block_files(s->legacy_blocks, s->datadir, 4);
+    return ok && r.destination_ready && r.source_available &&
+           r.failures == 0 && access(s->dest_blk, F_OK) == 0 &&
+           access(s->dest_rev, F_OK) != 0;
+}
+
+static bool blb_link_pair_links_missing(struct blb_stage *s)
+{
+    bool ok = blb_stage_block_pair(s, "link", "blk0", false);
+    struct boot_legacy_block_file_link_result r =
+        boot_legacy_link_missing_block_files(s->legacy_blocks, s->datadir, 4);
+    return ok && r.destination_ready && r.source_available &&
+           !r.truncated_path && r.linked == 1 &&
+           access(s->dest_blk, F_OK) == 0 &&
+           access(s->dest_rev, F_OK) == 0;
+}
+
 int test_boot_legacy_blocks(void)
 {
     int failures = 0;
 
     {
-        char root[256], legacy_blocks[512], datadir[512];
-        char p[512], dest_blk[512], dest_rev[512];
-        test_make_tmpdir(root, sizeof(root), "boot_legacy_blocks", "import");
-        bool ok = blb_make_blocks_dirs(root, legacy_blocks,
-                                       sizeof(legacy_blocks),
-                                       datadir, sizeof(datadir));
-        ok = ok && blb_path(p, sizeof(p), legacy_blocks, "blk00000.dat") &&
-             blb_write_file(p, "blk0");
-        ok = ok && blb_path(p, sizeof(p), legacy_blocks, "rev00000.dat") &&
-             blb_write_file(p, "rev0");
-        ok = ok && blb_path(dest_blk, sizeof(dest_blk), datadir,
-                            "blocks/blk00000.dat");
-        ok = ok && blb_path(dest_rev, sizeof(dest_rev), datadir,
-                            "blocks/rev00000.dat");
-
-        struct boot_legacy_block_file_import_result r =
-            boot_legacy_import_block_files(legacy_blocks, datadir, 4);
-        BLB_CHECK("import links or copies blk and rev pair",
-                  ok && r.destination_ready && r.source_available &&
-                  !r.truncated_path && r.failures == 0 &&
-                  access(dest_blk, F_OK) == 0 &&
-                  access(dest_rev, F_OK) == 0);
-        test_rm_rf_recursive(root);
+        struct blb_stage s;
+        bool pass = blb_import_pair_reaches_dest(&s);
+        BLB_CHECK("import links or copies blk and rev pair", pass);
+        test_rm_rf_recursive(s.root);
     }
 
     {
-        char root[256], legacy_blocks[512], datadir[512];
-        char p[512], dest_blk[512], dest_rev[512];
-        test_make_tmpdir(root, sizeof(root), "boot_legacy_blocks", "skip");
-        bool ok = blb_make_blocks_dirs(root, legacy_blocks,
-                                       sizeof(legacy_blocks),
-                                       datadir, sizeof(datadir));
-        ok = ok && blb_path(p, sizeof(p), legacy_blocks, "blk00000.dat") &&
-             blb_write_file(p, "same");
-        ok = ok && blb_path(p, sizeof(p), legacy_blocks, "rev00000.dat") &&
-             blb_write_file(p, "rev0");
-        ok = ok && blb_path(dest_blk, sizeof(dest_blk), datadir,
-                            "blocks/blk00000.dat") &&
-             blb_write_file(dest_blk, "same");
-        ok = ok && blb_path(dest_rev, sizeof(dest_rev), datadir,
-                            "blocks/rev00000.dat");
-
-        struct boot_legacy_block_file_import_result r =
-            boot_legacy_import_block_files(legacy_blocks, datadir, 4);
+        struct blb_stage s;
+        bool pass = blb_import_pair_skips_existing_blk(&s);
         BLB_CHECK("existing same-size blk preserves legacy skip semantics",
-                  ok && r.destination_ready && r.source_available &&
-                  r.failures == 0 && access(dest_blk, F_OK) == 0 &&
-                  access(dest_rev, F_OK) != 0);
-        test_rm_rf_recursive(root);
+                  pass);
+        test_rm_rf_recursive(s.root);
     }
 
     {
-        char root[256], legacy_blocks[512], datadir[512];
-        char p[512], dest_blk[512], dest_rev[512];
-        test_make_tmpdir(root, sizeof(root), "boot_legacy_blocks", "link");
-        bool ok = blb_make_blocks_dirs(root, legacy_blocks,
-                                       sizeof(legacy_blocks),
-                                       datadir, sizeof(datadir));
-        ok = ok && blb_path(p, sizeof(p), legacy_blocks, "blk00000.dat") &&
-             blb_write_file(p, "blk0");
-        ok = ok && blb_path(p, sizeof(p), legacy_blocks, "rev00000.dat") &&
-             blb_write_file(p, "rev0");
-        ok = ok && blb_path(dest_blk, sizeof(dest_blk), datadir,
-                            "blocks/blk00000.dat");
-        ok = ok && blb_path(dest_rev, sizeof(dest_rev), datadir,
-                            "blocks/rev00000.dat");
-
-        struct boot_legacy_block_file_link_result r =
-            boot_legacy_link_missing_block_files(legacy_blocks, datadir, 4);
-        BLB_CHECK("warm helper links missing blk and rev files",
-                  ok && r.destination_ready && r.source_available &&
-                  !r.truncated_path && r.linked == 1 &&
-                  access(dest_blk, F_OK) == 0 &&
-                  access(dest_rev, F_OK) == 0);
-        test_rm_rf_recursive(root);
+        struct blb_stage s;
+        bool pass = blb_link_pair_links_missing(&s);
+        BLB_CHECK("warm helper links missing blk and rev files", pass);
+        test_rm_rf_recursive(s.root);
     }
 
     {
