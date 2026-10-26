@@ -116,9 +116,6 @@ contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:4
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:79
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_assemble:27
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_process_scope:56
-contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:bundle_parse_parts:17
-contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:bundle_validate_authority:18
-contexts/commons/modules/vcs/src/zcode_candidate_bundle.c:vcs_zcode_candidate_bundle_export:27
 contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_decode:16
 contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_from_selection:18
 contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_validate:28

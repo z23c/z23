@@ -123,6 +123,65 @@ static enum vcs_zcode_candidate_bundle_result bundle_task_binding(
         : VCS_ZCODE_CANDIDATE_BUNDLE_AUTHORITY;
 }
 
+static bool bundle_measure_payload(
+    size_t scope_len, size_t patch_len, size_t base_len, size_t candidate_len,
+    const struct bundle_blob *blobs, size_t blob_count,
+    enum vcs_zcode_candidate_bundle_result result, size_t *total_out)
+{
+    size_t total = VCS_ZCODE_CANDIDATE_BUNDLE_HEADER_BYTES;
+    bool sized = result == VCS_ZCODE_CANDIDATE_BUNDLE_OK &&
+        bundle_add_size(&total, scope_len) &&
+        bundle_add_size(&total, patch_len) && bundle_add_size(&total, base_len) &&
+        bundle_add_size(&total, candidate_len);
+    for (size_t i = 0; sized && i < blob_count; i++)
+        sized = bundle_add_size(
+            &total, VCS_ZCODE_CANDIDATE_BUNDLE_BLOB_HEADER_BYTES) &&
+            bundle_add_size(&total, blobs[i].len);
+    *total_out = total;
+    return sized;
+}
+
+static enum vcs_zcode_candidate_bundle_result bundle_finish_export(
+    uint8_t *scope, size_t scope_len, uint8_t *patch_wire, size_t patch_len,
+    uint8_t *base, size_t base_len,
+    uint8_t *candidate_wire, size_t candidate_len,
+    struct bundle_blob *blobs, size_t blob_count, size_t total,
+    enum vcs_zcode_candidate_bundle_result result,
+    uint8_t **wire_out, size_t *wire_len)
+{
+    uint8_t *wire = zcl_malloc(total, "zcode.candidate_bundle.wire");
+    if (!wire) result = VCS_ZCODE_CANDIDATE_BUNDLE_ALLOC;
+    if (result == VCS_ZCODE_CANDIDATE_BUNDLE_OK) {
+        memcpy(wire, bundle_magic, 8);
+        vcs_wr_u16le(wire + 8, VCS_ZCODE_CANDIDATE_BUNDLE_VERSION);
+        vcs_wr_u16le(wire + 10, 0);
+        vcs_wr_u32le(wire + 12, (uint32_t)blob_count);
+        vcs_wr_u64le(wire + 16, scope_len);
+        vcs_wr_u64le(wire + 24, patch_len);
+        vcs_wr_u64le(wire + 32, base_len);
+        vcs_wr_u64le(wire + 40, candidate_len);
+        size_t off = VCS_ZCODE_CANDIDATE_BUNDLE_HEADER_BYTES;
+        memcpy(wire + off, scope, scope_len); off += scope_len;
+        memcpy(wire + off, patch_wire, patch_len); off += patch_len;
+        memcpy(wire + off, base, base_len); off += base_len;
+        memcpy(wire + off, candidate_wire, candidate_len); off += candidate_len;
+        for (size_t i = 0; i < blob_count; i++) {
+            memcpy(wire + off, blobs[i].hash, 32); off += 32;
+            vcs_wr_u64le(wire + off, blobs[i].len); off += 8;
+            memcpy(wire + off, blobs[i].bytes, blobs[i].len);
+            off += blobs[i].len;
+        }
+        if (off != total) result = VCS_ZCODE_CANDIDATE_BUNDLE_SHAPE;
+    }
+    bundle_blobs_free(blobs, blob_count);
+    free(candidate_wire); free(base); free(patch_wire); free(scope);
+    if (result != VCS_ZCODE_CANDIDATE_BUNDLE_OK) {
+        free(wire); return result;
+    }
+    *wire_out = wire; *wire_len = total;
+    return VCS_ZCODE_CANDIDATE_BUNDLE_OK;
+}
+
 enum vcs_zcode_candidate_bundle_result vcs_zcode_candidate_bundle_export(
     const char *repo_root, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
@@ -161,15 +220,9 @@ enum vcs_zcode_candidate_bundle_result vcs_zcode_candidate_bundle_export(
         repo_root, &parsed_patch, &blobs, &blob_count,
         task->max_patch_bytes);
     vcs_zcode_patch_free(&parsed_patch);
-    size_t total = VCS_ZCODE_CANDIDATE_BUNDLE_HEADER_BYTES;
-    bool sized = result == VCS_ZCODE_CANDIDATE_BUNDLE_OK &&
-        bundle_add_size(&total, scope_len) &&
-        bundle_add_size(&total, patch_len) && bundle_add_size(&total, base_len) &&
-        bundle_add_size(&total, candidate_len);
-    for (size_t i = 0; sized && i < blob_count; i++)
-        sized = bundle_add_size(
-            &total, VCS_ZCODE_CANDIDATE_BUNDLE_BLOB_HEADER_BYTES) &&
-            bundle_add_size(&total, blobs[i].len);
+    size_t total = 0;
+    bool sized = bundle_measure_payload(scope_len, patch_len,
+        base_len, candidate_len, blobs, blob_count, result, &total);
     if (!sized || total > task->max_context_bytes ||
         total > VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES || blob_count > UINT32_MAX) {
         if (result == VCS_ZCODE_CANDIDATE_BUNDLE_OK)
@@ -178,37 +231,9 @@ enum vcs_zcode_candidate_bundle_result vcs_zcode_candidate_bundle_export(
         free(candidate_wire); free(base); free(patch_wire); free(scope);
         return result;
     }
-    uint8_t *wire = zcl_malloc(total, "zcode.candidate_bundle.wire");
-    if (!wire) result = VCS_ZCODE_CANDIDATE_BUNDLE_ALLOC;
-    if (result == VCS_ZCODE_CANDIDATE_BUNDLE_OK) {
-        memcpy(wire, bundle_magic, 8);
-        vcs_wr_u16le(wire + 8, VCS_ZCODE_CANDIDATE_BUNDLE_VERSION);
-        vcs_wr_u16le(wire + 10, 0);
-        vcs_wr_u32le(wire + 12, (uint32_t)blob_count);
-        vcs_wr_u64le(wire + 16, scope_len);
-        vcs_wr_u64le(wire + 24, patch_len);
-        vcs_wr_u64le(wire + 32, base_len);
-        vcs_wr_u64le(wire + 40, candidate_len);
-        size_t off = VCS_ZCODE_CANDIDATE_BUNDLE_HEADER_BYTES;
-        memcpy(wire + off, scope, scope_len); off += scope_len;
-        memcpy(wire + off, patch_wire, patch_len); off += patch_len;
-        memcpy(wire + off, base, base_len); off += base_len;
-        memcpy(wire + off, candidate_wire, candidate_len); off += candidate_len;
-        for (size_t i = 0; i < blob_count; i++) {
-            memcpy(wire + off, blobs[i].hash, 32); off += 32;
-            vcs_wr_u64le(wire + off, blobs[i].len); off += 8;
-            memcpy(wire + off, blobs[i].bytes, blobs[i].len);
-            off += blobs[i].len;
-        }
-        if (off != total) result = VCS_ZCODE_CANDIDATE_BUNDLE_SHAPE;
-    }
-    bundle_blobs_free(blobs, blob_count);
-    free(candidate_wire); free(base); free(patch_wire); free(scope);
-    if (result != VCS_ZCODE_CANDIDATE_BUNDLE_OK) {
-        free(wire); return result;
-    }
-    *wire_out = wire; *wire_len = total;
-    return VCS_ZCODE_CANDIDATE_BUNDLE_OK;
+    return bundle_finish_export(scope, scope_len, patch_wire, patch_len,
+        base, base_len, candidate_wire, candidate_len,
+        blobs, blob_count, total, result, wire_out, wire_len);
 }
 
 static bool bundle_take(const uint8_t *wire, size_t wire_len, size_t *off,
@@ -220,11 +245,10 @@ static bool bundle_take(const uint8_t *wire, size_t wire_len, size_t *off,
     return true;
 }
 
-static enum vcs_zcode_candidate_bundle_result bundle_parse_parts(
+static enum vcs_zcode_candidate_bundle_result bundle_parts_header(
     const uint8_t *wire, size_t wire_len,
     const struct vcs_zcode_task_v1 *task, struct bundle_parts *parts)
 {
-    memset(parts, 0, sizeof(*parts));
     if (wire_len < VCS_ZCODE_CANDIDATE_BUNDLE_HEADER_BYTES ||
         wire_len > task->max_context_bytes ||
         wire_len > VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES ||
@@ -234,6 +258,17 @@ static enum vcs_zcode_candidate_bundle_result bundle_parse_parts(
         return VCS_ZCODE_CANDIDATE_BUNDLE_SHAPE;
     parts->blob_count = vcs_rd_u32le(wire + 12);
     if (parts->blob_count > 4096u) return VCS_ZCODE_CANDIDATE_BUNDLE_LIMIT;
+    return VCS_ZCODE_CANDIDATE_BUNDLE_OK;
+}
+
+static enum vcs_zcode_candidate_bundle_result bundle_parse_parts(
+    const uint8_t *wire, size_t wire_len,
+    const struct vcs_zcode_task_v1 *task, struct bundle_parts *parts)
+{
+    memset(parts, 0, sizeof(*parts));
+    enum vcs_zcode_candidate_bundle_result result =
+        bundle_parts_header(wire, wire_len, task, parts);
+    if (result != VCS_ZCODE_CANDIDATE_BUNDLE_OK) return result;
     size_t off = VCS_ZCODE_CANDIDATE_BUNDLE_HEADER_BYTES;
     if (!bundle_take(wire, wire_len, &off, vcs_rd_u64le(wire + 16),
                      &parts->scope, &parts->scope_len) ||
@@ -256,6 +291,35 @@ static enum vcs_zcode_candidate_bundle_result bundle_parse_parts(
     }
     return off == wire_len ? VCS_ZCODE_CANDIDATE_BUNDLE_OK
                            : VCS_ZCODE_CANDIDATE_BUNDLE_SHAPE;
+}
+
+static bool bundle_validate_patch(
+    const struct bundle_parts *parts, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    struct vcs_zcode_patch_v1 *patch_out, uint8_t checked[32],
+    const struct vcs_zcode_write_scope_v1 *scope,
+    struct vcs_manifest *base,
+    struct vcs_manifest *candidate_manifest)
+{
+    bool valid = vcs_manifest_tree_hash(candidate_manifest, checked) &&
+        memcmp(checked, candidate->candidate_source_root, 32) == 0 &&
+        vcs_zcode_patch_parse(parts->patch, parts->patch_len, patch_out) ==
+            VCS_ZCODE_PATCH_OK &&
+        vcs_zcode_patch_root(patch_out, checked) == VCS_ZCODE_PATCH_OK &&
+        memcmp(checked, candidate->patch_root, 32) == 0;
+    if (valid) {
+        struct vcs_zcode_patch_v1 derived;
+        bool derived_ready = vcs_zcode_patch_derive(
+            base, task->source_root, candidate_manifest,
+            candidate->candidate_source_root, scope,
+            task->max_changed_files, task->max_patch_bytes, &derived) ==
+                VCS_ZCODE_PATCH_OK;
+        valid = derived_ready &&
+            vcs_zcode_patch_root(&derived, checked) == VCS_ZCODE_PATCH_OK &&
+            memcmp(checked, candidate->patch_root, 32) == 0;
+        if (derived_ready) vcs_zcode_patch_free(&derived);
+    }
+    return valid;
 }
 
 static enum vcs_zcode_candidate_bundle_result bundle_validate_authority(
@@ -283,24 +347,8 @@ static enum vcs_zcode_candidate_bundle_result bundle_validate_authority(
         vcs_manifest_free(&base);
         return VCS_ZCODE_CANDIDATE_BUNDLE_AUTHORITY;
     }
-    valid = vcs_manifest_tree_hash(&candidate_manifest, checked) &&
-        memcmp(checked, candidate->candidate_source_root, 32) == 0 &&
-        vcs_zcode_patch_parse(parts->patch, parts->patch_len, patch_out) ==
-            VCS_ZCODE_PATCH_OK &&
-        vcs_zcode_patch_root(patch_out, checked) == VCS_ZCODE_PATCH_OK &&
-        memcmp(checked, candidate->patch_root, 32) == 0;
-    if (valid) {
-        struct vcs_zcode_patch_v1 derived;
-        bool derived_ready = vcs_zcode_patch_derive(
-            &base, task->source_root, &candidate_manifest,
-            candidate->candidate_source_root, &scope,
-            task->max_changed_files, task->max_patch_bytes, &derived) ==
-                VCS_ZCODE_PATCH_OK;
-        valid = derived_ready &&
-            vcs_zcode_patch_root(&derived, checked) == VCS_ZCODE_PATCH_OK &&
-            memcmp(checked, candidate->patch_root, 32) == 0;
-        if (derived_ready) vcs_zcode_patch_free(&derived);
-    }
+    valid = bundle_validate_patch(parts, task, candidate, patch_out,
+        checked, &scope, &base, &candidate_manifest);
     vcs_manifest_free(&candidate_manifest); vcs_manifest_free(&base);
     if (!valid) vcs_zcode_patch_free(patch_out);
     return valid ? VCS_ZCODE_CANDIDATE_BUNDLE_OK
