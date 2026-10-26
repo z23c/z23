@@ -442,6 +442,7 @@ void effects_update(effects_manager_t* manager, float dt) {
     // Update global particles
     effects_update_global_particles(manager, dt);
     
+    // Update combat feedback
     effects_update_combat_feedbacks(manager, dt);
     
     // Update screen effects
