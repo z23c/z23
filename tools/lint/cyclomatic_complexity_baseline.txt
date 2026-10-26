@@ -1412,16 +1412,6 @@ tools/dev/dev_activation.c:dev_derive_paths:19
 tools/dev/dev_activation.c:dev_validate_confinement:29
 tools/dev/dev_activation.c:dev_write_in_progress:23
 tools/dev/dev_activation_stage.c:dev_activation_stage_candidate:39
-tools/dev/dev_failure_store.c:atomic_replace_at:21
-tools/dev/dev_failure_store.c:latest_read:23
-tools/dev/dev_failure_store.c:observation_read:20
-tools/dev/dev_failure_store.c:read_file_at:29
-tools/dev/dev_failure_store.c:record_json:16
-tools/dev/dev_failure_store.c:store_open:23
-tools/dev/dev_failure_store.c:zcl_dev_failure_match_latest:20
-tools/dev/dev_failure_store.c:zcl_dev_failure_normalize_error:19
-tools/dev/dev_failure_store.c:zcl_dev_failure_note_coalesced:32
-tools/dev/dev_failure_store.c:zcl_dev_failure_record_failure:73
 tools/dev/dev_proof_receipt.c:verdict_payload_valid:16
 tools/dev/dev_proof_receipt.c:zcl_dev_proof_receipt_parse:17
 tools/dev/dev_proof_receipt.c:zcl_dev_verdict_leaf_verify:16

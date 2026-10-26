@@ -132,6 +132,13 @@ static void digest_finish(struct sha3_256_ctx *ctx, char out[65])
     zcl_hex_encode(digest, 32, out);
 }
 
+static const unsigned char *normalize_error_skip_blank(const unsigned char *p)
+{
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
+        p++;
+    return p;
+}
+
 bool zcl_dev_failure_normalize_error(const char *input,
                                      char out[ZCL_DEV_FAILURE_ERROR_MAX])
 {
@@ -139,9 +146,8 @@ bool zcl_dev_failure_normalize_error(const char *input,
         return false;
     size_t pos = 0;
     bool pending_space = false;
-    const unsigned char *p = (const unsigned char *)input;
-    while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
-        p++;
+    const unsigned char *p =
+        normalize_error_skip_blank((const unsigned char *)input);
     for (; *p; p++) {
         unsigned char c = *p;
         if (c == '\r' || c == '\n')
@@ -271,29 +277,12 @@ static void store_close(struct failure_store *store)
 #endif
 }
 
-static enum store_open_result store_open(const char *repo_root, bool create,
-                                         struct failure_store *store,
-                                         char *why, size_t why_len)
+#if defined(_WIN32)
+static enum store_open_result store_open_dirs_win32(const char *path,
+                                                    bool create,
+                                                    struct failure_store *store,
+                                                    char *why, size_t why_len)
 {
-    memset(store, 0, sizeof(*store));
-#if defined(_WIN32)
-    platform_directory_transaction_init(&store->workspace.value);
-    platform_directory_transaction_init(&store->failures.value);
-#else
-    store->workspace.value = -1;
-    store->failures.value = -1;
-#endif
-    char path[PATH_MAX];
-    if (!zcl_devloop_workspace_resolve(repo_root, store->workspace_id,
-                                       path, sizeof(path))) {
-        set_why(why, why_len, "failure_store_workspace_unavailable");
-        return STORE_OPEN_INVALID;
-    }
-    if (create && !mkdirs(path)) {
-        set_why(why, why_len, "failure_store_workspace_create_failed");
-        return STORE_OPEN_INVALID;
-    }
-#if defined(_WIN32)
     if (strlen(path) >= sizeof(store->workspace.path))
         return STORE_OPEN_INVALID;
     (void)snprintf(store->workspace.path, sizeof(store->workspace.path), "%s", path);
@@ -316,7 +305,14 @@ static enum store_open_result store_open(const char *repo_root, bool create,
     if (pn <= 0 || (size_t)pn >= sizeof(store->failures.path)) {
         store_close(store); return STORE_OPEN_INVALID;
     }
+    return STORE_OPEN_OK;
+}
 #else
+static enum store_open_result store_open_dirs_posix(const char *path,
+                                                    bool create,
+                                                    struct failure_store *store,
+                                                    char *why, size_t why_len)
+{
     store->workspace.value = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC |
                                       O_NOFOLLOW);
     if (store->workspace.value < 0 && !create && errno == ENOENT)
@@ -344,8 +340,37 @@ static enum store_open_result store_open(const char *repo_root, bool create,
         store_close(store);
         return STORE_OPEN_INVALID;
     }
-#endif
     return STORE_OPEN_OK;
+}
+#endif
+
+static enum store_open_result store_open(const char *repo_root, bool create,
+                                         struct failure_store *store,
+                                         char *why, size_t why_len)
+{
+    memset(store, 0, sizeof(*store));
+#if defined(_WIN32)
+    platform_directory_transaction_init(&store->workspace.value);
+    platform_directory_transaction_init(&store->failures.value);
+#else
+    store->workspace.value = -1;
+    store->failures.value = -1;
+#endif
+    char path[PATH_MAX];
+    if (!zcl_devloop_workspace_resolve(repo_root, store->workspace_id,
+                                       path, sizeof(path))) {
+        set_why(why, why_len, "failure_store_workspace_unavailable");
+        return STORE_OPEN_INVALID;
+    }
+    if (create && !mkdirs(path)) {
+        set_why(why, why_len, "failure_store_workspace_create_failed");
+        return STORE_OPEN_INVALID;
+    }
+#if defined(_WIN32)
+    return store_open_dirs_win32(path, create, store, why, why_len);
+#else
+    return store_open_dirs_posix(path, create, store, why, why_len);
+#endif
 }
 
 static bool store_lock(const struct failure_store *store, bool exclusive,
@@ -451,10 +476,11 @@ static bool unique_temp_name(const char *kind, char out[96])
     return n > 0 && n < 96;
 }
 
-static bool atomic_replace_at(struct failure_dir *dir, const char *final_name,
-                              const char *kind, const char *body, size_t len)
-{
 #if defined(_WIN32)
+static bool atomic_replace_win32(struct failure_dir *dir,
+                                 const char *final_name, const char *kind,
+                                 const char *body, size_t len)
+{
     char temp[96] = {0};
     struct platform_directory_child file;
     platform_directory_child_init(&file);
@@ -473,7 +499,12 @@ static bool atomic_replace_at(struct failure_dir *dir, const char *final_name,
     if (created && !ok)
         (void)platform_directory_child_unlink(&dir->value, temp, true);
     return ok;
+}
 #else
+static bool atomic_replace_posix(struct failure_dir *dir,
+                                 const char *final_name, const char *kind,
+                                 const char *body, size_t len)
+{
     int dirfd = dir->value;
     char temp[96] = {0};
     int fd = -1;
@@ -498,17 +529,45 @@ static bool atomic_replace_at(struct failure_dir *dir, const char *final_name,
     if (!ok)
         (void)unlinkat(dirfd, temp, 0);
     return ok;
+}
+#endif
+
+static bool atomic_replace_at(struct failure_dir *dir, const char *final_name,
+                              const char *kind, const char *body, size_t len)
+{
+#if defined(_WIN32)
+    return atomic_replace_win32(dir, final_name, kind, body, len);
+#else
+    return atomic_replace_posix(dir, final_name, kind, body, len);
 #endif
 }
 
-static enum zcl_dev_failure_lookup read_file_at(struct failure_dir *dir,
-                                                const char *name,
-                                                char *body, size_t cap,
-                                                size_t *len_out)
-{
 #if defined(_WIN32)
+static bool read_file_verify_win32(struct platform_directory_child *file,
+                                   const struct platform_directory_child_info *before,
+                                   char *body)
+{
+    struct platform_directory_child_info after;
+    return platform_directory_child_read_exact(
+               file, body, (size_t)before->size, 0) &&
+           platform_directory_child_info(file, &after) &&
+           before->volume == after.volume &&
+           before->file_low == after.file_low &&
+           before->file_high == after.file_high &&
+           before->size == after.size &&
+           before->modified_seconds == after.modified_seconds &&
+           before->modified_nanoseconds == after.modified_nanoseconds &&
+           before->changed_seconds == after.changed_seconds &&
+           before->changed_nanoseconds == after.changed_nanoseconds;
+}
+
+static enum zcl_dev_failure_lookup read_file_win32(struct failure_dir *dir,
+                                                   const char *name,
+                                                   char *body, size_t cap,
+                                                   size_t *len_out)
+{
     struct platform_directory_child file;
-    struct platform_directory_child_info before, after;
+    struct platform_directory_child_info before;
     platform_directory_child_init(&file);
     enum platform_directory_result opened = platform_directory_child_open_result(
         &dir->value, name, false, false, &file, NULL);
@@ -517,20 +576,18 @@ static enum zcl_dev_failure_lookup read_file_at(struct failure_dir *dir,
     bool ok = opened == PLATFORM_DIRECTORY_OK &&
         platform_directory_child_info(&file, &before) && before.size > 0 &&
         before.size < cap && before.current_user_only && before.link_count == 1;
-    if (ok) ok = platform_directory_child_read_exact(
-        &file, body, (size_t)before.size, 0) &&
-        platform_directory_child_info(&file, &after) &&
-        before.volume == after.volume && before.file_low == after.file_low &&
-        before.file_high == after.file_high && before.size == after.size &&
-        before.modified_seconds == after.modified_seconds &&
-        before.modified_nanoseconds == after.modified_nanoseconds &&
-        before.changed_seconds == after.changed_seconds &&
-        before.changed_nanoseconds == after.changed_nanoseconds;
+    if (ok) ok = read_file_verify_win32(&file, &before, body);
     platform_directory_child_close(&file);
     if (!ok) return ZCL_DEV_FAILURE_LOOKUP_INVALID;
     body[before.size] = 0; *len_out = (size_t)before.size;
     return ZCL_DEV_FAILURE_LOOKUP_FOUND;
+}
 #else
+static enum zcl_dev_failure_lookup read_file_posix(struct failure_dir *dir,
+                                                   const char *name,
+                                                   char *body, size_t cap,
+                                                   size_t *len_out)
+{
     int dirfd = dir->value;
     int fd = openat(dirfd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0 && errno == ENOENT)
@@ -562,6 +619,18 @@ static enum zcl_dev_failure_lookup read_file_at(struct failure_dir *dir,
     body[off] = 0;
     *len_out = off;
     return ZCL_DEV_FAILURE_LOOKUP_FOUND;
+}
+#endif
+
+static enum zcl_dev_failure_lookup read_file_at(struct failure_dir *dir,
+                                                const char *name,
+                                                char *body, size_t cap,
+                                                size_t *len_out)
+{
+#if defined(_WIN32)
+    return read_file_win32(dir, name, body, cap, len_out);
+#else
+    return read_file_posix(dir, name, body, cap, len_out);
 #endif
 }
 
@@ -589,29 +658,33 @@ static void record_digest(const struct zcl_dev_failure_record *record,
     digest_finish(&ctx, out);
 }
 
+static bool record_json_fill(struct json_value *doc,
+                             const struct zcl_dev_failure_record *record)
+{
+    return json_push_kv_str(doc, "schema", "zcl.dev_failure_record.v1") &&
+           json_push_kv_str(doc, "failure_id", record->failure_id) &&
+           json_push_kv_str(doc, "workspace_id", record->workspace_id) &&
+           json_push_kv_str(doc, "source_id_sha256", record->source_id) &&
+           json_push_kv_str(doc, "first_source_mutation_sha256",
+                            record->first_source_mutation) &&
+           json_push_kv_str(doc, "first_execution_id_sha3",
+                            record->first_execution_id) &&
+           json_push_kv_str(doc, "phase", record->phase) &&
+           json_push_kv_str(doc, "first_error", record->first_error) &&
+           json_push_kv_str(doc, "failure_capsule", record->capsule) &&
+           json_push_kv_str(doc, "retry_command", record->retry_command) &&
+           json_push_kv_int(doc, "first_seen_unix_ms",
+                            record->first_seen_unix_ms) &&
+           json_push_kv_str(doc, "record_sha3", record->record_digest);
+}
+
 static bool record_json(const struct zcl_dev_failure_record *record,
                         char body[FAILURE_JSON_MAX], size_t *len_out)
 {
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
-    bool ok = json_push_kv_str(&doc, "schema",
-                               "zcl.dev_failure_record.v1") &&
-              json_push_kv_str(&doc, "failure_id", record->failure_id) &&
-              json_push_kv_str(&doc, "workspace_id", record->workspace_id) &&
-              json_push_kv_str(&doc, "source_id_sha256", record->source_id) &&
-              json_push_kv_str(&doc, "first_source_mutation_sha256",
-                               record->first_source_mutation) &&
-              json_push_kv_str(&doc, "first_execution_id_sha3",
-                               record->first_execution_id) &&
-              json_push_kv_str(&doc, "phase", record->phase) &&
-              json_push_kv_str(&doc, "first_error", record->first_error) &&
-              json_push_kv_str(&doc, "failure_capsule", record->capsule) &&
-              json_push_kv_str(&doc, "retry_command",
-                               record->retry_command) &&
-              json_push_kv_int(&doc, "first_seen_unix_ms",
-                               record->first_seen_unix_ms) &&
-              json_push_kv_str(&doc, "record_sha3", record->record_digest);
+    bool ok = record_json_fill(&doc, record);
     size_t len = ok ? json_write(&doc, body, FAILURE_JSON_MAX - 2) : 0;
     json_free(&doc);
     if (!ok || len == 0 || len >= FAILURE_JSON_MAX - 2)
@@ -682,6 +755,23 @@ static bool observation_json(const struct failure_observation *observation,
     return true;
 }
 
+static bool observation_fields_copy(const char *schema, const char *id,
+                                    const char *digest,
+                                    const struct json_value *count,
+                                    const struct json_value *seen,
+                                    const char *failure_id,
+                                    struct failure_observation *out)
+{
+    return schema &&
+           strcmp(schema, "zcl.dev_failure_observations.v1") == 0 &&
+           id && strcmp(id, failure_id) == 0 && valid_hex64(id) &&
+           valid_hex64(digest) && count && count->type == JSON_INT &&
+           json_get_int(count) > 0 && seen && seen->type == JSON_INT &&
+           json_get_int(seen) >= 0 &&
+           copy_string(out->failure_id, sizeof(out->failure_id), id) &&
+           copy_string(out->digest, sizeof(out->digest), digest);
+}
+
 static bool observation_read(struct failure_dir *failure,
                              const char *failure_id,
                              struct failure_observation *out)
@@ -704,14 +794,8 @@ static bool observation_read(struct failure_dir *failure,
     const struct json_value *count = json_get(&doc, "count");
     const struct json_value *seen = json_get(&doc, "last_seen_unix_ms");
     memset(out, 0, sizeof(*out));
-    bool ok = schema &&
-              strcmp(schema, "zcl.dev_failure_observations.v1") == 0 &&
-              id && strcmp(id, failure_id) == 0 && valid_hex64(id) &&
-              valid_hex64(digest) && count && count->type == JSON_INT &&
-              json_get_int(count) > 0 && seen && seen->type == JSON_INT &&
-              json_get_int(seen) >= 0 &&
-              copy_string(out->failure_id, sizeof(out->failure_id), id) &&
-              copy_string(out->digest, sizeof(out->digest), digest);
+    bool ok = observation_fields_copy(schema, id, digest, count, seen,
+                                      failure_id, out);
     if (ok) {
         out->count = (uint64_t)json_get_int(count);
         out->last_seen_unix_ms = json_get_int(seen);
@@ -956,6 +1040,40 @@ static bool latest_publish(const struct failure_store *store,
                              "latest", body, len);
 }
 
+static bool latest_fields_valid(const struct json_value *doc,
+                                const char *schema, const char *id,
+                                const char *workspace, const char *source,
+                                const char *mutation, const char *execution,
+                                const char *phase, const char *digest,
+                                const char *expected_workspace)
+{
+    return doc->num_children == 8 && schema &&
+           strcmp(schema, "zcl.dev_failure_latest.v1") == 0 &&
+           valid_hex64(id) && valid_hex64(workspace) &&
+           valid_hex64(source) && valid_hex64(mutation) &&
+           valid_hex64(execution) && valid_hex64(digest) &&
+           valid_phase(phase) &&
+           strcmp(workspace, expected_workspace) == 0;
+}
+
+static bool latest_fields_copy(struct failure_latest *latest, const char *id,
+                               const char *workspace, const char *source,
+                               const char *mutation, const char *execution,
+                               const char *phase, const char *digest)
+{
+    return copy_string(latest->failure_id, sizeof(latest->failure_id), id) &&
+           copy_string(latest->workspace_id, sizeof(latest->workspace_id),
+                       workspace) &&
+           copy_string(latest->source_id, sizeof(latest->source_id),
+                       source) &&
+           copy_string(latest->source_mutation,
+                       sizeof(latest->source_mutation), mutation) &&
+           copy_string(latest->execution_id,
+                       sizeof(latest->execution_id), execution) &&
+           copy_string(latest->phase, sizeof(latest->phase), phase) &&
+           copy_string(latest->digest, sizeof(latest->digest), digest);
+}
+
 static enum zcl_dev_failure_lookup latest_read(
     const struct failure_store *store, struct failure_latest *latest)
 {
@@ -982,24 +1100,11 @@ static enum zcl_dev_failure_lookup latest_read(
     const char *execution = required_string(&doc, "execution_id_sha3");
     const char *phase = required_string(&doc, "phase");
     const char *digest = required_string(&doc, "latest_sha3");
-    bool ok = doc.num_children == 8 && schema &&
-              strcmp(schema, "zcl.dev_failure_latest.v1") == 0 &&
-              valid_hex64(id) && valid_hex64(workspace) &&
-              valid_hex64(source) && valid_hex64(mutation) &&
-              valid_hex64(execution) && valid_hex64(digest) &&
-              valid_phase(phase) &&
-              strcmp(workspace, store->workspace_id) == 0 &&
-              copy_string(latest->failure_id, sizeof(latest->failure_id), id) &&
-              copy_string(latest->workspace_id, sizeof(latest->workspace_id),
-                          workspace) &&
-              copy_string(latest->source_id, sizeof(latest->source_id),
-                          source) &&
-              copy_string(latest->source_mutation,
-                          sizeof(latest->source_mutation), mutation) &&
-              copy_string(latest->execution_id,
-                          sizeof(latest->execution_id), execution) &&
-              copy_string(latest->phase, sizeof(latest->phase), phase) &&
-              copy_string(latest->digest, sizeof(latest->digest), digest);
+    bool ok = latest_fields_valid(&doc, schema, id, workspace, source,
+                                  mutation, execution, phase, digest,
+                                  store->workspace_id) &&
+              latest_fields_copy(latest, id, workspace, source, mutation,
+                                 execution, phase, digest);
     json_free(&doc);
     char recomputed[65];
     if (!ok)
@@ -1009,6 +1114,325 @@ static enum zcl_dev_failure_lookup latest_read(
                ? ZCL_DEV_FAILURE_LOOKUP_FOUND
                : ZCL_DEV_FAILURE_LOOKUP_INVALID;
 }
+
+static bool record_failure_input_invalid(
+    const char *source_id, const char *source_mutation,
+    const char *execution_id, const char *phase, const char *first_error,
+    const char *capsule, const char *retry_command, char *normalized,
+    char *normalized_capsule, char *id)
+{
+    return !valid_hex64(source_id) || !valid_hex64(source_mutation) ||
+           !valid_hex64(execution_id) || !valid_phase(phase) || !capsule ||
+           strlen(capsule) >= ZCL_DEV_FAILURE_CAPSULE_MAX || !retry_command ||
+           strcmp(retry_command, "dev.ff") != 0 ||
+           !zcl_dev_failure_normalize_error(first_error, normalized) ||
+           !normalize_capsule(capsule, normalized_capsule) ||
+           !zcl_dev_failure_compute_id(source_id, phase, normalized, id);
+}
+
+static void record_failure_candidate(
+    struct zcl_dev_failure_record *candidate,
+    const struct failure_store *store, const char *id,
+    const char *source_id, const char *source_mutation,
+    const char *execution_id, const char *phase, const char *normalized,
+    const char *normalized_capsule, const char *retry_command)
+{
+    memset(candidate, 0, sizeof(*candidate));
+    (void)snprintf(candidate->failure_id, sizeof(candidate->failure_id), "%s",
+                   id);
+    (void)snprintf(candidate->workspace_id, sizeof(candidate->workspace_id),
+                   "%s", store->workspace_id);
+    (void)snprintf(candidate->source_id, sizeof(candidate->source_id), "%s",
+                   source_id);
+    (void)snprintf(candidate->first_source_mutation,
+                   sizeof(candidate->first_source_mutation), "%s",
+                   source_mutation);
+    (void)snprintf(candidate->first_execution_id,
+                   sizeof(candidate->first_execution_id), "%s", execution_id);
+    (void)snprintf(candidate->phase, sizeof(candidate->phase), "%s", phase);
+    (void)snprintf(candidate->first_error, sizeof(candidate->first_error),
+                   "%s", normalized);
+    (void)snprintf(candidate->capsule, sizeof(candidate->capsule), "%s",
+                   normalized_capsule);
+    (void)snprintf(candidate->retry_command, sizeof(candidate->retry_command),
+                   "%s", retry_command);
+    candidate->first_seen_unix_ms = platform_time_realtime_us() / 1000;
+    if (candidate->first_seen_unix_ms < 0)
+        candidate->first_seen_unix_ms = 0;
+    candidate->repeat_count = 1;
+    record_digest(candidate, candidate->record_digest);
+}
+
+static bool record_failure_finish(
+    struct failure_store *store, struct failure_dir *failure,
+    const char *id, const char *source_id, const char *source_mutation,
+    const char *execution_id, const char *phase, const char *normalized,
+    const struct zcl_dev_failure_record *candidate, bool created,
+    struct zcl_dev_failure_record *out, char *why, size_t why_len)
+{
+    struct zcl_dev_failure_record record;
+    bool ok = true;
+    if (created) {
+        record = *candidate;
+    } else {
+        ok = read_record_fd(failure, id, store->workspace_id, &record) &&
+             strcmp(record.source_id, source_id) == 0 &&
+             strcmp(record.phase, phase) == 0 &&
+             strcmp(record.first_error, normalized) == 0 &&
+             observation_increment(failure, id, &record.repeat_count);
+    }
+    struct failure_latest latest = {0};
+    if (ok) {
+        (void)snprintf(latest.failure_id, sizeof(latest.failure_id), "%s",
+                       id);
+        (void)snprintf(latest.workspace_id, sizeof(latest.workspace_id), "%s",
+                       store->workspace_id);
+        (void)snprintf(latest.source_id, sizeof(latest.source_id), "%s",
+                       source_id);
+        (void)snprintf(latest.source_mutation,
+                       sizeof(latest.source_mutation), "%s", source_mutation);
+        (void)snprintf(latest.execution_id, sizeof(latest.execution_id), "%s",
+                       execution_id);
+        (void)snprintf(latest.phase, sizeof(latest.phase), "%s", phase);
+        latest_digest(&latest, latest.digest);
+        ok = latest_publish(store, &latest);
+    }
+    if (!ok)
+        set_why(why, why_len, "failure_record_publication_failed");
+    if (ok && out)
+        *out = record;
+    return ok;
+}
+
+#if defined(_WIN32)
+static bool record_failure_stage_files_win32(
+    struct failure_dir *staged, bool ok, bool staged_open,
+    const struct zcl_dev_failure_record *candidate, const char *id)
+{
+    char body[FAILURE_JSON_MAX], observation_body[OBSERVATION_JSON_MAX];
+    size_t len = 0, observation_len = 0;
+    struct failure_observation observation = {0};
+    (void)snprintf(observation.failure_id,
+                   sizeof(observation.failure_id), "%s", id);
+    observation.count = 1;
+    observation.last_seen_unix_ms = candidate->first_seen_unix_ms;
+    observation_digest(&observation, observation.digest);
+    ok = ok && staged_open && record_json(candidate, body, &len) &&
+         observation_json(&observation, observation_body,
+                          &observation_len) &&
+         write_new_file_at(staged, "base.json", body, len) &&
+         write_new_file_at(staged, "observations.json", observation_body,
+                           observation_len) &&
+         platform_directory_transaction_flush(&staged->value);
+    platform_directory_transaction_close(&staged->value);
+    return ok;
+}
+
+static bool record_failure_stage_win32(
+    struct failure_store *store,
+    const struct zcl_dev_failure_record *candidate, const char *id,
+    struct failure_dir *failure, bool *created, bool ok)
+{
+    char stage[96] = {0};
+    struct failure_dir staged;
+    platform_directory_transaction_init(&staged.value);
+    bool staged_open = false;
+    for (unsigned attempt = 0; attempt < 8 && !staged_open; attempt++) {
+        if (!unique_temp_name("failure", stage)) {
+            ok = false;
+            break;
+        }
+        staged_open = platform_directory_transaction_open_child(
+                          &store->failures.value, stage, true,
+                          &staged.value) == PLATFORM_DIRECTORY_OK;
+    }
+    ok = record_failure_stage_files_win32(&staged, ok, staged_open, candidate,
+                                          id);
+    char stage_path[PATH_MAX], final_path[PATH_MAX];
+    int sn = snprintf(stage_path, sizeof(stage_path), "%s/%s",
+                      store->failures.path, stage);
+    int fn = snprintf(final_path, sizeof(final_path), "%s/%s",
+                      store->failures.path, id);
+    if (ok && sn > 0 && (size_t)sn < sizeof(stage_path) && fn > 0 &&
+        (size_t)fn < sizeof(final_path) &&
+        platform_private_directory_publish_no_clobber(stage_path,
+                                                       final_path)) {
+        *created = true;
+    }
+    enum platform_directory_result failure_open =
+        platform_directory_transaction_open_child(&store->failures.value, id,
+                                                  false, &failure->value);
+    bool failure_present = failure_open == PLATFORM_DIRECTORY_OK;
+    if (!*created && stage[0]) {
+        struct failure_dir cleanup;
+        platform_directory_transaction_init(&cleanup.value);
+        if (platform_directory_transaction_open(&cleanup.value, stage_path)) {
+            (void)platform_directory_child_unlink(&cleanup.value,
+                                                   "observations.json", true);
+            (void)platform_directory_child_unlink(&cleanup.value,
+                                                   "base.json", true);
+            platform_directory_transaction_close(&cleanup.value);
+            (void)platform_private_directory_remove_empty(stage_path);
+        }
+    }
+    return ok && failure_present;
+}
+
+static bool record_failure_publish_win32(
+    struct failure_store *store, const char *id, const char *source_id,
+    const char *source_mutation, const char *execution_id, const char *phase,
+    const char *normalized, const char *normalized_capsule,
+    const char *retry_command, struct zcl_dev_failure_record *out,
+    char *why, size_t why_len)
+{
+    struct failure_dir failure;
+    platform_directory_transaction_init(&failure.value);
+    enum platform_directory_result failure_open =
+        platform_directory_transaction_open_child(&store->failures.value, id,
+                                                  false, &failure.value);
+    if (failure_open != PLATFORM_DIRECTORY_OK &&
+        failure_open != PLATFORM_DIRECTORY_MISSING) {
+        set_why(why, why_len, "failure_record_directory_invalid");
+        return false;
+    }
+    bool failure_present = failure_open == PLATFORM_DIRECTORY_OK;
+    bool created = false;
+    struct zcl_dev_failure_record candidate;
+    record_failure_candidate(&candidate, store, id, source_id, source_mutation,
+                             execution_id, phase, normalized,
+                             normalized_capsule, retry_command);
+    bool ok = true;
+    if (!failure_present)
+        ok = record_failure_stage_win32(store, &candidate, id, &failure,
+                                        &created, ok);
+    if (!ok) {
+        set_why(why, why_len, "failure_record_directory_publication_failed");
+        platform_directory_transaction_close(&failure.value);
+        return false;
+    }
+    ok = record_failure_finish(store, &failure, id, source_id, source_mutation,
+                               execution_id, phase, normalized, &candidate,
+                               created, out, why, why_len);
+    platform_directory_transaction_close(&failure.value);
+    return ok;
+}
+#else
+static bool record_failure_publish_stage_posix(
+    struct failure_store *store, char stage[96], const char *id,
+    int *stage_fd, int *failure_fd, bool *created, bool ok)
+{
+    if (ok) {
+        if (platform_renameat_noreplace(store->failures.value, stage,
+                                        store->failures.value, id) == 0) {
+            *created = true;
+            *failure_fd = *stage_fd;
+            *stage_fd = -1;
+            stage[0] = 0;
+            ok = fsync(store->failures.value) == 0;
+        } else if (errno == EEXIST) {
+            ok = true;
+        } else {
+            ok = false;
+        }
+    }
+    if (*stage_fd >= 0) {
+        (void)unlinkat(*stage_fd, "observations.json", 0);
+        (void)unlinkat(*stage_fd, "base.json", 0);
+        close(*stage_fd);
+    }
+    if (stage[0]) {
+        (void)unlinkat(store->failures.value, stage, AT_REMOVEDIR);
+        (void)fsync(store->failures.value);
+    }
+    if (ok && !*created)
+        *failure_fd = openat(store->failures.value, id,
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                 O_NOFOLLOW);
+    return ok;
+}
+
+static bool record_failure_stage_posix(
+    struct failure_store *store,
+    const struct zcl_dev_failure_record *candidate, const char *id,
+    int *failure_fd, bool *created, bool ok)
+{
+    char stage[96] = {0};
+    int stage_fd = -1;
+    for (unsigned attempt = 0; attempt < 8; attempt++) {
+        if (!unique_temp_name("failure", stage)) {
+            ok = false;
+            break;
+        }
+        if (mkdirat(store->failures.value, stage, 0700) == 0) {
+            stage_fd = openat(store->failures.value, stage,
+                              O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                  O_NOFOLLOW);
+            break;
+        }
+        if (errno != EEXIST) {
+            ok = false;
+            break;
+        }
+    }
+    if (stage_fd < 0 || !private_dir_fd(stage_fd))
+        ok = false;
+    char body[FAILURE_JSON_MAX], observation_body[OBSERVATION_JSON_MAX];
+    size_t len = 0, observation_len = 0;
+    struct failure_observation observation = {0};
+    (void)snprintf(observation.failure_id, sizeof(observation.failure_id),
+                   "%s", id);
+    observation.count = 1;
+    observation.last_seen_unix_ms = candidate->first_seen_unix_ms;
+    observation_digest(&observation, observation.digest);
+    if (ok)
+        ok = record_json(candidate, body, &len) &&
+             observation_json(&observation, observation_body,
+                              &observation_len) &&
+             write_new_file_at(&(struct failure_dir){.value = stage_fd},
+                               "base.json", body, len) &&
+             write_new_file_at(&(struct failure_dir){.value = stage_fd},
+                               "observations.json", observation_body,
+                               observation_len) &&
+             fsync(stage_fd) == 0;
+    return record_failure_publish_stage_posix(store, stage, id, &stage_fd,
+                                              failure_fd, created, ok);
+}
+
+static bool record_failure_publish_posix(
+    struct failure_store *store, const char *id, const char *source_id,
+    const char *source_mutation, const char *execution_id, const char *phase,
+    const char *normalized, const char *normalized_capsule,
+    const char *retry_command, struct zcl_dev_failure_record *out,
+    char *why, size_t why_len)
+{
+    int failure_fd = openat(store->failures.value, id,
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (failure_fd < 0 && errno != ENOENT) {
+        set_why(why, why_len, "failure_record_directory_invalid");
+        return false;
+    }
+    bool created = false;
+    struct zcl_dev_failure_record candidate;
+    record_failure_candidate(&candidate, store, id, source_id, source_mutation,
+                             execution_id, phase, normalized,
+                             normalized_capsule, retry_command);
+    bool ok = true;
+    if (failure_fd < 0)
+        ok = record_failure_stage_posix(store, &candidate, id, &failure_fd,
+                                        &created, ok);
+    struct failure_dir failure = {.value = failure_fd};
+    if (!ok || !private_dir_fd(failure_fd)) {
+        set_why(why, why_len, "failure_record_directory_publication_failed");
+        if (failure_fd >= 0) close(failure_fd);
+        return false;
+    }
+    ok = record_failure_finish(store, &failure, id, source_id, source_mutation,
+                               execution_id, phase, normalized, &candidate,
+                               created, out, why, why_len);
+    if (failure_fd >= 0) close(failure_fd);
+    return ok;
+}
+#endif
 
 bool zcl_dev_failure_record_failure(
     const char *repo_root,
@@ -1023,13 +1447,10 @@ bool zcl_dev_failure_record_failure(
         why[0] = 0;
     char normalized[ZCL_DEV_FAILURE_ERROR_MAX];
     char normalized_capsule[ZCL_DEV_FAILURE_CAPSULE_MAX], id[65];
-    if (!valid_hex64(source_id) || !valid_hex64(source_mutation) ||
-        !valid_hex64(execution_id) || !valid_phase(phase) || !capsule ||
-        strlen(capsule) >= ZCL_DEV_FAILURE_CAPSULE_MAX || !retry_command ||
-        strcmp(retry_command, "dev.ff") != 0 ||
-        !zcl_dev_failure_normalize_error(first_error, normalized) ||
-        !normalize_capsule(capsule, normalized_capsule) ||
-        !zcl_dev_failure_compute_id(source_id, phase, normalized, id)) {
+    if (record_failure_input_invalid(source_id, source_mutation, execution_id,
+                                     phase, first_error, capsule,
+                                     retry_command, normalized,
+                                     normalized_capsule, id)) {
         set_why(why, why_len, "failure_record_input_invalid");
         return false;
     }
@@ -1042,230 +1463,17 @@ bool zcl_dev_failure_record_failure(
         return false;
     }
 #if defined(_WIN32)
-    struct failure_dir failure;
-    platform_directory_transaction_init(&failure.value);
-    enum platform_directory_result failure_open =
-        platform_directory_transaction_open_child(&store.failures.value, id,
-                                                  false, &failure.value);
-    if (failure_open != PLATFORM_DIRECTORY_OK &&
-        failure_open != PLATFORM_DIRECTORY_MISSING) {
-        set_why(why, why_len, "failure_record_directory_invalid");
-        store_unlock(&lock); store_close(&store); return false;
-    }
-    bool failure_present = failure_open == PLATFORM_DIRECTORY_OK;
+    bool ok = record_failure_publish_win32(&store, id, source_id,
+                                           source_mutation, execution_id,
+                                           phase, normalized,
+                                           normalized_capsule, retry_command,
+                                           out, why, why_len);
 #else
-    int failure_fd = openat(store.failures.value, id,
-                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (failure_fd < 0 && errno != ENOENT) {
-        set_why(why, why_len, "failure_record_directory_invalid");
-        store_unlock(&lock);
-        store_close(&store);
-        return false;
-    }
-#endif
-    bool created = false;
-    struct zcl_dev_failure_record record, candidate;
-    memset(&candidate, 0, sizeof(candidate));
-    (void)snprintf(candidate.failure_id, sizeof(candidate.failure_id), "%s",
-                   id);
-    (void)snprintf(candidate.workspace_id, sizeof(candidate.workspace_id), "%s",
-                   store.workspace_id);
-    (void)snprintf(candidate.source_id, sizeof(candidate.source_id), "%s",
-                   source_id);
-    (void)snprintf(candidate.first_source_mutation,
-                   sizeof(candidate.first_source_mutation), "%s",
-                   source_mutation);
-    (void)snprintf(candidate.first_execution_id,
-                   sizeof(candidate.first_execution_id), "%s", execution_id);
-    (void)snprintf(candidate.phase, sizeof(candidate.phase), "%s", phase);
-    (void)snprintf(candidate.first_error, sizeof(candidate.first_error), "%s",
-                   normalized);
-    (void)snprintf(candidate.capsule, sizeof(candidate.capsule), "%s",
-                   normalized_capsule);
-    (void)snprintf(candidate.retry_command, sizeof(candidate.retry_command),
-                   "%s", retry_command);
-    candidate.first_seen_unix_ms = platform_time_realtime_us() / 1000;
-    if (candidate.first_seen_unix_ms < 0)
-        candidate.first_seen_unix_ms = 0;
-    candidate.repeat_count = 1;
-    record_digest(&candidate, candidate.record_digest);
-
-    bool ok = true;
-#if defined(_WIN32)
-    if (!failure_present) {
-        char stage[96] = {0};
-        struct failure_dir staged;
-        platform_directory_transaction_init(&staged.value);
-        bool staged_open = false;
-        for (unsigned attempt = 0; attempt < 8 && !staged_open; attempt++) {
-            if (!unique_temp_name("failure", stage)) { ok = false; break; }
-            staged_open = platform_directory_transaction_open_child(
-                &store.failures.value, stage, true, &staged.value) ==
-                PLATFORM_DIRECTORY_OK;
-        }
-        char body[FAILURE_JSON_MAX], observation_body[OBSERVATION_JSON_MAX];
-        size_t len = 0, observation_len = 0;
-        struct failure_observation observation = {0};
-        (void)snprintf(observation.failure_id,
-                       sizeof(observation.failure_id), "%s", id);
-        observation.count = 1;
-        observation.last_seen_unix_ms = candidate.first_seen_unix_ms;
-        observation_digest(&observation, observation.digest);
-        ok = ok && staged_open && record_json(&candidate, body, &len) &&
-            observation_json(&observation, observation_body,
-                             &observation_len) &&
-            write_new_file_at(&staged, "base.json", body, len) &&
-            write_new_file_at(&staged, "observations.json", observation_body,
-                              observation_len) &&
-            platform_directory_transaction_flush(&staged.value);
-        platform_directory_transaction_close(&staged.value);
-        char stage_path[PATH_MAX], final_path[PATH_MAX];
-        int sn = snprintf(stage_path, sizeof(stage_path), "%s/%s",
-                          store.failures.path, stage);
-        int fn = snprintf(final_path, sizeof(final_path), "%s/%s",
-                          store.failures.path, id);
-        if (ok && sn > 0 && (size_t)sn < sizeof(stage_path) && fn > 0 &&
-            (size_t)fn < sizeof(final_path) &&
-            platform_private_directory_publish_no_clobber(stage_path,
-                                                           final_path)) {
-            created = true;
-        }
-        failure_open = platform_directory_transaction_open_child(
-            &store.failures.value, id, false, &failure.value);
-        failure_present = failure_open == PLATFORM_DIRECTORY_OK;
-        if (!created && stage[0]) {
-            struct failure_dir cleanup;
-            platform_directory_transaction_init(&cleanup.value);
-            if (platform_directory_transaction_open(&cleanup.value, stage_path)) {
-                (void)platform_directory_child_unlink(&cleanup.value,
-                                                       "observations.json", true);
-                (void)platform_directory_child_unlink(&cleanup.value,
-                                                       "base.json", true);
-                platform_directory_transaction_close(&cleanup.value);
-                (void)platform_private_directory_remove_empty(stage_path);
-            }
-        }
-        ok = ok && failure_present;
-    }
-#else
-    if (failure_fd < 0) {
-        char stage[96] = {0};
-        int stage_fd = -1;
-        for (unsigned attempt = 0; attempt < 8; attempt++) {
-            if (!unique_temp_name("failure", stage)) {
-                ok = false;
-                break;
-            }
-            if (mkdirat(store.failures.value, stage, 0700) == 0) {
-                stage_fd = openat(store.failures.value, stage,
-                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                                      O_NOFOLLOW);
-                break;
-            }
-            if (errno != EEXIST) {
-                ok = false;
-                break;
-            }
-        }
-        if (stage_fd < 0 || !private_dir_fd(stage_fd))
-            ok = false;
-        char body[FAILURE_JSON_MAX], observation_body[OBSERVATION_JSON_MAX];
-        size_t len = 0, observation_len = 0;
-        struct failure_observation observation = {0};
-        (void)snprintf(observation.failure_id,
-                       sizeof(observation.failure_id), "%s", id);
-        observation.count = 1;
-        observation.last_seen_unix_ms = candidate.first_seen_unix_ms;
-        observation_digest(&observation, observation.digest);
-        if (ok)
-            ok = record_json(&candidate, body, &len) &&
-                 observation_json(&observation, observation_body,
-                                  &observation_len) &&
-                 write_new_file_at(&(struct failure_dir){.value = stage_fd},
-                                   "base.json", body, len) &&
-                 write_new_file_at(&(struct failure_dir){.value = stage_fd},
-                                   "observations.json",
-                                   observation_body, observation_len) &&
-                 fsync(stage_fd) == 0;
-        if (ok) {
-            if (platform_renameat_noreplace(store.failures.value, stage,
-                                            store.failures.value, id) == 0) {
-                created = true;
-                failure_fd = stage_fd;
-                stage_fd = -1;
-                stage[0] = 0;
-                ok = fsync(store.failures.value) == 0;
-            } else if (errno == EEXIST) {
-                ok = true;
-            } else {
-                ok = false;
-            }
-        }
-        if (stage_fd >= 0) {
-            (void)unlinkat(stage_fd, "observations.json", 0);
-            (void)unlinkat(stage_fd, "base.json", 0);
-            close(stage_fd);
-        }
-        if (stage[0]) {
-            (void)unlinkat(store.failures.value, stage, AT_REMOVEDIR);
-            (void)fsync(store.failures.value);
-        }
-        if (ok && !created)
-            failure_fd = openat(store.failures.value, id,
-                                O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                                    O_NOFOLLOW);
-    }
-    struct failure_dir failure = {.value = failure_fd};
-#endif
-    if (!ok ||
-#if defined(_WIN32)
-        !failure_present
-#else
-        !private_dir_fd(failure_fd)
-#endif
-    ) {
-        set_why(why, why_len, "failure_record_directory_publication_failed");
-#if defined(_WIN32)
-        platform_directory_transaction_close(&failure.value);
-#else
-        if (failure_fd >= 0) close(failure_fd);
-#endif
-        store_unlock(&lock);
-        store_close(&store);
-        return false;
-    }
-    if (created) {
-        record = candidate;
-    } else {
-        ok = read_record_fd(&failure, id, store.workspace_id, &record) &&
-             strcmp(record.source_id, source_id) == 0 &&
-             strcmp(record.phase, phase) == 0 &&
-             strcmp(record.first_error, normalized) == 0 &&
-             observation_increment(&failure, id, &record.repeat_count);
-    }
-    struct failure_latest latest = {0};
-    if (ok) {
-        (void)snprintf(latest.failure_id, sizeof(latest.failure_id), "%s", id);
-        (void)snprintf(latest.workspace_id, sizeof(latest.workspace_id), "%s",
-                       store.workspace_id);
-        (void)snprintf(latest.source_id, sizeof(latest.source_id), "%s",
-                       source_id);
-        (void)snprintf(latest.source_mutation,
-                       sizeof(latest.source_mutation), "%s", source_mutation);
-        (void)snprintf(latest.execution_id, sizeof(latest.execution_id), "%s",
-                       execution_id);
-        (void)snprintf(latest.phase, sizeof(latest.phase), "%s", phase);
-        latest_digest(&latest, latest.digest);
-        ok = latest_publish(&store, &latest);
-    }
-    if (!ok)
-        set_why(why, why_len, "failure_record_publication_failed");
-    if (ok && out)
-        *out = record;
-#if defined(_WIN32)
-    platform_directory_transaction_close(&failure.value);
-#else
-    if (failure_fd >= 0) close(failure_fd);
+    bool ok = record_failure_publish_posix(&store, id, source_id,
+                                           source_mutation, execution_id,
+                                           phase, normalized,
+                                           normalized_capsule, retry_command,
+                                           out, why, why_len);
 #endif
     store_unlock(&lock);
     store_close(&store);
@@ -1349,6 +1557,28 @@ enum zcl_dev_failure_lookup zcl_dev_failure_read_latest(
     return result;
 }
 
+static bool match_latest_mismatch(const struct failure_latest *latest,
+                                  const char *source_id,
+                                  const char *source_mutation,
+                                  const char *execution_id, const char *phase)
+{
+    return strcmp(latest->source_id, source_id) != 0 ||
+           strcmp(latest->source_mutation, source_mutation) != 0 ||
+           strcmp(latest->execution_id, execution_id) != 0 ||
+           strcmp(latest->phase, phase) != 0;
+}
+
+static bool match_latest_record(const struct failure_store *store,
+                                const struct failure_latest *latest,
+                                const char *source_id, const char *phase,
+                                struct zcl_dev_failure_record *out)
+{
+    return record_read_store(store, latest->failure_id, out) ==
+               ZCL_DEV_FAILURE_LOOKUP_FOUND &&
+           strcmp(out->source_id, source_id) == 0 &&
+           strcmp(out->phase, phase) == 0;
+}
+
 bool zcl_dev_failure_match_latest(
     const char *repo_root,
     const char source_id[ZCL_DEV_FAILURE_HEX_LEN + 1],
@@ -1385,24 +1615,90 @@ bool zcl_dev_failure_match_latest(
         store_close(&store);
         return false;
     }
-    if (strcmp(latest.source_id, source_id) != 0 ||
-        strcmp(latest.source_mutation, source_mutation) != 0 ||
-        strcmp(latest.execution_id, execution_id) != 0 ||
-        strcmp(latest.phase, phase) != 0) {
+    if (match_latest_mismatch(&latest, source_id, source_mutation,
+                              execution_id, phase)) {
         store_unlock(&lock);
         store_close(&store);
         return false;
     }
-    bool ok = record_read_store(&store, latest.failure_id, out) ==
-                  ZCL_DEV_FAILURE_LOOKUP_FOUND &&
-              strcmp(out->source_id, source_id) == 0 &&
-              strcmp(out->phase, phase) == 0;
+    bool ok = match_latest_record(&store, &latest, source_id, phase, out);
     if (!ok)
         set_why(why, why_len, "latest_failure_record_invalid");
     store_unlock(&lock);
     store_close(&store);
     return ok;
 }
+
+static bool note_coalesced_latest_matches(struct failure_store *store,
+                                          const char *failure_id,
+                                          const char *source_id,
+                                          const char *source_mutation,
+                                          const char *execution_id,
+                                          const char *phase)
+{
+    struct failure_latest latest;
+    return latest_read(store, &latest) == ZCL_DEV_FAILURE_LOOKUP_FOUND &&
+           strcmp(latest.failure_id, failure_id) == 0 &&
+           strcmp(latest.source_id, source_id) == 0 &&
+           strcmp(latest.source_mutation, source_mutation) == 0 &&
+           strcmp(latest.execution_id, execution_id) == 0 &&
+           strcmp(latest.phase, phase) == 0;
+}
+
+#if defined(_WIN32)
+static bool note_coalesced_append_win32(struct failure_store *store,
+                                        const char *failure_id,
+                                        const char *source_id,
+                                        const char *phase,
+                                        struct zcl_dev_failure_record *out,
+                                        bool ok)
+{
+    struct failure_dir failure;
+    platform_directory_transaction_init(&failure.value);
+    enum platform_directory_result opened = ok
+        ? platform_directory_transaction_open_child(&store->failures.value,
+                                                     failure_id, false,
+                                                     &failure.value)
+        : PLATFORM_DIRECTORY_REFUSED;
+    struct zcl_dev_failure_record before;
+    ok = ok && opened == PLATFORM_DIRECTORY_OK &&
+         read_record_fd(&failure, failure_id, store->workspace_id, &before) &&
+         strcmp(before.source_id, source_id) == 0 &&
+         strcmp(before.phase, phase) == 0 &&
+         observation_increment(&failure, failure_id, &before.repeat_count) &&
+         read_record_fd(&failure, failure_id, store->workspace_id, out);
+    platform_directory_transaction_close(&failure.value);
+    return ok;
+}
+#else
+static bool note_coalesced_append_posix(struct failure_store *store,
+                                        const char *failure_id,
+                                        const char *source_id,
+                                        const char *phase,
+                                        struct zcl_dev_failure_record *out,
+                                        char *why, size_t why_len, bool ok)
+{
+    int failure_fd = ok
+        ? openat(store->failures.value, failure_id,
+                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        : -1;
+    struct zcl_dev_failure_record before;
+    ok = ok && private_dir_fd(failure_fd) &&
+         read_record_fd(&(struct failure_dir){.value = failure_fd}, failure_id,
+                        store->workspace_id, &before) &&
+         strcmp(before.source_id, source_id) == 0 &&
+         strcmp(before.phase, phase) == 0 &&
+         observation_increment(&(struct failure_dir){.value = failure_fd}, failure_id,
+                               &before.repeat_count) &&
+         read_record_fd(&(struct failure_dir){.value = failure_fd}, failure_id,
+                        store->workspace_id, out);
+    if (!ok)
+        set_why(why, why_len, "coalesced_failure_append_failed_or_superseded");
+    if (failure_fd >= 0)
+        close(failure_fd);
+    return ok;
+}
+#endif
 
 bool zcl_dev_failure_note_coalesced(
     const char *repo_root,
@@ -1429,49 +1725,15 @@ bool zcl_dev_failure_note_coalesced(
         store_close(&store);
         return false;
     }
-    struct failure_latest latest;
-    bool ok = latest_read(&store, &latest) ==
-                  ZCL_DEV_FAILURE_LOOKUP_FOUND &&
-              strcmp(latest.failure_id, failure_id) == 0 &&
-              strcmp(latest.source_id, source_id) == 0 &&
-              strcmp(latest.source_mutation, source_mutation) == 0 &&
-              strcmp(latest.execution_id, execution_id) == 0 &&
-              strcmp(latest.phase, phase) == 0;
+    bool ok = note_coalesced_latest_matches(&store, failure_id, source_id,
+                                            source_mutation, execution_id,
+                                            phase);
 #if defined(_WIN32)
-    struct failure_dir failure;
-    platform_directory_transaction_init(&failure.value);
-    enum platform_directory_result opened = ok
-        ? platform_directory_transaction_open_child(&store.failures.value,
-                                                     failure_id, false,
-                                                     &failure.value)
-        : PLATFORM_DIRECTORY_REFUSED;
-    struct zcl_dev_failure_record before;
-    ok = ok && opened == PLATFORM_DIRECTORY_OK &&
-         read_record_fd(&failure, failure_id, store.workspace_id, &before) &&
-         strcmp(before.source_id, source_id) == 0 &&
-         strcmp(before.phase, phase) == 0 &&
-         observation_increment(&failure, failure_id, &before.repeat_count) &&
-         read_record_fd(&failure, failure_id, store.workspace_id, out);
-    platform_directory_transaction_close(&failure.value);
+    ok = note_coalesced_append_win32(&store, failure_id, source_id, phase, out,
+                                     ok);
 #else
-    int failure_fd = ok
-        ? openat(store.failures.value, failure_id,
-                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
-        : -1;
-    struct zcl_dev_failure_record before;
-    ok = ok && private_dir_fd(failure_fd) &&
-         read_record_fd(&(struct failure_dir){.value = failure_fd}, failure_id,
-                        store.workspace_id, &before) &&
-         strcmp(before.source_id, source_id) == 0 &&
-         strcmp(before.phase, phase) == 0 &&
-         observation_increment(&(struct failure_dir){.value = failure_fd}, failure_id,
-                               &before.repeat_count) &&
-         read_record_fd(&(struct failure_dir){.value = failure_fd}, failure_id,
-                        store.workspace_id, out);
-    if (!ok)
-        set_why(why, why_len, "coalesced_failure_append_failed_or_superseded");
-    if (failure_fd >= 0)
-        close(failure_fd);
+    ok = note_coalesced_append_posix(&store, failure_id, source_id, phase, out,
+                                     why, why_len, ok);
 #endif
     store_unlock(&lock);
     store_close(&store);
