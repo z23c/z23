@@ -529,7 +529,6 @@ contexts/explorer/views/src/explorer_tx_view.c:explorer_view_tx:27
 contexts/market/controllers/src/file_market_controller.c:market_purchase_code:18
 contexts/market/controllers/src/file_market_controller.c:rpc_zmarket_purchase_plan:28
 contexts/market/controllers/src/market_content_native_handler.c:zcl_native_handle_market_content_register:58
-contexts/market/controllers/src/market_content_rpc.c:rpc_zmarket_content_register:28
 contexts/market/controllers/src/market_moderation_native_handler.c:market_moderation_view_frozen_kat:42
 contexts/market/controllers/src/market_moderation_native_handler.c:zcl_native_handle_market_moderation_profile_set:16
 contexts/market/controllers/src/market_moderation_native_handler.c:zcl_native_handle_market_moderation_relay_set:16
