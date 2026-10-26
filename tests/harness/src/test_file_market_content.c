@@ -191,13 +191,408 @@ static void content_interleave_registration(void *opaque)
     fixture->saved = db_market_content_save(fixture->ndb, &fixture->row);
 }
 
+static void content_fill_payload(uint8_t *payload, size_t size)
+{
+    for (size_t i = 0; i < size; i++)
+        payload[i] = (uint8_t)(i * 17u + 3u);
+}
+
+static bool content_market_dir_created(const char *dir)
+{
+    return platform_directory_create(dir, 0700) == 0 || errno == EEXIST;
+}
+
+static bool content_write_content_fixtures(const char *filepath,
+    const char *symlink_path, const char *fifo_path, const char *wrong_path,
+    const uint8_t *payload, size_t size)
+{
+#if defined(_WIN32)
+    (void)symlink_path;
+    (void)fifo_path;
+    return content_write_file(filepath, payload, size) &&
+        content_write_file(wrong_path, payload, size - 1);
+#else
+    return content_write_file(filepath, payload, size) &&
+        content_symlink_create(filepath, symlink_path) &&
+        content_special_create(fifo_path) &&
+        content_write_file(wrong_path, payload, size - 1);
+#endif
+}
+
+static bool content_authenticated_offer_opened(struct node_db *ndb,
+    const char *dbpath, struct file_offer *offer, const uint8_t root[32],
+    uint64_t size, int64_t now_unix)
+{
+    bool signed_offer = content_signed_offer(
+        offer, root, size, 7301, now_unix);
+    memset(ndb, 0, sizeof(*ndb));
+    return signed_offer && node_db_open(ndb, dbpath) &&
+           db_file_offer_save(ndb, offer);
+}
+
+static void content_close_open_node_db(struct node_db *ndb)
+{
+    if (ndb->open)
+        node_db_close(ndb);
+}
+
+static bool content_registration_states_differ(struct node_db *ndb,
+                                               const uint8_t offer_id[32])
+{
+    uint8_t identity[32];
+    struct node_db closed_probe;
+    memset(&closed_probe, 0, sizeof(closed_probe));
+    return db_market_content_registration_identity(
+            ndb, offer_id, identity) == MARKET_CONTENT_STATE_ABSENT &&
+        db_market_content_registration_identity(
+            &closed_probe, offer_id, identity) == MARKET_CONTENT_STATE_ERROR;
+}
+
+static bool content_initial_counts_fail_closed(struct node_db *ndb)
+{
+    struct node_db closed_probe;
+    memset(&closed_probe, 0, sizeof(closed_probe));
+    closed_probe.open = false;
+    return db_market_content_count(ndb) == 0 &&
+        db_file_offer_count(ndb) == 1 &&
+        db_market_content_count(NULL) == -1 &&
+        db_market_content_count(&closed_probe) == -1 &&
+        db_file_offer_count(&closed_probe) == -1;
+}
+
+static bool content_manifest_bytes_match(const struct zcl_result *result,
+    const struct market_content_public_record *registered, size_t size,
+    const uint8_t root[32])
+{
+    return result->ok && registered->size_bytes == size &&
+        registered->num_chunks == 1 &&
+        memcmp(registered->root_hash, root, 32) == 0;
+}
+
+static bool content_one_offer_listed(int listed_count, int listed_total,
+    const struct market_content_public_record *listed,
+    const uint8_t offer_id[32])
+{
+    return listed_count == 1 && listed_total == 1 &&
+        memcmp(listed[0].offer_id, offer_id, 32) == 0;
+}
+
+static bool content_verified_chunk_bytes(bool load_ok,
+    const struct file_market_delivery_chunk *loaded, const uint8_t *payload,
+    size_t size, const uint8_t chunk_sha3[32])
+{
+    return load_ok && loaded->size == size &&
+        memcmp(loaded->data, payload, size) == 0 &&
+        memcmp(loaded->sha3, chunk_sha3, 32) == 0;
+}
+
+static bool content_wrong_root_offer_saved(struct node_db *ndb,
+    struct file_offer *wrong_root_offer, uint64_t size, int64_t now_unix)
+{
+    uint8_t wrong_root[32];
+    memset(wrong_root, 0x92, sizeof(wrong_root));
+    return content_signed_offer(
+        wrong_root_offer, wrong_root, size, 7302, now_unix) &&
+        db_file_offer_save(ndb, wrong_root_offer);
+}
+
+static bool content_root_mismatch_rejected(bool wrong_offer_ready,
+                                           const struct zcl_result *result)
+{
+    return wrong_offer_ready && !result->ok;
+}
+
+static bool content_saved_offer_counts(struct node_db *ndb)
+{
+    return db_file_offer_count(ndb) == 2 &&
+        db_market_content_count(ndb) == 1;
+}
+
+static bool content_index_hides_rows(bool hidden_indexed, size_t hidden_len,
+    const char *hidden_rendered, const struct json_value *hidden_index)
+{
+    return hidden_indexed && hidden_len > 0 &&
+        !strstr(hidden_rendered, "offer_id") &&
+        json_get(hidden_index, "hidden_by_profile") == NULL &&
+        json_get(hidden_index, "total") == NULL;
+}
+
+static bool content_reviewed_index_omits_path(bool signed_off_ok, bool indexed,
+    size_t rendered_len, const char *rendered, const char *filepath)
+{
+    return signed_off_ok && indexed && rendered_len > 0 &&
+        strstr(rendered, "offer_id") &&
+        !strstr(rendered, "private_path") && !strstr(rendered, filepath);
+}
+
+static bool content_restarted_chunk_bytes(bool load_ok,
+    const struct file_market_delivery_chunk *loaded, const uint8_t *payload,
+    size_t size)
+{
+    return load_ok && loaded->size == size &&
+        memcmp(loaded->data, payload, size) == 0;
+}
+
+static bool content_warm_chunk_bytes(const struct zcl_result *warm_result,
+    const struct file_market_delivery_chunk *loaded, const uint8_t *payload,
+    size_t size, const uint8_t chunk_sha3[32])
+{
+    return warm_result->ok && loaded->size == size &&
+        memcmp(loaded->data, payload, size) == 0 &&
+        memcmp(loaded->sha3, chunk_sha3, 32) == 0;
+}
+
+#if !defined(_WIN32)
+static bool content_mtime_freeze_rejected(struct node_db *ndb,
+    const uint8_t offer_id[32], const char *filepath, uint8_t first_byte)
+{
+    struct stat before_rewrite;
+    bool captured = stat(filepath, &before_rewrite) == 0;
+    int rewrite_fd = open(filepath, O_WRONLY | O_CLOEXEC);
+    uint8_t swapped = (uint8_t)(first_byte ^ 0xffu);
+    bool rewrote = captured && rewrite_fd >= 0 &&
+        platform_positioned_write(rewrite_fd, &swapped, 1, 0) == 1;
+    if (rewrite_fd >= 0)
+        close(rewrite_fd);
+    const struct timespec keep_times[2] = {
+        before_rewrite.st_atim, before_rewrite.st_mtim,
+    };
+    bool clock_frozen = rewrote &&
+        utimensat(AT_FDCWD, filepath, keep_times, 0) == 0;
+    struct file_market_delivery_chunk loaded;
+    struct zcl_result load_result = file_market_content_load_chunk(
+        ndb, offer_id, 0, &loaded);
+    return clock_frozen && !load_result.ok && loaded.data == NULL;
+}
+#endif /* !defined(_WIN32) */
+
+static bool content_post_tamper_revoked(struct node_db *ndb,
+    const uint8_t offer_id[32], const char *filepath, uint8_t first_byte)
+{
+    int mutate_fd = open(filepath, O_WRONLY | O_CLOEXEC);
+    uint8_t changed = (uint8_t)(first_byte ^ 0xffu);
+    bool mutated = mutate_fd >= 0 &&
+        platform_positioned_write(mutate_fd, &changed, 1, 0) == 1;
+    if (mutate_fd >= 0) close(mutate_fd);
+    struct file_market_delivery_chunk loaded;
+    struct zcl_result load_result = file_market_content_load_chunk(
+        ndb, offer_id, 0, &loaded);
+    bool load_ok = load_result.ok;
+    return mutated && !load_ok && loaded.data == NULL;
+}
+
+static bool content_seed_index_window_rows(struct node_db *wndb,
+    const char *wdbpath, size_t payload_size, int64_t now_unix)
+{
+    memset(wndb, 0, sizeof(*wndb));
+    bool wopened = node_db_open(wndb, wdbpath);
+    rpc_market_set_state(wndb);
+
+    /* 257 registry rows, one past the window. The three newest are
+     * reviewed-ok via real signed offers; the rest hide under the
+     * boot-default profile. */
+    struct file_offer reviewed[3];
+    bool seeded = wopened;
+    for (int k = 0; seeded && k < 3; k++) {
+        uint8_t digest[32], root[32];
+        content_window_digest(256 - k, digest);
+        sha3_256(digest, sizeof(digest), root);
+        seeded = content_signed_offer(&reviewed[k], root,
+                                      payload_size,
+                                      (uint64_t)(7401 + k),
+                                      now_unix) &&
+            db_file_offer_save(wndb, &reviewed[k]) &&
+            market_moderation_set_review_state(
+                reviewed[k].offer_id,
+                MARKET_REVIEW_REVIEWED_OK).ok;
+    }
+    for (int i = 0; seeded && i < 257; i++) {
+        uint8_t digest[32], root[32];
+        content_window_digest(i, digest);
+        sha3_256(digest, sizeof(digest), root);
+        struct market_content_record row;
+        memset(&row, 0, sizeof(row));
+        if (i >= 254)
+            memcpy(row.offer_id, reviewed[256 - i].offer_id, 32);
+        else
+            memcpy(row.offer_id, digest, 32);
+        memcpy(row.root_hash, root, 32);
+        snprintf(row.private_path, sizeof(row.private_path),
+                 "/registered/window-%03d.bin", i);
+        row.size_bytes = payload_size;
+        row.num_chunks = 1;
+        row.chunk_hashes = digest;
+        row.chunk_hashes_len = sizeof(digest);
+        row.registered_at = now_unix + 10000 + i;
+        seeded = db_market_content_save(wndb, &row);
+    }
+    return seeded;
+}
+
+static bool content_registry_count_matches(struct node_db *wndb, bool seeded)
+{
+    return seeded && db_market_content_count(wndb) == 257;
+}
+
+static bool content_list_seeded_contents(bool seeded, struct json_value *index)
+{
+    return seeded && api_market_content_list(index);
+}
+
+static bool content_window_shows_three(const struct json_value *window_index,
+    bool window_indexed, const struct json_value *shown_v,
+    const struct json_value *rows_v)
+{
+    return window_indexed && shown_v && rows_v &&
+        rows_v->type == JSON_ARR &&
+        json_size(rows_v) == 3 &&
+        json_get_int(shown_v) == 3 &&
+        json_get(window_index, "total") == NULL &&
+        json_get(window_index, "hidden_by_profile") == NULL;
+}
+
+static bool content_snapshot_row_total(int snapshot_count, int snapshot_total)
+{
+    return snapshot_count == 2 && snapshot_total == 257;
+}
+
+static bool content_uncountable_shown_only(bool uncountable_ok,
+    const struct json_value *u_shown, const struct json_value *uncountable)
+{
+    return uncountable_ok && u_shown &&
+        json_get_int(u_shown) == 0 &&
+        json_get(uncountable, "total") == NULL;
+}
+
+static bool content_gate_bytes_offered(struct node_db *ndb,
+    const char *gate_path, const uint8_t *payload, size_t size,
+    const uint8_t root[32], int64_t now_unix, struct file_offer *gate_offer)
+{
+    return content_write_file(gate_path, payload, size) &&
+        content_signed_offer(gate_offer, root, size, 7501, now_unix) &&
+        db_file_offer_save(ndb, gate_offer);
+}
+
+static void content_copy_token_text(const char *token, char *out,
+                                    size_t out_size)
+{
+    if (token)
+        snprintf(out, out_size, "%s", token);
+}
+
+static bool content_plan_rows_unchanged(bool planned, const char *plan_status,
+    const char *token_hex, struct node_db *ndb, int64_t rows_before)
+{
+    return planned && plan_status &&
+        strcmp(plan_status, "planned") == 0 &&
+        strlen(token_hex) == 64 &&
+        db_market_content_count(ndb) == rows_before;
+}
+
+static char content_flip_leading_hex(char digit)
+{
+    return digit == '0' ? '1' : '0';
+}
+
+static const char *content_json_value_string(const struct json_value *value)
+{
+    return value->type == JSON_STR ? json_get_str(value) : NULL;
+}
+
+static bool content_stale_token_kept_rows(bool tamper_refused,
+    const char *tamper_reason, struct node_db *ndb, int64_t rows_before)
+{
+    return tamper_refused && tamper_reason &&
+        strstr(tamper_reason, "STALE_PLAN") != NULL &&
+        db_market_content_count(ndb) == rows_before;
+}
+
+static bool content_bare_commit_kept_rows(bool bare_refused,
+    struct node_db *ndb, int64_t rows_before)
+{
+    return bare_refused && db_market_content_count(ndb) == rows_before;
+}
+
+static bool content_commit_registered_receipt(bool committed,
+    const struct json_value *committed_flag, const char *commit_status,
+    const struct json_value *registered_at, const char *commit_rendered,
+    const char *gate_path, struct node_db *ndb, int64_t rows_before)
+{
+    return committed && committed_flag &&
+        committed_flag->type == JSON_BOOL &&
+        json_get_bool(committed_flag) &&
+        commit_status && strcmp(commit_status, "registered") == 0 &&
+        registered_at && registered_at->type == JSON_INT &&
+        json_get_int(registered_at) > 0 &&
+        strstr(commit_rendered, gate_path) == NULL &&
+        strstr(commit_rendered, "content_path") == NULL &&
+        db_market_content_count(ndb) == rows_before + 1;
+}
+
+static int64_t content_json_int_if_present(const struct json_value *value)
+{
+    return value && value->type == JSON_INT ? json_get_int(value) : 0;
+}
+
+static bool content_stale_plan_text(bool replay_stale, const char *stale_reason)
+{
+    return replay_stale && stale_reason &&
+        strstr(stale_reason, "STALE_PLAN") != NULL;
+}
+
+static bool content_token_texts_differ(const char *path_token_buf,
+                                       const char *token_hex)
+{
+    return path_token_buf[0] && strcmp(path_token_buf, token_hex) != 0;
+}
+
+static bool content_path_commit_refused(bool path_planned,
+    bool path_token_differs, bool path_refused, const char *path_reason,
+    struct node_db *ndb, int64_t rows_before)
+{
+    return path_planned && path_token_differs && path_refused &&
+        path_reason && strstr(path_reason, "STALE_PLAN") != NULL &&
+        db_market_content_count(ndb) == rows_before + 1;
+}
+
+static bool content_alternate_gate_ready(const char *alternate_path,
+    const uint8_t *payload, size_t size, const char *gate_path,
+    char *canonical_gate, size_t canonical_gate_size,
+    char *canonical_alternate, size_t canonical_alternate_size)
+{
+    return content_write_file(alternate_path, payload, size) &&
+        content_canonical_file(gate_path, canonical_gate,
+                               canonical_gate_size) &&
+        content_canonical_file(alternate_path, canonical_alternate,
+                               canonical_alternate_size);
+}
+
+static bool content_rebind_row_saved(bool before_ok, struct node_db *ndb,
+                                     struct market_content_record *row)
+{
+    return before_ok && db_market_content_save(ndb, row);
+}
+
+static bool content_plan_digest_changed(bool after_ok,
+    const uint8_t before_same_second[32], const uint8_t after_same_second[32])
+{
+    return after_ok &&
+        memcmp(before_same_second, after_same_second, 32) != 0;
+}
+
+static bool content_interleave_refused(bool saved,
+                                       const struct zcl_result *interleaved)
+{
+    return saved && !interleaved->ok &&
+        strstr(interleaved->message, "STALE_PLAN") != NULL;
+}
+
 int file_market_content_tests(void)
 {
     int failures = 0;
     enum { PAYLOAD_SIZE = 8193 };
     uint8_t payload[PAYLOAD_SIZE];
-    for (size_t i = 0; i < sizeof(payload); i++)
-        payload[i] = (uint8_t)(i * 17u + 3u);
+    content_fill_payload(payload, sizeof(payload));
     uint8_t chunk_sha3[32], root[32];
     content_one_chunk_root(payload, sizeof(payload), chunk_sha3, root);
 
@@ -205,7 +600,7 @@ int file_market_content_tests(void)
     char fifo_path[512], wrong_path[512];
     snprintf(dir, sizeof(dir), "./test-tmp/market_content_%d", (int)getpid());
     (void)platform_directory_create("./test-tmp", 0700);
-    if (platform_directory_create(dir, 0700) != 0 && errno != EEXIST) {
+    if (!content_market_dir_created(dir)) {
         CONTENT_CHECK("create fixture directory", false);
         return failures;
     }
@@ -218,86 +613,62 @@ int file_market_content_tests(void)
     /* No mkfifo, and symlink creation may lack privilege
      * (ERROR_PRIVILEGE_NOT_HELD), so the non-regular-file refusal fixtures
      * cannot be built. */
-    bool files_ready = content_write_file(filepath, payload, sizeof(payload)) &&
-        content_write_file(wrong_path, payload, sizeof(payload) - 1);
+    bool files_ready = content_write_content_fixtures(
+        filepath, symlink_path, fifo_path, wrong_path, payload,
+        sizeof(payload));
     CONTENT_CHECK("regular and mismatch fixtures", files_ready);
     (void)symlink_path;
     (void)fifo_path;
 #else
-    bool files_ready = content_write_file(filepath, payload, sizeof(payload)) &&
-        content_symlink_create(filepath, symlink_path) &&
-        content_special_create(fifo_path) &&
-        content_write_file(wrong_path, payload, sizeof(payload) - 1);
+    bool files_ready = content_write_content_fixtures(
+        filepath, symlink_path, fifo_path, wrong_path, payload,
+        sizeof(payload));
     CONTENT_CHECK("regular, symlink, special, and mismatch fixtures",
                   files_ready);
 #endif
 
     int64_t now_unix = (int64_t)platform_time_wall_time_t();
     struct file_offer offer;
-    bool signed_offer = content_signed_offer(
-        &offer, root, sizeof(payload), 7301, now_unix);
     struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    bool opened = signed_offer && node_db_open(&ndb, dbpath) &&
-                  db_file_offer_save(&ndb, &offer);
+    bool opened = content_authenticated_offer_opened(
+        &ndb, dbpath, &offer, root, sizeof(payload), now_unix);
     CONTENT_CHECK("authenticated offer database fixture", opened);
     if (!opened) {
-        if (ndb.open) node_db_close(&ndb);
+        content_close_open_node_db(&ndb);
         test_cleanup_tmpdir(dir);
         return failures;
     }
 
-    {
-        uint8_t identity[32];
-        struct node_db closed_probe;
-        memset(&closed_probe, 0, sizeof(closed_probe));
-        CONTENT_CHECK("registration state distinguishes absent from error",
-            db_market_content_registration_identity(
-                &ndb, offer.offer_id, identity) ==
-                MARKET_CONTENT_STATE_ABSENT &&
-            db_market_content_registration_identity(
-                &closed_probe, offer.offer_id, identity) ==
-                MARKET_CONTENT_STATE_ERROR);
-    }
+    CONTENT_CHECK("registration state distinguishes absent from error",
+        content_registration_states_differ(&ndb, offer.offer_id));
 
     /* Counts come from the store, uncapped: an empty registry counts zero,
      * an unreadable one fails closed to -1. */
-    {
-        struct node_db closed_probe;
-        memset(&closed_probe, 0, sizeof(closed_probe));
-        closed_probe.open = false;
-        CONTENT_CHECK("store counts start measured and fail closed",
-            db_market_content_count(&ndb) == 0 &&
-            db_file_offer_count(&ndb) == 1 &&
-            db_market_content_count(NULL) == -1 &&
-            db_market_content_count(&closed_probe) == -1 &&
-            db_file_offer_count(&closed_probe) == -1);
-    }
+    CONTENT_CHECK("store counts start measured and fail closed",
+        content_initial_counts_fail_closed(&ndb));
 
     struct market_content_public_record registered;
     struct zcl_result result = file_market_content_register(
         &ndb, offer.offer_id, filepath, now_unix, &registered);
     CONTENT_CHECK("exact bytes register against signed manifest",
-        result.ok && registered.size_bytes == sizeof(payload) &&
-        registered.num_chunks == 1 &&
-        memcmp(registered.root_hash, root, 32) == 0);
+        content_manifest_bytes_match(&result, &registered, sizeof(payload),
+                                     root));
 
     struct market_content_public_record listed[2];
     int listed_total = -1;
     int listed_count = db_market_content_list_snapshot(
         &ndb, listed, 2, &listed_total);
     CONTENT_CHECK("path-free model projection lists one binding",
-        listed_count == 1 && listed_total == 1 &&
-        memcmp(listed[0].offer_id, offer.offer_id, 32) == 0);
+        content_one_offer_listed(listed_count, listed_total, listed,
+                                 offer.offer_id));
 
     struct file_market_delivery_chunk loaded;
     struct zcl_result load_result = file_market_content_load_chunk(
         &ndb, offer.offer_id, 0, &loaded);
     bool load_ok = load_result.ok;
     CONTENT_CHECK("verified reader returns exact registered chunk",
-        load_ok && loaded.size == sizeof(payload) &&
-        memcmp(loaded.data, payload, sizeof(payload)) == 0 &&
-        memcmp(loaded.sha3, chunk_sha3, 32) == 0);
+        content_verified_chunk_bytes(load_ok, &loaded, payload,
+                                     sizeof(payload), chunk_sha3));
     free(loaded.data);
 
 #if !defined(_WIN32)
@@ -318,20 +689,17 @@ int file_market_content_tests(void)
     CONTENT_CHECK("signed size mismatch fails before persistence", !result.ok);
 
     struct file_offer wrong_root_offer;
-    uint8_t wrong_root[32];
-    memset(wrong_root, 0x92, sizeof(wrong_root));
-    bool wrong_offer_ready = content_signed_offer(
-        &wrong_root_offer, wrong_root, sizeof(payload), 7302, now_unix) &&
-        db_file_offer_save(&ndb, &wrong_root_offer);
+    bool wrong_offer_ready = content_wrong_root_offer_saved(
+        &ndb, &wrong_root_offer, sizeof(payload), now_unix);
     result = wrong_offer_ready ? file_market_content_register(
         &ndb, wrong_root_offer.offer_id, filepath, now_unix + 1,
         &registered) : ZCL_ERR(-1, "wrong offer fixture failed");
     CONTENT_CHECK("signed root mismatch fails before persistence",
-                  wrong_offer_ready && !result.ok);
+                  content_root_mismatch_rejected(wrong_offer_ready,
+                                                 &result));
 
     CONTENT_CHECK("model counts follow the rows actually saved",
-        db_file_offer_count(&ndb) == 2 &&
-        db_market_content_count(&ndb) == 1);
+        content_saved_offer_counts(&ndb));
 
     rpc_market_set_state(&ndb);
     /* The registered-content index is a serving surface. Under the
@@ -344,10 +712,8 @@ int file_market_content_tests(void)
     size_t hidden_len = json_write(&hidden_index, hidden_rendered,
                                    sizeof(hidden_rendered));
     CONTENT_CHECK("public index withholds rows and private counts",
-        hidden_indexed && hidden_len > 0 &&
-        !strstr(hidden_rendered, "offer_id") &&
-        json_get(&hidden_index, "hidden_by_profile") == NULL &&
-        json_get(&hidden_index, "total") == NULL);
+        content_index_hides_rows(hidden_indexed, hidden_len,
+                                 hidden_rendered, &hidden_index));
     json_free(&hidden_index);
 
     /* After this node signs off on its own content the row appears — and
@@ -361,9 +727,9 @@ int file_market_content_tests(void)
     size_t rendered_len = json_write(&public_index, rendered,
                                      sizeof(rendered));
     CONTENT_CHECK("private REST index omits filesystem references",
-        signed_off.ok && indexed && rendered_len > 0 &&
-        strstr(rendered, "offer_id") &&
-        !strstr(rendered, "private_path") && !strstr(rendered, filepath));
+        content_reviewed_index_omits_path(signed_off.ok, indexed,
+                                          rendered_len, rendered,
+                                          filepath));
     json_free(&public_index);
 
     node_db_close(&ndb);
@@ -373,8 +739,8 @@ int file_market_content_tests(void)
         : ZCL_ERR(-1, "database reopen failed");
     load_ok = load_result.ok;
     CONTENT_CHECK("restart reconstructs verified content reader",
-        load_ok && loaded.size == sizeof(payload) &&
-        memcmp(loaded.data, payload, sizeof(payload)) == 0);
+        content_restarted_chunk_bytes(load_ok, &loaded, payload,
+                                      sizeof(payload)));
     free(loaded.data);
 
     /* Slice-serving loads once per <=60 KiB slice of the same immutable
@@ -383,9 +749,8 @@ int file_market_content_tests(void)
     struct zcl_result warm_result = file_market_content_load_chunk(
         &ndb, offer.offer_id, 0, &loaded);
     CONTENT_CHECK("warm slice load repeats the exact verified chunk",
-        warm_result.ok && loaded.size == sizeof(payload) &&
-        memcmp(loaded.data, payload, sizeof(payload)) == 0 &&
-        memcmp(loaded.sha3, chunk_sha3, 32) == 0);
+        content_warm_chunk_bytes(&warm_result, &loaded, payload,
+                                 sizeof(payload), chunk_sha3));
     free(loaded.data);
 
     /* An in-place rewrite restoring its old mtime via utimensat(2) must
@@ -393,35 +758,14 @@ int file_market_content_tests(void)
      * bytes are re-hashed. POSIX-only (st_atim/st_mtim, utimensat), so not
      * exercised on Windows. */
 #if !defined(_WIN32)
-    struct stat before_rewrite;
-    bool captured = stat(filepath, &before_rewrite) == 0;
-    int rewrite_fd = open(filepath, O_WRONLY | O_CLOEXEC);
-    uint8_t swapped = (uint8_t)(payload[0] ^ 0xffu);
-    bool rewrote = captured && rewrite_fd >= 0 &&
-        platform_positioned_write(rewrite_fd, &swapped, 1, 0) == 1;
-    if (rewrite_fd >= 0)
-        close(rewrite_fd);
-    const struct timespec keep_times[2] = {
-        before_rewrite.st_atim, before_rewrite.st_mtim,
-    };
-    bool clock_frozen = rewrote &&
-        utimensat(AT_FDCWD, filepath, keep_times, 0) == 0;
-    load_result = file_market_content_load_chunk(
-        &ndb, offer.offer_id, 0, &loaded);
     CONTENT_CHECK("mtime-frozen rewrite cannot ride the digest table",
-                  clock_frozen && !load_result.ok && loaded.data == NULL);
+                  content_mtime_freeze_rejected(&ndb, offer.offer_id,
+                                                filepath, payload[0]));
 #endif /* !defined(_WIN32) */
 
-    int mutate_fd = open(filepath, O_WRONLY | O_CLOEXEC);
-    uint8_t changed = (uint8_t)(payload[0] ^ 0xffu);
-    bool mutated = mutate_fd >= 0 &&
-        platform_positioned_write(mutate_fd, &changed, 1, 0) == 1;
-    if (mutate_fd >= 0) close(mutate_fd);
-    load_result = file_market_content_load_chunk(
-        &ndb, offer.offer_id, 0, &loaded);
-    load_ok = load_result.ok;
     CONTENT_CHECK("post-registration content tamper revokes delivery",
-                  mutated && !load_ok && loaded.data == NULL);
+                  content_post_tamper_revoked(&ndb, offer.offer_id,
+                                              filepath, payload[0]));
 
     /* ── the serving index discloses its window ──────────────────── */
     /* Past the index's 256-row listing window the index discloses shown and
@@ -439,65 +783,21 @@ int file_market_content_tests(void)
         }
         snprintf(wdbpath, sizeof(wdbpath), "%s/node.db", wdir);
         struct node_db wndb;
-        memset(&wndb, 0, sizeof(wndb));
-        bool wopened = node_db_open(&wndb, wdbpath);
-        rpc_market_set_state(&wndb);
-
-        /* 257 registry rows, one past the window. The three newest are
-         * reviewed-ok via real signed offers; the rest hide under the
-         * boot-default profile. */
-        struct file_offer reviewed[3];
-        bool seeded = wopened;
-        for (int k = 0; seeded && k < 3; k++) {
-            uint8_t digest[32], root[32];
-            content_window_digest(256 - k, digest);
-            sha3_256(digest, sizeof(digest), root);
-            seeded = content_signed_offer(&reviewed[k], root,
-                                          sizeof(payload),
-                                          (uint64_t)(7401 + k),
-                                          now_unix) &&
-                db_file_offer_save(&wndb, &reviewed[k]) &&
-                market_moderation_set_review_state(
-                    reviewed[k].offer_id,
-                    MARKET_REVIEW_REVIEWED_OK).ok;
-        }
-        for (int i = 0; seeded && i < 257; i++) {
-            uint8_t digest[32], root[32];
-            content_window_digest(i, digest);
-            sha3_256(digest, sizeof(digest), root);
-            struct market_content_record row;
-            memset(&row, 0, sizeof(row));
-            if (i >= 254)
-                memcpy(row.offer_id, reviewed[256 - i].offer_id, 32);
-            else
-                memcpy(row.offer_id, digest, 32);
-            memcpy(row.root_hash, root, 32);
-            snprintf(row.private_path, sizeof(row.private_path),
-                     "/registered/window-%03d.bin", i);
-            row.size_bytes = sizeof(payload);
-            row.num_chunks = 1;
-            row.chunk_hashes = digest;
-            row.chunk_hashes_len = sizeof(digest);
-            row.registered_at = now_unix + 10000 + i;
-            seeded = db_market_content_save(&wndb, &row);
-        }
+        bool seeded = content_seed_index_window_rows(
+            &wndb, wdbpath, sizeof(payload), now_unix);
         CONTENT_CHECK("registry seeds one past the index window",
-            seeded && db_market_content_count(&wndb) == 257);
+            content_registry_count_matches(&wndb, seeded));
 
         struct json_value window_index;
         json_init(&window_index);
-        bool window_indexed =
-            seeded && api_market_content_list(&window_index);
+        bool window_indexed = content_list_seeded_contents(
+            seeded, &window_index);
         const struct json_value *shown_v = json_get(&window_index, "shown");
         const struct json_value *rows_v =
             json_get(&window_index, "contents");
         CONTENT_CHECK("public index reveals only servable window rows",
-            window_indexed && shown_v && rows_v &&
-            rows_v->type == JSON_ARR &&
-            json_size(rows_v) == 3 &&
-            json_get_int(shown_v) == 3 &&
-            json_get(&window_index, "total") == NULL &&
-            json_get(&window_index, "hidden_by_profile") == NULL);
+            content_window_shows_three(&window_index, window_indexed,
+                                       shown_v, rows_v));
         json_free(&window_index);
 
         struct market_content_public_record snapshot[2];
@@ -505,7 +805,7 @@ int file_market_content_tests(void)
         int snapshot_count = db_market_content_list_snapshot(
             &wndb, snapshot, 2, &snapshot_total);
         CONTENT_CHECK("local snapshot binds bounded rows to exact total",
-            snapshot_count == 2 && snapshot_total == 257);
+            content_snapshot_row_total(snapshot_count, snapshot_total));
 
         /* An uncountable store keeps the listing but drops the total. */
         rpc_market_set_state(NULL);
@@ -514,9 +814,8 @@ int file_market_content_tests(void)
         bool uncountable_ok = api_market_content_list(&uncountable);
         const struct json_value *u_shown = json_get(&uncountable, "shown");
         CONTENT_CHECK("uncountable store drops the total, keeps shown",
-            uncountable_ok && u_shown &&
-            json_get_int(u_shown) == 0 &&
-            json_get(&uncountable, "total") == NULL);
+            content_uncountable_shown_only(uncountable_ok, u_shown,
+                                           &uncountable));
         json_free(&uncountable);
 
         node_db_close(&wndb);
@@ -535,11 +834,9 @@ int file_market_content_tests(void)
         char gate_path[512];
         snprintf(gate_path, sizeof(gate_path), "%s/gate.bin", dir);
         struct file_offer gate_offer;
-        bool gate_ready =
-            content_write_file(gate_path, payload, sizeof(payload)) &&
-            content_signed_offer(&gate_offer, root, sizeof(payload), 7501,
-                                 now_unix) &&
-            db_file_offer_save(&ndb, &gate_offer);
+        bool gate_ready = content_gate_bytes_offered(
+            &ndb, gate_path, payload, sizeof(payload), root, now_unix,
+            &gate_offer);
         CONTENT_CHECK("confirm-gate fixture offer", gate_ready);
 
         struct rpc_table gate_table;
@@ -561,33 +858,28 @@ int file_market_content_tests(void)
                                    gate_params, &gate);
         const char *plan_token = content_kv_str(&gate, "plan_token");
         char token_hex[65];
-        if (plan_token)
-            snprintf(token_hex, sizeof(token_hex), "%s", plan_token);
+        content_copy_token_text(plan_token, token_hex, sizeof(token_hex));
         const char *plan_status = content_kv_str(&gate, "status");
         CONTENT_CHECK("plan mints a token and mutates nothing",
-            planned && plan_status &&
-                strcmp(plan_status, "planned") == 0 &&
-                strlen(token_hex) == 64 &&
-                db_market_content_count(&ndb) == rows_before);
+            content_plan_rows_unchanged(planned, plan_status, token_hex,
+                                        &ndb, rows_before));
         json_free(&gate);
 
         /* A well-formed but wrong token re-derives a different digest and
          * reads as a moved bind (the bare-commit leg covers malformed). */
         char tampered[65];
         snprintf(tampered, sizeof(tampered), "%s", token_hex);
-        tampered[0] = tampered[0] == '0' ? '1' : '0';
+        tampered[0] = content_flip_leading_hex(tampered[0]);
         snprintf(gate_params, sizeof(gate_params),
                  "[\"%s\",\"%s\",\"commit\",\"%s\"]", gate_offer_hex,
                  gate_path, tampered);
         json_init(&gate);
         bool tamper_refused = !content_rpc(
             &gate_table, "zmarket_content_register", gate_params, &gate);
-        const char *tamper_reason =
-            gate.type == JSON_STR ? json_get_str(&gate) : NULL;
+        const char *tamper_reason = content_json_value_string(&gate);
         CONTENT_CHECK("tampered plan token is refused",
-            tamper_refused && tamper_reason &&
-                strstr(tamper_reason, "STALE_PLAN") != NULL &&
-                db_market_content_count(&ndb) == rows_before);
+            content_stale_token_kept_rows(tamper_refused, tamper_reason,
+                                          &ndb, rows_before));
         json_free(&gate);
 
         /* Commit without a token is refused. */
@@ -597,7 +889,7 @@ int file_market_content_tests(void)
         bool bare_refused = !content_rpc(
             &gate_table, "zmarket_content_register", gate_params, &gate);
         CONTENT_CHECK("commit without a plan token is refused",
-            bare_refused && db_market_content_count(&ndb) == rows_before);
+            content_bare_commit_kept_rows(bare_refused, &ndb, rows_before));
         json_free(&gate);
 
         /* The real commit carries the planned token and binds the bytes —
@@ -617,18 +909,11 @@ int file_market_content_tests(void)
         char commit_rendered[1024];
         (void)json_write(&gate, commit_rendered, sizeof(commit_rendered));
         CONTENT_CHECK("commit with the planned token registers",
-            committed && committed_flag &&
-                committed_flag->type == JSON_BOOL &&
-                json_get_bool(committed_flag) &&
-                commit_status && strcmp(commit_status, "registered") == 0 &&
-                registered_at && registered_at->type == JSON_INT &&
-                json_get_int(registered_at) > 0 &&
-                strstr(commit_rendered, gate_path) == NULL &&
-                strstr(commit_rendered, "content_path") == NULL &&
-                db_market_content_count(&ndb) == rows_before + 1);
-        int64_t gate_registered_at = registered_at &&
-            registered_at->type == JSON_INT
-                ? json_get_int(registered_at) : 0;
+            content_commit_registered_receipt(
+                committed, committed_flag, commit_status, registered_at,
+                commit_rendered, gate_path, &ndb, rows_before));
+        int64_t gate_registered_at =
+            content_json_int_if_present(registered_at);
         json_free(&gate);
 
         /* Replaying that commit after the registration moved is stale:
@@ -636,11 +921,9 @@ int file_market_content_tests(void)
         json_init(&gate);
         bool replay_stale = !content_rpc(
             &gate_table, "zmarket_content_register", gate_params, &gate);
-        const char *stale_reason =
-            gate.type == JSON_STR ? json_get_str(&gate) : NULL;
+        const char *stale_reason = content_json_value_string(&gate);
         CONTENT_CHECK("replayed commit after the bind is stale",
-            replay_stale && stale_reason &&
-                strstr(stale_reason, "STALE_PLAN") != NULL);
+            content_stale_plan_text(replay_stale, stale_reason));
         json_free(&gate);
 
         /* The target path is bound: a token planned for one path cannot
@@ -654,24 +937,21 @@ int file_market_content_tests(void)
         const char *path_token = content_kv_str(&gate, "plan_token");
         char path_token_buf[65];
         path_token_buf[0] = '\0';
-        if (path_token)
-            snprintf(path_token_buf, sizeof(path_token_buf), "%s",
-                     path_token);
+        content_copy_token_text(path_token, path_token_buf,
+                                sizeof(path_token_buf));
         json_free(&gate);
-        bool path_token_differs =
-            path_token_buf[0] && strcmp(path_token_buf, token_hex) != 0;
+        bool path_token_differs = content_token_texts_differ(
+            path_token_buf, token_hex);
         snprintf(gate_params, sizeof(gate_params),
                  "[\"%s\",\"%s\",\"commit\",\"%s\"]", gate_offer_hex,
                  gate_path, path_token_buf);
         json_init(&gate);
         bool path_refused = !content_rpc(
             &gate_table, "zmarket_content_register", gate_params, &gate);
-        const char *path_reason =
-            gate.type == JSON_STR ? json_get_str(&gate) : NULL;
+        const char *path_reason = content_json_value_string(&gate);
         CONTENT_CHECK("a plan for one path cannot commit another",
-            path_planned && path_token_differs && path_refused &&
-                path_reason && strstr(path_reason, "STALE_PLAN") != NULL &&
-                db_market_content_count(&ndb) == rows_before + 1);
+            content_path_commit_refused(path_planned, path_token_differs,
+                path_refused, path_reason, &ndb, rows_before));
         json_free(&gate);
 
         /* A timestamp is not a row identity: rebinding the same offer in the
@@ -681,12 +961,10 @@ int file_market_content_tests(void)
         char canonical_alternate[MARKET_CONTENT_PATH_MAX];
         snprintf(alternate_path, sizeof(alternate_path), "%s/gate-alt.bin",
                  dir);
-        bool alternate_ready =
-            content_write_file(alternate_path, payload, sizeof(payload)) &&
-            content_canonical_file(gate_path, canonical_gate,
-                                   sizeof(canonical_gate)) &&
-            content_canonical_file(alternate_path, canonical_alternate,
-                                   sizeof(canonical_alternate));
+        bool alternate_ready = content_alternate_gate_ready(
+            alternate_path, payload, sizeof(payload), gate_path,
+            canonical_gate, sizeof(canonical_gate),
+            canonical_alternate, sizeof(canonical_alternate));
         uint8_t before_same_second[32], after_same_second[32];
         char state_name[MARKET_CONTENT_REGISTRATION_STATE_MAX];
         struct zcl_result before_plan = alternate_ready
@@ -705,16 +983,16 @@ int file_market_content_tests(void)
         same_second.chunk_hashes = chunk_sha3;
         same_second.chunk_hashes_len = sizeof(chunk_sha3);
         same_second.registered_at = gate_registered_at;
-        bool rebound_same_second = before_plan.ok &&
-            db_market_content_save(&ndb, &same_second);
+        bool rebound_same_second = content_rebind_row_saved(
+            before_plan.ok, &ndb, &same_second);
         struct zcl_result after_plan = rebound_same_second
             ? file_market_content_registration_plan(
                 &ndb, gate_offer.offer_id, gate_path, after_same_second,
                 state_name)
             : ZCL_ERR(-1, "same-second rebind failed");
         CONTENT_CHECK("same-second durable row rewrite stales the plan",
-            after_plan.ok &&
-            memcmp(before_same_second, after_same_second, 32) != 0);
+            content_plan_digest_changed(after_plan.ok, before_same_second,
+                                        after_same_second));
 
         struct content_interleave_fixture interleave;
         memset(&interleave, 0, sizeof(interleave));
@@ -731,8 +1009,7 @@ int file_market_content_tests(void)
                 gate_registered_at, &refused_record);
         file_market_content_set_precommit_test_hook(NULL, NULL);
         CONTENT_CHECK("post-hash interleaving rewrite is atomically refused",
-            interleave.saved && !interleaved.ok &&
-            strstr(interleaved.message, "STALE_PLAN") != NULL);
+            content_interleave_refused(interleave.saved, &interleaved));
     }
 
     rpc_market_set_state(NULL);
