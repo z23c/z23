@@ -39,6 +39,23 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate(
     return VCS_ZCODE_FOCUS_OK;
 }
 
+static bool handoff_write_fields(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_focus_handoff_v1 *handoff)
+{
+    return zcl_codec_write_bytes(writer, handoff_magic, 8) &&
+        zcl_codec_write_u16le(writer, handoff->schema_version) &&
+        zcl_codec_write_u8(writer, handoff->status) &&
+        zcl_codec_write_u8(writer, handoff->flags) &&
+        zcl_codec_write_u32le(writer, handoff->reserved) &&
+        zcl_codec_write_bytes(writer, handoff->focus_root, 32) &&
+        zcl_codec_write_bytes(writer, handoff->report_root, 32) &&
+        zcl_codec_write_bytes(writer, handoff->from_claim_root, 32) &&
+        zcl_codec_write_bytes(writer, handoff->to_specialist_root, 32) &&
+        zcl_codec_write_bytes(writer, handoff->next_claim_root, 32) &&
+        zcl_codec_write_bytes(writer, handoff->required_evidence_root, 32) &&
+        zcl_codec_write_bytes(writer, handoff->continuation_root, 32);
+}
+
 enum vcs_zcode_focus_error vcs_zcode_focus_handoff_serialize(
     const struct vcs_zcode_focus_handoff_v1 *handoff,
     uint8_t out[VCS_ZCODE_FOCUS_HANDOFF_WIRE_BYTES])
@@ -49,22 +66,30 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_serialize(
     if (error != VCS_ZCODE_FOCUS_OK) return error;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_FOCUS_HANDOFF_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, handoff_magic, 8) &&
-        zcl_codec_write_u16le(&writer, handoff->schema_version) &&
-        zcl_codec_write_u8(&writer, handoff->status) &&
-        zcl_codec_write_u8(&writer, handoff->flags) &&
-        zcl_codec_write_u32le(&writer, handoff->reserved) &&
-        zcl_codec_write_bytes(&writer, handoff->focus_root, 32) &&
-        zcl_codec_write_bytes(&writer, handoff->report_root, 32) &&
-        zcl_codec_write_bytes(&writer, handoff->from_claim_root, 32) &&
-        zcl_codec_write_bytes(&writer, handoff->to_specialist_root, 32) &&
-        zcl_codec_write_bytes(&writer, handoff->next_claim_root, 32) &&
-        zcl_codec_write_bytes(&writer, handoff->required_evidence_root, 32) &&
-        zcl_codec_write_bytes(&writer, handoff->continuation_root, 32);
+    bool ok = handoff_write_fields(&writer, handoff);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == VCS_ZCODE_FOCUS_HANDOFF_WIRE_BYTES
         ? VCS_ZCODE_FOCUS_OK : VCS_ZCODE_FOCUS_SHAPE;
+}
+
+static bool handoff_read_fields(struct zcl_codec_reader *reader,
+    uint8_t magic[8], struct vcs_zcode_focus_handoff_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u8(reader, &out->status) &&
+        zcl_codec_read_u8(reader, &out->flags) &&
+        zcl_codec_read_u32le(reader, &out->reserved) &&
+        zcl_codec_read_bytes(reader, out->focus_root, 32) &&
+        zcl_codec_read_bytes(reader, out->report_root, 32) &&
+        zcl_codec_read_bytes(reader, out->from_claim_root, 32) &&
+        zcl_codec_read_bytes(reader, out->to_specialist_root, 32) &&
+        zcl_codec_read_bytes(reader, out->next_claim_root, 32) &&
+        zcl_codec_read_bytes(reader, out->required_evidence_root, 32) &&
+        zcl_codec_read_bytes(reader, out->continuation_root, 32) &&
+        zcl_codec_reader_finish(reader) &&
+        memcmp(magic, handoff_magic, 8) == 0;
 }
 
 enum vcs_zcode_focus_error vcs_zcode_focus_handoff_parse(
@@ -78,20 +103,7 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8];
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u8(&reader, &out->status) &&
-        zcl_codec_read_u8(&reader, &out->flags) &&
-        zcl_codec_read_u32le(&reader, &out->reserved) &&
-        zcl_codec_read_bytes(&reader, out->focus_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->report_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->from_claim_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->to_specialist_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->next_claim_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->required_evidence_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->continuation_root, 32) &&
-        zcl_codec_reader_finish(&reader) &&
-        memcmp(magic, handoff_magic, 8) == 0;
+    bool ok = handoff_read_fields(&reader, magic, out);
     if (!ok) {
         memset(out, 0, sizeof(*out));
         return VCS_ZCODE_FOCUS_SHAPE;
@@ -116,6 +128,55 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_root(
     return VCS_ZCODE_FOCUS_OK;
 }
 
+static enum vcs_zcode_focus_error handoff_chain_roots(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_focus_claim_v1 *from_claim,
+    const struct vcs_zcode_specialist_report_v1 *report,
+    const struct vcs_zcode_focus_claim_v1 *next_claim,
+    uint8_t focus_root[32], uint8_t situation_root[32],
+    uint8_t from_root[32], uint8_t report_root[32], uint8_t next_root[32])
+{
+    if (vcs_zcode_focus_root(focus, focus_root) != VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_situation_root(focus, situation_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_claim_root(from_claim, from_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_specialist_report_root(report, report_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_claim_root(next_claim, next_root) !=
+            VCS_ZCODE_FOCUS_OK)
+        return VCS_ZCODE_FOCUS_SHAPE;
+    return VCS_ZCODE_FOCUS_OK;
+}
+
+static bool handoff_chain_bound(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_focus_claim_v1 *from_claim,
+    const struct vcs_zcode_specialist_report_v1 *report,
+    const struct vcs_zcode_focus_handoff_v1 *handoff,
+    const struct vcs_zcode_focus_claim_v1 *next_claim,
+    const uint8_t focus_root[32], const uint8_t situation_root[32],
+    const uint8_t from_root[32], const uint8_t report_root[32],
+    const uint8_t next_root[32])
+{
+    return memcmp(from_claim->situation_root, situation_root, 32) == 0 &&
+        memcmp(next_claim->situation_root, situation_root, 32) == 0 &&
+        memcmp(report->focus_root, focus_root, 32) == 0 &&
+        memcmp(handoff->focus_root, focus_root, 32) == 0 &&
+        memcmp(report->claim_root, from_root, 32) == 0 &&
+        memcmp(handoff->from_claim_root, from_root, 32) == 0 &&
+        memcmp(handoff->report_root, report_root, 32) == 0 &&
+        memcmp(handoff->next_claim_root, next_root, 32) == 0 &&
+        memcmp(report->specialist_root, from_claim->claimant_root, 32) == 0 &&
+        memcmp(handoff->to_specialist_root,
+               next_claim->claimant_root, 32) == 0 &&
+        memcmp(handoff->required_evidence_root,
+               focus->required_evidence_root, 32) == 0 &&
+        memcmp(handoff->continuation_root,
+               report->next_experiment_root, 32) == 0 &&
+        handoff->status == report->status;
+}
+
 enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_chain(
     const struct vcs_zcode_focus_v1 *focus,
     const struct vcs_zcode_focus_claim_v1 *from_claim,
@@ -132,33 +193,104 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_chain(
         return VCS_ZCODE_FOCUS_SHAPE;
     uint8_t focus_root[32], situation_root[32], from_root[32];
     uint8_t report_root[32], next_root[32];
-    if (vcs_zcode_focus_root(focus, focus_root) != VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_focus_situation_root(focus, situation_root) !=
-            VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_focus_claim_root(from_claim, from_root) !=
-            VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_specialist_report_root(report, report_root) !=
-            VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_focus_claim_root(next_claim, next_root) !=
-            VCS_ZCODE_FOCUS_OK)
-        return VCS_ZCODE_FOCUS_SHAPE;
-    bool bound = memcmp(from_claim->situation_root, situation_root, 32) == 0 &&
-        memcmp(next_claim->situation_root, situation_root, 32) == 0 &&
-        memcmp(report->focus_root, focus_root, 32) == 0 &&
-        memcmp(handoff->focus_root, focus_root, 32) == 0 &&
-        memcmp(report->claim_root, from_root, 32) == 0 &&
-        memcmp(handoff->from_claim_root, from_root, 32) == 0 &&
-        memcmp(handoff->report_root, report_root, 32) == 0 &&
-        memcmp(handoff->next_claim_root, next_root, 32) == 0 &&
-        memcmp(report->specialist_root, from_claim->claimant_root, 32) == 0 &&
-        memcmp(handoff->to_specialist_root,
-               next_claim->claimant_root, 32) == 0 &&
-        memcmp(handoff->required_evidence_root,
-               focus->required_evidence_root, 32) == 0 &&
-        memcmp(handoff->continuation_root,
-               report->next_experiment_root, 32) == 0 &&
-        handoff->status == report->status;
+    enum vcs_zcode_focus_error error = handoff_chain_roots(
+        focus, from_claim, report, next_claim, focus_root, situation_root,
+        from_root, report_root, next_root);
+    if (error != VCS_ZCODE_FOCUS_OK) return error;
+    bool bound = handoff_chain_bound(focus, from_claim, report, handoff,
+        next_claim, focus_root, situation_root, from_root, report_root,
+        next_root);
     return bound ? VCS_ZCODE_FOCUS_OK : VCS_ZCODE_FOCUS_BINDING;
+}
+
+static enum vcs_zcode_focus_error handoff_work_check_present(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_agent_context_v1 *context,
+    const struct vcs_zcode_write_scope_v1 *task_scope,
+    const struct vcs_zcode_focus_claim_v1 *claims,
+    const struct vcs_zcode_write_scope_v1 *scopes,
+    const struct vcs_zcode_work_request_v1 *from_request,
+    const struct vcs_zcode_work_admission_v1 *from_admission,
+    const struct vcs_zcode_work_request_v1 *next_request,
+    const struct vcs_zcode_work_admission_v1 *next_admission,
+    const struct vcs_zcode_work_receipt_v1 *from_receipt,
+    const struct vcs_zcode_specialist_report_v1 *report,
+    const struct vcs_zcode_focus_handoff_v1 *handoff)
+{
+    if (!focus || !task || !context || !task_scope || !claims || !scopes ||
+        !from_request || !from_admission || !next_request ||
+        !next_admission || !from_receipt || !report || !handoff)
+        return VCS_ZCODE_FOCUS_NULL;
+    return VCS_ZCODE_FOCUS_OK;
+}
+
+static enum vcs_zcode_focus_error handoff_work_check_limits(
+    size_t claim_count, size_t from_index, size_t next_index)
+{
+    if (claim_count == 0 || claim_count > VCS_ZCODE_FOCUS_MAX_CLAIMS ||
+        from_index >= claim_count || next_index >= claim_count ||
+        from_index == next_index)
+        return VCS_ZCODE_FOCUS_LIMIT;
+    return VCS_ZCODE_FOCUS_OK;
+}
+
+static enum vcs_zcode_focus_error handoff_work_claim_roots(
+    const struct vcs_zcode_focus_claim_v1 *claims, size_t claim_count,
+    uint8_t claim_roots[VCS_ZCODE_FOCUS_MAX_CLAIMS][32])
+{
+    for (size_t i = 0; i < claim_count; i++)
+        if (vcs_zcode_focus_claim_root(&claims[i], claim_roots[i]) !=
+            VCS_ZCODE_FOCUS_OK)
+            return VCS_ZCODE_FOCUS_SHAPE;
+    return VCS_ZCODE_FOCUS_OK;
+}
+
+static enum vcs_zcode_focus_error handoff_work_check_source(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_focus_claim_v1 *from_claim,
+    const uint8_t (*claim_roots)[32], size_t claim_count,
+    const struct vcs_zcode_work_request_v1 *from_request,
+    const struct vcs_zcode_work_receipt_v1 *from_receipt,
+    const struct vcs_zcode_specialist_report_v1 *report,
+    int64_t now_unix)
+{
+    if (vcs_zcode_specialist_report_validate_for_work(
+            focus, from_claim, claim_roots, claim_count,
+            task, from_request, from_receipt, report) !=
+            VCS_ZCODE_FOCUS_OK ||
+        from_receipt->finished_unix <= 0 ||
+        from_receipt->finished_unix > now_unix)
+        return VCS_ZCODE_FOCUS_BINDING;
+    return VCS_ZCODE_FOCUS_OK;
+}
+
+static int64_t handoff_work_snapshot_unix(
+    const struct vcs_zcode_focus_claim_v1 *claims, size_t claim_count,
+    int64_t finished_unix)
+{
+    int64_t snapshot_unix = finished_unix;
+    for (size_t i = 0; i < claim_count; i++)
+        if (claims[i].created_unix > snapshot_unix)
+            snapshot_unix = claims[i].created_unix;
+    return snapshot_unix;
+}
+
+static enum vcs_zcode_focus_error handoff_work_check_authority(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_write_scope_v1 *task_scope,
+    const struct vcs_zcode_focus_claim_v1 *claims,
+    const struct vcs_zcode_write_scope_v1 *scopes,
+    size_t claim_count, int64_t snapshot_unix)
+{
+    for (size_t i = 0; i < claim_count; i++)
+        if (vcs_zcode_focus_claim_authority_status(
+                focus, task, task_scope, &claims[i], &scopes[i],
+                snapshot_unix) != ZCL_ONTOLOGY_PROVED)
+            return VCS_ZCODE_FOCUS_BINDING;
+    return VCS_ZCODE_FOCUS_OK;
 }
 
 enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
@@ -178,19 +310,16 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
     const struct vcs_zcode_focus_handoff_v1 *handoff,
     int64_t now_unix)
 {
-    if (!focus || !task || !context || !task_scope || !claims || !scopes ||
-        !from_request || !from_admission || !next_request ||
-        !next_admission || !from_receipt || !report || !handoff)
-        return VCS_ZCODE_FOCUS_NULL;
-    if (claim_count == 0 || claim_count > VCS_ZCODE_FOCUS_MAX_CLAIMS ||
-        from_index >= claim_count || next_index >= claim_count ||
-        from_index == next_index)
-        return VCS_ZCODE_FOCUS_LIMIT;
+    enum vcs_zcode_focus_error error = handoff_work_check_present(
+        focus, task, context, task_scope, claims, scopes, from_request,
+        from_admission, next_request, next_admission, from_receipt, report,
+        handoff);
+    if (error != VCS_ZCODE_FOCUS_OK) return error;
+    error = handoff_work_check_limits(claim_count, from_index, next_index);
+    if (error != VCS_ZCODE_FOCUS_OK) return error;
     uint8_t claim_roots[VCS_ZCODE_FOCUS_MAX_CLAIMS][32];
-    for (size_t i = 0; i < claim_count; i++)
-        if (vcs_zcode_focus_claim_root(&claims[i], claim_roots[i]) !=
-            VCS_ZCODE_FOCUS_OK)
-            return VCS_ZCODE_FOCUS_SHAPE;
+    error = handoff_work_claim_roots(claims, claim_count, claim_roots);
+    if (error != VCS_ZCODE_FOCUS_OK) return error;
     enum vcs_zcode_focus_error context_error =
         vcs_zcode_focus_validate_for_context(
             focus, task, context, claim_roots, claim_count, true);
@@ -201,17 +330,12 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
      * signed completion before using its timestamp. The earliest instant at
      * which every immutable claim existed after that completion is a
      * deterministic witness for the focus's active-claim snapshot. */
-    if (vcs_zcode_specialist_report_validate_for_work(
-            focus, &claims[from_index], claim_roots, claim_count,
-            task, from_request, from_receipt, report) !=
-            VCS_ZCODE_FOCUS_OK ||
-        from_receipt->finished_unix <= 0 ||
-        from_receipt->finished_unix > now_unix)
-        return VCS_ZCODE_FOCUS_BINDING;
-    int64_t snapshot_unix = from_receipt->finished_unix;
-    for (size_t i = 0; i < claim_count; i++)
-        if (claims[i].created_unix > snapshot_unix)
-            snapshot_unix = claims[i].created_unix;
+    error = handoff_work_check_source(
+        focus, task, &claims[from_index], claim_roots, claim_count,
+        from_request, from_receipt, report, now_unix);
+    if (error != VCS_ZCODE_FOCUS_OK) return error;
+    int64_t snapshot_unix = handoff_work_snapshot_unix(
+        claims, claim_count, from_receipt->finished_unix);
     if (snapshot_unix > now_unix)
         return VCS_ZCODE_FOCUS_BINDING;
     if (vcs_zcode_focus_claim_set_status(
@@ -219,11 +343,9 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
             ZCL_ONTOLOGY_PROVED)
         return VCS_ZCODE_FOCUS_BINDING;
 
-    for (size_t i = 0; i < claim_count; i++)
-        if (vcs_zcode_focus_claim_authority_status(
-                focus, task, task_scope, &claims[i], &scopes[i],
-                snapshot_unix) != ZCL_ONTOLOGY_PROVED)
-            return VCS_ZCODE_FOCUS_BINDING;
+    error = handoff_work_check_authority(
+        focus, task, task_scope, claims, scopes, claim_count, snapshot_unix);
+    if (error != VCS_ZCODE_FOCUS_OK) return error;
 
     if (vcs_zcode_focus_claim_work_status(
             focus, task, task_scope, &claims[from_index],

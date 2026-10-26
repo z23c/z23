@@ -135,10 +135,6 @@ contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_parse
 contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_serialize:16
 contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_set_status:21
 contexts/commons/modules/vcs/src/zcode_focus_claim.c:vcs_zcode_focus_claim_work_status:23
-contexts/commons/modules/vcs/src/zcode_focus_handoff.c:vcs_zcode_focus_handoff_parse:18
-contexts/commons/modules/vcs/src/zcode_focus_handoff.c:vcs_zcode_focus_handoff_serialize:17
-contexts/commons/modules/vcs/src/zcode_focus_handoff.c:vcs_zcode_focus_handoff_validate_chain:27
-contexts/commons/modules/vcs/src/zcode_focus_handoff.c:vcs_zcode_focus_handoff_validate_for_work:33
 contexts/commons/modules/vcs/src/zcode_heuristic_replication.c:hr_replication_row:30
 contexts/commons/modules/vcs/src/zcode_heuristic_replication.c:vcs_zcode_heuristic_replication_fold:36
 contexts/commons/modules/vcs/src/zcode_lane.c:lane_body:16
