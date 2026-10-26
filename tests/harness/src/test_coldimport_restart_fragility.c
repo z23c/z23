@@ -101,11 +101,12 @@ static struct block_index *ci_insert(struct main_state *ms, int height,
     return bi;
 }
 
-/* The EXACT forward-pass best-tip selection from boot.c:2095-2155.
- * Walks all entries height-sorted, accumulates nChainWork on top of pprev,
- * propagates nChainTx, then picks the highest-work entry that is data-bearing
- * and not failed. Returns the selected tip (or NULL). */
-static struct block_index *ci_select_best_tip(struct main_state *ms)
+/* Snapshot every block_index entry into a malloc'd array and height-sort it
+ * ascending. Sets *count to the number of entries actually collected.
+ * Returns the array (caller frees), or NULL when the map is empty or the
+ * allocation fails. */
+static struct block_index **ci_collect_height_sorted(struct main_state *ms,
+                                                     size_t *count)
 {
     size_t n = ms->map_block_index.size;
     if (n == 0)
@@ -131,26 +132,55 @@ static struct block_index *ci_select_best_tip(struct main_state *ms)
                 sorted[i] = sorted[j];
                 sorted[j] = t;
             }
+    *count = n;
+    return sorted;
+}
+
+/* Accumulate one entry's chain totals exactly as the forward pass does:
+ * nChainWork on top of pprev's, and nChainTx propagated from pprev. */
+static void ci_accumulate_chain_totals(struct block_index *b)
+{
+    struct arith_uint256 proof = GetBlockProof(b);
+    if (b->pprev)
+        arith_uint256_add(&b->nChainWork, &b->pprev->nChainWork, &proof);
+    else
+        b->nChainWork = proof;
+
+    if (b->nTx > 0) {
+        if (b->pprev && b->pprev->nChainTx > 0)
+            b->nChainTx = b->pprev->nChainTx + b->nTx;
+        else if (!b->pprev)
+            b->nChainTx = b->nTx;
+    }
+}
+
+/* The forward-pass candidacy rule from boot.c: an entry may become the
+ * selected tip only once nChainTx has propagated, it carries data, and it
+ * is not failed. */
+static bool ci_is_selectable_tip_candidate(struct block_index *b)
+{
+    return b->nChainTx > 0 &&
+        (b->nStatus & BLOCK_HAVE_DATA) &&
+        !(b->nStatus & BLOCK_FAILED_MASK);
+}
+
+/* The EXACT forward-pass best-tip selection from boot.c:2095-2155.
+ * Walks all entries height-sorted, accumulates nChainWork on top of pprev,
+ * propagates nChainTx, then picks the highest-work entry that is data-bearing
+ * and not failed. Returns the selected tip (or NULL). */
+static struct block_index *ci_select_best_tip(struct main_state *ms)
+{
+    size_t n = 0;
+    struct block_index **sorted = ci_collect_height_sorted(ms, &n);
+    if (!sorted)
+        return NULL;
 
     struct block_index *best = NULL;
     for (size_t i = 0; i < n; i++) {
         struct block_index *b = sorted[i];
-        struct arith_uint256 proof = GetBlockProof(b);
-        if (b->pprev)
-            arith_uint256_add(&b->nChainWork, &b->pprev->nChainWork, &proof);
-        else
-            b->nChainWork = proof;
+        ci_accumulate_chain_totals(b);
 
-        if (b->nTx > 0) {
-            if (b->pprev && b->pprev->nChainTx > 0)
-                b->nChainTx = b->pprev->nChainTx + b->nTx;
-            else if (!b->pprev)
-                b->nChainTx = b->nTx;
-        }
-
-        if (b->nChainTx > 0 &&
-            (b->nStatus & BLOCK_HAVE_DATA) &&
-            !(b->nStatus & BLOCK_FAILED_MASK)) {
+        if (ci_is_selectable_tip_candidate(b)) {
             if (!best ||
                 arith_uint256_compare(&b->nChainWork, &best->nChainWork) > 0)
                 best = b;
@@ -158,6 +188,68 @@ static struct block_index *ci_select_best_tip(struct main_state *ms)
     }
     free(sorted);
     return best;
+}
+
+/* Materialize [from_height .. fwd_tip_height] as ONE pprev-linked chain of
+ * ci_insert entries, recording the entries that land on mirror_height and
+ * fwd_tip_height. Returns the last entry inserted, or NULL as soon as an
+ * insert fails. */
+static struct block_index *ci_build_chain_tail(struct main_state *ms,
+                                               int from_height,
+                                               int mirror_height,
+                                               int fwd_tip_height,
+                                               struct block_index **mirror_tip,
+                                               struct block_index **fwd_tip)
+{
+    struct block_index *prev = NULL;
+    for (int h = from_height; h <= fwd_tip_height; h++) {
+        struct block_index *bi = ci_insert(ms, h, prev);
+        if (!bi)
+            return NULL;
+        if (h == mirror_height)
+            *mirror_tip = bi;
+        if (h == fwd_tip_height)
+            *fwd_tip = bi;
+        prev = bi;
+    }
+    return prev;
+}
+
+/* Walk tip-down from `start` across the entries strictly above
+ * mirror_height: each must be present at the expected height and
+ * data-bearing. Returns the entry the walk lands on (the mirror tip when
+ * the extent is contiguous), or NULL as soon as an entry fails. */
+static struct block_index *ci_walk_forward_extent(struct block_index *start,
+                                                  int from_height,
+                                                  int mirror_height)
+{
+    struct block_index *w = start;
+    for (int h = from_height; h > mirror_height; h--) {
+        if (!w || w->nHeight != h ||
+            !(w->nStatus & BLOCK_HAVE_DATA))
+            return NULL;
+        w = w->pprev;
+    }
+    return w;
+}
+
+/* The one-line suppression predicate replicated from boot.c: the backward
+ * CSR tip commit is suppressed only when we have a derived coins best
+ * whose height is STRICTLY above zclassicd's index best. */
+static bool ci_suppresses_backward_tip_commit(bool have_ndcb,
+                                              int32_t derived_h,
+                                              int32_t zcd_best_h)
+{
+    return have_ndcb && (derived_h > zcd_best_h);
+}
+
+/* True once every setup precondition holds: the chain fully materialized
+ * and both the mirror-tip and forward-tip entries were recorded. */
+static bool ci_setup_complete(bool insert_ok,
+                              struct block_index *zcd_tip,
+                              struct block_index *fwd_tip)
+{
+    return insert_ok && zcd_tip != NULL && fwd_tip != NULL;
 }
 
 int test_coldimport_restart_fragility(void)
@@ -187,22 +279,16 @@ int test_coldimport_restart_fragility(void)
      * materialized chain at A so genesis-anchoring is well-defined. */
     const int A = Z - 4;  /* materialize [A .. Z+N], a small connected tail */
 
-    struct block_index *prev = NULL;
     struct block_index *zcd_tip = NULL;   /* entry at the mirror tip Z */
     struct block_index *fwd_tip = NULL;   /* entry at the forward tip Z+N */
-    bool insert_ok = true;
-    for (int h = A; h <= FWD_TIP; h++) {
-        struct block_index *bi = ci_insert(&ms, h, prev);
-        if (!bi) { insert_ok = false; break; }
-        if (h == Z)       zcd_tip = bi;
-        if (h == FWD_TIP) fwd_tip = bi;
-        prev = bi;
-    }
+    struct block_index *chain_top =
+        ci_build_chain_tail(&ms, A, Z, FWD_TIP, &zcd_tip, &fwd_tip);
+    bool insert_ok = chain_top != NULL;
     CI_CHECK("setup: chain materialized", insert_ok);
     CI_CHECK("setup: mirror tip entry present", zcd_tip != NULL);
     CI_CHECK("setup: forward tip entry present", fwd_tip != NULL);
 
-    if (!insert_ok || !zcd_tip || !fwd_tip) {
+    if (!ci_setup_complete(insert_ok, zcd_tip, fwd_tip)) {
         main_state_free(&ms);
         test_cleanup_tmpdir(dir);
         return failures + 1;
@@ -223,16 +309,8 @@ int test_coldimport_restart_fragility(void)
      * every entry above the mirror tip is still present + connected (the
      * clean-restart bug drops these so the index falls back to the mirror
      * extent). */
-    bool fwd_preserved = true;
-    struct block_index *w = fwd_tip;
-    for (int h = FWD_TIP; h > Z; h--) {
-        if (!w || w->nHeight != h ||
-            !(w->nStatus & BLOCK_HAVE_DATA)) {
-            fwd_preserved = false;
-            break;
-        }
-        w = w->pprev;
-    }
+    struct block_index *w = ci_walk_forward_extent(fwd_tip, FWD_TIP, Z);
+    bool fwd_preserved = w != NULL;
     /* After walking the N forward entries we must land exactly on the
      * mirror tip Z — proving the forward extent is a contiguous extension. */
     CI_CHECK("forward extent contiguous + data-bearing above mirror tip",
@@ -247,7 +325,8 @@ int test_coldimport_restart_fragility(void)
     bool have_ndcb = true;                            /* canonical datadir */
     int32_t derived_frontier_h = fwd_tip->nHeight;    /* our coins frontier */
     bool suppress_backward_commit =
-        have_ndcb && (derived_frontier_h > zcd_best_h);
+        ci_suppresses_backward_tip_commit(have_ndcb, derived_frontier_h,
+                                          zcd_best_h);
     CI_CHECK("suppression predicate fires (no backward tip commit)",
              suppress_backward_commit);
 
@@ -257,7 +336,8 @@ int test_coldimport_restart_fragility(void)
      * the strict '>' is exercised, not a tautological self-comparison). */
     int32_t at_mirror_frontier_h = zcd_best_h;
     bool suppress_when_at_mirror =
-        have_ndcb && (at_mirror_frontier_h > zcd_best_h);
+        ci_suppresses_backward_tip_commit(have_ndcb, at_mirror_frontier_h,
+                                          zcd_best_h);
     CI_CHECK("control: at-mirror node does NOT suppress (promotes normally)",
              !suppress_when_at_mirror);
 
