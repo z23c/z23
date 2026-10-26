@@ -172,6 +172,59 @@ static bool offer_replay(struct node_db *ndb,
         db_market_content_find_chunk(ndb, existing->offer_id, 0, &binding);
 }
 
+/* Keep diagnostic origins stable across the extracted offer preparation. */
+#define offer (*offer_storage)
+static void offer_configure_authenticated_endpoint(
+    const struct market_offer_runtime *rt, struct file_offer *offer_storage,
+    const uint8_t onion_pubkey[32])
+{
+    if (rt->prefer_onion) {
+        offer.auth_version = FILE_MARKET_OFFER_VERSION_V2;
+        offer.endpoint_type = FILE_MARKET_ENDPOINT_ONION;
+        memcpy(offer.onion_pubkey, onion_pubkey,
+               sizeof(offer.onion_pubkey));
+    } else {
+        /* Clearnet stays on the v1 wire so pre-v2 nodes keep relaying and
+         * buying these offers unchanged. */
+        offer.auth_version = FILE_MARKET_OFFER_VERSION;
+        offer.endpoint_type = FILE_MARKET_ENDPOINT_CLEARNET;
+    }
+}
+
+static bool offer_assign_same_second_sequence(
+    const struct market_offer_runtime *rt, struct file_offer *offer_storage,
+    const uint8_t nonce_bytes[8])
+{
+    uint64_t nonce = 0;
+    memcpy(&nonce, nonce_bytes, sizeof(nonce));
+    offer.nonce = nonce & (uint64_t)INT64_MAX;
+    if (offer.nonce == 0)
+        offer.nonce = 1;
+    struct file_offer previous;
+    if (db_file_offer_find(rt->node_db, offer.root_hash, &previous) &&
+        previous.auth_version >= FILE_MARKET_OFFER_VERSION &&
+        memcmp(previous.seller_pubkey, offer.seller_pubkey,
+               sizeof(previous.seller_pubkey)) == 0 &&
+        previous.issued_unix == rt->now_unix &&
+        offer.nonce <= previous.nonce) {
+        if (previous.nonce == (uint64_t)INT64_MAX) {
+            return false;
+        }
+        offer.nonce = previous.nonce + 1;
+    }
+    return true;
+}
+#undef offer
+
+static bool offer_wire_encoding_failed(
+    const struct file_offer *offer, uint8_t *wire, size_t wire_capacity,
+    size_t *wire_len)
+{
+    return file_offer_auth_encode_into(offer, wire, wire_capacity, wire_len) !=
+               FILE_OFFER_AUTH_OK || *wire_len == 0;
+}
+
+#line 175
 struct zcl_result file_market_offer_commit(
     const struct market_offer_runtime *rt,
     const struct market_offer_request *req,
@@ -254,17 +307,8 @@ struct zcl_result file_market_offer_commit(
     memcpy(offer.z_addr, z_addr, sizeof(offer.z_addr));
     memcpy(offer.peer_ip, peer_ip, sizeof(offer.peer_ip));
     offer.peer_port = peer_port;
-    if (rt->prefer_onion) {
-        offer.auth_version = FILE_MARKET_OFFER_VERSION_V2;
-        offer.endpoint_type = FILE_MARKET_ENDPOINT_ONION;
-        memcpy(offer.onion_pubkey, onion_pubkey,
-               sizeof(offer.onion_pubkey));
-    } else {
-        /* Clearnet stays on the v1 wire so pre-v2 nodes keep relaying and
-         * buying these offers unchanged. */
-        offer.auth_version = FILE_MARKET_OFFER_VERSION;
-        offer.endpoint_type = FILE_MARKET_ENDPOINT_CLEARNET;
-    }
+    offer_configure_authenticated_endpoint(rt, &offer, onion_pubkey);
+#line 268
     offer.last_seen = rt->now_unix;
     offer.ttl = FILE_MARKET_MAX_TTL;
     uint8_t nonce_bytes[8];
@@ -273,25 +317,13 @@ struct zcl_result file_market_offer_commit(
         return ZCL_ERR(MARKET_OFFER_ERR_SEAL,
                        "could not mint the offer nonce");
     }
-    uint64_t nonce = 0;
-    memcpy(&nonce, nonce_bytes, sizeof(nonce));
-    offer.nonce = nonce & (uint64_t)INT64_MAX;
-    if (offer.nonce == 0)
-        offer.nonce = 1;
-    struct file_offer previous;
-    if (db_file_offer_find(rt->node_db, offer.root_hash, &previous) &&
-        previous.auth_version >= FILE_MARKET_OFFER_VERSION &&
-        memcmp(previous.seller_pubkey, offer.seller_pubkey,
-               sizeof(previous.seller_pubkey)) == 0 &&
-        previous.issued_unix == rt->now_unix &&
-        offer.nonce <= previous.nonce) {
-        if (previous.nonce == (uint64_t)INT64_MAX) {
+    if (!offer_assign_same_second_sequence(rt, &offer, nonce_bytes)) {
+#line 289
             memory_cleanse(seed, sizeof(seed));
             return ZCL_ERR(MARKET_OFFER_ERR_SEAL,
                            "same-second offer sequence is exhausted");
-        }
-        offer.nonce = previous.nonce + 1;
     }
+#line 295
     offer.issued_unix = rt->now_unix;
     offer.expires_unix = rt->now_unix + FILE_MARKET_OFFER_MAX_LIFETIME_SECS;
 
@@ -321,9 +353,8 @@ struct zcl_result file_market_offer_commit(
 
     uint8_t wire[FILE_MARKET_OFFER_WIRE_BYTES_MAX];
     size_t wire_len = 0;
-    if (file_offer_auth_encode_into(&offer, wire, sizeof(wire),
-                                    &wire_len) != FILE_OFFER_AUTH_OK ||
-        wire_len == 0)
+    if (offer_wire_encoding_failed(&offer, wire, sizeof(wire), &wire_len))
+#line 327
         return ZCL_ERR(MARKET_OFFER_ERR_WIRE,
                        "persisted offer failed its own wire encoding");
 
