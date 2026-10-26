@@ -1801,8 +1801,6 @@ tests/harness/src/test_params_vk_embedded.c:test_params_vk_embedded:45
 tests/harness/src/test_path_check.c:test_path_check:60
 tests/harness/src/test_payment_shutdown_owner.c:payment_shutdown_lifecycle_acceptance:25
 tests/harness/src/test_peer_dos_fairness.c:test_peer_dos_fairness:39
-tests/harness/src/test_peer_memory.c:pm_forge_store:22
-tests/harness/src/test_peer_memory.c:test_peer_memory_platform_arm:107
 tests/harness/src/test_peer_snapshot_conditions.c:test_peer_snapshot_conditions:54
 tests/harness/src/test_policy.c:test_policy:50
 tests/harness/src/test_process_headers_adversarial.c:test_process_headers_adversarial:55
