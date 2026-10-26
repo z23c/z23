@@ -659,6 +659,33 @@ static int cmd_seed_package(const char *datadir, uint8_t salt)
     return 0;
 }
 
+static void fixture_verify_stored_chunks(
+    struct vcs_package_store *store, const uint8_t root[32],
+    const struct vcs_package_manifest *manifest,
+    enum vcs_package_store_result *result, size_t *chunks_checked,
+    bool *chunks_ok)
+{
+    for (size_t i = 0; i < manifest->count && *chunks_ok; i++) {
+        const struct vcs_package_file *f = &manifest->files[i];
+        for (uint32_t c = 0; c < f->chunk_count && *chunks_ok; c++) {
+            uint8_t *chunk = NULL;
+            size_t chunk_len = 0;
+            *result = vcs_package_store_get_chunk_at(
+                store, root, i, c, &chunk, &chunk_len);
+            if (*result != VCS_PACKAGE_STORE_OK) {
+                *chunks_ok = false;
+                break;
+            }
+            uint8_t hash[32];
+            bool h = vcs_package_chunk_hash(chunk, chunk_len, hash);
+            *chunks_ok = h &&
+                memcmp(hash, f->chunk_hashes + (size_t)c * 32u, 32) == 0;
+            (*chunks_checked)++;
+            free(chunk);
+        }
+    }
+}
+
 static int cmd_verify_package(const char *datadir, const char *root_hex)
 {
     uint8_t root[32];
@@ -695,25 +722,8 @@ static int cmd_verify_package(const char *datadir, const char *root_hex)
          * address it was fetched under. */
         root_match = vcs_package_manifest_root(&manifest, rederived) &&
                      memcmp(rederived, root, 32) == 0;
-        for (size_t i = 0; i < manifest.count && chunks_ok; i++) {
-            const struct vcs_package_file *f = &manifest.files[i];
-            for (uint32_t c = 0; c < f->chunk_count && chunks_ok; c++) {
-                uint8_t *chunk = NULL;
-                size_t chunk_len = 0;
-                r = vcs_package_store_get_chunk_at(store, root, i, c,
-                                                   &chunk, &chunk_len);
-                if (r != VCS_PACKAGE_STORE_OK) {
-                    chunks_ok = false;
-                    break;
-                }
-                uint8_t hash[32];
-                bool h = vcs_package_chunk_hash(chunk, chunk_len, hash);
-                chunks_ok = h &&
-                    memcmp(hash, f->chunk_hashes + (size_t)c * 32u, 32) == 0;
-                chunks_checked++;
-                free(chunk);
-            }
-        }
+        fixture_verify_stored_chunks(store, root, &manifest, &r,
+                                     &chunks_checked, &chunks_ok);
     }
     vcs_package_manifest_free(&manifest);
     free(wire);
@@ -749,6 +759,22 @@ static int fix_usage(void)
     return 2;
 }
 
+static int fixture_dispatch_storage_commands(const char *cmd, int argc,
+                                             char **argv)
+{
+    if (strcmp(cmd, "v1mirror") == 0 && argc == 4)
+        return cmd_v1mirror(argv[2], argv[3]);
+    if (strcmp(cmd, "cas-has") == 0 && argc == 4)
+        return cmd_cas_has(argv[2], argv[3]);
+    if (strcmp(cmd, "pubkey") == 0 && argc == 3)
+        return cmd_pubkey(argv[2]);
+    if (strcmp(cmd, "seed-package") == 0 && argc == 4)
+        return cmd_seed_package(argv[2], (uint8_t)atoi(argv[3]));
+    if (strcmp(cmd, "verify-package") == 0 && argc == 4)
+        return cmd_verify_package(argv[2], argv[3]);
+    return fix_usage();
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
@@ -768,15 +794,5 @@ int main(int argc, char **argv)
                             (uint8_t)atoi(argv[7]));
     if (strcmp(cmd, "mkvote") == 0 && argc == 5)
         return cmd_mkvote(argv[2], atoll(argv[3]), (uint8_t)atoi(argv[4]));
-    if (strcmp(cmd, "v1mirror") == 0 && argc == 4)
-        return cmd_v1mirror(argv[2], argv[3]);
-    if (strcmp(cmd, "cas-has") == 0 && argc == 4)
-        return cmd_cas_has(argv[2], argv[3]);
-    if (strcmp(cmd, "pubkey") == 0 && argc == 3)
-        return cmd_pubkey(argv[2]);
-    if (strcmp(cmd, "seed-package") == 0 && argc == 4)
-        return cmd_seed_package(argv[2], (uint8_t)atoi(argv[3]));
-    if (strcmp(cmd, "verify-package") == 0 && argc == 4)
-        return cmd_verify_package(argv[2], argv[3]);
-    return fix_usage();
+    return fixture_dispatch_storage_commands(cmd, argc, argv);
 }

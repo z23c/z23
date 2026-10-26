@@ -1734,5 +1734,3 @@ tools/zcl-nodectl.c:cmd_launch:30
 tools/zcl-nodectl.c:main:16
 tools/zcode_dev_signer.c:main:36
 tools/zcode_package_registry_check.c:main:40
-tools/zcode_science_fixture.c:cmd_verify_package:19
-tools/zcode_science_fixture.c:main:22
