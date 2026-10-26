@@ -1223,8 +1223,6 @@ engine/models/src/mesh_capability_grant.c:capability_immutable_equal:19
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_complete:16
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_insert:16
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_validate:23
-engine/models/src/schema_migration.c:schema_migration_rollback_last:16
-engine/models/src/schema_migration.c:schema_migration_run_pending:17
 engine/modules/determinism/src/classify.c:zcl_det_classify:21
 engine/modules/engine/src/engine_cli.c:engine_cli_argv_build:29
 engine/modules/engine/src/engine_prompt.c:engine_prompt_audit_text:17
