@@ -57,8 +57,6 @@ cognition/services/src/zcode_retrieval_profile_evolution_service.c:zcode_retriev
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18
 contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21
 contexts/commons/modules/commons_demo/src/demo.c:commons_demo_render:20
-contexts/commons/modules/metaverse/src/character_sheet_text.c:character_seed_format:25
-contexts/commons/modules/metaverse/src/character_sheet_text.c:character_seed_parse:24
 contexts/commons/modules/vcs/src/build_execution_observation.c:vcs_build_execution_observation_v1_valid:26
 contexts/commons/modules/vcs/src/fastobj.c:vcs_fastobj_sidecar_verify:28
 contexts/commons/modules/vcs/src/moderation_attestation_object.c:attest_shape:21

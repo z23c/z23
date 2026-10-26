@@ -100,6 +100,42 @@ static bool cs_put_char(char *out, size_t cap, size_t *n, char c)
     return true;
 }
 
+/* Append the year: '-' only when negative, then `year_mag` as 4 digits. */
+static bool cs_put_seed_year(char *out, size_t cap, size_t *n, int32_t year,
+                             uint32_t year_mag)
+{
+    if (year < 0 && !cs_put_char(out, cap, n, '-'))
+        return false;
+    return cs_put_padded(out, cap, n, year_mag, 4u);
+}
+
+/* Append "-MM-DDTHH:MM:SSZ" from the born instant. */
+static bool cs_put_seed_month_day_time(char *out, size_t cap, size_t *n,
+                                       const struct astro_instant *born)
+{
+    return cs_put_char(out, cap, n, '-') &&
+           cs_put_padded(out, cap, n, born->month, 2u) &&
+           cs_put_char(out, cap, n, '-') &&
+           cs_put_padded(out, cap, n, born->day, 2u) &&
+           cs_put_char(out, cap, n, 'T') &&
+           cs_put_padded(out, cap, n, born->hour, 2u) &&
+           cs_put_char(out, cap, n, ':') &&
+           cs_put_padded(out, cap, n, born->minute, 2u) &&
+           cs_put_char(out, cap, n, ':') &&
+           cs_put_padded(out, cap, n, born->second, 2u) &&
+           cs_put_char(out, cap, n, 'Z');
+}
+
+/* Append "|LATITUDE|LONGITUDE" from the place. */
+static bool cs_put_seed_place(char *out, size_t cap, size_t *n,
+                              const struct astro_place *where)
+{
+    return cs_put_char(out, cap, n, '|') &&
+           cs_put_signed(out, cap, n, where->latitude_microdeg) &&
+           cs_put_char(out, cap, n, '|') &&
+           cs_put_signed(out, cap, n, where->longitude_microdeg);
+}
+
 bool character_seed_format(const struct character_seed *seed, char *out,
                            size_t cap)
 {
@@ -134,23 +170,9 @@ bool character_seed_format(const struct character_seed *seed, char *out,
     n += name_len;
 
     if (!cs_put_char(out, cap, &n, '|') ||
-        (seed->born.year < 0 && !cs_put_char(out, cap, &n, '-')) ||
-        !cs_put_padded(out, cap, &n, year_mag, 4u) ||
-        !cs_put_char(out, cap, &n, '-') ||
-        !cs_put_padded(out, cap, &n, seed->born.month, 2u) ||
-        !cs_put_char(out, cap, &n, '-') ||
-        !cs_put_padded(out, cap, &n, seed->born.day, 2u) ||
-        !cs_put_char(out, cap, &n, 'T') ||
-        !cs_put_padded(out, cap, &n, seed->born.hour, 2u) ||
-        !cs_put_char(out, cap, &n, ':') ||
-        !cs_put_padded(out, cap, &n, seed->born.minute, 2u) ||
-        !cs_put_char(out, cap, &n, ':') ||
-        !cs_put_padded(out, cap, &n, seed->born.second, 2u) ||
-        !cs_put_char(out, cap, &n, 'Z') ||
-        !cs_put_char(out, cap, &n, '|') ||
-        !cs_put_signed(out, cap, &n, seed->where.latitude_microdeg) ||
-        !cs_put_char(out, cap, &n, '|') ||
-        !cs_put_signed(out, cap, &n, seed->where.longitude_microdeg))
+        !cs_put_seed_year(out, cap, &n, seed->born.year, year_mag) ||
+        !cs_put_seed_month_day_time(out, cap, &n, &seed->born) ||
+        !cs_put_seed_place(out, cap, &n, &seed->where))
         goto refuse;
     out[n] = '\0';
     return true;
@@ -223,6 +245,62 @@ static bool cs_take_signed(const char **p, char stop, int32_t *out)
     return true;
 }
 
+/* Read the calendar date: an optional '-', then the year, month and day. */
+static bool cs_take_seed_date(const char **p, struct astro_instant *born)
+{
+    uint32_t year_mag, month, day;
+    bool year_negative = false;
+
+    memset(born, 0, sizeof *born);
+    if (**p == '-') {
+        year_negative = true;
+        (*p)++;
+    }
+    if (!cs_take_padded(p, 4u, &year_mag) || !cs_take_char(p, '-') ||
+        !cs_take_padded(p, 2u, &month) || !cs_take_char(p, '-') ||
+        !cs_take_padded(p, 2u, &day))
+        return false;
+
+    born->year = year_negative ? -(int32_t)year_mag : (int32_t)year_mag;
+    born->month = (uint8_t)month;
+    born->day = (uint8_t)day;
+    return true;
+}
+
+/* Read the time of day, the 'Z', and the '|' that ends the instant. */
+static bool cs_take_seed_time(const char **p, struct astro_instant *born)
+{
+    uint32_t hour, minute, second;
+
+    if (!cs_take_char(p, 'T') || !cs_take_padded(p, 2u, &hour) ||
+        !cs_take_char(p, ':') || !cs_take_padded(p, 2u, &minute) ||
+        !cs_take_char(p, ':') || !cs_take_padded(p, 2u, &second) ||
+        !cs_take_char(p, 'Z') || !cs_take_char(p, '|'))
+        return false;
+
+    born->hour = (uint8_t)hour;
+    born->minute = (uint8_t)minute;
+    born->second = (uint8_t)second;
+    return true;
+}
+
+/* Read the signed latitude, a '|', and the signed longitude to the end. */
+static bool cs_take_seed_place(const char **p, struct astro_place *where)
+{
+    memset(where, 0, sizeof *where);
+    if (!cs_take_signed(p, '|', &where->latitude_microdeg))
+        return false;
+    if (!cs_take_char(p, '|'))
+        return false;
+    if (!cs_take_signed(p, '\0', &where->longitude_microdeg))
+        return false;
+    /* cs_take_signed stopped at the NUL, so there are no trailing bytes: a
+     * string with anything after the longitude is a DIFFERENT string and must
+     * not silently parse, exactly as metaverse_property_id_parse() refuses a
+     * trailing byte after its 64 hex digits. */
+    return true;
+}
+
 bool character_seed_parse(const char *text, struct character_seed *out)
 {
     char name[CHARACTER_NAME_MAX];
@@ -231,8 +309,6 @@ bool character_seed_parse(const char *text, struct character_seed *out)
     const char *p;
     const char *bar;
     size_t name_len;
-    uint32_t year_mag, month, day, hour, minute, second;
-    bool year_negative = false;
 
     if (!out)
         return false;
@@ -250,42 +326,12 @@ bool character_seed_parse(const char *text, struct character_seed *out)
     name[name_len] = '\0';
 
     p = bar + 1;
-    if (*p == '-') {
-        year_negative = true;
-        p++;
-    }
-    if (!cs_take_padded(&p, 4u, &year_mag) || !cs_take_char(&p, '-') ||
-        !cs_take_padded(&p, 2u, &month) || !cs_take_char(&p, '-') ||
-        !cs_take_padded(&p, 2u, &day) || !cs_take_char(&p, 'T') ||
-        !cs_take_padded(&p, 2u, &hour) || !cs_take_char(&p, ':') ||
-        !cs_take_padded(&p, 2u, &minute) || !cs_take_char(&p, ':') ||
-        !cs_take_padded(&p, 2u, &second) || !cs_take_char(&p, 'Z') ||
-        !cs_take_char(&p, '|'))
-        return false;
-
-    memset(&born, 0, sizeof born);
-    born.year = year_negative ? -(int32_t)year_mag : (int32_t)year_mag;
-    born.month = (uint8_t)month;
-    born.day = (uint8_t)day;
-    born.hour = (uint8_t)hour;
-    born.minute = (uint8_t)minute;
-    born.second = (uint8_t)second;
-
-    memset(&where, 0, sizeof where);
-    if (!cs_take_signed(&p, '|', &where.latitude_microdeg))
-        return false;
-    if (!cs_take_char(&p, '|'))
-        return false;
-    if (!cs_take_signed(&p, '\0', &where.longitude_microdeg))
-        return false;
-    /* cs_take_signed stopped at the NUL, so there are no trailing bytes: a
-     * string with anything after the longitude is a DIFFERENT string and must
-     * not silently parse, exactly as metaverse_property_id_parse() refuses a
-     * trailing byte after its 64 hex digits. */
 
     /* Every remaining rule — the name charset, the calendar, the coordinate
      * limits — is character_seed_make()'s, asked once here rather than
      * duplicated. A parser with its own opinion about validity is a second
      * truth about what a character is. */
-    return character_seed_make(name, &born, &where, out);
+    return cs_take_seed_date(&p, &born) && cs_take_seed_time(&p, &born) &&
+           cs_take_seed_place(&p, &where) &&
+           character_seed_make(name, &born, &where, out);
 }
