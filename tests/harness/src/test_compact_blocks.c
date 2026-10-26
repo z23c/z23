@@ -158,7 +158,7 @@ static int test_process_cmpctblock_oom_pending_stash(void)
     return failures;
 }
 
-int test_compact_blocks(void)
+static int test_siphash_key_and_short_txid(void)
 {
     int failures = 0;
 
@@ -282,6 +282,13 @@ int test_compact_blocks(void)
         }
     }
 
+    return failures;
+}
+
+static int test_compact_block_from_block_basic(void)
+{
+    int failures = 0;
+
     /* ── Compact block from full block ──────────────────────────── */
     printf("compact_block_from_block basic... ");
     {
@@ -320,6 +327,13 @@ int test_compact_blocks(void)
         compact_block_msg_free(&cb);
         block_free(&blk);
     }
+
+    return failures;
+}
+
+static int test_compact_block_msg_roundtrip(void)
+{
+    int failures = 0;
 
     /* ── Serialization round-trip ───────────────────────────────── */
     printf("compact_block_msg serialize/deserialize round-trip... ");
@@ -376,6 +390,13 @@ int test_compact_blocks(void)
         compact_block_msg_free(&cb2);
         block_free(&blk);
     }
+
+    return failures;
+}
+
+static int test_compact_block_reconstruct_hard_failure(void)
+{
+    int failures = 0;
 
      /* Hard-failure returns must still initialize out_block. A 152-byte
       * cmpctblock (tests/harness/fuzz_seeds/p2p/crash-478b30c0482cf3e2842fa459987a7a2e5374e708.bin)
@@ -458,6 +479,13 @@ int test_compact_blocks(void)
             failures += local_failures;
         }
     }
+
+    return failures;
+}
+
+static int test_compact_block_reconstruct_matches(void)
+{
+    int failures = 0;
 
     /* ── Reconstruction with full mempool match ─────────────────── */
     printf("compact_block_reconstruct full match... ");
@@ -565,6 +593,13 @@ int test_compact_blocks(void)
         block_free(&blk);
     }
 
+    return failures;
+}
+
+static int test_compact_block_fill_missing(void)
+{
+    int failures = 0;
+
     /* ── Fill missing ───────────────────────────────────────────── */
     printf("compact_block_fill_missing... ");
     {
@@ -602,6 +637,13 @@ int test_compact_blocks(void)
         block_txn_response_free(&resp);
         block_free(&partial);
     }
+
+    return failures;
+}
+
+static int test_block_txn_request_roundtrip(void)
+{
+    int failures = 0;
 
     /* ── getblocktxn round-trip ─────────────────────────────────── */
     printf("block_txn_request serialize/deserialize round-trip... ");
@@ -642,6 +684,13 @@ int test_compact_blocks(void)
         block_txn_request_free(&req);
         block_txn_request_free(&req2);
     }
+
+    return failures;
+}
+
+static int test_block_txn_response_init_and_coinbase(void)
+{
+    int failures = 0;
 
     /* ── blocktxn round-trip ────────────────────────────────────── */
     printf("block_txn_response serialize/deserialize round-trip... ");
@@ -721,6 +770,21 @@ int test_compact_blocks(void)
         block_free(&blk);
     }
 
+    return failures;
+}
+
+int test_compact_blocks(void)
+{
+    int failures = 0;
+
+    failures += test_siphash_key_and_short_txid();
+    failures += test_compact_block_from_block_basic();
+    failures += test_compact_block_msg_roundtrip();
+    failures += test_compact_block_reconstruct_hard_failure();
+    failures += test_compact_block_reconstruct_matches();
+    failures += test_compact_block_fill_missing();
+    failures += test_block_txn_request_roundtrip();
+    failures += test_block_txn_response_init_and_coinbase();
     failures += test_process_cmpctblock_oom_pending_stash();
 
     return failures;
