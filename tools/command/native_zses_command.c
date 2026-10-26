@@ -58,6 +58,94 @@ static bool zses_read_onion(const char *datadir, char *out, size_t cap)
     return zses_looks_onion(out);
 }
 
+enum invite_pick_result {
+    INVITE_PICK_OK,
+    INVITE_PICK_CLEARNET_FORBIDDEN,
+    INVITE_PICK_BAD_ENDPOINT,
+    INVITE_PICK_NO_ONION_ENDPOINT,
+    INVITE_PICK_NO_HOSTNAME,
+};
+
+struct invite_create_input {
+    const char *endpoint;
+    const char *posture;
+    const char *tag;
+    const char *port;
+    int64_t expires;
+};
+
+static void invite_create_read_input(
+    const struct zcl_command_request *request, struct invite_create_input *in)
+{
+    in->endpoint = zses_input_str(request->input, "endpoint");
+    in->posture = zses_input_str(request->input, "posture");
+    in->tag = zses_input_str(request->input, "capability_tag");
+    if (!in->tag)
+        in->tag = zses_input_str(request->input, "capability-tag");
+    in->port = zses_input_str(request->input, "port");
+    const struct json_value *exp_v =
+        request->input ? json_get(request->input, "expires") : NULL;
+    in->expires = exp_v ? json_get_int(exp_v) : 0;
+    if (in->expires <= 0)
+        in->expires = platform_time_wall_unix() + 3600;
+}
+
+static const char *invite_posture_or_onion(const char *posture)
+{
+    return (posture && posture[0]) ? posture : "onion";
+}
+
+static enum invite_pick_result invite_pick_supplied_endpoint(
+    const struct invite_create_input *in, char *picked, size_t cap,
+    enum zses_refuse *refuse)
+{
+    const char *p = invite_posture_or_onion(in->posture);
+    if (zses_looks_clearnet(in->endpoint) && strcmp(p, "clearnet") != 0)
+        return INVITE_PICK_CLEARNET_FORBIDDEN;
+    if (strlen(in->endpoint) > ZSES_ENDPOINT_MAX)
+        return INVITE_PICK_BAD_ENDPOINT;
+    const char *onion = strcmp(p, "clearnet") == 0 ? NULL : in->endpoint;
+    const char *clearnet = strcmp(p, "clearnet") == 0 ? in->endpoint : NULL;
+    if (!zses_pick_endpoint(p, onion, clearnet, picked, cap, refuse))
+        return INVITE_PICK_NO_ONION_ENDPOINT;
+    return INVITE_PICK_OK;
+}
+
+static enum invite_pick_result invite_pick_discovered_endpoint(
+    const struct invite_create_input *in, char *picked, size_t cap,
+    enum zses_refuse *refuse)
+{
+    zcl_native_bridge_ensure_rpc();
+    char onion[ZSES_ENDPOINT_MAX + 1];
+    onion[0] = '\0';
+    const char *dd = node_rpc_client_datadir();
+    if (!zses_read_onion(dd, onion, sizeof(onion)))
+        return INVITE_PICK_NO_HOSTNAME;
+    const char *port = (in->port && in->port[0]) ? in->port : "8055";
+    char onion_ep[ZSES_ENDPOINT_MAX + 1];
+    (void)snprintf(onion_ep, sizeof(onion_ep), "%s:%s", onion, port);
+    if (!zses_pick_endpoint(in->posture, onion_ep, NULL, picked, cap, refuse))
+        return INVITE_PICK_NO_ONION_ENDPOINT;
+    return INVITE_PICK_OK;
+}
+
+static enum invite_pick_result invite_resolve_endpoint(
+    const struct invite_create_input *in, char *picked, size_t cap,
+    enum zses_refuse *refuse)
+{
+    if (in->endpoint && in->endpoint[0])
+        return invite_pick_supplied_endpoint(in, picked, cap, refuse);
+    return invite_pick_discovered_endpoint(in, picked, cap, refuse);
+}
+
+static void invite_set_capability_tag(struct zses_invite *inv, const char *tag)
+{
+    if (tag && tag[0] && strlen(tag) <= ZSES_TAG_MAX)
+        memcpy(inv->capability_tag, tag, strlen(tag) + 1);
+    else
+        memcpy(inv->capability_tag, "session", 8);
+}
+
 void zcl_native_handle_zses_invite_create(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -66,71 +154,38 @@ void zcl_native_handle_zses_invite_create(
         LOG_ERROR(ZSES_TAG, "INVALID_REQUEST: null request or reply");
         return;
     }
-    const char *endpoint_in = zses_input_str(request->input, "endpoint");
-    const char *posture = zses_input_str(request->input, "posture");
-    const char *tag = zses_input_str(request->input, "capability_tag");
-    if (!tag)
-        tag = zses_input_str(request->input, "capability-tag");
-    const char *port_s = zses_input_str(request->input, "port");
-    const struct json_value *exp_v =
-        request->input ? json_get(request->input, "expires") : NULL;
-    int64_t expires = exp_v ? json_get_int(exp_v) : 0;
-    if (expires <= 0)
-        expires = platform_time_wall_unix() + 3600;
+    struct invite_create_input in;
+    invite_create_read_input(request, &in);
 
     char picked[ZSES_ENDPOINT_MAX + 1];
     enum zses_refuse refuse = ZSES_OK;
-    if (endpoint_in && endpoint_in[0]) {
-        const char *p = (posture && posture[0]) ? posture : "onion";
-        if (zses_looks_clearnet(endpoint_in) && strcmp(p, "clearnet") != 0) {
-            zses_fail(reply, "CLEARNET_FORBIDDEN",
-                      "numeric endpoint refused unless posture=clearnet",
-                      "endpoint");
-            return;
-        }
-        if (strlen(endpoint_in) > ZSES_ENDPOINT_MAX) {
-            zses_fail(reply, "BAD_ENDPOINT", "endpoint too long", "endpoint");
-            return;
-        }
-        const char *onion = strcmp(p, "clearnet") == 0 ? NULL : endpoint_in;
-        const char *clearnet = strcmp(p, "clearnet") == 0 ? endpoint_in : NULL;
-        if (!zses_pick_endpoint(p, onion, clearnet, picked, sizeof(picked),
-                                &refuse)) {
-            zses_fail(reply, "NO_ONION_ENDPOINT", zses_refuse_name(refuse),
-                      "endpoint");
-            return;
-        }
-    } else {
-        zcl_native_bridge_ensure_rpc();
-        char onion[ZSES_ENDPOINT_MAX + 1];
-        onion[0] = '\0';
-        const char *dd = node_rpc_client_datadir();
-        if (zses_read_onion(dd, onion, sizeof(onion))) {
-            const char *port = (port_s && port_s[0]) ? port_s : "8055";
-            char onion_ep[ZSES_ENDPOINT_MAX + 1];
-            (void)snprintf(onion_ep, sizeof(onion_ep), "%s:%s", onion, port);
-            if (!zses_pick_endpoint(posture, onion_ep, NULL, picked,
-                                    sizeof(picked), &refuse)) {
-                zses_fail(reply, "NO_ONION_ENDPOINT",
-                          zses_refuse_name(refuse), "endpoint");
-                return;
-            }
-        } else {
-            zses_fail(reply, "NO_ONION_ENDPOINT",
-                      "no onion hostname and no endpoint supplied",
-                      "endpoint");
-            return;
-        }
+    switch (invite_resolve_endpoint(&in, picked, sizeof(picked), &refuse)) {
+    case INVITE_PICK_CLEARNET_FORBIDDEN:
+        zses_fail(reply, "CLEARNET_FORBIDDEN",
+                  "numeric endpoint refused unless posture=clearnet",
+                  "endpoint");
+        return;
+    case INVITE_PICK_BAD_ENDPOINT:
+        zses_fail(reply, "BAD_ENDPOINT", "endpoint too long", "endpoint");
+        return;
+    case INVITE_PICK_NO_ONION_ENDPOINT:
+        zses_fail(reply, "NO_ONION_ENDPOINT", zses_refuse_name(refuse),
+                  "endpoint");
+        return;
+    case INVITE_PICK_NO_HOSTNAME:
+        zses_fail(reply, "NO_ONION_ENDPOINT",
+                  "no onion hostname and no endpoint supplied",
+                  "endpoint");
+        return;
+    default:
+        break;
     }
 
     struct zses_invite inv;
     memset(&inv, 0, sizeof(inv));
     memcpy(inv.endpoint, picked, strlen(picked) + 1);
-    inv.expires = expires;
-    if (tag && tag[0] && strlen(tag) <= ZSES_TAG_MAX)
-        memcpy(inv.capability_tag, tag, strlen(tag) + 1);
-    else
-        memcpy(inv.capability_tag, "session", 8);
+    inv.expires = in.expires;
+    invite_set_capability_tag(&inv, in.tag);
 
     struct privkey k;
     privkey_make_new(&k, true);
@@ -152,7 +207,22 @@ void zcl_native_handle_zses_invite_create(
     (void)json_push_kv_int(&reply->data, "expires", inv.expires);
     (void)json_push_kv_str(&reply->data, "capability_tag", inv.capability_tag);
     (void)json_push_kv_str(&reply->data, "posture",
-                           (posture && posture[0]) ? posture : "onion");
+                           invite_posture_or_onion(in.posture));
+}
+
+static const char *accept_read_invite_text(
+    const struct zcl_command_request *request, char *buf, size_t cap)
+{
+    const char *invite = zses_input_str(request->input, "invite");
+    if ((!invite || !invite[0]) && request->input) {
+        const struct json_value *inv_v = json_get(request->input, "invite");
+        if (inv_v && inv_v->type == JSON_OBJ) {
+            size_t n = json_write(inv_v, buf, cap);
+            if (n > 0 && n < cap)
+                invite = buf;
+        }
+    }
+    return invite;
 }
 
 void zcl_native_handle_zses_invite_accept(
@@ -164,15 +234,8 @@ void zcl_native_handle_zses_invite_accept(
         return;
     }
     char invite_buf[ZSES_JSON_MAX];
-    const char *invite = zses_input_str(request->input, "invite");
-    if ((!invite || !invite[0]) && request->input) {
-        const struct json_value *inv_v = json_get(request->input, "invite");
-        if (inv_v && inv_v->type == JSON_OBJ) {
-            size_t n = json_write(inv_v, invite_buf, sizeof(invite_buf));
-            if (n > 0 && n < sizeof(invite_buf))
-                invite = invite_buf;
-        }
-    }
+    const char *invite = accept_read_invite_text(request, invite_buf,
+                                                 sizeof(invite_buf));
     if (!invite || !invite[0]) {
         zses_fail(reply, "MISSING_INVITE", "invite JSON is required", "invite");
         return;
