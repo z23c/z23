@@ -25,6 +25,7 @@
 #include "platform/rng.h"
 
 #include "base/safe_alloc.h"
+#include "util/compare.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,12 +35,6 @@
  * classification into an unbounded IO storm. */
 #define PROBE_SAMPLES_MAX 4096
 #define PROBE_BLOCK_MAX   (1024u * 1024u)
-
-static int cmp_i64(const void *a, const void *b)
-{
-    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
-    return (x > y) - (x < y);
-}
 
 /* Pick the LARGEST regular file directly in `dir` that clears the floor. A
  * big file is what makes the samples land far apart, which is what defeats
@@ -161,7 +156,7 @@ bool platform_storage_random_read_median_us(const char *dir, int samples,
         free(lat);
         return false;
     }
-    qsort(lat, (size_t)taken, sizeof(*lat), cmp_i64);
+    qsort(lat, (size_t)taken, sizeof(*lat), zcl_cmp_i64);
     /* Median, not mean: one 300 ms outlier from an unrelated writer must not
      * relabel an SSD as a spinning disk. */
     *out_median_us = lat[taken / 2];
