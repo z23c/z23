@@ -199,6 +199,296 @@ static const char *rfc_reply_filename(bool warm,
     return st->filename;
 }
 
+/* Endpoint validation for the bundle leaf: input.peer must be present,
+ * input.out_dir defaults to the node datadir, and input.port must parse.
+ * Each failure sets the structured error body and returns false. */
+static bool rfc_parse_bundle_endpoint(struct zcl_command_reply *reply,
+                                      const char *peer, const char *port_s,
+                                      const char **out_dir, uint16_t *port)
+{
+    if (!peer[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_PEER",
+                               "parse", false, false,
+                               "input.peer is required (the seeder's "
+                               "file-service host)", RFC_SUBSYS);
+        return false;
+    }
+    if (!(*out_dir)[0])
+        *out_dir = diag_datadir();
+    if (!(*out_dir)[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "NO_OUT_DIR",
+                               "parse", false, false,
+                               "no input.out_dir given and the node datadir "
+                               "is not available to this process", RFC_SUBSYS);
+        return false;
+    }
+    if (!rfc_parse_port(port_s, port)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_PORT",
+                               "parse", false, false,
+                               "input.port must be 1..65535", RFC_SUBSYS);
+        return false;
+    }
+    return true;
+}
+
+/* Parses the operator-committed artifact identity — chunk_root, whole_sha3,
+ * size, optional filename — into `m`, checks it against the ROM artifact
+ * bounds and derives the fallback filename. Each failure sets the
+ * structured error body and returns false. */
+static bool rfc_parse_committed_manifest(struct zcl_command_reply *reply,
+                                         const char *root_s,
+                                         const char *whole_s,
+                                         const char *size_s,
+                                         const char *filename,
+                                         struct rom_fetch_manifest *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->used = true;
+    if (!rfc_parse_hex32(root_s, m->chunk_root)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_ROOT",
+                               "parse", false, false,
+                               "input.root must be the 64-hex chunk_root the "
+                               "operator committed to (from a trusted "
+                               "directory listing or the bundle publisher)",
+                               RFC_SUBSYS);
+        return false;
+    }
+    if (!rfc_parse_hex32(whole_s, m->whole_sha3)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_WHOLE_SHA3",
+                               "parse", false, false,
+                               "input.whole_sha3 must be the 64-hex "
+                               "whole-file digest the operator committed to",
+                               RFC_SUBSYS);
+        return false;
+    }
+    if (!size_s[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_SIZE",
+                               "parse", false, false,
+                               "input.size (bytes, decimal) is required",
+                               RFC_SUBSYS);
+        return false;
+    }
+    {
+        char *end = NULL;
+        unsigned long long sz = strtoull(size_s, &end, 10);
+        if (!end || *end != '\0' || sz == 0) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INVALID, "BAD_SIZE",
+                                   "parse", false, false,
+                                   "input.size must be a positive decimal "
+                                   "byte count", RFC_SUBSYS);
+            return false;
+        }
+        m->size_bytes = (uint64_t)sz;
+    }
+    m->chunk_size = ROM_SEED_CHUNK_SIZE;
+    m->num_chunks =
+        (uint32_t)((m->size_bytes + m->chunk_size - 1) / m->chunk_size);
+    if (filename[0]) {
+        if (strlen(filename) >= sizeof(m->filename)) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INVALID, "BAD_FILENAME",
+                                   "parse", false, false,
+                                   "input.filename is too long", RFC_SUBSYS);
+            return false;
+        }
+        snprintf(m->filename, sizeof(m->filename), "%s", filename);
+    }
+    if (!rom_fetch_manifest_sane(m)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "MANIFEST_NOT_SANE", "parse", false, false,
+                               "the committed (size, chunking, filename) "
+                               "tuple fails the ROM artifact bounds — check "
+                               "size/filename against the publisher's "
+                               "manifest", RFC_SUBSYS);
+        return false;
+    }
+    rfc_derive_filename(m);
+    return true;
+}
+
+/* Splits input.peer's comma-separated host list into `peers` (every host
+ * shares `port`), trimming surrounding spaces per host. Returns how many
+ * slots were filled; 0 means the list held a comma but no usable host. */
+static size_t rfc_parse_peer_list(const char *peer, uint16_t port,
+                                  struct rom_fetch_peer peers[4])
+{
+    size_t npeers = 0;
+    char list[512];
+    snprintf(list, sizeof(list), "%s", peer);
+    for (char *tok = strtok(list, ","); tok && npeers < 4;
+         tok = strtok(NULL, ",")) {
+        while (*tok == ' ')
+            tok++;
+        size_t tl = strlen(tok);
+        while (tl > 0 && tok[tl - 1] == ' ')
+            tok[--tl] = '\0';
+        if (tl == 0 || tl >= sizeof(peers[0].addr))
+            continue;
+        snprintf(peers[npeers].addr, sizeof(peers[npeers].addr),
+                 "%s", tok);
+        peers[npeers].port = port;
+        npeers++;
+    }
+    return npeers;
+}
+
+/* Probes one seeder for its per-chunk manifest inside the MANIFEST
+ * benchmark phase. A false return is the normal legacy-seeder fallback,
+ * not an error; a NULL `chunk_sha3` (allocation failure) skips the probe
+ * itself, exactly as the short-circuit in the handler did. */
+static bool rfc_probe_peer_manifest(const char *peer, uint16_t port,
+                                    struct rom_fetch_manifest *m,
+                                    uint8_t (*chunk_sha3)[32],
+                                    uint32_t *manifest_chunks)
+{
+    sync_benchmark_phase_begin(SYNC_BENCH_MANIFEST);
+    bool have_manifest = chunk_sha3 &&
+        rom_fetch_get_manifest(peer, port, m->chunk_root, chunk_sha3,
+                               ROM_SEED_MAX_CHUNKS, manifest_chunks);
+    sync_benchmark_phase_end(SYNC_BENCH_MANIFEST);
+    return have_manifest;
+}
+
+/* Multi-seeder branch of the bundle handler: the comma-separated host list
+ * download. Returns false only for BAD_PEER_LIST (error body already set);
+ * otherwise the outcome lands in the caller's out-parameters. */
+static bool rfc_fetch_from_peer_list(
+    struct zcl_command_reply *reply,
+    const char *peer, uint16_t port, const char *out_dir,
+    struct rom_fetch_manifest *m,
+    bool *fetched, bool *fallback_used, bool *used_manifest_path,
+    uint32_t *chunks_verified, uint32_t *reused_chunks,
+    uint64_t *reused_bytes)
+{
+    struct rom_fetch_peer peers[4];
+    size_t npeers = rfc_parse_peer_list(peer, port, peers);
+    if (npeers == 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_PEER_LIST",
+                               "parse", false, false,
+                               "input.peer held a comma but no usable "
+                               "host", RFC_SUBSYS);
+        return false;
+    }
+    uint32_t workers = (uint32_t)(2 * npeers);
+    if (workers > ROM_FETCH_MAX_WORKERS)
+        workers = ROM_FETCH_MAX_WORKERS;
+
+    /* Prefer the per-chunk-verified multi-seeder path: probe reachable
+     * peers for the "RMF" manifest and, on the first that serves one
+     * matching the committed num_chunks, run the content-verify-and-failover
+     * download (trustable resume + per-chunk content proof across flaky
+     * seeders). Only if NO peer serves a manifest — an all-legacy seeder
+     * set — do we take the whole-file-only multi-seeder scheduler. */
+    uint8_t (*chunk_sha3)[32] = zcl_malloc(
+        (size_t)ROM_SEED_MAX_CHUNKS * 32, "rfc_par_chunk_sha3");
+    uint32_t manifest_chunks = 0;
+    bool have_manifest = false;
+    sync_benchmark_phase_begin(SYNC_BENCH_MANIFEST);
+    for (size_t i = 0; chunk_sha3 && i < npeers && !have_manifest; i++) {
+        if (rom_fetch_get_manifest(peers[i].addr, peers[i].port,
+                                   m->chunk_root, chunk_sha3,
+                                   ROM_SEED_MAX_CHUNKS, &manifest_chunks) &&
+            manifest_chunks == m->num_chunks)
+            have_manifest = true;
+    }
+    sync_benchmark_phase_end(SYNC_BENCH_MANIFEST);
+    if (have_manifest) {
+        rfc_journal_reused(out_dir, m, reused_chunks, reused_bytes);
+        sync_benchmark_note_reused(*reused_bytes);
+        sync_benchmark_phase_begin(SYNC_BENCH_ARTIFACT_DOWNLOAD);
+        *fetched = rom_fetch_download_verified_parallel(
+            peers, npeers, m, chunk_sha3, manifest_chunks, out_dir,
+            NULL, NULL);
+        sync_benchmark_phase_end(SYNC_BENCH_ARTIFACT_DOWNLOAD);
+        *used_manifest_path = true;
+        *chunks_verified = manifest_chunks;
+    } else {
+        sync_benchmark_phase_begin(SYNC_BENCH_ARTIFACT_DOWNLOAD);
+        *fetched = rom_fetch_download_parallel(peers, npeers, m, out_dir,
+                                               workers, NULL, NULL);
+        sync_benchmark_phase_end(SYNC_BENCH_ARTIFACT_DOWNLOAD);
+        *fallback_used = true; /* whole-file-only path across seeders */
+    }
+    free(chunk_sha3);
+    return true;
+}
+
+/* Renders the bundle success reply — installed path, per-chunk protocol
+ * observability, next step — and records the incomplete artifact-fetch-only
+ * zcl.sync_benchmark.v1 receipt. */
+static void rfc_render_bundle_reply(struct zcl_command_reply *reply,
+                                    const char *out_dir,
+                                    struct rom_fetch_manifest *m,
+                                    bool warm_identical,
+                                    bool used_manifest_path,
+                                    bool fallback_used,
+                                    uint32_t chunks_verified,
+                                    uint32_t reused_chunks,
+                                    uint64_t reused_bytes)
+{
+    /* The download derives a name from the digest when none was given; the
+     * status snapshot holds the post-derivation name. */
+    struct rom_fetch_status st;
+    rom_fetch_status_snapshot(&st);
+    const char *installed = rfc_reply_filename(warm_identical, &st, m);
+    (void)json_push_kv_str(&reply->data, "installed", installed);
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%s", out_dir, installed);
+    (void)json_push_kv_str(&reply->data, "path", path);
+    (void)json_push_kv_int(&reply->data, "size_bytes",
+                           (int64_t)m->size_bytes);
+    (void)json_push_kv_int(&reply->data, "num_chunks",
+                           (int64_t)m->num_chunks);
+    (void)json_push_kv_bool(&reply->data, "verified", true);
+    char root_hex[65];
+    HexStr(m->chunk_root, 32, false, root_hex, sizeof(root_hex));
+    (void)json_push_kv_str(&reply->data, "chunk_root", root_hex);
+
+    /* Per-chunk protocol observability. */
+    (void)json_push_kv_bool(&reply->data, "used_manifest_path",
+                            used_manifest_path);
+    (void)json_push_kv_bool(&reply->data, "fallback_used", fallback_used);
+    (void)json_push_kv_bool(&reply->data, "warm_identical", warm_identical);
+    if (used_manifest_path) {
+        (void)json_push_kv_int(&reply->data, "chunks_verified",
+                               (int64_t)chunks_verified);
+        (void)json_push_kv_int(&reply->data, "bytes_reused_from_journal",
+                               (int64_t)reused_bytes);
+        (void)json_push_kv_int(&reply->data, "chunks_reused_from_journal",
+                               (int64_t)reused_chunks);
+    }
+
+    (void)json_push_kv_str(&reply->data, "next",
+                           "reboot with -install-consensus-bundle=<path> to "
+                           "activate through the unified installer");
+
+    /* Record the download-side resource counters and write the durable
+     * zcl.sync_benchmark.v1 receipt. Marked incomplete: this command exercises
+     * the artifact fetch only, not the whole T_ready/T_sovereign sync. The
+     * downloaded byte count nets out journal-reused bytes (the resume path). */
+    uint64_t fresh_bytes =
+        (m->size_bytes > reused_bytes) ? (m->size_bytes - reused_bytes) : 0;
+    sync_benchmark_note_downloaded(fresh_bytes);
+    if (sync_benchmark_write_receipt(
+            false, "artifact_fetch_only via ops.debug.rom_fetch.bundle; "
+                   "peer_discovery/headers/verify/install/tail phases not "
+                   "exercised by this command")) {
+        char bench_path[640];
+        snprintf(bench_path, sizeof(bench_path), "%s/sync_benchmark.json",
+                 out_dir);
+        (void)json_push_kv_str(&reply->data, "benchmark_receipt", bench_path);
+    }
+}
+
 void zcl_native_handle_rom_fetch_bundle(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -211,101 +501,13 @@ void zcl_native_handle_rom_fetch_bundle(
     const char *filename = rfc_input(request, "filename");
     const char *out_dir = rfc_input(request, "out_dir");
 
-    if (!peer[0]) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "MISSING_PEER",
-                               "parse", false, false,
-                               "input.peer is required (the seeder's "
-                               "file-service host)", RFC_SUBSYS);
-        return;
-    }
-    if (!out_dir[0])
-        out_dir = diag_datadir();
-    if (!out_dir[0]) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "NO_OUT_DIR",
-                               "parse", false, false,
-                               "no input.out_dir given and the node datadir "
-                               "is not available to this process", RFC_SUBSYS);
-        return;
-    }
-
     uint16_t port = 0;
-    if (!rfc_parse_port(port_s, &port)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "BAD_PORT",
-                               "parse", false, false,
-                               "input.port must be 1..65535", RFC_SUBSYS);
+    if (!rfc_parse_bundle_endpoint(reply, peer, port_s, &out_dir, &port))
         return;
-    }
-
     struct rom_fetch_manifest m;
-    memset(&m, 0, sizeof(m));
-    m.used = true;
-    if (!rfc_parse_hex32(root_s, m.chunk_root)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "BAD_ROOT",
-                               "parse", false, false,
-                               "input.root must be the 64-hex chunk_root the "
-                               "operator committed to (from a trusted "
-                               "directory listing or the bundle publisher)",
-                               RFC_SUBSYS);
+    if (!rfc_parse_committed_manifest(reply, root_s, whole_s, size_s,
+                                      filename, &m))
         return;
-    }
-    if (!rfc_parse_hex32(whole_s, m.whole_sha3)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "BAD_WHOLE_SHA3",
-                               "parse", false, false,
-                               "input.whole_sha3 must be the 64-hex "
-                               "whole-file digest the operator committed to",
-                               RFC_SUBSYS);
-        return;
-    }
-    if (!size_s[0]) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "MISSING_SIZE",
-                               "parse", false, false,
-                               "input.size (bytes, decimal) is required",
-                               RFC_SUBSYS);
-        return;
-    }
-    {
-        char *end = NULL;
-        unsigned long long sz = strtoull(size_s, &end, 10);
-        if (!end || *end != '\0' || sz == 0) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "BAD_SIZE",
-                                   "parse", false, false,
-                                   "input.size must be a positive decimal "
-                                   "byte count", RFC_SUBSYS);
-            return;
-        }
-        m.size_bytes = (uint64_t)sz;
-    }
-    m.chunk_size = ROM_SEED_CHUNK_SIZE;
-    m.num_chunks =
-        (uint32_t)((m.size_bytes + m.chunk_size - 1) / m.chunk_size);
-    if (filename[0]) {
-        if (strlen(filename) >= sizeof(m.filename)) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "BAD_FILENAME",
-                                   "parse", false, false,
-                                   "input.filename is too long", RFC_SUBSYS);
-            return;
-        }
-        snprintf(m.filename, sizeof(m.filename), "%s", filename);
-    }
-    if (!rom_fetch_manifest_sane(&m)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID,
-                               "MANIFEST_NOT_SANE", "parse", false, false,
-                               "the committed (size, chunking, filename) "
-                               "tuple fails the ROM artifact bounds — check "
-                               "size/filename against the publisher's "
-                               "manifest", RFC_SUBSYS);
-        return;
-    }
-    rfc_derive_filename(&m);
 
     /* zcl.sync_benchmark.v1: instrument the artifact-fetch slice of fast sync.
      * This command drives only the manifest + artifact_download phases; the
@@ -343,82 +545,18 @@ void zcl_native_handle_rom_fetch_bundle(
         used_manifest_path = true;
         fetched = true;
     } else if (strchr(peer, ',')) {
-        struct rom_fetch_peer peers[4];
-        size_t npeers = 0;
-        char list[512];
-        snprintf(list, sizeof(list), "%s", peer);
-        for (char *tok = strtok(list, ","); tok && npeers < 4;
-             tok = strtok(NULL, ",")) {
-            while (*tok == ' ')
-                tok++;
-            size_t tl = strlen(tok);
-            while (tl > 0 && tok[tl - 1] == ' ')
-                tok[--tl] = '\0';
-            if (tl == 0 || tl >= sizeof(peers[0].addr))
-                continue;
-            snprintf(peers[npeers].addr, sizeof(peers[npeers].addr),
-                     "%s", tok);
-            peers[npeers].port = port;
-            npeers++;
-        }
-        if (npeers == 0) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "BAD_PEER_LIST",
-                                   "parse", false, false,
-                                   "input.peer held a comma but no usable "
-                                   "host", RFC_SUBSYS);
+        if (!rfc_fetch_from_peer_list(reply, peer, port, out_dir, &m,
+                                      &fetched, &fallback_used,
+                                      &used_manifest_path, &chunks_verified,
+                                      &reused_chunks, &reused_bytes))
             return;
-        }
-        uint32_t workers = (uint32_t)(2 * npeers);
-        if (workers > ROM_FETCH_MAX_WORKERS)
-            workers = ROM_FETCH_MAX_WORKERS;
-
-        /* Prefer the per-chunk-verified multi-seeder path: probe reachable
-         * peers for the "RMF" manifest and, on the first that serves one
-         * matching the committed num_chunks, run the content-verify-and-failover
-         * download (trustable resume + per-chunk content proof across flaky
-         * seeders). Only if NO peer serves a manifest — an all-legacy seeder
-         * set — do we take the whole-file-only multi-seeder scheduler. */
-        uint8_t (*chunk_sha3)[32] = zcl_malloc(
-            (size_t)ROM_SEED_MAX_CHUNKS * 32, "rfc_par_chunk_sha3");
-        uint32_t manifest_chunks = 0;
-        bool have_manifest = false;
-        sync_benchmark_phase_begin(SYNC_BENCH_MANIFEST);
-        for (size_t i = 0; chunk_sha3 && i < npeers && !have_manifest; i++) {
-            if (rom_fetch_get_manifest(peers[i].addr, peers[i].port,
-                                       m.chunk_root, chunk_sha3,
-                                       ROM_SEED_MAX_CHUNKS, &manifest_chunks) &&
-                manifest_chunks == m.num_chunks)
-                have_manifest = true;
-        }
-        sync_benchmark_phase_end(SYNC_BENCH_MANIFEST);
-        if (have_manifest) {
-            rfc_journal_reused(out_dir, &m, &reused_chunks, &reused_bytes);
-            sync_benchmark_note_reused(reused_bytes);
-            sync_benchmark_phase_begin(SYNC_BENCH_ARTIFACT_DOWNLOAD);
-            fetched = rom_fetch_download_verified_parallel(
-                peers, npeers, &m, chunk_sha3, manifest_chunks, out_dir,
-                NULL, NULL);
-            sync_benchmark_phase_end(SYNC_BENCH_ARTIFACT_DOWNLOAD);
-            used_manifest_path = true;
-            chunks_verified = manifest_chunks;
-        } else {
-            sync_benchmark_phase_begin(SYNC_BENCH_ARTIFACT_DOWNLOAD);
-            fetched = rom_fetch_download_parallel(peers, npeers, &m, out_dir,
-                                                  workers, NULL, NULL);
-            sync_benchmark_phase_end(SYNC_BENCH_ARTIFACT_DOWNLOAD);
-            fallback_used = true; /* whole-file-only path across seeders */
-        }
-        free(chunk_sha3);
     } else {
         uint8_t (*chunk_sha3)[32] = zcl_malloc(
             (size_t)ROM_SEED_MAX_CHUNKS * 32, "rfc_manifest_chunk_sha3");
         uint32_t manifest_chunks = 0;
-        sync_benchmark_phase_begin(SYNC_BENCH_MANIFEST);
-        bool have_manifest = chunk_sha3 &&
-            rom_fetch_get_manifest(peer, port, m.chunk_root, chunk_sha3,
-                                   ROM_SEED_MAX_CHUNKS, &manifest_chunks);
-        sync_benchmark_phase_end(SYNC_BENCH_MANIFEST);
+        bool have_manifest = rfc_probe_peer_manifest(peer, port, &m,
+                                                     chunk_sha3,
+                                                     &manifest_chunks);
         if (have_manifest && manifest_chunks == m.num_chunks) {
             rfc_journal_reused(out_dir, &m, &reused_chunks, &reused_bytes);
             sync_benchmark_note_reused(reused_bytes);
@@ -461,59 +599,9 @@ void zcl_native_handle_rom_fetch_bundle(
                                          "{}", "inspect the fetch status");
         return;
     }
-
-    /* The download derives a name from the digest when none was given; the
-     * status snapshot holds the post-derivation name. */
-    struct rom_fetch_status st;
-    rom_fetch_status_snapshot(&st);
-    const char *installed = rfc_reply_filename(warm_identical, &st, &m);
-    (void)json_push_kv_str(&reply->data, "installed", installed);
-    char path[1200];
-    snprintf(path, sizeof(path), "%s/%s", out_dir, installed);
-    (void)json_push_kv_str(&reply->data, "path", path);
-    (void)json_push_kv_int(&reply->data, "size_bytes",
-                           (int64_t)m.size_bytes);
-    (void)json_push_kv_int(&reply->data, "num_chunks",
-                           (int64_t)m.num_chunks);
-    (void)json_push_kv_bool(&reply->data, "verified", true);
-    char root_hex[65];
-    HexStr(m.chunk_root, 32, false, root_hex, sizeof(root_hex));
-    (void)json_push_kv_str(&reply->data, "chunk_root", root_hex);
-
-    /* Per-chunk protocol observability. */
-    (void)json_push_kv_bool(&reply->data, "used_manifest_path",
-                            used_manifest_path);
-    (void)json_push_kv_bool(&reply->data, "fallback_used", fallback_used);
-    (void)json_push_kv_bool(&reply->data, "warm_identical", warm_identical);
-    if (used_manifest_path) {
-        (void)json_push_kv_int(&reply->data, "chunks_verified",
-                               (int64_t)chunks_verified);
-        (void)json_push_kv_int(&reply->data, "bytes_reused_from_journal",
-                               (int64_t)reused_bytes);
-        (void)json_push_kv_int(&reply->data, "chunks_reused_from_journal",
-                               (int64_t)reused_chunks);
-    }
-
-    (void)json_push_kv_str(&reply->data, "next",
-                           "reboot with -install-consensus-bundle=<path> to "
-                           "activate through the unified installer");
-
-    /* Record the download-side resource counters and write the durable
-     * zcl.sync_benchmark.v1 receipt. Marked incomplete: this command exercises
-     * the artifact fetch only, not the whole T_ready/T_sovereign sync. The
-     * downloaded byte count nets out journal-reused bytes (the resume path). */
-    uint64_t fresh_bytes =
-        (m.size_bytes > reused_bytes) ? (m.size_bytes - reused_bytes) : 0;
-    sync_benchmark_note_downloaded(fresh_bytes);
-    if (sync_benchmark_write_receipt(
-            false, "artifact_fetch_only via ops.debug.rom_fetch.bundle; "
-                   "peer_discovery/headers/verify/install/tail phases not "
-                   "exercised by this command")) {
-        char bench_path[640];
-        snprintf(bench_path, sizeof(bench_path), "%s/sync_benchmark.json",
-                 out_dir);
-        (void)json_push_kv_str(&reply->data, "benchmark_receipt", bench_path);
-    }
+    rfc_render_bundle_reply(reply, out_dir, &m, warm_identical,
+                            used_manifest_path, fallback_used,
+                            chunks_verified, reused_chunks, reused_bytes);
 }
 
 /* ── Hot-swappable leaves ──────────────────────────────────────────────────
