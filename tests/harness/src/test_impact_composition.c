@@ -5813,6 +5813,24 @@ static int test_ic_proof_dependency_link_refusals(void)
     return failures;
 }
 
+static bool ic_depcopy_donor_pwrite(const char *source, const char *byte)
+{
+    int donor = open(source, O_WRONLY);
+    bool written = donor >= 0 && pwrite(donor, byte, 1, 0) == 1;
+    if (donor >= 0)
+        written = close(donor) == 0 && written;
+    return written;
+}
+
+static bool ic_depcopy_read_back(const char *path, char *seen, size_t len)
+{
+    int fd = open(path, O_RDONLY);
+    bool read_ok = fd >= 0 && read(fd, seen, len) == (ssize_t)len;
+    if (fd >= 0)
+        read_ok = close(fd) == 0 && read_ok;
+    return read_ok;
+}
+
 static int test_ic_proof_dependency_crosses_filesystems(void)
 {
     int failures = 0;
@@ -5881,29 +5899,14 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         /* A donor rebuilt in place must not rewrite either already-frozen
          * generation. Restore the fixture before asserting so a born-red
          * failure cannot leak changed bytes into later cases. */
-        int donor = open(source, O_WRONLY);
-        bool donor_changed = donor >= 0 && pwrite(donor, "X", 1, 0) == 1;
-        if (donor >= 0)
-            donor_changed = close(donor) == 0 && donor_changed;
+        bool donor_changed = ic_depcopy_donor_pwrite(source, "X");
         char first_seen[sizeof(body)] = {0};
         char second_seen[sizeof(body)] = {0};
-        int first = open(same, O_RDONLY);
-        bool first_read = first >= 0 &&
-                          read(first, first_seen, sizeof(body) - 1) ==
-                              (ssize_t)(sizeof(body) - 1);
-        if (first >= 0)
-            first_read = close(first) == 0 && first_read;
-        int second_fd = open(second, O_RDONLY);
-        bool second_read = second_fd >= 0 &&
-                           read(second_fd, second_seen, sizeof(body) - 1) ==
-                               (ssize_t)(sizeof(body) - 1);
-        if (second_fd >= 0)
-            second_read = close(second_fd) == 0 && second_read;
-        donor = open(source, O_WRONLY);
-        bool donor_restored = donor >= 0 &&
-                              pwrite(donor, body, 1, 0) == 1;
-        if (donor >= 0)
-            donor_restored = close(donor) == 0 && donor_restored;
+        bool first_read = ic_depcopy_read_back(same, first_seen,
+                                               sizeof(body) - 1);
+        bool second_read = ic_depcopy_read_back(second, second_seen,
+                                                sizeof(body) - 1);
+        bool donor_restored = ic_depcopy_donor_pwrite(source, body);
         donor_restored = utimensat(AT_FDCWD, source, pinned, 0) == 0 &&
                            donor_restored;
         struct stat first_after_donor;
