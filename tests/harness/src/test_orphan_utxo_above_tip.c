@@ -105,206 +105,231 @@ static bool out_open_db(struct node_db *ndb, const char *tag, char *path_out,
     return node_db_open(ndb, path_out);
 }
 
+/* ── 1. No orphans: utxos all at/below tip → detect false ── */
+static int out_case_no_orphans_quiet(void)
+{
+    int failures = 0;
+
+    condition_engine_reset_for_testing();
+    orphan_utxo_above_tip_test_reset();
+
+    struct main_state ms;
+    main_state_init(&ms);
+    out_build_chain(&ms, 50); /* tip at h=49 */
+    condition_engine_set_main_state(&ms);
+
+    char db_path[256];
+    struct node_db ndb;
+    bool ok = out_open_db(&ndb, "noorphan", db_path, sizeof(db_path));
+    if (ok) {
+        /* 10 rows, all at or below tip (h=1..10). */
+        out_insert_utxos_at(&ndb, 0, 5, 10);
+        orphan_utxo_above_tip_test_set_node_db(&ndb);
+        register_orphan_utxo_above_tip();
+
+        condition_engine_tick();
+
+        ok = ok && condition_engine_get_active_count() == 0;
+        ok = ok && orphan_utxo_above_tip_test_remedy_calls() == 0;
+        /* witness() is true (no orphans), so the engine never
+         * marks the condition active. */
+        OUT_CHECK("no orphans -> detect false, no remedy", ok);
+
+        node_db_close(&ndb);
+    } else {
+        OUT_CHECK("no orphans (db open failed)", false);
+    }
+    unlink(db_path);
+
+    condition_engine_set_main_state(NULL);
+    condition_engine_reset_for_testing();
+    orphan_utxo_above_tip_test_reset();
+    main_state_free(&ms);
+
+    return failures;
+}
+
+/* ── 2. Small overshoot heals: <=32 rows above tip ── */
+static int out_case_small_overshoot_heals(void)
+{
+    int failures = 0;
+
+    condition_engine_reset_for_testing();
+    orphan_utxo_above_tip_test_reset();
+
+    struct main_state ms;
+    main_state_init(&ms);
+    out_build_chain(&ms, 50); /* tip at h=49 */
+    condition_engine_set_main_state(&ms);
+
+    char db_path[256];
+    struct node_db ndb;
+    bool ok = out_open_db(&ndb, "small", db_path, sizeof(db_path));
+    if (ok) {
+        /* 8 rows at tip+1 (h=50) — single-block overshoot, <=32. */
+        out_insert_utxos_at(&ndb, 0, 50, 8);
+        orphan_utxo_above_tip_test_set_node_db(&ndb);
+        register_orphan_utxo_above_tip();
+
+        /* cleared_count is a cumulative lifetime counter on the
+         * (static) condition struct; capture a baseline and assert it
+         * advances by exactly one when the heal is witnessed. */
+        struct condition_runtime_snapshot pre;
+        int cleared_before = 0;
+        if (condition_engine_get_registered_snapshot(
+                "orphan_utxo_above_tip", &pre))
+            cleared_before = pre.cleared_count;
+
+        int64_t above_before = node_db_utxo_count(&ndb);
+        condition_engine_tick();
+        int64_t above_after = node_db_utxo_count(&ndb);
+
+        /* remedy ran exactly once, returned OK, witness confirmed the
+         * heal, so the engine cleared the condition. */
+        ok = ok && above_before == 8;
+        ok = ok && orphan_utxo_above_tip_test_remedy_calls() == 1;
+        ok = ok && above_after == 0;
+        ok = ok && condition_engine_get_active_count() == 0;
+
+        struct condition_runtime_snapshot snap;
+        ok = ok && condition_engine_get_registered_snapshot(
+                       "orphan_utxo_above_tip", &snap);
+        ok = ok && snap.cleared_count == cleared_before + 1;
+        OUT_CHECK("small overshoot -> remedy OK, rows pruned, "
+                  "witness true", ok);
+
+        node_db_close(&ndb);
+    } else {
+        OUT_CHECK("small overshoot heals (db open failed)", false);
+    }
+    unlink(db_path);
+
+    condition_engine_set_main_state(NULL);
+    condition_engine_reset_for_testing();
+    orphan_utxo_above_tip_test_reset();
+    main_state_free(&ms);
+
+    return failures;
+}
+
+/* ── 3. Oversized overshoot refuses + pages ── */
+static int out_case_oversized_overshoot_refuses(void)
+{
+    int failures = 0;
+
+    condition_engine_reset_for_testing();
+    orphan_utxo_above_tip_test_reset();
+
+    struct main_state ms;
+    main_state_init(&ms);
+    out_build_chain(&ms, 50); /* tip at h=49 */
+    condition_engine_set_main_state(&ms);
+
+    char db_path[256];
+    struct node_db ndb;
+    bool ok = out_open_db(&ndb, "big", db_path, sizeof(db_path));
+    if (ok) {
+        /* 40 rows at tip+1 (h=50) — exceeds the 32-row guard. */
+        out_insert_utxos_at(&ndb, 0, 50, 40);
+        orphan_utxo_above_tip_test_set_node_db(&ndb);
+        register_orphan_utxo_above_tip();
+
+        /* cleared_count is a cumulative lifetime counter on the
+         * (static) condition struct that survives re-registration, so
+         * capture a baseline and assert it does NOT advance (the
+         * symptom must not clear). */
+        struct condition_runtime_snapshot pre;
+        int cleared_before = 0;
+        if (condition_engine_get_registered_snapshot(
+                "orphan_utxo_above_tip", &pre))
+            cleared_before = pre.cleared_count;
+
+        condition_engine_tick();
+        int64_t above_after = node_db_utxo_count(&ndb);
+
+        /* remedy ran (guard refused) -> FAILED; rows remain; the
+         * symptom is NOT cleared so the condition stays active. */
+        ok = ok && orphan_utxo_above_tip_test_remedy_calls() == 1;
+        ok = ok && above_after == 40;
+        ok = ok && condition_engine_get_active_count() == 1;
+
+        struct condition_runtime_snapshot snap;
+        ok = ok && condition_engine_get_registered_snapshot(
+                       "orphan_utxo_above_tip", &snap);
+        ok = ok && snap.last_outcome == COND_REMEDY_FAILED;
+        ok = ok && snap.cleared_count == cleared_before;
+        OUT_CHECK("oversized overshoot -> remedy FAILED, witness "
+                  "false (symptom persists)", ok);
+
+        node_db_close(&ndb);
+    } else {
+        OUT_CHECK("oversized overshoot refuses (db open failed)", false);
+    }
+    unlink(db_path);
+
+    condition_engine_set_main_state(NULL);
+    condition_engine_reset_for_testing();
+    orphan_utxo_above_tip_test_reset();
+    main_state_free(&ms);
+
+    return failures;
+}
+
+/* ── 4. Tip not established (tip_h == 0) → no false positive ── */
+static int out_case_tip_not_established_quiet(void)
+{
+    int failures = 0;
+
+    condition_engine_reset_for_testing();
+    orphan_utxo_above_tip_test_reset();
+
+    struct main_state ms;
+    main_state_init(&ms); /* no chain built — tip is NULL/height 0 */
+    condition_engine_set_main_state(&ms);
+
+    char db_path[256];
+    struct node_db ndb;
+    bool ok = out_open_db(&ndb, "notip", db_path, sizeof(db_path));
+    if (ok) {
+        /* Rows present at high heights, but with no established tip
+         * the Condition must stay quiet (boot not finalized). */
+        out_insert_utxos_at(&ndb, 0, 100, 5);
+        orphan_utxo_above_tip_test_set_node_db(&ndb);
+        register_orphan_utxo_above_tip();
+
+        condition_engine_tick();
+
+        ok = ok && condition_engine_get_active_count() == 0;
+        ok = ok && orphan_utxo_above_tip_test_remedy_calls() == 0;
+        /* rows untouched — no heal attempted against an
+         * unestablished tip. */
+        ok = ok && node_db_utxo_count(&ndb) == 5;
+        OUT_CHECK("tip not established -> detect false, witness true",
+                  ok);
+
+        node_db_close(&ndb);
+    } else {
+        OUT_CHECK("tip not established (db open failed)", false);
+    }
+    unlink(db_path);
+
+    condition_engine_set_main_state(NULL);
+    condition_engine_reset_for_testing();
+    orphan_utxo_above_tip_test_reset();
+    main_state_free(&ms);
+
+    return failures;
+}
+
 int test_orphan_utxo_above_tip(void)
 {
     printf("\n=== orphan_utxo_above_tip condition tests ===\n");
     int failures = 0;
 
-    /* ── 1. No orphans: utxos all at/below tip → detect false ── */
-    {
-        condition_engine_reset_for_testing();
-        orphan_utxo_above_tip_test_reset();
-
-        struct main_state ms;
-        main_state_init(&ms);
-        out_build_chain(&ms, 50); /* tip at h=49 */
-        condition_engine_set_main_state(&ms);
-
-        char db_path[256];
-        struct node_db ndb;
-        bool ok = out_open_db(&ndb, "noorphan", db_path, sizeof(db_path));
-        if (ok) {
-            /* 10 rows, all at or below tip (h=1..10). */
-            out_insert_utxos_at(&ndb, 0, 5, 10);
-            orphan_utxo_above_tip_test_set_node_db(&ndb);
-            register_orphan_utxo_above_tip();
-
-            condition_engine_tick();
-
-            ok = ok && condition_engine_get_active_count() == 0;
-            ok = ok && orphan_utxo_above_tip_test_remedy_calls() == 0;
-            /* witness() is true (no orphans), so the engine never
-             * marks the condition active. */
-            OUT_CHECK("no orphans -> detect false, no remedy", ok);
-
-            node_db_close(&ndb);
-        } else {
-            OUT_CHECK("no orphans (db open failed)", false);
-        }
-        unlink(db_path);
-
-        condition_engine_set_main_state(NULL);
-        condition_engine_reset_for_testing();
-        orphan_utxo_above_tip_test_reset();
-        main_state_free(&ms);
-    }
-
-    /* ── 2. Small overshoot heals: <=32 rows above tip ── */
-    {
-        condition_engine_reset_for_testing();
-        orphan_utxo_above_tip_test_reset();
-
-        struct main_state ms;
-        main_state_init(&ms);
-        out_build_chain(&ms, 50); /* tip at h=49 */
-        condition_engine_set_main_state(&ms);
-
-        char db_path[256];
-        struct node_db ndb;
-        bool ok = out_open_db(&ndb, "small", db_path, sizeof(db_path));
-        if (ok) {
-            /* 8 rows at tip+1 (h=50) — single-block overshoot, <=32. */
-            out_insert_utxos_at(&ndb, 0, 50, 8);
-            orphan_utxo_above_tip_test_set_node_db(&ndb);
-            register_orphan_utxo_above_tip();
-
-            /* cleared_count is a cumulative lifetime counter on the
-             * (static) condition struct; capture a baseline and assert it
-             * advances by exactly one when the heal is witnessed. */
-            struct condition_runtime_snapshot pre;
-            int cleared_before = 0;
-            if (condition_engine_get_registered_snapshot(
-                    "orphan_utxo_above_tip", &pre))
-                cleared_before = pre.cleared_count;
-
-            int64_t above_before = node_db_utxo_count(&ndb);
-            condition_engine_tick();
-            int64_t above_after = node_db_utxo_count(&ndb);
-
-            /* remedy ran exactly once, returned OK, witness confirmed the
-             * heal, so the engine cleared the condition. */
-            ok = ok && above_before == 8;
-            ok = ok && orphan_utxo_above_tip_test_remedy_calls() == 1;
-            ok = ok && above_after == 0;
-            ok = ok && condition_engine_get_active_count() == 0;
-
-            struct condition_runtime_snapshot snap;
-            ok = ok && condition_engine_get_registered_snapshot(
-                           "orphan_utxo_above_tip", &snap);
-            ok = ok && snap.cleared_count == cleared_before + 1;
-            OUT_CHECK("small overshoot -> remedy OK, rows pruned, "
-                      "witness true", ok);
-
-            node_db_close(&ndb);
-        } else {
-            OUT_CHECK("small overshoot heals (db open failed)", false);
-        }
-        unlink(db_path);
-
-        condition_engine_set_main_state(NULL);
-        condition_engine_reset_for_testing();
-        orphan_utxo_above_tip_test_reset();
-        main_state_free(&ms);
-    }
-
-    /* ── 3. Oversized overshoot refuses + pages ── */
-    {
-        condition_engine_reset_for_testing();
-        orphan_utxo_above_tip_test_reset();
-
-        struct main_state ms;
-        main_state_init(&ms);
-        out_build_chain(&ms, 50); /* tip at h=49 */
-        condition_engine_set_main_state(&ms);
-
-        char db_path[256];
-        struct node_db ndb;
-        bool ok = out_open_db(&ndb, "big", db_path, sizeof(db_path));
-        if (ok) {
-            /* 40 rows at tip+1 (h=50) — exceeds the 32-row guard. */
-            out_insert_utxos_at(&ndb, 0, 50, 40);
-            orphan_utxo_above_tip_test_set_node_db(&ndb);
-            register_orphan_utxo_above_tip();
-
-            /* cleared_count is a cumulative lifetime counter on the
-             * (static) condition struct that survives re-registration, so
-             * capture a baseline and assert it does NOT advance (the
-             * symptom must not clear). */
-            struct condition_runtime_snapshot pre;
-            int cleared_before = 0;
-            if (condition_engine_get_registered_snapshot(
-                    "orphan_utxo_above_tip", &pre))
-                cleared_before = pre.cleared_count;
-
-            condition_engine_tick();
-            int64_t above_after = node_db_utxo_count(&ndb);
-
-            /* remedy ran (guard refused) -> FAILED; rows remain; the
-             * symptom is NOT cleared so the condition stays active. */
-            ok = ok && orphan_utxo_above_tip_test_remedy_calls() == 1;
-            ok = ok && above_after == 40;
-            ok = ok && condition_engine_get_active_count() == 1;
-
-            struct condition_runtime_snapshot snap;
-            ok = ok && condition_engine_get_registered_snapshot(
-                           "orphan_utxo_above_tip", &snap);
-            ok = ok && snap.last_outcome == COND_REMEDY_FAILED;
-            ok = ok && snap.cleared_count == cleared_before;
-            OUT_CHECK("oversized overshoot -> remedy FAILED, witness "
-                      "false (symptom persists)", ok);
-
-            node_db_close(&ndb);
-        } else {
-            OUT_CHECK("oversized overshoot refuses (db open failed)", false);
-        }
-        unlink(db_path);
-
-        condition_engine_set_main_state(NULL);
-        condition_engine_reset_for_testing();
-        orphan_utxo_above_tip_test_reset();
-        main_state_free(&ms);
-    }
-
-    /* ── 4. Tip not established (tip_h == 0) → no false positive ── */
-    {
-        condition_engine_reset_for_testing();
-        orphan_utxo_above_tip_test_reset();
-
-        struct main_state ms;
-        main_state_init(&ms); /* no chain built — tip is NULL/height 0 */
-        condition_engine_set_main_state(&ms);
-
-        char db_path[256];
-        struct node_db ndb;
-        bool ok = out_open_db(&ndb, "notip", db_path, sizeof(db_path));
-        if (ok) {
-            /* Rows present at high heights, but with no established tip
-             * the Condition must stay quiet (boot not finalized). */
-            out_insert_utxos_at(&ndb, 0, 100, 5);
-            orphan_utxo_above_tip_test_set_node_db(&ndb);
-            register_orphan_utxo_above_tip();
-
-            condition_engine_tick();
-
-            ok = ok && condition_engine_get_active_count() == 0;
-            ok = ok && orphan_utxo_above_tip_test_remedy_calls() == 0;
-            /* rows untouched — no heal attempted against an
-             * unestablished tip. */
-            ok = ok && node_db_utxo_count(&ndb) == 5;
-            OUT_CHECK("tip not established -> detect false, witness true",
-                      ok);
-
-            node_db_close(&ndb);
-        } else {
-            OUT_CHECK("tip not established (db open failed)", false);
-        }
-        unlink(db_path);
-
-        condition_engine_set_main_state(NULL);
-        condition_engine_reset_for_testing();
-        orphan_utxo_above_tip_test_reset();
-        main_state_free(&ms);
-    }
+    failures += out_case_no_orphans_quiet();
+    failures += out_case_small_overshoot_heals();
+    failures += out_case_oversized_overshoot_refuses();
+    failures += out_case_tip_not_established_quiet();
 
     return failures;
 }
