@@ -52,7 +52,17 @@ static void print_hex(const uint8_t *data, size_t len)
         printf("%02x", data[i]);
 }
 
-int test_mnemonic(void)
+/* Counts the space-separated words in a mnemonic phrase. */
+static int count_mnemonic_words(const char *phrase)
+{
+    int count = 1;
+    for (size_t i = 0; phrase[i]; i++)
+        if (phrase[i] == ' ') count++;
+    return count;
+}
+
+/* Wordlist access and lookup tests; returns the number of failures. */
+static int test_wordlist_lookup(void)
 {
     int failures = 0;
 
@@ -87,6 +97,14 @@ int test_mnemonic(void)
         }
     }
 
+    return failures;
+}
+
+/* Wordlist out-of-range index test; returns the number of failures. */
+static int test_wordlist_out_of_range(void)
+{
+    int failures = 0;
+
     /* ── Test 3: wordlist out of range ───────────────────────────── */
     printf("mnemonic wordlist out of range... ");
     {
@@ -96,15 +114,21 @@ int test_mnemonic(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* Mnemonic generation tests; returns the number of failures. */
+static int test_mnemonic_generate(void)
+{
+    int failures = 0;
+
     /* ── Test 4: generate 12-word mnemonic ───────────────────────── */
     printf("mnemonic generate 12 words... ");
     {
         char phrase[MNEMONIC_MAX_PHRASE_SIZE];
         if (mnemonic_generate(12, phrase, sizeof(phrase))) {
             /* Count words */
-            int count = 1;
-            for (size_t i = 0; phrase[i]; i++)
-                if (phrase[i] == ' ') count++;
+            int count = count_mnemonic_words(phrase);
             if (count == 12 && mnemonic_validate(phrase))
                 printf("OK\n");
             else { printf("FAIL (count=%d)\n", count); failures++; }
@@ -116,9 +140,7 @@ int test_mnemonic(void)
     {
         char phrase[MNEMONIC_MAX_PHRASE_SIZE];
         if (mnemonic_generate(24, phrase, sizeof(phrase))) {
-            int count = 1;
-            for (size_t i = 0; phrase[i]; i++)
-                if (phrase[i] == ' ') count++;
+            int count = count_mnemonic_words(phrase);
             if (count == 24 && mnemonic_validate(phrase))
                 printf("OK\n");
             else { printf("FAIL (count=%d)\n", count); failures++; }
@@ -135,6 +157,14 @@ int test_mnemonic(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* BIP39 entropy-to-mnemonic test vectors; returns the number of failures. */
+static int test_bip39_entropy_vectors(void)
+{
+    int failures = 0;
 
     /* ── Test 7: BIP39 test vector — 128-bit entropy ─────────────── */
     printf("BIP39 test vector 128-bit entropy... ");
@@ -165,6 +195,14 @@ int test_mnemonic(void)
             }
         } else { printf("FAIL (from_entropy)\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Mnemonic validation tests; returns the number of failures. */
+static int test_mnemonic_validate(void)
+{
+    int failures = 0;
 
     /* ── Test 9: validate known good mnemonic ────────────────────── */
     printf("mnemonic validate known good... ");
@@ -205,6 +243,14 @@ int test_mnemonic(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Seed derivation tests; returns the number of failures. */
+static int test_mnemonic_to_seed(void)
+{
+    int failures = 0;
 
     /* ── Test 13: seed derivation — BIP39 test vector ────────────── */
     printf("BIP39 seed derivation (no passphrase)... ");
@@ -256,6 +302,14 @@ int test_mnemonic(void)
         memory_cleanse(seed_empty, sizeof(seed_empty));
     }
 
+    return failures;
+}
+
+/* from_entropy + validate roundtrip test; returns the number of failures. */
+static int test_from_entropy_roundtrip(void)
+{
+    int failures = 0;
+
     /* ── Test 16: from_entropy roundtrip ─────────────────────────── */
     printf("mnemonic from_entropy + validate roundtrip... ");
     {
@@ -264,14 +318,20 @@ int test_mnemonic(void)
         char phrase[MNEMONIC_MAX_PHRASE_SIZE];
         if (mnemonic_from_entropy(entropy, sizeof(entropy),
                                   phrase, sizeof(phrase))) {
-            int count = 1;
-            for (size_t i = 0; phrase[i]; i++)
-                if (phrase[i] == ' ') count++;
+            int count = count_mnemonic_words(phrase);
             if (count == 15 && mnemonic_validate(phrase))
                 printf("OK\n");
             else { printf("FAIL (count=%d)\n", count); failures++; }
         } else { printf("FAIL (from_entropy)\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Mnemonic → seed → BIP32 master key test; returns the number of failures. */
+static int test_seed_to_master_pipeline(void)
+{
+    int failures = 0;
 
     /* ── Test 17: mnemonic → seed → BIP32 master key pipeline ────── */
     printf("mnemonic → seed → BIP32 master key pipeline... ");
@@ -289,6 +349,14 @@ int test_mnemonic(void)
         memory_cleanse(&master, sizeof(master));
     }
 
+    return failures;
+}
+
+/* from_entropy bad length rejection test; returns the number of failures. */
+static int test_from_entropy_rejects_bad_length(void)
+{
+    int failures = 0;
+
     /* ── Test 18: from_entropy rejects bad length ────────────────── */
     printf("mnemonic from_entropy rejects bad length... ");
     {
@@ -298,6 +366,23 @@ int test_mnemonic(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_mnemonic(void)
+{
+    int failures = 0;
+
+    failures += test_wordlist_lookup();
+    failures += test_wordlist_out_of_range();
+    failures += test_mnemonic_generate();
+    failures += test_bip39_entropy_vectors();
+    failures += test_mnemonic_validate();
+    failures += test_mnemonic_to_seed();
+    failures += test_from_entropy_roundtrip();
+    failures += test_seed_to_master_pipeline();
+    failures += test_from_entropy_rejects_bad_length();
 
     (void)print_hex; /* suppress unused warning if test 13 passes */
 
