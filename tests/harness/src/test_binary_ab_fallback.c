@@ -189,12 +189,68 @@ static bool ab_fexecve_true(int fd)
  * adapter is POSIX-only and is not exercised on Windows, only kept
  * syntactically valid there. */
 #if !defined(_WIN32)
+static bool ab_nodectl_launch_args_ok(const char *slots, const char *node,
+                                      char *output, size_t output_size,
+                                      int *exit_status)
+{
+    return slots && node && output && output_size != 0 && exit_status;
+}
+
+/* Exit code for the child, or 0 when slots, HOME, threshold and echo are set. */
+static int ab_nodectl_child_env(const char *slots, const char *threshold,
+                                const char *echo_value)
+{
+    if (setenv("ZCL_BINARY_SLOTS_DIR", slots, 1) != 0 ||
+        unsetenv("HOME") != 0)
+        return 121;
+    if (threshold) {
+        if (setenv("ZCL_BINARY_FALLBACK_THRESHOLD", threshold, 1) != 0)
+            return 122;
+    } else {
+        unsetenv("ZCL_BINARY_FALLBACK_THRESHOLD");
+    }
+    if (echo_value) {
+        if (setenv("ZCL_LAUNCH_TEST_ECHO", echo_value, 1) != 0)
+            return 123;
+    } else {
+        unsetenv("ZCL_LAUNCH_TEST_ECHO");
+    }
+    return 0;
+}
+
+/* 0 after EOF, with *used_out set. 1 on a read error other than EINTR. */
+static int ab_nodectl_drain_stdout(int fd, char *output, size_t output_size,
+                                   size_t *used_out)
+{
+    size_t used = 0;
+    for (;;) {
+        char discard[256];
+        char *dst = used + 1u < output_size ? output + used : discard;
+        size_t cap = used + 1u < output_size
+            ? output_size - 1u - used : sizeof(discard);
+        ssize_t n = read(fd, dst, cap);
+        if (n > 0) {
+            if (dst != discard)
+                used += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0)
+            return 1;
+        break;
+    }
+    *used_out = used;
+    return 0;
+}
+
 static bool ab_run_nodectl(const char *slots, const char *threshold,
                            const char *echo_value, const char *node,
                            char *output, size_t output_size,
                            int *exit_status)
 {
-    if (!slots || !node || !output || output_size == 0 || !exit_status)
+    if (!ab_nodectl_launch_args_ok(slots, node, output, output_size,
+                                   exit_status))
         return false;
     int capture[2];
     if (pipe(capture) != 0)
@@ -210,46 +266,19 @@ static bool ab_run_nodectl(const char *slots, const char *threshold,
         if (dup2(capture[1], STDOUT_FILENO) < 0)
             _exit(120);
         close(capture[1]);
-        if (setenv("ZCL_BINARY_SLOTS_DIR", slots, 1) != 0 ||
-            unsetenv("HOME") != 0)
-            _exit(121);
-        if (threshold) {
-            if (setenv("ZCL_BINARY_FALLBACK_THRESHOLD", threshold, 1) != 0)
-                _exit(122);
-        } else {
-            unsetenv("ZCL_BINARY_FALLBACK_THRESHOLD");
-        }
-        if (echo_value) {
-            if (setenv("ZCL_LAUNCH_TEST_ECHO", echo_value, 1) != 0)
-                _exit(123);
-        } else {
-            unsetenv("ZCL_LAUNCH_TEST_ECHO");
-        }
+        int env_rc = ab_nodectl_child_env(slots, threshold, echo_value);
+        if (env_rc != 0)
+            _exit(env_rc);
         execl("build/bin/zcl-nodectl", "zcl-nodectl", "launch", node,
               "-datadir=/forwarded", "--marker=kept", (char *)NULL);
         _exit(124);
     }
     close(capture[1]);
     size_t used = 0;
-    for (;;) {
-        char discard[256];
-        char *dst = used + 1u < output_size ? output + used : discard;
-        size_t cap = used + 1u < output_size
-            ? output_size - 1u - used : sizeof(discard);
-        ssize_t n = read(capture[0], dst, cap);
-        if (n > 0) {
-            if (dst != discard)
-                used += (size_t)n;
-            continue;
-        }
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n < 0) {
-            close(capture[0]);
-            (void)waitpid(child, NULL, 0);
-            return false;
-        }
-        break;
+    if (ab_nodectl_drain_stdout(capture[0], output, output_size, &used) != 0) {
+        close(capture[0]);
+        (void)waitpid(child, NULL, 0);
+        return false;
     }
     close(capture[0]);
     output[used] = '\0';
@@ -419,32 +448,9 @@ static int ab_nodectl_unit_contract(void)
 }
 
 
-static int test_binary_ab_fallback_posix_arm(void)
+static int ab_posix_execute_only_ancestor(const char *dir)
 {
-    printf("\n=== binary_ab_fallback tests ===\n");
     int failures = 0;
-
-    blocker_module_init();
-
-    char tmpl[] = "/tmp/zcl_ab_XXXXXX";
-    char *dir = mkdtemp(tmpl);
-    if (!dir) {
-        printf("ab: mkdtemp failed — cannot run seam tests\n");
-        return 1;
-    }
-    char resolved_dir[PATH_MAX];
-    if (!platform_directory_canonical_real(dir, resolved_dir,
-                                           sizeof(resolved_dir))) {
-        printf("ab: realpath failed — cannot run seam tests\n");
-        return 1;
-    }
-    dir = resolved_dir;
-
-    char streak[PATH_MAX], cur[PATH_MAX], lastgood[PATH_MAX], buf[256];
-    snprintf(streak, sizeof(streak), "%s/%s", dir, BINARY_AB_STREAK_BASENAME);
-    snprintf(lastgood, sizeof(lastgood), "%s/%s", dir, BINARY_AB_LASTGOOD_BASENAME);
-    snprintf(cur, sizeof(cur), "%s/current-bin", dir);
-
 #if defined(__linux__)
     /* systemd ProtectSystem=strict exposes read-only ancestors as searchable
      * but not readable. The launcher must traverse them without directory
@@ -461,7 +467,17 @@ static int test_binary_ab_fallback_posix_arm(void)
         AB_CHECK("remove traversed slots fixture", rmdir(protected_slots) == 0);
         AB_CHECK("remove traversal fixture", rmdir(writable) == 0);
     }
+#else
+    (void)dir;
 #endif
+    return failures;
+}
+
+static int ab_posix_reset_promote_ready(const char *dir, const char *streak,
+                                        const char *cur, const char *lastgood)
+{
+    int failures = 0;
+    char buf[256];
 
     /* ── 1. reset_streak overwrites any value with "0\n" ─────────────── */
     {
@@ -498,6 +514,15 @@ static int test_binary_ab_fallback_posix_arm(void)
                  ab_read_file(lastgood, buf, sizeof(buf)) >= 0
                  && strcmp(buf, "CURRENT-V2-BYTES") == 0);
     }
+
+    return failures;
+}
+
+static int ab_posix_fallback_ready_and_blocker(const char *dir, const char *streak,
+                                               const char *cur, const char *lastgood)
+{
+    int failures = 0;
+    char buf[256];
 
     /* ── 4. on_ready (fallback): resets streak but does NOT overwrite the
      *      good slot with the bad current binary ─────────────────────── */
@@ -556,6 +581,13 @@ static int test_binary_ab_fallback_posix_arm(void)
         blocker_clear(BINARY_FALLBACK_BLOCKER_ID);
     }
 
+    return failures;
+}
+
+static int ab_posix_threshold_parse_cases(void)
+{
+    int failures = 0;
+
     /* ── 7. corrupt launch state fails closed to a pinned last-good ──── */
     {
         uint32_t threshold = 0;
@@ -576,7 +608,20 @@ static int test_binary_ab_fallback_posix_arm(void)
                  !os_binary_slots_parse_threshold("3x", &threshold));
         AB_CHECK("strict threshold rejects overflow",
                  !os_binary_slots_parse_threshold("4294967296", &threshold));
+    }
 
+    return failures;
+}
+
+static int ab_posix_corrupt_streak_selects_lastgood(const char *dir,
+                                                    const char *streak,
+                                                    const char *cur,
+                                                    const char *lastgood)
+{
+    int failures = 0;
+    char buf[256];
+
+    {
         AB_CHECK("write executable current fixture",
                  ab_write_file(cur, "CURRENT-PINNED", 0755) == 0);
         AB_CHECK("write executable last-good fixture",
@@ -603,7 +648,21 @@ static int test_binary_ab_fallback_posix_arm(void)
                  !launch.streak_written &&
                  ab_read_file(streak, buf, sizeof(buf)) == 0);
         os_binary_slots_close_launch(&launch);
+    }
 
+    return failures;
+}
+
+static int ab_posix_overflow_streak_selects_fallback(const char *dir,
+                                                     const char *streak,
+                                                     const char *cur)
+{
+    int failures = 0;
+    char buf[256];
+    struct os_binary_slots_launch launch;
+    bool ok = false;
+
+    {
         AB_CHECK("seed numeric overflow streak",
                  ab_write_file(streak, "4294967296\n", 0600) == 0);
         ok = os_binary_slots_prepare_launch(dir, cur, 3, &launch);
@@ -624,6 +683,15 @@ static int test_binary_ab_fallback_posix_arm(void)
                  strcmp(buf, "4294967295\n") == 0);
         os_binary_slots_close_launch(&launch);
     }
+
+    return failures;
+}
+
+static int ab_posix_interrupted_streak_write(const char *dir, const char *streak,
+                                             const char *cur)
+{
+    int failures = 0;
+    char buf[256];
 
     /* ── 8. interrupted durable write preserves old committed bytes ──── */
     {
@@ -663,6 +731,14 @@ static int test_binary_ab_fallback_posix_arm(void)
                  strcmp(buf, "2\n") == 0);
         os_binary_slots_close_launch(&launch);
     }
+
+    return failures;
+}
+
+static int ab_posix_fifo_streak_and_current(const char *dir, const char *streak,
+                                            const char *cur)
+{
+    int failures = 0;
 
     /* ── 9. selected fd survives a pathname replacement ─────────────── */
     {
@@ -714,7 +790,23 @@ static int test_binary_ab_fallback_posix_arm(void)
         AB_CHECK("remove non-regular current", ab_special_remove(cur));
         AB_CHECK("restore regular current",
                  ab_write_file(cur, "CURRENT-AFTER-FIFO", 0755) == 0);
+    }
 
+    return failures;
+}
+
+static int ab_posix_pinned_fd_survives_replace(const char *dir, const char *streak,
+                                               const char *cur,
+                                               const char *lastgood)
+{
+    int failures = 0;
+    {
+        const unsigned hang_guard_secs = 30;
+        int64_t started;
+        struct os_binary_slots_launch fifo_launch;
+        bool fifo_ok;
+        bool no_hang;
+        int64_t elapsed;
         AB_CHECK("seed threshold before FIFO last-good",
                  ab_write_file(streak, "3\n", 0600) == 0);
         AB_CHECK("replace last-good with non-regular object",
@@ -756,6 +848,14 @@ static int test_binary_ab_fallback_posix_arm(void)
         unlink(replacement);
     }
 
+    return failures;
+}
+
+static int ab_posix_cloexec_and_overlong(const char *dir, const char *streak,
+                                         const char *cur)
+{
+    int failures = 0;
+
     /* ── 10. O_CLOEXEC pinned descriptor executes a real host binary ─ */
     {
         AB_CHECK("seed native launch streak",
@@ -785,72 +885,152 @@ static int test_binary_ab_fallback_posix_arm(void)
                  !binary_ab_promote(too_long, cur));
     }
 
-    /* ── 12. native zcl-nodectl adapter preserves argv/env contracts ── */
-    {
-        char output[2048];
-        int status = -1;
-        AB_CHECK("seed adapter normal streak",
-                 ab_write_file(streak, "0\n", 0600) == 0);
+    return failures;
+}
+
 #if defined(__APPLE__)
-        AB_CHECK("native launcher refuses when descriptor-bound exec is unavailable",
-                 ab_run_nodectl(dir, "3", "0", AB_TRUE_PATH,
-                                output, sizeof(output), &status) &&
-                 status == 126);
-        AB_CHECK("seed Darwin adapter threshold streak",
-                 ab_write_file(streak, "3\n", 0600) == 0);
-        AB_CHECK("Darwin selected last-good also fails closed",
-                 ab_run_nodectl(dir, "3", "0", AB_TRUE_PATH,
-                                output, sizeof(output), &status) &&
-                 status == 126);
+static int ab_posix_darwin_descriptor_exec_refuses(const char *dir,
+                                                   const char *streak)
+{
+    int failures = 0;
+    char output[2048];
+    int status = -1;
+
+    AB_CHECK("native launcher refuses when descriptor-bound exec is unavailable",
+             ab_run_nodectl(dir, "3", "0", AB_TRUE_PATH,
+                            output, sizeof(output), &status) &&
+             status == 126);
+    AB_CHECK("seed Darwin adapter threshold streak",
+             ab_write_file(streak, "3\n", 0600) == 0);
+    AB_CHECK("Darwin selected last-good also fails closed",
+             ab_run_nodectl(dir, "3", "0", AB_TRUE_PATH,
+                            output, sizeof(output), &status) &&
+             status == 126);
+    return failures;
+}
 #else
-        AB_CHECK("native launcher runs with explicit slots and no HOME",
-                 ab_run_nodectl(dir, "3", "1", AB_TRUE_PATH,
-                                output, sizeof(output), &status) &&
-                 status == 0);
-        AB_CHECK("native launcher forwards normal environment",
-                 strstr(output, "FALLBACK_ACTIVE=\n") &&
-                 strstr(output, "CURRENT=" AB_TRUE_PATH "\n") &&
-                 strstr(output, "STREAK_WRITTEN=1\n"));
-        AB_CHECK("native launcher forwards node argv",
-                 strstr(output, "ARGV[0]=-datadir=/forwarded\n") &&
-                 strstr(output, "ARGV[1]=--marker=kept\n"));
+static int ab_posix_native_launch_forwards(const char *dir, const char *streak)
+{
+    int failures = 0;
+    char output[2048];
+    int status = -1;
 
-        AB_CHECK("seed exact-echo control streak",
-                 ab_write_file(streak, "0\n", 0600) == 0);
-        AB_CHECK("test echo value zero executes rather than echoing",
-                 ab_run_nodectl(dir, "3", "0", AB_TRUE_PATH,
-                                output, sizeof(output), &status) &&
-                 status == 0 && output[0] == '\0');
+    AB_CHECK("native launcher runs with explicit slots and no HOME",
+             ab_run_nodectl(dir, "3", "1", AB_TRUE_PATH,
+                            output, sizeof(output), &status) &&
+             status == 0);
+    AB_CHECK("native launcher forwards normal environment",
+             strstr(output, "FALLBACK_ACTIVE=\n") &&
+             strstr(output, "CURRENT=" AB_TRUE_PATH "\n") &&
+             strstr(output, "STREAK_WRITTEN=1\n"));
+    AB_CHECK("native launcher forwards node argv",
+             strstr(output, "ARGV[0]=-datadir=/forwarded\n") &&
+             strstr(output, "ARGV[1]=--marker=kept\n"));
+
+    AB_CHECK("seed exact-echo control streak",
+             ab_write_file(streak, "0\n", 0600) == 0);
+    AB_CHECK("test echo value zero executes rather than echoing",
+             ab_run_nodectl(dir, "3", "0", AB_TRUE_PATH,
+                            output, sizeof(output), &status) &&
+             status == 0 && output[0] == '\0');
+    return failures;
+}
+
+static int ab_posix_native_launch_uses_fallback(const char *dir,
+                                                const char *streak)
+{
+    int failures = 0;
+    char output[2048];
+    int status = -1;
+
+    AB_CHECK("seed adapter threshold streak",
+             ab_write_file(streak, "3\n", 0600) == 0);
+    AB_CHECK("native launcher threshold uses fallback",
+             ab_run_nodectl(dir, "3", "1", AB_TRUE_PATH,
+                            output, sizeof(output), &status) &&
+             status == 0 && strstr(output, "FALLBACK_ACTIVE=1\n") &&
+             strstr(output, "STREAK_WRITTEN=4\n"));
+
+    AB_CHECK("seed adapter missing-current streak",
+             ab_write_file(streak, "0\n", 0600) == 0);
+    AB_CHECK("native launcher missing current uses fallback",
+             ab_run_nodectl(dir, "3", "1", "/does/not/exist/z23",
+                            output, sizeof(output), &status) &&
+             status == 0 && strstr(output, "FALLBACK_ACTIVE=1\n") &&
+             strstr(output, "CURRENT=\n"));
+    return failures;
+}
 #endif
 
-        AB_CHECK("seed invalid-threshold control streak",
-                 ab_write_file(streak, "0\n", 0600) == 0);
-        AB_CHECK("native launcher rejects non-decimal threshold",
-                 ab_run_nodectl(dir, "+3", "1", AB_TRUE_PATH,
-                                output, sizeof(output), &status) &&
-                 status == 64);
-        AB_CHECK("invalid threshold leaves streak untouched",
-                 ab_read_file(streak, buf, sizeof(buf)) >= 0 &&
-                 strcmp(buf, "0\n") == 0);
+static int ab_posix_nodectl_adapter_cases(const char *dir, const char *streak)
+{
+    int failures = 0;
+    char output[2048];
+    int status = -1;
+    char buf[256];
 
+    /* ── 12. native zcl-nodectl adapter preserves argv/env contracts ── */
+    AB_CHECK("seed adapter normal streak",
+             ab_write_file(streak, "0\n", 0600) == 0);
+#if defined(__APPLE__)
+    failures += ab_posix_darwin_descriptor_exec_refuses(dir, streak);
+#else
+    failures += ab_posix_native_launch_forwards(dir, streak);
+#endif
+    AB_CHECK("seed invalid-threshold control streak",
+             ab_write_file(streak, "0\n", 0600) == 0);
+    AB_CHECK("native launcher rejects non-decimal threshold",
+             ab_run_nodectl(dir, "+3", "1", AB_TRUE_PATH,
+                            output, sizeof(output), &status) &&
+             status == 64);
+    AB_CHECK("invalid threshold leaves streak untouched",
+             ab_read_file(streak, buf, sizeof(buf)) >= 0 &&
+             strcmp(buf, "0\n") == 0);
 #if !defined(__APPLE__)
-        AB_CHECK("seed adapter threshold streak",
-                 ab_write_file(streak, "3\n", 0600) == 0);
-        AB_CHECK("native launcher threshold uses fallback",
-                 ab_run_nodectl(dir, "3", "1", AB_TRUE_PATH,
-                                output, sizeof(output), &status) &&
-                 status == 0 && strstr(output, "FALLBACK_ACTIVE=1\n") &&
-                 strstr(output, "STREAK_WRITTEN=4\n"));
-
-        AB_CHECK("seed adapter missing-current streak",
-                 ab_write_file(streak, "0\n", 0600) == 0);
-        AB_CHECK("native launcher missing current uses fallback",
-                 ab_run_nodectl(dir, "3", "1", "/does/not/exist/z23",
-                                output, sizeof(output), &status) &&
-                 status == 0 && strstr(output, "FALLBACK_ACTIVE=1\n") &&
-                 strstr(output, "CURRENT=\n"));
+    failures += ab_posix_native_launch_uses_fallback(dir, streak);
 #endif
+    return failures;
+}
+
+static int test_binary_ab_fallback_posix_arm(void)
+{
+    printf("\n=== binary_ab_fallback tests ===\n");
+    int failures = 0;
+
+    blocker_module_init();
+
+    char tmpl[] = "/tmp/zcl_ab_XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (!dir) {
+        printf("ab: mkdtemp failed — cannot run seam tests\n");
+        return 1;
     }
+    char resolved_dir[PATH_MAX];
+    if (!platform_directory_canonical_real(dir, resolved_dir,
+                                           sizeof(resolved_dir))) {
+        printf("ab: realpath failed — cannot run seam tests\n");
+        return 1;
+    }
+    dir = resolved_dir;
+
+    char streak[PATH_MAX], cur[PATH_MAX], lastgood[PATH_MAX];
+    snprintf(streak, sizeof(streak), "%s/%s", dir, BINARY_AB_STREAK_BASENAME);
+    snprintf(lastgood, sizeof(lastgood), "%s/%s", dir, BINARY_AB_LASTGOOD_BASENAME);
+    snprintf(cur, sizeof(cur), "%s/current-bin", dir);
+
+    failures += ab_posix_execute_only_ancestor(dir);
+    failures += ab_posix_reset_promote_ready(dir, streak, cur, lastgood);
+    failures += ab_posix_fallback_ready_and_blocker(dir, streak, cur, lastgood);
+    failures += ab_posix_threshold_parse_cases();
+    failures += ab_posix_corrupt_streak_selects_lastgood(dir, streak, cur,
+                                                         lastgood);
+    failures += ab_posix_overflow_streak_selects_fallback(dir, streak, cur);
+    failures += ab_posix_interrupted_streak_write(dir, streak, cur);
+    failures += ab_posix_fifo_streak_and_current(dir, streak, cur);
+    failures += ab_posix_pinned_fd_survives_replace(dir, streak, cur,
+                                                    lastgood);
+    failures += ab_posix_cloexec_and_overlong(dir, streak, cur);
+    failures += ab_posix_nodectl_adapter_cases(dir, streak);
 
     /* ── 13. cleanup temp dir ────────────────────────────────────────── */
     unlink(streak); unlink(lastgood); unlink(cur);
