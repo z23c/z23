@@ -630,7 +630,6 @@ engine/services/src/state_auditor.c:coins_check_window:25
 engine/services/src/state_auditor.c:opret_leg_tick:18
 engine/services/src/sticky_escalator.c:apply_drive:23
 engine/services/src/utxo_mirror_delta.c:utxo_mirror_delta_apply:54
-engine/services/src/utxo_recovery_backfill.c:backfill_shielded_write:33
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_clamp_tip_to_header_frontier:30
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_relink_scrambled_ancestry:38
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_settle_finalized_floor:22

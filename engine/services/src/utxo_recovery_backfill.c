@@ -36,6 +36,13 @@
  * crash-safe incremental progress; the common re-fire suffix is far smaller. */
 #define SHIELDED_BACKFILL_SCAN_BATCH 50000
 
+/* Outcome codes for backfill_walk_value_range: a non-negative result is the
+ * highest height proven durable; negatives say why the walk stopped early. */
+enum backfill_walk_status {
+    BACKFILL_WALK_ABORTED = -1,       /* write failed; *abort_op names it */
+    BACKFILL_WALK_BEGIN_FAILED = -2,  /* BEGIN for the next batch failed */
+};
+
 struct shielded_backfill_ctx {
     int updated;
     struct main_state *state;
@@ -148,6 +155,189 @@ static bool backfill_finish_write(struct node_db *ndb, sqlite3_stmt *upd,
     return true;
 }
 
+/* True when the in-memory index entry carries a committed block body this
+ * backfill can derive shielded values from. */
+static bool backfill_index_has_block_data(const struct block_index *bi)
+{
+    return !(bi->nFile < 0 || !(bi->nStatus & BLOCK_HAVE_DATA) ||
+             (bi->nDataPos == 0 && bi->nHeight > 0));
+}
+
+/* Resolve one block's shielded values in place. Returns 0 with the values
+ * resolved (the block body is read only when the cached pair is an ambiguous
+ * zero), or -1 when the body cannot be read, in which case the caller must
+ * stop without advancing the cursor. */
+static int backfill_resolve_block_values(struct block_index *bi,
+                                         const char *datadir,
+                                         int64_t *sprout_val,
+                                         int64_t *sapling_val)
+{
+    if (*sprout_val == 0 && *sapling_val == 0) {
+        /* Cached zero is ambiguous. Read the body to resolve it. A read
+         * failure means we cannot PROVE zero, so we must not advance the
+         * cursor past this height — stop and retry next boot. */
+        struct block blk;
+        if (!read_block_from_disk_index(&blk, bi, datadir))
+            return -1;
+        connect_block_shielded_values(&blk, sprout_val, sapling_val);
+        block_free(&blk);
+        if (*sprout_val != 0 || *sapling_val != 0) {
+            bi->nSproutValue = *sprout_val;
+            bi->nSaplingValue = *sapling_val;
+        }
+    }
+    return 0;
+}
+
+/* Write one block's derived shielded values. Returns 1 when a value row was
+ * written, 0 when there was nothing to write, -1 when the UPDATE step failed
+ * and -2 when the fallback INSERT step failed; on failure *abort_op names the
+ * failed operation for backfill_abort_write. */
+static int backfill_write_value_row(struct node_db *ndb, sqlite3_stmt *upd,
+                                    sqlite3_stmt *ins,
+                                    struct block_index *bi,
+                                    int64_t sprout_val, int64_t sapling_val,
+                                    const char **abort_op)
+{
+    if (sprout_val == 0 && sapling_val == 0)
+        return 0;
+    /* Primary path: derive-only UPDATE keyed by hash. Touches ONLY the
+     * two shielded-value columns — the consensus columns of an
+     * already-populated row are left exactly as normal sync wrote them. */
+    sqlite3_reset(upd);
+    sqlite3_bind_int64(upd, 1, sapling_val);
+    sqlite3_bind_int64(upd, 2, sprout_val);
+    sqlite3_bind_blob(upd, 3, bi->phashBlock->data, 32, SQLITE_STATIC);
+
+    if (AR_STEP_WRITE(upd) != SQLITE_DONE) {
+        *abort_op = "UPDATE value row";
+        return -1;
+    }
+    if (sqlite3_changes(ndb->db) > 0)
+        return 1;
+    /* No row for this hash yet: insert a FULL row from the in-memory
+     * block_index (real solution/chain_work/undo_pos/sapling_root),
+     * so the computed value is preserved instead of silently lost. */
+    sqlite3_reset(ins);
+    const struct uint256 bi_merkle = block_index_merkle_root(bi);
+    const struct uint256 bi_nonce = block_index_nonce(bi);
+    size_t bi_sol_len = 0;
+    const unsigned char *bi_sol = block_index_solution(bi, &bi_sol_len);
+    sqlite3_bind_blob(ins, 1, bi->phashBlock->data, 32, SQLITE_STATIC);
+    sqlite3_bind_int(ins, 2, bi->nHeight);
+    sqlite3_bind_blob(ins, 3,
+                      bi->pprev ? bi->pprev->phashBlock->data
+                                : (const uint8_t[32]){0},
+                      32, SQLITE_STATIC);
+    sqlite3_bind_int(ins, 4, bi->nVersion);
+    sqlite3_bind_blob(ins, 5, bi_merkle.data, 32,
+                      SQLITE_STATIC);
+    sqlite3_bind_int64(ins, 6, bi->nTime);
+    sqlite3_bind_int(ins, 7, (int)bi->nBits);
+    sqlite3_bind_blob(ins, 8, bi_nonce.data, 32, SQLITE_STATIC);
+    sqlite3_bind_blob(ins, 9,
+                      bi_sol ? (const void *)bi_sol : (const void *)"",
+                      bi_sol ? (int)bi_sol_len : 0, SQLITE_STATIC);
+    sqlite3_bind_blob(ins, 10, bi->nChainWork.pn, 32, SQLITE_STATIC);
+    sqlite3_bind_int(ins, 11, bi->nStatus);
+    sqlite3_bind_int(ins, 12, bi->nFile);
+    sqlite3_bind_int(ins, 13, (int)bi->nDataPos);
+    sqlite3_bind_int(ins, 14, (int)bi->nUndoPos);
+    sqlite3_bind_int(ins, 15, bi->nTx);
+    sqlite3_bind_blob(ins, 16, bi->hashFinalSaplingRoot.data, 32,
+                      SQLITE_STATIC);
+    sqlite3_bind_int64(ins, 17, sapling_val);
+    sqlite3_bind_int64(ins, 18, sprout_val);
+    if (AR_STEP_WRITE(ins) != SQLITE_DONE) {
+        *abort_op = "INSERT value row";
+        return -2;
+    }
+    return 1;
+}
+
+/* Durably commit one scanned batch and advance the in-transaction cursor.
+ * Returns 0 on success, -1 when the cursor persist failed and -2 when the
+ * commit failed; on failure *abort_op names the failed operation. */
+static int backfill_flush_scan_batch(struct node_db *ndb, int h,
+                                     int *cursor_committed,
+                                     const char **abort_op)
+{
+    /* Cursor advance is part of THIS transaction: the covering rows
+     * and the cursor commit atomically together (crash-safe). */
+    if (!node_db_state_set_int(ndb, "shielded_backfill_height", h)) {
+        *abort_op = "persist batch cursor";
+        return -1;
+    }
+    if (!node_db_commit(ndb)) {
+        *abort_op = "commit value batch";
+        return -2;
+    }
+    *cursor_committed = h;
+    return 0;
+}
+
+/* Highest height actually resolved: tip on a full pass, or (h-1) if we
+ * broke early. Never move the cursor backward. */
+static int backfill_final_reached_height(int h, int cursor_committed)
+{
+    int reached = h - 1;
+    if (reached < cursor_committed)
+        reached = cursor_committed;
+    return reached;
+}
+
+/* Walk (start, tip] on the active chain, deriving and persisting each
+ * block's shielded values. Returns the highest height proven durable,
+ * BACKFILL_WALK_ABORTED after a failed write (*abort_op names the operation
+ * for backfill_abort_write), or BACKFILL_WALK_BEGIN_FAILED when the BEGIN
+ * for the next batch failed after a commit (statements are NOT finalized;
+ * the caller finalizes and logs). */
+static int backfill_walk_value_range(struct node_db *ndb,
+                                     struct active_chain *chain,
+                                     const char *datadir,
+                                     sqlite3_stmt *upd, sqlite3_stmt *ins,
+                                     int start, int tip, int *updated,
+                                     const char **abort_op)
+{
+    int scanned = 0;
+    int cursor_committed = start - 1;   /* durable floor already proven */
+    int h = start;
+    for (; h <= tip; h++) {
+        struct block_index *bi = active_chain_at(chain, h);
+        if (!bi)
+            break;   /* gap on the active chain: stop; keep the cursor honest */
+        if (!backfill_index_has_block_data(bi))
+            break;   /* no committed body → cannot compute; stop advancing */
+
+        int64_t sprout_val = bi->nSproutValue;
+        int64_t sapling_val = bi->nSaplingValue;
+        if (backfill_resolve_block_values(bi, datadir, &sprout_val,
+                                          &sapling_val) != 0)
+            break;
+
+        int wrote = backfill_write_value_row(ndb, upd, ins, bi,
+                                             sprout_val, sapling_val,
+                                             abort_op);
+        if (wrote < 0)
+            return BACKFILL_WALK_ABORTED;
+        if (wrote > 0)
+            (*updated)++;
+
+        if (++scanned >= SHIELDED_BACKFILL_SCAN_BATCH) {
+            if (backfill_flush_scan_batch(ndb, h, &cursor_committed,
+                                          abort_op) != 0)
+                return BACKFILL_WALK_ABORTED;
+            if (!node_db_begin(ndb))
+                return BACKFILL_WALK_BEGIN_FAILED;
+            scanned = 0;
+            printf("  backfill: scanned through h=%d (%d shielded rows)...\n",
+                   h, *updated);
+            fflush(stdout);
+        }
+    }
+    return backfill_final_reached_height(h, cursor_committed);
+}
+
 static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
 {
     struct shielded_backfill_ctx *bctx = ctx_ptr;
@@ -186,122 +376,19 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
     if (!backfill_open_write(ndb, &upd, &ins))
         return false; // raw-return-ok:backfill_open_write-logs-each-failure
 
-    int updated = 0, scanned = 0;
-    int cursor_committed = start - 1;   /* durable floor already proven */
-    int h = start;
-    for (; h <= tip; h++) {
-        struct block_index *bi = active_chain_at(chain, h);
-        if (!bi)
-            break;   /* gap on the active chain: stop; keep the cursor honest */
-        if (bi->nFile < 0 || !(bi->nStatus & BLOCK_HAVE_DATA) ||
-            (bi->nDataPos == 0 && bi->nHeight > 0))
-            break;   /* no committed body → cannot compute; stop advancing */
-
-        int64_t sprout_val = bi->nSproutValue;
-        int64_t sapling_val = bi->nSaplingValue;
-
-        if (sprout_val == 0 && sapling_val == 0) {
-            /* Cached zero is ambiguous. Read the body to resolve it. A read
-             * failure means we cannot PROVE zero, so we must not advance the
-             * cursor past this height — stop and retry next boot. */
-            struct block blk;
-            if (!read_block_from_disk_index(&blk, bi, bctx->datadir))
-                break;
-            connect_block_shielded_values(&blk, &sprout_val, &sapling_val);
-            block_free(&blk);
-            if (sprout_val != 0 || sapling_val != 0) {
-                bi->nSproutValue = sprout_val;
-                bi->nSaplingValue = sapling_val;
-            }
-        }
-
-        if (sprout_val != 0 || sapling_val != 0) {
-            /* Primary path: derive-only UPDATE keyed by hash. Touches ONLY the
-             * two shielded-value columns — the consensus columns of an
-             * already-populated row are left exactly as normal sync wrote them. */
-            sqlite3_reset(upd);
-            sqlite3_bind_int64(upd, 1, sapling_val);
-            sqlite3_bind_int64(upd, 2, sprout_val);
-            sqlite3_bind_blob(upd, 3, bi->phashBlock->data, 32, SQLITE_STATIC);
-
-            bool wrote = false;
-            if (AR_STEP_WRITE(upd) != SQLITE_DONE) {
-                return backfill_abort_write(ndb, upd, ins, "UPDATE value row");
-            } else if (sqlite3_changes(ndb->db) > 0) {
-                wrote = true;
-            } else {
-                /* No row for this hash yet: insert a FULL row from the in-memory
-                 * block_index (real solution/chain_work/undo_pos/sapling_root),
-                 * so the computed value is preserved instead of silently lost. */
-                sqlite3_reset(ins);
-                const struct uint256 bi_merkle = block_index_merkle_root(bi);
-                const struct uint256 bi_nonce = block_index_nonce(bi);
-                size_t bi_sol_len = 0;
-                const unsigned char *bi_sol = block_index_solution(bi, &bi_sol_len);
-                sqlite3_bind_blob(ins, 1, bi->phashBlock->data, 32, SQLITE_STATIC);
-                sqlite3_bind_int(ins, 2, bi->nHeight);
-                sqlite3_bind_blob(ins, 3,
-                    bi->pprev ? bi->pprev->phashBlock->data
-                              : (const uint8_t[32]){0},
-                    32, SQLITE_STATIC);
-                sqlite3_bind_int(ins, 4, bi->nVersion);
-                sqlite3_bind_blob(ins, 5, bi_merkle.data, 32,
-                                  SQLITE_STATIC);
-                sqlite3_bind_int64(ins, 6, bi->nTime);
-                sqlite3_bind_int(ins, 7, (int)bi->nBits);
-                sqlite3_bind_blob(ins, 8, bi_nonce.data, 32, SQLITE_STATIC);
-                sqlite3_bind_blob(ins, 9,
-                    bi_sol ? (const void *)bi_sol : (const void *)"",
-                    bi_sol ? (int)bi_sol_len : 0, SQLITE_STATIC);
-                sqlite3_bind_blob(ins, 10, bi->nChainWork.pn, 32, SQLITE_STATIC);
-                sqlite3_bind_int(ins, 11, bi->nStatus);
-                sqlite3_bind_int(ins, 12, bi->nFile);
-                sqlite3_bind_int(ins, 13, (int)bi->nDataPos);
-                sqlite3_bind_int(ins, 14, (int)bi->nUndoPos);
-                sqlite3_bind_int(ins, 15, bi->nTx);
-                sqlite3_bind_blob(ins, 16, bi->hashFinalSaplingRoot.data, 32,
-                                  SQLITE_STATIC);
-                sqlite3_bind_int64(ins, 17, sapling_val);
-                sqlite3_bind_int64(ins, 18, sprout_val);
-                if (AR_STEP_WRITE(ins) != SQLITE_DONE) {
-                    return backfill_abort_write(ndb, upd, ins,
-                                                "INSERT value row");
-                } else {
-                    wrote = true;
-                }
-            }
-            if (wrote)
-                updated++;
-        }
-
-        if (++scanned >= SHIELDED_BACKFILL_SCAN_BATCH) {
-            /* Cursor advance is part of THIS transaction: the covering rows
-             * and the cursor commit atomically together (crash-safe). */
-            if (!node_db_state_set_int(ndb, "shielded_backfill_height", h))
-                return backfill_abort_write(ndb, upd, ins,
-                                            "persist batch cursor");
-            if (!node_db_commit(ndb))
-                return backfill_abort_write(ndb, upd, ins,
-                                            "commit value batch");
-            cursor_committed = h;
-            if (!node_db_begin(ndb)) {
-                sqlite3_finalize(upd);
-                sqlite3_finalize(ins);
-                LOG_FAIL("utxo_recovery", "backfill: begin next batch failed: %s",
-                         sqlite3_errmsg(ndb->db));
-            }
-            scanned = 0;
-            printf("  backfill: scanned through h=%d (%d shielded rows)...\n",
-                   h, updated);
-            fflush(stdout);
-        }
+    int updated = 0;
+    const char *abort_op = NULL;
+    int reached = backfill_walk_value_range(ndb, chain, bctx->datadir,
+                                            upd, ins, start, tip,
+                                            &updated, &abort_op);
+    if (reached == BACKFILL_WALK_BEGIN_FAILED) {
+        sqlite3_finalize(upd);
+        sqlite3_finalize(ins);
+        LOG_FAIL("utxo_recovery", "backfill: begin next batch failed: %s",
+                 sqlite3_errmsg(ndb->db));
     }
-
-    /* Highest height actually resolved: tip on a full pass, or (h-1) if we
-     * broke early. Never move the cursor backward. */
-    int reached = h - 1;
-    if (reached < cursor_committed)
-        reached = cursor_committed;
+    if (abort_op)
+        return backfill_abort_write(ndb, upd, ins, abort_op);
     return backfill_finish_write(ndb, upd, ins, reached, start, updated, bctx);
 }
 
