@@ -170,6 +170,64 @@ static bool rpc_chainview(const struct json_value *params, bool help,
     return true;
 }
 
+/* Aggregate statistics accumulated over a block height range. */
+struct chain_range_totals {
+    int64_t total_tx;
+    int64_t sapling_delta;
+    int64_t sprout_delta;
+    uint32_t min_time;
+    uint32_t max_time;
+    int blocks_with_data;
+    int max_file;
+};
+
+/* Walk blocks start..end and sum tx counts, shielded value deltas, time
+ * extremes, data presence and the highest block file number seen. */
+static void accumulate_chain_range_stats(struct main_state *ms,
+                                         int start, int end,
+                                         struct chain_range_totals *t)
+{
+    t->total_tx = 0;
+    t->sapling_delta = 0;
+    t->sprout_delta = 0;
+    t->min_time = UINT32_MAX;
+    t->max_time = 0;
+    t->blocks_with_data = 0;
+    t->max_file = 0;
+
+    for (int h = start; h <= end; h++) {
+        const struct block_index *bi =
+            active_chain_at(&ms->chain_active, h);
+        if (!bi) continue;
+        t->total_tx += bi->nTx;
+        t->sapling_delta += bi->nSaplingValue;
+        t->sprout_delta += bi->nSproutValue;
+        if (bi->nTime < t->min_time) t->min_time = bi->nTime;
+        if (bi->nTime > t->max_time) t->max_time = bi->nTime;
+        if (bi->nStatus & BLOCK_HAVE_DATA) t->blocks_with_data++;
+        if (bi->nFile > t->max_file) t->max_file = bi->nFile;
+    }
+}
+
+/* Sum the sizes of blk*.dat files 0..max_file and push the total as the
+ * human-readable "total_block_data" string. */
+static void push_total_block_data_size(struct json_value *result,
+                                       const char *datadir, int max_file)
+{
+    int64_t total_bytes = 0;
+    for (int f = 0; f <= max_file; f++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat", datadir, f);
+        struct stat st;
+        if (stat(path, &st) == 0)
+            total_bytes += st.st_size;
+    }
+    char size_str[32];
+    snprintf(size_str, sizeof(size_str), "%.2f GB",
+             (double)total_bytes / (1024.0 * 1024.0 * 1024.0));
+    json_push_kv_str(result, "total_block_data", size_str);
+}
+
 /* chainstats [start_height] [end_height]
  * Returns aggregate chain statistics over a range. */
 static bool rpc_chainstats(const struct json_value *params, bool help,
@@ -202,55 +260,27 @@ static bool rpc_chainstats(const struct json_value *params, bool help,
     if (end > chain_tip) end = chain_tip;
     if (start > end) { json_set_str(result, "start > end"); return false; }
 
-    int64_t total_tx = 0;
-    int64_t sapling_delta = 0;
-    int64_t sprout_delta = 0;
-    uint32_t min_time = UINT32_MAX, max_time = 0;
-    int blocks_with_data = 0;
-    int max_file = 0;
-
-    for (int h = start; h <= end; h++) {
-        const struct block_index *bi =
-            active_chain_at(&ctx->main_state->chain_active, h);
-        if (!bi) continue;
-        total_tx += bi->nTx;
-        sapling_delta += bi->nSaplingValue;
-        sprout_delta += bi->nSproutValue;
-        if (bi->nTime < min_time) min_time = bi->nTime;
-        if (bi->nTime > max_time) max_time = bi->nTime;
-        if (bi->nStatus & BLOCK_HAVE_DATA) blocks_with_data++;
-        if (bi->nFile > max_file) max_file = bi->nFile;
-    }
+    struct chain_range_totals totals;
+    accumulate_chain_range_stats(ctx->main_state, start, end, &totals);
 
     json_set_object(result);
     json_push_kv_int(result, "start_height", start);
     json_push_kv_int(result, "end_height", end);
     json_push_kv_int(result, "blocks", end - start + 1);
-    json_push_kv_int(result, "blocks_with_data", blocks_with_data);
-    json_push_kv_int(result, "total_transactions", total_tx);
-    json_push_kv_int(result, "sapling_value_delta", sapling_delta);
-    json_push_kv_int(result, "sprout_value_delta", sprout_delta);
-    json_push_kv_int(result, "time_start", min_time);
-    json_push_kv_int(result, "time_end", max_time);
+    json_push_kv_int(result, "blocks_with_data", totals.blocks_with_data);
+    json_push_kv_int(result, "total_transactions", totals.total_tx);
+    json_push_kv_int(result, "sapling_value_delta", totals.sapling_delta);
+    json_push_kv_int(result, "sprout_value_delta", totals.sprout_delta);
+    json_push_kv_int(result, "time_start", totals.min_time);
+    json_push_kv_int(result, "time_end", totals.max_time);
     json_push_kv_int(result, "duration_seconds",
-                     max_time > min_time ? max_time - min_time : 0);
-    json_push_kv_int(result, "max_block_file", max_file);
+                     totals.max_time > totals.min_time
+                         ? totals.max_time - totals.min_time : 0);
+    json_push_kv_int(result, "max_block_file", totals.max_file);
 
     /* Estimate total block data size */
-    if (ctx->datadir) {
-        int64_t total_bytes = 0;
-        for (int f = 0; f <= max_file; f++) {
-            char path[512];
-            snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat", ctx->datadir, f);
-            struct stat st;
-            if (stat(path, &st) == 0)
-                total_bytes += st.st_size;
-        }
-        char size_str[32];
-        snprintf(size_str, sizeof(size_str), "%.2f GB",
-                 (double)total_bytes / (1024.0 * 1024.0 * 1024.0));
-        json_push_kv_str(result, "total_block_data", size_str);
-    }
+    if (ctx->datadir)
+        push_total_block_data_size(result, ctx->datadir, totals.max_file);
 
     return true;
 }
@@ -465,6 +495,94 @@ static bool rpc_saplingtreeinfo(const struct json_value *params, bool help,
     return true;
 }
 
+/* (Re)map the blk%05d.dat file for file_number into *mapping, closing any
+ * previously cached fd/mapping first. Returns 0 when *mapping is usable,
+ * -1 otherwise; *cached_file is reset to -1 on every failure path except
+ * an fstat failure, matching the previous inline control flow. */
+static int load_block_file_mapping(struct platform_read_mapping *mapping,
+                                   int *cached_fd, int *cached_file,
+                                   const char *datadir, int file_number)
+{
+    platform_read_mapping_close(mapping);
+    if (*cached_fd >= 0) close(*cached_fd);
+    *cached_fd = -1;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
+             datadir, file_number);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        *cached_file = -1;
+        return -1;
+    }
+    struct stat fst;
+    if (fstat(fd, &fst) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (fst.st_size <= 0 || (uintmax_t)fst.st_size > SIZE_MAX) {
+        close(fd);
+        *cached_file = -1;
+        return -1;
+    }
+    bool mapped = platform_read_mapping_open(
+        mapping, fd, (size_t)fst.st_size);
+    if (!mapped) {
+        close(fd);
+        *cached_file = -1;
+        return -1;
+    }
+    *cached_fd = fd;
+    *cached_file = file_number;
+    return 0;
+}
+
+/* Commitment counts gathered while fast-scanning a height range. */
+struct commitment_scan_totals {
+    int64_t total_cms;
+    int blocks_with_cms;
+};
+
+/* Fast-scan blocks start..end for Sapling commitments through a single
+ * reusable blk*.dat mapping. Blocks with no on-disk data, an unmappable
+ * file or an out-of-range data position are skipped. */
+static void scan_blocks_for_commitments(struct chain_inspect_context *ctx,
+                                        int start, int end,
+                                        struct commitment_scan_totals *totals)
+{
+    int cached_file = -1;
+    int cached_fd = -1;
+    struct platform_read_mapping cached_mapping;
+    platform_read_mapping_init(&cached_mapping);
+    totals->total_cms = 0;
+    totals->blocks_with_cms = 0;
+
+    for (int h = start; h <= end; h++) {
+        const struct block_index *bi =
+            active_chain_at(&ctx->main_state->chain_active, h);
+        if (!bi || !(bi->nStatus & BLOCK_HAVE_DATA)) continue;
+
+        if (bi->nFile != cached_file) {
+            if (load_block_file_mapping(&cached_mapping, &cached_fd,
+                                        &cached_file, ctx->datadir,
+                                        bi->nFile) != 0)
+                continue;
+        }
+        if (!cached_mapping.data || bi->nDataPos >= cached_mapping.size)
+            continue;
+
+        uint8_t cms[4096][32];
+        int n = fast_scan_sapling_commitments(
+            cached_mapping.data + bi->nDataPos,
+            cached_mapping.size - bi->nDataPos, cms, 4096);
+        if (n > 0) {
+            totals->total_cms += n;
+            totals->blocks_with_cms++;
+        }
+    }
+    platform_read_mapping_close(&cached_mapping);
+    if (cached_fd >= 0) close(cached_fd);
+}
+
 /* scancommitments start_height end_height
  * Fast-scans blocks for Sapling commitments and reports count. */
 static bool rpc_scancommitments(const struct json_value *params, bool help,
@@ -498,66 +616,97 @@ static bool rpc_scancommitments(const struct json_value *params, bool help,
         return false;
     }
 
-    int cached_file = -1;
-    int cached_fd = -1;
-    struct platform_read_mapping cached_mapping;
-    platform_read_mapping_init(&cached_mapping);
-    int64_t total_cms = 0;
-    int blocks_with_cms = 0;
+    struct commitment_scan_totals totals = {0};
     int64_t t0 = (int64_t)platform_time_wall_time_t();
-
-    for (int h = start; h <= end; h++) {
-        const struct block_index *bi =
-            active_chain_at(&ctx->main_state->chain_active, h);
-        if (!bi || !(bi->nStatus & BLOCK_HAVE_DATA)) continue;
-
-        if (bi->nFile != cached_file) {
-            platform_read_mapping_close(&cached_mapping);
-            if (cached_fd >= 0) close(cached_fd);
-            cached_fd = -1;
-            char path[512];
-            snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-                     ctx->datadir, bi->nFile);
-            int fd = open(path, O_RDONLY);
-            if (fd < 0) { cached_file = -1; continue; }
-            struct stat fst;
-            if (fstat(fd, &fst) != 0) { close(fd); continue; }
-            if (fst.st_size <= 0 || (uintmax_t)fst.st_size > SIZE_MAX) {
-                close(fd);
-                cached_file = -1;
-                continue;
-            }
-            bool mapped = platform_read_mapping_open(
-                &cached_mapping, fd, (size_t)fst.st_size);
-            if (!mapped) { close(fd); cached_file = -1; continue; }
-            cached_fd = fd;
-            cached_file = bi->nFile;
-        }
-        if (!cached_mapping.data || bi->nDataPos >= cached_mapping.size)
-            continue;
-
-        uint8_t cms[4096][32];
-        int n = fast_scan_sapling_commitments(
-            cached_mapping.data + bi->nDataPos,
-            cached_mapping.size - bi->nDataPos, cms, 4096);
-        if (n > 0) {
-            total_cms += n;
-            blocks_with_cms++;
-        }
-    }
-    platform_read_mapping_close(&cached_mapping);
-    if (cached_fd >= 0) close(cached_fd);
-
+    scan_blocks_for_commitments(ctx, start, end, &totals);
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
 
     json_set_object(result);
     json_push_kv_int(result, "start_height", start);
     json_push_kv_int(result, "end_height", end);
     json_push_kv_int(result, "blocks_scanned", end - start + 1);
-    json_push_kv_int(result, "blocks_with_commitments", blocks_with_cms);
-    json_push_kv_int(result, "total_commitments", total_cms);
+    json_push_kv_int(result, "blocks_with_commitments", totals.blocks_with_cms);
+    json_push_kv_int(result, "total_commitments", totals.total_cms);
     json_push_kv_int(result, "elapsed_seconds", elapsed);
     return true;
+}
+
+/* Compare the running tree root against the block header root at a
+ * checkpoint height, counting matches and recording the first mismatch. */
+static void verify_root_checkpoint(struct incremental_merkle_tree *tree,
+                                   const struct block_index *bi, int h, int end,
+                                   int *checkpoints_ok, int *first_mismatch)
+{
+    /* Check every 10000 heights */
+    if (h % 10000 == 0 || h == end) {
+        struct uint256 our_root;
+        incremental_tree_root(tree, &our_root);
+        if (memcmp(our_root.data,
+                   bi->hashFinalSaplingRoot.data, 32) == 0) {
+            (*checkpoints_ok)++;
+        } else if (*first_mismatch < 0) {
+            *first_mismatch = h;
+        }
+    }
+}
+
+/* Totals from rebuilding the Sapling commitment tree over a height range. */
+struct root_verify_totals {
+    size_t total_cms;
+    int first_mismatch;
+    int checkpoints_ok;
+};
+
+/* Rebuild the Sapling commitment tree from scan_start..end, appending every
+ * scanned commitment to *tree and checkpointing the root every 10000
+ * heights and at end. Unreadable blocks are skipped but still
+ * checkpointed, as before. */
+static void build_tree_and_check_roots(struct chain_inspect_context *ctx,
+                                       int scan_start, int end,
+                                       struct incremental_merkle_tree *tree,
+                                       struct root_verify_totals *totals)
+{
+    int cached_file = -1;
+    int cached_fd = -1;
+    struct platform_read_mapping cached_mapping;
+    platform_read_mapping_init(&cached_mapping);
+    totals->total_cms = 0;
+    totals->first_mismatch = -1;
+    totals->checkpoints_ok = 0;
+
+    for (int h = scan_start; h <= end; h++) {
+        const struct block_index *bi =
+            active_chain_at(&ctx->main_state->chain_active, h);
+        if (!bi) continue;
+
+        if (bi->nStatus & BLOCK_HAVE_DATA) {
+            if (bi->nFile != cached_file) {
+                if (load_block_file_mapping(&cached_mapping, &cached_fd,
+                                            &cached_file, ctx->datadir,
+                                            bi->nFile) != 0)
+                    goto next;
+            }
+            if (cached_mapping.data && bi->nDataPos < cached_mapping.size) {
+                uint8_t cms[4096][32];
+                int n = fast_scan_sapling_commitments(
+                    cached_mapping.data + bi->nDataPos,
+                    cached_mapping.size - bi->nDataPos, cms, 4096);
+                for (int ci = 0; ci < n; ci++) {
+                    struct uint256 cm;
+                    memcpy(cm.data, cms[ci], 32);
+                    incremental_tree_append(tree, &cm);
+                    totals->total_cms++;
+                }
+            }
+        }
+
+next:
+        verify_root_checkpoint(tree, bi, h, end,
+                               &totals->checkpoints_ok,
+                               &totals->first_mismatch);
+    }
+    platform_read_mapping_close(&cached_mapping);
+    if (cached_fd >= 0) close(cached_fd);
 }
 
 /* verifychainroots start_height end_height
@@ -595,80 +744,16 @@ static bool rpc_verifychainroots(const struct json_value *params, bool help,
     int sapling_start = 476969;
     if (start < sapling_start) start = sapling_start;
 
-    int cached_file = -1;
-    int cached_fd = -1;
-    struct platform_read_mapping cached_mapping;
-    platform_read_mapping_init(&cached_mapping);
-    size_t total_cms = 0;
-    int first_mismatch = -1;
-    int checkpoints_ok = 0;
+    struct root_verify_totals totals = {0};
     int64_t t0 = (int64_t)platform_time_wall_time_t();
-
-    for (int h = sapling_start; h <= end; h++) {
-        const struct block_index *bi =
-            active_chain_at(&ctx->main_state->chain_active, h);
-        if (!bi) continue;
-
-        if (bi->nStatus & BLOCK_HAVE_DATA) {
-            if (bi->nFile != cached_file) {
-                platform_read_mapping_close(&cached_mapping);
-                if (cached_fd >= 0) close(cached_fd);
-                cached_fd = -1;
-                char path[512];
-                snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-                         ctx->datadir, bi->nFile);
-                int fd = open(path, O_RDONLY);
-                if (fd < 0) { cached_file = -1; goto next; }
-                struct stat fst;
-                if (fstat(fd, &fst) != 0) { close(fd); goto next; }
-                if (fst.st_size <= 0 || (uintmax_t)fst.st_size > SIZE_MAX) {
-                    close(fd);
-                    cached_file = -1;
-                    goto next;
-                }
-                bool mapped = platform_read_mapping_open(
-                    &cached_mapping, fd, (size_t)fst.st_size);
-                if (!mapped) { close(fd); cached_file = -1; goto next; }
-                cached_fd = fd;
-                cached_file = bi->nFile;
-            }
-            if (cached_mapping.data && bi->nDataPos < cached_mapping.size) {
-                uint8_t cms[4096][32];
-                int n = fast_scan_sapling_commitments(
-                    cached_mapping.data + bi->nDataPos,
-                    cached_mapping.size - bi->nDataPos, cms, 4096);
-                for (int ci = 0; ci < n; ci++) {
-                    struct uint256 cm;
-                    memcpy(cm.data, cms[ci], 32);
-                    incremental_tree_append(&tree, &cm);
-                    total_cms++;
-                }
-            }
-        }
-
-next:
-        /* Check every 10000 heights */
-        if (h % 10000 == 0 || h == end) {
-            struct uint256 our_root;
-            incremental_tree_root(&tree, &our_root);
-            if (memcmp(our_root.data,
-                       bi->hashFinalSaplingRoot.data, 32) == 0) {
-                checkpoints_ok++;
-            } else if (first_mismatch < 0) {
-                first_mismatch = h;
-            }
-        }
-    }
-    platform_read_mapping_close(&cached_mapping);
-    if (cached_fd >= 0) close(cached_fd);
-
+    build_tree_and_check_roots(ctx, sapling_start, end, &tree, &totals);
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
 
     json_set_object(result);
     json_push_kv_int(result, "range_start", start);
     json_push_kv_int(result, "range_end", end);
-    json_push_kv_int(result, "total_commitments", (int64_t)total_cms);
-    json_push_kv_int(result, "checkpoints_verified", checkpoints_ok);
+    json_push_kv_int(result, "total_commitments", (int64_t)totals.total_cms);
+    json_push_kv_int(result, "checkpoints_verified", totals.checkpoints_ok);
     json_push_kv_int(result, "elapsed_seconds", elapsed);
 
     struct uint256 final_root;
@@ -678,8 +763,8 @@ next:
     json_push_kv_str(result, "final_tree_root", fr_hex);
     json_push_kv_int(result, "tree_size", (int64_t)incremental_tree_size(&tree));
 
-    if (first_mismatch >= 0) {
-        json_push_kv_int(result, "first_mismatch_height", first_mismatch);
+    if (totals.first_mismatch >= 0) {
+        json_push_kv_int(result, "first_mismatch_height", totals.first_mismatch);
         json_push_kv_bool(result, "fully_verified", false);
     } else {
         json_push_kv_bool(result, "fully_verified", true);
