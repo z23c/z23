@@ -487,7 +487,7 @@ static size_t zcode_emit_publisher_packages_card(char *buf, size_t max,
     int n = snprintf(buf + off, max - off,
         "<div class='card'><h2>Packages</h2>");
     if (n > 0) off += (size_t)n;
-    for (size_t i = 0; i < in->packages_shown && off < max - 1024; i++) {
+    for (size_t i = 0; i < in->packages_shown && off + 1024 < max; i++) {
         const struct vcs_package_index_entry *e = in->packages[i];
         char safe_pname[160], safe_psemver[80];
         html_escape(safe_pname, sizeof(safe_pname), e->name);
