@@ -8,11 +8,24 @@
 #include "crypto/sha256.h"
 #include "core/serialize.h"
 
-int test_protocols(void)
+struct proto_offset_byte {
+    size_t off;
+    uint8_t val;
+};
+
+static bool proto_offset_bytes_match(const uint8_t *buf,
+                                     const struct proto_offset_byte *rows,
+                                     size_t nrows)
+{
+    bool ok = true;
+    for (size_t i = 0; i < nrows; i++)
+        ok = ok && buf[rows[i].off] == rows[i].val;
+    return ok;
+}
+
+static int znam_register_round_trip(void)
 {
     int failures = 0;
-
-    printf("\n=== ZNAM Name Protocol ===\n");
 
     /* ── ZNAM: build + parse REGISTER round-trip ──────────── */
 
@@ -30,6 +43,12 @@ int test_protocols(void)
         ok = ok && strstr(msg.target_value, ".onion") != NULL;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int znam_update_round_trip(void)
+{
+    int failures = 0;
 
     printf("znam_build_update round-trip... ");
     {
@@ -44,6 +63,12 @@ int test_protocols(void)
         ok = ok && strcmp(msg.target_value, "zs1testaddr") == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int znam_transfer_round_trip(void)
+{
+    int failures = 0;
 
     printf("znam_build_transfer round-trip... ");
     {
@@ -57,6 +82,12 @@ int test_protocols(void)
         ok = ok && strcmp(msg.new_owner, "t1NewOwnerAddr") == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int znam_renew_round_trip(void)
+{
+    int failures = 0;
 
     printf("znam_build_renew round-trip... ");
     {
@@ -68,6 +99,12 @@ int test_protocols(void)
         ok = ok && strcmp(msg.name, "myname") == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int znam_set_record_btc_round_trip(void)
+{
+    int failures = 0;
 
     printf("znam_build_set_record round-trip (BTC addr)... ");
     {
@@ -81,6 +118,12 @@ int test_protocols(void)
         ok = ok && strstr(msg.target_value, "1A1zP1") != NULL;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int znam_set_text_round_trip(void)
+{
+    int failures = 0;
 
     printf("znam_build_set_text round-trip... ");
     {
@@ -95,6 +138,12 @@ int test_protocols(void)
         ok = ok && strcmp(msg.text_value, "alice@example.org") == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int znam_set_text_empty_round_trip(void)
+{
+    int failures = 0;
 
     printf("znam_build_set_text empty-value round-trip... ");
     {
@@ -109,6 +158,12 @@ int test_protocols(void)
         ok = ok && msg.text_value[0] == '\0';
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int znam_validate_name_accepts(void)
+{
+    int failures = 0;
 
     /* ── ZNAM: name validation ────────────────────────────── */
 
@@ -122,6 +177,12 @@ int test_protocols(void)
         ok = ok && znam_validate_name("my-long-name-42");
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int znam_validate_name_rejects(void)
+{
+    int failures = 0;
 
     printf("znam_validate_name invalid names... ");
     {
@@ -136,6 +197,12 @@ int test_protocols(void)
         ok = ok && !znam_validate_name("has_underscore");
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int znam_parse_rejects_bad_script(void)
+{
+    int failures = 0;
 
     printf("znam_parse rejects bad script... ");
     {
@@ -148,8 +215,12 @@ int test_protocols(void)
         ok = ok && !znam_parse(&just_op, 1, &msg);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    printf("\n=== HTLC / Atomic Swap ===\n");
+static int htlc_script_is_contract_size(void)
+{
+    int failures = 0;
 
     /* ── HTLC: script is exactly 97 bytes ─────────────────── */
 
@@ -167,6 +238,12 @@ int test_protocols(void)
         bool ok = (len == HTLC_CONTRACT_SIZE);
         if (ok) printf("OK (%zu bytes)\n", len); else { printf("FAIL (%zu)\n", len); failures++; }
     }
+    return failures;
+}
+
+static int htlc_script_matches_dcrdex(void)
+{
+    int failures = 0;
 
     /* ── HTLC: script structure matches dcrdex ────────────── */
 
@@ -181,36 +258,49 @@ int test_protocols(void)
 
         uint8_t s[256];
         size_t len = htlc_build_script(&hp, s, sizeof(s));
+        static const struct proto_offset_byte opcode[] = {
+            { 0, 0x63 },  /* OP_IF */
+            { 1, 0x82 },  /* OP_SIZE */
+            { 2, 0x01 },  /* PUSH1 */
+            { 3, 0x20 },  /* 32 (secret size) */
+            { 4, 0x88 },  /* OP_EQUALVERIFY */
+            { 5, 0xa8 },  /* OP_SHA256 */
+            { 6, 0x20 },  /* PUSH32 */
+            /* s[7..38] = secret_hash */
+            { 39, 0x88 }, /* OP_EQUALVERIFY */
+            { 40, 0x76 }, /* OP_DUP */
+            { 41, 0xa9 }, /* OP_HASH160 */
+            { 42, 0x14 }, /* PUSH20 */
+            /* s[43..62] = recipient_pkh */
+            { 63, 0x67 }, /* OP_ELSE */
+            { 64, 0x04 }, /* PUSH4 */
+            /* s[65..68] = locktime LE */
+            { 65, 144 },
+            { 66, 0 },
+            { 67, 0 },
+            { 68, 0 },
+            { 69, 0xb1 }, /* OP_CLTV */
+            { 70, 0x75 }, /* OP_DROP */
+            { 71, 0x76 }, /* OP_DUP */
+            { 72, 0xa9 }, /* OP_HASH160 */
+            { 73, 0x14 }, /* PUSH20 */
+            /* s[74..93] = refunder_pkh */
+            { 94, 0x68 }, /* OP_ENDIF */
+            { 95, 0x88 }, /* OP_EQUALVERIFY */
+            { 96, 0xac }, /* OP_CHECKSIG */
+        };
         bool ok = len == 97;
         /* Verify opcode structure byte-by-byte */
-        ok = ok && s[0] == 0x63;  /* OP_IF */
-        ok = ok && s[1] == 0x82;  /* OP_SIZE */
-        ok = ok && s[2] == 0x01;  /* PUSH1 */
-        ok = ok && s[3] == 0x20;  /* 32 (secret size) */
-        ok = ok && s[4] == 0x88;  /* OP_EQUALVERIFY */
-        ok = ok && s[5] == 0xa8;  /* OP_SHA256 */
-        ok = ok && s[6] == 0x20;  /* PUSH32 */
-        /* s[7..38] = secret_hash */
-        ok = ok && s[39] == 0x88; /* OP_EQUALVERIFY */
-        ok = ok && s[40] == 0x76; /* OP_DUP */
-        ok = ok && s[41] == 0xa9; /* OP_HASH160 */
-        ok = ok && s[42] == 0x14; /* PUSH20 */
-        /* s[43..62] = recipient_pkh */
-        ok = ok && s[63] == 0x67; /* OP_ELSE */
-        ok = ok && s[64] == 0x04; /* PUSH4 */
-        /* s[65..68] = locktime LE */
-        ok = ok && s[65] == 144 && s[66] == 0 && s[67] == 0 && s[68] == 0;
-        ok = ok && s[69] == 0xb1; /* OP_CLTV */
-        ok = ok && s[70] == 0x75; /* OP_DROP */
-        ok = ok && s[71] == 0x76; /* OP_DUP */
-        ok = ok && s[72] == 0xa9; /* OP_HASH160 */
-        ok = ok && s[73] == 0x14; /* PUSH20 */
-        /* s[74..93] = refunder_pkh */
-        ok = ok && s[94] == 0x68; /* OP_ENDIF */
-        ok = ok && s[95] == 0x88; /* OP_EQUALVERIFY */
-        ok = ok && s[96] == 0xac; /* OP_CHECKSIG */
+        ok = ok && proto_offset_bytes_match(s, opcode,
+                                             sizeof(opcode) / sizeof(opcode[0]));
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int htlc_secret_matches_sha256(void)
+{
+    int failures = 0;
 
     /* ── HTLC: secret generation + hash verification ──────── */
 
@@ -232,6 +322,12 @@ int test_protocols(void)
         ok = ok && memcmp(secret, zero, 32) != 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int htlc_p2sh_addresses_match_prefixes(void)
+{
+    int failures = 0;
 
     /* ── HTLC: P2SH address generation ────────────────────── */
 
@@ -266,6 +362,12 @@ int test_protocols(void)
                        zcl_addr, btc_addr, ltc_addr, doge_addr);
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int swap_chain_params_resolve(void)
+{
+    int failures = 0;
 
     /* ── HTLC: chain params ───────────────────────────────── */
 
@@ -280,6 +382,12 @@ int test_protocols(void)
         ok = ok && strcmp(swap_get_chain_params(SWAP_CHAIN_DOGE)->ticker, "DOGE") == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int swap_parse_chain_names(void)
+{
+    int failures = 0;
 
     printf("swap_parse_chain... ");
     {
@@ -295,6 +403,12 @@ int test_protocols(void)
         ok = ok && swap_parse_chain(NULL) == -1;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int swap_compute_id_is_deterministic(void)
+{
+    int failures = 0;
 
     /* ── HTLC: swap ID deterministic ──────────────────────── */
 
@@ -312,6 +426,12 @@ int test_protocols(void)
         ok = ok && strcmp(id1, id3) != 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int htlc_redeem_scriptsig_has_op1(void)
+{
+    int failures = 0;
 
     /* ── HTLC: redeem/refund scriptSig builders ───────────── */
 
@@ -334,6 +454,12 @@ int test_protocols(void)
         ok = ok && found_op1;
         if (ok) printf("OK (%zu bytes)\n", len); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int htlc_refund_scriptsig_has_op0(void)
+{
+    int failures = 0;
 
     printf("htlc_build_refund_scriptsig... ");
     {
@@ -353,8 +479,12 @@ int test_protocols(void)
         ok = ok && found_op0;
         if (ok) printf("OK (%zu bytes)\n", len); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    printf("\n=== ZMSG Messaging ===\n");
+static int zmsg_round_trip_serialize(void)
+{
+    int failures = 0;
 
     /* ── ZMSG: serialize + deserialize round-trip ─────────── */
 
@@ -386,6 +516,12 @@ int test_protocols(void)
         stream_free(&s);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_deserialize_rejects_oversize(void)
+{
+    int failures = 0;
 
     /* ── ZMSG deserialize rejects peer-controlled overflows ───
      * A malicious peer picks slen/rlen = 255 (or blen = ZMSG_MAX_BODY)
@@ -460,6 +596,12 @@ int test_protocols(void)
 
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_id_is_deterministic(void)
+{
+    int failures = 0;
 
     /* ── ZMSG: compute_id deterministic ───────────────────── */
 
@@ -483,6 +625,12 @@ int test_protocols(void)
         ok = ok && memcmp(id1, id3, 32) != 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_store_add_and_list(void)
+{
+    int failures = 0;
 
     /* ── ZMSG: in-memory store ────────────────────────────── */
 
@@ -506,6 +654,12 @@ int test_protocols(void)
 
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_store_unread_tracks_filter(void)
+{
+    int failures = 0;
 
     /* ── ZMSG: store unread count ─────────────────────────── */
 
@@ -532,6 +686,47 @@ int test_protocols(void)
 
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static bool zmsg_inbox_null_args_fail(struct zmsg_message rows[2], bool ok)
+{
+    size_t written = 77;
+    int64_t total = 88;
+    ok = ok && !zmsg_store_inbox_window(NULL, 1, false,
+                                         &written, &total) &&
+         written == 0 && total == 0;
+    memset(&rows[0], 0xA5, sizeof(rows[0]));
+    total = 88;
+    ok = ok && !zmsg_store_inbox_window(rows, 1, false, NULL, &total) &&
+         total == 0 && rows[0].timestamp == 0 && rows[0].body[0] == '\0';
+    return ok;
+}
+
+static bool zmsg_inbox_window_pages(const struct zmsg_message added[3],
+                                    int64_t before_all,
+                                    int64_t before_unread,
+                                    bool ok)
+{
+    struct zmsg_message rows[2];
+    memset(rows, 0, sizeof(rows));
+    size_t written = 0;
+    int64_t total = 0;
+    ok = ok && zmsg_store_inbox_window(rows, 2, false, &written, &total) &&
+         written == 2 && total == before_all + 3 &&
+         memcmp(rows[0].msg_id, added[2].msg_id, 32) == 0 &&
+         memcmp(rows[1].msg_id, added[1].msg_id, 32) == 0;
+
+    memset(rows, 0, sizeof(rows));
+    ok = ok && zmsg_store_inbox_window(rows, 1, true, &written, &total) &&
+         written == 1 && total == before_unread + 2 &&
+         memcmp(rows[0].msg_id, added[2].msg_id, 32) == 0;
+    return zmsg_inbox_null_args_fail(rows, ok);
+}
+
+static int zmsg_inbox_window_is_newest_exact(void)
+{
+    int failures = 0;
 
     /* ── ZMSG: atomic inbox window + exact filtered total ─── */
 
@@ -555,31 +750,15 @@ int test_protocols(void)
         }
         ok = ok && zmsg_store_mark_read(added[1].msg_id);
 
-        struct zmsg_message rows[2];
-        memset(rows, 0, sizeof(rows));
-        size_t written = 0;
-        int64_t total = 0;
-        ok = ok && zmsg_store_inbox_window(rows, 2, false, &written, &total) &&
-             written == 2 && total == before_all + 3 &&
-             memcmp(rows[0].msg_id, added[2].msg_id, 32) == 0 &&
-             memcmp(rows[1].msg_id, added[1].msg_id, 32) == 0;
-
-        memset(rows, 0, sizeof(rows));
-        ok = ok && zmsg_store_inbox_window(rows, 1, true, &written, &total) &&
-             written == 1 && total == before_unread + 2 &&
-             memcmp(rows[0].msg_id, added[2].msg_id, 32) == 0;
-
-        written = 77;
-        total = 88;
-        ok = ok && !zmsg_store_inbox_window(NULL, 1, false,
-                                             &written, &total) &&
-             written == 0 && total == 0;
-        memset(&rows[0], 0xA5, sizeof(rows[0]));
-        total = 88;
-        ok = ok && !zmsg_store_inbox_window(rows, 1, false, NULL, &total) &&
-             total == 0 && rows[0].timestamp == 0 && rows[0].body[0] == '\0';
+        ok = zmsg_inbox_window_pages(added, before_all, before_unread, ok);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_memo_encode_decode_round_trip(void)
+{
+    int failures = 0;
 
     /* ── ZMSG: on-chain memo codec (v1) ───────────────────── */
 
@@ -593,11 +772,16 @@ int test_protocols(void)
         uint8_t memo[ZMSG_MEMO_LEN];
         bool ok = zmsg_memo_encode(memo, (const uint8_t *)body, blen, reply);
         /* Header bytes */
-        ok = ok && memo[0] == ZMSG_MEMO_MAGIC_0 && memo[1] == ZMSG_MEMO_MAGIC_1;
-        ok = ok && memo[2] == ZMSG_MEMO_VERSION;
-        ok = ok && memo[3] == ZMSG_MEMO_FLAG_HAS_REPLY_TO;
-        /* Trailing padding is 0xF6 */
-        ok = ok && memo[ZMSG_MEMO_LEN - 1] == ZMSG_MEMO_PAD_BYTE;
+        static const struct proto_offset_byte header[] = {
+            { 0, ZMSG_MEMO_MAGIC_0 },
+            { 1, ZMSG_MEMO_MAGIC_1 },
+            { 2, ZMSG_MEMO_VERSION },
+            { 3, ZMSG_MEMO_FLAG_HAS_REPLY_TO },
+            /* Trailing padding is 0xF6 */
+            { ZMSG_MEMO_LEN - 1, ZMSG_MEMO_PAD_BYTE },
+        };
+        ok = ok && proto_offset_bytes_match(memo, header,
+                                             sizeof(header) / sizeof(header[0]));
 
         struct zmsg_memo dec;
         ok = ok && zmsg_memo_decode(memo, &dec);
@@ -608,6 +792,12 @@ int test_protocols(void)
         ok = ok && memcmp(dec.reply_to, reply, 32) == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_memo_encode_without_reply(void)
+{
+    int failures = 0;
 
     printf("zmsg_memo encode without reply-to (fresh message)... ");
     {
@@ -623,6 +813,12 @@ int test_protocols(void)
         ok = ok && dec.payload_len == strlen(body);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_memo_empty_payload_round_trip(void)
+{
+    int failures = 0;
 
     printf("zmsg_memo empty payload round-trip... ");
     {
@@ -633,6 +829,12 @@ int test_protocols(void)
         ok = ok && dec.payload_len == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_memo_max_payload_round_trip(void)
+{
+    int failures = 0;
 
     printf("zmsg_memo max-payload (474) round-trip... ");
     {
@@ -647,6 +849,12 @@ int test_protocols(void)
         ok = ok && memcmp(dec.payload, payload, ZMSG_MEMO_MAX_PAYLOAD) == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_memo_rejects_overlong_payload(void)
+{
+    int failures = 0;
 
     printf("zmsg_memo_encode rejects over-long payload (475)... ");
     {
@@ -655,6 +863,12 @@ int test_protocols(void)
         bool ok = !zmsg_memo_encode(memo, payload, ZMSG_MEMO_MAX_PAYLOAD + 1, NULL);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int zmsg_memo_decode_rejects_corrupt(void)
+{
+    int failures = 0;
 
     printf("zmsg_memo_decode negatives (bad magic/version/flags/len)... ");
     {
@@ -685,6 +899,52 @@ int test_protocols(void)
 
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+int test_protocols(void)
+{
+    int failures = 0;
+
+    printf("\n=== ZNAM Name Protocol ===\n");
+
+    failures += znam_register_round_trip();
+    failures += znam_update_round_trip();
+    failures += znam_transfer_round_trip();
+    failures += znam_renew_round_trip();
+    failures += znam_set_record_btc_round_trip();
+    failures += znam_set_text_round_trip();
+    failures += znam_set_text_empty_round_trip();
+    failures += znam_validate_name_accepts();
+    failures += znam_validate_name_rejects();
+    failures += znam_parse_rejects_bad_script();
+
+    printf("\n=== HTLC / Atomic Swap ===\n");
+
+    failures += htlc_script_is_contract_size();
+    failures += htlc_script_matches_dcrdex();
+    failures += htlc_secret_matches_sha256();
+    failures += htlc_p2sh_addresses_match_prefixes();
+    failures += swap_chain_params_resolve();
+    failures += swap_parse_chain_names();
+    failures += swap_compute_id_is_deterministic();
+    failures += htlc_redeem_scriptsig_has_op1();
+    failures += htlc_refund_scriptsig_has_op0();
+
+    printf("\n=== ZMSG Messaging ===\n");
+
+    failures += zmsg_round_trip_serialize();
+    failures += zmsg_deserialize_rejects_oversize();
+    failures += zmsg_id_is_deterministic();
+    failures += zmsg_store_add_and_list();
+    failures += zmsg_store_unread_tracks_filter();
+    failures += zmsg_inbox_window_is_newest_exact();
+    failures += zmsg_memo_encode_decode_round_trip();
+    failures += zmsg_memo_encode_without_reply();
+    failures += zmsg_memo_empty_payload_round_trip();
+    failures += zmsg_memo_max_payload_round_trip();
+    failures += zmsg_memo_rejects_overlong_payload();
+    failures += zmsg_memo_decode_rejects_corrupt();
 
     int total = 0;
     /* Count from printf lines */

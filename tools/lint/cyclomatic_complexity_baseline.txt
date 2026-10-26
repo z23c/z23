@@ -2086,7 +2086,6 @@ tests/harness/src/test_proof_chain.c:pc_build_fixture:26
 tests/harness/src/test_proof_chain.c:pc_invariants:17
 tests/harness/src/test_proof_chain.c:test_proof_chain:77
 tests/harness/src/test_proof_validate_stage.c:test_proof_validate_stage:31
-tests/harness/src/test_protocols.c:test_protocols:204
 tests/harness/src/test_psc_real_range.c:prr_setup:25
 tests/harness/src/test_psc_real_range.c:test_psc_real_range:28
 tests/harness/src/test_pv_lookahead.c:la_fold_from:27
