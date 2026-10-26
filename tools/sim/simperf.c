@@ -154,6 +154,134 @@ static bool parse_int_flag(const char *arg, const char *name, int min, int max,
     return true;
 }
 
+/* Try the four integer-valued workload flags (--blocks=, --txs-per-block=,
+ * --reps=, --funding-multiple=) in main's historical check order. Returns
+ * true when arg matched one of them; parse_int_flag itself reports a bad
+ * value and exits. */
+static bool simperf_parse_int_flags(const char *a,
+                                    struct simnet_perf_config *cfg)
+{
+    if (parse_int_flag(a, "--blocks=", 1, 100000, &cfg->blocks))
+        return true;
+    if (parse_int_flag(a, "--txs-per-block=", 1, 1000, &cfg->txs_per_block))
+        return true;
+    if (parse_int_flag(a, "--reps=", 1, 64, &cfg->reps))
+        return true;
+    return parse_int_flag(a, "--funding-multiple=", 1, 16,
+                          &cfg->funding_multiple);
+}
+
+/* Set cfg->inject from an --inject= value. Returns 0 for a known value, or 2
+ * after reporting an unknown one. */
+static int simperf_parse_inject_value(const char *v,
+                                      struct simnet_perf_config *cfg)
+{
+    if (strcmp(v, "none") == 0) {
+        cfg->inject = SIMNET_PERF_INJECT_NONE;
+    } else if (strcmp(v, "coins-hash-collapse") == 0) {
+        cfg->inject = SIMNET_PERF_INJECT_COINS_HASH_COLLAPSE;
+    } else {
+        fprintf(stderr, "simperf: unknown --inject=%s "
+                        "(none|coins-hash-collapse)\n", v);
+        return 2;
+    }
+    return 0;
+}
+
+/* Append one --expect assertion to expects. Returns 0 when appended, or 2
+ * after reporting why it was rejected. */
+static int simperf_add_expect_arg(const char *text,
+                                  struct simperf_expect *expects,
+                                  size_t *expect_count)
+{
+    if (*expect_count >= SIMPERF_MAX_EXPECTS) {
+        fprintf(stderr, "simperf: too many --expect assertions\n");
+        return 2;
+    }
+    if (!parse_expect(text, &expects[*expect_count])) {
+        fprintf(stderr,
+                "simperf: malformed --expect='%s' — want "
+                "'METRIC OP VALUE'\n", text);
+        return 2;
+    }
+    (*expect_count)++;
+    return 0;
+}
+
+/* Parse argv into cfg, expects and quiet. Returns the exit code main should
+ * return at once (0 for --help, 2 for a usage error; both already reported),
+ * or -1 when every argument parsed and the workload should run. */
+static int simperf_parse_args(int argc, char **argv,
+                              struct simnet_perf_config *cfg,
+                              struct simperf_expect *expects,
+                              size_t *expect_count, bool *quiet)
+{
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
+            usage(stdout);
+            return 0;
+        }
+        if (strcmp(a, "--quiet") == 0) {
+            *quiet = true;
+            continue;
+        }
+        if (simperf_parse_int_flags(a, cfg))
+            continue;
+        if (strncmp(a, "--scales=", 9) == 0) {
+            if (!parse_scales(a + 9, cfg)) {
+                fprintf(stderr, "simperf: --scales wants 2..%d strictly "
+                                "increasing sizes, e.g. --scales=1,2,4\n",
+                        SIMNET_PERF_MAX_POINTS);
+                return 2;
+            }
+            continue;
+        }
+        if (strncmp(a, "--inject=", 9) == 0) {
+            const int rc = simperf_parse_inject_value(a + 9, cfg);
+            if (rc != 0)
+                return rc;
+            continue;
+        }
+        if (strncmp(a, "--expect=", 9) == 0) {
+            const int rc = simperf_add_expect_arg(a + 9, expects,
+                                                  expect_count);
+            if (rc != 0)
+                return rc;
+            continue;
+        }
+        fprintf(stderr, "simperf: unrecognized argument '%s'\n", a);
+        usage(stderr);
+        return 2;
+    }
+    return -1;
+}
+
+/* Default budget: the calibrated growth ceiling plus derived anti-vacuity
+ * assertions, so a workload that silently folded nothing FAILS instead of
+ * reporting a flattering ratio over two empty runs. */
+static void simperf_apply_default_expects(const struct simnet_perf_config *cfg,
+                                          struct simperf_expect *expects,
+                                          size_t *expect_count)
+{
+    if (*expect_count == 0) {
+        const int last_scale = cfg->scales[cfg->scale_count - 1];
+        const int64_t want_txs = (int64_t)cfg->blocks * last_scale *
+                                 ((int64_t)cfg->txs_per_block + 1);
+        struct simperf_expect defaults[] = {
+            { "fold_growth_permille",  "<=",
+              SIMNET_PERF_GROWTH_BUDGET_PERMILLE },
+            { "total_growth_permille", "<=",
+              SIMNET_PERF_GROWTH_BUDGET_PERMILLE },
+            { "measured_txs",          "==", want_txs },
+            { "coins_at_end",          ">=", (int64_t)cfg->blocks * last_scale },
+            { "points",                ">=", 2 },
+        };
+        for (size_t i = 0; i < sizeof(defaults) / sizeof(defaults[0]); i++)
+            expects[(*expect_count)++] = defaults[i];
+    }
+}
+
 int main(int argc, char **argv)
 {
     /* simnet value-copies chain_params_get(); select mainnet first, same as
@@ -167,85 +295,12 @@ int main(int argc, char **argv)
     size_t expect_count = 0;
     bool quiet = false;
 
-    for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
-            usage(stdout);
-            return 0;
-        }
-        if (strcmp(a, "--quiet") == 0) {
-            quiet = true;
-            continue;
-        }
-        if (parse_int_flag(a, "--blocks=", 1, 100000, &cfg.blocks))
-            continue;
-        if (parse_int_flag(a, "--txs-per-block=", 1, 1000, &cfg.txs_per_block))
-            continue;
-        if (parse_int_flag(a, "--reps=", 1, 64, &cfg.reps))
-            continue;
-        if (parse_int_flag(a, "--funding-multiple=", 1, 16,
-                           &cfg.funding_multiple))
-            continue;
-        if (strncmp(a, "--scales=", 9) == 0) {
-            if (!parse_scales(a + 9, &cfg)) {
-                fprintf(stderr, "simperf: --scales wants 2..%d strictly "
-                                "increasing sizes, e.g. --scales=1,2,4\n",
-                        SIMNET_PERF_MAX_POINTS);
-                return 2;
-            }
-            continue;
-        }
-        if (strncmp(a, "--inject=", 9) == 0) {
-            const char *v = a + 9;
-            if (strcmp(v, "none") == 0) {
-                cfg.inject = SIMNET_PERF_INJECT_NONE;
-            } else if (strcmp(v, "coins-hash-collapse") == 0) {
-                cfg.inject = SIMNET_PERF_INJECT_COINS_HASH_COLLAPSE;
-            } else {
-                fprintf(stderr, "simperf: unknown --inject=%s "
-                                "(none|coins-hash-collapse)\n", v);
-                return 2;
-            }
-            continue;
-        }
-        if (strncmp(a, "--expect=", 9) == 0) {
-            if (expect_count >= SIMPERF_MAX_EXPECTS) {
-                fprintf(stderr, "simperf: too many --expect assertions\n");
-                return 2;
-            }
-            if (!parse_expect(a + 9, &expects[expect_count])) {
-                fprintf(stderr,
-                        "simperf: malformed --expect='%s' — want "
-                        "'METRIC OP VALUE'\n", a + 9);
-                return 2;
-            }
-            expect_count++;
-            continue;
-        }
-        fprintf(stderr, "simperf: unrecognized argument '%s'\n", a);
-        usage(stderr);
-        return 2;
-    }
+    const int arg_rc = simperf_parse_args(argc, argv, &cfg, expects,
+                                          &expect_count, &quiet);
+    if (arg_rc >= 0)
+        return arg_rc;
 
-    /* Default budget: the calibrated growth ceiling plus derived anti-vacuity
-     * assertions, so a workload that silently folded nothing FAILS instead of
-     * reporting a flattering ratio over two empty runs. */
-    if (expect_count == 0) {
-        const int last_scale = cfg.scales[cfg.scale_count - 1];
-        const int64_t want_txs = (int64_t)cfg.blocks * last_scale *
-                                 ((int64_t)cfg.txs_per_block + 1);
-        struct simperf_expect defaults[] = {
-            { "fold_growth_permille",  "<=",
-              SIMNET_PERF_GROWTH_BUDGET_PERMILLE },
-            { "total_growth_permille", "<=",
-              SIMNET_PERF_GROWTH_BUDGET_PERMILLE },
-            { "measured_txs",          "==", want_txs },
-            { "coins_at_end",          ">=", (int64_t)cfg.blocks * last_scale },
-            { "points",                ">=", 2 },
-        };
-        for (size_t i = 0; i < sizeof(defaults) / sizeof(defaults[0]); i++)
-            expects[expect_count++] = defaults[i];
-    }
+    simperf_apply_default_expects(&cfg, expects, &expect_count);
 
     struct simnet_perf_result result;
     if (!simnet_perf_run(&cfg, &result)) {
