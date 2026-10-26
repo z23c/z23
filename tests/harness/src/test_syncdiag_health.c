@@ -218,442 +218,547 @@ static int syncdiag_case_getsyncdetail_coverage(void)
     return failures;
 }
 
+/* One field expectation, walked in source order. A miss stops the walk,
+ * matching `ok = ok && ...`. STR, INT, BOOL and IS_NULL look the key up
+ * again for the value compare, as each original check did. */
+enum {
+    SYNC_HEALTH_PRESENT = 1,
+    SYNC_HEALTH_ABSENT,
+    SYNC_HEALTH_STR,
+    SYNC_HEALTH_INT,
+    SYNC_HEALTH_BOOL,
+    SYNC_HEALTH_IS_NULL
+};
+
+struct sync_health_expect {
+    const char *key;
+    int kind;
+    bool want_bool;
+    int64_t want_int;
+    const char *want_str;
+};
+
+static bool sync_health_expect_holds(const struct json_value *obj,
+                                    const struct sync_health_expect *e)
+{
+    const struct json_value *v = json_get(obj, e->key);
+    if (e->kind == SYNC_HEALTH_PRESENT)
+        return v != NULL;
+    if (e->kind == SYNC_HEALTH_ABSENT)
+        return v == NULL;
+    if (v == NULL)
+        return false;
+    if (e->kind == SYNC_HEALTH_STR)
+        return strcmp(json_get_str(json_get(obj, e->key)), e->want_str) == 0;
+    if (e->kind == SYNC_HEALTH_INT)
+        return json_get_int(json_get(obj, e->key)) == e->want_int;
+    if (e->kind == SYNC_HEALTH_BOOL)
+        return json_get_bool(json_get(obj, e->key)) == e->want_bool;
+    if (e->kind == SYNC_HEALTH_IS_NULL)
+        return json_is_null(json_get(obj, e->key));
+    return false;
+}
+
+static bool sync_health_expects_hold(const struct json_value *obj,
+                                    const struct sync_health_expect *rows,
+                                    size_t n)
+{
+    bool ok = true;
+    for (size_t i = 0; i < n && ok; i++)
+        ok = sync_health_expect_holds(obj, &rows[i]);
+    return ok;
+}
+
+static bool sync_health_is_type(const struct json_value *v, enum json_type t)
+{
+    return v && v->type == t;
+}
+
+static bool sync_health_bool_is(const struct json_value *v, bool want)
+{
+    return v && json_get_bool(v) == want;
+}
+
+static bool sync_health_coordinator_keys(const struct json_value *svc)
+{
+    static const struct sync_health_expect keys[] = {
+        { "authority", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "decision", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "selected_source", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "selected_source_trust", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "mirror_fallback_allowed", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "activation_allowed", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "best_header_height", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "projection_height", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "projection_lag", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "projection_deferred", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "projection_state", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "projection_deferred_total", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "last_projection_deferred_height", SYNC_HEALTH_PRESENT, false, 0,
+          NULL },
+        { "last_projection_deferred_time", SYNC_HEALTH_PRESENT, false, 0,
+          NULL },
+        { "last_projection_deferred_reason", SYNC_HEALTH_PRESENT, false, 0,
+          NULL },
+        { "reason", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "initialized", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "has_connman", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "has_main_state", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "has_node_db", SYNC_HEALTH_PRESENT, false, 0, NULL },
+    };
+    return sync_health_expects_hold(svc, keys, sizeof(keys) / sizeof(keys[0]));
+}
+
+static bool sync_health_current_sources(bool ok, const struct json_value *svc)
+{
+    static const struct sync_health_expect rows[] = {
+        { "selectable", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "selection_blocker", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "score_target_lag_penalty", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "score_failure_penalty", SYNC_HEALTH_PRESENT, false, 0, NULL },
+    };
+    const struct json_value *sources =
+        svc ? json_get(svc, "sources") : NULL;
+    const struct json_value *current_snapshot =
+        find_source_json(sources, "snapshot");
+    ok = ok && sync_health_is_type(sources, JSON_ARR);
+    ok = ok && sync_health_is_type(current_snapshot, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(current_snapshot, rows,
+                                        sizeof(rows) / sizeof(rows[0]));
+    return ok;
+}
+
+static bool sync_health_last_decision(bool ok,
+                                     const struct json_value *has_last,
+                                     const struct json_value *last)
+{
+    static const struct sync_health_expect last_rows[] = {
+        { "op", SYNC_HEALTH_STR, false, 0, "snapshot_offer" },
+        { "selected_source_reason", SYNC_HEALTH_STR, false, 0, "manifest_ok" },
+        { "selected_source_selectable", SYNC_HEALTH_BOOL, true, 0, NULL },
+        { "selected_source_selection_blocker", SYNC_HEALTH_STR, false, 0, "" },
+        { "selected_source_score_base", SYNC_HEALTH_INT, false, 85, NULL },
+        { "selected_source_score_target_lag_penalty", SYNC_HEALTH_INT, false,
+          25, NULL },
+        { "selected_source_score_failure_penalty", SYNC_HEALTH_INT, false, 0,
+          NULL },
+    };
+    static const struct sync_health_expect snap_rows[] = {
+        { "trust", SYNC_HEALTH_STR, false, 0,
+          "native_snapshot_proof_validated" },
+        { "reason", SYNC_HEALTH_STR, false, 0, "manifest_ok" },
+    };
+    ok = ok && sync_health_bool_is(has_last, true);
+    ok = ok && sync_health_is_type(last, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(last, last_rows,
+                                        sizeof(last_rows) / sizeof(last_rows[0]));
+    const struct json_value *last_sources = json_get(last, "sources");
+    const struct json_value *snapshot =
+        find_source_json(last_sources, "snapshot");
+    ok = ok && sync_health_is_type(last_sources, JSON_ARR);
+    ok = ok && sync_health_is_type(snapshot, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(snapshot, snap_rows,
+                                        sizeof(snap_rows) / sizeof(snap_rows[0]));
+    return ok;
+}
+
+static bool gsh_chain_advance_coordinator_ok(void)
+{
+    struct json_value result;
+    json_init(&result);
+    block_source_policy_reset_for_test();
+    condition_engine_reset_for_testing();
+    mirror_consensus_reset_for_test();
+    mirror_consensus_set_enabled(true);
+    mirror_consensus_record_blocker("body-hash-mismatch");
+    bool seeded = block_source_policy_snapshot_offer_allowed(
+        100, 10000, 10100, true, "manifest_ok", NULL);
+    bool ok = seeded && api_getservicehealth(&result);
+    const struct json_value *svc =
+        find_service(&result, "chain_advance_coordinator");
+    ok = ok && result.type == JSON_ARR && svc != NULL;
+    ok = ok && sync_health_coordinator_keys(svc);
+    ok = sync_health_current_sources(ok, svc);
+    const struct json_value *has_last =
+        svc ? json_get(svc, "has_last_decision") : NULL;
+    const struct json_value *last =
+        svc ? json_get(svc, "last_decision") : NULL;
+    ok = sync_health_last_decision(ok, has_last, last);
+
+    json_free(&result);
+    block_source_policy_reset_for_test();
+    return ok;
+}
+
+static bool gsh_canonical_mirror_trust_ok(void)
+{
+    static const struct sync_health_expect rows[] = {
+        { "state", SYNC_HEALTH_STR, false, 0, "blocked" },
+        { "consensus_authority", SYNC_HEALTH_STR, false, 0,
+          "local_consensus_validation" },
+        { "candidate_source", SYNC_HEALTH_STR, false, 0, "legacy_advisory" },
+        { "mirror_authorization_enabled", SYNC_HEALTH_ABSENT, false, 0, NULL },
+        { "mirror_source_trust", SYNC_HEALTH_ABSENT, false, 0, NULL },
+        { "candidate_trust", SYNC_HEALTH_STR, false, 0,
+          "bounded_advisory_fallback" },
+        { "candidate_lag_observed", SYNC_HEALTH_IS_NULL, false, 0, NULL },
+        { "candidate_lag", SYNC_HEALTH_INT, false, 0, NULL },
+        { "tip_hashes_agree", SYNC_HEALTH_BOOL, false, 0, NULL },
+        { "blocker_recovered_by_tip_agreement", SYNC_HEALTH_BOOL, false, 0,
+          NULL },
+        { "mirror_monitor_running", SYNC_HEALTH_BOOL, true, 0, NULL },
+        { "zclassicd_rpc_transport_reachable", SYNC_HEALTH_BOOL, true, 0,
+          NULL },
+        { "legacy_oracle_usable", SYNC_HEALTH_BOOL, false, 0, NULL },
+        { "zclassicd_rpc_error_code", SYNC_HEALTH_INT, false, 0, NULL },
+        { "zclassicd_rpc_error_message", SYNC_HEALTH_STR, false, 0, "" },
+        { "candidate_blocker", SYNC_HEALTH_STR, false, 0,
+          "body-hash-mismatch" },
+        { "candidate_blocker_scope", SYNC_HEALTH_STR, false, 0,
+          "advisory_source" },
+        { "activation_blocker", SYNC_HEALTH_STR, false, 0,
+          "body-hash-mismatch" },
+        { "last_blocker_code", SYNC_HEALTH_STR, false, 0,
+          "body-hash-mismatch" },
+        { "legacy_advisory_gated_by_native_retries", SYNC_HEALTH_PRESENT,
+          false, 0, NULL },
+        { "mirror_repair_gated_by_local_retries", SYNC_HEALTH_PRESENT, false,
+          0, NULL },
+        { "local_retries_exhausted", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "overrides_total", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "unsafe_overrides_total", SYNC_HEALTH_INT, false, 1, NULL },
+        { "last_override_safe", SYNC_HEALTH_BOOL, false, 0, NULL },
+        { "last_override_reason", SYNC_HEALTH_STR, false, 0,
+          "body-hash-mismatch" },
+        { "last_override_scope", SYNC_HEALTH_STR, false, 0,
+          "unsafe_no_authorized_scope" },
+        { "blockers_total", SYNC_HEALTH_INT, false, 1, NULL },
+        { "stalls_total", SYNC_HEALTH_INT, false, 3, NULL },
+        { "lag_observed", SYNC_HEALTH_IS_NULL, false, 0, NULL },
+        { "lag", SYNC_HEALTH_INT, false, 0, NULL },
+    };
+    struct legacy_mirror_sync_stats stats;
+    struct json_value result;
+
+    sync_monitor_init();
+    legacy_mirror_sync_reset_for_test();
+    mirror_consensus_reset_for_test();
+    mirror_consensus_set_enabled(true);
+    mirror_consensus_record_override(200, "body-hash-mismatch");
+    mirror_consensus_record_blocker("body-hash-mismatch");
+
+    memset(&stats, 0, sizeof(stats));
+    stats.enabled = true;
+    stats.running = true;
+    stats.reachable = true;
+    stats.legacy_height = 200;
+    stats.local_height = 199;
+    stats.target_height = 200;
+    stats.stalls_total = 3;
+    snprintf(stats.last_blocker_id, sizeof(stats.last_blocker_id),
+             "%s", "body-hash-mismatch");
+    legacy_mirror_sync_test_set_stats(&stats, NULL);
+
+    json_init(&result);
+    bool ok = api_getservicehealth(&result);
+    const struct json_value *svc = find_service(&result, "legacy_mirror");
+    ok = ok && result.type == JSON_ARR && svc != NULL;
+    ok = ok && sync_health_expects_hold(svc, rows,
+                                        sizeof(rows) / sizeof(rows[0]));
+
+    json_free(&result);
+    legacy_mirror_sync_reset_for_test();
+    mirror_consensus_reset_for_test();
+    return ok;
+}
+
+static bool hc_build_and_check_fields(bool ok, const struct json_value *result,
+                                     const struct json_value *checks)
+{
+    static const struct sync_health_expect check_rows[] = {
+        { "error_total", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "last_error_age_seconds", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "last_error_recent", SYNC_HEALTH_PRESENT, false, 0, NULL },
+    };
+    static const struct sync_health_expect result_rows[] = {
+        { "candidate_lag_known", SYNC_HEALTH_BOOL, false, 0, NULL },
+        { "candidate_lag_valid", SYNC_HEALTH_BOOL, false, 0, NULL },
+        { "mirror_tip_hashes_agree", SYNC_HEALTH_BOOL, false, 0, NULL },
+        { "mirror_blocker_recovered_by_tip_agreement", SYNC_HEALTH_BOOL,
+          false, 0, NULL },
+        { "candidate_lag", SYNC_HEALTH_INT, false, 0, NULL },
+        { "candidate_lag_observed", SYNC_HEALTH_IS_NULL, false, 0, NULL },
+        { "mirror_lag", SYNC_HEALTH_INT, false, 0, NULL },
+        { "mirror_lag_observed", SYNC_HEALTH_IS_NULL, false, 0, NULL },
+        { "mirror_monitor_running", SYNC_HEALTH_BOOL, true, 0, NULL },
+        { "zclassicd_rpc_transport_reachable", SYNC_HEALTH_BOOL, false, 0,
+          NULL },
+        { "legacy_oracle_usable", SYNC_HEALTH_BOOL, false, 0, NULL },
+        { "zclassicd_rpc_error_code", SYNC_HEALTH_INT, false, 0, NULL },
+        { "zclassicd_rpc_error_message", SYNC_HEALTH_STR, false, 0,
+          "connect failed" },
+        { "mirror_rpc_errors", SYNC_HEALTH_INT, false, 0, NULL },
+        { "mirror_active_error_code", SYNC_HEALTH_STR, false, 0,
+          "body-hash-mismatch" },
+        { "mirror_active_error_detail", SYNC_HEALTH_STR, false, 0,
+          "connect failed" },
+        { "candidate_blocker", SYNC_HEALTH_STR, false, 0,
+          "body-hash-mismatch" },
+        { "candidate_blocker_scope", SYNC_HEALTH_STR, false, 0,
+          "active_or_safety" },
+        { "legacy_advisory_blocker", SYNC_HEALTH_STR, false, 0,
+          "body-hash-mismatch" },
+        { "mirror_blockers_total", SYNC_HEALTH_INT, false, 1, NULL },
+        { "mirror_stalls_total", SYNC_HEALTH_INT, false, 0, NULL },
+        { "mirror_unsafe_overrides_total", SYNC_HEALTH_INT, false, 1, NULL },
+        { "mirror_last_override_safe", SYNC_HEALTH_BOOL, false, 0, NULL },
+        { "mirror_last_override_reason", SYNC_HEALTH_STR, false, 0,
+          "body-hash-mismatch" },
+        { "mirror_last_override_scope", SYNC_HEALTH_STR, false, 0,
+          "unsafe_no_authorized_scope" },
+        { "mirror_activation_blocker", SYNC_HEALTH_STR, false, 0,
+          "body-hash-mismatch" },
+    };
+    ok = ok && json_get(result, "build_commit") != NULL &&
+        strcmp(json_get_str(json_get(result, "build_commit")),
+               zcl_build_commit()) == 0;
+    ok = ok && sync_health_is_type(checks, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(checks, check_rows,
+                                        sizeof(check_rows) / sizeof(check_rows[0]));
+    ok = ok && sync_health_expects_hold(result, result_rows,
+                                        sizeof(result_rows) / sizeof(result_rows[0]));
+    return ok;
+}
+
+static bool hc_engine_and_evidence(bool ok,
+                                  const struct json_value *condition_engine,
+                                  const struct json_value *ce)
+{
+    static const struct sync_health_expect engine_rows[] = {
+        { "registered_count", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "active_count", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "unresolved_count", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "conditions", SYNC_HEALTH_PRESENT, false, 0, NULL },
+    };
+    static const struct sync_health_expect ce_rows[] = {
+        { "state", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "publish_state", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "active_tip_source_class", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "active_tip", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "header_tip", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "persisted_active_tip", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "utxo_max_height", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "coins_best_block_height", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "csr_sqlite_max_height", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "missing_active_tip_evidence", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "publish_state_not_local", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "active_tip_hash_mismatch", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "csr_cursor_mismatch", SYNC_HEALTH_PRESENT, false, 0, NULL },
+    };
+    ok = ok && sync_health_is_type(condition_engine, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(condition_engine, engine_rows,
+                                        sizeof(engine_rows) / sizeof(engine_rows[0]));
+    ok = ok && sync_health_is_type(ce, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(ce, ce_rows,
+                                        sizeof(ce_rows) / sizeof(ce_rows[0]));
+    return ok;
+}
+
+static bool hc_advance_object(bool ok, const struct json_value *ca)
+{
+    ok = ok && sync_health_is_type(ca, JSON_OBJ);
+    ok = ok && sync_health_coordinator_keys(ca);
+    ok = sync_health_current_sources(ok, ca);
+    const struct json_value *has_last = json_get(ca, "has_last_decision");
+    const struct json_value *last = json_get(ca, "last_decision");
+    return sync_health_last_decision(ok, has_last, last);
+}
+
+static bool hc_chain_advance_decision_ok(struct json_value *params,
+                                        struct json_value *result)
+{
+    struct rpc_table tbl;
+    rpc_table_init(&tbl);
+    register_event_rpc_commands(&tbl);
+    if (rpc_is_in_warmup(NULL, 0))
+        set_rpc_warmup_finished();
+
+    json_init(params);
+    json_set_object(params);
+    json_push_kv_bool(params, "full", true);
+
+    json_init(result);
+
+    block_source_policy_reset_for_test();
+    legacy_mirror_sync_reset_for_test();
+    mirror_consensus_reset_for_test();
+    struct legacy_mirror_sync_stats stats;
+    memset(&stats, 0, sizeof(stats));
+    stats.enabled = true;
+    stats.running = true;
+    stats.reachable = false;
+    stats.legacy_height = 0;
+    stats.local_height = 3157703;
+    snprintf(stats.last_blocker_id, sizeof(stats.last_blocker_id),
+             "%s", "rpc-unreachable");
+    snprintf(stats.last_error, sizeof(stats.last_error),
+             "%s", "connect failed");
+    legacy_mirror_sync_test_set_stats(&stats, NULL);
+    mirror_consensus_set_enabled(true);
+    mirror_consensus_record_override(100, "body-hash-mismatch");
+    mirror_consensus_record_blocker("body-hash-mismatch");
+    bool seeded = block_source_policy_snapshot_offer_allowed(
+        100, 10000, 10100, true, "manifest_ok", NULL);
+    bool executed = rpc_table_execute(&tbl, "healthcheck",
+                                      params, result);
+
+    const struct json_value *checks = json_get(result, "checks");
+    const struct json_value *ca =
+        checks ? json_get(checks, "chain_advance") : NULL;
+    const struct json_value *ce =
+        checks ? json_get(checks, "chain_evidence") : NULL;
+    const struct json_value *condition_engine =
+        checks ? json_get(checks, "condition_engine") : NULL;
+    bool ok = seeded && executed && result->type == JSON_OBJ;
+    ok = hc_build_and_check_fields(ok, result, checks);
+    ok = hc_engine_and_evidence(ok, condition_engine, ce);
+    ok = hc_advance_object(ok, ca);
+    return ok;
+}
+
+static bool hc_bounded_result_identity(bool ok, const struct json_value *result)
+{
+    static const struct sync_health_expect rows[] = {
+        { "schema", SYNC_HEALTH_STR, false, 0, "zcl.healthcheck.v1" },
+        { "consensus_authority", SYNC_HEALTH_STR, false, 0,
+          "local_consensus_validation" },
+        { "candidate_source", SYNC_HEALTH_STR, false, 0,
+          "agent_cached_summary" },
+        { "candidate_trust", SYNC_HEALTH_STR, false, 0,
+          "bounded_cached_status" },
+        { "result_completeness", SYNC_HEALTH_STR, false, 0, "bounded" },
+        { "partial_result", SYNC_HEALTH_BOOL, true, 0, NULL },
+    };
+    return ok && sync_health_expects_hold(result, rows,
+                                          sizeof(rows) / sizeof(rows[0]));
+}
+
+static bool hc_bounded_first_call_block(bool ok,
+                                       const struct json_value *result)
+{
+    static const struct sync_health_expect call_rows[] = {
+        { "schema", SYNC_HEALTH_STR, false, 0, "zcl.first_call_contract.v1" },
+        { "api", SYNC_HEALTH_STR, false, 0, "healthcheck" },
+        { "result_completeness", SYNC_HEALTH_STR, false, 0, "bounded" },
+        { "source", SYNC_HEALTH_STR, false, 0, "agent_cached_summary" },
+        { "partial_result", SYNC_HEALTH_BOOL, true, 0, NULL },
+        { "budget_ms", SYNC_HEALTH_INT, false, 500, NULL },
+        { "elapsed_ms", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "budget_exceeded", SYNC_HEALTH_PRESENT, false, 0, NULL },
+    };
+    static const struct sync_health_expect top_rows[] = {
+        { "full_mode_command", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "healthy", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "serving", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "readiness_status", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "chain_serving_ready", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "height_contract_status", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "normal_lookahead", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "sync_fsm_at_tip", SYNC_HEALTH_PRESENT, false, 0, NULL },
+    };
+    const struct json_value *first_call = json_get(result, "first_call");
+    ok = ok && sync_health_is_type(first_call, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(first_call, call_rows,
+                                        sizeof(call_rows) / sizeof(call_rows[0]));
+    ok = ok && sync_health_expects_hold(result, top_rows,
+                                        sizeof(top_rows) / sizeof(top_rows[0]));
+    return ok;
+}
+
+static bool hc_bounded_tail(bool ok, const struct json_value *checks,
+                           const struct json_value *ca,
+                           const struct json_value *agent)
+{
+    static const struct sync_health_expect check_rows[] = {
+        { "bounded", SYNC_HEALTH_BOOL, true, 0, NULL },
+        { "partial_result", SYNC_HEALTH_BOOL, true, 0, NULL },
+        { "height_contract_status", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "normal_lookahead", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "sync_fsm_at_tip", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "chain_serving_ready", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "serving_ready", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "index_projection_ready", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "agent_work_ready", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "peer_count", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "log_head", SYNC_HEALTH_PRESENT, false, 0, NULL },
+        { "chain_evidence", SYNC_HEALTH_ABSENT, false, 0, NULL },
+    };
+    static const struct sync_health_expect ca_rows[] = {
+        { "source", SYNC_HEALTH_STR, false, 0, "cached_first_call" },
+        { "block_source_status_cached", SYNC_HEALTH_PRESENT, false, 0, NULL },
+    };
+    static const struct sync_health_expect agent_rows[] = {
+        { "schema", SYNC_HEALTH_STR, false, 0, "zcl.public_status.v3" },
+    };
+    ok = ok && sync_health_is_type(checks, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(checks, check_rows,
+                                        sizeof(check_rows) / sizeof(check_rows[0]));
+    ok = ok && sync_health_is_type(ca, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(ca, ca_rows,
+                                        sizeof(ca_rows) / sizeof(ca_rows[0]));
+    ok = ok && sync_health_is_type(agent, JSON_OBJ);
+    ok = ok && sync_health_expects_hold(agent, agent_rows,
+                                        sizeof(agent_rows) / sizeof(agent_rows[0]));
+    return ok;
+}
+
+static bool hc_bounded_first_call_ok(struct json_value *params,
+                                    struct json_value *result)
+{
+    struct rpc_table tbl;
+    rpc_table_init(&tbl);
+    register_event_rpc_commands(&tbl);
+    if (rpc_is_in_warmup(NULL, 0))
+        set_rpc_warmup_finished();
+
+    json_init(params);
+    json_set_array(params);
+
+    json_init(result);
+
+    bool executed = rpc_table_execute(&tbl, "healthcheck",
+                                      params, result);
+    const struct json_value *checks = json_get(result, "checks");
+    const struct json_value *agent = json_get(result, "agent");
+    const struct json_value *ca =
+        checks ? json_get(checks, "chain_advance") : NULL;
+    bool ok = executed && result->type == JSON_OBJ;
+    ok = hc_bounded_result_identity(ok, result);
+    ok = hc_bounded_first_call_block(ok, result);
+    ok = hc_bounded_tail(ok, checks, ca, agent);
+    return ok;
+}
+
 int syncdiag_cases_health(void)
 {
     int failures = 0;
 
     printf("getservicehealth: exposes chain advance coordinator "
            "(RED)... ");
-    {
-        struct json_value result;
-        json_init(&result);
-        block_source_policy_reset_for_test();
-        condition_engine_reset_for_testing();
-        mirror_consensus_reset_for_test();
-        mirror_consensus_set_enabled(true);
-        mirror_consensus_record_blocker("body-hash-mismatch");
-        bool seeded = block_source_policy_snapshot_offer_allowed(
-            100, 10000, 10100, true, "manifest_ok", NULL);
-        bool ok = seeded && api_getservicehealth(&result);
-        const struct json_value *svc =
-            find_service(&result, "chain_advance_coordinator");
-        ok = ok && result.type == JSON_ARR && svc != NULL;
-        ok = ok && json_get(svc, "authority") != NULL;
-        ok = ok && json_get(svc, "decision") != NULL;
-        ok = ok && json_get(svc, "selected_source") != NULL;
-        ok = ok && json_get(svc, "selected_source_trust") != NULL;
-        ok = ok && json_get(svc, "mirror_fallback_allowed") != NULL;
-        ok = ok && json_get(svc, "activation_allowed") != NULL;
-        ok = ok && json_get(svc, "best_header_height") != NULL;
-        ok = ok && json_get(svc, "projection_height") != NULL;
-        ok = ok && json_get(svc, "projection_lag") != NULL;
-        ok = ok && json_get(svc, "projection_deferred") != NULL;
-        ok = ok && json_get(svc, "projection_state") != NULL;
-        ok = ok && json_get(svc, "projection_deferred_total") != NULL;
-        ok = ok && json_get(svc, "last_projection_deferred_height") != NULL;
-        ok = ok && json_get(svc, "last_projection_deferred_time") != NULL;
-        ok = ok && json_get(svc, "last_projection_deferred_reason") != NULL;
-        ok = ok && json_get(svc, "reason") != NULL;
-        ok = ok && json_get(svc, "initialized") != NULL;
-        ok = ok && json_get(svc, "has_connman") != NULL;
-        ok = ok && json_get(svc, "has_main_state") != NULL;
-        ok = ok && json_get(svc, "has_node_db") != NULL;
-        const struct json_value *sources =
-            svc ? json_get(svc, "sources") : NULL;
-        const struct json_value *current_snapshot =
-            find_source_json(sources, "snapshot");
-        ok = ok && sources && sources->type == JSON_ARR;
-        ok = ok && current_snapshot && current_snapshot->type == JSON_OBJ;
-        ok = ok && json_get(current_snapshot, "selectable") != NULL;
-        ok = ok && json_get(current_snapshot, "selection_blocker") != NULL;
-        ok = ok && json_get(current_snapshot,
-                            "score_target_lag_penalty") != NULL;
-        ok = ok && json_get(current_snapshot,
-                            "score_failure_penalty") != NULL;
-        const struct json_value *has_last =
-            svc ? json_get(svc, "has_last_decision") : NULL;
-        const struct json_value *last =
-            svc ? json_get(svc, "last_decision") : NULL;
-        ok = ok && has_last && json_get_bool(has_last);
-        ok = ok && last && last->type == JSON_OBJ;
-        ok = ok && json_get(last, "op") != NULL &&
-            strcmp(json_get_str(json_get(last, "op")),
-                   "snapshot_offer") == 0;
-        ok = ok && json_get(last, "selected_source_reason") != NULL &&
-            strcmp(json_get_str(json_get(last, "selected_source_reason")),
-                   "manifest_ok") == 0;
-        ok = ok && json_get(last, "selected_source_selectable") != NULL;
-        ok = ok && json_get_bool(json_get(
-            last, "selected_source_selectable"));
-        ok = ok && json_get(last,
-                            "selected_source_selection_blocker") != NULL;
-        ok = ok && strcmp(json_get_str(json_get(
-            last, "selected_source_selection_blocker")), "") == 0;
-        ok = ok && json_get(last, "selected_source_score_base") != NULL;
-        ok = ok && json_get_int(json_get(
-            last, "selected_source_score_base")) == 85;
-        ok = ok && json_get(last,
-                            "selected_source_score_target_lag_penalty")
-                 != NULL;
-        ok = ok && json_get_int(json_get(
-            last, "selected_source_score_target_lag_penalty")) == 25;
-        ok = ok && json_get(last,
-                            "selected_source_score_failure_penalty") != NULL;
-        ok = ok && json_get_int(json_get(
-            last, "selected_source_score_failure_penalty")) == 0;
-        const struct json_value *last_sources = json_get(last, "sources");
-        const struct json_value *snapshot =
-            find_source_json(last_sources, "snapshot");
-        ok = ok && last_sources && last_sources->type == JSON_ARR;
-        ok = ok && snapshot && snapshot->type == JSON_OBJ;
-        ok = ok && json_get(snapshot, "trust") != NULL &&
-            strcmp(json_get_str(json_get(snapshot, "trust")),
-                   "native_snapshot_proof_validated") == 0;
-        ok = ok && json_get(snapshot, "reason") != NULL &&
-            strcmp(json_get_str(json_get(snapshot, "reason")),
-                   "manifest_ok") == 0;
-
-        json_free(&result);
-        block_source_policy_reset_for_test();
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
+    if (gsh_chain_advance_coordinator_ok()) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
 
     printf("getservicehealth: exposes canonical mirror trust "
            "(RED)... ");
-    {
-        struct legacy_mirror_sync_stats stats;
-        struct json_value result;
-
-        sync_monitor_init();
-        legacy_mirror_sync_reset_for_test();
-        mirror_consensus_reset_for_test();
-        mirror_consensus_set_enabled(true);
-        mirror_consensus_record_override(200, "body-hash-mismatch");
-        mirror_consensus_record_blocker("body-hash-mismatch");
-
-        memset(&stats, 0, sizeof(stats));
-        stats.enabled = true;
-        stats.running = true;
-        stats.reachable = true;
-        stats.legacy_height = 200;
-        stats.local_height = 199;
-        stats.target_height = 200;
-        stats.stalls_total = 3;
-        snprintf(stats.last_blocker_id, sizeof(stats.last_blocker_id),
-                 "%s", "body-hash-mismatch");
-        legacy_mirror_sync_test_set_stats(&stats, NULL);
-
-        json_init(&result);
-        bool ok = api_getservicehealth(&result);
-        const struct json_value *svc = find_service(&result, "legacy_mirror");
-        ok = ok && result.type == JSON_ARR && svc != NULL;
-        ok = ok && json_get(svc, "state") != NULL &&
-            strcmp(json_get_str(json_get(svc, "state")), "blocked") == 0;
-        ok = ok && json_get(svc, "consensus_authority") != NULL &&
-            strcmp(json_get_str(json_get(svc, "consensus_authority")),
-                   "local_consensus_validation") == 0;
-        ok = ok && json_get(svc, "candidate_source") != NULL &&
-            strcmp(json_get_str(json_get(svc, "candidate_source")),
-                   "legacy_advisory") == 0;
-        ok = ok && json_get(svc, "mirror_authorization_enabled") == NULL;
-        ok = ok && json_get(svc, "mirror_source_trust") == NULL;
-        ok = ok && json_get(svc, "candidate_trust") != NULL &&
-            strcmp(json_get_str(json_get(svc, "candidate_trust")),
-                   "bounded_advisory_fallback") == 0;
-        ok = ok && json_get(svc, "candidate_lag_observed") != NULL &&
-            json_is_null(json_get(svc, "candidate_lag_observed"));
-        ok = ok && json_get(svc, "candidate_lag") != NULL &&
-            json_get_int(json_get(svc, "candidate_lag")) == 0;
-        ok = ok && json_get(svc, "tip_hashes_agree") != NULL &&
-            !json_get_bool(json_get(svc, "tip_hashes_agree"));
-        ok = ok && json_get(svc, "blocker_recovered_by_tip_agreement") !=
-                 NULL &&
-            !json_get_bool(json_get(
-                svc, "blocker_recovered_by_tip_agreement"));
-        ok = ok && json_get(svc, "mirror_monitor_running") != NULL &&
-            json_get_bool(json_get(svc, "mirror_monitor_running"));
-        ok = ok && json_get(svc, "zclassicd_rpc_transport_reachable") != NULL &&
-            json_get_bool(json_get(svc, "zclassicd_rpc_transport_reachable"));
-        ok = ok && json_get(svc, "legacy_oracle_usable") != NULL &&
-            !json_get_bool(json_get(svc, "legacy_oracle_usable"));
-        ok = ok && json_get(svc, "zclassicd_rpc_error_code") != NULL &&
-            json_get_int(json_get(svc, "zclassicd_rpc_error_code")) == 0;
-        ok = ok && json_get(svc, "zclassicd_rpc_error_message") != NULL &&
-            strcmp(json_get_str(json_get(svc,
-                                         "zclassicd_rpc_error_message")),
-                   "") == 0;
-        ok = ok && json_get(svc, "candidate_blocker") != NULL &&
-            strcmp(json_get_str(json_get(svc, "candidate_blocker")),
-                   "body-hash-mismatch") == 0;
-        ok = ok && json_get(svc, "candidate_blocker_scope") != NULL &&
-            strcmp(json_get_str(json_get(svc, "candidate_blocker_scope")),
-                   "advisory_source") == 0;
-        ok = ok && json_get(svc, "activation_blocker") != NULL &&
-            strcmp(json_get_str(json_get(svc, "activation_blocker")),
-                   "body-hash-mismatch") == 0;
-        ok = ok && json_get(svc, "last_blocker_code") != NULL &&
-            strcmp(json_get_str(json_get(svc, "last_blocker_code")),
-                   "body-hash-mismatch") == 0;
-        ok = ok && json_get(svc,
-                             "legacy_advisory_gated_by_native_retries") != NULL;
-        ok = ok && json_get(svc,
-                             "mirror_repair_gated_by_local_retries") != NULL;
-        ok = ok && json_get(svc, "local_retries_exhausted") != NULL;
-        ok = ok && json_get(svc, "overrides_total") != NULL;
-        ok = ok && json_get(svc, "unsafe_overrides_total") != NULL &&
-            json_get_int(json_get(svc, "unsafe_overrides_total")) == 1;
-        ok = ok && json_get(svc, "last_override_safe") != NULL &&
-            !json_get_bool(json_get(svc, "last_override_safe"));
-        ok = ok && json_get(svc, "last_override_reason") != NULL &&
-            strcmp(json_get_str(json_get(svc, "last_override_reason")),
-                   "body-hash-mismatch") == 0;
-        ok = ok && json_get(svc, "last_override_scope") != NULL &&
-            strcmp(json_get_str(json_get(svc, "last_override_scope")),
-                   "unsafe_no_authorized_scope") == 0;
-        ok = ok && json_get(svc, "blockers_total") != NULL &&
-            json_get_int(json_get(svc, "blockers_total")) == 1;
-        ok = ok && json_get(svc, "stalls_total") != NULL &&
-            json_get_int(json_get(svc, "stalls_total")) == 3;
-        ok = ok && json_get(svc, "lag_observed") != NULL &&
-            json_is_null(json_get(svc, "lag_observed"));
-        ok = ok && json_get(svc, "lag") != NULL &&
-            json_get_int(json_get(svc, "lag")) == 0;
-
-        json_free(&result);
-        legacy_mirror_sync_reset_for_test();
-        mirror_consensus_reset_for_test();
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
+    if (gsh_canonical_mirror_trust_ok()) printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
 
     printf("healthcheck: exposes chain advance decision "
            "(RED)... ");
     {
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_event_rpc_commands(&tbl);
-        if (rpc_is_in_warmup(NULL, 0))
-            set_rpc_warmup_finished();
-
         struct json_value params;
-        json_init(&params);
-        json_set_object(&params);
-        json_push_kv_bool(&params, "full", true);
-
         struct json_value result;
-        json_init(&result);
-
-        block_source_policy_reset_for_test();
-        legacy_mirror_sync_reset_for_test();
-        mirror_consensus_reset_for_test();
-        struct legacy_mirror_sync_stats stats;
-        memset(&stats, 0, sizeof(stats));
-        stats.enabled = true;
-        stats.running = true;
-        stats.reachable = false;
-        stats.legacy_height = 0;
-        stats.local_height = 3157703;
-        snprintf(stats.last_blocker_id, sizeof(stats.last_blocker_id),
-                 "%s", "rpc-unreachable");
-        snprintf(stats.last_error, sizeof(stats.last_error),
-                 "%s", "connect failed");
-        legacy_mirror_sync_test_set_stats(&stats, NULL);
-        mirror_consensus_set_enabled(true);
-        mirror_consensus_record_override(100, "body-hash-mismatch");
-        mirror_consensus_record_blocker("body-hash-mismatch");
-        bool seeded = block_source_policy_snapshot_offer_allowed(
-            100, 10000, 10100, true, "manifest_ok", NULL);
-        bool executed = rpc_table_execute(&tbl, "healthcheck",
-                                          &params, &result);
-
-        const struct json_value *checks = json_get(&result, "checks");
-        const struct json_value *ca =
-            checks ? json_get(checks, "chain_advance") : NULL;
-        const struct json_value *ce =
-            checks ? json_get(checks, "chain_evidence") : NULL;
-        const struct json_value *condition_engine =
-            checks ? json_get(checks, "condition_engine") : NULL;
-        bool ok = seeded && executed && result.type == JSON_OBJ;
-        ok = ok && json_get(&result, "build_commit") != NULL &&
-            strcmp(json_get_str(json_get(&result, "build_commit")),
-                   zcl_build_commit()) == 0;
-        ok = ok && checks && checks->type == JSON_OBJ;
-        ok = ok && json_get(checks, "error_total") != NULL;
-        ok = ok && json_get(checks, "last_error_age_seconds") != NULL;
-        ok = ok && json_get(checks, "last_error_recent") != NULL;
-        ok = ok && json_get(&result, "candidate_lag_known") != NULL &&
-            !json_get_bool(json_get(&result, "candidate_lag_known"));
-        ok = ok && json_get(&result, "candidate_lag_valid") != NULL &&
-            !json_get_bool(json_get(&result, "candidate_lag_valid"));
-        ok = ok && json_get(&result, "mirror_tip_hashes_agree") != NULL &&
-            !json_get_bool(json_get(&result, "mirror_tip_hashes_agree"));
-        ok = ok && json_get(&result,
-                            "mirror_blocker_recovered_by_tip_agreement")
-                 != NULL &&
-            !json_get_bool(json_get(
-                &result, "mirror_blocker_recovered_by_tip_agreement"));
-        ok = ok && json_get(&result, "candidate_lag") != NULL &&
-            json_get_int(json_get(&result, "candidate_lag")) == 0;
-        ok = ok && json_get(&result, "candidate_lag_observed") != NULL &&
-            json_is_null(json_get(&result, "candidate_lag_observed"));
-        ok = ok && json_get(&result, "mirror_lag") != NULL &&
-            json_get_int(json_get(&result, "mirror_lag")) == 0;
-        ok = ok && json_get(&result, "mirror_lag_observed") != NULL &&
-            json_is_null(json_get(&result, "mirror_lag_observed"));
-        ok = ok && json_get(&result, "mirror_monitor_running") != NULL &&
-            json_get_bool(json_get(&result, "mirror_monitor_running"));
-        ok = ok && json_get(&result,
-                            "zclassicd_rpc_transport_reachable") != NULL &&
-            !json_get_bool(json_get(&result,
-                                    "zclassicd_rpc_transport_reachable"));
-        ok = ok && json_get(&result, "legacy_oracle_usable") != NULL &&
-            !json_get_bool(json_get(&result, "legacy_oracle_usable"));
-        ok = ok && json_get(&result, "zclassicd_rpc_error_code") != NULL &&
-            json_get_int(json_get(&result, "zclassicd_rpc_error_code")) == 0;
-        ok = ok && json_get(&result,
-                            "zclassicd_rpc_error_message") != NULL &&
-            strcmp(json_get_str(json_get(
-                       &result, "zclassicd_rpc_error_message")),
-                   "connect failed") == 0;
-        ok = ok && json_get(&result, "mirror_rpc_errors") != NULL &&
-            json_get_int(json_get(&result, "mirror_rpc_errors")) == 0;
-        ok = ok && json_get(&result, "mirror_active_error_code") != NULL &&
-            strcmp(json_get_str(json_get(&result,
-                                         "mirror_active_error_code")),
-                   "body-hash-mismatch") == 0;
-        ok = ok && json_get(&result, "mirror_active_error_detail") != NULL &&
-            strcmp(json_get_str(json_get(&result,
-                                         "mirror_active_error_detail")),
-                   "connect failed") == 0;
-        ok = ok && json_get(&result, "candidate_blocker") != NULL &&
-            strcmp(json_get_str(json_get(&result, "candidate_blocker")),
-                   "body-hash-mismatch") == 0;
-        ok = ok && json_get(&result, "candidate_blocker_scope") != NULL &&
-            strcmp(json_get_str(json_get(
-                       &result, "candidate_blocker_scope")),
-                   "active_or_safety") == 0;
-        ok = ok && json_get(&result, "legacy_advisory_blocker") != NULL &&
-            strcmp(json_get_str(json_get(
-                       &result, "legacy_advisory_blocker")),
-                   "body-hash-mismatch") == 0;
-        ok = ok && json_get(&result, "mirror_blockers_total") != NULL &&
-            json_get_int(json_get(&result, "mirror_blockers_total")) == 1;
-        ok = ok && json_get(&result, "mirror_stalls_total") != NULL &&
-            json_get_int(json_get(&result, "mirror_stalls_total")) == 0;
-        ok = ok && json_get(&result,
-                            "mirror_unsafe_overrides_total") != NULL &&
-            json_get_int(json_get(&result,
-                                  "mirror_unsafe_overrides_total")) == 1;
-        ok = ok && json_get(&result, "mirror_last_override_safe") != NULL &&
-            !json_get_bool(json_get(&result, "mirror_last_override_safe"));
-        ok = ok && json_get(&result, "mirror_last_override_reason") != NULL &&
-            strcmp(json_get_str(json_get(&result,
-                                         "mirror_last_override_reason")),
-                   "body-hash-mismatch") == 0;
-        ok = ok && json_get(&result, "mirror_last_override_scope") != NULL &&
-            strcmp(json_get_str(json_get(&result,
-                                         "mirror_last_override_scope")),
-                   "unsafe_no_authorized_scope") == 0;
-        ok = ok && json_get(&result, "mirror_activation_blocker") != NULL &&
-            strcmp(json_get_str(json_get(&result,
-                                         "mirror_activation_blocker")),
-                   "body-hash-mismatch") == 0;
-        ok = ok && condition_engine && condition_engine->type == JSON_OBJ;
-        ok = ok && json_get(condition_engine, "registered_count") != NULL;
-        ok = ok && json_get(condition_engine, "active_count") != NULL;
-        ok = ok && json_get(condition_engine, "unresolved_count") != NULL;
-        ok = ok && json_get(condition_engine, "conditions") != NULL;
-        ok = ok && ce && ce->type == JSON_OBJ;
-        ok = ok && json_get(ce, "state") != NULL;
-        ok = ok && json_get(ce, "publish_state") != NULL;
-        ok = ok && json_get(ce, "active_tip_source_class") != NULL;
-        ok = ok && json_get(ce, "active_tip") != NULL;
-        ok = ok && json_get(ce, "header_tip") != NULL;
-        ok = ok && json_get(ce, "persisted_active_tip") != NULL;
-        ok = ok && json_get(ce, "utxo_max_height") != NULL;
-        ok = ok && json_get(ce, "coins_best_block_height") != NULL;
-        ok = ok && json_get(ce, "csr_sqlite_max_height") != NULL;
-        ok = ok && json_get(ce, "missing_active_tip_evidence") != NULL;
-        ok = ok && json_get(ce, "publish_state_not_local") != NULL;
-        ok = ok && json_get(ce, "active_tip_hash_mismatch") != NULL;
-        ok = ok && json_get(ce, "csr_cursor_mismatch") != NULL;
-        ok = ok && ca && ca->type == JSON_OBJ;
-        ok = ok && json_get(ca, "authority") != NULL;
-        ok = ok && json_get(ca, "decision") != NULL;
-        ok = ok && json_get(ca, "selected_source") != NULL;
-        ok = ok && json_get(ca, "selected_source_trust") != NULL;
-        ok = ok && json_get(ca, "mirror_fallback_allowed") != NULL;
-        ok = ok && json_get(ca, "activation_allowed") != NULL;
-        ok = ok && json_get(ca, "best_header_height") != NULL;
-        ok = ok && json_get(ca, "projection_height") != NULL;
-        ok = ok && json_get(ca, "projection_lag") != NULL;
-        ok = ok && json_get(ca, "projection_deferred") != NULL;
-        ok = ok && json_get(ca, "projection_state") != NULL;
-        ok = ok && json_get(ca, "projection_deferred_total") != NULL;
-        ok = ok && json_get(ca, "last_projection_deferred_height") != NULL;
-        ok = ok && json_get(ca, "last_projection_deferred_time") != NULL;
-        ok = ok && json_get(ca, "last_projection_deferred_reason") != NULL;
-        ok = ok && json_get(ca, "reason") != NULL;
-        ok = ok && json_get(ca, "initialized") != NULL;
-        ok = ok && json_get(ca, "has_connman") != NULL;
-        ok = ok && json_get(ca, "has_main_state") != NULL;
-        ok = ok && json_get(ca, "has_node_db") != NULL;
-        const struct json_value *sources =
-            ca ? json_get(ca, "sources") : NULL;
-        const struct json_value *current_snapshot =
-            find_source_json(sources, "snapshot");
-        ok = ok && sources && sources->type == JSON_ARR;
-        ok = ok && current_snapshot && current_snapshot->type == JSON_OBJ;
-        ok = ok && json_get(current_snapshot, "selectable") != NULL;
-        ok = ok && json_get(current_snapshot, "selection_blocker") != NULL;
-        ok = ok && json_get(current_snapshot,
-                            "score_target_lag_penalty") != NULL;
-        ok = ok && json_get(current_snapshot,
-                            "score_failure_penalty") != NULL;
-        const struct json_value *has_last = json_get(ca, "has_last_decision");
-        const struct json_value *last = json_get(ca, "last_decision");
-        ok = ok && has_last && json_get_bool(has_last);
-        ok = ok && last && last->type == JSON_OBJ;
-        ok = ok && json_get(last, "op") != NULL &&
-            strcmp(json_get_str(json_get(last, "op")),
-                   "snapshot_offer") == 0;
-        ok = ok && json_get(last, "selected_source_reason") != NULL &&
-            strcmp(json_get_str(json_get(last, "selected_source_reason")),
-                   "manifest_ok") == 0;
-        ok = ok && json_get(last, "selected_source_selectable") != NULL;
-        ok = ok && json_get_bool(json_get(
-            last, "selected_source_selectable"));
-        ok = ok && json_get(last,
-                            "selected_source_selection_blocker") != NULL;
-        ok = ok && strcmp(json_get_str(json_get(
-            last, "selected_source_selection_blocker")), "") == 0;
-        ok = ok && json_get(last, "selected_source_score_base") != NULL;
-        ok = ok && json_get_int(json_get(
-            last, "selected_source_score_base")) == 85;
-        ok = ok && json_get(last,
-                            "selected_source_score_target_lag_penalty")
-                 != NULL;
-        ok = ok && json_get_int(json_get(
-            last, "selected_source_score_target_lag_penalty")) == 25;
-        ok = ok && json_get(last,
-                            "selected_source_score_failure_penalty") != NULL;
-        ok = ok && json_get_int(json_get(
-            last, "selected_source_score_failure_penalty")) == 0;
-        const struct json_value *last_sources = json_get(last, "sources");
-        const struct json_value *snapshot =
-            find_source_json(last_sources, "snapshot");
-        ok = ok && last_sources && last_sources->type == JSON_ARR;
-        ok = ok && snapshot && snapshot->type == JSON_OBJ;
-        ok = ok && json_get(snapshot, "trust") != NULL &&
-            strcmp(json_get_str(json_get(snapshot, "trust")),
-                   "native_snapshot_proof_validated") == 0;
-        ok = ok && json_get(snapshot, "reason") != NULL &&
-            strcmp(json_get_str(json_get(snapshot, "reason")),
-                   "manifest_ok") == 0;
-
+        bool ok = hc_chain_advance_decision_ok(&params, &result);
         if (ok) printf("OK\n");
         else    { printf("FAIL\n"); failures++; }
         json_free(&params);
@@ -665,84 +770,9 @@ int syncdiag_cases_health(void)
 
     printf("healthcheck: default is bounded first-call JSON... ");
     {
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_event_rpc_commands(&tbl);
-        if (rpc_is_in_warmup(NULL, 0))
-            set_rpc_warmup_finished();
-
         struct json_value params;
-        json_init(&params);
-        json_set_array(&params);
-
         struct json_value result;
-        json_init(&result);
-
-        bool executed = rpc_table_execute(&tbl, "healthcheck",
-                                          &params, &result);
-        const struct json_value *checks = json_get(&result, "checks");
-        const struct json_value *agent = json_get(&result, "agent");
-        const struct json_value *ca =
-            checks ? json_get(checks, "chain_advance") : NULL;
-        bool ok = executed && result.type == JSON_OBJ;
-        ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
-                          "zcl.healthcheck.v1") == 0;
-        ok = ok && strcmp(json_get_str(json_get(&result,
-                          "consensus_authority")),
-                          "local_consensus_validation") == 0;
-        ok = ok && strcmp(json_get_str(json_get(&result,
-                          "candidate_source")),
-                          "agent_cached_summary") == 0;
-        ok = ok && strcmp(json_get_str(json_get(&result,
-                          "candidate_trust")),
-                          "bounded_cached_status") == 0;
-        ok = ok && strcmp(json_get_str(json_get(&result,
-                          "result_completeness")), "bounded") == 0;
-        ok = ok && json_get_bool(json_get(&result, "partial_result"));
-        const struct json_value *first_call =
-            json_get(&result, "first_call");
-        ok = ok && first_call && first_call->type == JSON_OBJ;
-        ok = ok && strcmp(json_get_str(json_get(first_call, "schema")),
-                          "zcl.first_call_contract.v1") == 0;
-        ok = ok && strcmp(json_get_str(json_get(first_call, "api")),
-                          "healthcheck") == 0;
-        ok = ok && strcmp(json_get_str(json_get(first_call,
-                          "result_completeness")), "bounded") == 0;
-        ok = ok && strcmp(json_get_str(json_get(first_call, "source")),
-                          "agent_cached_summary") == 0;
-        ok = ok && json_get_bool(json_get(first_call, "partial_result"));
-        ok = ok && json_get_int(json_get(first_call, "budget_ms")) == 500;
-        ok = ok && json_get(first_call, "elapsed_ms") != NULL;
-        ok = ok && json_get(first_call, "budget_exceeded") != NULL;
-        ok = ok && json_get(&result, "full_mode_command") != NULL;
-        ok = ok && json_get(&result, "healthy") != NULL;
-        ok = ok && json_get(&result, "serving") != NULL;
-        ok = ok && json_get(&result, "readiness_status") != NULL;
-        ok = ok && json_get(&result, "chain_serving_ready") != NULL;
-        ok = ok && json_get(&result, "height_contract_status") != NULL;
-        ok = ok && json_get(&result, "normal_lookahead") != NULL;
-        ok = ok && json_get(&result, "sync_fsm_at_tip") != NULL;
-        ok = ok && checks && checks->type == JSON_OBJ;
-        ok = ok && json_get_bool(json_get(checks, "bounded"));
-        ok = ok && json_get_bool(json_get(checks, "partial_result"));
-        ok = ok && json_get(checks, "height_contract_status") != NULL;
-        ok = ok && json_get(checks, "normal_lookahead") != NULL;
-        ok = ok && json_get(checks, "sync_fsm_at_tip") != NULL;
-        ok = ok && json_get(checks, "chain_serving_ready") != NULL;
-        ok = ok && json_get(checks, "serving_ready") != NULL;
-        ok = ok && json_get(checks, "index_projection_ready") != NULL;
-        ok = ok && json_get(checks, "agent_work_ready") != NULL;
-        ok = ok && json_get(checks, "peer_count") != NULL;
-        ok = ok && json_get(checks, "log_head") != NULL;
-        ok = ok && json_get(checks, "chain_evidence") == NULL;
-        ok = ok && ca && ca->type == JSON_OBJ;
-        ok = ok && strcmp(json_get_str(json_get(ca, "source")),
-                          "cached_first_call") == 0;
-        ok = ok && json_get(ca, "block_source_status_cached") != NULL;
-        ok = ok && agent && agent->type == JSON_OBJ;
-        ok = ok && strcmp(json_get_str(json_get(agent, "schema")),
-                          "zcl.public_status.v3") == 0;
-
+        bool ok = hc_bounded_first_call_ok(&params, &result);
         if (ok) printf("OK\n");
         else    { printf("FAIL\n"); failures++; }
         json_free(&params);

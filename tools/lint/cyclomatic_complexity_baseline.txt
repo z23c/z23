@@ -1728,7 +1728,6 @@ tests/harness/src/test_supervisor.c:test_supervisor:84
 tests/harness/src/test_supervisor_production_tree.c:test_supervisor_production_tree:43
 tests/harness/src/test_sync_rate_below_floor.c:test_sync_rate_below_floor:36
 tests/harness/src/test_sync_watchdog_conditions.c:test_sync_watchdog_conditions:150
-tests/harness/src/test_syncdiag_health.c:syncdiag_cases_health:314
 tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:367
 tests/harness/src/test_telemetry_network.c:check_fill_completeness:18
 tests/harness/src/test_telemetry_network.c:check_meaning_rows:23
