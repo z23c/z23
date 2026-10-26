@@ -227,13 +227,10 @@ static enum vcs_zcode_creation_error creation_write(
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out,
                           VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES);
-    /* The roots transfer takes non-const field addresses; this copy is only
-     * read. */
-    struct vcs_zcode_creation_attribution_v1 fields;
-    memcpy(&fields, a, sizeof(fields));
     bool ok = creation_write_header(&writer, a) &&
         creation_write_challenge(&writer, a) &&
-        creation_transfer_roots(&writer, NULL, &fields);
+        creation_transfer_roots(&writer, NULL,
+            (struct vcs_zcode_creation_attribution_v1 *)a);
     size_t written = 0;
     if (!ok || !zcl_codec_writer_finish(&writer, &written) ||
         written != VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES)
