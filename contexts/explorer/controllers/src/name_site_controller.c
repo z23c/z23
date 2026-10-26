@@ -167,7 +167,7 @@ bool rpc_name_records(const struct json_value *params, bool help,
     if (help || !params || json_size(params) < 1) {
         json_set_str(result,
             "name_records \"name\"\n"
-            "\nList a registered ZCL Names' resolver records (text +\n"
+            "\nList a registered ZCL Name's resolver records (text +\n"
             "multi-coin address records — the name's has_many relationship).\n"
             "\nArguments:\n"
             "1. name (string, required) The name whose records to list\n"
