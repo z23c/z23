@@ -1505,7 +1505,6 @@ tests/harness/src/test_file_market_moderation.c:test_mmt_view_filter:38
 tests/harness/src/test_file_market_purchase.c:file_market_purchase_tests:103
 tests/harness/src/test_file_market_purchase.c:purchase_fetch:17
 tests/harness/src/test_file_market_purchase.c:purchase_send:18
-tests/harness/src/test_fingerprint.c:test_fingerprint:53
 tests/harness/src/test_fleet_board.c:fb_rpc_verify_item:17
 tests/harness/src/test_fleet_board.c:test_fleet_board_rpc_verification:31
 tests/harness/src/test_fleet_ledger.c:test_fleet_ledger:40

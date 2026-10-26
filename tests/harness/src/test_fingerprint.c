@@ -191,18 +191,17 @@ static const struct fp_candidate *fx_find(const struct fp_candidate *c, long n,
     return NULL;
 }
 
-int test_fingerprint(void)
+/* REPRODUCIBLE: the same function twice, then the same behavior spelled
+ * differently at a different optimisation level. Hands the rotate-by-n
+ * reference fingerprint back for the separation checks. */
+static int fx_check_reproducible_fingerprints(uint64_t shape, uint64_t *ref1,
+                                              uint64_t *ref2)
 {
     int failures = 0;
-    const uint64_t shape = 0x0123456789ABCDEFull;
     uint64_t a1 = 0;
     uint64_t a2 = 0;
     uint64_t b1 = 0;
     uint64_t b2 = 0;
-    uint64_t c1 = 0;
-    uint64_t c2 = 0;
-    uint64_t d1 = 0;
-    uint64_t d2 = 0;
 
     printf("fingerprint reproducible across two computations... ");
     fx_fingerprint(fx_rot_o0, shape, &a1, &a2);
@@ -229,9 +228,26 @@ int test_fingerprint(void)
         failures++;
     }
 
+    *ref1 = a1;
+    *ref2 = a2;
+    return failures;
+}
+
+/* SENSITIVE and DISCRIMINATING: a one-character change moves the
+ * fingerprint, an unrelated function of the same shape does not collide,
+ * and the corpus follows the SHAPE, not the function. */
+static int fx_check_fingerprint_separation(uint64_t shape, uint64_t ref1,
+                                           uint64_t ref2)
+{
+    int failures = 0;
+    uint64_t c1 = 0;
+    uint64_t c2 = 0;
+    uint64_t d1 = 0;
+    uint64_t d2 = 0;
+
     printf("a deliberate behavior change moves the fingerprint... ");
     fx_fingerprint(fx_rot_changed, shape, &c1, &c2);
-    if (c1 != a1 || c2 != a2) {
+    if (c1 != ref1 || c2 != ref2) {
         printf("OK\n");
     } else {
         printf("FAIL (a rotate-by-n+1 fingerprinted the same as rotate-by-n)\n");
@@ -240,7 +256,7 @@ int test_fingerprint(void)
 
     printf("two different functions of one shape do not collide... ");
     fx_fingerprint(fx_unrelated, shape, &d1, &d2);
-    if ((d1 != a1 || d2 != a2) && (d1 != c1 || d2 != c2)) {
+    if ((d1 != ref1 || d2 != ref2) && (d1 != c1 || d2 != c2)) {
         printf("OK\n");
     } else {
         printf("FAIL (unrelated functions produced an equal fingerprint)\n");
@@ -254,7 +270,7 @@ int test_fingerprint(void)
         /* A different shape reseeds the corpus, so the same function under
          * another shape must not fingerprint the same. */
         fx_fingerprint(fx_rot_o0, shape ^ 1ull, &e1, &e2);
-        if (e1 != a1 || e2 != a2) {
+        if (e1 != ref1 || e2 != ref2) {
             printf("OK\n");
         } else {
             printf("FAIL (the shape does not reach the input generator)\n");
@@ -262,190 +278,263 @@ int test_fingerprint(void)
         }
     }
 
-    /* ── candidate selection over a real fixture tree ── */
-    {
-        char dir[PATH_MAX];
-        const char *files[3];
-        struct fp_index *ix = NULL;
-        struct fp_candidate *cands = NULL;
-        size_t tally[FP_V_COUNT];
-        long n = -1;
+    return failures;
+}
 
-        test_make_tmpdir(dir, sizeof dir, "fingerprint", "select");
-        printf("fixture tree scans... ");
-        if (!fx_write(dir, "fx.h", k_fixture_h) ||
-            !fx_write(dir, "fx.c", k_fixture_c) ||
-            !fx_write(dir, "fxmain.c", k_fixture_main_c)) {
-            printf("FAIL (could not write the fixture tree)\n");
+/* FAIL-CLOSED, the admission half: the pure functions are candidates and
+ * the impure ones are refused outright. */
+static int fx_check_candidate_admission(const struct fp_candidate *cands,
+                                        long n)
+{
+    int failures = 0;
+
+    printf("a pure function is a candidate... ");
+    if (fx_is_candidate(cands, n, "fx_pure_double")) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (fx_pure_double was not selected)\n");
+        failures++;
+    }
+
+    printf("a pure function calling a pure function is a candidate... ");
+    if (fx_is_candidate(cands, n, "fx_calls_pure")) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (fx_calls_pure was not selected)\n");
+        failures++;
+    }
+
+    printf("an impure function is REFUSED, not fingerprinted... ");
+    {
+        int bad = 0;
+        if (fx_is_candidate(cands, n, "fx_reads_global")) bad++;
+        if (fx_is_candidate(cands, n, "fx_allocates")) bad++;
+        if (fx_is_candidate(cands, n, "fx_has_static")) bad++;
+        if (fx_is_candidate(cands, n, "fx_variadic")) bad++;
+        if (bad == 0) {
+            printf("OK (global read, allocation, function static and "
+                   "variadic all refused)\n");
+        } else {
+            printf("FAIL (%d impure function(s) were selected)\n", bad);
+            failures++;
+        }
+    }
+
+    return failures;
+}
+
+/* FAIL-CLOSED, the accounting half: every refusal above is counted under
+ * its specific named reason. */
+static int fx_check_refusal_reasons(const size_t *tally)
+{
+    int failures = 0;
+
+    printf("each refusal names a specific reason... ");
+    if (tally[FP_V_IMPURE_GLOBAL] >= 1u &&
+        tally[FP_V_UNRESOLVED_CALL] >= 1u &&
+        tally[FP_V_FUNCTION_STATIC] >= 1u &&
+        tally[FP_V_VARIADIC] >= 1u) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (global=%zu unresolved=%zu fnstatic=%zu "
+               "variadic=%zu)\n", tally[FP_V_IMPURE_GLOBAL],
+               tally[FP_V_UNRESOLVED_CALL],
+               tally[FP_V_FUNCTION_STATIC], tally[FP_V_VARIADIC]);
+        failures++;
+    }
+
+    return failures;
+}
+
+/* FILE-LOCAL REACH: a pure static is routed through its defining unit
+ * while an externally linkable function still goes through its header. */
+static int fx_check_candidate_routing(const struct fp_candidate *cands,
+                                      long n)
+{
+    int failures = 0;
+
+    /* A file-local function has no external linkage, so the probe
+     * compiles against its defining unit and the candidate says so
+     * (emission, link-failure attribution and per-route accounting
+     * key off that flag). */
+    printf("a pure static function is now a candidate, reached by "
+           "including its unit... ");
+    {
+        const struct fp_candidate *c =
+            fx_find(cands, n, "fx_local_only");
+        if (c != NULL && c->via_source &&
+            strcmp(c->include, "fx.c") == 0) {
+            printf("OK (include \"%s\")\n", c->include);
+        } else if (c == NULL) {
+            printf("FAIL (a pure static was not selected at all)\n");
             failures++;
         } else {
-            files[0] = "fx.h";
-            files[1] = "fx.c";
-            files[2] = "fxmain.c";
-            ix = fp_index_build(dir, files, 3);
-            cands = (struct fp_candidate *)calloc(64, sizeof *cands);
-            if (ix == NULL || cands == NULL) {
-                printf("FAIL (index build)\n");
-                failures++;
-            } else {
-                n = fp_index_select(ix, cands, 64, tally);
-                printf("OK (%zu definitions, %ld candidates)\n",
-                       fp_index_function_count(ix), n);
-            }
+            printf("FAIL (selected but routed through \"%s\", "
+                   "via_source=%d — a static is not callable that "
+                   "way)\n", c->include, (int)c->via_source);
+            failures++;
         }
-
-        if (n >= 0) {
-            printf("a pure function is a candidate... ");
-            if (fx_is_candidate(cands, n, "fx_pure_double")) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (fx_pure_double was not selected)\n");
-                failures++;
-            }
-
-            printf("a pure function calling a pure function is a candidate... ");
-            if (fx_is_candidate(cands, n, "fx_calls_pure")) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (fx_calls_pure was not selected)\n");
-                failures++;
-            }
-
-            printf("an impure function is REFUSED, not fingerprinted... ");
-            {
-                int bad = 0;
-                if (fx_is_candidate(cands, n, "fx_reads_global")) bad++;
-                if (fx_is_candidate(cands, n, "fx_allocates")) bad++;
-                if (fx_is_candidate(cands, n, "fx_has_static")) bad++;
-                if (fx_is_candidate(cands, n, "fx_variadic")) bad++;
-                if (bad == 0) {
-                    printf("OK (global read, allocation, function static and "
-                           "variadic all refused)\n");
-                } else {
-                    printf("FAIL (%d impure function(s) were selected)\n", bad);
-                    failures++;
-                }
-            }
-
-            printf("each refusal names a specific reason... ");
-            if (tally[FP_V_IMPURE_GLOBAL] >= 1u &&
-                tally[FP_V_UNRESOLVED_CALL] >= 1u &&
-                tally[FP_V_FUNCTION_STATIC] >= 1u &&
-                tally[FP_V_VARIADIC] >= 1u) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (global=%zu unresolved=%zu fnstatic=%zu "
-                       "variadic=%zu)\n", tally[FP_V_IMPURE_GLOBAL],
-                       tally[FP_V_UNRESOLVED_CALL],
-                       tally[FP_V_FUNCTION_STATIC], tally[FP_V_VARIADIC]);
-                failures++;
-            }
-
-            /* A file-local function has no external linkage, so the probe
-             * compiles against its defining unit and the candidate says so
-             * (emission, link-failure attribution and per-route accounting
-             * key off that flag). */
-            printf("a pure static function is now a candidate, reached by "
-                   "including its unit... ");
-            {
-                const struct fp_candidate *c =
-                    fx_find(cands, n, "fx_local_only");
-                if (c != NULL && c->via_source &&
-                    strcmp(c->include, "fx.c") == 0) {
-                    printf("OK (include \"%s\")\n", c->include);
-                } else if (c == NULL) {
-                    printf("FAIL (a pure static was not selected at all)\n");
-                    failures++;
-                } else {
-                    printf("FAIL (selected but routed through \"%s\", "
-                           "via_source=%d — a static is not callable that "
-                           "way)\n", c->include, (int)c->via_source);
-                    failures++;
-                }
-            }
-
-            printf("an externally linkable function still goes through its "
-                   "header, not its unit... ");
-            {
-                const struct fp_candidate *c =
-                    fx_find(cands, n, "fx_pure_double");
-                if (c != NULL && !c->via_source &&
-                    strcmp(c->include, "fx.h") == 0) {
-                    printf("OK\n");
-                } else {
-                    printf("FAIL (the header route was not preferred)\n");
-                    failures++;
-                }
-            }
-
-            /* Impurity is judged identically on both routes: a file-local
-             * function reading its unit's mutable file-scope object is
-             * refused by that named reason. */
-            printf("a static function touching file-scope state is still "
-                   "REFUSED, with a named reason... ");
-            {
-                int bad = 0;
-                if (fx_is_candidate(cands, n, "fx_local_reads_global")) bad++;
-                if (fx_is_candidate(cands, n, "fx_local_has_static")) bad++;
-                if (fx_is_candidate(cands, n, "fx_local_allocates")) bad++;
-                /* And the refusal must propagate: a caller of an impure
-                 * static is impure too. */
-                if (fx_is_candidate(cands, n, "fx_uses_local_global")) bad++;
-                if (fx_is_candidate(cands, n, "fx_uses_local_static")) bad++;
-                if (fx_is_candidate(cands, n, "fx_uses_local_alloc")) bad++;
-                if (bad != 0) {
-                    printf("FAIL (%d impure file-local function(s) or their "
-                           "callers reached the candidate set)\n", bad);
-                    failures++;
-                } else if (tally[FP_V_IMPURE_GLOBAL] < 2u ||
-                           tally[FP_V_FUNCTION_STATIC] < 2u ||
-                           tally[FP_V_UNRESOLVED_CALL] < 2u) {
-                    printf("FAIL (refused, but the reasons were not counted: "
-                           "global=%zu fnstatic=%zu unresolved=%zu)\n",
-                           tally[FP_V_IMPURE_GLOBAL],
-                           tally[FP_V_FUNCTION_STATIC],
-                           tally[FP_V_UNRESOLVED_CALL]);
-                    failures++;
-                } else {
-                    printf("OK\n");
-                }
-            }
-
-            /* A unit that owns main() cannot be included (the driver has its
-             * own main()); a pure static in it is unreachable and says so. */
-            printf("a static in a unit that owns main() is still refused for "
-                   "linkage... ");
-            if (!fx_is_candidate(cands, n, "fx_unreachable_pure") &&
-                tally[FP_V_STATIC_LINKAGE] >= 1u) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (a static in a main()-owning unit reached the "
-                       "candidate set; STATIC_LINKAGE=%zu)\n",
-                       tally[FP_V_STATIC_LINKAGE]);
-                failures++;
-            }
-
-            printf("the verdicts partition every definition found... ");
-            {
-                size_t sum = 0;
-                size_t i;
-                for (i = 0; i < (size_t)FP_V_COUNT; i++)
-                    sum += tally[i];
-                if (sum == fp_index_function_count(ix)) {
-                    printf("OK (%zu)\n", sum);
-                } else {
-                    printf("FAIL (verdicts %zu vs definitions %zu — the "
-                           "coverage number would not be an accounting)\n",
-                           sum, fp_index_function_count(ix));
-                    failures++;
-                }
-            }
-        }
-
-        free(cands);
-        fp_index_free(ix);
-        test_cleanup_tmpdir(dir);
     }
+
+    printf("an externally linkable function still goes through its "
+           "header, not its unit... ");
+    {
+        const struct fp_candidate *c =
+            fx_find(cands, n, "fx_pure_double");
+        if (c != NULL && !c->via_source &&
+            strcmp(c->include, "fx.h") == 0) {
+            printf("OK\n");
+        } else {
+            printf("FAIL (the header route was not preferred)\n");
+            failures++;
+        }
+    }
+
+    return failures;
+}
+
+/* FILE-LOCAL REACH WITHOUT LOSING PURITY: impure statics are refused on
+ * the source route too, their callers with them, and the reasons count. */
+static int fx_check_filelocal_impurity(const struct fp_candidate *cands,
+                                       long n, const size_t *tally)
+{
+    int failures = 0;
+
+    /* Impurity is judged identically on both routes: a file-local
+     * function reading its unit's mutable file-scope object is
+     * refused by that named reason. */
+    printf("a static function touching file-scope state is still "
+           "REFUSED, with a named reason... ");
+    {
+        int bad = 0;
+        if (fx_is_candidate(cands, n, "fx_local_reads_global")) bad++;
+        if (fx_is_candidate(cands, n, "fx_local_has_static")) bad++;
+        if (fx_is_candidate(cands, n, "fx_local_allocates")) bad++;
+        /* And the refusal must propagate: a caller of an impure
+         * static is impure too. */
+        if (fx_is_candidate(cands, n, "fx_uses_local_global")) bad++;
+        if (fx_is_candidate(cands, n, "fx_uses_local_static")) bad++;
+        if (fx_is_candidate(cands, n, "fx_uses_local_alloc")) bad++;
+        if (bad != 0) {
+            printf("FAIL (%d impure file-local function(s) or their "
+                   "callers reached the candidate set)\n", bad);
+            failures++;
+        } else if (tally[FP_V_IMPURE_GLOBAL] < 2u ||
+                   tally[FP_V_FUNCTION_STATIC] < 2u ||
+                   tally[FP_V_UNRESOLVED_CALL] < 2u) {
+            printf("FAIL (refused, but the reasons were not counted: "
+                   "global=%zu fnstatic=%zu unresolved=%zu)\n",
+                   tally[FP_V_IMPURE_GLOBAL],
+                   tally[FP_V_FUNCTION_STATIC],
+                   tally[FP_V_UNRESOLVED_CALL]);
+            failures++;
+        } else {
+            printf("OK\n");
+        }
+    }
+
+    return failures;
+}
+
+/* The two closed ends of the accounting: a static in a main()-owning unit
+ * is refused for linkage, and the verdicts partition every definition. */
+static int fx_check_selection_accounting(const struct fp_candidate *cands,
+                                         long n, const size_t *tally,
+                                         struct fp_index *ix)
+{
+    int failures = 0;
+
+    /* A unit that owns main() cannot be included (the driver has its
+     * own main()); a pure static in it is unreachable and says so. */
+    printf("a static in a unit that owns main() is still refused for "
+           "linkage... ");
+    if (!fx_is_candidate(cands, n, "fx_unreachable_pure") &&
+        tally[FP_V_STATIC_LINKAGE] >= 1u) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (a static in a main()-owning unit reached the "
+               "candidate set; STATIC_LINKAGE=%zu)\n",
+               tally[FP_V_STATIC_LINKAGE]);
+        failures++;
+    }
+
+    printf("the verdicts partition every definition found... ");
+    {
+        size_t sum = 0;
+        size_t i;
+        for (i = 0; i < (size_t)FP_V_COUNT; i++)
+            sum += tally[i];
+        if (sum == fp_index_function_count(ix)) {
+            printf("OK (%zu)\n", sum);
+        } else {
+            printf("FAIL (verdicts %zu vs definitions %zu — the "
+                   "coverage number would not be an accounting)\n",
+                   sum, fp_index_function_count(ix));
+            failures++;
+        }
+    }
+
+    return failures;
+}
+
+/* ── candidate selection over a real fixture tree ── */
+static int fx_scan_fixture_tree(void)
+{
+    char dir[PATH_MAX];
+    const char *files[3];
+    struct fp_index *ix = NULL;
+    struct fp_candidate *cands = NULL;
+    size_t tally[FP_V_COUNT];
+    long n = -1;
+    int failures = 0;
+
+    test_make_tmpdir(dir, sizeof dir, "fingerprint", "select");
+    printf("fixture tree scans... ");
+    if (!fx_write(dir, "fx.h", k_fixture_h) ||
+        !fx_write(dir, "fx.c", k_fixture_c) ||
+        !fx_write(dir, "fxmain.c", k_fixture_main_c)) {
+        printf("FAIL (could not write the fixture tree)\n");
+        failures++;
+    } else {
+        files[0] = "fx.h";
+        files[1] = "fx.c";
+        files[2] = "fxmain.c";
+        ix = fp_index_build(dir, files, 3);
+        cands = (struct fp_candidate *)calloc(64, sizeof *cands);
+        if (ix == NULL || cands == NULL) {
+            printf("FAIL (index build)\n");
+            failures++;
+        } else {
+            n = fp_index_select(ix, cands, 64, tally);
+            printf("OK (%zu definitions, %ld candidates)\n",
+                   fp_index_function_count(ix), n);
+        }
+    }
+
+    if (n >= 0) {
+        failures += fx_check_candidate_admission(cands, n);
+        failures += fx_check_refusal_reasons(tally);
+        failures += fx_check_candidate_routing(cands, n);
+        failures += fx_check_filelocal_impurity(cands, n, tally);
+        failures += fx_check_selection_accounting(cands, n, tally, ix);
+    }
+
+    free(cands);
+    fp_index_free(ix);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+int test_fingerprint(void)
+{
+    int failures = 0;
+    const uint64_t shape = 0x0123456789ABCDEFull;
+    uint64_t a1 = 0;
+    uint64_t a2 = 0;
+
+    failures += fx_check_reproducible_fingerprints(shape, &a1, &a2);
+    failures += fx_check_fingerprint_separation(shape, a1, a2);
+    failures += fx_scan_fixture_tree();
 
     return failures;
 }
