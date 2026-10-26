@@ -272,22 +272,6 @@ static int test_core_getrandbytes_abort(void)
 #endif
 }
 
-static int test_core_compact_value_roundtrip(uint64_t value)
-{
-    int failures = 0;
-    struct byte_stream ws;
-    stream_init(&ws, 64);
-    stream_write_compact_size(&ws, value);
-    struct byte_stream rs;
-    stream_init_from_data(&rs, ws.data, ws.size);
-    uint64_t val = 0;
-    bool ok = stream_read_compact_size(&rs, &val) && val == value;
-    stream_free(&ws);
-    if (ok) printf("OK\n");
-    else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
-    return failures;
-}
-
 static int test_core_rand_recover_and_compact_size(void)
 {
     int failures = 0;
@@ -309,13 +293,53 @@ static int test_core_rand_recover_and_compact_size(void)
      * compact_size: canonical encoding roundtrip
      * ================================================================ */
     printf("compact_size: small value roundtrip... ");
-    failures += test_core_compact_value_roundtrip(42);
+    {
+        struct byte_stream ws;
+        stream_init(&ws, 64);
+        stream_write_compact_size(&ws, 42);
+        struct byte_stream rs;
+        stream_init_from_data(&rs, ws.data, ws.size);
+        uint64_t val = 0;
+        bool ok = stream_read_compact_size(&rs, &val) && val == 42;
+        stream_free(&ws);
+        if (ok) printf("OK\n");
+        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
+    }
 
     printf("compact_size: 16-bit value roundtrip... ");
-    failures += test_core_compact_value_roundtrip(1000);
+    {
+        struct byte_stream ws;
+        stream_init(&ws, 64);
+        stream_write_compact_size(&ws, 1000);
+        struct byte_stream rs;
+        stream_init_from_data(&rs, ws.data, ws.size);
+        uint64_t val = 0;
+        bool ok = stream_read_compact_size(&rs, &val) && val == 1000;
+        stream_free(&ws);
+        if (ok) printf("OK\n");
+        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
+    }
 
     printf("compact_size: 32-bit value roundtrip... ");
-    failures += test_core_compact_value_roundtrip(100000);
+    {
+        struct byte_stream ws;
+        stream_init(&ws, 64);
+        stream_write_compact_size(&ws, 100000);
+        struct byte_stream rs;
+        stream_init_from_data(&rs, ws.data, ws.size);
+        uint64_t val = 0;
+        bool ok = stream_read_compact_size(&rs, &val) && val == 100000;
+        stream_free(&ws);
+        if (ok) printf("OK\n");
+        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
+    }
+
+    return failures;
+}
+
+static int test_core_compact_edge_values(void)
+{
+    int failures = 0;
 
     printf("compact_size: accepts non-canonical encoding (wire compat)... ");
     {
@@ -331,10 +355,32 @@ static int test_core_rand_recover_and_compact_size(void)
     }
 
     printf("compact_size: 64-bit value roundtrip... ");
-    failures += test_core_compact_value_roundtrip(0x200000000ULL);
+    {
+        struct byte_stream ws;
+        stream_init(&ws, 64);
+        stream_write_compact_size(&ws, 0x200000000ULL);
+        struct byte_stream rs;
+        stream_init_from_data(&rs, ws.data, ws.size);
+        uint64_t val = 0;
+        bool ok = stream_read_compact_size(&rs, &val) && val == 0x200000000ULL;
+        stream_free(&ws);
+        if (ok) printf("OK\n");
+        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
+    }
 
     printf("compact_size: boundary value 253 roundtrip... ");
-    failures += test_core_compact_value_roundtrip(253);
+    {
+        struct byte_stream ws;
+        stream_init(&ws, 64);
+        stream_write_compact_size(&ws, 253);
+        struct byte_stream rs;
+        stream_init_from_data(&rs, ws.data, ws.size);
+        uint64_t val = 0;
+        bool ok = stream_read_compact_size(&rs, &val) && val == 253;
+        stream_free(&ws);
+        if (ok) printf("OK\n");
+        else { printf("FAIL (val=%llu)\n", (unsigned long long)val); failures++; }
+    }
 
     return failures;
 }
@@ -409,6 +455,7 @@ int test_core(void)
     failures += test_core_compact_edges_and_getrand();
     failures += test_core_getrandbytes_abort();
     failures += test_core_rand_recover_and_compact_size();
+    failures += test_core_compact_edge_values();
     failures += test_core_stream_grow_and_varint();
     return failures;
 }
