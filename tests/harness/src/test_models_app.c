@@ -28,30 +28,6 @@ static bool fixture_rm_ok(const char *dir)
     return lstat(dir, &st) != 0 && errno == ENOENT;
 }
 
-/* Open a throwaway node db, run one model check, then remove the directory.
- * The check runs only after a successful open. Removal always runs. */
-static bool models_app_db_case(const char *leaf,
-                               bool (*check)(struct node_db *ndb))
-{
-    char dbdir[256];
-    char dbpath[320];
-    struct node_db ndb;
-    bool ok;
-
-    test_make_tmpdir(dbdir, sizeof(dbdir), "models_app", leaf);
-    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
-    memset(&ndb, 0, sizeof(ndb));
-    ok = node_db_open(&ndb, dbpath);
-    if (ok) {
-        ok = check(&ndb);
-        node_db_close(&ndb);
-    }
-    ok &= fixture_rm_ok(dbdir);
-    if (ok) printf("OK\n");
-    else printf("FAIL\n");
-    return ok;
-}
-
 static bool swap_contract_rejects_empty_accepts_valid(void)
 {
     struct swap_contract bad, good;
@@ -677,6 +653,64 @@ static bool wallet_label_round_trip(struct node_db *ndb)
     return wallet_label_clears_label(ndb, ok);
 }
 
+/* Ids select a direct call. A function-pointer check is not a call edge, so
+ * the inventory would stop crediting the model symbols these cases reach. */
+enum models_app_case {
+    MODELS_APP_CASE_CONTACTS = 1,
+    MODELS_APP_CASE_CONTACT_TRIM,
+    MODELS_APP_CASE_ONION,
+    MODELS_APP_CASE_ONION_RECENT,
+    MODELS_APP_CASE_STORE,
+    MODELS_APP_CASE_FILE_SERVICES,
+    MODELS_APP_CASE_PEERS,
+    MODELS_APP_CASE_WALLET_LABEL
+};
+
+static bool models_app_call_model_check(enum models_app_case kind,
+                                        struct node_db *ndb)
+{
+    if (kind == MODELS_APP_CASE_CONTACTS)
+        return contact_validates_and_orders_recent(ndb);
+    if (kind == MODELS_APP_CASE_CONTACT_TRIM)
+        return contact_trims_whitespace_before_save(ndb);
+    if (kind == MODELS_APP_CASE_ONION)
+        return onion_announcement_validates_and_persists(ndb);
+    if (kind == MODELS_APP_CASE_ONION_RECENT)
+        return onion_announcement_normalizes_and_lists(ndb);
+    if (kind == MODELS_APP_CASE_STORE)
+        return store_product_and_order_persist(ndb);
+    if (kind == MODELS_APP_CASE_FILE_SERVICES)
+        return file_service_normalizes_and_orders(ndb);
+    if (kind == MODELS_APP_CASE_PEERS)
+        return peer_normalizes_and_orders(ndb);
+    if (kind == MODELS_APP_CASE_WALLET_LABEL)
+        return wallet_label_round_trip(ndb);
+    return false;
+}
+
+/* Open a throwaway node db, run one model check, then remove the directory.
+ * The check runs only after a successful open. Removal always runs. */
+static bool models_app_db_case(const char *leaf, enum models_app_case kind)
+{
+    char dbdir[256];
+    char dbpath[320];
+    struct node_db ndb;
+    bool ok;
+
+    test_make_tmpdir(dbdir, sizeof(dbdir), "models_app", leaf);
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
+    memset(&ndb, 0, sizeof(ndb));
+    ok = node_db_open(&ndb, dbpath);
+    if (ok) {
+        ok = models_app_call_model_check(kind, &ndb);
+        node_db_close(&ndb);
+    }
+    ok &= fixture_rm_ok(dbdir);
+    if (ok) printf("OK\n");
+    else printf("FAIL\n");
+    return ok;
+}
+
 int test_model_app(void)
 {
     int failures = 0;
@@ -688,29 +722,25 @@ int test_model_app(void)
     failures += !hodl_wave_older_than_1y_percent_guards_zero();
 
     printf("Contact model validates and orders recent contacts... ");
-    failures += !models_app_db_case("contacts",
-                                    contact_validates_and_orders_recent);
+    failures += !models_app_db_case("contacts", MODELS_APP_CASE_CONTACTS);
     printf("Contact model trims whitespace before save... ");
     failures += !models_app_db_case("contact_trim",
-                                    contact_trims_whitespace_before_save);
+                                    MODELS_APP_CASE_CONTACT_TRIM);
     printf("Onion announcement model validates suffix and persists... ");
-    failures += !models_app_db_case("onion",
-                                    onion_announcement_validates_and_persists);
+    failures += !models_app_db_case("onion", MODELS_APP_CASE_ONION);
     printf("Onion announcement model normalizes and lists recent rows... ");
     failures += !models_app_db_case("onion_recent",
-                                    onion_announcement_normalizes_and_lists);
+                                    MODELS_APP_CASE_ONION_RECENT);
     printf("Store product/order models validate and persist... ");
-    failures += !models_app_db_case("store",
-                                    store_product_and_order_persist);
+    failures += !models_app_db_case("store", MODELS_APP_CASE_STORE);
     printf("File service model normalizes defaults and orders recent rows... ");
     failures += !models_app_db_case("file_services",
-                                    file_service_normalizes_and_orders);
+                                    MODELS_APP_CASE_FILE_SERVICES);
     printf("Peer model normalizes defaults and orders recent rows... ");
-    failures += !models_app_db_case("peers",
-                                    peer_normalizes_and_orders);
+    failures += !models_app_db_case("peers", MODELS_APP_CASE_PEERS);
     printf("Wallet label model sets, reads back, relabels, and lists cleanly... ");
     failures += !models_app_db_case("wallet_label",
-                                    wallet_label_round_trip);
+                                    MODELS_APP_CASE_WALLET_LABEL);
 
     return failures;
 }
