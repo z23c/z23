@@ -119,6 +119,25 @@ static sqlite3 *xck_open_ro(const char *datadir, const char *fname)
 
 /* ── in-memory selected-chain block_index from copy node.db ─────────── */
 
+/* The `blocks` row's hash and merkle_root blobs must both be present and
+ * 32 bytes wide (columns 0 and 2, same short-circuit order as the old
+ * inline check). */
+static bool xck_row_width_ok(const void *hash, const void *merkle,
+                             sqlite3_stmt *st)
+{
+    return hash && sqlite3_column_bytes(st, 0) == 32 && merkle &&
+           sqlite3_column_bytes(st, 2) == 32;
+}
+
+/* The row's prev_hash blob (column 1) must be present, 32 bytes wide, and
+ * equal to the previous node's block hash. */
+static bool xck_prev_hash_matches(const void *prev, sqlite3_stmt *st,
+                                  const struct block_index *prev_node)
+{
+    return prev && sqlite3_column_bytes(st, 1) == 32 &&
+           memcmp(prev, prev_node->hashBlock.data, 32) == 0;
+}
+
 static bool xck_build_index(sqlite3 *cdb, int64_t checkpoint,
                             struct block_index **nodes_out, size_t *count_out)
 {
@@ -158,8 +177,7 @@ static bool xck_build_index(sqlite3 *cdb, int64_t checkpoint,
         const void *hash = sqlite3_column_blob(st, 0);
         const void *prev = sqlite3_column_blob(st, 1);
         const void *merkle = sqlite3_column_blob(st, 2);
-        if (!hash || sqlite3_column_bytes(st, 0) != 32 ||
-            !merkle || sqlite3_column_bytes(st, 2) != 32) {
+        if (!xck_row_width_ok(hash, merkle, st)) {
             LOG_WARN(XCK_SUBSYS, "build_index: bad row width h=%lld",
                      (long long)h);
             ok = false;
@@ -176,9 +194,7 @@ static bool xck_build_index(sqlite3 *cdb, int64_t checkpoint,
         bi->nDataPos = (unsigned int)sqlite3_column_int64(st, 4);
         bi->nStatus = (unsigned int)(BLOCK_VALID_TREE | BLOCK_HAVE_DATA);
         bi->pprev = (h > 0) ? &nodes[h - 1] : NULL;
-        if (h > 0 &&
-            (!prev || sqlite3_column_bytes(st, 1) != 32 ||
-             memcmp(prev, nodes[h - 1].hashBlock.data, 32) != 0)) {
+        if (h > 0 && !xck_prev_hash_matches(prev, st, &nodes[h - 1])) {
             LOG_WARN(XCK_SUBSYS, "build_index: prev-linkage break at h=%lld",
                      (long long)h);
             ok = false;
@@ -593,6 +609,119 @@ static bool xck_nf_sets_equal(const struct xck_nf *B, size_t nB,
     return true;
 }
 
+/* ── entry-point helpers ────────────────────────────────────────────── */
+
+/* Zero the caller's verdict struct; out may be NULL until the args check. */
+static void xck_reset_result(struct crosscheck_result *out)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+}
+
+/* Run contract: non-NULL datadirs and out, checkpoint within [0, INT_MAX]. */
+static bool xck_args_valid(const char *copy_datadir,
+                           const char *producer_datadir,
+                           int64_t checkpoint_height,
+                           const struct crosscheck_result *out)
+{
+    return copy_datadir && producer_datadir && out && checkpoint_height >= 0 &&
+           checkpoint_height <= INT_MAX;
+}
+
+/* Resolve the producer's kernel-store file name (consensus.db post-flip,
+ * else the legacy progress.kv). The path buffer belongs to the caller and
+ * must outlive the returned pointer. */
+static const char *xck_producer_kernel_name(const char *producer_datadir,
+                                            char *path_buf, size_t path_cap)
+{
+    const char *kernel_name = "progress.kv";
+    if (consensus_db_kernel_store_path(producer_datadir, path_buf, path_cap)) {
+        const char *slash = strrchr(path_buf, '/');
+        kernel_name = slash ? slash + 1 : path_buf;
+    }
+    return kernel_name;
+}
+
+/* Build the copy's block index, then load the producer's anchor heights;
+ * each step logs its own failures, the caller only aborts. Same order and
+ * short-circuiting as the two sequential calls it replaces. */
+static bool xck_load_index_and_anchors(sqlite3 *cdb, sqlite3 *pdb,
+                                       int64_t checkpoint_height,
+                                       struct block_index **nodes_out,
+                                       size_t *node_count_out, int64_t **A_out,
+                                       struct uint256 **R_out, size_t *m_out)
+{
+    return xck_build_index(cdb, checkpoint_height, nodes_out,
+                           node_count_out) &&
+           xck_load_anchor_heights(pdb, checkpoint_height, A_out, R_out, m_out);
+}
+
+/* The workpool item array: one pointer per shard. NULL on alloc failure. */
+static void **xck_shard_item_array(struct xck_shard *shards, size_t S)
+{
+    void **items = zcl_calloc(S, sizeof(*items), "xck_items");
+    if (items)
+        for (size_t i = 0; i < S; i++)
+            items[i] = &shards[i];
+    return items;
+}
+
+/* Did every shard's sprout-frontier walk match its anchors? */
+static bool xck_all_shards_sprout_ok(const struct xck_shard *shards, size_t S)
+{
+    bool sprout_ok = true;
+    for (size_t i = 0; i < S; i++)
+        if (!shards[i].sprout_ok)
+            sprout_ok = false;
+    return sprout_ok;
+}
+
+/* Total nullifiers collected across all shards (pre-dedup). */
+static size_t xck_total_shard_nf(const struct xck_shard *shards, size_t S)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < S; i++)
+        total += shards[i].nf_count;
+    return total;
+}
+
+/* Concatenate the shards' nullifier arrays into B (sized by total_nf). */
+static void xck_copy_shard_nullifiers(struct xck_nf *B,
+                                      const struct xck_shard *shards, size_t S)
+{
+    for (size_t i = 0, at = 0; i < S; i++) {
+        if (shards[i].nf_count)
+            memcpy(B + at, shards[i].nf, shards[i].nf_count * sizeof(*B));
+        at += shards[i].nf_count;
+    }
+}
+
+/* done:-label teardown, in the original release order. */
+static void xck_release_walk_state(struct workpool *wp, bool wp_init,
+                                   struct xck_shard *shards, size_t S,
+                                   void **items, struct block_index *nodes,
+                                   int64_t *A, struct uint256 *R,
+                                   struct xck_nf *B, struct xck_nf *P,
+                                   sqlite3 *pdb, sqlite3 *cdb)
+{
+    if (wp_init)
+        workpool_destroy(wp);
+    if (shards)
+        for (size_t i = 0; i < S; i++)
+            free(shards[i].nf);
+    free(shards);
+    free(items);
+    free(nodes);
+    free(A);
+    free(R);
+    free(B);
+    free(P);
+    if (pdb)
+        sqlite3_close(pdb);
+    if (cdb)
+        sqlite3_close(cdb);
+}
+
 /* ── entry point ────────────────────────────────────────────────────── */
 
 bool shielded_history_body_crosscheck_run(const char *copy_datadir,
@@ -600,10 +729,9 @@ bool shielded_history_body_crosscheck_run(const char *copy_datadir,
                                           int64_t checkpoint_height,
                                           struct crosscheck_result *out)
 {
-    if (out)
-        memset(out, 0, sizeof(*out));
-    if (!copy_datadir || !producer_datadir || !out || checkpoint_height < 0 ||
-        checkpoint_height > INT_MAX)
+    xck_reset_result(out);
+    if (!xck_args_valid(copy_datadir, producer_datadir, checkpoint_height,
+                        out))
         LOG_RETURN(false, XCK_SUBSYS,
                    "crosscheck: invalid args checkpoint=%lld",
                    (long long)checkpoint_height);
@@ -626,12 +754,8 @@ bool shielded_history_body_crosscheck_run(const char *copy_datadir,
     /* A4: the producer's anchors/nullifiers live in the kernel store —
      * consensus.db post-flip, or the legacy progress.kv on a pre-flip datadir. */
     char kernel_path[PATH_MAX];
-    const char *kernel_name = "progress.kv";
-    if (consensus_db_kernel_store_path(producer_datadir, kernel_path,
-                                       sizeof(kernel_path))) {
-        const char *slash = strrchr(kernel_path, '/');
-        kernel_name = slash ? slash + 1 : kernel_path;
-    }
+    const char *kernel_name = xck_producer_kernel_name(
+        producer_datadir, kernel_path, sizeof(kernel_path));
     pdb = xck_open_ro(producer_datadir, kernel_name);
     if (!pdb) {
         LOG_WARN(XCK_SUBSYS, "crosscheck: producer kernel store (%s) unavailable",
@@ -643,9 +767,8 @@ bool shielded_history_body_crosscheck_run(const char *copy_datadir,
         LOG_WARN(XCK_SUBSYS, "crosscheck: copy node.db unavailable");
         goto done;
     }
-    if (!xck_build_index(cdb, checkpoint_height, &nodes, &node_count))
-        goto done;
-    if (!xck_load_anchor_heights(pdb, checkpoint_height, &A, &R, &m))
+    if (!xck_load_index_and_anchors(cdb, pdb, checkpoint_height, &nodes,
+                                    &node_count, &A, &R, &m))
         goto done;
     out->sprout_frontier_count = (uint64_t)m;
 
@@ -662,11 +785,9 @@ bool shielded_history_body_crosscheck_run(const char *copy_datadir,
                           checkpoint_height, &shards, &S))
         goto done;
 
-    items = zcl_calloc(S, sizeof(*items), "xck_items");
+    items = xck_shard_item_array(shards, S);
     if (!items)
         goto done;
-    for (size_t i = 0; i < S; i++)
-        items[i] = &shards[i];
     if (!workpool_init(&wp, 0, S, xck_shard_run)) {
         LOG_WARN(XCK_SUBSYS, "crosscheck: workpool_init failed S=%zu", S);
         goto done;
@@ -677,22 +798,13 @@ bool shielded_history_body_crosscheck_run(const char *copy_datadir,
         goto done; /* ret stays false — infrastructure failure */
     }
 
-    bool sprout_ok = true;
-    size_t total_nf = 0;
-    for (size_t i = 0; i < S; i++) {
-        if (!shards[i].sprout_ok)
-            sprout_ok = false;
-        total_nf += shards[i].nf_count;
-    }
+    bool sprout_ok = xck_all_shards_sprout_ok(shards, S);
+    size_t total_nf = xck_total_shard_nf(shards, S);
     if (total_nf) {
         B = zcl_calloc(total_nf, sizeof(*B), "xck_B");
         if (!B)
             goto done;
-        for (size_t i = 0, at = 0; i < S; i++) {
-            if (shards[i].nf_count)
-                memcpy(B + at, shards[i].nf, shards[i].nf_count * sizeof(*B));
-            at += shards[i].nf_count;
-        }
+        xck_copy_shard_nullifiers(B, shards, S);
     }
     nB = xck_nf_sort_dedup(B, total_nf);
 
@@ -707,21 +819,7 @@ bool shielded_history_body_crosscheck_run(const char *copy_datadir,
     ret = true;
 
 done:
-    if (wp_init)
-        workpool_destroy(&wp);
-    if (shards)
-        for (size_t i = 0; i < S; i++)
-            free(shards[i].nf);
-    free(shards);
-    free(items);
-    free(nodes);
-    free(A);
-    free(R);
-    free(B);
-    free(P);
-    if (pdb)
-        sqlite3_close(pdb);
-    if (cdb)
-        sqlite3_close(cdb);
+    xck_release_walk_state(&wp, wp_init, shards, S, items, nodes, A, R, B, P,
+                           pdb, cdb);
     return ret;
 }
