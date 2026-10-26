@@ -168,23 +168,13 @@ static const char *mal_skip_ws(const char *p)
     return p;
 }
 
-static int mal_is_ident0(char c)
-{
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
-}
-
-static int mal_is_ident(char c)
-{
-    return mal_is_ident0(c) || (c >= '0' && c <= '9');
-}
-
 static int mal_copy_ident(const char **pp, char *name, size_t cap)
 {
     const char *p = *pp;
     size_t n = 0;
-    if (!mal_is_ident0(*p))
+    if (!lintc_ident_start(*p))
         return 0;
-    while (mal_is_ident(*p)) {
+    while (lintc_ident_char(*p)) {
         if (n + 1 < cap)
             name[n++] = *p;
         p++;

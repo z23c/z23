@@ -11,6 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "premise.h"
+#include "lintc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -181,11 +182,6 @@ struct closure {
     size_t next;
     bool computed;
 };
-
-static int cmp_str(const void *a, const void *b)
-{
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
 
 static int closure_root(struct side *s, const struct premise_tree *cand,
                         const struct closure *c, uint8_t out[PREMISE_HASH_BYTES],
@@ -359,7 +355,7 @@ static int unit_closure(struct premise_session *s, const struct premise_gate *g,
                                            &c->ext, &c->next, &c->computed,
                                            err);
     if (rc == 0 && c->next > 1)
-        qsort(c->ext, c->next, sizeof *c->ext, cmp_str);
+        qsort(c->ext, c->next, sizeof *c->ext, lintc_strcmp_ptr);
     return rc;
 }
 
@@ -527,11 +523,6 @@ static int code_closures(struct code_list *cl, struct premise_tree *t,
     return rc;
 }
 
-static int cmp_cstr(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 static int code_expand(struct premise_session *s, const struct premise_gate *g,
                        struct code_list *cl, FILE *err)
 {
@@ -548,7 +539,7 @@ static int code_expand(struct premise_session *s, const struct premise_gate *g,
         rc = code_closures(cl, &s->cand, err);
     if (rc || cl->n < 2)
         return rc;
-    qsort(cl->v, cl->n, sizeof *cl->v, cmp_cstr);
+    qsort(cl->v, cl->n, sizeof *cl->v, lintc_strcmp_ptr);
     size_t w = 1;
     for (size_t i = 1; i < cl->n; i++)
         if (strcmp(cl->v[i], cl->v[w - 1]) != 0)

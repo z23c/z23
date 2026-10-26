@@ -172,11 +172,6 @@ static int mcd_pool(char *pool, size_t cap, size_t *used, const char *s,
     return 0;
 }
 
-static int mcd_ptr_cmp(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 /* ── the baseline (local loader; see the file header for why) ──────────── */
 
 /* One raw baseline line: '#' truncates anywhere, both ends trim, blanks
@@ -404,7 +399,7 @@ static int mcd_root_collect(const char *root)
         rc = mcd_root_entry(root, de->d_name);
     closedir(d);
     if (rc == 0)
-        qsort(g_mcd_f, (size_t)g_mcd_nf, sizeof g_mcd_f[0], mcd_ptr_cmp);
+        qsort(g_mcd_f, (size_t)g_mcd_nf, sizeof g_mcd_f[0], lintc_strcmp_ptr);
     return rc;
 }
 

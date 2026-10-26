@@ -17,6 +17,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "premise.h"
+#include "lintc.h"
 #include "base/hex.h"
 
 #include <errno.h>
@@ -132,16 +133,11 @@ static int strv_split(struct strv *s, const char *text)
     return rc;
 }
 
-static int cmp_str(const void *a, const void *b)
-{
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
-
 static void strv_sort_unique(struct strv *s)
 {
     if (s->n < 2)
         return;
-    qsort(s->v, s->n, sizeof *s->v, cmp_str);
+    qsort(s->v, s->n, sizeof *s->v, lintc_strcmp_ptr);
     size_t w = 1;
     for (size_t i = 1; i < s->n; i++) {
         if (strcmp(s->v[i], s->v[w - 1]) == 0)

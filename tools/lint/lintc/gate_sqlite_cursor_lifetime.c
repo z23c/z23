@@ -114,19 +114,13 @@ static const struct scl_tok scl_toks[] = {
     { "GUARD", SCL_MACRO },
 };
 
-static int scl_ident_char(int c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_';
-}
-
 /* p sits at an identifier start. Match `name` exactly, then optional blanks
  * and '('. Returns the offset one past '(' on match, else 0. */
 static size_t scl_call_at(const char *p, const char *name)
 {
     size_t n = strlen(name);
     size_t i = n;
-    if (strncmp(p, name, n) != 0 || scl_ident_char((unsigned char)p[n]))
+    if (strncmp(p, name, n) != 0 || lintc_ident_char((unsigned char)p[n]))
         return 0;
     while (p[i] == ' ' || p[i] == '\t')
         i++;
@@ -140,10 +134,10 @@ static int scl_read_ident(const char **pp, char *out, size_t cap)
     size_t n = 0;
     while (*p == ' ' || *p == '\t')
         p++;
-    if (!scl_ident_char((unsigned char)*p) ||
+    if (!lintc_ident_char((unsigned char)*p) ||
         (*p >= '0' && *p <= '9'))
         return 0;
-    while (scl_ident_char((unsigned char)*p) && n + 1 < cap)
+    while (lintc_ident_char((unsigned char)*p) && n + 1 < cap)
         out[n++] = *p++;
     out[n] = '\0';
     *pp = p;
@@ -172,7 +166,7 @@ static void scl_capture(struct scl *s, const char *p)
     char nm[SCL_VNAME];
     struct scl_var *v;
     while (s->prep && *p) {
-        if (*p != '&' || !scl_ident_char((unsigned char)p[1])) {
+        if (*p != '&' || !lintc_ident_char((unsigned char)p[1])) {
             p++;
             continue;
         }
@@ -271,7 +265,7 @@ static void scl_tok(struct scl *s, const char **pp)
         *pp = args - 1;
         return;
     }
-    while (scl_ident_char((unsigned char)*p))
+    while (lintc_ident_char((unsigned char)*p))
         p++;
     *pp = p;
 }
@@ -314,10 +308,10 @@ static void scl_walk(struct scl *s, const char *clean)
             scl_close_paren(s);
             p++;
         } else if (s->prep && c == '&' &&
-                   scl_ident_char((unsigned char)p[1])) {
+                   lintc_ident_char((unsigned char)p[1])) {
             p++;
             scl_capture(s, p - 1);
-        } else if (scl_ident_char(c) && !(c >= '0' && c <= '9')) {
+        } else if (lintc_ident_char(c) && !(c >= '0' && c <= '9')) {
             scl_tok(s, &p);
         } else {
             p++;

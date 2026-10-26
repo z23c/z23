@@ -67,14 +67,6 @@ static int af_replay(FILE *from, FILE *to)
     return err ? die("z23-lint: read failed\n", "") : 0;
 }
 
-static int af_is_dir(const char *dir)
-{
-    struct stat st;
-    if (stat(dir, &st) != 0)
-        return 0;
-    return S_ISDIR(st.st_mode);
-}
-
 static void af_strip_nl(char *line, ssize_t n)
 {
     if (n > 0 && line[n - 1] == '\n')
@@ -158,7 +150,7 @@ static int vng_on_file(const char *path, void *ctx)
 
 static int vng_eval(const char *dir, FILE *out, int *hits)
 {
-    if (!af_is_dir(dir))
+    if (!lintc_is_dir(dir))
         return vng_missing(dir);
     regex_t re;
     int rc = vng_comp(&re);

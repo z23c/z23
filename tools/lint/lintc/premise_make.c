@@ -15,6 +15,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "premise.h"
+#include "lintc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -37,12 +38,6 @@ static int text_add(struct mk_text *t, const char *p, size_t n)
     grown[t->len] = '\0';
     t->buf = grown;
     return 0;
-}
-
-static bool ident_char(char c)
-{
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-           || (c >= '0' && c <= '9') || c == '_';
 }
 
 static const char *skip_sp(const char *p, const char *end)
@@ -85,7 +80,7 @@ static int defines(const char *p, const char *end, const char *name)
     if (block)
         p = skip_sp(p + 6, end);
     if ((size_t)(end - p) < n || memcmp(p, name, n) != 0
-        || (p + n < end && ident_char(p[n])))
+        || (p + n < end && lintc_ident_char(p[n])))
         return 0;
     if (block)
         return 2;
@@ -216,7 +211,7 @@ static int add_references(struct mk_work *w, const char *text)
         if (p[1] != '(' && p[1] != '{')
             continue;
         const char *q = p + 2;
-        while (ident_char(*q))
+        while (lintc_ident_char(*q))
             q++;
         if (q > p + 2)
             rc = work_add(w, p + 2, (size_t)(q - p - 2));

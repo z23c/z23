@@ -129,11 +129,6 @@ static int gacs_span1(int re, const char *line, const char **out)
     return gacs_span(line, m[1], out);
 }
 
-static int gacs_ptr_cmp(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 /* ── sed -n '1p' ───────────────────────────────────────────────────────── */
 
 static int gacs_first_line(const char *path)
@@ -250,7 +245,7 @@ int gacs_load_baseline(const char *path)
         rc = gacs_base_row(line, (size_t)n);
     }
     qsort(g_gacs_base, (size_t)g_gacs_nbase, sizeof g_gacs_base[0],
-          gacs_ptr_cmp);
+          lintc_strcmp_ptr);
     int w = 0;
     for (int i = 0; i < g_gacs_nbase; i++) {
         if (w > 0 && strcmp(g_gacs_base[w - 1], g_gacs_base[i]) == 0)
@@ -271,7 +266,7 @@ int gacs_baseline_n(void)
 int gacs_baseline_has(const char *key)
 {
     return bsearch(&key, g_gacs_base, (size_t)g_gacs_nbase,
-                   sizeof g_gacs_base[0], gacs_ptr_cmp) != NULL;
+                   sizeof g_gacs_base[0], lintc_strcmp_ptr) != NULL;
 }
 
 /* ── the capability-inventory parse ────────────────────────────────────── */

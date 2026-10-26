@@ -201,12 +201,6 @@ static void spd_strip_trailing_comment(char *line)
         *c = '\0';
 }
 
-static int spd_ident_char(unsigned char c)
-{
-    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
-        || (c >= 'a' && c <= 'z') || c == '_';
-}
-
 /* Literal-name match requiring a `(` (optional space/tab first) right
  * after the name — the awk original's `name[ \t]*\(` shape — and no
  * identifier char right before it, so a longer identifier that merely
@@ -216,7 +210,7 @@ static const char *spd_find_call(const char *line, const char *name)
     size_t nlen = strlen(name);
     const char *p = line;
     while ((p = strstr(p, name)) != NULL) {
-        if (p > line && spd_ident_char((unsigned char)p[-1])) {
+        if (p > line && lintc_ident_char((unsigned char)p[-1])) {
             p++;
             continue;
         }

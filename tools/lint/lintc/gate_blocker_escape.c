@@ -179,12 +179,6 @@ static int ber_stmt(FILE *f, char *buf, size_t cap, int *lineno, const char *fir
     return 0;
 }
 
-static int ber_is_ident(unsigned char c)
-{
-    return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-        || (c >= '0' && c <= '9');
-}
-
 static int ber_on_register(FILE *f, int *lineno, const char *first,
                            struct ber_names *reg)
 {
@@ -205,7 +199,7 @@ static int ber_on_condition(const char *line, struct ber_names *cond)
     if (!p)
         return 0;
     p += 14;
-    while (ber_is_ident((unsigned char)*p)) {
+    while (lintc_ident_char((unsigned char)*p)) {
         if (n + 1 < BER_NAME)
             id[n++] = *p;
         p++;

@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "lintc.h"
 #include "base/hex.h"
 #include "gate_app_bundle_reproducible_priv.h"
 
@@ -78,15 +79,10 @@ static void abr_list_free(struct abr_list *l)
     *l = (struct abr_list){ 0 };
 }
 
-static int abr_cmp_str(const void *a, const void *b)
-{
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
-
 static void abr_list_sort(struct abr_list *l)
 {
     if (l->n > 1)
-        qsort(l->v, l->n, sizeof *l->v, abr_cmp_str);
+        qsort(l->v, l->n, sizeof *l->v, lintc_strcmp_ptr);
 }
 
 /* "./a/b" relative to root -> root/a/b ("." -> root). */

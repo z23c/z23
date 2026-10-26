@@ -56,8 +56,6 @@ static int ph_cannot_open(const char *path)
     fprintf(ph_err ? ph_err : stderr, "z23-lint: cannot open %s\n", path);
     return 2;
 }
-static int ph_isdir(const char *path)
-{ struct stat st; return stat(path, &st) == 0 && S_ISDIR(st.st_mode); }
 static int ph_hit(const regex_t *re, const char *s)
 { return regexec(re, s, 0, NULL, 0) == 0; }
 static int ph_has(const char *buf, const char *need)
@@ -478,7 +476,7 @@ static int ph_jobs_report(const struct ph_jobs *a)
 static int ph_jobs_eval(void)
 {
     const char *dir = ph_jobs_dir();
-    if (!ph_isdir(dir)) return ph_jobs_missing(dir);
+    if (!lintc_is_dir(dir)) return ph_jobs_missing(dir);
     struct ph_jobs a;
     memset(&a, 0, sizeof a);
     int rc = ph_jobs_comp(&a);

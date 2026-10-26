@@ -125,12 +125,6 @@ struct cyc_lx {
     char mac_tail[9];
 };
 
-static int cyc_is_ident(int c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-        || (c >= '0' && c <= '9') || c == '_';
-}
-
 /* Characters the lexer must not count: a preprocessor directive line
  * contributes neither braces, parens, nor decision points. */
 static int cyc_off(const struct cyc_lx *lx)
@@ -159,7 +153,7 @@ static int cyc_pp_word(const char *line, ssize_t n, char *out, size_t cap)
     while (i < n && (line[i] == ' ' || line[i] == '\t'))
         i++;
     size_t k = 0;
-    while (i < n && cyc_is_ident((unsigned char)line[i]) && k + 1 < cap)
+    while (i < n && lintc_ident_char((unsigned char)line[i]) && k + 1 < cap)
         out[k++] = line[i++];
     out[k] = '\0';
     return 1;
@@ -517,7 +511,7 @@ static int cyc_mac_name(const char *line, ssize_t n, char *name)
     while (i < n && (line[i] == ' ' || line[i] == '\t'))
         i++;
     size_t k = 0;
-    while (i < n && cyc_is_ident((unsigned char)line[i]) && k + 1 < CYC_NAME)
+    while (i < n && lintc_ident_char((unsigned char)line[i]) && k + 1 < CYC_NAME)
         name[k++] = line[i++];
     name[k] = '\0';
     return k > 0 && i < n && line[i] == '(';
@@ -578,7 +572,7 @@ static int cyc_code_char(struct cyc_lx *lx, const struct cyc_emit *em,
     if (lx->sol && c == '#')
         lx->pp = 1;
     cyc_mac_tail(lx, c);
-    if (cyc_is_ident((unsigned char)c)) {
+    if (lintc_ident_char((unsigned char)c)) {
         cyc_ident_char(lx, c);
         return 0;
     }

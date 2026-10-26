@@ -200,15 +200,10 @@ int sd_split_words(const char *s, char *buf, size_t cap,
     return 0;
 }
 
-static int sd_ptr_cmp(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 /* LC_ALL=C sort -u: bytewise order, exact-duplicate collapse. */
 static int sd_sort_uniq(const char **v, int n)
 {
-    qsort(v, (size_t)n, sizeof v[0], sd_ptr_cmp);
+    qsort(v, (size_t)n, sizeof v[0], lintc_strcmp_ptr);
     int w = 0;
     for (int i = 0; i < n; i++) {
         if (w > 0 && strcmp(v[w - 1], v[i]) == 0)

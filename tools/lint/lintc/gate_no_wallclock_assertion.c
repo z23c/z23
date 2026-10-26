@@ -161,11 +161,6 @@ static void wca_list_free(struct wca_list *l)
     memset(l, 0, sizeof *l);
 }
 
-static int wca_cmp_str(const void *a, const void *b)
-{
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
-
 /* ── the scan set ─────────────────────────────────────────────────────── */
 
 struct wca_idx { struct wca_list *out; const regex_t *re; };
@@ -391,7 +386,7 @@ static int wca_say(FILE *out, const char *s)
 
 static int wca_print_sorted(FILE *out, struct wca_list *l)
 {
-    qsort(l->v, (size_t)l->n, sizeof *l->v, wca_cmp_str);
+    qsort(l->v, (size_t)l->n, sizeof *l->v, lintc_strcmp_ptr);
     for (int i = 0; i < l->n; i++)
         if (fprintf(out, "  %s\n", l->v[i]) < 0)
             return die("z23-lint: write failed\n", "");
@@ -467,7 +462,7 @@ static int wca_update(const struct wca_cfg *c, const struct wca_rows *rows)
         rc = ovf(n, sizeof tmp) ? 2 : wca_list_add(&lines, tmp);
     }
     if (rc == 0) {
-        qsort(lines.v, (size_t)lines.n, sizeof *lines.v, wca_cmp_str);
+        qsort(lines.v, (size_t)lines.n, sizeof *lines.v, lintc_strcmp_ptr);
         FILE *f = fopen(c->allowlist, "w");
         if (!f)
             return die("z23-lint: cannot write %s\n", c->allowlist);

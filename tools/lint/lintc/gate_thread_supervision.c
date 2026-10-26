@@ -196,15 +196,10 @@ static int ts_pool_add(const char *path)
     return 0;
 }
 
-static int ts_ptr_cmp(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 /* LC_ALL=C sort -u: bytewise order, exact-duplicate collapse. */
 static int ts_sort_uniq(const char **v, int n)
 {
-    qsort(v, (size_t)n, sizeof v[0], ts_ptr_cmp);
+    qsort(v, (size_t)n, sizeof v[0], lintc_strcmp_ptr);
     int w = 0;
     for (int i = 0; i < n; i++) {
         if (w > 0 && strcmp(v[w - 1], v[i]) == 0)
@@ -603,7 +598,7 @@ static int ts_run_body(void)
         rc = ts_walk(g_ts_rvec[i]);
     if (rc == 0) {
         qsort(g_ts_files, (size_t)g_ts_nfiles, sizeof g_ts_files[0],
-              ts_ptr_cmp);
+              lintc_strcmp_ptr);
         rc = ts_floor();
     }
     if (rc == 0 && strcmp(env_or("ZCL_THREADSUP_COVERAGE", "1"), "1") == 0)

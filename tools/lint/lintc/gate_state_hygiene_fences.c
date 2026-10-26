@@ -49,11 +49,8 @@ static int sh_want(const char *tag, int got, int w, const char *s)
     return 1;
 }
 
-static int jvi_ident_start(unsigned char c)
-{ return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'; }
-
 static int jvi_ident(unsigned char c)
-{ return jvi_ident_start(c) || (c >= '0' && c <= '9'); }
+{ return lintc_ident_start(c) || (c >= '0' && c <= '9'); }
 
 static const char *jvi_skip_ht(const char *p)
 { while (*p == ' ' || *p == '\t') p++; return p; }
@@ -72,7 +69,7 @@ static const char *jvi_kw(const char *p, const char *kw)
 static int jvi_read_ident(const char **pp, char *name, size_t cap)
 {
     const char *p = *pp;
-    if (!jvi_ident_start((unsigned char)*p))
+    if (!lintc_ident_start((unsigned char)*p))
         return 0;
     size_t n = 0;
     name[n++] = *p++;
