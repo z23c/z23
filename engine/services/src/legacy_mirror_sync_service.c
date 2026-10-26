@@ -223,23 +223,11 @@ bool lms_env_disabled(void)
                  !strcasecmp(s, "off") || !strcasecmp(s, "no"));
 }
 
-static bool lms_parse_int_result(const char *raw, const char *key,
-                                 int *out, char *err, size_t err_sz)
+#define v (*json_storage)
+static bool lms_require_integer_result_or_report_rpc_error(
+    const struct json_value *field, struct json_value *json_storage,
+    const char *key, char *err, size_t err_sz)
 {
-    const char *body = legacy_rpc_http_body(raw);
-    if (!body) {
-        snprintf(err, err_sz, "no http body separator");
-        return false;
-    }
-    struct json_value v = {0};
-    if (!json_read(&v, body, strlen(body))) {
-        snprintf(err, err_sz, "json parse failed");
-        json_free(&v);
-        return false;
-    }
-    const struct json_value *result = json_get(&v, "result");
-    const struct json_value *field = key && result ? json_get(result, key)
-                                                   : result;
     if (!field || field->type != JSON_INT) {
         const struct json_value *jerr = json_get(&v, "error");
         if (jerr && jerr->type == JSON_OBJ) {
@@ -269,6 +257,32 @@ static bool lms_parse_int_result(const char *raw, const char *key,
         json_free(&v);
         return false;
     }
+    return true;
+}
+#undef v
+
+#line 226
+static bool lms_parse_int_result(const char *raw, const char *key,
+                                 int *out, char *err, size_t err_sz)
+{
+    const char *body = legacy_rpc_http_body(raw);
+    if (!body) {
+        snprintf(err, err_sz, "no http body separator");
+        return false;
+    }
+    struct json_value v = {0};
+    if (!json_read(&v, body, strlen(body))) {
+        snprintf(err, err_sz, "json parse failed");
+        json_free(&v);
+        return false;
+    }
+    const struct json_value *result = json_get(&v, "result");
+    const struct json_value *field = key && result ? json_get(result, key)
+                                                   : result;
+    if (!lms_require_integer_result_or_report_rpc_error(
+            field, &v, key, err, err_sz))
+        return false;
+#line 272
     int64_t n = json_get_int(field);
     if (n < 0 || n > 0x7fffffff) {
         snprintf(err, err_sz, "height out of range");
@@ -649,6 +663,70 @@ static void lms_mark_success(int local, int progress)
     lms_clear_blocker();
 }
 
+static bool lms_observe_lag_verify_hashes_and_record_catchup_status(int legacy_blocks)
+{
+    bool ok = true;
+    int local = -1, hdr = -1;
+    lms_refresh_local_heights(&local, &hdr);
+    int lag = legacy_blocks - local;
+
+    /* SLO evaluation runs every tick regardless of gating — the loud
+     * half of the redundancy guarantee. Severity is emitted once per
+     * episode (latched), cleared when lag drops back below threshold. */
+    lms_evaluate_lag_slo(lag, legacy_blocks, local, (int64_t)platform_time_wall_time_t());
+
+    char local_hash[65] = {0}, remote_hash[65] = {0};
+    {
+        char hash_err[160] = {0};
+        (void)lms_local_hash_at(local, local_hash);
+        if (legacy_blocks >= 0)
+            (void)lms_fetch_hash(legacy_blocks, remote_hash,
+                                 hash_err, sizeof(hash_err));
+        /* Tip hashes remain separate observations because their heights
+         * differ while the local node is catching up. */
+        lms_cache_tip_hashes(local_hash, remote_hash);
+    }
+
+    int comparison_height = local < legacy_blocks ? local : legacy_blocks;
+    enum lms_hash_comparison_result comparison =
+        lms_verify_common_height(
+            comparison_height,
+            comparison_height == local ? local_hash : NULL,
+            comparison_height == legacy_blocks ? remote_hash : NULL);
+    if (comparison != LMS_HASH_COMPARISON_AGREE) {
+        ok = false;
+        return ok;
+    }
+
+    if (legacy_blocks < local) {
+        atomic_store(&g_lms.target_height, legacy_blocks);
+        lms_mark_success(local, 0);
+        lms_set_error("mirror behind local; observing");
+        ok = true;
+        return ok;
+    }
+
+    if (lag <= g_lms.lag_sla) {
+        atomic_store(&g_lms.target_height, legacy_blocks);
+        int prev_advanced = atomic_load(&g_lms.last_advanced_height);
+        if (local >= prev_advanced)
+            atomic_fetch_add(&g_lms.catchups_total, 1);
+        lms_mark_success(local, local - prev_advanced);
+        ok = true;
+        return ok;
+    }
+    /* Monitor-only: the stage pipeline is the authoritative
+     * block writer. The mirror no longer applies blocks; it observes
+     * the lag, records the stuck status when behind, and lets the
+     * native pipeline advance the tip. */
+    atomic_store(&g_lms.target_height, legacy_blocks);
+    lms_record_stuck_status(local + 1);
+    lms_observe_local_primary(local, legacy_blocks);
+    ok = true;
+    return ok;
+}
+
+#line 652
 struct zcl_result legacy_mirror_sync_request_catchup(const char *reason)
 {
 #ifdef ZCL_TESTING
@@ -692,65 +770,9 @@ struct zcl_result legacy_mirror_sync_request_catchup(const char *reason)
     atomic_store(&g_lms.legacy_height, legacy_blocks);
     atomic_store(&g_lms.legacy_headers, legacy_headers);
 
-    int local = -1, hdr = -1;
-    lms_refresh_local_heights(&local, &hdr);
-    int lag = legacy_blocks - local;
-
-    /* SLO evaluation runs every tick regardless of gating — the loud
-     * half of the redundancy guarantee. Severity is emitted once per
-     * episode (latched), cleared when lag drops back below threshold. */
-    lms_evaluate_lag_slo(lag, legacy_blocks, local, (int64_t)platform_time_wall_time_t());
-
-    char local_hash[65] = {0}, remote_hash[65] = {0};
-    {
-        char hash_err[160] = {0};
-        (void)lms_local_hash_at(local, local_hash);
-        if (legacy_blocks >= 0)
-            (void)lms_fetch_hash(legacy_blocks, remote_hash,
-                                 hash_err, sizeof(hash_err));
-        /* Tip hashes remain separate observations because their heights
-         * differ while the local node is catching up. */
-        lms_cache_tip_hashes(local_hash, remote_hash);
-    }
-
-    int comparison_height = local < legacy_blocks ? local : legacy_blocks;
-    enum lms_hash_comparison_result comparison =
-        lms_verify_common_height(
-            comparison_height,
-            comparison_height == local ? local_hash : NULL,
-            comparison_height == legacy_blocks ? remote_hash : NULL);
-    if (comparison != LMS_HASH_COMPARISON_AGREE) {
-        ok = false;
-        goto out;
-    }
-
-    if (legacy_blocks < local) {
-        atomic_store(&g_lms.target_height, legacy_blocks);
-        lms_mark_success(local, 0);
-        lms_set_error("mirror behind local; observing");
-        ok = true;
-        goto out;
-    }
-
-    if (lag <= g_lms.lag_sla) {
-        atomic_store(&g_lms.target_height, legacy_blocks);
-        int prev_advanced = atomic_load(&g_lms.last_advanced_height);
-        if (local >= prev_advanced)
-            atomic_fetch_add(&g_lms.catchups_total, 1);
-        lms_mark_success(local, local - prev_advanced);
-        ok = true;
-        goto out;
-    }
-    /* Monitor-only: the stage pipeline is the authoritative
-     * block writer. The mirror no longer applies blocks; it observes
-     * the lag, records the stuck status when behind, and lets the
-     * native pipeline advance the tip. */
-    atomic_store(&g_lms.target_height, legacy_blocks);
-    lms_record_stuck_status(local + 1);
-    lms_observe_local_primary(local, legacy_blocks);
-    ok = true;
+    ok = lms_observe_lag_verify_hashes_and_record_catchup_status(legacy_blocks);
     goto out;
-
+#line 754
 out:
     lms_refresh_local_heights(NULL, NULL);
     atomic_store(&g_lms.in_flight, 0);

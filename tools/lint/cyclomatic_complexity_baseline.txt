@@ -1026,8 +1026,6 @@ engine/services/src/consensus_state_publication_decide.c:manifest_complete_self_
 engine/services/src/gap_fill_service.c:gap_fill_pass:27
 engine/services/src/header_probe.c:header_probe_pull_range:34
 engine/services/src/legacy_import_service.c:legacy_import_service_run:66
-engine/services/src/legacy_mirror_sync_service.c:legacy_mirror_sync_request_catchup:21
-engine/services/src/legacy_mirror_sync_service.c:lms_parse_int_result:21
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_init:31
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_stats_snapshot_impl:44
 engine/services/src/legacy_mirror_sync_state.c:lms_state_name:19
