@@ -1159,7 +1159,6 @@ tests/harness/src/test_blog.c:test_blog:60
 tests/harness/src/test_blog.c:test_blog_publication_slice:24
 tests/harness/src/test_bls12_381_adversarial.c:test_bls12_381_adversarial:29
 tests/harness/src/test_body_fetch_stage.c:test_body_fetch_stage_platform_arm:56
-tests/harness/src/test_boot_flight_recorder.c:test_boot_flight_recorder:55
 tests/harness/src/test_boot_legacy_blocks.c:test_boot_legacy_blocks:40
 tests/harness/src/test_boot_matrix.c:bm_cell2_mint_anchor_headers_only:17
 tests/harness/src/test_boot_matrix.c:bm_cell3_mint_anchor_imported_bodies:18
