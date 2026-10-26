@@ -1873,9 +1873,6 @@ tests/harness/src/test_sha512_isa_parity.c:test_sha512_isa_parity:23
 tests/harness/src/test_shielded_bind_guard.c:test_shielded_bind_guard:24
 tests/harness/src/test_shielded_history_import.c:test_shielded_history_import:36
 tests/harness/src/test_shielded_import_cured_tip_anchor.c:test_shielded_import_cured_tip_anchor:30
-tests/harness/src/test_shielded_payment_gate.c:p11_4_open_trust_fixture:18
-tests/harness/src/test_shielded_payment_gate.c:p11_4_vault_mixed:70
-tests/harness/src/test_shielded_payment_gate.c:test_shielded_payment_gate:72
 tests/harness/src/test_shielded_spend_slice.c:test_shielded_spend_slice:21
 tests/harness/src/test_shielded_sync_strength.c:test_sst_frontier_seed_positive_and_negative:45
 tests/harness/src/test_shielded_sync_strength.c:test_sst_preflight_refuses_impossible_replay:23

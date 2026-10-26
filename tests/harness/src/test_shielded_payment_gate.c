@@ -131,28 +131,42 @@ static bool p11_4_save_tip(struct node_db *ndb,
     return db_block_save(ndb, &block);
 }
 
-/* The production wallet commit path is sovereignty-gated. Populate the same
- * minimal self-derived progress projection a running node has; otherwise this
- * wallet test exits before reaching Sapling transaction construction. */
-static bool p11_4_open_trust_fixture(const char *dir)
+enum {
+    P11_4_TRUST_READY = 0,
+    P11_4_TRUST_NO_STORE = 1,
+    P11_4_TRUST_NO_DB = 2,
+    P11_4_TRUST_NO_COINS = 3,
+    P11_4_TRUST_NO_REDUCER = 4,
+    P11_4_TRUST_NO_COIN = 5
+};
+
+struct p11_4_trust_txn {
+    sqlite3 *db;
+    sqlite3_stmt *st;
+    char *err;
+    uint8_t tip_hash[32];
+    bool began;
+    bool applied;
+    bool stamped;
+    bool ok;
+    bool header_prepared;
+    bool header_written;
+    bool committed;
+    bool self_folded;
+};
+
+static int p11_4_trust_prepare_coin(const char *dir, sqlite3 **db_out)
 {
-    if (!progress_store_open(dir)) {
-        printf("(trust fixture: progress_store_open) ");
-        return false;
-    }
+    if (!progress_store_open(dir))
+        return P11_4_TRUST_NO_STORE;
     sqlite3 *db = progress_store_db();
-    if (!db) {
-        printf("(trust fixture: progress_store_db) ");
-        return false;
-    }
-    if (!coins_kv_ensure_schema(db)) {
-        printf("(trust fixture: coins schema: %s) ", sqlite3_errmsg(db));
-        return false;
-    }
-    if (!reducer_frontier_ensure_schema(db)) {
-        printf("(trust fixture: reducer schema: %s) ", sqlite3_errmsg(db));
-        return false;
-    }
+    if (!db)
+        return P11_4_TRUST_NO_DB;
+    *db_out = db;
+    if (!coins_kv_ensure_schema(db))
+        return P11_4_TRUST_NO_COINS;
+    if (!reducer_frontier_ensure_schema(db))
+        return P11_4_TRUST_NO_REDUCER;
     reducer_frontier_provable_tip_set(P11_4_TIP_HEIGHT);
     struct uint256 txid;
     uint256_set_null(&txid);
@@ -160,60 +174,96 @@ static bool p11_4_open_trust_fixture(const char *dir)
     txid.data[31] = 0x77;
     const unsigned char script[4] = {0xE0, 0xE0, 0xE0, 0xE0};
     if (!coins_kv_add(db, txid.data, 0, 1234, P11_4_TIP_HEIGHT, true,
-                      script, sizeof(script))) {
+                      script, sizeof(script)))
+        return P11_4_TRUST_NO_COIN;
+    return P11_4_TRUST_READY;
+}
+
+static void p11_4_trust_write_header(struct p11_4_trust_txn *txn)
+{
+    uint8_t migrated = 1;
+    memset(txn->tip_hash, 0x50, sizeof(txn->tip_hash));
+    txn->began = sqlite3_exec(txn->db, "BEGIN IMMEDIATE", NULL, NULL,
+                              &txn->err) == SQLITE_OK;
+    txn->applied = txn->began && coins_kv_set_applied_height_in_tx(
+        txn->db, P11_4_TIP_HEIGHT + 1);
+    txn->stamped = txn->applied && progress_meta_set_in_tx(
+        txn->db, COINS_KV_MIGRATION_COMPLETE_KEY, &migrated, sizeof(migrated));
+    txn->ok = txn->began && txn->applied && txn->stamped;
+    if (txn->ok) {
+        txn->ok = sqlite3_prepare_v2(txn->db,
+            "INSERT OR REPLACE INTO validate_headers_log"
+            "(height,hash,ok,validated_at) VALUES(?1,?2,1,0)",
+            -1, &txn->st, NULL) == SQLITE_OK;
+        txn->header_prepared = txn->ok;
+    }
+    if (txn->ok) {
+        sqlite3_bind_int(txn->st, 1, P11_4_TIP_HEIGHT);
+        sqlite3_bind_blob(txn->st, 2, txn->tip_hash, sizeof(txn->tip_hash),
+                          SQLITE_STATIC);
+        txn->ok = sqlite3_step(txn->st) == SQLITE_DONE;
+        txn->header_written = txn->ok;
+    }
+}
+
+static void p11_4_trust_finish_txn(struct p11_4_trust_txn *txn)
+{
+    if (txn->st)
+        sqlite3_finalize(txn->st);
+    if (txn->ok) {
+        txn->ok = sqlite3_exec(txn->db, "COMMIT", NULL, NULL, &txn->err) ==
+            SQLITE_OK;
+        txn->committed = txn->ok;
+    } else if (txn->began) {
+        (void)sqlite3_exec(txn->db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    if (txn->ok) {
+        txn->ok = coins_kv_mark_self_folded(txn->db);
+        txn->self_folded = txn->ok;
+    }
+    if (txn->err)
+        sqlite3_free(txn->err);
+}
+
+/* The production wallet commit path is sovereignty-gated. Populate the same
+ * minimal self-derived progress projection a running node has; otherwise this
+ * wallet test exits before reaching Sapling transaction construction. */
+static bool p11_4_open_trust_fixture(const char *dir)
+{
+    sqlite3 *db = NULL;
+    int prep = p11_4_trust_prepare_coin(dir, &db);
+    if (prep == P11_4_TRUST_NO_STORE) {
+        printf("(trust fixture: progress_store_open) ");
+        return false;
+    }
+    if (prep == P11_4_TRUST_NO_DB) {
+        printf("(trust fixture: progress_store_db) ");
+        return false;
+    }
+    if (prep == P11_4_TRUST_NO_COINS) {
+        printf("(trust fixture: coins schema: %s) ", sqlite3_errmsg(db));
+        return false;
+    }
+    if (prep == P11_4_TRUST_NO_REDUCER) {
+        printf("(trust fixture: reducer schema: %s) ", sqlite3_errmsg(db));
+        return false;
+    }
+    if (prep == P11_4_TRUST_NO_COIN) {
         printf("(trust fixture: authority coin: %s) ", sqlite3_errmsg(db));
         return false;
     }
-    uint8_t migrated = 1;
-    uint8_t tip_hash[32];
-    memset(tip_hash, 0x50, sizeof(tip_hash));
-    char *err = NULL;
-    bool began = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) ==
-        SQLITE_OK;
-    bool applied = began && coins_kv_set_applied_height_in_tx(
-        db, P11_4_TIP_HEIGHT + 1);
-    bool stamped = applied && progress_meta_set_in_tx(
-        db, COINS_KV_MIGRATION_COMPLETE_KEY, &migrated, sizeof(migrated));
-    bool ok = began && applied && stamped;
-    sqlite3_stmt *st = NULL;
-    bool header_prepared = false;
-    bool header_written = false;
-    bool committed = false;
-    bool self_folded = false;
-    if (ok) {
-        ok = sqlite3_prepare_v2(db,
-            "INSERT OR REPLACE INTO validate_headers_log"
-            "(height,hash,ok,validated_at) VALUES(?1,?2,1,0)",
-            -1, &st, NULL) == SQLITE_OK;
-        header_prepared = ok;
-    }
-    if (ok) {
-        sqlite3_bind_int(st, 1, P11_4_TIP_HEIGHT);
-        sqlite3_bind_blob(st, 2, tip_hash, sizeof(tip_hash), SQLITE_STATIC);
-        ok = sqlite3_step(st) == SQLITE_DONE;
-        header_written = ok;
-    }
-    if (st)
-        sqlite3_finalize(st);
-    if (ok) {
-        ok = sqlite3_exec(db, "COMMIT", NULL, NULL, &err) == SQLITE_OK;
-        committed = ok;
-    } else if (began) {
-        (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-    }
-    if (ok) {
-        ok = coins_kv_mark_self_folded(db);
-        self_folded = ok;
-    }
-    if (err)
-        sqlite3_free(err);
-    if (!ok)
+    struct p11_4_trust_txn txn;
+    memset(&txn, 0, sizeof(txn));
+    txn.db = db;
+    p11_4_trust_write_header(&txn);
+    p11_4_trust_finish_txn(&txn);
+    if (!txn.ok)
         printf("(trust fixture: begin=%d applied=%d stamped=%d "
                "header_prepared=%d header_written=%d committed=%d "
-               "self_folded=%d sqlite=%s) ", began, applied, stamped,
-               header_prepared, header_written, committed, self_folded,
-               sqlite3_errmsg(db));
-    return ok;
+               "self_folded=%d sqlite=%s) ", txn.began, txn.applied,
+               txn.stamped, txn.header_prepared, txn.header_written,
+               txn.committed, txn.self_folded, sqlite3_errmsg(db));
+    return txn.ok;
 }
 
 static bool p11_4_build_funding_utxo(struct node_db *ndb,
@@ -278,6 +328,95 @@ static bool p11_4_rpc_z_getnewaddress(struct rpc_table *tbl,
     return ok;
 }
 
+struct p11_4_plan_view {
+    const char *plan_id;
+    const char *digest;
+    const char *route;
+    const char *from;
+    const struct json_value *effects;
+};
+
+static void p11_4_plan_view_load(bool ok, const struct json_value *result,
+                                 struct p11_4_plan_view *view)
+{
+    view->plan_id = ok && result->type == JSON_OBJ
+        ? json_get_str(json_get(result, "plan_id")) : NULL;
+    view->digest = ok && result->type == JSON_OBJ
+        ? json_get_str(json_get(result, "digest")) : NULL;
+    view->route = ok && result->type == JSON_OBJ
+        ? json_get_str(json_get(result, "route")) : NULL;
+    view->from = ok && result->type == JSON_OBJ
+        ? json_get_str(json_get(result, "from")) : NULL;
+    view->effects = ok && result->type == JSON_OBJ
+        ? json_get(result, "effects") : NULL;
+}
+
+static bool p11_4_plan_route_effects(const struct p11_4_plan_view *view,
+                                     const struct json_value *result,
+                                     const char *from_addr)
+{
+    return view->route && strcmp(view->route, "mixed") == 0 && view->from &&
+        strcmp(view->from, from_addr) == 0 &&
+        json_get_int(json_get(result, "confirmation_policy")) == 6 &&
+        view->effects && view->effects->type == JSON_ARR &&
+        json_size(view->effects) == 2;
+}
+
+static bool p11_4_plan_fresh_ok(bool ok, const struct json_value *result,
+                                const struct p11_4_plan_view *view,
+                                const char *from_addr,
+                                struct tx_mempool *mempool)
+{
+    return ok && json_get_bool(json_get(result, "ok")) &&
+        view->plan_id && strlen(view->plan_id) == 64 &&
+        view->digest && strlen(view->digest) == 64 &&
+        p11_4_plan_route_effects(view, result, from_addr) &&
+        json_get(result, "idempotent_plan") != NULL &&
+        !json_get_bool(json_get(result, "idempotent_plan")) &&
+        tx_mempool_size(mempool) == 0;
+}
+
+static bool p11_4_plan_retry_ok(bool ok, const struct json_value *result,
+                                const struct p11_4_plan_view *view,
+                                const char *from_addr,
+                                const char *plan_id_copy,
+                                const char *digest_copy,
+                                struct tx_mempool *mempool)
+{
+    return ok && json_get_bool(json_get(result, "ok")) &&
+        json_get_bool(json_get(result, "idempotent_plan")) &&
+        view->plan_id && strcmp(view->plan_id, plan_id_copy) == 0 &&
+        view->digest && strcmp(view->digest, digest_copy) == 0 &&
+        p11_4_plan_route_effects(view, result, from_addr) &&
+        tx_mempool_size(mempool) == 0;
+}
+
+static const char *p11_4_commit_txid(bool ok, const struct json_value *result)
+{
+    return ok && result->type == JSON_OBJ
+        ? json_get_str(json_get(result, "txid")) : NULL;
+}
+
+static bool p11_4_commit_accepted(bool ok, const struct json_value *result,
+                                  const char *txid)
+{
+    return ok && json_get_bool(json_get(result, "ok")) && txid &&
+        strlen(txid) == 64;
+}
+
+static const char *p11_4_json_str_or(const struct json_value *result,
+                                     const char *key, const char *fallback)
+{
+    const char *value = json_get_str(json_get(result, key));
+    return value ? value : fallback;
+}
+
+static void p11_4_copy_text(bool ok, const char *src, char *dst, size_t dst_size)
+{
+    if (ok)
+        snprintf(dst, dst_size, "%s", src);
+}
+
 static bool p11_4_vault_mixed(struct rpc_table *tbl,
                               const char *from_addr,
                               const char *zaddr,
@@ -312,70 +451,30 @@ static bool p11_4_vault_mixed(struct rpc_table *tbl,
     json_push_kv(&input, "effects", &effects);
     json_push_back(&params, &input);
 
-    bool ok = rpc_table_execute(tbl, "vault_intent_plan", &params, &result);
-    const char *plan_id = ok && result.type == JSON_OBJ
-        ? json_get_str(json_get(&result, "plan_id")) : NULL;
-    const char *digest = ok && result.type == JSON_OBJ
-        ? json_get_str(json_get(&result, "digest")) : NULL;
-    const char *route = ok && result.type == JSON_OBJ
-        ? json_get_str(json_get(&result, "route")) : NULL;
-    const char *from = ok && result.type == JSON_OBJ
-        ? json_get_str(json_get(&result, "from")) : NULL;
-    const struct json_value *plan_effects = ok && result.type == JSON_OBJ
-        ? json_get(&result, "effects") : NULL;
     char plan_id_copy[65] = {0};
     char digest_copy[65] = {0};
-    ok = ok && json_get_bool(json_get(&result, "ok")) &&
-        plan_id && strlen(plan_id) == 64 && digest && strlen(digest) == 64 &&
-        route && strcmp(route, "mixed") == 0 && from &&
-        strcmp(from, from_addr) == 0 &&
-        json_get_int(json_get(&result, "confirmation_policy")) == 6 &&
-        plan_effects && plan_effects->type == JSON_ARR &&
-        json_size(plan_effects) == 2 &&
-        json_get(&result, "idempotent_plan") != NULL &&
-        !json_get_bool(json_get(&result, "idempotent_plan")) &&
-        tx_mempool_size(mempool) == 0;
-    if (!ok) {
-        const char *code = json_get_str(json_get(&result, "code"));
-        const char *message = json_get_str(json_get(&result, "message"));
-        printf("(plan code=%s message=%s) ", code ? code : "RPC_FAILURE",
-               message ? message : "no message");
-    }
-    if (ok) {
-        snprintf(plan_id_copy, sizeof(plan_id_copy), "%s", plan_id);
-        snprintf(digest_copy, sizeof(digest_copy), "%s", digest);
-    }
+    bool ok = rpc_table_execute(tbl, "vault_intent_plan", &params, &result);
+    struct p11_4_plan_view view;
+    p11_4_plan_view_load(ok, &result, &view);
+    ok = p11_4_plan_fresh_ok(ok, &result, &view, from_addr, mempool);
+    if (!ok)
+        printf("(plan code=%s message=%s) ",
+               p11_4_json_str_or(&result, "code", "RPC_FAILURE"),
+               p11_4_json_str_or(&result, "message", "no message"));
+    p11_4_copy_text(ok, view.plan_id, plan_id_copy, sizeof(plan_id_copy));
+    p11_4_copy_text(ok, view.digest, digest_copy, sizeof(digest_copy));
 
     /* An agent reviewing an idempotent retry must receive the same complete
      * owner-visible plan, not merely a plan id and reservation row. */
     json_free(&result); json_init(&result);
     ok = ok && rpc_table_execute(tbl, "vault_intent_plan", &params, &result);
-    plan_id = ok && result.type == JSON_OBJ
-        ? json_get_str(json_get(&result, "plan_id")) : NULL;
-    digest = ok && result.type == JSON_OBJ
-        ? json_get_str(json_get(&result, "digest")) : NULL;
-    route = ok && result.type == JSON_OBJ
-        ? json_get_str(json_get(&result, "route")) : NULL;
-    from = ok && result.type == JSON_OBJ
-        ? json_get_str(json_get(&result, "from")) : NULL;
-    plan_effects = ok && result.type == JSON_OBJ
-        ? json_get(&result, "effects") : NULL;
-    ok = ok && json_get_bool(json_get(&result, "ok")) &&
-        json_get_bool(json_get(&result, "idempotent_plan")) &&
-        plan_id && strcmp(plan_id, plan_id_copy) == 0 && digest &&
-        strcmp(digest, digest_copy) == 0 &&
-        route && strcmp(route, "mixed") == 0 && from &&
-        strcmp(from, from_addr) == 0 &&
-        json_get_int(json_get(&result, "confirmation_policy")) == 6 &&
-        plan_effects && plan_effects->type == JSON_ARR &&
-        json_size(plan_effects) == 2 && tx_mempool_size(mempool) == 0;
-    if (!ok) {
-        const char *code = json_get_str(json_get(&result, "code"));
-        const char *message = json_get_str(json_get(&result, "message"));
+    p11_4_plan_view_load(ok, &result, &view);
+    ok = p11_4_plan_retry_ok(ok, &result, &view, from_addr, plan_id_copy,
+                             digest_copy, mempool);
+    if (!ok)
         printf("(idempotent plan code=%s message=%s) ",
-               code ? code : "RPC_FAILURE",
-               message ? message : "incomplete retry review");
-    }
+               p11_4_json_str_or(&result, "code", "RPC_FAILURE"),
+               p11_4_json_str_or(&result, "message", "incomplete retry review"));
 
     json_free(&params); json_init(&params); json_set_array(&params);
     json_free(&input); json_init(&input); json_set_object(&input);
@@ -385,18 +484,13 @@ static bool p11_4_vault_mixed(struct rpc_table *tbl,
     json_push_back(&params, &input);
     json_free(&result); json_init(&result);
     ok = ok && rpc_table_execute(tbl, "vault_intent_commit", &params, &result);
-    const char *txid = ok && result.type == JSON_OBJ
-        ? json_get_str(json_get(&result, "txid")) : NULL;
-    ok = ok && json_get_bool(json_get(&result, "ok")) && txid &&
-        strlen(txid) == 64;
-    if (!ok) {
-        const char *code = json_get_str(json_get(&result, "code"));
-        const char *message = json_get_str(json_get(&result, "message"));
-        printf("(commit code=%s message=%s) ", code ? code : "RPC_FAILURE",
-               message ? message : "no message");
-    }
-    if (ok)
-        snprintf(txid_hex, txid_hex_size, "%s", txid);
+    const char *txid = p11_4_commit_txid(ok, &result);
+    ok = p11_4_commit_accepted(ok, &result, txid);
+    if (!ok)
+        printf("(commit code=%s message=%s) ",
+               p11_4_json_str_or(&result, "code", "RPC_FAILURE"),
+               p11_4_json_str_or(&result, "message", "no message"));
+    p11_4_copy_text(ok, txid, txid_hex, txid_hex_size);
 
     json_free(&params);
     json_free(&input);
@@ -706,10 +800,500 @@ static bool p11_4_payment_shape(bool found, const struct transaction *payment,
         p11_4_conserves(payment, pool, funding, pay, sender);
 }
 
+static bool p11_4_require_prover(const char *params_dir)
+{
+    if (!sapling_init_params(params_dir)) {
+        printf("FAIL (sapling_init_params(%s) failed)\n", params_dir);
+        return false;
+    }
+    if (!zclassic_sapling_prover_is_ready()) {
+        printf("FAIL (Sapling prover backend=%s status=%s)\n",
+               zclassic_sapling_prover_backend(),
+               zclassic_sapling_prover_status());
+        return false;
+    }
+    return true;
+}
+
+static bool p11_4_open_wallet_fixture(char *tmpdir, size_t tmpdir_size,
+                                      char *dbpath, size_t dbpath_size,
+                                      struct wallet **wallet_out)
+{
+    if (!p11_4_make_tmpdir(tmpdir, tmpdir_size)) {
+        printf("FAIL (tmpdir)\n");
+        return false;
+    }
+    if (!p11_4_open_trust_fixture(tmpdir)) {
+        printf("FAIL (sovereignty trust fixture)\n");
+        reducer_frontier_provable_tip_reset();
+        progress_store_close();
+        if (!p11_4_cleanup_owned(tmpdir))
+            printf("FAIL (trust fixture cleanup)\n");
+        return false;
+    }
+    snprintf(dbpath, dbpath_size, "%s/node.db", tmpdir);
+
+    struct wallet *wallet = zcl_calloc(1, sizeof(*wallet), "p11_4_wallet");
+    if (!wallet) {
+        printf("FAIL (wallet alloc)\n");
+        reducer_frontier_provable_tip_reset();
+        progress_store_close();
+        if (!p11_4_cleanup_owned(tmpdir))
+            printf("FAIL (wallet allocation fixture cleanup)\n");
+        return false;
+    }
+    wallet_init(wallet);
+    if (!sapling_keystore_generate_seed(&wallet->sapling_keys)) {
+        wallet_free(wallet);
+        free(wallet);
+        printf("FAIL (sapling seed)\n");
+        reducer_frontier_provable_tip_reset();
+        progress_store_close();
+        if (!p11_4_cleanup_owned(tmpdir))
+            printf("FAIL (seed fixture cleanup)\n");
+        return false;
+    }
+    *wallet_out = wallet;
+    return true;
+}
+
+static void p11_4_bind_tip_and_sync(struct wallet *wallet,
+                                    struct main_state *ms,
+                                    struct connman *cm,
+                                    struct p2p_node *peer,
+                                    struct p2p_node **peer_slots,
+                                    struct block_index *tip,
+                                    struct node_db *ndb,
+                                    const char *dbpath,
+                                    bool *ok,
+                                    const char **fail_step)
+{
+    tip->nHeight = P11_4_TIP_HEIGHT;
+    tip->nTime = (uint32_t)platform_time_wall_time_t();
+    memset(tip->hashBlock.data, 0x50, sizeof(tip->hashBlock.data));
+    active_chain_move_window_tip(&ms->chain_active, tip);
+    wallet->best_block = tip;
+    wallet->best_block_height = tip->nHeight;
+    zcl_mutex_init(&cm->manager.cs_nodes);
+    peer->id = 1;
+    peer->starting_height = tip->nHeight;
+    peer->state = PEER_ACTIVE;
+    peer->services = NODE_NETWORK;
+    peer_slots[0] = peer;
+    cm->manager.nodes = peer_slots;
+    cm->manager.num_nodes = 1;
+    sync_monitor_set_context(cm, NULL, ms);
+    (void)sync_set_state(SYNC_IDLE, "shielded payment fixture reset");
+    *ok = sync_set_state(SYNC_FINDING_PEERS, "shielded payment fixture") &&
+          sync_set_state(SYNC_HEADERS_DOWNLOAD, "shielded payment fixture") &&
+          sync_set_state(SYNC_BLOCKS_DOWNLOAD, "shielded payment fixture") &&
+          sync_set_state(SYNC_CONNECTING_BLOCKS, "shielded payment fixture") &&
+          sync_set_state(SYNC_AT_TIP, "shielded payment fixture");
+
+    *ok = *ok && node_db_open(ndb, dbpath);
+    if (!*ok)
+        printf("(node_db_open failed for %s)\n", dbpath);
+
+    if (*ok) {
+        *fail_step = "persisted_chain_tip";
+        *ok = p11_4_save_tip(ndb, tip);
+    }
+}
+
+static void p11_4_open_wallet_db(bool *ok, struct wallet_sqlite *wsql,
+                                 struct node_db *ndb, bool *wsql_open)
+{
+    if (*ok) {
+        /* z_getnewaddress fail-closes (wallet_shielded_controller.c) unless
+         * ctx->wallet_db is a real, open wallet_sqlite — same as production
+         * boot.c, which opens wallet_sqlite over the same node.db handle
+         * right after node_db_open succeeds. A NULL wallet_db here would
+         * trip that guard on the very first RPC call. */
+        struct zcl_result wsql_r = wallet_sqlite_open_r(wsql, ndb->db);
+        *ok = wsql_r.ok && wallet_sqlite_self_test(wsql).ok &&
+            wallet_canary_run(ndb->db, NULL) == WALLET_CANARY_OK;
+        if (*ok) {
+            *wsql_open = true;
+        } else {
+            printf("(wallet_sqlite_open_r failed: code=%d message=%s)\n",
+                   wsql_r.code, wsql_r.message);
+        }
+    }
+}
+
+static void p11_4_persist_funding_key(bool *ok, const char **fail_step,
+                                      struct wallet *wallet,
+                                      struct wallet_sqlite *wsql,
+                                      struct privkey *funding_key,
+                                      struct pubkey *funding_pubkey,
+                                      struct key_id *funding_kid)
+{
+    if (*ok) {
+        *fail_step = "wallet_unlock";
+        wallet_lock_reset_for_test();
+        wallet_lock_note_encrypted_at_rest();
+        *ok = wallet_lock_unlock(NULL, NULL, "shielded-payment-gate").ok;
+    }
+
+    if (*ok) {
+        privkey_make_new(funding_key, true);
+        privkey_get_pubkey(funding_key, funding_pubkey);
+        *funding_kid = pubkey_get_id(funding_pubkey);
+        *ok = keystore_add_key(&wallet->keystore, funding_key) &&
+              wallet_sqlite_write_key_r(
+                  wsql, funding_pubkey, funding_key).ok;
+    }
+
+    if (*ok) {
+        *fail_step = "persisted_keypool";
+        *ok = wallet_top_up_key_pool(wallet, 2);
+        int64_t generation = wallet_key_pool_generation_ceiling(wallet);
+        *ok = *ok && wallet_sqlite_flush_r(wsql, wallet).ok;
+        if (*ok)
+            wallet_key_pool_mark_persisted_through(wallet, generation);
+    }
+}
+
+static void p11_4_fund_on_simnet(bool *ok, const char **fail_step,
+                                 struct tx_destination *funding_dest,
+                                 const struct key_id *funding_kid,
+                                 struct script *funding_script,
+                                 char *funding_addr, size_t funding_addr_size,
+                                 struct simnet *chain_sim,
+                                 bool *chain_sim_open,
+                                 int *chain_funding_height,
+                                 struct uint256 *chain_funding_txid,
+                                 struct node_db *ndb,
+                                 struct coins_view_cache *coins_tip)
+{
+    if (*ok) {
+        funding_dest->type = DEST_KEY_ID;
+        funding_dest->id.key = *funding_kid;
+        script_for_destination(funding_script, funding_dest);
+        const struct chain_params *cp = chain_params_get();
+        size_t pk_pfx_len = 0;
+        size_t sc_pfx_len = 0;
+        const unsigned char *pk_pfx =
+            chain_params_base58_prefix(cp, B58_PUBKEY_ADDRESS, &pk_pfx_len);
+        const unsigned char *sc_pfx =
+            chain_params_base58_prefix(cp, B58_SCRIPT_ADDRESS, &sc_pfx_len);
+        *ok = encode_destination(funding_dest, pk_pfx, pk_pfx_len,
+                                 sc_pfx, sc_pfx_len,
+                                 funding_addr, funding_addr_size);
+    }
+
+    if (*ok) {
+        *fail_step = "simnet_funding";
+        *ok = simnet_init(chain_sim);
+        if (*ok) {
+            *chain_sim_open = true;
+            int sapling_height = simnet_tip_height(chain_sim) + 1;
+            simnet_activate_sapling_at(chain_sim, sapling_height);
+            *ok = simnet_enable_sapling_tree(chain_sim);
+            simnet_enable_contextual_check(chain_sim, true);
+            *chain_funding_height = sapling_height;
+        }
+        *ok = *ok && simnet_mint_coinbase_to(
+            chain_sim, funding_script, 3 * COIN_VALUE,
+            chain_funding_txid);
+        *ok = *ok && simnet_mint_to_height(
+            chain_sim, *chain_funding_height + COINBASE_MATURITY);
+    }
+
+    if (*ok)
+        *ok = p11_4_build_funding_utxo(
+            ndb, coins_tip, chain_funding_txid, funding_kid,
+            funding_script, *chain_funding_height);
+}
+
+static void p11_4_register_and_address(bool *ok, const char **fail_step,
+                                       struct rpc_table *tbl,
+                                       struct wallet *wallet,
+                                       struct main_state *ms,
+                                       const char *tmpdir,
+                                       struct wallet_sqlite *wsql,
+                                       struct tx_mempool *mempool,
+                                       struct node_db *ndb,
+                                       struct coins_view_cache *coins_tip,
+                                       char *zaddr, size_t zaddr_size,
+                                       struct wallet **recipient)
+{
+    if (*ok) {
+        /* register_wallet_rpc_commands() already registers the shielded
+         * sub-controller (wallet_controller.c calls
+         * register_wallet_shielded_rpc_commands internally), so a second
+         * explicit call here would re-register z_getnewaddress and trip the
+         * rpc_table_must_append duplicate-name guard. One call registers the
+         * full transparent + shielded surface the gate exercises. */
+        register_wallet_rpc_commands(tbl);
+        {
+            char warmup_status[64];
+            if (rpc_is_in_warmup(warmup_status, sizeof(warmup_status)))
+                set_rpc_warmup_finished();
+        }
+        rpc_wallet_set_state(wallet, ms, tmpdir, wsql, mempool, NULL);
+        rpc_wallet_set_node_db(ndb);
+        rpc_wallet_set_coins_tip(coins_tip);
+    }
+
+    if (*ok) {
+        *fail_step = "z_getnewaddress";
+        *ok = p11_4_rpc_z_getnewaddress(tbl, zaddr, zaddr_size);
+    }
+
+    if (*ok) {
+        *fail_step = "zaddr_prefix";
+        *ok = strncmp(zaddr, "zs1", 3) == 0;
+    }
+
+    if (*ok) {
+        *fail_step = "uncredited_recipient";
+        *recipient = p11_4_recipient(wallet, zaddr);
+        *ok = *recipient && (*recipient)->num_sapling_notes == 0 &&
+            wallet_get_sapling_balance(*recipient) == 0;
+    }
+
+    if (*ok) {
+        *fail_step = "custody_identity";
+        struct wallet_identity_row identity;
+        *ok = wallet_identity_ensure(ndb,
+            chain_params_get()->consensus.hashGenesisBlock.data,
+            "test", &identity);
+    }
+}
+
+static void p11_4_backup_and_health(bool *ok, const char **fail_step,
+                                    char *backup_dir, size_t backup_dir_size,
+                                    const char *tmpdir, struct node_db *ndb,
+                                    struct wallet_sqlite *wsql,
+                                    struct wallet *wallet)
+{
+    if (*ok) {
+        *fail_step = "encrypted_backup";
+        snprintf(backup_dir, backup_dir_size, "%s/backups", tmpdir);
+        struct wallet_backup_config backup;
+        memset(&backup, 0, sizeof(backup));
+        backup.backup_dir = backup_dir;
+        backup.encrypt = true;
+        backup.encrypt_password = "shielded-payment-backup";
+        *ok = wallet_backup_start(&backup, ndb).ok &&
+              wallet_backup_now().ok;
+    }
+
+    if (*ok) {
+        struct wallet_sqlite_health health = wallet_sqlite_get_health(
+            wsql, (int)wallet->keystore.num_keys);
+        if (!health.open || !health.canary_ok || health.mismatch) {
+            printf("(persistence open=%d canary=%d rows=%d keys=%d error=%s) ",
+                   health.open, health.canary_ok, health.row_count,
+                   health.keystore_count, health.last_error);
+        }
+    }
+}
+
+struct p11_4_send_probe {
+    bool lookup_ok;
+    bool shape_ok;
+    bool admit_ok;
+    bool copied;
+    bool tamper_ok;
+    bool uncredited;
+    enum mempool_accept_result accepted;
+    enum mempool_accept_result rejected;
+};
+
+static void p11_4_probe_admission(struct p11_4_send_probe *probe,
+                                  struct tx_mempool *mempool,
+                                  struct transaction *sent_tx,
+                                  struct coins_view_cache *coins_tip,
+                                  struct main_state *ms,
+                                  const struct uint256 *chain_funding_txid,
+                                  const struct script *funding_script,
+                                  const struct wallet *wallet,
+                                  const char *txid_hex)
+{
+    struct uint256 txid;
+    memset(&txid, 0, sizeof(txid));
+    uint256_set_hex(&txid, txid_hex);
+    probe->lookup_ok = tx_mempool_lookup(mempool, &txid, sent_tx);
+    probe->shape_ok = p11_4_payment_shape(probe->lookup_ok, sent_tx, mempool,
+        chain_funding_txid, funding_script, wallet);
+
+    /* A second, independent admission into an empty pool exercises the
+     * complete consensus/mempool boundary: structure, Sapling output
+     * proof + binding signature, transparent input/script, and fee. */
+    struct tx_mempool proof_pool;
+    tx_mempool_init(&proof_pool, 0);
+    probe->accepted = accept_to_mempool(
+        &proof_pool, coins_tip, ms, chain_params_get(), sent_tx);
+    probe->admit_ok = probe->accepted == MEMPOOL_ACCEPT_OK &&
+        tx_mempool_exists(&proof_pool, &sent_tx->hash);
+    tx_mempool_free(&proof_pool);
+}
+
+static void p11_4_probe_tamper(struct p11_4_send_probe *probe,
+                               const struct transaction *sent_tx,
+                               struct coins_view_cache *coins_tip,
+                               struct main_state *ms)
+{
+    /* Negative control: changing one proof byte must be rejected by the
+     * same full admission boundary and must leave its pool empty. */
+    struct transaction tampered_tx;
+    transaction_init(&tampered_tx);
+    probe->copied = transaction_copy(&tampered_tx, sent_tx);
+    if (probe->copied && tampered_tx.num_shielded_output == 1) {
+        tampered_tx.v_shielded_output[0].zkproof[0] ^= 0x01;
+        transaction_compute_hash(&tampered_tx);
+    }
+    struct tx_mempool reject_pool;
+    tx_mempool_init(&reject_pool, 0);
+    probe->rejected = probe->copied
+        ? accept_to_mempool(&reject_pool, coins_tip, ms,
+                            chain_params_get(), &tampered_tx)
+        : MEMPOOL_ACCEPT_INTERNAL_ERROR;
+    probe->tamper_ok = probe->copied &&
+        probe->rejected == MEMPOOL_ACCEPT_INVALID &&
+        tx_mempool_size(&reject_pool) == 0;
+    tx_mempool_free(&reject_pool);
+    transaction_free(&tampered_tx);
+}
+
+static bool p11_4_post_send_checks(struct tx_mempool *mempool,
+                                   struct transaction *sent_tx,
+                                   struct coins_view_cache *coins_tip,
+                                   struct main_state *ms,
+                                   const struct uint256 *chain_funding_txid,
+                                   const struct script *funding_script,
+                                   const struct wallet *wallet,
+                                   const char *txid_hex,
+                                   struct wallet *recipient)
+{
+    struct p11_4_send_probe probe;
+    memset(&probe, 0, sizeof(probe));
+    p11_4_probe_admission(&probe, mempool, sent_tx, coins_tip, ms,
+                          chain_funding_txid, funding_script, wallet,
+                          txid_hex);
+    p11_4_probe_tamper(&probe, sent_tx, coins_tip, ms);
+    probe.uncredited = recipient && recipient->num_sapling_notes == 0 &&
+        wallet_get_sapling_balance(recipient) == 0;
+    bool passed = probe.lookup_ok && probe.shape_ok && probe.admit_ok &&
+        probe.tamper_ok && probe.uncredited;
+    if (!passed)
+        printf("(lookup=%d zouts=%zu vouts=%zu value_balance=%lld "
+               "accept=%d admitted=%d copied=%d reject=%d tamper=%d "
+               "uncredited=%d) ",
+               probe.lookup_ok, sent_tx->num_shielded_output,
+               sent_tx->num_vout, (long long)sent_tx->value_balance,
+               (int)probe.accepted, probe.admit_ok, probe.copied,
+               (int)probe.rejected, probe.tamper_ok, probe.uncredited);
+    return passed;
+}
+
+static void p11_4_exercise_payment(bool *ok, const char **fail_step,
+                                   struct rpc_table *tbl,
+                                   const char *funding_addr,
+                                   const char *zaddr,
+                                   struct tx_mempool *mempool,
+                                   char *txid_hex, size_t txid_hex_size,
+                                   struct transaction *sent_tx,
+                                   struct coins_view_cache *coins_tip,
+                                   struct main_state *ms,
+                                   const struct uint256 *chain_funding_txid,
+                                   const struct script *funding_script,
+                                   struct wallet *wallet,
+                                   struct wallet *recipient,
+                                   struct simnet *chain_sim,
+                                   struct block *accepted_block,
+                                   int *accepted_height,
+                                   bool *chain_confirmed,
+                                   const char *tmpdir)
+{
+    if (*ok) {
+        *fail_step = "vault_intent_mixed";
+        *ok = p11_4_vault_mixed(tbl, funding_addr, zaddr, mempool,
+                                txid_hex, txid_hex_size);
+    }
+
+    if (*ok) {
+        *fail_step = "post_send_checks";
+        *ok = p11_4_post_send_checks(mempool, sent_tx, coins_tip, ms,
+                                     chain_funding_txid, funding_script,
+                                     wallet, txid_hex, recipient);
+    }
+
+    if (*ok) {
+        *fail_step = "simnet_confirm";
+        *chain_confirmed = p11_4_mint_payment(chain_sim, sent_tx,
+            chain_funding_txid, accepted_block, accepted_height);
+        *ok = *chain_confirmed;
+    }
+
+    if (*ok) {
+        *fail_step = "confirmed_body_rescan";
+        *ok = p11_4_confirmed_rescan(recipient, accepted_block,
+                                     *accepted_height, sent_tx, tmpdir);
+    }
+}
+
+static int p11_4_finish_gate(bool ok, const char *fail_step,
+                             int previous_defer_height, bool chain_confirmed,
+                             struct wallet *recipient,
+                             struct block *accepted_block,
+                             struct transaction *sent_tx,
+                             struct coins_view_cache *coins_tip,
+                             struct tx_mempool *mempool,
+                             struct wallet_sqlite *wsql, bool wsql_open,
+                             struct node_db *ndb, struct main_state *ms,
+                             struct wallet *wallet,
+                             struct simnet *chain_sim, bool chain_sim_open,
+                             const char *tmpdir)
+{
+    atomic_store_explicit(&g_deferred_proof_validation_below_height,
+                          previous_defer_height, memory_order_relaxed);
+
+    rpc_wallet_set_node_db(NULL);
+    rpc_wallet_set_coins_tip(NULL);
+    rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);
+    sync_monitor_set_context(NULL, NULL, NULL);
+    (void)sync_set_state(SYNC_IDLE, "shielded payment fixture cleanup");
+    reducer_frontier_provable_tip_reset();
+    progress_store_close();
+    wallet_backup_stop();
+    wallet_lock_reset_for_test();
+
+    block_free(accepted_block);
+    if (recipient) {
+        wallet_free(recipient);
+        free(recipient);
+    }
+    transaction_free(sent_tx);
+    coins_view_cache_free(coins_tip);
+    tx_mempool_free(mempool);
+    if (wsql_open)
+        wallet_sqlite_close(wsql);
+    node_db_close(ndb);
+    main_state_free(ms);
+    wallet_free(wallet);
+    free(wallet);
+    if (chain_sim_open)
+        simnet_free(chain_sim);
+    ok = p11_4_cleanup_owned(tmpdir) && ok;
+
+    int failures = 0;
+    if (ok) {
+        printf("OK (durable t->(z,t) plan/commit, proof verified, fully "
+               "admitted, tamper rejected, confirmed body rescanned to "
+               "1.00000000 ZCL without precredit, "
+               "simnet block confirmed=%d)\n", chain_confirmed);
+    } else {
+        printf("FAIL (%s)\n", fail_step);
+        failures++;
+    }
+    return failures;
+}
+
 int test_shielded_payment_gate(void)
 {
-    int failures = 0;
-
     printf("\n=== shielded payment (MVP #4) ===\n");
     printf("shielded_payment wallet shield + private send e2e... ");
 
@@ -732,16 +1316,8 @@ int test_shielded_payment_gate(void)
         return 0;
     }
 
-    if (!sapling_init_params(params_dir)) {
-        printf("FAIL (sapling_init_params(%s) failed)\n", params_dir);
+    if (!p11_4_require_prover(params_dir))
         return 1;
-    }
-    if (!zclassic_sapling_prover_is_ready()) {
-        printf("FAIL (Sapling prover backend=%s status=%s)\n",
-               zclassic_sapling_prover_backend(),
-               zclassic_sapling_prover_status());
-        return 1;
-    }
 
     char tmpdir[256];
     char dbpath[320];
@@ -804,40 +1380,9 @@ int test_shielded_payment_gate(void)
     memset(txid_hex, 0, sizeof(txid_hex));
     memset(backup_dir, 0, sizeof(backup_dir));
 
-    if (!p11_4_make_tmpdir(tmpdir, sizeof(tmpdir))) {
-        printf("FAIL (tmpdir)\n");
+    if (!p11_4_open_wallet_fixture(tmpdir, sizeof(tmpdir), dbpath,
+                                   sizeof(dbpath), &wallet))
         return 1;
-    }
-    if (!p11_4_open_trust_fixture(tmpdir)) {
-        printf("FAIL (sovereignty trust fixture)\n");
-        reducer_frontier_provable_tip_reset();
-        progress_store_close();
-        if (!p11_4_cleanup_owned(tmpdir))
-            printf("FAIL (trust fixture cleanup)\n");
-        return 1;
-    }
-    snprintf(dbpath, sizeof(dbpath), "%s/node.db", tmpdir);
-
-    wallet = zcl_calloc(1, sizeof(*wallet), "p11_4_wallet");
-    if (!wallet) {
-        printf("FAIL (wallet alloc)\n");
-        reducer_frontier_provable_tip_reset();
-        progress_store_close();
-        if (!p11_4_cleanup_owned(tmpdir))
-            printf("FAIL (wallet allocation fixture cleanup)\n");
-        return 1;
-    }
-    wallet_init(wallet);
-    if (!sapling_keystore_generate_seed(&wallet->sapling_keys)) {
-        wallet_free(wallet);
-        free(wallet);
-        printf("FAIL (sapling seed)\n");
-        reducer_frontier_provable_tip_reset();
-        progress_store_close();
-        if (!p11_4_cleanup_owned(tmpdir))
-            printf("FAIL (seed fixture cleanup)\n");
-        return 1;
-    }
     main_state_init(&ms);
     tx_mempool_init(&mempool, 0);
     coins_view_cache_init(&coins_tip, &null_coins_view);
@@ -845,182 +1390,20 @@ int test_shielded_payment_gate(void)
     block_index_init(&tip);
     transaction_init(&sent_tx);
 
-    tip.nHeight = P11_4_TIP_HEIGHT;
-    tip.nTime = (uint32_t)platform_time_wall_time_t();
-    memset(tip.hashBlock.data, 0x50, sizeof(tip.hashBlock.data));
-    active_chain_move_window_tip(&ms.chain_active, &tip);
-    wallet->best_block = &tip;
-    wallet->best_block_height = tip.nHeight;
-    zcl_mutex_init(&cm.manager.cs_nodes);
-    peer.id = 1;
-    peer.starting_height = tip.nHeight;
-    peer.state = PEER_ACTIVE;
-    peer.services = NODE_NETWORK;
-    peer_slots[0] = &peer;
-    cm.manager.nodes = peer_slots;
-    cm.manager.num_nodes = 1;
-    sync_monitor_set_context(&cm, NULL, &ms);
-    (void)sync_set_state(SYNC_IDLE, "shielded payment fixture reset");
-    ok = sync_set_state(SYNC_FINDING_PEERS, "shielded payment fixture") &&
-         sync_set_state(SYNC_HEADERS_DOWNLOAD, "shielded payment fixture") &&
-         sync_set_state(SYNC_BLOCKS_DOWNLOAD, "shielded payment fixture") &&
-         sync_set_state(SYNC_CONNECTING_BLOCKS, "shielded payment fixture") &&
-         sync_set_state(SYNC_AT_TIP, "shielded payment fixture");
-
-    ok = ok && node_db_open(&ndb, dbpath);
-    if (!ok)
-        printf("(node_db_open failed for %s)\n", dbpath);
-
-    if (ok) {
-        fail_step = "persisted_chain_tip";
-        ok = p11_4_save_tip(&ndb, &tip);
-    }
-
-    if (ok) {
-        /* z_getnewaddress fail-closes (wallet_shielded_controller.c) unless
-         * ctx->wallet_db is a real, open wallet_sqlite — same as production
-         * boot.c, which opens wallet_sqlite over the same node.db handle
-         * right after node_db_open succeeds. A NULL wallet_db here would
-         * trip that guard on the very first RPC call. */
-        struct zcl_result wsql_r = wallet_sqlite_open_r(&wsql, ndb.db);
-        ok = wsql_r.ok && wallet_sqlite_self_test(&wsql).ok &&
-            wallet_canary_run(ndb.db, NULL) == WALLET_CANARY_OK;
-        if (ok) {
-            wsql_open = true;
-        } else {
-            printf("(wallet_sqlite_open_r failed: code=%d message=%s)\n",
-                   wsql_r.code, wsql_r.message);
-        }
-    }
-
-    if (ok) {
-        fail_step = "wallet_unlock";
-        wallet_lock_reset_for_test();
-        wallet_lock_note_encrypted_at_rest();
-        ok = wallet_lock_unlock(NULL, NULL, "shielded-payment-gate").ok;
-    }
-
-    if (ok) {
-        privkey_make_new(&funding_key, true);
-        privkey_get_pubkey(&funding_key, &funding_pubkey);
-        funding_kid = pubkey_get_id(&funding_pubkey);
-        ok = keystore_add_key(&wallet->keystore, &funding_key) &&
-             wallet_sqlite_write_key_r(
-                 &wsql, &funding_pubkey, &funding_key).ok;
-    }
-
-    if (ok) {
-        fail_step = "persisted_keypool";
-        ok = wallet_top_up_key_pool(wallet, 2);
-        int64_t generation = wallet_key_pool_generation_ceiling(wallet);
-        ok = ok && wallet_sqlite_flush_r(&wsql, wallet).ok;
-        if (ok)
-            wallet_key_pool_mark_persisted_through(wallet, generation);
-    }
-
-    if (ok) {
-        funding_dest.type = DEST_KEY_ID;
-        funding_dest.id.key = funding_kid;
-        script_for_destination(&funding_script, &funding_dest);
-        const struct chain_params *cp = chain_params_get();
-        size_t pk_pfx_len = 0;
-        size_t sc_pfx_len = 0;
-        const unsigned char *pk_pfx =
-            chain_params_base58_prefix(cp, B58_PUBKEY_ADDRESS, &pk_pfx_len);
-        const unsigned char *sc_pfx =
-            chain_params_base58_prefix(cp, B58_SCRIPT_ADDRESS, &sc_pfx_len);
-        ok = encode_destination(&funding_dest, pk_pfx, pk_pfx_len,
-                                sc_pfx, sc_pfx_len,
-                                funding_addr, sizeof(funding_addr));
-    }
-
-    if (ok) {
-        fail_step = "simnet_funding";
-        ok = simnet_init(&chain_sim);
-        if (ok) {
-            chain_sim_open = true;
-            int sapling_height = simnet_tip_height(&chain_sim) + 1;
-            simnet_activate_sapling_at(&chain_sim, sapling_height);
-            ok = simnet_enable_sapling_tree(&chain_sim);
-            simnet_enable_contextual_check(&chain_sim, true);
-            chain_funding_height = sapling_height;
-        }
-        ok = ok && simnet_mint_coinbase_to(
-            &chain_sim, &funding_script, 3 * COIN_VALUE,
-            &chain_funding_txid);
-        ok = ok && simnet_mint_to_height(
-            &chain_sim, chain_funding_height + COINBASE_MATURITY);
-    }
-
-    if (ok)
-        ok = p11_4_build_funding_utxo(
-            &ndb, &coins_tip, &chain_funding_txid, &funding_kid,
-            &funding_script, chain_funding_height);
-
-    if (ok) {
-        /* register_wallet_rpc_commands() already registers the shielded
-         * sub-controller (wallet_controller.c calls
-         * register_wallet_shielded_rpc_commands internally), so a second
-         * explicit call here would re-register z_getnewaddress and trip the
-         * rpc_table_must_append duplicate-name guard. One call registers the
-         * full transparent + shielded surface the gate exercises. */
-        register_wallet_rpc_commands(&tbl);
-        {
-            char warmup_status[64];
-            if (rpc_is_in_warmup(warmup_status, sizeof(warmup_status)))
-                set_rpc_warmup_finished();
-        }
-        rpc_wallet_set_state(wallet, &ms, tmpdir, &wsql, &mempool, NULL);
-        rpc_wallet_set_node_db(&ndb);
-        rpc_wallet_set_coins_tip(&coins_tip);
-    }
-
-    if (ok) {
-        fail_step = "z_getnewaddress";
-        ok = p11_4_rpc_z_getnewaddress(&tbl, zaddr, sizeof(zaddr));
-    }
-
-    if (ok) {
-        fail_step = "zaddr_prefix";
-        ok = strncmp(zaddr, "zs1", 3) == 0;
-    }
-
-    if (ok) {
-        fail_step = "uncredited_recipient";
-        recipient = p11_4_recipient(wallet, zaddr);
-        ok = recipient && recipient->num_sapling_notes == 0 &&
-            wallet_get_sapling_balance(recipient) == 0;
-    }
-
-    if (ok) {
-        fail_step = "custody_identity";
-        struct wallet_identity_row identity;
-        ok = wallet_identity_ensure(&ndb,
-            chain_params_get()->consensus.hashGenesisBlock.data,
-            "test", &identity);
-    }
-
-    if (ok) {
-        fail_step = "encrypted_backup";
-        snprintf(backup_dir, sizeof(backup_dir), "%s/backups", tmpdir);
-        struct wallet_backup_config backup;
-        memset(&backup, 0, sizeof(backup));
-        backup.backup_dir = backup_dir;
-        backup.encrypt = true;
-        backup.encrypt_password = "shielded-payment-backup";
-        ok = wallet_backup_start(&backup, &ndb).ok &&
-             wallet_backup_now().ok;
-    }
-
-    if (ok) {
-        struct wallet_sqlite_health health = wallet_sqlite_get_health(
-            &wsql, (int)wallet->keystore.num_keys);
-        if (!health.open || !health.canary_ok || health.mismatch) {
-            printf("(persistence open=%d canary=%d rows=%d keys=%d error=%s) ",
-                   health.open, health.canary_ok, health.row_count,
-                   health.keystore_count, health.last_error);
-        }
-    }
+    p11_4_bind_tip_and_sync(wallet, &ms, &cm, &peer, peer_slots, &tip, &ndb,
+                            dbpath, &ok, &fail_step);
+    p11_4_open_wallet_db(&ok, &wsql, &ndb, &wsql_open);
+    p11_4_persist_funding_key(&ok, &fail_step, wallet, &wsql, &funding_key,
+                              &funding_pubkey, &funding_kid);
+    p11_4_fund_on_simnet(&ok, &fail_step, &funding_dest, &funding_kid,
+                         &funding_script, funding_addr, sizeof(funding_addr),
+                         &chain_sim, &chain_sim_open, &chain_funding_height,
+                         &chain_funding_txid, &ndb, &coins_tip);
+    p11_4_register_and_address(&ok, &fail_step, &tbl, wallet, &ms, tmpdir,
+                               &wsql, &mempool, &ndb, &coins_tip, zaddr,
+                               sizeof(zaddr), &recipient);
+    p11_4_backup_and_health(&ok, &fail_step, backup_dir, sizeof(backup_dir),
+                            tmpdir, &ndb, &wsql, wallet);
 
     /* Make the gate prove that Groth16 checks really ran even if another test
      * changed the process-wide historical-proof deferral policy. */
@@ -1028,118 +1411,16 @@ int test_shielded_payment_gate(void)
         &g_deferred_proof_validation_below_height, -1,
         memory_order_relaxed);
 
-    if (ok) {
-        fail_step = "vault_intent_mixed";
-        ok = p11_4_vault_mixed(&tbl, funding_addr, zaddr, &mempool,
-                               txid_hex, sizeof(txid_hex));
-    }
+    p11_4_exercise_payment(&ok, &fail_step, &tbl, funding_addr, zaddr,
+                           &mempool, txid_hex, sizeof(txid_hex), &sent_tx,
+                           &coins_tip, &ms, &chain_funding_txid,
+                           &funding_script, wallet, recipient, &chain_sim,
+                           &accepted_block, &accepted_height,
+                           &chain_confirmed, tmpdir);
 
-    if (ok) {
-        fail_step = "post_send_checks";
-        struct uint256 txid;
-        memset(&txid, 0, sizeof(txid));
-        uint256_set_hex(&txid, txid_hex);
-        bool lookup_ok = tx_mempool_lookup(&mempool, &txid, &sent_tx);
-        bool shape_ok = p11_4_payment_shape(lookup_ok, &sent_tx, &mempool,
-            &chain_funding_txid, &funding_script, wallet);
-
-        /* A second, independent admission into an empty pool exercises the
-         * complete consensus/mempool boundary: structure, Sapling output
-         * proof + binding signature, transparent input/script, and fee. */
-        struct tx_mempool proof_pool;
-        tx_mempool_init(&proof_pool, 0);
-        enum mempool_accept_result accepted = accept_to_mempool(
-            &proof_pool, &coins_tip, &ms, chain_params_get(), &sent_tx);
-        bool admit_ok = accepted == MEMPOOL_ACCEPT_OK &&
-            tx_mempool_exists(&proof_pool, &sent_tx.hash);
-        tx_mempool_free(&proof_pool);
-
-        /* Negative control: changing one proof byte must be rejected by the
-         * same full admission boundary and must leave its pool empty. */
-        struct transaction tampered_tx;
-        transaction_init(&tampered_tx);
-        bool copied = transaction_copy(&tampered_tx, &sent_tx);
-        if (copied && tampered_tx.num_shielded_output == 1) {
-            tampered_tx.v_shielded_output[0].zkproof[0] ^= 0x01;
-            transaction_compute_hash(&tampered_tx);
-        }
-        struct tx_mempool reject_pool;
-        tx_mempool_init(&reject_pool, 0);
-        enum mempool_accept_result rejected = copied
-            ? accept_to_mempool(&reject_pool, &coins_tip, &ms,
-                                chain_params_get(), &tampered_tx)
-            : MEMPOOL_ACCEPT_INTERNAL_ERROR;
-        bool tamper_ok = copied && rejected == MEMPOOL_ACCEPT_INVALID &&
-            tx_mempool_size(&reject_pool) == 0;
-        tx_mempool_free(&reject_pool);
-        transaction_free(&tampered_tx);
-
-        bool uncredited = recipient && recipient->num_sapling_notes == 0 &&
-            wallet_get_sapling_balance(recipient) == 0;
-        ok = lookup_ok && shape_ok && admit_ok && tamper_ok && uncredited;
-        if (!ok)
-            printf("(lookup=%d zouts=%zu vouts=%zu value_balance=%lld "
-                   "accept=%d admitted=%d copied=%d reject=%d tamper=%d "
-                   "uncredited=%d) ",
-                   lookup_ok, sent_tx.num_shielded_output,
-                   sent_tx.num_vout, (long long)sent_tx.value_balance,
-                   (int)accepted, admit_ok, copied, (int)rejected, tamper_ok,
-                   uncredited);
-    }
-
-    if (ok) {
-        fail_step = "simnet_confirm";
-        chain_confirmed = p11_4_mint_payment(&chain_sim, &sent_tx,
-            &chain_funding_txid, &accepted_block, &accepted_height);
-        ok = chain_confirmed;
-    }
-
-    if (ok) {
-        fail_step = "confirmed_body_rescan";
-        ok = p11_4_confirmed_rescan(recipient, &accepted_block,
-                                    accepted_height, &sent_tx, tmpdir);
-    }
-
-    atomic_store_explicit(&g_deferred_proof_validation_below_height,
-                          previous_defer_height, memory_order_relaxed);
-
-    rpc_wallet_set_node_db(NULL);
-    rpc_wallet_set_coins_tip(NULL);
-    rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);
-    sync_monitor_set_context(NULL, NULL, NULL);
-    (void)sync_set_state(SYNC_IDLE, "shielded payment fixture cleanup");
-    reducer_frontier_provable_tip_reset();
-    progress_store_close();
-    wallet_backup_stop();
-    wallet_lock_reset_for_test();
-
-    block_free(&accepted_block);
-    if (recipient) {
-        wallet_free(recipient);
-        free(recipient);
-    }
-    transaction_free(&sent_tx);
-    coins_view_cache_free(&coins_tip);
-    tx_mempool_free(&mempool);
-    if (wsql_open)
-        wallet_sqlite_close(&wsql);
-    node_db_close(&ndb);
-    main_state_free(&ms);
-    wallet_free(wallet);
-    free(wallet);
-    if (chain_sim_open)
-        simnet_free(&chain_sim);
-    ok = p11_4_cleanup_owned(tmpdir) && ok;
-
-    if (ok) {
-        printf("OK (durable t->(z,t) plan/commit, proof verified, fully "
-               "admitted, tamper rejected, confirmed body rescanned to "
-               "1.00000000 ZCL without precredit, "
-               "simnet block confirmed=%d)\n", chain_confirmed);
-    } else {
-        printf("FAIL (%s)\n", fail_step);
-        failures++;
-    }
-
-    return failures;
+    return p11_4_finish_gate(ok, fail_step, previous_defer_height,
+                             chain_confirmed, recipient, &accepted_block,
+                             &sent_tx, &coins_tip, &mempool, &wsql, wsql_open,
+                             &ndb, &ms, wallet, &chain_sim, chain_sim_open,
+                             tmpdir);
 }
