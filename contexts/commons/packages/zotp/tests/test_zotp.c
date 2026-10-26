@@ -11,6 +11,13 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_sink;
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define main zotp_cli_main
+#include "../app/main.c"
+#undef main
+#undef printf
+
 static int failures = 0;
 
 #define CHECK(cond)                                                     \
@@ -123,8 +130,69 @@ static void test_truncate_offsets(void)
     }
 }
 
+static int cli_case(int argc, char **argv, int status, const char *want)
+{
+    FILE *output = tmpfile();
+    if (!output) return 1;
+    cli_sink = output;
+    int bad = zotp_cli_main(argc, argv) != status;
+    rewind(output);
+    char bytes[128];
+    size_t n = fread(bytes, 1, sizeof bytes, output);
+    if (ferror(output) || n != strlen(want) || memcmp(bytes, want, n) != 0)
+        bad = 1;
+    if (fclose(output) != 0) bad = 1;
+    return bad;
+}
+
+static void test_cli_args(void)
+{
+    char *args[] = {"zotp", "12345678901234567890", "0", "1", "6", "extra", NULL};
+    CHECK(cli_case(3, args, 0, "755224\n") == 0);
+    args[3] = "3";
+    CHECK(cli_case(4, args, 0, "755224\n287082\n359152\n") == 0);
+    args[3] = "1"; args[4] = "8";
+    CHECK(cli_case(5, args, 0, "84755224\n") == 0);
+    args[3] = "4294967296"; args[4] = "6";
+    CHECK(cli_case(5, args, 2, "") == 0);
+    args[3] = "1"; args[4] = "4294967302";
+    CHECK(cli_case(5, args, 2, "") == 0);
+    const char *bad[] = {"", "+1", "-1", " 1", "1 ", "1junk",
+                         "18446744073709551616"};
+    for (int field = 2; field <= 4; field++) {
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            args[2] = "0"; args[3] = "1"; args[4] = "6";
+            args[field] = (char *)bad[i];
+            CHECK(cli_case(5, args, 2, "") == 0);
+        }
+    }
+    args[2] = "18446744073709551615"; args[3] = "2"; args[4] = "6";
+    CHECK(cli_case(5, args, 2, "") == 0);
+    args[3] = "1";
+    char want[17] = {0};
+    bool rendered = zotp_hotp(args[1], strlen(args[1]), UINT64_MAX, 6, want);
+    CHECK(rendered);
+    if (rendered) {
+        strcat(want, "\n");
+        CHECK(cli_case(5, args, 0, want) == 0);
+    }
+    args[3] = "0";
+    CHECK(cli_case(5, args, 0, "") == 0);
+    args[4] = "5";
+    CHECK(cli_case(5, args, 2, "") == 0);
+    args[4] = "10";
+    CHECK(cli_case(5, args, 2, "") == 0);
+    CHECK(cli_case(6, args, 2, "") == 0);
+    CHECK(cli_case(2, args, 2, "") == 0);
+    char maximum[3 * sizeof(unsigned) + 1];
+    snprintf(maximum, sizeof maximum, "%u", UINT_MAX);
+    uint64_t parsed = 0;
+    CHECK(parse_decimal(maximum, UINT_MAX, &parsed) && parsed == UINT_MAX);
+}
+
 int main(void)
 {
+    test_cli_args();
     test_hmac_sha1_rfc2202();
     test_hotp_rfc4226_table();
     test_digit_widths();
