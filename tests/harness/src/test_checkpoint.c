@@ -8,55 +8,132 @@
 #include <stdio.h>
 #include <string.h>
 
-static int check_reorg_reason_matches(int tip, int target, bool want_ok,
-                                      const char *want_reason)
+static int checkpoint_case_1(void)
 {
+    int failures = 0;
     const char *r = NULL;
-    bool ok = reorg_is_allowed(tip, target, &r);
-    if (ok == want_ok && r && strcmp(r, want_reason) == 0)
+    bool ok = reorg_is_allowed(-1, 0, &r);
+    if (ok && r && strcmp(r, "no_tip") == 0)
         printf("OK\n");
-    else { printf("FAIL (ok=%d r=%s)\n", ok, r ? r : "(null)"); return 1; }
-    return 0;
+    else { printf("FAIL (ok=%d r=%s)\n", ok, r ? r : "(null)"); failures++; }
+    return failures;
 }
 
-static int check_reorg_forward_ok(int tip, int target)
+static int checkpoint_case_2(void)
 {
+    int failures = 0;
     const char *r = NULL;
-    bool ok = reorg_is_allowed(tip, target, &r);
+    bool ok = reorg_is_allowed(100, 200, &r);
+    if (ok && r && strcmp(r, "no_disconnect") == 0)
+        printf("OK\n");
+    else { printf("FAIL (ok=%d r=%s)\n", ok, r ? r : "(null)"); failures++; }
+    return failures;
+}
+
+static int checkpoint_case_3(void)
+{
+    int failures = 0;
+    const char *r = NULL;
+    bool ok = reorg_is_allowed(100, 100, &r);
     if (ok)
         printf("OK\n");
-    else { printf("FAIL\n"); return 1; }
-    return 0;
+    else { printf("FAIL\n"); failures++; }
+    return failures;
 }
 
-static int check_immutable_height_flag(int tip, int height, bool want_immutable)
+static int checkpoint_case_4(void)
 {
-    if (height_is_immutable(tip, height) == want_immutable)
+    int failures = 0;
+    const char *r = NULL;
+    bool ok = reorg_is_allowed(100, 99, &r);
+    if (ok && r && strcmp(r, "within_finality_depth") == 0)
         printf("OK\n");
-    else { printf("FAIL\n"); return 1; }
-    return 0;
+    else { printf("FAIL (ok=%d r=%s)\n", ok, r ? r : "(null)"); failures++; }
+    return failures;
 }
 
-static int check_finality_policy_invariants(void)
+static int checkpoint_case_5(void)
 {
+    int failures = 0;
+    const char *r = NULL;
+    bool ok = reorg_is_allowed(1000, 1000 - MAX_REORG_LENGTH, &r);
+    if (ok && r && strcmp(r, "within_finality_depth") == 0)
+        printf("OK\n");
+    else { printf("FAIL (ok=%d r=%s)\n", ok, r ? r : "(null)"); failures++; }
+    return failures;
+}
+
+static int checkpoint_case_6(void)
+{
+    int failures = 0;
+    const char *r = NULL;
+    bool ok = reorg_is_allowed(1000, 1000 - MAX_REORG_LENGTH - 1, &r);
+    if (!ok && r && strcmp(r, "below_finality_depth") == 0)
+        printf("OK\n");
+    else { printf("FAIL (ok=%d r=%s)\n", ok, r ? r : "(null)"); failures++; }
+    return failures;
+}
+
+static int checkpoint_case_7(void)
+{
+    int failures = 0;
+    const char *r = NULL;
+    bool ok = reorg_is_allowed(3000000, 1000, &r);
+    if (!ok && r && strcmp(r, "below_finality_depth") == 0)
+        printf("OK\n");
+    else { printf("FAIL (ok=%d r=%s)\n", ok, r ? r : "(null)"); failures++; }
+    return failures;
+}
+
+static int checkpoint_case_8(void)
+{
+    int failures = 0;
+    if (height_is_immutable(1000, 500))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int checkpoint_case_9(void)
+{
+    int failures = 0;
+    if (!height_is_immutable(1000, 1000))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int checkpoint_case_10(void)
+{
+    int failures = 0;
+    if (!height_is_immutable(1000, 1000 - MAX_REORG_LENGTH + 1))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int checkpoint_case_11(void)
+{
+    int failures = 0;
     if (zcl_finality_depth() == 10 &&
         zcl_immutable_height(1000) == 990 &&
         zcl_is_finality_safe_anchor(990, 1000) &&
         !zcl_is_finality_safe_anchor(991, 1000))
         printf("OK\n");
-    else { printf("FAIL\n"); return 1; }
-    return 0;
+    else { printf("FAIL\n"); failures++; }
+    return failures;
 }
 
-static int check_ibd_reorg_exception_bounds(void)
+static int checkpoint_case_12(void)
 {
+    int failures = 0;
     const char *r = NULL;
     bool ok = zcl_reorg_allowed(2000, 1500, true, &r);
     bool bad = zcl_reorg_allowed(2000, 999, true, NULL);
     if (ok && r && strcmp(r, "ibd_reorg_allowed") == 0 && !bad)
         printf("OK\n");
-    else { printf("FAIL\n"); return 1; }
-    return 0;
+    else { printf("FAIL\n"); failures++; }
+    return failures;
 }
 
 int test_checkpoint(void)
@@ -64,44 +141,40 @@ int test_checkpoint(void)
     int failures = 0;
 
     printf("reorg_is_allowed: no tip allows... ");
-    failures += check_reorg_reason_matches(-1, 0, true, "no_tip");
+    failures += checkpoint_case_1();
 
     printf("reorg_is_allowed: target above tip is no-op... ");
-    failures += check_reorg_reason_matches(100, 200, true, "no_disconnect");
+    failures += checkpoint_case_2();
 
     printf("reorg_is_allowed: target = tip is allowed (forward)... ");
-    failures += check_reorg_forward_ok(100, 100);
+    failures += checkpoint_case_3();
 
     printf("reorg_is_allowed: 1-deep reorg allowed... ");
-    failures += check_reorg_reason_matches(100, 99, true, "within_finality_depth");
+    failures += checkpoint_case_4();
 
     printf("reorg_is_allowed: MAX_REORG_LENGTH-deep allowed... ");
-    failures += check_reorg_reason_matches(1000, 1000 - MAX_REORG_LENGTH, true,
-                                           "within_finality_depth");
+    failures += checkpoint_case_5();
 
     printf("reorg_is_allowed: MAX_REORG_LENGTH+1 deep refused... ");
-    failures += check_reorg_reason_matches(1000, 1000 - MAX_REORG_LENGTH - 1,
-                                           false, "below_finality_depth");
+    failures += checkpoint_case_6();
 
     printf("reorg_is_allowed: very deep refused... ");
-    failures += check_reorg_reason_matches(3000000, 1000, false,
-                                           "below_finality_depth");
+    failures += checkpoint_case_7();
 
     printf("height_is_immutable: below floor is immutable... ");
-    failures += check_immutable_height_flag(1000, 500, true);
+    failures += checkpoint_case_8();
 
     printf("height_is_immutable: tip itself is mutable... ");
-    failures += check_immutable_height_flag(1000, 1000, false);
+    failures += checkpoint_case_9();
 
     printf("height_is_immutable: tip - MAX_REORG_LENGTH boundary mutable... ");
-    failures += check_immutable_height_flag(1000, 1000 - MAX_REORG_LENGTH + 1,
-                                            false);
+    failures += checkpoint_case_10();
 
     printf("sync_evidence_policy: immutable height is tip minus finality... ");
-    failures += check_finality_policy_invariants();
+    failures += checkpoint_case_11();
 
     printf("sync_evidence_policy: IBD reorg exception is bounded... ");
-    failures += check_ibd_reorg_exception_bounds();
+    failures += checkpoint_case_12();
 
     return failures;
 }
