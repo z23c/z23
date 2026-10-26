@@ -352,18 +352,13 @@ static void mo_fill_capability(struct mesh_obs_self *s)
     snprintf(s->hw_fingerprint, sizeof(s->hw_fingerprint), "%s", fp ? fp : "");
 }
 
-/* ── the sample ─────────────────────────────────────────────────────── */
+/* ── self: identity and build facts ─────────────────────────────────── */
 
-void mesh_observation_sample_once(void)
+/* Who and what published this record: schema, onion address, source id and
+ * build target, plus the pre-bench defaults for the two hardware timings
+ * that mo_fill_capability() fills in below. */
+static void mo_fill_self_identity(struct mesh_obs_self *s)
 {
-    mo_ensure_lock();
-
-    int64_t mono_start = platform_time_monotonic_us();
-    int64_t now_unix = platform_time_wall_unix();
-
-    struct mesh_observation local;
-    memset(&local, 0, sizeof(local));
-    struct mesh_obs_self *s = &local.self;
     snprintf(s->schema, sizeof(s->schema), "%s", MESH_OBS_SCHEMA);
     const char *addr = tor_integration_get_onion_address();
     snprintf(s->onion, sizeof(s->onion), "%s", addr ? addr : "");
@@ -377,11 +372,14 @@ void mesh_observation_sample_once(void)
     snprintf(s->arch, sizeof(s->arch), "%s", mesh_obs_platform_arch());
     s->fsync_us = -1;
     s->pread_us = -1;
+}
 
-    mo_fill_chain(s);
-    mo_fill_listen_stage(s);
-    mo_fill_capability(s);
+/* ── self: reducer-frontier and netsplit facts ──────────────────────── */
 
+/* Reducer-frontier facts for this node, clamped so no reader sees a
+ * negative where a height was expected. */
+static void mo_fill_self_frontier(struct mesh_obs_self *s)
+{
     s->provable_tip = reducer_frontier_provable_tip_cached();
     s->provable_tip_published = reducer_frontier_provable_tip_is_published();
     s->reducer_floor = reducer_frontier_floor();
@@ -389,7 +387,10 @@ void mesh_observation_sample_once(void)
         s->provable_tip = 0;
     if (s->reducer_floor < 0)
         s->reducer_floor = 0;
+}
 
+static void mo_fill_self_netsplit(struct mesh_obs_self *s)
+{
     /* Minority-work instrument, reused from the netsplit fold rather than
      * recomputed. window_blocks == 0 means the fold REFUSED TO JUDGE. */
     struct network_partition_view pv;
@@ -404,6 +405,120 @@ void mesh_observation_sample_once(void)
         s->implied_hashrate_ratio_milli = 0;
     if (s->arrival_window_blocks < 0)
         s->arrival_window_blocks = 0;
+}
+
+/* ── edges: connection timing and claim verification ────────────────── */
+
+/* The connection facts of one edge row: stage, ages against both clocks,
+ * and the transport classification that follows from them. */
+static void mo_fill_edge_timing(struct mesh_obs_edge *e,
+                                const struct mo_raw_peer *r,
+                                int64_t now_unix, int64_t mono_now)
+{
+    e->inbound = r->inbound;
+    e->stage = mo_stage_of_peer(r->state);
+    e->deadline_us = MESH_OBS_HANDSHAKE_DEADLINE_US;
+    e->connected_age_us = r->connected_monotonic_us > 0
+        ? mono_now - r->connected_monotonic_us : 0;
+    e->stage_elapsed_us = e->connected_age_us;
+    e->last_recv_age_us = r->last_activity_monotonic_us > 0
+        ? mono_now - r->last_activity_monotonic_us : -1;
+    e->last_send_age_us = (r->last_send_wall > 0 && now_unix > 0)
+        ? (now_unix - r->last_send_wall) * 1000000 : -1;
+    e->min_ping_us = r->min_ping_usec_time > 0 ? r->min_ping_usec_time : -1;
+
+    /* CONFIRMED requires positive evidence: bytes actually arrived from
+     * this peer. A spent budget is DEADLINE_EXPIRED and nothing worse —
+     * silence is NEVER refusal. Neither yet, and there is simply no
+     * observation to report. */
+    if (r->last_activity_monotonic_us > 0)
+        e->transport = MESH_OBS_CONFIRMED;
+    else if (e->connected_age_us > e->deadline_us)
+        e->transport = MESH_OBS_DEADLINE;
+    else
+        e->transport = MESH_OBS_NOT_PROBED;
+}
+
+/* The peer's CLAIM from the quorum vote snapshot, then our own
+ * recomputation of it against our own chain. */
+static void mo_fill_edge_claim(struct mesh_obs_edge *e,
+                               const struct mo_raw_peer *r,
+                               const struct qo_peer_vote_view *votes,
+                               int nvotes, int64_t now_unix)
+{
+    e->claimed_height = -1;
+    e->claim_age_us = -1;
+    for (int v = 0; v < nvotes; v++) {
+        if (votes[v].peer_id != r->peer_id)
+            continue;
+        e->claimed_height = votes[v].height;
+        snprintf(e->claimed_tip_hash_hex, sizeof(e->claimed_tip_hash_hex),
+                 "%s", votes[v].hash_hex);
+        e->claim_age_us = votes[v].unix_time > 0
+            ? (now_unix - votes[v].unix_time) * 1000000 : -1;
+        break;
+    }
+
+    /* My OWN recomputation of the peer's claim against my OWN chain.
+     * A contradicting hash is positive counter-evidence, which is the
+     * one thing in this sampler that may report REFUSED. */
+    e->header_service = r->total_headers_delivered > 0
+        ? MESH_OBS_CONFIRMED : MESH_OBS_NOT_PROBED;
+    if (e->claimed_height >= 0 && e->claimed_tip_hash_hex[0]) {
+        char ours[MESH_OBS_HEXHASH];
+        if (mo_our_hash_at(e->claimed_height, ours)) {
+            if (strcasecmp(ours, e->claimed_tip_hash_hex) == 0) {
+                e->claim_verified_locally = true;
+            } else {
+                e->header_service = MESH_OBS_REFUSED;
+            }
+        }
+    }
+}
+
+/* ── the sample ─────────────────────────────────────────────────────── */
+
+/* The peer table was not readable this tick: carry the previous tick's
+ * edge rows forward unchanged, with their own stamps, and name which
+ * coverage fact happened. */
+static void mo_carry_forward_previous_edges(struct mesh_observation *local,
+                                            int nrows)
+{
+    struct mesh_obs_self *s = &local->self;
+    s->lock_contended = (nrows == MO_PEERS_CONTENDED);
+    snprintf(s->unavailable_reason, sizeof(s->unavailable_reason), "%s",
+             nrows == MO_PEERS_CONTENDED ? "peer_table_contended"
+                                         : "no_peer_table");
+    zcl_mutex_lock(&g_mo.lock);
+    if (g_mo.have_sample) {
+        memcpy(local->edges, g_mo.rec.edges, sizeof(local->edges));
+        local->edge_count = g_mo.rec.edge_count;
+        local->edges_truncated = g_mo.rec.edges_truncated;
+        local->rows_unreadable = g_mo.rec.rows_unreadable + 1;
+    } else {
+        local->rows_unreadable = 1;
+    }
+    zcl_mutex_unlock(&g_mo.lock);
+}
+
+void mesh_observation_sample_once(void)
+{
+    mo_ensure_lock();
+
+    int64_t mono_start = platform_time_monotonic_us();
+    int64_t now_unix = platform_time_wall_unix();
+
+    struct mesh_observation local;
+    memset(&local, 0, sizeof(local));
+    struct mesh_obs_self *s = &local.self;
+    mo_fill_self_identity(s);
+
+    mo_fill_chain(s);
+    mo_fill_listen_stage(s);
+    mo_fill_capability(s);
+
+    mo_fill_self_frontier(s);
+    mo_fill_self_netsplit(s);
 
     /* Phase A — copy the peer table out under ONE trylock. */
     struct mo_raw_peer rows[MESH_OBS_EDGES_MAX];
@@ -414,20 +529,7 @@ void mesh_observation_sample_once(void)
         /* Either coverage fact is expected and neither is a peer
          * observation. Carry the previous tick's rows forward unchanged,
          * with their own stamps, and name which one happened. */
-        s->lock_contended = (nrows == MO_PEERS_CONTENDED);
-        snprintf(s->unavailable_reason, sizeof(s->unavailable_reason), "%s",
-                 nrows == MO_PEERS_CONTENDED ? "peer_table_contended"
-                                             : "no_peer_table");
-        zcl_mutex_lock(&g_mo.lock);
-        if (g_mo.have_sample) {
-            memcpy(local.edges, g_mo.rec.edges, sizeof(local.edges));
-            local.edge_count = g_mo.rec.edge_count;
-            local.edges_truncated = g_mo.rec.edges_truncated;
-            local.rows_unreadable = g_mo.rec.rows_unreadable + 1;
-        } else {
-            local.rows_unreadable = 1;
-        }
-        zcl_mutex_unlock(&g_mo.lock);
+        mo_carry_forward_previous_edges(&local, nrows);
         goto publish;
     }
 
@@ -460,57 +562,8 @@ void mesh_observation_sample_once(void)
             (void)net_addr_to_string(&r->svc.addr, e->peer_onion,
                                      sizeof(e->peer_onion));
 
-        e->inbound = r->inbound;
-        e->stage = mo_stage_of_peer(r->state);
-        e->deadline_us = MESH_OBS_HANDSHAKE_DEADLINE_US;
-        e->connected_age_us = r->connected_monotonic_us > 0
-            ? mono_now - r->connected_monotonic_us : 0;
-        e->stage_elapsed_us = e->connected_age_us;
-        e->last_recv_age_us = r->last_activity_monotonic_us > 0
-            ? mono_now - r->last_activity_monotonic_us : -1;
-        e->last_send_age_us = (r->last_send_wall > 0 && now_unix > 0)
-            ? (now_unix - r->last_send_wall) * 1000000 : -1;
-        e->min_ping_us = r->min_ping_usec_time > 0 ? r->min_ping_usec_time : -1;
-
-        /* CONFIRMED requires positive evidence: bytes actually arrived from
-         * this peer. A spent budget is DEADLINE_EXPIRED and nothing worse —
-         * silence is NEVER refusal. Neither yet, and there is simply no
-         * observation to report. */
-        if (r->last_activity_monotonic_us > 0)
-            e->transport = MESH_OBS_CONFIRMED;
-        else if (e->connected_age_us > e->deadline_us)
-            e->transport = MESH_OBS_DEADLINE;
-        else
-            e->transport = MESH_OBS_NOT_PROBED;
-
-        e->claimed_height = -1;
-        e->claim_age_us = -1;
-        for (int v = 0; v < nvotes; v++) {
-            if (votes[v].peer_id != r->peer_id)
-                continue;
-            e->claimed_height = votes[v].height;
-            snprintf(e->claimed_tip_hash_hex, sizeof(e->claimed_tip_hash_hex),
-                     "%s", votes[v].hash_hex);
-            e->claim_age_us = votes[v].unix_time > 0
-                ? (now_unix - votes[v].unix_time) * 1000000 : -1;
-            break;
-        }
-
-        /* My OWN recomputation of the peer's claim against my OWN chain.
-         * A contradicting hash is positive counter-evidence, which is the
-         * one thing in this sampler that may report REFUSED. */
-        e->header_service = r->total_headers_delivered > 0
-            ? MESH_OBS_CONFIRMED : MESH_OBS_NOT_PROBED;
-        if (e->claimed_height >= 0 && e->claimed_tip_hash_hex[0]) {
-            char ours[MESH_OBS_HEXHASH];
-            if (mo_our_hash_at(e->claimed_height, ours)) {
-                if (strcasecmp(ours, e->claimed_tip_hash_hex) == 0) {
-                    e->claim_verified_locally = true;
-                } else {
-                    e->header_service = MESH_OBS_REFUSED;
-                }
-            }
-        }
+        mo_fill_edge_timing(e, r, now_unix, mono_now);
+        mo_fill_edge_claim(e, r, votes, nvotes, now_unix);
     }
     local.edge_count = nrows;
 
