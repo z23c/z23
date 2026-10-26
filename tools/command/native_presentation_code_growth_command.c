@@ -453,11 +453,25 @@ static bool npg_array_u64(struct json_value *array, uint64_t number)
     return ok;
 }
 
-static bool npg_reply_points(
+static bool npg_array_day_fields(struct json_value *array,
+                                 const struct science_code_growth_day *day)
+{
+    return npg_array_str(array, day->date) &&
+        npg_array_str(array, day->head_commit) &&
+        npg_array_u64(array, day->commits) &&
+        npg_array_u64(array, day->non_test_lines) &&
+        npg_array_u64(array, day->non_test_added) &&
+        npg_array_u64(array, day->non_test_deleted) &&
+        npg_array_u64(array, day->test_lines) &&
+        npg_array_u64(array, day->test_added) &&
+        npg_array_u64(array, day->test_deleted);
+}
+
+static bool npg_reply_metadata(
     struct zcl_command_reply *reply,
     const struct science_code_growth_history *history)
 {
-    bool ok = json_push_kv_str(&reply->data, "scope",
+    return json_push_kv_str(&reply->data, "scope",
             "current maintained roots; .c+.h; non-test and test separated") &&
         json_push_kv_str(&reply->data, "history",
             "first-parent; merge diff against first parent; UTC commit day") &&
@@ -478,6 +492,11 @@ static bool npg_reply_points(
             "minus/plus; small, medium, large; default medium") &&
         json_push_kv_str(&reply->data, "clipboard",
             "button or C; current chart copied as a native image");
+}
+
+static bool npg_reply_plot_point_fields(
+    struct zcl_command_reply *reply, bool ok)
+{
     static const char *const fields[] = {
         "date_utc", "head_commit", "commits",
         "non_test_lines", "non_test_added", "non_test_deleted",
@@ -491,6 +510,13 @@ static bool npg_reply_points(
     if (ok) ok = json_push_kv(&reply->data, "plot_point_fields",
                                &field_names);
     json_free(&field_names);
+    return ok;
+}
+
+static bool npg_reply_plot_points(
+    struct zcl_command_reply *reply,
+    const struct science_code_growth_history *history, bool ok)
+{
     struct json_value points;
     json_init(&points);
     json_set_array(&points);
@@ -499,20 +525,22 @@ static bool npg_reply_points(
         struct json_value point;
         json_init(&point);
         json_set_array(&point);
-        ok = npg_array_str(&point, day->date) &&
-            npg_array_str(&point, day->head_commit) &&
-            npg_array_u64(&point, day->commits) &&
-            npg_array_u64(&point, day->non_test_lines) &&
-            npg_array_u64(&point, day->non_test_added) &&
-            npg_array_u64(&point, day->non_test_deleted) &&
-            npg_array_u64(&point, day->test_lines) &&
-            npg_array_u64(&point, day->test_added) &&
-            npg_array_u64(&point, day->test_deleted) &&
+        ok = npg_array_day_fields(&point, day) &&
             json_push_back(&points, &point);
         json_free(&point);
     }
     if (ok) ok = json_push_kv(&reply->data, "plot_points", &points);
     json_free(&points);
+    return ok;
+}
+
+static bool npg_reply_points(
+    struct zcl_command_reply *reply,
+    const struct science_code_growth_history *history)
+{
+    bool ok = npg_reply_metadata(reply, history);
+    ok = npg_reply_plot_point_fields(reply, ok);
+    ok = npg_reply_plot_points(reply, history, ok);
     return ok;
 }
 
