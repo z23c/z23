@@ -71,6 +71,52 @@ static void print_stats(const char *label, const struct simnet_wire_stats *st)
            st->monitor_failed ? 1 : 0, st->fingerprint);
 }
 
+/* Baseline act ([2/6]): drain handshake + attacker traffic, confirm peer 0
+ * handshook, then round-trip a ping on the honest link — the calls run in
+ * this exact order and short-circuit at the first failure. */
+static bool baseline_handshake_ping_pong_ok(struct simnet_wire *wire)
+{
+    return simnet_wire_run(wire, 512, 0) &&
+           simnet_wire_peer_handshake_complete(wire, 0) &&
+           simnet_wire_peer_send_ping(wire, 0, PING_BEFORE) &&
+           simnet_wire_run(wire, 512, 128) &&
+           simnet_wire_peer_pong_received(wire, 0, PING_BEFORE);
+}
+
+/* Recovery act ([6/6]): settle after the heal, then round-trip a fresh
+ * ping/pong on the reopened honest link. */
+static bool post_heal_ping_pong_ok(struct simnet_wire *wire)
+{
+    return simnet_wire_run(wire, 256, 0) &&
+           simnet_wire_peer_send_ping(wire, 0, PING_AFTER) &&
+           simnet_wire_run(wire, 512, 128) &&
+           simnet_wire_peer_pong_received(wire, 0, PING_AFTER);
+}
+
+/* Mid-outage expectation: no PERMANENT blocker tripped, monitor healthy,
+ * and only the attacker's link still open. */
+static bool mid_outage_state_ok(const struct simnet_wire_stats *st)
+{
+    return st->no_unexpected_permanent_blocker && !st->monitor_failed &&
+           st->peers_open == 1;
+}
+
+/* Post-heal expectation: monitor healthy, both links open again, the fresh
+ * pong seen, and the receive queue still within its cap. */
+static bool post_heal_state_ok(const struct simnet_wire_stats *st)
+{
+    return st->no_unexpected_permanent_blocker && !st->monitor_failed &&
+           st->peers_open == 2 && /* both links open again */
+           st->pong_received &&
+           st->max_recv_msg_count <= MAX_RECV_MESSAGES;
+}
+
+/* The 0/1 rendering the FAIL diagnostics print for stats booleans. */
+static int flag01(bool flag)
+{
+    return flag ? 1 : 0;
+}
+
 int main(void)
 {
     printf("=== 10_wire_adversaries: honest peer + flooding adversary, "
@@ -106,11 +152,7 @@ int main(void)
 
     printf("[2/6] baseline: draining handshake + attacker traffic, then "
            "round-tripping a ping on the honest link...\n");
-    bool ok = simnet_wire_run(wire, 512, 0) &&
-              simnet_wire_peer_handshake_complete(wire, 0) &&
-              simnet_wire_peer_send_ping(wire, 0, PING_BEFORE) &&
-              simnet_wire_run(wire, 512, 128) &&
-              simnet_wire_peer_pong_received(wire, 0, PING_BEFORE);
+    bool ok = baseline_handshake_ping_pong_ok(wire);
     if (!ok) {
         fprintf(stderr, "FAIL: baseline handshake/ping/pong did not "
                         "complete while the FLOOD peer was live\n");
@@ -149,13 +191,12 @@ int main(void)
     /* The no-silent-halt invariant: a real partition must not trip a
      * PERMANENT blocker (that would mean the node quietly wedged instead
      * of naming the outage). Only the attacker's link remains open. */
-    if (!mid.no_unexpected_permanent_blocker || mid.monitor_failed ||
-        mid.peers_open != 1) {
+    if (!mid_outage_state_ok(&mid)) {
         fprintf(stderr, "FAIL: outage state wrong (expected "
                         "no_unexpected_permanent_blocker=1, "
                         "monitor_failed=0, peers_open=1; got %d/%d/%zu)\n",
-                mid.no_unexpected_permanent_blocker ? 1 : 0,
-                mid.monitor_failed ? 1 : 0, mid.peers_open);
+                flag01(mid.no_unexpected_permanent_blocker),
+                flag01(mid.monitor_failed), mid.peers_open);
         simnet_wire_free(wire);
         return 1;
     }
@@ -171,10 +212,7 @@ int main(void)
     }
 
     printf("[6/6] proving recovery with a fresh ping/pong round trip...\n");
-    ok = simnet_wire_run(wire, 256, 0) &&
-         simnet_wire_peer_send_ping(wire, 0, PING_AFTER) &&
-         simnet_wire_run(wire, 512, 128) &&
-         simnet_wire_peer_pong_received(wire, 0, PING_AFTER);
+    ok = post_heal_ping_pong_ok(wire);
     if (!ok) {
         fprintf(stderr, "FAIL: post-heal ping/pong did not complete\n");
         simnet_wire_free(wire);
@@ -190,11 +228,7 @@ int main(void)
     }
     print_stats("post-heal", &final_st);
 
-    ok = final_st.no_unexpected_permanent_blocker &&
-         !final_st.monitor_failed &&
-         final_st.peers_open == 2 && /* both links open again */
-         final_st.pong_received &&
-         final_st.max_recv_msg_count <= MAX_RECV_MESSAGES;
+    ok = post_heal_state_ok(&final_st);
     if (!ok) {
         fprintf(stderr, "FAIL: post-heal invariants did not hold\n");
         simnet_wire_free(wire);
