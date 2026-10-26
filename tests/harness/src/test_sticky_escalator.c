@@ -569,73 +569,15 @@ static enum sticky_rung_result se_always_progressing(void)
     return STICKY_RUNG_PROGRESSING;
 }
 
-/* ── T22 helpers: resnapshot must not call an LCC refusal PROGRESSING ────── */
+/* Per-test bodies in ladder order; each returns its SE_CHECK failure count,
+ * summed by test_sticky_escalator. */
 
-static const char *const k_t22_cursors[] = {
-    "validate_headers", "body_fetch", "body_persist", "script_validate",
-    "proof_validate", "utxo_apply", "tip_finalize",
-};
-#define T22_NCURSORS (sizeof(k_t22_cursors) / sizeof(k_t22_cursors[0]))
-
-static void t22_snapshot(sqlite3 *db, int out[T22_NCURSORS])
-{
-    for (size_t i = 0; i < T22_NCURSORS; i++)
-        out[i] = cursor_value(db, k_t22_cursors[i]);
-}
-
-static bool t22_unchanged(sqlite3 *db, const int before[T22_NCURSORS])
-{
-    for (size_t i = 0; i < T22_NCURSORS; i++)
-        if (cursor_value(db, k_t22_cursors[i]) != before[i])
-            return false;
-    return true;
-}
-
-/* Seal base at A+3 under an applied height (A+3) that lost its inverse delta:
- * stage_rederive_range returns true with refused_no_inverse and rewinds
- * nothing (reducer_frontier_replay_tx.c: ok utxo row with no delta). */
-static int t22_resnapshot_refusal(void)
+/* T0 — a callback already queued when shutdown begins must be inert. The
+ * live incident armed auto_reindex_request from such a stale recovery tick
+ * while node.db/event teardown was in progress, immediately before SIGSEGV. */
+static int t0_shutdown_barrier(void)
 {
     int failures = 0;
-    struct se_fixture fx;
-    SE_CHECK("T22: setup fixture", setup_fixture(&fx, "t22_resnapshot_refusal"));
-    sqlite3 *db = progress_store_db();
-    SE_CHECK("T22: seed seal base and drop the inverse delta at A+3",
-             seed_ratified_seal(db, A + 3) &&
-             delete_height(db, "utxo_apply_delta", A + 3));
-
-    int before[T22_NCURSORS];
-    t22_snapshot(db, before);
-    int64_t rows_before = total_log_rows(db);
-    sticky_escalator_test_reset();
-    blocker_reset_for_testing();
-    enum sticky_rung_result r =
-        sticky_escalator_resnapshot_run(&fx.ms, A + 10);
-    SE_CHECK("T22: LCC refusal is FAILED, not PROGRESSING",
-             r == STICKY_RUNG_FAILED);
-    SE_CHECK("T22: refusal rewound no cursor", t22_unchanged(db, before));
-    SE_CHECK("T22: refusal deleted no log row",
-             total_log_rows(db) == rows_before);
-
-    blocker_reset_for_testing();
-    teardown_fixture(&fx);
-    return failures;
-}
-
-int test_sticky_escalator(void);
-int test_sticky_escalator(void)
-{
-    printf("\n=== sticky_escalator tests ===\n");
-    int failures = 0;
-
-    blocker_module_init();
-    /* Pin the network-derived compiled-anchor floor to the mainnet anchor A:
-     * the fixtures seed rows at A+1.. (see the refill test's rationale). */
-    reducer_frontier_test_set_compiled_anchor(A);
-
-    /* T0 — a callback already queued when shutdown begins must be inert. The
-     * live incident armed auto_reindex_request from such a stale recovery tick
-     * while node.db/event teardown was in progress, immediately before SIGSEGV. */
     {
         thread_registry_reset_for_test();
         sticky_escalator_test_reset();
@@ -652,10 +594,15 @@ int test_sticky_escalator(void)
         thread_registry_reset_for_test();
         sticky_escalator_test_reset();
     }
+    return failures;
+}
 
-    /* T1 — actionable rowless script+proof hole at coins_applied: driving the
-     * real ladder into the targeted_rederive rung applies the reconcile clamp
-     * (no peer gate) and holds the rung while the stages would consume it. */
+/* T1 — actionable rowless script+proof hole at coins_applied: driving the
+ * real ladder into the targeted_rederive rung applies the reconcile clamp
+ * (no peer gate) and holds the rung while the stages would consume it. */
+static int t1_rowless_hole_repair_hold(void)
+{
+    int failures = 0;
     {
         struct se_fixture fx;
         SE_CHECK("T1: setup fixture", setup_fixture(&fx, "t1_hole"));
@@ -711,9 +658,14 @@ int test_sticky_escalator(void)
 
         teardown_fixture(&fx);
     }
+    return failures;
+}
 
-    /* T2 — fully-consistent store: nothing actionable. The rung reports the
-     * honest no-op and the ladder advances to the next rung, zero writes. */
+/* T2 — fully-consistent store: nothing actionable. The rung reports the
+ * honest no-op and the ladder advances to the next rung, zero writes. */
+static int t2_clean_store_noop(void)
+{
+    int failures = 0;
     {
         struct se_fixture fx;
         SE_CHECK("T2: setup fixture", setup_fixture(&fx, "t2_clean"));
@@ -754,11 +706,16 @@ int test_sticky_escalator(void)
 
         teardown_fixture(&fx);
     }
+    return failures;
+}
 
-    /* T3 — cold-import window: active-chain state exists, but genesis-side
-     * block data is not readable from this datadir. Runtime escalation must
-     * NOT arm auto_reindex_request, because the next boot would only consume
-     * and refuse the impossible replay-from-blocks verb. */
+/* T3 — cold-import window: active-chain state exists, but genesis-side
+ * block data is not readable from this datadir. Runtime escalation must
+ * NOT arm auto_reindex_request, because the next boot would only consume
+ * and refuse the impossible replay-from-blocks verb. */
+static int t3_cold_import_no_auto_reindex(void)
+{
+    int failures = 0;
     {
         struct se_fixture fx;
         SE_CHECK("T3: setup fixture", setup_fixture(&fx, "t3_cold_import"));
@@ -795,6 +752,13 @@ int test_sticky_escalator(void)
         sticky_escalator_set_datadir(NULL);
         teardown_fixture(&fx);
     }
+    return failures;
+}
+
+/* T4-T6: episode clear vs pending/terminal auto-reindex markers. */
+static int t4_t6_reindex_marker_episode_clear(void)
+{
+    int failures = 0;
 
     /* T4 — episode clears via tip progress with a PENDING (non-terminal)
      * reindex marker whose anchor the tip has progressed PAST:
@@ -900,6 +864,13 @@ int test_sticky_escalator(void)
         reducer_frontier_provable_tip_reset();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
+
+/* T7/T8: WARN vs CRITICAL severity gating of the auto-arm path. */
+static int t7_t8_autoarm_severity_gate(void)
+{
+    int failures = 0;
 
     /* T7 — belt-and-suspenders auto-arm (apply_drive's own
      * condition_engine_get_unresolved_critical_count() check, reached with NO
@@ -987,24 +958,29 @@ int test_sticky_escalator(void)
         sticky_escalator_test_reset();
         reducer_frontier_provable_tip_reset();
     }
+    return failures;
+}
 
-    /* ── T9/T10: the widen_peers rung ───────────────────────────────────────
-     * A hermetic connman with directly-injected p2p_node entries (never
-     * started — no sockets/threads), mirroring
-     * test_connman_addnode_fallback.c's add_test_peer, so
-     * connman_outbound_healthy_count() reflects exactly the peers we
-     * inject. g_connect_only forces connman_kick_seed_discovery /
-     * connman_kick_onion_seeds to no-op (both check it — core/modules/net/src/
-     * connman.c) so the rung's real dispatch never touches DNS/onion
-     * network I/O in-test; the dispatch itself is observed via the
-     * sticky_escalator_test_widen_kicks() counter, not its side effects. */
+/* ── T9/T10: the widen_peers rung ───────────────────────────────────────
+ * A hermetic connman with directly-injected p2p_node entries (never
+ * started — no sockets/threads), mirroring
+ * test_connman_addnode_fallback.c's add_test_peer, so
+ * connman_outbound_healthy_count() reflects exactly the peers we
+ * inject. g_connect_only forces connman_kick_seed_discovery /
+ * connman_kick_onion_seeds to no-op (both check it — core/modules/net/src/
+ * connman.c) so the rung's real dispatch never touches DNS/onion
+ * network I/O in-test; the dispatch itself is observed via the
+ * sticky_escalator_test_widen_kicks() counter, not its side effects. */
 
-    /* T9 — peers below the widen-peers floor: driving the real ladder all
-     * the way down (retry -> targeted_rederive -> resnapshot -> reindex ->
-     * self_mint_refold -> widen_peers, the same unexecutable-reindex shape
-     * as T3) must NOT report NOT_IMPLEMENTED at widen_peers: it dispatches
-     * connman_kick_seed_discovery (+ onion, zero outbound) and HOLDS the
-     * rung for its witness window, same shape as T1's real curative rung. */
+/* T9 — peers below the widen-peers floor: driving the real ladder all
+ * the way down (retry -> targeted_rederive -> resnapshot -> reindex ->
+ * self_mint_refold -> widen_peers, the same unexecutable-reindex shape
+ * as T3) must NOT report NOT_IMPLEMENTED at widen_peers: it dispatches
+ * connman_kick_seed_discovery (+ onion, zero outbound) and HOLDS the
+ * rung for its witness window, same shape as T1's real curative rung. */
+static int t9_widen_peers_below_floor(void)
+{
+    int failures = 0;
     {
         extern bool g_connect_only; /* core/modules/net/src/connman.c */
         bool saved_connect_only = g_connect_only;
@@ -1098,11 +1074,16 @@ int test_sticky_escalator(void)
         connman_free(&cm);
         g_connect_only = saved_connect_only;
     }
+    return failures;
+}
 
-    /* T10 — peers already at/above the floor when the ladder reaches
-     * widen_peers: nothing for THIS rung to widen, so it must honestly
-     * FAIL (not hold, not NOT_IMPLEMENTED) and advance straight to
-     * rebootstrap without dispatching any kick. */
+/* T10 — peers already at/above the floor when the ladder reaches
+ * widen_peers: nothing for THIS rung to widen, so it must honestly
+ * FAIL (not hold, not NOT_IMPLEMENTED) and advance straight to
+ * rebootstrap without dispatching any kick. */
+static int t10_widen_peers_at_floor(void)
+{
+    int failures = 0;
     {
         extern bool g_connect_only;
         bool saved_connect_only = g_connect_only;
@@ -1184,14 +1165,19 @@ int test_sticky_escalator(void)
         connman_free(&cm);
         g_connect_only = saved_connect_only;
     }
+    return failures;
+}
 
-    /* ── T11: self_mint_refold ARMS the from-anchor refold; the TERMINAL rung
-     * triggers the (suppressed) self-respawn that consumes it ────────────────
-     * The stub rungs are now real: self_mint_refold arms boot_auto_refold
-     * (witnessed via boot_auto_refold_pending) WITHOUT respawning, so the
-     * cheaper widen_peers/rebootstrap rungs still get a turn; the terminal
-     * refold_from_anchor rung then pulls the restart trigger. The anchor-artifact
-     * gate is forced present and the real shutdown/respawn syscalls suppressed. */
+/* ── T11: self_mint_refold ARMS the from-anchor refold; the TERMINAL rung
+ * triggers the (suppressed) self-respawn that consumes it ────────────────
+ * The stub rungs are now real: self_mint_refold arms boot_auto_refold
+ * (witnessed via boot_auto_refold_pending) WITHOUT respawning, so the
+ * cheaper widen_peers/rebootstrap rungs still get a turn; the terminal
+ * refold_from_anchor rung then pulls the restart trigger. The anchor-artifact
+ * gate is forced present and the real shutdown/respawn syscalls suppressed. */
+static int t11_refold_arm_and_terminal_rung(void)
+{
+    int failures = 0;
     {
         struct se_fixture fx;
         SE_CHECK("T11: setup fixture", setup_fixture(&fx, "t11_refold_arm"));
@@ -1251,17 +1237,22 @@ int test_sticky_escalator(void)
         reducer_frontier_provable_tip_reset();
         teardown_fixture(&fx);
     }
+    return failures;
+}
 
-    /* ── T12: resnapshot detects the nearest SELF-VERIFIED rewind base ───────
-     * With NO base it names the typed blocker resnapshot_no_base and advances.
-     * With a ratified seal reachable AND the stage_rederive_range primitive now
-     * LINKED into this build (pillar2's universal re-derive), it invokes that
-     * in-process consumer from the base; on the degenerate range this minimal
-     * fixture presents (no observable tip above the base) the consumer refuses
-     * honestly and the rung advances to the durable reindex rung — naming
-     * neither no_base (a base WAS found) nor no_consumer (a consumer IS linked).
-     * Either way it advances — never a borrowed-state snapshot pull, never a
-     * faked "done". Witnessed via the typed blocker registry. */
+/* ── T12: resnapshot detects the nearest SELF-VERIFIED rewind base ───────
+ * With NO base it names the typed blocker resnapshot_no_base and advances.
+ * With a ratified seal reachable AND the stage_rederive_range primitive now
+ * LINKED into this build (pillar2's universal re-derive), it invokes that
+ * in-process consumer from the base; on the degenerate range this minimal
+ * fixture presents (no observable tip above the base) the consumer refuses
+ * honestly and the rung advances to the durable reindex rung — naming
+ * neither no_base (a base WAS found) nor no_consumer (a consumer IS linked).
+ * Either way it advances — never a borrowed-state snapshot pull, never a
+ * faked "done". Witnessed via the typed blocker registry. */
+static int t12_resnapshot_base_selection(void)
+{
+    int failures = 0;
     {
         struct se_fixture fx;
         SE_CHECK("T12: setup fixture", setup_fixture(&fx, "t12_resnapshot_base"));
@@ -1322,12 +1313,17 @@ int test_sticky_escalator(void)
         blocker_clear("sticky_escalator.resnapshot_no_consumer");
         teardown_fixture(&fx);
     }
+    return failures;
+}
 
-    /* ── T13: episode clear withdraws a stale armed refold ───────────────────
-     * A pending (non-terminal) auto_refold_request whose anchor the tip has
-     * progressed past is withdrawn on episode clear (mirrors T4 for the reindex
-     * marker) so a self-resolved stall does not force a needless from-anchor
-     * refold on the next boot — the auto-terminating-remedy invariant. */
+/* ── T13: episode clear withdraws a stale armed refold ───────────────────
+ * A pending (non-terminal) auto_refold_request whose anchor the tip has
+ * progressed past is withdrawn on episode clear (mirrors T4 for the reindex
+ * marker) so a self-resolved stall does not force a needless from-anchor
+ * refold on the next boot — the auto-terminating-remedy invariant. */
+static int t13_refold_marker_withdraw(void)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "sticky_escalator", "t13_refold_withdraw");
@@ -1354,14 +1350,19 @@ int test_sticky_escalator(void)
         reducer_frontier_provable_tip_reset();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── T14: flat-H* repair churn advances the rung (FIX-3) ──────────────────
-     * A targeted_rederive whose reconcile keeps reporting repaired (a cursor is
-     * re-raised above the same rowless hole every tick — the fold re-advancing
-     * while the hole pins H*) must NOT hold its whole window: after
-     * STICKY_REDERIVE_MAX_FLAT_REPAIRS flat repairs (H* never lifts past the
-     * rung-entry baseline) the rung FAILs so the ladder advances to resnapshot
-     * instead of looping on a repair that will never clear H*. */
+/* ── T14: flat-H* repair churn advances the rung (FIX-3) ──────────────────
+ * A targeted_rederive whose reconcile keeps reporting repaired (a cursor is
+ * re-raised above the same rowless hole every tick — the fold re-advancing
+ * while the hole pins H*) must NOT hold its whole window: after
+ * STICKY_REDERIVE_MAX_FLAT_REPAIRS flat repairs (H* never lifts past the
+ * rung-entry baseline) the rung FAILs so the ladder advances to resnapshot
+ * instead of looping on a repair that will never clear H*. */
+static int t14_flat_repair_churn_advances(void)
+{
+    int failures = 0;
     {
         struct se_fixture fx;
         SE_CHECK("T14: setup fixture", setup_fixture(&fx, "t14_flat_churn"));
@@ -1418,6 +1419,14 @@ int test_sticky_escalator(void)
         reducer_frontier_provable_tip_reset();
         teardown_fixture(&fx);
     }
+    return failures;
+}
+
+/* T15/T16: the livelock backstop and the climbing-tip reset. */
+static int t15_t16_livelock_backstop(void)
+{
+    int failures = 0;
+
     /* ── T15: ladder-livelock backstop ──────────────────────────────────
      * A rung that returns PROGRESSING every pass while the observed tip stays
      * frozen is spinning without advancing. The per-episode assertion must
@@ -1483,6 +1492,13 @@ int test_sticky_escalator(void)
         sticky_escalator_test_reset();
         reducer_frontier_provable_tip_reset();
     }
+    return failures;
+}
+
+/* T17-T19: permanent vs transient blockers and the hold's release. */
+static int t17_t19_permanent_blocker_hold(void)
+{
+    int failures = 0;
 
     /* ── T17: a PERMANENT sync-domain blocker HOLDS the ladder ───────────────
      * The defect class this guards against: a shielded-history-less node
@@ -1612,13 +1628,18 @@ int test_sticky_escalator(void)
         sticky_escalator_test_reset();
         reducer_frontier_provable_tip_reset();
     }
+    return failures;
+}
 
-    /* ── T20: a CORRUPT seal is skipped, never a re-entry base ──────────────
-     * A ratified seal sits in the ring below the frontier, but its stored bytes
-     * no longer match their own self_sha3. resnapshot must refuse it exactly as
-     * it refuses an absent one — name resnapshot_no_base and leave every body
-     * cursor untouched. The negative half of the re-entry-depth proof: recovery
-     * never rewinds onto state it cannot self-verify. */
+/* ── T20: a CORRUPT seal is skipped, never a re-entry base ──────────────
+ * A ratified seal sits in the ring below the frontier, but its stored bytes
+ * no longer match their own self_sha3. resnapshot must refuse it exactly as
+ * it refuses an absent one — name resnapshot_no_base and leave every body
+ * cursor untouched. The negative half of the re-entry-depth proof: recovery
+ * never rewinds onto state it cannot self-verify. */
+static int t20_corrupt_seal_not_a_base(void)
+{
+    int failures = 0;
     {
         struct se_fixture fx;
         SE_CHECK("T20: setup fixture", setup_fixture(&fx, "t20_corrupt_seal"));
@@ -1667,14 +1688,19 @@ int test_sticky_escalator(void)
         reducer_frontier_provable_tip_reset();
         teardown_fixture(&fx);
     }
+    return failures;
+}
 
-    /* ── T21: re-entry DEPTH — a reachable seal makes recovery O(delta) ─────
-     * T12B proves resnapshot finds a ratified base and invokes the re-derive
-     * consumer. This pins the property that matters for recovery COST: with an
-     * observable tip above a valid seal, the body cursors rewind to the SEAL
-     * height, not down to the compiled anchor A. Recovery is O(tip - seal), not
-     * O(tip - anchor) — the difference between a delta refold and a full
-     * chain refold. */
+/* ── T21: re-entry DEPTH — a reachable seal makes recovery O(delta) ─────
+ * T12B proves resnapshot finds a ratified base and invokes the re-derive
+ * consumer. This pins the property that matters for recovery COST: with an
+ * observable tip above a valid seal, the body cursors rewind to the SEAL
+ * height, not down to the compiled anchor A. Recovery is O(tip - seal), not
+ * O(tip - anchor) — the difference between a delta refold and a full
+ * chain refold. */
+static int t21_seal_reentry_depth(void)
+{
+    int failures = 0;
     {
         struct se_fixture fx;
         SE_CHECK("T21: setup fixture", setup_fixture(&fx, "t21_seal_reentry"));
@@ -1747,7 +1773,89 @@ int test_sticky_escalator(void)
         reducer_frontier_provable_tip_reset();
         teardown_fixture(&fx);
     }
+    return failures;
+}
 
+/* ── T22 helpers: resnapshot must not call an LCC refusal PROGRESSING ────── */
+
+static const char *const k_t22_cursors[] = {
+    "validate_headers", "body_fetch", "body_persist", "script_validate",
+    "proof_validate", "utxo_apply", "tip_finalize",
+};
+#define T22_NCURSORS (sizeof(k_t22_cursors) / sizeof(k_t22_cursors[0]))
+
+static void t22_snapshot(sqlite3 *db, int out[T22_NCURSORS])
+{
+    for (size_t i = 0; i < T22_NCURSORS; i++)
+        out[i] = cursor_value(db, k_t22_cursors[i]);
+}
+
+static bool t22_unchanged(sqlite3 *db, const int before[T22_NCURSORS])
+{
+    for (size_t i = 0; i < T22_NCURSORS; i++)
+        if (cursor_value(db, k_t22_cursors[i]) != before[i])
+            return false;
+    return true;
+}
+
+/* Seal base at A+3 under an applied height (A+3) that lost its inverse delta:
+ * stage_rederive_range returns true with refused_no_inverse and rewinds
+ * nothing (reducer_frontier_replay_tx.c: ok utxo row with no delta). */
+static int t22_resnapshot_refusal(void)
+{
+    int failures = 0;
+    struct se_fixture fx;
+    SE_CHECK("T22: setup fixture", setup_fixture(&fx, "t22_resnapshot_refusal"));
+    sqlite3 *db = progress_store_db();
+    SE_CHECK("T22: seed seal base and drop the inverse delta at A+3",
+             seed_ratified_seal(db, A + 3) &&
+             delete_height(db, "utxo_apply_delta", A + 3));
+
+    int before[T22_NCURSORS];
+    t22_snapshot(db, before);
+    int64_t rows_before = total_log_rows(db);
+    sticky_escalator_test_reset();
+    blocker_reset_for_testing();
+    enum sticky_rung_result r =
+        sticky_escalator_resnapshot_run(&fx.ms, A + 10);
+    SE_CHECK("T22: LCC refusal is FAILED, not PROGRESSING",
+             r == STICKY_RUNG_FAILED);
+    SE_CHECK("T22: refusal rewound no cursor", t22_unchanged(db, before));
+    SE_CHECK("T22: refusal deleted no log row",
+             total_log_rows(db) == rows_before);
+
+    blocker_reset_for_testing();
+    teardown_fixture(&fx);
+    return failures;
+}
+
+int test_sticky_escalator(void);
+int test_sticky_escalator(void)
+{
+    printf("\n=== sticky_escalator tests ===\n");
+    int failures = 0;
+
+    blocker_module_init();
+    /* Pin the network-derived compiled-anchor floor to the mainnet anchor A:
+     * the fixtures seed rows at A+1.. (see the refill test's rationale). */
+    reducer_frontier_test_set_compiled_anchor(A);
+
+    failures += t0_shutdown_barrier();
+    failures += t1_rowless_hole_repair_hold();
+    failures += t2_clean_store_noop();
+    failures += t3_cold_import_no_auto_reindex();
+    failures += t4_t6_reindex_marker_episode_clear();
+    failures += t7_t8_autoarm_severity_gate();
+    failures += t9_widen_peers_below_floor();
+    failures += t10_widen_peers_at_floor();
+    failures += t11_refold_arm_and_terminal_rung();
+    failures += t12_resnapshot_base_selection();
+    failures += t13_refold_marker_withdraw();
+    failures += t14_flat_repair_churn_advances();
+    failures += t15_t16_livelock_backstop();
+    failures += t17_t19_permanent_blocker_hold();
+    failures += t20_corrupt_seal_not_a_base();
+    failures += t21_seal_reentry_depth();
     failures += t22_resnapshot_refusal();
 
     reducer_frontier_test_set_compiled_anchor(-1); /* restore production floor */
