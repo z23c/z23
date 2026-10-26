@@ -1792,7 +1792,6 @@ tests/harness/src/test_shielded_sync_strength.c:test_sst_root_mismatch_classific
 tests/harness/src/test_shop_fulfill.c:sf_flow:33
 tests/harness/src/test_shop_reputation.c:sr_populate:17
 tests/harness/src/test_shop_reputation.c:sr_store_declaration:18
-tests/harness/src/test_shutdown_marker.c:test_shutdown_marker:61
 tests/harness/src/test_shutdown_stagewatch.c:test_shutdown_stagewatch:50
 tests/harness/src/test_sighash_edge.c:test_sighash_edge:34
 tests/harness/src/test_sighash_malleability.c:test_sighash_malleability:55
