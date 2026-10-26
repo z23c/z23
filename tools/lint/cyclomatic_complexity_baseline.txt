@@ -20,8 +20,6 @@ cognition/modules/ontology/src/ontology.c:contexts_bound:17
 cognition/modules/ontology/src/ontology.c:zcl_ontology_evaluate_atom_v1:43
 cognition/modules/ontology/src/ontology.c:zcl_ontology_predicate_v1_root:18
 cognition/modules/science/src/science_corpus.c:walk_dir:20
-cognition/modules/session/src/agent_broker.c:agent_broker_handle:27
-cognition/modules/session/src/agent_broker.c:agent_broker_session_bind:17
 cognition/modules/session/src/agent_broker_spawn.c:agent_broker_spawn_confined#2:24
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_proto_error_string:16
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_receipt_v1_matches_open:16

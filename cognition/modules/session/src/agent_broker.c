@@ -116,6 +116,16 @@ const struct agent_broker_provider *agent_broker_provider_get(void)
     return g_provider;
 }
 
+#if !defined(_WIN32)
+static void agent_broker_bind_refuse_unregistered(char *why, size_t why_cap)
+{
+    if (why && why_cap)
+        snprintf(why, why_cap,
+                 "no property provider is registered: this broker has no "
+                 "authority and no property surface");
+}
+#endif
+
 /* THE ONE PLACE A SESSION ACQUIRES AUTHORITY. It exists so that "bind" is not
  * a recipe each caller retypes: forgetting to record `provider`/`provider_ctx`
  * on the reference would leave a reference that names a grant and cannot reach
@@ -146,10 +156,7 @@ bool agent_broker_session_bind(struct agent_broker_session *s,
 
     const struct agent_broker_provider *p = g_provider;
     if (!p) {
-        if (why && why_cap)
-            snprintf(why, why_cap,
-                     "no property provider is registered: this broker has no "
-                     "authority and no property surface");
+        agent_broker_bind_refuse_unregistered(why, why_cap);
         return false;
     }
     if (p->ops)
@@ -208,13 +215,97 @@ static const char *session_grant_id(const struct agent_broker_session *session)
                : "";
 }
 
+static bool agent_broker_verb_is_unknown(const struct mvap_request *req,
+                                         bool is_action)
+{
+    return !is_action && !mvap_verb_is_query(req->verb);
+}
+
+static bool agent_broker_plan_refused(const struct agent_broker_session *s,
+                                      const struct mvap_request *req,
+                                      bool is_action, struct agent_plan *plan)
+{
+    bool (*resolve)(void *, const struct mvap_request *, struct agent_plan *) =
+        is_action ? s->ops.plan
+                  : (s->ops.query ? s->ops.query : s->ops.plan);
+    return !resolve || !resolve(s->ops.ctx, req, plan);
+}
+
+static bool agent_broker_recheck_refused(const struct agent_broker_session *s,
+                                         const struct mvap_request *req,
+                                         const struct agent_plan *plan,
+                                         int64_t now, int32_t *verdict)
+{
+    if (mvap_property_id_is_zero(req->property_id))
+        return false;
+    struct mvap_request authoritative = *req;
+    authoritative.kind = plan->kind;
+    *verdict = authorize_live(s, &authoritative, now);
+    return *verdict != MVAP_OK;
+}
+
+static bool agent_broker_commit_refused(struct agent_broker_session *s,
+                                        const struct mvap_request *req,
+                                        const struct agent_plan *plan,
+                                        struct agent_commit_outcome *outcome)
+{
+    return !s->ops.commit ||
+           !s->ops.commit(s->ops.ctx, req, plan, outcome);
+}
+
+static bool agent_broker_debit_refused(const struct agent_broker_session *s,
+                                       const struct mvap_request *req,
+                                       int64_t now)
+{
+    return s->authority && s->authority->provider &&
+           s->authority->provider->debit &&
+           !s->authority->provider->debit(s->authority->provider_ctx,
+                                          s->authority, req, now);
+}
+
+static void agent_broker_commit_reply(struct agent_broker_session *s,
+                                      const struct mvap_request *req,
+                                      struct mvap_response *out,
+                                      const struct agent_plan *plan,
+                                      const struct agent_idem_identity *id,
+                                      const uint8_t digest[32],
+                                      const struct agent_commit_outcome
+                                          *outcome)
+{
+    resp_init(out, req, MVAP_OK);
+    resp_body(out, "%s", outcome->body);
+    /* The confinement envelope commits to the canonical action receipt rather
+     * than restating what the action was. */
+    char detail[AGENT_RECEIPT_DETAIL_MAX + 1];
+    char action_hex[65];
+    zcl_hex_encode(outcome->action_receipt_id, 32, action_hex);
+    bool have_action_receipt = false;
+    for (size_t i = 0; i < 32; i++)
+        have_action_receipt |= outcome->action_receipt_id[i] != 0;
+    snprintf(detail, sizeof(detail), "%.79s action_receipt=%s", plan->detail,
+             have_action_receipt ? action_hex : "none");
+    broker_receipt(s, req, out, detail, outcome->action_receipt_id);
+    /* THE ONLY THING THAT PUTS AN ANSWER IN THE RING. A mutation that actually
+     * committed: an identical repeat now replays this response and this
+     * receipt and executes nothing. Stored with the canonical action receipt
+     * it commits to, so the replay's audit row can name it too. */
+    agent_broker_idem_commit(s, id, digest, out,
+                             outcome->action_receipt_id);
+}
 #endif
+
+static bool agent_broker_request_missing(const struct agent_broker_session *s,
+                                         const struct mvap_request *req,
+                                         const struct mvap_response *out)
+{
+    return !s || !req || !out;
+}
 
 void agent_broker_handle(struct agent_broker_session *s,
                          const struct mvap_request *req,
                          struct mvap_response *out)
 {
-    if (!s || !req || !out)
+    if (agent_broker_request_missing(s, req, out))
         return;
 
     s->requests_served++;
@@ -236,7 +327,7 @@ void agent_broker_handle(struct agent_broker_session *s,
      * no operation, so it has no identity worth remembering and never claims
      * an id. */
     const bool is_action = mvap_verb_is_action(req->verb);
-    if (!is_action && !mvap_verb_is_query(req->verb)) {
+    if (agent_broker_verb_is_unknown(req, is_action)) {
         resp_init(out, req, MVAP_ERR_UNKNOWN_VERB);
         resp_body(out, "{\"denied\":\"UNKNOWN_VERB\"}");
         s->requests_denied++;
@@ -309,10 +400,7 @@ void agent_broker_handle(struct agent_broker_session *s,
     /* 2. Resolve the property through the node seam — `query` for a query,
      *    `plan` for an action. */
     struct agent_plan plan;
-    bool (*resolve)(void *, const struct mvap_request *, struct agent_plan *) =
-        is_action ? s->ops.plan
-                  : (s->ops.query ? s->ops.query : s->ops.plan);
-    if (!resolve || !resolve(s->ops.ctx, req, &plan)) {
+    if (agent_broker_plan_refused(s, req, is_action, &plan)) {
         resp_init(out, req, MVAP_ERR_PLAN_FAILED);
         resp_body(out, "{\"denied\":\"PLAN_FAILED\"}");
         s->requests_denied++;
@@ -335,20 +423,15 @@ void agent_broker_handle(struct agent_broker_session *s,
      *    This is a SECOND read of the live authority, not a re-run over the
      *    first verdict: the resolve above did real datadir work, and a revoke
      *    that landed during it must be seen here. */
-    if (!mvap_property_id_is_zero(req->property_id)) {
-        struct mvap_request authoritative = *req;
-        authoritative.kind = plan.kind;
-        verdict = authorize_live(s, &authoritative, now);
-        if (verdict != MVAP_OK) {
-            resp_init(out, req, verdict);
-            resp_body(out, "{\"denied\":\"%s\",\"stage\":\"recheck\","
-                           "\"actual_kind\":\"%s\"}",
-                      mvap_status_name(verdict), mvap_kind_name(plan.kind));
-            s->requests_denied++;
-            broker_receipt(s, req, out, "denied at post-plan kind recheck",
-                           NULL);
-            return;
-        }
+    if (agent_broker_recheck_refused(s, req, &plan, now, &verdict)) {
+        resp_init(out, req, verdict);
+        resp_body(out, "{\"denied\":\"%s\",\"stage\":\"recheck\","
+                       "\"actual_kind\":\"%s\"}",
+                  mvap_status_name(verdict), mvap_kind_name(plan.kind));
+        s->requests_denied++;
+        broker_receipt(s, req, out, "denied at post-plan kind recheck",
+                       NULL);
+        return;
     }
 
     /* 4. A query answers from what it resolved. It mutates nothing, debits
@@ -378,8 +461,7 @@ void agent_broker_handle(struct agent_broker_session *s,
         broker_receipt(s, req, out, "commit refused: owner mismatch", NULL);
         return;
     }
-    if (!s->ops.commit ||
-        !s->ops.commit(s->ops.ctx, req, &plan, &outcome)) {
+    if (agent_broker_commit_refused(s, req, &plan, &outcome)) {
         resp_init(out, req, MVAP_ERR_COMMIT_FAILED);
         resp_body(out, "{\"denied\":\"COMMIT_FAILED\"}");
         s->requests_denied++;
@@ -390,34 +472,13 @@ void agent_broker_handle(struct agent_broker_session *s,
     /* The debit lands on the LIVE authority, so a budget spent here is spent
      * for every other reader of that grant — not in a session-local copy that
      * dies with the connection. */
-    if (s->authority && s->authority->provider &&
-        s->authority->provider->debit &&
-        !s->authority->provider->debit(s->authority->provider_ctx,
-                                       s->authority, req, now))
+    if (agent_broker_debit_refused(s, req, now))
         LOG_WARN(BROKER_TAG,
                  "grant %s: the live authority refused a debit that authorize "
                  "had already allowed (verb=%s value=%llu)",
                  session_grant_id(s), mvap_verb_name(req->verb),
                  (unsigned long long)req->value_zats);
-    resp_init(out, req, MVAP_OK);
-    resp_body(out, "%s", outcome.body);
-    /* The confinement envelope commits to the canonical action receipt rather
-     * than restating what the action was. */
-    char detail[AGENT_RECEIPT_DETAIL_MAX + 1];
-    char action_hex[65];
-    zcl_hex_encode(outcome.action_receipt_id, 32, action_hex);
-    bool have_action_receipt = false;
-    for (size_t i = 0; i < 32; i++)
-        have_action_receipt |= outcome.action_receipt_id[i] != 0;
-    snprintf(detail, sizeof(detail), "%.79s action_receipt=%s", plan.detail,
-             have_action_receipt ? action_hex : "none");
-    broker_receipt(s, req, out, detail, outcome.action_receipt_id);
-    /* THE ONLY THING THAT PUTS AN ANSWER IN THE RING. A mutation that actually
-     * committed: an identical repeat now replays this response and this
-     * receipt and executes nothing. Stored with the canonical action receipt
-     * it commits to, so the replay's audit row can name it too. */
-    agent_broker_idem_commit(s, &ident, digest, out,
-                             outcome.action_receipt_id);
+    agent_broker_commit_reply(s, req, out, &plan, &ident, digest, &outcome);
 #endif
 }
 
