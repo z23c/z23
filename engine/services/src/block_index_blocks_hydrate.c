@@ -277,14 +277,15 @@ static unsigned int bih_union_status(unsigned int stored_status,
                          (unsigned int)BLOCK_HAVE_UNDO));
 }
 
-struct zcl_result load_block_index_from_blocks_table(struct node_db *ndb,
-                                                     struct main_state *ms)
-{
-    if (!ndb || !ndb->open)
-        return ZCL_ERR(-1, "load_block_index_from_blocks_table: null/closed db");
-    if (!ms)
-        return ZCL_ERR(-1, "load_block_index_from_blocks_table: null main_state");
+/* ── pass helpers split out of load_block_index_from_blocks_table ───
+ * Every ZCL_ERR refusal and every LOG_* line stays in the loader proper
+ * (log/error output is function-named); these return plain status codes the
+ * loader checks and reports exactly as the unsplit function did. */
 
+/* Row-count probe for the hydrate gate: a `blocks` table that is missing or
+ * empty reports 0, and the caller refuses with -2 before any work starts. */
+static int64_t bih_blocks_table_row_count(struct node_db *ndb)
+{
     int64_t row_count = 0;
     sqlite3_stmt *cnt = NULL;
     if (sqlite3_prepare_v2(ndb->db, "SELECT COUNT(*) FROM blocks", -1, &cnt,
@@ -293,40 +294,150 @@ struct zcl_result load_block_index_from_blocks_table(struct node_db *ndb,
             row_count = sqlite3_column_int64(cnt, 0);
         sqlite3_finalize(cnt);
     }
-    if (row_count <= 0)
-        return ZCL_ERR(-2, "load_block_index_from_blocks_table: `blocks` "
-                       "table empty — nothing to hydrate");
+    return row_count;
+}
 
-    int64_t t0 = (int64_t)platform_time_wall_time_t();
-    LOG_INFO("block_index",
-             "Hydrating block index from node.db `blocks` (%lld rows)...",
-             (long long)row_count);
-
-    /* Canonical admission context (shared with the import + flat loaders):
-     * chain params for the PoW target + Equihash params, and the ROM
-     * checkpoint height that opens the full-Equihash budget on the tail. */
-    const struct chain_params *cp = chain_params_get();
+/* The ROM checkpoint height that opens the full-Equihash budget on the
+ * unverified tail; -1 when no ROM checkpoint is installed. */
+static int64_t bih_rom_checkpoint_height(void)
+{
     const struct rom_state_checkpoint *rom_cp = get_rom_state_checkpoint();
-    int64_t rom_checkpoint_height = rom_cp ? (int64_t)rom_cp->height : -1;
+    return rom_cp ? (int64_t)rom_cp->height : -1;
+}
 
-    /* ── Pass A (J5): VALIDATE every row hash-binds BEFORE touching the map,
-     *    but a poisoned row NO LONGER refuses the whole table. Each bad row is
-     *    QUEUED for a deferred purge (we cannot DELETE while this SELECT is
-     *    still stepping the same table) and skipped; the good rows still load.
-     *    A grossly-shredded table (> BLOCKS_HYDRATE_MAX_QUARANTINE bad rows)
-     *    still refuses whole — localized corruption heals per-row, gross
-     *    corruption is not blindly seeded. */
-    sqlite3_stmt *sel = NULL;
-    if (sqlite3_prepare_v2(ndb->db, BLOCKS_HYDRATE_SEL, -1, &sel, NULL)
-            != SQLITE_OK || !sel)
-        return ZCL_ERR(-3, "load_block_index_from_blocks_table: failed to "
-                       "prepare validate SELECT over `blocks`");
+/* Full-Equihash budget for one row: the expensive solution check runs on
+ * every STRIDE-th height plus every height above the ROM checkpoint. */
+static bool bih_row_needs_full_equihash(int h, int64_t rom_checkpoint_height)
+{
+    return (h > 0 && (h % BLOCKS_HYDRATE_POW_STRIDE) == 0) ||
+           (rom_checkpoint_height >= 0 && h > rom_checkpoint_height);
+}
 
-    struct bhc_bad_row *bad = NULL;   /* lazily allocated on first bad row */
+/* Classify one BLOCKS_HYDRATE_SEL row of the validate pass: true when the row
+ * is poisoned (with *reason naming why), false when it may be admitted. The
+ * order of checks mirrors the unsplit if/else chain exactly; *reason enters
+ * as the caller's BHC_BAD_UNUSABLE_HEADER default. */
+static bool bih_row_is_poisoned(sqlite3_stmt *sel, bool has_hash,
+                                uint8_t stored_hash[32],
+                                const struct chain_params *cp,
+                                int64_t rom_checkpoint_height, int h,
+                                struct block_header *hdr,
+                                enum bhc_bad_reason *reason)
+{
+    if (!has_hash) {
+        *reason = BHC_BAD_SHORT_HASH;
+        return true;
+    }
+    if (!blocks_row_to_header(sel, hdr)) {
+        *reason = BHC_BAD_UNUSABLE_HEADER;
+        return true;
+    }
+    if (cp) {
+        /* Canonical admission (J5 upgrade): hash-bind + PoW target on every
+         * row, plus the full Equihash solution check on the strided /
+         * above-checkpoint subset — the SAME strength the import + flat
+         * loaders admit at, via the shared block_row_verify() primitive. */
+        bool full_check =
+            bih_row_needs_full_equihash(h, rom_checkpoint_height);
+        switch (block_row_verify(stored_hash, hdr->nBits, hdr, cp,
+                                 full_check)) {
+            case BLOCK_ROW_VERIFY_OK:
+                return false;
+            case BLOCK_ROW_VERIFY_HASH_BIND_MISMATCH:
+                *reason = BHC_BAD_HASH_MISMATCH;
+                return true;
+            case BLOCK_ROW_VERIFY_HIGH_HASH:
+                *reason = BHC_BAD_HIGH_HASH;
+                return true;
+            case BLOCK_ROW_VERIFY_BAD_EQUIHASH:
+                *reason = BHC_BAD_EQUIHASH;
+                return true;
+            case BLOCK_ROW_VERIFY_NO_PARAMS:
+                *reason = BHC_BAD_HASH_MISMATCH; /* unreachable: cp != NULL */
+                return true;
+        }
+    } else {
+        /* Chain params unavailable (not expected this late in boot): fall
+         * back to the pre-J5 hash-bind-only admission so a missing params
+         * table cannot quarantine the whole chain. */
+        struct uint256 computed;
+        block_header_get_hash(hdr, &computed);
+        if (memcmp(computed.data, stored_hash, 32) != 0) {
+            *reason = BHC_BAD_HASH_MISMATCH;
+            return true;
+        }
+        return false;
+    }
+    return true;    /* unreachable: the switch above is exhaustive */
+}
+
+/* Outcome of queueing one poisoned row for the deferred purge. */
+enum bih_queue_status {
+    BIH_QUEUE_QUEUED,   /* row appended to the quarantine list */
+    BIH_QUEUE_GROSS,    /* quarantine cap hit: row NOT queued, pass must stop */
+    BIH_QUEUE_OOM,      /* the quarantine list itself could not be allocated */
+};
+
+/* Queue one poisoned row on the quarantine list, allocating that list
+ * lazily on the first bad row. The cap is checked only after the allocation,
+ * exactly as the unsplit pass did. */
+static enum bih_queue_status bih_queue_bad_row(struct bhc_bad_row **bad,
+                                               int64_t *bad_count, int h,
+                                               bool has_hash,
+                                               uint8_t stored_hash[32],
+                                               enum bhc_bad_reason reason)
+{
+    if (!*bad) {
+        *bad = zcl_malloc(
+            (size_t)BLOCKS_HYDRATE_MAX_QUARANTINE * sizeof(**bad),
+            "blocks_table quarantine list");
+        if (!*bad)
+            return BIH_QUEUE_OOM;
+    }
+    if (*bad_count >= BLOCKS_HYDRATE_MAX_QUARANTINE)
+        return BIH_QUEUE_GROSS;
+    (*bad)[*bad_count].height = h;
+    (*bad)[*bad_count].has_hash = has_hash;
+    if (has_hash)
+        memcpy((*bad)[*bad_count].hash, stored_hash, 32);
+    (*bad)[*bad_count].reason = reason;
+    (*bad_count)++;
+    return BIH_QUEUE_QUEUED;
+}
+
+/* Outcome of the Pass A validate sweep, reported up to the loader proper so
+ * the matching ZCL_ERR refusals stay in load_block_index_from_blocks_table.
+ * The codes equal the original ZCL_ERR codes they stand in for. */
+enum bih_validate_status {
+    BIH_VALIDATE_OK      = 0,
+    BIH_VALIDATE_PREPARE = -3,  /* validate SELECT refused to prepare */
+    BIH_VALIDATE_OOM     = -7,  /* quarantine-list allocation failed (the
+                                 * SELECT is already finalized by then) */
+};
+
+/* Pass A row sweep: step BLOCKS_HYDRATE_SEL and validate every row BEFORE the
+ * map is touched, queueing each poisoned row for a deferred purge instead of
+ * refusing the whole table. On OK the out-params carry the queue (owned by
+ * the caller, NULL until the first bad row), its count, the usable-row tally
+ * and the gross-corruption flag; the SELECT is finalized on OK, GROSS and OOM
+ * alike, never on PREPARE (nothing was stepped). */
+static int bih_validate_rows(sqlite3 *db, const struct chain_params *cp,
+                             int64_t rom_checkpoint_height,
+                             int64_t row_count, struct bhc_bad_row **bad_out,
+                             int64_t *bad_count_out, int64_t *validated_out,
+                             bool *gross_out)
+{
+    struct bhc_bad_row *bad = NULL;
     int64_t bad_count = 0;
     int64_t validated = 0;
     int64_t seen = 0;
-    bool gross_corruption = false;
+    *gross_out = false;
+
+    sqlite3_stmt *sel = NULL;
+    if (sqlite3_prepare_v2(db, BLOCKS_HYDRATE_SEL, -1, &sel, NULL)
+            != SQLITE_OK || !sel)
+        return BIH_VALIDATE_PREPARE;
+
     while (AR_STEP_ROW_READONLY(sel) == SQLITE_ROW) {
         /* 3.1M-row validate pass (full Equihash on the strided/above-
          * checkpoint subset) outlives the 2-min systemd watchdog on a cold
@@ -343,126 +454,109 @@ struct zcl_result load_block_index_from_blocks_table(struct node_db *ndb,
             memcpy(stored_hash, hb, 32);
 
         enum bhc_bad_reason reason = BHC_BAD_UNUSABLE_HEADER;
-        bool bad_row = true;
         struct block_header hdr;
-        if (!has_hash) {
-            reason = BHC_BAD_SHORT_HASH;
-        } else if (!blocks_row_to_header(sel, &hdr)) {
-            reason = BHC_BAD_UNUSABLE_HEADER;
-        } else if (cp) {
-            /* Canonical admission (J5 upgrade): hash-bind + PoW target on every
-             * row, plus the full Equihash solution check on the strided /
-             * above-checkpoint subset — the SAME strength the import + flat
-             * loaders admit at, via the shared block_row_verify() primitive. */
-            bool full_check =
-                (h > 0 && (h % BLOCKS_HYDRATE_POW_STRIDE) == 0) ||
-                (rom_checkpoint_height >= 0 && h > rom_checkpoint_height);
-            switch (block_row_verify(stored_hash, hdr.nBits, &hdr, cp,
-                                     full_check)) {
-                case BLOCK_ROW_VERIFY_OK:
-                    bad_row = false;
-                    break;
-                case BLOCK_ROW_VERIFY_HASH_BIND_MISMATCH:
-                    reason = BHC_BAD_HASH_MISMATCH;
-                    break;
-                case BLOCK_ROW_VERIFY_HIGH_HASH:
-                    reason = BHC_BAD_HIGH_HASH;
-                    break;
-                case BLOCK_ROW_VERIFY_BAD_EQUIHASH:
-                    reason = BHC_BAD_EQUIHASH;
-                    break;
-                case BLOCK_ROW_VERIFY_NO_PARAMS:
-                    reason = BHC_BAD_HASH_MISMATCH; /* unreachable: cp != NULL */
-                    break;
-            }
-        } else {
-            /* Chain params unavailable (not expected this late in boot): fall
-             * back to the pre-J5 hash-bind-only admission so a missing params
-             * table cannot quarantine the whole chain. */
-            struct uint256 computed;
-            block_header_get_hash(&hdr, &computed);
-            if (memcmp(computed.data, stored_hash, 32) != 0)
-                reason = BHC_BAD_HASH_MISMATCH;
-            else
-                bad_row = false;
-        }
-
-        if (!bad_row) {
+        if (!bih_row_is_poisoned(sel, has_hash, stored_hash, cp,
+                                 rom_checkpoint_height, h, &hdr, &reason)) {
             validated++;
             continue;
         }
 
         /* Queue the poisoned row for deferred purge. */
-        if (!bad) {
-            bad = zcl_malloc(
-                (size_t)BLOCKS_HYDRATE_MAX_QUARANTINE * sizeof(*bad),
-                "blocks_table quarantine list");
-            if (!bad) {
-                sqlite3_finalize(sel);
-                return ZCL_ERR(-7, "load_block_index_from_blocks_table: OOM for "
-                               "quarantine list");
-            }
+        enum bih_queue_status qs = bih_queue_bad_row(&bad, &bad_count, h,
+                                                     has_hash, stored_hash,
+                                                     reason);
+        if (qs == BIH_QUEUE_OOM) {
+            sqlite3_finalize(sel);
+            return BIH_VALIDATE_OOM;
         }
-        if (bad_count >= BLOCKS_HYDRATE_MAX_QUARANTINE) {
-            gross_corruption = true;
+        if (qs == BIH_QUEUE_GROSS) {
+            *gross_out = true;
             break;
         }
-        bad[bad_count].height = h;
-        bad[bad_count].has_hash = has_hash;
-        if (has_hash)
-            memcpy(bad[bad_count].hash, stored_hash, 32);
-        bad[bad_count].reason = reason;
-        bad_count++;
     }
     sqlite3_finalize(sel);
-    sel = NULL;
 
-    if (gross_corruption) {
-        free(bad);
-        LOG_WARN("block_index",
-                 "blocks-hydrate: > %d poisoned rows — grossly-shredded "
-                 "`blocks` table, refusing whole hydration (map untouched)",
-                 BLOCKS_HYDRATE_MAX_QUARANTINE);
-        struct blocker_record rec;
-        char reason[BLOCKER_REASON_MAX];
-        snprintf(reason, sizeof(reason),
-                 "blocks-hydrate refused: > %d poisoned `blocks` rows "
-                 "(grossly shredded); per-row quarantine declined, "
-                 "operator/re-import needed", BLOCKS_HYDRATE_MAX_QUARANTINE);
-        if (blocker_init(&rec, BLOCKS_HYDRATE_QUARANTINE_BLOCKER_ID,
-                         "block_index", BLOCKER_PERMANENT, reason))
-            (void)blocker_set(&rec);
-        return ZCL_ERR(-8, "load_block_index_from_blocks_table: > %d poisoned "
-                       "rows — refusing", BLOCKS_HYDRATE_MAX_QUARANTINE);
-    }
+    *bad_out = bad;
+    *bad_count_out = bad_count;
+    *validated_out = validated;
+    return BIH_VALIDATE_OK;
+}
 
-    /* ── Quarantine phase: purge each queued poisoned row now that the
-     *    validate SELECT is finalized. Purge before Pass B re-SELECTs so the
-     *    poisoned rows are already gone from `blocks`. */
+/* Run the deferred purges queued by Pass A (bhc_quarantine_row performs the
+ * delete + typed blocker + throttled WARN for each row). */
+static void bih_purge_quarantined_rows(struct node_db *ndb,
+                                       const struct bhc_bad_row *bad,
+                                       int64_t bad_count)
+{
     for (int64_t i = 0; i < bad_count; i++)
         bhc_quarantine_row(ndb, &bad[i]);
-    free(bad);
-    bad = NULL;
+}
 
-    if (validated == 0)
-        return ZCL_ERR(-6, "load_block_index_from_blocks_table: 0 usable rows "
-                       "(quarantined %lld poisoned)", (long long)bad_count);
+/* Raise the PERMANENT typed blocker for the gross-corruption refusal (the
+ * per-row quarantine above deliberately uses the TRANSIENT flavor). */
+static void bih_raise_gross_corruption_blocker(void)
+{
+    struct blocker_record rec;
+    char reason[BLOCKER_REASON_MAX];
+    snprintf(reason, sizeof(reason),
+             "blocks-hydrate refused: > %d poisoned `blocks` rows "
+             "(grossly shredded); per-row quarantine declined, "
+             "operator/re-import needed", BLOCKS_HYDRATE_MAX_QUARANTINE);
+    if (blocker_init(&rec, BLOCKS_HYDRATE_QUARANTINE_BLOCKER_ID,
+                     "block_index", BLOCKER_PERMANENT, reason))
+        (void)blocker_set(&rec);
+}
 
-    /* ── Pass B: INSERT (rows are hash-bound now). ORDER BY height means the
-     *    collected array is height-ASC, so pprev is always resolvable in the
-     *    link pass and the forward pass sees each parent before its child. */
-    struct block_index **sorted = zcl_malloc(
-        (size_t)validated * sizeof(*sorted), "blocks_table hydrate sorted");
-    if (!sorted)
-        return ZCL_ERR(-7, "load_block_index_from_blocks_table: OOM for %lld "
-                       "sorted pointers", (long long)validated);
-
-    if (sqlite3_prepare_v2(ndb->db, BLOCKS_HYDRATE_SEL, -1, &sel, NULL)
-            != SQLITE_OK || !sel) {
-        free(sorted);
-        return ZCL_ERR(-3, "load_block_index_from_blocks_table: failed to "
-                       "prepare insert SELECT over `blocks`");
+/* Fill one map entry from a BLOCKS_HYDRATE_SEL row: the header scalars, the
+ * merkle/sapling/nonce columns, and the honestly-clamped status union. */
+static void bih_fill_block_index_from_row(sqlite3_stmt *sel,
+                                          struct block_index *bi)
+{
+    bi->nHeight  = sqlite3_column_int(sel, BHC_HEIGHT);
+    bi->nVersion = (int32_t)sqlite3_column_int(sel, BHC_VERSION);
+    bi->nTime    = (uint32_t)sqlite3_column_int64(sel, BHC_TIME);
+    bi->nBits    = (uint32_t)sqlite3_column_int64(sel, BHC_BITS);
+    {
+        int nt = sqlite3_column_int(sel, BHC_NUMTX);
+        if (nt > 0)
+            bi->nTx = (unsigned int)nt;
     }
+
+    struct uint256 hyd_merkle = block_index_merkle_root(bi);
+    struct uint256 hyd_nonce = block_index_nonce(bi);
+    const void *mr = sqlite3_column_blob(sel, BHC_MERKLE);
+    if (mr && sqlite3_column_bytes(sel, BHC_MERKLE) >= 32)
+        memcpy(hyd_merkle.data, mr, 32);
+    const void *sr = sqlite3_column_blob(sel, BHC_SAPLING);
+    if (sr && sqlite3_column_bytes(sel, BHC_SAPLING) >= 32)
+        memcpy(bi->hashFinalSaplingRoot.data, sr, 32);
+    const void *nn = sqlite3_column_blob(sel, BHC_NONCE);
+    if (nn && sqlite3_column_bytes(sel, BHC_NONCE) >= 32)
+        memcpy(hyd_nonce.data, nn, 32);
+    hyd_store_merkle_nonce(bi, &hyd_merkle, &hyd_nonce);
+
+    /* HONEST validity for what THIS table owns: we verified the header
+     * hash-binds (and the link pass verifies parent linkage), but the
+     * row holds NO block body and we have NOT checked tx/script/context
+     * validity. The clamp stays at most BLOCK_VALID_TREE with no
+     * fabricated HAVE bits; a row an earlier rung already admitted keeps
+     * that rung's body knowledge (see bih_union_status). */
+    unsigned int stored = (unsigned int)sqlite3_column_int(sel, BHC_STATUS);
+    bi->nStatus = bih_union_status(stored, bi->nStatus);
+}
+
+/* Pass B row sweep: INSERT the hash-bound rows into the in-memory map,
+ * height-ASC, collecting them into `sorted`. Returns 0 with *n_out set on
+ * completion, or -3 when the insert SELECT refuses to prepare (nothing
+ * appended; the caller frees `sorted` and refuses). */
+static int bih_insert_rows(sqlite3 *db, struct main_state *ms,
+                           struct block_index **sorted, int64_t validated,
+                           size_t *n_out)
+{
+    sqlite3_stmt *sel = NULL;
+    if (sqlite3_prepare_v2(db, BLOCKS_HYDRATE_SEL, -1, &sel, NULL)
+            != SQLITE_OK || !sel)
+        return -3;
 
     size_t n = 0;
     while (AR_STEP_ROW_READONLY(sel) == SQLITE_ROW && n < (size_t)validated) {
@@ -476,37 +570,7 @@ struct zcl_result load_block_index_from_blocks_table(struct node_db *ndb,
         if (!bi)
             continue;
 
-        bi->nHeight  = sqlite3_column_int(sel, BHC_HEIGHT);
-        bi->nVersion = (int32_t)sqlite3_column_int(sel, BHC_VERSION);
-        bi->nTime    = (uint32_t)sqlite3_column_int64(sel, BHC_TIME);
-        bi->nBits    = (uint32_t)sqlite3_column_int64(sel, BHC_BITS);
-        {
-            int nt = sqlite3_column_int(sel, BHC_NUMTX);
-            if (nt > 0)
-                bi->nTx = (unsigned int)nt;
-        }
-
-        struct uint256 hyd_merkle = block_index_merkle_root(bi);
-        struct uint256 hyd_nonce = block_index_nonce(bi);
-        const void *mr = sqlite3_column_blob(sel, BHC_MERKLE);
-        if (mr && sqlite3_column_bytes(sel, BHC_MERKLE) >= 32)
-            memcpy(hyd_merkle.data, mr, 32);
-        const void *sr = sqlite3_column_blob(sel, BHC_SAPLING);
-        if (sr && sqlite3_column_bytes(sel, BHC_SAPLING) >= 32)
-            memcpy(bi->hashFinalSaplingRoot.data, sr, 32);
-        const void *nn = sqlite3_column_blob(sel, BHC_NONCE);
-        if (nn && sqlite3_column_bytes(sel, BHC_NONCE) >= 32)
-            memcpy(hyd_nonce.data, nn, 32);
-        hyd_store_merkle_nonce(bi, &hyd_merkle, &hyd_nonce);
-
-        /* HONEST validity for what THIS table owns: we verified the header
-         * hash-binds (and the link pass verifies parent linkage), but the
-         * row holds NO block body and we have NOT checked tx/script/context
-         * validity. The clamp stays at most BLOCK_VALID_TREE with no
-         * fabricated HAVE bits; a row an earlier rung already admitted keeps
-         * that rung's body knowledge (see bih_union_status). */
-        unsigned int stored = (unsigned int)sqlite3_column_int(sel, BHC_STATUS);
-        bi->nStatus = bih_union_status(stored, bi->nStatus);
+        bih_fill_block_index_from_row(sel, bi);
 
         sorted[n++] = bi;
         if ((n & 0xFFF) == 0)
@@ -514,10 +578,18 @@ struct zcl_result load_block_index_from_blocks_table(struct node_db *ndb,
                                (uint64_t)n, (uint64_t)validated);
     }
     sqlite3_finalize(sel);
-    sel = NULL;
+    *n_out = n;
+    return 0;
+}
 
-    /* ── Pass C: link pprev by prev_hash (both endpoints now in the map). */
-    if (sqlite3_prepare_v2(ndb->db, "SELECT hash,prev_hash FROM blocks",
+/* Pass C row sweep: link pprev by prev_hash now that both endpoints are in
+ * the map. A row whose hash or prev_hash column is NULL/short is skipped,
+ * exactly as the unsplit pass did; a prepare failure skips the pass. */
+static void bih_link_pprev_rows(sqlite3 *db, struct main_state *ms,
+                                int64_t row_count)
+{
+    sqlite3_stmt *sel = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT hash,prev_hash FROM blocks",
                            -1, &sel, NULL) == SQLITE_OK && sel) {
         size_t linked = 0;
         while (AR_STEP_ROW_READONLY(sel) == SQLITE_ROW) {
@@ -542,6 +614,93 @@ struct zcl_result load_block_index_from_blocks_table(struct node_db *ndb,
         }
         sqlite3_finalize(sel);
     }
+}
+
+struct zcl_result load_block_index_from_blocks_table(struct node_db *ndb,
+                                                     struct main_state *ms)
+{
+    if (!ndb || !ndb->open)
+        return ZCL_ERR(-1, "load_block_index_from_blocks_table: null/closed db");
+    if (!ms)
+        return ZCL_ERR(-1, "load_block_index_from_blocks_table: null main_state");
+
+    int64_t row_count = bih_blocks_table_row_count(ndb);
+    if (row_count <= 0)
+        return ZCL_ERR(-2, "load_block_index_from_blocks_table: `blocks` "
+                       "table empty — nothing to hydrate");
+
+    int64_t t0 = (int64_t)platform_time_wall_time_t();
+    LOG_INFO("block_index",
+             "Hydrating block index from node.db `blocks` (%lld rows)...",
+             (long long)row_count);
+
+    /* Canonical admission context (shared with the import + flat loaders):
+     * chain params for the PoW target + Equihash params, and the ROM
+     * checkpoint height that opens the full-Equihash budget on the tail. */
+    const struct chain_params *cp = chain_params_get();
+    int64_t rom_checkpoint_height = bih_rom_checkpoint_height();
+
+    /* ── Pass A (J5): VALIDATE every row hash-binds BEFORE touching the map,
+     *    but a poisoned row NO LONGER refuses the whole table. Each bad row is
+     *    QUEUED for a deferred purge (we cannot DELETE while this SELECT is
+     *    still stepping the same table) and skipped; the good rows still load.
+     *    A grossly-shredded table (> BLOCKS_HYDRATE_MAX_QUARANTINE bad rows)
+     *    still refuses whole — localized corruption heals per-row, gross
+     *    corruption is not blindly seeded. */
+    struct bhc_bad_row *bad = NULL;   /* lazily allocated on first bad row */
+    int64_t bad_count = 0;
+    int64_t validated = 0;
+    bool gross_corruption = false;
+    int vstat = bih_validate_rows(ndb->db, cp, rom_checkpoint_height,
+                                  row_count, &bad, &bad_count, &validated,
+                                  &gross_corruption);
+    if (vstat == BIH_VALIDATE_OOM)
+        return ZCL_ERR(-7, "load_block_index_from_blocks_table: OOM for "
+                       "quarantine list");
+    if (vstat == BIH_VALIDATE_PREPARE)
+        return ZCL_ERR(-3, "load_block_index_from_blocks_table: failed to "
+                       "prepare validate SELECT over `blocks`");
+
+    if (gross_corruption) {
+        free(bad);
+        LOG_WARN("block_index",
+                 "blocks-hydrate: > %d poisoned rows — grossly-shredded "
+                 "`blocks` table, refusing whole hydration (map untouched)",
+                 BLOCKS_HYDRATE_MAX_QUARANTINE);
+        bih_raise_gross_corruption_blocker();
+        return ZCL_ERR(-8, "load_block_index_from_blocks_table: > %d poisoned "
+                       "rows — refusing", BLOCKS_HYDRATE_MAX_QUARANTINE);
+    }
+
+    /* ── Quarantine phase: purge each queued poisoned row now that the
+     *    validate SELECT is finalized. Purge before Pass B re-SELECTs so the
+     *    poisoned rows are already gone from `blocks`. */
+    bih_purge_quarantined_rows(ndb, bad, bad_count);
+    free(bad);
+    bad = NULL;
+
+    if (validated == 0)
+        return ZCL_ERR(-6, "load_block_index_from_blocks_table: 0 usable rows "
+                       "(quarantined %lld poisoned)", (long long)bad_count);
+
+    /* ── Pass B: INSERT (rows are hash-bound now). ORDER BY height means the
+     *    collected array is height-ASC, so pprev is always resolvable in the
+     *    link pass and the forward pass sees each parent before its child. */
+    struct block_index **sorted = zcl_malloc(
+        (size_t)validated * sizeof(*sorted), "blocks_table hydrate sorted");
+    if (!sorted)
+        return ZCL_ERR(-7, "load_block_index_from_blocks_table: OOM for %lld "
+                       "sorted pointers", (long long)validated);
+
+    size_t n = 0;
+    if (bih_insert_rows(ndb->db, ms, sorted, validated, &n) != 0) {
+        free(sorted);
+        return ZCL_ERR(-3, "load_block_index_from_blocks_table: failed to "
+                       "prepare insert SELECT over `blocks`");
+    }
+
+    /* ── Pass C: link pprev by prev_hash (both endpoints now in the map). */
+    bih_link_pprev_rows(ndb->db, ms, row_count);
 
     /* Post-load, identical to the LevelDB rung: recompute nChainWork/nChainTx/
      * skip from the linked pprev chain (the imported chain_work column is
