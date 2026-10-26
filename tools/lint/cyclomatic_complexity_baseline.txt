@@ -228,8 +228,6 @@ contexts/commons/modules/vcs/src/zcode_patronage_funding.c:vcs_zcode_patronage_f
 contexts/commons/modules/vcs/src/zcode_patronage_settlement.c:settlement_body:28
 contexts/commons/modules/vcs/src/zcode_patronage_settlement.c:settlement_fields:22
 contexts/commons/modules/vcs/src/zcode_patronage_settlement.c:vcs_zcode_patronage_settlement_parse:31
-contexts/commons/modules/vcs/src/zcode_patronage_settlement_verify.c:settlement_proof_chain:18
-contexts/commons/modules/vcs/src/zcode_patronage_settlement_verify.c:vcs_zcode_patronage_settlement_verify_cas:35
 contexts/commons/modules/vcs/src/zcode_patronage_verify.c:patronage_binding:16
 contexts/commons/modules/vcs/src/zcode_replication.c:vcs_zcode_replication_evaluate_evidence:38
 contexts/commons/modules/vcs/src/zcode_reproduction_qualification.c:vcs_zcode_reproduction_qualification_string:17

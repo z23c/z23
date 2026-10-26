@@ -77,6 +77,34 @@ static enum vcs_zcode_patronage_settlement_error settlement_load_creation(
               : VCS_ZCODE_PATRONAGE_SETTLEMENT_EVIDENCE;
 }
 
+static enum vcs_zcode_patronage_settlement_error settlement_check_bindings(
+    const struct vcs_zcode_patronage_settlement_v1 *settlement,
+    const struct vcs_zcode_patronage_intent_v1 *intent,
+    const struct vcs_zcode_creation_attribution_v1 *creation)
+{
+    if (!settlement_equal(creation->network_genesis_root,
+                          settlement->network_genesis_root) ||
+        !settlement_equal(creation->contributor_binding_root,
+                          settlement->recipient_contributor_binding_root) ||
+        !settlement_equal(creation->task_root, settlement->task_root) ||
+        !settlement_equal(creation->candidate_root,
+                          settlement->candidate_root) ||
+        !settlement_equal(creation->proof_policy_root,
+                          settlement->proof_policy_root) ||
+        !settlement_equal(creation->proof_set_root,
+                          settlement->proof_set_root) ||
+        !settlement_equal(creation->proven_lane_root,
+                          settlement->proven_lane_root) ||
+        !settlement_equal(creation->score_receipt_root,
+                          settlement->score_receipt_root) ||
+        !settlement_equal(intent->intended_recipient_binding_root,
+                          creation->contributor_binding_root) ||
+        !settlement_equal(intent->proof_policy_root,
+                          creation->proof_policy_root))
+        return VCS_ZCODE_PATRONAGE_SETTLEMENT_EVIDENCE;
+    return VCS_ZCODE_PATRONAGE_SETTLEMENT_OK;
+}
+
 static enum vcs_zcode_patronage_settlement_error settlement_proof_chain(
     const struct vcs_zcode_patronage_settlement_v1 *settlement,
     const struct vcs_zcode_patronage_intent_v1 *intent,
@@ -101,26 +129,8 @@ static enum vcs_zcode_patronage_settlement_error settlement_proof_chain(
             &creation, &creation_context) != VCS_ZCODE_CREATION_OK)
         return VCS_ZCODE_PATRONAGE_SETTLEMENT_EVIDENCE;
 
-    if (!settlement_equal(creation.network_genesis_root,
-                          settlement->network_genesis_root) ||
-        !settlement_equal(creation.contributor_binding_root,
-                          settlement->recipient_contributor_binding_root) ||
-        !settlement_equal(creation.task_root, settlement->task_root) ||
-        !settlement_equal(creation.candidate_root,
-                          settlement->candidate_root) ||
-        !settlement_equal(creation.proof_policy_root,
-                          settlement->proof_policy_root) ||
-        !settlement_equal(creation.proof_set_root,
-                          settlement->proof_set_root) ||
-        !settlement_equal(creation.proven_lane_root,
-                          settlement->proven_lane_root) ||
-        !settlement_equal(creation.score_receipt_root,
-                          settlement->score_receipt_root) ||
-        !settlement_equal(intent->intended_recipient_binding_root,
-                          creation.contributor_binding_root) ||
-        !settlement_equal(intent->proof_policy_root,
-                          creation.proof_policy_root))
-        return VCS_ZCODE_PATRONAGE_SETTLEMENT_EVIDENCE;
+    error = settlement_check_bindings(settlement, intent, &creation);
+    if (error != VCS_ZCODE_PATRONAGE_SETTLEMENT_OK) return error;
     if (intent->mode == VCS_ZCODE_PATRONAGE_EXACT_TASK_COMMISSION &&
         !settlement_equal(intent->task_root, creation.task_root))
         return VCS_ZCODE_PATRONAGE_SETTLEMENT_EVIDENCE;
@@ -130,14 +140,10 @@ static enum vcs_zcode_patronage_settlement_error settlement_proof_chain(
     return VCS_ZCODE_PATRONAGE_SETTLEMENT_OK;
 }
 
-enum vcs_zcode_patronage_settlement_error
-vcs_zcode_patronage_settlement_verify_cas(
+static enum vcs_zcode_patronage_settlement_error settlement_check_context(
     const struct vcs_zcode_patronage_settlement_v1 *settlement,
     const struct vcs_zcode_patronage_settlement_validation_context *context)
 {
-    enum vcs_zcode_patronage_settlement_error error =
-        vcs_zcode_patronage_settlement_verify(settlement);
-    if (error != VCS_ZCODE_PATRONAGE_SETTLEMENT_OK) return error;
     if (!context || !context->patronage ||
         !context->patronage->workspace ||
         !context->patronage->expected_network_genesis_root ||
@@ -152,6 +158,80 @@ vcs_zcode_patronage_settlement_verify_cas(
         settlement->observed_mtp > context->active_mtp ||
         settlement->observed_mtp > settlement->created_unix)
         return VCS_ZCODE_PATRONAGE_SETTLEMENT_TIME;
+    return VCS_ZCODE_PATRONAGE_SETTLEMENT_OK;
+}
+
+static enum vcs_zcode_patronage_settlement_error settlement_check_funding(
+    const struct vcs_zcode_patronage_settlement_v1 *settlement,
+    const struct vcs_zcode_patronage_settlement_validation_context *context,
+    struct vcs_zcode_patronage_funding_v1 *funding,
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
+    struct vcs_zcode_patronage_validation_context historical =
+        *context->patronage;
+    historical.now_unix = funding->created_unix;
+    if (vcs_zcode_patronage_funding_verify_cas(
+            funding, &historical) != VCS_ZCODE_PATRONAGE_FUNDING_OK)
+        return VCS_ZCODE_PATRONAGE_SETTLEMENT_FUNDING;
+    if (!settlement_equal(funding->patronage_intent_root,
+                          settlement->patronage_intent_root) ||
+        !settlement_equal(funding->network_genesis_root,
+                          settlement->network_genesis_root) ||
+        !settlement_equal(funding->funder_zid_pubkey,
+                          settlement->settler_zid_pubkey))
+        return VCS_ZCODE_PATRONAGE_SETTLEMENT_FUNDING;
+    if (funding->amount_atoms != settlement->amount_atoms ||
+        intent->amount_atoms != settlement->amount_atoms)
+        return VCS_ZCODE_PATRONAGE_SETTLEMENT_AMOUNT;
+    if (funding->created_unix >= settlement->created_unix)
+        return VCS_ZCODE_PATRONAGE_SETTLEMENT_TIME;
+    return VCS_ZCODE_PATRONAGE_SETTLEMENT_OK;
+}
+
+static enum vcs_zcode_patronage_settlement_error settlement_check_refund(
+    const struct vcs_zcode_patronage_settlement_v1 *settlement,
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
+    if (intent->mode == VCS_ZCODE_PATRONAGE_DIRECT_GIFT ||
+        !settlement_equal(
+            settlement->recipient_contributor_binding_root,
+            intent->patron_contributor_binding_root))
+        return VCS_ZCODE_PATRONAGE_SETTLEMENT_INTENT;
+    return settlement->created_unix >= intent->expires_unix &&
+           settlement->created_unix >= intent->refund_unix &&
+           settlement->observed_height >= intent->refund_height &&
+           settlement->observed_mtp >= intent->refund_unix
+        ? VCS_ZCODE_PATRONAGE_SETTLEMENT_OK
+        : VCS_ZCODE_PATRONAGE_SETTLEMENT_TIME;
+}
+
+static enum vcs_zcode_patronage_settlement_error
+settlement_check_direct_gift(
+    const struct vcs_zcode_patronage_settlement_v1 *settlement)
+{
+    const uint8_t *evidence[] = {
+        settlement->creation_attribution_root, settlement->task_root,
+        settlement->candidate_root, settlement->proof_policy_root,
+        settlement->proof_set_root, settlement->proven_lane_root,
+        settlement->score_receipt_root,
+    };
+    static const uint8_t zero[32] = {0};
+    for (size_t i = 0; i < sizeof(evidence) / sizeof(evidence[0]); i++)
+        if (!settlement_equal(evidence[i], zero))
+            return VCS_ZCODE_PATRONAGE_SETTLEMENT_EVIDENCE;
+    return VCS_ZCODE_PATRONAGE_SETTLEMENT_OK;
+}
+
+enum vcs_zcode_patronage_settlement_error
+vcs_zcode_patronage_settlement_verify_cas(
+    const struct vcs_zcode_patronage_settlement_v1 *settlement,
+    const struct vcs_zcode_patronage_settlement_validation_context *context)
+{
+    enum vcs_zcode_patronage_settlement_error error =
+        vcs_zcode_patronage_settlement_verify(settlement);
+    if (error != VCS_ZCODE_PATRONAGE_SETTLEMENT_OK) return error;
+    error = settlement_check_context(settlement, context);
+    if (error != VCS_ZCODE_PATRONAGE_SETTLEMENT_OK) return error;
 
     struct vcs_zcode_patronage_funding_v1 funding;
     error = settlement_load_funding(context->patronage->workspace,
@@ -164,55 +244,17 @@ vcs_zcode_patronage_settlement_verify_cas(
                                    &intent);
     if (error != VCS_ZCODE_PATRONAGE_SETTLEMENT_OK) return error;
 
-    struct vcs_zcode_patronage_validation_context historical =
-        *context->patronage;
-    historical.now_unix = funding.created_unix;
-    if (vcs_zcode_patronage_funding_verify_cas(
-            &funding, &historical) != VCS_ZCODE_PATRONAGE_FUNDING_OK)
-        return VCS_ZCODE_PATRONAGE_SETTLEMENT_FUNDING;
-    if (!settlement_equal(funding.patronage_intent_root,
-                          settlement->patronage_intent_root) ||
-        !settlement_equal(funding.network_genesis_root,
-                          settlement->network_genesis_root) ||
-        !settlement_equal(funding.funder_zid_pubkey,
-                          settlement->settler_zid_pubkey))
-        return VCS_ZCODE_PATRONAGE_SETTLEMENT_FUNDING;
-    if (funding.amount_atoms != settlement->amount_atoms ||
-        intent.amount_atoms != settlement->amount_atoms)
-        return VCS_ZCODE_PATRONAGE_SETTLEMENT_AMOUNT;
-    if (funding.created_unix >= settlement->created_unix)
-        return VCS_ZCODE_PATRONAGE_SETTLEMENT_TIME;
+    error = settlement_check_funding(settlement, context, &funding, &intent);
+    if (error != VCS_ZCODE_PATRONAGE_SETTLEMENT_OK) return error;
 
-    if (settlement->action == VCS_ZCODE_PATRONAGE_SIMULATED_REFUNDED) {
-        if (intent.mode == VCS_ZCODE_PATRONAGE_DIRECT_GIFT ||
-            !settlement_equal(
-                settlement->recipient_contributor_binding_root,
-                intent.patron_contributor_binding_root))
-            return VCS_ZCODE_PATRONAGE_SETTLEMENT_INTENT;
-        return settlement->created_unix >= intent.expires_unix &&
-               settlement->created_unix >= intent.refund_unix &&
-               settlement->observed_height >= intent.refund_height &&
-               settlement->observed_mtp >= intent.refund_unix
-            ? VCS_ZCODE_PATRONAGE_SETTLEMENT_OK
-            : VCS_ZCODE_PATRONAGE_SETTLEMENT_TIME;
-    }
+    if (settlement->action == VCS_ZCODE_PATRONAGE_SIMULATED_REFUNDED)
+        return settlement_check_refund(settlement, &intent);
 
     if (settlement->created_unix >= intent.expires_unix ||
         !settlement_equal(settlement->recipient_contributor_binding_root,
                           intent.intended_recipient_binding_root))
         return VCS_ZCODE_PATRONAGE_SETTLEMENT_INTENT;
-    if (intent.mode == VCS_ZCODE_PATRONAGE_DIRECT_GIFT) {
-        const uint8_t *evidence[] = {
-            settlement->creation_attribution_root, settlement->task_root,
-            settlement->candidate_root, settlement->proof_policy_root,
-            settlement->proof_set_root, settlement->proven_lane_root,
-            settlement->score_receipt_root,
-        };
-        static const uint8_t zero[32] = {0};
-        for (size_t i = 0; i < sizeof(evidence) / sizeof(evidence[0]); i++)
-            if (!settlement_equal(evidence[i], zero))
-                return VCS_ZCODE_PATRONAGE_SETTLEMENT_EVIDENCE;
-        return VCS_ZCODE_PATRONAGE_SETTLEMENT_OK;
-    }
+    if (intent.mode == VCS_ZCODE_PATRONAGE_DIRECT_GIFT)
+        return settlement_check_direct_gift(settlement);
     return settlement_proof_chain(settlement, &intent, context);
 }
