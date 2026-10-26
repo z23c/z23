@@ -1955,7 +1955,6 @@ tests/harness/src/test_reorg_residue_tipfin_replace.c:test_reorg_residue_tipfin_
 tests/harness/src/test_reorg_safety.c:test_reorg_safety:53
 tests/harness/src/test_repair_marker.c:test_repair_marker:56
 tests/harness/src/test_replay_canary_verdict.c:test_identity_is_captured_once_before_replay:18
-tests/harness/src/test_rescanwitnesses_diverge_guard.c:test_rescanwitnesses_diverge_guard:27
 tests/harness/src/test_resident_launch_contract.c:rlc_fixture_selfcheck:18
 tests/harness/src/test_resident_launch_contract.c:rlc_publish:30
 tests/harness/src/test_resident_launch_contract.c:rlc_stage_f_trap:59

@@ -31,6 +31,92 @@ static void check_case(const char *name, bool got, bool want, int *failures)
     }
 }
 
+static bool install_replay_endpoint_slots(struct active_chain *chain,
+                                          struct block_index *older,
+                                          struct block_index *recent)
+{
+    return active_chain_install_tip_slot(chain, older) &&
+           active_chain_install_tip_slot(chain, recent);
+}
+
+static void build_sapling_body_with_one_commitment(struct block *body)
+{
+    block_init(body);
+    body->vtx = calloc(1, sizeof(*body->vtx));
+    body->num_vtx = body->vtx ? 1 : 0;
+    if (body->vtx) {
+        transaction_init(&body->vtx[0]);
+        body->vtx[0].version = SAPLING_TX_VERSION;
+        body->vtx[0].overwintered = true;
+        body->vtx[0].version_group_id = SAPLING_VERSION_GROUP_ID;
+        body->vtx[0].v_shielded_output =
+            calloc(1, sizeof(*body->vtx[0].v_shielded_output));
+        if (body->vtx[0].v_shielded_output) {
+            body->vtx[0].num_shielded_output = 1;
+            body->vtx[0].v_shielded_output[0].cm = test_root(0x71);
+        }
+    }
+}
+
+static bool decoded_body_appends_all_commitments(void)
+{
+    struct block body;
+    build_sapling_body_with_one_commitment(&body);
+    struct byte_stream body_wire;
+    stream_init(&body_wire, 2048);
+    bool body_serialized = body.vtx && body.vtx[0].v_shielded_output &&
+                           block_serialize(&body, &body_wire);
+    struct byte_stream body_read;
+    stream_init_from_data(&body_read, body_wire.data, body_wire.size);
+    struct block decoded;
+    block_init(&decoded);
+    bool body_decoded = body_serialized && block_deserialize(&decoded,
+                                                             &body_read);
+    struct incremental_merkle_tree replay_tree;
+    sapling_tree_init(&replay_tree);
+    struct incremental_witness replay_witness;
+    memset(&replay_witness, 0, sizeof(replay_witness));
+    bool replay_active = false;
+    struct db_sapling_note replay_note;
+    memset(&replay_note, 0, sizeof(replay_note));
+    if (body.vtx && body.vtx[0].v_shielded_output)
+        memcpy(replay_note.cm, body.vtx[0].v_shielded_output[0].cm.data, 32);
+    int replay_built = 0;
+    size_t replayed = body_decoded ? rescan_append_block_commitments(
+        &decoded, &replay_tree, &replay_witness, &replay_active,
+        &replay_note, 1, &replay_built) : 0;
+    bool appended = replayed == 1 && replay_built == 1 && replay_active &&
+                    incremental_tree_size(&replay_tree) == 1;
+    block_free(&decoded);
+    stream_free(&body_wire);
+    block_free(&body);
+    return appended;
+}
+
+static bool attempt_prior_anchor_seed_shortcut(
+    sqlite3 **db, struct active_chain *chain, struct block_index *prior,
+    struct db_sapling_note *note, struct incremental_merkle_tree *anchored,
+    struct incremental_merkle_tree *seeded, int *replay_start,
+    int *seed_height)
+{
+    return sqlite3_open(":memory:", db) == SQLITE_OK &&
+        anchor_kv_ensure_schema(*db) && anchor_kv_initialize_history(*db, 0) &&
+        anchor_kv_add_tree(*db, ANCHOR_POOL_SAPLING, anchored, 499999) &&
+        active_chain_install_tip_slot(chain, prior) &&
+        rescan_seed_before_oldest_note_from_db(
+            *db, chain, note, 1, 476969, seeded, replay_start,
+            seed_height);
+}
+
+static bool anchor_seeded_at_oldest_note(bool seed_ok, int replay_start,
+                                         int seed_height,
+                                         struct uint256 *seeded_root,
+                                         struct uint256 *anchor_root)
+{
+    return seed_ok && replay_start == 500001 && seed_height == 500000 &&
+           uint256_eq(seeded_root, anchor_root);
+}
+
 int test_rescanwitnesses_diverge_guard(void)
 {
     printf("\n=== rescanwitnesses divergence guard ===\n");
@@ -99,9 +185,8 @@ int test_rescanwitnesses_diverge_guard(void)
     recent_endpoint.phashBlock = &recent_endpoint.hashBlock;
     recent_endpoint.hashFinalSaplingRoot = root;
     recent_endpoint.nFile = 0;
-    bool endpoints_installed =
-        active_chain_install_tip_slot(&endpoint_chain, &older_endpoint) &&
-        active_chain_install_tip_slot(&endpoint_chain, &recent_endpoint);
+    bool endpoints_installed = install_replay_endpoint_slots(
+        &endpoint_chain, &older_endpoint, &recent_endpoint);
     int endpoint_height = -1;
     const struct block_index *selected = rescan_find_replay_endpoint(
         &endpoint_chain, 103, &endpoint_height);
@@ -116,51 +201,8 @@ int test_rescanwitnesses_diverge_guard(void)
                &failures);
     active_chain_free(&endpoint_chain);
 
-    struct block body;
-    block_init(&body);
-    body.vtx = calloc(1, sizeof(*body.vtx));
-    body.num_vtx = body.vtx ? 1 : 0;
-    if (body.vtx) {
-        transaction_init(&body.vtx[0]);
-        body.vtx[0].version = SAPLING_TX_VERSION;
-        body.vtx[0].overwintered = true;
-        body.vtx[0].version_group_id = SAPLING_VERSION_GROUP_ID;
-        body.vtx[0].v_shielded_output =
-            calloc(1, sizeof(*body.vtx[0].v_shielded_output));
-        if (body.vtx[0].v_shielded_output) {
-            body.vtx[0].num_shielded_output = 1;
-            body.vtx[0].v_shielded_output[0].cm = test_root(0x71);
-        }
-    }
-    struct byte_stream body_wire;
-    stream_init(&body_wire, 2048);
-    bool body_serialized = body.vtx && body.vtx[0].v_shielded_output &&
-                           block_serialize(&body, &body_wire);
-    struct byte_stream body_read;
-    stream_init_from_data(&body_read, body_wire.data, body_wire.size);
-    struct block decoded;
-    block_init(&decoded);
-    bool body_decoded = body_serialized && block_deserialize(&decoded,
-                                                             &body_read);
-    struct incremental_merkle_tree replay_tree;
-    sapling_tree_init(&replay_tree);
-    struct incremental_witness replay_witness;
-    memset(&replay_witness, 0, sizeof(replay_witness));
-    bool replay_active = false;
-    struct db_sapling_note replay_note;
-    memset(&replay_note, 0, sizeof(replay_note));
-    if (body.vtx && body.vtx[0].v_shielded_output)
-        memcpy(replay_note.cm, body.vtx[0].v_shielded_output[0].cm.data, 32);
-    int replay_built = 0;
-    size_t replayed = body_decoded ? rescan_append_block_commitments(
-        &decoded, &replay_tree, &replay_witness, &replay_active,
-        &replay_note, 1, &replay_built) : 0;
     check_case("consensus-decoded body appends every commitment and note",
-               replayed == 1 && replay_built == 1 && replay_active &&
-               incremental_tree_size(&replay_tree) == 1, true, &failures);
-    block_free(&decoded);
-    stream_free(&body_wire);
-    block_free(&body);
+               decoded_body_appends_all_commitments(), true, &failures);
 
     sqlite3 *db = NULL;
     struct active_chain chain;
@@ -185,18 +227,15 @@ int test_rescanwitnesses_diverge_guard(void)
     sapling_tree_init(&seeded);
     int replay_start = -1;
     int seed_height = -1;
-    bool seed_ok = sqlite3_open(":memory:", &db) == SQLITE_OK &&
-        anchor_kv_ensure_schema(db) && anchor_kv_initialize_history(db, 0) &&
-        anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &anchored, 499999) &&
-        active_chain_install_tip_slot(&chain, &prior) &&
-        rescan_seed_before_oldest_note_from_db(
-            db, &chain, &note, 1, 476969, &seeded, &replay_start,
-            &seed_height);
+    bool seed_ok = attempt_prior_anchor_seed_shortcut(
+        &db, &chain, &prior, &note, &anchored, &seeded, &replay_start,
+        &seed_height);
     struct uint256 seeded_root;
     incremental_tree_root(&seeded, &seeded_root);
     check_case("header-bound prior anchor seeds at the oldest note",
-               seed_ok && replay_start == 500001 && seed_height == 500000 &&
-               uint256_eq(&seeded_root, &anchor_root), true, &failures);
+               anchor_seeded_at_oldest_note(seed_ok, replay_start, seed_height,
+                                            &seeded_root, &anchor_root),
+               true, &failures);
 
     prior.hashFinalSaplingRoot = test_root(0x66);
     check_case("missing prior-header anchor refuses the shortcut",
