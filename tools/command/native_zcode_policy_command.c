@@ -83,16 +83,26 @@ static bool zp_genesis(const char *datadir, uint8_t out[32]) {
   return zp_genesis_rpc(out);
 }
 
+static bool zp_error_writable(char *error_out, size_t error_capacity) {
+  return error_out && error_capacity;
+}
+
+static bool zp_allows_inputs_ready(
+    const char *datadir, const struct vcs_zcode_sovereignty_subject *subject,
+    uint8_t genesis[32]) {
+  bool have_genesis = zp_genesis(datadir, genesis);
+  return datadir && subject && have_genesis;
+}
+
 bool zcl_native_zcode_policy_allows(
     const char *datadir, enum vcs_zcode_sovereignty_action action,
     const struct vcs_zcode_sovereignty_subject *subject,
     char *error_out, size_t error_capacity) {
-  if (error_out && error_capacity)
+  if (zp_error_writable(error_out, error_capacity))
     error_out[0] = '\0';
   uint8_t genesis[32];
-  bool have_genesis = zp_genesis(datadir, genesis);
-  if (!datadir || !subject || !have_genesis) {
-    if (error_out && error_capacity)
+  if (!zp_allows_inputs_ready(datadir, subject, genesis)) {
+    if (zp_error_writable(error_out, error_capacity))
       (void)snprintf(error_out, error_capacity,
                      "cannot bind local policy to the running network");
     return false;
@@ -104,7 +114,7 @@ bool zcl_native_zcode_policy_allows(
                      policy, datadir, load_error, sizeof(load_error)) !=
                      VCS_ZCODE_SOVEREIGNTY_OK) {
     vcs_zcode_sovereignty_policy_free(policy);
-    if (error_out && error_capacity)
+    if (zp_error_writable(error_out, error_capacity))
       (void)snprintf(error_out, error_capacity, "%s",
                      load_error[0] ? load_error : "local policy allocation failed");
     return false;
@@ -112,7 +122,7 @@ bool zcl_native_zcode_policy_allows(
   struct vcs_zcode_sovereignty_decision decision =
       vcs_zcode_sovereignty_policy_check(policy, action, subject);
   vcs_zcode_sovereignty_policy_free(policy);
-  if (!decision.allow && error_out && error_capacity)
+  if (!decision.allow && zp_error_writable(error_out, error_capacity))
     (void)snprintf(error_out, error_capacity,
                    "local sovereignty policy denied %s",
                    vcs_zcode_sovereignty_action_string(action));
@@ -129,24 +139,55 @@ static bool zp_enum(const char *text, const char *const *names, size_t count,
   return false;
 }
 
-static bool zp_mutation(const struct json_value *in,
-                        struct policy_mutation *out) {
-  static const char *const operations[] = {"add", "remove", "advisory"};
+static bool zp_hex32(const char *text, uint8_t out[32]) {
+  return text && strlen(text) == 64 &&
+         zcl_hex_decode_lower(text, out, 32);
+}
+
+static bool zp_mutation_rule_value(int scope, const char *text,
+                                   uint8_t rule_value[32]) {
+  if (!text)
+    return false;
+  if (scope <= VCS_ZCODE_SOVEREIGNTY_PUBLISHER_ZID)
+    return zp_hex32(text, rule_value);
+  size_t n = strlen(text);
+  if (!n || n > 31)
+    return false;
+  memcpy(rule_value, text, n);
+  return true;
+}
+
+static bool zp_mutation_add(const struct json_value *in,
+                            struct policy_mutation *out) {
   static const char *const sources[] = {"local", "advisory"};
   static const char *const effects[] = {"allow", "block"};
   static const char *const scopes[] = {"full_root", "package",
                                        "publisher_zid", "service_type",
                                        "classification"};
+  int source = 0, effect = 0, scope = 0;
+  const struct json_value *mask = json_get(in, "action_mask");
+  int64_t action_mask = mask && mask->type == JSON_INT ? json_get_int(mask) : 0;
+  uint8_t rule_value[32] = {0};
+  return zp_enum(zp_str(in, "source"), sources, 2, &source) &&
+         zp_enum(zp_str(in, "effect"), effects, 2, &effect) &&
+         zp_enum(zp_str(in, "scope"), scopes, 5, &scope) &&
+         action_mask >= 1 && action_mask <= 127 &&
+         zp_mutation_rule_value(scope, zp_str(in, "value"), rule_value) &&
+         vcs_zcode_sovereignty_rule_build(
+             &out->rule, source, effect, scope, (uint8_t)action_mask,
+             rule_value) == VCS_ZCODE_SOVEREIGNTY_OK;
+}
+
+static bool zp_mutation(const struct json_value *in,
+                        struct policy_mutation *out) {
+  static const char *const operations[] = {"add", "remove", "advisory"};
   memset(out, 0, sizeof(*out));
   int value = 0;
   if (!zp_enum(zp_str(in, "operation"), operations, 3, &value))
     return false;
   out->operation = (enum policy_operation)value;
-  if (out->operation == POLICY_REMOVE) {
-    const char *id = zp_str(in, "rule_id");
-    return id && strlen(id) == 64 &&
-           zcl_hex_decode_lower(id, out->rule_id, 32);
-  }
+  if (out->operation == POLICY_REMOVE)
+    return zp_hex32(zp_str(in, "rule_id"), out->rule_id);
   if (out->operation == POLICY_ADVISORY) {
     const struct json_value *enabled = json_get(in, "enabled");
     if (!enabled || enabled->type != JSON_BOOL)
@@ -154,30 +195,15 @@ static bool zp_mutation(const struct json_value *in,
     out->enabled = json_get_bool(enabled);
     return true;
   }
-  int source = 0, effect = 0, scope = 0;
-  const struct json_value *mask = json_get(in, "action_mask");
-  int64_t action_mask = mask && mask->type == JSON_INT ? json_get_int(mask) : 0;
-  if (!zp_enum(zp_str(in, "source"), sources, 2, &source) ||
-      !zp_enum(zp_str(in, "effect"), effects, 2, &effect) ||
-      !zp_enum(zp_str(in, "scope"), scopes, 5, &scope) ||
-      action_mask < 1 || action_mask > 127)
-    return false;
-  uint8_t rule_value[32] = {0};
-  const char *text = zp_str(in, "value");
-  if (!text)
-    return false;
-  if (scope <= VCS_ZCODE_SOVEREIGNTY_PUBLISHER_ZID) {
-    if (strlen(text) != 64 || !zcl_hex_decode_lower(text, rule_value, 32))
-      return false;
-  } else {
-    size_t n = strlen(text);
-    if (!n || n > 31)
-      return false;
-    memcpy(rule_value, text, n);
-  }
-  return vcs_zcode_sovereignty_rule_build(
-             &out->rule, source, effect, scope, (uint8_t)action_mask,
-             rule_value) == VCS_ZCODE_SOVEREIGNTY_OK;
+  return zp_mutation_add(in, out);
+}
+
+static bool zp_mutate_request_valid(const char *mode,
+                                    const struct json_value *in,
+                                    struct policy_mutation *out) {
+  bool mode_ok = mode && (strcmp(mode, "plan") == 0 ||
+                          strcmp(mode, "commit") == 0);
+  return mode_ok && zp_mutation(in, out);
 }
 
 static void zp_token(const uint8_t genesis[32], const uint8_t digest[32],
@@ -248,14 +274,64 @@ void zcl_native_handle_zcode_network_policy_list(
   vcs_zcode_sovereignty_policy_free(policy);
 }
 
+static uint8_t zp_token_difference(const uint8_t supplied[32],
+                                   const uint8_t token[32]) {
+  uint8_t difference = 0;
+  for (size_t i = 0; i < 32; i++)
+    difference |= supplied[i] ^ token[i];
+  return difference;
+}
+
+static enum vcs_zcode_sovereignty_result zp_commit_apply(
+    struct vcs_zcode_sovereignty_policy *policy,
+    struct policy_mutation *mutation, uint8_t difference) {
+  enum vcs_zcode_sovereignty_result changed = VCS_ZCODE_SOVEREIGNTY_INVALID;
+  if (!difference && mutation->operation == POLICY_ADD)
+    changed = vcs_zcode_sovereignty_policy_add(policy, &mutation->rule);
+  else if (!difference && mutation->operation == POLICY_REMOVE)
+    changed = vcs_zcode_sovereignty_policy_remove(policy, mutation->rule_id);
+  else if (!difference) {
+    vcs_zcode_sovereignty_policy_set_advisory(policy, mutation->enabled);
+    changed = VCS_ZCODE_SOVEREIGNTY_OK;
+  }
+  return changed;
+}
+
+static bool zp_commit_persisted(struct vcs_zcode_sovereignty_policy *policy,
+                                const char *datadir, uint8_t difference,
+                                enum vcs_zcode_sovereignty_result changed,
+                                char *error, size_t error_size) {
+  return !difference && changed == VCS_ZCODE_SOVEREIGNTY_OK &&
+         vcs_zcode_sovereignty_policy_save(policy, datadir, error,
+                                           error_size) ==
+             VCS_ZCODE_SOVEREIGNTY_OK;
+}
+
+static void zp_reply_plan(struct zcl_command_reply *reply, const char *mode,
+                          const uint8_t token[32],
+                          const struct policy_mutation *mutation) {
+  char token_hex[65], rule_hex[65] = {0};
+  zcl_hex_encode(token, 32, token_hex);
+  const uint8_t *rule_id = mutation->operation == POLICY_ADD
+                               ? mutation->rule.id : mutation->rule_id;
+  if (mutation->operation != POLICY_ADVISORY)
+    zcl_hex_encode(rule_id, 32, rule_hex);
+  json_push_kv_str(&reply->data, "mode", mode);
+  json_push_kv_bool(&reply->data, "committed", strcmp(mode, "commit") == 0);
+  json_push_kv_str(&reply->data, "plan_token", token_hex);
+  if (rule_hex[0])
+    json_push_kv_str(&reply->data, "rule_id", rule_hex);
+  json_push_kv_bool(&reply->data, "private_rules_redacted", true);
+  json_push_kv_bool(&reply->data, "effective_after_dht_restart", true);
+}
+
 void zcl_native_handle_zcode_network_policy_mutate(
     const struct zcl_command_request *request, struct zcl_command_reply *reply) {
   if (!request || !reply)
     return;
   const char *mode = zp_str(request->input, "mode");
   struct policy_mutation mutation;
-  if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
-      !zp_mutation(request->input, &mutation)) {
+  if (!zp_mutate_request_valid(mode, request->input, &mutation)) {
     zp_fail(reply, "INVALID_MUTATION", "exact mode and policy mutation fields required");
     return;
   }
@@ -268,47 +344,24 @@ void zcl_native_handle_zcode_network_policy_mutate(
   vcs_zcode_sovereignty_policy_digest(policy, digest);
   zp_token(genesis, digest, &mutation, token);
   if (strcmp(mode, "commit") == 0) {
-    uint8_t supplied[32], difference = 0;
-    const char *hex = zp_str(request->input, "plan_token");
-    if (!hex || strlen(hex) != 64 || !zcl_hex_decode_lower(hex, supplied, 32)) {
+    uint8_t supplied[32];
+    if (!zp_hex32(zp_str(request->input, "plan_token"), supplied)) {
       vcs_zcode_sovereignty_policy_free(policy);
       zp_fail(reply, "INVALID_PLAN_TOKEN", "commit requires canonical plan_token");
       return;
     }
-    for (size_t i = 0; i < 32; i++)
-      difference |= supplied[i] ^ token[i];
-    enum vcs_zcode_sovereignty_result changed = VCS_ZCODE_SOVEREIGNTY_INVALID;
-    if (!difference && mutation.operation == POLICY_ADD)
-      changed = vcs_zcode_sovereignty_policy_add(policy, &mutation.rule);
-    else if (!difference && mutation.operation == POLICY_REMOVE)
-      changed = vcs_zcode_sovereignty_policy_remove(policy, mutation.rule_id);
-    else if (!difference) {
-      vcs_zcode_sovereignty_policy_set_advisory(policy, mutation.enabled);
-      changed = VCS_ZCODE_SOVEREIGNTY_OK;
-    }
+    uint8_t difference = zp_token_difference(supplied, token);
+    enum vcs_zcode_sovereignty_result changed =
+        zp_commit_apply(policy, &mutation, difference);
     char error[192] = {0};
-    if (difference || changed != VCS_ZCODE_SOVEREIGNTY_OK ||
-        vcs_zcode_sovereignty_policy_save(policy, datadir, error,
-                                           sizeof(error)) !=
-            VCS_ZCODE_SOVEREIGNTY_OK) {
+    if (!zp_commit_persisted(policy, datadir, difference, changed, error,
+                             sizeof(error))) {
       vcs_zcode_sovereignty_policy_free(policy);
       zp_fail(reply, difference ? "STALE_PLAN" : "POLICY_REFUSED",
               error[0] ? error : vcs_zcode_sovereignty_result_string(changed));
       return;
     }
   }
-  char token_hex[65], rule_hex[65] = {0};
-  zcl_hex_encode(token, 32, token_hex);
-  const uint8_t *rule_id = mutation.operation == POLICY_ADD
-                               ? mutation.rule.id : mutation.rule_id;
-  if (mutation.operation != POLICY_ADVISORY)
-    zcl_hex_encode(rule_id, 32, rule_hex);
-  json_push_kv_str(&reply->data, "mode", mode);
-  json_push_kv_bool(&reply->data, "committed", strcmp(mode, "commit") == 0);
-  json_push_kv_str(&reply->data, "plan_token", token_hex);
-  if (rule_hex[0])
-    json_push_kv_str(&reply->data, "rule_id", rule_hex);
-  json_push_kv_bool(&reply->data, "private_rules_redacted", true);
-  json_push_kv_bool(&reply->data, "effective_after_dht_restart", true);
+  zp_reply_plan(reply, mode, token, &mutation);
   vcs_zcode_sovereignty_policy_free(policy);
 }
