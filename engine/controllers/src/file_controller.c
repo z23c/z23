@@ -351,33 +351,111 @@ static bool file_manifest_save(const struct file_manifest *fm,
     return true;
 }
 
+/* Read the cache magic word; true only when it reads whole and matches "FMAN". */
+static bool file_manifest_read_valid_magic(FILE *f, uint32_t *magic)
+{
+    return fread(magic, 4, 1, f) == 1 && *magic == 0x464D414E;
+}
+
+/* Read the fixed header fields that follow the magic word. */
+static bool file_manifest_read_header_fields(FILE *f, struct file_manifest *fm)
+{
+    return fread(&fm->num_chunks, 4, 1, f) == 1 &&
+           fread(&fm->total_bytes, 8, 1, f) == 1 &&
+           fread(fm->root_hash, 32, 1, f) == 1;
+}
+
+/* Read one chunk record from the cache file. */
+static bool file_manifest_read_chunk_record(FILE *f, struct file_chunk *chunk)
+{
+    return fread(chunk->sha3, 32, 1, f) == 1 &&
+           fread(&chunk->offset, 8, 1, f) == 1 &&
+           fread(&chunk->size, 4, 1, f) == 1 &&
+           fread(&chunk->file_index, 1, 1, f) == 1;
+}
+
+/* Verify block files still match — check first AND last chunk.
+ * The last chunk is most likely to be stale (active block file). */
+/* Returns nonzero, printing the reason, when the cache must be rebuilt. */
+static int file_manifest_cached_chunks_stale(const struct file_manifest *fm,
+                                             const char *datadir)
+{
+    if (fm->num_chunks == 0) return 0;
+    uint8_t *data = NULL;
+    uint32_t sz = 0;
+    if (!file_chunk_read(&fm->chunks[0], datadir, &data, &sz)) {
+        printf("file_manifest: first chunk stale, rebuilding\n");
+        return 1;
+    }
+    free(data);
+    /* Also check last chunk — most likely to be stale */
+    if (fm->num_chunks > 1) {
+        data = NULL; sz = 0;
+        if (!file_chunk_read(&fm->chunks[fm->num_chunks - 1],
+                             datadir, &data, &sz)) {
+            printf("file_manifest: last chunk stale, rebuilding\n");
+            return 1;
+        }
+        free(data);
+    }
+    return 0;
+}
+
+enum file_cache_freshness {
+    FILE_CACHE_FRESH_OK = 0,
+    FILE_CACHE_FRESH_STALE_BLOCK,
+    FILE_CACHE_FRESH_INPUTS_STALE,
+};
+
+static enum file_cache_freshness file_manifest_cache_freshness(
+                               const struct file_manifest *fm,
+                               const char *datadir,
+                               const char *cache_path)
+{
+    if (fm->num_chunks == 0) return FILE_CACHE_FRESH_OK;
+    struct stat cache_st;
+    /* Check if any served input artifact changed after the cache. */
+    if (stat(cache_path, &cache_st) == 0) {
+        uint8_t last_fi = fm->chunks[fm->num_chunks - 1].file_index;
+        if (last_fi < 253) {
+            char blk_path[576];
+            struct stat blk_st;
+            snprintf(blk_path, sizeof(blk_path),
+                     "%s/blocks/blk%05d.dat", datadir, last_fi);
+            if (stat(blk_path, &blk_st) == 0 &&
+                blk_st.st_mtime > cache_st.st_mtime) {
+                printf("file_manifest: blk%05d.dat modified after cache, "
+                       "rebuilding\n", last_fi);
+                return FILE_CACHE_FRESH_STALE_BLOCK;
+            }
+        }
+        if (!file_manifest_cache_inputs_are_fresh(fm, datadir, &cache_st))
+            return FILE_CACHE_FRESH_INPUTS_STALE;
+    }
+    return FILE_CACHE_FRESH_OK;
+}
+
 /* Load cached manifest from disk — instant startup */
 static bool file_manifest_load(struct file_manifest *fm,
                                 const char *datadir)
 {
     char path[512];
-    struct stat cache_st;
     snprintf(path, sizeof(path), "%s/file_manifest.bin", datadir);
     FILE *f = fopen(path, "rb");
     if (!f) LOG_FAIL("file", "manifest_load: cannot open %s", path);
     memset(fm, 0, sizeof(*fm));
     uint32_t magic = 0;
-    if (fread(&magic, 4, 1, f) != 1 || magic != 0x464D414E) {
+    if (!file_manifest_read_valid_magic(f, &magic)) {
         fclose(f); LOG_FAIL("file", "manifest_load: bad magic in %s (got 0x%08x)", path, magic);
     }
     /* A truncated cache leaves these fields uninitialized; a short fread must
      * fail loudly rather than run the bounds check and loop on garbage. */
-    if (fread(&fm->num_chunks, 4, 1, f) != 1 ||
-        fread(&fm->total_bytes, 8, 1, f) != 1 ||
-        fread(fm->root_hash, 32, 1, f) != 1) {
+    if (!file_manifest_read_header_fields(f, fm)) {
         fclose(f); LOG_FAIL("file", "manifest_load: short header read from %s", path);
     }
     if (fm->num_chunks > FILE_MAX_CHUNKS) { fclose(f); LOG_FAIL("file", "manifest_load: num_chunks %u exceeds max %d", fm->num_chunks, FILE_MAX_CHUNKS); }
     for (uint32_t i = 0; i < fm->num_chunks; i++) {
-        if (fread(fm->chunks[i].sha3, 32, 1, f) != 1 ||
-            fread(&fm->chunks[i].offset, 8, 1, f) != 1 ||
-            fread(&fm->chunks[i].size, 4, 1, f) != 1 ||
-            fread(&fm->chunks[i].file_index, 1, 1, f) != 1) {
+        if (!file_manifest_read_chunk_record(f, &fm->chunks[i])) {
             fclose(f); LOG_FAIL("file", "manifest_load: short chunk read from %s (chunk %u of %u)", path, i, fm->num_chunks);
         }
     }
@@ -386,49 +464,105 @@ static bool file_manifest_load(struct file_manifest *fm,
     if (!file_manifest_cache_has_required_exports(fm, datadir))
         LOG_FAIL("file", "manifest_load: cache missing required exports");
 
-    /* Verify block files still match — check first AND last chunk.
-     * The last chunk is most likely to be stale (active block file). */
-    if (fm->num_chunks > 0) {
-        uint8_t *data = NULL;
-        uint32_t sz = 0;
-        if (!file_chunk_read(&fm->chunks[0], datadir, &data, &sz)) {
-            printf("file_manifest: first chunk stale, rebuilding\n");
-            return false;
-        }
-        free(data);
-        /* Also check last chunk — most likely to be stale */
-        if (fm->num_chunks > 1) {
-            data = NULL; sz = 0;
-            if (!file_chunk_read(&fm->chunks[fm->num_chunks - 1],
-                                  datadir, &data, &sz)) {
-                printf("file_manifest: last chunk stale, rebuilding\n");
-                return false;
-            }
-            free(data);
-        }
-        /* Check if any served input artifact changed after the cache. */
-        if (stat(path, &cache_st) == 0) {
-            uint8_t last_fi = fm->chunks[fm->num_chunks - 1].file_index;
-            if (last_fi < 253) {
-                char blk_path[576];
-                struct stat blk_st;
-                snprintf(blk_path, sizeof(blk_path),
-                         "%s/blocks/blk%05d.dat", datadir, last_fi);
-                if (stat(blk_path, &blk_st) == 0 &&
-                    blk_st.st_mtime > cache_st.st_mtime) {
-                    printf("file_manifest: blk%05d.dat modified after cache, "
-                           "rebuilding\n", last_fi);
-                    return false;
-                }
-            }
-            if (!file_manifest_cache_inputs_are_fresh(fm, datadir, &cache_st))
-                LOG_FAIL("file", "manifest_load: cache inputs are stale");
-        }
-    }
+    if (file_manifest_cached_chunks_stale(fm, datadir))
+        return false;
+    enum file_cache_freshness freshness =
+        file_manifest_cache_freshness(fm, datadir, path);
+    if (freshness == FILE_CACHE_FRESH_STALE_BLOCK)
+        return false;
+    if (freshness == FILE_CACHE_FRESH_INPUTS_STALE)
+        LOG_FAIL("file", "manifest_load: cache inputs are stale");
+
     printf("file_manifest: loaded cached manifest (%u chunks, %.1f GB)\n",
            fm->num_chunks,
            (double)fm->total_bytes / (1024.0*1024.0*1024.0));
     return true;
+}
+
+/* Count block files first to find the last one */
+static int file_manifest_count_block_files(const char *blocks_dir)
+{
+    int num_files = 0;
+    for (int i = 0; i < 256; i++) {
+        char path[576];
+        snprintf(path, sizeof(path), "%s/blk%05d.dat", blocks_dir, i);
+        struct stat st;
+        if (stat(path, &st) != 0) break;
+        num_files++;
+    }
+    return num_files;
+}
+
+enum file_scan_result {
+    FILE_SCAN_CONTINUE = 0,
+    FILE_SCAN_STOP,
+    FILE_SCAN_HASH_FAILED,
+};
+
+/* Scan block files. Skip any file modified in the last hour —
+ * the node may be actively appending blocks via P2P, which
+ * changes the file after we hash it, causing SHA3 mismatches.
+ * Only serve stable, immutable files. */
+static enum file_scan_result file_manifest_scan_block_file(
+                                                  const char *path,
+                                                  int file_index,
+                                                  int64_t cutoff,
+                                                  struct file_manifest *fm)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) return FILE_SCAN_STOP;
+    if (st.st_size == 0) return FILE_SCAN_CONTINUE;
+    if ((int64_t)st.st_mtime > cutoff) {
+        printf("file_manifest: skipping %s (modified %llds ago)\n",
+               path, (long long)((int64_t)platform_time_wall_time_t() - (int64_t)st.st_mtime));
+        return FILE_SCAN_CONTINUE;
+    }
+    if (!hash_file_chunks(path, (uint8_t)file_index, fm))
+        return FILE_SCAN_HASH_FAILED;
+    return FILE_SCAN_CONTINUE;
+}
+
+/* Serve block_index.bin (flat file, ~409MB) as file_index=253.
+ * Saves 116s LevelDB scan on first boot. Block index is safe to
+ * transfer — it only contains PoW-verified header metadata. */
+static void file_manifest_add_block_index(const char *datadir, int64_t cutoff,
+                                          struct file_manifest *fm)
+{
+    char flat_path[576];
+    snprintf(flat_path, sizeof(flat_path), "%s/block_index.bin", datadir);
+    struct stat flat_st;
+    if (stat(flat_path, &flat_st) == 0 && flat_st.st_size > 1000000) {
+        if ((int64_t)flat_st.st_mtime > cutoff) {
+            printf("file_manifest: skipping block_index.bin "
+                   "(modified %llds ago)\n",
+                   (long long)((int64_t)platform_time_wall_time_t() -
+                               (int64_t)flat_st.st_mtime));
+        } else {
+            printf("file_manifest: adding block_index.bin (%.0f MB)\n",
+                   (double)flat_st.st_size / (1024.0*1024.0));
+            hash_file_chunks(flat_path, 253, fm);
+        }
+    }
+}
+
+/* Serve consensus snapshot as file_index=254 only from sovereign state.
+ * SECURITY: node.db contains private wallet keys/txns.
+ * We export ONLY public consensus tables (blocks, utxos,
+ * addresses, chain_stats) into a separate snapshot file.
+ * This file is SHA3-verified and safe to share with any peer. */
+static void file_manifest_add_consensus_snapshot(const char *datadir,
+                                                 struct file_manifest *fm)
+{
+    char snap_path[576];
+    snprintf(snap_path, sizeof(snap_path),
+             "%s/consensus_snapshot.db", datadir);
+    struct stat snap_st;
+    if (file_snapshot_serving_allowed(datadir) &&
+        stat(snap_path, &snap_st) == 0 && snap_st.st_size > 1000000) {
+        printf("file_manifest: adding consensus_snapshot.db (%.0f MB)\n",
+               (double)snap_st.st_size / (1024.0*1024.0));
+        hash_file_chunks(snap_path, 254, fm);
+    }
 }
 
 bool file_manifest_build(struct file_manifest *fm, const char *datadir)
@@ -442,76 +576,22 @@ bool file_manifest_build(struct file_manifest *fm, const char *datadir)
     char blocks_dir[512];
     snprintf(blocks_dir, sizeof(blocks_dir), "%s/blocks", datadir);
 
-    /* Count block files first to find the last one */
-    int num_files = 0;
-    for (int i = 0; i < 256; i++) {
-        char path[576];
-        snprintf(path, sizeof(path), "%s/blk%05d.dat", blocks_dir, i);
-        struct stat st;
-        if (stat(path, &st) != 0) break;
-        num_files++;
-    }
+    int num_files = file_manifest_count_block_files(blocks_dir);
 
-    /* Scan block files. Skip any file modified in the last hour —
-     * the node may be actively appending blocks via P2P, which
-     * changes the file after we hash it, causing SHA3 mismatches.
-     * Only serve stable, immutable files. */
     int64_t cutoff = (int64_t)platform_time_wall_time_t() - 3600;
     for (int i = 0; i < num_files; i++) {
         char path[576];
         snprintf(path, sizeof(path), "%s/blk%05d.dat", blocks_dir, i);
-
-        struct stat st;
-        if (stat(path, &st) != 0) break;
-        if (st.st_size == 0) continue;
-        if ((int64_t)st.st_mtime > cutoff) {
-            printf("file_manifest: skipping %s (modified %llds ago)\n",
-                   path, (long long)((int64_t)platform_time_wall_time_t() - (int64_t)st.st_mtime));
-            continue;
-        }
-
-        if (!hash_file_chunks(path, (uint8_t)i, fm))
+        enum file_scan_result rc =
+            file_manifest_scan_block_file(path, i, cutoff, fm);
+        if (rc == FILE_SCAN_HASH_FAILED)
             LOG_FAIL("file", "manifest_build: hash_file_chunks failed for %s", path);
+        if (rc != FILE_SCAN_CONTINUE)
+            break;
     }
 
-    /* Serve block_index.bin (flat file, ~409MB) as file_index=253.
-     * Saves 116s LevelDB scan on first boot. Block index is safe to
-     * transfer — it only contains PoW-verified header metadata. */
-    {
-        char flat_path[576];
-        snprintf(flat_path, sizeof(flat_path), "%s/block_index.bin", datadir);
-        struct stat flat_st;
-        if (stat(flat_path, &flat_st) == 0 && flat_st.st_size > 1000000) {
-            if ((int64_t)flat_st.st_mtime > cutoff) {
-                printf("file_manifest: skipping block_index.bin "
-                       "(modified %llds ago)\n",
-                       (long long)((int64_t)platform_time_wall_time_t() -
-                                   (int64_t)flat_st.st_mtime));
-            } else {
-                printf("file_manifest: adding block_index.bin (%.0f MB)\n",
-                       (double)flat_st.st_size / (1024.0*1024.0));
-                hash_file_chunks(flat_path, 253, fm);
-            }
-        }
-    }
-
-    /* Serve consensus snapshot as file_index=254 only from sovereign state.
-     * SECURITY: node.db contains private wallet keys/txns.
-     * We export ONLY public consensus tables (blocks, utxos,
-     * addresses, chain_stats) into a separate snapshot file.
-     * This file is SHA3-verified and safe to share with any peer. */
-    {
-        char snap_path[576];
-        snprintf(snap_path, sizeof(snap_path),
-                 "%s/consensus_snapshot.db", datadir);
-        struct stat snap_st;
-        if (file_snapshot_serving_allowed(datadir) &&
-            stat(snap_path, &snap_st) == 0 && snap_st.st_size > 1000000) {
-            printf("file_manifest: adding consensus_snapshot.db (%.0f MB)\n",
-                   (double)snap_st.st_size / (1024.0*1024.0));
-            hash_file_chunks(snap_path, 254, fm);
-        }
-    }
+    file_manifest_add_block_index(datadir, cutoff, fm);
+    file_manifest_add_consensus_snapshot(datadir, fm);
 
     if (fm->num_chunks == 0) LOG_FAIL("file", "manifest_build: no chunks found in %s", datadir);
 
