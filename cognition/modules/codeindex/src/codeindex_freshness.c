@@ -9,6 +9,29 @@
 
 #include <string.h>
 
+static bool freshness_profile_metadata_matches(
+    const struct ci_merkle_node *source, const uint8_t cur_dep_stats[32],
+    bool check_depfiles, const uint8_t stored_merkle[32],
+    const uint8_t stored_dep_stats[32], const char stored_format[64],
+    const char stored_schema[64], size_t merkle_len, size_t dep_len,
+    size_t format_len, size_t schema_len, bool merkle_found, bool dep_found,
+    bool format_found, bool schema_found)
+{
+    bool metadata_current =
+        merkle_found && merkle_len == 32 &&
+        memcmp(source->digest.bytes, stored_merkle, 32) == 0 &&
+        (!check_depfiles ||
+         (dep_found && dep_len == 32 &&
+          memcmp(cur_dep_stats, stored_dep_stats, 32) == 0)) &&
+        format_found && format_len == sizeof(CI_STORE_FORMAT) - 1 &&
+        memcmp(stored_format, CI_STORE_FORMAT,
+               sizeof(CI_STORE_FORMAT) - 1) == 0 &&
+        schema_found && schema_len == sizeof(CI_SCHEMA_VERSION) - 1 &&
+        memcmp(stored_schema, CI_SCHEMA_VERSION,
+               sizeof(CI_SCHEMA_VERSION) - 1) == 0;
+    return metadata_current;
+}
+
 static bool store_is_stale_profile(struct codeindex *ci,
                                    bool check_depfiles, bool *stale)
 {
@@ -46,18 +69,10 @@ static bool store_is_stale_profile(struct codeindex *ci,
         !ci_store_meta_get(ci->store, "ci_schema_version", stored_schema,
                            sizeof(stored_schema), &schema_len, &schema_found))
         LOG_FAIL("codeindex", "read freshness metadata");
-    bool metadata_current =
-        merkle_found && merkle_len == 32 &&
-        memcmp(source.digest.bytes, stored_merkle, 32) == 0 &&
-        (!check_depfiles ||
-         (dep_found && dep_len == 32 &&
-          memcmp(cur_dep_stats, stored_dep_stats, 32) == 0)) &&
-        format_found && format_len == sizeof(CI_STORE_FORMAT) - 1 &&
-        memcmp(stored_format, CI_STORE_FORMAT,
-               sizeof(CI_STORE_FORMAT) - 1) == 0 &&
-        schema_found && schema_len == sizeof(CI_SCHEMA_VERSION) - 1 &&
-        memcmp(stored_schema, CI_SCHEMA_VERSION,
-               sizeof(CI_SCHEMA_VERSION) - 1) == 0;
+    bool metadata_current = freshness_profile_metadata_matches(
+        &source, cur_dep_stats, check_depfiles, stored_merkle, stored_dep_stats,
+        stored_format, stored_schema, merkle_len, dep_len, format_len,
+        schema_len, merkle_found, dep_found, format_found, schema_found);
     if (stale) *stale = !metadata_current;
     if (metadata_current) {
         ci_merkle_free(ci->pending_merkle);
