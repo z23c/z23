@@ -46,6 +46,39 @@ static void header_init_synthetic(struct block_header *h)
     h->nSolutionSize = 0;
 }
 
+static bool dha_result_is_null_arg(const struct zcl_result *r)
+{
+    return !r->ok && r->code == DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_NULL_ARG;
+}
+
+static bool dha_domain_reject_matches(const struct zcl_result *r, int code,
+                                      const char *reason, const char *expect,
+                                      int dos, int expect_dos)
+{
+    return !r->ok &&
+           r->code == code &&
+           strcmp(reason, expect) == 0 &&
+           dos == expect_dos;
+}
+
+static bool dha_state_reject_matches(bool ok,
+                                     const struct validation_state *st,
+                                     int dos, unsigned int reject_code,
+                                     const char *reason)
+{
+    return !ok &&
+           st->mode == MODE_INVALID &&
+           st->dos == dos &&
+           st->reject_code == reject_code &&
+           strcmp(st->reject_reason, reason) == 0;
+}
+
+static bool dha_version_accept_cleared(const struct zcl_result *r, int dos,
+                                       const char *reason)
+{
+    return r->ok && dos == 0 && reason[0] == '\0';
+}
+
 int test_domain_consensus_header_accept(void)
 {
     int failures = 0;
@@ -58,48 +91,42 @@ int test_domain_consensus_header_accept(void)
             domain_consensus_check_header_version_too_low(
                 NULL, 4, NULL, 0, NULL);
         DHA_CHECK("version_too_low: null header -> ERR_NULL_ARG",
-                  !r.ok && r.code ==
-                  DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_NULL_ARG);
+                  dha_result_is_null_arg(&r));
     }
     {
         struct zcl_result r =
             domain_consensus_check_header_version_obsolete(
                 NULL, 4, NULL, 0, NULL);
         DHA_CHECK("version_obsolete: null header -> ERR_NULL_ARG",
-                  !r.ok && r.code ==
-                  DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_NULL_ARG);
+                  dha_result_is_null_arg(&r));
     }
     {
         struct zcl_result r =
             domain_consensus_check_header_timestamp_too_new(
                 NULL, 0, NULL, 0, NULL);
         DHA_CHECK("timestamp_too_new: null header -> ERR_NULL_ARG",
-                  !r.ok && r.code ==
-                  DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_NULL_ARG);
+                  dha_result_is_null_arg(&r));
     }
     {
         struct zcl_result r =
             domain_consensus_check_header_timestamp_too_old(
                 NULL, 0, NULL, 0, NULL);
         DHA_CHECK("timestamp_too_old: null header -> ERR_NULL_ARG",
-                  !r.ok && r.code ==
-                  DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_NULL_ARG);
+                  dha_result_is_null_arg(&r));
     }
     {
         struct zcl_result r =
             domain_consensus_check_header_equihash_solution_size(
                 NULL, 0, NULL, 0, NULL);
         DHA_CHECK("equihash_size: null header -> ERR_NULL_ARG",
-                  !r.ok && r.code ==
-                  DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_NULL_ARG);
+                  dha_result_is_null_arg(&r));
     }
     {
         struct zcl_result r =
             domain_consensus_check_header_bits_match(
                 NULL, 0, NULL, 0, NULL);
         DHA_CHECK("bits_match: null header -> ERR_NULL_ARG",
-                  !r.ok && r.code ==
-                  DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_NULL_ARG);
+                  dha_result_is_null_arg(&r));
     }
 
     /* ---- version-too-low ---- */
@@ -112,11 +139,10 @@ int test_domain_consensus_header_accept(void)
             domain_consensus_check_header_version_too_low(
                 &h, 4, reason, sizeof(reason), &dos);
         DHA_CHECK("v<4 -> version-too-low domain",
-                  !r.ok &&
-                  r.code ==
-                    DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_VERSION_TOO_LOW &&
-                  strcmp(reason, "version-too-low") == 0 &&
-                  dos == 100);
+                  dha_domain_reject_matches(
+                      &r,
+                      DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_VERSION_TOO_LOW,
+                      reason, "version-too-low", dos, 100));
 
         /* Lib-wrapper parity: reject_reason byte-identical, dos=100,
          * mode=MODE_INVALID, reject_code=REJECT_INVALID. */
@@ -124,11 +150,8 @@ int test_domain_consensus_header_accept(void)
         validation_state_init(&st);
         bool ok = accept_block_header_check_version_too_low(&h, 4, &st);
         DHA_CHECK("v<4 -> version-too-low lib-wrapper parity",
-                  !ok &&
-                  st.mode == MODE_INVALID &&
-                  st.dos == 100 &&
-                  st.reject_code == REJECT_INVALID &&
-                  strcmp(st.reject_reason, "version-too-low") == 0);
+                  dha_state_reject_matches(ok, &st, 100, REJECT_INVALID,
+                                           "version-too-low"));
 
         /* Legacy regression seal: check_block_header() with
          * check_pow=false runs the same impl. */
@@ -137,12 +160,8 @@ int test_domain_consensus_header_accept(void)
         bool ok_l = check_block_header(&h, &st_legacy,
                                        chain_params_get(), false);
         DHA_CHECK("v<4 -> version-too-low legacy parity",
-                  !ok_l &&
-                  st_legacy.mode == MODE_INVALID &&
-                  st_legacy.dos == 100 &&
-                  st_legacy.reject_code == REJECT_INVALID &&
-                  strcmp(st_legacy.reject_reason,
-                         "version-too-low") == 0);
+                  dha_state_reject_matches(ok_l, &st_legacy, 100,
+                                           REJECT_INVALID, "version-too-low"));
 
         /* Accept path: v=4 should pass. */
         h.nVersion = 4;
@@ -150,7 +169,7 @@ int test_domain_consensus_header_accept(void)
         r = domain_consensus_check_header_version_too_low(
                 &h, 4, reason, sizeof(reason), &dos);
         DHA_CHECK("v==4 -> accept",
-                  r.ok && dos == 0 && reason[0] == '\0');
+                  dha_version_accept_cleared(&r, dos, reason));
     }
 
     /* ---- bad-version (obsolete-below) ---- */
@@ -163,22 +182,17 @@ int test_domain_consensus_header_accept(void)
             domain_consensus_check_header_version_obsolete(
                 &h, 4, reason, sizeof(reason), &dos);
         DHA_CHECK("v<4 -> bad-version domain",
-                  !r.ok &&
-                  r.code ==
-                    DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_BAD_VERSION &&
-                  strcmp(reason, "bad-version") == 0 &&
-                  dos == 0);
+                  dha_domain_reject_matches(
+                      &r, DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_BAD_VERSION,
+                      reason, "bad-version", dos, 0));
 
         /* Lib-wrapper parity: dos=0, code=REJECT_OBSOLETE. */
         struct validation_state st;
         validation_state_init(&st);
         bool ok = accept_block_header_check_version_obsolete(&h, 4, &st);
         DHA_CHECK("v<4 -> bad-version lib-wrapper parity",
-                  !ok &&
-                  st.mode == MODE_INVALID &&
-                  st.dos == 0 &&
-                  st.reject_code == REJECT_OBSOLETE &&
-                  strcmp(st.reject_reason, "bad-version") == 0);
+                  dha_state_reject_matches(ok, &st, 0, REJECT_OBSOLETE,
+                                           "bad-version"));
 
         /* Accept path: v=4 passes. */
         h.nVersion = 4;
@@ -197,11 +211,9 @@ int test_domain_consensus_header_accept(void)
             domain_consensus_check_header_timestamp_too_new(
                 &h, 4000, reason, sizeof(reason), &dos);
         DHA_CHECK("time>upper -> time-too-new domain",
-                  !r.ok &&
-                  r.code ==
-                    DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_TIME_TOO_NEW &&
-                  strcmp(reason, "time-too-new") == 0 &&
-                  dos == 0);
+                  dha_domain_reject_matches(
+                      &r, DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_TIME_TOO_NEW,
+                      reason, "time-too-new", dos, 0));
 
         /* Lib-wrapper parity: dos=0, code=REJECT_INVALID. */
         struct validation_state st;
@@ -209,11 +221,8 @@ int test_domain_consensus_header_accept(void)
         bool ok = accept_block_header_check_timestamp_too_new(
                       &h, 4000, &st);
         DHA_CHECK("time>upper -> time-too-new lib parity",
-                  !ok &&
-                  st.mode == MODE_INVALID &&
-                  st.dos == 0 &&
-                  st.reject_code == REJECT_INVALID &&
-                  strcmp(st.reject_reason, "time-too-new") == 0);
+                  dha_state_reject_matches(ok, &st, 0, REJECT_INVALID,
+                                           "time-too-new"));
 
         /* Boundary: equal is OK (legacy uses strict >). */
         r = domain_consensus_check_header_timestamp_too_new(
@@ -236,11 +245,9 @@ int test_domain_consensus_header_accept(void)
             domain_consensus_check_header_timestamp_too_old(
                 &h, 1000, reason, sizeof(reason), &dos);
         DHA_CHECK("time<=mtp -> time-too-old domain",
-                  !r.ok &&
-                  r.code ==
-                    DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_TIME_TOO_OLD &&
-                  strcmp(reason, "time-too-old") == 0 &&
-                  dos == 0);
+                  dha_domain_reject_matches(
+                      &r, DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_TIME_TOO_OLD,
+                      reason, "time-too-old", dos, 0));
 
         /* Boundary: strict equality fails (legacy uses <=). */
         r = domain_consensus_check_header_timestamp_too_old(
@@ -253,11 +260,8 @@ int test_domain_consensus_header_accept(void)
         bool ok = accept_block_header_check_timestamp_too_old(
                       &h, 1000, &st);
         DHA_CHECK("time<=mtp -> time-too-old lib parity",
-                  !ok &&
-                  st.mode == MODE_INVALID &&
-                  st.dos == 0 &&
-                  st.reject_code == REJECT_INVALID &&
-                  strcmp(st.reject_reason, "time-too-old") == 0);
+                  dha_state_reject_matches(ok, &st, 0, REJECT_INVALID,
+                                           "time-too-old"));
     }
 
     /* ---- bad-equihash-solution-size ---- */
@@ -272,11 +276,10 @@ int test_domain_consensus_header_accept(void)
             domain_consensus_check_header_equihash_solution_size(
                 &h, 1344, reason, sizeof(reason), &dos);
         DHA_CHECK("sol_size mismatch -> bad-equihash-solution-size domain",
-                  !r.ok &&
-                  r.code ==
-                   DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_BAD_EQUIHASH_SOL_SIZE &&
-                  strcmp(reason, "bad-equihash-solution-size") == 0 &&
-                  dos == 100);
+                  dha_domain_reject_matches(
+                      &r,
+                      DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_BAD_EQUIHASH_SOL_SIZE,
+                      reason, "bad-equihash-solution-size", dos, 100));
 
         /* Lib-wrapper parity. */
         struct validation_state st;
@@ -284,12 +287,8 @@ int test_domain_consensus_header_accept(void)
         bool ok = accept_block_header_check_equihash_solution_size(
                       &h, 1344, &st);
         DHA_CHECK("sol_size mismatch -> bad-equihash-solution-size lib parity",
-                  !ok &&
-                  st.mode == MODE_INVALID &&
-                  st.dos == 100 &&
-                  st.reject_code == REJECT_INVALID &&
-                  strcmp(st.reject_reason,
-                         "bad-equihash-solution-size") == 0);
+                  dha_state_reject_matches(ok, &st, 100, REJECT_INVALID,
+                                           "bad-equihash-solution-size"));
 
         /* Match path. */
         h.nSolutionSize = 1344;
@@ -314,11 +313,9 @@ int test_domain_consensus_header_accept(void)
             domain_consensus_check_header_bits_match(
                 &h, 0x1f07fffeu, reason, sizeof(reason), &dos);
         DHA_CHECK("nBits mismatch -> bad-diffbits domain",
-                  !r.ok &&
-                  r.code ==
-                    DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_BAD_DIFFBITS &&
-                  strcmp(reason, "bad-diffbits") == 0 &&
-                  dos == 100);
+                  dha_domain_reject_matches(
+                      &r, DOMAIN_CONSENSUS_HEADER_ACCEPT_ERR_BAD_DIFFBITS,
+                      reason, "bad-diffbits", dos, 100));
 
         /* Lib-wrapper parity. */
         struct validation_state st;
@@ -326,11 +323,8 @@ int test_domain_consensus_header_accept(void)
         bool ok = accept_block_header_check_bits_match(
                       &h, 0x1f07fffeu, &st);
         DHA_CHECK("nBits mismatch -> bad-diffbits lib parity",
-                  !ok &&
-                  st.mode == MODE_INVALID &&
-                  st.dos == 100 &&
-                  st.reject_code == REJECT_INVALID &&
-                  strcmp(st.reject_reason, "bad-diffbits") == 0);
+                  dha_state_reject_matches(ok, &st, 100, REJECT_INVALID,
+                                           "bad-diffbits"));
 
         /* Match path. */
         r = domain_consensus_check_header_bits_match(
