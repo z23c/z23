@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
 
 static int g_fail = 0;
 #define CHECK(cond)                                                     \
@@ -432,7 +434,10 @@ static void test_format_refusal_state(void) {
   }
 }
 
+static void test_cli(void);
+
 int main(void) {
+  test_cli();
   test_forced_format_move();
   test_borrowed_format_move();
   test_format_refusal_state();
@@ -457,4 +462,160 @@ int main(void) {
   }
   printf("test_zbuf: all groups passed (basic printf bound sticky null fuzz borrowed_format refusal)\n");
   return 0;
+}
+
+static FILE *cli_source, *cli_sink, *cli_errors;
+static size_t cli_flushes, cli_frees;
+static bool cli_read_fault, cli_init_fault, cli_stale_errno;
+static FILE *real_stdin(void) { return stdin; }
+static FILE *real_stdout(void) { return stdout; }
+static FILE *real_stderr(void) { return stderr; }
+static void cli_free(zbuf *b) {
+  zbuf_free(b);
+  CHECK(b->data == NULL && b->len == 0 && b->cap == 0 && b->err == ZBUF_OK);
+  cli_frees++;
+}
+static zbuf_err cli_init(zbuf *b, size_t max) {
+  if (cli_init_fault) *b = (zbuf){0};
+  return zbuf_init(b, cli_init_fault ? SIZE_MAX : max);
+}
+static int cli_error(FILE *stream) {
+  return (stream == cli_source && cli_read_fault) || ferror(stream);
+}
+[[maybe_unused]] static int cli_flush(FILE *stream) {
+  if (stream == cli_sink) cli_flushes++;
+  return fflush(stream);
+}
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin cli_source
+#define stdout cli_sink
+#define stderr cli_errors
+#define fflush cli_flush
+#define ferror cli_error
+#define zbuf_free cli_free
+#define zbuf_init cli_init
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef zbuf_init
+#undef zbuf_free
+#undef ferror
+#undef fflush
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin real_stdin()
+#define stdout real_stdout()
+#define stderr real_stderr()
+
+static FILE *require_stream(FILE *stream) {
+  if (!stream) { fprintf(stderr, "zbuf CLI fixture setup failed\n"); exit(2); }
+  return stream;
+}
+static FILE *cli_input(const char *text) {
+  FILE *source = require_stream(tmpfile());
+  if (fputs(text, source) < 0 || fflush(source) != 0) exit(2);
+  rewind(source);
+  return source;
+}
+static int cli_invoke(FILE *source, FILE *sink, FILE *errors, const char *max) {
+  char *args[] = {"zbuf", (char *)max, NULL};
+  cli_source = source;
+  cli_sink = sink;
+  cli_errors = errors;
+  cli_flushes = cli_frees = 0;
+  if (cli_stale_errno) errno = ERANGE;
+  int rc = embedded_cli_main(max ? 2 : 1, args);
+  cli_source = stdin;
+  cli_sink = stdout;
+  cli_errors = stderr;
+  return rc;
+}
+static void check_bytes(FILE *stream, const char *want) {
+  char bytes[256];
+  rewind(stream);
+  size_t n = fread(bytes, 1, sizeof bytes, stream);
+  CHECK(!ferror(stream) && n == strlen(want) && !memcmp(bytes, want, n));
+}
+static void check_message(FILE *stream, const char *want, bool success) {
+  char bytes[256];
+  rewind(stream);
+  size_t n = fread(bytes, 1, sizeof bytes - 1, stream);
+  bytes[n] = '\0';
+  CHECK(!ferror(stream) && strstr(bytes, want) != NULL);
+  CHECK((strstr(bytes, "ok:") != NULL) == success);
+}
+static void cli_case(const char *input, const char *max, int status,
+                      const char *want, const char *message) {
+  FILE *source = cli_input(input), *sink = require_stream(tmpfile());
+  FILE *errors = require_stream(tmpfile());
+  CHECK(cli_invoke(source, sink, errors, max) == status);
+  check_bytes(sink, want);
+  check_message(errors, message, status == 0);
+  if (!*want) CHECK(cli_flushes == 0);
+  CHECK(cli_frees == (status == 2 ? 0u : 1u));
+  if (status == 2) CHECK(ftell(source) == 0);
+  CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_maximum(void) {
+  const char *bad[] = {"", " ", "-1", "1junk", "1 ",
+    "999999999999999999999999999999999", "-999999999999999999999999999999999"};
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    cli_case("a\n", bad[i], 2, "", "bad max");
+  char maximum[64];
+  snprintf(maximum, sizeof maximum, "%ld", LONG_MAX);
+  cli_case("a\n", maximum, 0, "     1\ta\n", "ok: 1 lines, 9 bytes");
+  cli_case("a\n", "9", 0, "     1\ta\n", "ok:");
+  cli_case("a\n", "8", 1, "", "buffer bound reached");
+  cli_case("a\n", "10", 0, "     1\ta\n", "ok:");
+  cli_stale_errno = true;
+  cli_case("a\n", " \t+9", 0, "     1\ta\n", "ok:");
+  cli_stale_errno = false;
+  cli_case("", "-0", 0, "", "ok: 0 lines, 0 bytes");
+  cli_case("", "0", 0, "", "ok: 0 lines, 0 bytes");
+}
+static void cli_failed_sink(bool buffered) {
+#ifdef _WIN32
+  const char *null_path = "NUL";
+#else
+  const char *null_path = "/dev/null";
+#endif
+  FILE *source = cli_input("a\n"), *errors = require_stream(tmpfile());
+  FILE *sink = require_stream(fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r"));
+  char buffer[4096];
+  if (buffered && setvbuf(sink, buffer, _IOFBF, sizeof buffer) != 0) exit(2);
+  CHECK(cli_invoke(source, sink, errors, NULL) == 1);
+  CHECK(cli_frees == 1 && ferror(sink));
+  check_message(errors, "write error", false);
+  CHECK(fclose(source) == 0 && fclose(errors) == 0);
+  (void)fclose(sink);
+}
+static void cli_failures(void) {
+  cli_read_fault = true;
+  cli_case("a\n", NULL, 1, "", "error reading stdin");
+  cli_read_fault = false;
+  cli_init_fault = true;
+  cli_case("a\n", NULL, 2, "", "initialization failed");
+  cli_init_fault = false;
+#ifdef _WIN32
+  FILE *source = require_stream(fopen("NUL", "w"));
+#else
+  FILE *source = require_stream(fopen("/dev/null", "w"));
+#endif
+  FILE *sink = require_stream(tmpfile()), *errors = require_stream(tmpfile());
+  CHECK(cli_invoke(source, sink, errors, NULL) == 1);
+  CHECK(cli_frees == 1 && cli_flushes == 0 && ftell(sink) == 0);
+  check_message(errors, "error reading stdin", false);
+  CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void test_cli(void) {
+  cli_maximum();
+  cli_case("a\nb\n", NULL, 0, "     1\ta\n     2\tb\n", "ok: 2 lines, 18 bytes");
+  cli_failed_sink(false);
+#ifdef __linux__
+  cli_failed_sink(true);
+#endif
+  cli_failures();
 }

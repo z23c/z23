@@ -9,6 +9,20 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+
+static int finish_report(zbuf *b, size_t lines) {
+  size_t len = zbuf_len(b);
+  if (len && (fwrite(zbuf_cstr(b), 1, len, stdout) != len ||
+              fflush(stdout) != 0 || ferror(stdout))) {
+    fprintf(stderr, "zbuf: write error\n");
+    zbuf_free(b);
+    return 1;
+  }
+  fprintf(stderr, "ok: %zu lines, %zu bytes\n", lines, len);
+  zbuf_free(b);
+  return 0;
+}
 
 int main(int argc, char **argv) {
   size_t max = 1u << 20;
@@ -17,14 +31,18 @@ int main(int argc, char **argv) {
   size_t n = 0;
   if (argc > 1) {
     char *end = NULL;
+    errno = 0;
     long m = strtol(argv[1], &end, 10);
-    if (end == argv[1] || *end != '\0' || m < 0) {
+    if (end == argv[1] || *end != '\0' || m < 0 || errno == ERANGE) {
       fprintf(stderr, "zbuf: bad max\n");
       return 2;
     }
     max = (size_t)m;
   }
-  zbuf_init(&b, max);
+  if (zbuf_init(&b, max) != ZBUF_OK) {
+    fprintf(stderr, "zbuf: initialization failed\n");
+    return 2;
+  }
   while (fgets(line, sizeof(line), stdin) != NULL) {
     n++;
     if (zbuf_printf(&b, "%6zu\t%s", n, line) != ZBUF_OK) {
@@ -39,12 +57,5 @@ int main(int argc, char **argv) {
     zbuf_free(&b);
     return 1;
   }
-  if (fwrite(zbuf_cstr(&b), 1, zbuf_len(&b), stdout) != zbuf_len(&b)) {
-    fprintf(stderr, "zbuf: write error\n");
-    zbuf_free(&b);
-    return 1;
-  }
-  fprintf(stderr, "ok: %zu lines, %zu bytes\n", n, zbuf_len(&b));
-  zbuf_free(&b);
-  return 0;
+  return finish_report(&b, n);
 }
