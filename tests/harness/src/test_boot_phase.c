@@ -423,39 +423,11 @@ static int test_boot_event_log_lifecycle(void)
     return !(rejects_missing && reused && retired);
 }
 
-int test_boot_phase(void)
+/* The boot_stage_name() table: pinned names, the (invalid) out-of-range
+ * fallbacks, and no gaps across the legal range. */
+static int bp_test_boot_stage_names(void)
 {
-#if defined(_WIN32)
-    /* Re-exec'd child lanes for the illegal-transition abort cases (Windows
-     * has no fork()). UCRT abort() exits with code 3, the analogue of
-     * WTERMSIG==SIGABRT. */
-    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
-    if (fork_role && fork_role[0]) {
-        zcl_win_suppress_abort_dialog();
-        if (strcmp(fork_role, "bp_backward") == 0) {
-            boot_stage_reset_for_testing();            /* -> INIT */
-            boot_stage_advance_to(BOOT_STAGE_DB_OPEN); /* legal forward jump */
-            boot_stage_advance_to(BOOT_STAGE_INIT);    /* illegal: backward */
-            return 99; /* reached only if the abort() did NOT fire */
-        }
-        if (strcmp(fork_role, "bp_range") == 0) {
-            boot_stage_reset_for_testing();            /* -> INIT */
-            boot_stage_advance_to(BOOT_STAGE__MAX);    /* illegal: >= MAX */
-            return 99; /* reached only if the abort() did NOT fire */
-        }
-        return 97;
-    }
-#endif
-    printf("\n=== boot_phase tests ===\n");
     int failures = 0;
-    BP_CHECK("event log publishes once, reuses its handle and retires cleanly",
-        test_boot_event_log_lifecycle() == 0);
-
-    boot_stage_reset_for_testing();
-
-    BP_CHECK("wallet rebuild skips no-key wallets, preserves keyed wallets, "
-             "and fails closed",
-        test_wallet_rebuild_probe() == 0);
 
     /* ── name lookup ────────────────────────────────────────────── */
     BP_CHECK("name(INIT) is \"init\"",
@@ -486,6 +458,14 @@ int test_boot_phase(void)
         }
         BP_CHECK("every legal stage has a non-empty name", all_named);
     }
+    return failures;
+}
+
+/* Stage predicates and the legal INIT -> DB_OPEN walk; the caller has
+ * already reset the stage to INIT. */
+static int bp_test_stage_predicates_and_steps(void)
+{
+    int failures = 0;
 
     /* ── current + predicate at INIT ────────────────────────────── */
     BP_CHECK("current() is INIT after reset",
@@ -513,6 +493,14 @@ int test_boot_phase(void)
     boot_stage_advance_to(BOOT_STAGE_DB_OPEN);
     BP_CHECK("step through CRYPTO_READY -> DB_OPEN",
         boot_stage_current() == BOOT_STAGE_DB_OPEN);
+    return failures;
+}
+
+/* Which mainnet / params-dir / mint-anchor combinations make a ZK params
+ * loader-thread failure fatal. */
+static int bp_test_params_thread_failure_gating(void)
+{
+    int failures = 0;
 
     /* ZK params are consensus-critical on mainnet. If the background loader
      * thread cannot even start, boot must name params_missing and park before
@@ -525,38 +513,14 @@ int test_boot_phase(void)
         !boot_test_params_thread_failure_is_fatal(true, true, true));
     BP_CHECK("non-mainnet params thread failure stays warning-only",
         !boot_test_params_thread_failure_is_fatal(true, false, false));
+    return failures;
+}
 
-    /* ── export mode must not park on a permanent blocker ─────────
-     * Shutdown is already requested so a missing export-mode branch cannot
-     * sleep; the assertions distinguish REFUSED from PARKED. */
-    {
-        char dir[PATH_MAX];
-        char captured[4096];
-        bool gate_rc = true;
-        struct boot_status_snapshot snap;
-        char why[128];
-
-        bp_park_fixture_begin(dir, sizeof(dir), true);
-        bool captured_ok = bp_capture_gate(dir, captured, sizeof(captured),
-                                           &gate_rc);
-        bool status_ok = boot_status_read(dir, &snap, why, sizeof(why));
-        BP_CHECK("export+node_db_unopened: gate returns (does not park)",
-                 captured_ok && !gate_rc);
-        BP_CHECK("export+node_db_unopened: REFUSED line names the blocker",
-                 captured_ok &&
-                 strstr(captured,
-                        "REFUSED: -export-consensus-bundle: reason=node_db_unopened")
-                     != NULL);
-        BP_CHECK("export+node_db_unopened: does not emit PARKED",
-                 captured_ok && strstr(captured, "PARKED") == NULL);
-        BP_CHECK("export+node_db_unopened: latches FATAL (exit 1 path)",
-                 boot_error_reported());
-        BP_CHECK("export+node_db_unopened: boot_status names the blocker",
-                 status_ok && strcmp(snap.blocker, "node_db_unopened") == 0);
-        bp_park_fixture_end(dir);
-    }
-
-    failures += bp_node_db_gate_refuses();
+/* boot_need_legacy_header_pull(): the empty-datadir trigger and the 90pct
+ * ratio trigger. */
+static int bp_test_legacy_header_pull_predicates(void)
+{
+    int failures = 0;
 
     /* ── boot_need_legacy_header_pull (fresh-datadir need_zcd) ──
      * On an empty datadir the ratio test `local < chain_h*9/10` is `0 < 0`
@@ -578,6 +542,14 @@ int test_boot_phase(void)
         !boot_need_legacy_header_pull(3000000, 3000000, true));
     BP_CHECK("ratio trigger requires legacy source present",
         !boot_need_legacy_header_pull(3, 3000000, false));
+    return failures;
+}
+
+/* boot_need_blocks_table_hydrate(): the bulk rung, the ratio rung and the
+ * stale-small-map case. */
+static int bp_test_blocks_table_hydrate_predicates(void)
+{
+    int failures = 0;
 
     /* ── boot_need_blocks_table_hydrate (importblockindex determinism) ──
      * The bulk-hydrate rung keys on the blocks-table row count vs the
@@ -601,6 +573,14 @@ int test_boot_phase(void)
     BP_CHECK("fully-loaded map (warm restart) does not re-fire — preserves "
              "existing warm-datadir behavior",
         !boot_need_blocks_table_hydrate(3100000, 3100000));
+    return failures;
+}
+
+/* Legal forward jumps: INIT -> READY skipping stages, and shutdown entry
+ * from mid-boot through SHUTDOWN_COMPLETE. */
+static int bp_test_legal_forward_jumps(void)
+{
+    int failures = 0;
 
     /* ── forward-jump (legal, emits WARN) ──────────────────────── */
     boot_stage_reset_for_testing();
@@ -620,6 +600,33 @@ int test_boot_phase(void)
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_COMPLETE);
     BP_CHECK("advance SHUTDOWN_REQUESTED -> SHUTDOWN_COMPLETE",
         boot_stage_current() == BOOT_STAGE_SHUTDOWN_COMPLETE);
+    return failures;
+}
+
+#if !defined(_WIN32)
+/* Wait for one fork-isolated child and grade its death: it must be SIGABRT.
+ * Returns this check's failure count. */
+static int bp_check_child_sigabrt(pid_t pid, const char *wait_msg,
+                                  const char *abort_msg)
+{
+    int failures = 0;
+
+    if (pid > 0) {
+        int status = 0;
+        pid_t got = waitpid(pid, &status, 0);
+        BP_CHECK(wait_msg, got == pid);
+        BP_CHECK(abort_msg, got == pid && WIFSIGNALED(status) &&
+                 WTERMSIG(status) == SIGABRT);
+    }
+    return failures;
+}
+#endif
+
+/* Illegal stage moves — a BACKWARD move and an OUT-OF-RANGE target — must
+ * abort() in fork-isolated children. */
+static int bp_test_illegal_transition_aborts(void)
+{
+    int failures = 0;
 
     /* ── illegal transitions abort() (fork-isolated) ─────────────────
      * boot_stage_advance_to() aborts on a BACKWARD move and on an
@@ -648,14 +655,8 @@ int test_boot_phase(void)
             _exit(99); /* reached only if the abort() did NOT fire */
         }
         BP_CHECK("fork backward-move child", pid > 0);
-        if (pid > 0) {
-            int status = 0;
-            pid_t got = waitpid(pid, &status, 0);
-            BP_CHECK("wait backward-move child", got == pid);
-            BP_CHECK("backward move (DB_OPEN -> INIT) aborts via SIGABRT",
-                     got == pid && WIFSIGNALED(status) &&
-                     WTERMSIG(status) == SIGABRT);
-        }
+        failures += bp_check_child_sigabrt(pid, "wait backward-move child",
+            "backward move (DB_OPEN -> INIT) aborts via SIGABRT");
 #endif
     }
 
@@ -679,16 +680,18 @@ int test_boot_phase(void)
             _exit(99); /* reached only if the abort() did NOT fire */
         }
         BP_CHECK("fork out-of-range child", pid > 0);
-        if (pid > 0) {
-            int status = 0;
-            pid_t got = waitpid(pid, &status, 0);
-            BP_CHECK("wait out-of-range child", got == pid);
-            BP_CHECK("out-of-range target (__MAX) aborts via SIGABRT",
-                     got == pid && WIFSIGNALED(status) &&
-                     WTERMSIG(status) == SIGABRT);
-        }
+        failures += bp_check_child_sigabrt(pid, "wait out-of-range child",
+            "out-of-range target (__MAX) aborts via SIGABRT");
 #endif
     }
+    return failures;
+}
+
+/* boot_step_classify(): the running/slow/stuck boundaries, the verdict
+ * strings, and that the clock alone cannot manufacture a failure. */
+static int bp_test_step_classification(void)
+{
+    int failures = 0;
 
     /* ── boot step reporter: slow, stuck, and failed are three states ──
      *
@@ -757,33 +760,55 @@ int test_boot_phase(void)
         BP_CHECK("step: zero budget falls back to the default budget",
             boot_step_classify(BOOT_STEP_BUDGET_MS + 1, 0, 1) ==
                 BOOT_STEP_SLOW);
-
-        /* Every state has a distinct, non-empty name; out-of-range is named. */
-        {
-            bool all_named = true;
-            for (int s = 0; s < (int)BOOT_STEP_STATE__MAX; s++) {
-                const char *n = boot_step_state_name((enum boot_step_state)s);
-                if (!n || !*n || strcmp(n, "(invalid)") == 0)
-                    all_named = false;
-                for (int t = s + 1; t < (int)BOOT_STEP_STATE__MAX; t++)
-                    if (strcmp(n, boot_step_state_name(
-                                   (enum boot_step_state)t)) == 0)
-                        all_named = false;
-            }
-            BP_CHECK("step: every state has a distinct non-empty name",
-                all_named);
-            BP_CHECK("step: out-of-range state names as (invalid)",
-                strcmp(boot_step_state_name(BOOT_STEP_STATE__MAX),
-                       "(invalid)") == 0);
-        }
-
-        /* The tracked-step API is safe with no step open; boot_step_fail
-         * always returns false. */
-        boot_step_done();                 /* nothing open — no-op */
-        boot_step_note();
-        BP_CHECK("step: fail() returns false even with no step open",
-            !boot_step_fail("nothing open"));
     }
+    return failures;
+}
+
+/* The boot_step_state_name() table: every state distinct and non-empty,
+ * out-of-range named "(invalid)". */
+static int bp_test_step_state_names(void)
+{
+    int failures = 0;
+
+    /* Every state has a distinct, non-empty name; out-of-range is named. */
+    {
+        bool all_named = true;
+        for (int s = 0; s < (int)BOOT_STEP_STATE__MAX; s++) {
+            const char *n = boot_step_state_name((enum boot_step_state)s);
+            if (!n || !*n || strcmp(n, "(invalid)") == 0)
+                all_named = false;
+            for (int t = s + 1; t < (int)BOOT_STEP_STATE__MAX; t++)
+                if (strcmp(n, boot_step_state_name(
+                               (enum boot_step_state)t)) == 0)
+                    all_named = false;
+        }
+        BP_CHECK("step: every state has a distinct non-empty name",
+            all_named);
+        BP_CHECK("step: out-of-range state names as (invalid)",
+            strcmp(boot_step_state_name(BOOT_STEP_STATE__MAX),
+                   "(invalid)") == 0);
+    }
+    return failures;
+}
+
+/* The tracked-step API must be safe when no step is open. */
+static int bp_test_step_api_with_no_step_open(void)
+{
+    int failures = 0;
+
+    /* The tracked-step API is safe with no step open; boot_step_fail
+     * always returns false. */
+    boot_step_done();                 /* nothing open — no-op */
+    boot_step_note();
+    BP_CHECK("step: fail() returns false even with no step open",
+        !boot_step_fail("nothing open"));
+    return failures;
+}
+
+/* Which step states earn more systemd start budget: only moving ones. */
+static int bp_test_step_budget_earning(void)
+{
+    int failures = 0;
 
     /* ── An extension must be EARNED ──────────────────────────────
      * The reporter re-arms every budget window, so a state that extends the
@@ -820,6 +845,14 @@ int test_boot_phase(void)
                    "telemetry") == 0 &&
             !boot_step_state_is_failure(BOOT_STEP_STUCK));
     }
+    return failures;
+}
+
+/* The out-of-band evidence probe: EXTEND_TIMEOUT_USEC is sent only when the
+ * probe's value moved during the window. */
+static int bp_test_step_evidence_probe(void)
+{
+    int failures = 0;
 
     /* ── out-of-band evidence probe for an OPAQUE step ─────────────
      *
@@ -933,6 +966,87 @@ int test_boot_phase(void)
         /* No step must be left open for the tests that run after this. */
         boot_step_done();
     }
+    return failures;
+}
+
+int test_boot_phase(void)
+{
+#if defined(_WIN32)
+    /* Re-exec'd child lanes for the illegal-transition abort cases (Windows
+     * has no fork()). UCRT abort() exits with code 3, the analogue of
+     * WTERMSIG==SIGABRT. */
+    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
+    if (fork_role && fork_role[0]) {
+        zcl_win_suppress_abort_dialog();
+        if (strcmp(fork_role, "bp_backward") == 0) {
+            boot_stage_reset_for_testing();            /* -> INIT */
+            boot_stage_advance_to(BOOT_STAGE_DB_OPEN); /* legal forward jump */
+            boot_stage_advance_to(BOOT_STAGE_INIT);    /* illegal: backward */
+            return 99; /* reached only if the abort() did NOT fire */
+        }
+        if (strcmp(fork_role, "bp_range") == 0) {
+            boot_stage_reset_for_testing();            /* -> INIT */
+            boot_stage_advance_to(BOOT_STAGE__MAX);    /* illegal: >= MAX */
+            return 99; /* reached only if the abort() did NOT fire */
+        }
+        return 97;
+    }
+#endif
+    printf("\n=== boot_phase tests ===\n");
+    int failures = 0;
+    BP_CHECK("event log publishes once, reuses its handle and retires cleanly",
+        test_boot_event_log_lifecycle() == 0);
+
+    boot_stage_reset_for_testing();
+
+    BP_CHECK("wallet rebuild skips no-key wallets, preserves keyed wallets, "
+             "and fails closed",
+        test_wallet_rebuild_probe() == 0);
+
+    failures += bp_test_boot_stage_names();
+    failures += bp_test_stage_predicates_and_steps();
+    failures += bp_test_params_thread_failure_gating();
+
+    /* ── export mode must not park on a permanent blocker ─────────
+     * Shutdown is already requested so a missing export-mode branch cannot
+     * sleep; the assertions distinguish REFUSED from PARKED. */
+    {
+        char dir[PATH_MAX];
+        char captured[4096];
+        bool gate_rc = true;
+        struct boot_status_snapshot snap;
+        char why[128];
+
+        bp_park_fixture_begin(dir, sizeof(dir), true);
+        bool captured_ok = bp_capture_gate(dir, captured, sizeof(captured),
+                                           &gate_rc);
+        bool status_ok = boot_status_read(dir, &snap, why, sizeof(why));
+        BP_CHECK("export+node_db_unopened: gate returns (does not park)",
+                 captured_ok && !gate_rc);
+        BP_CHECK("export+node_db_unopened: REFUSED line names the blocker",
+                 captured_ok &&
+                 strstr(captured,
+                        "REFUSED: -export-consensus-bundle: reason=node_db_unopened")
+                     != NULL);
+        BP_CHECK("export+node_db_unopened: does not emit PARKED",
+                 captured_ok && strstr(captured, "PARKED") == NULL);
+        BP_CHECK("export+node_db_unopened: latches FATAL (exit 1 path)",
+                 boot_error_reported());
+        BP_CHECK("export+node_db_unopened: boot_status names the blocker",
+                 status_ok && strcmp(snap.blocker, "node_db_unopened") == 0);
+        bp_park_fixture_end(dir);
+    }
+
+    failures += bp_node_db_gate_refuses();
+    failures += bp_test_legacy_header_pull_predicates();
+    failures += bp_test_blocks_table_hydrate_predicates();
+    failures += bp_test_legal_forward_jumps();
+    failures += bp_test_illegal_transition_aborts();
+    failures += bp_test_step_classification();
+    failures += bp_test_step_state_names();
+    failures += bp_test_step_api_with_no_step_open();
+    failures += bp_test_step_budget_earning();
+    failures += bp_test_step_evidence_probe();
 
     /* Evidence scoped to one thread — its own function, so this one stays
      * inside the complexity cap. */
