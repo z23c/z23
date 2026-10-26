@@ -24,7 +24,7 @@ static const uint8_t recipe_root_domain[] = VCS_PACKAGE_RECIPE_ROOT_DOMAIN;
 
 /* ── error strings ──────────────────────────────────────────────────── */
 
-const char *vcs_package_recipe_error_string(
+static const char *recipe_error_string_first(
     enum vcs_package_recipe_error error)
 {
     switch (error) {
@@ -37,6 +37,15 @@ const char *vcs_package_recipe_error_string(
     case VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED: return "wire-truncated";
     case VCS_PACKAGE_RECIPE_ERR_WIRE_TRAILING: return "wire-trailing";
     case VCS_PACKAGE_RECIPE_ERR_LIST_ORDER: return "list-not-canonical-order";
+    default: break;
+    }
+    return NULL;
+}
+
+static const char *recipe_error_string_rest(
+    enum vcs_package_recipe_error error)
+{
+    switch (error) {
     case VCS_PACKAGE_RECIPE_ERR_COUNT_BOUND: return "list-count-bound";
     case VCS_PACKAGE_RECIPE_ERR_PATH: return "path-grammar";
     case VCS_PACKAGE_RECIPE_ERR_DEFINE: return "define-grammar";
@@ -45,8 +54,18 @@ const char *vcs_package_recipe_error_string(
     case VCS_PACKAGE_RECIPE_ERR_TEST_SECONDS: return "test-seconds-bound";
     case VCS_PACKAGE_RECIPE_ERR_MEMORY_BYTES: return "memory-bytes-bound";
     case VCS_PACKAGE_RECIPE_ERR_PROGRAM: return "programs-schema-mismatch";
+    default: break;
     }
-    return "unknown-error";
+    return NULL;
+}
+
+const char *vcs_package_recipe_error_string(
+    enum vcs_package_recipe_error error)
+{
+    const char *name = recipe_error_string_first(error);
+    if (!name)
+        name = recipe_error_string_rest(error);
+    return name ? name : "unknown-error";
 }
 
 /* ── library allowlist ──────────────────────────────────────────────── */
@@ -395,11 +414,10 @@ void vcs_package_recipe_set_test_limits(struct vcs_package_recipe *r,
 
 /* ── validation ─────────────────────────────────────────────────────── */
 
-enum vcs_package_recipe_error vcs_package_recipe_validate(
+/* Schema version, the program list and its schema-2 coupling. */
+static enum vcs_package_recipe_error recipe_validate_program_list(
     const struct vcs_package_recipe *recipe)
 {
-    if (!recipe)
-        return VCS_PACKAGE_RECIPE_ERR_NULL;
     if (recipe->schema_version != VCS_PACKAGE_RECIPE_VERSION &&
         recipe->schema_version != VCS_PACKAGE_RECIPE_VERSION_PROGRAMS)
         return VCS_PACKAGE_RECIPE_ERR_SCHEMA_VERSION;
@@ -419,6 +437,13 @@ enum vcs_package_recipe_error vcs_package_recipe_validate(
         if (i > 0 && strcmp(recipe->programs.items[i - 1], entry) >= 0)
             return VCS_PACKAGE_RECIPE_ERR_LIST_ORDER;
     }
+    return VCS_PACKAGE_RECIPE_OK;
+}
+
+/* Source list presence and the test-time and memory bounds. */
+static enum vcs_package_recipe_error recipe_validate_limits(
+    const struct vcs_package_recipe *recipe)
+{
     if (recipe->sources.count == 0)
         return VCS_PACKAGE_RECIPE_ERR_SOURCES_EMPTY;
     if (recipe->maximum_test_seconds == 0 ||
@@ -427,6 +452,12 @@ enum vcs_package_recipe_error vcs_package_recipe_validate(
     if (recipe->maximum_memory_bytes < VCS_PACKAGE_RECIPE_MIN_MEMORY_BYTES ||
         recipe->maximum_memory_bytes > VCS_PACKAGE_RECIPE_MAX_MEMORY_BYTES)
         return VCS_PACKAGE_RECIPE_ERR_MEMORY_BYTES;
+    return VCS_PACKAGE_RECIPE_OK;
+}
+
+static enum vcs_package_recipe_error recipe_validate_libraries(
+    const struct vcs_package_recipe *recipe)
+{
     if (recipe->library_count > VCS_PACKAGE_RECIPE_MAX_LIBRARIES)
         return VCS_PACKAGE_RECIPE_ERR_COUNT_BOUND;
     for (size_t i = 0; i < recipe->library_count; i++) {
@@ -435,6 +466,12 @@ enum vcs_package_recipe_error vcs_package_recipe_validate(
         if (i > 0 && recipe->libraries[i] <= recipe->libraries[i - 1])
             return VCS_PACKAGE_RECIPE_ERR_LIST_ORDER;
     }
+    return VCS_PACKAGE_RECIPE_OK;
+}
+
+static enum vcs_package_recipe_error recipe_validate_string_lists(
+    const struct vcs_package_recipe *recipe)
+{
     /* The struct is public, so validate re-checks every list: grammar,
      * count bound, and strictly ascending canonical order — a caller that
      * bypassed the add_* builders is held to the same rules. */
@@ -477,6 +514,22 @@ enum vcs_package_recipe_error vcs_package_recipe_validate(
     return VCS_PACKAGE_RECIPE_OK;
 }
 
+enum vcs_package_recipe_error vcs_package_recipe_validate(
+    const struct vcs_package_recipe *recipe)
+{
+    if (!recipe)
+        return VCS_PACKAGE_RECIPE_ERR_NULL;
+    enum vcs_package_recipe_error err =
+        recipe_validate_program_list(recipe);
+    if (err == VCS_PACKAGE_RECIPE_OK)
+        err = recipe_validate_limits(recipe);
+    if (err == VCS_PACKAGE_RECIPE_OK)
+        err = recipe_validate_libraries(recipe);
+    if (err == VCS_PACKAGE_RECIPE_OK)
+        err = recipe_validate_string_lists(recipe);
+    return err;
+}
+
 /* ── serialization ──────────────────────────────────────────────────── */
 
 static size_t recipe_strings_wire_bytes(
@@ -513,6 +566,28 @@ static bool recipe_strings_write(
     return true;
 }
 
+/* Magic through the scalars, in wire order; the program list is written by
+ * the caller only on schema 2. */
+static bool recipe_write_fields(struct zcl_codec_writer *writer,
+                                const struct vcs_package_recipe *recipe)
+{
+    return zcl_codec_write_bytes(
+               writer, recipe_wire_magic,
+               VCS_PACKAGE_RECIPE_WIRE_MAGIC_BYTES) &&
+        zcl_codec_write_u16le(writer, recipe->schema_version) &&
+        recipe_strings_write(writer, &recipe->public_headers) &&
+        recipe_strings_write(writer, &recipe->sources) &&
+        recipe_strings_write(writer, &recipe->test_sources) &&
+        recipe_strings_write(writer, &recipe->include_dirs) &&
+        recipe_strings_write(writer, &recipe->defines) &&
+        zcl_codec_write_u16le(writer, (uint16_t)recipe->library_count) &&
+        zcl_codec_write_bytes(writer, recipe->libraries,
+                              recipe->library_count) &&
+        zcl_codec_write_u8(writer, recipe->expected_test_exit_code) &&
+        zcl_codec_write_u32le(writer, recipe->maximum_test_seconds) &&
+        zcl_codec_write_u64le(writer, recipe->maximum_memory_bytes);
+}
+
 enum vcs_package_recipe_error vcs_package_recipe_serialize(
     const struct vcs_package_recipe *recipe, uint8_t **out, size_t *out_len)
 {
@@ -533,21 +608,7 @@ enum vcs_package_recipe_error vcs_package_recipe_serialize(
                    "alloc %zu recipe wire bytes", len);
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, wire, len);
-    bool ok = zcl_codec_write_bytes(
-                  &writer, recipe_wire_magic,
-                  VCS_PACKAGE_RECIPE_WIRE_MAGIC_BYTES) &&
-        zcl_codec_write_u16le(&writer, recipe->schema_version) &&
-        recipe_strings_write(&writer, &recipe->public_headers) &&
-        recipe_strings_write(&writer, &recipe->sources) &&
-        recipe_strings_write(&writer, &recipe->test_sources) &&
-        recipe_strings_write(&writer, &recipe->include_dirs) &&
-        recipe_strings_write(&writer, &recipe->defines) &&
-        zcl_codec_write_u16le(&writer, (uint16_t)recipe->library_count) &&
-        zcl_codec_write_bytes(&writer, recipe->libraries,
-                              recipe->library_count) &&
-        zcl_codec_write_u8(&writer, recipe->expected_test_exit_code) &&
-        zcl_codec_write_u32le(&writer, recipe->maximum_test_seconds) &&
-        zcl_codec_write_u64le(&writer, recipe->maximum_memory_bytes);
+    bool ok = recipe_write_fields(&writer, recipe);
     if (ok && recipe->schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS)
         ok = recipe_strings_write(&writer, &recipe->programs);
     size_t written = 0;
@@ -562,6 +623,21 @@ enum vcs_package_recipe_error vcs_package_recipe_serialize(
 }
 
 /* ── parse ──────────────────────────────────────────────────────────── */
+
+/* Wire grammar of one list entry: no embedded NUL, then the path or define
+ * rule. Returns the rejection the list reader reports, or OK. */
+static enum vcs_package_recipe_error recipe_entry_grammar_err(
+    const char *entry, uint16_t len, const char *suffix, bool is_define)
+{
+    bool grammar = memchr(entry, '\0', len) == NULL &&
+        (is_define ? recipe_define_valid(entry)
+        : (vcs_package_path_valid(entry) &&
+           (!suffix || recipe_suffix(entry, suffix))));
+    if (grammar)
+        return VCS_PACKAGE_RECIPE_OK;
+    return is_define ? VCS_PACKAGE_RECIPE_ERR_DEFINE
+                     : VCS_PACKAGE_RECIPE_ERR_PATH;
+}
 
 /* Read one string list (count-prefixed) through the canonical insertion
  * path; unsorted input lands out of insertion order, so the wire's own
@@ -592,14 +668,11 @@ static enum vcs_package_recipe_error recipe_parse_strings(
             return VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
         }
         entry[len] = '\0';
-        bool grammar = memchr(entry, '\0', len) == NULL &&
-            (is_define ? recipe_define_valid(entry)
-            : (vcs_package_path_valid(entry) &&
-               (!suffix || recipe_suffix(entry, suffix))));
-        if (!grammar) {
+        enum vcs_package_recipe_error gerr =
+            recipe_entry_grammar_err(entry, len, suffix, is_define);
+        if (gerr != VCS_PACKAGE_RECIPE_OK) {
             free(entry);
-            return is_define ? VCS_PACKAGE_RECIPE_ERR_DEFINE
-                             : VCS_PACKAGE_RECIPE_ERR_PATH;
+            return gerr;
         }
         if (prev[0] && strcmp(prev, entry) >= 0) {
             free(entry);
@@ -616,6 +689,113 @@ static enum vcs_package_recipe_error recipe_parse_strings(
     return VCS_PACKAGE_RECIPE_OK;
 }
 
+/* Magic and schema version: the only fields read before out is touched. */
+static enum vcs_package_recipe_error recipe_parse_header(
+    struct zcl_codec_reader *reader, uint16_t *version_out)
+{
+    uint8_t magic[VCS_PACKAGE_RECIPE_WIRE_MAGIC_BYTES];
+    if (!zcl_codec_read_bytes(reader, magic, sizeof(magic)) ||
+        memcmp(magic, recipe_wire_magic, sizeof(magic)) != 0)
+        return VCS_PACKAGE_RECIPE_ERR_WIRE_MAGIC;
+    uint16_t version = 0;
+    if (!zcl_codec_read_u16le(reader, &version))
+        return VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
+    if (version != VCS_PACKAGE_RECIPE_VERSION &&
+        version != VCS_PACKAGE_RECIPE_VERSION_PROGRAMS)
+        return VCS_PACKAGE_RECIPE_ERR_SCHEMA_VERSION;
+    *version_out = version;
+    return VCS_PACKAGE_RECIPE_OK;
+}
+
+/* The five path and define string lists, in wire order. */
+static enum vcs_package_recipe_error recipe_parse_lists(
+    struct zcl_codec_reader *reader, struct vcs_package_recipe *out)
+{
+    enum vcs_package_recipe_error err;
+    err = recipe_parse_strings(reader, &out->public_headers,
+                               VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST, ".h",
+                               false);
+    if (err == VCS_PACKAGE_RECIPE_OK)
+        err = recipe_parse_strings(reader, &out->sources,
+                                   VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST,
+                                   ".c", false);
+    if (err == VCS_PACKAGE_RECIPE_OK)
+        err = recipe_parse_strings(reader, &out->test_sources,
+                                   VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST,
+                                   ".c", false);
+    if (err == VCS_PACKAGE_RECIPE_OK)
+        err = recipe_parse_strings(reader, &out->include_dirs,
+                                   VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST,
+                                   NULL, false);
+    if (err == VCS_PACKAGE_RECIPE_OK)
+        err = recipe_parse_strings(reader, &out->defines,
+                                   VCS_PACKAGE_RECIPE_MAX_DEFINES, NULL,
+                                   true);
+    return err;
+}
+
+static enum vcs_package_recipe_error recipe_parse_libraries(
+    struct zcl_codec_reader *reader, struct vcs_package_recipe *out)
+{
+    uint16_t lib_count = 0;
+    if (!zcl_codec_read_u16le(reader, &lib_count))
+        return VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
+    if (lib_count > VCS_PACKAGE_RECIPE_MAX_LIBRARIES)
+        return VCS_PACKAGE_RECIPE_ERR_COUNT_BOUND;
+    for (uint16_t i = 0; i < lib_count; i++) {
+        uint8_t id = 0;
+        if (!zcl_codec_read_u8(reader, &id))
+            return VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
+        if (!vcs_package_recipe_library_name(id))
+            return VCS_PACKAGE_RECIPE_ERR_LIBRARY;
+        if (i > 0 && id <= out->libraries[i - 1])
+            return VCS_PACKAGE_RECIPE_ERR_LIST_ORDER;
+        out->libraries[i] = id;
+    }
+    out->library_count = lib_count;
+    return VCS_PACKAGE_RECIPE_OK;
+}
+
+static enum vcs_package_recipe_error recipe_parse_scalars(
+    struct zcl_codec_reader *reader, struct vcs_package_recipe *out)
+{
+    if (!zcl_codec_read_u8(reader, &out->expected_test_exit_code))
+        return VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
+    uint32_t seconds = 0;
+    uint64_t memory = 0;
+    if (!zcl_codec_read_u32le(reader, &seconds) ||
+        !zcl_codec_read_u64le(reader, &memory))
+        return VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
+    out->maximum_test_seconds = seconds;
+    out->maximum_memory_bytes = memory;
+    return VCS_PACKAGE_RECIPE_OK;
+}
+
+/* Everything after the header: lists, libraries, scalars, the schema-2
+ * program list and the trailing-byte check. */
+static enum vcs_package_recipe_error recipe_parse_fields(
+    struct zcl_codec_reader *reader, uint16_t version,
+    struct vcs_package_recipe *out)
+{
+    enum vcs_package_recipe_error err = recipe_parse_lists(reader, out);
+    if (err == VCS_PACKAGE_RECIPE_OK)
+        err = recipe_parse_libraries(reader, out);
+    if (err == VCS_PACKAGE_RECIPE_OK)
+        err = recipe_parse_scalars(reader, out);
+    /* Schema 2 carries its program list last; the entry grammar is checked
+     * again by validate() below (the `app/` prefix rule is stricter than
+     * the generic ".c" path rule the list reader applies). */
+    if (err == VCS_PACKAGE_RECIPE_OK &&
+        version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS)
+        err = recipe_parse_strings(reader, &out->programs,
+                                   VCS_PACKAGE_RECIPE_MAX_PROGRAMS, ".c",
+                                   false);
+    if (err == VCS_PACKAGE_RECIPE_OK &&
+        !zcl_codec_reader_finish(reader))
+        err = VCS_PACKAGE_RECIPE_ERR_WIRE_TRAILING;
+    return err;
+}
+
 enum vcs_package_recipe_error vcs_package_recipe_parse(
     const uint8_t *wire, size_t wire_len, struct vcs_package_recipe *out)
 {
@@ -630,106 +810,22 @@ enum vcs_package_recipe_error vcs_package_recipe_parse(
         return VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
     struct zcl_codec_reader reader;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    uint8_t magic[VCS_PACKAGE_RECIPE_WIRE_MAGIC_BYTES];
-    if (!zcl_codec_read_bytes(&reader, magic, sizeof(magic)) ||
-        memcmp(magic, recipe_wire_magic, sizeof(magic)) != 0)
-        return VCS_PACKAGE_RECIPE_ERR_WIRE_MAGIC;
     uint16_t version = 0;
-    if (!zcl_codec_read_u16le(&reader, &version))
-        return VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
-    if (version != VCS_PACKAGE_RECIPE_VERSION &&
-        version != VCS_PACKAGE_RECIPE_VERSION_PROGRAMS)
-        return VCS_PACKAGE_RECIPE_ERR_SCHEMA_VERSION;
+    enum vcs_package_recipe_error err =
+        recipe_parse_header(&reader, &version);
+    if (err != VCS_PACKAGE_RECIPE_OK)
+        return err;
     out->schema_version = version;
 
-    enum vcs_package_recipe_error err;
-    err = recipe_parse_strings(&reader, &out->public_headers,
-                               VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST, ".h",
-                               false);
+    err = recipe_parse_fields(&reader, version, out);
     if (err == VCS_PACKAGE_RECIPE_OK)
-        err = recipe_parse_strings(&reader, &out->sources,
-                                   VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST,
-                                   ".c", false);
-    if (err == VCS_PACKAGE_RECIPE_OK)
-        err = recipe_parse_strings(&reader, &out->test_sources,
-                                   VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST,
-                                   ".c", false);
-    if (err == VCS_PACKAGE_RECIPE_OK)
-        err = recipe_parse_strings(&reader, &out->include_dirs,
-                                   VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST,
-                                   NULL, false);
-    if (err == VCS_PACKAGE_RECIPE_OK)
-        err = recipe_parse_strings(&reader, &out->defines,
-                                   VCS_PACKAGE_RECIPE_MAX_DEFINES, NULL,
-                                   true);
-    if (err != VCS_PACKAGE_RECIPE_OK)
-        goto reject;
-
-    uint16_t lib_count = 0;
-    if (!zcl_codec_read_u16le(&reader, &lib_count)) {
-        err = VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
-        goto reject;
+        err = vcs_package_recipe_validate(out);
+    if (err != VCS_PACKAGE_RECIPE_OK) {
+        vcs_package_recipe_free(out);
+        vcs_package_recipe_init(out);
+        return err;
     }
-    if (lib_count > VCS_PACKAGE_RECIPE_MAX_LIBRARIES) {
-        err = VCS_PACKAGE_RECIPE_ERR_COUNT_BOUND;
-        goto reject;
-    }
-    for (uint16_t i = 0; i < lib_count; i++) {
-        uint8_t id = 0;
-        if (!zcl_codec_read_u8(&reader, &id)) {
-            err = VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
-            goto reject;
-        }
-        if (!vcs_package_recipe_library_name(id)) {
-            err = VCS_PACKAGE_RECIPE_ERR_LIBRARY;
-            goto reject;
-        }
-        if (i > 0 && id <= out->libraries[i - 1]) {
-            err = VCS_PACKAGE_RECIPE_ERR_LIST_ORDER;
-            goto reject;
-        }
-        out->libraries[i] = id;
-    }
-    out->library_count = lib_count;
-
-    if (!zcl_codec_read_u8(&reader, &out->expected_test_exit_code)) {
-        err = VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
-        goto reject;
-    }
-    uint32_t seconds = 0;
-    uint64_t memory = 0;
-    if (!zcl_codec_read_u32le(&reader, &seconds) ||
-        !zcl_codec_read_u64le(&reader, &memory)) {
-        err = VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
-        goto reject;
-    }
-    out->maximum_test_seconds = seconds;
-    out->maximum_memory_bytes = memory;
-
-    /* Schema 2 carries its program list last; the entry grammar is checked
-     * again by validate() below (the `app/` prefix rule is stricter than
-     * the generic ".c" path rule the list reader applies). */
-    if (version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS) {
-        err = recipe_parse_strings(&reader, &out->programs,
-                                   VCS_PACKAGE_RECIPE_MAX_PROGRAMS, ".c",
-                                   false);
-        if (err != VCS_PACKAGE_RECIPE_OK)
-            goto reject;
-    }
-
-    if (!zcl_codec_reader_finish(&reader)) {
-        err = VCS_PACKAGE_RECIPE_ERR_WIRE_TRAILING;
-        goto reject;
-    }
-    err = vcs_package_recipe_validate(out);
-    if (err != VCS_PACKAGE_RECIPE_OK)
-        goto reject;
     return VCS_PACKAGE_RECIPE_OK;
-
-reject:
-    vcs_package_recipe_free(out);
-    vcs_package_recipe_init(out);
-    return err;
 }
 
 /* ── recipe root ────────────────────────────────────────────────────── */
