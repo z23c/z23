@@ -108,6 +108,18 @@ static struct consensus_state_publication_cas_inputs make_inputs(void)
     return in;
 }
 
+/* Fresh ADMIT-shaped inputs whose source receipt, manifest and logical
+ * artifact digest are all rebound to `r`. */
+static struct consensus_state_publication_cas_inputs inputs_bound_to_receipt(
+    const struct consensus_state_source_receipt *r)
+{
+    struct consensus_state_publication_cas_inputs in = make_inputs();
+    in.source_receipt = *r;
+    in.manifest = make_manifest(100, r);
+    memcpy(in.artifact_logical_digest, in.manifest.artifact_digest, 32);
+    return in;
+}
+
 static bool refuses_with(struct consensus_state_publication_cas_inputs in,
                          enum consensus_state_publication_refusal expected)
 {
@@ -152,6 +164,45 @@ static void *pcas_race_writer_a(void *opaque)
     return NULL;
 }
 
+/* Block until writer A is parked inside its open temp file, releasing it
+ * early when the interleave never happens within the deadline. */
+static bool pcas_race_wait_for_temp_open(struct pcas_race_ctx *race)
+{
+    struct timespec deadline;
+    platform_time_realtime_timespec(&deadline);
+    deadline.tv_sec += 5;
+    pthread_mutex_lock(&race->lock);
+    int wait_rc = 0;
+    while (!race->a_entered && wait_rc == 0)
+        wait_rc = pthread_cond_timedwait(&race->cv, &race->lock, &deadline);
+    bool interleave_ready = race->a_entered;
+    if (!interleave_ready) {
+        race->release_a = true;
+        pthread_cond_broadcast(&race->cv);
+    }
+    pthread_mutex_unlock(&race->lock);
+    return interleave_ready;
+}
+
+/* Release the parked writer A, join it, then reload whatever it published. */
+static struct zcl_result pcas_race_finish_writer_a(
+    struct pcas_race_ctx *race, pthread_t a_thread, bool thread_ok,
+    struct consensus_state_publication_decision_record *loaded)
+{
+    if (thread_ok) {
+        pthread_mutex_lock(&race->lock);
+        race->release_a = true;
+        pthread_cond_broadcast(&race->cv);
+        pthread_mutex_unlock(&race->lock);
+        (void)pthread_join(a_thread, NULL);
+    }
+    consensus_state_publication_cas_test_set_after_temp_open_hook(NULL, NULL);
+    return thread_ok && race->a_result.ok
+        ? consensus_state_publication_cas_load(race->dir_fd, race->name,
+                                               loaded)
+        : race->a_result;
+}
+
 static bool pcas_no_temp_names(int dir_fd, const char *name)
 {
     int scan_fd = dup(dir_fd);
@@ -174,12 +225,11 @@ static bool pcas_no_temp_names(int dir_fd, const char *name)
     return ok;
 }
 
-static int test_consensus_state_publication_cas_platform_arm(void)
+/* The legacy codec remains self-consistent and decodable, but cannot earn
+ * publication authority even when every other binding agrees. */
+static int check_legacy_receipt_cannot_earn_authority(void)
 {
     int failures = 0;
-
-    /* The legacy codec remains self-consistent and decodable, but cannot earn
-     * publication authority even when every other binding agrees. */
     struct consensus_state_source_receipt legacy = make_receipt(100);
     legacy.schema_version = CONSENSUS_STATE_SOURCE_RECEIPT_V1;
     memcpy(legacy.producer_commit, PCAS_COMMIT, 40);
@@ -187,18 +237,20 @@ static int test_consensus_state_publication_cas_platform_arm(void)
     consensus_state_source_epoch_digest(&legacy,
                                         legacy.source_epoch_digest);
     consensus_state_source_receipt_digest(&legacy, legacy.receipt_digest);
-    struct consensus_state_publication_cas_inputs legacy_in = make_inputs();
-    legacy_in.source_receipt = legacy;
-    legacy_in.manifest = make_manifest(100, &legacy);
-    memcpy(legacy_in.artifact_logical_digest,
-           legacy_in.manifest.artifact_digest, 32);
+    struct consensus_state_publication_cas_inputs legacy_in =
+        inputs_bound_to_receipt(&legacy);
     PCAS_CHECK("self-consistent legacy v1 receipt never ADMITs",
                refuses_with(
                    legacy_in,
                    CONSENSUS_PUBLICATION_REFUSAL_SOURCE_RECEIPT_MALFORMED));
+    return failures;
+}
 
-    /* V2 binds the 32-byte source identity, never optional GitHub trace
-     * metadata, and the publication gate admits that self-consistent shape. */
+/* V2 binds the 32-byte source identity, never optional GitHub trace
+ * metadata, and the publication gate admits that self-consistent shape. */
+static int check_v2_receipt_binds_source_identity(void)
+{
+    int failures = 0;
     struct consensus_state_source_receipt v2 = make_receipt(100);
     uint8_t v2_epoch[32], v2_receipt[32];
     memcpy(v2_epoch, v2.source_epoch_digest, 32);
@@ -211,48 +263,48 @@ static int test_consensus_state_publication_cas_platform_arm(void)
     PCAS_CHECK("v2 GitHub trace metadata is non-authoritative",
                memcmp(v2_epoch, traced_epoch, 32) == 0 &&
                memcmp(v2_receipt, traced_receipt, 32) == 0);
-    struct consensus_state_publication_cas_inputs traced_in = make_inputs();
-    traced_in.source_receipt = v2;
-    traced_in.manifest = make_manifest(100, &v2);
-    memcpy(traced_in.artifact_logical_digest,
-           traced_in.manifest.artifact_digest, 32);
+    struct consensus_state_publication_cas_inputs traced_in =
+        inputs_bound_to_receipt(&v2);
     struct consensus_state_publication_decision_record traced_refusal;
     consensus_state_publication_cas_decide(&traced_in, &traced_refusal);
     PCAS_CHECK("v2 receipt rejects embedded Git trace metadata",
                traced_refusal.decision == CONSENSUS_PUBLICATION_REFUSED);
     v2.producer_commit[0] = '\0';
-    struct consensus_state_publication_cas_inputs v2_in = make_inputs();
-    v2_in.source_receipt = v2;
-    v2_in.manifest = make_manifest(100, &v2);
-    memcpy(v2_in.artifact_logical_digest, v2_in.manifest.artifact_digest, 32);
+    struct consensus_state_publication_cas_inputs v2_in =
+        inputs_bound_to_receipt(&v2);
     struct consensus_state_publication_decision_record v2_admit;
     consensus_state_publication_cas_decide(&v2_in, &v2_admit);
     PCAS_CHECK("self-consistent source-identity v2 receipt ADMITs",
                v2_admit.decision == CONSENSUS_PUBLICATION_ADMIT);
+    return failures;
+}
 
-    /* Happy path: all three receipts present and mutually binding. */
+/* Happy path: all three receipts present and mutually binding. */
+static int check_full_agreement_admits(
+    struct consensus_state_publication_decision_record *admit)
+{
+    int failures = 0;
     struct consensus_state_publication_cas_inputs in = make_inputs();
-    struct consensus_state_publication_decision_record admit;
-    consensus_state_publication_cas_decide(&in, &admit);
+    consensus_state_publication_cas_decide(&in, admit);
     PCAS_CHECK("full agreement ADMITs",
-               admit.decision == CONSENSUS_PUBLICATION_ADMIT &&
-               admit.refusal == CONSENSUS_PUBLICATION_REFUSAL_NONE);
+               admit->decision == CONSENSUS_PUBLICATION_ADMIT &&
+               admit->refusal == CONSENSUS_PUBLICATION_REFUSAL_NONE);
     PCAS_CHECK("ADMIT binds bundle H/hash and frontier",
-               admit.bundle_height == 100 &&
-               admit.expected_frontier_height == 120 &&
-               memcmp(admit.bundle_hash, in.manifest.block_hash, 32) == 0);
+               admit->bundle_height == 100 &&
+               admit->expected_frontier_height == 120 &&
+               memcmp(admit->bundle_hash, in.manifest.block_hash, 32) == 0);
 
     /* Pinned canonical decision-digest vector. */
     uint8_t recomputed[32];
     PCAS_CHECK("decision digest recomputes to the record's stored value",
-               consensus_state_publication_decision_digest(&admit,
-                                                            recomputed) &&
-               memcmp(recomputed, admit.decision_digest, 32) == 0);
+               consensus_state_publication_decision_digest(admit,
+                                                           recomputed) &&
+               memcmp(recomputed, admit->decision_digest, 32) == 0);
     char hex[65];
     static const char hexd[] = "0123456789abcdef";
     for (size_t i = 0; i < 32; i++) {
-        hex[i * 2] = hexd[(admit.decision_digest[i] >> 4) & 0xF];
-        hex[i * 2 + 1] = hexd[admit.decision_digest[i] & 0xF];
+        hex[i * 2] = hexd[(admit->decision_digest[i] >> 4) & 0xF];
+        hex[i * 2 + 1] = hexd[admit->decision_digest[i] & 0xF];
     }
     hex[64] = '\0';
     printf("consensus_state_publication_cas: ADMIT decision_digest=%s\n", hex);
@@ -260,29 +312,41 @@ static int test_consensus_state_publication_cas_platform_arm(void)
         "8891fac78730575c9a1866ff0f396047d2825e8e5c96c7c2620999fe77d36b7d";
     PCAS_CHECK("ADMIT decision digest matches pinned vector",
                strcmp(hex, PINNED) == 0);
+    return failures;
+}
 
-    /* CAS staleness: current only at the exact bound frontier. */
+/* CAS staleness: current only at the exact bound frontier. */
+static int check_cas_frontier_staleness(
+    const struct consensus_state_publication_decision_record *admit,
+    struct consensus_state_publication_decision_record *admit2)
+{
+    int failures = 0;
+    struct consensus_state_publication_cas_inputs in = make_inputs();
     PCAS_CHECK("decision is current at its bound frontier",
                consensus_state_publication_cas_decision_is_current(
-                   &admit, 120, in.frontier_hash));
+                   admit, 120, in.frontier_hash));
     uint8_t moved[32];
     fill(moved, 32, 0x03);
     PCAS_CHECK("decision is stale after the frontier moves (hash)",
                !consensus_state_publication_cas_decision_is_current(
-                   &admit, 120, moved));
+                   admit, 120, moved));
     PCAS_CHECK("decision is stale after the frontier moves (height)",
                !consensus_state_publication_cas_decision_is_current(
-                   &admit, 121, in.frontier_hash));
+                   admit, 121, in.frontier_hash));
     /* A re-run over a changed frontier yields a fresh, different digest. */
     struct consensus_state_publication_cas_inputs moved_in = make_inputs();
     moved_in.frontier_height = 121;
-    struct consensus_state_publication_decision_record admit2;
-    consensus_state_publication_cas_decide(&moved_in, &admit2);
+    consensus_state_publication_cas_decide(&moved_in, admit2);
     PCAS_CHECK("moved-frontier re-run produces a different decision digest",
-               admit2.decision == CONSENSUS_PUBLICATION_ADMIT &&
-               memcmp(admit2.decision_digest, admit.decision_digest, 32) != 0);
+               admit2->decision == CONSENSUS_PUBLICATION_ADMIT &&
+               memcmp(admit2->decision_digest, admit->decision_digest, 32) != 0);
+    return failures;
+}
 
-    /* Every mutual-binding refusal fires, fail-closed and typed. */
+/* Every mutual-binding refusal fires, fail-closed and typed. */
+static int check_mutual_binding_refusals(void)
+{
+    int failures = 0;
     struct consensus_state_publication_cas_inputs bad;
 
     bad = make_inputs();
@@ -426,8 +490,67 @@ static int test_consensus_state_publication_cas_platform_arm(void)
     PCAS_CHECK("null inputs refuse (null_input)",
                null_rec.decision == CONSENSUS_PUBLICATION_REFUSED &&
                null_rec.refusal == CONSENSUS_PUBLICATION_REFUSAL_NULL_INPUT);
+    return failures;
+}
 
-    /* Durable record round-trip + tamper rejection. */
+/* Deterministically interleave A(open temp) -> B(publish/load) ->
+ * A(publish/load). A shared <name>.tmp implementation makes A
+ * overwrite or lose B's inode; unique temps make both writes
+ * independently valid and leave the last completed writer A. */
+static int check_concurrent_writer_race(
+    int dir_fd,
+    const struct consensus_state_publication_decision_record *admit,
+    const struct consensus_state_publication_decision_record *admit2)
+{
+    int failures = 0;
+    struct pcas_race_ctx race;
+    memset(&race, 0, sizeof(race));
+    pthread_mutex_init(&race.lock, NULL);
+    pthread_cond_init(&race.cv, NULL);
+    race.dir_fd = dir_fd;
+    race.name = "race.rec";
+    race.a = *admit;
+    struct consensus_state_publication_decision_record b_rec = *admit2;
+    consensus_state_publication_cas_test_set_after_temp_open_hook(
+        pcas_race_after_temp_open, &race);
+    pthread_t a_thread;
+    bool thread_ok = pthread_create(&a_thread, NULL,
+                                    pcas_race_writer_a, &race) == 0;
+    bool interleave_ready = false;
+    if (thread_ok)
+        interleave_ready = pcas_race_wait_for_temp_open(&race);
+    struct zcl_result b_result = interleave_ready
+        ? consensus_state_publication_cas_persist_for_test(
+              dir_fd, race.name, &b_rec)
+        : ZCL_ERR(-1, "thread create failed");
+    struct consensus_state_publication_decision_record race_loaded;
+    struct zcl_result b_loaded = b_result.ok
+        ? consensus_state_publication_cas_load(
+              dir_fd, race.name, &race_loaded)
+        : b_result;
+    PCAS_CHECK("concurrent writer B publishes while A temp is open",
+               interleave_ready && b_result.ok && b_loaded.ok &&
+               memcmp(race_loaded.decision_digest,
+                      b_rec.decision_digest, 32) == 0);
+    struct zcl_result a_loaded = pcas_race_finish_writer_a(
+        &race, a_thread, thread_ok, &race_loaded);
+    PCAS_CHECK("concurrent writer A completes without clobber race",
+               thread_ok && race.a_result.ok && a_loaded.ok &&
+               memcmp(race_loaded.decision_digest,
+                      race.a.decision_digest, 32) == 0 &&
+               pcas_no_temp_names(dir_fd, race.name));
+    pthread_cond_destroy(&race.cv);
+    pthread_mutex_destroy(&race.lock);
+    (void)unlinkat(dir_fd, race.name, 0);
+    return failures;
+}
+
+/* Durable record round-trip + tamper rejection. */
+static int check_durable_record_roundtrip_and_race(
+    const struct consensus_state_publication_decision_record *admit,
+    const struct consensus_state_publication_decision_record *admit2)
+{
+    int failures = 0;
     char dir_template[] = "/tmp/zcl-pcas-XXXXXX";
     char *dir = mkdtemp(dir_template);
     PCAS_CHECK("fixture directory", dir != NULL);
@@ -453,81 +576,19 @@ static int test_consensus_state_publication_cas_platform_arm(void)
                 dir_fd, "decision.rec", &loaded);
             PCAS_CHECK("load rejects a malformed record", !lr.ok);
 
-            /* Deterministically interleave A(open temp) -> B(publish/load) ->
-             * A(publish/load). A shared <name>.tmp implementation makes A
-             * overwrite or lose B's inode; unique temps make both writes
-             * independently valid and leave the last completed writer A. */
-            struct pcas_race_ctx race;
-            memset(&race, 0, sizeof(race));
-            pthread_mutex_init(&race.lock, NULL);
-            pthread_cond_init(&race.cv, NULL);
-            race.dir_fd = dir_fd;
-            race.name = "race.rec";
-            race.a = admit;
-            struct consensus_state_publication_decision_record b_rec = admit2;
-            consensus_state_publication_cas_test_set_after_temp_open_hook(
-                pcas_race_after_temp_open, &race);
-            pthread_t a_thread;
-            bool thread_ok = pthread_create(&a_thread, NULL,
-                                            pcas_race_writer_a, &race) == 0;
-            bool interleave_ready = false;
-            if (thread_ok) {
-                struct timespec deadline;
-                platform_time_realtime_timespec(&deadline);
-                deadline.tv_sec += 5;
-                pthread_mutex_lock(&race.lock);
-                int wait_rc = 0;
-                while (!race.a_entered && wait_rc == 0)
-                    wait_rc = pthread_cond_timedwait(
-                        &race.cv, &race.lock, &deadline);
-                interleave_ready = race.a_entered;
-                if (!interleave_ready) {
-                    race.release_a = true;
-                    pthread_cond_broadcast(&race.cv);
-                }
-                pthread_mutex_unlock(&race.lock);
-            }
-            struct zcl_result b_result = interleave_ready
-                ? consensus_state_publication_cas_persist_for_test(
-                      dir_fd, race.name, &b_rec)
-                : ZCL_ERR(-1, "thread create failed");
-            struct consensus_state_publication_decision_record race_loaded;
-            struct zcl_result b_loaded = b_result.ok
-                ? consensus_state_publication_cas_load(
-                      dir_fd, race.name, &race_loaded)
-                : b_result;
-            PCAS_CHECK("concurrent writer B publishes while A temp is open",
-                       interleave_ready && b_result.ok && b_loaded.ok &&
-                       memcmp(race_loaded.decision_digest,
-                              b_rec.decision_digest, 32) == 0);
-            if (thread_ok) {
-                pthread_mutex_lock(&race.lock);
-                race.release_a = true;
-                pthread_cond_broadcast(&race.cv);
-                pthread_mutex_unlock(&race.lock);
-                (void)pthread_join(a_thread, NULL);
-            }
-            consensus_state_publication_cas_test_set_after_temp_open_hook(
-                NULL, NULL);
-            struct zcl_result a_loaded = thread_ok && race.a_result.ok
-                ? consensus_state_publication_cas_load(
-                      dir_fd, race.name, &race_loaded)
-                : race.a_result;
-            PCAS_CHECK("concurrent writer A completes without clobber race",
-                       thread_ok && race.a_result.ok && a_loaded.ok &&
-                       memcmp(race_loaded.decision_digest,
-                              race.a.decision_digest, 32) == 0 &&
-                       pcas_no_temp_names(dir_fd, race.name));
-            pthread_cond_destroy(&race.cv);
-            pthread_mutex_destroy(&race.lock);
-            (void)unlinkat(dir_fd, race.name, 0);
+            failures += check_concurrent_writer_race(dir_fd, admit, admit2);
             close(dir_fd);
             (void)unlink(path);
         }
         (void)rmdir(dir);
     }
+    return failures;
+}
 
-    /* run() fail-closed guards (no process singleton in this unit test). */
+/* run() fail-closed guards (no process singleton in this unit test). */
+static int check_run_fail_closed_guards(void)
+{
+    int failures = 0;
     struct consensus_state_publication_decision_record out;
     struct zcl_result rr = consensus_state_publication_cas_run(NULL, &out);
     PCAS_CHECK("run refuses a null request", !rr.ok);
@@ -536,6 +597,22 @@ static int test_consensus_state_publication_cas_platform_arm(void)
     req.target_lane = CONSENSUS_STATE_TARGET_LANE_CANONICAL;
     rr = consensus_state_publication_cas_run(&req, &out);
     PCAS_CHECK("run refuses a request with null members", !rr.ok);
+    return failures;
+}
+
+static int test_consensus_state_publication_cas_platform_arm(void)
+{
+    int failures = 0;
+    struct consensus_state_publication_decision_record admit;
+    struct consensus_state_publication_decision_record admit2;
+
+    failures += check_legacy_receipt_cannot_earn_authority();
+    failures += check_v2_receipt_binds_source_identity();
+    failures += check_full_agreement_admits(&admit);
+    failures += check_cas_frontier_staleness(&admit, &admit2);
+    failures += check_mutual_binding_refusals();
+    failures += check_durable_record_roundtrip_and_race(&admit, &admit2);
+    failures += check_run_fail_closed_guards();
 
     printf("consensus_state_publication_cas: %s\n",
            failures ? "FAILED" : "ALL PASSED");

@@ -1048,7 +1048,6 @@ tests/harness/src/test_consensus_parity.c:test_consensus_parity:18
 tests/harness/src/test_consensus_reject_index.c:test_consensus_reject_index:28
 tests/harness/src/test_consensus_state_producer_receipt.c:pr_seed_fold_rows:19
 tests/harness/src/test_consensus_state_producer_receipt.c:test_consensus_state_producer_receipt:62
-tests/harness/src/test_consensus_state_publication_cas.c:test_consensus_state_publication_cas_platform_arm:32
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_run_rung_ladder_tests:45
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_receipt_version:23
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_source:24
