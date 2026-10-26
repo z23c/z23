@@ -173,6 +173,85 @@ static int t_partial_is_not_success(void)
 
 /* ── 3. a mismatch is diagnosed, or honestly refused ───────────────────── */
 
+/* Evidence order: a differing source is named before a toolchain
+ * difference can be. */
+static int nr_check_source_outranks_toolchain(
+    struct vcs_node_receipt *a, struct vcs_node_receipt *b,
+    struct vcs_node_repro_report *rep, bool *ret)
+{
+    int failures = 0;
+
+    /* Different source: says nothing about the publisher. Checked FIRST, so
+     * a wrong checkout can never be reported as a false publisher claim. */
+    nr_fill(a, VCS_NODE_PRODUCER_RECEIVED, SRC_A, TC_A, 0x11, 100);
+    nr_fill(b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_B, TC_B, 0x22, 100);
+    NR_CHECK("different source outranks a toolchain difference",
+             nr_run(a, b, rep, ret) == VCS_NODE_REPRO_SOURCE_DIFFERS &&
+                 !*ret && !rep->source_id_agrees && rep->source_id_known);
+
+    /* Same source, different toolchain: the ordinary, benign explanation. */
+    nr_fill(b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_A, TC_B, 0x22, 100);
+    NR_CHECK("same source + different toolchain = toolchain-differs",
+             nr_run(a, b, rep, ret) == VCS_NODE_REPRO_TOOLCHAIN_DIFFERS &&
+                 !*ret && rep->source_id_agrees && rep->toolchain_known &&
+                 !rep->toolchain_agrees);
+    return failures;
+}
+
+/* All declared inputs agree and the output does not: the claim is false and
+ * the differing artifact is named with a rule. */
+static int nr_check_claim_false_names_row(
+    struct vcs_node_receipt *a, struct vcs_node_receipt *b,
+    struct vcs_node_repro_report *rep, bool *ret)
+{
+    int failures = 0;
+
+    /* Same source AND same toolchain, different bytes: every declared input
+     * agrees and the output does not. */
+    nr_fill(b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_A, TC_A, 0x22, 100);
+    NR_CHECK("same source + same toolchain + different bytes = claim-false",
+             nr_run(a, b, rep, ret) == VCS_NODE_REPRO_CLAIM_FALSE &&
+                 !*ret && rep->source_id_agrees && rep->toolchain_agrees &&
+                 rep->differed == 1);
+    NR_CHECK("the differing artifact is named with a rule, not a bare false",
+             rep->row_count == 1 &&
+                 rep->rows[0].rule == VCS_NODE_ROW_CONTENT_DIFFERS &&
+                 strcmp(rep->rows[0].path, "bin/z23") == 0 &&
+                 rep->rows[0].detail[0] != '\0');
+    return failures;
+}
+
+/* Missing identities: UNDIAGNOSED rather than a guess, and two unknowns
+ * never read as agreement. */
+static int nr_check_unknown_identity_refusals(
+    struct vcs_node_receipt *a, struct vcs_node_receipt *b,
+    struct vcs_node_repro_report *rep, bool *ret)
+{
+    int failures = 0;
+
+    /* Missing source identity: refuse to name a culprit. */
+    nr_fill(a, VCS_NODE_PRODUCER_RECEIVED, NULL, TC_A, 0x11, 100);
+    nr_fill(b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_A, TC_A, 0x22, 100);
+    NR_CHECK("no source identity on one side = undiagnosed, not a guess",
+             nr_run(a, b, rep, ret) == VCS_NODE_REPRO_UNDIAGNOSED &&
+                 !*ret && !rep->source_id_known);
+
+    /* Missing toolchain identity: same refusal, one step later. */
+    nr_fill(a, VCS_NODE_PRODUCER_RECEIVED, SRC_A, NULL, 0x11, 100);
+    nr_fill(b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_A, TC_A, 0x22, 100);
+    NR_CHECK("no toolchain identity on one side = undiagnosed",
+             nr_run(a, b, rep, ret) == VCS_NODE_REPRO_UNDIAGNOSED &&
+                 !*ret && rep->source_id_agrees && !rep->toolchain_known);
+
+    /* Two absent identities must not read as agreement. */
+    nr_fill(a, VCS_NODE_PRODUCER_RECEIVED, NULL, NULL, 0x11, 100);
+    nr_fill(b, VCS_NODE_PRODUCER_LOCAL_REBUILD, NULL, NULL, 0x22, 100);
+    NR_CHECK("unknown never equals unknown",
+             nr_run(a, b, rep, ret) == VCS_NODE_REPRO_UNDIAGNOSED &&
+                 !rep->source_id_agrees && !rep->toolchain_agrees);
+    return failures;
+}
+
 static int t_mismatch_is_diagnosed(void)
 {
     int failures = 0;
@@ -180,54 +259,9 @@ static int t_mismatch_is_diagnosed(void)
     struct vcs_node_repro_report rep;
     bool ret = true;
 
-    /* Different source: says nothing about the publisher. Checked FIRST, so
-     * a wrong checkout can never be reported as a false publisher claim. */
-    nr_fill(&a, VCS_NODE_PRODUCER_RECEIVED, SRC_A, TC_A, 0x11, 100);
-    nr_fill(&b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_B, TC_B, 0x22, 100);
-    NR_CHECK("different source outranks a toolchain difference",
-             nr_run(&a, &b, &rep, &ret) == VCS_NODE_REPRO_SOURCE_DIFFERS &&
-                 !ret && !rep.source_id_agrees && rep.source_id_known);
-
-    /* Same source, different toolchain: the ordinary, benign explanation. */
-    nr_fill(&b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_A, TC_B, 0x22, 100);
-    NR_CHECK("same source + different toolchain = toolchain-differs",
-             nr_run(&a, &b, &rep, &ret) == VCS_NODE_REPRO_TOOLCHAIN_DIFFERS &&
-                 !ret && rep.source_id_agrees && rep.toolchain_known &&
-                 !rep.toolchain_agrees);
-
-    /* Same source AND same toolchain, different bytes: every declared input
-     * agrees and the output does not. */
-    nr_fill(&b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_A, TC_A, 0x22, 100);
-    NR_CHECK("same source + same toolchain + different bytes = claim-false",
-             nr_run(&a, &b, &rep, &ret) == VCS_NODE_REPRO_CLAIM_FALSE &&
-                 !ret && rep.source_id_agrees && rep.toolchain_agrees &&
-                 rep.differed == 1);
-    NR_CHECK("the differing artifact is named with a rule, not a bare false",
-             rep.row_count == 1 &&
-                 rep.rows[0].rule == VCS_NODE_ROW_CONTENT_DIFFERS &&
-                 strcmp(rep.rows[0].path, "bin/z23") == 0 &&
-                 rep.rows[0].detail[0] != '\0');
-
-    /* Missing source identity: refuse to name a culprit. */
-    nr_fill(&a, VCS_NODE_PRODUCER_RECEIVED, NULL, TC_A, 0x11, 100);
-    nr_fill(&b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_A, TC_A, 0x22, 100);
-    NR_CHECK("no source identity on one side = undiagnosed, not a guess",
-             nr_run(&a, &b, &rep, &ret) == VCS_NODE_REPRO_UNDIAGNOSED &&
-                 !ret && !rep.source_id_known);
-
-    /* Missing toolchain identity: same refusal, one step later. */
-    nr_fill(&a, VCS_NODE_PRODUCER_RECEIVED, SRC_A, NULL, 0x11, 100);
-    nr_fill(&b, VCS_NODE_PRODUCER_LOCAL_REBUILD, SRC_A, TC_A, 0x22, 100);
-    NR_CHECK("no toolchain identity on one side = undiagnosed",
-             nr_run(&a, &b, &rep, &ret) == VCS_NODE_REPRO_UNDIAGNOSED &&
-                 !ret && rep.source_id_agrees && !rep.toolchain_known);
-
-    /* Two absent identities must not read as agreement. */
-    nr_fill(&a, VCS_NODE_PRODUCER_RECEIVED, NULL, NULL, 0x11, 100);
-    nr_fill(&b, VCS_NODE_PRODUCER_LOCAL_REBUILD, NULL, NULL, 0x22, 100);
-    NR_CHECK("unknown never equals unknown",
-             nr_run(&a, &b, &rep, &ret) == VCS_NODE_REPRO_UNDIAGNOSED &&
-                 !rep.source_id_agrees && !rep.toolchain_agrees);
+    failures += nr_check_source_outranks_toolchain(&a, &b, &rep, &ret);
+    failures += nr_check_claim_false_names_row(&a, &b, &rep, &ret);
+    failures += nr_check_unknown_identity_refusals(&a, &b, &rep, &ret);
     return failures;
 }
 

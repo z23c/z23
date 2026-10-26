@@ -2025,7 +2025,6 @@ tests/harness/src/test_node_character_wire.c:ncw_sheet_same:27
 tests/harness/src/test_node_character_wire.c:test_node_character_wire:83
 tests/harness/src/test_node_db_catchup_service.c:test_node_db_catchup_service:110
 tests/harness/src/test_node_health_service.c:test_node_health_service:304
-tests/harness/src/test_node_reproduce.c:t_mismatch_is_diagnosed:22
 tests/harness/src/test_nullifier_backfill_service.c:nbf_reader:16
 tests/harness/src/test_nullifier_backfill_service.c:test_nullifier_backfill_service:42
 tests/harness/src/test_nullifier_kv.c:test_nullifier_kv:48
