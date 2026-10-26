@@ -1186,12 +1186,6 @@ static int op_allow(const char *mode, const struct sr_set *base, const char *f)
     return strcmp(mode, "FAIL") != 0 && sr_has(base, f);
 }
 
-static const char *op_mode(void)
-{
-    const char *m = getenv("ZCL_LINT_MODE");
-    return (m && m[0]) ? m : "WARN";
-}
-
 struct op_acc {
     const char *mode;
     const struct sr_set *base;
@@ -1269,7 +1263,7 @@ int check_no_orphan_placement_run(int argc, char **argv)
     int rc = sr_load(&base, k_op_base);
     if (rc)
         return rc;
-    struct op_acc a = { .mode = op_mode(), .base = &base };
+    struct op_acc a = { .mode = sql_mode(), .base = &base };
     const char *env = getenv("ZCL_ORPHAN_PLACEMENT_FILES");
     int floor = 1500;
     if (env && env[0]) {
