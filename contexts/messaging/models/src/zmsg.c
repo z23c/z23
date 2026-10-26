@@ -200,20 +200,81 @@ int db_zmsg_count(struct node_db *ndb, bool unread_only)
     return count > INT_MAX ? INT_MAX : (int)count;
 }
 
-bool db_zmsg_inbox_window(struct node_db *ndb, struct zmsg_message *out,
-                          size_t max, bool unread_only, size_t *rows_out,
-                          int64_t *total_out)
+enum zmsg_window_arg_status {
+    ZMSG_WINDOW_ARGS_OK = 0,
+    ZMSG_WINDOW_ARGS_COUNTS_NULL,
+    ZMSG_WINDOW_ARGS_DB_CLOSED,
+    ZMSG_WINDOW_ARGS_BAD_MAX,
+};
+
+static void zmsg_window_zero_outputs(struct zmsg_message *out, size_t max,
+                                     size_t *rows_out, int64_t *total_out)
 {
     if (rows_out) *rows_out = 0;
     if (total_out) *total_out = 0;
     if (out && max <= SIZE_MAX / sizeof(*out))
         memset(out, 0, max * sizeof(*out));
+}
+
+static enum zmsg_window_arg_status
+zmsg_window_check_args(struct node_db *ndb, const struct zmsg_message *out,
+                       size_t max, const size_t *rows_out,
+                       const int64_t *total_out)
+{
     if (!rows_out || !total_out)
-        LOG_FAIL("zmsg", "db_zmsg_inbox_window: output counts are NULL");
+        return ZMSG_WINDOW_ARGS_COUNTS_NULL;
     if (!ndb || !ndb->open || !ndb->db)
-        LOG_FAIL("zmsg", "db_zmsg_inbox_window: db not open");
+        return ZMSG_WINDOW_ARGS_DB_CLOSED;
     if ((!out && max > 0) || max > (size_t)INT64_MAX ||
         max > SIZE_MAX / sizeof(*out))
+        return ZMSG_WINDOW_ARGS_BAD_MAX;
+    return ZMSG_WINDOW_ARGS_OK;
+}
+
+static int zmsg_window_bind_params(sqlite3_stmt *s, bool unread_only,
+                                   size_t max)
+{
+    int rc = sqlite3_bind_int(s, 1, unread_only ? 1 : 0);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_int64(s, 2, (sqlite3_int64)max);
+    return rc;
+}
+
+static int zmsg_window_step_rows(sqlite3_stmt *s, struct zmsg_message *out,
+                                 size_t max, size_t *rows, int64_t *total,
+                                 bool *have_total)
+{
+    int rc;
+    while ((rc = ZMSG_WINDOW_STEP(s)) == SQLITE_ROW) {
+        if (sqlite3_column_type(s, 9) != SQLITE_INTEGER ||
+            sqlite3_column_int64(s, 9) < 0)
+            return SQLITE_CORRUPT;
+        int64_t row_total = sqlite3_column_int64(s, 9);
+        if (*have_total && row_total != *total)
+            return SQLITE_CORRUPT;
+        *total = row_total;
+        *have_total = true;
+        if (sqlite3_column_int(s, 11) == 0)
+            continue;
+        if (*rows >= max || !row_to_zmsg(s, &out[*rows]))
+            return *rows >= max ? SQLITE_TOOBIG : SQLITE_CORRUPT;
+        (*rows)++;
+    }
+    return rc;
+}
+
+bool db_zmsg_inbox_window(struct node_db *ndb, struct zmsg_message *out,
+                          size_t max, bool unread_only, size_t *rows_out,
+                          int64_t *total_out)
+{
+    zmsg_window_zero_outputs(out, max, rows_out, total_out);
+    enum zmsg_window_arg_status args =
+        zmsg_window_check_args(ndb, out, max, rows_out, total_out);
+    if (args == ZMSG_WINDOW_ARGS_COUNTS_NULL)
+        LOG_FAIL("zmsg", "db_zmsg_inbox_window: output counts are NULL");
+    if (args == ZMSG_WINDOW_ARGS_DB_CLOSED)
+        LOG_FAIL("zmsg", "db_zmsg_inbox_window: db not open");
+    if (args == ZMSG_WINDOW_ARGS_BAD_MAX)
         LOG_FAIL("zmsg", "db_zmsg_inbox_window: invalid output window max=%zu",
                  max);
 
@@ -244,9 +305,7 @@ bool db_zmsg_inbox_window(struct node_db *ndb, struct zmsg_message *out,
         LOG_FAIL("zmsg", "db_zmsg_inbox_window: prepare failed rc=%d: %s",
                  rc, context);
     }
-    rc = sqlite3_bind_int(s, 1, unread_only ? 1 : 0);
-    if (rc == SQLITE_OK)
-        rc = sqlite3_bind_int64(s, 2, (sqlite3_int64)max);
+    rc = zmsg_window_bind_params(s, unread_only, max);
     if (rc != SQLITE_OK) {
         char context[160];
         snprintf(context, sizeof(context), "%s", sqlite3_errmsg(ndb->db));
@@ -258,27 +317,7 @@ bool db_zmsg_inbox_window(struct node_db *ndb, struct zmsg_message *out,
     size_t rows = 0;
     int64_t total = 0;
     bool have_total = false;
-    while ((rc = ZMSG_WINDOW_STEP(s)) == SQLITE_ROW) {
-        if (sqlite3_column_type(s, 9) != SQLITE_INTEGER ||
-            sqlite3_column_int64(s, 9) < 0) {
-            rc = SQLITE_CORRUPT;
-            goto row_failure;
-        }
-        int64_t row_total = sqlite3_column_int64(s, 9);
-        if (have_total && row_total != total) {
-            rc = SQLITE_CORRUPT;
-            goto row_failure;
-        }
-        total = row_total;
-        have_total = true;
-        if (sqlite3_column_int(s, 11) == 0)
-            continue;
-        if (rows >= max || !row_to_zmsg(s, &out[rows])) {
-            rc = rows >= max ? SQLITE_TOOBIG : SQLITE_CORRUPT;
-            goto row_failure;
-        }
-        rows++;
-    }
+    rc = zmsg_window_step_rows(s, out, max, &rows, &total, &have_total);
     if (rc != SQLITE_DONE || !have_total)
         goto row_failure;
     AR_FINALIZE(s);
