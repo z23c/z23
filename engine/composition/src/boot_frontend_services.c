@@ -304,6 +304,141 @@ static void boot_https_arm_public_install(const char *datadir)
     https_server_set_public_install_root(install_root);
 }
 
+/* Whichever pair is chosen below must be readable before a listener is
+ * started; the self-signed pair is the fallback. */
+static bool boot_https_select_serve_pair(struct boot_svc_ctx *svc,
+                                         const char *cert_path,
+                                         const char *key_path,
+                                         const char *placeholder_cert,
+                                         const char *placeholder_key,
+                                         const char *handoff_path,
+                                         const char *https_domain,
+                                         const char **serve_cert,
+                                         const char **serve_key)
+{
+    *serve_cert = cert_path;
+    *serve_key = key_path;
+    if (access(cert_path, R_OK) != 0 || access(key_path, R_OK) != 0) {
+        if (!acme_selfsigned_ensure(placeholder_cert, placeholder_key,
+                                    https_domain) ||
+            access(placeholder_cert, R_OK) != 0 ||
+            access(placeholder_key, R_OK) != 0) {
+            printf("HTTPS: no certificate at %s and no self-signed "
+                   "placeholder could be placed at %s - block explorer not "
+                   "on clearnet, and this host cannot answer a TLS-ALPN-01 "
+                   "challenge to obtain one\n", cert_path, placeholder_cert);
+            return false;
+        }
+        *serve_cert = placeholder_cert;
+        *serve_key = placeholder_key;
+        printf("HTTPS: no certificate authority has issued anything for this "
+               "host yet (%s absent).\n"
+               "HTTPS: starting on the self-signed placeholder at %s so the\n"
+               "HTTPS: TLS-ALPN-01 challenge can be answered. To get a real\n"
+               "HTTPS: certificate with no restart afterwards, run:\n"
+               "HTTPS:   z23-acme obtain --domain %s --agree-tos \\\n"
+               "HTTPS:     --account %s/ssl/account.pem --cert %s \\\n"
+               "HTTPS:     --key %s --handoff %s\n",
+               cert_path, placeholder_cert,
+               (https_domain && https_domain[0]) ? https_domain
+                                                 : "<your.domain>",
+               svc->datadir, cert_path, key_path, handoff_path);
+    }
+    return true;
+}
+
+/* One -httpsaltdomain=NAME: refuse a name that cannot name a host, create
+ * its <datadir>/ssl/NAME directory, hand the name's certificate pair to the
+ * watcher, and say which certificate the name is served from. */
+static void boot_https_setup_alt_domain_cert(struct boot_svc_ctx *svc,
+                                             const char *alt,
+                                             const char *handoff_path)
+{
+    char alt_dir[1024], alt_cert[1152], alt_key[1152];
+    if (!acme_domain_is_ldh(alt) || strchr(alt, '*')) {
+        printf("HTTPS: refusing invalid extra name %s before creating "
+               "any certificate path\n", alt);
+        return;
+    }
+    if (snprintf(alt_dir, sizeof(alt_dir), "%s/ssl/%s", svc->datadir,
+                 alt) >= (int)sizeof(alt_dir)) {
+        printf("HTTPS: the path for the extra name %s does not fit; that "
+               "name is not served from its own certificate\n", alt);
+        return;
+    }
+    snprintf(alt_cert, sizeof(alt_cert), "%s/fullchain.pem", alt_dir);
+    snprintf(alt_key, sizeof(alt_key), "%s/privkey.pem", alt_dir);
+    if (platform_directory_create(alt_dir, 0700) != 0 && errno != EEXIST) {
+        printf("HTTPS: cannot create %s - %s is not served from its own "
+               "certificate\n", alt_dir, alt);
+        return;
+    }
+    if (!https_server_watch_certificate_for_name(alt, alt_cert, alt_key))
+        return;
+    if (access(alt_cert, R_OK) == 0 && access(alt_key, R_OK) == 0) {
+        printf("HTTPS: also serving %s from %s\n", alt, alt_cert);
+    } else {
+        printf("HTTPS: %s is configured but has no certificate yet. It is "
+               "served the main certificate until one lands at %s; to get "
+               "one with no restart, run:\n"
+               "HTTPS:   z23-acme obtain --domain %s --agree-tos \\\n"
+               "HTTPS:     --account %s/ssl/account.pem --cert %s \\\n"
+               "HTTPS:     --key %s --handoff %s\n",
+               alt, alt_cert, alt, svc->datadir, alt_cert, alt_key,
+               handoff_path);
+    }
+}
+
+/* ADDITIONAL names on this same listener (-httpsaltdomain=NAME), each
+ * with its own certificate selected by TLS SNI. The pair for a name
+ * lives in <datadir>/ssl/NAME/fullchain.pem and .../privkey.pem (the same
+ * filenames `z23-acme` writes). Watched, never required: a name
+ * without an issued certificate is not served from its own certificate
+ * yet, and does not affect other names.
+ *
+ * The directory is created here, like <datadir>/ssl, so the certificate
+ * worker need not make it. */
+static void boot_https_watch_alt_domain_certs(struct boot_svc_ctx *svc,
+                                              const char *handoff_path)
+{
+    for (int i = 0; i < svc->app_ctx->n_https_alt_domains; i++) {
+        const char *alt = svc->app_ctx->https_alt_domains[i];
+        if (!alt || !alt[0])
+            continue;
+        boot_https_setup_alt_domain_cert(svc, alt, handoff_path);
+    }
+}
+
+/* Start the listener when the node is near tip; during IBD leave a deferred
+ * start armed so the explorer comes up without a restart once the chain is
+ * close enough to the tip. */
+static void boot_https_explorer_listen_or_defer(struct boot_svc_ctx *svc,
+                                                const char *serve_cert,
+                                                const char *serve_key,
+                                                const char *https_domain)
+{
+    int chain_tip_h = active_chain_height(&svc->state->chain_active);
+    int best_header = svc->state->pindex_best_header ?
+        svc->state->pindex_best_header->nHeight : chain_tip_h;
+    bool near_tip = (best_header - chain_tip_h < 1000) &&
+                    (chain_tip_h > g_deferred_proof_validation_below_height - 10000);
+    if (near_tip) {
+        https_server_start_on_port(serve_cert, serve_key, https_domain,
+                                   svc->app_ctx->https_port,
+                                   svc->app_ctx->https_port - 363);
+    } else {
+        printf("HTTPS: deferred during IBD (chain=%d, headers=%d, "
+               "behind=%d). Will start when near tip.\n",
+               chain_tip_h, best_header, best_header - chain_tip_h);
+        /* The engine copies the paths, and refuses ones too long to keep. */
+        ZCL_IGNORE_RESULT(https_deferred_start_set(serve_cert, serve_key,
+                                                   https_domain,
+                                                   svc->app_ctx->https_port,
+                                                   svc->app_ctx->https_port - 363),
+                          "the set logs its own refusal; boot continues without the deferred start");
+    }
+}
+
 static bool boot_https_explorer_start(void *ctx)
 {
     struct boot_svc_ctx *svc = ctx;
@@ -340,36 +475,13 @@ static bool boot_https_explorer_start(void *ctx)
      * cert the server presents that cert regardless of SNI. */
     const char *https_domain = svc->app_ctx->https_domain;
 
-    /* Whichever pair is chosen below must be readable before a listener is
-     * started; the self-signed pair is the fallback. */
-    const char *serve_cert = cert_path;
-    const char *serve_key = key_path;
-    if (access(cert_path, R_OK) != 0 || access(key_path, R_OK) != 0) {
-        if (!acme_selfsigned_ensure(placeholder_cert, placeholder_key,
-                                    https_domain) ||
-            access(placeholder_cert, R_OK) != 0 ||
-            access(placeholder_key, R_OK) != 0) {
-            printf("HTTPS: no certificate at %s and no self-signed "
-                   "placeholder could be placed at %s - block explorer not "
-                   "on clearnet, and this host cannot answer a TLS-ALPN-01 "
-                   "challenge to obtain one\n", cert_path, placeholder_cert);
-            return true;
-        }
-        serve_cert = placeholder_cert;
-        serve_key = placeholder_key;
-        printf("HTTPS: no certificate authority has issued anything for this "
-               "host yet (%s absent).\n"
-               "HTTPS: starting on the self-signed placeholder at %s so the\n"
-               "HTTPS: TLS-ALPN-01 challenge can be answered. To get a real\n"
-               "HTTPS: certificate with no restart afterwards, run:\n"
-               "HTTPS:   z23-acme obtain --domain %s --agree-tos \\\n"
-               "HTTPS:     --account %s/ssl/account.pem --cert %s \\\n"
-               "HTTPS:     --key %s --handoff %s\n",
-               cert_path, placeholder_cert,
-               (https_domain && https_domain[0]) ? https_domain
-                                                 : "<your.domain>",
-               svc->datadir, cert_path, key_path, handoff_path);
-    }
+    const char *serve_cert;
+    const char *serve_key;
+    if (!boot_https_select_serve_pair(svc, cert_path, key_path,
+                                      placeholder_cert, placeholder_key,
+                                      handoff_path, https_domain,
+                                      &serve_cert, &serve_key))
+        return true;
 
     boot_configure_frontend_rpc(svc);
 
@@ -380,74 +492,10 @@ static bool boot_https_explorer_start(void *ctx)
      * the start path records the watched pair's identity. */
     https_server_watch_certificate(cert_path, key_path);
 
-    /* ADDITIONAL names on this same listener (-httpsaltdomain=NAME), each
-     * with its own certificate selected by TLS SNI. The pair for a name
-     * lives in <datadir>/ssl/NAME/fullchain.pem and .../privkey.pem (the same
-     * filenames `z23-acme` writes). Watched, never required: a name
-     * without an issued certificate is not served from its own certificate
-     * yet, and does not affect other names.
-     *
-     * The directory is created here, like <datadir>/ssl, so the certificate
-     * worker need not make it. */
-    for (int i = 0; i < svc->app_ctx->n_https_alt_domains; i++) {
-        const char *alt = svc->app_ctx->https_alt_domains[i];
-        char alt_dir[1024], alt_cert[1152], alt_key[1152];
-        if (!alt || !alt[0])
-            continue;
-        if (!acme_domain_is_ldh(alt) || strchr(alt, '*')) {
-            printf("HTTPS: refusing invalid extra name %s before creating "
-                   "any certificate path\n", alt);
-            continue;
-        }
-        if (snprintf(alt_dir, sizeof(alt_dir), "%s/ssl/%s", svc->datadir,
-                     alt) >= (int)sizeof(alt_dir)) {
-            printf("HTTPS: the path for the extra name %s does not fit; that "
-                   "name is not served from its own certificate\n", alt);
-            continue;
-        }
-        snprintf(alt_cert, sizeof(alt_cert), "%s/fullchain.pem", alt_dir);
-        snprintf(alt_key, sizeof(alt_key), "%s/privkey.pem", alt_dir);
-        if (platform_directory_create(alt_dir, 0700) != 0 && errno != EEXIST) {
-            printf("HTTPS: cannot create %s - %s is not served from its own "
-                   "certificate\n", alt_dir, alt);
-            continue;
-        }
-        if (!https_server_watch_certificate_for_name(alt, alt_cert, alt_key))
-            continue;
-        if (access(alt_cert, R_OK) == 0 && access(alt_key, R_OK) == 0) {
-            printf("HTTPS: also serving %s from %s\n", alt, alt_cert);
-        } else {
-            printf("HTTPS: %s is configured but has no certificate yet. It is "
-                   "served the main certificate until one lands at %s; to get "
-                   "one with no restart, run:\n"
-                   "HTTPS:   z23-acme obtain --domain %s --agree-tos \\\n"
-                   "HTTPS:     --account %s/ssl/account.pem --cert %s \\\n"
-                   "HTTPS:     --key %s --handoff %s\n",
-                   alt, alt_cert, alt, svc->datadir, alt_cert, alt_key,
-                   handoff_path);
-        }
-    }
+    boot_https_watch_alt_domain_certs(svc, handoff_path);
 
-    int chain_tip_h = active_chain_height(&svc->state->chain_active);
-    int best_header = svc->state->pindex_best_header ?
-        svc->state->pindex_best_header->nHeight : chain_tip_h;
-    bool near_tip = (best_header - chain_tip_h < 1000) &&
-                    (chain_tip_h > g_deferred_proof_validation_below_height - 10000);
-    if (near_tip) {
-        https_server_start_on_port(serve_cert, serve_key, https_domain,
-                                   svc->app_ctx->https_port,
-                                   svc->app_ctx->https_port - 363);
-    } else {
-        printf("HTTPS: deferred during IBD (chain=%d, headers=%d, "
-               "behind=%d). Will start when near tip.\n",
-               chain_tip_h, best_header, best_header - chain_tip_h);
-        /* The engine copies the paths, and refuses ones too long to keep. */
-        ZCL_IGNORE_RESULT(https_deferred_start_set(serve_cert, serve_key,
-                                                   https_domain,
-                                                   svc->app_ctx->https_port,
-                                                   svc->app_ctx->https_port - 363),
-                          "the set logs its own refusal; boot continues without the deferred start");
-    }
+    boot_https_explorer_listen_or_defer(svc, serve_cert, serve_key,
+                                        https_domain);
     return true;
 }
 
