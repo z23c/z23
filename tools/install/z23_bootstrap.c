@@ -371,8 +371,8 @@ static bool dns_txt_from_file(const char *path, struct fd_dns_txt *out,
 }
 
 /* One live query per configured nameserver, in order, until one answers.
- * Returns NULL with the answer in *out, or the reason the wire stayed
- * silent. */
+ * Returns NULL with the answer in *out, or the reason no nameserver gave a
+ * usable answer (silence, no answer, truncated or malformed reply). */
 static const char *dns_txt_from_wire(const char *name,
                                      char servers[DNS_MAX_SERVERS][64],
                                      size_t count, struct fd_dns_txt *out)
