@@ -607,10 +607,11 @@ bool broker_provider_mint_from_spec(const char *path, char *out_id,
 
     struct metaverse_grant g;
     memset(&g, 0, sizeof(g));
-    if (!spec_mint_parties(&doc, &g, why, why_cap))
+    bool ok = spec_mint_parties(&doc, &g, why, why_cap);
+    if (!ok)
         return false;
 
-    bool ok = spec_scope(&doc, &g, why, why_cap);
+    ok = spec_scope(&doc, &g, why, why_cap);
     if (ok)
         ok = spec_mint_verbs(&doc, &g, why, why_cap);
     if (ok)
