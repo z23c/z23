@@ -85,37 +85,18 @@ static void npc_count_item(struct zcl_present_model_v1 *model,
              have_count ? status : ZCL_PRESENT_STATUS_YELLOW);
 }
 
-bool zcl_native_presentation_corpus_model_from_facts(
-    const struct json_value *facts, struct zcl_present_model_v1 *model,
-    char *why, size_t why_cap)
+static bool npc_projection_ready(const struct json_value *facts)
 {
-    if (!facts || facts->type != JSON_OBJ || !model) {
-        if (why && why_cap)
-            (void)snprintf(why, why_cap, "canonical corpus facts are missing");
-        return false;
-    }
     const struct json_value *ready_value =
         npc_value(facts, "projection_ready");
-    bool ready = ready_value && ready_value->type == JSON_BOOL &&
-                 json_get_bool(ready_value);
-    const char *root = ready ? npc_str(facts, "checkpoint_root")
-                             : npc_str(facts, "rules_root");
-    if (!npc_root(root)) {
-        if (why && why_cap)
-            (void)snprintf(why, why_cap,
-                           "canonical corpus root is unavailable or invalid");
-        return false;
-    }
+    return ready_value && ready_value->type == JSON_BOOL &&
+           json_get_bool(ready_value);
+}
 
-    zcl_present_model_init_v1(model, ZCL_PRESENT_MODEL_STATUS_CARD);
-    (void)snprintf(model->request_id, sizeof(model->request_id),
-                   "c23-corpus-status");
-    (void)snprintf(model->title, sizeof(model->title),
-                   "10 Million Exact C23");
-    (void)snprintf(model->summary, sizeof(model->summary),
-                   "Verified corpus lower bound; never a global completeness claim.");
-    (void)snprintf(model->exact_root, sizeof(model->exact_root), "%s", root);
-
+static void npc_add_inventory_items(struct zcl_present_model_v1 *model,
+                                    const struct json_value *facts,
+                                    bool ready)
+{
     npc_count_item(model, facts, "admitted_production_loc", "production-loc",
                    "Admitted production", "LOC", ZCL_PRESENT_STATUS_GREEN,
                    ready);
@@ -155,8 +136,13 @@ bool zcl_native_presentation_corpus_model_from_facts(
     npc_item(model, "exclusions", "Exclusions", value,
              have_excluded
                  ? ZCL_PRESENT_STATUS_INFO : ZCL_PRESENT_STATUS_YELLOW);
+}
 
+static void npc_add_progress_items(struct zcl_present_model_v1 *model,
+                                   const struct json_value *facts, bool ready)
+{
     uint64_t loc_added = 0, packages_added = 0, days = 0;
+    char value[ZCL_PRESENT_MODEL_VALUE_MAX + 1u];
     bool have_velocity = ready &&
         npc_u64(facts, "admitted_loc_added", &loc_added) &&
         npc_u64(facts, "packages_added", &packages_added) &&
@@ -181,6 +167,38 @@ bool zcl_native_presentation_corpus_model_from_facts(
     if (blocker && blocker[0])
         npc_item(model, "blocker", "Named blocker", blocker,
                  ZCL_PRESENT_STATUS_YELLOW);
+}
+
+bool zcl_native_presentation_corpus_model_from_facts(
+    const struct json_value *facts, struct zcl_present_model_v1 *model,
+    char *why, size_t why_cap)
+{
+    if (!facts || facts->type != JSON_OBJ || !model) {
+        if (why && why_cap)
+            (void)snprintf(why, why_cap, "canonical corpus facts are missing");
+        return false;
+    }
+    bool ready = npc_projection_ready(facts);
+    const char *root = ready ? npc_str(facts, "checkpoint_root")
+                             : npc_str(facts, "rules_root");
+    if (!npc_root(root)) {
+        if (why && why_cap)
+            (void)snprintf(why, why_cap,
+                           "canonical corpus root is unavailable or invalid");
+        return false;
+    }
+
+    zcl_present_model_init_v1(model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(model->request_id, sizeof(model->request_id),
+                   "c23-corpus-status");
+    (void)snprintf(model->title, sizeof(model->title),
+                   "10 Million Exact C23");
+    (void)snprintf(model->summary, sizeof(model->summary),
+                   "Verified corpus lower bound; never a global completeness claim.");
+    (void)snprintf(model->exact_root, sizeof(model->exact_root), "%s", root);
+
+    npc_add_inventory_items(model, facts, ready);
+    npc_add_progress_items(model, facts, ready);
 
     return zcl_present_model_validate_v1(model, why, why_cap);
 }
