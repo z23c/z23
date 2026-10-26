@@ -113,6 +113,29 @@ bool stage_repair_header_solution_save(sqlite3 *db, int height,
     return true;
 }
 
+static bool repair_header_row_blobs_present(const void *hash_blob,
+                                            const void *prev_blob,
+                                            const void *merkle_blob,
+                                            const void *sapling_blob,
+                                            const void *nonce_blob,
+                                            const void *solution_blob)
+{
+    return hash_blob && prev_blob && merkle_blob && sapling_blob &&
+           nonce_blob && solution_blob;
+}
+
+static bool repair_header_row_sizes_valid(sqlite3_stmt *st, int solution_bytes,
+                                          int64_t solution_len)
+{
+    return sqlite3_column_bytes(st, 0) == 32 &&
+           sqlite3_column_bytes(st, 2) == 32 &&
+           sqlite3_column_bytes(st, 3) == 32 &&
+           sqlite3_column_bytes(st, 4) == 32 &&
+           sqlite3_column_bytes(st, 7) == 32 &&
+           solution_len > 0 && solution_len <= MAX_SOLUTION_SIZE &&
+           solution_bytes == (int)solution_len;
+}
+
 bool stage_repair_header_solution_load(sqlite3 *db, int height,
                                        const struct uint256 *expected_hash,
                                        struct block_header *out)
@@ -150,15 +173,11 @@ bool stage_repair_header_solution_load(sqlite3 *db, int height,
     const void *solution_blob = sqlite3_column_blob(st, 8);
     int solution_bytes = sqlite3_column_bytes(st, 8);
     int64_t solution_len = sqlite3_column_int64(st, 9);
-    if (!hash_blob || !prev_blob || !merkle_blob || !sapling_blob ||
-        !nonce_blob || !solution_blob ||
-        sqlite3_column_bytes(st, 0) != 32 ||
-        sqlite3_column_bytes(st, 2) != 32 ||
-        sqlite3_column_bytes(st, 3) != 32 ||
-        sqlite3_column_bytes(st, 4) != 32 ||
-        sqlite3_column_bytes(st, 7) != 32 ||
-        solution_len <= 0 || solution_len > MAX_SOLUTION_SIZE ||
-        solution_bytes != (int)solution_len) {
+    if (!repair_header_row_blobs_present(hash_blob, prev_blob,
+                                         merkle_blob, sapling_blob,
+                                         nonce_blob, solution_blob) ||
+        !repair_header_row_sizes_valid(st, solution_bytes,
+                                       solution_len)) {
         sqlite3_finalize(st);
         return false;
     }

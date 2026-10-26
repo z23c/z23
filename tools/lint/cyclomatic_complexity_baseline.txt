@@ -1132,7 +1132,6 @@ engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:34
 engine/jobs/src/stage_repair_coin_backfill_creator.c:coin_backfill_enumerate_unresolved_prevouts:21
 engine/jobs/src/stage_repair_coin_backfill_creator.c:coin_backfill_resolve_creator:28
 engine/jobs/src/stage_repair_coin_backfill_scan.c:coin_backfill_scan_step:69
-engine/jobs/src/stage_repair_header_solution.c:stage_repair_header_solution_load:23
 engine/jobs/src/stage_repair_rewind.c:poison_mode_unlocked:20
 engine/jobs/src/stage_repair_rewind.c:stage_repair_header_solution_poison_rewind:30
 engine/jobs/src/stage_repair_trusted_base.c:stage_repair_preserve_trusted_base_transition:17
