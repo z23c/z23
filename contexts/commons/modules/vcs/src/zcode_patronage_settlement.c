@@ -34,20 +34,9 @@ const char *vcs_zcode_patronage_settlement_error_string(
     return "unknown";
 }
 
-static enum vcs_zcode_patronage_settlement_error settlement_fields(
-    const struct vcs_zcode_patronage_settlement_v1 *settlement,
-    bool signed_wire)
+static enum vcs_zcode_patronage_settlement_error settlement_root_fields(
+    const struct vcs_zcode_patronage_settlement_v1 *settlement)
 {
-    if (!settlement) return VCS_ZCODE_PATRONAGE_SETTLEMENT_NULL;
-    uint8_t flags = VCS_ZCODE_PATRONAGE_SETTLEMENT_SIMULATION_ONLY |
-        VCS_ZCODE_PATRONAGE_SETTLEMENT_NO_LIVE_FUNDS |
-        VCS_ZCODE_PATRONAGE_SETTLEMENT_NO_TRANSACTION_BYTES;
-    if (settlement->schema_version !=
-            VCS_ZCODE_PATRONAGE_SETTLEMENT_VERSION ||
-        (settlement->action != VCS_ZCODE_PATRONAGE_SIMULATED_SETTLED &&
-         settlement->action != VCS_ZCODE_PATRONAGE_SIMULATED_REFUNDED) ||
-        settlement->flags != flags)
-        return VCS_ZCODE_PATRONAGE_SETTLEMENT_SHAPE;
     const uint8_t *common[] = {
         settlement->network_genesis_root,
         settlement->patronage_intent_root,
@@ -75,6 +64,26 @@ static enum vcs_zcode_patronage_settlement_error settlement_fields(
         (settlement->action == VCS_ZCODE_PATRONAGE_SIMULATED_REFUNDED &&
          evidence_count != 0))
         return VCS_ZCODE_PATRONAGE_SETTLEMENT_SHAPE;
+    return VCS_ZCODE_PATRONAGE_SETTLEMENT_OK;
+}
+
+static enum vcs_zcode_patronage_settlement_error settlement_fields(
+    const struct vcs_zcode_patronage_settlement_v1 *settlement,
+    bool signed_wire)
+{
+    if (!settlement) return VCS_ZCODE_PATRONAGE_SETTLEMENT_NULL;
+    uint8_t flags = VCS_ZCODE_PATRONAGE_SETTLEMENT_SIMULATION_ONLY |
+        VCS_ZCODE_PATRONAGE_SETTLEMENT_NO_LIVE_FUNDS |
+        VCS_ZCODE_PATRONAGE_SETTLEMENT_NO_TRANSACTION_BYTES;
+    if (settlement->schema_version !=
+            VCS_ZCODE_PATRONAGE_SETTLEMENT_VERSION ||
+        (settlement->action != VCS_ZCODE_PATRONAGE_SIMULATED_SETTLED &&
+         settlement->action != VCS_ZCODE_PATRONAGE_SIMULATED_REFUNDED) ||
+        settlement->flags != flags)
+        return VCS_ZCODE_PATRONAGE_SETTLEMENT_SHAPE;
+    enum vcs_zcode_patronage_settlement_error error =
+        settlement_root_fields(settlement);
+    if (error != VCS_ZCODE_PATRONAGE_SETTLEMENT_OK) return error;
     if (settlement->amount_atoms == 0)
         return VCS_ZCODE_PATRONAGE_SETTLEMENT_AMOUNT;
     if (settlement->created_unix <= 0 || settlement->observed_height == 0 ||
@@ -92,6 +101,45 @@ vcs_zcode_patronage_settlement_validate(
     return settlement_fields(settlement, true);
 }
 
+static bool settlement_write_prefix(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_patronage_settlement_v1 *settlement)
+{
+    return zcl_codec_write_bytes(writer, settlement_magic, 8) &&
+        zcl_codec_write_u16le(writer, settlement->schema_version) &&
+        zcl_codec_write_u8(writer, settlement->action) &&
+        zcl_codec_write_u8(writer, settlement->flags) &&
+        zcl_codec_write_u32le(writer, 0) &&
+        zcl_codec_write_bytes(writer,
+            settlement->network_genesis_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            settlement->patronage_intent_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            settlement->patronage_funding_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            settlement->creation_attribution_root, 32) &&
+        zcl_codec_write_bytes(writer, settlement->task_root, 32) &&
+        zcl_codec_write_bytes(writer, settlement->candidate_root, 32);
+}
+
+static bool settlement_write_suffix(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_patronage_settlement_v1 *settlement)
+{
+    return zcl_codec_write_bytes(writer, settlement->proof_policy_root, 32) &&
+        zcl_codec_write_bytes(writer, settlement->proof_set_root, 32) &&
+        zcl_codec_write_bytes(writer, settlement->proven_lane_root, 32) &&
+        zcl_codec_write_bytes(writer, settlement->score_receipt_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            settlement->recipient_contributor_binding_root, 32) &&
+        zcl_codec_write_bytes(writer, settlement->settler_zid_pubkey, 32) &&
+        zcl_codec_write_u64le(writer, settlement->amount_atoms) &&
+        zcl_codec_write_i64le(writer, settlement->created_unix) &&
+        zcl_codec_write_u64le(writer, settlement->observed_height) &&
+        zcl_codec_write_i64le(writer, settlement->observed_mtp) &&
+        zcl_codec_write_u64le(writer, settlement->sequence);
+}
+
 static enum vcs_zcode_patronage_settlement_error settlement_body(
     const struct vcs_zcode_patronage_settlement_v1 *settlement,
     uint8_t out[VCS_ZCODE_PATRONAGE_SETTLEMENT_BODY_BYTES])
@@ -103,33 +151,8 @@ static enum vcs_zcode_patronage_settlement_error settlement_body(
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out,
                           VCS_ZCODE_PATRONAGE_SETTLEMENT_BODY_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, settlement_magic, 8) &&
-        zcl_codec_write_u16le(&writer, settlement->schema_version) &&
-        zcl_codec_write_u8(&writer, settlement->action) &&
-        zcl_codec_write_u8(&writer, settlement->flags) &&
-        zcl_codec_write_u32le(&writer, 0) &&
-        zcl_codec_write_bytes(&writer,
-            settlement->network_genesis_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            settlement->patronage_intent_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            settlement->patronage_funding_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            settlement->creation_attribution_root, 32) &&
-        zcl_codec_write_bytes(&writer, settlement->task_root, 32) &&
-        zcl_codec_write_bytes(&writer, settlement->candidate_root, 32) &&
-        zcl_codec_write_bytes(&writer, settlement->proof_policy_root, 32) &&
-        zcl_codec_write_bytes(&writer, settlement->proof_set_root, 32) &&
-        zcl_codec_write_bytes(&writer, settlement->proven_lane_root, 32) &&
-        zcl_codec_write_bytes(&writer, settlement->score_receipt_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            settlement->recipient_contributor_binding_root, 32) &&
-        zcl_codec_write_bytes(&writer, settlement->settler_zid_pubkey, 32) &&
-        zcl_codec_write_u64le(&writer, settlement->amount_atoms) &&
-        zcl_codec_write_i64le(&writer, settlement->created_unix) &&
-        zcl_codec_write_u64le(&writer, settlement->observed_height) &&
-        zcl_codec_write_i64le(&writer, settlement->observed_mtp) &&
-        zcl_codec_write_u64le(&writer, settlement->sequence);
+    bool ok = settlement_write_prefix(&writer, settlement) &&
+        settlement_write_suffix(&writer, settlement);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == VCS_ZCODE_PATRONAGE_SETTLEMENT_BODY_BYTES
@@ -169,6 +192,44 @@ vcs_zcode_patronage_settlement_serialize(
     return error;
 }
 
+static bool settlement_read_prefix(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_patronage_settlement_v1 *out,
+    uint8_t magic[8], uint32_t *reserved)
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u8(reader, &out->action) &&
+        zcl_codec_read_u8(reader, &out->flags) &&
+        zcl_codec_read_u32le(reader, reserved) &&
+        zcl_codec_read_bytes(reader, out->network_genesis_root, 32) &&
+        zcl_codec_read_bytes(reader, out->patronage_intent_root, 32) &&
+        zcl_codec_read_bytes(reader, out->patronage_funding_root, 32) &&
+        zcl_codec_read_bytes(reader, out->creation_attribution_root, 32) &&
+        zcl_codec_read_bytes(reader, out->task_root, 32) &&
+        zcl_codec_read_bytes(reader, out->candidate_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proof_policy_root, 32);
+}
+
+static bool settlement_read_suffix(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_patronage_settlement_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->proof_set_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proven_lane_root, 32) &&
+        zcl_codec_read_bytes(reader, out->score_receipt_root, 32) &&
+        zcl_codec_read_bytes(reader,
+            out->recipient_contributor_binding_root, 32) &&
+        zcl_codec_read_bytes(reader, out->settler_zid_pubkey, 32) &&
+        zcl_codec_read_u64le(reader, &out->amount_atoms) &&
+        zcl_codec_read_i64le(reader, &out->created_unix) &&
+        zcl_codec_read_u64le(reader, &out->observed_height) &&
+        zcl_codec_read_i64le(reader, &out->observed_mtp) &&
+        zcl_codec_read_u64le(reader, &out->sequence) &&
+        zcl_codec_read_bytes(reader, out->signature, 64) &&
+        zcl_codec_reader_finish(reader);
+}
+
 enum vcs_zcode_patronage_settlement_error
 vcs_zcode_patronage_settlement_parse(
     const uint8_t *wire, size_t wire_len,
@@ -181,31 +242,8 @@ vcs_zcode_patronage_settlement_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8]; uint32_t reserved = 0;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u8(&reader, &out->action) &&
-        zcl_codec_read_u8(&reader, &out->flags) &&
-        zcl_codec_read_u32le(&reader, &reserved) &&
-        zcl_codec_read_bytes(&reader, out->network_genesis_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->patronage_intent_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->patronage_funding_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->creation_attribution_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->task_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->candidate_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_policy_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_set_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proven_lane_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->score_receipt_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-            out->recipient_contributor_binding_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->settler_zid_pubkey, 32) &&
-        zcl_codec_read_u64le(&reader, &out->amount_atoms) &&
-        zcl_codec_read_i64le(&reader, &out->created_unix) &&
-        zcl_codec_read_u64le(&reader, &out->observed_height) &&
-        zcl_codec_read_i64le(&reader, &out->observed_mtp) &&
-        zcl_codec_read_u64le(&reader, &out->sequence) &&
-        zcl_codec_read_bytes(&reader, out->signature, 64) &&
-        zcl_codec_reader_finish(&reader);
+    bool ok = settlement_read_prefix(&reader, out, magic, &reserved) &&
+        settlement_read_suffix(&reader, out);
     enum vcs_zcode_patronage_settlement_error error = !ok
         ? VCS_ZCODE_PATRONAGE_SETTLEMENT_WIRE_SIZE
         : memcmp(magic, settlement_magic, 8) != 0
