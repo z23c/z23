@@ -1559,9 +1559,6 @@ engine/services/src/node_db_import_pipeline.c:node_db_import_decoder_thread:17
 engine/services/src/node_db_import_pipeline.c:node_db_import_writer_thread:30
 engine/services/src/node_db_import_service.c:node_db_import_service_run:58
 engine/services/src/node_health_service.c:node_health_collect:137
-engine/services/src/nullifier_backfill_chain.c:nbf_chain_binding_capture:19
-engine/services/src/nullifier_backfill_chain.c:nbf_chain_binding_read:18
-engine/services/src/nullifier_backfill_chain.c:nbf_chain_body_verify:19
 engine/services/src/nullifier_backfill_service.c:nbf_reconcile_preloaded_nullifiers:17
 engine/services/src/nullifier_backfill_service.c:nullifier_backfill_service_run:28
 engine/services/src/op_return_backfill_service.c:backfill_run_once_typed:36

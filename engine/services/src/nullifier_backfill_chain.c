@@ -64,6 +64,32 @@ bool nbf_chain_binding_equal(const struct nbf_chain_binding *a,
            uint256_eq(&a->tip_hash, &b->tip_hash);
 }
 
+static void nbf_binding_read_outputs_reset(struct nbf_chain_binding *out,
+                                           bool *found_out,
+                                           bool *valid_out)
+{
+    if (found_out)
+        *found_out = false;
+    if (valid_out)
+        *valid_out = false;
+    if (out)
+        memset(out, 0, sizeof(*out));
+}
+
+static bool nbf_binding_wire_header_valid(size_t len, const uint8_t *wire)
+{
+    return len == NBF_CHAIN_BINDING_WIRE_SIZE &&
+           wire[0] == NBF_CHAIN_BINDING_VERSION &&
+           wire[1] == 0 && wire[2] == 0 && wire[3] == 0;
+}
+
+static bool nbf_binding_heights_valid(uint32_t target_height,
+                                      uint32_t tip_height)
+{
+    return target_height <= INT_MAX && tip_height <= INT_MAX &&
+           tip_height >= target_height;
+}
+
 struct zcl_result nbf_chain_binding_read(
     sqlite3 *db,
     struct nbf_chain_binding *out,
@@ -74,12 +100,7 @@ struct zcl_result nbf_chain_binding_read(
     size_t len = 0;
     bool found = false;
 
-    if (found_out)
-        *found_out = false;
-    if (valid_out)
-        *valid_out = false;
-    if (out)
-        memset(out, 0, sizeof(*out));
+    nbf_binding_read_outputs_reset(out, found_out, valid_out);
     if (!db || !out || !found_out || !valid_out) {
         LOG_WARN(NBF_CHAIN_SUBSYS, "read_chain_binding: invalid args");
         return ZCL_ERR(-4, "read_chain_binding invalid args");
@@ -97,8 +118,7 @@ struct zcl_result nbf_chain_binding_read(
     *found_out = found;
     if (!found)
         return ZCL_OK;
-    if (len != sizeof(wire) || wire[0] != NBF_CHAIN_BINDING_VERSION ||
-        wire[1] != 0 || wire[2] != 0 || wire[3] != 0) {
+    if (!nbf_binding_wire_header_valid(len, wire)) {
         LOG_WARN(NBF_CHAIN_SUBSYS,
                  "read_chain_binding: malformed version/length len=%zu",
                  len);
@@ -106,8 +126,7 @@ struct zcl_result nbf_chain_binding_read(
     }
     uint32_t target_height = nbf_get_u32le(wire + 4);
     uint32_t tip_height = nbf_get_u32le(wire + 40);
-    if (target_height > INT_MAX || tip_height > INT_MAX ||
-        tip_height < target_height) {
+    if (!nbf_binding_heights_valid(target_height, tip_height)) {
         LOG_WARN(NBF_CHAIN_SUBSYS,
                  "read_chain_binding: invalid heights target=%u tip=%u",
                  target_height, tip_height);
@@ -119,6 +138,21 @@ struct zcl_result nbf_chain_binding_read(
     memcpy(out->tip_hash.data, wire + 44, 32);
     *valid_out = true;
     return ZCL_OK;
+}
+
+static bool nbf_chain_window_proves_target(
+    const struct active_chain_window_snapshot *snapshot,
+    int target_height)
+{
+    return snapshot->tip && snapshot->requested &&
+           snapshot->height >= target_height &&
+           snapshot->tip->nHeight == snapshot->height &&
+           snapshot->requested->nHeight == target_height &&
+           snapshot->tip->phashBlock && snapshot->requested->phashBlock &&
+           !block_has_any_failure(snapshot->tip) &&
+           !block_has_any_failure(snapshot->requested) &&
+           block_index_is_valid(snapshot->tip, BLOCK_VALID_TREE) &&
+           block_index_is_valid(snapshot->requested, BLOCK_VALID_TREE);
 }
 
 struct zcl_result nbf_chain_binding_capture(
@@ -140,15 +174,7 @@ struct zcl_result nbf_chain_binding_capture(
     memset(&snapshot, 0, sizeof(snapshot));
     if (!active_chain_capture_window(&cfg->main->chain_active,
                                      target_height, &snapshot) ||
-        !snapshot.tip || !snapshot.requested ||
-        snapshot.height < target_height ||
-        snapshot.tip->nHeight != snapshot.height ||
-        snapshot.requested->nHeight != target_height ||
-        !snapshot.tip->phashBlock || !snapshot.requested->phashBlock ||
-        block_has_any_failure(snapshot.tip) ||
-        block_has_any_failure(snapshot.requested) ||
-        !block_index_is_valid(snapshot.tip, BLOCK_VALID_TREE) ||
-        !block_index_is_valid(snapshot.requested, BLOCK_VALID_TREE)) {
+        !nbf_chain_window_proves_target(&snapshot, target_height)) {
         LOG_WARN(NBF_CHAIN_SUBSYS,
                  "capture_chain_binding: selected prefix unavailable "
                  "target=%d window=%d tip=%p requested=%p",
@@ -182,6 +208,28 @@ bool nbf_chain_binding_store_in_tx(
     return true;
 }
 
+static bool nbf_body_verify_args_valid(const struct nbf_chain_binding *binding,
+                                       const struct block *blk,
+                                       int64_t height)
+{
+    return binding && binding->target && blk && height >= 0 &&
+           height <= binding->target_height;
+}
+
+static bool nbf_ancestor_proves_height(struct block_index *expected,
+                                       int64_t height)
+{
+    return expected && expected->nHeight == height && expected->phashBlock &&
+           !block_has_any_failure(expected) &&
+           block_index_is_valid(expected, BLOCK_VALID_TREE);
+}
+
+static bool nbf_body_tx_count_valid(size_t num_vtx)
+{
+    return num_vtx > 0 && num_vtx <= MAX_BLOCK_TRANSACTIONS &&
+           num_vtx <= SIZE_MAX / sizeof(struct uint256);
+}
+
 struct zcl_result nbf_chain_body_verify(
     const struct nbf_chain_binding *binding,
     const struct block *blk,
@@ -192,17 +240,14 @@ struct zcl_result nbf_chain_body_verify(
     struct uint256 merkle_root;
     struct uint256 *txids;
 
-    if (!binding || !binding->target || !blk || height < 0 ||
-        height > binding->target_height) {
+    if (!nbf_body_verify_args_valid(binding, blk, height)) {
         LOG_WARN(NBF_CHAIN_SUBSYS, "verify_selected_body: invalid h=%lld",
                  (long long)height);
         return ZCL_ERR(-17, "invalid selected body height %lld",
                        (long long)height);
     }
     expected = block_index_get_ancestor(binding->target, (int)height);
-    if (!expected || expected->nHeight != height || !expected->phashBlock ||
-        block_has_any_failure(expected) ||
-        !block_index_is_valid(expected, BLOCK_VALID_TREE)) {
+    if (!nbf_ancestor_proves_height(expected, height)) {
         LOG_WARN(NBF_CHAIN_SUBSYS,
                  "verify_selected_body: selected ancestry unavailable h=%lld",
                  (long long)height);
@@ -220,8 +265,7 @@ struct zcl_result nbf_chain_body_verify(
         return ZCL_ERR(-19, "block body is not selected-chain height %lld",
                        (long long)height);
     }
-    if (blk->num_vtx == 0 || blk->num_vtx > MAX_BLOCK_TRANSACTIONS ||
-        blk->num_vtx > SIZE_MAX / sizeof(*txids)) {
+    if (!nbf_body_tx_count_valid(blk->num_vtx)) {
         LOG_WARN(NBF_CHAIN_SUBSYS,
                  "verify_selected_body: invalid tx count h=%lld count=%zu",
                  (long long)height, blk->num_vtx);
