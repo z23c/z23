@@ -125,6 +125,59 @@ static bool public_install_write_all(SSL *ssl, const void *buf, size_t n)
     return true;
 }
 
+/* Operator-set front paths (-site-home= / -site-start=). Empty means the
+ * default: "/" redirects browsers to /explorer and "/start" is not special.
+ * Set once at boot before the listener serves, copied here. */
+static char g_front_home[HTTPS_FRONT_PATH_MAX];
+static char g_front_start[HTTPS_FRONT_PATH_MAX];
+
+/* A redirect target must be a rooted local path: "/" first, not "//" (a
+ * protocol-relative URL leaves the site), no backslash, and clean under
+ * path_check_url_arg (no control bytes, no ".." segment). */
+static bool https_front_path_ok(const char *name, const char *p)
+{
+    if (!path_check_url_arg(p, HTTPS_FRONT_PATH_MAX - 1) || p[1] == '/' ||
+        strchr(p, '\\') != NULL) {
+        LOG_WARN("https", "-site-%s path rejected; keeping the default", name);
+        return false;
+    }
+    return true;
+}
+
+void https_server_set_front_paths(const char *home, const char *start)
+{
+    g_front_home[0] = '\0';
+    g_front_start[0] = '\0';
+    if (home && home[0] && https_front_path_ok("home", home))
+        snprintf(g_front_home, sizeof(g_front_home), "%s", home);
+    if (start && start[0] && https_front_path_ok("start", start))
+        snprintf(g_front_start, sizeof(g_front_start), "%s", start);
+}
+
+/* Where a browser GET "/" is sent. */
+const char *https_front_root_target(void)
+{
+    return g_front_home[0] ? g_front_home : "/explorer";
+}
+
+/* Where GET/HEAD "/start" is sent, or NULL when it is not special. */
+const char *https_front_start_target(const char *path)
+{
+    return (g_front_start[0] && strcmp(path, "/start") == 0)
+               ? g_front_start : NULL;
+}
+
+#ifdef ZCL_TESTING
+const char *https_root_redirect_target_for_testing(void)
+{
+    return https_front_root_target();
+}
+const char *https_start_redirect_target_for_testing(const char *path)
+{
+    return https_front_start_target(path);
+}
+#endif
+
 bool https_server_try_public_install(SSL *ssl, const char *url)
 {
     char filepath[PATH_MAX];

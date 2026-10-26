@@ -34,5 +34,11 @@ void https_server_handle_http_client_fd(platform_socket_t fd,
  * keep the explorer redirect. */
 struct ssl_st;
 bool https_server_try_public_install(struct ssl_st *ssl, const char *url);
+/* Operator-set front paths (https_server_set_front_paths): the Location for
+ * a browser GET /, and for GET/HEAD /start (NULL when /start is not
+ * special). */
+#define HTTPS_FRONT_PATH_MAX 256
+const char *https_front_root_target(void);
+const char *https_front_start_target(const char *path);
 
 #endif /* ZCL_NET_HTTPS_SERVER_INTERNAL_H */

@@ -27,6 +27,67 @@
     else { printf("FAIL\n"); failures++; }                          \
 } while (0)
 
+static int ish_front_paths(void)
+{
+    int failures = 0;
+    /* Front paths: default-off; set paths steer the browser root and
+     * /start; a bad path is refused and keeps the default. */
+    https_server_set_front_paths(NULL, NULL);
+    ISH_CHECK("front paths default: root goes to /explorer",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/explorer") == 0);
+    ISH_CHECK("front paths default: /start is not special",
+              https_start_redirect_target_for_testing("/start") == NULL);
+    https_server_set_front_paths("", "");
+    ISH_CHECK("empty front paths keep the defaults",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/explorer") == 0 &&
+              https_start_redirect_target_for_testing("/start") == NULL);
+    https_server_set_front_paths("/wiki/home", "/wiki/start.txt");
+    ISH_CHECK("site-home steers the browser root",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/wiki/home") == 0);
+    ISH_CHECK("site-start steers /start only",
+              strcmp(https_start_redirect_target_for_testing("/start"),
+                     "/wiki/start.txt") == 0 &&
+              https_start_redirect_target_for_testing("/starts") == NULL &&
+              https_start_redirect_target_for_testing("/") == NULL);
+    ISH_CHECK("script clients still want the installer with front paths set",
+              https_root_wants_install_script_for_testing("curl/8.0", ""));
+    https_server_set_front_paths("wiki", "//evil.example/x");
+    ISH_CHECK("unrooted and protocol-relative paths are refused",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/explorer") == 0 &&
+              https_start_redirect_target_for_testing("/start") == NULL);
+    https_server_set_front_paths("/a/../b", "/x\r\nSet-Cookie: y=1");
+    ISH_CHECK("dot-dot and control bytes are refused",
+              strcmp(https_root_redirect_target_for_testing(),
+                     "/explorer") == 0 &&
+              https_start_redirect_target_for_testing("/start") == NULL);
+    https_server_set_front_paths(NULL, NULL);
+    return failures;
+}
+
+static int ish_script_steps(const char *body)
+{
+    int failures = 0;
+    ISH_CHECK("the script reports each step on stderr",
+              body && strstr(body, "say \"checking tools") != NULL &&
+                  strstr(body, "say \"cloning ") != NULL &&
+                  strstr(body, "say \"updating existing clone") != NULL &&
+                  strstr(body, "say \"building with $jobs jobs") != NULL &&
+                  strstr(body, "say \"done\"") != NULL &&
+                  strstr(body, ">&2") != NULL);
+    ISH_CHECK("the script ends with the contributor pointer after Built",
+              body && strstr(body, "echo \"Built. Next:") != NULL &&
+                  strstr(strstr(body, "echo \"Built. Next:"),
+                         "Want to contribute? Read $SRC/.github/"
+                         "CONTRIBUTING.md, then post a claim in board room "
+                         "contrib (https://z23.sh/start).") != NULL);
+
+    return failures;
+}
+
 int test_install_sh_site(void)
 {
     printf("\n=== install.sh site tests ===\n");
@@ -58,19 +119,7 @@ int test_install_sh_site(void)
               body && strstr(body, "__Z23_PIN__") == NULL);
     ISH_CHECK("the Z23_PIN= assignment line survived substitution",
               body && strstr(body, "Z23_PIN=\"") != NULL);
-    ISH_CHECK("the script reports each step on stderr",
-              body && strstr(body, "say \"checking tools") != NULL &&
-                  strstr(body, "say \"cloning ") != NULL &&
-                  strstr(body, "say \"updating existing clone") != NULL &&
-                  strstr(body, "say \"building with $jobs jobs") != NULL &&
-                  strstr(body, "say \"done\"") != NULL &&
-                  strstr(body, ">&2") != NULL);
-    ISH_CHECK("the script ends with the contributor pointer after Built",
-              body && strstr(body, "echo \"Built. Next:") != NULL &&
-                  strstr(strstr(body, "echo \"Built. Next:"),
-                         "Want to contribute? Read $SRC/.github/"
-                         "CONTRIBUTING.md, then post a claim in board room "
-                         "contrib (https://z23.sh/start).") != NULL);
+    failures += ish_script_steps(body);
 
     /* HEAD: same headers, no body. */
     size_t head_n = install_sh_handle_request("HEAD", "/install.sh", NULL, 0,
@@ -113,41 +162,7 @@ int test_install_sh_site(void)
     ISH_CHECK("no User-Agent at all stays a browsing request",
               !https_root_wants_install_script_for_testing(NULL, NULL));
 
-    /* Front paths: default-off; set paths steer the browser root and
-     * /start; a bad path is refused and keeps the default. */
-    https_server_set_front_paths(NULL, NULL);
-    ISH_CHECK("front paths default: root goes to /explorer",
-              strcmp(https_root_redirect_target_for_testing(),
-                     "/explorer") == 0);
-    ISH_CHECK("front paths default: /start is not special",
-              https_start_redirect_target_for_testing("/start") == NULL);
-    https_server_set_front_paths("", "");
-    ISH_CHECK("empty front paths keep the defaults",
-              strcmp(https_root_redirect_target_for_testing(),
-                     "/explorer") == 0 &&
-              https_start_redirect_target_for_testing("/start") == NULL);
-    https_server_set_front_paths("/wiki/home", "/wiki/start.txt");
-    ISH_CHECK("site-home steers the browser root",
-              strcmp(https_root_redirect_target_for_testing(),
-                     "/wiki/home") == 0);
-    ISH_CHECK("site-start steers /start only",
-              strcmp(https_start_redirect_target_for_testing("/start"),
-                     "/wiki/start.txt") == 0 &&
-              https_start_redirect_target_for_testing("/starts") == NULL &&
-              https_start_redirect_target_for_testing("/") == NULL);
-    ISH_CHECK("script clients still want the installer with front paths set",
-              https_root_wants_install_script_for_testing("curl/8.0", ""));
-    https_server_set_front_paths("wiki", "//evil.example/x");
-    ISH_CHECK("unrooted and protocol-relative paths are refused",
-              strcmp(https_root_redirect_target_for_testing(),
-                     "/explorer") == 0 &&
-              https_start_redirect_target_for_testing("/start") == NULL);
-    https_server_set_front_paths("/a/../b", "/x\r\nSet-Cookie: y=1");
-    ISH_CHECK("dot-dot and control bytes are refused",
-              strcmp(https_root_redirect_target_for_testing(),
-                     "/explorer") == 0 &&
-              https_start_redirect_target_for_testing("/start") == NULL);
-    https_server_set_front_paths(NULL, NULL);
+    failures += ish_front_paths();
 
     return failures;
 }

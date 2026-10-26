@@ -316,3 +316,7 @@ later lane flips it HARD.
 - 2026-10-26T21:48:23Z — REASON: Owner-authorized 2026-10-26: default-off https_server_set_front_paths so a site node can point the browser root and /start elsewhere; existing behaviour unchanged when unset
   old ROOT: bfa2e068bab92e18f15eb5be151823feb8b6929dd6e902d59161a61256840681
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-26T22:05:12Z — REASON: Owner-authorized 2026-10-26 front-paths change: move the helpers from https_server.c to https_server_install.c to stay under the 1500-line file cap; no behaviour change
+  old ROOT: e20033051bbd1bad0804e1251d0a746800e3b52d56b0a7682066959216539fd1
+  by: owner unseal ritual (make core-unseal)
