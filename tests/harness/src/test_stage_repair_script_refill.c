@@ -609,54 +609,40 @@ static bool srf_log_ok_at(sqlite3 *db, const char *table, int height)
     return ok;
 }
 
-static int run_drain_harness_refill(void)
-{
-    int failures = 0;
-
-    blocker_module_init();
-    chain_params_select(CHAIN_REGTEST);
-    const struct chain_params *cp = chain_params_get();
-
+struct srf_drain_paths {
     char dir[256];
+    char netdir[512];
+    char blocksdir[640];
+    char log_path[512];
+};
+
+static void srf_drain_make_paths(struct srf_drain_paths *paths)
+{
     srf_mkdir_p("./test-tmp");
-    test_fmt_tmpdir(dir, sizeof(dir), "stage_repair_script_refill", "drain");
-    srf_mkdir_p(dir);
+    test_fmt_tmpdir(paths->dir, sizeof(paths->dir),
+                    "stage_repair_script_refill", "drain");
+    srf_mkdir_p(paths->dir);
 
     /* SetDataDir already clears the cache and populates cachedDataDirNet =
      * <dir>/regtest; do NOT ClearDataDirCache() here or GetDataDir falls back
      * to the shared default ~/.zclassic-c23/regtest and races other groups. */
-    SetDataDir(dir);
-    char netdir[512];
-    GetDataDir(true, netdir, sizeof(netdir));
-    srf_mkdir_p(netdir);
-    char blocksdir[640];
-    snprintf(blocksdir, sizeof(blocksdir), "%s/blocks", netdir);
-    srf_mkdir_p(blocksdir);
+    SetDataDir(paths->dir);
+    GetDataDir(true, paths->netdir, sizeof(paths->netdir));
+    srf_mkdir_p(paths->netdir);
+    snprintf(paths->blocksdir, sizeof(paths->blocksdir), "%s/blocks",
+             paths->netdir);
+    srf_mkdir_p(paths->blocksdir);
 
-    char log_path[512];
-    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
+    snprintf(paths->log_path, sizeof(paths->log_path), "%s/events.log",
+             paths->dir);
+}
 
-    progress_store_close();
-    bool store_ok = progress_store_open(dir);
-    SRF_CHECK("drain: progress_store opens", store_ok);
-
-    event_log_t *lg = store_ok ? event_log_open(log_path) : NULL;
-    SRF_CHECK("drain: event log opens", lg != NULL);
-
-    if (!store_ok || !lg) {
-        if (lg) event_log_close(lg);
-        progress_store_close();
-        SetDataDir(""); ClearDataDirCache();
-        chain_params_select(CHAIN_MAIN);
-        return failures + 1;
-    }
-
-    struct main_state ms;
-    main_state_init(&ms);
-
-    struct uint256 genesis_hash = cp->consensus.hashGenesisBlock;
+static int srf_drain_seed_genesis(struct main_state *ms,
+                                  struct uint256 *genesis_hash)
+{
+    int failures = 0;
     struct block_index *genesis = chainstate_insert_block_index(
-        (struct chainstate *)&ms, &genesis_hash);
+        (struct chainstate *)ms, genesis_hash);
     SRF_CHECK("drain: genesis block_index inserted", genesis != NULL);
     if (genesis) {
         genesis->nHeight = 0;
@@ -664,29 +650,42 @@ static int run_drain_harness_refill(void)
         genesis->nTx = 1;
         genesis->nChainTx = 1;
         genesis->nChainWork = GetBlockProof(genesis);
-        active_chain_move_window_tip(&ms.chain_active, genesis);
-        ms.pindex_best_header = genesis;
+        active_chain_move_window_tip(&ms->chain_active, genesis);
+        ms->pindex_best_header = genesis;
     }
+    return failures;
+}
 
-    bool stages_ok =
-        header_admit_stage_init(&ms) &&
-        validate_headers_stage_init(&ms) &&
-        body_fetch_stage_init(&ms) &&
-        body_persist_stage_init(&ms) &&
-        script_validate_stage_init(&ms) &&
-        proof_validate_stage_init(&ms) &&
-        utxo_apply_stage_init(&ms) &&
-        tip_finalize_stage_init(&ms);
-    SRF_CHECK("drain: all eight reducer stages init", stages_ok);
+static int srf_drain_init_stages(struct main_state *ms,
+                                 struct uint256 *genesis_hash,
+                                 bool *stages_ok)
+{
+    int failures = 0;
+    *stages_ok =
+        header_admit_stage_init(ms) &&
+        validate_headers_stage_init(ms) &&
+        body_fetch_stage_init(ms) &&
+        body_persist_stage_init(ms) &&
+        script_validate_stage_init(ms) &&
+        proof_validate_stage_init(ms) &&
+        utxo_apply_stage_init(ms) &&
+        tip_finalize_stage_init(ms);
+    SRF_CHECK("drain: all eight reducer stages init", *stages_ok);
     SRF_CHECK("drain: seed genesis utxo_apply row",
               srf_seed_genesis_utxo_apply_row(progress_store_db()));
     SRF_CHECK("drain: tip_finalize anchor seed at genesis",
-              tip_finalize_stage_seed_anchor(0, genesis_hash.data, false));
+              tip_finalize_stage_seed_anchor(0, genesis_hash->data, false));
+    return failures;
+}
 
-    sqlite3 *db = progress_store_db();
-
+static bool srf_drain_mine_chain(struct main_state *ms,
+                                 const struct chain_params *cp,
+                                 const char *netdir,
+                                 const struct uint256 *genesis_hash,
+                                 bool stages_ok)
+{
     /* Mine + admit + persist blocks 1..3 (chained, coinbase-only). */
-    struct uint256 prev = genesis_hash;
+    struct uint256 prev = *genesis_hash;
     bool chain_built = stages_ok;
     for (int h = 1; chain_built && h <= 3; h++) {
         struct block blk;
@@ -709,7 +708,7 @@ static int run_drain_harness_refill(void)
         chain_built = mailbox_header_admit_push(&m);
         (void)header_admit_stage_drain(10);
 
-        struct block_index *bi = block_map_find(&ms.map_block_index, &bh);
+        struct block_index *bi = block_map_find(&ms->map_block_index, &bh);
         if (chain_built && bi) {
             struct disk_block_pos pos;
             disk_block_pos_init(&pos);
@@ -723,8 +722,13 @@ static int run_drain_harness_refill(void)
         prev = bh;
         block_free(&blk);
     }
-    SRF_CHECK("drain: blocks 1..3 mined + admitted + persisted", chain_built);
+    return chain_built;
+}
 
+static int srf_drain_first_pass_check(sqlite3 *db, int32_t *coins,
+                                      bool *coins_found)
+{
+    int failures = 0;
     /* First pass: script/proof walk all three; utxo applies ONLY block 1 —
      * the live shape (script/proof cursors ahead, coins frontier behind). */
     (void)validate_headers_stage_drain(100);
@@ -736,18 +740,21 @@ static int run_drain_harness_refill(void)
         (void)utxo_apply_stage_step_once();
     (void)tip_finalize_stage_step_once();
 
-    int32_t coins = -1;
-    bool coins_found = false;
     SRF_CHECK("drain: coins frontier readable",
-              coins_kv_get_applied_height(db, &coins, &coins_found));
+              coins_kv_get_applied_height(db, coins, coins_found));
     SRF_CHECK("drain: first pass — script/proof at 4, coins at 2",
               cursor_value(db, "script_validate") == 4 &&
               cursor_value(db, "proof_validate") == 4 &&
               cursor_value(db, "utxo_apply") == 2 &&
-              coins_found && coins == 2 &&
+              *coins_found && *coins == 2 &&
               srf_log_ok_at(db, "script_validate_log", 2) &&
               srf_log_ok_at(db, "proof_validate_log", 2));
+    return failures;
+}
 
+static int srf_drain_check_fix2b_clamp(sqlite3 *db)
+{
+    int failures = 0;
     /* Simulate the bulldozed rowless hole at h=2 == coins_applied. */
     SRF_CHECK("drain: punch rowless script+proof hole at h=2",
               delete_height(db, "script_validate_log", 2) &&
@@ -782,15 +789,21 @@ static int run_drain_harness_refill(void)
               cursor_value(db, "utxo_apply") == utxo_before &&
               cursor_value(db, "tip_finalize") == tip_before &&
               total_log_rows(db) == rows_before);
+    return failures;
+}
 
+static int srf_drain_refill_check(sqlite3 *db, int32_t *coins,
+                                  bool *coins_found)
+{
+    int failures = 0;
     /* Production stages refill the hole (INSERT OR REPLACE) and coins
      * re-advance to the tip — the un-deadlock FIX-2 exists for. */
     (void)script_validate_stage_drain(100);
     (void)proof_validate_stage_drain(100);
     (void)utxo_apply_stage_drain(100);
 
-    coins = -1;
-    coins_found = false;
+    *coins = -1;
+    *coins_found = false;
     SRF_CHECK("drain: refill rewrote the hole and coins re-advanced",
               srf_log_ok_at(db, "script_validate_log", 2) &&
               srf_log_ok_at(db, "proof_validate_log", 2) &&
@@ -799,8 +812,57 @@ static int run_drain_harness_refill(void)
               cursor_value(db, "script_validate") == 4 &&
               cursor_value(db, "proof_validate") == 4 &&
               cursor_value(db, "utxo_apply") == 4 &&
-              coins_kv_get_applied_height(db, &coins, &coins_found) &&
-              coins_found && coins == 4);
+              coins_kv_get_applied_height(db, coins, coins_found) &&
+              *coins_found && *coins == 4);
+    return failures;
+}
+
+static int run_drain_harness_refill(void)
+{
+    int failures = 0;
+
+    blocker_module_init();
+    chain_params_select(CHAIN_REGTEST);
+    const struct chain_params *cp = chain_params_get();
+
+    struct srf_drain_paths paths;
+    srf_drain_make_paths(&paths);
+
+    progress_store_close();
+    bool store_ok = progress_store_open(paths.dir);
+    SRF_CHECK("drain: progress_store opens", store_ok);
+
+    event_log_t *lg = store_ok ? event_log_open(paths.log_path) : NULL;
+    SRF_CHECK("drain: event log opens", lg != NULL);
+
+    if (!store_ok || !lg) {
+        if (lg) event_log_close(lg);
+        progress_store_close();
+        SetDataDir(""); ClearDataDirCache();
+        chain_params_select(CHAIN_MAIN);
+        return failures + 1;
+    }
+
+    struct main_state ms;
+    main_state_init(&ms);
+
+    struct uint256 genesis_hash = cp->consensus.hashGenesisBlock;
+    failures += srf_drain_seed_genesis(&ms, &genesis_hash);
+
+    bool stages_ok = false;
+    failures += srf_drain_init_stages(&ms, &genesis_hash, &stages_ok);
+
+    sqlite3 *db = progress_store_db();
+
+    bool chain_built = srf_drain_mine_chain(&ms, cp, paths.netdir,
+                                            &genesis_hash, stages_ok);
+    SRF_CHECK("drain: blocks 1..3 mined + admitted + persisted", chain_built);
+
+    int32_t coins = -1;
+    bool coins_found = false;
+    failures += srf_drain_first_pass_check(db, &coins, &coins_found);
+    failures += srf_drain_check_fix2b_clamp(db);
+    failures += srf_drain_refill_check(db, &coins, &coins_found);
 
     /* teardown (drain-harness order) */
     tip_finalize_stage_shutdown();
@@ -814,11 +876,241 @@ static int run_drain_harness_refill(void)
     event_log_close(lg);
     progress_store_close();
     main_state_free(&ms);
-    test_cleanup_tmpdir(blocksdir);
-    test_cleanup_tmpdir(netdir);
-    test_cleanup_tmpdir(dir);
+    test_cleanup_tmpdir(paths.blocksdir);
+    test_cleanup_tmpdir(paths.netdir);
+    test_cleanup_tmpdir(paths.dir);
     SetDataDir(""); ClearDataDirCache();
     chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
+static int srf_check_rowless_hole_dry_run(sqlite3 *db, struct main_state *ms)
+{
+    int failures = 0;
+    struct stage_reducer_frontier_reconcile_result dry;
+    SRF_CHECK("T1: dry-run succeeds",
+              stage_reducer_frontier_reconcile_light_needed(
+                  db, ms, &dry));
+    SRF_CHECK("T1: dry-run detects + plans the clamp, no DB writes",
+              dry.hstar == A + 1 &&
+              !dry.refused_coin_tear &&
+              dry.lowest_script_validate_refill_hole == A + 2 &&
+              dry.lowest_proof_validate_refill_hole == -1 &&
+              dry.clamped_script_validate &&
+              dry.clamped_proof_validate &&
+              dry.script_validate_cursor_before == A + 4 &&
+              dry.script_validate_cursor_after == A + 2 &&
+              dry.proof_validate_cursor_before == A + 4 &&
+              dry.proof_validate_cursor_after == A + 2 &&
+              !dry.pre_refusal_unapplied_clamp &&
+              cursor_value(db, "script_validate") == A + 4 &&
+              cursor_value(db, "proof_validate") == A + 4 &&
+              cursor_value(db, "tip_finalize") == A + 4);
+    return failures;
+}
+
+static int srf_check_rowless_hole_apply(sqlite3 *db, struct main_state *ms,
+                                        int64_t rows_before)
+{
+    int failures = 0;
+    struct stage_reducer_frontier_reconcile_result rr;
+    SRF_CHECK("T1: apply succeeds",
+              stage_reducer_frontier_reconcile_light(db, ms, &rr));
+    SRF_CHECK("T1: clamps script/proof/tip_finalize to the hole",
+              rr.repaired &&
+              rr.clamped_script_validate &&
+              rr.clamped_proof_validate &&
+              rr.clamped_tip_finalize &&
+              cursor_value(db, "script_validate") == A + 2 &&
+              cursor_value(db, "proof_validate") == A + 2 &&
+              /* OWN-frame (task #31, corrected): served tip = A+2,
+               * backed by the intact transition row at A+1 and coins
+               * applied through A+1 (coins_applied A+2, NEXT-frame) —
+               * the same height the forward step rests at. */
+              cursor_value(db, "tip_finalize") == A + 2 &&
+              cursor_value(db, "validate_headers") == A + 4 &&
+              cursor_value(db, "body_fetch") == A + 4 &&
+              cursor_value(db, "body_persist") == A + 4);
+    SRF_CHECK("T1: utxo_apply cursor untouched, no log rows deleted",
+              cursor_value(db, "utxo_apply") == A + 2 &&
+              total_log_rows(db) == rows_before);
+    return failures;
+}
+
+/* T1 (synthetic): rowless script+proof hole at h0 == coins_applied,
+ * cursors at N > h0 — FIX-2b (via the full reconcile_light pipeline)
+ * clamps script/proof/tip_finalize to h0 and deletes nothing. */
+static int srf_run_rowless_hole_refill(void)
+{
+    int failures = 0;
+    struct srf_fixture fx;
+    SRF_CHECK("T1: setup fixture", setup_fixture(&fx, "t1_refill"));
+    sqlite3 *db = progress_store_db();
+
+    SRF_CHECK("T1: punch rowless hole at h0 = coins_applied",
+              delete_height(db, "script_validate_log", A + 2) &&
+              delete_height(db, "proof_validate_log", A + 2) &&
+              delete_height(db, "utxo_apply_log", A + 2) &&
+              delete_height(db, "utxo_apply_log", A + 3) &&
+              seed_cursor(db, "utxo_apply", A + 2));
+
+    int64_t rows_before = total_log_rows(db);
+
+    failures += srf_check_rowless_hole_dry_run(db, &fx.ms);
+    failures += srf_check_rowless_hole_apply(db, &fx.ms, rows_before);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+/* FIX-2a positive (direct call): refused coin tear pending, rowless
+ * script holes at A+1 (below coins → replay domain, OUT of bounds) and
+ * A+2 (== coins_applied → in bounds) — bounds arithmetic picks only the
+ * unapplied one, clamps, clears the refusal, claims the tick. */
+static int srf_run_unapplied_hole_clamp(void)
+{
+    int failures = 0;
+    struct srf_fixture fx;
+    SRF_CHECK("2a+: setup fixture", setup_fixture(&fx, "t2a_clamp"));
+    sqlite3 *db = progress_store_db();
+
+    SRF_CHECK("2a+: punch script holes at A+1 (applied) and A+2",
+              delete_height(db, "script_validate_log", A + 1) &&
+              delete_height(db, "script_validate_log", A + 2));
+
+    int64_t rows_before = total_log_rows(db);
+    struct stage_reducer_frontier_reconcile_result rr;
+    rr_init_direct(&rr, A, A + 3, A + 2);
+    rr.refused_coin_tear = true;
+
+    bool handled = false;
+    SRF_CHECK("2a+: try_unapplied_hole_clamp succeeds",
+              stage_reducer_frontier_try_unapplied_hole_clamp(
+                  db, true, &rr, &handled));
+    SRF_CHECK("2a+: clamps only the unapplied hole and claims the tick",
+              handled &&
+              rr.pre_refusal_unapplied_clamp &&
+              !rr.refused_coin_tear &&
+              rr.repaired &&
+              rr.clamped_script_validate &&
+              rr.lowest_script_validate_refill_hole == A + 2 &&
+              rr.script_validate_cursor_before == A + 4 &&
+              rr.script_validate_cursor_after == A + 2 &&
+              !rr.clamped_proof_validate &&
+              cursor_value(db, "script_validate") == A + 2 &&
+              cursor_value(db, "proof_validate") == A + 4);
+    SRF_CHECK("2a+: utxo/tip untouched, no rows deleted",
+              cursor_value(db, "utxo_apply") == A + 4 &&
+              cursor_value(db, "tip_finalize") == A + 4 &&
+              total_log_rows(db) == rows_before);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+/* FIX-2a negative: REAL coin tear — the only hole is strictly below the
+ * coins frontier (already applied). Bounds exclude it: handled stays
+ * false, the refusal stands, ZERO cursor writes, ZERO row writes. */
+static int srf_run_coin_tear_refusal(void)
+{
+    int failures = 0;
+    struct srf_fixture fx;
+    SRF_CHECK("2a-: setup fixture", setup_fixture(&fx, "t2a_tear"));
+    sqlite3 *db = progress_store_db();
+
+    SRF_CHECK("2a-: punch script hole at A+1 only (below coins=A+2)",
+              delete_height(db, "script_validate_log", A + 1));
+
+    int64_t rows_before = total_log_rows(db);
+    struct stage_reducer_frontier_reconcile_result rr;
+    rr_init_direct(&rr, A, A + 3, A + 2);
+    rr.refused_coin_tear = true;
+
+    bool handled = false;
+    SRF_CHECK("2a-: try_unapplied_hole_clamp succeeds",
+              stage_reducer_frontier_try_unapplied_hole_clamp(
+                  db, true, &rr, &handled));
+    SRF_CHECK("2a-: refusal stands, zero writes",
+              !handled &&
+              rr.refused_coin_tear &&
+              !rr.pre_refusal_unapplied_clamp &&
+              !rr.clamped_script_validate &&
+              !rr.clamped_proof_validate &&
+              rr.lowest_script_validate_refill_hole == -1 &&
+              cursor_value(db, "script_validate") == A + 4 &&
+              cursor_value(db, "proof_validate") == A + 4 &&
+              cursor_value(db, "utxo_apply") == A + 4 &&
+              cursor_value(db, "tip_finalize") == A + 4 &&
+              total_log_rows(db) == rows_before);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+/* Coins floor (direct FIX-2b): a hole strictly below coins_applied is
+ * DETECTED but the clamp is refused ("replay domain" WARN) — the
+ * stale-script replay owns it, not the forward refill. */
+static int srf_run_coins_floor_hold(void)
+{
+    int failures = 0;
+    struct srf_fixture fx;
+    SRF_CHECK("floor: setup fixture", setup_fixture(&fx, "t_floor"));
+    sqlite3 *db = progress_store_db();
+
+    SRF_CHECK("floor: hole at A+2 below coins frontier A+3",
+              delete_height(db, "script_validate_log", A + 2) &&
+              seed_coins_applied(db, A + 3));
+
+    int64_t rows_before = total_log_rows(db);
+    struct stage_reducer_frontier_reconcile_result rr;
+    rr_init_direct(&rr, A + 1, A + 3, A + 3);
+
+    SRF_CHECK("floor: reconcile_refill_cursors succeeds",
+              stage_reducer_frontier_reconcile_refill_cursors(
+                  db, NULL, true, &rr));
+    SRF_CHECK("floor: hole detected but clamp refused (replay domain)",
+              rr.lowest_script_validate_refill_hole == A + 2 &&
+              !rr.clamped_script_validate &&
+              !rr.clamped_proof_validate &&
+              rr.script_validate_cursor_after == A + 4 &&
+              cursor_value(db, "script_validate") == A + 4 &&
+              cursor_value(db, "proof_validate") == A + 4 &&
+              cursor_value(db, "utxo_apply") == A + 4 &&
+              total_log_rows(db) == rows_before);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+/* ok=0 row at the pin: a real failed verdict is NOT a refill hole —
+ * the scans require the row to be MISSING. Zero clamps, zero writes. */
+static int srf_run_ok0_verdict_respected(void)
+{
+    int failures = 0;
+    struct srf_fixture fx;
+    SRF_CHECK("ok0: setup fixture", setup_fixture(&fx, "t_ok0"));
+    sqlite3 *db = progress_store_db();
+
+    SRF_CHECK("ok0: real ok=0 script verdict at the pin",
+              put_hash_log(db, "script_validate_log", "block_hash",
+                           A + 2, 0, &fx.hashes[2]));
+
+    int64_t rows_before = total_log_rows(db);
+    struct stage_reducer_frontier_reconcile_result rr;
+    SRF_CHECK("ok0: reconcile_light succeeds",
+              stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
+    SRF_CHECK("ok0: verdict respected — no script/proof clamp",
+              rr.hstar == A + 1 &&
+              rr.lowest_script_validate_refill_hole == -1 &&
+              rr.lowest_proof_validate_refill_hole == -1 &&
+              !rr.clamped_script_validate &&
+              !rr.clamped_proof_validate &&
+              cursor_value(db, "script_validate") == A + 4 &&
+              cursor_value(db, "proof_validate") == A + 4 &&
+              cursor_value(db, "utxo_apply") == A + 4 &&
+              total_log_rows(db) == rows_before);
+
+    teardown_fixture(&fx);
     return failures;
 }
 
@@ -834,206 +1126,11 @@ int test_stage_repair_script_refill(void)
      * under regtest params. Restored to -1 (production default) before return. */
     reducer_frontier_test_set_compiled_anchor(A);
 
-    /* T1 (synthetic): rowless script+proof hole at h0 == coins_applied,
-     * cursors at N > h0 — FIX-2b (via the full reconcile_light pipeline)
-     * clamps script/proof/tip_finalize to h0 and deletes nothing. */
-    {
-        struct srf_fixture fx;
-        SRF_CHECK("T1: setup fixture", setup_fixture(&fx, "t1_refill"));
-        sqlite3 *db = progress_store_db();
-
-        SRF_CHECK("T1: punch rowless hole at h0 = coins_applied",
-                  delete_height(db, "script_validate_log", A + 2) &&
-                  delete_height(db, "proof_validate_log", A + 2) &&
-                  delete_height(db, "utxo_apply_log", A + 2) &&
-                  delete_height(db, "utxo_apply_log", A + 3) &&
-                  seed_cursor(db, "utxo_apply", A + 2));
-
-        int64_t rows_before = total_log_rows(db);
-
-        struct stage_reducer_frontier_reconcile_result dry;
-        SRF_CHECK("T1: dry-run succeeds",
-                  stage_reducer_frontier_reconcile_light_needed(
-                      db, &fx.ms, &dry));
-        SRF_CHECK("T1: dry-run detects + plans the clamp, no DB writes",
-                  dry.hstar == A + 1 &&
-                  !dry.refused_coin_tear &&
-                  dry.lowest_script_validate_refill_hole == A + 2 &&
-                  dry.lowest_proof_validate_refill_hole == -1 &&
-                  dry.clamped_script_validate &&
-                  dry.clamped_proof_validate &&
-                  dry.script_validate_cursor_before == A + 4 &&
-                  dry.script_validate_cursor_after == A + 2 &&
-                  dry.proof_validate_cursor_before == A + 4 &&
-                  dry.proof_validate_cursor_after == A + 2 &&
-                  !dry.pre_refusal_unapplied_clamp &&
-                  cursor_value(db, "script_validate") == A + 4 &&
-                  cursor_value(db, "proof_validate") == A + 4 &&
-                  cursor_value(db, "tip_finalize") == A + 4);
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        SRF_CHECK("T1: apply succeeds",
-                  stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
-        SRF_CHECK("T1: clamps script/proof/tip_finalize to the hole",
-                  rr.repaired &&
-                  rr.clamped_script_validate &&
-                  rr.clamped_proof_validate &&
-                  rr.clamped_tip_finalize &&
-                  cursor_value(db, "script_validate") == A + 2 &&
-                  cursor_value(db, "proof_validate") == A + 2 &&
-                  /* OWN-frame (task #31, corrected): served tip = A+2,
-                   * backed by the intact transition row at A+1 and coins
-                   * applied through A+1 (coins_applied A+2, NEXT-frame) —
-                   * the same height the forward step rests at. */
-                  cursor_value(db, "tip_finalize") == A + 2 &&
-                  cursor_value(db, "validate_headers") == A + 4 &&
-                  cursor_value(db, "body_fetch") == A + 4 &&
-                  cursor_value(db, "body_persist") == A + 4);
-        SRF_CHECK("T1: utxo_apply cursor untouched, no log rows deleted",
-                  cursor_value(db, "utxo_apply") == A + 2 &&
-                  total_log_rows(db) == rows_before);
-
-        teardown_fixture(&fx);
-    }
-
-    /* FIX-2a positive (direct call): refused coin tear pending, rowless
-     * script holes at A+1 (below coins → replay domain, OUT of bounds) and
-     * A+2 (== coins_applied → in bounds) — bounds arithmetic picks only the
-     * unapplied one, clamps, clears the refusal, claims the tick. */
-    {
-        struct srf_fixture fx;
-        SRF_CHECK("2a+: setup fixture", setup_fixture(&fx, "t2a_clamp"));
-        sqlite3 *db = progress_store_db();
-
-        SRF_CHECK("2a+: punch script holes at A+1 (applied) and A+2",
-                  delete_height(db, "script_validate_log", A + 1) &&
-                  delete_height(db, "script_validate_log", A + 2));
-
-        int64_t rows_before = total_log_rows(db);
-        struct stage_reducer_frontier_reconcile_result rr;
-        rr_init_direct(&rr, A, A + 3, A + 2);
-        rr.refused_coin_tear = true;
-
-        bool handled = false;
-        SRF_CHECK("2a+: try_unapplied_hole_clamp succeeds",
-                  stage_reducer_frontier_try_unapplied_hole_clamp(
-                      db, true, &rr, &handled));
-        SRF_CHECK("2a+: clamps only the unapplied hole and claims the tick",
-                  handled &&
-                  rr.pre_refusal_unapplied_clamp &&
-                  !rr.refused_coin_tear &&
-                  rr.repaired &&
-                  rr.clamped_script_validate &&
-                  rr.lowest_script_validate_refill_hole == A + 2 &&
-                  rr.script_validate_cursor_before == A + 4 &&
-                  rr.script_validate_cursor_after == A + 2 &&
-                  !rr.clamped_proof_validate &&
-                  cursor_value(db, "script_validate") == A + 2 &&
-                  cursor_value(db, "proof_validate") == A + 4);
-        SRF_CHECK("2a+: utxo/tip untouched, no rows deleted",
-                  cursor_value(db, "utxo_apply") == A + 4 &&
-                  cursor_value(db, "tip_finalize") == A + 4 &&
-                  total_log_rows(db) == rows_before);
-
-        teardown_fixture(&fx);
-    }
-
-    /* FIX-2a negative: REAL coin tear — the only hole is strictly below the
-     * coins frontier (already applied). Bounds exclude it: handled stays
-     * false, the refusal stands, ZERO cursor writes, ZERO row writes. */
-    {
-        struct srf_fixture fx;
-        SRF_CHECK("2a-: setup fixture", setup_fixture(&fx, "t2a_tear"));
-        sqlite3 *db = progress_store_db();
-
-        SRF_CHECK("2a-: punch script hole at A+1 only (below coins=A+2)",
-                  delete_height(db, "script_validate_log", A + 1));
-
-        int64_t rows_before = total_log_rows(db);
-        struct stage_reducer_frontier_reconcile_result rr;
-        rr_init_direct(&rr, A, A + 3, A + 2);
-        rr.refused_coin_tear = true;
-
-        bool handled = false;
-        SRF_CHECK("2a-: try_unapplied_hole_clamp succeeds",
-                  stage_reducer_frontier_try_unapplied_hole_clamp(
-                      db, true, &rr, &handled));
-        SRF_CHECK("2a-: refusal stands, zero writes",
-                  !handled &&
-                  rr.refused_coin_tear &&
-                  !rr.pre_refusal_unapplied_clamp &&
-                  !rr.clamped_script_validate &&
-                  !rr.clamped_proof_validate &&
-                  rr.lowest_script_validate_refill_hole == -1 &&
-                  cursor_value(db, "script_validate") == A + 4 &&
-                  cursor_value(db, "proof_validate") == A + 4 &&
-                  cursor_value(db, "utxo_apply") == A + 4 &&
-                  cursor_value(db, "tip_finalize") == A + 4 &&
-                  total_log_rows(db) == rows_before);
-
-        teardown_fixture(&fx);
-    }
-
-    /* Coins floor (direct FIX-2b): a hole strictly below coins_applied is
-     * DETECTED but the clamp is refused ("replay domain" WARN) — the
-     * stale-script replay owns it, not the forward refill. */
-    {
-        struct srf_fixture fx;
-        SRF_CHECK("floor: setup fixture", setup_fixture(&fx, "t_floor"));
-        sqlite3 *db = progress_store_db();
-
-        SRF_CHECK("floor: hole at A+2 below coins frontier A+3",
-                  delete_height(db, "script_validate_log", A + 2) &&
-                  seed_coins_applied(db, A + 3));
-
-        int64_t rows_before = total_log_rows(db);
-        struct stage_reducer_frontier_reconcile_result rr;
-        rr_init_direct(&rr, A + 1, A + 3, A + 3);
-
-        SRF_CHECK("floor: reconcile_refill_cursors succeeds",
-                  stage_reducer_frontier_reconcile_refill_cursors(
-                      db, NULL, true, &rr));
-        SRF_CHECK("floor: hole detected but clamp refused (replay domain)",
-                  rr.lowest_script_validate_refill_hole == A + 2 &&
-                  !rr.clamped_script_validate &&
-                  !rr.clamped_proof_validate &&
-                  rr.script_validate_cursor_after == A + 4 &&
-                  cursor_value(db, "script_validate") == A + 4 &&
-                  cursor_value(db, "proof_validate") == A + 4 &&
-                  cursor_value(db, "utxo_apply") == A + 4 &&
-                  total_log_rows(db) == rows_before);
-
-        teardown_fixture(&fx);
-    }
-
-    /* ok=0 row at the pin: a real failed verdict is NOT a refill hole —
-     * the scans require the row to be MISSING. Zero clamps, zero writes. */
-    {
-        struct srf_fixture fx;
-        SRF_CHECK("ok0: setup fixture", setup_fixture(&fx, "t_ok0"));
-        sqlite3 *db = progress_store_db();
-
-        SRF_CHECK("ok0: real ok=0 script verdict at the pin",
-                  put_hash_log(db, "script_validate_log", "block_hash",
-                               A + 2, 0, &fx.hashes[2]));
-
-        int64_t rows_before = total_log_rows(db);
-        struct stage_reducer_frontier_reconcile_result rr;
-        SRF_CHECK("ok0: reconcile_light succeeds",
-                  stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
-        SRF_CHECK("ok0: verdict respected — no script/proof clamp",
-                  rr.hstar == A + 1 &&
-                  rr.lowest_script_validate_refill_hole == -1 &&
-                  rr.lowest_proof_validate_refill_hole == -1 &&
-                  !rr.clamped_script_validate &&
-                  !rr.clamped_proof_validate &&
-                  cursor_value(db, "script_validate") == A + 4 &&
-                  cursor_value(db, "proof_validate") == A + 4 &&
-                  cursor_value(db, "utxo_apply") == A + 4 &&
-                  total_log_rows(db) == rows_before);
-
-        teardown_fixture(&fx);
-    }
+    failures += srf_run_rowless_hole_refill();
+    failures += srf_run_unapplied_hole_clamp();
+    failures += srf_run_coin_tear_refusal();
+    failures += srf_run_coins_floor_hold();
+    failures += srf_run_ok0_verdict_respected();
 
     /* Drain harness: production stages refill + re-advance after the clamp.
      * Runs with the override still pinned to A (its fixture is at mainnet

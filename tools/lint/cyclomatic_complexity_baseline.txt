@@ -1365,8 +1365,6 @@ tests/harness/src/test_stage_repair_coin_backfill.c:cb_case_happy:27
 tests/harness/src/test_stage_repair_coin_backfill.c:cb_case_refusal_marker_decoder_contract:28
 tests/harness/src/test_stage_repair_coin_backfill.c:cb_seed_store:20
 tests/harness/src/test_stage_repair_coin_backfill.c:cb_setup:17
-tests/harness/src/test_stage_repair_script_refill.c:run_drain_harness_refill:47
-tests/harness/src/test_stage_repair_script_refill.c:test_stage_repair_script_refill:67
 tests/harness/src/test_sticky_escalator.c:test_sticky_escalator:85
 tests/harness/src/test_store.c:test_store:327
 tests/harness/src/test_store_e2e_gate.c:test_store_e2e_gate:59
