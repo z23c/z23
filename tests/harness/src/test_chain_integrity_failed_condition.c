@@ -101,6 +101,264 @@ static const struct json_value *find_condition_json(
     return NULL;
 }
 
+static bool cif_holes_classified_reconcilable(
+    bool ok, const struct chain_integrity_result *before)
+{
+    ok = ok && before->ok == false;
+    ok = ok && before->active_chain_holes == 10;
+    ok = ok && before->active_chain_mismatches == 0;
+    ok = ok && chain_integrity_classify(before) ==
+               CHAIN_INTEGRITY_RECONCILABLE;
+    return ok;
+}
+
+static bool cif_ancestor_holes_stay_reconcilable(struct main_state *ms)
+{
+    struct uint256 hashes[11];
+    bool ok = true;
+    register_chain_integrity_failed();
+
+    ok = ok && seed_linked_chain(ms, hashes, 10);
+    for (int h = 0; h < 10; h++)
+        ms->chain_active.chain[h] = NULL;
+
+    struct chain_integrity_result before;
+    chain_integrity_check_post_restore(&before, ms);
+    ok = cif_holes_classified_reconcilable(ok, &before);
+
+    condition_engine_tick();
+
+    struct chain_integrity_result after;
+    chain_integrity_check_post_restore(&after, ms);
+    ok = ok && chain_integrity_failed_test_remedy_calls() == 1;
+    ok = ok && chain_integrity_failed_test_queue_calls() == 0;
+    ok = ok && after.ok == true;
+    ok = ok && after.active_chain_holes == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok;
+}
+
+static bool cif_fatal_nbits_triggers_finalize(struct main_state *ms)
+{
+    struct uint256 hashes[11];
+    bool ok = true;
+    register_chain_integrity_failed();
+
+    ok = ok && seed_linked_chain(ms, hashes, 10);
+    struct block_index *tip = active_chain_tip(&ms->chain_active);
+    ok = ok && tip != NULL;
+    if (tip)
+        tip->nBits = 0;
+
+    struct chain_integrity_result before;
+    chain_integrity_check_post_restore(&before, ms);
+    ok = ok && before.ok == false;
+    ok = ok && before.zero_nbits_count == 1;
+
+    condition_engine_tick();
+
+    struct chain_integrity_result after;
+    chain_integrity_check_post_restore(&after, ms);
+    ok = ok && chain_integrity_failed_test_remedy_calls() == 1;
+    ok = ok && after.ok == false;
+    ok = ok && condition_engine_get_active_count() == 1;
+    return ok;
+}
+
+static bool cif_clean_chain_ignored(struct main_state *ms)
+{
+    struct uint256 hashes[5];
+    bool ok = true;
+    register_chain_integrity_failed();
+
+    ok = ok && seed_linked_chain(ms, hashes, 4);
+    condition_engine_tick();
+
+    ok = ok && chain_integrity_failed_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok;
+}
+
+static bool cif_async_remedy_queues_without_finalize(struct main_state *ms)
+{
+    struct uint256 hashes[11];
+    bool ok = true;
+    register_chain_integrity_failed();
+
+    ok = ok && seed_linked_chain(ms, hashes, 10);
+    struct block_index *tip = active_chain_tip(&ms->chain_active);
+    ok = ok && tip != NULL;
+    if (tip)
+        tip->nBits = 0;
+
+    chain_integrity_failed_test_set_async(true);
+    chain_integrity_failed_test_disable_spawn(true);
+    condition_engine_tick();
+
+    struct chain_integrity_result after;
+    chain_integrity_check_post_restore(&after, ms);
+    ok = ok && chain_integrity_failed_test_remedy_calls() == 1;
+    ok = ok && chain_integrity_failed_test_queue_calls() == 1;
+    ok = ok && after.ok == false;
+    ok = ok && after.zero_nbits_count == 1;
+    ok = ok && chain_integrity_classify(&after) ==
+               CHAIN_INTEGRITY_UNRECOVERABLE;
+    ok = ok && condition_engine_get_active_count() == 1;
+    return ok;
+}
+
+static bool cif_reconcilable_detail_fields(bool ok, struct json_value *out)
+{
+    const struct json_value *conditions = json_get(out, "conditions");
+    const struct json_value *cond =
+        find_condition_json(conditions, "chain_integrity_failed");
+    const struct json_value *detail = cond ? json_get(cond, "detail") : NULL;
+    ok = ok && detail != NULL;
+    ok = ok && strcmp(json_get_str(json_get(detail, "integrity_class")),
+                      "reconcilable") == 0;
+    ok = ok && json_get_int(json_get(detail, "tip_window_holes")) == 1;
+    ok = ok && json_get_int(json_get(detail, "active_chain_holes")) == 1;
+    ok = ok &&
+         json_get_int(json_get(detail, "active_chain_mismatches")) == 0;
+    ok = ok && !json_get_bool(json_get(detail,
+                                       "restore_last_used_datadir"));
+    return ok;
+}
+
+static bool cif_reconcilable_queues_memory_repair(struct main_state *ms)
+{
+    struct uint256 hashes[11];
+    bool ok = true;
+    register_chain_integrity_failed();
+
+    ok = ok && seed_linked_chain(ms, hashes, 10);
+    ms->chain_active.chain[10] = NULL;
+
+    chain_integrity_failed_test_set_async(true);
+    chain_integrity_failed_test_disable_spawn(true);
+    condition_engine_tick();
+    ok = ok && chain_integrity_failed_test_remedy_calls() == 1;
+    ok = ok && chain_integrity_failed_test_queue_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+
+    struct json_value out;
+    json_init(&out);
+    json_set_object(&out);
+    ok = ok && condition_engine_dump_state_json(&out, NULL);
+    ok = cif_reconcilable_detail_fields(ok, &out);
+    json_free(&out);
+    return ok;
+}
+
+static bool cif_unrecoverable_detail_exposed(struct main_state *ms)
+{
+    struct uint256 hashes[5];
+    bool ok = true;
+    register_chain_integrity_failed();
+
+    ok = ok && seed_linked_chain(ms, hashes, 4);
+    struct block_index *tip = active_chain_tip(&ms->chain_active);
+    ok = ok && tip != NULL;
+    if (tip)
+        tip->nBits = 0;
+
+    condition_engine_tick();
+
+    struct json_value out;
+    json_init(&out);
+    json_set_object(&out);
+    ok = ok && condition_engine_dump_state_json(&out, NULL);
+    const struct json_value *conditions = json_get(&out, "conditions");
+    const struct json_value *cond =
+        find_condition_json(conditions, "chain_integrity_failed");
+    const struct json_value *detail = cond ? json_get(cond, "detail") : NULL;
+    ok = ok && detail != NULL;
+    ok = ok && strcmp(json_get_str(json_get(detail, "integrity_class")),
+                      "unrecoverable") == 0;
+    ok = ok && json_get_int(json_get(detail, "zero_nbits_count")) == 1;
+    ok = ok && json_get_int(json_get(detail,
+                                     "first_nbits_zero_height")) == 4;
+    json_free(&out);
+    return ok;
+}
+
+static bool cif_watchdog_child_registered(bool ok,
+                                          struct supervisor_snapshot *snaps,
+                                          int n,
+                                          uint32_t *stall_before)
+{
+    bool found = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].name,
+                   "chain.chain_integrity_restore_watchdog") == 0) {
+            found = true;
+            *stall_before = snaps[i].stall_fires;
+            ok = ok && snaps[i].period_secs == 30;
+            break;
+        }
+    }
+    ok = ok && found;
+    return ok;
+}
+
+static bool cif_restore_watchdog_names_and_clears(void)
+{
+    bool ok = true;
+    register_chain_integrity_failed();
+
+    supervisor_child_id wid = chain_integrity_failed_test_watchdog_id();
+    ok = ok && wid != SUPERVISOR_INVALID_ID;
+
+    struct supervisor_snapshot snaps[SUPERVISOR_CAP];
+    int n = supervisor_snapshot_all(snaps, SUPERVISOR_CAP);
+    uint32_t stall_before = 0;
+    ok = cif_watchdog_child_registered(ok, snaps, n, &stall_before);
+
+    /* Not running: tick is a no-op, no blocker named. */
+    chain_integrity_failed_test_force_running(false);
+    chain_integrity_failed_test_watchdog_tick();
+    ok = ok && !blocker_exists("chain_integrity_restore_stuck");
+
+    /* Running, well under the deadline: still no blocker. */
+    chain_integrity_failed_test_force_running(true);
+    chain_integrity_failed_test_set_started_us_ago(5LL * 1000000);
+    chain_integrity_failed_test_watchdog_tick();
+    ok = ok && !blocker_exists("chain_integrity_restore_stuck");
+
+    /* Running, past the deadline: the watchdog names a blocker and
+     * reports a self-stall on its own supervisor child. */
+    int64_t deadline_s = chain_integrity_failed_test_deadline_secs();
+    /* Force the synthetic start below zero, as on a fresh VM whose
+     * monotonic uptime is under the 30-minute deadline (zero is the
+     * production unset sentinel). */
+    chain_integrity_failed_test_set_started_us_ago(
+        platform_time_monotonic_us() +
+        (deadline_s + 60) * 1000000LL);
+    chain_integrity_failed_test_watchdog_tick();
+    ok = ok && blocker_exists("chain_integrity_restore_stuck");
+    ok = ok && blocker_class_for("chain_integrity_restore_stuck") ==
+               BLOCKER_DEPENDENCY;
+
+    n = supervisor_snapshot_all(snaps, SUPERVISOR_CAP);
+    bool stall_bumped = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].name,
+                   "chain.chain_integrity_restore_watchdog") == 0) {
+            stall_bumped = snaps[i].stall_fires > stall_before;
+            break;
+        }
+    }
+    ok = ok && stall_bumped;
+
+    /* Simulate the worker returning: the finish path clears the
+     * blocker (exercised directly here; chain_integrity_restore_worker
+     * itself calls the same blocker_clear on return). */
+    chain_integrity_failed_test_force_running(false);
+    blocker_clear("chain_integrity_restore_stuck");
+    ok = ok && !blocker_exists("chain_integrity_restore_stuck");
+    return ok;
+}
+
 int test_chain_integrity_failed_condition(void)
 {
     printf("\n=== chain_integrity_failed condition tests ===\n");
@@ -120,180 +378,48 @@ int test_chain_integrity_failed_condition(void)
 
     {
         struct main_state ms;
-        struct uint256 hashes[11];
         reset_cif(&ms);
-        bool ok = true;
-        register_chain_integrity_failed();
-
-        ok = ok && seed_linked_chain(&ms, hashes, 10);
-        for (int h = 0; h < 10; h++)
-            ms.chain_active.chain[h] = NULL;
-
-        struct chain_integrity_result before;
-        chain_integrity_check_post_restore(&before, &ms);
-        ok = ok && before.ok == false;
-        ok = ok && before.active_chain_holes == 10;
-        ok = ok && before.active_chain_mismatches == 0;
-        ok = ok && chain_integrity_classify(&before) ==
-                         CHAIN_INTEGRITY_RECONCILABLE;
-
-        condition_engine_tick();
-
-        struct chain_integrity_result after;
-        chain_integrity_check_post_restore(&after, &ms);
-        ok = ok && chain_integrity_failed_test_remedy_calls() == 1;
-        ok = ok && chain_integrity_failed_test_queue_calls() == 0;
-        ok = ok && after.ok == true;
-        ok = ok && after.active_chain_holes == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
+        bool ok = cif_ancestor_holes_stay_reconcilable(&ms);
         CIF_CHECK("ancestor holes stay reconcilable and trigger remedy", ok);
         cleanup_cif(&ms);
     }
 
     {
         struct main_state ms;
-        struct uint256 hashes[11];
         reset_cif(&ms);
-        bool ok = true;
-        register_chain_integrity_failed();
-
-        ok = ok && seed_linked_chain(&ms, hashes, 10);
-        struct block_index *tip = active_chain_tip(&ms.chain_active);
-        ok = ok && tip != NULL;
-        if (tip)
-            tip->nBits = 0;
-
-        struct chain_integrity_result before;
-        chain_integrity_check_post_restore(&before, &ms);
-        ok = ok && before.ok == false;
-        ok = ok && before.zero_nbits_count == 1;
-
-        condition_engine_tick();
-
-        struct chain_integrity_result after;
-        chain_integrity_check_post_restore(&after, &ms);
-        ok = ok && chain_integrity_failed_test_remedy_calls() == 1;
-        ok = ok && after.ok == false;
-        ok = ok && condition_engine_get_active_count() == 1;
+        bool ok = cif_fatal_nbits_triggers_finalize(&ms);
         CIF_CHECK("fatal nBits zero triggers restore finalize remedy", ok);
         cleanup_cif(&ms);
     }
 
     {
         struct main_state ms;
-        struct uint256 hashes[5];
         reset_cif(&ms);
-        bool ok = true;
-        register_chain_integrity_failed();
-
-        ok = ok && seed_linked_chain(&ms, hashes, 4);
-        condition_engine_tick();
-
-        ok = ok && chain_integrity_failed_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
+        bool ok = cif_clean_chain_ignored(&ms);
         CIF_CHECK("clean chain is ignored", ok);
         cleanup_cif(&ms);
     }
 
     {
         struct main_state ms;
-        struct uint256 hashes[11];
         reset_cif(&ms);
-        bool ok = true;
-        register_chain_integrity_failed();
-
-        ok = ok && seed_linked_chain(&ms, hashes, 10);
-        struct block_index *tip = active_chain_tip(&ms.chain_active);
-        ok = ok && tip != NULL;
-        if (tip)
-            tip->nBits = 0;
-
-        chain_integrity_failed_test_set_async(true);
-        chain_integrity_failed_test_disable_spawn(true);
-        condition_engine_tick();
-
-        struct chain_integrity_result after;
-        chain_integrity_check_post_restore(&after, &ms);
-        ok = ok && chain_integrity_failed_test_remedy_calls() == 1;
-        ok = ok && chain_integrity_failed_test_queue_calls() == 1;
-        ok = ok && after.ok == false;
-        ok = ok && after.zero_nbits_count == 1;
-        ok = ok && chain_integrity_classify(&after) ==
-                         CHAIN_INTEGRITY_UNRECOVERABLE;
-        ok = ok && condition_engine_get_active_count() == 1;
+        bool ok = cif_async_remedy_queues_without_finalize(&ms);
         CIF_CHECK("async remedy queues without inline finalize", ok);
         cleanup_cif(&ms);
     }
 
     {
         struct main_state ms;
-        struct uint256 hashes[11];
         reset_cif(&ms);
-        bool ok = true;
-        register_chain_integrity_failed();
-
-        ok = ok && seed_linked_chain(&ms, hashes, 10);
-        ms.chain_active.chain[10] = NULL;
-
-        chain_integrity_failed_test_set_async(true);
-        chain_integrity_failed_test_disable_spawn(true);
-        condition_engine_tick();
-        ok = ok && chain_integrity_failed_test_remedy_calls() == 1;
-        ok = ok && chain_integrity_failed_test_queue_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-
-        struct json_value out;
-        json_init(&out);
-        json_set_object(&out);
-        ok = ok && condition_engine_dump_state_json(&out, NULL);
-        const struct json_value *conditions = json_get(&out, "conditions");
-        const struct json_value *cond =
-            find_condition_json(conditions, "chain_integrity_failed");
-        const struct json_value *detail = cond ? json_get(cond, "detail") : NULL;
-        ok = ok && detail != NULL;
-        ok = ok && strcmp(json_get_str(json_get(detail, "integrity_class")),
-                          "reconcilable") == 0;
-        ok = ok && json_get_int(json_get(detail, "tip_window_holes")) == 1;
-        ok = ok && json_get_int(json_get(detail, "active_chain_holes")) == 1;
-        ok = ok &&
-             json_get_int(json_get(detail, "active_chain_mismatches")) == 0;
-        ok = ok && !json_get_bool(json_get(detail,
-                                           "restore_last_used_datadir"));
-        json_free(&out);
+        bool ok = cif_reconcilable_queues_memory_repair(&ms);
         CIF_CHECK("reconcilable integrity queues memory repair and stays active", ok);
         cleanup_cif(&ms);
     }
 
     {
         struct main_state ms;
-        struct uint256 hashes[5];
         reset_cif(&ms);
-        bool ok = true;
-        register_chain_integrity_failed();
-
-        ok = ok && seed_linked_chain(&ms, hashes, 4);
-        struct block_index *tip = active_chain_tip(&ms.chain_active);
-        ok = ok && tip != NULL;
-        if (tip)
-            tip->nBits = 0;
-
-        condition_engine_tick();
-
-        struct json_value out;
-        json_init(&out);
-        json_set_object(&out);
-        ok = ok && condition_engine_dump_state_json(&out, NULL);
-        const struct json_value *conditions = json_get(&out, "conditions");
-        const struct json_value *cond =
-            find_condition_json(conditions, "chain_integrity_failed");
-        const struct json_value *detail = cond ? json_get(cond, "detail") : NULL;
-        ok = ok && detail != NULL;
-        ok = ok && strcmp(json_get_str(json_get(detail, "integrity_class")),
-                          "unrecoverable") == 0;
-        ok = ok && json_get_int(json_get(detail, "zero_nbits_count")) == 1;
-        ok = ok && json_get_int(json_get(detail,
-                                         "first_nbits_zero_height")) == 4;
-        json_free(&out);
+        bool ok = cif_unrecoverable_detail_exposed(&ms);
         CIF_CHECK("detail exposes unrecoverable integrity state", ok);
         cleanup_cif(&ms);
     }
@@ -301,70 +427,7 @@ int test_chain_integrity_failed_condition(void)
     {
         struct main_state ms;
         reset_cif(&ms);
-        bool ok = true;
-        register_chain_integrity_failed();
-
-        supervisor_child_id wid = chain_integrity_failed_test_watchdog_id();
-        ok = ok && wid != SUPERVISOR_INVALID_ID;
-
-        struct supervisor_snapshot snaps[SUPERVISOR_CAP];
-        int n = supervisor_snapshot_all(snaps, SUPERVISOR_CAP);
-        bool found = false;
-        uint32_t stall_before = 0;
-        for (int i = 0; i < n; i++) {
-            if (strcmp(snaps[i].name,
-                       "chain.chain_integrity_restore_watchdog") == 0) {
-                found = true;
-                stall_before = snaps[i].stall_fires;
-                ok = ok && snaps[i].period_secs == 30;
-                break;
-            }
-        }
-        ok = ok && found;
-
-        /* Not running: tick is a no-op, no blocker named. */
-        chain_integrity_failed_test_force_running(false);
-        chain_integrity_failed_test_watchdog_tick();
-        ok = ok && !blocker_exists("chain_integrity_restore_stuck");
-
-        /* Running, well under the deadline: still no blocker. */
-        chain_integrity_failed_test_force_running(true);
-        chain_integrity_failed_test_set_started_us_ago(5LL * 1000000);
-        chain_integrity_failed_test_watchdog_tick();
-        ok = ok && !blocker_exists("chain_integrity_restore_stuck");
-
-        /* Running, past the deadline: the watchdog names a blocker and
-         * reports a self-stall on its own supervisor child. */
-        int64_t deadline_s = chain_integrity_failed_test_deadline_secs();
-        /* Force the synthetic start below zero, as on a fresh VM whose
-         * monotonic uptime is under the 30-minute deadline (zero is the
-         * production unset sentinel). */
-        chain_integrity_failed_test_set_started_us_ago(
-            platform_time_monotonic_us() +
-            (deadline_s + 60) * 1000000LL);
-        chain_integrity_failed_test_watchdog_tick();
-        ok = ok && blocker_exists("chain_integrity_restore_stuck");
-        ok = ok && blocker_class_for("chain_integrity_restore_stuck") ==
-                         BLOCKER_DEPENDENCY;
-
-        n = supervisor_snapshot_all(snaps, SUPERVISOR_CAP);
-        bool stall_bumped = false;
-        for (int i = 0; i < n; i++) {
-            if (strcmp(snaps[i].name,
-                       "chain.chain_integrity_restore_watchdog") == 0) {
-                stall_bumped = snaps[i].stall_fires > stall_before;
-                break;
-            }
-        }
-        ok = ok && stall_bumped;
-
-        /* Simulate the worker returning: the finish path clears the
-         * blocker (exercised directly here; chain_integrity_restore_worker
-         * itself calls the same blocker_clear on return). */
-        chain_integrity_failed_test_force_running(false);
-        blocker_clear("chain_integrity_restore_stuck");
-        ok = ok && !blocker_exists("chain_integrity_restore_stuck");
-
+        bool ok = cif_restore_watchdog_names_and_clears();
         CIF_CHECK("restore watchdog names+clears a blocker past deadline", ok);
         cleanup_cif(&ms);
     }
