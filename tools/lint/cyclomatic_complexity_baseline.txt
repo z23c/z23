@@ -432,12 +432,6 @@ tools/command/cli_render.c:zcl_cli_render_resolve:20
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_build:29
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_check:19
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_status:17
-tools/command/native_devagent_queue.c:dvq_compose_task:21
-tools/command/native_devagent_queue.c:dvq_model_ok:16
-tools/command/native_devagent_queue.c:dvq_next:46
-tools/command/native_devagent_queue.c:dvq_post:34
-tools/command/native_devagent_queue.c:dvq_status:27
-tools/command/native_devagent_queue.c:dvq_task_prev:23
 tools/command/native_zcode_command.c:zcl_native_handle_zcode_package_attest_import:17
 tools/command/native_zcode_command.c:zcl_native_handle_zcode_package_library:21
 tools/command/native_zcode_command.c:zcl_native_handle_zcode_package_recipe:17

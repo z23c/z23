@@ -252,6 +252,13 @@ static bool dvq_group_ok(const char *s)
     return true;
 }
 
+static bool dvq_model_char_ok(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-' ||
+           c == ':' || c == '+';
+}
+
 static bool dvq_model_ok(const char *s)
 {
     size_t n;
@@ -261,10 +268,7 @@ static bool dvq_model_ok(const char *s)
     if (n > 128)
         return false;
     for (const char *p = s; *p; p++) {
-        bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-                  (*p >= '0' && *p <= '9') || *p == '_' || *p == '.' ||
-                  *p == '-' || *p == ':' || *p == '+';
-        if (!ok)
+        if (!dvq_model_char_ok(*p))
             return false;
     }
     return true;
@@ -1237,6 +1241,132 @@ static bool dvq_post_admit(const struct dvq_row *rows, size_t n,
     return true;
 }
 
+static bool dvq_post_check_kind_name(struct zcl_command_reply *reply,
+                                     const char *kind, const char *name)
+{
+    if (!kind || !dvq_kind_ok(kind)) {
+        dvq_fail(reply, "BAD_INPUT", "post",
+                 "kind is one of leaf|doc|file|fix-gate",
+                 "input.kind missing or unknown");
+        return false;
+    }
+    if (!name || !dvq_name_ok(name)) {
+        dvq_fail(reply, "BAD_INPUT", "post",
+                 "name matches [A-Za-z0-9_.-]{1,64} and is never . or ..",
+                 "input.name missing, misspelled, or escaping");
+        return false;
+    }
+    return true;
+}
+
+static bool dvq_post_check_group(struct zcl_command_reply *reply,
+                                 const char *kind, const char *group)
+{
+    if (strcmp(kind, "file") == 0 && (!group || !dvq_group_ok(group))) {
+        dvq_fail(reply, "BAD_INPUT", "post",
+                 "a file unit needs the test group that judges it",
+                 "input.group missing or misspelled");
+        return false;
+    }
+    if (group && group[0] && !dvq_group_ok(group)) {
+        dvq_fail(reply, "BAD_INPUT", "post",
+                 "group is a test group name ([A-Za-z0-9_-], under 64)",
+                 "input.group misspelled");
+        return false;
+    }
+    return true;
+}
+
+static bool dvq_post_record_unit(const struct zcl_command_request *req,
+                                 struct zcl_command_reply *reply,
+                                 const struct dvq_dirs *d, const char *kind,
+                                 const char *path, const char *brief,
+                                 char *brief_abs, size_t brief_cap,
+                                 struct dvq_row *r)
+{
+    if (strcmp(kind, "doc") == 0 || strcmp(kind, "file") == 0) {
+        if (!path || !dvq_scope_path_ok(path)) {
+            dvq_fail(reply, "BAD_INPUT", "post",
+                     "a doc/file unit needs a repo-relative path",
+                     "input.path missing, absolute, or escaping");
+            return false;
+        }
+        if (!brief || !dvq_resolve_brief(req, brief, d->root, brief_abs,
+                                         brief_cap)) {
+            dvq_fail(reply, "BAD_INPUT", "post",
+                     "brief is an existing file inside the repo or state dir",
+                     "input.brief missing or outside both roots");
+            return false;
+        }
+        if (strlen(brief_abs) >= sizeof(r->brief)) {
+            dvq_fail(reply, "BAD_INPUT", "post",
+                     "brief path is too long to record",
+                     "input.brief over the row budget");
+            return false;
+        }
+        (void)snprintf(r->path, sizeof(r->path), "%s", path);
+        (void)snprintf(r->brief, sizeof(r->brief), "%s", brief_abs);
+    }
+    return true;
+}
+
+static void dvq_post_fill_row(struct dvq_row *r, const char *group,
+                              const char *model, const char *kind,
+                              const char *name, long long attempt)
+{
+    char ts[64];
+    if (group && group[0])
+        (void)snprintf(r->group, sizeof(r->group), "%s", group);
+    if (model && model[0])
+        (void)snprintf(r->model, sizeof(r->model), "%s", model);
+    (void)snprintf(r->kind, sizeof(r->kind), "%s", kind);
+    (void)snprintf(r->name, sizeof(r->name), "%s", name);
+    r->attempt = attempt;
+    (void)snprintf(r->state, sizeof(r->state), "queued");
+    dvq_now_iso(ts);
+    (void)snprintf(r->ts, sizeof(r->ts), "%s", ts);
+}
+
+static long long dvq_post_next_seq(const struct dvq_row *rows, size_t nrows)
+{
+    long long seq = 1;
+    for (size_t i = 0; i < nrows; i++) {
+        if (rows[i].seq >= seq)
+            seq = rows[i].seq + 1;
+    }
+    return seq;
+}
+
+static bool dvq_post_check_admit(struct dvq_row *rows, size_t nrows,
+                                 const char *name, int lock,
+                                 struct zcl_command_reply *reply)
+{
+    const char *code = NULL, *msg = NULL;
+    char evidence[128];
+    if (!dvq_post_admit(rows, nrows, name, &code, &msg, evidence,
+                        sizeof(evidence))) {
+        free(rows);
+        dvq_unlock(lock);
+        dvq_fail(reply, code, "post", msg, evidence);
+        return false;
+    }
+    return true;
+}
+
+static bool dvq_post_append_row(struct zcl_command_reply *reply, int lock,
+                                const struct dvq_row *r, const char *qpath,
+                                char *line, size_t cap, size_t *len)
+{
+    if (!dvq_encode_row(r, line, cap, len) ||
+        !dvq_append_row(qpath, line, *len)) {
+        dvq_unlock(lock);
+        dvq_fail(reply, "QUEUE_WRITE_FAILED", "post",
+                 "cannot append the queue row", qpath);
+        return false;
+    }
+    return true;
+}
+
 static void dvq_post(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
 {
@@ -1247,7 +1377,6 @@ static void dvq_post(const struct zcl_command_request *req,
     char qpath[4096 + 32];
     char line[DVQ_LINE_CAP];
     char brief_abs[4096];
-    char ts[64];
     const char *kind, *name, *group, *path, *brief, *model, *engine;
     long long attempt = 1;
     size_t len = 0;
@@ -1261,18 +1390,8 @@ static void dvq_post(const struct zcl_command_request *req,
     }
     kind = dvq_str(req, "kind");
     name = dvq_str(req, "name");
-    if (!kind || !dvq_kind_ok(kind)) {
-        dvq_fail(reply, "BAD_INPUT", "post",
-                 "kind is one of leaf|doc|file|fix-gate",
-                 "input.kind missing or unknown");
+    if (!dvq_post_check_kind_name(reply, kind, name))
         return;
-    }
-    if (!name || !dvq_name_ok(name)) {
-        dvq_fail(reply, "BAD_INPUT", "post",
-                 "name matches [A-Za-z0-9_.-]{1,64} and is never . or ..",
-                 "input.name missing, misspelled, or escaping");
-        return;
-    }
     if (!dvq_dirs_resolve(&d, true)) {
         dvq_fail(reply, "STATE_DIR_FAILED", "post",
                  "cannot resolve the owner-private state root",
@@ -1293,51 +1412,12 @@ static void dvq_post(const struct zcl_command_request *req,
             return;
         }
     }
-    if (strcmp(kind, "file") == 0 && (!group || !dvq_group_ok(group))) {
-        dvq_fail(reply, "BAD_INPUT", "post",
-                 "a file unit needs the test group that judges it",
-                 "input.group missing or misspelled");
+    if (!dvq_post_check_group(reply, kind, group))
         return;
-    }
-    if (group && group[0] && !dvq_group_ok(group)) {
-        dvq_fail(reply, "BAD_INPUT", "post",
-                 "group is a test group name ([A-Za-z0-9_-], under 64)",
-                 "input.group misspelled");
+    if (!dvq_post_record_unit(req, reply, &d, kind, path, brief, brief_abs,
+                              sizeof(brief_abs), &r))
         return;
-    }
-    if (strcmp(kind, "doc") == 0 || strcmp(kind, "file") == 0) {
-        if (!path || !dvq_scope_path_ok(path)) {
-            dvq_fail(reply, "BAD_INPUT", "post",
-                     "a doc/file unit needs a repo-relative path",
-                     "input.path missing, absolute, or escaping");
-            return;
-        }
-        if (!brief || !dvq_resolve_brief(req, brief, d.root, brief_abs,
-                                         sizeof(brief_abs))) {
-            dvq_fail(reply, "BAD_INPUT", "post",
-                     "brief is an existing file inside the repo or state dir",
-                     "input.brief missing or outside both roots");
-            return;
-        }
-        if (strlen(brief_abs) >= sizeof(r.brief)) {
-            dvq_fail(reply, "BAD_INPUT", "post",
-                     "brief path is too long to record",
-                     "input.brief over the row budget");
-            return;
-        }
-        (void)snprintf(r.path, sizeof(r.path), "%s", path);
-        (void)snprintf(r.brief, sizeof(r.brief), "%s", brief_abs);
-    }
-    if (group && group[0])
-        (void)snprintf(r.group, sizeof(r.group), "%s", group);
-    if (model && model[0])
-        (void)snprintf(r.model, sizeof(r.model), "%s", model);
-    (void)snprintf(r.kind, sizeof(r.kind), "%s", kind);
-    (void)snprintf(r.name, sizeof(r.name), "%s", name);
-    r.attempt = attempt;
-    (void)snprintf(r.state, sizeof(r.state), "queued");
-    dvq_now_iso(ts);
-    (void)snprintf(r.ts, sizeof(r.ts), "%s", ts);
+    dvq_post_fill_row(&r, group, model, kind, name, attempt);
     if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.queue) >=
         (int)sizeof(qpath)) {
         dvq_fail(reply, "QUEUE_WRITE_FAILED", "post",
@@ -1360,33 +1440,15 @@ static void dvq_post(const struct zcl_command_request *req,
                  "cannot admit the complete queue snapshot", qpath);
         return;
     }
-    {
-        for (size_t i = 0; i < nrows; i++) {
-            if (rows[i].seq >= seq)
-                seq = rows[i].seq + 1;
-        }
-    }
-    {
-        const char *code = NULL, *msg = NULL;
-        char evidence[128];
-        if (!dvq_post_admit(rows, nrows, name, &code, &msg, evidence,
-                            sizeof(evidence))) {
-            free(rows);
-            dvq_unlock(lock);
-            dvq_fail(reply, code, "post", msg, evidence);
-            return;
-        }
-    }
+    seq = dvq_post_next_seq(rows, nrows);
+    if (!dvq_post_check_admit(rows, nrows, name, lock, reply))
+        return;
     free(rows);
     rows = NULL;
     r.seq = seq;
-    if (!dvq_encode_row(&r, line, sizeof(line), &len) ||
-        !dvq_append_row(qpath, line, len)) {
-        dvq_unlock(lock);
-        dvq_fail(reply, "QUEUE_WRITE_FAILED", "post",
-                 "cannot append the queue row", qpath);
+    if (!dvq_post_append_row(reply, lock, &r, qpath, line, sizeof(line),
+                             &len))
         return;
-    }
     dvq_unlock(lock);
     (void)json_push_kv_str(&reply->data, "leaf", DVQ_LEAF);
     (void)json_push_kv_int(&reply->data, "seq", seq);
@@ -1600,16 +1662,10 @@ static bool dvq_task_cat(char *task, size_t cap, size_t *used,
 static bool dvq_task_prev(char *task, size_t cap, size_t *used,
                           const char *prevdir);
 
-static bool dvq_compose_task(const struct dvq_row *r, const char *wt,
-                             const char *st, const char *enginedir,
-                             char *task, size_t cap, size_t *used_out)
+static int dvq_compose_header(const struct dvq_row *r, char *task, size_t cap)
 {
-    size_t used = 0;
-    int w;
     bool doc;
-    if (!r || !wt || !st || !enginedir || !task || cap == 0 || !used_out)
-        return false;
-    (void)st;
+    int w;
     doc = strcmp(r->kind, "doc") == 0;
     if (doc)
         w = snprintf(task, cap, "kind: doc-claim\n\nONE FILE. Emit exactly "
@@ -1629,41 +1685,105 @@ static bool dvq_compose_task(const struct dvq_row *r, const char *wt,
                                 "tests/harness/src/test_devagent_%s.c is "
                                 "the acceptance bar and is read-only.\n",
                      r->name, r->name);
+    return w;
+}
+
+static bool dvq_compose_leaf(const struct dvq_row *r, const char *wt,
+                             const char *enginedir, char *task, size_t cap,
+                             size_t *used)
+{
+    char cur[4096 + 64], tst[4096 + 64], prev[4096 + 64];
+    (void)snprintf(cur, sizeof(cur),
+                   "%s/tools/command/native_devagent_%s.c", wt, r->name);
+    (void)snprintf(tst, sizeof(tst),
+                   "%s/tests/harness/src/test_devagent_%s.c", wt, r->name);
+    if (!dvq_task_cat(task, cap, used, "CURRENT", cur))
+        return false;
+    if (!dvq_task_cat(task, cap, used, "ACCEPTANCE TEST (read-only)", tst))
+        return false;
+    if (r->attempt > 1) {
+        (void)snprintf(prev, sizeof(prev), "%s/%s/a%lld", enginedir,
+                       r->name, r->attempt - 1);
+        if (!dvq_task_prev(task, cap, used, prev))
+            return false;
+    }
+    return true;
+}
+
+static bool dvq_compose_brief(const struct dvq_row *r, char *task, size_t cap,
+                              size_t *used)
+{
+    char line[512];
+    if (r->group[0]) {
+        (void)snprintf(line, sizeof(line), "group: %s\n", r->group);
+        if (*used + strlen(line) >= cap)
+            return false;
+        memcpy(task + *used, line, strlen(line) + 1);
+        *used += strlen(line);
+    }
+    if (!dvq_task_cat(task, cap, used, "BRIEF", r->brief))
+        return false;
+    return true;
+}
+
+static bool dvq_compose_task(const struct dvq_row *r, const char *wt,
+                             const char *st, const char *enginedir,
+                             char *task, size_t cap, size_t *used_out)
+{
+    size_t used = 0;
+    int w;
+    if (!r || !wt || !st || !enginedir || !task || cap == 0 || !used_out)
+        return false;
+    (void)st;
+    w = dvq_compose_header(r, task, cap);
     if (w <= 0 || (size_t)w >= cap)
         return false;
     used = (size_t)w;
     if (strcmp(r->kind, "leaf") == 0 || strcmp(r->kind, "fix-gate") == 0) {
-        char cur[4096 + 64], tst[4096 + 64], prev[4096 + 64];
-        (void)snprintf(cur, sizeof(cur),
-                       "%s/tools/command/native_devagent_%s.c", wt, r->name);
-        (void)snprintf(tst, sizeof(tst),
-                       "%s/tests/harness/src/test_devagent_%s.c", wt,
-                       r->name);
-        if (!dvq_task_cat(task, cap, &used, "CURRENT", cur))
+        if (!dvq_compose_leaf(r, wt, enginedir, task, cap, &used))
             return false;
-        if (!dvq_task_cat(task, cap, &used, "ACCEPTANCE TEST (read-only)",
-                          tst))
-            return false;
-        if (r->attempt > 1) {
-            (void)snprintf(prev, sizeof(prev), "%s/%s/a%lld", enginedir,
-                           r->name, r->attempt - 1);
-            if (!dvq_task_prev(task, cap, &used, prev))
-                return false;
-        }
     } else {
-        char line[512];
-        if (r->group[0]) {
-            (void)snprintf(line, sizeof(line), "group: %s\n", r->group);
-            if (used + strlen(line) >= cap)
-                return false;
-            memcpy(task + used, line, strlen(line) + 1);
-            used += strlen(line);
-        }
-        if (!dvq_task_cat(task, cap, &used, "BRIEF", r->brief))
+        if (!dvq_compose_brief(r, task, cap, &used))
             return false;
     }
     *used_out = used;
     return true;
+}
+
+static bool dvq_task_line_hit(const char *line, const char *const *needles,
+                              size_t count)
+{
+    char lower[512];
+    size_t k;
+    for (k = 0; k < sizeof(lower) - 1 && line[k]; k++)
+        lower[k] = (char)tolower((unsigned char)line[k]);
+    lower[k] = '\0';
+    for (size_t i = 0; i < count; i++) {
+        if (strstr(lower, needles[i]))
+            return true;
+    }
+    return false;
+}
+
+static void dvq_task_emit_prev(char *task, size_t cap, size_t *used,
+                               char **kept, size_t nkept)
+{
+    size_t room;
+    int w;
+    room = cap > *used ? cap - *used : 0;
+    w = snprintf(task + *used, room,
+                 "\n=== PREVIOUS ATTEMPT: GATE OUTPUT "
+                 "(fix exactly these) ===\n");
+    if (w > 0 && (size_t)w < room) {
+        *used += (size_t)w;
+        for (size_t i = 0; i < nkept; i++) {
+            room = cap > *used ? cap - *used : 0;
+            w = snprintf(task + *used, room, "%s\n", kept[i]);
+            if (w <= 0 || (size_t)w >= room)
+                break;
+            *used += (size_t)w;
+        }
+    }
 }
 
 /* Previous-attempt gate tail, the way the interim shell greps it: lines
@@ -1679,8 +1799,6 @@ static bool dvq_task_prev(char *task, size_t cap, size_t *used,
     const char *src = NULL;
     char *kept[30];
     size_t nkept = 0;
-    int w;
-    size_t room;
     if (!task || !used || !prevdir)
         return false;
     (void)snprintf(runout, sizeof(runout), "%s/run.out", prevdir);
@@ -1697,20 +1815,8 @@ static bool dvq_task_prev(char *task, size_t cap, size_t *used,
         char *copy = text;
         for (line = strtok_r(copy, "\n", &save); line;
              line = strtok_r(NULL, "\n", &save)) {
-            char lower[512];
-            size_t k;
-            bool hit = false;
-            for (k = 0; k < sizeof(lower) - 1 && line[k]; k++)
-                lower[k] = (char)tolower((unsigned char)line[k]);
-            lower[k] = '\0';
-            for (size_t i = 0;
-                 i < sizeof(needles) / sizeof(needles[0]); i++) {
-                if (strstr(lower, needles[i])) {
-                    hit = true;
-                    break;
-                }
-            }
-            if (!hit)
+            if (!dvq_task_line_hit(line, needles,
+                                   sizeof(needles) / sizeof(needles[0])))
                 continue;
             if (nkept == sizeof(kept) / sizeof(kept[0])) {
                 for (size_t i = 1; i < nkept; i++)
@@ -1719,20 +1825,7 @@ static bool dvq_task_prev(char *task, size_t cap, size_t *used,
             }
             kept[nkept++] = line;
         }
-        room = cap > *used ? cap - *used : 0;
-        w = snprintf(task + *used, room,
-                     "\n=== PREVIOUS ATTEMPT: GATE OUTPUT "
-                     "(fix exactly these) ===\n");
-        if (w > 0 && (size_t)w < room) {
-            *used += (size_t)w;
-            for (size_t i = 0; i < nkept; i++) {
-                room = cap > *used ? cap - *used : 0;
-                w = snprintf(task + *used, room, "%s\n", kept[i]);
-                if (w <= 0 || (size_t)w >= room)
-                    break;
-                *used += (size_t)w;
-            }
-        }
+        dvq_task_emit_prev(task, cap, used, kept, nkept);
     }
     free(text);
     return true;
@@ -2814,6 +2907,344 @@ static bool dvq_next_ready(struct zcl_command_reply *reply, int lock,
     return true;
 }
 
+static bool dvq_next_open_queue(struct zcl_command_reply *reply,
+                                struct dvq_dirs *d, char *qpath, size_t qcap,
+                                char *poolpath, size_t pcap)
+{
+    if (!dvq_dirs_resolve(d, true)) {
+        dvq_fail(reply, "STATE_DIR_FAILED", "select",
+                 "cannot resolve the owner-private state root",
+                 "platform_state_root");
+        return false;
+    }
+    if (snprintf(qpath, qcap, "%s/queue.jsonl", d->queue) >= (int)qcap ||
+        snprintf(poolpath, pcap, "%s/pool.txt", d->queue) >= (int)pcap) {
+        dvq_fail(reply, "QUEUE_READ_FAILED", "select",
+                 "the queue paths do not fit their buffers",
+                 "platform_state_root too long");
+        return false;
+    }
+    return true;
+}
+
+static bool dvq_next_lock_rows(struct zcl_command_reply *reply,
+                               const struct dvq_dirs *d, const char *qpath,
+                               int *lock, struct dvq_row **rows, size_t *nrows)
+{
+    *lock = dvq_lock(d->queue);
+    if (*lock < 0) {
+        dvq_fail(reply, "QUEUE_READ_FAILED", "select",
+                 "cannot take the queue lock", qpath);
+        return false;
+    }
+    if (!dvq_load_rows(qpath, rows, nrows)) {
+        dvq_unlock(*lock);
+        dvq_fail(reply, "QUEUE_READ_FAILED", "select",
+                 "cannot read the queue file", qpath);
+        return false;
+    }
+    return true;
+}
+
+static bool dvq_next_select_row(const struct dvq_dirs *d,
+                                const struct dvq_row *rows, size_t nrows,
+                                struct dvq_row *pick)
+{
+    char opath[4096 + 32], unused[80] = {0};
+    long at = -1;
+    if (snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", d->queue) <
+        (int)sizeof(opath))
+        at = dvq_pick_ready(rows, nrows, opath, false, unused);
+    if (at < 0)
+        return false;
+    *pick = rows[at];
+    return true;
+}
+
+static bool dvq_next_pick_worktree(struct zcl_command_reply *reply,
+                                   struct dvq_row *rows, int lock,
+                                   const char *poolpath, char *wt,
+                                   size_t wtcap, int *wtfd)
+{
+    char *text = (char *)zcl_malloc(DVQ_POOL_CAP, "devagent.queue.pool");
+    char *save = NULL, *line;
+    if (!text) {
+        free(rows);
+        dvq_close_wt(*wtfd);
+        dvq_unlock(lock);
+        dvq_fail(reply, "QUEUE_READ_FAILED", "select",
+                 "cannot allocate the pool buffer", poolpath);
+        return false;
+    }
+    if (dvq_read_file(poolpath, text, DVQ_POOL_CAP, NULL)) {
+        for (line = strtok_r(text, "\n", &save); line;
+             line = strtok_r(NULL, "\n", &save)) {
+            int fd = -1;
+            dvq_trim(line);
+            if (!line[0] || wt[0])
+                continue;
+            if (strlen(line) >= wtcap)
+                continue;
+            if (dvq_try_worktree(line, &fd)) {
+                memcpy(wt, line, strlen(line) + 1);
+                *wtfd = fd;
+            }
+        }
+    }
+    free(text);
+    return true;
+}
+
+static void dvq_next_timeouts(bool doc, const char *kind, const char **tmo,
+                              const char **gtmo)
+{
+    if (!doc && strcmp(kind, "file") != 0) {
+        *tmo = "1200";
+        *gtmo = "2400";
+    } else {
+        *tmo = "900";
+        *gtmo = NULL;
+    }
+}
+
+static void dvq_next_mark_running(struct dvq_row *pick, const char *wt,
+                                  struct dvq_row *rows, size_t nrows,
+                                  char *unit, size_t unitcap)
+{
+    (void)snprintf(pick->worktree, sizeof(pick->worktree), "%s", wt);
+    pick->started = (long long)platform_time_wall_unix();
+    dvq_stamp_owner(pick);
+    if (dvq_have_systemd()) {
+        char frag[96];
+        dvq_unit_frag(pick->name, frag, sizeof(frag));
+        (void)snprintf(unit, unitcap, "eu-%s-a%lld-s%lld", frag,
+                       pick->attempt, pick->seq);
+        (void)snprintf(pick->pid_or_unit, sizeof(pick->pid_or_unit), "%s",
+                       unit);
+    } else {
+        (void)snprintf(pick->pid_or_unit, sizeof(pick->pid_or_unit),
+                       "direct");
+    }
+    (void)snprintf(pick->state, sizeof(pick->state), "running");
+    for (size_t i = 0; i < nrows; i++) {
+        if (rows[i].seq == pick->seq) {
+            rows[i] = *pick;
+            break;
+        }
+    }
+}
+
+static bool dvq_next_persist_running(struct zcl_command_reply *reply,
+                                     const char *queue, const char *qpath,
+                                     struct dvq_row *rows, size_t nrows,
+                                     int lock, int wtfd)
+{
+    if (!dvq_rewrite_rows(queue, qpath, rows, nrows)) {
+        free(rows);
+        dvq_close_wt(wtfd);
+        dvq_unlock(lock);
+        dvq_fail(reply, "QUEUE_WRITE_FAILED", "dispatch",
+                 "cannot mark the row running", qpath);
+        return false;
+    }
+    return true;
+}
+
+static bool dvq_next_stage_run(struct zcl_command_reply *reply,
+                               const struct dvq_dirs *d, const char *qpath,
+                               const struct dvq_row *pick, const char *wt,
+                               const char *st, const char *taskpath,
+                               int wtfd)
+{
+    char *task = NULL;
+    size_t task_used = 0;
+    {
+        char namedir[4096 + 80];
+        (void)snprintf(namedir, sizeof(namedir), "%s/%s", d->engine,
+                       pick->name);
+        if (!dvq_mkdir_one(namedir) || !dvq_mkdir_one(st)) {
+            dvq_close_wt(wtfd);
+            dvq_unmark(d->queue, qpath, pick->seq);
+            dvq_fail(reply, "STATE_DIR_FAILED", "dispatch",
+                     "cannot create the run state dir", st);
+            return false;
+        }
+    }
+    task = (char *)zcl_malloc(DVQ_TASK_CAP, "devagent.queue.task");
+    if (!task) {
+        dvq_close_wt(wtfd);
+        dvq_unmark(d->queue, qpath, pick->seq);
+        dvq_fail(reply, "DISPATCH_FAILED", "dispatch",
+                 "cannot allocate the task buffer", "malloc failed");
+        return false;
+    }
+    if (!dvq_compose_task(pick, wt, st, d->engine, task, DVQ_TASK_CAP,
+                          &task_used) ||
+        !dvq_write_file(taskpath, task, task_used)) {
+        free(task);
+        dvq_close_wt(wtfd);
+        dvq_unmark(d->queue, qpath, pick->seq);
+        dvq_fail(reply, "DISPATCH_FAILED", "dispatch",
+                 "cannot compose the task file", taskpath);
+        return false;
+    }
+    free(task);
+    return true;
+}
+
+static bool dvq_next_find_harness(struct zcl_command_reply *reply,
+                                  const struct dvq_dirs *d, const char *qpath,
+                                  const struct dvq_row *pick, int wtfd,
+                                  char *harness, size_t cap)
+{
+    if (dvq_find_harness(harness, cap))
+        return true;
+    dvq_close_wt(wtfd);
+    dvq_unmark(d->queue, qpath, pick->seq);
+    dvq_fail(reply, "DISPATCH_NO_HARNESS", "dispatch",
+             "z23-engine-unit is not on PATH and "
+             "ZCL_ENGINE_UNIT_BIN is unset",
+             "install the harness or set ZCL_ENGINE_UNIT_BIN");
+    return false;
+}
+
+static void dvq_next_harness_argv(const struct dvq_row *pick,
+                                  const char *model, bool doc,
+                                  const char *harness, const char *taskpath,
+                                  const char *wt, const char *st,
+                                  const char *tmo, const char *gtmo,
+                                  const char **hargv)
+{
+    char group[96];
+    int n = 0;
+    hargv[n++] = harness;
+    n = dvq_engine_args(pick, model, hargv, n);
+    hargv[n++] = "--task";
+    hargv[n++] = taskpath;
+    if (doc) {
+        hargv[n++] = "--no-group";
+    } else {
+        if (pick->group[0])
+            (void)snprintf(group, sizeof(group), "%s", pick->group);
+        else
+            (void)snprintf(group, sizeof(group), "devagent_%s", pick->name);
+        hargv[n++] = "--group";
+        hargv[n++] = group;
+    }
+    hargv[n++] = "--territory";
+    hargv[n++] = "engine/modules/engine";
+    hargv[n++] = "--worktree";
+    hargv[n++] = wt;
+    hargv[n++] = "--state-dir";
+    hargv[n++] = st;
+    hargv[n++] = "--timeout";
+    hargv[n++] = tmo;
+    if (gtmo) {
+        hargv[n++] = "--gate-timeout";
+        hargv[n++] = gtmo;
+    }
+    hargv[n++] = "--turns";
+    hargv[n++] = "3";
+    hargv[n++] = "--yes-dispatch";
+    hargv[n++] = NULL;
+}
+
+static bool dvq_next_zbin_env(const char *wt, char *zbenv, size_t cap)
+{
+    char zbind[4096 + 64];
+    bool have_zbin = dvq_z23_bin(wt, zbind, sizeof(zbind));
+    if (have_zbin) {
+        if (snprintf(zbenv, cap, "ZCL_Z23_BIN=%s", zbind) >= (int)cap)
+            have_zbin = false;
+    }
+    return have_zbin;
+}
+
+static struct zcl_result dvq_next_spawn_systemd(
+    const char **hargv, bool have_zbin, const char *zbenv, const char *unit,
+    const char *wt, const char *runout, const char *lockpath, char *psetenv,
+    int *wtfd)
+{
+    const char *sargv[56];
+    char unitarg[192], wdirarg[4096 + 32], outarg[4096 + 64];
+    char errarg[4096 + 64], zsetenv[4096 + 64];
+    int m = 0;
+    (void)snprintf(unitarg, sizeof(unitarg), "--unit=%s", unit);
+    (void)snprintf(wdirarg, sizeof(wdirarg), "--working-directory=%s", wt);
+    (void)snprintf(outarg, sizeof(outarg), "StandardOutput=truncate:%s",
+                   runout);
+    (void)snprintf(errarg, sizeof(errarg), "StandardError=truncate:%s",
+                   runout);
+    sargv[m++] = "systemd-run";
+    sargv[m++] = "--user";
+    sargv[m++] = "--quiet";
+    sargv[m++] = "--collect";
+    sargv[m++] = "-p";
+    sargv[m++] = "CPUQuota=600%";
+    sargv[m++] = "-p";
+    sargv[m++] = "Nice=12";
+    sargv[m++] = "-p";
+    sargv[m++] = outarg;
+    sargv[m++] = "-p";
+    sargv[m++] = errarg;
+    sargv[m++] = unitarg;
+    sargv[m++] = wdirarg;
+    m = dvq_unit_env_args(sargv, m, zbenv, have_zbin, zsetenv,
+                          sizeof(zsetenv), psetenv);
+    sargv[m++] = "flock";
+    sargv[m++] = "-n";
+    sargv[m++] = lockpath;
+    for (int i = 0; hargv[i] && m < (int)(sizeof(sargv) / sizeof(sargv[0])) - 1;
+         i++)
+        sargv[m++] = hargv[i];
+    sargv[m] = NULL;
+    /* The unit takes its own flock; ours guarded it until launch. */
+    dvq_close_wt(*wtfd);
+    *wtfd = -1;
+    return zcl_spawn_detached(sargv, runout);
+}
+
+static struct zcl_result dvq_next_spawn_env(const char **hargv,
+                                            const char *zbenv,
+                                            const char *runout, int *wtfd)
+{
+    const char *sargv[56];
+    struct zcl_result zr;
+    int m = 0;
+    /* No shell anywhere: env(1) carries the one variable and
+     * execs the harness with the same argv. */
+    sargv[m++] = "env";
+    sargv[m++] = zbenv;
+    for (int i = 0; hargv[i] && m < (int)(sizeof(sargv) / sizeof(sargv[0])) - 1;
+         i++)
+        sargv[m++] = hargv[i];
+    sargv[m] = NULL;
+    zr = zcl_spawn_detached(sargv, runout);
+    /* The child inherited the worktree lock; ours can close. */
+    dvq_close_wt(*wtfd);
+    *wtfd = -1;
+    return zr;
+}
+
+static struct zcl_result dvq_next_spawn(const char **hargv, bool have_zbin,
+                                        const char *zbenv, const char *unit,
+                                        const char *wt, const char *runout,
+                                        const char *lockpath, char *psetenv,
+                                        int *wtfd)
+{
+    struct zcl_result zr;
+    if (dvq_have_systemd())
+        return dvq_next_spawn_systemd(hargv, have_zbin, zbenv, unit, wt,
+                                      runout, lockpath, psetenv, wtfd);
+    if (have_zbin)
+        return dvq_next_spawn_env(hargv, zbenv, runout, wtfd);
+    zr = zcl_spawn_detached(hargv, runout);
+    /* The child inherited the worktree lock; ours can close. */
+    dvq_close_wt(*wtfd);
+    *wtfd = -1;
+    return zr;
+}
+
 static void dvq_next(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
 {
@@ -2825,16 +3256,11 @@ static void dvq_next(const struct zcl_command_request *req,
     char qpath[4096 + 32], poolpath[4096 + 32];
     char wt[4096], st[4096 + 64], taskpath[4096 + 64];
     char runout[4096 + 64], lockpath[4096 + 16];
-    char harness[4096], model[160], group[96], unit[160], unitarg[192];
-    char wdirarg[4096 + 32];
-    char zbind[4096 + 64], zbenv[4096 + 64], zsetenv[4096 + 64];
+    char harness[4096], model[160], unit[160];
+    char zbenv[4096 + 64];
     char psetenv[8192 + 32];
-    char outarg[4096 + 64], errarg[4096 + 64];
-    char *task = NULL;
-    size_t task_used = 0;
     const char *tmo = "1200", *gtmo = "2400";
     const char *hargv[26];
-    const char *sargv[56];
     bool have_zbin;
     int lock = -1, wtfd = -1;
     struct zcl_result zr;
@@ -2846,44 +3272,12 @@ static void dvq_next(const struct zcl_command_request *req,
              "run next on a POSIX host");
     return;
 #endif
-    if (!dvq_dirs_resolve(&d, true)) {
-        dvq_fail(reply, "STATE_DIR_FAILED", "select",
-                 "cannot resolve the owner-private state root",
-                 "platform_state_root");
+    if (!dvq_next_open_queue(reply, &d, qpath, sizeof(qpath), poolpath,
+                             sizeof(poolpath)))
         return;
-    }
-    if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.queue) >=
-            (int)sizeof(qpath) ||
-        snprintf(poolpath, sizeof(poolpath), "%s/pool.txt", d.queue) >=
-            (int)sizeof(poolpath)) {
-        dvq_fail(reply, "QUEUE_READ_FAILED", "select",
-                 "the queue paths do not fit their buffers",
-                 "platform_state_root too long");
+    if (!dvq_next_lock_rows(reply, &d, qpath, &lock, &rows, &nrows))
         return;
-    }
-    lock = dvq_lock(d.queue);
-    if (lock < 0) {
-        dvq_fail(reply, "QUEUE_READ_FAILED", "select",
-                 "cannot take the queue lock", qpath);
-        return;
-    }
-    if (!dvq_load_rows(qpath, &rows, &nrows)) {
-        dvq_unlock(lock);
-        dvq_fail(reply, "QUEUE_READ_FAILED", "select",
-                 "cannot read the queue file", qpath);
-        return;
-    }
-    {
-        char opath[4096 + 32], unused[80] = {0};
-        long at = -1;
-        if (snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", d.queue) <
-            (int)sizeof(opath))
-            at = dvq_pick_ready(rows, nrows, opath, false, unused);
-        if (at >= 0) {
-            pick = rows[at];
-            have_pick = true;
-        }
-    }
+    have_pick = dvq_next_select_row(&d, rows, nrows, &pick);
     if (!have_pick) {
         free(rows);
         dvq_unlock(lock);
@@ -2896,34 +3290,9 @@ static void dvq_next(const struct zcl_command_request *req,
     /* READY row held under the lock; now find it a free warm
      * worktree. Every probe below is a non-blocking local file op. */
     wt[0] = '\0';
-    {
-        char *text = (char *)zcl_malloc(DVQ_POOL_CAP, "devagent.queue.pool");
-        char *save = NULL, *line;
-        if (!text) {
-            free(rows);
-            dvq_close_wt(wtfd);
-            dvq_unlock(lock);
-            dvq_fail(reply, "QUEUE_READ_FAILED", "select",
-                     "cannot allocate the pool buffer", poolpath);
-            return;
-        }
-        if (dvq_read_file(poolpath, text, DVQ_POOL_CAP, NULL)) {
-            for (line = strtok_r(text, "\n", &save); line;
-                 line = strtok_r(NULL, "\n", &save)) {
-                int fd = -1;
-                dvq_trim(line);
-                if (!line[0] || wt[0])
-                    continue;
-                if (strlen(line) >= sizeof(wt))
-                    continue;
-                if (dvq_try_worktree(line, &fd)) {
-                    memcpy(wt, line, strlen(line) + 1);
-                    wtfd = fd;
-                }
-            }
-        }
-        free(text);
-    }
+    if (!dvq_next_pick_worktree(reply, rows, lock, poolpath, wt, sizeof(wt),
+                                &wtfd))
+        return;
     if (!dvq_next_ready(reply, lock, rows, poolpath, wt[0] != '\0', wtfd,
                         psetenv, sizeof(psetenv)))
         return;
@@ -2931,42 +3300,11 @@ static void dvq_next(const struct zcl_command_request *req,
      * across the spawn so the child inherits the lock. */
     dvq_select_model(&pick, model, sizeof(model));
     doc = strcmp(pick.kind, "doc") == 0;
-    if (!doc && strcmp(pick.kind, "file") != 0) {
-        tmo = "1200";
-        gtmo = "2400";
-    } else {
-        tmo = "900";
-        gtmo = NULL;
-    }
-    (void)snprintf(pick.worktree, sizeof(pick.worktree), "%s", wt);
-    pick.started = (long long)platform_time_wall_unix();
-    dvq_stamp_owner(&pick);
-    if (dvq_have_systemd()) {
-        char frag[96];
-        dvq_unit_frag(pick.name, frag, sizeof(frag));
-        (void)snprintf(unit, sizeof(unit), "eu-%s-a%lld-s%lld", frag,
-                       pick.attempt, pick.seq);
-        (void)snprintf(pick.pid_or_unit, sizeof(pick.pid_or_unit), "%s",
-                       unit);
-    } else {
-        (void)snprintf(pick.pid_or_unit, sizeof(pick.pid_or_unit),
-                       "direct");
-    }
-    (void)snprintf(pick.state, sizeof(pick.state), "running");
-    for (size_t i = 0; i < nrows; i++) {
-        if (rows[i].seq == pick.seq) {
-            rows[i] = pick;
-            break;
-        }
-    }
-    if (!dvq_rewrite_rows(d.queue, qpath, rows, nrows)) {
-        free(rows);
-        dvq_close_wt(wtfd);
-        dvq_unlock(lock);
-        dvq_fail(reply, "QUEUE_WRITE_FAILED", "dispatch",
-                 "cannot mark the row running", qpath);
+    dvq_next_timeouts(doc, pick.kind, &tmo, &gtmo);
+    dvq_next_mark_running(&pick, wt, rows, nrows, unit, sizeof(unit));
+    if (!dvq_next_persist_running(reply, d.queue, qpath, rows, nrows, lock,
+                                  wtfd))
         return;
-    }
     free(rows);
     rows = NULL;
     dvq_unlock(lock);
@@ -2986,144 +3324,16 @@ static void dvq_next(const struct zcl_command_request *req,
                  "platform_state_root too long");
         return;
     }
-    {
-        char namedir[4096 + 80];
-        (void)snprintf(namedir, sizeof(namedir), "%s/%s", d.engine,
-                       pick.name);
-        if (!dvq_mkdir_one(namedir) || !dvq_mkdir_one(st)) {
-            dvq_close_wt(wtfd);
-            dvq_unmark(d.queue, qpath, pick.seq);
-            dvq_fail(reply, "STATE_DIR_FAILED", "dispatch",
-                     "cannot create the run state dir", st);
-            return;
-        }
-    }
-    task = (char *)zcl_malloc(DVQ_TASK_CAP, "devagent.queue.task");
-    if (!task) {
-        dvq_close_wt(wtfd);
-        dvq_unmark(d.queue, qpath, pick.seq);
-        dvq_fail(reply, "DISPATCH_FAILED", "dispatch",
-                 "cannot allocate the task buffer", "malloc failed");
+    if (!dvq_next_stage_run(reply, &d, qpath, &pick, wt, st, taskpath, wtfd))
         return;
-    }
-    if (!dvq_compose_task(&pick, wt, st, d.engine, task, DVQ_TASK_CAP,
-                          &task_used) ||
-        !dvq_write_file(taskpath, task, task_used)) {
-        free(task);
-        dvq_close_wt(wtfd);
-        dvq_unmark(d.queue, qpath, pick.seq);
-        dvq_fail(reply, "DISPATCH_FAILED", "dispatch",
-                 "cannot compose the task file", taskpath);
+    if (!dvq_next_find_harness(reply, &d, qpath, &pick, wtfd, harness,
+                               sizeof(harness)))
         return;
-    }
-    free(task);
-    if (!dvq_find_harness(harness, sizeof(harness))) {
-        dvq_close_wt(wtfd);
-        dvq_unmark(d.queue, qpath, pick.seq);
-        dvq_fail(reply, "DISPATCH_NO_HARNESS", "dispatch",
-                 "z23-engine-unit is not on PATH and "
-                 "ZCL_ENGINE_UNIT_BIN is unset",
-                 "install the harness or set ZCL_ENGINE_UNIT_BIN");
-        return;
-    }
-    {
-        int n = 0;
-        hargv[n++] = harness;
-        n = dvq_engine_args(&pick, model, hargv, n);
-        hargv[n++] = "--task";
-        hargv[n++] = taskpath;
-        if (doc) {
-            hargv[n++] = "--no-group";
-        } else {
-            if (pick.group[0])
-                (void)snprintf(group, sizeof(group), "%s", pick.group);
-            else
-                (void)snprintf(group, sizeof(group), "devagent_%s",
-                               pick.name);
-            hargv[n++] = "--group";
-            hargv[n++] = group;
-        }
-        hargv[n++] = "--territory";
-        hargv[n++] = "engine/modules/engine";
-        hargv[n++] = "--worktree";
-        hargv[n++] = wt;
-        hargv[n++] = "--state-dir";
-        hargv[n++] = st;
-        hargv[n++] = "--timeout";
-        hargv[n++] = tmo;
-        if (gtmo) {
-            hargv[n++] = "--gate-timeout";
-            hargv[n++] = gtmo;
-        }
-        hargv[n++] = "--turns";
-        hargv[n++] = "3";
-        hargv[n++] = "--yes-dispatch";
-        hargv[n++] = NULL;
-        have_zbin = dvq_z23_bin(wt, zbind, sizeof(zbind));
-        if (have_zbin) {
-            if (snprintf(zbenv, sizeof(zbenv), "ZCL_Z23_BIN=%s", zbind) >=
-                (int)sizeof(zbenv))
-                have_zbin = false;
-        }
-        if (dvq_have_systemd()) {
-            int m = 0;
-            (void)snprintf(unitarg, sizeof(unitarg), "--unit=%s", unit);
-            (void)snprintf(wdirarg, sizeof(wdirarg),
-                           "--working-directory=%s", wt);
-            (void)snprintf(outarg, sizeof(outarg),
-                           "StandardOutput=truncate:%s", runout);
-            (void)snprintf(errarg, sizeof(errarg),
-                           "StandardError=truncate:%s", runout);
-            sargv[m++] = "systemd-run";
-            sargv[m++] = "--user";
-            sargv[m++] = "--quiet";
-            sargv[m++] = "--collect";
-            sargv[m++] = "-p";
-            sargv[m++] = "CPUQuota=600%";
-            sargv[m++] = "-p";
-            sargv[m++] = "Nice=12";
-            sargv[m++] = "-p";
-            sargv[m++] = outarg;
-            sargv[m++] = "-p";
-            sargv[m++] = errarg;
-            sargv[m++] = unitarg;
-            sargv[m++] = wdirarg;
-            m = dvq_unit_env_args(sargv, m, zbenv, have_zbin, zsetenv,
-                                  sizeof(zsetenv), psetenv);
-            sargv[m++] = "flock";
-            sargv[m++] = "-n";
-            sargv[m++] = lockpath;
-            for (int i = 0; hargv[i] && m < (int)(sizeof(sargv) /
-                                                 sizeof(sargv[0])) - 1;
-                 i++)
-                sargv[m++] = hargv[i];
-            sargv[m] = NULL;
-            /* The unit takes its own flock; ours guarded it until launch. */
-            dvq_close_wt(wtfd);
-            wtfd = -1;
-            zr = zcl_spawn_detached(sargv, runout);
-        } else if (have_zbin) {
-            /* No shell anywhere: env(1) carries the one variable and
-             * execs the harness with the same argv. */
-            int m = 0;
-            sargv[m++] = "env";
-            sargv[m++] = zbenv;
-            for (int i = 0; hargv[i] && m < (int)(sizeof(sargv) /
-                                                 sizeof(sargv[0])) - 1;
-                 i++)
-                sargv[m++] = hargv[i];
-            sargv[m] = NULL;
-            zr = zcl_spawn_detached(sargv, runout);
-            /* The child inherited the worktree lock; ours can close. */
-            dvq_close_wt(wtfd);
-            wtfd = -1;
-        } else {
-            zr = zcl_spawn_detached(hargv, runout);
-            /* The child inherited the worktree lock; ours can close. */
-            dvq_close_wt(wtfd);
-            wtfd = -1;
-        }
-    }
+    dvq_next_harness_argv(&pick, model, doc, harness, taskpath, wt, st, tmo,
+                          gtmo, hargv);
+    have_zbin = dvq_next_zbin_env(wt, zbenv, sizeof(zbenv));
+    zr = dvq_next_spawn(hargv, have_zbin, zbenv, unit, wt, runout, lockpath,
+                        psetenv, &wtfd);
     if (!zr.ok) {
         dvq_unmark(d.queue, qpath, pick.seq);
         dvq_fail(reply, "DISPATCH_FAILED", "dispatch",
@@ -4326,6 +4536,104 @@ static bool dvq_status_emit(struct zcl_command_reply *reply,
     return ok;
 }
 
+static bool dvq_status_want_json(const struct zcl_command_request *req)
+{
+    const struct json_value *jv;
+    if (req && req->input) {
+        jv = json_get(req->input, "json");
+        return jv && json_get_bool(jv);
+    }
+    return false;
+}
+
+static bool dvq_status_push_rows(const struct dvq_row *rows, size_t nrows,
+                                 const char *opath, long long now,
+                                 const char *engine, struct json_value *queued,
+                                 struct json_value *running,
+                                 long long *queued_ready)
+{
+    for (size_t i = 0; i < nrows; i++) {
+        if (strcmp(rows[i].state, "queued") == 0) {
+            if (!dvq_push_queued(queued, rows, nrows, i, opath, queued_ready))
+                return false;
+        } else if (strcmp(rows[i].state, "running") == 0) {
+            if (!dvq_push_running(running, &rows[i], now, engine))
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool dvq_status_push_outcomes(const char *opath,
+                                     struct json_value *outcomes)
+{
+    char *text = (char *)zcl_malloc(DVQ_FILE_CAP, "devagent.queue.outcomes");
+    if (!text)
+        return false;
+    if (dvq_read_file(opath, text, DVQ_FILE_CAP, NULL)) {
+        struct {
+            char name[80];
+            long long attempt;
+            char verdict[128];
+            long long rc;
+            char ts[64];
+            struct dvq_usage usage;
+            struct dvq_artifact_roots roots;
+            struct dvq_outcome_timing timing;
+        } last[10];
+        size_t kept = 0;
+        char *save = NULL, *line;
+        for (line = strtok_r(text, "\n", &save); line;
+             line = strtok_r(NULL, "\n", &save)) {
+            char name[80], verdict[128], ts[64];
+            long long attempt = 0, rc = -1;
+            if (!dvq_line_str(line, "name", name, sizeof(name)) ||
+                !dvq_line_int(line, "attempt", &attempt))
+                continue;
+            (void)dvq_line_str(line, "verdict", verdict, sizeof(verdict));
+            (void)dvq_line_int(line, "rc", &rc);
+            (void)dvq_line_str(line, "ts", ts, sizeof(ts));
+            if (kept == sizeof(last) / sizeof(last[0])) {
+                for (size_t k = 1; k < kept; k++)
+                    last[k - 1] = last[k];
+                kept--;
+            }
+            memset(&last[kept], 0, sizeof(last[kept]));
+            (void)snprintf(last[kept].name, sizeof(last[kept].name), "%s",
+                           name);
+            last[kept].attempt = attempt;
+            (void)snprintf(last[kept].verdict, sizeof(last[kept].verdict),
+                           "%s", verdict);
+            last[kept].rc = rc;
+            (void)snprintf(last[kept].ts, sizeof(last[kept].ts), "%s", ts);
+            (void)dvq_line_int(line, "seq", &last[kept].timing.seq);
+            (void)dvq_line_str(line, "queued_ts",
+                               last[kept].timing.queued_ts,
+                               sizeof(last[kept].timing.queued_ts));
+            (void)dvq_line_int(line, "started_unix",
+                               &last[kept].timing.started_unix);
+            dvq_usage_from_text(line, &last[kept].usage);
+            memset(&last[kept].roots, 0, sizeof(last[kept].roots));
+            (void)dvq_line_str(line, "receipt_sha256",
+                               last[kept].roots.receipt_sha256,
+                               sizeof(last[kept].roots.receipt_sha256));
+            (void)dvq_line_str(line, "candidate_sha256",
+                               last[kept].roots.candidate_sha256,
+                               sizeof(last[kept].roots.candidate_sha256));
+            kept++;
+        }
+        for (size_t k = 0; k < kept; k++) {
+            if (!dvq_push_outcome(outcomes, last[k].name, last[k].attempt,
+                                  last[k].verdict, last[k].rc, last[k].ts,
+                                  &last[k].usage, &last[k].roots,
+                                  &last[k].timing))
+                break;
+        }
+    }
+    free(text);
+    return true;
+}
+
 static void dvq_status(const struct zcl_command_request *req,
                        struct zcl_command_reply *reply)
 {
@@ -4338,12 +4646,8 @@ static void dvq_status(const struct zcl_command_request *req,
     struct dvq_pool_census census;
     long long now = (long long)platform_time_wall_unix();
     bool want_json = false;
-    const struct json_value *jv;
     char screen[16384];
-    if (req && req->input) {
-        jv = json_get(req->input, "json");
-        want_json = jv && json_get_bool(jv);
-    }
+    want_json = dvq_status_want_json(req);
     if (!dvq_dirs_resolve(&d, false)) {
         dvq_fail(reply, "STATE_DIR_FAILED", "status",
                  "cannot resolve the owner-private state root",
@@ -4374,86 +4678,12 @@ static void dvq_status(const struct zcl_command_request *req,
     json_set_array(&outcomes);
     json_init(&pool);
     json_set_object(&pool);
-    for (size_t i = 0; i < nrows; i++) {
-        if (strcmp(rows[i].state, "queued") == 0) {
-            if (!dvq_push_queued(&queued, rows, nrows, i, opath,
-                                 &queued_ready))
-                goto fail;
-        } else if (strcmp(rows[i].state, "running") == 0) {
-            if (!dvq_push_running(&running, &rows[i], now, d.engine))
-                goto fail;
-        }
-    }
+    if (!dvq_status_push_rows(rows, nrows, opath, now, d.engine, &queued,
+                              &running, &queued_ready))
+        goto fail;
     /* Last 10 outcome rows, oldest first. */
-    {
-        char *text = (char *)zcl_malloc(DVQ_FILE_CAP, "devagent.queue.outcomes");
-        if (!text)
-            goto fail;
-        if (dvq_read_file(opath, text, DVQ_FILE_CAP, NULL)) {
-            struct {
-                char name[80];
-                long long attempt;
-                char verdict[128];
-                long long rc;
-                char ts[64];
-                struct dvq_usage usage;
-                struct dvq_artifact_roots roots;
-                struct dvq_outcome_timing timing;
-            } last[10];
-            size_t kept = 0;
-            char *save = NULL, *line;
-            for (line = strtok_r(text, "\n", &save); line;
-                 line = strtok_r(NULL, "\n", &save)) {
-                char name[80], verdict[128], ts[64];
-                long long attempt = 0, rc = -1;
-                if (!dvq_line_str(line, "name", name, sizeof(name)) ||
-                    !dvq_line_int(line, "attempt", &attempt))
-                    continue;
-                (void)dvq_line_str(line, "verdict", verdict,
-                                   sizeof(verdict));
-                (void)dvq_line_int(line, "rc", &rc);
-                (void)dvq_line_str(line, "ts", ts, sizeof(ts));
-                if (kept == sizeof(last) / sizeof(last[0])) {
-                    for (size_t k = 1; k < kept; k++)
-                        last[k - 1] = last[k];
-                    kept--;
-                }
-                memset(&last[kept], 0, sizeof(last[kept]));
-                (void)snprintf(last[kept].name, sizeof(last[kept].name),
-                               "%s", name);
-                last[kept].attempt = attempt;
-                (void)snprintf(last[kept].verdict,
-                               sizeof(last[kept].verdict), "%s", verdict);
-                last[kept].rc = rc;
-                (void)snprintf(last[kept].ts, sizeof(last[kept].ts), "%s",
-                               ts);
-                (void)dvq_line_int(line, "seq", &last[kept].timing.seq);
-                (void)dvq_line_str(line, "queued_ts",
-                                   last[kept].timing.queued_ts,
-                                   sizeof(last[kept].timing.queued_ts));
-                (void)dvq_line_int(line, "started_unix",
-                                   &last[kept].timing.started_unix);
-                dvq_usage_from_text(line, &last[kept].usage);
-                memset(&last[kept].roots, 0, sizeof(last[kept].roots));
-                (void)dvq_line_str(line, "receipt_sha256",
-                                   last[kept].roots.receipt_sha256,
-                                   sizeof(last[kept].roots.receipt_sha256));
-                (void)dvq_line_str(line, "candidate_sha256",
-                                   last[kept].roots.candidate_sha256,
-                                   sizeof(last[kept].roots.candidate_sha256));
-                kept++;
-            }
-            for (size_t k = 0; k < kept; k++) {
-                if (!dvq_push_outcome(&outcomes, last[k].name,
-                                      last[k].attempt, last[k].verdict,
-                                      last[k].rc, last[k].ts,
-                                      &last[k].usage, &last[k].roots,
-                                      &last[k].timing))
-                    break;
-            }
-        }
-        free(text);
-    }
+    if (!dvq_status_push_outcomes(opath, &outcomes))
+        goto fail;
     dvq_pool_take(poolpath, &census);
     /* known FIRST, then every count, which are null — never 0 — when the pool
      * was not measured, so a consumer reading only the numbers cannot mistake
