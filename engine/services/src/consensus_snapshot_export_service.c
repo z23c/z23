@@ -179,6 +179,43 @@ static bool hash_regular_file(const char *path, uint8_t out_sha3[32],
     return true;
 }
 
+static bool local_export_proof_read_stable(
+    struct platform_positioned_file *file, uint8_t *raw, size_t raw_size,
+    struct platform_positioned_file_snapshot *before_out)
+{
+    struct platform_positioned_file_snapshot before, after;
+    bool ok = platform_positioned_file_snapshot(file, &before) &&
+              before.size == raw_size &&
+              platform_positioned_file_read(file, raw, raw_size, 0) ==
+                  (int64_t)raw_size &&
+              platform_positioned_file_snapshot(file, &after) &&
+              snapshot_identity_equal(&before, &after);
+    if (ok)
+        *before_out = before;
+    return ok;
+}
+
+static bool local_export_proof_accept(const uint8_t *raw, size_t raw_size,
+                                     struct local_export_proof *out)
+{
+    if (memcmp(raw, LOCAL_EXPORT_PROOF_MAGIC,
+               sizeof(LOCAL_EXPORT_PROOF_MAGIC)) == 0 &&
+        get_u32_le(raw + 8) == LOCAL_EXPORT_PROOF_VERSION &&
+        get_u32_le(raw + 12) == LOCAL_EXPORT_PROOF_BYTES) {
+        for (size_t i = 92; i < raw_size; i++) {
+            if (raw[i] != 0)
+                return false;
+        }
+        memset(out, 0, sizeof(*out));
+        out->body_size = get_u64_le(raw + 16);
+        memcpy(out->body_sha3, raw + 24, 32);
+        out->state_height = (int32_t)get_u32_le(raw + 56);
+        memcpy(out->state_block_hash, raw + 60, 32);
+        return out->state_height >= 0 && out->body_size != 0;
+    }
+    return false;
+}
+
 static bool read_local_export_proof(const char *path,
                                     struct local_export_proof *out,
     struct platform_positioned_file_snapshot *out_snapshot)
@@ -189,31 +226,12 @@ static bool read_local_export_proof(const char *path,
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, path))
         return false; /* raw-return-ok:missing-proof-is-policy-input */
-    struct platform_positioned_file_snapshot before, after;
+    struct platform_positioned_file_snapshot before;
     uint8_t raw[LOCAL_EXPORT_PROOF_BYTES];
-    bool ok = platform_positioned_file_snapshot(&file, &before) &&
-              before.size == sizeof(raw) &&
-              platform_positioned_file_read(&file, raw, sizeof(raw), 0) ==
-                  (int64_t)sizeof(raw) &&
-              platform_positioned_file_snapshot(&file, &after) &&
-              snapshot_identity_equal(&before, &after);
+    bool ok = local_export_proof_read_stable(&file, raw, sizeof(raw),
+                                             &before);
     platform_positioned_file_close(&file);
-    if (!ok || memcmp(raw, LOCAL_EXPORT_PROOF_MAGIC,
-                      sizeof(LOCAL_EXPORT_PROOF_MAGIC)) != 0 ||
-        get_u32_le(raw + 8) != LOCAL_EXPORT_PROOF_VERSION ||
-        get_u32_le(raw + 12) != LOCAL_EXPORT_PROOF_BYTES)
-        return false;
-    for (size_t i = 92; i < sizeof(raw); i++) {
-        if (raw[i] != 0)
-            return false;
-    }
-
-    memset(out, 0, sizeof(*out));
-    out->body_size = get_u64_le(raw + 16);
-    memcpy(out->body_sha3, raw + 24, 32);
-    out->state_height = (int32_t)get_u32_le(raw + 56);
-    memcpy(out->state_block_hash, raw + 60, 32);
-    if (out->state_height < 0 || out->body_size == 0)
+    if (!ok || !local_export_proof_accept(raw, sizeof(raw), out))
         return false;
     if (out_snapshot) *out_snapshot = before;
     return true;
@@ -256,88 +274,121 @@ done:
     return found;
 }
 
-static bool load_verified_local_export(const char *datadir,
-                                       struct local_export_proof *out,
-                                       char *reason, size_t reason_size)
+static bool local_export_fail(char *reason, size_t reason_size,
+                              const char *code)
 {
-    char body_path[640], proof_path[640];
-    if (!export_path(body_path, sizeof(body_path), datadir,
+    if (reason && reason_size)
+        snprintf(reason, reason_size, "%s", code);
+    return false;
+}
+
+static const char *local_export_locate(
+    const char *datadir, char *body_path, size_t body_size,
+    char *proof_path, size_t proof_size,
+    struct platform_positioned_file_snapshot *body_snapshot,
+    struct platform_positioned_file_snapshot *proof_snapshot)
+{
+    if (!export_path(body_path, body_size, datadir,
                      "consensus_snapshot.db") ||
-        !export_path(proof_path, sizeof(proof_path), datadir,
-                     LOCAL_EXPORT_PROOF_NAME)) {
-        if (reason && reason_size)
-            snprintf(reason, reason_size, "local_export_path_invalid");
-        return false; /* raw-return-ok:bounded policy reason returned */
-    }
+        !export_path(proof_path, proof_size, datadir,
+                     LOCAL_EXPORT_PROOF_NAME))
+        return "local_export_path_invalid"; /* raw-return-ok:bounded policy reason returned */
+    if (!snapshot_named_file(body_path, body_snapshot) ||
+        !snapshot_named_file(proof_path, proof_snapshot))
+        return "local_export_proof_missing"; /* raw-return-ok:missing proof is expected policy */
+    return NULL;
+}
 
-    struct platform_positioned_file_snapshot body_snapshot, proof_snapshot;
-    if (!snapshot_named_file(body_path, &body_snapshot) ||
-        !snapshot_named_file(proof_path, &proof_snapshot)) {
-        if (reason && reason_size)
-            snprintf(reason, reason_size, "local_export_proof_missing");
-        return false; /* raw-return-ok:missing proof is expected policy */
-    }
-
+static bool local_export_cache_take(
+    const char *datadir,
+    const struct platform_positioned_file_snapshot *body_snapshot,
+    const struct platform_positioned_file_snapshot *proof_snapshot,
+    struct local_export_proof *out)
+{
     pthread_mutex_lock(&g_local_export_cache_mutex);
     bool cached = g_local_export_cache.valid &&
         strcmp(g_local_export_cache.datadir, datadir) == 0 &&
         snapshot_identity_equal(&g_local_export_cache.body_snapshot,
-                                &body_snapshot) &&
+                                body_snapshot) &&
         snapshot_identity_equal(&g_local_export_cache.proof_snapshot,
-                                &proof_snapshot);
+                                proof_snapshot);
     if (cached)
         *out = g_local_export_cache.proof;
     pthread_mutex_unlock(&g_local_export_cache_mutex);
-    if (cached)
-        return true;
+    return cached;
+}
 
-    struct local_export_proof proof;
-    struct platform_positioned_file_snapshot opened_proof_snapshot;
-    struct platform_positioned_file_snapshot opened_body_snapshot;
+static const char *local_export_verify_opened(
+    const char *body_path, const char *proof_path,
+    struct local_export_proof *proof,
+    struct platform_positioned_file_snapshot *opened_body,
+    struct platform_positioned_file_snapshot *opened_proof)
+{
     uint8_t got_sha3[32];
     uint64_t got_size = 0;
-    if (!read_local_export_proof(proof_path, &proof,
-                                 &opened_proof_snapshot)) {
-        if (reason && reason_size)
-            snprintf(reason, reason_size, "local_export_proof_malformed");
-        return false; /* raw-return-ok:bounded policy reason returned */
-    }
-    if (!hash_regular_file(body_path, got_sha3, &got_size,
-                           &opened_body_snapshot) ||
-        got_size != proof.body_size ||
-        memcmp(got_sha3, proof.body_sha3, 32) != 0) {
-        if (reason && reason_size)
-            snprintf(reason, reason_size, "local_export_digest_mismatch");
-        return false; /* raw-return-ok:bounded policy reason returned */
-    }
-    if (!sqlite_has_bound_block(body_path, proof.state_height,
-                                proof.state_block_hash)) {
-        if (reason && reason_size)
-            snprintf(reason, reason_size, "local_export_state_mismatch");
-        return false; /* raw-return-ok:bounded policy reason returned */
-    }
+    if (!read_local_export_proof(proof_path, proof, opened_proof))
+        return "local_export_proof_malformed"; /* raw-return-ok:bounded policy reason returned */
+    if (!hash_regular_file(body_path, got_sha3, &got_size, opened_body) ||
+        got_size != proof->body_size ||
+        memcmp(got_sha3, proof->body_sha3, 32) != 0)
+        return "local_export_digest_mismatch"; /* raw-return-ok:bounded policy reason returned */
+    if (!sqlite_has_bound_block(body_path, proof->state_height,
+                                proof->state_block_hash))
+        return "local_export_state_mismatch"; /* raw-return-ok:bounded policy reason returned */
     struct platform_positioned_file_snapshot final_body_snapshot;
     struct platform_positioned_file_snapshot final_proof_snapshot;
     if (!snapshot_named_file(body_path, &final_body_snapshot) ||
         !snapshot_named_file(proof_path, &final_proof_snapshot) ||
-        !snapshot_identity_equal(&opened_body_snapshot,
-                                 &final_body_snapshot) ||
-        !snapshot_identity_equal(&opened_proof_snapshot,
-                                 &final_proof_snapshot)) {
-        if (reason && reason_size)
-            snprintf(reason, reason_size, "local_export_identity_changed");
-        return false;
-    }
+        !snapshot_identity_equal(opened_body, &final_body_snapshot) ||
+        !snapshot_identity_equal(opened_proof, &final_proof_snapshot))
+        return "local_export_identity_changed";
+    return NULL;
+}
 
+static void local_export_cache_store(
+    const char *datadir,
+    const struct platform_positioned_file_snapshot *body_snapshot,
+    const struct platform_positioned_file_snapshot *proof_snapshot,
+    const struct local_export_proof *proof)
+{
     pthread_mutex_lock(&g_local_export_cache_mutex);
     memset(&g_local_export_cache, 0, sizeof(g_local_export_cache));
     g_local_export_cache.valid = true;
     snprintf(g_local_export_cache.datadir,
              sizeof(g_local_export_cache.datadir), "%s", datadir);
-    g_local_export_cache.body_snapshot = opened_body_snapshot;
-    g_local_export_cache.proof_snapshot = opened_proof_snapshot;
-    g_local_export_cache.proof = proof;
+    g_local_export_cache.body_snapshot = *body_snapshot;
+    g_local_export_cache.proof_snapshot = *proof_snapshot;
+    g_local_export_cache.proof = *proof;
     pthread_mutex_unlock(&g_local_export_cache_mutex);
+}
+
+static bool load_verified_local_export(const char *datadir,
+                                       struct local_export_proof *out,
+                                       char *reason, size_t reason_size)
+{
+    char body_path[640], proof_path[640];
+    struct platform_positioned_file_snapshot body_snapshot, proof_snapshot;
+    const char *fail = local_export_locate(
+        datadir, body_path, sizeof(body_path), proof_path, sizeof(proof_path),
+        &body_snapshot, &proof_snapshot);
+    if (fail)
+        return local_export_fail(reason, reason_size, fail);
+
+    if (local_export_cache_take(datadir, &body_snapshot, &proof_snapshot,
+                                out))
+        return true;
+
+    struct local_export_proof proof;
+    struct platform_positioned_file_snapshot opened_proof_snapshot;
+    struct platform_positioned_file_snapshot opened_body_snapshot;
+    fail = local_export_verify_opened(
+        body_path, proof_path, &proof, &opened_body_snapshot,
+        &opened_proof_snapshot);
+    if (fail)
+        return local_export_fail(reason, reason_size, fail);
+
+    local_export_cache_store(datadir, &opened_body_snapshot,
+                             &opened_proof_snapshot, &proof);
     *out = proof;
     return true;
 }
@@ -496,28 +547,59 @@ static struct zcl_result export_step_checked(sqlite3_stmt *stmt, sqlite3 *db,
     return ZCL_OK;
 }
 
-static struct zcl_result consensus_snapshot_export_service_run_internal(
+struct export_sql_step {
+    const char *sql;
+    const char *label;
+};
+
+static struct zcl_result export_exec_steps(sqlite3 *db,
+    const struct export_sql_step *steps, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        struct zcl_result step = export_exec_checked(db, steps[i].sql,
+                                                    steps[i].label);
+        if (!step.ok)
+            return step;
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result export_snapshot_apply_open_pragmas(sqlite3 *dst_db)
+{
+    static const struct export_sql_step steps[] = {
+        { "PRAGMA journal_mode=WAL", "set journal_mode WAL" },
+        { "PRAGMA synchronous=OFF", "set synchronous OFF" },
+        { "PRAGMA cache_size=-65536", "set cache_size" },
+        { "PRAGMA temp_store=FILE", "set temp_store FILE" },
+    };
+    return export_exec_steps(dst_db, steps, sizeof steps / sizeof steps[0]);
+}
+
+static struct zcl_result export_snapshot_paths_ready(
     const char *datadir, int32_t state_height,
-    const uint8_t state_block_hash[32])
+    const uint8_t *state_block_hash,
+    char *src_path, size_t src_size,
+    char *dst_path, size_t dst_size,
+    char *proof_path, size_t proof_size)
 {
     if (!export_datadir_valid(datadir))
         return ZCL_ERR(-1, "export_snapshot: invalid datadir");
     if (state_height < 0 || !state_block_hash)
         return ZCL_ERR(-1, "export_snapshot: invalid state binding");
-
-    char src_path[576], dst_path[576], proof_path[640];
-    if (!export_snapshot_paths(datadir, src_path, sizeof(src_path),
-                               dst_path, sizeof(dst_path), proof_path,
-                               sizeof(proof_path)))
+    if (!export_snapshot_paths(datadir, src_path, src_size, dst_path, dst_size,
+                               proof_path, proof_size))
         return ZCL_ERR(-1, "export_snapshot: path too long");
 
     struct platform_file_metadata src_metadata;
     if (platform_file_metadata_read(src_path, &src_metadata) !=
-            PLATFORM_FILE_METADATA_OK || src_metadata.size < 1000000) {
+            PLATFORM_FILE_METADATA_OK || src_metadata.size < 1000000)
         return ZCL_ERR(-2, "export_snapshot: %s missing or too small",
                        src_path);
-    }
+    return ZCL_OK;
+}
 
+static struct zcl_result export_snapshot_source_utxo_floor(const char *src_path)
+{
     /* Refuse to clobber a downloaded snapshot with an empty rebuild.
      * On a fresh node, node.db has only the genesis-era UTXOs that
      * block-by-block IBD has produced so far. Exporting that would
@@ -525,31 +607,233 @@ static struct zcl_result consensus_snapshot_export_service_run_internal(
      * boot needs to import, destroying the secure-snapshot fast path
      * for any node that runs file_service and then restarts before
      * full chain catchup. */
-    {
-        sqlite3 *probe = NULL;
-        int64_t src_utxos = 0;
-        if (sqlite3_open_v2(src_path, &probe,
-                            SQLITE_OPEN_READONLY, NULL) == SQLITE_OK
-            && probe) {
-            sqlite3_stmt *q = NULL;
-            if (sqlite3_prepare_v2(probe,
-                    "SELECT COUNT(*) FROM utxos",
-                    -1, &q, NULL) == SQLITE_OK && q) {
-                if (sqlite3_step(q) == SQLITE_ROW)  // raw-sql-ok:read-only-probe
-                    src_utxos = sqlite3_column_int64(q, 0);
-                sqlite3_finalize(q);
-            }
-            sqlite3_close(probe);
+    sqlite3 *probe = NULL;
+    int64_t src_utxos = 0;
+    if (sqlite3_open_v2(src_path, &probe,
+                        SQLITE_OPEN_READONLY, NULL) == SQLITE_OK
+        && probe) {
+        sqlite3_stmt *q = NULL;
+        if (sqlite3_prepare_v2(probe,
+                "SELECT COUNT(*) FROM utxos",
+                -1, &q, NULL) == SQLITE_OK && q) {
+            if (sqlite3_step(q) == SQLITE_ROW)  // raw-sql-ok:read-only-probe
+                src_utxos = sqlite3_column_int64(q, 0);
+            sqlite3_finalize(q);
         }
-        if (src_utxos < 1000) {
-            return ZCL_ERR(
-                -3,
-                "export_snapshot: source utxos=%lld is below the 1000-row "
-                "threshold; preserving any downloaded consensus_snapshot.db "
-                "so the next boot can import it",
-                (long long)src_utxos);
-        }
+        sqlite3_close(probe);
     }
+    if (src_utxos < 1000) {
+        return ZCL_ERR(
+            -3,
+            "export_snapshot: source utxos=%lld is below the 1000-row "
+            "threshold; preserving any downloaded consensus_snapshot.db "
+            "so the next boot can import it",
+            (long long)src_utxos);
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result export_snapshot_open_pair(
+    const char *src_path, const char *dst_path,
+    sqlite3 **src_db, sqlite3 **dst_db,
+    bool *src_opened, bool *dst_opened)
+{
+    if (sqlite3_open_v2(src_path, src_db, SQLITE_OPEN_READONLY, NULL)
+        != SQLITE_OK || !*src_db)
+        return ZCL_ERR(-4, "export_snapshot: cannot open source db %s",
+                       src_path);
+    *src_opened = true;
+
+    if (sqlite3_open_v2(dst_path, dst_db,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) != SQLITE_OK ||
+        !*dst_db)
+        return ZCL_ERR(-5, "export_snapshot: cannot create destination db %s",
+                       dst_path);
+    *dst_opened = true;
+    return export_snapshot_apply_open_pragmas(*dst_db);
+}
+
+static struct zcl_result export_snapshot_attach_source(
+    sqlite3 *dst_db, const char *src_path, bool *src_attached)
+{
+    char *attach_sql = sqlite3_mprintf("ATTACH DATABASE '%q' AS src",
+                                       src_path);
+    if (!attach_sql)
+        return ZCL_ERR(-12, "export_snapshot: out of memory building ATTACH");
+    struct zcl_result step = export_exec_checked(dst_db, attach_sql,
+                                                 "attach source db");
+    sqlite3_free(attach_sql);
+    if (!step.ok)
+        return step;
+    *src_attached = true;
+    return ZCL_OK;
+}
+
+static struct zcl_result export_snapshot_copy_tables(
+    sqlite3 *dst_db, bool *dst_txn_open, int *tables_copied)
+{
+    static const char *safe_tables[] = {
+        "blocks", "transactions", "utxos", "addresses",
+        "chain_stats", "zslp_tokens", "zslp_balances",
+        NULL
+    };
+
+    struct zcl_result step = export_exec_checked(dst_db, "BEGIN",
+                               "begin snapshot transaction");
+    if (!step.ok)
+        return step;
+    *dst_txn_open = true;
+
+    int copied = 0;
+    for (int i = 0; safe_tables[i]; i++) {
+        char create_sql[512];
+        snprintf(create_sql, sizeof(create_sql),
+            "CREATE TABLE IF NOT EXISTS %s AS SELECT * FROM src.%s",
+            safe_tables[i], safe_tables[i]);
+        step = export_exec_checked(dst_db, create_sql,
+                                   "copy consensus table");
+        if (!step.ok)
+            return step;
+        copied++;
+    }
+    *tables_copied = copied;
+    return ZCL_OK;
+}
+
+static struct zcl_result export_snapshot_write_meta(
+    sqlite3 *dst_db, int32_t state_height, int tables_copied)
+{
+    struct zcl_result step = export_exec_checked(dst_db,
+        "CREATE TABLE IF NOT EXISTS _snapshot_meta "
+        "(key TEXT PRIMARY KEY, value TEXT)",
+        "create metadata table");
+    if (!step.ok)
+        return step;
+
+    sqlite3_stmt *meta = NULL;
+    step = export_prepare_checked(
+        dst_db,
+        "INSERT INTO _snapshot_meta(key,value) VALUES(?,?)",
+        &meta, "prepare metadata insert");
+    if (!step.ok)
+        return step;
+
+    char value_buf[32];
+    snprintf(value_buf, sizeof(value_buf), "%d", state_height);
+    if (sqlite3_bind_text(meta, 1, "height", -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(meta, 2, value_buf, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        step = ZCL_ERR(-6, "export_snapshot: bind metadata height failed: %s",
+                       sqlite3_errmsg(dst_db));
+        sqlite3_finalize(meta);
+        return step;
+    }
+    step = export_step_checked(meta, dst_db, "insert metadata height");
+    if (!step.ok) {
+        sqlite3_finalize(meta);
+        return step;
+    }
+
+    sqlite3_reset(meta);
+    sqlite3_clear_bindings(meta);
+
+    snprintf(value_buf, sizeof(value_buf), "%d", tables_copied);
+    if (sqlite3_bind_text(meta, 1, "tables", -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(meta, 2, value_buf, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        step = ZCL_ERR(-7, "export_snapshot: bind metadata tables failed: %s",
+                       sqlite3_errmsg(dst_db));
+        sqlite3_finalize(meta);
+        return step;
+    }
+    step = export_step_checked(meta, dst_db, "insert metadata table count");
+    if (!step.ok) {
+        sqlite3_finalize(meta);
+        return step;
+    }
+    sqlite3_finalize(meta);
+    return ZCL_OK;
+}
+
+static struct zcl_result export_snapshot_finish_body(
+    sqlite3 *dst_db, const char *dst_path,
+    bool *dst_txn_open, bool *src_attached,
+    int tables_copied, int32_t state_height)
+{
+    struct zcl_result step = export_exec_checked(dst_db, "COMMIT",
+                               "commit snapshot transaction");
+    if (!step.ok)
+        return step;
+    *dst_txn_open = false;
+    *src_attached = false;
+    step = export_exec_checked(dst_db, "DETACH DATABASE src",
+                               "detach source db");
+    if (!step.ok)
+        return step;
+
+    static const struct export_sql_step steps[] = {
+        { "PRAGMA synchronous=NORMAL", "restore sync NORMAL" },
+        { "VACUUM", "vacuum snapshot" },
+    };
+    step = export_exec_steps(dst_db, steps, sizeof steps / sizeof steps[0]);
+    if (!step.ok)
+        return step;
+
+    struct platform_file_metadata dst_metadata;
+    if (platform_file_metadata_read(dst_path, &dst_metadata) !=
+        PLATFORM_FILE_METADATA_OK)
+        return ZCL_ERR(-8, "export_snapshot: destination stat failed: %s",
+                       dst_path);
+
+    printf("Consensus snapshot: %d tables, height %d, %.0f MB\n",
+           tables_copied, state_height,
+           (double)dst_metadata.size / (1024.0 * 1024.0));
+    if (tables_copied == 0)
+        return ZCL_ERR(-9, "export_snapshot: no tables exported");
+    return ZCL_OK;
+}
+
+static struct zcl_result export_snapshot_first_error(
+    struct zcl_result current, struct zcl_result step)
+{
+    if (!step.ok && current.ok)
+        return step;
+    return current;
+}
+
+static struct zcl_result export_snapshot_close_dbs(
+    sqlite3 *dst_db, bool dst_opened, bool dst_txn_open, bool src_attached,
+    sqlite3 *src_db, bool src_opened, struct zcl_result result)
+{
+    if (dst_opened && dst_db) {
+        if (dst_txn_open && !sqlite3_get_autocommit(dst_db))
+            result = export_snapshot_first_error(
+                result, export_exec_checked(dst_db, "ROLLBACK",
+                                            "rollback snapshot tx"));
+        if (src_attached)
+            result = export_snapshot_first_error(
+                result, export_exec_checked(dst_db, "DETACH DATABASE src",
+                                            "detach source db"));
+        sqlite3_close(dst_db);
+    }
+    if (src_opened && src_db)
+        sqlite3_close(src_db);
+    return result;
+}
+
+static struct zcl_result consensus_snapshot_export_service_run_internal(
+    const char *datadir, int32_t state_height,
+    const uint8_t state_block_hash[32])
+{
+    char src_path[576], dst_path[576], proof_path[640];
+    struct zcl_result result = export_snapshot_paths_ready(
+        datadir, state_height, state_block_hash,
+        src_path, sizeof(src_path), dst_path, sizeof(dst_path),
+        proof_path, sizeof(proof_path));
+    if (!result.ok)
+        return result;
+
+    result = export_snapshot_source_utxo_floor(src_path);
+    if (!result.ok)
+        return result;
 
     /* Remove eligibility before touching the body.  A crash at any later
      * boundary leaves either no artifact or an unstamped artifact, neither of
@@ -564,170 +848,36 @@ static struct zcl_result consensus_snapshot_export_service_run_internal(
     bool dst_db_opened = false;
     bool dst_txn_open = false;
     bool src_attached = false;
-    struct zcl_result result = ZCL_OK;
 
-    if (sqlite3_open_v2(src_path, &src_db, SQLITE_OPEN_READONLY, NULL)
-        != SQLITE_OK || !src_db) {
-        result = ZCL_ERR(-4, "export_snapshot: cannot open source db %s",
-                         src_path);
+    result = export_snapshot_open_pair(src_path, dst_path, &src_db, &dst_db,
+                                       &src_db_opened, &dst_db_opened);
+    if (!result.ok)
         goto export_cleanup;
-    }
-    src_db_opened = true;
 
-    if (sqlite3_open_v2(dst_path, &dst_db,
-        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) != SQLITE_OK ||
-        !dst_db) {
-        result = ZCL_ERR(-5, "export_snapshot: cannot create destination db %s",
-                         dst_path);
+    result = export_snapshot_attach_source(dst_db, src_path, &src_attached);
+    if (!result.ok)
         goto export_cleanup;
-    }
-    dst_db_opened = true;
-
-    struct zcl_result step = export_exec_checked(dst_db,
-        "PRAGMA journal_mode=WAL", "set journal_mode WAL");
-    if (!step.ok) { result = step; goto export_cleanup; }
-    step = export_exec_checked(dst_db, "PRAGMA synchronous=OFF",
-                               "set synchronous OFF");
-    if (!step.ok) { result = step; goto export_cleanup; }
-    step = export_exec_checked(dst_db, "PRAGMA cache_size=-65536",
-                               "set cache_size");
-    if (!step.ok) { result = step; goto export_cleanup; }
-    step = export_exec_checked(dst_db, "PRAGMA temp_store=FILE",
-                               "set temp_store FILE");
-    if (!step.ok) { result = step; goto export_cleanup; }
-
-    char *attach_sql = sqlite3_mprintf("ATTACH DATABASE '%q' AS src",
-                                       src_path);
-    if (!attach_sql) {
-        result = ZCL_ERR(-12, "export_snapshot: out of memory building ATTACH");
-        goto export_cleanup;
-    }
-    step = export_exec_checked(dst_db, attach_sql, "attach source db");
-    sqlite3_free(attach_sql);
-    if (!step.ok) { result = step; goto export_cleanup; }
-    src_attached = true;
-
-    static const char *safe_tables[] = {
-        "blocks", "transactions", "utxos", "addresses",
-        "chain_stats", "zslp_tokens", "zslp_balances",
-        NULL
-    };
-
-    step = export_exec_checked(dst_db, "BEGIN",
-                               "begin snapshot transaction");
-    if (!step.ok) { result = step; goto export_cleanup; }
-    dst_txn_open = true;
 
     int tables_copied = 0;
-    for (int i = 0; safe_tables[i]; i++) {
-        char create_sql[512];
-        snprintf(create_sql, sizeof(create_sql),
-            "CREATE TABLE IF NOT EXISTS %s AS SELECT * FROM src.%s",
-            safe_tables[i], safe_tables[i]);
-        step = export_exec_checked(dst_db, create_sql,
-                                   "copy consensus table");
-        if (!step.ok) { result = step; goto export_cleanup; }
-        tables_copied++;
-    }
-
-    step = export_exec_checked(dst_db,
-        "CREATE TABLE IF NOT EXISTS _snapshot_meta "
-        "(key TEXT PRIMARY KEY, value TEXT)",
-        "create metadata table");
-    if (!step.ok) { result = step; goto export_cleanup; }
-
-    sqlite3_stmt *meta = NULL;
-    step = export_prepare_checked(
-        dst_db,
-        "INSERT INTO _snapshot_meta(key,value) VALUES(?,?)",
-        &meta, "prepare metadata insert");
-    if (!step.ok) { result = step; goto export_cleanup; }
-
-    char value_buf[32];
-    snprintf(value_buf, sizeof(value_buf), "%d", state_height);
-    if (sqlite3_bind_text(meta, 1, "height", -1, SQLITE_STATIC) != SQLITE_OK ||
-        sqlite3_bind_text(meta, 2, value_buf, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
-        result = ZCL_ERR(-6, "export_snapshot: bind metadata height failed: %s",
-                         sqlite3_errmsg(dst_db));
-        sqlite3_finalize(meta);
+    result = export_snapshot_copy_tables(dst_db, &dst_txn_open,
+                                         &tables_copied);
+    if (!result.ok)
         goto export_cleanup;
-    }
-    step = export_step_checked(meta, dst_db, "insert metadata height");
-    if (!step.ok) {
-        result = step;
-        sqlite3_finalize(meta);
+
+    result = export_snapshot_write_meta(dst_db, state_height, tables_copied);
+    if (!result.ok)
         goto export_cleanup;
-    }
 
-    sqlite3_reset(meta);
-    sqlite3_clear_bindings(meta);
-
-    snprintf(value_buf, sizeof(value_buf), "%d", tables_copied);
-    if (sqlite3_bind_text(meta, 1, "tables", -1, SQLITE_STATIC) != SQLITE_OK ||
-        sqlite3_bind_text(meta, 2, value_buf, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
-        result = ZCL_ERR(-7, "export_snapshot: bind metadata tables failed: %s",
-                         sqlite3_errmsg(dst_db));
-        sqlite3_finalize(meta);
+    result = export_snapshot_finish_body(dst_db, dst_path, &dst_txn_open,
+                                         &src_attached, tables_copied,
+                                         state_height);
+    if (!result.ok)
         goto export_cleanup;
-    }
-    step = export_step_checked(meta, dst_db, "insert metadata table count");
-    if (!step.ok) {
-        result = step;
-        sqlite3_finalize(meta);
-        goto export_cleanup;
-    }
-    sqlite3_finalize(meta);
-    meta = NULL;
-
-    step = export_exec_checked(dst_db, "COMMIT",
-                               "commit snapshot transaction");
-    if (!step.ok) { result = step; goto export_cleanup; }
-    dst_txn_open = false;
-    src_attached = false;
-    step = export_exec_checked(dst_db, "DETACH DATABASE src",
-                               "detach source db");
-    if (!step.ok) { result = step; goto export_cleanup; }
-
-    step = export_exec_checked(dst_db, "PRAGMA synchronous=NORMAL",
-                               "restore sync NORMAL");
-    if (!step.ok) { result = step; goto export_cleanup; }
-    step = export_exec_checked(dst_db, "VACUUM", "vacuum snapshot");
-    if (!step.ok) { result = step; goto export_cleanup; }
-
-    struct platform_file_metadata dst_metadata;
-    if (platform_file_metadata_read(dst_path, &dst_metadata) !=
-        PLATFORM_FILE_METADATA_OK) {
-        result = ZCL_ERR(-8, "export_snapshot: destination stat failed: %s",
-                         dst_path);
-        goto export_cleanup;
-    }
-
-    printf("Consensus snapshot: %d tables, height %d, %.0f MB\n",
-           tables_copied, state_height,
-           (double)dst_metadata.size / (1024.0 * 1024.0));
-    if (tables_copied == 0) {
-        result = ZCL_ERR(-9, "export_snapshot: no tables exported");
-        goto export_cleanup;
-    }
 
 export_cleanup:
-    if (dst_db_opened && dst_db) {
-        if (dst_txn_open && !sqlite3_get_autocommit(dst_db)) {
-            step = export_exec_checked(dst_db, "ROLLBACK",
-                                       "rollback snapshot tx");
-            if (!step.ok && result.ok)
-                result = step;
-        }
-        if (src_attached) {
-            step = export_exec_checked(dst_db, "DETACH DATABASE src",
-                                       "detach source db");
-            if (!step.ok && result.ok)
-                result = step;
-        }
-        sqlite3_close(dst_db);
-    }
-    if (src_db_opened && src_db)
-        sqlite3_close(src_db);
+    result = export_snapshot_close_dbs(dst_db, dst_db_opened, dst_txn_open,
+                                       src_attached, src_db, src_db_opened,
+                                       result);
 
     if (!result.ok) {
         LOG_WARN("consensus_snapshot_export", "%s", result.message);
