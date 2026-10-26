@@ -35,7 +35,7 @@ static void mk_key(uint8_t out[ANCHOR_FINALITY_KEY_LEN], uint8_t seed)
         out[i] = (uint8_t)(seed + i);
 }
 
-int test_anchor_finality(void)
+static int anchor_band_matches_addrman(void)
 {
     int failures = 0;
 
@@ -55,6 +55,12 @@ int test_anchor_finality(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int anchor_depth_nine_confers_nothing(void)
+{
+    int failures = 0;
 
     printf("anchor_finality: depth 9 confers NOTHING... ");
     {
@@ -74,6 +80,12 @@ int test_anchor_finality(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int anchor_depth_ten_confers_influence(void)
+{
+    int failures = 0;
 
     printf("anchor_finality: depth 10 confers influence... ");
     {
@@ -92,6 +104,12 @@ int test_anchor_finality(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int anchor_boundary_matches_immutable(void)
+{
+    int failures = 0;
 
     printf("anchor_finality: boundary agrees with height_is_immutable "
            "at every depth 0..20... ");
@@ -109,6 +127,12 @@ int test_anchor_finality(void)
         if (bad == 0) printf("OK\n");
         else { printf("FAIL (%d mismatches)\n", bad); failures++; }
     }
+    return failures;
+}
+
+static int anchor_blocks_until_final_countdown(void)
+{
+    int failures = 0;
 
     printf("anchor_finality: blocks_until_final counts down without "
            "off-by-one... ");
@@ -126,6 +150,12 @@ int test_anchor_finality(void)
         if (bad == 0) printf("OK\n");
         else { printf("FAIL (%d bad)\n", bad); failures++; }
     }
+    return failures;
+}
+
+static int anchor_record_above_tip_provisional(void)
+{
+    int failures = 0;
 
     printf("anchor_finality: record ABOVE tip is provisional, not UB... ");
     {
@@ -143,6 +173,12 @@ int test_anchor_finality(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int anchor_extreme_heights_stay_total(void)
+{
+    int failures = 0;
 
     printf("anchor_finality: extreme heights stay total (no overflow)... ");
     {
@@ -164,6 +200,12 @@ int test_anchor_finality(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int anchor_missing_tip_is_unknown(void)
+{
+    int failures = 0;
 
     printf("anchor_finality: no tip / bad record height are UNKNOWN... ");
     {
@@ -182,6 +224,12 @@ int test_anchor_finality(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int anchor_shallow_tip_never_confers(void)
+{
+    int failures = 0;
 
     printf("anchor_finality: shallow tip (< depth) never confers... ");
     {
@@ -194,6 +242,12 @@ int test_anchor_finality(void)
             printf("OK\n");
         else { printf("FAIL (bad=%d)\n", bad); failures++; }
     }
+    return failures;
+}
+
+static int anchor_fresh_insert_leaks_nothing(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: fresh insert leaks no influence... ");
     {
@@ -208,6 +262,12 @@ int test_anchor_finality(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int anchor_claimed_multiplier_is_clamped(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: claimed multiplier is clamped into [1,4]... ");
     {
@@ -227,6 +287,24 @@ int test_anchor_finality(void)
             printf("OK\n");
         else { printf("FAIL (%.3f %.3f %.3f)\n", a, b, c); failures++; }
     }
+    return failures;
+}
+
+static bool anchor_reorg_shallow_record_withdrew(
+    const struct anchor_influence_set *set,
+    const uint8_t key[ANCHOR_FINALITY_KEY_LEN],
+    size_t inf, size_t w, const struct anchor_finality *f)
+{
+    return inf == 0 && w == 1 &&
+           anchor_influence_weight_for(set, key) == 1.0 &&
+           f->state == ANCHOR_FINALITY_PROVISIONAL &&
+           f->depth == 5 && f->blocks_until_final == 5 &&
+           set->count == 1;
+}
+
+static int anchor_reorg_shallow_demotes(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: reorg to shallow DEMOTES and withdraws... ");
     {
@@ -246,11 +324,8 @@ int test_anchor_finality(void)
         inf = anchor_influence_set_apply_tip(&set, 1005, &w);
         struct anchor_finality f;
         anchor_influence_lookup(&set, k, &f, NULL);
-        bool withdrawn = (inf == 0 && w == 1 &&
-                          anchor_influence_weight_for(&set, k) == 1.0 &&
-                          f.state == ANCHOR_FINALITY_PROVISIONAL &&
-                          f.depth == 5 && f.blocks_until_final == 5 &&
-                          set.count == 1);
+        bool withdrawn = anchor_reorg_shallow_record_withdrew(
+            &set, k, inf, w, &f);
 
         /* And it comes back when the chain grows past it again. */
         inf = anchor_influence_set_apply_tip(&set, 1020, &w);
@@ -264,6 +339,12 @@ int test_anchor_finality(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int anchor_reorg_below_record_evicts(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: reorg BELOW the record evicts it entirely... ");
     {
@@ -293,6 +374,12 @@ int test_anchor_finality(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int anchor_lost_tip_withdraws_all(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: losing the tip withdraws everything, "
            "evicts nothing... ");
@@ -315,6 +402,12 @@ int test_anchor_finality(void)
             printf("OK\n");
         else { printf("FAIL (inf=%zu w=%zu)\n", inf, w); failures++; }
     }
+    return failures;
+}
+
+static int anchor_explicit_remove_and_absent(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: explicit remove and absent lookups... ");
     {
@@ -334,6 +427,12 @@ int test_anchor_finality(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int anchor_capacity_bounded_idempotent(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: capacity is bounded and upsert is idempotent... ");
     {
@@ -366,6 +465,12 @@ int test_anchor_finality(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int anchor_negative_and_null_refused(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: negative height and NULL args are refused... ");
     {
@@ -384,6 +489,12 @@ int test_anchor_finality(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int anchor_weight_never_below_floor(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: no reachable weight is ever below 1.0... ");
     {
@@ -410,6 +521,27 @@ int test_anchor_finality(void)
         if (bad == 0) printf("OK\n");
         else { printf("FAIL (%d out-of-band weights)\n", bad); failures++; }
     }
+    return failures;
+}
+
+static void anchor_dump_note_record_row(const struct json_value *row,
+                                        int *seen_prov, int *seen_final)
+{
+    const struct json_value *st = json_get(row, "state");
+    const struct json_value *rs = json_get(row, "reason");
+    const char *s = st ? json_get_str(st) : NULL;
+    const char *r = rs ? json_get_str(rs) : NULL;
+    if (s && r && strcmp(s, "provisional") == 0 &&
+        strcmp(r, "provisional_shallow") == 0)
+        (*seen_prov)++;
+    if (s && r && strcmp(s, "final") == 0 &&
+        strcmp(r, "final") == 0)
+        (*seen_final)++;
+}
+
+static int anchor_dump_reports_provisional_vs_final(void)
+{
+    int failures = 0;
 
     printf("anchor_influence: dump reports provisional vs final... ");
     {
@@ -427,17 +559,9 @@ int test_anchor_finality(void)
 
         const struct json_value *rows = json_get(&out, "records");
         int seen_prov = 0, seen_final = 0;
-        for (size_t i = 0; rows && i < json_size(rows); i++) {
-            const struct json_value *row = json_at(rows, i);
-            const struct json_value *st = json_get(row, "state");
-            const struct json_value *rs = json_get(row, "reason");
-            const char *s = st ? json_get_str(st) : NULL;
-            const char *r = rs ? json_get_str(rs) : NULL;
-            if (s && r && strcmp(s, "provisional") == 0 &&
-                strcmp(r, "provisional_shallow") == 0) seen_prov++;
-            if (s && r && strcmp(s, "final") == 0 &&
-                strcmp(r, "final") == 0) seen_final++;
-        }
+        for (size_t i = 0; rows && i < json_size(rows); i++)
+            anchor_dump_note_record_row(json_at(rows, i),
+                                        &seen_prov, &seen_final);
         const struct json_value *ic = json_get(&out, "influencing_count");
         const struct json_value *th = json_get(&out, "tip_height");
         bool counts = ic && json_get_int(ic) == 1 &&
@@ -453,6 +577,31 @@ int test_anchor_finality(void)
             failures++;
         }
     }
+    return failures;
+}
 
+int test_anchor_finality(void)
+{
+    int failures = 0;
+
+    failures += anchor_band_matches_addrman();
+    failures += anchor_depth_nine_confers_nothing();
+    failures += anchor_depth_ten_confers_influence();
+    failures += anchor_boundary_matches_immutable();
+    failures += anchor_blocks_until_final_countdown();
+    failures += anchor_record_above_tip_provisional();
+    failures += anchor_extreme_heights_stay_total();
+    failures += anchor_missing_tip_is_unknown();
+    failures += anchor_shallow_tip_never_confers();
+    failures += anchor_fresh_insert_leaks_nothing();
+    failures += anchor_claimed_multiplier_is_clamped();
+    failures += anchor_reorg_shallow_demotes();
+    failures += anchor_reorg_below_record_evicts();
+    failures += anchor_lost_tip_withdraws_all();
+    failures += anchor_explicit_remove_and_absent();
+    failures += anchor_capacity_bounded_idempotent();
+    failures += anchor_negative_and_null_refused();
+    failures += anchor_weight_never_below_floor();
+    failures += anchor_dump_reports_provisional_vs_final();
     return failures;
 }
