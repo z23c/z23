@@ -106,6 +106,298 @@ static void isn_healthy_inputs(struct invariant_sweep_inputs *in)
     in->prev_cur_tip_finalize = 3142990; /* cursor moved since last sweep */
 }
 
+/* check 3: authority-pair self-check against a throwaway in-memory db. */
+static int isn_assert_pair_self_check(void)
+{
+    int failures = 0;
+
+    struct node_db ndb;
+    bool dbok = node_db_open(&ndb, ":memory:");
+    ISN_CHECK("fixture: in-memory node_db opens", dbok);
+    if (dbok) {
+        uint8_t hash_a[32]; memset(hash_a, 0xA1, 32);
+        uint8_t hash_b[32]; memset(hash_b, 0xB2, 32);
+
+        /* empty projection: unknown hash passes (fresh datadir /
+         * cold-import non-fire proof) */
+        bool ok = invariant_sentinel_check_pair(&ndb, hash_a, 100,
+                                                "test_empty");
+        ISN_CHECK("pair: unknown hash passes (empty projection)", ok);
+
+        /* matching pair passes */
+        ok = isn_insert_block(&ndb, hash_a, 100) &&
+             invariant_sentinel_check_pair(&ndb, hash_a, 100,
+                                           "test_match");
+        ISN_CHECK("pair: matching (height,hash) passes", ok);
+        ISN_CHECK("pair: no blocker after passes",
+                  !blocker_exists("authority.pair_self_check"));
+
+        /* mismatch refuses + blocker (crash-only) */
+        ok = isn_insert_block(&ndb, hash_b, 200);
+        bool refused = !invariant_sentinel_check_pair(&ndb, hash_b, 206,
+                                                      "test_mismatch");
+        ISN_CHECK("pair: +6 mismatch REFUSED", ok && refused);
+        ISN_CHECK("pair: PERMANENT blocker registered",
+                  blocker_exists("authority.pair_self_check") &&
+                  blocker_class_for("authority.pair_self_check") ==
+                      BLOCKER_PERMANENT);
+
+        /* tip reset (height -1) passes silently */
+        ok = invariant_sentinel_check_pair(&ndb, hash_b, -1,
+                                           "test_reset");
+        ISN_CHECK("pair: height -1 (tip reset) passes", ok);
+
+        blocker_clear("authority.pair_self_check");
+        node_db_close(&ndb);
+    }
+    /* NULL ndb passes (unit tests / early boot) */
+    uint8_t hash_c[32]; memset(hash_c, 0xC3, 32);
+    ISN_CHECK("pair: NULL ndb passes",
+              invariant_sentinel_check_pair(NULL, hash_c, 5, "t"));
+    return failures;
+}
+
+/* check 4: window sweep verdict scenarios (pure evaluation). */
+static int isn_assert_sweep_verdict(void)
+{
+    int failures = 0;
+    struct invariant_sweep_inputs in;
+    struct invariant_sweep_verdict v;
+
+    /* healthy steady-state pipeline */
+    isn_healthy_inputs(&in);
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    ISN_CHECK("sweep: healthy pipeline -> no violation", !v.violated);
+
+    /* fresh datadir: all zeros, nothing known */
+    memset(&in, 0, sizeof(in));
+    in.prev_cur_tip_finalize = -1;
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    ISN_CHECK("sweep: fresh datadir (all zeros) -> no violation",
+              !v.violated);
+
+    /* anchor-stamped cold-import: all cursors equal, frontier ==
+     * cursor-1 (the anchor row) */
+    isn_healthy_inputs(&in);
+    in.cur_tip_finalize = in.cur_utxo_apply = in.cur_script_validate =
+        in.cur_body_fetch = in.cur_validate_headers = 3056759;
+    in.ua_log_frontier = 3056758;
+    in.coins_applied = 3056759;
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    ISN_CHECK("sweep: anchor-stamped cold-import -> no violation",
+              !v.violated);
+
+    /* I4.1: tip_finalize cursor ahead of utxo_apply */
+    isn_healthy_inputs(&in);
+    in.cur_tip_finalize = in.cur_utxo_apply + 5;
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    ISN_CHECK("sweep: I4.1 ordering violation fires + named",
+              v.violated && strcmp(v.invariant, "I4.1") == 0 &&
+              strstr(v.detail, "tip_finalize") != NULL);
+
+    /* I4.3: hole below the utxo_apply cursor */
+    isn_healthy_inputs(&in);
+    in.ua_log_frontier = (int32_t)(in.cur_utxo_apply - 30);
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    ISN_CHECK("sweep: I4.3 log hole fires + names first hole h",
+              v.violated && strcmp(v.invariant, "I4.3") == 0 &&
+              v.first_bad_h == (int)(in.cur_utxo_apply - 29));
+
+    /* I4.4: coin tear — coins_applied above utxo_apply's own ok=1
+     * prefix + 1 (Invariant B) */
+    isn_healthy_inputs(&in);
+    in.cur_utxo_apply = in.ua_log_frontier + 1; /* keep I4.3 quiet */
+    in.coins_applied = in.ua_log_frontier + 7;
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    ISN_CHECK("sweep: I4.4 coin tear fires",
+              v.violated && strcmp(v.invariant, "I4.4") == 0);
+
+    /* legitimate pipeline depth is NOT a tear: coins_applied ==
+     * frontier+1 while tip_finalize lags far behind */
+    isn_healthy_inputs(&in);
+    in.cur_tip_finalize = in.cur_utxo_apply - 500;
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    ISN_CHECK("sweep: pipeline depth (tip_finalize lag) -> no tear",
+              !v.violated);
+
+    /* I4.5: oscillation at an unmoving cursor — fires at threshold */
+    isn_healthy_inputs(&in);
+    in.prev_cur_tip_finalize = in.cur_tip_finalize; /* unmoved */
+    in.prev_reorg_detected_total = 100;
+    in.reorg_detected_total = 109; /* below threshold of 10 */
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    bool below_quiet = !v.violated;
+    in.reorg_detected_total = 110; /* at threshold */
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    ISN_CHECK("sweep: I4.5 oscillation fires at threshold only",
+              below_quiet && v.violated &&
+              strcmp(v.invariant, "I4.5") == 0);
+
+    /* moving cursor: same reorg burst is normal reorg handling */
+    isn_healthy_inputs(&in);
+    in.prev_cur_tip_finalize = in.cur_tip_finalize - 3; /* moved */
+    in.prev_reorg_detected_total = 100;
+    in.reorg_detected_total = 150;
+    invariant_sentinel_sweep_evaluate(&in, &v);
+    ISN_CHECK("sweep: reorg burst at a MOVING cursor -> quiet",
+              !v.violated);
+    return failures;
+}
+
+/* two-sweep confirmation gate for repeated violations. */
+static int isn_assert_confirm_violation_gate(void)
+{
+    int failures = 0;
+
+    invariant_sentinel_reset_for_testing();
+    struct invariant_sweep_verdict v;
+    memset(&v, 0, sizeof(v));
+    v.violated = true;
+    snprintf(v.invariant, sizeof(v.invariant), "I4.1");
+    v.first_bad_h = 100;
+    snprintf(v.detail, sizeof(v.detail), "t");
+
+    ISN_CHECK("confirm: first observation does NOT raise "
+              "(reorg-unwind window cover)",
+              !invariant_sentinel_confirm_violation(&v));
+    ISN_CHECK("confirm: same violation on the next sweep raises",
+              invariant_sentinel_confirm_violation(&v));
+
+    /* a moved boundary is a different violation: restart the count */
+    v.first_bad_h = 200;
+    ISN_CHECK("confirm: changed first_bad_h restarts the count",
+              !invariant_sentinel_confirm_violation(&v));
+
+    /* a clean sweep resets the pending state */
+    struct invariant_sweep_verdict clean;
+    memset(&clean, 0, sizeof(clean));
+    clean.first_bad_h = -1;
+    ISN_CHECK("confirm: clean verdict resets pending",
+              !invariant_sentinel_confirm_violation(&clean));
+    v.first_bad_h = 200;
+    ISN_CHECK("confirm: post-clean re-observation starts at one",
+              !invariant_sentinel_confirm_violation(&v));
+    return failures;
+}
+
+/* check 5, phase 1: seed the 8-utxo fixture, checkpoint it, then prove
+ * the clean and growth audits stay quiet (growth resyncs the
+ * checkpoint). */
+static int isn_audit_seed_checkpoint_and_growth(struct node_db *ndb)
+{
+    int failures = 0;
+    bool dbok = true;
+    for (int i = 0; i < 8; i++)
+        if (!isn_insert_utxo(ndb, i))
+            dbok = false;
+    ISN_CHECK("fixture: 8 utxos seeded", dbok);
+
+    struct utxo_commitment uc;
+    utxo_commitment_compute_db(ndb->db, &uc);
+    bool saved = utxo_commitment_save_checkpoint(ndb->db, &uc);
+    ISN_CHECK("fixture: checkpoint saved (count=8)",
+              saved && uc.count == 8);
+
+    /* matching set -> clean, no blocker, no hold */
+    bool ran = invariant_sentinel_commitment_audit_once();
+    ISN_CHECK("audit: matching set -> clean (no blocker, no hold)",
+              ran && !blocker_exists("coins.commitment_spot_check") &&
+              !chain_linkage_hold_active());
+
+    /* GROWTH (computed > saved): no fire, and EDIT 1 RESYNCS the
+     * checkpoint to the grown set (count 8 -> 10). */
+    bool grew = isn_insert_utxo(ndb, 100) &&
+                isn_insert_utxo(ndb, 101);
+    ran = invariant_sentinel_commitment_audit_once();
+    struct utxo_commitment ck;
+    bool loaded = utxo_commitment_load_checkpoint(ndb->db, &ck);
+    ISN_CHECK("audit: growth -> no fire + checkpoint resynced to 10",
+              grew && ran &&
+              !blocker_exists("coins.commitment_spot_check") &&
+              !chain_linkage_hold_active() &&
+              loaded && ck.count == 10);
+    return failures;
+}
+
+/* check 5, phase 2: shrink streak gate, non-fatal diagnostic fire,
+ * owner release, and growth self-heal of a latched blocker. */
+static int isn_audit_shrink_streak_and_self_heal(struct node_db *ndb)
+{
+    int failures = 0;
+
+    /* SHRINK below the (now count=10) checkpoint. */
+    bool truncated = sqlite3_exec(ndb->db,
+        "DELETE FROM utxos WHERE rowid IN "
+        "(SELECT rowid FROM utxos LIMIT 4)",
+        NULL, NULL, NULL) == SQLITE_OK;
+    /* STREAK GATE: a single shrink audit must NOT fire. */
+    bool ran = invariant_sentinel_commitment_audit_once();
+    ISN_CHECK("audit: single shrink does NOT fire (streak gate)",
+              truncated && ran &&
+              !blocker_exists("coins.commitment_spot_check") &&
+              !chain_linkage_hold_active());
+
+    /* DECOUPLE: a 2nd consecutive shrink fires the NON-FATAL diagnostic
+     * blocker but NEVER a chain_linkage hold. */
+    ran = invariant_sentinel_commitment_audit_once();
+    ISN_CHECK("audit: 2nd shrink FIRES non-fatal blocker, NO HOLD",
+              ran &&
+              blocker_exists("coins.commitment_spot_check") &&
+              blocker_class_for("coins.commitment_spot_check") ==
+                  BLOCKER_PERMANENT &&
+              !chain_linkage_hold_active());
+
+    /* OWNER: the auto-terminating owner hook (called by the
+     * state_window_inconsistent remedy) releases the diagnostic with no
+     * node.db access. */
+    invariant_sentinel_clear_commitment_blocker();
+    ISN_CHECK("owner: clear_commitment_blocker releases blocker + hold",
+              !blocker_exists("coins.commitment_spot_check") &&
+              !chain_linkage_hold_active());
+
+    /* Re-latch (2 shrinks), then a GROWTH audit clears the blocker via resync. */
+    (void)invariant_sentinel_commitment_audit_once(); /* streak 1 */
+    (void)invariant_sentinel_commitment_audit_once(); /* streak 2 -> fire */
+    ISN_CHECK("setup: blocker re-latched on sustained shrink",
+              blocker_exists("coins.commitment_spot_check"));
+    bool regrew = isn_insert_utxo(ndb, 200) &&
+                  isn_insert_utxo(ndb, 201) &&
+                  isn_insert_utxo(ndb, 202) &&
+                  isn_insert_utxo(ndb, 203) &&
+                  isn_insert_utxo(ndb, 204); /* above the 10-checkpoint */
+    ran = invariant_sentinel_commitment_audit_once();
+    ISN_CHECK("audit: growth resync clears a latched blocker (3164076 self-heal)",
+              regrew && ran &&
+              !blocker_exists("coins.commitment_spot_check") &&
+              !chain_linkage_hold_active());
+    return failures;
+}
+
+/* check 5: commitment audit driver — opens the audit fixture db and runs
+ * both phases (seed/checkpoint/growth, then shrink-streak/self-heal). */
+static int isn_assert_commitment_audit(void)
+{
+    int failures = 0;
+
+    invariant_sentinel_reset_for_testing();
+    blocker_reset_for_testing();
+    chain_linkage_reset_for_testing();
+    struct node_db ndb;
+    bool dbok = node_db_open(&ndb, ":memory:");
+    ISN_CHECK("fixture: audit node_db opens", dbok);
+    if (dbok) {
+        invariant_sentinel_set_node_db_for_testing(&ndb);
+
+        failures += isn_audit_seed_checkpoint_and_growth(&ndb);
+        failures += isn_audit_shrink_streak_and_self_heal(&ndb);
+
+        blocker_clear("coins.commitment_spot_check");
+        chain_linkage_hold_clear("commitment_audit");
+        node_db_close(&ndb);
+    }
+    return failures;
+}
+
 int test_invariant_sentinel(void)
 {
     printf("\n=== invariant_sentinel tests ===\n");
@@ -117,264 +409,20 @@ int test_invariant_sentinel(void)
     invariant_sentinel_reset_for_testing();
 
     /* ── check 3: authority-pair self-check ───────────────────────── */
-    {
-        struct node_db ndb;
-        bool dbok = node_db_open(&ndb, ":memory:");
-        ISN_CHECK("fixture: in-memory node_db opens", dbok);
-        if (dbok) {
-            uint8_t hash_a[32]; memset(hash_a, 0xA1, 32);
-            uint8_t hash_b[32]; memset(hash_b, 0xB2, 32);
-
-            /* empty projection: unknown hash passes (fresh datadir /
-             * cold-import non-fire proof) */
-            bool ok = invariant_sentinel_check_pair(&ndb, hash_a, 100,
-                                                    "test_empty");
-            ISN_CHECK("pair: unknown hash passes (empty projection)", ok);
-
-            /* matching pair passes */
-            ok = isn_insert_block(&ndb, hash_a, 100) &&
-                 invariant_sentinel_check_pair(&ndb, hash_a, 100,
-                                               "test_match");
-            ISN_CHECK("pair: matching (height,hash) passes", ok);
-            ISN_CHECK("pair: no blocker after passes",
-                      !blocker_exists("authority.pair_self_check"));
-
-            /* mismatch refuses + blocker (crash-only) */
-            ok = isn_insert_block(&ndb, hash_b, 200);
-            bool refused = !invariant_sentinel_check_pair(&ndb, hash_b, 206,
-                                                          "test_mismatch");
-            ISN_CHECK("pair: +6 mismatch REFUSED", ok && refused);
-            ISN_CHECK("pair: PERMANENT blocker registered",
-                      blocker_exists("authority.pair_self_check") &&
-                      blocker_class_for("authority.pair_self_check") ==
-                          BLOCKER_PERMANENT);
-
-            /* tip reset (height -1) passes silently */
-            ok = invariant_sentinel_check_pair(&ndb, hash_b, -1,
-                                               "test_reset");
-            ISN_CHECK("pair: height -1 (tip reset) passes", ok);
-
-            blocker_clear("authority.pair_self_check");
-            node_db_close(&ndb);
-        }
-        /* NULL ndb passes (unit tests / early boot) */
-        uint8_t hash_c[32]; memset(hash_c, 0xC3, 32);
-        ISN_CHECK("pair: NULL ndb passes",
-                  invariant_sentinel_check_pair(NULL, hash_c, 5, "t"));
-    }
+    failures += isn_assert_pair_self_check();
 
     /* ── check 4: sweep verdict (pure) ────────────────────────────── */
-    {
-        struct invariant_sweep_inputs in;
-        struct invariant_sweep_verdict v;
-
-        /* healthy steady-state pipeline */
-        isn_healthy_inputs(&in);
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        ISN_CHECK("sweep: healthy pipeline -> no violation", !v.violated);
-
-        /* fresh datadir: all zeros, nothing known */
-        memset(&in, 0, sizeof(in));
-        in.prev_cur_tip_finalize = -1;
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        ISN_CHECK("sweep: fresh datadir (all zeros) -> no violation",
-                  !v.violated);
-
-        /* anchor-stamped cold-import: all cursors equal, frontier ==
-         * cursor-1 (the anchor row) */
-        isn_healthy_inputs(&in);
-        in.cur_tip_finalize = in.cur_utxo_apply = in.cur_script_validate =
-            in.cur_body_fetch = in.cur_validate_headers = 3056759;
-        in.ua_log_frontier = 3056758;
-        in.coins_applied = 3056759;
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        ISN_CHECK("sweep: anchor-stamped cold-import -> no violation",
-                  !v.violated);
-
-        /* I4.1: tip_finalize cursor ahead of utxo_apply */
-        isn_healthy_inputs(&in);
-        in.cur_tip_finalize = in.cur_utxo_apply + 5;
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        ISN_CHECK("sweep: I4.1 ordering violation fires + named",
-                  v.violated && strcmp(v.invariant, "I4.1") == 0 &&
-                  strstr(v.detail, "tip_finalize") != NULL);
-
-        /* I4.3: hole below the utxo_apply cursor */
-        isn_healthy_inputs(&in);
-        in.ua_log_frontier = (int32_t)(in.cur_utxo_apply - 30);
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        ISN_CHECK("sweep: I4.3 log hole fires + names first hole h",
-                  v.violated && strcmp(v.invariant, "I4.3") == 0 &&
-                  v.first_bad_h == (int)(in.cur_utxo_apply - 29));
-
-        /* I4.4: coin tear — coins_applied above utxo_apply's own ok=1
-         * prefix + 1 (Invariant B) */
-        isn_healthy_inputs(&in);
-        in.cur_utxo_apply = in.ua_log_frontier + 1; /* keep I4.3 quiet */
-        in.coins_applied = in.ua_log_frontier + 7;
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        ISN_CHECK("sweep: I4.4 coin tear fires",
-                  v.violated && strcmp(v.invariant, "I4.4") == 0);
-
-        /* legitimate pipeline depth is NOT a tear: coins_applied ==
-         * frontier+1 while tip_finalize lags far behind */
-        isn_healthy_inputs(&in);
-        in.cur_tip_finalize = in.cur_utxo_apply - 500;
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        ISN_CHECK("sweep: pipeline depth (tip_finalize lag) -> no tear",
-                  !v.violated);
-
-        /* I4.5: oscillation at an unmoving cursor — fires at threshold */
-        isn_healthy_inputs(&in);
-        in.prev_cur_tip_finalize = in.cur_tip_finalize; /* unmoved */
-        in.prev_reorg_detected_total = 100;
-        in.reorg_detected_total = 109; /* below threshold of 10 */
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        bool below_quiet = !v.violated;
-        in.reorg_detected_total = 110; /* at threshold */
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        ISN_CHECK("sweep: I4.5 oscillation fires at threshold only",
-                  below_quiet && v.violated &&
-                  strcmp(v.invariant, "I4.5") == 0);
-
-        /* moving cursor: same reorg burst is normal reorg handling */
-        isn_healthy_inputs(&in);
-        in.prev_cur_tip_finalize = in.cur_tip_finalize - 3; /* moved */
-        in.prev_reorg_detected_total = 100;
-        in.reorg_detected_total = 150;
-        invariant_sentinel_sweep_evaluate(&in, &v);
-        ISN_CHECK("sweep: reorg burst at a MOVING cursor -> quiet",
-                  !v.violated);
-    }
+    failures += isn_assert_sweep_verdict();
 
     /* ── two-sweep confirmation gate ──────────────────────────────── */
-    {
-        invariant_sentinel_reset_for_testing();
-        struct invariant_sweep_verdict v;
-        memset(&v, 0, sizeof(v));
-        v.violated = true;
-        snprintf(v.invariant, sizeof(v.invariant), "I4.1");
-        v.first_bad_h = 100;
-        snprintf(v.detail, sizeof(v.detail), "t");
-
-        ISN_CHECK("confirm: first observation does NOT raise "
-                  "(reorg-unwind window cover)",
-                  !invariant_sentinel_confirm_violation(&v));
-        ISN_CHECK("confirm: same violation on the next sweep raises",
-                  invariant_sentinel_confirm_violation(&v));
-
-        /* a moved boundary is a different violation: restart the count */
-        v.first_bad_h = 200;
-        ISN_CHECK("confirm: changed first_bad_h restarts the count",
-                  !invariant_sentinel_confirm_violation(&v));
-
-        /* a clean sweep resets the pending state */
-        struct invariant_sweep_verdict clean;
-        memset(&clean, 0, sizeof(clean));
-        clean.first_bad_h = -1;
-        ISN_CHECK("confirm: clean verdict resets pending",
-                  !invariant_sentinel_confirm_violation(&clean));
-        v.first_bad_h = 200;
-        ISN_CHECK("confirm: post-clean re-observation starts at one",
-                  !invariant_sentinel_confirm_violation(&v));
-    }
+    failures += isn_assert_confirm_violation_gate();
 
     /* ── check 5: commitment audit — decoupled, streak-gated, self-clearing.
      * A mismatch is benign skew between the rebuildable `utxos` projection and
      * the frozen checkpoint: it never raises a chain_linkage HOLD, needs 2
      * consecutive candidate verdicts to fire, and self-clears on a growth
      * resync or via the auto-terminating owner. ── */
-    {
-        invariant_sentinel_reset_for_testing();
-        blocker_reset_for_testing();
-        chain_linkage_reset_for_testing();
-        struct node_db ndb;
-        bool dbok = node_db_open(&ndb, ":memory:");
-        ISN_CHECK("fixture: audit node_db opens", dbok);
-        if (dbok) {
-            invariant_sentinel_set_node_db_for_testing(&ndb);
-
-            for (int i = 0; i < 8; i++)
-                if (!isn_insert_utxo(&ndb, i))
-                    dbok = false;
-            ISN_CHECK("fixture: 8 utxos seeded", dbok);
-
-            struct utxo_commitment uc;
-            utxo_commitment_compute_db(ndb.db, &uc);
-            bool saved = utxo_commitment_save_checkpoint(ndb.db, &uc);
-            ISN_CHECK("fixture: checkpoint saved (count=8)",
-                      saved && uc.count == 8);
-
-            /* matching set -> clean, no blocker, no hold */
-            bool ran = invariant_sentinel_commitment_audit_once();
-            ISN_CHECK("audit: matching set -> clean (no blocker, no hold)",
-                      ran && !blocker_exists("coins.commitment_spot_check") &&
-                      !chain_linkage_hold_active());
-
-            /* GROWTH (computed > saved): no fire, and EDIT 1 RESYNCS the
-             * checkpoint to the grown set (count 8 -> 10). */
-            bool grew = isn_insert_utxo(&ndb, 100) &&
-                        isn_insert_utxo(&ndb, 101);
-            ran = invariant_sentinel_commitment_audit_once();
-            struct utxo_commitment ck;
-            bool loaded = utxo_commitment_load_checkpoint(ndb.db, &ck);
-            ISN_CHECK("audit: growth -> no fire + checkpoint resynced to 10",
-                      grew && ran &&
-                      !blocker_exists("coins.commitment_spot_check") &&
-                      !chain_linkage_hold_active() &&
-                      loaded && ck.count == 10);
-
-            /* SHRINK below the (now count=10) checkpoint. */
-            bool truncated = sqlite3_exec(ndb.db,
-                "DELETE FROM utxos WHERE rowid IN "
-                "(SELECT rowid FROM utxos LIMIT 4)",
-                NULL, NULL, NULL) == SQLITE_OK;
-            /* STREAK GATE: a single shrink audit must NOT fire. */
-            ran = invariant_sentinel_commitment_audit_once();
-            ISN_CHECK("audit: single shrink does NOT fire (streak gate)",
-                      truncated && ran &&
-                      !blocker_exists("coins.commitment_spot_check") &&
-                      !chain_linkage_hold_active());
-
-            /* DECOUPLE: a 2nd consecutive shrink fires the NON-FATAL diagnostic
-             * blocker but NEVER a chain_linkage hold. */
-            ran = invariant_sentinel_commitment_audit_once();
-            ISN_CHECK("audit: 2nd shrink FIRES non-fatal blocker, NO HOLD",
-                      ran &&
-                      blocker_exists("coins.commitment_spot_check") &&
-                      blocker_class_for("coins.commitment_spot_check") ==
-                          BLOCKER_PERMANENT &&
-                      !chain_linkage_hold_active());
-
-            /* OWNER: the auto-terminating owner hook (called by the
-             * state_window_inconsistent remedy) releases the diagnostic with no
-             * node.db access. */
-            invariant_sentinel_clear_commitment_blocker();
-            ISN_CHECK("owner: clear_commitment_blocker releases blocker + hold",
-                      !blocker_exists("coins.commitment_spot_check") &&
-                      !chain_linkage_hold_active());
-
-            /* Re-latch (2 shrinks), then a GROWTH audit clears the blocker via resync. */
-            (void)invariant_sentinel_commitment_audit_once(); /* streak 1 */
-            (void)invariant_sentinel_commitment_audit_once(); /* streak 2 -> fire */
-            ISN_CHECK("setup: blocker re-latched on sustained shrink",
-                      blocker_exists("coins.commitment_spot_check"));
-            bool regrew = isn_insert_utxo(&ndb, 200) &&
-                          isn_insert_utxo(&ndb, 201) &&
-                          isn_insert_utxo(&ndb, 202) &&
-                          isn_insert_utxo(&ndb, 203) &&
-                          isn_insert_utxo(&ndb, 204); /* above the 10-checkpoint */
-            ran = invariant_sentinel_commitment_audit_once();
-            ISN_CHECK("audit: growth resync clears a latched blocker (3164076 self-heal)",
-                      regrew && ran &&
-                      !blocker_exists("coins.commitment_spot_check") &&
-                      !chain_linkage_hold_active());
-
-            blocker_clear("coins.commitment_spot_check");
-            chain_linkage_hold_clear("commitment_audit");
-            node_db_close(&ndb);
-        }
-    }
+    failures += isn_assert_commitment_audit();
 
     /* crash-only sanity: everything above ran in-process; reaching here
      * IS the no-FATAL proof. */
