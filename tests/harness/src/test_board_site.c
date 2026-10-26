@@ -322,6 +322,17 @@ static int test_board_site_wiki(void)
         ASSERT(strstr(resp, "second line"));
         ASSERT(!strstr(resp, "<b>&amp;"));
 
+        /* Plain text: the raw page text, unescaped, as text/plain. */
+        resp = bsw_get("GET", "/wiki/zeta-page.txt");
+        ASSERT(strstr(resp, "200 OK"));
+        ASSERT(strstr(resp, "Content-Type: text/plain; charset=utf-8"));
+        ASSERT(strstr(bsw_body(resp), "first line <b>&amp; more"));
+        ASSERT(!strstr(resp, "<pre>"));
+        resp = bsw_get("GET", "/wiki/no-such-page.txt");
+        ASSERT(strstr(resp, "404 Not Found"));
+        ASSERT(strstr(resp, "Content-Type: text/plain; charset=utf-8"));
+        ASSERT(!strstr(resp, "<h1>"));
+
         /* Page JSON matches. */
         resp = bsw_get("GET", "/wiki/alpha-page.json");
         ASSERT(bsw_json(resp, &doc));

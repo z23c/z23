@@ -52,6 +52,7 @@ struct ws_request {
     enum ws_route route;
     const char *base;                    /* mount prefix links use */
     bool json;
+    bool txt;                            /* "<slug>.txt": plain text */
     char slug[FLEET_BOARD_SLUG_MAX + 1];
 };
 
@@ -72,7 +73,8 @@ static const char *ws_mount_rest(const char *route, const char **base)
     return NULL;
 }
 
-/* "<slug>" or "<slug>.json" with no further segment. The slug alphabet has
+/* "<slug>", "<slug>.json" or "<slug>.txt" with no further segment. The
+ * slug alphabet has
  * no '.', so the suffix is unambiguous. */
 static bool ws_parse_slug(const char *seg, struct ws_request *req)
 {
@@ -80,6 +82,9 @@ static bool ws_parse_slug(const char *seg, struct ws_request *req)
     if (len > 5 && strcmp(seg + len - 5, ".json") == 0) {
         req->json = true;
         len -= 5;
+    } else if (len > 4 && strcmp(seg + len - 4, ".txt") == 0) {
+        req->txt = true;
+        len -= 4;
     }
     if (len == 0 || len > FLEET_BOARD_SLUG_MAX)
         return false;
@@ -156,6 +161,26 @@ static size_t ws_error(const char *status, const char *what, bool json,
     return ws_respond(status,
                       json ? "application/json" : "text/html; charset=utf-8",
                       body, (size_t)n, head_only, resp, max);
+}
+
+/* Same errors for the .txt form, as plain text. */
+static size_t ws_error_txt(const char *status, bool head_only, uint8_t *resp,
+                           size_t max)
+{
+    char body[128];
+    int n = snprintf(body, sizeof(body), "%s\n", status);
+    if (n < 0 || (size_t)n >= sizeof(body))
+        return 0;
+    return ws_respond(status, "text/plain; charset=utf-8", body, (size_t)n,
+                      head_only, resp, max);
+}
+
+static size_t ws_page_error(const struct ws_request *rq, const char *status,
+                            const char *what, bool head_only, uint8_t *resp,
+                            size_t max)
+{
+    return rq->txt ? ws_error_txt(status, head_only, resp, max)
+                   : ws_error(status, what, rq->json, head_only, resp, max);
 }
 
 /* ── small helpers ────────────────────────────────────────────────── */
@@ -744,16 +769,16 @@ static size_t ws_serve_page(struct node_db *ndb, const struct ws_request *rq,
         1, sizeof(*row), "wiki site page row");
     struct ws_page pg = {.post = row};
     if (!row)
-        return ws_error("503 Service Unavailable", "wiki_unavailable",
-                        rq->json, head_only, resp, max);
+        return ws_page_error(rq, "503 Service Unavailable",
+                             "wiki_unavailable", head_only, resp, max);
     /* An unknown slug, or one whose revisions all fail verification or sit
      * in the fleet-private scope, is the same 404: nothing is shown. */
     if (!db_fleet_board_wiki_read_checked(ndb, rq->slug, row,
                                           &pg.newer_unverified) ||
         !ws_in_scope(row)) {
         free(row);
-        return ws_error("404 Not Found", "not_found", rq->json, head_only,
-                        resp, max);
+        return ws_page_error(rq, "404 Not Found", "not_found", head_only,
+                             resp, max);
     }
     struct json_value entry;
     json_init(&entry);
@@ -768,17 +793,25 @@ static size_t ws_serve_page(struct node_db *ndb, const struct ws_request *rq,
     size_t len = 0;
     if (pg.text && st != FLEET_WIKI_PARSE_ALLOC_FAILED) {
         (void)ws_clean(pg.text, tlen * 3 + 1, row->post.text, tlen);
-        body = ws_page_body(&pg, rq->json, rq->base, cap, &len);
+        if (rq->txt) {
+            len = strlen(pg.text);
+            body = zcl_malloc(len + 1, "wiki site txt body");
+            if (body)
+                memcpy(body, pg.text, len + 1);
+        } else {
+            body = ws_page_body(&pg, rq->json, rq->base, cap, &len);
+        }
     }
     free(pg.text);
     json_free(&entry);
     free(row);
     if (!body)
-        return ws_error("503 Service Unavailable", "wiki_unavailable",
-                        rq->json, head_only, resp, max);
+        return ws_page_error(rq, "503 Service Unavailable",
+                             "wiki_unavailable", head_only, resp, max);
     size_t out = ws_respond("200 OK",
                             rq->json ? "application/json"
-                                     : "text/html; charset=utf-8",
+                            : rq->txt ? "text/plain; charset=utf-8"
+                                      : "text/html; charset=utf-8",
                             body, len, head_only, resp, max);
     free(body);
     return out;
