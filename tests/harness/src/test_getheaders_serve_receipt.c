@@ -254,6 +254,526 @@ static bool rc_serve_once(struct msg_processor *mp, struct p2p_node *node,
 
 static struct net_manager g_rc_nm;
 
+/* Mine `count` chained regtest headers (heights 0..count-1) off the null
+ * hash, hashing each as it lands. Stops at the first header that fails. */
+static bool rc_mine_header_chain(struct block_header *h, struct uint256 *hash,
+                                 int count, const struct chain_params *cp,
+                                 uint8_t salt)
+{
+    struct uint256 null_hash;
+    uint256_set_null(&null_hash);
+    bool mined = true;
+    for (int i = 0; i < count; i++) {
+        mined = mined && rc_mine_header(&h[i], i,
+                                        i == 0 ? &null_hash : &hash[i - 1],
+                                        cp, salt);
+        if (!mined)
+            break;
+        block_header_get_hash(&h[i], &hash[i]);
+    }
+    return mined;
+}
+
+/* Seed `count` index entries over a mined chain, pinning each header's real
+ * solution. Stops at the first entry that cannot be seeded. */
+static bool rc_seed_chain_with_solutions(struct main_state *ms,
+                                         const struct block_header *h,
+                                         const struct uint256 *hash,
+                                         struct block_index **bi, int count)
+{
+    bool seeded = true;
+    for (int i = 0; i < count && seeded; i++) {
+        bi[i] = rc_seed_index(ms, &h[i], &hash[i], i,
+                              i == 0 ? NULL : bi[i - 1]);
+        seeded = bi[i] && rc_pin_solution(bi[i], &h[i], "rc_chain_sol");
+    }
+    return seeded;
+}
+
+/* ── B. a miss pays in full ───────────────────────────────
+ *
+ * Extend the chain with a header the table has never seen. The
+ * table is warm; this header is not in it; it must cost a full
+ * verification. */
+static int rc_case_b_unseen_header_pays(struct main_state *ms,
+                                        struct msg_processor *mp,
+                                        const struct chain_params *cp,
+                                        struct block_index *bi_prev,
+                                        const struct uint256 *prev_hash)
+{
+    int failures = 0;
+    struct block_header hnew;
+    struct uint256 hash_new;
+    bool mined_new = rc_mine_header(&hnew, 4, prev_hash, cp, 0xC4);
+    RC_CHECK("B: mined a header the table has never seen", mined_new);
+    if (mined_new) {
+        block_header_get_hash(&hnew, &hash_new);
+        struct block_index *bi_new =
+            rc_seed_index(ms, &hnew, &hash_new, 4, bi_prev);
+        bool ready = bi_new &&
+            rc_pin_solution(bi_new, &hnew, "rc_new_sol");
+        RC_CHECK("B: new entry seeded", ready);
+        if (ready) {
+            ms->pindex_best_header = bi_new;
+            uint64_t before = getheaders_serve_pow_checks();
+            struct block_header out;
+            block_header_init(&out);
+            bool ok = getheaders_index_header_servable(mp, bi_new, &out);
+            uint64_t spent = getheaders_serve_pow_checks() - before;
+            printf("getheaders_serve_receipt: B: an unseen header "
+                   "cost %llu verification(s) with the table warm\n",
+                   (unsigned long long)spent);
+            RC_CHECK("B: it is servable", ok);
+            RC_CHECK("B: a MISS still pays a full verification",
+                     spent == 1);
+
+            /* And immediately after, it is a hit — so B measured a
+             * genuine miss, not a broken table. */
+            before = getheaders_serve_pow_checks();
+            ok = getheaders_index_header_servable(mp, bi_new, &out);
+            spent = getheaders_serve_pow_checks() - before;
+            RC_CHECK("B: the same header is then free", ok &&
+                     spent == 0);
+        }
+    }
+    return failures;
+}
+
+/* ── C. generation binding ────────────────────────────────
+ *
+ * Same entry, byte-identical header, still hash-binding, still
+ * genuinely mined — presented under a DIFFERENT generation. The
+ * params copy differs only in hashGenesisBlock; powLimit is
+ * untouched, and check_equihash_solution ignores its params
+ * argument entirely, so verifiability is provably identical and
+ * the generation tag is the only variable. */
+static int rc_case_c_generation_binding(struct msg_processor *mp,
+                                        const struct chain_params *cp,
+                                        struct block_index *bi)
+{
+    int failures = 0;
+    struct chain_params alt = *cp;   /* POD; shallow copy is whole */
+    alt.consensus.hashGenesisBlock.data[0] ^= 0x5a;
+    RC_CHECK("C: the alternate generation keeps powLimit "
+             "byte-identical",
+             memcmp(alt.consensus.powLimit.data,
+                    cp->consensus.powLimit.data, 32) == 0);
+    RC_CHECK("C: and differs only in the genesis hash",
+             !uint256_eq(&alt.consensus.hashGenesisBlock,
+                         &cp->consensus.hashGenesisBlock));
+
+    /* bi[1] carries a live receipt from request 1/2 above. */
+    uint64_t before = getheaders_serve_pow_checks();
+    struct block_header out;
+    block_header_init(&out);
+    bool warm_ok = getheaders_index_header_servable(mp, bi, &out);
+    uint64_t warm = getheaders_serve_pow_checks() - before;
+    RC_CHECK("C: under the real params the header is free "
+             "(a receipt exists)", warm_ok && warm == 0);
+
+    const struct chain_params *saved = mp->params;
+    mp->params = &alt;
+    before = getheaders_serve_pow_checks();
+    bool alt_ok = getheaders_index_header_servable(mp, bi, &out);
+    uint64_t alt_spent = getheaders_serve_pow_checks() - before;
+    printf("getheaders_serve_receipt: C: the same header under a "
+           "different source generation cost %llu "
+           "verification(s)\n", (unsigned long long)alt_spent);
+    RC_CHECK("C: a receipt from another generation is NOT "
+             "honoured — the header is re-verified",
+             alt_spent == 1);
+    RC_CHECK("C: and it still verifies, so the miss was the tag "
+             "and not a broken header", alt_ok);
+
+    /* The alt-generation miss re-verified and then minted, into
+     * the same slot (same hash, direct-mapped), displacing the
+     * original receipt. So restoring the real params MISSES and
+     * verifies again — the fail-safe direction, and the one that
+     * matters: a generation excursion can only ever cost extra
+     * verification, never grant an unearned pass. Two generations
+     * alternating on one header thrash the slot, which is correct
+     * and free of consequence in production, where the tag moves
+     * only on a build change or a network switch. */
+    mp->params = saved;
+    before = getheaders_serve_pow_checks();
+    bool back_ok = getheaders_index_header_servable(mp, bi, &out);
+    uint64_t back = getheaders_serve_pow_checks() - before;
+    printf("getheaders_serve_receipt: C: back under the real "
+           "generation cost %llu verification(s)\n",
+           (unsigned long long)back);
+    RC_CHECK("C: the displaced receipt degrades to VERIFY AGAIN, "
+             "never to assume-pass", back_ok && back == 1);
+
+    before = getheaders_serve_pow_checks();
+    back_ok = getheaders_index_header_servable(mp, bi, &out);
+    back = getheaders_serve_pow_checks() - before;
+    RC_CHECK("C: and the re-minted receipt is honoured again, so "
+             "the table still works after the excursion",
+             back_ok && back == 0);
+    return failures;
+}
+
+/* Judge the two serves of case A against each other: the same headers on
+ * the wire the second time, zero repeated Equihash work, and the receipt
+ * deltas the saving must show up as. */
+static int rc_case_a_check_both_requests(bool served1, bool served2,
+                                         int64_t wire1, int64_t wire2,
+                                         uint64_t pow1, uint64_t pow2,
+                                         const struct getheaders_receipt_stats *rs0)
+{
+    int failures = 0;
+    printf("getheaders_serve_receipt: A: request 1 = %lld header(s) "
+           "for %llu verification(s); request 2 (identical) = %lld "
+           "header(s) for %llu verification(s) "
+           "(pre-fix: 3 then 3)\n",
+           (long long)wire1, (unsigned long long)pow1,
+           (long long)wire2, (unsigned long long)pow2);
+
+    RC_CHECK("A: both requests were answered", served1 && served2);
+    RC_CHECK("A: request 1 carried the 3 header-only entries",
+             wire1 == 3);
+    RC_CHECK("A: request 2 carried the SAME 3 headers — the saving "
+             "is not a shorter reply", wire2 == wire1);
+
+    /* Direction 2, the floor: a cold table must NOT hit. If the
+     * receipt ever became a status bit that skipped work never done,
+     * this drops below 3. */
+    RC_CHECK("A: request 1 paid one verification per header served "
+             "(a cold table must not hit)",
+             wire1 > 0 && pow1 == (uint64_t)wire1);
+
+    /* Direction 1, the saving: THE headline. Fails on the parent
+     * commit with 3. */
+    RC_CHECK("A: request 2 repeated NO Equihash work at all",
+             pow2 == 0);
+    RC_CHECK("A: so N identical headers served twice cost N "
+             "verifications, not 2N",
+             pow1 + pow2 == (uint64_t)wire1);
+
+    struct getheaders_receipt_stats rsa;
+    memset(&rsa, 0, sizeof(rsa));
+    getheaders_verify_receipt_stats(&rsa);
+    RC_CHECK("A: the skipped verifications are counted as receipt "
+             "hits", rsa.hits - rs0->hits >= (uint64_t)wire1);
+    RC_CHECK("A: receipts were minted only for verifications that "
+             "succeeded", rsa.mints - rs0->mints == (uint64_t)wire1);
+    return failures;
+}
+
+/* ── A. the same request served twice ─────────────────────────────
+ *
+ * A clean 3-header chain above an active tip, every header genuinely
+ * mined and pinned. Serve the identical locator twice. */
+static int rc_case_a_served_twice(const struct chain_params *cp, char *dir,
+                                  const struct getheaders_receipt_stats *rs0)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+
+    struct block_header h[4];
+    struct uint256 hash[4], null_hash;
+    uint256_set_null(&null_hash);
+    bool mined = rc_mine_header_chain(h, hash, 4, cp, 0xC0);
+    RC_CHECK("A: mined a 4-header chain", mined);
+
+    struct block_index *bi[4] = {0};
+    bool seeded = mined &&
+        rc_seed_chain_with_solutions(&ms, h, hash, bi, 4);
+    RC_CHECK("A: index chain seeded with real solutions", seeded);
+
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_rc_nm, NULL);
+
+    if (seeded) {
+        bi[0]->nStatus |= BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+        bi[0]->nTx = 1;
+        bi[0]->nChainTx = 1;
+        RC_CHECK("A: active tip parked at entry 0",
+                 active_chain_move_window_tip(&ms.chain_active, bi[0]));
+        ms.pindex_best_header = bi[3];
+
+        struct p2p_node node;
+        rc_setup_node(&node);
+
+        /* Request 1 — cold table. */
+        uint64_t pow1 = 0;
+        int64_t wire1 = -1;
+        bool served1 = rc_serve_once(&mp, &node, &hash[0], &null_hash,
+                                     &pow1, &wire1);
+
+        /* Request 2 — byte-identical request, warm table. */
+        uint64_t pow2 = 0;
+        int64_t wire2 = -1;
+        bool served2 = rc_serve_once(&mp, &node, &hash[0], &null_hash,
+                                     &pow2, &wire2);
+
+        failures += rc_case_a_check_both_requests(served1, served2,
+                                                  wire1, wire2, pow1,
+                                                  pow2, rs0);
+
+        failures += rc_case_b_unseen_header_pays(&ms, &mp, cp, bi[3],
+                                                 &hash[3]);
+        failures += rc_case_c_generation_binding(&mp, cp, bi[1]);
+    }
+
+    main_state_free(&ms);
+    return failures;
+}
+
+/* Grind `hy` — a copy of `hb` whose solution bytes are perturbed — until the
+ * serialized header still passes CheckProofOfWork while its Equihash
+ * solution is garbage: one grind, not a mine. Writes each candidate's hash
+ * to `hash_y`; true when a forged header was found. */
+static bool rc_forge_invalid_equihash_header(struct block_header *hy,
+                                             const struct block_header *hb,
+                                             struct uint256 *hash_y,
+                                             const struct chain_params *cp)
+{
+    bool y_ready = false;
+    for (int attempt = 0; attempt < 4096 && !y_ready; attempt++) {
+        for (size_t i = 0; i < hy->nSolutionSize; i++)
+            hy->nSolution[i] = (uint8_t)(hb->nSolution[i] ^ 0x5c ^
+                                         (uint8_t)attempt);
+        block_header_get_hash(hy, hash_y);
+        if (!CheckProofOfWork(*hash_y, hy->nBits, &cp->consensus))
+            continue;
+        if (check_equihash_solution(hy, cp))
+            continue;      /* astronomically unlikely; skip it */
+        y_ready = true;
+    }
+    return y_ready;
+}
+
+/* Mine the D chain (g, then A, then B), seed its index entries, and grind
+ * the forged header off B. Hands the forge verdict and the parent entry back
+ * so the caller keeps the original `y_ready && bi_a` gate. */
+static int rc_case_d_mine_seed_and_forge(struct main_state *ms,
+                                         const struct chain_params *cp,
+                                         struct block_index **bi_a_out,
+                                         struct block_header *hy,
+                                         struct uint256 *hash_y,
+                                         bool *y_ready_out)
+{
+    int failures = 0;
+    struct block_header hg, ha, hb;
+    struct uint256 hash_g, hash_a, hash_b, null_hash;
+    uint256_set_null(&null_hash);
+    RC_CHECK("D: mine g", rc_mine_header(&hg, 0, &null_hash, cp, 0xD0));
+    block_header_get_hash(&hg, &hash_g);
+    RC_CHECK("D: mine A", rc_mine_header(&ha, 1, &hash_g, cp, 0xD1));
+    block_header_get_hash(&ha, &hash_a);
+    RC_CHECK("D: mine B", rc_mine_header(&hb, 2, &hash_a, cp, 0xD2));
+    block_header_get_hash(&hb, &hash_b);
+
+    struct block_index *bi_g = rc_seed_index(ms, &hg, &hash_g, 0, NULL);
+    struct block_index *bi_a = rc_seed_index(ms, &ha, &hash_a, 1, bi_g);
+    RC_CHECK("D: index chain seeded", bi_g && bi_a);
+
+    *hy = hb;
+    bool y_ready = rc_forge_invalid_equihash_header(hy, &hb, hash_y, cp);
+    RC_CHECK("D: forged header found (PoW passes, Equihash does not)",
+             y_ready);
+    RC_CHECK("D: forged solution really fails Equihash",
+             y_ready && !check_equihash_solution(hy, cp));
+
+    *bi_a_out = bi_a;
+    *y_ready_out = y_ready;
+    return failures;
+}
+
+/* Offer the forged entry through the serve path twice: it must be refused
+ * both times, and each refusal must cost a full verification. */
+static int rc_case_d_refuse_forged_twice(struct msg_processor *mp,
+                                         struct main_state *ms,
+                                         struct block_index *bi_y)
+{
+    int failures = 0;
+    ms->pindex_best_header = bi_y;
+    unsigned int status_before = bi_y->nStatus;
+
+    struct block_header out;
+    block_header_init(&out);
+    uint64_t before = getheaders_serve_pow_checks();
+    bool ok1 = getheaders_index_header_servable(mp, bi_y, &out);
+    uint64_t spent1 = getheaders_serve_pow_checks() - before;
+
+    before = getheaders_serve_pow_checks();
+    bool ok2 = getheaders_index_header_servable(mp, bi_y, &out);
+    uint64_t spent2 = getheaders_serve_pow_checks() - before;
+
+    printf("getheaders_serve_receipt: D: the forged header cost "
+           "%llu then %llu verification(s) and was refused "
+           "both times\n", (unsigned long long)spent1,
+           (unsigned long long)spent2);
+
+    RC_CHECK("D: the forged header is REFUSED", !ok1);
+    RC_CHECK("D: and refused again on the second offer", !ok2);
+    RC_CHECK("D: the first refusal cost a full verification",
+             spent1 == 1);
+    RC_CHECK("D: the second ALSO cost a full verification — "
+             "refusals are never cached", spent2 == 1);
+    RC_CHECK("D: no receipt can exist for a header that failed",
+             spent1 + spent2 == 2);
+    RC_CHECK("D: the refusal is still not a validity verdict",
+             bi_y->nStatus == status_before);
+    return failures;
+}
+
+/* ── D. failures are never cached ─────────────────────────────────
+ *
+ * A forged header: same solution size, Equihash garbage, but the
+ * serialized bytes still satisfy CheckProofOfWork — one grind, not a
+ * mine, which is what a hostile block_index.bin / node.db bundle can
+ * carry. It must be REFUSED, and refusing it twice must cost two
+ * verifications: a cached refusal would be the dangerous direction, and
+ * time-too-new proves refusals are not even monotone. */
+static int rc_case_d_failures_not_cached(const struct chain_params *cp,
+                                         char *dir)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+
+    struct block_header hy;
+    struct uint256 hash_y;
+    struct block_index *bi_a = NULL;
+    bool y_ready = false;
+    failures += rc_case_d_mine_seed_and_forge(&ms, cp, &bi_a, &hy,
+                                              &hash_y, &y_ready);
+
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_rc_nm, NULL);
+
+    if (y_ready && bi_a) {
+        struct block_index *bi_y =
+            rc_seed_index(&ms, &hy, &hash_y, 2, bi_a);
+        bool ready = bi_y && rc_pin_solution(bi_y, &hy, "rc_forged_sol");
+        RC_CHECK("D: forged entry seeded", ready);
+        if (ready)
+            failures += rc_case_d_refuse_forged_twice(&mp, &ms, bi_y);
+    }
+
+    main_state_free(&ms);
+    return failures;
+}
+
+/* The receipt table's structural invariants after one more served header:
+ * occupied stays within the (constant) slot count and the byte footprint
+ * never moves. */
+static bool rc_flood_cap_intact(const struct getheaders_receipt_stats *now,
+                                const struct getheaders_receipt_stats *before,
+                                size_t bytes_seen)
+{
+    return now->occupied <= now->slots && now->slots == before->slots &&
+           now->bytes == bytes_seen;
+}
+
+/* Serve `flood` distinct, freshly mined headers once each, checking the
+ * table's structural cap after every serve. Reports how many were served
+ * and whether the cap held at every point. */
+static void rc_case_e_flood_headers(struct main_state *ms,
+                                    struct msg_processor *mp,
+                                    const struct chain_params *cp,
+                                    int flood,
+                                    const struct getheaders_receipt_stats *before_flood,
+                                    int *served_out, bool *cap_held_out)
+{
+    struct uint256 prev;
+    uint256_set_null(&prev);
+    struct block_index *chain_prev = NULL;
+    int served = 0;
+    bool cap_held = true;
+    size_t bytes_seen = before_flood->bytes;
+
+    for (int i = 0; i < flood; i++) {
+        struct block_header fh;
+        if (!rc_mine_header(&fh, i, &prev, cp, 0xE0))
+            break;
+        struct uint256 fhash;
+        block_header_get_hash(&fh, &fhash);
+        struct block_index *bi =
+            rc_seed_index(ms, &fh, &fhash, i, chain_prev);
+        if (!bi || !rc_pin_solution(bi, &fh, "rc_flood_sol"))
+            break;
+
+        struct block_header out;
+        block_header_init(&out);
+        if (getheaders_index_header_servable(mp, bi, &out))
+            served++;
+
+        struct getheaders_receipt_stats now;
+        memset(&now, 0, sizeof(now));
+        getheaders_verify_receipt_stats(&now);
+        if (!rc_flood_cap_intact(&now, before_flood, bytes_seen))
+            cap_held = false;
+
+        prev = fhash;
+        chain_prev = bi;
+    }
+
+    *served_out = served;
+    *cap_held_out = cap_held;
+}
+
+/* ── E. the cap holds under a flood ───────────────────────────────
+ *
+ * Serve many DISTINCT real headers once each. The table must not grow:
+ * occupied stays within the cap and the byte footprint never moves. A
+ * peer offering unlimited distinct headers churns slots at a constant
+ * cost, which is the whole point of a fixed static table. */
+static int rc_case_e_cap_under_flood(const struct chain_params *cp, char *dir)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_rc_nm, NULL);
+
+    struct getheaders_receipt_stats before_flood;
+    memset(&before_flood, 0, sizeof(before_flood));
+    getheaders_verify_receipt_stats(&before_flood);
+
+    /* 48,5 regtest headers mine in milliseconds, but a flood still has
+     * to stay inside a unit test's budget. 96 distinct headers is enough
+     * to churn slots and prove the invariant; the cap is structural, so
+     * it does not need saturation to be established. */
+    const int flood = 96;
+    int served = 0;
+    bool cap_held = true;
+    rc_case_e_flood_headers(&ms, &mp, cp, flood, &before_flood,
+                            &served, &cap_held);
+
+    struct getheaders_receipt_stats after_flood;
+    memset(&after_flood, 0, sizeof(after_flood));
+    getheaders_verify_receipt_stats(&after_flood);
+
+    printf("getheaders_serve_receipt: E: %d distinct headers served; "
+           "table %zu/%zu slots occupied, %zu bytes, %llu eviction(s)\n",
+           served, after_flood.occupied, after_flood.slots,
+           after_flood.bytes,
+           (unsigned long long)(after_flood.evictions -
+                                before_flood.evictions));
+
+    RC_CHECK("E: the flood really served distinct headers",
+             served == flood);
+    RC_CHECK("E: occupied never exceeded the cap at any point during "
+             "the flood", cap_held);
+    RC_CHECK("E: occupied is still within the cap afterwards",
+             after_flood.occupied <= after_flood.slots);
+    RC_CHECK("E: the byte footprint did not move — the table cannot "
+             "grow", after_flood.bytes == before_flood.bytes);
+    RC_CHECK("E: the slot count is a constant",
+             after_flood.slots == before_flood.slots);
+    RC_CHECK("E: every served header was verified exactly once — a "
+             "flood of distinct headers gets no discount",
+             after_flood.mints - before_flood.mints == (uint64_t)served);
+
+    main_state_free(&ms);
+    return failures;
+}
+
 int test_getheaders_serve_receipt(void);
 int test_getheaders_serve_receipt(void)
 {
@@ -306,387 +826,9 @@ int test_getheaders_serve_receipt(void)
              rs0.slots > 0 && rs0.bytes > 0);
     RC_CHECK("occupied never exceeds the cap", rs0.occupied <= rs0.slots);
 
-    /* ── A. the same request served twice ─────────────────────────────
-     *
-     * A clean 3-header chain above an active tip, every header genuinely
-     * mined and pinned. Serve the identical locator twice. */
-    {
-        struct main_state ms;
-        main_state_init(&ms);
-
-        struct block_header h[4];
-        struct uint256 hash[4], null_hash;
-        uint256_set_null(&null_hash);
-        bool mined = true;
-        for (int i = 0; i < 4; i++) {
-            mined = mined && rc_mine_header(&h[i], i,
-                                            i == 0 ? &null_hash : &hash[i - 1],
-                                            cp, 0xC0);
-            if (!mined)
-                break;
-            block_header_get_hash(&h[i], &hash[i]);
-        }
-        RC_CHECK("A: mined a 4-header chain", mined);
-
-        struct block_index *bi[4] = {0};
-        bool seeded = mined;
-        for (int i = 0; i < 4 && seeded; i++) {
-            bi[i] = rc_seed_index(&ms, &h[i], &hash[i], i,
-                                  i == 0 ? NULL : bi[i - 1]);
-            seeded = bi[i] && rc_pin_solution(bi[i], &h[i], "rc_chain_sol");
-        }
-        RC_CHECK("A: index chain seeded with real solutions", seeded);
-
-        struct msg_processor mp;
-        msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_rc_nm, NULL);
-
-        if (seeded) {
-            bi[0]->nStatus |= BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
-            bi[0]->nTx = 1;
-            bi[0]->nChainTx = 1;
-            RC_CHECK("A: active tip parked at entry 0",
-                     active_chain_move_window_tip(&ms.chain_active, bi[0]));
-            ms.pindex_best_header = bi[3];
-
-            struct p2p_node node;
-            rc_setup_node(&node);
-
-            /* Request 1 — cold table. */
-            uint64_t pow1 = 0;
-            int64_t wire1 = -1;
-            bool served1 = rc_serve_once(&mp, &node, &hash[0], &null_hash,
-                                         &pow1, &wire1);
-
-            /* Request 2 — byte-identical request, warm table. */
-            uint64_t pow2 = 0;
-            int64_t wire2 = -1;
-            bool served2 = rc_serve_once(&mp, &node, &hash[0], &null_hash,
-                                         &pow2, &wire2);
-
-            printf("getheaders_serve_receipt: A: request 1 = %lld header(s) "
-                   "for %llu verification(s); request 2 (identical) = %lld "
-                   "header(s) for %llu verification(s) "
-                   "(pre-fix: 3 then 3)\n",
-                   (long long)wire1, (unsigned long long)pow1,
-                   (long long)wire2, (unsigned long long)pow2);
-
-            RC_CHECK("A: both requests were answered", served1 && served2);
-            RC_CHECK("A: request 1 carried the 3 header-only entries",
-                     wire1 == 3);
-            RC_CHECK("A: request 2 carried the SAME 3 headers — the saving "
-                     "is not a shorter reply", wire2 == wire1);
-
-            /* Direction 2, the floor: a cold table must NOT hit. If the
-             * receipt ever became a status bit that skipped work never done,
-             * this drops below 3. */
-            RC_CHECK("A: request 1 paid one verification per header served "
-                     "(a cold table must not hit)",
-                     wire1 > 0 && pow1 == (uint64_t)wire1);
-
-            /* Direction 1, the saving: THE headline. Fails on the parent
-             * commit with 3. */
-            RC_CHECK("A: request 2 repeated NO Equihash work at all",
-                     pow2 == 0);
-            RC_CHECK("A: so N identical headers served twice cost N "
-                     "verifications, not 2N",
-                     pow1 + pow2 == (uint64_t)wire1);
-
-            struct getheaders_receipt_stats rsa;
-            memset(&rsa, 0, sizeof(rsa));
-            getheaders_verify_receipt_stats(&rsa);
-            RC_CHECK("A: the skipped verifications are counted as receipt "
-                     "hits", rsa.hits - rs0.hits >= (uint64_t)wire1);
-            RC_CHECK("A: receipts were minted only for verifications that "
-                     "succeeded", rsa.mints - rs0.mints == (uint64_t)wire1);
-
-            /* ── B. a miss pays in full ───────────────────────────────
-             *
-             * Extend the chain with a header the table has never seen. The
-             * table is warm; this header is not in it; it must cost a full
-             * verification. */
-            struct block_header hnew;
-            struct uint256 hash_new;
-            bool mined_new = rc_mine_header(&hnew, 4, &hash[3], cp, 0xC4);
-            RC_CHECK("B: mined a header the table has never seen", mined_new);
-            if (mined_new) {
-                block_header_get_hash(&hnew, &hash_new);
-                struct block_index *bi_new =
-                    rc_seed_index(&ms, &hnew, &hash_new, 4, bi[3]);
-                bool ready = bi_new &&
-                    rc_pin_solution(bi_new, &hnew, "rc_new_sol");
-                RC_CHECK("B: new entry seeded", ready);
-                if (ready) {
-                    ms.pindex_best_header = bi_new;
-                    uint64_t before = getheaders_serve_pow_checks();
-                    struct block_header out;
-                    block_header_init(&out);
-                    bool ok = getheaders_index_header_servable(&mp, bi_new,
-                                                               &out);
-                    uint64_t spent = getheaders_serve_pow_checks() - before;
-                    printf("getheaders_serve_receipt: B: an unseen header "
-                           "cost %llu verification(s) with the table warm\n",
-                           (unsigned long long)spent);
-                    RC_CHECK("B: it is servable", ok);
-                    RC_CHECK("B: a MISS still pays a full verification",
-                             spent == 1);
-
-                    /* And immediately after, it is a hit — so B measured a
-                     * genuine miss, not a broken table. */
-                    before = getheaders_serve_pow_checks();
-                    ok = getheaders_index_header_servable(&mp, bi_new, &out);
-                    spent = getheaders_serve_pow_checks() - before;
-                    RC_CHECK("B: the same header is then free", ok &&
-                             spent == 0);
-                }
-            }
-
-            /* ── C. generation binding ────────────────────────────────
-             *
-             * Same entry, byte-identical header, still hash-binding, still
-             * genuinely mined — presented under a DIFFERENT generation. The
-             * params copy differs only in hashGenesisBlock; powLimit is
-             * untouched, and check_equihash_solution ignores its params
-             * argument entirely, so verifiability is provably identical and
-             * the generation tag is the only variable. */
-            {
-                struct chain_params alt = *cp;   /* POD; shallow copy is whole */
-                alt.consensus.hashGenesisBlock.data[0] ^= 0x5a;
-                RC_CHECK("C: the alternate generation keeps powLimit "
-                         "byte-identical",
-                         memcmp(alt.consensus.powLimit.data,
-                                cp->consensus.powLimit.data, 32) == 0);
-                RC_CHECK("C: and differs only in the genesis hash",
-                         !uint256_eq(&alt.consensus.hashGenesisBlock,
-                                     &cp->consensus.hashGenesisBlock));
-
-                /* bi[1] carries a live receipt from request 1/2 above. */
-                uint64_t before = getheaders_serve_pow_checks();
-                struct block_header out;
-                block_header_init(&out);
-                bool warm_ok = getheaders_index_header_servable(&mp, bi[1],
-                                                                &out);
-                uint64_t warm = getheaders_serve_pow_checks() - before;
-                RC_CHECK("C: under the real params the header is free "
-                         "(a receipt exists)", warm_ok && warm == 0);
-
-                const struct chain_params *saved = mp.params;
-                mp.params = &alt;
-                before = getheaders_serve_pow_checks();
-                bool alt_ok = getheaders_index_header_servable(&mp, bi[1],
-                                                               &out);
-                uint64_t alt_spent = getheaders_serve_pow_checks() - before;
-                printf("getheaders_serve_receipt: C: the same header under a "
-                       "different source generation cost %llu "
-                       "verification(s)\n", (unsigned long long)alt_spent);
-                RC_CHECK("C: a receipt from another generation is NOT "
-                         "honoured — the header is re-verified",
-                         alt_spent == 1);
-                RC_CHECK("C: and it still verifies, so the miss was the tag "
-                         "and not a broken header", alt_ok);
-
-                /* The alt-generation miss re-verified and then minted, into
-                 * the same slot (same hash, direct-mapped), displacing the
-                 * original receipt. So restoring the real params MISSES and
-                 * verifies again — the fail-safe direction, and the one that
-                 * matters: a generation excursion can only ever cost extra
-                 * verification, never grant an unearned pass. Two generations
-                 * alternating on one header thrash the slot, which is correct
-                 * and free of consequence in production, where the tag moves
-                 * only on a build change or a network switch. */
-                mp.params = saved;
-                before = getheaders_serve_pow_checks();
-                bool back_ok = getheaders_index_header_servable(&mp, bi[1],
-                                                               &out);
-                uint64_t back = getheaders_serve_pow_checks() - before;
-                printf("getheaders_serve_receipt: C: back under the real "
-                       "generation cost %llu verification(s)\n",
-                       (unsigned long long)back);
-                RC_CHECK("C: the displaced receipt degrades to VERIFY AGAIN, "
-                         "never to assume-pass", back_ok && back == 1);
-
-                before = getheaders_serve_pow_checks();
-                back_ok = getheaders_index_header_servable(&mp, bi[1], &out);
-                back = getheaders_serve_pow_checks() - before;
-                RC_CHECK("C: and the re-minted receipt is honoured again, so "
-                         "the table still works after the excursion",
-                         back_ok && back == 0);
-            }
-        }
-
-        main_state_free(&ms);
-    }
-
-    /* ── D. failures are never cached ─────────────────────────────────
-     *
-     * A forged header: same solution size, Equihash garbage, but the
-     * serialized bytes still satisfy CheckProofOfWork — one grind, not a
-     * mine, which is what a hostile block_index.bin / node.db bundle can
-     * carry. It must be REFUSED, and refusing it twice must cost two
-     * verifications: a cached refusal would be the dangerous direction, and
-     * time-too-new proves refusals are not even monotone. */
-    {
-        struct main_state ms;
-        main_state_init(&ms);
-
-        struct block_header hg, ha, hb;
-        struct uint256 hash_g, hash_a, hash_b, null_hash;
-        uint256_set_null(&null_hash);
-        RC_CHECK("D: mine g", rc_mine_header(&hg, 0, &null_hash, cp, 0xD0));
-        block_header_get_hash(&hg, &hash_g);
-        RC_CHECK("D: mine A", rc_mine_header(&ha, 1, &hash_g, cp, 0xD1));
-        block_header_get_hash(&ha, &hash_a);
-        RC_CHECK("D: mine B", rc_mine_header(&hb, 2, &hash_a, cp, 0xD2));
-        block_header_get_hash(&hb, &hash_b);
-
-        struct block_index *bi_g = rc_seed_index(&ms, &hg, &hash_g, 0, NULL);
-        struct block_index *bi_a = rc_seed_index(&ms, &ha, &hash_a, 1, bi_g);
-        RC_CHECK("D: index chain seeded", bi_g && bi_a);
-
-        struct block_header hy = hb;
-        struct uint256 hash_y;
-        bool y_ready = false;
-        for (int attempt = 0; attempt < 4096 && !y_ready; attempt++) {
-            for (size_t i = 0; i < hy.nSolutionSize; i++)
-                hy.nSolution[i] = (uint8_t)(hb.nSolution[i] ^ 0x5c ^
-                                            (uint8_t)attempt);
-            block_header_get_hash(&hy, &hash_y);
-            if (!CheckProofOfWork(hash_y, hy.nBits, &cp->consensus))
-                continue;
-            if (check_equihash_solution(&hy, cp))
-                continue;      /* astronomically unlikely; skip it */
-            y_ready = true;
-        }
-        RC_CHECK("D: forged header found (PoW passes, Equihash does not)",
-                 y_ready);
-        RC_CHECK("D: forged solution really fails Equihash",
-                 y_ready && !check_equihash_solution(&hy, cp));
-
-        struct msg_processor mp;
-        msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_rc_nm, NULL);
-
-        if (y_ready && bi_a) {
-            struct block_index *bi_y =
-                rc_seed_index(&ms, &hy, &hash_y, 2, bi_a);
-            bool ready = bi_y && rc_pin_solution(bi_y, &hy, "rc_forged_sol");
-            RC_CHECK("D: forged entry seeded", ready);
-            if (ready) {
-                ms.pindex_best_header = bi_y;
-                unsigned int status_before = bi_y->nStatus;
-
-                struct block_header out;
-                block_header_init(&out);
-                uint64_t before = getheaders_serve_pow_checks();
-                bool ok1 = getheaders_index_header_servable(&mp, bi_y, &out);
-                uint64_t spent1 = getheaders_serve_pow_checks() - before;
-
-                before = getheaders_serve_pow_checks();
-                bool ok2 = getheaders_index_header_servable(&mp, bi_y, &out);
-                uint64_t spent2 = getheaders_serve_pow_checks() - before;
-
-                printf("getheaders_serve_receipt: D: the forged header cost "
-                       "%llu then %llu verification(s) and was refused "
-                       "both times\n", (unsigned long long)spent1,
-                       (unsigned long long)spent2);
-
-                RC_CHECK("D: the forged header is REFUSED", !ok1);
-                RC_CHECK("D: and refused again on the second offer", !ok2);
-                RC_CHECK("D: the first refusal cost a full verification",
-                         spent1 == 1);
-                RC_CHECK("D: the second ALSO cost a full verification — "
-                         "refusals are never cached", spent2 == 1);
-                RC_CHECK("D: no receipt can exist for a header that failed",
-                         spent1 + spent2 == 2);
-                RC_CHECK("D: the refusal is still not a validity verdict",
-                         bi_y->nStatus == status_before);
-            }
-        }
-
-        main_state_free(&ms);
-    }
-
-    /* ── E. the cap holds under a flood ───────────────────────────────
-     *
-     * Serve many DISTINCT real headers once each. The table must not grow:
-     * occupied stays within the cap and the byte footprint never moves. A
-     * peer offering unlimited distinct headers churns slots at a constant
-     * cost, which is the whole point of a fixed static table. */
-    {
-        struct main_state ms;
-        main_state_init(&ms);
-
-        struct msg_processor mp;
-        msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_rc_nm, NULL);
-
-        struct getheaders_receipt_stats before_flood;
-        memset(&before_flood, 0, sizeof(before_flood));
-        getheaders_verify_receipt_stats(&before_flood);
-
-        /* 48,5 regtest headers mine in milliseconds, but a flood still has
-         * to stay inside a unit test's budget. 96 distinct headers is enough
-         * to churn slots and prove the invariant; the cap is structural, so
-         * it does not need saturation to be established. */
-        const int flood = 96;
-        struct uint256 prev;
-        uint256_set_null(&prev);
-        struct block_index *chain_prev = NULL;
-        int served = 0;
-        bool cap_held = true;
-        size_t bytes_seen = before_flood.bytes;
-
-        for (int i = 0; i < flood; i++) {
-            struct block_header fh;
-            if (!rc_mine_header(&fh, i, &prev, cp, 0xE0))
-                break;
-            struct uint256 fhash;
-            block_header_get_hash(&fh, &fhash);
-            struct block_index *bi =
-                rc_seed_index(&ms, &fh, &fhash, i, chain_prev);
-            if (!bi || !rc_pin_solution(bi, &fh, "rc_flood_sol"))
-                break;
-
-            struct block_header out;
-            block_header_init(&out);
-            if (getheaders_index_header_servable(&mp, bi, &out))
-                served++;
-
-            struct getheaders_receipt_stats now;
-            memset(&now, 0, sizeof(now));
-            getheaders_verify_receipt_stats(&now);
-            if (now.occupied > now.slots || now.slots != before_flood.slots ||
-                now.bytes != bytes_seen)
-                cap_held = false;
-
-            prev = fhash;
-            chain_prev = bi;
-        }
-
-        struct getheaders_receipt_stats after_flood;
-        memset(&after_flood, 0, sizeof(after_flood));
-        getheaders_verify_receipt_stats(&after_flood);
-
-        printf("getheaders_serve_receipt: E: %d distinct headers served; "
-               "table %zu/%zu slots occupied, %zu bytes, %llu eviction(s)\n",
-               served, after_flood.occupied, after_flood.slots,
-               after_flood.bytes,
-               (unsigned long long)(after_flood.evictions -
-                                    before_flood.evictions));
-
-        RC_CHECK("E: the flood really served distinct headers",
-                 served == flood);
-        RC_CHECK("E: occupied never exceeded the cap at any point during "
-                 "the flood", cap_held);
-        RC_CHECK("E: occupied is still within the cap afterwards",
-                 after_flood.occupied <= after_flood.slots);
-        RC_CHECK("E: the byte footprint did not move — the table cannot "
-                 "grow", after_flood.bytes == before_flood.bytes);
-        RC_CHECK("E: the slot count is a constant",
-                 after_flood.slots == before_flood.slots);
-        RC_CHECK("E: every served header was verified exactly once — a "
-                 "flood of distinct headers gets no discount",
-                 after_flood.mints - before_flood.mints == (uint64_t)served);
-
-        main_state_free(&ms);
-    }
+    failures += rc_case_a_served_twice(cp, dir, &rs0);
+    failures += rc_case_d_failures_not_cached(cp, dir);
+    failures += rc_case_e_cap_under_flood(cp, dir);
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);

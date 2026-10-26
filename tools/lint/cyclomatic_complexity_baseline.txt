@@ -1572,7 +1572,6 @@ tests/harness/src/test_fold_inram_crash_proof.c:fip_setup:25
 tests/harness/src/test_game.c:test_game:58
 tests/harness/src/test_gap_fill_frontier_window.c:test_gap_fill_frontier_window:18
 tests/harness/src/test_getheaders_serve_pow_dedup.c:test_getheaders_serve_pow_dedup:47
-tests/harness/src/test_getheaders_serve_receipt.c:test_getheaders_serve_receipt:41
 tests/harness/src/test_groth16_msm_parity.c:test_groth16_msm_parity:25
 tests/harness/src/test_groth16_r1cs_oracle.c:test_groth16_r1cs_oracle:63
 tests/harness/src/test_groth16_selfverify.c:native_circuit_baseline:17
