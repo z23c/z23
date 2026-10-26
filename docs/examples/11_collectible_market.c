@@ -358,6 +358,436 @@ static bool build_htlc_deed_spend(struct transaction *tx,
     return true;
 }
 
+/* [1/6] Mint the three one-of-one deeds: one ZSLP GENESIS per collectible,
+ * each document_hash-bound to distinct "artwork" bytes, then independently
+ * re-parsed and looked up in the projection to prove the binding is
+ * on-chain. Fills deed_token_id/deed_holder_txid for the sale paths. */
+static void mint_collectible_deeds(struct simnet *sim, struct node_db *db,
+                                   const struct script *seller_script,
+                                   struct uint256 deed_token_id[3],
+                                   struct uint256 deed_holder_txid[3])
+{
+    printf("[1/6] minting three one-of-one collectibles (ZSLP GENESIS, "
+          "quantity=1, decimals=0, no mint baton)...\n");
+
+    const int64_t seller_fund_value = 260000;
+    const int64_t deed_value = 200000; /* dust value each deed's holder output carries */
+
+    const char *deed_ticker[3] = { "ART1", "ART2", "ART3" };
+    const char *deed_name[3] = {
+        "Sovereign Sketch #1", "Sovereign Sketch #2", "Sovereign Sketch #3"
+    };
+
+    for (int i = 0; i < 3; i++) {
+        struct uint256 cb_txid, fund_txid;
+        must(simnet_mint_coinbase(sim, &cb_txid), "mint coinbase for deed funding");
+        must(simnet_spend(sim, &cb_txid, 0, seller_fund_value, &fund_txid),
+            "spend matured coinbase into deed-funding coin");
+
+        uint8_t artwork[64];
+        fill_artwork(artwork, (unsigned char)(0x10 * (i + 1)));
+        uint8_t document_hash[32];
+        sha3_256(artwork, sizeof(artwork), document_hash);
+
+        uint8_t genesis_script[512];
+        size_t genesis_len = slp_build_genesis(genesis_script, sizeof(genesis_script),
+            deed_ticker[i], deed_name[i], /*document_url=*/"",
+            document_hash, /*decimals=*/0, /*mint_baton_vout=*/0,
+            /*initial_quantity=*/1);
+        must(genesis_len > 0, "slp_build_genesis");
+
+        struct transaction genesis_tx;
+        must(build_slp_tx(&genesis_tx, &fund_txid, 0, genesis_script, genesis_len,
+                          seller_script, deed_value), "build GENESIS tx");
+        deed_token_id[i] = genesis_tx.hash; /* SLP token_id == the GENESIS txid */
+
+        struct simnet_mempool_result mr;
+        must(simnet_mempool_add(sim, &genesis_tx, &mr), "mempool add GENESIS");
+        must(simnet_mempool_mint(sim), "mint GENESIS block");
+        int height = simnet_tip_height(sim);
+        must(apply_slp(db, &genesis_tx, height), "fold GENESIS into projection");
+        deed_holder_txid[i] = genesis_tx.hash;
+
+        /* Prove the deed is on-chain and hash-bound: parse the OP_RETURN
+         * back independently of the projection and check document_hash
+         * equals the SHA3 of the exact artwork bytes above. */
+        struct slp_message parsed;
+        must(slp_parse(genesis_tx.vout[0].script_pub_key.data,
+                       genesis_tx.vout[0].script_pub_key.size, &parsed),
+            "re-parse GENESIS OP_RETURN");
+        must(parsed.has_document_hash &&
+            memcmp(parsed.document_hash, document_hash, 32) == 0,
+            "on-chain document_hash must equal SHA3(artwork bytes)");
+        must(parsed.initial_quantity == 1 && parsed.decimals == 0,
+            "deed must be a true one-of-one: quantity 1, decimals 0");
+
+        char thex[65];
+        token_hex(&deed_token_id[i], thex);
+        struct db_zslp_token_info tinfo;
+        memset(&tinfo, 0, sizeof(tinfo));
+        must(db_zslp_token_find(db, thex, &tinfo), "projection sees the new deed");
+        printf("      %s \"%s\" minted at height %d; document_hash bound to "
+              "%zu artwork bytes and verified via independent slp_parse\n",
+              deed_ticker[i], deed_name[i], height, sizeof(artwork));
+
+        transaction_free(&genesis_tx);
+    }
+}
+
+/* [2/6] Claim the storefront: ZNAM REGISTER plus a SET_TEXT "onion" record
+ * pointing at the (illustrative) storefront address, each indexed and read
+ * back out of the projection. */
+static void claim_storefront(struct simnet *sim, struct node_db *db)
+{
+    printf("\n[2/6] claiming a permanent on-chain storefront identity "
+          "(ZNAM REGISTER -> SET_TEXT \"onion\")...\n");
+
+    const char *gallery_name = "collectible-gallery";
+    const char *storefront_onion =
+        "artisan1lect1blesgalleryfrontdoorxxxxxxxxxxxxxxxxxxxxxxxxx.onion";
+
+    struct uint256 znam_cb_txid, znam_fund_txid;
+    must(simnet_mint_coinbase(sim, &znam_cb_txid), "mint coinbase for ZNAM funding");
+    must(simnet_spend(sim, &znam_cb_txid, 0, 500000, &znam_fund_txid),
+        "spend matured coinbase into ZNAM-funding coin");
+    struct transaction znam_fund_tx;
+    must(build_p2pkh_fund_tx(&znam_fund_tx, &znam_fund_txid, 0, 480000, 0xA0),
+        "build seller's P2PKH-owned ZNAM funding coin");
+    struct simnet_mempool_result mr_fund;
+    must(simnet_mempool_add(sim, &znam_fund_tx, &mr_fund), "mempool add ZNAM fund tx");
+    must(simnet_mempool_mint(sim), "mint ZNAM fund block");
+    int znam_fund_height = simnet_tip_height(sim);
+    /* apply_znam derives REGISTER's authorizing owner via znam_owner_address
+     * -> db_tx_output_addr, which reads the SPENT output's address out of
+     * the tx_outputs projection table, not the in-memory tx — so the
+     * funding coin's own block must be indexed before anything spending it
+     * can resolve an owner (same requirement docs/examples/05_znam_names.c's
+     * fund_tx follows). */
+    must(index_znam_tx(db, &znam_fund_tx, znam_fund_height, 0xE0),
+        "index ZNAM funding tx");
+    struct uint256 znam_owned_txid = znam_fund_tx.hash;
+    transaction_free(&znam_fund_tx);
+
+    uint8_t register_script[512];
+    size_t register_len = znam_build_register(register_script, sizeof(register_script),
+                                              gallery_name, ZNAM_TYPE_TADDR,
+                                              "t1gallerydemoaddr");
+    must(register_len > 0, "znam_build_register");
+    struct transaction register_tx;
+    must(build_znam_tx(&register_tx, &znam_owned_txid, 0, register_script,
+                       register_len, 420000, 0xA0), "build REGISTER tx");
+    struct simnet_mempool_result mr_reg;
+    must(simnet_mempool_add(sim, &register_tx, &mr_reg), "mempool add REGISTER");
+    must(simnet_mempool_mint(sim), "mint REGISTER block");
+    int register_height = simnet_tip_height(sim);
+    must(index_znam_tx(db, &register_tx, register_height, 0xE1), "index REGISTER");
+    struct uint256 register_txid = register_tx.hash;
+    transaction_free(&register_tx);
+
+    struct znam_entry name_entry;
+    memset(&name_entry, 0, sizeof(name_entry));
+    must(db_znam_find(db, gallery_name, &name_entry), "projection sees the new name");
+    printf("      REGISTER \"%s\" -> %s accepted at height %d (owner=%s)\n",
+          gallery_name, name_entry.target_value, register_height,
+          name_entry.owner_address);
+
+    uint8_t text_script[512];
+    size_t text_len = znam_build_set_text(text_script, sizeof(text_script),
+                                          gallery_name, "onion", storefront_onion);
+    must(text_len > 0, "znam_build_set_text");
+    struct transaction text_tx;
+    must(build_znam_tx(&text_tx, &register_txid, 1, text_script, text_len,
+                       360000, 0xA0), "build SET_TEXT tx");
+    struct simnet_mempool_result mr_text;
+    must(simnet_mempool_add(sim, &text_tx, &mr_text), "mempool add SET_TEXT");
+    must(simnet_mempool_mint(sim), "mint SET_TEXT block");
+    int text_height = simnet_tip_height(sim);
+    must(index_znam_tx(db, &text_tx, text_height, 0xE2), "index SET_TEXT");
+    transaction_free(&text_tx);
+
+    char onion_out[ZNAM_TEXT_VAL_MAX + 1];
+    memset(onion_out, 0, sizeof(onion_out));
+    must(db_znam_text_get(db, gallery_name, "onion", onion_out, sizeof(onion_out)),
+        "projection records the onion text record");
+    must(strcmp(onion_out, storefront_onion) == 0, "onion record must round-trip exactly");
+    printf("      SET_TEXT[onion] accepted at height %d; a buyer resolving "
+          "\"%s\" now finds:\n        %s  (illustrative address, not a live "
+          "service)\n", text_height, gallery_name, onion_out);
+}
+
+/* [3/6] Sale path A: the buyer's plain payment and deed #1's SLP SEND land
+ * in the SAME block; provenance then reads GENESIS -> SEND. */
+static void sell_deed_direct(struct simnet *sim, struct node_db *db,
+                             const struct script *seller_script,
+                             const struct script *direct_script,
+                             const struct uint256 *token_id,
+                             const struct uint256 *holder_txid)
+{
+    printf("\n[3/6] sale path A (direct): buyer pays the asking price; the "
+          "SAME block carries deed #1's transfer...\n");
+
+    const int64_t sale_price = 150000;
+    const int64_t buyer_fund_value = 210000;
+    const int64_t deed1_send_value = 180000; /* deed_value minus this tx's fee */
+
+    struct uint256 buyer_cb_txid, buyer_fund_txid;
+    must(simnet_mint_coinbase(sim, &buyer_cb_txid), "mint coinbase for buyer funding");
+    must(simnet_spend(sim, &buyer_cb_txid, 0, buyer_fund_value, &buyer_fund_txid),
+        "spend matured coinbase into buyer's payment coin");
+
+    /* Plain payment: buyer_fund_txid:0 -> seller_script, no OP_RETURN at all
+     * — an everyday transparent send, structurally unrelated to the token
+     * transfer below except that both land in the same block. */
+    struct transaction payment_tx;
+    transaction_init(&payment_tx);
+    must(transaction_alloc(&payment_tx, 1, 1), "alloc payment tx");
+    payment_tx.version = 1;
+    payment_tx.vin[0].prevout.hash = buyer_fund_txid;
+    payment_tx.vin[0].prevout.n = 0;
+    { uint8_t sig[] = {0x00, 0x00}; script_set(&payment_tx.vin[0].script_sig, sig, sizeof(sig)); }
+    payment_tx.vin[0].sequence = 0xFFFFFFFFu;
+    payment_tx.vout[0].value = sale_price;
+    payment_tx.vout[0].script_pub_key = *seller_script;
+    transaction_compute_hash(&payment_tx);
+
+    /* The deed transfer: spend deed #1's GENESIS holder output (vout 1,
+     * quantity 1), carry a fresh SLP SEND OP_RETURN, hand it to the buyer. */
+    struct uint256 wire_id0;
+    wire_token_id(token_id, &wire_id0);
+    uint64_t send_qty1[1] = { 1 };
+    uint8_t send_script1[512];
+    size_t send_len1 = slp_build_send(send_script1, sizeof(send_script1),
+                                      &wire_id0, send_qty1, 1);
+    must(send_len1 > 0, "slp_build_send for deed #1");
+    struct transaction send_tx1;
+    must(build_slp_tx(&send_tx1, holder_txid, 1, send_script1, send_len1,
+                      direct_script, deed1_send_value), "build deed #1 SEND tx");
+
+    struct simnet_mempool_result mr_pay, mr_send1;
+    must(simnet_mempool_add(sim, &payment_tx, &mr_pay), "mempool add payment tx");
+    must(simnet_mempool_add(sim, &send_tx1, &mr_send1), "mempool add deed #1 SEND tx");
+    must(simnet_mempool_size(sim) == 2, "both txs must be queued before the mint");
+    must(simnet_mempool_mint(sim), "mint the combined sale block");
+    int sale_height = simnet_tip_height(sim);
+    must(apply_slp(db, &send_tx1, sale_height), "fold deed #1 SEND into projection");
+
+    char thex0[65];
+    token_hex(token_id, thex0);
+    struct db_zslp_transfer_info xfers0[4];
+    memset(xfers0, 0, sizeof(xfers0));
+    int nxfers0 = db_zslp_transfer_list_by_token(db, thex0, xfers0, 4);
+    /* db_zslp_transfer_list_by_token orders newest-height-first (see
+     * contexts/market/models/src/zslp.c: "ORDER BY block_height DESC"), so we check
+     * membership rather than a fixed index — GENESIS and SEND must both be
+     * present exactly once, not that GENESIS sorts first. */
+    int n_genesis0 = 0, n_send0 = 0;
+    for (int i = 0; i < nxfers0; i++) {
+        if (xfers0[i].tx_type == SLP_TX_GENESIS) n_genesis0++;
+        if (xfers0[i].tx_type == SLP_TX_SEND) n_send0++;
+    }
+    must(nxfers0 == 2 && n_genesis0 == 1 && n_send0 == 1,
+        "deed #1's provenance must read GENESIS then SEND");
+    printf("      block accepted at height %d: payment of %lld zats settled "
+          "AND deed #1 handed to the buyer in the same block; provenance = "
+          "%d row(s) (GENESIS -> SEND)\n",
+          sale_height, (long long)sale_price, nxfers0);
+
+    struct slp_message send1_parsed;
+    must(slp_parse(send_tx1.vout[0].script_pub_key.data,
+                   send_tx1.vout[0].script_pub_key.size, &send1_parsed),
+        "re-parse deed #1 SEND OP_RETURN");
+    must(send1_parsed.type == SLP_TX_SEND && send1_parsed.output_quantities[0] == 1,
+        "SEND must move exactly quantity 1 to the buyer");
+
+    transaction_free(&payment_tx);
+    transaction_free(&send_tx1);
+}
+
+/* [4/6] Sale path B, leg 1: deed #2 is locked behind an HTLC and the
+ * collector redeems it by revealing the secret, continuing the token's
+ * provenance straight through the contract. */
+static void sell_deed_via_escrow(struct simnet *sim, struct node_db *db,
+                                 const uint8_t collector_pkh[20],
+                                 const uint8_t seller_pkh[20],
+                                 const struct script *collector_script,
+                                 const struct uint256 *token_id,
+                                 const struct uint256 *holder_txid)
+{
+    printf("\n[4/6] sale path B (trustless escrow), leg 1: lock deed #2 "
+          "behind an HTLC, then the collector redeems it with the "
+          "secret...\n");
+
+    uint32_t redeem_locktime = (uint32_t)(simnet_tip_height(sim) + 3);
+    struct script redeem_p2sh;
+    uint8_t redeem_contract[HTLC_CONTRACT_SIZE], redeem_secret[32];
+    must(build_htlc(redeem_locktime, collector_pkh, seller_pkh,
+                    &redeem_p2sh, redeem_contract, redeem_secret),
+        "build redeem-path HTLC script for deed #2");
+    printf("      secret = %02x%02x%02x%02x...(32 bytes, real CSPRNG — "
+          "differs every run, see file header)\n",
+          redeem_secret[0], redeem_secret[1], redeem_secret[2], redeem_secret[3]);
+
+    /* Lock: spend deed #2's GENESIS holder output into the HTLC P2SH output,
+     * carrying an SLP SEND OP_RETURN (quantity 1 -> vout 1, the escrow). */
+    struct uint256 wire_id1;
+    wire_token_id(token_id, &wire_id1);
+    uint64_t lock_qty[1] = { 1 };
+    uint8_t lock_script[512];
+    size_t lock_len = slp_build_send(lock_script, sizeof(lock_script),
+                                     &wire_id1, lock_qty, 1);
+    must(lock_len > 0, "slp_build_send for deed #2 escrow lock");
+    const int64_t escrow2_value = 180000; /* deed_value minus this tx's fee */
+    struct transaction lock_tx2;
+    must(build_slp_tx(&lock_tx2, holder_txid, 1, lock_script, lock_len,
+                      &redeem_p2sh, escrow2_value), "build deed #2 escrow-lock tx");
+    struct simnet_mempool_result mr_lock2;
+    must(simnet_mempool_add(sim, &lock_tx2, &mr_lock2), "mempool add deed #2 escrow-lock tx");
+    must(simnet_mempool_mint(sim), "mint deed #2 escrow-lock block");
+    int lock2_height = simnet_tip_height(sim);
+    must(apply_slp(db, &lock_tx2, lock2_height), "fold deed #2 escrow-lock into projection");
+    struct uint256 lock_tx2_txid = lock_tx2.hash;
+    printf("      deed #2 locked at height %d behind a P2SH HTLC — the "
+          "projection now shows it held at the CONTRACT's own address, not "
+          "a person, until someone settles it\n", lock2_height);
+    transaction_free(&lock_tx2);
+
+    /* Redeem: the collector reveals the secret, claiming the deed AND
+     * continuing its SLP provenance to their own address. Same wire_id1 —
+     * every SEND in a token's chain references the SAME token_id. */
+    uint64_t redeem_qty[1] = { 1 };
+    uint8_t redeem_send_script[512];
+    size_t redeem_send_len = slp_build_send(redeem_send_script, sizeof(redeem_send_script),
+                                            &wire_id1, redeem_qty, 1);
+    must(redeem_send_len > 0, "slp_build_send for deed #2 redeem");
+    struct transaction redeem_tx2;
+    must(build_htlc_deed_spend(&redeem_tx2, &lock_tx2_txid, /*prev_n=*/1, escrow2_value,
+                              redeem_contract, redeem_secret, /*refund=*/false,
+                              redeem_locktime, redeem_send_script, redeem_send_len,
+                              collector_script), "build deed #2 redeem tx");
+    struct simnet_mempool_result mr_redeem2;
+    must(simnet_mempool_add(sim, &redeem_tx2, &mr_redeem2), "mempool add deed #2 redeem tx");
+    must(simnet_mempool_mint(sim), "mint deed #2 redeem block");
+    int redeem2_height = simnet_tip_height(sim);
+    must(apply_slp(db, &redeem_tx2, redeem2_height), "fold deed #2 redeem into projection");
+
+    /* This is the step a real cross-chain counterparty performs: read the
+     * secret back out of the settled redeem transaction's scriptSig. */
+    uint8_t extracted_secret[32];
+    must(htlc_extract_secret(redeem_tx2.vin[0].script_sig.data,
+                             redeem_tx2.vin[0].script_sig.size, extracted_secret) &&
+        memcmp(extracted_secret, redeem_secret, 32) == 0,
+        "htlc_extract_secret must recover the exact secret from the on-chain scriptSig");
+
+    char thex1[65];
+    token_hex(token_id, thex1);
+    struct db_zslp_transfer_info xfers1[4];
+    memset(xfers1, 0, sizeof(xfers1));
+    int nxfers1 = db_zslp_transfer_list_by_token(db, thex1, xfers1, 4);
+    int n_genesis1 = 0, n_send1 = 0;
+    for (int i = 0; i < nxfers1; i++) {
+        if (xfers1[i].tx_type == SLP_TX_GENESIS) n_genesis1++;
+        if (xfers1[i].tx_type == SLP_TX_SEND) n_send1++;
+    }
+    must(nxfers1 == 3 && n_genesis1 == 1 && n_send1 == 2,
+        "deed #2's provenance must read GENESIS -> lock-SEND -> redeem-SEND");
+    printf("      redeem accepted at height %d — collector now holds deed "
+          "#2; htlc_extract_secret recovered the exact %d-bit secret from "
+          "the settled scriptSig; provenance = %d row(s)\n",
+          redeem2_height, 256, nxfers1);
+    transaction_free(&redeem_tx2);
+}
+
+/* [5/6] Sale path B, leg 2: deed #3's escrow listing never completes — the
+ * pre-locktime refund is rejected as non-final, then after the CLTV timeout
+ * the seller refunds the deed back to themselves. */
+static void refund_deed_after_timeout(struct simnet *sim, struct node_db *db,
+                                      const uint8_t seller_pkh[20],
+                                      const struct script *seller_script,
+                                      const struct uint256 *token_id,
+                                      const struct uint256 *holder_txid)
+{
+    printf("\n[5/6] sale path B (trustless escrow), leg 2: a listing for "
+          "deed #3 never completes — after the CLTV timeout, the seller "
+          "refunds it back to themselves...\n");
+
+    uint32_t refund_locktime = (uint32_t)(simnet_tip_height(sim) + 3);
+    struct script refund_p2sh;
+    uint8_t refund_contract[HTLC_CONTRACT_SIZE], refund_secret[32];
+    /* recipient_pkh here stands in for a never-materializing buyer — nobody
+     * ever redeems this contract with the secret. */
+    uint8_t no_show_pkh[20];
+    memset(no_show_pkh, 0x99, sizeof(no_show_pkh));
+    must(build_htlc(refund_locktime, no_show_pkh, seller_pkh,
+                    &refund_p2sh, refund_contract, refund_secret),
+        "build refund-path HTLC script for deed #3");
+
+    struct uint256 wire_id2;
+    wire_token_id(token_id, &wire_id2);
+    uint64_t lock_qty3[1] = { 1 };
+    uint8_t lock_script3[512];
+    size_t lock_len3 = slp_build_send(lock_script3, sizeof(lock_script3),
+                                      &wire_id2, lock_qty3, 1);
+    must(lock_len3 > 0, "slp_build_send for deed #3 escrow lock");
+    const int64_t escrow3_value = 180000;
+    struct transaction lock_tx3;
+    must(build_slp_tx(&lock_tx3, holder_txid, 1, lock_script3, lock_len3,
+                      &refund_p2sh, escrow3_value), "build deed #3 escrow-lock tx");
+    struct simnet_mempool_result mr_lock3;
+    must(simnet_mempool_add(sim, &lock_tx3, &mr_lock3), "mempool add deed #3 escrow-lock tx");
+    must(simnet_mempool_mint(sim), "mint deed #3 escrow-lock block");
+    int lock3_height = simnet_tip_height(sim);
+    must(apply_slp(db, &lock_tx3, lock3_height), "fold deed #3 escrow-lock into projection");
+    struct uint256 lock_tx3_txid = lock_tx3.hash;
+    printf("      deed #3 listed at height %d, locktime %u\n",
+          lock3_height, refund_locktime);
+    transaction_free(&lock_tx3);
+
+    uint64_t refund_qty[1] = { 1 };
+    uint8_t refund_send_script[512];
+    size_t refund_send_len = slp_build_send(refund_send_script, sizeof(refund_send_script),
+                                            &wire_id2, refund_qty, 1);
+    must(refund_send_len > 0, "slp_build_send for deed #3 refund");
+    struct transaction refund_tx3;
+    must(build_htlc_deed_spend(&refund_tx3, &lock_tx3_txid, /*prev_n=*/1, escrow3_value,
+                              refund_contract, refund_secret, /*refund=*/true,
+                              refund_locktime, refund_send_script, refund_send_len,
+                              seller_script), "build deed #3 refund tx");
+
+    /* Before the locktime height, the refund must be rejected as
+     * non-final — this is the CLTV guarantee that keeps the buyer's redeem
+     * window exclusive until the timeout genuinely expires. */
+    struct simnet_mempool_result early_reject;
+    bool accepted_early = simnet_mempool_add(sim, &refund_tx3, &early_reject);
+    must(!accepted_early && early_reject.reason == SIMNET_MEMPOOL_REJECT_NONFINAL,
+        "refund before the locktime must be rejected as NONFINAL");
+    printf("      refund attempted before height %u correctly rejected (%s)\n",
+          refund_locktime, simnet_mempool_reject_name(early_reject.reason));
+
+    must(simnet_mint_to_height(sim, (int)refund_locktime),
+        "advance the chain to the locktime height");
+    must(simnet_mempool_add(sim, &refund_tx3, NULL), "mempool add deed #3 refund tx");
+    must(simnet_mempool_mint(sim), "mint deed #3 refund block");
+    int refund3_height = simnet_tip_height(sim);
+    must(apply_slp(db, &refund_tx3, refund3_height), "fold deed #3 refund into projection");
+
+    char thex2[65];
+    token_hex(token_id, thex2);
+    struct db_zslp_transfer_info xfers2[4];
+    memset(xfers2, 0, sizeof(xfers2));
+    int nxfers2 = db_zslp_transfer_list_by_token(db, thex2, xfers2, 4);
+    int n_genesis2 = 0, n_send2 = 0;
+    for (int i = 0; i < nxfers2; i++) {
+        if (xfers2[i].tx_type == SLP_TX_GENESIS) n_genesis2++;
+        if (xfers2[i].tx_type == SLP_TX_SEND) n_send2++;
+    }
+    must(nxfers2 == 3 && n_genesis2 == 1 && n_send2 == 2,
+        "deed #3's provenance must read GENESIS -> lock-SEND -> refund-SEND");
+    printf("      refund accepted+mined at height %d — the seller reclaimed "
+          "deed #3; provenance = %d row(s), ending back at the seller "
+          "(nobody redeemed it)\n", refund3_height, nxfers2);
+    transaction_free(&refund_tx3);
+}
+
 int main(void)
 {
     printf("=== 11_collectible_market: mint -> claim a storefront -> sell "
@@ -404,405 +834,36 @@ int main(void)
      * [1/6] MINT THE DEEDS — three one-of-one ZSLP GENESIS tokens, each
      * document_hash-bound to distinct "artwork" bytes.
      * =================================================================== */
-    printf("[1/6] minting three one-of-one collectibles (ZSLP GENESIS, "
-          "quantity=1, decimals=0, no mint baton)...\n");
-
-    const int64_t seller_fund_value = 260000;
-    const int64_t deed_value = 200000; /* dust value each deed's holder output carries */
-
     struct uint256 deed_token_id[3];
     struct uint256 deed_holder_txid[3];
-    const char *deed_ticker[3] = { "ART1", "ART2", "ART3" };
-    const char *deed_name[3] = {
-        "Sovereign Sketch #1", "Sovereign Sketch #2", "Sovereign Sketch #3"
-    };
-
-    for (int i = 0; i < 3; i++) {
-        struct uint256 cb_txid, fund_txid;
-        must(simnet_mint_coinbase(&sim, &cb_txid), "mint coinbase for deed funding");
-        must(simnet_spend(&sim, &cb_txid, 0, seller_fund_value, &fund_txid),
-            "spend matured coinbase into deed-funding coin");
-
-        uint8_t artwork[64];
-        fill_artwork(artwork, (unsigned char)(0x10 * (i + 1)));
-        uint8_t document_hash[32];
-        sha3_256(artwork, sizeof(artwork), document_hash);
-
-        uint8_t genesis_script[512];
-        size_t genesis_len = slp_build_genesis(genesis_script, sizeof(genesis_script),
-            deed_ticker[i], deed_name[i], /*document_url=*/"",
-            document_hash, /*decimals=*/0, /*mint_baton_vout=*/0,
-            /*initial_quantity=*/1);
-        must(genesis_len > 0, "slp_build_genesis");
-
-        struct transaction genesis_tx;
-        must(build_slp_tx(&genesis_tx, &fund_txid, 0, genesis_script, genesis_len,
-                          &seller_script, deed_value), "build GENESIS tx");
-        deed_token_id[i] = genesis_tx.hash; /* SLP token_id == the GENESIS txid */
-
-        struct simnet_mempool_result mr;
-        must(simnet_mempool_add(&sim, &genesis_tx, &mr), "mempool add GENESIS");
-        must(simnet_mempool_mint(&sim), "mint GENESIS block");
-        int height = simnet_tip_height(&sim);
-        must(apply_slp(&db, &genesis_tx, height), "fold GENESIS into projection");
-        deed_holder_txid[i] = genesis_tx.hash;
-
-        /* Prove the deed is on-chain and hash-bound: parse the OP_RETURN
-         * back independently of the projection and check document_hash
-         * equals the SHA3 of the exact artwork bytes above. */
-        struct slp_message parsed;
-        must(slp_parse(genesis_tx.vout[0].script_pub_key.data,
-                       genesis_tx.vout[0].script_pub_key.size, &parsed),
-            "re-parse GENESIS OP_RETURN");
-        must(parsed.has_document_hash &&
-            memcmp(parsed.document_hash, document_hash, 32) == 0,
-            "on-chain document_hash must equal SHA3(artwork bytes)");
-        must(parsed.initial_quantity == 1 && parsed.decimals == 0,
-            "deed must be a true one-of-one: quantity 1, decimals 0");
-
-        char thex[65];
-        token_hex(&deed_token_id[i], thex);
-        struct db_zslp_token_info tinfo;
-        memset(&tinfo, 0, sizeof(tinfo));
-        must(db_zslp_token_find(&db, thex, &tinfo), "projection sees the new deed");
-        printf("      %s \"%s\" minted at height %d; document_hash bound to "
-              "%zu artwork bytes and verified via independent slp_parse\n",
-              deed_ticker[i], deed_name[i], height, sizeof(artwork));
-
-        transaction_free(&genesis_tx);
-    }
+    mint_collectible_deeds(&sim, &db, &seller_script, deed_token_id,
+                           deed_holder_txid);
 
     /* ===================================================================
      * [2/6] CLAIM THE STOREFRONT — ZNAM REGISTER + SET_TEXT("onion", ...).
      * =================================================================== */
-    printf("\n[2/6] claiming a permanent on-chain storefront identity "
-          "(ZNAM REGISTER -> SET_TEXT \"onion\")...\n");
-
-    const char *gallery_name = "collectible-gallery";
-    const char *storefront_onion =
-        "artisan1lect1blesgalleryfrontdoorxxxxxxxxxxxxxxxxxxxxxxxxx.onion";
-
-    struct uint256 znam_cb_txid, znam_fund_txid;
-    must(simnet_mint_coinbase(&sim, &znam_cb_txid), "mint coinbase for ZNAM funding");
-    must(simnet_spend(&sim, &znam_cb_txid, 0, 500000, &znam_fund_txid),
-        "spend matured coinbase into ZNAM-funding coin");
-    struct transaction znam_fund_tx;
-    must(build_p2pkh_fund_tx(&znam_fund_tx, &znam_fund_txid, 0, 480000, 0xA0),
-        "build seller's P2PKH-owned ZNAM funding coin");
-    struct simnet_mempool_result mr_fund;
-    must(simnet_mempool_add(&sim, &znam_fund_tx, &mr_fund), "mempool add ZNAM fund tx");
-    must(simnet_mempool_mint(&sim), "mint ZNAM fund block");
-    int znam_fund_height = simnet_tip_height(&sim);
-    /* apply_znam derives REGISTER's authorizing owner via znam_owner_address
-     * -> db_tx_output_addr, which reads the SPENT output's address out of
-     * the tx_outputs projection table, not the in-memory tx — so the
-     * funding coin's own block must be indexed before anything spending it
-     * can resolve an owner (same requirement docs/examples/05_znam_names.c's
-     * fund_tx follows). */
-    must(index_znam_tx(&db, &znam_fund_tx, znam_fund_height, 0xE0),
-        "index ZNAM funding tx");
-    struct uint256 znam_owned_txid = znam_fund_tx.hash;
-    transaction_free(&znam_fund_tx);
-
-    uint8_t register_script[512];
-    size_t register_len = znam_build_register(register_script, sizeof(register_script),
-                                              gallery_name, ZNAM_TYPE_TADDR,
-                                              "t1gallerydemoaddr");
-    must(register_len > 0, "znam_build_register");
-    struct transaction register_tx;
-    must(build_znam_tx(&register_tx, &znam_owned_txid, 0, register_script,
-                       register_len, 420000, 0xA0), "build REGISTER tx");
-    struct simnet_mempool_result mr_reg;
-    must(simnet_mempool_add(&sim, &register_tx, &mr_reg), "mempool add REGISTER");
-    must(simnet_mempool_mint(&sim), "mint REGISTER block");
-    int register_height = simnet_tip_height(&sim);
-    must(index_znam_tx(&db, &register_tx, register_height, 0xE1), "index REGISTER");
-    struct uint256 register_txid = register_tx.hash;
-    transaction_free(&register_tx);
-
-    struct znam_entry name_entry;
-    memset(&name_entry, 0, sizeof(name_entry));
-    must(db_znam_find(&db, gallery_name, &name_entry), "projection sees the new name");
-    printf("      REGISTER \"%s\" -> %s accepted at height %d (owner=%s)\n",
-          gallery_name, name_entry.target_value, register_height,
-          name_entry.owner_address);
-
-    uint8_t text_script[512];
-    size_t text_len = znam_build_set_text(text_script, sizeof(text_script),
-                                          gallery_name, "onion", storefront_onion);
-    must(text_len > 0, "znam_build_set_text");
-    struct transaction text_tx;
-    must(build_znam_tx(&text_tx, &register_txid, 1, text_script, text_len,
-                       360000, 0xA0), "build SET_TEXT tx");
-    struct simnet_mempool_result mr_text;
-    must(simnet_mempool_add(&sim, &text_tx, &mr_text), "mempool add SET_TEXT");
-    must(simnet_mempool_mint(&sim), "mint SET_TEXT block");
-    int text_height = simnet_tip_height(&sim);
-    must(index_znam_tx(&db, &text_tx, text_height, 0xE2), "index SET_TEXT");
-    transaction_free(&text_tx);
-
-    char onion_out[ZNAM_TEXT_VAL_MAX + 1];
-    memset(onion_out, 0, sizeof(onion_out));
-    must(db_znam_text_get(&db, gallery_name, "onion", onion_out, sizeof(onion_out)),
-        "projection records the onion text record");
-    must(strcmp(onion_out, storefront_onion) == 0, "onion record must round-trip exactly");
-    printf("      SET_TEXT[onion] accepted at height %d; a buyer resolving "
-          "\"%s\" now finds:\n        %s  (illustrative address, not a live "
-          "service)\n", text_height, gallery_name, onion_out);
+    claim_storefront(&sim, &db);
 
     /* ===================================================================
      * [3/6] SALE PATH A — DIRECT: payment + deed transfer in ONE block.
      * =================================================================== */
-    printf("\n[3/6] sale path A (direct): buyer pays the asking price; the "
-          "SAME block carries deed #1's transfer...\n");
-
-    const int64_t sale_price = 150000;
-    const int64_t buyer_fund_value = 210000;
-    const int64_t deed1_send_value = 180000; /* deed_value minus this tx's fee */
-
-    struct uint256 buyer_cb_txid, buyer_fund_txid;
-    must(simnet_mint_coinbase(&sim, &buyer_cb_txid), "mint coinbase for buyer funding");
-    must(simnet_spend(&sim, &buyer_cb_txid, 0, buyer_fund_value, &buyer_fund_txid),
-        "spend matured coinbase into buyer's payment coin");
-
-    /* Plain payment: buyer_fund_txid:0 -> seller_script, no OP_RETURN at all
-     * — an everyday transparent send, structurally unrelated to the token
-     * transfer below except that both land in the same block. */
-    struct transaction payment_tx;
-    transaction_init(&payment_tx);
-    must(transaction_alloc(&payment_tx, 1, 1), "alloc payment tx");
-    payment_tx.version = 1;
-    payment_tx.vin[0].prevout.hash = buyer_fund_txid;
-    payment_tx.vin[0].prevout.n = 0;
-    { uint8_t sig[] = {0x00, 0x00}; script_set(&payment_tx.vin[0].script_sig, sig, sizeof(sig)); }
-    payment_tx.vin[0].sequence = 0xFFFFFFFFu;
-    payment_tx.vout[0].value = sale_price;
-    payment_tx.vout[0].script_pub_key = seller_script;
-    transaction_compute_hash(&payment_tx);
-
-    /* The deed transfer: spend deed #1's GENESIS holder output (vout 1,
-     * quantity 1), carry a fresh SLP SEND OP_RETURN, hand it to the buyer. */
-    struct uint256 wire_id0;
-    wire_token_id(&deed_token_id[0], &wire_id0);
-    uint64_t send_qty1[1] = { 1 };
-    uint8_t send_script1[512];
-    size_t send_len1 = slp_build_send(send_script1, sizeof(send_script1),
-                                      &wire_id0, send_qty1, 1);
-    must(send_len1 > 0, "slp_build_send for deed #1");
-    struct transaction send_tx1;
-    must(build_slp_tx(&send_tx1, &deed_holder_txid[0], 1, send_script1, send_len1,
-                      &direct_script, deed1_send_value), "build deed #1 SEND tx");
-
-    struct simnet_mempool_result mr_pay, mr_send1;
-    must(simnet_mempool_add(&sim, &payment_tx, &mr_pay), "mempool add payment tx");
-    must(simnet_mempool_add(&sim, &send_tx1, &mr_send1), "mempool add deed #1 SEND tx");
-    must(simnet_mempool_size(&sim) == 2, "both txs must be queued before the mint");
-    must(simnet_mempool_mint(&sim), "mint the combined sale block");
-    int sale_height = simnet_tip_height(&sim);
-    must(apply_slp(&db, &send_tx1, sale_height), "fold deed #1 SEND into projection");
-
-    char thex0[65];
-    token_hex(&deed_token_id[0], thex0);
-    struct db_zslp_transfer_info xfers0[4];
-    memset(xfers0, 0, sizeof(xfers0));
-    int nxfers0 = db_zslp_transfer_list_by_token(&db, thex0, xfers0, 4);
-    /* db_zslp_transfer_list_by_token orders newest-height-first (see
-     * contexts/market/models/src/zslp.c: "ORDER BY block_height DESC"), so we check
-     * membership rather than a fixed index — GENESIS and SEND must both be
-     * present exactly once, not that GENESIS sorts first. */
-    int n_genesis0 = 0, n_send0 = 0;
-    for (int i = 0; i < nxfers0; i++) {
-        if (xfers0[i].tx_type == SLP_TX_GENESIS) n_genesis0++;
-        if (xfers0[i].tx_type == SLP_TX_SEND) n_send0++;
-    }
-    must(nxfers0 == 2 && n_genesis0 == 1 && n_send0 == 1,
-        "deed #1's provenance must read GENESIS then SEND");
-    printf("      block accepted at height %d: payment of %lld zats settled "
-          "AND deed #1 handed to the buyer in the same block; provenance = "
-          "%d row(s) (GENESIS -> SEND)\n",
-          sale_height, (long long)sale_price, nxfers0);
-
-    struct slp_message send1_parsed;
-    must(slp_parse(send_tx1.vout[0].script_pub_key.data,
-                   send_tx1.vout[0].script_pub_key.size, &send1_parsed),
-        "re-parse deed #1 SEND OP_RETURN");
-    must(send1_parsed.type == SLP_TX_SEND && send1_parsed.output_quantities[0] == 1,
-        "SEND must move exactly quantity 1 to the buyer");
-
-    transaction_free(&payment_tx);
-    transaction_free(&send_tx1);
+    sell_deed_direct(&sim, &db, &seller_script, &direct_script,
+                     &deed_token_id[0], &deed_holder_txid[0]);
 
     /* ===================================================================
      * [4/6] SALE PATH B, leg 1 — TRUSTLESS ESCROW, REDEEMED: deed #2 sits
      * behind an HTLC; the collector reveals the secret to claim it.
      * =================================================================== */
-    printf("\n[4/6] sale path B (trustless escrow), leg 1: lock deed #2 "
-          "behind an HTLC, then the collector redeems it with the "
-          "secret...\n");
-
-    uint32_t redeem_locktime = (uint32_t)(simnet_tip_height(&sim) + 3);
-    struct script redeem_p2sh;
-    uint8_t redeem_contract[HTLC_CONTRACT_SIZE], redeem_secret[32];
-    must(build_htlc(redeem_locktime, collector_pkh, seller_pkh,
-                    &redeem_p2sh, redeem_contract, redeem_secret),
-        "build redeem-path HTLC script for deed #2");
-    printf("      secret = %02x%02x%02x%02x...(32 bytes, real CSPRNG — "
-          "differs every run, see file header)\n",
-          redeem_secret[0], redeem_secret[1], redeem_secret[2], redeem_secret[3]);
-
-    /* Lock: spend deed #2's GENESIS holder output into the HTLC P2SH output,
-     * carrying an SLP SEND OP_RETURN (quantity 1 -> vout 1, the escrow). */
-    struct uint256 wire_id1;
-    wire_token_id(&deed_token_id[1], &wire_id1);
-    uint64_t lock_qty[1] = { 1 };
-    uint8_t lock_script[512];
-    size_t lock_len = slp_build_send(lock_script, sizeof(lock_script),
-                                     &wire_id1, lock_qty, 1);
-    must(lock_len > 0, "slp_build_send for deed #2 escrow lock");
-    const int64_t escrow2_value = 180000; /* deed_value minus this tx's fee */
-    struct transaction lock_tx2;
-    must(build_slp_tx(&lock_tx2, &deed_holder_txid[1], 1, lock_script, lock_len,
-                      &redeem_p2sh, escrow2_value), "build deed #2 escrow-lock tx");
-    struct simnet_mempool_result mr_lock2;
-    must(simnet_mempool_add(&sim, &lock_tx2, &mr_lock2), "mempool add deed #2 escrow-lock tx");
-    must(simnet_mempool_mint(&sim), "mint deed #2 escrow-lock block");
-    int lock2_height = simnet_tip_height(&sim);
-    must(apply_slp(&db, &lock_tx2, lock2_height), "fold deed #2 escrow-lock into projection");
-    struct uint256 lock_tx2_txid = lock_tx2.hash;
-    printf("      deed #2 locked at height %d behind a P2SH HTLC — the "
-          "projection now shows it held at the CONTRACT's own address, not "
-          "a person, until someone settles it\n", lock2_height);
-    transaction_free(&lock_tx2);
-
-    /* Redeem: the collector reveals the secret, claiming the deed AND
-     * continuing its SLP provenance to their own address. Same wire_id1 —
-     * every SEND in a token's chain references the SAME token_id. */
-    uint64_t redeem_qty[1] = { 1 };
-    uint8_t redeem_send_script[512];
-    size_t redeem_send_len = slp_build_send(redeem_send_script, sizeof(redeem_send_script),
-                                            &wire_id1, redeem_qty, 1);
-    must(redeem_send_len > 0, "slp_build_send for deed #2 redeem");
-    struct transaction redeem_tx2;
-    must(build_htlc_deed_spend(&redeem_tx2, &lock_tx2_txid, /*prev_n=*/1, escrow2_value,
-                              redeem_contract, redeem_secret, /*refund=*/false,
-                              redeem_locktime, redeem_send_script, redeem_send_len,
-                              &collector_script), "build deed #2 redeem tx");
-    struct simnet_mempool_result mr_redeem2;
-    must(simnet_mempool_add(&sim, &redeem_tx2, &mr_redeem2), "mempool add deed #2 redeem tx");
-    must(simnet_mempool_mint(&sim), "mint deed #2 redeem block");
-    int redeem2_height = simnet_tip_height(&sim);
-    must(apply_slp(&db, &redeem_tx2, redeem2_height), "fold deed #2 redeem into projection");
-
-    /* This is the step a real cross-chain counterparty performs: read the
-     * secret back out of the settled redeem transaction's scriptSig. */
-    uint8_t extracted_secret[32];
-    must(htlc_extract_secret(redeem_tx2.vin[0].script_sig.data,
-                             redeem_tx2.vin[0].script_sig.size, extracted_secret) &&
-        memcmp(extracted_secret, redeem_secret, 32) == 0,
-        "htlc_extract_secret must recover the exact secret from the on-chain scriptSig");
-
-    char thex1[65];
-    token_hex(&deed_token_id[1], thex1);
-    struct db_zslp_transfer_info xfers1[4];
-    memset(xfers1, 0, sizeof(xfers1));
-    int nxfers1 = db_zslp_transfer_list_by_token(&db, thex1, xfers1, 4);
-    int n_genesis1 = 0, n_send1 = 0;
-    for (int i = 0; i < nxfers1; i++) {
-        if (xfers1[i].tx_type == SLP_TX_GENESIS) n_genesis1++;
-        if (xfers1[i].tx_type == SLP_TX_SEND) n_send1++;
-    }
-    must(nxfers1 == 3 && n_genesis1 == 1 && n_send1 == 2,
-        "deed #2's provenance must read GENESIS -> lock-SEND -> redeem-SEND");
-    printf("      redeem accepted at height %d — collector now holds deed "
-          "#2; htlc_extract_secret recovered the exact %d-bit secret from "
-          "the settled scriptSig; provenance = %d row(s)\n",
-          redeem2_height, 256, nxfers1);
-    transaction_free(&redeem_tx2);
+    sell_deed_via_escrow(&sim, &db, collector_pkh, seller_pkh,
+                         &collector_script, &deed_token_id[1],
+                         &deed_holder_txid[1]);
 
     /* ===================================================================
      * [5/6] SALE PATH B, leg 2 — TRUSTLESS ESCROW, TIMED OUT: deed #3 is
      * listed for escrow, nobody redeems, the seller refunds it.
      * =================================================================== */
-    printf("\n[5/6] sale path B (trustless escrow), leg 2: a listing for "
-          "deed #3 never completes — after the CLTV timeout, the seller "
-          "refunds it back to themselves...\n");
-
-    uint32_t refund_locktime = (uint32_t)(simnet_tip_height(&sim) + 3);
-    struct script refund_p2sh;
-    uint8_t refund_contract[HTLC_CONTRACT_SIZE], refund_secret[32];
-    /* recipient_pkh here stands in for a never-materializing buyer — nobody
-     * ever redeems this contract with the secret. */
-    uint8_t no_show_pkh[20];
-    memset(no_show_pkh, 0x99, sizeof(no_show_pkh));
-    must(build_htlc(refund_locktime, no_show_pkh, seller_pkh,
-                    &refund_p2sh, refund_contract, refund_secret),
-        "build refund-path HTLC script for deed #3");
-
-    struct uint256 wire_id2;
-    wire_token_id(&deed_token_id[2], &wire_id2);
-    uint64_t lock_qty3[1] = { 1 };
-    uint8_t lock_script3[512];
-    size_t lock_len3 = slp_build_send(lock_script3, sizeof(lock_script3),
-                                      &wire_id2, lock_qty3, 1);
-    must(lock_len3 > 0, "slp_build_send for deed #3 escrow lock");
-    const int64_t escrow3_value = 180000;
-    struct transaction lock_tx3;
-    must(build_slp_tx(&lock_tx3, &deed_holder_txid[2], 1, lock_script3, lock_len3,
-                      &refund_p2sh, escrow3_value), "build deed #3 escrow-lock tx");
-    struct simnet_mempool_result mr_lock3;
-    must(simnet_mempool_add(&sim, &lock_tx3, &mr_lock3), "mempool add deed #3 escrow-lock tx");
-    must(simnet_mempool_mint(&sim), "mint deed #3 escrow-lock block");
-    int lock3_height = simnet_tip_height(&sim);
-    must(apply_slp(&db, &lock_tx3, lock3_height), "fold deed #3 escrow-lock into projection");
-    struct uint256 lock_tx3_txid = lock_tx3.hash;
-    printf("      deed #3 listed at height %d, locktime %u\n",
-          lock3_height, refund_locktime);
-    transaction_free(&lock_tx3);
-
-    uint64_t refund_qty[1] = { 1 };
-    uint8_t refund_send_script[512];
-    size_t refund_send_len = slp_build_send(refund_send_script, sizeof(refund_send_script),
-                                            &wire_id2, refund_qty, 1);
-    must(refund_send_len > 0, "slp_build_send for deed #3 refund");
-    struct transaction refund_tx3;
-    must(build_htlc_deed_spend(&refund_tx3, &lock_tx3_txid, /*prev_n=*/1, escrow3_value,
-                              refund_contract, refund_secret, /*refund=*/true,
-                              refund_locktime, refund_send_script, refund_send_len,
-                              &seller_script), "build deed #3 refund tx");
-
-    /* Before the locktime height, the refund must be rejected as
-     * non-final — this is the CLTV guarantee that keeps the buyer's redeem
-     * window exclusive until the timeout genuinely expires. */
-    struct simnet_mempool_result early_reject;
-    bool accepted_early = simnet_mempool_add(&sim, &refund_tx3, &early_reject);
-    must(!accepted_early && early_reject.reason == SIMNET_MEMPOOL_REJECT_NONFINAL,
-        "refund before the locktime must be rejected as NONFINAL");
-    printf("      refund attempted before height %u correctly rejected (%s)\n",
-          refund_locktime, simnet_mempool_reject_name(early_reject.reason));
-
-    must(simnet_mint_to_height(&sim, (int)refund_locktime),
-        "advance the chain to the locktime height");
-    must(simnet_mempool_add(&sim, &refund_tx3, NULL), "mempool add deed #3 refund tx");
-    must(simnet_mempool_mint(&sim), "mint deed #3 refund block");
-    int refund3_height = simnet_tip_height(&sim);
-    must(apply_slp(&db, &refund_tx3, refund3_height), "fold deed #3 refund into projection");
-
-    char thex2[65];
-    token_hex(&deed_token_id[2], thex2);
-    struct db_zslp_transfer_info xfers2[4];
-    memset(xfers2, 0, sizeof(xfers2));
-    int nxfers2 = db_zslp_transfer_list_by_token(&db, thex2, xfers2, 4);
-    int n_genesis2 = 0, n_send2 = 0;
-    for (int i = 0; i < nxfers2; i++) {
-        if (xfers2[i].tx_type == SLP_TX_GENESIS) n_genesis2++;
-        if (xfers2[i].tx_type == SLP_TX_SEND) n_send2++;
-    }
-    must(nxfers2 == 3 && n_genesis2 == 1 && n_send2 == 2,
-        "deed #3's provenance must read GENESIS -> lock-SEND -> refund-SEND");
-    printf("      refund accepted+mined at height %d — the seller reclaimed "
-          "deed #3; provenance = %d row(s), ending back at the seller "
-          "(nobody redeemed it)\n", refund3_height, nxfers2);
-    transaction_free(&refund_tx3);
+    refund_deed_after_timeout(&sim, &db, seller_pkh, &seller_script,
+                              &deed_token_id[2], &deed_holder_txid[2]);
 
     seed_tape_uninstall();
     seed_tape_close(tape);
