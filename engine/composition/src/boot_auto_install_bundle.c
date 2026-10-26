@@ -163,33 +163,32 @@ static long icb_bundle_height(const char *name)
     return h;
 }
 
-char *boot_autodetect_consensus_bundle(const char *datadir)
+/* Pure ordering predicate for the freshest-selection scan: true iff the
+ * candidate (nm, h) replaces the current best (best_name, best_h). */
+static bool icb_candidate_beats_best(const char *nm, long h,
+                                     const char *best_name, long best_h)
 {
-    if (!datadir || !datadir[0])
-        return NULL;
+    if (best_name[0] == '\0')
+        return true;
+    if (h != best_h)
+        return h > best_h;
+    return strcmp(nm, best_name) > 0;
+}
 
-    /* Never re-install over already-sovereign state. */
-    if (boot_consensus_bundle_marker_exists(datadir))
-        return NULL;
-
-    char dirpath[PATH_MAX];
-    int dn = snprintf(dirpath, sizeof(dirpath), "%s/bundles", datadir);
-    if (dn < 0 || (size_t)dn >= sizeof(dirpath))
-        return NULL;
-
-    DIR *d = opendir(dirpath);
-    if (!d)
-        return NULL; /* no bundles/ directory → nothing to auto-install */
-
+/* Scan an open bundles/ directory for the freshest installable *.sqlite name
+ * into best_name (best_cap bytes; best_name[0] stays '\0' when none
+ * qualifies). */
+static void icb_scan_best_bundle(DIR *d, const char *dirpath, char *best_name,
+                                 size_t best_cap)
+{
     static const char SFX[] = ".sqlite";
     const size_t slen = sizeof(SFX) - 1;
-    char best_name[256] = {0};
     long best_h = -1;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         const char *nm = ent->d_name;
         size_t len = strlen(nm);
-        if (len <= slen || len >= sizeof(best_name))
+        if (len <= slen || len >= best_cap)
             continue;
         if (strcmp(nm + len - slen, SFX) != 0)
             continue;
@@ -208,21 +207,36 @@ char *boot_autodetect_consensus_bundle(const char *datadir)
          * names the higher height wins; ties / two non-canonical names break
          * lexicographically for stable determinism. */
         long h = icb_bundle_height(nm);
-        bool take;
-        if (best_name[0] == '\0')
-            take = true;
-        else if (h != best_h)
-            take = h > best_h;
-        else
-            take = strcmp(nm, best_name) > 0;
-        if (take) {
+        if (icb_candidate_beats_best(nm, h, best_name, best_h)) {
             size_t name_len = strlen(nm);
-            if (name_len >= sizeof(best_name))
+            if (name_len >= best_cap)
                 continue;
             memcpy(best_name, nm, name_len + 1);
             best_h = h;
         }
     }
+}
+
+char *boot_autodetect_consensus_bundle(const char *datadir)
+{
+    if (!datadir || !datadir[0])
+        return NULL;
+
+    /* Never re-install over already-sovereign state. */
+    if (boot_consensus_bundle_marker_exists(datadir))
+        return NULL;
+
+    char dirpath[PATH_MAX];
+    int dn = snprintf(dirpath, sizeof(dirpath), "%s/bundles", datadir);
+    if (dn < 0 || (size_t)dn >= sizeof(dirpath))
+        return NULL;
+
+    DIR *d = opendir(dirpath);
+    if (!d)
+        return NULL; /* no bundles/ directory → nothing to auto-install */
+
+    char best_name[256] = {0};
+    icb_scan_best_bundle(d, dirpath, best_name, sizeof(best_name));
     closedir(d);
 
     if (best_name[0] == '\0')
@@ -748,6 +762,35 @@ static void nss_classify(struct app_context *ctx,
 
 /* ── The app_init selection seam ───────────────────────────────────────────── */
 
+/* The transparent-only from-anchor predicate: an explicit operator
+ * -refold-from-anchor, a consumed escalator refold, or a load-verify boot with
+ * an eligible snapshot selects the from-anchor reset — unless a complete
+ * install already fired. */
+static bool bss_wants_from_anchor(struct node_db *ndb, struct app_context *ctx,
+                                  const struct boot_state_source_selection *out)
+{
+    return !out->auto_installed_bundle &&
+           (ctx->refold_from_anchor || out->consumed_auto_refold ||
+            (ctx->load_verify_boot &&
+             boot_load_verify_snapshot_eligible(ndb, progress_store_db())));
+}
+
+/* The LOUD no-state-source predicate: this boot selected NO fast-start state
+ * source (no complete install, no consumed refold, no from-anchor cutover),
+ * there is no staged/pending bundle and no sovereign marker, AND the datadir
+ * has no meaningful chain state. */
+static bool bss_no_state_source_condition(
+    struct main_state *ms, struct app_context *ctx,
+    const struct boot_state_source_selection *out)
+{
+    return !out->auto_installed_bundle && !out->consumed_auto_refold &&
+           !out->do_from_anchor &&
+           !boot_consensus_bundle_marker_exists(ctx->datadir) &&
+           !boot_install_bundle_pending(ctx->datadir) &&
+           !nss_bundle_staged(ctx->datadir) &&
+           nss_no_meaningful_chain_state(ms);
+}
+
 void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
                               struct app_context *ctx,
                               struct boot_state_source_selection *out)
@@ -809,11 +852,7 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
         boot_auto_refold_pending(ctx->datadir))
         out->consumed_auto_refold = boot_auto_refold_consume(ctx->datadir);
 
-    out->do_from_anchor =
-        !out->auto_installed_bundle &&
-        (ctx->refold_from_anchor || out->consumed_auto_refold ||
-         (ctx->load_verify_boot &&
-          boot_load_verify_snapshot_eligible(ndb, progress_store_db())));
+    out->do_from_anchor = bss_wants_from_anchor(ndb, ctx, out);
 
     /* LOUD no-state-source signage (conditions/no_state_source.h): if this boot
      * selected NO fast-start state source (no complete install, no consumed
@@ -824,12 +863,7 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
      * instead of a misleading downstream fold symptom. The node still proceeds
      * with normal from-genesis IBD; the blocker self-clears on H* climb / a
      * source landing (the no_state_source condition's witness). */
-    if (!out->auto_installed_bundle && !out->consumed_auto_refold &&
-        !out->do_from_anchor &&
-        !boot_consensus_bundle_marker_exists(ctx->datadir) &&
-        !boot_install_bundle_pending(ctx->datadir) &&
-        !nss_bundle_staged(ctx->datadir) &&
-        nss_no_meaningful_chain_state(ms)) {
+    if (bss_no_state_source_condition(ms, ctx, out)) {
         struct no_state_source_facts f;
         nss_classify(ctx, &f);
         no_state_source_raise(&f);
