@@ -393,6 +393,213 @@ static void p11_5_onion_dispatch_gate(bool *ok,
     *ok = gate_ok;
 }
 
+static void p11_5_gate_fetch_csrf(bool *ok, const char **fail_step,
+                                  const char *datadir, char *csrf,
+                                  size_t csrf_size)
+{
+    if (*ok) *fail_step = "fetch csrf";
+    *ok = *ok && p11_5_fetch_csrf_token(datadir, 1, csrf, csrf_size);
+}
+
+static void p11_5_gate_solve_pow(bool *ok, const char **fail_step,
+                                 const char *datadir, char *pow_ts,
+                                 size_t pow_ts_size, char *pow_nonce,
+                                 size_t pow_nonce_size)
+{
+    if (*ok) *fail_step = "solve pow";
+    *ok = *ok && p11_5_solve_store_pow(datadir, 1, pow_ts, pow_ts_size,
+                                       pow_nonce, pow_nonce_size);
+}
+
+static void p11_5_gate_create_order(bool *ok, const char **fail_step,
+                                    const char *datadir, const char *csrf,
+                                    const char *pow_ts, const char *pow_nonce,
+                                    uint8_t *resp, size_t resp_size)
+{
+    char body[256];
+    size_t n = 0;
+
+    if (*ok) {
+        *fail_step = "create order";
+        snprintf(body, sizeof(body),
+                 "product_id=1&customer_addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn"
+                 "&csrf_token=%s&pow_ts=%s&pow_nonce=%s",
+                 csrf, pow_ts, pow_nonce);
+        n = store_handle_request("POST", "/store/orders",
+                                 (const uint8_t *)body, strlen(body),
+                                 resp, resp_size, datadir);
+        *ok = n > 0;
+        *ok = *ok && strstr((char *)resp, "HTTP/1.1 200 OK") != NULL;
+        *ok = *ok && strstr((char *)resp, "Order #") != NULL;
+    }
+}
+
+static void p11_5_gate_check_created_order(bool *ok, const char **fail_step,
+                                           struct node_db *ndb,
+                                           struct db_store_order_summary *summaries,
+                                           size_t summaries_cap,
+                                           struct db_store_order_view *order)
+{
+    int order_count;
+
+    order_count = db_store_order_list_recent(ndb, summaries, summaries_cap);
+    if (*ok) *fail_step = "list recent";
+    *ok = order_count == 1;
+    if (*ok) *fail_step = "load order";
+    *ok = *ok && db_store_order_find_view(ndb, summaries[0].id, order);
+    if (*ok) *fail_step = "pending status";
+    *ok = *ok && order->status == STORE_ORDER_PENDING;
+    if (*ok) *fail_step = "payment addr present";
+    *ok = *ok && order->payment_addr[0] != '\0';
+}
+
+static void p11_5_gate_seed_created_order(bool *ok, const char **fail_step,
+                                          struct node_db *ndb,
+                                          struct db_store_order_summary *summaries,
+                                          struct db_store_order_view *order)
+{
+    if (*ok) *fail_step = "seed tip block";
+    *ok = *ok && p11_5_seed_tip_block(ndb, 100);
+    if (*ok) *fail_step = "seed confirmed note";
+    *ok = *ok && p11_5_seed_confirmed_note(ndb, order->payment_addr,
+                                           summaries[0].id,
+                                           order->amount_zatoshi, 97);
+    /* Attach the real file payload to product #1 (the seeded
+     * ZCL23ACCESS product the order purchased) so the token-gated
+     * download serves bytes instead of the HTML access page. */
+    if (*ok) *fail_step = "attach product blob";
+    *ok = *ok && p11_5_attach_blob_to_product(ndb, 1);
+}
+
+static void p11_5_gate_reopen_and_check_sent(bool *ok, const char **fail_step,
+                                             const char *datadir,
+                                             const char *dbpath,
+                                             struct node_db *ndb,
+                                             struct db_store_order_summary *summaries,
+                                             struct db_store_order_view *order)
+{
+    uint64_t bal;
+
+    if (*ok) *fail_step = "reopen after reconcile";
+    *ok = *ok && node_db_open(ndb, dbpath);
+    if (*ok) {
+        memset(order, 0, sizeof(*order));
+        if (*ok) *fail_step = "reload order";
+        *ok = db_store_order_find_view(ndb, summaries[0].id, order);
+        if (*ok) *fail_step = "sent status";
+        *ok = *ok && order->status == STORE_ORDER_SENT;
+        if (*ok) *fail_step = "credited balance";
+        bal = zslp_balance(datadir, "ZCL23ACCESS",
+                           "t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn");
+        *ok = *ok && (bal == 10);
+        node_db_close(ndb);
+    }
+}
+
+static void p11_5_gate_check_status_page(bool *ok, const char **fail_step,
+                                         const char *datadir, uint8_t *resp,
+                                         size_t resp_size,
+                                         struct db_store_order_view *order)
+{
+    size_t n = 0;
+
+    if (*ok) {
+        *fail_step = "status page";
+        n = store_handle_request("GET", "/store/orders/1", NULL, 0,
+                                 resp, resp_size, datadir);
+        *ok = n > 0;
+        *ok = *ok && strstr((char *)resp, "HTTP/1.1 200 OK") != NULL;
+        *ok = *ok && strstr((char *)resp, "Tokens Sent") != NULL;
+        *ok = *ok && strstr((char *)resp, order->payment_addr) != NULL;
+    }
+}
+
+static void p11_5_gate_reconcile_dedupe(bool *ok, const char **fail_step,
+                                        const char *datadir)
+{
+    uint64_t bal;
+
+    if (*ok) *fail_step = "dedupe reconcile";
+    if (*ok)
+        store_process_payments(datadir);
+
+    if (*ok) *fail_step = "dedupe balance";
+    bal = zslp_balance(datadir, "ZCL23ACCESS",
+                       "t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn");
+    *ok = *ok && (bal == 10);
+}
+
+static void p11_5_gate_check_token_download(bool *ok, const char **fail_step,
+                                            const char *datadir,
+                                            uint8_t *resp, size_t resp_size)
+{
+    size_t n = 0;
+
+    if (*ok) {
+        *fail_step = "token access serves real bytes";
+        n = store_handle_request("GET",
+                                 "/store/access?addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn&token=ZCL23ACCESS",
+                                 NULL, 0, resp, resp_size, datadir);
+        *ok = n > 0;
+        *ok = *ok && strstr((char *)resp, "HTTP/1.1 200 OK") != NULL;
+        *ok = *ok && strstr((char *)resp,
+                            "Content-Type: engine/application/octet-stream") != NULL;
+
+        /* Locate the body after the header terminator. */
+        const uint8_t *hdr_end = NULL;
+        if (*ok) {
+            for (size_t i = 0; i + 4 <= n; i++) {
+                if (memcmp(resp + i, "\r\n\r\n", 4) == 0) {
+                    hdr_end = resp + i + 4;
+                    break;
+                }
+            }
+            *ok = (hdr_end != NULL);
+        }
+        /* Buyer must receive the exact blob bytes, NUL included. */
+        if (*ok) {
+            size_t body_len = n - (size_t)(hdr_end - resp);
+            *ok = (body_len == sizeof(P11_5_BLOB)) &&
+                  (memcmp(hdr_end, P11_5_BLOB, sizeof(P11_5_BLOB)) == 0);
+        }
+        /* Defence-in-depth: served bytes re-hash to the stored hash. */
+        if (*ok) {
+            uint8_t got_hash[32], want_hash[32];
+            zcl_sha3_256(hdr_end, sizeof(P11_5_BLOB), got_hash);
+            zcl_sha3_256(P11_5_BLOB, sizeof(P11_5_BLOB), want_hash);
+            *ok = (memcmp(got_hash, want_hash, 32) == 0);
+        }
+    }
+}
+
+static void p11_5_gate_check_full_txid_token(bool *ok, const char **fail_step,
+                                             const char *datadir,
+                                             uint8_t *resp, size_t resp_size)
+{
+    size_t n = 0;
+
+    /* Regression (C5 collect wedge, second half): the canonical token
+     * key is a 64-hex-char txid. A token[64] route buffer truncated it
+     * to 63 chars (store_parse_query_field caps at out_max-1), the
+     * validator rejected the prefix as a truncated-txid look-alike, and
+     * the gate answered 400 to EVERY full-txid request — only the
+     * 11-char ticker form below ever worked. Assert a full-txid request
+     * now REACHES the gate: honest 403 balance denial, never the 400
+     * "Invalid access request" parse failure. */
+    if (*ok) {
+        *fail_step = "full-txid token reaches the gate";
+        n = store_handle_request("GET",
+            "/store/access?addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn"
+            "&token=44A568A771FE2BE73B7181483387EC331501DBCE329615139"
+            "AA1254FFECC7135",
+            NULL, 0, resp, resp_size, datadir);
+        *ok = n > 0;
+        *ok = *ok && strstr((char *)resp, "Invalid access request") == NULL;
+        *ok = *ok && strstr((char *)resp, "403 Forbidden") != NULL;
+        *ok = *ok && strstr((char *)resp, "Access Denied") != NULL;
+    }
+}
+
 int test_store_e2e_gate(void)
 {
     int failures = 0;
@@ -409,15 +616,11 @@ int test_store_e2e_gate(void)
         char datadir[256];
         char dbpath[320];
         char csrf[64] = "";
-        char body[256];
         uint8_t resp[16384];
         struct node_db ndb;
         struct db_store_order_summary summaries[8];
         struct db_store_order_view order;
-        size_t n = 0;
         bool ok = true;
-        int order_count;
-        uint64_t bal;
         const char *fail_step = "setup";
 
         p11_5_setup_datadir(datadir, sizeof(datadir));
@@ -433,50 +636,21 @@ int test_store_e2e_gate(void)
         if (ok) fail_step = "wire merchant runtime";
         ok = merchant_w != NULL;
 
-        if (ok) fail_step = "fetch csrf";
-        ok = ok && p11_5_fetch_csrf_token(datadir, 1, csrf, sizeof(csrf));
+        p11_5_gate_fetch_csrf(&ok, &fail_step, datadir, csrf, sizeof(csrf));
         char pow_ts[32] = "", pow_nonce[32] = "";
-        if (ok) fail_step = "solve pow";
-        ok = ok && p11_5_solve_store_pow(datadir, 1, pow_ts, sizeof(pow_ts),
-                                         pow_nonce, sizeof(pow_nonce));
-        if (ok) {
-            fail_step = "create order";
-            snprintf(body, sizeof(body),
-                     "product_id=1&customer_addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn"
-                     "&csrf_token=%s&pow_ts=%s&pow_nonce=%s",
-                     csrf, pow_ts, pow_nonce);
-            n = store_handle_request("POST", "/store/orders",
-                                     (const uint8_t *)body, strlen(body),
-                                     resp, sizeof(resp), datadir);
-            ok = n > 0;
-            ok = ok && strstr((char *)resp, "HTTP/1.1 200 OK") != NULL;
-            ok = ok && strstr((char *)resp, "Order #") != NULL;
-        }
+        p11_5_gate_solve_pow(&ok, &fail_step, datadir, pow_ts, sizeof(pow_ts),
+                             pow_nonce, sizeof(pow_nonce));
+        p11_5_gate_create_order(&ok, &fail_step, datadir, csrf, pow_ts,
+                                pow_nonce, resp, sizeof(resp));
 
         if (ok) fail_step = "open after create";
         ok = ok && node_db_open(&ndb, dbpath);
         if (ok) {
-            order_count = db_store_order_list_recent(&ndb, summaries,
-                                                     sizeof(summaries) / sizeof(summaries[0]));
-            if (ok) fail_step = "list recent";
-            ok = order_count == 1;
-            if (ok) fail_step = "load order";
-            ok = ok && db_store_order_find_view(&ndb, summaries[0].id, &order);
-            if (ok) fail_step = "pending status";
-            ok = ok && order.status == STORE_ORDER_PENDING;
-            if (ok) fail_step = "payment addr present";
-            ok = ok && order.payment_addr[0] != '\0';
-            if (ok) fail_step = "seed tip block";
-            ok = ok && p11_5_seed_tip_block(&ndb, 100);
-            if (ok) fail_step = "seed confirmed note";
-            ok = ok && p11_5_seed_confirmed_note(&ndb, order.payment_addr,
-                                                 summaries[0].id,
-                                                 order.amount_zatoshi, 97);
-            /* Attach the real file payload to product #1 (the seeded
-             * ZCL23ACCESS product the order purchased) so the token-gated
-             * download serves bytes instead of the HTML access page. */
-            if (ok) fail_step = "attach product blob";
-            ok = ok && p11_5_attach_blob_to_product(&ndb, 1);
+            p11_5_gate_check_created_order(&ok, &fail_step, &ndb, summaries,
+                                           sizeof(summaries) / sizeof(summaries[0]),
+                                           &order);
+            p11_5_gate_seed_created_order(&ok, &fail_step, &ndb, summaries,
+                                          &order);
             node_db_close(&ndb);
         }
 
@@ -485,96 +659,19 @@ int test_store_e2e_gate(void)
             store_process_payments(datadir);
 
         memset(&ndb, 0, sizeof(ndb));
-        if (ok) fail_step = "reopen after reconcile";
-        ok = ok && node_db_open(&ndb, dbpath);
-        if (ok) {
-            memset(&order, 0, sizeof(order));
-            if (ok) fail_step = "reload order";
-            ok = db_store_order_find_view(&ndb, summaries[0].id, &order);
-            if (ok) fail_step = "sent status";
-            ok = ok && order.status == STORE_ORDER_SENT;
-            if (ok) fail_step = "credited balance";
-            bal = zslp_balance(datadir, "ZCL23ACCESS",
-                               "t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn");
-            ok = ok && (bal == 10);
-            node_db_close(&ndb);
-        }
+        p11_5_gate_reopen_and_check_sent(&ok, &fail_step, datadir, dbpath,
+                                         &ndb, summaries, &order);
 
-        if (ok) {
-            fail_step = "status page";
-            n = store_handle_request("GET", "/store/orders/1", NULL, 0,
-                                     resp, sizeof(resp), datadir);
-            ok = n > 0;
-            ok = ok && strstr((char *)resp, "HTTP/1.1 200 OK") != NULL;
-            ok = ok && strstr((char *)resp, "Tokens Sent") != NULL;
-            ok = ok && strstr((char *)resp, order.payment_addr) != NULL;
-        }
+        p11_5_gate_check_status_page(&ok, &fail_step, datadir, resp,
+                                     sizeof(resp), &order);
 
-        if (ok) fail_step = "dedupe reconcile";
-        if (ok)
-            store_process_payments(datadir);
+        p11_5_gate_reconcile_dedupe(&ok, &fail_step, datadir);
 
-        if (ok) fail_step = "dedupe balance";
-        bal = zslp_balance(datadir, "ZCL23ACCESS",
-                           "t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn");
-        ok = ok && (bal == 10);
+        p11_5_gate_check_token_download(&ok, &fail_step, datadir, resp,
+                                        sizeof(resp));
 
-        if (ok) {
-            fail_step = "token access serves real bytes";
-            n = store_handle_request("GET",
-                                     "/store/access?addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn&token=ZCL23ACCESS",
-                                     NULL, 0, resp, sizeof(resp), datadir);
-            ok = n > 0;
-            ok = ok && strstr((char *)resp, "HTTP/1.1 200 OK") != NULL;
-            ok = ok && strstr((char *)resp,
-                              "Content-Type: engine/application/octet-stream") != NULL;
-
-            /* Locate the body after the header terminator. */
-            const uint8_t *hdr_end = NULL;
-            if (ok) {
-                for (size_t i = 0; i + 4 <= n; i++) {
-                    if (memcmp(resp + i, "\r\n\r\n", 4) == 0) {
-                        hdr_end = resp + i + 4;
-                        break;
-                    }
-                }
-                ok = (hdr_end != NULL);
-            }
-            /* Buyer must receive the exact blob bytes, NUL included. */
-            if (ok) {
-                size_t body_len = n - (size_t)(hdr_end - resp);
-                ok = (body_len == sizeof(P11_5_BLOB)) &&
-                     (memcmp(hdr_end, P11_5_BLOB, sizeof(P11_5_BLOB)) == 0);
-            }
-            /* Defence-in-depth: served bytes re-hash to the stored hash. */
-            if (ok) {
-                uint8_t got_hash[32], want_hash[32];
-                zcl_sha3_256(hdr_end, sizeof(P11_5_BLOB), got_hash);
-                zcl_sha3_256(P11_5_BLOB, sizeof(P11_5_BLOB), want_hash);
-                ok = (memcmp(got_hash, want_hash, 32) == 0);
-            }
-        }
-
-        /* Regression (C5 collect wedge, second half): the canonical token
-         * key is a 64-hex-char txid. A token[64] route buffer truncated it
-         * to 63 chars (store_parse_query_field caps at out_max-1), the
-         * validator rejected the prefix as a truncated-txid look-alike, and
-         * the gate answered 400 to EVERY full-txid request — only the
-         * 11-char ticker form below ever worked. Assert a full-txid request
-         * now REACHES the gate: honest 403 balance denial, never the 400
-         * "Invalid access request" parse failure. */
-        if (ok) {
-            fail_step = "full-txid token reaches the gate";
-            n = store_handle_request("GET",
-                "/store/access?addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn"
-                "&token=44A568A771FE2BE73B7181483387EC331501DBCE329615139"
-                "AA1254FFECC7135",
-                NULL, 0, resp, sizeof(resp), datadir);
-            ok = n > 0;
-            ok = ok && strstr((char *)resp, "Invalid access request") == NULL;
-            ok = ok && strstr((char *)resp, "403 Forbidden") != NULL;
-            ok = ok && strstr((char *)resp, "Access Denied") != NULL;
-        }
+        p11_5_gate_check_full_txid_token(&ok, &fail_step, datadir, resp,
+                                         sizeof(resp));
 
         /* C5 onion wire dispatch, extracted: see p11_5_onion_dispatch_gate
          * above — it wraps its own *ok gate, so this call adds no branch to
@@ -745,6 +842,284 @@ static bool p11_6_persist_recovered_note(struct node_db *ndb,
     return db_sapling_note_save(ndb, &note);
 }
 
+static void p11_6_shielded_create_order(bool *ok, const char **fail_step,
+                                        const char *datadir, const char *csrf,
+                                        const char *pow_ts, const char *pow_nonce,
+                                        uint8_t *resp, size_t resp_size)
+{
+    char body[256];
+    size_t n = 0;
+
+    if (*ok) {
+        *fail_step = "create order";
+        snprintf(body, sizeof(body),
+                 "product_id=1&customer_addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn"
+                 "&csrf_token=%s&pow_ts=%s&pow_nonce=%s",
+                 csrf, pow_ts, pow_nonce);
+        n = store_handle_request("POST", "/store/orders",
+                                 (const uint8_t *)body, strlen(body),
+                                 resp, resp_size, datadir);
+        *ok = n > 0 && strstr((char *)resp, "HTTP/1.1 200 OK") != NULL &&
+              strstr((char *)resp, "Order #") != NULL;
+    }
+}
+
+static void p11_6_shielded_open_and_load_order(bool *ok, const char **fail_step,
+                                               const char *dbpath,
+                                               struct node_db *ndb,
+                                               struct db_store_order_summary *summaries,
+                                               size_t summaries_cap,
+                                               struct db_store_order_view *order,
+                                               int64_t *order_id,
+                                               int64_t *amount,
+                                               int64_t *other_order)
+{
+    int order_count = 0;
+
+    *ok = *ok && node_db_open(ndb, dbpath);
+    if (*ok) {
+        order_count = db_store_order_list_recent(ndb, summaries, summaries_cap);
+        *fail_step = "list recent";
+        *ok = order_count == 1;
+        *fail_step = "load order";
+        *ok = *ok && db_store_order_find_view(ndb, summaries[0].id, order);
+        *fail_step = "payment addr present";
+        *ok = *ok && order->payment_addr[0] != '\0';
+        if (*ok) {
+            *order_id = summaries[0].id;
+            *amount = order->amount_zatoshi;
+            *other_order = *order_id + 777;
+        }
+        *fail_step = "order has positive amount";
+        *ok = *ok && *amount > 0;
+    }
+}
+
+static struct wallet *p11_6_shielded_derive_merchant_wallet(bool *ok,
+                                                            const char **fail_step,
+                                                            uint8_t *to_d,
+                                                            uint8_t *to_pk_d)
+{
+    struct wallet *w = NULL;
+
+    if (*ok) {
+        w = zcl_calloc(1, sizeof(struct wallet), "p11_6_wallet");
+        *fail_step = "merchant wallet alloc";
+        *ok = w != NULL;
+    }
+    if (*ok) {
+        wallet_init(w);
+        uint8_t seed[32];
+        memset(seed, 0x11, 32);
+        *fail_step = "merchant sapling seed";
+        *ok = sapling_keystore_set_seed(&w->sapling_keys, seed);
+        *fail_step = "merchant sapling address";
+        *ok = *ok && sapling_keystore_new_address(&w->sapling_keys, to_d,
+                                                  to_pk_d);
+    }
+    return w;
+}
+
+static void p11_6_shielded_init_funding(bool *ok, const char **fail_step,
+                                        struct simnet *sim, bool *sim_ready,
+                                        struct uint256 *funding_txid,
+                                        int *payment_target, int64_t amount)
+{
+    if (*ok) {
+        *fail_step = "shielded simnet initialize";
+        *ok = simnet_init(sim);
+        *sim_ready = *ok;
+    }
+    if (*ok) {
+        enum { P11_SAPLING_HEIGHT = 100 };
+        simnet_activate_sapling_at(sim, P11_SAPLING_HEIGHT);
+        *fail_step = "enable shielded commitment tree";
+        *ok = simnet_enable_sapling_tree(sim);
+        simnet_enable_contextual_check(sim, false);
+        struct script funding_script;
+        script_init(&funding_script);
+        static const uint8_t p2pkh_prefix[] = {0x76, 0xa9, 0x14};
+        script_set(&funding_script, p2pkh_prefix, sizeof(p2pkh_prefix));
+        int funding_height = simnet_tip_height(sim) + 1;
+        *fail_step = "mint and mature shielded payment funding";
+        *ok = *ok && simnet_mint_coinbase_to(
+            sim, &funding_script, amount + 10000, funding_txid);
+        *ok = *ok && simnet_mint_to_height(
+            sim, funding_height + COINBASE_MATURITY);
+        *payment_target = simnet_tip_height(sim) + 1;
+    }
+}
+
+static void p11_6_shielded_build_payment(bool *ok, const char **fail_step,
+                                         struct transaction *tx,
+                                         bool *tx_built,
+                                         uint8_t *to_d, uint8_t *to_pk_d,
+                                         int64_t amount, int64_t order_id,
+                                         struct simnet *sim,
+                                         int payment_target,
+                                         const struct uint256 *funding_txid)
+{
+    /* (3) REAL payment: build a Sapling output to the merchant carrying the
+     * order memo, ivk-DECRYPT it, and persist the RECOVERED note. */
+    uint8_t payment_rcv[32] = {0};
+    if (*ok) {
+        *tx_built = p11_6_build_paid_output_tx(tx, to_d, to_pk_d,
+                                               (uint64_t)amount, order_id,
+                                               payment_rcv);
+        *fail_step = "build paid output (params-free)";
+        *ok = *tx_built;
+    }
+    if (*ok) {
+        uint32_t branch_id = consensus_current_epoch_branch_id(
+            payment_target, &sim->params.consensus);
+        *fail_step = "bind transparent funding input to shielded output";
+        *ok = p11_6_bind_transparent_input(
+            tx, funding_txid, payment_rcv, branch_id);
+    }
+}
+
+static void p11_6_shielded_decrypt_and_connect(bool *ok, const char **fail_step,
+                                               struct wallet *w,
+                                               struct transaction *tx,
+                                               bool *tx_built,
+                                               struct simnet *sim,
+                                               struct uint256 *txid,
+                                               struct uint256 *funding_txid,
+                                               int *payment_height,
+                                               int payment_target)
+{
+    if (*ok) {
+        int found = wallet_try_sapling_decrypt(w, tx, txid);
+        *fail_step = "merchant ivk-decrypts the paying note";
+        *ok = found == 1 && w->num_sapling_notes == 1;
+    }
+    if (*ok) {
+        struct output_description *shielded_owned = tx->v_shielded_output;
+        *fail_step = "exact memo-bound payment passes connect_block";
+        *ok = simnet_mint_txs(sim, tx, 1);
+        free(shielded_owned);
+        *tx_built = false; /* simnet consumed the ordinary tx allocations */
+        *payment_height = simnet_tip_height(sim);
+        *ok = *ok && *payment_height == payment_target &&
+              simnet_sapling_tree_size(sim) == 1 &&
+              !simnet_coin_value(sim, funding_txid, 0, NULL);
+    }
+}
+
+static void p11_6_shielded_check_recovered_note(bool *ok, const char **fail_step,
+                                                struct node_db *ndb,
+                                                struct wallet *w,
+                                                const struct uint256 *txid,
+                                                struct db_store_order_view *order,
+                                                int payment_height,
+                                                int64_t order_id,
+                                                int64_t amount)
+{
+    if (*ok) {
+        *fail_step = "seed three-confirmation projection tip";
+        *ok = p11_5_seed_tip_block(ndb, payment_height + 3);
+    }
+    if (*ok) {
+        const struct sapling_received_note *rn = &w->sapling_notes[0];
+        char expect[64];
+        int el = snprintf(expect, sizeof(expect), "ZCL23ORDER:%lld",
+                          (long long)order_id);
+        *fail_step = "recovered value == order amount";
+        *ok = rn->value == (uint64_t)amount;
+        *fail_step = "recovered memo binds the order";
+        *ok = *ok && el > 0 && (size_t)el < sizeof(expect) &&
+              memcmp(rn->memo, expect, (size_t)el) == 0 && rn->memo[el] == '\0';
+        *fail_step = "persist recovered note";
+        *ok = *ok && p11_6_persist_recovered_note(ndb, rn, txid,
+                                                  order->payment_addr,
+                                                  payment_height);
+    }
+}
+
+static void p11_6_shielded_check_memo_credit(bool *ok, const char **fail_step,
+                                             struct node_db *ndb,
+                                             struct db_store_order_view *order,
+                                             int64_t order_id,
+                                             int payment_height,
+                                             int64_t amount)
+{
+    /* (4) The memo-bound finder credits this order; the legacy finder agrees
+     * (one note, one order — they cannot diverge yet). */
+    if (*ok) {
+        *fail_step = "memo-bound finder credits the order";
+        *ok = db_store_received_payment_for_memo(ndb, order->payment_addr,
+                                                 order_id,
+                                                 payment_height) == amount;
+        *fail_step = "legacy address+amount finder also sees the note";
+        *ok = *ok && db_store_received_payment(
+            ndb, order->payment_addr, payment_height) == amount;
+    }
+}
+
+static void p11_6_shielded_check_other_order_payment(bool *ok,
+                                                     const char **fail_step,
+                                                     struct node_db *ndb,
+                                                     struct wallet *w,
+                                                     struct transaction *tx2,
+                                                     bool *tx2_built,
+                                                     uint8_t *to_d,
+                                                     uint8_t *to_pk_d,
+                                                     int64_t amount,
+                                                     int64_t other_order,
+                                                     struct db_store_order_view *order,
+                                                     int payment_height)
+{
+    /* (5) NEGATIVE: a REAL payment to the SAME address whose memo names a
+     * DIFFERENT order must NOT credit this order — yet the legacy address+amount
+     * finder wrongly counts both. This is the hole the memo bind closes. */
+    if (*ok) {
+        *tx2_built = p11_6_build_paid_output_tx(tx2, to_d, to_pk_d,
+                                                (uint64_t)amount, other_order,
+                                                NULL);
+        *fail_step = "build other-order payment";
+        *ok = *tx2_built;
+    }
+    struct uint256 txid2;
+    memset(&txid2, 0, sizeof(txid2));
+    txid2.data[0] = 0x5D;
+    txid2.data[1] = (uint8_t)(other_order & 0xff);
+    if (*ok) {
+        int found2 = wallet_try_sapling_decrypt(w, tx2, &txid2);
+        *fail_step = "second payment ivk-decrypts";
+        *ok = found2 == 1 && w->num_sapling_notes == 2;
+    }
+    if (*ok) {
+        *fail_step = "persist second recovered note";
+        *ok = p11_6_persist_recovered_note(ndb, &w->sapling_notes[1], &txid2,
+                                           order->payment_addr,
+                                           payment_height);
+    }
+}
+
+static void p11_6_shielded_check_other_order_credit(bool *ok,
+                                                    const char **fail_step,
+                                                    struct node_db *ndb,
+                                                    struct db_store_order_view *order,
+                                                    int64_t order_id,
+                                                    int64_t other_order,
+                                                    int payment_height,
+                                                    int64_t amount)
+{
+    if (*ok) {
+        *fail_step = "memo finder still credits ONLY this order's amount";
+        *ok = db_store_received_payment_for_memo(ndb, order->payment_addr,
+                                                 order_id,
+                                                 payment_height) == amount;
+        *fail_step = "memo finder credits the OTHER order separately";
+        *ok = *ok && db_store_received_payment_for_memo(ndb, order->payment_addr,
+                                                        other_order,
+                                                        payment_height) == amount;
+        *fail_step = "legacy finder over-counts both (the closed hole)";
+        *ok = *ok && db_store_received_payment(
+            ndb, order->payment_addr, payment_height) == amount * 2;
+    }
+}
+
 int test_store_e2e_shielded(void);
 int test_store_e2e_shielded(void)
 {
@@ -762,7 +1137,6 @@ int test_store_e2e_shielded(void)
     char datadir[256];
     char dbpath[320];
     char csrf[64] = "";
-    char body[256];
     uint8_t resp[16384];
     struct node_db ndb;
     struct db_store_order_summary summaries[8];
@@ -774,8 +1148,6 @@ int test_store_e2e_shielded(void)
     bool sim_ready = false;
     int payment_height = 0;
     bool ok = true;
-    size_t n = 0;
-    int order_count = 0;
     int64_t order_id = 0, amount = 0;
     int64_t other_order = 0;
     const char *fail_step = "setup";
@@ -798,58 +1170,20 @@ int test_store_e2e_shielded(void)
     ok = merchant_w != NULL;
 
     /* (1) Create an order through the HTTP controller (same as the gate). */
-    if (ok) fail_step = "fetch csrf";
-    ok = ok && p11_5_fetch_csrf_token(datadir, 1, csrf, sizeof(csrf));
+    p11_5_gate_fetch_csrf(&ok, &fail_step, datadir, csrf, sizeof(csrf));
     char pow_ts[32] = "", pow_nonce[32] = "";
-    if (ok) fail_step = "solve pow";
-    ok = ok && p11_5_solve_store_pow(datadir, 1, pow_ts, sizeof(pow_ts),
-                                     pow_nonce, sizeof(pow_nonce));
-    if (ok) {
-        fail_step = "create order";
-        snprintf(body, sizeof(body),
-                 "product_id=1&customer_addr=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn"
-                 "&csrf_token=%s&pow_ts=%s&pow_nonce=%s",
-                 csrf, pow_ts, pow_nonce);
-        n = store_handle_request("POST", "/store/orders",
-                                 (const uint8_t *)body, strlen(body),
-                                 resp, sizeof(resp), datadir);
-        ok = n > 0 && strstr((char *)resp, "HTTP/1.1 200 OK") != NULL &&
-             strstr((char *)resp, "Order #") != NULL;
-    }
-    ok = ok && node_db_open(&ndb, dbpath);
-    if (ok) {
-        order_count = db_store_order_list_recent(&ndb, summaries,
-                                                 sizeof(summaries) / sizeof(summaries[0]));
-        fail_step = "list recent";
-        ok = order_count == 1;
-        fail_step = "load order";
-        ok = ok && db_store_order_find_view(&ndb, summaries[0].id, &order);
-        fail_step = "payment addr present";
-        ok = ok && order.payment_addr[0] != '\0';
-        if (ok) {
-            order_id = summaries[0].id;
-            amount = order.amount_zatoshi;
-            other_order = order_id + 777;
-        }
-        fail_step = "order has positive amount";
-        ok = ok && amount > 0;
-    }
+    p11_5_gate_solve_pow(&ok, &fail_step, datadir, pow_ts, sizeof(pow_ts),
+                         pow_nonce, sizeof(pow_nonce));
+    p11_6_shielded_create_order(&ok, &fail_step, datadir, csrf, pow_ts,
+                                pow_nonce, resp, sizeof(resp));
+    p11_6_shielded_open_and_load_order(&ok, &fail_step, dbpath, &ndb,
+                                       summaries,
+                                       sizeof(summaries) / sizeof(summaries[0]),
+                                       &order, &order_id, &amount,
+                                       &other_order);
 
     /* (2) Merchant wallet derives the address whose ivk will decrypt payments. */
-    if (ok) {
-        w = zcl_calloc(1, sizeof(struct wallet), "p11_6_wallet");
-        fail_step = "merchant wallet alloc";
-        ok = w != NULL;
-    }
-    if (ok) {
-        wallet_init(w);
-        uint8_t seed[32];
-        memset(seed, 0x11, 32);
-        fail_step = "merchant sapling seed";
-        ok = sapling_keystore_set_seed(&w->sapling_keys, seed);
-        fail_step = "merchant sapling address";
-        ok = ok && sapling_keystore_new_address(&w->sapling_keys, to_d, to_pk_d);
-    }
+    w = p11_6_shielded_derive_merchant_wallet(&ok, &fail_step, to_d, to_pk_d);
 
     /* A real isolated transparent input funds the shielded order payment.
      * Proof verification remains at the same deferred boundary used by the
@@ -857,135 +1191,31 @@ int test_store_e2e_shielded(void)
      * commitment-tree application, and connect_block are all production. */
     struct uint256 funding_txid;
     int payment_target = 0;
-    if (ok) {
-        fail_step = "shielded simnet initialize";
-        ok = simnet_init(&sim);
-        sim_ready = ok;
-    }
-    if (ok) {
-        enum { P11_SAPLING_HEIGHT = 100 };
-        simnet_activate_sapling_at(&sim, P11_SAPLING_HEIGHT);
-        fail_step = "enable shielded commitment tree";
-        ok = simnet_enable_sapling_tree(&sim);
-        simnet_enable_contextual_check(&sim, false);
-        struct script funding_script;
-        script_init(&funding_script);
-        static const uint8_t p2pkh_prefix[] = {0x76, 0xa9, 0x14};
-        script_set(&funding_script, p2pkh_prefix, sizeof(p2pkh_prefix));
-        int funding_height = simnet_tip_height(&sim) + 1;
-        fail_step = "mint and mature shielded payment funding";
-        ok = ok && simnet_mint_coinbase_to(
-            &sim, &funding_script, amount + 10000, &funding_txid);
-        ok = ok && simnet_mint_to_height(
-            &sim, funding_height + COINBASE_MATURITY);
-        payment_target = simnet_tip_height(&sim) + 1;
-    }
+    p11_6_shielded_init_funding(&ok, &fail_step, &sim, &sim_ready,
+                                &funding_txid, &payment_target, amount);
 
-    /* (3) REAL payment: build a Sapling output to the merchant carrying the
-     * order memo, ivk-DECRYPT it, and persist the RECOVERED note. */
-    uint8_t payment_rcv[32] = {0};
-    if (ok) {
-        tx_built = p11_6_build_paid_output_tx(&tx, to_d, to_pk_d,
-                                              (uint64_t)amount, order_id,
-                                              payment_rcv);
-        fail_step = "build paid output (params-free)";
-        ok = tx_built;
-    }
-    if (ok) {
-        uint32_t branch_id = consensus_current_epoch_branch_id(
-            payment_target, &sim.params.consensus);
-        fail_step = "bind transparent funding input to shielded output";
-        ok = p11_6_bind_transparent_input(
-            &tx, &funding_txid, payment_rcv, branch_id);
-    }
+    p11_6_shielded_build_payment(&ok, &fail_step, &tx, &tx_built, to_d, to_pk_d,
+                                 amount, order_id, &sim, payment_target,
+                                 &funding_txid);
     struct uint256 txid;
     txid = tx_built ? tx.hash : (struct uint256){0};
-    if (ok) {
-        int found = wallet_try_sapling_decrypt(w, &tx, &txid);
-        fail_step = "merchant ivk-decrypts the paying note";
-        ok = found == 1 && w->num_sapling_notes == 1;
-    }
-    if (ok) {
-        struct output_description *shielded_owned = tx.v_shielded_output;
-        fail_step = "exact memo-bound payment passes connect_block";
-        ok = simnet_mint_txs(&sim, &tx, 1);
-        free(shielded_owned);
-        tx_built = false; /* simnet consumed the ordinary tx allocations */
-        payment_height = simnet_tip_height(&sim);
-        ok = ok && payment_height == payment_target &&
-             simnet_sapling_tree_size(&sim) == 1 &&
-             !simnet_coin_value(&sim, &funding_txid, 0, NULL);
-    }
-    if (ok) {
-        fail_step = "seed three-confirmation projection tip";
-        ok = p11_5_seed_tip_block(&ndb, payment_height + 3);
-    }
-    if (ok) {
-        const struct sapling_received_note *rn = &w->sapling_notes[0];
-        char expect[64];
-        int el = snprintf(expect, sizeof(expect), "ZCL23ORDER:%lld",
-                          (long long)order_id);
-        fail_step = "recovered value == order amount";
-        ok = rn->value == (uint64_t)amount;
-        fail_step = "recovered memo binds the order";
-        ok = ok && el > 0 && (size_t)el < sizeof(expect) &&
-             memcmp(rn->memo, expect, (size_t)el) == 0 && rn->memo[el] == '\0';
-        fail_step = "persist recovered note";
-        ok = ok && p11_6_persist_recovered_note(&ndb, rn, &txid,
-                                                order.payment_addr,
-                                                payment_height);
-    }
+    p11_6_shielded_decrypt_and_connect(&ok, &fail_step, w, &tx, &tx_built,
+                                       &sim, &txid, &funding_txid,
+                                       &payment_height, payment_target);
+    p11_6_shielded_check_recovered_note(&ok, &fail_step, &ndb, w, &txid,
+                                        &order, payment_height, order_id,
+                                        amount);
 
-    /* (4) The memo-bound finder credits this order; the legacy finder agrees
-     * (one note, one order — they cannot diverge yet). */
-    if (ok) {
-        fail_step = "memo-bound finder credits the order";
-        ok = db_store_received_payment_for_memo(&ndb, order.payment_addr,
-                                                order_id,
-                                                payment_height) == amount;
-        fail_step = "legacy address+amount finder also sees the note";
-        ok = ok && db_store_received_payment(
-            &ndb, order.payment_addr, payment_height) == amount;
-    }
+    p11_6_shielded_check_memo_credit(&ok, &fail_step, &ndb, &order, order_id,
+                                     payment_height, amount);
 
-    /* (5) NEGATIVE: a REAL payment to the SAME address whose memo names a
-     * DIFFERENT order must NOT credit this order — yet the legacy address+amount
-     * finder wrongly counts both. This is the hole the memo bind closes. */
-    if (ok) {
-        tx2_built = p11_6_build_paid_output_tx(&tx2, to_d, to_pk_d,
-                                               (uint64_t)amount, other_order,
-                                               NULL);
-        fail_step = "build other-order payment";
-        ok = tx2_built;
-    }
-    struct uint256 txid2;
-    memset(&txid2, 0, sizeof(txid2));
-    txid2.data[0] = 0x5D;
-    txid2.data[1] = (uint8_t)(other_order & 0xff);
-    if (ok) {
-        int found2 = wallet_try_sapling_decrypt(w, &tx2, &txid2);
-        fail_step = "second payment ivk-decrypts";
-        ok = found2 == 1 && w->num_sapling_notes == 2;
-    }
-    if (ok) {
-        fail_step = "persist second recovered note";
-        ok = p11_6_persist_recovered_note(&ndb, &w->sapling_notes[1], &txid2,
-                                          order.payment_addr,
-                                          payment_height);
-    }
-    if (ok) {
-        fail_step = "memo finder still credits ONLY this order's amount";
-        ok = db_store_received_payment_for_memo(&ndb, order.payment_addr,
-                                                order_id,
-                                                payment_height) == amount;
-        fail_step = "memo finder credits the OTHER order separately";
-        ok = ok && db_store_received_payment_for_memo(&ndb, order.payment_addr,
-                                                      other_order,
-                                                      payment_height) == amount;
-        fail_step = "legacy finder over-counts both (the closed hole)";
-        ok = ok && db_store_received_payment(
-            &ndb, order.payment_addr, payment_height) == amount * 2;
-    }
+    p11_6_shielded_check_other_order_payment(&ok, &fail_step, &ndb, w, &tx2,
+                                             &tx2_built, to_d, to_pk_d, amount,
+                                             other_order, &order,
+                                             payment_height);
+    p11_6_shielded_check_other_order_credit(&ok, &fail_step, &ndb, &order,
+                                            order_id, other_order,
+                                            payment_height, amount);
 
     if (ndb.open)
         node_db_close(&ndb);

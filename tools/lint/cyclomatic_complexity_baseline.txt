@@ -1365,8 +1365,6 @@ tests/harness/src/test_stage_repair_coin_backfill.c:cb_seed_store:20
 tests/harness/src/test_stage_repair_coin_backfill.c:cb_setup:17
 tests/harness/src/test_sticky_escalator.c:test_sticky_escalator:85
 tests/harness/src/test_store.c:test_store:327
-tests/harness/src/test_store_e2e_gate.c:test_store_e2e_gate:59
-tests/harness/src/test_store_e2e_gate.c:test_store_e2e_shielded:55
 tests/harness/src/test_supervisor.c:test_supervisor:84
 tests/harness/src/test_supervisor_production_tree.c:test_supervisor_production_tree:43
 tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:367
