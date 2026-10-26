@@ -194,6 +194,82 @@ static bool fz_relay_full_chain(struct simnet_cluster *cluster, size_t node_id,
     return true;
 }
 
+static bool fz_scenario_mint_round(struct simnet_cluster *cluster,
+                                   size_t node_count,
+                                   struct fz_node_chain *chain, uint64_t *rng,
+                                   bool ok)
+{
+    /* Each node extends its own branch by a random amount this round. */
+    for (size_t n = 0; n < node_count && ok; n++) {
+        int mints = sm_range(rng, 0, 3);
+        for (int m = 0; m < mints; m++) {
+            if (chain[n].count >= FZ_MAX_HASHES)
+                break;
+            struct uint256 h;
+            if (!simnet_cluster_mint_on(cluster, n, &h)) {
+                ok = false;
+                break;
+            }
+            chain[n].hashes[chain[n].count++] = h;
+        }
+    }
+    return ok;
+}
+
+static bool fz_scenario_partition_round(struct simnet_cluster *cluster,
+                                        size_t node_count,
+                                        struct fz_node_chain *chain,
+                                        uint64_t *rng, bool ok)
+{
+    /* Send-side partition: a random subset of nodes relays this round;
+     * the rest withhold (private branch that competes on heal). */
+    for (size_t n = 0; n < node_count && ok; n++) {
+        bool relays = sm_range(rng, 0, 3) != 0;  /* ~75% relay */
+        if (relays && chain[n].count > 0) {
+            if (!fz_relay_full_chain(cluster, n, &chain[n]))
+                ok = false;
+        }
+    }
+    if (ok && !simnet_cluster_deliver_pending(cluster))
+        ok = false;
+    return ok;
+}
+
+static bool fz_scenario_final_heal(struct simnet_cluster *cluster,
+                                   size_t node_count,
+                                   struct fz_node_chain *chain, bool ok)
+{
+    /* FINAL HEAL: every node relays its complete chain, then deliver to
+     * quiescence — after this every node has seen every branch. */
+    for (size_t n = 0; n < node_count && ok; n++) {
+        if (chain[n].count > 0 && !fz_relay_full_chain(cluster, n, &chain[n]))
+            ok = false;
+    }
+    if (ok && !simnet_cluster_deliver_pending(cluster))
+        ok = false;
+    return ok;
+}
+
+static bool fz_scenario_nodes_agree(struct simnet_cluster *cluster,
+                                    size_t node_count,
+                                    struct uint256 *out_tip,
+                                    struct utxo_commitment *out_digest)
+{
+    bool converged = true;
+    for (size_t n = 1; n < node_count; n++) {
+        struct uint256 tip_n;
+        struct utxo_commitment dig_n;
+        if (!simnet_cluster_tip_hash(cluster, n, &tip_n) ||
+            !simnet_cluster_coins_digest(cluster, n, &dig_n) ||
+            !uint256_eq(out_tip, &tip_n) ||
+            !utxo_commitment_equal(out_digest, &dig_n)) {
+            converged = false;
+            break;
+        }
+    }
+    return converged;
+}
+
 /* Run one full multi-node scenario derived deterministically from `seed`.
  * Returns true iff the harness itself ran to completion (no mint/relay/deliver
  * error). On success:
@@ -221,60 +297,18 @@ static bool fz_run_scenario(uint64_t seed,
     int rounds = sm_range(&rng, 2, 5);
 
     for (int r = 0; r < rounds && ok; r++) {
-        /* Each node extends its own branch by a random amount this round. */
-        for (size_t n = 0; n < node_count && ok; n++) {
-            int mints = sm_range(&rng, 0, 3);
-            for (int m = 0; m < mints; m++) {
-                if (chain[n].count >= FZ_MAX_HASHES)
-                    break;
-                struct uint256 h;
-                if (!simnet_cluster_mint_on(cluster, n, &h)) {
-                    ok = false;
-                    break;
-                }
-                chain[n].hashes[chain[n].count++] = h;
-            }
-        }
-        /* Send-side partition: a random subset of nodes relays this round;
-         * the rest withhold (private branch that competes on heal). */
-        for (size_t n = 0; n < node_count && ok; n++) {
-            bool relays = sm_range(&rng, 0, 3) != 0;  /* ~75% relay */
-            if (relays && chain[n].count > 0) {
-                if (!fz_relay_full_chain(cluster, n, &chain[n]))
-                    ok = false;
-            }
-        }
-        if (ok && !simnet_cluster_deliver_pending(cluster))
-            ok = false;
+        ok = fz_scenario_mint_round(cluster, node_count, chain, &rng, ok);
+        ok = fz_scenario_partition_round(cluster, node_count, chain, &rng, ok);
     }
-
-    /* FINAL HEAL: every node relays its complete chain, then deliver to
-     * quiescence — after this every node has seen every branch. */
-    for (size_t n = 0; n < node_count && ok; n++) {
-        if (chain[n].count > 0 && !fz_relay_full_chain(cluster, n, &chain[n]))
-            ok = false;
-    }
-    if (ok && !simnet_cluster_deliver_pending(cluster))
-        ok = false;
+    ok = fz_scenario_final_heal(cluster, node_count, chain, ok);
 
     bool converged = false;
     if (ok) {
         ok = simnet_cluster_tip_hash(cluster, 0, out_tip) &&
              simnet_cluster_coins_digest(cluster, 0, out_digest);
-        if (ok) {
-            converged = true;
-            for (size_t n = 1; n < node_count; n++) {
-                struct uint256 tip_n;
-                struct utxo_commitment dig_n;
-                if (!simnet_cluster_tip_hash(cluster, n, &tip_n) ||
-                    !simnet_cluster_coins_digest(cluster, n, &dig_n) ||
-                    !uint256_eq(out_tip, &tip_n) ||
-                    !utxo_commitment_equal(out_digest, &dig_n)) {
-                    converged = false;
-                    break;
-                }
-            }
-        }
+        if (ok)
+            converged = fz_scenario_nodes_agree(cluster, node_count, out_tip,
+                                                out_digest);
     }
 
     *out_fp = simnet_cluster_delivery_fingerprint(cluster);
@@ -363,26 +397,9 @@ static double perf_wall_ms(void)
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
 }
 
-/* One N-node scenario: every node mints one block (round 0), then re-relays
- * its whole chain across `relay_rounds` broadcast rounds and heals. The heavy
- * axis is the number of QUEUED DELIVERIES per drain (N*(N-1) each round), which
- * is exactly what the old whole-queue rescan made quadratic. Returns the
- * delivery fingerprint (via out_fp) and whether all N nodes converged. */
-static bool fz_perf_scenario(size_t n_nodes, int relay_rounds, uint64_t seed,
-                             uint64_t *out_fp, bool *out_converged)
+static bool fz_perf_mint_all(struct simnet_cluster *c, size_t n_nodes,
+                             struct fz_node_chain *chains)
 {
-    struct simnet_cluster *c = simnet_cluster_init(n_nodes, seed);
-    if (!c)
-        return false;
-
-    /* Heap-allocated so N is not bounded by FZ_MAX_NODES / the stack. */
-    struct fz_node_chain *chains =
-        zcl_calloc(n_nodes, sizeof(*chains), "fz_perf_chains");
-    if (!chains) {
-        simnet_cluster_free(c);
-        return false;
-    }
-
     bool ok = true;
     for (size_t nnode = 0; nnode < n_nodes && ok; nnode++) {
         struct uint256 h;
@@ -391,7 +408,13 @@ static bool fz_perf_scenario(size_t n_nodes, int relay_rounds, uint64_t seed,
         else
             chains[nnode].hashes[chains[nnode].count++] = h;
     }
+    return ok;
+}
 
+static bool fz_perf_relay_rounds(struct simnet_cluster *c, size_t n_nodes,
+                                 int relay_rounds, struct fz_node_chain *chains,
+                                 bool ok)
+{
     for (int r = 0; r < relay_rounds && ok; r++) {
         for (size_t nnode = 0; nnode < n_nodes && ok; nnode++) {
             if (chains[nnode].count > 0 &&
@@ -401,6 +424,12 @@ static bool fz_perf_scenario(size_t n_nodes, int relay_rounds, uint64_t seed,
         if (ok && !simnet_cluster_deliver_pending(c))
             ok = false;
     }
+    return ok;
+}
+
+static bool fz_perf_final_heal(struct simnet_cluster *c, size_t n_nodes,
+                               struct fz_node_chain *chains, bool ok)
+{
     /* final heal (redundant after the first drain, but proves quiescence). */
     for (size_t nnode = 0; nnode < n_nodes && ok; nnode++)
         if (chains[nnode].count > 0 &&
@@ -408,7 +437,12 @@ static bool fz_perf_scenario(size_t n_nodes, int relay_rounds, uint64_t seed,
             ok = false;
     if (ok && !simnet_cluster_deliver_pending(c))
         ok = false;
+    return ok;
+}
 
+static bool fz_perf_converged(struct simnet_cluster *c, size_t n_nodes,
+                              bool ok)
+{
     bool converged = false;
     if (ok) {
         struct uint256 tip0;
@@ -429,6 +463,33 @@ static bool fz_perf_scenario(size_t n_nodes, int relay_rounds, uint64_t seed,
             }
         }
     }
+    return converged;
+}
+
+/* One N-node scenario: every node mints one block (round 0), then re-relays
+ * its whole chain across `relay_rounds` broadcast rounds and heals. The heavy
+ * axis is the number of QUEUED DELIVERIES per drain (N*(N-1) each round), which
+ * is exactly what the old whole-queue rescan made quadratic. Returns the
+ * delivery fingerprint (via out_fp) and whether all N nodes converged. */
+static bool fz_perf_scenario(size_t n_nodes, int relay_rounds, uint64_t seed,
+                             uint64_t *out_fp, bool *out_converged)
+{
+    struct simnet_cluster *c = simnet_cluster_init(n_nodes, seed);
+    if (!c)
+        return false;
+
+    /* Heap-allocated so N is not bounded by FZ_MAX_NODES / the stack. */
+    struct fz_node_chain *chains =
+        zcl_calloc(n_nodes, sizeof(*chains), "fz_perf_chains");
+    if (!chains) {
+        simnet_cluster_free(c);
+        return false;
+    }
+
+    bool ok = fz_perf_mint_all(c, n_nodes, chains);
+    ok = fz_perf_relay_rounds(c, n_nodes, relay_rounds, chains, ok);
+    ok = fz_perf_final_heal(c, n_nodes, chains, ok);
+    bool converged = fz_perf_converged(c, n_nodes, ok);
 
     *out_fp = simnet_cluster_delivery_fingerprint(c);
     *out_converged = converged;
@@ -495,6 +556,101 @@ static void fz_perf_smoke(void)
  * reproduce the legacy all-honest delivery fingerprint bit-for-bit. */
 #define FZ_BYZ_SUBSTREAM_TAG 0x42595A4E4F444531ULL  /* ASCII "BYZNODE1" */
 
+static bool fz_byz_parity_mint_round(struct simnet_cluster *cluster,
+                                     size_t node_count, bool *is_byz,
+                                     struct fz_node_chain *chain,
+                                     struct fz_node_chain *byz, uint64_t *rng,
+                                     uint64_t *byz_rng, bool ok)
+{
+    for (size_t n = 0; n < node_count && ok; n++) {
+        if (!is_byz[n]) {
+            int mints = sm_range(rng, 0, 3);   /* SAME draw as legacy */
+            for (int m = 0; m < mints; m++) {
+                if (chain[n].count >= FZ_MAX_HASHES)
+                    break;
+                struct uint256 h;
+                if (!simnet_cluster_mint_on(cluster, n, &h)) {
+                    ok = false;
+                    break;
+                }
+                chain[n].hashes[chain[n].count++] = h;
+            }
+        } else if (byz[n].count < FZ_MAX_HASHES) {
+            struct uint256 h;
+            uint64_t bs = sm_next(byz_rng);
+            if (!simnet_cluster_byzantine_mint_on(cluster, n, bs, &h))
+                ok = false;
+            else
+                byz[n].hashes[byz[n].count++] = h;
+        }
+    }
+    return ok;
+}
+
+static bool fz_byz_parity_relay_round(struct simnet_cluster *cluster,
+                                      size_t node_count, bool *is_byz,
+                                      struct fz_node_chain *chain,
+                                      struct fz_node_chain *byz,
+                                      uint64_t *rng, bool ok)
+{
+    for (size_t n = 0; n < node_count && ok; n++) {
+        if (!is_byz[n]) {
+            bool relays = sm_range(rng, 0, 3) != 0;  /* SAME as legacy */
+            if (relays && chain[n].count > 0)
+                if (!fz_relay_full_chain(cluster, n, &chain[n]))
+                    ok = false;
+        } else {
+            for (size_t i = 0; i < byz[n].count && ok; i++)
+                if (!simnet_cluster_broadcast(cluster, n, &byz[n].hashes[i]))
+                    ok = false;
+        }
+    }
+    if (ok && !simnet_cluster_deliver_pending(cluster))
+        ok = false;
+    return ok;
+}
+
+static bool fz_byz_parity_final_heal(struct simnet_cluster *cluster,
+                                     size_t node_count, bool *is_byz,
+                                     struct fz_node_chain *chain,
+                                     struct fz_node_chain *byz, bool ok)
+{
+    for (size_t n = 0; n < node_count && ok; n++) {
+        struct fz_node_chain *src = is_byz[n] ? &byz[n] : &chain[n];
+        if (src->count > 0 && !fz_relay_full_chain(cluster, n, src))
+            ok = false;
+    }
+    if (ok && !simnet_cluster_deliver_pending(cluster))
+        ok = false;
+    return ok;
+}
+
+static bool fz_byz_parity_honest_converged(struct simnet_cluster *cluster,
+                                           size_t node_count, bool *is_byz)
+{
+    bool honest_conv = false;
+    struct uint256 tip0;
+    struct utxo_commitment dig0;
+    if (simnet_cluster_tip_hash(cluster, 0, &tip0) &&
+        simnet_cluster_coins_digest(cluster, 0, &dig0)) {
+        honest_conv = true;
+        for (size_t n = 1; n < node_count; n++) {
+            if (is_byz[n])
+                continue;             /* only honest nodes must agree */
+            struct uint256 tn;
+            struct utxo_commitment dn;
+            if (!simnet_cluster_tip_hash(cluster, n, &tn) ||
+                !simnet_cluster_coins_digest(cluster, n, &dn) ||
+                !uint256_eq(&tip0, &tn) ||
+                !utxo_commitment_equal(&dig0, &dn)) {
+                honest_conv = false;
+                break;
+            }
+        }
+    }
+    return honest_conv;
+}
+
 /* Structural mirror of fz_run_scenario, made role-aware. At
  * honest_permille=1000 every node is honest and this draws the schedule stream
  * (`rng`) EXACTLY as fz_run_scenario does — same draws, same order — so it must
@@ -537,74 +693,17 @@ static bool fz_run_byz_parity(uint64_t seed, int honest_permille,
     int rounds = sm_range(&rng, 2, 5);         /* SAME draw as legacy */
 
     for (int r = 0; r < rounds && ok; r++) {
-        for (size_t n = 0; n < node_count && ok; n++) {
-            if (!is_byz[n]) {
-                int mints = sm_range(&rng, 0, 3);   /* SAME draw as legacy */
-                for (int m = 0; m < mints; m++) {
-                    if (chain[n].count >= FZ_MAX_HASHES)
-                        break;
-                    struct uint256 h;
-                    if (!simnet_cluster_mint_on(cluster, n, &h)) {
-                        ok = false;
-                        break;
-                    }
-                    chain[n].hashes[chain[n].count++] = h;
-                }
-            } else if (byz[n].count < FZ_MAX_HASHES) {
-                struct uint256 h;
-                uint64_t bs = sm_next(&byz_rng);
-                if (!simnet_cluster_byzantine_mint_on(cluster, n, bs, &h))
-                    ok = false;
-                else
-                    byz[n].hashes[byz[n].count++] = h;
-            }
-        }
-        for (size_t n = 0; n < node_count && ok; n++) {
-            if (!is_byz[n]) {
-                bool relays = sm_range(&rng, 0, 3) != 0;  /* SAME as legacy */
-                if (relays && chain[n].count > 0)
-                    if (!fz_relay_full_chain(cluster, n, &chain[n]))
-                        ok = false;
-            } else {
-                for (size_t i = 0; i < byz[n].count && ok; i++)
-                    if (!simnet_cluster_broadcast(cluster, n, &byz[n].hashes[i]))
-                        ok = false;
-            }
-        }
-        if (ok && !simnet_cluster_deliver_pending(cluster))
-            ok = false;
+        ok = fz_byz_parity_mint_round(cluster, node_count, is_byz, chain, byz,
+                                      &rng, &byz_rng, ok);
+        ok = fz_byz_parity_relay_round(cluster, node_count, is_byz, chain,
+                                       byz, &rng, ok);
     }
-
-    for (size_t n = 0; n < node_count && ok; n++) {
-        struct fz_node_chain *src = is_byz[n] ? &byz[n] : &chain[n];
-        if (src->count > 0 && !fz_relay_full_chain(cluster, n, src))
-            ok = false;
-    }
-    if (ok && !simnet_cluster_deliver_pending(cluster))
-        ok = false;
+    ok = fz_byz_parity_final_heal(cluster, node_count, is_byz, chain, byz, ok);
 
     bool honest_conv = false;
-    if (ok) {
-        struct uint256 tip0;
-        struct utxo_commitment dig0;
-        if (simnet_cluster_tip_hash(cluster, 0, &tip0) &&
-            simnet_cluster_coins_digest(cluster, 0, &dig0)) {
-            honest_conv = true;
-            for (size_t n = 1; n < node_count; n++) {
-                if (is_byz[n])
-                    continue;             /* only honest nodes must agree */
-                struct uint256 tn;
-                struct utxo_commitment dn;
-                if (!simnet_cluster_tip_hash(cluster, n, &tn) ||
-                    !simnet_cluster_coins_digest(cluster, n, &dn) ||
-                    !uint256_eq(&tip0, &tn) ||
-                    !utxo_commitment_equal(&dig0, &dn)) {
-                    honest_conv = false;
-                    break;
-                }
-            }
-        }
-    }
+    if (ok)
+        honest_conv = fz_byz_parity_honest_converged(cluster, node_count,
+                                                     is_byz);
 
     if (out_fp)
         *out_fp = simnet_cluster_delivery_fingerprint(cluster);
@@ -614,6 +713,105 @@ static bool fz_run_byz_parity(uint64_t seed, int honest_permille,
         *out_byz_rejected = simnet_cluster_byzantine_rejected(cluster);
     simnet_cluster_free(cluster);
     return ok;
+}
+
+static void fz_byz_wide_assign_roles(size_t n_nodes, int honest_permille,
+                                     uint64_t *byz_rng, bool *is_byz)
+{
+    size_t byz_total = 0;
+    for (size_t n = 0; n < n_nodes; n++) {
+        bool b = (n != 0) &&
+                 ((int)(sm_u32(byz_rng) % 1000u) >= honest_permille);
+        is_byz[n] = b;
+        if (b)
+            byz_total++;
+    }
+    if (byz_total == 0 && n_nodes >= 2) {
+        is_byz[n_nodes - 1] = true;       /* guarantee an adversary to observe */
+        byz_total = 1;
+    }
+}
+
+static bool fz_byz_wide_set_roles(struct simnet_cluster *c, size_t n_nodes,
+                                  bool *is_byz)
+{
+    bool ok = true;
+    for (size_t n = 0; n < n_nodes && ok; n++)
+        if (!simnet_cluster_set_role(c, n,
+                is_byz[n] ? SIMNET_ROLE_BYZANTINE : SIMNET_ROLE_HONEST))
+            ok = false;
+    return ok;
+}
+
+static bool fz_byz_wide_mint_round(struct simnet_cluster *c, size_t n_nodes,
+                                   bool *is_byz, struct fz_node_chain *chain,
+                                   struct fz_node_chain *byz, uint64_t *rng,
+                                   uint64_t *byz_rng, bool ok)
+{
+    for (size_t n = 0; n < n_nodes && ok; n++) {
+        if (!is_byz[n]) {
+            int mints = sm_range(rng, 1, 2);
+            for (int m = 0; m < mints && chain[n].count < FZ_MAX_HASHES;
+                 m++) {
+                struct uint256 h;
+                if (!simnet_cluster_mint_on(c, n, &h)) {
+                    ok = false;
+                    break;
+                }
+                chain[n].hashes[chain[n].count++] = h;
+            }
+        } else if (byz[n].count < FZ_MAX_HASHES) {
+            struct uint256 h;
+            uint64_t bs = sm_next(byz_rng);
+            if (!simnet_cluster_byzantine_mint_on(c, n, bs, &h))
+                ok = false;
+            else
+                byz[n].hashes[byz[n].count++] = h;
+        }
+    }
+    return ok;
+}
+
+static bool fz_byz_wide_broadcast_round(struct simnet_cluster *c,
+                                        size_t n_nodes, bool *is_byz,
+                                        struct fz_node_chain *chain,
+                                        struct fz_node_chain *byz, bool ok)
+{
+    for (size_t n = 0; n < n_nodes && ok; n++) {
+        struct fz_node_chain *src = is_byz[n] ? &byz[n] : &chain[n];
+        for (size_t i = 0; i < src->count && ok; i++)
+            if (!simnet_cluster_broadcast(c, n, &src->hashes[i]))
+                ok = false;
+    }
+    if (ok && !simnet_cluster_deliver_pending(c))
+        ok = false;
+    return ok;
+}
+
+static bool fz_byz_wide_converged(struct simnet_cluster *c, size_t n_nodes,
+                                  bool *is_byz)
+{
+    bool converged = false;
+    struct uint256 tip0;
+    struct utxo_commitment dig0;
+    if (simnet_cluster_tip_hash(c, 0, &tip0) &&
+        simnet_cluster_coins_digest(c, 0, &dig0)) {
+        converged = true;
+        for (size_t n = 1; n < n_nodes; n++) {
+            if (is_byz[n])
+                continue;             /* only honest nodes must converge */
+            struct uint256 tn;
+            struct utxo_commitment dn;
+            if (!simnet_cluster_tip_hash(c, n, &tn) ||
+                !simnet_cluster_coins_digest(c, n, &dn) ||
+                !uint256_eq(&tip0, &tn) ||
+                !utxo_commitment_equal(&dig0, &dn)) {
+                converged = false;
+                break;
+            }
+        }
+    }
+    return converged;
 }
 
 /* Wider fixed-N byzantine cluster for the convergence + perf axes. Node 0 is
@@ -645,87 +843,20 @@ static bool fz_byz_wide(uint64_t seed, size_t n_nodes, int honest_permille,
         return false;
     }
 
-    size_t byz_total = 0;
-    for (size_t n = 0; n < n_nodes; n++) {
-        bool b = (n != 0) &&
-                 ((int)(sm_u32(&byz_rng) % 1000u) >= honest_permille);
-        is_byz[n] = b;
-        if (b)
-            byz_total++;
-    }
-    if (byz_total == 0 && n_nodes >= 2) {
-        is_byz[n_nodes - 1] = true;       /* guarantee an adversary to observe */
-        byz_total = 1;
-    }
-    bool ok = true;
-    for (size_t n = 0; n < n_nodes && ok; n++)
-        if (!simnet_cluster_set_role(c, n,
-                is_byz[n] ? SIMNET_ROLE_BYZANTINE : SIMNET_ROLE_HONEST))
-            ok = false;
+    fz_byz_wide_assign_roles(n_nodes, honest_permille, &byz_rng, is_byz);
+    bool ok = fz_byz_wide_set_roles(c, n_nodes, is_byz);
 
     int rounds = 4;
     for (int r = 0; r < rounds && ok; r++) {
-        for (size_t n = 0; n < n_nodes && ok; n++) {
-            if (!is_byz[n]) {
-                int mints = sm_range(&rng, 1, 2);
-                for (int m = 0; m < mints && chain[n].count < FZ_MAX_HASHES;
-                     m++) {
-                    struct uint256 h;
-                    if (!simnet_cluster_mint_on(c, n, &h)) {
-                        ok = false;
-                        break;
-                    }
-                    chain[n].hashes[chain[n].count++] = h;
-                }
-            } else if (byz[n].count < FZ_MAX_HASHES) {
-                struct uint256 h;
-                uint64_t bs = sm_next(&byz_rng);
-                if (!simnet_cluster_byzantine_mint_on(c, n, bs, &h))
-                    ok = false;
-                else
-                    byz[n].hashes[byz[n].count++] = h;
-            }
-        }
-        for (size_t n = 0; n < n_nodes && ok; n++) {
-            struct fz_node_chain *src = is_byz[n] ? &byz[n] : &chain[n];
-            for (size_t i = 0; i < src->count && ok; i++)
-                if (!simnet_cluster_broadcast(c, n, &src->hashes[i]))
-                    ok = false;
-        }
-        if (ok && !simnet_cluster_deliver_pending(c))
-            ok = false;
+        ok = fz_byz_wide_mint_round(c, n_nodes, is_byz, chain, byz, &rng,
+                                    &byz_rng, ok);
+        ok = fz_byz_wide_broadcast_round(c, n_nodes, is_byz, chain, byz, ok);
     }
-    for (size_t n = 0; n < n_nodes && ok; n++) {
-        struct fz_node_chain *src = is_byz[n] ? &byz[n] : &chain[n];
-        for (size_t i = 0; i < src->count && ok; i++)
-            if (!simnet_cluster_broadcast(c, n, &src->hashes[i]))
-                ok = false;
-    }
-    if (ok && !simnet_cluster_deliver_pending(c))
-        ok = false;
+    ok = fz_byz_wide_broadcast_round(c, n_nodes, is_byz, chain, byz, ok);
 
     bool converged = false;
-    if (ok) {
-        struct uint256 tip0;
-        struct utxo_commitment dig0;
-        if (simnet_cluster_tip_hash(c, 0, &tip0) &&
-            simnet_cluster_coins_digest(c, 0, &dig0)) {
-            converged = true;
-            for (size_t n = 1; n < n_nodes; n++) {
-                if (is_byz[n])
-                    continue;             /* only honest nodes must converge */
-                struct uint256 tn;
-                struct utxo_commitment dn;
-                if (!simnet_cluster_tip_hash(c, n, &tn) ||
-                    !simnet_cluster_coins_digest(c, n, &dn) ||
-                    !uint256_eq(&tip0, &tn) ||
-                    !utxo_commitment_equal(&dig0, &dn)) {
-                    converged = false;
-                    break;
-                }
-            }
-        }
-    }
+    if (ok)
+        converged = fz_byz_wide_converged(c, n_nodes, is_byz);
 
     if (out_converged)
         *out_converged = converged;
