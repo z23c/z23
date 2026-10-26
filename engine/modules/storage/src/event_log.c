@@ -707,11 +707,9 @@ static bool event_log_write_pending_locked(event_log_t *log)
 static int event_log_append_stage_locked(event_log_t *log, const uint8_t *hdr,
                                          const void *payload,
                                          size_t payload_len, uint8_t *sent,
-                                         uint64_t *start_io, uint32_t crc)
+                                         uint64_t *start_io, uint32_t crc,
+                                         bool defer)
 {
-    /* Deferred mode skips BOTH per-append fsync()s (batched to a later
-     * event_log_flush()), unless the kill switch forces per-append sync. */
-    bool defer = log->deferred_sync && !event_log_force_per_append_sync();
     if (defer) {
         size_t event_len = EVT_HDR_LEN + payload_len + EVT_SENTINEL_LEN;
         if (!event_log_pending_prepare(&log->pending, event_len, &log->file,
@@ -788,6 +786,9 @@ uint64_t event_log_append(event_log_t *log,
 
     pthread_mutex_lock(&log->lock);
     uint64_t start = log->end_offset + (uint64_t)log->pending.len;
+    /* Deferred mode skips BOTH per-append fsync()s (batched to a later
+     * event_log_flush()), unless the kill switch forces per-append sync. */
+    bool defer = log->deferred_sync && !event_log_force_per_append_sync();
 
     /* Build header. */
     uint8_t hdr[EVT_HDR_LEN];
@@ -802,7 +803,7 @@ uint64_t event_log_append(event_log_t *log,
     put_u64_le(sent + 8, start);
 
     int staged = event_log_append_stage_locked(log, hdr, payload, payload_len,
-                                               sent, &start, crc);
+                                               sent, &start, crc, defer);
     if (staged > 0) {
         pthread_mutex_unlock(&log->lock);
         atomic_fetch_add_explicit(&g_deferred_appends, 1u,
@@ -893,9 +894,6 @@ bool event_log_flush(event_log_t *log)
     return true;
 }
 
-/* Sentinel validation (cheap, catches in-flight corruption). Returns 0 when
- * the sentinel at `sent_off` carries the magic and the record's own start
- * offset `start`, 1 on a read error, 2 on a mismatch. */
 static int event_log_check_sentinel(struct platform_private_file *file,
                                     uint64_t sent_off, uint64_t start)
 {
@@ -918,10 +916,7 @@ static void event_log_read_fill_outputs(enum event_log_type *type_out,
 }
 
 /* Read into caller buf if it fits; otherwise fail (caller must
- * pre-size). Use a temp buffer so we can always validate CRC.
- * Returns 0 on success; on failure returns a code identifying the step so
- * the caller can log its own message (1 = allocation failed, 2 = pread
- * failed, 3 = CRC mismatch, 4 = caller buffer too small). */
+ * pre-size). Use a temp buffer so we can always validate CRC. */
 static int event_log_read_payload(event_log_t *log, uint64_t offset,
                                   uint32_t plen, uint32_t crc_d,
                                   void *buf, size_t buf_cap)
@@ -1059,6 +1054,7 @@ static int event_log_stream_read_record(struct platform_private_file *file,
     }
     *plen_out = plen;
     *type_out = get_u32_le(hdr + 4);
+    /* Sentinel validation (cheap, catches in-flight corruption). */
     return event_log_check_sentinel(file, cursor + EVT_HDR_LEN + plen,
                                     cursor);
 }
