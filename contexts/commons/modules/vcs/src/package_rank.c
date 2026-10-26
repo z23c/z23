@@ -286,6 +286,59 @@ static int rank_sort_fact_cmp(const void *a, const void *b)
     return 0;
 }
 
+/* Copies the facts that count toward the window into the scratch array;
+ * every other fact is counted as dropped. */
+static size_t rank_keep_facts(const struct vcs_rank_fact_input *facts,
+                              size_t fact_count,
+                              const struct vcs_rank_window *window,
+                              struct vcs_rank_projection *p,
+                              struct rank_sort_fact *kept)
+{
+    size_t kept_count = 0;
+    for (size_t i = 0; i < fact_count; i++) {
+        const struct vcs_rank_fact_input *f = &facts[i];
+        if (f->points == 0 || !vcs_rank_window_contains(window, f->day) ||
+            !vcs_rank_category_available(f->category) ||
+            f->category == VCS_RANK_CATEGORY_OVERALL) {
+            p->facts_dropped++;
+            continue;
+        }
+        memcpy(kept[kept_count].contributor, f->contributor, 33);
+        kept[kept_count].category = (uint32_t)f->category;
+        kept[kept_count].points = f->points;
+        kept_count++;
+    }
+    return kept_count;
+}
+
+/* Folds the sorted scratch facts into one projection row per contributor,
+ * stopping when the row cap is reached. */
+static void rank_aggregate_rows(struct vcs_rank_projection *p,
+                                const struct rank_sort_fact *kept,
+                                size_t kept_count)
+{
+    for (size_t i = 0; i < kept_count; i++) {
+        if (p->count > 0 &&
+            memcmp(p->rows[p->count - 1].contributor,
+                   kept[i].contributor, 33) == 0) {
+            p->rows[p->count - 1].category_points[kept[i].category] +=
+                kept[i].points;
+            p->facts_used++;
+            continue;
+        }
+        if (p->count == VCS_RANK_MAX_CONTRIBUTORS) {
+            p->truncated = true;
+            p->facts_dropped += kept_count - i;
+            break;
+        }
+        struct vcs_rank_contributor *row = &p->rows[p->count++];
+        memset(row, 0, sizeof(*row));
+        memcpy(row->contributor, kept[i].contributor, 33);
+        row->category_points[kept[i].category] = kept[i].points;
+        p->facts_used++;
+    }
+}
+
 struct vcs_rank_projection *vcs_rank_projection_from_facts(
     const struct vcs_rank_fact_input *facts, size_t fact_count,
     const struct vcs_rank_window *window)
@@ -316,20 +369,7 @@ struct vcs_rank_projection *vcs_rank_projection_from_facts(
         free(p);
         LOG_NULL(RANK_LOG, "sort facts alloc (%zu)", fact_count);
     }
-    size_t kept_count = 0;
-    for (size_t i = 0; i < fact_count; i++) {
-        const struct vcs_rank_fact_input *f = &facts[i];
-        if (f->points == 0 || !vcs_rank_window_contains(window, f->day) ||
-            !vcs_rank_category_available(f->category) ||
-            f->category == VCS_RANK_CATEGORY_OVERALL) {
-            p->facts_dropped++;
-            continue;
-        }
-        memcpy(kept[kept_count].contributor, f->contributor, 33);
-        kept[kept_count].category = (uint32_t)f->category;
-        kept[kept_count].points = f->points;
-        kept_count++;
-    }
+    size_t kept_count = rank_keep_facts(facts, fact_count, window, p, kept);
     qsort(kept, kept_count, sizeof(*kept), rank_sort_fact_cmp);
 
     p->rows = zcl_malloc(
@@ -339,26 +379,7 @@ struct vcs_rank_projection *vcs_rank_projection_from_facts(
         free(p);
         LOG_NULL(RANK_LOG, "rows alloc (%zu)", kept_count);
     }
-    for (size_t i = 0; i < kept_count; i++) {
-        if (p->count > 0 &&
-            memcmp(p->rows[p->count - 1].contributor,
-                   kept[i].contributor, 33) == 0) {
-            p->rows[p->count - 1].category_points[kept[i].category] +=
-                kept[i].points;
-            p->facts_used++;
-            continue;
-        }
-        if (p->count == VCS_RANK_MAX_CONTRIBUTORS) {
-            p->truncated = true;
-            p->facts_dropped += kept_count - i;
-            break;
-        }
-        struct vcs_rank_contributor *row = &p->rows[p->count++];
-        memset(row, 0, sizeof(*row));
-        memcpy(row->contributor, kept[i].contributor, 33);
-        row->category_points[kept[i].category] = kept[i].points;
-        p->facts_used++;
-    }
+    rank_aggregate_rows(p, kept, kept_count);
     free(kept);
 
     /* OVERALL is the sum over the available categories. */
@@ -518,16 +539,10 @@ size_t vcs_rank_table(const struct vcs_rank_projection *p,
     return rankable;
 }
 
-bool vcs_rank_contributor(const struct vcs_rank_projection *p,
-                          enum vcs_rank_category category,
-                          const uint8_t contributor[33],
-                          struct vcs_rank_entry *out)
+/* The projection row for one contributor, or NULL when it has none. */
+static const struct vcs_rank_contributor *rank_find_contributor_row(
+    const struct vcs_rank_projection *p, const uint8_t contributor[33])
 {
-    if (!p || !contributor || category < 0 ||
-        category >= VCS_RANK_CATEGORY_COUNT)
-        return false;
-    if (!vcs_rank_category_available(category))
-        return false;
     const struct vcs_rank_contributor *self = NULL;
     for (size_t i = 0; i < p->count; i++) {
         if (memcmp(p->rows[i].contributor, contributor, 33) == 0) {
@@ -535,8 +550,14 @@ bool vcs_rank_contributor(const struct vcs_rank_projection *p,
             break;
         }
     }
-    if (!self || rank_points_of(self, category) == 0)
-        return false;
+    return self;
+}
+
+static uint64_t rank_count_rows_ahead(const struct vcs_rank_projection *p,
+                                      enum vcs_rank_category category,
+                                      const uint8_t contributor[33],
+                                      const struct vcs_rank_contributor *self)
+{
     /* Rank = 1 + the number of rows strictly ahead under the total order
      * (more points, or equal points with a smaller pubkey). */
     uint64_t ahead = 0;
@@ -551,6 +572,24 @@ bool vcs_rank_contributor(const struct vcs_rank_projection *p,
              memcmp(row->contributor, contributor, 33) < 0))
             ahead++;
     }
+    return ahead;
+}
+
+bool vcs_rank_contributor(const struct vcs_rank_projection *p,
+                          enum vcs_rank_category category,
+                          const uint8_t contributor[33],
+                          struct vcs_rank_entry *out)
+{
+    if (!p || !contributor || category < 0 ||
+        category >= VCS_RANK_CATEGORY_COUNT)
+        return false;
+    if (!vcs_rank_category_available(category))
+        return false;
+    const struct vcs_rank_contributor *self =
+        rank_find_contributor_row(p, contributor);
+    if (!self || rank_points_of(self, category) == 0)
+        return false;
+    uint64_t ahead = rank_count_rows_ahead(p, category, contributor, self);
     if (out)
         rank_fill_entry(self, category, ahead + 1, out);
     return true;

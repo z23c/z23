@@ -53,8 +53,6 @@ contexts/commons/modules/vcs/src/package_install.c:vcs_package_plan_parse:17
 contexts/commons/modules/vcs/src/package_install.c:vcs_package_plan_validate:20
 contexts/commons/modules/vcs/src/package_manifest.c:vcs_package_manifest_add:27
 contexts/commons/modules/vcs/src/package_manifest.c:vcs_package_manifest_parse:23
-contexts/commons/modules/vcs/src/package_rank.c:vcs_rank_contributor:17
-contexts/commons/modules/vcs/src/package_rank.c:vcs_rank_projection_from_facts:21
 contexts/commons/modules/vcs/src/package_recipe.c:recipe_define_valid:34
 contexts/commons/modules/vcs/src/package_recipe.c:recipe_parse_strings:18
 contexts/commons/modules/vcs/src/package_recipe.c:vcs_package_recipe_error_string:18
