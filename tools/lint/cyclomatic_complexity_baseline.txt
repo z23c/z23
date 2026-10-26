@@ -331,7 +331,6 @@ contexts/commons/packages/zsemver/src/zsemver.c:zsemver_parse_n:20
 contexts/commons/packages/zslug/src/zslug.c:utf8_decode:24
 contexts/commons/packages/zslug/src/zslug.c:zslug:35
 contexts/commons/packages/zslug/src/zslug.c:zslug_is_canonical:19
-contexts/commons/packages/zstr/app/main.c:main:20
 contexts/commons/packages/ztemplate/src/ztemplate.c:ztemplate_parse:30
 contexts/commons/packages/ztemplate/tests/test_ztemplate.c:ref_render:17
 contexts/commons/packages/ztime/src/ztime.c:ztime_parse_n:43

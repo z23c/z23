@@ -188,8 +188,11 @@ static void test_null_source_contract(void)
     CHECK(!failed);
 }
 
+static void test_cli(void);
+
 int main(void)
 {
+    test_cli();
     test_null_source_contract();
 
     test_copy_concat();
@@ -199,4 +202,185 @@ int main(void)
     test_split_nul_delimiter();
     puts("test_zstr: all groups passed (copy concat trim case prefix count split)");
     return 0;
+}
+
+static FILE *cli_sink, *cli_errors;
+static size_t cli_live, cli_flushes, cli_writes, cli_next_calls;
+static bool cli_allocation_failure;
+static FILE *real_stdout(void) { return stdout; }
+static FILE *real_stderr(void) { return stderr; }
+static void *cli_malloc(size_t n)
+{
+    if (cli_allocation_failure) return NULL;
+    void *p = malloc(n); // raw-alloc-ok:allocation-failure-fixture
+    if (p) cli_live++;
+    return p;
+}
+static void cli_free(void *p)
+{
+    if (p) { CHECK(cli_live > 0); cli_live--; }
+    free(p);
+}
+static bool cli_next(zstr_split_it *it, zstr_span *span)
+{
+    cli_next_calls++;
+    return zstr_split_next(it, span);
+}
+static FILE *cli_output(void)
+{
+    cli_writes++;
+    return cli_sink;
+}
+[[maybe_unused]] static int cli_flush(FILE *stream)
+{
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+#undef stdout
+#undef stderr
+#define stdout cli_sink
+#define stderr cli_errors
+#define printf(...) fprintf(cli_output(), __VA_ARGS__)
+#define puts(text) fprintf(cli_output(), "%s\n", (text))
+#define fflush cli_flush
+#define malloc cli_malloc
+#define free cli_free
+#define zstr_split_next cli_next
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef zstr_split_next
+#undef free
+#undef malloc
+#undef fflush
+#undef puts
+#undef printf
+#undef stdout
+#undef stderr
+#define stdout real_stdout()
+#define stderr real_stderr()
+
+static int cli_invoke(FILE *sink, FILE *errors, int argc, char **args)
+{
+    cli_sink = sink;
+    cli_errors = errors;
+    cli_live = cli_flushes = cli_writes = cli_next_calls = 0;
+    int rc = embedded_cli_main(argc, args);
+    cli_sink = stdout;
+    cli_errors = stderr;
+    CHECK(cli_live == 0);
+    return rc;
+}
+static void cli_message(FILE *errors, const char *want)
+{
+    char bytes[256];
+    rewind(errors);
+    size_t n = fread(bytes, 1, sizeof bytes - 1, errors);
+    bytes[n] = 0;
+    CHECK(!ferror(errors) && strstr(bytes, want) != NULL);
+}
+static void cli_case(int argc, char **args, int status, const char *want)
+{
+    FILE *sink = tmpfile(), *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    CHECK(cli_invoke(sink, errors, argc, args) == status);
+    if (!*want) { CHECK(cli_flushes == 0 && cli_writes == 0); }
+    char bytes[256];
+    rewind(sink);
+    size_t n = fread(bytes, 1, sizeof bytes, sink);
+    CHECK(!ferror(sink) && n == strlen(want) && !memcmp(bytes, want, n));
+    CHECK(fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_normal(void)
+{
+    char *trim[] = {"zstr", "trim", " \tHi \r\n", "ignored", NULL};
+    cli_case(4, trim, 0, "Hi\n");
+    char *lower[] = {"zstr", "lower", "AbC", NULL};
+    cli_case(3, lower, 0, "abc\n");
+    char *upper[] = {"zstr", "upper", "AbC", NULL};
+    cli_case(3, upper, 0, "ABC\n");
+    char *count[] = {"zstr", "count", "aaaa", "aa", NULL};
+    cli_case(4, count, 0, "2\n");
+    count[3] = "";
+    cli_case(4, count, 0, "0\n");
+    char *split[] = {"zstr", "split", ",", "a,,b,", NULL};
+    cli_case(4, split, 0, "a\n\nb\n\n");
+    split[3] = "";
+    cli_case(4, split, 0, "\n");
+    trim[2] = "";
+    cli_case(3, trim, 0, "\n");
+}
+static void cli_failed_output(const char *command, bool buffered)
+{
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *sink = fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r");
+    FILE *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    char buffer[4096];
+    if (buffered) { CHECK(setvbuf(sink, buffer, _IOFBF, sizeof buffer) == 0); }
+    bool split = strcmp(command, "split") == 0;
+    char *args[] = {"zstr", (char *)command, split ? "," : "AbC", split ? "a,,b," : "A", NULL};
+    CHECK(cli_invoke(sink, errors, 4, args) == 1 && ferror(sink));
+    if (!buffered) { CHECK(cli_writes == 1); }
+    if (split) { CHECK(cli_next_calls == (buffered ? 5u : 1u)); }
+    cli_message(errors, "write error");
+    CHECK(fclose(errors) == 0);
+    (void)fclose(sink);
+}
+static void cli_output_free(void)
+{
+#ifdef _WIN32
+    FILE *sink = fopen("NUL", "r");
+#else
+    FILE *sink = fopen("/dev/null", "r");
+#endif
+    FILE *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    const char *commands[] = {"starts", "ends"};
+    for (size_t i = 0; i < 2; i++) {
+        char *args[] = {"zstr", (char *)commands[i], "abc", "", NULL};
+        CHECK(cli_invoke(sink, errors, 4, args) == 0);
+        CHECK(cli_flushes == 0 && cli_writes == 0 && !ferror(sink));
+        args[3] = "xyz";
+        CHECK(cli_invoke(sink, errors, 4, args) == 1);
+        CHECK(cli_flushes == 0 && cli_writes == 0 && !ferror(sink));
+    }
+    char *bad[] = {"zstr", "split", "xx", "abc", NULL};
+    CHECK(cli_invoke(sink, errors, 4, bad) == 2);
+    CHECK(cli_flushes == 0 && cli_writes == 0 && !ferror(sink));
+    CHECK(fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_allocation_errors(void)
+{
+    const char *commands[] = {"trim", "lower", "upper"};
+    for (size_t i = 0; i < 3; i++) {
+        FILE *sink = tmpfile(), *errors = tmpfile();
+        CHECK(sink != NULL && errors != NULL);
+        char *args[] = {"zstr", (char *)commands[i], "abc", NULL};
+        cli_allocation_failure = true;
+        CHECK(cli_invoke(sink, errors, 3, args) == 1);
+        cli_allocation_failure = false;
+        CHECK(cli_flushes == 0 && cli_writes == 0 && ftell(sink) == 0);
+        cli_message(errors, "allocation failed");
+        CHECK(fclose(sink) == 0 && fclose(errors) == 0);
+    }
+}
+static void test_cli(void)
+{
+    cli_normal();
+    const char *commands[] = {"trim", "lower", "upper", "count", "split"};
+    for (size_t i = 0; i < 5; i++) {
+        cli_failed_output(commands[i], false);
+#ifdef __linux__
+        cli_failed_output(commands[i], true);
+#endif
+    }
+    cli_output_free();
+    cli_allocation_errors();
+    char *usage[] = {"zstr", NULL};
+    cli_case(1, usage, 2, "");
 }
