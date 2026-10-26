@@ -49,21 +49,34 @@ static bool activation_refuse(
     return false;
 }
 
+static bool create_request_invalid(const struct zcl_app_host_v1 *host,
+                                   uint64_t allowed_capabilities,
+                                   const char *build_identity)
+{
+    return !host || host->struct_size < sizeof(*host) ||
+           host->abi_version != ZCL_APP_HOST_ABI_V1 || !build_identity ||
+           !build_identity[0] || strlen(build_identity) >= 65 ||
+           (allowed_capabilities & ~host->capabilities) != 0;
+}
+
+static bool resident_state_hooks_missing(const struct zcl_app_host_v1 *host,
+                                         uint64_t allowed_capabilities)
+{
+    return (allowed_capabilities & ZCL_APP_CAP_RESIDENT_STATE) &&
+           (!host->state_open || !host->state_read || !host->state_write);
+}
+
 struct zcl_app_runtime_v1 *zcl_app_runtime_v1_create(
     const struct zcl_app_host_v1 *host, uint64_t allowed_capabilities,
     const char *build_identity, char *why, size_t why_sz)
 {
     if (why && why_sz) why[0] = 0;
-    if (!host || host->struct_size < sizeof(*host) ||
-        host->abi_version != ZCL_APP_HOST_ABI_V1 || !build_identity ||
-        !build_identity[0] || strlen(build_identity) >= 65 ||
-        (allowed_capabilities & ~host->capabilities) != 0) {
+    if (create_request_invalid(host, allowed_capabilities, build_identity)) {
         (void)runtime_reject(why, why_sz,
                      "host ABI, capability ceiling, or build identity invalid");
         return NULL;
     }
-    if ((allowed_capabilities & ZCL_APP_CAP_RESIDENT_STATE) &&
-        (!host->state_open || !host->state_read || !host->state_write)) {
+    if (resident_state_hooks_missing(host, allowed_capabilities)) {
         (void)runtime_reject(why, why_sz,
                      "resident-state capability lacks host-owned state hooks");
         return NULL;
@@ -94,21 +107,12 @@ void zcl_app_runtime_v1_destroy(struct zcl_app_runtime_v1 *runtime)
     free(runtime);
 }
 
-bool zcl_app_runtime_v1_activate(
+static bool activation_candidate_admissible(
     struct zcl_app_runtime_v1 *runtime,
     const struct zcl_app_manifest_v1 *candidate,
-    struct zcl_app_activation_receipt_v1 *receipt)
+    struct zcl_app_activation_receipt_v1 *receipt,
+    struct zcl_app_error *hook_error)
 {
-    if (!receipt)
-        return false;
-    activation_receipt_init(receipt);
-    if (!runtime)
-        return activation_refuse(receipt, "validate", "runtime is null");
-
-    pthread_mutex_lock(&runtime->lock);
-    receipt->generation = runtime->generation;
-    receipt->from_schema = runtime->schema;
-    receipt->to_schema = candidate ? candidate->state_schema_version : 0;
     char why[ZCL_APP_ERROR_MAX + 1] = {0};
     if (!zcl_app_manifest_v1_validate(
             candidate, runtime->allowed_capabilities,
@@ -128,74 +132,119 @@ bool zcl_app_runtime_v1_activate(
         return activation_refuse(receipt, "migration",
                                  "live schema rollback or removal is refused");
     }
-
-    struct zcl_app_error hook_error = {0};
-    if (candidate->self_test(&runtime->host, &hook_error) != 0) {
+    if (candidate->self_test(&runtime->host, hook_error) != 0) {
         pthread_mutex_unlock(&runtime->lock);
         return activation_refuse(
             receipt, "self_test",
-            hook_error.message[0] ? hook_error.message
-                                  : "candidate self-test failed");
+            hook_error->message[0] ? hook_error->message
+                                   : "candidate self-test failed");
     }
+    return true;
+}
 
-    bool migration_needed = candidate->state_schema_version != runtime->schema;
-    zcl_app_state_handle state = runtime->state;
+static bool activation_prepare_migration(
+    struct zcl_app_runtime_v1 *runtime,
+    const struct zcl_app_manifest_v1 *candidate,
+    struct zcl_app_activation_receipt_v1 *receipt,
+    zcl_app_state_handle *state, struct zcl_app_error *hook_error)
+{
     const struct zcl_app_migration_v1 *migration = candidate->migration;
-    if (migration_needed) {
-        if (!migration || migration->from_schema != runtime->schema ||
-            migration->to_schema != candidate->state_schema_version) {
-            pthread_mutex_unlock(&runtime->lock);
-            return activation_refuse(
-                receipt, "migration",
-                "migration schema endpoints do not match active and candidate");
-        }
-        if (state == 0 &&
-            runtime->host.state_open(runtime->host.host_context,
-                                     candidate->app_id, runtime->schema,
-                                     &state, &hook_error) != 0) {
-            pthread_mutex_unlock(&runtime->lock);
-            return activation_refuse(
-                receipt, "state_open",
-                hook_error.message[0] ? hook_error.message
-                                      : "host state_open failed");
-        }
-        hook_error = (struct zcl_app_error){0};
-        if (migration->prepare(&runtime->host, state, &hook_error) != 0) {
-            pthread_mutex_unlock(&runtime->lock);
-            return activation_refuse(
-                receipt, "migration_prepare",
-                hook_error.message[0] ? hook_error.message
-                                      : "migration prepare failed");
-        }
-        receipt->migration_prepared = true;
+    if (!migration || migration->from_schema != runtime->schema ||
+        migration->to_schema != candidate->state_schema_version) {
+        pthread_mutex_unlock(&runtime->lock);
+        return activation_refuse(
+            receipt, "migration",
+            "migration schema endpoints do not match active and candidate");
     }
+    if (*state == 0 &&
+        runtime->host.state_open(runtime->host.host_context,
+                                 candidate->app_id, runtime->schema,
+                                 state, hook_error) != 0) {
+        pthread_mutex_unlock(&runtime->lock);
+        return activation_refuse(
+            receipt, "state_open",
+            hook_error->message[0] ? hook_error->message
+                                   : "host state_open failed");
+    }
+    *hook_error = (struct zcl_app_error){0};
+    if (migration->prepare(&runtime->host, *state, hook_error) != 0) {
+        pthread_mutex_unlock(&runtime->lock);
+        return activation_refuse(
+            receipt, "migration_prepare",
+            hook_error->message[0] ? hook_error->message
+                                   : "migration prepare failed");
+    }
+    receipt->migration_prepared = true;
+    return true;
+}
 
+static bool activation_commit_generation(
+    struct zcl_app_runtime_v1 *runtime,
+    const struct zcl_app_migration_v1 *migration,
+    zcl_app_state_handle state,
+    struct zcl_app_activation_receipt_v1 *receipt, bool migration_needed,
+    struct zcl_app_error *hook_error)
+{
     if (runtime->active) {
-        hook_error = (struct zcl_app_error){0};
+        *hook_error = (struct zcl_app_error){0};
         if (runtime->active->quiesce(&runtime->host, 200,
-                                     &hook_error) != 0) {
+                                     hook_error) != 0) {
             if (receipt->migration_prepared)
                 migration->abort(&runtime->host, state);
             pthread_mutex_unlock(&runtime->lock);
             return activation_refuse(
                 receipt, "quiesce",
-                hook_error.message[0] ? hook_error.message
-                                      : "active generation did not quiesce");
+                hook_error->message[0] ? hook_error->message
+                                       : "active generation did not quiesce");
         }
     }
 
     if (migration_needed) {
-        hook_error = (struct zcl_app_error){0};
-        if (migration->commit(&runtime->host, state, &hook_error) != 0) {
+        *hook_error = (struct zcl_app_error){0};
+        if (migration->commit(&runtime->host, state, hook_error) != 0) {
             migration->abort(&runtime->host, state);
             pthread_mutex_unlock(&runtime->lock);
             return activation_refuse(
                 receipt, "migration_commit",
-                hook_error.message[0] ? hook_error.message
-                                      : "migration commit failed");
+                hook_error->message[0] ? hook_error->message
+                                       : "migration commit failed");
         }
         receipt->migration_committed = true;
     }
+    return true;
+}
+
+bool zcl_app_runtime_v1_activate(
+    struct zcl_app_runtime_v1 *runtime,
+    const struct zcl_app_manifest_v1 *candidate,
+    struct zcl_app_activation_receipt_v1 *receipt)
+{
+    if (!receipt)
+        return false;
+    activation_receipt_init(receipt);
+    if (!runtime)
+        return activation_refuse(receipt, "validate", "runtime is null");
+
+    pthread_mutex_lock(&runtime->lock);
+    receipt->generation = runtime->generation;
+    receipt->from_schema = runtime->schema;
+    receipt->to_schema = candidate ? candidate->state_schema_version : 0;
+    struct zcl_app_error hook_error = {0};
+    if (!activation_candidate_admissible(runtime, candidate, receipt,
+                                         &hook_error))
+        return false;
+
+    bool migration_needed = candidate->state_schema_version != runtime->schema;
+    zcl_app_state_handle state = runtime->state;
+    const struct zcl_app_migration_v1 *migration = candidate->migration;
+    if (migration_needed &&
+        !activation_prepare_migration(runtime, candidate, receipt, &state,
+                                      &hook_error))
+        return false;
+
+    if (!activation_commit_generation(runtime, migration, state, receipt,
+                                      migration_needed, &hook_error))
+        return false;
 
     runtime->active = candidate;
     runtime->state = state;
