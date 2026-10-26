@@ -63,6 +63,93 @@ static bool zfix_apply(struct node_db *ndb, const struct transaction *tx,
 
 /* ── Codec helper negatives ──────────────────────────────────────────── */
 
+static bool codec_reader_open_rejects_bad_script(struct overlay_reader *r)
+{
+    uint8_t good[] = {0x6a, 0x01, 0x00};
+    uint8_t notret[] = {0x76, 0x01, 0x00};
+    return !overlay_reader_open(r, NULL, 3) &&
+           !overlay_reader_open(r, good, 0) &&
+           !overlay_reader_open(r, notret, sizeof notret) &&
+           overlay_reader_open(r, good, sizeof good);
+}
+
+static bool codec_reader_begin_rejects_wrong_lokad(struct overlay_reader *r)
+{
+    uint8_t buf[32];
+    size_t n = zfix_build(buf, sizeof buf, 7, (const uint8_t *)"x", 1);
+    return n > 0 && overlay_reader_begin(r, buf, n, ZFIX_LOKAD) &&
+           !overlay_reader_begin(r, buf, n, "ZNAM");
+}
+
+static bool codec_read_field_rejects_truncated_push(struct overlay_reader *r)
+{
+    /* PUSH claims 5 bytes but only 2 follow. */
+    uint8_t bad[] = {0x6a, 0x04, 'Z','F','I','X', 0x05, 'a','b'};
+    const uint8_t *d; size_t l;
+    overlay_reader_open(r, bad, sizeof bad);
+    overlay_read_field(r, &d, &l);            /* lokad ok */
+    return !overlay_read_field(r, &d, &l) && !r->ok;
+}
+
+static bool codec_read_fixed_rejects_wrong_length(struct overlay_reader *r)
+{
+    uint8_t buf[32];
+    size_t n = zfix_build(buf, sizeof buf, 7, (const uint8_t *)"ab", 2);
+    overlay_reader_begin(r, buf, n, ZFIX_LOKAD);
+    overlay_expect_u8(r, 1);
+    uint8_t dst4[4];
+    /* next field is the 1-byte kind; demanding 4 bytes must fail. */
+    return !overlay_read_fixed(r, dst4, 4) && !r->ok;
+}
+
+static bool codec_expect_u8_rejects_value_mismatch(struct overlay_reader *r)
+{
+    uint8_t buf[32];
+    size_t n = zfix_build(buf, sizeof buf, 7, NULL, 0);
+    overlay_reader_begin(r, buf, n, ZFIX_LOKAD);
+    return !overlay_expect_u8(r, 9) && !r->ok;   /* version is 1, not 9 */
+}
+
+static bool codec_read_bounded_rejects_oversize_field(void)
+{
+    uint8_t big[20]; memset(big, 'q', sizeof big);
+    uint8_t buf[64];
+    size_t n = zfix_build(buf, sizeof buf, 7, big, sizeof big);  /* 20 > 16 */
+    struct zfix_msg m;
+    return n > 0 && !zfix_parse(buf, n, &m);
+}
+
+static bool codec_reader_finish_rejects_trailing_bytes(void)
+{
+    uint8_t buf[32];
+    size_t n = zfix_build(buf, sizeof buf, 7, (const uint8_t *)"z", 1);
+    buf[n] = 0x00;                                   /* stray trailing byte */
+    struct zfix_msg m;
+    return !zfix_parse(buf, n + 1, &m);
+}
+
+static bool codec_writer_overflow_yields_length_zero(void)
+{
+    uint8_t tiny[6];                                 /* too small for ZFIX */
+    struct overlay_writer w;
+    overlay_writer_begin(&w, tiny, sizeof tiny, ZFIX_LOKAD);
+    overlay_put_u8(&w, 1);
+    overlay_put_field(&w, (const uint8_t *)"aaaaaaaa", 8);
+    bool ok = overlay_writer_finish(&w) == 0;
+    /* zero cap also refuses. */
+    overlay_writer_begin(&w, tiny, 0, ZFIX_LOKAD);
+    return ok && overlay_writer_finish(&w) == 0;
+}
+
+static bool codec_put_field_rejects_null_data(void)
+{
+    uint8_t buf[32];
+    struct overlay_writer w;
+    overlay_writer_begin(&w, buf, sizeof buf, ZFIX_LOKAD);
+    return !overlay_put_field(&w, NULL, 4) &&
+           overlay_writer_finish(&w) == 0;
+}
+
 static int test_codec_helpers(void)
 {
     int f = 0;
@@ -70,97 +157,55 @@ static int test_codec_helpers(void)
 
     printf("overlay_reader_open: reject NULL/empty/non-OP_RETURN... ");
     {
-        uint8_t good[] = {0x6a, 0x01, 0x00};
-        uint8_t notret[] = {0x76, 0x01, 0x00};
-        bool ok = !overlay_reader_open(&r, NULL, 3) &&
-                  !overlay_reader_open(&r, good, 0) &&
-                  !overlay_reader_open(&r, notret, sizeof notret) &&
-                  overlay_reader_open(&r, good, sizeof good);
+        bool ok = codec_reader_open_rejects_bad_script(&r);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_reader_begin: reject wrong lokad... ");
     {
-        uint8_t buf[32];
-        size_t n = zfix_build(buf, sizeof buf, 7, (const uint8_t *)"x", 1);
-        bool ok = n > 0 && overlay_reader_begin(&r, buf, n, ZFIX_LOKAD) &&
-                  !overlay_reader_begin(&r, buf, n, "ZNAM");
+        bool ok = codec_reader_begin_rejects_wrong_lokad(&r);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_read_field: reject truncated push... ");
     {
-        /* PUSH claims 5 bytes but only 2 follow. */
-        uint8_t bad[] = {0x6a, 0x04, 'Z','F','I','X', 0x05, 'a','b'};
-        const uint8_t *d; size_t l;
-        overlay_reader_open(&r, bad, sizeof bad);
-        overlay_read_field(&r, &d, &l);            /* lokad ok */
-        bool ok = !overlay_read_field(&r, &d, &l) && !r.ok;
+        bool ok = codec_read_field_rejects_truncated_push(&r);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_read_fixed: reject wrong length... ");
     {
-        uint8_t buf[32];
-        size_t n = zfix_build(buf, sizeof buf, 7, (const uint8_t *)"ab", 2);
-        overlay_reader_begin(&r, buf, n, ZFIX_LOKAD);
-        overlay_expect_u8(&r, 1);
-        uint8_t dst4[4];
-        /* next field is the 1-byte kind; demanding 4 bytes must fail. */
-        bool ok = !overlay_read_fixed(&r, dst4, 4) && !r.ok;
+        bool ok = codec_read_fixed_rejects_wrong_length(&r);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_expect_u8: reject value mismatch... ");
     {
-        uint8_t buf[32];
-        size_t n = zfix_build(buf, sizeof buf, 7, NULL, 0);
-        overlay_reader_begin(&r, buf, n, ZFIX_LOKAD);
-        bool ok = !overlay_expect_u8(&r, 9) && !r.ok;   /* version is 1, not 9 */
+        bool ok = codec_expect_u8_rejects_value_mismatch(&r);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_read_bounded: reject oversize field... ");
     {
-        uint8_t big[20]; memset(big, 'q', sizeof big);
-        uint8_t buf[64];
-        size_t n = zfix_build(buf, sizeof buf, 7, big, sizeof big);  /* 20 > 16 */
-        struct zfix_msg m;
-        bool ok = n > 0 && !zfix_parse(buf, n, &m);
+        bool ok = codec_read_bounded_rejects_oversize_field();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_reader_finish: reject trailing bytes... ");
     {
-        uint8_t buf[32];
-        size_t n = zfix_build(buf, sizeof buf, 7, (const uint8_t *)"z", 1);
-        buf[n] = 0x00;                                   /* stray trailing byte */
-        struct zfix_msg m;
-        bool ok = !zfix_parse(buf, n + 1, &m);
+        bool ok = codec_reader_finish_rejects_trailing_bytes();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_writer: overflow yields length 0... ");
     {
-        uint8_t tiny[6];                                 /* too small for ZFIX */
-        struct overlay_writer w;
-        overlay_writer_begin(&w, tiny, sizeof tiny, ZFIX_LOKAD);
-        overlay_put_u8(&w, 1);
-        overlay_put_field(&w, (const uint8_t *)"aaaaaaaa", 8);
-        bool ok = overlay_writer_finish(&w) == 0;
-        /* zero cap also refuses. */
-        overlay_writer_begin(&w, tiny, 0, ZFIX_LOKAD);
-        ok = ok && overlay_writer_finish(&w) == 0;
+        bool ok = codec_writer_overflow_yields_length_zero();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_put_field: reject NULL data with len>0... ");
     {
-        uint8_t buf[32];
-        struct overlay_writer w;
-        overlay_writer_begin(&w, buf, sizeof buf, ZFIX_LOKAD);
-        bool ok = !overlay_put_field(&w, NULL, 4) &&
-                  overlay_writer_finish(&w) == 0;
+        bool ok = codec_put_field_rejects_null_data();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
@@ -237,6 +282,117 @@ static int registry_lookup_identity(void)
     return failures;
 }
 
+static bool registry_add_find_count_rejects_bad_regs(struct overlay_registry *reg,
+                                                     struct zfix_sink *sink)
+{
+    overlay_registry_init(reg);
+    struct overlay_descriptor d = {
+        .name = "zfix", .apply = zfix_apply, .ctx = sink,
+    };
+    memcpy(d.lokad, ZFIX_LOKAD, 4);
+    bool add_ok = overlay_registry_add(reg, &d);
+    bool dup = !overlay_registry_add(reg, &d);             /* dup lokad */
+    struct overlay_descriptor noapply = d; noapply.apply = NULL;
+    memcpy(noapply.lokad, "ZNUL", 4);
+    bool no_apply = !overlay_registry_add(reg, &noapply);
+    struct overlay_descriptor badtag = d;
+    memcpy(badtag.lokad, "ZF\0X", 4);                        /* embedded NUL */
+    bool bad_tag = !overlay_registry_add(reg, &badtag);
+    const struct overlay_descriptor *hit =
+        overlay_registry_find(reg, ZFIX_LOKAD);
+    bool miss = overlay_registry_find(reg, "ZNAM") == NULL;
+    return add_ok && dup && no_apply && bad_tag && hit &&
+           overlay_registry_count(reg) == 1 && miss;
+}
+
+static bool registry_padded_tags_register_embedded_reject(
+    struct overlay_registry *reg, struct zfix_sink *sink)
+{
+    overlay_registry_init(reg);
+    struct overlay_descriptor d = {
+        .name = "pad", .apply = zfix_apply, .ctx = sink,
+    };
+    memcpy(d.lokad, "\x53\x4c\x50\x00", 4);                  /* "SLP\0" */
+    bool slp_ok = overlay_registry_add(reg, &d);
+    memcpy(d.lokad, "\x5a\x49\x44\x00", 4);                  /* "ZID\0" */
+    bool zid_ok = overlay_registry_add(reg, &d);
+    memcpy(d.lokad, "Z\0\0\0", 4);                     /* 1 char + pad */
+    bool one_ok = overlay_registry_add(reg, &d);
+    memcpy(d.lokad, "\0ZID", 4);                           /* leading NUL */
+    bool lead_rejected = !overlay_registry_add(reg, &d);
+    memcpy(d.lokad, "ZF\0X", 4);                          /* embedded NUL */
+    bool mid_rejected = !overlay_registry_add(reg, &d);
+    memcpy(d.lokad, "Z\0I\0", 4);                    /* NUL-then-non-NUL */
+    bool gap_rejected = !overlay_registry_add(reg, &d);
+    bool found = overlay_registry_find(reg, "\x53\x4c\x50\x00") != NULL &&
+                 overlay_registry_find(reg, "\x5a\x49\x44\x00") != NULL;
+    return slp_ok && zid_ok && one_ok && lead_rejected && mid_rejected &&
+           gap_rejected && found && overlay_registry_count(reg) == 3;
+}
+
+static bool registry_rejects_overflow_past_max(struct overlay_registry *reg,
+                                               struct zfix_sink *sink)
+{
+    overlay_registry_init(reg);
+    struct overlay_descriptor d = {
+        .name = "n", .apply = zfix_apply, .ctx = sink,
+    };
+    bool all_add = true, overflow_rejected;
+    for (int i = 0; i < OVERLAY_REGISTRY_MAX; i++) {
+        d.lokad[0] = 'A'; d.lokad[1] = 'A';
+        d.lokad[2] = (char)('A' + i / 26);
+        d.lokad[3] = (char)('A' + i % 26);
+        all_add = all_add && overlay_registry_add(reg, &d);
+    }
+    d.lokad[0] = 'Z'; d.lokad[1] = 'Z'; d.lokad[2] = 'Z'; d.lokad[3] = 'Z';
+    overflow_rejected = !overlay_registry_add(reg, &d);
+    return all_add && overflow_rejected &&
+           overlay_registry_count(reg) == OVERLAY_REGISTRY_MAX;
+}
+
+static bool peek_lokad_extracts_tag_refuses_malformed(void)
+{
+    uint8_t buf[32];
+    size_t n = zfix_build(buf, sizeof buf, 3, (const uint8_t *)"p", 1);
+    char tag[4];
+    uint8_t notret[] = {0x76, 0x04, 'Z','F','I','X'};
+    return overlay_peek_lokad(buf, n, tag) &&
+           memcmp(tag, ZFIX_LOKAD, 4) == 0 &&
+           !overlay_peek_lokad(notret, sizeof notret, tag) &&
+           !overlay_peek_lokad(NULL, 0, tag);
+}
+
+static bool ingest_dispatches_matched_apply_skips_others(
+    struct overlay_registry *reg, struct zfix_sink *sink)
+{
+    overlay_registry_init(reg);
+    sink->applied = 0;
+    struct overlay_descriptor d = {
+        .name = "zfix", .apply = zfix_apply, .ctx = sink,
+    };
+    memcpy(d.lokad, ZFIX_LOKAD, 4);
+    overlay_registry_add(reg, &d);
+
+    uint8_t dummy_db;                       /* non-NULL ndb for the seam */
+    struct node_db *ndb = (struct node_db *)&dummy_db;
+
+    uint8_t buf[32];
+    size_t n = zfix_build(buf, sizeof buf, 42, (const uint8_t *)"hi", 2);
+    bool applied = overlay_ingest(reg, ndb, NULL, buf, n, 100);
+
+    /* An unregistered lokad ("ZNAM") does not dispatch. */
+    uint8_t other[] = {0x6a, 0x04, 'Z','N','A','M', 0x01, 0x00};
+    bool skipped = !overlay_ingest(reg, ndb, NULL, other, sizeof other, 1);
+
+    /* A malformed (truncated) script does not dispatch. */
+    uint8_t junk[] = {0x6a, 0x04, 'Z'};
+    bool junk_ok = !overlay_ingest(reg, ndb, NULL, junk, sizeof junk, 1);
+
+    return applied && sink->applied == 1 && sink->last.kind == 42 &&
+           sink->last.payload_len == 2 &&
+           memcmp(sink->last.payload, "hi", 2) == 0 && skipped && junk_ok;
+}
+
 static int test_registry(void)
 {
     int f = 0;
@@ -245,26 +401,8 @@ static int test_registry(void)
 
     printf("overlay_registry: add/find/count + reject bad regs... ");
     {
-        overlay_registry_init(&reg);
-        struct overlay_descriptor d = {
-            .name = "zfix", .apply = zfix_apply, .ctx = &sink,
-        };
-        memcpy(d.lokad, ZFIX_LOKAD, 4);
-        bool add_ok = overlay_registry_add(&reg, &d);
-        bool dup = !overlay_registry_add(&reg, &d);             /* dup lokad */
-        struct overlay_descriptor noapply = d; noapply.apply = NULL;
-        memcpy(noapply.lokad, "ZNUL", 4);
-        bool no_apply = !overlay_registry_add(&reg, &noapply);
-        struct overlay_descriptor badtag = d;
-        memcpy(badtag.lokad, "ZF\0X", 4);                        /* embedded NUL */
-        bool bad_tag = !overlay_registry_add(&reg, &badtag);
-        const struct overlay_descriptor *hit =
-            overlay_registry_find(&reg, ZFIX_LOKAD);
-        bool miss = overlay_registry_find(&reg, "ZNAM") == NULL;
-        if (add_ok && dup && no_apply && bad_tag && hit &&
-            overlay_registry_count(&reg) == 1 && miss)
-            printf("OK\n");
-        else { printf("FAIL\n"); f++; }
+        bool ok = registry_add_find_count_rejects_bad_regs(&reg, &sink);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     /* The on-chain SLP lineage spells a THREE-character tag NUL-padded to
@@ -272,94 +410,26 @@ static int test_registry(void)
      * embedded NUL (leading, or NUL-then-non-NUL) must still reject. */
     printf("overlay_registry: NUL-padded tags register, embedded NUL rejects... ");
     {
-        overlay_registry_init(&reg);
-        struct overlay_descriptor d = {
-            .name = "pad", .apply = zfix_apply, .ctx = &sink,
-        };
-        memcpy(d.lokad, "\x53\x4c\x50\x00", 4);                  /* "SLP\0" */
-        bool slp_ok = overlay_registry_add(&reg, &d);
-        memcpy(d.lokad, "\x5a\x49\x44\x00", 4);                  /* "ZID\0" */
-        bool zid_ok = overlay_registry_add(&reg, &d);
-        memcpy(d.lokad, "Z\0\0\0", 4);                     /* 1 char + pad */
-        bool one_ok = overlay_registry_add(&reg, &d);
-        memcpy(d.lokad, "\0ZID", 4);                           /* leading NUL */
-        bool lead_rejected = !overlay_registry_add(&reg, &d);
-        memcpy(d.lokad, "ZF\0X", 4);                          /* embedded NUL */
-        bool mid_rejected = !overlay_registry_add(&reg, &d);
-        memcpy(d.lokad, "Z\0I\0", 4);                    /* NUL-then-non-NUL */
-        bool gap_rejected = !overlay_registry_add(&reg, &d);
-        bool found = overlay_registry_find(&reg, "\x53\x4c\x50\x00") != NULL &&
-                     overlay_registry_find(&reg, "\x5a\x49\x44\x00") != NULL;
-        if (slp_ok && zid_ok && one_ok && lead_rejected && mid_rejected &&
-            gap_rejected && found && overlay_registry_count(&reg) == 3)
-            printf("OK\n");
-        else { printf("FAIL\n"); f++; }
+        bool ok = registry_padded_tags_register_embedded_reject(&reg, &sink);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_registry: reject overflow past OVERLAY_REGISTRY_MAX... ");
     {
-        overlay_registry_init(&reg);
-        struct overlay_descriptor d = {
-            .name = "n", .apply = zfix_apply, .ctx = &sink,
-        };
-        bool all_add = true, overflow_rejected;
-        for (int i = 0; i < OVERLAY_REGISTRY_MAX; i++) {
-            d.lokad[0] = 'A'; d.lokad[1] = 'A';
-            d.lokad[2] = (char)('A' + i / 26);
-            d.lokad[3] = (char)('A' + i % 26);
-            all_add = all_add && overlay_registry_add(&reg, &d);
-        }
-        d.lokad[0] = 'Z'; d.lokad[1] = 'Z'; d.lokad[2] = 'Z'; d.lokad[3] = 'Z';
-        overflow_rejected = !overlay_registry_add(&reg, &d);
-        if (all_add && overflow_rejected &&
-            overlay_registry_count(&reg) == OVERLAY_REGISTRY_MAX)
-            printf("OK\n");
-        else { printf("FAIL\n"); f++; }
+        bool ok = registry_rejects_overflow_past_max(&reg, &sink);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_peek_lokad: extract tag / refuse malformed... ");
     {
-        uint8_t buf[32];
-        size_t n = zfix_build(buf, sizeof buf, 3, (const uint8_t *)"p", 1);
-        char tag[4];
-        uint8_t notret[] = {0x76, 0x04, 'Z','F','I','X'};
-        bool ok = overlay_peek_lokad(buf, n, tag) &&
-                  memcmp(tag, ZFIX_LOKAD, 4) == 0 &&
-                  !overlay_peek_lokad(notret, sizeof notret, tag) &&
-                  !overlay_peek_lokad(NULL, 0, tag);
+        bool ok = peek_lokad_extracts_tag_refuses_malformed();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     printf("overlay_ingest: dispatch matched apply, skip others... ");
     {
-        overlay_registry_init(&reg);
-        sink.applied = 0;
-        struct overlay_descriptor d = {
-            .name = "zfix", .apply = zfix_apply, .ctx = &sink,
-        };
-        memcpy(d.lokad, ZFIX_LOKAD, 4);
-        overlay_registry_add(&reg, &d);
-
-        uint8_t dummy_db;                       /* non-NULL ndb for the seam */
-        struct node_db *ndb = (struct node_db *)&dummy_db;
-
-        uint8_t buf[32];
-        size_t n = zfix_build(buf, sizeof buf, 42, (const uint8_t *)"hi", 2);
-        bool applied = overlay_ingest(&reg, ndb, NULL, buf, n, 100);
-
-        /* An unregistered lokad ("ZNAM") does not dispatch. */
-        uint8_t other[] = {0x6a, 0x04, 'Z','N','A','M', 0x01, 0x00};
-        bool skipped = !overlay_ingest(&reg, ndb, NULL, other, sizeof other, 1);
-
-        /* A malformed (truncated) script does not dispatch. */
-        uint8_t junk[] = {0x6a, 0x04, 'Z'};
-        bool junk_ok = !overlay_ingest(&reg, ndb, NULL, junk, sizeof junk, 1);
-
-        if (applied && sink.applied == 1 && sink.last.kind == 42 &&
-            sink.last.payload_len == 2 &&
-            memcmp(sink.last.payload, "hi", 2) == 0 && skipped && junk_ok)
-            printf("OK\n");
-        else { printf("FAIL\n"); f++; }
+        bool ok = ingest_dispatches_matched_apply_skips_others(&reg, &sink);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); f++; }
     }
 
     return f;
