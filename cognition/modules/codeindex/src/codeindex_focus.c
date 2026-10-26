@@ -481,6 +481,27 @@ static bool focus_load_issue_body(const char *root, const char *rel,
     return ok;
 }
 
+/* Strips one trailing CR (a CRLF line ending) from p in place; returns the
+ * remaining length. */
+static size_t focus_strip_cr(char *p)
+{
+    size_t n = strlen(p);
+    if (n && p[n - 1] == '\r')
+        p[--n] = '\0';
+    return n;
+}
+
+/* One `git ls-files -- docs` line: loads the issue body when the path names
+ * an issue file; false when the body load failed. */
+static bool focus_issue_line(const char *root, char *p,
+                             struct specialist_focus_evidence *ev)
+{
+    (void)focus_strip_cr(p);
+    if (!p[0] || !focus_ci_issue_name(p))
+        return true;
+    return focus_load_issue_body(root, p, ev);
+}
+
 bool specialist_focus_load_issues(const char *root,
                                   struct specialist_focus_evidence *ev)
 {
@@ -502,11 +523,7 @@ bool specialist_focus_load_issues(const char *root,
         char *eol = strchr(p, '\n');
         if (eol)
             *eol = '\0';
-        size_t n = strlen(p);
-        if (n && p[n - 1] == '\r')
-            p[n - 1] = '\0';
-        if (p[0] && focus_ci_issue_name(p))
-            ok = focus_load_issue_body(root, p, ev);
+        ok = focus_issue_line(root, p, ev);
         if (!ok || !eol)
             break;
         p = eol + 1;
@@ -538,6 +555,25 @@ static bool focus_add_churn_path(struct specialist_focus_evidence *ev,
     return true;
 }
 
+/* One `git log --name-only --pretty=format:%ct` line: an all-digit line is a
+ * commit timestamp (bumps *commit); any other non-empty line is a path of
+ * that commit. False when the churn table rejects the path. */
+static bool focus_churn_line(struct specialist_focus_evidence *ev, char *p,
+                             int *commit)
+{
+    size_t n = focus_strip_cr(p);
+    bool digits = n > 0;
+    for (size_t i = 0; digits && i < n; i++)
+        digits = isdigit((unsigned char)p[i]) != 0;
+    if (digits) {
+        (*commit)++;
+        return true;
+    }
+    if (!p[0] || *commit < 0 || ev->churn_count >= SPECIALIST_FOCUS_CHURN_CAP)
+        return true;
+    return focus_add_churn_path(ev, p, *commit);
+}
+
 bool specialist_focus_load_churn(const char *root,
                                  struct specialist_focus_evidence *ev)
 {
@@ -561,20 +597,9 @@ bool specialist_focus_load_churn(const char *root,
         char *eol = strchr(p, '\n');
         if (eol)
             *eol = '\0';
-        size_t n = strlen(p);
-        if (n && p[n - 1] == '\r')
-            p[--n] = '\0';
-        bool digits = n > 0;
-        for (size_t i = 0; digits && i < n; i++)
-            digits = isdigit((unsigned char)p[i]) != 0;
-        if (digits) {
-            commit++;
-        } else if (p[0] && commit >= 0 &&
-                   ev->churn_count < SPECIALIST_FOCUS_CHURN_CAP) {
-            if (!focus_add_churn_path(ev, p, commit)) {
-                free(buf);
-                LOG_FAIL(FOCUS_TAG, "churn path");
-            }
+        if (!focus_churn_line(ev, p, &commit)) {
+            free(buf);
+            LOG_FAIL(FOCUS_TAG, "churn path");
         }
         if (!eol)
             break;

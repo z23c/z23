@@ -19,8 +19,6 @@ cognition/modules/codeindex/src/codeindex_fetch.c:fetch_copy_image:23
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_install_posix:61
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_open_image:18
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_verify_staged:39
-cognition/modules/codeindex/src/codeindex_focus.c:specialist_focus_load_churn:18
-cognition/modules/codeindex/src/codeindex_focus.c:specialist_focus_load_issues:16
 cognition/modules/codeindex/src/codeindex_freshness.c:store_is_stale_profile:26
 cognition/modules/codeindex/src/codeindex_group.c:ci_group_emit_all:18
 cognition/modules/codeindex/src/codeindex_group.c:ci_group_for_path:21
