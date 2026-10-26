@@ -512,6 +512,47 @@ void zcl_native_handle_zcode_science_study_list(
     (void)json_push_kv_int(&reply->data, "count", count);
 }
 
+/* Reads the optional v1/v2 auxiliary wires of a work plan. Every failure
+ * replies and frees the wire it was handed; the caller returns on false. */
+static bool zsci_work_plan_aux(const struct zcl_command_request *request,
+                               struct zcl_command_reply *reply,
+                               uint8_t *wire, size_t wire_len,
+                               struct vcs_build_action_v1 *action,
+                               uint8_t **method, size_t *method_len,
+                               uint8_t **profile, size_t *profile_len)
+{
+    if (!zsci_wire_is_reproduction(wire, wire_len)) {
+        if (!zsci_action(request->input, action, reply,
+                         "zcode.science.work.plan")) {
+            free(wire);
+            return false;
+        }
+        if (zsci_wire_is_result_v2(wire, wire_len)) {
+            *method = zsci_wire(request->input, "method_hex", method_len);
+            *profile = zsci_wire(request->input, "profile_hex", profile_len);
+            if (!*method || !*profile) {
+                free(*profile);
+                free(*method);
+                free(wire);
+                zsci_fail(reply, "BAD_AUX_WIRES",
+                          "a benchmark_result.v2 plan requires method_hex "
+                          "and profile_hex wires",
+                          "zcode.science.work.plan");
+                return false;
+            }
+        } else if (json_get(request->input, "method_hex") ||
+                   json_get(request->input, "profile_hex")) {
+            free(wire);
+            zsci_fail(reply, "BAD_AUX_WIRES",
+                      "a benchmark_result.v1 plan forbids method_hex and "
+                      "profile_hex; those roots exist only in v2",
+                      "zcode.science.work.plan");
+            return false;
+        }
+    }
+    return true;
+}
+
 void zcl_native_handle_zcode_science_work_plan(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -531,36 +572,12 @@ void zcl_native_handle_zcode_science_work_plan(
     struct vcs_build_action_v1 action;
     struct vcs_build_action_v1 *action_p = NULL;
     uint8_t *method = NULL, *profile = NULL;
-    if (!zsci_wire_is_reproduction(wire, wire_len)) {
-        if (!zsci_action(request->input, &action, reply,
-                         "zcode.science.work.plan")) {
-            free(wire);
-            return;
-        }
-        action_p = &action;
-        if (zsci_wire_is_result_v2(wire, wire_len)) {
-            method = zsci_wire(request->input, "method_hex", &method_len);
-            profile = zsci_wire(request->input, "profile_hex", &profile_len);
-            if (!method || !profile) {
-                free(profile);
-                free(method);
-                free(wire);
-                zsci_fail(reply, "BAD_AUX_WIRES",
-                          "a benchmark_result.v2 plan requires method_hex "
-                          "and profile_hex wires",
-                          "zcode.science.work.plan");
-                return;
-            }
-        } else if (json_get(request->input, "method_hex") ||
-                   json_get(request->input, "profile_hex")) {
-            free(wire);
-            zsci_fail(reply, "BAD_AUX_WIRES",
-                      "a benchmark_result.v1 plan forbids method_hex and "
-                      "profile_hex; those roots exist only in v2",
-                      "zcode.science.work.plan");
-            return;
-        }
+    if (!zsci_work_plan_aux(request, reply, wire, wire_len, &action, &method,
+                            &method_len, &profile, &profile_len)) {
+        return;
     }
+    if (!zsci_wire_is_reproduction(wire, wire_len))
+        action_p = &action;
     struct node_db ndb = {0};
     if (!zsci_open_db(zsci_datadir(request->input), &ndb)) {
         free(profile);
@@ -1032,6 +1049,24 @@ bool zcl_native_zcode_science_test_candidate_allowed(
 }
 #endif
 
+/* A pointer row is usable only when its three roots are 64-hex and decode,
+ * and its sequence is positive. Unusable rows are skipped by the caller. */
+static bool zsci_pointer_row_wellformed(const char *transport,
+                                        const char *publisher,
+                                        const char *provider,
+                                        int64_t sequence)
+{
+    uint8_t decoded[32];
+    if (!transport || !publisher || !provider || sequence < 1 ||
+        strlen(transport) != 64 || strlen(publisher) != 64 ||
+        strlen(provider) != 64 ||
+        !zcl_hex_decode_lower(transport, decoded, 32) ||
+        !zcl_hex_decode_lower(publisher, decoded, 32) ||
+        !zcl_hex_decode_lower(provider, decoded, 32))
+        return false;
+    return true;
+}
+
 static bool zsci_resolve_pointer(const char *science_root,
                                  struct zsci_pointer_choice *choice)
 {
@@ -1057,13 +1092,8 @@ static bool zsci_resolve_pointer(const char *science_root,
         int64_t sequence = json_get_int(json_get(row, "sequence"));
         bool conflicted = json_get_bool_or(row, "conflicted", false);
         bool superseded = json_get_bool_or(row, "superseded", false);
-        uint8_t decoded[32];
-        if (!transport || !publisher || !provider || sequence < 1 ||
-            strlen(transport) != 64 || strlen(publisher) != 64 ||
-            strlen(provider) != 64 ||
-            !zcl_hex_decode_lower(transport, decoded, 32) ||
-            !zcl_hex_decode_lower(publisher, decoded, 32) ||
-            !zcl_hex_decode_lower(provider, decoded, 32))
+        if (!zsci_pointer_row_wellformed(transport, publisher, provider,
+                                         sequence))
             continue;
         choice->records_seen++;
         if (conflicted || superseded) {
@@ -1121,6 +1151,74 @@ static bool zsci_route_providers(const char *blob_root,
     return true;
 }
 
+static bool zsci_publish_sovereignty_allows(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    const char *root_hex)
+{
+    return zsci_policy_allows(request->input, VCS_ZCODE_SOVEREIGNTY_STORE,
+                              root_hex, NULL, NULL, reply,
+                              "zcode.science.publish") &&
+        zsci_policy_allows(request->input, VCS_ZCODE_SOVEREIGNTY_INDEX,
+                           root_hex, NULL, NULL, reply,
+                           "zcode.science.publish") &&
+        zsci_policy_allows(request->input, VCS_ZCODE_SOVEREIGNTY_SERVE,
+                           root_hex, NULL, NULL, reply,
+                           "zcode.science.publish") &&
+        zsci_policy_allows(request->input, VCS_ZCODE_SOVEREIGNTY_FORWARD,
+                           root_hex, NULL, NULL, reply,
+                           "zcode.science.publish");
+}
+
+/* Signs the pointer and provider discovery records for a published root.
+ * Each flag is set only when its record was accepted; the error buffers
+ * carry the refusal reason for the caller's report. */
+static void zsci_publish_discovery(const char *root_hex, const char *blob_hex,
+                                   int64_t now, bool *pointer, bool *provider,
+                                   char *pointer_error, char *provider_error)
+{
+    char pointer_token[65], provider_token[65];
+    *pointer = now > 0 && now <= INT64_MAX - ZSCI_POINTER_SECONDS &&
+        zsci_discovery_record("pointer", root_hex, blob_hex, now,
+                              now + ZSCI_POINTER_SECONDS, pointer_token,
+                              pointer_error);
+    *provider = now > 0 && now <= INT64_MAX - 7200 &&
+        zsci_discovery_record("provider", root_hex, blob_hex, now,
+                              now + 7200, provider_token, provider_error);
+}
+
+static void zsci_publish_incomplete(struct zcl_command_reply *reply,
+                                    const char *root_hex, const char *blob_hex,
+                                    bool pointer, bool provider,
+                                    const char *pointer_error,
+                                    const char *provider_error)
+{
+    char detail[256];
+    const char *pointer_status = pointer ? "published" :
+        (pointer_error[0] ? pointer_error : "not_attempted");
+    const char *provider_status = provider ? "published" :
+        (provider_error[0] ? provider_error : "not_attempted");
+    (void)snprintf(
+        detail, sizeof(detail),
+        "transport object exists but signed pointer/provider publication "
+        "did not complete (pointer=%s provider=%s)",
+        pointer_status, provider_status);
+    json_push_kv_str(&reply->data, "science_root", root_hex);
+    json_push_kv_str(&reply->data, "blob_root", blob_hex);
+    json_push_kv_bool(&reply->data, "transport_object_committed", true);
+    json_push_kv_bool(&reply->data, "pointer_published", pointer);
+    json_push_kv_bool(&reply->data, "provider_published", provider);
+    if (!pointer && pointer_error[0])
+        json_push_kv_str(&reply->data, "pointer_error", pointer_error);
+    if (!provider && provider_error[0])
+        json_push_kv_str(&reply->data, "provider_error", provider_error);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_TRANSIENT,
+                           "DISCOVERY_PUBLICATION_INCOMPLETE", "commit",
+                           true, true,
+                           detail,
+                           "zcode.science.publish");
+}
+
 void zcl_native_handle_zcode_science_publish(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -1142,19 +1240,7 @@ void zcl_native_handle_zcode_science_publish(
                   "zcode.science.publish");
         return;
     }
-    if (!zsci_policy_allows(request->input, VCS_ZCODE_SOVEREIGNTY_STORE,
-                            root_hex, NULL, NULL, reply,
-                            "zcode.science.publish") ||
-        !zsci_policy_allows(request->input, VCS_ZCODE_SOVEREIGNTY_INDEX,
-                            root_hex, NULL, NULL, reply,
-                            "zcode.science.publish") ||
-        !zsci_policy_allows(request->input, VCS_ZCODE_SOVEREIGNTY_SERVE,
-                            root_hex, NULL, NULL, reply,
-                            "zcode.science.publish") ||
-        !zsci_policy_allows(request->input, VCS_ZCODE_SOVEREIGNTY_FORWARD,
-                            root_hex, NULL, NULL, reply,
-                            "zcode.science.publish"))
-        return;
+    if (!zsci_publish_sovereignty_allows(request, reply, root_hex)) return;
     bool live = false;
     struct vcs_package_store *store = NULL;
     if (!zsci_store_for(datadir, &live, &store)) {
@@ -1174,41 +1260,13 @@ void zcl_native_handle_zcode_science_publish(
         return;
     }
     int64_t now = platform_time_wall_unix();
-    char pointer_token[65], provider_token[65];
+    bool pointer = false, provider = false;
     char pointer_error[64] = {0}, provider_error[64] = {0};
-    bool pointer = now > 0 && now <= INT64_MAX - ZSCI_POINTER_SECONDS &&
-        zsci_discovery_record("pointer", root_hex, blob_hex, now,
-                              now + ZSCI_POINTER_SECONDS, pointer_token,
-                              pointer_error);
-    bool provider = now > 0 && now <= INT64_MAX - 7200 &&
-        zsci_discovery_record("provider", root_hex, blob_hex, now,
-                              now + 7200, provider_token, provider_error);
+    zsci_publish_discovery(root_hex, blob_hex, now, &pointer, &provider,
+                           pointer_error, provider_error);
     if (!pointer || !provider) {
-        char detail[256];
-        const char *pointer_status = pointer ? "published" :
-            (pointer_error[0] ? pointer_error : "not_attempted");
-        const char *provider_status = provider ? "published" :
-            (provider_error[0] ? provider_error : "not_attempted");
-        (void)snprintf(
-            detail, sizeof(detail),
-            "transport object exists but signed pointer/provider publication "
-            "did not complete (pointer=%s provider=%s)",
-            pointer_status, provider_status);
-        json_push_kv_str(&reply->data, "science_root", root_hex);
-        json_push_kv_str(&reply->data, "blob_root", blob_hex);
-        json_push_kv_bool(&reply->data, "transport_object_committed", true);
-        json_push_kv_bool(&reply->data, "pointer_published", pointer);
-        json_push_kv_bool(&reply->data, "provider_published", provider);
-        if (!pointer && pointer_error[0])
-            json_push_kv_str(&reply->data, "pointer_error", pointer_error);
-        if (!provider && provider_error[0])
-            json_push_kv_str(&reply->data, "provider_error", provider_error);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                               ZCL_COMMAND_EXIT_TRANSIENT,
-                               "DISCOVERY_PUBLICATION_INCOMPLETE", "commit",
-                               true, true,
-                               detail,
-                               "zcode.science.publish");
+        zsci_publish_incomplete(reply, root_hex, blob_hex, pointer, provider,
+                                pointer_error, provider_error);
         return;
     }
     (void)json_push_kv_str(&reply->data, "science_root", root_hex);
@@ -1226,31 +1284,57 @@ void zcl_native_handle_zcode_science_publish(
             "to every connected peer");
 }
 
-void zcl_native_handle_zcode_science_fetch(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    if (!request || !reply) return;
-    const char *requested_root = zsci_str(request->input, "root");
-    const char *explicit_blob = zsci_str(request->input, "blob_root");
-    bool cancel = json_get_bool_or(request->input, "cancel", false);
-    bool root_only = !explicit_blob || !explicit_blob[0];
+/* Per-call state for a fetch, shared by the helpers in the order the
+ * fetch runs them: candidate resolution, store/workspace open, cancel or
+ * provider routing, the swarm run, admission, then the reply. */
+struct zsci_fetch {
+    const struct zcl_command_request *request;
+    struct zcl_command_reply *reply;
+    const char *requested_root;
+    const char *explicit_blob;
+    bool cancel;
+    bool root_only;
     struct zsci_pointer_choice choice;
-    memset(&choice, 0, sizeof(choice));
+    const char *datadir;
+    char ws[ZSCI_PATH_MAX];
+    const char *workspace;
+    char zcode_dir[ZSCI_PATH_MAX];
+    struct vcs_package_store *store;
+    bool live_store;
+    bool live_engine;
+    enum vcs_swarm_fetch_result fr;
+    uint32_t provider_records, authenticated_providers;
+    uint32_t reachability_pending, routed_candidates;
+    struct zcl_result admitted;
+    char admitted_blob[65];
+    char science_hex[65];
+    char kind[ZCODE_SCIENCE_KIND_CAP];
+    bool is_new;
+    size_t candidate_attempts;
+};
+
+static bool zsci_fetch_resolve_root(struct zsci_fetch *f)
+{
+    struct zcl_command_reply *reply = f->reply;
+    const char *requested_root = f->requested_root;
+    const char *explicit_blob = f->explicit_blob;
+    bool root_only = f->root_only;
+    struct zsci_pointer_choice *choice = &f->choice;
     if (root_only && (!requested_root || strlen(requested_root) != 64)) {
         zsci_fail(reply, "BAD_BLOB_ROOT",
                   "provide a 64-lowercase-hex blob_root, or a science root "
                   "resolvable through iterative signed POINTER discovery",
                   "zcode.science.fetch");
-        return;
+        return false;
     }
-    if (root_only && !zsci_resolve_pointer(requested_root, &choice)) {
-        if (choice.conflicts || choice.superseded) {
+    if (root_only && !zsci_resolve_pointer(requested_root, choice)) {
+        if (choice->conflicts || choice->superseded) {
             (void)json_push_kv_int(&reply->data, "pointer_records",
-                                   choice.records_seen);
+                                   choice->records_seen);
             (void)json_push_kv_int(&reply->data, "pointer_conflicts",
-                                   choice.conflicts);
+                                   choice->conflicts);
             (void)json_push_kv_int(&reply->data, "pointer_superseded",
-                                   choice.superseded);
+                                   choice->superseded);
             zsci_fail_service(
                 reply, "POINTER_EVIDENCE_UNUSABLE",
                 "signed pointer evidence exists, but every stream is "
@@ -1261,7 +1345,7 @@ void zcl_native_handle_zcode_science_fetch(
                       "science root has no usable signed POINTER evidence",
                       "zcode.science.fetch");
         }
-        return;
+        return false;
     }
     if (!root_only) {
         char blob_root_err[128];
@@ -1269,140 +1353,176 @@ void zcl_native_handle_zcode_science_fetch(
                                       blob_root_err, sizeof(blob_root_err))) {
             zsci_fail(reply, "BAD_BLOB_ROOT", blob_root_err,
                       "zcode.science.fetch");
-            return;
+            return false;
         }
-        choice.candidate_count = 1;
-        choice.records_seen = 1;
-        memcpy(choice.candidate[0].blob_root, explicit_blob, 65);
+        choice->candidate_count = 1;
+        choice->records_seen = 1;
+        memcpy(choice->candidate[0].blob_root, explicit_blob, 65);
     }
+    return true;
+}
+
+static bool zsci_fetch_check_candidates(struct zsci_fetch *f)
+{
+    struct zcl_command_reply *reply = f->reply;
+    const struct zcl_command_request *request = f->request;
+    const char *requested_root = f->requested_root;
+    bool cancel = f->cancel;
+    bool root_only = f->root_only;
+    struct zsci_pointer_choice *choice = &f->choice;
     if (cancel && root_only) {
         zsci_fail(reply, "BAD_BLOB_ROOT",
                   "cancel requires the exact 64-lowercase-hex blob_root",
                   "zcode.science.fetch");
-        return;
+        return false;
     }
     if (root_only) {
         uint32_t allowed = 0;
-        for (uint32_t i = 0; i < choice.candidate_count; i++) {
+        for (uint32_t i = 0; i < choice->candidate_count; i++) {
             if (!zsci_candidate_policy_allows(
-                    request->input, requested_root, &choice.candidate[i])) {
-                choice.policy_denied++;
+                    request->input, requested_root, &choice->candidate[i])) {
+                choice->policy_denied++;
                 continue;
             }
-            choice.candidate[allowed++] = choice.candidate[i];
+            choice->candidate[allowed++] = choice->candidate[i];
         }
-        choice.candidate_count = allowed;
+        choice->candidate_count = allowed;
         if (!allowed) {
             zsci_fail_service(
                 reply, "SOVEREIGNTY_DENIED",
                 "local sovereignty policy denied every signed pointer candidate",
                 "zcode.science.fetch");
-            return;
+            return false;
         }
-        if (choice.candidate_count > VCS_ZCODE_DHT_K) {
-            choice.candidate_truncated =
-                choice.candidate_count - VCS_ZCODE_DHT_K;
-            choice.candidate_count = VCS_ZCODE_DHT_K;
+        if (choice->candidate_count > VCS_ZCODE_DHT_K) {
+            choice->candidate_truncated =
+                choice->candidate_count - VCS_ZCODE_DHT_K;
+            choice->candidate_count = VCS_ZCODE_DHT_K;
         }
     } else if (!cancel && (!zsci_policy_allows(
                    request->input, VCS_ZCODE_SOVEREIGNTY_FETCH,
-                   requested_root, choice.candidate[0].blob_root, NULL,
+                   requested_root, choice->candidate[0].blob_root, NULL,
                    reply, "zcode.science.fetch") ||
                !zsci_policy_allows(
                    request->input, VCS_ZCODE_SOVEREIGNTY_STORE,
-                   requested_root, choice.candidate[0].blob_root, NULL,
+                   requested_root, choice->candidate[0].blob_root, NULL,
                    reply, "zcode.science.fetch") ||
                !zsci_policy_allows(
                    request->input, VCS_ZCODE_SOVEREIGNTY_INDEX,
-                   requested_root, choice.candidate[0].blob_root, NULL,
+                   requested_root, choice->candidate[0].blob_root, NULL,
                    reply, "zcode.science.fetch"))) {
-        return;
+        return false;
     }
+    return true;
+}
+
+static bool zsci_fetch_open(struct zsci_fetch *f)
+{
+    struct zcl_command_reply *reply = f->reply;
+    const struct zcl_command_request *request = f->request;
+    bool cancel = f->cancel;
     const char *datadir = zsci_datadir(request->input);
-    char ws[ZSCI_PATH_MAX];
     const char *workspace = cancel ? NULL
-                                   : zsci_workspace(request->input, ws,
-                                                    sizeof(ws));
+                                   : zsci_workspace(request->input, f->ws,
+                                                    sizeof(f->ws));
+    f->datadir = datadir;
+    f->workspace = workspace;
     if (!datadir || (!cancel && !workspace)) {
         zsci_fail(reply, "BAD_WORKSPACE",
                   "datadir/workspace could not be resolved",
                   "zcode.science.fetch");
-        return;
+        return false;
     }
-    char zcode_dir[ZSCI_PATH_MAX];
-    int zn = snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
-    if (zn <= 0 || (size_t)zn >= sizeof(zcode_dir)) {
+    int zn = snprintf(f->zcode_dir, sizeof(f->zcode_dir), "%s/zcode", datadir);
+    if (zn <= 0 || (size_t)zn >= sizeof(f->zcode_dir)) {
         zsci_fail(reply, "BAD_WORKSPACE", "datadir path too long",
                   "zcode.science.fetch");
-        return;
+        return false;
     }
-    bool live_store = false;
-    struct vcs_package_store *store = NULL;
-    if (!zsci_store_for(datadir, &live_store, &store)) {
+    if (!zsci_store_for(datadir, &f->live_store, &f->store)) {
         zsci_fail_service(reply, "NO_STORE",
                           "the package store failed to open",
                           "zcode.science.fetch");
-        return;
+        return false;
     }
-    if (cancel) {
-        struct vcs_swarm_engine *cancel_engine = vcs_swarm_engine_global();
-        struct vcs_service_book *cancel_book = NULL;
-        bool temporary_engine = cancel_engine == NULL;
-        if (temporary_engine) {
-            cancel_book = vcs_service_book_load(zcode_dir);
-            cancel_engine = vcs_swarm_engine_create(
-                store, cancel_book, zcode_dir, NULL, NULL);
-        }
-        uint8_t transport[32];
-        (void)zcl_hex_decode_lower(choice.candidate[0].blob_root,
-                                   transport, 32);
-        bool canceled = cancel_engine && vcs_swarm_engine_cancel(
-                                             cancel_engine, transport,
-                                             (uint64_t)zsci_now(request->input));
-        if (temporary_engine && cancel_engine)
-            vcs_swarm_engine_free(cancel_engine);
-        vcs_service_book_free(cancel_book);
-        if (!live_store)
-            vcs_package_store_close(store);
-        (void)json_push_kv_str(&reply->data, "blob_root",
-                               choice.candidate[0].blob_root);
-        (void)json_push_kv_bool(&reply->data, "canceled", canceled);
-        (void)json_push_kv_bool(&reply->data, "restriction_widened", false);
-        (void)json_push_kv_str(&reply->data, "result",
-                               canceled ? "canceled" : "not_active");
-        return;
+    return true;
+}
+
+static void zsci_fetch_cancel(struct zsci_fetch *f)
+{
+    struct zcl_command_reply *reply = f->reply;
+    const struct zcl_command_request *request = f->request;
+    struct zsci_pointer_choice *choice = &f->choice;
+    struct vcs_package_store *store = f->store;
+    const char *zcode_dir = f->zcode_dir;
+    bool live_store = f->live_store;
+    struct vcs_swarm_engine *cancel_engine = vcs_swarm_engine_global();
+    struct vcs_service_book *cancel_book = NULL;
+    bool temporary_engine = cancel_engine == NULL;
+    if (temporary_engine) {
+        cancel_book = vcs_service_book_load(zcode_dir);
+        cancel_engine = vcs_swarm_engine_create(
+            store, cancel_book, zcode_dir, NULL, NULL);
     }
-    uint32_t provider_records = 0, authenticated_providers = 0;
-    uint32_t reachability_pending = 0, routed_candidates = 0;
-    if (root_only)
-        for (uint32_t i = 0; i < choice.candidate_count; i++) {
+    uint8_t transport[32];
+    (void)zcl_hex_decode_lower(choice->candidate[0].blob_root,
+                               transport, 32);
+    bool canceled = cancel_engine && vcs_swarm_engine_cancel(
+                                         cancel_engine, transport,
+                                         (uint64_t)zsci_now(request->input));
+    if (temporary_engine && cancel_engine)
+        vcs_swarm_engine_free(cancel_engine);
+    vcs_service_book_free(cancel_book);
+    if (!live_store)
+        vcs_package_store_close(store);
+    (void)json_push_kv_str(&reply->data, "blob_root",
+                           choice->candidate[0].blob_root);
+    (void)json_push_kv_bool(&reply->data, "canceled", canceled);
+    (void)json_push_kv_bool(&reply->data, "restriction_widened", false);
+    (void)json_push_kv_str(&reply->data, "result",
+                           canceled ? "canceled" : "not_active");
+}
+
+static void zsci_fetch_route(struct zsci_fetch *f)
+{
+    const struct zsci_pointer_choice *choice = &f->choice;
+    if (f->root_only)
+        for (uint32_t i = 0; i < choice->candidate_count; i++) {
             uint32_t records = 0, authenticated = 0, pending = 0;
-            if (!zsci_route_providers(choice.candidate[i].blob_root,
+            if (!zsci_route_providers(choice->candidate[i].blob_root,
                                       &records, &authenticated, &pending))
                 continue;
-            provider_records += records;
-            authenticated_providers += authenticated;
-            reachability_pending += pending;
-            routed_candidates++;
+            f->provider_records += records;
+            f->authenticated_providers += authenticated;
+            f->reachability_pending += pending;
+            f->routed_candidates++;
         }
+}
+
+static void zsci_fetch_swarm(struct zsci_fetch *f)
+{
+    const struct zcl_command_request *request = f->request;
+    const struct zsci_pointer_choice *choice = &f->choice;
+    bool root_only = f->root_only;
     /* Explicit transport fetches retain the generic swarm behavior. A
      * root-only fetch is registered as restricted even with zero current
      * providers, so a restart cannot silently widen it before discovery is
      * repeated and fresh Noise sessions are bound. */
     struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
-    bool live_engine = engine != NULL || routed_candidates > 0;
+    f->live_engine = engine != NULL || f->routed_candidates > 0;
     struct vcs_service_book *book = NULL;
-    if (!engine && routed_candidates == 0) {
-        book = vcs_service_book_load(zcode_dir);
-        engine = vcs_swarm_engine_create(store, book, zcode_dir, NULL, NULL);
+    if (!engine && f->routed_candidates == 0) {
+        book = vcs_service_book_load(f->zcode_dir);
+        engine = vcs_swarm_engine_create(f->store, book, f->zcode_dir, NULL,
+                                         NULL);
     }
-    enum vcs_swarm_fetch_result fr = routed_candidates > 0
+    f->fr = f->routed_candidates > 0
         ? VCS_SWARM_FETCH_OK : VCS_SWARM_FETCH_NO_STORE;
-    if (engine && (!root_only || routed_candidates == 0)) {
+    if (engine && (!root_only || f->routed_candidates == 0)) {
         int64_t now = zsci_now(request->input);
-        for (uint32_t i = 0; i < choice.candidate_count; i++) {
+        for (uint32_t i = 0; i < choice->candidate_count; i++) {
             uint8_t transport[32];
-            (void)zcl_hex_decode_lower(choice.candidate[i].blob_root,
+            (void)zcl_hex_decode_lower(choice->candidate[i].blob_root,
                                        transport, 32);
             enum vcs_swarm_fetch_result one = root_only
                 ? vcs_swarm_engine_fetch_from(engine, transport,
@@ -1412,99 +1532,143 @@ void zcl_native_handle_zcode_science_fetch(
                                          now / 86400, (uint64_t)now);
             if (one == VCS_SWARM_FETCH_OK ||
                 one == VCS_SWARM_FETCH_ALREADY_COMPLETE)
-                fr = one;
+                f->fr = one;
         }
     }
     if (!vcs_swarm_engine_global() && engine) {
         vcs_swarm_engine_free(engine);
         vcs_service_book_free(book);
     }
-    if (fr != VCS_SWARM_FETCH_OK && fr != VCS_SWARM_FETCH_ALREADY_COMPLETE) {
-        if (!live_store)
-            vcs_package_store_close(store);
+}
+
+static bool zsci_fetch_check_result(struct zsci_fetch *f)
+{
+    struct zcl_command_reply *reply = f->reply;
+    if (f->fr != VCS_SWARM_FETCH_OK &&
+        f->fr != VCS_SWARM_FETCH_ALREADY_COMPLETE) {
+        if (!f->live_store)
+            vcs_package_store_close(f->store);
         zsci_fail_service(reply, "FETCH_REFUSED",
-                          vcs_swarm_fetch_result_string(fr),
+                          vcs_swarm_fetch_result_string(f->fr),
                           "zcode.science.fetch");
-        return;
+        return false;
     }
+    return true;
+}
+
+static void zsci_fetch_admit(struct zsci_fetch *f)
+{
+    const struct zcl_command_request *request = f->request;
+    const struct zsci_pointer_choice *choice = &f->choice;
     /* Admit whenever the blob's bytes are already local (already complete,
      * or just downloaded by the live engine). Absent is not a failure —
      * the download is scheduled; re-invoke after the swarm delivers. */
     struct node_db ndb = {0};
-    bool db_open = zsci_open_db(datadir, &ndb);
-    char science_hex[65] = {0}, kind[ZCODE_SCIENCE_KIND_CAP] = {0};
-    char admitted_blob[65] = {0};
-    bool is_new = false;
-    size_t candidate_attempts = 0;
-    struct zcl_result admitted = ZCL_ERR(-1, "science-admit-db-unavailable");
+    bool db_open = zsci_open_db(f->datadir, &ndb);
+    f->admitted = ZCL_ERR(-1, "science-admit-db-unavailable");
     if (db_open) {
-        if (root_only) {
+        if (f->root_only) {
             const char *blob_roots[VCS_ZCODE_DHT_K];
-            for (uint32_t i = 0; i < choice.candidate_count; i++)
-                blob_roots[i] = choice.candidate[i].blob_root;
-            admitted = zcode_science_admit_candidates(
-                store, &ndb, workspace, requested_root, blob_roots,
-                choice.candidate_count, zsci_now(request->input),
-                admitted_blob, kind, &is_new, &candidate_attempts);
-            if (admitted.ok)
-                memcpy(science_hex, requested_root, 65);
+            for (uint32_t i = 0; i < choice->candidate_count; i++)
+                blob_roots[i] = choice->candidate[i].blob_root;
+            f->admitted = zcode_science_admit_candidates(
+                f->store, &ndb, f->workspace, f->requested_root, blob_roots,
+                choice->candidate_count, zsci_now(request->input),
+                f->admitted_blob, f->kind, &f->is_new,
+                &f->candidate_attempts);
+            if (f->admitted.ok)
+                memcpy(f->science_hex, f->requested_root, 65);
         } else {
-            admitted = zcode_science_admit(
-                store, &ndb, workspace, choice.candidate[0].blob_root,
-                zsci_now(request->input), science_hex, kind, &is_new);
-            if (admitted.ok)
-                memcpy(admitted_blob, choice.candidate[0].blob_root, 65);
+            f->admitted = zcode_science_admit(
+                f->store, &ndb, f->workspace, choice->candidate[0].blob_root,
+                zsci_now(request->input), f->science_hex, f->kind,
+                &f->is_new);
+            if (f->admitted.ok)
+                memcpy(f->admitted_blob, choice->candidate[0].blob_root, 65);
         }
         node_db_close(&ndb);
     }
-    if (!live_store)
-        vcs_package_store_close(store);
+    if (!f->live_store)
+        vcs_package_store_close(f->store);
+}
+
+static void zsci_fetch_reply(struct zsci_fetch *f)
+{
+    struct zcl_command_reply *reply = f->reply;
+    const struct zsci_pointer_choice *choice = &f->choice;
+    const char *requested_root = f->requested_root;
     (void)json_push_kv_str(&reply->data, "blob_root",
-                           admitted.ok ? admitted_blob
-                                       : choice.candidate[0].blob_root);
-    (void)json_push_kv_bool(&reply->data, "live", live_engine);
+                           f->admitted.ok ? f->admitted_blob
+                                          : choice->candidate[0].blob_root);
+    (void)json_push_kv_bool(&reply->data, "live", f->live_engine);
     (void)json_push_kv_str(&reply->data, "result",
-                           vcs_swarm_fetch_result_string(fr));
-    (void)json_push_kv_bool(&reply->data, "admitted", admitted.ok);
-    (void)json_push_kv_bool(&reply->data, "provider_restricted", root_only);
+                           vcs_swarm_fetch_result_string(f->fr));
+    (void)json_push_kv_bool(&reply->data, "admitted", f->admitted.ok);
+    (void)json_push_kv_bool(&reply->data, "provider_restricted", f->root_only);
     (void)json_push_kv_int(&reply->data, "pointer_records",
-                           choice.records_seen);
+                           choice->records_seen);
     (void)json_push_kv_int(&reply->data, "pointer_candidates",
-                           choice.candidate_count);
+                           choice->candidate_count);
     (void)json_push_kv_int(&reply->data, "pointer_conflicts",
-                           choice.conflicts);
+                           choice->conflicts);
     (void)json_push_kv_int(&reply->data, "pointer_superseded",
-                           choice.superseded);
+                           choice->superseded);
     (void)json_push_kv_int(&reply->data, "pointer_policy_denied",
-                           choice.policy_denied);
+                           choice->policy_denied);
     (void)json_push_kv_int(&reply->data, "pointer_candidate_truncated",
-                           choice.candidate_truncated);
+                           choice->candidate_truncated);
     (void)json_push_kv_int(&reply->data, "provider_records",
-                           provider_records);
+                           f->provider_records);
     (void)json_push_kv_int(&reply->data, "authenticated_providers",
-                           authenticated_providers);
+                           f->authenticated_providers);
     (void)json_push_kv_int(&reply->data, "reachability_pending",
-                           reachability_pending);
+                           f->reachability_pending);
     (void)json_push_kv_int(&reply->data, "candidate_attempts",
-                           candidate_attempts);
-    if (admitted.ok && requested_root &&
-        strcmp(requested_root, science_hex) != 0) {
+                           f->candidate_attempts);
+    if (f->admitted.ok && requested_root &&
+        strcmp(requested_root, f->science_hex) != 0) {
         zsci_fail_service(reply, "POINTER_ROOT_MISMATCH",
                           "verified bytes re-derived a different science root",
                           "zcode.science.fetch");
         return;
     }
-    if (admitted.ok) {
-        (void)json_push_kv_str(&reply->data, "science_root", science_hex);
-        (void)json_push_kv_str(&reply->data, "kind", kind);
-        (void)json_push_kv_bool(&reply->data, "new", is_new);
+    if (f->admitted.ok) {
+        (void)json_push_kv_str(&reply->data, "science_root", f->science_hex);
+        (void)json_push_kv_str(&reply->data, "kind", f->kind);
+        (void)json_push_kv_bool(&reply->data, "new", f->is_new);
     } else {
         (void)json_push_kv_str(&reply->data, "admit_state",
-                               admitted.message);
+                               f->admitted.message);
         (void)json_push_kv_str(
             &reply->data, "note",
-            live_engine
+            f->live_engine
                 ? "download scheduled on the live swarm; re-invoke once the blob completes to admit it"
                 : "no live engine: the resumable download record is persisted under <datadir>/zcode/downloads; the next -packagehost=1 boot downloads it, then re-invoke to admit");
     }
+}
+
+void zcl_native_handle_zcode_science_fetch(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+    struct zsci_fetch f;
+    memset(&f, 0, sizeof(f));
+    f.request = request;
+    f.reply = reply;
+    f.requested_root = zsci_str(request->input, "root");
+    f.explicit_blob = zsci_str(request->input, "blob_root");
+    f.cancel = json_get_bool_or(request->input, "cancel", false);
+    f.root_only = !f.explicit_blob || !f.explicit_blob[0];
+    if (!zsci_fetch_resolve_root(&f)) return;
+    if (!zsci_fetch_check_candidates(&f)) return;
+    if (!zsci_fetch_open(&f)) return;
+    if (f.cancel) {
+        zsci_fetch_cancel(&f);
+        return;
+    }
+    zsci_fetch_route(&f);
+    zsci_fetch_swarm(&f);
+    if (!zsci_fetch_check_result(&f)) return;
+    zsci_fetch_admit(&f);
+    zsci_fetch_reply(&f);
 }
