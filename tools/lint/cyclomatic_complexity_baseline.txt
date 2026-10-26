@@ -1347,8 +1347,6 @@ tests/harness/src/test_shutdown_stagewatch.c:test_shutdown_stagewatch:50
 tests/harness/src/test_sighash_edge.c:test_sighash_edge:34
 tests/harness/src/test_sighash_malleability.c:test_sighash_malleability:55
 tests/harness/src/test_simnet.c:test_simnet:245
-tests/harness/src/test_simnet_sapling_shielded_send.c:build_and_verify:26
-tests/harness/src/test_simnet_sapling_shielded_send.c:groth16_hook_isolation:16
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_a_consensus_accept:60
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_b_wallet_rpc:33
 tests/harness/src/test_simnet_txkit.c:test_simnet_txkit:38

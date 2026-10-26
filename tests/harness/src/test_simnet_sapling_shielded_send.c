@@ -477,6 +477,183 @@ struct zz_components {
     bool populated;
 };
 
+static void build_and_verify_tz_output(struct transaction *tz,
+                                       struct sapling_id *id,
+                                       uint8_t *memo, int64_t shielded_value,
+                                       const struct consensus_params *cp,
+                                       int tz_height, uint8_t *note_rcm,
+                                       int *failures)
+{
+    uint8_t tz_out_rcv[32];
+    bool tz_out_built = false;
+    if (tz->v_shielded_output) {
+        struct output_description *od = &tz->v_shielded_output[0];
+        tz_out_built = sapling_build_output_description(
+                     id->ovk, id->d, id->pk_d, (uint64_t)shielded_value,
+                     memo, od->cv.data, od->cm.data, od->ephemeral_key.data,
+                     od->enc_ciphertext, od->out_ciphertext, od->zkproof,
+                     tz_out_rcv);
+        SS_CHECKP(failures, "build t->z output (real prover + memo)",
+                  tz_out_built);
+
+        /* Recipient-side decryption recovers (value, rcm, memo) — the honest
+         * receive path. This also gives us rcm to spend the note later. */
+        uint8_t dhsecret[32], enckey[32], pt[564];
+        bool dec = sapling_ka_agree(od->ephemeral_key.data, id->ivk,
+                                    dhsecret) &&
+                   sapling_kdf(enckey, dhsecret, od->ephemeral_key.data) &&
+                   sapling_note_decrypt(enckey, od->enc_ciphertext,
+                                        sizeof(od->enc_ciphertext), pt);
+        SS_CHECKP(failures,
+                  "t->z note decrypts to recipient (AEAD authenticates)", dec);
+        if (dec) {
+            uint64_t dv = 0;
+            for (int i = 0; i < 8; i++) dv |= (uint64_t)pt[12 + i] << (8 * i);
+            SS_CHECKP(failures, "decrypted value matches",
+                      dv == (uint64_t)shielded_value);
+            SS_CHECKP(failures, "decrypted memo round-trips",
+                      memcmp(pt + 52, memo, 512) == 0);
+            memcpy(note_rcm, pt + 20, 32);
+        } else {
+            memset(note_rcm, 0, 32);
+        }
+
+        /* Binding signature over the Sapling sighash (empty script, NOT_AN_INPUT). */
+        transaction_compute_hash(tz);
+        uint32_t branch = consensus_current_epoch_branch_id(tz_height, cp);
+        struct sighash_type ht; ht.raw = 1; /* SIGHASH_ALL */
+        struct precomputed_tx_data txd; precompute_tx_data(tz, &txd);
+        struct script empty; empty.size = 0;
+        struct uint256 sighash;
+        SS_CHECKP(failures, "t->z binding sighash",
+                  signature_hash(&empty, tz, NOT_AN_INPUT, ht, 0, branch,
+                                 &txd, &sighash));
+        const uint8_t *rcv_list[1] = { tz_out_rcv };
+        const bool is_output[1] = { true };
+        SS_CHECKP(failures, "t->z binding sig",
+                  tz_out_built && direct_binding_sig(rcv_list, is_output, 1,
+                                                     sighash.data,
+                                                     tz->binding_sig));
+    } else {
+        memset(note_rcm, 0, 32);
+    }
+}
+
+static bool build_and_verify_zz_spend(const struct simnet *s,
+                                      struct sapling_id *id,
+                                      const struct uint256 *anchor,
+                                      const struct incremental_witness *w,
+                                      const uint8_t *note_rcm,
+                                      int64_t shielded_value,
+                                      struct spend_description *sd,
+                                      uint8_t *ar, uint8_t *spend_rcv,
+                                      uint8_t *spend_nf, int *failures)
+{
+    uint8_t path[1 + 32 * 33];
+    size_t path_len = 0;
+    SS_CHECKP(failures, "extract Merkle path from witness",
+              incremental_witness_merkle_path(w, path, &path_len));
+    uint64_t position = simnet_sapling_tree_size(s) - 1;   /* == 0 */
+
+    bool spend_built = direct_build_spend_description(
+                 id->ask, id->nsk, id->d, id->pk_d, note_rcm,
+                 (uint64_t)shielded_value, position, anchor->data,
+                 path, path_len,
+                 sd->cv.data, sd->nullifier.data, sd->rk.data,
+                 sd->zkproof, ar, spend_rcv);
+    SS_CHECKP(failures, "build z->z spend proof (real spend prover)",
+              spend_built);
+    memcpy(sd->anchor.data, anchor->data, 32);
+    memcpy(spend_nf, sd->nullifier.data, 32);
+    return spend_built;
+}
+
+static bool build_and_verify_zz_sign(struct transaction *zz,
+                                     struct spend_description *sd,
+                                     struct output_description *od,
+                                     struct sapling_id *id, uint8_t *ar,
+                                     uint8_t *spend_rcv, bool spend_built,
+                                     int64_t shielded_value, int zz_height,
+                                     const struct consensus_params *cp,
+                                     int *failures)
+{
+    uint8_t out_rcv[32];
+    bool out_built = sapling_build_output_description(
+                 id->ovk, id->d, id->pk_d, (uint64_t)shielded_value,
+                 NULL, od->cv.data, od->cm.data, od->ephemeral_key.data,
+                 od->enc_ciphertext, od->out_ciphertext, od->zkproof,
+                 out_rcv);
+    bool recovered = blue_output_checks(out_built, od, id,
+                                        (uint64_t)shielded_value);
+    SS_CHECKP(failures, "build and recover z->z output; reject alterations",
+              recovered);
+
+    /* Sapling sighash, spend_auth_sig (rsk = ask + ar in Fs), binding sig. */
+    transaction_compute_hash(zz);
+    uint32_t branch = consensus_current_epoch_branch_id(zz_height, cp);
+    struct sighash_type ht; ht.raw = 1;
+    struct precomputed_tx_data txd; precompute_tx_data(zz, &txd);
+    struct script empty; empty.size = 0;
+    struct uint256 sighash;
+    SS_CHECKP(failures, "z->z sighash",
+              signature_hash(&empty, zz, NOT_AN_INPUT, ht, 0, branch,
+                             &txd, &sighash));
+
+    uint8_t rsk[32];
+    struct fs ask_fs, ar_fs, rsk_fs;
+    fs_from_bytes(&ask_fs, id->ask);
+    fs_from_bytes(&ar_fs, ar);
+    fs_add(&rsk_fs, &ask_fs, &ar_fs);
+    fs_to_bytes(rsk, &rsk_fs);
+    SS_CHECKP(failures, "z->z spend_auth_sig",
+              redjubjub_sign(rsk, sighash.data, 32, sd->spend_auth_sig, 5));
+    const uint8_t *rcv_list[2] = { spend_rcv, out_rcv };
+    const bool is_output[2] = { false, true };
+    SS_CHECKP(failures, "z->z binding sig",
+              spend_built && out_built &&
+              direct_binding_sig(rcv_list, is_output, 2, sighash.data,
+                                 zz->binding_sig));
+    return recovered;
+}
+
+static void build_and_verify_check_nullifiers(struct transaction *zz,
+                                              int zz_height,
+                                              const uint8_t *spend_nf,
+                                              int *failures)
+{
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    SS_CHECKP(failures, "open :memory: nullifier db",
+              rc == SQLITE_OK && db != NULL);
+    SS_CHECKP(failures, "nullifier_kv schema",
+              db && nullifier_kv_ensure_schema(db));
+
+    struct block blk;
+    memset(&blk, 0, sizeof(blk));
+    blk.num_vtx = 1;
+    blk.vtx = zz;   /* borrow — utxo_apply only reads spends/nullifiers */
+
+    struct delta_summary sum1; memset(&sum1, 0, sizeof(sum1)); sum1.ok = true;
+    SS_CHECKP(failures, "utxo_apply records z->z nullifier (real path)",
+              db && utxo_apply_check_and_insert_nullifiers(db, &blk, zz_height,
+                                                           &sum1)
+              && sum1.ok);
+
+    bool found = false;
+    SS_CHECKP(failures, "nullifier present in durable set",
+              db && nullifier_kv_get(db, spend_nf, NULLIFIER_POOL_SAPLING,
+                                     &found, NULL) && found);
+
+    /* Replay the same nullifier -> shielded double-spend reject. */
+    struct delta_summary sum2; memset(&sum2, 0, sizeof(sum2)); sum2.ok = true;
+    bool applied = db && utxo_apply_check_and_insert_nullifiers(db, &blk,
+                                                                zz_height + 1,
+                                                                &sum2);
+    SS_CHECKP(failures, "replay of spent nullifier is rejected (double-spend)",
+              applied && !sum2.ok);
+    if (db) sqlite3_close(db);
+}
+
 /* ─────────────────────────────────────────────────────────────────────
  * The payoff: build a full t->z then z->z with the REAL prover, DRIVE the
  * REAL verifier on each (asserting its verdict equals `verify_ok`), advance
@@ -575,56 +752,9 @@ static int build_and_verify(uint64_t seed, bool verify_ok,
     int mature_h = SAPLING_H + COINBASE_MATURITY;   /* t->z mines at +1 = 201 */
     int tz_height = mature_h + 1;
 
-    uint8_t tz_out_rcv[32];
-    bool tz_out_built = false;
-    if (tz.v_shielded_output) {
-        struct output_description *od = &tz.v_shielded_output[0];
-        tz_out_built = sapling_build_output_description(
-                     id.ovk, id.d, id.pk_d, (uint64_t)SHIELDED_VALUE,
-                     memo, od->cv.data, od->cm.data, od->ephemeral_key.data,
-                     od->enc_ciphertext, od->out_ciphertext, od->zkproof,
-                     tz_out_rcv);
-        SS_CHECK("build t->z output (real prover + memo)", tz_out_built);
-
-        /* Recipient-side decryption recovers (value, rcm, memo) — the honest
-         * receive path. This also gives us rcm to spend the note later. */
-        uint8_t dhsecret[32], enckey[32], pt[564];
-        bool dec = sapling_ka_agree(od->ephemeral_key.data, id.ivk, dhsecret) &&
-                   sapling_kdf(enckey, dhsecret, od->ephemeral_key.data) &&
-                   sapling_note_decrypt(enckey, od->enc_ciphertext,
-                                        sizeof(od->enc_ciphertext), pt);
-        SS_CHECK("t->z note decrypts to recipient (AEAD authenticates)", dec);
-        if (dec) {
-            uint64_t dv = 0;
-            for (int i = 0; i < 8; i++) dv |= (uint64_t)pt[12 + i] << (8 * i);
-            SS_CHECK("decrypted value matches", dv == (uint64_t)SHIELDED_VALUE);
-            SS_CHECK("decrypted memo round-trips",
-                     memcmp(pt + 52, memo, 512) == 0);
-            memcpy(note_rcm, pt + 20, 32);
-        } else {
-            memset(note_rcm, 0, 32);
-        }
-
-        /* Binding signature over the Sapling sighash (empty script, NOT_AN_INPUT). */
-        transaction_compute_hash(&tz);
-        uint32_t branch = consensus_current_epoch_branch_id(tz_height,
-                                                            &s.params.consensus);
-        struct sighash_type ht; ht.raw = 1; /* SIGHASH_ALL */
-        struct precomputed_tx_data txd; precompute_tx_data(&tz, &txd);
-        struct script empty; empty.size = 0;
-        struct uint256 sighash;
-        SS_CHECK("t->z binding sighash",
-                 signature_hash(&empty, &tz, NOT_AN_INPUT, ht, 0, branch,
-                                &txd, &sighash));
-        const uint8_t *rcv_list[1] = { tz_out_rcv };
-        const bool is_output[1] = { true };
-        SS_CHECK("t->z binding sig",
-                 tz_out_built && direct_binding_sig(rcv_list, is_output, 1,
-                                                    sighash.data,
-                                                    tz.binding_sig));
-    } else {
-        memset(note_rcm, 0, 32);
-    }
+    build_and_verify_tz_output(&tz, &id, memo, SHIELDED_VALUE,
+                               &s.params.consensus, tz_height, note_rcm,
+                               &failures);
 
     transaction_compute_hash(&tz);
     struct uint256 tz_txid = tz.hash;
@@ -680,60 +810,18 @@ static int build_and_verify(uint64_t seed, bool verify_ok,
         struct spend_description  *sd = &zz.v_shielded_spend[0];
         struct output_description *od = &zz.v_shielded_output[0];
 
-        uint8_t path[1 + 32 * 33];
-        size_t path_len = 0;
-        SS_CHECK("extract Merkle path from witness",
-                 incremental_witness_merkle_path(&w, path, &path_len));
-        uint64_t position = simnet_sapling_tree_size(&s) - 1;   /* == 0 */
-
         uint8_t spend_rcv[32];
-        bool spend_built = direct_build_spend_description(
-                     id.ask, id.nsk, id.d, id.pk_d, note_rcm,
-                     (uint64_t)SHIELDED_VALUE, position, anchor.data,
-                     path, path_len,
-                     sd->cv.data, sd->nullifier.data, sd->rk.data,
-                     sd->zkproof, ar, spend_rcv);
-        SS_CHECK("build z->z spend proof (real spend prover)", spend_built);
-        memcpy(sd->anchor.data, anchor.data, 32);
-        memcpy(spend_nf, sd->nullifier.data, 32);
+        bool spend_built = build_and_verify_zz_spend(&s, &id, &anchor, &w,
+                                                     note_rcm, SHIELDED_VALUE,
+                                                     sd, ar, spend_rcv,
+                                                     spend_nf, &failures);
 
-        uint8_t out_rcv[32];
-        bool out_built = sapling_build_output_description(
-                     id.ovk, id.d, id.pk_d, (uint64_t)SHIELDED_VALUE,
-                     NULL, od->cv.data, od->cm.data, od->ephemeral_key.data,
-                     od->enc_ciphertext, od->out_ciphertext, od->zkproof,
-                     out_rcv);
-        zz_output_recovered = blue_output_checks(out_built, od, &id,
-                                                  (uint64_t)SHIELDED_VALUE);
-        SS_CHECK("build and recover z->z output; reject alterations",
-                 zz_output_recovered);
-
-        /* Sapling sighash, spend_auth_sig (rsk = ask + ar in Fs), binding sig. */
-        transaction_compute_hash(&zz);
-        uint32_t branch = consensus_current_epoch_branch_id(zz_height,
-                                                            &s.params.consensus);
-        struct sighash_type ht; ht.raw = 1;
-        struct precomputed_tx_data txd; precompute_tx_data(&zz, &txd);
-        struct script empty; empty.size = 0;
-        struct uint256 sighash;
-        SS_CHECK("z->z sighash",
-                 signature_hash(&empty, &zz, NOT_AN_INPUT, ht, 0, branch,
-                                &txd, &sighash));
-
-        uint8_t rsk[32];
-        struct fs ask_fs, ar_fs, rsk_fs;
-        fs_from_bytes(&ask_fs, id.ask);
-        fs_from_bytes(&ar_fs, ar);
-        fs_add(&rsk_fs, &ask_fs, &ar_fs);
-        fs_to_bytes(rsk, &rsk_fs);
-        SS_CHECK("z->z spend_auth_sig",
-                 redjubjub_sign(rsk, sighash.data, 32, sd->spend_auth_sig, 5));
-        const uint8_t *rcv_list[2] = { spend_rcv, out_rcv };
-        const bool is_output[2] = { false, true };
-        SS_CHECK("z->z binding sig",
-                 spend_built && out_built &&
-                 direct_binding_sig(rcv_list, is_output, 2, sighash.data,
-                                    zz.binding_sig));
+        zz_output_recovered = build_and_verify_zz_sign(&zz, sd, od, &id, ar,
+                                                       spend_rcv, spend_built,
+                                                       SHIELDED_VALUE,
+                                                       zz_height,
+                                                       &s.params.consensus,
+                                                       &failures);
 
         /* Capture the z->z components for the caller's per-field determinism
          * localization. */
@@ -766,35 +854,7 @@ static int build_and_verify(uint64_t seed, bool verify_ok,
     memory_cleanse(ar, sizeof ar);
 
     /* ── Drive the REAL durable nullifier path on the z->z block ── */
-    {
-        sqlite3 *db = NULL;
-        int rc = sqlite3_open(":memory:", &db);
-        SS_CHECK("open :memory: nullifier db", rc == SQLITE_OK && db != NULL);
-        SS_CHECK("nullifier_kv schema", db && nullifier_kv_ensure_schema(db));
-
-        struct block blk;
-        memset(&blk, 0, sizeof(blk));
-        blk.num_vtx = 1;
-        blk.vtx = &zz;   /* borrow — utxo_apply only reads spends/nullifiers */
-
-        struct delta_summary sum1; memset(&sum1, 0, sizeof(sum1)); sum1.ok = true;
-        SS_CHECK("utxo_apply records z->z nullifier (real path)",
-                 db && utxo_apply_check_and_insert_nullifiers(db, &blk, zz_height, &sum1)
-                 && sum1.ok);
-
-        bool found = false;
-        SS_CHECK("nullifier present in durable set",
-                 db && nullifier_kv_get(db, spend_nf, NULLIFIER_POOL_SAPLING,
-                                        &found, NULL) && found);
-
-        /* Replay the same nullifier -> shielded double-spend reject. */
-        struct delta_summary sum2; memset(&sum2, 0, sizeof(sum2)); sum2.ok = true;
-        bool applied = db && utxo_apply_check_and_insert_nullifiers(db, &blk,
-                                                                    zz_height + 1, &sum2);
-        SS_CHECK("replay of spent nullifier is rejected (double-spend)",
-                 applied && !sum2.ok);
-        if (db) sqlite3_close(db);
-    }
+    build_and_verify_check_nullifiers(&zz, zz_height, spend_nf, &failures);
 
     /* Mint z->z: appends the new note, stamps the tree root, advances tip via
      * connect_block. Ownership of zz's vin/vout transfers to simnet; the
@@ -820,6 +880,19 @@ static int build_and_verify(uint64_t seed, bool verify_ok,
     return failures;
 }
 
+static bool groth16_hook_isolation_derive_recipient(const uint8_t ivk[32],
+                                                    uint8_t to_d[11],
+                                                    uint8_t to_pk_d[32])
+{
+    bool have = false;
+    for (unsigned d0 = 0; d0 < 256 && !have; d0++) {
+        memset(to_d, 0, 11);
+        to_d[0] = (uint8_t)d0;
+        if (sapling_ivk_to_pkd(ivk, to_d, to_pk_d)) have = true;
+    }
+    return have;
+}
+
 /* ── Groth16 r,s hook isolation (Lane C deliverable 2) ──
  * With ONLY the seedable Sapling + Groth16 per-function hooks installed (no
  * default-RNG diversion), the 192-byte output proof is byte-identical twice
@@ -834,12 +907,7 @@ static void groth16_hook_isolation(int *failures)
     uint8_t ovk[32]; memset(ovk, 0x11, 32);
     uint8_t ivk[32]; memset(ivk, 0x22, 32);
     uint8_t to_d[11] = {0}, to_pk_d[32];
-    bool have = false;
-    for (unsigned d0 = 0; d0 < 256 && !have; d0++) {
-        memset(to_d, 0, sizeof(to_d));
-        to_d[0] = (uint8_t)d0;
-        if (sapling_ivk_to_pkd(ivk, to_d, to_pk_d)) have = true;
-    }
+    bool have = groth16_hook_isolation_derive_recipient(ivk, to_d, to_pk_d);
     SS_CHECKP(failures, "derived recipient for groth16 isolation", have);
     if (!have) return;
 
