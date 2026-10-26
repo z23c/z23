@@ -35,6 +35,44 @@
 #define THREADSUP_FIXTURE_REL  "test-tmp/_threadsup_scan_dir_tmp/_threadsup_probe_tmp.c"
 #define THREADSUP_BASELINE_REL "test-tmp/_threadsup_baseline_tmp.txt"
 
+/* Resolve the five fixture paths the ratchet touches; nonzero when any
+ * repo_path call failed (the caller reports and bails out). */
+static int threadsup_fixture_paths(char test_tmp[PATH_MAX],
+                                   char scan_dir[PATH_MAX],
+                                   char keep_path[PATH_MAX],
+                                   char fixture_path[PATH_MAX],
+                                   char baseline_path[PATH_MAX])
+{
+    return repo_path(test_tmp, PATH_MAX, "test-tmp") != 0 ||
+           repo_path(scan_dir, PATH_MAX, THREADSUP_SCAN_DIR_REL) != 0 ||
+           repo_path(keep_path, PATH_MAX, THREADSUP_KEEP_REL) != 0 ||
+           repo_path(fixture_path, PATH_MAX, THREADSUP_FIXTURE_REL) != 0 ||
+           repo_path(baseline_path, PATH_MAX, THREADSUP_BASELINE_REL) != 0;
+}
+
+/* Run the thread-supervision gate on the hermetic scan roots/baseline only
+ * when every fixture write for the case landed; -999 marks a skipped run. */
+static int threadsup_gate_rc_when_written(int wrote_a, int wrote_b,
+                                          int wrote_c)
+{
+    return (wrote_a == 0 && wrote_b == 0 && wrote_c == 0)
+        ? run_gate_script_with_env2(THREADSUP_SCRIPT_REL,
+              "ZCL_THREADSUP_SCAN_ROOTS", THREADSUP_SCAN_DIR_REL,
+              "ZCL_THREADSUP_BASELINE", THREADSUP_BASELINE_REL)
+        : -999;
+}
+
+/* Read the gate's captured output when the run produced one; -1 when the
+ * gate never ran or the output path would not resolve. */
+static int threadsup_read_gate_output(int gate_rc, char **out)
+{
+    char out_path[PATH_MAX];
+    return (gate_rc >= 0 &&
+            lint_gate_out_path(out_path, sizeof(out_path)) == 0)
+        ? read_entire_file(out_path, out)
+        : -1;
+}
+
 int t_thread_supervision_ratchet(void)
 {
     int failures = 0;
@@ -44,13 +82,8 @@ int t_thread_supervision_ratchet(void)
     char fixture_path[PATH_MAX];
     char baseline_path[PATH_MAX];
 
-    if (repo_path(test_tmp, sizeof(test_tmp), "test-tmp") != 0 ||
-        repo_path(scan_dir, sizeof(scan_dir), THREADSUP_SCAN_DIR_REL) != 0 ||
-        repo_path(keep_path, sizeof(keep_path), THREADSUP_KEEP_REL) != 0 ||
-        repo_path(fixture_path, sizeof(fixture_path),
-                  THREADSUP_FIXTURE_REL) != 0 ||
-        repo_path(baseline_path, sizeof(baseline_path),
-                  THREADSUP_BASELINE_REL) != 0) {
+    if (threadsup_fixture_paths(test_tmp, scan_dir, keep_path, fixture_path,
+                                baseline_path) != 0) {
         fprintf(stderr, "[lint-gate] could not resolve thread-supervision "
                         "fixture paths\n");
         return 1;
@@ -69,29 +102,16 @@ int t_thread_supervision_ratchet(void)
         "}\n");
     int wrote_empty_baseline = write_file(baseline_path, "");
     int unaccounted_rc =
-        (wrote_keep == 0 && wrote_fixture_spawn == 0 &&
-         wrote_empty_baseline == 0)
-            ? run_gate_script_with_env2(THREADSUP_SCRIPT_REL,
-                  "ZCL_THREADSUP_SCAN_ROOTS", THREADSUP_SCAN_DIR_REL,
-                  "ZCL_THREADSUP_BASELINE", THREADSUP_BASELINE_REL)
-            : -999;
-    char un_out_path[PATH_MAX];
+        threadsup_gate_rc_when_written(wrote_keep, wrote_fixture_spawn,
+                                       wrote_empty_baseline);
     char *un_out = NULL;
-    int un_read =
-        (unaccounted_rc >= 0 &&
-         lint_gate_out_path(un_out_path, sizeof(un_out_path)) == 0)
-            ? read_entire_file(un_out_path, &un_out)
-            : -1;
+    int un_read = threadsup_read_gate_output(unaccounted_rc, &un_out);
 
     /* Case B: same fixture, thread now BASELINED — must pass. */
     int wrote_baseline_entry = write_file(baseline_path,
         "zcl_probe_thread  bounded  self-test fixture thread\n");
     int baselined_rc =
-        wrote_baseline_entry == 0
-            ? run_gate_script_with_env2(THREADSUP_SCRIPT_REL,
-                  "ZCL_THREADSUP_SCAN_ROOTS", THREADSUP_SCAN_DIR_REL,
-                  "ZCL_THREADSUP_BASELINE", THREADSUP_BASELINE_REL)
-            : -999;
+        threadsup_gate_rc_when_written(wrote_baseline_entry, 0, 0);
 
     /* Case C: same thread, EMPTY baseline but the spawn now carries a
      * // supervised: marker — must pass. */
@@ -103,11 +123,8 @@ int t_thread_supervision_ratchet(void)
         "}\n");
     int wrote_empty_baseline2 = write_file(baseline_path, "");
     int marked_rc =
-        (wrote_fixture_marked == 0 && wrote_empty_baseline2 == 0)
-            ? run_gate_script_with_env2(THREADSUP_SCRIPT_REL,
-                  "ZCL_THREADSUP_SCAN_ROOTS", THREADSUP_SCAN_DIR_REL,
-                  "ZCL_THREADSUP_BASELINE", THREADSUP_BASELINE_REL)
-            : -999;
+        threadsup_gate_rc_when_written(wrote_fixture_marked,
+                                       wrote_empty_baseline2, 0);
 
     /* Case D: fixture no longer spawns, baseline still lists the thread —
      * must trip as a STALE (shrink-only) entry. */
@@ -116,18 +133,10 @@ int t_thread_supervision_ratchet(void)
     int wrote_baseline_stale = write_file(baseline_path,
         "zcl_probe_thread  bounded  self-test fixture thread\n");
     int stale_rc =
-        (wrote_fixture_nospawn == 0 && wrote_baseline_stale == 0)
-            ? run_gate_script_with_env2(THREADSUP_SCRIPT_REL,
-                  "ZCL_THREADSUP_SCAN_ROOTS", THREADSUP_SCAN_DIR_REL,
-                  "ZCL_THREADSUP_BASELINE", THREADSUP_BASELINE_REL)
-            : -999;
-    char stale_out_path[PATH_MAX];
+        threadsup_gate_rc_when_written(wrote_fixture_nospawn,
+                                       wrote_baseline_stale, 0);
     char *stale_out = NULL;
-    int stale_read =
-        (stale_rc >= 0 &&
-         lint_gate_out_path(stale_out_path, sizeof(stale_out_path)) == 0)
-            ? read_entire_file(stale_out_path, &stale_out)
-            : -1;
+    int stale_read = threadsup_read_gate_output(stale_rc, &stale_out);
 
     (void)unlink(fixture_path);
     (void)unlink(keep_path);

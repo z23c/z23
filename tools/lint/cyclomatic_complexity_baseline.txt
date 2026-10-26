@@ -1739,7 +1739,6 @@ tests/harness/src/lint_gate_hygiene_selftests.c:t_dev_proof_helpers_include_lint
 tests/harness/src/lint_gate_hygiene_selftests.c:t_lint_umbrellas_share_built_prereqs:18
 tests/harness/src/lint_gate_shape_selftests.c:t_e1_file_size_baseline_and_hollow_scan:20
 tests/harness/src/lint_gate_shape_selftests.c:t_long_functions_lib_warn_tier:16
-tests/harness/src/lint_gate_supervision_selftests.c:t_thread_supervision_ratchet:20
 tests/harness/src/mesh_term_fixture.c:mesh_term_fixture_open:21
 tests/harness/src/mesh_term_fixture.c:mesh_term_handshake:16
 tests/harness/src/mint_anchor_preflight_windows_refusal_acceptance.c:main:26
