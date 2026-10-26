@@ -393,155 +393,228 @@ static void zd_fixture_close(struct zd_fixture *f)
     test_rm_rf(f->datadir);
 }
 
-static int zd_case_publish_fetch(void)
+/* The state the phases of the end-to-end case below hand to each
+ * other: the fixture, the scratch directory the accept checks share,
+ * the published descriptor and its fetched copy, the two times and
+ * the signed wire image the tamper and window phases reuse. */
+struct zd_e2e_ctx {
+    struct zd_fixture f;
+    struct zdesc_directory tdir;
+    struct zdesc pub;
+    struct zdesc got;
+    uint64_t now;
+    uint64_t expiry;
+    uint8_t root[32];
+    uint8_t wire[ZID_DOC_MAX];
+    size_t wire_len;
+};
+
+/* e2e phase 1: publish seq 7, prove the record is indexed under the
+ * blinded key and the doc verifies, and leave the doc's wire image in
+ * the context for the later phases. */
+static int zd_check_e2e_publish_indexing(struct zd_e2e_ctx *c)
 {
     int failures = 0;
-    struct zd_fixture f;
-    ZD_CHECK("e2e: store opens", zd_fixture_open(&f, "e2e", 0x21));
-    if (!f.store)
-        return failures;
-
-    /* Both times sit inside ONE period, so a window failure below is
-     * unambiguously the doc's expiry and never period addressing. */
-    const uint64_t now = ZD_GOLDEN_NOT_BEFORE + 3600;
-    const uint64_t expiry = ZD_GOLDEN_NOT_BEFORE + 7200;
-
-    struct zdesc pub;
-    zd_make_desc(&pub, 3, ZD_GOLDEN_NOT_BEFORE);
-
-    uint8_t root[32], out_pk[32];
-    enum zdesc_result r = zdesc_publish_to(f.store, &f.dir, &pub, 7, expiry,
-                                           f.seed, now, root, out_pk);
+    uint8_t out_pk[32];
+    enum zdesc_result r = zdesc_publish_to(c->f.store, &c->f.dir, &c->pub,
+                                           7, c->expiry, c->f.seed, c->now,
+                                           c->root, out_pk);
     ZD_CHECK("e2e: publish succeeds", r == ZDESC_OK);
     ZD_CHECK("e2e: publish reports the signing identity",
-             memcmp(out_pk, f.pk, 32) == 0);
+             memcmp(out_pk, c->f.pk, 32) == 0);
 
     /* The record is addressed by the BLINDED key for the period, and
      * the directory index agrees with an independent derivation. */
     uint8_t want_key[32];
-    zdesc_record_key(want_key, f.pk, zdesc_period_at(now));
+    zdesc_record_key(want_key, c->f.pk, zdesc_period_at(c->now));
     const struct zdesc_entry *entry = NULL;
     ZD_CHECK("e2e: the record is indexed under the blinded key",
-             zdesc_directory_lookup(&f.dir, want_key, &entry) &&
-             entry != NULL && memcmp(entry->root, root, 32) == 0 &&
-             entry->period == zdesc_period_at(now));
+             zdesc_directory_lookup(&c->f.dir, want_key, &entry) &&
+             entry != NULL && memcmp(entry->root, c->root, 32) == 0 &&
+             entry->period == zdesc_period_at(c->now));
 
     /* The blob root is the CONTENT's: derivable from the doc bytes
      * alone, with no store involved. */
     struct zid_doc doc;
     ZD_CHECK("e2e: the doc verifies as a descriptor",
-             entry && zdesc_verify(&entry->doc, NULL, now));
+             entry && zdesc_verify(&entry->doc, NULL, c->now));
     if (entry)
         doc = entry->doc;
     else
         memset(&doc, 0, sizeof(doc));
-    uint8_t wire[ZID_DOC_MAX];
-    size_t wire_len = zid_doc_encode(wire, sizeof(wire), &doc);
+    c->wire_len = zid_doc_encode(c->wire, sizeof(c->wire), &doc);
+    return failures;
+}
+
+/* e2e phase 2: the blob root is derivable from the doc bytes alone,
+ * and the descriptor fetches back from the stored bytes and verifies. */
+static int zd_check_e2e_wire_and_fetch(struct zd_e2e_ctx *c)
+{
+    int failures = 0;
     uint8_t pure_root[32];
     ZD_CHECK("e2e: the blob root is a pure function of the doc bytes",
-             wire_len > 0 &&
-             vcs_blob_root_of(wire, wire_len, pure_root) == VCS_BLOB_OK &&
-             memcmp(pure_root, root, 32) == 0);
+             c->wire_len > 0 &&
+             vcs_blob_root_of(c->wire, c->wire_len, pure_root) ==
+                 VCS_BLOB_OK &&
+             memcmp(pure_root, c->root, 32) == 0);
     ZD_CHECK("e2e: the signed doc really is under one blob chunk",
-             wire_len <= (size_t)VCS_BLOB_MAX_BYTES && wire_len > 223);
+             c->wire_len <= (size_t)VCS_BLOB_MAX_BYTES && c->wire_len > 223);
 
-    struct zdesc got;
-    memset(&got, 0, sizeof(got));
-    r = zdesc_fetch_from(f.store, &f.dir, f.pk, now, &got);
+    memset(&c->got, 0, sizeof(c->got));
+    enum zdesc_result r = zdesc_fetch_from(c->f.store, &c->f.dir, c->f.pk,
+                                           c->now, &c->got);
     ZD_CHECK("e2e: fetch resolves and verifies from the stored bytes",
-             r == ZDESC_OK && zd_desc_eq(&pub, &got));
+             r == ZDESC_OK && zd_desc_eq(&c->pub, &c->got));
+    return failures;
+}
 
-    /* ── tamper + key mismatch ── */
-    enum zcl_log_level saved = zcl_log_level_get();
-    zcl_log_level_set(ZCL_LOG_OFF);
-
+/* A flipped byte anywhere in the stored wire fails verification, and a
+ * foreign identity is refused by name. */
+static int zd_check_tamper_and_key_mismatch(struct zd_e2e_ctx *c)
+{
+    int failures = 0;
     uint8_t bad_wire[ZID_DOC_MAX];
-    memcpy(bad_wire, wire, wire_len);
+    memcpy(bad_wire, c->wire, c->wire_len);
     bad_wire[60] ^= 0x01; /* inside the signed body */
-    struct zdesc_directory tdir;
-    zdesc_directory_init(&tdir);
+    zdesc_directory_init(&c->tdir);
     ZD_CHECK("tamper: a flipped body byte fails verification",
-             zdesc_accept(&tdir, f.pk, bad_wire, wire_len, now, NULL) ==
-                 ZDESC_ERR_VERIFY);
+             zdesc_accept(&c->tdir, c->f.pk, bad_wire, c->wire_len, c->now,
+                          NULL) == ZDESC_ERR_VERIFY);
 
-    memcpy(bad_wire, wire, wire_len);
-    bad_wire[wire_len - 1] ^= 0x01; /* inside the signature */
+    memcpy(bad_wire, c->wire, c->wire_len);
+    bad_wire[c->wire_len - 1] ^= 0x01; /* inside the signature */
     ZD_CHECK("tamper: a flipped signature byte fails verification",
-             zdesc_accept(&tdir, f.pk, bad_wire, wire_len, now, NULL) ==
-                 ZDESC_ERR_VERIFY);
+             zdesc_accept(&c->tdir, c->f.pk, bad_wire, c->wire_len, c->now,
+                          NULL) == ZDESC_ERR_VERIFY);
 
     uint8_t other_pk[32], other_sk[32], other_seed[32];
     memset(other_seed, 0x77, sizeof(other_seed));
     ed25519_keypair(other_pk, other_sk, other_seed);
     ZD_CHECK("key: verifying against another identity is refused by name",
-             zdesc_accept(&tdir, other_pk, wire, wire_len, now, NULL) ==
-                 ZDESC_ERR_KEY_MISMATCH);
+             zdesc_accept(&c->tdir, other_pk, c->wire, c->wire_len, c->now,
+                          NULL) == ZDESC_ERR_KEY_MISMATCH);
     ZD_CHECK("key: fetching under an unknown identity is absent",
-             zdesc_fetch_from(f.store, &f.dir, other_pk, now, NULL) ==
-                 ZDESC_ERR_ABSENT);
+             zdesc_fetch_from(c->f.store, &c->f.dir, other_pk, c->now,
+                              NULL) == ZDESC_ERR_ABSENT);
+    return failures;
+}
 
-    /* ── validity window ── */
+/* The doc's and the body's validity windows, enforced at fetch, accept
+ * and sign time. */
+static int zd_check_validity_window(struct zd_e2e_ctx *c)
+{
+    int failures = 0;
     ZD_CHECK("window: at/after expiry is refused (same period)",
-             zdesc_period_at(expiry) == zdesc_period_at(now) &&
-             zdesc_fetch_from(f.store, &f.dir, f.pk, expiry, NULL) ==
-                 ZDESC_ERR_VERIFY &&
-             zdesc_fetch_from(f.store, &f.dir, f.pk, expiry + 1, NULL) ==
-                 ZDESC_ERR_VERIFY);
+             zdesc_period_at(c->expiry) == zdesc_period_at(c->now) &&
+             zdesc_fetch_from(c->f.store, &c->f.dir, c->f.pk,
+                              c->expiry, NULL) == ZDESC_ERR_VERIFY &&
+             zdesc_fetch_from(c->f.store, &c->f.dir, c->f.pk,
+                              c->expiry + 1, NULL) == ZDESC_ERR_VERIFY);
     /* Before not_before the signature and expiry both hold, so the
      * refusal must come from the BODY's window, not the doc's. */
     ZD_CHECK("window: before not_before is refused",
-             zdesc_accept(&tdir, f.pk, wire, wire_len,
+             zdesc_accept(&c->tdir, c->f.pk, c->wire, c->wire_len,
                           ZD_GOLDEN_NOT_BEFORE - 1, NULL) == ZDESC_ERR_BODY);
     ZD_CHECK("window: exactly at not_before is accepted",
-             zdesc_accept(&tdir, f.pk, wire, wire_len, ZD_GOLDEN_NOT_BEFORE,
-                          NULL) == ZDESC_OK);
+             zdesc_accept(&c->tdir, c->f.pk, c->wire, c->wire_len,
+                          ZD_GOLDEN_NOT_BEFORE, NULL) == ZDESC_OK);
 
     /* A window that never opens is refused at SIGN time. */
     struct zid_doc junk;
     ZD_CHECK("window: expiry <= not_before is refused at sign",
-             !zdesc_sign(&junk, &pub, 1, ZD_GOLDEN_NOT_BEFORE, f.seed) &&
-             !zdesc_sign(&junk, &pub, 1, ZD_GOLDEN_NOT_BEFORE - 1, f.seed));
+             !zdesc_sign(&junk, &c->pub, 1, ZD_GOLDEN_NOT_BEFORE,
+                         c->f.seed) &&
+             !zdesc_sign(&junk, &c->pub, 1, ZD_GOLDEN_NOT_BEFORE - 1,
+                         c->f.seed));
+    return failures;
+}
 
-    /* ── replay: a lower or equal seq can never displace seq 7 ── */
+/* A lower or an equal seq can never displace the held descriptor. */
+static int zd_check_replay_refusal(struct zd_e2e_ctx *c)
+{
+    int failures = 0;
     struct zdesc old_desc;
     zd_make_desc(&old_desc, 1, ZD_GOLDEN_NOT_BEFORE);
     struct zid_doc old_doc, same_doc;
     uint8_t old_wire[ZID_DOC_MAX], same_wire[ZID_DOC_MAX];
     size_t old_len = 0, same_len = 0;
-    if (zdesc_sign(&old_doc, &old_desc, 4, expiry, f.seed))
+    if (zdesc_sign(&old_doc, &old_desc, 4, c->expiry, c->f.seed))
         old_len = zid_doc_encode(old_wire, sizeof(old_wire), &old_doc);
-    if (zdesc_sign(&same_doc, &old_desc, 7, expiry, f.seed))
+    if (zdesc_sign(&same_doc, &old_desc, 7, c->expiry, c->f.seed))
         same_len = zid_doc_encode(same_wire, sizeof(same_wire), &same_doc);
 
     ZD_CHECK("replay: a lower seq is refused STALE",
              old_len > 0 &&
-             zdesc_accept(&f.dir, f.pk, old_wire, old_len, now, NULL) ==
-                 ZDESC_ERR_STALE);
+             zdesc_accept(&c->f.dir, c->f.pk, old_wire, old_len, c->now,
+                          NULL) == ZDESC_ERR_STALE);
     ZD_CHECK("replay: an equal seq is refused STALE",
              same_len > 0 &&
-             zdesc_accept(&f.dir, f.pk, same_wire, same_len, now, NULL) ==
-                 ZDESC_ERR_STALE);
-    entry = NULL;
+             zdesc_accept(&c->f.dir, c->f.pk, same_wire, same_len, c->now,
+                          NULL) == ZDESC_ERR_STALE);
+    const struct zdesc_entry *entry = NULL;
     ZD_CHECK("replay: the directory still holds seq 7",
-             zdesc_directory_find(&f.dir, f.pk, &entry) && entry &&
+             zdesc_directory_find(&c->f.dir, c->f.pk, &entry) && entry &&
              entry->doc.seq == 7 && entry->desc.intro_count == 3);
     ZD_CHECK("replay: a refused publish leaves the held descriptor alone",
-             zdesc_publish_to(f.store, &f.dir, &old_desc, 6, expiry, f.seed,
-                              now, NULL, NULL) == ZDESC_ERR_STALE &&
-             zdesc_fetch_from(f.store, &f.dir, f.pk, now, &got) == ZDESC_OK &&
-             got.intro_count == 3);
+             zdesc_publish_to(c->f.store, &c->f.dir, &old_desc,
+                              6, c->expiry, c->f.seed, c->now,
+                              NULL, NULL) == ZDESC_ERR_STALE &&
+             zdesc_fetch_from(c->f.store, &c->f.dir, c->f.pk, c->now,
+                              &c->got) == ZDESC_OK &&
+             c->got.intro_count == 3);
+    return failures;
+}
 
-    /* A strictly higher seq DOES rotate — for free, no transaction. */
+/* Rotation: a strictly higher seq replaces the held descriptor. */
+static int zd_check_rotate_to_higher_seq(struct zd_e2e_ctx *c)
+{
+    int failures = 0;
     struct zdesc rotated;
     zd_make_desc(&rotated, 5, ZD_GOLDEN_NOT_BEFORE);
     ZD_CHECK("rotate: a higher seq replaces the descriptor",
-             zdesc_publish_to(f.store, &f.dir, &rotated, 8, expiry, f.seed,
-                              now, NULL, NULL) == ZDESC_OK &&
-             zdesc_fetch_from(f.store, &f.dir, f.pk, now, &got) == ZDESC_OK &&
-             got.intro_count == 5);
+             zdesc_publish_to(c->f.store, &c->f.dir, &rotated,
+                              8, c->expiry, c->f.seed, c->now,
+                              NULL, NULL) == ZDESC_OK &&
+             zdesc_fetch_from(c->f.store, &c->f.dir, c->f.pk, c->now,
+                              &c->got) == ZDESC_OK &&
+             c->got.intro_count == 5);
+    return failures;
+}
+
+static int zd_case_publish_fetch(void)
+{
+    int failures = 0;
+    struct zd_e2e_ctx e2e;
+    ZD_CHECK("e2e: store opens", zd_fixture_open(&e2e.f, "e2e", 0x21));
+    if (!e2e.f.store)
+        return failures;
+
+    /* Both times sit inside ONE period, so a window failure below is
+     * unambiguously the doc's expiry and never period addressing. */
+    e2e.now = ZD_GOLDEN_NOT_BEFORE + 3600;
+    e2e.expiry = ZD_GOLDEN_NOT_BEFORE + 7200;
+
+    zd_make_desc(&e2e.pub, 3, ZD_GOLDEN_NOT_BEFORE);
+
+    failures += zd_check_e2e_publish_indexing(&e2e);
+    failures += zd_check_e2e_wire_and_fetch(&e2e);
+
+    /* ── tamper + key mismatch ── */
+    enum zcl_log_level saved = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_OFF);
+    failures += zd_check_tamper_and_key_mismatch(&e2e);
+
+    /* ── validity window ── */
+    failures += zd_check_validity_window(&e2e);
+
+    /* ── replay: a lower or equal seq can never displace seq 7 ── */
+    failures += zd_check_replay_refusal(&e2e);
+
+    /* A strictly higher seq DOES rotate — for free, no transaction. */
+    failures += zd_check_rotate_to_higher_seq(&e2e);
 
     zcl_log_level_set(saved);
-    zd_fixture_close(&f);
+    zd_fixture_close(&e2e.f);
     return failures;
 }
 
