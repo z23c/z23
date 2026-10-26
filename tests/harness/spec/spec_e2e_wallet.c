@@ -146,6 +146,87 @@ static void cleanup_test_db(void)
     wallet_view_init(NULL);
 }
 
+typedef bool (*e2e_page_check_fn)(void);
+
+static bool run_wallet_e2e_case(int64_t transparent_sat, int64_t shielded_sat,
+                                const char *path,
+                                e2e_page_check_fn check_page)
+{
+    bool ok = setup_test_db(transparent_sat, shielded_sat);
+    if (ok) {
+        wallet_view_init(g_tmpdir);
+        e2e_GET(path);
+        ok = check_page();
+    }
+    cleanup_test_db();
+    return ok;
+}
+
+static bool check_mostly_public_privacy_meter(void)
+{
+    /* Should show ~16% private, not claim "untraceable" */
+    bool ok = e2e_has("private");
+    ok = ok && !e2e_has("untraceable");
+    ok = ok && !e2e_has("You are now untraceable");
+    /* Should show nudge to shield remaining */
+    ok = ok && (e2e_has("Shield All") || e2e_has("shield") ||
+                e2e_has("/wallet/shield"));
+    return ok;
+}
+
+static bool check_all_private_celebration(void)
+{
+    /* Should show 100% private */
+    bool ok = e2e_has("100%") || e2e_has("All funds private");
+    /* Should NOT show the nudge */
+    ok = ok && !e2e_has("Shield All");
+    ok = ok && !e2e_has("transparent addresses");
+    return ok;
+}
+
+static bool check_zero_balance_empty_state(void)
+{
+    bool ok = e2e_has("0.00") || e2e_has("0.0000");
+    ok = ok && !e2e_has("untraceable");
+    ok = ok && !e2e_has("sqlite");
+    ok = ok && !e2e_has("ERROR");
+    return ok;
+}
+
+static bool check_dashboard_key_elements(void)
+{
+    bool ok = e2e_has("ZCL");          /* balance shows */
+    ok = ok && e2e_has("Send");    /* nav works */
+    ok = ok && e2e_has("Receive");
+    ok = ok && e2e_has("private"); /* privacy meter */
+    ok = ok && e2e_has("/wallet/node"); /* node strip */
+    return ok;
+}
+
+static bool check_node_page_block_height(void)
+{
+    bool ok = e2e_has("Command Center");
+    ok = ok && e2e_has("Block Height");
+    ok = ok && e2e_has("500"); /* height 500000 */
+    ok = ok && e2e_has("sovereign");
+    return ok;
+}
+
+static bool check_empty_history_clean(void)
+{
+    bool ok = !e2e_has("sqlite");
+    ok = ok && !e2e_has("SELECT");
+    ok = ok && !e2e_has("ERROR");
+    return ok;
+}
+
+static bool check_coins_page_utxos(void)
+{
+    bool ok = e2e_has("Coin Audit") || e2e_has("ZCL");
+    ok = ok && !e2e_has("sqlite");
+    return ok;
+}
+
 int spec_e2e_wallet(void)
 {
     int failures = 0;
@@ -153,118 +234,52 @@ int spec_e2e_wallet(void)
 
     /* ── Test: mostly public funds shows accurate privacy % ── */
     {   printf("e2e: 84%% public shows honest privacy meter... ");
-        bool ok = setup_test_db(
+        bool ok = run_wallet_e2e_case(
             84000000,   /* 0.84 ZCL transparent */
-            16000000    /* 0.16 ZCL shielded */
-        );
-        if (ok) {
-            wallet_view_init(g_tmpdir);
-            e2e_GET("/wallet");
-
-            /* Should show ~16% private, not claim "untraceable" */
-            ok = e2e_has("private");
-            ok = ok && !e2e_has("untraceable");
-            ok = ok && !e2e_has("You are now untraceable");
-            /* Should show nudge to shield remaining */
-            ok = ok && (e2e_has("Shield All") || e2e_has("shield") ||
-                        e2e_has("/wallet/shield"));
-        }
-        cleanup_test_db();
+            16000000,   /* 0.16 ZCL shielded */
+            "/wallet", check_mostly_public_privacy_meter);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     /* ── Test: 100% private shows celebration ── */
     {   printf("e2e: 100%% private shows all-private state... ");
-        bool ok = setup_test_db(0, 100000000); /* 1.0 ZCL all shielded */
-        if (ok) {
-            wallet_view_init(g_tmpdir);
-            e2e_GET("/wallet");
-
-            /* Should show 100% private */
-            ok = e2e_has("100%") || e2e_has("All funds private");
-            /* Should NOT show the nudge */
-            ok = ok && !e2e_has("Shield All");
-            ok = ok && !e2e_has("transparent addresses");
-        }
-        cleanup_test_db();
+        bool ok = run_wallet_e2e_case(0, 100000000, /* 1.0 ZCL all shielded */
+                                      "/wallet", check_all_private_celebration);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     /* ── Test: zero balance shows clean empty state ── */
     {   printf("e2e: zero balance renders cleanly... ");
-        bool ok = setup_test_db(0, 0);
-        if (ok) {
-            wallet_view_init(g_tmpdir);
-            e2e_GET("/wallet");
-
-            ok = e2e_has("0.00") || e2e_has("0.0000");
-            ok = ok && !e2e_has("untraceable");
-            ok = ok && !e2e_has("sqlite");
-            ok = ok && !e2e_has("ERROR");
-        }
-        cleanup_test_db();
+        bool ok = run_wallet_e2e_case(0, 0,
+                                      "/wallet", check_zero_balance_empty_state);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     /* ── Test: dashboard renders all key elements with data ── */
     {   printf("e2e: dashboard with real data has all elements... ");
-        bool ok = setup_test_db(50000000, 50000000); /* 0.5 + 0.5 */
-        if (ok) {
-            wallet_view_init(g_tmpdir);
-            e2e_GET("/wallet");
-
-            ok = e2e_has("ZCL");          /* balance shows */
-            ok = ok && e2e_has("Send");    /* nav works */
-            ok = ok && e2e_has("Receive");
-            ok = ok && e2e_has("private"); /* privacy meter */
-            ok = ok && e2e_has("/wallet/node"); /* node strip */
-        }
-        cleanup_test_db();
+        bool ok = run_wallet_e2e_case(50000000, 50000000, /* 0.5 + 0.5 */
+                                      "/wallet", check_dashboard_key_elements);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     /* ── Test: node page works with real block data ── */
     {   printf("e2e: node page shows block height from DB... ");
-        bool ok = setup_test_db(0, 0);
-        if (ok) {
-            wallet_view_init(g_tmpdir);
-            e2e_GET("/wallet/node");
-
-            ok = e2e_has("Command Center");
-            ok = ok && e2e_has("Block Height");
-            ok = ok && e2e_has("500"); /* height 500000 */
-            ok = ok && e2e_has("sovereign");
-        }
-        cleanup_test_db();
+        bool ok = run_wallet_e2e_case(0, 0, "/wallet/node",
+                                      check_node_page_block_height);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     /* ── Test: history page with no transactions is clean ── */
     {   printf("e2e: empty history shows friendly state... ");
-        bool ok = setup_test_db(0, 0);
-        if (ok) {
-            wallet_view_init(g_tmpdir);
-            e2e_GET("/wallet/history");
-
-            ok = !e2e_has("sqlite");
-            ok = ok && !e2e_has("SELECT");
-            ok = ok && !e2e_has("ERROR");
-        }
-        cleanup_test_db();
+        bool ok = run_wallet_e2e_case(0, 0, "/wallet/history",
+                                      check_empty_history_clean);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     /* ── Test: coins page shows real UTXO data ── */
     {   printf("e2e: coins page shows transparent UTXOs... ");
-        bool ok = setup_test_db(75000000, 25000000);
-        if (ok) {
-            wallet_view_init(g_tmpdir);
-            e2e_GET("/wallet/coins");
-
-            ok = e2e_has("Coin Audit") || e2e_has("ZCL");
-            ok = ok && !e2e_has("sqlite");
-        }
-        cleanup_test_db();
+        bool ok = run_wallet_e2e_case(75000000, 25000000,
+                                      "/wallet/coins", check_coins_page_utxos);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
