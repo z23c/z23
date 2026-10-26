@@ -140,9 +140,10 @@ bool zcl_devloop_distill_first_error(const char *out, size_t len,
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-static bool compiler_error_shape(const char *line, size_t len)
+/* True when the line contains any transient-infrastructure marker listed in
+ * the exclusion table. */
+static bool line_has_transient_error(const char *line, size_t len)
 {
-    static const char marker[] = ": error:";
     static const char *const transient[] = {
         "No space left", "Input/output error", "I/O error", "Killed",
         "out of memory", "Out of memory", "cannot allocate memory",
@@ -154,20 +155,35 @@ static bool compiler_error_shape(const char *line, size_t len)
     };
     for (size_t i = 0; i < sizeof(transient) / sizeof(transient[0]); i++)
         if (bounded_find(line, len, transient[i], strlen(transient[i])) != NULL)
-            return false;
+            return true;
+    return false;
+}
+
+/* If p points at a ':' immediately followed by a decimal number, return a
+ * pointer just past that number; otherwise return NULL. */
+static const char *past_colon_number(const char *p, const char *end)
+{
+    if (p + 1 >= end || *p != ':' || !isdigit((unsigned char)p[1]))
+        return NULL;
+    const char *q = p + 1;
+    while (q < end && isdigit((unsigned char)*q))
+        q++;
+    return q;
+}
+
+static bool compiler_error_shape(const char *line, size_t len)
+{
+    static const char marker[] = ": error:";
+    if (line_has_transient_error(line, len))
+        return false;
     const char *end = line + len;
     for (const char *p = line; p < end; p++) {
-        if (*p != ':' || p + 1 >= end || !isdigit((unsigned char)p[1]))
+        const char *q = past_colon_number(p, end);
+        if (!q)
             continue;
-        const char *q = p + 1;
-        while (q < end && isdigit((unsigned char)*q))
-            q++;
-        if (q >= end || *q != ':' || q + 1 >= end ||
-            !isdigit((unsigned char)q[1]))
+        q = past_colon_number(q, end);
+        if (!q)
             continue;
-        q++;
-        while (q < end && isdigit((unsigned char)*q))
-            q++;
         if ((size_t)(end - q) >= sizeof(marker) - 1 &&
             memcmp(q, marker, sizeof(marker) - 1) == 0)
             return true;
