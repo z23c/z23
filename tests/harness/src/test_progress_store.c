@@ -556,14 +556,9 @@ static int ps_test_projection_scan_quarantine(void)
     return failures;
 }
 
-int test_progress_store(void)
+static int ps_test_open_creates_store(void)
 {
-    printf("\n=== progress_store tests ===\n");
     int failures = 0;
-
-    blocker_module_init();
-
-    /* ── open creates file + table, idempotent on same path ────────── */
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "open");
@@ -630,8 +625,12 @@ int test_progress_store(void)
         test_cleanup_tmpdir(dir);
         test_cleanup_tmpdir(dir2);
     }
+    return failures;
+}
 
-    /* ── cursor persistence: stage cursor survives close + reopen ──── */
+static int ps_test_cursor_persist(void)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "persist");
@@ -666,8 +665,12 @@ int test_progress_store(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── dump_state_json shape ─────────────────────────────────────── */
+static int ps_test_dump_state_shape(void)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "dump");
@@ -704,8 +707,12 @@ int test_progress_store(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── input validation ──────────────────────────────────────────── */
+static int ps_test_input_validation(void)
+{
+    int failures = 0;
     {
         PS_CHECK("open(NULL) rejected", !progress_store_open(NULL));
         PS_CHECK("open(\"\") rejected", !progress_store_open(""));
@@ -714,14 +721,13 @@ int test_progress_store(void)
         PS_CHECK("dump(NULL) rejected",
                  !progress_store_dump_state_json(NULL, NULL));
     }
+    return failures;
+}
 
-    /* ── progress_meta k/v API (S-4b) ───────────────────────────────── */
+static int ps_test_meta_missing_and_blob(sqlite3 *db)
+{
+    int failures = 0;
     {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "progress_store", "meta");
-        PS_CHECK("open for meta", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-
         /* Missing key returns found=false, len=0, function returns true. */
         bool found = true;
         size_t got = 99;
@@ -746,7 +752,19 @@ int test_progress_store(void)
         PS_CHECK("get blob length matches", got == payload_len);
         PS_CHECK("get blob bytes match",
                  memcmp(out, payload, payload_len) == 0);
+    }
+    return failures;
+}
 
+static int ps_test_meta_exact_blob(sqlite3 *db)
+{
+    int failures = 0;
+    {
+        uint8_t out[64] = {0};
+        size_t got = 0;
+        bool found = false;
+        const char *payload = "the-quick-brown-fox";
+        size_t payload_len = strlen(payload);
         memset(out, 0, sizeof(out));
         got = 0; found = false;
         PS_CHECK("exact-BLOB get accepts BLOB storage",
@@ -792,7 +810,17 @@ int test_progress_store(void)
         PS_CHECK("get blob with NULL buf reports length",
                  progress_meta_get(db, "k.blob", NULL, 0, &got, &found) &&
                  got == payload_len && found);
+    }
+    return failures;
+}
 
+static int ps_test_meta_overwrite_and_delete(sqlite3 *db)
+{
+    int failures = 0;
+    {
+        uint8_t out[64] = {0};
+        size_t got = 0;
+        bool found = false;
         /* INSERT OR REPLACE semantics — second set overwrites. */
         const char *payload2 = "OVERWRITTEN";
         PS_CHECK("set overwrite OK",
@@ -845,7 +873,17 @@ int test_progress_store(void)
         PS_CHECK("sentinel not present after delete in compose",
                  progress_meta_get(db, "sentinel", out, sizeof(out),
                                    &got, &found) && !found);
+    }
+    return failures;
+}
 
+static int ps_test_meta_nested_txn(sqlite3 *db)
+{
+    int failures = 0;
+    {
+        uint8_t out[64] = {0};
+        size_t got = 0;
+        bool found = false;
         /* Batch-aware nesting: progress_meta_set / progress_meta_delete detect
          * an open txn (sqlite3_get_autocommit()==0) and nest as a SAVEPOINT
          * instead of a rejected BEGIN IMMEDIATE, so a bare call inside an
@@ -891,7 +929,17 @@ int test_progress_store(void)
         PS_CHECK("get NULL db rejected",
                  !progress_meta_get(NULL, "k", out, sizeof(out),
                                     &got, &found));
+    }
+    return failures;
+}
 
+static int ps_test_meta_persist(sqlite3 *db, const char *dir)
+{
+    int failures = 0;
+    {
+        uint8_t out[64] = {0};
+        size_t got = 0;
+        bool found = false;
         /* Persistence across close + reopen. */
         const char *persist_payload = "PERSISTED-1";
         PS_CHECK("set for persistence",
@@ -910,16 +958,30 @@ int test_progress_store(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── integrity quick_check + quarantine self-heal ──────────────────────
-     * On open the store runs PRAGMA quick_check; a non-"ok" verdict
-     * quarantines the file aside (rename -> progress.kv.corrupt.<ts>...) and
-     * reopens a FRESH, empty store so boot can re-seed and re-fold; mirrors
-     * node.db's db_quick_check_ok path. Proves three things:
-     *   (a) a HEALTHY store reopens with NO quarantine (no false positive),
-     *   (b) a page-garbled store is detected, quarantined, and reopens as a
-     *       fresh, queryable, EMPTY store,
-     *   (c) it is auto-terminating (one quarantine, not a loop). */
+static int ps_test_progress_meta(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "progress_store", "meta");
+        PS_CHECK("open for meta", progress_store_open(dir));
+        sqlite3 *db = progress_store_db();
+
+    failures += ps_test_meta_missing_and_blob(db);
+    failures += ps_test_meta_exact_blob(db);
+    failures += ps_test_meta_overwrite_and_delete(db);
+    failures += ps_test_meta_nested_txn(db);
+    failures += ps_test_meta_persist(db, dir);
+    }
+    return failures;
+}
+
+static int ps_test_consensus_quarantine(void)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "quarantine");
@@ -1022,14 +1084,12 @@ int test_progress_store(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── FUTURE schema marker (binary downgrade) refuses the open ──────────
-     * A consensus.db written by a NEWER binary (schema marker version >
-     * CONSENSUS_DB_SCHEMA_VERSION) must refuse the open outright (see
-     * consensus_db_schema_is_downgrade() / progress_store_open()). Proves:
-     * (1) a current-version marker opens, (2) a future-version marker makes
-     * the NEXT open fail (no handle), (3) the file is untouched: a refusal,
-     * not a quarantine or a rewrite. */
+static int ps_test_future_schema_refusal(void)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "downgrade");
@@ -1093,17 +1153,13 @@ int test_progress_store(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── projection_store integrity quick_check + quarantine self-heal ────
-     * projection_store's progress.kv projection tables (address_index /
-     * txindex / created_outputs) are rebuildable, but a corrupt file left in
-     * place would surface as a mid-fold SQLITE_CORRUPT with no named blocker.
-     * Both stores run the SAME shared gate (sqlite_integrity_gate.c). Proves:
-     *   (a) a HEALTHY store reopens with NO quarantine,
-     *   (b) a page-garbled store is detected, quarantined, and reopens as a
-     *       fresh, queryable, EMPTY store,
-     *   (c) it is auto-terminating (one quarantine, not a loop). */
-    for (unsigned receipt_version = 1; receipt_version <= 3; receipt_version++) {
+static int ps_test_projection_quarantine(unsigned receipt_version)
+{
+    int failures = 0;
+    {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "proj_quarantine");
         char fpath[512];
@@ -1236,14 +1292,12 @@ int test_progress_store(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── projection_store split: independent connection + lock-order
-     *    concurrency ────────────────────────────────────────────────
-     * The projection handle is a SECOND sqlite3 connection to the SAME
-     * progress.kv file. Two threads writing concurrently (kernel handle under
-     * progress_store_tx_lock, projection handle under projection_store_tx_lock)
-     * must not deadlock (disjoint mutex domains; WAL single-writer resolved by
-     * busy_timeout) and both must commit their own row. */
+static int ps_test_projection_split(void)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "projsplit");
@@ -1322,20 +1376,13 @@ int test_progress_store(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── progress.kv stays inside its size bound under churn ─────────
-     * Compaction keeps the file from tracking the high-water mark of
-     * everything ever indexed. Fill a projection table, delete almost all of
-     * it, and prove the FILE shrinks, not just the row count. */
+static int ps_test_compact_grow_and_drop(sqlite3 *pdb)
+{
+    int failures = 0;
     {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "progress_store", "compact");
-        PS_CHECK("compact: kernel open", progress_store_open(dir));
-        PS_CHECK("compact: projection open", projection_store_open(dir));
-
-        sqlite3 *pdb = projection_store_db();
-        PS_CHECK("compact: projection handle live", pdb != NULL);
-
         struct projection_store_usage empty;
         PS_CHECK("compact: a fresh store measures itself",
                  projection_store_usage(&empty) && empty.file_bytes > 0 &&
@@ -1386,7 +1433,14 @@ int test_progress_store(void)
                  measured_waste && wasted.file_bytes >= grown.file_bytes * 9 / 10);
         PS_CHECK("compact: the freed space is visible as free bytes",
                  measured_waste && wasted.free_bytes > wasted.live_bytes);
+    }
+    return failures;
+}
 
+static int ps_test_compact_bounds(sqlite3 *pdb, const char *dir)
+{
+    int failures = 0;
+    {
         /* A bound the store is inside must not trigger a rewrite. */
         PS_CHECK("compact: an in-bound store is left alone",
                  !projection_store_compact_if_needed(1024LL * 1024 * 1024, 250,
@@ -1431,15 +1485,30 @@ int test_progress_store(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── compaction never runs a VACUUM while a writer holds the tx lock ──
-     * projection_store_compact_if_needed() calls the BLOCKING
-     * projection_store_tx_lock(), the same recursive mutex every writer
-     * (address_index_service, txindex_projection_service) takes via
-     * projection_store_tx_trylock(), so it can only block until the writer
-     * releases. A background thread holds the lock across a sleep; the
-     * compaction call here must not observe the lock as free (and start its
-     * VACUUM) until that thread has released it. */
+static int ps_test_progress_compact(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "progress_store", "compact");
+        PS_CHECK("compact: kernel open", progress_store_open(dir));
+        PS_CHECK("compact: projection open", projection_store_open(dir));
+
+        sqlite3 *pdb = projection_store_db();
+        PS_CHECK("compact: projection handle live", pdb != NULL);
+
+        failures += ps_test_compact_grow_and_drop(pdb);
+        failures += ps_test_compact_bounds(pdb, dir);
+    }
+    return failures;
+}
+
+static int ps_test_compact_under_lock(void)
+{
+    int failures = 0;
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "compact_lock");
@@ -1509,6 +1578,88 @@ int test_progress_store(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
+
+int test_progress_store(void)
+{
+    printf("\n=== progress_store tests ===\n");
+    int failures = 0;
+
+    blocker_module_init();
+
+    /* ── open creates file + table, idempotent on same path ────────── */
+    failures += ps_test_open_creates_store();
+
+    /* ── cursor persistence: stage cursor survives close + reopen ──── */
+    failures += ps_test_cursor_persist();
+
+    /* ── dump_state_json shape ─────────────────────────────────────── */
+    failures += ps_test_dump_state_shape();
+
+    /* ── input validation ──────────────────────────────────────────── */
+    failures += ps_test_input_validation();
+
+    /* ── progress_meta k/v API (S-4b) ───────────────────────────────── */
+    failures += ps_test_progress_meta();
+
+    /* ── integrity quick_check + quarantine self-heal ──────────────────────
+     * On open the store runs PRAGMA quick_check; a non-"ok" verdict
+     * quarantines the file aside (rename -> progress.kv.corrupt.<ts>...) and
+     * reopens a FRESH, empty store so boot can re-seed and re-fold; mirrors
+     * node.db's db_quick_check_ok path. Proves three things:
+     *   (a) a HEALTHY store reopens with NO quarantine (no false positive),
+     *   (b) a page-garbled store is detected, quarantined, and reopens as a
+     *       fresh, queryable, EMPTY store,
+     *   (c) it is auto-terminating (one quarantine, not a loop). */
+    failures += ps_test_consensus_quarantine();
+
+    /* ── FUTURE schema marker (binary downgrade) refuses the open ──────────
+     * A consensus.db written by a NEWER binary (schema marker version >
+     * CONSENSUS_DB_SCHEMA_VERSION) must refuse the open outright (see
+     * consensus_db_schema_is_downgrade() / progress_store_open()). Proves:
+     * (1) a current-version marker opens, (2) a future-version marker makes
+     * the NEXT open fail (no handle), (3) the file is untouched: a refusal,
+     * not a quarantine or a rewrite. */
+    failures += ps_test_future_schema_refusal();
+
+    /* ── projection_store integrity quick_check + quarantine self-heal ────
+     * projection_store's progress.kv projection tables (address_index /
+     * txindex / created_outputs) are rebuildable, but a corrupt file left in
+     * place would surface as a mid-fold SQLITE_CORRUPT with no named blocker.
+     * Both stores run the SAME shared gate (sqlite_integrity_gate.c). Proves:
+     *   (a) a HEALTHY store reopens with NO quarantine,
+     *   (b) a page-garbled store is detected, quarantined, and reopens as a
+     *       fresh, queryable, EMPTY store,
+     *   (c) it is auto-terminating (one quarantine, not a loop). */
+    for (unsigned receipt_version = 1; receipt_version <= 3; receipt_version++) {
+        failures += ps_test_projection_quarantine(receipt_version);
+    }
+
+    /* ── projection_store split: independent connection + lock-order
+     *    concurrency ────────────────────────────────────────────────
+     * The projection handle is a SECOND sqlite3 connection to the SAME
+     * progress.kv file. Two threads writing concurrently (kernel handle under
+     * progress_store_tx_lock, projection handle under projection_store_tx_lock)
+     * must not deadlock (disjoint mutex domains; WAL single-writer resolved by
+     * busy_timeout) and both must commit their own row. */
+    failures += ps_test_projection_split();
+
+    /* ── progress.kv stays inside its size bound under churn ─────────
+     * Compaction keeps the file from tracking the high-water mark of
+     * everything ever indexed. Fill a projection table, delete almost all of
+     * it, and prove the FILE shrinks, not just the row count. */
+    failures += ps_test_progress_compact();
+
+    /* ── compaction never runs a VACUUM while a writer holds the tx lock ──
+     * projection_store_compact_if_needed() calls the BLOCKING
+     * projection_store_tx_lock(), the same recursive mutex every writer
+     * (address_index_service, txindex_projection_service) takes via
+     * projection_store_tx_trylock(), so it can only block until the writer
+     * releases. A background thread holds the lock across a sleep; the
+     * compaction call here must not observe the lock as free (and start its
+     * VACUUM) until that thread has released it. */
+    failures += ps_test_compact_under_lock();
 
     /* The integrity scan, off the boot thread — each fixture is its own
      * function so this one stays inside the complexity cap. */
