@@ -52,9 +52,45 @@ static bool globs_from_default(char ***out_globs, size_t *out_n)
     return true;
 }
 
+/* True when all pointer arguments to vcs_seal_load_globs are non-NULL. */
+static bool load_globs_args_present(const char *repo_root, char ***out_globs,
+                                    size_t *out_n)
+{
+    return repo_root && out_globs && out_n;
+}
+
+/* Strip trailing newline/CR and leading whitespace from one sealed_paths
+ * line; returns the glob text, or NULL when the line is blank or comment. */
+static char *parse_sealed_path_line(char *line)
+{
+    /* strip trailing newline / CR */
+    size_t l = strlen(line);
+    while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
+        line[--l] = '\0';
+    /* strip leading whitespace */
+    char *s = line;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '\0' || *s == '#')
+        return NULL;
+    return s;
+}
+
+/* Make room in the glob array for one more entry; returns the array
+ * (possibly moved), or NULL when the growth allocation fails. */
+static char **glob_array_reserve(char **g, size_t count, size_t *cap)
+{
+    if (count != *cap)
+        return g;
+    size_t ncap = *cap ? *cap * 2 : 16;
+    char **ng = zcl_realloc(g, ncap * sizeof(*ng), "vcs_globs");
+    if (ng)
+        *cap = ncap;
+    return ng;
+}
+
 bool vcs_seal_load_globs(const char *repo_root, char ***out_globs, size_t *out_n)
 {
-    if (!repo_root || !out_globs || !out_n)
+    if (!load_globs_args_present(repo_root, out_globs, out_n))
         LOG_FAIL("vcs", "null arg to load_globs");
     *out_globs = NULL;
     *out_n = 0;
@@ -73,22 +109,12 @@ bool vcs_seal_load_globs(const char *repo_root, char ***out_globs, size_t *out_n
     char line[VCS_PATH_MAX + 2];
     bool ok = true;
     while (fgets(line, sizeof(line), f)) {
-        /* strip trailing newline / CR */
-        size_t l = strlen(line);
-        while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
-            line[--l] = '\0';
-        /* strip leading whitespace */
-        char *s = line;
-        while (*s == ' ' || *s == '\t') s++;
-        if (*s == '\0' || *s == '#')
+        char *s = parse_sealed_path_line(line);
+        if (!s)
             continue;
-        if (count == cap) {
-            size_t ncap = cap ? cap * 2 : 16;
-            char **ng = zcl_realloc(g, ncap * sizeof(*ng), "vcs_globs");
-            if (!ng) { ok = false; break; }
-            g = ng;
-            cap = ncap;
-        }
+        char **ng = glob_array_reserve(g, count, &cap);
+        if (!ng) { ok = false; break; }
+        g = ng;
         g[count] = zcl_strdup(s, "vcs_glob");
         if (!g[count]) { ok = false; break; }
         count++;
