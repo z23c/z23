@@ -238,20 +238,11 @@ static void zc4_cmd_free(struct zc4_cmd *c)
     json_free(&c->input);
 }
 
-/* Commit one small package; root_hex_out (65) gets the package root. */
-static bool zc4_commit_one(const char *dd, uint8_t key_seed, uint64_t seq,
-                           const char *name, const char *license,
-                           int content_seed, const char *znam,
-                           char root_hex_out[65])
+/* Writes LICENSE and src/x.c under pkgdir and adds both to the manifest. */
+static bool zc4_commit_write_tree(const char *pkgdir, const char *license,
+                                  int content_seed,
+                                  struct vcs_package_manifest *manifest)
 {
-    if (!g_zc4_recipe_ready && !zc4_use_recipe())
-        return false;
-    char pkgdir[512];
-    snprintf(pkgdir, sizeof(pkgdir), "%s/src-%d", dd, content_seed);
-    mkdir(pkgdir, 0700);
-
-    struct vcs_package_manifest manifest;
-    vcs_package_manifest_init(&manifest);
     char license_text[96];
     snprintf(license_text, sizeof(license_text),
              "%s\nsee the LICENSE file, variant %d\n", license,
@@ -284,12 +275,30 @@ static bool zc4_commit_one(const char *dd, uint8_t key_seed, uint64_t seq,
                                     strlen(license_text), lic_hash) &&
              vcs_package_chunk_hash((const uint8_t *)source,
                                     strlen(source), src_hash) &&
-             vcs_package_manifest_add(&manifest, "LICENSE",
+             vcs_package_manifest_add(manifest, "LICENSE",
                                       VCS_PACKAGE_MODE_FILE,
                                       strlen(license_text), lic_hash, 1) &&
-             vcs_package_manifest_add(&manifest, "src/x.c",
+             vcs_package_manifest_add(manifest, "src/x.c",
                                       VCS_PACKAGE_MODE_FILE,
                                       strlen(source), src_hash, 1);
+    return ok;
+}
+
+/* Commit one small package; root_hex_out (65) gets the package root. */
+static bool zc4_commit_one(const char *dd, uint8_t key_seed, uint64_t seq,
+                           const char *name, const char *license,
+                           int content_seed, const char *znam,
+                           char root_hex_out[65])
+{
+    if (!g_zc4_recipe_ready && !zc4_use_recipe())
+        return false;
+    char pkgdir[512];
+    snprintf(pkgdir, sizeof(pkgdir), "%s/src-%d", dd, content_seed);
+    mkdir(pkgdir, 0700);
+
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    bool ok = zc4_commit_write_tree(pkgdir, license, content_seed, &manifest);
     uint8_t *m_wire = NULL;
     size_t m_wire_len = 0;
     uint8_t root[32];
@@ -416,6 +425,47 @@ static void zc4_resolve(struct zc4_cmd *c, const char *dd, const char *name)
     zcl_native_handle_zcode_package_resolve(&c->request, &c->reply);
 }
 
+static bool zc4_show_facts_ok(const struct zc4_cmd *c)
+{
+    return c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+           json_get_bool(json_get(&c->reply.data, "has_published")) &&
+           json_get_int(json_get(&c->reply.data, "release_count")) == 2 &&
+           json_get_int(json_get(&c->reply.data, "latest_sequence")) == 2;
+}
+
+static bool zc4_show_latest_ok(const struct json_value *data)
+{
+    const char *latest = json_get_str(json_get(data, "latest_name"));
+    const char *rzp =
+        json_get_str(json_get(data, "release_znam_pointer"));
+    return latest && strcmp(latest, "rhett/json-lite") == 0 &&
+           rzp && strcmp(rzp, "jsonlite") == 0;
+}
+
+static bool zc4_show_profile_ok(const struct json_value *zp)
+{
+    const char *zp_name = zp ? json_get_str(json_get(zp, "name")) : NULL;
+    const char *zp_display =
+        zp ? json_get_str(json_get(zp, "display_name")) : NULL;
+    return zp && json_get_bool(json_get(zp, "found")) &&
+           json_get_int(json_get(zp, "claimant_names")) == 1 &&
+           zp_name && strcmp(zp_name, "rhett") == 0 &&
+           zp_display && strcmp(zp_display, "Rhett") == 0;
+}
+
+static bool zc4_show_binding_ok(const struct json_value *zp,
+                                const char *owner_a)
+{
+    const struct json_value *binding = zp ? json_get(zp, "binding") : NULL;
+    const char *b_owner =
+        binding ? json_get_str(json_get(binding, "owner_address")) : NULL;
+    const char *b_expected =
+        binding ? json_get_str(json_get(binding, "expected_owner")) : NULL;
+    return binding && json_get_bool(json_get(binding, "bound")) &&
+           b_owner && b_expected && strcmp(b_owner, b_expected) == 0 &&
+           strcmp(b_owner, owner_a) == 0;
+}
+
 /* ── 1: contributor show ────────────────────────────────────────────── */
 static int t_show(void)
 {
@@ -441,34 +491,12 @@ static int t_show(void)
 
     struct zc4_cmd c;
     zc4_show(&c, dd, pk_a);
-    ZC4_CHECK("show: passes with release facts",
-              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-              json_get_bool(json_get(&c.reply.data, "has_published")) &&
-              json_get_int(json_get(&c.reply.data, "release_count")) == 2 &&
-              json_get_int(json_get(&c.reply.data, "latest_sequence")) == 2);
-    const char *latest = json_get_str(json_get(&c.reply.data, "latest_name"));
-    const char *rzp =
-        json_get_str(json_get(&c.reply.data, "release_znam_pointer"));
+    ZC4_CHECK("show: passes with release facts", zc4_show_facts_ok(&c));
     ZC4_CHECK("show: latest release + its znam pointer",
-              latest && strcmp(latest, "rhett/json-lite") == 0 &&
-              rzp && strcmp(rzp, "jsonlite") == 0);
+              zc4_show_latest_ok(&c.reply.data));
     const struct json_value *zp = json_get(&c.reply.data, "znam_profile");
-    const struct json_value *binding = zp ? json_get(zp, "binding") : NULL;
-    const char *zp_name = zp ? json_get_str(json_get(zp, "name")) : NULL;
-    const char *zp_display =
-        zp ? json_get_str(json_get(zp, "display_name")) : NULL;
-    const char *b_owner =
-        binding ? json_get_str(json_get(binding, "owner_address")) : NULL;
-    const char *b_expected =
-        binding ? json_get_str(json_get(binding, "expected_owner")) : NULL;
     ZC4_CHECK("show: bound profile with binding proof",
-              zp && json_get_bool(json_get(zp, "found")) &&
-              json_get_int(json_get(zp, "claimant_names")) == 1 &&
-              zp_name && strcmp(zp_name, "rhett") == 0 &&
-              zp_display && strcmp(zp_display, "Rhett") == 0 &&
-              binding && json_get_bool(json_get(binding, "bound")) &&
-              b_owner && b_expected && strcmp(b_owner, b_expected) == 0 &&
-              strcmp(b_owner, owner_a) == 0);
+              zc4_show_profile_ok(zp) && zc4_show_binding_ok(zp, owner_a));
     const struct json_value *roots = json_get(&c.reply.data, "package_roots");
     ZC4_CHECK("show: package roots page",
               roots && json_size(roots) == 2 &&
@@ -492,6 +520,15 @@ static int t_show(void)
 
     test_rm_rf_recursive(dd);
     return failures;
+}
+
+static bool zc4_packages_row_ok(const struct json_value *rows)
+{
+    const struct json_value *row0 = rows ? json_at(rows, 0) : NULL;
+    return row0 && json_get_str(json_get(row0, "name")) &&
+           json_get_str(json_get(row0, "package_root")) &&
+           json_get_str(json_get(row0, "release_id")) &&
+           json_get_str(json_get(row0, "license"));
 }
 
 /* ── 2: contributor packages ────────────────────────────────────────── */
@@ -522,12 +559,8 @@ static int t_packages(void)
               json_get_int(json_get(&c.reply.data, "rendered")) == 2 &&
               !json_get_bool(json_get(&c.reply.data, "items_truncated")) &&
               rows && json_size(rows) == 2);
-    const struct json_value *row0 = rows ? json_at(rows, 0) : NULL;
     ZC4_CHECK("packages: row carries identity facts",
-              row0 && json_get_str(json_get(row0, "name")) &&
-              json_get_str(json_get(row0, "package_root")) &&
-              json_get_str(json_get(row0, "release_id")) &&
-              json_get_str(json_get(row0, "license")));
+              zc4_packages_row_ok(rows));
     zc4_cmd_free(&c);
 
     zc4_packages(&c, dd, pk_c);
@@ -544,6 +577,37 @@ static int t_packages(void)
 
     test_rm_rf_recursive(dd);
     return failures;
+}
+
+static bool zc4_resolve_separated_ok(const struct zc4_cmd *c,
+                                     const struct json_value *zp,
+                                     const struct json_value *zi)
+{
+    const char *id_src = zi ? json_get_str(json_get(zi, "source")) : NULL;
+    const char *p_src = zp ? json_get_str(json_get(zp, "source")) : NULL;
+    return c->reply.status == ZCL_COMMAND_STATUS_PASSED && zp && zi &&
+           p_src && strcmp(p_src, "znam-record") == 0 &&
+           id_src && strcmp(id_src, "signed-release") == 0 &&
+           json_get_str(json_get(&c->reply.data, "identity_note"));
+}
+
+static bool zc4_resolve_binding_ok(const struct json_value *zp,
+                                   const struct json_value *zi,
+                                   const char *pk_a, const char *root1)
+{
+    const struct json_value *binding = zp ? json_get(zp, "binding") : NULL;
+    const char *claimed =
+        zp ? json_get_str(json_get(zp, "claimed_package_root")) : NULL;
+    const char *id_pub =
+        zi ? json_get_str(json_get(zi, "publisher")) : NULL;
+    const char *id_root =
+        zi ? json_get_str(json_get(zi, "package_root")) : NULL;
+    return binding && json_get_bool(json_get(binding, "bound")) &&
+           claimed && strcmp(claimed, root1) == 0 &&
+           id_pub && strcmp(id_pub, pk_a) == 0 &&
+           id_root && strcmp(id_root, root1) == 0 &&
+           json_get_bool(json_get(zi, "matches_pointer_root")) &&
+           json_get_bool(json_get(zi, "matches_pointer_publisher"));
 }
 
 /* ── 3: package resolve + rejections ────────────────────────────────── */
@@ -573,27 +637,10 @@ static int t_resolve(void)
     zc4_resolve(&c, dd, "ringbuffer");
     const struct json_value *zp = json_get(&c.reply.data, "pointer");
     const struct json_value *zi = json_get(&c.reply.data, "identity");
-    const struct json_value *binding = zp ? json_get(zp, "binding") : NULL;
-    const char *claimed =
-        zp ? json_get_str(json_get(zp, "claimed_package_root")) : NULL;
-    const char *id_pub =
-        zi ? json_get_str(json_get(zi, "publisher")) : NULL;
-    const char *id_root =
-        zi ? json_get_str(json_get(zi, "package_root")) : NULL;
-    const char *id_src = zi ? json_get_str(json_get(zi, "source")) : NULL;
-    const char *p_src = zp ? json_get_str(json_get(zp, "source")) : NULL;
     ZC4_CHECK("resolve: pointer and identity separated",
-              c.reply.status == ZCL_COMMAND_STATUS_PASSED && zp && zi &&
-              p_src && strcmp(p_src, "znam-record") == 0 &&
-              id_src && strcmp(id_src, "signed-release") == 0 &&
-              json_get_str(json_get(&c.reply.data, "identity_note")));
+              zc4_resolve_separated_ok(&c, zp, zi));
     ZC4_CHECK("resolve: binding proof and root match",
-              binding && json_get_bool(json_get(binding, "bound")) &&
-              claimed && strcmp(claimed, root1) == 0 &&
-              id_pub && strcmp(id_pub, pk_a) == 0 &&
-              id_root && strcmp(id_root, root1) == 0 &&
-              json_get_bool(json_get(zi, "matches_pointer_root")) &&
-              json_get_bool(json_get(zi, "matches_pointer_publisher")));
+              zc4_resolve_binding_ok(zp, zi, pk_a, root1));
     zc4_cmd_free(&c);
 
     zc4_resolve(&c, dd, "nosuch");
@@ -760,6 +807,28 @@ static int t_impersonation(void)
     return failures;
 }
 
+static bool zc4_rebuild_identical_ok(const struct zc4_cmd *a,
+                                     const struct zc4_cmd *b)
+{
+    const struct json_value *pa = json_get(&a->reply.data, "znam_profile");
+    const struct json_value *pb = json_get(&b->reply.data, "znam_profile");
+    const char *na = pa ? json_get_str(json_get(pa, "name")) : NULL;
+    const char *nb = pb ? json_get_str(json_get(pb, "name")) : NULL;
+    const char *la = json_get_str(json_get(&a->reply.data, "latest_name"));
+    const char *lb = json_get_str(json_get(&b->reply.data, "latest_name"));
+    const char *ia =
+        json_get_str(json_get(&a->reply.data, "latest_release_id"));
+    const char *ib =
+        json_get_str(json_get(&b->reply.data, "latest_release_id"));
+    return a->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+           b->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+           json_get_int(json_get(&a->reply.data, "release_count")) ==
+               json_get_int(json_get(&b->reply.data, "release_count")) &&
+           la && lb && strcmp(la, lb) == 0 &&
+           ia && ib && strcmp(ia, ib) == 0 &&
+           na && nb && strcmp(na, nb) == 0;
+}
+
 /* ── 6: rebuild equivalence (reopen node.db + rebuild index) ────────── */
 static int t_rebuild_equivalence(void)
 {
@@ -785,22 +854,8 @@ static int t_rebuild_equivalence(void)
     struct zc4_cmd b;
     zc4_show(&a, dd, pk_a);
     zc4_show(&b, dd, pk_a);
-    const struct json_value *pa = json_get(&a.reply.data, "znam_profile");
-    const struct json_value *pb = json_get(&b.reply.data, "znam_profile");
-    const char *na = pa ? json_get_str(json_get(pa, "name")) : NULL;
-    const char *nb = pb ? json_get_str(json_get(pb, "name")) : NULL;
-    const char *la = json_get_str(json_get(&a.reply.data, "latest_name"));
-    const char *lb = json_get_str(json_get(&b.reply.data, "latest_name"));
-    const char *ia = json_get_str(json_get(&a.reply.data, "latest_release_id"));
-    const char *ib = json_get_str(json_get(&b.reply.data, "latest_release_id"));
     ZC4_CHECK("rebuild: profile output identical across rebuilds",
-              a.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-              b.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-              json_get_int(json_get(&a.reply.data, "release_count")) ==
-                  json_get_int(json_get(&b.reply.data, "release_count")) &&
-              la && lb && strcmp(la, lb) == 0 &&
-              ia && ib && strcmp(ia, ib) == 0 &&
-              na && nb && strcmp(na, nb) == 0);
+              zc4_rebuild_identical_ok(&a, &b));
     zc4_cmd_free(&a);
     zc4_cmd_free(&b);
 
