@@ -163,6 +163,148 @@ static void psc_join_shard(int shard, void *vctx)
     }
 }
 
+/* Allocate the context's three per-shard arrays; -1 on OOM. */
+static int psc_join_alloc_shard_arrays(struct psc_join_ctx *ctx)
+{
+    ctx->buckets  = zcl_calloc((size_t)ctx->s_shards, sizeof(*ctx->buckets), "psc_buckets");
+    ctx->bucket_n = zcl_calloc((size_t)ctx->s_shards, sizeof(*ctx->bucket_n), "psc_bucket_n");
+    ctx->out      = zcl_calloc((size_t)ctx->s_shards, sizeof(*ctx->out), "psc_shard_out");
+    if (!ctx->buckets || !ctx->bucket_n || !ctx->out) return -1;
+    return 0;
+}
+
+/* Counting-sort pass 1: route each event to its shard and count per bucket. */
+static void psc_join_count_shard_events(struct psc_join_ctx *ctx, size_t n,
+                                        uint32_t *shard_of)
+{
+    for (size_t i = 0; i < n; i++) {
+        uint32_t s = (uint32_t)(psc_key_hash(ctx->ev[i].txid, ctx->ev[i].vout) %
+                                (uint64_t)ctx->s_shards);
+        shard_of[i] = s;
+        ctx->bucket_n[s]++;
+    }
+}
+
+/* Allocate each non-empty shard's sort-record bucket; -1 on OOM. */
+static int psc_join_alloc_buckets(struct psc_join_ctx *ctx)
+{
+    bool alloc_ok = true;
+    for (int s = 0; s < ctx->s_shards && alloc_ok; s++) {
+        if (ctx->bucket_n[s] == 0) continue;
+        ctx->buckets[s] = zcl_malloc(ctx->bucket_n[s] * sizeof(**ctx->buckets),
+                                     "psc_bucket");
+        if (!ctx->buckets[s]) alloc_ok = false;
+    }
+    return alloc_ok ? 0 : -1;
+}
+
+/* Counting-sort pass 2: place each event's sort record into its bucket. */
+static int psc_join_place_records(struct psc_join_ctx *ctx, size_t n,
+                                  const uint32_t *shard_of)
+{
+    size_t *fill = zcl_calloc((size_t)ctx->s_shards, sizeof(*fill), "psc_fill");
+    if (!fill) return -1;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t s = shard_of[i];
+        struct psc_sortrec *r = &ctx->buckets[s][fill[s]++];
+        memcpy(r->txid, ctx->ev[i].txid, 32);
+        r->vout = ctx->ev[i].vout;
+        r->seq = ctx->ev[i].seq;
+        r->idx = (uint32_t)i;
+    }
+    free(fill);
+    return 0;
+}
+
+/* Scatter the global event array into the per-shard buckets. On OOM it frees
+ * the context's allocations and returns -1. */
+static int psc_join_scatter(struct psc_join_ctx *ctx, size_t n)
+{
+    uint32_t *shard_of = NULL;
+    if (n) {
+        shard_of = zcl_malloc(n * sizeof(*shard_of), "psc_shard_of");
+        if (!shard_of) {
+            free(ctx->buckets); free(ctx->bucket_n); free(ctx->out);
+            return -1;
+        }
+    }
+    psc_join_count_shard_events(ctx, n, shard_of);
+    if (psc_join_alloc_buckets(ctx) != 0 ||
+        psc_join_place_records(ctx, n, shard_of) != 0) {
+        for (int s = 0; s < ctx->s_shards; s++) free(ctx->buckets[s]);
+        free(shard_of); free(ctx->buckets); free(ctx->bucket_n); free(ctx->out);
+        return -1;
+    }
+    free(shard_of);
+    return 0;
+}
+
+/* Scan the per-shard outputs for a hard error, the smallest-seq typed
+ * reject, and the total live-coin count. */
+static void psc_join_reduce(const struct psc_shard_out *out, int s_shards,
+                            bool *any_error, bool *any_reject,
+                            char best_kind[48], uint64_t *best_seq,
+                            int32_t *best_height, size_t *total)
+{
+    for (int s = 0; s < s_shards; s++) {
+        if (out[s].error) *any_error = true;
+        if (out[s].rejected) {
+            *any_reject = true;
+            if (out[s].reject_seq < *best_seq) {
+                *best_seq = out[s].reject_seq;
+                *best_height = out[s].reject_height;
+                snprintf(best_kind, 48, "%s", out[s].reject);
+            }
+        }
+        *total += out[s].n;
+    }
+}
+
+/* Concatenate the per-shard live-coin arrays into one flat array. */
+static struct psc_coin *psc_join_merge_coins(const struct psc_shard_out *out,
+                                             int s_shards, size_t total)
+{
+    struct psc_coin *coins = total
+        ? zcl_malloc(total * sizeof(*coins), "psc_coins") : NULL;
+    if (coins) {
+        size_t w = 0;
+        for (int s = 0; s < s_shards; s++) {
+            if (out[s].n)
+                memcpy(coins + w, out[s].coins,
+                       out[s].n * sizeof(*coins));
+            w += out[s].n;
+        }
+    }
+    return coins;
+}
+
+/* Report the reduce result: fill reject/reject_height, or hand back the
+ * merged coins. Returns 0 on success, -1 on failure. */
+static int psc_join_report(struct psc_join_ctx *ctx, size_t total,
+                           bool any_error, bool any_reject,
+                           const char *best_kind, int32_t best_height,
+                           struct psc_coin **out_coins, size_t *out_count,
+                           char reject[48], int32_t *reject_height)
+{
+    if (any_error) {
+        if (reject) snprintf(reject, 48, "internal");
+    } else if (any_reject) {
+        if (reject) snprintf(reject, 48, "%s", best_kind);
+        if (reject_height) *reject_height = best_height;
+    } else {
+        struct psc_coin *coins = psc_join_merge_coins(ctx->out, ctx->s_shards,
+                                                      total);
+        if (total && !coins) {
+            if (reject) snprintf(reject, 48, "internal");
+        } else {
+            *out_coins = coins;
+            *out_count = total;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 bool psc_join(const struct psc_event *ev, size_t n, const uint8_t *scripts,
               int s_shards, int k_workers, psc_parallel_for_fn parallel_for,
               struct psc_coin **out_coins, size_t *out_count,
@@ -180,10 +322,7 @@ bool psc_join(const struct psc_event *ev, size_t n, const uint8_t *scripts,
     ctx.ev = ev;
     ctx.scripts = scripts;
     ctx.s_shards = s_shards;
-    ctx.buckets  = zcl_calloc((size_t)s_shards, sizeof(*ctx.buckets), "psc_buckets");
-    ctx.bucket_n = zcl_calloc((size_t)s_shards, sizeof(*ctx.bucket_n), "psc_bucket_n");
-    ctx.out      = zcl_calloc((size_t)s_shards, sizeof(*ctx.out), "psc_shard_out");
-    if (!ctx.buckets || !ctx.bucket_n || !ctx.out) {
+    if (psc_join_alloc_shard_arrays(&ctx) != 0) {
         free(ctx.buckets); free(ctx.bucket_n); free(ctx.out);
         if (reject) snprintf(reject, 48, "internal");
         return false;
@@ -191,53 +330,10 @@ bool psc_join(const struct psc_event *ev, size_t n, const uint8_t *scripts,
 
     /* Scatter (counting sort): pass 1 counts per shard, pass 2 places records.
      * O(E) single-threaded — cheap relative to the parallel per-shard sort. */
-    uint32_t *shard_of = NULL;
-    if (n) {
-        shard_of = zcl_malloc(n * sizeof(*shard_of), "psc_shard_of");
-        if (!shard_of) {
-            free(ctx.buckets); free(ctx.bucket_n); free(ctx.out);
-            if (reject) snprintf(reject, 48, "internal");
-            return false;
-        }
-    }
-    for (size_t i = 0; i < n; i++) {
-        uint32_t s = (uint32_t)(psc_key_hash(ev[i].txid, ev[i].vout) %
-                                (uint64_t)s_shards);
-        shard_of[i] = s;
-        ctx.bucket_n[s]++;
-    }
-    bool alloc_ok = true;
-    for (int s = 0; s < s_shards && alloc_ok; s++) {
-        if (ctx.bucket_n[s] == 0) continue;
-        ctx.buckets[s] = zcl_malloc(ctx.bucket_n[s] * sizeof(**ctx.buckets),
-                                    "psc_bucket");
-        if (!ctx.buckets[s]) alloc_ok = false;
-    }
-    if (!alloc_ok) {
-        for (int s = 0; s < s_shards; s++) free(ctx.buckets[s]);
-        free(shard_of); free(ctx.buckets); free(ctx.bucket_n); free(ctx.out);
+    if (psc_join_scatter(&ctx, n) != 0) {
         if (reject) snprintf(reject, 48, "internal");
         return false;
     }
-    {
-        size_t *fill = zcl_calloc((size_t)s_shards, sizeof(*fill), "psc_fill");
-        if (!fill) {
-            for (int s = 0; s < s_shards; s++) free(ctx.buckets[s]);
-            free(shard_of); free(ctx.buckets); free(ctx.bucket_n); free(ctx.out);
-            if (reject) snprintf(reject, 48, "internal");
-            return false;
-        }
-        for (size_t i = 0; i < n; i++) {
-            uint32_t s = shard_of[i];
-            struct psc_sortrec *r = &ctx.buckets[s][fill[s]++];
-            memcpy(r->txid, ev[i].txid, 32);
-            r->vout = ev[i].vout;
-            r->seq = ev[i].seq;
-            r->idx = (uint32_t)i;
-        }
-        free(fill);
-    }
-    free(shard_of);
 
     /* Parallel: sort + validate + emit each shard independently. */
     parallel_for(s_shards, k_workers, psc_join_shard, &ctx);
@@ -248,43 +344,12 @@ bool psc_join(const struct psc_event *ev, size_t n, const uint8_t *scripts,
     char     best_kind[48] = {0};
     int32_t  best_height = -1;
     size_t   total = 0;
-    for (int s = 0; s < s_shards; s++) {
-        if (ctx.out[s].error) any_error = true;
-        if (ctx.out[s].rejected) {
-            any_reject = true;
-            if (ctx.out[s].reject_seq < best_seq) {
-                best_seq = ctx.out[s].reject_seq;
-                best_height = ctx.out[s].reject_height;
-                snprintf(best_kind, sizeof(best_kind), "%s", ctx.out[s].reject);
-            }
-        }
-        total += ctx.out[s].n;
-    }
+    psc_join_reduce(ctx.out, s_shards, &any_error, &any_reject, best_kind,
+                    &best_seq, &best_height, &total);
 
-    bool ok = false;
-    if (any_error) {
-        if (reject) snprintf(reject, 48, "internal");
-    } else if (any_reject) {
-        if (reject) snprintf(reject, 48, "%s", best_kind);
-        if (reject_height) *reject_height = best_height;
-    } else {
-        struct psc_coin *coins = total
-            ? zcl_malloc(total * sizeof(*coins), "psc_coins") : NULL;
-        if (total && !coins) {
-            if (reject) snprintf(reject, 48, "internal");
-        } else {
-            size_t w = 0;
-            for (int s = 0; s < s_shards; s++) {
-                if (ctx.out[s].n)
-                    memcpy(coins + w, ctx.out[s].coins,
-                           ctx.out[s].n * sizeof(*coins));
-                w += ctx.out[s].n;
-            }
-            *out_coins = coins;
-            *out_count = total;
-            ok = true;
-        }
-    }
+    bool ok = psc_join_report(&ctx, total, any_error, any_reject, best_kind,
+                              best_height, out_coins, out_count, reject,
+                              reject_height) == 0;
 
     for (int s = 0; s < s_shards; s++) {
         free(ctx.buckets[s]);
