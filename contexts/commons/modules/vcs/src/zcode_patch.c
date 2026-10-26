@@ -58,34 +58,29 @@ static bool descriptor_present(uint32_t mode, const uint8_t blob[32])
     return mode != 0 && !zcl_bytes_all_zero(blob, 32);
 }
 
-static enum vcs_zcode_patch_result patch_validate_modified(
-    const struct vcs_zcode_patch_change_v1 *change)
+static bool patch_modified_invalid(const struct vcs_zcode_patch_change_v1 *change)
 {
-    bool old_present = descriptor_present(change->old_mode, change->old_blob);
-    bool new_present = descriptor_present(change->new_mode, change->new_blob);
-    if (!old_present || !new_present ||
+    return !descriptor_present(change->old_mode, change->old_blob) ||
+        !descriptor_present(change->new_mode, change->new_blob) ||
         (change->old_mode == change->new_mode &&
-         memcmp(change->old_blob, change->new_blob, 32) == 0))
-        return VCS_ZCODE_PATCH_SHAPE;
-    return VCS_ZCODE_PATCH_OK;
+         memcmp(change->old_blob, change->new_blob, 32) == 0);
 }
 
 static enum vcs_zcode_patch_result patch_validate_kind(
     const struct vcs_zcode_patch_change_v1 *change)
 {
-    bool old_present = descriptor_present(change->old_mode, change->old_blob);
-    bool new_present = descriptor_present(change->new_mode, change->new_blob);
     if (change->kind == VCS_DIFF_ADDED &&
         (!descriptor_absent(change->old_mode, change->old_size,
-                            change->old_blob) || !new_present))
+                            change->old_blob) ||
+         !descriptor_present(change->new_mode, change->new_blob)))
         return VCS_ZCODE_PATCH_SHAPE;
     if (change->kind == VCS_DIFF_REMOVED &&
-        (!old_present ||
+        (!descriptor_present(change->old_mode, change->old_blob) ||
          !descriptor_absent(change->new_mode, change->new_size,
                             change->new_blob)))
         return VCS_ZCODE_PATCH_SHAPE;
-    if (change->kind == VCS_DIFF_MODIFIED)
-        return patch_validate_modified(change);
+    if (change->kind == VCS_DIFF_MODIFIED && patch_modified_invalid(change))
+        return VCS_ZCODE_PATCH_SHAPE;
     if (change->kind != VCS_DIFF_ADDED &&
         change->kind != VCS_DIFF_REMOVED &&
         change->kind != VCS_DIFF_MODIFIED)
