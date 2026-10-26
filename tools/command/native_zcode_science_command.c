@@ -518,6 +518,7 @@ static bool zsci_work_plan_aux(const struct zcl_command_request *request,
                                struct zcl_command_reply *reply,
                                uint8_t *wire, size_t wire_len,
                                struct vcs_build_action_v1 *action,
+                               struct vcs_build_action_v1 **action_p,
                                uint8_t **method, size_t *method_len,
                                uint8_t **profile, size_t *profile_len)
 {
@@ -527,6 +528,7 @@ static bool zsci_work_plan_aux(const struct zcl_command_request *request,
             free(wire);
             return false;
         }
+        *action_p = action;
         if (zsci_wire_is_result_v2(wire, wire_len)) {
             *method = zsci_wire(request->input, "method_hex", method_len);
             *profile = zsci_wire(request->input, "profile_hex", profile_len);
@@ -572,12 +574,10 @@ void zcl_native_handle_zcode_science_work_plan(
     struct vcs_build_action_v1 action;
     struct vcs_build_action_v1 *action_p = NULL;
     uint8_t *method = NULL, *profile = NULL;
-    if (!zsci_work_plan_aux(request, reply, wire, wire_len, &action, &method,
-                            &method_len, &profile, &profile_len)) {
+    if (!zsci_work_plan_aux(request, reply, wire, wire_len, &action, &action_p,
+                            &method, &method_len, &profile, &profile_len)) {
         return;
     }
-    if (!zsci_wire_is_reproduction(wire, wire_len))
-        action_p = &action;
     struct node_db ndb = {0};
     if (!zsci_open_db(zsci_datadir(request->input), &ndb)) {
         free(profile);
