@@ -362,7 +362,7 @@ static bool sync_health_last_decision(bool ok,
     return ok;
 }
 
-static bool gsh_chain_advance_coordinator_ok(void)
+static bool getservicehealth_chain_advance_ok(void)
 {
     struct json_value result;
     json_init(&result);
@@ -390,7 +390,7 @@ static bool gsh_chain_advance_coordinator_ok(void)
     return ok;
 }
 
-static bool gsh_canonical_mirror_trust_ok(void)
+static bool getservicehealth_canonical_mirror_ok(void)
 {
     static const struct sync_health_expect rows[] = {
         { "state", SYNC_HEALTH_STR, false, 0, "blocked" },
@@ -564,7 +564,7 @@ static bool hc_engine_and_evidence(bool ok,
     return ok;
 }
 
-static bool hc_advance_object(bool ok, const struct json_value *ca)
+static bool hc_chain_advance_block_ok(bool ok, const struct json_value *ca)
 {
     ok = ok && sync_health_is_type(ca, JSON_OBJ);
     ok = ok && sync_health_coordinator_keys(ca);
@@ -622,7 +622,7 @@ static bool hc_chain_advance_decision_ok(struct json_value *params,
     bool ok = seeded && executed && result->type == JSON_OBJ;
     ok = hc_build_and_check_fields(ok, result, checks);
     ok = hc_engine_and_evidence(ok, condition_engine, ce);
-    ok = hc_advance_object(ok, ca);
+    ok = hc_chain_advance_block_ok(ok, ca);
     return ok;
 }
 
@@ -675,7 +675,7 @@ static bool hc_bounded_first_call_block(bool ok,
     return ok;
 }
 
-static bool hc_bounded_tail(bool ok, const struct json_value *checks,
+static bool hc_bounded_checks_tail_ok(bool ok, const struct json_value *checks,
                            const struct json_value *ca,
                            const struct json_value *agent)
 {
@@ -735,7 +735,7 @@ static bool hc_bounded_first_call_ok(struct json_value *params,
     bool ok = executed && result->type == JSON_OBJ;
     ok = hc_bounded_result_identity(ok, result);
     ok = hc_bounded_first_call_block(ok, result);
-    ok = hc_bounded_tail(ok, checks, ca, agent);
+    ok = hc_bounded_checks_tail_ok(ok, checks, ca, agent);
     return ok;
 }
 
@@ -745,12 +745,12 @@ int syncdiag_cases_health(void)
 
     printf("getservicehealth: exposes chain advance coordinator "
            "(RED)... ");
-    if (gsh_chain_advance_coordinator_ok()) printf("OK\n");
+    if (getservicehealth_chain_advance_ok()) printf("OK\n");
     else    { printf("FAIL\n"); failures++; }
 
     printf("getservicehealth: exposes canonical mirror trust "
            "(RED)... ");
-    if (gsh_canonical_mirror_trust_ok()) printf("OK\n");
+    if (getservicehealth_canonical_mirror_ok()) printf("OK\n");
     else    { printf("FAIL\n"); failures++; }
 
     printf("healthcheck: exposes chain advance decision "
