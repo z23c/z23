@@ -101,6 +101,16 @@ static uint64_t parent_pid(void)
     return parent;
 }
 
+static bool watcher_parent_tokens_match(
+    HANDLE token, HANDLE own_token, TOKEN_USER *parent, TOKEN_USER *own,
+    DWORD *parent_size, DWORD *own_size)
+{
+    return parent && own &&
+         GetTokenInformation(token, TokenUser, parent, *parent_size, parent_size) &&
+         GetTokenInformation(own_token, TokenUser, own, *own_size, own_size) &&
+         EqualSid(parent->User.Sid, own->User.Sid);
+}
+
 static bool parent_matches(const struct watcher_record *record)
 {
     if (parent_pid() != record->creator_pid) return false;
@@ -122,10 +132,8 @@ static bool parent_matches(const struct watcher_record *record)
         parent = zcl_malloc(parent_size, "watcher-parent-token");
         own = zcl_malloc(own_size, "watcher-own-token");
     }
-    ok = ok && parent && own &&
-         GetTokenInformation(token, TokenUser, parent, parent_size, &parent_size) &&
-         GetTokenInformation(own_token, TokenUser, own, own_size, &own_size) &&
-         EqualSid(parent->User.Sid, own->User.Sid);
+    ok = ok && watcher_parent_tokens_match(token, own_token, parent, own,
+                                            &parent_size, &own_size);
     free(parent); free(own);
     if (token) CloseHandle(token);
     if (own_token) CloseHandle(own_token);
@@ -240,39 +248,30 @@ void platform_watcher_launch_init(struct platform_watcher_launch *launch)
         .stop_native = UINTPTR_MAX, .record_native = UINTPTR_MAX};
 }
 
-bool platform_watcher_launch_prepare(struct platform_watcher_launch *launch,
-                                     const char *root, const char *image,
-                                     const char hash[65])
+static bool watcher_record_setup_failed(
+    const char *root, const char *image, struct watcher_record *record,
+    uint8_t *nonce, size_t nonce_size)
 {
-    uint8_t hash_bytes[32];
-    if (!launch || launch->inherited_read != UINTPTR_MAX ||
-        !root || !image || !hash ||
-        !zcl_hex_decode_lower(hash, hash_bytes, sizeof(hash_bytes)))
-        return false;
-    struct watcher_record record = {0};
-    uint8_t nonce[32];
-    if (!platform_directory_canonical_real(root, record.root, sizeof(record.root)) ||
-        !file_identity(image, &record.image_volume, &record.image_low,
-                       &record.image_high, &record.image_size,
-                       record.image, sizeof(record.image)) ||
-        !root_identity(record.root, &record.root_volume, &record.root_low,
-                       &record.root_high) ||
-        !platform_current_identity(record.identity, sizeof(record.identity)) ||
-        !os_proc_exe_path(record.parent_image, sizeof(record.parent_image)) ||
-        !rng_fill(nonce, sizeof(nonce))) return false;
-    memcpy(record.magic, WL_MAGIC, sizeof(WL_MAGIC));
-    memcpy(record.image_sha256, hash, 65); record.creator_pid = os_proc_current_pid();
-    if (!os_proc_pid_start_token(record.creator_pid,
-                                 &record.creator_start_token))
-        return false;
-    zcl_hex_encode(nonce, sizeof(nonce), record.nonce);
-    memcpy(launch->nonce, record.nonce, 65);
+    return !platform_directory_canonical_real(root, record->root, sizeof(record->root)) ||
+        !file_identity(image, &record->image_volume, &record->image_low,
+                       &record->image_high, &record->image_size,
+                       record->image, sizeof(record->image)) ||
+        !root_identity(record->root, &record->root_volume, &record->root_low,
+                       &record->root_high) ||
+        !platform_current_identity(record->identity, sizeof(record->identity)) ||
+        !os_proc_exe_path(record->parent_image, sizeof(record->parent_image)) ||
+        !rng_fill(nonce, nonce_size);
+}
+
+static bool watcher_launch_channel(
+    struct platform_watcher_launch *launch, const struct watcher_record *record)
+{
 #if defined(_WIN32)
     SECURITY_ATTRIBUTES sa = {.nLength = sizeof(sa), .bInheritHandle = TRUE};
     HANDLE read_handle = NULL, write_handle = NULL, event = NULL;
-    if (!CreatePipe(&read_handle, &write_handle, &sa, sizeof(record)) ||
+    if (!CreatePipe(&read_handle, &write_handle, &sa, sizeof(*record)) ||
         !SetHandleInformation(write_handle, HANDLE_FLAG_INHERIT, 0) ||
-        !make_stop(record.nonce, launch->stop_locator, &event)) {
+        !make_stop(record->nonce, launch->stop_locator, &event)) {
         if (read_handle) CloseHandle(read_handle);
         if (write_handle) CloseHandle(write_handle);
         return false;
@@ -284,7 +283,7 @@ bool platform_watcher_launch_prepare(struct platform_watcher_launch *launch,
     bool ready = pipe(pipefd) == 0 &&
                  fcntl(pipefd[0], F_SETFD, 0) == 0 &&
                  fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) == 0 &&
-                 make_stop(record.nonce, launch->stop_locator, &stop);
+                 make_stop(record->nonce, launch->stop_locator, &stop);
     if (!ready) {
         if (pipefd[0] >= 0) close(pipefd[0]);
         if (pipefd[1] >= 0) close(pipefd[1]);
@@ -298,6 +297,30 @@ bool platform_watcher_launch_prepare(struct platform_watcher_launch *launch,
     launch->inherited_read = (uintptr_t)pipefd[0];
     launch->private_write = (uintptr_t)pipefd[1]; launch->stop_native = (uintptr_t)stop;
 #endif
+    return true;
+}
+
+bool platform_watcher_launch_prepare(struct platform_watcher_launch *launch,
+                                     const char *root, const char *image,
+                                     const char hash[65])
+{
+    uint8_t hash_bytes[32];
+    if (!launch || launch->inherited_read != UINTPTR_MAX ||
+        !root || !image || !hash ||
+        !zcl_hex_decode_lower(hash, hash_bytes, sizeof(hash_bytes)))
+        return false;
+    struct watcher_record record = {0};
+    uint8_t nonce[32];
+    if (watcher_record_setup_failed(root, image, &record, nonce, sizeof(nonce)))
+        return false;
+    memcpy(record.magic, WL_MAGIC, sizeof(WL_MAGIC));
+    memcpy(record.image_sha256, hash, 65); record.creator_pid = os_proc_current_pid();
+    if (!os_proc_pid_start_token(record.creator_pid,
+                                 &record.creator_start_token))
+        return false;
+    zcl_hex_encode(nonce, sizeof(nonce), record.nonce);
+    memcpy(launch->nonce, record.nonce, 65);
+    if (!watcher_launch_channel(launch, &record)) return false;
     struct watcher_record *saved = zcl_malloc(sizeof(*saved),
                                                "watcher-launch-record");
     if (!saved) { platform_watcher_launch_close(launch); return false; }
@@ -355,6 +378,58 @@ void platform_watcher_launch_close(struct platform_watcher_launch *launch)
 void platform_watcher_lease_init(struct platform_watcher_lease *lease)
 { if (lease) *lease = (struct platform_watcher_lease){.stop_native = UINTPTR_MAX}; }
 
+static bool watcher_record_root_matches(
+    const struct watcher_record *record, const char *root)
+{
+    char identity[WL_IDENTITY], canonical[WL_PATH];
+    uint8_t nonce_bytes[32];
+    uint64_t rv, rl, rh;
+    return memcmp(record->magic, WL_MAGIC, sizeof(WL_MAGIC)) == 0 &&
+         zcl_hex_decode_lower(record->nonce, nonce_bytes,
+                              sizeof(nonce_bytes)) &&
+         platform_current_identity(identity, sizeof(identity)) &&
+         strcmp(identity, record->identity) == 0 && parent_matches(record) &&
+         platform_directory_canonical_real(root, canonical, sizeof(canonical)) &&
+         strcmp(canonical, record->root) == 0 &&
+         root_identity(canonical, &rv, &rl, &rh) && rv == record->root_volume &&
+         rl == record->root_low && rh == record->root_high;
+}
+
+static bool watcher_record_image_matches(
+    const struct watcher_record *record, const char *image, const char *hash)
+{
+    char parent_image[WL_PATH];
+    uint64_t iv, il, ih, size;
+    return file_identity(image, &iv, &il, &ih, &size, parent_image,
+                       sizeof(parent_image)) &&
+         strcmp(parent_image, record->image) == 0 &&
+         strcmp(hash, record->image_sha256) == 0 && iv == record->image_volume &&
+         il == record->image_low && ih == record->image_high && size == record->image_size;
+}
+
+static bool watcher_lease_open_stop(
+    struct platform_watcher_lease *lease, const struct watcher_record *record,
+    bool ok)
+{
+#if defined(_WIN32)
+    int stop_name = ok ? snprintf(
+        lease->stop_locator, sizeof(lease->stop_locator),
+        "Local\\z23-watch-stop-%s", record->nonce) : -1;
+    HANDLE event = stop_name > 0 &&
+                           stop_name < (int)sizeof(lease->stop_locator)
+                       ? OpenEventA(SYNCHRONIZE, FALSE, lease->stop_locator)
+                       : NULL;
+    ok = ok && event; if (ok) lease->stop_native = (uintptr_t)event;
+#else
+    int n = snprintf(lease->stop_locator, sizeof(lease->stop_locator),
+        "/tmp/z23-watch-stop-%lu-%s", (unsigned long)geteuid(), record->nonce);
+    int stop = ok && n > 0 && n < (int)sizeof(lease->stop_locator)
+        ? open(lease->stop_locator, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && stop >= 0; if (ok) lease->stop_native = (uintptr_t)stop;
+#endif
+    return ok;
+}
+
 bool platform_watcher_lease_accept(struct platform_watcher_lease *lease,
                                    uintptr_t inherited, const char *root,
                                    const char *image, const char hash[65])
@@ -378,39 +453,9 @@ bool platform_watcher_lease_accept(struct platform_watcher_lease *lease,
     bool ok = io_exact((int)inherited, &record, sizeof(record), false);
     close((int)inherited);
 #endif
-    char identity[WL_IDENTITY], canonical[WL_PATH], parent_image[WL_PATH];
-    uint8_t nonce_bytes[32];
-    uint64_t rv, rl, rh, iv, il, ih, size;
-    ok = ok && memcmp(record.magic, WL_MAGIC, sizeof(WL_MAGIC)) == 0 &&
-         zcl_hex_decode_lower(record.nonce, nonce_bytes,
-                              sizeof(nonce_bytes)) &&
-         platform_current_identity(identity, sizeof(identity)) &&
-         strcmp(identity, record.identity) == 0 && parent_matches(&record) &&
-         platform_directory_canonical_real(root, canonical, sizeof(canonical)) &&
-         strcmp(canonical, record.root) == 0 &&
-         root_identity(canonical, &rv, &rl, &rh) && rv == record.root_volume &&
-         rl == record.root_low && rh == record.root_high &&
-         file_identity(image, &iv, &il, &ih, &size, parent_image,
-                       sizeof(parent_image)) &&
-         strcmp(parent_image, record.image) == 0 &&
-         strcmp(hash, record.image_sha256) == 0 && iv == record.image_volume &&
-         il == record.image_low && ih == record.image_high && size == record.image_size;
-#if defined(_WIN32)
-    int stop_name = ok ? snprintf(
-        lease->stop_locator, sizeof(lease->stop_locator),
-        "Local\\z23-watch-stop-%s", record.nonce) : -1;
-    HANDLE event = stop_name > 0 &&
-                           stop_name < (int)sizeof(lease->stop_locator)
-                       ? OpenEventA(SYNCHRONIZE, FALSE, lease->stop_locator)
-                       : NULL;
-    ok = ok && event; if (ok) lease->stop_native = (uintptr_t)event;
-#else
-    int n = snprintf(lease->stop_locator, sizeof(lease->stop_locator),
-        "/tmp/z23-watch-stop-%lu-%s", (unsigned long)geteuid(), record.nonce);
-    int stop = ok && n > 0 && n < (int)sizeof(lease->stop_locator)
-        ? open(lease->stop_locator, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
-    ok = ok && stop >= 0; if (ok) lease->stop_native = (uintptr_t)stop;
-#endif
+    ok = ok && watcher_record_root_matches(&record, root) &&
+         watcher_record_image_matches(&record, image, hash);
+    ok = watcher_lease_open_stop(lease, &record, ok);
     uint64_t creator_start = 0;
     ok = ok && os_proc_pid_start_token(record.creator_pid, &creator_start) &&
          creator_start == record.creator_start_token;
