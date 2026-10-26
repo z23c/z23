@@ -293,13 +293,66 @@ void vfs_dir_binding_file_closed(struct sqlite_vfs_dir_binding *binding)
         vfs_dir_binding_retire_resources(binding);
 }
 
+static bool vfs_dir_register_arguments_present(char *vfs_name_out,
+                                               const char *db_basename,
+                                               HANDLE dir)
+{
+    return vfs_name_out && db_basename && dir != INVALID_HANDLE_VALUE &&
+           dir != NULL;
+}
+
+static bool vfs_dir_register_basename_valid(const char *db_basename)
+{
+    return strlen(db_basename) <= VFS_DIR_BASENAME_MAX &&
+           vfs_dir_valid_leaf(db_basename) &&
+           !vfs_dir_is_temp_name(db_basename);
+}
+
+static bool vfs_dir_register_retained_directory_valid(HANDLE dir)
+{
+    BY_HANDLE_FILE_INFORMATION info;
+    return GetFileInformationByHandle(dir, &info) != 0 &&
+           (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+           platform_private_acl_validate_handle(dir, true);
+}
+
+static bool vfs_dir_register_binding_zeroed_and_duplicated(
+    struct sqlite_vfs_dir_binding *binding, HANDLE dir, HANDLE *duplicated)
+{
+    if (!binding)
+        return false;
+    memset(binding, 0, sizeof(*binding));
+    return DuplicateHandle(GetCurrentProcess(), dir,
+                           GetCurrentProcess(), duplicated,
+                           0, FALSE, DUPLICATE_SAME_ACCESS);
+}
+
+static bool vfs_dir_binding_attach_default_vfs(
+    struct sqlite_vfs_dir_binding *binding)
+{
+    binding->base = sqlite3_vfs_find(NULL);
+    binding->mutex = binding->base
+        ? sqlite3_mutex_alloc(SQLITE_MUTEX_FAST) : NULL;
+    return binding->base && binding->mutex;
+}
+
+static bool vfs_dir_register_vfs_name_assigned(
+    struct sqlite_vfs_dir_binding *binding, uint64_t nonce)
+{
+    int n = snprintf(binding->name, sizeof(binding->name),
+                     "zclvfsdir_%lu_%llu",
+                     (unsigned long)GetCurrentProcessId(),
+                     (unsigned long long)nonce);
+    return n > 0 && (size_t)n < sizeof(binding->name);
+}
+
 bool sqlite_vfs_dir_register(uintptr_t retained_dir, const char *db_basename,
                              char vfs_name_out[SQLITE_VFS_DIR_NAME_MAX])
 {
     static atomic_uint_fast64_t sequence = 0;
     HANDLE dir = (HANDLE)retained_dir;
-    if (!vfs_name_out || !db_basename ||
-        dir == INVALID_HANDLE_VALUE || !dir) {
+    if (!vfs_dir_register_arguments_present(vfs_name_out, db_basename, dir)) {
         fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
                 "[sqlite_vfs_dir] register: null argument\n");
         return false;
@@ -312,19 +365,13 @@ bool sqlite_vfs_dir_register(uintptr_t retained_dir, const char *db_basename,
     }
     if (!vfs_dir_volume_is_local_ntfs(dir, "register"))
         goto refuse_reserved;
-    if (strlen(db_basename) > VFS_DIR_BASENAME_MAX ||
-        !vfs_dir_valid_leaf(db_basename) ||
-        vfs_dir_is_temp_name(db_basename)) {
+    if (!vfs_dir_register_basename_valid(db_basename)) {
         fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
                 "[sqlite_vfs_dir] register: refused db basename '%s'\n",
                 db_basename);
         goto refuse_reserved;
     }
-    BY_HANDLE_FILE_INFORMATION info;
-    if (!GetFileInformationByHandle(dir, &info) ||
-        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
-        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-        !platform_private_acl_validate_handle(dir, true)) {
+    if (!vfs_dir_register_retained_directory_valid(dir)) {
         fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
                 "[sqlite_vfs_dir] register: retained handle failed "
                 "directory validation (win32=%lu)\n",
@@ -334,11 +381,8 @@ bool sqlite_vfs_dir_register(uintptr_t retained_dir, const char *db_basename,
 
     struct sqlite_vfs_dir_binding *binding = sqlite3_malloc(sizeof(*binding));
     HANDLE duplicated = INVALID_HANDLE_VALUE;
-    if (binding)
-        memset(binding, 0, sizeof(*binding));
-    if (!binding || !DuplicateHandle(GetCurrentProcess(), dir,
-                                     GetCurrentProcess(), &duplicated,
-                                     0, FALSE, DUPLICATE_SAME_ACCESS)) {
+    if (!vfs_dir_register_binding_zeroed_and_duplicated(binding, dir,
+                                                        &duplicated)) {
         fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
                 "[sqlite_vfs_dir] register: allocation/duplication failed "
                 "(win32=%lu)\n", (unsigned long)GetLastError());
@@ -348,10 +392,7 @@ bool sqlite_vfs_dir_register(uintptr_t retained_dir, const char *db_basename,
     binding->dir = duplicated;
     memcpy(binding->basename, db_basename, strlen(db_basename) + 1u);
     binding->shm.file = INVALID_HANDLE_VALUE;
-    binding->base = sqlite3_vfs_find(NULL);
-    binding->mutex = binding->base
-        ? sqlite3_mutex_alloc(SQLITE_MUTEX_FAST) : NULL;
-    if (!binding->base || !binding->mutex) {
+    if (!vfs_dir_binding_attach_default_vfs(binding)) {
         fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
                 "[sqlite_vfs_dir] register: no default VFS or no mutex\n");
         (void)CloseHandle(binding->dir);
@@ -359,11 +400,7 @@ bool sqlite_vfs_dir_register(uintptr_t retained_dir, const char *db_basename,
         goto refuse_reserved;
     }
     uint64_t nonce = atomic_fetch_add(&sequence, 1) + 1;
-    int n = snprintf(binding->name, sizeof(binding->name),
-                     "zclvfsdir_%lu_%llu",
-                     (unsigned long)GetCurrentProcessId(),
-                     (unsigned long long)nonce);
-    if (n <= 0 || (size_t)n >= sizeof(binding->name)) {
+    if (!vfs_dir_register_vfs_name_assigned(binding, nonce)) {
         fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
                 "[sqlite_vfs_dir] register: VFS name overflow\n");
         vfs_dir_binding_destroy_unpublished(binding);
@@ -432,15 +469,69 @@ bool sqlite_vfs_dir_unregister(const char *vfs_name)
     return true;
 }
 
+static bool vfs_dir_main_file_info_arguments_valid(
+    sqlite3 *db, uintptr_t expected_directory, const char *expected_leaf,
+    const uint64_t *volume_serial_out, const uint64_t *file_index_out,
+    const uint64_t *file_size_out)
+{
+    return db && expected_directory != UINTPTR_MAX &&
+           expected_directory != 0 && expected_leaf &&
+           vfs_dir_valid_leaf(expected_leaf) && volume_serial_out &&
+           file_index_out && file_size_out;
+}
+
+static bool vfs_dir_main_file_owned_by_dir_vfs(const sqlite3_file *base)
+{
+    return base && base->pMethods == &vfs_dir_io_methods;
+}
+
+static bool vfs_dir_file_information_identical(
+    const BY_HANDLE_FILE_INFORMATION *bound,
+    const BY_HANDLE_FILE_INFORMATION *expected)
+{
+    return bound->dwVolumeSerialNumber == expected->dwVolumeSerialNumber &&
+           bound->nFileIndexHigh == expected->nFileIndexHigh &&
+           bound->nFileIndexLow == expected->nFileIndexLow;
+}
+
+static bool vfs_dir_main_file_bound_directory_matches(
+    const struct vfs_dir_file *file, uintptr_t expected_directory,
+    BY_HANDLE_FILE_INFORMATION *expected_info)
+{
+    BY_HANDLE_FILE_INFORMATION bound_directory;
+    return file->binding &&
+           GetFileInformationByHandle(file->binding->dir,
+                                      &bound_directory) != 0 &&
+           GetFileInformationByHandle((HANDLE)expected_directory,
+                                      expected_info) != 0 &&
+           vfs_dir_file_information_identical(&bound_directory,
+                                              expected_info);
+}
+
+static bool vfs_dir_main_file_expected_directory_qualified(
+    uintptr_t expected_directory)
+{
+    HANDLE directory = (HANDLE)expected_directory;
+    return platform_private_acl_validate_handle(directory, true) &&
+           vfs_dir_volume_is_local_ntfs(directory, "main_file_info");
+}
+
+static bool vfs_dir_main_file_leaf_names_match(
+    const struct vfs_dir_file *file, const char *expected_leaf)
+{
+    return strcmp(file->leaf, expected_leaf) == 0 &&
+           strcmp(file->binding->basename, expected_leaf) == 0;
+}
+
 bool sqlite_vfs_dir_main_file_info(sqlite3 *db, uintptr_t expected_directory,
                                    const char *expected_leaf,
                                    uint64_t *volume_serial_out,
                                    uint64_t *file_index_out,
                                    uint64_t *file_size_out)
 {
-    if (!db || expected_directory == UINTPTR_MAX || expected_directory == 0 ||
-        !expected_leaf || !vfs_dir_valid_leaf(expected_leaf) ||
-        !volume_serial_out || !file_index_out || !file_size_out) {
+    if (!vfs_dir_main_file_info_arguments_valid(
+            db, expected_directory, expected_leaf, volume_serial_out,
+            file_index_out, file_size_out)) {
         fprintf(stderr,
                 "[sqlite_vfs_dir] main_file_info: invalid argument\n");
         return false;
@@ -449,7 +540,7 @@ bool sqlite_vfs_dir_main_file_info(sqlite3 *db, uintptr_t expected_directory,
     sqlite3_file *base = NULL;
     int rc = sqlite3_file_control(db, "main", SQLITE_FCNTL_FILE_POINTER,
                                   &base);
-    if (rc != SQLITE_OK || !base || base->pMethods != &vfs_dir_io_methods) {
+    if (rc != SQLITE_OK || !vfs_dir_main_file_owned_by_dir_vfs(base)) {
         fprintf(stderr,
                 "[sqlite_vfs_dir] main_file_info: main database is not "
                 "owned by sqlite_vfs_dir\n");
@@ -457,23 +548,14 @@ bool sqlite_vfs_dir_main_file_info(sqlite3 *db, uintptr_t expected_directory,
     }
 
     struct vfs_dir_file *file = (struct vfs_dir_file *)base;
-    BY_HANDLE_FILE_INFORMATION bound_directory;
     BY_HANDLE_FILE_INFORMATION expected;
-    bool same_directory = file->binding &&
-        GetFileInformationByHandle(file->binding->dir, &bound_directory) != 0 &&
-        GetFileInformationByHandle((HANDLE)expected_directory, &expected) != 0 &&
-        bound_directory.dwVolumeSerialNumber == expected.dwVolumeSerialNumber &&
-        bound_directory.nFileIndexHigh == expected.nFileIndexHigh &&
-        bound_directory.nFileIndexLow == expected.nFileIndexLow;
+    bool same_directory = vfs_dir_main_file_bound_directory_matches(
+        file, expected_directory, &expected);
     if (!same_directory || file->h == INVALID_HANDLE_VALUE ||
-        (expected.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
-        (expected.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-        !platform_private_acl_validate_handle((HANDLE)expected_directory,
-                                              true) ||
-        !vfs_dir_volume_is_local_ntfs((HANDLE)expected_directory,
-                                      "main_file_info") ||
-        strcmp(file->leaf, expected_leaf) != 0 ||
-        strcmp(file->binding->basename, expected_leaf) != 0) {
+        !((expected.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+          (expected.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) ||
+        !vfs_dir_main_file_expected_directory_qualified(expected_directory) ||
+        !vfs_dir_main_file_leaf_names_match(file, expected_leaf)) {
         fprintf(stderr,
                 "[sqlite_vfs_dir] main_file_info: retained directory "
                 "identity mismatch\n");
