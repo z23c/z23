@@ -1780,7 +1780,6 @@ tools/fingerprint_scan.c:fp_prune_link:29
 tools/fingerprint_scan.c:main:155
 tools/gen_utxo_root_ladder.c:main:35
 tools/gen_utxo_root_ladder.c:parse_cli:22
-tools/ldb_verify_c23.c:main:54
 tools/lint/lintc/gate_git_scan_a.c:check_equihash_params_run:26
 tools/lint/lintc/gate_git_scan_a.c:check_framework_filename_suffix_run:18
 tools/lint/lintc/gate_git_scan_a.c:check_no_stray_root_files_run:18
