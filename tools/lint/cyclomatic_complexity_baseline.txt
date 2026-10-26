@@ -638,9 +638,6 @@ engine/modules/storage/src/consensus_db.c:consensus_db_migrate_from_progress:41
 engine/modules/storage/src/event_log.c:event_log_append:16
 engine/modules/storage/src/event_log.c:event_log_read:17
 engine/modules/storage/src/event_log.c:event_log_stream:19
-engine/modules/storage/src/ldb_reader_version.c:apply_edit:34
-engine/modules/storage/src/ldb_reader_version.c:ldb_memtable_load:16
-engine/modules/storage/src/ldb_reader_version.c:ldb_version_load:19
 engine/modules/storage/src/projection_store.c:projection_clean_receipt_write:17
 engine/modules/storage/src/projection_store.c:projection_store_open:28
 engine/modules/storage/src/sqlite_vfs_dir_windows.c:vfs_dir_open_impl:32

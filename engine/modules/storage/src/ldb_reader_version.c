@@ -101,6 +101,167 @@ static uint8_t *dup_bytes(const uint8_t *p, size_t n)
     return out;
 }
 
+/* Outcome of decoding one version-edit tag; apply_edit turns each value
+ * into its error text. */
+enum edit_tag_status {
+    EDIT_TAG_OK = 0,               /* tag decoded and applied */
+    EDIT_TAG_TRUNCATED,            /* record ended mid-field */
+    EDIT_TAG_TRUNCATED_COMPARATOR, /* comparator name ran past the record */
+    EDIT_TAG_DELETED_BAD_LEVEL,    /* delete names a level >= LDB_MAX_LEVEL */
+    EDIT_TAG_NEW_BAD_LEVEL,        /* new file names a level >= LDB_MAX_LEVEL */
+    EDIT_TAG_NEW_SHORT_KEY,        /* internal key bound under 8 bytes */
+    EDIT_TAG_NEW_OOM,              /* allocation failed installing a file */
+    EDIT_TAG_UNKNOWN,              /* tag outside the frozen set above */
+};
+
+/* Details of a rejected tag, for apply_edit's error text. */
+struct edit_tag_reject {
+    uint32_t level;    /* level the offending file was assigned */
+    uint64_t number;   /* offending file number */
+    size_t bound_len;  /* too-short internal key bound */
+};
+
+/* Reads one varint64 field; marks *flag (when given) as present. */
+static enum edit_tag_status edit_varint_field(const uint8_t **p,
+                                              const uint8_t *end,
+                                              uint64_t *out, bool *flag)
+{
+    if (!ldb_get_varint64(p, end, out))
+        return EDIT_TAG_TRUNCATED;
+    if (flag)
+        *flag = true;
+    return EDIT_TAG_OK;
+}
+
+/* Reads the comparator name into v. */
+static enum edit_tag_status edit_comparator(struct ldb_version *v,
+                                            const uint8_t **p,
+                                            const uint8_t *end)
+{
+    struct ldb_slice s;
+    if (!ldb_get_length_prefixed(p, end, &s))
+        return EDIT_TAG_TRUNCATED_COMPARATOR;
+    size_t n = s.n < sizeof(v->comparator) - 1 ? s.n
+                                               : sizeof(v->comparator) - 1;
+    memcpy(v->comparator, s.p, n);
+    v->comparator[n] = '\0';
+    v->has_comparator = true;
+    return EDIT_TAG_OK;
+}
+
+/* Reads and discards a compaction pointer. */
+static enum edit_tag_status edit_compact_pointer(const uint8_t **p,
+                                                 const uint8_t *end)
+{
+    uint32_t level = 0;
+    struct ldb_slice key;
+    if (!ldb_get_varint32(p, end, &level) ||
+        !ldb_get_length_prefixed(p, end, &key))
+        return EDIT_TAG_TRUNCATED;
+    /* compaction hint only; no bearing on reads */
+    return EDIT_TAG_OK;
+}
+
+/* Drops one deleted file from the level the edit names. */
+static enum edit_tag_status edit_deleted_file(struct ldb_version *v,
+                                              const uint8_t **p,
+                                              const uint8_t *end,
+                                              struct edit_tag_reject *why)
+{
+    uint32_t level = 0;
+    uint64_t number = 0;
+    if (!ldb_get_varint32(p, end, &level) ||
+        !ldb_get_varint64(p, end, &number))
+        return EDIT_TAG_TRUNCATED;
+    if (level >= LDB_MAX_LEVEL) {
+        why->level = level;
+        return EDIT_TAG_DELETED_BAD_LEVEL;
+    }
+    level_remove(&v->levels[level], number);
+    return EDIT_TAG_OK;
+}
+
+/* Copies the key bounds and appends the file to its level. */
+static enum edit_tag_status push_new_file(struct ldb_version *v,
+                                          uint32_t level,
+                                          struct ldb_file_meta *fm,
+                                          const struct ldb_slice *smallest,
+                                          const struct ldb_slice *largest)
+{
+    fm->smallest = dup_bytes(smallest->p, smallest->n);
+    fm->largest = dup_bytes(largest->p, largest->n);
+    fm->smallest_len = smallest->n;
+    fm->largest_len = largest->n;
+    if (!fm->smallest || !fm->largest ||
+        !level_push(&v->levels[level], fm)) {
+        free(fm->smallest);
+        free(fm->largest);
+        return EDIT_TAG_NEW_OOM;
+    }
+    return EDIT_TAG_OK;
+}
+
+/* Decodes one new-file tag and installs the file in its level. */
+static enum edit_tag_status edit_new_file(struct ldb_version *v,
+                                          const uint8_t **p,
+                                          const uint8_t *end,
+                                          struct edit_tag_reject *why)
+{
+    uint32_t level = 0;
+    struct ldb_file_meta fm;
+    struct ldb_slice smallest, largest;
+    memset(&fm, 0, sizeof(fm));
+    if (!ldb_get_varint32(p, end, &level) ||
+        !ldb_get_varint64(p, end, &fm.number) ||
+        !ldb_get_varint64(p, end, &fm.size) ||
+        !ldb_get_length_prefixed(p, end, &smallest) ||
+        !ldb_get_length_prefixed(p, end, &largest))
+        return EDIT_TAG_TRUNCATED;
+    if (level >= LDB_MAX_LEVEL) {
+        why->level = level;
+        return EDIT_TAG_NEW_BAD_LEVEL;
+    }
+    if (smallest.n < 8 || largest.n < 8) {
+        why->number = fm.number;
+        why->bound_len = smallest.n < 8 ? smallest.n : largest.n;
+        return EDIT_TAG_NEW_SHORT_KEY;
+    }
+    /* A re-add supersedes any earlier copy AND any pending delete,
+     * matching leveldb's VersionSet::Builder. */
+    level_remove(&v->levels[level], fm.number);
+    return push_new_file(v, level, &fm, &smallest, &largest);
+}
+
+/* Decodes one version-edit tag and applies it to v. */
+static enum edit_tag_status apply_edit_tag(struct ldb_version *v, uint32_t tag,
+                                           const uint8_t **p,
+                                           const uint8_t *end,
+                                           struct edit_tag_reject *why)
+{
+    switch (tag) {
+    case LDB_TAG_COMPARATOR:
+        return edit_comparator(v, p, end);
+    case LDB_TAG_LOG_NUMBER:
+        return edit_varint_field(p, end, &v->log_number, NULL);
+    case LDB_TAG_PREV_LOG_NUMBER:
+        return edit_varint_field(p, end, &v->prev_log_number, NULL);
+    case LDB_TAG_NEXT_FILE_NUMBER:
+        return edit_varint_field(p, end, &v->next_file_number,
+                                 &v->have_next_file);
+    case LDB_TAG_LAST_SEQUENCE:
+        return edit_varint_field(p, end, &v->last_sequence,
+                                 &v->have_last_sequence);
+    case LDB_TAG_COMPACT_POINTER:
+        return edit_compact_pointer(p, end);
+    case LDB_TAG_DELETED_FILE:
+        return edit_deleted_file(v, p, end, why);
+    case LDB_TAG_NEW_FILE:
+        return edit_new_file(v, p, end, why);
+    default:
+        return EDIT_TAG_UNKNOWN;
+    }
+}
+
 static bool apply_edit(struct ldb_version *v, const struct ldb_slice *rec,
                        char **err)
 {
@@ -113,98 +274,31 @@ static bool apply_edit(struct ldb_version *v, const struct ldb_slice *rec,
             *err = ldb_strdup("ldb manifest: truncated version-edit tag");
             return false;
         }
-        switch (tag) {
-        case LDB_TAG_COMPARATOR: {
-            struct ldb_slice s;
-            if (!ldb_get_length_prefixed(&p, end, &s)) {
-                *err = ldb_strdup("ldb manifest: truncated comparator name");
-                return false;
-            }
-            size_t n = s.n < sizeof(v->comparator) - 1 ? s.n
-                                                       : sizeof(v->comparator) - 1;
-            memcpy(v->comparator, s.p, n);
-            v->comparator[n] = '\0';
-            v->has_comparator = true;
+        struct edit_tag_reject why = {0};
+        switch (apply_edit_tag(v, tag, &p, end, &why)) {
+        case EDIT_TAG_OK:
             break;
-        }
-        case LDB_TAG_LOG_NUMBER:
-            if (!ldb_get_varint64(&p, end, &v->log_number))
-                goto truncated;
-            break;
-        case LDB_TAG_PREV_LOG_NUMBER:
-            if (!ldb_get_varint64(&p, end, &v->prev_log_number))
-                goto truncated;
-            break;
-        case LDB_TAG_NEXT_FILE_NUMBER:
-            if (!ldb_get_varint64(&p, end, &v->next_file_number))
-                goto truncated;
-            v->have_next_file = true;
-            break;
-        case LDB_TAG_LAST_SEQUENCE:
-            if (!ldb_get_varint64(&p, end, &v->last_sequence))
-                goto truncated;
-            v->have_last_sequence = true;
-            break;
-        case LDB_TAG_COMPACT_POINTER: {
-            uint32_t level = 0;
-            struct ldb_slice key;
-            if (!ldb_get_varint32(&p, end, &level) ||
-                !ldb_get_length_prefixed(&p, end, &key))
-                goto truncated;
-            break;      /* compaction hint only; no bearing on reads */
-        }
-        case LDB_TAG_DELETED_FILE: {
-            uint32_t level = 0;
-            uint64_t number = 0;
-            if (!ldb_get_varint32(&p, end, &level) ||
-                !ldb_get_varint64(&p, end, &number))
-                goto truncated;
-            if (level >= LDB_MAX_LEVEL) {
-                *err = ldb_errf("ldb manifest: deleted file at level %u", level);
-                return false;
-            }
-            level_remove(&v->levels[level], number);
-            break;
-        }
-        case LDB_TAG_NEW_FILE: {
-            uint32_t level = 0;
-            struct ldb_file_meta fm;
-            struct ldb_slice smallest, largest;
-            memset(&fm, 0, sizeof(fm));
-            if (!ldb_get_varint32(&p, end, &level) ||
-                !ldb_get_varint64(&p, end, &fm.number) ||
-                !ldb_get_varint64(&p, end, &fm.size) ||
-                !ldb_get_length_prefixed(&p, end, &smallest) ||
-                !ldb_get_length_prefixed(&p, end, &largest))
-                goto truncated;
-            if (level >= LDB_MAX_LEVEL) {
-                *err = ldb_errf("ldb manifest: new file at level %u", level);
-                return false;
-            }
-            if (smallest.n < 8 || largest.n < 8) {
-                *err = ldb_errf("ldb manifest: file %llu has a %zu-byte "
-                                "internal key bound",
-                                (unsigned long long)fm.number,
-                                smallest.n < 8 ? smallest.n : largest.n);
-                return false;
-            }
-            /* A re-add supersedes any earlier copy AND any pending delete,
-             * matching leveldb's VersionSet::Builder. */
-            level_remove(&v->levels[level], fm.number);
-            fm.smallest = dup_bytes(smallest.p, smallest.n);
-            fm.largest = dup_bytes(largest.p, largest.n);
-            fm.smallest_len = smallest.n;
-            fm.largest_len = largest.n;
-            if (!fm.smallest || !fm.largest ||
-                !level_push(&v->levels[level], &fm)) {
-                free(fm.smallest);
-                free(fm.largest);
-                *err = ldb_strdup("ldb manifest: out of memory");
-                return false;
-            }
-            break;
-        }
-        default:
+        case EDIT_TAG_TRUNCATED:
+            goto truncated;
+        case EDIT_TAG_TRUNCATED_COMPARATOR:
+            *err = ldb_strdup("ldb manifest: truncated comparator name");
+            return false;
+        case EDIT_TAG_DELETED_BAD_LEVEL:
+            *err = ldb_errf("ldb manifest: deleted file at level %u",
+                            why.level);
+            return false;
+        case EDIT_TAG_NEW_BAD_LEVEL:
+            *err = ldb_errf("ldb manifest: new file at level %u", why.level);
+            return false;
+        case EDIT_TAG_NEW_SHORT_KEY:
+            *err = ldb_errf("ldb manifest: file %llu has a %zu-byte "
+                            "internal key bound",
+                            (unsigned long long)why.number, why.bound_len);
+            return false;
+        case EDIT_TAG_NEW_OOM:
+            *err = ldb_strdup("ldb manifest: out of memory");
+            return false;
+        case EDIT_TAG_UNKNOWN:
             *err = ldb_errf("ldb manifest: unknown version-edit tag %u", tag);
             return false;
         }
@@ -249,22 +343,11 @@ static bool read_current(const char *dir, char *out, size_t cap, char **err)
     return true;
 }
 
-bool ldb_version_load(struct ldb_version *v, const char *dir, char **err)
+/* Folds every version edit in a mapped MANIFEST into v, then rejects a
+ * descriptor missing the entries a readable database must carry. */
+static bool fold_manifest(struct ldb_version *v, const uint8_t *base,
+                          size_t size, const char *manifest_name, char **err)
 {
-    memset(v, 0, sizeof(*v));
-
-    char manifest_name[512];
-    if (!read_current(dir, manifest_name, sizeof(manifest_name), err))
-        return false;
-
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/%s", dir, manifest_name);
-    struct ldb_file_mapping file = {0};
-    if (!ldb_map_file(path, &file, err))
-        return false;
-    size_t size = file.mapping.size;
-    const uint8_t *base = file.mapping.data;
-
     struct ldb_log_reader r;
     ldb_log_reader_init(&r, base, size, true);
 
@@ -298,6 +381,38 @@ bool ldb_version_load(struct ldb_version *v, const char *dir, char **err)
         ok = false;
     }
     ldb_log_reader_free(&r);
+    return ok;
+}
+
+/* Level 0 files overlap, so Get must consult them newest-file-first.
+ * Levels 1+ are disjoint and sorted by their smallest key. */
+static void sort_version_levels(struct ldb_version *v)
+{
+    if (v->levels[0].n > 1)
+        qsort(v->levels[0].files, v->levels[0].n, sizeof(v->levels[0].files[0]),
+              cmp_by_number_desc);
+    for (int lv = 1; lv < LDB_MAX_LEVEL; lv++) {
+        if (v->levels[lv].n > 1)
+            qsort(v->levels[lv].files, v->levels[lv].n,
+                  sizeof(v->levels[lv].files[0]), cmp_by_smallest);
+    }
+}
+
+bool ldb_version_load(struct ldb_version *v, const char *dir, char **err)
+{
+    memset(v, 0, sizeof(*v));
+
+    char manifest_name[512];
+    if (!read_current(dir, manifest_name, sizeof(manifest_name), err))
+        return false;
+
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/%s", dir, manifest_name);
+    struct ldb_file_mapping file = {0};
+    if (!ldb_map_file(path, &file, err))
+        return false;
+    bool ok = fold_manifest(v, file.mapping.data, file.mapping.size,
+                            manifest_name, err);
     ldb_unmap_file(&file);
 
     if (!ok) {
@@ -311,17 +426,7 @@ bool ldb_version_load(struct ldb_version *v, const char *dir, char **err)
         ldb_version_free(v);
         return false;
     }
-
-    /* Level 0 files overlap, so Get must consult them newest-file-first.
-     * Levels 1+ are disjoint and sorted by their smallest key. */
-    if (v->levels[0].n > 1)
-        qsort(v->levels[0].files, v->levels[0].n, sizeof(v->levels[0].files[0]),
-              cmp_by_number_desc);
-    for (int lv = 1; lv < LDB_MAX_LEVEL; lv++) {
-        if (v->levels[lv].n > 1)
-            qsort(v->levels[lv].files, v->levels[lv].n,
-                  sizeof(v->levels[lv].files[0]), cmp_by_smallest);
-    }
+    sort_version_levels(v);
     return true;
 }
 
@@ -516,18 +621,17 @@ static bool parse_log_name(const char *name, uint64_t *number)
     return true;
 }
 
-bool ldb_memtable_load(struct ldb_memtable *m, const char *dir,
-                       const struct ldb_version *v, bool verify, char **err)
+/* Collects the file numbers of the write-ahead logs dir holds, keeping
+ * exactly the ones leveldb's recover step would replay. */
+static bool collect_wal_numbers(const char *dir, const struct ldb_version *v,
+                                uint64_t **logs, size_t *nlogs, char **err)
 {
-    memset(m, 0, sizeof(*m));
-
     DIR *d = opendir(dir);
     if (!d) {
         *err = ldb_errf("ldb: cannot list %s", dir);
         return false;
     }
-    uint64_t *logs = NULL;
-    size_t nlogs = 0, cap = 0;
+    size_t cap = 0;
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         uint64_t number = 0;
@@ -536,32 +640,49 @@ bool ldb_memtable_load(struct ldb_memtable *m, const char *dir,
         /* Exactly leveldb's DBImpl::Recover admission test. */
         if (number < v->log_number && number != v->prev_log_number)
             continue;
-        if (nlogs == cap) {
+        if (*nlogs == cap) {
             size_t ncap = cap ? cap * 2 : 8;
-            uint64_t *nl = zcl_realloc(logs, ncap * sizeof(*nl), "ldb_wal_list");
+            uint64_t *nl = zcl_realloc(*logs, ncap * sizeof(*nl), "ldb_wal_list");
             if (!nl) {
-                free(logs);
+                free(*logs);
                 closedir(d);
                 *err = ldb_strdup("ldb: out of memory listing write-ahead logs");
                 return false;
             }
-            logs = nl;
+            *logs = nl;
             cap = ncap;
         }
-        logs[nlogs++] = number;
+        (*nlogs)++;
     }
     closedir(d);
+    return true;
+}
 
-    /* Ascending file number = ascending sequence. */
-    for (size_t i = 1; i < nlogs; i++) {
-        uint64_t key = logs[i];
-        size_t j = i;
-        while (j > 0 && logs[j - 1] > key) {
-            logs[j] = logs[j - 1];
-            j--;
-        }
-        logs[j] = key;
-    }
+static int cmp_log_number_asc(const void *a, const void *b)
+{
+    uint64_t na = *(const uint64_t *)a, nb = *(const uint64_t *)b;
+    if (na != nb)
+        return na < nb ? -1 : 1;
+    return 0;
+}
+
+/* Ascending file number = ascending sequence. */
+static void sort_log_numbers(uint64_t *logs, size_t nlogs)
+{
+    if (nlogs > 1)
+        qsort(logs, nlogs, sizeof(logs[0]), cmp_log_number_asc);
+}
+
+bool ldb_memtable_load(struct ldb_memtable *m, const char *dir,
+                       const struct ldb_version *v, bool verify, char **err)
+{
+    memset(m, 0, sizeof(*m));
+
+    uint64_t *logs = NULL;
+    size_t nlogs = 0;
+    if (!collect_wal_numbers(dir, v, &logs, &nlogs, err))
+        return false;
+    sort_log_numbers(logs, nlogs);
 
     bool ok = true;
     for (size_t i = 0; i < nlogs && ok; i++) {
