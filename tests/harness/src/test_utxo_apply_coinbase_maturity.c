@@ -130,6 +130,46 @@ static bool ucm_build_block(struct block *b, uint8_t tag,
     return true;
 }
 
+/* Classify the currently selected network so the test can restore exactly
+ * what the caller (or a prior group) had after switching to regtest. */
+static enum chain_network ucm_saved_network(void)
+{
+    const char *id = chain_params_get()->strNetworkID;
+    if (strcmp(id, "test") == 0)         return CHAIN_TESTNET;
+    else if (strcmp(id, "regtest") == 0) return CHAIN_REGTEST;
+    else                                 return CHAIN_MAIN;
+}
+
+/* True when the delta recorded exactly one spent entry and that entry IS the
+ * given coinbase coin, with its is_coinbase flag, creation height and value
+ * preserved — the (a2) authority pin. */
+static bool ucm_spent_is_the_coinbase_coin(const struct delta_summary *out,
+                                           const struct ucm_coin *coin)
+{
+    return out->spent_count == 1 && out->spent != NULL &&
+           out->spent[0].is_coinbase == true &&
+           out->spent[0].height == coin->height &&
+           out->spent[0].value == coin->value;
+}
+
+/* True when nothing was authored past a count-only fire: no spent entries, no
+ * added entries and no value movement — the (e) load-bearing safety pin. */
+static bool ucm_authored_no_coins(const struct delta_summary *out)
+{
+    return out->spent_count == 0 && out->added_count == 0 &&
+           out->spent == NULL && out->added == NULL &&
+           out->total_value_delta == 0;
+}
+
+/* True when the delta failed with the zclassicd parity reject kind
+ * "bad-txns-premature-spend-of-coinbase". */
+static bool ucm_failure_is_premature_spend(const struct delta_summary *out)
+{
+    return out->failure_kind != NULL &&
+           strcmp(out->failure_kind,
+                  "bad-txns-premature-spend-of-coinbase") == 0;
+}
+
 int test_utxo_apply_coinbase_maturity(void);
 int test_utxo_apply_coinbase_maturity(void)
 {
@@ -142,13 +182,7 @@ int test_utxo_apply_coinbase_maturity(void)
      * (utxo_apply_delta.c) from rejecting the transparent-output coinbase
      * spends in the ACCEPT cases below, isolating the maturity rule under
      * test. Restore the prior network at the end. */
-    enum chain_network saved_net = CHAIN_MAIN;
-    {
-        const char *id = chain_params_get()->strNetworkID;
-        if (strcmp(id, "test") == 0)        saved_net = CHAIN_TESTNET;
-        else if (strcmp(id, "regtest") == 0) saved_net = CHAIN_REGTEST;
-        else                                 saved_net = CHAIN_MAIN;
-    }
+    enum chain_network saved_net = ucm_saved_network();
     chain_params_select(CHAIN_REGTEST);
 
     /* A coinbase coin created at height 10. The spending block height controls
@@ -216,10 +250,7 @@ int test_utxo_apply_coinbase_maturity(void)
             UCM_CHECK("(a2) authority: exactly one input spent",
                       out.spent_count == 1);
             UCM_CHECK("(a2) authority: spent coin is the coinbase coin",
-                      out.spent_count == 1 && out.spent != NULL &&
-                      out.spent[0].is_coinbase == true &&
-                      out.spent[0].height == cb.height &&
-                      out.spent[0].value == cb.value);
+                      ucm_spent_is_the_coinbase_coin(&out, &cb));
             /* added: vtx[1].vout[0]; the coinbase vtx[0] output is also added.
              * The authority records every spendable output, so added_count is
              * the 2 outputs (coinbase out + the spend's out). */
@@ -249,9 +280,7 @@ int test_utxo_apply_coinbase_maturity(void)
                                            &out);
             UCM_CHECK("(b) flag ON: premature spend REJECTS", out.ok == false);
             UCM_CHECK("(b) flag ON: reject is bad-txns-premature-spend-of-coinbase",
-                      out.failure_kind != NULL &&
-                      strcmp(out.failure_kind,
-                             "bad-txns-premature-spend-of-coinbase") == 0);
+                      ucm_failure_is_premature_spend(&out));
             free_delta(&out);
         }
         block_free(&b);
@@ -337,9 +366,7 @@ int test_utxo_apply_coinbase_maturity(void)
                       out.count_only_d2_skip == true);
             /* (3) authors NO coins past the fire — the load-bearing safety */
             UCM_CHECK("(e) count-only: NO coins authored (0 spent, 0 added)",
-                      out.spent_count == 0 && out.added_count == 0 &&
-                      out.spent == NULL && out.added == NULL &&
-                      out.total_value_delta == 0);
+                      ucm_authored_no_coins(&out));
             /* (4) the fire was COUNTED + first offending height recorded */
             UCM_CHECK("(e) count-only: the fire was counted (total == 1)",
                       replay_count_only_total_rejected() == 1);
@@ -369,9 +396,7 @@ int test_utxo_apply_coinbase_maturity(void)
             UCM_CHECK("(e2) env unset: premature spend REJECTS (live unchanged)",
                       out2.ok == false &&
                       out2.count_only_d2_skip == false &&
-                      out2.failure_kind != NULL &&
-                      strcmp(out2.failure_kind,
-                             "bad-txns-premature-spend-of-coinbase") == 0);
+                      ucm_failure_is_premature_spend(&out2));
             free_delta(&out2);
         }
         block_free(&b2);
