@@ -672,17 +672,15 @@ static const char hlt_lesson_v3[] =
     "contradictions=the current additive cache-accounting counterexample remains evidence for a later exact parser supersession; it does not invalidate reproducing the accepted original outcome at this exact historical source\n"
     "lineage=this projection supersedes v2 because v2 searched and stopped after one file; an accepted RETRACTION retires v3, while CONFLICT evidence alone never grants lifecycle authority\n";
 
-static int hlt_experience_episode(const char *workspace)
+static bool hlt_episode_focus_ok(
+    struct vcs_zcode_task_v1 *task,
+    struct vcs_zcode_agent_context_v1 *context,
+    struct zcl_story_event_v1 *story_event, struct zcl_story_graph_v1 *story,
+    struct vcs_zcode_focus_v1 *focus,
+    uint8_t task_root[32], uint8_t focus_root[32])
 {
-    int failures = 0;
-    struct vcs_zcode_task_v1 task;
-    struct vcs_zcode_agent_context_v1 context;
-    struct zcl_story_event_v1 story_event;
-    struct zcl_story_graph_v1 story;
-    struct vcs_zcode_focus_v1 focus;
-    uint8_t task_root[32], focus_root[32], expected[32];
-    bool focus_ok = hlt_experience_focus(
-            &task, &context, &story_event, &story, &focus,
+    uint8_t expected[32];
+    return hlt_experience_focus(task, context, story_event, story, focus,
             task_root, focus_root) &&
         hlt_hex_root(
             "149e861115138bad74a64afcbe252ccc12165e09b81ec45edd6fe5b6aabf8c21",
@@ -690,13 +688,14 @@ static int hlt_experience_episode(const char *workspace)
         hlt_hex_root(
             "dbc85f01dc457aa3bb81feef6c411565d7d4cb1de0307adc5e10b0052b844469",
             expected) && memcmp(focus_root, expected, 32) == 0;
-    HL_CHECK("episode-reuses-exact-task-focus-story-ontology", focus_ok);
-    if (!focus_ok) return failures + 1;
+}
 
-    uint8_t receipt_roots[5][32], path_roots[3][32];
-    uint8_t manifest_root[32], lesson_roots[3][32], proof_root[32];
-    bool blobs_ok =
-        hlt_blob_exact(workspace, hlt_receipt_a,
+static bool hlt_episode_evidence_blobs_ok(const char *workspace,
+    uint8_t receipt_roots[5][32], uint8_t path_roots[3][32],
+    uint8_t proof_root[32], uint8_t manifest_root[32],
+    uint8_t lesson_roots[3][32])
+{
+    return hlt_blob_exact(workspace, hlt_receipt_a,
             "506c01c9d2fc7bf5384d9e02c2052d0ab8e8cc69dce8c3a793ab608188fa4a08",
             receipt_roots[0]) &&
         hlt_blob_exact(workspace, hlt_receipt_b,
@@ -735,13 +734,13 @@ static int hlt_experience_episode(const char *workspace)
         hlt_blob_exact(workspace, hlt_lesson_v3,
             "dae1d434998a5815ff2ee682a167fb62084a922e91f6ea8b6acfe4dabcf09fa7",
             lesson_roots[2]);
-    HL_CHECK("episode-sanitized-evidence-has-exact-CAS-roots", blobs_ok);
-    if (!blobs_ok) return failures + 1;
+}
 
-    uint8_t seed[32], secret[32], pubkey[32];
-    hlt_root(seed, 220u);
-    ed25519_keypair(pubkey, secret, seed);
-    uint8_t claim_roots[3][32], specialist_roots[3][32];
+static bool hlt_episode_identity_stored(const char *workspace,
+    uint8_t claim_roots[3][32], uint8_t specialist_roots[3][32],
+    uint8_t outcome_commit_root[32], uint8_t final_evidence_root[32],
+    uint8_t receipt_roots[5][32], uint8_t proof_root[32])
+{
     static const char *const claim_text[3] = {
         "independent control session A observation",
         "independent control session B observation",
@@ -761,7 +760,6 @@ static int hlt_experience_episode(const char *workspace)
             strlen(specialist_text[i]), VCS_TAG_BLOB, specialist_roots[i]);
     }
 
-    uint8_t outcome_commit_root[32], final_evidence_root[32];
     static const char outcome_commit[] =
         "48fbe027ae48e22b193392dc97a895ef5b749264";
     uint8_t final_evidence[64];
@@ -773,142 +771,125 @@ static int hlt_experience_episode(const char *workspace)
             outcome_commit_root) &&
         vcs_object_put(workspace, final_evidence, sizeof(final_evidence),
                        VCS_TAG_BLOB, final_evidence_root);
-    HL_CHECK("episode-session-and-outcome-identities-store", identity_ok);
+    return identity_ok;
+}
 
-    struct vcs_zcode_work_receipt_v1 work_receipt;
-    memset(&work_receipt, 0, sizeof(work_receipt));
-    work_receipt.schema_version = VCS_ZCODE_DEV_VERSION;
-    memcpy(work_receipt.task_root, task_root, 32);
-    memcpy(work_receipt.candidate_root, outcome_commit_root, 32);
-    memcpy(work_receipt.action_root, lesson_roots[2], 32);
-    memcpy(work_receipt.input_root, focus_root, 32);
-    memcpy(work_receipt.output_root, outcome_commit_root, 32);
-    memcpy(work_receipt.proof_policy_root, task.proof_policy_root, 32);
-    memcpy(work_receipt.toolchain_capsule_root,
-           task.toolchain_capsule_root, 32);
-    hlt_root(work_receipt.lease_id, 221u);
-    memcpy(work_receipt.evidence_root, final_evidence_root, 32);
-    memcpy(work_receipt.confinement_root, focus.authority_limits_root, 32);
-    work_receipt.work_kind = VCS_ZCODE_WORK_TEST;
-    work_receipt.status = VCS_ZCODE_WORK_PASS;
-    work_receipt.exit_status = 0;
-    work_receipt.started_unix = 1;
-    work_receipt.finished_unix = 2;
-    uint8_t work_receipt_root[32];
+static bool hlt_episode_work_receipt_ok(const char *workspace,
+    struct vcs_zcode_work_receipt_v1 *work_receipt,
+    uint8_t secret[32], uint8_t pubkey[32], uint8_t work_receipt_root[32])
+{
     uint8_t work_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
-    bool work_ok = vcs_zcode_work_receipt_seal(
-            &work_receipt, secret, pubkey) == VCS_ZCODE_DEV_OK &&
-        vcs_zcode_work_receipt_verify(&work_receipt, pubkey) ==
+    return vcs_zcode_work_receipt_seal(work_receipt, secret, pubkey) ==
             VCS_ZCODE_DEV_OK &&
-        vcs_zcode_work_receipt_id(&work_receipt, work_receipt_root) ==
+        vcs_zcode_work_receipt_verify(work_receipt, pubkey) ==
             VCS_ZCODE_DEV_OK &&
-        vcs_zcode_work_receipt_serialize(&work_receipt, work_wire) ==
+        vcs_zcode_work_receipt_id(work_receipt, work_receipt_root) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_serialize(work_receipt, work_wire) ==
             VCS_ZCODE_DEV_OK &&
         vcs_object_put_addressed(workspace, work_receipt_root, work_wire,
                                  sizeof(work_wire));
-    HL_CHECK("episode-landed-outcome-has-signed-work-receipt", work_ok);
+}
 
-    struct vcs_zcode_specialist_report_v1 episode_reports[3];
-    uint8_t episode_report_roots[3][32];
-    hlt_report_init(&episode_reports[0], focus_root, claim_roots[0],
-        specialist_roots[0], receipt_roots[0], path_roots[0],
-        lesson_roots[0], task.toolchain_capsule_root,
-        ZCL_ONTOLOGY_INCOMPLETE, 2063u, UINT64_C(671384974), 27u, 100u, 0u);
-    hlt_report_init(&episode_reports[1], focus_root, claim_roots[1],
-        specialist_roots[1], receipt_roots[1], path_roots[1],
-        lesson_roots[0], task.toolchain_capsule_root,
-        ZCL_ONTOLOGY_INCOMPLETE, 2063u, UINT64_C(686564042), 29u, 90u, 0u);
-    hlt_report_init(&episode_reports[2], focus_root, claim_roots[2],
-        pubkey, work_receipt_root, outcome_commit_root,
-        lesson_roots[2], task.toolchain_capsule_root,
-        ZCL_ONTOLOGY_PROVED, 1492u, UINT64_C(120578583), 1u, 5u, 1u);
+static bool hlt_episode_reports_stored(const char *workspace,
+    struct vcs_zcode_specialist_report_v1 episode_reports[3],
+    uint8_t episode_report_roots[3][32])
+{
     bool reports_ok = true;
     for (size_t i = 0; i < 3u; i++)
         reports_ok = reports_ok && hlt_report_store(
             workspace, &episode_reports[i], episode_report_roots[i]);
-    HL_CHECK("episode-controls-and-treatment-use-rooted-reports", reports_ok);
+    return reports_ok;
+}
 
-    uint8_t observations[3][32];
+static bool hlt_episode_report_observations_ok(const char *workspace,
+    uint8_t episode_report_roots[3][32], uint8_t receipt_roots[5][32],
+    uint8_t observations[3][32])
+{
     uint8_t report_pair[64];
     memcpy(report_pair, episode_report_roots[0], 32);
     memcpy(report_pair + 32, episode_report_roots[1], 32);
-    bool observations_ok = vcs_object_put(
+    return vcs_object_put(
             workspace, report_pair, sizeof(report_pair), VCS_TAG_BLOB,
             observations[0]) &&
         vcs_object_put(workspace, receipt_roots[2], 32u, VCS_TAG_BLOB,
                        observations[1]);
+}
+
+static bool hlt_episode_final_observation_ok(const char *workspace,
+    bool observations_ok, uint8_t episode_report_roots[3][32],
+    uint8_t receipt_roots[5][32], uint8_t observations[3][32])
+{
     uint8_t final_pair[64];
     memcpy(final_pair, episode_report_roots[2], 32);
     memcpy(final_pair + 32, receipt_roots[3], 32);
-    observations_ok = observations_ok && vcs_object_put(
+    return observations_ok && vcs_object_put(
         workspace, final_pair, sizeof(final_pair), VCS_TAG_BLOB,
         observations[2]);
+}
 
-    struct vcs_zcode_heuristic_v1 heuristics[3];
-    uint8_t heuristic_roots[3][32];
-    hlt_heuristic_init(&heuristics[0], &focus, focus_root, observations[0],
-        lesson_roots[0], lesson_roots[0], manifest_root, manifest_root,
-        task.toolchain_capsule_root);
-    bool lineage_ok = observations_ok &&
-        vcs_zcode_heuristic_root(&heuristics[0], heuristic_roots[0]) ==
+static bool hlt_episode_heuristic_rooted_ok(bool observations_ok,
+    struct vcs_zcode_heuristic_v1 *heuristic, uint8_t heuristic_root[32])
+{
+    return observations_ok &&
+        vcs_zcode_heuristic_root(heuristic, heuristic_root) ==
             VCS_ZCODE_ATTENTION_OK;
-    heuristics[1] = heuristics[0];
-    heuristics[1].derivation = VCS_ZCODE_HEURISTIC_REPAIR;
-    heuristics[1].parent_count = 1u;
-    memcpy(heuristics[1].parent_roots[0], heuristic_roots[0], 32);
-    memcpy(heuristics[1].observed_features_root, observations[1], 32);
-    memcpy(heuristics[1].proposed_rule_root, lesson_roots[1], 32);
-    memcpy(heuristics[1].expected_effect_root, lesson_roots[1], 32);
-    memcpy(heuristics[1].provenance_root, receipt_roots[2], 32);
-    lineage_ok = lineage_ok && vcs_zcode_heuristic_validate_derivation(
-            &heuristics[1], &heuristics[0], 1u) == VCS_ZCODE_ATTENTION_OK &&
-        vcs_zcode_heuristic_root(&heuristics[1], heuristic_roots[1]) ==
-            VCS_ZCODE_ATTENTION_OK;
-    heuristics[2] = heuristics[1];
-    memcpy(heuristics[2].parent_roots[0], heuristic_roots[1], 32);
-    memcpy(heuristics[2].observed_features_root, observations[2], 32);
-    memcpy(heuristics[2].proposed_rule_root, lesson_roots[2], 32);
-    memcpy(heuristics[2].expected_effect_root, lesson_roots[2], 32);
-    memcpy(heuristics[2].provenance_root, work_receipt_root, 32);
-    lineage_ok = lineage_ok && vcs_zcode_heuristic_validate_derivation(
-            &heuristics[2], &heuristics[1], 1u) == VCS_ZCODE_ATTENTION_OK &&
-        vcs_zcode_heuristic_root(&heuristics[2], heuristic_roots[2]) ==
-            VCS_ZCODE_ATTENTION_OK;
-    HL_CHECK("episode-failed-lessons-repair-into-one-immutable-lesson",
-             lineage_ok);
+}
 
-    struct vcs_zcode_attention_bid_v1 episode_bids[3];
-    uint8_t bid_roots[3][32], stored_heuristic[32];
-    bool pairs_ok = lineage_ok &&
-        hlt_bid_init(&episode_bids[0], &heuristics[0], &focus,
-            task.proof_policy_root, task.toolchain_capsule_root,
+static bool hlt_episode_derivation_rooted_ok(bool lineage_ok,
+    struct vcs_zcode_heuristic_v1 *child, struct vcs_zcode_heuristic_v1 *parent,
+    uint8_t child_root[32])
+{
+    return lineage_ok && vcs_zcode_heuristic_validate_derivation(
+            child, parent, 1u) == VCS_ZCODE_ATTENTION_OK &&
+        vcs_zcode_heuristic_root(child, child_root) ==
+            VCS_ZCODE_ATTENTION_OK;
+}
+
+static bool hlt_episode_attention_pairs_ok(const char *workspace,
+    bool lineage_ok, struct vcs_zcode_task_v1 *task,
+    struct vcs_zcode_focus_v1 *focus,
+    struct vcs_zcode_heuristic_v1 heuristics[3],
+    struct vcs_zcode_attention_bid_v1 episode_bids[3],
+    uint8_t heuristic_roots[3][32], uint8_t bid_roots[3][32],
+    uint8_t stored_heuristic[32], uint8_t observations[3][32],
+    uint8_t receipt_roots[5][32], uint8_t work_receipt_root[32])
+{
+    return lineage_ok && hlt_bid_init(&episode_bids[0], &heuristics[0],
+            focus, task->proof_policy_root, task->toolchain_capsule_root,
             observations[0], 3000u) &&
         vcs_zcode_attention_store_pair(workspace, &heuristics[0],
             &episode_bids[0], stored_heuristic, bid_roots[0]) ==
             VCS_ZCODE_ATTENTION_OK &&
         memcmp(stored_heuristic, heuristic_roots[0], 32) == 0 &&
-        hlt_bid_init(&episode_bids[1], &heuristics[1], &focus,
-            task.proof_policy_root, task.toolchain_capsule_root,
+        hlt_bid_init(&episode_bids[1], &heuristics[1], focus,
+            task->proof_policy_root, task->toolchain_capsule_root,
             receipt_roots[2], 5000u) &&
         vcs_zcode_attention_store_pair(workspace, &heuristics[1],
             &episode_bids[1], stored_heuristic, bid_roots[1]) ==
             VCS_ZCODE_ATTENTION_OK &&
         memcmp(stored_heuristic, heuristic_roots[1], 32) == 0 &&
-        hlt_bid_init(&episode_bids[2], &heuristics[2], &focus,
-            task.proof_policy_root, task.toolchain_capsule_root,
+        hlt_bid_init(&episode_bids[2], &heuristics[2], focus,
+            task->proof_policy_root, task->toolchain_capsule_root,
             work_receipt_root, 9000u) &&
         vcs_zcode_attention_store_pair(workspace, &heuristics[2],
             &episode_bids[2], stored_heuristic, bid_roots[2]) ==
             VCS_ZCODE_ATTENTION_OK &&
         memcmp(stored_heuristic, heuristic_roots[2], 32) == 0;
-    HL_CHECK("episode-reuses-existing-CAS-attention-pair-admission", pairs_ok);
+}
 
-    struct vcs_zcode_science_statement_v1 lesson_statements[4];
-    struct vcs_zcode_science_relation_set_v1 lesson_relations[4];
-    uint8_t lesson_statement_roots[4][32];
-    bool statements_ok = pairs_ok && hlt_bound_result(
+static bool hlt_episode_lesson_statements_ok(const char *workspace,
+    bool pairs_ok, struct vcs_zcode_attention_bid_v1 episode_bids[3],
+    struct vcs_zcode_heuristic_v1 heuristics[3],
+    struct vcs_zcode_focus_v1 *focus, uint8_t secret[32], uint8_t pubkey[32],
+    struct vcs_zcode_science_statement_v1 lesson_statements[4],
+    struct vcs_zcode_science_relation_set_v1 lesson_relations[4],
+    uint8_t lesson_statement_roots[4][32], uint8_t receipt_roots[5][32],
+    uint8_t proof_root[32])
+{
+    return pairs_ok && hlt_bound_result(
             &lesson_statements[0], &lesson_relations[0], &episode_bids[2],
-            &heuristics[2], &focus, secret, pubkey) &&
+            &heuristics[2], focus, secret, pubkey) &&
         hlt_store(workspace, &lesson_statements[0], &lesson_relations[0],
                   lesson_statement_roots[0]) &&
         hlt_transition(&lesson_statements[1], &lesson_relations[1],
@@ -932,67 +913,66 @@ static int hlt_experience_episode(const char *workspace)
             secret, pubkey) &&
         hlt_store(workspace, &lesson_statements[3], &lesson_relations[3],
                   lesson_statement_roots[3]);
-    HL_CHECK("episode-lesson-carries-conflict-supersession-retraction",
-             statements_ok);
+}
 
-    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 lesson_snapshot;
-    struct vcs_zcode_heuristic_lifecycle_report lesson_report;
-    uint8_t accepted_roots[4][32];
-    memcpy(accepted_roots[0], lesson_statement_roots[0], 32);
-    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
-                 lesson_statement_roots[0], accepted_roots, 1u);
-    bool retained_ok = statements_ok && hlt_select_retained(
-        workspace, &lesson_snapshot, &episode_bids[2], &heuristics[2],
-        &heuristics[1], &lesson_statements[0], &focus, pubkey) ==
+static bool hlt_episode_lesson_retained_ok(const char *workspace,
+    bool statements_ok,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lesson_snapshot,
+    struct vcs_zcode_attention_bid_v1 episode_bids[3],
+    struct vcs_zcode_heuristic_v1 heuristics[3],
+    struct vcs_zcode_science_statement_v1 lesson_statements[4],
+    struct vcs_zcode_focus_v1 *focus, uint8_t pubkey[32])
+{
+    return statements_ok && hlt_select_retained(
+            workspace, lesson_snapshot, &episode_bids[2], &heuristics[2],
+            &heuristics[1], &lesson_statements[0], focus, pubkey) ==
         VCS_ZCODE_ATTENTION_OK;
-    HL_CHECK("episode-retained-lesson-enters-verified-attention", retained_ok);
+}
 
-    struct zcl_experience_episode_v1 episode = {
-        .workspace = workspace,
-        .story = &story,
-        .task = &task,
-        .agent_context = &context,
-        .focus = &focus,
-        .work_receipt = &work_receipt,
-        .specialist_report = &episode_reports[2],
-        .heuristic = &heuristics[2],
-        .parents = &heuristics[1],
-        .parent_count = 1u,
-        .attention_bid = &episode_bids[2],
-        .relations = &lesson_relations[0],
-        .statement = &lesson_statements[0],
-        .local_acceptance = &lesson_snapshot,
-    };
-    struct zcl_experience_compilation_v1 compiled;
-    bool compiled_ok = retained_ok && zcl_experience_compile(
-            &episode, &compiled) == ZCL_EXPERIENCE_COMPILATION_OK &&
-        compiled.captured && !compiled.lesson_relevant &&
-        compiled.outcome == ZCL_ONTOLOGY_PROVED &&
-        compiled.lifecycle_status ==
+static bool hlt_episode_compiled_ok(bool retained_ok,
+    struct zcl_experience_episode_v1 *episode,
+    struct zcl_experience_compilation_v1 *compiled,
+    struct vcs_zcode_focus_v1 *focus, uint8_t work_receipt_root[32],
+    uint8_t heuristic_roots[3][32], uint8_t lesson_statement_roots[4][32])
+{
+    return retained_ok && zcl_experience_compile(episode, compiled) ==
+            ZCL_EXPERIENCE_COMPILATION_OK &&
+        compiled->captured && !compiled->lesson_relevant &&
+        compiled->outcome == ZCL_ONTOLOGY_PROVED &&
+        compiled->lifecycle_status ==
             VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED &&
-        memcmp(compiled.story_root, focus.story_graph_root, 32) == 0 &&
-        memcmp(compiled.receipt_root, work_receipt_root, 32) == 0 &&
-        memcmp(compiled.heuristic_root, heuristic_roots[2], 32) == 0 &&
-        memcmp(compiled.statement_root, lesson_statement_roots[0], 32) == 0 &&
-        memcmp(compiled.derived_rule_root,
+        memcmp(compiled->story_root, focus->story_graph_root, 32) == 0 &&
+        memcmp(compiled->receipt_root, work_receipt_root, 32) == 0 &&
+        memcmp(compiled->heuristic_root, heuristic_roots[2], 32) == 0 &&
+        memcmp(compiled->statement_root, lesson_statement_roots[0], 32) == 0 &&
+        memcmp(compiled->derived_rule_root,
                (const uint8_t[32]){0}, 32) == 0;
-    HL_CHECK("episode-capture-without-replication-returns-no-lesson",
-             compiled_ok);
+}
 
+static bool hlt_episode_alias_refused(struct zcl_experience_episode_v1 *episode)
+{
     union {
         struct zcl_experience_episode_v1 episode;
         struct zcl_experience_compilation_v1 output;
     } aliased_episode;
-    aliased_episode.episode = episode;
+    aliased_episode.episode = *episode;
     struct zcl_experience_episode_v1 aliased_before = aliased_episode.episode;
-    HL_CHECK("episode-output-alias-refuses-without-corrupting-input",
-             zcl_experience_compile(
-                 &aliased_episode.episode, &aliased_episode.output) ==
-                     ZCL_EXPERIENCE_COMPILATION_ALIAS &&
+    return zcl_experience_compile(
+                &aliased_episode.episode, &aliased_episode.output) ==
+                    ZCL_EXPERIENCE_COMPILATION_ALIAS &&
              memcmp(&aliased_episode.episode, &aliased_before,
-                    sizeof(aliased_before)) == 0);
+                    sizeof(aliased_before)) == 0;
+}
 
-    struct vcs_zcode_work_receipt_v1 failed_receipt = work_receipt;
+static bool hlt_episode_failure_unqualified_ok(
+    struct zcl_experience_episode_v1 *episode,
+    struct vcs_zcode_focus_v1 *focus, uint8_t secret[32], uint8_t pubkey[32],
+    struct vcs_zcode_work_receipt_v1 *work_receipt,
+    struct vcs_zcode_specialist_report_v1 episode_reports[3],
+    struct vcs_zcode_heuristic_v1 heuristics[3],
+    struct vcs_zcode_attention_bid_v1 episode_bids[3])
+{
+    struct vcs_zcode_work_receipt_v1 failed_receipt = *work_receipt;
     failed_receipt.status = VCS_ZCODE_WORK_FAIL;
     failed_receipt.exit_status = 1;
     memset(failed_receipt.signature, 0, sizeof(failed_receipt.signature));
@@ -1017,7 +997,7 @@ static int hlt_experience_episode(const char *workspace)
     struct vcs_zcode_science_relation_set_v1 failed_relations;
     failed_shapes_ok = failed_shapes_ok && hlt_bound_result(
         &failed_statement, &failed_relations, &failed_bid,
-        &failed_heuristic, &focus, secret, pubkey);
+        &failed_heuristic, focus, secret, pubkey);
     uint8_t failed_statement_root[32], failed_accepted[1][32];
     failed_shapes_ok = failed_shapes_ok &&
         vcs_zcode_science_statement_root(
@@ -1027,7 +1007,7 @@ static int hlt_experience_episode(const char *workspace)
     struct vcs_zcode_heuristic_lifecycle_snapshot_v1 failed_snapshot;
     hlt_snapshot(&failed_snapshot, failed_heuristic_root, pubkey,
                  failed_statement_root, failed_accepted, 1u);
-    struct zcl_experience_episode_v1 failed_episode = episode;
+    struct zcl_experience_episode_v1 failed_episode = *episode;
     failed_episode.work_receipt = &failed_receipt;
     failed_episode.specialist_report = &failed_report;
     failed_episode.heuristic = &failed_heuristic;
@@ -1036,88 +1016,115 @@ static int hlt_experience_episode(const char *workspace)
     failed_episode.statement = &failed_statement;
     failed_episode.local_acceptance = &failed_snapshot;
     struct zcl_experience_compilation_v1 failed_compiled;
-    HL_CHECK("episode-failure-is-immutable-but-unqualified-evidence",
-             failed_shapes_ok && zcl_experience_compile(
+    return failed_shapes_ok && zcl_experience_compile(
                  &failed_episode, &failed_compiled) ==
                      ZCL_EXPERIENCE_COMPILATION_OK &&
              failed_compiled.captured && !failed_compiled.lesson_relevant &&
-             failed_compiled.outcome == ZCL_ONTOLOGY_DISPROVED);
+             failed_compiled.outcome == ZCL_ONTOLOGY_DISPROVED;
+}
 
-    struct vcs_zcode_work_receipt_v1 cancelled_receipt = work_receipt;
+static bool hlt_episode_cancelled_not_failure(
+    struct zcl_experience_episode_v1 *episode,
+    struct vcs_zcode_work_receipt_v1 *work_receipt, uint8_t secret[32],
+    uint8_t pubkey[32], struct zcl_experience_compilation_v1 *zero_compilation)
+{
+    struct vcs_zcode_work_receipt_v1 cancelled_receipt = *work_receipt;
     cancelled_receipt.status = VCS_ZCODE_WORK_CANCELLED;
     memset(cancelled_receipt.signature, 0, sizeof(cancelled_receipt.signature));
     bool cancelled_ok = vcs_zcode_work_receipt_seal(
             &cancelled_receipt, secret, pubkey) == VCS_ZCODE_DEV_OK;
-    struct zcl_experience_episode_v1 cancelled_episode = episode;
+    struct zcl_experience_episode_v1 cancelled_episode = *episode;
     cancelled_episode.work_receipt = &cancelled_receipt;
     struct zcl_experience_compilation_v1 cancelled_compilation;
     memset(&cancelled_compilation, 0xa5, sizeof(cancelled_compilation));
-    struct zcl_experience_compilation_v1 zero_compilation = {0};
-    HL_CHECK("episode-cancelled-work-is-not-invented-as-a-failure-lesson",
-             cancelled_ok && zcl_experience_compile(
+    return cancelled_ok && zcl_experience_compile(
                  &cancelled_episode, &cancelled_compilation) ==
                      ZCL_EXPERIENCE_COMPILATION_RECEIPT &&
-             memcmp(&cancelled_compilation, &zero_compilation,
-                    sizeof(cancelled_compilation)) == 0);
+             memcmp(&cancelled_compilation, zero_compilation,
+                    sizeof(cancelled_compilation)) == 0;
+}
 
-    struct zcl_experience_compilation_v1 refused_compilation;
-    struct vcs_zcode_agent_context_v1 stale_context = context;
+static bool hlt_episode_wrong_generation_refused(
+    struct zcl_experience_episode_v1 *episode,
+    struct vcs_zcode_agent_context_v1 *context,
+    struct zcl_experience_compilation_v1 *refused_compilation,
+    struct zcl_experience_compilation_v1 *zero_compilation)
+{
+    struct vcs_zcode_agent_context_v1 stale_context = *context;
     stale_context.source_root[0] ^= 1u;
-    struct zcl_experience_episode_v1 stale_episode = episode;
+    struct zcl_experience_episode_v1 stale_episode = *episode;
     stale_episode.agent_context = &stale_context;
-    memset(&refused_compilation, 0xa5, sizeof(refused_compilation));
-    HL_CHECK("episode-wrong-source-generation-refuses-atomically",
-             zcl_experience_compile(&stale_episode, &refused_compilation) ==
-                 ZCL_EXPERIENCE_COMPILATION_FOCUS &&
-             memcmp(&refused_compilation, &zero_compilation,
-                    sizeof(refused_compilation)) == 0);
+    memset(refused_compilation, 0xa5, sizeof(*refused_compilation));
+    return zcl_experience_compile(&stale_episode, refused_compilation) ==
+            ZCL_EXPERIENCE_COMPILATION_FOCUS &&
+        memcmp(refused_compilation, zero_compilation,
+               sizeof(*refused_compilation)) == 0;
+}
 
-    struct zcl_story_event_v1 stale_event = story_event;
+static bool hlt_episode_stale_story_refused(
+    struct zcl_experience_episode_v1 *episode,
+    struct zcl_story_event_v1 *story_event, struct zcl_story_graph_v1 *story,
+    struct zcl_experience_compilation_v1 *refused_compilation,
+    struct zcl_experience_compilation_v1 *zero_compilation)
+{
+    struct zcl_story_event_v1 stale_event = *story_event;
     stale_event.evidence_root[0] ^= 1u;
-    struct zcl_story_graph_v1 stale_story = story;
+    struct zcl_story_graph_v1 stale_story = *story;
     stale_story.events = &stale_event;
-    stale_episode = episode;
+    struct zcl_experience_episode_v1 stale_episode = *episode;
     stale_episode.story = &stale_story;
-    memset(&refused_compilation, 0xa5, sizeof(refused_compilation));
-    HL_CHECK("episode-stale-story-refuses-atomically",
-             zcl_experience_compile(&stale_episode, &refused_compilation) ==
-                 ZCL_EXPERIENCE_COMPILATION_STORY &&
-             memcmp(&refused_compilation, &zero_compilation,
-                    sizeof(refused_compilation)) == 0);
+    memset(refused_compilation, 0xa5, sizeof(*refused_compilation));
+    return zcl_experience_compile(&stale_episode, refused_compilation) ==
+            ZCL_EXPERIENCE_COMPILATION_STORY &&
+        memcmp(refused_compilation, zero_compilation,
+               sizeof(*refused_compilation)) == 0;
+}
 
+static bool hlt_episode_forged_evaluator_refused(
+    struct zcl_experience_episode_v1 *episode,
+    struct vcs_zcode_science_statement_v1 lesson_statements[4],
+    struct zcl_experience_compilation_v1 *refused_compilation,
+    struct zcl_experience_compilation_v1 *zero_compilation)
+{
     struct vcs_zcode_science_statement_v1 forged_statement =
         lesson_statements[0];
     forged_statement.signature[0] ^= 1u;
-    struct zcl_experience_episode_v1 forged_episode = episode;
+    struct zcl_experience_episode_v1 forged_episode = *episode;
     forged_episode.statement = &forged_statement;
-    memset(&refused_compilation, 0xa5, sizeof(refused_compilation));
-    HL_CHECK("episode-forged-evaluator-evidence-refuses-atomically",
-             zcl_experience_compile(&forged_episode,
-                                    &refused_compilation) ==
-                 ZCL_EXPERIENCE_COMPILATION_HEURISTIC &&
-             memcmp(&refused_compilation, &zero_compilation,
-                    sizeof(refused_compilation)) == 0);
+    memset(refused_compilation, 0xa5, sizeof(*refused_compilation));
+    return zcl_experience_compile(&forged_episode, refused_compilation) ==
+            ZCL_EXPERIENCE_COMPILATION_HEURISTIC &&
+        memcmp(refused_compilation, zero_compilation,
+               sizeof(*refused_compilation)) == 0;
+}
 
+static bool hlt_episode_source_mutations_refused(
+    struct zcl_experience_episode_v1 *episode, struct vcs_zcode_focus_v1 *focus,
+    struct zcl_experience_compilation_v1 *refused_compilation,
+    struct zcl_experience_compilation_v1 *zero_compilation)
+{
     bool mutation_ok = true;
     for (size_t i = 0; i < 32u; i++) {
-        struct vcs_zcode_focus_v1 mutated_focus = focus;
+        struct vcs_zcode_focus_v1 mutated_focus = *focus;
         mutated_focus.source_universe_root[i] ^= (uint8_t)(i + 1u);
-        struct zcl_experience_episode_v1 mutated_episode = episode;
+        struct zcl_experience_episode_v1 mutated_episode = *episode;
         mutated_episode.focus = &mutated_focus;
-        memset(&refused_compilation, 0xa5, sizeof(refused_compilation));
+        memset(refused_compilation, 0xa5, sizeof(*refused_compilation));
         mutation_ok = mutation_ok && zcl_experience_compile(
-                &mutated_episode, &refused_compilation) ==
+                &mutated_episode, refused_compilation) ==
                     ZCL_EXPERIENCE_COMPILATION_FOCUS &&
-            memcmp(&refused_compilation, &zero_compilation,
-                   sizeof(refused_compilation)) == 0;
+            memcmp(refused_compilation, zero_compilation,
+                   sizeof(*refused_compilation)) == 0;
     }
-    HL_CHECK("episode-source-root-byte-mutation-property-refuses-all",
-             mutation_ok);
+    return mutation_ok;
+}
 
-    char replica[256];
-    int replica_n = snprintf(replica, sizeof(replica), "%s.replica", workspace);
-    test_cleanup_tmpdir(replica);
-    bool replica_ok = replica_n > 0 && (size_t)replica_n < sizeof(replica) &&
+static bool hlt_episode_replica_stored_ok(char *replica, size_t replica_size,
+    int replica_n, struct vcs_zcode_heuristic_v1 heuristics[3],
+    struct vcs_zcode_attention_bid_v1 episode_bids[3],
+    uint8_t stored_heuristic[32], uint8_t bid_roots[3][32])
+{
+    return replica_n > 0 && (size_t)replica_n < replica_size &&
         mkdir(replica, 0700) == 0 && vcs_object_store_init(replica) &&
         vcs_zcode_attention_store_pair(replica, &heuristics[0],
             &episode_bids[0], stored_heuristic, bid_roots[0]) ==
@@ -1125,30 +1132,36 @@ static int hlt_experience_episode(const char *workspace)
         vcs_zcode_attention_store_pair(replica, &heuristics[1],
             &episode_bids[1], stored_heuristic, bid_roots[1]) ==
                 VCS_ZCODE_ATTENTION_OK;
-    struct zcl_experience_episode_v1 replica_episode = episode;
+}
+
+static bool hlt_episode_replica_reproduced_ok(bool replica_ok, char *replica,
+    struct zcl_experience_episode_v1 *episode,
+    struct zcl_experience_compilation_v1 *compiled)
+{
+    struct zcl_experience_episode_v1 replica_episode = *episode;
     replica_episode.workspace = replica;
     struct zcl_experience_compilation_v1 reproduced;
-    replica_ok = replica_ok && zcl_experience_compile(
-            &replica_episode, &reproduced) ==
-                ZCL_EXPERIENCE_COMPILATION_OK &&
+    return replica_ok && zcl_experience_compile(&replica_episode,
+            &reproduced) == ZCL_EXPERIENCE_COMPILATION_OK &&
         reproduced.captured && !reproduced.lesson_relevant &&
-        memcmp(reproduced.receipt_root, compiled.receipt_root, 32) == 0 &&
-        memcmp(reproduced.report_root, compiled.report_root, 32) == 0 &&
-        memcmp(reproduced.heuristic_root, compiled.heuristic_root, 32) == 0 &&
-        memcmp(reproduced.statement_root, compiled.statement_root, 32) == 0 &&
+        memcmp(reproduced.receipt_root, compiled->receipt_root, 32) == 0 &&
+        memcmp(reproduced.report_root, compiled->report_root, 32) == 0 &&
+        memcmp(reproduced.heuristic_root, compiled->heuristic_root, 32) == 0 &&
+        memcmp(reproduced.statement_root, compiled->statement_root, 32) == 0 &&
         memcmp(reproduced.acceptance_snapshot_root,
-               compiled.acceptance_snapshot_root, 32) == 0;
-    HL_CHECK("episode-independent-workspace-reproduces-exact-roots",
-             replica_ok);
-    test_cleanup_tmpdir(replica);
+               compiled->acceptance_snapshot_root, 32) == 0;
+}
 
-    char poisoned[256];
-    int poisoned_n = snprintf(
-        poisoned, sizeof(poisoned), "%s.poisoned", workspace);
-    test_cleanup_tmpdir(poisoned);
+static bool hlt_episode_poisoned_stored_ok(char *poisoned,
+    size_t poisoned_size, int poisoned_n,
+    struct vcs_zcode_heuristic_v1 heuristics[3],
+    struct vcs_zcode_attention_bid_v1 episode_bids[3],
+    uint8_t stored_heuristic[32], uint8_t bid_roots[3][32],
+    struct zcl_experience_compilation_v1 *compiled)
+{
     static const uint8_t malformed_report[] = "not a specialist report";
-    bool poisoned_ok = poisoned_n > 0 &&
-        (size_t)poisoned_n < sizeof(poisoned) &&
+    return poisoned_n > 0 &&
+        (size_t)poisoned_n < poisoned_size &&
         mkdir(poisoned, 0700) == 0 && vcs_object_store_init(poisoned) &&
         vcs_zcode_attention_store_pair(poisoned, &heuristics[0],
             &episode_bids[0], stored_heuristic, bid_roots[0]) ==
@@ -1156,114 +1169,94 @@ static int hlt_experience_episode(const char *workspace)
         vcs_zcode_attention_store_pair(poisoned, &heuristics[1],
             &episode_bids[1], stored_heuristic, bid_roots[1]) ==
                 VCS_ZCODE_ATTENTION_OK &&
-        vcs_object_put_addressed(poisoned, compiled.report_root,
+        vcs_object_put_addressed(poisoned, compiled->report_root,
             malformed_report, sizeof(malformed_report) - 1u);
-    struct zcl_experience_episode_v1 poisoned_episode = episode;
+}
+
+static bool hlt_episode_poisoned_refused_ok(bool poisoned_ok, char *poisoned,
+    struct zcl_experience_episode_v1 *episode,
+    struct zcl_experience_compilation_v1 *refused_compilation,
+    struct zcl_experience_compilation_v1 *zero_compilation)
+{
+    struct zcl_experience_episode_v1 poisoned_episode = *episode;
     poisoned_episode.workspace = poisoned;
-    memset(&refused_compilation, 0xa5, sizeof(refused_compilation));
-    poisoned_ok = poisoned_ok && zcl_experience_compile(
-            &poisoned_episode, &refused_compilation) ==
-                ZCL_EXPERIENCE_COMPILATION_CAS &&
-        memcmp(&refused_compilation, &zero_compilation,
-               sizeof(refused_compilation)) == 0;
-    HL_CHECK("episode-malformed-existing-CAS-object-refuses-atomically",
-             poisoned_ok);
-    test_cleanup_tmpdir(poisoned);
+    memset(refused_compilation, 0xa5, sizeof(*refused_compilation));
+    return poisoned_ok && zcl_experience_compile(&poisoned_episode,
+            refused_compilation) == ZCL_EXPERIENCE_COMPILATION_CAS &&
+        memcmp(refused_compilation, zero_compilation,
+               sizeof(*refused_compilation)) == 0;
+}
 
-    struct vcs_zcode_focus_v1 stale_focus = focus;
-    stale_focus.source_universe_root[0] ^= 1u;
-    HL_CHECK("episode-stale-source-lesson-fails-closed",
-             retained_ok && hlt_select_retained(
-                 workspace, &lesson_snapshot, &episode_bids[2],
-                 &heuristics[2], &heuristics[1], &lesson_statements[0],
-                 &stale_focus, pubkey) == VCS_ZCODE_ATTENTION_BINDING);
-    struct vcs_zcode_focus_v1 irrelevant_focus = focus;
-    irrelevant_focus.story_graph_root[0] ^= 1u;
-    HL_CHECK("episode-irrelevant-context-lesson-fails-closed",
-             hlt_select_retained(
-                 workspace, &lesson_snapshot, &episode_bids[2],
-                 &heuristics[2], &heuristics[1], &lesson_statements[0],
-                 &irrelevant_focus, pubkey) == VCS_ZCODE_ATTENTION_BINDING);
+static bool hlt_episode_stale_source_fails(bool retained_ok,
+    const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lesson_snapshot,
+    struct vcs_zcode_attention_bid_v1 episode_bids[3],
+    struct vcs_zcode_heuristic_v1 heuristics[3],
+    struct vcs_zcode_science_statement_v1 lesson_statements[4],
+    struct vcs_zcode_focus_v1 *stale_focus, uint8_t pubkey[32])
+{
+    return retained_ok && hlt_select_retained(
+                workspace, lesson_snapshot, &episode_bids[2],
+                &heuristics[2], &heuristics[1], &lesson_statements[0],
+                stale_focus, pubkey) == VCS_ZCODE_ATTENTION_BINDING;
+}
 
-    memcpy(accepted_roots[1], lesson_statement_roots[1], 32);
-    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
-                 lesson_statement_roots[0], accepted_roots, 2u);
-    HL_CHECK("episode-conflict-cannot-create-lifecycle-authority",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &lesson_snapshot, &lesson_report) ==
-                 VCS_ZCODE_ATTENTION_EVIDENCE);
+static bool hlt_episode_supersession_retained_ok(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lesson_snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *lesson_report,
+    uint8_t lesson_statement_roots[4][32])
+{
+    return vcs_zcode_heuristic_lifecycle_fold(
+            workspace, lesson_snapshot, lesson_report) ==
+                VCS_ZCODE_ATTENTION_OK &&
+        lesson_report->status == VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED &&
+        memcmp(lesson_report->head_statement_root,
+               lesson_statement_roots[2], 32) == 0;
+}
 
-    memcpy(accepted_roots[1], lesson_statement_roots[2], 32);
-    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
-                 lesson_statement_roots[0], accepted_roots, 2u);
-    HL_CHECK("episode-accepted-supersession-remains-retained",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &lesson_snapshot, &lesson_report) ==
-                 VCS_ZCODE_ATTENTION_OK &&
-             lesson_report.status == VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED &&
-             memcmp(lesson_report.head_statement_root,
-                    lesson_statement_roots[2], 32) == 0);
-    memcpy(accepted_roots[2], lesson_statement_roots[3], 32);
-    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
-                 lesson_statement_roots[0], accepted_roots, 3u);
-    HL_CHECK("episode-retracted-lesson-fails-closed",
-             hlt_select_retained(
-                 workspace, &lesson_snapshot, &episode_bids[2],
-                 &heuristics[2], &heuristics[1], &lesson_statements[0],
-                 &focus, pubkey) == VCS_ZCODE_ATTENTION_EVIDENCE);
-    episode.local_acceptance = &lesson_snapshot;
-    struct zcl_experience_compilation_v1 retired_compilation;
-    HL_CHECK("episode-retracted-local-lesson-is-captured-but-not-returned",
-             zcl_experience_compile(&episode, &retired_compilation) ==
-                 ZCL_EXPERIENCE_COMPILATION_OK &&
-             retired_compilation.captured &&
-             !retired_compilation.lesson_relevant &&
-             retired_compilation.lifecycle_status ==
-                 VCS_ZCODE_HEURISTIC_LIFECYCLE_RETIRED);
+static bool hlt_episode_retired_lesson_captured(
+    struct zcl_experience_episode_v1 *episode,
+    struct zcl_experience_compilation_v1 *retired_compilation)
+{
+    return zcl_experience_compile(episode, retired_compilation) ==
+            ZCL_EXPERIENCE_COMPILATION_OK &&
+        retired_compilation->captured &&
+        !retired_compilation->lesson_relevant &&
+        retired_compilation->lifecycle_status ==
+            VCS_ZCODE_HEURISTIC_LIFECYCLE_RETIRED;
+}
 
-    uint8_t malformed_root[32];
-    hlt_root(malformed_root, 252u);
-    uint8_t malformed_wire[VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES];
-    bool malformed_stored = vcs_zcode_science_statement_serialize(
-            &lesson_statements[0], malformed_wire) == VCS_ZCODE_SCIENCE_OK;
-    malformed_wire[0] ^= 1u;
-    malformed_stored = malformed_stored && vcs_object_put_addressed(
-        workspace, malformed_root, malformed_wire, sizeof(malformed_wire));
-    memcpy(accepted_roots[0], malformed_root, 32);
-    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
-                 malformed_root, accepted_roots, 1u);
-    HL_CHECK("episode-malformed-wrong-anchor-fails-binding",
-             malformed_stored && hlt_select_retained(
-                 workspace, &lesson_snapshot, &episode_bids[2],
-                 &heuristics[2], &heuristics[1], &lesson_statements[0],
-                 &focus, pubkey) == VCS_ZCODE_ATTENTION_BINDING);
+static bool hlt_episode_malformed_anchor_fails(bool malformed_stored,
+    const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lesson_snapshot,
+    struct vcs_zcode_attention_bid_v1 episode_bids[3],
+    struct vcs_zcode_heuristic_v1 heuristics[3],
+    struct vcs_zcode_science_statement_v1 lesson_statements[4],
+    struct vcs_zcode_focus_v1 *focus, uint8_t pubkey[32])
+{
+    return malformed_stored && hlt_select_retained(
+            workspace, lesson_snapshot, &episode_bids[2], &heuristics[2],
+            &heuristics[1], &lesson_statements[0], focus, pubkey) ==
+        VCS_ZCODE_ATTENTION_BINDING;
+}
 
-    struct vcs_zcode_attention_bid_v1 generation_bids[2] = {
-        episode_bids[2], episode_bids[2]
-    };
-    struct vcs_zcode_heuristic_v1 generation_heuristics[2] = {
-        heuristics[2], heuristics[2]
-    };
-    struct vcs_zcode_heuristic_v1 generation_parents[2] = {
-        heuristics[1], heuristics[1]
-    };
-    struct vcs_zcode_science_statement_v1 generation_statements[5] = {{0}};
-    struct vcs_zcode_science_relation_set_v1 generation_relations[5] = {{0}};
-    uint8_t generation_roots[5][32] = {{0}};
-    generation_bids[0].priority_class = VCS_ZCODE_ATTENTION_P0_SECURITY;
-    generation_bids[1].priority_class =
-        VCS_ZCODE_ATTENTION_P1_USER_JOURNEY;
-    memcpy(generation_bids[1].evidence_root, receipt_roots[3], 32);
-    generation_bids[1].information_gain_bp--;
-    bool generation_ok = hlt_bound_result(
+static bool hlt_episode_generation_stored_ok(const char *workspace,
+    struct vcs_zcode_attention_bid_v1 generation_bids[2],
+    struct vcs_zcode_heuristic_v1 generation_heuristics[2],
+    struct vcs_zcode_science_statement_v1 generation_statements[5],
+    struct vcs_zcode_science_relation_set_v1 generation_relations[5],
+    uint8_t generation_roots[5][32], uint8_t receipt_roots[5][32],
+    struct vcs_zcode_focus_v1 *focus, uint8_t secret[32], uint8_t pubkey[32])
+{
+    return hlt_bound_result(
             &generation_statements[0], &generation_relations[0],
-            &generation_bids[0], &generation_heuristics[0], &focus,
+            &generation_bids[0], &generation_heuristics[0], focus,
             secret, pubkey) &&
         hlt_store(workspace, &generation_statements[0],
                   &generation_relations[0], generation_roots[0]) &&
         hlt_bound_result(
             &generation_statements[1], &generation_relations[1],
-            &generation_bids[1], &generation_heuristics[1], &focus,
+            &generation_bids[1], &generation_heuristics[1], focus,
             secret, pubkey) &&
         hlt_store(workspace, &generation_statements[1],
                   &generation_relations[1], generation_roots[1]) &&
@@ -1291,6 +1284,494 @@ static int hlt_experience_episode(const char *workspace)
             secret, pubkey) &&
         hlt_store(workspace, &generation_statements[4],
                   &generation_relations[4], generation_roots[4]);
+}
+
+static bool hlt_episode_retired_p0_yields(bool generation_ok,
+    const char *workspace, struct vcs_zcode_attention_bid_v1 generation_bids[2],
+    struct vcs_zcode_heuristic_v1 generation_heuristics[2],
+    struct vcs_zcode_heuristic_v1 generation_parents[2],
+    struct vcs_zcode_science_statement_v1 generation_statements[5],
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 generation_snapshots[2],
+    struct vcs_zcode_focus_v1 *focus, struct vcs_zcode_task_v1 *task,
+    uint8_t lifecycle_policy_root[32], uint8_t pubkey[32], size_t selected[2],
+    struct vcs_zcode_attention_verified_report *verified)
+{
+    return generation_ok &&
+        vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, generation_bids, 2u, generation_heuristics,
+                 generation_parents, 2u, generation_statements,
+                 generation_snapshots, focus, task->proof_policy_root,
+                 lifecycle_policy_root, task->toolchain_capsule_root, pubkey,
+                 selected, 2u, verified) == VCS_ZCODE_ATTENTION_OK &&
+        verified->verified_count == 2u &&
+        verified->choice.frontier.input_count == 1u &&
+        verified->choice.selected_priority_class ==
+            VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
+        verified->choice.frontier.frontier_count == 1u &&
+        selected[0] == 1u;
+}
+
+static bool hlt_episode_frontier_duplicate_refuses(const char *workspace,
+    struct vcs_zcode_attention_bid_v1 bids[],
+    struct vcs_zcode_heuristic_v1 heuristics[],
+    struct vcs_zcode_heuristic_v1 parents[],
+    struct vcs_zcode_science_statement_v1 statements[],
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 snapshots[],
+    struct vcs_zcode_focus_v1 *focus, struct vcs_zcode_task_v1 *task,
+    uint8_t lifecycle_policy_root[32], uint8_t pubkey[32], size_t selected[],
+    struct vcs_zcode_attention_verified_report *verified,
+    struct vcs_zcode_attention_verified_report *verified_before)
+{
+    return vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, bids, 2u, heuristics, parents, 2u, statements,
+                 snapshots, focus, task->proof_policy_root,
+                 lifecycle_policy_root, task->toolchain_capsule_root, pubkey,
+                 selected, 2u, verified) == VCS_ZCODE_ATTENTION_DUPLICATE &&
+        memcmp(verified, verified_before, sizeof(*verified)) == 0 &&
+        selected[0] == SIZE_MAX;
+}
+
+static bool hlt_episode_all_retired_empty(const char *workspace,
+    struct vcs_zcode_attention_bid_v1 bids[],
+    struct vcs_zcode_heuristic_v1 heuristics[],
+    struct vcs_zcode_heuristic_v1 parents[],
+    struct vcs_zcode_science_statement_v1 statements[],
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 snapshots[],
+    struct vcs_zcode_focus_v1 *focus, struct vcs_zcode_task_v1 *task,
+    uint8_t lifecycle_policy_root[32], uint8_t pubkey[32], size_t selected[],
+    struct vcs_zcode_attention_verified_report *verified)
+{
+    for (size_t i = 0; i < 2u; i++)
+        memcpy(snapshots[i].local_policy_root, lifecycle_policy_root, 32);
+    selected[0] = SIZE_MAX;
+    return vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, bids, 2u, heuristics, parents, 2u, statements,
+                 snapshots, focus, task->proof_policy_root,
+                 lifecycle_policy_root, task->toolchain_capsule_root, pubkey,
+                 selected, 2u, verified) == VCS_ZCODE_ATTENTION_OK &&
+        verified->verified_count == 2u &&
+        verified->choice.frontier.input_count == 0u &&
+        verified->choice.frontier.frontier_count == 0u &&
+        verified->choice.selected_priority_class ==
+            VCS_ZCODE_ATTENTION_PRIORITY_AUTO &&
+        selected[0] == SIZE_MAX;
+}
+
+static bool hlt_episode_capacity_statement_ok(const char *workspace,
+    struct vcs_zcode_science_statement_v1 capacity_statements[3],
+    struct vcs_zcode_science_relation_set_v1 *capacity_relations,
+    struct vcs_zcode_attention_bid_v1 capacity_bids[3],
+    struct vcs_zcode_heuristic_v1 capacity_heuristics[3],
+    struct vcs_zcode_focus_v1 *focus, uint8_t secret[32], uint8_t pubkey[32],
+    uint8_t capacity_root[32])
+{
+    return hlt_bound_result(
+            &capacity_statements[0], capacity_relations, &capacity_bids[0],
+            &capacity_heuristics[0], focus, secret, pubkey) &&
+        hlt_store(workspace, &capacity_statements[0], capacity_relations,
+                  capacity_root);
+}
+
+static bool hlt_episode_capacity_retired_hidden_ok(bool capacity_ok,
+    const char *workspace, struct vcs_zcode_attention_bid_v1 capacity_bids[3],
+    struct vcs_zcode_heuristic_v1 capacity_heuristics[3],
+    struct vcs_zcode_heuristic_v1 capacity_parents[2],
+    struct vcs_zcode_science_statement_v1 capacity_statements[3],
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 capacity_snapshots[3],
+    struct vcs_zcode_focus_v1 *focus, struct vcs_zcode_task_v1 *task,
+    uint8_t lifecycle_policy_root[32], uint8_t pubkey[32],
+    size_t capacity_selected[2], struct vcs_zcode_attention_verified_report *verified)
+{
+    for (size_t i = 0; i < 3u; i++)
+        memcpy(capacity_snapshots[i].local_policy_root,
+               lifecycle_policy_root, 32);
+    return capacity_ok && vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, capacity_bids, 3u, capacity_heuristics,
+                 capacity_parents, 2u, capacity_statements,
+                 capacity_snapshots, focus, task->proof_policy_root,
+                 lifecycle_policy_root, task->toolchain_capsule_root, pubkey,
+                 capacity_selected, 2u, verified) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+             verified->verified_count == 3u &&
+             verified->choice.frontier.input_count == 2u &&
+             verified->choice.frontier.frontier_count == 2u &&
+             verified->choice.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
+             capacity_selected[0] != capacity_selected[1] &&
+             (capacity_selected[0] == 0u || capacity_selected[0] == 2u) &&
+             (capacity_selected[1] == 0u || capacity_selected[1] == 2u);
+}
+
+static bool hlt_episode_capacity_frontier_atomic(bool capacity_ok,
+    const char *workspace, struct vcs_zcode_attention_bid_v1 capacity_bids[3],
+    struct vcs_zcode_heuristic_v1 capacity_heuristics[3],
+    struct vcs_zcode_heuristic_v1 capacity_parents[2],
+    struct vcs_zcode_science_statement_v1 capacity_statements[3],
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 capacity_snapshots[3],
+    struct vcs_zcode_focus_v1 *focus, struct vcs_zcode_task_v1 *task,
+    uint8_t lifecycle_policy_root[32], uint8_t pubkey[32],
+    size_t capacity_selected[2], struct vcs_zcode_attention_verified_report *verified)
+{
+    return capacity_ok && vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, capacity_bids, 3u, capacity_heuristics,
+                 capacity_parents, 2u, capacity_statements,
+                 capacity_snapshots, focus, task->proof_policy_root,
+                 lifecycle_policy_root, task->toolchain_capsule_root, pubkey,
+                 capacity_selected, 1u, verified) ==
+                 VCS_ZCODE_ATTENTION_CAPACITY &&
+             verified->verified_count == 3u &&
+             verified->choice.frontier.input_count == 2u &&
+             verified->choice.frontier.frontier_count == 2u &&
+             verified->choice.frontier.returned_count == 0u &&
+             capacity_selected[0] == SIZE_MAX;
+}
+
+static bool hlt_episode_frontier_evidence_refuses(const char *workspace,
+    struct vcs_zcode_attention_bid_v1 bids[],
+    struct vcs_zcode_heuristic_v1 heuristics[],
+    struct vcs_zcode_heuristic_v1 parents[],
+    struct vcs_zcode_science_statement_v1 statements[],
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 snapshots[],
+    struct vcs_zcode_focus_v1 *focus, struct vcs_zcode_task_v1 *task,
+    uint8_t lifecycle_policy_root[32], uint8_t pubkey[32], size_t selected[],
+    struct vcs_zcode_attention_verified_report *verified,
+    struct vcs_zcode_attention_verified_report *verified_before)
+{
+    return vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, bids, 2u, heuristics, parents, 2u, statements,
+                 snapshots, focus, task->proof_policy_root,
+                 lifecycle_policy_root, task->toolchain_capsule_root, pubkey,
+                 selected, 2u, verified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+        memcmp(verified, verified_before, sizeof(*verified)) == 0 &&
+        selected[0] == SIZE_MAX;
+}
+
+static bool hlt_episode_frontier_binding_refuses(const char *workspace,
+    struct vcs_zcode_attention_bid_v1 bids[],
+    struct vcs_zcode_heuristic_v1 heuristics[],
+    struct vcs_zcode_heuristic_v1 parents[],
+    struct vcs_zcode_science_statement_v1 statements[],
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 snapshots[],
+    struct vcs_zcode_focus_v1 *focus, struct vcs_zcode_task_v1 *task,
+    uint8_t lifecycle_policy_root[32], uint8_t pubkey[32], size_t selected[],
+    struct vcs_zcode_attention_verified_report *verified,
+    struct vcs_zcode_attention_verified_report *verified_before)
+{
+    return vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, bids, 2u, heuristics, parents, 2u, statements,
+                 snapshots, focus, task->proof_policy_root,
+                 lifecycle_policy_root, task->toolchain_capsule_root, pubkey,
+                 selected, 2u, verified) == VCS_ZCODE_ATTENTION_BINDING &&
+        memcmp(verified, verified_before, sizeof(*verified)) == 0 &&
+        selected[0] == SIZE_MAX;
+}
+
+static bool hlt_episode_lesson_beats_controls(
+    struct vcs_zcode_specialist_report_v1 episode_reports[3],
+    struct vcs_zcode_work_receipt_v1 *work_receipt)
+{
+    return episode_reports[2].files_opened < episode_reports[0].files_opened &&
+        episode_reports[2].files_opened < episode_reports[1].files_opened &&
+        episode_reports[2].tool_calls < episode_reports[0].tool_calls &&
+        episode_reports[2].tool_calls < episode_reports[1].tool_calls &&
+        episode_reports[2].latency_us < episode_reports[0].latency_us &&
+        episode_reports[2].latency_us < episode_reports[1].latency_us &&
+        UINT64_C(78900) < UINT64_C(2939645) &&
+        UINT64_C(78900) < UINT64_C(2948716) &&
+        work_receipt->status == VCS_ZCODE_WORK_PASS;
+}
+
+static int hlt_experience_episode(const char *workspace)
+{
+    int failures = 0;
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_agent_context_v1 context;
+    struct zcl_story_event_v1 story_event;
+    struct zcl_story_graph_v1 story;
+    struct vcs_zcode_focus_v1 focus;
+    uint8_t task_root[32], focus_root[32];
+    bool focus_ok = hlt_episode_focus_ok(&task, &context, &story_event,
+        &story, &focus, task_root, focus_root);
+    HL_CHECK("episode-reuses-exact-task-focus-story-ontology", focus_ok);
+    if (!focus_ok) return failures + 1;
+
+    uint8_t receipt_roots[5][32], path_roots[3][32];
+    uint8_t manifest_root[32], lesson_roots[3][32], proof_root[32];
+    bool blobs_ok = hlt_episode_evidence_blobs_ok(workspace, receipt_roots,
+        path_roots, proof_root, manifest_root, lesson_roots);
+    HL_CHECK("episode-sanitized-evidence-has-exact-CAS-roots", blobs_ok);
+    if (!blobs_ok) return failures + 1;
+
+    uint8_t seed[32], secret[32], pubkey[32];
+    hlt_root(seed, 220u);
+    ed25519_keypair(pubkey, secret, seed);
+    uint8_t claim_roots[3][32], specialist_roots[3][32];
+    uint8_t outcome_commit_root[32], final_evidence_root[32];
+    bool identity_ok = hlt_episode_identity_stored(workspace, claim_roots,
+        specialist_roots, outcome_commit_root, final_evidence_root,
+        receipt_roots, proof_root);
+    HL_CHECK("episode-session-and-outcome-identities-store", identity_ok);
+
+    struct vcs_zcode_work_receipt_v1 work_receipt;
+    memset(&work_receipt, 0, sizeof(work_receipt));
+    work_receipt.schema_version = VCS_ZCODE_DEV_VERSION;
+    memcpy(work_receipt.task_root, task_root, 32);
+    memcpy(work_receipt.candidate_root, outcome_commit_root, 32);
+    memcpy(work_receipt.action_root, lesson_roots[2], 32);
+    memcpy(work_receipt.input_root, focus_root, 32);
+    memcpy(work_receipt.output_root, outcome_commit_root, 32);
+    memcpy(work_receipt.proof_policy_root, task.proof_policy_root, 32);
+    memcpy(work_receipt.toolchain_capsule_root,
+           task.toolchain_capsule_root, 32);
+    hlt_root(work_receipt.lease_id, 221u);
+    memcpy(work_receipt.evidence_root, final_evidence_root, 32);
+    memcpy(work_receipt.confinement_root, focus.authority_limits_root, 32);
+    work_receipt.work_kind = VCS_ZCODE_WORK_TEST;
+    work_receipt.status = VCS_ZCODE_WORK_PASS;
+    work_receipt.exit_status = 0;
+    work_receipt.started_unix = 1;
+    work_receipt.finished_unix = 2;
+    uint8_t work_receipt_root[32];
+    bool work_ok = hlt_episode_work_receipt_ok(workspace, &work_receipt,
+        secret, pubkey, work_receipt_root);
+    HL_CHECK("episode-landed-outcome-has-signed-work-receipt", work_ok);
+
+    struct vcs_zcode_specialist_report_v1 episode_reports[3];
+    uint8_t episode_report_roots[3][32];
+    hlt_report_init(&episode_reports[0], focus_root, claim_roots[0],
+        specialist_roots[0], receipt_roots[0], path_roots[0],
+        lesson_roots[0], task.toolchain_capsule_root,
+        ZCL_ONTOLOGY_INCOMPLETE, 2063u, UINT64_C(671384974), 27u, 100u, 0u);
+    hlt_report_init(&episode_reports[1], focus_root, claim_roots[1],
+        specialist_roots[1], receipt_roots[1], path_roots[1],
+        lesson_roots[0], task.toolchain_capsule_root,
+        ZCL_ONTOLOGY_INCOMPLETE, 2063u, UINT64_C(686564042), 29u, 90u, 0u);
+    hlt_report_init(&episode_reports[2], focus_root, claim_roots[2],
+        pubkey, work_receipt_root, outcome_commit_root,
+        lesson_roots[2], task.toolchain_capsule_root,
+        ZCL_ONTOLOGY_PROVED, 1492u, UINT64_C(120578583), 1u, 5u, 1u);
+    bool reports_ok = hlt_episode_reports_stored(workspace, episode_reports,
+        episode_report_roots);
+    HL_CHECK("episode-controls-and-treatment-use-rooted-reports", reports_ok);
+
+    uint8_t observations[3][32];
+    bool observations_ok = hlt_episode_report_observations_ok(workspace,
+        episode_report_roots, receipt_roots, observations);
+    observations_ok = hlt_episode_final_observation_ok(workspace,
+        observations_ok, episode_report_roots, receipt_roots, observations);
+
+    struct vcs_zcode_heuristic_v1 heuristics[3];
+    uint8_t heuristic_roots[3][32];
+    hlt_heuristic_init(&heuristics[0], &focus, focus_root, observations[0],
+        lesson_roots[0], lesson_roots[0], manifest_root, manifest_root,
+        task.toolchain_capsule_root);
+    bool lineage_ok = hlt_episode_heuristic_rooted_ok(observations_ok,
+        &heuristics[0], heuristic_roots[0]);
+    heuristics[1] = heuristics[0];
+    heuristics[1].derivation = VCS_ZCODE_HEURISTIC_REPAIR;
+    heuristics[1].parent_count = 1u;
+    memcpy(heuristics[1].parent_roots[0], heuristic_roots[0], 32);
+    memcpy(heuristics[1].observed_features_root, observations[1], 32);
+    memcpy(heuristics[1].proposed_rule_root, lesson_roots[1], 32);
+    memcpy(heuristics[1].expected_effect_root, lesson_roots[1], 32);
+    memcpy(heuristics[1].provenance_root, receipt_roots[2], 32);
+    lineage_ok = hlt_episode_derivation_rooted_ok(lineage_ok,
+        &heuristics[1], &heuristics[0], heuristic_roots[1]);
+    heuristics[2] = heuristics[1];
+    memcpy(heuristics[2].parent_roots[0], heuristic_roots[1], 32);
+    memcpy(heuristics[2].observed_features_root, observations[2], 32);
+    memcpy(heuristics[2].proposed_rule_root, lesson_roots[2], 32);
+    memcpy(heuristics[2].expected_effect_root, lesson_roots[2], 32);
+    memcpy(heuristics[2].provenance_root, work_receipt_root, 32);
+    lineage_ok = hlt_episode_derivation_rooted_ok(lineage_ok,
+        &heuristics[2], &heuristics[1], heuristic_roots[2]);
+    HL_CHECK("episode-failed-lessons-repair-into-one-immutable-lesson",
+             lineage_ok);
+
+    struct vcs_zcode_attention_bid_v1 episode_bids[3];
+    uint8_t bid_roots[3][32], stored_heuristic[32];
+    bool pairs_ok = hlt_episode_attention_pairs_ok(workspace, lineage_ok,
+        &task, &focus, heuristics, episode_bids, heuristic_roots, bid_roots,
+        stored_heuristic, observations, receipt_roots, work_receipt_root);
+    HL_CHECK("episode-reuses-existing-CAS-attention-pair-admission", pairs_ok);
+
+    struct vcs_zcode_science_statement_v1 lesson_statements[4];
+    struct vcs_zcode_science_relation_set_v1 lesson_relations[4];
+    uint8_t lesson_statement_roots[4][32];
+    bool statements_ok = hlt_episode_lesson_statements_ok(workspace, pairs_ok,
+        episode_bids, heuristics, &focus, secret, pubkey, lesson_statements,
+        lesson_relations, lesson_statement_roots, receipt_roots, proof_root);
+    HL_CHECK("episode-lesson-carries-conflict-supersession-retraction",
+             statements_ok);
+
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 lesson_snapshot;
+    struct vcs_zcode_heuristic_lifecycle_report lesson_report;
+    uint8_t accepted_roots[4][32];
+    memcpy(accepted_roots[0], lesson_statement_roots[0], 32);
+    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
+                 lesson_statement_roots[0], accepted_roots, 1u);
+    bool retained_ok = hlt_episode_lesson_retained_ok(workspace,
+        statements_ok, &lesson_snapshot, episode_bids, heuristics,
+        lesson_statements, &focus, pubkey);
+    HL_CHECK("episode-retained-lesson-enters-verified-attention", retained_ok);
+
+    struct zcl_experience_episode_v1 episode = {
+        .workspace = workspace,
+        .story = &story,
+        .task = &task,
+        .agent_context = &context,
+        .focus = &focus,
+        .work_receipt = &work_receipt,
+        .specialist_report = &episode_reports[2],
+        .heuristic = &heuristics[2],
+        .parents = &heuristics[1],
+        .parent_count = 1u,
+        .attention_bid = &episode_bids[2],
+        .relations = &lesson_relations[0],
+        .statement = &lesson_statements[0],
+        .local_acceptance = &lesson_snapshot,
+    };
+    struct zcl_experience_compilation_v1 compiled;
+    bool compiled_ok = hlt_episode_compiled_ok(retained_ok, &episode,
+        &compiled, &focus, work_receipt_root, heuristic_roots,
+        lesson_statement_roots);
+    HL_CHECK("episode-capture-without-replication-returns-no-lesson",
+             compiled_ok);
+
+    HL_CHECK("episode-output-alias-refuses-without-corrupting-input",
+             hlt_episode_alias_refused(&episode));
+
+    HL_CHECK("episode-failure-is-immutable-but-unqualified-evidence",
+             hlt_episode_failure_unqualified_ok(&episode, &focus, secret,
+                 pubkey, &work_receipt, episode_reports, heuristics,
+                 episode_bids));
+
+    struct zcl_experience_compilation_v1 zero_compilation = {0};
+    HL_CHECK("episode-cancelled-work-is-not-invented-as-a-failure-lesson",
+             hlt_episode_cancelled_not_failure(&episode, &work_receipt,
+                 secret, pubkey, &zero_compilation));
+
+    struct zcl_experience_compilation_v1 refused_compilation;
+    HL_CHECK("episode-wrong-source-generation-refuses-atomically",
+             hlt_episode_wrong_generation_refused(&episode, &context,
+                 &refused_compilation, &zero_compilation));
+
+    HL_CHECK("episode-stale-story-refuses-atomically",
+             hlt_episode_stale_story_refused(&episode, &story_event, &story,
+                 &refused_compilation, &zero_compilation));
+
+    HL_CHECK("episode-forged-evaluator-evidence-refuses-atomically",
+             hlt_episode_forged_evaluator_refused(&episode, lesson_statements,
+                 &refused_compilation, &zero_compilation));
+
+    bool mutation_ok = hlt_episode_source_mutations_refused(&episode, &focus,
+        &refused_compilation, &zero_compilation);
+    HL_CHECK("episode-source-root-byte-mutation-property-refuses-all",
+             mutation_ok);
+
+    char replica[256];
+    int replica_n = snprintf(replica, sizeof(replica), "%s.replica", workspace);
+    test_cleanup_tmpdir(replica);
+    bool replica_ok = hlt_episode_replica_stored_ok(replica, sizeof(replica),
+        replica_n, heuristics, episode_bids, stored_heuristic, bid_roots);
+    replica_ok = hlt_episode_replica_reproduced_ok(replica_ok, replica,
+        &episode, &compiled);
+    HL_CHECK("episode-independent-workspace-reproduces-exact-roots",
+             replica_ok);
+    test_cleanup_tmpdir(replica);
+
+    char poisoned[256];
+    int poisoned_n = snprintf(
+        poisoned, sizeof(poisoned), "%s.poisoned", workspace);
+    test_cleanup_tmpdir(poisoned);
+    bool poisoned_ok = hlt_episode_poisoned_stored_ok(poisoned,
+        sizeof(poisoned), poisoned_n, heuristics, episode_bids,
+        stored_heuristic, bid_roots, &compiled);
+    poisoned_ok = hlt_episode_poisoned_refused_ok(poisoned_ok, poisoned,
+        &episode, &refused_compilation, &zero_compilation);
+    HL_CHECK("episode-malformed-existing-CAS-object-refuses-atomically",
+             poisoned_ok);
+    test_cleanup_tmpdir(poisoned);
+
+    struct vcs_zcode_focus_v1 stale_focus = focus;
+    stale_focus.source_universe_root[0] ^= 1u;
+    HL_CHECK("episode-stale-source-lesson-fails-closed",
+             hlt_episode_stale_source_fails(retained_ok, workspace,
+                 &lesson_snapshot, episode_bids, heuristics, lesson_statements,
+                 &stale_focus, pubkey));
+    struct vcs_zcode_focus_v1 irrelevant_focus = focus;
+    irrelevant_focus.story_graph_root[0] ^= 1u;
+    HL_CHECK("episode-irrelevant-context-lesson-fails-closed",
+             hlt_select_retained(
+                 workspace, &lesson_snapshot, &episode_bids[2],
+                 &heuristics[2], &heuristics[1], &lesson_statements[0],
+                 &irrelevant_focus, pubkey) == VCS_ZCODE_ATTENTION_BINDING);
+
+    memcpy(accepted_roots[1], lesson_statement_roots[1], 32);
+    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
+                 lesson_statement_roots[0], accepted_roots, 2u);
+    HL_CHECK("episode-conflict-cannot-create-lifecycle-authority",
+             vcs_zcode_heuristic_lifecycle_fold(
+                 workspace, &lesson_snapshot, &lesson_report) ==
+                 VCS_ZCODE_ATTENTION_EVIDENCE);
+
+    memcpy(accepted_roots[1], lesson_statement_roots[2], 32);
+    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
+                 lesson_statement_roots[0], accepted_roots, 2u);
+    HL_CHECK("episode-accepted-supersession-remains-retained",
+             hlt_episode_supersession_retained_ok(workspace, &lesson_snapshot,
+                 &lesson_report, lesson_statement_roots));
+    memcpy(accepted_roots[2], lesson_statement_roots[3], 32);
+    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
+                 lesson_statement_roots[0], accepted_roots, 3u);
+    HL_CHECK("episode-retracted-lesson-fails-closed",
+             hlt_select_retained(
+                 workspace, &lesson_snapshot, &episode_bids[2],
+                 &heuristics[2], &heuristics[1], &lesson_statements[0],
+                 &focus, pubkey) == VCS_ZCODE_ATTENTION_EVIDENCE);
+    episode.local_acceptance = &lesson_snapshot;
+    struct zcl_experience_compilation_v1 retired_compilation;
+    HL_CHECK("episode-retracted-local-lesson-is-captured-but-not-returned",
+             hlt_episode_retired_lesson_captured(&episode,
+                 &retired_compilation));
+
+    uint8_t malformed_root[32];
+    hlt_root(malformed_root, 252u);
+    uint8_t malformed_wire[VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES];
+    bool malformed_stored = vcs_zcode_science_statement_serialize(
+            &lesson_statements[0], malformed_wire) == VCS_ZCODE_SCIENCE_OK;
+    malformed_wire[0] ^= 1u;
+    malformed_stored = malformed_stored && vcs_object_put_addressed(
+        workspace, malformed_root, malformed_wire, sizeof(malformed_wire));
+    memcpy(accepted_roots[0], malformed_root, 32);
+    hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
+                 malformed_root, accepted_roots, 1u);
+    HL_CHECK("episode-malformed-wrong-anchor-fails-binding",
+             hlt_episode_malformed_anchor_fails(malformed_stored, workspace,
+                 &lesson_snapshot, episode_bids, heuristics, lesson_statements,
+                 &focus, pubkey));
+
+    struct vcs_zcode_attention_bid_v1 generation_bids[2] = {
+        episode_bids[2], episode_bids[2]
+    };
+    struct vcs_zcode_heuristic_v1 generation_heuristics[2] = {
+        heuristics[2], heuristics[2]
+    };
+    struct vcs_zcode_heuristic_v1 generation_parents[2] = {
+        heuristics[1], heuristics[1]
+    };
+    struct vcs_zcode_science_statement_v1 generation_statements[5] = {{0}};
+    struct vcs_zcode_science_relation_set_v1 generation_relations[5] = {{0}};
+    uint8_t generation_roots[5][32] = {{0}};
+    generation_bids[0].priority_class = VCS_ZCODE_ATTENTION_P0_SECURITY;
+    generation_bids[1].priority_class =
+        VCS_ZCODE_ATTENTION_P1_USER_JOURNEY;
+    memcpy(generation_bids[1].evidence_root, receipt_roots[3], 32);
+    generation_bids[1].information_gain_bp--;
+    bool generation_ok = hlt_episode_generation_stored_ok(workspace,
+        generation_bids, generation_heuristics, generation_statements,
+        generation_relations, generation_roots, receipt_roots, &focus, secret,
+        pubkey);
     HL_CHECK("episode-generation-lifecycles-store", generation_ok);
     if (!generation_ok) return failures;
 
@@ -1312,19 +1793,10 @@ static int hlt_experience_episode(const char *workspace)
     size_t selected[2] = {SIZE_MAX, SIZE_MAX};
     struct vcs_zcode_attention_verified_report verified;
     HL_CHECK("episode-retired-p0-yields-to-retained-p1-original-index",
-             generation_ok &&
-             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
-                 workspace, generation_bids, 2u, generation_heuristics,
-                 generation_parents, 2u, generation_statements,
-                 generation_snapshots, &focus, task.proof_policy_root,
-                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
-                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_OK &&
-             verified.verified_count == 2u &&
-             verified.choice.frontier.input_count == 1u &&
-             verified.choice.selected_priority_class ==
-                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
-             verified.choice.frontier.frontier_count == 1u &&
-             selected[0] == 1u);
+             hlt_episode_retired_p0_yields(generation_ok, workspace,
+                 generation_bids, generation_heuristics, generation_parents,
+                 generation_statements, generation_snapshots, &focus, &task,
+                 lifecycle_policy_root, pubkey, selected, &verified));
 
     uint8_t old_retained[1][32];
     memcpy(old_retained[0], generation_roots[0], 32);
@@ -1336,14 +1808,11 @@ static int hlt_experience_episode(const char *workspace)
     struct vcs_zcode_attention_verified_report verified_before = verified;
     selected[0] = SIZE_MAX;
     HL_CHECK("episode-two-retained-generations-refuse-atomically",
-             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
-                 workspace, generation_bids, 2u, generation_heuristics,
-                 generation_parents, 2u, generation_statements,
-                 generation_snapshots, &focus, task.proof_policy_root,
-                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
-                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_DUPLICATE &&
-             memcmp(&verified, &verified_before, sizeof(verified)) == 0 &&
-             selected[0] == SIZE_MAX);
+             hlt_episode_frontier_duplicate_refuses(workspace, generation_bids,
+                 generation_heuristics, generation_parents,
+                 generation_statements, generation_snapshots, &focus, &task,
+                 lifecycle_policy_root, pubkey, selected, &verified,
+                 &verified_before));
 
     uint8_t new_retired[2][32];
     memcpy(new_retired[0], generation_roots[1], 32);
@@ -1352,23 +1821,11 @@ static int hlt_experience_episode(const char *workspace)
                  generation_roots[0], old_retired, 2u);
     hlt_snapshot(&generation_snapshots[1], heuristic_roots[2], pubkey,
                  generation_roots[1], new_retired, 2u);
-    for (size_t i = 0; i < 2u; i++)
-        memcpy(generation_snapshots[i].local_policy_root,
-               lifecycle_policy_root, 32);
-    selected[0] = SIZE_MAX;
     HL_CHECK("episode-all-retired-is-explicit-empty-choice",
-             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
-                 workspace, generation_bids, 2u, generation_heuristics,
-                 generation_parents, 2u, generation_statements,
-                 generation_snapshots, &focus, task.proof_policy_root,
-                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
-                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_OK &&
-             verified.verified_count == 2u &&
-             verified.choice.frontier.input_count == 0u &&
-             verified.choice.frontier.frontier_count == 0u &&
-             verified.choice.selected_priority_class ==
-                 VCS_ZCODE_ATTENTION_PRIORITY_AUTO &&
-             selected[0] == SIZE_MAX);
+             hlt_episode_all_retired_empty(workspace, generation_bids,
+                 generation_heuristics, generation_parents,
+                 generation_statements, generation_snapshots, &focus, &task,
+                 lifecycle_policy_root, pubkey, selected, &verified));
 
     struct vcs_zcode_attention_bid_v1 repeated_bids[2] = {
         generation_bids[0], generation_bids[0]
@@ -1382,14 +1839,10 @@ static int hlt_experience_episode(const char *workspace)
     verified = verified_before;
     selected[0] = SIZE_MAX;
     HL_CHECK("episode-repeated-result-anchor-is-malformed-duplicate",
-             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
-                 workspace, repeated_bids, 2u, generation_heuristics,
-                 generation_parents, 2u, repeated_statements,
-                 repeated_snapshots, &focus, task.proof_policy_root,
-                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
-                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_DUPLICATE &&
-             memcmp(&verified, &verified_before, sizeof(verified)) == 0 &&
-             selected[0] == SIZE_MAX);
+             hlt_episode_frontier_duplicate_refuses(workspace, repeated_bids,
+                 generation_heuristics, generation_parents, repeated_statements,
+                 repeated_snapshots, &focus, &task, lifecycle_policy_root,
+                 pubkey, selected, &verified, &verified_before));
 
     struct vcs_zcode_attention_bid_v1 capacity_bids[3] = {
         episode_bids[0], generation_bids[0], generation_bids[1]
@@ -1409,11 +1862,9 @@ static int hlt_experience_episode(const char *workspace)
     };
     struct vcs_zcode_science_relation_set_v1 capacity_relations = {0};
     uint8_t capacity_root[32];
-    bool capacity_ok = hlt_bound_result(
-            &capacity_statements[0], &capacity_relations, &capacity_bids[0],
-            &capacity_heuristics[0], &focus, secret, pubkey) &&
-        hlt_store(workspace, &capacity_statements[0], &capacity_relations,
-                  capacity_root);
+    bool capacity_ok = hlt_episode_capacity_statement_ok(workspace,
+        capacity_statements, &capacity_relations, capacity_bids,
+        capacity_heuristics, &focus, secret, pubkey, capacity_root);
     struct vcs_zcode_heuristic_lifecycle_snapshot_v1 capacity_snapshots[3];
     uint8_t capacity_accepted[1][32];
     memcpy(capacity_accepted[0], capacity_root, 32);
@@ -1422,44 +1873,20 @@ static int hlt_experience_episode(const char *workspace)
     capacity_snapshots[1] = generation_snapshots[0];
     hlt_snapshot(&capacity_snapshots[2], heuristic_roots[2], pubkey,
                  generation_roots[1], new_retained, 1u);
-    for (size_t i = 0; i < 3u; i++)
-        memcpy(capacity_snapshots[i].local_policy_root,
-               lifecycle_policy_root, 32);
     size_t capacity_selected[2] = {SIZE_MAX, SIZE_MAX};
     HL_CHECK("episode-retired-dominator-cannot-hide-retained-frontier",
-             capacity_ok &&
-             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
-                 workspace, capacity_bids, 3u, capacity_heuristics,
-                 capacity_parents, 2u, capacity_statements,
-                 capacity_snapshots, &focus, task.proof_policy_root,
-                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
-                 capacity_selected, 2u, &verified) ==
-                 VCS_ZCODE_ATTENTION_OK &&
-             verified.verified_count == 3u &&
-             verified.choice.frontier.input_count == 2u &&
-             verified.choice.frontier.frontier_count == 2u &&
-             verified.choice.selected_priority_class ==
-                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
-             capacity_selected[0] != capacity_selected[1] &&
-             (capacity_selected[0] == 0u || capacity_selected[0] == 2u) &&
-             (capacity_selected[1] == 0u || capacity_selected[1] == 2u));
+             hlt_episode_capacity_retired_hidden_ok(capacity_ok, workspace,
+                 capacity_bids, capacity_heuristics, capacity_parents,
+                 capacity_statements, capacity_snapshots, &focus, &task,
+                 lifecycle_policy_root, pubkey, capacity_selected, &verified));
 
     verified = verified_before;
     capacity_selected[0] = SIZE_MAX;
     HL_CHECK("episode-lifecycle-frontier-capacity-is-atomic",
-             capacity_ok &&
-             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
-                 workspace, capacity_bids, 3u, capacity_heuristics,
-                 capacity_parents, 2u, capacity_statements,
-                 capacity_snapshots, &focus, task.proof_policy_root,
-                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
-                 capacity_selected, 1u, &verified) ==
-                 VCS_ZCODE_ATTENTION_CAPACITY &&
-             verified.verified_count == 3u &&
-             verified.choice.frontier.input_count == 2u &&
-             verified.choice.frontier.frontier_count == 2u &&
-             verified.choice.frontier.returned_count == 0u &&
-             capacity_selected[0] == SIZE_MAX);
+             hlt_episode_capacity_frontier_atomic(capacity_ok, workspace,
+                 capacity_bids, capacity_heuristics, capacity_parents,
+                 capacity_statements, capacity_snapshots, &focus, &task,
+                 lifecycle_policy_root, pubkey, capacity_selected, &verified));
 
     uint8_t forked_new[3][32];
     memcpy(forked_new[0], generation_roots[1], 32);
@@ -1472,14 +1899,11 @@ static int hlt_experience_episode(const char *workspace)
     verified = verified_before;
     selected[0] = SIZE_MAX;
     HL_CHECK("episode-forked-lifecycle-poisons-whole-batch",
-             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
-                 workspace, generation_bids, 2u, generation_heuristics,
-                 generation_parents, 2u, generation_statements,
-                 generation_snapshots, &focus, task.proof_policy_root,
-                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
-                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
-             memcmp(&verified, &verified_before, sizeof(verified)) == 0 &&
-             selected[0] == SIZE_MAX);
+             hlt_episode_frontier_evidence_refuses(workspace, generation_bids,
+                 generation_heuristics, generation_parents,
+                 generation_statements, generation_snapshots, &focus, &task,
+                 lifecycle_policy_root, pubkey, selected, &verified,
+                 &verified_before));
 
     hlt_snapshot(&generation_snapshots[1], heuristic_roots[2], pubkey,
                  generation_roots[1], new_retained, 1u);
@@ -1492,25 +1916,14 @@ static int hlt_experience_episode(const char *workspace)
     verified = verified_before;
     selected[0] = SIZE_MAX;
     HL_CHECK("episode-valid-wrong-anchor-refuses-atomically",
-             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
-                 workspace, generation_bids, 2u, generation_heuristics,
-                 generation_parents, 2u, generation_statements,
-                 generation_snapshots, &focus, task.proof_policy_root,
-                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
-                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_BINDING &&
-             memcmp(&verified, &verified_before, sizeof(verified)) == 0 &&
-             selected[0] == SIZE_MAX);
+             hlt_episode_frontier_binding_refuses(workspace, generation_bids,
+                 generation_heuristics, generation_parents,
+                 generation_statements, generation_snapshots, &focus, &task,
+                 lifecycle_policy_root, pubkey, selected, &verified,
+                 &verified_before));
 
     HL_CHECK("episode-lesson-beats-both-no-lesson-controls",
-             episode_reports[2].files_opened < episode_reports[0].files_opened &&
-             episode_reports[2].files_opened < episode_reports[1].files_opened &&
-             episode_reports[2].tool_calls < episode_reports[0].tool_calls &&
-             episode_reports[2].tool_calls < episode_reports[1].tool_calls &&
-             episode_reports[2].latency_us < episode_reports[0].latency_us &&
-             episode_reports[2].latency_us < episode_reports[1].latency_us &&
-             UINT64_C(78900) < UINT64_C(2939645) &&
-             UINT64_C(78900) < UINT64_C(2948716) &&
-             work_receipt.status == VCS_ZCODE_WORK_PASS);
+             hlt_episode_lesson_beats_controls(episode_reports, &work_receipt));
 
     printf("  zcode_heuristic_lifecycle: experience_lesson_root=");
     for (size_t i = 0; i < 32u; i++) printf("%02x", heuristic_roots[2][i]);
@@ -1518,26 +1931,20 @@ static int hlt_experience_episode(const char *workspace)
     return failures;
 }
 
-int test_zcode_heuristic_lifecycle(void)
+static bool hlt_test_workspace_ready(const char *workspace,
+    size_t workspace_size, int n)
 {
-    int failures = 0;
-    char workspace[160];
-    int n = snprintf(workspace, sizeof(workspace),
-                     "test-tmp/zcode_heuristic_lifecycle_%d", (int)getpid());
-    test_cleanup_tmpdir(workspace);
-    bool setup = n > 0 && (size_t)n < sizeof(workspace) &&
+    return n > 0 && (size_t)n < workspace_size &&
         (mkdir("test-tmp", 0700) == 0 || access("test-tmp", F_OK) == 0) &&
         mkdir(workspace, 0700) == 0 && vcs_object_store_init(workspace);
-    HL_CHECK("workspace-initializes", setup);
-    if (!setup) return failures + 1;
+}
 
-    uint8_t seed[32], secret[32], pubkey[32], heuristic_root[32];
-    hlt_root(seed, 40);
-    hlt_root(heuristic_root, 41);
-    ed25519_keypair(pubkey, secret, seed);
-    struct vcs_zcode_science_statement_v1 statements[7];
-    struct vcs_zcode_science_relation_set_v1 relations[7];
-    uint8_t roots[7][32];
+static bool hlt_test_fixture_chain(const char *workspace,
+    struct vcs_zcode_science_statement_v1 statements[7],
+    struct vcs_zcode_science_relation_set_v1 relations[7],
+    uint8_t roots[7][32], uint8_t heuristic_root[32], uint8_t secret[32],
+    uint8_t pubkey[32])
+{
     bool built = hlt_statement(
             &statements[0], &relations[0], VCS_ZCODE_SCIENCE_PROFILE_RESULT,
             0, NULL, heuristic_root, 50, secret, pubkey) &&
@@ -1572,14 +1979,161 @@ int test_zcode_heuristic_lifecycle(void)
             VCS_ZCODE_SCIENCE_RELATION_RETRACTION, roots[0],
             heuristic_root, 55, secret, pubkey) &&
         hlt_store(workspace, &statements[5], &relations[5], roots[5]);
-    uint8_t wrong_subject[32];
-    hlt_root(wrong_subject, 99);
-    built = built && hlt_statement(
+    return built;
+}
+
+static bool hlt_test_wrong_subject_fixture(bool built, const char *workspace,
+    struct vcs_zcode_science_statement_v1 statements[7],
+    struct vcs_zcode_science_relation_set_v1 relations[7],
+    uint8_t roots[7][32], uint8_t wrong_subject[32], uint8_t secret[32],
+    uint8_t pubkey[32])
+{
+    return built && hlt_statement(
             &statements[6], &relations[6],
             VCS_ZCODE_SCIENCE_PROFILE_SUPERSESSION,
             VCS_ZCODE_SCIENCE_RELATION_SUPERSESSION, roots[0],
             wrong_subject, 56, secret, pubkey) &&
         hlt_store(workspace, &statements[6], &relations[6], roots[6]);
+}
+
+static bool hlt_test_empty_snapshot_undetermined(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report)
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot, report) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        report->complete &&
+        report->status ==
+            VCS_ZCODE_HEURISTIC_LIFECYCLE_UNDETERMINED &&
+        report->reason == VCS_ZCODE_HEURISTIC_LIFECYCLE_REASON_EMPTY &&
+        report->validated_count == 0;
+}
+
+static bool hlt_test_accepted_head_retained(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report, uint8_t roots[7][32])
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot, report) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        report->complete &&
+        report->status == VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED &&
+        memcmp(report->head_statement_root, roots[0], 32) == 0;
+}
+
+static bool hlt_test_supersession_head_retained(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report, uint8_t roots[7][32])
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot, report) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        report->status == VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED &&
+        memcmp(report->head_statement_root, roots[1], 32) == 0;
+}
+
+static bool hlt_test_retraction_head_retires(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *linear_report,
+    uint8_t roots[7][32])
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot,
+                 linear_report) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+        linear_report->status == VCS_ZCODE_HEURISTIC_LIFECYCLE_RETIRED &&
+        memcmp(linear_report->head_statement_root, roots[2], 32) == 0;
+}
+
+static bool hlt_test_fold_evidence_refuses(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report,
+    struct vcs_zcode_heuristic_lifecycle_report *sentinel)
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot, report) ==
+                 VCS_ZCODE_ATTENTION_EVIDENCE &&
+        memcmp(report, sentinel, sizeof(*report)) == 0;
+}
+
+static bool hlt_test_fork_undetermined(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report)
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot, report) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        report->complete &&
+        report->status ==
+            VCS_ZCODE_HEURISTIC_LIFECYCLE_UNDETERMINED &&
+        report->reason ==
+            VCS_ZCODE_HEURISTIC_LIFECYCLE_REASON_AMBIGUOUS &&
+        memcmp(report->head_statement_root, (uint8_t[32]){0}, 32) == 0;
+}
+
+static bool hlt_test_order_projection_same(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report,
+    struct vcs_zcode_heuristic_lifecycle_report *linear_report)
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot, report) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+        hlt_report_same(linear_report, report);
+}
+
+static bool hlt_test_fold_order_refuses(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report,
+    struct vcs_zcode_heuristic_lifecycle_report *sentinel)
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot, report) ==
+                 VCS_ZCODE_ATTENTION_ORDER &&
+        memcmp(report, sentinel, sizeof(*report)) == 0;
+}
+
+static bool hlt_test_inactive_root_alias_refuses(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report,
+    struct vcs_zcode_heuristic_lifecycle_report *sentinel)
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot, report) ==
+                 VCS_ZCODE_ATTENTION_ROOT &&
+        memcmp(report, sentinel, sizeof(*report)) == 0 &&
+        vcs_zcode_heuristic_lifecycle_fold(
+                 workspace, snapshot,
+                 (struct vcs_zcode_heuristic_lifecycle_report *)snapshot) ==
+                 VCS_ZCODE_ATTENTION_ALIAS;
+}
+
+static bool hlt_test_allocation_fault_atomic(const char *workspace,
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    struct vcs_zcode_heuristic_lifecycle_report *report,
+    struct vcs_zcode_heuristic_lifecycle_report *sentinel)
+{
+    return vcs_zcode_heuristic_lifecycle_fold(workspace, snapshot, report) ==
+                 VCS_ZCODE_ATTENTION_CAS &&
+        memcmp(report, sentinel, sizeof(*report)) == 0;
+}
+
+int test_zcode_heuristic_lifecycle(void)
+{
+    int failures = 0;
+    char workspace[160];
+    int n = snprintf(workspace, sizeof(workspace),
+                     "test-tmp/zcode_heuristic_lifecycle_%d", (int)getpid());
+    test_cleanup_tmpdir(workspace);
+    bool setup = hlt_test_workspace_ready(workspace, sizeof(workspace), n);
+    HL_CHECK("workspace-initializes", setup);
+    if (!setup) return failures + 1;
+
+    uint8_t seed[32], secret[32], pubkey[32], heuristic_root[32];
+    hlt_root(seed, 40);
+    hlt_root(heuristic_root, 41);
+    ed25519_keypair(pubkey, secret, seed);
+    struct vcs_zcode_science_statement_v1 statements[7];
+    struct vcs_zcode_science_relation_set_v1 relations[7];
+    uint8_t roots[7][32];
+    bool built = hlt_test_fixture_chain(workspace, statements, relations,
+        roots, heuristic_root, secret, pubkey);
+    uint8_t wrong_subject[32];
+    hlt_root(wrong_subject, 99);
+    built = hlt_test_wrong_subject_fixture(built, workspace, statements,
+        relations, roots, wrong_subject, secret, pubkey);
     HL_CHECK("fixtures-seal-and-store", built);
 
     struct vcs_zcode_heuristic_lifecycle_snapshot_v1 snapshot;
@@ -1589,41 +2143,28 @@ int test_zcode_heuristic_lifecycle(void)
     hlt_snapshot(&snapshot, heuristic_root, pubkey, NULL, NULL, 0);
     memset(&report, 0xa5, sizeof(report));
     HL_CHECK("empty-accepted-snapshot-is-undetermined",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) == VCS_ZCODE_ATTENTION_OK &&
-             report.complete &&
-             report.status ==
-                 VCS_ZCODE_HEURISTIC_LIFECYCLE_UNDETERMINED &&
-             report.reason == VCS_ZCODE_HEURISTIC_LIFECYCLE_REASON_EMPTY &&
-             report.validated_count == 0);
+             hlt_test_empty_snapshot_undetermined(workspace, &snapshot,
+                 &report));
 
     uint8_t accepted[4][32];
     memcpy(accepted[0], roots[0], 32);
     hlt_snapshot(&snapshot, heuristic_root, pubkey, roots[0], accepted, 1);
     HL_CHECK("accepted-result-anchor-is-retained",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) == VCS_ZCODE_ATTENTION_OK &&
-             report.complete &&
-             report.status == VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED &&
-             memcmp(report.head_statement_root, roots[0], 32) == 0);
+             hlt_test_accepted_head_retained(workspace, &snapshot, &report,
+                 roots));
 
     memcpy(accepted[1], roots[1], 32);
     hlt_snapshot(&snapshot, heuristic_root, pubkey, roots[0], accepted, 2);
     HL_CHECK("supersession-head-remains-retained",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) == VCS_ZCODE_ATTENTION_OK &&
-             report.status == VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED &&
-             memcmp(report.head_statement_root, roots[1], 32) == 0);
+             hlt_test_supersession_head_retained(workspace, &snapshot, &report,
+                 roots));
 
     memcpy(accepted[2], roots[2], 32);
     hlt_snapshot(&snapshot, heuristic_root, pubkey, roots[0], accepted, 3);
     struct vcs_zcode_heuristic_lifecycle_report linear_report;
     HL_CHECK("explicit-retraction-head-retires",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &linear_report) ==
-                 VCS_ZCODE_ATTENTION_OK &&
-             linear_report.status == VCS_ZCODE_HEURISTIC_LIFECYCLE_RETIRED &&
-             memcmp(linear_report.head_statement_root, roots[2], 32) == 0);
+             hlt_test_retraction_head_retires(workspace, &snapshot,
+                 &linear_report, roots));
 
     uint8_t counter_chain[2][32];
     memcpy(counter_chain[0], roots[3], 32);
@@ -1632,10 +2173,8 @@ int test_zcode_heuristic_lifecycle(void)
                  counter_chain, 2);
     report = sentinel;
     HL_CHECK("counterevidence-is-not-lifecycle-authority",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) ==
-                 VCS_ZCODE_ATTENTION_EVIDENCE &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
+             hlt_test_fold_evidence_refuses(workspace, &snapshot, &report,
+                 &sentinel));
 
     uint8_t replication_chain[2][32];
     memcpy(replication_chain[0], roots[4], 32);
@@ -1644,10 +2183,8 @@ int test_zcode_heuristic_lifecycle(void)
                  replication_chain, 2);
     report = sentinel;
     HL_CHECK("support-is-not-lifecycle-authority",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) ==
-                 VCS_ZCODE_ATTENTION_EVIDENCE &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
+             hlt_test_fold_evidence_refuses(workspace, &snapshot, &report,
+                 &sentinel));
 
     uint8_t forked[3][32];
     memcpy(forked[0], roots[0], 32);
@@ -1655,14 +2192,7 @@ int test_zcode_heuristic_lifecycle(void)
     memcpy(forked[2], roots[5], 32);
     hlt_snapshot(&snapshot, heuristic_root, pubkey, roots[0], forked, 3);
     HL_CHECK("fork-is-complete-but-undetermined",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) == VCS_ZCODE_ATTENTION_OK &&
-             report.complete &&
-             report.status ==
-                 VCS_ZCODE_HEURISTIC_LIFECYCLE_UNDETERMINED &&
-             report.reason ==
-                 VCS_ZCODE_HEURISTIC_LIFECYCLE_REASON_AMBIGUOUS &&
-             memcmp(report.head_statement_root, (uint8_t[32]){0}, 32) == 0);
+             hlt_test_fork_undetermined(workspace, &snapshot, &report));
 
     uint8_t permuted[3][32];
     memcpy(permuted[0], roots[2], 32);
@@ -1670,17 +2200,14 @@ int test_zcode_heuristic_lifecycle(void)
     memcpy(permuted[2], roots[1], 32);
     hlt_snapshot(&snapshot, heuristic_root, pubkey, roots[0], permuted, 3);
     HL_CHECK("construction-order-cannot-change-projection",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) == VCS_ZCODE_ATTENTION_OK &&
-             hlt_report_same(&linear_report, &report));
+             hlt_test_order_projection_same(workspace, &snapshot, &report,
+                 &linear_report));
 
     report = sentinel;
     snapshot.expected_signer[0] ^= 1u;
     HL_CHECK("wrong-local-signer-fails-atomically",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) ==
-                 VCS_ZCODE_ATTENTION_EVIDENCE &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
+             hlt_test_fold_evidence_refuses(workspace, &snapshot, &report,
+                 &sentinel));
     snapshot.expected_signer[0] ^= 1u;
 
     uint8_t wrong_subject_chain[2][32];
@@ -1690,10 +2217,8 @@ int test_zcode_heuristic_lifecycle(void)
                  wrong_subject_chain, 2);
     report = sentinel;
     HL_CHECK("wrong-subject-row-fails-whole-fold",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) ==
-                 VCS_ZCODE_ATTENTION_EVIDENCE &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
+             hlt_test_fold_evidence_refuses(workspace, &snapshot, &report,
+                 &sentinel));
 
     uint8_t absent_root[32];
     hlt_root(absent_root, 111);
@@ -1703,41 +2228,29 @@ int test_zcode_heuristic_lifecycle(void)
     hlt_snapshot(&snapshot, heuristic_root, pubkey, roots[0], absent_set, 2);
     report = sentinel;
     HL_CHECK("missing-accepted-object-fails-atomically",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) ==
-                 VCS_ZCODE_ATTENTION_EVIDENCE &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
+             hlt_test_fold_evidence_refuses(workspace, &snapshot, &report,
+                 &sentinel));
 
     hlt_snapshot(&snapshot, heuristic_root, pubkey, roots[0], accepted, 3);
     memcpy(snapshot.statement_roots[1], snapshot.statement_roots[0], 32);
     report = sentinel;
     HL_CHECK("duplicate-accepted-root-refuses",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) ==
-                 VCS_ZCODE_ATTENTION_ORDER &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
+             hlt_test_fold_order_refuses(workspace, &snapshot, &report,
+                 &sentinel));
 
     hlt_snapshot(&snapshot, heuristic_root, pubkey, roots[0], accepted, 3);
     snapshot.statement_roots[3][0] = 1;
     report = sentinel;
     HL_CHECK("inactive-root-and-alias-refuse",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) ==
-                 VCS_ZCODE_ATTENTION_ROOT &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0 &&
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot,
-                 (struct vcs_zcode_heuristic_lifecycle_report *)&snapshot) ==
-                 VCS_ZCODE_ATTENTION_ALIAS);
+             hlt_test_inactive_root_alias_refuses(workspace, &snapshot,
+                 &report, &sentinel));
 
     hlt_snapshot(&snapshot, heuristic_root, pubkey, roots[0], accepted, 3);
     report = sentinel;
     zcl_alloc_fault_fail_next("heuristic_lifecycle");
     HL_CHECK("allocation-failure-is-atomic",
-             vcs_zcode_heuristic_lifecycle_fold(
-                 workspace, &snapshot, &report) ==
-                 VCS_ZCODE_ATTENTION_CAS &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
+             hlt_test_allocation_fault_atomic(workspace, &snapshot, &report,
+                 &sentinel));
     zcl_alloc_fault_clear();
 
     failures += hlt_experience_episode(workspace);
