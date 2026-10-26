@@ -2086,8 +2086,6 @@ tests/harness/src/testcache.c:testcache_probe_group_internal:25
 tools/acme/acme_jws.c:acme_es256_sign:16
 tools/acme/acme_jws.c:acme_jws_body:16
 tools/acme/acme_jws.c:acme_jws_protected_header:19
-tools/acme/acme_selftest_protocol.c:selftest_jws:57
-tools/acme/acme_selftest_protocol.c:selftest_wire:36
 tools/acme/tls_client.c:chunked_walk:23
 tools/acme/tls_client.c:header_span:17
 tools/acme/tls_client.c:parse_status_line:16
