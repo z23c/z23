@@ -48,6 +48,7 @@
  * the SHIPPED flags, not a copy that has drifted.
  */
 
+#define _DEFAULT_SOURCE
 #define _GNU_SOURCE
 
 #include "base/hex.h"
