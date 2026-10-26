@@ -247,74 +247,79 @@ static struct consensus_state_chain_binding_observation assisted_observation(
     return o;
 }
 
-int test_consensus_state_chain_binding(void)
+static int check_selected_chain_binding_baseline(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation)
 {
     int failures = 0;
-    struct consensus_state_bundle_manifest manifest = valid_manifest();
-    struct consensus_state_chain_binding_observation observation =
-        valid_observation(&manifest);
     CSB_CHECK("complete exact selected-chain binding passes",
               consensus_state_chain_binding_decide(
-                  &manifest, &observation).ok);
+                  manifest, observation).ok);
 
-    struct consensus_state_bundle_manifest invalid_profile_manifest = manifest;
+    struct consensus_state_bundle_manifest invalid_profile_manifest =
+        *manifest;
     invalid_profile_manifest.validation_profile =
         CONSENSUS_STATE_VALIDATION_INVALID;
     consensus_state_bundle_artifact_digest(
         &invalid_profile_manifest, invalid_profile_manifest.artifact_digest);
     CSB_CHECK("unknown validation profile refuses",
-              rejected(&invalid_profile_manifest, &observation));
+              rejected(&invalid_profile_manifest, observation));
 
-    struct consensus_state_chain_binding_observation bad = observation;
+    struct consensus_state_chain_binding_observation bad = *observation;
     bad.frontier_unchanged = false;
-    CSB_CHECK("frontier movement refuses", rejected(&manifest, &bad));
-    bad = observation;
-    bad.durable_served_height = manifest.height - 1;
-    CSB_CHECK("bundle above durable H star refuses", rejected(&manifest, &bad));
-    bad = observation;
+    CSB_CHECK("frontier movement refuses", rejected(manifest, &bad));
+    bad = *observation;
+    bad.durable_served_height = manifest->height - 1;
+    CSB_CHECK("bundle above durable H star refuses", rejected(manifest, &bad));
+    bad = *observation;
     bad.selected_bundle_hash[0] ^= 1u;
     CSB_CHECK("same-height selected hash mismatch refuses",
-              rejected(&manifest, &bad));
-    bad = observation;
+              rejected(manifest, &bad));
+    bad = *observation;
     bad.selected_bundle_valid_scripts = false;
-    CSB_CHECK("insufficient bundle validity refuses", rejected(&manifest, &bad));
-    bad = observation;
+    CSB_CHECK("insufficient bundle validity refuses", rejected(manifest, &bad));
+    bad = *observation;
     bad.bundle_header_pass_record = false;
     CSB_CHECK("missing exact bundle header proof refuses",
-              rejected(&manifest, &bad));
-    bad = observation;
+              rejected(manifest, &bad));
+    bad = *observation;
     memset(bad.selected_sapling_source_hash, 0, 32);
-    CSB_CHECK("unknown Sapling source hash refuses", rejected(&manifest, &bad));
-    bad = observation;
+    CSB_CHECK("unknown Sapling source hash refuses", rejected(manifest, &bad));
+    bad = *observation;
     bad.selected_sapling_source_root[0] ^= 1u;
     CSB_CHECK("Sapling source-header root mismatch refuses",
-              rejected(&manifest, &bad));
-    bad = observation;
+              rejected(manifest, &bad));
+    bad = *observation;
     bad.selected_bundle_sapling_root[0] ^= 1u;
     CSB_CHECK("stale sparse Sapling frontier at bundle height refuses",
-              rejected(&manifest, &bad));
-    bad = observation;
+              rejected(manifest, &bad));
+    bad = *observation;
     bad.sapling_source_header_pass_record = false;
     CSB_CHECK("missing exact Sapling source proof refuses",
-              rejected(&manifest, &bad));
-    bad = observation;
+              rejected(manifest, &bad));
+    bad = *observation;
     bad.header_descends_from_bundle = false;
-    CSB_CHECK("off-chain selected header refuses", rejected(&manifest, &bad));
-    bad = observation;
+    CSB_CHECK("off-chain selected header refuses", rejected(manifest, &bad));
+    bad = *observation;
     bad.bundle_descends_from_sapling_source = false;
-    CSB_CHECK("off-chain Sapling source refuses", rejected(&manifest, &bad));
+    CSB_CHECK("off-chain Sapling source refuses", rejected(manifest, &bad));
 
-    struct consensus_state_bundle_manifest bad_manifest = manifest;
+    struct consensus_state_bundle_manifest bad_manifest = *manifest;
     bad_manifest.artifact_digest[0] ^= 1u;
     CSB_CHECK("unbound manifest digest refuses",
-              rejected(&bad_manifest, &observation));
-    bad_manifest = manifest;
+              rejected(&bad_manifest, observation));
+    bad_manifest = *manifest;
     bad_manifest.history_complete = false;
     consensus_state_bundle_artifact_digest(
         &bad_manifest, bad_manifest.artifact_digest);
     CSB_CHECK("current-only history refuses selected-chain evidence",
-              rejected(&bad_manifest, &observation));
+              rejected(&bad_manifest, observation));
+    return failures;
+}
 
+static int check_evidence_build_refusals(void)
+{
+    int failures = 0;
     struct consensus_state_chain_evidence *evidence = (void *)1;
     CSB_CHECK("null build refuses without evidence",
               !consensus_state_chain_evidence_build(NULL, &evidence).ok &&
@@ -343,68 +348,75 @@ int test_consensus_state_chain_binding(void)
                   CONSENSUS_STATE_TARGET_LANE_COPY_PROOF));
     CSB_CHECK("checkpoint-authority accessor rejects null",
               !consensus_state_chain_evidence_used_checkpoint_authority(NULL));
+    return failures;
+}
 
+static int check_checkpoint_authority_substitution(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation)
+{
+    int failures = 0;
     /* ── Compiled-checkpoint content authority (FIX-A) ─────────────────────
      * On a snapshot-seeded target the checkpoint block is never materialized,
      * so the below-checkpoint predicates would refuse on absent index evidence.
      * When the bundle IS the compiled checkpoint (height + block_hash + Sapling
      * frontier match byte-for-byte), the compiled checkpoint authorizes them. */
     struct consensus_state_checkpoint_authority authority =
-        matching_authority(&manifest);
+        matching_authority(manifest);
 
     /* (a) Seeded target (index floors above checkpoint) + bundle at checkpoint
      * height with matching compiled content → ADMIT via checkpoint authority. */
     struct consensus_state_chain_binding_observation seeded =
-        seeded_target_observation(&manifest, &authority);
+        seeded_target_observation(manifest, &authority);
     CSB_CHECK("checkpoint-height bundle on seeded target ADMITs via authority",
-              consensus_state_chain_binding_decide(&manifest, &seeded).ok);
+              consensus_state_chain_binding_decide(manifest, &seeded).ok);
     CSB_CHECK("authority predicate reports the substitution was used",
               consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &seeded));
+                  manifest, &seeded));
 
     /* Same seeded target WITHOUT the authority (available=false) → the pure
      * target-derived gate refuses at -5 exactly as before (bundle absent). */
     struct consensus_state_chain_binding_observation seeded_no_auth =
-        seeded_target_observation(&manifest, NULL);
+        seeded_target_observation(manifest, NULL);
     struct zcl_result no_auth = consensus_state_chain_binding_decide(
-        &manifest, &seeded_no_auth);
+        manifest, &seeded_no_auth);
     CSB_CHECK("seeded target with no authority refuses at -5",
               !no_auth.ok && no_auth.code == -5 &&
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &seeded_no_auth));
+                  manifest, &seeded_no_auth));
 
     /* (b) Bundle content (block_hash) mismatches the compiled checkpoint →
      * authority does NOT apply → refuse exactly as today (bundle absent → -5). */
     struct consensus_state_checkpoint_authority bad_hash_auth = authority;
     bad_hash_auth.block_hash[0] ^= 1u;
     struct consensus_state_chain_binding_observation seeded_bad_hash =
-        seeded_target_observation(&manifest, &bad_hash_auth);
+        seeded_target_observation(manifest, &bad_hash_auth);
     struct zcl_result bad_hash = consensus_state_chain_binding_decide(
-        &manifest, &seeded_bad_hash);
+        manifest, &seeded_bad_hash);
     CSB_CHECK("checkpoint block_hash mismatch refuses (no authority) at -5",
               !bad_hash.ok && bad_hash.code == -5 &&
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &seeded_bad_hash));
+                  manifest, &seeded_bad_hash));
 
     /* Sapling frontier root mismatch is likewise not authorized. */
     struct consensus_state_checkpoint_authority bad_root_auth = authority;
     bad_root_auth.sapling_frontier_root[0] ^= 1u;
     struct consensus_state_chain_binding_observation seeded_bad_root =
-        seeded_target_observation(&manifest, &bad_root_auth);
+        seeded_target_observation(manifest, &bad_root_auth);
     CSB_CHECK("checkpoint Sapling-root mismatch refuses (no authority)",
-              rejected(&manifest, &seeded_bad_root) &&
+              rejected(manifest, &seeded_bad_root) &&
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &seeded_bad_root));
+                  manifest, &seeded_bad_root));
 
     /* Sapling frontier HEIGHT mismatch is not authorized either. */
     struct consensus_state_checkpoint_authority bad_sh_auth = authority;
     bad_sh_auth.sapling_frontier_height ^= 1;
     struct consensus_state_chain_binding_observation seeded_bad_sh =
-        seeded_target_observation(&manifest, &bad_sh_auth);
+        seeded_target_observation(manifest, &bad_sh_auth);
     CSB_CHECK("checkpoint Sapling-height mismatch refuses (no authority)",
-              rejected(&manifest, &seeded_bad_sh) &&
+              rejected(manifest, &seeded_bad_sh) &&
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &seeded_bad_sh));
+                  manifest, &seeded_bad_sh));
 
     /* (c) Bundle at a NON-checkpoint height on the same seeded target → the
      * authority (pinned to the checkpoint height) does not apply → -5 exactly
@@ -412,22 +424,22 @@ int test_consensus_state_chain_binding(void)
      * manifest, which is what get_*_checkpoint() yields for a non-checkpoint
      * bundle. */
     struct consensus_state_checkpoint_authority off_height_auth = authority;
-    off_height_auth.height = manifest.height + 1;
+    off_height_auth.height = manifest->height + 1;
     struct consensus_state_chain_binding_observation seeded_off_height =
-        seeded_target_observation(&manifest, &off_height_auth);
+        seeded_target_observation(manifest, &off_height_auth);
     struct zcl_result off_height = consensus_state_chain_binding_decide(
-        &manifest, &seeded_off_height);
+        manifest, &seeded_off_height);
     CSB_CHECK("non-checkpoint-height bundle refuses at -5 (authority inert)",
               !off_height.ok && off_height.code == -5 &&
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &seeded_off_height));
+                  manifest, &seeded_off_height));
 
     /* Authority available=false is inert even at the checkpoint height. */
     struct consensus_state_checkpoint_authority unavailable_auth = authority;
     unavailable_auth.available = false;
     CSB_CHECK("unavailable authority does not substitute",
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest,
+                  manifest,
                   &(struct consensus_state_chain_binding_observation){
                       .checkpoint_authority = unavailable_auth}));
 
@@ -437,33 +449,39 @@ int test_consensus_state_chain_binding(void)
     struct consensus_state_chain_binding_observation auth_bad_frontier = seeded;
     auth_bad_frontier.frontier_unchanged = false;
     CSB_CHECK("authority does not relax -3 frontier durability",
-              rejected(&manifest, &auth_bad_frontier));
+              rejected(manifest, &auth_bad_frontier));
     struct consensus_state_chain_binding_observation auth_bad_hstar = seeded;
-    auth_bad_hstar.durable_served_height = manifest.height - 1;
+    auth_bad_hstar.durable_served_height = manifest->height - 1;
     CSB_CHECK("authority does not relax -4 durable served H*",
-              rejected(&manifest, &auth_bad_hstar));
+              rejected(manifest, &auth_bad_hstar));
     struct consensus_state_chain_binding_observation auth_bad_header = seeded;
     auth_bad_header.selected_header_valid_tree = false;
     CSB_CHECK("authority does not relax -11 header-tip validity",
-              rejected(&manifest, &auth_bad_header));
+              rejected(manifest, &auth_bad_header));
     struct consensus_state_chain_binding_observation auth_no_header = seeded;
     auth_no_header.selected_header_known = false;
     CSB_CHECK("authority still requires a materialized header tip",
-              rejected(&manifest, &auth_no_header));
+              rejected(manifest, &auth_no_header));
 
     /* A fully-materialized (from-genesis) target binds through the NORMAL
      * predicates. With an authority present but pinned to a different height
      * (so the substitution is inert), the real index evidence must still pass
      * every below-checkpoint predicate on its own. */
     struct consensus_state_chain_binding_observation materialized_inert_auth =
-        observation;
+        *observation;
     materialized_inert_auth.checkpoint_authority = off_height_auth;
     CSB_CHECK("materialized target binds via normal path (authority inert)",
               consensus_state_chain_binding_decide(
-                  &manifest, &materialized_inert_auth).ok &&
+                  manifest, &materialized_inert_auth).ok &&
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &materialized_inert_auth));
+                  manifest, &materialized_inert_auth));
+    return failures;
+}
 
+static int check_header_bootstrap_admission(
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    int failures = 0;
     /* ── Header-bootstrap install (the instant-on keystone, FIX-B) ─────────
      * A blank node fast-syncs the header chain (PoW-validated to tip) and then
      * installs the baked checkpoint state WITHOUT first folding bodies through
@@ -473,15 +491,17 @@ int test_consensus_state_chain_binding(void)
      * block_hash (selected_bundle_* at the checkpoint height + a durable
      * validate_headers pass record). Gated on cp_auth so a non-checkpoint bundle
      * can never bootstrap; -3 and -11 stay enforced on the bootstrap path. */
+    struct consensus_state_checkpoint_authority authority =
+        matching_authority(manifest);
     struct consensus_state_chain_binding_observation bootstrap =
-        header_bootstrap_observation(&manifest, &authority);
+        header_bootstrap_observation(manifest, &authority);
 
     /* (1) Headers-first bootstrap ADMITTED without a fold. */
     CSB_CHECK("headers-first bootstrap admits install without a fold (H*=0)",
-              consensus_state_chain_binding_decide(&manifest, &bootstrap).ok);
+              consensus_state_chain_binding_decide(manifest, &bootstrap).ok);
     CSB_CHECK("bootstrap admit reports checkpoint authority was used",
               consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &bootstrap));
+                  manifest, &bootstrap));
 
     /* (2) Wrong block at the checkpoint height (hash != baked block_hash) →
      * refused: the pass record no longer keys the baked value. */
@@ -489,7 +509,7 @@ int test_consensus_state_chain_binding(void)
         bootstrap;
     bootstrap_wrong_block.selected_bundle_hash[0] ^= 1u;
     struct zcl_result wrong_block = consensus_state_chain_binding_decide(
-        &manifest, &bootstrap_wrong_block);
+        manifest, &bootstrap_wrong_block);
     CSB_CHECK("bootstrap wrong-block header refuses at -4",
               !wrong_block.ok && wrong_block.code == -4);
 
@@ -500,7 +520,7 @@ int test_consensus_state_chain_binding(void)
         bootstrap;
     bootstrap_unvalidated.bundle_header_pass_record = false;
     struct zcl_result unvalidated = consensus_state_chain_binding_decide(
-        &manifest, &bootstrap_unvalidated);
+        manifest, &bootstrap_unvalidated);
     CSB_CHECK("bootstrap unvalidated header (no pass record) refuses at -4",
               !unvalidated.ok && unvalidated.code == -4);
 
@@ -510,22 +530,22 @@ int test_consensus_state_chain_binding(void)
     struct consensus_state_checkpoint_authority non_checkpoint_auth = authority;
     non_checkpoint_auth.block_hash[0] ^= 1u;  /* manifest != baked */
     struct consensus_state_chain_binding_observation bootstrap_non_cp =
-        header_bootstrap_observation(&manifest, &non_checkpoint_auth);
+        header_bootstrap_observation(manifest, &non_checkpoint_auth);
     struct zcl_result non_cp = consensus_state_chain_binding_decide(
-        &manifest, &bootstrap_non_cp);
+        manifest, &bootstrap_non_cp);
     CSB_CHECK("non-checkpoint bundle cannot bootstrap (refused at -4)",
               !non_cp.ok && non_cp.code == -4 &&
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &bootstrap_non_cp));
+                  manifest, &bootstrap_non_cp));
 
     /* And an unavailable authority (no checkpoint compiled) is likewise inert:
      * the bootstrap path needs cp_auth, so served H*=0 refuses at -4. */
     struct consensus_state_checkpoint_authority unavailable_boot = authority;
     unavailable_boot.available = false;
     struct consensus_state_chain_binding_observation bootstrap_no_auth =
-        header_bootstrap_observation(&manifest, &unavailable_boot);
+        header_bootstrap_observation(manifest, &unavailable_boot);
     struct zcl_result boot_no_auth = consensus_state_chain_binding_decide(
-        &manifest, &bootstrap_no_auth);
+        manifest, &bootstrap_no_auth);
     CSB_CHECK("bootstrap with unavailable authority refuses at -4",
               !boot_no_auth.ok && boot_no_auth.code == -4);
 
@@ -533,11 +553,17 @@ int test_consensus_state_chain_binding(void)
      * checkpoint height) still admits — path (a) is unchanged by path (b). */
     struct consensus_state_chain_binding_observation bootstrap_replaced =
         bootstrap;
-    bootstrap_replaced.durable_served_height = manifest.height;
+    bootstrap_replaced.durable_served_height = manifest->height;
     CSB_CHECK("state-replacement path still admits (served H* >= height)",
               consensus_state_chain_binding_decide(
-                  &manifest, &bootstrap_replaced).ok);
+                  manifest, &bootstrap_replaced).ok);
+    return failures;
+}
 
+static int check_fresh_genesis_bootstrap(
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    int failures = 0;
      /* Fresh-genesis instant-on bootstrap: -3 is relaxed only for a clean,
       * quiescent genesis node (fresh_genesis_bootstrap set from a coherent
       * runtime frontier at H*=0, no partial fold state) under compiled-
@@ -548,6 +574,10 @@ int test_consensus_state_chain_binding(void)
      * authority), but the clean-genesis eligibility flag is set and the compiled
      * checkpoint authority matches. Everything else mirrors the header-bootstrap
      * shape (H*=0, checkpoint header present with baked hash + PoW pass record). */
+    struct consensus_state_checkpoint_authority authority =
+        matching_authority(manifest);
+    struct consensus_state_chain_binding_observation bootstrap =
+        header_bootstrap_observation(manifest, &authority);
     struct consensus_state_chain_binding_observation fresh_genesis = bootstrap;
     fresh_genesis.before_frontier_consistent = false;
     fresh_genesis.after_frontier_consistent = false;
@@ -558,17 +588,17 @@ int test_consensus_state_chain_binding(void)
      * cp_auth) → ADMIT even though the durable frontier is not yet consistent. */
     CSB_CHECK("fresh-genesis: clean quiescent genesis ADMITs the checkpoint",
               consensus_state_chain_binding_decide(
-                  &manifest, &fresh_genesis).ok);
+                  manifest, &fresh_genesis).ok);
     CSB_CHECK("fresh-genesis: admit reports checkpoint authority was used",
               consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &fresh_genesis));
+                  manifest, &fresh_genesis));
 
     /* (A2) Mid-fold / partial-state node: NOT clean genesis (flag false) and the
      * durable frontier is not consistent → still REFUSE at -3. */
     struct consensus_state_chain_binding_observation midfold = fresh_genesis;
     midfold.fresh_genesis_bootstrap = false;
     struct zcl_result midfold_r =
-        consensus_state_chain_binding_decide(&manifest, &midfold);
+        consensus_state_chain_binding_decide(manifest, &midfold);
     CSB_CHECK("fresh-genesis: mid-fold (no clean-genesis flag) refuses at -3",
               !midfold_r.ok && midfold_r.code == -3);
 
@@ -578,7 +608,7 @@ int test_consensus_state_chain_binding(void)
         fresh_genesis;
     fg_wrong_block.selected_bundle_hash[0] ^= 1u;
     struct zcl_result fg_wrong =
-        consensus_state_chain_binding_decide(&manifest, &fg_wrong_block);
+        consensus_state_chain_binding_decide(manifest, &fg_wrong_block);
     CSB_CHECK("fresh-genesis: wrong-block checkpoint header refuses at -4",
               !fg_wrong.ok && fg_wrong.code == -4);
 
@@ -587,7 +617,7 @@ int test_consensus_state_chain_binding(void)
     struct consensus_state_chain_binding_observation fg_no_pass = fresh_genesis;
     fg_no_pass.bundle_header_pass_record = false;
     struct zcl_result fg_pass =
-        consensus_state_chain_binding_decide(&manifest, &fg_no_pass);
+        consensus_state_chain_binding_decide(manifest, &fg_no_pass);
     CSB_CHECK("fresh-genesis: missing PoW pass record refuses at -4",
               !fg_pass.ok && fg_pass.code == -4);
 
@@ -599,11 +629,11 @@ int test_consensus_state_chain_binding(void)
     struct consensus_state_chain_binding_observation fg_non_cp = fresh_genesis;
     fg_non_cp.checkpoint_authority = fg_non_cp_auth;
     struct zcl_result fg_non_cp_r =
-        consensus_state_chain_binding_decide(&manifest, &fg_non_cp);
+        consensus_state_chain_binding_decide(manifest, &fg_non_cp);
     CSB_CHECK("fresh-genesis: non-checkpoint bundle refuses at -3 (no cp_auth)",
               !fg_non_cp_r.ok && fg_non_cp_r.code == -3 &&
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &fg_non_cp));
+                  manifest, &fg_non_cp));
 
     /* (A6) No regression: a fully-folded target (durable frontier consistent,
      * served H* >= checkpoint) still admits via the normal path even with the
@@ -612,10 +642,10 @@ int test_consensus_state_chain_binding(void)
     fg_replaced.fresh_genesis_bootstrap = false;
     fg_replaced.before_frontier_consistent = true;
     fg_replaced.after_frontier_consistent = true;
-    fg_replaced.durable_served_height = manifest.height;
+    fg_replaced.durable_served_height = manifest->height;
     CSB_CHECK("fresh-genesis: state-replacement path unaffected (still admits)",
               consensus_state_chain_binding_decide(
-                  &manifest, &fg_replaced).ok);
+                  manifest, &fg_replaced).ok);
 
     /* (A7) The relaxation touches ONLY -3: a clean-genesis node whose frontier
      * MOVED between samples (frontier_unchanged false) still refuses at -3 — the
@@ -623,10 +653,16 @@ int test_consensus_state_chain_binding(void)
     struct consensus_state_chain_binding_observation fg_moved = fresh_genesis;
     fg_moved.frontier_unchanged = false;
     struct zcl_result fg_moved_r =
-        consensus_state_chain_binding_decide(&manifest, &fg_moved);
+        consensus_state_chain_binding_decide(manifest, &fg_moved);
     CSB_CHECK("fresh-genesis: a moving frontier still refuses at -3",
               !fg_moved_r.ok && fg_moved_r.code == -3);
+    return failures;
+}
 
+static int check_assisted_admission(
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    int failures = 0;
     /* ── ASSISTED above-checkpoint admission (the RELEASE_ASSISTED tier) ───────
      * A FRESHEST bundle strictly ABOVE the compiled checkpoint. With the opt-in
      * set, the assisted relaxation ADMITs it — binding the bundle LOCATION (PoW
@@ -634,18 +670,18 @@ int test_consensus_state_chain_binding(void)
      * coverage and the -5/-6/-8 body self-validation (structurally impossible on
      * borrowed state) — while KEEPING -3 determinism and -11 header work/ancestry.
      * cp_height is strictly below the bundle so this is never cp_auth. */
-    const int32_t assisted_cp_height = manifest.height - 40;
+    const int32_t assisted_cp_height = manifest->height - 40;
     struct consensus_state_chain_binding_observation assisted =
-        assisted_observation(&manifest, assisted_cp_height);
+        assisted_observation(manifest, assisted_cp_height);
 
     CSB_CHECK("assisted: above-checkpoint borrowed bundle ADMITs",
-              consensus_state_chain_binding_decide(&manifest, &assisted).ok);
+              consensus_state_chain_binding_decide(manifest, &assisted).ok);
     CSB_CHECK("assisted: admit reports the assisted authority was used",
               consensus_state_chain_binding_uses_assisted_authority(
-                  &manifest, &assisted));
+                  manifest, &assisted));
     CSB_CHECK("assisted: it is NOT the compiled-checkpoint authority",
               !consensus_state_chain_binding_uses_checkpoint_authority(
-                  &manifest, &assisted));
+                  manifest, &assisted));
 
     /* Opt-in OFF (assisted_mode_requested false): an above-checkpoint borrowed
      * bundle refuses at -4 exactly as before this feature — served H* is below
@@ -653,27 +689,27 @@ int test_consensus_state_chain_binding(void)
     struct consensus_state_chain_binding_observation assisted_off = assisted;
     assisted_off.assisted_mode_requested = false;
     struct zcl_result a_off =
-        consensus_state_chain_binding_decide(&manifest, &assisted_off);
+        consensus_state_chain_binding_decide(manifest, &assisted_off);
     CSB_CHECK("assisted: opt-in OFF refuses at -4",
               !a_off.ok && a_off.code == -4 &&
               !consensus_state_chain_binding_uses_assisted_authority(
-                  &manifest, &assisted_off));
+                  manifest, &assisted_off));
 
     /* Bundle hash off the selected chain → assisted predicate fails → -4. */
     struct consensus_state_chain_binding_observation a_bad_hash = assisted;
     a_bad_hash.selected_bundle_hash[0] ^= 1u;
     struct zcl_result a_hash =
-        consensus_state_chain_binding_decide(&manifest, &a_bad_hash);
+        consensus_state_chain_binding_decide(manifest, &a_bad_hash);
     CSB_CHECK("assisted: bundle hash off-chain refuses at -4",
               !a_hash.ok && a_hash.code == -4 &&
               !consensus_state_chain_binding_uses_assisted_authority(
-                  &manifest, &a_bad_hash));
+                  manifest, &a_bad_hash));
 
     /* No durable bundle-height header pass record → LOCATION not PoW-bound → -4. */
     struct consensus_state_chain_binding_observation a_no_pass = assisted;
     a_no_pass.bundle_header_pass_record = false;
     struct zcl_result a_pass =
-        consensus_state_chain_binding_decide(&manifest, &a_no_pass);
+        consensus_state_chain_binding_decide(manifest, &a_no_pass);
     CSB_CHECK("assisted: missing bundle-height pass record refuses at -4",
               !a_pass.ok && a_pass.code == -4);
 
@@ -681,35 +717,35 @@ int test_consensus_state_chain_binding(void)
     struct consensus_state_chain_binding_observation a_bad_root = assisted;
     a_bad_root.selected_bundle_sapling_root[0] ^= 1u;
     CSB_CHECK("assisted: shielded-tip root mismatch refuses",
-              rejected(&manifest, &a_bad_root) &&
+              rejected(manifest, &a_bad_root) &&
               !consensus_state_chain_binding_uses_assisted_authority(
-                  &manifest, &a_bad_root));
+                  manifest, &a_bad_root));
 
     /* Sapling SOURCE-header root mismatch is likewise not authorized. */
     struct consensus_state_chain_binding_observation a_bad_src = assisted;
     a_bad_src.selected_sapling_source_root[0] ^= 1u;
     CSB_CHECK("assisted: sapling-source root mismatch refuses",
-              rejected(&manifest, &a_bad_src));
+              rejected(manifest, &a_bad_src));
 
     /* PoW facts are NOT relaxed: -11 header validity + ancestry stay enforced. */
     struct consensus_state_chain_binding_observation a_bad_header = assisted;
     a_bad_header.selected_header_valid_tree = false;
     CSB_CHECK("assisted: does not relax -11 header-tip validity",
-              rejected(&manifest, &a_bad_header));
+              rejected(manifest, &a_bad_header));
     struct consensus_state_chain_binding_observation a_no_anc = assisted;
     a_no_anc.header_descends_from_bundle = false;
     CSB_CHECK("assisted: does not relax -11 ancestry",
-              rejected(&manifest, &a_no_anc));
+              rejected(manifest, &a_no_anc));
     struct consensus_state_chain_binding_observation a_no_src_anc = assisted;
     a_no_src_anc.bundle_descends_from_sapling_source = false;
     CSB_CHECK("assisted: does not relax -11 sapling-source ancestry",
-              rejected(&manifest, &a_no_src_anc));
+              rejected(manifest, &a_no_src_anc));
 
     /* Determinism (-3) is NEVER relaxed: a moving frontier still refuses at -3. */
     struct consensus_state_chain_binding_observation a_moved = assisted;
     a_moved.frontier_unchanged = false;
     struct zcl_result a_moved_r =
-        consensus_state_chain_binding_decide(&manifest, &a_moved);
+        consensus_state_chain_binding_decide(manifest, &a_moved);
     CSB_CHECK("assisted: a moving frontier still refuses at -3",
               !a_moved_r.ok && a_moved_r.code == -3);
 
@@ -718,14 +754,24 @@ int test_consensus_state_chain_binding(void)
     struct consensus_state_chain_binding_observation a_no_cp = assisted;
     a_no_cp.checkpoint_authority.available = false;
     struct zcl_result a_no_cp_r =
-        consensus_state_chain_binding_decide(&manifest, &a_no_cp);
+        consensus_state_chain_binding_decide(manifest, &a_no_cp);
     CSB_CHECK("assisted: no compiled checkpoint refuses at -4 (inert)",
               !a_no_cp_r.ok && a_no_cp_r.code == -4 &&
               !consensus_state_chain_binding_uses_assisted_authority(
-                  &manifest, &a_no_cp));
+                  manifest, &a_no_cp));
+    return failures;
+}
 
+static int check_assisted_fresh_genesis_regression(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation)
+{
+    int failures = 0;
      /* Fresh-genesis assisted: a fresh node (H*=0) installing the freshest
       * bundle ADMITs under the -3 clean-genesis relaxation. */
+    const int32_t assisted_cp_height = manifest->height - 40;
+    struct consensus_state_chain_binding_observation assisted =
+        assisted_observation(manifest, assisted_cp_height);
     struct consensus_state_chain_binding_observation assisted_fresh = assisted;
     assisted_fresh.before_frontier_consistent = false;
     assisted_fresh.after_frontier_consistent = false;
@@ -734,22 +780,23 @@ int test_consensus_state_chain_binding(void)
     assisted_fresh.durable_served_height = 0;
     CSB_CHECK("assisted: fresh-genesis node ADMITs the freshest bundle",
               consensus_state_chain_binding_decide(
-                  &manifest, &assisted_fresh).ok &&
+                  manifest, &assisted_fresh).ok &&
               consensus_state_chain_binding_uses_assisted_authority(
-                  &manifest, &assisted_fresh));
+                  manifest, &assisted_fresh));
     /* Mid-fold (no clean-genesis flag, no durable frontier) still refuses at -3. */
     struct consensus_state_chain_binding_observation assisted_midfold =
         assisted_fresh;
     assisted_midfold.fresh_genesis_bootstrap = false;
     struct zcl_result a_mid =
-        consensus_state_chain_binding_decide(&manifest, &assisted_midfold);
+        consensus_state_chain_binding_decide(manifest, &assisted_midfold);
     CSB_CHECK("assisted: mid-fold node still refuses at -3",
               !a_mid.ok && a_mid.code == -3);
 
      /* A self-validated target is never demoted to assisted: with the
       * assisted opt-in on and a checkpoint below the bundle, it binds via the
       * normal below-checkpoint gate and uses_assisted_authority stays false. */
-    struct consensus_state_chain_binding_observation self_validated = observation;
+    struct consensus_state_chain_binding_observation self_validated =
+        *observation;
     self_validated.assisted_mode_requested = true;
     self_validated.checkpoint_authority.available = true;
     self_validated.checkpoint_authority.height = assisted_cp_height;
@@ -759,11 +806,29 @@ int test_consensus_state_chain_binding(void)
     memset(self_validated.checkpoint_authority.sapling_frontier_root, 0xa2, 32);
     CSB_CHECK("regression: self-validated target admits via the normal gate",
               consensus_state_chain_binding_decide(
-                  &manifest, &self_validated).ok);
+                  manifest, &self_validated).ok);
     CSB_CHECK("regression: self-validated target is NOT assisted (served covers)",
               !consensus_state_chain_binding_uses_assisted_authority(
-                  &manifest, &self_validated));
+                  manifest, &self_validated));
+    return failures;
+}
 
+int test_consensus_state_chain_binding(void)
+{
+    int failures = 0;
+    struct consensus_state_bundle_manifest manifest = valid_manifest();
+    struct consensus_state_chain_binding_observation observation =
+        valid_observation(&manifest);
+    failures += check_selected_chain_binding_baseline(&manifest,
+                                                      &observation);
+    failures += check_evidence_build_refusals();
+    failures += check_checkpoint_authority_substitution(&manifest,
+                                                        &observation);
+    failures += check_header_bootstrap_admission(&manifest);
+    failures += check_fresh_genesis_bootstrap(&manifest);
+    failures += check_assisted_admission(&manifest);
+    failures += check_assisted_fresh_genesis_regression(&manifest,
+                                                        &observation);
     printf("consensus_state_chain_binding: %s\n",
            failures ? "FAILED" : "ALL PASSED");
     return failures;
