@@ -1529,7 +1529,6 @@ tests/harness/src/test_helpers.c:test_spawn_capture_kill:42
 tests/harness/src/test_https_sni_select.c:handshake:19
 tests/harness/src/test_https_sni_select.c:http_get:17
 tests/harness/src/test_https_sni_select.c:test_https_sni_select:39
-tests/harness/src/test_hw_profile.c:test_hw_profile:50
 tests/harness/src/test_impact_composition.c:test_ic_proof_dependency_crosses_filesystems:24
 tests/harness/src/test_importblockindex_roundtrip.c:test_importblockindex_roundtrip:45
 tests/harness/src/test_keys.c:test_keys:27

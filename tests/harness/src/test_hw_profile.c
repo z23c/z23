@@ -183,13 +183,15 @@ static int hwp_drain_batch_int_bounds(void)
     return failures;
 }
 
-int test_hw_profile(void)
+/* ── Per-section check helpers ────────────────────────────────────── */
+
+/* Resets every organ to the real host, then checks that init succeeds,
+ * is idempotent, and reports sane core/RAM/ISA values; the probed
+ * online/ram/isa values are handed back for the dump-state checks. */
+static int hwp_check_realhost_init_probes(int *online_out, int64_t *ram_out,
+                                          const struct hw_profile_isa **isa_out)
 {
     int failures = 0;
-
-    failures += hwp_drain_batch_int_bounds();
-
-    /* ── real-host probe ─────────────────────────────────────────── */
     hw_profile_reset_for_testing();
     cpu_topology_reset_for_testing();
     cpu_topology_set_sysfs_root_for_testing(NULL);
@@ -209,7 +211,19 @@ int test_hw_profile(void)
 
     const struct hw_profile_isa *isa = hw_profile_isa();
     HWP_CHECK("isa pointer non-NULL", isa != NULL);
+
+    *online_out = online;
+    *ram_out = ram;
+    *isa_out = isa;
+    return failures;
+}
+
 #if defined(__APPLE__) && defined(__aarch64__)
+/* Cross-checks every Darwin ARM ISA fact in the profile against an
+ * independent sysctl report of the same OS feature. */
+static int hwp_check_darwin_isa_matches_sysctl(const struct hw_profile_isa *isa)
+{
+    int failures = 0;
     HWP_CHECK("Darwin NEON fact matches the independent OS report",
               isa && isa->arm_neon == hwp_sysctl_feature("hw.optional.neon"));
     HWP_CHECK("Darwin SHA-256 fact matches the independent OS report",
@@ -224,8 +238,16 @@ int test_hw_profile(void)
     HWP_CHECK("Darwin AES fact matches the independent OS report",
               isa && isa->arm_aes ==
                          hwp_sysctl_feature("hw.optional.arm.FEAT_AES"));
+    return failures;
+}
 #endif
 
+/* Checks device-number semantics for the host platform (availability,
+ * Darwin's 8-bit major / 24-bit minor encoding) and the honest
+ * unknown-rotational answer for a NULL datadir. */
+static int hwp_check_device_semantics(void)
+{
+    int failures = 0;
 #if defined(_WIN32)
     HWP_CHECK("Windows does not claim Unix major/minor semantics",
               !platform_device_major_minor_available());
@@ -246,316 +268,465 @@ int test_hw_profile(void)
     bool known = true;
     (void)hw_profile_datadir_rotational(&known);
     HWP_CHECK("datadir_rotational(NULL datadir) reports unknown", !known);
+    return failures;
+}
 
-    /* ── dump_state_json ──────────────────────────────────────────── */
-    {
-        int forced = chacha20_select_impl(CHACHA20_IMPL_VECTOR4);
-        const char *active_before_dump = chacha20_implementation();
-        struct json_value v;
-        json_init(&v);
-        HWP_CHECK("dump_state_json succeeds", hw_profile_dump_state_json(&v, NULL));
-        HWP_CHECK("dump has online_cores",
-                  json_get(&v, "online_cores") &&
-                  json_get_int(json_get(&v, "online_cores")) == online);
-        HWP_CHECK("dump has physical_cores", json_get(&v, "physical_cores") != NULL);
-        HWP_CHECK("dump has ram_bytes",
-                  json_get(&v, "ram_bytes") &&
-                  json_get_int(json_get(&v, "ram_bytes")) == ram);
-        HWP_CHECK("dump has ram_class", json_get(&v, "ram_class") != NULL);
-        HWP_CHECK("dump has isa object", json_get(&v, "isa") != NULL);
-        const struct json_value *isa_dump = json_get(&v, "isa");
-        HWP_CHECK("dump names active SHA-256 transform",
-                  json_get(isa_dump, "sha256_transform") != NULL);
-        HWP_CHECK("dump names active Equihash BLAKE2b batch tier",
-                  json_get(isa_dump, "equihash_blake2b_batch") != NULL);
-        HWP_CHECK("dump names active CRC32C transform",
-                  json_get(isa_dump, "crc32c_transform") != NULL);
-        HWP_CHECK("dump reports four-lane Keccak availability",
-                  json_get(isa_dump, "keccak_x4_available") != NULL);
-        const struct json_value *chacha_dump =
-            json_get(isa_dump, "chacha20_vector4");
-        HWP_CHECK("dump has nested ChaCha20 vector status",
-                  chacha_dump != NULL);
-        HWP_CHECK("dump separates compiled ChaCha20 vector tier",
-                  json_get(chacha_dump, "compiled") != NULL);
-        HWP_CHECK("dump separates CPU-capable ChaCha20 vector tier",
-                  json_get(chacha_dump, "cpu_capable") != NULL);
-        HWP_CHECK("dump separates KAT-usable ChaCha20 vector tier",
-                  json_get(chacha_dump, "kat_usable") != NULL);
-        HWP_CHECK("dump separates ChaCha20 AUTO selection",
-                  json_get(chacha_dump, "auto_selected") != NULL);
-        HWP_CHECK("dump names the active ChaCha20 transform",
-                  json_get(chacha_dump, "active_transform") != NULL &&
-                  strcmp(json_get_str(json_get(chacha_dump,
-                                               "active_transform")),
-                         active_before_dump) == 0);
-        HWP_CHECK("dump does not confuse forced selection with AUTO policy",
-                  json_get_bool(json_get(chacha_dump, "auto_selected")) ==
-                      chacha20_auto_uses_vector4());
-        HWP_CHECK("dump does not mutate the active ChaCha20 transform",
-                  strcmp(chacha20_implementation(), active_before_dump) == 0);
+/* Checks the dump's top-level scalar/object keys against the probed
+ * host values. */
+static int hwp_check_dump_core_fields(const struct json_value *v,
+                                      int online, int64_t ram)
+{
+    int failures = 0;
+    HWP_CHECK("dump has online_cores",
+              json_get(v, "online_cores") &&
+              json_get_int(json_get(v, "online_cores")) == online);
+    HWP_CHECK("dump has physical_cores", json_get(v, "physical_cores") != NULL);
+    HWP_CHECK("dump has ram_bytes",
+              json_get(v, "ram_bytes") &&
+              json_get_int(json_get(v, "ram_bytes")) == ram);
+    HWP_CHECK("dump has ram_class", json_get(v, "ram_class") != NULL);
+    HWP_CHECK("dump has isa object", json_get(v, "isa") != NULL);
+    return failures;
+}
+
+/* Checks the nested ChaCha20 vector-tier fields, and that the dump
+ * neither misreports nor mutates the transform active before it. */
+static int hwp_check_dump_chacha20_fields(const struct json_value *chacha_dump,
+                                          const char *active_before_dump)
+{
+    int failures = 0;
+    HWP_CHECK("dump has nested ChaCha20 vector status",
+              chacha_dump != NULL);
+    HWP_CHECK("dump separates compiled ChaCha20 vector tier",
+              json_get(chacha_dump, "compiled") != NULL);
+    HWP_CHECK("dump separates CPU-capable ChaCha20 vector tier",
+              json_get(chacha_dump, "cpu_capable") != NULL);
+    HWP_CHECK("dump separates KAT-usable ChaCha20 vector tier",
+              json_get(chacha_dump, "kat_usable") != NULL);
+    HWP_CHECK("dump separates ChaCha20 AUTO selection",
+              json_get(chacha_dump, "auto_selected") != NULL);
+    HWP_CHECK("dump names the active ChaCha20 transform",
+              json_get(chacha_dump, "active_transform") != NULL &&
+              strcmp(json_get_str(json_get(chacha_dump,
+                                           "active_transform")),
+                     active_before_dump) == 0);
+    HWP_CHECK("dump does not confuse forced selection with AUTO policy",
+              json_get_bool(json_get(chacha_dump, "auto_selected")) ==
+                  chacha20_auto_uses_vector4());
+    HWP_CHECK("dump does not mutate the active ChaCha20 transform",
+              strcmp(chacha20_implementation(), active_before_dump) == 0);
+    return failures;
+}
+
 #if defined(__aarch64__) || defined(__x86_64__) || defined(_M_X64)
-        HWP_CHECK("mandatory-ABI ChaCha20 vector facts are internally honest",
-                  json_get_bool(json_get(chacha_dump, "compiled")) &&
-                  json_get_bool(json_get(chacha_dump, "cpu_capable")) &&
-                  json_get_bool(json_get(chacha_dump, "kat_usable")) &&
-                  (!json_get_bool(json_get(chacha_dump, "auto_selected")) ||
-                   (json_get_bool(json_get(chacha_dump, "compiled")) &&
-                    json_get_bool(json_get(chacha_dump, "cpu_capable")) &&
-                    json_get_bool(json_get(chacha_dump, "kat_usable")))));
+/* On ABIs with a mandatory vector tier, the compiled / cpu_capable /
+ * kat_usable facts must be internally consistent with AUTO selection. */
+static int hwp_check_dump_chacha20_abi_honesty(
+    const struct json_value *chacha_dump)
+{
+    int failures = 0;
+    HWP_CHECK("mandatory-ABI ChaCha20 vector facts are internally honest",
+              json_get_bool(json_get(chacha_dump, "compiled")) &&
+              json_get_bool(json_get(chacha_dump, "cpu_capable")) &&
+              json_get_bool(json_get(chacha_dump, "kat_usable")) &&
+              (!json_get_bool(json_get(chacha_dump, "auto_selected")) ||
+               (json_get_bool(json_get(chacha_dump, "compiled")) &&
+                json_get_bool(json_get(chacha_dump, "cpu_capable")) &&
+                json_get_bool(json_get(chacha_dump, "kat_usable")))));
+    return failures;
+}
+#endif
+
+#if defined(__APPLE__) && defined(__aarch64__)
+/* The dump's Darwin ARM ISA section must echo the profile's observed
+ * facts: key present and boolean equal for each feature. */
+static int hwp_check_dump_darwin_arm_facts(const struct json_value *isa_dump,
+                                           const struct hw_profile_isa *isa)
+{
+    int failures = 0;
+    HWP_CHECK("dump reports the observed Darwin ARM ISA facts",
+              json_get(isa_dump, "arm_neon") &&
+              json_get_bool(json_get(isa_dump, "arm_neon")) ==
+                  isa->arm_neon &&
+              json_get(isa_dump, "arm_sha256") &&
+              json_get_bool(json_get(isa_dump, "arm_sha256")) ==
+                  isa->arm_sha256 &&
+              json_get(isa_dump, "arm_sha3") &&
+              json_get_bool(json_get(isa_dump, "arm_sha3")) ==
+                  isa->arm_sha3 &&
+              json_get(isa_dump, "arm_crc32") &&
+              json_get_bool(json_get(isa_dump, "arm_crc32")) ==
+                  isa->arm_crc32 &&
+              json_get(isa_dump, "arm_aes") &&
+              json_get_bool(json_get(isa_dump, "arm_aes")) ==
+                  isa->arm_aes);
+    return failures;
+}
+#endif
+
+/* Checks that a forced vector selection narrows honestly and that the
+ * remaining documented top-level objects are present. */
+static int hwp_check_dump_trailer_fields(const struct json_value *v,
+                                         int forced)
+{
+    int failures = 0;
+    HWP_CHECK("forced ChaCha20 vector selection narrows honestly",
+              forced == CHACHA20_IMPL_VECTOR4 ||
+              forced == CHACHA20_IMPL_PORTABLE);
+    HWP_CHECK("dump has storage object", json_get(v, "storage") != NULL);
+    HWP_CHECK("dump has l3 object", json_get(v, "l3") != NULL);
+    HWP_CHECK("dump has derived object", json_get(v, "derived") != NULL);
+    HWP_CHECK("dump has pin_reducer_available",
+              json_get(v, "pin_reducer_available") != NULL);
+    return failures;
+}
+
+/* Forces the vector4 ChaCha20 tier, dumps state, checks the documented
+ * key surface (delegating the grouped sections), then restores AUTO. */
+static int hwp_check_dump_state_json(int online, int64_t ram,
+                                     const struct hw_profile_isa *isa)
+{
+    int failures = 0;
+    (void)isa; /* only read by the Darwin ARM dump section */
+    int forced = chacha20_select_impl(CHACHA20_IMPL_VECTOR4);
+    const char *active_before_dump = chacha20_implementation();
+    struct json_value v;
+    json_init(&v);
+    HWP_CHECK("dump_state_json succeeds", hw_profile_dump_state_json(&v, NULL));
+    failures += hwp_check_dump_core_fields(&v, online, ram);
+    const struct json_value *isa_dump = json_get(&v, "isa");
+    HWP_CHECK("dump names active SHA-256 transform",
+              json_get(isa_dump, "sha256_transform") != NULL);
+    HWP_CHECK("dump names active Equihash BLAKE2b batch tier",
+              json_get(isa_dump, "equihash_blake2b_batch") != NULL);
+    HWP_CHECK("dump names active CRC32C transform",
+              json_get(isa_dump, "crc32c_transform") != NULL);
+    HWP_CHECK("dump reports four-lane Keccak availability",
+              json_get(isa_dump, "keccak_x4_available") != NULL);
+    const struct json_value *chacha_dump =
+        json_get(isa_dump, "chacha20_vector4");
+    failures += hwp_check_dump_chacha20_fields(chacha_dump, active_before_dump);
+#if defined(__aarch64__) || defined(__x86_64__) || defined(_M_X64)
+    failures += hwp_check_dump_chacha20_abi_honesty(chacha_dump);
 #endif
 #if defined(__APPLE__) && defined(__aarch64__)
-        HWP_CHECK("dump reports the observed Darwin ARM ISA facts",
-                  json_get(isa_dump, "arm_neon") &&
-                  json_get_bool(json_get(isa_dump, "arm_neon")) ==
-                      isa->arm_neon &&
-                  json_get(isa_dump, "arm_sha256") &&
-                  json_get_bool(json_get(isa_dump, "arm_sha256")) ==
-                      isa->arm_sha256 &&
-                  json_get(isa_dump, "arm_sha3") &&
-                  json_get_bool(json_get(isa_dump, "arm_sha3")) ==
-                      isa->arm_sha3 &&
-                  json_get(isa_dump, "arm_crc32") &&
-                  json_get_bool(json_get(isa_dump, "arm_crc32")) ==
-                      isa->arm_crc32 &&
-                  json_get(isa_dump, "arm_aes") &&
-                  json_get_bool(json_get(isa_dump, "arm_aes")) ==
-                      isa->arm_aes);
+    failures += hwp_check_dump_darwin_arm_facts(isa_dump, isa);
 #endif
-        HWP_CHECK("forced ChaCha20 vector selection narrows honestly",
-                  forced == CHACHA20_IMPL_VECTOR4 ||
-                  forced == CHACHA20_IMPL_PORTABLE);
-        HWP_CHECK("dump has storage object", json_get(&v, "storage") != NULL);
-        HWP_CHECK("dump has l3 object", json_get(&v, "l3") != NULL);
-        HWP_CHECK("dump has derived object", json_get(&v, "derived") != NULL);
-        HWP_CHECK("dump has pin_reducer_available",
-                  json_get(&v, "pin_reducer_available") != NULL);
-        json_free(&v);
-        (void)chacha20_select_impl(CHACHA20_IMPL_AUTO);
-    }
+    failures += hwp_check_dump_trailer_fields(&v, forced);
+    json_free(&v);
+    (void)chacha20_select_impl(CHACHA20_IMPL_AUTO);
+    return failures;
+}
 
-    /* ── derived tunables: monotonicity + clamps ─────────────────── */
-    {
-        int64_t r1 = 1LL * 1024 * 1024 * 1024;    /* 1 GiB */
-        int64_t r2 = 4LL * 1024 * 1024 * 1024;    /* 4 GiB */
-        int64_t r3 = 16LL * 1024 * 1024 * 1024;   /* 16 GiB */
-        int64_t r4 = 128LL * 1024 * 1024 * 1024;  /* 128 GiB */
+/* sqlite_cache_kib and sqlite_mmap_bytes must be monotone
+ * non-decreasing in RAM and honour their floor/ceiling clamps. */
+static int hwp_check_derived_sqlite_tunables(int64_t r1, int64_t r2,
+                                             int64_t r3, int64_t r4)
+{
+    int failures = 0;
+    int64_t c1 = hw_profile_sqlite_cache_kib(r1, 0, 0);
+    int64_t c2 = hw_profile_sqlite_cache_kib(r2, 0, 0);
+    int64_t c3 = hw_profile_sqlite_cache_kib(r3, 0, 0);
+    int64_t c4 = hw_profile_sqlite_cache_kib(r4, 0, 0);
+    HWP_CHECK("sqlite_cache_kib monotone non-decreasing",
+              c1 <= c2 && c2 <= c3 && c3 <= c4);
+    HWP_CHECK("sqlite_cache_kib respects default floor (16 MiB)",
+              hw_profile_sqlite_cache_kib(0, 0, 0) == 16 * 1024);
+    HWP_CHECK("sqlite_cache_kib respects default ceiling (1 GiB)",
+              c4 == 1024 * 1024);
+    HWP_CHECK("sqlite_cache_kib custom floor/ceiling clamps",
+              hw_profile_sqlite_cache_kib(r4, 8 * 1024, 32 * 1024) == 32 * 1024);
 
-        int64_t c1 = hw_profile_sqlite_cache_kib(r1, 0, 0);
-        int64_t c2 = hw_profile_sqlite_cache_kib(r2, 0, 0);
-        int64_t c3 = hw_profile_sqlite_cache_kib(r3, 0, 0);
-        int64_t c4 = hw_profile_sqlite_cache_kib(r4, 0, 0);
-        HWP_CHECK("sqlite_cache_kib monotone non-decreasing",
-                  c1 <= c2 && c2 <= c3 && c3 <= c4);
-        HWP_CHECK("sqlite_cache_kib respects default floor (16 MiB)",
-                  hw_profile_sqlite_cache_kib(0, 0, 0) == 16 * 1024);
-        HWP_CHECK("sqlite_cache_kib respects default ceiling (1 GiB)",
-                  c4 == 1024 * 1024);
-        HWP_CHECK("sqlite_cache_kib custom floor/ceiling clamps",
-                  hw_profile_sqlite_cache_kib(r4, 8 * 1024, 32 * 1024) == 32 * 1024);
+    int64_t m1 = hw_profile_sqlite_mmap_bytes(r1, 0, 0);
+    int64_t m2 = hw_profile_sqlite_mmap_bytes(r2, 0, 0);
+    int64_t m3 = hw_profile_sqlite_mmap_bytes(r3, 0, 0);
+    int64_t m4 = hw_profile_sqlite_mmap_bytes(r4, 0, 0);
+    HWP_CHECK("sqlite_mmap_bytes monotone non-decreasing",
+              m1 <= m2 && m2 <= m3 && m3 <= m4);
+    HWP_CHECK("sqlite_mmap_bytes never exceeds a low caller ceiling "
+              "(the node.db 256 MiB landmine bound)",
+              hw_profile_sqlite_mmap_bytes(r4, 0, 256LL * 1024 * 1024) ==
+              256LL * 1024 * 1024);
+    HWP_CHECK("sqlite_mmap_bytes(0 ram) == 0",
+              hw_profile_sqlite_mmap_bytes(0, 0, 0) == 0);
+    return failures;
+}
 
-        int64_t m1 = hw_profile_sqlite_mmap_bytes(r1, 0, 0);
-        int64_t m2 = hw_profile_sqlite_mmap_bytes(r2, 0, 0);
-        int64_t m3 = hw_profile_sqlite_mmap_bytes(r3, 0, 0);
-        int64_t m4 = hw_profile_sqlite_mmap_bytes(r4, 0, 0);
-        HWP_CHECK("sqlite_mmap_bytes monotone non-decreasing",
-                  m1 <= m2 && m2 <= m3 && m3 <= m4);
-        HWP_CHECK("sqlite_mmap_bytes never exceeds a low caller ceiling "
-                  "(the node.db 256 MiB landmine bound)",
-                  hw_profile_sqlite_mmap_bytes(r4, 0, 256LL * 1024 * 1024) ==
-                  256LL * 1024 * 1024);
-        HWP_CHECK("sqlite_mmap_bytes(0 ram) == 0",
-                  hw_profile_sqlite_mmap_bytes(0, 0, 0) == 0);
+/* verify_workers must be monotone in requested parallelism, floored
+ * at 2 and capped at 4. */
+static int hwp_check_derived_verify_workers(void)
+{
+    int failures = 0;
+    int w1 = hw_profile_verify_workers(1);
+    int w2 = hw_profile_verify_workers(4);
+    int w3 = hw_profile_verify_workers(16);
+    int w4 = hw_profile_verify_workers(64);
+    HWP_CHECK("verify_workers monotone non-decreasing",
+              w1 <= w2 && w2 <= w3 && w3 <= w4);
+    HWP_CHECK("verify_workers floor is 2", w1 == 2);
+    HWP_CHECK("verify_workers ceiling is 4", w4 == 4);
+    return failures;
+}
 
-        int w1 = hw_profile_verify_workers(1);
-        int w2 = hw_profile_verify_workers(4);
-        int w3 = hw_profile_verify_workers(16);
-        int w4 = hw_profile_verify_workers(64);
-        HWP_CHECK("verify_workers monotone non-decreasing",
-                  w1 <= w2 && w2 <= w3 && w3 <= w4);
-        HWP_CHECK("verify_workers floor is 2", w1 == 2);
-        HWP_CHECK("verify_workers ceiling is 4", w4 == 4);
+/* script_batch_cap steps from the low-RAM cap to unlimited, and
+ * ram_class_of buckets the LOW/MEDIUM/HIGH boundaries. */
+static int hwp_check_derived_script_cap_and_ram_class(void)
+{
+    int failures = 0;
+    HWP_CHECK("script_batch_cap: low RAM (4 GiB) capped at 10000",
+              hw_profile_script_batch_cap(4LL * 1024 * 1024 * 1024) == 10000);
+    HWP_CHECK("script_batch_cap: high RAM (16 GiB) unlimited",
+              hw_profile_script_batch_cap(16LL * 1024 * 1024 * 1024) == 0);
+    HWP_CHECK("script_batch_cap: unknown RAM (0) unlimited",
+              hw_profile_script_batch_cap(0) == 0);
 
-        HWP_CHECK("script_batch_cap: low RAM (4 GiB) capped at 10000",
-                  hw_profile_script_batch_cap(4LL * 1024 * 1024 * 1024) == 10000);
-        HWP_CHECK("script_batch_cap: high RAM (16 GiB) unlimited",
-                  hw_profile_script_batch_cap(16LL * 1024 * 1024 * 1024) == 0);
-        HWP_CHECK("script_batch_cap: unknown RAM (0) unlimited",
-                  hw_profile_script_batch_cap(0) == 0);
+    HWP_CHECK("ram_class_of low", hw_profile_ram_class_of(4LL << 30) == HW_PROFILE_RAM_LOW);
+    HWP_CHECK("ram_class_of medium", hw_profile_ram_class_of(16LL << 30) == HW_PROFILE_RAM_MEDIUM);
+    HWP_CHECK("ram_class_of high", hw_profile_ram_class_of(64LL << 30) == HW_PROFILE_RAM_HIGH);
+    return failures;
+}
 
-        HWP_CHECK("ram_class_of low", hw_profile_ram_class_of(4LL << 30) == HW_PROFILE_RAM_LOW);
-        HWP_CHECK("ram_class_of medium", hw_profile_ram_class_of(16LL << 30) == HW_PROFILE_RAM_MEDIUM);
-        HWP_CHECK("ram_class_of high", hw_profile_ram_class_of(64LL << 30) == HW_PROFILE_RAM_HIGH);
+/* ── K3 derived drain batch ──────────────────────────────── */
+/* drain_batch must be monotone in RAM, never fall below the caller's
+ * baseline, cap at 8x baseline, and let core count cap the multiplier. */
+static int hwp_check_derived_drain_batch_scaling(int64_t r1, int64_t r2,
+                                                 int64_t r3, int64_t r4)
+{
+    int failures = 0;
+    int many_cores = 32; /* enough that RAM is the binding cap */
+    int d1 = hw_profile_drain_batch(r1, many_cores, 1000);
+    int d2 = hw_profile_drain_batch(r2, many_cores, 1000);
+    int d3 = hw_profile_drain_batch(r3, many_cores, 1000);
+    int d4 = hw_profile_drain_batch(r4, many_cores, 1000);
+    HWP_CHECK("drain_batch monotone non-decreasing in RAM",
+              d1 <= d2 && d2 <= d3 && d3 <= d4);
+    HWP_CHECK("drain_batch floor is the baseline (small/unknown host)",
+              hw_profile_drain_batch(0, many_cores, 1000) == 1000 &&
+              hw_profile_drain_batch(r4, 1 /*cores*/, 1000) == 1000);
+    HWP_CHECK("drain_batch never below baseline floor", d1 >= 1000);
+    HWP_CHECK("drain_batch ceiling is 8x baseline",
+              d4 == 8000 &&
+              hw_profile_drain_batch(1024LL << 30, many_cores, 1000) == 8000);
+    HWP_CHECK("drain_batch honors the 100 baseline too (header path)",
+              hw_profile_drain_batch(0, many_cores, 100) == 100 &&
+              hw_profile_drain_batch(1024LL << 30, many_cores, 100) == 800);
+    HWP_CHECK("drain_batch: cores cap the multiplier (4 cores -> 1x)",
+              hw_profile_drain_batch(1024LL << 30, 4, 1000) == 1000);
+    return failures;
+}
 
-        /* ── K3 derived drain batch ──────────────────────────────── */
-        int many_cores = 32; /* enough that RAM is the binding cap */
-        int d1 = hw_profile_drain_batch(r1, many_cores, 1000);
-        int d2 = hw_profile_drain_batch(r2, many_cores, 1000);
-        int d3 = hw_profile_drain_batch(r3, many_cores, 1000);
-        int d4 = hw_profile_drain_batch(r4, many_cores, 1000);
-        HWP_CHECK("drain_batch monotone non-decreasing in RAM",
-                  d1 <= d2 && d2 <= d3 && d3 <= d4);
-        HWP_CHECK("drain_batch floor is the baseline (small/unknown host)",
-                  hw_profile_drain_batch(0, many_cores, 1000) == 1000 &&
-                  hw_profile_drain_batch(r4, 1 /*cores*/, 1000) == 1000);
-        HWP_CHECK("drain_batch never below baseline floor", d1 >= 1000);
-        HWP_CHECK("drain_batch ceiling is 8x baseline",
-                  d4 == 8000 &&
-                  hw_profile_drain_batch(1024LL << 30, many_cores, 1000) == 8000);
-        HWP_CHECK("drain_batch honors the 100 baseline too (header path)",
-                  hw_profile_drain_batch(0, many_cores, 100) == 100 &&
-                  hw_profile_drain_batch(1024LL << 30, many_cores, 100) == 800);
-        HWP_CHECK("drain_batch: cores cap the multiplier (4 cores -> 1x)",
-                  hw_profile_drain_batch(1024LL << 30, 4, 1000) == 1000);
+/* Runtime gate: OFF by default -> baseline; ON -> derived. */
+static int hwp_check_derive_gate_roundtrip(void)
+{
+    int failures = 0;
+    HWP_CHECK("derive gate default OFF",
+              !hw_profile_derive_drain_batch_enabled());
+    HWP_CHECK("effective returns baseline while gate OFF",
+              hw_profile_drain_batch_effective(1000) == 1000 &&
+              hw_profile_drain_batch_effective(100) == 100);
+    hw_profile_set_derive_drain_batch(true);
+    HWP_CHECK("derive gate reads back ON",
+              hw_profile_derive_drain_batch_enabled());
+    HWP_CHECK("effective while ON is >= baseline (measured host)",
+              hw_profile_drain_batch_effective(1000) >= 1000 &&
+              hw_profile_drain_batch_effective(1000) <= 8000);
+    hw_profile_set_derive_drain_batch(false); /* restore default */
+    HWP_CHECK("effective returns baseline after gate restored OFF",
+              hw_profile_drain_batch_effective(1000) == 1000);
+    return failures;
+}
 
-        /* Runtime gate: OFF by default -> baseline; ON -> derived. */
-        HWP_CHECK("derive gate default OFF",
-                  !hw_profile_derive_drain_batch_enabled());
-        HWP_CHECK("effective returns baseline while gate OFF",
-                  hw_profile_drain_batch_effective(1000) == 1000 &&
-                  hw_profile_drain_batch_effective(100) == 100);
-        hw_profile_set_derive_drain_batch(true);
-        HWP_CHECK("derive gate reads back ON",
-                  hw_profile_derive_drain_batch_enabled());
-        HWP_CHECK("effective while ON is >= baseline (measured host)",
-                  hw_profile_drain_batch_effective(1000) >= 1000 &&
-                  hw_profile_drain_batch_effective(1000) <= 8000);
-        hw_profile_set_derive_drain_batch(false); /* restore default */
-        HWP_CHECK("effective returns baseline after gate restored OFF",
-                  hw_profile_drain_batch_effective(1000) == 1000);
-    }
+/* Drives the derived-tunable checks over a 1..128 GiB RAM sweep. */
+static int hwp_check_derived_tunables(void)
+{
+    int failures = 0;
+    int64_t r1 = 1LL * 1024 * 1024 * 1024;    /* 1 GiB */
+    int64_t r2 = 4LL * 1024 * 1024 * 1024;    /* 4 GiB */
+    int64_t r3 = 16LL * 1024 * 1024 * 1024;   /* 16 GiB */
+    int64_t r4 = 128LL * 1024 * 1024 * 1024;  /* 128 GiB */
 
-    /* ── symmetric topology: no asymmetric CCD, pin is a no-op ─────── */
-    {
+    failures += hwp_check_derived_sqlite_tunables(r1, r2, r3, r4);
+    failures += hwp_check_derived_verify_workers();
+    failures += hwp_check_derived_script_cap_and_ram_class();
+    failures += hwp_check_derived_drain_batch_scaling(r1, r2, r3, r4);
+    failures += hwp_check_derive_gate_roundtrip();
+    return failures;
+}
+
+/* On the symmetric single-domain fallback topology nothing is
+ * asymmetric, so pin_reducer_thread must be an advisory no-op. */
+static int hwp_check_symmetric_topology_pin(void)
+{
+    int failures = 0;
+    cpu_topology_reset_for_testing();
+    cpu_topology_set_sysfs_root_for_testing(
+        "/nonexistent/zcl_hw_profile_symmetric_fixture_12345");
+    cpu_topology_init(); /* falls back to ONE synthetic domain */
+
+    HWP_CHECK("symmetric/fallback topology is not asymmetric",
+              !hw_profile_l3_asymmetric());
+    HWP_CHECK("symmetric topology has no large L3 domain",
+              hw_profile_large_l3_domain() == -1);
+    HWP_CHECK("pin_reducer_thread returns false on symmetric topology",
+              !hw_profile_pin_reducer_thread(pthread_self()));
+    return failures;
+}
+
+/* Runs the synthetic asymmetric-L3 fixture and checks topology
+ * detection, large-domain selection and pin behavior on it. */
+static int hwp_check_asymmetric_l3_fixture(void)
+{
+    int failures = 0;
+    char tmpl[PATH_MAX];
+    char *root = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_hwp_l3_fixture");
+    HWP_CHECK("l3 fixture mkdtemp succeeds", root != NULL);
+    if (root) {
+        hwp_build_l3_fixture(root);
         cpu_topology_reset_for_testing();
-        cpu_topology_set_sysfs_root_for_testing(
-            "/nonexistent/zcl_hw_profile_symmetric_fixture_12345");
-        cpu_topology_init(); /* falls back to ONE synthetic domain */
+        cpu_topology_set_sysfs_root_for_testing(root);
+        HWP_CHECK("l3 fixture cpu_topology_init succeeds", cpu_topology_init());
+        HWP_CHECK("l3 fixture: 4 logical cpus",
+                  cpu_topology_logical_cpus() == 4);
+        HWP_CHECK("l3 fixture: 2 L3 domains",
+                  cpu_topology_l3_domains() == 2);
+        HWP_CHECK("l3 fixture is detected asymmetric",
+                  hw_profile_l3_asymmetric());
 
-        HWP_CHECK("symmetric/fallback topology is not asymmetric",
-                  !hw_profile_l3_asymmetric());
-        HWP_CHECK("symmetric topology has no large L3 domain",
-                  hw_profile_large_l3_domain() == -1);
-        HWP_CHECK("pin_reducer_thread returns false on symmetric topology",
-                  !hw_profile_pin_reducer_thread(pthread_self()));
-    }
-
-    /* ── synthetic asymmetric-L3 fixture ─────────────────────────── */
-    {
-        char tmpl[PATH_MAX];
-        char *root = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_hwp_l3_fixture");
-        HWP_CHECK("l3 fixture mkdtemp succeeds", root != NULL);
-        if (root) {
-            hwp_build_l3_fixture(root);
-            cpu_topology_reset_for_testing();
-            cpu_topology_set_sysfs_root_for_testing(root);
-            HWP_CHECK("l3 fixture cpu_topology_init succeeds", cpu_topology_init());
-            HWP_CHECK("l3 fixture: 4 logical cpus",
-                      cpu_topology_logical_cpus() == 4);
-            HWP_CHECK("l3 fixture: 2 L3 domains",
-                      cpu_topology_l3_domains() == 2);
-            HWP_CHECK("l3 fixture is detected asymmetric",
-                      hw_profile_l3_asymmetric());
-
-            int large = hw_profile_large_l3_domain();
-            HWP_CHECK("l3 fixture large domain is valid", large >= 0);
-            struct cpu_topology_domain snap;
-            bool got = cpu_topology_domain_at(large, &snap);
-            HWP_CHECK("l3 fixture large domain has the 64 MiB L3",
-                      got && snap.l3_size_bytes == 65536LL * 1024);
-            HWP_CHECK("l3 fixture large domain cpus are {2,3}",
-                      got && snap.cpu_count == 2 &&
-                      ((snap.cpus[0] == 2 && snap.cpus[1] == 3) ||
-                       (snap.cpus[0] == 3 && snap.cpus[1] == 2)));
+        int large = hw_profile_large_l3_domain();
+        HWP_CHECK("l3 fixture large domain is valid", large >= 0);
+        struct cpu_topology_domain snap;
+        bool got = cpu_topology_domain_at(large, &snap);
+        HWP_CHECK("l3 fixture large domain has the 64 MiB L3",
+                  got && snap.l3_size_bytes == 65536LL * 1024);
+        HWP_CHECK("l3 fixture large domain cpus are {2,3}",
+                  got && snap.cpu_count == 2 &&
+                  ((snap.cpus[0] == 2 && snap.cpus[1] == 3) ||
+                   (snap.cpus[0] == 3 && snap.cpus[1] == 2)));
 
 #if defined(__APPLE__)
-            HWP_CHECK("pin_reducer_thread refuses where Darwin has no affinity API",
-                      !hw_profile_pin_reducer_thread(pthread_self()));
+        HWP_CHECK("pin_reducer_thread refuses where Darwin has no affinity API",
+                  !hw_profile_pin_reducer_thread(pthread_self()));
 #else
-            HWP_CHECK("pin_reducer_thread succeeds on asymmetric fixture",
-                      hw_profile_pin_reducer_thread(pthread_self()));
+        HWP_CHECK("pin_reducer_thread succeeds on asymmetric fixture",
+                  hw_profile_pin_reducer_thread(pthread_self()));
 #endif
+    }
+
+    /* restore real topology for anything running after this test */
+    cpu_topology_reset_for_testing();
+    cpu_topology_set_sysfs_root_for_testing(NULL);
+    cpu_topology_init();
+    return failures;
+}
+
+/* Runs the synthetic /sys/dev/block fixtures: partition-shaped SSD,
+ * whole-disk HDD, and a missing symlink degrading to known=false. */
+static int hwp_check_storage_rotational_fixture(void)
+{
+    int failures = 0;
+    char tmpl[PATH_MAX];
+    char *root = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_hwp_block_fixture");
+    HWP_CHECK("block fixture mkdtemp succeeds", root != NULL);
+    if (root) {
+        /* The probe only resolves the symlink named after the datadir's
+         * dev_t. Use ONE datadir's maj:min (two datadirs would collide
+         * on the same symlink name): plant the SSD-shaped target, probe,
+         * swap to the HDD-shaped target, probe again. */
+        char datadir[600];
+        snprintf(datadir, sizeof(datadir), "%s/test_datadir", root);
+        hwp_mkdir_p(datadir);
+
+        struct stat st;
+        bool have_stat = stat(datadir, &st) == 0;
+        HWP_CHECK("block fixture datadir stat() OK", have_stat);
+
+        if (have_stat) {
+            unsigned maj = platform_device_major(st.st_dev);
+            unsigned min = platform_device_minor(st.st_dev);
+            char block_root[600];
+            snprintf(block_root, sizeof(block_root), "%s/blockroot", root);
+            hwp_mkdir_p(block_root);
+            char dev_block_dir[700];
+            snprintf(dev_block_dir, sizeof(dev_block_dir), "%s/dev/block",
+                     block_root);
+            hwp_mkdir_p(dev_block_dir);
+            hw_profile_set_block_root_for_testing(dev_block_dir);
+
+            hwp_plant_ssd_partition(block_root, maj, min);
+            hw_profile_reset_for_testing();
+            hw_profile_init(datadir);
+            bool ssd_known = false;
+            bool ssd_rot = hw_profile_datadir_rotational(&ssd_known);
+            HWP_CHECK("partition-shaped SSD fixture: probe succeeded",
+                      ssd_known);
+            HWP_CHECK("partition-shaped SSD fixture: rotational == false",
+                      ssd_known && !ssd_rot);
+
+            hwp_plant_hdd_wholedisk(block_root, maj, min);
+            hw_profile_reset_for_testing();
+            hw_profile_init(datadir);
+            bool hdd_known = false;
+            bool hdd_rot = hw_profile_datadir_rotational(&hdd_known);
+            HWP_CHECK("whole-disk HDD fixture: probe succeeded", hdd_known);
+            HWP_CHECK("whole-disk HDD fixture: rotational == true",
+                      hdd_known && hdd_rot);
         }
 
-        /* restore real topology for anything running after this test */
-        cpu_topology_reset_for_testing();
-        cpu_topology_set_sysfs_root_for_testing(NULL);
-        cpu_topology_init();
+        /* A maj:min with no entry under the fixture block root gives
+         * known == false. */
+        char orphan_datadir[600];
+        snprintf(orphan_datadir, sizeof(orphan_datadir), "%s/orphan_datadir",
+                 root);
+        hwp_mkdir_p(orphan_datadir);
+        char empty_block_root[600];
+        snprintf(empty_block_root, sizeof(empty_block_root),
+                 "%s/empty_blockroot/dev/block", root);
+        hwp_mkdir_p(empty_block_root);
+        hw_profile_set_block_root_for_testing(empty_block_root);
+        hw_profile_reset_for_testing();
+        hw_profile_init(orphan_datadir);
+        bool orphan_known = true;
+        hw_profile_datadir_rotational(&orphan_known);
+        HWP_CHECK("missing block-device symlink degrades to known=false",
+                  !orphan_known);
     }
+
+    hw_profile_set_block_root_for_testing(NULL);
+    hw_profile_reset_for_testing();
+    hw_profile_init(NULL);
+    return failures;
+}
+
+int test_hw_profile(void)
+{
+    int failures = 0;
+
+    failures += hwp_drain_batch_int_bounds();
+
+    /* ── real-host probe ─────────────────────────────────────────── */
+    int online = 0;
+    int64_t ram = 0;
+    const struct hw_profile_isa *isa = NULL;
+    failures += hwp_check_realhost_init_probes(&online, &ram, &isa);
+#if defined(__APPLE__) && defined(__aarch64__)
+    failures += hwp_check_darwin_isa_matches_sysctl(isa);
+#endif
+    failures += hwp_check_device_semantics();
+
+    /* ── dump_state_json ──────────────────────────────────────────── */
+    failures += hwp_check_dump_state_json(online, ram, isa);
+
+    /* ── derived tunables: monotonicity + clamps ─────────────────── */
+    failures += hwp_check_derived_tunables();
+
+    /* ── symmetric topology: no asymmetric CCD, pin is a no-op ─────── */
+    failures += hwp_check_symmetric_topology_pin();
+
+    /* ── synthetic asymmetric-L3 fixture ─────────────────────────── */
+    failures += hwp_check_asymmetric_l3_fixture();
 
     /* ── synthetic storage-rotational fixture ────────────────────── */
-    {
-        char tmpl[PATH_MAX];
-        char *root = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_hwp_block_fixture");
-        HWP_CHECK("block fixture mkdtemp succeeds", root != NULL);
-        if (root) {
-            /* The probe only resolves the symlink named after the datadir's
-             * dev_t. Use ONE datadir's maj:min (two datadirs would collide
-             * on the same symlink name): plant the SSD-shaped target, probe,
-             * swap to the HDD-shaped target, probe again. */
-            char datadir[600];
-            snprintf(datadir, sizeof(datadir), "%s/test_datadir", root);
-            hwp_mkdir_p(datadir);
-
-            struct stat st;
-            bool have_stat = stat(datadir, &st) == 0;
-            HWP_CHECK("block fixture datadir stat() OK", have_stat);
-
-            if (have_stat) {
-                unsigned maj = platform_device_major(st.st_dev);
-                unsigned min = platform_device_minor(st.st_dev);
-                char block_root[600];
-                snprintf(block_root, sizeof(block_root), "%s/blockroot", root);
-                hwp_mkdir_p(block_root);
-                char dev_block_dir[700];
-                snprintf(dev_block_dir, sizeof(dev_block_dir), "%s/dev/block",
-                         block_root);
-                hwp_mkdir_p(dev_block_dir);
-                hw_profile_set_block_root_for_testing(dev_block_dir);
-
-                hwp_plant_ssd_partition(block_root, maj, min);
-                hw_profile_reset_for_testing();
-                hw_profile_init(datadir);
-                bool ssd_known = false;
-                bool ssd_rot = hw_profile_datadir_rotational(&ssd_known);
-                HWP_CHECK("partition-shaped SSD fixture: probe succeeded",
-                          ssd_known);
-                HWP_CHECK("partition-shaped SSD fixture: rotational == false",
-                          ssd_known && !ssd_rot);
-
-                hwp_plant_hdd_wholedisk(block_root, maj, min);
-                hw_profile_reset_for_testing();
-                hw_profile_init(datadir);
-                bool hdd_known = false;
-                bool hdd_rot = hw_profile_datadir_rotational(&hdd_known);
-                HWP_CHECK("whole-disk HDD fixture: probe succeeded", hdd_known);
-                HWP_CHECK("whole-disk HDD fixture: rotational == true",
-                          hdd_known && hdd_rot);
-            }
-
-            /* A maj:min with no entry under the fixture block root gives
-             * known == false. */
-            char orphan_datadir[600];
-            snprintf(orphan_datadir, sizeof(orphan_datadir), "%s/orphan_datadir",
-                     root);
-            hwp_mkdir_p(orphan_datadir);
-            char empty_block_root[600];
-            snprintf(empty_block_root, sizeof(empty_block_root),
-                     "%s/empty_blockroot/dev/block", root);
-            hwp_mkdir_p(empty_block_root);
-            hw_profile_set_block_root_for_testing(empty_block_root);
-            hw_profile_reset_for_testing();
-            hw_profile_init(orphan_datadir);
-            bool orphan_known = true;
-            hw_profile_datadir_rotational(&orphan_known);
-            HWP_CHECK("missing block-device symlink degrades to known=false",
-                      !orphan_known);
-        }
-
-        hw_profile_set_block_root_for_testing(NULL);
-        hw_profile_reset_for_testing();
-        hw_profile_init(NULL);
-    }
+    failures += hwp_check_storage_rotational_fixture();
 
     if (failures == 0) {
         printf("=== hw_profile tests: ALL PASS ===\n\n");
