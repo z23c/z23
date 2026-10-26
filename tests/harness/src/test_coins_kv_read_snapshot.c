@@ -42,6 +42,73 @@ static bool ckrs_add(sqlite3 *db, uint8_t tag, uint32_t vout, int64_t value,
                         script, sizeof(script));
 }
 
+static bool ckrs_commit_newer_wal_generation(sqlite3 *db)
+{
+    return sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK &&
+           ckrs_add(db, 0x20, 0, 200, 11) &&
+           coins_kv_set_applied_height_in_tx(db, 12) &&
+           coins_kv_bump_authority_generation_in_tx(db) &&
+           sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static enum coins_kv_read_snapshot_step ckrs_next_step_or_error(
+    struct coins_kv_read_snapshot *snap,
+    struct coins_kv_read_snapshot_row *row)
+{
+    return snap ? coins_kv_read_snapshot_next(snap, row)
+                : COINS_KV_READ_SNAPSHOT_ERROR;
+}
+
+static int ckrs_count_rows(struct coins_kv_read_snapshot *snap,
+                           struct coins_kv_read_snapshot_row *row,
+                           enum coins_kv_read_snapshot_step *step)
+{
+    int rows = 0;
+    while (snap && (*step = coins_kv_read_snapshot_next(snap, row)) ==
+                       COINS_KV_READ_SNAPSHOT_ROW)
+        rows++;
+    return rows;
+}
+
+static bool ckrs_second_snapshot_saw_new_generation(
+    const struct coins_kv_read_snapshot *snap,
+    const struct coins_kv_read_snapshot_info *info,
+    int rows, enum coins_kv_read_snapshot_step step)
+{
+    return snap && info->applied_height == 12 && rows == 2 &&
+           info->authority_generation == 1 &&
+           step == COINS_KV_READ_SNAPSHOT_DONE;
+}
+
+static bool ckrs_insert_malformed_row(sqlite3 *db)
+{
+    uint8_t bad_txid[31] = {0x30};
+    sqlite3_stmt *insert = NULL;
+    bool malformed_inserted = sqlite3_prepare_v2(
+        db, "INSERT INTO coins(txid,vout,value,height,is_coinbase,script) "
+            "VALUES(?,0,1,11,0,X'51')", -1, &insert, NULL) == SQLITE_OK;
+    if (malformed_inserted) {
+        malformed_inserted = sqlite3_bind_blob(insert, 1, bad_txid,
+                                                sizeof(bad_txid), SQLITE_STATIC) == SQLITE_OK &&
+                             sqlite3_step(insert) == SQLITE_DONE;
+    }
+    sqlite3_finalize(insert);
+    return malformed_inserted;
+}
+
+static bool ckrs_scan_until_error(struct coins_kv_read_snapshot *snap,
+                                  struct coins_kv_read_snapshot_row *row)
+{
+    while (snap) {
+        enum coins_kv_read_snapshot_step step = coins_kv_read_snapshot_next(snap, row);
+        if (step == COINS_KV_READ_SNAPSHOT_ERROR)
+            return true;
+        if (step == COINS_KV_READ_SNAPSHOT_DONE)
+            return false;
+    }
+    return false;
+}
+
 int test_coins_kv_read_snapshot(void);
 int test_coins_kv_read_snapshot(void)
 {
@@ -64,25 +131,18 @@ int test_coins_kv_read_snapshot(void)
                first && first_info.applied_height == 11);
 
     progress_store_tx_lock();
-    bool writer_ok = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK &&
-                     ckrs_add(db, 0x20, 0, 200, 11) &&
-                     coins_kv_set_applied_height_in_tx(db, 12) &&
-                     coins_kv_bump_authority_generation_in_tx(db) &&
-                     sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    bool writer_ok = ckrs_commit_newer_wal_generation(db);
     if (!writer_ok)
         (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
     progress_store_tx_unlock();
     CKRS_CHECK("writer commits a newer WAL generation", writer_ok);
 
     struct coins_kv_read_snapshot_row row;
-    enum coins_kv_read_snapshot_step step = first
-        ? coins_kv_read_snapshot_next(first, &row)
-        : COINS_KV_READ_SNAPSHOT_ERROR;
+    enum coins_kv_read_snapshot_step step = ckrs_next_step_or_error(first, &row);
     CKRS_CHECK("pinned snapshot sees original row", step == COINS_KV_READ_SNAPSHOT_ROW &&
                row.txid[0] == 0x10 && row.value == 100 &&
                first_info.authority_generation == 0);
-    step = first ? coins_kv_read_snapshot_next(first, &row)
-                 : COINS_KV_READ_SNAPSHOT_ERROR;
+    step = ckrs_next_step_or_error(first, &row);
     CKRS_CHECK("pinned snapshot excludes newer row",
                step == COINS_KV_READ_SNAPSHOT_DONE);
     CKRS_CHECK("completed snapshot finishes", first &&
@@ -91,43 +151,20 @@ int test_coins_kv_read_snapshot(void)
     struct coins_kv_read_snapshot_info second_info;
     struct coins_kv_read_snapshot *second =
         coins_kv_read_snapshot_open(&second_info);
-    int second_rows = 0;
-    while (second && (step = coins_kv_read_snapshot_next(second, &row)) ==
-                         COINS_KV_READ_SNAPSHOT_ROW)
-        second_rows++;
+    int second_rows = ckrs_count_rows(second, &row, &step);
     CKRS_CHECK("next snapshot sees new frontier and both rows",
-               second && second_info.applied_height == 12 && second_rows == 2 &&
-               second_info.authority_generation == 1 &&
-               step == COINS_KV_READ_SNAPSHOT_DONE);
+               ckrs_second_snapshot_saw_new_generation(
+                   second, &second_info, second_rows, step));
     CKRS_CHECK("second snapshot finishes", second &&
                coins_kv_read_snapshot_finish(second));
 
-    uint8_t bad_txid[31] = {0x30};
-    sqlite3_stmt *insert = NULL;
-    bool malformed_inserted = sqlite3_prepare_v2(
-        db, "INSERT INTO coins(txid,vout,value,height,is_coinbase,script) "
-            "VALUES(?,0,1,11,0,X'51')", -1, &insert, NULL) == SQLITE_OK;
-    if (malformed_inserted) {
-        malformed_inserted = sqlite3_bind_blob(insert, 1, bad_txid,
-                                                sizeof(bad_txid), SQLITE_STATIC) == SQLITE_OK &&
-                             sqlite3_step(insert) == SQLITE_DONE;
-    }
-    sqlite3_finalize(insert);
+    bool malformed_inserted = ckrs_insert_malformed_row(db);
     CKRS_CHECK("malformed authority row injected", malformed_inserted);
 
     struct coins_kv_read_snapshot_info malformed_info;
     struct coins_kv_read_snapshot *malformed =
         coins_kv_read_snapshot_open(&malformed_info);
-    bool refused = false;
-    while (malformed) {
-        step = coins_kv_read_snapshot_next(malformed, &row);
-        if (step == COINS_KV_READ_SNAPSHOT_ERROR) {
-            refused = true;
-            break;
-        }
-        if (step == COINS_KV_READ_SNAPSHOT_DONE)
-            break;
-    }
+    bool refused = ckrs_scan_until_error(malformed, &row);
     CKRS_CHECK("malformed txid row is refused", refused);
     if (malformed)
         coins_kv_read_snapshot_abort(malformed);
