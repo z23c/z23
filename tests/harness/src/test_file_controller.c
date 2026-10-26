@@ -171,6 +171,30 @@ static bool sqlite_has_file(const char *path)
     return true;
 }
 
+#define fm (*manifest)
+static bool file_controller_check_tampered_snapshot_manifest(
+    bool ok, const char *snap, const char *dir,
+    struct file_manifest *manifest)
+{
+        /* Global sovereignty cannot bless changed/downloaded bytes.  The
+         * exact locally exported digest is required at serving time. */
+        boot_snapshot_offer_test_set_trust_override(1);
+        FILE *tamper = fopen(snap, "r+b");
+        ok = ok && tamper != NULL;
+        if (tamper) {
+            ok = ok && fseek(tamper, 4096, SEEK_SET) == 0;
+            ok = ok && fputc(0xA5, tamper) != EOF;
+            ok = ok && fflush(tamper) == 0;
+            ok = ok && platform_data_sync(fileno(tamper)) == 0;
+            fclose(tamper);
+        }
+        memset(&fm, 0, sizeof(fm));
+        ok = ok && file_manifest_build(&fm, dir);
+        ok = ok && !manifest_has_file_index(&fm, 254);
+    return ok;
+}
+#undef fm
+
 static int test_manifest_build_includes_snapshot(void)
 {
     int failures = 0;
@@ -218,21 +242,7 @@ static int test_manifest_build_includes_snapshot(void)
         ok = ok && file_manifest_build(&fm, dir);
         ok = ok && !manifest_has_file_index(&fm, 254);
 
-        /* Global sovereignty cannot bless changed/downloaded bytes.  The
-         * exact locally exported digest is required at serving time. */
-        boot_snapshot_offer_test_set_trust_override(1);
-        FILE *tamper = fopen(snap, "r+b");
-        ok = ok && tamper != NULL;
-        if (tamper) {
-            ok = ok && fseek(tamper, 4096, SEEK_SET) == 0;
-            ok = ok && fputc(0xA5, tamper) != EOF;
-            ok = ok && fflush(tamper) == 0;
-            ok = ok && platform_data_sync(fileno(tamper)) == 0;
-            fclose(tamper);
-        }
-        memset(&fm, 0, sizeof(fm));
-        ok = ok && file_manifest_build(&fm, dir);
-        ok = ok && !manifest_has_file_index(&fm, 254);
+        ok = file_controller_check_tampered_snapshot_manifest(ok, snap, dir, &fm);
 
         boot_snapshot_offer_test_set_trust_override(-1);
         cleanup_manifest_test_dir(dir);
@@ -350,6 +360,24 @@ static int test_controller_refresh_manifest_api(void)
     return failures;
 }
 
+#define status (*manifest_status)
+static bool file_controller_check_refreshed_manifest_status(
+    bool ok, struct file_manifest_status *manifest_status)
+{
+        ok = ok && file_controller_refresh_manifest();
+        memset(&status, 0, sizeof(status));
+        file_controller_get_manifest_status(&status);
+        ok = ok && status.manifest_valid;
+        ok = ok && status.snapshot_present;
+        ok = ok && status.snapshot_served;
+        ok = ok && status.block_index_present;
+        ok = ok && !status.block_index_served;
+        ok = ok && status.num_chunks > 0;
+        ok = ok && status.total_bytes > 0;
+    return ok;
+}
+#undef status
+
 static int test_manifest_status_reports_export_readiness(void)
 {
     int failures = 0;
@@ -383,16 +411,7 @@ static int test_manifest_status_reports_export_readiness(void)
         ok = ok && status.block_index_present;
         ok = ok && !status.block_index_served;
 
-        ok = ok && file_controller_refresh_manifest();
-        memset(&status, 0, sizeof(status));
-        file_controller_get_manifest_status(&status);
-        ok = ok && status.manifest_valid;
-        ok = ok && status.snapshot_present;
-        ok = ok && status.snapshot_served;
-        ok = ok && status.block_index_present;
-        ok = ok && !status.block_index_served;
-        ok = ok && status.num_chunks > 0;
-        ok = ok && status.total_bytes > 0;
+        ok = file_controller_check_refreshed_manifest_status(ok, &status);
 
         /* The cached manifest is not authority: a live trust downgrade hides
          * the snapshot immediately while preserving honest disk presence. */
@@ -598,6 +617,36 @@ static int test_file_service_resolved_connect_lifecycle(void)
 #endif
 }
 
+#define stmt (*statement)
+#define tables_count (*table_count)
+static bool file_controller_check_exported_snapshot_tables(
+    bool ok, sqlite3 *snap_db, sqlite3_stmt **statement,
+    int *table_count)
+{
+        if (snap_db) {
+            sqlite3_prepare_v2(snap_db,
+                               "SELECT value FROM _snapshot_meta WHERE key='tables'",
+                               -1, &stmt, NULL);
+            if (stmt && sqlite3_step(stmt) == SQLITE_ROW) {
+                tables_count = sqlite3_column_int(stmt, 0);
+            }
+            if (stmt) sqlite3_finalize(stmt);
+            sqlite3_prepare_v2(snap_db,
+                               "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='wallet_utxos'",
+                               -1, &stmt, NULL);
+            int secret_tables = 0;
+            if (stmt && sqlite3_step(stmt) == SQLITE_ROW)
+                secret_tables = sqlite3_column_int(stmt, 0);
+            if (stmt) sqlite3_finalize(stmt);
+            ok = ok && tables_count == 7;
+            ok = ok && secret_tables == 0;
+            sqlite3_close(snap_db);
+        }
+    return ok;
+}
+#undef tables_count
+#undef stmt
+
 static int test_file_export_snapshot_success(void)
 {
     int failures = 0;
@@ -628,25 +677,8 @@ static int test_file_export_snapshot_success(void)
             ok = ok && sqlite3_open_v2(snap_path, &snap_db,
                                        SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
         }
-        if (snap_db) {
-            sqlite3_prepare_v2(snap_db,
-                               "SELECT value FROM _snapshot_meta WHERE key='tables'",
-                               -1, &stmt, NULL);
-            if (stmt && sqlite3_step(stmt) == SQLITE_ROW) {
-                tables_count = sqlite3_column_int(stmt, 0);
-            }
-            if (stmt) sqlite3_finalize(stmt);
-            sqlite3_prepare_v2(snap_db,
-                               "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='wallet_utxos'",
-                               -1, &stmt, NULL);
-            int secret_tables = 0;
-            if (stmt && sqlite3_step(stmt) == SQLITE_ROW)
-                secret_tables = sqlite3_column_int(stmt, 0);
-            if (stmt) sqlite3_finalize(stmt);
-            ok = ok && tables_count == 7;
-            ok = ok && secret_tables == 0;
-            sqlite3_close(snap_db);
-        }
+        ok = file_controller_check_exported_snapshot_tables(
+            ok, snap_db, &stmt, &tables_count);
 
         /* The digest cache is not enough: a same-height local chain change
          * must invalidate the stamped state binding immediately. */
