@@ -543,11 +543,6 @@ engine/modules/storage/src/coins_ram.c:coins_ram_get_coins:24
 engine/modules/storage/src/coins_ram.c:coins_ram_init:18
 engine/modules/storage/src/coins_ram.c:coins_ram_reconcile_boot:33
 engine/modules/storage/src/coins_ram.c:coins_ram_snapshot_write:41
-engine/modules/storage/src/coins_view_sqlite.c:coins_reconcile_stale_anchor:16
-engine/modules/storage/src/coins_view_sqlite.c:coins_rewind_above_tip:20
-engine/modules/storage/src/coins_view_sqlite.c:coins_view_sqlite_batch_write:59
-engine/modules/storage/src/coins_view_sqlite.c:coins_view_sqlite_check_tip_consistency:29
-engine/modules/storage/src/coins_view_sqlite.c:coins_view_sqlite_open:17
 engine/modules/storage/src/consensus_db.c:cdb_ddl_copy_table:22
 engine/modules/storage/src/consensus_db.c:consensus_db_drop_migrated_from_progress:40
 engine/modules/storage/src/consensus_db.c:consensus_db_migrate_from_progress:41

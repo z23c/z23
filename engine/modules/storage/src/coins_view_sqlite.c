@@ -176,9 +176,85 @@ static int coins_view_sqlite_delete_bind_height(sqlite3 *db,
  * explicit recovery mode for callers that have already selected a replacement
  * tip. Returns deleted UTXO rows on COMMIT, 0 for no work, -1 on refusal or
  * SQL failure. Logs + emits an event in both failure and mutation paths. */
+static const char *coins_sql_err_or(const char *err, const char *fallback)
+{
+    return err ? err : fallback;
+}
+
+static bool coins_rewind_args_rejected(sqlite3 *db, int64_t tip_height)
+{
+    return !db || tip_height < 0;
+}
+
+/* 0: count is in *would_wipe / *max_height and *stmt_out is finalized.
+ * -1: prepare failed (statement not open). -2: step failed and *stmt_out
+ * is still open so the caller can log sqlite3_errmsg before finalize. */
+static int coins_rewind_count_above(sqlite3 *db, int64_t tip_height,
+                                    sqlite3_stmt **stmt_out,
+                                    int64_t *would_wipe, int64_t *max_height)
+{
+    sqlite3_stmt *count_stmt = NULL;
+    *stmt_out = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COUNT(*), COALESCE(MAX(height),0) "
+            "FROM utxos WHERE height > ?",
+            -1, &count_stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(count_stmt, 1, tip_height);
+    int count_rc = AR_STEP_ROW_READONLY(count_stmt);
+    if (count_rc == SQLITE_ROW) {
+        *would_wipe = sqlite3_column_int64(count_stmt, 0);
+        *max_height = sqlite3_column_int64(count_stmt, 1);
+        sqlite3_finalize(count_stmt);
+        return 0;
+    }
+    if (count_rc != SQLITE_DONE) {
+        *stmt_out = count_stmt;
+        return -2;
+    }
+    sqlite3_finalize(count_stmt);
+    return 0;
+}
+
+static bool coins_rewind_guard_refused(int64_t max_rows, int64_t max_height,
+                                      int64_t tip_height, int64_t would_wipe)
+{
+    return max_rows >= 0 &&
+        (max_height != tip_height + 1 || would_wipe > max_rows);
+}
+
+/* Returns 0 after the height sweep and, when `transactions` exists, the
+ * txid and tx-index sweeps. Returns the negative delete helper result on
+ * the first failure so the caller can roll the transaction back. */
+static int coins_rewind_delete_stale_rows(sqlite3 *db, int64_t tip_height,
+                                          int *deleted_high,
+                                          int *deleted_bytxid,
+                                          int *deleted_txindex)
+{
+    *deleted_high = coins_view_sqlite_delete_bind_height(db,
+        "DELETE FROM utxos WHERE height > ?",
+        tip_height, "utxos-high");
+    if (*deleted_high < 0)
+        return *deleted_high;
+    if (coins_view_sqlite_table_exists(db, "transactions")) {
+        *deleted_bytxid = coins_view_sqlite_delete_bind_height(db,
+            "DELETE FROM utxos WHERE txid IN"
+            " (SELECT txid FROM transactions WHERE block_height > ?)",
+            tip_height, "utxos-by-txid");
+        if (*deleted_bytxid < 0)
+            return *deleted_bytxid;
+        *deleted_txindex = coins_view_sqlite_delete_bind_height(db,
+            "DELETE FROM transactions WHERE block_height > ?",
+            tip_height, "transactions-high");
+        if (*deleted_txindex < 0)
+            return *deleted_txindex;
+    }
+    return 0;
+}
+
 int coins_rewind_above_tip(sqlite3 *db, int64_t tip_height, int64_t max_rows)
 {
-    if (!db || tip_height < 0) {
+    if (coins_rewind_args_rejected(db, tip_height)) {
         fprintf(stderr,  // obs-ok:helper-context-logged
             "[coins] auto-rewind: invalid args db=%p tip_height=%lld\n",
             (void *)db, (long long)tip_height);
@@ -188,34 +264,27 @@ int coins_rewind_above_tip(sqlite3 *db, int64_t tip_height, int64_t max_rows)
     int64_t would_wipe = 0;
     int64_t max_height = 0;
     sqlite3_stmt *count_stmt = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT COUNT(*), COALESCE(MAX(height),0) "
-            "FROM utxos WHERE height > ?",
-            -1, &count_stmt, NULL) != SQLITE_OK) {
+    int count_st = coins_rewind_count_above(db, tip_height, &count_stmt,
+                                            &would_wipe, &max_height);
+    if (count_st == -1) {
         fprintf(stderr,  // obs-ok:helper-context-logged
             "[coins] auto-rewind: count prepare failed: %s\n",
             sqlite3_errmsg(db));
         return -1;
     }
-    sqlite3_bind_int64(count_stmt, 1, tip_height);
-    int count_rc = AR_STEP_ROW_READONLY(count_stmt);
-    if (count_rc == SQLITE_ROW) {
-        would_wipe = sqlite3_column_int64(count_stmt, 0);
-        max_height = sqlite3_column_int64(count_stmt, 1);
-    } else if (count_rc != SQLITE_DONE) {
+    if (count_st == -2) {
         fprintf(stderr,  // obs-ok:helper-context-logged
             "[coins] auto-rewind: count step failed: %s\n",
             sqlite3_errmsg(db));
         sqlite3_finalize(count_stmt);
         return -1;
     }
-    sqlite3_finalize(count_stmt);
 
     if (would_wipe <= 0)
         return 0;
 
-    if (max_rows >= 0 &&
-        (max_height != tip_height + 1 || would_wipe > max_rows)) {
+    if (coins_rewind_guard_refused(max_rows, max_height, tip_height,
+                                  would_wipe)) {
         fprintf(stderr,  // obs-ok:helper-context-logged
             "[coins] auto-rewind: guard refused tip_height=%lld "
             "rows=%lld max_height=%lld guard=%lld\n",
@@ -232,44 +301,33 @@ int coins_rewind_above_tip(sqlite3 *db, int64_t tip_height, int64_t max_rows)
     char *err = NULL;
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
         fprintf(stderr,
-            "[coins] auto-rewind: BEGIN failed: %s\n", err ? err : "?");
+            "[coins] auto-rewind: BEGIN failed: %s\n",
+            coins_sql_err_or(err, "?"));
         sqlite3_free(err);
         return -1;
     }
 
-    int deleted_high = coins_view_sqlite_delete_bind_height(db,
-        "DELETE FROM utxos WHERE height > ?",
-        tip_height, "utxos-high");
-    if (deleted_high < 0) goto rollback;
-
+    int deleted_high = 0;
     int deleted_bytxid = 0;
     int deleted_txindex = 0;
-    if (coins_view_sqlite_table_exists(db, "transactions")) {
-        deleted_bytxid = coins_view_sqlite_delete_bind_height(db,
-            "DELETE FROM utxos WHERE txid IN"
-            " (SELECT txid FROM transactions WHERE block_height > ?)",
-            tip_height, "utxos-by-txid");
-        if (deleted_bytxid < 0) goto rollback;
-
-        deleted_txindex = coins_view_sqlite_delete_bind_height(db,
-            "DELETE FROM transactions WHERE block_height > ?",
-            tip_height, "transactions-high");
-        if (deleted_txindex < 0) goto rollback;
-    }
+    if (coins_rewind_delete_stale_rows(db, tip_height, &deleted_high,
+                                      &deleted_bytxid, &deleted_txindex) < 0)
+        goto rollback;
 
     if (sqlite3_exec(db,
             "DELETE FROM node_state WHERE key='utxo_commitment'",
             NULL, NULL, &err) != SQLITE_OK) {
         fprintf(stderr,  // obs-ok:helper-context-logged
             "[coins] auto-rewind: commitment purge failed: %s\n",
-            err ? err : "?");
+            coins_sql_err_or(err, "?"));
         sqlite3_free(err);
         goto rollback;
     }
 
     if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
         fprintf(stderr,  // obs-ok:helper-context-logged
-            "[coins] auto-rewind: COMMIT failed: %s\n", err ? err : "?");
+            "[coins] auto-rewind: COMMIT failed: %s\n",
+            coins_sql_err_or(err, "?"));
         sqlite3_free(err);
         goto rollback;
     }
@@ -328,6 +386,45 @@ rollback:
  * usable, rows above the committed height, recompute mismatch, or anchor hash
  * unresolvable), so the caller keeps the strict FATAL — the gate is never
  * weakened. Never trusts a cursor; never deletes UTXOs. */
+/* 0 and *rows_above set from the count (0 when the step yields no row).
+ * -1 when the count statement cannot be prepared. */
+static int coins_reconcile_count_rows_above(sqlite3 *db, int64_t commit_h,
+                                            int64_t *rows_above)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COUNT(*) FROM utxos WHERE height > ?",
+            -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(s, 1, commit_h);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+        *rows_above = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return 0;
+}
+
+/* 1 when a 32-byte status>=3 block hash was copied into anchor_hash. */
+static int coins_reconcile_load_block_hash(sqlite3 *db, int64_t commit_h,
+                                           uint8_t anchor_hash[32])
+{
+    sqlite3_stmt *s = NULL;
+    int found = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT hash FROM blocks WHERE height=? AND status>=3",
+            -1, &s, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(s, 1, commit_h);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        const void *blob = sqlite3_column_blob(s, 0);
+        if (blob && sqlite3_column_bytes(s, 0) == 32) {
+            memcpy(anchor_hash, blob, 32);
+            found = 1;
+        }
+    }
+    sqlite3_finalize(s);
+    return found;
+}
+
 static bool coins_reconcile_stale_anchor(sqlite3 *db,
                                          int64_t max_utxo_height,
                                          int64_t stale_tip_height)
@@ -362,20 +459,11 @@ static bool coins_reconcile_stale_anchor(sqlite3 *db,
      * committed snapshot. (Subsumed by the recompute, but an explicit, cheap
      * guard that fails fast and documents intent.) */
     int64_t rows_above = 0;
-    {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT COUNT(*) FROM utxos WHERE height > ?",
-                -1, &s, NULL) != SQLITE_OK) {
-            LOG_WARN("coins",
-                "[coins] stale-anchor reconcile refused: rows-above prepare "
-                "failed: %s — preserving FATAL", sqlite3_errmsg(db));
-            return false;
-        }
-        sqlite3_bind_int64(s, 1, commit_h);
-        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
-            rows_above = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
+    if (coins_reconcile_count_rows_above(db, commit_h, &rows_above) != 0) {
+        LOG_WARN("coins",
+            "[coins] stale-anchor reconcile refused: rows-above prepare "
+            "failed: %s — preserving FATAL", sqlite3_errmsg(db));
+        return false;
     }
     if (rows_above != 0) {
         LOG_WARN("coins",
@@ -408,24 +496,7 @@ static bool coins_reconcile_stale_anchor(sqlite3 *db,
      * losing sibling as the surviving status>=3 row AND carrying a matching
      * full UTXO commitment) is implausible and logged, not silently trusted. */
     uint8_t anchor_hash[32];
-    bool anchor_ok = false;
-    {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT hash FROM blocks WHERE height=? AND status>=3",
-                -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(s, 1, commit_h);
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                const void *blob = sqlite3_column_blob(s, 0);
-                if (blob && sqlite3_column_bytes(s, 0) == 32) {
-                    memcpy(anchor_hash, blob, 32);
-                    anchor_ok = true;
-                }
-            }
-            sqlite3_finalize(s);
-        }
-    }
-    if (!anchor_ok) {
+    if (!coins_reconcile_load_block_hash(db, commit_h, anchor_hash)) {
         LOG_WARN("coins",
             "[coins] stale-anchor reconcile refused: committed height=%d has "
             "no resolvable status>=3 block hash — preserving FATAL", commit_h);
@@ -489,6 +560,86 @@ static bool coins_reconcile_stale_anchor(sqlite3 *db,
  *       OR count exceeds the auto-rewind guard
  *                                        → MISMATCH (UTXOs ahead)
  */
+static bool coins_tip_db_is_proven_authority(int32_t *applied)
+{
+    sqlite3 *pdb = progress_store_db();
+    return pdb && coins_kv_is_proven_authority(pdb, applied);
+}
+
+/* Leaves *max_height and *count unchanged when prepare fails or the
+ * statement yields no row. A NULL MAX stays unchanged (caller sentinel). */
+static void coins_tip_read_utxo_max_count(sqlite3 *db, int64_t *max_height,
+                                         int64_t *count)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT MAX(height), COUNT(*) FROM utxos",
+            -1, &s, NULL) != SQLITE_OK)
+        return;
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        if (sqlite3_column_type(s, 0) == SQLITE_INTEGER)
+            *max_height = sqlite3_column_int64(s, 0);
+        *count = sqlite3_column_int64(s, 1);
+    }
+    sqlite3_finalize(s);
+}
+
+static void coins_tip_read_best_hash(sqlite3 *db, uint8_t tip_hash[32],
+                                    bool *tip_set)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT value FROM node_state WHERE key='coins_best_block'",
+            -1, &s, NULL) != SQLITE_OK)
+        return;
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        int len = sqlite3_column_bytes(s, 0);
+        const void *data = sqlite3_column_blob(s, 0);
+        if (data && len == 32) {
+            memcpy(tip_hash, data, 32);
+            *tip_set = true;
+        }
+    }
+    sqlite3_finalize(s);
+}
+
+enum coins_tip_shape {
+    COINS_TIP_BOTH = 0,
+    COINS_TIP_FRESH,
+    COINS_TIP_ORPHAN_UTXOS,
+    COINS_TIP_ANCHOR_ONLY
+};
+
+static enum coins_tip_shape coins_tip_classify(bool have_utxos, bool tip_set)
+{
+    if (!have_utxos && !tip_set)
+        return COINS_TIP_FRESH;
+    if (have_utxos && !tip_set)
+        return COINS_TIP_ORPHAN_UTXOS;
+    if (!have_utxos && tip_set)
+        return COINS_TIP_ANCHOR_ONLY;
+    return COINS_TIP_BOTH;
+}
+
+static void coins_tip_read_block_height(sqlite3 *db, const uint8_t tip_hash[32],
+                                       int64_t *tip_height)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT height FROM blocks WHERE hash=? AND status>=3",
+            -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_blob(s, 1, tip_hash, 32, SQLITE_STATIC);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+        *tip_height = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+}
+
+static bool coins_tip_is_historical_lag(int64_t tip_height, int64_t max_height)
+{
+    return tip_height > 1000000 && max_height - tip_height > 1000;
+}
+
 static bool coins_view_sqlite_check_tip_consistency(sqlite3 *db)
 {
     int64_t max_height = -1;
@@ -507,21 +658,10 @@ static bool coins_view_sqlite_check_tip_consistency(sqlite3 *db)
      * (predicate false / progress store not open) keep the strict legacy
      * gate unchanged. */
     {
-        sqlite3 *pdb = progress_store_db();
         int32_t applied = -1;
-        if (pdb && coins_kv_is_proven_authority(pdb, &applied)) {
+        if (coins_tip_db_is_proven_authority(&applied)) {
             int64_t mirror_max = -1, mirror_count = 0;
-            sqlite3_stmt *ds = NULL;
-            if (sqlite3_prepare_v2(db,
-                    "SELECT MAX(height), COUNT(*) FROM utxos",
-                    -1, &ds, NULL) == SQLITE_OK) {
-                if (AR_STEP_ROW_READONLY(ds) == SQLITE_ROW) {
-                    if (sqlite3_column_type(ds, 0) == SQLITE_INTEGER)
-                        mirror_max = sqlite3_column_int64(ds, 0);
-                    mirror_count = sqlite3_column_int64(ds, 1);
-                }
-                sqlite3_finalize(ds);
-            }
+            coins_tip_read_utxo_max_count(db, &mirror_max, &mirror_count);
             int64_t derived_h = (int64_t)applied - 1;
             if (mirror_max != derived_h)
                 printf("[coins] tip check: derived coins-best h=%lld "
@@ -538,40 +678,19 @@ static bool coins_view_sqlite_check_tip_consistency(sqlite3 *db)
         }
     }
 
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT MAX(height), COUNT(*) FROM utxos",
-            -1, &s, NULL) == SQLITE_OK) {
-        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-            if (sqlite3_column_type(s, 0) == SQLITE_INTEGER)
-                max_height = sqlite3_column_int64(s, 0);
-            have_utxos = sqlite3_column_int64(s, 1) > 0;
-        }
-        sqlite3_finalize(s);
-    }
+    int64_t utxo_count = 0;
+    coins_tip_read_utxo_max_count(db, &max_height, &utxo_count);
+    have_utxos = utxo_count > 0;
 
     uint8_t tip_hash[32];
     bool tip_set = false;
-    s = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT value FROM node_state WHERE key='coins_best_block'",
-            -1, &s, NULL) == SQLITE_OK) {
-        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-            int len = sqlite3_column_bytes(s, 0);
-            const void *data = sqlite3_column_blob(s, 0);
-            if (data && len == 32) {
-                memcpy(tip_hash, data, 32);
-                tip_set = true;
-            }
-        }
-        sqlite3_finalize(s);
-    }
+    coins_tip_read_best_hash(db, tip_hash, &tip_set);
 
-    if (!have_utxos && !tip_set) {
+    switch (coins_tip_classify(have_utxos, tip_set)) {
+    case COINS_TIP_FRESH:
         printf("[coins] tip check: fresh DB (no utxos, no tip)\n");
         return true;
-    }
-    if (have_utxos && !tip_set) {
+    case COINS_TIP_ORPHAN_UTXOS:
         fprintf(stderr,  // obs-ok:helper-context-logged
             "[coins] DB_ERR_TIP_MISMATCH: utxos present "
             "(max_height=%lld) but coins_best_block is unset — "
@@ -579,23 +698,16 @@ static bool coins_view_sqlite_check_tip_consistency(sqlite3 *db)
             "Halt and investigate; do not auto-heal.\n",
             (long long)max_height);
         return false;
-    }
-    if (!have_utxos && tip_set) {
+    case COINS_TIP_ANCHOR_ONLY:
         printf("[coins] tip check: coins_best_block set, utxos empty — "
                "post-wipe or pre-import anchor, continuing\n");
         return true;
+    default:
+        break;
     }
 
     int64_t tip_height = -1;
-    s = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT height FROM blocks WHERE hash=? AND status>=3",
-            -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_blob(s, 1, tip_hash, 32, SQLITE_STATIC);
-        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
-            tip_height = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
-    }
+    coins_tip_read_block_height(db, tip_hash, &tip_height);
 
     if (tip_height < 0) {
         fprintf(stderr,  // obs-ok:helper-context-logged
@@ -634,7 +746,7 @@ static bool coins_view_sqlite_check_tip_consistency(sqlite3 *db)
                 "failed — halt and investigate.\n");
             return false;
         }
-        if (tip_height > 1000000 && max_height - tip_height > 1000) {
+        if (coins_tip_is_historical_lag(tip_height, max_height)) {
             fprintf(stderr,  // obs-ok:helper-context-logged
                 "[coins] tip check WARN: utxos max_height=%lld > "
                 "tip_height=%lld by %lld historical blocks — deferring "
@@ -672,6 +784,70 @@ static bool coins_view_sqlite_check_tip_consistency(sqlite3 *db)
 }
 
 /* ── Open / Close ──────────────────────────────────────────────── */
+
+static int coins_view_sqlite_prepare_statements(struct coins_view_sqlite *cvs)
+{
+    int rc;
+
+    rc = sqlite3_prepare_v2(cvs->db,
+        "SELECT vout, value, script, height, is_coinbase"
+        " FROM utxos WHERE txid=? ORDER BY vout",
+        -1, &cvs->stmt_get, NULL);
+    if (rc != SQLITE_OK)
+        return rc;
+
+    rc = sqlite3_prepare_v2(cvs->db,
+        "SELECT 1 FROM utxos WHERE txid=? LIMIT 1",
+        -1, &cvs->stmt_have, NULL);
+    if (rc != SQLITE_OK)
+        return rc;
+
+    rc = sqlite3_prepare_v2(cvs->db,
+        "INSERT OR REPLACE INTO utxos"
+        " (txid, vout, value, script, script_type, address_hash,"
+        "  height, is_coinbase)"
+        " VALUES(?,?,?,?,?,?,?,?)",
+        -1, &cvs->stmt_insert, NULL);
+    if (rc != SQLITE_OK)
+        return rc;
+
+    rc = sqlite3_prepare_v2(cvs->db,
+        "DELETE FROM utxos WHERE txid=?",
+        -1, &cvs->stmt_delete_tx, NULL);
+    if (rc != SQLITE_OK)
+        return rc;
+
+    rc = sqlite3_prepare_v2(cvs->db,
+        "SELECT value FROM node_state WHERE key='coins_best_block'",
+        -1, &cvs->stmt_best_get, NULL);
+    if (rc != SQLITE_OK)
+        return rc;
+
+    /* CACHE-REFRESH of the derived coins-best (display / legacy-boot
+     * fallback only; authority = reducer_frontier_derive_coins_best over
+     * coins_kv). Atomic with the mirror rows — correct for a projection. */
+    rc = sqlite3_prepare_v2(cvs->db,
+        "INSERT OR REPLACE INTO node_state(key,value)"
+        " VALUES('coins_best_block',?)",
+        -1, &cvs->stmt_best_set, NULL);
+    if (rc != SQLITE_OK)
+        return rc;
+
+    rc = sqlite3_prepare_v2(cvs->db,
+        "SELECT value FROM node_state WHERE key='utxo_commitment'",
+        -1, &cvs->stmt_commit_get, NULL);
+    if (rc != SQLITE_OK)
+        return rc;
+
+    rc = sqlite3_prepare_v2(cvs->db,
+        "INSERT OR REPLACE INTO node_state(key,value)"
+        " VALUES('utxo_commitment',?)",
+        -1, &cvs->stmt_commit_set, NULL);
+    if (rc != SQLITE_OK)
+        return rc;
+
+    return SQLITE_OK;
+}
 
 bool coins_view_sqlite_open(struct coins_view_sqlite *cvs, sqlite3 *db)
 {
@@ -752,55 +928,7 @@ bool coins_view_sqlite_open(struct coins_view_sqlite *cvs, sqlite3 *db)
     sqlite3_exec(cvs->db, "PRAGMA journal_size_limit = 104857600",
                  NULL, NULL, NULL);
 
-    int rc;
-
-    rc = sqlite3_prepare_v2(cvs->db,
-        "SELECT vout, value, script, height, is_coinbase"
-        " FROM utxos WHERE txid=? ORDER BY vout",
-        -1, &cvs->stmt_get, NULL);
-    if (rc != SQLITE_OK) goto fail;
-
-    rc = sqlite3_prepare_v2(cvs->db,
-        "SELECT 1 FROM utxos WHERE txid=? LIMIT 1",
-        -1, &cvs->stmt_have, NULL);
-    if (rc != SQLITE_OK) goto fail;
-
-    rc = sqlite3_prepare_v2(cvs->db,
-        "INSERT OR REPLACE INTO utxos"
-        " (txid, vout, value, script, script_type, address_hash,"
-        "  height, is_coinbase)"
-        " VALUES(?,?,?,?,?,?,?,?)",
-        -1, &cvs->stmt_insert, NULL);
-    if (rc != SQLITE_OK) goto fail;
-
-    rc = sqlite3_prepare_v2(cvs->db,
-        "DELETE FROM utxos WHERE txid=?",
-        -1, &cvs->stmt_delete_tx, NULL);
-    if (rc != SQLITE_OK) goto fail;
-
-    rc = sqlite3_prepare_v2(cvs->db,
-        "SELECT value FROM node_state WHERE key='coins_best_block'",
-        -1, &cvs->stmt_best_get, NULL);
-    if (rc != SQLITE_OK) goto fail;
-
-    /* CACHE-REFRESH of the derived coins-best (display / legacy-boot
-     * fallback only; authority = reducer_frontier_derive_coins_best over
-     * coins_kv). Atomic with the mirror rows — correct for a projection. */
-    rc = sqlite3_prepare_v2(cvs->db,
-        "INSERT OR REPLACE INTO node_state(key,value)"
-        " VALUES('coins_best_block',?)",
-        -1, &cvs->stmt_best_set, NULL);
-    if (rc != SQLITE_OK) goto fail;
-
-    rc = sqlite3_prepare_v2(cvs->db,
-        "SELECT value FROM node_state WHERE key='utxo_commitment'",
-        -1, &cvs->stmt_commit_get, NULL);
-    if (rc != SQLITE_OK) goto fail;
-
-    rc = sqlite3_prepare_v2(cvs->db,
-        "INSERT OR REPLACE INTO node_state(key,value)"
-        " VALUES('utxo_commitment',?)",
-        -1, &cvs->stmt_commit_set, NULL);
+    int rc = coins_view_sqlite_prepare_statements(cvs);
     if (rc != SQLITE_OK) goto fail;
 
     /* Boot-time integrity check — refuses to open on detected
@@ -970,6 +1098,207 @@ bool coins_view_sqlite_get_best_block(struct coins_view_sqlite *cvs,
 
 /* ── batch_write: flush dirty coins_map to SQLite ───────────── */
 
+struct coins_flush_tally {
+    int write_errors;
+    size_t entries_written;
+    size_t entries_deleted;
+};
+
+struct coins_flush_tail_status {
+    int best_failed;
+    int best_rc;
+    int commit_failed;
+    int commit_rc;
+};
+
+static bool coins_flush_step_ok(int rc)
+{
+    return rc == SQLITE_DONE || rc == SQLITE_ROW;
+}
+
+static void coins_flush_select_txn_sql(bool owns_db,
+                                       const char **txn_begin,
+                                       const char **txn_commit,
+                                       const char **txn_rollback)
+{
+    *txn_begin = owns_db ? "BEGIN IMMEDIATE"
+                         : "SAVEPOINT coins_flush";
+    *txn_commit = owns_db ? "COMMIT"
+                          : "RELEASE coins_flush";
+    *txn_rollback = owns_db ? "ROLLBACK"
+                            : "ROLLBACK TO SAVEPOINT coins_flush";
+}
+
+static void coins_view_sqlite_reset_owned_stmts(struct coins_view_sqlite *cvs)
+{
+    if (cvs->stmt_get)        sqlite3_reset(cvs->stmt_get);
+    if (cvs->stmt_have)       sqlite3_reset(cvs->stmt_have);
+    if (cvs->stmt_insert)     sqlite3_reset(cvs->stmt_insert);
+    if (cvs->stmt_delete_tx)  sqlite3_reset(cvs->stmt_delete_tx);
+    if (cvs->stmt_best_get)   sqlite3_reset(cvs->stmt_best_get);
+    if (cvs->stmt_best_set)   sqlite3_reset(cvs->stmt_best_set);
+    if (cvs->stmt_commit_get) sqlite3_reset(cvs->stmt_commit_get);
+    if (cvs->stmt_commit_set) sqlite3_reset(cvs->stmt_commit_set);
+}
+
+static size_t coins_flush_insert_outputs(struct coins_view_sqlite *cvs,
+                                        const struct coins_map_entry *e,
+                                        int *write_errors)
+{
+    const struct coins *cc = &e->entry.coins;
+    size_t written = 0;
+    for (size_t vi = 0; vi < cc->num_vout; vi++) {
+        if (tx_out_is_null(&cc->vout[vi]))
+            continue;
+
+        uint8_t addr_hash[20];
+        bool has_addr = false;
+        enum script_type stype = utxo_classify_script(
+            cc->vout[vi].script_pub_key.data,
+            cc->vout[vi].script_pub_key.size,
+            addr_hash, &has_addr);
+
+        sqlite3_stmt *ins = cvs->stmt_insert;
+        sqlite3_reset(ins);
+        sqlite3_bind_blob(ins, 1, e->txid.data, 32, SQLITE_STATIC);
+        sqlite3_bind_int(ins, 2, (int)vi);
+        sqlite3_bind_int64(ins, 3, cc->vout[vi].value);
+        sqlite3_bind_blob(ins, 4,
+            cc->vout[vi].script_pub_key.data,
+            (int)cc->vout[vi].script_pub_key.size,
+            SQLITE_STATIC);
+        sqlite3_bind_int(ins, 5, stype);
+        if (has_addr)
+            sqlite3_bind_blob(ins, 6, addr_hash, 20, SQLITE_STATIC);
+        else
+            sqlite3_bind_null(ins, 6);
+        sqlite3_bind_int(ins, 7, cc->height);
+        sqlite3_bind_int(ins, 8, cc->is_coinbase ? 1 : 0);
+        int rc = sqlite3_step(ins); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
+        if (!coins_flush_step_ok(rc)) {
+            fprintf(stderr, "coins_flush: INSERT failed rc=%d "  // obs-ok:write_errors-counted-and-rolled-back-below
+                    "h=%d vout=%zu: %s\n",
+                    rc, cc->height, vi, sqlite3_errmsg(cvs->db));
+            (*write_errors)++;
+        } else {
+            written++;
+        }
+    }
+    return written;
+}
+
+static void coins_flush_apply_entries(struct coins_view_sqlite *cvs,
+                                     struct coins_map *map_coins,
+                                     struct coins_flush_tally *tally)
+{
+    for (size_t i = 0; i < map_coins->num_buckets; i++) {
+        struct coins_map_entry *e = &map_coins->buckets[i];
+        if (!e->occupied || !(e->entry.flags & COINS_CACHE_DIRTY))
+            continue;
+
+        if (coins_is_pruned(&e->entry.coins)) {
+            /* All outputs spent — remove from SQLite */
+            sqlite3_reset(cvs->stmt_delete_tx);
+            sqlite3_bind_blob(cvs->stmt_delete_tx, 1,
+                              e->txid.data, 32, SQLITE_STATIC);
+            int rc = sqlite3_step(cvs->stmt_delete_tx); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
+            if (!coins_flush_step_ok(rc)) {
+                fprintf(stderr, "coins_flush: DELETE failed rc=%d: %s\n",  // obs-ok:helper-context-logged
+                        rc, sqlite3_errmsg(cvs->db));
+                tally->write_errors++;
+            } else {
+                tally->entries_deleted++;
+            }
+        } else {
+            /* Delete stale rows first, then insert current outputs */
+            sqlite3_reset(cvs->stmt_delete_tx);
+            sqlite3_bind_blob(cvs->stmt_delete_tx, 1,
+                              e->txid.data, 32, SQLITE_STATIC);
+            int rc = sqlite3_step(cvs->stmt_delete_tx); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
+            if (!coins_flush_step_ok(rc)) {
+                fprintf(stderr, "coins_flush: pre-DELETE failed rc=%d: %s\n",  // obs-ok:write_errors-counted-and-rolled-back-below
+                        rc, sqlite3_errmsg(cvs->db));
+                tally->write_errors++;
+            }
+
+            tally->entries_written += coins_flush_insert_outputs(
+                cvs, e, &tally->write_errors);
+        }
+    }
+}
+
+/* Zero when any flush op landed, or when the map has no dirty entries.
+ * Otherwise the dirty-entry count, so the caller can warn. */
+static size_t coins_flush_unflushed_dirty(const struct coins_map *map_coins,
+                                          size_t entries_written,
+                                          size_t entries_deleted)
+{
+    if (entries_written != 0 || entries_deleted != 0)
+        return 0;
+    size_t dirty_count = 0;
+    for (size_t di = 0; di < map_coins->num_buckets; di++) {
+        struct coins_map_entry *de = &map_coins->buckets[di];
+        if (de->occupied && (de->entry.flags & COINS_CACHE_DIRTY))
+            dirty_count++;
+    }
+    return dirty_count;
+}
+
+static void coins_flush_write_best_and_commitment(
+    struct coins_view_sqlite *cvs,
+    const struct uint256 *hash_block,
+    const struct utxo_commitment *commit,
+    struct coins_flush_tail_status *st)
+{
+    st->best_failed = 0;
+    st->best_rc = SQLITE_DONE;
+    st->commit_failed = 0;
+    st->commit_rc = SQLITE_DONE;
+    if (hash_block && !uint256_is_null(hash_block)) {
+        sqlite3_reset(cvs->stmt_best_set);
+        sqlite3_bind_blob(cvs->stmt_best_set, 1,
+                          hash_block->data, 32, SQLITE_STATIC);
+        st->best_rc = sqlite3_step(cvs->stmt_best_set); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
+        if (!coins_flush_step_ok(st->best_rc)) {
+            st->best_failed = 1;
+            return;
+        }
+    }
+    if (commit) {
+        uint8_t buf[UTXO_COMMITMENT_SERIALIZED_SIZE];
+        utxo_commitment_serialize(commit, buf);
+        sqlite3_reset(cvs->stmt_commit_set);
+        sqlite3_bind_blob(cvs->stmt_commit_set, 1,
+                          buf, UTXO_COMMITMENT_SERIALIZED_SIZE, SQLITE_STATIC);
+        st->commit_rc = AR_STEP_WRITE(cvs->stmt_commit_set);
+        if (!coins_flush_step_ok(st->commit_rc))
+            st->commit_failed = 1;
+    }
+}
+
+static int coins_flush_read_post_stats(sqlite3 *db, int64_t *max_h,
+                                      int64_t *count)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT IFNULL(MAX(height), -1), COUNT(*) FROM utxos",
+            -1, &s, NULL) != SQLITE_OK)
+        return 0;
+    int have = 0;
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        *max_h = sqlite3_column_int64(s, 0);
+        *count = sqlite3_column_int64(s, 1);
+        have = 1;
+    }
+    sqlite3_finalize(s);
+    return have;
+}
+
+static int coins_flush_tip_written(const struct uint256 *hash_block)
+{
+    return (hash_block && !uint256_is_null(hash_block)) ? 1 : 0;
+}
+
 bool coins_view_sqlite_batch_write( // one-write-path-ok:coins-sqlite-writer-impl
     struct coins_view_sqlite *cvs, struct coins_map *map_coins,
     const struct uint256 *hash_block, const struct utxo_commitment *commit)
@@ -980,12 +1309,11 @@ bool coins_view_sqlite_batch_write( // one-write-path-ok:coins-sqlite-writer-imp
     /* Transaction control: dedicated connection uses BEGIN IMMEDIATE.
      * Shared handle (in-memory or fallback) uses SAVEPOINT to nest
      * inside any existing transaction from node_db batch writes. */
-    const char *txn_begin = cvs->owns_db ? "BEGIN IMMEDIATE"
-                                          : "SAVEPOINT coins_flush";
-    const char *txn_commit = cvs->owns_db ? "COMMIT"
-                                           : "RELEASE coins_flush";
-    const char *txn_rollback = cvs->owns_db ? "ROLLBACK"
-                                : "ROLLBACK TO SAVEPOINT coins_flush";
+    const char *txn_begin;
+    const char *txn_commit;
+    const char *txn_rollback;
+    coins_flush_select_txn_sql(cvs->owns_db, &txn_begin, &txn_commit,
+                              &txn_rollback);
 
     pthread_mutex_lock(&cvs->mutex);
 
@@ -1000,14 +1328,7 @@ bool coins_view_sqlite_batch_write( // one-write-path-ok:coins-sqlite-writer-imp
      * a cursor open, SAVEPOINT will SQLITE_BUSY and we'll bail
      * cleanly — the subsystem is expected to finalize its own
      * iterators before racing with a UTXO flush. */
-    if (cvs->stmt_get)        sqlite3_reset(cvs->stmt_get);
-    if (cvs->stmt_have)       sqlite3_reset(cvs->stmt_have);
-    if (cvs->stmt_insert)     sqlite3_reset(cvs->stmt_insert);
-    if (cvs->stmt_delete_tx)  sqlite3_reset(cvs->stmt_delete_tx);
-    if (cvs->stmt_best_get)   sqlite3_reset(cvs->stmt_best_get);
-    if (cvs->stmt_best_set)   sqlite3_reset(cvs->stmt_best_set);
-    if (cvs->stmt_commit_get) sqlite3_reset(cvs->stmt_commit_get);
-    if (cvs->stmt_commit_set) sqlite3_reset(cvs->stmt_commit_set);
+    coins_view_sqlite_reset_owned_stmts(cvs);
 
     /* Bump busy timeout for the flush — during IBD, WAL contention
      * from background readers/checkpointers makes SQLITE_BUSY common.
@@ -1020,7 +1341,7 @@ bool coins_view_sqlite_batch_write( // one-write-path-ok:coins-sqlite-writer-imp
                                    NULL, NULL, &txn_err);
         if (txn_rc != SQLITE_OK) {
             fprintf(stderr, "coins_flush: %s failed rc=%d: %s\n",  // obs-ok:helper-context-logged
-                    txn_begin, txn_rc, txn_err ? txn_err : "unknown");
+                    txn_begin, txn_rc, coins_sql_err_or(txn_err, "unknown"));
             if (txn_err) sqlite3_free(txn_err);
             sqlite3_busy_timeout(cvs->db, 10000); /* restore */
             pthread_mutex_unlock(&cvs->mutex);
@@ -1028,89 +1349,17 @@ bool coins_view_sqlite_batch_write( // one-write-path-ok:coins-sqlite-writer-imp
         }
     }
 
-    int write_errors = 0;
-    size_t entries_written = 0;
-    size_t entries_deleted = 0;
+    struct coins_flush_tally tally = {0, 0, 0};
+    coins_flush_apply_entries(cvs, map_coins, &tally);
 
-    for (size_t i = 0; i < map_coins->num_buckets; i++) {
-        struct coins_map_entry *e = &map_coins->buckets[i];
-        if (!e->occupied || !(e->entry.flags & COINS_CACHE_DIRTY))
-            continue;
-
-        if (coins_is_pruned(&e->entry.coins)) {
-            /* All outputs spent — remove from SQLite */
-            sqlite3_reset(cvs->stmt_delete_tx);
-            sqlite3_bind_blob(cvs->stmt_delete_tx, 1,
-                              e->txid.data, 32, SQLITE_STATIC);
-            int rc = sqlite3_step(cvs->stmt_delete_tx); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
-            if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-                fprintf(stderr, "coins_flush: DELETE failed rc=%d: %s\n",  // obs-ok:helper-context-logged
-                        rc, sqlite3_errmsg(cvs->db));
-                write_errors++;
-            } else {
-                entries_deleted++;
-            }
-        } else {
-            /* Delete stale rows first, then insert current outputs */
-            sqlite3_reset(cvs->stmt_delete_tx);
-            sqlite3_bind_blob(cvs->stmt_delete_tx, 1,
-                              e->txid.data, 32, SQLITE_STATIC);
-            int rc = sqlite3_step(cvs->stmt_delete_tx); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
-            if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-                fprintf(stderr, "coins_flush: pre-DELETE failed rc=%d: %s\n",  // obs-ok:write_errors-counted-and-rolled-back-below
-                        rc, sqlite3_errmsg(cvs->db));
-                write_errors++;
-            }
-
-            const struct coins *cc = &e->entry.coins;
-            for (size_t vi = 0; vi < cc->num_vout; vi++) {
-                if (tx_out_is_null(&cc->vout[vi]))
-                    continue;
-
-                uint8_t addr_hash[20];
-                bool has_addr = false;
-                enum script_type stype = utxo_classify_script(
-                    cc->vout[vi].script_pub_key.data,
-                    cc->vout[vi].script_pub_key.size,
-                    addr_hash, &has_addr);
-
-                sqlite3_stmt *ins = cvs->stmt_insert;
-                sqlite3_reset(ins);
-                sqlite3_bind_blob(ins, 1, e->txid.data, 32, SQLITE_STATIC);
-                sqlite3_bind_int(ins, 2, (int)vi);
-                sqlite3_bind_int64(ins, 3, cc->vout[vi].value);
-                sqlite3_bind_blob(ins, 4,
-                    cc->vout[vi].script_pub_key.data,
-                    (int)cc->vout[vi].script_pub_key.size,
-                    SQLITE_STATIC);
-                sqlite3_bind_int(ins, 5, stype);
-                if (has_addr)
-                    sqlite3_bind_blob(ins, 6, addr_hash, 20, SQLITE_STATIC);
-                else
-                    sqlite3_bind_null(ins, 6);
-                sqlite3_bind_int(ins, 7, cc->height);
-                sqlite3_bind_int(ins, 8, cc->is_coinbase ? 1 : 0);
-                rc = sqlite3_step(ins); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
-                if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-                    fprintf(stderr, "coins_flush: INSERT failed rc=%d "  // obs-ok:write_errors-counted-and-rolled-back-below
-                            "h=%d vout=%zu: %s\n",
-                            rc, cc->height, vi, sqlite3_errmsg(cvs->db));
-                    write_errors++;
-                } else {
-                    entries_written++;
-                }
-            }
-        }
-    }
-
-    if (write_errors > 0) {
+    if (tally.write_errors > 0) {
         fprintf(stderr, "coins_flush: %d write errors! "  // obs-ok:paired-with-event_emitf-below
                 "Rolling back to prevent UTXO loss "
                 "(wrote=%zu deleted=%zu)\n",
-                write_errors, entries_written, entries_deleted);
+                tally.write_errors, tally.entries_written, tally.entries_deleted);
         event_emitf(EV_COINS_FLUSH_FAILED, 0,
                     "write_errors=%d wrote=%zu deleted=%zu",
-                    write_errors, entries_written, entries_deleted);
+                    tally.write_errors, tally.entries_written, tally.entries_deleted);
         sqlite3_exec(cvs->db, txn_rollback, NULL, NULL, NULL);
         pthread_mutex_unlock(&cvs->mutex);
         return false;
@@ -1119,70 +1368,44 @@ bool coins_view_sqlite_batch_write( // one-write-path-ok:coins-sqlite-writer-imp
     /* Verify: at least one operation should have occurred if map had dirty
      * entries. Count actual dirty entries — map_coins->size includes clean
      * (read-only) entries that don't need flushing. */
-    if (entries_written == 0 && entries_deleted == 0) {
-        size_t dirty_count = 0;
-        for (size_t di = 0; di < map_coins->num_buckets; di++) {
-            struct coins_map_entry *de = &map_coins->buckets[di];
-            if (de->occupied && (de->entry.flags & COINS_CACHE_DIRTY))
-                dirty_count++;
-        }
-        if (dirty_count > 0) {
-            fprintf(stderr, "coins_flush: WARNING zero operations with "  // obs-ok:warning-only-on-best-effort-path
-                    "%zu dirty entries (total=%zu) — possible silent failure\n",
-                    dirty_count, map_coins->size);
-        }
+    size_t dirty_count = coins_flush_unflushed_dirty(
+        map_coins, tally.entries_written, tally.entries_deleted);
+    if (dirty_count > 0) {
+        fprintf(stderr, "coins_flush: WARNING zero operations with "  // obs-ok:warning-only-on-best-effort-path
+                "%zu dirty entries (total=%zu) — possible silent failure\n",
+                dirty_count, map_coins->size);
     }
 
     /* Update best block hash */
-    if (hash_block && !uint256_is_null(hash_block)) {
-        sqlite3_reset(cvs->stmt_best_set);
-        sqlite3_bind_blob(cvs->stmt_best_set, 1,
-                          hash_block->data, 32, SQLITE_STATIC);
-        int rc = sqlite3_step(cvs->stmt_best_set); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
-        if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-            fprintf(stderr, "coins_flush: best_block UPDATE failed rc=%d: "  // obs-ok:paired-with-return-false-below
-                    "%s\n", rc, sqlite3_errmsg(cvs->db));
-            sqlite3_exec(cvs->db, txn_rollback, NULL, NULL, NULL);
-            pthread_mutex_unlock(&cvs->mutex);
-            return false;
-        }
-    }
-
     /* Write UTXO commitment inside the same transaction (atomic with
      * the coins flush). Kept inside the same transaction as the coins
      * flush so no window exists where a concurrent reader could block
      * the next SAVEPOINT. */
-    if (commit) {
-        uint8_t buf[UTXO_COMMITMENT_SERIALIZED_SIZE];
-        utxo_commitment_serialize(commit, buf);
-        sqlite3_reset(cvs->stmt_commit_set);
-        sqlite3_bind_blob(cvs->stmt_commit_set, 1,
-                          buf, UTXO_COMMITMENT_SERIALIZED_SIZE, SQLITE_STATIC);
-        int rc = AR_STEP_WRITE(cvs->stmt_commit_set);
-        if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-            fprintf(stderr, "coins_flush: commitment UPDATE failed rc=%d: "  // obs-ok:non-fatal-commitment-is-optional
-                    "%s\n", rc, sqlite3_errmsg(cvs->db));
-            /* Non-fatal: commitment is optional, don't rollback coins */
-        }
+    struct coins_flush_tail_status tail;
+    coins_flush_write_best_and_commitment(cvs, hash_block, commit, &tail);
+    if (tail.best_failed) {
+        fprintf(stderr, "coins_flush: best_block UPDATE failed rc=%d: "  // obs-ok:paired-with-return-false-below
+                "%s\n", tail.best_rc, sqlite3_errmsg(cvs->db));
+        sqlite3_exec(cvs->db, txn_rollback, NULL, NULL, NULL);
+        pthread_mutex_unlock(&cvs->mutex);
+        return false;
+    }
+    if (tail.commit_failed) {
+        fprintf(stderr, "coins_flush: commitment UPDATE failed rc=%d: "  // obs-ok:non-fatal-commitment-is-optional
+                "%s\n", tail.commit_rc, sqlite3_errmsg(cvs->db));
+        /* Non-fatal: commitment is optional, don't rollback coins */
     }
 
     /* Reset only OUR statements before COMMIT/RELEASE (see the
      * rationale on the pre-BEGIN reset above). */
-    if (cvs->stmt_get)        sqlite3_reset(cvs->stmt_get);
-    if (cvs->stmt_have)       sqlite3_reset(cvs->stmt_have);
-    if (cvs->stmt_insert)     sqlite3_reset(cvs->stmt_insert);
-    if (cvs->stmt_delete_tx)  sqlite3_reset(cvs->stmt_delete_tx);
-    if (cvs->stmt_best_get)   sqlite3_reset(cvs->stmt_best_get);
-    if (cvs->stmt_best_set)   sqlite3_reset(cvs->stmt_best_set);
-    if (cvs->stmt_commit_get) sqlite3_reset(cvs->stmt_commit_get);
-    if (cvs->stmt_commit_set) sqlite3_reset(cvs->stmt_commit_set);
+    coins_view_sqlite_reset_owned_stmts(cvs);
 
     {
         char *errmsg = NULL;
         int rc = sqlite3_exec(cvs->db, txn_commit, NULL, NULL, &errmsg);
         if (rc != SQLITE_OK) {
             fprintf(stderr, "coins_flush: %s failed: %s\n",  // obs-ok:paired-with-return-false-below
-                    txn_commit, errmsg ? errmsg : "unknown");
+                    txn_commit, coins_sql_err_or(errmsg, "unknown"));
             if (errmsg) sqlite3_free(errmsg);
             sqlite3_exec(cvs->db, txn_rollback, NULL, NULL, NULL);
             sqlite3_busy_timeout(cvs->db, 10000); /* restore */
@@ -1196,21 +1419,14 @@ bool coins_view_sqlite_batch_write( // one-write-path-ok:coins-sqlite-writer-imp
      * enforce at boot.  Cheap to compute (MAX + COUNT on a single
      * table) and invaluable when triaging an IBD divergence. */
     {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(cvs->db,
-                "SELECT IFNULL(MAX(height), -1), COUNT(*) FROM utxos",
-                -1, &s, NULL) == SQLITE_OK) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int64_t max_h = sqlite3_column_int64(s, 0);
-                int64_t count = sqlite3_column_int64(s, 1);
-                int tip_h = (hash_block && !uint256_is_null(hash_block))
-                          ? 1 : 0; /* presence flag; hash itself not resolved here */
-                printf("[coins] flush ok: max_height=%lld utxos=%lld "
-                       "tip_written=%d wrote=%zu deleted=%zu\n",
-                       (long long)max_h, (long long)count, tip_h,
-                       entries_written, entries_deleted);
-            }
-            sqlite3_finalize(s);
+        int64_t max_h = 0;
+        int64_t count = 0;
+        if (coins_flush_read_post_stats(cvs->db, &max_h, &count)) {
+            int tip_h = coins_flush_tip_written(hash_block); /* presence flag; hash itself not resolved here */
+            printf("[coins] flush ok: max_height=%lld utxos=%lld "
+                   "tip_written=%d wrote=%zu deleted=%zu\n",
+                   (long long)max_h, (long long)count, tip_h,
+                   tally.entries_written, tally.entries_deleted);
         }
     }
 
