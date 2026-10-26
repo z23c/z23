@@ -39,9 +39,11 @@
 
 /* Parse argv into the bundle path, out dir and optional chainwork bytes.
  * Returns 0, or exit code 2 after printing the usage error. */
-static int parse_args(int argc, char **argv, const char **bundle_path,
-                      const char **out_dir, uint8_t chainwork[32],
-                      bool *have_chainwork)
+static int checkpoint_rung_export_parse_cli(int argc, char **argv,
+                                            const char **bundle_path,
+                                            const char **out_dir,
+                                            uint8_t chainwork[32],
+                                            bool *have_chainwork)
 {
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--chainwork=", 12) == 0) {
@@ -120,7 +122,7 @@ int main(int argc, char **argv)
     uint8_t chainwork[32] = {0};
     bool have_chainwork = false;
 
-    int rc = parse_args(argc, argv, &bundle_path, &out_dir, chainwork,
+    int rc = checkpoint_rung_export_parse_cli(argc, argv, &bundle_path, &out_dir, chainwork,
                         &have_chainwork);
     if (rc != 0)
         return rc;
