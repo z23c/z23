@@ -1539,7 +1539,6 @@ tests/harness/src/test_boot_phase.c:test_boot_phase:40
 tests/harness/src/test_boot_refold_window_extend.c:test_boot_refold_window_extend:52
 tests/harness/src/test_boot_reindex_terminates.c:test_boot_reindex_terminates:57
 tests/harness/src/test_boot_shutdown_marker.c:test_boot_shutdown_marker:72
-tests/harness/src/test_boot_snapshot_drop_bodiless.c:test_boot_snapshot_drop_bodiless:31
 tests/harness/src/test_boot_snapshot_failure_memory.c:test_boot_snapshot_failure_memory:38
 tests/harness/src/test_build_fabric.c:test_bf_confined_worker:28
 tests/harness/src/test_byte_order_codec.c:test_byte_order_codec:22

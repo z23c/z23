@@ -119,6 +119,46 @@ static bool bsd_is_cleared(const struct block_index *bi)
            bi->nTx == 0;
 }
 
+static bool bsd_two_entries_cleared(size_t cleared,
+                                    const struct block_index *first,
+                                    const struct block_index *second)
+{
+    return cleared == 2 &&
+           bsd_is_cleared(first) &&
+           bsd_is_cleared(second);
+}
+
+static bool bsd_present_bodies_kept(size_t cleared,
+                                    const struct block_index *below,
+                                    const struct block_index *above)
+{
+    return cleared == 0 &&
+           below && above &&
+           (below->nStatus & BLOCK_HAVE_DATA) &&
+           (above->nStatus & BLOCK_HAVE_DATA) &&
+           below->nFile == 2 && below->nDataPos == 444 &&
+           below->nTx == 6 &&
+           above->nFile == 2 && above->nDataPos == 555 &&
+           above->nTx == 7;
+}
+
+static bool bsd_unreadable_body_cleared(size_t cleared,
+                                        const struct block_index *bogus)
+{
+    return cleared == 1 && bsd_is_cleared(bogus);
+}
+
+static bool bsd_hash_readable_body_kept(size_t cleared,
+                                        const struct block_index *real,
+                                        const struct disk_block_pos *pos)
+{
+    return cleared == 0 && real &&
+           (real->nStatus & BLOCK_HAVE_DATA) &&
+           real->nFile == pos->nFile &&
+           real->nDataPos == pos->nPos &&
+           real->nTx == 1;
+}
+
 int test_boot_snapshot_drop_bodiless(void)
 {
     test_reset_shared_globals();
@@ -144,8 +184,7 @@ int test_boot_snapshot_drop_bodiless(void)
                 &ms, dir, seed_h, true);
 
         BSD_CHECK("missing: below+above bodiless entries cleared",
-                  cleared == 2 && bsd_is_cleared(below) &&
-                  bsd_is_cleared(above));
+                  bsd_two_entries_cleared(cleared, below, above));
         BSD_CHECK("missing: seed block protected",
                   seed &&
                   (seed->nStatus & BLOCK_HAVE_DATA) &&
@@ -177,14 +216,7 @@ int test_boot_snapshot_drop_bodiless(void)
                 &ms, dir, 10, true);
 
         BSD_CHECK("present: real block bodies keep HAVE_DATA",
-                  cleared == 0 &&
-                  below && above &&
-                  (below->nStatus & BLOCK_HAVE_DATA) &&
-                  (above->nStatus & BLOCK_HAVE_DATA) &&
-                  below->nFile == 2 && below->nDataPos == 444 &&
-                  below->nTx == 6 &&
-                  above->nFile == 2 && above->nDataPos == 555 &&
-                  above->nTx == 7);
+                  bsd_present_bodies_kept(cleared, below, above));
 
         main_state_free(&ms);
         test_rm_rf_recursive(dir);
@@ -211,9 +243,7 @@ int test_boot_snapshot_drop_bodiless(void)
                 &ms, dir, 10, true);
 
         BSD_CHECK("absent: nFile=-1 and empty blk file clear",
-                  cleared == 2 &&
-                  bsd_is_cleared(no_file_slot) &&
-                  bsd_is_cleared(zero_file));
+                  bsd_two_entries_cleared(cleared, no_file_slot, zero_file));
         BSD_CHECK("absent: header-only rows are ignored",
                   no_have_data &&
                   !(no_have_data->nStatus & BLOCK_HAVE_DATA) &&
@@ -244,7 +274,7 @@ int test_boot_snapshot_drop_bodiless(void)
                 &ms, dir, 10, false);
 
         BSD_CHECK("untrusted: non-empty but unreadable body clears",
-                  cleared == 1 && bsd_is_cleared(bogus));
+                  bsd_unreadable_body_cleared(cleared, bogus));
 
         main_state_free(&ms);
         test_rm_rf_recursive(dir);
@@ -276,11 +306,7 @@ int test_boot_snapshot_drop_bodiless(void)
                 &ms, dir, 10, false);
 
         BSD_CHECK("verified: hash-readable body keeps HAVE_DATA",
-                  cleared == 0 && real &&
-                  (real->nStatus & BLOCK_HAVE_DATA) &&
-                  real->nFile == pos.nFile &&
-                  real->nDataPos == pos.nPos &&
-                  real->nTx == 1);
+                  bsd_hash_readable_body_kept(cleared, real, &pos));
 
         main_state_free(&ms);
         block_free(&blk);
