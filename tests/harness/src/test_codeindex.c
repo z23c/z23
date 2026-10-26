@@ -406,7 +406,7 @@ static bool cl_test_tree_terminal(const char *path, void *user)
     return path && strncmp(path, "tests/harness/src/", 13) == 0;
 }
 
-static bool write_fixture(void)
+static bool write_fixture_objects(void)
 {
     return mk_write(FIX, "core/modules/net/src/foo.c", FOO_C) &&
            mk_write(FIX, "core/modules/net/include/net/foo.h", FOO_H) &&
@@ -427,8 +427,13 @@ static bool write_fixture(void)
            /* a plain object root, with no generations at all */
            mk_write(FIX, "build/test-obj/foo.d",
                     "build/test-obj/foo.o: core/modules/net/src/foo.c "
-                    "core/modules/net/include/net/foo.h\n") &&
-           mk_write(FIX, "core/modules/net/src/purpose_stem.c", PURPOSE_STEM_C) &&
+                    "core/modules/net/include/net/foo.h\n");
+}
+
+static bool write_fixture_sources(void)
+{
+    return mk_write(FIX, "core/modules/net/src/purpose_stem.c",
+                    PURPOSE_STEM_C) &&
            mk_write(FIX, "core/modules/net/src/purpose_override.c", PURPOSE_OVERRIDE_C) &&
            mk_write(FIX, "core/modules/net/src/purpose_none.c", PURPOSE_NONE_C) &&
            mk_write(FIX, "core/modules/net/src/purpose_after_license.c",
@@ -442,8 +447,13 @@ static bool write_fixture(void)
            mk_write(FIX, "packages/widget/include/package/api.h",
                     PACKAGE_HEADER_H) &&
            mk_write(FIX, "packages/widget/tests/test_package.c",
-                    PACKAGE_TEST_C) &&
-           mk_write(FIX, "platform/ports/include/ports/fixture_port.h", PORT_H) &&
+                    PACKAGE_TEST_C);
+}
+
+static bool write_fixture_leaves(void)
+{
+    return mk_write(FIX, "platform/ports/include/ports/fixture_port.h",
+                    PORT_H) &&
            mk_write(FIX, "tests/harness/src/test_fixture_indexed.c", TEST_SOURCE_C) &&
            mk_write(FIX, "examples/example_fixture.c", EXAMPLE_SOURCE_C) &&
            mk_write(FIX, "docs/examples/documented_fixture.c", EXAMPLE_SOURCE_C) &&
@@ -458,6 +468,13 @@ static bool write_fixture(void)
            mk_write(FIX, "core/modules/net/src/saturation.c", SATURATION_C) &&
            mk_write(FIX, "tests/harness/include/test/build/generated_should_not_index.c",
                     "int generated_should_not_index(void) { return 0; }\n");
+}
+
+static bool write_fixture(void)
+{
+    return write_fixture_objects() &&
+           write_fixture_sources() &&
+           write_fixture_leaves();
 }
 
 /* Canonical ordered dump of every symbol as one string (for identity tests). */
@@ -659,6 +676,22 @@ static bool crash_rebuild_at(enum codeindex_test_crash_point point)
     return WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
 }
 
+static void concurrent_open_child(int gate[2], const char *required_symbol)
+{
+    close(gate[1]);
+    char token = 0;
+    if (read(gate[0], &token, 1) != 1) _exit(10);
+    close(gate[0]);
+    struct codeindex *child = codeindex_open(FIX);
+    struct ci_symbol sym;
+    bool found = false;
+    bool ok = child &&
+              codeindex_symbol(child, required_symbol, &sym, &found) &&
+              found;
+    if (child) codeindex_close(child);
+    _exit(ok ? 0 : 11);
+}
+
 static bool concurrent_open_32(const char *required_symbol)
 {
     enum { CHILDREN = 32 };
@@ -669,18 +702,7 @@ static bool concurrent_open_32(const char *required_symbol)
     for (int i = 0; i < CHILDREN; i++) {
         pid_t pid = fork();
         if (pid == 0) {
-            close(gate[1]);
-            char token = 0;
-            if (read(gate[0], &token, 1) != 1) _exit(10);
-            close(gate[0]);
-            struct codeindex *child = codeindex_open(FIX);
-            struct ci_symbol sym;
-            bool found = false;
-            bool ok = child &&
-                      codeindex_symbol(child, required_symbol, &sym, &found) &&
-                      found;
-            if (child) codeindex_close(child);
-            _exit(ok ? 0 : 11);
+            concurrent_open_child(gate, required_symbol);
         }
         if (pid < 0) break;
         pids[started++] = pid;
@@ -964,7 +986,7 @@ static int ci_selector_multiple_targets(struct codeindex *index)
     return failures;
 }
 
-static int test_codeindex_platform_arm(void)
+static int test_codeindex_platform_arm_context_map(void)
 {
     int failures = 0;
 
@@ -993,6 +1015,14 @@ static int test_codeindex_platform_arm(void)
                  memcmp(digest_a, digest_again, sizeof(digest_a)) == 0 &&
                  memcmp(digest_a, digest_b, sizeof(digest_a)) != 0);
     }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_context_owners(void)
+{
+    int failures = 0;
+    struct ci_context_assignment assignment;
+
     CI_CHECK("wallet service has one context and its physical service shape",
              codeindex_context_classify(
                  "contexts/wallet/services/src/wallet_backup_service.c", &assignment) &&
@@ -1015,19 +1045,23 @@ static int test_codeindex_platform_arm(void)
              !codeindex_path_is_production(
                  "contexts/commons/packages/zbuf/tests/test_zbuf.c") &&
              codeindex_path_is_production("cognition/modules/codeindex/src/codeindex.c"));
+    return failures;
+}
 
- TEST_DISCARD(system("rm -rf " FIX));
-    if (!write_fixture()) {
-        printf("  codeindex: write_fixture... FAIL\n");
-        return failures + 1;
-    }
+static bool test_codeindex_platform_arm_physical_root(const char *path)
+{
+    return strncmp(path, "core/", 5) == 0 ||
+           strncmp(path, "engine/", 7) == 0 ||
+           strncmp(path, "contexts/", 9) == 0 ||
+           strncmp(path, "cognition/", 10) == 0 ||
+           strncmp(path, "platform/", 9) == 0 ||
+           strncmp(path, "tools/", 6) == 0;
+}
 
-    /* ── open (triggers first build) ── */
-    struct codeindex *ci = codeindex_open(FIX);
-    CI_CHECK("open builds index", ci != NULL);
-    if (!ci) return failures + 1;
-
-    failures += check_assertion_symbols(ci);
+static int test_codeindex_platform_arm_production_coverage(struct codeindex *ci)
+{
+    int failures = 0;
+    struct ci_context_assignment assignment;
 
     {
         int total = codeindex_file_count(ci);
@@ -1037,12 +1071,7 @@ static int test_codeindex_platform_arm(void)
         for (int i = 0; covered && i < listed; i++) {
             if (!codeindex_path_is_production(files[i].path)) continue;
             bool physical =
-                strncmp(files[i].path, "core/", 5) == 0 ||
-                strncmp(files[i].path, "engine/", 7) == 0 ||
-                strncmp(files[i].path, "contexts/", 9) == 0 ||
-                strncmp(files[i].path, "cognition/", 10) == 0 ||
-                strncmp(files[i].path, "platform/", 9) == 0 ||
-                strncmp(files[i].path, "tools/", 6) == 0;
+                test_codeindex_platform_arm_physical_root(files[i].path);
             if (!physical) continue; /* conventional external workspace */
             if (!codeindex_context_classify(files[i].path, &assignment) ||
                 assignment.orphan || !assignment.context[0] ||
@@ -1052,6 +1081,12 @@ static int test_codeindex_platform_arm(void)
         CI_CHECK("every indexed Z23 production fixture has one context and shape",
                  covered);
     }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_symbol_queries(struct codeindex *ci)
+{
+    int failures = 0;
 
     /* ── 2: query correctness ── */
     struct ci_symbol s;
@@ -1086,6 +1121,13 @@ static int test_codeindex_platform_arm(void)
              s.def_path[0] == '\0' &&
              strstr(s.decl_path, "include/net/foo.h") != NULL);
 
+    return failures;
+}
+
+static int test_codeindex_platform_arm_symbol_text(struct codeindex *ci)
+{
+    int failures = 0;
+
     struct ci_search_hit text_hits[8];
     int ntext = codeindex_search_text(ci, "data frame", text_hits, 8);
     CI_CHECK("indexed doc text finds its symbol with an explained match",
@@ -1101,95 +1143,146 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("indexed path text finds declarations deterministically",
              ntext >= 1 &&
              (text_hits[0].match_mask & CI_SEARCH_MATCH_PATH) != 0);
+    return failures;
+}
 
-    struct zcode_goal_selection selected, selected_again, selected_indexed;
+static int test_codeindex_platform_arm_goal_ranking(
+    struct zcode_goal_selection *selected)
+{
+    int failures = 0;
+
     CI_CHECK("goal selector ranks the checksum symbol from plain language",
              zcode_goal_context_select(
                  FIX, "Repair the data frame checksum length", NULL,
-                 &selected).ok &&
-             strcmp(selected.selected.name, "foo_checksum") == 0 &&
-             selected.token_count >= 3 && selected.candidate_count >= 1 &&
-             selected.generation_us > 0 && selected.retrieval_us > 0 &&
-             selected.retrieval_corpus_files > 0 &&
-             selected.retrieval_ranked_files > 0 &&
-             strstr(selected.why, "bm25_story_file") != NULL);
+                 selected).ok &&
+             strcmp(selected->selected.name, "foo_checksum") == 0 &&
+             selected->token_count >= 3 && selected->candidate_count >= 1 &&
+             selected->generation_us > 0 && selected->retrieval_us > 0 &&
+             selected->retrieval_corpus_files > 0 &&
+             selected->retrieval_ranked_files > 0 &&
+             strstr(selected->why, "bm25_story_file") != NULL);
+    return failures;
+}
+
+static bool test_codeindex_platform_arm_indexed_match(struct codeindex *ci,
+    struct zcode_goal_selection *selected,
+    struct zcode_goal_selection *selected_indexed)
+{
     bool indexed_ok = zcode_goal_context_select_indexed(
         ci, "Repair the data frame checksum length", NULL,
-        &selected_indexed).ok;
+        selected_indexed).ok;
     bool indexed_same = indexed_ok &&
-        selected.token_count == selected_indexed.token_count &&
-        selected.candidate_count == selected_indexed.candidate_count &&
-        selected.total_matches == selected_indexed.total_matches &&
-        selected.dropped_candidates == selected_indexed.dropped_candidates &&
-        selected.budget_exhausted == selected_indexed.budget_exhausted &&
-        selected.retrieval_corpus_files ==
-            selected_indexed.retrieval_corpus_files &&
-        selected.retrieval_ranked_files ==
-            selected_indexed.retrieval_ranked_files &&
-        selected.retrieval_truncated == selected_indexed.retrieval_truncated &&
-        selected_indexed.retrieval_us > 0 &&
-        selected.service_generation == selected_indexed.service_generation &&
-        strcmp(selected.selected_symbol_id,
-               selected_indexed.selected_symbol_id) == 0 &&
-        strcmp(selected.why, selected_indexed.why) == 0 &&
-        selected_indexed.generation_us > 0;
-    for (size_t i = 0; indexed_same && i < selected.token_count; i++)
-        indexed_same = strcmp(selected.tokens[i],
-                              selected_indexed.tokens[i]) == 0;
-    for (size_t i = 0; indexed_same && i < selected.candidate_count; i++) {
+        selected->token_count == selected_indexed->token_count &&
+        selected->candidate_count == selected_indexed->candidate_count &&
+        selected->total_matches == selected_indexed->total_matches &&
+        selected->dropped_candidates == selected_indexed->dropped_candidates &&
+        selected->budget_exhausted == selected_indexed->budget_exhausted &&
+        selected->retrieval_corpus_files ==
+            selected_indexed->retrieval_corpus_files &&
+        selected->retrieval_ranked_files ==
+            selected_indexed->retrieval_ranked_files &&
+        selected->retrieval_truncated ==
+            selected_indexed->retrieval_truncated &&
+        selected_indexed->retrieval_us > 0 &&
+        selected->service_generation == selected_indexed->service_generation &&
+        strcmp(selected->selected_symbol_id,
+               selected_indexed->selected_symbol_id) == 0 &&
+        strcmp(selected->why, selected_indexed->why) == 0 &&
+        selected_indexed->generation_us > 0;
+    return indexed_same;
+}
+
+static int test_codeindex_platform_arm_indexed_loops(bool indexed_same,
+    struct zcode_goal_selection *selected,
+    struct zcode_goal_selection *selected_indexed)
+{
+    int failures = 0;
+
+    for (size_t i = 0; indexed_same && i < selected->token_count; i++)
+        indexed_same = strcmp(selected->tokens[i],
+                              selected_indexed->tokens[i]) == 0;
+    for (size_t i = 0; indexed_same && i < selected->candidate_count; i++) {
         indexed_same =
-            strcmp(selected.candidates[i].symbol_id,
-                   selected_indexed.candidates[i].symbol_id) == 0 &&
-            strcmp(selected.candidates[i].matched_token,
-                   selected_indexed.candidates[i].matched_token) == 0 &&
-            strcmp(selected.candidates[i].why,
-                   selected_indexed.candidates[i].why) == 0 &&
-            selected.candidates[i].match_mask ==
-                selected_indexed.candidates[i].match_mask &&
-            selected.candidates[i].score == selected_indexed.candidates[i].score;
+            strcmp(selected->candidates[i].symbol_id,
+                   selected_indexed->candidates[i].symbol_id) == 0 &&
+            strcmp(selected->candidates[i].matched_token,
+                   selected_indexed->candidates[i].matched_token) == 0 &&
+            strcmp(selected->candidates[i].why,
+                   selected_indexed->candidates[i].why) == 0 &&
+            selected->candidates[i].match_mask ==
+                selected_indexed->candidates[i].match_mask &&
+            selected->candidates[i].score ==
+                selected_indexed->candidates[i].score;
     }
     CI_CHECK("caller-owned index produces the identical literal ranking",
              indexed_same);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_goal_repeat(
+    struct zcode_goal_selection *selected,
+    struct zcode_goal_selection *selected_again)
+{
+    int failures = 0;
+
     CI_CHECK("goal selection is deterministic across repeated runs",
              zcode_goal_context_select(
                  FIX, "Repair the data frame checksum length", NULL,
-                 &selected_again).ok &&
-             strcmp(selected.selected_symbol_id,
-                    selected_again.selected_symbol_id) == 0 &&
-             selected.candidate_count == selected_again.candidate_count);
+                 selected_again).ok &&
+             strcmp(selected->selected_symbol_id,
+                    selected_again->selected_symbol_id) == 0 &&
+             selected->candidate_count == selected_again->candidate_count);
     CI_CHECK("exact symbol override remains available",
              zcode_goal_context_select(FIX, "ignored", "helper_add",
-                                       &selected).ok &&
-             strcmp(selected.selected.name, "helper_add") == 0 &&
-             strcmp(selected.why, "exact_symbol_override") == 0);
+                                       selected).ok &&
+             strcmp(selected->selected.name, "helper_add") == 0 &&
+             strcmp(selected->why, "exact_symbol_override") == 0);
     CI_CHECK("behavior-only goal gets an explicit project-entry fallback",
              zcode_goal_context_select(
                  FIX, "Eliminate the seeded oscillation", NULL,
-                 &selected).ok &&
-             selected.selected.name[0] != '\0' &&
-             strcmp(selected.why, "project_entry_fallback") == 0);
+                 selected).ok &&
+             selected->selected.name[0] != '\0' &&
+             strcmp(selected->why, "project_entry_fallback") == 0);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_goal_saturation(
+    struct zcode_goal_selection *selected)
+{
+    int failures = 0;
+
     CI_CHECK("a saturated literal bucket reports incomplete ranking",
              zcode_goal_context_select(
-                 FIX, "saturation", NULL, &selected).ok &&
-             selected.candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
-             selected.budget_exhausted);
+                 FIX, "saturation", NULL, selected).ok &&
+             selected->candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
+             selected->budget_exhausted);
     CI_CHECK("a selective story term survives an earlier saturated term",
              zcode_goal_context_select(
-                 FIX, "saturation checksum", NULL, &selected).ok &&
-             strcmp(selected.selected.name, "foo_checksum") == 0 &&
-             selected.candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
-             selected.budget_exhausted);
+                 FIX, "saturation checksum", NULL, selected).ok &&
+             strcmp(selected->selected.name, "foo_checksum") == 0 &&
+             selected->candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
+             selected->budget_exhausted);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_goal_literal(struct codeindex *ci,
+    struct zcode_goal_selection *selected_indexed)
+{
+    int failures = 0;
+
     CI_CHECK("the observational literal baseline preserves token-order loss",
              zcode_goal_context_select_literal_indexed(
-                 ci, "saturation checksum", &selected_indexed).ok &&
-             strcmp(selected_indexed.selected.name, "foo_checksum") != 0 &&
-             selected_indexed.candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
-             selected_indexed.budget_exhausted &&
-             selected_indexed.retrieval_corpus_files == 0);
+                 ci, "saturation checksum", selected_indexed).ok &&
+             strcmp(selected_indexed->selected.name, "foo_checksum") != 0 &&
+             selected_indexed->candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
+             selected_indexed->budget_exhausted &&
+             selected_indexed->retrieval_corpus_files == 0);
+    return failures;
+}
 
-    failures += ci_selector_late_targets(ci);
-    failures += ci_selector_identifier_boundaries(ci);
-    failures += ci_selector_multiple_targets(ci);
+static int test_codeindex_platform_arm_refs(struct codeindex *ci)
+{
+    int failures = 0;
 
     /* refs */
     struct ci_ref refs[32];
@@ -1197,6 +1290,13 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("helper_add has call-site refs", nref >= 1);
     nref = codeindex_refs(ci, "foo_checksum", refs, 32);
     CI_CHECK("foo_checksum has one call-site ref", nref == 1);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_warm_epoch(struct codeindex **pci)
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
 
     char includes[8][256];
     int nincludes = codeindex_includes_of_file(
@@ -1243,6 +1343,17 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("historical epoch depfiles cannot change active include edges",
              ci && nincludes == 1 &&
              strcmp(includes[0], "core/modules/net/include/net/foo.h") == 0);
+    *pci = ci;
+    return failures;
+}
+
+static int test_codeindex_platform_arm_repoint_generation(
+    struct codeindex **pci)
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
+    char includes[8][256];
+    int nincludes = 0;
 
     /* Which generation is live is what .current-epoch says, not which one was
      * written last: repoint the root at the older one and its edges become the
@@ -1276,6 +1387,13 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("the retained generation is inert again",
              ci && nincludes == 1 &&
              strcmp(includes[0], "core/modules/net/include/net/foo.h") == 0);
+    *pci = ci;
+    return failures;
+}
+
+static int test_codeindex_platform_arm_depfile_inventory(void)
+{
+    int failures = 0;
 
     /* Four depfiles are on disk; two of them are the graph. Anyone who needs
      * that number (the test-result cache asks whether the graph exists at all)
@@ -1287,6 +1405,14 @@ static int test_codeindex_platform_arm(void)
         CI_CHECK("depfile inventory counts the live generation only",
                  inventory && dep_n == 2 && dep_newest > 0);
     }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_insecure_directory(
+    struct codeindex **pci)
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
 
     /* Warm acceptance uses an owner-controlled directory capability. Mode
      * drift fails closed before SQLite can consume the canonical pathname. */
@@ -1301,6 +1427,14 @@ static int test_codeindex_platform_arm(void)
              chmod(FIX "/.codeindex", 0755) == 0);
     ci = codeindex_open(FIX);
     CI_CHECK("owner-controlled warm index reopens", ci != NULL);
+    *pci = ci;
+    return failures;
+}
+
+static int test_codeindex_platform_arm_file_purpose(struct codeindex *ci)
+{
+    int failures = 0;
+    bool found = false;
 
     /* file → group */
     struct ci_file cf;
@@ -1329,6 +1463,16 @@ static int test_codeindex_platform_arm(void)
     codeindex_file(ci, "core/modules/net/src/purpose_license_only.c", &cf, &found);
     CI_CHECK("license-only header yields empty purpose", found &&
              cf.purpose[0] == '\0');
+    return failures;
+}
+
+static int test_codeindex_platform_arm_engine_entry_symbols(
+    struct codeindex *ci)
+{
+    int failures = 0;
+    struct ci_file cf;
+    struct ci_symbol s;
+    bool found = false;
 
     /* ── 8: every developer-facing source root is indexed ── */
     codeindex_file(ci, "engine/entry/main.c", &cf, &found);
@@ -1352,6 +1496,14 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("repository package app symbol is searchable",
              found && s.kind == 't' &&
              strcmp(s.def_path, "packages/widget/app/main.c") == 0);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_fixture_roots(struct codeindex *ci)
+{
+    int failures = 0;
+    struct ci_file cf;
+    bool found = false;
 
     codeindex_file(ci, "platform/ports/include/ports/fixture_port.h", &cf, &found);
     CI_CHECK("ports header is indexed in ports", found &&
@@ -1382,6 +1534,15 @@ static int test_codeindex_platform_arm(void)
     codeindex_file(ci, "engine/composition/fixture_registry.def", &cf, &found);
     CI_CHECK("registry node is indexed for impact without C symbols", found &&
              strcmp(cf.group, "engine/composition") == 0);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_source_counts(struct codeindex *ci)
+{
+    int failures = 0;
+    struct ci_file cf;
+    struct ci_symbol s;
+    bool found = false;
 
     struct ci_source_file_counts source_counts;
     CI_CHECK("C23 and registry-node counts are exact and separate",
@@ -1401,28 +1562,60 @@ static int test_codeindex_platform_arm(void)
     codeindex_file(ci, "tests/harness/include/test/build/generated_should_not_index.c",
                    &cf, &found);
     CI_CHECK("generated test build directory stays pruned", !found);
+    return failures;
+}
+
+static void test_codeindex_platform_arm_group_scan(
+    const struct ci_group *groups, int ng, bool *has_libnet,
+    bool *has_appsvc, bool *has_libtest, bool *has_packages,
+    bool *has_examples, bool *has_src)
+{
+    for (int i = 0; i < ng; i++) {
+        if (strcmp(groups[i].path, "core/modules/net") == 0 &&
+            strcmp(groups[i].parent, "core/modules") == 0) *has_libnet = true;
+        if (strcmp(groups[i].path, "engine/entry") == 0) *has_appsvc = true;
+        if (strcmp(groups[i].path, "tests") == 0 &&
+            strcmp(groups[i].parent, "root") == 0) *has_libtest = true;
+        if (strcmp(groups[i].path, "packages") == 0 &&
+            strcmp(groups[i].parent, "root") == 0) *has_packages = true;
+        if (strcmp(groups[i].path, "examples") == 0 &&
+            strcmp(groups[i].parent, "root") == 0) *has_examples = true;
+        if (strcmp(groups[i].path, "app") == 0 &&
+            strcmp(groups[i].parent, "root") == 0) *has_src = true;
+    }
+}
+
+static int test_codeindex_platform_arm_group_check(bool has_libnet,
+    bool has_appsvc, bool has_libtest, bool has_packages, bool has_examples,
+    bool has_src)
+{
+    int failures = 0;
+
+    CI_CHECK("group hierarchy exposes physical and package-workspace roots",
+             has_libnet && has_libtest && has_appsvc && has_packages &&
+             has_examples && has_src);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_group_roots(struct codeindex *ci)
+{
+    int failures = 0;
 
     /* group hierarchy follows the physical authorities and rooms. */
     struct ci_group groups[256];
     int ng = codeindex_groups(ci, groups, 256);
     bool has_libnet = false, has_appsvc = false, has_libtest = false;
     bool has_packages = false, has_examples = false, has_src = false;
-    for (int i = 0; i < ng; i++) {
-        if (strcmp(groups[i].path, "core/modules/net") == 0 &&
-            strcmp(groups[i].parent, "core/modules") == 0) has_libnet = true;
-        if (strcmp(groups[i].path, "engine/entry") == 0) has_appsvc = true;
-        if (strcmp(groups[i].path, "tests") == 0 &&
-            strcmp(groups[i].parent, "root") == 0) has_libtest = true;
-        if (strcmp(groups[i].path, "packages") == 0 &&
-            strcmp(groups[i].parent, "root") == 0) has_packages = true;
-        if (strcmp(groups[i].path, "examples") == 0 &&
-            strcmp(groups[i].parent, "root") == 0) has_examples = true;
-        if (strcmp(groups[i].path, "app") == 0 &&
-            strcmp(groups[i].parent, "root") == 0) has_src = true;
-    }
-    CI_CHECK("group hierarchy exposes physical and package-workspace roots",
-             has_libnet && has_libtest && has_appsvc && has_packages &&
-             has_examples && has_src);
+    test_codeindex_platform_arm_group_scan(groups, ng, &has_libnet,
+        &has_appsvc, &has_libtest, &has_packages, &has_examples, &has_src);
+    failures += test_codeindex_platform_arm_group_check(has_libnet,
+        has_appsvc, has_libtest, has_packages, has_examples, has_src);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_card_and_counts(struct codeindex *ci)
+{
+    int failures = 0;
 
     /* card render */
     char card[1024];
@@ -1448,6 +1641,12 @@ static int test_codeindex_platform_arm(void)
                  recur_self == direct);
         CI_CHECK("unknown group counts zero (not an error)", missing == 0);
     }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_route_parity(void)
+{
+    int failures = 0;
 
     /* ── 7b: routing-link parity — `code tests <path>`'s route MUST equal
      * `dev test plan`'s proof_group for the same single changed file. Pure
@@ -1484,10 +1683,17 @@ static int test_codeindex_platform_arm(void)
         CI_CHECK("code tests route == dev test plan proof_group (all cases)",
                  all_agree);
     }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_build_determinism(struct codeindex *ci,
+    char **dump1, char **dump2)
+{
+    int failures = 0;
 
     /* ── 1: build determinism ── */
-    char *dump1 = dump_symbols(ci);
-    CI_CHECK("dump #1 non-empty", dump1 && dump1[0]);
+    *dump1 = dump_symbols(ci);
+    CI_CHECK("dump #1 non-empty", *dump1 && (*dump1)[0]);
     CI_CHECK("legacy WAL sidecar fixture writes",
              mk_write(FIX, ".codeindex/index.kv-wal", "legacy-wal-bytes") &&
              mk_write(FIX, ".codeindex/index.kv-shm", "legacy-shm-bytes"));
@@ -1496,26 +1702,77 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("publication removes legacy WAL/SHM names",
              access(FIX "/.codeindex/index.kv-wal", F_OK) != 0 &&
              access(FIX "/.codeindex/index.kv-shm", F_OK) != 0);
-    char *dump2 = dump_symbols(ci);
+    *dump2 = dump_symbols(ci);
     CI_CHECK("rebuild is deterministic (dump identical)",
-             dump1 && dump2 && strcmp(dump1, dump2) == 0);
+             *dump1 && *dump2 && strcmp(*dump1, *dump2) == 0);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_scratch_rebuild(struct codeindex **pci,
+    char **dump1, char **dump3, uint64_t *scratch_exact_bytes)
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
 
     /* ── 3: rebuild-from-scratch identity ── */
     codeindex_close(ci);
  TEST_DISCARD(system("rm -rf " FIX "/.codeindex"));
     codeindex_test_reset_exact_bytes_read();
     ci = codeindex_open(FIX);
-    uint64_t scratch_exact_bytes = codeindex_test_exact_bytes_read();
+    (*scratch_exact_bytes) = codeindex_test_exact_bytes_read();
     printf("  codeindex: from-scratch rebuild exact_bytes=%llu\n",
-           (unsigned long long)scratch_exact_bytes);
+           (unsigned long long)(*scratch_exact_bytes));
     /* Liveness proof for the byte counter the incremental check below relies
      * on: with the store deleted the open must rehash fixture content, so a
      * zero here would mean the counter is dead, not that no work happened. */
     CI_CHECK("from-scratch rebuild rehashes content (byte counter is alive)",
-             ci && scratch_exact_bytes > 0);
-    char *dump3 = ci ? dump_symbols(ci) : NULL;
+             ci && (*scratch_exact_bytes) > 0);
+    (*dump3) = ci ? dump_symbols(ci) : NULL;
     CI_CHECK("from-scratch rebuild matches",
-             dump1 && dump3 && strcmp(dump1, dump3) == 0);
+             (*dump1) && (*dump3) && strcmp((*dump1), (*dump3)) == 0);
+    *pci = ci;
+    return failures;
+}
+
+static int test_codeindex_platform_arm_incremental_report(
+    bool incremental_wall_ok, bool incremental_bytes_ok,
+    bool incremental_cpu_ok, bool incremental_root_ok, bool full_root_ok,
+    const uint8_t *incremental_root, const uint8_t *full_root,
+    uint64_t incremental_elapsed_us, uint64_t incremental_cpu_us,
+    uint64_t incremental_exact_bytes, uint64_t scratch_exact_bytes,
+    struct test_budget incremental_budget)
+{
+    int failures = 0;
+
+    printf("INCREMENTAL_REOPEN_VERDICT=%s elapsed_us=%llu wall_ok=%d cpu_us=%llu exact_bytes=%llu scratch_bytes=%llu nominal_us=300000 budget_us=%llu load_factor=%.2f calib_us=%llu\n",
+           incremental_wall_ok ||
+           (incremental_bytes_ok && incremental_cpu_ok) ? "PASS" : "FAIL",
+           (unsigned long long)incremental_elapsed_us,
+           incremental_wall_ok ? 1 : 0,
+           (unsigned long long)incremental_cpu_us,
+           (unsigned long long)incremental_exact_bytes,
+           (unsigned long long)scratch_exact_bytes,
+           (unsigned long long)incremental_budget.effective_us,
+           incremental_budget.factor,
+           (unsigned long long)incremental_budget.calib_med_us);
+    /* Fast under the load-scaled wall budget, or provably incremental
+     * (bounded reread and CPU) when host IO stalls the wall clock. */
+    CI_CHECK("one-file incremental reopen is fast or provably bounded (load-scaled 300 ms wall budget)",
+             incremental_wall_ok ||
+             (incremental_bytes_ok && incremental_cpu_ok));
+    CI_CHECK("incremental and forced-full stores have identical logical roots",
+             incremental_root_ok && full_root_ok &&
+             memcmp(incremental_root, full_root, 32) == 0);
+    return failures;
+}
+
+static int test_codeindex_platform_arm_incremental_reopen(
+    struct codeindex **pci, uint64_t scratch_exact_bytes)
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
+    struct ci_symbol s;
+    bool found = false;
 
     /* ── 4: staleness ⇒ auto-rebuild ── */
     if (ci) codeindex_close(ci);
@@ -1557,25 +1814,22 @@ static int test_codeindex_platform_arm(void)
              incremental_bytes_ok);
     CI_CHECK("incremental reopen burns bounded CPU, not a full rebuild",
              incremental_cpu_ok);
-    printf("INCREMENTAL_REOPEN_VERDICT=%s elapsed_us=%llu wall_ok=%d cpu_us=%llu exact_bytes=%llu scratch_bytes=%llu nominal_us=300000 budget_us=%llu load_factor=%.2f calib_us=%llu\n",
-           incremental_wall_ok ||
-           (incremental_bytes_ok && incremental_cpu_ok) ? "PASS" : "FAIL",
-           (unsigned long long)incremental_elapsed_us,
-           incremental_wall_ok ? 1 : 0,
-           (unsigned long long)incremental_cpu_us,
-           (unsigned long long)incremental_exact_bytes,
-           (unsigned long long)scratch_exact_bytes,
-           (unsigned long long)incremental_budget.effective_us,
-           incremental_budget.factor,
-           (unsigned long long)incremental_budget.calib_med_us);
-    /* Fast under the load-scaled wall budget, or provably incremental
-     * (bounded reread and CPU) when host IO stalls the wall clock. */
-    CI_CHECK("one-file incremental reopen is fast or provably bounded (load-scaled 300 ms wall budget)",
-             incremental_wall_ok ||
-             (incremental_bytes_ok && incremental_cpu_ok));
-    CI_CHECK("incremental and forced-full stores have identical logical roots",
-             incremental_root_ok && full_root_ok &&
-             memcmp(incremental_root, full_root, 32) == 0);
+    failures += test_codeindex_platform_arm_incremental_report(
+        incremental_wall_ok, incremental_bytes_ok, incremental_cpu_ok,
+        incremental_root_ok, full_root_ok, incremental_root, full_root,
+        incremental_elapsed_us, incremental_cpu_us, incremental_exact_bytes,
+        scratch_exact_bytes, incremental_budget);
+    *pci = ci;
+    return failures;
+}
+
+static int test_codeindex_platform_arm_depfile_freshness(
+    struct codeindex **pci)
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
+    char includes[8][256];
+    int nincludes = 0;
 
     /* Depfiles are consumed index inputs too. A same-size edit with the exact
      * previous mtime must invalidate include edges even when every C/H byte is
@@ -1616,15 +1870,25 @@ static int test_codeindex_platform_arm(void)
              ci && nincludes == 2 &&
              strcmp(includes[0], "core/modules/net/include/net/bar.h") == 0 &&
              strcmp(includes[1], "core/modules/net/include/net/foo.h") == 0);
+    *pci = ci;
+    return failures;
+}
+
+static int test_codeindex_platform_arm_source_freshness(struct codeindex **pci,
+    char (*source_current)[16384])
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
+    struct ci_symbol s;
+    bool found = false;
 
     /* ── 9a: the freshness root is bytes, not (mtime,size). Preserve the
      * exact original mtime while changing a same-length symbol name. */
     if (ci) { codeindex_close(ci); ci = NULL; }
-    char source_current[16384];
-    snprintf(source_current, sizeof(source_current),
+    snprintf((*source_current), sizeof((*source_current)),
              "%s\nint ci_same_aaaa(void){return 1;}\n", FOO_C);
     CI_CHECK("content-freshness fixture A writes",
-             mk_write(FIX, "core/modules/net/src/foo.c", source_current));
+             mk_write(FIX, "core/modules/net/src/foo.c", (*source_current)));
     ci = codeindex_open(FIX);
     found = false;
     if (ci) codeindex_symbol(ci, "ci_same_aaaa", &s, &found);
@@ -1633,10 +1897,10 @@ static int test_codeindex_platform_arm(void)
 
     struct stat same_st;
     bool same_stat = stat(FIX "/core/modules/net/src/foo.c", &same_st) == 0;
-    char *same_name = strstr(source_current, "ci_same_aaaa");
+    char *same_name = strstr((*source_current), "ci_same_aaaa");
     if (same_name) memcpy(same_name, "ci_same_bbbb", strlen("ci_same_bbbb"));
     bool same_write = same_name &&
-        mk_write(FIX, "core/modules/net/src/foo.c", source_current);
+        mk_write(FIX, "core/modules/net/src/foo.c", (*source_current));
     struct timespec same_times[2];
     if (same_stat) {
         same_times[0] = same_st.st_atim;
@@ -1655,15 +1919,25 @@ static int test_codeindex_platform_arm(void)
     }
     CI_CHECK("source-only view rejects same-size/same-mtime stale index",
              ci && found_new && !found_old);
+    *pci = ci;
+    return failures;
+}
+
+static int test_codeindex_platform_arm_reader_publication(
+    struct codeindex **pci, char (*source_current)[16384])
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
+    struct ci_symbol s;
 
     /* ── 9b: publication is rename-over, not unlink-then-rename. A reader
      * already bound to generation A remains valid while B becomes canonical. */
     struct codeindex *old_reader = ci;
-    size_t used = strlen(source_current);
-    snprintf(source_current + used, sizeof(source_current) - used,
+    size_t used = strlen((*source_current));
+    snprintf((*source_current) + used, sizeof((*source_current)) - used,
              "int ci_retained_new(void){return 2;}\n");
     CI_CHECK("old-reader replacement fixture writes",
-             mk_write(FIX, "core/modules/net/src/foo.c", source_current));
+             mk_write(FIX, "core/modules/net/src/foo.c", (*source_current)));
     struct codeindex *new_reader = codeindex_open(FIX);
     bool old_known = false, old_new = true, new_new = false;
     if (old_reader) {
@@ -1678,6 +1952,15 @@ static int test_codeindex_platform_arm(void)
              new_reader && new_new);
     if (old_reader) codeindex_close(old_reader);
     ci = new_reader;
+    *pci = ci;
+    return failures;
+}
+
+static int test_codeindex_platform_arm_stage_substitution(struct codeindex *ci,
+    char (*source_current)[16384])
+{
+    int failures = 0;
+    size_t used = 0;
 
     /* ── 9c: a substituted stage name never receives SQLite writes. The
      * retained O_EXCL descriptor becomes unlinked, identity verification
@@ -1686,11 +1969,11 @@ static int test_codeindex_platform_arm(void)
     static const char victim_bytes[] = "stage-victim-must-not-change";
     CI_CHECK("stage-substitution victim fixture writes",
              mk_write(FIX, "stage-victim.bin", victim_bytes));
-    used = strlen(source_current);
-    snprintf(source_current + used, sizeof(source_current) - used,
+    used = strlen((*source_current));
+    snprintf((*source_current) + used, sizeof((*source_current)) - used,
              "int ci_stage_symlink(void){return 6;}\n");
     CI_CHECK("symlink-substitution source fixture writes",
-             mk_write(FIX, "core/modules/net/src/foo.c", source_current));
+             mk_write(FIX, "core/modules/net/src/foo.c", (*source_current)));
     codeindex_test_set_stage_tamper(CODEINDEX_TEST_STAGE_TAMPER_SYMLINK,
                                     victim_path);
     CI_CHECK("symlink-substituted stage is rejected",
@@ -1703,11 +1986,11 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("symlink substitution leaves no staging name",
              no_staging_files());
 
-    used = strlen(source_current);
-    snprintf(source_current + used, sizeof(source_current) - used,
+    used = strlen((*source_current));
+    snprintf((*source_current) + used, sizeof((*source_current)) - used,
              "int ci_stage_hardlink(void){return 7;}\n");
     CI_CHECK("hardlink-substitution source fixture writes",
-             mk_write(FIX, "core/modules/net/src/foo.c", source_current));
+             mk_write(FIX, "core/modules/net/src/foo.c", (*source_current)));
     codeindex_test_set_stage_tamper(CODEINDEX_TEST_STAGE_TAMPER_HARDLINK,
                                     victim_path);
     CI_CHECK("hardlink-substituted stage is rejected",
@@ -1721,16 +2004,27 @@ static int test_codeindex_platform_arm(void)
              no_staging_files());
     CI_CHECK("clean rebuild succeeds after stage substitutions",
              ci && codeindex_rebuild(ci));
+    return failures;
+}
+
+static int test_codeindex_platform_arm_crash_lock(struct codeindex **pci,
+    char (*source_current)[16384])
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
+    size_t used = 0;
+    struct ci_symbol s;
+    bool found = false;
 
     /* ── 9d: process death before rename leaves the old generation; a later
      * open removes the abandoned unique stage and publishes a complete new
      * generation. */
     if (ci) { codeindex_close(ci); ci = NULL; }
-    used = strlen(source_current);
-    snprintf(source_current + used, sizeof(source_current) - used,
+    used = strlen((*source_current));
+    snprintf((*source_current) + used, sizeof((*source_current)) - used,
              "int ci_crash_before(void){return 3;}\n");
     CI_CHECK("pre-rename crash fixture writes",
-             mk_write(FIX, "core/modules/net/src/foo.c", source_current));
+             mk_write(FIX, "core/modules/net/src/foo.c", (*source_current)));
     CI_CHECK("SIGKILL fires immediately before publication rename",
              crash_rebuild_at(CODEINDEX_TEST_CRASH_BEFORE_RENAME));
     CI_CHECK("pre-rename crash preserves the prior canonical generation",
@@ -1745,11 +2039,11 @@ static int test_codeindex_platform_arm(void)
      * committed new file. Directory fsync is a power-loss boundary; SIGKILL
      * cannot manufacture a hybrid SQLite generation. */
     if (ci) { codeindex_close(ci); ci = NULL; }
-    used = strlen(source_current);
-    snprintf(source_current + used, sizeof(source_current) - used,
+    used = strlen((*source_current));
+    snprintf((*source_current) + used, sizeof((*source_current)) - used,
              "int ci_crash_after(void){return 4;}\n");
     CI_CHECK("post-rename crash fixture writes",
-             mk_write(FIX, "core/modules/net/src/foo.c", source_current));
+             mk_write(FIX, "core/modules/net/src/foo.c", (*source_current)));
     CI_CHECK("SIGKILL fires immediately after publication rename",
              crash_rebuild_at(CODEINDEX_TEST_CRASH_AFTER_RENAME));
     CI_CHECK("post-rename crash exposes one complete new generation",
@@ -1763,11 +2057,11 @@ static int test_codeindex_platform_arm(void)
     /* A directory capability removed between validation and O_CREAT is
      * reacquired and revalidated (the ENOENT boundary of the 32-way case). */
     if (ci) { codeindex_close(ci); ci = NULL; }
-    used = strlen(source_current);
-    snprintf(source_current + used, sizeof(source_current) - used,
+    used = strlen((*source_current));
+    snprintf((*source_current) + used, sizeof((*source_current)) - used,
              "int ci_lock_dir_retry(void){return 8;}\n");
     CI_CHECK("lock-directory retry fixture writes",
-             mk_write(FIX, "core/modules/net/src/foo.c", source_current));
+             mk_write(FIX, "core/modules/net/src/foo.c", (*source_current)));
     (void)test_rm_rf_recursive(FIX "/.codeindex");
     codeindex_test_remove_lock_directory_once();
     ci = codeindex_open(FIX);
@@ -1775,15 +2069,27 @@ static int test_codeindex_platform_arm(void)
     if (ci) codeindex_symbol(ci, "ci_lock_dir_retry", &s, &found);
     CI_CHECK("cold open reacquires a removed lock-directory capability",
              ci && found);
+    *pci = ci;
+    return failures;
+}
+
+static int test_codeindex_platform_arm_concurrent_publication(
+    struct codeindex **pci, char (*source_current)[16384])
+{
+    int failures = 0;
+    struct codeindex *ci = *pci;
+    size_t used = 0;
+    struct ci_symbol s;
+    bool found = false;
 
     /* ── 9e: 32 processes start with no index. Exactly one rebuilds; losers
      * wait, recheck the winner's content root, and adopt it. */
     if (ci) { codeindex_close(ci); ci = NULL; }
-    used = strlen(source_current);
-    snprintf(source_current + used, sizeof(source_current) - used,
+    used = strlen((*source_current));
+    snprintf((*source_current) + used, sizeof((*source_current)) - used,
              "int ci_concurrent_32(void){return 5;}\n");
     CI_CHECK("32-way cold-open fixture writes",
-             mk_write(FIX, "core/modules/net/src/foo.c", source_current));
+             mk_write(FIX, "core/modules/net/src/foo.c", (*source_current)));
  TEST_DISCARD(system("rm -rf " FIX "/.codeindex"));
     CI_CHECK("32 concurrent cold opens all adopt one complete generation",
              concurrent_open_32("ci_concurrent_32"));
@@ -1803,30 +2109,17 @@ static int test_codeindex_platform_arm(void)
     if (ci) codeindex_symbol(ci, "foo_main", &s, &found);
     CI_CHECK("corrupted row is rejected on read", ci && found == false);
     if (ci) codeindex_close(ci);
+    *pci = ci;
+    return failures;
+}
 
-    free(dump1); free(dump2); free(dump3);
+static int test_codeindex_platform_arm_module_classification(size_t cn,
+    const char *const *code)
+{
+    int failures = 0;
+    struct ci_context_assignment assignment;
 
-    /* ── 6: group parity vs the lib/ tree + shapes ── */
     {
-        static char mk[CI_DISK_MODULES_MAX][CI_DISK_MODULE_NAME];
-        int mn = disk_lib_modules(mk);
-        size_t cn = 0;
-        const char *const *code = ci_lib_modules(&cn);
-        CI_CHECK("module-list fixture has room for the declared module list",
-                 disk_lib_modules_fit(mn));
-        /* set equality (both directions) */
-        bool all_mk_in_code = true, all_code_in_mk = true;
-        for (int i = 0; i < mn; i++) {
-            bool hit = false;
-            for (size_t j = 0; j < cn; j++)
-                if (strcmp(mk[i], code[j]) == 0) { hit = true; break; }
-            if (!hit) all_mk_in_code = false;
-        }
-        for (size_t j = 0; j < cn; j++)
-            if (!set_contains(mk, mn, code[j])) all_code_in_mk = false;
-        CI_CHECK("module list resolves to the physical module tree",
-                 mn > 0 && (size_t)mn == cn && all_mk_in_code && all_code_in_mk);
-
         bool modules_classified = true;
         for (size_t i = 0; i < cn; i++) {
             char path[128];
@@ -1849,7 +2142,15 @@ static int test_codeindex_platform_arm(void)
         }
         CI_CHECK("every canonical module has one context and module shape",
                  cn > 0 && modules_classified);
+    }
+    return failures;
+}
 
+static int test_codeindex_platform_arm_module_shapes(void)
+{
+    int failures = 0;
+
+    {
         size_t sn = 0;
         const char *const *shapes = ci_app_shapes(&sn);
         /* Seven physical app/ shape folders. Event (the eighth conceptual
@@ -1866,6 +2167,113 @@ static int test_codeindex_platform_arm(void)
         }
         CI_CHECK("app shape list is the seven physical shape folders", shapes_ok);
     }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_module_set(void)
+{
+    int failures = 0;
+
+    /* ── 6: group parity vs the lib/ tree + shapes ── */
+    {
+        static char mk[CI_DISK_MODULES_MAX][CI_DISK_MODULE_NAME];
+        int mn = disk_lib_modules(mk);
+        size_t cn = 0;
+        const char *const *code = ci_lib_modules(&cn);
+        CI_CHECK("module-list fixture has room for the declared module list",
+                 disk_lib_modules_fit(mn));
+        /* set equality (both directions) */
+        bool all_mk_in_code = true, all_code_in_mk = true;
+        for (int i = 0; i < mn; i++) {
+            bool hit = false;
+            for (size_t j = 0; j < cn; j++)
+                if (strcmp(mk[i], code[j]) == 0) { hit = true; break; }
+            if (!hit) all_mk_in_code = false;
+        }
+        for (size_t j = 0; j < cn; j++)
+            if (!set_contains(mk, mn, code[j])) all_code_in_mk = false;
+        CI_CHECK("module list resolves to the physical module tree",
+                 mn > 0 && (size_t)mn == cn && all_mk_in_code && all_code_in_mk);
+        failures += test_codeindex_platform_arm_module_classification(cn,
+            code);
+        failures += test_codeindex_platform_arm_module_shapes();
+    }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_schema_migration(void)
+{
+    int failures = 0;
+
+    {
+        /* ── 11: schema-version migration — a store missing ci_schema_version
+         * is stale and fully rebuilds on the next open (recompute never repair). */
+        /* The expected tag is READ from the fresh build, never spelled out
+         * here. CI_SCHEMA_VERSION lives in codeindex_priv.h, which this TU
+         * cannot see; a literal copy of it in the test is a second source of
+         * truth that goes stale silently the moment the real one is bumped —
+         * and bumping it is routine, since any derived-schema change is
+         * required to. What is under test is the INVARIANT (a store that
+         * lost the key rebuilds and gets stamped again with whatever the
+         * current generation is), not the spelling of one generation. */
+        char meta_val[64];
+        char stamped[64];
+        CI_CHECK("fresh index stamps ci_schema_version",
+                 published_meta_get(CG_FIX "/.codeindex/index.kv",
+                                    "ci_schema_version", stamped,
+                                    sizeof(stamped)) &&
+                 stamped[0] != '\0');
+        CI_CHECK("drop the ci_schema_version key from the published index",
+                 delete_meta_key(CG_FIX "/.codeindex/index.kv",
+                                 "ci_schema_version"));
+        CI_CHECK("key is genuinely absent after delete",
+                 !published_meta_get(CG_FIX "/.codeindex/index.kv",
+                                     "ci_schema_version", meta_val,
+                                     sizeof(meta_val)));
+        failures += check_existing_full_freshness_stale(
+            CG_FIX, "full freshness rejects absent schema metadata");
+        struct codeindex *migr = codeindex_open(CG_FIX);
+        CI_CHECK("open with absent ci_schema_version rebuilds", migr != NULL);
+        CI_CHECK("rebuild restamps ci_schema_version",
+                 published_meta_get(CG_FIX "/.codeindex/index.kv",
+                                    "ci_schema_version", meta_val,
+                                    sizeof(meta_val)) &&
+                 strcmp(meta_val, stamped) == 0);
+        if (migr) {
+            struct ci_ref refs[16];
+            int ne = codeindex_callees(migr, "cg_main", refs, 16);
+            CI_CHECK("call graph intact after migration rebuild", ne == 2);
+            codeindex_close(migr);
+        }
+        failures += check_prior_scan_epoch(CG_FIX, stamped);
+ TEST_DISCARD(system("rm -rf " CG_FIX));
+    }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_symbol_ids(struct codeindex *cg)
+{
+    int failures = 0;
+
+    /* Linkage-aware ids: static functions are path-scoped, external
+     * functions name-scoped, other kinds namespaced by kind. */
+    char id[512];
+    int il = codeindex_symbol_id(cg, "cg_helper", id, sizeof(id));
+    CI_CHECK("symbol_id(static fn) is path-scoped",
+             il > 0 &&
+             strcmp(id, "fn:static:core/modules/net/src/cg.c:cg_helper") == 0);
+    il = codeindex_symbol_id(cg, "cg_main", id, sizeof(id));
+    CI_CHECK("symbol_id(external fn) is name-scoped",
+             il > 0 && strcmp(id, "fn:external:cg_main") == 0);
+    il = codeindex_symbol_id(cg, "no_such_symbol_xyz", id, sizeof(id));
+    CI_CHECK("symbol_id(missing) reports not-found", il == -1);
+
+    return failures;
+}
+
+static int test_codeindex_platform_arm_call_graph(void)
+{
+    int failures = 0;
 
     /* ── 10: call graph (enclosing attribution, callers/callees, ids) ──
      * A dedicated clean fixture: the shared FIX foo.c has been mutated by the
@@ -1914,66 +2322,113 @@ static int test_codeindex_platform_arm(void)
             CI_CHECK("cg_main has no callers, cg_helper has no callees",
                      nc0 == 0 && ne0 == 0);
 
-            /* Linkage-aware ids: static functions are path-scoped, external
-             * functions name-scoped, other kinds namespaced by kind. */
-            char id[512];
-            int il = codeindex_symbol_id(cg, "cg_helper", id, sizeof(id));
-            CI_CHECK("symbol_id(static fn) is path-scoped",
-                     il > 0 &&
-                     strcmp(id, "fn:static:core/modules/net/src/cg.c:cg_helper") == 0);
-            il = codeindex_symbol_id(cg, "cg_main", id, sizeof(id));
-            CI_CHECK("symbol_id(external fn) is name-scoped",
-                     il > 0 && strcmp(id, "fn:external:cg_main") == 0);
-            il = codeindex_symbol_id(cg, "no_such_symbol_xyz", id, sizeof(id));
-            CI_CHECK("symbol_id(missing) reports not-found", il == -1);
+            failures += test_codeindex_platform_arm_symbol_ids(cg);
 
             codeindex_close(cg);
             cg = NULL;
         }
 
-        /* ── 11: schema-version migration — a store missing ci_schema_version
-         * is stale and fully rebuilds on the next open (recompute never repair). */
-        /* The expected tag is READ from the fresh build, never spelled out
-         * here. CI_SCHEMA_VERSION lives in codeindex_priv.h, which this TU
-         * cannot see; a literal copy of it in the test is a second source of
-         * truth that goes stale silently the moment the real one is bumped —
-         * and bumping it is routine, since any derived-schema change is
-         * required to. What is under test is the INVARIANT (a store that
-         * lost the key rebuilds and gets stamped again with whatever the
-         * current generation is), not the spelling of one generation. */
-        char meta_val[64];
-        char stamped[64];
-        CI_CHECK("fresh index stamps ci_schema_version",
-                 published_meta_get(CG_FIX "/.codeindex/index.kv",
-                                    "ci_schema_version", stamped,
-                                    sizeof(stamped)) &&
-                 stamped[0] != '\0');
-        CI_CHECK("drop the ci_schema_version key from the published index",
-                 delete_meta_key(CG_FIX "/.codeindex/index.kv",
-                                 "ci_schema_version"));
-        CI_CHECK("key is genuinely absent after delete",
-                 !published_meta_get(CG_FIX "/.codeindex/index.kv",
-                                     "ci_schema_version", meta_val,
-                                     sizeof(meta_val)));
-        failures += check_existing_full_freshness_stale(
-            CG_FIX, "full freshness rejects absent schema metadata");
-        struct codeindex *migr = codeindex_open(CG_FIX);
-        CI_CHECK("open with absent ci_schema_version rebuilds", migr != NULL);
-        CI_CHECK("rebuild restamps ci_schema_version",
-                 published_meta_get(CG_FIX "/.codeindex/index.kv",
-                                    "ci_schema_version", meta_val,
-                                    sizeof(meta_val)) &&
-                 strcmp(meta_val, stamped) == 0);
-        if (migr) {
-            struct ci_ref refs[16];
-            int ne = codeindex_callees(migr, "cg_main", refs, 16);
-            CI_CHECK("call graph intact after migration rebuild", ne == 2);
-            codeindex_close(migr);
-        }
-        failures += check_prior_scan_epoch(CG_FIX, stamped);
- TEST_DISCARD(system("rm -rf " CG_FIX));
+        failures += test_codeindex_platform_arm_schema_migration();
     }
+    return failures;
+}
 
+static int test_codeindex_platform_arm_closure_terminal(struct codeindex *cl,
+    const char changed[1][256])
+{
+    int failures = 0;
+    if (cl) {
+        char outt[64][256];
+        bool trunct = true;
+        int nt = codeindex_impact_closure_with_terminal(
+            cl, changed, 1, 0, cl_test_tree_terminal, NULL,
+            outt, 64, &trunct);
+        CI_CHECK("terminal callback records test leaf but does not "
+                 "walk into umbrella harness",
+                 nt == 4 && !trunct &&
+                 strcmp(outt[0], "core/modules/net/src/cl_a.c") == 0 &&
+                 strcmp(outt[1], "core/modules/net/src/cl_b.c") == 0 &&
+                 strcmp(outt[2], "core/modules/net/src/cl_c.c") == 0 &&
+                 strcmp(outt[3], "tests/harness/src/test_cl.c") == 0);
+    }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_closure_repeat(struct codeindex *cl,
+    const char changed[1][256], char out[64][256], int n, bool trunc)
+{
+    int failures = 0;
+    if (cl) {
+        /* Deterministic: a second identical query yields the identical set. */
+        char out2[64][256];
+        bool trunc2 = true;
+        int n2 = codeindex_impact_closure(cl, changed, 1, 0, out2, 64,
+                                          &trunc2);
+        bool same = (n2 == n && trunc2 == trunc);
+        for (int i = 0; same && i < n; i++)
+            if (strcmp(out[i], out2[i]) != 0) same = false;
+        CI_CHECK("closure is deterministic across repeated queries", same);
+    }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_closure_depth_cap(struct codeindex *cl,
+    const char changed[1][256])
+{
+    int failures = 0;
+    if (cl) {
+        /* Depth bound: depth=1 reaches the direct caller only (cl_b.c), not
+         * cl_a.c — depth exhaustion is a normal bound, NOT truncation. */
+        char outd[64][256];
+        bool truncd = true;
+        int nd = codeindex_impact_closure(cl, changed, 1, 1, outd, 64,
+                                          &truncd);
+        CI_CHECK("closure depth=1 = {cl_b.c, cl_c.c}, not truncated",
+                 nd == 2 && !truncd &&
+                 strcmp(outd[0], "core/modules/net/src/cl_b.c") == 0 &&
+                 strcmp(outd[1], "core/modules/net/src/cl_c.c") == 0);
+
+        /* Cap honoured: a cap smaller than the closure sets truncated and
+         * returns exactly `cap` rows (the sorted prefix). */
+        char outc[1][256];
+        bool truncc = false;
+        int nc = codeindex_impact_closure(cl, changed, 1, 0, outc, 1,
+                                          &truncc);
+        CI_CHECK("closure honours cap: cap=1 -> 1 row + truncated flag",
+                 nc == 1 && truncc &&
+                 strcmp(outc[0], "core/modules/net/src/cl_a.c") == 0);
+    }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_closure_lone(struct codeindex *cl,
+    const char changed[1][256], char out[64][256])
+{
+    int failures = 0;
+    if (cl) {
+        /* A leaf change with no callers impacts only the changed file. */
+        const char lone[1][256] = { "tests/harness/src/test.c" };
+        char outl[64][256];
+        bool truncl = true;
+        int nl = codeindex_impact_closure(cl, lone, 1, 0, outl, 64, &truncl);
+        CI_CHECK("closure(test.c) = itself only (no callers)",
+                 nl == 1 && !truncl &&
+                 strcmp(outl[0], "tests/harness/src/test.c") == 0);
+
+        /* Bad args are rejected (not found is never an error). */
+        bool tb = false;
+        CI_CHECK("closure rejects null out / non-positive cap",
+                 codeindex_impact_closure(cl, changed, 1, 0, NULL, 64,
+                                          &tb) == -1 &&
+                 codeindex_impact_closure(cl, changed, 1, 0, out, 0,
+                                          &tb) == -1);
+    }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_impact_closure(void)
+{
+    int failures = 0;
     /* ── 12: impact closure (F3, proof-DAG from symbol closure) ──
      * cl_a -> cl_b -> cl_c across three files; changing cl_c.c's file must
      * impact cl_b.c and cl_a.c too. Deterministic, depth-bounded, cap-honoured. */
@@ -1998,71 +2453,24 @@ static int test_codeindex_platform_arm(void)
                      strcmp(out[3], "tests/harness/src/test.c") == 0 &&
                      strcmp(out[4], "tests/harness/src/test_cl.c") == 0);
 
-            char outt[64][256];
-            bool trunct = true;
-            int nt = codeindex_impact_closure_with_terminal(
-                cl, changed, 1, 0, cl_test_tree_terminal, NULL,
-                outt, 64, &trunct);
-            CI_CHECK("terminal callback records test leaf but does not "
-                     "walk into umbrella harness",
-                     nt == 4 && !trunct &&
-                     strcmp(outt[0], "core/modules/net/src/cl_a.c") == 0 &&
-                     strcmp(outt[1], "core/modules/net/src/cl_b.c") == 0 &&
-                     strcmp(outt[2], "core/modules/net/src/cl_c.c") == 0 &&
-                     strcmp(outt[3], "tests/harness/src/test_cl.c") == 0);
+        failures += test_codeindex_platform_arm_closure_terminal(cl, changed);
 
-            /* Deterministic: a second identical query yields the identical set. */
-            char out2[64][256];
-            bool trunc2 = true;
-            int n2 = codeindex_impact_closure(cl, changed, 1, 0, out2, 64,
-                                              &trunc2);
-            bool same = (n2 == n && trunc2 == trunc);
-            for (int i = 0; same && i < n; i++)
-                if (strcmp(out[i], out2[i]) != 0) same = false;
-            CI_CHECK("closure is deterministic across repeated queries", same);
+        failures += test_codeindex_platform_arm_closure_repeat(cl, changed,
+            out, n, trunc);
 
-            /* Depth bound: depth=1 reaches the direct caller only (cl_b.c), not
-             * cl_a.c — depth exhaustion is a normal bound, NOT truncation. */
-            char outd[64][256];
-            bool truncd = true;
-            int nd = codeindex_impact_closure(cl, changed, 1, 1, outd, 64,
-                                              &truncd);
-            CI_CHECK("closure depth=1 = {cl_b.c, cl_c.c}, not truncated",
-                     nd == 2 && !truncd &&
-                     strcmp(outd[0], "core/modules/net/src/cl_b.c") == 0 &&
-                     strcmp(outd[1], "core/modules/net/src/cl_c.c") == 0);
+        failures += test_codeindex_platform_arm_closure_depth_cap(cl, changed);
 
-            /* Cap honoured: a cap smaller than the closure sets truncated and
-             * returns exactly `cap` rows (the sorted prefix). */
-            char outc[1][256];
-            bool truncc = false;
-            int nc = codeindex_impact_closure(cl, changed, 1, 0, outc, 1,
-                                              &truncc);
-            CI_CHECK("closure honours cap: cap=1 -> 1 row + truncated flag",
-                     nc == 1 && truncc &&
-                     strcmp(outc[0], "core/modules/net/src/cl_a.c") == 0);
-
-            /* A leaf change with no callers impacts only the changed file. */
-            const char lone[1][256] = { "tests/harness/src/test.c" };
-            char outl[64][256];
-            bool truncl = true;
-            int nl = codeindex_impact_closure(cl, lone, 1, 0, outl, 64, &truncl);
-            CI_CHECK("closure(test.c) = itself only (no callers)",
-                     nl == 1 && !truncl &&
-                     strcmp(outl[0], "tests/harness/src/test.c") == 0);
-
-            /* Bad args are rejected (not found is never an error). */
-            bool tb = false;
-            CI_CHECK("closure rejects null out / non-positive cap",
-                     codeindex_impact_closure(cl, changed, 1, 0, NULL, 64,
-                                              &tb) == -1 &&
-                     codeindex_impact_closure(cl, changed, 1, 0, out, 0,
-                                              &tb) == -1);
-
+        failures += test_codeindex_platform_arm_closure_lone(cl, changed, out);
             codeindex_close(cl);
         }
  TEST_DISCARD(system("rm -rf " CL_FIX));
     }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_metrics(void)
+{
+    int failures = 0;
 
     /* ── code.index.metrics: schema, receipt parity, stale without rebuild ── */
     {
@@ -2123,7 +2531,89 @@ static int test_codeindex_platform_arm(void)
         json_free(&input);
  TEST_DISCARD(system("rm -rf " MET_FIX));
     }
+    return failures;
+}
 
+static int test_codeindex_platform_arm(void)
+{
+    int failures = 0;
+
+    failures += test_codeindex_platform_arm_context_map();
+    failures += test_codeindex_platform_arm_context_owners();
+
+ TEST_DISCARD(system("rm -rf " FIX));
+    if (!write_fixture()) {
+        printf("  codeindex: write_fixture... FAIL\n");
+        return failures + 1;
+    }
+
+    /* ── open (triggers first build) ── */
+    struct codeindex *ci = codeindex_open(FIX);
+    CI_CHECK("open builds index", ci != NULL);
+    if (!ci) return failures + 1;
+
+    failures += check_assertion_symbols(ci);
+
+    failures += test_codeindex_platform_arm_production_coverage(ci);
+
+    failures += test_codeindex_platform_arm_symbol_queries(ci);
+    failures += test_codeindex_platform_arm_symbol_text(ci);
+
+    struct zcode_goal_selection selected, selected_again, selected_indexed;
+    failures += test_codeindex_platform_arm_goal_ranking(&selected);
+    bool indexed_same = test_codeindex_platform_arm_indexed_match(ci,
+        &selected, &selected_indexed);
+    failures += test_codeindex_platform_arm_indexed_loops(indexed_same,
+        &selected, &selected_indexed);
+    failures += test_codeindex_platform_arm_goal_repeat(&selected,
+        &selected_again);
+    failures += test_codeindex_platform_arm_goal_saturation(&selected);
+    failures += test_codeindex_platform_arm_goal_literal(ci, &selected_indexed);
+
+    failures += ci_selector_late_targets(ci);
+    failures += ci_selector_identifier_boundaries(ci);
+    failures += ci_selector_multiple_targets(ci);
+
+    failures += test_codeindex_platform_arm_refs(ci);
+    failures += test_codeindex_platform_arm_warm_epoch(&ci);
+    failures += test_codeindex_platform_arm_repoint_generation(&ci);
+    failures += test_codeindex_platform_arm_depfile_inventory();
+    failures += test_codeindex_platform_arm_insecure_directory(&ci);
+    failures += test_codeindex_platform_arm_file_purpose(ci);
+    failures += test_codeindex_platform_arm_engine_entry_symbols(ci);
+    failures += test_codeindex_platform_arm_fixture_roots(ci);
+    failures += test_codeindex_platform_arm_source_counts(ci);
+    failures += test_codeindex_platform_arm_group_roots(ci);
+    failures += test_codeindex_platform_arm_card_and_counts(ci);
+    failures += test_codeindex_platform_arm_route_parity();
+
+    char *dump1 = NULL, *dump2 = NULL, *dump3 = NULL;
+    failures += test_codeindex_platform_arm_build_determinism(ci, &dump1,
+        &dump2);
+    uint64_t scratch_exact_bytes = 0;
+    failures += test_codeindex_platform_arm_scratch_rebuild(&ci, &dump1,
+        &dump3, &scratch_exact_bytes);
+    failures += test_codeindex_platform_arm_incremental_reopen(&ci,
+        scratch_exact_bytes);
+    failures += test_codeindex_platform_arm_depfile_freshness(&ci);
+
+    char source_current[16384];
+    failures += test_codeindex_platform_arm_source_freshness(&ci,
+        &source_current);
+    failures += test_codeindex_platform_arm_reader_publication(&ci,
+        &source_current);
+    failures += test_codeindex_platform_arm_stage_substitution(ci,
+        &source_current);
+    failures += test_codeindex_platform_arm_crash_lock(&ci, &source_current);
+    failures += test_codeindex_platform_arm_concurrent_publication(&ci,
+        &source_current);
+
+    free(dump1); free(dump2); free(dump3);
+
+    failures += test_codeindex_platform_arm_module_set();
+    failures += test_codeindex_platform_arm_call_graph();
+    failures += test_codeindex_platform_arm_impact_closure();
+    failures += test_codeindex_platform_arm_metrics();
     return failures;
 }
 #else  /* _WIN32 */
