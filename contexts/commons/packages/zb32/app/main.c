@@ -10,7 +10,22 @@
 #include <stdio.h>
 #include <string.h>
 
-int main(int argc, char **argv) {
+static bool cli_read(FILE *source, unsigned char *in, size_t cap, size_t *n) {
+  *n = fread(in, 1, cap, source);
+  if (*n == cap && !ferror(source))
+    (void)fgetc(source);
+  if (ferror(source)) {
+    fprintf(stderr, "zb32: error reading stdin\n");
+    return false;
+  }
+  if (*n == cap && !feof(source)) {
+    fprintf(stderr, "zb32: input too large (max %zu)\n", cap);
+    return false;
+  }
+  return true;
+}
+
+static int cli_run(int argc, char **argv, FILE *source, FILE *output) {
   static unsigned char in[40960];
   static char out[sizeof(in) * 2 + 8];
   int dec;
@@ -21,15 +36,7 @@ int main(int argc, char **argv) {
     return 2;
   }
   dec = strcmp(argv[1], "decode") == 0;
-  n = fread(in, 1, sizeof(in), stdin);
-  if (ferror(stdin)) {
-    fprintf(stderr, "zb32: error reading stdin\n");
-    return 1;
-  }
-  if (n == sizeof(in) && !feof(stdin)) {
-    fprintf(stderr, "zb32: input too large (max %zu)\n", sizeof(in));
-    return 1;
-  }
+  if (!cli_read(source, in, sizeof in, &n)) return 1;
   {
     size_t need = dec ? zb32_decode(out, sizeof(out), (char *)in, n)
                       : zb32_encode(out, sizeof(out), in, n);
@@ -38,10 +45,15 @@ int main(int argc, char **argv) {
               dec ? "decode" : "encode");
       return 1;
     }
-    if (fwrite(out, 1, need, stdout) != need) {
+    if (fwrite(out, 1, need, output) != need ||
+        fflush(output) != 0 || ferror(output)) {
       fprintf(stderr, "zb32: write error\n");
       return 1;
     }
   }
   return 0;
+}
+
+int main(int argc, char **argv) {
+  return cli_run(argc, argv, stdin, stdout);
 }

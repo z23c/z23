@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define main zb32_cli_main
+#include "../app/main.c"
+#undef main
+
 static int g_fail = 0;
 #define CHECK(cond)                                                     \
   do {                                                                  \
@@ -144,7 +148,83 @@ static void test_decoded_bound(void) {
   CHECK(zb32_decoded_len(wire, sizeof wire) == SIZE_MAX);
 }
 
+static int cli_case(char *mode, const char *data, int status, const char *expected) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (fputs(data, source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  char *argv[] = {"zb32", mode, NULL};
+  if (cli_run(2, argv, source, output) != status) goto cleanup;
+  rewind(output);
+  char bytes[64];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  if (ferror(output) || n != strlen(expected)) goto cleanup;
+  if (memcmp(bytes, expected, n) != 0) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static int cli_bound(char *mode, size_t size, int status, long output_size) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  for (size_t i = 0; i < size; i++)
+    if (fputc('A', source) == EOF) goto cleanup;
+  if (fflush(source) != 0) goto cleanup;
+  rewind(source);
+  char *argv[] = {"zb32", mode, NULL};
+  if (cli_run(2, argv, source, output) != status) goto cleanup;
+  if (ftell(output) != output_size) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static int cli_output_error(const char *path, const char *access) {
+  FILE *source = tmpfile(), *output = fopen(path, access);
+  int failed = 1;
+  char buffer[4096];
+  if (!source || !output) goto cleanup;
+  if (setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+  if (fputs("f", source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  char *argv[] = {"zb32", "encode", NULL};
+  if (cli_run(2, argv, source, output) != 1 || !ferror(output)) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output) (void)fclose(output);
+  return failed;
+}
+
+static void test_cli(void) {
+  CHECK(cli_case("encode", "foo", 0, "MZXW6===") == 0);
+  CHECK(cli_case("decode", "MZXW6===", 0, "foo") == 0);
+  CHECK(cli_case("encode", "", 0, "") == 0);
+  CHECK(cli_case("decode", "MZ======", 1, "") == 0);
+  CHECK(cli_case("decode", "MY======\n", 1, "") == 0);
+  CHECK(cli_bound("encode", 40959, 0, 65536) == 0);
+  CHECK(cli_bound("encode", 40960, 0, 65536) == 0);
+  CHECK(cli_bound("encode", 40961, 1, 0) == 0);
+  CHECK(cli_bound("decode", 40960, 0, 25600) == 0);
+#if defined(_WIN32)
+  CHECK(cli_output_error("NUL", "r") == 0);
+#else
+  CHECK(cli_output_error("/dev/null", "r") == 0);
+#endif
+#if defined(__linux__)
+  CHECK(cli_output_error("/dev/full", "w") == 0);
+#endif
+}
+
 int main(void) {
+  test_cli();
   test_decoded_bound();
   test_kat();
   test_err();
