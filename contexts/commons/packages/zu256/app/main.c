@@ -73,13 +73,25 @@ static int binary_command(const char *op, zu256256 a, zu256256 b)
     }
 }
 
-int main(int argc, char **argv)
+static int check_arity(int argc, char **argv)
 {
     if (argc < 3) {
         fprintf(stderr,
             "usage: zu256 add|sub|mul|div|mod A B | shl|shr A N | dec|hex A\n");
         return 2;
     }
+    int expected = strcmp(argv[1], "dec") == 0 || strcmp(argv[1], "hex") == 0 ? 3 : 4;
+    if (argc != expected) {
+        fprintf(stderr, "zu256: %s expects %d operand%s\n", argv[1],
+                expected - 2, expected == 3 ? "" : "s");
+        return 2;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (check_arity(argc, argv)) return 2;
     zu256256 a, b;
     if (!parse(argv[2], &a)) {
         fprintf(stderr, "zu256: bad number %s\n", argv[2]);
@@ -92,10 +104,6 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "hex") == 0) {
         return show(a);
-    }
-    if (argc < 4) {
-        fprintf(stderr, "zu256: missing operand\n");
-        return 2;
     }
     if (strcmp(argv[1], "shl") == 0 || strcmp(argv[1], "shr") == 0) {
         unsigned n;

@@ -258,12 +258,43 @@ static void test_cli_shift_counts(void)
     CHECK(cli_shift_case("shl", "1", "1", 0, want, true) == 0);
 }
 
+static void test_cli_arity(void)
+{
+    static const char *ops[] = {"dec", "hex", "add", "sub", "mul", "div", "mod", "shl", "shr"};
+    static const unsigned results[] = {8, 8, 10, 6, 16, 4, 0, 32, 2};
+    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++) {
+        int exact = i < 2 ? 3 : 4;
+        for (int argc = 1; argc <= 6; argc++) {
+            char *args[] = {"zu256", (char *)ops[i], "8", "2", "extra", "extra", NULL};
+            args[argc] = NULL;
+            cli_sink = tmpfile(); cli_errors = tmpfile();
+            CHECK(cli_sink && cli_errors);
+            int rc = zu256_cli_main(argc, args);
+            CHECK(rc == (argc == exact ? 0 : 2));
+            CHECK(fflush(cli_sink) == 0 && fflush(cli_errors) == 0);
+            CHECK(ftell(cli_sink) == (argc == exact ? (i == 0 ? 2L : 67L) : 0L));
+            if (argc == exact) {
+                char expected[80], actual[80] = {0};
+                if (i == 0) snprintf(expected, sizeof expected, "%u\n", results[i]);
+                else snprintf(expected, sizeof expected, "0x%064x\n", results[i]);
+                rewind(cli_sink);
+                CHECK(fread(actual, 1, sizeof actual - 1, cli_sink) == strlen(expected));
+                CHECK(strcmp(actual, expected) == 0);
+            }
+            if (argc != exact) { CHECK(ftell(cli_errors) > 0); }
+            CHECK(fclose(cli_sink) == 0 && fclose(cli_errors) == 0);
+        }
+    }
+    cli_sink = stdout; cli_errors = NULL;
+}
+
 static void test_cli_output(void);
 
 int main(void)
 {
     cli_sink = stdout;
     test_cli_output();
+    test_cli_arity();
     test_cli_shift_counts();
     test_cli_rejects_unknown_operations();
     test_identities();
