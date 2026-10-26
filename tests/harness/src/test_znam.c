@@ -482,6 +482,106 @@ static bool znam_test_register(struct node_db *ndb, const char *name,
     return db_znam_save(ndb, &e);
 }
 
+static int znam_test_wallet_seed_names(struct node_db *ndb,
+                                       const char *mine_addr,
+                                       const char *watched_addr,
+                                       const char *stranger_addr)
+{
+    int failures = 0;
+
+    bool seeded = znam_test_register(ndb, "mine", mine_addr, 100) &&
+                  znam_test_register(ndb, "watched", watched_addr, 200) &&
+                  znam_test_register(ndb, "notmine", stranger_addr, 300);
+    printf("znam wallet: seeded three registered names... ");
+    if (seeded) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
+static int znam_test_wallet_no_keys(struct node_db *ndb,
+                                    struct znam_entry *owned)
+{
+    int failures = 0;
+
+    printf("znam wallet: a wallet with no keys owns 0 names "
+           "(empty, not an error)... ");
+    { int n = db_znam_list_wallet_owned(ndb, owned, 8);
+      int a = db_znam_wallet_address_count(ndb);
+      int all = db_znam_list(ndb, owned, 8);
+      if (n == 0 && a == 0 && all == 3) printf("OK\n");
+      else { printf("FAIL (owned=%d addrs=%d registry=%d)\n", n, a, all);
+             failures++; } }
+
+    return failures;
+}
+
+static int znam_test_wallet_key_claims(struct node_db *ndb,
+                                       struct znam_entry *owned,
+                                       const char *mine_addr)
+{
+    int failures = 0;
+
+    printf("znam wallet: a wallet key claims its own name and not the "
+           "stranger's... ");
+    { int n = db_znam_list_wallet_owned(ndb, owned, 8);
+      if (n == 1 && strcmp(owned[0].name, "mine") == 0 &&
+          strcmp(owned[0].owner_address, mine_addr) == 0 &&
+          owned[0].reg_height == 100 && owned[0].expiry_height == 1100)
+          printf("OK\n");
+      else { printf("FAIL (n=%d name=%s expiry=%d)\n", n,
+                    n > 0 ? owned[0].name : "-",
+                    n > 0 ? owned[0].expiry_height : -1); failures++; } }
+
+    printf("znam wallet: the wallet-wide answer matches the per-owner one... ");
+    { struct znam_entry by_owner[8];
+      int a = db_znam_list_wallet_owned(ndb, owned, 8);
+      int b = db_znam_list_by_owner(ndb, mine_addr, by_owner, 8);
+      if (a == b && a == 1 && strcmp(owned[0].name, by_owner[0].name) == 0)
+          printf("OK\n");
+      else { printf("FAIL (wallet=%d owner=%d)\n", a, b); failures++; } }
+
+    return failures;
+}
+
+static int znam_test_wallet_watch_only(struct node_db *ndb,
+                                       struct znam_entry *owned)
+{
+    int failures = 0;
+
+    printf("znam wallet: a watch-only address adds its name (2 owned, "
+           "stranger still excluded)... ");
+    { int n = db_znam_list_wallet_owned(ndb, owned, 8);
+      int a = db_znam_wallet_address_count(ndb);
+      bool saw_stranger = false;
+      for (int i = 0; i < n; i++)
+          if (strcmp(owned[i].name, "notmine") == 0) saw_stranger = true;
+      if (n == 2 && a == 2 && !saw_stranger) printf("OK\n");
+      else { printf("FAIL (owned=%d addrs=%d stranger=%d)\n", n, a,
+                    (int)saw_stranger); failures++; } }
+
+    return failures;
+}
+
+static int znam_test_wallet_folded_zero(struct node_db *ndb,
+                                        struct znam_entry *owned)
+{
+    int failures = 0;
+
+    printf("znam wallet: an address reachable through both tables is folded "
+           "once... ");
+    { int n = db_znam_list_wallet_owned(ndb, owned, 8);
+      int a = db_znam_wallet_address_count(ndb);
+      if (n == 2 && a == 2) printf("OK\n");
+      else { printf("FAIL (owned=%d addrs=%d)\n", n, a); failures++; } }
+
+    printf("znam wallet: a zero-capacity sweep writes nothing and "
+           "returns 0... ");
+    { int n = db_znam_list_wallet_owned(ndb, owned, 0);
+      if (n == 0) printf("OK\n"); else { printf("FAIL (%d)\n", n); failures++; } }
+
+    return failures;
+}
+
 static int test_znam_wallet_sweep(void)
 {
     int failures = 0;
@@ -502,72 +602,26 @@ static int test_znam_wallet_sweep(void)
     znam_test_p2pkh(watched, watched_addr);
     znam_test_p2pkh(stranger, stranger_addr);
 
-    bool seeded = znam_test_register(&ndb, "mine", mine_addr, 100) &&
-                  znam_test_register(&ndb, "watched", watched_addr, 200) &&
-                  znam_test_register(&ndb, "notmine", stranger_addr, 300);
-    printf("znam wallet: seeded three registered names... ");
-    if (seeded) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    failures += znam_test_wallet_seed_names(&ndb, mine_addr, watched_addr,
+                                            stranger_addr);
 
     struct znam_entry owned[8];
 
-    printf("znam wallet: a wallet with no keys owns 0 names "
-           "(empty, not an error)... ");
-    { int n = db_znam_list_wallet_owned(&ndb, owned, 8);
-      int a = db_znam_wallet_address_count(&ndb);
-      int all = db_znam_list(&ndb, owned, 8);
-      if (n == 0 && a == 0 && all == 3) printf("OK\n");
-      else { printf("FAIL (owned=%d addrs=%d registry=%d)\n", n, a, all);
-             failures++; } }
+    failures += znam_test_wallet_no_keys(&ndb, owned);
 
     znam_test_ins_key(&ndb, mine);
 
-    printf("znam wallet: a wallet key claims its own name and not the "
-           "stranger's... ");
-    { int n = db_znam_list_wallet_owned(&ndb, owned, 8);
-      if (n == 1 && strcmp(owned[0].name, "mine") == 0 &&
-          strcmp(owned[0].owner_address, mine_addr) == 0 &&
-          owned[0].reg_height == 100 && owned[0].expiry_height == 1100)
-          printf("OK\n");
-      else { printf("FAIL (n=%d name=%s expiry=%d)\n", n,
-                    n > 0 ? owned[0].name : "-",
-                    n > 0 ? owned[0].expiry_height : -1); failures++; } }
-
-    printf("znam wallet: the wallet-wide answer matches the per-owner one... ");
-    { struct znam_entry by_owner[8];
-      int a = db_znam_list_wallet_owned(&ndb, owned, 8);
-      int b = db_znam_list_by_owner(&ndb, mine_addr, by_owner, 8);
-      if (a == b && a == 1 && strcmp(owned[0].name, by_owner[0].name) == 0)
-          printf("OK\n");
-      else { printf("FAIL (wallet=%d owner=%d)\n", a, b); failures++; } }
+    failures += znam_test_wallet_key_claims(&ndb, owned, mine_addr);
 
     znam_test_ins_watch(&ndb, watched, watched_addr);
 
-    printf("znam wallet: a watch-only address adds its name (2 owned, "
-           "stranger still excluded)... ");
-    { int n = db_znam_list_wallet_owned(&ndb, owned, 8);
-      int a = db_znam_wallet_address_count(&ndb);
-      bool saw_stranger = false;
-      for (int i = 0; i < n; i++)
-          if (strcmp(owned[i].name, "notmine") == 0) saw_stranger = true;
-      if (n == 2 && a == 2 && !saw_stranger) printf("OK\n");
-      else { printf("FAIL (owned=%d addrs=%d stranger=%d)\n", n, a,
-                    (int)saw_stranger); failures++; } }
+    failures += znam_test_wallet_watch_only(&ndb, owned);
 
     /* Importing your own key as watch-only is the ordinary way one address
      * becomes reachable twice; the name must still be listed once. */
     znam_test_ins_watch(&ndb, mine, mine_addr);
 
-    printf("znam wallet: an address reachable through both tables is folded "
-           "once... ");
-    { int n = db_znam_list_wallet_owned(&ndb, owned, 8);
-      int a = db_znam_wallet_address_count(&ndb);
-      if (n == 2 && a == 2) printf("OK\n");
-      else { printf("FAIL (owned=%d addrs=%d)\n", n, a); failures++; } }
-
-    printf("znam wallet: a zero-capacity sweep writes nothing and "
-           "returns 0... ");
-    { int n = db_znam_list_wallet_owned(&ndb, owned, 0);
-      if (n == 0) printf("OK\n"); else { printf("FAIL (%d)\n", n); failures++; } }
+    failures += znam_test_wallet_folded_zero(&ndb, owned);
 
     node_db_close(&ndb);
     return failures;
@@ -678,14 +732,9 @@ static int znam_commit_failure_surfaces_error(void)
     return failures;
 }
 
-int test_znam(void)
+static int znam_test_validate_name_accepts_rejects(void)
 {
     int failures = 0;
-    failures += znam_addr_save_bounds();
-
-    /* ── Name validation ──────────────────────────────────────── */
-
-    printf("\n=== ZNAM Tests ===\n");
 
     printf("znam_validate_name: valid lowercase alpha... ");
     if (znam_validate_name("alice")) printf("OK\n");
@@ -731,6 +780,13 @@ int test_znam(void)
     if (znam_validate_name("a")) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 
+    return failures;
+}
+
+static int znam_test_validate_name_bounds_and_digits(void)
+{
+    int failures = 0;
+
     printf("znam_validate_name: max length (63 chars)... ");
     {
         char name64[64];
@@ -761,6 +817,13 @@ int test_znam(void)
     if (znam_validate_name("12345")) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 
+    return failures;
+}
+
+static int znam_test_roundtrip_register(void)
+{
+    int failures = 0;
+
     /* ── Build + Parse roundtrip: REGISTER ────────────────────── */
 
     printf("znam build+parse REGISTER roundtrip... ");
@@ -786,6 +849,13 @@ int test_znam(void)
             }
         }
     }
+
+    return failures;
+}
+
+static int znam_test_roundtrip_update_transfer(void)
+{
+    int failures = 0;
 
     /* ── Build + Parse roundtrip: UPDATE ──────────────────────── */
 
@@ -821,6 +891,13 @@ int test_znam(void)
         } else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int znam_test_roundtrip_renew_set_record(void)
+{
+    int failures = 0;
+
     /* ── Build + Parse roundtrip: RENEW ───────────────────────── */
 
     printf("znam build+parse RENEW roundtrip... ");
@@ -852,6 +929,13 @@ int test_znam(void)
             printf("OK\n");
         } else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int znam_test_roundtrip_set_text(void)
+{
+    int failures = 0;
 
     /* ── Build + Parse roundtrip: SET_TEXT ─────────────────────── */
 
@@ -888,6 +972,13 @@ int test_znam(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int znam_test_parse_rejects(void)
+{
+    int failures = 0;
+
     /* ── Parser edge cases ────────────────────────────────────── */
 
     printf("znam_parse: reject empty script... ");
@@ -920,6 +1011,13 @@ int test_znam(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int znam_test_builder_reject_inputs(void)
+{
+    int failures = 0;
+
     /* ── Builder validation ───────────────────────────────────── */
 
     printf("znam_build_register: reject invalid name... ");
@@ -939,6 +1037,13 @@ int test_znam(void)
         if (len == 0) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int znam_test_builder_accept_register_types(void)
+{
+    int failures = 0;
 
     /* ── REGISTER/UPDATE accept multi-coin types (parser parity) ── */
 
@@ -995,6 +1100,13 @@ int test_znam(void)
         else { printf("FAIL (len=%zu)\n", len); failures++; }
     }
 
+    return failures;
+}
+
+static int znam_test_builder_accept_update_btc(void)
+{
+    int failures = 0;
+
     printf("znam_build_update: accepts ZNAM_TYPE_BTC... ");
     {
         uint8_t buf[256];
@@ -1008,6 +1120,13 @@ int test_znam(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (len=%zu)\n", len); failures++; }
     }
+
+    return failures;
+}
+
+static int znam_test_builder_reject_types_values(void)
+{
+    int failures = 0;
 
     printf("znam_build_register: rejects type > ZNAM_TYPE_CONTENT... ");
     {
@@ -1045,6 +1164,13 @@ int test_znam(void)
         if (len == 0) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int znam_test_builder_relay_cap(void)
+{
+    int failures = 0;
 
     /* ── Standard-relay cap (MAX_OP_RETURN_RELAY) ──────────────────
      *
@@ -1124,6 +1250,13 @@ int test_znam(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int znam_test_set_record_all_types(void)
+{
+    int failures = 0;
+
     /* ── SET_RECORD with all target types ─────────────────────── */
 
     printf("znam SET_RECORD all target types roundtrip... ");
@@ -1142,6 +1275,164 @@ int test_znam(void)
         if (all_ok) printf("OK (types 1-%d)\n", ZNAM_TYPE_CONTENT);
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int znam_test_db_save_find_list(struct node_db *ndb,
+                                       struct znam_entry *entry)
+{
+    int failures = 0;
+
+            bool save_ok = db_znam_save(ndb, entry);
+            struct znam_entry found = {0};
+            bool find_ok = db_znam_find(ndb, "alice", &found);
+
+            struct znam_entry list[10];
+            memset(list, 0xA5, sizeof(list));
+            int count = db_znam_list(ndb, list, 10);
+
+            if (save_ok && find_ok &&
+                strcmp(found.name, "alice") == 0 &&
+                strcmp(found.owner_address, "t1owner") == 0 &&
+                found.target_type == ZNAM_TYPE_TADDR &&
+                strcmp(found.target_value, "t1target") == 0 &&
+                found.reg_height == 12345 &&
+                found.expiry_height == 12345 + ZNAM_REGISTRATION_TERM_BLOCKS &&
+                znam_list_payload_matches(list, count, entry)) {
+                printf("OK\n");
+            } else {
+                printf("FAIL (save=%d find=%d count=%d)\n",
+                       save_ok, find_ok, count);
+                failures++;
+            }
+
+    return failures;
+}
+
+static int znam_test_db_text_records(struct node_db *ndb)
+{
+    int failures = 0;
+
+            /* Text records */
+            printf("znam DB text records save+get+list... ");
+            bool t_save = db_znam_text_save(ndb, "alice", "email", "a@b.com");
+            bool t_save2 = db_znam_text_save(ndb, "alice", "url", "https://x.com");
+            char val[256] = {0};
+            bool t_get = db_znam_text_get(ndb, "alice", "email", val, sizeof(val));
+            struct znam_text_record texts[10];
+            memset(texts, 0xA5, sizeof(texts));
+            int t_count = db_znam_text_list(ndb, "alice", texts, 10);
+            /* The uncapped total behind the window — equal here because
+             * nothing was truncated, and zero for a name that has none. */
+            int t_total = db_znam_text_count(ndb, "alice");
+            int t_total_missing =
+                db_znam_text_count(ndb, "nobody-here");
+
+            if (t_save && t_save2 && t_get &&
+                strcmp(val, "a@b.com") == 0 &&
+                znam_text_list_payload_matches(texts, t_count) &&
+                t_total == 2 && t_total_missing == 0) {
+                printf("OK\n");
+            } else {
+                printf("FAIL (save=%d get=%d val=%s count=%d total=%d"
+                       " missing=%d)\n",
+                       t_save && t_save2, t_get, val, t_count, t_total,
+                       t_total_missing);
+                failures++;
+            }
+
+    return failures;
+}
+
+static int znam_test_db_addr_records(struct node_db *ndb)
+{
+    int failures = 0;
+
+            /* Address records */
+            printf("znam DB addr records save+get+list... ");
+            bool a_save = db_znam_addr_save(ndb, "alice", ZNAM_TYPE_BTC, "1abc");
+            bool a_save2 = db_znam_addr_save(ndb, "alice", ZNAM_TYPE_LTC, "Labc");
+            char addr[256] = {0};
+            bool a_get = db_znam_addr_get(ndb, "alice", ZNAM_TYPE_BTC, addr, sizeof(addr));
+            struct znam_addr_record addrs[10];
+            int a_count = db_znam_addr_list(ndb, "alice", addrs, 10);
+            int a_total = db_znam_addr_count(ndb, "alice");
+            if (a_save && a_save2 && a_get && strcmp(addr, "1abc") == 0 &&
+                a_count == 2 && a_total == 2 &&
+                addrs[0].coin_type == ZNAM_TYPE_BTC &&
+                addrs[1].coin_type == ZNAM_TYPE_LTC &&
+                strcmp(addrs[1].address, "Labc") == 0) {
+                printf("OK\n");
+            } else {
+                printf("FAIL (save=%d get=%d count=%d total=%d)\n",
+                       a_save && a_save2, a_get, a_count, a_total);
+                failures++;
+            }
+
+    return failures;
+}
+
+static int znam_test_db_count_fail_closed(struct node_db *ndb)
+{
+    int failures = 0;
+
+            /* A non-row count step is a store failure, never an empty
+             * record set. Inject SQLITE_INTERRUPT at the exact seam shared
+             * by both helpers, then restore the production reader. */
+            printf("znam DB record counts fail closed on interrupt... ");
+            db_znam_test_set_count_step(znam_count_step_interrupted);
+            int t_interrupted = db_znam_text_count(ndb, "alice");
+            int a_interrupted = db_znam_addr_count(ndb, "alice");
+            db_znam_test_set_count_step(NULL);
+            if (t_interrupted == -1 && a_interrupted == -1) {
+                printf("OK\n");
+            } else {
+                printf("FAIL (text=%d addr=%d)\n",
+                       t_interrupted, a_interrupted);
+                failures++;
+            }
+
+            failures += znam_text_input_bounds_report(ndb);
+
+    return failures;
+}
+
+static int znam_test_db_owner_and_missing(struct node_db *ndb,
+                                          struct znam_entry *entry)
+{
+    int failures = 0;
+
+            /* List by owner */
+            printf("znam DB list_by_owner... ");
+            struct znam_entry by_owner[10];
+            int owner_count = db_znam_list_by_owner(ndb, "t1owner", by_owner, 10);
+            if (owner_count == 1 && strcmp(by_owner[0].name, "alice") == 0) {
+                printf("OK\n");
+            } else {
+                printf("FAIL (count=%d)\n", owner_count); failures++;
+            }
+
+            /* Find non-existent */
+            printf("znam DB find non-existent... ");
+            struct znam_entry none;
+            bool found_none = db_znam_find(ndb, "nonexistent", &none);
+            if (!found_none) printf("OK\n");
+            else { printf("FAIL\n"); failures++; }
+
+            /* Null DB guard */
+            printf("znam DB null guard... ");
+            if (!db_znam_save(NULL, entry) &&
+                !db_znam_find(NULL, "x", &none)) {
+                printf("OK\n");
+            } else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
+static int znam_test_db_persistence(void)
+{
+    int failures = 0;
 
     /* ── SQLite persistence ───────────────────────────────────── */
 
@@ -1181,123 +1472,267 @@ int test_znam(void)
             memset(entry.last_update_txid, 0xBB, 32);
             entry.expiry_height = 12345 + ZNAM_REGISTRATION_TERM_BLOCKS;
 
-            bool save_ok = db_znam_save(&ndb, &entry);
-            struct znam_entry found = {0};
-            bool find_ok = db_znam_find(&ndb, "alice", &found);
+            failures += znam_test_db_save_find_list(&ndb, &entry);
 
-            struct znam_entry list[10];
-            memset(list, 0xA5, sizeof(list));
-            int count = db_znam_list(&ndb, list, 10);
+            failures += znam_test_db_text_records(&ndb);
+            failures += znam_test_db_addr_records(&ndb);
 
-            if (save_ok && find_ok &&
-                strcmp(found.name, "alice") == 0 &&
-                strcmp(found.owner_address, "t1owner") == 0 &&
-                found.target_type == ZNAM_TYPE_TADDR &&
-                strcmp(found.target_value, "t1target") == 0 &&
-                found.reg_height == 12345 &&
-                found.expiry_height == 12345 + ZNAM_REGISTRATION_TERM_BLOCKS &&
-                znam_list_payload_matches(list, count, &entry)) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (save=%d find=%d count=%d)\n",
-                       save_ok, find_ok, count);
-                failures++;
-            }
+            failures += znam_test_db_count_fail_closed(&ndb);
 
-            /* Text records */
-            printf("znam DB text records save+get+list... ");
-            bool t_save = db_znam_text_save(&ndb, "alice", "email", "a@b.com");
-            bool t_save2 = db_znam_text_save(&ndb, "alice", "url", "https://x.com");
-            char val[256] = {0};
-            bool t_get = db_znam_text_get(&ndb, "alice", "email", val, sizeof(val));
-            struct znam_text_record texts[10];
-            memset(texts, 0xA5, sizeof(texts));
-            int t_count = db_znam_text_list(&ndb, "alice", texts, 10);
-            /* The uncapped total behind the window — equal here because
-             * nothing was truncated, and zero for a name that has none. */
-            int t_total = db_znam_text_count(&ndb, "alice");
-            int t_total_missing =
-                db_znam_text_count(&ndb, "nobody-here");
-
-            if (t_save && t_save2 && t_get &&
-                strcmp(val, "a@b.com") == 0 &&
-                znam_text_list_payload_matches(texts, t_count) &&
-                t_total == 2 && t_total_missing == 0) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (save=%d get=%d val=%s count=%d total=%d"
-                       " missing=%d)\n",
-                       t_save && t_save2, t_get, val, t_count, t_total,
-                       t_total_missing);
-                failures++;
-            }
-
-            /* Address records */
-            printf("znam DB addr records save+get+list... ");
-            bool a_save = db_znam_addr_save(&ndb, "alice", ZNAM_TYPE_BTC, "1abc");
-            bool a_save2 = db_znam_addr_save(&ndb, "alice", ZNAM_TYPE_LTC, "Labc");
-            char addr[256] = {0};
-            bool a_get = db_znam_addr_get(&ndb, "alice", ZNAM_TYPE_BTC, addr, sizeof(addr));
-            struct znam_addr_record addrs[10];
-            int a_count = db_znam_addr_list(&ndb, "alice", addrs, 10);
-            int a_total = db_znam_addr_count(&ndb, "alice");
-            if (a_save && a_save2 && a_get && strcmp(addr, "1abc") == 0 &&
-                a_count == 2 && a_total == 2 &&
-                addrs[0].coin_type == ZNAM_TYPE_BTC &&
-                addrs[1].coin_type == ZNAM_TYPE_LTC &&
-                strcmp(addrs[1].address, "Labc") == 0) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (save=%d get=%d count=%d total=%d)\n",
-                       a_save && a_save2, a_get, a_count, a_total);
-                failures++;
-            }
-
-            /* A non-row count step is a store failure, never an empty
-             * record set. Inject SQLITE_INTERRUPT at the exact seam shared
-             * by both helpers, then restore the production reader. */
-            printf("znam DB record counts fail closed on interrupt... ");
-            db_znam_test_set_count_step(znam_count_step_interrupted);
-            int t_interrupted = db_znam_text_count(&ndb, "alice");
-            int a_interrupted = db_znam_addr_count(&ndb, "alice");
-            db_znam_test_set_count_step(NULL);
-            if (t_interrupted == -1 && a_interrupted == -1) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (text=%d addr=%d)\n",
-                       t_interrupted, a_interrupted);
-                failures++;
-            }
-
-            failures += znam_text_input_bounds_report(&ndb);
-
-            /* List by owner */
-            printf("znam DB list_by_owner... ");
-            struct znam_entry by_owner[10];
-            int owner_count = db_znam_list_by_owner(&ndb, "t1owner", by_owner, 10);
-            if (owner_count == 1 && strcmp(by_owner[0].name, "alice") == 0) {
-                printf("OK\n");
-            } else {
-                printf("FAIL (count=%d)\n", owner_count); failures++;
-            }
-
-            /* Find non-existent */
-            printf("znam DB find non-existent... ");
-            struct znam_entry none;
-            bool found_none = db_znam_find(&ndb, "nonexistent", &none);
-            if (!found_none) printf("OK\n");
-            else { printf("FAIL\n"); failures++; }
-
-            /* Null DB guard */
-            printf("znam DB null guard... ");
-            if (!db_znam_save(NULL, &entry) &&
-                !db_znam_find(NULL, "x", &none)) {
-                printf("OK\n");
-            } else { printf("FAIL\n"); failures++; }
+            failures += znam_test_db_owner_and_missing(&ndb, &entry);
 
             sqlite3_close(db);
         }
     }
+
+    return failures;
+}
+
+static int znam_test_rpc_name_update(struct rpc_table *t,
+                                     const char *oversize_value)
+{
+    int failures = 0;
+
+            /* name_update */
+            {
+                struct json_value r = {0};
+                /* Fewer than 3 args hits the same "< 3" branch as an
+                 * explicit help request (matches rpc_name_register's own
+                 * shape) — usage text back, not a hard rejection. */
+                printf("name_update: too few args returns usage text... ");
+                bool ok = call_name_rpc(t, "name_update", "alice", "taddr", false, NULL, &r);
+                if (ok && strstr(json_get_str(&r), "name_update") != NULL) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_update: unknown name rejected... ");
+                bool ok = call_name_rpc(t, "name_update", "nosuchname", "taddr", true, "t1x", &r);
+                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_update: oversize value rejected... ");
+                bool ok = call_name_rpc(t, "name_update", "alice", "taddr", true, oversize_value, &r);
+                if (!ok && strcmp(json_get_str(&r), "Value too long (max 128 chars)") == 0) printf("OK\n");
+                else { printf("FAIL (ok=%d msg=%s)\n", ok, json_get_str(&r)); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_update: valid update (no wallet) returns ready hex... ");
+                bool ok = call_name_rpc(t, "name_update", "alice", "btc", true, "1NewBtcAddr", &r);
+                bool pass = ok &&
+                    strcmp(json_get_str(json_get(&r, "name")), "alice") == 0 &&
+                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0 &&
+                    json_get(&r, "op_return_hex") != NULL;
+                if (pass) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+
+    return failures;
+}
+
+static int znam_test_rpc_name_transfer(struct rpc_table *t,
+                                       const char *oversize_owner)
+{
+    int failures = 0;
+
+            /* name_transfer */
+            {
+                struct json_value r = {0};
+                printf("name_transfer: too few args returns usage text... ");
+                bool ok = call_name_rpc(t, "name_transfer", "alice", NULL, false, NULL, &r);
+                if (ok && strstr(json_get_str(&r), "name_transfer") != NULL) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_transfer: oversize new_owner rejected... ");
+                bool ok = call_name_rpc(t, "name_transfer", "alice", oversize_owner, false, NULL, &r);
+                if (!ok && strcmp(json_get_str(&r), "Invalid new_owner (1-63 chars)") == 0) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_transfer: unknown name rejected... ");
+                bool ok = call_name_rpc(t, "name_transfer", "nosuchname", "t1newowner", false, NULL, &r);
+                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_transfer: valid transfer (no wallet) returns ready hex... ");
+                bool ok = call_name_rpc(t, "name_transfer", "alice", "t1newowner", false, NULL, &r);
+                bool pass = ok &&
+                    strcmp(json_get_str(json_get(&r, "new_owner")), "t1newowner") == 0 &&
+                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
+                if (pass) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+
+    return failures;
+}
+
+static int znam_test_rpc_name_renew(struct rpc_table *t)
+{
+    int failures = 0;
+
+            /* name_renew */
+            {
+                struct json_value r = {0};
+                printf("name_renew: unknown name rejected... ");
+                bool ok = call_name_rpc(t, "name_renew", "nosuchname", NULL, false, NULL, &r);
+                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_renew: invalid name rejected... ");
+                bool ok = call_name_rpc(t, "name_renew", "INVALID", NULL, false, NULL, &r);
+                if (!ok) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_renew: valid renew (no wallet) returns ready hex... ");
+                bool ok = call_name_rpc(t, "name_renew", "alice", NULL, false, NULL, &r);
+                bool pass = ok &&
+                    strcmp(json_get_str(json_get(&r, "name")), "alice") == 0 &&
+                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
+                if (pass) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+
+    return failures;
+}
+
+static int znam_test_rpc_name_set_record(struct rpc_table *t,
+                                         const char *oversize_value)
+{
+    int failures = 0;
+
+            /* name_set_record */
+            {
+                struct json_value r = {0};
+                printf("name_set_record: unknown name rejected... ");
+                bool ok = call_name_rpc(t, "name_set_record", "nosuchname", "btc", true, "1abc", &r);
+                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_set_record: invalid type rejected... ");
+                bool ok = call_name_rpc(t, "name_set_record", "alice", "notacoin", true, "1abc", &r);
+                if (!ok) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_set_record: oversize value rejected... ");
+                bool ok = call_name_rpc(t, "name_set_record", "alice", "btc", true, oversize_value, &r);
+                if (!ok && strcmp(json_get_str(&r), "Value too long (max 128 chars)") == 0) printf("OK\n");
+                else { printf("FAIL (ok=%d msg=%s)\n", ok, json_get_str(&r)); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_set_record: valid record (no wallet) returns ready hex... ");
+                bool ok = call_name_rpc(t, "name_set_record", "alice", "btc",
+                                       true, "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &r);
+                bool pass = ok &&
+                    strcmp(json_get_str(json_get(&r, "type")), "bitcoin") == 0 &&
+                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
+                if (pass) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+
+    return failures;
+}
+
+static int znam_test_rpc_name_set_text(struct rpc_table *t,
+                                       const char *oversize_key,
+                                       const char *oversize_value)
+{
+    int failures = 0;
+
+            /* name_set_text */
+            {
+                struct json_value r = {0};
+                printf("name_set_text: too few args returns usage text... ");
+                bool ok = call_name_rpc(t, "name_set_text", "alice", NULL, false, NULL, &r);
+                if (ok && strstr(json_get_str(&r), "name_set_text") != NULL) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_set_text: unknown name rejected... ");
+                bool ok = call_name_rpc(t, "name_set_text", "nosuchname", "email", true, "a@b.com", &r);
+                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_set_text: oversize key rejected... ");
+                bool ok = call_name_rpc(t, "name_set_text", "alice", oversize_key, true, "v", &r);
+                if (!ok) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_set_text: oversize value rejected... ");
+                bool ok = call_name_rpc(t, "name_set_text", "alice", "bio", true, oversize_value, &r);
+                if (!ok) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_set_text: valid with omitted value clears the key... ");
+                bool ok = call_name_rpc(t, "name_set_text", "alice", "avatar", false, NULL, &r);
+                bool pass = ok &&
+                    strcmp(json_get_str(json_get(&r, "key")), "avatar") == 0 &&
+                    strcmp(json_get_str(json_get(&r, "value")), "") == 0 &&
+                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
+                if (pass) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+            {
+                struct json_value r = {0};
+                printf("name_set_text: valid with value (no wallet) returns ready hex... ");
+                bool ok = call_name_rpc(t, "name_set_text", "alice", "email", true, "a@b.com", &r);
+                bool pass = ok &&
+                    strcmp(json_get_str(json_get(&r, "value")), "a@b.com") == 0 &&
+                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
+                if (pass) printf("OK\n");
+                else { printf("FAIL\n"); failures++; }
+                json_free(&r);
+            }
+
+    return failures;
+}
+
+static int znam_test_rpc_write_surface(void)
+{
+    int failures = 0;
 
     /* ── RPC write surface: name_update / name_transfer / name_renew /
      * name_set_record / name_set_text ─────────────────────────────
@@ -1343,226 +1778,27 @@ int test_znam(void)
             memset(oversize_key, 'k', sizeof(oversize_key) - 1);
             oversize_key[sizeof(oversize_key) - 1] = '\0';
 
-            /* name_update */
-            {
-                struct json_value r = {0};
-                /* Fewer than 3 args hits the same "< 3" branch as an
-                 * explicit help request (matches rpc_name_register's own
-                 * shape) — usage text back, not a hard rejection. */
-                printf("name_update: too few args returns usage text... ");
-                bool ok = call_name_rpc(&t, "name_update", "alice", "taddr", false, NULL, &r);
-                if (ok && strstr(json_get_str(&r), "name_update") != NULL) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_update: unknown name rejected... ");
-                bool ok = call_name_rpc(&t, "name_update", "nosuchname", "taddr", true, "t1x", &r);
-                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_update: oversize value rejected... ");
-                bool ok = call_name_rpc(&t, "name_update", "alice", "taddr", true, oversize_value, &r);
-                if (!ok && strcmp(json_get_str(&r), "Value too long (max 128 chars)") == 0) printf("OK\n");
-                else { printf("FAIL (ok=%d msg=%s)\n", ok, json_get_str(&r)); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_update: valid update (no wallet) returns ready hex... ");
-                bool ok = call_name_rpc(&t, "name_update", "alice", "btc", true, "1NewBtcAddr", &r);
-                bool pass = ok &&
-                    strcmp(json_get_str(json_get(&r, "name")), "alice") == 0 &&
-                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0 &&
-                    json_get(&r, "op_return_hex") != NULL;
-                if (pass) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
+            failures += znam_test_rpc_name_update(&t, oversize_value);
+            failures += znam_test_rpc_name_transfer(&t, oversize_owner);
 
-            /* name_transfer */
-            {
-                struct json_value r = {0};
-                printf("name_transfer: too few args returns usage text... ");
-                bool ok = call_name_rpc(&t, "name_transfer", "alice", NULL, false, NULL, &r);
-                if (ok && strstr(json_get_str(&r), "name_transfer") != NULL) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_transfer: oversize new_owner rejected... ");
-                bool ok = call_name_rpc(&t, "name_transfer", "alice", oversize_owner, false, NULL, &r);
-                if (!ok && strcmp(json_get_str(&r), "Invalid new_owner (1-63 chars)") == 0) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_transfer: unknown name rejected... ");
-                bool ok = call_name_rpc(&t, "name_transfer", "nosuchname", "t1newowner", false, NULL, &r);
-                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_transfer: valid transfer (no wallet) returns ready hex... ");
-                bool ok = call_name_rpc(&t, "name_transfer", "alice", "t1newowner", false, NULL, &r);
-                bool pass = ok &&
-                    strcmp(json_get_str(json_get(&r, "new_owner")), "t1newowner") == 0 &&
-                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
-                if (pass) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
+            failures += znam_test_rpc_name_renew(&t);
 
-            /* name_renew */
-            {
-                struct json_value r = {0};
-                printf("name_renew: unknown name rejected... ");
-                bool ok = call_name_rpc(&t, "name_renew", "nosuchname", NULL, false, NULL, &r);
-                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_renew: invalid name rejected... ");
-                bool ok = call_name_rpc(&t, "name_renew", "INVALID", NULL, false, NULL, &r);
-                if (!ok) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_renew: valid renew (no wallet) returns ready hex... ");
-                bool ok = call_name_rpc(&t, "name_renew", "alice", NULL, false, NULL, &r);
-                bool pass = ok &&
-                    strcmp(json_get_str(json_get(&r, "name")), "alice") == 0 &&
-                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
-                if (pass) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
+            failures += znam_test_rpc_name_set_record(&t, oversize_value);
 
-            /* name_set_record */
-            {
-                struct json_value r = {0};
-                printf("name_set_record: unknown name rejected... ");
-                bool ok = call_name_rpc(&t, "name_set_record", "nosuchname", "btc", true, "1abc", &r);
-                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_set_record: invalid type rejected... ");
-                bool ok = call_name_rpc(&t, "name_set_record", "alice", "notacoin", true, "1abc", &r);
-                if (!ok) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_set_record: oversize value rejected... ");
-                bool ok = call_name_rpc(&t, "name_set_record", "alice", "btc", true, oversize_value, &r);
-                if (!ok && strcmp(json_get_str(&r), "Value too long (max 128 chars)") == 0) printf("OK\n");
-                else { printf("FAIL (ok=%d msg=%s)\n", ok, json_get_str(&r)); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_set_record: valid record (no wallet) returns ready hex... ");
-                bool ok = call_name_rpc(&t, "name_set_record", "alice", "btc",
-                                       true, "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &r);
-                bool pass = ok &&
-                    strcmp(json_get_str(json_get(&r, "type")), "bitcoin") == 0 &&
-                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
-                if (pass) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-
-            /* name_set_text */
-            {
-                struct json_value r = {0};
-                printf("name_set_text: too few args returns usage text... ");
-                bool ok = call_name_rpc(&t, "name_set_text", "alice", NULL, false, NULL, &r);
-                if (ok && strstr(json_get_str(&r), "name_set_text") != NULL) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_set_text: unknown name rejected... ");
-                bool ok = call_name_rpc(&t, "name_set_text", "nosuchname", "email", true, "a@b.com", &r);
-                if (!ok && strcmp(json_get_str(&r), "Name not found") == 0) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_set_text: oversize key rejected... ");
-                bool ok = call_name_rpc(&t, "name_set_text", "alice", oversize_key, true, "v", &r);
-                if (!ok) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_set_text: oversize value rejected... ");
-                bool ok = call_name_rpc(&t, "name_set_text", "alice", "bio", true, oversize_value, &r);
-                if (!ok) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_set_text: valid with omitted value clears the key... ");
-                bool ok = call_name_rpc(&t, "name_set_text", "alice", "avatar", false, NULL, &r);
-                bool pass = ok &&
-                    strcmp(json_get_str(json_get(&r, "key")), "avatar") == 0 &&
-                    strcmp(json_get_str(json_get(&r, "value")), "") == 0 &&
-                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
-                if (pass) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
-            {
-                struct json_value r = {0};
-                printf("name_set_text: valid with value (no wallet) returns ready hex... ");
-                bool ok = call_name_rpc(&t, "name_set_text", "alice", "email", true, "a@b.com", &r);
-                bool pass = ok &&
-                    strcmp(json_get_str(json_get(&r, "value")), "a@b.com") == 0 &&
-                    strcmp(json_get_str(json_get(&r, "status")), "ready") == 0;
-                if (pass) printf("OK\n");
-                else { printf("FAIL\n"); failures++; }
-                json_free(&r);
-            }
+            failures += znam_test_rpc_name_set_text(&t, oversize_key,
+                                                    oversize_value);
 
             rpc_name_set_state(NULL);
             sqlite3_close(db);
         }
     }
 
-    /* ── Owner-authorization gate ────────────────────────────────────
-     *
-     * Exercises zslp_command_build_owner_base_tx directly (the new
-     * coin-selection helper the 4 owner-restricted RPCs above use) and
-     * the RPC-level "non-owner rejected" path, without needing a full
-     * mempool/coins_tip/main_state chain fixture — the ownership check
-     * fails (or the coin-selection loop finds nothing) strictly before
-     * that plumbing is ever touched. Section 7 of test_simnet.c already
-     * proves the consensus-side projection independently re-derives and
-     * enforces ownership from the confirmed tx; this section proves the
-     * RPC/wallet-layer fail-fast gate in front of it. */
+    return failures;
+}
 
-    printf("\n=== ZNAM owner-authorization gate ===\n");
+static int znam_test_owner_gate_not_p2pkh(void)
+{
+    int failures = 0;
 
     printf("build_owner_base_tx: rejects an address that isn't P2PKH... ");
     {
@@ -1577,6 +1813,13 @@ int test_znam(void)
             printf("OK\n");
         else { printf("FAIL (ok=%d err=%s)\n", r.ok, err ? err : "(null)"); failures++; }
     }
+
+    return failures;
+}
+
+static int znam_test_owner_gate_wrong_wallet(void)
+{
+    int failures = 0;
 
     printf("build_owner_base_tx: rejects a wallet that lacks the owner's key... ");
     {
@@ -1599,6 +1842,13 @@ int test_znam(void)
         }
     }
 
+    return failures;
+}
+
+static int znam_test_owner_gate_no_funded_coin(void)
+{
+    int failures = 0;
+
     printf("build_owner_base_tx: rejects owner key held but no funded coin... ");
     {
         static struct wallet w;
@@ -1618,6 +1868,31 @@ int test_znam(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static bool znam_test_signed_op_return_matches(struct wallet *w,
+                                               struct wallet_tx *wtx,
+                                               bool base_ok, bool prepared_ok,
+                                               int64_t fee,
+                                               const uint8_t *script,
+                                               size_t script_len)
+{
+    return base_ok && prepared_ok && wtx->tx.num_vout == 3 &&
+        wtx->tx.vout[0].value == 0 &&
+        wtx->tx.vout[0].script_pub_key.size == script_len &&
+        memcmp(wtx->tx.vout[0].script_pub_key.data, script, script_len) == 0 &&
+        wtx->tx.vout[1].value == 546 &&
+        wtx->tx.vout[2].value == (20000 - 546 - fee) &&
+        wtx->tx.vin[0].script_sig.size > 0 &&
+        !uint256_is_null(&wtx->tx.hash) &&
+        wallet_get_tx(w, &wtx->tx.hash) == NULL;
+}
+
+static int znam_test_owner_gate_signed_bytes(void)
+{
+    int failures = 0;
 
     printf("build_owner_base_tx: prepares exact signed OP_RETURN bytes without broadcast... ");
     {
@@ -1645,15 +1920,9 @@ int test_znam(void)
         if (script_len > 0)
             prepared = zslp_command_prepare_with_op_return(
                 &w, &wtx, script, script_len);
-        bool pass = base_ok && prepared.ok && wtx.tx.num_vout == 3 &&
-            wtx.tx.vout[0].value == 0 &&
-            wtx.tx.vout[0].script_pub_key.size == script_len &&
-            memcmp(wtx.tx.vout[0].script_pub_key.data, script, script_len) == 0 &&
-            wtx.tx.vout[1].value == 546 &&
-            wtx.tx.vout[2].value == (20000 - 546 - fee) &&
-            wtx.tx.vin[0].script_sig.size > 0 &&
-            !uint256_is_null(&wtx.tx.hash) &&
-            wallet_get_tx(&w, &wtx.tx.hash) == NULL;
+        bool pass = znam_test_signed_op_return_matches(&w, &wtx, base_ok,
+                                                       prepared.ok, fee,
+                                                       script, script_len);
         if (pass) printf("OK\n");
         else {
             printf("FAIL (got_addr=%d funded=%d base=%d prepared=%d vin=%zu vout=%zu fee=%" PRId64 ")\n",
@@ -1663,6 +1932,13 @@ int test_znam(void)
         }
         if (r.ok) transaction_free(&wtx.tx);
     }
+
+    return failures;
+}
+
+static int znam_test_rpc_non_owner_rejected(void)
+{
+    int failures = 0;
 
     /* RPC-level: a wallet that does not hold the current owner's key is
      * refused a clean error for every owner-restricted command, instead
@@ -1753,6 +2029,59 @@ int test_znam(void)
         }
         if (opened) sqlite3_close(db);
     }
+
+    return failures;
+}
+
+int test_znam(void)
+{
+    int failures = 0;
+    failures += znam_addr_save_bounds();
+
+    /* ── Name validation ──────────────────────────────────────── */
+
+    printf("\n=== ZNAM Tests ===\n");
+
+    failures += znam_test_validate_name_accepts_rejects();
+    failures += znam_test_validate_name_bounds_and_digits();
+
+    failures += znam_test_roundtrip_register();
+    failures += znam_test_roundtrip_update_transfer();
+    failures += znam_test_roundtrip_renew_set_record();
+    failures += znam_test_roundtrip_set_text();
+
+    failures += znam_test_parse_rejects();
+
+    failures += znam_test_builder_reject_inputs();
+    failures += znam_test_builder_accept_register_types();
+    failures += znam_test_builder_accept_update_btc();
+    failures += znam_test_builder_reject_types_values();
+    failures += znam_test_builder_relay_cap();
+    failures += znam_test_set_record_all_types();
+
+    failures += znam_test_db_persistence();
+
+    failures += znam_test_rpc_write_surface();
+
+    /* ── Owner-authorization gate ────────────────────────────────────
+     *
+     * Exercises zslp_command_build_owner_base_tx directly (the new
+     * coin-selection helper the 4 owner-restricted RPCs above use) and
+     * the RPC-level "non-owner rejected" path, without needing a full
+     * mempool/coins_tip/main_state chain fixture — the ownership check
+     * fails (or the coin-selection loop finds nothing) strictly before
+     * that plumbing is ever touched. Section 7 of test_simnet.c already
+     * proves the consensus-side projection independently re-derives and
+     * enforces ownership from the confirmed tx; this section proves the
+     * RPC/wallet-layer fail-fast gate in front of it. */
+
+    printf("\n=== ZNAM owner-authorization gate ===\n");
+    failures += znam_test_owner_gate_not_p2pkh();
+    failures += znam_test_owner_gate_wrong_wallet();
+    failures += znam_test_owner_gate_no_funded_coin();
+    failures += znam_test_owner_gate_signed_bytes();
+
+    failures += znam_test_rpc_non_owner_rejected();
 
     failures += znam_commit_failure_surfaces_error();
     failures += test_znam_wallet_sweep();
