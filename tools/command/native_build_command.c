@@ -231,24 +231,11 @@ static void bf_plan_fill_action(struct db_build_action *action,
     action->created_at = action->updated_at = now;
 }
 
-static bool bf_plan_persist(const struct zcl_command_request *request,
-                            struct zcl_command_reply *reply,
-                            struct db_build_job *job,
-                            struct db_build_action *action,
-                            struct zcl_result *result)
+static bool bf_plan_reread(struct node_db *ndb, struct db_build_job *job,
+                           struct db_build_action *action)
 {
-    struct node_db local, *ndb = NULL;
-    if (result->ok && bf_open_write(request, reply, &local, &ndb)) {
-        *result = build_fabric_plan(ndb, job, action);
-        if (result->ok &&
-            (!db_build_job_find(ndb, job->job_id, job) ||
-             !db_build_action_find(ndb, action->action_id, action)))
-            *result = ZCL_ERR(-1, "persisted build plan could not be re-read");
-        bf_close_write(&local, ndb);
-    } else if (result->ok) {
-        return false;
-    }
-    return true;
+    return db_build_job_find(ndb, job->job_id, job) &&
+           db_build_action_find(ndb, action->action_id, action);
 }
 
 void zcl_native_handle_metaverse_build_plan(
@@ -289,7 +276,15 @@ void zcl_native_handle_metaverse_build_plan(
     if (result.ok)
         result = build_fabric_job_id(&job, action.action_id, job.job_id);
     (void)snprintf(action.job_id, sizeof(action.job_id), "%s", job.job_id);
-    if (!bf_plan_persist(request, reply, &job, &action, &result)) return;
+    struct node_db local, *ndb = NULL;
+    if (result.ok && bf_open_write(request, reply, &local, &ndb)) {
+        result = build_fabric_plan(ndb, &job, &action);
+        if (result.ok && !bf_plan_reread(ndb, &job, &action))
+            result = ZCL_ERR(-1, "persisted build plan could not be re-read");
+        bf_close_write(&local, ndb);
+    } else if (result.ok) {
+        return;
+    }
     if (!result.ok) {
         bf_fail(reply, "PLAN_REJECTED", result.message, action.action_id, false);
         return;
