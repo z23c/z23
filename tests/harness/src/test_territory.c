@@ -252,6 +252,54 @@ static const struct territory_symbol *find_sym(
     return NULL;
 }
 
+/* Write every fixture file under TERR_FIX in one call: the two public
+ * headers, the two base sources, the net caller, the registered proof
+ * entry point, and the lint wiring. */
+static bool write_fixture_tree(void)
+{
+    return terr_write(TERR_FIX, "platform/modules/base/include/base/alpha.h", ALPHA_H) &&
+           terr_write(TERR_FIX, "platform/modules/base/include/base/beta.h", BETA_H) &&
+           terr_write(TERR_FIX, "platform/modules/base/src/alpha.c", ALPHA_C) &&
+           terr_write(TERR_FIX, "platform/modules/base/src/registry.c", REGISTRY_C) &&
+           terr_write(TERR_FIX, "core/modules/net/src/caller.c", CALLER_C) &&
+           terr_write(TERR_FIX, "tests/harness/src/test_fixgroup.c", TEST_ENTRY_C) &&
+           terr_write(TERR_FIX, "tools/lint/run_lint.sh", RUN_LINT_SH) &&
+           terr_write(TERR_FIX, "tools/lint/check_base_shape.sh", GATE_BASE_SH) &&
+           terr_write(TERR_FIX, "tools/lint/check_net_shape.sh", GATE_NET_SH) &&
+           terr_write(TERR_FIX, "tools/lint/check_treewide.sh", GATE_TREEWIDE_SH) &&
+           terr_write(TERR_FIX, "tools/lint/base_shape_baseline.txt",
+                      GATE_BASE_BASELINE);
+}
+
+/* Record which of the two fixture modules territory_list() named. */
+static void scan_module_names(char names[][TERRITORY_NAME_MAX], int n,
+                              bool *saw_base, bool *saw_net)
+{
+    *saw_base = false;
+    *saw_net = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(names[i], "platform/modules/base") == 0) *saw_base = true;
+        if (strcmp(names[i], "core/modules/net") == 0) *saw_net = true;
+    }
+}
+
+/* Flip one byte of an open memo payload at offset `at`. */
+static void corrupt_memo_byte(FILE *f, long at)
+{
+    if (fseek(f, at, SEEK_SET) == 0) {
+        int b = fgetc(f);
+        if (b != EOF && fseek(f, at, SEEK_SET) == 0)
+            (void)fputc(b ^ 0xff, f);
+    }
+}
+
+/* territory_list() signals failure with a negative count; the gates reader
+ * takes a plain count, so clamp the error away. */
+static int clamp_negative_count(int n)
+{
+    return n < 0 ? 0 : n;
+}
+
 int test_territory(void);
 int test_territory(void)
 {
@@ -268,19 +316,7 @@ int test_territory(void)
     int gcount = 0;
 
     test_rm_rf(TERR_FIX);
-    if (!terr_write(TERR_FIX, "platform/modules/base/include/base/alpha.h", ALPHA_H) ||
-        !terr_write(TERR_FIX, "platform/modules/base/include/base/beta.h", BETA_H) ||
-        !terr_write(TERR_FIX, "platform/modules/base/src/alpha.c", ALPHA_C) ||
-        !terr_write(TERR_FIX, "platform/modules/base/src/registry.c", REGISTRY_C) ||
-        !terr_write(TERR_FIX, "core/modules/net/src/caller.c", CALLER_C) ||
-        !terr_write(TERR_FIX, "tests/harness/src/test_fixgroup.c", TEST_ENTRY_C) ||
-        !terr_write(TERR_FIX, "tools/lint/run_lint.sh", RUN_LINT_SH) ||
-        !terr_write(TERR_FIX, "tools/lint/check_base_shape.sh", GATE_BASE_SH) ||
-        !terr_write(TERR_FIX, "tools/lint/check_net_shape.sh", GATE_NET_SH) ||
-        !terr_write(TERR_FIX, "tools/lint/check_treewide.sh",
-                    GATE_TREEWIDE_SH) ||
-        !terr_write(TERR_FIX, "tools/lint/base_shape_baseline.txt",
-                    GATE_BASE_BASELINE)) {
+    if (!write_fixture_tree()) {
         printf("test_territory: could not write the fixture tree\n");
         return 1;
     }
@@ -301,10 +337,7 @@ int test_territory(void)
         int n = territory_list(ci, names, 128);
         ASSERT(n > 0);
         bool saw_base = false, saw_net = false;
-        for (int i = 0; i < n; i++) {
-            if (strcmp(names[i], "platform/modules/base") == 0) saw_base = true;
-            if (strcmp(names[i], "core/modules/net") == 0) saw_net = true;
-        }
+        scan_module_names(names, n, &saw_base, &saw_net);
         ASSERT(saw_base);
         ASSERT(saw_net);
         PASS();
@@ -486,11 +519,7 @@ int test_territory(void)
         ASSERT(f != NULL);
         /* Flip one byte of the payload, leaving the header's generation key
          * intact: only the payload digest can catch this. */
-        if (fseek(f, 100, SEEK_SET) == 0) {
-            int b = fgetc(f);
-            if (b != EOF && fseek(f, 100, SEEK_SET) == 0)
-                (void)fputc(b ^ 0xff, f);
-        }
+        corrupt_memo_byte(f, 100);
         fclose(f);
         struct territory_reach_stats c = {0};
         struct territory_reach_set *again =
@@ -513,14 +542,13 @@ int test_territory(void)
             territory_reach_reason_label(TERRITORY_REASON_FILE_SCOPE_REF),
             "file-scope-reference-only");
         ASSERT_STR_EQ(territory_reach_reason_label(TERRITORY_REASON_NO_REFS),
-                      "no-reference-in-tree");
+            "no-reference-in-tree");
         PASS();
     }
 
     /* ── the general's brief ─────────────────────────────────────────── */
 
-    gcount = territory_list(ci, gnames, 128);
-    if (gcount < 0) gcount = 0;
+    gcount = clamp_negative_count(territory_list(ci, gnames, 128));
     gates = territory_gates_open(TERR_FIX, gnames, gcount);
     struct territory_router frouter = { .route = fix_route, .user = NULL };
 
@@ -655,11 +683,7 @@ int test_territory(void)
 
         FILE *f = fopen(TERR_FIX "/.codeindex/territory_rollup.v1", "r+b");
         ASSERT(f != NULL);
-        if (fseek(f, 96, SEEK_SET) == 0) {
-            int by = fgetc(f);
-            if (by != EOF && fseek(f, 96, SEEK_SET) == 0)
-                (void)fputc(by ^ 0xff, f);
-        }
+        corrupt_memo_byte(f, 96);
         fclose(f);
         struct territory_rollup *third =
             territory_rollup_build(ci, TERR_FIX, rs, &frouter);
