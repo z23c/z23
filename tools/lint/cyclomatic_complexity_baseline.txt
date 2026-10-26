@@ -1423,13 +1423,6 @@ tools/command/native_dev_command.c:zcl_native_handle_dev_app_simulate:18
 tools/command/native_dev_command.c:zcl_native_handle_dev_drive:35
 tools/command/native_dev_command.c:zcl_native_handle_dev_ff:23
 tools/command/native_dev_command.c:zcl_native_handle_dev_publication_status:16
-tools/command/native_dev_land.c:dl_dependency_repair_one:36
-tools/command/native_dev_land.c:dl_materialize_file:43
-tools/command/native_dev_land.c:dl_status:40
-tools/command/native_dev_land.c:dl_step_start:18
-tools/command/native_dev_land.c:dl_submit:18
-tools/command/native_dev_land.c:dl_worktree_ok:17
-tools/command/native_dev_land.c:dl_wt_vendor_tor_pin_matches:17
 tools/command/native_dev_retrieval_command.c:rb_canonical_repo_path:16
 tools/command/native_dev_retrieval_command.c:rb_identifier_graph_rank:56
 tools/command/native_dev_retrieval_command.c:rb_push_rank:27

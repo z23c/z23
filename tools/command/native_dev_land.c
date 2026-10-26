@@ -644,26 +644,21 @@ static bool dl_worktree_shape_ok(const char *wt)
     return true;
 }
 
-/* Availability and local path authority are execution preconditions, not
- * reasons to forget an admitted request when another checkout reads it. */
-static bool dl_worktree_ok(const char *wt)
+static bool dl_worktree_under_home(const char *wt)
 {
-    struct stat st;
-    const char *home;
-    char checkout[4096], *slash;
-    if (!dl_worktree_shape_ok(wt))
-        return false;
-    if (!wt || !wt[0])
-        return true;
-    if (stat(wt, &st) != 0 || !S_ISDIR(st.st_mode))
-        return false;
-    home = getenv("HOME");
+    const char *home = getenv("HOME");
     if (home && home[0]) {
         size_t hlen = strlen(home);
         if (strncmp(wt, home, hlen) == 0 &&
             (wt[hlen] == '/' || wt[hlen] == '\0'))
             return true;
     }
+    return false;
+}
+
+static bool dl_worktree_under_checkout(const char *wt)
+{
+    char checkout[4096], *slash;
     if (zcl_devagent_checkout_root(NULL, checkout, sizeof(checkout)) &&
         (slash = strrchr(checkout, '/')) != NULL && slash != checkout) {
         size_t plen = (size_t)(slash - checkout);
@@ -672,6 +667,22 @@ static bool dl_worktree_ok(const char *wt)
             return true;
     }
     return false;
+}
+
+/* Availability and local path authority are execution preconditions, not
+ * reasons to forget an admitted request when another checkout reads it. */
+static bool dl_worktree_ok(const char *wt)
+{
+    struct stat st;
+    if (!dl_worktree_shape_ok(wt))
+        return false;
+    if (!wt || !wt[0])
+        return true;
+    if (stat(wt, &st) != 0 || !S_ISDIR(st.st_mode))
+        return false;
+    if (dl_worktree_under_home(wt))
+        return true;
+    return dl_worktree_under_checkout(wt);
 }
 
 static bool dl_worktree_present(const char *wt)
@@ -3601,6 +3612,61 @@ static bool dl_submit_precheck(const struct zcl_command_request *req,
                                  note_buf, cap, reply);
 }
 
+static bool dl_submit_resolve_root(const struct zcl_command_request *req,
+                                   char *root, size_t cap,
+                                   struct zcl_command_reply *reply)
+{
+    const char *worktree = dl_str(req, "worktree");
+    root[0] = '\0';
+    if (worktree) {
+        (void)snprintf(root, cap, "%s", worktree);
+    } else if (!zcl_devagent_checkout_root(NULL, root, cap)) {
+        dl_fail(reply, "NO_CHECKOUT", "submit",
+                "run this inside a Z23 checkout or pass --worktree",
+                "no checkout root above the current directory");
+        return false;
+    }
+    return true;
+}
+
+static bool dl_submit_require_signed_tip(const char *allow_unsigned,
+                                         const char *sig,
+                                         struct zcl_command_reply *reply)
+{
+    if (sig[0] != 'G') {
+        /* The test-only bypass. It is admitted ONLY alongside the proof
+         * stub, which no production caller sets: a signing key is not always
+         * available to a test process, but a real submission that skipped
+         * both the signature and the proof would be a landing with no
+         * evidence at all. */
+        if (!(allow_unsigned && strcmp(allow_unsigned, "1") == 0 &&
+              dl_stub() != NULL)) {
+            dl_fail(reply, "TIP_UNSIGNED", "submit",
+                    "main takes signed commits only; sign the tip and "
+                    "resubmit",
+                    sig[0] ? sig : "git log -1 --format=%G? said nothing");
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool dl_submit_check_merge_base(const char *root, const char *full,
+                                       struct zcl_command_reply *reply)
+{
+    /* Shared history with the branch it is going onto. A tip with no merge
+     * base is not something a rebase can fix. */
+    const char *args[] = { "merge-base", full, "origin/main", NULL };
+    char buf[256];
+    if (dl_git(root, args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) != 0) {
+        dl_fail(reply, "TIP_UNRELATED", "submit",
+                "that commit shares no history with origin/main",
+                "git merge-base found no common ancestor");
+        return false;
+    }
+    return true;
+}
+
 static void dl_submit(const struct zcl_command_request *req,
                       bool sender_checked,
                       struct zcl_command_reply *reply)
@@ -3612,7 +3678,7 @@ static void dl_submit(const struct zcl_command_request *req,
     char qpath[4096 + 32];
     char root[4096], sig[64], full[80], ts[64], tip_buf[64];
     char note_buf[DL_NOTE_MAX + 1];
-    const char *tip, *worktree, *note;
+    const char *tip, *note;
     const char *allow_unsigned = dl_allow_unsigned();
     int lock = -1;
     struct zcl_land_qualify qr = {0};
@@ -3627,16 +3693,8 @@ static void dl_submit(const struct zcl_command_request *req,
         return;
     }
     dl_pool_sweep_and_log(&d);
-    worktree = dl_str(req, "worktree");
-    root[0] = '\0';
-    if (worktree) {
-        (void)snprintf(root, sizeof(root), "%s", worktree);
-    } else if (!zcl_devagent_checkout_root(NULL, root, sizeof(root))) {
-        dl_fail(reply, "NO_CHECKOUT", "submit",
-                "run this inside a Z23 checkout or pass --worktree",
-                "no checkout root above the current directory");
+    if (!dl_submit_resolve_root(req, root, sizeof(root), reply))
         return;
-    }
     /* The tip has to be a commit THIS checkout can name. A tip nobody can
      * resolve is not a landing request, it is a typo. */
     if (!dl_submit_tip_resolve(root, tip, full, reply)) {
@@ -3650,33 +3708,10 @@ static void dl_submit(const struct zcl_command_request *req,
         (void)dl_git(root, args, sig, sizeof(sig), DL_GIT_TIMEOUT_MS);
         dl_trim(sig);
     }
-    if (sig[0] != 'G') {
-        /* The test-only bypass. It is admitted ONLY alongside the proof
-         * stub, which no production caller sets: a signing key is not always
-         * available to a test process, but a real submission that skipped
-         * both the signature and the proof would be a landing with no
-         * evidence at all. */
-        if (!(allow_unsigned && strcmp(allow_unsigned, "1") == 0 &&
-              dl_stub() != NULL)) {
-            dl_fail(reply, "TIP_UNSIGNED", "submit",
-                    "main takes signed commits only; sign the tip and "
-                    "resubmit",
-                    sig[0] ? sig : "git log -1 --format=%G? said nothing");
-            return;
-        }
-    }
-    /* Shared history with the branch it is going onto. A tip with no merge
-     * base is not something a rebase can fix. */
-    {
-        const char *args[] = { "merge-base", full, "origin/main", NULL };
-        char buf[256];
-        if (dl_git(root, args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) != 0) {
-            dl_fail(reply, "TIP_UNRELATED", "submit",
-                    "that commit shares no history with origin/main",
-                    "git merge-base found no common ancestor");
-            return;
-        }
-    }
+    if (!dl_submit_require_signed_tip(allow_unsigned, sig, reply))
+        return;
+    if (!dl_submit_check_merge_base(root, full, reply))
+        return;
     note = dl_str(req, "note");
     if (note && strlen(note) > DL_NOTE_MAX) {
         dl_fail(reply, "BAD_INPUT", "submit",
@@ -4665,6 +4700,141 @@ static bool dl_outcomes_tail(const char *path, struct dl_row last[10],
     return dl_history_read(path, dl_collect_outcome_tail, &tail, why, why_cap);
 }
 
+static bool dl_status_wants_json(const struct zcl_command_request *req)
+{
+    bool want_json = false;
+    if (req && req->input) {
+        const struct json_value *jv = json_get(req->input, "json");
+        want_json = jv && jv->type == JSON_BOOL && json_get_bool(jv);
+    }
+    return want_json;
+}
+
+static bool dl_status_paths_fit(const struct dl_dirs *d, char *qpath,
+                                size_t qcap, char *opath, size_t ocap,
+                                struct zcl_command_reply *reply)
+{
+    if (snprintf(qpath, qcap, "%s/queue.jsonl", d->land) >= (int)qcap ||
+        snprintf(opath, ocap, "%s/outcomes.jsonl", d->land) >= (int)ocap) {
+        dl_fail(reply, "QUEUE_READ_FAILED", "status",
+                "the queue paths do not fit their buffers",
+                "platform_state_root too long");
+        return false;
+    }
+    return true;
+}
+
+static bool dl_status_bucket_rows(struct json_value *queued,
+                                  struct json_value *inflight,
+                                  struct dl_row *rows, size_t nrows,
+                                  const char *wt, long long now,
+                                  bool *have_inflight)
+{
+    for (size_t i = 0; i < nrows; i++) {
+        if (strcmp(rows[i].state, "queued") == 0) {
+            if (!dl_push_queued(queued, &rows[i]))
+                return false;
+        } else if (strcmp(rows[i].state, "inflight") == 0 && !*have_inflight) {
+            if (!dl_push_inflight(inflight, &rows[i], wt, now))
+                return false;
+            *have_inflight = true;
+        }
+    }
+    return true;
+}
+
+static bool dl_status_collect_outcomes(const char *opath,
+                                       struct dl_row last[10], size_t *nlast,
+                                       char *read_why, size_t why_cap,
+                                       struct json_value *outcomes)
+{
+    /* The last ten outcomes, oldest first. */
+    if (!dl_outcomes_tail(opath, last, nlast, read_why, why_cap))
+        return false;
+    for (size_t k = 0; k < *nlast; k++) {
+        if (!dl_push_outcome_row(outcomes, &last[k]))
+            return false;
+    }
+    return true;
+}
+
+static bool dl_status_screen_header(const struct json_value *queued,
+                                    bool have_inflight, char *screen,
+                                    size_t cap, size_t *used)
+{
+    int w = snprintf(screen, cap,
+                     "land: %llu queued, %s\n",
+                     (unsigned long long)queued->num_children,
+                     have_inflight ? "1 in flight" : "nothing in flight");
+    if (w <= 0 || (size_t)w >= cap)
+        return false;
+    *used = (size_t)w;
+    return true;
+}
+
+static bool dl_status_screen_inflight(struct dl_row *rows, size_t nrows,
+                                      long long now, char *screen,
+                                      size_t cap, size_t *used)
+{
+    for (size_t i = 0; i < nrows; i++) {
+        long long elapsed;
+        int w;
+        if (strcmp(rows[i].state, "inflight") != 0)
+            continue;
+        elapsed = now - rows[i].started;
+        if (elapsed < 0)
+            elapsed = 0;
+        w = snprintf(screen + *used, cap - *used,
+                     "  #%lld %.12s %-8s attempt %lld, %llds%s\n",
+                     rows[i].seq, rows[i].tip, rows[i].phase,
+                     rows[i].attempt, elapsed, dl_hold_display(&rows[i]));
+        if (w <= 0 || (size_t)w >= cap - *used)
+            return false;
+        *used += (size_t)w;
+    }
+    return true;
+}
+
+static bool dl_status_screen_queued(struct dl_row *rows, size_t nrows,
+                                    char *screen, size_t cap, size_t *used)
+{
+    for (size_t i = 0; i < nrows; i++) {
+        int w;
+        if (strcmp(rows[i].state, "queued") != 0)
+            continue;
+        w = snprintf(screen + *used, cap - *used,
+                     "  #%lld %.12s queued priority #%lld%s\n",
+                     rows[i].seq, rows[i].tip, rows[i].priority_seq, dl_hold_display(&rows[i]));
+        if (w <= 0 || (size_t)w >= cap - *used)
+            return false;
+        *used += (size_t)w;
+    }
+    return true;
+}
+
+static bool dl_status_screen_outcomes(struct dl_row *last, size_t nlast,
+                                      char *screen, size_t cap, size_t *used)
+{
+    for (size_t k = 0; k < nlast; k++) {
+        int w;
+        if (strcmp(last[k].state, "landed") == 0)
+            w = snprintf(screen + *used, cap - *used,
+                         "  #%lld %.12s landed as %.12s\n", last[k].seq,
+                         last[k].tip, last[k].pushed);
+        else
+            w = snprintf(screen + *used, cap - *used,
+                         "  #%lld %.12s %s %s%s%s\n", last[k].seq,
+                         last[k].tip, last[k].state,
+                         last[k].dimension[0] ? last[k].dimension : "",
+                         last[k].log_path[0] ? " " : "",
+                         last[k].log_path);
+        if (w <= 0 || (size_t)w >= cap - *used)
+            return false;
+        *used += (size_t)w;
+    }
+    return true;
+}
+
 static void dl_status(const struct zcl_command_request *req,
                       struct zcl_command_reply *reply)
 {
@@ -4676,28 +4846,18 @@ static void dl_status(const struct zcl_command_request *req,
     char read_why[128] = {0};
     struct json_value queued, inflight, outcomes;
     long long now = (long long)platform_time_wall_unix();
-    bool want_json = false, have_inflight = false;
+    bool want_json = dl_status_wants_json(req);
+    bool have_inflight = false;
     size_t used = 0;
-    int w;
-    if (req && req->input) {
-        const struct json_value *jv = json_get(req->input, "json");
-        want_json = jv && jv->type == JSON_BOOL && json_get_bool(jv);
-    }
     if (!dl_dirs_resolve(&d, false)) {
         dl_fail(reply, "STATE_DIR_FAILED", "status",
                 "the existing owner-private state root is unavailable",
                 "platform_state_root_existing");
         return;
     }
-    if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.land) >=
-            (int)sizeof(qpath) ||
-        snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", d.land) >=
-            (int)sizeof(opath)) {
-        dl_fail(reply, "QUEUE_READ_FAILED", "status",
-                "the queue paths do not fit their buffers",
-                "platform_state_root too long");
+    if (!dl_status_paths_fit(&d, qpath, sizeof(qpath), opath,
+                             sizeof(opath), reply))
         return;
-    }
     char queue_why[128] = {0};
     if (!dl_load_rows(qpath, &rows, &nrows, queue_why,
                       sizeof(queue_why))) {
@@ -4712,73 +4872,24 @@ static void dl_status(const struct zcl_command_request *req,
     json_set_object(&inflight);
     json_init(&outcomes);
     json_set_array(&outcomes);
-    for (size_t i = 0; i < nrows; i++) {
-        if (strcmp(rows[i].state, "queued") == 0) {
-            if (!dl_push_queued(&queued, &rows[i]))
-                goto fail;
-        } else if (strcmp(rows[i].state, "inflight") == 0 && !have_inflight) {
-            if (!dl_push_inflight(&inflight, &rows[i], d.wt, now))
-                goto fail;
-            have_inflight = true;
-        }
-    }
-    dl_train_status(&inflight, rows, nrows);
-    /* The last ten outcomes, oldest first. */
-    if (!dl_outcomes_tail(opath, last, &nlast, read_why, sizeof(read_why)))
+    if (!dl_status_bucket_rows(&queued, &inflight, rows, nrows, d.wt, now,
+                               &have_inflight))
         goto fail;
-    for (size_t k = 0; k < nlast; k++) {
-        if (!dl_push_outcome_row(&outcomes, &last[k]))
-            goto fail;
-    }
+    dl_train_status(&inflight, rows, nrows);
+    if (!dl_status_collect_outcomes(opath, last, &nlast, read_why,
+                                    sizeof(read_why), &outcomes))
+        goto fail;
     if (!want_json) {
-        w = snprintf(screen, sizeof(screen),
-                     "land: %llu queued, %s\n",
-                     (unsigned long long)queued.num_children,
-                     have_inflight ? "1 in flight" : "nothing in flight");
-        if (w <= 0 || (size_t)w >= sizeof(screen))
+        if (!dl_status_screen_header(&queued, have_inflight, screen,
+                                     sizeof(screen), &used))
             goto fail;
-        used = (size_t)w;
-        for (size_t i = 0; i < nrows; i++) {
-            long long elapsed;
-            if (strcmp(rows[i].state, "inflight") != 0)
-                continue;
-            elapsed = now - rows[i].started;
-            if (elapsed < 0)
-                elapsed = 0;
-            w = snprintf(screen + used, sizeof(screen) - used,
-                         "  #%lld %.12s %-8s attempt %lld, %llds%s\n",
-                         rows[i].seq, rows[i].tip, rows[i].phase,
-                         rows[i].attempt, elapsed, dl_hold_display(&rows[i]));
-            if (w <= 0 || (size_t)w >= sizeof(screen) - used)
-                goto render_done;
-            used += (size_t)w;
-        }
-        for (size_t i = 0; i < nrows; i++) {
-            if (strcmp(rows[i].state, "queued") != 0)
-                continue;
-            w = snprintf(screen + used, sizeof(screen) - used,
-                         "  #%lld %.12s queued priority #%lld%s\n",
-                         rows[i].seq, rows[i].tip, rows[i].priority_seq, dl_hold_display(&rows[i]));
-            if (w <= 0 || (size_t)w >= sizeof(screen) - used)
-                goto render_done;
-            used += (size_t)w;
-        }
-        for (size_t k = 0; k < nlast; k++) {
-            if (strcmp(last[k].state, "landed") == 0)
-                w = snprintf(screen + used, sizeof(screen) - used,
-                             "  #%lld %.12s landed as %.12s\n", last[k].seq,
-                             last[k].tip, last[k].pushed);
-            else
-                w = snprintf(screen + used, sizeof(screen) - used,
-                             "  #%lld %.12s %s %s%s%s\n", last[k].seq,
-                             last[k].tip, last[k].state,
-                             last[k].dimension[0] ? last[k].dimension : "",
-                             last[k].log_path[0] ? " " : "",
-                             last[k].log_path);
-            if (w <= 0 || (size_t)w >= sizeof(screen) - used)
-                goto render_done;
-            used += (size_t)w;
-        }
+        if (!dl_status_screen_inflight(rows, nrows, now, screen,
+                                       sizeof(screen), &used) ||
+            !dl_status_screen_queued(rows, nrows, screen, sizeof(screen),
+                                     &used) ||
+            !dl_status_screen_outcomes(last, nlast, screen, sizeof(screen),
+                                       &used))
+            goto render_done;
     }
 render_done:
     dl_status_attach_steer(reply, &d, rows, nrows, now, screen, sizeof(screen),
@@ -5624,6 +5735,116 @@ static bool dl_materialize_published(const char *target,
     return ok;
 }
 
+#if !defined(_WIN32)
+static bool dl_materialize_copy_fallback(int input, int output,
+                                         const struct stat *source_st)
+{
+    bool ok = true;
+    uint64_t remaining = (uint64_t)source_st->st_size;
+    while (ok && remaining) {
+        unsigned char buf[65536];
+        size_t want = remaining < sizeof(buf) ? (size_t)remaining : sizeof(buf);
+        ssize_t got = read(input, buf, want);
+        ssize_t off = 0;
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0) {
+            ok = false;
+            break;
+        }
+        remaining -= (uint64_t)got;
+        while (ok && off < got) {
+            ssize_t wrote = write(output, buf + off, (size_t)(got - off));
+            if (wrote < 0 && errno == EINTR)
+                continue;
+            if (wrote <= 0)
+                ok = false;
+            else
+                off += wrote;
+        }
+    }
+    return ok;
+}
+
+static bool dl_materialize_stamp_output(int output,
+                                        const struct stat *source_st,
+                                        const char *explained_alias, bool ok)
+{
+    /* Landing steps refuse on Windows; POSIX hosts preserve nanoseconds. */
+    const struct timespec times[2] = {
+#if defined(__APPLE__)
+        source_st->st_atimespec, source_st->st_mtimespec,
+#else
+        source_st->st_atim, source_st->st_mtim,
+#endif
+    };
+    if (ok)
+        ok = futimens(output, times) == 0;
+    if (ok && explained_alias)
+        ok = fsync(output) == 0;
+    return ok;
+}
+
+static bool dl_materialize_recheck_input(int input,
+                                         const struct stat *source_st,
+                                         struct stat *observed, bool ok)
+{
+    if (ok)
+        ok = fstat(input, observed) == 0 &&
+             dl_same_file_snapshot(source_st, observed);
+    return ok;
+}
+
+static bool dl_materialize_recheck_alias(const char *target,
+                                         const char *explained_alias,
+                                         const struct stat *source_st,
+                                         struct stat *observed, bool ok)
+{
+    /* A repair may replace only the exact two names checked by preflight.
+     * Recheck after the bounded copy, before publishing a replacement. */
+    if (ok && explained_alias)
+        ok = lstat(target, observed) == 0 &&
+             dl_same_file_snapshot(source_st, observed) &&
+             lstat(explained_alias, observed) == 0 &&
+             dl_same_file_snapshot(source_st, observed);
+    return ok;
+}
+
+static bool dl_materialize_recheck_output(int output, const char *tmp,
+                                          const struct stat *source_st,
+                                          struct stat *observed,
+                                          struct stat *completed, bool ok)
+{
+    if (ok)
+        ok = fstat(output, completed) == 0 &&
+             S_ISREG(completed->st_mode) && completed->st_nlink == 1 &&
+             !dl_same_inode(source_st, completed) &&
+             dl_same_copy_metadata(source_st, completed) &&
+             lstat(tmp, observed) == 0 &&
+             dl_same_file_snapshot(completed, observed);
+    return ok;
+}
+
+static bool dl_materialize_close_publish(int input, int output,
+                                         const char *tmp, const char *target,
+                                         const struct stat *completed,
+                                         const char *explained_alias, bool ok)
+{
+    if (close(input) != 0)
+        ok = false;
+    if (close(output) != 0)
+        ok = false;
+    if (ok && rename(tmp, target) != 0)
+        ok = false;
+    if (ok)
+        ok = dl_materialize_published(target, completed,
+                                      explained_alias != NULL);
+    if (!ok)
+        (void)unlink(tmp);
+    return ok;
+}
+#endif
+
 static bool dl_materialize_file(const char *source, const char *target,
                                 const struct stat *source_st,
                                 const char *explained_alias)
@@ -5666,74 +5887,18 @@ static bool dl_materialize_file(const char *source, const char *target,
     enum platform_file_clone_result cloned =
         platform_file_clone_fd(input, output);
     ok = cloned != PLATFORM_FILE_CLONE_REFUSED;
-    uint64_t remaining = (uint64_t)source_st->st_size;
-    while (ok && cloned == PLATFORM_FILE_CLONE_UNAVAILABLE && remaining) {
-        unsigned char buf[65536];
-        size_t want = remaining < sizeof(buf) ? (size_t)remaining : sizeof(buf);
-        ssize_t got = read(input, buf, want);
-        ssize_t off = 0;
-        if (got < 0 && errno == EINTR)
-            continue;
-        if (got <= 0) {
-            ok = false;
-            break;
-        }
-        remaining -= (uint64_t)got;
-        while (ok && off < got) {
-            ssize_t wrote = write(output, buf + off, (size_t)(got - off));
-            if (wrote < 0 && errno == EINTR)
-                continue;
-            if (wrote <= 0)
-                ok = false;
-            else
-                off += wrote;
-        }
-    }
+    if (ok && cloned == PLATFORM_FILE_CLONE_UNAVAILABLE)
+        ok = dl_materialize_copy_fallback(input, output, source_st);
     if (ok)
         ok = fchmod(output, source_st->st_mode & 07777) == 0;
-#if !defined(_WIN32)
-    /* Landing steps refuse on Windows; POSIX hosts preserve nanoseconds. */
-    const struct timespec times[2] = {
-#if defined(__APPLE__)
-        source_st->st_atimespec, source_st->st_mtimespec,
-#else
-        source_st->st_atim, source_st->st_mtim,
-#endif
-    };
-    if (ok)
-        ok = futimens(output, times) == 0;
-    if (ok && explained_alias)
-        ok = fsync(output) == 0;
-#endif
-    if (ok)
-        ok = fstat(input, &observed) == 0 &&
-             dl_same_file_snapshot(source_st, &observed);
-    /* A repair may replace only the exact two names checked by preflight.
-     * Recheck after the bounded copy, before publishing a replacement. */
-    if (ok && explained_alias)
-        ok = lstat(target, &observed) == 0 &&
-             dl_same_file_snapshot(source_st, &observed) &&
-             lstat(explained_alias, &observed) == 0 &&
-             dl_same_file_snapshot(source_st, &observed);
-    if (ok)
-        ok = fstat(output, &completed) == 0 &&
-             S_ISREG(completed.st_mode) && completed.st_nlink == 1 &&
-             !dl_same_inode(source_st, &completed) &&
-             dl_same_copy_metadata(source_st, &completed) &&
-             lstat(tmp, &observed) == 0 &&
-             dl_same_file_snapshot(&completed, &observed);
-    if (close(input) != 0)
-        ok = false;
-    if (close(output) != 0)
-        ok = false;
-    if (ok && rename(tmp, target) != 0)
-        ok = false;
-    if (ok)
-        ok = dl_materialize_published(target, &completed,
-                                      explained_alias != NULL);
-    if (!ok)
-        (void)unlink(tmp);
-    return ok;
+    ok = dl_materialize_stamp_output(output, source_st, explained_alias, ok);
+    ok = dl_materialize_recheck_input(input, source_st, &observed, ok);
+    ok = dl_materialize_recheck_alias(target, explained_alias, source_st,
+                                      &observed, ok);
+    ok = dl_materialize_recheck_output(output, tmp, source_st, &observed,
+                                       &completed, ok);
+    return dl_materialize_close_publish(input, output, tmp, target,
+                                        &completed, explained_alias, ok);
 #endif
 }
 
@@ -5908,6 +6073,39 @@ static bool dl_wt_vendor_tor_is_submodule(const struct dl_dirs *d,
  * refuses by name on any mismatch or unresolved side rather than reusing
  * an archive that was never proven to belong to this tip. */
 #if !defined(_WIN32)
+static bool dl_wt_vendor_tor_fast_accept(const struct dl_dirs *d,
+                                         const char *tip_pin,
+                                         const char *src_args[])
+{
+    /* FAST ACCEPT, before the submitting checkout is consulted at all.
+     * dl_wt_vendor_ensure() has already run dl_wt_submodule_ensure() on
+     * THIS worktree, so d->wt's own vendor/tor is initialised or the
+     * caller already refused; and the archive it materialized survives in
+     * the landing worktree across trains. When that worktree is already
+     * standing on the very commit the tip pins AND still holds the
+     * archive built for it, the submitting checkout has nothing left to
+     * prove — re-deriving the pin from a fresh checkout every train is
+     * what makes an uninitialised submodule over there refuse a tip that
+     * is fine. Accept-or-fall-through only: nothing here ever refuses. */
+    if (dl_wt_submodule_ready(d->wt, "vendor/tor")) {
+        char wt_dir[4096 + 96], wt_pin[80], archive[4096 + 96];
+        struct platform_file_metadata metadata;
+        if (snprintf(wt_dir, sizeof(wt_dir), "%s/vendor/tor", d->wt) <
+                (int)sizeof(wt_dir) &&
+            snprintf(archive, sizeof(archive), "%s/vendor/tor/libtor.a",
+                     d->wt) < (int)sizeof(archive) &&
+            dl_git(wt_dir, src_args, wt_pin, sizeof(wt_pin),
+                   DL_GIT_TIMEOUT_MS) == 0) {
+            dl_trim(wt_pin);
+            if (dl_sha_ok(wt_pin) && strcmp(wt_pin, tip_pin) == 0 &&
+                platform_file_metadata_read(archive, &metadata) ==
+                    PLATFORM_FILE_METADATA_OK)
+                return true;
+        }
+    }
+    return false;
+}
+
 static bool dl_wt_vendor_tor_pin_matches(const struct dl_dirs *d,
                                          const struct dl_row *r, char *why,
                                          size_t why_cap)
@@ -5938,32 +6136,8 @@ static bool dl_wt_vendor_tor_pin_matches(const struct dl_dirs *d,
                        "(tip carries no vendor/tor gitlink)");
         return false;
     }
-    /* FAST ACCEPT, before the submitting checkout is consulted at all.
-     * dl_wt_vendor_ensure() has already run dl_wt_submodule_ensure() on
-     * THIS worktree, so d->wt's own vendor/tor is initialised or the
-     * caller already refused; and the archive it materialized survives in
-     * the landing worktree across trains. When that worktree is already
-     * standing on the very commit the tip pins AND still holds the
-     * archive built for it, the submitting checkout has nothing left to
-     * prove — re-deriving the pin from a fresh checkout every train is
-     * what makes an uninitialised submodule over there refuse a tip that
-     * is fine. Accept-or-fall-through only: nothing here ever refuses. */
-    if (dl_wt_submodule_ready(d->wt, "vendor/tor")) {
-        char wt_dir[4096 + 96], wt_pin[80], archive[4096 + 96];
-        struct platform_file_metadata metadata;
-        if (snprintf(wt_dir, sizeof(wt_dir), "%s/vendor/tor", d->wt) <
-                (int)sizeof(wt_dir) &&
-            snprintf(archive, sizeof(archive), "%s/vendor/tor/libtor.a",
-                     d->wt) < (int)sizeof(archive) &&
-            dl_git(wt_dir, src_args, wt_pin, sizeof(wt_pin),
-                   DL_GIT_TIMEOUT_MS) == 0) {
-            dl_trim(wt_pin);
-            if (dl_sha_ok(wt_pin) && strcmp(wt_pin, tip_pin) == 0 &&
-                platform_file_metadata_read(archive, &metadata) ==
-                    PLATFORM_FILE_METADATA_OK)
-                return true;
-        }
-    }
+    if (dl_wt_vendor_tor_fast_accept(d, tip_pin, src_args))
+        return true;
     if (!dl_worktree_present(r->worktree) ||
         snprintf(src_dir, sizeof(src_dir), "%s/vendor/tor", r->worktree) >=
             (int)sizeof(src_dir)) {
@@ -6258,6 +6432,91 @@ static bool dl_generation_pool_scan(
  * Any name outside those roots is not this code's link, so it still
  * refuses -- fail closed, same reason string as before. */
 #if !defined(_WIN32)
+static bool dl_dependency_repair_locate(
+    const struct dl_dependency_repair *repair, const char *relative,
+    uint64_t links, char *target, size_t target_cap, char *donor,
+    size_t donor_cap, char *target_real, struct stat *before)
+{
+    if (links < 2 ||
+        snprintf(target, target_cap, "%s/%s", repair->dirs->wt,
+                 relative) >= (int)target_cap ||
+        !dl_worktree_file(repair->row->worktree, relative, donor, donor_cap) ||
+        !realpath(target, target_real) ||
+        lstat(target, before) != 0 || !S_ISREG(before->st_mode) ||
+        before->st_nlink != links)
+        return false;
+    return true;
+}
+
+static bool dl_dependency_repair_train_donor(const char *donor,
+                                             char *donor_real,
+                                             const char *target_real,
+                                             const struct stat *before)
+{
+    struct stat donor_st;
+    return realpath(donor, donor_real) &&
+           strcmp(target_real, donor_real) != 0 &&
+           lstat(donor, &donor_st) == 0 &&
+           dl_same_file_snapshot(before, &donor_st);
+}
+
+static bool dl_dependency_repair_scan(
+    const struct dl_dependency_repair *repair, const char *relative,
+    const struct stat *before, const char *target_real,
+    char partners[][4096 + 96], size_t *partner_count)
+{
+    return dl_generation_pool_scan(repair->disk_gen_parent, relative, before,
+                                   target_real, partners, partner_count) &&
+           (!repair->has_ram_gen_parent ||
+            dl_generation_pool_scan(repair->ram_gen_parent, relative, before,
+                                    target_real, partners, partner_count));
+}
+
+static bool dl_dependency_repair_replace(const char *target,
+                                         const struct stat *before,
+                                         bool have_train_donor,
+                                         const char *donor,
+                                         char partners[][4096 + 96],
+                                         size_t partner_count)
+{
+    struct stat after;
+    const char *alias =
+        have_train_donor ? donor : (partner_count > 0 ? partners[0] : NULL);
+    if (!alias ||
+        !dl_materialize_file(target, target, before, alias) ||
+        lstat(target, &after) != 0 || !S_ISREG(after.st_mode) ||
+        after.st_nlink != 1 || dl_same_inode(before, &after) ||
+        !dl_same_copy_metadata(before, &after))
+        return false;
+    return true;
+}
+
+static bool dl_dependency_repair_recheck(const struct stat *before,
+                                         uint64_t links, bool have_train_donor,
+                                         const char *donor,
+                                         char partners[][4096 + 96],
+                                         size_t partner_count)
+{
+    /* Every name that explained this link must still be exactly the
+     * pre-repair inode, now missing only the name just replaced. */
+    uint64_t expected_remaining = links - 1;
+    if (have_train_donor) {
+        struct stat recheck;
+        if (lstat(donor, &recheck) != 0 ||
+            (uint64_t)recheck.st_nlink != expected_remaining ||
+            !dl_same_inode(before, &recheck))
+            return false;
+    }
+    for (size_t i = 0; i < partner_count; i++) {
+        struct stat recheck;
+        if (lstat(partners[i], &recheck) != 0 ||
+            (uint64_t)recheck.st_nlink != expected_remaining ||
+            !dl_same_inode(before, &recheck))
+            return false;
+    }
+    return true;
+}
+
 static bool dl_dependency_repair_one(const char *relative, uint64_t links,
                                      void *opaque)
 {
@@ -6271,34 +6530,23 @@ static bool dl_dependency_repair_one(const char *relative, uint64_t links,
 #if !defined(_WIN32)
     char target[4096 + 96], donor[4096 + 96];
     char target_real[PATH_MAX], donor_real[PATH_MAX];
-    struct stat before, donor_st, after;
-    bool have_train_donor = false;
-    if (links < 2 ||
-        snprintf(target, sizeof(target), "%s/%s", repair->dirs->wt,
-                 relative) >= (int)sizeof(target) ||
-        !dl_worktree_file(repair->row->worktree, relative, donor, sizeof(donor)) ||
-        !realpath(target, target_real) ||
-        lstat(target, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_nlink != links) {
+    struct stat before;
+    if (!dl_dependency_repair_locate(repair, relative, links, target,
+                                     sizeof(target), donor, sizeof(donor),
+                                     target_real, &before)) {
         (void)snprintf(repair->why, repair->why_cap,
                        "proof_generation_dependency_unexplained_links:%s",
                        relative);
         return false;
     }
-    if (realpath(donor, donor_real) &&
-        strcmp(target_real, donor_real) != 0 &&
-        lstat(donor, &donor_st) == 0 &&
-        dl_same_file_snapshot(&before, &donor_st))
-        have_train_donor = true;
+    bool have_train_donor = dl_dependency_repair_train_donor(
+        donor, donor_real, target_real, &before);
 
     char partners[DL_DEPENDENCY_POOL_PARTNER_MAX][4096 + 96];
     size_t partner_count = 0;
-    bool scan_ok =
-        dl_generation_pool_scan(repair->disk_gen_parent, relative, &before,
-                                target_real, partners, &partner_count) &&
-        (!repair->has_ram_gen_parent ||
-         dl_generation_pool_scan(repair->ram_gen_parent, relative, &before,
-                                 target_real, partners, &partner_count));
+    bool scan_ok = dl_dependency_repair_scan(repair, relative, &before,
+                                             target_real, partners,
+                                             &partner_count);
 
     size_t accounted = (have_train_donor ? (size_t)1 : (size_t)0) +
                        partner_count;
@@ -6310,42 +6558,19 @@ static bool dl_dependency_repair_one(const char *relative, uint64_t links,
     }
     if (!repair->apply)
         return true;
-    const char *alias =
-        have_train_donor ? donor : (partner_count > 0 ? partners[0] : NULL);
-    if (!alias ||
-        !dl_materialize_file(target, target, &before, alias) ||
-        lstat(target, &after) != 0 || !S_ISREG(after.st_mode) ||
-        after.st_nlink != 1 || dl_same_inode(&before, &after) ||
-        !dl_same_copy_metadata(&before, &after)) {
+    if (!dl_dependency_repair_replace(target, &before, have_train_donor,
+                                      donor, partners, partner_count)) {
         (void)snprintf(repair->why, repair->why_cap,
                        "proof_generation_dependency_repair_failed:%s",
                        relative);
         return false;
     }
-    /* Every name that explained this link must still be exactly the
-     * pre-repair inode, now missing only the name just replaced. */
-    uint64_t expected_remaining = links - 1;
-    if (have_train_donor) {
-        struct stat recheck;
-        if (lstat(donor, &recheck) != 0 ||
-            (uint64_t)recheck.st_nlink != expected_remaining ||
-            !dl_same_inode(&before, &recheck)) {
-            (void)snprintf(repair->why, repair->why_cap,
-                           "proof_generation_dependency_repair_failed:%s",
-                           relative);
-            return false;
-        }
-    }
-    for (size_t i = 0; i < partner_count; i++) {
-        struct stat recheck;
-        if (lstat(partners[i], &recheck) != 0 ||
-            (uint64_t)recheck.st_nlink != expected_remaining ||
-            !dl_same_inode(&before, &recheck)) {
-            (void)snprintf(repair->why, repair->why_cap,
-                           "proof_generation_dependency_repair_failed:%s",
-                           relative);
-            return false;
-        }
+    if (!dl_dependency_repair_recheck(&before, links, have_train_donor,
+                                      donor, partners, partner_count)) {
+        (void)snprintf(repair->why, repair->why_cap,
+                       "proof_generation_dependency_repair_failed:%s",
+                       relative);
+        return false;
     }
     repair->repaired++;
     return true;
@@ -7083,6 +7308,56 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
     }
 }
 
+static bool dl_step_start_lint_stopped(const struct dl_dirs *d,
+                                       struct dl_row *row,
+                                       struct zcl_command_reply *reply)
+{
+    /* The lint pass is what the proof would discover last and cheapest to
+     * discover first. The proof stub skips it: a test of this queue is not
+     * a test of the lint suite. */
+    if (!dl_stub() && dl_lint_candidate(d, row) != 0) {
+        bool retry = strcmp(row->dimension, "host_load") == 0 &&
+                     row->attempt < DL_ATTEMPT_MAX;
+        if (retry) {
+            row->attempt++;
+            (void)snprintf(row->phase, sizeof(row->phase), "rebase");
+            (void)snprintf(row->state, sizeof(row->state), "queued");
+            if (dl_commit_or_report(d, row, false, reply, "rebased"))
+                dl_step_reply(reply, row, "rebased");
+            return true;
+        }
+        (void)snprintf(row->state, sizeof(row->state), "failed");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
+        return true;
+    }
+    return false;
+}
+
+static bool dl_step_start_deps_failed(const struct dl_dirs *d,
+                                      struct dl_row *row,
+                                      struct zcl_command_reply *reply,
+                                      char *why, size_t why_cap)
+{
+    /* The exact proof's own private generation only ever COPIES its
+     * dependencies out of this worktree, and reads the restart plan
+     * straight from it; it never builds any of them. The stub skips the
+     * make-based restart plan for the same reason it skips lint: it
+     * replaces the proof, not the worktree the proof would have used. */
+    if (!dl_wt_proof_deps_ensure(d, row, dl_stub() != NULL, why, why_cap)) {
+        (void)snprintf(row->state, sizeof(row->state), "failed");
+        (void)snprintf(row->dimension, sizeof(row->dimension),
+                       "worktree_deps");
+        (void)snprintf(row->detail, sizeof(row->detail), "%s", why);
+        dl_log(row, why);
+        dl_log(row, "\n");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
+        return true;
+    }
+    return false;
+}
+
 static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply,
                           char observed_main[80])
@@ -7134,48 +7409,16 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "failed");
         return;
     }
-    /* The lint pass is what the proof would discover last and cheapest to
-     * discover first. The proof stub skips it: a test of this queue is not
-     * a test of the lint suite. */
     (void)snprintf(row->phase, sizeof(row->phase), "prebuild");
-    if (!dl_stub() && dl_lint_candidate(d, row) != 0) {
-        bool retry = strcmp(row->dimension, "host_load") == 0 &&
-                     row->attempt < DL_ATTEMPT_MAX;
-        if (retry) {
-            row->attempt++;
-            (void)snprintf(row->phase, sizeof(row->phase), "rebase");
-            (void)snprintf(row->state, sizeof(row->state), "queued");
-            if (dl_commit_or_report(d, row, false, reply, "rebased"))
-                dl_step_reply(reply, row, "rebased");
-            return;
-        }
-        (void)snprintf(row->state, sizeof(row->state), "failed");
-        if (dl_commit_or_report(d, row, true, reply, "failed"))
-            dl_step_reply(reply, row, "failed");
+    if (dl_step_start_lint_stopped(d, row, reply))
         return;
-    }
     /* Where node2's commuting tickets plug in: with a ticket set installed,
      * the groups it names are admitted here and the proof asks for less. */
     if (dl_tickets_admit(row, row->base, tickets, sizeof(tickets)))
         dl_log(row, tickets);
-    /* The exact proof's own private generation only ever COPIES its
-     * dependencies out of this worktree, and reads the restart plan
-     * straight from it; it never builds any of them. The stub skips the
-     * make-based restart plan for the same reason it skips lint: it
-     * replaces the proof, not the worktree the proof would have used. */
     (void)snprintf(row->phase, sizeof(row->phase), "prebuild");
-    if (!dl_wt_proof_deps_ensure(d, row, dl_stub() != NULL, why,
-                                 sizeof(why))) {
-        (void)snprintf(row->state, sizeof(row->state), "failed");
-        (void)snprintf(row->dimension, sizeof(row->dimension),
-                       "worktree_deps");
-        (void)snprintf(row->detail, sizeof(row->detail), "%s", why);
-        dl_log(row, why);
-        dl_log(row, "\n");
-        if (dl_commit_or_report(d, row, true, reply, "failed"))
-            dl_step_reply(reply, row, "failed");
+    if (dl_step_start_deps_failed(d, row, reply, why, sizeof(why)))
         return;
-    }
     dl_start_proof(d, row, reply);
 }
 
