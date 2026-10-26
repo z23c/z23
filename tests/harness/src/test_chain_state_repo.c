@@ -1382,6 +1382,19 @@ static int t_singleton_uninitialized_rejects(void)
     return failures;
 }
 
+/* True when the singleton is uninitialized, holds none of its borrowed
+ * bindings, and its snapshot reports empty tip and header heights. */
+static bool csr_singleton_bindings_detached(
+    const struct chain_state_repository *csr,
+    const struct chain_state_view *view)
+{
+    return !csr->initialized && !csr->block_map &&
+           !csr->chain_active && !csr->pindex_best_hdr &&
+           !csr->coins_tip && !csr->ndb && !csr->db_service &&
+           !csr->wallet_scan_h && view->tip_height == -1 &&
+           view->header_height == -1;
+}
+
 static int t_singleton_init_wires_fixture(void)
 {
     /* Wire the singleton to a local fixture, commit a genesis tip,
@@ -1419,11 +1432,7 @@ static int t_singleton_init_wires_fixture(void)
     csr_test_reset_singleton();
     struct chain_state_view detached_view;
     csr_snapshot(csr, &detached_view);
-    bool detached = !csr->initialized && !csr->block_map &&
-                    !csr->chain_active && !csr->pindex_best_hdr &&
-                    !csr->coins_tip && !csr->ndb && !csr->db_service &&
-                    !csr->wallet_scan_h && detached_view.tip_height == -1 &&
-                    detached_view.header_height == -1;
+    bool detached = csr_singleton_bindings_detached(csr, &detached_view);
     CSR_RUN("csr: singleton test reset detaches every borrowed binding",
             detached);
 
