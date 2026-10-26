@@ -615,28 +615,37 @@ static int ndt_probe_scan_cases(const char *dir)
     return failures;
 }
 
-int test_block_index_node_db_topup(void)
+/* The forward-extent fold's shared fixture: the node.db and progress.db
+ * opened once for the whole group, the in-memory map and its entries of
+ * interest. */
+struct ndt_window_fixture {
+    struct node_db ndb;
+    sqlite3 *progress;
+    struct main_state ms;
+    struct block_index *e100;
+    struct block_index *e101;
+    struct block_index *seed;
+    struct block_index *e103;
+    struct block_index *e104;
+    struct block_index *e105;
+};
+
+/* Open the shared dbs, write the window rows, seed the in-memory map, store
+ * the durable seed-anchor keys and set the coins frontier. */
+static int ndt_setup_cold_import_fixture(struct ndt_window_fixture *fx,
+                                         const char *dir)
 {
     int failures = 0;
-    printf("\n=== block_index node.db forward-extent top-up tests ===\n");
-
-    char dir[256];
-    snprintf(dir, sizeof(dir), "./test-tmp/nodedbtopup_%d", (int)getpid());
-    mkdir("./test-tmp", 0755);
-    mkdir(dir, 0755);
-
     char ndb_path[320];
     snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", dir);
     char prog_path[320];
     snprintf(prog_path, sizeof(prog_path), "%s/progress.db", dir);
 
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    NDT_CHECK("setup: node.db opens", node_db_open(&ndb, ndb_path));
+    NDT_CHECK("setup: node.db opens", node_db_open(&fx->ndb, ndb_path));
 
-    sqlite3 *progress = NULL;
+    fx->progress = NULL;
     NDT_CHECK("setup: progress.db opens",
-              sqlite3_open(prog_path, &progress) == SQLITE_OK);
+              sqlite3_open(prog_path, &fx->progress) == SQLITE_OK);
 
     /* Fixture: seed anchor at H_seed=102, coins_best=105.
      * node.db `blocks` carries the connected window 103..105 (plus 100..102
@@ -645,36 +654,45 @@ int test_block_index_node_db_topup(void)
     const int coins_best = 105;
     bool wrote = true;
     for (int h = 100; h <= coins_best; h++)
-        wrote &= ndt_write_block(&ndb, h);
+        wrote &= ndt_write_block(&fx->ndb, h);
     NDT_CHECK("setup: window blocks written", wrote);
 
     /* In-memory map (the post-reload shape): contiguous chain 100..101 with
      * pprev links, then the seed anchor at 102 as a DETACHED root (pprev=NULL).
      * The forward window 103..105 is NOT in the map. */
-    struct main_state ms;
-    main_state_init(&ms);
-    struct block_index *e100 = ndt_insert_entry(&ms, 100);
-    struct block_index *e101 = ndt_insert_entry(&ms, 101);
-    struct block_index *seed = ndt_insert_entry(&ms, 102);
-    if (e101) e101->pprev = e100;
+    main_state_init(&fx->ms);
+    fx->e100 = ndt_insert_entry(&fx->ms, 100);
+    fx->e101 = ndt_insert_entry(&fx->ms, 101);
+    fx->seed = ndt_insert_entry(&fx->ms, 102);
+    if (fx->e101) fx->e101->pprev = fx->e100;
     /* seed->pprev deliberately left NULL — the cold-import snapshot base. */
     NDT_CHECK("setup: map has 100,101,detached-seed-102",
-              e100 && e101 && seed && seed->pprev == NULL);
+              fx->e100 && fx->e101 && fx->seed && fx->seed->pprev == NULL);
 
     /* Durable cold-import seed anchor keys (height + hash). */
     struct uint256 seed_hash;
     ndt_hash_for(H_seed, &seed_hash);
     NDT_CHECK("setup: seed anchor keys written",
-              node_db_state_set_int(&ndb, "cold_import_seed_anchor_height",
+              node_db_state_set_int(&fx->ndb, "cold_import_seed_anchor_height",
                                     H_seed) &&
-              node_db_state_set(&ndb, "cold_import_seed_anchor_hash",
+              node_db_state_set(&fx->ndb, "cold_import_seed_anchor_hash",
                                 seed_hash.data, 32));
 
     /* coins_best = 105 (applied_height = 106). */
-    NDT_CHECK("setup: coins frontier set", ndt_set_coins_best(progress, coins_best));
+    NDT_CHECK("setup: coins frontier set", ndt_set_coins_best(fx->progress, coins_best));
+    return failures;
+}
+
+/* Run the top-up once, then check the forward window heights are in the map
+ * with their height labels. */
+static int ndt_topup_run_check_window_inserted(struct ndt_window_fixture *fx,
+                                               const char *dir)
+{
+    int failures = 0;
 
     /* ── Run the top-up. ───────────────────────────────────────────── */
-    bool ran = block_index_node_db_topup_with(&ms, &ndb, progress, dir);
+    bool ran = block_index_node_db_topup_with(&fx->ms, &fx->ndb, fx->progress,
+                                              dir);
     NDT_CHECK("topup returns ok", ran);
 
     /* 1. forward window inserted + pprev-linked down to the seed anchor. */
@@ -682,127 +700,186 @@ int test_block_index_node_db_topup(void)
     ndt_hash_for(103, &h103);
     ndt_hash_for(104, &h104);
     ndt_hash_for(105, &h105);
-    struct block_index *e103 = block_map_find(&ms.map_block_index, &h103);
-    struct block_index *e104 = block_map_find(&ms.map_block_index, &h104);
-    struct block_index *e105 = block_map_find(&ms.map_block_index, &h105);
-    NDT_CHECK("window heights inserted", e103 && e104 && e105);
+    fx->e103 = block_map_find(&fx->ms.map_block_index, &h103);
+    fx->e104 = block_map_find(&fx->ms.map_block_index, &h104);
+    fx->e105 = block_map_find(&fx->ms.map_block_index, &h105);
+    NDT_CHECK("window heights inserted", fx->e103 && fx->e104 && fx->e105);
     NDT_CHECK("inserted heights correct",
-              e103 && e103->nHeight == 103 &&
-              e104 && e104->nHeight == 104 &&
-              e105 && e105->nHeight == 105);
+              fx->e103 && fx->e103->nHeight == 103 &&
+              fx->e104 && fx->e104->nHeight == 104 &&
+              fx->e105 && fx->e105->nHeight == 105);
+    return failures;
+}
+
+/* Check the inserted entries carry data positions and nTx from their
+ * `blocks` rows. */
+static int ndt_check_inserted_entry_state(const struct ndt_window_fixture *fx)
+{
+    int failures = 0;
     NDT_CHECK("inserted carry HAVE_DATA + positions",
-              e103 && (e103->nStatus & BLOCK_HAVE_DATA) &&
-              e103->nFile == 1 && e103->nDataPos == (unsigned)(1000 + 103));
+              fx->e103 && (fx->e103->nStatus & BLOCK_HAVE_DATA) &&
+              fx->e103->nFile == 1 && fx->e103->nDataPos == (unsigned)(1000 + 103));
     NDT_CHECK("inserted carry nTx from blocks row",
-              e103 && e103->nTx == 2 && e105 && e105->nTx == 2);
+              fx->e103 && fx->e103->nTx == 2 && fx->e105 && fx->e105->nTx == 2);
+    return failures;
+}
+
+/* Check the inserted window is pprev-linked down to the seed anchor and its
+ * chainwork strictly increases across it. */
+static int ndt_check_inserted_links_and_chainwork(const struct ndt_window_fixture *fx)
+{
+    int failures = 0;
     NDT_CHECK("pprev chain 105->104->103->seed",
-              e105 && e105->pprev == e104 &&
-              e104 && e104->pprev == e103 &&
-              e103 && e103->pprev == seed);
+              fx->e105 && fx->e105->pprev == fx->e104 &&
+              fx->e104 && fx->e104->pprev == fx->e103 &&
+              fx->e103 && fx->e103->pprev == fx->seed);
     NDT_CHECK("seed anchor is no longer an orphan tip (has a child)",
-              e103 && e103->pprev == seed);
+              fx->e103 && fx->e103->pprev == fx->seed);
     NDT_CHECK("inserted chainwork strictly increasing",
-              e103 && e104 && e105 &&
-              arith_uint256_compare(&e104->nChainWork,
-                                    &e103->nChainWork) > 0 &&
-              arith_uint256_compare(&e105->nChainWork,
-                                    &e104->nChainWork) > 0);
+              fx->e103 && fx->e104 && fx->e105 &&
+              arith_uint256_compare(&fx->e104->nChainWork,
+                                    &fx->e103->nChainWork) > 0 &&
+              arith_uint256_compare(&fx->e105->nChainWork,
+                                    &fx->e104->nChainWork) > 0);
+    return failures;
+}
+
+/* Check nothing above coins_best was inserted, pre-existing links survive,
+ * and a second run changes nothing. */
+static int ndt_check_window_bounds_and_idempotence(struct ndt_window_fixture *fx,
+                                                   const char *dir)
+{
+    int failures = 0;
 
     /* 4. window-bounded: nothing above coins_best (106) inserted. */
     struct uint256 h106;
     ndt_hash_for(106, &h106);
     NDT_CHECK("nothing above coins_best inserted",
-              block_map_find(&ms.map_block_index, &h106) == NULL);
+              block_map_find(&fx->ms.map_block_index, &h106) == NULL);
 
     /* 2. raise-only: pre-existing entries keep their state. */
-    NDT_CHECK("e101 pprev preserved", e101 && e101->pprev == e100);
+    NDT_CHECK("e101 pprev preserved", fx->e101 && fx->e101->pprev == fx->e100);
 
     /* 5. idempotent second run changes nothing. */
-    bool ran2 = block_index_node_db_topup_with(&ms, &ndb, progress, dir);
+    bool ran2 = block_index_node_db_topup_with(&fx->ms, &fx->ndb, fx->progress,
+                                               dir);
     NDT_CHECK("second topup returns ok", ran2);
     NDT_CHECK("second topup changed nothing",
-              e105 && e105->pprev == e104 && e105->nTx == 2 &&
-              e103 && e103->pprev == seed);
+              fx->e105 && fx->e105->pprev == fx->e104 && fx->e105->nTx == 2 &&
+              fx->e103 && fx->e103->pprev == fx->seed);
+    return failures;
+}
 
-    main_state_free(&ms);
-
-    /* ── NO-OP without a seed anchor (normal / P2P-origin datadir). ──── */
-    {
-        struct node_db ndb2;
-        memset(&ndb2, 0, sizeof(ndb2));
-        char ndb2_path[320];
-        snprintf(ndb2_path, sizeof(ndb2_path), "%s/node2.db", dir);
-        bool opened = node_db_open(&ndb2, ndb2_path);
-        NDT_CHECK("noseed: node.db opens", opened);
-        if (opened) {
-            for (int h = 100; h <= coins_best; h++)
-                (void)ndt_write_block(&ndb2, h);
-            /* NO cold_import_seed_anchor_* keys written. */
-            struct main_state ms2;
-            main_state_init(&ms2);
-            struct block_index *s100 = ndt_insert_entry(&ms2, 100);
-            (void)s100;
-            size_t before = ms2.map_block_index.size;
-            bool ok = block_index_node_db_topup_with(&ms2, &ndb2, progress, dir);
-            size_t after = ms2.map_block_index.size;
-            NDT_CHECK("noseed: returns ok", ok);
-            NDT_CHECK("noseed: STRICT no-op (map unchanged)", after == before);
-            main_state_free(&ms2);
-            node_db_close(&ndb2);
-        }
+/* ── NO-OP without a seed anchor (normal / P2P-origin datadir). ──── */
+static int ndt_noseed_noop_checks(const char *dir, sqlite3 *progress)
+{
+    int failures = 0;
+    const int coins_best = 105;
+    struct node_db ndb2;
+    memset(&ndb2, 0, sizeof(ndb2));
+    char ndb2_path[320];
+    snprintf(ndb2_path, sizeof(ndb2_path), "%s/node2.db", dir);
+    bool opened = node_db_open(&ndb2, ndb2_path);
+    NDT_CHECK("noseed: node.db opens", opened);
+    if (opened) {
+        for (int h = 100; h <= coins_best; h++)
+            (void)ndt_write_block(&ndb2, h);
+        /* NO cold_import_seed_anchor_* keys written. */
+        struct main_state ms2;
+        main_state_init(&ms2);
+        struct block_index *s100 = ndt_insert_entry(&ms2, 100);
+        (void)s100;
+        size_t before = ms2.map_block_index.size;
+        bool ok = block_index_node_db_topup_with(&ms2, &ndb2, progress, dir);
+        size_t after = ms2.map_block_index.size;
+        NDT_CHECK("noseed: returns ok", ok);
+        NDT_CHECK("noseed: STRICT no-op (map unchanged)", after == before);
+        main_state_free(&ms2);
+        node_db_close(&ndb2);
     }
+    return failures;
+}
 
-    /* ── NO-OP on an empty window (coins_best <= H_seed). ───────────── */
-    {
-        struct node_db ndb3;
-        memset(&ndb3, 0, sizeof(ndb3));
-        char ndb3_path[320];
-        snprintf(ndb3_path, sizeof(ndb3_path), "%s/node3.db", dir);
-        char prog3_path[320];
-        snprintf(prog3_path, sizeof(prog3_path), "%s/progress3.db", dir);
-        sqlite3 *progress3 = NULL;
-        bool opened = node_db_open(&ndb3, ndb3_path) &&
-                      sqlite3_open(prog3_path, &progress3) == SQLITE_OK;
-        NDT_CHECK("empty-window: dbs open", opened);
-        if (opened) {
-            for (int h = 100; h <= H_seed; h++)
-                (void)ndt_write_block(&ndb3, h);
-            struct uint256 sh;
-            ndt_hash_for(H_seed, &sh);
-            node_db_state_set_int(&ndb3, "cold_import_seed_anchor_height",
-                                  H_seed);
-            node_db_state_set(&ndb3, "cold_import_seed_anchor_hash",
-                              sh.data, 32);
-            /* coins_best == H_seed → empty forward window. */
-            (void)ndt_set_coins_best(progress3, H_seed);
-            struct main_state ms3;
-            main_state_init(&ms3);
-            struct block_index *sd = ndt_insert_entry(&ms3, H_seed);
-            (void)sd;
-            size_t before = ms3.map_block_index.size;
-            bool ok = block_index_node_db_topup_with(&ms3, &ndb3, progress3, dir);
-            size_t after = ms3.map_block_index.size;
-            NDT_CHECK("empty-window: returns ok", ok);
-            NDT_CHECK("empty-window: no insert", after == before);
-            main_state_free(&ms3);
-            if (progress3) sqlite3_close(progress3);
-            node_db_close(&ndb3);
-        }
+/* ── NO-OP on an empty window (coins_best <= H_seed). ───────────── */
+static int ndt_empty_window_noop_checks(const char *dir)
+{
+    int failures = 0;
+    const int H_seed = 102;
+    struct node_db ndb3;
+    memset(&ndb3, 0, sizeof(ndb3));
+    char ndb3_path[320];
+    snprintf(ndb3_path, sizeof(ndb3_path), "%s/node3.db", dir);
+    char prog3_path[320];
+    snprintf(prog3_path, sizeof(prog3_path), "%s/progress3.db", dir);
+    sqlite3 *progress3 = NULL;
+    bool opened = node_db_open(&ndb3, ndb3_path) &&
+                  sqlite3_open(prog3_path, &progress3) == SQLITE_OK;
+    NDT_CHECK("empty-window: dbs open", opened);
+    if (opened) {
+        for (int h = 100; h <= H_seed; h++)
+            (void)ndt_write_block(&ndb3, h);
+        struct uint256 sh;
+        ndt_hash_for(H_seed, &sh);
+        node_db_state_set_int(&ndb3, "cold_import_seed_anchor_height",
+                              H_seed);
+        node_db_state_set(&ndb3, "cold_import_seed_anchor_hash",
+                          sh.data, 32);
+        /* coins_best == H_seed → empty forward window. */
+        (void)ndt_set_coins_best(progress3, H_seed);
+        struct main_state ms3;
+        main_state_init(&ms3);
+        struct block_index *sd = ndt_insert_entry(&ms3, H_seed);
+        (void)sd;
+        size_t before = ms3.map_block_index.size;
+        bool ok = block_index_node_db_topup_with(&ms3, &ndb3, progress3, dir);
+        size_t after = ms3.map_block_index.size;
+        NDT_CHECK("empty-window: returns ok", ok);
+        NDT_CHECK("empty-window: no insert", after == before);
+        main_state_free(&ms3);
+        if (progress3) sqlite3_close(progress3);
+        node_db_close(&ndb3);
     }
+    return failures;
+}
 
-    /* NULL node.db / NULL progress are no-op successes. */
-    {
-        struct main_state ms4;
-        main_state_init(&ms4);
-        NDT_CHECK("NULL node.db no-op",
-                  block_index_node_db_topup_with(&ms4, NULL, progress, dir));
-        NDT_CHECK("NULL progress no-op",
-                  block_index_node_db_topup_with(&ms4, &ndb, NULL, dir));
-        main_state_free(&ms4);
-    }
+/* NULL node.db / NULL progress are no-op successes. */
+static int ndt_null_db_noop_checks(const char *dir, struct node_db *ndb,
+                                   sqlite3 *progress)
+{
+    int failures = 0;
+    struct main_state ms4;
+    main_state_init(&ms4);
+    NDT_CHECK("NULL node.db no-op",
+              block_index_node_db_topup_with(&ms4, NULL, progress, dir));
+    NDT_CHECK("NULL progress no-op",
+              block_index_node_db_topup_with(&ms4, ndb, NULL, dir));
+    main_state_free(&ms4);
+    return failures;
+}
 
-    if (progress) sqlite3_close(progress);
-    node_db_close(&ndb);
+int test_block_index_node_db_topup(void)
+{
+    printf("\n=== block index node.db forward-extent top-up tests ===\n");
+
+    char dir[256];
+    snprintf(dir, sizeof(dir), "./test-tmp/nodedbtopup_%d", (int)getpid());
+    mkdir("./test-tmp", 0755);
+    mkdir(dir, 0755);
+
+    struct ndt_window_fixture fx;
+    memset(&fx, 0, sizeof(fx));
+    int failures = ndt_setup_cold_import_fixture(&fx, dir);
+    failures += ndt_topup_run_check_window_inserted(&fx, dir);
+    failures += ndt_check_inserted_entry_state(&fx);
+    failures += ndt_check_inserted_links_and_chainwork(&fx);
+    failures += ndt_check_window_bounds_and_idempotence(&fx, dir);
+    main_state_free(&fx.ms);
+    failures += ndt_noseed_noop_checks(dir, fx.progress);
+    failures += ndt_empty_window_noop_checks(dir);
+    failures += ndt_null_db_noop_checks(dir, &fx.ndb, fx.progress);
+
+    if (fx.progress) sqlite3_close(fx.progress);
+    node_db_close(&fx.ndb);
     return failures + ndt_undo_topup_cases(dir) +
            ndt_range_equivalence_cases(dir) +
            ndt_probe_scan_cases(dir);
