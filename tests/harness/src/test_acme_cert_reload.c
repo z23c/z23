@@ -227,6 +227,174 @@ static void *hammer_fn(void *arg)
     return NULL;
 }
 
+static int check_initial_certificate_is_served(void)
+{
+    int failures = 0;
+    char cn[256] = "";
+    CR_CHECK("a client completes a handshake", served_cn(cn, sizeof(cn)));
+    CR_CHECK("and is served the first certificate", strcmp(cn, ALPHA) == 0);
+    CR_CHECK("the node reports that it is self-signed, not CA-issued",
+             https_server_certificate_is_self_signed());
+    return failures;
+}
+
+static int check_swap_to_second_pair(const char *b_cert, const char *b_key)
+{
+    int failures = 0;
+
+    CR_CHECK("nothing changed on disk means nothing is reloaded",
+             !https_server_certificate_refresh());
+
+    https_server_watch_certificate(b_cert, b_key);
+    CR_CHECK("watching a different pair makes the next refresh swap it in",
+             https_server_certificate_refresh());
+    char cn[256] = "";
+    CR_CHECK("a new client is served the second certificate",
+             served_cn(cn, sizeof(cn)) && strcmp(cn, BRAVO) == 0);
+    CR_CHECK("and a second refresh finds nothing more to do",
+             !https_server_certificate_refresh());
+    return failures;
+}
+
+static int check_open_connection_survives_swap(const char *a_cert,
+                                               const char *a_key)
+{
+    int failures = 0;
+    struct conn held;
+    CR_CHECK("a connection is opened and its handshake completed",
+             conn_open(&held) && strcmp(held.cn, BRAVO) == 0);
+    https_server_watch_certificate(a_cert, a_key);
+    CR_CHECK("the certificate is swapped while it is open",
+             https_server_certificate_refresh());
+    CR_CHECK("the OPEN connection still serves its request",
+             conn_get_root(&held));
+    conn_close(&held);
+    char cn[256] = "";
+    CR_CHECK("while a new connection gets the swapped-in certificate",
+             served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
+    return failures;
+}
+
+static int check_reload_refusals(const char *a_cert, const char *a_key,
+                                 const char *b_cert, const char *b_key,
+                                 const char *junk, const char *absent)
+{
+    int failures = 0;
+    char cn[256] = "";
+
+    https_server_watch_certificate(a_cert, b_key);
+    CR_CHECK("a certificate whose key is not its own is refused",
+             !https_server_certificate_refresh());
+    CR_CHECK("and the front door keeps serving what it had",
+             served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
+    CR_CHECK("a forced reload refuses the same mismatched pair",
+             !https_server_reload_certificate());
+
+    https_server_watch_certificate(absent, a_key);
+    CR_CHECK("a pair that is not on disk is not an error and not a swap",
+             !https_server_certificate_refresh());
+    CR_CHECK("a forced reload of an absent certificate is refused",
+             !https_server_reload_certificate());
+    CR_CHECK("and the front door still serves what it had",
+             served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
+
+    https_server_watch_certificate(junk, a_key);
+    CR_CHECK("a file that is not a certificate is refused",
+             !https_server_certificate_refresh());
+    CR_CHECK("and the front door still serves what it had",
+             served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
+
+    https_server_watch_certificate(NULL, NULL);
+    CR_CHECK("naming half a pair to watch changes nothing",
+             !https_server_certificate_refresh() &&
+             served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
+
+    /* Back to a good pair: the refusals above must not have wedged it. */
+    https_server_watch_certificate(b_cert, b_key);
+    CR_CHECK("a good pair after those refusals still swaps in",
+             https_server_reload_certificate() &&
+             served_cn(cn, sizeof(cn)) && strcmp(cn, BRAVO) == 0);
+    return failures;
+}
+
+static int check_swap_atomicity_under_concurrency(const char *a_cert,
+                                                  const char *a_key,
+                                                  const char *b_cert,
+                                                  const char *b_key)
+{
+    int failures = 0;
+    struct hammer workers[4];
+    memset(workers, 0, sizeof(workers));
+    pthread_mutex_lock(&g_hammer_lock);
+    g_hammer_start = false;
+    g_hammer_completed = 0;
+    pthread_mutex_unlock(&g_hammer_lock);
+    bool spawned = true;
+    size_t spawned_count = 0;
+    for (size_t i = 0; i < sizeof(workers) / sizeof(workers[0]); i++) {
+        workers[i].rounds = 30;
+        if (pthread_create(&workers[i].thread, NULL, hammer_fn,
+                           &workers[i]) != 0) {
+            workers[i].rounds = 0;
+            spawned = false;
+        } else
+            spawned_count++;
+    }
+
+    pthread_mutex_lock(&g_hammer_lock);
+    g_hammer_start = true;
+    pthread_cond_broadcast(&g_hammer_cond);
+    pthread_mutex_unlock(&g_hammer_lock);
+
+    int flips = 0;
+    for (;;) {
+        int completed;
+        if (flips % 2 == 0)
+            https_server_watch_certificate(a_cert, a_key);
+        else
+            https_server_watch_certificate(b_cert, b_key);
+        (void)https_server_certificate_refresh();
+        flips++;
+
+        pthread_mutex_lock(&g_hammer_lock);
+        completed = g_hammer_completed;
+        pthread_mutex_unlock(&g_hammer_lock);
+        if (flips >= 60 && completed == (int)spawned_count)
+            break;
+    }
+    int failed = 0, alpha = 0, bravo = 0, other = 0;
+    for (size_t i = 0; i < sizeof(workers) / sizeof(workers[0]); i++) {
+        if (workers[i].rounds == 0 && !spawned)
+            continue;
+        pthread_join(workers[i].thread, NULL);
+        failed += workers[i].handshakes_failed;
+        alpha += workers[i].saw_alpha;
+        bravo += workers[i].saw_bravo;
+        other += workers[i].saw_other;
+    }
+    printf("acme_cert_reload: %d handshakes during %d swaps "
+           "(alpha=%d bravo=%d other=%d failed=%d)\n",
+           alpha + bravo + other + failed, flips,
+           alpha, bravo, other, failed);
+    CR_CHECK("every thread was started", spawned);
+    CR_CHECK("four workers each attempted exactly 30 handshakes",
+             alpha + bravo + other + failed == 4 * 30);
+    /* A mismatched certificate and key cannot produce a page: it
+     * produces a handshake failure. Zero failures IS the atomicity
+     * claim. */
+    CR_CHECK("no handshake failed while the certificate was swapping",
+             failed == 0);
+    CR_CHECK("every certificate served was one whole pair or the other",
+             other == 0);
+    CR_CHECK("enough handshakes ran for that to mean something",
+             alpha + bravo >= 100);
+    /* Without this the run above could have proved only that nothing
+     * ever changed. */
+    CR_CHECK("and BOTH certificates were actually observed on the wire",
+             alpha > 0 && bravo > 0);
+    return failures;
+}
+
 int test_acme_cert_reload(void)
 {
     int failures = 0;
@@ -276,155 +444,21 @@ int test_acme_cert_reload(void)
     }
 
     /* ── what is being served, and whether the node says so ────────── */
-    {
-        char cn[256] = "";
-        CR_CHECK("a client completes a handshake", served_cn(cn, sizeof(cn)));
-        CR_CHECK("and is served the first certificate", strcmp(cn, ALPHA) == 0);
-        CR_CHECK("the node reports that it is self-signed, not CA-issued",
-                 https_server_certificate_is_self_signed());
-    }
+    failures += check_initial_certificate_is_served();
 
     /* ── the swap ──────────────────────────────────────────────────── */
-    {
-        CR_CHECK("nothing changed on disk means nothing is reloaded",
-                 !https_server_certificate_refresh());
-
-        https_server_watch_certificate(b_cert, b_key);
-        CR_CHECK("watching a different pair makes the next refresh swap it in",
-                 https_server_certificate_refresh());
-        char cn[256] = "";
-        CR_CHECK("a new client is served the second certificate",
-                 served_cn(cn, sizeof(cn)) && strcmp(cn, BRAVO) == 0);
-        CR_CHECK("and a second refresh finds nothing more to do",
-                 !https_server_certificate_refresh());
-    }
+    failures += check_swap_to_second_pair(b_cert, b_key);
 
     /* ── a connection already established must not break ───────────── */
-    {
-        struct conn held;
-        CR_CHECK("a connection is opened and its handshake completed",
-                 conn_open(&held) && strcmp(held.cn, BRAVO) == 0);
-        https_server_watch_certificate(a_cert, a_key);
-        CR_CHECK("the certificate is swapped while it is open",
-                 https_server_certificate_refresh());
-        CR_CHECK("the OPEN connection still serves its request",
-                 conn_get_root(&held));
-        conn_close(&held);
-        char cn[256] = "";
-        CR_CHECK("while a new connection gets the swapped-in certificate",
-                 served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
-    }
+    failures += check_open_connection_survives_swap(a_cert, a_key);
 
     /* ── what a reload REFUSES, and what it keeps serving ──────────── */
-    {
-        char cn[256] = "";
-
-        https_server_watch_certificate(a_cert, b_key);
-        CR_CHECK("a certificate whose key is not its own is refused",
-                 !https_server_certificate_refresh());
-        CR_CHECK("and the front door keeps serving what it had",
-                 served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
-        CR_CHECK("a forced reload refuses the same mismatched pair",
-                 !https_server_reload_certificate());
-
-        https_server_watch_certificate(absent, a_key);
-        CR_CHECK("a pair that is not on disk is not an error and not a swap",
-                 !https_server_certificate_refresh());
-        CR_CHECK("a forced reload of an absent certificate is refused",
-                 !https_server_reload_certificate());
-        CR_CHECK("and the front door still serves what it had",
-                 served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
-
-        https_server_watch_certificate(junk, a_key);
-        CR_CHECK("a file that is not a certificate is refused",
-                 !https_server_certificate_refresh());
-        CR_CHECK("and the front door still serves what it had",
-                 served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
-
-        https_server_watch_certificate(NULL, NULL);
-        CR_CHECK("naming half a pair to watch changes nothing",
-                 !https_server_certificate_refresh() &&
-                 served_cn(cn, sizeof(cn)) && strcmp(cn, ALPHA) == 0);
-
-        /* Back to a good pair: the refusals above must not have wedged it. */
-        https_server_watch_certificate(b_cert, b_key);
-        CR_CHECK("a good pair after those refusals still swaps in",
-                 https_server_reload_certificate() &&
-                 served_cn(cn, sizeof(cn)) && strcmp(cn, BRAVO) == 0);
-    }
+    failures += check_reload_refusals(a_cert, a_key, b_cert, b_key,
+                                      junk, absent);
 
     /* ── the atomicity claim, under concurrent handshakes ──────────── */
-    {
-        struct hammer workers[4];
-        memset(workers, 0, sizeof(workers));
-        pthread_mutex_lock(&g_hammer_lock);
-        g_hammer_start = false;
-        g_hammer_completed = 0;
-        pthread_mutex_unlock(&g_hammer_lock);
-        bool spawned = true;
-        size_t spawned_count = 0;
-        for (size_t i = 0; i < sizeof(workers) / sizeof(workers[0]); i++) {
-            workers[i].rounds = 30;
-            if (pthread_create(&workers[i].thread, NULL, hammer_fn,
-                               &workers[i]) != 0) {
-                workers[i].rounds = 0;
-                spawned = false;
-            } else
-                spawned_count++;
-        }
-
-        pthread_mutex_lock(&g_hammer_lock);
-        g_hammer_start = true;
-        pthread_cond_broadcast(&g_hammer_cond);
-        pthread_mutex_unlock(&g_hammer_lock);
-
-        int flips = 0;
-        for (;;) {
-            int completed;
-            if (flips % 2 == 0)
-                https_server_watch_certificate(a_cert, a_key);
-            else
-                https_server_watch_certificate(b_cert, b_key);
-            (void)https_server_certificate_refresh();
-            flips++;
-
-            pthread_mutex_lock(&g_hammer_lock);
-            completed = g_hammer_completed;
-            pthread_mutex_unlock(&g_hammer_lock);
-            if (flips >= 60 && completed == (int)spawned_count)
-                break;
-        }
-        int failed = 0, alpha = 0, bravo = 0, other = 0;
-        for (size_t i = 0; i < sizeof(workers) / sizeof(workers[0]); i++) {
-            if (workers[i].rounds == 0 && !spawned)
-                continue;
-            pthread_join(workers[i].thread, NULL);
-            failed += workers[i].handshakes_failed;
-            alpha += workers[i].saw_alpha;
-            bravo += workers[i].saw_bravo;
-            other += workers[i].saw_other;
-        }
-        printf("acme_cert_reload: %d handshakes during %d swaps "
-               "(alpha=%d bravo=%d other=%d failed=%d)\n",
-               alpha + bravo + other + failed, flips,
-               alpha, bravo, other, failed);
-        CR_CHECK("every thread was started", spawned);
-        CR_CHECK("four workers each attempted exactly 30 handshakes",
-                 alpha + bravo + other + failed == 4 * 30);
-        /* A mismatched certificate and key cannot produce a page: it
-         * produces a handshake failure. Zero failures IS the atomicity
-         * claim. */
-        CR_CHECK("no handshake failed while the certificate was swapping",
-                 failed == 0);
-        CR_CHECK("every certificate served was one whole pair or the other",
-                 other == 0);
-        CR_CHECK("enough handshakes ran for that to mean something",
-                 alpha + bravo >= 100);
-        /* Without this the run above could have proved only that nothing
-         * ever changed. */
-        CR_CHECK("and BOTH certificates were actually observed on the wire",
-                 alpha > 0 && bravo > 0);
-    }
+    failures += check_swap_atomicity_under_concurrency(a_cert, a_key,
+                                                       b_cert, b_key);
 
     https_server_stop();
     CR_CHECK("the front door stops", !https_server_is_running());
