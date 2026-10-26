@@ -44,6 +44,22 @@ void vcs_zcode_reproduction_request_init(
     request->confinement = VCS_PACKAGE_BUILD_ISOLATION_FULL;
 }
 
+static enum vcs_zcode_reproduction_error
+vcs_zcode_reproduction_request_check_budget(
+    const struct vcs_zcode_reproduction_request_v1 *request)
+{
+    if (request->max_cpu_seconds == 0 ||
+        request->max_cpu_seconds > VCS_ZCODE_REPRODUCTION_MAX_CPU_SECONDS ||
+        request->max_processes == 0 ||
+        request->max_processes > VCS_ZCODE_REPRODUCTION_MAX_PROCESSES ||
+        request->max_memory_bytes == 0 ||
+        request->max_memory_bytes > VCS_ZCODE_REPRODUCTION_MAX_MEMORY_BYTES ||
+        request->max_output_bytes == 0 ||
+        request->max_output_bytes > VCS_ZCODE_REPRODUCTION_MAX_OUTPUT_BYTES)
+        return VCS_ZCODE_REPRODUCTION_BUDGET;
+    return VCS_ZCODE_REPRODUCTION_OK;
+}
+
 enum vcs_zcode_reproduction_error vcs_zcode_reproduction_request_validate(
     const struct vcs_zcode_reproduction_request_v1 *request)
 {
@@ -76,16 +92,20 @@ enum vcs_zcode_reproduction_error vcs_zcode_reproduction_request_validate(
         request->expires_unix - request->created_unix >
             VCS_ZCODE_REPRODUCTION_MAX_TTL_SECONDS)
         return VCS_ZCODE_REPRODUCTION_TIME;
-    if (request->max_cpu_seconds == 0 ||
-        request->max_cpu_seconds > VCS_ZCODE_REPRODUCTION_MAX_CPU_SECONDS ||
-        request->max_processes == 0 ||
-        request->max_processes > VCS_ZCODE_REPRODUCTION_MAX_PROCESSES ||
-        request->max_memory_bytes == 0 ||
-        request->max_memory_bytes > VCS_ZCODE_REPRODUCTION_MAX_MEMORY_BYTES ||
-        request->max_output_bytes == 0 ||
-        request->max_output_bytes > VCS_ZCODE_REPRODUCTION_MAX_OUTPUT_BYTES)
-        return VCS_ZCODE_REPRODUCTION_BUDGET;
-    return VCS_ZCODE_REPRODUCTION_OK;
+    return vcs_zcode_reproduction_request_check_budget(request);
+}
+
+static bool vcs_zcode_reproduction_request_write_time_and_budget(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_reproduction_request_v1 *request)
+{
+    return zcl_codec_write_i64le(writer, request->created_unix) &&
+        zcl_codec_write_i64le(writer, request->expires_unix) &&
+        zcl_codec_write_u32le(writer, request->max_cpu_seconds) &&
+        zcl_codec_write_u32le(writer, request->max_processes) &&
+        zcl_codec_write_u64le(writer, request->max_memory_bytes) &&
+        zcl_codec_write_u64le(writer, request->max_output_bytes) &&
+        zcl_codec_write_u32le(writer, 0);
 }
 
 enum vcs_zcode_reproduction_error vcs_zcode_reproduction_request_serialize(
@@ -121,17 +141,26 @@ enum vcs_zcode_reproduction_error vcs_zcode_reproduction_request_serialize(
     WRITE_ROOT(challenge_nonce);
     WRITE_ROOT(requester_contributor_binding_root);
 #undef WRITE_ROOT
-    ok = ok && zcl_codec_write_i64le(&writer, request->created_unix) &&
-        zcl_codec_write_i64le(&writer, request->expires_unix) &&
-        zcl_codec_write_u32le(&writer, request->max_cpu_seconds) &&
-        zcl_codec_write_u32le(&writer, request->max_processes) &&
-        zcl_codec_write_u64le(&writer, request->max_memory_bytes) &&
-        zcl_codec_write_u64le(&writer, request->max_output_bytes) &&
-        zcl_codec_write_u32le(&writer, 0);
+    ok = ok && vcs_zcode_reproduction_request_write_time_and_budget(
+        &writer, request);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
                    written == VCS_ZCODE_REPRODUCTION_REQUEST_WIRE_BYTES
         ? VCS_ZCODE_REPRODUCTION_OK : VCS_ZCODE_REPRODUCTION_WIRE_SIZE;
+}
+
+static bool vcs_zcode_reproduction_request_read_time_and_budget(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_reproduction_request_v1 *out, uint32_t *reserved32)
+{
+    return zcl_codec_read_i64le(reader, &out->created_unix) &&
+        zcl_codec_read_i64le(reader, &out->expires_unix) &&
+        zcl_codec_read_u32le(reader, &out->max_cpu_seconds) &&
+        zcl_codec_read_u32le(reader, &out->max_processes) &&
+        zcl_codec_read_u64le(reader, &out->max_memory_bytes) &&
+        zcl_codec_read_u64le(reader, &out->max_output_bytes) &&
+        zcl_codec_read_u32le(reader, reserved32) &&
+        zcl_codec_reader_finish(reader);
 }
 
 enum vcs_zcode_reproduction_error vcs_zcode_reproduction_request_parse(
@@ -168,14 +197,8 @@ enum vcs_zcode_reproduction_error vcs_zcode_reproduction_request_parse(
     READ_ROOT(challenge_nonce);
     READ_ROOT(requester_contributor_binding_root);
 #undef READ_ROOT
-    ok = ok && zcl_codec_read_i64le(&reader, &out->created_unix) &&
-        zcl_codec_read_i64le(&reader, &out->expires_unix) &&
-        zcl_codec_read_u32le(&reader, &out->max_cpu_seconds) &&
-        zcl_codec_read_u32le(&reader, &out->max_processes) &&
-        zcl_codec_read_u64le(&reader, &out->max_memory_bytes) &&
-        zcl_codec_read_u64le(&reader, &out->max_output_bytes) &&
-        zcl_codec_read_u32le(&reader, &reserved32) &&
-        zcl_codec_reader_finish(&reader);
+    ok = ok && vcs_zcode_reproduction_request_read_time_and_budget(
+        &reader, out, &reserved32);
     if (!ok) {
         memset(out, 0, sizeof(*out));
         return VCS_ZCODE_REPRODUCTION_WIRE_SIZE;

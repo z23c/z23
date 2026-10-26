@@ -218,9 +218,6 @@ contexts/commons/modules/vcs/src/zcode_patronage_verify.c:patronage_binding:16
 contexts/commons/modules/vcs/src/zcode_replication.c:vcs_zcode_replication_evaluate_evidence:38
 contexts/commons/modules/vcs/src/zcode_reproduction_qualification.c:vcs_zcode_reproduction_qualification_string:17
 contexts/commons/modules/vcs/src/zcode_reproduction_qualification.c:vcs_zcode_reproduction_qualify_cas:96
-contexts/commons/modules/vcs/src/zcode_reproduction_request.c:vcs_zcode_reproduction_request_parse:21
-contexts/commons/modules/vcs/src/zcode_reproduction_request.c:vcs_zcode_reproduction_request_serialize:18
-contexts/commons/modules/vcs/src/zcode_reproduction_request.c:vcs_zcode_reproduction_request_validate:19
 contexts/commons/modules/vcs/src/zcode_science.c:vcs_zcode_benchmark_result_validate_for_study:24
 contexts/commons/modules/vcs/src/zcode_science.c:vcs_zcode_hardware_profile_capture:22
 contexts/commons/modules/vcs/src/zcode_science.c:vcs_zcode_reproduction_validate_for_results:19
