@@ -117,8 +117,6 @@ static bool binary_ab_install_staging(struct platform_private_file *output,
            platform_private_parent_flush(parent);
 }
 
-/* Copy the input stream into the staging file at rising offsets; the caller
- * still checks ferror(input) so read failures are logged there. */
 static bool binary_ab_copy_stream_to_file(FILE *input,
                                           struct platform_private_file *output)
 {
@@ -137,8 +135,6 @@ static bool binary_ab_copy_stream_to_file(FILE *input,
     return copy_ok;
 }
 
-/* Retire the staging file when the promotion did not commit, then close the
- * output handle either way. */
 static void binary_ab_retire_or_close_output(
     struct platform_private_file *output, const char *staging, bool committed)
 {
@@ -186,21 +182,14 @@ static bool binary_ab_promote_stream(const char *slots_dir, FILE *input,
     return true;
 }
 
-/* Build "<slots_dir>/last-good" and resolve it and its parent directory.
- * The 1024 literals match the dst/parent arrays the callers pass in, the
- * same way binary_ab_open_staging passes a literal 1088 for staging. */
-static bool binary_ab_resolve_lastgood_destination(const char *slots_dir,
-                                                   char dst[1024],
-                                                   char parent[1024])
+static bool binary_ab_lastgood_request_ok(bool ok, const char *requested,
+                                          int requested_len, char dst[1024],
+                                          char parent[1024])
 {
-    char requested[1024];
-    int n = snprintf(requested, sizeof(requested), "%s/%s", slots_dir,
-                     BINARY_AB_LASTGOOD_BASENAME);
-    return n > 0 && (size_t)n < sizeof(requested) &&
+    return ok && requested_len > 0 && (size_t)requested_len < 1024 &&
            platform_private_path_resolve(requested, dst, 1024, parent, 1024);
 }
 
-/* Open the source as a positioned file and require a regular executable. */
 static bool binary_ab_open_positioned_executable(
     struct platform_positioned_file *file, const char *path)
 {
@@ -219,9 +208,11 @@ bool binary_ab_promote(const char *slots_dir, const char *current_path)
                  current_path);
     uint64_t size = 0;
     bool ok = platform_positioned_file_size(&input, &size);
-    char dst[1024], parent[1024], tmp[1088];
-    if (ok)
-        ok = binary_ab_resolve_lastgood_destination(slots_dir, dst, parent);
+    char requested[1024], dst[1024], parent[1024], tmp[1088];
+    int requested_len = snprintf(requested, sizeof(requested), "%s/%s",
+                                 slots_dir, BINARY_AB_LASTGOOD_BASENAME);
+    ok = binary_ab_lastgood_request_ok(ok, requested, requested_len, dst,
+                                       parent);
     struct platform_private_file output;
     platform_private_file_init(&output);
     if (ok) ok = binary_ab_open_staging(dst, tmp, &output);
