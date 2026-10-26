@@ -14,14 +14,9 @@
 
 static int test_merkle_tree_scale(void);
 
-int test_merkle_tree(void)
+static int test_merkle_serialize_roundtrip(void)
 {
     int failures = 0;
-
-    /* ================================================================ */
-    /* Incremental Merkle tree serialization test                       */
-    /* ================================================================ */
-
     printf("Sapling incremental tree serialize/deserialize roundtrip... ");
     {
         struct incremental_merkle_tree t;
@@ -63,7 +58,12 @@ int test_merkle_tree(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_merkle_append_root_changes(void)
+{
+    int failures = 0;
     printf("Sapling incremental tree append + root changes... ");
     {
         struct incremental_merkle_tree t;
@@ -95,7 +95,12 @@ int test_merkle_tree(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_merkle_empty_root_known(void)
+{
+    int failures = 0;
     printf("Sapling empty root matches known value... ");
     {
         struct incremental_merkle_tree t;
@@ -110,7 +115,12 @@ int test_merkle_tree(void)
         else printf("OK\n");
         if (!ok) failures++;
     }
+    return failures;
+}
 
+static int test_merkle_first_commitment_root(void)
+{
+    int failures = 0;
     printf("Sapling tree root after first real commitment (block 476977)... ");
     {
         struct incremental_merkle_tree t;
@@ -129,7 +139,12 @@ int test_merkle_tree(void)
         else printf("OK\n");
         if (!ok) failures++;
     }
+    return failures;
+}
 
+static int test_merkle_witness_matches_tree(void)
+{
+    int failures = 0;
     printf("Sapling witness root matches tree root... ");
     {
         struct incremental_merkle_tree t;
@@ -151,7 +166,12 @@ int test_merkle_tree(void)
         } else printf("OK\n");
         if (!ok) failures++;
     }
+    return failures;
+}
 
+static int test_merkle_witness_advances(void)
+{
+    int failures = 0;
     printf("Sapling witness advances correctly with new commitment... ");
     {
         struct incremental_merkle_tree t;
@@ -175,11 +195,12 @@ int test_merkle_tree(void)
         } else printf("OK\n");
         if (!ok) failures++;
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* sapling_generate_r tests                                         */
-    /* ================================================================ */
-
+static int test_merkle_size_after_10000(void)
+{
+    int failures = 0;
     printf("Sapling tree size after 10000 appends... ");
     {
         struct incremental_merkle_tree t;
@@ -202,6 +223,29 @@ int test_merkle_tree(void)
         stream_free(&ts);
         if (!ok) failures++;
     }
+    return failures;
+}
+
+int test_merkle_tree(void)
+{
+    int failures = 0;
+
+    /* ================================================================ */
+    /* Incremental Merkle tree serialization test                       */
+    /* ================================================================ */
+
+    failures += test_merkle_serialize_roundtrip();
+    failures += test_merkle_append_root_changes();
+    failures += test_merkle_empty_root_known();
+    failures += test_merkle_first_commitment_root();
+    failures += test_merkle_witness_matches_tree();
+    failures += test_merkle_witness_advances();
+
+    /* ================================================================ */
+    /* sapling_generate_r tests                                         */
+    /* ================================================================ */
+
+    failures += test_merkle_size_after_10000();
 
     /* Scale tests are split out: each allocates ~5.6KB of stack structs that one
      * frame may not reuse, risking overflow. */
@@ -210,12 +254,9 @@ int test_merkle_tree(void)
     return failures;
 }
 
-/* Split from test_merkle_tree to bound stack usage; noinline stops LTO merging frames. */
-__attribute__((noinline))
-static int test_merkle_tree_scale(void)
+static int test_merkle_witness_roots_at_sizes(void)
 {
     int failures = 0;
-
     /* Witness-at-scale tests: verify witness root == tree root at increasing sizes.
      * The live rescan processes 1M+ commitments; we need to confirm correctness. */
     int scale_sizes[] = {100, 1000, 10000};
@@ -257,7 +298,12 @@ static int test_merkle_tree_scale(void)
             }
         }
     }
+    return failures;
+}
 
+static int test_merkle_witness_root_at_10000(void)
+{
+    int failures = 0;
     printf("Sapling witness root matches tree root at scale (10000 elements)... ");
     {
         struct incremental_merkle_tree t;
@@ -287,7 +333,12 @@ static int test_merkle_tree_scale(void)
         } else printf("OK\n");
         if (!ok) failures++;
     }
+    return failures;
+}
 
+static int test_merkle_tree_serdes_25k(void)
+{
+    int failures = 0;
     printf("Sapling TREE serialize/deserialize preserves root (25K)... ");
     {
         /* 25000 appends fill 14 of 32 parent levels (has_left/has_right set), which
@@ -314,7 +365,12 @@ static int test_merkle_tree_scale(void)
         else printf("OK (%zu bytes)\n", s.size);
         stream_free(&s);
     }
+    return failures;
+}
 
+static int test_merkle_witness_serdes_10k(void)
+{
+    int failures = 0;
     printf("Sapling witness serialize/deserialize preserves root (10K)... ");
     {
         struct incremental_merkle_tree t;
@@ -358,7 +414,12 @@ static int test_merkle_tree_scale(void)
         stream_free(&ws);
         if (!ok) failures++;
     }
+    return failures;
+}
 
+static int test_merkle_witness_advance_1100(void)
+{
+    int failures = 0;
     printf("Sapling witness root after advancement at scale (1000+100)... ");
     {
         struct incremental_merkle_tree t;
@@ -397,7 +458,12 @@ static int test_merkle_tree_scale(void)
         } else printf("OK\n");
         if (!ok) failures++;
     }
+    return failures;
+}
 
+static int test_merkle_generate_r_scalars(void)
+{
+    int failures = 0;
     printf("sapling_generate_r produces valid non-zero scalars... ");
     {
         bool ok = true;
@@ -418,11 +484,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* Pedersen hash direct tests                                       */
-    /* ================================================================ */
-
+static int test_merkle_pedersen_hash(void)
+{
+    int failures = 0;
     printf("pedersen_merkle_hash deterministic and non-colliding... ");
     {
         uint8_t a[32] = {0}, b[32] = {0};
@@ -442,11 +509,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* Sprout note/address tests                                        */
-    /* ================================================================ */
-
+static int test_merkle_sprout_key_address(void)
+{
+    int failures = 0;
     printf("Sprout spending key → viewing key → address... ");
     {
         struct sprout_spending_key sk;
@@ -469,7 +537,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_merkle_sprout_address_serdes(void)
+{
+    int failures = 0;
     printf("Sprout payment address serialize/deserialize... ");
     {
         struct sprout_spending_key sk;
@@ -493,7 +566,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_merkle_sapling_bech32(void)
+{
+    int failures = 0;
     printf("Sapling payment address encode/decode bech32... ");
     {
         uint8_t seed[32] = {0};
@@ -517,7 +595,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_merkle_note_plaintext_serdes(void)
+{
+    int failures = 0;
     printf("Sapling note plaintext serialize/deserialize... ");
     {
         struct sapling_note_plaintext np;
@@ -547,7 +630,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_merkle_sprout_note_encryption(void)
+{
+    int failures = 0;
     printf("Sprout note encryption roundtrip... ");
     {
         /* Generate Sprout key pair via curve25519 */
@@ -585,11 +673,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* Sapling keystore comprehensive tests                             */
-    /* ================================================================ */
-
+static int test_merkle_keystore_addresses(void)
+{
+    int failures = 0;
     printf("Sapling keystore generate multiple addresses... ");
     {
         struct sapling_keystore sks;
@@ -622,11 +711,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* Witness cursor depth survives serialize/deserialize             */
-    /* ================================================================ */
-
+static int test_merkle_witness_cursor_depth(void)
+{
+    int failures = 0;
     printf("Witness cursor depth preserved after serialize/deserialize... ");
     {
         /* Regression: deserialize must set cursor.depth = cursor_depth, not the full
@@ -714,7 +804,72 @@ static int test_merkle_tree_scale(void)
         }
         stream_free(&ws);
     }
+    return failures;
+}
 
+static int test_merkle_witness_25k_roundtrip_ok(struct incremental_merkle_tree *t,
+                                                struct incremental_witness *w)
+{
+    int failures = 0;
+    struct uint256 tree_root, w_root;
+    incremental_tree_root(t, &tree_root);
+    incremental_witness_root(w, &w_root);
+
+    /* Verify witness matches tree before serialize */
+    bool roots_match = (memcmp(tree_root.data, w_root.data, 32) == 0);
+
+    /* Serialize */
+    struct byte_stream ws;
+    stream_init(&ws, 8192);
+    incremental_witness_serialize(w, &ws);
+
+    /* Deserialize */
+    struct incremental_witness w2;
+    struct byte_stream rs;
+    stream_init_from_data(&rs, ws.data, ws.size);
+    bool deser_ok = incremental_witness_deserialize(&w2, &rs,
+        SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH,
+        t->combine, t->uncommitted);
+
+    struct uint256 w2_root;
+    incremental_witness_root(&w2, &w2_root);
+
+    bool ok = roots_match && deser_ok &&
+              (memcmp(w_root.data, w2_root.data, 32) == 0) &&
+              (w2.has_cursor == w->has_cursor) &&
+              (w2.cursor_depth == w->cursor_depth);
+    if (w->has_cursor)
+        ok = ok && (w2.cursor.depth == w->cursor.depth);
+
+    if (!ok) {
+        char h1[65], h2[65], h3[65];
+        uint256_get_hex(&tree_root, h1);
+        uint256_get_hex(&w_root, h2);
+        uint256_get_hex(&w2_root, h3);
+        printf("FAIL\n"
+            "  tree/witness match before: %d\n"
+            "  tree root:   %s\n"
+            "  witness:     %s\n"
+            "  roundtrip:   %s\n"
+            "  cursor: has=%d depth=%zu cursor.depth=%zu\n"
+            "  deser:  has=%d depth=%zu cursor.depth=%zu\n",
+            roots_match, h1, h2, h3,
+            w->has_cursor, w->cursor_depth,
+            w->has_cursor ? w->cursor.depth : (size_t)0,
+            w2.has_cursor, w2.cursor_depth,
+            w2.has_cursor ? w2.cursor.depth : (size_t)0);
+        failures++;
+    } else {
+        printf("OK (%zu bytes, fills=%zu, cursor=%d depth=%zu)\n",
+            ws.size, w2.num_filled, w2.has_cursor, w2.cursor_depth);
+    }
+    stream_free(&ws);
+    return failures;
+}
+
+static int test_merkle_witness_serdes_25k(void)
+{
+    int failures = 0;
     printf("Witness serialize/deserialize roundtrip at 25K with cursor... ");
     {
         struct incremental_merkle_tree t;
@@ -749,68 +904,98 @@ static int test_merkle_tree_scale(void)
             incremental_tree_append(&t, &cm);
         }
 
-        struct uint256 tree_root, w_root;
-        incremental_tree_root(&t, &tree_root);
-        incremental_witness_root(&w, &w_root);
-
-        /* Verify witness matches tree before serialize */
-        bool roots_match = (memcmp(tree_root.data, w_root.data, 32) == 0);
-
-        /* Serialize */
-        struct byte_stream ws;
-        stream_init(&ws, 8192);
-        incremental_witness_serialize(&w, &ws);
-
-        /* Deserialize */
-        struct incremental_witness w2;
-        struct byte_stream rs;
-        stream_init_from_data(&rs, ws.data, ws.size);
-        bool deser_ok = incremental_witness_deserialize(&w2, &rs,
-            SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH,
-            t.combine, t.uncommitted);
-
-        struct uint256 w2_root;
-        incremental_witness_root(&w2, &w2_root);
-
-        bool ok = roots_match && deser_ok &&
-                  (memcmp(w_root.data, w2_root.data, 32) == 0) &&
-                  (w2.has_cursor == w.has_cursor) &&
-                  (w2.cursor_depth == w.cursor_depth);
-        if (w.has_cursor)
-            ok = ok && (w2.cursor.depth == w.cursor.depth);
-
-        if (!ok) {
-            char h1[65], h2[65], h3[65];
-            uint256_get_hex(&tree_root, h1);
-            uint256_get_hex(&w_root, h2);
-            uint256_get_hex(&w2_root, h3);
-            printf("FAIL\n"
-                "  tree/witness match before: %d\n"
-                "  tree root:   %s\n"
-                "  witness:     %s\n"
-                "  roundtrip:   %s\n"
-                "  cursor: has=%d depth=%zu cursor.depth=%zu\n"
-                "  deser:  has=%d depth=%zu cursor.depth=%zu\n",
-                roots_match, h1, h2, h3,
-                w.has_cursor, w.cursor_depth,
-                w.has_cursor ? w.cursor.depth : (size_t)0,
-                w2.has_cursor, w2.cursor_depth,
-                w2.has_cursor ? w2.cursor.depth : (size_t)0);
-            failures++;
-        } else {
-            printf("OK (%zu bytes, fills=%zu, cursor=%d depth=%zu)\n",
-                ws.size, w2.num_filled, w2.has_cursor, w2.cursor_depth);
-        }
-        stream_free(&ws);
+        failures += test_merkle_witness_25k_roundtrip_ok(&t, &w);
     }
+    return failures;
+}
 
+static int test_merkle_witness_paths_match_root(
+    struct incremental_merkle_tree *t,
+    struct incremental_witness *witnesses,
+    const int *positions,
+    int num_pos)
+{
+    int failures = 0;
+    bool ok = true;
+
+    /* For each witness, extract Merkle path and verify it can reconstruct root */
+    struct uint256 tree_root;
+    incremental_tree_root(t, &tree_root);
+
+    for (int j = 0; j < num_pos; j++) {
+        struct uint256 w_root;
+        incremental_witness_root(&witnesses[j], &w_root);
+        if (memcmp(w_root.data, tree_root.data, 32) != 0) {
+            printf("FAIL (witness %d root mismatch)\n", positions[j]);
+            ok = false;
+            break;
+        }
+        uint8_t path[1 + 32 * 33];
+        size_t path_len;
+        if (!incremental_witness_merkle_path(&witnesses[j], path, &path_len)) {
+            printf("FAIL (witness %d path extraction failed)\n", positions[j]);
+            ok = false;
+            break;
+        }
+        /* Path should be: 1 byte depth + depth * 33 bytes */
+        if (path_len != 1 + SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH * 33) {
+            printf("FAIL (witness %d path_len=%zu, expected %d)\n",
+                positions[j], path_len,
+                1 + SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH * 33);
+            ok = false;
+            break;
+        }
+
+        /* Teeth: reconstruct the anchor from the leaf and serialized
+         * sibling/direction pairs; a length-only check misses a level-0 inversion. */
+        struct uint256 cur = {{0}};
+        cur.data[0] = (uint8_t)(positions[j] - 1);
+        for (size_t level = 0;
+             level < SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH; level++) {
+            struct uint256 sibling;
+            struct uint256 parent;
+            const size_t off = 1 + level * 33;
+            memcpy(sibling.data, path + off, 32);
+            const uint8_t direction = path[off + 32];
+            if (direction == 0)
+                witnesses[j].tree.combine(
+                    &cur, &sibling, level, &parent);
+            else if (direction == 1)
+                witnesses[j].tree.combine(
+                    &sibling, &cur, level, &parent);
+            else {
+                printf("FAIL (witness %d invalid direction at level %zu)\n",
+                       positions[j], level);
+                ok = false;
+                break;
+            }
+            cur = parent;
+        }
+        if (!ok)
+            break;
+        if (memcmp(cur.data, tree_root.data, 32) != 0) {
+            printf("FAIL (witness %d serialized path does not reconstruct root)\n",
+                   positions[j]);
+            ok = false;
+            break;
+        }
+    }
+    if (ok)
+        printf("OK (all %d positions valid)\n", num_pos);
+    else
+        failures++;
+    return failures;
+}
+
+static int test_merkle_witness_paths(void)
+{
+    int failures = 0;
     printf("Witness Merkle path valid at multiple positions... ");
     {
         struct incremental_merkle_tree t;
         sapling_tree_init(&t);
         struct uint256 cm;
         memset(cm.data, 0, 32);
-        bool ok = true;
 
         /* Test at positions 1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64 */
         int positions[] = {1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64};
@@ -833,74 +1018,15 @@ static int test_merkle_tree_scale(void)
             }
         }
 
-        /* For each witness, extract Merkle path and verify it can reconstruct root */
-        struct uint256 tree_root;
-        incremental_tree_root(&t, &tree_root);
-
-        for (int j = 0; j < num_pos; j++) {
-            struct uint256 w_root;
-            incremental_witness_root(&witnesses[j], &w_root);
-            if (memcmp(w_root.data, tree_root.data, 32) != 0) {
-                printf("FAIL (witness %d root mismatch)\n", positions[j]);
-                ok = false;
-                break;
-            }
-            uint8_t path[1 + 32 * 33];
-            size_t path_len;
-            if (!incremental_witness_merkle_path(&witnesses[j], path, &path_len)) {
-                printf("FAIL (witness %d path extraction failed)\n", positions[j]);
-                ok = false;
-                break;
-            }
-            /* Path should be: 1 byte depth + depth * 33 bytes */
-            if (path_len != 1 + SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH * 33) {
-                printf("FAIL (witness %d path_len=%zu, expected %d)\n",
-                    positions[j], path_len,
-                    1 + SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH * 33);
-                ok = false;
-                break;
-            }
-
-            /* Teeth: reconstruct the anchor from the leaf and serialized
-             * sibling/direction pairs; a length-only check misses a level-0 inversion. */
-            struct uint256 cur = {{0}};
-            cur.data[0] = (uint8_t)(positions[j] - 1);
-            for (size_t level = 0;
-                 level < SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH; level++) {
-                struct uint256 sibling;
-                struct uint256 parent;
-                const size_t off = 1 + level * 33;
-                memcpy(sibling.data, path + off, 32);
-                const uint8_t direction = path[off + 32];
-                if (direction == 0)
-                    witnesses[j].tree.combine(
-                        &cur, &sibling, level, &parent);
-                else if (direction == 1)
-                    witnesses[j].tree.combine(
-                        &sibling, &cur, level, &parent);
-                else {
-                    printf("FAIL (witness %d invalid direction at level %zu)\n",
-                           positions[j], level);
-                    ok = false;
-                    break;
-                }
-                cur = parent;
-            }
-            if (!ok)
-                break;
-            if (memcmp(cur.data, tree_root.data, 32) != 0) {
-                printf("FAIL (witness %d serialized path does not reconstruct root)\n",
-                       positions[j]);
-                ok = false;
-                break;
-            }
-        }
-        if (ok)
-            printf("OK (all %d positions valid)\n", num_pos);
-        else
-            failures++;
+        failures += test_merkle_witness_paths_match_root(
+            &t, witnesses, positions, num_pos);
     }
+    return failures;
+}
 
+static int test_merkle_witness_blob_bounded(void)
+{
+    int failures = 0;
     printf("Witness serialization blob size bounded... ");
     {
         struct incremental_merkle_tree t;
@@ -939,7 +1065,12 @@ static int test_merkle_tree_scale(void)
         }
         stream_free(&ws);
     }
+    return failures;
+}
 
+static int test_merkle_witness_rejects_corrupt(void)
+{
+    int failures = 0;
     printf("Witness deserialize rejects corrupt blobs... ");
     {
         bool ok = true;
@@ -1002,7 +1133,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else failures++;
     }
+    return failures;
+}
 
+static int test_merkle_witness_stress_50k(void)
+{
+    int failures = 0;
     printf("Witness root == tree root at 50K elements (stress)... ");
     {
         struct incremental_merkle_tree *t = zcl_malloc(sizeof(*t), "merkle_tree");
@@ -1070,29 +1206,43 @@ static int test_merkle_tree_scale(void)
         free(t);
         free(w);
     }
+    return failures;
+}
 
+static void test_merkle_fill_witnesses_100_500_999(
+    struct incremental_merkle_tree *t,
+    struct incremental_witness *w100,
+    struct incremental_witness *w500,
+    struct incremental_witness *w999)
+{
+    struct uint256 cm;
+    memset(cm.data, 0, 32);
+    bool init100 = false, init500 = false, init999 = false;
+
+    for (int i = 0; i < 2000; i++) {
+        cm.data[0] = (unsigned char)(i & 0xff);
+        cm.data[1] = (unsigned char)((i >> 8) & 0xff);
+        if (init100) incremental_witness_append(w100, &cm);
+        if (init500) incremental_witness_append(w500, &cm);
+        if (init999) incremental_witness_append(w999, &cm);
+        incremental_tree_append(t, &cm);
+        if (i == 99)  { incremental_witness_init(w100, t); init100 = true; }
+        if (i == 499) { incremental_witness_init(w500, t); init500 = true; }
+        if (i == 999) { incremental_witness_init(w999, t); init999 = true; }
+    }
+}
+
+static int test_merkle_three_witnesses_track(void)
+{
+    int failures = 0;
     printf("Multiple witnesses track same tree correctly... ");
     {
         struct incremental_merkle_tree t;
         sapling_tree_init(&t);
-        struct uint256 cm;
-        memset(cm.data, 0, 32);
 
         /* Create witnesses at positions 100, 500, 999 in a 2000-element tree */
         struct incremental_witness w100, w500, w999;
-        bool init100 = false, init500 = false, init999 = false;
-
-        for (int i = 0; i < 2000; i++) {
-            cm.data[0] = (unsigned char)(i & 0xff);
-            cm.data[1] = (unsigned char)((i >> 8) & 0xff);
-            if (init100) incremental_witness_append(&w100, &cm);
-            if (init500) incremental_witness_append(&w500, &cm);
-            if (init999) incremental_witness_append(&w999, &cm);
-            incremental_tree_append(&t, &cm);
-            if (i == 99)  { incremental_witness_init(&w100, &t); init100 = true; }
-            if (i == 499) { incremental_witness_init(&w500, &t); init500 = true; }
-            if (i == 999) { incremental_witness_init(&w999, &t); init999 = true; }
-        }
+        test_merkle_fill_witnesses_100_500_999(&t, &w100, &w500, &w999);
 
         struct uint256 tree_root;
         incremental_tree_root(&t, &tree_root);
@@ -1142,7 +1292,12 @@ static int test_merkle_tree_scale(void)
             failures++;
         }
     }
+    return failures;
+}
 
+static int test_merkle_size_power_of_two_boundaries(void)
+{
+    int failures = 0;
     printf("Tree size computation correct at power-of-2 boundaries... ");
     {
         struct incremental_merkle_tree t;
@@ -1172,11 +1327,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK (all 16 sizes correct)\n");
         else failures++;
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* Sapling tree root verification (connect_block check)             */
-    /* ================================================================ */
-
+static int test_merkle_root_matches_block_header(void)
+{
+    int failures = 0;
     printf("Sapling tree root verification matches block header... ");
     {
         struct incremental_merkle_tree tree;
@@ -1203,7 +1359,12 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_merkle_persist_reload_preserves_root(void)
+{
+    int failures = 0;
     printf("Sapling tree persist + reload preserves root... ");
     {
         struct incremental_merkle_tree tree;
@@ -1236,6 +1397,68 @@ static int test_merkle_tree_scale(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Split from test_merkle_tree to bound stack usage; noinline stops LTO merging frames. */
+__attribute__((noinline))
+static int test_merkle_tree_scale(void)
+{
+    int failures = 0;
+
+    failures += test_merkle_witness_roots_at_sizes();
+    failures += test_merkle_witness_root_at_10000();
+    failures += test_merkle_tree_serdes_25k();
+    failures += test_merkle_witness_serdes_10k();
+    failures += test_merkle_witness_advance_1100();
+    failures += test_merkle_generate_r_scalars();
+
+    /* ================================================================ */
+    /* Pedersen hash direct tests                                       */
+    /* ================================================================ */
+
+    failures += test_merkle_pedersen_hash();
+
+    /* ================================================================ */
+    /* Sprout note/address tests                                        */
+    /* ================================================================ */
+
+    failures += test_merkle_sprout_key_address();
+    failures += test_merkle_sprout_address_serdes();
+    failures += test_merkle_sapling_bech32();
+    failures += test_merkle_note_plaintext_serdes();
+    failures += test_merkle_sprout_note_encryption();
+
+    /* ================================================================ */
+    /* Sapling keystore comprehensive tests                             */
+    /* ================================================================ */
+
+    failures += test_merkle_keystore_addresses();
+
+    /* ================================================================ */
+    /* Witness cursor depth survives serialize/deserialize             */
+    /* ================================================================ */
+
+    failures += test_merkle_witness_cursor_depth();
+    failures += test_merkle_witness_serdes_25k();
+
+    failures += test_merkle_witness_paths();
+
+    failures += test_merkle_witness_blob_bounded();
+    failures += test_merkle_witness_rejects_corrupt();
+    failures += test_merkle_witness_stress_50k();
+
+    failures += test_merkle_three_witnesses_track();
+
+    failures += test_merkle_size_power_of_two_boundaries();
+
+    /* ================================================================ */
+    /* Sapling tree root verification (connect_block check)             */
+    /* ================================================================ */
+
+    failures += test_merkle_root_matches_block_header();
+
+    failures += test_merkle_persist_reload_preserves_root();
 
     return failures;
 }
