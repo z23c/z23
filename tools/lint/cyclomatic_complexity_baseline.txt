@@ -1620,7 +1620,6 @@ tests/harness/src/test_api_openapi.c:api_openapi_focused_tests:221
 tests/harness/src/test_api_resource_reads.c:api_resource_reads_focused_tests:105
 tests/harness/src/test_api_routes.c:api_route_table_focused_tests:236
 tests/harness/src/test_api_supply.c:api_supply_focused_tests:23
-tests/harness/src/test_api_znam_routes.c:api_znam_routes_focused_tests:328
 tests/harness/src/test_app_context.c:test_app_context:89
 tests/harness/src/test_app_context.c:test_app_context_tor_policy:29
 tests/harness/src/test_arm_hw_tiers.c:test_arm_hw_tiers:30
