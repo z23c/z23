@@ -105,10 +105,45 @@ bool node_db_state_set(struct node_db *ndb, const char *key,
     return rc == SQLITE_DONE;
 }
 
+/* node_db_state_set_detached's guard conditions and its
+ * prepare/bind/step/finalize write sequence, factored out so that
+ * function's own cyclomatic complexity stays a flat series of checks on
+ * helper results. The LOG_WARN lines stay in node_db_state_set_detached
+ * itself (LOG_* prints the enclosing function's name), so the helpers
+ * return the guard bool or the sqlite result code and the caller logs. */
+static bool node_db_state_set_detached_args_invalid(struct node_db *ndb,
+                                                    const char *key,
+                                                    const void *value)
+{
+    return !ndb || !ndb->open || !key || !value;
+}
+
+static bool node_db_state_set_detached_path_rejected(struct node_db *ndb)
+{
+    return !ndb->path[0] || strcmp(ndb->path, ":memory:") == 0;
+}
+
+static int node_db_state_set_detached_write(sqlite3 *db, const char *key,
+                                            const void *value, size_t len)
+{
+    sqlite3_stmt *s = NULL;
+    int rc = sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO node_state(key,value) VALUES(?,?)",
+            -1, &s, NULL);
+    if (rc == SQLITE_OK && s) {
+        sqlite3_bind_text(s, 1, key, -1, SQLITE_STATIC);
+        sqlite3_bind_blob(s, 2, value, (int)len, SQLITE_STATIC);
+        rc = sqlite3_step(s);  // raw-sql-ok:kv-state-detached-fallback
+    }
+    if (s)
+        sqlite3_finalize(s);
+    return rc;
+}
+
 bool node_db_state_set_detached(struct node_db *ndb, const char *key,
                                 const void *value, size_t len)
 {
-    if (!ndb || !ndb->open || !key || !value) {
+    if (node_db_state_set_detached_args_invalid(ndb, key, value)) {
         LOG_WARN("node_db",
                  "detached state_set skipped invalid args ndb=%d open=%d "
                  "key=%d value=%d",
@@ -118,7 +153,7 @@ bool node_db_state_set_detached(struct node_db *ndb, const char *key,
                                   SQLITE_MISUSE);
         return false;
     }
-    if (!ndb->path[0] || strcmp(ndb->path, ":memory:") == 0) {
+    if (node_db_state_set_detached_path_rejected(ndb)) {
         LOG_WARN("node_db",
                  "detached state_set skipped unsupported path key=%s path=%s",
                  key, ndb->path[0] ? ndb->path : "(empty)");
@@ -141,17 +176,7 @@ bool node_db_state_set_detached(struct node_db *ndb, const char *key,
     }
     sqlite3_busy_timeout(db, NODE_DB_DETACHED_BUSY_TIMEOUT_MS);
 
-    sqlite3_stmt *s = NULL;
-    rc = sqlite3_prepare_v2(db,
-            "INSERT OR REPLACE INTO node_state(key,value) VALUES(?,?)",
-            -1, &s, NULL);
-    if (rc == SQLITE_OK && s) {
-        sqlite3_bind_text(s, 1, key, -1, SQLITE_STATIC);
-        sqlite3_bind_blob(s, 2, value, (int)len, SQLITE_STATIC);
-        rc = sqlite3_step(s);  // raw-sql-ok:kv-state-detached-fallback
-    }
-    if (s)
-        sqlite3_finalize(s);
+    rc = node_db_state_set_detached_write(db, key, value, len);
     if (rc != SQLITE_DONE) {
         LOG_WARN("node_db",
                  "detached state_set failed key=%s path=%s rc=%d: %s",
@@ -327,6 +352,462 @@ static int node_db_migrate_feature_error(int feature_applied)
         ? -1 : NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
 }
 
+/* How one row of k_db_migrate_core_ddl is applied: a plain node_db_exec, a
+ * db_exec_tolerant (a re-appliable ALTER that may hit a known-benign error
+ * substring), or a db_exec_checked (any other error is logged). */
+enum db_migrate_core_ddl_kind {
+    DB_MIGRATE_CORE_DDL_EXEC,
+    DB_MIGRATE_CORE_DDL_EXEC_TOLERANT,
+    DB_MIGRATE_CORE_DDL_EXEC_CHECKED
+};
+
+struct db_migrate_core_ddl {
+    int version;
+    enum db_migrate_core_ddl_kind kind;
+    const char *sql;
+    const char *label;      /* TOLERANT/CHECKED rows: the db_exec_* label */
+    const char *tolerated;  /* TOLERANT rows: the tolerated error substring */
+};
+
+/* The v2..v13 core migration blocks as data: one row per statement, in the
+ * exact order the blocks applied them, stamped with the version whose block
+ * ran them. node_db_migrate's versioned-block loop applies the rows of each
+ * version below current_ver, then stamps schema_version/schema_compat_floor
+ * exactly where the block's own tail did. */
+static const struct db_migrate_core_ddl k_db_migrate_core_ddl[] = {
+    {2, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('002')",
+     NULL, NULL},
+
+    /* Add Sapling commitment tree tracking columns */
+    {3, DB_MIGRATE_CORE_DDL_EXEC,
+     "ALTER TABLE blocks ADD COLUMN sapling_tree_data BLOB", NULL, NULL},
+    {3, DB_MIGRATE_CORE_DDL_EXEC,
+     "ALTER TABLE wallet_sapling_notes ADD COLUMN witness_data BLOB",
+     NULL, NULL},
+    {3, DB_MIGRATE_CORE_DDL_EXEC,
+     "ALTER TABLE wallet_sapling_notes ADD COLUMN witness_height INTEGER DEFAULT 0",
+     NULL, NULL},
+    {3, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('003')",
+     NULL, NULL},
+
+    /* Block index cache — enables instant warm restart by skipping
+     * the 11s LevelDB block index load. Verified cryptographically
+     * via tip hash match with coins DB. */
+    {4, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS block_index_cache ("
+     "hash BLOB NOT NULL PRIMARY KEY,"
+     "prev_hash BLOB NOT NULL,"
+     "height INTEGER NOT NULL,"
+     "n_bits INTEGER NOT NULL,"
+     "n_time INTEGER NOT NULL,"
+     "n_version INTEGER NOT NULL DEFAULT 4,"
+     "n_status INTEGER NOT NULL DEFAULT 0,"
+     "n_file INTEGER NOT NULL DEFAULT 0,"
+     "n_data_pos INTEGER NOT NULL DEFAULT 0,"
+     "n_undo_pos INTEGER NOT NULL DEFAULT 0,"
+     "n_tx INTEGER NOT NULL DEFAULT 0,"
+     "chain_work BLOB,"
+     "merkle_root BLOB,"
+     "final_sapling_root BLOB,"
+     "nonce BLOB,"
+     "solution BLOB,"
+     "n_solution_size INTEGER NOT NULL DEFAULT 0,"
+     "n_cached_branch_id INTEGER NOT NULL DEFAULT 0"
+     ")",
+     NULL, NULL},
+    {4, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_bic_height"
+     " ON block_index_cache(height)",
+     NULL, NULL},
+    {4, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('004')",
+     NULL, NULL},
+
+    /* v5: Explorer + REST API tables and indexes.
+     * Optimized for high-performance read queries. */
+
+    /* Addresses table — aggregated balance cache per address.
+     * Rebuilt from UTXO set on demand. */
+    {5, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS addresses ("
+     "address_hash BLOB PRIMARY KEY,"
+     "script_type INTEGER NOT NULL DEFAULT 0,"
+     "balance INTEGER NOT NULL DEFAULT 0,"
+     "utxo_count INTEGER NOT NULL DEFAULT 0,"
+     "first_seen_height INTEGER NOT NULL DEFAULT 0,"
+     "last_seen_height INTEGER NOT NULL DEFAULT 0)",
+     NULL, NULL},
+
+    {5, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_addr_balance"
+     " ON addresses(balance DESC)",
+     NULL, NULL},
+
+    /* Chain stats — pre-computed per-block aggregate stats.
+     * Used for charts (difficulty, hashrate, supply). */
+    {5, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS chain_stats ("
+     "height INTEGER PRIMARY KEY,"
+     "time INTEGER NOT NULL,"
+     "difficulty REAL NOT NULL DEFAULT 0,"
+     "tx_count INTEGER NOT NULL DEFAULT 0,"
+     "utxo_count INTEGER NOT NULL DEFAULT 0,"
+     "total_supply INTEGER NOT NULL DEFAULT 0,"
+     "shielded_supply INTEGER NOT NULL DEFAULT 0,"
+     "block_size INTEGER NOT NULL DEFAULT 0)",
+     NULL, NULL},
+
+    /* ZSLP token registry — discovered from OP_RETURN GENESIS txs */
+    {5, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS zslp_tokens ("
+     "token_id BLOB PRIMARY KEY,"
+     "ticker TEXT NOT NULL DEFAULT '',"
+     "name TEXT NOT NULL DEFAULT '',"
+     "decimals INTEGER NOT NULL DEFAULT 0,"
+     "document_url TEXT DEFAULT '',"
+     "genesis_height INTEGER NOT NULL DEFAULT 0,"
+     "total_minted INTEGER NOT NULL DEFAULT 0,"
+     "total_burned INTEGER NOT NULL DEFAULT 0)",
+     NULL, NULL},
+
+    {5, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_zslp_ticker"
+     " ON zslp_tokens(ticker)",
+     NULL, NULL},
+
+    /* Additional covering index for block queries without status filter */
+    {5, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_blocks_height_all"
+     " ON blocks(height)",
+     NULL, NULL},
+
+    /* Index for timestamp lookups (HODL wave chart) */
+    {5, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_blocks_time"
+     " ON blocks(time)",
+     NULL, NULL},
+
+    /* Composite covering index for UTXO age distribution (HODL waves) */
+    {5, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_utxo_height_value"
+     " ON utxos(height, value)",
+     NULL, NULL},
+
+    {5, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('005')",
+     NULL, NULL},
+
+    /* v6: Add address column to wallet_sapling_notes for per-order
+     * payment matching.  Tolerate "duplicate column name" on
+     * re-apply; any other error (disk full, corruption) is now
+     * logged instead of silently swallowed. */
+    {6, DB_MIGRATE_CORE_DDL_EXEC_TOLERANT,
+     "ALTER TABLE wallet_sapling_notes ADD COLUMN address TEXT",
+     "v6: add wallet_sapling_notes.address",
+     "duplicate column name"},
+    {6, DB_MIGRATE_CORE_DDL_EXEC_CHECKED,
+     "CREATE INDEX IF NOT EXISTS idx_snote_address"
+     " ON wallet_sapling_notes(address) WHERE spent_txid IS NULL",
+     "v6: idx_snote_address", NULL},
+    {6, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('006')",
+     NULL, NULL},
+
+    /* v7: ZSLP token transfer tracking + OP_RETURN index */
+    {7, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS zslp_transfers ("
+     "txid BLOB NOT NULL,"
+     "block_height INTEGER NOT NULL,"
+     "token_id BLOB NOT NULL,"
+     "tx_type INTEGER NOT NULL," /* 1=GENESIS, 2=MINT, 3=SEND */
+     "from_addr BLOB,"
+     "to_addr BLOB,"
+     "amount INTEGER NOT NULL DEFAULT 0,"
+     "vout INTEGER NOT NULL DEFAULT 0,"
+     "PRIMARY KEY (txid, vout))",
+     NULL, NULL},
+
+    {7, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_zslp_xfer_token"
+     " ON zslp_transfers(token_id)",
+     NULL, NULL},
+
+    {7, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_zslp_xfer_height"
+     " ON zslp_transfers(block_height DESC)",
+     NULL, NULL},
+
+    {7, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_zslp_xfer_addr"
+     " ON zslp_transfers(to_addr) WHERE to_addr IS NOT NULL",
+     NULL, NULL},
+
+    /* OP_RETURN index — stores all OP_RETURN output data for scanning */
+    {7, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS op_returns ("
+     "txid BLOB PRIMARY KEY,"
+     "block_height INTEGER NOT NULL,"
+     "script BLOB NOT NULL,"
+     "is_slp INTEGER NOT NULL DEFAULT 0)",
+     NULL, NULL},
+
+    {7, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_opret_height"
+     " ON op_returns(block_height)",
+     NULL, NULL},
+
+    {7, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_opret_slp"
+     " ON op_returns(is_slp) WHERE is_slp = 1",
+     NULL, NULL},
+
+    {7, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('007')",
+     NULL, NULL},
+
+    /* v8: Partial indexes on shielded value columns for fast stats queries.
+     * Only index non-zero rows — most blocks have zero shielded activity. */
+    {8, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_blocks_sprout_value "
+     "ON blocks(sprout_value) WHERE sprout_value != 0",
+     NULL, NULL},
+
+    {8, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_blocks_sapling_value "
+     "ON blocks(sapling_value) WHERE sapling_value != 0",
+     NULL, NULL},
+
+    /* Covering index for time-range queries on shielded blocks */
+    {8, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_blocks_time_sprout "
+     "ON blocks(time, sprout_value) WHERE sprout_value != 0",
+     NULL, NULL},
+
+    {8, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_blocks_time_sapling "
+     "ON blocks(time, sapling_value) WHERE sapling_value != 0",
+     NULL, NULL},
+
+    /* Index for num_tx queries (block records) */
+    {8, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_blocks_num_tx "
+     "ON blocks(num_tx DESC)",
+     NULL, NULL},
+
+    {8, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('008')",
+     NULL, NULL},
+
+    /* v9: Full chain indexing — permanent tx inputs/outputs,
+     * Sapling spends/outputs, Sprout JoinSplits, SHA3 integrity. */
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS tx_outputs ("
+     "txid BLOB NOT NULL, vout INTEGER NOT NULL,"
+     "value INTEGER NOT NULL, script_type INTEGER NOT NULL DEFAULT 0,"
+     "address_hash BLOB, block_height INTEGER NOT NULL,"
+     "PRIMARY KEY (txid, vout))",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_txo_addr"
+     " ON tx_outputs(address_hash) WHERE address_hash IS NOT NULL",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_txo_height"
+     " ON tx_outputs(block_height)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS tx_inputs ("
+     "txid BLOB NOT NULL, vin_index INTEGER NOT NULL,"
+     "prev_txid BLOB NOT NULL, prev_vout INTEGER NOT NULL,"
+     "block_height INTEGER NOT NULL,"
+     "PRIMARY KEY (txid, vin_index))",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_txi_prev"
+     " ON tx_inputs(prev_txid, prev_vout)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_txi_height"
+     " ON tx_inputs(block_height)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS sapling_spends ("
+     "txid BLOB NOT NULL, spend_index INTEGER NOT NULL,"
+     "cv BLOB NOT NULL, anchor BLOB NOT NULL,"
+     "nullifier BLOB NOT NULL, rk BLOB NOT NULL,"
+     "block_height INTEGER NOT NULL,"
+     "PRIMARY KEY (txid, spend_index))",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_ss_nf"
+     " ON sapling_spends(nullifier)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_ss_height"
+     " ON sapling_spends(block_height)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS sapling_outputs ("
+     "txid BLOB NOT NULL, output_index INTEGER NOT NULL,"
+     "cv BLOB NOT NULL, cm BLOB NOT NULL,"
+     "ephemeral_key BLOB NOT NULL, block_height INTEGER NOT NULL,"
+     "PRIMARY KEY (txid, output_index))",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_so_height"
+     " ON sapling_outputs(block_height)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS joinsplits ("
+     "txid BLOB NOT NULL, js_index INTEGER NOT NULL,"
+     "vpub_old INTEGER NOT NULL, vpub_new INTEGER NOT NULL,"
+     "anchor BLOB NOT NULL, block_height INTEGER NOT NULL,"
+     "PRIMARY KEY (txid, js_index))",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_js_height"
+     " ON joinsplits(block_height)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS sprout_nullifiers ("
+     "nullifier BLOB PRIMARY KEY,"
+     "txid BLOB NOT NULL, block_height INTEGER NOT NULL)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_spnf_height"
+     " ON sprout_nullifiers(block_height)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS view_integrity ("
+     "height INTEGER PRIMARY KEY,"
+     "sha3_hash BLOB NOT NULL)",
+     NULL, NULL},
+
+    {9, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('009')",
+     NULL, NULL},
+
+    /* v10: Add n_chain_tx to block_index_cache for full restart from SQLite.
+     * Needed so difficulty validation (17-ancestor walk) works without LevelDB. */
+    {10, DB_MIGRATE_CORE_DDL_EXEC_TOLERANT,
+     "ALTER TABLE block_index_cache ADD COLUMN n_chain_tx INTEGER NOT NULL DEFAULT 0",
+     "v10: add block_index_cache.n_chain_tx",
+     "duplicate column name"},
+    {10, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('010')",
+     NULL, NULL},
+
+    /* v11: Peer bandwidth scores + ZCL23 flag for fast reconnection.
+     * New nodes should reconnect to fast ZCL23 peers first, enabling
+     * instant swarm sync on subsequent starts. */
+    {11, DB_MIGRATE_CORE_DDL_EXEC_TOLERANT,
+     "ALTER TABLE peers ADD COLUMN bandwidth_score INTEGER NOT NULL DEFAULT 0",
+     "v11: add peers.bandwidth_score",
+     "duplicate column name"},
+    {11, DB_MIGRATE_CORE_DDL_EXEC_TOLERANT,
+     "ALTER TABLE peers ADD COLUMN is_zcl23 INTEGER NOT NULL DEFAULT 0",
+     "v11: add peers.is_zcl23",
+     "duplicate column name"},
+    /* Index: prioritize fast ZCL23 peers for reconnection */
+    {11, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_peers_zcl23_score "
+     "ON peers(is_zcl23 DESC, bandwidth_score DESC)",
+     NULL, NULL},
+    {11, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('011')",
+     NULL, NULL},
+
+    /* v12: ZSLP address balances as a first-class model-backed table. */
+    {12, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS zslp_balances ("
+     "token_id TEXT NOT NULL,"
+     "address TEXT NOT NULL,"
+     "balance INTEGER NOT NULL DEFAULT 0,"
+     "PRIMARY KEY (token_id, address))",
+     NULL, NULL},
+
+    {12, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_zslp_balance_token "
+     "ON zslp_balances(token_id)",
+     NULL, NULL},
+
+    {12, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_zslp_balance_address "
+     "ON zslp_balances(address)",
+     NULL, NULL},
+
+    {12, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('012')",
+     NULL, NULL},
+
+    /* v13: App-facing lightweight models for wallet contacts and
+     * onion announcement registry. */
+    {13, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS contacts ("
+     "address TEXT PRIMARY KEY,"
+     "name TEXT NOT NULL,"
+     "last_used INTEGER NOT NULL DEFAULT 0)",
+     NULL, NULL},
+
+    {13, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_contacts_last_used "
+     "ON contacts(last_used DESC)",
+     NULL, NULL},
+
+    {13, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE TABLE IF NOT EXISTS onion_announcements ("
+     "onion_address TEXT PRIMARY KEY,"
+     "announced_at INTEGER NOT NULL,"
+     "script_hex TEXT NOT NULL DEFAULT '')",
+     NULL, NULL},
+
+    {13, DB_MIGRATE_CORE_DDL_EXEC,
+     "CREATE INDEX IF NOT EXISTS idx_onion_announced_at "
+     "ON onion_announcements(announced_at DESC)",
+     NULL, NULL},
+
+    {13, DB_MIGRATE_CORE_DDL_EXEC,
+     "INSERT OR IGNORE INTO schema_migrations(version) VALUES('013')",
+     NULL, NULL},
+};
+
+/* Apply every k_db_migrate_core_ddl row of one version, in table order —
+ * the statements the matching versioned block ran, nothing else. */
+static void db_migrate_apply_core_ddl(struct node_db *ndb, int version)
+{
+    for (size_t i = 0;
+         i < sizeof k_db_migrate_core_ddl / sizeof k_db_migrate_core_ddl[0];
+         i++) {
+        const struct db_migrate_core_ddl *r = &k_db_migrate_core_ddl[i];
+        if (r->version != version)
+            continue;
+        if (r->kind == DB_MIGRATE_CORE_DDL_EXEC_TOLERANT)
+            db_exec_tolerant(ndb->db, r->sql, r->label, r->tolerated);
+        else if (r->kind == DB_MIGRATE_CORE_DDL_EXEC_CHECKED)
+            db_exec_checked(ndb->db, r->sql, r->label);
+        else
+            node_db_exec(ndb, r->sql);
+    }
+}
+
 int node_db_migrate(struct node_db *ndb, const char *datadir)
 {
     (void)datadir;
@@ -375,417 +856,17 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
      * engine/models/include/models/database.h when you add a new block.
      */
 
-    if (current_ver < 2) {
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('002')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 2, floor);
-        current_ver = 2;
-        applied++;
-    }
-
-    if (current_ver < 3) {
-        /* Add Sapling commitment tree tracking columns */
-        node_db_exec(ndb,
-            "ALTER TABLE blocks ADD COLUMN sapling_tree_data BLOB");
-        node_db_exec(ndb,
-            "ALTER TABLE wallet_sapling_notes ADD COLUMN witness_data BLOB");
-        node_db_exec(ndb,
-            "ALTER TABLE wallet_sapling_notes ADD COLUMN witness_height INTEGER DEFAULT 0");
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('003')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 3, floor);
-        current_ver = 3;
-        applied++;
-    }
-
-    if (current_ver < 4) {
-        /* Block index cache — enables instant warm restart by skipping
-         * the 11s LevelDB block index load. Verified cryptographically
-         * via tip hash match with coins DB. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS block_index_cache ("
-            "hash BLOB NOT NULL PRIMARY KEY,"
-            "prev_hash BLOB NOT NULL,"
-            "height INTEGER NOT NULL,"
-            "n_bits INTEGER NOT NULL,"
-            "n_time INTEGER NOT NULL,"
-            "n_version INTEGER NOT NULL DEFAULT 4,"
-            "n_status INTEGER NOT NULL DEFAULT 0,"
-            "n_file INTEGER NOT NULL DEFAULT 0,"
-            "n_data_pos INTEGER NOT NULL DEFAULT 0,"
-            "n_undo_pos INTEGER NOT NULL DEFAULT 0,"
-            "n_tx INTEGER NOT NULL DEFAULT 0,"
-            "chain_work BLOB,"
-            "merkle_root BLOB,"
-            "final_sapling_root BLOB,"
-            "nonce BLOB,"
-            "solution BLOB,"
-            "n_solution_size INTEGER NOT NULL DEFAULT 0,"
-            "n_cached_branch_id INTEGER NOT NULL DEFAULT 0"
-            ")");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_bic_height"
-            " ON block_index_cache(height)");
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('004')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 4, floor);
-        current_ver = 4;
-        applied++;
-    }
-
-    if (current_ver < 5) {
-        /* v5: Explorer + REST API tables and indexes.
-         * Optimized for high-performance read queries. */
-
-        /* Addresses table — aggregated balance cache per address.
-         * Rebuilt from UTXO set on demand. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS addresses ("
-            "address_hash BLOB PRIMARY KEY,"
-            "script_type INTEGER NOT NULL DEFAULT 0,"
-            "balance INTEGER NOT NULL DEFAULT 0,"
-            "utxo_count INTEGER NOT NULL DEFAULT 0,"
-            "first_seen_height INTEGER NOT NULL DEFAULT 0,"
-            "last_seen_height INTEGER NOT NULL DEFAULT 0)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_addr_balance"
-            " ON addresses(balance DESC)");
-
-        /* Chain stats — pre-computed per-block aggregate stats.
-         * Used for charts (difficulty, hashrate, supply). */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS chain_stats ("
-            "height INTEGER PRIMARY KEY,"
-            "time INTEGER NOT NULL,"
-            "difficulty REAL NOT NULL DEFAULT 0,"
-            "tx_count INTEGER NOT NULL DEFAULT 0,"
-            "utxo_count INTEGER NOT NULL DEFAULT 0,"
-            "total_supply INTEGER NOT NULL DEFAULT 0,"
-            "shielded_supply INTEGER NOT NULL DEFAULT 0,"
-            "block_size INTEGER NOT NULL DEFAULT 0)");
-
-        /* ZSLP token registry — discovered from OP_RETURN GENESIS txs */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS zslp_tokens ("
-            "token_id BLOB PRIMARY KEY,"
-            "ticker TEXT NOT NULL DEFAULT '',"
-            "name TEXT NOT NULL DEFAULT '',"
-            "decimals INTEGER NOT NULL DEFAULT 0,"
-            "document_url TEXT DEFAULT '',"
-            "genesis_height INTEGER NOT NULL DEFAULT 0,"
-            "total_minted INTEGER NOT NULL DEFAULT 0,"
-            "total_burned INTEGER NOT NULL DEFAULT 0)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_zslp_ticker"
-            " ON zslp_tokens(ticker)");
-
-        /* Additional covering index for block queries without status filter */
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blocks_height_all"
-            " ON blocks(height)");
-
-        /* Index for timestamp lookups (HODL wave chart) */
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blocks_time"
-            " ON blocks(time)");
-
-        /* Composite covering index for UTXO age distribution (HODL waves) */
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_utxo_height_value"
-            " ON utxos(height, value)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('005')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 5, floor);
-        current_ver = 5;
-        applied++;
-    }
-
-    if (current_ver < 6) {
-        /* v6: Add address column to wallet_sapling_notes for per-order
-         * payment matching.  Tolerate "duplicate column name" on
-         * re-apply; any other error (disk full, corruption) is now
-         * logged instead of silently swallowed. */
-        db_exec_tolerant(ndb->db,
-            "ALTER TABLE wallet_sapling_notes ADD COLUMN address TEXT",
-            "v6: add wallet_sapling_notes.address",
-            "duplicate column name");
-        db_exec_checked(ndb->db,
-            "CREATE INDEX IF NOT EXISTS idx_snote_address"
-            " ON wallet_sapling_notes(address) WHERE spent_txid IS NULL",
-            "v6: idx_snote_address");
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('006')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 6, floor);
-        current_ver = 6;
-        applied++;
-    }
-
-    if (current_ver < 7) {
-        /* v7: ZSLP token transfer tracking + OP_RETURN index */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS zslp_transfers ("
-            "txid BLOB NOT NULL,"
-            "block_height INTEGER NOT NULL,"
-            "token_id BLOB NOT NULL,"
-            "tx_type INTEGER NOT NULL," /* 1=GENESIS, 2=MINT, 3=SEND */
-            "from_addr BLOB,"
-            "to_addr BLOB,"
-            "amount INTEGER NOT NULL DEFAULT 0,"
-            "vout INTEGER NOT NULL DEFAULT 0,"
-            "PRIMARY KEY (txid, vout))");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_zslp_xfer_token"
-            " ON zslp_transfers(token_id)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_zslp_xfer_height"
-            " ON zslp_transfers(block_height DESC)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_zslp_xfer_addr"
-            " ON zslp_transfers(to_addr) WHERE to_addr IS NOT NULL");
-
-        /* OP_RETURN index — stores all OP_RETURN output data for scanning */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS op_returns ("
-            "txid BLOB PRIMARY KEY,"
-            "block_height INTEGER NOT NULL,"
-            "script BLOB NOT NULL,"
-            "is_slp INTEGER NOT NULL DEFAULT 0)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_opret_height"
-            " ON op_returns(block_height)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_opret_slp"
-            " ON op_returns(is_slp) WHERE is_slp = 1");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('007')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 7, floor);
-        current_ver = 7;
-        applied++;
-    }
-
-    if (current_ver < 8) {
-        /* v8: Partial indexes on shielded value columns for fast stats queries.
-         * Only index non-zero rows — most blocks have zero shielded activity. */
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blocks_sprout_value "
-            "ON blocks(sprout_value) WHERE sprout_value != 0");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blocks_sapling_value "
-            "ON blocks(sapling_value) WHERE sapling_value != 0");
-
-        /* Covering index for time-range queries on shielded blocks */
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blocks_time_sprout "
-            "ON blocks(time, sprout_value) WHERE sprout_value != 0");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blocks_time_sapling "
-            "ON blocks(time, sapling_value) WHERE sapling_value != 0");
-
-        /* Index for num_tx queries (block records) */
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blocks_num_tx "
-            "ON blocks(num_tx DESC)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('008')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 8, floor);
-        current_ver = 8;
-        applied++;
-    }
-
-    if (current_ver < 9) {
-        /* v9: Full chain indexing — permanent tx inputs/outputs,
-         * Sapling spends/outputs, Sprout JoinSplits, SHA3 integrity. */
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS tx_outputs ("
-            "txid BLOB NOT NULL, vout INTEGER NOT NULL,"
-            "value INTEGER NOT NULL, script_type INTEGER NOT NULL DEFAULT 0,"
-            "address_hash BLOB, block_height INTEGER NOT NULL,"
-            "PRIMARY KEY (txid, vout))");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_txo_addr"
-            " ON tx_outputs(address_hash) WHERE address_hash IS NOT NULL");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_txo_height"
-            " ON tx_outputs(block_height)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS tx_inputs ("
-            "txid BLOB NOT NULL, vin_index INTEGER NOT NULL,"
-            "prev_txid BLOB NOT NULL, prev_vout INTEGER NOT NULL,"
-            "block_height INTEGER NOT NULL,"
-            "PRIMARY KEY (txid, vin_index))");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_txi_prev"
-            " ON tx_inputs(prev_txid, prev_vout)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_txi_height"
-            " ON tx_inputs(block_height)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS sapling_spends ("
-            "txid BLOB NOT NULL, spend_index INTEGER NOT NULL,"
-            "cv BLOB NOT NULL, anchor BLOB NOT NULL,"
-            "nullifier BLOB NOT NULL, rk BLOB NOT NULL,"
-            "block_height INTEGER NOT NULL,"
-            "PRIMARY KEY (txid, spend_index))");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_ss_nf"
-            " ON sapling_spends(nullifier)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_ss_height"
-            " ON sapling_spends(block_height)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS sapling_outputs ("
-            "txid BLOB NOT NULL, output_index INTEGER NOT NULL,"
-            "cv BLOB NOT NULL, cm BLOB NOT NULL,"
-            "ephemeral_key BLOB NOT NULL, block_height INTEGER NOT NULL,"
-            "PRIMARY KEY (txid, output_index))");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_so_height"
-            " ON sapling_outputs(block_height)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS joinsplits ("
-            "txid BLOB NOT NULL, js_index INTEGER NOT NULL,"
-            "vpub_old INTEGER NOT NULL, vpub_new INTEGER NOT NULL,"
-            "anchor BLOB NOT NULL, block_height INTEGER NOT NULL,"
-            "PRIMARY KEY (txid, js_index))");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_js_height"
-            " ON joinsplits(block_height)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS sprout_nullifiers ("
-            "nullifier BLOB PRIMARY KEY,"
-            "txid BLOB NOT NULL, block_height INTEGER NOT NULL)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_spnf_height"
-            " ON sprout_nullifiers(block_height)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS view_integrity ("
-            "height INTEGER PRIMARY KEY,"
-            "sha3_hash BLOB NOT NULL)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('009')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 9, floor);
-        current_ver = 9;
-        applied++;
-    }
-
-    if (current_ver < 10) {
-        /* v10: Add n_chain_tx to block_index_cache for full restart from SQLite.
-         * Needed so difficulty validation (17-ancestor walk) works without LevelDB. */
-        db_exec_tolerant(ndb->db,
-            "ALTER TABLE block_index_cache ADD COLUMN n_chain_tx INTEGER NOT NULL DEFAULT 0",
-            "v10: add block_index_cache.n_chain_tx",
-            "duplicate column name");
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('010')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 10, floor);
-        current_ver = 10;
-        applied++;
-    }
-
-    if (current_ver < 11) {
-        /* v11: Peer bandwidth scores + ZCL23 flag for fast reconnection.
-         * New nodes should reconnect to fast ZCL23 peers first, enabling
-         * instant swarm sync on subsequent starts. */
-        db_exec_tolerant(ndb->db,
-            "ALTER TABLE peers ADD COLUMN bandwidth_score INTEGER NOT NULL DEFAULT 0",
-            "v11: add peers.bandwidth_score",
-            "duplicate column name");
-        db_exec_tolerant(ndb->db,
-            "ALTER TABLE peers ADD COLUMN is_zcl23 INTEGER NOT NULL DEFAULT 0",
-            "v11: add peers.is_zcl23",
-            "duplicate column name");
-        /* Index: prioritize fast ZCL23 peers for reconnection */
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_peers_zcl23_score "
-            "ON peers(is_zcl23 DESC, bandwidth_score DESC)");
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('011')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 11, floor);
-        current_ver = 11;
-        applied++;
-    }
-
-    if (current_ver < 12) {
-        /* v12: ZSLP address balances as a first-class model-backed table. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS zslp_balances ("
-            "token_id TEXT NOT NULL,"
-            "address TEXT NOT NULL,"
-            "balance INTEGER NOT NULL DEFAULT 0,"
-            "PRIMARY KEY (token_id, address))");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_zslp_balance_token "
-            "ON zslp_balances(token_id)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_zslp_balance_address "
-            "ON zslp_balances(address)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('012')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 12, floor);
-        current_ver = 12;
-        applied++;
-    }
-
-    if (current_ver < 13) {
-        /* v13: App-facing lightweight models for wallet contacts and
-         * onion announcement registry. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS contacts ("
-            "address TEXT PRIMARY KEY,"
-            "name TEXT NOT NULL,"
-            "last_used INTEGER NOT NULL DEFAULT 0)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_contacts_last_used "
-            "ON contacts(last_used DESC)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS onion_announcements ("
-            "onion_address TEXT PRIMARY KEY,"
-            "announced_at INTEGER NOT NULL,"
-            "script_hex TEXT NOT NULL DEFAULT '')");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_onion_announced_at "
-            "ON onion_announcements(announced_at DESC)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('013')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 13, floor);
-        current_ver = 13;
-        applied++;
+    /* The v2..v13 versioned blocks are the rows of k_db_migrate_core_ddl:
+     * one guard per version applies that version's rows in table order,
+     * then stamps schema_version/schema_compat_floor exactly where the
+     * block's own tail did. */
+    for (int ver = 2; ver <= 13; ver++) {
+        if (current_ver < ver) {
+            db_migrate_apply_core_ddl(ndb, ver);
+            DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, ver, floor);
+            current_ver = ver;
+            applied++;
+        }
     }
 
     /* v14+ app-feature tables (store products/orders, ZCL Market file
