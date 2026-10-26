@@ -148,8 +148,6 @@ static bool co_component_equal(
            memcmp(left->root, right->root, sizeof(left->root)) == 0;
 }
 
-/* Field groups of co_observation_equal, split so each chain stays small;
- * the comparison order is unchanged. */
 static bool co_observation_evidence_equal(
     const struct ci_source_universe_observation *left,
     const struct ci_source_universe_observation *right)
