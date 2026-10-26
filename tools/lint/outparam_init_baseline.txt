@@ -91,7 +91,6 @@ bg_validation_read_body_resilient|block|block
 # third, rawtx_find_in_recent_chain, guards only on NULL arguments and is
 # therefore out of scope for this gate.)
 rawtx_find_in_node_db|tx|transaction
-rawtx_find_by_wallet_note|tx|transaction
 # wallet_db_tx_deserialize(): LOG_FAIL on an empty/absent raw blob sits above
 # transaction_init(tx). All five callers (wallet history, diagnostics, health)
 # use the `if (!wallet_db_tx_deserialize(&dbtx, &tx)) { db_wallet_tx_free(...);
