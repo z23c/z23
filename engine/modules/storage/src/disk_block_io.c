@@ -468,6 +468,58 @@ static bool disk_file_creation_allowed(bool read_only)
     return !read_only && errno == ENOENT;
 }
 
+/* Read-only cache hit: reuse the cached handle when it covers this
+ * (nFile, prefix) and still seeks to the position. NULL on any miss. */
+static FILE *cached_read_handle(const struct disk_block_pos *pos,
+                                const char *prefix)
+{
+    if (!g_cached_file ||
+        g_cached_nfile != pos->nFile ||
+        strcmp(g_cached_prefix, prefix) != 0)
+        return NULL;
+    if (fseek(g_cached_file, (long)pos->nPos, SEEK_SET) == 0)
+        return g_cached_file;
+    /* Seek failed — close and reopen */
+    disk_block_io_close_cache_locked();
+    return NULL;
+}
+
+/* Drop the cached read handle when the same file opens for writing. */
+static void drop_cached_handle_for_write(const struct disk_block_pos *pos,
+                                         const char *prefix)
+{
+    if (g_cached_file && g_cached_nfile == pos->nFile &&
+        strcmp(g_cached_prefix, prefix) == 0) {
+        disk_block_io_close_cache_locked();
+    }
+}
+
+/* Update open first; a failed update open permits creation only when the
+ * path was absent (see disk_file_creation_allowed). */
+static FILE *open_block_file_at_path(const char *path, bool read_only)
+{
+    FILE *file = block_fopen(path, "rb+");
+    if (!file && disk_file_creation_allowed(read_only))
+        file = block_fopen(path, "wb+");
+    return file;
+}
+
+/* Cache read-only handles for sequential access */
+static void cache_read_handle(FILE *file, const struct disk_block_pos *pos,
+                              const char *prefix)
+{
+    /* Close any previous cached handle. Reaching here means the
+     * cache-hit test above missed, so the cached handle (if any) is
+     * for a different (nFile, prefix) pair — note blk and rev files
+     * share numbers, so comparing nFile alone would leak the old
+     * handle when only the prefix differs. */
+    if (g_cached_file)
+        fclose(g_cached_file);
+    g_cached_file = file;
+    g_cached_nfile = pos->nFile;
+    snprintf(g_cached_prefix, sizeof(g_cached_prefix), "%s", prefix);
+}
+
 FILE *open_disk_file(const char *datadir,
                      const struct disk_block_pos *pos,
                      const char *prefix, bool read_only)
@@ -480,32 +532,21 @@ FILE *open_disk_file(const char *datadir,
     ensure_directory(blocks_dir);
 
     /* Try the read-only cache: same file number and prefix → reuse handle */
-    if (read_only && g_cached_file &&
-        g_cached_nfile == pos->nFile &&
-        strcmp(g_cached_prefix, prefix) == 0) {
-        if (fseek(g_cached_file, (long)pos->nPos, SEEK_SET) == 0)
-            return g_cached_file;
-        /* Seek failed — close and reopen */
-        fclose(g_cached_file);
-        g_cached_file = NULL;
-        g_cached_nfile = -1;
+    if (read_only) {
+        FILE *cached = cached_read_handle(pos, prefix);
+        if (cached)
+            return cached;
     }
 
     /* Invalidate cache if opening same file for writing — prevents
      * stale stdio buffers after the write handle modifies the file. */
-    if (!read_only && g_cached_file && g_cached_nfile == pos->nFile &&
-        strcmp(g_cached_prefix, prefix) == 0) {
-        fclose(g_cached_file);
-        g_cached_file = NULL;
-        g_cached_nfile = -1;
-    }
+    if (!read_only)
+        drop_cached_handle_for_write(pos, prefix);
 
     char path[4096];
     get_block_pos_filename(path, sizeof(path), datadir, pos, prefix);
 
-    FILE *file = block_fopen(path, "rb+");
-    if (!file && disk_file_creation_allowed(read_only))
-        file = block_fopen(path, "wb+");
+    FILE *file = open_block_file_at_path(path, read_only);
     if (!file) {
         fprintf(stderr, "open_disk_file: cannot open %s: %s\n",
                 path, strerror(errno));
@@ -522,20 +563,145 @@ FILE *open_disk_file(const char *datadir,
     }
 
     /* Cache read-only handles for sequential access */
-    if (read_only) {
-        /* Close any previous cached handle. Reaching here means the
-         * cache-hit test above missed, so the cached handle (if any) is
-         * for a different (nFile, prefix) pair — note blk and rev files
-         * share numbers, so comparing nFile alone would leak the old
-         * handle when only the prefix differs. */
-        if (g_cached_file)
-            fclose(g_cached_file);
-        g_cached_file = file;
-        g_cached_nfile = pos->nFile;
-        snprintf(g_cached_prefix, sizeof(g_cached_prefix), "%s", prefix);
-    }
+    if (read_only)
+        cache_read_handle(file, pos, prefix);
 
     return file;
+}
+
+/* Allocate an append position only when the caller did not pin one
+ * (pos->nFile < 0); a pinned position passes through untouched. */
+static bool ensure_append_block_pos(struct disk_block_pos *pos,
+                                    uint32_t block_size,
+                                    const char *datadir,
+                                    bool append_allocated)
+{
+    return !append_allocated ||
+        choose_append_block_pos(pos, block_size, datadir, g_deferred_sync);
+}
+
+/* An opened blk file is writable only as a lone regular file: a hardlinked
+ * blk file may have a live foreign appender. Always fills opened_out and
+ * links_out so the caller can log exactly what it refused. */
+static bool opened_blk_file_is_safe(FILE *file, const char *datadir,
+                                    const struct disk_block_pos *pos,
+                                    struct stat *opened_out,
+                                    unsigned long *links_out)
+{
+    bool opened_safe = fstat(fileno(file), opened_out) == 0 &&
+        S_ISREG(opened_out->st_mode);
+#if defined(_WIN32)
+    /* UCRT's stat/fstat reports st_nlink=1 for an NTFS hard link.  Ask the
+     * UTF-8 -> CreateFileW metadata seam for the real handle-backed link
+     * count; ordinary POSIX hosts retain fstat's race-free answer. */
+    char opened_path[512];
+    struct platform_file_metadata opened_metadata = {0};
+    get_block_pos_filename(opened_path, sizeof(opened_path), datadir, pos,
+                           "blk");
+    opened_safe = opened_safe &&
+        platform_file_metadata_read(opened_path, &opened_metadata) ==
+            PLATFORM_FILE_METADATA_OK;
+    *links_out = (unsigned long)opened_metadata.links;
+#else
+    (void)datadir;
+    (void)pos;
+    *links_out = (unsigned long)opened_out->st_nlink;
+#endif
+    return opened_safe && *links_out == 1;
+}
+
+/* Which step of the framed write failed, so the caller logs its own
+ * message at its own site. */
+enum block_write_result {
+    BLOCK_WRITE_OK,
+    BLOCK_WRITE_FTELL_FAILED,
+    BLOCK_WRITE_HEADER_FAILED,
+    BLOCK_WRITE_DATA_POS_RANGE,
+    BLOCK_WRITE_DATA_FAILED
+};
+
+/* Write the 8-byte magic+size frame header, then the serialized block body.
+ * On success *data_pos_out is the payload offset; on a data-position range
+ * failure it holds the out-of-range value for the caller's log line. */
+static enum block_write_result write_block_frame(FILE *file,
+                                                 const unsigned char message_start[4],
+                                                 uint32_t nSize,
+                                                 const struct byte_stream *s,
+                                                 long *data_pos_out)
+{
+    long file_pos = ftell(file);
+    if (file_pos < 0)
+        return BLOCK_WRITE_FTELL_FAILED;
+
+    if (fwrite(message_start, 1, 4, file) != 4 || // disk-io-lock: held (internal)
+        fwrite(&nSize, sizeof(nSize), 1, file) != 1)
+        return BLOCK_WRITE_HEADER_FAILED;
+
+    long data_pos = ftell(file);
+    if (data_pos < 0 || (unsigned long)data_pos > UINT32_MAX) {
+        *data_pos_out = data_pos;
+        return BLOCK_WRITE_DATA_POS_RANGE;
+    }
+
+    if (fwrite(s->data, 1, s->size, file) != s->size) // disk-io-lock: held (internal)
+        return BLOCK_WRITE_DATA_FAILED;
+
+    *data_pos_out = data_pos;
+    return BLOCK_WRITE_OK;
+}
+
+/* Which durability step failed, so the caller logs its own message at its
+ * own site. */
+enum block_sync_result {
+    BLOCK_SYNC_OK,
+    BLOCK_SYNC_FFLUSH_FAILED,
+    BLOCK_SYNC_DATASYNC_FAILED
+};
+
+/* Flush to disk before reporting success — prevents silent data loss
+ * on power failure. fdatasync skips metadata update (faster).
+ *
+ * Deferred mode (reducer fold / catch-up drain): push the stdio buffer to
+ * the kernel now (fflush) so a concurrent reader sees the bytes, but defer
+ * the fdatasync to the drain-batch boundary (disk_block_io_sync_pending,
+ * fired before the stage COMMIT). Record the file as pending; on set
+ * overflow fall back to an inline fdatasync so a file is never left
+ * unsynced. Both g_deferred_sync and the pending set are under the mutex
+ * held here. */
+static enum block_sync_result flush_and_sync_block_file(FILE *file,
+                                                        const char *datadir,
+                                                        const struct disk_block_pos *pos)
+{
+    if (fflush(file) != 0)
+        return BLOCK_SYNC_FFLUSH_FAILED;
+    bool sync_now = true;
+    if (g_deferred_sync) {
+        char wpath[512];
+        get_block_pos_filename(wpath, sizeof(wpath), datadir, pos, "blk");
+        if (deferred_record_pending_locked(wpath))
+            sync_now = false; /* synced later at the drain-batch boundary */
+    }
+    if (sync_now && platform_data_sync(fileno(file)) != 0)
+        return BLOCK_SYNC_DATASYNC_FAILED;
+    return BLOCK_SYNC_OK;
+}
+
+/* Only record position AFTER data is confirmed on disk.
+ * If we crash before this, caller retries from scratch — safe. */
+static void finish_block_write(struct disk_block_pos *pos, long data_pos,
+                               const char *datadir, struct byte_stream *s,
+                               FILE *file, bool append_allocated)
+{
+    pos->nPos = (unsigned int)data_pos;
+    if (append_allocated && g_deferred_sync)
+        append_hint_record(datadir, pos->nFile,
+                           (uint64_t)data_pos + (uint64_t)s->size);
+    else
+        append_hint_invalidate();
+
+    fclose(file);
+    pthread_mutex_unlock(&g_file_cache_mutex);
+    stream_free(s);
 }
 
 bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
@@ -556,8 +722,7 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
      * stale cached FILE* handle. */
     pthread_mutex_lock(&g_file_cache_mutex);
     bool append_allocated = pos->nFile < 0;
-    if (append_allocated &&
-        !choose_append_block_pos(pos, nSize, datadir, g_deferred_sync)) {
+    if (!ensure_append_block_pos(pos, nSize, datadir, append_allocated)) {
         pthread_mutex_unlock(&g_file_cache_mutex);
         stream_free(&s);
         LOG_FAIL("disk_block_io", "write_block: append position allocation failed");
@@ -572,24 +737,7 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
 
     struct stat opened = {0};
     unsigned long opened_links = 0;
-    bool opened_safe = fstat(fileno(file), &opened) == 0 &&
-        S_ISREG(opened.st_mode);
-#if defined(_WIN32)
-    /* UCRT's stat/fstat reports st_nlink=1 for an NTFS hard link.  Ask the
-     * UTF-8 -> CreateFileW metadata seam for the real handle-backed link
-     * count; ordinary POSIX hosts retain fstat's race-free answer. */
-    char opened_path[512];
-    struct platform_file_metadata opened_metadata = {0};
-    get_block_pos_filename(opened_path, sizeof(opened_path), datadir, pos,
-                           "blk");
-    opened_safe = opened_safe &&
-        platform_file_metadata_read(opened_path, &opened_metadata) ==
-            PLATFORM_FILE_METADATA_OK;
-    opened_links = (unsigned long)opened_metadata.links;
-#else
-    opened_links = (unsigned long)opened.st_nlink;
-#endif
-    if (!opened_safe || opened_links != 1) {
+    if (!opened_blk_file_is_safe(file, datadir, pos, &opened, &opened_links)) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
         stream_free(&s);
@@ -599,48 +747,40 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
                  opened_links);
     }
 
-    long file_pos = ftell(file);
-    if (file_pos < 0) {
+    long data_pos = 0;
+    enum block_write_result write_result =
+        write_block_frame(file, message_start, nSize, &s, &data_pos);
+    if (write_result == BLOCK_WRITE_FTELL_FAILED) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
         stream_free(&s);
         LOG_FAIL("disk_block_io", "write_block: ftell failed");
     }
 
-    if (fwrite(message_start, 1, 4, file) != 4 || // disk-io-lock: held (internal)
-        fwrite(&nSize, sizeof(nSize), 1, file) != 1) {
+    if (write_result == BLOCK_WRITE_HEADER_FAILED) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
         stream_free(&s);
         LOG_FAIL("disk_block_io", "write_block: fwrite header failed for file=%d", pos->nFile);
     }
 
-    long data_pos = ftell(file);
-    if (data_pos < 0 || (unsigned long)data_pos > UINT32_MAX) {
+    if (write_result == BLOCK_WRITE_DATA_POS_RANGE) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
         stream_free(&s);
         LOG_FAIL("disk_block_io", "write_block: data position out of range (pos=%ld)", data_pos);
     }
 
-    if (fwrite(s.data, 1, s.size, file) != s.size) { // disk-io-lock: held (internal)
+    if (write_result == BLOCK_WRITE_DATA_FAILED) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
         stream_free(&s);
         LOG_FAIL("disk_block_io", "write_block: fwrite block data failed (size=%zu)", s.size);
     }
 
-    /* Flush to disk before reporting success — prevents silent data loss
-     * on power failure. fdatasync skips metadata update (faster).
-     *
-     * Deferred mode (reducer fold / catch-up drain): push the stdio buffer to
-     * the kernel now (fflush) so a concurrent reader sees the bytes, but defer
-     * the fdatasync to the drain-batch boundary (disk_block_io_sync_pending,
-     * fired before the stage COMMIT). Record the file as pending; on set
-     * overflow fall back to an inline fdatasync so a file is never left
-     * unsynced. Both g_deferred_sync and the pending set are under the mutex
-     * held here. */
-    if (fflush(file) != 0) {
+    enum block_sync_result sync_result =
+        flush_and_sync_block_file(file, datadir, pos);
+    if (sync_result == BLOCK_SYNC_FFLUSH_FAILED) {
         fprintf(stderr, "write_block_to_disk: fflush failed: %s\n",
                 strerror(errno));
         fclose(file);
@@ -648,14 +788,7 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
         stream_free(&s);
         return false;
     }
-    bool sync_now = true;
-    if (g_deferred_sync) {
-        char wpath[512];
-        get_block_pos_filename(wpath, sizeof(wpath), datadir, pos, "blk");
-        if (deferred_record_pending_locked(wpath))
-            sync_now = false; /* synced later at the drain-batch boundary */
-    }
-    if (sync_now && platform_data_sync(fileno(file)) != 0) {
+    if (sync_result == BLOCK_SYNC_DATASYNC_FAILED) {
         fprintf(stderr, "write_block_to_disk: fdatasync failed: %s\n",
                 strerror(errno));
         fclose(file);
@@ -664,18 +797,7 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
         return false;
     }
 
-    /* Only record position AFTER data is confirmed on disk.
-     * If we crash before this, caller retries from scratch — safe. */
-    pos->nPos = (unsigned int)data_pos;
-    if (append_allocated && g_deferred_sync)
-        append_hint_record(datadir, pos->nFile,
-                           (uint64_t)data_pos + (uint64_t)s.size);
-    else
-        append_hint_invalidate();
-
-    fclose(file);
-    pthread_mutex_unlock(&g_file_cache_mutex);
-    stream_free(&s);
+    finish_block_write(pos, data_pos, datadir, &s, file, append_allocated);
     return true;
 }
 

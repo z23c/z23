@@ -1231,8 +1231,6 @@ engine/modules/storage/src/consensus_db.c:consensus_db_drop_migrated_from_progre
 engine/modules/storage/src/consensus_db.c:consensus_db_migrate_from_progress:41
 engine/modules/storage/src/dbwrapper.c:db_wrapper_ensure_directory:16
 engine/modules/storage/src/dbwrapper.c:db_wrapper_open:35
-engine/modules/storage/src/disk_block_io.c:open_disk_file:18
-engine/modules/storage/src/disk_block_io.c:write_block_to_disk:22
 engine/modules/storage/src/event_log.c:event_log_append:16
 engine/modules/storage/src/event_log.c:event_log_read:17
 engine/modules/storage/src/event_log.c:event_log_stream:19
