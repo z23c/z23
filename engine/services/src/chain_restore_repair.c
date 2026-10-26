@@ -920,31 +920,6 @@ static bool chain_restore_finalize_note_csr(struct chain_state_view *view)
     return !view->consistent;
 }
 
-/* Integrity is verifiably clean — any auto-reindex sentinel is
- * stale (already served, or written for a state that no longer
- * exists). Without this, a stale pending sentinel makes every
- * subsequent healthy boot re-run a full -reindex-chainstate
- * forever. The TERMINAL marker must clear here too: it means
- * "budget exhausted at a stall that needs a human", but the node
- * is now provably healthy, so leaving it would permanently poison
- * the reindex path for the NEXT genuine episode — a clear gated only
- * on pending() never fires for a terminal marker. */
-static const char *chain_restore_finalize_take_reindex_label(
-    const char *datadir,
-    bool *clear_episode)
-{
-    *clear_episode = false;
-    if (!datadir || !datadir[0])
-        return NULL;
-    *clear_episode = true;
-    bool was_terminal = boot_auto_reindex_is_terminal(datadir);
-    if (was_terminal || boot_auto_reindex_pending(datadir)) {
-        boot_auto_reindex_clear(datadir);
-        return was_terminal ? "terminal" : "pending";
-    }
-    return NULL;
-}
-
 struct zcl_result chain_restore_finalize(struct main_state *ms, const char *datadir)
 {
     if (!ms) return ZCL_ERR(-1, "chain_restore_finalize: null main_state");
@@ -1014,20 +989,30 @@ struct zcl_result chain_restore_finalize(struct main_state *ms, const char *data
             BII_OK, BII_RECOVERY_ACCEPTED,
             "post-restore integrity clean; active chain reconciled",
             false, false);
-        bool clear_episode = false;
-        const char *reindex_label =
-            chain_restore_finalize_take_reindex_label(datadir, &clear_episode);
-        if (reindex_label)
-            LOG_INFO("chain",
-                     "[chain-integrity] cleared stale auto-reindex "
-                     "sentinel (%s): post-restore integrity is clean",
-                     reindex_label);
-        /* Clean integrity ends the repair episode, so the durable
-         * per-finding attempt ledger goes with it. Retiring it anywhere
-         * else would reset the budget the boot gate uses to stop
-         * restarting on an unchanging finding. */
-        if (clear_episode)
+        /* Integrity is verifiably clean — any auto-reindex sentinel is
+         * stale (already served, or written for a state that no longer
+         * exists). Without this, a stale pending sentinel makes every
+         * subsequent healthy boot re-run a full -reindex-chainstate
+         * forever. The TERMINAL marker must clear here too: it means
+         * "budget exhausted at a stall that needs a human", but the node
+         * is now provably healthy, so leaving it would permanently poison
+         * the reindex path for the NEXT genuine episode — a clear gated only
+         * on pending() never fires for a terminal marker. */
+        if (datadir && datadir[0]) {
+            bool was_terminal = boot_auto_reindex_is_terminal(datadir);
+            if (was_terminal || boot_auto_reindex_pending(datadir)) {
+                boot_auto_reindex_clear(datadir);
+                LOG_INFO("chain",
+                         "[chain-integrity] cleared stale auto-reindex "
+                         "sentinel (%s): post-restore integrity is clean",
+                         was_terminal ? "terminal" : "pending");
+            }
+            /* Clean integrity ends the repair episode, so the durable
+             * per-finding attempt ledger goes with it. Retiring it anywhere
+             * else would reset the budget the boot gate uses to stop
+             * restarting on an unchanging finding. */
             boot_repair_episode_clear(datadir);
+        }
     }
 
     if (!r.ok)
