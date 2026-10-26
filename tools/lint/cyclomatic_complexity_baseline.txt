@@ -999,8 +999,6 @@ engine/composition/src/consensus_state_snapshot_install_activate_backup.c:activa
 engine/composition/src/consensus_state_snapshot_output_seal.c:consensus_export_descriptor_digest#2:18
 engine/composition/src/consensus_state_snapshot_output_seal.c:consensus_export_seal_readonly#2:42
 engine/composition/src/consensus_state_snapshot_output_seal.c:descriptor_has_writable_alias:16
-engine/composition/src/file_ops.c:block_files_copy:17
-engine/composition/src/file_ops.c:file_copy:27
 engine/conditions/src/download_queue_starved.c:detail_download_queue_starved:52
 engine/conditions/src/have_data_unreadable.c:detect_have_data_unreadable:19
 engine/conditions/src/have_data_unreadable.c:witness_have_data_unreadable:17
