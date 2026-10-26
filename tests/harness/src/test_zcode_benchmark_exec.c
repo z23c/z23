@@ -283,6 +283,36 @@ struct zbex_context {
     uint8_t workload_root[32];
 };
 
+/* Serialize + CAS-store the study, task, candidate and method objects. */
+static bool zbex_store_context_objects(const char *workspace,
+                                       struct zbex_context *ctx)
+{
+    uint8_t study_wire[VCS_ZCODE_STUDY_SPEC_WIRE_BYTES];
+    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+    uint8_t method_wire[VCS_ZCODE_BENCHMARK_METHOD_WIRE_BYTES];
+    return vcs_zcode_study_spec_serialize(&ctx->study, study_wire) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_study_spec_root(&ctx->study, ctx->study_root) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_object_put_addressed(workspace, ctx->study_root, study_wire,
+                                    sizeof(study_wire)) &&
+           vcs_zcode_task_serialize(&ctx->task, task_wire) ==
+               VCS_ZCODE_DEV_OK &&
+           vcs_object_put_addressed(workspace, ctx->task_root, task_wire,
+                                    sizeof(task_wire)) &&
+           vcs_zcode_candidate_serialize(&ctx->candidate, candidate_wire) ==
+               VCS_ZCODE_DEV_OK &&
+           vcs_object_put_addressed(workspace, ctx->candidate_root,
+                                    candidate_wire, sizeof(candidate_wire)) &&
+           vcs_zcode_benchmark_method_serialize(&ctx->method, method_wire) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_benchmark_method_root(&ctx->method, ctx->method_root) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_object_put_addressed(workspace, ctx->method_root, method_wire,
+                                    sizeof(method_wire));
+}
+
 /* Build + CAS-store the whole execution context (open policy). */
 static bool zbex_seed_context(const char *workspace,
                               struct zbex_context *ctx)
@@ -317,30 +347,7 @@ static bool zbex_seed_context(const char *workspace,
                                   workload_wire, sizeof(workload_wire)))
         return false;
     zbex_method(ctx->workload_root, &ctx->method);
-    uint8_t study_wire[VCS_ZCODE_STUDY_SPEC_WIRE_BYTES];
-    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
-    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
-    uint8_t method_wire[VCS_ZCODE_BENCHMARK_METHOD_WIRE_BYTES];
-    return vcs_zcode_study_spec_serialize(&ctx->study, study_wire) ==
-               VCS_ZCODE_SCIENCE_OK &&
-           vcs_zcode_study_spec_root(&ctx->study, ctx->study_root) ==
-               VCS_ZCODE_SCIENCE_OK &&
-           vcs_object_put_addressed(workspace, ctx->study_root, study_wire,
-                                    sizeof(study_wire)) &&
-           vcs_zcode_task_serialize(&ctx->task, task_wire) ==
-               VCS_ZCODE_DEV_OK &&
-           vcs_object_put_addressed(workspace, ctx->task_root, task_wire,
-                                    sizeof(task_wire)) &&
-           vcs_zcode_candidate_serialize(&ctx->candidate, candidate_wire) ==
-               VCS_ZCODE_DEV_OK &&
-           vcs_object_put_addressed(workspace, ctx->candidate_root,
-                                    candidate_wire, sizeof(candidate_wire)) &&
-           vcs_zcode_benchmark_method_serialize(&ctx->method, method_wire) ==
-               VCS_ZCODE_SCIENCE_OK &&
-           vcs_zcode_benchmark_method_root(&ctx->method, ctx->method_root) ==
-               VCS_ZCODE_SCIENCE_OK &&
-           vcs_object_put_addressed(workspace, ctx->method_root, method_wire,
-                                    sizeof(method_wire));
+    return zbex_store_context_objects(workspace, ctx);
 }
 
 static void zbex_request(const char *workspace,
