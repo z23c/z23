@@ -2381,8 +2381,6 @@ tools/zcl-nodectl.c:cmd_launch:30
 tools/zcl-nodectl.c:main:16
 tools/zcl_portfwd.c:main:41
 tools/zcode_adapter_runner.c:main:73
-tools/zcode_app_server_benchmark.c:handle_notification:18
-tools/zcode_app_server_benchmark.c:main:31
 tools/zcode_dev_signer.c:main:36
 tools/zcode_package_registry_check.c:main:40
 tools/zcode_science_fixture.c:cmd_verify_package:19

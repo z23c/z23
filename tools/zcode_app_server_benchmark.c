@@ -182,6 +182,49 @@ static bool allowed_item(const char *type)
         strcmp(type, "commandExecution") == 0);
 }
 
+static void note_token_usage(const struct json_value *params,
+                             struct app_metrics *metrics)
+{
+    const struct json_value *usage = json_get(
+        json_get(json_get(params, "tokenUsage"), "last"), "inputTokens");
+    if (usage) metrics->input_tokens = json_get_int(usage);
+    usage = json_get(json_get(json_get(params, "tokenUsage"), "last"),
+                     "cachedInputTokens");
+    if (usage) metrics->cached_input_tokens = json_get_int(usage);
+    usage = json_get(json_get(json_get(params, "tokenUsage"), "last"),
+                     "outputTokens");
+    if (usage) metrics->output_tokens = json_get_int(usage);
+}
+
+static void note_item_completed(const struct json_value *params,
+                                struct app_metrics *metrics)
+{
+    const struct json_value *item = json_get(params, "item");
+    const char *type = json_get_str(json_get(item, "type"));
+    if (!allowed_item(type)) metrics->forbidden_tool_calls++;
+    if (type && strcmp(type, "commandExecution") == 0) {
+        const char *output = json_get_str(json_get(item,
+                                                   "aggregatedOutput"));
+        metrics->tool_calls++;
+        if (output) metrics->tool_output_bytes += (int64_t)strlen(output);
+    }
+}
+
+static void note_turn_completed(const struct json_value *params,
+                                const char *turn_id,
+                                struct app_metrics *metrics)
+{
+    const struct json_value *turn = json_get(params, "turn");
+    const char *id = json_get_str(json_get(turn, "id"));
+    if (id && turn_id[0] && strcmp(id, turn_id) == 0) {
+        metrics->completed = true;
+        const char *status = json_get_str(json_get(turn, "status"));
+        (void)snprintf(metrics->turn_status,
+                       sizeof(metrics->turn_status), "%s",
+                       status ? status : "missing");
+    }
+}
+
 static void handle_notification(const struct json_value *message,
                                 const char *thread_id, const char *turn_id,
                                 struct app_metrics *metrics)
@@ -191,40 +234,15 @@ static void handle_notification(const struct json_value *message,
     if (!method || !params) return;
     if (strcmp(method, "thread/tokenUsage/updated") == 0 &&
         strcmp(json_get_str(json_get(params, "threadId")), thread_id) == 0) {
-        const struct json_value *usage = json_get(
-            json_get(json_get(params, "tokenUsage"), "last"), "inputTokens");
-        if (usage) metrics->input_tokens = json_get_int(usage);
-        usage = json_get(json_get(json_get(params, "tokenUsage"), "last"),
-                         "cachedInputTokens");
-        if (usage) metrics->cached_input_tokens = json_get_int(usage);
-        usage = json_get(json_get(json_get(params, "tokenUsage"), "last"),
-                         "outputTokens");
-        if (usage) metrics->output_tokens = json_get_int(usage);
+        note_token_usage(params, metrics);
         return;
     }
     if (strcmp(method, "item/completed") == 0) {
-        const struct json_value *item = json_get(params, "item");
-        const char *type = json_get_str(json_get(item, "type"));
-        if (!allowed_item(type)) metrics->forbidden_tool_calls++;
-        if (type && strcmp(type, "commandExecution") == 0) {
-            const char *output = json_get_str(json_get(item,
-                                                       "aggregatedOutput"));
-            metrics->tool_calls++;
-            if (output) metrics->tool_output_bytes += (int64_t)strlen(output);
-        }
+        note_item_completed(params, metrics);
         return;
     }
-    if (strcmp(method, "turn/completed") == 0) {
-        const struct json_value *turn = json_get(params, "turn");
-        const char *id = json_get_str(json_get(turn, "id"));
-        if (id && turn_id[0] && strcmp(id, turn_id) == 0) {
-            metrics->completed = true;
-            const char *status = json_get_str(json_get(turn, "status"));
-            (void)snprintf(metrics->turn_status,
-                           sizeof(metrics->turn_status), "%s",
-                           status ? status : "missing");
-        }
-    }
+    if (strcmp(method, "turn/completed") == 0)
+        note_turn_completed(params, turn_id, metrics);
 }
 
 static int wait_response(struct app_reader *reader, int input_fd, int64_t id,
@@ -618,6 +636,52 @@ static int run_benchmark(const char *candidate, const char *packet,
     return ok && rendered && WIFEXITED(status) ? 0 : 1;
 }
 
+static bool resolve_bounded_inputs(char candidate[PATH_MAX],
+                                   char packet_path[PATH_MAX], char **argv)
+{
+    return realpath(argv[1], candidate) && realpath(argv[2], packet_path) &&
+        beneath(candidate, packet_path) && argv[3][0] &&
+        !strpbrk(argv[3], " \t\r\n");
+}
+
+static int resolve_auth_source(const char *configured,
+                               char auth_source[PATH_MAX])
+{
+    struct passwd pwd, *found = NULL;
+    char pwd_buffer[16384];
+    const char *home = NULL;
+    if (configured && configured[0]) home = configured;
+    else if (getpwuid_r(getuid(), &pwd, pwd_buffer, sizeof(pwd_buffer),
+                        &found) == 0 && found) home = pwd.pw_dir;
+    return home ? snprintf(auth_source, PATH_MAX, "%s/%s",
+                           home, configured && configured[0]
+                                 ? "auth.json" : ".codex/auth.json") : -1;
+}
+
+static bool auth_login_installed(const char *auth_source)
+{
+    struct stat auth_st;
+    return lstat(auth_source, &auth_st) == 0 && S_ISREG(auth_st.st_mode) &&
+        auth_st.st_uid == getuid();
+}
+
+static bool prepare_run_paths(const char *auth_source, const char *candidate,
+                              const char *private_home,
+                              char auth_link[PATH_MAX],
+                              char stderr_path[PATH_MAX],
+                              char adapter_tmp[PATH_MAX])
+{
+    int n = snprintf(auth_link, PATH_MAX, "%s/auth.json", private_home);
+    int e = snprintf(stderr_path, PATH_MAX, "%s/stderr", private_home);
+    int t = snprintf(adapter_tmp, PATH_MAX, "%s/.zcode-adapter-tmp",
+                     candidate);
+    return n > 0 && (size_t)n < PATH_MAX &&
+        e > 0 && (size_t)e < PATH_MAX &&
+        t > 0 && (size_t)t < PATH_MAX &&
+        symlink(auth_source, auth_link) == 0 &&
+        (mkdir(adapter_tmp, 0700) == 0 || errno == EEXIST);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
@@ -625,29 +689,18 @@ int main(int argc, char **argv)
         return 64;
     }
     char candidate[PATH_MAX], packet_path[PATH_MAX];
-    if (!realpath(argv[1], candidate) || !realpath(argv[2], packet_path) ||
-        !beneath(candidate, packet_path) || !argv[3][0] ||
-        strpbrk(argv[3], " \t\r\n")) {
+    if (!resolve_bounded_inputs(candidate, packet_path, argv)) {
         fprintf(stderr, "app-server benchmark: invalid bounded input\n");
         return 65;
     }
     size_t packet_len = 0;
     char *packet = read_file(packet_path, APP_PACKET_MAX, &packet_len);
     (void)packet_len;
-    struct passwd pwd, *found = NULL;
-    char pwd_buffer[16384], auth_source[PATH_MAX];
+    char auth_source[PATH_MAX];
     const char *configured = getenv("CODEX_HOME");
-    const char *home = NULL;
-    if (configured && configured[0]) home = configured;
-    else if (getpwuid_r(getuid(), &pwd, pwd_buffer, sizeof(pwd_buffer),
-                        &found) == 0 && found) home = pwd.pw_dir;
-    int n = home ? snprintf(auth_source, sizeof(auth_source), "%s/%s",
-                            home, configured && configured[0]
-                                  ? "auth.json" : ".codex/auth.json") : -1;
-    struct stat auth_st;
+    int n = resolve_auth_source(configured, auth_source);
     if (!packet || n <= 0 || (size_t)n >= sizeof(auth_source) ||
-        lstat(auth_source, &auth_st) != 0 || !S_ISREG(auth_st.st_mode) ||
-        auth_st.st_uid != getuid()) {
+        !auth_login_installed(auth_source)) {
         free(packet);
         fprintf(stderr, "app-server benchmark: installed login unavailable\n");
         return 69;
@@ -655,15 +708,8 @@ int main(int argc, char **argv)
     char private_home[] = "/tmp/z23-app-server-home.XXXXXX";
     if (!mkdtemp(private_home)) { free(packet); return 73; }
     char auth_link[PATH_MAX], stderr_path[PATH_MAX], adapter_tmp[PATH_MAX];
-    n = snprintf(auth_link, sizeof(auth_link), "%s/auth.json", private_home);
-    int e = snprintf(stderr_path, sizeof(stderr_path), "%s/stderr", private_home);
-    int t = snprintf(adapter_tmp, sizeof(adapter_tmp),
-                     "%s/.zcode-adapter-tmp", candidate);
-    bool prepared = n > 0 && (size_t)n < sizeof(auth_link) &&
-        e > 0 && (size_t)e < sizeof(stderr_path) &&
-        t > 0 && (size_t)t < sizeof(adapter_tmp) &&
-        symlink(auth_source, auth_link) == 0 &&
-        (mkdir(adapter_tmp, 0700) == 0 || errno == EEXIST);
+    bool prepared = prepare_run_paths(auth_source, candidate, private_home,
+                                      auth_link, stderr_path, adapter_tmp);
     int rc = prepared ? run_benchmark(candidate, packet, argv[3], private_home,
                                       stderr_path) : 73;
     free(packet);
