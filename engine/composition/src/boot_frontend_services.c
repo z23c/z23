@@ -304,17 +304,15 @@ static void boot_https_arm_public_install(const char *datadir)
     https_server_set_public_install_root(install_root);
 }
 
-/* Whichever pair is chosen below must be readable before a listener is
- * started; the self-signed pair is the fallback. */
-static bool boot_https_select_serve_pair(struct boot_svc_ctx *svc,
-                                         const char *cert_path,
-                                         const char *key_path,
-                                         const char *placeholder_cert,
-                                         const char *placeholder_key,
-                                         const char *handoff_path,
-                                         const char *https_domain,
-                                         const char **serve_cert,
-                                         const char **serve_key)
+static bool boot_https_serve_pair_missing(struct boot_svc_ctx *svc,
+                                          const char *cert_path,
+                                          const char *key_path,
+                                          const char *placeholder_cert,
+                                          const char *placeholder_key,
+                                          const char *handoff_path,
+                                          const char *https_domain,
+                                          const char **serve_cert,
+                                          const char **serve_key)
 {
     *serve_cert = cert_path;
     *serve_key = key_path;
@@ -327,7 +325,7 @@ static bool boot_https_select_serve_pair(struct boot_svc_ctx *svc,
                    "placeholder could be placed at %s - block explorer not "
                    "on clearnet, and this host cannot answer a TLS-ALPN-01 "
                    "challenge to obtain one\n", cert_path, placeholder_cert);
-            return false;
+            return true;
         }
         *serve_cert = placeholder_cert;
         *serve_key = placeholder_key;
@@ -344,12 +342,9 @@ static bool boot_https_select_serve_pair(struct boot_svc_ctx *svc,
                                                  : "<your.domain>",
                svc->datadir, cert_path, key_path, handoff_path);
     }
-    return true;
+    return false;
 }
 
-/* One -httpsaltdomain=NAME: refuse a name that cannot name a host, create
- * its <datadir>/ssl/NAME directory, hand the name's certificate pair to the
- * watcher, and say which certificate the name is served from. */
 static void boot_https_setup_alt_domain_cert(struct boot_svc_ctx *svc,
                                              const char *alt,
                                              const char *handoff_path)
@@ -389,15 +384,6 @@ static void boot_https_setup_alt_domain_cert(struct boot_svc_ctx *svc,
     }
 }
 
-/* ADDITIONAL names on this same listener (-httpsaltdomain=NAME), each
- * with its own certificate selected by TLS SNI. The pair for a name
- * lives in <datadir>/ssl/NAME/fullchain.pem and .../privkey.pem (the same
- * filenames `z23-acme` writes). Watched, never required: a name
- * without an issued certificate is not served from its own certificate
- * yet, and does not affect other names.
- *
- * The directory is created here, like <datadir>/ssl, so the certificate
- * worker need not make it. */
 static void boot_https_watch_alt_domain_certs(struct boot_svc_ctx *svc,
                                               const char *handoff_path)
 {
@@ -409,9 +395,6 @@ static void boot_https_watch_alt_domain_certs(struct boot_svc_ctx *svc,
     }
 }
 
-/* Start the listener when the node is near tip; during IBD leave a deferred
- * start armed so the explorer comes up without a restart once the chain is
- * close enough to the tip. */
 static void boot_https_explorer_listen_or_defer(struct boot_svc_ctx *svc,
                                                 const char *serve_cert,
                                                 const char *serve_key,
@@ -475,9 +458,11 @@ static bool boot_https_explorer_start(void *ctx)
      * cert the server presents that cert regardless of SNI. */
     const char *https_domain = svc->app_ctx->https_domain;
 
+    /* Whichever pair is chosen below must be readable before a listener is
+     * started; the self-signed pair is the fallback. */
     const char *serve_cert;
     const char *serve_key;
-    if (!boot_https_select_serve_pair(svc, cert_path, key_path,
+    if (boot_https_serve_pair_missing(svc, cert_path, key_path,
                                       placeholder_cert, placeholder_key,
                                       handoff_path, https_domain,
                                       &serve_cert, &serve_key))
@@ -492,6 +477,15 @@ static bool boot_https_explorer_start(void *ctx)
      * the start path records the watched pair's identity. */
     https_server_watch_certificate(cert_path, key_path);
 
+    /* ADDITIONAL names on this same listener (-httpsaltdomain=NAME), each
+     * with its own certificate selected by TLS SNI. The pair for a name
+     * lives in <datadir>/ssl/NAME/fullchain.pem and .../privkey.pem (the same
+     * filenames `z23-acme` writes). Watched, never required: a name
+     * without an issued certificate is not served from its own certificate
+     * yet, and does not affect other names.
+     *
+     * The directory is created here, like <datadir>/ssl, so the certificate
+     * worker need not make it. */
     boot_https_watch_alt_domain_certs(svc, handoff_path);
 
     boot_https_explorer_listen_or_defer(svc, serve_cert, serve_key,
