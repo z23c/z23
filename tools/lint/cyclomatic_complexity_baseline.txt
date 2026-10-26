@@ -2024,7 +2024,6 @@ tests/harness/src/test_peer_memory.c:test_peer_memory_platform_arm:107
 tests/harness/src/test_peer_snapshot_conditions.c:test_peer_snapshot_conditions:54
 tests/harness/src/test_peers_projection.c:t_payload_roundtrip:28
 tests/harness/src/test_phgr13_fix.c:test_phgr13_fix:23
-tests/harness/src/test_platform_toolchain.c:test_platform_toolchain:22
 tests/harness/src/test_policy.c:test_policy:50
 tests/harness/src/test_primitives.c:test_primitives:77
 tests/harness/src/test_process_headers_adversarial.c:test_process_headers_adversarial:55
