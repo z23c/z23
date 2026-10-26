@@ -313,6 +313,138 @@ done:
     return matches;
 }
 
+/* What mv_prepare_possession_verification() decided. */
+enum mv_possession_preflight {
+    MV_POSSESSION_PREFLIGHT_RUN,  /* fingerprints allocated; run both passes */
+    MV_POSSESSION_PREFLIGHT_STOP, /* manifest state is already final */
+};
+
+/* Zero the caller's running totals, re-check the manifest's own root
+ * evidence, and allocate the fingerprint table the two passes fill. Every
+ * STOP path but a null manifest records its verification_gap here. */
+static enum mv_possession_preflight mv_prepare_possession_verification(
+    const char *zcode_dir, struct mv_manifest_read *manifest,
+    struct mv_chunk_fingerprint **fingerprints_out,
+    uint64_t *bytes_used, uint32_t *operations_used)
+{
+    struct mv_chunk_fingerprint *fingerprints;
+
+    if (bytes_used)
+        *bytes_used = 0;
+    if (operations_used)
+        *operations_used = 0;
+    if (!manifest)
+        return MV_POSSESSION_PREFLIGHT_STOP;
+    manifest->chunks_present = 0;
+    manifest->chunks_verified = 0;
+    manifest->bytes_verified = 0;
+    manifest->verification_complete = false;
+    if (!manifest->manifest_root_verified) {
+        mv_verification_gap(manifest, "manifest_root_mismatch");
+        return MV_POSSESSION_PREFLIGHT_STOP;
+    }
+    manifest->verification_gap[0] = '\0';
+    if (!zcode_dir) {
+        mv_verification_gap(manifest, "store_unavailable");
+        return MV_POSSESSION_PREFLIGHT_STOP;
+    }
+    if (manifest->chunk_total == 0) {
+        manifest->verification_complete = true;
+        return MV_POSSESSION_PREFLIGHT_STOP;
+    }
+    fingerprints = zcl_calloc(manifest->chunk_total,
+                              sizeof(*fingerprints),
+                              "mv_chunk_fingerprints");
+    if (!fingerprints) {
+        mv_verification_gap(manifest, "allocation_failed");
+        return MV_POSSESSION_PREFLIGHT_STOP;
+    }
+    *fingerprints_out = fingerprints;
+    return MV_POSSESSION_PREFLIGHT_RUN;
+}
+
+/* First pass over one chunk coordinate: budget it, open its CAS object,
+ * read and hash it, and file the fingerprint the second pass re-checks.
+ * Returns NULL when the coordinate verifies; any other return is the
+ * reason to hand to mv_verification_gap(), with every resource already
+ * released. */
+static const char *mv_verify_chunk_coordinate(
+    const char *zcode_dir, const struct vcs_package_file *file,
+    uint32_t chunk_index, uint64_t byte_budget, uint32_t operation_budget,
+    uint64_t *used_bytes, uint32_t *used_operations,
+    struct mv_chunk_fingerprint *fingerprint,
+    struct mv_manifest_read *manifest)
+{
+    const uint8_t *hash = file->chunk_hashes + (size_t)chunk_index * 32u;
+    size_t expected = mv_expected_chunk(file, chunk_index);
+    char path[MV_PATH_MAX];
+    struct platform_positioned_file file_handle;
+    struct platform_positioned_file_snapshot before, after;
+    uint8_t *bytes = NULL;
+
+    if (*used_operations >= operation_budget)
+        return "operation_budget_exhausted";
+    if ((uint64_t)expected > byte_budget - *used_bytes)
+        return "byte_budget_exhausted";
+    (*used_operations)++;
+    if (!mv_cas_path(zcode_dir, hash, path))
+        return "cas_path_invalid";
+    platform_positioned_file_init(&file_handle);
+    if (!platform_positioned_file_open_beneath(
+            &file_handle, zcode_dir, path)) {
+        /* The refusal above is the fail-closed decision and it is
+         * already taken on the handle; this second, pathname-based
+         * look only NAMES it. open_beneath returns one bool for four
+         * different facts, and reporting a planted symlink or a
+         * directory as "chunk_missing" tells an operator to
+         * re-download when what actually happened is that something
+         * was substituted at the CAS coordinate. mv_read_file()
+         * above answers a coarser question -- absent or invalid --
+         * so it keeps only two of these four facts; this path needs
+         * all four. A race here can only mislabel a refusal that
+         * stands regardless. */
+        return mv_chunk_refusal_gap(zcode_dir, path);
+    }
+    if (!platform_positioned_file_snapshot(&file_handle, &before)) {
+        platform_positioned_file_close(&file_handle);
+        return "chunk_stat_failed";
+    }
+    if (before.size != (uint64_t)expected) {
+        platform_positioned_file_close(&file_handle);
+        return "chunk_length_mismatch";
+    }
+    manifest->chunks_present++;
+    bytes = zcl_malloc(expected, "mv_verify_chunk");
+    if (!bytes) {
+        platform_positioned_file_close(&file_handle);
+        return "allocation_failed";
+    }
+    if (!mv_read_exact(&file_handle, bytes, expected)) {
+        free(bytes);
+        platform_positioned_file_close(&file_handle);
+        *used_bytes += expected;
+        return "chunk_read_failed";
+    }
+    *used_bytes += expected;
+    if (!platform_positioned_file_snapshot(&file_handle, &after) ||
+        !mv_snapshot_equal(&before, &after)) {
+        free(bytes);
+        platform_positioned_file_close(&file_handle);
+        return "chunk_mutated_during_verification";
+    }
+    platform_positioned_file_close(&file_handle);
+    if (!vcs_package_verify_chunk(file, chunk_index, bytes, expected)) {
+        free(bytes);
+        return "chunk_hash_mismatch";
+    }
+    free(bytes);
+    fingerprint->snapshot = after;
+    memcpy(fingerprint->hash, hash, 32);
+    manifest->chunks_verified++;
+    manifest->bytes_verified += expected;
+    return NULL;
+}
+
 static void mv_manifest_verify_possession_impl(
     const char *zcode_dir, struct mv_manifest_read *manifest,
     uint64_t byte_budget, uint32_t operation_budget,
@@ -322,127 +454,29 @@ static void mv_manifest_verify_possession_impl(
     uint64_t *bytes_used, uint32_t *operations_used)
 {
     struct mv_chunk_fingerprint *fingerprints = NULL;
+    enum mv_possession_preflight preflight;
     uint32_t coordinate = 0;
     uint64_t used_bytes = 0;
     uint32_t used_operations = 0;
 
-    if (bytes_used)
-        *bytes_used = 0;
-    if (operations_used)
-        *operations_used = 0;
-    if (!manifest)
+    preflight = mv_prepare_possession_verification(
+        zcode_dir, manifest, &fingerprints, bytes_used, operations_used);
+    if (preflight != MV_POSSESSION_PREFLIGHT_RUN)
         return;
-    manifest->chunks_present = 0;
-    manifest->chunks_verified = 0;
-    manifest->bytes_verified = 0;
-    manifest->verification_complete = false;
-    if (!manifest->manifest_root_verified) {
-        mv_verification_gap(manifest, "manifest_root_mismatch");
-        return;
-    }
-    manifest->verification_gap[0] = '\0';
-    if (!zcode_dir) {
-        mv_verification_gap(manifest, "store_unavailable");
-        return;
-    }
-    if (manifest->chunk_total == 0) {
-        manifest->verification_complete = true;
-        return;
-    }
-    fingerprints = zcl_calloc(manifest->chunk_total,
-                              sizeof(*fingerprints),
-                              "mv_chunk_fingerprints");
-    if (!fingerprints) {
-        mv_verification_gap(manifest, "allocation_failed");
-        return;
-    }
 
     for (size_t i = 0; i < manifest->manifest.count; i++) {
         const struct vcs_package_file *file = &manifest->manifest.files[i];
 
         for (uint32_t c = 0; c < file->chunk_count; c++, coordinate++) {
-            const uint8_t *hash = file->chunk_hashes + (size_t)c * 32u;
-            size_t expected = mv_expected_chunk(file, c);
-            char path[MV_PATH_MAX];
-            struct platform_positioned_file file_handle;
-            struct platform_positioned_file_snapshot before, after;
-            uint8_t *bytes = NULL;
+            const char *gap = mv_verify_chunk_coordinate(
+                zcode_dir, file, c, byte_budget, operation_budget,
+                &used_bytes, &used_operations, &fingerprints[coordinate],
+                manifest);
 
-            if (used_operations >= operation_budget) {
-                mv_verification_gap(manifest, "operation_budget_exhausted");
+            if (gap) {
+                mv_verification_gap(manifest, gap);
                 goto done;
             }
-            if ((uint64_t)expected > byte_budget - used_bytes) {
-                mv_verification_gap(manifest, "byte_budget_exhausted");
-                goto done;
-            }
-            used_operations++;
-            if (!mv_cas_path(zcode_dir, hash, path)) {
-                mv_verification_gap(manifest, "cas_path_invalid");
-                goto done;
-            }
-            platform_positioned_file_init(&file_handle);
-            if (!platform_positioned_file_open_beneath(
-                    &file_handle, zcode_dir, path)) {
-                /* The refusal above is the fail-closed decision and it is
-                 * already taken on the handle; this second, pathname-based
-                 * look only NAMES it. open_beneath returns one bool for four
-                 * different facts, and reporting a planted symlink or a
-                 * directory as "chunk_missing" tells an operator to
-                 * re-download when what actually happened is that something
-                 * was substituted at the CAS coordinate. mv_read_file()
-                 * above answers a coarser question -- absent or invalid --
-                 * so it keeps only two of these four facts; this path needs
-                 * all four. A race here can only mislabel a refusal that
-                 * stands regardless. */
-                mv_verification_gap(manifest,
-                                    mv_chunk_refusal_gap(zcode_dir, path));
-                goto done;
-            }
-            if (!platform_positioned_file_snapshot(&file_handle, &before)) {
-                platform_positioned_file_close(&file_handle);
-                mv_verification_gap(manifest, "chunk_stat_failed");
-                goto done;
-            }
-            if (before.size != (uint64_t)expected) {
-                platform_positioned_file_close(&file_handle);
-                mv_verification_gap(manifest, "chunk_length_mismatch");
-                goto done;
-            }
-            manifest->chunks_present++;
-            bytes = zcl_malloc(expected, "mv_verify_chunk");
-            if (!bytes) {
-                platform_positioned_file_close(&file_handle);
-                mv_verification_gap(manifest, "allocation_failed");
-                goto done;
-            }
-            if (!mv_read_exact(&file_handle, bytes, expected)) {
-                free(bytes);
-                platform_positioned_file_close(&file_handle);
-                used_bytes += expected;
-                mv_verification_gap(manifest, "chunk_read_failed");
-                goto done;
-            }
-            used_bytes += expected;
-            if (!platform_positioned_file_snapshot(&file_handle, &after) ||
-                !mv_snapshot_equal(&before, &after)) {
-                free(bytes);
-                platform_positioned_file_close(&file_handle);
-                mv_verification_gap(manifest,
-                                    "chunk_mutated_during_verification");
-                goto done;
-            }
-            platform_positioned_file_close(&file_handle);
-            if (!vcs_package_verify_chunk(file, c, bytes, expected)) {
-                free(bytes);
-                mv_verification_gap(manifest, "chunk_hash_mismatch");
-                goto done;
-            }
-            free(bytes);
-            fingerprints[coordinate].snapshot = after;
-            memcpy(fingerprints[coordinate].hash, hash, 32);
-            manifest->chunks_verified++;
-            manifest->bytes_verified += expected;
 #ifdef ZCL_TESTING
             if (hook)
                 hook(hook_context, manifest->chunks_verified);
@@ -555,41 +589,34 @@ static int mv_name_cmp(const void *a, const void *b)
     return strcmp((const char *)a, (const char *)b);
 }
 
-bool mv_manifest_names(const char *zcode_dir, char (*out)[65],
-                       size_t out_cap, size_t *written_out,
-                       size_t *total_out, bool *truncated_out)
+/* Zero the caller's outputs, then say whether the request can be served:
+ * a store directory and every output pointer must be given, and capacity
+ * may only be requested when there is a buffer to fill. */
+static bool mv_names_prepare_scan(const char *zcode_dir, char (*out)[65],
+                                  size_t out_cap, size_t *written_out,
+                                  size_t *total_out, bool *truncated_out)
 {
-    char path[MV_PATH_MAX];
-    char (*names)[65];
-    size_t seen = 0;
-    size_t written;
-    bool truncated = false;
-    DIR *dir;
-    struct dirent *ent;
-    int n;
-
     if (written_out)
         *written_out = 0;
     if (total_out)
         *total_out = 0;
     if (truncated_out)
         *truncated_out = false;
-    if (!zcode_dir || !written_out || !total_out || !truncated_out ||
-        (!out && out_cap > 0))
-        return false;
+    return zcode_dir && written_out && total_out && truncated_out &&
+        (out || out_cap == 0);
+}
 
-    n = snprintf(path, sizeof(path), "%s/manifests", zcode_dir);
-    if (n < 0 || (size_t)n >= sizeof(path))
-        return false;
-    dir = opendir(path);
-    if (!dir)
-        return errno == ENOENT; /* no store yet: honestly empty */
+/* Collect manifest names from an open directory stream, keeping at most
+ * MV_MANIFEST_SCAN_MAX of them; entries that are not lowercase hex roots
+ * are skipped. Leaves errno exactly as the final readdir() left it, so the
+ * caller decides whether the scan failed. */
+static void mv_scan_manifest_names(DIR *dir, char (*names)[65],
+                                   size_t *seen_out, bool *truncated_out)
+{
+    struct dirent *ent;
+    size_t seen = 0;
+    bool truncated = false;
 
-    names = zcl_malloc(MV_MANIFEST_SCAN_MAX * sizeof(*names), "mv_names");
-    if (!names) {
-        closedir(dir);
-        LOG_FAIL(MV_LOG, "manifest name buffer for %s", path);
-    }
     errno = 0;
     while ((ent = readdir(dir)) != NULL) {
         uint8_t scratch[32];
@@ -604,6 +631,41 @@ bool mv_manifest_names(const char *zcode_dir, char (*out)[65],
         names[seen][64] = '\0';
         seen++;
     }
+    *seen_out = seen;
+    *truncated_out = truncated;
+}
+
+bool mv_manifest_names(const char *zcode_dir, char (*out)[65],
+                       size_t out_cap, size_t *written_out,
+                       size_t *total_out, bool *truncated_out)
+{
+    char path[MV_PATH_MAX];
+    char (*names)[65];
+    size_t seen = 0;
+    size_t written;
+    bool truncated = false;
+    bool ready;
+    DIR *dir;
+    int n;
+
+    ready = mv_names_prepare_scan(zcode_dir, out, out_cap, written_out,
+                                  total_out, truncated_out);
+    if (!ready)
+        return false;
+
+    n = snprintf(path, sizeof(path), "%s/manifests", zcode_dir);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false;
+    dir = opendir(path);
+    if (!dir)
+        return errno == ENOENT; /* no store yet: honestly empty */
+
+    names = zcl_malloc(MV_MANIFEST_SCAN_MAX * sizeof(*names), "mv_names");
+    if (!names) {
+        closedir(dir);
+        LOG_FAIL(MV_LOG, "manifest name buffer for %s", path);
+    }
+    mv_scan_manifest_names(dir, names, &seen, &truncated);
     if (errno != 0) {
         closedir(dir);
         free(names);

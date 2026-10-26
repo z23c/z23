@@ -60,8 +60,6 @@ contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21
 contexts/commons/modules/commons_demo/src/demo.c:commons_demo_render:20
 contexts/commons/modules/metaverse/src/character_sheet_text.c:character_seed_format:25
 contexts/commons/modules/metaverse/src/character_sheet_text.c:character_seed_parse:24
-contexts/commons/modules/metaverse/src/manifest_read.c:mv_manifest_names:21
-contexts/commons/modules/metaverse/src/manifest_read.c:mv_manifest_verify_possession_impl:27
 contexts/commons/modules/vcs/src/build_execution_observation.c:vcs_build_execution_observation_v1_valid:26
 contexts/commons/modules/vcs/src/fastobj.c:vcs_fastobj_sidecar_verify:28
 contexts/commons/modules/vcs/src/fastobj_carrier.c:fc_carrier_apply:29
