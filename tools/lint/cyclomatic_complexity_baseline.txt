@@ -899,9 +899,6 @@ engine/modules/storage/src/coins_ram.c:coins_ram_get_coins:24
 engine/modules/storage/src/coins_ram.c:coins_ram_init:18
 engine/modules/storage/src/coins_ram.c:coins_ram_reconcile_boot:33
 engine/modules/storage/src/coins_ram.c:coins_ram_snapshot_write:41
-engine/modules/storage/src/coins_record_codec.c:coins_record_decode:33
-engine/modules/storage/src/coins_record_codec.c:coins_record_decode_status_name:18
-engine/modules/storage/src/coins_record_codec.c:coins_record_encode:26
 engine/modules/storage/src/coins_view_sqlite.c:coins_reconcile_stale_anchor:16
 engine/modules/storage/src/coins_view_sqlite.c:coins_rewind_above_tip:20
 engine/modules/storage/src/coins_view_sqlite.c:coins_view_sqlite_batch_write:59
