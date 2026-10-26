@@ -39,35 +39,43 @@ static struct zcl_result observation_error(
     return ZCL_ERR(code, "%s", out->reason);
 }
 
-static bool decimal_zat(const char *text, int64_t *out)
+static bool decimal_zat_scan_whole(const char **p, uint64_t *whole)
 {
-    if (!text || !out || text[0] < '0' || text[0] > '9')
-        return false;
-
-    uint64_t whole = 0;
-    const char *p = text;
-    while (*p >= '0' && *p <= '9') {
-        uint64_t digit = (uint64_t)(*p++ - '0');
-        if (whole > (UINT64_MAX - digit) / 10u)
+    uint64_t value = 0;
+    while (**p >= '0' && **p <= '9') {
+        uint64_t digit = (uint64_t)(*(*p)++ - '0');
+        if (value > (UINT64_MAX - digit) / 10u)
             return false;
-        whole = whole * 10u + digit;
+        value = value * 10u + digit;
     }
+    *whole = value;
+    return true;
+}
 
-    uint64_t fraction = 0;
-    unsigned digits = 0;
-    if (*p == '.') {
-        p++;
-        while (*p >= '0' && *p <= '9') {
-            if (digits == 8u)
+static bool decimal_zat_scan_fraction(const char **p, uint64_t *fraction,
+                                      unsigned *digits)
+{
+    uint64_t value = 0;
+    unsigned count = 0;
+    if (**p == '.') {
+        (*p)++;
+        while (**p >= '0' && **p <= '9') {
+            if (count == 8u)
                 return false;
-            fraction = fraction * 10u + (uint64_t)(*p++ - '0');
-            digits++;
+            value = value * 10u + (uint64_t)(*(*p)++ - '0');
+            count++;
         }
-        if (digits == 0u)
+        if (count == 0u)
             return false;
     }
-    if (*p != '\0')
-        return false;
+    *fraction = value;
+    *digits = count;
+    return true;
+}
+
+static bool decimal_zat_scale_and_store(uint64_t whole, uint64_t fraction,
+                                        unsigned digits, int64_t *out)
+{
     while (digits++ < 8u)
         fraction *= 10u;
 
@@ -76,6 +84,35 @@ static bool decimal_zat(const char *text, int64_t *out)
         return false;
     *out = (int64_t)(whole * (uint64_t)ZATOSHI_PER_ZCL + fraction);
     return true;
+}
+
+static bool decimal_zat(const char *text, int64_t *out)
+{
+    if (!text || !out || text[0] < '0' || text[0] > '9')
+        return false;
+
+    uint64_t whole = 0;
+    uint64_t fraction = 0;
+    unsigned digits = 0;
+    const char *p = text;
+    return decimal_zat_scan_whole(&p, &whole) &&
+           decimal_zat_scan_fraction(&p, &fraction, &digits) &&
+           *p == '\0' &&
+           decimal_zat_scale_and_store(whole, fraction, digits, out);
+}
+
+static bool parse_balance_amounts(const struct json_value *result,
+                                  struct legacy_balance_observation *out)
+{
+    const struct json_value *transparent = json_get(result, "transparent");
+    const struct json_value *shielded = json_get(result, "private");
+    const struct json_value *total = json_get(result, "total");
+    return transparent && transparent->type == JSON_STR &&
+           shielded && shielded->type == JSON_STR &&
+           total && total->type == JSON_STR &&
+           decimal_zat(json_get_str(transparent), &out->transparent_zat) &&
+           decimal_zat(json_get_str(shielded), &out->shielded_zat) &&
+           decimal_zat(json_get_str(total), &out->total_zat);
 }
 
 static struct zcl_result parse_result_object(
@@ -88,15 +125,7 @@ static struct zcl_result parse_result_object(
         return observation_error(out, -2,
                                  "z_gettotalbalance returned an RPC error");
 
-    const struct json_value *transparent = json_get(result, "transparent");
-    const struct json_value *shielded = json_get(result, "private");
-    const struct json_value *total = json_get(result, "total");
-    if (!transparent || transparent->type != JSON_STR ||
-        !shielded || shielded->type != JSON_STR ||
-        !total || total->type != JSON_STR ||
-        !decimal_zat(json_get_str(transparent), &out->transparent_zat) ||
-        !decimal_zat(json_get_str(shielded), &out->shielded_zat) ||
-        !decimal_zat(json_get_str(total), &out->total_zat))
+    if (!parse_balance_amounts(result, out))
         return observation_error(out, -2,
                                  "z_gettotalbalance amounts are invalid");
 
