@@ -626,7 +626,7 @@ static bool sb_write_atomic(const char *path, const uint8_t *data, size_t len)
     }
 
     if (!sb_write_staging_file(&staging, data, len, tmp, installed))
-        return false;
+        return false; // raw-return-ok:refusal travels in errno; sb_write_atomic's caller logs it (collect LOG_WARN)
     if (!platform_private_parent_flush(parent)) {
         sb_errno_default_eio();
         return false;

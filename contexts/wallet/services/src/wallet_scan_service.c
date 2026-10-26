@@ -231,7 +231,7 @@ static bool wallet_scan_store_wtx_rows(struct node_db *ndb,
         dt.from_me = t->from_me;
         dt.fee = t->fee;
         if (!db_wallet_tx_save(ndb, &dt))
-            return false;
+            return false; // raw-return-ok:caller wallet_scan_store_results logs the wallet_tx save failure
     }
     return true;
 }
