@@ -626,6 +626,23 @@ static bool lu_seed_rows(struct node_db *ndb)
     return ok;
 }
 
+/* Every seeded row appears exactly once with its own amount. */
+static bool lu_rows_match_seed(const struct json_value *result)
+{
+    bool seen[LU_ROWS] = {false};
+    for (size_t i = 0; i < json_size(result); i++) {
+        const struct json_value *e = json_at(result, i);
+        int64_t vout = json_get_int(json_get(e, "vout"));
+        if (vout < 0 || vout >= LU_ROWS || seen[vout])
+            return false;
+        seen[vout] = true;
+        double sats = json_get_real(json_get(e, "amount")) * 1e8;
+        if ((int64_t)(sats + 0.5) != 1000 + vout)
+            return false;
+    }
+    return true;
+}
+
 /* One listunspent call; minconf 0 means "no argument" (all rows eligible). */
 static bool lu_call(struct rpc_table *tbl, int minconf, size_t want_rows)
 {
@@ -633,12 +650,14 @@ static bool lu_call(struct rpc_table *tbl, int minconf, size_t want_rows)
     json_init(&params); json_set_array(&params);
     json_init(&arg);
     json_init(&result);
+    bool ok = true;
     if (minconf > 0) {
         json_set_int(&arg, minconf);
-        (void)json_push_back(&params, &arg);
+        ok = json_push_back(&params, &arg);
     }
-    bool ok = rpc_table_execute(tbl, "listunspent", &params, &result) &&
-              json_size(&result) == want_rows;
+    ok = ok && rpc_table_execute(tbl, "listunspent", &params, &result) &&
+         json_size(&result) == want_rows &&
+         (want_rows == 0 || lu_rows_match_seed(&result));
     json_free(&params); json_free(&arg); json_free(&result);
     return ok;
 }
