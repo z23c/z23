@@ -131,7 +131,6 @@ static void msg_onchain_compose_sendmany(struct json_value *zparams,
     json_free(&jarr);
 }
 
-/* Success path: persist the outbound copy, free the sub-result and reply. */
 static bool msg_onchain_store_and_report(const char *to_addr, const char *body,
                                          struct json_value *sub,
                                          struct json_value *result)
