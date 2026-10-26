@@ -438,19 +438,8 @@ bool syncdiag_seed_log_verdict(sqlite3 *db, const char *table,
     return ok;
 }
 
-bool syncdiag_seed_anchorstatus_progress(const char *dir)
+static bool syncdiag_seed_anchorstatus_tables(sqlite3 *db)
 {
-    char path[512];
-    sqlite3 *db = NULL;
-    if (!dir ||
-        snprintf(path, sizeof(path), "%s/progress.kv", dir) >=
-            (int)sizeof(path))
-        return false;
-    if (sqlite3_open(path, &db) != SQLITE_OK) {
-        sqlite3_close(db);
-        return false;
-    }
-
     bool ok = true;
     ok = ok && syncdiag_exec_sql(db,
         "CREATE TABLE IF NOT EXISTS stage_cursor("
@@ -468,7 +457,11 @@ bool syncdiag_seed_anchorstatus_progress(const char *dir)
         ok = syncdiag_create_height_log(db, logs[i]);
     ok = ok && syncdiag_exec_sql(
         db, "ALTER TABLE utxo_apply_log ADD COLUMN applied_at INTEGER");
+    return ok;
+}
 
+static bool syncdiag_seed_anchorstatus_cursors(sqlite3 *db, bool ok)
+{
     ok = ok && syncdiag_seed_cursor(db, "header_admit", 2791000);
     ok = ok && syncdiag_seed_cursor(db, "validate_headers", 2791000);
     ok = ok && syncdiag_seed_cursor(db, "body_fetch", 2791000);
@@ -477,7 +470,11 @@ bool syncdiag_seed_anchorstatus_progress(const char *dir)
     ok = ok && syncdiag_seed_cursor(db, "proof_validate", 2791000);
     ok = ok && syncdiag_seed_cursor(db, "utxo_apply", 164000);
     ok = ok && syncdiag_seed_cursor(db, "tip_finalize", 164000);
+    return ok;
+}
 
+static bool syncdiag_seed_anchorstatus_logs(sqlite3 *db, bool ok)
+{
     ok = ok && syncdiag_seed_log_point(db, "header_admit_log", 0);
     ok = ok && syncdiag_seed_log_point(db, "header_admit_log", 3166384);
     ok = ok && syncdiag_seed_log_point(db, "proof_validate_log", 0);
@@ -494,7 +491,11 @@ bool syncdiag_seed_anchorstatus_progress(const char *dir)
     ok = ok && syncdiag_exec_sql(
         db, "UPDATE utxo_apply_log SET applied_at="
             "CASE height WHEN 0 THEN 1000 WHEN 163999 THEN 1060 END");
+    return ok;
+}
 
+static bool syncdiag_seed_anchorstatus_meta(sqlite3 *db, bool ok)
+{
     const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
     uint8_t marker[48] = {0};
     memcpy(marker, "ZAM1", 4);
@@ -513,6 +514,26 @@ bool syncdiag_seed_anchorstatus_progress(const char *dir)
                                        height_blob, sizeof(height_blob));
     const uint8_t one = 1;
     ok = ok && syncdiag_seed_meta_blob(db, "refold_in_progress", &one, 1);
+    return ok;
+}
+
+bool syncdiag_seed_anchorstatus_progress(const char *dir)
+{
+    char path[512];
+    sqlite3 *db = NULL;
+    if (!dir ||
+        snprintf(path, sizeof(path), "%s/progress.kv", dir) >=
+            (int)sizeof(path))
+        return false;
+    if (sqlite3_open(path, &db) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+
+    bool ok = syncdiag_seed_anchorstatus_tables(db);
+    ok = syncdiag_seed_anchorstatus_cursors(db, ok);
+    ok = syncdiag_seed_anchorstatus_logs(db, ok);
+    ok = syncdiag_seed_anchorstatus_meta(db, ok);
 
     sqlite3_close(db);
     return ok;
@@ -554,15 +575,8 @@ bool syncdiag_seed_log_rows(sqlite3 *db, const char *insert_sql,
     return true;
 }
 
-bool syncdiag_seed_lookahead_reducer_progress(int served_height)
+static bool syncdiag_seed_lookahead_tables(sqlite3 *db, bool ok)
 {
-    sqlite3 *db = progress_store_db();
-    if (!db || served_height < 0)
-        return false;
-
-    int next_height = served_height + 1;
-    bool ok = true;
-    progress_store_tx_lock();
     ok = ok && syncdiag_exec_sql(db,
         "CREATE TABLE IF NOT EXISTS validate_headers_log ("
         "height INTEGER PRIMARY KEY, hash BLOB, ok INTEGER NOT NULL)");
@@ -589,7 +603,12 @@ bool syncdiag_seed_lookahead_reducer_progress(int served_height)
         "work_delta_low INTEGER NOT NULL, utxo_size_after INTEGER NOT NULL, "
         "reorg_depth INTEGER NOT NULL, finalized_at INTEGER NOT NULL, "
         "tip_hash BLOB)");
+    return ok;
+}
 
+static bool syncdiag_seed_lookahead_rows(sqlite3 *db, int served_height,
+                                         bool ok)
+{
     ok = ok && syncdiag_seed_log_rows(db,
         "INSERT OR REPLACE INTO validate_headers_log(height, hash, ok) "
         "VALUES(?, zeroblob(32), 1)",
@@ -618,6 +637,20 @@ bool syncdiag_seed_lookahead_reducer_progress(int served_height)
         "utxo_size_after, reorg_depth, finalized_at, tip_hash) "
         "VALUES(?, 'finalized', 1, 0, 0, 0, 0, 1, zeroblob(32))",
         served_height);
+    return ok;
+}
+
+bool syncdiag_seed_lookahead_reducer_progress(int served_height)
+{
+    sqlite3 *db = progress_store_db();
+    if (!db || served_height < 0)
+        return false;
+
+    int next_height = served_height + 1;
+    bool ok = true;
+    progress_store_tx_lock();
+    ok = syncdiag_seed_lookahead_tables(db, ok);
+    ok = syncdiag_seed_lookahead_rows(db, served_height, ok);
 
     ok = ok && syncdiag_seed_cursor(db, "validate_headers", next_height);
     ok = ok && syncdiag_seed_cursor(db, "script_validate", next_height);
