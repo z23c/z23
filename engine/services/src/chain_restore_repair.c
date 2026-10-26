@@ -136,6 +136,29 @@ static bool chain_restore_active_slot_is_canonical(
     return slot->pprev == active_chain_at(c, h - 1);
 }
 
+static void chain_restore_copy_index_hash_hex(char out[65],
+                                              const struct block_index *bi)
+{
+    if (bi && bi->phashBlock)
+        uint256_get_hex(bi->phashBlock, out);
+}
+
+static struct block_index *chain_restore_load_mismatch_hashes(
+    const struct active_chain *c,
+    int h,
+    const struct block_index *at,
+    char at_hash[65],
+    char pprev_hash[65],
+    char prev_slot_hash[65])
+{
+    struct block_index *prev_slot =
+        h > 0 ? active_chain_at(c, h - 1) : NULL;
+    chain_restore_copy_index_hash_hex(at_hash, at);
+    chain_restore_copy_index_hash_hex(pprev_hash, at ? at->pprev : NULL);
+    chain_restore_copy_index_hash_hex(prev_slot_hash, prev_slot);
+    return prev_slot;
+}
+
 static void chain_restore_log_first_mismatch(
     const struct active_chain *c,
     int h)
@@ -144,16 +167,11 @@ static void chain_restore_log_first_mismatch(
         return;
 
     struct block_index *at = active_chain_at(c, h);
-    struct block_index *prev_slot = h > 0 ? active_chain_at(c, h - 1) : NULL;
     char at_hash[65] = {0};
     char pprev_hash[65] = {0};
     char prev_slot_hash[65] = {0};
-    if (at && at->phashBlock)
-        uint256_get_hex(at->phashBlock, at_hash);
-    if (at && at->pprev && at->pprev->phashBlock)
-        uint256_get_hex(at->pprev->phashBlock, pprev_hash);
-    if (prev_slot && prev_slot->phashBlock)
-        uint256_get_hex(prev_slot->phashBlock, prev_slot_hash);
+    struct block_index *prev_slot = chain_restore_load_mismatch_hashes(
+        c, h, at, at_hash, pprev_hash, prev_slot_hash);
     LOG_WARN("chain", "[chain-integrity] first mismatch detail: h=%d at=%p " "at_h=%d at_hash=%s pprev=%p pprev_h=%d pprev_hash=%s " "prev_slot=%p prev_slot_h=%d prev_slot_hash=%s", h, (void *)at, at ? at->nHeight : -1, at_hash[0] ? at_hash : "<null>", at ? (void *)at->pprev : NULL, (at && at->pprev) ? at->pprev->nHeight : -1, pprev_hash[0] ? pprev_hash : "<null>", (void *)prev_slot, prev_slot ? prev_slot->nHeight : -1, prev_slot_hash[0] ? prev_slot_hash : "<null>");
 }
 
@@ -233,56 +251,89 @@ static bool chain_restore_rebuild_ensure_tip(struct main_state *ms,
     return cr.ok;
 }
 
-int chain_restore_rebuild_active_chain(struct main_state *ms,
-                                       struct block_index *tip,
-                                       const char *datadir)
+/* Tier-2 P2: under a verified-clean binding, drop the datadir so the
+ * disk-backed rebuilds are skipped and only the in-memory pprev walk runs
+ * (integrity check downstream stays the fail-safe). */
+static const char *chain_restore_rebuild_effective_datadir(const char *datadir)
 {
-    if (!ms || !tip || tip->nHeight < 0)
-        return 0;
-
-    /* Tier-2 P2: under a verified-clean binding, drop the datadir so the
-     * disk-backed rebuilds are skipped and only the in-memory pprev walk runs
-     * (integrity check downstream stays the fail-safe). */
     if (chain_restore_trust_index_fastpath())
-        datadir = NULL;
+        return NULL;
+    return datadir;
+}
 
-    struct active_chain *c = &ms->chain_active;
-    const int tip_h = tip->nHeight;
+static int chain_restore_rebuild_try_block_files(struct main_state *ms,
+                                                 struct active_chain *c,
+                                                 struct block_index *tip,
+                                                 const char *datadir,
+                                                 int tip_h)
+{
+    int populated = chain_restore_rebuild_active_chain_from_block_files(
+        ms, tip, datadir);
+    if (populated == tip_h + 1)
+        chain_restore_publish_rebuilt_tip(c, tip_h);
+    return populated;
+}
 
-    if (!chain_restore_rebuild_ensure_tip(ms, c, tip))
+static int chain_restore_rebuild_from_disk_sources(struct main_state *ms,
+                                                   struct active_chain *c,
+                                                   struct block_index *tip,
+                                                   const char *datadir,
+                                                   int tip_h)
+{
+    if (!datadir || !datadir[0])
         return 0;
 
-    int populated = 0;
+    int populated = chain_restore_rebuild_active_chain_from_disk(
+        ms, tip, datadir);
+    if (populated != tip_h + 1)
+        return chain_restore_rebuild_try_block_files(
+            ms, c, tip, datadir, tip_h);
 
-    if (datadir && datadir[0]) {
-        populated = chain_restore_rebuild_active_chain_from_disk(ms, tip,
-                                                                datadir);
-        if (populated == tip_h + 1) {
-            chain_restore_publish_rebuilt_tip(c, tip_h);
-            struct chain_integrity_result r;
-            chain_integrity_check_post_restore(&r, ms);
-            if (r.active_chain_mismatches == 0 &&
-                r.tip_window_holes == 0)
-                return populated;
-            populated = chain_restore_rebuild_active_chain_from_block_files(
-                ms, tip, datadir);
-            if (populated == tip_h + 1) {
-                chain_restore_publish_rebuilt_tip(c, tip_h);
-                return populated;
-            }
-        } else {
-            populated = chain_restore_rebuild_active_chain_from_block_files(
-                ms, tip, datadir);
-            if (populated == tip_h + 1) {
-                chain_restore_publish_rebuilt_tip(c, tip_h);
-                return populated;
-            }
-        }
+    chain_restore_publish_rebuilt_tip(c, tip_h);
+    struct chain_integrity_result r;
+    chain_integrity_check_post_restore(&r, ms);
+    if (r.active_chain_mismatches == 0 &&
+        r.tip_window_holes == 0)
+        return populated;
+    return chain_restore_rebuild_try_block_files(ms, c, tip, datadir, tip_h);
+}
+
+static bool chain_restore_rebuild_store_pprev_node(struct active_chain *c,
+                                                   struct block_index *p,
+                                                   const char *datadir,
+                                                   int tip_h,
+                                                   int *deepest)
+{
+    int h = p->nHeight;
+    if (h < 0 || h > tip_h)
+        return false;
+    bool disk_ok = true;
+    if (datadir && datadir[0] &&
+        (p->nStatus & BLOCK_HAVE_DATA) && p->nDataPos != 0)
+        disk_ok = chain_restore_candidate_matches_disk(p, datadir);
+    if (disk_ok) {
+        if (c->chain[h] != p)
+            chain_restore_store_slot(c, h, p);
+    } else if (c->chain[h] == p) {
+        chain_restore_store_slot(c, h, NULL);
     }
+    if (h < *deepest)
+        *deepest = h;
+    return true;
+}
 
-    /* Fast path — walk pprev from tip and slot each ancestor. Covers
-     * the happy case (real chain, pprev intact) in O(tip_h). */
-    int deepest = tip_h + 1;
+/* Fast path — walk pprev from tip and slot each ancestor. Covers
+ * the happy case (real chain, pprev intact) in O(tip_h). */
+static int chain_restore_rebuild_pprev_walk(struct active_chain *c,
+                                            struct block_index *tip,
+                                            const char *datadir,
+                                            int tip_h,
+                                            int populated,
+                                            int *deepest,
+                                            bool *cycled)
+{
+    *deepest = tip_h + 1;
+    *cycled = false;
     int pprev_walk_budget = tip_h + 1;
     /* Shutdown poll per ancestor: with a datadir this walk preads every
      * chain block; an atomic load per step is noise against that and lets
@@ -290,26 +341,172 @@ int chain_restore_rebuild_active_chain(struct main_state *ms,
     for (struct block_index *p = tip;
          p != NULL && !thread_registry_shutdown_requested(); p = p->pprev) {
         if (--pprev_walk_budget < 0) {
-            LOG_WARN("chain_restore",
-                     "[chain-restore] stopped cyclic pprev walk during live boot: "
-                     "tip_h=%d deepest=%d populated=%d",
-                     tip_h, deepest, populated);
+            *cycled = true;
             break;
         }
-        int h = p->nHeight;
-        if (h < 0 || h > tip_h) break;
-        bool disk_ok = true;
-        if (datadir && datadir[0] &&
-            (p->nStatus & BLOCK_HAVE_DATA) && p->nDataPos != 0)
-            disk_ok = chain_restore_candidate_matches_disk(p, datadir);
-        if (disk_ok) {
-            if (c->chain[h] != p) chain_restore_store_slot(c, h, p);
-        } else if (c->chain[h] == p) {
-            chain_restore_store_slot(c, h, NULL);
-        }
-        if (h < deepest) deepest = h;
+        if (!chain_restore_rebuild_store_pprev_node(
+                c, p, datadir, tip_h, deepest))
+            break;
         populated++;
     }
+    return populated;
+}
+
+static void chain_restore_rebuild_skip_from_genesis(struct active_chain *c,
+                                                    int tip_h)
+{
+    for (int h = 1; h <= tip_h; h++) {
+        struct block_index *cur = c->chain[h];
+        if (cur && cur->pprev && cur->pskip == NULL)
+            block_index_build_skip(cur);
+    }
+}
+
+/* Returns 1 to prefer cand, -1 to keep best, 0 when disk does not decide. */
+static int chain_restore_rebuild_disk_tiebreak(const struct block_index *cand,
+                                               const struct block_index *best,
+                                               const char *datadir)
+{
+    if (!datadir || !datadir[0])
+        return 0;
+    bool cand_disk = chain_restore_candidate_matches_disk(cand, datadir);
+    bool best_disk = chain_restore_candidate_matches_disk(best, datadir);
+    if (cand_disk && !best_disk)
+        return 1;
+    if (best_disk && !cand_disk)
+        return -1;
+    return 0;
+}
+
+/* Prefer BLOCK_HAVE_DATA, then highest nChainWork — matches
+ * the tie-break rules so we don't slot a stale
+ * fork over a real ancestor. */
+static bool chain_restore_rebuild_prefer_candidate(const struct block_index *cand,
+                                                   const struct block_index *best,
+                                                   const char *datadir)
+{
+    bool best_data = (best->nStatus & BLOCK_HAVE_DATA) != 0;
+    bool cand_data = (cand->nStatus & BLOCK_HAVE_DATA) != 0;
+    if (cand_data && !best_data)
+        return true;
+    if (best_data && !cand_data)
+        return false;
+    if (cand_data && best_data) {
+        int disk = chain_restore_rebuild_disk_tiebreak(cand, best, datadir);
+        if (disk != 0)
+            return disk > 0;
+    }
+    return arith_uint256_compare(&cand->nChainWork,
+                                 &best->nChainWork) > 0;
+}
+
+static void chain_restore_rebuild_pick_by_height(
+    const struct active_chain *c,
+    const char *datadir,
+    int tip_h,
+    struct block_index **map_indices,
+    size_t map_count,
+    struct block_index **by_height)
+{
+    for (size_t i = 0; i < map_count; i++) {
+        struct block_index *cand = map_indices[i];
+        if (!cand)
+            continue;
+        int h = cand->nHeight;
+        if (h < 0 || h > tip_h)
+            continue;
+        if (chain_restore_active_slot_is_canonical(c, h))
+            continue;
+        if (cand->nStatus & BLOCK_FAILED_MASK)
+            continue;
+
+        struct block_index *best = by_height[h];
+        if (!best ||
+            chain_restore_rebuild_prefer_candidate(cand, best, datadir))
+            by_height[h] = cand;
+    }
+}
+
+static int chain_restore_rebuild_apply_height_slots(struct active_chain *c,
+                                                    int tip_h,
+                                                    struct block_index **by_height,
+                                                    int populated)
+{
+    /* One write_lock hold across the whole no-I/O sweep (vs per-slot):
+     * the lock-free at()/canonical reads stay valid under it. */
+    zcl_mutex_lock(&c->write_lock);
+    for (int h = 0; h <= tip_h; h++) {
+        if (chain_restore_active_slot_is_canonical(c, h))
+            continue;
+        if (by_height[h]) {
+            c->chain[h] = by_height[h];
+            populated++;
+        } else {
+            c->chain[h] = NULL;
+        }
+    }
+    zcl_mutex_unlock(&c->write_lock);
+    return populated;
+}
+
+/* wire pprev + pskip across the rebuilt chain. The anchor
+ * path leaves tip->pprev=NULL and flat-file loads can leave pskip
+ * unpopulated, which forces block_index_get_ancestor to fall back
+ * to O(N) pprev walks (or NULL on the anchor). Walking bottom-up
+ * lets block_index_build_skip reuse each parent's already-built
+ * pskip, keeping this pass O(tip_h · log tip_h) — about 1.7M
+ * operations at live tip (3M), well under a second.
+ *
+ * Only wire pprev when it is currently NULL. Forked entries
+ * promoted into chain_active by the bucketing step may legitimately
+ * point at a different parent — but if we only fill NULLs we can't
+ * stomp on an existing ancestry relationship. Same rule for pskip. */
+static void chain_restore_rebuild_wire_ancestry(struct active_chain *c,
+                                                int tip_h)
+{
+    for (int h = 1; h <= tip_h; h++) {
+        struct block_index *cur = c->chain[h];
+        if (!cur)
+            continue;
+        if (cur->pprev == NULL) {
+            struct block_index *prev = c->chain[h - 1];
+            if (prev)
+                cur->pprev = prev;
+        }
+        if (cur->pskip == NULL && cur->pprev)
+            block_index_build_skip(cur);
+    }
+}
+
+int chain_restore_rebuild_active_chain(struct main_state *ms,
+                                       struct block_index *tip,
+                                       const char *datadir)
+{
+    if (!ms || !tip || tip->nHeight < 0)
+        return 0;
+
+    datadir = chain_restore_rebuild_effective_datadir(datadir);
+
+    struct active_chain *c = &ms->chain_active;
+    const int tip_h = tip->nHeight;
+
+    if (!chain_restore_rebuild_ensure_tip(ms, c, tip))
+        return 0;
+
+    int populated = chain_restore_rebuild_from_disk_sources(
+        ms, c, tip, datadir, tip_h);
+    if (populated == tip_h + 1)
+        return populated;
+
+    int deepest = 0;
+    bool pprev_cycled = false;
+    populated = chain_restore_rebuild_pprev_walk(
+        c, tip, datadir, tip_h, populated, &deepest, &pprev_cycled);
+    if (pprev_cycled)
+        LOG_WARN("chain_restore",
+                 "[chain-restore] stopped cyclic pprev walk during live boot: "
+                 "tip_h=%d deepest=%d populated=%d",
+                 tip_h, deepest, populated);
 
     if (deepest != 0 && thread_registry_shutdown_requested())
         LOG_WARN("chain_restore",
@@ -320,11 +517,7 @@ int chain_restore_rebuild_active_chain(struct main_state *ms,
      * but flat-file loads may still have left pskip empty. Rebuild
      * missing skip pointers bottom-up so ancestor lookups stay O(log N). */
     if (deepest == 0) {
-        for (int h = 1; h <= tip_h; h++) {
-            struct block_index *cur = c->chain[h];
-            if (cur && cur->pprev && cur->pskip == NULL)
-                block_index_build_skip(cur);
-        }
+        chain_restore_rebuild_skip_from_genesis(c, tip_h);
         return populated;
     }
 
@@ -351,78 +544,15 @@ int chain_restore_rebuild_active_chain(struct main_state *ms,
         LOG_RETURN(populated, "chain_restore",
                    "rebuild_active_chain: block-map snapshot failed");
     }
-    for (size_t i = 0; i < map_count; i++) {
-        struct block_index *cand = map_indices[i];
-        if (!cand) continue;
-        int h = cand->nHeight;
-        if (h < 0 || h > tip_h) continue;
-        if (chain_restore_active_slot_is_canonical(c, h))
-            continue;
-        if (cand->nStatus & BLOCK_FAILED_MASK) continue;
-
-        struct block_index *best = by_height[h];
-        if (!best) { by_height[h] = cand; continue; }
-
-        /* Prefer BLOCK_HAVE_DATA, then highest nChainWork — matches
-         * the tie-break rules so we don't slot a stale
-         * fork over a real ancestor. */
-        bool best_data = (best->nStatus & BLOCK_HAVE_DATA) != 0;
-        bool cand_data = (cand->nStatus & BLOCK_HAVE_DATA) != 0;
-        if (cand_data && !best_data) { by_height[h] = cand; continue; }
-        if (best_data && !cand_data) continue;
-
-        if (datadir && datadir[0] && cand_data && best_data) {
-            bool cand_disk = chain_restore_candidate_matches_disk(cand, datadir);
-            bool best_disk = chain_restore_candidate_matches_disk(best, datadir);
-            if (cand_disk && !best_disk) { by_height[h] = cand; continue; }
-            if (best_disk && !cand_disk) continue;
-        }
-
-        if (arith_uint256_compare(&cand->nChainWork,
-                                  &best->nChainWork) > 0)
-            by_height[h] = cand;
-    }
+    chain_restore_rebuild_pick_by_height(
+        c, datadir, tip_h, map_indices, map_count, by_height);
     free(map_indices);
 
-    /* One write_lock hold across the whole no-I/O sweep (vs per-slot):
-     * the lock-free at()/canonical reads stay valid under it. */
-    zcl_mutex_lock(&c->write_lock);
-    for (int h = 0; h <= tip_h; h++) {
-        if (chain_restore_active_slot_is_canonical(c, h))
-            continue;
-        if (by_height[h]) {
-            c->chain[h] = by_height[h];
-            populated++;
-        } else {
-            c->chain[h] = NULL;
-        }
-    }
-    zcl_mutex_unlock(&c->write_lock);
-
+    populated = chain_restore_rebuild_apply_height_slots(
+        c, tip_h, by_height, populated);
     free(by_height);
 
-    /* wire pprev + pskip across the rebuilt chain. The anchor
-     * path leaves tip->pprev=NULL and flat-file loads can leave pskip
-     * unpopulated, which forces block_index_get_ancestor to fall back
-     * to O(N) pprev walks (or NULL on the anchor). Walking bottom-up
-     * lets block_index_build_skip reuse each parent's already-built
-     * pskip, keeping this pass O(tip_h · log tip_h) — about 1.7M
-     * operations at live tip (3M), well under a second.
-     *
-     * Only wire pprev when it is currently NULL. Forked entries
-     * promoted into chain_active by the bucketing step may legitimately
-     * point at a different parent — but if we only fill NULLs we can't
-     * stomp on an existing ancestry relationship. Same rule for pskip. */
-    for (int h = 1; h <= tip_h; h++) {
-        struct block_index *cur = c->chain[h];
-        if (!cur) continue;
-        if (cur->pprev == NULL) {
-            struct block_index *prev = c->chain[h - 1];
-            if (prev) cur->pprev = prev;
-        }
-        if (cur->pskip == NULL && cur->pprev)
-            block_index_build_skip(cur);
-    }
+    chain_restore_rebuild_wire_ancestry(c, tip_h);
 
     populated += chain_restore_repair_active_projection(c, tip_h);
 
@@ -443,6 +573,57 @@ static bool chain_restore_backfill_args_ok(const struct main_state *ms,
                                            const char *datadir)
 {
     return ms && datadir && datadir[0];
+}
+
+static bool chain_restore_backfill_entry_eligible(const struct block_index *p)
+{
+    if (!p)
+        return false;
+    if (p->nBits != 0)
+        return false;
+    if (p->nHeight <= 0)
+        return false;   /* genesis nBits is set elsewhere */
+    if (p->nDataPos == 0)
+        return false;  /* synthetic anchor; no disk data */
+    return (p->nStatus & BLOCK_HAVE_DATA) != 0;
+}
+
+static void chain_restore_backfill_record_read_miss(
+    struct main_state *ms,
+    int tip_h,
+    struct block_index *p,
+    int *read_errors,
+    int *invalidated_off_chain)
+{
+    /* Disk read failed despite BLOCK_HAVE_DATA. The data file
+     * is missing or truncated. If this entry is not on the
+     * active chain, drop BLOCK_HAVE_DATA so the integrity gate
+     * stops flagging it and the download path can re-fetch.
+     * Never touch entries on the active chain — those are
+     * load-bearing for chainwork accounting. */
+    bool on_active = false;
+    if (tip_h >= 0 && p->nHeight <= tip_h) {
+        struct block_index *at = active_chain_at(
+            &ms->chain_active, p->nHeight);
+        if (at == p)
+            on_active = true;
+    }
+    if (!on_active) {
+        p->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
+        (*invalidated_off_chain)++;
+    } else {
+        (*read_errors)++;
+    }
+}
+
+static void chain_restore_backfill_store_header(struct block_index *p,
+                                               const struct block *blk)
+{
+    p->nVersion = blk->header.nVersion;
+    p->hashFinalSaplingRoot = blk->header.hashFinalSaplingRoot;
+    p->nTime = blk->header.nTime;
+    p->nBits = blk->header.nBits;
+    chain_restore_repair_store_hdr(p, &blk->header);
 }
 
 int chain_restore_backfill_nbits_from_disk(struct main_state *ms,
@@ -470,32 +651,13 @@ int chain_restore_backfill_nbits_from_disk(struct main_state *ms,
      * zcl_chain_fix join from hanging on a heavily-corrupt index. */
     while (!thread_registry_shutdown_requested() &&
            block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
-        if (!p) continue;
-        if (p->nBits != 0) continue;
-        if (p->nHeight <= 0) continue;   /* genesis nBits is set elsewhere */
-        if (p->nDataPos == 0) continue;  /* synthetic anchor; no disk data */
-        if (!(p->nStatus & BLOCK_HAVE_DATA)) continue;
+        if (!chain_restore_backfill_entry_eligible(p))
+            continue;
 
         struct block blk;
         if (!read_block_from_disk_index_pread(&blk, p, datadir)) {
-            /* Disk read failed despite BLOCK_HAVE_DATA. The data file
-             * is missing or truncated. If this entry is not on the
-             * active chain, drop BLOCK_HAVE_DATA so the integrity gate
-             * stops flagging it and the download path can re-fetch.
-             * Never touch entries on the active chain — those are
-             * load-bearing for chainwork accounting. */
-            bool on_active = false;
-            if (tip_h >= 0 && p->nHeight <= tip_h) {
-                struct block_index *at = active_chain_at(
-                    &ms->chain_active, p->nHeight);
-                if (at == p) on_active = true;
-            }
-            if (!on_active) {
-                p->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
-                invalidated_off_chain++;
-            } else {
-                read_errors++;
-            }
+            chain_restore_backfill_record_read_miss(
+                ms, tip_h, p, &read_errors, &invalidated_off_chain);
             continue;
         }
 
@@ -511,11 +673,7 @@ int chain_restore_backfill_nbits_from_disk(struct main_state *ms,
                 block_free(&blk);
                 continue;
             }
-            p->nVersion = blk.header.nVersion;
-            p->hashFinalSaplingRoot = blk.header.hashFinalSaplingRoot;
-            p->nTime = blk.header.nTime;
-            p->nBits = blk.header.nBits;
-            chain_restore_repair_store_hdr(p, &blk.header);
+            chain_restore_backfill_store_header(p, &blk);
             fixed++;
         }
         block_free(&blk);
@@ -635,6 +793,21 @@ static bool chain_restore_served_floor(int *out)
     return true;
 }
 
+static struct block_index *chain_restore_synthetic_tip_replacement(
+    struct block_index *tip,
+    const char *datadir)
+{
+    if (datadir && datadir[0]) {
+        if (chain_restore_block_is_consensus_backed_on_disk(tip, datadir))
+            return NULL;
+        return chain_restore_nearest_consensus_backed_ancestor_on_disk(
+            tip, datadir);
+    }
+    if (chain_restore_block_is_consensus_backed(tip))
+        return NULL;
+    return chain_restore_nearest_consensus_backed_ancestor(tip);
+}
+
 static void chain_restore_quarantine_synthetic_tip(struct main_state *ms,
                                                    const char *datadir)
 {
@@ -644,16 +817,9 @@ static void chain_restore_quarantine_synthetic_tip(struct main_state *ms,
     struct block_index *tip = active_chain_tip(&ms->chain_active);
     if (!tip)
         return;
-    if (datadir && datadir[0]) {
-        if (chain_restore_block_is_consensus_backed_on_disk(tip, datadir))
-            return;
-    } else if (chain_restore_block_is_consensus_backed(tip)) {
-        return;
-    }
 
-    struct block_index *replacement = (datadir && datadir[0])
-        ? chain_restore_nearest_consensus_backed_ancestor_on_disk(tip, datadir)
-        : chain_restore_nearest_consensus_backed_ancestor(tip);
+    struct block_index *replacement =
+        chain_restore_synthetic_tip_replacement(tip, datadir);
     if (!replacement || replacement == tip)
         return;
 
@@ -671,10 +837,8 @@ static void chain_restore_quarantine_synthetic_tip(struct main_state *ms,
 
     char old_hash[65] = {0};
     char new_hash[65] = {0};
-    if (tip->phashBlock)
-        uint256_get_hex(tip->phashBlock, old_hash);
-    if (replacement->phashBlock)
-        uint256_get_hex(replacement->phashBlock, new_hash);
+    chain_restore_copy_index_hash_hex(old_hash, tip);
+    chain_restore_copy_index_hash_hex(new_hash, replacement);
 
     LOG_INFO("chain", "[chain-restore] quarantining non-consensus active tip " "h=%d hash=%s status=%u file=%d pos=%u tx=%u chaintx=%lld; " "restoring nearest data-backed ancestor h=%d hash=%s", tip->nHeight, old_hash[0] ? old_hash : "<null>", tip->nStatus, tip->nFile, tip->nDataPos, tip->nTx, (long long)tip->nChainTx, replacement->nHeight, new_hash[0] ? new_hash : "<null>");
 
@@ -706,30 +870,27 @@ static void chain_restore_clear_resolved_anchor(struct main_state *ms,
     snapsync_set_anchor(NULL);
 }
 
-struct zcl_result chain_restore_finalize(struct main_state *ms, const char *datadir)
+/* (c) the rebuild cascade below mutates shared block_index node
+ * fields (nStatus/nFile/nDataPos/phashBlock/pprev/pskip/nBits/...) and the
+ * active_chain slot array. bg_hash_verification_service reads EXACTLY those
+ * fields under ms->cs_main, so this rebuild MUST hold cs_main too —
+ * otherwise it tears block_index/active_chain state out from under a
+ * concurrent reader (the malloc_trim-during-free heap-corruption SEGV, same
+ * class as the fixed phashBlock UAF). The tip read inside this lock uses
+ * active_chain_cached_tip(), not active_chain_tip(): the latter can consult
+ * the tip authority and, before that authority is registered, fall back
+ * through active_chain_height() into progress_store_tx_lock(). Taking that
+ * path under cs_main would invert the reducer reconcile order
+ * (progress_store_tx_lock -> cs_main). active_chain_cached_tip() is the raw,
+ * lock-free container read and keeps this section on cs_main only, followed
+ * by cs_main -> csr->lock (small-tip commit) or cs_main ->
+ * active_chain.write_lock. Released before the lock-free post-restore
+ * integrity reader below. The rebuild path takes no coins_kv, so the
+ * LOCK-ORDER LAW (drive's coins_kv never crosses cs_main) is preserved. */
+static struct block_index *chain_restore_finalize_repair_locked(
+    struct main_state *ms,
+    const char *datadir)
 {
-    if (!ms) return ZCL_ERR(-1, "chain_restore_finalize: null main_state");
-
-    chain_restore_quarantine_synthetic_tip(ms, datadir);
-    chain_restore_clear_resolved_anchor(ms, datadir);
-
-    /* (c) the rebuild cascade below mutates shared block_index node
-     * fields (nStatus/nFile/nDataPos/phashBlock/pprev/pskip/nBits/...) and the
-     * active_chain slot array. bg_hash_verification_service reads EXACTLY those
-     * fields under ms->cs_main, so this rebuild MUST hold cs_main too —
-     * otherwise it tears block_index/active_chain state out from under a
-     * concurrent reader (the malloc_trim-during-free heap-corruption SEGV, same
-     * class as the fixed phashBlock UAF). The tip read inside this lock uses
-     * active_chain_cached_tip(), not active_chain_tip(): the latter can consult
-     * the tip authority and, before that authority is registered, fall back
-     * through active_chain_height() into progress_store_tx_lock(). Taking that
-     * path under cs_main would invert the reducer reconcile order
-     * (progress_store_tx_lock -> cs_main). active_chain_cached_tip() is the raw,
-     * lock-free container read and keeps this section on cs_main only, followed
-     * by cs_main -> csr->lock (small-tip commit) or cs_main ->
-     * active_chain.write_lock. Released before the lock-free post-restore
-     * integrity reader below. The rebuild path takes no coins_kv, so the
-     * LOCK-ORDER LAW (drive's coins_kv never crosses cs_main) is preserved. */
     zcl_mutex_lock(&ms->cs_main);
     struct block_index *tip = active_chain_cached_tip(&ms->chain_active);
     if (tip)
@@ -747,6 +908,53 @@ struct zcl_result chain_restore_finalize(struct main_state *ms, const char *data
     if (tip)
         utxo_recovery_note_band_unrooted_tip(tip, "chain_restore_finalize");
     zcl_mutex_unlock(&ms->cs_main);
+    return tip;
+}
+
+static bool chain_restore_finalize_note_csr(struct chain_state_view *view)
+{
+    struct chain_state_repository *csr = csr_instance();
+    if (!csr || !csr->initialized)
+        return false;
+    csr_snapshot(csr, view);
+    chain_restore_record_csr_consistency(
+        view->consistent, view->tip_height, view->header_height);
+    return !view->consistent;
+}
+
+/* Integrity is verifiably clean — any auto-reindex sentinel is
+ * stale (already served, or written for a state that no longer
+ * exists). Without this, a stale pending sentinel makes every
+ * subsequent healthy boot re-run a full -reindex-chainstate
+ * forever. The TERMINAL marker must clear here too: it means
+ * "budget exhausted at a stall that needs a human", but the node
+ * is now provably healthy, so leaving it would permanently poison
+ * the reindex path for the NEXT genuine episode — a clear gated only
+ * on pending() never fires for a terminal marker. */
+static const char *chain_restore_finalize_take_reindex_label(
+    const char *datadir,
+    bool *clear_episode)
+{
+    *clear_episode = false;
+    if (!datadir || !datadir[0])
+        return NULL;
+    *clear_episode = true;
+    bool was_terminal = boot_auto_reindex_is_terminal(datadir);
+    if (was_terminal || boot_auto_reindex_pending(datadir)) {
+        boot_auto_reindex_clear(datadir);
+        return was_terminal ? "terminal" : "pending";
+    }
+    return NULL;
+}
+
+struct zcl_result chain_restore_finalize(struct main_state *ms, const char *datadir)
+{
+    if (!ms) return ZCL_ERR(-1, "chain_restore_finalize: null main_state");
+
+    chain_restore_quarantine_synthetic_tip(ms, datadir);
+    chain_restore_clear_resolved_anchor(ms, datadir);
+
+    struct block_index *tip = chain_restore_finalize_repair_locked(ms, datadir);
 
     struct chain_integrity_result r;
     chain_integrity_check_post_restore(&r, ms);
@@ -756,15 +964,9 @@ struct zcl_result chain_restore_finalize(struct main_state *ms, const char *data
      * and returns tip_height=-1 if csr isn't initialized (some test
      * paths), in which case we leave csr_consistency_checked=false. */
     {
-        struct chain_state_repository *csr = csr_instance();
-        if (csr && csr->initialized) {
-            struct chain_state_view view;
-            csr_snapshot(csr, &view);
-            chain_restore_record_csr_consistency(
-                view.consistent, view.tip_height, view.header_height);
-            if (!view.consistent) {
-                LOG_INFO("chain", "[chain-integrity] CSR tip/coins divergence at boot: " "tip_h=%d header_h=%d — first reducer activation " "pass should reconcile", view.tip_height, view.header_height);
-            }
+        struct chain_state_view view;
+        if (chain_restore_finalize_note_csr(&view)) {
+            LOG_INFO("chain", "[chain-integrity] CSR tip/coins divergence at boot: " "tip_h=%d header_h=%d — first reducer activation " "pass should reconcile", view.tip_height, view.header_height);
         }
     }
 
@@ -814,30 +1016,20 @@ struct zcl_result chain_restore_finalize(struct main_state *ms, const char *data
             BII_OK, BII_RECOVERY_ACCEPTED,
             "post-restore integrity clean; active chain reconciled",
             false, false);
-        /* Integrity is verifiably clean — any auto-reindex sentinel is
-         * stale (already served, or written for a state that no longer
-         * exists). Without this, a stale pending sentinel makes every
-         * subsequent healthy boot re-run a full -reindex-chainstate
-         * forever. The TERMINAL marker must clear here too: it means
-         * "budget exhausted at a stall that needs a human", but the node
-         * is now provably healthy, so leaving it would permanently poison
-         * the reindex path for the NEXT genuine episode — a clear gated only
-         * on pending() never fires for a terminal marker. */
-        if (datadir && datadir[0]) {
-            bool was_terminal = boot_auto_reindex_is_terminal(datadir);
-            if (was_terminal || boot_auto_reindex_pending(datadir)) {
-                boot_auto_reindex_clear(datadir);
-                LOG_INFO("chain",
-                         "[chain-integrity] cleared stale auto-reindex "
-                         "sentinel (%s): post-restore integrity is clean",
-                         was_terminal ? "terminal" : "pending");
-            }
-            /* Clean integrity ends the repair episode, so the durable
-             * per-finding attempt ledger goes with it. Retiring it anywhere
-             * else would reset the budget the boot gate uses to stop
-             * restarting on an unchanging finding. */
+        bool clear_episode = false;
+        const char *reindex_label =
+            chain_restore_finalize_take_reindex_label(datadir, &clear_episode);
+        if (reindex_label)
+            LOG_INFO("chain",
+                     "[chain-integrity] cleared stale auto-reindex "
+                     "sentinel (%s): post-restore integrity is clean",
+                     reindex_label);
+        /* Clean integrity ends the repair episode, so the durable
+         * per-finding attempt ledger goes with it. Retiring it anywhere
+         * else would reset the budget the boot gate uses to stop
+         * restarting on an unchanging finding. */
+        if (clear_episode)
             boot_repair_episode_clear(datadir);
-        }
     }
 
     if (!r.ok)
