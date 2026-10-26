@@ -71,6 +71,52 @@ static bool wl_abandoned_launch_cleans_fifo(const char *root,
     return existed && access(locator, F_OK) != 0 && errno == ENOENT;
 }
 
+static bool wl_child_accepts_and_binds(struct platform_watcher_lease *lease,
+                                       uintptr_t inherited_read,
+                                       const char *root,
+                                       const char *image)
+{
+    struct platform_watcher_accepted_binding binding;
+    bool accepted = platform_watcher_lease_accept(
+        lease, inherited_read, root, image, watcher_hash);
+    return accepted && platform_watcher_lease_binding(lease, &binding) &&
+        binding.creator_pid == (uint64_t)getppid() &&
+        binding.creator_start_token != 0 &&
+        strcmp(binding.canonical_root, root) == 0 &&
+        strcmp(binding.canonical_image, image) == 0 &&
+        strcmp(binding.image_sha256, watcher_hash) == 0;
+}
+
+static void wl_child_runs_lease_handshake(int report_fd,
+                                          uintptr_t inherited_read,
+                                          const char *root,
+                                          const char *image)
+{
+    struct platform_watcher_lease lease;
+    platform_watcher_lease_init(&lease);
+    bool bound = wl_child_accepts_and_binds(&lease, inherited_read,
+                                            root, image);
+    unsigned char ready = bound ? 1u : 0u;
+    bool reported = wl_io_exact(report_fd, &ready, sizeof(ready), true);
+    unsigned char stopped = bound &&
+        platform_watcher_lease_wait_stop(&lease, 3000) ? 1u : 0u;
+    reported = wl_io_exact(report_fd, &stopped, sizeof(stopped), true) &&
+               reported;
+    platform_watcher_lease_close(&lease);
+    close(report_fd);
+    _exit(reported && ready && stopped ? 0 : 1);
+}
+
+static bool wl_roundtrip_succeeded(bool published, bool ready_read,
+                                   unsigned char ready, bool signaled,
+                                   bool stopped_read, unsigned char stopped,
+                                   bool reaped, int status, bool removed)
+{
+    return published && ready_read && ready == 1u && signaled &&
+           stopped_read && stopped == 1u && reaped && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0 && removed;
+}
+
 static bool wl_parent_child_roundtrip(const char *root, const char *image)
 {
     struct platform_watcher_launch launch;
@@ -96,27 +142,8 @@ static bool wl_parent_child_roundtrip(const char *root, const char *image)
         close(report[0]);
         close((int)launch.private_write);
         close((int)launch.stop_native);
-        struct platform_watcher_lease lease;
-        struct platform_watcher_accepted_binding binding;
-        platform_watcher_lease_init(&lease);
-        bool accepted = platform_watcher_lease_accept(
-            &lease, launch.inherited_read, root, image, watcher_hash);
-        bool bound = accepted && platform_watcher_lease_binding(
-            &lease, &binding) &&
-            binding.creator_pid == (uint64_t)getppid() &&
-            binding.creator_start_token != 0 &&
-            strcmp(binding.canonical_root, root) == 0 &&
-            strcmp(binding.canonical_image, image) == 0 &&
-            strcmp(binding.image_sha256, watcher_hash) == 0;
-        unsigned char ready = bound ? 1u : 0u;
-        bool reported = wl_io_exact(report[1], &ready, sizeof(ready), true);
-        unsigned char stopped = bound &&
-            platform_watcher_lease_wait_stop(&lease, 3000) ? 1u : 0u;
-        reported = wl_io_exact(report[1], &stopped, sizeof(stopped), true) &&
-                   reported;
-        platform_watcher_lease_close(&lease);
-        close(report[1]);
-        _exit(reported && ready && stopped ? 0 : 1);
+        wl_child_runs_lease_handshake(report[1], launch.inherited_read,
+                                      root, image);
     }
 
     close(report[1]);
@@ -135,9 +162,9 @@ static bool wl_parent_child_roundtrip(const char *root, const char *image)
     platform_watcher_launch_close(&launch);
     errno = 0;
     bool removed = access(locator, F_OK) != 0 && errno == ENOENT;
-    return published && ready_read && ready == 1u && signaled &&
-           stopped_read && stopped == 1u && reaped && WIFEXITED(status) &&
-           WEXITSTATUS(status) == 0 && removed;
+    return wl_roundtrip_succeeded(published, ready_read, ready, signaled,
+                                  stopped_read, stopped, reaped, status,
+                                  removed);
 }
 #endif
 
