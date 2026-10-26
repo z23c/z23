@@ -870,10 +870,6 @@ engine/controllers/src/diagnostics_block_index.c:find_block_index_by_key:18
 engine/controllers/src/file_controller.c:file_manifest_build:20
 engine/controllers/src/file_controller.c:file_manifest_load:23
 engine/controllers/src/hodl_controller.c:rpc_gethodlwaveimage:45
-engine/controllers/src/legacy_import_scan.c:block_has_shielded_raw:39
-engine/controllers/src/legacy_import_scan.c:extract_height_raw:23
-engine/controllers/src/legacy_import_scan.c:legacy_import_decrypt_thread:22
-engine/controllers/src/legacy_import_scan.c:legacy_import_sapling_filter_thread:18
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
 engine/controllers/src/nodelog_controller.c:line_level:22
 engine/controllers/src/nodelog_controller.c:parse_syslog_timestamp:16
