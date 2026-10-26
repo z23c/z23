@@ -351,10 +351,6 @@ engine/composition/src/consensus_state_snapshot_install_activate_backup.c:activa
 engine/controllers/src/api_controller_status.c:api_milestone_status_json:43
 engine/controllers/src/blockchain_controller_chain.c:rpc_getblockchaininfo:34
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
-engine/controllers/src/repair_controller_rebuild.c:backfill_header_solutions_run:24
-engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_fetch_and_connect:27
-engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_resolve_range:21
-engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_run:20
 engine/controllers/src/rpc_client.c:node_rpc_call_http_impl:45
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
 engine/entry/main_cli_modes.c:bench_crypto_verify:22

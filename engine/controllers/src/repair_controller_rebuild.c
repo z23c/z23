@@ -48,21 +48,11 @@
  * consensus block serializes to ≤4 MB of hex; 8 MB leaves headroom. */
 #define REBUILD_RECENT_HEX_CAP     (8u * 1024u * 1024u)
 
-/* Resolve the [lo, hi] inclusive height window to fetch.
- *
- * Returns true and fills *lo_out / *hi_out on success. Returns false on
- * a logic/bound error and writes a human-readable reason into err.
- *
- * Idempotent no-op (already at or above the remote tip) is signalled by
- * returning true with *hi_out < *lo_out; the caller treats that as a
- * zero-block success rather than an error.
- *
- * Exposed (non-static) so the unit test can exercise the range/bound/
- * idempotence math without a live zclassicd. */
-bool rebuild_recent_resolve_range(int tip_height, int remote_height,
-                                  int64_t from_arg, bool from_present,
-                                  int *lo_out, int *hi_out,
-                                  char *err, size_t err_sz)
+/* Reject a null output or a negative active or remote height. */
+static bool rebuild_recent_check_range_inputs(int tip_height,
+                                              int remote_height,
+                                              int *lo_out, int *hi_out,
+                                              char *err, size_t err_sz)
 {
     if (!lo_out || !hi_out) {
         if (err && err_sz) snprintf(err, err_sz, "null output");
@@ -80,7 +70,15 @@ bool rebuild_recent_resolve_range(int tip_height, int remote_height,
                      remote_height);
         return false;
     }
+    return true;
+}
 
+/* Pick the window's low height: from_arg when present, else the default
+ * look-back below the active tip. */
+static bool rebuild_recent_pick_from_height(int tip_height, int64_t from_arg,
+                                            bool from_present, int *lo_out,
+                                            char *err, size_t err_sz)
+{
     int lo;
     if (from_present) {
         if (from_arg < 0 || from_arg > INT32_MAX) {
@@ -95,13 +93,13 @@ bool rebuild_recent_resolve_range(int tip_height, int remote_height,
         lo = tip_height - REBUILD_RECENT_DEFAULT_MARGIN;
         if (lo < 0) lo = 0;
     }
+    *lo_out = lo;
+    return true;
+}
 
-    /* Upper bound is the remote tip, but never advance more than one
-     * "recent" window past lo in a single invocation. */
-    int hi = remote_height;
-    if (hi > lo + (REBUILD_RECENT_MAX_RANGE - 1))
-        hi = lo + (REBUILD_RECENT_MAX_RANGE - 1);
-
+static bool rebuild_recent_check_span(int lo, int remote_height, char *err,
+                                      size_t err_sz)
+{
     /* Bound guard: refuse a request whose span exceeds the recent
      * window. This only fires when lo is far below the remote tip — i.e.
      * the operator asked for a deep replay. That's cold-import's job. */
@@ -114,10 +112,186 @@ bool rebuild_recent_resolve_range(int tip_height, int remote_height,
                      REBUILD_RECENT_MAX_RANGE);
         return false;
     }
+    return true;
+}
+
+/* Resolve the [lo, hi] inclusive height window to fetch.
+ *
+ * Returns true and fills *lo_out / *hi_out on success. Returns false on
+ * a logic/bound error and writes a human-readable reason into err.
+ *
+ * Idempotent no-op (already at or above the remote tip) is signalled by
+ * returning true with *hi_out < *lo_out; the caller treats that as a
+ * zero-block success rather than an error.
+ *
+ * Exposed (non-static) so the unit test can exercise the range/bound/
+ * idempotence math without a live zclassicd. */
+bool rebuild_recent_resolve_range(int tip_height, int remote_height,
+                                  int64_t from_arg, bool from_present,
+                                  int *lo_out, int *hi_out,
+                                  char *err, size_t err_sz)
+{
+    if (!rebuild_recent_check_range_inputs(tip_height, remote_height,
+                                           lo_out, hi_out, err, err_sz))
+        return false;
+
+    int lo;
+    if (!rebuild_recent_pick_from_height(tip_height, from_arg, from_present,
+                                         &lo, err, err_sz))
+        return false;
+
+    /* Upper bound is the remote tip, but never advance more than one
+     * "recent" window past lo in a single invocation. */
+    int hi = remote_height;
+    if (hi > lo + (REBUILD_RECENT_MAX_RANGE - 1))
+        hi = lo + (REBUILD_RECENT_MAX_RANGE - 1);
+
+    if (!rebuild_recent_check_span(lo, remote_height, err, err_sz))
+        return false;
 
     *lo_out = lo;
     *hi_out = hi; /* hi < lo => idempotent no-op (already at/above tip) */
     return true;
+}
+
+/* Fetch zclassicd's canonical block hash for `height` into canonical_hash. */
+static bool rebuild_recent_fetch_canonical_hash(int height,
+                                                char *canonical_hex,
+                                                struct uint256 *canonical_hash,
+                                                char *err, size_t err_sz)
+{
+    memset(canonical_hash, 0, sizeof(*canonical_hash));
+    if (!legacy_chain_rpc_get_block_hash_hex(height, canonical_hex)) {
+        snprintf(err, err_sz, "fetch block hash %d from zclassicd failed",
+                 height);
+        return false;
+    }
+    uint256_set_hex(canonical_hash, canonical_hex);
+    return true;
+}
+
+/* True when the active chain already holds the canonical block at `height`
+ * with its data and no recorded failure. */
+static bool rebuild_recent_block_present(struct repair_context *ctx,
+                                         int height,
+                                         const struct uint256 *canonical_hash)
+{
+    if (ctx && ctx->main_state) {
+        struct block_index *have =
+            active_chain_at(&ctx->main_state->chain_active, height);
+        if (have && (have->nStatus & BLOCK_HAVE_DATA) &&
+            !block_has_any_failure(have) && have->phashBlock &&
+            uint256_cmp(have->phashBlock, canonical_hash) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Fetch the full block hex for `height` from zclassicd into hex_buf. */
+static bool rebuild_recent_fetch_block_hex(int height, char *hex_buf,
+                                           char *err, size_t err_sz)
+{
+    if (!legacy_chain_rpc_get_block_hex(height, hex_buf,
+                                        REBUILD_RECENT_HEX_CAP)) {
+        snprintf(err, err_sz, "fetch block %d from zclassicd failed",
+                 height);
+        return false;
+    }
+    return true;
+}
+
+/* Decode hex_buf into blk: hex to bytes, then block deserialize. */
+static bool rebuild_recent_parse_block(char *hex_buf, int height,
+                                       struct block *blk,
+                                       char *err, size_t err_sz)
+{
+    size_t hex_len = strlen(hex_buf);
+    size_t bin_len = hex_len / 2;
+    unsigned char *bin = zcl_malloc(bin_len, "rebuild_recent_bin");
+    if (!bin) {
+        snprintf(err, err_sz, "oom decoding block %d (%zu bytes)",
+                 height, bin_len);
+        return false;
+    }
+    size_t parsed = ParseHex(hex_buf, bin, bin_len);
+    if (parsed == 0) {
+        free(bin);
+        snprintf(err, err_sz, "hex decode failed for block %d", height);
+        return false;
+    }
+
+    struct byte_stream s;
+    stream_init_from_data(&s, bin, parsed);
+    block_init(blk);
+    if (!block_deserialize(blk, &s)) {
+        block_free(blk);
+        stream_free(&s);
+        free(bin);
+        snprintf(err, err_sz, "block deserialize failed for block %d",
+                 height);
+        return false;
+    }
+    stream_free(&s);
+    free(bin);
+    return true;
+}
+
+/* Reject a block whose hash differs from the canonical hash at `height`. */
+static bool rebuild_recent_check_block_hash(
+    struct block *blk, int height, const struct uint256 *canonical_hash,
+    const char *canonical_hex, char *err, size_t err_sz)
+{
+    struct uint256 body_hash;
+    block_header_get_hash(&blk->header, &body_hash);
+    if (uint256_cmp(&body_hash, canonical_hash) != 0) {
+        char got_hex[65];
+        uint256_get_hex(&body_hash, got_hex);
+        block_free(blk);
+        snprintf(err, err_sz,
+                 "zclassicd block %d hash mismatch: got %s want %s",
+                 height, got_hex, canonical_hex);
+        return false;
+    }
+    return true;
+}
+
+/* Frontier retry for a solutionless first block; *ok changes only when
+ * the rewind runs. */
+static void rebuild_recent_frontier_rewind(struct repair_context *ctx,
+                                           struct block *blk, int height,
+                                           struct validation_state *state,
+                                           bool *ok, char *msg, size_t msg_sz)
+{
+    if (strstr(msg, "no-header-solution-backfill-required") &&
+        ctx && ctx->main_state) {
+        sqlite3 *pdb = progress_store_db();
+        int active_tip = active_chain_height(&ctx->main_state->chain_active);
+        /* Hash-aware availability: only proceed once the CORRECT solution
+         * for the in-hand block at `height` is durably present (the prior
+         * reducer_ingest above saved it via the per-ingest backfill), never
+         * on a stale wrong-block row. */
+        struct uint256 ihh;
+        block_header_get_hash(&blk->header, &ihh);
+        if (pdb && height == active_tip + 1 &&
+            stage_repair_header_solution_available(pdb, height, &ihh)) {
+            struct stage_repair_header_solution_result rr;
+            if (stage_repair_header_solution_poison_rewind(pdb, height,
+                                                           active_tip, &rr)) {
+                validation_state_init(state);
+                *ok = reducer_ingest_block(boot_activation_controller(), blk,
+                                           REDUCER_SRC_REPAIR, true, state);
+                if (!*ok)
+                    format_state_message(state, msg, msg_sz);
+            }
+        }
+    }
+}
+
+/* True for the two verdicts that mean connected-but-pending, not rejected. */
+static bool rebuild_recent_verdict_is_pending(const char *msg)
+{
+    return strstr(msg, "not-finalized-by-reducer") ||
+           strstr(msg, "no-header-solution-backfill-required");
 }
 
 /* Fetch the canonical block at `height` from zclassicd and submit it
@@ -136,13 +310,9 @@ static bool rebuild_recent_fetch_and_connect(struct repair_context *ctx,
 
     char canonical_hex[65] = {0};
     struct uint256 canonical_hash;
-    memset(&canonical_hash, 0, sizeof(canonical_hash));
-    if (!legacy_chain_rpc_get_block_hash_hex(height, canonical_hex)) {
-        snprintf(err, err_sz, "fetch block hash %d from zclassicd failed",
-                 height);
+    if (!rebuild_recent_fetch_canonical_hash(height, canonical_hex,
+                                             &canonical_hash, err, err_sz))
         return false;
-    }
-    uint256_set_hex(&canonical_hash, canonical_hex);
 
     /* Skip blocks already present on the active chain: they connected, and
      * their finalization just awaits a later body we will still fetch. This
@@ -154,63 +324,19 @@ static bool rebuild_recent_fetch_and_connect(struct repair_context *ctx,
      * with HAVE_DATA is only sufficient if its hash equals zclassicd's
      * canonical getblockhash(H); otherwise rebuild_recent is specifically here
      * to replace that stale sibling. */
-    if (ctx && ctx->main_state) {
-        struct block_index *have =
-            active_chain_at(&ctx->main_state->chain_active, height);
-        if (have && (have->nStatus & BLOCK_HAVE_DATA) &&
-            !block_has_any_failure(have) && have->phashBlock &&
-            uint256_cmp(have->phashBlock, &canonical_hash) == 0)
-            return true; /* present; advance to the next height */
-    }
+    if (rebuild_recent_block_present(ctx, height, &canonical_hash))
+        return true; /* present; advance to the next height */
 
-    if (!legacy_chain_rpc_get_block_hex(height, hex_buf,
-                                        REBUILD_RECENT_HEX_CAP)) {
-        snprintf(err, err_sz, "fetch block %d from zclassicd failed",
-                 height);
+    if (!rebuild_recent_fetch_block_hex(height, hex_buf, err, err_sz))
         return false;
-    }
 
-    size_t hex_len = strlen(hex_buf);
-    size_t bin_len = hex_len / 2;
-    unsigned char *bin = zcl_malloc(bin_len, "rebuild_recent_bin");
-    if (!bin) {
-        snprintf(err, err_sz, "oom decoding block %d (%zu bytes)",
-                 height, bin_len);
-        return false;
-    }
-    size_t parsed = ParseHex(hex_buf, bin, bin_len);
-    if (parsed == 0) {
-        free(bin);
-        snprintf(err, err_sz, "hex decode failed for block %d", height);
-        return false;
-    }
-
-    struct byte_stream s;
-    stream_init_from_data(&s, bin, parsed);
     struct block blk;
-    block_init(&blk);
-    if (!block_deserialize(&blk, &s)) {
-        block_free(&blk);
-        stream_free(&s);
-        free(bin);
-        snprintf(err, err_sz, "block deserialize failed for block %d",
-                 height);
+    if (!rebuild_recent_parse_block(hex_buf, height, &blk, err, err_sz))
         return false;
-    }
-    stream_free(&s);
-    free(bin);
 
-    struct uint256 body_hash;
-    block_header_get_hash(&blk.header, &body_hash);
-    if (uint256_cmp(&body_hash, &canonical_hash) != 0) {
-        char got_hex[65];
-        uint256_get_hex(&body_hash, got_hex);
-        block_free(&blk);
-        snprintf(err, err_sz,
-                 "zclassicd block %d hash mismatch: got %s want %s",
-                 height, got_hex, canonical_hex);
+    if (!rebuild_recent_check_block_hash(&blk, height, &canonical_hash,
+                                         canonical_hex, err, err_sz))
         return false;
-    }
 
     struct validation_state state;
     validation_state_init(&state);
@@ -248,29 +374,8 @@ static bool rebuild_recent_fetch_and_connect(struct repair_context *ctx,
          * this single rewind, validate_headers re-drains the whole gap forward
          * (solutions all present, plus the per-ingest backfill); later blocks
          * are NOT at the frontier, so this fires at most once per run. */
-        if (strstr(msg, "no-header-solution-backfill-required") &&
-            ctx && ctx->main_state) {
-            sqlite3 *pdb = progress_store_db();
-            int active_tip = active_chain_height(&ctx->main_state->chain_active);
-            /* Hash-aware availability: only proceed once the CORRECT solution
-             * for the in-hand block at `height` is durably present (the prior
-             * reducer_ingest above saved it via the per-ingest backfill), never
-             * on a stale wrong-block row. */
-            struct uint256 ihh;
-            block_header_get_hash(&blk.header, &ihh);
-            if (pdb && height == active_tip + 1 &&
-                stage_repair_header_solution_available(pdb, height, &ihh)) {
-                struct stage_repair_header_solution_result rr;
-                if (stage_repair_header_solution_poison_rewind(pdb, height,
-                                                               active_tip, &rr)) {
-                    validation_state_init(&state);
-                    ok = reducer_ingest_block(boot_activation_controller(), &blk,
-                                              REDUCER_SRC_REPAIR, true, &state);
-                    if (!ok)
-                        format_state_message(&state, msg, sizeof(msg));
-                }
-            }
-        }
+        rebuild_recent_frontier_rewind(ctx, &blk, height, &state, &ok,
+                                       msg, sizeof(msg));
     }
     block_free(&blk);
 
@@ -295,8 +400,7 @@ static bool rebuild_recent_fetch_and_connect(struct repair_context *ctx,
          *
          * Any OTHER verdict (bad block, header reject, a distinct failed stage)
          * is a real rejection and stops the rebuild. */
-        if (strstr(msg, "not-finalized-by-reducer") ||
-            strstr(msg, "no-header-solution-backfill-required")) {
+        if (rebuild_recent_verdict_is_pending(msg)) {
             *accepted = false; /* connected; body persisted, validate catching up */
             return true;
         }
@@ -325,6 +429,32 @@ struct rebuild_recent_report {
     bool complete;
     char error[256];
 };
+
+/* Hash of the active chain tip; all zeros when there is no tip. */
+static struct uint256
+rebuild_recent_active_tip_hash(struct repair_context *ctx)
+{
+    struct uint256 tip_hash = {0};
+    struct block_index *t0 = active_chain_tip(&ctx->main_state->chain_active);
+    if (t0 && t0->phashBlock)
+        tip_hash = *t0->phashBlock;
+    return tip_hash;
+}
+
+static bool rebuild_recent_is_reorged(struct repair_context *ctx,
+                                      int new_tip, int start_tip,
+                                      const struct uint256 *start_tip_hash)
+{
+    bool reorged = false;
+    struct uint256 new_tip_hash = rebuild_recent_active_tip_hash(ctx);
+    if (new_tip < start_tip) {
+        reorged = true;
+    } else if (new_tip == start_tip &&
+               uint256_cmp(&new_tip_hash, start_tip_hash) != 0) {
+        reorged = true;
+    }
+    return reorged;
+}
 
 /* Core: resolve the range, fetch + connect each canonical block through the
  * validated accept path, and fill *rep. Returns false (with rep->error set)
@@ -364,13 +494,7 @@ static bool rebuild_recent_run(struct repair_context *ctx,
     }
 
     int start_tip = tip_height;
-    struct uint256 start_tip_hash = {0};
-    {
-        struct block_index *t0 =
-            active_chain_tip(&ctx->main_state->chain_active);
-        if (t0 && t0->phashBlock)
-            start_tip_hash = *t0->phashBlock;
-    }
+    struct uint256 start_tip_hash = rebuild_recent_active_tip_hash(ctx);
 
     rep->from_height = lo;
     rep->to_height = hi;
@@ -430,19 +554,8 @@ static bool rebuild_recent_run(struct repair_context *ctx,
 
     /* Reorg = the active tip's identity (not just its height) changed in
      * a way that disconnected the old tip. */
-    bool reorged = false;
-    {
-        struct block_index *t1 =
-            active_chain_tip(&ctx->main_state->chain_active);
-        struct uint256 new_tip_hash = {0};
-        if (t1 && t1->phashBlock) new_tip_hash = *t1->phashBlock;
-        if (new_tip < start_tip) {
-            reorged = true;
-        } else if (new_tip == start_tip &&
-                   uint256_cmp(&new_tip_hash, &start_tip_hash) != 0) {
-            reorged = true;
-        }
-    }
+    bool reorged = rebuild_recent_is_reorged(ctx, new_tip, start_tip,
+                                             &start_tip_hash);
 
     rep->fetched = fetched;
     rep->connected = connected;
@@ -548,6 +661,105 @@ void register_rebuild_recent_rpc_commands(struct rpc_table *t)
         rpc_table_must_append(t, &cmds[i]);
 }
 
+/* Node and progress-store preconditions; *pdb_out is set on success. */
+static bool backfill_header_solutions_check_stores(struct repair_context *ctx,
+                                                   sqlite3 **pdb_out,
+                                                   char *err, size_t err_sz)
+{
+    if (!ctx->main_state) {
+        snprintf(err, err_sz, "Node not fully initialized");
+        return false;
+    }
+    sqlite3 *pdb = progress_store_db();
+    if (!pdb) {
+        snprintf(err, err_sz, "progress store not open");
+        return false;
+    }
+    *pdb_out = pdb;
+    return true;
+}
+
+static bool backfill_header_solutions_upper_bound(struct repair_context *ctx,
+                                                  int *hi_out,
+                                                  char *err, size_t err_sz)
+{
+    /* Upper bound is the header tip (highest admitted header), clamped to what
+     * zclassicd actually serves — the solutionless gap lives ABOVE the active
+     * tip. */
+    int header_tip = ctx->main_state->pindex_best_header
+                   ? ctx->main_state->pindex_best_header->nHeight
+                   : active_chain_height(&ctx->main_state->chain_active);
+
+    int remote_height = 0;
+    if (!legacy_chain_rpc_get_block_count(&remote_height)) {
+        snprintf(err, err_sz,
+                 "Cannot reach zclassicd (getblockcount) — is it running?");
+        return false;
+    }
+    *hi_out = header_tip < remote_height ? header_tip : remote_height;
+    return true;
+}
+
+static bool backfill_header_solutions_start_height(
+    struct repair_context *ctx, int64_t from_arg, bool from_present,
+    int *lo_out, char *err, size_t err_sz)
+{
+    int lo;
+    if (from_present) {
+        if (from_arg < 0 || from_arg > INT32_MAX) {
+            snprintf(err, err_sz, "from_height out of range (%lld)",
+                     (long long)from_arg);
+            return false;
+        }
+        lo = (int)from_arg;
+    } else {
+        /* Default: one past the active tip — the start of the forward gap. */
+        lo = active_chain_height(&ctx->main_state->chain_active) + 1;
+        if (lo < 0) lo = 0;
+    }
+    *lo_out = lo;
+    return true;
+}
+
+static bool backfill_header_solutions_is_filled(struct repair_context *ctx,
+                                                sqlite3 *pdb, int h)
+{
+    struct block_index *cbi =
+        active_chain_at(&ctx->main_state->chain_active, h);
+    return cbi && cbi->phashBlock &&
+           stage_repair_header_solution_available(pdb, h, cbi->phashBlock);
+}
+
+/* Decode hex_buf into blk; the caller frees hex_buf on failure. */
+static bool backfill_header_solutions_decode_block(char *hex_buf, int h,
+                                                   struct block *blk,
+                                                   char *err, size_t err_sz)
+{
+    size_t bin_len = strlen(hex_buf) / 2;
+    if (bin_len == 0) {
+        snprintf(err, err_sz, "empty block hex for %d", h);
+        return false;
+    }
+    unsigned char *bin = zcl_malloc(bin_len, "backfill_bin");
+    if (!bin) {
+        snprintf(err, err_sz, "oom decoding block %d", h);
+        return false;
+    }
+    size_t parsed = ParseHex(hex_buf, bin, bin_len);
+    struct byte_stream s;
+    stream_init_from_data(&s, bin, parsed);
+    block_init(blk);
+    bool dok = (parsed > 0) && block_deserialize(blk, &s);
+    stream_free(&s);
+    free(bin);
+    if (!dok) {
+        block_free(blk);
+        snprintf(err, err_sz, "block deserialize failed for %d", h);
+        return false;
+    }
+    return true;
+}
+
 /* ── backfill_header_solutions ───────────────────────────────────────────
  *
  * Bulk-fill the progress.kv header_solution_repair side-table for every
@@ -571,44 +783,18 @@ static bool backfill_header_solutions_run(struct repair_context *ctx,
                                           int *out_filled, int *out_skipped,
                                           char *err, size_t err_sz)
 {
-    if (!ctx->main_state) {
-        snprintf(err, err_sz, "Node not fully initialized");
+    sqlite3 *pdb = NULL;
+    if (!backfill_header_solutions_check_stores(ctx, &pdb, err, err_sz))
         return false;
-    }
-    sqlite3 *pdb = progress_store_db();
-    if (!pdb) {
-        snprintf(err, err_sz, "progress store not open");
+
+    int hi = 0;
+    if (!backfill_header_solutions_upper_bound(ctx, &hi, err, err_sz))
         return false;
-    }
 
-    /* Upper bound is the header tip (highest admitted header), clamped to what
-     * zclassicd actually serves — the solutionless gap lives ABOVE the active
-     * tip. */
-    int header_tip = ctx->main_state->pindex_best_header
-                   ? ctx->main_state->pindex_best_header->nHeight
-                   : active_chain_height(&ctx->main_state->chain_active);
-
-    int remote_height = 0;
-    if (!legacy_chain_rpc_get_block_count(&remote_height)) {
-        snprintf(err, err_sz,
-                 "Cannot reach zclassicd (getblockcount) — is it running?");
+    int lo = 0;
+    if (!backfill_header_solutions_start_height(ctx, from_arg, from_present,
+                                                &lo, err, err_sz))
         return false;
-    }
-    int hi = header_tip < remote_height ? header_tip : remote_height;
-
-    int lo;
-    if (from_present) {
-        if (from_arg < 0 || from_arg > INT32_MAX) {
-            snprintf(err, err_sz, "from_height out of range (%lld)",
-                     (long long)from_arg);
-            return false;
-        }
-        lo = (int)from_arg;
-    } else {
-        /* Default: one past the active tip — the start of the forward gap. */
-        lo = active_chain_height(&ctx->main_state->chain_active) + 1;
-        if (lo < 0) lo = 0;
-    }
 
     *out_from = lo; *out_to = hi; *out_filled = 0; *out_skipped = 0;
     if (hi < lo) return true; /* nothing above the tip — no-op */
@@ -637,10 +823,7 @@ static bool backfill_header_solutions_run(struct repair_context *ctx,
          * whose load IS hash-checked, would keep rejecting it and the tip would
          * stay wedged. When the canonical hash is unknown (height not on the
          * in-memory chain) do not skip: fetch and overwrite to be safe. */
-        struct block_index *cbi =
-            active_chain_at(&ctx->main_state->chain_active, h);
-        if (cbi && cbi->phashBlock &&
-            stage_repair_header_solution_available(pdb, h, cbi->phashBlock)) {
+        if (backfill_header_solutions_is_filled(ctx, pdb, h)) {
             (*out_skipped)++;
             continue;
         }
@@ -650,29 +833,9 @@ static bool backfill_header_solutions_run(struct repair_context *ctx,
             free(hex_buf);
             return false;
         }
-        size_t bin_len = strlen(hex_buf) / 2;
-        if (bin_len == 0) {
-            snprintf(err, err_sz, "empty block hex for %d", h);
-            free(hex_buf);
-            return false;
-        }
-        unsigned char *bin = zcl_malloc(bin_len, "backfill_bin");
-        if (!bin) {
-            snprintf(err, err_sz, "oom decoding block %d", h);
-            free(hex_buf);
-            return false;
-        }
-        size_t parsed = ParseHex(hex_buf, bin, bin_len);
-        struct byte_stream s;
-        stream_init_from_data(&s, bin, parsed);
         struct block blk;
-        block_init(&blk);
-        bool dok = (parsed > 0) && block_deserialize(&blk, &s);
-        stream_free(&s);
-        free(bin);
-        if (!dok) {
-            block_free(&blk);
-            snprintf(err, err_sz, "block deserialize failed for %d", h);
+        if (!backfill_header_solutions_decode_block(hex_buf, h, &blk,
+                                                    err, err_sz)) {
             free(hex_buf);
             return false;
         }
