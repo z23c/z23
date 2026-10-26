@@ -144,6 +144,62 @@ static bool address_from_view(struct net_address *address,
   return false;
 }
 
+static bool reach_index_unchanged_locked(
+    uint64_t identity_generation, int chain_height,
+    const uint8_t chain_hash[32], const uint8_t fingerprint[32]) {
+  return g_reach.index_generation != 0 &&
+         g_reach.identity_generation == identity_generation &&
+         g_reach.chain_height == chain_height &&
+         memcmp(g_reach.chain_hash, chain_hash, 32) == 0 &&
+         memcmp(g_reach.endpoint_fingerprint, fingerprint, 32) == 0;
+}
+
+static size_t reach_rebuild_entries(
+    const uint8_t genesis[32], const struct zendp_record_view *views,
+    size_t count, const struct block_index *tip, uint64_t wall_unix,
+    struct reachability_entry *rebuilt) {
+  size_t rebuilt_count = 0;
+  for (size_t i = 0; tip && i < count; i++) {
+    if (views[i].anchor_height < 0 ||
+        views[i].anchor_height > INT32_MAX - ZCL_FINALITY_DEPTH)
+      continue;
+    uint32_t beacon_height =
+        (uint32_t)(views[i].anchor_height + ZCL_FINALITY_DEPTH);
+    struct block_index *beacon = block_index_get_ancestor(
+        (struct block_index *)tip, (int)beacon_height);
+    struct reachability_entry *entry = &rebuilt[rebuilt_count];
+    if (!beacon || !beacon->phashBlock ||
+        !vcs_zcode_dht_node_id(entry->node_id, genesis,
+                               views[i].master_pubkey,
+                               beacon->phashBlock->data) ||
+        !address_from_view(&entry->address, &views[i], wall_unix))
+      continue;
+    memcpy(entry->master_pubkey, views[i].master_pubkey, 32);
+    rebuilt_count++;
+  }
+  return rebuilt_count;
+}
+
+static void reach_commit_rebuild_locked(
+    const struct reachability_entry *rebuilt, size_t rebuilt_count,
+    const uint8_t fingerprint[32], const uint8_t chain_hash[32],
+    int chain_height, uint64_t identity_generation) {
+  if (memcmp(g_reach.endpoint_fingerprint, fingerprint, 32) != 0)
+    g_reach.endpoint_generation++;
+  memcpy(g_reach.entries, rebuilt, rebuilt_count * sizeof(rebuilt[0]));
+  if (rebuilt_count < ZENDP_DIR_MAX)
+    memset(&g_reach.entries[rebuilt_count], 0,
+           (ZENDP_DIR_MAX - rebuilt_count) * sizeof(g_reach.entries[0]));
+  g_reach.entry_count = rebuilt_count;
+  prune_backoff_locked();
+  memcpy(g_reach.endpoint_fingerprint, fingerprint, 32);
+  memcpy(g_reach.chain_hash, chain_hash, 32);
+  g_reach.chain_height = chain_height;
+  g_reach.identity_generation = identity_generation;
+  g_reach.index_generation++;
+  g_reach.rebuilds++;
+}
+
 bool boot_zcode_dht_reachability_refresh(
     const uint8_t genesis[32], struct vcs_zcode_dht_time now) {
   if (!genesis)
@@ -160,11 +216,9 @@ bool boot_zcode_dht_reachability_refresh(
     memcpy(chain_hash, tip->phashBlock->data, 32);
 
   reach_lock();
-  bool unchanged = g_reach.index_generation != 0 &&
-                   g_reach.identity_generation == identity_generation &&
-                   g_reach.chain_height == chain_height &&
-                   memcmp(g_reach.chain_hash, chain_hash, 32) == 0 &&
-                   memcmp(g_reach.endpoint_fingerprint, fingerprint, 32) == 0;
+  bool unchanged = reach_index_unchanged_locked(identity_generation,
+                                                chain_height, chain_hash,
+                                                fingerprint);
   if (unchanged) {
     g_reach.cache_hits++;
     zcl_mutex_unlock(&g_reach_lock);
@@ -173,42 +227,14 @@ bool boot_zcode_dht_reachability_refresh(
   zcl_mutex_unlock(&g_reach_lock);
 
   struct reachability_entry rebuilt[ZENDP_DIR_MAX];
-  size_t rebuilt_count = 0;
-  for (size_t i = 0; tip && i < count; i++) {
-    if (views[i].anchor_height < 0 ||
-        views[i].anchor_height > INT32_MAX - ZCL_FINALITY_DEPTH)
-      continue;
-    uint32_t beacon_height =
-        (uint32_t)(views[i].anchor_height + ZCL_FINALITY_DEPTH);
-    struct block_index *beacon = block_index_get_ancestor(
-        (struct block_index *)tip, (int)beacon_height);
-    struct reachability_entry *entry = &rebuilt[rebuilt_count];
-    if (!beacon || !beacon->phashBlock ||
-        !vcs_zcode_dht_node_id(entry->node_id, genesis,
-                               views[i].master_pubkey,
-                               beacon->phashBlock->data) ||
-        !address_from_view(&entry->address, &views[i], now.wall_unix))
-      continue;
-    memcpy(entry->master_pubkey, views[i].master_pubkey, 32);
-    rebuilt_count++;
-  }
+  size_t rebuilt_count = reach_rebuild_entries(genesis, views, count, tip,
+                                               now.wall_unix, rebuilt);
   qsort(rebuilt, rebuilt_count, sizeof(rebuilt[0]), entry_compare);
 
   reach_lock();
-  if (memcmp(g_reach.endpoint_fingerprint, fingerprint, 32) != 0)
-    g_reach.endpoint_generation++;
-  memcpy(g_reach.entries, rebuilt, rebuilt_count * sizeof(rebuilt[0]));
-  if (rebuilt_count < ZENDP_DIR_MAX)
-    memset(&g_reach.entries[rebuilt_count], 0,
-           (ZENDP_DIR_MAX - rebuilt_count) * sizeof(rebuilt[0]));
-  g_reach.entry_count = rebuilt_count;
-  prune_backoff_locked();
-  memcpy(g_reach.endpoint_fingerprint, fingerprint, 32);
-  memcpy(g_reach.chain_hash, chain_hash, 32);
-  g_reach.chain_height = chain_height;
-  g_reach.identity_generation = identity_generation;
-  g_reach.index_generation++;
-  g_reach.rebuilds++;
+  reach_commit_rebuild_locked(rebuilt, rebuilt_count, fingerprint,
+                              chain_hash, chain_height,
+                              identity_generation);
   zcl_mutex_unlock(&g_reach_lock);
   return true;
 }
@@ -307,12 +333,8 @@ static void prune_backoff_locked(void) {
       memset(&g_reach.backoff[i], 0, sizeof(g_reach.backoff[i]));
 }
 
-void boot_zcode_dht_reachability_drive(
-    struct boot_svc_ctx *svc, const struct vcs_zcode_dht_peer_view *peers,
-    size_t peer_count, struct vcs_zcode_dht_time now) {
-  if (!svc || !svc->connman)
-    return;
-
+static void reach_credit_reauthenticated_members(
+    const struct vcs_zcode_dht_peer_view *peers, size_t peer_count) {
   /* A FRESH authenticated session earns exactly one clean probe budget:
    * clearing the ladder on every steady-state tick would let any peer
    * that merely stays connected pin its dial delay at the base forever
@@ -339,7 +361,10 @@ void boot_zcode_dht_reachability_drive(
     }
     zcl_mutex_unlock(&g_reach_lock);
   }
-  reach_lock();
+}
+
+static void reach_clear_lapsed_authentication_locked(
+    const struct vcs_zcode_dht_peer_view *peers, size_t peer_count) {
   for (size_t i = 0; i < ZENDP_DIR_MAX; i++) {
     if (!g_reach.backoff[i].used)
       continue;
@@ -351,9 +376,10 @@ void boot_zcode_dht_reachability_drive(
     if (!seen)
       g_reach.backoff[i].was_authenticated = false;
   }
-  zcl_mutex_unlock(&g_reach_lock);
+}
 
-  uint8_t requests[DHT_REACH_REQUEST_MAX][32];
+static size_t reach_take_pending_requests(
+    uint8_t requests[DHT_REACH_REQUEST_MAX][32]) {
   size_t request_count = 0;
   reach_lock();
   request_count = g_reach.request_count;
@@ -362,32 +388,56 @@ void boot_zcode_dht_reachability_drive(
   memset(g_reach.requests, 0, sizeof(g_reach.requests));
   g_reach.request_count = 0;
   zcl_mutex_unlock(&g_reach_lock);
+  return request_count;
+}
+
+static bool reach_prepare_dial_locked(const uint8_t node_id[32],
+                                      uint64_t monotonic_s,
+                                      struct net_address *address) {
+  int at = entry_index_locked(node_id);
+  struct reachability_backoff *backoff =
+      at >= 0 ? backoff_for_locked(node_id) : NULL;
+  bool dial = false;
+  if (at >= 0 && backoff && monotonic_s >= backoff->next_mono) {
+    *address = g_reach.entries[at].address;
+    uint8_t exponent = backoff->attempts < 6 ? backoff->attempts : 6;
+    uint64_t delay = DHT_REACH_BACKOFF_BASE_S << exponent;
+    if (delay > DHT_REACH_BACKOFF_MAX_S)
+      delay = DHT_REACH_BACKOFF_MAX_S;
+    if (backoff->attempts != UINT8_MAX)
+      backoff->attempts++;
+    backoff->next_mono = monotonic_s + delay;
+    dial = true;
+  } else if (at >= 0 && backoff) {
+    g_reach.backoff_skips++;
+  } else if (at >= 0) {
+    /* A member that cannot get a pool slot is a starved dial, not a
+     * backed-off one; count it so exhaustion is observable instead of
+     * indistinguishable from quiet. */
+    g_reach.backoff_full++;
+  }
+  return dial;
+}
+
+void boot_zcode_dht_reachability_drive(
+    struct boot_svc_ctx *svc, const struct vcs_zcode_dht_peer_view *peers,
+    size_t peer_count, struct vcs_zcode_dht_time now) {
+  if (!svc || !svc->connman)
+    return;
+
+  reach_credit_reauthenticated_members(peers, peer_count);
+  reach_lock();
+  reach_clear_lapsed_authentication_locked(peers, peer_count);
+  zcl_mutex_unlock(&g_reach_lock);
+
+  uint8_t requests[DHT_REACH_REQUEST_MAX][32];
+  size_t request_count = reach_take_pending_requests(requests);
 
   for (size_t i = 0; i < request_count; i++) {
     struct net_address address;
-    bool dial = false;
     reach_lock();
-    int at = entry_index_locked(requests[i]);
-    struct reachability_backoff *backoff =
-        at >= 0 ? backoff_for_locked(requests[i]) : NULL;
-    if (at >= 0 && backoff && now.monotonic_s >= backoff->next_mono) {
-      address = g_reach.entries[at].address;
-      uint8_t exponent = backoff->attempts < 6 ? backoff->attempts : 6;
-      uint64_t delay = DHT_REACH_BACKOFF_BASE_S << exponent;
-      if (delay > DHT_REACH_BACKOFF_MAX_S)
-        delay = DHT_REACH_BACKOFF_MAX_S;
-      if (backoff->attempts != UINT8_MAX)
-        backoff->attempts++;
-      backoff->next_mono = now.monotonic_s + delay;
-      dial = true;
-    } else if (at >= 0 && backoff) {
-      g_reach.backoff_skips++;
-    } else if (at >= 0) {
-      /* A member that cannot get a pool slot is a starved dial, not a
-       * backed-off one; count it so exhaustion is observable instead of
-       * indistinguishable from quiet. */
-      g_reach.backoff_full++;
-    }
+    bool dial = reach_prepare_dial_locked(requests[i], now.monotonic_s,
+                                          &address);
     zcl_mutex_unlock(&g_reach_lock);
     if (!dial)
       continue;
