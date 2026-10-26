@@ -25,17 +25,6 @@
 #include "lintc.h"
 #include "gate_outparam_init_priv.h"
 
-int op_idc(int c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-        || (c >= '0' && c <= '9') || c == '_';
-}
-
-int op_id1(int c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
-}
-
 size_t op_skipws(const char *s, size_t i)
 {
     while (s[i] == ' ' || s[i] == '\t')
@@ -107,13 +96,6 @@ int op_buf_put(struct op_buf *b, const char *s, size_t n)
     b->n += n;
     b->p[b->n] = '\0';
     return 0;
-}
-
-void op_buf_clear(struct op_buf *b)
-{
-    b->n = 0;
-    if (b->p)
-        b->p[0] = '\0';
 }
 
 void op_buf_free(struct op_buf *b)

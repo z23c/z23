@@ -217,16 +217,10 @@ static int cph_verdict(void)
 
 /* ── the gate ──────────────────────────────────────────────────────────── */
 
-static int cph_dir(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 static int cph_preflight(const char *root, const char *hroot,
                          const char *baseline)
 {
-    if (!cph_dir(root)) {
+    if (!lintc_is_dir(root)) {
         fprintf(stderr, "[%s] UNPROVEN: scan root missing: %s\n", k_cph_name,
                 root);
         return 2;
@@ -239,7 +233,7 @@ static int cph_preflight(const char *root, const char *hroot,
                 k_cph_name, root);
         return 2;
     }
-    if (hroot[0] && !cph_dir(hroot)) {
+    if (hroot[0] && !lintc_is_dir(hroot)) {
         fprintf(stderr, "[%s] UNPROVEN: controller header root missing: %s\n",
                 k_cph_name, hroot);
         return 2;

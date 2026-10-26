@@ -9,6 +9,8 @@
 #include <regex.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
 
 struct lint_gate {
     const char *name;
@@ -100,6 +102,40 @@ int pair_comp(regex_t *a, int fa, const char *a0, const char *a1,
 int miss(const char *path, FILE *out, const char *fmt);
 int scan_re(const char *path, const regex_t *re, int *hits, int show);
 int capture_cmd(const char *cmd, char *out, size_t cap, int *code);
+
+/* Header bodies on purpose: a .c copy of any of these is already a
+ * duplicate candidate elsewhere in the tree. Gates call these instead of
+ * keeping a private copy. */
+static inline int lintc_is_dir(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static inline int lintc_ident_char(int c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9') || c == '_';
+}
+
+static inline int lintc_ident_start(int c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+static inline int lintc_strcmp_ptr(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Drop the length of a growable NUL-terminated buffer. Does not free it. */
+static inline void lintc_buf_clear(char **p, size_t *n)
+{
+    *n = 0;
+    if (*p)
+        (*p)[0] = '\0';
+}
+
 const char *env_or(const char *name, const char *fallback);
 int lint_self_exe(char *buf, size_t cap);
 int sh_single_quote(const char *in, char *out, size_t cap);

@@ -98,11 +98,6 @@ static int lmr_word(char c)
         || (c >= '0' && c <= '9') || c == '_';
 }
 
-static int lmr_alpha_(char c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
-}
-
 static int lmr_upper(char c) { return c >= 'A' && c <= 'Z'; }
 
 static const char *lmr_find(const char *h, size_t hn, const char *nd)
@@ -313,7 +308,7 @@ static int lmr_split_name(const struct lmr_buf *s, size_t *at, size_t *end)
         }
     }
     for (size_t b = s->n - 1; b >= 1; b--) {
-        if (!lmr_alpha_(s->p[b]) || lmr_word(s->p[b - 1]))
+        if (!lintc_ident_start(s->p[b]) || lmr_word(s->p[b - 1]))
             continue;
         size_t e = b;
         while (e < s->n && lmr_word(s->p[e]))

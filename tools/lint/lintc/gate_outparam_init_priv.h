@@ -9,6 +9,7 @@
 #define GATE_OUTPARAM_INIT_PRIV_H
 
 #include <stddef.h>
+#include "lintc.h"
 
 enum { OP_NAME = 128, OP_PATH = 160, OP_KEY = 3 * OP_NAME + 4 };
 
@@ -18,7 +19,10 @@ struct op_buf {
     size_t n, cap;
 };
 int op_buf_put(struct op_buf *b, const char *s, size_t n);
-void op_buf_clear(struct op_buf *b);
+static inline void op_buf_clear(struct op_buf *b)
+{
+    lintc_buf_clear(&b->p, &b->n);
+}
 void op_buf_free(struct op_buf *b);
 const char *op_buf_str(const struct op_buf *b);
 
@@ -36,8 +40,14 @@ int op_hset_add(struct op_hset *h, const char *s);
 int op_hset_has(const struct op_hset *h, const char *s);
 
 /* ASCII character classes and small text predicates (locale independent). */
-int op_idc(int c);
-int op_id1(int c);
+static inline int op_idc(int c)
+{
+    return lintc_ident_char(c);
+}
+static inline int op_id1(int c)
+{
+    return lintc_ident_start(c);
+}
 size_t op_skipws(const char *s, size_t i);
 int op_word_before_ok(const char *s, size_t i);
 int op_has_word(const char *s, const char *w);

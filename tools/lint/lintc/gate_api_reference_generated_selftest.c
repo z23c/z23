@@ -192,12 +192,6 @@ static int ars_read_error(const char *root, const char *home)
     return bad;
 }
 
-static int ars_is_dir(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 /* With TMPDIR at tmp the scratch directory cannot be created: the gate must exit 2,
  * leave no half-built name behind, and not remove the directory at victim. */
 static int ars_scratch_refused(const char *root, const char *home, const char *tmp,
@@ -214,11 +208,11 @@ static int ars_scratch_refused(const char *root, const char *home, const char *t
         setenv("TMPDIR", saved, 1);
     else
         unsetenv("TMPDIR");
-    int bad = opened == 0 || s.dir[0] != '\0' || rc != 2 || !ars_is_dir(victim);
+    int bad = opened == 0 || s.dir[0] != '\0' || rc != 2 || !lintc_is_dir(victim);
     if (bad)
         fprintf(stderr, "%s: FAIL — %s: scratch directory not refused cleanly (open %d,\n"
                 "  leftover name length %zu, exit %d, sibling kept %d)\n", ars_name, what, opened,
-                strlen(s.dir), rc, ars_is_dir(victim));
+                strlen(s.dir), rc, lintc_is_dir(victim));
     return bad;
 }
 

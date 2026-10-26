@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "base/safe_alloc.h"
+#include "lintc.h"
 #include "gate_command_input_keys_priv.h"
 
 void *cik_mem(void *old, size_t n, const char *label)
@@ -56,9 +57,7 @@ void cik_buf_puts(struct cik_buf *b, const char *s)
 
 void cik_buf_clear(struct cik_buf *b)
 {
-    b->n = 0;
-    if (b->p)
-        b->p[0] = '\0';
+    lintc_buf_clear(&b->p, &b->n);
 }
 
 void cik_buf_free(struct cik_buf *b)

@@ -326,18 +326,13 @@ static void op_report_pubfree(const struct op_pub *pub)
           "  core/modules/sapling/src/params_init.c.\n", stderr);
 }
 
-static int op_cmp_key(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 /* Sorted unique finding keys (pointers into the finding table). */
 static int op_unique_keys(const struct op_scan *s, const char **keys)
 {
     int n = 0;
     for (int i = 0; i < s->nfind; i++)
         keys[n++] = s->find[i].key;
-    qsort(keys, (size_t)n, sizeof *keys, op_cmp_key);
+    qsort(keys, (size_t)n, sizeof *keys, lintc_strcmp_ptr);
     int u = 0;
     for (int i = 0; i < n; i++)
         if (u == 0 || strcmp(keys[u - 1], keys[i]) != 0)
@@ -353,11 +348,6 @@ static void op_print_detail(const struct op_scan *s, const char *key, const char
             fprintf(stderr, "%s%s\texit=L%ld init=L%ld(%s)\n", lead, f->file,
                     f->exit_line, f->init_line, f->tag == 'm' ? "memset" : "init");
     }
-}
-
-static int op_cmp_line(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
 /* --print-findings: every in-scope finding with its file and line numbers. */
@@ -377,7 +367,7 @@ static int op_print_findings(const struct op_scan *s)
             rc = die("z23-lint: outparam-init: out of memory\n", "");
     }
     if (rc == 0) {
-        qsort(lines, (size_t)s->nfind, sizeof *lines, op_cmp_line);
+        qsort(lines, (size_t)s->nfind, sizeof *lines, lintc_strcmp_ptr);
         for (int i = 0; i < s->nfind; i++)
             puts(lines[i]);
     }
