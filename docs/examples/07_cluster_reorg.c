@@ -65,6 +65,72 @@ static void print_hash(const char *label, const struct uint256 *h)
     printf("    %-18s %s\n", label, hex);
 }
 
+/* Mint `count` blocks on top of `node`'s current tip, storing each new
+ * tip hash in `hashes`. Returns the index of the first mint that failed,
+ * or `count` when every mint succeeded. */
+static size_t mint_branch(struct simnet_cluster *cluster, unsigned node,
+                          struct uint256 *hashes, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (!simnet_cluster_mint_on(cluster, node, &hashes[i])) {
+            return i;
+        }
+    }
+    return count;
+}
+
+/* Broadcast every block of both partition branches into the cluster's
+ * pending-delivery queue. Returns 0 when all blocks were announced;
+ * otherwise the first failure, encoded as -(i+1) for node 0's i-th
+ * block or +(i+1) for node 1's i-th block. */
+static int broadcast_branches(struct simnet_cluster *cluster,
+                              struct uint256 *losing, size_t losing_count,
+                              struct uint256 *winning, size_t winning_count)
+{
+    for (size_t i = 0; i < losing_count; i++) {
+        if (!simnet_cluster_broadcast(cluster, 0, &losing[i])) {
+            return -(int)(i + 1);
+        }
+    }
+    for (size_t i = 0; i < winning_count; i++) {
+        if (!simnet_cluster_broadcast(cluster, 1, &winning[i])) {
+            return (int)(i + 1);
+        }
+    }
+    return 0;
+}
+
+/* Read both nodes' post-delivery state: tip hashes into tip0/tip1 and
+ * coins digests into coins0/coins1, recording each read's success in
+ * got[0..3] (tip0, tip1, coins0, coins1). Returns how many of the four
+ * reads succeeded; 4 means all of them did. */
+static int read_node_states(struct simnet_cluster *cluster,
+                            struct uint256 *tip0, struct uint256 *tip1,
+                            struct utxo_commitment *coins0,
+                            struct utxo_commitment *coins1, bool got[4])
+{
+    got[0] = simnet_cluster_tip_hash(cluster, 0, tip0);
+    got[1] = simnet_cluster_tip_hash(cluster, 1, tip1);
+    got[2] = simnet_cluster_coins_digest(cluster, 0, coins0);
+    got[3] = simnet_cluster_coins_digest(cluster, 1, coins1);
+    return got[0] + got[1] + got[2] + got[3];
+}
+
+/* Check the three convergence invariants, recording each outcome in
+ * match[0..2]: both nodes share a tip, node 0's tip is the branch's
+ * original winning tip, and the UTXO digests agree. Returns true only
+ * when all three hold. */
+static bool convergence_verified(struct uint256 *tip0, struct uint256 *tip1,
+                                 struct uint256 *winner_tip,
+                                 struct utxo_commitment *coins0,
+                                 struct utxo_commitment *coins1, bool match[3])
+{
+    match[0] = uint256_eq(tip0, tip1);
+    match[1] = uint256_eq(tip0, winner_tip);
+    match[2] = utxo_commitment_equal(coins0, coins1);
+    return match[0] && match[1] && match[2];
+}
+
 int main(void)
 {
     printf("=== 07_cluster_reorg: 2-node partition + convergence ===\n\n");
@@ -97,19 +163,17 @@ int main(void)
            "node 1 mints a 6-block winning branch...\n");
     struct uint256 losing[3];
     struct uint256 winning[6];
-    for (size_t i = 0; i < 3; i++) {
-        if (!simnet_cluster_mint_on(cluster, 0, &losing[i])) {
-            fprintf(stderr, "FAIL: node 0 mint %zu failed\n", i);
-            simnet_cluster_free(cluster);
-            return 1;
-        }
+    size_t mint_fail = mint_branch(cluster, 0, losing, 3);
+    if (mint_fail < 3) {
+        fprintf(stderr, "FAIL: node 0 mint %zu failed\n", mint_fail);
+        simnet_cluster_free(cluster);
+        return 1;
     }
-    for (size_t i = 0; i < 6; i++) {
-        if (!simnet_cluster_mint_on(cluster, 1, &winning[i])) {
-            fprintf(stderr, "FAIL: node 1 mint %zu failed\n", i);
-            simnet_cluster_free(cluster);
-            return 1;
-        }
+    mint_fail = mint_branch(cluster, 1, winning, 6);
+    if (mint_fail < 6) {
+        fprintf(stderr, "FAIL: node 1 mint %zu failed\n", mint_fail);
+        simnet_cluster_free(cluster);
+        return 1;
     }
     print_hash("node0 losing tip:", &losing[2]);
     print_hash("node1 winning tip:", &winning[5]);
@@ -121,19 +185,18 @@ int main(void)
      * apply the blocks yet — it just announces "this hash exists" so the
      * next delivery pass can fetch and evaluate it. */
     printf("[3/5] broadcasting both branches into the cluster...\n");
-    for (size_t i = 0; i < 3; i++) {
-        if (!simnet_cluster_broadcast(cluster, 0, &losing[i])) {
-            fprintf(stderr, "FAIL: broadcast of node0 block %zu failed\n", i);
-            simnet_cluster_free(cluster);
-            return 1;
-        }
+    int bc_fail = broadcast_branches(cluster, losing, 3, winning, 6);
+    if (bc_fail < 0) {
+        fprintf(stderr, "FAIL: broadcast of node0 block %zu failed\n",
+                (size_t)(-bc_fail - 1));
+        simnet_cluster_free(cluster);
+        return 1;
     }
-    for (size_t i = 0; i < 6; i++) {
-        if (!simnet_cluster_broadcast(cluster, 1, &winning[i])) {
-            fprintf(stderr, "FAIL: broadcast of node1 block %zu failed\n", i);
-            simnet_cluster_free(cluster);
-            return 1;
-        }
+    if (bc_fail > 0) {
+        fprintf(stderr, "FAIL: broadcast of node1 block %zu failed\n",
+                (size_t)(bc_fail - 1));
+        simnet_cluster_free(cluster);
+        return 1;
     }
 
     /* [4/5] Deliver: this is where the real reorg machinery runs. Node 0
@@ -161,14 +224,12 @@ int main(void)
     printf("[5/5] verifying both nodes converged to the same tip + coins...\n");
     struct uint256 tip0, tip1;
     struct utxo_commitment coins0, coins1;
-    bool got_tip0 = simnet_cluster_tip_hash(cluster, 0, &tip0);
-    bool got_tip1 = simnet_cluster_tip_hash(cluster, 1, &tip1);
-    bool got_coins0 = simnet_cluster_coins_digest(cluster, 0, &coins0);
-    bool got_coins1 = simnet_cluster_coins_digest(cluster, 1, &coins1);
-    if (!got_tip0 || !got_tip1 || !got_coins0 || !got_coins1) {
+    bool got_state[4];
+    if (read_node_states(cluster, &tip0, &tip1, &coins0, &coins1,
+                         got_state) != 4) {
         fprintf(stderr, "FAIL: could not read post-delivery tip/coins state "
                         "(tip0=%d tip1=%d coins0=%d coins1=%d)\n",
-                got_tip0, got_tip1, got_coins0, got_coins1);
+                got_state[0], got_state[1], got_state[2], got_state[3]);
         simnet_cluster_free(cluster);
         return 1;
     }
@@ -180,15 +241,13 @@ int main(void)
     printf("    node1 utxo count:  %llu\n",
            (unsigned long long)coins1.count);
 
-    bool tips_match = uint256_eq(&tip0, &tip1);
-    bool adopted_winner = uint256_eq(&tip0, &winning[5]);
-    bool coins_match = utxo_commitment_equal(&coins0, &coins1);
-
-    if (!tips_match || !adopted_winner || !coins_match) {
+    bool match[3];
+    if (!convergence_verified(&tip0, &tip1, &winning[5], &coins0, &coins1,
+                              match)) {
         fprintf(stderr,
                 "FAIL: convergence check failed (tips_match=%d "
                 "adopted_winner=%d coins_match=%d)\n",
-                tips_match, adopted_winner, coins_match);
+                match[0], match[1], match[2]);
         simnet_cluster_free(cluster);
         return 1;
     }
