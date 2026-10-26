@@ -124,6 +124,27 @@ static bool dva_ident_char(char c)
            (c >= '0' && c <= '9') || c == '_';
 }
 
+/* Handle one byte while inside a string or char literal: it is never code,
+ * a backslash also covers the byte it escapes (skipped by advancing *i, so
+ * the caller's own loop increment lands one past it), and the matching
+ * quote ends the literal. */
+static void dva_mask_literal_byte(const char *line, size_t len, size_t *i,
+                                  bool *in_str, bool *in_chr,
+                                  unsigned char *mask)
+{
+    char c = line[*i];
+    mask[*i] = 0;
+    if (c == '\\' && *i + 1 < len) {
+        mask[*i + 1] = 0;
+        (*i)++;
+        return;
+    }
+    if (*in_str && c == '"')
+        *in_str = false;
+    else if (*in_chr && c == '\'')
+        *in_chr = false;
+}
+
 /* Mark every byte of `line` that is real code (1) versus string/char literal
  * or trailing comment (0). One line in isolation cannot see an enclosing
  * block comment, which is why an obviously-comment line is refused by the
@@ -134,14 +155,7 @@ static void dva_code_mask(const char *line, size_t len, unsigned char *mask)
     for (size_t i = 0; i < len; i++) {
         char c = line[i];
         if (in_str || in_chr) {
-            mask[i] = 0;
-            if (c == '\\' && i + 1 < len) {
-                mask[i + 1] = 0;
-                i++;
-                continue;
-            }
-            if (in_str && c == '"') in_str = false;
-            else if (in_chr && c == '\'') in_chr = false;
+            dva_mask_literal_byte(line, len, &i, &in_str, &in_chr, mask);
             continue;
         }
         if (c == '"') { in_str = true; mask[i] = 0; continue; }
@@ -232,10 +246,133 @@ static bool dva_emit(const char *line, size_t at, size_t from_len,
     return true;
 }
 
+/* Outcome of attempting a mutation at one scan position: nothing matched
+ * here, a rule fired and was written out, or a rule matched but its
+ * replacement could not be produced or fitted in the output buffer. The
+ * last one stops the whole scan, exactly as the inline `break`s did. */
+enum dva_attempt {
+    dva_attempt_none,
+    dva_attempt_applied,
+    dva_attempt_blocked,
+};
+
+/* The whole argument set must be present before anything is written; held
+ * here so the entry point keeps its short early-return ladder. */
+static bool dva_mutate_args_ok(const char *line,
+                               const struct zcl_devagent_mutation *m,
+                               const char *out, size_t out_cap)
+{
+    return line && m && out && out_cap != 0;
+}
+
+/* Walk g_op_rules at one code position, in priority order, and apply the
+ * first rule whose text sits there. A rule that matches but will not fit
+ * in `out` is reported as dva_attempt_none, not blocked: the inline scan
+ * broke only the rule loop and still tried the keyword and integer rules
+ * at the same position, so that leniency is behaviour, not an oversight. */
+static enum dva_attempt dva_try_op_rule_at(const char *line, size_t len,
+                                           const unsigned char *mask, size_t i,
+                                           struct zcl_devagent_mutation *m,
+                                           char *out, size_t out_cap)
+{
+    for (size_t r = 0; r < sizeof(g_op_rules) / sizeof(g_op_rules[0]); r++) {
+        const struct dva_op_rule *rule = &g_op_rules[r];
+        size_t fl = strlen(rule->from);
+        if (i + fl > len || memcmp(line + i, rule->from, fl) != 0)
+            continue;
+        if (!mask[i + fl - 1] || !dva_op_applies(line, i, rule->from))
+            continue;
+        if (!dva_emit(line, i, fl, rule->to, out, out_cap))
+            return dva_attempt_none;
+        (void)snprintf(m->rule, sizeof(m->rule), "%s", rule->name);
+        (void)snprintf(m->before, sizeof(m->before), "%s", rule->from);
+        (void)snprintf(m->after, sizeof(m->after), "%s", rule->to);
+        m->column = i + 1;
+        return dva_attempt_applied;
+    }
+    return dva_attempt_none;
+}
+
+/* Flip the `true`/`false` keyword at one code position. Unlike an operator
+ * rule, a keyword whose flipped text will not fit in `out` stops the whole
+ * scan — the inline code broke the outer loop here. */
+static enum dva_attempt dva_try_word_flip_at(const char *line, size_t len,
+                                             size_t i,
+                                             struct zcl_devagent_mutation *m,
+                                             char *out, size_t out_cap)
+{
+    if (dva_word_at(line, len, i, "true")) {
+        if (!dva_emit(line, i, 4, "false", out, out_cap))
+            return dva_attempt_blocked;
+        (void)snprintf(m->rule, sizeof(m->rule), "%s", "true_to_false");
+        (void)snprintf(m->before, sizeof(m->before), "%s", "true");
+        (void)snprintf(m->after, sizeof(m->after), "%s", "false");
+        m->column = i + 1;
+        return dva_attempt_applied;
+    }
+    if (dva_word_at(line, len, i, "false")) {
+        if (!dva_emit(line, i, 5, "true", out, out_cap))
+            return dva_attempt_blocked;
+        (void)snprintf(m->rule, sizeof(m->rule), "%s", "false_to_true");
+        (void)snprintf(m->before, sizeof(m->before), "%s", "false");
+        (void)snprintf(m->after, sizeof(m->after), "%s", "true");
+        m->column = i + 1;
+        return dva_attempt_applied;
+    }
+    return dva_attempt_none;
+}
+
+/* Bump a standalone decimal literal to its successor. Any refusal after the
+ * literal is recognized (LLONG_MAX, an unrenderable successor, no room in
+ * `out`) stops the whole scan, matching the inline `break`s. */
+static enum dva_attempt dva_try_int_bump_at(const char *line, size_t len,
+                                            size_t i,
+                                            struct zcl_devagent_mutation *m,
+                                            char *out, size_t out_cap)
+{
+    size_t digits = dva_int_literal_at(line, len, i);
+    if (digits > 0 && digits < ZCL_DEVAGENT_TOKEN_MAX - 1) {
+        char before[ZCL_DEVAGENT_TOKEN_MAX];
+        char after[ZCL_DEVAGENT_TOKEN_MAX];
+        memcpy(before, line + i, digits);
+        before[digits] = '\0';
+        long long value = strtoll(before, NULL, 10);
+        if (value == LLONG_MAX)
+            return dva_attempt_blocked;
+        int n = snprintf(after, sizeof(after), "%lld", value + 1);
+        if (n <= 0 || (size_t)n >= sizeof(after))
+            return dva_attempt_blocked;
+        if (!dva_emit(line, i, digits, after, out, out_cap))
+            return dva_attempt_blocked;
+        (void)snprintf(m->rule, sizeof(m->rule), "%s", "int_bump");
+        (void)snprintf(m->before, sizeof(m->before), "%s", before);
+        (void)snprintf(m->after, sizeof(m->after), "%s", after);
+        m->column = i + 1;
+        return dva_attempt_applied;
+    }
+    return dva_attempt_none;
+}
+
+/* Try every mutation family at one code position in priority order: the
+ * operator flips, then a boolean keyword flip, then the integer bump. */
+static enum dva_attempt dva_mutate_at(const char *line, size_t len,
+                                      const unsigned char *mask, size_t i,
+                                      struct zcl_devagent_mutation *m,
+                                      char *out, size_t out_cap)
+{
+    if (dva_try_op_rule_at(line, len, mask, i, m, out, out_cap) ==
+        dva_attempt_applied)
+        return dva_attempt_applied;
+    enum dva_attempt a = dva_try_word_flip_at(line, len, i, m, out, out_cap);
+    if (a != dva_attempt_none)
+        return a;
+    return dva_try_int_bump_at(line, len, i, m, out, out_cap);
+}
+
 bool zcl_devagent_mutate_line(const char *line, struct zcl_devagent_mutation *m,
                               char *out, size_t out_cap)
 {
-    if (!line || !m || !out || out_cap == 0)
+    if (!dva_mutate_args_ok(line, m, out, out_cap))
         return false;
     memset(m, 0, sizeof(*m));
     out[0] = '\0';
@@ -252,65 +389,12 @@ bool zcl_devagent_mutate_line(const char *line, struct zcl_devagent_mutation *m,
     for (size_t i = 0; i < len && !done; i++) {
         if (!mask[i])
             continue;
-        for (size_t r = 0; r < sizeof(g_op_rules) / sizeof(g_op_rules[0]); r++) {
-            const struct dva_op_rule *rule = &g_op_rules[r];
-            size_t fl = strlen(rule->from);
-            if (i + fl > len || memcmp(line + i, rule->from, fl) != 0)
-                continue;
-            if (!mask[i + fl - 1] || !dva_op_applies(line, i, rule->from))
-                continue;
-            if (!dva_emit(line, i, fl, rule->to, out, out_cap))
-                break;
-            (void)snprintf(m->rule, sizeof(m->rule), "%s", rule->name);
-            (void)snprintf(m->before, sizeof(m->before), "%s", rule->from);
-            (void)snprintf(m->after, sizeof(m->after), "%s", rule->to);
-            m->column = i + 1;
+        enum dva_attempt a = dva_mutate_at(line, len, mask, i, m, out,
+                                           out_cap);
+        if (a == dva_attempt_applied)
             done = true;
+        else if (a == dva_attempt_blocked)
             break;
-        }
-        if (done)
-            break;
-        if (dva_word_at(line, len, i, "true")) {
-            if (!dva_emit(line, i, 4, "false", out, out_cap))
-                break;
-            (void)snprintf(m->rule, sizeof(m->rule), "%s", "true_to_false");
-            (void)snprintf(m->before, sizeof(m->before), "%s", "true");
-            (void)snprintf(m->after, sizeof(m->after), "%s", "false");
-            m->column = i + 1;
-            done = true;
-            break;
-        }
-        if (dva_word_at(line, len, i, "false")) {
-            if (!dva_emit(line, i, 5, "true", out, out_cap))
-                break;
-            (void)snprintf(m->rule, sizeof(m->rule), "%s", "false_to_true");
-            (void)snprintf(m->before, sizeof(m->before), "%s", "false");
-            (void)snprintf(m->after, sizeof(m->after), "%s", "true");
-            m->column = i + 1;
-            done = true;
-            break;
-        }
-        size_t digits = dva_int_literal_at(line, len, i);
-        if (digits > 0 && digits < ZCL_DEVAGENT_TOKEN_MAX - 1) {
-            char before[ZCL_DEVAGENT_TOKEN_MAX];
-            char after[ZCL_DEVAGENT_TOKEN_MAX];
-            memcpy(before, line + i, digits);
-            before[digits] = '\0';
-            long long value = strtoll(before, NULL, 10);
-            if (value == LLONG_MAX)
-                break;
-            int n = snprintf(after, sizeof(after), "%lld", value + 1);
-            if (n <= 0 || (size_t)n >= sizeof(after))
-                break;
-            if (!dva_emit(line, i, digits, after, out, out_cap))
-                break;
-            (void)snprintf(m->rule, sizeof(m->rule), "%s", "int_bump");
-            (void)snprintf(m->before, sizeof(m->before), "%s", before);
-            (void)snprintf(m->after, sizeof(m->after), "%s", after);
-            m->column = i + 1;
-            done = true;
-            break;
-        }
     }
     free(mask);
     if (!done) {
