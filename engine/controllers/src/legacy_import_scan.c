@@ -161,7 +161,7 @@ static int locate_block_tx_list_raw(const uint8_t *bdata, size_t bsize,
     if (*pos >= bsize) return -1; // raw-return-ok:bin-parser-bounds
     uint64_t num_tx;
     n = read_compact_size_raw(bdata + *pos, bsize - *pos, &num_tx);
-    if (n == 0 || num_tx == 0) return -1; // raw-return-ok:bin-parser-empty-vin
+    if (n == 0 || num_tx == 0) return -1; // raw-return-ok:bin-parser-bounds
     *pos += (size_t)n;
     return 0;
 }
