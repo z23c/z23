@@ -181,6 +181,119 @@ static void dvg_parse_refs(const char *out, struct dvg_branch_names *names)
     }
 }
 
+/* Copy one optional string field into *out only when it is a non-empty JSON
+ * string; missing, null or empty leaves the caller's default untouched. */
+static void dvg_read_str_option(const struct json_value *input,
+                                const char *key, const char **out)
+{
+    const struct json_value *v = json_get(input, key);
+    if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
+        *out = json_get_str(v);
+}
+
+/* Copy one optional int field into *out only when it is a JSON int; any
+ * other shape leaves the caller's default untouched. */
+static void dvg_read_int_option(const struct json_value *input,
+                                const char *key, long long *out)
+{
+    const struct json_value *v = json_get(input, key);
+    if (v && v->type == JSON_INT)
+        *out = json_get_int(v);
+}
+
+/* Run the five per-branch probes in order — head SHA, ahead, behind, commit
+ * time, merge-tree — filling head/ahead/behind/age_days/merge_clean. Returns
+ * the first non-zero git exit status, with `line` naming that argv, or 0
+ * when every probe ran; a non-zero merge-tree is the merge_clean=false
+ * answer, never a failure. The caller logs and owns the failure path. */
+static int dvg_measure_branch(const char *cwd, const char *base,
+                              const char *branch, time_t now, char *head,
+                              size_t headcap, char *out, size_t outcap,
+                              char *line, size_t linecap, long long *ahead,
+                              long long *behind, long long *age_days,
+                              bool *merge_clean)
+{
+    char range_ahead[300], range_behind[300];
+    int rc;
+
+    {
+        const char *argv_head[] = {"rev-parse", "--short", branch, NULL};
+        rc = dvg_git(cwd, argv_head, head, headcap, line, linecap);
+        if (rc != 0)
+            return rc;
+        dvg_strip(head);
+    }
+
+    (void)snprintf(range_ahead, sizeof(range_ahead), "%s..%s", base, branch);
+    {
+        const char *argv_ahead[] = {"rev-list", "--count", range_ahead,
+                                    NULL};
+        rc = dvg_git(cwd, argv_ahead, out, outcap, line, linecap);
+        if (rc != 0)
+            return rc;
+        dvg_strip(out);
+        *ahead = dvg_parse_ll(out);
+    }
+
+    (void)snprintf(range_behind, sizeof(range_behind), "%s..%s", branch,
+                   base);
+    {
+        const char *argv_behind[] = {"rev-list", "--count", range_behind,
+                                     NULL};
+        rc = dvg_git(cwd, argv_behind, out, outcap, line, linecap);
+        if (rc != 0)
+            return rc;
+        dvg_strip(out);
+        *behind = dvg_parse_ll(out);
+    }
+
+    {
+        const char *argv_ct[] = {"log", "-1", "--format=%ct", branch,
+                                 NULL};
+        rc = dvg_git(cwd, argv_ct, out, outcap, line, linecap);
+        if (rc != 0)
+            return rc;
+        dvg_strip(out);
+        {
+            long long committed = dvg_parse_ll(out);
+            long long delta = (long long)now - committed;
+            *age_days = delta > 0 ? delta / 86400 : 0;
+        }
+    }
+
+    {
+        const char *argv_mt[] = {"merge-tree", "--write-tree", base,
+                                 branch, NULL};
+        rc = dvg_git(cwd, argv_mt, out, outcap, line, linecap);
+        *merge_clean = rc == 0;
+    }
+    return 0;
+}
+
+/* Apply RULE, in this order, bump the matching reported-branch counter and
+ * return the bin name. */
+static const char *dvg_bin_branch(long long ahead, long long max_age_days,
+                                  long long age_days, long long behind,
+                                  bool merge_clean, long long *land,
+                                  long long *rebase, long long *del)
+{
+    const char *bin;
+    if (ahead == 0 || (age_days > max_age_days && behind > 500))
+        bin = "delete";
+    else if (merge_clean)
+        bin = "land";
+    else
+        bin = "rebase";
+
+    if (strcmp(bin, "land") == 0)
+        (*land)++;
+    else if (strcmp(bin, "rebase") == 0)
+        (*rebase)++;
+    else
+        (*del)++;
+    return bin;
+}
+
 void zcl_native_handle_dev_agent_triage(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -203,19 +316,10 @@ void zcl_native_handle_dev_agent_triage(
     (void)json_push_kv_str(&reply->data, "leaf", DVG_LEAF);
 
     if (request && request->input) {
-        const struct json_value *v;
-        v = json_get(request->input, "cwd");
-        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
-            cwd = json_get_str(v);
-        v = json_get(request->input, "base");
-        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
-            base = json_get_str(v);
-        v = json_get(request->input, "max_age_days");
-        if (v && v->type == JSON_INT)
-            max_age_days = json_get_int(v);
-        v = json_get(request->input, "limit");
-        if (v && v->type == JSON_INT)
-            limit = json_get_int(v);
+        dvg_read_str_option(request->input, "cwd", &cwd);
+        dvg_read_str_option(request->input, "base", &base);
+        dvg_read_int_option(request->input, "max_age_days", &max_age_days);
+        dvg_read_int_option(request->input, "limit", &limit);
     }
     if (limit <= 0)
         limit = 200;
@@ -244,103 +348,30 @@ void zcl_native_handle_dev_agent_triage(
         char head[128];
         long long ahead = 0, behind = 0, age_days = 0;
         bool merge_clean;
-        char range_ahead[300], range_behind[300];
+        const char *bin;
 
-        {
-            const char *argv_head[] = {"rev-parse", "--short", branch, NULL};
-            rc = dvg_git(cwd, argv_head, head, sizeof(head), line, sizeof(line));
-            if (rc != 0) {
-                dvg_git_failed(reply, line, rc);
-                json_free(&row);
-                json_free(&branches_arr);
-                return;
-            }
-            dvg_strip(head);
+        rc = dvg_measure_branch(cwd, base, branch, now, head, sizeof(head),
+                                out, sizeof(out), line, sizeof(line), &ahead,
+                                &behind, &age_days, &merge_clean);
+        if (rc != 0) {
+            dvg_git_failed(reply, line, rc);
+            json_free(&row);
+            json_free(&branches_arr);
+            return;
         }
 
-        (void)snprintf(range_ahead, sizeof(range_ahead), "%s..%s", base, branch);
-        {
-            const char *argv_ahead[] = {"rev-list", "--count", range_ahead,
-                                        NULL};
-            rc = dvg_git(cwd, argv_ahead, out, sizeof(out), line, sizeof(line));
-            if (rc != 0) {
-                dvg_git_failed(reply, line, rc);
-                json_free(&row);
-                json_free(&branches_arr);
-                return;
-            }
-            dvg_strip(out);
-            ahead = dvg_parse_ll(out);
-        }
+        bin = dvg_bin_branch(ahead, max_age_days, age_days, behind,
+                             merge_clean, &land, &rebase, &del);
 
-        (void)snprintf(range_behind, sizeof(range_behind), "%s..%s", branch,
-                       base);
-        {
-            const char *argv_behind[] = {"rev-list", "--count", range_behind,
-                                         NULL};
-            rc = dvg_git(cwd, argv_behind, out, sizeof(out), line, sizeof(line));
-            if (rc != 0) {
-                dvg_git_failed(reply, line, rc);
-                json_free(&row);
-                json_free(&branches_arr);
-                return;
-            }
-            dvg_strip(out);
-            behind = dvg_parse_ll(out);
-        }
-
-        {
-            const char *argv_ct[] = {"log", "-1", "--format=%ct", branch,
-                                     NULL};
-            rc = dvg_git(cwd, argv_ct, out, sizeof(out), line, sizeof(line));
-            if (rc != 0) {
-                dvg_git_failed(reply, line, rc);
-                json_free(&row);
-                json_free(&branches_arr);
-                return;
-            }
-            dvg_strip(out);
-            {
-                long long committed = dvg_parse_ll(out);
-                long long delta = (long long)now - committed;
-                age_days = delta > 0 ? delta / 86400 : 0;
-            }
-        }
-
-        {
-            const char *argv_mt[] = {"merge-tree", "--write-tree", base,
-                                     branch, NULL};
-            rc = dvg_git(cwd, argv_mt, out, sizeof(out), line, sizeof(line));
-            merge_clean = rc == 0;
-        }
-
-        {
-            const char *bin;
-            if (ahead == 0 ||
-                (age_days > max_age_days && behind > 500))
-                bin = "delete";
-            else if (merge_clean)
-                bin = "land";
-            else
-                bin = "rebase";
-
-            if (strcmp(bin, "land") == 0)
-                land++;
-            else if (strcmp(bin, "rebase") == 0)
-                rebase++;
-            else
-                del++;
-
-            json_set_object(&row);
-            (void)json_push_kv_str(&row, "branch", branch);
-            (void)json_push_kv_str(&row, "head", head);
-            (void)json_push_kv_int(&row, "ahead", ahead);
-            (void)json_push_kv_int(&row, "behind", behind);
-            (void)json_push_kv_int(&row, "last_commit_age_days", age_days);
-            (void)json_push_kv_bool(&row, "merge_clean", merge_clean);
-            (void)json_push_kv_str(&row, "bin", bin);
-            (void)json_push_back(&branches_arr, &row);
-        }
+        json_set_object(&row);
+        (void)json_push_kv_str(&row, "branch", branch);
+        (void)json_push_kv_str(&row, "head", head);
+        (void)json_push_kv_int(&row, "ahead", ahead);
+        (void)json_push_kv_int(&row, "behind", behind);
+        (void)json_push_kv_int(&row, "last_commit_age_days", age_days);
+        (void)json_push_kv_bool(&row, "merge_clean", merge_clean);
+        (void)json_push_kv_str(&row, "bin", bin);
+        (void)json_push_back(&branches_arr, &row);
     }
     json_free(&row);
 
