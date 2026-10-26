@@ -55,6 +55,134 @@ ZCL_MODEL_READ_ROW_FN(blog_receipt_read_row,
 ZCL_MODEL_BIND_FN(blog_receipt_bind, struct db_blog_publication_receipt,
                   BLOG_PUBLICATION_RECEIPT_FIELDS)
 
+/* Lead-byte classes in code-point order: the mask strips the length prefix
+ * so the continuation bytes can fold into the code point, and a lead byte
+ * outside every row is invalid. */
+static const struct {
+    unsigned char lo;
+    unsigned char hi;
+    unsigned char mask;
+    unsigned char width;
+} blog_utf8_lead_specs[] = {
+    {0x00, 0x7f, 0x7f, 1},
+    {0xc2, 0xdf, 0x1f, 2},
+    {0xe0, 0xef, 0x0f, 3},
+    {0xf0, 0xf4, 0x07, 4},
+};
+
+/* Code-point ranges that render invisibly in HTML and Markdown. */
+static const struct {
+    uint32_t lo;
+    uint32_t hi;
+} blog_utf8_invisible_ranges[] = {
+    {0x7f, 0x7f},
+    {0x80, 0x9f},
+    {0x200b, 0x200f},
+    {0x202a, 0x202e},
+    {0x2066, 0x2069},
+    {0xfeff, 0xfeff},
+};
+
+static size_t blog_utf8_lead_byte_width(unsigned char lead, uint32_t *cp)
+{
+    const size_t spec_count =
+        sizeof(blog_utf8_lead_specs) / sizeof(blog_utf8_lead_specs[0]);
+    for (size_t i = 0; i < spec_count; i++) {
+        if (lead >= blog_utf8_lead_specs[i].lo &&
+            lead <= blog_utf8_lead_specs[i].hi) {
+            *cp = (uint32_t)(lead & blog_utf8_lead_specs[i].mask);
+            return blog_utf8_lead_specs[i].width;
+        }
+    }
+    return 0;
+}
+
+static bool blog_utf8_code_point_is_invisible(uint32_t cp)
+{
+    const size_t range_count =
+        sizeof(blog_utf8_invisible_ranges) /
+        sizeof(blog_utf8_invisible_ranges[0]);
+    for (size_t i = 0; i < range_count; i++) {
+        if (cp >= blog_utf8_invisible_ranges[i].lo &&
+            cp <= blog_utf8_invisible_ranges[i].hi)
+            return true;
+    }
+    return false;
+}
+
+/* Lowest code point each multi-byte width exists to encode: a code point
+ * below its width's floor has a shorter encoding, so the sequence that
+ * carries it is overlong. */
+static const struct {
+    size_t width;
+    uint32_t floor;
+} blog_utf8_width_floors[] = {
+    {2, 0x80},
+    {3, 0x800},
+    {4, 0x10000},
+};
+
+static bool blog_utf8_code_point_valid(uint32_t cp, size_t width)
+{
+    const size_t floor_count =
+        sizeof(blog_utf8_width_floors) / sizeof(blog_utf8_width_floors[0]);
+    for (size_t i = 0; i < floor_count; i++) {
+        if (width == blog_utf8_width_floors[i].width &&
+            cp < blog_utf8_width_floors[i].floor)
+            return false;
+    }
+    return cp <= 0x10ffff && (cp < 0xd800 || cp > 0xdfff);
+}
+
+static bool blog_utf8_code_point_text_safe(uint32_t cp, bool allow_multiline)
+{
+    if (cp < 0x20)
+        return allow_multiline && (cp == '\n' || cp == '\t');
+    /* Reject invisible/bidirectional controls that can spoof source,
+     * links, names, or proof text in HTML and Markdown renderers. */
+    return !blog_utf8_code_point_is_invisible(cp);
+}
+
+static bool blog_utf8_sequence_tail_valid(const unsigned char *p,
+                                          size_t width, uint32_t cp,
+                                          bool allow_multiline)
+{
+    for (size_t i = 1; i < width; i++) {
+        if ((p[i] & 0xc0) != 0x80)
+            return false;
+        cp = (cp << 6) | (uint32_t)(p[i] & 0x3f);
+    }
+    return blog_utf8_code_point_valid(cp, width) &&
+           blog_utf8_code_point_text_safe(cp, allow_multiline);
+}
+
+static size_t blog_utf8_sequence_valid(const unsigned char *p,
+                                       size_t avail, bool allow_multiline)
+{
+    uint32_t cp = 0;
+    size_t width = blog_utf8_lead_byte_width(*p, &cp);
+    bool valid = width != 0 && avail >= width &&
+                 blog_utf8_sequence_tail_valid(p, width, cp,
+                                               allow_multiline);
+    if (!valid)
+        return 0;
+    return width;
+}
+
+static bool blog_utf8_scanned_text_valid(const unsigned char *p,
+                                         const unsigned char *limit,
+                                         bool allow_multiline)
+{
+    while (p < limit) {
+        size_t width = blog_utf8_sequence_valid(p, (size_t)(limit - p),
+                                                allow_multiline);
+        if (width == 0)
+            return false;
+        p += width;
+    }
+    return true;
+}
+
 static bool bounded_utf8_text(const char *text, size_t max_len,
                               bool allow_multiline)
 {
@@ -63,52 +191,9 @@ static bool bounded_utf8_text(const char *text, size_t max_len,
     const char *end = memchr(text, 0, max_len + 1);
     if (!end || end == text)
         return false;
-    const unsigned char *p = (const unsigned char *)text;
-    const unsigned char *limit = (const unsigned char *)end;
-    while (p < limit) {
-        uint32_t cp = 0;
-        size_t width = 0;
-        if (*p < 0x80) {
-            cp = *p;
-            width = 1;
-        } else if (*p >= 0xc2 && *p <= 0xdf) {
-            cp = (uint32_t)(*p & 0x1f);
-            width = 2;
-        } else if (*p >= 0xe0 && *p <= 0xef) {
-            cp = (uint32_t)(*p & 0x0f);
-            width = 3;
-        } else if (*p >= 0xf0 && *p <= 0xf4) {
-            cp = (uint32_t)(*p & 0x07);
-            width = 4;
-        } else {
-            return false;
-        }
-        if ((size_t)(limit - p) < width)
-            return false;
-        for (size_t i = 1; i < width; i++) {
-            if ((p[i] & 0xc0) != 0x80)
-                return false;
-            cp = (cp << 6) | (uint32_t)(p[i] & 0x3f);
-        }
-        if ((width == 2 && cp < 0x80) ||
-            (width == 3 && cp < 0x800) ||
-            (width == 4 && cp < 0x10000) ||
-            cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff))
-            return false;
-        if (cp < 0x20) {
-            if (!(allow_multiline && (cp == '\n' || cp == '\t')))
-                return false;
-        } else if (cp == 0x7f || (cp >= 0x80 && cp <= 0x9f) ||
-                   (cp >= 0x200b && cp <= 0x200f) ||
-                   (cp >= 0x202a && cp <= 0x202e) ||
-                   (cp >= 0x2066 && cp <= 0x2069) || cp == 0xfeff) {
-            /* Reject invisible/bidirectional controls that can spoof source,
-             * links, names, or proof text in HTML and Markdown renderers. */
-            return false;
-        }
-        p += width;
-    }
-    return true;
+    return blog_utf8_scanned_text_valid((const unsigned char *)text,
+                                        (const unsigned char *)end,
+                                        allow_multiline);
 }
 
 bool db_blog_slug_valid(const char *slug)

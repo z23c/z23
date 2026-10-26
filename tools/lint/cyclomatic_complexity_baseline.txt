@@ -1063,7 +1063,6 @@ engine/jobs/src/utxo_apply_delta_repair.c:prove_exact_future_coin_suffix:19
 engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:42
 engine/jobs/src/validate_headers_stage.c:recheck_failed_rows:53
 engine/jobs/src/validate_headers_stage.c:step_validate:23
-engine/models/src/blog_post.c:bounded_utf8_text:38
 engine/models/src/build_proof_event.c:db_build_proof_event_root:23
 engine/models/src/database.c:node_db_open_impl:26
 engine/models/src/database_migrate_features.c:migration_schema_object_matches:20
