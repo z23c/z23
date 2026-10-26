@@ -163,23 +163,19 @@ static bool witness_download_queue_starved(int64_t target_at_detect)
            !download_work_pending(inflight, queued);
 }
 
-static bool detail_download_queue_starved(struct json_value *out)
-{
-    struct connman *cm = sync_monitor_connman();
-    struct download_manager *dm = sync_monitor_download_manager();
-    uint64_t requested = 0;
-    uint64_t received = 0;
-    uint64_t timed_out = 0;
-    uint64_t inflight = 0;
-    uint64_t queued = 0;
-    struct dl_diagnostics diag;
-    dl_get_diagnostics(dm, &diag);
-    if (dm) {
-        dl_get_stats(dm, &requested, &received, &timed_out, &inflight,
-                     &queued);
-    }
+/* detail_download_queue_starved() emits its JSON fields through the helpers
+ * below. Each helper threads the running `ok` through the same
+ * `ok = ok && ...` chain, so the short-circuit contract of the original
+ * single chain is preserved exactly: once a push fails, no later field is
+ * pushed and no later value expression (atomic loads, peer-count call,
+ * assign-result name lookup) is evaluated. */
 
-    bool ok = true;
+/* Environment fields: sync state, manager presence, peer count and the
+ * trigger constants. */
+static bool detail_push_environment_fields(struct json_value *out, bool ok,
+                                           struct connman *cm,
+                                           struct download_manager *dm)
+{
     ok = ok && json_push_kv_str(out, "sync_state",
                                 sync_state_name(sync_get_state()));
     ok = ok && json_push_kv_bool(out, "has_connman", cm != NULL);
@@ -191,6 +187,12 @@ static bool detail_download_queue_starved(struct json_value *out)
                                     QUEUE_STARVED_RATIO_DEN);
     ok = ok && json_push_kv_int(out, "trigger_secs",
                                 QUEUE_STARVED_TRIGGER_SECS);
+    return ok;
+}
+
+/* Counters captured when the episode was detected. */
+static bool detail_push_detect_snapshot(struct json_value *out, bool ok)
+{
     ok = ok && json_push_kv_int(out, "first_seen_unix",
                                 atomic_load(&g_first_seen));
     ok = ok && json_push_kv_int(out, "detect_age_s",
@@ -208,7 +210,18 @@ static bool detail_download_queue_starved(struct json_value *out)
                                 (int64_t)atomic_load(
                                     &g_inflight_at_detect));
     ok = ok && json_push_kv_int(out, "queued_at_detect",
-                                (int64_t)atomic_load(&g_queued_at_detect));
+                                (int64_t)atomic_load(
+                                    &g_queued_at_detect));
+    return ok;
+}
+
+/* Live download counters read at detail time. */
+static bool detail_push_current_counters(struct json_value *out, bool ok,
+                                         uint64_t requested,
+                                         uint64_t received,
+                                         uint64_t timed_out,
+                                         uint64_t inflight, uint64_t queued)
+{
     ok = ok && json_push_kv_int(out, "current_requested",
                                 (int64_t)requested);
     ok = ok && json_push_kv_int(out, "current_received",
@@ -219,6 +232,12 @@ static bool detail_download_queue_starved(struct json_value *out)
                                 (int64_t)inflight);
     ok = ok && json_push_kv_int(out, "current_queued",
                                 (int64_t)queued);
+    return ok;
+}
+
+/* Counters captured by the last witness run. */
+static bool detail_push_witness_snapshot(struct json_value *out, bool ok)
+{
     ok = ok && json_push_kv_int(out, "last_witness_requested",
                                 (int64_t)atomic_load(
                                     &g_last_witness_requested));
@@ -238,6 +257,15 @@ static bool detail_download_queue_starved(struct json_value *out)
         out, "witness_request_counter_advanced",
         atomic_load(&g_last_witness_requested) >
             atomic_load(&g_requested_at_detect));
+    return ok;
+}
+
+/* Pending-work flags; the two locals are computed unconditionally, matching
+ * the original inline order between the witness and diagnostics fields. */
+static bool detail_push_pending_flags(struct json_value *out, bool ok,
+                                      struct download_manager *dm,
+                                      uint64_t inflight, uint64_t queued)
+{
     bool pending = dm && download_work_pending(inflight, queued);
     bool witness_pending = download_work_pending(
         atomic_load(&g_last_witness_inflight),
@@ -245,33 +273,76 @@ static bool detail_download_queue_starved(struct json_value *out)
     ok = ok && json_push_kv_bool(out, "pending_download_work", pending);
     ok = ok && json_push_kv_bool(out, "witness_download_work_drained",
                                  !witness_pending);
+    return ok;
+}
+
+/* Diagnostic counters and the last assign result name. */
+static bool detail_push_dl_diagnostics(struct json_value *out, bool ok,
+                                       const struct dl_diagnostics *diag)
+{
     ok = ok && json_push_kv_int(out, "total_orphaned",
-                                (int64_t)diag.total_orphaned);
+                                (int64_t)diag->total_orphaned);
     ok = ok && json_push_kv_int(out, "accounting_drift",
-                                diag.accounting_drift);
+                                diag->accounting_drift);
     ok = ok && json_push_kv_int(out, "assign_attempts",
-                                (int64_t)diag.assign_attempts);
+                                (int64_t)diag->assign_attempts);
     ok = ok && json_push_kv_int(out, "assign_successes",
-                                (int64_t)diag.assign_successes);
+                                (int64_t)diag->assign_successes);
     ok = ok && json_push_kv_int(out, "assign_zero_results",
-                                (int64_t)diag.assign_zero_results);
+                                (int64_t)diag->assign_zero_results);
     ok = ok && json_push_kv_str(out, "last_assign_result",
                                 dl_assign_result_name(
-                                    diag.last_assign_result));
+                                    diag->last_assign_result));
+    return ok;
+}
+
+/* Last assign attempt details plus in-flight age and overdue counts. */
+static bool detail_push_last_assign_details(struct json_value *out, bool ok,
+                                            const struct dl_diagnostics
+                                                *diag)
+{
     ok = ok && json_push_kv_int(out, "last_assign_peer_id",
-                                diag.last_assign_peer_id);
+                                diag->last_assign_peer_id);
     ok = ok && json_push_kv_int(out, "last_assign_available",
-                                (int64_t)diag.last_assign_available);
+                                (int64_t)diag->last_assign_available);
     ok = ok && json_push_kv_int(out, "last_assign_assigned",
-                                (int64_t)diag.last_assign_assigned);
+                                (int64_t)diag->last_assign_assigned);
     ok = ok && json_push_kv_int(out, "last_assign_queue_len",
-                                (int64_t)diag.last_assign_queue_len);
+                                (int64_t)diag->last_assign_queue_len);
     ok = ok && json_push_kv_int(out, "last_assign_active",
-                                (int64_t)diag.last_assign_active);
+                                (int64_t)diag->last_assign_active);
     ok = ok && json_push_kv_int(out, "oldest_in_flight_age_seconds",
-                                diag.oldest_in_flight_age_seconds);
+                                diag->oldest_in_flight_age_seconds);
     ok = ok && json_push_kv_int(out, "overdue_in_flight",
-                                (int64_t)diag.overdue_in_flight);
+                                (int64_t)diag->overdue_in_flight);
+    return ok;
+}
+
+static bool detail_download_queue_starved(struct json_value *out)
+{
+    struct connman *cm = sync_monitor_connman();
+    struct download_manager *dm = sync_monitor_download_manager();
+    uint64_t requested = 0;
+    uint64_t received = 0;
+    uint64_t timed_out = 0;
+    uint64_t inflight = 0;
+    uint64_t queued = 0;
+    struct dl_diagnostics diag;
+    dl_get_diagnostics(dm, &diag);
+    if (dm) {
+        dl_get_stats(dm, &requested, &received, &timed_out, &inflight,
+                     &queued);
+    }
+
+    bool ok = true;
+    ok = detail_push_environment_fields(out, ok, cm, dm);
+    ok = detail_push_detect_snapshot(out, ok);
+    ok = detail_push_current_counters(out, ok, requested, received,
+                                      timed_out, inflight, queued);
+    ok = detail_push_witness_snapshot(out, ok);
+    ok = detail_push_pending_flags(out, ok, dm, inflight, queued);
+    ok = detail_push_dl_diagnostics(out, ok, &diag);
+    ok = detail_push_last_assign_details(out, ok, &diag);
     ok = ok && json_push_kv_str(
         out, "remedy_contract",
         "kick_local_sync is witnessed when total_requested advances past requested_at_detect or the pending queue/in-flight work drains; DEFERRED (not attempted) whenever a permanent fold blocker is active, since a queue kick can never clear one");
