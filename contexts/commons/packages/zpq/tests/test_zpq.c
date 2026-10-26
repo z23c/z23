@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
 
 #define CHECK(cond) do { \
     if (!(cond)) { \
@@ -216,12 +218,143 @@ static void test_heapsort_property(void)
     }
 }
 
+static void test_cli(void);
+
 int main(void)
 {
+    test_cli();
     test_basic();
     test_from_and_replace();
     test_alloc_failure();
     test_heapsort_property();
     puts("test_zpq: all groups passed (basic from allocfail heapproperty)");
     return 0;
+}
+
+static FILE *cli_sink;
+static size_t cli_flushes, cli_storage_allocs, cli_storage_frees;
+static struct test_alloc cli_alloc;
+static FILE *real_stdout(void) { return stdout; }
+static zpq *cli_create(zpq_cmp cmp, void *ctx, zpq_alloc ignored)
+{
+    (void)ignored;
+    cli_alloc = (struct test_alloc){0, 0, SIZE_MAX};
+    return zpq_create(cmp, ctx, (zpq_alloc){ta_malloc, ta_free, &cli_alloc});
+}
+static void *cli_malloc(size_t n)
+{
+    void *p = malloc(n);
+    if (p) cli_storage_allocs++;
+    return p;
+}
+static void cli_free(void *p)
+{
+    if (p) cli_storage_frees++;
+    free(p);
+}
+[[maybe_unused]] static int cli_flush(FILE *stream)
+{
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+#undef stdout
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define fflush cli_flush
+#define malloc cli_malloc
+#define free cli_free
+#define zpq_create cli_create
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef zpq_create
+#undef malloc
+#undef free
+#undef fflush
+#undef printf
+#undef stdout
+#define stdout real_stdout()
+
+static void cli_case(int argc, char **args, int status, const char *want,
+                      bool stale_errno)
+{
+    FILE *sink = tmpfile();
+    CHECK(sink != NULL);
+    cli_sink = sink;
+    cli_flushes = cli_storage_allocs = cli_storage_frees = 0;
+    errno = stale_errno ? ERANGE : 0;
+    int rc = embedded_cli_main(argc, args);
+    cli_sink = stdout;
+    CHECK(rc == status);
+    CHECK(cli_alloc.mallocs == cli_alloc.frees);
+    CHECK(cli_storage_allocs == cli_storage_frees);
+    if (!*want) CHECK(cli_flushes == 0);
+    char got[256];
+    rewind(sink);
+    size_t n = fread(got, 1, sizeof got, sink);
+    CHECK(!ferror(sink) && n == strlen(want) && !memcmp(got, want, n));
+    CHECK(fclose(sink) == 0);
+}
+static void cli_numbers(void)
+{
+    const char *bad[] = {"", " \t", "garbage", "1junk", "1 ", "0x10",
+        "999999999999999999999999999999999999", "-999999999999999999999999999999999999"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char *args[] = {"zpq", "push", (char *)bad[i], "pop", NULL};
+        cli_case(4, args, 2, "", false);
+    }
+    char minimum[64], maximum[64], want[160];
+    snprintf(minimum, sizeof minimum, "%ld", LONG_MIN);
+    snprintf(maximum, sizeof maximum, "%ld", LONG_MAX);
+    snprintf(want, sizeof want, "%s\n%s\n", minimum, maximum);
+    char *bounds[] = {"zpq", "push", maximum, "push", minimum, "pop", "pop", NULL};
+    cli_case(7, bounds, 0, want, false);
+    char *valid[] = {"zpq", "push", " \t+7", "push", "-2", "push", "-0",
+                     "peek", "pop", "len", "pop", "pop", NULL};
+    cli_case(12, valid, 0, "-2\n-2\n2\n0\n7\n", true);
+    char *late[] = {"zpq", "push", "7", "pop", "push", "junk", NULL};
+    cli_case(6, late, 2, "7\n", false);
+    char *unknown[] = {"zpq", "len", "unknown", NULL};
+    cli_case(3, unknown, 2, "0\n", false);
+}
+static void cli_sink_failure(const char *op, bool buffered, bool late_error)
+{
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *sink = fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r");
+    CHECK(sink != NULL);
+    char buffer[4096];
+    if (buffered) CHECK(setvbuf(sink, buffer, _IOFBF, sizeof buffer) == 0);
+    char *args[] = {"zpq", "push", "7", (char *)op, "unknown", NULL};
+    cli_sink = sink;
+    cli_storage_allocs = cli_storage_frees = 0;
+    int rc = embedded_cli_main(late_error ? 5 : 4, args);
+    cli_sink = stdout;
+    CHECK(rc == 1 && ferror(sink));
+    CHECK(cli_alloc.mallocs == cli_alloc.frees);
+    CHECK(cli_storage_allocs == cli_storage_frees);
+    (void)fclose(sink);
+}
+static void test_cli(void)
+{
+    cli_numbers();
+    char *empty[] = {"zpq", "pop", "peek", NULL};
+    cli_case(3, empty, 0, "", false);
+    char *push[] = {"zpq", "push", "1", NULL};
+    cli_case(3, push, 0, "", false);
+    char *missing[] = {"zpq", "push", NULL};
+    cli_case(2, missing, 2, "", false);
+    char *usage[] = {"zpq", NULL};
+    cli_case(1, usage, 2, "", false);
+    const char *ops[] = {"pop", "peek", "len"};
+    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++) {
+        cli_sink_failure(ops[i], false, false);
+#ifdef __linux__
+        cli_sink_failure(ops[i], true, false);
+        cli_sink_failure(ops[i], true, true);
+#endif
+    }
 }
