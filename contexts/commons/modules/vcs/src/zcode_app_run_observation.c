@@ -32,6 +32,54 @@ const char *vcs_zcode_app_run_observation_error_string(
     return "unknown";
 }
 
+/* True when all eight 32-byte roots have at least one nonzero byte. */
+static bool observation_roots_all_set(
+    const struct vcs_zcode_app_run_observation_v1 *observation)
+{
+    const uint8_t *const roots[] = {
+        observation->task_root, observation->candidate_root,
+        observation->build_receipt_root, observation->artifact_root,
+        observation->invocation_root, observation->stdout_root,
+        observation->stderr_root, observation->confinement_root,
+    };
+    bool all_set = true;
+    for (size_t i = 0; all_set && i < sizeof(roots) / sizeof(roots[0]); i++)
+        all_set = zcl_bytes_any_set(roots[i], 32);
+    return all_set;
+}
+
+/* True when the flags field breaks the v1 flag rules. */
+static bool observation_flags_invalid(uint16_t flags)
+{
+    return (flags & ~VCS_ZCODE_APP_RUN_KNOWN_FLAGS) != 0 ||
+           (flags & VCS_ZCODE_APP_RUN_ATTEMPTED) == 0 ||
+           ((flags & VCS_ZCODE_APP_RUN_LAUNCHED) != 0 &&
+            (flags & VCS_ZCODE_APP_RUN_ATTEMPTED) == 0) ||
+           ((flags & VCS_ZCODE_APP_RUN_EXITED) != 0 &&
+            (flags & VCS_ZCODE_APP_RUN_LAUNCHED) == 0) ||
+           ((flags & (VCS_ZCODE_APP_RUN_OUTPUT_COMPLETE |
+                      VCS_ZCODE_APP_RUN_FULL_ISOLATION |
+                      VCS_ZCODE_APP_RUN_NETWORK_DENIED)) != 0 &&
+            (flags & VCS_ZCODE_APP_RUN_LAUNCHED) == 0);
+}
+
+/* True when exit_status is invalid for the run's EXITED state. */
+static bool observation_exit_status_invalid(
+    const struct vcs_zcode_app_run_observation_v1 *observation, bool exited)
+{
+    return (exited && (observation->exit_status < -255 ||
+                       observation->exit_status > 255)) ||
+           (!exited && observation->exit_status != INT32_MIN);
+}
+
+/* True when started/finished timestamps fail the time-order rule. */
+static bool observation_times_invalid(
+    const struct vcs_zcode_app_run_observation_v1 *observation)
+{
+    return observation->started_unix <= 0 ||
+           observation->finished_unix < observation->started_unix;
+}
+
 enum vcs_zcode_app_run_observation_error
 vcs_zcode_app_run_observation_v1_validate(
     const struct vcs_zcode_app_run_observation_v1 *observation)
@@ -40,34 +88,15 @@ vcs_zcode_app_run_observation_v1_validate(
     if (observation->schema_version !=
         VCS_ZCODE_APP_RUN_OBSERVATION_VERSION)
         return VCS_ZCODE_APP_RUN_ERR_VERSION;
-    const uint8_t *const roots[] = {
-        observation->task_root, observation->candidate_root,
-        observation->build_receipt_root, observation->artifact_root,
-        observation->invocation_root, observation->stdout_root,
-        observation->stderr_root, observation->confinement_root,
-    };
-    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!zcl_bytes_any_set(roots[i], 32))
-            return VCS_ZCODE_APP_RUN_ERR_ROOT_ZERO;
+    if (!observation_roots_all_set(observation))
+        return VCS_ZCODE_APP_RUN_ERR_ROOT_ZERO;
     uint16_t flags = observation->flags;
-    if ((flags & ~VCS_ZCODE_APP_RUN_KNOWN_FLAGS) != 0 ||
-        (flags & VCS_ZCODE_APP_RUN_ATTEMPTED) == 0 ||
-        ((flags & VCS_ZCODE_APP_RUN_LAUNCHED) != 0 &&
-         (flags & VCS_ZCODE_APP_RUN_ATTEMPTED) == 0) ||
-        ((flags & VCS_ZCODE_APP_RUN_EXITED) != 0 &&
-         (flags & VCS_ZCODE_APP_RUN_LAUNCHED) == 0) ||
-        ((flags & (VCS_ZCODE_APP_RUN_OUTPUT_COMPLETE |
-                   VCS_ZCODE_APP_RUN_FULL_ISOLATION |
-                   VCS_ZCODE_APP_RUN_NETWORK_DENIED)) != 0 &&
-         (flags & VCS_ZCODE_APP_RUN_LAUNCHED) == 0))
+    if (observation_flags_invalid(flags))
         return VCS_ZCODE_APP_RUN_ERR_FLAGS;
     bool exited = (flags & VCS_ZCODE_APP_RUN_EXITED) != 0;
-    if ((exited && (observation->exit_status < -255 ||
-                    observation->exit_status > 255)) ||
-        (!exited && observation->exit_status != INT32_MIN))
+    if (observation_exit_status_invalid(observation, exited))
         return VCS_ZCODE_APP_RUN_ERR_EXIT_STATUS;
-    if (observation->started_unix <= 0 ||
-        observation->finished_unix < observation->started_unix)
+    if (observation_times_invalid(observation))
         return VCS_ZCODE_APP_RUN_ERR_TIME_ORDER;
     if (zcl_bytes_any_set(observation->reserved,
                           sizeof(observation->reserved)))
