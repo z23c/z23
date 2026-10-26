@@ -102,6 +102,105 @@ static bool byz_seed_wire_tip(struct simnet_wire *wire)
     return true;
 }
 
+/* Climb one optional rung of the sync-state ladder into headers download.
+ * An inactive rung is a no-op; an active rung returns sync_set_state's own
+ * result so a failed transition stops the climb when chained with &&. */
+static bool byz_sync_headers_rung(bool active, const char *reason)
+{
+    if (!active)
+        return true;
+    return sync_set_state(SYNC_HEADERS_DOWNLOAD, reason);
+}
+
+/* Terminal leg of the at-tip climb: reorg, snapshot receive, and any other
+ * state all land on the same at-tip transition, in the original order. */
+static bool byz_sync_land_at_tip(void)
+{
+    if (sync_get_state() == SYNC_REORG)
+        return sync_set_state(SYNC_AT_TIP,
+                              "simnet-wire byz at-tip");
+    if (sync_get_state() == SYNC_SNAPSHOT_RECEIVE)
+        return sync_set_state(SYNC_AT_TIP,
+                              "simnet-wire byz at-tip");
+    return sync_set_state(SYNC_AT_TIP, "simnet-wire byz at-tip");
+}
+
+static bool byz_sync_enter_headers_download(enum sync_state cur)
+{
+    if (cur == SYNC_IDLE)
+        return sync_set_state(SYNC_HEADERS_DOWNLOAD,
+                              "simnet-wire byz restore");
+    if (cur == SYNC_FINDING_PEERS)
+        return sync_set_state(SYNC_HEADERS_DOWNLOAD,
+                              "simnet-wire byz restore");
+    return false;
+}
+
+/* Blocks download is entered directly, or from idle via a headers-download
+ * rung whose own result gates the final transition. */
+static bool byz_sync_enter_blocks_download(enum sync_state cur)
+{
+    if (cur != SYNC_IDLE)
+        return sync_set_state(SYNC_BLOCKS_DOWNLOAD,
+                              "simnet-wire byz restore");
+    return sync_set_state(SYNC_HEADERS_DOWNLOAD,
+                          "simnet-wire byz restore") &&
+           sync_set_state(SYNC_BLOCKS_DOWNLOAD,
+                          "simnet-wire byz restore");
+}
+
+/* Connecting blocks first climbs the optional headers rung, then lands
+ * from headers or blocks download; any other state refuses. */
+static bool byz_sync_enter_connecting_blocks(enum sync_state cur)
+{
+    return byz_sync_headers_rung(cur == SYNC_IDLE,
+                                 "simnet-wire byz restore") &&
+           (sync_get_state() == SYNC_HEADERS_DOWNLOAD ||
+            sync_get_state() == SYNC_BLOCKS_DOWNLOAD) &&
+           sync_set_state(SYNC_CONNECTING_BLOCKS,
+                          "simnet-wire byz restore");
+}
+
+/* At-tip climbs two optional headers rungs (from idle, then from finding
+ * peers) before landing on the terminal transition. */
+static bool byz_sync_enter_at_tip(enum sync_state cur)
+{
+    return byz_sync_headers_rung(cur == SYNC_IDLE,
+                                 "simnet-wire byz at-tip") &&
+           byz_sync_headers_rung(sync_get_state() == SYNC_FINDING_PEERS,
+                                 "simnet-wire byz at-tip") &&
+           byz_sync_land_at_tip();
+}
+
+/* Forward half of byz_set_sync_state: one branch per target, in the
+ * original check order, after cur has been normalized off SYNC_AT_TIP and
+ * SYNC_FAILED. */
+static bool byz_sync_advance_towards(enum sync_state target,
+                                     enum sync_state cur)
+{
+    if (target == SYNC_IDLE)
+        return sync_set_state(SYNC_IDLE, "simnet-wire byz restore");
+    if (target == SYNC_FINDING_PEERS)
+        return cur == SYNC_IDLE
+            ? sync_set_state(SYNC_FINDING_PEERS,
+                             "simnet-wire byz restore")
+            : false;
+    if (target == SYNC_HEADERS_DOWNLOAD)
+        return byz_sync_enter_headers_download(cur);
+    if (target == SYNC_BLOCKS_DOWNLOAD)
+        return byz_sync_enter_blocks_download(cur);
+    if (target == SYNC_CONNECTING_BLOCKS)
+        return byz_sync_enter_connecting_blocks(cur);
+    if (target == SYNC_AT_TIP)
+        return byz_sync_enter_at_tip(cur);
+    if (target == SYNC_SNAPSHOT_RECEIVE)
+        return cur == SYNC_IDLE
+            ? sync_set_state(SYNC_SNAPSHOT_RECEIVE,
+                             "simnet-wire byz restore")
+            : false;
+    return true;
+}
+
 static bool byz_set_sync_state(enum sync_state target)
 {
     enum sync_state cur = sync_get_state();
@@ -117,66 +216,7 @@ static bool byz_set_sync_state(enum sync_state target)
             return false;
         cur = SYNC_IDLE;
     }
-    if (target == SYNC_IDLE)
-        return sync_set_state(SYNC_IDLE, "simnet-wire byz restore");
-    if (target == SYNC_FINDING_PEERS)
-        return cur == SYNC_IDLE
-            ? sync_set_state(SYNC_FINDING_PEERS,
-                             "simnet-wire byz restore")
-            : false;
-    if (target == SYNC_HEADERS_DOWNLOAD) {
-        if (cur == SYNC_IDLE)
-            return sync_set_state(SYNC_HEADERS_DOWNLOAD,
-                                  "simnet-wire byz restore");
-        if (cur == SYNC_FINDING_PEERS)
-            return sync_set_state(SYNC_HEADERS_DOWNLOAD,
-                                  "simnet-wire byz restore");
-        return false;
-    }
-    if (target == SYNC_BLOCKS_DOWNLOAD) {
-        if (cur == SYNC_IDLE &&
-            !sync_set_state(SYNC_HEADERS_DOWNLOAD,
-                            "simnet-wire byz restore"))
-            return false;
-        return sync_set_state(SYNC_BLOCKS_DOWNLOAD,
-                              "simnet-wire byz restore");
-    }
-    if (target == SYNC_CONNECTING_BLOCKS) {
-        if (cur == SYNC_IDLE &&
-            !sync_set_state(SYNC_HEADERS_DOWNLOAD,
-                            "simnet-wire byz restore"))
-            return false;
-        if (sync_get_state() == SYNC_HEADERS_DOWNLOAD)
-            return sync_set_state(SYNC_CONNECTING_BLOCKS,
-                                  "simnet-wire byz restore");
-        if (sync_get_state() == SYNC_BLOCKS_DOWNLOAD)
-            return sync_set_state(SYNC_CONNECTING_BLOCKS,
-                                  "simnet-wire byz restore");
-        return false;
-    }
-    if (target == SYNC_AT_TIP) {
-        if (cur == SYNC_IDLE &&
-            !sync_set_state(SYNC_HEADERS_DOWNLOAD,
-                            "simnet-wire byz at-tip"))
-            return false;
-        if (sync_get_state() == SYNC_FINDING_PEERS &&
-            !sync_set_state(SYNC_HEADERS_DOWNLOAD,
-                            "simnet-wire byz at-tip"))
-            return false;
-        if (sync_get_state() == SYNC_REORG)
-            return sync_set_state(SYNC_AT_TIP,
-                                  "simnet-wire byz at-tip");
-        if (sync_get_state() == SYNC_SNAPSHOT_RECEIVE)
-            return sync_set_state(SYNC_AT_TIP,
-                                  "simnet-wire byz at-tip");
-        return sync_set_state(SYNC_AT_TIP, "simnet-wire byz at-tip");
-    }
-    if (target == SYNC_SNAPSHOT_RECEIVE)
-        return cur == SYNC_IDLE
-            ? sync_set_state(SYNC_SNAPSHOT_RECEIVE,
-                             "simnet-wire byz restore")
-            : false;
-    return true;
+    return byz_sync_advance_towards(target, cur);
 }
 
 static bool byz_force_at_tip(struct simnet_wire *wire)
@@ -272,6 +312,55 @@ static bool byz_record_unchanged(struct simnet_wire *wire)
     return true;
 }
 
+/* Build the byzantine artifact for the requested tier into wire->byz_sim,
+ * returning the tier's own build result. */
+static bool byz_build_case_for_tier(struct simnet_wire *wire,
+                                    enum simnet_byzantine_class kind,
+                                    enum simnet_byzantine_tier tier)
+{
+    return tier == SIMNET_BYZ_TIER_CONNECT_BLOCK
+        ? byz_build_connect_case(kind, &wire->byz_sim, &wire->byz_block)
+        : byz_build_header_case(kind, &wire->byz_sim, &wire->byz_header);
+}
+
+/* Seed the wire tip, snapshot the monitor and byzantine-case baselines,
+ * and open the observation, in the original order. */
+static bool byz_prepare_baselines(struct simnet_wire *wire,
+                                  enum simnet_byzantine_class kind,
+                                  enum simnet_byzantine_tier tier)
+{
+    bool ok = byz_seed_wire_tip(wire) &&
+              simnet_wire_tip_hash(wire, &wire->monitor.baseline_tip) &&
+              simnet_wire_coins_digest(wire,
+                                       &wire->monitor.baseline_coins);
+    if (ok) {
+        byz_init_observation(wire, kind, tier);
+        ok = simnet_tip_hash(&wire->byz_sim, &wire->byz_baseline_tip) &&
+             byz_digest(&wire->byz_sim, &wire->byz_baseline_coins);
+    }
+    return ok;
+}
+
+/* Mark the peer as the running adversary and, for peer 0 that has not yet
+ * versioned, return the result of the initial version enqueue. */
+static bool byz_arm_peer_adversary(struct simnet_wire *wire, size_t peer_id,
+                                   enum simnet_byzantine_class kind,
+                                   enum simnet_byzantine_tier tier)
+{
+    struct wire_peer *peer = &wire->peers[peer_id];
+    peer->byz_kind = kind;
+    peer->byz_kind_set = true;
+    peer->byz_injected = false;
+    peer->adversary_started = true;
+    peer->adversary_done = false;
+    peer->link.open = true;
+    if (tier == SIMNET_BYZ_TIER_CONNECT_BLOCK)
+        peer->ban_expected = true;
+    if (peer_id == 0 && !peer->version_sent)
+        return simnet_wire_enqueue_version(wire, peer_id);
+    return true;
+}
+
 bool simnet_wire_byzantine_start(struct simnet_wire *wire, size_t peer_id,
                                  enum simnet_byzantine_class kind,
                                  enum simnet_byzantine_tier tier)
@@ -292,37 +381,14 @@ bool simnet_wire_byzantine_start(struct simnet_wire *wire, size_t peer_id,
     simnet_use_seed_tape(&wire->byz_sim, wire->tape);
     wire->byz_sim_ready = true;
 
-    bool built = tier == SIMNET_BYZ_TIER_CONNECT_BLOCK
-        ? byz_build_connect_case(kind, &wire->byz_sim, &wire->byz_block)
-        : byz_build_header_case(kind, &wire->byz_sim, &wire->byz_header);
-    if (!built)
+    if (!byz_build_case_for_tier(wire, kind, tier))
         return false;
     wire->byz_block_ready = tier == SIMNET_BYZ_TIER_CONNECT_BLOCK;
     wire->byz_header_ready = tier == SIMNET_BYZ_TIER_HEADER_ADMISSION;
 
-    if (!byz_seed_wire_tip(wire))
+    if (!byz_prepare_baselines(wire, kind, tier))
         return false;
-    if (!simnet_wire_tip_hash(wire, &wire->monitor.baseline_tip) ||
-        !simnet_wire_coins_digest(wire, &wire->monitor.baseline_coins))
-        return false;
-
-    byz_init_observation(wire, kind, tier);
-    if (!simnet_tip_hash(&wire->byz_sim, &wire->byz_baseline_tip) ||
-        !byz_digest(&wire->byz_sim, &wire->byz_baseline_coins))
-        return false;
-
-    struct wire_peer *peer = &wire->peers[peer_id];
-    peer->byz_kind = kind;
-    peer->byz_kind_set = true;
-    peer->byz_injected = false;
-    peer->adversary_started = true;
-    peer->adversary_done = false;
-    peer->link.open = true;
-    if (tier == SIMNET_BYZ_TIER_CONNECT_BLOCK)
-        peer->ban_expected = true;
-    if (peer_id == 0 && !peer->version_sent)
-        return simnet_wire_enqueue_version(wire, peer_id);
-    return true;
+    return byz_arm_peer_adversary(wire, peer_id, kind, tier);
 }
 
 static bool byz_enqueue_block(struct simnet_wire *wire, size_t peer_id)

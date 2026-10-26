@@ -1145,8 +1145,6 @@ engine/modules/sim/src/simnet_wire.c:simnet_wire_idle:26
 engine/modules/sim/src/simnet_wire.c:simnet_wire_peer_handle_frame:20
 engine/modules/sim/src/simnet_wire.c:simnet_wire_pump_to_nut:17
 engine/modules/sim/src/simnet_wire.c:simnet_wire_tick:16
-engine/modules/sim/src/simnet_wire_byzantine.c:byz_set_sync_state:30
-engine/modules/sim/src/simnet_wire_byzantine.c:simnet_wire_byzantine_start:17
 engine/modules/storage/src/anchor_kv.c:anchor_kv_get:20
 engine/modules/storage/src/anchor_kv.c:anchor_kv_initialize_history:25
 engine/modules/storage/src/anchor_kv.c:anchor_kv_latest_tree:21
