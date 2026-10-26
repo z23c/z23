@@ -140,12 +140,10 @@ static enum boot_mesh_route_result route_step_locked(
     return BOOT_MESH_ROUTE_PENDING;
 }
 
-static enum boot_mesh_route_observation route_observe_peer(
+static size_t route_collect_candidate_peers(
     struct net_manager *manager, const struct net_address *endpoint,
-    const uint8_t expected_static[32], struct p2p_node **matched_out,
-    struct noise_transport_snapshot *session_out)
+    struct p2p_node *peers[CONNMAN_DHT_HINT_MAX])
 {
-    struct p2p_node *peers[CONNMAN_DHT_HINT_MAX];
     size_t count = 0;
     zcl_mutex_lock(&manager->cs_nodes);
     for (size_t i = 0; i < manager->num_nodes && count < CONNMAN_DHT_HINT_MAX;
@@ -158,7 +156,14 @@ static enum boot_mesh_route_observation route_observe_peer(
         p2p_node_add_ref(peer);
     }
     zcl_mutex_unlock(&manager->cs_nodes);
+    return count;
+}
 
+static enum boot_mesh_route_observation route_classify_peer_snapshots(
+    struct p2p_node *peers[CONNMAN_DHT_HINT_MAX], size_t count,
+    const uint8_t expected_static[32], struct p2p_node **matched_out,
+    struct noise_transport_snapshot *session_out)
+{
     enum boot_mesh_route_observation observed = BOOT_MESH_ROUTE_OBS_NONE;
     struct p2p_node *matched = NULL;
     for (size_t i = 0; i < count; i++) {
@@ -191,6 +196,20 @@ static enum boot_mesh_route_observation route_observe_peer(
             observed = BOOT_MESH_ROUTE_OBS_CONNECTING;
         }
     }
+    *matched_out = matched;
+    return observed;
+}
+
+static enum boot_mesh_route_observation route_observe_peer(
+    struct net_manager *manager, const struct net_address *endpoint,
+    const uint8_t expected_static[32], struct p2p_node **matched_out,
+    struct noise_transport_snapshot *session_out)
+{
+    struct p2p_node *peers[CONNMAN_DHT_HINT_MAX];
+    size_t count = route_collect_candidate_peers(manager, endpoint, peers);
+    struct p2p_node *matched = NULL;
+    enum boot_mesh_route_observation observed = route_classify_peer_snapshots(
+        peers, count, expected_static, &matched, session_out);
     for (size_t i = 0; i < count; i++)
         if (peers[i] != matched)
             p2p_node_release(peers[i]);
@@ -211,6 +230,18 @@ static bool route_resources_admit(struct boot_svc_ctx *svc)
                               SUBORDINATE_WORK_ADMIT;
 }
 
+static bool route_acquire_args_valid(
+    struct boot_svc_ctx *svc, const struct db_mesh_pairing *pairing,
+    struct p2p_node **peer_out, struct noise_transport_snapshot *session_out,
+    uint64_t wall_unix, uint64_t monotonic_ms)
+{
+    if (!svc || !svc->connman || !svc->msg_processor ||
+        !svc->msg_processor->net_mgr || !pairing || !peer_out || !session_out ||
+        wall_unix == 0 || monotonic_ms == 0)
+        return false;
+    return true;
+}
+
 enum boot_mesh_route_result boot_mesh_route_acquire(
     struct boot_svc_ctx *svc, const struct db_mesh_pairing *pairing,
     uint64_t wall_unix, uint64_t monotonic_ms, struct p2p_node **peer_out,
@@ -218,9 +249,8 @@ enum boot_mesh_route_result boot_mesh_route_acquire(
 {
     if (peer_out)
         *peer_out = NULL;
-    if (!svc || !svc->connman || !svc->msg_processor ||
-        !svc->msg_processor->net_mgr || !pairing || !peer_out || !session_out ||
-        wall_unix == 0 || monotonic_ms == 0)
+    if (!route_acquire_args_valid(svc, pairing, peer_out, session_out,
+                                  wall_unix, monotonic_ms))
         return BOOT_MESH_ROUTE_UNAVAILABLE;
 
     struct net_address endpoint;
