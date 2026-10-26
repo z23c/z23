@@ -45,6 +45,30 @@ static void ys_fail(struct zcl_command_reply *reply,
                            false, message, evidence);
 }
 
+/* True when the leaf's input is present and usable as an object for the
+ * RPC forward. */
+static bool ys_input_is_object(const struct json_value *input)
+{
+    return input && input->type == JSON_OBJ;
+}
+
+/* Read the node's raw RPC reply into *body; true only when it parsed and
+ * came back as a JSON object. */
+static bool ys_read_rpc_body(struct json_value *body, const char *result)
+{
+    json_init(body);
+    return json_read(body, result, strlen(result)) && body->type == JSON_OBJ;
+}
+
+/* A refusal's own text when the service sent a non-empty one, else the
+ * fixed fallback this leaf reports. */
+static const char *ys_refusal_text(const char *field, const char *fallback)
+{
+    if (field && field[0])
+        return field;
+    return fallback;
+}
+
 /* Forward the leaf's input object to the node's yardsale wallet RPC
  * method and project the node's body into the reply. The service body
  * contract is {ok:bool, ...}: ok:false carries code+message and means
@@ -61,7 +85,7 @@ static void ys_forward(const struct zcl_command_request *request,
     json_init(&empty);
     json_set_object(&empty);
     const struct json_value *input = request->input;
-    if (!input || input->type != JSON_OBJ) {
+    if (!ys_input_is_object(input)) {
         if (input_required) {
             ys_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                     ZCL_COMMAND_EXIT_INVALID, "INVALID_INPUT", "normalize",
@@ -98,8 +122,7 @@ static void ys_forward(const struct zcl_command_request *request,
     }
 
     struct json_value body;
-    json_init(&body);
-    if (!json_read(&body, result, strlen(result)) || body.type != JSON_OBJ) {
+    if (!ys_read_rpc_body(&body, result)) {
         json_free(&body);
         free(result);
         ys_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -114,11 +137,10 @@ static void ys_forward(const struct zcl_command_request *request,
         const char *code = json_get_str(json_get(&body, "code"));
         const char *message = json_get_str(json_get(&body, "message"));
         ys_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                (code && code[0]) ? code : "YARDSALE_REFUSED", "execute",
-                false,
-                (message && message[0])
-                    ? message
-                    : "the yardsale wallet service refused the request",
+                ys_refusal_text(code, "YARDSALE_REFUSED"), "execute", false,
+                ys_refusal_text(
+                    message,
+                    "the yardsale wallet service refused the request"),
                 rpc_method);
         json_free(&body);
         return;
@@ -174,6 +196,111 @@ static bool ys_push_layer(struct json_value *layers, const char *id,
     return ok;
 }
 
+/* One scalar guide field, in reply order. A NULL value marks the single
+ * numeric row, which is pushed as an int instead of a string. */
+struct ys_guide_field {
+    const char *key;
+    const char *value;
+};
+
+static const struct ys_guide_field ys_guide_fields[] = {
+    {"mission",
+     "Pay ZCL and sell a 1/1 collectible without giving anyone "
+     "custody of your keys."},
+    {"next_action",
+     "See whether this node holds confirmed ZCL, then plan. "
+     "Nothing broadcasts until confirm:true."},
+    {"start_command", "z23 vault list"},
+    {"fee_zat", NULL},
+    {"fee_zcl", "0.00000100"},
+    {"fee_policy",
+     "Wallet default_fee is the min-relay floor (100 zat). This "
+     "node's mempool and miners accept that amount. Plans render "
+     "the exact fee before commit."},
+    {"pay_plan",
+     "printf '%s' '{\"wallet_scope\":\"dev\",\"route\":\"transparent\","
+     "\"idempotency_key\":\"pay-001\",\"effects\":[{\"asset\":\"ZCL\","
+     "\"to\":\"<recipient>\",\"amount\":\"0.01\"}]}' | "
+     "z23 vault intent plan --input=-"},
+    {"pay_commit",
+     "z23 vault intent commit --input='{\"wallet_scope\":\"dev\","
+     "\"plan_id\":\"<64hex>\",\"confirm\":true}'"},
+    {"nft_create",
+     "z23 app tokens create --input='{\"wallet_scope\":\"dev\","
+     "\"ticker\":\"ART1\",\"name\":\"One of one\",\"decimals\":0,"
+     "\"supply\":\"1\",\"idempotency_key\":\"nft-genesis-1\"}'"},
+    {"yardsale_sell",
+     "z23 yardsale.seller.arm --input='{\"token_txid\":\"<64hex>\","
+     "\"token_vout\":1,\"ad_root\":\"<64hex>\"}'"},
+    {"yardsale_buy",
+     "z23 yardsale.buy --input='{\"ad_root\":\"<64hex>\"}'"},
+    {"torrent_announce",
+     "z23 app market offer --input='{\"filepath\":\"/data/file\","
+     "\"price_per_mb_zat\":100}'"},
+    {"torrent_fetch",
+     "z23 zcode package fetch --input='{\"root\":\"<64hex>\"}'"},
+    {"onion_shop", "z23 app shop init"},
+    {"confirm_rule",
+     "Every money leaf is plan then confirm:true on that exact plan. "
+     "A guide never spends, never prints keys or addresses."},
+    {"funding_rule",
+     "An empty wallet refuses at plan time and names the shortfall. "
+     "Fund this node's wallet first; do not export keys or invent a "
+     "balance."},
+    {"continue_rule",
+     "Follow the plan reply's commit_input. Discover exact keys with "
+     "z23 discover schema <leaf>."},
+    {"docs", "docs/node/SELL.md"},
+};
+
+/* Push one guide field row onto the reply data. */
+static bool ys_guide_push_row(struct json_value *data,
+                              const struct ys_guide_field *field)
+{
+    if (field->value)
+        return json_push_kv_str(data, field->key, field->value);
+    return json_push_kv_int(data, field->key, WALLET_DEFAULT_FEE_ZAT);
+}
+
+/* Push every scalar guide field in order; a failed row stops the rows
+ * after it, exactly like the original single && chain. */
+static bool ys_guide_push_fields(struct json_value *data)
+{
+    size_t field_count =
+        sizeof(ys_guide_fields) / sizeof(ys_guide_fields[0]);
+    bool ok = true;
+    for (size_t i = 0; i < field_count; i++)
+        ok = ok && ys_guide_push_row(data, &ys_guide_fields[i]);
+    return ok;
+}
+
+/* Build the guide's six progress layers; a failed layer stops the layers
+ * after it, exactly like the original chain. */
+static bool ys_guide_fill_layers(struct json_value *layers)
+{
+    return ys_push_layer(layers, "pay_zcl",
+            "Pay confirmed ZCL to a transparent address without exporting keys.",
+            "vault.intent.plan", "test_simnet_wallet_import_backup",
+            "simnet_confirmed") &&
+        ys_push_layer(layers, "sapling",
+            "Shield or send Sapling value through the same plan-then-confirm vault.",
+            "vault.intent.plan", "test_simnet_shielded_wallet_e2e",
+            "simnet_confirmed") &&
+        ys_push_layer(layers, "zslp_one_of_one",
+            "Mint a 1/1 ZSLP collectible (decimals 0, supply 1) as a plan.",
+            "app.tokens.create", "test_simnet", "simnet_confirmed") &&
+        ys_push_layer(layers, "yardsale",
+            "Atomically swap that 1/1 for ZCL between two wallets in one transaction.",
+            "yardsale.buy", "test_yardsale_app", "simnet_confirmed") &&
+        ys_push_layer(layers, "onion_market",
+            "Pay ZCL, then fetch SHA3-verified chunks over the onion file-service.",
+            "app.market.purchase.plan", "test_file_market",
+            "simnet_confirmed") &&
+        ys_push_layer(layers, "zcode_package",
+            "Publish or fetch an exact C23 package root; fetch is inert until accept.",
+            "zcode.work.start", "test_zcode_release", "simnet_confirmed");
+}
+
 void zcl_native_handle_yardsale_guide(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -187,93 +314,11 @@ void zcl_native_handle_yardsale_guide(
                 "yardsale guide accepts no input keys", "yardsale.guide");
         return;
     }
-    bool ok = json_push_kv_str(
-            &reply->data, "mission",
-            "Pay ZCL and sell a 1/1 collectible without giving anyone "
-            "custody of your keys.") &&
-        json_push_kv_str(
-            &reply->data, "next_action",
-            "See whether this node holds confirmed ZCL, then plan. "
-            "Nothing broadcasts until confirm:true.") &&
-        json_push_kv_str(&reply->data, "start_command", "z23 vault list") &&
-        json_push_kv_int(&reply->data, "fee_zat", WALLET_DEFAULT_FEE_ZAT) &&
-        json_push_kv_str(&reply->data, "fee_zcl", "0.00000100") &&
-        json_push_kv_str(
-            &reply->data, "fee_policy",
-            "Wallet default_fee is the min-relay floor (100 zat). This "
-            "node's mempool and miners accept that amount. Plans render "
-            "the exact fee before commit.") &&
-        json_push_kv_str(
-            &reply->data, "pay_plan",
-            "printf '%s' '{\"wallet_scope\":\"dev\",\"route\":\"transparent\","
-            "\"idempotency_key\":\"pay-001\",\"effects\":[{\"asset\":\"ZCL\","
-            "\"to\":\"<recipient>\",\"amount\":\"0.01\"}]}' | "
-            "z23 vault intent plan --input=-") &&
-        json_push_kv_str(
-            &reply->data, "pay_commit",
-            "z23 vault intent commit --input='{\"wallet_scope\":\"dev\","
-            "\"plan_id\":\"<64hex>\",\"confirm\":true}'") &&
-        json_push_kv_str(
-            &reply->data, "nft_create",
-            "z23 app tokens create --input='{\"wallet_scope\":\"dev\","
-            "\"ticker\":\"ART1\",\"name\":\"One of one\",\"decimals\":0,"
-            "\"supply\":\"1\",\"idempotency_key\":\"nft-genesis-1\"}'") &&
-        json_push_kv_str(
-            &reply->data, "yardsale_sell",
-            "z23 yardsale.seller.arm --input='{\"token_txid\":\"<64hex>\","
-            "\"token_vout\":1,\"ad_root\":\"<64hex>\"}'") &&
-        json_push_kv_str(
-            &reply->data, "yardsale_buy",
-            "z23 yardsale.buy --input='{\"ad_root\":\"<64hex>\"}'") &&
-        json_push_kv_str(
-            &reply->data, "torrent_announce",
-            "z23 app market offer --input='{\"filepath\":\"/data/file\","
-            "\"price_per_mb_zat\":100}'") &&
-        json_push_kv_str(
-            &reply->data, "torrent_fetch",
-            "z23 zcode package fetch --input='{\"root\":\"<64hex>\"}'") &&
-        json_push_kv_str(
-            &reply->data, "onion_shop",
-            "z23 app shop init") &&
-        json_push_kv_str(
-            &reply->data, "confirm_rule",
-            "Every money leaf is plan then confirm:true on that exact plan. "
-            "A guide never spends, never prints keys or addresses.") &&
-        json_push_kv_str(
-            &reply->data, "funding_rule",
-            "An empty wallet refuses at plan time and names the shortfall. "
-            "Fund this node's wallet first; do not export keys or invent a "
-            "balance.") &&
-        json_push_kv_str(
-            &reply->data, "continue_rule",
-            "Follow the plan reply's commit_input. Discover exact keys with "
-            "z23 discover schema <leaf>.") &&
-        json_push_kv_str(&reply->data, "docs", "docs/node/SELL.md");
+    bool ok = ys_guide_push_fields(&reply->data);
     struct json_value layers;
     json_init(&layers);
     json_set_array(&layers);
-    ok = ok &&
-        ys_push_layer(&layers, "pay_zcl",
-            "Pay confirmed ZCL to a transparent address without exporting keys.",
-            "vault.intent.plan", "test_simnet_wallet_import_backup",
-            "simnet_confirmed") &&
-        ys_push_layer(&layers, "sapling",
-            "Shield or send Sapling value through the same plan-then-confirm vault.",
-            "vault.intent.plan", "test_simnet_shielded_wallet_e2e",
-            "simnet_confirmed") &&
-        ys_push_layer(&layers, "zslp_one_of_one",
-            "Mint a 1/1 ZSLP collectible (decimals 0, supply 1) as a plan.",
-            "app.tokens.create", "test_simnet", "simnet_confirmed") &&
-        ys_push_layer(&layers, "yardsale",
-            "Atomically swap that 1/1 for ZCL between two wallets in one transaction.",
-            "yardsale.buy", "test_yardsale_app", "simnet_confirmed") &&
-        ys_push_layer(&layers, "onion_market",
-            "Pay ZCL, then fetch SHA3-verified chunks over the onion file-service.",
-            "app.market.purchase.plan", "test_file_market",
-            "simnet_confirmed") &&
-        ys_push_layer(&layers, "zcode_package",
-            "Publish or fetch an exact C23 package root; fetch is inert until accept.",
-            "zcode.work.start", "test_zcode_release", "simnet_confirmed") &&
+    ok = ok && ys_guide_fill_layers(&layers) &&
         json_push_kv(&reply->data, "layers", &layers);
     json_free(&layers);
     if (!ok)
