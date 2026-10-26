@@ -6,6 +6,7 @@
 
 #include "core/serialize.h"
 #include "platform/read_mapping.h"
+#include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <fcntl.h>
@@ -196,10 +197,10 @@ static int extract_height_raw(const uint8_t *bdata, size_t bsize)
 {
     if (bsize < 141) return -1; // raw-return-ok:bin-parser-bounds
     size_t pos = 140;
-    if (locate_block_tx_list_raw(bdata, bsize, &pos) != 0) return -1;
+    if (locate_block_tx_list_raw(bdata, bsize, &pos) != 0) return -1; // raw-return-ok:bin-parser-propagate-malformed
     uint64_t script_len;
     if (locate_coinbase_scriptsig_raw(bdata, bsize, &pos, &script_len) != 0)
-        return -1;
+        return -1; // raw-return-ok:bin-parser-propagate-malformed
 
     const uint8_t *sig = bdata + pos;
     uint8_t nbytes = sig[0];
@@ -339,10 +340,10 @@ static int scan_tx_shielded_raw(const uint8_t *bdata, size_t bsize, size_t *pos)
     uint32_t vg_id;
     if (parse_tx_header_raw(bdata, bsize, pos, &overwintered, &ver,
                             &vg_id) != 0)
-        return -1;
+        return -1; // raw-return-ok:bin-parser-propagate-malformed
     if (skip_tx_vin_vout_raw(bdata, bsize, pos) != 0)
-        return -1;
-    if (skip_tx_locktime_raw(bsize, pos, overwintered) != 0) return -1;
+        return -1; // raw-return-ok:bin-parser-propagate-malformed
+    if (skip_tx_locktime_raw(bsize, pos, overwintered) != 0) return -1; // raw-return-ok:bin-parser-propagate-malformed
 
     if (overwintered && vg_id == 0x892F2085) {
         int shielded = scan_sapling_bundle_raw(bdata, bsize, pos);
@@ -352,7 +353,7 @@ static int scan_tx_shielded_raw(const uint8_t *bdata, size_t bsize, size_t *pos)
     if (ver >= 2 && (!overwintered || ver < 5)) {
         if (skip_joinsplit_section_raw(bdata, bsize, pos, overwintered,
                                        vg_id) != 0)
-            return -1;
+            return -1; // raw-return-ok:bin-parser-propagate-malformed
     }
     return 0;
 }
@@ -389,18 +390,18 @@ static int open_mapped_block_file(const char *datadir, int file_num,
     snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
              datadir, file_num);
     int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
+    if (fd < 0) LOG_ERR("legacy_import", "open %s failed", path);
     struct stat st;
-    if (fstat(fd, &st) != 0) { close(fd); return -1; }
+    if (fstat(fd, &st) != 0) { close(fd); LOG_ERR("legacy_import", "fstat %s failed", path); }
     if (st.st_size <= 0 || (uintmax_t)st.st_size > SIZE_MAX) {
         close(fd);
-        return -1;
+        LOG_ERR("legacy_import", "%s is empty or too large to map", path);
     }
     *fsize = (size_t)st.st_size;
     platform_read_mapping_init(mapping);
     if (!platform_read_mapping_open(mapping, fd, *fsize)) {
         close(fd);
-        return -1;
+        LOG_ERR("legacy_import", "read-map of %s failed", path);
     }
     return fd;
 }
@@ -417,7 +418,8 @@ static int grow_filter_hits(struct legacy_import_filter_file_ctx *ctx)
         /* OOM: keep the old buffer (zcl_realloc leaves it intact),
          * restore the cap to match it, skip this hit and keep scanning. */
         ctx->hit_cap /= 2;
-        return -1;
+        LOG_ERR("legacy_import", "filter hit buffer grow failed at cap %d; skipping hit",
+                ctx->hit_cap);
     }
     ctx->hits = tmp;
     return 0;
