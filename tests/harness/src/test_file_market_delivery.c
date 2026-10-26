@@ -521,7 +521,7 @@ static int64_t delivery_immediate_deadline_monotonic_us(void *opaque)
     return read == 0 ? 1000000LL : 32000000LL;
 }
 
-/* OR of every session key byte: zero means the key was never written. */
+/* OR of every current session key byte: zero means all key bytes are zero. */
 static uint8_t delivery_session_key_or(const struct fs_session *session)
 {
     uint8_t key_or = 0;
