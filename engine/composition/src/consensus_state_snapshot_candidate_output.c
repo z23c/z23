@@ -123,6 +123,18 @@ static bool candidate_name_is_active_family(const char *name)
                                         CONSENSUS_DB_LEGACY_KERNEL_FILENAME);
 }
 
+static bool candidate_name_chars_allowed(const char *name, size_t length)
+{
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
+            continue;
+        return false;
+    }
+    return true;
+}
+
 static bool candidate_name_valid(const char *name)
 {
     if (!name || !name[0] || strcmp(name, ".") == 0 ||
@@ -131,13 +143,7 @@ static bool candidate_name_valid(const char *name)
     size_t length = strlen(name);
     if (length >= CONSENSUS_EXPORT_NAME_MAX - 48)
         return false;
-    for (size_t i = 0; i < length; i++) {
-        unsigned char c = (unsigned char)name[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
-            return false;
-    }
-    return true;
+    return candidate_name_chars_allowed(name, length);
 }
 
 static bool output_name_absent(
@@ -296,6 +302,107 @@ static void candidate_run_before_link_hook(void)
 static void candidate_run_before_link_hook(void) { }
 #endif
 
+static bool candidate_staging_durable(
+    const struct consensus_state_candidate_output *output, int fd)
+{
+    return output_sidecars_absent(output, output->binding.final_name) &&
+           fsync(fd) == 0 && fchmod(fd, S_IRUSR) == 0 && fsync(fd) == 0;
+}
+
+static bool candidate_sealed_inode_anonymous(
+    const struct consensus_state_candidate_output *output,
+    const struct stat *sealed)
+{
+    return S_ISREG(sealed->st_mode) && sealed->st_nlink == 0 &&
+           sealed->st_dev == output->binding.temp_dev &&
+           sealed->st_ino == output->binding.temp_ino &&
+           (sealed->st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0;
+}
+
+static bool candidate_reopened_db_ok(
+    struct consensus_state_candidate_output *output,
+    const struct consensus_state_bundle_manifest *manifest,
+    const uint8_t admission_receipt[32],
+    struct consensus_state_candidate_result *result)
+{
+    sqlite3 *check = NULL;
+    bool ok = sqlite3_open_v2("zcl-export-main", &check,
+        SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
+        output->binding.vfs_name) == SQLITE_OK;
+    int defensive = 0;
+    int trusted = 1;
+    ok = ok &&
+         sqlite3_db_config(check, SQLITE_DBCONFIG_DEFENSIVE, 1,
+                           &defensive) == SQLITE_OK && defensive == 1 &&
+         sqlite3_db_config(check, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0,
+                           &trusted) == SQLITE_OK && trusted == 0 &&
+         sqlite3_exec(check, "PRAGMA query_only=ON", NULL, NULL, NULL) ==
+             SQLITE_OK &&
+         consensus_state_candidate_validate_reopened(
+             check, manifest, admission_receipt, result);
+    return consensus_state_candidate_sqlite_close_strict(output, &check) && ok;
+}
+
+static bool candidate_stat_identity_matches(const struct stat *sealed,
+                                            const struct stat *observed)
+{
+    return sealed->st_dev == observed->st_dev &&
+           sealed->st_ino == observed->st_ino &&
+           sealed->st_nlink == 0 && observed->st_nlink == 0 &&
+           sealed->st_size == observed->st_size &&
+           sealed->st_mode == observed->st_mode &&
+           sealed->st_mtim.tv_sec == observed->st_mtim.tv_sec &&
+           sealed->st_mtim.tv_nsec == observed->st_mtim.tv_nsec &&
+           sealed->st_ctim.tv_sec == observed->st_ctim.tv_sec &&
+           sealed->st_ctim.tv_nsec == observed->st_ctim.tv_nsec;
+}
+
+static bool candidate_reopen_stat_matches(int fd, const struct stat *sealed)
+{
+    struct stat after;
+    return fstat(fd, &after) == 0 &&
+           candidate_stat_identity_matches(sealed, &after);
+}
+
+static bool candidate_post_hook_unchanged(int fd, const struct stat *sealed,
+                                          const uint8_t digest[32])
+{
+    uint8_t after_hook_digest[32];
+    struct stat after_hook;
+    return consensus_export_descriptor_digest(fd, after_hook_digest) &&
+           memcmp(after_hook_digest, digest, 32) == 0 &&
+           fstat(fd, &after_hook) == 0 &&
+           candidate_stat_identity_matches(sealed, &after_hook);
+}
+
+static bool candidate_output_linked(
+    const struct consensus_state_candidate_output *output, int fd)
+{
+    return output_name_absent(output, output->binding.final_name) &&
+           output_sidecars_absent(output, output->binding.final_name) &&
+           output_link_fd(fd, output->binding.dirfd,
+                          output->binding.final_name);
+}
+
+static bool candidate_published_inode_durable(
+    const struct consensus_state_candidate_output *output, int fd,
+    const struct stat *sealed,
+    const struct consensus_state_candidate_result *result)
+{
+    struct stat final;
+    uint8_t published_digest[32];
+    return fstatat(output->binding.dirfd, output->binding.final_name, &final,
+                   AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISREG(final.st_mode) &&
+           output_sidecars_absent(output, output->binding.final_name) &&
+           final.st_dev == sealed->st_dev && final.st_ino == sealed->st_ino &&
+           final.st_nlink == 1 && final.st_size == sealed->st_size &&
+           (final.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0 &&
+           consensus_export_descriptor_digest(fd, published_digest) &&
+           memcmp(published_digest, result->candidate_file_digest, 32) == 0 &&
+           fsync(output->binding.dirfd) == 0;
+}
+
 bool consensus_state_candidate_output_finalize(
     struct consensus_state_candidate_output *output,
     const struct consensus_state_bundle_manifest *manifest,
@@ -304,8 +411,7 @@ bool consensus_state_candidate_output_finalize(
     struct consensus_state_candidate_result *result)
 {
     int fd = output->binding.temp_fd;
-    if (!output_sidecars_absent(output, output->binding.final_name) ||
-        fsync(fd) != 0 || fchmod(fd, S_IRUSR) != 0 || fsync(fd) != 0)
+    if (!candidate_staging_durable(output, fd))
         return consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate staging durability/seal failed");
@@ -315,40 +421,13 @@ bool consensus_state_candidate_output_finalize(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate writable staging descriptor could not be retired");
     fd = output->binding.temp_fd;
-    if (!S_ISREG(sealed.st_mode) ||
-        sealed.st_nlink != 0 || sealed.st_dev != output->binding.temp_dev ||
-        sealed.st_ino != output->binding.temp_ino ||
-        (sealed.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0)
+    if (!candidate_sealed_inode_anonymous(output, &sealed))
         return consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate anonymous staging identity invalid");
-
-    sqlite3 *check = NULL;
-    bool ok = sqlite3_open_v2("zcl-export-main", &check,
-        SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
-        output->binding.vfs_name) == SQLITE_OK;
-    int defensive = 0;
-    int trusted = 1;
-    if (ok)
-        ok = sqlite3_db_config(check, SQLITE_DBCONFIG_DEFENSIVE, 1,
-                               &defensive) == SQLITE_OK && defensive == 1 &&
-             sqlite3_db_config(check, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0,
-                               &trusted) == SQLITE_OK && trusted == 0 &&
-             sqlite3_exec(check, "PRAGMA query_only=ON", NULL, NULL, NULL) ==
-                 SQLITE_OK &&
-             consensus_state_candidate_validate_reopened(
-                 check, manifest, admission_receipt, result);
-    if (!consensus_state_candidate_sqlite_close_strict(output, &check))
-        ok = false;
-    struct stat after;
-    if (!ok || fstat(fd, &after) != 0 || sealed.st_dev != after.st_dev ||
-        sealed.st_ino != after.st_ino || sealed.st_nlink != 0 ||
-        after.st_nlink != 0 || sealed.st_size != after.st_size ||
-        sealed.st_mode != after.st_mode ||
-        sealed.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-        sealed.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-        sealed.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-        sealed.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
+    if (!candidate_reopened_db_ok(output, manifest, admission_receipt,
+                                  result) ||
+        !candidate_reopen_stat_matches(fd, &sealed))
         return consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "independent immutable candidate validation failed");
@@ -361,39 +440,16 @@ bool consensus_state_candidate_output_finalize(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate complete-file digest failed");
     candidate_run_before_link_hook();
-    uint8_t after_hook_digest[32];
-    struct stat after_hook;
-    if (!consensus_export_descriptor_digest(fd, after_hook_digest) ||
-        memcmp(after_hook_digest, result->candidate_file_digest, 32) != 0 ||
-        fstat(fd, &after_hook) != 0 || after_hook.st_dev != sealed.st_dev ||
-        after_hook.st_ino != sealed.st_ino || after_hook.st_nlink != 0 ||
-        after_hook.st_size != sealed.st_size ||
-        after_hook.st_mode != sealed.st_mode ||
-        after_hook.st_mtim.tv_sec != sealed.st_mtim.tv_sec ||
-        after_hook.st_mtim.tv_nsec != sealed.st_mtim.tv_nsec ||
-        after_hook.st_ctim.tv_sec != sealed.st_ctim.tv_sec ||
-        after_hook.st_ctim.tv_nsec != sealed.st_ctim.tv_nsec)
+    if (!candidate_post_hook_unchanged(fd, &sealed,
+                                       result->candidate_file_digest))
         return consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate changed after immutable digest");
-    if (!output_name_absent(output, output->binding.final_name) ||
-        !output_sidecars_absent(output, output->binding.final_name) ||
-        !output_link_fd(fd, output->binding.dirfd,
-                        output->binding.final_name))
+    if (!candidate_output_linked(output, fd))
         return consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate atomic no-replace link failed");
-    struct stat final;
-    uint8_t published_digest[32];
-    if (fstatat(output->binding.dirfd, output->binding.final_name, &final,
-                AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(final.st_mode) ||
-        !output_sidecars_absent(output, output->binding.final_name) ||
-        final.st_dev != sealed.st_dev || final.st_ino != sealed.st_ino ||
-        final.st_nlink != 1 || final.st_size != sealed.st_size ||
-        (final.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0 ||
-        !consensus_export_descriptor_digest(fd, published_digest) ||
-        memcmp(published_digest, result->candidate_file_digest, 32) != 0 ||
-        fsync(output->binding.dirfd) != 0)
+    if (!candidate_published_inode_durable(output, fd, &sealed, result))
         return consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate final inode/directory durability ambiguous");
