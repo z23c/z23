@@ -1546,7 +1546,6 @@ tools/lint/lintc/gate_git_scan_a.c:ffs_scan_room:22
 tools/lint/lintc/gate_git_scan_a.c:nak_scan_file:17
 tools/mind/mind_resident.c:mind_serve_posix:34
 tools/mint_v2_snapshot.c:main:72
-tools/native_ui_driver.c:main:72
 tools/p2_invariant_check.c:main:33
 tools/retrieval_eval.c:main:47
 tools/retrieval_eval.c:rank_root_mode:18

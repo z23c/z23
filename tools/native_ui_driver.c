@@ -121,6 +121,147 @@ static bool image_differs(const XImage *before, const XImage *after)
     return bytes > 0 && memcmp(before->data, after->data, bytes) != 0;
 }
 
+struct ui_driver_options {
+    const char *title;
+    const char *key;
+    bool expect_count_set;
+    unsigned int expected_count;
+    unsigned int timeout_ms;
+    bool expect_pixels_change;
+};
+
+static int parse_unsigned_in_range(const char *text, unsigned long lowest,
+                                   unsigned long highest, unsigned int *value)
+{
+    char *end = NULL;
+    unsigned long parsed = strtoul(text, &end, 10);
+    if (!end || *end || parsed < lowest || parsed > highest)
+        return -1;
+    *value = (unsigned int)parsed;
+    return 0;
+}
+
+static int parse_ui_driver_options(int argc, char **argv,
+                                   struct ui_driver_options *options)
+{
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--title=", 8) == 0)
+            options->title = argv[i] + 8;
+        else if (strncmp(argv[i], "--key=", 6) == 0)
+            options->key = argv[i] + 6;
+        else if (strncmp(argv[i], "--expect-count=", 15) == 0) {
+            if (parse_unsigned_in_range(argv[i] + 15, 0, 1024,
+                                        &options->expected_count) != 0)
+                return -1;
+            options->expect_count_set = true;
+        }
+        else if (strncmp(argv[i], "--timeout-ms=", 13) == 0) {
+            if (parse_unsigned_in_range(argv[i] + 13, 20, 30000,
+                                        &options->timeout_ms) != 0)
+                return -1;
+        } else if (strcmp(argv[i], "--expect-pixels-change") == 0) {
+            options->expect_pixels_change = true;
+        } else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+struct ui_driver_key_entry {
+    const char *name;
+    KeySym symbol;
+};
+
+static const struct ui_driver_key_entry ui_driver_key_table[] = {
+    {"1", XK_1},
+    {"tab", XK_Tab},
+    {"enter", XK_Return},
+    {"left", XK_Left},
+    {"right", XK_Right},
+    {"up", XK_Up},
+    {"down", XK_Down},
+    {"pagedown", XK_Page_Down},
+    {"pageup", XK_Page_Up},
+    /* "escape" maps to NoSymbol: it closes the window instead of sending a key. */
+    {"escape", NoSymbol},
+};
+
+static const struct ui_driver_key_entry *find_ui_driver_key(const char *name)
+{
+    if (name == NULL)
+        return NULL;
+    size_t entries = sizeof(ui_driver_key_table) /
+                     sizeof(ui_driver_key_table[0]);
+    for (size_t i = 0; i < entries; i++)
+        if (strcmp(name, ui_driver_key_table[i].name) == 0)
+            return &ui_driver_key_table[i];
+    return NULL;
+}
+
+static KeySym ui_driver_key_symbol(const char *name)
+{
+    const struct ui_driver_key_entry *entry = find_ui_driver_key(name);
+    return entry ? entry->symbol : XK_Page_Up;
+}
+
+static bool ui_driver_options_usable(const struct ui_driver_options *options)
+{
+    if (!options->title || !options->title[0] ||
+        (!!options->key == options->expect_count_set) ||
+        (options->expect_pixels_change && !options->key))
+        return false;
+    return !options->key || find_ui_driver_key(options->key) != NULL;
+}
+
+static void wait_for_matching_windows(Display *display, Window root,
+                                      const struct ui_driver_options *options,
+                                      unsigned int attempts, Window *window,
+                                      unsigned int *count)
+{
+    for (unsigned int i = 0; i <= attempts; i++) {
+        *window = None;
+        *count = matching_windows(display, root, options->title, 4u, window);
+        if ((options->expect_count_set && *count == options->expected_count) ||
+            (!options->expect_count_set && *window != None))
+            break;
+        if (i < attempts)
+            sleep_20ms();
+    }
+}
+
+static bool send_window_event(Display *display, Window root, Window window,
+                              bool expect_pixels_change, XImage *before,
+                              KeySym key_sym)
+{
+    if (window == None)
+        return false;
+    if (expect_pixels_change && before == NULL)
+        return false;
+    if (key_sym == NoSymbol)
+        return send_close(display, window);
+    return send_key(display, root, window, key_sym);
+}
+
+static bool pixels_changed_after_send(Display *display, Window window,
+                                      XImage *before, unsigned int attempts,
+                                      bool sent, bool expect_pixels_change)
+{
+    bool changed = !expect_pixels_change;
+    if (sent && expect_pixels_change) {
+        for (unsigned int i = 0; i <= attempts; i++) {
+            XImage *after = capture_window(display, window);
+            changed = image_differs(before, after);
+            if (after)
+                XDestroyImage(after);
+            if (changed || i == attempts)
+                break;
+            sleep_20ms();
+        }
+    }
+    return changed;
+}
+
 static int usage(const char *program)
 {
     fprintf(stderr,
@@ -134,53 +275,23 @@ static int usage(const char *program)
 
 int main(int argc, char **argv)
 {
-    const char *title = NULL;
-    const char *key = NULL;
-    bool expect_count_set = false;
-    unsigned int expected_count = 0;
-    unsigned int timeout_ms = 5000;
-    bool expect_pixels_change = false;
-    for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--title=", 8) == 0)
-            title = argv[i] + 8;
-        else if (strncmp(argv[i], "--key=", 6) == 0)
-            key = argv[i] + 6;
-        else if (strncmp(argv[i], "--expect-count=", 15) == 0) {
-            char *end = NULL;
-            unsigned long parsed = strtoul(argv[i] + 15, &end, 10);
-            if (!end || *end || parsed > 1024)
-                return usage(argv[0]);
-            expect_count_set = true;
-            expected_count = (unsigned int)parsed;
-        }
-        else if (strncmp(argv[i], "--timeout-ms=", 13) == 0) {
-            char *end = NULL;
-            unsigned long parsed = strtoul(argv[i] + 13, &end, 10);
-            if (!end || *end || parsed < 20 || parsed > 30000)
-                return usage(argv[0]);
-            timeout_ms = (unsigned int)parsed;
-        } else if (strcmp(argv[i], "--expect-pixels-change") == 0) {
-            expect_pixels_change = true;
-        } else {
-            return usage(argv[0]);
-        }
-    }
-    if (!title || !title[0] || (!!key == expect_count_set) ||
-        (expect_pixels_change && !key))
+    struct ui_driver_options options = {
+        .title = NULL,
+        .key = NULL,
+        .expect_count_set = false,
+        .expected_count = 0,
+        .timeout_ms = 5000,
+        .expect_pixels_change = false,
+    };
+    if (parse_ui_driver_options(argc, argv, &options) != 0)
         return usage(argv[0]);
-    bool first_action = key && strcmp(key, "1") == 0;
-    bool tab = key && strcmp(key, "tab") == 0;
-    bool enter = key && strcmp(key, "enter") == 0;
-    bool page_down = key && strcmp(key, "pagedown") == 0;
-    bool page_up = key && strcmp(key, "pageup") == 0;
-    bool left = key && strcmp(key, "left") == 0;
-    bool right = key && strcmp(key, "right") == 0;
-    bool up = key && strcmp(key, "up") == 0;
-    bool down = key && strcmp(key, "down") == 0;
-    bool close = key && strcmp(key, "escape") == 0;
-    if (key && !first_action && !tab && !enter &&
-        !page_down && !page_up && !left && !right && !up && !down && !close)
+    if (!ui_driver_options_usable(&options))
         return usage(argv[0]);
+    const char *title = options.title;
+    const char *key = options.key;
+    bool expect_count_set = options.expect_count_set;
+    bool expect_pixels_change = options.expect_pixels_change;
+    unsigned int expected_count = options.expected_count;
 
     Display *display = XOpenDisplay(NULL);
     if (!display) {
@@ -190,16 +301,9 @@ int main(int argc, char **argv)
     Window root = DefaultRootWindow(display);
     Window window = None;
     unsigned int count = 0;
-    unsigned int attempts = timeout_ms / 20u;
-    for (unsigned int i = 0; i <= attempts; i++) {
-        window = None;
-        count = matching_windows(display, root, title, 4u, &window);
-        if ((expect_count_set && count == expected_count) ||
-            (!expect_count_set && window != None))
-            break;
-        if (i < attempts)
-            sleep_20ms();
-    }
+    unsigned int attempts = options.timeout_ms / 20u;
+    wait_for_matching_windows(display, root, &options, attempts, &window,
+                              &count);
     if (expect_count_set) {
         (void)XCloseDisplay(display);
         if (count != expected_count) {
@@ -213,31 +317,16 @@ int main(int argc, char **argv)
                title, count);
         return 0;
     }
-    KeySym key_sym = XK_Page_Up;
-    if (first_action) key_sym = XK_1;
-    else if (tab) key_sym = XK_Tab;
-    else if (enter) key_sym = XK_Return;
-    else if (left) key_sym = XK_Left;
-    else if (right) key_sym = XK_Right;
-    else if (up) key_sym = XK_Up;
-    else if (down) key_sym = XK_Down;
-    else if (page_down) key_sym = XK_Page_Down;
+    KeySym key_sym = ui_driver_key_symbol(key);
     XImage *before = expect_pixels_change
         ? capture_window(display, window) : NULL;
-    bool sent = window != None && (!expect_pixels_change || before) && (close
-        ? send_close(display, window)
-        : send_key(display, root, window, key_sym));
-    bool pixels_changed = !expect_pixels_change;
-    if (sent && expect_pixels_change) {
-        for (unsigned int i = 0; i <= attempts; i++) {
-            XImage *after = capture_window(display, window);
-            pixels_changed = image_differs(before, after);
-            if (after) XDestroyImage(after);
-            if (pixels_changed || i == attempts) break;
-            sleep_20ms();
-        }
-    }
-    if (before) XDestroyImage(before);
+    bool sent = send_window_event(display, root, window, expect_pixels_change,
+                                  before, key_sym);
+    bool pixels_changed = pixels_changed_after_send(display, window, before,
+                                                    attempts, sent,
+                                                    expect_pixels_change);
+    if (before)
+        XDestroyImage(before);
     (void)XCloseDisplay(display);
     if (!sent || !pixels_changed) {
         fprintf(stderr,
