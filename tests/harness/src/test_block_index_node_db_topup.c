@@ -859,7 +859,7 @@ static int ndt_null_db_noop_checks(const char *dir, struct node_db *ndb,
 
 int test_block_index_node_db_topup(void)
 {
-    printf("\n=== block index node.db forward-extent top-up tests ===\n");
+    printf("\n=== block_index node.db forward-extent top-up tests ===\n");
 
     char dir[256];
     snprintf(dir, sizeof(dir), "./test-tmp/nodedbtopup_%d", (int)getpid());
