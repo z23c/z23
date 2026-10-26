@@ -270,6 +270,13 @@ bool boot_start_tx_index_service(struct boot_svc_ctx *svc)
     return snapshot_tx_index_job_start(&svc->tx_index_job, svc->datadir);
 }
 
+static void hodl_history_sleep_unless_stopped(struct boot_svc_ctx *svc,
+                                              int secs)
+{
+    for (int i = 0; i < secs && !svc->hodl_history_thread_stop; i++)
+        sleep(1);
+}
+
 /* HODL history worker.
  *
  * Fills the hodl_history table incrementally so /explorer/hodl can
@@ -292,9 +299,7 @@ static void *hodl_history_worker_thread(void *arg)
         return NULL;
     }
     /* Settle but observe shutdown once per second (never sleep(15)). */
-    for (int i = 0; i < HODL_HISTORY_IDLE_SLEEP_SEC &&
-                    !svc->hodl_history_thread_stop; i++)
-        sleep(1);
+    hodl_history_sleep_unless_stopped(svc, HODL_HISTORY_IDLE_SLEEP_SEC);
     while (!svc->hodl_history_thread_stop) {
         supervisor_child_id sup_id = atomic_load(&g_hodl_history_sup_id);
         if (sup_id != SUPERVISOR_INVALID_ID) {
@@ -324,15 +329,11 @@ static void *hodl_history_worker_thread(void *arg)
                 int sleep_secs = filled >= HODL_HISTORY_FILL_BATCH
                     ? HODL_HISTORY_BACKLOG_SLEEP_SEC
                     : HODL_HISTORY_IDLE_SLEEP_SEC;
-                for (int i = 0; i < sleep_secs &&
-                                !svc->hodl_history_thread_stop; i++)
-                    sleep(1);
+                hodl_history_sleep_unless_stopped(svc, sleep_secs);
                 continue;
             }
         }
-        for (int i = 0; i < HODL_HISTORY_IDLE_SLEEP_SEC &&
-                        !svc->hodl_history_thread_stop; i++)
-            sleep(1);
+        hodl_history_sleep_unless_stopped(svc, HODL_HISTORY_IDLE_SLEEP_SEC);
     }
     boot_complete_worker_supervisor(&g_hodl_history_sup_id);
     return NULL;
@@ -368,6 +369,167 @@ static void projection_backfill_clear_stuck_blocker(void)
         blocker_clear(PROJECTION_STUCK_BLOCKER_ID);
 }
 
+static bool projection_backfill_should_run(struct boot_svc_ctx *svc)
+{
+    return !svc->projection_backfill_thread_stop && boot_running(svc);
+}
+
+static void projection_backfill_idle_sleep(struct boot_svc_ctx *svc)
+{
+    for (int i = 0; i < 5 &&
+         !svc->projection_backfill_thread_stop &&
+         boot_running(svc); i++) {
+        sleep(1);
+    }
+}
+
+static int projection_backfill_chain_tip(struct boot_svc_ctx *svc)
+{
+    return svc->state ?
+        active_chain_height(&svc->state->chain_active) : -1;
+}
+
+static int projection_backfill_cursor_height(struct node_db *ndb)
+{
+    return (ndb && ndb->open) ? node_db_sync_get_tip_height(ndb) : -1;
+}
+
+static bool projection_backfill_is_behind(bool refolding, bool tail_folding,
+                                          int projection_cursor,
+                                          int chain_tip)
+{
+    return !refolding && !tail_folding && projection_cursor >= 0 &&
+           chain_tip >= 0 && projection_cursor < chain_tip;
+}
+
+static bool projection_backfill_cursor_frozen(bool behind,
+                                              int projection_cursor,
+                                              int last_projection_cursor)
+{
+    return behind && projection_cursor == last_projection_cursor;
+}
+
+static void projection_backfill_beat(int64_t *loop_iterations, bool behind,
+                                     int projection_cursor,
+                                     int last_projection_cursor)
+{
+    supervisor_child_id sup_id =
+        atomic_load(&g_projection_backfill_sup_id);
+    if (sup_id != SUPERVISOR_INVALID_ID) {
+        supervisor_tick(sup_id);
+        /* Progress marker: the cursor height while behind (a frozen cursor
+         * freezes the marker → SUPERVISOR_STALL_NO_PROGRESS), else a
+         * synthetic beat in a disjoint numeric range so quiescence at the
+         * tip never false-trips the gate. */
+        int64_t marker = behind
+            ? (int64_t)projection_cursor
+            : PROJECTION_BACKFILL_AT_TIP_BEAT_BASE + (++*loop_iterations);
+        supervisor_progress(sup_id, marker);
+        /* Retire the stale stall blocker ONLY when the worker is healthy
+         * this loop — quiescent (at tip / mid-refold) or the cursor
+         * advanced. A behind-and-frozen worker skips the clear so a
+         * NO_PROGRESS-raised worker.stall.* blocker stays standing until the
+         * cursor moves again — advance-or-name-a-blocker, honestly. */
+        bool healthy_this_loop =
+            !behind || projection_cursor != last_projection_cursor;
+        if (healthy_this_loop)
+            boot_worker_clear_stall_blocker(
+                &g_projection_backfill_contract);
+    }
+}
+
+static bool projection_backfill_defer_for_fold(struct boot_svc_ctx *svc,
+                                               bool refolding,
+                                               bool tail_folding)
+{
+    bool deferred = false;
+    if (refolding || tail_folding) {
+        projection_backfill_idle_sleep(svc);
+        deferred = true;
+    }
+    return deferred;
+}
+
+static bool projection_backfill_catchup_ready(struct node_db *ndb,
+                                              struct boot_svc_ctx *svc,
+                                              int chain_tip)
+{
+    return ndb && ndb->open && chain_tip >= 0 &&
+           !node_db_sync_catchup_job_is_started(&svc->catchup_job);
+}
+
+static bool projection_backfill_rewind_to_block(struct node_db *ndb,
+                                                struct boot_svc_ctx *svc,
+                                                int projection_tip,
+                                                int projection_block_tip,
+                                                int chain_tip,
+                                                bool sparse_prefix)
+{
+    bool rewound = false;
+    if (projection_block_tip >= 0 &&
+        projection_tip > projection_block_tip &&
+        projection_block_tip < chain_tip &&
+        !sparse_prefix) {
+        struct block_index *rewind_tip =
+            active_chain_at(&svc->state->chain_active,
+                            projection_block_tip);
+        rewound = rewind_tip && rewind_tip->phashBlock &&
+                  node_db_sync_set_tip(ndb, rewind_tip->phashBlock->data,
+                                       projection_block_tip);
+    }
+    return rewound;
+}
+
+static int projection_backfill_repair_cap(int projection_tip, int chain_tip)
+{
+    return projection_tip < chain_tip ? projection_tip : chain_tip;
+}
+
+static bool projection_backfill_hole_needs_repair(bool hole_scan_ran,
+                                                  bool hole_scan_ok,
+                                                  int first_missing_height,
+                                                  int repair_cap,
+                                                  bool sparse_prefix)
+{
+    return hole_scan_ran && hole_scan_ok &&
+           first_missing_height >= 0 &&
+           first_missing_height <= repair_cap &&
+           !sparse_prefix;
+}
+
+static bool projection_backfill_hole_resolved(bool hole_scan_ran,
+                                              bool hole_scan_ok,
+                                              int first_missing_height,
+                                              bool sparse_prefix)
+{
+    return (hole_scan_ran && hole_scan_ok &&
+            first_missing_height < 0) || sparse_prefix;
+}
+
+static bool projection_backfill_rewind_to_height(struct node_db *ndb,
+                                                 struct boot_svc_ctx *svc,
+                                                 int rewind_height)
+{
+    bool rewound = false;
+    if (rewind_height < 0) {
+        rewound = node_db_sync_reset_tip(ndb);
+    } else {
+        struct block_index *rewind_tip =
+            active_chain_at(&svc->state->chain_active, rewind_height);
+        rewound = rewind_tip && rewind_tip->phashBlock &&
+                  node_db_sync_set_tip(ndb, rewind_tip->phashBlock->data,
+                                       rewind_height);
+    }
+    return rewound;
+}
+
+static bool projection_backfill_start_pending(int projection_tip,
+                                              int chain_tip,
+                                              bool sparse_tip_pending)
+{
+    return projection_tip < chain_tip && !sparse_tip_pending;
+}
+
 static void *projection_backfill_service_thread(void *arg)
 {
     struct boot_svc_ctx *svc = arg;
@@ -389,10 +551,9 @@ static void *projection_backfill_service_thread(void *arg)
         return NULL;
     }
 
-    while (!svc->projection_backfill_thread_stop && boot_running(svc)) {
+    while (projection_backfill_should_run(svc)) {
         struct node_db *ndb = boot_node_db(svc);
-        int chain_tip = svc->state ?
-            active_chain_height(&svc->state->chain_active) : -1;
+        int chain_tip = projection_backfill_chain_tip(svc);
         int projection_tip = -1;
         int projection_block_tip = -1;
         int first_missing_height = -1;
@@ -406,43 +567,21 @@ static void *projection_backfill_service_thread(void *arg)
          * read before the rewind logic below mutates projection_tip. This — not
          * a loop counter — is the supervisor progress marker while behind, so a
          * stuck cursor freezes the marker and NO_PROGRESS can fire. */
-        int projection_cursor =
-            (ndb && ndb->open) ? node_db_sync_get_tip_height(ndb) : -1;
+        int projection_cursor = projection_backfill_cursor_height(ndb);
 
         /* BEHIND = there is real backfill work to do and it is not being
          * intentionally suppressed by an in-progress mint/refold or canonical
          * tail fold. Only in this state is a frozen cursor a fault; a caught-up
          * (cursor >= tip) or intentionally deferred worker is
          * healthy/quiescent. */
-        bool behind = !refolding && !tail_folding &&
-                      projection_cursor >= 0 && chain_tip >= 0 &&
-                      projection_cursor < chain_tip;
-        bool cursor_frozen = behind &&
-                             projection_cursor == last_projection_cursor;
+        bool behind = projection_backfill_is_behind(refolding, tail_folding,
+                                                    projection_cursor,
+                                                    chain_tip);
+        bool cursor_frozen = projection_backfill_cursor_frozen(
+            behind, projection_cursor, last_projection_cursor);
 
-        supervisor_child_id sup_id =
-            atomic_load(&g_projection_backfill_sup_id);
-        if (sup_id != SUPERVISOR_INVALID_ID) {
-            supervisor_tick(sup_id);
-            /* Progress marker: the cursor height while behind (a frozen cursor
-             * freezes the marker → SUPERVISOR_STALL_NO_PROGRESS), else a
-             * synthetic beat in a disjoint numeric range so quiescence at the
-             * tip never false-trips the gate. */
-            int64_t marker = behind
-                ? (int64_t)projection_cursor
-                : PROJECTION_BACKFILL_AT_TIP_BEAT_BASE + (++loop_iterations);
-            supervisor_progress(sup_id, marker);
-            /* Retire the stale stall blocker ONLY when the worker is healthy
-             * this loop — quiescent (at tip / mid-refold) or the cursor
-             * advanced. A behind-and-frozen worker skips the clear so a
-             * NO_PROGRESS-raised worker.stall.* blocker stays standing until the
-             * cursor moves again — advance-or-name-a-blocker, honestly. */
-            bool healthy_this_loop =
-                !behind || projection_cursor != last_projection_cursor;
-            if (healthy_this_loop)
-                boot_worker_clear_stall_blocker(
-                    &g_projection_backfill_contract);
-        }
+        projection_backfill_beat(&loop_iterations, behind, projection_cursor,
+                                 last_projection_cursor);
         last_projection_cursor = projection_cursor;
 
         boot_reap_catchup_service(svc);
@@ -454,16 +593,10 @@ static void *projection_backfill_service_thread(void *arg)
          * eligible; the first loop after either fold closes resumes backfill.
          * Mirrors the ownership guards in node_db_catchup_service.c and
          * utxo_mirror_sync_service.c. */
-        if (refolding || tail_folding) {
-            for (int i = 0; i < 5 &&
-                 !svc->projection_backfill_thread_stop &&
-                 boot_running(svc); i++)
-                sleep(1);
+        if (projection_backfill_defer_for_fold(svc, refolding, tail_folding))
             continue;
-        }
 
-        if (ndb && ndb->open && chain_tip >= 0 &&
-            !node_db_sync_catchup_job_is_started(&svc->catchup_job)) {
+        if (projection_backfill_catchup_ready(ndb, svc, chain_tip)) {
             projection_tip = node_db_sync_get_tip_height(ndb);
             projection_block_tip = db_block_max_height(ndb);
             bool sparse_prefix =
@@ -484,33 +617,26 @@ static void *projection_backfill_service_thread(void *arg)
                 node_db_catchup_sparse_tip_slot_pending(
                     sparse_prefix, projection_tip, chain_tip,
                     next_slot_present);
-            if (projection_block_tip >= 0 &&
-                projection_tip > projection_block_tip &&
-                projection_block_tip < chain_tip &&
-                !sparse_prefix) {
-                struct block_index *rewind_tip =
-                    active_chain_at(&svc->state->chain_active,
-                                    projection_block_tip);
-                if (rewind_tip && rewind_tip->phashBlock &&
-                    node_db_sync_set_tip(ndb, rewind_tip->phashBlock->data,
-                                         projection_block_tip)) {
-                    event_emitf(EV_RECOVERY_ACTION, 0,
-                                "projection-cursor-rewind from=%d to=%d",
-                                projection_tip, projection_block_tip);
-                    projection_tip = projection_block_tip;
-                }
+            if (projection_backfill_rewind_to_block(ndb, svc, projection_tip,
+                                                    projection_block_tip,
+                                                    chain_tip,
+                                                    sparse_prefix)) {
+                event_emitf(EV_RECOVERY_ACTION, 0,
+                            "projection-cursor-rewind from=%d to=%d",
+                            projection_tip, projection_block_tip);
+                projection_tip = projection_block_tip;
             }
-            int repair_cap = projection_tip < chain_tip ? projection_tip : chain_tip;
+            int repair_cap =
+                projection_backfill_repair_cap(projection_tip, chain_tip);
             bool hole_scan_ran = false;
             bool hole_scan_ok = boot_projection_hole_scan_if_due(
                 &hole_scan, ndb, repair_cap, sparse_prefix, behind,
                 cursor_frozen, projection_cursor,
                 (int64_t)platform_time_wall_time_t(), &hole_scan_ran,
                 &first_missing_height);
-            if (hole_scan_ran && hole_scan_ok &&
-                first_missing_height >= 0 &&
-                first_missing_height <= repair_cap &&
-                !sparse_prefix) {
+            if (projection_backfill_hole_needs_repair(
+                    hole_scan_ran, hole_scan_ok, first_missing_height,
+                    repair_cap, sparse_prefix)) {
                 if (first_missing_height != last_hole_rewind_height) {
                     last_hole_rewind_height = first_missing_height;
                     hole_rewind_attempts = 0;
@@ -523,17 +649,8 @@ static void *projection_backfill_service_thread(void *arg)
                     int rewind_height = first_missing_height - 1;
                     bool rewound = false;
                     hole_rewind_attempts++;
-                    if (rewind_height < 0) {
-                        rewound = node_db_sync_reset_tip(ndb);
-                    } else {
-                        struct block_index *rewind_tip =
-                            active_chain_at(&svc->state->chain_active,
-                                            rewind_height);
-                        rewound = rewind_tip && rewind_tip->phashBlock &&
-                                  node_db_sync_set_tip(ndb,
-                                                       rewind_tip->phashBlock->data,
-                                                       rewind_height);
-                    }
+                    rewound = projection_backfill_rewind_to_height(
+                        ndb, svc, rewind_height);
                     if (rewound) {
                         event_emitf(EV_RECOVERY_ACTION, 0,
                                     "projection-hole-rewind missing=%d "
@@ -566,8 +683,9 @@ static void *projection_backfill_service_thread(void *arg)
                         projection_tip, first_missing_height, repair_cap,
                         hole_rewind_attempts);
                 }
-            } else if ((hole_scan_ran && hole_scan_ok &&
-                        first_missing_height < 0) || sparse_prefix) {
+            } else if (projection_backfill_hole_resolved(
+                           hole_scan_ran, hole_scan_ok, first_missing_height,
+                           sparse_prefix)) {
                 last_hole_rewind_height = -1;
                 hole_rewind_attempts = 0;
                 hole_rewind_gave_up_reported = false;
@@ -575,7 +693,8 @@ static void *projection_backfill_service_thread(void *arg)
                  * → any terminal-stuck claim has resolved; retire it. */
                 projection_backfill_clear_stuck_blocker();
             }
-            if (projection_tip < chain_tip && !sparse_tip_pending) {
+            if (projection_backfill_start_pending(projection_tip, chain_tip,
+                                                  sparse_tip_pending)) {
                 if (last_start_height != chain_tip) {
                     event_emitf(EV_RECOVERY_ACTION, 0,
                                 "projection-backfill-start from=%d to=%d",
@@ -591,11 +710,7 @@ static void *projection_backfill_service_thread(void *arg)
             }
         }
 
-        for (int i = 0; i < 5 &&
-             !svc->projection_backfill_thread_stop &&
-             boot_running(svc); i++) {
-            sleep(1);
-        }
+        projection_backfill_idle_sleep(svc);
     }
 
     boot_reap_catchup_service(svc);
