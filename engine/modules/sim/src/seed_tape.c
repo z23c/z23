@@ -515,9 +515,10 @@ int seed_tape_save(const seed_tape_t *tape, const char *path)
 
 /* ── load ─────────────────────────────────────────────────────── */
 
-/* Validate image size, CRC32C and header fields; returns 0 if the image
- * is well-formed, else -1 (stderr messages keep seed_tape_load_from_memory's
- * name). */
+/* Validate image size, CRC32C and the magic, version and flags header
+ * fields; returns 0 if those pass, else -1 (stderr messages keep
+ * seed_tape_load_from_memory's name). The RNG state and action records
+ * are checked by the caller. */
 static int tape_check_header(const uint8_t *buf, size_t fsize)
 {
     /* Minimum: header (32) + rng state (32) + action_count (8) + crc (4) = 76. */
