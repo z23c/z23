@@ -112,7 +112,7 @@ static bool post_heal_state_ok(const struct simnet_wire_stats *st)
 }
 
 /* The 0/1 rendering the FAIL diagnostics print for stats booleans. */
-static int flag01(bool flag)
+static int bool_as_01(bool flag)
 {
     return flag ? 1 : 0;
 }
@@ -195,8 +195,8 @@ int main(void)
         fprintf(stderr, "FAIL: outage state wrong (expected "
                         "no_unexpected_permanent_blocker=1, "
                         "monitor_failed=0, peers_open=1; got %d/%d/%zu)\n",
-                flag01(mid.no_unexpected_permanent_blocker),
-                flag01(mid.monitor_failed), mid.peers_open);
+                bool_as_01(mid.no_unexpected_permanent_blocker),
+                bool_as_01(mid.monitor_failed), mid.peers_open);
         simnet_wire_free(wire);
         return 1;
     }
