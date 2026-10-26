@@ -73,6 +73,64 @@ static size_t fsce_script_len(uint32_t index)
     return 1;
 }
 
+static bool fsce_seed_rows(sqlite3 *db, uint32_t rows, bool reverse, bool ok)
+{
+    for (uint32_t n = 0; ok && n < rows; n++) {
+        uint32_t index = reverse ? rows - 1 - n : n;
+        ok = fsce_add_row(db, index, fsce_script_len(index));
+    }
+    return ok;
+}
+
+static enum fast_sync_coins_export_step fsce_collect_chunks(
+    struct fast_sync_coins_export *exporter, bool ok,
+    struct utxo_chunk *chunk, struct fsce_result *result)
+{
+    enum fast_sync_coins_export_step step = FAST_SYNC_COINS_EXPORT_ERROR;
+    while (ok && result->chunks < 2 &&
+           (step = fast_sync_coins_export_next_chunk(
+                exporter, chunk, result->chunk_hashes[result->chunks])) ==
+                    FAST_SYNC_COINS_EXPORT_CHUNK) {
+        result->chunk_sizes[result->chunks] = chunk->num_entries;
+        result->chunks++;
+    }
+    return step;
+}
+
+static bool fsce_result_matches(const struct fsce_result *result,
+                                uint32_t rows,
+                                const uint8_t expected_root[32])
+{
+    return result->count == rows &&
+           memcmp(result->root, expected_root, 32) == 0;
+}
+
+static bool fsce_export_and_verify(struct fast_sync_coins_export *exporter,
+                                   bool ok, uint32_t rows,
+                                   const uint8_t expected_root[32],
+                                   struct fsce_result *result)
+{
+    struct utxo_chunk *chunk = zcl_calloc(
+        1, sizeof(*chunk), "fast_sync_coins_export_chunk");
+    enum fast_sync_coins_export_step step =
+        fsce_collect_chunks(exporter, ok, chunk, result);
+    if (ok && step == FAST_SYNC_COINS_EXPORT_CHUNK)
+        step = fast_sync_coins_export_next_chunk(exporter, chunk,
+                                                  (uint8_t[32]){0});
+    bool finished = false;
+    if (ok && step == FAST_SYNC_COINS_EXPORT_DONE) {
+        finished = fast_sync_coins_export_finish(
+            exporter, result->root, &result->count);
+        exporter = NULL;
+    }
+    ok = ok && step == FAST_SYNC_COINS_EXPORT_DONE && finished &&
+         fsce_result_matches(result, rows, expected_root);
+    if (!ok && exporter)
+        fast_sync_coins_export_abort(exporter);
+    free(chunk);
+    return ok;
+}
+
 static bool fsce_run_corpus(const char *tag, uint32_t rows, bool reverse,
                             struct fsce_result *out)
 {
@@ -82,10 +140,7 @@ static bool fsce_run_corpus(const char *tag, uint32_t rows, bool reverse,
         return false;
     sqlite3 *db = progress_store_db();
     bool ok = db && coins_kv_ensure_schema(db);
-    for (uint32_t n = 0; ok && n < rows; n++) {
-        uint32_t index = reverse ? rows - 1 - n : n;
-        ok = fsce_add_row(db, index, fsce_script_len(index));
-    }
+    ok = fsce_seed_rows(db, rows, reverse, ok);
     ok = ok && fsce_set_frontier(db, 200) &&
          coins_kv_mark_migration_complete(db);
 
@@ -96,31 +151,9 @@ static bool fsce_run_corpus(const char *tag, uint32_t rows, bool reverse,
         ? fast_sync_coins_export_open(&info) : NULL;
     ok = ok && exporter && info.applied_height == 200;
 
-    struct utxo_chunk *chunk = zcl_calloc(
-        1, sizeof(*chunk), "fast_sync_coins_export_chunk");
     struct fsce_result result = {0};
-    enum fast_sync_coins_export_step step = FAST_SYNC_COINS_EXPORT_ERROR;
-    while (ok && result.chunks < 2 &&
-           (step = fast_sync_coins_export_next_chunk(
-                exporter, chunk, result.chunk_hashes[result.chunks])) ==
-                    FAST_SYNC_COINS_EXPORT_CHUNK) {
-        result.chunk_sizes[result.chunks] = chunk->num_entries;
-        result.chunks++;
-    }
-    if (ok && step == FAST_SYNC_COINS_EXPORT_CHUNK)
-        step = fast_sync_coins_export_next_chunk(exporter, chunk,
-                                                  (uint8_t[32]){0});
-    bool finished = false;
-    if (ok && step == FAST_SYNC_COINS_EXPORT_DONE) {
-        finished = fast_sync_coins_export_finish(
-            exporter, result.root, &result.count);
-        exporter = NULL;
-    }
-    ok = ok && step == FAST_SYNC_COINS_EXPORT_DONE && finished &&
-         result.count == rows && memcmp(result.root, expected_root, 32) == 0;
-    if (!ok && exporter)
-        fast_sync_coins_export_abort(exporter);
-    free(chunk);
+    ok = fsce_export_and_verify(exporter, ok, rows, expected_root,
+                                &result);
     progress_store_close();
     test_cleanup_tmpdir(dir);
     if (ok)
