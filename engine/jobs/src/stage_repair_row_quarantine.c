@@ -108,6 +108,57 @@ static void runtime_row_clear_have_data(struct main_state *ms, int height)
     }
 }
 
+/* A quarantine attempt is only well-formed with a db handle, a canonical hash
+ * and a height inside the block-index int domain. */
+static bool row_quarantine_args_valid(struct node_db *ndb,
+                                      const struct uint256 *hash,
+                                      int64_t height)
+{
+    return ndb && hash && height >= 0 && height <= INT32_MAX;
+}
+
+/* Copy the result record out to the caller's slot, when the caller
+ * supplied one. */
+static void row_quarantine_copy_result(
+    struct stage_repair_row_quarantine_result *out,
+    const struct stage_repair_row_quarantine_result *r)
+{
+    if (out)
+        *out = *r;
+}
+
+/* Full Equihash check above the baked ROM checkpoint — the runtime frontier
+ * lives in that unverified tail, so a live quarantine always runs the full
+ * solution check (matching the loaders' above-checkpoint budget). Below the
+ * checkpoint (fixtures / early history) the hash-bind + PoW-target checks
+ * still catch a poisoned row without the expensive solution check. */
+static bool row_quarantine_needs_full_equihash_check(int64_t height)
+{
+    const struct rom_state_checkpoint *rom_cp = get_rom_state_checkpoint();
+    int64_t rom_h = rom_cp ? (int64_t)rom_cp->height : -1;
+    return rom_h >= 0 && height > rom_h;
+}
+
+/* Fire the fixed-id TRANSIENT typed blocker that reports the purge (height,
+ * hash and verdict travel in the reason string; fire_count and the runtime
+ * counter above carry multiplicity). */
+static void runtime_row_fire_quarantine_blocker(
+    int64_t height, const char *hex, enum block_row_verify_result verdict,
+    bool purged)
+{
+    struct blocker_record rec;
+    char reason[BLOCKER_REASON_MAX];
+    snprintf(reason, sizeof(reason),
+             "poisoned blocks row height=%lld hash=%.64s verdict=%.40s; "
+             "purge%s; header sync and body_fetch will refetch it",
+             (long long)height, hex,
+             row_verify_verdict_name(verdict),
+             purged ? "=ok" : "=failed (repair loop retries)");
+    if (blocker_init(&rec, RUNTIME_ROW_QUARANTINE_BLOCKER_ID, "block_index",
+                     BLOCKER_TRANSIENT, reason))
+        (void)blocker_set(&rec);
+}
+
 bool stage_repair_quarantine_blocks_row(
     struct node_db *ndb, struct main_state *ms, int64_t height,
     const struct uint256 *hash,
@@ -118,11 +169,11 @@ bool stage_repair_quarantine_blocks_row(
     r.height = (int)height;
     r.verdict = BLOCK_ROW_VERIFY_OK;
 
-    if (!ndb || !hash || height < 0 || height > INT32_MAX) {
+    if (!row_quarantine_args_valid(ndb, hash, height)) {
         LOG_WARN("stage_repair",
                  "[row_quarantine] invalid args (ndb=%p height=%lld)",
                  (void *)ndb, (long long)height);
-        if (out) *out = r;
+        row_quarantine_copy_result(out, &r);
         return false; // raw-return-ok:invalid-args-logged
     }
 
@@ -142,7 +193,7 @@ bool stage_repair_quarantine_blocks_row(
             /* No addressable row at (hash | height): nothing to purge. The
              * repair loop's re-fetch remains the path forward. */
             r.row_absent = true;
-            if (out) *out = r;
+            row_quarantine_copy_result(out, &r);
             return false; // raw-return-ok:no-row-to-quarantine
         }
         r.deleted_by_height = true;
@@ -150,14 +201,7 @@ bool stage_repair_quarantine_blocks_row(
     r.attempted = true;
 
     const struct chain_params *cp = chain_params_get();
-    /* Full Equihash check above the baked ROM checkpoint — the runtime frontier
-     * lives in that unverified tail, so a live quarantine always runs the full
-     * solution check (matching the loaders' above-checkpoint budget). Below the
-     * checkpoint (fixtures / early history) the hash-bind + PoW-target checks
-     * still catch a poisoned row without the expensive solution check. */
-    const struct rom_state_checkpoint *rom_cp = get_rom_state_checkpoint();
-    int64_t rom_h = rom_cp ? (int64_t)rom_cp->height : -1;
-    bool full_check = (rom_h >= 0 && height > rom_h);
+    bool full_check = row_quarantine_needs_full_equihash_check(height);
 
     enum block_row_verify_result verdict =
         block_row_verify(hash->data, hdr.nBits, &hdr, cp, full_check);
@@ -174,7 +218,7 @@ bool stage_repair_quarantine_blocks_row(
                  "[row_quarantine] h=%lld hash=%s: chain params unavailable — "
                  "refusing to purge (cannot prove poison)",
                  (long long)height, hex);
-        if (out) *out = r;
+        row_quarantine_copy_result(out, &r);
         return false; // raw-return-ok:no-params-refused
     }
 
@@ -188,7 +232,7 @@ bool stage_repair_quarantine_blocks_row(
                  "[row_quarantine] h=%lld hash=%s: `blocks` row verifies OK — "
                  "NOT a poisoned row, refusing to purge",
                  (long long)height, hex);
-        if (out) *out = r;
+        row_quarantine_copy_result(out, &r);
         return false; // raw-return-ok:clean-row-refused
     }
 
@@ -206,17 +250,7 @@ bool stage_repair_quarantine_blocks_row(
     atomic_fetch_add_explicit(&g_runtime_row_quarantined, 1,
                               memory_order_relaxed);
 
-    struct blocker_record rec;
-    char reason[BLOCKER_REASON_MAX];
-    snprintf(reason, sizeof(reason),
-             "poisoned blocks row height=%lld hash=%.64s verdict=%.40s; "
-             "purge%s; header sync and body_fetch will refetch it",
-             (long long)height, hex,
-             row_verify_verdict_name(verdict),
-             purged ? "=ok" : "=failed (repair loop retries)");
-    if (blocker_init(&rec, RUNTIME_ROW_QUARANTINE_BLOCKER_ID, "block_index",
-                     BLOCKER_TRANSIENT, reason))
-        (void)blocker_set(&rec);
+    runtime_row_fire_quarantine_blocker(height, hex, verdict, purged);
 
     uint64_t reps = 0;
     if (log_throttle_should_emit(&g_runtime_row_quarantine_log,
@@ -239,6 +273,6 @@ bool stage_repair_quarantine_blocks_row(
     }
 
     r.quarantined = purged;
-    if (out) *out = r;
+    row_quarantine_copy_result(out, &r);
     return purged;
 }
