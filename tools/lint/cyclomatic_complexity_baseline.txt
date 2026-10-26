@@ -1272,7 +1272,6 @@ tests/harness/src/test_stage_repair_coin_backfill.c:cb_seed_store:20
 tests/harness/src/test_stage_repair_coin_backfill.c:cb_setup:17
 tests/harness/src/test_store.c:test_store:327
 tests/harness/src/test_supervisor_production_tree.c:test_supervisor_production_tree:43
-tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:367
 tests/harness/src/test_test_group_selector.c:capture_command_ends:17
 tests/harness/src/test_test_group_selector.c:test_runner_exact_selection:26
 tests/harness/src/test_testcache.c:test_testcache:130
