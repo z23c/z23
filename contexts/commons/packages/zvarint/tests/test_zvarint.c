@@ -396,6 +396,26 @@ static void test_cli_output_controls(void)
     CHECK(io_closes[0] == 1 && io_closes[1] == 1);
 }
 
+static void test_cli_argument_count(void)
+{
+    char *decode_modes[] = {"dec", "decs"};
+    for (size_t i = 0; i < sizeof decode_modes / sizeof decode_modes[0]; ++i) {
+        char *args[] = {"zvarint", decode_modes[i], "00", "not-hex", NULL};
+        io_reset(IO_NONE, 0);
+        CHECK(zvarint_cli_main(4, args) == 2);
+        CHECK(io_text[0][0] == '\0');
+        CHECK(strstr(io_text[1], "usage:") != NULL);
+    }
+    char *encode_modes[] = {"enc", "encs"};
+    const char *expected[] = {"00\n01\n", "00\n02\n"};
+    for (size_t i = 0; i < sizeof encode_modes / sizeof encode_modes[0]; ++i) {
+        char *args[] = {"zvarint", encode_modes[i], "0", "1", NULL};
+        io_reset(IO_NONE, 0);
+        CHECK(zvarint_cli_main(4, args) == 0);
+        CHECK(strcmp(io_text[0], expected[i]) == 0);
+    }
+}
+
 int main(void)
 {
     test_known_vectors();
@@ -407,6 +427,7 @@ int main(void)
     test_cli_decimal_controls();
     test_cli_output_failures();
     test_cli_output_controls();
+    test_cli_argument_count();
     puts("test_zvarint: all groups passed (vectors zigzag errors roundtrip errstr cli)");
     return 0;
 }

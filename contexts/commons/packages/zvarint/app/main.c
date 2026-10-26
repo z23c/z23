@@ -128,8 +128,10 @@ static int run(int argc, char **argv)
         }
         return 0;
     }
-    if (strcmp(argv[1], "dec") == 0 || strcmp(argv[1], "decs") == 0)
+    if (strcmp(argv[1], "dec") == 0 || strcmp(argv[1], "decs") == 0) {
+        if (argc != 3) return usage();
         return decode_hex(argv[2], argv[1][3] == 's');
+    }
     return usage();
 }
 

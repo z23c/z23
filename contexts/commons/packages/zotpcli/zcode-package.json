@@ -104,7 +104,7 @@
     },
     {
       "name": "zvarint/zvarint",
-      "root": "e6cc3aa6ddc7650ce2e212d171625853db8a39556bf0ec7cb371759cb90b44a5",
+      "root": "f6cd213941ea458f9516cb59b54c192d10830c0b8ba3f028a83876bc408ed817",
       "semver": "0.1.0"
     }
   ],
