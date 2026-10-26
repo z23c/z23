@@ -596,7 +596,7 @@ static void fleet_host_cpu(int64_t load, int64_t cores,
     v[2] = p[2] && cores > load_ceil ? cores - load_ceil : 0;
 }
 
-/* The memory rows: used and total system memory, and this node's RSS. */
+/* The memory rows: used and total system memory. */
 static void fleet_host_memory(bool mem_ok, const struct os_proc_mem *mem,
                               int64_t v[ZCL_FLEET_HOST_N],
                               bool p[ZCL_FLEET_HOST_N])
@@ -607,6 +607,15 @@ static void fleet_host_memory(bool mem_ok, const struct os_proc_mem *mem,
     v[3] = p[3] ? (mem->sys_total_bytes - mem->sys_avail_bytes) / mib : 0;
     p[4] = mem_ok && mem->sys_total_bytes >= 0;
     v[4] = p[4] ? mem->sys_total_bytes / mib : 0;
+}
+
+/* The uptime row, then this node's RSS row, in the original write order. */
+static void fleet_host_tail(bool mem_ok, const struct os_proc_mem *mem,
+                            int64_t up, int64_t v[ZCL_FLEET_HOST_N],
+                            bool p[ZCL_FLEET_HOST_N])
+{
+    const int64_t mib = 1024 * 1024;
+    p[7] = up >= 0; v[7] = up;
     p[8] = mem_ok && mem->rss_bytes >= 0;
     v[8] = p[8] ? mem->rss_bytes / mib : 0;
 }
@@ -636,7 +645,7 @@ void zcl_fleet_host_snapshot(const char *datadir, int64_t v[ZCL_FLEET_HOST_N],
     fleet_host_cpu(load, cores, v, p);
     fleet_host_memory(mem_ok, &mem, v, p);
     fleet_host_disk(disk, d_avail, d_total, v, p);
-    p[7] = up >= 0; v[7] = up;
+    fleet_host_tail(mem_ok, &mem, up, v, p);
 }
 
 /* The one metric id asked for, or NULL when the request names none. */
