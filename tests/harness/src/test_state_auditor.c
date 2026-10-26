@@ -360,6 +360,60 @@ static bool sa_set_applied_height(sqlite3 *pdb, int32_t height)
     return ok;
 }
 
+/* Install the three fixture rows in both stores plus the applied-height
+ * markers, short-circuiting in the same order the inline chain did. */
+static bool sa_install_coins_fixture_rows(sqlite3 *pdb, struct node_db *ndb,
+                                          const uint8_t txid_a[32],
+                                          const uint8_t txid_b[32],
+                                          const uint8_t txid_c[32],
+                                          int32_t height)
+{
+    return coins_kv_add(pdb, txid_a, 0, 5000, height, false, NULL, 0) &&
+           coins_kv_add(pdb, txid_b, 0, 6000, height, false, NULL, 0) &&
+           coins_kv_add(pdb, txid_c, 1, 7000, height, false, NULL, 0) &&
+           sa_insert_utxo_row(ndb, txid_a, 0, 5000, height) &&
+           sa_insert_utxo_row(ndb, txid_b, 0, 6000, height) &&
+           sa_insert_utxo_row(ndb, txid_c, 1, 7000, height) &&
+           sa_set_applied_height(pdb, height) &&
+           node_db_state_set_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, height);
+}
+
+/* Drive state_auditor_tick_once() the given number of times. */
+static void sa_auditor_tick_n_times(int ticks)
+{
+    for (int i = 0; i < ticks; i++) state_auditor_tick_once();
+}
+
+/* Clean-fixture cross-check: 10 ticks with no coins-leg latch, and the
+ * leg really ran (its tick counter reached 10). */
+static bool sa_coins_clean_crosscheck_ok(void)
+{
+    bool ok = true;
+    for (int i = 0; i < 10; i++) {
+        state_auditor_tick_once();
+        struct state_auditor_mismatch_info info;
+        state_auditor_get_mismatch(STATE_AUDITOR_LEG_COINS_COMMITMENT,
+                                   &info);
+        if (info.latched) { ok = false; break; }
+    }
+    return ok && state_auditor_test_coins_ticks() >= 10;
+}
+
+/* Run STATE_AUDITOR_CONFIRM_STREAK confirming ticks on the coins leg,
+ * leaving the last tick's mismatch info in *info; returns its latched flag
+ * (the loop's final assignment). */
+static bool sa_coins_run_confirm_streak(struct state_auditor_mismatch_info *info)
+{
+    memset(info, 0, sizeof(*info));
+    bool latched = false;
+    for (int i = 0; i < STATE_AUDITOR_CONFIRM_STREAK; i++) {
+        state_auditor_tick_once();
+        state_auditor_get_mismatch(STATE_AUDITOR_LEG_COINS_COMMITMENT, info);
+        latched = info->latched;
+    }
+    return latched;
+}
+
 static int test_state_auditor_coins_leg(void)
 {
     int failures = 0;
@@ -384,14 +438,7 @@ static int test_state_auditor_coins_leg(void)
 
     const int32_t H = 100;
     bool inserted =
-        coins_kv_add(pdb, txid_a, 0, 5000, H, false, NULL, 0) &&
-        coins_kv_add(pdb, txid_b, 0, 6000, H, false, NULL, 0) &&
-        coins_kv_add(pdb, txid_c, 1, 7000, H, false, NULL, 0) &&
-        sa_insert_utxo_row(&ndb, txid_a, 0, 5000, H) &&
-        sa_insert_utxo_row(&ndb, txid_b, 0, 6000, H) &&
-        sa_insert_utxo_row(&ndb, txid_c, 1, 7000, H) &&
-        sa_set_applied_height(pdb, H) &&
-        node_db_state_set_int(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, H);
+        sa_install_coins_fixture_rows(pdb, &ndb, txid_a, txid_b, txid_c, H);
     SA_CHECK("fixture rows + applied-height markers installed", inserted);
 
     g_state_auditor_test_pdb = pdb;
@@ -422,15 +469,7 @@ static int test_state_auditor_coins_leg(void)
     printf("state_auditor coins: clean cross-check — zero mismatches over "
           "10 ticks... ");
     {
-        bool ok = true;
-        for (int i = 0; i < 10; i++) {
-            state_auditor_tick_once();
-            struct state_auditor_mismatch_info info;
-            state_auditor_get_mismatch(STATE_AUDITOR_LEG_COINS_COMMITMENT,
-                                       &info);
-            if (info.latched) { ok = false; break; }
-        }
-        ok = ok && state_auditor_test_coins_ticks() >= 10;
+        bool ok = sa_coins_clean_crosscheck_ok();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -450,8 +489,7 @@ static int test_state_auditor_coins_leg(void)
           "confirmed as corruption... ");
     {
         atomic_store(&mirror_guard.updates_active, 1u);
-        for (int i = 0; i < STATE_AUDITOR_CONFIRM_STREAK + 1; i++)
-            state_auditor_tick_once();
+        sa_auditor_tick_n_times(STATE_AUDITOR_CONFIRM_STREAK + 1);
         struct state_auditor_mismatch_info info;
         state_auditor_get_mismatch(STATE_AUDITOR_LEG_COINS_COMMITMENT, &info);
         atomic_fetch_add(&mirror_guard.update_generation, 2u);
@@ -463,15 +501,8 @@ static int test_state_auditor_coins_leg(void)
     printf("state_auditor coins: corrupted row flagged after %d confirming "
           "ticks... ", STATE_AUDITOR_CONFIRM_STREAK);
     {
-        bool latched = false;
         struct state_auditor_mismatch_info info;
-        memset(&info, 0, sizeof(info));
-        for (int i = 0; i < STATE_AUDITOR_CONFIRM_STREAK; i++) {
-            state_auditor_tick_once();
-            state_auditor_get_mismatch(STATE_AUDITOR_LEG_COINS_COMMITMENT,
-                                       &info);
-            latched = info.latched;
-        }
+        bool latched = sa_coins_run_confirm_streak(&info);
         bool ok = latched && strstr(info.detail, "keyspace_window") != NULL;
         if (ok) printf("OK\n");
         else {

@@ -2178,7 +2178,6 @@ tests/harness/src/test_stage_repair_tipfin_backfill.c:test_stage_repair_tipfin_b
 tests/harness/src/test_stage_step_budget_exceeded.c:test_stage_step_budget_exceeded:36
 tests/harness/src/test_stall_totality_matrix.c:make_fixture_block_readable:20
 tests/harness/src/test_stall_totality_matrix.c:test_stall_totality_matrix:96
-tests/harness/src/test_state_auditor.c:test_state_auditor_coins_leg:22
 tests/harness/src/test_sticky_escalator.c:test_sticky_escalator:85
 tests/harness/src/test_stopwatch_skip_watch.c:test_stopwatch_skip_watch:181
 tests/harness/src/test_store.c:test_store:327
