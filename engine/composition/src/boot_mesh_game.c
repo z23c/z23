@@ -76,10 +76,6 @@ static size_t game_roster_bytes(const struct mesh_game_roster *roster)
     return 35u + (size_t)roster->row_count * (33u + roster->asset_count);
 }
 
-/* One composer per frame kind, lifted from the switch arms of
- * mesh_game_compose. Each cursor starts at 1, past the kind byte the
- * composer writes first, and each helper returns what its arm returned:
- * the bytes written, or 0 when the frame refuses its own bounds. */
 static size_t game_compose_hello(const struct mesh_game_frame *frame,
                                  uint8_t *out, size_t cap)
 {
@@ -180,9 +176,6 @@ size_t mesh_game_compose(const struct mesh_game_frame *frame, uint8_t *out,
     return 0;
 }
 
-/* One parser per frame kind, lifted from the switch arms of
- * mesh_game_parse. Each cursor starts at 1, past the kind byte the parser
- * switched on, and each helper returns the verdict its arm returned. */
 static enum mesh_game_refusal game_parse_hello(const uint8_t *in, size_t len,
                                                struct mesh_game_frame *out)
 {
@@ -369,8 +362,8 @@ static enum mesh_stream_refusal game_service_open(struct mesh_stream *st,
                                                   size_t reply_cap,
                                                   size_t *reply_len, void *ctx)
 {
-    struct mesh_game_session *s;
     struct mesh_game_frame frame;
+    struct mesh_game_session *s;
     uint8_t zid[32];
 
     (void)ctx;
