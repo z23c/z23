@@ -541,7 +541,6 @@ contexts/market/models/src/zslp_validity.c:validate_message:56
 contexts/market/models/src/zslp_validity.c:zslp_validity_apply_height:21
 contexts/market/models/src/zslp_validity.c:zslp_validity_inputs_match:21
 contexts/market/models/src/zslp_validity.c:zslp_validity_token_summary:20
-contexts/market/modules/zswap/src/zswap_assembly.c:zswap_assemble:33
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_accept_decode:24
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_buyer_verify_partial:24
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_error_string:24

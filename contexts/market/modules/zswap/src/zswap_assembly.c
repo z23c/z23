@@ -267,22 +267,14 @@ static bool decode_address(const char field[ZSWAP_ADDRESS_FIELD_BYTES],
 
 /* ── the assembler ─────────────────────────────────────────────────── */
 
-enum zswap_assembly_error zswap_assemble(
+/* Terms gate: the ad and both accepts must validate, both accepts must
+ * name the ad's expiry as their shared deadline, and the seller's token
+ * input must fund at least the token dust. */
+static enum zswap_assembly_error zswap_assemble_check_terms(
     const struct zswap_quote_v1 *ad,
     const struct zswap_buyer_accept *buyer,
-    const struct zswap_seller_accept *seller,
-    struct zswap_assembly *out)
+    const struct zswap_seller_accept *seller)
 {
-    if (!ad || !buyer || !seller || !out)
-        return ZSWAP_ASSEMBLY_ERR_NULL;
-    memset(out, 0, sizeof(*out));
-    transaction_init(&out->tx);
-    out->vout_slp_opreturn = -1;
-    out->vout_token_dust = -1;
-    out->vout_seller_payment = -1;
-    out->vout_seller_change = -1;
-    out->vout_buyer_change = -1;
-
     if (zswap_quote_validate(ad) != ZSWAP_QUOTE_OK)
         return ZSWAP_ASSEMBLY_ERR_AD;
     enum zswap_assembly_error e = zswap_buyer_accept_validate(buyer);
@@ -299,47 +291,80 @@ enum zswap_assembly_error zswap_assemble(
      * the dust that carries the token to the buyer. */
     if (seller->token_input.value_sats < ZSWAP_TOKEN_DUST_ZAT)
         return ZSWAP_ASSEMBLY_ERR_SELLER_DUST;
+    return ZSWAP_ASSEMBLY_OK;
+}
 
-    struct zswap_swap_input token_input = seller->token_input;
-    struct zswap_swap_input buyer_inputs[ZSWAP_MAX_BUYER_INPUTS];
-    memcpy(buyer_inputs, buyer->inputs, sizeof(buyer_inputs));
-    size_t num_buyer = buyer->num_inputs;
+/* Sort the buyer's inputs into canonical outpoint order and refuse any
+ * outpoint collision with the seller's token input. */
+static enum zswap_assembly_error zswap_assemble_order_inputs(
+    const struct zswap_swap_input *token_input,
+    struct zswap_swap_input buyer_inputs[ZSWAP_MAX_BUYER_INPUTS],
+    size_t num_buyer)
+{
     if (!sort_inputs(buyer_inputs, num_buyer))
         return ZSWAP_ASSEMBLY_ERR_INPUT_ORDER;
     for (size_t i = 0; i < num_buyer; i++)
-        if (swap_input_outpoint_cmp(&token_input, &buyer_inputs[i]) == 0)
+        if (swap_input_outpoint_cmp(token_input, &buyer_inputs[i]) == 0)
             return ZSWAP_ASSEMBLY_ERR_INPUT_ORDER;
+    return ZSWAP_ASSEMBLY_OK;
+}
 
+static enum zswap_assembly_error zswap_assemble_decode_destinations(
+    const struct zswap_buyer_accept *buyer,
+    const struct zswap_seller_accept *seller,
+    struct tx_destination *buyer_token_dest,
+    struct tx_destination *buyer_change_dest,
+    struct tx_destination *seller_recv_dest,
+    struct tx_destination *seller_change_dest)
+{
     /* Addresses: the ad carries terms only — all four destinations arrive in
      * the accept data and must decode under this network's params. */
-    struct tx_destination buyer_token_dest, buyer_change_dest;
-    struct tx_destination seller_recv_dest, seller_change_dest;
-    if (!decode_address(buyer->token_recv_address, &buyer_token_dest) ||
-        !decode_address(buyer->change_address, &buyer_change_dest) ||
-        !decode_address(seller->zcl_recv_address, &seller_recv_dest) ||
-        !decode_address(seller->change_address, &seller_change_dest))
+    if (!decode_address(buyer->token_recv_address, buyer_token_dest) ||
+        !decode_address(buyer->change_address, buyer_change_dest) ||
+        !decode_address(seller->zcl_recv_address, seller_recv_dest) ||
+        !decode_address(seller->change_address, seller_change_dest))
         return ZSWAP_ASSEMBLY_ERR_ADDRESS;
+    return ZSWAP_ASSEMBLY_OK;
+}
 
+static enum zswap_assembly_error zswap_assemble_check_amounts(
+    const struct zswap_quote_v1 *ad,
+    const struct zswap_buyer_accept *buyer,
+    const struct zswap_swap_input *buyer_inputs,
+    size_t num_buyer,
+    int64_t token_input_value,
+    int64_t *zcl_amount,
+    int64_t *fee,
+    int64_t *buyer_change,
+    int64_t *seller_change)
+{
     /* Money math in int64 (values are int64 on the tx; the ad's amounts are
      * uint64, so guard the casts before any arithmetic). */
     if (ad->zcl_amount > (uint64_t)INT64_MAX ||
         buyer->fee_sats > (uint64_t)INT64_MAX)
         return ZSWAP_ASSEMBLY_ERR_OVERFLOW;
-    int64_t zcl_amount = (int64_t)ad->zcl_amount;
-    int64_t fee = (int64_t)buyer->fee_sats;
+    *zcl_amount = (int64_t)ad->zcl_amount;
+    *fee = (int64_t)buyer->fee_sats;
     int64_t buyer_total = 0;
     for (size_t i = 0; i < num_buyer; i++) {
         if (buyer_inputs[i].value_sats > INT64_MAX - buyer_total)
             return ZSWAP_ASSEMBLY_ERR_OVERFLOW;
         buyer_total += buyer_inputs[i].value_sats;
     }
-    if (zcl_amount > INT64_MAX - fee)
+    if (*zcl_amount > INT64_MAX - *fee)
         return ZSWAP_ASSEMBLY_ERR_OVERFLOW;
-    if (buyer_total < zcl_amount + fee)
+    if (buyer_total < *zcl_amount + *fee)
         return ZSWAP_ASSEMBLY_ERR_INSUFFICIENT;
-    int64_t buyer_change = buyer_total - zcl_amount - fee;
-    int64_t seller_change = token_input.value_sats - ZSWAP_TOKEN_DUST_ZAT;
+    *buyer_change = buyer_total - *zcl_amount - *fee;
+    *seller_change = token_input_value - ZSWAP_TOKEN_DUST_ZAT;
+    return ZSWAP_ASSEMBLY_OK;
+}
 
+static enum zswap_assembly_error zswap_assemble_build_slp_opreturn(
+    const struct zswap_quote_v1 *ad,
+    uint8_t op_script[256],
+    size_t *op_len)
+{
     /* The SLP SEND declaration: exactly one quantity — token_amount of the
      * ad's token — paying vout[1]. token_id crosses to the SLP wire's
      * byte-reversed convention exactly as the single-party builder does. */
@@ -347,15 +372,28 @@ enum zswap_assembly_error zswap_assemble(
     for (int i = 0; i < 32; i++)
         wire_token_id.data[i] = ad->token_id[31 - i];
     uint64_t quantities[1] = { ad->token_amount };
-    uint8_t op_script[256];
-    size_t op_len = slp_build_send(op_script, sizeof(op_script),
-                                   &wire_token_id, quantities, 1);
-    if (op_len == 0)
+    size_t len = slp_build_send(op_script, 256, &wire_token_id, quantities, 1);
+    if (len == 0)
         return ZSWAP_ASSEMBLY_ERR_SLP_SCRIPT;
+    *op_len = len;
+    return ZSWAP_ASSEMBLY_OK;
+}
 
-    size_t num_vin = 1 + num_buyer;
-    size_t num_vout = 3 + (seller_change > 0 ? 1 : 0) +
-                      (buyer_change > 0 ? 1 : 0);
+/* The three fixed outputs plus one vout for each positive change. */
+static size_t zswap_assemble_vout_count(int64_t seller_change,
+                                        int64_t buyer_change)
+{
+    return 3 + (seller_change > 0 ? 1 : 0) +
+           (buyer_change > 0 ? 1 : 0);
+}
+
+/* Allocate the vin/vout arrays, write the canonical envelope, and null
+ * every vout before the role fill. */
+static enum zswap_assembly_error zswap_assemble_alloc_transaction(
+    struct zswap_assembly *out,
+    size_t num_vin,
+    size_t num_vout)
+{
     if (!transaction_alloc(&out->tx, num_vin, num_vout))
         return ZSWAP_ASSEMBLY_ERR_ALLOC;
 
@@ -370,10 +408,18 @@ enum zswap_assembly_error zswap_assemble(
 
     for (size_t i = 0; i < num_vout; i++)
         tx_out_set_null(&out->tx.vout[i]);
+    return ZSWAP_ASSEMBLY_OK;
+}
 
-    /* Inputs: seller token input first, then the sorted buyer inputs. */
-    memcpy(out->tx.vin[0].prevout.hash.data, token_input.txid, 32);
-    out->tx.vin[0].prevout.n = token_input.vout;
+/* Inputs: seller token input first, then the sorted buyer inputs. */
+static void zswap_assemble_fill_inputs(
+    struct zswap_assembly *out,
+    const struct zswap_swap_input *token_input,
+    const struct zswap_swap_input *buyer_inputs,
+    size_t num_buyer)
+{
+    memcpy(out->tx.vin[0].prevout.hash.data, token_input->txid, 32);
+    out->tx.vin[0].prevout.n = token_input->vout;
     out->tx.vin[0].script_sig.size = 0;
     out->tx.vin[0].sequence = UINT32_MAX;
     for (size_t i = 0; i < num_buyer; i++) {
@@ -382,8 +428,21 @@ enum zswap_assembly_error zswap_assemble(
         out->tx.vin[1 + i].script_sig.size = 0;
         out->tx.vin[1 + i].sequence = UINT32_MAX;
     }
+}
 
-    /* Outputs in fixed role order. */
+/* Outputs in fixed role order. */
+static void zswap_assemble_fill_outputs(
+    struct zswap_assembly *out,
+    const uint8_t *op_script,
+    size_t op_len,
+    int64_t zcl_amount,
+    int64_t seller_change,
+    int64_t buyer_change,
+    const struct tx_destination *buyer_token_dest,
+    const struct tx_destination *seller_recv_dest,
+    const struct tx_destination *seller_change_dest,
+    const struct tx_destination *buyer_change_dest)
+{
     size_t v = 0;
     out->vout_slp_opreturn = (int)v;
     out->tx.vout[v].value = 0;
@@ -394,29 +453,87 @@ enum zswap_assembly_error zswap_assemble(
     out->vout_token_dust = (int)v;
     out->tx.vout[v].value = ZSWAP_TOKEN_DUST_ZAT;
     script_for_destination(&out->tx.vout[v].script_pub_key,
-                           &buyer_token_dest);
+                           buyer_token_dest);
     v++;
 
     out->vout_seller_payment = (int)v;
     out->tx.vout[v].value = zcl_amount;
     script_for_destination(&out->tx.vout[v].script_pub_key,
-                           &seller_recv_dest);
+                           seller_recv_dest);
     v++;
 
     if (seller_change > 0) {
         out->vout_seller_change = (int)v;
         out->tx.vout[v].value = seller_change;
         script_for_destination(&out->tx.vout[v].script_pub_key,
-                               &seller_change_dest);
+                               seller_change_dest);
         v++;
     }
     if (buyer_change > 0) {
         out->vout_buyer_change = (int)v;
         out->tx.vout[v].value = buyer_change;
         script_for_destination(&out->tx.vout[v].script_pub_key,
-                               &buyer_change_dest);
+                               buyer_change_dest);
         v++;
     }
+}
+
+enum zswap_assembly_error zswap_assemble(
+    const struct zswap_quote_v1 *ad,
+    const struct zswap_buyer_accept *buyer,
+    const struct zswap_seller_accept *seller,
+    struct zswap_assembly *out)
+{
+    if (!ad || !buyer || !seller || !out)
+        return ZSWAP_ASSEMBLY_ERR_NULL;
+    memset(out, 0, sizeof(*out));
+    transaction_init(&out->tx);
+    out->vout_slp_opreturn = -1;
+    out->vout_token_dust = -1;
+    out->vout_seller_payment = -1;
+    out->vout_seller_change = -1;
+    out->vout_buyer_change = -1;
+
+    enum zswap_assembly_error e =
+        zswap_assemble_check_terms(ad, buyer, seller);
+    if (e != ZSWAP_ASSEMBLY_OK) return e;
+
+    struct zswap_swap_input token_input = seller->token_input;
+    struct zswap_swap_input buyer_inputs[ZSWAP_MAX_BUYER_INPUTS];
+    memcpy(buyer_inputs, buyer->inputs, sizeof(buyer_inputs));
+    size_t num_buyer = buyer->num_inputs;
+    e = zswap_assemble_order_inputs(&token_input, buyer_inputs, num_buyer);
+    if (e != ZSWAP_ASSEMBLY_OK) return e;
+
+    struct tx_destination buyer_token_dest, buyer_change_dest;
+    struct tx_destination seller_recv_dest, seller_change_dest;
+    e = zswap_assemble_decode_destinations(
+        buyer, seller, &buyer_token_dest, &buyer_change_dest,
+        &seller_recv_dest, &seller_change_dest);
+    if (e != ZSWAP_ASSEMBLY_OK) return e;
+
+    int64_t zcl_amount = 0, fee = 0;
+    int64_t buyer_change = 0, seller_change = 0;
+    e = zswap_assemble_check_amounts(
+        ad, buyer, buyer_inputs, num_buyer, token_input.value_sats,
+        &zcl_amount, &fee, &buyer_change, &seller_change);
+    if (e != ZSWAP_ASSEMBLY_OK) return e;
+
+    uint8_t op_script[256];
+    size_t op_len = 0;
+    e = zswap_assemble_build_slp_opreturn(ad, op_script, &op_len);
+    if (e != ZSWAP_ASSEMBLY_OK) return e;
+
+    size_t num_vin = 1 + num_buyer;
+    size_t num_vout = zswap_assemble_vout_count(seller_change, buyer_change);
+    e = zswap_assemble_alloc_transaction(out, num_vin, num_vout);
+    if (e != ZSWAP_ASSEMBLY_OK) return e;
+
+    zswap_assemble_fill_inputs(out, &token_input, buyer_inputs, num_buyer);
+    zswap_assemble_fill_outputs(
+        out, op_script, op_len, zcl_amount, seller_change, buyer_change,
+        &buyer_token_dest, &seller_recv_dest, &seller_change_dest,
+        &buyer_change_dest);
 
     out->seller_input_count = 1;
     out->buyer_input_count = num_buyer;
