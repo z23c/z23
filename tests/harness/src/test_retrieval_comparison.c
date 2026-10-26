@@ -74,7 +74,8 @@ static bool rc_fixture_init(struct rc_fixture *fixture)
     rc_root(fixture->parent.proposal_input_root, 0x22u);
     memcpy(fixture->parent.evaluation_input_root,
            fixture->policy.evaluation_input_root, 32u);
-    memcpy(fixture->parent.evaluator_root, fixture->policy.evaluator_root, 32u);
+    memcpy(fixture->parent.evaluator_root,
+           fixture->policy.evaluator_root, 32u);
 
     fixture->child = fixture->parent;
     fixture->child.recall_at_5_bp = 5100u;
@@ -150,6 +151,79 @@ static bool rc_expect_status(uint8_t direction, uint16_t threshold,
            report.missing_arms == 0 && report.failed_guards == 0;
 }
 
+static bool rc_policy_wire_roundtrip_succeeds(
+    struct zcl_retrieval_comparison_policy_v1 *policy,
+    uint8_t wire[ZCL_RETRIEVAL_COMPARISON_POLICY_WIRE_BYTES],
+    uint8_t roundtrip[ZCL_RETRIEVAL_COMPARISON_POLICY_WIRE_BYTES],
+    struct zcl_retrieval_comparison_policy_v1 *parsed,
+    uint8_t first_root[32], uint8_t second_root[32])
+{
+    return zcl_retrieval_comparison_policy_serialize(policy, wire) ==
+               ZCL_RETRIEVAL_COMPARISON_OK &&
+           zcl_retrieval_comparison_policy_parse(
+               wire, ZCL_RETRIEVAL_COMPARISON_POLICY_WIRE_BYTES, parsed) ==
+               ZCL_RETRIEVAL_COMPARISON_OK &&
+           zcl_retrieval_comparison_policy_serialize(parsed, roundtrip) ==
+               ZCL_RETRIEVAL_COMPARISON_OK &&
+           zcl_retrieval_comparison_policy_root(policy, first_root) ==
+               ZCL_RETRIEVAL_COMPARISON_OK &&
+           zcl_retrieval_comparison_policy_root(parsed, second_root) ==
+               ZCL_RETRIEVAL_COMPARISON_OK;
+}
+
+static bool rc_policy_kat_matches_wire_and_roots(
+    const uint8_t wire[ZCL_RETRIEVAL_COMPARISON_POLICY_WIRE_BYTES],
+    const uint8_t roundtrip[ZCL_RETRIEVAL_COMPARISON_POLICY_WIRE_BYTES],
+    const uint8_t expected_root[32], const uint8_t first_root[32],
+    const uint8_t second_root[32])
+{
+    return memcmp(wire, "ZCRCMP1\n", 8u) == 0 &&
+           wire[10] == ZCL_RETRIEVAL_COMPARISON_RECALL_AT_5_BP &&
+           wire[11] == ZCL_RETRIEVAL_COMPARISON_HIGHER_BY_AT_LEAST &&
+           wire[12] == (uint8_t)ZCL_RETRIEVAL_COMPARISON_GUARDS_ALL &&
+           wire[16] == 100u && wire[20] == 2u &&
+           memcmp(wire, roundtrip,
+                  ZCL_RETRIEVAL_COMPARISON_POLICY_WIRE_BYTES) == 0 &&
+           memcmp(first_root, expected_root, 32u) == 0 &&
+           memcmp(first_root, second_root, 32u) == 0;
+}
+
+static void rc_apply_policy_root_mutation(
+    struct zcl_retrieval_comparison_policy_v1 *policy, unsigned int mutation)
+{
+    switch (mutation) {
+    case 0: policy->metric = ZCL_RETRIEVAL_COMPARISON_MRR_BP; break;
+    case 1:
+        policy->direction = ZCL_RETRIEVAL_COMPARISON_LOWER_BY_AT_LEAST;
+        break;
+    case 2:
+        policy->required_guards &= (uint16_t)~
+            ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED;
+        break;
+    case 3: policy->threshold_bp++; break;
+    case 4: policy->expected_tasks++; break;
+    case 5: policy->evaluation_input_root[0] ^= 1u; break;
+    default: policy->evaluator_root[0] ^= 1u; break;
+    }
+}
+
+static bool rc_policy_mutations_change_root(
+    const struct zcl_retrieval_comparison_policy_v1 *policy,
+    const uint8_t reference_root[32])
+{
+    bool mutations = true;
+    for (unsigned int mutation = 0; mutation < 7u && mutations; mutation++) {
+        struct zcl_retrieval_comparison_policy_v1 changed = *policy;
+        rc_apply_policy_root_mutation(&changed, mutation);
+        uint8_t changed_root[32];
+        mutations = zcl_retrieval_comparison_policy_root(
+                        &changed, changed_root) ==
+                        ZCL_RETRIEVAL_COMPARISON_OK &&
+                    memcmp(reference_root, changed_root, 32u) != 0;
+    }
+    return mutations;
+}
+
 static int case_policy_kat(void)
 {
     int failures = 0;
@@ -166,49 +240,15 @@ static int case_policy_kat(void)
     struct zcl_retrieval_comparison_policy_v1 parsed;
     bool initialized = rc_fixture_init(&fixture);
     bool exact = initialized &&
-        zcl_retrieval_comparison_policy_serialize(&fixture.policy, wire) ==
-            ZCL_RETRIEVAL_COMPARISON_OK &&
-        zcl_retrieval_comparison_policy_parse(wire, sizeof(wire), &parsed) ==
-            ZCL_RETRIEVAL_COMPARISON_OK &&
-        zcl_retrieval_comparison_policy_serialize(&parsed, roundtrip) ==
-            ZCL_RETRIEVAL_COMPARISON_OK &&
-        zcl_retrieval_comparison_policy_root(&fixture.policy, first_root) ==
-            ZCL_RETRIEVAL_COMPARISON_OK &&
-        zcl_retrieval_comparison_policy_root(&parsed, second_root) ==
-            ZCL_RETRIEVAL_COMPARISON_OK;
+        rc_policy_wire_roundtrip_succeeds(&fixture.policy, wire, roundtrip,
+                                          &parsed, first_root, second_root);
     RC_CHECK("policy wire and root known-answer vector",
-             exact && memcmp(wire, "ZCRCMP1\n", 8u) == 0 &&
-             wire[10] == ZCL_RETRIEVAL_COMPARISON_RECALL_AT_5_BP &&
-             wire[11] == ZCL_RETRIEVAL_COMPARISON_HIGHER_BY_AT_LEAST &&
-             wire[12] == (uint8_t)ZCL_RETRIEVAL_COMPARISON_GUARDS_ALL &&
-             wire[16] == 100u && wire[20] == 2u &&
-             memcmp(wire, roundtrip, sizeof(wire)) == 0 &&
-             memcmp(first_root, expected_root, 32u) == 0 &&
-             memcmp(first_root, second_root, 32u) == 0);
+             exact && rc_policy_kat_matches_wire_and_roots(
+                          wire, roundtrip, expected_root, first_root,
+                          second_root));
 
-    bool mutations = exact;
-    for (unsigned int mutation = 0; mutation < 7u && mutations; mutation++) {
-        struct zcl_retrieval_comparison_policy_v1 changed = fixture.policy;
-        switch (mutation) {
-        case 0: changed.metric = ZCL_RETRIEVAL_COMPARISON_MRR_BP; break;
-        case 1:
-            changed.direction = ZCL_RETRIEVAL_COMPARISON_LOWER_BY_AT_LEAST;
-            break;
-        case 2:
-            changed.required_guards &= (uint16_t)~
-                ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED;
-            break;
-        case 3: changed.threshold_bp++; break;
-        case 4: changed.expected_tasks++; break;
-        case 5: changed.evaluation_input_root[0] ^= 1u; break;
-        default: changed.evaluator_root[0] ^= 1u; break;
-        }
-        uint8_t changed_root[32];
-        mutations = zcl_retrieval_comparison_policy_root(
-                        &changed, changed_root) ==
-                        ZCL_RETRIEVAL_COMPARISON_OK &&
-                    memcmp(first_root, changed_root, 32u) != 0;
-    }
+    bool mutations = exact && rc_policy_mutations_change_root(
+                                  &fixture.policy, first_root);
     RC_CHECK("every active policy field changes the root", mutations);
     return failures;
 }
@@ -267,6 +307,35 @@ static int case_threshold_directions(void)
     return failures;
 }
 
+static bool rc_observe_status_matches(
+    struct rc_fixture *fixture,
+    struct zcl_retrieval_comparison_report *report,
+    enum zcl_retrieval_comparison_status status)
+{
+    return rc_refresh(fixture) &&
+           rc_observe(fixture, report) == ZCL_RETRIEVAL_COMPARISON_OK &&
+           report->status == status;
+}
+
+static bool rc_report_missing_failed_delta_match(
+    const struct zcl_retrieval_comparison_report *report,
+    uint16_t missing_arms, uint16_t failed_guards, int32_t delta_bp)
+{
+    return report->missing_arms == missing_arms &&
+           report->failed_guards == failed_guards &&
+           report->directional_delta_bp == delta_bp;
+}
+
+static bool rc_verdict_is_closed_observation(
+    const struct zcl_retrieval_comparison_report *report,
+    const struct zcl_retrieval_comparison_policy_v1 *policy)
+{
+    return report->status >= ZCL_RETRIEVAL_COMPARISON_SATISFIED &&
+           report->status <= ZCL_RETRIEVAL_COMPARISON_INCOMPLETE &&
+           report->metric == policy->metric &&
+           report->direction == policy->direction;
+}
+
 static int case_incomplete_and_guards(void)
 {
     int failures = 0;
@@ -277,9 +346,8 @@ static int case_incomplete_and_guards(void)
         ZCL_RETRIEVAL_EVAL_RESULT_RECALL_5_AVAILABLE;
     fixture.parent.recall_at_5_bp = 0;
     RC_CHECK("required metric unavailable is incomplete",
-             initialized && rc_refresh(&fixture) &&
-             rc_observe(&fixture, &report) == ZCL_RETRIEVAL_COMPARISON_OK &&
-             report.status == ZCL_RETRIEVAL_COMPARISON_INCOMPLETE &&
+             initialized && rc_observe_status_matches(
+                 &fixture, &report, ZCL_RETRIEVAL_COMPARISON_INCOMPLETE) &&
              report.missing_arms ==
                  ZCL_RETRIEVAL_COMPARISON_PARENT_METRIC_MISSING &&
              report.directional_delta_bp == 0);
@@ -288,9 +356,8 @@ static int case_incomplete_and_guards(void)
     fixture.child.flags &= (uint16_t)~
         ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED;
     RC_CHECK("absent required child guard is not satisfied",
-             initialized && rc_refresh(&fixture) &&
-             rc_observe(&fixture, &report) == ZCL_RETRIEVAL_COMPARISON_OK &&
-             report.status == ZCL_RETRIEVAL_COMPARISON_NOT_SATISFIED &&
+             initialized && rc_observe_status_matches(
+                 &fixture, &report, ZCL_RETRIEVAL_COMPARISON_NOT_SATISFIED) &&
              report.failed_guards ==
                  ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED &&
              report.directional_delta_bp == 0);
@@ -302,14 +369,11 @@ static int case_incomplete_and_guards(void)
     fixture.child.flags &= (uint16_t)~
         ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED;
     RC_CHECK("failed guard takes precedence over missing required metric",
-             initialized && rc_refresh(&fixture) &&
-             rc_observe(&fixture, &report) == ZCL_RETRIEVAL_COMPARISON_OK &&
-             report.status == ZCL_RETRIEVAL_COMPARISON_NOT_SATISFIED &&
-             report.missing_arms ==
-                 ZCL_RETRIEVAL_COMPARISON_PARENT_METRIC_MISSING &&
-             report.failed_guards ==
-                 ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED &&
-             report.directional_delta_bp == 0);
+             initialized && rc_observe_status_matches(
+                 &fixture, &report, ZCL_RETRIEVAL_COMPARISON_NOT_SATISFIED) &&
+             rc_report_missing_failed_delta_match(
+                 &report, ZCL_RETRIEVAL_COMPARISON_PARENT_METRIC_MISSING,
+                 ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED, 0));
 
     initialized = rc_fixture_init(&fixture);
     fixture.parent.flags &=
@@ -319,16 +383,11 @@ static int case_incomplete_and_guards(void)
     fixture.parent.mrr_bp = 0;
     fixture.child.mrr_bp = 0;
     RC_CHECK("unselected unavailable metric is ignored",
-             initialized && rc_refresh(&fixture) &&
-             rc_observe(&fixture, &report) == ZCL_RETRIEVAL_COMPARISON_OK &&
-             report.status == ZCL_RETRIEVAL_COMPARISON_SATISFIED &&
-             report.missing_arms == 0 && report.failed_guards == 0 &&
-             report.directional_delta_bp == 100);
+             initialized && rc_observe_status_matches(
+                 &fixture, &report, ZCL_RETRIEVAL_COMPARISON_SATISFIED) &&
+             rc_report_missing_failed_delta_match(&report, 0, 0, 100));
     RC_CHECK("satisfied is a closed observational verdict only",
-             report.status >= ZCL_RETRIEVAL_COMPARISON_SATISFIED &&
-             report.status <= ZCL_RETRIEVAL_COMPARISON_INCOMPLETE &&
-             report.metric == fixture.policy.metric &&
-             report.direction == fixture.policy.direction);
+             rc_verdict_is_closed_observation(&report, &fixture.policy));
     return failures;
 }
 
