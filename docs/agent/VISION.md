@@ -21,7 +21,7 @@ whichever AI the owner directs; no line depends on one vendor.
 | Own your money | The full node and its shielded wallet. Consensus, custody and node health always come first. | `z23 milestone`: MVP criteria met, out of 8 | The criteria still open in [MVP.md](../quality/MVP.md) |
 | Command your machines | The three verbs below (wiki, lab, card), driven by any AI through one command registry | Engines `z23-engine-unit --list` can drive | Rows for Astra and Kimi, so every AI the owner uses can take a card |
 | Build your world | [One file is the unit](#one-file-is-the-unit): lab file, plugin, Commons package, reproduced result | Lab files promoted to signed plugins with `lab.promote` | Not counted yet: count promotions, and reproductions on another node |
-| Share the fire | A front door for newcomers, starter cards drawn from the lab's own backlog, a leaderboard read from history, receipts shared between labs | Commits that carry a `Contributed-by:` trailer | The front door, the starter cards and the leaderboard as `lab` commands |
+| Share the fire | A front door for newcomers, starter cards drawn from the lab's own backlog, a leaderboard read from history, receipts shared between labs | Commits that credit an outside contributor with a `Contributed by` line | The front door, the starter cards and the leaderboard as `lab` commands |
 
 <!-- claim: symbol-present lab.promote engine/composition/commands/lab.def # live lab-to-plugin leaf -->
 
