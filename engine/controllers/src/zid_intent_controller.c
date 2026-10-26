@@ -51,6 +51,60 @@ static struct zcl_result ziic_money(
                                        scope, out);
 }
 
+static struct zcl_result ziic_build_anchor_script(
+    const struct overlay_intent_request *request, uint8_t *script,
+    size_t capacity, size_t *script_len, struct wallet_rpc_context *ctx)
+{
+    struct zid_identity previous;
+    if (db_zid_identity_find(ctx->node_db, request->semantics, &previous) &&
+        strcmp(previous.status, ZID_IDENTITY_STATUS_ACTIVE) != 0)
+        return ZCL_ERR(-1, "dead or superseded ZID key cannot be re-anchored");
+    *script_len = zid_anchor_build_anchor(
+        script, capacity, request->semantics);
+    return ZCL_OK;
+}
+
+static struct zcl_result ziic_build_rotate_script(
+    const struct overlay_intent_request *request, uint8_t *script,
+    size_t capacity, size_t *script_len,
+    char owner[ZID_IDENTITY_ADDRESS_MAX],
+    struct wallet_rpc_context *ctx)
+{
+    if (memcmp(request->semantics, request->semantics + 32, 32) == 0)
+        return ZCL_ERR(-2, "ZID self-rotation is invalid");
+    struct zid_identity previous;
+    if (!db_zid_identity_find(ctx->node_db, request->semantics, &previous))
+        return ZCL_ERR(-3, "ZID key is not anchored");
+    if (strcmp(previous.status, ZID_IDENTITY_STATUS_REVOKED) == 0)
+        return ZCL_ERR(-4, "revoked ZID key cannot rotate");
+    if (!previous.owner_address[0])
+        return ZCL_ERR(-5, "ZID row has no provable owner");
+    snprintf(owner, ZID_IDENTITY_ADDRESS_MAX, "%s",
+             previous.owner_address);
+    *script_len = zid_anchor_build_rotate(
+        script, capacity, request->semantics, request->semantics + 32);
+    return ZCL_OK;
+}
+
+static struct zcl_result ziic_build_revoke_script(
+    const struct overlay_intent_request *request, uint8_t *script,
+    size_t capacity, size_t *script_len,
+    char owner[ZID_IDENTITY_ADDRESS_MAX],
+    struct wallet_rpc_context *ctx)
+{
+    struct zid_identity previous;
+    if (!db_zid_identity_find(ctx->node_db, request->semantics, &previous))
+        return ZCL_ERR(-6, "ZID key is not anchored");
+    if (strcmp(previous.status, ZID_IDENTITY_STATUS_REVOKED) == 0)
+        return ZCL_ERR(-7, "ZID key is already revoked");
+    if (!previous.owner_address[0])
+        return ZCL_ERR(-8, "ZID row has no provable owner");
+    snprintf(owner, ZID_IDENTITY_ADDRESS_MAX, "%s",
+             previous.owner_address);
+    *script_len = zid_anchor_build_revoke(script, capacity, request->semantics);
+    return ZCL_OK;
+}
+
 static struct zcl_result ziic_build_script(
     const struct overlay_intent_request *request, uint8_t *script,
     size_t capacity, size_t *script_len,
@@ -58,47 +112,87 @@ static struct zcl_result ziic_build_script(
     struct wallet_rpc_context *ctx)
 {
     owner[0] = '\0';
+    struct zcl_result built;
     if (strcmp(request->operation, "anchor") == 0 &&
-        request->semantics_len == 32) {
-        struct zid_identity previous;
-        if (db_zid_identity_find(ctx->node_db, request->semantics, &previous) &&
-            strcmp(previous.status, ZID_IDENTITY_STATUS_ACTIVE) != 0)
-            return ZCL_ERR(-1, "dead or superseded ZID key cannot be re-anchored");
-        *script_len = zid_anchor_build_anchor(
-            script, capacity, request->semantics);
-    } else if (strcmp(request->operation, "rotate") == 0 &&
-               request->semantics_len == 64) {
-        if (memcmp(request->semantics, request->semantics + 32, 32) == 0)
-            return ZCL_ERR(-2, "ZID self-rotation is invalid");
-        struct zid_identity previous;
-        if (!db_zid_identity_find(ctx->node_db, request->semantics, &previous))
-            return ZCL_ERR(-3, "ZID key is not anchored");
-        if (strcmp(previous.status, ZID_IDENTITY_STATUS_REVOKED) == 0)
-            return ZCL_ERR(-4, "revoked ZID key cannot rotate");
-        if (!previous.owner_address[0])
-            return ZCL_ERR(-5, "ZID row has no provable owner");
-        snprintf(owner, ZID_IDENTITY_ADDRESS_MAX, "%s",
-                 previous.owner_address);
-        *script_len = zid_anchor_build_rotate(
-            script, capacity, request->semantics, request->semantics + 32);
-    } else if (strcmp(request->operation, "revoke") == 0 &&
-               request->semantics_len == 32) {
-        struct zid_identity previous;
-        if (!db_zid_identity_find(ctx->node_db, request->semantics, &previous))
-            return ZCL_ERR(-6, "ZID key is not anchored");
-        if (strcmp(previous.status, ZID_IDENTITY_STATUS_REVOKED) == 0)
-            return ZCL_ERR(-7, "ZID key is already revoked");
-        if (!previous.owner_address[0])
-            return ZCL_ERR(-8, "ZID row has no provable owner");
-        snprintf(owner, ZID_IDENTITY_ADDRESS_MAX, "%s",
-                 previous.owner_address);
-        *script_len = zid_anchor_build_revoke(
-            script, capacity, request->semantics);
-    } else {
+        request->semantics_len == 32)
+        built = ziic_build_anchor_script(
+            request, script, capacity, script_len, ctx);
+    else if (strcmp(request->operation, "rotate") == 0 &&
+             request->semantics_len == 64)
+        built = ziic_build_rotate_script(
+            request, script, capacity, script_len, owner, ctx);
+    else if (strcmp(request->operation, "revoke") == 0 &&
+             request->semantics_len == 32)
+        built = ziic_build_revoke_script(
+            request, script, capacity, script_len, owner, ctx);
+    else
         return ZCL_ERR(-9, "ZID operation or semantic payload is invalid");
-    }
+    if (!built.ok)
+        return built;
     return *script_len > 0
         ? ZCL_OK : ZCL_ERR(-10, "ZID OP_RETURN builder refused the request");
+}
+
+static bool ziic_prepare_context_incomplete(
+    const struct wallet_rpc_context *ctx,
+    const struct overlay_intent_request *request, int64_t maximum_fee_zat,
+    const uint8_t *raw_tx, const size_t *raw_tx_len, const uint8_t *txid_out,
+    const int64_t *actual_fee_zat, const struct vault_intent_input *inputs,
+    const size_t *input_count)
+{
+    return !ctx || !ctx->wallet || !ctx->node_db || !request || !raw_tx ||
+           !raw_tx_len || !txid_out || !actual_fee_zat || !inputs ||
+           !input_count || maximum_fee_zat <= 0;
+}
+
+static struct zcl_result ziic_build_funding_tx(
+    struct wallet_rpc_context *ctx, const char *owner,
+    struct wallet_tx *wtx, int64_t *fee)
+{
+    const char *why = NULL;
+    struct zcl_result built = owner[0]
+        ? zslp_command_build_owner_base_tx(ctx->wallet, owner, wtx, fee, &why)
+        : zslp_command_build_genesis_base_tx(ctx->wallet, wtx, fee, &why);
+    if (!built.ok)
+        return ZCL_ERR(-12, "ZID funding/owner input build failed: %s",
+                       why ? why : built.message);
+    return ZCL_OK;
+}
+
+static bool ziic_fee_and_inputs_within_contract(
+    int64_t fee, int64_t maximum_fee_zat, size_t num_vin,
+    size_t input_capacity)
+{
+    return fee >= 0 && fee <= maximum_fee_zat && num_vin > 0 &&
+           num_vin <= input_capacity;
+}
+
+/* Serializes the signed transaction into the caller's output buffers and
+ * frees the wallet transaction whether or not serialization fit. */
+static struct zcl_result ziic_emit_prepared_tx(
+    struct wallet_tx *wtx, uint8_t *raw_tx, size_t raw_capacity,
+    size_t *raw_tx_len, uint8_t txid_out[32], int64_t *actual_fee_zat,
+    int64_t fee, struct vault_intent_input *inputs, size_t *input_count)
+{
+    struct byte_stream stream;
+    stream_init(&stream, 1024);
+    bool serialized = transaction_serialize(&wtx->tx, &stream) &&
+                      stream.size <= raw_capacity;
+    if (serialized) {
+        memcpy(raw_tx, stream.data, stream.size);
+        *raw_tx_len = stream.size;
+        memcpy(txid_out, wtx->tx.hash.data, 32);
+        *actual_fee_zat = fee;
+        *input_count = wtx->tx.num_vin;
+        for (size_t i = 0; i < wtx->tx.num_vin; i++) {
+            memcpy(inputs[i].txid, wtx->tx.vin[i].prevout.hash.data, 32);
+            inputs[i].vout = wtx->tx.vin[i].prevout.n;
+        }
+    }
+    stream_free(&stream);
+    transaction_free(&wtx->tx);
+    return serialized ? ZCL_OK
+                      : ZCL_ERR(-16, "prepared ZID transaction is too large");
 }
 
 static struct zcl_result ziic_prepare(
@@ -109,9 +203,9 @@ static struct zcl_result ziic_prepare(
     size_t *input_count)
 {
     struct wallet_rpc_context *ctx = opaque;
-    if (!ctx || !ctx->wallet || !ctx->node_db || !request || !raw_tx ||
-        !raw_tx_len || !txid_out || !actual_fee_zat || !inputs ||
-        !input_count || maximum_fee_zat <= 0)
+    if (ziic_prepare_context_incomplete(
+            ctx, request, maximum_fee_zat, raw_tx, raw_tx_len, txid_out,
+            actual_fee_zat, inputs, input_count))
         return ZCL_ERR(-11, "ZID prepare context is incomplete");
     uint8_t script[ZID_ANCHOR_SCRIPT_MAX];
     size_t script_len = 0;
@@ -120,21 +214,17 @@ static struct zcl_result ziic_prepare(
         request, script, sizeof(script), &script_len, owner, ctx));
     struct wallet_tx wtx; memset(&wtx, 0, sizeof(wtx));
     int64_t fee = 0;
-    const char *why = NULL;
-    struct zcl_result built = owner[0]
-        ? zslp_command_build_owner_base_tx(ctx->wallet, owner, &wtx, &fee, &why)
-        : zslp_command_build_genesis_base_tx(ctx->wallet, &wtx, &fee, &why);
-    if (!built.ok)
-        return ZCL_ERR(-12, "ZID funding/owner input build failed: %s",
-                       why ? why : built.message);
+    struct zcl_result funded = ziic_build_funding_tx(ctx, owner, &wtx, &fee);
+    if (!funded.ok)
+        return funded;
     struct zcl_result prepared = zslp_command_prepare_with_op_return(
         ctx->wallet, &wtx, script, script_len);
     if (!prepared.ok) {
         transaction_free(&wtx.tx);
         return ZCL_ERR(-13, "ZID exact signing failed: %s", prepared.message);
     }
-    if (fee < 0 || fee > maximum_fee_zat || wtx.tx.num_vin == 0 ||
-        wtx.tx.num_vin > input_capacity) {
+    if (!ziic_fee_and_inputs_within_contract(
+            fee, maximum_fee_zat, wtx.tx.num_vin, input_capacity)) {
         transaction_free(&wtx.tx);
         return ZCL_ERR(-14, "ZID transaction exceeds fee or input contract");
     }
@@ -144,25 +234,9 @@ static struct zcl_result ziic_prepare(
         return ZCL_ERR(-15, "ZID plan key persistence failed: %s",
                        flushed.message);
     }
-    struct byte_stream stream;
-    stream_init(&stream, 1024);
-    bool serialized = transaction_serialize(&wtx.tx, &stream) &&
-                      stream.size <= raw_capacity;
-    if (serialized) {
-        memcpy(raw_tx, stream.data, stream.size);
-        *raw_tx_len = stream.size;
-        memcpy(txid_out, wtx.tx.hash.data, 32);
-        *actual_fee_zat = fee;
-        *input_count = wtx.tx.num_vin;
-        for (size_t i = 0; i < wtx.tx.num_vin; i++) {
-            memcpy(inputs[i].txid, wtx.tx.vin[i].prevout.hash.data, 32);
-            inputs[i].vout = wtx.tx.vin[i].prevout.n;
-        }
-    }
-    stream_free(&stream);
-    transaction_free(&wtx.tx);
-    return serialized ? ZCL_OK
-                      : ZCL_ERR(-16, "prepared ZID transaction is too large");
+    return ziic_emit_prepared_tx(
+        &wtx, raw_tx, raw_capacity, raw_tx_len, txid_out, actual_fee_zat,
+        fee, inputs, input_count);
 }
 
 static struct zcl_result ziic_publish(
@@ -251,6 +325,64 @@ static void ziic_render(const struct overlay_intent_result *intent,
     }
 }
 
+static const struct json_value *ziic_first_param_object(
+    const struct json_value *params)
+{
+    const struct json_value *input = params && json_size(params)
+        ? json_at(params, 0) : NULL;
+    if (!input || input->type != JSON_OBJ)
+        return NULL;
+    return input;
+}
+
+static bool ziic_scope_is_known(const char *scope)
+{
+    return scope != NULL && (strcmp(scope, "dev") == 0 ||
+                             strcmp(scope, "prod") == 0);
+}
+
+/* Refusal parsers: return NULL on success, otherwise the exact message the
+ * RPC wrapper must report unchanged. */
+static const char *ziic_parse_commit_plan_id(
+    const struct json_value *input, uint8_t plan_id[32])
+{
+    const char *plan_hex = json_get_str(json_get(input, "plan_id"));
+    if (!plan_hex || strlen(plan_hex) != 64 || !IsHex(plan_hex) ||
+        ParseHex(plan_hex, plan_id, 32) != 32)
+        return "ZID commit requires a 64-hex plan_id";
+    return NULL;
+}
+
+static const char *ziic_fill_plan_request(
+    const struct json_value *input, const char *scope,
+    struct overlay_intent_request *request)
+{
+    const char *operation = json_get_str(json_get(input, "operation"));
+    const char *pubkey = json_get_str(json_get(input, "pubkey"));
+    const char *new_pubkey = json_get_str(json_get(input, "new_pubkey"));
+    const char *idempotency =
+        json_get_str(json_get(input, "idempotency_key"));
+    if (!operation || !idempotency ||
+        !ziic_parse_key(pubkey, request->semantics))
+        return "ZID plan requires a valid operation, pubkey, and idempotency_key";
+    request->semantics_len = 32;
+    if (strcmp(operation, "rotate") == 0) {
+        if (!ziic_parse_key(new_pubkey, request->semantics + 32))
+            return "ZID rotate requires a valid new_pubkey";
+        request->semantics_len = 64;
+    } else if (strcmp(operation, "anchor") != 0 &&
+               strcmp(operation, "revoke") != 0) {
+        return "ZID operation must be anchor, rotate, or revoke";
+    }
+    snprintf(request->wallet_scope, sizeof(request->wallet_scope), "%s", scope);
+    snprintf(request->application_kind, sizeof(request->application_kind),
+             "%s", ZID_INTENT_APPLICATION);
+    snprintf(request->operation, sizeof(request->operation), "%s", operation);
+    snprintf(request->idempotency_key, sizeof(request->idempotency_key),
+             "%s", idempotency);
+    return NULL;
+}
+
 static bool rpc_zid_intent(const struct json_value *params, bool help,
                            struct json_value *result)
 {
@@ -260,15 +392,14 @@ static bool rpc_zid_intent(const struct json_value *params, bool help,
             "zid_intent commit {wallet_scope,plan_id,confirm:true}\n");
         return true;
     }
-    const struct json_value *input = params && json_size(params)
-        ? json_at(params, 0) : NULL;
-    if (!input || input->type != JSON_OBJ) {
+    const struct json_value *input = ziic_first_param_object(params);
+    if (!input) {
         json_set_str(result, "zid_intent requires one object");
         return false;
     }
     const char *scope = json_get_str(json_get(input, "wallet_scope"));
     bool confirm = json_get_bool_or(input, "confirm", false);
-    if (!scope || (strcmp(scope, "dev") != 0 && strcmp(scope, "prod") != 0)) {
+    if (!ziic_scope_is_known(scope)) {
         json_set_str(result, "zid_intent requires wallet_scope=dev|prod");
         return false;
     }
@@ -286,45 +417,22 @@ static bool rpc_zid_intent(const struct json_value *params, bool help,
     struct overlay_intent_result intent;
     struct zcl_result outcome;
     if (confirm) {
-        const char *plan_hex = json_get_str(json_get(input, "plan_id"));
         uint8_t plan_id[32];
-        if (!plan_hex || strlen(plan_hex) != 64 || !IsHex(plan_hex) ||
-            ParseHex(plan_hex, plan_id, sizeof(plan_id)) != 32) {
-            json_set_str(result, "ZID commit requires a 64-hex plan_id");
+        const char *plan_refusal = ziic_parse_commit_plan_id(input, plan_id);
+        if (plan_refusal) {
+            json_set_str(result, plan_refusal);
             return false;
         }
         outcome = overlay_transaction_intent_commit(
             &runtime, ZID_INTENT_APPLICATION, scope, plan_id, &intent);
     } else {
-        const char *operation = json_get_str(json_get(input, "operation"));
-        const char *pubkey = json_get_str(json_get(input, "pubkey"));
-        const char *new_pubkey = json_get_str(json_get(input, "new_pubkey"));
-        const char *idempotency =
-            json_get_str(json_get(input, "idempotency_key"));
         struct overlay_intent_request request; memset(&request, 0, sizeof(request));
-        if (!operation || !idempotency ||
-            !ziic_parse_key(pubkey, request.semantics)) {
-            json_set_str(result, "ZID plan requires a valid operation, pubkey, and idempotency_key");
+        const char *request_refusal =
+            ziic_fill_plan_request(input, scope, &request);
+        if (request_refusal) {
+            json_set_str(result, request_refusal);
             return false;
         }
-        request.semantics_len = 32;
-        if (strcmp(operation, "rotate") == 0) {
-            if (!ziic_parse_key(new_pubkey, request.semantics + 32)) {
-                json_set_str(result, "ZID rotate requires a valid new_pubkey");
-                return false;
-            }
-            request.semantics_len = 64;
-        } else if (strcmp(operation, "anchor") != 0 &&
-                   strcmp(operation, "revoke") != 0) {
-            json_set_str(result, "ZID operation must be anchor, rotate, or revoke");
-            return false;
-        }
-        snprintf(request.wallet_scope, sizeof(request.wallet_scope), "%s", scope);
-        snprintf(request.application_kind, sizeof(request.application_kind),
-                 "%s", ZID_INTENT_APPLICATION);
-        snprintf(request.operation, sizeof(request.operation), "%s", operation);
-        snprintf(request.idempotency_key, sizeof(request.idempotency_key),
-                 "%s", idempotency);
         outcome = overlay_transaction_intent_plan(&runtime, &request, &intent);
     }
     if (!outcome.ok) {

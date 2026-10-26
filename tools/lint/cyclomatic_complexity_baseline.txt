@@ -1088,9 +1088,6 @@ engine/controllers/src/transaction_controller.c:rpc_getrawtransaction:44
 engine/controllers/src/transaction_controller.c:rpc_sendrawtransaction:17
 engine/controllers/src/transaction_controller_sign.c:rpc_signrawtransaction:57
 engine/controllers/src/transaction_controller_sign.c:sign_one_input:21
-engine/controllers/src/zid_intent_controller.c:rpc_zid_intent:25
-engine/controllers/src/zid_intent_controller.c:ziic_build_script:17
-engine/controllers/src/zid_intent_controller.c:ziic_prepare:25
 engine/entry/main_cli_modes.c:bench_crypto_verify:22
 engine/entry/main_cli_modes.c:bench_crypto_vs_rust:55
 engine/entry/main_cli_modes.c:bench_find_live_pid:22
