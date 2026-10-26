@@ -154,7 +154,6 @@ static void die(const char *fmt, ...)
     (void)fputs("z23-install: REFUSE: ", stderr);
     (void)vfprintf(stderr, fmt, ap);
     (void)fputc('\n', stderr);
-    va_end(ap);
     work_cleanup();
     exit(1);
 }
@@ -370,6 +369,41 @@ static bool dns_txt_from_file(const char *path, struct fd_dns_txt *out,
     return true;
 }
 
+/* One live query per configured nameserver, in order, until one answers.
+ * Returns NULL with the answer in *out, or the reason the wire stayed
+ * silent. */
+static const char *dns_txt_from_wire(const char *name,
+                                     char servers[DNS_MAX_SERVERS][64],
+                                     size_t count, struct fd_dns_txt *out)
+{
+    unsigned char query[FD_DNS_QUERY_MAX];
+    /* A per-run query ID. Not a security boundary — plain DNS has none —
+     * but a fixed ID would let a stale datagram from a previous run be
+     * accepted as this run's answer. */
+    const int64_t now_ns = clock_now_monotonic_ns();
+    const uint16_t id = (uint16_t)((now_ns ^ (int64_t)getpid()) & 0xffff);
+    const size_t query_len = fd_dns_txt_query(id, name, query,
+                                              sizeof query);
+    if (query_len == 0)
+        return "bad-query-name";
+    bool got = false;
+    const char *reason = "lookup-failed";
+    for (size_t i = 0; i < count && !got; i++) {
+        unsigned char reply[DNS_REPLY_MAX];
+        const size_t n = dns_ask(servers[i], query, query_len, reply,
+                                 sizeof reply);
+        if (n == 0)
+            continue;
+        switch (fd_dns_txt_parse(reply, n, id, out)) {
+            case FD_DNS_OK:        got = true; break;
+            case FD_DNS_NO_ANSWER: reason = "no-answer"; break;
+            case FD_DNS_TRUNCATED: reason = "truncated-answer"; break;
+            case FD_DNS_MALFORMED: reason = "malformed-answer"; break;
+        }
+    }
+    return got ? NULL : reason;
+}
+
 static void dns_attestation(const char *name, struct fd_attestation *att)
 {
     struct fd_dns_txt txt;
@@ -394,34 +428,8 @@ static void dns_attestation(const char *name, struct fd_attestation *att)
             fd_attestation_unreachable(att, "dns", "no-resolver");
             return;
         }
-        unsigned char query[FD_DNS_QUERY_MAX];
-        /* A per-run query ID. Not a security boundary — plain DNS has none —
-         * but a fixed ID would let a stale datagram from a previous run be
-         * accepted as this run's answer. */
-        const int64_t now_ns = clock_now_monotonic_ns();
-        const uint16_t id = (uint16_t)((now_ns ^ (int64_t)getpid()) & 0xffff);
-        const size_t query_len = fd_dns_txt_query(id, name, query,
-                                                  sizeof query);
-        if (query_len == 0) {
-            fd_attestation_unreachable(att, "dns", "bad-query-name");
-            return;
-        }
-        bool got = false;
-        reason = "lookup-failed";
-        for (size_t i = 0; i < count && !got; i++) {
-            unsigned char reply[DNS_REPLY_MAX];
-            const size_t n = dns_ask(servers[i], query, query_len, reply,
-                                     sizeof reply);
-            if (n == 0)
-                continue;
-            switch (fd_dns_txt_parse(reply, n, id, &txt)) {
-                case FD_DNS_OK:        got = true; break;
-                case FD_DNS_NO_ANSWER: reason = "no-answer"; break;
-                case FD_DNS_TRUNCATED: reason = "truncated-answer"; break;
-                case FD_DNS_MALFORMED: reason = "malformed-answer"; break;
-            }
-        }
-        if (!got) {
+        reason = dns_txt_from_wire(name, servers, count, &txt);
+        if (reason != NULL) {
             fd_attestation_unreachable(att, "dns", reason);
             return;
         }
@@ -503,46 +511,38 @@ static bool have_on_path(const char *name)
     return false;
 }
 
-static int bootstrap_main(int argc, char **argv)
+/* The shim forwards argv verbatim, so this is the same one-argument
+ * surface install.sh had. An unknown argument is refused rather than
+ * ignored: a typo that silently installs is worse than one that stops. */
+static bool parse_print_pin_request(int argc, char **argv)
 {
-    bool print_pin = false;
-    /* The shim forwards argv verbatim, so this is the same one-argument
-     * surface install.sh had. An unknown argument is refused rather than
-     * ignored: a typo that silently installs is worse than one that stops. */
     if (argc > 2)
         die("unsupported bootstrap arguments; use --print-pin");
     if (argc == 2) {
         if (strcmp(argv[1], "--print-pin") == 0)
-            print_pin = true;
-        else
-            die("unsupported bootstrap argument; use --print-pin");
+            return true;
+        die("unsupported bootstrap argument; use --print-pin");
     }
+    return false;
+}
 
-    const char *origin = getenv("Z23_INSTALL_TEST_ORIGIN");
-    const char *repo_url = getenv("Z23_INSTALL_TEST_PIN_REPO_URL");
-    g_test_urls = (origin && *origin) || (repo_url && *repo_url);
-    if (!origin || !*origin)
-        origin = k_default_origin;
-    if (!repo_url || !*repo_url)
-        repo_url = k_default_pin_repo;
-    const char *pin_dns = env_or("Z23_INSTALL_TEST_PIN_DNS", k_default_pin_dns);
-
-    char triple[FD_TRIPLE_MAX];
-    detect_platform(triple);
-    if (!print_pin) {
-        if (!fd_platform_published(triple)) {
-            die("no Z23 runtime is published for %s; published: %s", triple,
-                fd_platform_published_list());
-        }
-        if (!have_on_path("bash"))
-            die("the Z23 installer is a bash script and bash was not found");
+/* Die unless this machine can actually be installed onto: a published
+ * runtime for its triple and a bash to run the installer with. */
+static void require_installable_platform(const char triple[FD_TRIPLE_MAX])
+{
+    if (!fd_platform_published(triple)) {
+        die("no Z23 runtime is published for %s; published: %s", triple,
+            fd_platform_published_list());
     }
+    if (!have_on_path("bash"))
+        die("the Z23 installer is a bash script and bash was not found");
+}
 
-    /* Scratch space is created only once every refusal that can be made
-     * without a network has been made — an unpublished platform must leave no
-     * trace at all. */
+/* Create the scratch directory and arm the handlers that empty it on a
+ * signal. */
+static void make_scratch_directory(const char *tmpdir)
+{
     char template[BOOTSTRAP_PATH_MAX];
-    const char *tmpdir = env_or("TMPDIR", "/tmp");
     if ((size_t)snprintf(template, sizeof template, "%s/z23-install.XXXXXX",
                          tmpdir) >= sizeof template)
         die("TMPDIR path is too long");
@@ -552,54 +552,50 @@ static int bootstrap_main(int argc, char **argv)
     (void)signal(SIGHUP, on_signal);
     (void)signal(SIGINT, on_signal);
     (void)signal(SIGTERM, on_signal);
+}
 
-    struct fd_attestation att[3];
-    /* Channel 1: baked into these bytes. Not an external trust anchor for a
-     * copy of this program fetched from the same origin. */
-    const char *baked = env_or("Z23_INSTALL_TEST_BAKED_PIN", k_baked_pin);
+static void baked_pin_attestation(struct fd_attestation *att,
+                                  const char *baked)
+{
     struct fd_pin baked_pin;
     if (fd_pin_is_sentinel(baked))
-        fd_attestation_unreachable(&att[0], "baked", "no-release-pinned");
+        fd_attestation_unreachable(att, "baked", "no-release-pinned");
     else if (fd_pin_parse(baked, &baked_pin))
-        fd_attestation_answered(&att[0], "baked", &baked_pin);
+        fd_attestation_answered(att, "baked", &baked_pin);
     else
-        fd_attestation_unreachable(&att[0], "baked", "malformed-answer");
+        fd_attestation_unreachable(att, "baked", "malformed-answer");
+}
 
-    dns_attestation(pin_dns, &att[1]);
-    repo_attestation(repo_url, &att[2]);
-
-    struct fd_agreement agreement;
-    fd_agree(att, 3, &agreement);
-    switch (agreement.verdict) {
+/* The quorum gate: every verdict but a two-source agreement ends here. */
+static void enforce_pin_agreement(const struct fd_agreement *agreement)
+{
+    switch (agreement->verdict) {
         case FD_VERDICT_DISAGREE:
-            say("attested pin %s=%s", agreement.first_origin,
-                agreement.first_pin);
-            say("attested pin %s=%s", agreement.other_origin,
-                agreement.other_pin);
+            say("attested pin %s=%s", agreement->first_origin,
+                agreement->first_pin);
+            say("attested pin %s=%s", agreement->other_origin,
+                agreement->other_pin);
             die("release pin disagreement between %s and %s — refusing to "
-                "install either", agreement.first_origin,
-                agreement.other_origin);
+                "install either", agreement->first_origin,
+                agreement->other_origin);
             break;
         case FD_VERDICT_NO_QUORUM:
             die("release pin quorum: %zu of %zu sources answered, two "
                 "independent sources are required for pin consistency; this "
                 "does not authenticate the first-stage script (unreachable: "
-                "%s)", agreement.answered, agreement.total,
-                agreement.unreachable[0] ? agreement.unreachable : "none");
+                "%s)", agreement->answered, agreement->total,
+                agreement->unreachable[0] ? agreement->unreachable : "none");
             break;
         case FD_VERDICT_AGREED:
             break;
     }
-    if (agreement.answered < agreement.total)
-        say("release pin agreed by %zu of %zu sources (unreachable: %s)",
-            agreement.answered, agreement.total, agreement.unreachable);
+}
 
-    if (print_pin) {
-        (void)printf("%s\n", agreement.agreed.text);
-        work_cleanup();
-        return 0;
-    }
-
+/* Fetch the installer, check it against the agreed pin, and lay it down in
+ * the scratch directory. */
+static void stage_verified_installer(const char *origin,
+                                     const struct fd_agreement *agreement)
+{
     char installer_url[TLS_CLIENT_MAX_PATH];
     if ((size_t)snprintf(installer_url, sizeof installer_url,
                          "%s/install_z23.sh", origin) >= sizeof installer_url)
@@ -612,7 +608,7 @@ static int bootstrap_main(int argc, char **argv)
 
     char got[FD_HEX_LEN + 1];
     sha256_hex((const unsigned char *)installer, installer_len, got);
-    if (strcmp(got, agreement.agreed.installer) != 0) {
+    if (strcmp(got, agreement->agreed.installer) != 0) {
         free(installer);
         die("installer digest mismatch — %s served bytes the agreed release "
             "pin does not name", origin);
@@ -631,14 +627,20 @@ static int bootstrap_main(int argc, char **argv)
     free(installer);
     if (wrote != (ssize_t)installer_len)
         die("could not write the verified installer to %s", installer_path);
+}
 
-    /* The handoff. Every attestation goes through so the installer judges the
-     * same evidence itself rather than taking our word for it. The current
-     * convenience default is the same domain: an operator may select any
-     * mirror with Z23_RELEASE_SOURCE, but automatic decentralized discovery
-     * and failover do not exist yet. */
+/* The handoff. Every attestation goes through so the installer judges the
+ * same evidence itself rather than taking our word for it. The current
+ * convenience default is the same domain: an operator may select any
+ * mirror with Z23_RELEASE_SOURCE, but automatic decentralized discovery
+ * and failover do not exist yet. */
+static int run_verified_installer(const char *origin,
+                                  const char triple[FD_TRIPLE_MAX],
+                                  const struct fd_agreement *agreement,
+                                  struct fd_attestation att[3],
+                                  const char *release_source)
+{
     char source[TLS_CLIENT_MAX_PATH + 32];
-    const char *release_source = getenv("Z23_RELEASE_SOURCE");
     if (release_source && *release_source)
         (void)snprintf(source, sizeof source, "--source=%s", release_source);
     else
@@ -646,13 +648,16 @@ static int bootstrap_main(int argc, char **argv)
                        triple);
     char manifest[FD_HEX_LEN + 32];
     (void)snprintf(manifest, sizeof manifest, "--manifest-sha256=%s",
-                   agreement.agreed.manifest);
+                   agreement->agreed.manifest);
     char attest[3][FD_ATTEST_ARG_MAX];
     for (size_t i = 0; i < 3; i++) {
         if (!fd_attest_arg(&att[i], attest[i], sizeof attest[i]))
             die("could not render the %s attestation for the installer",
                 att[i].origin);
     }
+    char installer_path[BOOTSTRAP_PATH_MAX + 32];
+    (void)snprintf(installer_path, sizeof installer_path, "%s/install_z23.sh",
+                   g_work);
     char *child_argv[] = { (char *)"bash", installer_path, source, manifest,
                            attest[0], attest[1], attest[2], NULL };
 
@@ -672,6 +677,58 @@ static int bootstrap_main(int argc, char **argv)
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+}
+
+static int bootstrap_main(int argc, char **argv)
+{
+    const bool print_pin = parse_print_pin_request(argc, argv);
+
+    const char *origin = getenv("Z23_INSTALL_TEST_ORIGIN");
+    const char *repo_url = getenv("Z23_INSTALL_TEST_PIN_REPO_URL");
+    g_test_urls = (origin && *origin) || (repo_url && *repo_url);
+    if (!origin || !*origin)
+        origin = k_default_origin;
+    if (!repo_url || !*repo_url)
+        repo_url = k_default_pin_repo;
+    const char *pin_dns = env_or("Z23_INSTALL_TEST_PIN_DNS", k_default_pin_dns);
+
+    char triple[FD_TRIPLE_MAX];
+    detect_platform(triple);
+    if (!print_pin)
+        require_installable_platform(triple);
+
+    /* Scratch space is created only once every refusal that can be made
+     * without a network has been made — an unpublished platform must leave no
+     * trace at all. */
+    const char *tmpdir = env_or("TMPDIR", "/tmp");
+    make_scratch_directory(tmpdir);
+
+    struct fd_attestation att[3];
+    /* Channel 1: baked into these bytes. Not an external trust anchor for a
+     * copy of this program fetched from the same origin. */
+    const char *baked = env_or("Z23_INSTALL_TEST_BAKED_PIN", k_baked_pin);
+    baked_pin_attestation(&att[0], baked);
+
+    dns_attestation(pin_dns, &att[1]);
+    repo_attestation(repo_url, &att[2]);
+
+    struct fd_agreement agreement;
+    fd_agree(att, 3, &agreement);
+    enforce_pin_agreement(&agreement);
+    if (agreement.answered < agreement.total)
+        say("release pin agreed by %zu of %zu sources (unreachable: %s)",
+            agreement.answered, agreement.total, agreement.unreachable);
+
+    if (print_pin) {
+        (void)printf("%s\n", agreement.agreed.text);
+        work_cleanup();
+        return 0;
+    }
+
+    stage_verified_installer(origin, &agreement);
+    const char *release_source = getenv("Z23_RELEASE_SOURCE");
+    return run_verified_installer(origin, triple, &agreement, att,
+                                  release_source);
 }
 
 #endif
