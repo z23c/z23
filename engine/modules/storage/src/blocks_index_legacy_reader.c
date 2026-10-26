@@ -225,15 +225,20 @@ static int bilr_decode_candidate_value(const char *v, size_t vlen,
     struct byte_stream s;
     stream_init_from_data(&s, (unsigned char *)v, vlen);
 
+    if (!disk_block_index_deserialize(dbi, &s)) {
+        stream_free(&s);
+        return 1;
+    }
+    stream_free(&s);
+
     /* Only keep entries that are usable for body-pull:
      * BLOCK_HAVE_DATA must be set (we need an nFile/nDataPos),
      * and the entry must not be FAILED. */
-    bool usable = disk_block_index_deserialize(dbi, &s) &&
-                  (dbi->nStatus & BLOCK_HAVE_DATA) != 0 &&
-                  (dbi->nStatus & BLOCK_FAILED_MASK) == 0 &&
-                  dbi->nHeight >= 0;
-    stream_free(&s);
-    return usable ? 0 : 1;
+    bool have_data = (dbi->nStatus & BLOCK_HAVE_DATA) != 0;
+    bool failed    = (dbi->nStatus & BLOCK_FAILED_MASK) != 0;
+    if (!have_data || failed || dbi->nHeight < 0)
+        return 1;
+    return 0;
 }
 
 /* True when candidate idx should replace the current best candidate. */
