@@ -623,4 +623,3 @@ bool ci_store_row_counts(struct ci_store *s, struct ci_row_counts *out)
     pthread_mutex_unlock(&s->lock);
     return true;
 }
-
