@@ -37,6 +37,26 @@ void rpc_rawtx_set_connman(struct connman *cm)
     rawtx_ctx()->connman = cm;
 }
 
+static bool rawtx_node_db_position_valid(const struct db_tx_index *row)
+{
+    return row->block_height >= 0 && row->tx_index >= 0;
+}
+
+static bool rawtx_node_db_locator_on_chain(struct block_index *bi,
+                                           struct db_tx_index *row)
+{
+    return bi && bi->phashBlock &&
+           memcmp(row->block_hash, bi->phashBlock->data,
+                  sizeof(row->block_hash)) == 0;
+}
+
+static bool rawtx_block_vtx_matches(struct block *blk, int tx_index,
+                                    const struct uint256 *hash)
+{
+    return (size_t)tx_index < blk->num_vtx &&
+           uint256_cmp(&blk->vtx[tx_index].hash, hash) == 0;
+}
+
 /* The canonical node database already records every transaction's active-
  * chain height and index while a block is finalized.  Treat that row only as
  * a locator: the block hash, body position, and transaction hash are all
@@ -55,7 +75,7 @@ static bool rawtx_find_in_node_db(struct rawtx_context *ctx,
         !db_tx_find(ndb, hash->data, &row))
         return false;
 
-    if (row.block_height < 0 || row.tx_index < 0) {
+    if (!rawtx_node_db_position_valid(&row)) {
         LOG_WARN("rawtx", "node-db locator rejected negative position "
                  "(height=%d tx_index=%d)", row.block_height, row.tx_index);
         return false;
@@ -63,9 +83,7 @@ static bool rawtx_find_in_node_db(struct rawtx_context *ctx,
 
     struct block_index *bi = active_chain_at(
         &ctx->main_state->chain_active, row.block_height);
-    if (!bi || !bi->phashBlock ||
-        memcmp(row.block_hash, bi->phashBlock->data,
-               sizeof(row.block_hash)) != 0) {
+    if (!rawtx_node_db_locator_on_chain(bi, &row)) {
         LOG_WARN("rawtx", "node-db locator is not on the active chain "
                  "(height=%d tx_index=%d)", row.block_height, row.tx_index);
         return false;
@@ -75,8 +93,7 @@ static bool rawtx_find_in_node_db(struct rawtx_context *ctx,
     block_init(&blk);
     bool found = false;
     if (read_block_from_disk_index(&blk, bi, ctx->datadir) &&
-        (size_t)row.tx_index < blk.num_vtx &&
-        uint256_cmp(&blk.vtx[row.tx_index].hash, hash) == 0) {
+        rawtx_block_vtx_matches(&blk, row.tx_index, hash)) {
         struct uint256 body_hash;
         block_header_get_hash(&blk.header, &body_hash);
         if (uint256_cmp(&body_hash, bi->phashBlock) == 0) {
@@ -92,6 +109,163 @@ static bool rawtx_find_in_node_db(struct rawtx_context *ctx,
         }
     }
     block_free(&blk);
+    return found;
+}
+
+static bool rpc_getrawtransaction_find_in_mempool(struct rawtx_context *ctx,
+                                                  struct uint256 *hash,
+                                                  struct transaction *tx)
+{
+    return ctx->mempool && tx_mempool_lookup(ctx->mempool, hash, tx);
+}
+
+static bool rpc_getrawtransaction_find_in_node_and_wallets(
+    struct rawtx_context *ctx, struct uint256 *hash, struct transaction *tx,
+    struct uint256 *hash_block, bool found)
+{
+    /* 1a. The canonical finalized-block projection is the normal confirmed
+     * lookup path.  The independent indexes below remain useful fallbacks,
+     * but a snapshot-seeded node need not rebuild from genesis before it can
+     * answer for a transaction already present in its verified chain. */
+    if (!found)
+        found = rawtx_find_in_node_db(ctx, hash, tx, hash_block);
+
+    /* Wallet-owned transactions are projected synchronously from the exact
+     * finalized body before the global transaction index is guaranteed to
+     * catch up. */
+    if (!found)
+        found = rawtx_find_in_wallet_db(ctx, hash, tx, hash_block);
+
+    if (!found)
+        found = rawtx_find_by_wallet_note(ctx, hash, tx, hash_block);
+
+    if (!found)
+        found = rawtx_find_in_wallet(ctx, hash, tx, hash_block);
+
+    return found;
+}
+
+static bool rpc_getrawtransaction_find_in_projection(
+    struct rawtx_context *ctx, struct uint256 *hash, struct transaction *tx,
+    struct uint256 *hash_block, bool found)
+{
+    /* 1b. Check the txindex projection when present (first-class, integrity-
+     * tagged). A hit locates (height, tx_n) directly; a behind/absent/busy
+     * result never asserts "not found" here — it falls through to the paths
+     * below, so a lagging projection is never silently wrong. */
+    if (!found && ctx->main_state && ctx->datadir) {
+        int64_t pi_height = -1, pi_tx_n = -1, pi_cursor = -1;
+        uint8_t pi_block_hash[32];
+        enum txindex_read_status pst = txindex_projection_read_locate(
+            hash->data, &pi_height, pi_block_hash, &pi_tx_n, &pi_cursor);
+        if (pst == TXINDEX_READ_FOUND && pi_height >= 0 && pi_tx_n >= 0) {
+            struct block_index *bi = active_chain_at(
+                &ctx->main_state->chain_active, (int)pi_height);
+            if (bi) {
+                struct block blk;
+                block_init(&blk);
+                if (read_block_from_disk_index(&blk, bi, ctx->datadir) &&
+                    (size_t)pi_tx_n < blk.num_vtx &&
+                    uint256_cmp(&blk.vtx[pi_tx_n].hash, hash) == 0) {
+                    transaction_free(tx);
+                    transaction_init(tx);
+                    transaction_copy(tx, &blk.vtx[pi_tx_n]);
+                    block_header_get_hash(&blk.header, hash_block);
+                    found = true;
+                }
+                block_free(&blk);
+            }
+        }
+    }
+    return found;
+}
+
+static bool rpc_getrawtransaction_index_ready(
+    const struct block_tree_db *btdb, struct rawtx_context *ctx)
+{
+    return btdb && ctx->main_state && ctx->main_state->fTxIndex;
+}
+
+static void rpc_getrawtransaction_index_block_hash(struct rawtx_context *ctx,
+                                                   struct disk_tx_pos *pos,
+                                                   struct uint256 *hash_block)
+{
+    /* pread-based reads: no shared FILE* cache, no lock, and no
+     * silently-unchecked fseek — each read names its absolute
+     * position. */
+    unsigned char hdr_buf[256];
+    ssize_t hdr_read = disk_block_pread(ctx->datadir, &pos->block_pos,
+                                        "blk", hdr_buf, sizeof(hdr_buf));
+    if (hdr_read > 0) {
+        struct byte_stream hs;
+        stream_init_from_data(&hs, hdr_buf, (size_t)hdr_read);
+        struct block_header bh;
+        block_header_deserialize(&bh, &hs);
+        block_header_get_hash(&bh, hash_block);
+    }
+}
+
+static bool rpc_getrawtransaction_read_indexed_tx(struct rawtx_context *ctx,
+                                                  struct disk_block_pos *tx_pos,
+                                                  struct transaction *tx)
+{
+    bool found = false;
+    const size_t tx_cap = 2 * 1024 * 1024;
+    unsigned char *tx_buf = zcl_malloc(tx_cap, "rawtx disk read");
+    if (tx_buf) {
+        ssize_t tx_read = disk_block_pread(ctx->datadir, tx_pos, "blk",
+                                           tx_buf, tx_cap);
+        if (tx_read > 0) {
+            struct byte_stream ts;
+            stream_init_from_data(&ts, tx_buf, (size_t)tx_read);
+            transaction_free(tx);
+            transaction_init(tx);
+            if (transaction_deserialize(tx, &ts))
+                found = true;
+        }
+        free(tx_buf);
+    }
+    return found;
+}
+
+static bool rpc_getrawtransaction_coins_ready(struct rawtx_context *ctx)
+{
+    return ctx->coins_tip && ctx->main_state && ctx->datadir;
+}
+
+static bool rpc_getrawtransaction_find_in_coin_block(struct rawtx_context *ctx,
+                                                     struct uint256 *hash,
+                                                     struct transaction *tx,
+                                                     struct uint256 *hash_block)
+{
+    bool found = false;
+    struct coins entry;
+    coins_init(&entry);
+    if (coins_view_cache_get_coins(ctx->coins_tip, hash, &entry)) {
+        if (entry.height > 0) {
+            struct block_index *bi = active_chain_at(
+                &ctx->main_state->chain_active, entry.height);
+            if (bi) {
+                struct block blk;
+                block_init(&blk);
+                if (read_block_from_disk_index(&blk, bi, ctx->datadir)) {
+                    for (size_t i = 0; i < blk.num_vtx; i++) {
+                        if (uint256_cmp(&blk.vtx[i].hash, hash) == 0) {
+                            transaction_free(tx);
+                            transaction_init(tx);
+                            transaction_copy(tx, &blk.vtx[i]);
+                            block_header_get_hash(&blk.header,
+                                                  hash_block);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                block_free(&blk);
+            }
+        }
+        coins_free(&entry);
+    }
     return found;
 }
 
@@ -127,96 +301,26 @@ static bool rpc_getrawtransaction(const struct json_value *params, bool help,
     bool found = false;
 
     /* 1. Check mempool */
-    if (ctx->mempool && tx_mempool_lookup(ctx->mempool, &hash, &tx)) {
-        found = true;
-    }
+    found = rpc_getrawtransaction_find_in_mempool(ctx, &hash, &tx);
 
-    /* 1a. The canonical finalized-block projection is the normal confirmed
-     * lookup path.  The independent indexes below remain useful fallbacks,
-     * but a snapshot-seeded node need not rebuild from genesis before it can
-     * answer for a transaction already present in its verified chain. */
-    if (!found)
-        found = rawtx_find_in_node_db(ctx, &hash, &tx, &hash_block);
+    found = rpc_getrawtransaction_find_in_node_and_wallets(
+        ctx, &hash, &tx, &hash_block, found);
 
-    /* Wallet-owned transactions are projected synchronously from the exact
-     * finalized body before the global transaction index is guaranteed to
-     * catch up. */
-    if (!found)
-        found = rawtx_find_in_wallet_db(ctx, &hash, &tx, &hash_block);
-
-    if (!found)
-        found = rawtx_find_by_wallet_note(ctx, &hash, &tx, &hash_block);
-
-    if (!found)
-        found = rawtx_find_in_wallet(ctx, &hash, &tx, &hash_block);
-
-    /* 1b. Check the txindex projection when present (first-class, integrity-
-     * tagged). A hit locates (height, tx_n) directly; a behind/absent/busy
-     * result never asserts "not found" here — it falls through to the paths
-     * below, so a lagging projection is never silently wrong. */
-    if (!found && ctx->main_state && ctx->datadir) {
-        int64_t pi_height = -1, pi_tx_n = -1, pi_cursor = -1;
-        uint8_t pi_block_hash[32];
-        enum txindex_read_status pst = txindex_projection_read_locate(
-            hash.data, &pi_height, pi_block_hash, &pi_tx_n, &pi_cursor);
-        if (pst == TXINDEX_READ_FOUND && pi_height >= 0 && pi_tx_n >= 0) {
-            struct block_index *bi = active_chain_at(
-                &ctx->main_state->chain_active, (int)pi_height);
-            if (bi) {
-                struct block blk;
-                block_init(&blk);
-                if (read_block_from_disk_index(&blk, bi, ctx->datadir) &&
-                    (size_t)pi_tx_n < blk.num_vtx &&
-                    uint256_cmp(&blk.vtx[pi_tx_n].hash, &hash) == 0) {
-                    transaction_free(&tx);
-                    transaction_init(&tx);
-                    transaction_copy(&tx, &blk.vtx[pi_tx_n]);
-                    block_header_get_hash(&blk.header, &hash_block);
-                    found = true;
-                }
-                block_free(&blk);
-            }
-        }
-    }
+    found = rpc_getrawtransaction_find_in_projection(
+        ctx, &hash, &tx, &hash_block, found);
 
     /* 2. Check txindex for O(1) disk lookup */
     extern struct block_tree_db *g_active_block_tree;
-    if (!found && g_active_block_tree && ctx->main_state &&
-        ctx->main_state->fTxIndex) {
+    if (!found &&
+        rpc_getrawtransaction_index_ready(g_active_block_tree, ctx)) {
         struct disk_tx_pos pos;
         if (block_tree_db_read_tx_index(g_active_block_tree, &hash, &pos)) {
-            /* pread-based reads: no shared FILE* cache, no lock, and no
-             * silently-unchecked fseek — each read names its absolute
-             * position. */
-            unsigned char hdr_buf[256];
-            ssize_t hdr_read = disk_block_pread(ctx->datadir, &pos.block_pos,
-                                                "blk", hdr_buf,
-                                                sizeof(hdr_buf));
-            if (hdr_read > 0) {
-                struct byte_stream hs;
-                stream_init_from_data(&hs, hdr_buf, (size_t)hdr_read);
-                struct block_header bh;
-                block_header_deserialize(&bh, &hs);
-                block_header_get_hash(&bh, &hash_block);
-            }
+            rpc_getrawtransaction_index_block_hash(ctx, &pos, &hash_block);
             struct disk_block_pos tx_pos = pos.block_pos;
             if (pos.nTxOffset <= UINT32_MAX - tx_pos.nPos) {
                 tx_pos.nPos += pos.nTxOffset;
-                const size_t tx_cap = 2 * 1024 * 1024;
-                unsigned char *tx_buf = zcl_malloc(tx_cap, "rawtx disk read");
-                if (tx_buf) {
-                    ssize_t tx_read = disk_block_pread(ctx->datadir, &tx_pos,
-                                                       "blk", tx_buf, tx_cap);
-                    if (tx_read > 0) {
-                        struct byte_stream ts;
-                        stream_init_from_data(&ts, tx_buf, (size_t)tx_read);
-                        transaction_free(&tx);
-                        transaction_init(&tx);
-                        if (transaction_deserialize(&tx, &ts))
-                            found = true;
-                    }
-                    free(tx_buf);
-                }
+                found = rpc_getrawtransaction_read_indexed_tx(
+                    ctx, &tx_pos, &tx);
             } else {
                 LOG_WARN("rawtx", "txindex offset overflow (nPos=%u nTxOffset=%u)",
                          pos.block_pos.nPos, pos.nTxOffset);
@@ -230,37 +334,12 @@ static bool rpc_getrawtransaction(const struct json_value *params, bool help,
         found = rawtx_find_in_recent_chain(ctx, &hash, &tx, &hash_block);
 
     /* 3. Fallback: use coins DB to find block, then scan block */
-    if (!found && ctx->coins_tip && ctx->main_state && ctx->datadir) {
+    if (!found && rpc_getrawtransaction_coins_ready(ctx)) {
         if (!rpc_require_chainstate_lookup_ready(ctx->main_state, result,
                 "getrawtransaction", "Chainstate lookup"))
             return false;
-        struct coins entry;
-        coins_init(&entry);
-        if (coins_view_cache_get_coins(ctx->coins_tip, &hash, &entry)) {
-            if (entry.height > 0) {
-                struct block_index *bi = active_chain_at(
-                    &ctx->main_state->chain_active, entry.height);
-                if (bi) {
-                    struct block blk;
-                    block_init(&blk);
-                    if (read_block_from_disk_index(&blk, bi, ctx->datadir)) {
-                        for (size_t i = 0; i < blk.num_vtx; i++) {
-                            if (uint256_cmp(&blk.vtx[i].hash, &hash) == 0) {
-                                transaction_free(&tx);
-                                transaction_init(&tx);
-                                transaction_copy(&tx, &blk.vtx[i]);
-                                block_header_get_hash(&blk.header,
-                                                      &hash_block);
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    block_free(&blk);
-                }
-            }
-            coins_free(&entry);
-        }
+        found = rpc_getrawtransaction_find_in_coin_block(ctx, &hash, &tx,
+                                                         &hash_block);
     }
 
     if (!found) {
@@ -321,6 +400,41 @@ static bool rpc_decoderawtransaction(const struct json_value *params, bool help,
     return true;
 }
 
+static const char *rpc_sendrawtransaction_reject_msg(
+    enum mempool_accept_result r)
+{
+    const char *msg;
+    switch (r) {
+    case MEMPOOL_ACCEPT_INVALID:
+        msg = "TX rejected: failed verification "
+              "(bad signature, proof, or structure)"; break;
+    case MEMPOOL_ACCEPT_DUPLICATE:
+        msg = "TX already in mempool"; break;
+    case MEMPOOL_ACCEPT_CONFLICT:
+        msg = "TX rejected: conflicts with mempool (double-spend)";
+        break;
+    case MEMPOOL_ACCEPT_BELOW_FEE:
+        msg = "TX rejected: insufficient fee"; break;
+    case MEMPOOL_ACCEPT_MISSING_INPUTS:
+        msg = "TX rejected: inputs missing or already spent"; break;
+    case MEMPOOL_ACCEPT_NONFINAL:
+        msg = "TX rejected: non-final lock time"; break;
+    case MEMPOOL_ACCEPT_EXPIRING_SOON:
+        msg = "TX rejected: expiry height is too close"; break;
+    case MEMPOOL_ACCEPT_UNVERIFIABLE:
+        /* Say what actually happened. Reporting this as "bad
+         * signature, proof, or structure" would send an operator
+         * hunting a defect in a transaction that is probably fine. */
+        msg = "TX not accepted: shielded proof verification is "
+              "unavailable right now (verifying keys still loading). "
+              "The transaction was not judged invalid — retry shortly";
+        break;
+    default:
+        msg = "TX rejected: failed to add to mempool"; break;
+    }
+    return msg;
+}
+
 static bool rpc_sendrawtransaction(const struct json_value *params, bool help,
                                     struct json_value *result)
 {
@@ -371,36 +485,7 @@ static bool rpc_sendrawtransaction(const struct json_value *params, bool help,
             chain_params_get(), &tx);
 
         if (r != MEMPOOL_ACCEPT_OK) {
-            const char *msg;
-            switch (r) {
-            case MEMPOOL_ACCEPT_INVALID:
-                msg = "TX rejected: failed verification "
-                      "(bad signature, proof, or structure)"; break;
-            case MEMPOOL_ACCEPT_DUPLICATE:
-                msg = "TX already in mempool"; break;
-            case MEMPOOL_ACCEPT_CONFLICT:
-                msg = "TX rejected: conflicts with mempool (double-spend)";
-                break;
-            case MEMPOOL_ACCEPT_BELOW_FEE:
-                msg = "TX rejected: insufficient fee"; break;
-            case MEMPOOL_ACCEPT_MISSING_INPUTS:
-                msg = "TX rejected: inputs missing or already spent"; break;
-            case MEMPOOL_ACCEPT_NONFINAL:
-                msg = "TX rejected: non-final lock time"; break;
-            case MEMPOOL_ACCEPT_EXPIRING_SOON:
-                msg = "TX rejected: expiry height is too close"; break;
-            case MEMPOOL_ACCEPT_UNVERIFIABLE:
-                /* Say what actually happened. Reporting this as "bad
-                 * signature, proof, or structure" would send an operator
-                 * hunting a defect in a transaction that is probably fine. */
-                msg = "TX not accepted: shielded proof verification is "
-                      "unavailable right now (verifying keys still loading). "
-                      "The transaction was not judged invalid — retry shortly";
-                break;
-            default:
-                msg = "TX rejected: failed to add to mempool"; break;
-            }
-            json_set_str(result, msg);
+            json_set_str(result, rpc_sendrawtransaction_reject_msg(r));
             transaction_free(&tx);
             return false;
         }
@@ -417,6 +502,114 @@ static bool rpc_sendrawtransaction(const struct json_value *params, bool help,
     return true;
 }
 
+static const char *rpc_createrawtransaction_check_params(
+    const struct json_value *params, const struct json_value **inputs,
+    const struct json_value **outputs)
+{
+    if (json_size(params) < 2)
+        return "Missing required parameters: inputs and outputs";
+    if (json_size(params) > 3)
+        return "Too many parameters (maximum 3)";
+
+    *inputs = json_at(params, 0);
+    *outputs = json_at(params, 1);
+
+    if (!*inputs || (*inputs)->type != JSON_ARR ||
+        !*outputs || (*outputs)->type != JSON_OBJ)
+        return "Invalid parameters";
+    return NULL;
+}
+
+static void rpc_createrawtransaction_set_tx_version(struct rawtx_context *ctx,
+                                                    struct transaction *tx)
+{
+    int tip_height = ctx->main_state ?
+        active_chain_height(&ctx->main_state->chain_active) : 0;
+    const struct consensus_params *cp = &chain_params_get()->consensus;
+    int epoch = consensus_current_epoch(tip_height + 1, cp);
+
+    if (epoch >= (int)UPGRADE_SAPLING) {
+        tx->overwintered = true;
+        tx->version = SAPLING_TX_VERSION;
+        tx->version_group_id = SAPLING_VERSION_GROUP_ID;
+        tx->expiry_height = (uint32_t)(tip_height + 500);
+    } else if (epoch >= (int)UPGRADE_OVERWINTER) {
+        tx->overwintered = true;
+        tx->version = OVERWINTER_TX_VERSION;
+        tx->version_group_id = OVERWINTER_VERSION_GROUP_ID;
+        tx->expiry_height = (uint32_t)(tip_height + 500);
+    } else {
+        tx->version = 1;
+    }
+}
+
+static bool rpc_createrawtransaction_find_input_refs(
+    const struct json_value *inp, const struct json_value **txid_v,
+    const struct json_value **vout_v)
+{
+    if (!inp || inp->type != JSON_OBJ)
+        return false;
+    *txid_v = json_get(inp, "txid");
+    *vout_v = json_get(inp, "vout");
+    return *txid_v && *vout_v;
+}
+
+static void rpc_createrawtransaction_set_input_sequence(
+    const struct json_value *inp, struct tx_in *vin)
+{
+    const struct json_value *seq_v = json_get(inp, "sequence");
+    if (seq_v) vin->sequence = (uint32_t)json_get_int(seq_v);
+}
+
+static bool rpc_createrawtransaction_parse_amount(
+    const struct json_value *amt_v, int64_t *amount)
+{
+    if (amt_v->type == JSON_REAL) {
+        double d = json_get_real(amt_v);
+        if (d < 0 || d > 21000000.0)
+            return false;
+        *amount = (int64_t)(d * (double)ZATOSHI_PER_ZCL);
+    } else if (amt_v->type == JSON_INT) {
+        int64_t v = json_get_int(amt_v);
+        if (v < 0 || v > 21000000)
+            return false;
+        *amount = v * ZATOSHI_PER_ZCL;
+    }
+    return true;
+}
+
+static void rpc_createrawtransaction_set_output_script(const char *addr,
+                                                       struct tx_out *vout)
+{
+    const struct chain_params *cp2 = chain_params_get();
+    size_t pk_len, sc_len;
+    const unsigned char *pk_pfx = chain_params_base58_prefix(
+        cp2, B58_PUBKEY_ADDRESS, &pk_len);
+    const unsigned char *sc_pfx = chain_params_base58_prefix(
+        cp2, B58_SCRIPT_ADDRESS, &sc_len);
+    struct tx_destination dest;
+    if (decode_destination(addr, pk_pfx, pk_len, sc_pfx, sc_len, &dest)) {
+        script_for_destination(&vout->script_pub_key, &dest);
+    }
+}
+
+static const char *rpc_createrawtransaction_parse_op_return(
+    const struct json_value *op_return_v, uint8_t *script, size_t *script_len)
+{
+    const char *op_return_hex = json_get_str(op_return_v);
+    const size_t hex_len = op_return_hex ? strlen(op_return_hex) : 0;
+    const size_t len =
+        op_return_hex && IsHex(op_return_hex) && (hex_len & 1U) == 0 &&
+                hex_len <= MAX_OP_RETURN_RELAY * 2
+            ? ParseHex(op_return_hex, script, MAX_OP_RETURN_RELAY)
+            : 0;
+    if (len == 0 || script[0] != OP_RETURN)
+        return "Invalid op_return_hex (need one exact OP_RETURN script "
+               "within the 223-byte relay cap)";
+    *script_len = len;
+    return NULL;
+}
+
 static bool rpc_createrawtransaction(const struct json_value *params, bool help,
                                       struct json_value *result)
 {
@@ -431,53 +624,26 @@ static bool rpc_createrawtransaction(const struct json_value *params, bool help,
         "3. \"op_return_hex\" (string, optional) exact standard-relay "
         "OP_RETURN script");
 
-    if (json_size(params) < 2) {
-        json_set_str(result, "Missing required parameters: inputs and outputs");
-        return false;
-    }
-    if (json_size(params) > 3) {
-        json_set_str(result, "Too many parameters (maximum 3)");
-        return false;
-    }
-
-    const struct json_value *inputs = json_at(params, 0);
-    const struct json_value *outputs = json_at(params, 1);
-
-    if (!inputs || inputs->type != JSON_ARR ||
-        !outputs || outputs->type != JSON_OBJ) {
-        json_set_str(result, "Invalid parameters");
+    const struct json_value *inputs = NULL;
+    const struct json_value *outputs = NULL;
+    const char *param_err = rpc_createrawtransaction_check_params(
+        params, &inputs, &outputs);
+    if (param_err) {
+        json_set_str(result, param_err);
         return false;
     }
 
     struct transaction tx;
     transaction_init(&tx);
 
-    int tip_height = ctx->main_state ?
-        active_chain_height(&ctx->main_state->chain_active) : 0;
-    const struct consensus_params *cp = &chain_params_get()->consensus;
-    int epoch = consensus_current_epoch(tip_height + 1, cp);
-
-    if (epoch >= (int)UPGRADE_SAPLING) {
-        tx.overwintered = true;
-        tx.version = SAPLING_TX_VERSION;
-        tx.version_group_id = SAPLING_VERSION_GROUP_ID;
-        tx.expiry_height = (uint32_t)(tip_height + 500);
-    } else if (epoch >= (int)UPGRADE_OVERWINTER) {
-        tx.overwintered = true;
-        tx.version = OVERWINTER_TX_VERSION;
-        tx.version_group_id = OVERWINTER_VERSION_GROUP_ID;
-        tx.expiry_height = (uint32_t)(tip_height + 500);
-    } else {
-        tx.version = 1;
-    }
+    rpc_createrawtransaction_set_tx_version(ctx, &tx);
 
     for (size_t i = 0; i < json_size(inputs); i++) {
         const struct json_value *inp = json_at(inputs, i);
-        if (!inp || inp->type != JSON_OBJ) continue;
-
-        const struct json_value *txid_v = json_get(inp, "txid");
-        const struct json_value *vout_v = json_get(inp, "vout");
-        if (!txid_v || !vout_v) continue;
+        const struct json_value *txid_v = NULL;
+        const struct json_value *vout_v = NULL;
+        if (!rpc_createrawtransaction_find_input_refs(inp, &txid_v, &vout_v))
+            continue;
 
         struct tx_in vin;
         tx_in_init(&vin);
@@ -488,8 +654,7 @@ static bool rpc_createrawtransaction(const struct json_value *params, bool help,
         }
         vin.prevout.n = (uint32_t)json_get_int(vout_v);
 
-        const struct json_value *seq_v = json_get(inp, "sequence");
-        if (seq_v) vin.sequence = (uint32_t)json_get_int(seq_v);
+        rpc_createrawtransaction_set_input_sequence(inp, &vin);
 
         size_t new_count = tx.num_vin + 1;
         struct tx_in *new_vin = zcl_realloc(tx.vin, new_count * sizeof(struct tx_in), "tx_vin");
@@ -508,35 +673,14 @@ static bool rpc_createrawtransaction(const struct json_value *params, bool help,
         tx_out_set_null(&vout);
 
         int64_t amount = 0;
-        if (amt_v->type == JSON_REAL) {
-            double d = json_get_real(amt_v);
-            if (d < 0 || d > 21000000.0) {
-                json_set_str(result, "Amount out of range");
-                transaction_free(&tx);
-                return false;
-            }
-            amount = (int64_t)(d * (double)ZATOSHI_PER_ZCL);
-        } else if (amt_v->type == JSON_INT) {
-            int64_t v = json_get_int(amt_v);
-            if (v < 0 || v > 21000000) {
-                json_set_str(result, "Amount out of range");
-                transaction_free(&tx);
-                return false;
-            }
-            amount = v * ZATOSHI_PER_ZCL;
+        if (!rpc_createrawtransaction_parse_amount(amt_v, &amount)) {
+            json_set_str(result, "Amount out of range");
+            transaction_free(&tx);
+            return false;
         }
         vout.value = amount;
 
-        const struct chain_params *cp2 = chain_params_get();
-        size_t pk_len, sc_len;
-        const unsigned char *pk_pfx = chain_params_base58_prefix(
-            cp2, B58_PUBKEY_ADDRESS, &pk_len);
-        const unsigned char *sc_pfx = chain_params_base58_prefix(
-            cp2, B58_SCRIPT_ADDRESS, &sc_len);
-        struct tx_destination dest;
-        if (decode_destination(addr, pk_pfx, pk_len, sc_pfx, sc_len, &dest)) {
-            script_for_destination(&vout.script_pub_key, &dest);
-        }
+        rpc_createrawtransaction_set_output_script(addr, &vout);
 
         size_t new_count = tx.num_vout + 1;
         struct tx_out *new_vout = zcl_realloc(tx.vout,
@@ -549,18 +693,12 @@ static bool rpc_createrawtransaction(const struct json_value *params, bool help,
 
     const struct json_value *op_return_v = json_at(params, 2);
     if (op_return_v) {
-        const char *op_return_hex = json_get_str(op_return_v);
         uint8_t script[MAX_OP_RETURN_RELAY];
-        const size_t hex_len = op_return_hex ? strlen(op_return_hex) : 0;
-        const size_t script_len =
-            op_return_hex && IsHex(op_return_hex) && (hex_len & 1U) == 0 &&
-                    hex_len <= sizeof(script) * 2
-                ? ParseHex(op_return_hex, script, sizeof(script))
-                : 0;
-        if (script_len == 0 || script[0] != OP_RETURN) {
-            json_set_str(result,
-                "Invalid op_return_hex (need one exact OP_RETURN script "
-                "within the 223-byte relay cap)");
+        size_t script_len = 0;
+        const char *op_return_err = rpc_createrawtransaction_parse_op_return(
+            op_return_v, script, &script_len);
+        if (op_return_err) {
+            json_set_str(result, op_return_err);
             transaction_free(&tx);
             return false;
         }

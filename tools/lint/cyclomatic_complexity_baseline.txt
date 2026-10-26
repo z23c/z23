@@ -771,10 +771,6 @@ engine/controllers/src/snapshot_controller_txindex.c:snapshot_tx_index_build_fro
 engine/controllers/src/status_native_handlers.c:zcl_native_status_body_full:45
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
 engine/controllers/src/sync_controller_sapling_tree_persist.c:sapling_tree_persist_pair_status:19
-engine/controllers/src/transaction_controller.c:rawtx_find_in_node_db:19
-engine/controllers/src/transaction_controller.c:rpc_createrawtransaction:39
-engine/controllers/src/transaction_controller.c:rpc_getrawtransaction:44
-engine/controllers/src/transaction_controller.c:rpc_sendrawtransaction:17
 engine/controllers/src/transaction_controller_sign.c:rpc_signrawtransaction:57
 engine/controllers/src/transaction_controller_sign.c:sign_one_input:21
 engine/entry/main_cli_modes.c:bench_crypto_verify:22
