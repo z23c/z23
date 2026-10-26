@@ -9,7 +9,7 @@
   "dependencies": [
     {
       "name": "zprng/zprng",
-      "root": "83d7a4e0afa5060737d81040d81ebe3855a72a2d7ce300f1dab22ab07144c304",
+      "root": "dd51bed7afbc3667ee9a3d8d51bf9b7be463163d19fdf285f16ad1491da2a452",
       "semver": "0.1.0"
     }
   ],

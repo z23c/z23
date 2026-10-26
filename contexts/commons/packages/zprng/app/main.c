@@ -19,6 +19,12 @@ static int parse_unsigned(const char *s, uint64_t *out)
     return 1;
 }
 
+static int output_error(void)
+{
+    fprintf(stderr, "zprng: output write failed\n");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     uint64_t seed = 42, requested_count = 5;
@@ -32,7 +38,10 @@ int main(int argc, char **argv)
     zxoshiro256ss rng;
 
     zxoshiro256ss_init(&rng, seed);
-    for (unsigned long i = 0; i < count; i++)
-        printf("%llu\n", (unsigned long long)zxoshiro256ss_next(&rng));
+    for (unsigned long i = 0; i < count; i++) {
+        if (printf("%llu\n", (unsigned long long)zxoshiro256ss_next(&rng)) < 0)
+            return output_error();
+    }
+    if (count && (fflush(stdout) != 0 || ferror(stdout))) return output_error();
     return 0;
 }

@@ -5,9 +5,32 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_sink;
+static size_t cli_next_calls, cli_flushes;
+static FILE *real_stdout(void) { return stdout; }
+static uint64_t cli_next(zxoshiro256ss *rng)
+{
+    cli_next_calls++;
+    return zxoshiro256ss_next(rng);
+}
+[[maybe_unused]] static int cli_flush(FILE *stream)
+{
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+#undef stdout
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define fflush cli_flush
+#define zxoshiro256ss_next cli_next
 #define main zprng_cli_main
 #include "../app/main.c"
 #undef main
+#undef zxoshiro256ss_next
+#undef fflush
+#undef printf
+#undef stdout
+#define stdout real_stdout()
 
 static int failures;
 
@@ -200,21 +223,29 @@ static void test_cli_rejects_invalid_arguments(void)
     const char *seed_rows[] = {"", "-1", "18446744073709551616", "seed"};
     for (size_t i = 0; i < sizeof seed_rows / sizeof seed_rows[0]; i++) {
         char *args[] = {"zprng", (char *)seed_rows[i], "0", NULL};
+        cli_next_calls = cli_flushes = 0;
         int ok = zprng_cli_main(3, args) == 2;
+        check(cli_next_calls == 0 && cli_flushes == 0, "bad seed leaves output untouched");
         fprintf(stderr, "prng_seed_row=%zu result=%s\n", i, ok ? "PASS" : "FAIL");
         check(ok, "demo rejects invalid seed");
     }
     const char *count_rows[] = {"", "count"};
     for (size_t i = 0; i < sizeof count_rows / sizeof count_rows[0]; i++) {
         char *args[] = {"zprng", "42", (char *)count_rows[i], NULL};
+        cli_next_calls = cli_flushes = 0;
         int ok = zprng_cli_main(3, args) == 2;
+        check(cli_next_calls == 0 && cli_flushes == 0, "bad count leaves output untouched");
         fprintf(stderr, "prng_count_row=%zu result=%s\n", i, ok ? "PASS" : "FAIL");
         check(ok, "demo rejects invalid count");
     }
 }
 
+static void test_cli_output(void);
+
 int main(void)
 {
+    cli_sink = stdout;
+    test_cli_output();
     test_cli_rejects_invalid_arguments();
     test_shuffle_size_overflow();
     test_shuffle_large_items();
@@ -231,4 +262,75 @@ int main(void)
     }
     puts("zprng: all tests passed");
     return 0;
+}
+
+static FILE *required_stream(FILE *stream)
+{
+    if (!stream) { fprintf(stderr, "zprng CLI fixture setup failed\n"); exit(2); }
+    return stream;
+}
+static int cli_invoke(FILE *sink, int argc, char **args)
+{
+    cli_sink = sink;
+    cli_next_calls = cli_flushes = 0;
+    int rc = zprng_cli_main(argc, args);
+    cli_sink = stdout;
+    return rc;
+}
+static void cli_expected(char *out, size_t cap, uint64_t seed, size_t count)
+{
+    zxoshiro256ss rng;
+    zxoshiro256ss_init(&rng, seed);
+    size_t used = 0;
+    for (size_t i = 0; i < count; i++) {
+        int n = snprintf(out + used, cap - used, "%llu\n",
+                         (unsigned long long)zxoshiro256ss_next(&rng));
+        if (n < 0 || (size_t)n >= cap - used) exit(2);
+        used += (size_t)n;
+    }
+    out[used] = '\0';
+}
+static void cli_normal(int argc, char **args, uint64_t seed, size_t count)
+{
+    FILE *sink = required_stream(tmpfile());
+    check(cli_invoke(sink, argc, args) == 0, "normal CLI status");
+    check(cli_next_calls == count, "normal CLI draws exact count");
+    if (!count) check(cli_flushes == 0, "zero CLI does not flush output");
+    char want[256], got[256];
+    cli_expected(want, sizeof want, seed, count);
+    rewind(sink);
+    size_t n = fread(got, 1, sizeof got, sink);
+    check(!ferror(sink) && n == strlen(want) && !memcmp(got, want, n), "exact CLI output");
+    check(fclose(sink) == 0, "normal CLI close");
+}
+static void cli_failed_output(bool buffered)
+{
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *sink = required_stream(fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r"));
+    char buffer[4096];
+    if (buffered && setvbuf(sink, buffer, _IOFBF, sizeof buffer) != 0) exit(2);
+    char *args[] = {"zprng", "42", "5", NULL};
+    check(cli_invoke(sink, 3, args) == 1, "CLI refuses failed output");
+    check(ferror(sink) != 0, "CLI observes stream failure");
+    check(cli_next_calls == (buffered ? 5u : 1u), "CLI stops draws after immediate write failure");
+    (void)fclose(sink);
+}
+static void test_cli_output(void)
+{
+    char *defaults[] = {"zprng", NULL};
+    cli_normal(1, defaults, 42, 5);
+    char *seed[] = {"zprng", "7", NULL};
+    cli_normal(2, seed, 7, 5);
+    char *explicit[] = {"zprng", "42", "3", "ignored", NULL};
+    cli_normal(4, explicit, 42, 3);
+    char *zero[] = {"zprng", "42", "0", NULL};
+    cli_normal(3, zero, 42, 0);
+    cli_failed_output(false);
+#ifdef __linux__
+    cli_failed_output(true);
+#endif
 }
