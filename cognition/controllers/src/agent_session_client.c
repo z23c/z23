@@ -299,8 +299,8 @@ bool agent_session_client_authorize(const char *session_id, int64_t amount_zat,
                                     const char *recipient,
                                     const char *wallet_scope, bool commit,
                                     bool canonical_plan,
-                                    int64_t*window_remaining_zat,
-                                    int64_t*charged_zat,
+                                    int64_t *window_remaining_zat,
+                                    int64_t *charged_zat,
                                     char *why, size_t why_cap)
 {
     if (window_remaining_zat)
