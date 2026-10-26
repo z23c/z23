@@ -105,15 +105,17 @@ static bool extract_str_field(const char *p, const char *end,
 
 /* Return a pointer just past the ':' (and blanks) that follow `key` (a
  * quoted JSON key) inside the object slice [p, end), or NULL when the
- * key does not appear in the slice. Numeric field parsing reads its
- * value from the returned pointer. */
+ * key does not appear in the slice. `skip` is the exact byte advance
+ * from the key's first quote (the original offsets: 11 for price_zcl,
+ * 20 for tokens_per_purchase). Numeric field parsing reads its value
+ * from the returned pointer. */
 static const char *json_value_text(const char *p, const char *end,
-                                   const char *key)
+                                   const char *key, size_t skip)
 {
     const char *q = strstr(p, key);
     if (!q || q >= end)
         return NULL;
-    q += strlen(key);
+    q += skip;
     while (*q == ':' || *q == ' ')
         q++;
     return q;
@@ -143,11 +145,11 @@ static int store_load_json_product(sqlite3 *db, const char *p,
     extract_str_field(p, end, "\"token_id\"",
                       token, sizeof(token));
     /* price_zcl */
-    const char *q = json_value_text(p, end, "\"price_zcl\"");
+    const char *q = json_value_text(p, end, "\"price_zcl\"", 11);
     if (q)
         price_zcl = strtod(q, NULL);
     /* tokens_per_purchase */
-    q = json_value_text(p, end, "\"tokens_per_purchase\"");
+    q = json_value_text(p, end, "\"tokens_per_purchase\"", 20);
     if (q) {
         long tval = strtol(q, NULL, 10);
         tokens = (tval > 0 && tval <= 10000) ? (int)tval : 1;
