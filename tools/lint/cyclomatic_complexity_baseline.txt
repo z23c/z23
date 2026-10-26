@@ -564,7 +564,6 @@ tests/harness/src/codeindex_freshness_windows_acceptance.c:mutation_acceptance:3
 tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
 tests/harness/src/test.c:main:407
 tests/harness/src/test_accept_to_mempool.c:test_accept_to_mempool:44
-tests/harness/src/test_build_fabric.c:test_bf_confined_worker:28
 tests/harness/src/test_cli_argv_strict.c:cas_run_daemon_wait_for:23
 tests/harness/src/test_code_inventory.c:ci_semantic_known_answers:25
 tests/harness/src/test_code_inventory.c:test_code_inventory:55

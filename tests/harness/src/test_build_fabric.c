@@ -2282,6 +2282,39 @@ static int test_bf_worker_identity_capability_honesty(void)
     return failures;
 }
 
+static int test_bf_assert_native_object_header(const uint8_t *object,
+                                               size_t object_len)
+{
+    int failures = 0;
+#if defined(__APPLE__)
+    ASSERT(object_len >= 16 && object[0] == 0xcf && object[1] == 0xfa &&
+           object[2] == 0xed && object[3] == 0xfe &&
+           object[4] == 0x0c && object[7] == 0x01 &&
+           object[12] == 0x01 && object[13] == 0x00);
+#else
+    ASSERT(object_len >= 20 && object[0] == 0x7f && object[1] == 'E' &&
+           object[16] == 1 && object[18] == 62);
+#endif
+    _test_next:;
+    return failures;
+}
+
+static int test_bf_assert_release_qualified(
+    struct build_fabric_release_qualification_report qualified)
+{
+    int failures = 0;
+    ASSERT(qualified.candidate_admitted &&
+           qualified.clean_shadow_match &&
+           qualified.independent_reproduction_match &&
+           qualified.distinct_executor_signers &&
+           qualified.physical_evidence_present &&
+           qualified.regression_proof_satisfied &&
+           qualified.human_confirmed && qualified.confirmer_approved &&
+           !qualified.publication_performed);
+    _test_next:;
+    return failures;
+}
+
 static int test_bf_confined_worker(void)
 {
     int failures = 0;
@@ -2415,15 +2448,10 @@ static int test_bf_confined_worker(void)
                                       &object_len), 0);
         ASSERT(vcs_build_artifact_manifest_v1_verify_chunk(
             &manifest, 0, object, object_len));
-#if defined(__APPLE__)
-        ASSERT(object_len >= 16 && object[0] == 0xcf && object[1] == 0xfa &&
-               object[2] == 0xed && object[3] == 0xfe &&
-               object[4] == 0x0c && object[7] == 0x01 &&
-               object[12] == 0x01 && object[13] == 0x00);
-#else
-        ASSERT(object_len >= 20 && object[0] == 0x7f && object[1] == 'E' &&
-               object[16] == 1 && object[18] == 62);
-#endif
+        if (test_bf_assert_native_object_header(object, object_len) != 0) {
+            failures++;
+            goto _test_next;
+        }
         free(object);
 
         /* A clean shadow is a second signed receipt for this SAME action,
@@ -2581,14 +2609,10 @@ static int test_bf_confined_worker(void)
         struct build_fabric_release_qualification_report qualified;
         ASSERT(build_fabric_release_qualify(
             &ndb, dir, confirmation_hex, now + 5, &qualified).ok);
-        ASSERT(qualified.candidate_admitted &&
-               qualified.clean_shadow_match &&
-               qualified.independent_reproduction_match &&
-               qualified.distinct_executor_signers &&
-               qualified.physical_evidence_present &&
-               qualified.regression_proof_satisfied &&
-               qualified.human_confirmed && qualified.confirmer_approved &&
-               !qualified.publication_performed);
+        if (test_bf_assert_release_qualified(qualified) != 0) {
+            failures++;
+            goto _test_next;
+        }
         ASSERT(strlen(qualified.qualification_root_sha3) == 64);
         struct db_build_receipt regression_receipt_after;
         ASSERT(db_build_receipt_find(
