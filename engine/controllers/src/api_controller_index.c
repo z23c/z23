@@ -326,6 +326,104 @@ static void api_openapi_crypto_policy_json(struct json_value *out)
     json_push_kv_bool(out, "signature_scheme_claimed", false);
 }
 
+static void api_openapi_format_operation_text(const char *resource,
+                                              const char *action,
+                                              const char *method,
+                                              const char *path,
+                                              size_t index,
+                                              char *operation_id,
+                                              size_t operation_id_size,
+                                              char *summary,
+                                              size_t summary_size)
+{
+    snprintf(operation_id, operation_id_size, "%s_%s_%zu",
+             resource && resource[0] ? resource : "api",
+             action && action[0] ? action : "show",
+             index);
+    snprintf(summary, summary_size, "%s %s",
+             method && method[0] ? method : "GET",
+             path && path[0] ? path : ZCL_REST_API_BASE_PATH);
+}
+
+static void api_openapi_push_operation_route_fields(struct json_value *operation,
+                                                    const char *resource,
+                                                    const char *action,
+                                                    const char *crud_operation,
+                                                    const char *resource_scope,
+                                                    const char *crud_name,
+                                                    const char *route_id,
+                                                    const char *command_path)
+{
+    json_push_kv_str(operation, "x-resource", resource);
+    json_push_kv_str(operation, "x-action", action);
+    json_push_kv_str(operation, "x-crud-operation", crud_operation);
+    json_push_kv_str(operation, "x-resource-scope", resource_scope);
+    json_push_kv_str(operation, "x-crud-name", crud_name);
+    json_push_kv_str(operation, "x-route-id", route_id);
+    if (command_path && command_path[0])
+        json_push_kv_str(operation, "x-zcl-command-path", command_path);
+}
+
+static void api_openapi_push_operation_attributes(struct json_value *operation,
+                                                  const struct json_value *contract,
+                                                  bool private_route,
+                                                  const char *auth_policy,
+                                                  const char *response_schema,
+                                                  const char *error_schema,
+                                                  const char *freshness,
+                                                  bool freshness_scoped,
+                                                  bool pagination,
+                                                  bool canonical,
+                                                  const char *legacy_alias,
+                                                  const char *compat_schema)
+{
+    json_push_kv_bool(operation, "x-private", private_route);
+    json_push_kv_str(operation, "x-auth",
+                     private_route ? "operator_private" : "public");
+    json_push_kv_str(operation, "x-auth-policy", auth_policy);
+    json_push_kv_bool(operation, "x-gateway-auth-compatible",
+                      json_get_bool(json_get(contract,
+                                            "gateway_auth_compatible")));
+    json_push_kv_str(operation, "x-response-schema", response_schema);
+    json_push_kv_str(operation, "x-error-schema", error_schema);
+    api_app_protocol_push_openapi_extensions(contract, operation);
+    json_push_kv_str(operation, "x-freshness", freshness);
+    json_push_kv_bool(operation, "x-freshness-scoped", freshness_scoped);
+    json_push_kv_bool(operation, "x-pagination", pagination);
+    json_push_kv_bool(operation, "x-canonical", canonical);
+    if (legacy_alias && legacy_alias[0])
+        json_push_kv_str(operation, "x-legacy-alias-of", legacy_alias);
+    if (compat_schema && compat_schema[0])
+        json_push_kv_str(operation, "x-compat-response-schema",
+                         compat_schema);
+}
+
+static void api_openapi_push_operation_contract_objects(struct json_value *operation,
+                                                        const struct json_value *telemetry,
+                                                        const struct json_value *crypto_policy,
+                                                        const struct json_value *service_binding,
+                                                        const struct json_value *filter_contract,
+                                                        const struct json_value *path_param_contract,
+                                                        const struct json_value *id_params,
+                                                        bool private_route)
+{
+    if (telemetry)
+        json_push_kv(operation, "x-zcl-telemetry", telemetry);
+    if (crypto_policy)
+        json_push_kv(operation, "x-zcl-crypto-policy", crypto_policy);
+    if (service_binding)
+        json_push_kv(operation, "x-zcl-service-binding", service_binding);
+    if (filter_contract)
+        json_push_kv(operation, "x-zcl-filter-contract", filter_contract);
+    if (path_param_contract)
+        json_push_kv(operation, "x-zcl-path-param-contract",
+                     path_param_contract);
+    if (id_params)
+        json_push_kv(operation, "x-id-params", id_params);
+    if (private_route)
+        api_openapi_security_json(operation);
+}
+
 static void api_openapi_operation_json(const struct json_value *contract,
                                        size_t index,
                                        struct json_value *operation,
@@ -359,13 +457,9 @@ static void api_openapi_operation_json(const struct json_value *contract,
 
     char operation_id[160];
     char summary[256];
-    snprintf(operation_id, sizeof(operation_id), "%s_%s_%zu",
-             resource && resource[0] ? resource : "api",
-             action && action[0] ? action : "show",
-             index);
-    snprintf(summary, sizeof(summary), "%s %s",
-             method && method[0] ? method : "GET",
-             path && path[0] ? path : ZCL_REST_API_BASE_PATH);
+    api_openapi_format_operation_text(resource, action, method, path, index,
+                                      operation_id, sizeof(operation_id),
+                                      summary, sizeof(summary));
 
     json_set_object(operation);
     json_push_kv_str(operation, "operationId", operation_id);
@@ -382,58 +476,33 @@ static void api_openapi_operation_json(const struct json_value *contract,
     json_push_kv(operation, "tags", &tags);
     json_free(&tags);
 
-    json_push_kv_str(operation, "x-resource", resource);
-    json_push_kv_str(operation, "x-action", action);
-    json_push_kv_str(operation, "x-crud-operation", crud_operation);
-    json_push_kv_str(operation, "x-resource-scope", resource_scope);
-    json_push_kv_str(operation, "x-crud-name", crud_name);
-    json_push_kv_str(operation, "x-route-id", route_id);
-    if (command_path && command_path[0])
-        json_push_kv_str(operation, "x-zcl-command-path", command_path);
-    json_push_kv_bool(operation, "x-private", private_route);
-    json_push_kv_str(operation, "x-auth",
-                     private_route ? "operator_private" : "public");
-    json_push_kv_str(operation, "x-auth-policy", auth_policy);
-    json_push_kv_bool(operation, "x-gateway-auth-compatible",
-                      json_get_bool(json_get(contract,
-                                            "gateway_auth_compatible")));
-    json_push_kv_str(operation, "x-response-schema", response_schema);
-    json_push_kv_str(operation, "x-error-schema", error_schema);
-    api_app_protocol_push_openapi_extensions(contract, operation);
-    json_push_kv_str(operation, "x-freshness", freshness);
-    json_push_kv_bool(operation, "x-freshness-scoped", freshness_scoped);
-    json_push_kv_bool(operation, "x-pagination", pagination);
-    json_push_kv_bool(operation, "x-canonical", canonical);
-    if (legacy_alias && legacy_alias[0])
-        json_push_kv_str(operation, "x-legacy-alias-of", legacy_alias);
-    if (compat_schema && compat_schema[0])
-        json_push_kv_str(operation, "x-compat-response-schema",
-                         compat_schema);
+    api_openapi_push_operation_route_fields(operation, resource, action,
+                                            crud_operation, resource_scope,
+                                            crud_name, route_id,
+                                            command_path);
+    api_openapi_push_operation_attributes(operation, contract,
+                                          private_route, auth_policy,
+                                          response_schema, error_schema,
+                                          freshness, freshness_scoped,
+                                          pagination, canonical,
+                                          legacy_alias, compat_schema);
+
     const struct json_value *telemetry = json_get(contract, "telemetry");
-    if (telemetry)
-        json_push_kv(operation, "x-zcl-telemetry", telemetry);
     const struct json_value *crypto_policy =
         json_get(contract, "crypto_policy");
-    if (crypto_policy)
-        json_push_kv(operation, "x-zcl-crypto-policy", crypto_policy);
     const struct json_value *service_binding =
         json_get(contract, "service_binding");
-    if (service_binding)
-        json_push_kv(operation, "x-zcl-service-binding", service_binding);
     const struct json_value *filter_contract =
         json_get(contract, "filter_contract");
-    if (filter_contract)
-        json_push_kv(operation, "x-zcl-filter-contract", filter_contract);
     const struct json_value *path_param_contract =
         json_get(contract, "path_param_contract");
-    if (path_param_contract)
-        json_push_kv(operation, "x-zcl-path-param-contract",
-                     path_param_contract);
     const struct json_value *id_params = json_get(contract, "id_params");
-    if (id_params)
-        json_push_kv(operation, "x-id-params", id_params);
-    if (private_route)
-        api_openapi_security_json(operation);
+    api_openapi_push_operation_contract_objects(operation, telemetry,
+                                                crypto_policy,
+                                                service_binding,
+                                                filter_contract,
+                                                path_param_contract,
+                                                id_params, private_route);
 
     struct json_value params;
     json_init(&params);
