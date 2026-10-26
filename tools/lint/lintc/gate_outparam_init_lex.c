@@ -490,7 +490,9 @@ static int op_top_text(struct op_fn *f, const char *line)
         op_buf_clear(&f->sig);
         return 0;
     }
-    return op_buf_put(&f->sig, " ", 1) || op_buf_put(&f->sig, line, strlen(line));
+    if (op_buf_put(&f->sig, " ", 1))
+        return 2;
+    return op_buf_put(&f->sig, line, strlen(line));
 }
 
 /* The publisher finder's opener: a one-line definition is a whole body. */

@@ -140,8 +140,12 @@ static int op_st_leg2(void)
     struct op_pub p;
     struct op_fn f;
     int bad = 0, d = 0;
-    if (op_hset_init(&pubs, 16) || op_hset_init(&objs, 16))
+    if (op_hset_init(&pubs, 16))
         return 1;
+    if (op_hset_init(&objs, 16)) {
+        op_hset_free(&pubs);
+        return 1;
+    }
     memset(&p, 0, sizeof p);
     p.found = &pubs;
     op_fn_init(&f, OP_MODE_PUB, op_pubfind_emit, &p, &objs);
