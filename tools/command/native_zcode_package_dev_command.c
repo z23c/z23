@@ -114,45 +114,54 @@ static bool zpd_prepare_source(const struct zcl_command_request *request,
     }
     return true;
 }
+static bool zpd_prepare_push_wires(struct zcl_command_reply *reply,
+    const struct vcs_package_prepared *prepared)
+{
+    return zpd_push_hex(&reply->data, "package_root", prepared->package_root, 32) &&
+        zpd_push_hex(&reply->data, "release_signing_digest",
+                     prepared->signing_digest, 32) &&
+        zpd_push_hex(&reply->data, "recipe_root", prepared->recipe_root, 32) &&
+        zpd_push_hex(&reply->data, "dependency_lock_root",
+                     prepared->lock_root, 32) &&
+        zpd_push_hex(&reply->data, "api_capsule_root",
+                     prepared->capsule_root, 32) &&
+        zpd_push_hex(&reply->data, "release_body_hex", prepared->release_body,
+                     prepared->release_body_len) &&
+        zpd_push_hex(&reply->data, "manifest_hex", prepared->manifest_wire,
+                     prepared->manifest_wire_len) &&
+        zpd_push_hex(&reply->data, "recipe_hex", prepared->recipe_wire,
+                     prepared->recipe_wire_len) &&
+        zpd_push_hex(&reply->data, "dependency_lock_hex", prepared->lock_wire,
+                     prepared->lock_wire_len) &&
+        zpd_push_hex(&reply->data, "api_capsule_hex", prepared->capsule_wire,
+                     prepared->capsule_wire_len);
+}
+static bool zpd_prepare_push_fields(struct zcl_command_reply *reply,
+    const struct vcs_package_prepared *prepared)
+{
+    return json_push_kv_str(&reply->data, "name", prepared->release.name) &&
+        json_push_kv_str(&reply->data, "semver", prepared->release.semver) &&
+        json_push_kv_str(&reply->data, "license", prepared->release.license) &&
+        /* The chain this release binds to. It decides whether any peer will
+         * ever accept the carrier, and it used to be invisible here. */
+        json_push_kv_str(&reply->data, "chain_id", prepared->release.chain_id) &&
+        json_push_kv_int(&reply->data, "publisher_sequence", (int64_t)prepared->release.publisher_sequence) &&
+        json_push_kv_int(&reply->data, "file_count",
+                         (int64_t)prepared->manifest.count) &&
+        json_push_kv_int(&reply->data, "dependency_count",
+                         (int64_t)(prepared->lock.count - 1u)) &&
+        json_push_kv_int(&reply->data, "public_header_count",
+                         (int64_t)prepared->capsule.count) &&
+        json_push_kv_bool(&reply->data, "read_only", true) &&
+        json_push_kv_str(&reply->data, "signature_status", "unsigned");
+}
 void zcl_native_handle_zcode_package_dev_prepare(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct vcs_package_prepared prepared;
     if (!zpd_prepare_source(request, reply, &prepared)) return;
-    bool ok =
-        zpd_push_hex(&reply->data, "package_root", prepared.package_root, 32) &&
-        zpd_push_hex(&reply->data, "release_signing_digest",
-                     prepared.signing_digest, 32) &&
-        zpd_push_hex(&reply->data, "recipe_root", prepared.recipe_root, 32) &&
-        zpd_push_hex(&reply->data, "dependency_lock_root",
-                     prepared.lock_root, 32) &&
-        zpd_push_hex(&reply->data, "api_capsule_root",
-                     prepared.capsule_root, 32) &&
-        zpd_push_hex(&reply->data, "release_body_hex", prepared.release_body,
-                     prepared.release_body_len) &&
-        zpd_push_hex(&reply->data, "manifest_hex", prepared.manifest_wire,
-                     prepared.manifest_wire_len) &&
-        zpd_push_hex(&reply->data, "recipe_hex", prepared.recipe_wire,
-                     prepared.recipe_wire_len) &&
-        zpd_push_hex(&reply->data, "dependency_lock_hex", prepared.lock_wire,
-                     prepared.lock_wire_len) &&
-        zpd_push_hex(&reply->data, "api_capsule_hex", prepared.capsule_wire,
-                     prepared.capsule_wire_len) &&
-        json_push_kv_str(&reply->data, "name", prepared.release.name) &&
-        json_push_kv_str(&reply->data, "semver", prepared.release.semver) &&
-        json_push_kv_str(&reply->data, "license", prepared.release.license) &&
-        /* The chain this release binds to. It decides whether any peer will
-         * ever accept the carrier, and it used to be invisible here. */
-        json_push_kv_str(&reply->data, "chain_id", prepared.release.chain_id) &&
-        json_push_kv_int(&reply->data, "publisher_sequence", (int64_t)prepared.release.publisher_sequence) &&
-        json_push_kv_int(&reply->data, "file_count",
-                         (int64_t)prepared.manifest.count) &&
-        json_push_kv_int(&reply->data, "dependency_count",
-                         (int64_t)(prepared.lock.count - 1u)) &&
-        json_push_kv_int(&reply->data, "public_header_count",
-                         (int64_t)prepared.capsule.count) &&
-        json_push_kv_bool(&reply->data, "read_only", true) &&
-        json_push_kv_str(&reply->data, "signature_status", "unsigned");
+    bool ok = zpd_prepare_push_wires(reply, &prepared) &&
+        zpd_prepare_push_fields(reply, &prepared);
     vcs_package_prepared_free(&prepared);
     if (!ok)
         zpd_fail(reply, "PACKAGE_PREPARE_OUTPUT",
@@ -312,23 +321,53 @@ void zcl_native_handle_zcode_package_dev_prepare_export(
 #endif
 }
 
+static bool zpd_seal_decode_inputs(const struct zcl_command_request *request,
+    uint8_t *signature, size_t signature_len, uint8_t **body, size_t *body_len)
+{
+    const char *signature_hex = zpd_str(request->input, "signature_hex");
+    return zcl_native_package_artifact_read(request->input, "release_body_hex",
+                        "release_body_file", "release_body_sha3",
+                        VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES -
+                            VCS_PACKAGE_RELEASE_SIGNATURE_BYTES,
+                        body, body_len) &&
+        signature_hex &&
+        zcl_hex_decode_lower(signature_hex, signature, signature_len);
+}
+static enum vcs_package_release_error zpd_seal_release_validate(
+    const uint8_t *wire, size_t wire_len, struct vcs_package_release *release,
+    uint8_t *release_id, uint8_t **canonical, size_t *canonical_len)
+{
+    enum vcs_package_release_error err =
+        vcs_package_release_parse(wire, wire_len, release);
+    if (err == VCS_PACKAGE_RELEASE_OK)
+        err = vcs_package_release_verify(release);
+    if (err == VCS_PACKAGE_RELEASE_OK)
+        err = vcs_package_release_id(release, release_id);
+    if (err == VCS_PACKAGE_RELEASE_OK)
+        err = vcs_package_release_serialize(release, canonical,
+                                            canonical_len);
+    return err;
+}
+static bool zpd_seal_render_reply(struct zcl_command_reply *reply,
+    const uint8_t *wire, size_t wire_len, const uint8_t *release_id)
+{
+    return zpd_push_hex(&reply->data, "release_hex", wire, wire_len) &&
+              zpd_push_hex(&reply->data, "release_id", release_id, 32) &&
+              json_push_kv_str(&reply->data, "schema",
+                               "zcl.zcode_release.v1") &&
+              json_push_kv_str(&reply->data, "signature_status", "verified") &&
+              json_push_kv_bool(&reply->data, "read_only", true);
+}
 void zcl_native_handle_zcode_package_dev_seal(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!request || !reply)
         return;
-    const char *signature_hex = zpd_str(request->input, "signature_hex");
     uint8_t *body = NULL;
     size_t body_len = 0;
     uint8_t signature[VCS_PACKAGE_RELEASE_SIGNATURE_BYTES];
-    if (!zcl_native_package_artifact_read(request->input, "release_body_hex",
-                        "release_body_file", "release_body_sha3",
-                        VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES -
-                            VCS_PACKAGE_RELEASE_SIGNATURE_BYTES,
-                        &body, &body_len) ||
-        !signature_hex ||
-        !zcl_hex_decode_lower(signature_hex, signature,
-                              sizeof(signature))) {
+    if (!zpd_seal_decode_inputs(request, signature, sizeof(signature),
+                               &body, &body_len)) {
         free(body);
         zpd_fail(reply, "BAD_SEAL_INPUT",
                  "exactly one bounded release body hex or file with expected SHA3, and a 128 lowercase hex signature are required");
@@ -345,18 +384,11 @@ void zcl_native_handle_zcode_package_dev_seal(
     memcpy(wire + body_len, signature, sizeof(signature));
     free(body);
     struct vcs_package_release release;
-    enum vcs_package_release_error err =
-        vcs_package_release_parse(wire, wire_len, &release);
-    if (err == VCS_PACKAGE_RELEASE_OK)
-        err = vcs_package_release_verify(&release);
     uint8_t release_id[32];
-    if (err == VCS_PACKAGE_RELEASE_OK)
-        err = vcs_package_release_id(&release, release_id);
     uint8_t *canonical = NULL;
     size_t canonical_len = 0;
-    if (err == VCS_PACKAGE_RELEASE_OK)
-        err = vcs_package_release_serialize(&release, &canonical,
-                                            &canonical_len);
+    enum vcs_package_release_error err = zpd_seal_release_validate(
+        wire, wire_len, &release, release_id, &canonical, &canonical_len);
     if (err != VCS_PACKAGE_RELEASE_OK || canonical_len != wire_len ||
         memcmp(canonical, wire, wire_len) != 0) {
         char message[192];
@@ -366,12 +398,7 @@ void zcl_native_handle_zcode_package_dev_seal(
         zpd_fail(reply, "PACKAGE_SEAL_FAILED", message);
         return;
     }
-    bool ok = zpd_push_hex(&reply->data, "release_hex", wire, wire_len) &&
-              zpd_push_hex(&reply->data, "release_id", release_id, 32) &&
-              json_push_kv_str(&reply->data, "schema",
-                               "zcl.zcode_release.v1") &&
-              json_push_kv_str(&reply->data, "signature_status", "verified") &&
-              json_push_kv_bool(&reply->data, "read_only", true);
+    bool ok = zpd_seal_render_reply(reply, wire, wire_len, release_id);
     free(canonical); free(wire);
     if (!ok)
         zpd_fail(reply, "PACKAGE_SEAL_OUTPUT",
