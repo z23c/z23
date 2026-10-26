@@ -1312,8 +1312,6 @@ engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_call_with_timeout:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_fill_missing_creds:20
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_parse_conf_stream:26
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_parse_result_string_array:20
-engine/modules/sim/src/postmortem_inventory.c:postmortem_capsule_list:20
-engine/modules/sim/src/postmortem_inventory.c:postmortem_capsule_prune:19
 engine/modules/sim/src/seed_tape.c:seed_tape_load_from_memory:24
 engine/modules/sim/src/simnet.c:sim_mint_block:29
 engine/modules/sim/src/simnet_chaos_faults_download.c:chaos_fault_peer_disconnect_mid_body_download:29

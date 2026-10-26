@@ -157,6 +157,48 @@ static void read_manifest_summary_gz(struct postmortem_capsule_entry *entry)
     free(buf);
 }
 
+static int capsule_candidate_from_dirent(const char *dir,
+                                         const struct dirent *de,
+                                         struct postmortem_capsule_entry *out)
+{
+    bool packed = postmortem_has_suffix(de->d_name, ".cap.gz");
+    bool unpacked = postmortem_has_suffix(de->d_name, ".cap");
+    if (!packed && !unpacked) return -1;
+
+    memset(out, 0, sizeof(*out));
+    snprintf(out->name, sizeof(out->name), "%.*s",
+             (int)sizeof(out->name) - 1, de->d_name);
+    snprintf(out->path, sizeof(out->path), "%s/%s", dir, de->d_name);
+    out->crash_unix = parse_capsule_time(de->d_name);
+
+    struct stat st;
+    if (stat(out->path, &st) != 0)
+        return -1;
+    if (unpacked) {
+        if (!S_ISDIR(st.st_mode)) return -1;
+        read_manifest_summary(out);
+    } else {
+        if (!S_ISREG(st.st_mode)) return -1;
+        read_manifest_summary_gz(out);
+    }
+    return 0;
+}
+
+static void insert_keep_newest(struct postmortem_capsule_entry *entries,
+                               size_t entry_cap, size_t *count_out,
+                               const struct postmortem_capsule_entry *entry)
+{
+    if (entry_cap > 0) {
+        if (*count_out < entry_cap) {
+            entries[*count_out] = *entry;
+        } else {
+            int oldest = find_oldest_entry(entries, entry_cap);
+            if (oldest >= 0 && entry_newer(entry, &entries[oldest]))
+                entries[oldest] = *entry;
+        }
+    }
+}
+
 int postmortem_capsule_list(const char *dir,
                             struct postmortem_capsule_entry *entries,
                             size_t entry_cap,
@@ -169,38 +211,11 @@ int postmortem_capsule_list(const char *dir,
 
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
-        bool packed = postmortem_has_suffix(de->d_name, ".cap.gz");
-        bool unpacked = postmortem_has_suffix(de->d_name, ".cap");
-        if (!packed && !unpacked) continue;
-
         struct postmortem_capsule_entry candidate;
-        memset(&candidate, 0, sizeof(candidate));
-        snprintf(candidate.name, sizeof(candidate.name), "%.*s",
-                 (int)sizeof(candidate.name) - 1, de->d_name);
-        snprintf(candidate.path, sizeof(candidate.path), "%s/%s", dir,
-                 de->d_name);
-        candidate.crash_unix = parse_capsule_time(de->d_name);
-
-        struct stat st;
-        if (stat(candidate.path, &st) != 0)
+        if (capsule_candidate_from_dirent(dir, de, &candidate) != 0)
             continue;
-        if (unpacked) {
-            if (!S_ISDIR(st.st_mode)) continue;
-            read_manifest_summary(&candidate);
-        } else {
-            if (!S_ISREG(st.st_mode)) continue;
-            read_manifest_summary_gz(&candidate);
-        }
 
-        if (entry_cap > 0) {
-            if (*count_out < entry_cap) {
-                entries[*count_out] = candidate;
-            } else {
-                int oldest = find_oldest_entry(entries, entry_cap);
-                if (oldest >= 0 && entry_newer(&candidate, &entries[oldest]))
-                    entries[oldest] = candidate;
-            }
-        }
+        insert_keep_newest(entries, entry_cap, count_out, &candidate);
         (*count_out)++;
     }
     closedir(d);
@@ -246,6 +261,44 @@ int postmortem_list(const char *dir,
     return 0;
 }
 
+static bool capsule_entry_past_retention(size_t index,
+                                         size_t keep_latest,
+                                         int64_t max_age_seconds,
+                                         int64_t now_unix,
+                                         int64_t crash_unix)
+{
+    bool over_count = keep_latest > 0 && index >= keep_latest;
+    bool over_age = false;
+    if (max_age_seconds > 0 && now_unix > 0 && crash_unix > 0) {
+        over_age = crash_unix < now_unix &&
+                   now_unix - crash_unix > max_age_seconds;
+    }
+    return over_count || over_age;
+}
+
+static int prune_past_retention(struct postmortem_capsule_entry *entries,
+                                size_t filled,
+                                size_t keep_latest,
+                                int64_t max_age_seconds,
+                                int64_t now_unix,
+                                size_t *pruned_out)
+{
+    int first_err = 0;
+    for (size_t i = 0; i < filled; i++) {
+        if (!capsule_entry_past_retention(i, keep_latest, max_age_seconds,
+                                          now_unix, entries[i].crash_unix))
+            continue;
+
+        int rc = postmortem_remove_tree(entries[i].path);
+        if (rc == 0) {
+            (*pruned_out)++;
+        } else if (first_err == 0) {
+            first_err = rc;
+        }
+    }
+    return first_err;
+}
+
 int postmortem_capsule_prune(const char *dir,
                              int64_t now_unix,
                              int64_t max_age_seconds,
@@ -270,27 +323,10 @@ int postmortem_capsule_prune(const char *dir,
         return rc;
     }
 
-    int first_err = 0;
     size_t filled = listed < total ? listed : total;
-    for (size_t i = 0; i < filled; i++) {
-        bool over_count = keep_latest > 0 && i >= keep_latest;
-        bool over_age = false;
-        if (max_age_seconds > 0 && now_unix > 0 &&
-            entries[i].crash_unix > 0) {
-            over_age = entries[i].crash_unix < now_unix &&
-                       now_unix - entries[i].crash_unix > max_age_seconds;
-        }
-        if (!over_count && !over_age)
-            continue;
-
-        rc = postmortem_remove_tree(entries[i].path);
-        if (rc == 0) {
-            (*pruned_out)++;
-        } else if (first_err == 0) {
-            first_err = rc;
-        }
-    }
-
+    int first_err = prune_past_retention(entries, filled, keep_latest,
+                                         max_age_seconds, now_unix,
+                                         pruned_out);
     free(entries);
     return first_err;
 }
