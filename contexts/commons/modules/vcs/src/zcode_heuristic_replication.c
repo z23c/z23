@@ -184,6 +184,110 @@ static bool hr_seen(const uint8_t roots[][32], size_t count,
     return false;
 }
 
+static bool hr_replication_check_statement(
+    const char *workspace, const uint8_t statement_root[32],
+    const uint8_t heuristic_root[32], const uint8_t anchor_root[32],
+    const uint8_t evaluator[32], const uint8_t original_root[32],
+    struct vcs_zcode_science_statement_v1 *statement)
+{
+    struct vcs_zcode_science_relation_set_v1 relations;
+    if (!hr_statement_load(workspace, statement_root, statement) ||
+        !hr_relations_load(workspace, statement, &relations) ||
+        statement->profile != VCS_ZCODE_SCIENCE_PROFILE_REPLICATION ||
+        statement->relation_count != 1 || relations.row_count != 1 ||
+        relations.rows[0].type != VCS_ZCODE_SCIENCE_RELATION_SUPPORT ||
+        memcmp(relations.rows[0].statement_root, anchor_root, 32) != 0 ||
+        memcmp(statement->subject_root, heuristic_root, 32) != 0 ||
+        memcmp(statement->input_root, original_root, 32) != 0 ||
+        memcmp(statement->signer_pubkey, evaluator, 32) == 0)
+        return false;
+    return true;
+}
+
+static bool hr_replication_load_unseen_evidence(
+    const char *workspace,
+    const struct vcs_zcode_science_statement_v1 *statement,
+    uint8_t signers[][32], uint8_t reproduction_roots[][32],
+    uint8_t result_roots[][32], size_t used,
+    struct vcs_zcode_reproduction_v1 *reproduction,
+    struct vcs_zcode_benchmark_result_v1 *reproduced)
+{
+    if (hr_seen(signers, used, statement->signer_pubkey) ||
+        hr_seen(reproduction_roots, used, statement->predicate_body_root) ||
+        hr_seen(result_roots, used, statement->provenance_root) ||
+        !hr_reproduction_load(workspace, statement->predicate_body_root,
+                              reproduction) ||
+        !hr_result_load(workspace, statement->provenance_root, reproduced))
+        return false;
+    return true;
+}
+
+static bool hr_replication_check_reproduction(
+    const struct vcs_zcode_science_statement_v1 *statement,
+    const struct vcs_zcode_reproduction_v1 *reproduction,
+    const uint8_t study_root[32], const uint8_t original_root[32],
+    const uint8_t expected_comparison_policy_root[32])
+{
+    if (memcmp(reproduction->reproducer_pubkey,
+               statement->signer_pubkey, 32) != 0 ||
+        memcmp(reproduction->study_root, study_root, 32) != 0 ||
+        memcmp(reproduction->original_result_root, original_root, 32) != 0 ||
+        memcmp(reproduction->reproduced_result_root,
+               statement->provenance_root, 32) != 0 ||
+        memcmp(reproduction->comparison_policy_root,
+               statement->activity_root, 32) != 0 ||
+        memcmp(reproduction->comparison_policy_root,
+               expected_comparison_policy_root, 32) != 0 ||
+        reproduction->created_unix != statement->observed_unix)
+        return false;
+    return true;
+}
+
+static bool hr_replication_check_results(
+    const struct vcs_zcode_study_spec_v1 *study,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_build_action_v1 *action,
+    const struct vcs_zcode_benchmark_result_v1 *original,
+    const struct vcs_zcode_benchmark_result_v1 *reproduced,
+    const struct vcs_zcode_reproduction_v1 *reproduction, int64_t now_unix)
+{
+    if (vcs_zcode_benchmark_result_validate_for_study(
+            study, task, candidate, action, reproduced, now_unix) !=
+                VCS_ZCODE_SCIENCE_OK ||
+        vcs_zcode_reproduction_validate_for_results(
+            study, original, reproduced, reproduction, now_unix) !=
+                VCS_ZCODE_SCIENCE_OK)
+        return false;
+    return true;
+}
+
+static bool hr_replication_check_verdict(
+    const struct vcs_zcode_benchmark_result_v1 *reproduced,
+    const struct vcs_zcode_reproduction_v1 *reproduction)
+{
+    if ((reproduced->status == VCS_ZCODE_BENCHMARK_NEGATIVE_RESULT &&
+         reproduction->verdict != VCS_ZCODE_REPRODUCTION_CONTRADICTED) ||
+        ((reproduced->status == VCS_ZCODE_BENCHMARK_NULL_RESULT ||
+          reproduced->status == VCS_ZCODE_BENCHMARK_EXECUTION_FAILED) &&
+         reproduction->verdict != VCS_ZCODE_REPRODUCTION_INCONCLUSIVE))
+        return false;
+    return true;
+}
+
+static bool hr_replication_record_row(
+    const struct vcs_zcode_science_statement_v1 *statement,
+    const struct vcs_zcode_reproduction_v1 *reproduction,
+    uint8_t signers[][32], uint8_t reproduction_roots[][32],
+    uint8_t result_roots[][32], size_t used, uint8_t *verdict)
+{
+    memcpy(signers[used], statement->signer_pubkey, 32);
+    memcpy(reproduction_roots[used], statement->predicate_body_root, 32);
+    memcpy(result_roots[used], statement->provenance_root, 32);
+    *verdict = reproduction->verdict;
+    return true;
+}
+
 static bool hr_replication_row(
     const char *workspace, const uint8_t statement_root[32],
     const uint8_t heuristic_root[32], const uint8_t anchor_root[32],
@@ -200,59 +304,31 @@ static bool hr_replication_row(
     uint8_t *verdict)
 {
     struct vcs_zcode_science_statement_v1 statement;
-    struct vcs_zcode_science_relation_set_v1 relations;
     struct vcs_zcode_reproduction_v1 reproduction;
     struct vcs_zcode_benchmark_result_v1 reproduced;
-    if (!hr_statement_load(workspace, statement_root, &statement) ||
-        !hr_relations_load(workspace, &statement, &relations) ||
-        statement.profile != VCS_ZCODE_SCIENCE_PROFILE_REPLICATION ||
-        statement.relation_count != 1 || relations.row_count != 1 ||
-        relations.rows[0].type != VCS_ZCODE_SCIENCE_RELATION_SUPPORT ||
-        memcmp(relations.rows[0].statement_root, anchor_root, 32) != 0 ||
-        memcmp(statement.subject_root, heuristic_root, 32) != 0 ||
-        memcmp(statement.input_root, original_root, 32) != 0 ||
-        memcmp(statement.signer_pubkey, evaluator, 32) == 0 ||
-        hr_seen(signers, used, statement.signer_pubkey) ||
-        hr_seen(reproduction_roots, used, statement.predicate_body_root) ||
-        hr_seen(result_roots, used, statement.provenance_root) ||
-        !hr_reproduction_load(workspace, statement.predicate_body_root,
-                              &reproduction) ||
-        !hr_result_load(workspace, statement.provenance_root, &reproduced) ||
-        memcmp(reproduction.reproducer_pubkey,
-               statement.signer_pubkey, 32) != 0 ||
-        memcmp(reproduction.study_root, study_root, 32) != 0 ||
-        memcmp(reproduction.original_result_root, original_root, 32) != 0 ||
-        memcmp(reproduction.reproduced_result_root,
-               statement.provenance_root, 32) != 0 ||
-        memcmp(reproduction.comparison_policy_root,
-               statement.activity_root, 32) != 0 ||
-        memcmp(reproduction.comparison_policy_root,
-               expected_comparison_policy_root, 32) != 0 ||
-        reproduction.created_unix != statement.observed_unix ||
-        vcs_zcode_benchmark_result_validate_for_study(
-            study, task, candidate, action, &reproduced, now_unix) !=
-                VCS_ZCODE_SCIENCE_OK ||
-        vcs_zcode_reproduction_validate_for_results(
-            study, original, &reproduced, &reproduction, now_unix) !=
-                VCS_ZCODE_SCIENCE_OK ||
-        (reproduced.status == VCS_ZCODE_BENCHMARK_NEGATIVE_RESULT &&
-         reproduction.verdict != VCS_ZCODE_REPRODUCTION_CONTRADICTED) ||
-        ((reproduced.status == VCS_ZCODE_BENCHMARK_NULL_RESULT ||
-          reproduced.status == VCS_ZCODE_BENCHMARK_EXECUTION_FAILED) &&
-         reproduction.verdict != VCS_ZCODE_REPRODUCTION_INCONCLUSIVE))
-        return false;
-    memcpy(signers[used], statement.signer_pubkey, 32);
-    memcpy(reproduction_roots[used], statement.predicate_body_root, 32);
-    memcpy(result_roots[used], statement.provenance_root, 32);
-    *verdict = reproduction.verdict;
-    return true;
+    return hr_replication_check_statement(
+            workspace, statement_root, heuristic_root, anchor_root,
+            evaluator, original_root, &statement) &&
+        hr_replication_load_unseen_evidence(
+            workspace, &statement, signers, reproduction_roots,
+            result_roots, used, &reproduction, &reproduced) &&
+        hr_replication_check_reproduction(
+            &statement, &reproduction, study_root, original_root,
+            expected_comparison_policy_root) &&
+        hr_replication_check_results(
+            study, task, candidate, action, original, &reproduced,
+            &reproduction, now_unix) &&
+        hr_replication_check_verdict(&reproduced, &reproduction) &&
+        hr_replication_record_row(
+            &statement, &reproduction, signers, reproduction_roots,
+            result_roots, used, verdict);
 }
 
-enum vcs_zcode_attention_error vcs_zcode_heuristic_replication_fold(
+static enum vcs_zcode_attention_error hr_replication_check_inputs(
     const char *workspace, const struct vcs_zcode_heuristic_v1 *heuristic,
     const struct vcs_build_action_v1 *action,
     const struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
-    int64_t now_unix, struct vcs_zcode_heuristic_replication_report *report)
+    struct vcs_zcode_heuristic_replication_report *report)
 {
     if (!workspace || !heuristic || !action || !snapshot || !report)
         return VCS_ZCODE_ATTENTION_NULL;
@@ -262,7 +338,88 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_replication_fold(
         hr_overlaps(report, sizeof(*report), action, sizeof(*action)) ||
         hr_overlaps(report, sizeof(*report), snapshot, sizeof(*snapshot)))
         return VCS_ZCODE_ATTENTION_ALIAS;
-    enum vcs_zcode_attention_error error = hr_snapshot_validate(snapshot);
+    return hr_snapshot_validate(snapshot);
+}
+
+static enum vcs_zcode_attention_error hr_replication_load_anchor(
+    const char *workspace,
+    const struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    const uint8_t heuristic_root[32],
+    struct vcs_zcode_science_statement_v1 *anchor)
+{
+    struct vcs_zcode_science_relation_set_v1 anchor_relations;
+    if (!hr_statement_load(workspace, snapshot->anchor_statement_root,
+                           anchor) ||
+        memcmp(anchor->signer_pubkey,
+               snapshot->expected_evaluator_signer, 32) != 0 ||
+        anchor->profile != VCS_ZCODE_SCIENCE_PROFILE_RESULT ||
+        memcmp(anchor->subject_root, heuristic_root, 32) != 0 ||
+        !hr_relations_load(workspace, anchor, &anchor_relations) ||
+        anchor_relations.row_count != 0)
+        return VCS_ZCODE_ATTENTION_EVIDENCE;
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static enum vcs_zcode_attention_error hr_replication_load_original_evidence(
+    const char *workspace, const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_science_statement_v1 *anchor,
+    const struct vcs_build_action_v1 *action, int64_t now_unix,
+    struct vcs_zcode_study_spec_v1 *study, struct vcs_zcode_task_v1 *task,
+    struct vcs_zcode_candidate_v1 *candidate,
+    struct vcs_zcode_benchmark_result_v1 *original)
+{
+    if (!hr_study_load(workspace, heuristic->study_root, study) ||
+        !hr_task_load(workspace, heuristic->task_root, task) ||
+        !hr_result_load(workspace, anchor->provenance_root, original) ||
+        !hr_candidate_load(workspace, original->candidate_root, candidate) ||
+        !hr_base_bindings(heuristic, study, task, original,
+                          heuristic->study_root, heuristic->task_root) ||
+        vcs_zcode_benchmark_result_validate_for_study(
+            study, task, candidate, action, original, now_unix) !=
+                VCS_ZCODE_SCIENCE_OK ||
+        original->status != VCS_ZCODE_BENCHMARK_OBSERVED)
+        return VCS_ZCODE_ATTENTION_EVIDENCE;
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static enum vcs_zcode_attention_error hr_replication_count_verdict(
+    struct vcs_zcode_heuristic_replication_report *result, uint8_t verdict)
+{
+    result->validated_count++;
+    if (verdict == VCS_ZCODE_REPRODUCTION_REPLICATED)
+        result->replicated_count++;
+    else if (verdict == VCS_ZCODE_REPRODUCTION_CONTRADICTED)
+        result->contradicted_count++;
+    else if (verdict == VCS_ZCODE_REPRODUCTION_INCONCLUSIVE)
+        result->inconclusive_count++;
+    else
+        return VCS_ZCODE_ATTENTION_EVIDENCE;
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static void hr_replication_set_reason(
+    struct vcs_zcode_heuristic_replication_report *result)
+{
+    if (result->contradicted_count != 0)
+        result->reason = VCS_ZCODE_HEURISTIC_REPLICATION_REASON_CONTRADICTED;
+    else if (result->replicated_count >= result->required_reproductions) {
+        result->qualified = true;
+        result->reason = VCS_ZCODE_HEURISTIC_REPLICATION_REASON_NONE;
+    } else if (result->inconclusive_count != 0)
+        result->reason = VCS_ZCODE_HEURISTIC_REPLICATION_REASON_INCONCLUSIVE;
+    else
+        result->reason =
+            VCS_ZCODE_HEURISTIC_REPLICATION_REASON_BELOW_THRESHOLD;
+}
+
+enum vcs_zcode_attention_error vcs_zcode_heuristic_replication_fold(
+    const char *workspace, const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_build_action_v1 *action,
+    const struct vcs_zcode_heuristic_replication_snapshot_v1 *snapshot,
+    int64_t now_unix, struct vcs_zcode_heuristic_replication_report *report)
+{
+    enum vcs_zcode_attention_error error = hr_replication_check_inputs(
+        workspace, heuristic, action, snapshot, report);
     if (error != VCS_ZCODE_ATTENTION_OK) return error;
     if (now_unix <= 0 ||
         vcs_zcode_heuristic_validate(heuristic) != VCS_ZCODE_ATTENTION_OK)
@@ -275,30 +432,17 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_replication_fold(
         return VCS_ZCODE_ATTENTION_BINDING;
 
     struct vcs_zcode_science_statement_v1 anchor;
-    struct vcs_zcode_science_relation_set_v1 anchor_relations;
     struct vcs_zcode_study_spec_v1 study;
     struct vcs_zcode_task_v1 task;
     struct vcs_zcode_candidate_v1 candidate;
     struct vcs_zcode_benchmark_result_v1 original;
-    if (!hr_statement_load(workspace, snapshot->anchor_statement_root,
-                           &anchor) ||
-        memcmp(anchor.signer_pubkey,
-               snapshot->expected_evaluator_signer, 32) != 0 ||
-        anchor.profile != VCS_ZCODE_SCIENCE_PROFILE_RESULT ||
-        memcmp(anchor.subject_root, heuristic_root, 32) != 0 ||
-        !hr_relations_load(workspace, &anchor, &anchor_relations) ||
-        anchor_relations.row_count != 0 ||
-        !hr_study_load(workspace, heuristic->study_root, &study) ||
-        !hr_task_load(workspace, heuristic->task_root, &task) ||
-        !hr_result_load(workspace, anchor.provenance_root, &original) ||
-        !hr_candidate_load(workspace, original.candidate_root, &candidate) ||
-        !hr_base_bindings(heuristic, &study, &task, &original,
-                          heuristic->study_root, heuristic->task_root) ||
-        vcs_zcode_benchmark_result_validate_for_study(
-            &study, &task, &candidate, action, &original, now_unix) !=
-                VCS_ZCODE_SCIENCE_OK ||
-        original.status != VCS_ZCODE_BENCHMARK_OBSERVED)
-        return VCS_ZCODE_ATTENTION_EVIDENCE;
+    error = hr_replication_load_anchor(workspace, snapshot, heuristic_root,
+                                       &anchor);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    error = hr_replication_load_original_evidence(
+        workspace, heuristic, &anchor, action, now_unix, &study, &task,
+        &candidate, &original);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
 
     struct vcs_zcode_heuristic_replication_report result = {0};
     result.complete = true;
@@ -322,26 +466,10 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_replication_fold(
                 &study, &task, &candidate, action, &original, now_unix,
                 signers, reproduction_roots, result_roots, i, &verdict))
             return VCS_ZCODE_ATTENTION_EVIDENCE;
-        result.validated_count++;
-        if (verdict == VCS_ZCODE_REPRODUCTION_REPLICATED)
-            result.replicated_count++;
-        else if (verdict == VCS_ZCODE_REPRODUCTION_CONTRADICTED)
-            result.contradicted_count++;
-        else if (verdict == VCS_ZCODE_REPRODUCTION_INCONCLUSIVE)
-            result.inconclusive_count++;
-        else
-            return VCS_ZCODE_ATTENTION_EVIDENCE;
+        error = hr_replication_count_verdict(&result, verdict);
+        if (error != VCS_ZCODE_ATTENTION_OK) return error;
     }
-    if (result.contradicted_count != 0)
-        result.reason = VCS_ZCODE_HEURISTIC_REPLICATION_REASON_CONTRADICTED;
-    else if (result.replicated_count >= result.required_reproductions) {
-        result.qualified = true;
-        result.reason = VCS_ZCODE_HEURISTIC_REPLICATION_REASON_NONE;
-    } else if (result.inconclusive_count != 0)
-        result.reason = VCS_ZCODE_HEURISTIC_REPLICATION_REASON_INCONCLUSIVE;
-    else
-        result.reason =
-            VCS_ZCODE_HEURISTIC_REPLICATION_REASON_BELOW_THRESHOLD;
+    hr_replication_set_reason(&result);
     *report = result;
     return VCS_ZCODE_ATTENTION_OK;
 }
