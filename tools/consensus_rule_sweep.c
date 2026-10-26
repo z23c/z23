@@ -93,7 +93,6 @@ static bool parse_i32(const char *s, int32_t *out)
     return true;
 }
 
-/* One CLI argument applied to cfg/verbose; main owns all printing. */
 enum crs_arg_result {
     CRS_ARG_OK,
     CRS_ARG_HELP,
