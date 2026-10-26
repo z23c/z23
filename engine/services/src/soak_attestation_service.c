@@ -159,12 +159,32 @@ static bool soak_prepare_file(void)
 
 /* ── Tick body ──────────────────────────────────────────────────── */
 
-void soak_attestation_tick(void)
+/* Everything one tick records, gathered outside g_soak.lock. */
+struct soak_tick_sample {
+    struct node_health_snapshot snap;
+    struct agent_security_posture security;
+    int64_t ts_now;
+    bool    security_ok;
+    bool    healthy;
+    bool    window_eligible;
+};
+
+/* Outcome of the locked pre-flight step at the top of the tick. */
+enum soak_tick_prepared {
+    SOAK_TICK_SKIP,   /* not initialized: silent no-op */
+    SOAK_TICK_FAILED, /* prepare failed: failure already counted under lock */
+    SOAK_TICK_READY,  /* lock released; the tick may record its line */
+};
+
+/* Pre-flight under g_soak.lock: skip when uninitialized, count the failure
+ * under the lock when the file cannot be prepared, else release the lock
+ * and report ready. Every non-READY outcome is an early return upstream. */
+static enum soak_tick_prepared soak_tick_preflight(void)
 {
     pthread_mutex_lock(&g_soak.lock);
     if (!g_soak.initialized) {
         pthread_mutex_unlock(&g_soak.lock);
-        return;
+        return SOAK_TICK_SKIP;
     }
     if (!soak_prepare_file()) {
         /* Failed rotation must leave a gap, not grow the old evidence file
@@ -173,69 +193,126 @@ void soak_attestation_tick(void)
         atomic_fetch_add(&g_soak.write_failures, 1);
         g_soak.failure_streak++;
         pthread_mutex_unlock(&g_soak.lock);
-        return;
+        return SOAK_TICK_FAILED;
     }
 
     pthread_mutex_unlock(&g_soak.lock);
+    return SOAK_TICK_READY;
+}
 
-    /* Health snapshot — safe to call outside the lock (node_health_collect is
-     * reentrant; g_soak.lock must not be held here because the health path
-     * itself may take csr->lock THEN coins_kv, and g_soak.lock is unrelated). */
-    struct node_health_snapshot snap = {0};
-    struct agent_security_posture security_posture;
-    node_health_collect(&snap, NULL, NULL);
-    agent_security_posture_collect(&security_posture, NULL);
+/* Health snapshot — safe to call outside the lock (node_health_collect is
+ * reentrant; g_soak.lock must not be held here because the health path
+ * itself may take csr->lock THEN coins_kv, and g_soak.lock is unrelated). */
+static void soak_collect_tick_sample(struct soak_tick_sample *s)
+{
+    s->snap = (struct node_health_snapshot){0};
+    node_health_collect(&s->snap, NULL, NULL);
+    agent_security_posture_collect(&s->security, NULL);
 
-    int64_t ts_now  = (int64_t)platform_time_wall_time_t();
-    bool security_ok =
-        agent_security_posture_allows_public_serving(&security_posture);
-    bool healthy = snap.healthy && security_ok;
-    bool window_eligible = healthy && security_ok;
-    int     height  = snap.tip_height;
-    int64_t uptime  = snap.uptime_seconds;
+    s->ts_now      = (int64_t)platform_time_wall_time_t();
+    s->security_ok =
+        agent_security_posture_allows_public_serving(&s->security);
+    s->healthy         = s->snap.healthy && s->security_ok;
+    s->window_eligible = s->healthy && s->security_ok;
+}
 
-    /* Escape the degraded_reason into a JSON-safe buffer.
-     * degrade_reason is already a C string (at most 128 chars); the only
-     * JSON-special chars that appear are '"' and '\' which we replace with a
-     * safe '?'.  (This is minimal — not full JSON string escaping — but
-     * sufficient for the ASCII-only reason strings this code produces.) */
-    char reason_esc[160] = {0};
-    {
-        const char *src = snap.degraded_reason;
-        size_t out_pos = 0;
-        for (; *src && out_pos < sizeof(reason_esc) - 1; src++) {
-            unsigned char c = (unsigned char)*src;
-            if (c == '"' || c == '\\' || c < 0x20) {
-                reason_esc[out_pos++] = '?';
-            } else {
-                reason_esc[out_pos++] = (char)c;
-            }
+/* Escape the degraded_reason into a JSON-safe buffer.
+ * degrade_reason is already a C string (at most 128 chars); the only
+ * JSON-special chars that appear are '"' and '\' which we replace with a
+ * safe '?'.  (This is minimal — not full JSON string escaping — but
+ * sufficient for the ASCII-only reason strings this code produces.) */
+static void soak_escape_degraded_reason(const char *src, char *out,
+                                        size_t out_sz)
+{
+    size_t out_pos = 0;
+    for (; *src && out_pos < out_sz - 1; src++) {
+        unsigned char c = (unsigned char)*src;
+        if (c == '"' || c == '\\' || c < 0x20) {
+            out[out_pos++] = '?';
+        } else {
+            out[out_pos++] = (char)c;
         }
-        reason_esc[out_pos] = '\0';
     }
+    out[out_pos] = '\0';
+}
 
-    const char *source_id = zcl_build_source_id_sha256();
-    const char *commit = zcl_build_commit();
-
-    /* Format the JSON line.  Keep it compact (one line, no trailing space). */
-    char line[640];
-    int line_len = snprintf(line, sizeof(line),
+/* Format the JSON line.  Keep it compact (one line, no trailing space). */
+/*
+ * Returns snprintf's own result so the caller can detect failure/truncation. */
+static int soak_format_attestation_line(char *line, size_t line_sz,
+                                        const struct soak_tick_sample *s,
+                                        const char *reason,
+                                        const char *source_id,
+                                        const char *commit)
+{
+    return snprintf(line, line_sz,
         "{\"ts\":%lld,\"height\":%d,\"healthy\":%s,"
         "\"degraded_reason\":\"%s\","
         "\"security_review_required\":%s,"
         "\"security_posture_ok\":%s,\"window_eligible\":%s,"
         "\"source_id_sha256\":\"%s\",\"build_commit\":\"%s\","
         "\"uptime_s\":%lld}\n",
-        (long long)ts_now,
-        height,
-        healthy ? "true" : "false",
-        security_ok ? reason_esc : security_posture.status,
-        security_posture.review_required ? "true" : "false",
-        security_ok ? "true" : "false",
-        window_eligible ? "true" : "false",
+        (long long)s->ts_now,
+        s->snap.tip_height,
+        s->healthy ? "true" : "false",
+        s->security_ok ? reason : s->security.status,
+        s->security.review_required ? "true" : "false",
+        s->security_ok ? "true" : "false",
+        s->window_eligible ? "true" : "false",
         source_id ? source_id : "unknown",
         commit ? commit : "unknown",
-        (long long)uptime);
+        (long long)s->snap.uptime_seconds);
+}
+
+/* Called with g_soak.lock held when a line could not be written: bump the
+ * failure-streak latch and the write_failures counter. */
+static void soak_record_write_failure_locked(void)
+{
+    g_soak.failure_streak++;
+    atomic_fetch_add(&g_soak.write_failures, 1);
+}
+
+/* Called with g_soak.lock held after a successful append: clear the streak,
+ * advance the offsets and counters, keep the fsync cadence. */
+static void soak_record_line_written_locked(int line_len,
+                                            const struct soak_tick_sample *s)
+{
+    g_soak.failure_streak = 0;   /* streak cleared */
+    g_soak.file_bytes += line_len;
+    g_soak.lines_since_fsync++;
+    int64_t total = atomic_fetch_add(&g_soak.lines_written, 1) + 1;
+    atomic_store(&g_soak.last_ts, s->ts_now);
+    atomic_store(&g_soak.last_healthy, s->healthy);
+    atomic_store(&g_soak.last_window_eligible, s->window_eligible);
+    atomic_store(&g_soak.last_security_review_required,
+                 s->security.review_required);
+
+    /* fsync every N lines to bound data-loss window. */
+    if (g_soak.lines_since_fsync >= SOAK_ATTESTATION_FSYNC_EVERY) {
+        (void)platform_private_file_flush(&g_soak.file);
+        g_soak.lines_since_fsync = 0;
+    }
+    (void)total; /* used above only for readable counter update */
+}
+
+void soak_attestation_tick(void)
+{
+    if (soak_tick_preflight() != SOAK_TICK_READY)
+        return;
+
+    struct soak_tick_sample sample;
+    soak_collect_tick_sample(&sample);
+
+    char reason_esc[160] = {0};
+    soak_escape_degraded_reason(sample.snap.degraded_reason, reason_esc,
+                                sizeof(reason_esc));
+
+    const char *source_id = zcl_build_source_id_sha256();
+    const char *commit = zcl_build_commit();
+
+    char line[640];
+    int line_len = soak_format_attestation_line(line, sizeof(line), &sample,
+                                                reason_esc, source_id, commit);
 
     if (line_len <= 0 || (size_t)line_len >= sizeof(line)) {
         /* Oversized or snprintf error — should never happen with fixed fields. */
@@ -254,32 +331,15 @@ void soak_attestation_tick(void)
                 LOG_WARN("soak_attest",
                          "write to soak_attestation.jsonl failed");
             }
-            g_soak.failure_streak++;
-            atomic_fetch_add(&g_soak.write_failures, 1);
+            soak_record_write_failure_locked();
         } else {
-            g_soak.failure_streak = 0;   /* streak cleared */
-            g_soak.file_bytes += line_len;
-            g_soak.lines_since_fsync++;
-            int64_t total = atomic_fetch_add(&g_soak.lines_written, 1) + 1;
-            atomic_store(&g_soak.last_ts, ts_now);
-            atomic_store(&g_soak.last_healthy, healthy);
-            atomic_store(&g_soak.last_window_eligible, window_eligible);
-            atomic_store(&g_soak.last_security_review_required,
-                         security_posture.review_required);
-
-            /* fsync every N lines to bound data-loss window. */
-            if (g_soak.lines_since_fsync >= SOAK_ATTESTATION_FSYNC_EVERY) {
-                (void)platform_private_file_flush(&g_soak.file);
-                g_soak.lines_since_fsync = 0;
-            }
-            (void)total; /* used above only for readable counter update */
+            soak_record_line_written_locked(line_len, &sample);
         }
     } else if (line_len > 0 && !g_soak.file_open) {
         /* fd open failed on this tick cycle (e.g. datadir not yet mounted). */
         if (g_soak.failure_streak == 0)
             LOG_WARN("soak_attest", "fd not open; skipping line write");
-        g_soak.failure_streak++;
-        atomic_fetch_add(&g_soak.write_failures, 1);
+        soak_record_write_failure_locked();
     }
     pthread_mutex_unlock(&g_soak.lock);
 }
