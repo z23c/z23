@@ -53,8 +53,6 @@ static bool dbm_exec(void *self, const char *sql, char *err, size_t errsz)
     return true;
 }
 
-/* Reset a WAL-checkpoint outcome to the "nothing ran" sentinels, so the
- * caller never reads a previous call's numbers on an early return. */
 static void dbm_reset_wal_outcome(struct db_maintenance_wal_outcome *out)
 {
     out->log_frames = -1;
@@ -89,7 +87,6 @@ static int dbm_run_wal_checkpoints(sqlite3 *db, int *log_frames, int *ckpt_frame
     return truncate_hard_failure ? *truncate_rc : *passive_rc;
 }
 
-/* Record the run's numbers into the caller's outcome struct. */
 static void dbm_fill_wal_outcome(struct db_maintenance_wal_outcome *out,
                                  int log_frames, int ckpt_frames,
                                  int effective_rc, int truncate_rc,
