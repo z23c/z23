@@ -331,41 +331,54 @@ static void fuzz_dispatch_payload(const char *command,
         (void)msg_process_messages(&g_mp, g_node);
 }
 
+/* Minimum inbound payload lengths per command, in the original
+ * dispatch-check order. Commands absent here fall through to 0. */
+static const struct min_dispatch_len {
+    const char *command;
+    size_t min_len;
+} g_min_dispatch_len[] = {
+    { "version", 80 },
+    { "ping", 8 },
+    { "pong", 8 },
+    { "getblocks", 33 },
+    { "getheaders", 33 },
+    { "block", 80 },
+    { "tx", 8 },
+    { "feefilter", 8 },
+    { "sendcmpct", 9 },
+    { "cmpctblock", 90 },
+    { "getblocktxn", 33 },
+    { "blocktxn", 33 },
+    { "zfileaddr", 2 },
+    { "zmsg", 44 },
+    { "zmsgack", 32 },
+    { "zfilelist", 1 },
+    { "zfilechal", 36 },
+    { "zfileproof", 68 },
+    { "zfilepay", 72 },
+    { "zgame", 2 },
+    { MSG_SNAPSHOT_OFFER, 116 },
+    { MSG_SNAPSHOT_REQ, 4 },
+    { MSG_FC_CHALLENGE, 72 },
+    { MSG_FC_PROOFS, 4 },
+    { MSG_MANIFEST, 84 },
+    { MSG_CHUNK_REQ, 4 },
+    { MSG_CHUNK_DATA, 8 },
+    { MSG_BLOCK_MANIFEST, 76 },
+    { MSG_BLOCK_REQ, 4 },
+    { MSG_BLOCK_DATA, 8 },
+    { MSG_BLOCK_BITMAP, 4 },
+};
+
 static size_t fuzz_min_dispatch_payload(const char *command)
 {
     if (!command)
         return SIZE_MAX;
-    if (strcmp(command, "version") == 0) return 80;
-    if (strcmp(command, "ping") == 0) return 8;
-    if (strcmp(command, "pong") == 0) return 8;
-    if (strcmp(command, "getblocks") == 0) return 33;
-    if (strcmp(command, "getheaders") == 0) return 33;
-    if (strcmp(command, "block") == 0) return 80;
-    if (strcmp(command, "tx") == 0) return 8;
-    if (strcmp(command, "feefilter") == 0) return 8;
-    if (strcmp(command, "sendcmpct") == 0) return 9;
-    if (strcmp(command, "cmpctblock") == 0) return 90;
-    if (strcmp(command, "getblocktxn") == 0) return 33;
-    if (strcmp(command, "blocktxn") == 0) return 33;
-    if (strcmp(command, "zfileaddr") == 0) return 2;
-    if (strcmp(command, "zmsg") == 0) return 44;
-    if (strcmp(command, "zmsgack") == 0) return 32;
-    if (strcmp(command, "zfilelist") == 0) return 1;
-    if (strcmp(command, "zfilechal") == 0) return 36;
-    if (strcmp(command, "zfileproof") == 0) return 68;
-    if (strcmp(command, "zfilepay") == 0) return 72;
-    if (strcmp(command, "zgame") == 0) return 2;
-    if (strcmp(command, MSG_SNAPSHOT_OFFER) == 0) return 116;
-    if (strcmp(command, MSG_SNAPSHOT_REQ) == 0) return 4;
-    if (strcmp(command, MSG_FC_CHALLENGE) == 0) return 72;
-    if (strcmp(command, MSG_FC_PROOFS) == 0) return 4;
-    if (strcmp(command, MSG_MANIFEST) == 0) return 84;
-    if (strcmp(command, MSG_CHUNK_REQ) == 0) return 4;
-    if (strcmp(command, MSG_CHUNK_DATA) == 0) return 8;
-    if (strcmp(command, MSG_BLOCK_MANIFEST) == 0) return 76;
-    if (strcmp(command, MSG_BLOCK_REQ) == 0) return 4;
-    if (strcmp(command, MSG_BLOCK_DATA) == 0) return 8;
-    if (strcmp(command, MSG_BLOCK_BITMAP) == 0) return 4;
+    const size_t entry_count =
+        sizeof(g_min_dispatch_len) / sizeof(g_min_dispatch_len[0]);
+    for (size_t i = 0; i < entry_count; i++)
+        if (strcmp(command, g_min_dispatch_len[i].command) == 0)
+            return g_min_dispatch_len[i].min_len;
     return 0;
 }
 
