@@ -575,18 +575,10 @@ static bool lane_advance_inputs_valid(
         target_lane <= VCS_ZCODE_LANE_PROVEN;
 }
 
-static struct zcl_result lane_advance_idempotent_replay(
-    const char *workspace, const struct db_zcode_lane_receipt *prior,
-    bool have_prior, int target_lane, const struct db_build_action *action,
-    const struct vcs_zcode_task_v1 *task,
-    const struct vcs_zcode_candidate_v1 *candidate,
-    const struct vcs_zcode_proof_policy_v1 *policy,
-    const uint8_t signer_pubkey[32],
-    const struct zcode_lane_view_result_v1 *target_view,
-    uint32_t view_generation, struct zcode_lane_status *out, bool *replayed)
+static struct zcl_result lane_advance_replay_context(
+    int target_lane, const struct db_zcode_lane_receipt *prior,
+    const struct db_build_action *action)
 {
-    if (!have_prior || prior->lane < target_lane)
-        return ZCL_OK;
     if (prior->lane > target_lane)
         return ZCL_ERR(-1, "lane-downgrade-refused");
     if (strcmp(prior->task_root_sha3, action->task_root_sha3) != 0 ||
@@ -595,10 +587,6 @@ static struct zcl_result lane_advance_idempotent_replay(
         strcmp(prior->proof_policy_root_sha3,
                action->proof_policy_root_sha3) != 0)
         return ZCL_ERR(-1, "lane-idempotency-context-mismatch");
-    ZCL_CHECK(lane_prior_validate(
-        workspace, prior, task, candidate, policy, signer_pubkey));
-    lane_status_from_row(prior, target_view, view_generation, out);
-    *replayed = true;
     return ZCL_OK;
 }
 
@@ -774,13 +762,16 @@ struct zcl_result zcode_lane_advance(
     zcl_hex_encode(candidate.candidate_source_root, 32, source_hex);
     struct db_zcode_lane_receipt prior;
     bool have_prior = db_zcode_lane_latest(ndb, source_hex, &prior);
-    bool replayed = false;
-    ZCL_CHECK(lane_advance_idempotent_replay(
-        workspace, &prior, have_prior, target_lane, &action, &task,
-        &candidate, &policy, signer_pubkey, &target_view, view_generation,
-        out, &replayed));
-    if (replayed)
+    if (have_prior && prior.lane >= target_lane) {
+        struct zcl_result replay_context =
+            lane_advance_replay_context(target_lane, &prior, &action);
+        if (!replay_context.ok)
+            return replay_context;
+        ZCL_CHECK(lane_prior_validate(
+            workspace, &prior, &task, &candidate, &policy, signer_pubkey));
+        lane_status_from_row(&prior, &target_view, view_generation, out);
         return ZCL_OK;
+    }
     ZCL_CHECK(lane_advance_transition_gate(
         workspace, &prior, have_prior, target_lane, now, &task, &candidate,
         &policy, signer_pubkey));
@@ -803,7 +794,10 @@ struct zcl_result zcode_lane_advance(
     ZCL_CHECK(lane_receipt_seal_or_refuse(
         &receipt, signer_secret, signer_pubkey, &task, &candidate, &policy));
     char root_hex[65];
-    ZCL_CHECK(lane_receipt_store_cas(workspace, &receipt, root_hex));
+    struct zcl_result cas = lane_receipt_store_cas(workspace, &receipt,
+                                                   root_hex);
+    if (!cas.ok)
+        return cas;
     struct db_zcode_lane_receipt row = { .lane = target_lane,
                                         .created_at = now };
     lane_advance_row_fill(target_lane, &action, &evaluation, &prior,
