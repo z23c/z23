@@ -257,105 +257,163 @@ static void *delivery_handshake_call_main(void *opaque)
     return NULL;
 }
 
+struct delivery_handshake_capture {
+    int initiator_pair[2];
+    int responder_pair[2];
+    int attacker_pair[2];
+    pthread_t initiator_thread, responder_thread;
+    bool initiator_started, responder_started;
+    struct delivery_handshake_call initiator, responder;
+    uint8_t initiator_wire[64], responder_wire[64];
+    uint8_t paid_sha3[32], captured_derivation[32];
+    uint8_t *opened, *attacker_opened;
+    uint32_t opened_size, attacker_size;
+};
+
+static bool delivery_handshake_capture_relay(
+    struct delivery_handshake_capture *cap)
+{
+    bool relayed = false;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, cap->initiator_pair) != 0 ||
+        socketpair(AF_UNIX, SOCK_STREAM, 0, cap->responder_pair) != 0)
+        return false;
+    fs_session_init(&cap->initiator.session, cap->initiator_pair[0]);
+    fs_session_init(&cap->responder.session, cap->responder_pair[0]);
+    cap->responder_started = pthread_create(&cap->responder_thread, NULL,
+                                            delivery_handshake_call_main,
+                                            &cap->responder) == 0;
+    cap->initiator_started = cap->responder_started &&
+        pthread_create(&cap->initiator_thread, NULL,
+                       delivery_handshake_call_main, &cap->initiator) == 0;
+    if (!cap->initiator_started)
+        return false;
+
+    relayed = delivery_recv_exact(cap->initiator_pair[1],
+                                  cap->initiator_wire, 32) &&
+        delivery_send_exact(cap->responder_pair[1],
+                            cap->initiator_wire, 32) &&
+        delivery_recv_exact(cap->responder_pair[1],
+                            cap->responder_wire, 32) &&
+        delivery_send_exact(cap->initiator_pair[1],
+                            cap->responder_wire, 32) &&
+        delivery_recv_exact(cap->initiator_pair[1],
+                            cap->initiator_wire + 32, 32) &&
+        delivery_send_exact(cap->responder_pair[1],
+                            cap->initiator_wire + 32, 32) &&
+        delivery_recv_exact(cap->responder_pair[1],
+                            cap->responder_wire + 32, 32) &&
+        delivery_send_exact(cap->initiator_pair[1],
+                            cap->responder_wire + 32, 32);
+    return relayed;
+}
+
+static bool delivery_handshake_capture_join_and_check(
+    struct delivery_handshake_capture *cap)
+{
+    pthread_join(cap->initiator_thread, NULL);
+    pthread_join(cap->responder_thread, NULL);
+    cap->initiator_started = cap->responder_started = false;
+    if (!cap->initiator.ok || !cap->responder.ok ||
+        memcmp(cap->initiator.session.key, cap->responder.session.key,
+               32) != 0)
+        return false;
+    return true;
+}
+
+static bool delivery_handshake_capture_send_paid(
+    struct delivery_handshake_capture *cap, const uint8_t *paid_plain,
+    size_t paid_len, uint8_t *private_wire, size_t private_len)
+{
+    sha3_256(paid_plain, paid_len, cap->paid_sha3);
+    if (!fs_send_chunk_private(&cap->responder.session, paid_plain,
+                               paid_len, cap->paid_sha3) ||
+        !delivery_recv_exact(cap->responder_pair[1], private_wire,
+                             private_len) ||
+        !delivery_send_exact(cap->initiator_pair[1], private_wire,
+                             private_len) ||
+        !fs_recv_chunk_private(&cap->initiator.session, &cap->opened,
+                               &cap->opened_size, paid_len,
+                               cap->paid_sha3) ||
+        cap->opened_size != paid_len ||
+        memcmp(cap->opened, paid_plain, paid_len) != 0)
+        return false;
+    return true;
+}
+
+static bool delivery_handshake_capture_attack(
+    struct delivery_handshake_capture *cap, size_t paid_len,
+    const uint8_t *private_wire, size_t private_len)
+{
+    const uint8_t zero_root[32] = {0};
+    sha3_crypt_derive_key(zero_root, cap->initiator_wire,
+                          cap->responder_wire, cap->captured_derivation);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, cap->attacker_pair) != 0 ||
+        !delivery_send_exact(cap->attacker_pair[0], private_wire,
+                             private_len))
+        return false;
+    struct fs_session attacker;
+    fs_session_init(&attacker, cap->attacker_pair[1]);
+    memcpy(attacker.key, cap->captured_derivation, 32);
+    memcpy(attacker.our_nonce, cap->initiator_wire, 32);
+    memcpy(attacker.peer_nonce, cap->responder_wire, 32);
+    attacker.key_established = true;
+    bool attacker_decrypted = fs_recv_chunk_private(
+        &attacker, &cap->attacker_opened, &cap->attacker_size,
+        paid_len, cap->paid_sha3);
+    fs_session_cleanup(&attacker);
+
+    return !attacker_decrypted && cap->attacker_opened == NULL &&
+        memcmp(cap->initiator.session.key, cap->captured_derivation,
+               32) != 0;
+}
+
+static void delivery_handshake_capture_close(
+    struct delivery_handshake_capture *cap)
+{
+    if (cap->initiator_pair[1] >= 0) close(cap->initiator_pair[1]);
+    if (cap->responder_pair[1] >= 0) close(cap->responder_pair[1]);
+    if (cap->initiator_started)
+        pthread_join(cap->initiator_thread, NULL);
+    if (cap->responder_started)
+        pthread_join(cap->responder_thread, NULL);
+    fs_session_cleanup(&cap->initiator.session);
+    fs_session_cleanup(&cap->responder.session);
+    if (cap->initiator_pair[0] >= 0) close(cap->initiator_pair[0]);
+    if (cap->responder_pair[0] >= 0) close(cap->responder_pair[0]);
+    if (cap->attacker_pair[0] >= 0) close(cap->attacker_pair[0]);
+    if (cap->attacker_pair[1] >= 0) close(cap->attacker_pair[1]);
+    free(cap->opened);
+    free(cap->attacker_opened);
+}
+
 /* Relay and record a real handshake plus paid ciphertext. A recorder using
  * every public handshake byte and the historic KDF must fail to open it. */
 static bool delivery_handshake_capture_has_no_session_key(void)
 {
     static const uint8_t paid_plain[] = "paid-wire-capture-proof";
-    int initiator_pair[2] = {-1, -1};
-    int responder_pair[2] = {-1, -1};
-    int attacker_pair[2] = {-1, -1};
-    pthread_t initiator_thread, responder_thread;
-    bool initiator_started = false, responder_started = false;
-    struct delivery_handshake_call initiator = {.initiator = true};
-    struct delivery_handshake_call responder = {.initiator = false};
-    uint8_t initiator_wire[64], responder_wire[64];
     uint8_t private_wire[4 + sizeof(paid_plain) + POLY1305_TAG_SIZE];
-    uint8_t paid_sha3[32], captured_derivation[32];
-    uint8_t *opened = NULL, *attacker_opened = NULL;
-    uint32_t opened_size = 0, attacker_size = 0;
-    bool relayed = false;
+    struct delivery_handshake_capture cap = {
+        .initiator_pair = {-1, -1},
+        .responder_pair = {-1, -1},
+        .attacker_pair = {-1, -1},
+        .initiator = {.initiator = true},
+        .responder = {.initiator = false},
+    };
     bool result = false;
 
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, initiator_pair) != 0 ||
-        socketpair(AF_UNIX, SOCK_STREAM, 0, responder_pair) != 0)
+    if (!delivery_handshake_capture_relay(&cap))
         goto done;
-    fs_session_init(&initiator.session, initiator_pair[0]);
-    fs_session_init(&responder.session, responder_pair[0]);
-    responder_started = pthread_create(&responder_thread, NULL,
-                                       delivery_handshake_call_main,
-                                       &responder) == 0;
-    initiator_started = responder_started &&
-        pthread_create(&initiator_thread, NULL, delivery_handshake_call_main,
-                       &initiator) == 0;
-    if (!initiator_started)
+    if (!delivery_handshake_capture_join_and_check(&cap))
         goto done;
-
-    relayed = delivery_recv_exact(initiator_pair[1], initiator_wire, 32) &&
-        delivery_send_exact(responder_pair[1], initiator_wire, 32) &&
-        delivery_recv_exact(responder_pair[1], responder_wire, 32) &&
-        delivery_send_exact(initiator_pair[1], responder_wire, 32) &&
-        delivery_recv_exact(initiator_pair[1], initiator_wire + 32, 32) &&
-        delivery_send_exact(responder_pair[1], initiator_wire + 32, 32) &&
-        delivery_recv_exact(responder_pair[1], responder_wire + 32, 32) &&
-        delivery_send_exact(initiator_pair[1], responder_wire + 32, 32);
-
-    if (!relayed)
+    if (!delivery_handshake_capture_send_paid(&cap, paid_plain,
+            sizeof(paid_plain), private_wire, sizeof(private_wire)))
         goto done;
-    pthread_join(initiator_thread, NULL);
-    pthread_join(responder_thread, NULL);
-    initiator_started = responder_started = false;
-    if (!initiator.ok || !responder.ok ||
-        memcmp(initiator.session.key, responder.session.key, 32) != 0)
-        goto done;
-
-    sha3_256(paid_plain, sizeof(paid_plain), paid_sha3);
-    if (!fs_send_chunk_private(&responder.session, paid_plain,
-                               sizeof(paid_plain), paid_sha3) ||
-        !delivery_recv_exact(responder_pair[1], private_wire,
-                             sizeof(private_wire)) ||
-        !delivery_send_exact(initiator_pair[1], private_wire,
-                             sizeof(private_wire)) ||
-        !fs_recv_chunk_private(&initiator.session, &opened, &opened_size,
-                               sizeof(paid_plain), paid_sha3) ||
-        opened_size != sizeof(paid_plain) ||
-        memcmp(opened, paid_plain, sizeof(paid_plain)) != 0)
-        goto done;
-
-    const uint8_t zero_root[32] = {0};
-    sha3_crypt_derive_key(zero_root, initiator_wire, responder_wire,
-                          captured_derivation);
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, attacker_pair) != 0 ||
-        !delivery_send_exact(attacker_pair[0], private_wire,
-                             sizeof(private_wire)))
-        goto done;
-    struct fs_session attacker;
-    fs_session_init(&attacker, attacker_pair[1]);
-    memcpy(attacker.key, captured_derivation, 32);
-    memcpy(attacker.our_nonce, initiator_wire, 32);
-    memcpy(attacker.peer_nonce, responder_wire, 32);
-    attacker.key_established = true;
-    bool attacker_decrypted = fs_recv_chunk_private(
-        &attacker, &attacker_opened, &attacker_size,
-        sizeof(paid_plain), paid_sha3);
-    fs_session_cleanup(&attacker);
-
-    result = !attacker_decrypted && attacker_opened == NULL &&
-        memcmp(initiator.session.key, captured_derivation, 32) != 0;
+    result = delivery_handshake_capture_attack(&cap, sizeof(paid_plain),
+            private_wire, sizeof(private_wire));
 
 done:
-    if (initiator_pair[1] >= 0) close(initiator_pair[1]);
-    if (responder_pair[1] >= 0) close(responder_pair[1]);
-    if (initiator_started) pthread_join(initiator_thread, NULL);
-    if (responder_started) pthread_join(responder_thread, NULL);
-    fs_session_cleanup(&initiator.session);
-    fs_session_cleanup(&responder.session);
-    if (initiator_pair[0] >= 0) close(initiator_pair[0]);
-    if (responder_pair[0] >= 0) close(responder_pair[0]);
-    if (attacker_pair[0] >= 0) close(attacker_pair[0]);
-    if (attacker_pair[1] >= 0) close(attacker_pair[1]);
-    free(opened);
-    free(attacker_opened);
+    delivery_handshake_capture_close(&cap);
     return result;
 }
 
@@ -463,6 +521,15 @@ static int64_t delivery_immediate_deadline_monotonic_us(void *opaque)
     return read == 0 ? 1000000LL : 32000000LL;
 }
 
+/* OR of every session key byte: zero means the key was never written. */
+static uint8_t delivery_session_key_or(const struct fs_session *session)
+{
+    uint8_t key_or = 0;
+    for (size_t i = 0; i < sizeof(session->key); i++)
+        key_or |= session->key[i];
+    return key_or;
+}
+
 static bool delivery_handshake_rejects_partial_record_on_deadline(void)
 {
     int sockets[2] = {-1, -1};
@@ -509,9 +576,7 @@ static bool delivery_handshake_rejects_partial_record_on_deadline(void)
         pthread_join(thread, NULL);
     platform_clock_clear_source();
 
-    uint8_t key_or = 0;
-    for (size_t i = 0; i < sizeof(initiator.session.key); i++)
-        key_or |= initiator.session.key[i];
+    uint8_t key_or = delivery_session_key_or(&initiator.session);
     bool rejected = exchanged && finished && !initiator.ok &&
         !initiator.session.key_established && key_or == 0 &&
         atomic_load_explicit(&clock.reads, memory_order_relaxed) >= 3;
@@ -1127,7 +1192,27 @@ static bool onion_deadline_get(void *ctx, const char *onion_address,
     return ok;
 }
 
-int file_market_delivery_tests(void)
+struct delivery_suite {
+    struct fs_session server;
+    struct file_market_delivery_request request;
+    struct file_market_delivery_request decoded;
+    uint8_t wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
+    uint8_t buyer_seed[32];
+    uint8_t expected_session[32];
+    struct delivery_fixture fixture;
+    struct file_market_delivery_reply reply;
+    struct file_market_delivery_reply reply_roundtrip;
+    struct file_market_delivery_chunk chunk;
+    uint8_t tampered_wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
+    uint8_t buyer_public[32];
+    struct onion_loopback loop;
+    uint8_t seller_onion_pubkey[32];
+    int listen_fd;
+    struct sockaddr_in6 endpoint_addr;
+    uint8_t loopback_ip[16];
+};
+
+static int delivery_run_transport_checks(void)
 {
     int failures = 0;
     DELIVERY_CHECK("captured handshake cannot reconstruct paid-file key",
@@ -1156,88 +1241,91 @@ int file_market_delivery_tests(void)
                    delivery_fast_chunk_hash_failure_preserves_counter());
     DELIVERY_CHECK("chunk refusal send shares one absolute deadline",
                    delivery_chunk_refusal_send_uses_one_deadline());
-    struct fs_session server;
-    struct file_market_delivery_request request, decoded;
-    uint8_t wire[FILE_MARKET_DELIVERY_WIRE_BYTES], buyer_seed[32];
-    bool made = delivery_request_fixture(&server, &request, wire, buyer_seed);
-    DELIVERY_CHECK("session-bound signed request fixture", made);
-    if (!made)
-        return failures;
+    return failures;
+}
 
+static int delivery_run_request_session_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
     struct file_market_delivery_chunk expired_session_chunk;
     memset(&expired_session_chunk, 0xA5, sizeof(expired_session_chunk));
-    server.key_established = true;
+    ds->server.key_established = true;
     enum file_market_delivery_status expired_session_status =
         file_market_delivery_fetch_session_until(
-            &server, request.network_genesis, request.offer_id,
-            request.chunk_index, request.buyer_pubkey, buyer_seed,
-            platform_time_monotonic_ms(), &expired_session_chunk);
-    server.key_established = false;
+            &ds->server, ds->request.network_genesis, ds->request.offer_id,
+            ds->request.chunk_index, ds->request.buyer_pubkey,
+            ds->buyer_seed, platform_time_monotonic_ms(),
+            &expired_session_chunk);
+    ds->server.key_established = false;
     DELIVERY_CHECK("expired established session reports resource limit",
         expired_session_status == FILE_MARKET_DELIVERY_RESOURCE_LIMIT &&
         expired_session_chunk.data == NULL &&
         expired_session_chunk.size == 0 &&
         memcmp(expired_session_chunk.sha3, (uint8_t[32]){0}, 32) == 0);
 
-    uint8_t expected_session[32];
     file_market_delivery_session_id(
-        request.network_genesis, server.peer_nonce, server.our_nonce,
-        expected_session);
+        ds->request.network_genesis, ds->server.peer_nonce,
+        ds->server.our_nonce, ds->expected_session);
     bool codec = file_market_delivery_request_decode(
-                     wire, sizeof(wire), &decoded) ==
+                     ds->wire, sizeof(ds->wire), &ds->decoded) ==
                      FILE_MARKET_DELIVERY_OK &&
                  file_market_delivery_request_verify(
-                     &decoded, request.network_genesis, expected_session) ==
+                     &ds->decoded, ds->request.network_genesis,
+                     ds->expected_session) ==
                      FILE_MARKET_DELIVERY_OK;
     DELIVERY_CHECK("fixed request codec and buyer signature", codec);
 
     uint8_t other_session[32];
-    memcpy(other_session, expected_session, 32);
+    memcpy(other_session, ds->expected_session, 32);
     other_session[0] ^= 1;
     DELIVERY_CHECK("request cannot move to another encrypted session",
         file_market_delivery_request_verify(
-            &decoded, request.network_genesis, other_session) ==
+            &ds->decoded, ds->request.network_genesis, other_session) ==
         FILE_MARKET_DELIVERY_ERR_SESSION);
-    struct file_market_delivery_request tampered = decoded;
+    struct file_market_delivery_request tampered = ds->decoded;
     tampered.chunk_index++;
     DELIVERY_CHECK("changed chunk fails buyer authentication",
         file_market_delivery_request_verify(
-            &tampered, request.network_genesis, expected_session) ==
+            &tampered, ds->request.network_genesis,
+            ds->expected_session) ==
         FILE_MARKET_DELIVERY_ERR_SIGNATURE);
 
     /* Freshness runs before signature work: an aged or future-dated copy of
      * a real request dies with the dedicated expiry error. */
-    struct file_market_delivery_request stale = decoded;
+    struct file_market_delivery_request stale = ds->decoded;
     stale.issued_unix = (int64_t)platform_time_wall_time_t() -
         FILE_MARKET_DELIVERY_MAX_AGE_SECS - 1;
     DELIVERY_CHECK("stale signed stamp refuses on freshness",
         file_market_delivery_request_verify(
-            &stale, request.network_genesis, expected_session) ==
+            &stale, ds->request.network_genesis, ds->expected_session) ==
         FILE_MARKET_DELIVERY_ERR_EXPIRED);
 
-    struct file_market_delivery_request premature = decoded;
+    struct file_market_delivery_request premature = ds->decoded;
     premature.issued_unix = (int64_t)platform_time_wall_time_t() +
         FILE_MARKET_DELIVERY_MAX_AGE_SECS + 1;
     DELIVERY_CHECK("forged future stamp refuses on freshness",
         file_market_delivery_request_verify(
-            &premature, request.network_genesis, expected_session) ==
+            &premature, ds->request.network_genesis,
+            ds->expected_session) ==
         FILE_MARKET_DELIVERY_ERR_EXPIRED);
 
-    struct file_market_delivery_request unstamped = decoded;
+    struct file_market_delivery_request unstamped = ds->decoded;
     unstamped.issued_unix = 0;
     uint8_t refused_wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
     DELIVERY_CHECK("zero stamp cannot encode or verify",
         file_market_delivery_request_encode(&unstamped, refused_wire) ==
             FILE_MARKET_DELIVERY_ERR_EXPIRED &&
         file_market_delivery_request_verify(
-            &unstamped, request.network_genesis, expected_session) ==
+            &unstamped, ds->request.network_genesis,
+            ds->expected_session) ==
             FILE_MARKET_DELIVERY_ERR_EXPIRED);
 
-    struct file_market_delivery_request extreme_stamp = decoded;
+    struct file_market_delivery_request extreme_stamp = ds->decoded;
     extreme_stamp.issued_unix = INT64_MIN;
     DELIVERY_CHECK("minimum signed stamp refuses without overflow",
         file_market_delivery_request_verify(
-            &extreme_stamp, request.network_genesis, expected_session) ==
+            &extreme_stamp, ds->request.network_genesis,
+            ds->expected_session) ==
         FILE_MARKET_DELIVERY_ERR_EXPIRED);
 
     /* Coordinated-fleet cutover honesty: a legacy v2-length wire gets one
@@ -1245,139 +1333,175 @@ int file_market_delivery_tests(void)
     struct file_market_delivery_request legacy_probe;
     DELIVERY_CHECK("legacy zfileget.v2 wire length refuses cleanly",
         file_market_delivery_request_decode(
-            wire, FILE_MARKET_DELIVERY_WIRE_BYTES - 8u, &legacy_probe) ==
+            ds->wire, FILE_MARKET_DELIVERY_WIRE_BYTES - 8u, &legacy_probe) ==
         FILE_MARKET_DELIVERY_ERR_WIRE_SIZE);
+    return failures;
+}
 
-    struct delivery_fixture fixture = {
+static int delivery_run_prepare_payment_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
+    ds->fixture = (struct delivery_fixture){
         .authorization = FILE_MARKET_DELIVERY_PENDING,
         .load_ok = true,
     };
     file_market_delivery_set_handlers(
-        request.network_genesis, delivery_authorize, delivery_load,
-        delivery_moderation, &fixture);
-    struct file_market_delivery_reply reply, reply_roundtrip;
-    struct file_market_delivery_chunk chunk;
+        ds->request.network_genesis, delivery_authorize, delivery_load,
+        delivery_moderation, &ds->fixture);
     enum file_market_delivery_status status = file_market_delivery_prepare(
-        &server, wire, sizeof(wire), &reply, &chunk);
+        &ds->server, ds->wire, sizeof(ds->wire), &ds->reply, &ds->chunk);
     DELIVERY_CHECK("pending payment never invokes content reader",
         status == FILE_MARKET_DELIVERY_PAYMENT_PENDING &&
-        fixture.authorize_calls == 1 && fixture.load_calls == 0 &&
-        chunk.data == NULL);
+        ds->fixture.authorize_calls == 1 && ds->fixture.load_calls == 0 &&
+        ds->chunk.data == NULL);
 
-    fixture.authorization = FILE_MARKET_DELIVERY_UNKNOWN;
+    ds->fixture.authorization = FILE_MARKET_DELIVERY_UNKNOWN;
     status = file_market_delivery_prepare(
-        &server, wire, sizeof(wire), &reply, &chunk);
+        &ds->server, ds->wire, sizeof(ds->wire), &ds->reply, &ds->chunk);
     DELIVERY_CHECK("unknown payment never invokes content reader",
         status == FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN &&
-        fixture.load_calls == 0 && chunk.data == NULL);
-    fixture.authorization = FILE_MARKET_DELIVERY_CONFLICTED;
+        ds->fixture.load_calls == 0 && ds->chunk.data == NULL);
+    ds->fixture.authorization = FILE_MARKET_DELIVERY_CONFLICTED;
     status = file_market_delivery_prepare(
-        &server, wire, sizeof(wire), &reply, &chunk);
+        &ds->server, ds->wire, sizeof(ds->wire), &ds->reply, &ds->chunk);
     DELIVERY_CHECK("conflicted payment never invokes content reader",
         status == FILE_MARKET_DELIVERY_PAYMENT_CONFLICTED &&
-        fixture.load_calls == 0 && chunk.data == NULL);
+        ds->fixture.load_calls == 0 && ds->chunk.data == NULL);
 
-    uint8_t tampered_wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
-    memcpy(tampered_wire, wire, sizeof(tampered_wire));
-    tampered_wire[70] ^= 1;
-    int auth_before = fixture.authorize_calls;
+    memcpy(ds->tampered_wire, ds->wire, sizeof(ds->tampered_wire));
+    ds->tampered_wire[70] ^= 1;
+    int auth_before = ds->fixture.authorize_calls;
     status = file_market_delivery_prepare(
-        &server, tampered_wire, sizeof(tampered_wire), &reply, &chunk);
+        &ds->server, ds->tampered_wire, sizeof(ds->tampered_wire),
+        &ds->reply, &ds->chunk);
     DELIVERY_CHECK("unauthenticated request reaches neither app callback",
         status == FILE_MARKET_DELIVERY_UNAUTHENTICATED &&
-        fixture.authorize_calls == auth_before && fixture.load_calls == 0);
+        ds->fixture.authorize_calls == auth_before &&
+        ds->fixture.load_calls == 0);
+    return failures;
+}
 
-    fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
+static int delivery_run_prepare_ready_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
+    enum file_market_delivery_status status;
+    ds->fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
     status = file_market_delivery_prepare(
-        &server, wire, sizeof(wire), &reply, &chunk);
-    bool ready = status == FILE_MARKET_DELIVERY_READY && chunk.data &&
-                 fixture.load_calls == 1 && reply.size == chunk.size &&
-                 memcmp(reply.sha3, chunk.sha3, 32) == 0 &&
-                 file_market_delivery_reply_encode(&reply, tampered_wire) &&
+        &ds->server, ds->wire, sizeof(ds->wire), &ds->reply, &ds->chunk);
+    bool ready = status == FILE_MARKET_DELIVERY_READY && ds->chunk.data &&
+                 ds->fixture.load_calls == 1 &&
+                 ds->reply.size == ds->chunk.size &&
+                 memcmp(ds->reply.sha3, ds->chunk.sha3, 32) == 0 &&
+                 file_market_delivery_reply_encode(&ds->reply,
+                                                   ds->tampered_wire) &&
                  file_market_delivery_reply_decode(
-                     tampered_wire, FILE_MARKET_DELIVERY_REPLY_BYTES,
-                     &reply_roundtrip) &&
-                 reply_roundtrip.status == FILE_MARKET_DELIVERY_READY;
+                     ds->tampered_wire, FILE_MARKET_DELIVERY_REPLY_BYTES,
+                     &ds->reply_roundtrip) &&
+                 ds->reply_roundtrip.status == FILE_MARKET_DELIVERY_READY;
     DELIVERY_CHECK("confirmed payment loads one exact typed chunk", ready);
-    free(chunk.data);
+    free(ds->chunk.data);
 
-    fixture.corrupt_hash = true;
+    ds->fixture.corrupt_hash = true;
     status = file_market_delivery_prepare(
-        &server, wire, sizeof(wire), &reply, &chunk);
+        &ds->server, ds->wire, sizeof(ds->wire), &ds->reply, &ds->chunk);
     DELIVERY_CHECK("content hash mismatch fails closed before send",
         status == FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE &&
-        chunk.data == NULL);
-    fixture.corrupt_hash = false;
+        ds->chunk.data == NULL);
+    ds->fixture.corrupt_hash = false;
+    return failures;
+}
 
+static int delivery_run_moderation_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
+    enum file_market_delivery_status status;
     /* ── The node's own hosting decision ─────────────────────────────
      * A declined chunk costs the requester everything (no payment lookup,
      * content read or bytes); an unwired profile port is a refusal, not a
      * bypass. */
-    fixture.moderation_hidden = true;
-    int auth_calls_before_hidden = fixture.authorize_calls;
-    int load_calls_before_hidden = fixture.load_calls;
+    ds->fixture.moderation_hidden = true;
+    int auth_calls_before_hidden = ds->fixture.authorize_calls;
+    int load_calls_before_hidden = ds->fixture.load_calls;
     status = file_market_delivery_prepare(
-        &server, wire, sizeof(wire), &reply, &chunk);
+        &ds->server, ds->wire, sizeof(ds->wire), &ds->reply, &ds->chunk);
     DELIVERY_CHECK("profile refusal reaches neither payment nor content",
         status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN &&
-        fixture.authorize_calls == auth_calls_before_hidden &&
-        fixture.load_calls == load_calls_before_hidden &&
-        chunk.data == NULL && reply.size == 0);
+        ds->fixture.authorize_calls == auth_calls_before_hidden &&
+        ds->fixture.load_calls == load_calls_before_hidden &&
+        ds->chunk.data == NULL && ds->reply.size == 0);
     DELIVERY_CHECK("a refused reply still round-trips on the wire",
-        file_market_delivery_reply_encode(&reply, tampered_wire) &&
+        file_market_delivery_reply_encode(&ds->reply, ds->tampered_wire) &&
         file_market_delivery_reply_decode(
-            tampered_wire, FILE_MARKET_DELIVERY_REPLY_BYTES,
-            &reply_roundtrip) &&
-        reply_roundtrip.status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN);
-    fixture.moderation_hidden = false;
+            ds->tampered_wire, FILE_MARKET_DELIVERY_REPLY_BYTES,
+            &ds->reply_roundtrip) &&
+        ds->reply_roundtrip.status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN);
+    ds->fixture.moderation_hidden = false;
 
     /* Onion transport gets the identical answer: no transport widens what
      * this node will host. */
     status = file_market_delivery_prepare_onion(
-        wire, sizeof(wire), &reply, &chunk);
+        ds->wire, sizeof(ds->wire), &ds->reply, &ds->chunk);
     bool onion_hidden_when_unwired =
         status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN ||
         status == FILE_MARKET_DELIVERY_UNAUTHENTICATED;
     DELIVERY_CHECK("onion prepare never serves without a hosting decision",
-        onion_hidden_when_unwired && chunk.data == NULL);
+        onion_hidden_when_unwired && ds->chunk.data == NULL);
 
     file_market_delivery_set_handlers(
-        request.network_genesis, delivery_authorize, delivery_load, NULL,
-        &fixture);
-    int auth_calls_before_unwired = fixture.authorize_calls;
+        ds->request.network_genesis, delivery_authorize, delivery_load, NULL,
+        &ds->fixture);
+    int auth_calls_before_unwired = ds->fixture.authorize_calls;
     status = file_market_delivery_prepare(
-        &server, wire, sizeof(wire), &reply, &chunk);
+        &ds->server, ds->wire, sizeof(ds->wire), &ds->reply, &ds->chunk);
     DELIVERY_CHECK("an unwired profile port refuses rather than serves",
         status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN &&
-        fixture.authorize_calls == auth_calls_before_unwired &&
-        chunk.data == NULL);
+        ds->fixture.authorize_calls == auth_calls_before_unwired &&
+        ds->chunk.data == NULL);
     status = file_market_delivery_prepare_onion(
-        wire, sizeof(wire), &reply, &chunk);
+        ds->wire, sizeof(ds->wire), &ds->reply, &ds->chunk);
     DELIVERY_CHECK("an unwired profile port refuses on onion too",
         status == FILE_MARKET_DELIVERY_MODERATION_HIDDEN &&
-        chunk.data == NULL);
+        ds->chunk.data == NULL);
     file_market_delivery_set_handlers(
-        request.network_genesis, delivery_authorize, delivery_load,
-        delivery_moderation, &fixture);
+        ds->request.network_genesis, delivery_authorize, delivery_load,
+        delivery_moderation, &ds->fixture);
+    return failures;
+}
 
+static void delivery_close_served_pair(struct fs_session *server,
+                                       struct fs_session *client,
+                                       bool socket_ready,
+                                       const int sockets[2])
+{
+    if (socket_ready) {
+        fs_session_cleanup(server);
+        fs_session_cleanup(client);
+    }
+    if (sockets[0] >= 0) close(sockets[0]);
+    if (sockets[1] >= 0) close(sockets[1]);
+}
+
+static int delivery_run_socket_serve_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
     int sockets[2] = {-1, -1};
     bool socket_ready = socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0;
     struct fs_session client;
     if (socket_ready) {
-        fs_session_init(&server, sockets[0]);
+        fs_session_init(&ds->server, sockets[0]);
         fs_session_init(&client, sockets[1]);
-        memset(server.key, 0x75, sizeof(server.key));
-        memcpy(client.key, server.key, sizeof(client.key));
-        server.key_established = client.key_established = true;
-        memset(server.peer_nonce, 0x31, sizeof(server.peer_nonce));
-        memset(server.our_nonce, 0x42, sizeof(server.our_nonce));
-        fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
-        fixture.load_ok = true;
+        memset(ds->server.key, 0x75, sizeof(ds->server.key));
+        memcpy(client.key, ds->server.key, sizeof(client.key));
+        ds->server.key_established = client.key_established = true;
+        memset(ds->server.peer_nonce, 0x31, sizeof(ds->server.peer_nonce));
+        memset(ds->server.our_nonce, 0x42, sizeof(ds->server.our_nonce));
+        ds->fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
+        ds->fixture.load_ok = true;
         fs_pow_reset_state();
     }
     uint8_t client_ip[16] = {0};
     bool served = socket_ready && file_market_delivery_serve(
-        &server, client_ip, wire, sizeof(wire));
+        &ds->server, client_ip, ds->wire, sizeof(ds->wire));
     uint8_t type = 0;
     const uint8_t *reply_payload = NULL;
     uint32_t reply_len = 0;
@@ -1385,8 +1509,8 @@ int file_market_delivery_tests(void)
                                      &reply_len) &&
              type == FS_MARKET_REPLY &&
              file_market_delivery_reply_decode(
-                 reply_payload, reply_len, &reply_roundtrip) &&
-             reply_roundtrip.status == FILE_MARKET_DELIVERY_READY;
+                 reply_payload, reply_len, &ds->reply_roundtrip) &&
+             ds->reply_roundtrip.status == FILE_MARKET_DELIVERY_READY;
     uint8_t size_wire[4], body[32], tag[POLY1305_TAG_SIZE];
     uint32_t served_size = 0;
     if (served) {
@@ -1400,15 +1524,15 @@ int file_market_delivery_tests(void)
             delivery_recv_exact(sockets[1], tag, sizeof(tag));
     }
     DELIVERY_CHECK("paid chunk wire is encrypted after authenticated reply",
-        served && served_size == reply_roundtrip.size &&
+        served && served_size == ds->reply_roundtrip.size &&
         memcmp(body, "paid-chunk-proof", served_size) != 0);
-    if (socket_ready) {
-        fs_session_cleanup(&server);
-        fs_session_cleanup(&client);
-    }
-    if (sockets[0] >= 0) close(sockets[0]);
-    if (sockets[1] >= 0) close(sockets[1]);
+    delivery_close_served_pair(&ds->server, &client, socket_ready, sockets);
+    return failures;
+}
 
+static int delivery_run_buyer_session_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
     int buyer_sockets[2] = {-1, -1};
     bool buyer_ready = socketpair(AF_UNIX, SOCK_STREAM, 0, buyer_sockets) == 0;
     struct fs_session buyer_server, buyer_client;
@@ -1427,22 +1551,23 @@ int file_market_delivery_tests(void)
                sizeof(buyer_server.our_nonce));
         memcpy(buyer_client.our_nonce, buyer_server.peer_nonce, 32);
         memcpy(buyer_client.peer_nonce, buyer_server.our_nonce, 32);
-        fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
-        fixture.load_ok = true;
-        fixture.corrupt_hash = false;
+        ds->fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
+        ds->fixture.load_ok = true;
+        ds->fixture.corrupt_hash = false;
         server_call.session = &buyer_server;
         server_started = pthread_create(&server_thread, NULL,
                                         delivery_server_call_main,
                                         &server_call) == 0;
     }
-    uint8_t buyer_public[32], buyer_secret[32];
-    ed25519_keypair(buyer_public, buyer_secret, buyer_seed);
+    uint8_t buyer_secret[32];
+    ed25519_keypair(ds->buyer_public, buyer_secret, ds->buyer_seed);
     struct file_market_delivery_chunk fetched = {0};
     enum file_market_delivery_status fetched_status =
         buyer_ready && server_started
             ? file_market_delivery_fetch_session(
-                &buyer_client, request.network_genesis, request.offer_id, 7,
-                buyer_public, buyer_seed, &fetched)
+                &buyer_client, ds->request.network_genesis,
+                ds->request.offer_id, 7, ds->buyer_public, ds->buyer_seed,
+                &fetched)
             : FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
     if (server_started)
         pthread_join(server_thread, NULL);
@@ -1458,35 +1583,38 @@ int file_market_delivery_tests(void)
     }
     if (buyer_sockets[0] >= 0) close(buyer_sockets[0]);
     if (buyer_sockets[1] >= 0) close(buyer_sockets[1]);
+    return failures;
+}
 
-    int listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
-    struct sockaddr_in6 endpoint_addr;
-    memset(&endpoint_addr, 0, sizeof(endpoint_addr));
-    endpoint_addr.sin6_family = AF_INET6;
-    endpoint_addr.sin6_addr = in6addr_loopback;
-    endpoint_addr.sin6_port = 0;
-    socklen_t endpoint_len = sizeof(endpoint_addr);
-    bool endpoint_ready = listen_fd >= 0 &&
-        bind(listen_fd, (struct sockaddr *)&endpoint_addr,
-             sizeof(endpoint_addr)) == 0 &&
-        listen(listen_fd, 1) == 0 &&
-        getsockname(listen_fd, (struct sockaddr *)&endpoint_addr,
+static int delivery_run_endpoint_fetch_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
+    ds->listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
+    memset(&ds->endpoint_addr, 0, sizeof(ds->endpoint_addr));
+    ds->endpoint_addr.sin6_family = AF_INET6;
+    ds->endpoint_addr.sin6_addr = in6addr_loopback;
+    ds->endpoint_addr.sin6_port = 0;
+    socklen_t endpoint_len = sizeof(ds->endpoint_addr);
+    bool endpoint_ready = ds->listen_fd >= 0 &&
+        bind(ds->listen_fd, (struct sockaddr *)&ds->endpoint_addr,
+             sizeof(ds->endpoint_addr)) == 0 &&
+        listen(ds->listen_fd, 1) == 0 &&
+        getsockname(ds->listen_fd, (struct sockaddr *)&ds->endpoint_addr,
                     &endpoint_len) == 0;
     struct delivery_endpoint_server endpoint_server = {
-        .listen_fd = listen_fd,
+        .listen_fd = ds->listen_fd,
     };
     pthread_t endpoint_thread;
     bool endpoint_started = endpoint_ready && pthread_create(
         &endpoint_thread, NULL, delivery_endpoint_server_main,
         &endpoint_server) == 0;
-    uint8_t loopback_ip[16];
-    memcpy(loopback_ip, &in6addr_loopback, 16);
+    memcpy(ds->loopback_ip, &in6addr_loopback, 16);
     struct file_market_delivery_chunk endpoint_chunk = {0};
     enum file_market_delivery_status endpoint_status = endpoint_started
         ? file_market_delivery_fetch_endpoint(
-            loopback_ip, ntohs(endpoint_addr.sin6_port),
-            request.network_genesis, request.offer_id, 7,
-            buyer_public, buyer_seed, &endpoint_chunk)
+            ds->loopback_ip, ntohs(ds->endpoint_addr.sin6_port),
+            ds->request.network_genesis, ds->request.offer_id, 7,
+            ds->buyer_public, ds->buyer_seed, &endpoint_chunk)
         : FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
     if (endpoint_started)
         pthread_join(endpoint_thread, NULL);
@@ -1498,22 +1626,32 @@ int file_market_delivery_tests(void)
         memcmp(endpoint_chunk.data, "paid-chunk-proof",
                sizeof("paid-chunk-proof")) == 0);
     free(endpoint_chunk.data);
+    return failures;
+}
+
+static int delivery_run_expired_endpoint_check(struct delivery_suite *ds)
+{
+    int failures = 0;
     struct file_market_delivery_chunk expired_endpoint;
     memset(&expired_endpoint, 0xA5, sizeof(expired_endpoint));
     int64_t expired_deadline = platform_time_monotonic_ms();
     enum file_market_delivery_status expired_endpoint_status =
         file_market_delivery_fetch_endpoint_until(
-            loopback_ip, ntohs(endpoint_addr.sin6_port),
-            request.network_genesis, request.offer_id, 7,
-            buyer_public, buyer_seed, expired_deadline, &expired_endpoint);
+            ds->loopback_ip, ntohs(ds->endpoint_addr.sin6_port),
+            ds->request.network_genesis, ds->request.offer_id, 7,
+            ds->buyer_public, ds->buyer_seed, expired_deadline,
+            &expired_endpoint);
     DELIVERY_CHECK("expired clearnet deadline fails closed before connect",
         expired_endpoint_status == FILE_MARKET_DELIVERY_RESOURCE_LIMIT &&
         expired_endpoint.data == NULL && expired_endpoint.size == 0 &&
         memcmp(expired_endpoint.sha3, (uint8_t[32]){0}, 32) == 0);
-    if (listen_fd >= 0) close(listen_fd);
+    if (ds->listen_fd >= 0) close(ds->listen_fd);
+    return failures;
+}
 
-    /* ── Phase B5 onion delivery (docs/work/MARKET_ONION_DELIVERY.md) ── */
-
+static int delivery_run_onion_address_checks(void)
+{
+    int failures = 0;
     /* Tor spec example pair, verified against independent sha3/base32
      * implementations before being pinned here. */
     uint8_t vector_pubkey[32];
@@ -1546,62 +1684,72 @@ int file_market_delivery_tests(void)
         !onion_v3_pubkey_from_address(flipped_address, vector_recovered) &&
         vector_recovered[0] == 0 &&
         !onion_v3_address_from_pubkey(zero_pubkey, zero_address));
+    return failures;
+}
 
+static int delivery_run_onion_request_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
     uint8_t onion_session[32];
     file_market_delivery_onion_session_id(
-        request.network_genesis, request.offer_id, buyer_public,
+        ds->request.network_genesis, ds->request.offer_id, ds->buyer_public,
         onion_session);
     struct file_market_delivery_request onion_request;
     memset(&onion_request, 0, sizeof(onion_request));
     onion_request.version = FILE_MARKET_DELIVERY_VERSION;
-    memcpy(onion_request.network_genesis, request.network_genesis, 32);
-    memcpy(onion_request.offer_id, request.offer_id, 32);
+    memcpy(onion_request.network_genesis, ds->request.network_genesis, 32);
+    memcpy(onion_request.offer_id, ds->request.offer_id, 32);
     onion_request.chunk_index = 7;
-    memcpy(onion_request.buyer_pubkey, buyer_public, 32);
+    memcpy(onion_request.buyer_pubkey, ds->buyer_public, 32);
     memcpy(onion_request.session_id, onion_session, 32);
     uint8_t onion_wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
     bool onion_made =
-        file_market_delivery_request_seal(&onion_request, buyer_seed) ==
+        file_market_delivery_request_seal(&onion_request, ds->buyer_seed) ==
             FILE_MARKET_DELIVERY_OK &&
         file_market_delivery_request_encode(&onion_request, onion_wire) ==
             FILE_MARKET_DELIVERY_OK;
     DELIVERY_CHECK("onion session-bound request verifies",
         onion_made && file_market_delivery_request_verify(
-            &onion_request, request.network_genesis, onion_session) ==
+            &onion_request, ds->request.network_genesis, onion_session) ==
             FILE_MARKET_DELIVERY_OK);
     DELIVERY_CHECK("onion request cannot move to a clearnet session",
         onion_made && file_market_delivery_request_verify(
-            &onion_request, request.network_genesis, expected_session) ==
+            &onion_request, ds->request.network_genesis,
+            ds->expected_session) ==
             FILE_MARKET_DELIVERY_ERR_SESSION);
 
     struct file_market_delivery_reply onion_reply;
     struct file_market_delivery_chunk onion_chunk;
     enum file_market_delivery_status onion_serve_status =
-        file_market_delivery_prepare_onion(wire, sizeof(wire), &onion_reply,
-                                           &onion_chunk);
+        file_market_delivery_prepare_onion(ds->wire, sizeof(ds->wire),
+                                           &onion_reply, &onion_chunk);
     DELIVERY_CHECK("clearnet-bound request fails onion authentication",
         onion_serve_status == FILE_MARKET_DELIVERY_UNAUTHENTICATED &&
         onion_chunk.data == NULL);
+    return failures;
+}
 
-    uint8_t seller_onion_pubkey[32];
-    memset(seller_onion_pubkey, 0xa7, sizeof(seller_onion_pubkey));
-    struct onion_loopback loop;
-    memset(&loop, 0, sizeof(loop));
+static int delivery_run_onion_single_fetch_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
+    memset(ds->seller_onion_pubkey, 0xa7, sizeof(ds->seller_onion_pubkey));
+    memset(&ds->loop, 0, sizeof(ds->loop));
     bool onion_address_ok = onion_v3_address_from_pubkey(
-        seller_onion_pubkey, loop.expected_address);
+        ds->seller_onion_pubkey, ds->loop.expected_address);
 
-    fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
-    fixture.load_ok = true;
-    fixture.corrupt_hash = false;
+    ds->fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
+    ds->fixture.load_ok = true;
+    ds->fixture.corrupt_hash = false;
     file_market_delivery_set_handlers(
-        request.network_genesis, delivery_authorize, delivery_load,
-        delivery_moderation, &fixture);
+        ds->request.network_genesis, delivery_authorize, delivery_load,
+        delivery_moderation, &ds->fixture);
     struct file_market_delivery_chunk null_get_chunk;
     memset(&null_get_chunk, 0xA5, sizeof(null_get_chunk));
     enum file_market_delivery_status null_get_status =
         file_market_delivery_fetch_onion_with(
-            NULL, NULL, seller_onion_pubkey, request.network_genesis,
-            request.offer_id, 7, buyer_public, buyer_seed, &null_get_chunk);
+            NULL, NULL, ds->seller_onion_pubkey, ds->request.network_genesis,
+            ds->request.offer_id, 7, ds->buyer_public, ds->buyer_seed,
+            &null_get_chunk);
     DELIVERY_CHECK("legacy onion fetch rejects a null GET port",
         null_get_status == FILE_MARKET_DELIVERY_MALFORMED &&
         null_get_chunk.data == NULL && null_get_chunk.size == 0 &&
@@ -1609,38 +1757,48 @@ int file_market_delivery_tests(void)
     struct file_market_delivery_chunk single = {0};
     enum file_market_delivery_status single_status = onion_address_ok
         ? file_market_delivery_fetch_onion_with(
-            onion_loopback_get, &loop, seller_onion_pubkey,
-            request.network_genesis, request.offer_id, 7,
-            buyer_public, buyer_seed, &single)
+            onion_loopback_get, &ds->loop, ds->seller_onion_pubkey,
+            ds->request.network_genesis, ds->request.offer_id, 7,
+            ds->buyer_public, ds->buyer_seed, &single)
         : FILE_MARKET_DELIVERY_MALFORMED;
     DELIVERY_CHECK("onion fetch serves one verified slice",
         single_status == FILE_MARKET_DELIVERY_READY && single.data &&
         single.size == sizeof("paid-chunk-proof") &&
         memcmp(single.data, "paid-chunk-proof",
-               sizeof("paid-chunk-proof")) == 0 && loop.calls == 1);
+               sizeof("paid-chunk-proof")) == 0 && ds->loop.calls == 1);
     free(single.data);
+    return failures;
+}
 
+static int delivery_run_onion_multi_fetch_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
     file_market_delivery_set_handlers(
-        request.network_genesis, delivery_authorize, delivery_load_big,
-        delivery_moderation, &fixture);
-    loop.calls = 0;
+        ds->request.network_genesis, delivery_authorize, delivery_load_big,
+        delivery_moderation, &ds->fixture);
+    ds->loop.calls = 0;
     struct file_market_delivery_chunk multi = {0};
     enum file_market_delivery_status multi_status =
         file_market_delivery_fetch_onion_with(
-            onion_loopback_get, &loop, seller_onion_pubkey,
-            request.network_genesis, request.offer_id, 7,
-            buyer_public, buyer_seed, &multi);
+            onion_loopback_get, &ds->loop, ds->seller_onion_pubkey,
+            ds->request.network_genesis, ds->request.offer_id, 7,
+            ds->buyer_public, ds->buyer_seed, &multi);
     bool multi_exact = multi_status == FILE_MARKET_DELIVERY_READY &&
         multi.data && multi.size == DELIVERY_BIG_CHUNK_BYTES;
     for (uint32_t i = 0; multi_exact && i < DELIVERY_BIG_CHUNK_BYTES; i++)
         multi_exact = multi.data[i] == (uint8_t)(i * 31u + (i >> 8));
     DELIVERY_CHECK("onion fetch reassembles three verified slices",
-        multi_exact && loop.calls == 3);
+        multi_exact && ds->loop.calls == 3);
     free(multi.data);
+    return failures;
+}
 
+static int delivery_run_onion_deadline_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
     struct onion_deadline_loopback deadline_loop;
     memset(&deadline_loop, 0, sizeof(deadline_loop));
-    memcpy(deadline_loop.loop.expected_address, loop.expected_address,
+    memcpy(deadline_loop.loop.expected_address, ds->loop.expected_address,
            sizeof(deadline_loop.loop.expected_address));
     atomic_init(&deadline_loop.now_us, 1000000);
     struct platform_clock_source deadline_source = {
@@ -1653,8 +1811,9 @@ int file_market_delivery_tests(void)
     enum file_market_delivery_status bounded_status =
         file_market_delivery_fetch_onion_with_deadline(
             onion_deadline_get, &deadline_loop, 3500,
-            seller_onion_pubkey, request.network_genesis, request.offer_id, 7,
-            buyer_public, buyer_seed, &bounded);
+            ds->seller_onion_pubkey, ds->request.network_genesis,
+            ds->request.offer_id, 7, ds->buyer_public, ds->buyer_seed,
+            &bounded);
     platform_clock_clear_source();
     DELIVERY_CHECK("onion slice loop stops at one absolute budget",
         bounded_status == FILE_MARKET_DELIVERY_RESOURCE_LIMIT &&
@@ -1663,34 +1822,68 @@ int file_market_delivery_tests(void)
         deadline_loop.loop.calls == 2 &&
         deadline_loop.timeouts[0] == 2 && deadline_loop.timeouts[1] == 1);
     free(bounded.data);
+    return failures;
+}
 
-    int loads_before = fixture.load_calls;
-    fixture.authorization = FILE_MARKET_DELIVERY_PENDING;
-    loop.calls = 0;
+static int delivery_run_onion_refusal_checks(struct delivery_suite *ds)
+{
+    int failures = 0;
+    int loads_before = ds->fixture.load_calls;
+    ds->fixture.authorization = FILE_MARKET_DELIVERY_PENDING;
+    ds->loop.calls = 0;
     struct file_market_delivery_chunk pending = {0};
     enum file_market_delivery_status pending_status =
         file_market_delivery_fetch_onion_with(
-            onion_loopback_get, &loop, seller_onion_pubkey,
-            request.network_genesis, request.offer_id, 7,
-            buyer_public, buyer_seed, &pending);
+            onion_loopback_get, &ds->loop, ds->seller_onion_pubkey,
+            ds->request.network_genesis, ds->request.offer_id, 7,
+            ds->buyer_public, ds->buyer_seed, &pending);
     DELIVERY_CHECK("pending onion payment never invokes content reader",
         pending_status == FILE_MARKET_DELIVERY_PAYMENT_PENDING &&
-        loop.calls == 1 && fixture.load_calls == loads_before &&
+        ds->loop.calls == 1 && ds->fixture.load_calls == loads_before &&
         pending.data == NULL);
 
-    fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
-    loop.calls = 0;
-    loop.corrupt_path = true;
+    ds->fixture.authorization = FILE_MARKET_DELIVERY_AUTHORIZED;
+    ds->loop.calls = 0;
+    ds->loop.corrupt_path = true;
     struct file_market_delivery_chunk corrupt = {0};
     enum file_market_delivery_status corrupt_status =
         file_market_delivery_fetch_onion_with(
-            onion_loopback_get, &loop, seller_onion_pubkey,
-            request.network_genesis, request.offer_id, 7,
-            buyer_public, buyer_seed, &corrupt);
+            onion_loopback_get, &ds->loop, ds->seller_onion_pubkey,
+            ds->request.network_genesis, ds->request.offer_id, 7,
+            ds->buyer_public, ds->buyer_seed, &corrupt);
     DELIVERY_CHECK("malformed onion path surfaces as unknown payment",
         corrupt_status == FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN &&
         corrupt.data == NULL);
-    loop.corrupt_path = false;
+    ds->loop.corrupt_path = false;
+    return failures;
+}
+
+int file_market_delivery_tests(void)
+{
+    int failures = 0;
+    struct delivery_suite ds;
+    failures += delivery_run_transport_checks();
+    bool made = delivery_request_fixture(&ds.server, &ds.request, ds.wire,
+                                         ds.buyer_seed);
+    DELIVERY_CHECK("session-bound signed request fixture", made);
+    if (!made)
+        return failures;
+    failures += delivery_run_request_session_checks(&ds);
+    failures += delivery_run_prepare_payment_checks(&ds);
+    failures += delivery_run_prepare_ready_checks(&ds);
+    failures += delivery_run_moderation_checks(&ds);
+    failures += delivery_run_socket_serve_checks(&ds);
+    failures += delivery_run_buyer_session_checks(&ds);
+    failures += delivery_run_endpoint_fetch_checks(&ds);
+    failures += delivery_run_expired_endpoint_check(&ds);
+
+    /* ── Phase B5 onion delivery (docs/work/MARKET_ONION_DELIVERY.md) ── */
+    failures += delivery_run_onion_address_checks();
+    failures += delivery_run_onion_request_checks(&ds);
+    failures += delivery_run_onion_single_fetch_checks(&ds);
+    failures += delivery_run_onion_multi_fetch_checks(&ds);
+    failures += delivery_run_onion_deadline_checks(&ds);
+    failures += delivery_run_onion_refusal_checks(&ds);
 
     file_market_delivery_reset_handlers();
     return failures;
