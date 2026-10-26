@@ -157,9 +157,6 @@ bool progress_directory_child_exists(uintptr_t handle, const char *child,
 }
 
 #if defined(_WIN32)
-/* Report whether the retained handle and the candidate handle denote the same
- * directory object, with the candidate resolving to a plain directory rather
- * than a reparse point. */
 static bool progress_directory_windows_handles_same_directory(HANDLE retained,
                                                               HANDLE candidate)
 {
@@ -176,8 +173,6 @@ static bool progress_directory_windows_handles_same_directory(HANDLE retained,
            (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
 }
 #else
-/* Report whether the retained descriptor and the candidate descriptor denote
- * the same directory object. */
 static bool progress_directory_unix_fds_same_directory(int retained_fd,
                                                        int candidate_fd)
 {
