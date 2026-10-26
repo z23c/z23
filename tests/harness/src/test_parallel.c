@@ -1271,15 +1271,43 @@ static void print_captured(const char *path)
  * the markers so "ALL TESTS PASSED" can never silently absorb a skip;
  * the gates themselves stay opt-in (they are gated for runtime
  * reasons — visibility, not force-enabling, is the contract). */
+struct marker_line_scan {
+    size_t matched;
+    bool seen;
+    int lines;
+};
+
+static void marker_line_byte(struct marker_line_scan *scan, unsigned char byte,
+                              const char *sentinel, size_t len)
+{
+    if (byte == '\n') {
+        scan->lines += scan->seen;
+        scan->seen = false;
+        scan->matched = 0;
+        return;
+    }
+    if (scan->seen) return;
+    /* Neither canonical sentinel repeats its initial byte internally. */
+    if (byte == (unsigned char)sentinel[scan->matched]) scan->matched++;
+    else scan->matched = byte == (unsigned char)sentinel[0];
+    if (scan->matched == len) scan->seen = true;
+}
+
+static int marker_stream_lines(FILE *fp, const char *sentinel)
+{
+    struct marker_line_scan scan = {0};
+    unsigned char bytes[4096];
+    size_t n, len = strlen(sentinel);
+    while ((n = fread(bytes, 1, sizeof bytes, fp)) > 0)
+        for (size_t i = 0; i < n; i++) marker_line_byte(&scan, bytes[i], sentinel, len);
+    return scan.lines + scan.seen;
+}
+
 static int count_marker_lines(const char *path, const char *sentinel)
 {
     FILE *fp = fopen(path, "r");
     if (!fp) return 0;
-    char line[4096];
-    int n = 0;
-    while (fgets(line, sizeof(line), fp))
-        if (strstr(line, sentinel))
-            n++;
+    int n = marker_stream_lines(fp, sentinel);
     fclose(fp);
     return n;
 }

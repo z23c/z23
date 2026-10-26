@@ -13,6 +13,7 @@
 #include "test_group_weights.h"
 #include "util/clientversion.h"
 #include "util/util.h"
+#include "util/spawn.h"
 #include "json/json.h"
 
 #include <errno.h>
@@ -2453,6 +2454,63 @@ static bool tgs_home_contract(const char *state, const char *expected)
            tgs_scratch_root_is_real(state);
 }
 
+#if !defined(_WIN32)
+static bool tgs_marker_padding(FILE *fp, size_t n);
+
+static bool tgs_marker_runner_pid(long base)
+{
+    struct stat st;
+    if (lstat("marker-runner-pid", &st) == 0) {
+        if (!S_ISREG(st.st_mode)) return false;
+        FILE *fp = fopen("marker-runner-pid", "r");
+        if (!fp) return false;
+        long long pid = 0;
+        long saved_base = 0;
+        /* Preserve the first capture's base; a retry may have a different
+         * header length and aligns its own capture independently. */
+        bool ok = fscanf(fp, "%lld %ld", &pid, &saved_base) == 2 &&
+                  pid == (long long)getppid() && saved_base > 0 && saved_base % 4096 == 0;
+        if (fclose(fp) != 0) ok = false;
+        return ok;
+    }
+    if (errno != ENOENT) return false;
+    FILE *fp = fopen("marker-runner-pid", "wx");
+    if (!fp) return false;
+    bool ok = fprintf(fp, "%lld %ld", (long long)getppid(), base) > 0;
+    if (fclose(fp) != 0) ok = false;
+    return ok;
+}
+
+static bool tgs_marker_probe_output(void)
+{
+    struct stat st;
+    if (lstat("marker-lines-probe", &st) != 0) return errno == ENOENT;
+    if (!S_ISREG(st.st_mode)) return false;
+    FILE *fp = fopen("marker-lines-probe", "rb");
+    if (!fp) return false;
+    if (fflush(stdout) != 0) { fclose(fp); return false; }
+    long position = ftell(stdout);
+    if (position < 0) { fclose(fp); return false; }
+    /* Include the runner's dynamic private-state diagnostic in the observed
+     * offset. Start the fixture on a fresh, globally aligned capture block. */
+    size_t padding = (4096 - ((size_t)position + 1) % 4096) % 4096;
+    if (!tgs_marker_padding(stdout, padding) || fputc('\n', stdout) == EOF ||
+        !tgs_marker_runner_pid(position + (long)padding + 1)) {
+        fclose(fp);
+        return false;
+    }
+    char bytes[4096];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(bytes, 1, sizeof bytes, fp)) > 0) {
+        if (fwrite(bytes, 1, n, stdout) != n) { ok = false; break; }
+    }
+    if (ferror(fp)) ok = false;
+    if (fclose(fp) != 0) ok = false;
+    return ok;
+}
+#endif
+
 static int tgs_state_probe(void)
 {
     const char *state = getenv("XDG_STATE_HOME");
@@ -2467,8 +2525,184 @@ static int tgs_state_probe(void)
     bool ok = fputs("private state\n", f) >= 0;
     if (fclose(f) != 0) ok = false;
     printf("runner-state-probe: %s\n", ok ? "PASS" : "FAIL");
+#if !defined(_WIN32)
+    if (ok) ok = tgs_marker_probe_output();
+#endif
     return ok ? 0 : 1;
 }
+
+#if !defined(_WIN32)
+static bool tgs_marker_padding(FILE *fp, size_t n)
+{
+    char bytes[4096];
+    memset(bytes, 'x', sizeof bytes);
+    while (n) {
+        size_t chunk = n < sizeof bytes ? n : sizeof bytes;
+        if (fwrite(bytes, 1, chunk, fp) != chunk) return false;
+        n -= chunk;
+    }
+    return true;
+}
+
+struct tgs_marker_boundary { long offset; size_t marker, split; };
+static struct tgs_marker_boundary g_marker_boundaries[18];
+static size_t g_marker_boundary_count;
+static const char *const g_marker_sentinels[] = {"SKIP (", "UNOBSERVED ("};
+
+static bool tgs_marker_aligned(FILE *fp, size_t marker, size_t split)
+{
+    long position = ftell(fp);
+    if (position < 0 || g_marker_boundary_count >= 18) return false;
+    size_t capture = (size_t)position;
+    size_t padding = (4096 - (capture + split) % 4096) % 4096;
+    if (!tgs_marker_padding(fp, padding)) return false;
+    g_marker_boundaries[g_marker_boundary_count++] =
+        (struct tgs_marker_boundary){(long)(capture + padding), marker, split};
+    return fprintf(fp, "%saligned)\n", g_marker_sentinels[marker]) >= 0;
+}
+
+static bool tgs_marker_fixture(const char *path)
+{
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return false;
+    bool ok = true;
+    g_marker_boundary_count = 0;
+    const char *const *markers = g_marker_sentinels;
+    for (size_t m = 0; m < 2; m++) {
+        for (size_t split = 0; split < strlen(markers[m]); split++)
+            ok = ok && tgs_marker_padding(fp, 4095 - split) &&
+                 fprintf(fp, "%ssplit)\n", markers[m]) >= 0;
+        for (size_t split = 0; split < strlen(markers[m]); split++)
+            ok = ok && tgs_marker_aligned(fp, m, split);
+        ok = ok && fprintf(fp, "%sfirst)", markers[m]) >= 0 &&
+             tgs_marker_padding(fp, 8192) && fprintf(fp, "%ssecond)\n", markers[m]) >= 0;
+    }
+    ok = ok && fputs("SKIP \n(not a marker)\nUNOBSERVED \n(not a marker)\nSKIP (EOF)", fp) >= 0;
+    if (fclose(fp) != 0) ok = false;
+    return ok;
+}
+
+static bool tgs_marker_timing(void)
+{
+    struct json_value timing = {0};
+    if (!selector_timing_read(&timing)) return false;
+    const struct json_value *rows = json_get(&timing, "groups");
+    bool ok = json_size(rows) == 2;
+    const struct json_value *row = NULL;
+    for (size_t i = 0; i < json_size(rows); i++) {
+        const struct json_value *candidate = json_at(rows, i);
+        const char *name = json_get_str(json_get(candidate, "name"));
+        if (name && strcmp(name, "test_test_group_selector") == 0) row = candidate;
+    }
+    ok = ok && row && json_get_int(json_get(row, "skip_markers")) == 14 &&
+         json_get_int(json_get(row, "env_unobserved")) == 25 &&
+         json_get_bool(json_get(row, "measured")) && selector_timing_zero(row, "rc");
+    json_free(&timing);
+    return ok;
+}
+
+static bool tgs_marker_capture_boundaries(FILE *fp, long base)
+{
+    char bytes[64];
+    if (g_marker_boundary_count != 18 || base <= 0 || base % 4096 != 0) return false;
+    for (size_t i = 0; i < g_marker_boundary_count; i++) {
+        const struct tgs_marker_boundary *b = &g_marker_boundaries[i];
+        const char *sentinel = g_marker_sentinels[b->marker];
+        size_t len = strlen(sentinel);
+        if (((size_t)b->offset + b->split) % 4096 != 0) return false;
+        if (b->split && (size_t)b->offset / 4096 == ((size_t)b->offset + len - 1) / 4096)
+            return false;
+        if (fseek(fp, base + b->offset, SEEK_SET) != 0 || fread(bytes, 1, len, fp) != len ||
+            memcmp(bytes, sentinel, len) != 0) return false;
+    }
+    return !ferror(fp);
+}
+
+static bool tgs_marker_capture_eof(const char *root)
+{
+    char path[PATH_MAX + 128];
+    int n = snprintf(path, sizeof path, "%s/marker-runner-pid", root);
+    if (n < 0 || (size_t)n >= sizeof path) return false;
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    long long pid = 0;
+    long base = 0;
+    bool ok = fscanf(fp, "%lld %ld", &pid, &base) == 2 && pid > 0;
+    if (fclose(fp) != 0) ok = false;
+    if (!ok) return false;
+    /* The runner retains the deterministic first attempt for an UNOBSERVED
+     * retry; its successful final capture is retired after accounting. */
+    n = snprintf(path, sizeof path, "%s/test-tmp/test_parallel_%lld_%zu.log.first",
+                 root, pid, tgs_catalog_index("test_test_group_selector"));
+    if (n < 0 || (size_t)n >= sizeof path) return false;
+    fp = fopen(path, "rb");
+    if (!fp) return false;
+    ok = tgs_marker_capture_boundaries(fp, base) &&
+         fseek(fp, -1, SEEK_END) == 0 && fgetc(fp) == ')';
+    if (fclose(fp) != 0) ok = false;
+    if (ok) fprintf(stderr, "marker-boundaries: aligned=18 straddles=16 EOF verified\n");
+    return ok;
+}
+
+static bool tgs_marker_prepare(const char *root)
+{
+    char path[PATH_MAX + 32];
+    int n = snprintf(path, sizeof path, "%s/home", root);
+    if (n < 0 || (size_t)n >= sizeof path || mkdir(path, 0700) != 0) return false;
+    n = snprintf(path, sizeof path, "%s/caller-state", root);
+    if (n < 0 || (size_t)n >= sizeof path || mkdir(path, 0700) != 0) return false;
+    n = snprintf(path, sizeof path, "%s/last-run.json", g_tgs_timing_dir);
+    if (n < 0 || (size_t)n >= sizeof path) return false;
+    return unlink(path) == 0 || errno == ENOENT;
+}
+
+static bool tgs_marker_env(char *out, size_t cap, const char *key,
+                           const char *root, const char *suffix)
+{
+    int n = snprintf(out, cap, "%s=%s/%s", key, root, suffix);
+    return n > 0 && (size_t)n < cap;
+}
+
+static int tgs_marker_launch(const char *root, const char *exe, char *out, size_t cap)
+{
+    char home[PATH_MAX + 16], expected[PATH_MAX + 40], state[PATH_MAX + 40];
+    const char *env = tgs_fixture_executable("/usr/bin/env", "/bin/env");
+    if (!env || !tgs_marker_prepare(root)) return -1;
+    if (!tgs_marker_env(home, sizeof home, "HOME", root, "home") ||
+        !tgs_marker_env(expected, sizeof expected, "ZCL_TEST_RUNNER_EXPECT_HOME", root, "home") ||
+        !tgs_marker_env(state, sizeof state, "ZCL_STATE_ROOT", root, "caller-state")) return -1;
+    const char *args[] = {env, "-u", "ZCL_TEST_REAL_HOME", "-u", "ZCL_TEST_CANONICAL_DATADIR",
+        "-u", "XDG_STATE_HOME", home, expected, state, exe, "--jobs=2", "--verbose",
+        "--no-cache", "--state-isolation-probe",
+        "--exact=test_test_group_selector,test_hex_codec", NULL};
+    bool timed_out = false;
+    int rc = zcl_spawn_capture_merged_in_dir_observed(args, root, out, cap, 60000, &timed_out);
+    return timed_out ? -1 : rc;
+}
+
+static int test_runner_marker_lines(void)
+{
+    int failures = 0;
+    char root[PATH_MAX] = {0};
+    bool created = test_mkdtemp(root, sizeof root, "tgs_marker_lines") != NULL;
+    TEST("runner: marker counts follow logical lines across read boundaries") {
+        static char out[512 * 1024];
+        char exe[PATH_MAX], path[PATH_MAX + 32];
+        ASSERT(created);
+        ASSERT(os_proc_exe_path(exe, sizeof exe));
+        int n = snprintf(path, sizeof path, "%s/marker-lines-probe", root);
+        ASSERT(n > 0 && (size_t)n < sizeof path);
+        ASSERT(tgs_marker_fixture(path));
+        ASSERT(tgs_marker_launch(root, exe, out, sizeof out) == 0);
+        ASSERT(strstr(out, "self_skips=1 env_unobserved=1") != NULL);
+        ASSERT(tgs_marker_capture_eof(root));
+        ASSERT(tgs_marker_timing());
+        PASS();
+    } _test_next:;
+    if (created && test_rm_rf_recursive(root) != 0) failures++;
+    return failures;
+}
+#endif
 
 static bool tgs_retry_first_retained(const char *root, const char *out)
 {
@@ -2952,6 +3186,9 @@ int test_test_group_selector(void)
         fprintf(stderr, "selector: private timing dir setup failed\n");
         return 1;
     }
+#if !defined(_WIN32)
+    failures += test_runner_marker_lines();
+#endif
     failures += test_runner_private_state();
     failures += test_runner_retry_evidence();
     failures += test_runner_retry_probe_bounds();
