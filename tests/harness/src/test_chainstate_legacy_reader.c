@@ -155,12 +155,12 @@ static bool nf_cb(const uint8_t nf[32], void *ctx)
     return true;
 }
 
-static int run_bulk_iter_tests(void)
+/* ── A. Empty pool: every iterator returns 0, best pointers absent. ── */
+static int check_empty_pool_iterators(void)
 {
     int failures = 0;
     char dir[512];
 
-    /* ── A. Empty pool: every iterator returns 0, best pointers absent. ── */
     test_make_tmpdir(dir, sizeof(dir), "cslr_empty", "db");
     BLK_CHECK("make empty db", blk_make_empty(dir));
     {
@@ -189,6 +189,16 @@ static int run_bulk_iter_tests(void)
         }
     }
     test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* Scenarios B+C: a single anchor row plus its best-anchor pointer must
+ * iterate out exactly once and re-hash to its key — once for Sapling,
+ * once for Sprout. */
+static int check_single_anchor_and_best_pointer(void)
+{
+    int failures = 0;
+    char dir[512];
 
     /* ── B. Single Sapling anchor + best pointer. ── */
     test_make_tmpdir(dir, sizeof(dir), "cslr_sap1", "db");
@@ -251,8 +261,15 @@ static int run_bulk_iter_tests(void)
         }
     }
     test_rm_rf_recursive(dir);
+    return failures;
+}
 
-    /* ── D. Nullifier keyspaces ('S' Sapling, 's' Sprout) — presence-only. ── */
+/* ── D. Nullifier keyspaces ('S' Sapling, 's' Sprout) — presence-only. ── */
+static int check_nullifier_iteration(void)
+{
+    int failures = 0;
+    char dir[512];
+
     test_make_tmpdir(dir, sizeof(dir), "cslr_nf", "db");
     {
         const unsigned char one = 0x01; /* zcashd stores serialized `true`. */
@@ -281,6 +298,16 @@ static int run_bulk_iter_tests(void)
         }
     }
     test_rm_rf_recursive(dir);
+    return failures;
+}
+
+/* Scenarios E–G: corrupt anchor rows (wrong-root key, trailing bytes,
+ * malformed key length) must abort the whole scan — fail-closed
+ * completeness, never a silent skip. */
+static int check_corrupt_rows_abort_scan(void)
+{
+    int failures = 0;
+    char dir[512];
 
     /* ── E. Corrupt (non-re-hashing) anchor: valid tree under a WRONG-root
      *       key MUST abort the whole scan (fail-closed completeness). ── */
@@ -356,8 +383,15 @@ static int run_bulk_iter_tests(void)
         }
     }
     test_rm_rf_recursive(dir);
+    return failures;
+}
 
-    /* ── H. Consumer refusal aborts the scan (import must be complete). ── */
+/* ── H. Consumer refusal aborts the scan (import must be complete). ── */
+static int check_consumer_refusal_aborts_scan(void)
+{
+    int failures = 0;
+    char dir[512];
+
     test_make_tmpdir(dir, sizeof(dir), "cslr_refuse", "db");
     {
         struct incremental_merkle_tree t; blk_build_sapling(3, &t);
@@ -374,19 +408,32 @@ static int run_bulk_iter_tests(void)
         }
     }
     test_rm_rf_recursive(dir);
+    return failures;
+}
 
-    /* ── I. NULL-arg guards on the bulk surface. ── */
-    {
-        struct anchor_collect ac = {0};
-        struct nf_collect nc = {0};
-        struct uint256 r;
-        BLK_CHECK("iter_sapling_anchors(NULL handle) == -1",
-                  chainstate_legacy_iter_sapling_anchors(NULL, anchor_cb, &ac) == -1);
-        BLK_CHECK("iter_sapling_nullifiers(NULL cb) == -1 is not required; NULL handle == -1",
-                  chainstate_legacy_iter_sapling_nullifiers(NULL, nf_cb, &nc) == -1);
-        BLK_CHECK("get_best_sapling_anchor(NULL) == false",
-                  chainstate_legacy_get_best_sapling_anchor(NULL, &r) == false);
-    }
+/* ── I. NULL-arg guards on the bulk surface. ── */
+static int check_null_handle_guards(void)
+{
+    int failures = 0;
+    struct anchor_collect ac = {0};
+    struct nf_collect nc = {0};
+    struct uint256 r;
+    BLK_CHECK("iter_sapling_anchors(NULL handle) == -1",
+              chainstate_legacy_iter_sapling_anchors(NULL, anchor_cb, &ac) == -1);
+    BLK_CHECK("iter_sapling_nullifiers(NULL cb) == -1 is not required; NULL handle == -1",
+              chainstate_legacy_iter_sapling_nullifiers(NULL, nf_cb, &nc) == -1);
+    BLK_CHECK("get_best_sapling_anchor(NULL) == false",
+              chainstate_legacy_get_best_sapling_anchor(NULL, &r) == false);
+    return failures;
+}
+
+/* Scenarios J+K: empty and truncated values under a well-formed 'Z' key
+ * must be refused by both the point lookup and the scan — no crash, no
+ * OOB read. */
+static int check_empty_and_truncated_values_refused(void)
+{
+    int failures = 0;
+    char dir[512];
 
     /* ── J. EMPTY value under a well-formed 33-byte 'Z' anchor key —
      *       refused, not a crash / OOB read. ── */
@@ -450,7 +497,22 @@ static int run_bulk_iter_tests(void)
         }
     }
     test_rm_rf_recursive(dir);
+    return failures;
+}
 
+/* Runs the hermetic bulk-iterator scenarios (A–K) in order; each helper
+ * owns its LevelDB dir and returns its own failure count. */
+static int run_bulk_iter_tests(void)
+{
+    int failures = 0;
+
+    failures += check_empty_pool_iterators();
+    failures += check_single_anchor_and_best_pointer();
+    failures += check_nullifier_iteration();
+    failures += check_corrupt_rows_abort_scan();
+    failures += check_consumer_refusal_aborts_scan();
+    failures += check_null_handle_guards();
+    failures += check_empty_and_truncated_values_refused();
     return failures;
 }
 
@@ -503,6 +565,44 @@ static bool walk_cb(const struct uint256 *txid,
         st->print_first--;
     }
     return true;
+}
+
+/* Sanity bands applied to the full-walk stats once the walk itself
+ * succeeded; returns the number of failed bands. */
+static int check_walk_sanity_bands(int64_t n, const struct walk_state *st)
+{
+    int failures = 0;
+
+    /* Records are CCoins rows (one per transaction with any unspent
+     * output), not vouts: ~500k transactions / ~1.35M txouts on ZCL
+     * mainnet. Track tx count for `records`, vout count for
+     * `total_vouts`. Generous bands. */
+    if (n < 400000 || n > 2000000) {
+        printf("    FAIL: record count outside [400k..2M] sanity band\n");
+        failures++;
+    }
+    if (st->total_vouts < 1000000 || st->total_vouts > 5000000) {
+        printf("    FAIL: vout count outside [1M..5M] sanity band\n");
+        failures++;
+    }
+    if (st->bad_records > 0) {
+        printf("    FAIL: %d malformed records\n", st->bad_records);
+        failures++;
+    }
+    if (st->min_height < 1 || st->max_height < 3000000) {
+        printf("    FAIL: height range [%d..%d] looks wrong\n",
+               st->min_height, st->max_height);
+        failures++;
+    }
+    /* Supply check: ZCL has a published supply on the order of
+     * 10M ZCL ≈ 1e15 sat.  Accept 5e14..3e15. */
+    if (st->total_value_sat < 500000000000000LL ||
+        st->total_value_sat > 3000000000000000LL) {
+        printf("    FAIL: total value %.2f ZCL outside [5M..30M] band\n",
+               (double)st->total_value_sat / 1e8);
+        failures++;
+    }
+    return failures;
 }
 
 static const char *pick_snapshot_path(void)
@@ -582,35 +682,7 @@ int test_chainstate_legacy_reader(void)
                n, st.total_vouts,
                (double)st.total_value_sat / 1e8,
                st.min_height, st.max_height, st.bad_records);
-        /* Records are CCoins rows (one per transaction with any unspent
-         * output), not vouts: ~500k transactions / ~1.35M txouts on ZCL
-         * mainnet. Track tx count for `records`, vout count for
-         * `total_vouts`. Generous bands. */
-        if (n < 400000 || n > 2000000) {
-            printf("    FAIL: record count outside [400k..2M] sanity band\n");
-            failures++;
-        }
-        if (st.total_vouts < 1000000 || st.total_vouts > 5000000) {
-            printf("    FAIL: vout count outside [1M..5M] sanity band\n");
-            failures++;
-        }
-        if (st.bad_records > 0) {
-            printf("    FAIL: %d malformed records\n", st.bad_records);
-            failures++;
-        }
-        if (st.min_height < 1 || st.max_height < 3000000) {
-            printf("    FAIL: height range [%d..%d] looks wrong\n",
-                   st.min_height, st.max_height);
-            failures++;
-        }
-        /* Supply check: ZCL has a published supply on the order of
-         * 10M ZCL ≈ 1e15 sat.  Accept 5e14..3e15. */
-        if (st.total_value_sat < 500000000000000LL ||
-            st.total_value_sat > 3000000000000000LL) {
-            printf("    FAIL: total value %.2f ZCL outside [5M..30M] band\n",
-                   (double)st.total_value_sat / 1e8);
-            failures++;
-        }
+        failures += check_walk_sanity_bands(n, &st);
     }
 
     chainstate_legacy_close(h);
