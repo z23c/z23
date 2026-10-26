@@ -100,11 +100,70 @@ static bool bgv_auth_evidence_ready(
     return true;
 }
 
+static bool bgv_auth_dependencies_ready(struct bg_validation_service *svc)
+{
+    return svc && svc->ms && svc->ndb && svc->ndb->open && svc->ndb->db;
+}
+
+static bool bgv_auth_walk_current(int verified, int chain_height,
+                                  int64_t skips, bool coverage_complete,
+                                  char reason[192])
+{
+    if (coverage_complete && skips == 0 && verified == chain_height)
+        return true;
+    snprintf(reason, 192,
+             "incomplete walk verified=%d tip=%d skips=%lld coverage=%s",
+             verified, chain_height, (long long)skips,
+             coverage_complete ? "complete" : "gap");
+    return false;
+}
+
+static void bgv_auth_scan_locked_frontier(
+    struct bg_validation_service *svc, sqlite3 *pdb, int *chain_height,
+    int32_t *coins_height, uint8_t root_bytes[32], bool *root_ok,
+    int *chain_height_after)
+{
+    /* The reducer uses the same recursive process lock. Holding it across the
+     * height samples and SHA3 scan freezes the coins frontier for one coherent
+     * claim; this runs once per completed campaign, never on the hot path. */
+    progress_store_tx_lock();
+    *chain_height = active_chain_height(&svc->ms->chain_active);
+    bool coins_ok = reducer_frontier_derive_coins_best_now(
+        coins_height, NULL, NULL);
+    *root_ok = coins_ok && *coins_height == *chain_height &&
+               coins_kv_commitment(pdb, root_bytes) == 0;
+    *chain_height_after = active_chain_height(&svc->ms->chain_active);
+    progress_store_tx_unlock();
+}
+
+static bool bgv_auth_frontier_stable(int verified, int chain_height,
+                                     int32_t coins_height, int64_t skips,
+                                     int chain_height_after)
+{
+    if (chain_height_after != chain_height)
+        return false;
+    return bg_validation_authority_claim_is_complete(
+        verified, chain_height, coins_height, skips, true);
+}
+
+static bool bgv_auth_resolve_authority_root(
+    struct bg_validation_service *svc, bool external_seeded,
+    const uint8_t frontier_root[32], uint8_t authority_root[32])
+{
+    memcpy(authority_root, frontier_root, 32);
+    if (!external_seeded)
+        return true;
+    size_t root_len = 0;
+    return node_db_state_get(svc->ndb, "cec.snapshot_utxo_sha3",
+                             authority_root, 32, &root_len) &&
+           root_len == 32;
+}
+
 struct zcl_result bg_validation_authority_publish(
     struct bg_validation_service *svc, bool external_seeded,
     bool coverage_complete)
 {
-    if (!svc || !svc->ms || !svc->ndb || !svc->ndb->open || !svc->ndb->db)
+    if (!bgv_auth_dependencies_ready(svc))
         return bgv_auth_refuse("validation authority dependencies unavailable");
 
     int verified = atomic_load(&svc->progress.verified_height);
@@ -112,36 +171,22 @@ struct zcl_result bg_validation_authority_publish(
     int chain_height = -1;
     int32_t coins_height = -1;
     uint8_t root_bytes[32] = {0};
+    char reason[192] = {0};
     sqlite3 *pdb = progress_store_db();
     if (!pdb)
         return bgv_auth_refuse("canonical coins store unavailable");
 
     chain_height = active_chain_height(&svc->ms->chain_active);
-    if (!coverage_complete || skips != 0 || verified != chain_height) {
-        char reason[192];
-        snprintf(reason, sizeof(reason),
-                 "incomplete walk verified=%d tip=%d skips=%lld coverage=%s",
-                 verified, chain_height, (long long)skips,
-                 coverage_complete ? "complete" : "gap");
+    if (!bgv_auth_walk_current(verified, chain_height, skips,
+                               coverage_complete, reason))
         return bgv_auth_refuse(reason);
-    }
 
-    /* The reducer uses the same recursive process lock. Holding it across the
-     * height samples and SHA3 scan freezes the coins frontier for one coherent
-     * claim; this runs once per completed campaign, never on the hot path. */
-    progress_store_tx_lock();
-    chain_height = active_chain_height(&svc->ms->chain_active);
-    bool coins_ok = reducer_frontier_derive_coins_best_now(
-        &coins_height, NULL, NULL);
-    bool root_ok = coins_ok && coins_height == chain_height &&
-                   coins_kv_commitment(pdb, root_bytes) == 0;
-    int chain_height_after = active_chain_height(&svc->ms->chain_active);
-    progress_store_tx_unlock();
-
-    if (!bg_validation_authority_claim_is_complete(
-            verified, chain_height, coins_height, skips, true) ||
-        chain_height_after != chain_height) {
-        char reason[192];
+    bool root_ok = false;
+    int chain_height_after = -1;
+    bgv_auth_scan_locked_frontier(svc, pdb, &chain_height, &coins_height,
+                                  root_bytes, &root_ok, &chain_height_after);
+    if (!bgv_auth_frontier_stable(verified, chain_height, coins_height,
+                                  skips, chain_height_after)) {
         snprintf(reason, sizeof(reason),
                  "frontier moved during authority scan verified=%d tip=%d after=%d coins=%d skips=%lld",
                  verified, chain_height, chain_height_after, coins_height,
@@ -160,21 +205,14 @@ struct zcl_result bg_validation_authority_publish(
         return ZCL_OK;
     }
 
-    char reason[192] = {0};
     if (!bgv_auth_evidence_ready(&view, external_seeded, reason))
         return bgv_auth_refuse(reason);
 
     uint8_t authority_root_bytes[32];
-    memcpy(authority_root_bytes, root_bytes, sizeof(authority_root_bytes));
-    if (external_seeded) {
-        size_t root_len = 0;
-        if (!node_db_state_get(svc->ndb, "cec.snapshot_utxo_sha3",
-                               authority_root_bytes,
-                               sizeof(authority_root_bytes), &root_len) ||
-            root_len != sizeof(authority_root_bytes))
-            return bgv_auth_refuse(
-                "assisted walk lacks its bound snapshot commitment");
-    }
+    if (!bgv_auth_resolve_authority_root(svc, external_seeded, root_bytes,
+                                         authority_root_bytes))
+        return bgv_auth_refuse(
+            "assisted walk lacks its bound snapshot commitment");
 
     struct uint256 root;
     memcpy(root.data, authority_root_bytes, sizeof(root.data));
@@ -187,14 +225,14 @@ struct zcl_result bg_validation_authority_publish(
         return bgv_auth_refuse(reason);
     }
 
+    const char *origin = external_seeded ? "assisted_snapshot"
+                                          : "genesis_history";
     blocker_clear("bg_validation.full_history_unproven");
     event_emitf(EV_SYNC_STATE_CHANGE, 0,
                 "bg_validation authority published height=%d origin=%s",
-                chain_height, external_seeded ? "assisted_snapshot" :
-                                                "genesis_history");
+                chain_height, origin);
     LOG_INFO("bg_validation",
              "[bg-valid] durable full-validation authority published h=%d origin=%s",
-             chain_height, external_seeded ? "assisted_snapshot" :
-                                             "genesis_history");
+             chain_height, origin);
     return ZCL_OK;
 }
