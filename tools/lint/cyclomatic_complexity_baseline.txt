@@ -255,10 +255,6 @@ contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_propose_cas:30
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_serialize:30
 contexts/commons/modules/vcs/src/zcode_epoch_schedule.c:vcs_zcode_epoch_schedule_validate:31
-contexts/commons/modules/vcs/src/zcode_family_access.c:access_local_action:22
-contexts/commons/modules/vcs/src/zcode_family_access.c:request_control_valid:16
-contexts/commons/modules/vcs/src/zcode_family_access.c:request_diagnostic_valid:16
-contexts/commons/modules/vcs/src/zcode_family_access.c:request_intake_valid:17
 contexts/commons/modules/vcs/src/zcode_family_admission_object.c:admission_shape:31
 contexts/commons/modules/vcs/src/zcode_family_admission_object.c:vcs_zcode_family_admission_error_string:16
 contexts/commons/modules/vcs/src/zcode_family_admission_projection.c:vcs_zcode_family_admission_projection_build_v1:16

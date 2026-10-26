@@ -29,7 +29,7 @@ static bool access_zero(const uint8_t root[32])
     return !zcl_bytes_any_set(root, 32);
 }
 
-static enum vcs_zcode_sovereignty_action access_local_action(
+static enum vcs_zcode_sovereignty_action access_local_action_data_plane(
     enum vcs_zcode_family_access_action_v1 action)
 {
     switch (action) {
@@ -50,6 +50,16 @@ static enum vcs_zcode_sovereignty_action access_local_action(
     case VCS_ZCODE_FAMILY_ACTION_SERVE:
     case VCS_ZCODE_FAMILY_ACTION_DOWNLOAD:
         return VCS_ZCODE_SOVEREIGNTY_SERVE;
+    default:
+        break;
+    }
+    return VCS_ZCODE_SOVEREIGNTY_ACTION_COUNT;
+}
+
+static enum vcs_zcode_sovereignty_action access_local_action(
+    enum vcs_zcode_family_access_action_v1 action)
+{
+    switch (action) {
     case VCS_ZCODE_FAMILY_ACTION_DHT_ADVERTISE:
     case VCS_ZCODE_FAMILY_ACTION_DHT_FORWARD:
     case VCS_ZCODE_FAMILY_ACTION_PROVIDER_RENEW:
@@ -60,10 +70,9 @@ static enum vcs_zcode_sovereignty_action access_local_action(
     case VCS_ZCODE_FAMILY_ACTION_RUN:
     case VCS_ZCODE_FAMILY_ACTION_EXECUTE:
         return VCS_ZCODE_SOVEREIGNTY_EXECUTE;
-    case VCS_ZCODE_FAMILY_ACTION_COUNT:
-        break;
+    default:
+        return access_local_action_data_plane(action);
     }
-    return VCS_ZCODE_SOVEREIGNTY_ACTION_COUNT;
 }
 
 static bool request_subject_binds_content(
@@ -98,6 +107,24 @@ static bool request_family_public_valid(
            request_extras_zero(request);
 }
 
+static bool request_intake_bounds_valid(
+    const struct vcs_zcode_family_access_request_v1 *request)
+{
+    return request->expected_bytes > 0 &&
+           request->expected_bytes <= request->byte_budget &&
+           request->byte_budget <= VCS_ZCODE_FAMILY_INTAKE_MAX_BYTES &&
+           request->current_height > 0 && request->current_mtp > 0 &&
+           request->current_height <= request->expires_height &&
+           request->current_mtp <= request->expires_mtp;
+}
+
+static bool request_intake_flags_clear(
+    const struct vcs_zcode_family_access_request_v1 *request)
+{
+    return !request->control_bytes && !request->control_kind &&
+           !request->operator_authorized && !request->redacted;
+}
+
 static bool request_intake_valid(
     const struct vcs_zcode_family_access_request_v1 *request)
 {
@@ -107,14 +134,18 @@ static bool request_intake_valid(
            zcl_bytes_any_set(request->dependency_closure_root, 32) &&
            zcl_bytes_any_set(request->provider_root, 32) &&
            request_subject_binds_content(request) &&
-           request->expected_bytes > 0 &&
-           request->expected_bytes <= request->byte_budget &&
-           request->byte_budget <= VCS_ZCODE_FAMILY_INTAKE_MAX_BYTES &&
-           request->current_height > 0 && request->current_mtp > 0 &&
-           request->current_height <= request->expires_height &&
-           request->current_mtp <= request->expires_mtp &&
-           !request->control_bytes && !request->control_kind &&
-           !request->operator_authorized && !request->redacted;
+           request_intake_bounds_valid(request) &&
+           request_intake_flags_clear(request);
+}
+
+static bool request_diagnostic_extras_zero(
+    const struct vcs_zcode_family_access_request_v1 *request)
+{
+    return access_zero(request->provider_root) && !request->expected_bytes &&
+           !request->byte_budget && !request->expires_height &&
+           !request->expires_mtp && !request->current_height &&
+           !request->current_mtp && !request->control_bytes &&
+           !request->control_kind;
 }
 
 static bool request_diagnostic_valid(
@@ -126,14 +157,10 @@ static bool request_diagnostic_valid(
            zcl_bytes_any_set(request->dependency_closure_root, 32) &&
            request_subject_binds_content(request) &&
            request->operator_authorized && request->redacted &&
-           access_zero(request->provider_root) && !request->expected_bytes &&
-           !request->byte_budget && !request->expires_height &&
-           !request->expires_mtp && !request->current_height &&
-           !request->current_mtp && !request->control_bytes &&
-           !request->control_kind;
+           request_diagnostic_extras_zero(request);
 }
 
-static bool request_control_valid(
+static bool request_control_frame_valid(
     const struct vcs_zcode_family_access_request_v1 *request)
 {
     return request->action == VCS_ZCODE_FAMILY_ACTION_PROTOCOL_FRAME &&
@@ -141,14 +168,26 @@ static bool request_control_valid(
            request->control_kind <=
                VCS_ZCODE_FAMILY_CONTROL_MODERATION_DISCOVERY &&
            request->control_bytes > 0 &&
-           request->control_bytes <= VCS_ZCODE_FAMILY_CONTROL_MAX_BYTES &&
-           access_zero(request->content_root) &&
+           request->control_bytes <= VCS_ZCODE_FAMILY_CONTROL_MAX_BYTES;
+}
+
+static bool request_control_zero_fields(
+    const struct vcs_zcode_family_access_request_v1 *request)
+{
+    return access_zero(request->content_root) &&
            access_zero(request->dependency_closure_root) &&
            access_zero(request->provider_root) && !request->expected_bytes &&
            !request->byte_budget && !request->expires_height &&
            !request->expires_mtp && !request->current_height &&
            !request->current_mtp && !request->operator_authorized &&
            !request->redacted;
+}
+
+static bool request_control_valid(
+    const struct vcs_zcode_family_access_request_v1 *request)
+{
+    return request_control_frame_valid(request) &&
+           request_control_zero_fields(request);
 }
 
 static bool request_valid(
