@@ -1358,7 +1358,6 @@ tests/harness/src/test_parallel.c:run_parallel_phase:25
 tests/harness/src/test_parallel.c:write_test_timing_json:34
 tests/harness/src/test_params_vk_embedded.c:test_params_vk_embedded:45
 tests/harness/src/test_payment_shutdown_owner.c:payment_shutdown_lifecycle_acceptance:25
-tests/harness/src/test_peer_snapshot_conditions.c:test_peer_snapshot_conditions:54
 tests/harness/src/test_process_headers_adversarial.c:test_process_headers_adversarial:55
 tests/harness/src/test_progress_store.c:test_progress_store:100
 tests/harness/src/test_pv_lookahead.c:la_fold_from:27

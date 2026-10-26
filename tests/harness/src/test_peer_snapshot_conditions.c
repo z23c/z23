@@ -135,328 +135,364 @@ static int run_peer_floor_connect_only_case(void)
     return failures;
 }
 
+static void begin_peer_snapshot_condition_case(
+    struct fake_clock_peer_snapshot *clock, struct connman *cm,
+    struct download_manager *dm, struct main_state *ms, int64_t unix_s)
+{
+    fake_clock_install(clock, unix_s);
+    reset_peer_snapshot_conditions(cm, dm, ms);
+}
+
+static int run_peer_floor_kicks_unhealthy_slots_case(void)
+{
+    int failures = 0;
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 1000);
+    bool ok = true;
+    register_peer_floor_violated();
+
+    struct p2p_node stuck = {0};
+    stuck.id = 1;
+    stuck.state = PEER_CONNECTED;
+    struct p2p_node *peers[1] = { &stuck };
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    condition_engine_tick();
+    ok = ok && peer_floor_violated_test_remedy_calls() == 0;
+    fake_clock_set(&clock, 1061);
+    condition_engine_tick();
+    ok = ok && peer_floor_violated_test_remedy_calls() == 1;
+    ok = ok && stuck.disconnect;
+    PEER_SNAPSHOT_CHECK("peer floor kicks unhealthy outbound slots", ok);
+    cleanup_peer_snapshot_conditions();
+    return failures;
+}
+
+static int run_peer_floor_preserves_inbound_case(void)
+{
+    int failures = 0;
+    /* outbound=1, inbound=13: the remedy must never shed inbound peers to
+     * chase an OUTBOUND floor deficit. It acts on the side that can clear
+     * the condition: an addnode with only pure-TCP failure history has its
+     * backoff/last attempt cleared so the dialer retries it immediately
+     * (engine/conditions/src/peer_floor_violated.c). */
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 1500);
+    bool ok = true;
+    register_peer_floor_violated();
+
+    struct p2p_node healthy_outbound = {0};
+    healthy_outbound.id = 1;
+    healthy_outbound.state = PEER_ACTIVE;
+    healthy_outbound.services = NODE_NETWORK;
+
+    enum { N_INBOUND = 13, N_NODES = 1 + N_INBOUND };
+    struct p2p_node inbound[N_INBOUND] = {0};
+    for (int i = 0; i < N_INBOUND; i++) {
+        inbound[i].id = (uint64_t)(100 + i);
+        inbound[i].inbound = true;
+        /* Peer 0 is a brand-new joiner still mid-handshake (version_sent). */
+        inbound[i].state = (i == 0) ? PEER_VERSION_SENT : PEER_ACTIVE;
+    }
+
+    struct p2p_node *peers[N_NODES];
+    peers[0] = &healthy_outbound;
+    for (int i = 0; i < N_INBOUND; i++)
+        peers[1 + i] = &inbound[i];
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = N_NODES;
+
+    /* One addnode whose only history is pure-TCP failures — the case
+     * the remedy forgives above zero healthy outbound. */
+    cm.num_addnodes = 1;
+    cm.addnode_tcp_failures[0] = 3;
+    cm.addnode_protocol_failures[0] = 0;
+    cm.addnode_backoff_sec[0] = 900;
+    cm.addnode_last_attempt[0] = 1500;
+
+    condition_engine_tick();
+    ok = ok && peer_floor_violated_test_remedy_calls() == 0;
+    fake_clock_set(&clock, 1561);
+    condition_engine_tick();
+    ok = ok && peer_floor_violated_test_remedy_calls() == 1;
+
+    for (int i = 0; i < N_INBOUND; i++)
+        ok = ok && !inbound[i].disconnect;
+    ok = ok && !healthy_outbound.disconnect;
+    ok = ok && cm.addnode_backoff_sec[0] == 0;
+    ok = ok && cm.addnode_last_attempt[0] == 0;
+    PEER_SNAPSHOT_CHECK(
+        "peer floor keeps all inbound and requests an outbound dial",
+        ok);
+    cleanup_peer_snapshot_conditions();
+    return failures;
+}
+
+static int run_peer_floor_honors_peerless_mode_case(void)
+{
+    int failures = 0;
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 2000);
+    bool ok = true;
+    register_peer_floor_violated();
+    setenv("ZCL_PEERLESS_OK", "1", 1);
+
+    condition_engine_tick();
+    fake_clock_set(&clock, 2061);
+    condition_engine_tick();
+    ok = ok && peer_floor_violated_test_remedy_calls() == 0;
+    PEER_SNAPSHOT_CHECK("peer floor honors peerless test mode", ok);
+    cleanup_peer_snapshot_conditions();
+    return failures;
+}
+
+static int run_sync_violation_rotates_peers_case(void)
+{
+    int failures = 0;
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 3000);
+    bool ok = true;
+    register_sync_violation_lag();
+
+    struct block_index tip = {0};
+    tip.nHeight = 100;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
+    struct p2p_node peer = {0};
+    peer.id = 1;
+    peer.starting_height = 250;
+    peer.state = PEER_ACTIVE;
+    peer.services = NODE_NETWORK;
+    struct p2p_node *peers[1] = { &peer };
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    condition_engine_tick();
+    ok = ok && sync_violation_lag_test_remedy_calls() == 0;
+    fake_clock_set(&clock, 3601);
+    condition_engine_tick();
+    ok = ok && sync_violation_lag_test_remedy_calls() == 1;
+    ok = ok && peer.disconnect;
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && condition_engine_get_unresolved_count() == 0;
+    condition_engine_tick();
+    ok = ok && sync_violation_lag_test_remedy_calls() == 1;
+    PEER_SNAPSHOT_CHECK("sync violation rotates peers and clears", ok);
+    cleanup_peer_snapshot_conditions();
+    return failures;
+}
+
+static int run_sync_violation_timer_resets_case(void)
+{
+    int failures = 0;
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 5000);
+    bool ok = true;
+    register_sync_violation_lag();
+
+    struct block_index tip1 = {0};
+    tip1.nHeight = 100;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip1);
+    struct p2p_node peer = {0};
+    peer.id = 1;
+    peer.starting_height = 250;
+    peer.state = PEER_ACTIVE;
+    peer.services = NODE_NETWORK;
+    struct p2p_node *peers[1] = { &peer };
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    condition_engine_tick();
+    fake_clock_set(&clock, 5601);
+    struct block_index tip2 = {0};
+    tip2.nHeight = 101;  /* still >100 behind, but visibly progressing */
+    tip2.pprev = &tip1;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip2);
+    condition_engine_tick();
+    ok = ok && sync_violation_lag_test_remedy_calls() == 0;
+    ok = ok && !peer.disconnect;
+
+    fake_clock_set(&clock, 6202);
+    condition_engine_tick();
+    ok = ok && sync_violation_lag_test_remedy_calls() == 1;
+    ok = ok && peer.disconnect;
+    PEER_SNAPSHOT_CHECK("sync violation timer resets on local progress", ok);
+    cleanup_peer_snapshot_conditions();
+    return failures;
+}
+
+static bool sync_violation_lag_snapshot_matches_rearm_expectations(
+    const struct condition_runtime_snapshot *snap)
+{
+    return snap->max_attempts == 1 && snap->attempts == 1 &&
+           snap->operator_needed_emitted && snap->cooldown_secs == 600 &&
+           snap->cooldown_max_rearms == 0;
+}
+
+static int run_sync_violation_rearms_on_cooldown_case(void)
+{
+    int failures = 0;
+    /* An INBOUND peer stays far ahead of local height. The remedy only
+     * disconnects OUTBOUND peers, so this is a persistent fault reaching
+     * max_attempts=1 on the first call. The engine must re-arm (via
+     * cooldown_secs / cooldown_max_rearms) and call the remedy again
+     * rather than latch EV_OPERATOR_NEEDED. */
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 6000);
+    bool ok = true;
+    register_sync_violation_lag();
+
+    struct block_index tip = {0};
+    tip.nHeight = 100;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
+    struct p2p_node peer = {0};
+    peer.id = 7;
+    peer.starting_height = 250;
+    peer.state = PEER_ACTIVE;
+    peer.services = NODE_NETWORK;
+    peer.inbound = true;  /* survives connman_force_outbound_rotation */
+    struct p2p_node *peers[1] = { &peer };
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    condition_engine_tick();  /* primes first_seen/last_local baseline */
+    ok = ok && sync_violation_lag_test_remedy_calls() == 0;
+
+    fake_clock_set(&clock, 6601);  /* past SYNC_VIOLATION_SECS (600) */
+    condition_engine_tick();  /* attempt 1/1 -- hits max_attempts */
+    ok = ok && sync_violation_lag_test_remedy_calls() == 1;
+    ok = ok && !peer.disconnect;  /* inbound peer is never rotated away */
+    ok = ok && condition_engine_get_active_count() == 1;  /* unwitnessed */
+
+    struct condition_runtime_snapshot snap;
+    memset(&snap, 0, sizeof(snap));
+    ok = ok && condition_engine_get_registered_snapshot(
+        "sync_violation_lag", &snap);
+    ok = ok && sync_violation_lag_snapshot_matches_rearm_expectations(&snap);
+
+    /* The same fault persists well past the engine cooldown_secs (600) and
+     * the remedy's SYNC_VIOLATION_COOLDOWN_SECS (3600), past max_attempts;
+     * without cooldown_secs it would stay latched at operator_needed. */
+    fake_clock_set(&clock, 10202);
+    condition_engine_tick();
+    ok = ok && sync_violation_lag_test_remedy_calls() == 2;
+    ok = ok && condition_engine_get_active_count() == 1;
+
+    PEER_SNAPSHOT_CHECK(
+        "sync violation lag re-arms on cooldown past max_attempts "
+        "instead of latching forever",
+        ok);
+    cleanup_peer_snapshot_conditions();
+    return failures;
+}
+
+static int run_snapshot_offer_reasserts_receive_case(void)
+{
+    int failures = 0;
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 4000);
+    bool ok = true;
+    register_snapshot_offer_ready();
+
+    struct block_index tip = {0};
+    tip.nHeight = 100;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
+
+    struct snapshot_sync_service svc;
+    memset(&svc, 0, sizeof(svc));
+    svc.state = SNAPSYNC_NEGOTIATING;
+    svc.offered_height = 2000;
+    svc.offered_count = 100;
+    svc.serving_peer_id = 42;
+    snapshot_offer_ready_test_set_service(&svc);
+
+    ok = ok && sync_get_state() == SYNC_IDLE;
+    condition_engine_tick();
+    ok = ok && snapshot_offer_ready_test_remedy_calls() == 1;
+    ok = ok && sync_get_state() == SYNC_SNAPSHOT_RECEIVE;
+    ok = ok && condition_engine_get_active_count() == 0;
+
+    condition_engine_tick();
+    ok = ok && snapshot_offer_ready_test_remedy_calls() == 1;
+    PEER_SNAPSHOT_CHECK("snapshot offer ready reasserts snapshot receive", ok);
+    cleanup_peer_snapshot_conditions();
+    return failures;
+}
+
+static int run_snapshot_offer_ignores_at_tip_case(void)
+{
+    int failures = 0;
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 4500);
+    bool ok = true;
+    register_snapshot_offer_ready();
+
+    struct block_index tip = {0};
+    tip.nHeight = 100;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
+
+    ok = ok && sync_set_state(SYNC_FINDING_PEERS,
+                              "test snapshot at-tip setup");
+    ok = ok && sync_set_state(SYNC_HEADERS_DOWNLOAD,
+                              "test snapshot at-tip setup");
+    ok = ok && sync_set_state(SYNC_AT_TIP,
+                              "test snapshot at-tip setup");
+
+    struct snapshot_sync_service svc;
+    memset(&svc, 0, sizeof(svc));
+    svc.state = SNAPSYNC_NEGOTIATING;
+    svc.offered_height = 2000;
+    svc.offered_count = 100;
+    svc.serving_peer_id = 43;
+    snapshot_offer_ready_test_set_service(&svc);
+
+    condition_engine_tick();
+    ok = ok && snapshot_offer_ready_test_remedy_calls() == 0;
+    ok = ok && sync_get_state() == SYNC_AT_TIP;
+    ok = ok && condition_engine_get_active_count() == 0;
+    PEER_SNAPSHOT_CHECK("snapshot offer ready ignores at-tip state", ok);
+    cleanup_peer_snapshot_conditions();
+    return failures;
+}
+
 int test_peer_snapshot_conditions(void)
 {
     printf("\n=== peer and snapshot condition tests ===\n");
     int failures = 0;
 
-    {
-        struct fake_clock_peer_snapshot clock;
-        fake_clock_install(&clock, 1000);
-        struct connman cm;
-        struct download_manager dm;
-        struct main_state ms;
-        reset_peer_snapshot_conditions(&cm, &dm, &ms);
-        bool ok = true;
-        register_peer_floor_violated();
-
-        struct p2p_node stuck = {0};
-        stuck.id = 1;
-        stuck.state = PEER_CONNECTED;
-        struct p2p_node *peers[1] = { &stuck };
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = 1;
-
-        condition_engine_tick();
-        ok = ok && peer_floor_violated_test_remedy_calls() == 0;
-        fake_clock_set(&clock, 1061);
-        condition_engine_tick();
-        ok = ok && peer_floor_violated_test_remedy_calls() == 1;
-        ok = ok && stuck.disconnect;
-        PEER_SNAPSHOT_CHECK("peer floor kicks unhealthy outbound slots", ok);
-        cleanup_peer_snapshot_conditions();
-    }
-
-    {
-        /* outbound=1, inbound=13: the remedy must never shed inbound peers to
-         * chase an OUTBOUND floor deficit. It acts on the side that can clear
-         * the condition: an addnode with only pure-TCP failure history has its
-         * backoff/last attempt cleared so the dialer retries it immediately
-         * (engine/conditions/src/peer_floor_violated.c). */
-        struct fake_clock_peer_snapshot clock;
-        fake_clock_install(&clock, 1500);
-        struct connman cm;
-        struct download_manager dm;
-        struct main_state ms;
-        reset_peer_snapshot_conditions(&cm, &dm, &ms);
-        bool ok = true;
-        register_peer_floor_violated();
-
-        struct p2p_node healthy_outbound = {0};
-        healthy_outbound.id = 1;
-        healthy_outbound.state = PEER_ACTIVE;
-        healthy_outbound.services = NODE_NETWORK;
-
-        enum { N_INBOUND = 13, N_NODES = 1 + N_INBOUND };
-        struct p2p_node inbound[N_INBOUND] = {0};
-        for (int i = 0; i < N_INBOUND; i++) {
-            inbound[i].id = (uint64_t)(100 + i);
-            inbound[i].inbound = true;
-            /* Peer 0 is a brand-new joiner still mid-handshake (version_sent). */
-            inbound[i].state = (i == 0) ? PEER_VERSION_SENT : PEER_ACTIVE;
-        }
-
-        struct p2p_node *peers[N_NODES];
-        peers[0] = &healthy_outbound;
-        for (int i = 0; i < N_INBOUND; i++)
-            peers[1 + i] = &inbound[i];
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = N_NODES;
-
-        /* One addnode whose only history is pure-TCP failures — the case
-         * the remedy forgives above zero healthy outbound. */
-        cm.num_addnodes = 1;
-        cm.addnode_tcp_failures[0] = 3;
-        cm.addnode_protocol_failures[0] = 0;
-        cm.addnode_backoff_sec[0] = 900;
-        cm.addnode_last_attempt[0] = 1500;
-
-        condition_engine_tick();
-        ok = ok && peer_floor_violated_test_remedy_calls() == 0;
-        fake_clock_set(&clock, 1561);
-        condition_engine_tick();
-        ok = ok && peer_floor_violated_test_remedy_calls() == 1;
-
-        for (int i = 0; i < N_INBOUND; i++)
-            ok = ok && !inbound[i].disconnect;
-        ok = ok && !healthy_outbound.disconnect;
-        ok = ok && cm.addnode_backoff_sec[0] == 0;
-        ok = ok && cm.addnode_last_attempt[0] == 0;
-        PEER_SNAPSHOT_CHECK(
-            "peer floor keeps all inbound and requests an outbound dial",
-            ok);
-        cleanup_peer_snapshot_conditions();
-    }
-
-    {
-        struct fake_clock_peer_snapshot clock;
-        fake_clock_install(&clock, 2000);
-        struct connman cm;
-        struct download_manager dm;
-        struct main_state ms;
-        reset_peer_snapshot_conditions(&cm, &dm, &ms);
-        bool ok = true;
-        register_peer_floor_violated();
-        setenv("ZCL_PEERLESS_OK", "1", 1);
-
-        condition_engine_tick();
-        fake_clock_set(&clock, 2061);
-        condition_engine_tick();
-        ok = ok && peer_floor_violated_test_remedy_calls() == 0;
-        PEER_SNAPSHOT_CHECK("peer floor honors peerless test mode", ok);
-        cleanup_peer_snapshot_conditions();
-    }
-
+    failures += run_peer_floor_kicks_unhealthy_slots_case();
+    failures += run_peer_floor_preserves_inbound_case();
+    failures += run_peer_floor_honors_peerless_mode_case();
     failures += run_peer_floor_connect_only_case();
-
-    {
-        struct fake_clock_peer_snapshot clock;
-        fake_clock_install(&clock, 3000);
-        struct connman cm;
-        struct download_manager dm;
-        struct main_state ms;
-        reset_peer_snapshot_conditions(&cm, &dm, &ms);
-        bool ok = true;
-        register_sync_violation_lag();
-
-        struct block_index tip = {0};
-        tip.nHeight = 100;
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
-        struct p2p_node peer = {0};
-        peer.id = 1;
-        peer.starting_height = 250;
-        peer.state = PEER_ACTIVE;
-        peer.services = NODE_NETWORK;
-        struct p2p_node *peers[1] = { &peer };
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = 1;
-
-        condition_engine_tick();
-        ok = ok && sync_violation_lag_test_remedy_calls() == 0;
-        fake_clock_set(&clock, 3601);
-        condition_engine_tick();
-        ok = ok && sync_violation_lag_test_remedy_calls() == 1;
-        ok = ok && peer.disconnect;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && condition_engine_get_unresolved_count() == 0;
-        condition_engine_tick();
-        ok = ok && sync_violation_lag_test_remedy_calls() == 1;
-        PEER_SNAPSHOT_CHECK("sync violation rotates peers and clears", ok);
-        cleanup_peer_snapshot_conditions();
-    }
-
-    {
-        struct fake_clock_peer_snapshot clock;
-        fake_clock_install(&clock, 5000);
-        struct connman cm;
-        struct download_manager dm;
-        struct main_state ms;
-        reset_peer_snapshot_conditions(&cm, &dm, &ms);
-        bool ok = true;
-        register_sync_violation_lag();
-
-        struct block_index tip1 = {0};
-        tip1.nHeight = 100;
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip1);
-        struct p2p_node peer = {0};
-        peer.id = 1;
-        peer.starting_height = 250;
-        peer.state = PEER_ACTIVE;
-        peer.services = NODE_NETWORK;
-        struct p2p_node *peers[1] = { &peer };
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = 1;
-
-        condition_engine_tick();
-        fake_clock_set(&clock, 5601);
-        struct block_index tip2 = {0};
-        tip2.nHeight = 101;  /* still >100 behind, but visibly progressing */
-        tip2.pprev = &tip1;
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip2);
-        condition_engine_tick();
-        ok = ok && sync_violation_lag_test_remedy_calls() == 0;
-        ok = ok && !peer.disconnect;
-
-        fake_clock_set(&clock, 6202);
-        condition_engine_tick();
-        ok = ok && sync_violation_lag_test_remedy_calls() == 1;
-        ok = ok && peer.disconnect;
-        PEER_SNAPSHOT_CHECK("sync violation timer resets on local progress", ok);
-        cleanup_peer_snapshot_conditions();
-    }
-
-    {
-        /* An INBOUND peer stays far ahead of local height. The remedy only
-         * disconnects OUTBOUND peers, so this is a persistent fault reaching
-         * max_attempts=1 on the first call. The engine must re-arm (via
-         * cooldown_secs / cooldown_max_rearms) and call the remedy again
-         * rather than latch EV_OPERATOR_NEEDED. */
-        struct fake_clock_peer_snapshot clock;
-        fake_clock_install(&clock, 6000);
-        struct connman cm;
-        struct download_manager dm;
-        struct main_state ms;
-        reset_peer_snapshot_conditions(&cm, &dm, &ms);
-        bool ok = true;
-        register_sync_violation_lag();
-
-        struct block_index tip = {0};
-        tip.nHeight = 100;
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
-        struct p2p_node peer = {0};
-        peer.id = 7;
-        peer.starting_height = 250;
-        peer.state = PEER_ACTIVE;
-        peer.services = NODE_NETWORK;
-        peer.inbound = true;  /* survives connman_force_outbound_rotation */
-        struct p2p_node *peers[1] = { &peer };
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = 1;
-
-        condition_engine_tick();  /* primes first_seen/last_local baseline */
-        ok = ok && sync_violation_lag_test_remedy_calls() == 0;
-
-        fake_clock_set(&clock, 6601);  /* past SYNC_VIOLATION_SECS (600) */
-        condition_engine_tick();  /* attempt 1/1 -- hits max_attempts */
-        ok = ok && sync_violation_lag_test_remedy_calls() == 1;
-        ok = ok && !peer.disconnect;  /* inbound peer is never rotated away */
-        ok = ok && condition_engine_get_active_count() == 1;  /* unwitnessed */
-
-        struct condition_runtime_snapshot snap;
-        memset(&snap, 0, sizeof(snap));
-        ok = ok && condition_engine_get_registered_snapshot(
-                       "sync_violation_lag", &snap);
-        ok = ok && snap.max_attempts == 1;
-        ok = ok && snap.attempts == 1;
-        ok = ok && snap.operator_needed_emitted;
-        ok = ok && snap.cooldown_secs == 600;
-        ok = ok && snap.cooldown_max_rearms == 0;
-
-        /* The same fault persists well past the engine cooldown_secs (600) and
-         * the remedy's SYNC_VIOLATION_COOLDOWN_SECS (3600), past max_attempts;
-         * without cooldown_secs it would stay latched at operator_needed. */
-        fake_clock_set(&clock, 10202);
-        condition_engine_tick();
-        ok = ok && sync_violation_lag_test_remedy_calls() == 2;
-        ok = ok && condition_engine_get_active_count() == 1;
-
-        PEER_SNAPSHOT_CHECK(
-            "sync violation lag re-arms on cooldown past max_attempts "
-            "instead of latching forever",
-            ok);
-        cleanup_peer_snapshot_conditions();
-    }
-
-    {
-        struct fake_clock_peer_snapshot clock;
-        fake_clock_install(&clock, 4000);
-        struct connman cm;
-        struct download_manager dm;
-        struct main_state ms;
-        reset_peer_snapshot_conditions(&cm, &dm, &ms);
-        bool ok = true;
-        register_snapshot_offer_ready();
-
-        struct block_index tip = {0};
-        tip.nHeight = 100;
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
-
-        struct snapshot_sync_service svc;
-        memset(&svc, 0, sizeof(svc));
-        svc.state = SNAPSYNC_NEGOTIATING;
-        svc.offered_height = 2000;
-        svc.offered_count = 100;
-        svc.serving_peer_id = 42;
-        snapshot_offer_ready_test_set_service(&svc);
-
-        ok = ok && sync_get_state() == SYNC_IDLE;
-        condition_engine_tick();
-        ok = ok && snapshot_offer_ready_test_remedy_calls() == 1;
-        ok = ok && sync_get_state() == SYNC_SNAPSHOT_RECEIVE;
-        ok = ok && condition_engine_get_active_count() == 0;
-
-        condition_engine_tick();
-        ok = ok && snapshot_offer_ready_test_remedy_calls() == 1;
-        PEER_SNAPSHOT_CHECK("snapshot offer ready reasserts snapshot receive", ok);
-        cleanup_peer_snapshot_conditions();
-    }
-
-    {
-        struct fake_clock_peer_snapshot clock;
-        fake_clock_install(&clock, 4500);
-        struct connman cm;
-        struct download_manager dm;
-        struct main_state ms;
-        reset_peer_snapshot_conditions(&cm, &dm, &ms);
-        bool ok = true;
-        register_snapshot_offer_ready();
-
-        struct block_index tip = {0};
-        tip.nHeight = 100;
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
-
-        ok = ok && sync_set_state(SYNC_FINDING_PEERS,
-                                  "test snapshot at-tip setup");
-        ok = ok && sync_set_state(SYNC_HEADERS_DOWNLOAD,
-                                  "test snapshot at-tip setup");
-        ok = ok && sync_set_state(SYNC_AT_TIP,
-                                  "test snapshot at-tip setup");
-
-        struct snapshot_sync_service svc;
-        memset(&svc, 0, sizeof(svc));
-        svc.state = SNAPSYNC_NEGOTIATING;
-        svc.offered_height = 2000;
-        svc.offered_count = 100;
-        svc.serving_peer_id = 43;
-        snapshot_offer_ready_test_set_service(&svc);
-
-        condition_engine_tick();
-        ok = ok && snapshot_offer_ready_test_remedy_calls() == 0;
-        ok = ok && sync_get_state() == SYNC_AT_TIP;
-        ok = ok && condition_engine_get_active_count() == 0;
-        PEER_SNAPSHOT_CHECK("snapshot offer ready ignores at-tip state", ok);
-        cleanup_peer_snapshot_conditions();
-    }
+    failures += run_sync_violation_rotates_peers_case();
+    failures += run_sync_violation_timer_resets_case();
+    failures += run_sync_violation_rearms_on_cooldown_case();
+    failures += run_snapshot_offer_reasserts_receive_case();
+    failures += run_snapshot_offer_ignores_at_tip_case();
 
     cleanup_peer_snapshot_conditions();
     return failures;
