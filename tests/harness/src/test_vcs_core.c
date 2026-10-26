@@ -178,6 +178,22 @@ static bool vc_transport_file(
     return false;
 }
 
+static bool vc_store_put_file_chunks(struct vcs_package_store *store,
+    const uint8_t root[32], const struct vcs_package_file *file,
+    const uint8_t *bytes, size_t len, bool ok)
+{
+    for (uint32_t chunk = 0; ok && chunk < file->chunk_count; chunk++) {
+        size_t off = (size_t)chunk * VCS_PACKAGE_CHUNK_BYTES;
+        size_t take = len - off;
+        if (take > VCS_PACKAGE_CHUNK_BYTES)
+            take = VCS_PACKAGE_CHUNK_BYTES;
+        ok = vcs_package_store_put_chunk(
+                 store, root, file->path, chunk, bytes + off, take) ==
+             VCS_PACKAGE_STORE_OK;
+    }
+    return ok;
+}
+
 /* Store the same carrier with only its root-committed LICENSE bytes replaced.
  * This constructs a hostile-but-content-valid download that creation now
  * refuses, so checkout must independently enforce local license policy. */
@@ -223,15 +239,7 @@ static bool vc_store_transport_with_license(
         } else {
             ok = vc_transport_file(transport, file->path, &bytes, &len);
         }
-        for (uint32_t chunk = 0; ok && chunk < file->chunk_count; chunk++) {
-            size_t off = (size_t)chunk * VCS_PACKAGE_CHUNK_BYTES;
-            size_t take = len - off;
-            if (take > VCS_PACKAGE_CHUNK_BYTES)
-                take = VCS_PACKAGE_CHUNK_BYTES;
-            ok = vcs_package_store_put_chunk(
-                     store, root_out, file->path, chunk, bytes + off, take) ==
-                 VCS_PACKAGE_STORE_OK;
-        }
+        ok = vc_store_put_file_chunks(store, root_out, file, bytes, len, ok);
     }
     vcs_package_manifest_free(&manifest);
     return ok;
@@ -1399,6 +1407,42 @@ static void vc_wr_u64le(uint8_t out[8], uint64_t value)
         out[i] = (uint8_t)((value >> (8u * i)) & 0xffu);
 }
 
+static int t_package_manifest_source_scale(void)
+{
+    int failures = 0;
+    /* The sovereign source carrier must be able to describe the complete
+     * Zclassic23 tree, not merely a small leaf package.  The tracked tree is
+     * already above 5,100 regular files; keep bounded headroom so an accepted
+     * full-node source cannot fail before it reaches publication. */
+    struct vcs_package_manifest node_source_scale;
+    vcs_package_manifest_init(&node_source_scale);
+    bool node_source_scale_ok = true;
+    for (unsigned i = 0; i < 6144u && node_source_scale_ok; i++) {
+        char path[64];
+        (void)snprintf(path, sizeof(path), "node/file-%04u.c", i);
+        node_source_scale_ok = vcs_package_manifest_add(
+            &node_source_scale, path, VCS_PACKAGE_MODE_FILE, 0, NULL, 0);
+    }
+    uint8_t *node_source_wire = NULL;
+    size_t node_source_wire_len = 0;
+    node_source_scale_ok = node_source_scale_ok &&
+        vcs_package_manifest_serialize(&node_source_scale,
+                                       &node_source_wire,
+                                       &node_source_wire_len);
+    struct vcs_package_manifest node_source_roundtrip;
+    vcs_package_manifest_init(&node_source_roundtrip);
+    node_source_scale_ok = node_source_scale_ok &&
+        vcs_package_manifest_parse(node_source_wire, node_source_wire_len,
+                                   &node_source_roundtrip) &&
+        node_source_roundtrip.count == 6144u;
+    VC_CHECK("package: full Zclassic23 source-scale manifest roundtrips",
+             node_source_scale_ok);
+    vcs_package_manifest_free(&node_source_roundtrip);
+    free(node_source_wire);
+    vcs_package_manifest_free(&node_source_scale);
+    return failures;
+}
+
 /* ── test 1b: content.v2 package manifest + chunk verification ─── */
 static int t_package_manifest(void)
 {
@@ -1686,36 +1730,7 @@ static int t_package_manifest(void)
     VC_CHECK("package: overflow failure clears outputs",
              should_stay_null == NULL && should_stay_zero == 0);
 
-    /* The sovereign source carrier must be able to describe the complete
-     * Zclassic23 tree, not merely a small leaf package.  The tracked tree is
-     * already above 5,100 regular files; keep bounded headroom so an accepted
-     * full-node source cannot fail before it reaches publication. */
-    struct vcs_package_manifest node_source_scale;
-    vcs_package_manifest_init(&node_source_scale);
-    bool node_source_scale_ok = true;
-    for (unsigned i = 0; i < 6144u && node_source_scale_ok; i++) {
-        char path[64];
-        (void)snprintf(path, sizeof(path), "node/file-%04u.c", i);
-        node_source_scale_ok = vcs_package_manifest_add(
-            &node_source_scale, path, VCS_PACKAGE_MODE_FILE, 0, NULL, 0);
-    }
-    uint8_t *node_source_wire = NULL;
-    size_t node_source_wire_len = 0;
-    node_source_scale_ok = node_source_scale_ok &&
-        vcs_package_manifest_serialize(&node_source_scale,
-                                       &node_source_wire,
-                                       &node_source_wire_len);
-    struct vcs_package_manifest node_source_roundtrip;
-    vcs_package_manifest_init(&node_source_roundtrip);
-    node_source_scale_ok = node_source_scale_ok &&
-        vcs_package_manifest_parse(node_source_wire, node_source_wire_len,
-                                   &node_source_roundtrip) &&
-        node_source_roundtrip.count == 6144u;
-    VC_CHECK("package: full Zclassic23 source-scale manifest roundtrips",
-             node_source_scale_ok);
-    vcs_package_manifest_free(&node_source_roundtrip);
-    free(node_source_wire);
-    vcs_package_manifest_free(&node_source_scale);
+    failures += t_package_manifest_source_scale();
 
     free(duplicate_wire);
     vcs_package_manifest_free(&duplicate_fixture);
@@ -1756,6 +1771,111 @@ static bool vc_manifest_bytes_and_root_equal(
     return ok;
 }
 
+#if !defined(_WIN32)
+static int t_manifest_wait_for_ctime_tick(const char *dir,
+                                          struct stat before, bool captured)
+{
+    int failures = 0;
+    /* A filesystem stamps from a coarse clock. On a RAM-backed tree the
+     * rewrite below lands in the same tick as the stat above roughly a third
+     * of the time, ctime does not move, and the fixture proves nothing while
+     * reporting a failure. Wait for the clock to move first, on a path the
+     * worktree walk never sees. */
+    char tick_path[4096];
+    int tick_len = snprintf(tick_path, sizeof(tick_path), "%s/.zvcs/ctime-tick",
+                            dir);
+    bool ticked = captured && tick_len > 0 &&
+        (size_t)tick_len < sizeof(tick_path);
+    for (int spin = 0; ticked && spin < 1000000; spin++) {
+        FILE *tick_file = fopen(tick_path, "wb");
+        struct stat probe;
+        if (!tick_file) { ticked = false; break; }
+        (void)fputc('t', tick_file);
+        if (fclose(tick_file) != 0) { ticked = false; break; }
+        if (stat(tick_path, &probe) != 0) { ticked = false; break; }
+        if (probe.st_ctim.tv_sec != before.st_ctim.tv_sec ||
+            probe.st_ctim.tv_nsec != before.st_ctim.tv_nsec)
+            break;
+    }
+    VC_CHECK("cache identity: the filesystem clock moved before the edit",
+             ticked);
+    (void)unlink(tick_path);
+    return failures;
+}
+
+static bool t_manifest_same_size_restore(const char *dir, const char *path,
+                                         struct stat before, bool captured)
+{
+    struct stat after = {0};
+    bool rewrote = captured && vc_write(dir, "src/cache.c", "cache-two\n");
+    const struct timespec restore_times[2] = {
+        before.st_atim, before.st_mtim,
+    };
+    bool restored = rewrote &&
+        utimensat(AT_FDCWD, path, restore_times, 0) == 0 &&
+        stat(path, &after) == 0;
+    bool cache_key_changed = restored && before.st_size == after.st_size &&
+        before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+        before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+        (before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+         before.st_ctim.tv_nsec != after.st_ctim.tv_nsec);
+    return cache_key_changed;
+}
+
+static int t_manifest_ctime_edit_check(const char *dir, struct vcs_index *index,
+                                       const struct vcs_manifest *warm,
+                                       bool warm_ok, bool cache_key_changed)
+{
+    int failures = 0;
+    struct vcs_manifest edited_cached = {0}, edited_uncached = {0};
+    bool edited_cached_ok = cache_key_changed &&
+        vcs_manifest_build(dir, index, &edited_cached);
+    bool edited_uncached_ok = cache_key_changed &&
+        vcs_manifest_build(dir, NULL, &edited_uncached);
+    uint8_t old_root[32], edited_root[32];
+    bool old_root_ok = warm_ok && vcs_manifest_tree_hash(warm, old_root);
+    bool edited_root_ok = vcs_manifest_tree_hash(&edited_cached, edited_root);
+    VC_CHECK("cache identity: ctime invalidates restored-mtime cache entry",
+             edited_cached_ok && edited_uncached_ok && old_root_ok &&
+             edited_root_ok &&
+             memcmp(old_root, edited_root, sizeof(old_root)) != 0 &&
+             vc_manifest_bytes_and_root_equal(&edited_cached,
+                                              &edited_uncached));
+    vcs_manifest_free(&edited_uncached);
+    vcs_manifest_free(&edited_cached);
+    return failures;
+}
+#endif /* !defined(_WIN32) */
+
+static int t_manifest_fresh_rewrite_check(const char *dir,
+                                          struct vcs_index *index)
+{
+    int failures = 0;
+    vc_write(dir, "src/fresh.c", "fresh-one\n");
+    struct vcs_manifest fresh = {0};
+    bool fresh_ok = vcs_manifest_build(dir, index, &fresh);
+    struct vcs_stat_cache rows = {0};
+    bool rows_ok = fresh_ok && vcs_stat_cache_load(index, &rows);
+    VC_CHECK("cache identity: a file written this instant is left uncached",
+             rows_ok && vcs_stat_cache_find(&rows, "src/fresh.c") == NULL);
+    if (rows_ok) vcs_stat_cache_free(&rows);
+
+    /* ...and because it was left uncached, a same-length rewrite landing in
+     * the very same tick is still seen. */
+    vc_write(dir, "src/fresh.c", "fresh-two\n");
+    struct vcs_manifest rewritten = {0};
+    bool rewritten_ok = vcs_manifest_build(dir, index, &rewritten);
+    uint8_t fresh_root[32], rewritten_root[32];
+    VC_CHECK("cache identity: a same-length rewrite in one tick is still seen",
+             fresh_ok && rewritten_ok &&
+             vcs_manifest_tree_hash(&fresh, fresh_root) &&
+             vcs_manifest_tree_hash(&rewritten, rewritten_root) &&
+             memcmp(fresh_root, rewritten_root, sizeof(fresh_root)) != 0);
+    vcs_manifest_free(&rewritten);
+    vcs_manifest_free(&fresh);
+    return failures;
+}
+
 static int t_manifest_stat_cache_identity(const char *dir)
 {
     int failures = 0;
@@ -1788,64 +1908,16 @@ static int t_manifest_stat_cache_identity(const char *dir)
 #if !defined(_WIN32)
     char path[4096];
     int path_len = snprintf(path, sizeof(path), "%s/src/cache.c", dir);
-    struct stat before = {0}, after = {0};
+    struct stat before = {0};
     bool captured = path_len > 0 && (size_t)path_len < sizeof(path) &&
         stat(path, &before) == 0;
-    /* A filesystem stamps from a coarse clock. On a RAM-backed tree the
-     * rewrite below lands in the same tick as the stat above roughly a third
-     * of the time, ctime does not move, and the fixture proves nothing while
-     * reporting a failure. Wait for the clock to move first, on a path the
-     * worktree walk never sees. */
-    char tick_path[4096];
-    int tick_len = snprintf(tick_path, sizeof(tick_path), "%s/.zvcs/ctime-tick",
-                            dir);
-    bool ticked = captured && tick_len > 0 &&
-        (size_t)tick_len < sizeof(tick_path);
-    for (int spin = 0; ticked && spin < 1000000; spin++) {
-        FILE *tick_file = fopen(tick_path, "wb");
-        struct stat probe;
-        if (!tick_file) { ticked = false; break; }
-        (void)fputc('t', tick_file);
-        if (fclose(tick_file) != 0) { ticked = false; break; }
-        if (stat(tick_path, &probe) != 0) { ticked = false; break; }
-        if (probe.st_ctim.tv_sec != before.st_ctim.tv_sec ||
-            probe.st_ctim.tv_nsec != before.st_ctim.tv_nsec)
-            break;
-    }
-    VC_CHECK("cache identity: the filesystem clock moved before the edit",
-             ticked);
-    (void)unlink(tick_path);
-    bool rewrote = captured && vc_write(dir, "src/cache.c", "cache-two\n");
-    const struct timespec restore_times[2] = {
-        before.st_atim, before.st_mtim,
-    };
-    bool restored = rewrote &&
-        utimensat(AT_FDCWD, path, restore_times, 0) == 0 &&
-        stat(path, &after) == 0;
-    bool cache_key_changed = restored && before.st_size == after.st_size &&
-        before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
-        before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
-        (before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-         before.st_ctim.tv_nsec != after.st_ctim.tv_nsec);
+    failures += t_manifest_wait_for_ctime_tick(dir, before, captured);
+    bool cache_key_changed = t_manifest_same_size_restore(dir, path, before,
+                                                          captured);
     VC_CHECK("cache identity: same-size edit restores mtime but changes ctime",
              cache_key_changed);
-
-    struct vcs_manifest edited_cached = {0}, edited_uncached = {0};
-    bool edited_cached_ok = cache_key_changed &&
-        vcs_manifest_build(dir, index, &edited_cached);
-    bool edited_uncached_ok = cache_key_changed &&
-        vcs_manifest_build(dir, NULL, &edited_uncached);
-    uint8_t old_root[32], edited_root[32];
-    bool old_root_ok = warm_ok && vcs_manifest_tree_hash(&warm, old_root);
-    bool edited_root_ok = vcs_manifest_tree_hash(&edited_cached, edited_root);
-    VC_CHECK("cache identity: ctime invalidates restored-mtime cache entry",
-             edited_cached_ok && edited_uncached_ok && old_root_ok &&
-             edited_root_ok &&
-             memcmp(old_root, edited_root, sizeof(old_root)) != 0 &&
-             vc_manifest_bytes_and_root_equal(&edited_cached,
-                                              &edited_uncached));
-    vcs_manifest_free(&edited_uncached);
-    vcs_manifest_free(&edited_cached);
+    failures += t_manifest_ctime_edit_check(dir, index, &warm, warm_ok,
+                                            cache_key_changed);
 #endif /* !defined(_WIN32) */
 
     /* -- the cache may not answer for a file that is still moving --
@@ -1869,28 +1941,7 @@ static int t_manifest_stat_cache_identity(const char *dir)
                                       20 * VCS_STAT_SETTLE_NS,
                                       20 * VCS_STAT_SETTLE_NS));
 
-    vc_write(dir, "src/fresh.c", "fresh-one\n");
-    struct vcs_manifest fresh = {0};
-    bool fresh_ok = vcs_manifest_build(dir, index, &fresh);
-    struct vcs_stat_cache rows = {0};
-    bool rows_ok = fresh_ok && vcs_stat_cache_load(index, &rows);
-    VC_CHECK("cache identity: a file written this instant is left uncached",
-             rows_ok && vcs_stat_cache_find(&rows, "src/fresh.c") == NULL);
-    if (rows_ok) vcs_stat_cache_free(&rows);
-
-    /* ...and because it was left uncached, a same-length rewrite landing in
-     * the very same tick is still seen. */
-    vc_write(dir, "src/fresh.c", "fresh-two\n");
-    struct vcs_manifest rewritten = {0};
-    bool rewritten_ok = vcs_manifest_build(dir, index, &rewritten);
-    uint8_t fresh_root[32], rewritten_root[32];
-    VC_CHECK("cache identity: a same-length rewrite in one tick is still seen",
-             fresh_ok && rewritten_ok &&
-             vcs_manifest_tree_hash(&fresh, fresh_root) &&
-             vcs_manifest_tree_hash(&rewritten, rewritten_root) &&
-             memcmp(fresh_root, rewritten_root, sizeof(fresh_root)) != 0);
-    vcs_manifest_free(&rewritten);
-    vcs_manifest_free(&fresh);
+    failures += t_manifest_fresh_rewrite_check(dir, index);
 
     vcs_manifest_free(&warm);
     vcs_manifest_free(&cached);
@@ -2728,6 +2779,41 @@ static int t_commit_record(void)
 }
 
 /* ── test: bounded content.v2 source-swarm wire contract ────────── */
+static int t_package_swarm_file_hash_check(
+    struct vcs_package_manifest *manifest, const uint8_t *want_file_hash)
+{
+    int failures = 0;
+    uint8_t file_hash[32];
+    VC_CHECK("swarm file hash KAT",
+             manifest->count == 1 &&
+             vcs_package_file_hash(&manifest->files[0], file_hash) &&
+             memcmp(file_hash, want_file_hash, 32) == 0);
+    return failures;
+}
+
+static int t_package_swarm_cancel_round_trip(const uint8_t *root)
+{
+    int failures = 0;
+    struct vcs_package_swarm_message message;
+    uint8_t wire[2048];
+    size_t wire_len = 0;
+    struct vcs_package_swarm_message parsed;
+    memset(&message, 0, sizeof(message));
+    message.type = VCS_PACKAGE_SWARM_CANCEL;
+    message.body.cancel.request_id = 24;
+    memcpy(message.body.cancel.package_root, root, 32);
+    VC_CHECK("swarm cancel round-trip",
+             vcs_package_swarm_serialize(&message, wire, sizeof(wire),
+                                         &wire_len) &&
+             vcs_package_swarm_parse(wire, wire_len, &parsed) &&
+             parsed.body.cancel.request_id == 24);
+
+    message.body.cancel.request_id = 0;
+    VC_CHECK("swarm zero request rejected",
+             vcs_package_swarm_wire_size(&message) == 0);
+    return failures;
+}
+
 static int t_package_swarm(void)
 {
     int failures = 0;
@@ -2766,11 +2852,7 @@ static int t_package_swarm(void)
     uint8_t root[32];
     VC_CHECK("swarm package root",
              vcs_package_manifest_root(&manifest, root));
-    uint8_t file_hash[32];
-    VC_CHECK("swarm file hash KAT",
-             manifest.count == 1 &&
-             vcs_package_file_hash(&manifest.files[0], file_hash) &&
-             memcmp(file_hash, want_file_hash, 32) == 0);
+    failures += t_package_swarm_file_hash_check(&manifest, want_file_hash);
     VC_CHECK("swarm package root KAT",
              memcmp(root, want_package_root, 32) == 0);
     uint8_t *manifest_wire = NULL;
@@ -2954,19 +3036,7 @@ static int t_package_swarm(void)
     VC_CHECK("swarm exact frame length",
              !vcs_package_swarm_parse(wire, wire_len + 1, &parsed));
 
-    memset(&message, 0, sizeof(message));
-    message.type = VCS_PACKAGE_SWARM_CANCEL;
-    message.body.cancel.request_id = 24;
-    memcpy(message.body.cancel.package_root, root, 32);
-    VC_CHECK("swarm cancel round-trip",
-             vcs_package_swarm_serialize(&message, wire, sizeof(wire),
-                                         &wire_len) &&
-             vcs_package_swarm_parse(wire, wire_len, &parsed) &&
-             parsed.body.cancel.request_id == 24);
-
-    message.body.cancel.request_id = 0;
-    VC_CHECK("swarm zero request rejected",
-             vcs_package_swarm_wire_size(&message) == 0);
+    failures += t_package_swarm_cancel_round_trip(root);
 
     vcs_package_manifest_free(&forward_two);
     vcs_package_manifest_free(&reverse_two);

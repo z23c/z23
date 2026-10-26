@@ -1289,10 +1289,6 @@ tests/harness/src/test_utxo_activation_paused.c:test_utxo_activation_paused:190
 tests/harness/src/test_utxo_apply_stage.c:test_utxo_apply_stage:183
 tests/harness/src/test_utxo_mirror_sync.c:test_utxo_mirror_sync:34
 tests/harness/src/test_utxo_recovery_service.c:test_utxo_recovery_service:298
-tests/harness/src/test_vcs_core.c:t_manifest_stat_cache_identity:45
-tests/harness/src/test_vcs_core.c:t_package_manifest:20
-tests/harness/src/test_vcs_core.c:t_package_swarm:18
-tests/harness/src/test_vcs_core.c:vc_store_transport_with_license:16
 tests/harness/src/test_wallet_backup.c:t_force_now_encrypted:27
 tests/harness/src/test_wallet_destruction_drill.c:act1_transparent:73
 tests/harness/src/test_wallet_destruction_drill.c:act2_bodyless_restore_must_fail_loud:29
