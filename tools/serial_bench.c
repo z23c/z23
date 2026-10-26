@@ -48,7 +48,6 @@
  * the SHIPPED flags, not a copy that has drifted.
  */
 
-#define _DEFAULT_SOURCE
 #define _GNU_SOURCE
 
 #include "base/hex.h"
@@ -340,17 +339,19 @@ static struct variant g_var[] = {
 };
 #define NVAR ((int)(sizeof(g_var) / sizeof(g_var[0])))
 
-int main(int argc, char **argv)
-{
-    const char *corpus = NULL;
-    bool self_test = false;
+/* ── Run steps (one helper per phase of main) ────────────────────── */
 
+/* Parse the command line, then clamp the repetition count. Returns 0, or 1
+ * after printing usage for an unrecognized option. */
+static int parse_bench_args(int argc, char **argv, const char **corpus,
+                            bool *self_test)
+{
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--corpus=", 9) == 0) corpus = argv[i] + 9;
+        if (strncmp(argv[i], "--corpus=", 9) == 0) *corpus = argv[i] + 9;
         else if (strncmp(argv[i], "--reps=", 7) == 0) g_reps = atoi(argv[i] + 7);
         else if (strncmp(argv[i], "--cpu=", 6) == 0) g_pin_cpu = atoi(argv[i] + 6);
         else if (strcmp(argv[i], "--csv") == 0) g_csv = true;
-        else if (strcmp(argv[i], "--self-test") == 0) self_test = true;
+        else if (strcmp(argv[i], "--self-test") == 0) *self_test = true;
         else {
             fprintf(stderr,
                     "usage: %s [--corpus=FILE] [--reps=N] [--cpu=N] [--csv]"
@@ -360,44 +361,50 @@ int main(int argc, char **argv)
     }
     if (g_reps < 3) g_reps = 3;
     if (g_reps > BENCH_MAX_REPS) g_reps = BENCH_MAX_REPS;
+    return 0;
+}
 
-    if (!(corpus && corpus_load_file(corpus)) && !corpus_synthesize()) {
-        fprintf(stderr, "serial_bench: could not build a corpus\n");
-        return 1;
-    }
+/* Load the --corpus file, falling back to the synthetic block. */
+static bool bench_corpus_prepare(const char *corpus)
+{
+    if (corpus && corpus_load_file(corpus))
+        return true;
+    return corpus_synthesize();
+}
 
-    bool pinned = pin_to_cpu(g_pin_cpu);
-    struct cpu_topo topo;
-    topo_probe(g_pin_cpu, &topo);
-
+static size_t corpus_wire_bytes(void)
+{
     size_t total_bytes = 0;
     for (int i = 0; i < g_nblk; i++) total_bytes += g_blk_len[i];
+    return total_bytes;
+}
 
+/* The non-CSV banner: pin state, CCD/L3 topology, corpus shape, rep count. */
+static void print_report_header(bool pinned, const struct cpu_topo *topo,
+                                const char *corpus, size_t total_bytes)
+{
     if (!g_csv) {
         printf("serial_bench — block-body deserialization\n");
         printf("  cpu=%d %s", g_pin_cpu, pinned ? "(pinned)" : "(PIN FAILED — numbers not comparable)");
-        if (topo.known) printf("  ccd%d L3=%ldK cpus=%s", topo.ccd_index, topo.l3_kb, topo.l3_shared);
+        if (topo->known) printf("  ccd%d L3=%ldK cpus=%s", topo->ccd_index, topo->l3_kb, topo->l3_shared);
         printf("\n  corpus=%s  blocks=%d  bytes=%.1f KB  avg=%.0f B/block\n",
                g_synthetic ? "SYNTHETIC (not representative of the chain)" : corpus,
                g_nblk, total_bytes / 1024.0, (double)total_bytes / g_nblk);
         printf("  reps=%d (median + p90 of full corpus passes)\n\n", g_reps);
     }
+}
 
-    /* ── STEP 1+2: parity BEFORE timing. Every variant must derive
-     *    bit-identical output from the same bytes. ── */
-    struct uint256 ref;
-    int prev = transaction_alloc_poison_set(g_var[0].poison);
-    uint64_t ntx = observe_corpus(&ref);
-    (void)transaction_alloc_poison_set(prev);
-    g_var[0].verified = true;
-
+/* Re-observe under every other poison variant and count the variants whose
+ * digest differs from the reference. */
+static int count_parity_mismatches(const struct uint256 *ref)
+{
     int mismatches = 0;
     for (int v = 1; v < NVAR; v++) {
         struct uint256 d;
-        prev = transaction_alloc_poison_set(g_var[v].poison);
+        int prev = transaction_alloc_poison_set(g_var[v].poison);
         (void)observe_corpus(&d);
         (void)transaction_alloc_poison_set(prev);
-        g_var[v].verified = (memcmp(d.data, ref.data, 32) == 0);
+        g_var[v].verified = (memcmp(d.data, ref->data, 32) == 0);
         if (!g_var[v].verified) {
             mismatches++;
             fprintf(stderr,
@@ -407,48 +414,52 @@ int main(int argc, char **argv)
                     "chain split, not a speed result.\n", g_var[v].name);
         }
     }
+    return mismatches;
+}
 
-    /* --self-test proves the parity checker can actually fail: hash a value
-     * that genuinely differs and confirm the comparison rejects it. */
-    if (self_test) {
-        struct uint256 tampered = ref;
-        tampered.data[0] ^= 0x01;
-        bool caught = (memcmp(tampered.data, ref.data, 32) != 0);
-        printf("self-test: parity checker rejects a 1-bit difference: %s\n",
-               caught ? "YES" : "NO");
-        if (!caught) return 2;
-    }
+/* --self-test proves the parity checker can actually fail: hash a value
+ * that genuinely differs and confirm the comparison rejects it. */
+static bool parity_self_test_passes(const struct uint256 *ref)
+{
+    struct uint256 tampered = *ref;
+    tampered.data[0] ^= 0x01;
+    bool caught = (memcmp(tampered.data, ref->data, 32) != 0);
+    printf("self-test: parity checker rejects a 1-bit difference: %s\n",
+           caught ? "YES" : "NO");
+    return caught;
+}
 
-    if (mismatches) return 2;
-    if (!g_csv)
-        printf("parity: all %d variants derive the IDENTICAL digest over %d "
-               "blocks / %llu txs\n\n", NVAR, g_nblk, (unsigned long long)ntx);
-
-    /* ── STEP 3: only now, time them. ── */
-    /* INTERLEAVED, not variant-by-variant. Timing all reps of variant A and
-     * then all reps of variant B charges A for growing the heap arena and
-     * lets any thermal or load drift over the run land entirely on one
-     * variant — measured as a spurious 1.29x between two variants that do
-     * the identical amount of work. Round-robin makes every variant see the
-     * same drift. */
-    uint64_t *samples = zcl_malloc((size_t)g_reps * NVAR * sizeof(uint64_t), "serial_bench_samples");
-    if (!samples) return 1;
-
+static void run_variant_warmups(void)
+{
     for (int v = 0; v < NVAR; v++) {          /* warmups, all discarded */
-        prev = transaction_alloc_poison_set(g_var[v].poison);
+        int prev = transaction_alloc_poison_set(g_var[v].poison);
         parse_corpus_once();
         parse_corpus_once();
         (void)transaction_alloc_poison_set(prev);
     }
+}
+
+/* INTERLEAVED, not variant-by-variant. Timing all reps of variant A and
+ * then all reps of variant B charges A for growing the heap arena and
+ * lets any thermal or load drift over the run land entirely on one
+ * variant — measured as a spurious 1.29x between two variants that do
+ * the identical amount of work. Round-robin makes every variant see the
+ * same drift. */
+static void collect_interleaved_samples(uint64_t *samples)
+{
     for (int r = 0; r < g_reps; r++) {
         for (int v = 0; v < NVAR; v++) {
-            prev = transaction_alloc_poison_set(g_var[v].poison);
+            int prev = transaction_alloc_poison_set(g_var[v].poison);
             uint64_t t0 = now_ns();
             parse_corpus_once();
             samples[v * g_reps + r] = now_ns() - t0;
             (void)transaction_alloc_poison_set(prev);
         }
     }
+}
+
+static void summarize_variant_times(uint64_t *samples)
+{
     for (int v = 0; v < NVAR; v++) {
         uint64_t *s = samples + v * g_reps;
         qsort(s, (size_t)g_reps, sizeof(uint64_t), cmp_u64);
@@ -456,9 +467,10 @@ int main(int argc, char **argv)
         g_var[v].p90_ns    = pct_sorted(s, g_reps, 0.90);
         g_var[v].min_ns    = s[0];
     }
-    free(samples);
+}
 
-    double base = (double)g_var[0].median_ns;
+static void print_timing_results(double base, size_t total_bytes)
+{
     if (g_csv) {
         printf("variant,median_ns_per_block,p90_ns_per_block,min_ns_per_block,speedup_vs_zero_filled,verified\n");
         for (int v = 0; v < NVAR; v++)
@@ -488,5 +500,57 @@ int main(int argc, char **argv)
                    saved_ns / g_nblk * 3.2e6 / 1e9);
         printf("\n");
     }
+}
+
+int main(int argc, char **argv)
+{
+    const char *corpus = NULL;
+    bool self_test = false;
+
+    if (parse_bench_args(argc, argv, &corpus, &self_test) != 0) return 1;
+
+    if (!bench_corpus_prepare(corpus)) {
+        fprintf(stderr, "serial_bench: could not build a corpus\n");
+        return 1;
+    }
+
+    bool pinned = pin_to_cpu(g_pin_cpu);
+    struct cpu_topo topo;
+    topo_probe(g_pin_cpu, &topo);
+
+    size_t total_bytes = corpus_wire_bytes();
+
+    print_report_header(pinned, &topo, corpus, total_bytes);
+
+    /* ── STEP 1+2: parity BEFORE timing. Every variant must derive
+     *    bit-identical output from the same bytes. ── */
+    struct uint256 ref;
+    int prev = transaction_alloc_poison_set(g_var[0].poison);
+    uint64_t ntx = observe_corpus(&ref);
+    (void)transaction_alloc_poison_set(prev);
+    g_var[0].verified = true;
+
+    int mismatches = count_parity_mismatches(&ref);
+
+    if (self_test) {
+        if (!parity_self_test_passes(&ref)) return 2;
+    }
+
+    if (mismatches) return 2;
+    if (!g_csv)
+        printf("parity: all %d variants derive the IDENTICAL digest over %d "
+               "blocks / %llu txs\n\n", NVAR, g_nblk, (unsigned long long)ntx);
+
+    /* ── STEP 3: only now, time them. ── */
+    uint64_t *samples = zcl_malloc((size_t)g_reps * NVAR * sizeof(uint64_t), "serial_bench_samples");
+    if (!samples) return 1;
+
+    run_variant_warmups();
+    collect_interleaved_samples(samples);
+    summarize_variant_times(samples);
+    free(samples);
+
+    double base = (double)g_var[0].median_ns;
+    print_timing_results(base, total_bytes);
     return 0;
 }
