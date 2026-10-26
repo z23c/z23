@@ -1088,10 +1088,6 @@ tests/harness/src/test_ldb_snapshot.c:test_ldb_snapshot:27
 tests/harness/src/test_mempool_orphan.c:test_mempool_orphan:45
 tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
 tests/harness/src/test_merkle_tree.c:test_merkle_tree_scale:149
-tests/harness/src/test_metaverse_vocabulary.c:check_golden_v1_frames:22
-tests/harness/src/test_metaverse_vocabulary.c:check_no_bypass_of_the_evaluator:23
-tests/harness/src/test_metaverse_vocabulary.c:check_production_broker_has_no_fixture:21
-tests/harness/src/test_metaverse_vocabulary.c:check_wire_values_unique_and_gapless:23
 tests/harness/src/test_mint_anchor_fresh_datadir.c:test_mfd_scenario_b_headers_no_bodies_walls_frontier:24
 tests/harness/src/test_mint_anchor_fresh_datadir.c:test_mfd_scenario_c_headers_and_bodies_reaches_ceiling:17
 tests/harness/src/test_mint_skip_crypto.c:msc_make_killed_wal:39

@@ -284,63 +284,70 @@ static void golden_property_id(uint8_t fill, uint8_t out[MVAP_PROPERTY_ID_LEN])
         out[i] = (fill == 0xFF) ? (uint8_t)(i + 1u) : fill;
 }
 
+static int check_golden_request_frame(const struct golden_req *gv)
+{
+    int failures = 0;
+
+    size_t hexlen = strlen(gv->hex);
+    uint8_t bytes[MVAP_FRAME_PREFIX + MVAP_MAX_FRAME];
+    char label[96];
+
+    if (hexlen % 2 != 0 || hexlen / 2 > sizeof(bytes)) {
+        printf("vocabulary: golden vector %s is malformed... FAIL\n",
+               gv->what);
+        failures++;
+        return failures;
+    }
+    size_t n = hexlen / 2;
+    test_hex_to_bytes(gv->hex, bytes, (int)n);
+
+    /* The prefix must agree with the record it introduces. A vector whose
+     * own framing is inconsistent would prove nothing about the codec. */
+    snprintf(label, sizeof(label),
+             "golden %s frames its own record length", gv->what);
+    VC_CHECK(label, mvap_frame_length(bytes, n) == (uint32_t)(n - 4));
+
+    /* DECODE is the compatibility claim and it must hold forever: a
+     * version-1 frame keeps meaning the same operation. */
+    struct mvap_request got;
+    memset(&got, 0, sizeof(got));
+    bool ok = mvap_request_decode(bytes + MVAP_FRAME_PREFIX,
+                                  n - MVAP_FRAME_PREFIX, &got);
+    uint8_t want_id[MVAP_PROPERTY_ID_LEN];
+    golden_property_id(gv->fill, want_id);
+
+    snprintf(label, sizeof(label),
+             "golden %s decodes to the same operation", gv->what);
+    VC_CHECK(label,
+             ok && got.verb == gv->verb &&
+             got.request_id == gv->request_id &&
+             got.value_zats == gv->value_zats &&
+             got.kind == gv->kind &&
+             memcmp(got.property_id, want_id, MVAP_PROPERTY_ID_LEN) == 0 &&
+             strcmp(got.param, gv->param) == 0);
+
+    /* While the protocol still SPEAKS version 1, the encoder must also
+     * reproduce these bytes exactly. Once MVAP_VERSION moves on, the
+     * decode claim above is the one that carries the compatibility
+     * record and this half correctly stops applying. */
+    if (MVAP_VERSION == 1u && ok) {
+        uint8_t re[MVAP_FRAME_PREFIX + MVAP_MAX_FRAME];
+        size_t rn = mvap_request_encode(&got, re, sizeof(re));
+        snprintf(label, sizeof(label),
+                 "golden %s re-encodes byte-identically", gv->what);
+        VC_CHECK(label, rn == n && memcmp(re, bytes, n) == 0);
+    }
+
+    return failures;
+}
+
 static int check_golden_v1_frames(void)
 {
     int failures = 0;
 
     for (size_t g = 0; g < sizeof(k_golden_reqs) / sizeof(k_golden_reqs[0]);
-         g++) {
-        const struct golden_req *gv = &k_golden_reqs[g];
-        size_t hexlen = strlen(gv->hex);
-        uint8_t bytes[MVAP_FRAME_PREFIX + MVAP_MAX_FRAME];
-        char label[96];
-
-        if (hexlen % 2 != 0 || hexlen / 2 > sizeof(bytes)) {
-            printf("vocabulary: golden vector %s is malformed... FAIL\n",
-                   gv->what);
-            failures++;
-            continue;
-        }
-        size_t n = hexlen / 2;
-        test_hex_to_bytes(gv->hex, bytes, (int)n);
-
-        /* The prefix must agree with the record it introduces. A vector whose
-         * own framing is inconsistent would prove nothing about the codec. */
-        snprintf(label, sizeof(label),
-                 "golden %s frames its own record length", gv->what);
-        VC_CHECK(label, mvap_frame_length(bytes, n) == (uint32_t)(n - 4));
-
-        /* DECODE is the compatibility claim and it must hold forever: a
-         * version-1 frame keeps meaning the same operation. */
-        struct mvap_request got;
-        memset(&got, 0, sizeof(got));
-        bool ok = mvap_request_decode(bytes + MVAP_FRAME_PREFIX,
-                                      n - MVAP_FRAME_PREFIX, &got);
-        uint8_t want_id[MVAP_PROPERTY_ID_LEN];
-        golden_property_id(gv->fill, want_id);
-
-        snprintf(label, sizeof(label),
-                 "golden %s decodes to the same operation", gv->what);
-        VC_CHECK(label,
-                 ok && got.verb == gv->verb &&
-                 got.request_id == gv->request_id &&
-                 got.value_zats == gv->value_zats &&
-                 got.kind == gv->kind &&
-                 memcmp(got.property_id, want_id, MVAP_PROPERTY_ID_LEN) == 0 &&
-                 strcmp(got.param, gv->param) == 0);
-
-        /* While the protocol still SPEAKS version 1, the encoder must also
-         * reproduce these bytes exactly. Once MVAP_VERSION moves on, the
-         * decode claim above is the one that carries the compatibility
-         * record and this half correctly stops applying. */
-        if (MVAP_VERSION == 1u && ok) {
-            uint8_t re[MVAP_FRAME_PREFIX + MVAP_MAX_FRAME];
-            size_t rn = mvap_request_encode(&got, re, sizeof(re));
-            snprintf(label, sizeof(label),
-                     "golden %s re-encodes byte-identically", gv->what);
-            VC_CHECK(label, rn == n && memcmp(re, bytes, n) == 0);
-        }
-    }
+         g++)
+        failures += check_golden_request_frame(&k_golden_reqs[g]);
 
     /* Response side: the same claim for the record an agent reads back. */
     struct {
@@ -473,7 +480,7 @@ static int check_round_trip_is_byte_identical(void)
 
 /* ── C. one wire value per verb, and a gap is not a value ────────────────── */
 
-static int check_wire_values_unique_and_gapless(void)
+static int check_verb_wire_names(void)
 {
     int failures = 0;
 
@@ -489,14 +496,12 @@ static int check_wire_values_unique_and_gapless(void)
     VC_CHECK("no two wire verbs share a name", names_distinct);
     VC_CHECK("every verb name round-trips to its own value", names_round_trip);
 
-    VC_CHECK("zero is not a verb",
-             mvap_verb_from_name("NONE") == MVAP_VERB_NONE &&
-             mvap_verb_from_name("") == MVAP_VERB_NONE &&
-             mvap_verb_from_name(NULL) == MVAP_VERB_NONE);
-    VC_CHECK("a value past the table names nothing",
-             strcmp(mvap_verb_name((uint32_t)MVAP_VERB__COUNT),
-                    "unknown") == 0 &&
-             mvap_verb_from_name("unknown") == MVAP_VERB_NONE);
+    return failures;
+}
+
+static int check_undefined_wire_frames_refused(void)
+{
+    int failures = 0;
 
     /* A frame carrying an undefined verb or kind must be REFUSED. Reading it
      * as "some verb we do not have a name for yet" is how an unnamed right
@@ -541,6 +546,13 @@ static int check_wire_values_unique_and_gapless(void)
         VC_CHECK("could build a probe frame", false);
     }
 
+    return failures;
+}
+
+static int check_kind_wire_names(void)
+{
+    int failures = 0;
+
     /* Kind names: unique, round-tripping, and no row reading as "unknown". */
     bool kind_names_ok = true;
     for (uint16_t k = 1; k < (uint16_t)MVAP_KIND__COUNT; k++) {
@@ -552,6 +564,28 @@ static int check_wire_values_unique_and_gapless(void)
     }
     VC_CHECK("every wire kind has one unique name that round-trips",
              kind_names_ok);
+
+    return failures;
+}
+
+static int check_wire_values_unique_and_gapless(void)
+{
+    int failures = 0;
+
+    failures += check_verb_wire_names();
+
+    VC_CHECK("zero is not a verb",
+             mvap_verb_from_name("NONE") == MVAP_VERB_NONE &&
+             mvap_verb_from_name("") == MVAP_VERB_NONE &&
+             mvap_verb_from_name(NULL) == MVAP_VERB_NONE);
+    VC_CHECK("a value past the table names nothing",
+             strcmp(mvap_verb_name((uint32_t)MVAP_VERB__COUNT),
+                    "unknown") == 0 &&
+             mvap_verb_from_name("unknown") == MVAP_VERB_NONE);
+
+    failures += check_undefined_wire_frames_refused();
+
+    failures += check_kind_wire_names();
 
     return failures;
 }
@@ -1038,6 +1072,149 @@ static int check_transfer_moves_value_everywhere(void)
 
 /* ── H. no request may skip the grant evaluator ──────────────────────────── */
 
+static void check_narrow_live_grant(size_t i, struct agent_grant *gr,
+                                    struct mvap_request *req)
+{
+    /* Each case narrows the LIVE authority, not a session copy. */
+    switch (i) {
+    case 0: memset(gr->grant_id, 0, sizeof(gr->grant_id)); break;
+    case 1: gr->revoked = true; break;
+    case 2: gr->expires_unix_ms = 10; break;
+    /* actions_mask is the canonical metaverse_action_set, not wire-keyed,
+     * so the bit to clear is the canonical bit. */
+    case 3: gr->actions_mask &=
+                ~(uint32_t)METAVERSE_ACTION_PUBLISH_REVISION; break;
+    case 4: req->property_id[0] ^= 0xFFu; break;
+    case 5: gr->kinds_mask = 0;
+            req->kind = MVAP_KIND_ZCODE; break;
+    /* The per-action ceiling, isolated: lift the cumulative budget clear of
+     * the request so max_value_zats is the only limit left to violate. */
+    case 6: scoped_request(req, MVAP_VERB_BUY, 5000, "");
+            gr->budget_zats = 1000000;
+            req->request_id = 4006u; break;
+    case 7: scoped_request(req, MVAP_VERB_BUY, 100, "not-on-the-list");
+            snprintf(gr->counterparty_allowlist,
+                     sizeof(gr->counterparty_allowlist),
+                     "only-this-buyer");
+            req->request_id = 4007u; break;
+    case 8: scoped_request(req, MVAP_VERB_DELEGATE, 0, "");
+            gr->may_delegate = false;
+            req->request_id = 4008u; break;
+    default: break;
+    }
+}
+
+static int check_understated_kind_dies_at_recheck(
+    struct agent_audit_log *audit)
+{
+    int failures = 0;
+
+    /* The bypass an agent would actually attempt: understate the kind so the
+     * pre-plan mask check passes, then let PLAN reveal the real kind. The
+     * re-check must catch it and COMMIT must never run. */
+    struct agent_broker_session s;
+    struct agent_grant gr;
+    wide_grant(&gr);
+    gr.kinds_mask = 0;
+    agent_grant_allow_kind(&gr, MVAP_KIND_ANY);
+    agent_grant_allow_kind(&gr, MVAP_KIND_CONTENT);
+    vc_bind(&s, &gr);
+    s.ops = seam_ops();
+    s.audit = audit;
+    seam_reset();
+    g_seam.plan_kind = MVAP_KIND_ZCODE;   /* the catalog's real answer */
+
+    struct mvap_request req;
+    scoped_request(&req, MVAP_VERB_PUBLISH_REVISION, 0, "");
+    req.kind = MVAP_KIND_ANY;             /* the agent's understatement */
+    req.request_id = 4100u;
+
+    struct mvap_response resp;
+    memset(&resp, 0, sizeof(resp));
+    agent_broker_handle(&s, &req, &resp);
+
+    VC_CHECK("a request understating its kind dies at the post-plan recheck",
+             resp.status == MVAP_ERR_DENIED_KIND);
+    VC_CHECK("the understated request planned but never committed",
+             g_seam.plans == 1 && g_seam.commits == 0);
+
+    return failures;
+}
+
+static int check_undefined_verb_refused_early(struct agent_audit_log *audit)
+{
+    int failures = 0;
+
+    /* An undefined verb must be refused before anything is dispatched, and
+     * the wire must not have been able to carry it in the first place. */
+    struct agent_broker_session s;
+    struct agent_grant gr;
+    wide_grant(&gr);
+    vc_bind(&s, &gr);
+    s.ops = seam_ops();
+    s.audit = audit;
+    seam_reset();
+
+    struct mvap_request req;
+    scoped_request(&req, (uint32_t)MVAP_VERB__COUNT, 0, "");
+    req.request_id = 4200u;
+    struct mvap_response resp;
+    memset(&resp, 0, sizeof(resp));
+    agent_broker_handle(&s, &req, &resp);
+
+    VC_CHECK("an undefined verb is refused before the seam",
+             resp.status == MVAP_ERR_UNKNOWN_VERB && g_seam.plans == 0 &&
+             g_seam.commits == 0);
+
+    return failures;
+}
+
+static int check_grant_mask_one_verb_one_bit(void)
+{
+    int failures = 0;
+
+    /* And the mask arithmetic itself: allowing verb N must not allow verb M.
+     * A shared or shifted bit here would hand out a right nobody granted. */
+    /* A grant holds two sets: actions_mask (canonical metaverse_action_set)
+     * and queries_mask (keyed by wire value). Granting one wire verb must
+     * light exactly one bit in exactly one of them. */
+    bool one_verb_one_bit = true;
+    for (uint32_t v = 1; v < (uint32_t)MVAP_VERB__COUNT; v++) {
+        struct agent_grant g;
+        memset(&g, 0, sizeof(g));
+        snprintf(g.grant_id, sizeof(g.grant_id), "single-verb");
+        agent_grant_allow_action(&g, v);
+
+        bool v_is_query = mvap_verb_is_query(v);
+        for (uint32_t w = 1; w < (uint32_t)MVAP_VERB__COUNT; w++) {
+            bool want = (w == v);
+            if (mvap_verb_is_query(w)) {
+                bool allowed =
+                    (g.queries_mask & ((uint32_t)1u << w)) != 0;
+                if (allowed != want) one_verb_one_bit = false;
+            } else {
+                enum metaverse_action a;
+                bool allowed =
+                    mvap_verb_to_action(w, &a) &&
+                    (g.actions_mask & (uint32_t)a) != 0;
+                if (allowed != want) one_verb_one_bit = false;
+            }
+        }
+        /* And the set it does NOT belong in stays completely empty. */
+        if (v_is_query ? (g.actions_mask != 0u) : (g.queries_mask != 0u))
+            one_verb_one_bit = false;
+    }
+    VC_CHECK("granting one verb grants exactly that verb",
+             one_verb_one_bit);
+    struct agent_grant none;
+    memset(&none, 0, sizeof(none));
+    agent_grant_allow_action(&none, MVAP_VERB_NONE);
+    agent_grant_allow_action(&none, (uint32_t)MVAP_VERB__COUNT);
+    VC_CHECK("no out-of-range verb can be granted", none.actions_mask == 0);
+
+    return failures;
+}
+
 static int check_no_bypass_of_the_evaluator(struct agent_audit_log *audit)
 {
     int failures = 0;
@@ -1067,33 +1244,7 @@ static int check_no_bypass_of_the_evaluator(struct agent_audit_log *audit)
         scoped_request(&req, MVAP_VERB_PUBLISH_REVISION, 0, "");
         req.request_id = 4000u + (uint32_t)i;
 
-        /* Each case narrows the LIVE authority, not a session copy. */
-        switch (i) {
-        case 0: memset(gr.grant_id, 0, sizeof(gr.grant_id)); break;
-        case 1: gr.revoked = true; break;
-        case 2: gr.expires_unix_ms = 10; break;
-        /* actions_mask is the canonical metaverse_action_set, not wire-keyed,
-         * so the bit to clear is the canonical bit. */
-        case 3: gr.actions_mask &=
-                    ~(uint32_t)METAVERSE_ACTION_PUBLISH_REVISION; break;
-        case 4: req.property_id[0] ^= 0xFFu; break;
-        case 5: gr.kinds_mask = 0;
-                req.kind = MVAP_KIND_ZCODE; break;
-        /* The per-action ceiling, isolated: lift the cumulative budget clear of
-         * the request so max_value_zats is the only limit left to violate. */
-        case 6: scoped_request(&req, MVAP_VERB_BUY, 5000, "");
-                gr.budget_zats = 1000000;
-                req.request_id = 4006u; break;
-        case 7: scoped_request(&req, MVAP_VERB_BUY, 100, "not-on-the-list");
-                snprintf(gr.counterparty_allowlist,
-                         sizeof(gr.counterparty_allowlist),
-                         "only-this-buyer");
-                req.request_id = 4007u; break;
-        case 8: scoped_request(&req, MVAP_VERB_DELEGATE, 0, "");
-                gr.may_delegate = false;
-                req.request_id = 4008u; break;
-        default: break;
-        }
+        check_narrow_live_grant(i, &gr, &req);
         agent_broker_fixture_set_grant(&gr);
 
         struct mvap_response resp;
@@ -1110,100 +1261,11 @@ static int check_no_bypass_of_the_evaluator(struct agent_audit_log *audit)
         VC_CHECK(label, g_seam.plans == 0 && g_seam.commits == 0);
     }
 
-    /* The bypass an agent would actually attempt: understate the kind so the
-     * pre-plan mask check passes, then let PLAN reveal the real kind. The
-     * re-check must catch it and COMMIT must never run. */
-    {
-        struct agent_broker_session s;
-        struct agent_grant gr;
-        wide_grant(&gr);
-        gr.kinds_mask = 0;
-        agent_grant_allow_kind(&gr, MVAP_KIND_ANY);
-        agent_grant_allow_kind(&gr, MVAP_KIND_CONTENT);
-        vc_bind(&s, &gr);
-        s.ops = seam_ops();
-        s.audit = audit;
-        seam_reset();
-        g_seam.plan_kind = MVAP_KIND_ZCODE;   /* the catalog's real answer */
+    failures += check_understated_kind_dies_at_recheck(audit);
 
-        struct mvap_request req;
-        scoped_request(&req, MVAP_VERB_PUBLISH_REVISION, 0, "");
-        req.kind = MVAP_KIND_ANY;             /* the agent's understatement */
-        req.request_id = 4100u;
+    failures += check_undefined_verb_refused_early(audit);
 
-        struct mvap_response resp;
-        memset(&resp, 0, sizeof(resp));
-        agent_broker_handle(&s, &req, &resp);
-
-        VC_CHECK("a request understating its kind dies at the post-plan recheck",
-                 resp.status == MVAP_ERR_DENIED_KIND);
-        VC_CHECK("the understated request planned but never committed",
-                 g_seam.plans == 1 && g_seam.commits == 0);
-    }
-
-    /* An undefined verb must be refused before anything is dispatched, and
-     * the wire must not have been able to carry it in the first place. */
-    {
-        struct agent_broker_session s;
-        struct agent_grant gr;
-        wide_grant(&gr);
-        vc_bind(&s, &gr);
-        s.ops = seam_ops();
-        s.audit = audit;
-        seam_reset();
-
-        struct mvap_request req;
-        scoped_request(&req, (uint32_t)MVAP_VERB__COUNT, 0, "");
-        req.request_id = 4200u;
-        struct mvap_response resp;
-        memset(&resp, 0, sizeof(resp));
-        agent_broker_handle(&s, &req, &resp);
-
-        VC_CHECK("an undefined verb is refused before the seam",
-                 resp.status == MVAP_ERR_UNKNOWN_VERB && g_seam.plans == 0 &&
-                 g_seam.commits == 0);
-    }
-
-    /* And the mask arithmetic itself: allowing verb N must not allow verb M.
-     * A shared or shifted bit here would hand out a right nobody granted. */
-    {
-        /* A grant holds two sets: actions_mask (canonical metaverse_action_set)
-         * and queries_mask (keyed by wire value). Granting one wire verb must
-         * light exactly one bit in exactly one of them. */
-        bool one_verb_one_bit = true;
-        for (uint32_t v = 1; v < (uint32_t)MVAP_VERB__COUNT; v++) {
-            struct agent_grant g;
-            memset(&g, 0, sizeof(g));
-            snprintf(g.grant_id, sizeof(g.grant_id), "single-verb");
-            agent_grant_allow_action(&g, v);
-
-            bool v_is_query = mvap_verb_is_query(v);
-            for (uint32_t w = 1; w < (uint32_t)MVAP_VERB__COUNT; w++) {
-                bool want = (w == v);
-                if (mvap_verb_is_query(w)) {
-                    bool allowed =
-                        (g.queries_mask & ((uint32_t)1u << w)) != 0;
-                    if (allowed != want) one_verb_one_bit = false;
-                } else {
-                    enum metaverse_action a;
-                    bool allowed =
-                        mvap_verb_to_action(w, &a) &&
-                        (g.actions_mask & (uint32_t)a) != 0;
-                    if (allowed != want) one_verb_one_bit = false;
-                }
-            }
-            /* And the set it does NOT belong in stays completely empty. */
-            if (v_is_query ? (g.actions_mask != 0u) : (g.queries_mask != 0u))
-                one_verb_one_bit = false;
-        }
-        VC_CHECK("granting one verb grants exactly that verb",
-                 one_verb_one_bit);
-        struct agent_grant none;
-        memset(&none, 0, sizeof(none));
-        agent_grant_allow_action(&none, MVAP_VERB_NONE);
-        agent_grant_allow_action(&none, (uint32_t)MVAP_VERB__COUNT);
-        VC_CHECK("no out-of-range verb can be granted", none.actions_mask == 0);
-    }
+    failures += check_grant_mask_one_verb_one_bit();
 
     return failures;
 }
@@ -1286,6 +1348,79 @@ static int check_receipt_binds_response_to_audit(const char *dir)
  * authoritative model can ever mint one. A production broker that resolves
  * one is answering out of a test double. */
 #if !defined(_WIN32)
+static bool wait_for_broker_socket(const char *sockpath)
+{
+    /* Wait for the listening socket, bounded. */
+    bool up = false;
+    for (int i = 0; i < 300 && !up; i++) {
+        struct stat st;
+        if (stat(sockpath, &st) == 0) up = true;
+        else { struct timespec ts = { 0, 20 * 1000 * 1000 }; nanosleep(&ts, NULL); } /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+    }
+    return up;
+}
+
+static bool probe_broker_exchange(int fd, struct mvap_response *resp)
+{
+    bool answered = false;
+    struct mvap_request req;
+    memset(&req, 0, sizeof(req));
+    req.verb = MVAP_VERB_INSPECT;
+    req.request_id = 1;
+    req.kind = MVAP_KIND_ANY;
+    agent_broker_fixture_property_id(0, req.property_id);
+
+    uint8_t frame[MVAP_FRAME_PREFIX + MVAP_MAX_FRAME];
+    size_t n = mvap_request_encode(&req, frame, sizeof(frame));
+    if (n > 0 && write(fd, frame, n) == (ssize_t)n) {
+        struct pollfd p = { .fd = fd, .events = POLLIN };
+        uint8_t in[MVAP_FRAME_PREFIX + MVAP_MAX_FRAME];
+        if (poll(&p, 1, 5000) > 0) {
+            ssize_t got = read(fd, in, sizeof(in));
+            if (got > (ssize_t)MVAP_FRAME_PREFIX) {
+                uint32_t rec = mvap_frame_length(in, (size_t)got);
+                if (rec > 0 &&
+                    (size_t)got >= (size_t)MVAP_FRAME_PREFIX + rec)
+                    answered = mvap_response_decode(
+                        in + MVAP_FRAME_PREFIX, rec, resp);
+            }
+        }
+    }
+    return answered;
+}
+
+static bool probe_broker_socket(const char *sockpath,
+                                struct mvap_response *resp)
+{
+    bool answered = false;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", sockpath);
+    if (fd >= 0 && connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0)
+        answered = probe_broker_exchange(fd, resp);
+    if (fd >= 0) (void)close(fd);
+    return answered;
+}
+
+static void reap_broker_child(pid_t pid)
+{
+    /* Reap, bounded — never leave a broker behind on a test host. */
+    for (int i = 0; i < 300; i++) {
+        int st = 0;
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) { pid = -1; break; }
+        struct timespec ts = { 0, 20 * 1000 * 1000 };
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+    }
+    if (pid > 0) {
+        (void)kill(pid, SIGKILL);
+        int st = 0;
+        (void)waitpid(pid, &st, 0);
+    }
+}
+
 static int check_production_broker_has_no_fixture(void)
 {
     int failures = 0;
@@ -1315,52 +1450,15 @@ static int check_production_broker_has_no_fixture(void)
         _exit(rc == 0 ? 0 : 1);
     }
 
-    /* Wait for the listening socket, bounded. */
-    bool up = false;
-    for (int i = 0; i < 300 && !up; i++) {
-        struct stat st;
-        if (stat(sockpath, &st) == 0) up = true;
-        else { struct timespec ts = { 0, 20 * 1000 * 1000 }; nanosleep(&ts, NULL); } /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
-    }
+    bool up = wait_for_broker_socket(sockpath);
     VC_CHECK("the shipped broker mode came up on its own socket", up);
 
     struct mvap_response resp;
     memset(&resp, 0, sizeof(resp));
     bool answered = false;
 
-    if (up) {
-        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        struct sockaddr_un sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sun_family = AF_UNIX;
-        snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", sockpath);
-        if (fd >= 0 && connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
-            struct mvap_request req;
-            memset(&req, 0, sizeof(req));
-            req.verb = MVAP_VERB_INSPECT;
-            req.request_id = 1;
-            req.kind = MVAP_KIND_ANY;
-            agent_broker_fixture_property_id(0, req.property_id);
-
-            uint8_t frame[MVAP_FRAME_PREFIX + MVAP_MAX_FRAME];
-            size_t n = mvap_request_encode(&req, frame, sizeof(frame));
-            if (n > 0 && write(fd, frame, n) == (ssize_t)n) {
-                struct pollfd p = { .fd = fd, .events = POLLIN };
-                uint8_t in[MVAP_FRAME_PREFIX + MVAP_MAX_FRAME];
-                if (poll(&p, 1, 5000) > 0) {
-                    ssize_t got = read(fd, in, sizeof(in));
-                    if (got > (ssize_t)MVAP_FRAME_PREFIX) {
-                        uint32_t rec = mvap_frame_length(in, (size_t)got);
-                        if (rec > 0 &&
-                            (size_t)got >= (size_t)MVAP_FRAME_PREFIX + rec)
-                            answered = mvap_response_decode(
-                                in + MVAP_FRAME_PREFIX, rec, &resp);
-                    }
-                }
-            }
-        }
-        if (fd >= 0) (void)close(fd);
-    }
+    if (up)
+        answered = probe_broker_socket(sockpath, &resp);
 
     VC_CHECK("the shipped broker answered the probe", answered);
 
@@ -1369,19 +1467,7 @@ static int check_production_broker_has_no_fixture(void)
         VC_CHECK("the shipped broker mode serves no fixture catalog",
                  resp.status != MVAP_OK);
 
-    /* Reap, bounded — never leave a broker behind on a test host. */
-    for (int i = 0; i < 300; i++) {
-        int st = 0;
-        pid_t r = waitpid(pid, &st, WNOHANG);
-        if (r == pid) { pid = -1; break; }
-        struct timespec ts = { 0, 20 * 1000 * 1000 };
-        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
-    }
-    if (pid > 0) {
-        (void)kill(pid, SIGKILL);
-        int st = 0;
-        (void)waitpid(pid, &st, 0);
-    }
+    reap_broker_child(pid);
     test_rm_rf_recursive(dir);
 
     return failures;
