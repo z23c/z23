@@ -390,6 +390,68 @@ static struct node_db_schema_preflight inspect_schema_newer_than_binary(
     return out;
 }
 
+/* The schema_version node_state value must be exactly one 4-byte blob; this
+ * is the shape check a single stepped marker row has to pass. */
+static bool schema_marker_column_is_blob(sqlite3_stmt *stmt)
+{
+    return sqlite3_column_type(stmt, 0) == SQLITE_BLOB &&
+           sqlite3_column_bytes(stmt, 0) == (int)sizeof(int32_t) &&
+           sqlite3_column_blob(stmt, 0) != NULL;
+}
+
+/* Reads and validates the schema_version key. Returns SQLITE_OK with
+ * *version_out set to the marker on success; returns SQLITE_ERROR with
+ * *detail_out describing the failure otherwise. *version_out is set only
+ * for an unsupported marker value, which the caller reports verbatim; every
+ * other failure leaves it at the caller's initial 0. */
+static int read_schema_marker(sqlite3 *db, int32_t *version_out,
+                              const char **detail_out)
+{
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT value FROM node_state WHERE key='schema_version'",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK || !stmt) {
+        sqlite3_finalize(stmt);
+        *detail_out = "SCHEMA_VERSION_UNKNOWN: schema marker is unreadable";
+        return SQLITE_ERROR;
+    }
+
+    int rows = 0;
+    int32_t version = 0;
+    bool malformed = false;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) { // raw-sql-ok:read-only-schema-preflight
+        rows++;
+        if (rows != 1 || !schema_marker_column_is_blob(stmt)) {
+            malformed = true;
+            continue;
+        }
+        memcpy(&version, sqlite3_column_blob(stmt, 0), sizeof(version));
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        *detail_out = "SCHEMA_VERSION_UNKNOWN: schema marker read failed";
+        return SQLITE_ERROR;
+    }
+    if (rows != 1) {
+        *detail_out = rows == 0
+            ? "SCHEMA_VERSION_UNKNOWN: schema marker missing"
+            : "SCHEMA_VERSION_UNKNOWN: contradictory schema markers";
+        return SQLITE_ERROR;
+    }
+    if (malformed) {
+        *detail_out = "SCHEMA_VERSION_UNKNOWN: schema marker is not one 4-byte blob";
+        return SQLITE_ERROR;
+    }
+    if (version <= 0) {
+        *version_out = version;
+        *detail_out = "SCHEMA_VERSION_UNKNOWN: schema marker is unsupported";
+        return SQLITE_ERROR;
+    }
+    *version_out = version;
+    return SQLITE_OK;
+}
+
 static struct node_db_schema_preflight inspect_schema(sqlite3 *db)
 {
     int tables = 0;
@@ -408,44 +470,11 @@ static struct node_db_schema_preflight inspect_schema(sqlite3 *db)
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
             "SCHEMA_VERSION_UNKNOWN: recognized tables exist without node_state");
 
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT value FROM node_state WHERE key='schema_version'",
-        -1, &stmt, NULL);
-    if (rc != SQLITE_OK || !stmt) {
-        sqlite3_finalize(stmt);
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
-            "SCHEMA_VERSION_UNKNOWN: schema marker is unreadable");
-    }
-
-    int rows = 0;
     int32_t version = 0;
-    bool malformed = false;
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) { // raw-sql-ok:read-only-schema-preflight
-        rows++;
-        if (rows != 1 || sqlite3_column_type(stmt, 0) != SQLITE_BLOB ||
-            sqlite3_column_bytes(stmt, 0) != (int)sizeof(version) ||
-            !sqlite3_column_blob(stmt, 0)) {
-            malformed = true;
-            continue;
-        }
-        memcpy(&version, sqlite3_column_blob(stmt, 0), sizeof(version));
-    }
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE)
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
-            "SCHEMA_VERSION_UNKNOWN: schema marker read failed");
-    if (rows != 1)
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
-            rows == 0
-                ? "SCHEMA_VERSION_UNKNOWN: schema marker missing"
-                : "SCHEMA_VERSION_UNKNOWN: contradictory schema markers");
-    if (malformed)
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
-            "SCHEMA_VERSION_UNKNOWN: schema marker is not one 4-byte blob");
-    if (version <= 0)
+    const char *marker_detail = NULL;
+    if (read_schema_marker(db, &version, &marker_detail) != SQLITE_OK)
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version,
-            "SCHEMA_VERSION_UNKNOWN: schema marker is unsupported");
+                                marker_detail);
 
     if (version > NODE_DB_MAX_SCHEMA)
         return inspect_schema_newer_than_binary(db, version);
@@ -460,30 +489,74 @@ static struct node_db_schema_preflight inspect_schema(sqlite3 *db)
     return out;
 }
 
+/* Classifies the path itself before any file is opened. Returns 0 when the
+ * path names a non-empty regular file the caller should open and probe;
+ * returns 1 with *state_out and *detail_out set when the path alone already
+ * decides the preflight result. */
+static int preflight_classify_path(const char *path,
+                                   enum node_db_schema_preflight_state *state_out,
+                                   const char **detail_out)
+{
+    struct stat st;
+    if (!path || path[0] == '\0') {
+        *state_out = NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN;
+        *detail_out = "SCHEMA_VERSION_UNKNOWN: database path missing";
+        return 1;
+    }
+    if (strcmp(path, ":memory:") == 0) {
+        *state_out = NODE_DB_SCHEMA_PREFLIGHT_FRESH;
+        *detail_out = "in-memory database";
+        return 1;
+    }
+    if (stat(path, &st) != 0) {
+        if (errno == ENOENT) {
+            *state_out = NODE_DB_SCHEMA_PREFLIGHT_FRESH;
+            *detail_out = "database path absent";
+        } else {
+            *state_out = NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN;
+            *detail_out = "SCHEMA_VERSION_UNKNOWN: database path cannot be inspected";
+        }
+        return 1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        *state_out = NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN;
+        *detail_out = "SCHEMA_VERSION_UNKNOWN: database path is not a regular file";
+        return 1;
+    }
+    if (st.st_size == 0) {
+        *state_out = NODE_DB_SCHEMA_PREFLIGHT_FRESH;
+        *detail_out = "empty database file";
+        return 1;
+    }
+    return 0;
+}
+
+/* WAL mode is safe to open read-only only with live sidecars (wal + shm) or
+ * fully quiet ones (no shm and no non-empty wal); anything else fails
+ * closed. Returns true when the sidecars allow the open, false with
+ * *detail_out naming the unrecovered-WAL or contradictory case. */
+static bool wal_sidecars_consistent(bool wal_mode,
+                                    const struct preflight_sidecars *sidecars,
+                                    const char **detail_out)
+{
+    if (wal_mode && !(sidecars->wal && sidecars->shm) &&
+        !(!sidecars->shm && (!sidecars->wal || sidecars->wal_size == 0))) {
+        *detail_out = sidecars->wal && sidecars->wal_size > 0
+            ? "SCHEMA_VERSION_UNKNOWN: unrecovered WAL has no wal-index"
+            : "SCHEMA_VERSION_UNKNOWN: contradictory WAL sidecars";
+        return false;
+    }
+    return true;
+}
+
 struct node_db_schema_preflight node_db_schema_preflight_existing(
     const char *path)
 {
-    if (!path || path[0] == '\0')
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
-            "SCHEMA_VERSION_UNKNOWN: database path missing");
-    if (strcmp(path, ":memory:") == 0)
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_FRESH, 0,
-                                "in-memory database");
-
-    struct stat st;
-    if (stat(path, &st) != 0) {
-        if (errno == ENOENT)
-            return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_FRESH, 0,
-                                    "database path absent");
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
-            "SCHEMA_VERSION_UNKNOWN: database path cannot be inspected");
-    }
-    if (!S_ISREG(st.st_mode))
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
-            "SCHEMA_VERSION_UNKNOWN: database path is not a regular file");
-    if (st.st_size == 0)
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_FRESH, 0,
-                                "empty database file");
+    enum node_db_schema_preflight_state path_state =
+        NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN;
+    const char *path_detail = NULL;
+    if (preflight_classify_path(path, &path_state, &path_detail) != 0)
+        return preflight_result(path_state, 0, path_detail);
 
 #if defined(_WIN32)
     int fd = _open(path, _O_RDONLY | _O_BINARY);
@@ -509,13 +582,11 @@ struct node_db_schema_preflight node_db_schema_preflight_existing(
     }
 
     sqlite3 *db = NULL;
-    if (wal_mode && !(sidecars.wal && sidecars.shm) &&
-        !(!sidecars.shm && (!sidecars.wal || sidecars.wal_size == 0))) {
+    const char *wal_detail = NULL;
+    if (!wal_sidecars_consistent(wal_mode, &sidecars, &wal_detail)) {
         close(fd);
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
-            sidecars.wal && sidecars.wal_size > 0
-                ? "SCHEMA_VERSION_UNKNOWN: unrecovered WAL has no wal-index"
-                : "SCHEMA_VERSION_UNKNOWN: contradictory WAL sidecars");
+                                wal_detail);
     }
 
     const char *open_branch = NULL;
