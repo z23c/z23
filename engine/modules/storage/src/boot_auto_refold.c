@@ -27,6 +27,29 @@ static void arf_path(const char *datadir, char *out, size_t n)
     snprintf(out, n, "%s/auto_refold_request", datadir);
 }
 
+/* Read before->size bytes at offset 0 into raw, then re-snapshot: true iff the
+ * read was complete and the file did not change underneath it. */
+static bool arf_read_stable(
+    struct platform_positioned_file *file,
+    const struct platform_positioned_file_snapshot *before,
+    char raw[64])
+{
+    struct platform_positioned_file_snapshot after;
+    int64_t got = platform_positioned_file_read(file, raw,
+                                                (size_t)before->size, 0);
+    /* True iff two snapshots describe the same file, size and timestamps. */
+    return got == (int64_t)before->size &&
+           platform_positioned_file_snapshot(file, &after) &&
+           before->volume == after.volume &&
+           before->file_low == after.file_low &&
+           before->file_high == after.file_high &&
+           before->size == after.size &&
+           before->modified_seconds == after.modified_seconds &&
+           before->modified_nanoseconds == after.modified_nanoseconds &&
+           before->changed_seconds == after.changed_seconds &&
+           before->changed_nanoseconds == after.changed_nanoseconds;
+}
+
 /* Read the on-disk (anchor, count). Returns true iff a well-formed request was
  * read. On any read/parse miss, *anchor=0 and *count=0. */
 static bool arf_read(const char *path, int32_t *anchor, int *count)
@@ -34,7 +57,7 @@ static bool arf_read(const char *path, int32_t *anchor, int *count)
     *anchor = 0;
     *count = 0;
     struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before, after;
+    struct platform_positioned_file_snapshot before;
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, path) ||
         !platform_positioned_file_snapshot(&file, &before) ||
@@ -44,18 +67,7 @@ static bool arf_read(const char *path, int32_t *anchor, int *count)
         return false;
     }
     char raw[64];
-    int64_t got = platform_positioned_file_read(&file, raw,
-                                                (size_t)before.size, 0);
-    bool stable = got == (int64_t)before.size &&
-                  platform_positioned_file_snapshot(&file, &after) &&
-                  before.volume == after.volume &&
-                  before.file_low == after.file_low &&
-                  before.file_high == after.file_high &&
-                  before.size == after.size &&
-                  before.modified_seconds == after.modified_seconds &&
-                  before.modified_nanoseconds == after.modified_nanoseconds &&
-                  before.changed_seconds == after.changed_seconds &&
-                  before.changed_nanoseconds == after.changed_nanoseconds;
+    bool stable = arf_read_stable(&file, &before, raw);
     platform_positioned_file_close(&file);
     if (!stable)
         return false;
@@ -66,6 +78,26 @@ static bool arf_read(const char *path, int32_t *anchor, int *count)
         *count = 0;
     }
     return ok;
+}
+
+/* Create a uniquely-named private staging file beside resolved. On success
+ * staging_path holds the name used and staged the open file. */
+static bool arf_create_staging(const char *resolved, char *staging_path,
+                               size_t staging_len,
+                               struct platform_private_file *staged)
+{
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
+        uint64_t seq = atomic_fetch_add(&g_arf_temp_sequence, 1);
+        int n = snprintf(staging_path, staging_len, "%s.tmp.%llu",
+                         resolved, (unsigned long long)seq);
+        if (n <= 0 || (size_t)n >= staging_len)
+            break;
+        created = platform_private_file_create(staging_path, staged);
+        if (!created && errno != EEXIST)
+            break;
+    }
+    return created;
 }
 
 /* fsync-durable write of "<anchor> <count>\n". Returns true on success. */
@@ -86,17 +118,8 @@ static bool arf_write(const char *datadir, const char *path,
     }
     struct platform_private_file staged;
     platform_private_file_init(&staged);
-    bool created = false;
-    for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
-        uint64_t seq = atomic_fetch_add(&g_arf_temp_sequence, 1);
-        int n = snprintf(staging_path, sizeof(staging_path), "%s.tmp.%llu",
-                         resolved, (unsigned long long)seq);
-        if (n <= 0 || (size_t)n >= sizeof(staging_path))
-            break;
-        created = platform_private_file_create(staging_path, &staged);
-        if (!created && errno != EEXIST)
-            break;
-    }
+    bool created = arf_create_staging(resolved, staging_path,
+                                      sizeof(staging_path), &staged);
     bool ok = created &&
               platform_private_file_write_at(&staged, buf, (size_t)len, 0) &&
               platform_private_file_truncate(&staged, (uint64_t)len) &&
