@@ -117,6 +117,62 @@ static bool fsca_no_stage_files(const char *dir)
     return clean;
 }
 
+static bool fsca_artifact_facts_match(
+    const struct fast_sync_coins_artifact *artifact,
+    enum fast_sync_coins_artifact_status status,
+    uint64_t expected_generation, const uint8_t expected_merkle[32],
+    const uint8_t *bytes, size_t size)
+{
+    return status == FAST_SYNC_COINS_ARTIFACT_OK && bytes &&
+           artifact->applied_height == 200 &&
+           artifact->authority_generation == expected_generation &&
+           artifact->num_utxos == 501 && artifact->num_chunks == 2 &&
+           artifact->chunk_size == SYNC_CHUNK_SIZE &&
+           artifact->artifact_bytes == size &&
+           memcmp(artifact->merkle_root, expected_merkle, 32) == 0;
+}
+
+static void fsca_hash_chunk_entries(struct sha3_256_ctx *decoded,
+                                    struct utxo_chunk *chunk,
+                                    uint64_t *decoded_count)
+{
+    for (uint32_t i = 0; i < chunk->num_entries; i++) {
+        utxo_commitment_sha3_write_record(
+            decoded, chunk->entries[i].txid,
+            chunk->entries[i].vout, chunk->entries[i].value,
+            chunk->entries[i].script,
+            chunk->entries[i].script_len,
+            (uint32_t)chunk->entries[i].height,
+            (uint8_t)(chunk->entries[i].is_coinbase ? 1 : 0));
+        (*decoded_count)++;
+    }
+}
+
+static bool fsca_verify_served_chunks(
+    char *dir, struct fast_sync_coins_artifact *artifact, bool publish_ok)
+{
+    struct utxo_chunk *chunk = zcl_calloc(
+        1, sizeof(*chunk), "fast_sync_artifact_test_chunk");
+    struct sha3_256_ctx decoded;
+    sha3_256_init(&decoded);
+    uint64_t decoded_count = 0;
+    bool ok = publish_ok;
+    for (uint32_t ci = 0; ok && chunk && ci < artifact->num_chunks; ci++) {
+        ok = fast_sync_serve_chunk(dir, ci, chunk) &&
+             chunk->chunk_index == ci &&
+             fast_sync_verify_chunk(chunk, artifact->chunk_hashes[ci]);
+        if (ok)
+            fsca_hash_chunk_entries(&decoded, chunk, &decoded_count);
+    }
+    uint8_t decoded_root[32];
+    sha3_256_finalize(&decoded, decoded_root);
+    ok = ok && chunk && decoded_count == artifact->num_utxos &&
+         memcmp(decoded_root, artifact->utxo_root, 32) == 0 &&
+         !fast_sync_serve_chunk(dir, artifact->num_chunks, chunk);
+    free(chunk);
+    return ok;
+}
+
 static bool fsca_artifact_roundtrip(void)
 {
     char dir[256], path[320];
@@ -142,45 +198,16 @@ static bool fsca_artifact_roundtrip(void)
     size_t size = 0;
     uint8_t *bytes = status == FAST_SYNC_COINS_ARTIFACT_OK
         ? fsca_read_file(path, &size) : NULL;
-    ok = ok && status == FAST_SYNC_COINS_ARTIFACT_OK && bytes &&
-         artifact.applied_height == 200 &&
-         artifact.authority_generation == expected_generation &&
-         artifact.num_utxos == 501 && artifact.num_chunks == 2 &&
-         artifact.chunk_size == SYNC_CHUNK_SIZE &&
-         artifact.artifact_bytes == size &&
-         memcmp(artifact.merkle_root, expected_merkle, 32) == 0;
+    ok = ok &&
+         fsca_artifact_facts_match(&artifact, status, expected_generation,
+                                   expected_merkle, bytes, size);
 
     if (ok) {
         ok = fast_sync_publish_snapshot_cache(
             bytes, (int64_t)size, artifact.utxo_root, artifact.num_utxos);
         if (ok)
             bytes = NULL;
-        struct utxo_chunk *chunk = zcl_calloc(
-            1, sizeof(*chunk), "fast_sync_artifact_test_chunk");
-        struct sha3_256_ctx decoded;
-        sha3_256_init(&decoded);
-        uint64_t decoded_count = 0;
-        for (uint32_t ci = 0; ok && chunk && ci < artifact.num_chunks; ci++) {
-            ok = fast_sync_serve_chunk(dir, ci, chunk) &&
-                 chunk->chunk_index == ci &&
-                 fast_sync_verify_chunk(chunk, artifact.chunk_hashes[ci]);
-            for (uint32_t i = 0; ok && i < chunk->num_entries; i++) {
-                utxo_commitment_sha3_write_record(
-                    &decoded, chunk->entries[i].txid,
-                    chunk->entries[i].vout, chunk->entries[i].value,
-                    chunk->entries[i].script,
-                    chunk->entries[i].script_len,
-                    (uint32_t)chunk->entries[i].height,
-                    (uint8_t)(chunk->entries[i].is_coinbase ? 1 : 0));
-                decoded_count++;
-            }
-        }
-        uint8_t decoded_root[32];
-        sha3_256_finalize(&decoded, decoded_root);
-        ok = ok && chunk && decoded_count == artifact.num_utxos &&
-             memcmp(decoded_root, artifact.utxo_root, 32) == 0 &&
-             !fast_sync_serve_chunk(dir, artifact.num_chunks, chunk);
-        free(chunk);
+        ok = fsca_verify_served_chunks(dir, &artifact, ok);
         fast_sync_reset_snapshot_cache();
     }
     free(bytes);
@@ -188,6 +215,19 @@ static bool fsca_artifact_roundtrip(void)
     bool no_stage = fsca_no_stage_files(dir);
     test_cleanup_tmpdir(dir);
     return ok && no_stage;
+}
+
+static bool fsca_failure_left_destination_intact(
+    const struct fast_sync_coins_artifact *artifact,
+    enum fast_sync_coins_artifact_status status,
+    enum fast_sync_coins_artifact_status absent_status, bool preserved,
+    const uint8_t kept[4], const char *absent, const char *dir)
+{
+    return status == FAST_SYNC_COINS_ARTIFACT_EXPORT_FAILED &&
+           absent_status == FAST_SYNC_COINS_ARTIFACT_EXPORT_FAILED &&
+           artifact->chunk_hashes == NULL && preserved &&
+           memcmp(kept, "KEEP", 4) == 0 && access(absent, F_OK) != 0 &&
+           fsca_no_stage_files(dir);
 }
 
 static bool fsca_failure_preserves_destination(void)
@@ -214,11 +254,8 @@ static bool fsca_failure_preserves_destination(void)
     FILE *check = fopen(path, "rb");
     bool preserved = check && fread(kept, 1, sizeof(kept), check) ==
                                 sizeof(kept) && fclose(check) == 0;
-    ok = ok && status == FAST_SYNC_COINS_ARTIFACT_EXPORT_FAILED &&
-         absent_status == FAST_SYNC_COINS_ARTIFACT_EXPORT_FAILED &&
-         artifact.chunk_hashes == NULL && preserved &&
-         memcmp(kept, "KEEP", 4) == 0 && access(absent, F_OK) != 0 &&
-         fsca_no_stage_files(dir);
+    ok = ok && fsca_failure_left_destination_intact(
+        &artifact, status, absent_status, preserved, kept, absent, dir);
     fast_sync_coins_artifact_free(&artifact);
     test_cleanup_tmpdir(dir);
     return ok;
