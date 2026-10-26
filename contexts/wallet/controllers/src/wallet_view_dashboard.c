@@ -9,14 +9,228 @@
 
 /* ── Dashboard (/wallet) ────────────────────────────────────── */
 
+/* Loading page shown when the wallet database cannot be opened */
+static size_t render_loading_page(uint8_t *r, size_t max) {
+    size_t off = wv_emit_header(r, max, "Z23 Wallet", "/wallet");
+    off += template_render(TMPL_LOADING, NULL, 0,
+        (char *)r + off, max - off);
+    wv_emit_footer(r, max, &off);
+    return off;
+}
+
+/* If a shield operation is pending, adjust displayed balances.
+ * The blockchain hasn't confirmed yet, but the user expects to see
+ * the funds moving from public -> private immediately. */
+static void apply_pending_shield_to_display(int64_t *transparent,
+    int64_t *shielded) {
+    if (g_shield_pending_amount > 0 && g_shield_pending_since > 0) {
+        int64_t pending = g_shield_pending_amount;
+        if (pending > *transparent) pending = *transparent;
+        *transparent -= pending;
+        *shielded += pending;
+    }
+}
+
+/* Map internal state names to user-friendly labels */
+static const char *sync_label_for_state(bool synced,
+    const char *sync_raw) {
+    static const struct {
+        const char *match;
+        const char *label;
+    } labels[] = {
+        { "download", "Syncing blocks..." },
+        { "header",   "Syncing headers..." },
+        { "connect",  "Connecting..." },
+        { "idle",     "Ready" },
+        { "scan",     "Scanning..." },
+    };
+    if (synced)
+        return "Synced";
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++)
+        if (strstr(sync_raw, labels[i].match))
+            return labels[i].label;
+    return "Syncing...";
+}
+
+/* Sync badge CSS class */
+static const char *sync_class_for_state(bool synced,
+    const char *sync_raw) {
+    if (synced)
+        return "pill-synced";
+    return strstr(sync_raw, "idle") ? "pill-ready" : "pill-syncing";
+}
+
+/* Format balance with minimal decimals */
+static void format_balance_display(char *buf, size_t buflen,
+    int64_t total_balance) {
+    double bal_f = (double)total_balance / (double)ZATOSHI_PER_ZCL;
+    if (total_balance == 0)
+        snprintf(buf, buflen, "0.00");
+    else if (total_balance % 1000000 == 0)
+        snprintf(buf, buflen, "%.2f", bal_f);
+    else if (total_balance % 10000 == 0)
+        snprintf(buf, buflen, "%.4f", bal_f);
+    else
+        snprintf(buf, buflen, "%.8f", bal_f);
+}
+
+/* Privacy percentage */
+static int privacy_percent(int64_t shielded, int64_t total_balance) {
+    if (total_balance > 0)
+        return (int)(100 * shielded / total_balance);
+    return 0;
+}
+
+/* Color for the privacy meter at a given percentage */
+static const char *privacy_meter_color(int pct) {
+    return pct == 100 ? "#34d399" :
+           pct >= 50  ? "#a78bfa" :
+           pct > 0    ? "#fbbf24" : "#f87171";
+}
+
+/* Breakdown text — contextual based on privacy state */
+static void format_breakdown_html(char *breakdown, size_t buflen,
+    int pct, int64_t transparent, int64_t shielded,
+    bool synced, const char *sync_raw) {
+    if (pct >= 95 && shielded > 0 && transparent > 0) {
+        /* Nearly all private — don't clutter with dust amounts */
+        snprintf(breakdown, buflen,
+            "<span style='color:#34d399'>&#x1F512; Funds shielded</span>");
+    } else if (transparent > 0 && shielded > 0) {
+        char t_fmt[32], s_fmt[32];
+        zcl_format_zcl_short(t_fmt, sizeof(t_fmt), transparent);
+        zcl_format_zcl_short(s_fmt, sizeof(s_fmt), shielded);
+        snprintf(breakdown, buflen,
+            "%s public + %s private", t_fmt, s_fmt);
+    } else if (shielded > 0) {
+        snprintf(breakdown, buflen,
+            "<span style='color:#34d399'>&#x1F512; All funds private</span>");
+    } else if (transparent > 0) {
+        char t_fmt[32];
+        zcl_format_zcl_short(t_fmt, sizeof(t_fmt), transparent);
+        snprintf(breakdown, buflen, "%s public", t_fmt);
+    }
+    /* Append sync note if still syncing */
+    if (!synced && !strstr(sync_raw, "idle")) {
+        size_t blen = strlen(breakdown);
+        snprintf(breakdown + blen, buflen - blen,
+            "</span></div>"
+            "<div class='sync-note'>"
+            "Syncing &mdash; balance updating</div>"
+            "<div style='display:none'><span>");
+    }
+}
+
+/* Privacy card (nudge / pending / done) */
+static void render_privacy_card(char *privacy_buf, size_t buflen,
+    int64_t transparent) {
+    int shield_st = wv_shield_check_status();
+    if (shield_st == 1) {
+        char el_s[16];
+        snprintf(el_s, sizeof(el_s), "%d",
+            (int)(platform_time_wall_time_t() - g_shield_pending_since));
+        struct template_var pv[] = { { "elapsed", el_s } };
+        template_render(TMPL_SHIELD_PENDING, pv, 1,
+            privacy_buf, buflen);
+    } else if (shield_st == 2) {
+        /* Shield op completed — show what happened honestly */
+        char amt_s[32];
+        zcl_format_zcl(amt_s, sizeof(amt_s), g_shield_pending_amount);
+        const char *msg = (transparent <= 0)
+            ? "Moved to z-address. Not linkable to your transparent address."
+            : "Moved to z-address. Transparent balance remains — shield to complete.";
+        struct template_var dv[] = {
+            { "amount", amt_s }, { "message", msg }
+        };
+        size_t dlen = template_render(TMPL_SHIELD_DONE, dv, 2,
+            privacy_buf, buflen);
+        /* If there's STILL shieldable balance, also show the nudge */
+        if (transparent > (int64_t)(FEE_ZCL * ZATOSHI_PER_ZCL + 1) &&
+            dlen < buflen - 256) {
+            char t_fmt[32];
+            zcl_format_zcl(t_fmt, sizeof(t_fmt), transparent);
+            struct template_var pv[] = { { "amount", t_fmt } };
+            template_render(TMPL_PRIVACY_NUDGE, pv, 1,
+                privacy_buf + dlen, buflen - dlen);
+        }
+    } else if (transparent > (int64_t)(FEE_ZCL * ZATOSHI_PER_ZCL + 1)) {
+        /* Only show nudge if transparent balance exceeds fee.
+         * Amounts at or below the min-relay fee cannot pay a shield. */
+        char t_fmt[32];
+        zcl_format_zcl(t_fmt, sizeof(t_fmt), transparent);
+        struct template_var pv[] = { { "amount", t_fmt } };
+        template_render(TMPL_PRIVACY_NUDGE, pv, 1,
+            privacy_buf, buflen);
+    }
+}
+
+/* Token cards — fetch top-5 held tokens via the port, render via
+ * the dashboard view. */
+static void render_token_cards(sqlite3 *db, char *token_buf,
+    size_t buflen) {
+    struct wallet_view_token_balance tokens[5];
+    int n_tokens = wv_list_token_cards(db, tokens,
+        sizeof(tokens) / sizeof(tokens[0]));
+    wv_render_dashboard_tokens(token_buf, buflen,
+        tokens, n_tokens);
+}
+
+/* Recent transactions — fetch recent ledger rows + shielded notes
+ * via the port, render via the dashboard view (which caps at 5
+ * total and falls back to the empty-state). */
+static void render_recent_transactions(sqlite3 *db, char *tx_buf,
+    size_t buflen, int tip, int64_t total_balance) {
+    struct wallet_view_ledger_row rows[20];
+    int n_rows = wv_list_ledger_rows(db, rows,
+        sizeof(rows) / sizeof(rows[0]),
+        false, 0, 0, NULL, 0, 0);
+    struct wallet_view_note_row notes[5];
+    int n_notes = wv_list_recent_notes(db, notes,
+        sizeof(notes) / sizeof(notes[0]), false, 5);
+    wv_render_dashboard_recent(tx_buf, buflen,
+        rows, n_rows, notes, n_notes, tip, total_balance);
+}
+
+/* Backup warning */
+static void render_backup_warning(char *backup_buf, size_t buflen,
+    int64_t total_balance) {
+    if (total_balance > 0 && g_wv_datadir) {
+        char bk_path[1024];
+        snprintf(bk_path, sizeof(bk_path), "%s/wallet.backup", g_wv_datadir);
+        if (access(bk_path, F_OK) != 0) {
+            struct template_var bv[] = { { "address", PRIMARY_ADDR } };
+            template_render(TMPL_BACKUP_WARNING, bv, 1,
+                backup_buf, buflen);
+        }
+    }
+}
+
+/* Node status strip (compact, replaces old Power Node card) */
+static void render_node_status_strip(sqlite3 *db, char *node_strip,
+    size_t buflen, bool synced, const char *sync_raw, int tip) {
+    int peers = wv_query_int(db, "SELECT count(*) FROM peers");
+    bool is_ready = synced || strstr(sync_raw, "idle");
+    const char *node_status = synced ? "Synced" :
+                              strstr(sync_raw, "idle") ? "Ready" : "Syncing";
+    const char *node_color = is_ready ? "#34d399" : "#fbbf24";
+    char peers_str[16], height_str[16];
+    snprintf(peers_str, sizeof(peers_str), "%d", peers);
+    snprintf(height_str, sizeof(height_str), "%d", tip);
+
+    struct template_var nv[] = {
+        { "peers",        peers_str },
+        { "height",       height_str },
+        { "status",       node_status },
+        { "status_color", node_color },
+    };
+    template_render(TMPL_NODE_STATUS_STRIP, nv, 4,
+        node_strip, buflen);
+}
+
 size_t serve_dashboard(uint8_t *r, size_t max) {
     sqlite3 *db = wv_open_db();
     if (!db) {
-        size_t off = wv_emit_header(r, max, "Z23 Wallet", "/wallet");
-        off += template_render(TMPL_LOADING, NULL, 0,
-            (char *)r + off, max - off);
-        wv_emit_footer(r, max, &off);
-        return off;
+        return render_loading_page(r, max);
     }
 
     int tip = wv_effective_tip(db);
@@ -30,11 +244,7 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
 
     db = wv_open_db();
     if (!db) {
-        size_t off = wv_emit_header(r, max, "Z23 Wallet", "/wallet");
-        off += template_render(TMPL_LOADING, NULL, 0,
-            (char *)r + off, max - off);
-        wv_emit_footer(r, max, &off);
-        return off;
+        return render_loading_page(r, max);
     }
 
     /* Ground-truth transparent balance (P2PKH + P2SH change addresses) */
@@ -45,190 +255,45 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
     int z_notes = 0;
     int64_t shielded = wv_query_shielded_balance(db, &z_notes);
 
-    /* If a shield operation is pending, adjust displayed balances.
-     * The blockchain hasn't confirmed yet, but the user expects to see
-     * the funds moving from public -> private immediately. */
-    if (g_shield_pending_amount > 0 && g_shield_pending_since > 0) {
-        int64_t pending = g_shield_pending_amount;
-        if (pending > transparent) pending = transparent;
-        transparent -= pending;
-        shielded += pending;
-    }
+    apply_pending_shield_to_display(&transparent, &shielded);
 
     int64_t total_balance = transparent + shielded;
 
     const char *sync_raw = sync_state_name(sync_get_state());
     bool synced = (sync_get_state() == SYNC_AT_TIP);
 
-    /* Map internal state names to user-friendly labels */
-    const char *sync_label = synced ? "Synced" : "Syncing...";
-    if (!synced) {
-        if (strstr(sync_raw, "download")) sync_label = "Syncing blocks...";
-        else if (strstr(sync_raw, "header")) sync_label = "Syncing headers...";
-        else if (strstr(sync_raw, "connect")) sync_label = "Connecting...";
-        else if (strstr(sync_raw, "idle")) sync_label = "Ready";
-        else if (strstr(sync_raw, "scan")) sync_label = "Scanning...";
-    }
+    const char *sync_label = sync_label_for_state(synced, sync_raw);
 
-    /* Sync badge CSS class */
-    const char *sync_class = synced ? "pill-synced" :
-        (strstr(sync_raw, "idle") ? "pill-ready" : "pill-syncing");
+    const char *sync_class = sync_class_for_state(synced, sync_raw);
 
-    /* Format balance with minimal decimals */
     char bal_str[32];
-    double bal_f = (double)total_balance / (double)ZATOSHI_PER_ZCL;
-    if (total_balance == 0)
-        snprintf(bal_str, sizeof(bal_str), "0.00");
-    else if (total_balance % 1000000 == 0)
-        snprintf(bal_str, sizeof(bal_str), "%.2f", bal_f);
-    else if (total_balance % 10000 == 0)
-        snprintf(bal_str, sizeof(bal_str), "%.4f", bal_f);
-    else
-        snprintf(bal_str, sizeof(bal_str), "%.8f", bal_f);
+    format_balance_display(bal_str, sizeof(bal_str), total_balance);
 
-    /* Privacy percentage */
-    int pct = 0;
-    if (total_balance > 0)
-        pct = (int)(100 * shielded / total_balance);
-    const char *pct_color = pct == 100 ? "#34d399" :
-                            pct >= 50  ? "#a78bfa" :
-                            pct > 0    ? "#fbbf24" : "#f87171";
+    int pct = privacy_percent(shielded, total_balance);
+    const char *pct_color = privacy_meter_color(pct);
     char pct_str[12];
     snprintf(pct_str, sizeof(pct_str), "%d", pct);
 
-    /* Breakdown text — contextual based on privacy state */
     char breakdown[256] = "";
-    if (pct >= 95 && shielded > 0 && transparent > 0) {
-        /* Nearly all private — don't clutter with dust amounts */
-        snprintf(breakdown, sizeof(breakdown),
-            "<span style='color:#34d399'>&#x1F512; Funds shielded</span>");
-    } else if (transparent > 0 && shielded > 0) {
-        char t_fmt[32], s_fmt[32];
-        zcl_format_zcl_short(t_fmt, sizeof(t_fmt), transparent);
-        zcl_format_zcl_short(s_fmt, sizeof(s_fmt), shielded);
-        snprintf(breakdown, sizeof(breakdown),
-            "%s public + %s private", t_fmt, s_fmt);
-    } else if (shielded > 0) {
-        snprintf(breakdown, sizeof(breakdown),
-            "<span style='color:#34d399'>&#x1F512; All funds private</span>");
-    } else if (transparent > 0) {
-        char t_fmt[32];
-        zcl_format_zcl_short(t_fmt, sizeof(t_fmt), transparent);
-        snprintf(breakdown, sizeof(breakdown), "%s public", t_fmt);
-    }
-    /* Append sync note if still syncing */
-    if (!synced && !strstr(sync_raw, "idle")) {
-        size_t blen = strlen(breakdown);
-        snprintf(breakdown + blen, sizeof(breakdown) - blen,
-            "</span></div>"
-            "<div class='sync-note'>"
-            "Syncing &mdash; balance updating</div>"
-            "<div style='display:none'><span>");
-    }
+    format_breakdown_html(breakdown, sizeof(breakdown),
+        pct, transparent, shielded, synced, sync_raw);
 
-    /* Privacy card (nudge / pending / done) */
     char privacy_buf[512] = "";
-    {
-        int shield_st = wv_shield_check_status();
-        if (shield_st == 1) {
-            char el_s[16];
-            snprintf(el_s, sizeof(el_s), "%d",
-                (int)(platform_time_wall_time_t() - g_shield_pending_since));
-            struct template_var pv[] = { { "elapsed", el_s } };
-            template_render(TMPL_SHIELD_PENDING, pv, 1,
-                privacy_buf, sizeof(privacy_buf));
-        } else if (shield_st == 2) {
-            /* Shield op completed — show what happened honestly */
-            char amt_s[32];
-            zcl_format_zcl(amt_s, sizeof(amt_s), g_shield_pending_amount);
-            const char *msg = (transparent <= 0)
-                ? "Moved to z-address. Not linkable to your transparent address."
-                : "Moved to z-address. Transparent balance remains — shield to complete.";
-            struct template_var dv[] = {
-                { "amount", amt_s }, { "message", msg }
-            };
-            size_t dlen = template_render(TMPL_SHIELD_DONE, dv, 2,
-                privacy_buf, sizeof(privacy_buf));
-            /* If there's STILL shieldable balance, also show the nudge */
-            if (transparent > (int64_t)(FEE_ZCL * ZATOSHI_PER_ZCL + 1) &&
-                dlen < sizeof(privacy_buf) - 256) {
-                char t_fmt[32];
-                zcl_format_zcl(t_fmt, sizeof(t_fmt), transparent);
-                struct template_var pv[] = { { "amount", t_fmt } };
-                template_render(TMPL_PRIVACY_NUDGE, pv, 1,
-                    privacy_buf + dlen, sizeof(privacy_buf) - dlen);
-            }
-        } else if (transparent > (int64_t)(FEE_ZCL * ZATOSHI_PER_ZCL + 1)) {
-            /* Only show nudge if transparent balance exceeds fee.
-             * Amounts at or below the min-relay fee cannot pay a shield. */
-            char t_fmt[32];
-            zcl_format_zcl(t_fmt, sizeof(t_fmt), transparent);
-            struct template_var pv[] = { { "amount", t_fmt } };
-            template_render(TMPL_PRIVACY_NUDGE, pv, 1,
-                privacy_buf, sizeof(privacy_buf));
-        }
-    }
+    render_privacy_card(privacy_buf, sizeof(privacy_buf), transparent);
 
-    /* Token cards — fetch top-5 held tokens via the port, render via
-     * the dashboard view. */
     char token_buf[2048] = "";
-    {
-        struct wallet_view_token_balance tokens[5];
-        int n_tokens = wv_list_token_cards(db, tokens,
-            sizeof(tokens) / sizeof(tokens[0]));
-        wv_render_dashboard_tokens(token_buf, sizeof(token_buf),
-            tokens, n_tokens);
-    }
+    render_token_cards(db, token_buf, sizeof(token_buf));
 
-    /* Recent transactions — fetch recent ledger rows + shielded notes
-     * via the port, render via the dashboard view (which caps at 5
-     * total and falls back to the empty-state). */
     char tx_buf[4096] = "";
-    {
-        struct wallet_view_ledger_row rows[20];
-        int n_rows = wv_list_ledger_rows(db, rows,
-            sizeof(rows) / sizeof(rows[0]),
-            false, 0, 0, NULL, 0, 0);
-        struct wallet_view_note_row notes[5];
-        int n_notes = wv_list_recent_notes(db, notes,
-            sizeof(notes) / sizeof(notes[0]), false, 5);
-        wv_render_dashboard_recent(tx_buf, sizeof(tx_buf),
-            rows, n_rows, notes, n_notes, tip, total_balance);
-    }
+    render_recent_transactions(db, tx_buf, sizeof(tx_buf),
+        tip, total_balance);
 
-    /* Backup warning */
     char backup_buf[512] = "";
-    if (total_balance > 0 && g_wv_datadir) {
-        char bk_path[1024];
-        snprintf(bk_path, sizeof(bk_path), "%s/wallet.backup", g_wv_datadir);
-        if (access(bk_path, F_OK) != 0) {
-            struct template_var bv[] = { { "address", PRIMARY_ADDR } };
-            template_render(TMPL_BACKUP_WARNING, bv, 1,
-                backup_buf, sizeof(backup_buf));
-        }
-    }
-
-    /* Node status strip (compact, replaces old Power Node card) */
-    int peers = wv_query_int(db, "SELECT count(*) FROM peers");
-    bool is_ready = synced || strstr(sync_raw, "idle");
-    const char *node_status = synced ? "Synced" :
-                              strstr(sync_raw, "idle") ? "Ready" : "Syncing";
-    const char *node_color = is_ready ? "#34d399" : "#fbbf24";
-    char peers_str[16], height_str[16];
-    snprintf(peers_str, sizeof(peers_str), "%d", peers);
-    snprintf(height_str, sizeof(height_str), "%d", tip);
+    render_backup_warning(backup_buf, sizeof(backup_buf), total_balance);
 
     char node_strip[512] = "";
-    {
-        struct template_var nv[] = {
-            { "peers",        peers_str },
-            { "height",       height_str },
-            { "status",       node_status },
-            { "status_color", node_color },
-        };
-        template_render(TMPL_NODE_STATUS_STRIP, nv, 4,
-            node_strip, sizeof(node_strip));
-    }
+    render_node_status_strip(db, node_strip, sizeof(node_strip),
+        synced, sync_raw, tip);
 
     /* Render full dashboard via TMPL_DASHBOARD */
     size_t off = wv_emit_header(r, max, "Z23 Wallet", "/wallet");

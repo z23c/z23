@@ -388,7 +388,6 @@ contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rpc_rescanwit
 contexts/wallet/controllers/src/wallet_scan.c:wallet_scan_blocks:44
 contexts/wallet/controllers/src/wallet_shielded_send.c:z_sendmany_run:87
 contexts/wallet/controllers/src/wallet_shielded_send_shielded.c:z_sendmany_shielded:58
-contexts/wallet/controllers/src/wallet_view_dashboard.c:serve_dashboard:46
 contexts/wallet/controllers/src/wallet_view_sync.c:wv_sync_wallet_from_zclassicd:43
 contexts/wallet/domain/src/mnemonic.c:mnemonic_decode_core:18
 contexts/wallet/modules/wallet/src/wallet.c:wallet_create_transaction_multi:16
