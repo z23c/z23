@@ -1343,7 +1343,7 @@ static int live_interactive_roundtrip(void)
             failures = check(failures, found,
                              "shell executed the typed line (echo output)");
             if (!found) {
-                printf("  saw %.100s\n", saw);
+                printf("  saw %.200s\n", saw);
                 failures = check(failures, mesh_terminal_worker_alive(&w),
                                  "shell was alive during the drain");
             }
