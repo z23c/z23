@@ -32,7 +32,7 @@ static struct coins_view_vtable mutable_backing_vtable = {
     .have_coins = mutable_backing_have,
 };
 
-int test_coins(void)
+static int coins_case_cache_memory_and_init(void)
 {
     int failures = 0;
 
@@ -66,6 +66,13 @@ int test_coins(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int coins_case_alloc_null_and_tx_out(void)
+{
+    int failures = 0;
 
     printf("coins_alloc/free... ");
     {
@@ -111,6 +118,13 @@ int test_coins(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int coins_case_available_pruned_and_spend(void)
+{
+    int failures = 0;
 
     printf("coins_is_available... ");
     {
@@ -189,6 +203,13 @@ int test_coins(void)
         coins_free(&c);
     }
 
+    return failures;
+}
+
+static int coins_case_respend_cleanup_and_copy(void)
+{
+    int failures = 0;
+
     printf("coins_spend already spent... ");
     {
         struct coins c;
@@ -241,6 +262,13 @@ int test_coins(void)
         coins_free(&dst);
     }
 
+    return failures;
+}
+
+static int coins_case_from_tx_and_over_cap(void)
+{
+    int failures = 0;
+
     printf("coins_from_transaction... ");
     {
         struct transaction tx;
@@ -288,6 +316,13 @@ int test_coins(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int coins_case_from_tx_oom_stats_zero(void)
+{
+    int failures = 0;
+
     /* Round-23 contract: on a real OOM in coins_alloc, coins_from_transaction
      * returns false with an empty record rather than a misleading num_vout==0
      * "all pruned" coin. We arm the allocator fault seam on coins_alloc's
@@ -333,6 +368,13 @@ int test_coins(void)
         coins_free(&c);
     }
 
+    return failures;
+}
+
+static int coins_case_map_insert_find_count(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * coins_map: insert, find, erase, count
      * ================================================================ */
@@ -363,6 +405,13 @@ int test_coins(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int coins_case_map_erase_and_rehash(void)
+{
+    int failures = 0;
 
     printf("coins_map: erase... ");
     {
@@ -415,6 +464,13 @@ int test_coins(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int coins_case_cache_init_basic(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * coins_view_cache: init, modify_new, get_coins, have_coins
      * ================================================================ */
@@ -466,6 +522,13 @@ int test_coins(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int coins_case_cache_invalidate_modify_block(void)
+{
+    int failures = 0;
 
     /* A process-lifetime cache over canonical coins_kv must not retain an
      * output from the generation before a finalized block spent it. */
@@ -586,6 +649,13 @@ int test_coins(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int coins_case_cache_flush_and_value_in(void)
+{
+    int failures = 0;
+
     /* ================================================================
      * coins_view_cache: flush to parent cache
      * ================================================================ */
@@ -667,6 +737,13 @@ int test_coins(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int coins_case_unspendable_and_null_batch(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * BUG FIX TEST: OP_RETURN outputs excluded from UTXO set
@@ -785,6 +862,13 @@ int test_coins(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int coins_case_sqlite_roundtrip_readback(void)
+{
+    int failures = 0;
+
     printf("coins_view_sqlite: roundtrip flush and read back... ");
     {
         /* Create an in-memory SQLite DB, open coins_view_sqlite on it,
@@ -858,6 +942,13 @@ int test_coins(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int coins_case_sqlite_flush_keeps_cache(void)
+{
+    int failures = 0;
+
     printf("coins_view_sqlite: flush retains cache on failure... ");
     {
         /* The test-only coins view cache flush must NOT clear the cache when
@@ -888,6 +979,13 @@ int test_coins(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int coins_case_sqlite_savepoint_foreign_txn(void)
+{
+    int failures = 0;
 
     printf("coins_view_sqlite: SAVEPOINT nests inside foreign transaction... ");
     {
@@ -971,6 +1069,13 @@ int test_coins(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int coins_case_sqlite_interleaved_flushes(void)
+{
+    int failures = 0;
+
     printf("coins_view_sqlite: multi-flush with interleaved foreign txns... ");
     {
         /* Simulate the IBD pattern: repeated flushes where each one
@@ -1048,6 +1153,13 @@ int test_coins(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int coins_case_sqlite_reset_statements(void)
+{
+    int failures = 0;
+
     printf("coins_view_sqlite: read helpers reset statements before flush... ");
     {
         sqlite3 *db = NULL;
@@ -1111,6 +1223,13 @@ int test_coins(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int coins_case_sqlite_spend_after_flush(void)
+{
+    int failures = 0;
 
     printf("coins_view_sqlite: spend-after-flush roundtrip... ");
     {
@@ -1197,6 +1316,32 @@ int test_coins(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_coins(void)
+{
+    int failures = 0;
+
+    failures += coins_case_cache_memory_and_init();
+    failures += coins_case_alloc_null_and_tx_out();
+    failures += coins_case_available_pruned_and_spend();
+    failures += coins_case_respend_cleanup_and_copy();
+    failures += coins_case_from_tx_and_over_cap();
+    failures += coins_case_from_tx_oom_stats_zero();
+    failures += coins_case_map_insert_find_count();
+    failures += coins_case_map_erase_and_rehash();
+    failures += coins_case_cache_init_basic();
+    failures += coins_case_cache_invalidate_modify_block();
+    failures += coins_case_cache_flush_and_value_in();
+    failures += coins_case_unspendable_and_null_batch();
+    failures += coins_case_sqlite_roundtrip_readback();
+    failures += coins_case_sqlite_flush_keeps_cache();
+    failures += coins_case_sqlite_savepoint_foreign_txn();
+    failures += coins_case_sqlite_interleaved_flushes();
+    failures += coins_case_sqlite_reset_statements();
+    failures += coins_case_sqlite_spend_after_flush();
 
     return failures;
 }
