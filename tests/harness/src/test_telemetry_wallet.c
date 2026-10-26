@@ -66,7 +66,7 @@
     do { \
         printf("%s... ", (name)); \
         if (cond) { printf("OK\n"); } \
-        else { printf("FAIL (%s)\n", #cond); } \
+        else { printf("FAIL (%s)\n", #cond); failures++; } \
     } while (0)
 
 static const struct json_value *dig2(const struct json_value *o,
