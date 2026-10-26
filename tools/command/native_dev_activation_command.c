@@ -129,9 +129,41 @@ static bool dac_authority_name(const char *intent, char out[96])
     return n > 0 && n < 96;
 }
 
-static bool dac_read_current(const char *gen_root, char out[80])
-{
 #if defined(_WIN32)
+static bool dac_read_selection_stable(
+    struct platform_directory_child *selection,
+    struct platform_directory_child_info *before,
+    struct platform_directory_child_info *after, char blob[256],
+    size_t blob_capacity)
+{
+    return platform_directory_child_info(selection, before) &&
+           before->current_user_only && before->size > 0 &&
+           before->size < blob_capacity &&
+           platform_directory_child_read_exact(selection, blob,
+                                               (size_t)before->size, 0) &&
+           platform_directory_child_info(selection, after) &&
+           dac_child_stable(before, after);
+}
+
+static bool dac_parse_selection_generation(char out[80], const char *blob,
+                                           size_t blob_size)
+{
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = json_read(&doc, blob, blob_size) &&
+              doc.type == JSON_OBJ;
+    const char *schema = ok ? json_get_str(json_get(&doc, "schema")) : NULL;
+    const char *selected = ok ? json_get_str(json_get(&doc, "generation")) : NULL;
+    ok = schema && selected &&
+         strcmp(schema, "zcl.dev_generation_selection.v1") == 0 &&
+         dac_generation(selected) &&
+         snprintf(out, 80, "%s", selected) > 0;
+    json_free(&doc);
+    return ok;
+}
+
+static bool dac_read_current_win32(const char *gen_root, char out[80])
+{
     struct platform_directory_transaction root, generation;
     struct platform_directory_child selection, binary;
     platform_directory_transaction_init(&root);
@@ -151,26 +183,11 @@ static bool dac_read_current(const char *gen_root, char out[80])
         return true;
     }
     ok = ok && selected == PLATFORM_DIRECTORY_OK &&
-              platform_directory_child_info(&selection, &before) &&
-              before.current_user_only && before.size > 0 &&
-              before.size < sizeof(blob) &&
-              platform_directory_child_read_exact(&selection, blob,
-                                                   (size_t)before.size, 0) &&
-              platform_directory_child_info(&selection, &after) &&
-              dac_child_stable(&before, &after);
+         dac_read_selection_stable(&selection, &before, &after, blob,
+                                   sizeof(blob));
     if (ok) {
         blob[before.size] = 0;
-        struct json_value doc;
-        json_init(&doc);
-        ok = json_read(&doc, blob, (size_t)before.size) &&
-             doc.type == JSON_OBJ;
-        const char *schema = ok ? json_get_str(json_get(&doc, "schema")) : NULL;
-        const char *selected = ok ? json_get_str(json_get(&doc, "generation")) : NULL;
-        ok = schema && selected &&
-             strcmp(schema, "zcl.dev_generation_selection.v1") == 0 &&
-             dac_generation(selected) &&
-             snprintf(out, 80, "%s", selected) > 0;
-        json_free(&doc);
+        ok = dac_parse_selection_generation(out, blob, (size_t)before.size);
     }
     if (ok)
         ok = platform_directory_transaction_open_child(
@@ -184,6 +201,13 @@ static bool dac_read_current(const char *gen_root, char out[80])
     platform_directory_child_close(&selection);
     platform_directory_transaction_close(&root);
     return ok;
+}
+#endif
+
+static bool dac_read_current(const char *gen_root, char out[80])
+{
+#if defined(_WIN32)
+    return dac_read_current_win32(gen_root, out);
 #else
     char link[PATH_MAX];
     int n = snprintf(link, sizeof(link), "%s/current", gen_root);
@@ -208,6 +232,25 @@ static bool dac_resolve_root(const struct zcl_command_request *request,
                                              PATH_MAX);
 }
 
+#if defined(_WIN32)
+static bool dac_receipt_header_matches(
+    const uint8_t blob[AUTHORITY_RECEIPT_HEADER_BYTES],
+    const uint8_t artifact[32], const uint8_t anchor[32],
+    const uint8_t detail[32])
+{
+    struct authority_receipt_header header;
+    bool ok = authority_receipt_header_deserialize(blob, &header);
+    uint8_t running[32];
+    ok = ok && authority_receipt_running_binary_digest(running) &&
+         strcmp(header.schema, DAC_AUTHORITY_SCHEMA) == 0 &&
+         memcmp(header.verifier_binary_digest, running, 32) == 0 &&
+         memcmp(header.artifact_digest, artifact, 32) == 0 &&
+         memcmp(header.context_anchor, anchor, 32) == 0 &&
+         memcmp(header.detail_digest, detail, 32) == 0;
+    return ok;
+}
+#endif
+
 static bool dac_authority_available(
     const char *datadir, const char *name, const uint8_t artifact[32],
     const uint8_t anchor[32], const uint8_t detail[32])
@@ -228,15 +271,7 @@ static bool dac_authority_available(
                                                    sizeof(blob), 0) &&
               platform_directory_child_info(&receipt, &after) &&
               dac_child_stable(&before, &after);
-    struct authority_receipt_header header;
-    ok = ok && authority_receipt_header_deserialize(blob, &header);
-    uint8_t running[32];
-    ok = ok && authority_receipt_running_binary_digest(running) &&
-         strcmp(header.schema, DAC_AUTHORITY_SCHEMA) == 0 &&
-         memcmp(header.verifier_binary_digest, running, 32) == 0 &&
-         memcmp(header.artifact_digest, artifact, 32) == 0 &&
-         memcmp(header.context_anchor, anchor, 32) == 0 &&
-         memcmp(header.detail_digest, detail, 32) == 0;
+    ok = ok && dac_receipt_header_matches(blob, artifact, anchor, detail);
     platform_directory_child_close(&receipt);
     platform_directory_transaction_close(&directory);
     return ok;
@@ -532,7 +567,7 @@ static void dac_commit(const struct zcl_command_request *request,
         json_get_str(json_get(request->input, "source_mutation_sha256"));
     const char *cas = json_get_str(json_get(request->input, "source_cas_sha3"));
     const char *expected = json_get_str(
-        json_get(request->input, "expected_current_generation"));
+        request->input, "expected_current_generation");
     const struct json_value *expires_value =
         json_get(request->input, "expires_unix");
     int64_t expires = expires_value ? json_get_int(expires_value) : 0;
