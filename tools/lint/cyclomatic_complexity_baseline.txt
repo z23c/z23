@@ -1234,7 +1234,6 @@ tests/harness/src/test_db_migration_idempotent.c:db_mig_snapshot_family:22
 tests/harness/src/test_db_txn.c:t_busy_snapshot_rollback_rebegin:20
 tests/harness/src/test_db_txn.c:t_failed_commit_rolls_back:19
 tests/harness/src/test_db_txn.c:t_rollback_on_induced_failure:17
-tests/harness/src/test_debug_bundle.c:test_debug_bundle:23
 tests/harness/src/test_dev_fleet_start.c:fsx_repo_fixture:16
 tests/harness/src/test_dev_fleet_start.c:test_dev_fleet_start:16
 tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24

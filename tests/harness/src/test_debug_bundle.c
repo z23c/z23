@@ -169,23 +169,9 @@ static int debug_bundle_check_offline_drain_gate(const char *dir)
     return failures;
 }
 
-int test_debug_bundle(void)
+static int debug_bundle_check_rpc_capture(char (*bundle_path)[1200])
 {
-    printf("\n=== debug_bundle tests ===\n");
     int failures = 0;
-
-    char dir[256];
-    test_fmt_tmpdir(dir, sizeof(dir), "debug_bundle", "1");
-    mkdir("./test-tmp", 0755);
-    mkdir(dir, 0755);
-    diagnostics_controller_set_state(NULL, dir);
-    /* rpc_table_execute refuses while the process is in warmup, which is
-     * the default state in a bare test process (test_rpc.c gets past it in
-     * an earlier warmup test). */
-    set_rpc_warmup_finished();
-
-    /* ── (a) debugbundle RPC end-to-end ──────────────────────────── */
-    char bundle_path[1200] = {0};
     {
         struct json_value params;
         json_init(&params);
@@ -215,12 +201,12 @@ int test_debug_bundle(void)
                   captured + failed == (int64_t)count);
         int64_t bytes = json_get_int(json_get(&result, "bytes"));
         DBB_CHECK("rpc: bytes > 0", bytes > 0);
-        if (path) snprintf(bundle_path, sizeof(bundle_path), "%s", path);
+        if (path) snprintf(*bundle_path, sizeof(*bundle_path), "%s", path);
 
         struct json_value doc;
         json_init(&doc);
         long fsize = 0;
-        ok = dbb_parse_bundle(bundle_path, &doc, &fsize);
+        ok = dbb_parse_bundle(*bundle_path, &doc, &fsize);
         DBB_CHECK("file: exists and parses as a JSON object", ok);
         if (ok) {
             DBB_CHECK("file: size matches the reported bytes",
@@ -252,6 +238,27 @@ int test_debug_bundle(void)
         json_free(&params);
         json_free(&result);
     }
+    return failures;
+}
+
+int test_debug_bundle(void)
+{
+    printf("\n=== debug_bundle tests ===\n");
+    int failures = 0;
+
+    char dir[256];
+    test_fmt_tmpdir(dir, sizeof(dir), "debug_bundle", "1");
+    mkdir("./test-tmp", 0755);
+    mkdir(dir, 0755);
+    diagnostics_controller_set_state(NULL, dir);
+    /* rpc_table_execute refuses while the process is in warmup, which is
+     * the default state in a bare test process (test_rpc.c gets past it in
+     * an earlier warmup test). */
+    set_rpc_warmup_finished();
+
+    /* ── (a) debugbundle RPC end-to-end ──────────────────────────── */
+    char bundle_path[1200] = {0};
+    failures += debug_bundle_check_rpc_capture(&bundle_path);
 
     /* ── (b) supervisor-stall trigger metadata ───────────────────── */
     char stall_path[1200] = {0};
