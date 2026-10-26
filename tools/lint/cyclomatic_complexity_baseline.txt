@@ -1667,7 +1667,6 @@ tests/harness/src/test_have_data_unreadable.c:test_have_data_unreadable:75
 tests/harness/src/test_hd_keychain.c:test_hd_keychain:63
 tests/harness/src/test_header_admit_stage.c:test_header_admit_stage:36
 tests/harness/src/test_header_probe.c:hp_mock_loop:32
-tests/harness/src/test_header_probe_p2p_fallback.c:run_p2p_repair_case:29
 tests/harness/src/test_header_sync_stall.c:test_header_sync_stall:44
 tests/harness/src/test_helpers.c:test_abs_path:19
 tests/harness/src/test_helpers.c:test_spawn_capture_env:23

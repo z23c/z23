@@ -410,6 +410,86 @@ static int hpf_drive_one_header(struct msg_processor *mp, struct p2p_node *node,
 
 /* ── Cases 1 & 2 (P2P repair + missing-input) ──────────────────────────── */
 
+/* Park the stage cursors at the frontier and lay down the height-1 poison
+ * rows so the repair Condition has something to remedy. */
+static bool p2p_seed_repair_fixture(sqlite3 *db)
+{
+    bool ok = seed_cursors(db, 5, 5);
+    ok = ok && seed_poison_rows(
+        db, 1, "'no-header-solution-backfill-required'", 0);
+    return ok;
+}
+
+/* Tick 1 with the oracle dead: the remedy ran exactly once, the Condition is
+ * still active, HAVE_DATA was cleared for the re-fetch, and the probe
+ * accounting shows one getdata request that has not been served yet. */
+static bool check_p2p_refetch_requested(
+    const struct header_probe_repair_stats *s, struct block_index *blocks)
+{
+    bool ok = stale_validate_headers_repair_test_remedy_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && (blocks[1].nStatus & BLOCK_HAVE_DATA) == 0;  /* cleared for refetch */
+    ok = ok && s->p2p_requests == 1;
+    ok = ok && s->p2p_no_peer_events == 0;                  /* peers available */
+    ok = ok && s->p2p_repairs == 0;                         /* not served yet */
+    ok = ok && s->last_repair_height == 1;
+    return ok;
+}
+
+/* Tick 1 observables: the bounded header-only repair is armed, the
+ * full-block getdata fallback is queued for the canonical hash, and no
+ * missing-input blocker fired. */
+static bool check_full_block_fallback_armed(struct block_index *blocks,
+                                            struct download_manager *dm,
+                                            struct uint256 *rhash)
+{
+    bool ok = header_serve_repair_test_armed();
+    ok = ok && header_serve_repair_test_expected_count() == 1;
+    ok = ok && header_serve_repair_wants(&blocks[1]);
+    ok = ok && dm->queue_len == 1 && dm->queue_heights[0] == 1;
+    ok = ok && uint256_eq(&dm->queue[0], rhash);
+    ok = ok && !blocker_exists(HPF_NO_SOURCE_BLOCKER_ID);
+    return ok;
+}
+
+/* Simulate the honest peer's block arriving: reducer_cache_ingested_solution
+ * saves the re-validated solution hash-bound into the repair table. */
+static bool p2p_deliver_peer_solution(sqlite3 *db, struct uint256 *rhash,
+                                      struct block_header *rh)
+{
+    bool ok = stage_repair_header_solution_save(db, 1, rhash, rh);
+    ok = ok && stage_repair_header_solution_available(db, 1, rhash);
+    return ok;
+}
+
+/* Tick 2: the remedy ran again and the completed repair is attributed to the
+ * P2P source, not the (dead) oracle. */
+static bool check_p2p_repair_attributed(
+    const struct header_probe_repair_stats *s)
+{
+    bool ok = stale_validate_headers_repair_test_remedy_calls() == 2;
+    ok = ok && s->p2p_repairs == 1;
+    ok = ok && s->oracle_repairs == 0;
+    ok = ok && s->last_repair_source == HEADER_PROBE_SRC_P2P;
+    ok = ok && s->last_repair_height == 1;
+    return ok;
+}
+
+/* Fold the re-fetched block through the reducer: every downstream stage
+ * succeeds at height 1 and the body fetch is sourced from P2P. */
+static bool p2p_fold_repaired_block_through(sqlite3 *db, struct uint256 *rhash)
+{
+    bool ok = seed_reducer_success(db, 1);
+    ok = ok && exec_sql(db,
+        "UPDATE body_fetch_log SET ok=1, source='p2p', fail_reason=NULL "
+        "WHERE height=1");
+    /* Match the folded stage hashes to the canonical header and model H*
+     * advancing to the repaired height (the sole success predicate). */
+    ok = ok && set_hash_col(db, "validate_headers_log", "hash", 1, rhash);
+    ok = ok && set_hash_col(db, "script_validate_log", "block_hash", 1, rhash);
+    return ok;
+}
+
 static int run_p2p_repair_case(void)
 {
     int failures = 0;
@@ -427,9 +507,7 @@ static int run_p2p_repair_case(void)
     bool ok = case_setup("p2p_repair", dir, sizeof(dir), &ms, blocks, hashes,
                          &rhash, &dm);
     sqlite3 *db = progress_store_db();
-    ok = ok && seed_cursors(db, 5, 5);
-    ok = ok && seed_poison_rows(
-        db, 1, "'no-header-solution-backfill-required'", 0);
+    ok = ok && p2p_seed_repair_fixture(db);
 
     /* An honest peer is reachable for the getdata re-fetch. */
     stale_validate_headers_repair_test_set_peer_count(1);
@@ -439,27 +517,13 @@ static int run_p2p_repair_case(void)
 
     struct header_probe_repair_stats s1;
     header_probe_test_get_repair_stats(&s1);
-    ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-    ok = ok && condition_engine_get_active_count() == 1;
-    ok = ok && (blocks[1].nStatus & BLOCK_HAVE_DATA) == 0;   /* cleared for refetch */
-    ok = ok && s1.p2p_requests == 1;
-    ok = ok && s1.p2p_no_peer_events == 0;                   /* peers available */
-    ok = ok && s1.p2p_repairs == 0;                          /* not served yet */
-    ok = ok && s1.last_repair_height == 1;
-    ok = ok && header_serve_repair_test_armed();
-    ok = ok && header_serve_repair_test_expected_count() == 1;
-    ok = ok && header_serve_repair_wants(&blocks[1]);
-    ok = ok && dm.queue_len == 1 && dm.queue_heights[0] == 1;
-    ok = ok && uint256_eq(&dm.queue[0], &rhash);
-    ok = ok && !blocker_exists(HPF_NO_SOURCE_BLOCKER_ID);
+    ok = ok && check_p2p_refetch_requested(&s1, blocks);
+    ok = ok && check_full_block_fallback_armed(blocks, &dm, &rhash);
     HPF_CHECK("oracle dead → bounded header-only repair armed + full-block "
               "fallback requested (no premature repair or missing-input "
               "blocker)", ok);
 
-    /* Simulate the honest peer's block arriving: reducer_cache_ingested_solution
-     * saves the re-validated solution hash-bound into the repair table. */
-    ok = ok && stage_repair_header_solution_save(db, 1, &rhash, &rh);
-    ok = ok && stage_repair_header_solution_available(db, 1, &rhash);
+    ok = ok && p2p_deliver_peer_solution(db, &rhash, &rh);
 
     /* Tick 2: remedy sees the solution present, attributes it to P2P. */
     stale_validate_headers_repair_test_clear_backoff();
@@ -467,25 +531,14 @@ static int run_p2p_repair_case(void)
 
     struct header_probe_repair_stats s2;
     header_probe_test_get_repair_stats(&s2);
-    ok = ok && stale_validate_headers_repair_test_remedy_calls() == 2;
-    ok = ok && s2.p2p_repairs == 1;
-    ok = ok && s2.oracle_repairs == 0;
-    ok = ok && s2.last_repair_source == HEADER_PROBE_SRC_P2P;
-    ok = ok && s2.last_repair_height == 1;
+    ok = ok && check_p2p_repair_attributed(&s2);
     HPF_CHECK("P2P-delivered canonical solution re-validates + repair is "
               "attributed to the P2P source", ok);
 
     /* The reducer folds the re-fetched block through (consistent success
      * column at the frontier), detect goes false and the Condition
      * deactivates: the repair is not a latch. */
-    ok = ok && seed_reducer_success(db, 1);
-    ok = ok && exec_sql(db,
-        "UPDATE body_fetch_log SET ok=1, source='p2p', fail_reason=NULL "
-        "WHERE height=1");
-    /* Match the folded stage hashes to the canonical header and model H*
-     * advancing to the repaired height (the sole success predicate). */
-    ok = ok && set_hash_col(db, "validate_headers_log", "hash", 1, &rhash);
-    ok = ok && set_hash_col(db, "script_validate_log", "block_hash", 1, &rhash);
+    ok = ok && p2p_fold_repaired_block_through(db, &rhash);
     stale_validate_headers_repair_test_set_hstar_override(1);
     stale_validate_headers_repair_test_clear_backoff();
     condition_engine_tick();
