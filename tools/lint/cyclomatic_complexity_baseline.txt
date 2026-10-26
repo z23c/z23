@@ -324,10 +324,6 @@ contexts/commons/modules/vcs/src/zcode_task_authority_bundle.c:vcs_zcode_task_au
 contexts/commons/modules/vcs/src/zcode_task_context.c:vcs_zcode_task_context_admit:30
 contexts/commons/modules/vcs/src/zcode_task_context.c:vcs_zcode_task_context_export:21
 contexts/commons/modules/vcs/src/zcode_task_context.c:vcs_zcode_task_context_verify_wires:22
-contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_publish_result:22
-contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_submit:27
-contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_tick:26
-contexts/commons/modules/vcs/src/zcode_work_node.c:work_handle_request:22
 contexts/commons/modules/vcs/src/zcode_work_swarm.c:vcs_zcode_work_result_quorum:21
 contexts/commons/modules/vcs/src/zcode_work_swarm.c:vcs_zcode_work_result_verify:19
 contexts/commons/modules/vcs/src/zcode_work_swarm.c:vcs_zcode_work_swarm_parse:89
