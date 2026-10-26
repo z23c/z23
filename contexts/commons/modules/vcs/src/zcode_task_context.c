@@ -39,6 +39,41 @@ const char *vcs_zcode_task_context_error_string(
 
 /* ── wire rules (shared by export and admit) ────────────────────────── */
 
+static enum vcs_zcode_task_context_error tc_verify_bindings(
+    const uint8_t *task_wire, size_t task_len, const uint8_t *goal,
+    size_t goal_len, const uint8_t *policy_wire, size_t policy_len,
+    int64_t now_unix, struct vcs_zcode_task_v1 *task,
+    struct vcs_zcode_proof_policy_v1 *policy)
+{
+    if (vcs_zcode_task_parse(task_wire, task_len, task) !=
+        VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_TASK_CONTEXT_TASK_WIRE;
+    enum vcs_zcode_dev_error at =
+        vcs_zcode_task_validate_at(task, now_unix);
+    if (at == VCS_ZCODE_DEV_ERR_EXPIRY)
+        return VCS_ZCODE_TASK_CONTEXT_TASK_EXPIRED;
+    if (at != VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_TASK_CONTEXT_TASK_WIRE;
+    if (goal_len == 0 || goal_len > VCS_ZCODE_TASK_CONTEXT_GOAL_MAX ||
+        memchr(goal, '\0', goal_len))
+        return VCS_ZCODE_TASK_CONTEXT_GOAL;
+    uint8_t goal_check[32];
+    sha3_256(goal, goal_len, goal_check);
+    if (memcmp(goal_check, task->goal_root, 32) != 0)
+        return VCS_ZCODE_TASK_CONTEXT_GOAL;
+    if (vcs_zcode_proof_policy_parse(policy_wire, policy_len, policy) !=
+        VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_TASK_CONTEXT_POLICY_WIRE;
+    if (vcs_zcode_proof_policy_validate(policy) != VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_TASK_CONTEXT_POLICY_WIRE;
+    uint8_t policy_root[32];
+    if (vcs_zcode_proof_policy_root(policy, policy_root) !=
+        VCS_ZCODE_DEV_OK ||
+        memcmp(policy_root, task->proof_policy_root, 32) != 0)
+        return VCS_ZCODE_TASK_CONTEXT_POLICY_MISMATCH;
+    return VCS_ZCODE_TASK_CONTEXT_OK;
+}
+
 enum vcs_zcode_task_context_error vcs_zcode_task_context_verify_wires(
     const uint8_t *task_wire, size_t task_len, const uint8_t *goal,
     size_t goal_len, const uint8_t *policy_wire, size_t policy_len,
@@ -52,33 +87,11 @@ enum vcs_zcode_task_context_error vcs_zcode_task_context_verify_wires(
     if (!task_wire || !goal || !policy_wire)
         return VCS_ZCODE_TASK_CONTEXT_NULL;
     struct vcs_zcode_task_v1 task;
-    if (vcs_zcode_task_parse(task_wire, task_len, &task) !=
-        VCS_ZCODE_DEV_OK)
-        return VCS_ZCODE_TASK_CONTEXT_TASK_WIRE;
-    enum vcs_zcode_dev_error at =
-        vcs_zcode_task_validate_at(&task, now_unix);
-    if (at == VCS_ZCODE_DEV_ERR_EXPIRY)
-        return VCS_ZCODE_TASK_CONTEXT_TASK_EXPIRED;
-    if (at != VCS_ZCODE_DEV_OK)
-        return VCS_ZCODE_TASK_CONTEXT_TASK_WIRE;
-    if (goal_len == 0 || goal_len > VCS_ZCODE_TASK_CONTEXT_GOAL_MAX ||
-        memchr(goal, '\0', goal_len))
-        return VCS_ZCODE_TASK_CONTEXT_GOAL;
-    uint8_t goal_check[32];
-    sha3_256(goal, goal_len, goal_check);
-    if (memcmp(goal_check, task.goal_root, 32) != 0)
-        return VCS_ZCODE_TASK_CONTEXT_GOAL;
     struct vcs_zcode_proof_policy_v1 policy;
-    if (vcs_zcode_proof_policy_parse(policy_wire, policy_len, &policy) !=
-        VCS_ZCODE_DEV_OK)
-        return VCS_ZCODE_TASK_CONTEXT_POLICY_WIRE;
-    if (vcs_zcode_proof_policy_validate(&policy) != VCS_ZCODE_DEV_OK)
-        return VCS_ZCODE_TASK_CONTEXT_POLICY_WIRE;
-    uint8_t policy_root[32];
-    if (vcs_zcode_proof_policy_root(&policy, policy_root) !=
-        VCS_ZCODE_DEV_OK ||
-        memcmp(policy_root, task.proof_policy_root, 32) != 0)
-        return VCS_ZCODE_TASK_CONTEXT_POLICY_MISMATCH;
+    enum vcs_zcode_task_context_error verified = tc_verify_bindings(
+        task_wire, task_len, goal, goal_len, policy_wire, policy_len,
+        now_unix, &task, &policy);
+    if (verified != VCS_ZCODE_TASK_CONTEXT_OK) return verified;
     if (task_out) *task_out = task;
     if (policy_out) *policy_out = policy;
     if (task_root_out &&
@@ -88,6 +101,46 @@ enum vcs_zcode_task_context_error vcs_zcode_task_context_verify_wires(
 }
 
 /* ── export ─────────────────────────────────────────────────────────── */
+
+static bool tc_store_context(
+    const uint8_t *task_wire, size_t task_len, const uint8_t *goal,
+    size_t goal_len, const uint8_t *policy_wire, size_t policy_len,
+    struct vcs_package_store *store, struct vcs_package_manifest *manifest,
+    uint8_t **wire, size_t *wire_len, uint8_t root[32], bool ok)
+{
+    if (ok && (!vcs_package_manifest_serialize(manifest, wire,
+                                                wire_len) ||
+               !vcs_package_manifest_root(manifest, root)))
+        ok = false;
+    uint8_t stored_root[32] = {0};
+    if (ok) {
+        enum vcs_package_store_result r =
+            vcs_package_store_put_manifest(store, *wire, *wire_len,
+                                           stored_root);
+        if (r != VCS_PACKAGE_STORE_OK ||
+            memcmp(stored_root, root, 32) != 0)
+            ok = false;
+    }
+    if (ok &&
+        (vcs_package_content_put_file(
+             store, root, VCS_ZCODE_TASK_CONTEXT_TASK_PATH, task_wire,
+             task_len) != VCS_PACKAGE_STORE_OK ||
+         vcs_package_content_put_file(
+             store, root, VCS_ZCODE_TASK_CONTEXT_GOAL_PATH, goal,
+             goal_len) != VCS_PACKAGE_STORE_OK ||
+         vcs_package_content_put_file(
+             store, root, VCS_ZCODE_TASK_CONTEXT_POLICY_PATH, policy_wire,
+             policy_len) != VCS_PACKAGE_STORE_OK))
+        ok = false;
+    if (ok) {
+        struct vcs_package_store_status status;
+        /* bool return, not a store result code. */
+        if (!vcs_package_store_package_status(store, root, &status) ||
+            !status.complete)
+            ok = false;
+    }
+    return ok;
+}
 
 enum vcs_zcode_task_context_error vcs_zcode_task_context_export(
     const uint8_t *task_wire, size_t task_len, const uint8_t *goal,
@@ -124,37 +177,9 @@ enum vcs_zcode_task_context_error vcs_zcode_task_context_export(
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     uint8_t root[32] = {0};
-    if (ok && (!vcs_package_manifest_serialize(&manifest, &wire,
-                                                &wire_len) ||
-               !vcs_package_manifest_root(&manifest, root)))
-        ok = false;
-    uint8_t stored_root[32] = {0};
-    if (ok) {
-        enum vcs_package_store_result r =
-            vcs_package_store_put_manifest(store, wire, wire_len,
-                                           stored_root);
-        if (r != VCS_PACKAGE_STORE_OK ||
-            memcmp(stored_root, root, 32) != 0)
-            ok = false;
-    }
-    if (ok &&
-        (vcs_package_content_put_file(
-             store, root, VCS_ZCODE_TASK_CONTEXT_TASK_PATH, task_wire,
-             task_len) != VCS_PACKAGE_STORE_OK ||
-         vcs_package_content_put_file(
-             store, root, VCS_ZCODE_TASK_CONTEXT_GOAL_PATH, goal,
-             goal_len) != VCS_PACKAGE_STORE_OK ||
-         vcs_package_content_put_file(
-             store, root, VCS_ZCODE_TASK_CONTEXT_POLICY_PATH, policy_wire,
-             policy_len) != VCS_PACKAGE_STORE_OK))
-        ok = false;
-    if (ok) {
-        struct vcs_package_store_status status;
-        /* bool return, not a store result code. */
-        if (!vcs_package_store_package_status(store, root, &status) ||
-            !status.complete)
-            ok = false;
-    }
+    ok = tc_store_context(task_wire, task_len, goal, goal_len,
+                          policy_wire, policy_len, store, &manifest,
+                          &wire, &wire_len, root, ok);
     vcs_package_manifest_free(&manifest);
     free(wire);
     if (!ok)
@@ -204,55 +229,44 @@ static enum vcs_zcode_task_context_error tc_read_member(
     return VCS_ZCODE_TASK_CONTEXT_MANIFEST;
 }
 
-enum vcs_zcode_task_context_error vcs_zcode_task_context_admit(
+static enum vcs_zcode_task_context_error tc_check_manifest(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_package_manifest *manifest, const uint8_t root[32])
+{
+    enum vcs_zcode_task_context_error err = VCS_ZCODE_TASK_CONTEXT_OK;
+    if (!vcs_package_manifest_parse(wire, wire_len, manifest))
+        err = VCS_ZCODE_TASK_CONTEXT_MANIFEST;
+    uint8_t derived[32];
+    if (err == VCS_ZCODE_TASK_CONTEXT_OK &&
+        (!vcs_package_manifest_root(manifest, derived) ||
+         memcmp(derived, root, 32) != 0))
+        err = VCS_ZCODE_TASK_CONTEXT_MANIFEST;
+    if (err == VCS_ZCODE_TASK_CONTEXT_OK && !tc_manifest_shape_ok(manifest))
+        err = VCS_ZCODE_TASK_CONTEXT_MANIFEST;
+    return err;
+}
+
+static enum vcs_zcode_task_context_error tc_admit_members(
     struct vcs_package_store *store, const uint8_t root[32],
+    const struct vcs_package_manifest *manifest,
+    enum vcs_zcode_task_context_error err,
     const uint8_t expect_task_root[32], int64_t now_unix,
     struct vcs_zcode_task_v1 *task_out,
     struct vcs_zcode_proof_policy_v1 *policy_out, uint8_t *goal_out,
     size_t goal_cap, size_t *goal_len_out, uint8_t task_root_out[32])
 {
-    struct vcs_zcode_proof_policy_v1 discarded_policy;
-    if (!policy_out) policy_out = &discarded_policy;
-    memset(policy_out, 0, sizeof(*policy_out));
-    if (task_out) memset(task_out, 0, sizeof(*task_out));
-    if (goal_out && goal_cap) memset(goal_out, 0, goal_cap);
-    if (goal_len_out) *goal_len_out = 0;
-    if (task_root_out) memset(task_root_out, 0, 32);
-    if (!store || !root || (!goal_out && goal_cap))
-        return VCS_ZCODE_TASK_CONTEXT_NULL;
-
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    if (vcs_package_store_get_manifest_wire(store, root, &wire,
-                                            &wire_len) !=
-        VCS_PACKAGE_STORE_OK) {
-        free(wire);
-        return VCS_ZCODE_TASK_CONTEXT_STORE;
-    }
-    struct vcs_package_manifest manifest;
-    enum vcs_zcode_task_context_error err = VCS_ZCODE_TASK_CONTEXT_OK;
-    if (!vcs_package_manifest_parse(wire, wire_len, &manifest))
-        err = VCS_ZCODE_TASK_CONTEXT_MANIFEST;
-    uint8_t derived[32];
-    if (err == VCS_ZCODE_TASK_CONTEXT_OK &&
-        (!vcs_package_manifest_root(&manifest, derived) ||
-         memcmp(derived, root, 32) != 0))
-        err = VCS_ZCODE_TASK_CONTEXT_MANIFEST;
-    if (err == VCS_ZCODE_TASK_CONTEXT_OK && !tc_manifest_shape_ok(&manifest))
-        err = VCS_ZCODE_TASK_CONTEXT_MANIFEST;
-
     uint8_t *task_wire = NULL, *goal = NULL, *policy_wire = NULL;
     size_t task_len = 0, goal_len = 0, policy_len = 0;
     if (err == VCS_ZCODE_TASK_CONTEXT_OK)
-        err = tc_read_member(store, root, &manifest,
+        err = tc_read_member(store, root, manifest,
                              VCS_ZCODE_TASK_CONTEXT_TASK_PATH, &task_wire,
                              &task_len);
     if (err == VCS_ZCODE_TASK_CONTEXT_OK)
-        err = tc_read_member(store, root, &manifest,
+        err = tc_read_member(store, root, manifest,
                              VCS_ZCODE_TASK_CONTEXT_GOAL_PATH, &goal,
                              &goal_len);
     if (err == VCS_ZCODE_TASK_CONTEXT_OK)
-        err = tc_read_member(store, root, &manifest,
+        err = tc_read_member(store, root, manifest,
                              VCS_ZCODE_TASK_CONTEXT_POLICY_PATH,
                              &policy_wire, &policy_len);
 
@@ -282,6 +296,42 @@ enum vcs_zcode_task_context_error vcs_zcode_task_context_admit(
     free(task_wire);
     free(goal);
     free(policy_wire);
+    return err;
+}
+
+enum vcs_zcode_task_context_error vcs_zcode_task_context_admit(
+    struct vcs_package_store *store, const uint8_t root[32],
+    const uint8_t expect_task_root[32], int64_t now_unix,
+    struct vcs_zcode_task_v1 *task_out,
+    struct vcs_zcode_proof_policy_v1 *policy_out, uint8_t *goal_out,
+    size_t goal_cap, size_t *goal_len_out, uint8_t task_root_out[32])
+{
+    struct vcs_zcode_proof_policy_v1 discarded_policy;
+    if (!policy_out) policy_out = &discarded_policy;
+    memset(policy_out, 0, sizeof(*policy_out));
+    if (task_out) memset(task_out, 0, sizeof(*task_out));
+    if (goal_out && goal_cap) memset(goal_out, 0, goal_cap);
+    if (goal_len_out) *goal_len_out = 0;
+    if (task_root_out) memset(task_root_out, 0, 32);
+    if (!store || !root || (!goal_out && goal_cap))
+        return VCS_ZCODE_TASK_CONTEXT_NULL;
+
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (vcs_package_store_get_manifest_wire(store, root, &wire,
+                                            &wire_len) !=
+        VCS_PACKAGE_STORE_OK) {
+        free(wire);
+        return VCS_ZCODE_TASK_CONTEXT_STORE;
+    }
+    struct vcs_package_manifest manifest;
+    enum vcs_zcode_task_context_error err =
+        tc_check_manifest(wire, wire_len, &manifest, root);
+
+    err = tc_admit_members(store, root, &manifest, err,
+                           expect_task_root, now_unix, task_out,
+                           policy_out, goal_out, goal_cap, goal_len_out,
+                           task_root_out);
     vcs_package_manifest_free(&manifest);
     free(wire);
     return err;
