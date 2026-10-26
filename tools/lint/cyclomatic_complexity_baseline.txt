@@ -1386,8 +1386,6 @@ engine/services/src/build_fabric_cache.c:build_fabric_cache_restore:29
 engine/services/src/build_fabric_evidence.c:bf_count_kind:16
 engine/services/src/build_fabric_evidence.c:bf_package_evidence_wire:17
 engine/services/src/build_fabric_evidence.c:build_fabric_receipt_observe_remote:42
-engine/services/src/build_fabric_evidence_parse.c:build_fabric_fuzz_evidence_parse:25
-engine/services/src/build_fabric_evidence_parse.c:build_fabric_test_evidence_parse:19
 engine/services/src/build_fabric_worker.c:bfw_paths_init:30
 engine/services/src/build_fabric_worker.c:build_fabric_worker_execute:118
 engine/services/src/build_fabric_worker_feedback.c:build_fabric_worker_feedback_capture:39
