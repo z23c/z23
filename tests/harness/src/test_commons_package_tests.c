@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #if !defined(_WIN32)
 #include <dirent.h>
@@ -56,24 +57,55 @@ static int cpt_name_cmp(const void *a, const void *b)
     return strcmp((const char *)a, (const char *)b);
 }
 
-/* Collect the entries of `dir` (directories or .c files), sorted. */
+#if !defined(_WIN32)
+static bool cpt_read_names(DIR *d, bool want_dirs,
+                            char names[][CPT_NAME], size_t cap, size_t *n)
+{
+    for (;;) {
+        errno = 0;
+        struct dirent *e = readdir(d);
+        if (!e) return errno == 0;
+        if (e->d_name[0] == '.') continue;
+        if (!want_dirs && !cpt_is_c_file(e->d_name)) continue;
+        if (strlen(e->d_name) >= CPT_NAME) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        if (*n == cap) {
+            errno = EOVERFLOW;
+            return false;
+        }
+        memcpy(names[*n], e->d_name, strlen(e->d_name) + 1);
+        (*n)++;
+    }
+}
+
+static size_t cpt_discovery_error(const char *dir, int error)
+{
+    (void)snprintf(g_cpt_why, sizeof g_cpt_why,
+                   "discover %.180s: %s", dir, strerror(error));
+    return SIZE_MAX;
+}
+#endif
+
+/* Collect all entries, sorted. SIZE_MAX means discovery was incomplete. */
 static size_t cpt_list(const char *dir, bool want_dirs,
                        char names[][CPT_NAME], size_t cap)
 {
     size_t n = 0;
 #if !defined(_WIN32)
     DIR *d = opendir(dir);
-    if (!d) return 0;
-    for (struct dirent *e; (e = readdir(d)) != NULL && n < cap;) {
-        if (e->d_name[0] == '.' || strlen(e->d_name) >= CPT_NAME) continue;
-        if (!want_dirs && !cpt_is_c_file(e->d_name)) continue;
-        memcpy(names[n], e->d_name, strlen(e->d_name) + 1);
-        n++;
-    }
-    closedir(d);
+    if (!d) return cpt_discovery_error(dir, errno);
+    bool complete = cpt_read_names(d, want_dirs, names, cap, &n);
+    int error = complete ? 0 : errno;
+    if (closedir(d) != 0 && complete) error = errno;
+    if (error) return cpt_discovery_error(dir, error);
     qsort(names, n, CPT_NAME, cpt_name_cmp);
 #else
     (void)dir; (void)want_dirs; (void)names; (void)cap;
+    (void)snprintf(g_cpt_why, sizeof g_cpt_why,
+                   "package discovery unsupported on this platform");
+    return SIZE_MAX;
 #endif
     return n;
 }
@@ -152,7 +184,7 @@ static void cpt_push(struct cpt_argv *a, const char *s)
 
 /* -I and every source file of one package, addressed from the package under
  * test (all packages are siblings). */
-static void cpt_push_pkg(struct cpt_argv *a, const char *pkg)
+static bool cpt_push_pkg(struct cpt_argv *a, const char *pkg)
 {
     static char srcs[CPT_MAX_SRC][CPT_NAME];
     char dir[512], arg[160];
@@ -160,10 +192,12 @@ static void cpt_push_pkg(struct cpt_argv *a, const char *pkg)
     cpt_push(a, arg);
     (void)snprintf(dir, sizeof dir, "%s/%s/src", k_cpt_root, pkg);
     size_t ns = cpt_list(dir, false, srcs, CPT_MAX_SRC);
+    if (ns == SIZE_MAX) return false;
     for (size_t i = 0; i < ns; i++) {
         (void)snprintf(arg, sizeof arg, "../%s/src/%s", pkg, srcs[i]);
         cpt_push(a, arg);
     }
+    return true;
 }
 
 /* cc <flags> include and source dirs of the package and its dependencies, its own test. */
@@ -188,9 +222,9 @@ static bool cpt_build(const char *dir, const char *pkg, const char *out)
      * The refusal is what the test proves, so only zpem drops the warning. */
     if (strcmp(pkg, "zpem") == 0)
         cpt_push(&a, "-Wno-free-nonheap-object");
-    cpt_push_pkg(&a, pkg);
+    if (!cpt_push_pkg(&a, pkg)) return false;
     for (size_t i = 0; i < nd; i++)
-        cpt_push_pkg(&a, deps[i]);
+        if (!cpt_push_pkg(&a, deps[i])) return false;
     (void)snprintf(arg, sizeof arg, "tests/test_%s.c", pkg);
     cpt_push(&a, arg);
     cpt_push(&a, "-lm");
@@ -221,20 +255,66 @@ static int cpt_one(const char *pkg, const char *tmp)
     return ok;
 }
 
+#if !defined(_WIN32)
+static bool cpt_fixture_source(const char *dir, const char *name,
+                                char *path, size_t cap)
+{
+    int n = snprintf(path, cap, "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= cap) return false;
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return false;
+    bool ok = fputs("#error source must not be silently omitted\n", fp) >= 0;
+    if (fclose(fp) != 0) ok = false;
+    return ok;
+}
+
+static int cpt_discovery_selftest(void)
+{
+    int failures = 0;
+    char dir[512], path[640], names[3][CPT_NAME];
+    char long_name[CPT_NAME + 1];
+    if (!test_mkdtemp(dir, sizeof dir, "commons_discovery")) return 1;
+    TEST("commons discovery: complete lists or an explicit failure") {
+        ASSERT(cpt_list(dir, false, names, 3) == 0);
+        ASSERT(cpt_fixture_source(dir, "b.c", path, sizeof path));
+        ASSERT(cpt_fixture_source(dir, "a.c", path, sizeof path));
+        ASSERT(cpt_list(dir, false, names, 2) == 2);
+        ASSERT(strcmp(names[0], "a.c") == 0);
+        ASSERT(strcmp(names[1], "b.c") == 0);
+        ASSERT(cpt_list(dir, false, names, 1) == SIZE_MAX);
+        ASSERT(strstr(g_cpt_why, "discover") != NULL);
+        ASSERT(cpt_list(path, false, names, 3) == SIZE_MAX);
+        memset(long_name, 'x', sizeof long_name);
+        memcpy(long_name + CPT_NAME - 2, ".c", 3);
+        ASSERT(cpt_fixture_source(dir, long_name, path, sizeof path));
+        ASSERT(cpt_list(dir, false, names, 3) == SIZE_MAX);
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
+    if (cpt_list(dir, false, names, 3) != SIZE_MAX) failures++;
+    g_cpt_why[0] = '\0';
+    return failures;
+}
+#endif
+
 int test_commons_package_tests(void)
 {
     static char pkgs[CPT_MAX_PKGS][CPT_NAME];
     char tmp[512];
     int failures = 0, ran = 0;
 
+#if !defined(_WIN32)
+    if (cpt_discovery_selftest() != 0) return 1;
+#endif
     printf("\n=== commons_package_tests: every package builds and passes "
            "its own test ===\n");
     /* The fixture opts in to process execution; the group runs in its own
      * process, so the variable does not leak to another group. */
     (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
     size_t n = cpt_list(k_cpt_root, true, pkgs, CPT_MAX_PKGS);
-    if (n == 0 || !test_mkdtemp(tmp, sizeof tmp, "commons_pkg")) {
-        printf("commons_package_tests: no packages or no tmpdir... FAIL\n");
+    if (n == SIZE_MAX || n == 0 || !test_mkdtemp(tmp, sizeof tmp, "commons_pkg")) {
+        printf("commons_package_tests: discovery or tmpdir failure: %s... FAIL\n",
+               g_cpt_why);
         return 1;
     }
     for (size_t i = 0; i < n; i++) {
