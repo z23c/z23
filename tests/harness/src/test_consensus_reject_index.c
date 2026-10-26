@@ -76,8 +76,6 @@ static void cri_free_tx(struct transaction *tx)
     free(tx->vout);
 }
 
-/* Section 4 body, run between start(16) and stop(): one hash recorded
- * under two kinds, then the kind-filtered lookups. */
 static int cri_kind_filter_checks(void)
 {
     int failures = 0;
@@ -108,8 +106,6 @@ static int cri_kind_filter_checks(void)
     return failures;
 }
 
-/* Section 5 body, run between start(16) and stop(): the same hash
- * recorded twice; the newest record must win. */
 static int cri_newest_match_wins_checks(void)
 {
     int failures = 0;
@@ -130,8 +126,6 @@ static int cri_newest_match_wins_checks(void)
     return failures;
 }
 
-/* Section 6 body, run between start(8) and stop(): 12 records into a
- * capacity-8 ring; the oldest four must be evicted. */
 static int cri_ring_eviction_checks(void)
 {
     int failures = 0;
@@ -172,8 +166,6 @@ static int cri_ring_eviction_checks(void)
     return failures;
 }
 
-/* Section 7 body, run between start(8) and stop(): five records, then
- * recent() must list them newest-first. */
 static int cri_recent_newest_first_checks(void)
 {
     int failures = 0;
@@ -194,9 +186,6 @@ static int cri_recent_newest_first_checks(void)
     return failures;
 }
 
-/* Section 13b body, run between start(16) and stop(): dump_state_json
- * must report running/count and a one-element recent array with the
- * newest entry's fields intact. */
 static int cri_dump_state_shape_checks(void)
 {
     int failures = 0;
