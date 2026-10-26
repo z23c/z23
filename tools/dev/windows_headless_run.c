@@ -43,12 +43,9 @@ static bool append(struct wide_buffer *buffer, wchar_t value)
     return true;
 }
 
-/* CommandLineToArgvW-compatible quoting, including trailing backslashes. */
-static bool append_argument(struct wide_buffer *line, const wchar_t *argument)
+static bool append_escaped_argument(struct wide_buffer *line,
+                                    const wchar_t *argument, bool quote)
 {
-    if (line->used && !append(line, L' ')) return false;
-    bool quote = !argument[0] || wcspbrk(argument, L" \t\n\v\"") != NULL;
-    if (quote && !append(line, L'\"')) return false;
     size_t slashes = 0;
     for (const wchar_t *cursor = argument;; cursor++) {
         if (*cursor == L'\\') { slashes++; continue; }
@@ -65,7 +62,17 @@ static bool append_argument(struct wide_buffer *line, const wchar_t *argument)
         }
         slashes = 0;
     }
-    return (!quote || append(line, L'\"')) && append(line, 0);
+    return true;
+}
+
+/* CommandLineToArgvW-compatible quoting, including trailing backslashes. */
+static bool append_argument(struct wide_buffer *line, const wchar_t *argument)
+{
+    if (line->used && !append(line, L' ')) return false;
+    bool quote = !argument[0] || wcspbrk(argument, L" \t\n\v\"") != NULL;
+    if (quote && !append(line, L'\"')) return false;
+    return append_escaped_argument(line, argument, quote) &&
+           (!quote || append(line, L'\"')) && append(line, 0);
 }
 
 static wchar_t *make_command_line(int argc, wchar_t **argv, int first)
@@ -116,14 +123,77 @@ static void usage(void)
     fwprintf(stderr, L"usage: z23-headless-run --cwd ABS --log ABS -- ABS_EXE [args...]\n");
 }
 
+static bool run_arguments_are_invalid(int argc, wchar_t **argv)
+{
+    return argc < 7 || wcscmp(argv[1], L"--cwd") != 0 ||
+           wcscmp(argv[3], L"--log") != 0 || wcscmp(argv[5], L"--") != 0 ||
+           !absolute_path(argv[2]) || !absolute_path(argv[4]) ||
+           !absolute_path(argv[6]);
+}
+
+static HDESK create_headless_desktop(wchar_t *desktop_name, size_t capacity)
+{
+    int desktop_length = swprintf(
+        desktop_name, capacity,
+        L"z23-headless-%lu-%llu", (unsigned long)GetCurrentProcessId(),
+        (unsigned long long)GetTickCount64());
+    return desktop_length > 0 && (size_t)desktop_length < capacity
+        ? CreateDesktopW(desktop_name, NULL, NULL, 0, GENERIC_ALL, NULL)
+        : NULL;
+}
+
+static bool setup_startup_attributes(STARTUPINFOEXW *startup,
+                                     SIZE_T *attribute_size,
+                                     HANDLE *inherited, size_t inherited_bytes,
+                                     bool *list_initialized)
+{
+    startup->lpAttributeList = zcl_malloc(*attribute_size,
+                                          "win-headless attrlist");
+    *list_initialized = startup->lpAttributeList &&
+        InitializeProcThreadAttributeList(startup->lpAttributeList, 1, 0,
+                                          attribute_size);
+    return *list_initialized &&
+        UpdateProcThreadAttribute(startup->lpAttributeList, 0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, inherited_bytes,
+            NULL, NULL);
+}
+
+static bool run_child_in_job(HANDLE job, PROCESS_INFORMATION process,
+                             bool started, DWORD *exit_code)
+{
+    bool assigned = started &&
+        AssignProcessToJobObject(job, process.hProcess);
+    bool resumed = assigned && ResumeThread(process.hThread) != (DWORD)-1;
+    if (started && !resumed) TerminateProcess(process.hProcess, 125);
+    if (resumed &&
+        WaitForSingleObject(process.hProcess, INFINITE) == WAIT_OBJECT_0)
+        (void)GetExitCodeProcess(process.hProcess, exit_code);
+    return resumed;
+}
+
+static void release_run_resources(bool started, PROCESS_INFORMATION process,
+                                  HANDLE job, HDESK desktop,
+                                  LPPROC_THREAD_ATTRIBUTE_LIST attributes,
+                                  bool list_initialized)
+{
+    if (started) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    if (job) CloseHandle(job);
+    if (desktop) CloseDesktop(desktop);
+    if (attributes) {
+        if (list_initialized)
+            DeleteProcThreadAttributeList(attributes);
+        free(attributes);
+    }
+}
+
 int wmain(int argc, wchar_t **argv)
 {
     if (argc > 1 && wcscmp(argv[1], L"--selftest-child") == 0)
         return selftest_child(argc, argv);
-    if (argc < 7 || wcscmp(argv[1], L"--cwd") != 0 ||
-        wcscmp(argv[3], L"--log") != 0 || wcscmp(argv[5], L"--") != 0 ||
-        !absolute_path(argv[2]) || !absolute_path(argv[4]) ||
-        !absolute_path(argv[6])) {
+    if (run_arguments_are_invalid(argc, argv)) {
         usage();
         return 64;
     }
@@ -160,24 +230,13 @@ int wmain(int argc, wchar_t **argv)
     startup.StartupInfo.hStdOutput = log;
     startup.StartupInfo.hStdError = log;
     wchar_t desktop_name[96];
-    int desktop_length = swprintf(
-        desktop_name, sizeof(desktop_name) / sizeof(desktop_name[0]),
-        L"z23-headless-%lu-%llu", (unsigned long)GetCurrentProcessId(),
-        (unsigned long long)GetTickCount64());
-    HDESK desktop = desktop_length > 0 &&
-        (size_t)desktop_length < sizeof(desktop_name) / sizeof(desktop_name[0])
-        ? CreateDesktopW(desktop_name, NULL, NULL, 0, GENERIC_ALL, NULL)
-        : NULL;
+    HDESK desktop = create_headless_desktop(
+        desktop_name, sizeof(desktop_name) / sizeof(desktop_name[0]));
     startup.StartupInfo.lpDesktop = desktop_name;
-    startup.lpAttributeList = zcl_malloc(attribute_size,
-                                         "win-headless attrlist");
-    bool list_initialized = startup.lpAttributeList &&
-        InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0,
-                                          &attribute_size);
-    bool attributes_ok = list_initialized &&
-        UpdateProcThreadAttribute(startup.lpAttributeList, 0,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited),
-            NULL, NULL);
+    bool list_initialized = false;
+    bool attributes_ok = setup_startup_attributes(
+        &startup, &attribute_size, inherited, sizeof(inherited),
+        &list_initialized);
     HANDLE job = CreateJobObjectW(NULL, NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
     limits.BasicLimitInformation.LimitFlags =
@@ -193,24 +252,10 @@ int wmain(int argc, wchar_t **argv)
         argv[6], line, NULL, NULL, TRUE, flags, NULL, argv[2],
         &startup.StartupInfo, &process);
     (void)SetThreadErrorMode(previous_thread_mode, NULL);
-    bool assigned = started && AssignProcessToJobObject(job, process.hProcess);
-    bool resumed = assigned && ResumeThread(process.hThread) != (DWORD)-1;
-    if (started && !resumed) TerminateProcess(process.hProcess, 125);
     DWORD exit_code = 125;
-    if (resumed && WaitForSingleObject(process.hProcess, INFINITE) == WAIT_OBJECT_0)
-        (void)GetExitCodeProcess(process.hProcess, &exit_code);
-
-    if (started) {
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
-    }
-    if (job) CloseHandle(job);
-    if (desktop) CloseDesktop(desktop);
-    if (startup.lpAttributeList) {
-        if (list_initialized)
-            DeleteProcThreadAttributeList(startup.lpAttributeList);
-        free(startup.lpAttributeList);
-    }
+    bool resumed = run_child_in_job(job, process, started, &exit_code);
+    release_run_resources(started, process, job, desktop,
+                          startup.lpAttributeList, list_initialized);
     CloseHandle(input);
     FlushFileBuffers(log);
     CloseHandle(log);
