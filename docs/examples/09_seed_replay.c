@@ -95,6 +95,98 @@ static void cleanup_capsule_dir(const char *dir)
     rmdir(dir);
 }
 
+/* Fill out[0..count-1] with count rng_u64() draws. */
+static void draw_rng_values(uint64_t *out, int count)
+{
+    for (int i = 0; i < count; i++) out[i] = rng_u64();
+}
+
+/* Advance the recording tape's clock 3x150s and inject the 3 peer
+ * messages, as the event half of the recorded sim run. */
+static void advance_clock_and_inject_peer_messages(seed_tape_t *rec)
+{
+    for (int i = 0; i < 3; i++) {
+        int rc = seed_tape_advance(rec, 150 * 1000000 /* 150s in us */);
+        assert(rc == 0 && "advance must succeed while RECORDING");
+    }
+    for (int i = 0; i < 3; i++) {
+        int rc = seed_tape_inject(rec, PEER_MESSAGE_TYPE, kPeerMessages[i],
+                                  strlen(kPeerMessages[i]));
+        assert(rc == 0 && "inject must succeed while RECORDING");
+    }
+}
+
+/* Count how many of 5 rng_u64() draws differ from the expected
+ * continuation values. */
+static int replay_rng_continuation_mismatches(const uint64_t *expected)
+{
+    int mismatches = 0;
+    for (int i = 0; i < 5; i++) {
+        uint64_t v = rng_u64();
+        if (v != expected[i]) mismatches++;
+    }
+    return mismatches;
+}
+
+/* Count how many of the 3 events read back from the replay tape differ
+ * from the injected peer messages. */
+static int replayed_peer_event_mismatches(seed_tape_t *rep)
+{
+    int mismatches = 0;
+    for (int i = 0; i < 3; i++) {
+        uint8_t type = 0;
+        char payload[32];
+        size_t len = 0;
+        int ev = seed_tape_next_event(rep, &type, payload,
+                                      sizeof(payload), &len);
+        if (ev != 0 || type != PEER_MESSAGE_TYPE ||
+            len != strlen(kPeerMessages[i]) ||
+            memcmp(payload, kPeerMessages[i], len) != 0) {
+            mismatches++;
+        }
+    }
+    return mismatches;
+}
+
+/* Verify one reloaded snapshot against the ground truth, printing each
+ * verdict line; returns the failure count it accumulated. */
+static int verify_reloaded_tape(const char *label, seed_tape_t *rep,
+                                const uint64_t *expected_continuation)
+{
+    int failures = 0;
+    printf("      -- %s --\n", label);
+    if (!rep) {
+        fprintf(stderr, "FAIL: reload (%s) returned NULL\n", label);
+        failures++;
+        return failures;
+    }
+
+    seed_tape_install(rep);
+    bool draws_match =
+        replay_rng_continuation_mismatches(expected_continuation) == 0;
+    seed_tape_uninstall();
+    printf("      RNG continuation matches ground truth: %s\n",
+           draws_match ? "yes" : "NO");
+    if (!draws_match) failures++;
+
+    /* A replay tape is read-only: it reproduces the recorded past,
+     * it cannot record a new future. This is what makes a postmortem
+     * capsule safe to hand to a debugger — stepping through it can
+     * never silently diverge into "a different run". */
+    int adv_rc = seed_tape_advance(rep, 1);
+    printf("      replay tape rejects new writes (-EROFS): %s\n",
+           (adv_rc == -EROFS) ? "yes" : "NO");
+    if (adv_rc != -EROFS) failures++;
+
+    bool events_match = replayed_peer_event_mismatches(rep) == 0;
+    printf("      injected event queue replays in order: %s\n",
+           events_match ? "yes" : "NO");
+    if (!events_match) failures++;
+
+    seed_tape_close(rep);
+    return failures;
+}
+
 int main(void)
 {
     printf("=== 09_seed_replay: record a seed tape, snapshot it two ways, "
@@ -121,18 +213,10 @@ int main(void)
            "stand-ins) + 3 clock advances (150s simulated block "
            "interval) + 3 injected peer-message events...\n");
     uint64_t pre_draws[4];
-    for (int i = 0; i < 4; i++) pre_draws[i] = rng_u64();
+    draw_rng_values(pre_draws, 4);
     printf("      sample nonce draws: 0x%016" PRIx64 " 0x%016" PRIx64 " ...\n",
            pre_draws[0], pre_draws[1]);
-    for (int i = 0; i < 3; i++) {
-        int rc = seed_tape_advance(rec, 150 * 1000000 /* 150s in us */);
-        assert(rc == 0 && "advance must succeed while RECORDING");
-    }
-    for (int i = 0; i < 3; i++) {
-        int rc = seed_tape_inject(rec, PEER_MESSAGE_TYPE, kPeerMessages[i],
-                                  strlen(kPeerMessages[i]));
-        assert(rc == 0 && "inject must succeed while RECORDING");
-    }
+    advance_clock_and_inject_peer_messages(rec);
 
     printf("[3/5] snapshotting the LIVE tape two ways at this exact "
            "instant: a plain .bin file and a postmortem capsule (as if "
@@ -167,7 +251,7 @@ int main(void)
            "is the ground truth both reloaded snapshots must reproduce "
            "when replayed forward from the snapshot point...\n");
     uint64_t expected_continuation[5];
-    for (int i = 0; i < 5; i++) expected_continuation[i] = rng_u64();
+    draw_rng_values(expected_continuation, 5);
     seed_tape_uninstall();
     seed_tape_close(rec);
 
@@ -182,53 +266,9 @@ int main(void)
 
     int failures = 0;
     for (size_t r = 0; r < 2; r++) {
-        seed_tape_t *rep = replays[r].tape;
-        printf("      -- %s --\n", replays[r].label);
-        if (!rep) {
-            fprintf(stderr, "FAIL: reload (%s) returned NULL\n",
-                    replays[r].label);
-            failures++;
-            continue;
-        }
-
-        seed_tape_install(rep);
-        bool draws_match = true;
-        for (int i = 0; i < 5; i++) {
-            uint64_t v = rng_u64();
-            if (v != expected_continuation[i]) draws_match = false;
-        }
-        seed_tape_uninstall();
-        printf("      RNG continuation matches ground truth: %s\n",
-               draws_match ? "yes" : "NO");
-        if (!draws_match) failures++;
-
-        /* A replay tape is read-only: it reproduces the recorded past,
-         * it cannot record a new future. This is what makes a postmortem
-         * capsule safe to hand to a debugger — stepping through it can
-         * never silently diverge into "a different run". */
-        int adv_rc = seed_tape_advance(rep, 1);
-        printf("      replay tape rejects new writes (-EROFS): %s\n",
-               (adv_rc == -EROFS) ? "yes" : "NO");
-        if (adv_rc != -EROFS) failures++;
-
-        bool events_match = true;
-        for (int i = 0; i < 3; i++) {
-            uint8_t type = 0;
-            char payload[32];
-            size_t len = 0;
-            int ev = seed_tape_next_event(rep, &type, payload,
-                                          sizeof(payload), &len);
-            if (ev != 0 || type != PEER_MESSAGE_TYPE ||
-                len != strlen(kPeerMessages[i]) ||
-                memcmp(payload, kPeerMessages[i], len) != 0) {
-                events_match = false;
-            }
-        }
-        printf("      injected event queue replays in order: %s\n",
-               events_match ? "yes" : "NO");
-        if (!events_match) failures++;
-
-        seed_tape_close(rep);
+        failures += verify_reloaded_tape(replays[r].label,
+                                         replays[r].tape,
+                                         expected_continuation);
     }
 
     cleanup_capsule_dir(capsule_path);
