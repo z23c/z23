@@ -96,34 +96,31 @@ static bool blb_stage_block_pair(struct blb_stage *s, const char *tag,
     return ok;
 }
 
-static bool blb_import_pair_reaches_dest(struct blb_stage *s)
+static bool blb_import_pair_reaches_dest_ok(
+    bool ok, const struct blb_stage *s,
+    const struct boot_legacy_block_file_import_result *r)
 {
-    bool ok = blb_stage_block_pair(s, "import", "blk0", false);
-    struct boot_legacy_block_file_import_result r =
-        boot_legacy_import_block_files(s->legacy_blocks, s->datadir, 4);
-    return ok && r.destination_ready && r.source_available &&
-           !r.truncated_path && r.failures == 0 &&
+    return ok && r->destination_ready && r->source_available &&
+           !r->truncated_path && r->failures == 0 &&
            access(s->dest_blk, F_OK) == 0 &&
            access(s->dest_rev, F_OK) == 0;
 }
 
-static bool blb_import_pair_skips_existing_blk(struct blb_stage *s)
+static bool blb_import_pair_skips_existing_blk_ok(
+    bool ok, const struct blb_stage *s,
+    const struct boot_legacy_block_file_import_result *r)
 {
-    bool ok = blb_stage_block_pair(s, "skip", "same", true);
-    struct boot_legacy_block_file_import_result r =
-        boot_legacy_import_block_files(s->legacy_blocks, s->datadir, 4);
-    return ok && r.destination_ready && r.source_available &&
-           r.failures == 0 && access(s->dest_blk, F_OK) == 0 &&
+    return ok && r->destination_ready && r->source_available &&
+           r->failures == 0 && access(s->dest_blk, F_OK) == 0 &&
            access(s->dest_rev, F_OK) != 0;
 }
 
-static bool blb_link_pair_links_missing(struct blb_stage *s)
+static bool blb_link_pair_links_missing_ok(
+    bool ok, const struct blb_stage *s,
+    const struct boot_legacy_block_file_link_result *r)
 {
-    bool ok = blb_stage_block_pair(s, "link", "blk0", false);
-    struct boot_legacy_block_file_link_result r =
-        boot_legacy_link_missing_block_files(s->legacy_blocks, s->datadir, 4);
-    return ok && r.destination_ready && r.source_available &&
-           !r.truncated_path && r.linked == 1 &&
+    return ok && r->destination_ready && r->source_available &&
+           !r->truncated_path && r->linked == 1 &&
            access(s->dest_blk, F_OK) == 0 &&
            access(s->dest_rev, F_OK) == 0;
 }
@@ -134,23 +131,31 @@ int test_boot_legacy_blocks(void)
 
     {
         struct blb_stage s;
-        bool pass = blb_import_pair_reaches_dest(&s);
-        BLB_CHECK("import links or copies blk and rev pair", pass);
+        bool ok = blb_stage_block_pair(&s, "import", "blk0", false);
+        struct boot_legacy_block_file_import_result r =
+            boot_legacy_import_block_files(s.legacy_blocks, s.datadir, 4);
+        BLB_CHECK("import links or copies blk and rev pair",
+                  blb_import_pair_reaches_dest_ok(ok, &s, &r));
         test_rm_rf_recursive(s.root);
     }
 
     {
         struct blb_stage s;
-        bool pass = blb_import_pair_skips_existing_blk(&s);
+        bool ok = blb_stage_block_pair(&s, "skip", "same", true);
+        struct boot_legacy_block_file_import_result r =
+            boot_legacy_import_block_files(s.legacy_blocks, s.datadir, 4);
         BLB_CHECK("existing same-size blk preserves legacy skip semantics",
-                  pass);
+                  blb_import_pair_skips_existing_blk_ok(ok, &s, &r));
         test_rm_rf_recursive(s.root);
     }
 
     {
         struct blb_stage s;
-        bool pass = blb_link_pair_links_missing(&s);
-        BLB_CHECK("warm helper links missing blk and rev files", pass);
+        bool ok = blb_stage_block_pair(&s, "link", "blk0", false);
+        struct boot_legacy_block_file_link_result r =
+            boot_legacy_link_missing_block_files(s.legacy_blocks, s.datadir, 4);
+        BLB_CHECK("warm helper links missing blk and rev files",
+                  blb_link_pair_links_missing_ok(ok, &s, &r));
         test_rm_rf_recursive(s.root);
     }
 
