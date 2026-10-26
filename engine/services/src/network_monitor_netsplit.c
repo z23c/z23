@@ -106,6 +106,78 @@ static void nm_cluster_add_group(struct nm_tip_cluster *c, const char *key)
     c->groups++;
 }
 
+/* Index of the cluster already holding `hash`, or -1 if none matches. */
+static int nm_find_cluster_by_hash(const struct nm_tip_cluster *cl,
+                                   int num_cl, const char *hash)
+{
+    for (int k = 0; k < num_cl; k++) {
+        if (strcmp(cl[k].hash, hash) == 0)
+            return k;
+    }
+    return -1;
+}
+
+/* Fold observation `i` into the cluster ledger. Every early return below is
+ * one of the fold's skip conditions (no usable tip, ahead of us, lagging,
+ * malformed hash, unattributable, cluster table full); each survivor credits
+ * one peer and one address group to the cluster matching its normalised tip
+ * hash, creating that cluster when the cluster bound allows. Increments
+ * out->peers_ahead / out->peers_considered in place. */
+static void nm_cluster_peer_vote(const struct db_peer_chain_observation *obs,
+                                 int i, const nm_group_key_t *group_keys,
+                                 int64_t our_height,
+                                 struct nm_tip_cluster *cl, int *num_cl,
+                                 struct network_partition_view *out)
+{
+    if (obs[i].tip_hash[0] == '\0' || obs[i].best_height < 0)
+        return;
+    if (obs[i].best_height > our_height) {
+        out->peers_ahead++;
+        return;
+    }
+    if (obs[i].best_height != our_height)
+        return; /* lagging peer: a different tip proves nothing */
+    if (!nm_hash_hex_valid(obs[i].tip_hash))
+        return;
+    out->peers_considered++;
+
+    const char *key = NULL;
+    if (group_keys && group_keys[i][0] != '\0')
+        key = group_keys[i];
+    else if (obs[i].addr[0] != '\0')
+        key = obs[i].addr; /* fallback: one peer, one group */
+    else
+        return; /* unattributable peer cannot vote */
+
+    char peer_hash[PEER_OBS_TIP_HEX + 1];
+    nm_hash_norm(peer_hash, obs[i].tip_hash);
+
+    int found = nm_find_cluster_by_hash(cl, *num_cl, peer_hash);
+    if (found < 0) {
+        if (*num_cl >= NM_MAX_FORK_CLUSTERS)
+            return; /* bounded: extra rival tips are ignored */
+        found = (*num_cl)++;
+        snprintf(cl[found].hash, sizeof(cl[found].hash), "%s", peer_hash);
+    }
+    cl[found].peers++;
+    nm_cluster_add_group(&cl[found], key);
+}
+
+/* Strongest rival = most DISTINCT ADDRESS GROUPS (peers break the tie).
+ * Ranking by groups rather than peers is the whole point: one address
+ * group running twenty peers must not outrank two honest groups. */
+static int nm_select_strongest_rival(const struct nm_tip_cluster *cl,
+                                     int num_cl)
+{
+    int best = -1;
+    for (int k = 1; k < num_cl; k++) {
+        if (best < 0 || cl[k].groups > cl[best].groups ||
+            (cl[k].groups == cl[best].groups && cl[k].peers > cl[best].peers))
+            best = k;
+    }
+    return best;
+}
+
 void network_monitor_fold_tip_disagreement(
     const struct db_peer_chain_observation *obs, int n,
     const nm_group_key_t *group_keys,
@@ -145,59 +217,14 @@ void network_monitor_fold_tip_disagreement(
     int num_cl = 1;
     nm_hash_norm(cl[0].hash, our_tip_hash);
 
-    for (int i = 0; i < n; i++) {
-        if (obs[i].tip_hash[0] == '\0' || obs[i].best_height < 0)
-            continue;
-        if (obs[i].best_height > our_height) {
-            out->peers_ahead++;
-            continue;
-        }
-        if (obs[i].best_height != our_height)
-            continue; /* lagging peer: a different tip proves nothing */
-        if (!nm_hash_hex_valid(obs[i].tip_hash))
-            continue;
-        out->peers_considered++;
-
-        const char *key = NULL;
-        if (group_keys && group_keys[i][0] != '\0')
-            key = group_keys[i];
-        else if (obs[i].addr[0] != '\0')
-            key = obs[i].addr; /* fallback: one peer, one group */
-        else
-            continue; /* unattributable peer cannot vote */
-
-        char peer_hash[PEER_OBS_TIP_HEX + 1];
-        nm_hash_norm(peer_hash, obs[i].tip_hash);
-
-        int found = -1;
-        for (int k = 0; k < num_cl; k++) {
-            if (strcmp(cl[k].hash, peer_hash) == 0) {
-                found = k;
-                break;
-            }
-        }
-        if (found < 0) {
-            if (num_cl >= NM_MAX_FORK_CLUSTERS)
-                continue; /* bounded: extra rival tips are ignored */
-            found = num_cl++;
-            snprintf(cl[found].hash, sizeof(cl[found].hash), "%s", peer_hash);
-        }
-        cl[found].peers++;
-        nm_cluster_add_group(&cl[found], key);
-    }
+    for (int i = 0; i < n; i++)
+        nm_cluster_peer_vote(obs, i, group_keys, our_height, cl, &num_cl,
+                             out);
 
     out->agreeing_peers = cl[0].peers;
     out->agreeing_groups = cl[0].groups;
 
-    /* Strongest rival = most DISTINCT ADDRESS GROUPS (peers break the tie).
-     * Ranking by groups rather than peers is the whole point: one address
-     * group running twenty peers must not outrank two honest groups. */
-    int best = -1;
-    for (int k = 1; k < num_cl; k++) {
-        if (best < 0 || cl[k].groups > cl[best].groups ||
-            (cl[k].groups == cl[best].groups && cl[k].peers > cl[best].peers))
-            best = k;
-    }
+    int best = nm_select_strongest_rival(cl, num_cl);
     if (best < 0)
         return;
 
