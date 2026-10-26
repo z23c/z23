@@ -247,6 +247,33 @@ static bool rf_relay_write_all(int fd, const uint8_t *buf, size_t n)
     return true;
 }
 
+/* Forwards each direction with a ready pollfd exactly once, charging the
+ * relay's turnaround latency on a flow reversal; returns -1 when either side
+ * ends the byte flow (EOF or failed write), 0 to keep the session relaying. */
+static int rf_relay_forward_ready_directions(struct rf_lat_relay *r,
+                                             int cfd, int ufd,
+                                             const struct pollfd *pfds,
+                                             uint8_t *buf, int *last_dir)
+{
+    for (int d = 0; d < 2; d++) {
+        if (!(pfds[d].revents & (POLLIN | POLLHUP | POLLERR)))
+            continue;
+        int from = d == 0 ? cfd : ufd;
+        int to = d == 0 ? ufd : cfd;
+        ssize_t n = read(from, buf, 65536);
+        if (n <= 0)
+            return -1;
+        if (d != *last_dir) {
+            *last_dir = d;
+            atomic_fetch_add(&r->turnarounds, 1u);
+            platform_sleep_ms(r->one_way_ms); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+        }
+        if (!rf_relay_write_all(to, buf, (size_t)n))
+            return -1;
+    }
+    return 0;
+}
+
 static void *rf_lat_conn_thread(void *arg)
 {
     struct rf_lat_conn *c = (struct rf_lat_conn *)arg;
@@ -295,28 +322,8 @@ static void *rf_lat_conn_thread(void *arg)
                 break;
             continue;
         }
-        bool broke = false;
-        for (int d = 0; d < 2 && !broke; d++) {
-            if (!(pfds[d].revents & (POLLIN | POLLHUP | POLLERR)))
-                continue;
-            int from = d == 0 ? cfd : ufd;
-            int to = d == 0 ? ufd : cfd;
-            ssize_t n = read(from, buf, 65536);
-            if (n <= 0) {
-                broke = true;
-                break;
-            }
-            if (d != last_dir) {
-                last_dir = d;
-                atomic_fetch_add(&r->turnarounds, 1u);
-                platform_sleep_ms(r->one_way_ms); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
-            }
-            if (!rf_relay_write_all(to, buf, (size_t)n)) {
-                broke = true;
-                break;
-            }
-        }
-        if (broke)
+        if (rf_relay_forward_ready_directions(r, cfd, ufd, pfds, buf,
+                                              &last_dir) != 0)
             break;
     }
     free(buf);

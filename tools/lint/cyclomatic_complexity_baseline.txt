@@ -1381,7 +1381,6 @@ tests/harness/src/test_retrieval.c:case_gold_metrics:39
 tests/harness/src/test_retrieval.c:case_tokenizer:17
 tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
 tests/harness/src/test_robustness.c:test_robustness:104
-tests/harness/src/test_rom_fetch.c:rf_lat_conn_thread:18
 tests/harness/src/test_rom_fetch_onion.c:test_rom_fetch_onion:46
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:277
 tests/harness/src/test_sapling_anchor_frontier_condition.c:test_sapling_anchor_frontier_condition:49
