@@ -515,22 +515,22 @@ int seed_tape_save(const seed_tape_t *tape, const char *path)
 
 /* ── load ─────────────────────────────────────────────────────── */
 
-seed_tape_t *seed_tape_load_from_memory(const void *data, size_t len)
+/* Validate image size, CRC32C and header fields; returns 0 if the image
+ * is well-formed, else -1 (stderr messages keep seed_tape_load_from_memory's
+ * name). */
+static int tape_check_header(const uint8_t *buf, size_t fsize)
 {
-    if (!data) LOG_NULL("sim.seed_tape", "NULL data");
-
-    const uint8_t *buf = (const uint8_t *)data;
-    size_t fsize = len;
     /* Minimum: header (32) + rng state (32) + action_count (8) + crc (4) = 76. */
     if (fsize < TAPE_HEADER_SIZE + 32 + 8 + 4) {
         fprintf(stderr,
             "[sim.seed_tape] %s: buffer too small (%zu bytes)\n",
-            __func__, fsize);
-        return NULL;
+            "seed_tape_load_from_memory", fsize);
+        return -1;
     }
     if (fsize > (1u << 30)) {  /* 1 GiB sanity cap. */
-        fprintf(stderr, "[sim.seed_tape] %s: buffer too large (%zu)\n", __func__, fsize);
-        return NULL;
+        fprintf(stderr, "[sim.seed_tape] %s: buffer too large (%zu)\n",
+            "seed_tape_load_from_memory", fsize);
+        return -1;
     }
 
     /* CRC check first — fail fast on corruption. */
@@ -539,30 +539,158 @@ seed_tape_t *seed_tape_load_from_memory(const void *data, size_t len)
     if (stored_crc != calc_crc) {
         fprintf(stderr,
             "[sim.seed_tape] %s: CRC32C mismatch (stored=0x%08x calc=0x%08x)\n",
-            __func__, stored_crc, calc_crc);
-        return NULL;
+            "seed_tape_load_from_memory", stored_crc, calc_crc);
+        return -1;
     }
 
     /* Header. */
     if (memcmp(buf, TAPE_MAGIC, 8) != 0) {
-        fprintf(stderr, "[sim.seed_tape] %s: bad magic\n", __func__);
-        return NULL;
+        fprintf(stderr, "[sim.seed_tape] %s: bad magic\n",
+            "seed_tape_load_from_memory");
+        return -1;
     }
     uint8_t ver = buf[8];
     uint8_t flags = buf[9];
     if (ver != TAPE_VERSION) {
         fprintf(stderr,
             "[sim.seed_tape] %s: version mismatch (file=%u expected=%u)\n",
-            __func__, ver, TAPE_VERSION);
-        return NULL;
+            "seed_tape_load_from_memory", ver, TAPE_VERSION);
+        return -1;
     }
     if (flags != TAPE_FLAGS_NONE) {
         fprintf(stderr,
             "[sim.seed_tape] %s: unsupported flags=0x%02x\n",
-            __func__, flags);
-        return NULL;
+            "seed_tape_load_from_memory", flags);
+        return -1;
     }
     /* uint64_t seed_slot = get_u64_le(buf + 16); */  /* informational */
+    return 0;
+}
+
+/* Restore the 32-byte xoshiro state from the image into t, advancing *off
+ * past it. Returns 0, or -1 if the state is all zero (the caller closes
+ * the tape). */
+static int tape_restore_rng_state(seed_tape_t *t, const uint8_t *buf, size_t *off)
+{
+    /* RNG state (32 bytes). */
+    for (int i = 0; i < 4; i++) {
+        t->rng.s[i] = get_u64_le(buf + *off);
+        *off += 8;
+    }
+    /* Guard against degenerate all-zero state from a malformed tape. */
+    if ((t->rng.s[0] | t->rng.s[1] | t->rng.s[2] | t->rng.s[3]) == 0)
+        return -1;
+    return 0;
+}
+
+/* Read one INJECT record into a, advancing *off past its payload; returns
+ * 0, or -1 after freeing a and closing t (stderr messages keep
+ * seed_tape_load_from_memory's name). */
+static int tape_read_inject_record(seed_tape_t *t, const uint8_t *buf,
+                                   size_t fsize, size_t *off,
+                                   struct tape_action *a)
+{
+    if (*off + 5 > fsize - 4) {
+        free(a);
+        seed_tape_close(t);
+        fprintf(stderr,
+            "[sim.seed_tape] %s: truncated INJECT hdr\n",
+            "seed_tape_load_from_memory");
+        return -1;
+    }
+    a->type = buf[(*off)++];
+    a->payload_len = get_u32_le(buf + *off);
+    *off += 4;
+    if (a->payload_len > TAPE_MAX_PAYLOAD ||
+        *off + a->payload_len > fsize - 4) {
+        uint32_t bad_len = a->payload_len;
+        free(a);
+        seed_tape_close(t);
+        fprintf(stderr,
+            "[sim.seed_tape] %s: bad INJECT payload_len=%u\n",
+            "seed_tape_load_from_memory", bad_len);
+        return -1;
+    }
+    if (a->payload_len) {
+        a->payload = (uint8_t *)zcl_malloc(a->payload_len, "tape.payload");
+        if (!a->payload) {
+            free(a);
+            seed_tape_close(t);
+            return -1;
+        }
+        memcpy(a->payload, buf + *off, a->payload_len);
+        *off += a->payload_len;
+    }
+    t->inject_count++;
+    return 0;
+}
+
+/* Rebuild the action list from the n records at off; returns 0, or -1
+ * after closing the tape (stderr messages keep seed_tape_load_from_memory's
+ * name). */
+static int tape_read_action_records(seed_tape_t *t, const uint8_t *buf,
+                                    size_t fsize, uint64_t n, size_t off)
+{
+    /* Reconstruct the action list. Track stat counters so introspection
+     * matches what was recorded. */
+    for (uint64_t i = 0; i < n; i++) {
+        if (off + 1 > fsize - 4) {
+            seed_tape_close(t);
+            fprintf(stderr,
+                "[sim.seed_tape] %s: truncated record %llu\n",
+                "seed_tape_load_from_memory", (unsigned long long)i);
+            return -1;
+        }
+        uint8_t kind = buf[off++];
+        struct tape_action *a = (struct tape_action *)zcl_malloc(sizeof(*a), "tape.action");
+        if (!a) {
+            seed_tape_close(t);
+            return -1;
+        }
+        memset(a, 0, sizeof(*a));
+        a->kind = kind;
+
+        if (kind == TAPE_ACTION_ADVANCE) {
+            if (off + 8 > fsize - 4) {
+                free(a);
+                seed_tape_close(t);
+                fprintf(stderr,
+                    "[sim.seed_tape] %s: truncated ADVANCE\n",
+                    "seed_tape_load_from_memory");
+                return -1;
+            }
+            a->delta_us = get_i64_le(buf + off);
+            off += 8;
+            t->advance_count++;
+        } else if (kind == TAPE_ACTION_INJECT) {
+            if (tape_read_inject_record(t, buf, fsize, &off, a) != 0)
+                return -1;
+        } else {
+            free(a);
+            seed_tape_close(t);
+            fprintf(stderr,
+                "[sim.seed_tape] %s: unknown action kind=%u\n",
+                "seed_tape_load_from_memory", kind);
+            return -1;
+        }
+
+        /* Append (without using append_action which checks the cap
+         * and we've already validated n above). */
+        a->next = NULL;
+        if (t->tail) t->tail->next = a;
+        else         t->head = a;
+        t->tail = a;
+    }
+    return 0;
+}
+
+seed_tape_t *seed_tape_load_from_memory(const void *data, size_t len)
+{
+    if (!data) LOG_NULL("sim.seed_tape", "NULL data");
+
+    const uint8_t *buf = (const uint8_t *)data;
+    size_t fsize = len;
+    if (tape_check_header(buf, fsize) != 0) return NULL;
     int64_t wall_start = get_i64_le(buf + 24);
 
     /* Open a fresh tape (replay mode flipped on below). seed
@@ -572,13 +700,7 @@ seed_tape_t *seed_tape_load_from_memory(const void *data, size_t len)
     t->replay_mode = true;
 
     size_t off = TAPE_HEADER_SIZE;
-    /* RNG state (32 bytes). */
-    for (int i = 0; i < 4; i++) {
-        t->rng.s[i] = get_u64_le(buf + off);
-        off += 8;
-    }
-    /* Guard against degenerate all-zero state from a malformed tape. */
-    if ((t->rng.s[0] | t->rng.s[1] | t->rng.s[2] | t->rng.s[3]) == 0) {
+    if (tape_restore_rng_state(t, buf, &off) != 0) {
         seed_tape_close(t);
         fprintf(stderr, "[sim.seed_tape] %s: rng state is all zero\n", __func__);
         return NULL;
@@ -594,84 +716,8 @@ seed_tape_t *seed_tape_load_from_memory(const void *data, size_t len)
         return NULL;
     }
 
-    /* Reconstruct the action list. Track stat counters so introspection
-     * matches what was recorded. */
-    for (uint64_t i = 0; i < n; i++) {
-        if (off + 1 > fsize - 4) {
-            seed_tape_close(t);
-            fprintf(stderr,
-                "[sim.seed_tape] %s: truncated record %llu\n",
-                __func__, (unsigned long long)i);
-            return NULL;
-        }
-        uint8_t kind = buf[off++];
-        struct tape_action *a = (struct tape_action *)zcl_malloc(sizeof(*a), "tape.action");
-        if (!a) {
-            seed_tape_close(t);
-            return NULL;
-        }
-        memset(a, 0, sizeof(*a));
-        a->kind = kind;
+    if (tape_read_action_records(t, buf, fsize, n, off) != 0) return NULL;
 
-        if (kind == TAPE_ACTION_ADVANCE) {
-            if (off + 8 > fsize - 4) {
-                free(a);
-                seed_tape_close(t);
-                fprintf(stderr,
-                    "[sim.seed_tape] %s: truncated ADVANCE\n", __func__);
-                return NULL;
-            }
-            a->delta_us = get_i64_le(buf + off);
-            off += 8;
-            t->advance_count++;
-        } else if (kind == TAPE_ACTION_INJECT) {
-            if (off + 5 > fsize - 4) {
-                free(a);
-                seed_tape_close(t);
-                fprintf(stderr,
-                    "[sim.seed_tape] %s: truncated INJECT hdr\n", __func__);
-                return NULL;
-            }
-            a->type = buf[off++];
-            a->payload_len = get_u32_le(buf + off);
-            off += 4;
-            if (a->payload_len > TAPE_MAX_PAYLOAD ||
-                off + a->payload_len > fsize - 4) {
-                uint32_t bad_len = a->payload_len;
-                free(a);
-                seed_tape_close(t);
-                fprintf(stderr,
-                    "[sim.seed_tape] %s: bad INJECT payload_len=%u\n",
-                    __func__, bad_len);
-                return NULL;
-            }
-            if (a->payload_len) {
-                a->payload = (uint8_t *)zcl_malloc(a->payload_len, "tape.payload");
-                if (!a->payload) {
-                    free(a);
-                    seed_tape_close(t);
-                    return NULL;
-                }
-                memcpy(a->payload, buf + off, a->payload_len);
-                off += a->payload_len;
-            }
-            t->inject_count++;
-        } else {
-            free(a);
-            seed_tape_close(t);
-            fprintf(stderr,
-                "[sim.seed_tape] %s: unknown action kind=%u\n",
-                __func__, kind);
-            return NULL;
-        }
-
-        /* Append (without using append_action which checks the cap
-         * and we've already validated n above). */
-        a->next = NULL;
-        if (t->tail) t->tail->next = a;
-        else         t->head = a;
-        t->tail = a;
-    }
     t->action_count = n;
     t->replay_cursor = t->head;
 
