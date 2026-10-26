@@ -158,22 +158,24 @@ static bool cer_recompute_chainwork_from_ancestry(struct block_index *tip)
     return !arith_uint256_is_zero(&tip->nChainWork);
 }
 
-bool cec_reconstruct_active_tip_evidence(
-    struct chain_evidence_controller *authority,
-    struct block_index *active_tip,
-    const struct chain_state_view *csv,
-    bool drift_refused,
-    char reason_out[192])
+static bool cer_check_tip_args(struct chain_evidence_controller *authority,
+                               struct block_index *active_tip,
+                               const struct chain_state_view *csv,
+                               char reason_out[192])
 {
-    if (reason_out)
-        reason_out[0] = '\0';
     if (!authority || !authority->ndb || !active_tip ||
         !active_tip->phashBlock || !csv || csv->tip_height < 0) {
         if (reason_out)
             snprintf(reason_out, 192, "active_tip_reconstruct_null_arg");
         return false;
     }
+    return true;
+}
 
+static bool cer_check_tip_hash(struct block_index *active_tip,
+                               const struct chain_state_view *csv,
+                               char reason_out[192])
+{
     /* The block-index evidence we are about to publish proves the TIP:
      * its PoW-bearing header links to genesis (ancestry) and carries the
      * most accumulated work (chainwork). The csr active-tip hash must
@@ -186,6 +188,105 @@ bool cec_reconstruct_active_tip_evidence(
                      active_tip->nHeight);
         return false;
     }
+    return true;
+}
+
+static bool cer_check_tip_ancestry(struct chain_evidence_controller *authority,
+                                   struct block_index *active_tip,
+                                   char reason_out[192])
+{
+    /* Ancestry must link to genesis. After a restore it usually does; if
+     * it doesn't, we cannot prove the tip — freeze with reason. */
+    if (!cer_tip_ancestry_linked(authority->csr, active_tip)) {
+        if (reason_out)
+            snprintf(reason_out, 192,
+                     "active_tip_ancestry_unlinkable (h=%d)",
+                     active_tip->nHeight);
+        return false;
+    }
+    return true;
+}
+
+static bool cer_check_tip_chainwork(struct block_index *active_tip,
+                                    char reason_out[192])
+{
+    /* Recompute chainwork if missing — a restored tip frequently carries
+     * nChainWork==0 (loader hadn't propagated work). Recoverable. */
+    if (arith_uint256_is_zero(&active_tip->nChainWork) &&
+        !cer_recompute_chainwork_from_ancestry(active_tip)) {
+        if (reason_out)
+            snprintf(reason_out, 192,
+                     "active_tip_chainwork_unrecoverable (h=%d)",
+                     active_tip->nHeight);
+        return false;
+    }
+    return true;
+}
+
+static bool cer_tip_already_persisted(
+    struct chain_evidence_controller *authority,
+    struct block_index *active_tip,
+    struct chain_evidence_record *reconstructed)
+{
+    struct chain_evidence_record persisted;
+    struct uint256 persisted_tip;
+    return chain_evidence_store_load(authority->ndb,
+                                     "cec.active_tip_evidence",
+                                     &persisted).ok &&
+           cer_record_equal(&persisted, reconstructed) &&
+           cer_load_u256(authority->ndb, "cec.active_tip_hash",
+                         &persisted_tip) &&
+           cer_u256_equal(&persisted_tip, active_tip->phashBlock) &&
+           cer_state_get_i32(authority->ndb, "cec.active_tip_height", -1) ==
+               active_tip->nHeight &&
+           cer_state_get_i32(authority->ndb, "cec.utxo_max_height", -1) ==
+               active_tip->nHeight &&
+           cer_state_get_i32(authority->ndb,
+                             "cec.repaired_active_tip_evidence", 0) == 1;
+}
+
+static bool cer_persist_tip_evidence(
+    struct chain_evidence_controller *authority,
+    struct block_index *active_tip,
+    struct chain_evidence_record *reconstructed)
+{
+    return chain_evidence_controller_mark_block_evidence(
+               authority, active_tip->phashBlock, reconstructed).ok &&
+           cer_persist_blob(authority, "cec.active_tip_hash",
+                            active_tip->phashBlock->data, 32) &&
+           cer_persist_i64(authority, "cec.active_tip_height",
+                           active_tip->nHeight) &&
+           cer_persist_i64(authority, "cec.coins_best_block_height",
+                           chain_evidence_clamp_coins_height_to_frontier(
+                               authority, active_tip->nHeight)) &&
+           cer_persist_i64(authority, "cec.utxo_max_height",
+                           active_tip->nHeight) &&
+           cer_persist_i64(authority, "cec.publish_state",
+                           CEC_PUBLISH_LOCAL_EVIDENCE) &&
+           cer_persist_i64(authority, "cec.active_tip_source_class",
+                           CEC_SOURCE_CLASS_LOCAL_IMPORT) &&
+           cer_persist_i64(authority, "cec.repaired_active_tip_evidence", 1) &&
+           chain_evidence_store_persist(authority,
+                            "cec.block_index_evidence_state",
+                            reconstructed).ok &&
+           chain_evidence_store_persist(authority, "cec.active_tip_evidence",
+                            reconstructed).ok;
+}
+
+bool cec_reconstruct_active_tip_evidence(
+    struct chain_evidence_controller *authority,
+    struct block_index *active_tip,
+    const struct chain_state_view *csv,
+    bool drift_refused,
+    char reason_out[192])
+{
+    if (reason_out)
+        reason_out[0] = '\0';
+    if (!cer_check_tip_args(authority, active_tip, csv, reason_out))
+        return false;
+    if (!cer_check_tip_hash(active_tip, csv, reason_out))
+        return false;
+
     /* The coins (UTXO) best-block cursor is a PROJECTION that trails or,
      * on a torn restart, transiently overshoots the tip — it is NOT part
      * of the tip's block-index evidence and must NOT gate it. reconcile_
@@ -204,26 +305,10 @@ bool cec_reconstruct_active_tip_evidence(
                  active_tip->nHeight);
     }
 
-    /* Ancestry must link to genesis. After a restore it usually does; if
-     * it doesn't, we cannot prove the tip — freeze with reason. */
-    if (!cer_tip_ancestry_linked(authority->csr, active_tip)) {
-        if (reason_out)
-            snprintf(reason_out, 192,
-                     "active_tip_ancestry_unlinkable (h=%d)",
-                     active_tip->nHeight);
+    if (!cer_check_tip_ancestry(authority, active_tip, reason_out))
         return false;
-    }
-
-    /* Recompute chainwork if missing — a restored tip frequently carries
-     * nChainWork==0 (loader hadn't propagated work). Recoverable. */
-    if (arith_uint256_is_zero(&active_tip->nChainWork) &&
-        !cer_recompute_chainwork_from_ancestry(active_tip)) {
-        if (reason_out)
-            snprintf(reason_out, 192,
-                     "active_tip_chainwork_unrecoverable (h=%d)",
-                     active_tip->nHeight);
+    if (!cer_check_tip_chainwork(active_tip, reason_out))
         return false;
-    }
 
     /* Refused-rewind mode: reconcile found the persisted tip AHEAD of the
      * in-memory tip and refused to rewrite it downward. The in-memory tip
@@ -253,20 +338,7 @@ bool cec_reconstruct_active_tip_evidence(
      * the discriminator that the FULL persist chain below already ran for
      * this tip (a reconcile drift-update re-anchors hash+height alone, and
      * the record content is constant — those three alone cannot prove it). */
-    struct chain_evidence_record persisted;
-    struct uint256 persisted_tip;
-    if (chain_evidence_store_load(authority->ndb, "cec.active_tip_evidence",
-                                  &persisted).ok &&
-        cer_record_equal(&persisted, &reconstructed) &&
-        cer_load_u256(authority->ndb, "cec.active_tip_hash",
-                      &persisted_tip) &&
-        cer_u256_equal(&persisted_tip, active_tip->phashBlock) &&
-        cer_state_get_i32(authority->ndb, "cec.active_tip_height", -1) ==
-            active_tip->nHeight &&
-        cer_state_get_i32(authority->ndb, "cec.utxo_max_height", -1) ==
-            active_tip->nHeight &&
-        cer_state_get_i32(authority->ndb,
-                          "cec.repaired_active_tip_evidence", 0) == 1) {
+    if (cer_tip_already_persisted(authority, active_tip, &reconstructed)) {
         static _Atomic int64_t g_idem_warned_h = INT64_MIN;
         if (atomic_exchange(&g_idem_warned_h, (int64_t)active_tip->nHeight)
             != (int64_t)active_tip->nHeight)
@@ -276,27 +348,7 @@ bool cec_reconstruct_active_tip_evidence(
         return true;
     }
 
-    return chain_evidence_controller_mark_block_evidence(
-               authority, active_tip->phashBlock, &reconstructed).ok &&
-           cer_persist_blob(authority, "cec.active_tip_hash",
-                            active_tip->phashBlock->data, 32) &&
-           cer_persist_i64(authority, "cec.active_tip_height",
-                           active_tip->nHeight) &&
-           cer_persist_i64(authority, "cec.coins_best_block_height",
-                           chain_evidence_clamp_coins_height_to_frontier(
-                               authority, active_tip->nHeight)) &&
-           cer_persist_i64(authority, "cec.utxo_max_height",
-                           active_tip->nHeight) &&
-           cer_persist_i64(authority, "cec.publish_state",
-                           CEC_PUBLISH_LOCAL_EVIDENCE) &&
-           cer_persist_i64(authority, "cec.active_tip_source_class",
-                           CEC_SOURCE_CLASS_LOCAL_IMPORT) &&
-           cer_persist_i64(authority, "cec.repaired_active_tip_evidence", 1) &&
-           chain_evidence_store_persist(authority,
-                            "cec.block_index_evidence_state",
-                            &reconstructed).ok &&
-           chain_evidence_store_persist(authority, "cec.active_tip_evidence",
-                            &reconstructed).ok;
+    return cer_persist_tip_evidence(authority, active_tip, &reconstructed);
 }
 
 /* ── startup reconcile (single entry, from controller init) ──────────── */
@@ -373,9 +425,103 @@ static bool cec_record_is_reconciled_local_import(
            ev->chainwork_recomputed;
 }
 
+static bool cer_startup_inputs_ok(
+    const struct chain_evidence_controller *authority)
+{
+    return authority && authority->ndb && authority->csr;
+}
+
+/* Snapshots the chain view; returns the active tip this run claims, or NULL
+ * when no tip is visible yet or the once-guard was already claimed. */
+static struct block_index *cer_claim_startup_tip(
+    struct chain_evidence_controller *authority, struct chain_state_view *csv)
+{
+    memset(csv, 0, sizeof(*csv));
+    csr_snapshot(authority->csr, csv);
+    if (csv->tip_height < 0)
+        return NULL;
+
+    struct block_index *active_tip = authority->csr->chain_active
+        ? active_chain_tip(authority->csr->chain_active) : NULL;
+    if (!active_tip || !active_tip->phashBlock)
+        return NULL;
+
+    if (atomic_exchange(&g_cec_startup_reconciled, true))
+        return NULL;
+    return active_tip;
+}
+
+static bool cer_persisted_tip_matches(bool has_persisted_hash,
+                                      const struct uint256 *persisted_hash,
+                                      const struct block_index *active_tip)
+{
+    return has_persisted_hash &&
+        cer_u256_equal(persisted_hash, active_tip->phashBlock);
+}
+
+static bool cer_hash_drift_pending(bool has_persisted_hash,
+                                   bool persisted_tip_matches)
+{
+    return has_persisted_hash && !persisted_tip_matches;
+}
+
+static bool cer_height_drift_pending(bool drift_refused, int persisted_height,
+                                     const struct block_index *active_tip)
+{
+    return !drift_refused && persisted_height >= 0 &&
+        persisted_height != active_tip->nHeight;
+}
+
+static bool cer_header_tip_behind(const struct chain_state_view *csv,
+                                  const struct block_index *active_tip)
+{
+    return csv->header_height >= 0 &&
+        csv->header_height < active_tip->nHeight;
+}
+
+static bool cer_sql_tip_behind(const struct chain_state_view *csv,
+                               const struct block_index *active_tip)
+{
+    return csv->sql_max_height >= 0 &&
+        csv->sql_max_height < active_tip->nHeight;
+}
+
+static bool cer_tip_evidence_accepted(
+    struct chain_evidence_controller *authority, bool has_active_evidence,
+    struct chain_evidence_record *active_evidence, bool persisted_tip_matches)
+{
+    bool evidence_repaired = cer_state_get_i32(authority->ndb,
+        "cec.repaired_active_tip_evidence", 0) == 1;
+    return has_active_evidence &&
+        (chain_evidence_record_has_block_index_required(active_evidence) ||
+         (evidence_repaired && persisted_tip_matches &&
+          cec_record_is_reconciled_local_import(active_evidence)));
+}
+
+static bool cer_reconstruct_tip_evidence(
+    struct chain_evidence_controller *authority,
+    struct block_index *active_tip, const struct chain_state_view *csv,
+    bool drift_refused)
+{
+    char reason[192];
+    if (cec_reconstruct_active_tip_evidence(authority, active_tip, csv,
+                                            drift_refused, reason))
+        return true;
+    /* Reconstruct only fails when the tip genuinely cannot be
+     * proven consistent. It always fills a precise reason; never
+     * freeze with an empty/generic string (that produces a halt
+     * that does not name itself). */
+    if (reason[0] == '\0')
+        snprintf(reason, sizeof(reason),
+                 "active_tip_evidence_unrecoverable (h=%d)",
+                 active_tip->nHeight);
+    chain_evidence_controller_freeze(authority, reason);
+    return false;
+}
+
 void cec_reconcile_startup(struct chain_evidence_controller *authority)
 {
-    if (!authority || !authority->ndb || !authority->csr)
+    if (!cer_startup_inputs_ok(authority))
         return;
 
     /* A persisted freeze is advisory, not permanent. We always re-derive
@@ -387,17 +533,8 @@ void cec_reconcile_startup(struct chain_evidence_controller *authority)
     bool was_frozen = (authority->state == CEC_CONTRADICTION_FROZEN);
 
     struct chain_state_view csv;
-    memset(&csv, 0, sizeof(csv));
-    csr_snapshot(authority->csr, &csv);
-    if (csv.tip_height < 0)
-        return;
-
-    struct block_index *active_tip = authority->csr->chain_active
-        ? active_chain_tip(authority->csr->chain_active) : NULL;
-    if (!active_tip || !active_tip->phashBlock)
-        return;
-
-    if (atomic_exchange(&g_cec_startup_reconciled, true))
+    struct block_index *active_tip = cer_claim_startup_tip(authority, &csv);
+    if (!active_tip)
         return;
 
     struct uint256 persisted_hash;
@@ -415,8 +552,9 @@ void cec_reconcile_startup(struct chain_evidence_controller *authority)
      * persisted hash to the in-memory tip, but any persisted evidence was
      * derived for the OLD hash, so acceptance must not survive the
      * update (reconstruct re-derives for the new tip instead). */
-    bool persisted_tip_matches = has_persisted_hash &&
-        cer_u256_equal(&persisted_hash, active_tip->phashBlock);
+    bool persisted_tip_matches =
+        cer_persisted_tip_matches(has_persisted_hash, &persisted_hash,
+                                  active_tip);
 
     /* Refusing to rewind the persisted high tip skips ONLY the
      * persist-update: evidence reconstruct and the stale-freeze lift below
@@ -424,7 +562,7 @@ void cec_reconcile_startup(struct chain_evidence_controller *authority)
      * from persisting the lower tip). An early return here silently parked
      * frozen nodes forever behind a stale higher persisted tip. */
     bool drift_refused = false;
-    if (has_persisted_hash && !persisted_tip_matches) {
+    if (cer_hash_drift_pending(has_persisted_hash, persisted_tip_matches)) {
         if (persisted_height > active_tip->nHeight) {
             LOG_WARN("cec", "[cec] startup tip drift: refusing to rewrite "
                      "persisted high tip h=%d down to in-memory h=%d — "
@@ -443,8 +581,8 @@ void cec_reconcile_startup(struct chain_evidence_controller *authority)
                             active_tip->nHeight);
         }
     }
-    if (!drift_refused && persisted_height >= 0 &&
-        persisted_height != active_tip->nHeight) {
+    if (cer_height_drift_pending(drift_refused, persisted_height,
+                                 active_tip)) {
         if (persisted_height > active_tip->nHeight) {
             LOG_WARN("cec", "[cec] startup tip drift: refusing lower height "
                      "h=%d -> h=%d — continuing reconcile without the "
@@ -472,7 +610,7 @@ void cec_reconcile_startup(struct chain_evidence_controller *authority)
      * pindex_best_header forward and log a one-liner; the lagging signal
      * will catch up via P2P / projection. A freeze here was sticky and
      * required manual node.db surgery to clear. */
-    if (csv.header_height >= 0 && csv.header_height < active_tip->nHeight) {
+    if (cer_header_tip_behind(&csv, active_tip)) {
         LOG_INFO("cec", "[cec] reconcile_startup: pindex_best_header h=%d behind " "active_tip h=%d — advancing in-memory tracker", csv.header_height, active_tip->nHeight);
         struct chain_state_header_commit header_commit = {
             .new_header_tip = active_tip,
@@ -487,35 +625,17 @@ void cec_reconcile_startup(struct chain_evidence_controller *authority)
             drift_refused = true;
         }
     }
-    if (csv.sql_max_height >= 0 && csv.sql_max_height < active_tip->nHeight) {
+    if (cer_sql_tip_behind(&csv, active_tip)) {
         LOG_INFO("cec", "[cec] reconcile_startup: blocks.max_height=%lld behind " "active_tip h=%d — projection will backfill", (long long)csv.sql_max_height, active_tip->nHeight);
     }
 
-    bool evidence_repaired = cer_state_get_i32(authority->ndb,
-        "cec.repaired_active_tip_evidence", 0) == 1;
     bool tip_evidence_ok =
-        has_active_evidence &&
-        (chain_evidence_record_has_block_index_required(&active_evidence) ||
-         (evidence_repaired && persisted_tip_matches &&
-          cec_record_is_reconciled_local_import(&active_evidence)));
-    if (!tip_evidence_ok) {
-        char reason[192];
-        if (cec_reconstruct_active_tip_evidence(authority, active_tip, &csv,
-                                                drift_refused, reason)) {
-            tip_evidence_ok = true;
-        } else {
-            /* Reconstruct only fails when the tip genuinely cannot be
-             * proven consistent. It always fills a precise reason; never
-             * freeze with an empty/generic string (that produces a halt
-             * that does not name itself). */
-            if (reason[0] == '\0')
-                snprintf(reason, sizeof(reason),
-                         "active_tip_evidence_unrecoverable (h=%d)",
-                         active_tip->nHeight);
-            chain_evidence_controller_freeze(authority, reason);
-            return;
-        }
-    }
+        cer_tip_evidence_accepted(authority, has_active_evidence,
+                                  &active_evidence, persisted_tip_matches) ||
+        cer_reconstruct_tip_evidence(authority, active_tip, &csv,
+                                     drift_refused);
+    if (!tip_evidence_ok)
+        return;
 
     /* The active tip now carries valid block-index evidence (reconstructed
      * this boot or already present). If we entered frozen, that freeze is
