@@ -189,6 +189,27 @@ static enum vcs_zcode_dht_delegation_error chain_structure_check(
     return VCS_ZCODE_DHT_DELEGATION_OK;
 }
 
+static enum vcs_zcode_dht_delegation_error delegation_expected_chain_check(
+    const struct vcs_zcode_dht_delegation *delegation,
+    const uint8_t expected_genesis[32],
+    const uint8_t expected_noise_static[32],
+    uint32_t expected_beacon_height,
+    const uint8_t expected_beacon_hash[32])
+{
+    if (expected_genesis &&
+        memcmp(delegation->network_genesis, expected_genesis, 32) != 0)
+        return VCS_ZCODE_DHT_DELEGATION_NETWORK;
+    if (expected_noise_static &&
+        memcmp(delegation->noise_static_pubkey, expected_noise_static, 32) != 0)
+        return VCS_ZCODE_DHT_DELEGATION_NOISE_KEY;
+    if ((expected_beacon_height != 0 &&
+         delegation->beacon_height != expected_beacon_height) ||
+        (expected_beacon_hash &&
+         memcmp(delegation->beacon_hash, expected_beacon_hash, 32) != 0))
+        return VCS_ZCODE_DHT_DELEGATION_BEACON;
+    return VCS_ZCODE_DHT_DELEGATION_OK;
+}
+
 enum vcs_zcode_dht_delegation_error vcs_zcode_dht_delegation_verify(
     const struct vcs_zcode_dht_delegation *delegation,
     const uint8_t expected_genesis[32],
@@ -213,18 +234,10 @@ enum vcs_zcode_dht_delegation_error vcs_zcode_dht_delegation_verify(
         return VCS_ZCODE_DHT_DELEGATION_EXPIRED;
     if (!zid_doc_verify(&delegation->doc, now_unix))
         return VCS_ZCODE_DHT_DELEGATION_SIGNATURE;
-    if (expected_genesis &&
-        memcmp(delegation->network_genesis, expected_genesis, 32) != 0)
-        return VCS_ZCODE_DHT_DELEGATION_NETWORK;
-    if (expected_noise_static &&
-        memcmp(delegation->noise_static_pubkey, expected_noise_static, 32) != 0)
-        return VCS_ZCODE_DHT_DELEGATION_NOISE_KEY;
-    if ((expected_beacon_height != 0 &&
-         delegation->beacon_height != expected_beacon_height) ||
-        (expected_beacon_hash &&
-         memcmp(delegation->beacon_hash, expected_beacon_hash, 32) != 0))
-        return VCS_ZCODE_DHT_DELEGATION_BEACON;
-    return VCS_ZCODE_DHT_DELEGATION_OK;
+    return delegation_expected_chain_check(delegation, expected_genesis,
+                                           expected_noise_static,
+                                           expected_beacon_height,
+                                           expected_beacon_hash);
 }
 
 bool vcs_zcode_dht_delegation_node_id(

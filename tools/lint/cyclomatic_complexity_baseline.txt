@@ -123,7 +123,6 @@ contexts/commons/modules/vcs/src/zcode_creation_attribution.c:creation_write:33
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation_attribution_parse:37
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation_attribution_validate:21
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation_error_string:32
-contexts/commons/modules/vcs/src/zcode_dht_delegation.c:vcs_zcode_dht_delegation_verify:16
 contexts/commons/modules/vcs/src/zcode_dht_record.c:record_shape:25
 contexts/commons/modules/vcs/src/zcode_dht_record.c:vcs_zcode_dht_record_error_string:21
 contexts/commons/modules/vcs/src/zcode_dht_record.c:vcs_zcode_dht_record_parse_persisted:16
