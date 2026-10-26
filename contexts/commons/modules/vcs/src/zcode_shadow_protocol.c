@@ -109,6 +109,21 @@ static bool protocol_continuity_duplicate(
     return false;
 }
 
+static bool protocol_report_write_u64_fields(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_shadow_protocol_epoch_report *row)
+{
+    return zcl_codec_write_u64le(writer, row->epoch) &&
+        zcl_codec_write_u64le(writer, row->creations) &&
+        zcl_codec_write_u64le(writer, row->cap_atoms) &&
+        zcl_codec_write_u64le(writer, row->simulated_issue_atoms) &&
+        zcl_codec_write_u64le(writer, row->attributed_atoms) &&
+        zcl_codec_write_u64le(writer, row->unissued_atoms) &&
+        zcl_codec_write_u64le(writer, row->cumulative_issue_atoms) &&
+        zcl_codec_write_u64le(writer,
+                              row->cumulative_attributed_atoms);
+}
+
 static bool protocol_report_root(
     const struct vcs_zcode_shadow_protocol_input *input,
     const struct vcs_zcode_shadow_protocol_report *report, uint8_t out[32])
@@ -125,15 +140,7 @@ static bool protocol_report_root(
         struct zcl_codec_writer writer;
         size_t written = 0;
         zcl_codec_writer_init(&writer, numbers, sizeof(numbers));
-        if (!zcl_codec_write_u64le(&writer, row->epoch) ||
-            !zcl_codec_write_u64le(&writer, row->creations) ||
-            !zcl_codec_write_u64le(&writer, row->cap_atoms) ||
-            !zcl_codec_write_u64le(&writer, row->simulated_issue_atoms) ||
-            !zcl_codec_write_u64le(&writer, row->attributed_atoms) ||
-            !zcl_codec_write_u64le(&writer, row->unissued_atoms) ||
-            !zcl_codec_write_u64le(&writer, row->cumulative_issue_atoms) ||
-            !zcl_codec_write_u64le(
-                &writer, row->cumulative_attributed_atoms) ||
+        if (!protocol_report_write_u64_fields(&writer, row) ||
             !zcl_codec_write_u8(&writer,
                                 row->active_anchor_status ? 1u : 0u) ||
             !zcl_codec_write_u8(&writer,
@@ -152,15 +159,196 @@ static bool protocol_report_root(
     return true;
 }
 
+static enum vcs_zcode_shadow_simulation_error protocol_load_epoch_set(
+    const struct vcs_zcode_shadow_protocol_input *input, size_t i,
+    struct vcs_zcode_policy_candidate_v1 *policy,
+    struct vcs_zcode_epoch_creation_set_v1 *set, size_t *capacity)
+{
+    uint8_t *wire = NULL, observed[32];
+    size_t wire_len = 0;
+    if (zcl_bytes_all_zero(input->epoch_roots[i], 32) ||
+        zcl_bytes_all_zero(input->fixture_branch_roots[i], 32) ||
+        !protocol_load(input->workspace, input->epoch_roots[i],
+                       VCS_ZCODE_EPOCH_CREATION_MAX_WIRE_BYTES,
+                       &wire, &wire_len) ||
+        vcs_zcode_epoch_creation_parse(wire, wire_len, set) !=
+            VCS_ZCODE_EPOCH_CREATION_OK ||
+        vcs_zcode_epoch_creation_root(set, observed) !=
+            VCS_ZCODE_EPOCH_CREATION_OK ||
+        !protocol_equal(observed, input->epoch_roots[i]) ||
+        set->epoch != i ||
+        !protocol_equal(set->zc23_policy_root,
+                        input->policy_candidate_root) ||
+        !protocol_equal(set->network_genesis_root,
+                        policy->network_genesis_root) ||
+        set->attribution_count > SIZE_MAX - *capacity) {
+        free(wire);
+        return VCS_ZCODE_SHADOW_SIMULATION_EPOCH;
+    }
+    free(wire);
+    *capacity += set->attribution_count;
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
+
+static bool protocol_input_incomplete(
+    const struct vcs_zcode_shadow_protocol_input *input)
+{
+    return !input->workspace || !input->policy_candidate_root ||
+        !input->epoch_roots || !input->fixture_branch_roots ||
+        input->now_unix <= 0;
+}
+
+static bool protocol_state_alloc_failed(
+    const struct shadow_protocol_callbacks *state)
+{
+    return !state->candidate_roots || !state->attribution_roots ||
+        !state->continuity_keys || !state->continuity_roots;
+}
+
+static enum vcs_zcode_shadow_simulation_error protocol_check_epoch_links(
+    const struct vcs_zcode_shadow_protocol_input *input, size_t i,
+    const struct vcs_zcode_epoch_creation_set_v1 *set,
+    const uint8_t *expected_previous)
+{
+    uint8_t expected_opening[32], expected_maturity[32];
+    if (!protocol_equal(set->previous_epoch_creation_root,
+                        expected_previous))
+        return VCS_ZCODE_SHADOW_SIMULATION_PREDECESSOR;
+    if (!protocol_equal(set->committee_evidence_snapshot_root,
+                        input->fixture_branch_roots[i]) ||
+        !vcs_zcode_shadow_fixture_anchor_root(
+            input->policy_candidate_root,
+            input->fixture_branch_roots[i], set->epoch, 1,
+            expected_opening) ||
+        !vcs_zcode_shadow_fixture_anchor_root(
+            input->policy_candidate_root,
+            input->fixture_branch_roots[i], set->epoch, 2,
+            expected_maturity) ||
+        !protocol_equal(set->opening_hash, expected_opening) ||
+        !protocol_equal(set->maturity_hash, expected_maturity))
+        return VCS_ZCODE_SHADOW_SIMULATION_ANCHOR;
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
+
+static enum vcs_zcode_shadow_simulation_error protocol_verify_epoch_set(
+    const struct vcs_zcode_shadow_protocol_input *input,
+    struct vcs_zcode_epoch_creation_set_v1 *set,
+    const uint8_t *expected_previous,
+    struct vcs_zcode_policy_candidate_v1 *policy,
+    struct shadow_protocol_callbacks *state)
+{
+    struct vcs_zcode_epoch_creation_validation_context context = {
+        .workspace = input->workspace,
+        .expected_network_genesis_root = policy->network_genesis_root,
+        .expected_zc23_policy_root = input->policy_candidate_root,
+        .expected_previous_epoch_creation_root = expected_previous,
+        .observed_actual_mint_atoms = set->actual_mint_atoms,
+        .active_height = set->maturity_height,
+        .active_mtp = set->maturity_mtp,
+        .now_unix = input->now_unix,
+        .anchor_is_active = protocol_anchor,
+        .contribution_is_duplicate = protocol_duplicate,
+        .continuity_is_duplicate = protocol_continuity_duplicate,
+        .callback_opaque = state,
+    };
+    enum vcs_zcode_epoch_creation_error epoch_error =
+        vcs_zcode_shadow_epoch_verify_cas(set, &context, policy);
+    if (epoch_error != VCS_ZCODE_EPOCH_CREATION_OK)
+        return epoch_error == VCS_ZCODE_EPOCH_CREATION_DUPLICATE
+            ? VCS_ZCODE_SHADOW_SIMULATION_DUPLICATE
+            : epoch_error == VCS_ZCODE_EPOCH_CREATION_REORG
+                ? VCS_ZCODE_SHADOW_SIMULATION_ANCHOR
+                : epoch_error == VCS_ZCODE_EPOCH_CREATION_PREDECESSOR
+                    ? VCS_ZCODE_SHADOW_SIMULATION_PREDECESSOR
+                    : VCS_ZCODE_SHADOW_SIMULATION_EPOCH;
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
+
+static void protocol_fill_epoch_row(
+    const struct vcs_zcode_shadow_protocol_input *input, size_t i,
+    const struct vcs_zcode_epoch_creation_set_v1 *set,
+    const uint8_t *expected_previous,
+    struct vcs_zcode_shadow_protocol_epoch_report *row)
+{
+    memcpy(row->epoch_root, input->epoch_roots[i], 32);
+    memcpy(row->predecessor_root, expected_previous, 32);
+    memcpy(row->fixture_branch_root,
+           input->fixture_branch_roots[i], 32);
+    row->epoch = set->epoch;
+    row->creations = set->attribution_count;
+    row->cap_atoms = set->emission_cap_atoms;
+    row->simulated_issue_atoms = set->actual_mint_atoms;
+    row->attributed_atoms = set->actual_mint_atoms;
+    row->unissued_atoms = set->unissued_atoms;
+    row->active_anchor_status = true;
+    row->reproduction_grade =
+        VCS_ZCODE_SHADOW_REPRODUCTION_SAME_HOST_FIXTURE;
+}
+
+static enum vcs_zcode_shadow_simulation_error protocol_accumulate_epoch(
+    struct vcs_zcode_shadow_protocol_report *out,
+    struct vcs_zcode_shadow_protocol_epoch_report *row)
+{
+    if (!zcl_u64_add(out->cumulative_issue_atoms,
+                     row->simulated_issue_atoms,
+                     &out->cumulative_issue_atoms) ||
+        !zcl_u64_add(out->cumulative_attributed_atoms,
+                     row->attributed_atoms,
+                     &out->cumulative_attributed_atoms) ||
+        !zcl_u64_add(out->cumulative_unissued_atoms,
+                     row->unissued_atoms,
+                     &out->cumulative_unissued_atoms))
+        return VCS_ZCODE_SHADOW_SIMULATION_OVERFLOW;
+    row->cumulative_issue_atoms = out->cumulative_issue_atoms;
+    row->cumulative_attributed_atoms =
+        out->cumulative_attributed_atoms;
+    row->cumulative_equality =
+        row->cumulative_issue_atoms ==
+        row->cumulative_attributed_atoms;
+    if (!row->cumulative_equality)
+        return VCS_ZCODE_SHADOW_SIMULATION_EPOCH;
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
+
+static enum vcs_zcode_shadow_simulation_error protocol_verify_epochs(
+    const struct vcs_zcode_shadow_protocol_input *input,
+    struct vcs_zcode_epoch_creation_set_v1 *sets,
+    struct vcs_zcode_policy_candidate_v1 *policy,
+    struct shadow_protocol_callbacks *state,
+    struct vcs_zcode_shadow_protocol_report *out)
+{
+    enum vcs_zcode_shadow_simulation_error error =
+        VCS_ZCODE_SHADOW_SIMULATION_OK;
+    uint8_t zero[32] = {0};
+    for (size_t i = 0; i < VCS_ZCODE_SHADOW_PROTOCOL_EPOCHS; i++) {
+        struct vcs_zcode_epoch_creation_set_v1 *set = &sets[i];
+        const uint8_t *expected_previous = i == 0
+            ? zero : input->epoch_roots[i - 1];
+        error = protocol_check_epoch_links(input, i, set, expected_previous);
+        if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) break;
+        state->opening_height = set->opening_height;
+        state->maturity_height = set->maturity_height;
+        memcpy(state->opening_hash, set->opening_hash, 32);
+        memcpy(state->maturity_hash, set->maturity_hash, 32);
+        error = protocol_verify_epoch_set(input, set, expected_previous,
+                                          policy, state);
+        if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) break;
+        struct vcs_zcode_shadow_protocol_epoch_report *row = &out->epochs[i];
+        protocol_fill_epoch_row(input, i, set, expected_previous, row);
+        error = protocol_accumulate_epoch(out, row);
+        if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) break;
+        out->epoch_count++;
+    }
+    return error;
+}
+
 enum vcs_zcode_shadow_simulation_error
 vcs_zcode_shadow_protocol_verify_cas(
     const struct vcs_zcode_shadow_protocol_input *input,
     struct vcs_zcode_shadow_protocol_report *out)
 {
     if (out) memset(out, 0, sizeof(*out));
-    if (!input || !out || !input->workspace ||
-        !input->policy_candidate_root || !input->epoch_roots ||
-        !input->fixture_branch_roots || input->now_unix <= 0)
+    if (!input || !out || protocol_input_incomplete(input))
         return VCS_ZCODE_SHADOW_SIMULATION_NULL;
 
     struct vcs_zcode_policy_candidate_v1 policy;
@@ -173,30 +361,9 @@ vcs_zcode_shadow_protocol_verify_cas(
     memset(sets, 0, sizeof(sets));
     size_t capacity = 64u;
     for (size_t i = 0; i < VCS_ZCODE_SHADOW_PROTOCOL_EPOCHS; i++) {
-        uint8_t *wire = NULL, observed[32];
-        size_t wire_len = 0;
-        if (zcl_bytes_all_zero(input->epoch_roots[i], 32) ||
-            zcl_bytes_all_zero(input->fixture_branch_roots[i], 32) ||
-            !protocol_load(input->workspace, input->epoch_roots[i],
-                           VCS_ZCODE_EPOCH_CREATION_MAX_WIRE_BYTES,
-                           &wire, &wire_len) ||
-            vcs_zcode_epoch_creation_parse(wire, wire_len, &sets[i]) !=
-                VCS_ZCODE_EPOCH_CREATION_OK ||
-            vcs_zcode_epoch_creation_root(&sets[i], observed) !=
-                VCS_ZCODE_EPOCH_CREATION_OK ||
-            !protocol_equal(observed, input->epoch_roots[i]) ||
-            sets[i].epoch != i ||
-            !protocol_equal(sets[i].zc23_policy_root,
-                            input->policy_candidate_root) ||
-            !protocol_equal(sets[i].network_genesis_root,
-                            policy.network_genesis_root) ||
-            sets[i].attribution_count > SIZE_MAX - capacity) {
-            free(wire);
-            error = VCS_ZCODE_SHADOW_SIMULATION_EPOCH;
-            goto done;
-        }
-        free(wire);
-        capacity += sets[i].attribution_count;
+        error = protocol_load_epoch_set(input, i, &policy, &sets[i],
+                                        &capacity);
+        if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) goto done;
     }
 
     struct shadow_protocol_callbacks state;
@@ -210,108 +377,14 @@ vcs_zcode_shadow_protocol_verify_cas(
                                        "shadow_protocol_continuity_keys");
     state.continuity_roots = zcl_calloc(capacity, 32,
                                         "shadow_protocol_continuity_roots");
-    if (!state.candidate_roots || !state.attribution_roots ||
-        !state.continuity_keys || !state.continuity_roots) {
+    if (protocol_state_alloc_failed(&state)) {
         error = VCS_ZCODE_SHADOW_SIMULATION_CAS;
         free(state.candidate_roots); free(state.attribution_roots);
         free(state.continuity_keys); free(state.continuity_roots);
         goto done;
     }
 
-    uint8_t zero[32] = {0};
-    for (size_t i = 0; i < VCS_ZCODE_SHADOW_PROTOCOL_EPOCHS; i++) {
-        struct vcs_zcode_epoch_creation_set_v1 *set = &sets[i];
-        const uint8_t *expected_previous = i == 0
-            ? zero : input->epoch_roots[i - 1];
-        uint8_t expected_opening[32], expected_maturity[32];
-        if (!protocol_equal(set->previous_epoch_creation_root,
-                            expected_previous)) {
-            error = VCS_ZCODE_SHADOW_SIMULATION_PREDECESSOR;
-            break;
-        }
-        if (!protocol_equal(set->committee_evidence_snapshot_root,
-                            input->fixture_branch_roots[i]) ||
-            !vcs_zcode_shadow_fixture_anchor_root(
-                input->policy_candidate_root,
-                input->fixture_branch_roots[i], set->epoch, 1,
-                expected_opening) ||
-            !vcs_zcode_shadow_fixture_anchor_root(
-                input->policy_candidate_root,
-                input->fixture_branch_roots[i], set->epoch, 2,
-                expected_maturity) ||
-            !protocol_equal(set->opening_hash, expected_opening) ||
-            !protocol_equal(set->maturity_hash, expected_maturity)) {
-            error = VCS_ZCODE_SHADOW_SIMULATION_ANCHOR;
-            break;
-        }
-        state.opening_height = set->opening_height;
-        state.maturity_height = set->maturity_height;
-        memcpy(state.opening_hash, set->opening_hash, 32);
-        memcpy(state.maturity_hash, set->maturity_hash, 32);
-        struct vcs_zcode_epoch_creation_validation_context context = {
-            .workspace = input->workspace,
-            .expected_network_genesis_root = policy.network_genesis_root,
-            .expected_zc23_policy_root = input->policy_candidate_root,
-            .expected_previous_epoch_creation_root = expected_previous,
-            .observed_actual_mint_atoms = set->actual_mint_atoms,
-            .active_height = set->maturity_height,
-            .active_mtp = set->maturity_mtp,
-            .now_unix = input->now_unix,
-            .anchor_is_active = protocol_anchor,
-            .contribution_is_duplicate = protocol_duplicate,
-            .continuity_is_duplicate = protocol_continuity_duplicate,
-            .callback_opaque = &state,
-        };
-        enum vcs_zcode_epoch_creation_error epoch_error =
-            vcs_zcode_shadow_epoch_verify_cas(set, &context, &policy);
-        if (epoch_error != VCS_ZCODE_EPOCH_CREATION_OK) {
-            error = epoch_error == VCS_ZCODE_EPOCH_CREATION_DUPLICATE
-                ? VCS_ZCODE_SHADOW_SIMULATION_DUPLICATE
-                : epoch_error == VCS_ZCODE_EPOCH_CREATION_REORG
-                    ? VCS_ZCODE_SHADOW_SIMULATION_ANCHOR
-                    : epoch_error == VCS_ZCODE_EPOCH_CREATION_PREDECESSOR
-                        ? VCS_ZCODE_SHADOW_SIMULATION_PREDECESSOR
-                        : VCS_ZCODE_SHADOW_SIMULATION_EPOCH;
-            break;
-        }
-        struct vcs_zcode_shadow_protocol_epoch_report *row = &out->epochs[i];
-        memcpy(row->epoch_root, input->epoch_roots[i], 32);
-        memcpy(row->predecessor_root, expected_previous, 32);
-        memcpy(row->fixture_branch_root,
-               input->fixture_branch_roots[i], 32);
-        row->epoch = set->epoch;
-        row->creations = set->attribution_count;
-        row->cap_atoms = set->emission_cap_atoms;
-        row->simulated_issue_atoms = set->actual_mint_atoms;
-        row->attributed_atoms = set->actual_mint_atoms;
-        row->unissued_atoms = set->unissued_atoms;
-        row->active_anchor_status = true;
-        row->reproduction_grade =
-            VCS_ZCODE_SHADOW_REPRODUCTION_SAME_HOST_FIXTURE;
-        if (!zcl_u64_add(out->cumulative_issue_atoms,
-                         row->simulated_issue_atoms,
-                         &out->cumulative_issue_atoms) ||
-            !zcl_u64_add(out->cumulative_attributed_atoms,
-                         row->attributed_atoms,
-                         &out->cumulative_attributed_atoms) ||
-            !zcl_u64_add(out->cumulative_unissued_atoms,
-                         row->unissued_atoms,
-                         &out->cumulative_unissued_atoms)) {
-            error = VCS_ZCODE_SHADOW_SIMULATION_OVERFLOW;
-            break;
-        }
-        row->cumulative_issue_atoms = out->cumulative_issue_atoms;
-        row->cumulative_attributed_atoms =
-            out->cumulative_attributed_atoms;
-        row->cumulative_equality =
-            row->cumulative_issue_atoms ==
-            row->cumulative_attributed_atoms;
-        if (!row->cumulative_equality) {
-            error = VCS_ZCODE_SHADOW_SIMULATION_EPOCH;
-            break;
-        }
-        out->epoch_count++;
-    }
+    error = protocol_verify_epochs(input, sets, &policy, &state, out);
     free(state.candidate_roots); free(state.attribution_roots);
     free(state.continuity_keys); free(state.continuity_roots);
     if (error == VCS_ZCODE_SHADOW_SIMULATION_OK) {

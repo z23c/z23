@@ -64,8 +64,6 @@ contexts/commons/modules/vcs/src/zcode_replication.c:vcs_zcode_replication_evalu
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_consider_object:55
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_derive:23
 contexts/commons/modules/vcs/src/zcode_science_index.c:vcs_zcode_science_index_build:22
-contexts/commons/modules/vcs/src/zcode_shadow_protocol.c:protocol_report_root:17
-contexts/commons/modules/vcs/src/zcode_shadow_protocol.c:vcs_zcode_shadow_protocol_verify_cas:46
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:shadow_package_facts:16
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:vcs_zcode_shadow_attribution_plan_cas:31
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:vcs_zcode_shadow_epoch_plan_cas:36
