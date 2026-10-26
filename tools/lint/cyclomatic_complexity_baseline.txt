@@ -108,7 +108,6 @@ contexts/commons/modules/vcs/src/package_build.c:vcs_package_build_validate:32
 contexts/commons/modules/vcs/src/package_capsule.c:vcs_package_capsule_parse:17
 contexts/commons/modules/vcs/src/package_checkout.c:checkout_materialize:19
 contexts/commons/modules/vcs/src/package_checkout.c:vcs_package_checkout#2:29
-contexts/commons/modules/vcs/src/package_deps.c:vcs_package_deps_error_string:25
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_deps_parse_meta:39
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_lock_parse:24
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_lock_resolve:18

@@ -28,32 +28,38 @@ static const uint8_t lock_root_domain[] = VCS_PACKAGE_LOCK_ROOT_DOMAIN;
 
 const char *vcs_package_deps_error_string(enum vcs_package_deps_error error)
 {
-    switch (error) {
-    case VCS_PACKAGE_DEPS_OK: return "ok";
-    case VCS_PACKAGE_DEPS_ERR_NULL: return "null-argument";
-    case VCS_PACKAGE_DEPS_ERR_ALLOC: return "allocation-failure";
-    case VCS_PACKAGE_DEPS_ERR_META_OVERSIZE: return "declaration-oversize";
-    case VCS_PACKAGE_DEPS_ERR_META_JSON: return "declaration-not-json-object";
-    case VCS_PACKAGE_DEPS_ERR_META_SCHEMA: return "declaration-schema";
-    case VCS_PACKAGE_DEPS_ERR_DEP_SHAPE: return "dependency-entry-shape";
-    case VCS_PACKAGE_DEPS_ERR_DEP_ROOT: return "dependency-root";
-    case VCS_PACKAGE_DEPS_ERR_DEP_NAME: return "dependency-name-label";
-    case VCS_PACKAGE_DEPS_ERR_DEP_SEMVER: return "dependency-semver-label";
-    case VCS_PACKAGE_DEPS_ERR_DEP_DUPLICATE: return "dependency-duplicate-root";
-    case VCS_PACKAGE_DEPS_ERR_DEP_COUNT: return "dependency-count-bound";
-    case VCS_PACKAGE_DEPS_ERR_SELF: return "dependency-self";
-    case VCS_PACKAGE_DEPS_ERR_CYCLE: return "dependency-cycle";
-    case VCS_PACKAGE_DEPS_ERR_DEPTH: return "dependency-depth-bound";
-    case VCS_PACKAGE_DEPS_ERR_NODE_COUNT: return "dependency-node-bound";
-    case VCS_PACKAGE_DEPS_ERR_UNRESOLVED: return "dependency-unresolved-root";
-    case VCS_PACKAGE_DEPS_ERR_LABEL_MISMATCH: return "dependency-label-mismatch";
-    case VCS_PACKAGE_DEPS_ERR_WIRE_MAGIC: return "lock-wire-magic";
-    case VCS_PACKAGE_DEPS_ERR_WIRE_VERSION: return "lock-wire-version";
-    case VCS_PACKAGE_DEPS_ERR_WIRE_TRUNCATED: return "lock-wire-truncated";
-    case VCS_PACKAGE_DEPS_ERR_WIRE_TRAILING: return "lock-wire-trailing";
-    case VCS_PACKAGE_DEPS_ERR_WIRE_OVERSIZE: return "lock-wire-oversize";
-    case VCS_PACKAGE_DEPS_ERR_WIRE_ORDER: return "lock-wire-order";
-    }
+    static const char *const names[] = {
+        [VCS_PACKAGE_DEPS_OK] = "ok",
+        [VCS_PACKAGE_DEPS_ERR_NULL] = "null-argument",
+        [VCS_PACKAGE_DEPS_ERR_ALLOC] = "allocation-failure",
+        [VCS_PACKAGE_DEPS_ERR_META_OVERSIZE] = "declaration-oversize",
+        [VCS_PACKAGE_DEPS_ERR_META_JSON] = "declaration-not-json-object",
+        [VCS_PACKAGE_DEPS_ERR_META_SCHEMA] = "declaration-schema",
+        [VCS_PACKAGE_DEPS_ERR_DEP_SHAPE] = "dependency-entry-shape",
+        [VCS_PACKAGE_DEPS_ERR_DEP_ROOT] = "dependency-root",
+        [VCS_PACKAGE_DEPS_ERR_DEP_NAME] = "dependency-name-label",
+        [VCS_PACKAGE_DEPS_ERR_DEP_SEMVER] = "dependency-semver-label",
+        [VCS_PACKAGE_DEPS_ERR_DEP_DUPLICATE] = "dependency-duplicate-root",
+        [VCS_PACKAGE_DEPS_ERR_DEP_COUNT] = "dependency-count-bound",
+        [VCS_PACKAGE_DEPS_ERR_SELF] = "dependency-self",
+        [VCS_PACKAGE_DEPS_ERR_CYCLE] = "dependency-cycle",
+        [VCS_PACKAGE_DEPS_ERR_DEPTH] = "dependency-depth-bound",
+        [VCS_PACKAGE_DEPS_ERR_NODE_COUNT] = "dependency-node-bound",
+        [VCS_PACKAGE_DEPS_ERR_UNRESOLVED] = "dependency-unresolved-root",
+        [VCS_PACKAGE_DEPS_ERR_LABEL_MISMATCH] = "dependency-label-mismatch",
+        [VCS_PACKAGE_DEPS_ERR_WIRE_MAGIC] = "lock-wire-magic",
+        [VCS_PACKAGE_DEPS_ERR_WIRE_VERSION] = "lock-wire-version",
+        [VCS_PACKAGE_DEPS_ERR_WIRE_TRUNCATED] = "lock-wire-truncated",
+        [VCS_PACKAGE_DEPS_ERR_WIRE_TRAILING] = "lock-wire-trailing",
+        [VCS_PACKAGE_DEPS_ERR_WIRE_OVERSIZE] = "lock-wire-oversize",
+        [VCS_PACKAGE_DEPS_ERR_WIRE_ORDER] = "lock-wire-order",
+    };
+    const unsigned index = (unsigned)error;
+    if (index >= sizeof(names) / sizeof(names[0]))
+        return "unknown-error";
+    const char *const name = names[index];
+    if (name)
+        return name;
     return "unknown-error";
 }
 

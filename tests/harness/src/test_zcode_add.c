@@ -451,6 +451,55 @@ static enum vcs_package_deps_error za_resolve(struct za_fake_src *s,
                                     sizeof(detail));
 }
 
+static int t_deps_error_strings(void)
+{
+    static const char *const expected[] = {
+        "ok",
+        "null-argument",
+        "allocation-failure",
+        "declaration-oversize",
+        "declaration-not-json-object",
+        "declaration-schema",
+        "dependency-entry-shape",
+        "dependency-root",
+        "dependency-name-label",
+        "dependency-semver-label",
+        "dependency-duplicate-root",
+        "dependency-count-bound",
+        "dependency-self",
+        "dependency-cycle",
+        "dependency-depth-bound",
+        "dependency-node-bound",
+        "dependency-unresolved-root",
+        "dependency-label-mismatch",
+        "lock-wire-magic",
+        "lock-wire-version",
+        "lock-wire-truncated",
+        "lock-wire-trailing",
+        "lock-wire-oversize",
+        "lock-wire-order",
+    };
+    int failures = 0;
+    bool all_names_match = true;
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+        if (strcmp(vcs_package_deps_error_string(
+                       (enum vcs_package_deps_error)i), expected[i]) != 0)
+            all_names_match = false;
+    }
+    ZA_CHECK("all dependency error strings preserve their exact mapping",
+             all_names_match);
+    ZA_CHECK("negative dependency error uses the unknown fallback",
+             strcmp(vcs_package_deps_error_string(
+                        (enum vcs_package_deps_error)-1),
+                    "unknown-error") == 0);
+    ZA_CHECK("out-of-range dependency error uses the unknown fallback",
+             strcmp(vcs_package_deps_error_string(
+                        (enum vcs_package_deps_error)(
+                            VCS_PACKAGE_DEPS_ERR_WIRE_ORDER + 1)),
+                    "unknown-error") == 0);
+    return failures;
+}
+
 static int t_deps_rules(void)
 {
     int failures = 0;
@@ -3821,6 +3870,7 @@ int test_zcode_add(void)
 {
     printf("\n=== zcode_add: package install lifecycle ===\n");
     int failures = 0;
+    failures += t_deps_error_strings();
     failures += t_worker_literal_path();
     failures += t_deps_rules();
     failures += t_generations();
