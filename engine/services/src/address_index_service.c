@@ -60,27 +60,22 @@ static char g_ai_digest_hex[65];
 static struct liveness_contract g_ai_contract;
 static _Atomic supervisor_child_id g_ai_id = SUPERVISOR_INVALID_ID;
 
-/* ── one bounded fold batch (tx lock held by caller) ────────────────── */
-static int ai_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
+/* Latch schema readiness once and snapshot the surviving row count so
+ * dumpstate reports honestly before the first fold. */
+static void ai_mark_schema_ready(sqlite3 *db)
 {
-    if (!atomic_load(&g_ai_schema_ready)) {
-        if (!address_index_ensure_schema(db))
-            return 0;
-        int64_t rc0 = address_index_row_count(db);
-        atomic_store(&g_ai_rows, rc0 >= 0 ? rc0 : 0);
-        atomic_store(&g_ai_schema_ready, true);
-    }
+    int64_t rc0 = address_index_row_count(db);
+    atomic_store(&g_ai_rows, rc0 >= 0 ? rc0 : 0);
+    atomic_store(&g_ai_schema_ready, true);
+}
 
-    int64_t cursor = -1;
-    (void)address_index_get_cursor(db, &cursor);
-    int64_t hstar = (int64_t)tip_finalize_stage_cursor();
-    atomic_store(&g_ai_hstar, hstar);
-    atomic_store(&g_ai_cursor, cursor);
-
-    /* Deep-rewind safety net: H* only advances under normal operation, so
-     * cursor > H* means a reorg/rewind dropped finalized history below us. A
-     * projection folded as a forward-only digest chain cannot partially unwind,
-     * so drop-and-rederive from height 0 (cheap, rebuildable by construction). */
+/* Deep-rewind safety net: H* only advances under normal operation, so
+ * cursor > H* means a reorg/rewind dropped finalized history below us. A
+ * projection folded as a forward-only digest chain cannot partially unwind,
+ * so drop-and-rederive from height 0 (cheap, rebuildable by construction). */
+static bool ai_reset_after_deep_rewind(sqlite3 *db, int64_t hstar,
+                                       int64_t cursor)
+{
     if (hstar >= 0 && cursor > hstar) {
         if (address_index_drop(db) && address_index_ensure_schema(db)) {
             atomic_fetch_add(&g_ai_resets, 1);
@@ -90,8 +85,109 @@ static int ai_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
             g_ai_digest_hex[0] = '\0';
             pthread_mutex_unlock(&g_ai_digest_lock);
         }
-        return 0;
+        return true;
     }
+    return false;
+}
+
+/* Fold one bounded run of pending blocks, reporting fold counts, blocker
+ * state and the last fully folded height through the out-parameters. */
+static void ai_fold_pending_blocks(struct main_state *ms, const char *datadir,
+                                   sqlite3 *db, int64_t cursor, int64_t hstar,
+                                   uint8_t digest[32], int64_t start_us,
+                                   int *folded, int *total_added,
+                                   bool *blocked, int64_t *blocked_h,
+                                   int64_t *last_good)
+{
+    for (int64_t h = cursor + 1;
+         h <= hstar && *folded < ADDRESS_INDEX_BATCH_BLOCKS; h++) {
+        struct block_index *bi = active_chain_at(&ms->chain_active, (int)h);
+        struct block blk;
+        block_init(&blk);
+        if (!index_fold_read_body(&blk, bi, h, datadir)) {
+            block_free(&blk);
+            *blocked = true;
+            *blocked_h = h;
+            /* Name the floor: below the snapshot seed this is a structural
+             * DEPENDENCY (bodies never downloaded), above it a transient gap. */
+            index_fold_note_absent_body("address_index", "address_index",
+                                        db, h);
+            break;                          /* body absent — coverage floor */
+        }
+        int added = 0;
+        bool put_ok = address_index_put_block(db, &blk, (int)h, digest,
+                                              &added);
+        block_free(&blk);
+        if (!put_ok) {
+            *blocked = true;
+            *blocked_h = h;
+            break;                          /* real DB error — surface + stop */
+        }
+        *total_added += added;
+        *last_good = h;
+        (*folded)++;
+        if (platform_time_monotonic_us() - start_us >= ADDRESS_INDEX_BATCH_US)
+            break;                          /* wall-time budget spent */
+    }
+}
+
+/* Persist the folded cursor + digest and commit, or roll the batch back. */
+static bool ai_try_commit_fold(sqlite3 *db, int folded, int64_t last_good,
+                               uint8_t digest[32])
+{
+    bool commit = false;
+    if (folded > 0 && address_index_set_cursor(db, last_good, digest) &&
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK) {
+        commit = true;
+    }
+    if (!commit)
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    return commit;
+}
+
+/* Publish per-batch observables (blocker latch, counters, timing). */
+static void ai_publish_batch_stats(bool commit, int folded, bool blocked,
+                                   int64_t blocked_h, int64_t elapsed)
+{
+    if (commit && !blocked)
+        index_fold_clear_seed_blocker("address_index");
+    atomic_store(&g_ai_blocked, blocked);
+    atomic_store(&g_ai_blocked_height, blocked ? blocked_h : -1);
+    atomic_store(&g_ai_last_batch_blocks, commit ? folded : 0);
+    atomic_store(&g_ai_last_batch_us, elapsed);
+}
+
+/* Publish committed-batch observables (cursor, lifetime counters, digest). */
+static void ai_publish_fold_result(int64_t last_good, int folded,
+                                   int total_added, uint8_t digest[32])
+{
+    atomic_store(&g_ai_cursor, last_good);
+    atomic_fetch_add(&g_ai_blocks_folded, folded);
+    atomic_fetch_add(&g_ai_rows, total_added);
+    char hex[65];
+    HexStr(digest, 32, false, hex, sizeof(hex));
+    pthread_mutex_lock(&g_ai_digest_lock);
+    memcpy(g_ai_digest_hex, hex, sizeof(hex));
+    pthread_mutex_unlock(&g_ai_digest_lock);
+}
+
+/* ── one bounded fold batch (tx lock held by caller) ────────────────── */
+static int ai_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
+{
+    if (!atomic_load(&g_ai_schema_ready)) {
+        if (!address_index_ensure_schema(db))
+            return 0;
+        ai_mark_schema_ready(db);
+    }
+
+    int64_t cursor = -1;
+    (void)address_index_get_cursor(db, &cursor);
+    int64_t hstar = (int64_t)tip_finalize_stage_cursor();
+    atomic_store(&g_ai_hstar, hstar);
+    atomic_store(&g_ai_cursor, cursor);
+
+    if (ai_reset_after_deep_rewind(db, hstar, cursor))
+        return 0;
     if (cursor >= hstar) {                 /* caught up to the finalized tip */
         atomic_store(&g_ai_blocked, false);
         atomic_store(&g_ai_last_batch_blocks, 0);
@@ -124,61 +220,16 @@ static int ai_do_batch(struct main_state *ms, const char *datadir, sqlite3 *db)
     bool blocked = false;
     int64_t blocked_h = -1, last_good = cursor;
 
-    for (int64_t h = cursor + 1; h <= hstar && folded < ADDRESS_INDEX_BATCH_BLOCKS;
-         h++) {
-        struct block_index *bi = active_chain_at(&ms->chain_active, (int)h);
-        struct block blk;
-        block_init(&blk);
-        if (!index_fold_read_body(&blk, bi, h, datadir)) {
-            block_free(&blk);
-            blocked = true;
-            blocked_h = h;
-            /* Name the floor: below the snapshot seed this is a structural
-             * DEPENDENCY (bodies never downloaded), above it a transient gap. */
-            index_fold_note_absent_body("address_index", "address_index",
-                                            db, h);
-            break;                          /* body absent — coverage floor */
-        }
-        int added = 0;
-        bool put_ok = address_index_put_block(db, &blk, (int)h, digest, &added);
-        block_free(&blk);
-        if (!put_ok) {
-            blocked = true;
-            blocked_h = h;
-            break;                          /* real DB error — surface + stop */
-        }
-        total_added += added;
-        last_good = h;
-        folded++;
-        if (platform_time_monotonic_us() - start_us >= ADDRESS_INDEX_BATCH_US)
-            break;                          /* wall-time budget spent */
-    }
+    ai_fold_pending_blocks(ms, datadir, db, cursor, hstar, digest, start_us,
+                           &folded, &total_added, &blocked, &blocked_h,
+                           &last_good);
 
-    bool commit = false;
-    if (folded > 0 && address_index_set_cursor(db, last_good, digest) &&
-        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK) {
-        commit = true;
-    }
-    if (!commit)
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    bool commit = ai_try_commit_fold(db, folded, last_good, digest);
 
     int64_t elapsed = platform_time_monotonic_us() - start_us;
-    if (commit && !blocked)
-        index_fold_clear_seed_blocker("address_index");
-    atomic_store(&g_ai_blocked, blocked);
-    atomic_store(&g_ai_blocked_height, blocked ? blocked_h : -1);
-    atomic_store(&g_ai_last_batch_blocks, commit ? folded : 0);
-    atomic_store(&g_ai_last_batch_us, elapsed);
-    if (commit) {
-        atomic_store(&g_ai_cursor, last_good);
-        atomic_fetch_add(&g_ai_blocks_folded, folded);
-        atomic_fetch_add(&g_ai_rows, total_added);
-        char hex[65];
-        HexStr(digest, 32, false, hex, sizeof(hex));
-        pthread_mutex_lock(&g_ai_digest_lock);
-        memcpy(g_ai_digest_hex, hex, sizeof(hex));
-        pthread_mutex_unlock(&g_ai_digest_lock);
-    }
+    ai_publish_batch_stats(commit, folded, blocked, blocked_h, elapsed);
+    if (commit)
+        ai_publish_fold_result(last_good, folded, total_added, digest);
     return commit ? folded : 0;
 }
 
@@ -258,7 +309,8 @@ static void ai_dump_status(struct json_value *out)
     json_push_kv_int(out, "ticks", atomic_load(&g_ai_ticks));
     json_push_kv_int(out, "last_batch_blocks",
                      atomic_load(&g_ai_last_batch_blocks));
-    json_push_kv_int(out, "last_batch_us", atomic_load(&g_ai_last_batch_us));
+    json_push_kv_int(out, "last_batch_us",
+                     atomic_load(&g_ai_last_batch_us));
     json_push_kv_int(out, "resets", atomic_load(&g_ai_resets));
     json_push_kv_bool(out, "registered", atomic_load(&g_ai_registered));
     bool blocked = atomic_load(&g_ai_blocked);

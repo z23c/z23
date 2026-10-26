@@ -1089,7 +1089,6 @@ engine/reducer/services/src/reducer_drain.c:reducer_drain_core:16
 engine/reducer/services/src/reducer_ingest_service.c:reducer_ingest_block:38
 engine/reducer/services/src/reducer_ingest_service.c:reducer_persist_ingested_body_locked:19
 engine/reducer/services/src/reducer_ingest_service.c:reducer_read_back_verdict:16
-engine/services/src/address_index_service.c:ai_do_batch:28
 engine/services/src/agents_telemetry_fill.c:at_scan:23
 engine/services/src/anchor_selfmint.c:anchor_selfmint_snapshot_status:20
 engine/services/src/bg_validation_authority.c:bg_validation_authority_publish:24
