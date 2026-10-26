@@ -1525,27 +1525,10 @@ static int test_mail_prefix_cursor(void)
     return failures;
 }
 
-int test_devagent_mail(void);
-int test_devagent_mail(void)
+/* The registry entry for the leaf, pinned to its declared keys. */
+static int test_mail_leaf_registered(void)
 {
     int failures = 0;
-    long long cursor = 0;
-
-    failures += test_mail_independent_cursor();
-    failures += test_mail_exact_locator();
-    failures += test_mail_exact_maximum();
-    failures += test_mail_exact_malformed();
-    failures += test_mail_exact_nul();
-    failures += test_mail_prefix_cursor();
-    failures += test_mail_paging();
-    failures += test_mail_brief_drain();
-    failures += test_mail_ref_filter_and_agent_resume();
-    failures += test_mail_stored_cursor();
-    failures += test_mail_board_fields();
-#if !defined(_WIN32)
-    failures += test_mail_cwd_invariance();
-#endif
-
     TEST("mail: the leaf is registered with its post/pull/ack keys") {
         const struct zcl_command_spec *spec =
             zcl_command_registry_find(zcl_command_catalog(), DVX_PATH, NULL);
@@ -1563,6 +1546,16 @@ int test_devagent_mail(void)
         ASSERT(spec->input_keys && strstr(spec->input_keys, "cursor") != NULL);
         PASS();
     }
+_test_next:;
+    return failures;
+}
+
+/* A fresh state dir: the first post creates it, the row round-trips, and
+ * the returned cursor reads nothing new. */
+static int test_mail_first_post_roundtrip(void)
+{
+    int failures = 0;
+    long long cursor = 0;
 
     TEST("mail: a missing state dir is created by the first post") {
         char maildir[1100], outbox[1200];
@@ -1640,7 +1633,15 @@ int test_devagent_mail(void)
         dvx_restore();
         PASS();
     }
+_test_next:;
+    return failures;
+}
 
+/* An ack persists the caller's cursor to the agent's cursor file. */
+static int test_mail_ack_persists_cursor(void)
+{
+    int failures = 0;
+    long long cursor = 0;
     TEST("mail: ack persists the caller cursor") {
         struct dvx_call c, a;
         char path[1200];
@@ -1670,7 +1671,14 @@ int test_devagent_mail(void)
         dvx_restore();
         PASS();
     }
+_test_next:;
+    return failures;
+}
 
+/* Bodies refused outright: onion, key, IPv4 and hostile path tokens. */
+static int test_mail_body_refusals(void)
+{
+    int failures = 0;
     TEST("mail: a body containing an onion address is refused, not stored") {
         struct dvx_call c, p;
         const struct json_value *rows;
@@ -1796,11 +1804,17 @@ int test_devagent_mail(void)
         dvx_restore();
         PASS();
     }
+_test_next:;
+    return failures;
+}
 
-    /* A body naming only REPO-RELATIVE paths is accepted: the detector must
-     * not require an absolute in-root token, or a cross-box directive naming
-     * a workspace logically and a scope relatively could never pass. Every
-     * absolute refusal below is unchanged. */
+/* A body naming only REPO-RELATIVE paths is accepted: the detector must
+ * not require an absolute in-root token, or a cross-box directive naming
+ * a workspace logically and a scope relatively could never pass. Every
+ * absolute refusal below is unchanged. */
+static int test_mail_body_path_verdicts(void)
+{
+    int failures = 0;
     TEST("mail: a body naming only relative paths is accepted") {
         struct dvx_call c, p;
         const struct json_value *rows;
@@ -1940,8 +1954,16 @@ int test_devagent_mail(void)
         dvx_restore();
         PASS();
     }
+_test_next:;
+    return failures;
+}
 
 #if !defined(_WIN32)
+/* An ack installs the cursor file whole: exact bytes, no temp file left. */
+static int test_mail_ack_atomic(void)
+{
+    int failures = 0;
+    long long cursor = 0;
     TEST("mail: ack leaves the cursor exact and no temp file behind") {
         struct dvx_call c, a;
         char maildir[1100], path[1200], buf[64];
@@ -1990,9 +2012,53 @@ int test_devagent_mail(void)
         dvx_restore();
         PASS();
     }
-#endif
+_test_next:;
+    return failures;
+}
 
-#if !defined(_WIN32)
+/* _exit with the handler's verdict: a failure here must fail
+ * the parent even though output is captured per process. */
+static void dvx_fork_child_post(const char *from, const char *body)
+{
+    struct dvx_call c;
+    dvx_post(&c, from, "*", "note", body);
+    (void)dvx_run(&c);
+    _exit(dvx_ok(&c) ? 0 : 1);
+}
+
+/* Reap one forked child, retrying while waitpid fails. */
+static void dvx_wait_child(pid_t pid, int *status)
+{
+    while (waitpid(pid, status, 0) < 0)
+        ;
+}
+
+/* Trim trailing CR/LF from a line in place and return its new length. */
+static size_t dvx_trim_line(char *line)
+{
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        line[--len] = '\0';
+    return len;
+}
+
+/* Set the alpha/beta found flags by scanning each row's body. */
+static void dvx_find_fork_bodies(const struct json_value *rows, int *found_a,
+                                 int *found_b)
+{
+    for (size_t i = 0; i < rows->num_children; i++) {
+        const char *body = json_get_str(json_get(&rows->children[i], "body"));
+        if (body && strstr(body, "alpha"))
+            *found_a = 1;
+        if (body && strstr(body, "beta"))
+            *found_b = 1;
+    }
+}
+
+/* Two processes posting at once never interleave outbox bytes. */
+static int test_mail_fork_interleave(void)
+{
+    int failures = 0;
     TEST("mail: two processes posting at once never interleave bytes") {
         char maildir[1100], outbox[1200];
         pid_t a, b;
@@ -2006,28 +2072,16 @@ int test_devagent_mail(void)
         dvx_isolate("fork");
         a = fork();
         ASSERT(a >= 0);
-        if (a == 0) {
-            struct dvx_call c;
-            dvx_post(&c, "proc-a", "*", "note",
-                     "fork body alpha 0123456789 abcdefghij");
-            (void)dvx_run(&c);
-            /* _exit with the handler's verdict: a failure here must fail
-             * the parent even though output is captured per process. */
-            _exit(dvx_ok(&c) ? 0 : 1);
-        }
+        if (a == 0)
+            dvx_fork_child_post("proc-a",
+                                "fork body alpha 0123456789 abcdefghij");
         b = fork();
         ASSERT(b >= 0);
-        if (b == 0) {
-            struct dvx_call c;
-            dvx_post(&c, "proc-b", "*", "note",
-                     "fork body beta 9876543210 jihgfedcba");
-            (void)dvx_run(&c);
-            _exit(dvx_ok(&c) ? 0 : 1);
-        }
-        while (waitpid(a, &sa, 0) < 0)
-            ;
-        while (waitpid(b, &sb, 0) < 0)
-            ;
+        if (b == 0)
+            dvx_fork_child_post("proc-b",
+                                "fork body beta 9876543210 jihgfedcba");
+        dvx_wait_child(a, &sa);
+        dvx_wait_child(b, &sb);
         ASSERT(WIFEXITED(sa) && WEXITSTATUS(sa) == 0);
         ASSERT(WIFEXITED(sb) && WEXITSTATUS(sb) == 0);
         /* Byte-level proof: every line of the outbox is one complete,
@@ -2040,10 +2094,7 @@ int test_devagent_mail(void)
         if (f) {
             while (fgets(line, sizeof(line), f)) {
                 struct json_value v;
-                size_t len = strlen(line);
-                while (len > 0 &&
-                       (line[len - 1] == '\n' || line[len - 1] == '\r'))
-                    line[--len] = '\0';
+                size_t len = dvx_trim_line(line);
                 if (len == 0)
                     continue;
                 nlines++;
@@ -2060,22 +2111,47 @@ int test_devagent_mail(void)
         rows = dvx_arr(&p, "rows");
         ASSERT(rows != NULL);
         ASSERT_EQ((long long)rows->num_children, 2);
-        for (size_t i = 0; i < rows->num_children; i++) {
-            const char *body =
-                json_get_str(json_get(&rows->children[i], "body"));
-            if (body && strstr(body, "alpha"))
-                found_a = 1;
-            if (body && strstr(body, "beta"))
-                found_b = 1;
-        }
+        dvx_find_fork_bodies(rows, &found_a, &found_b);
         ASSERT(found_a && found_b);
         dvx_end(&p);
         dvx_restore();
         PASS();
     }
+_test_next:;
+    return failures;
+}
+#endif /* !defined(_WIN32) */
+
+int test_devagent_mail(void);
+int test_devagent_mail(void)
+{
+    int failures = 0;
+
+    failures += test_mail_independent_cursor();
+    failures += test_mail_exact_locator();
+    failures += test_mail_exact_maximum();
+    failures += test_mail_exact_malformed();
+    failures += test_mail_exact_nul();
+    failures += test_mail_prefix_cursor();
+    failures += test_mail_paging();
+    failures += test_mail_brief_drain();
+    failures += test_mail_ref_filter_and_agent_resume();
+    failures += test_mail_stored_cursor();
+    failures += test_mail_board_fields();
+#if !defined(_WIN32)
+    failures += test_mail_cwd_invariance();
 #endif
 
-_test_next:;
+    failures += test_mail_leaf_registered();
+    failures += test_mail_first_post_roundtrip();
+    failures += test_mail_ack_persists_cursor();
+    failures += test_mail_body_refusals();
+    failures += test_mail_body_path_verdicts();
+#if !defined(_WIN32)
+    failures += test_mail_ack_atomic();
+    failures += test_mail_fork_interleave();
+#endif
+
     dvx_restore();
     if (failures == 0)
         printf("test_devagent_mail: all passed\n");
