@@ -669,13 +669,7 @@ static int t_model_shadow_emits(void)
          * projection emit now that the model save hook is gone. */
         uint8_t key_pkh[20];
         struct wallet_sqlite ws;
-        /* wallet_sqlite_open()/wallet_sqlite_write_key() LOG_FAIL on failure
-         * from inside wallet_sqlite.c; the *_r variants stay silent. This
-         * shadow-write check needs that logged failure, so keep the wrappers
-         * here (the test build compiles with -Wno-deprecated-declarations). */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-        ok = wallet_sqlite_open(&ws, ndb.db);
+        ok = wallet_sqlite_open_r(&ws, ndb.db).ok;
         struct privkey key;
         struct pubkey pk;
         privkey_init(&key);
@@ -684,8 +678,7 @@ static int t_model_shadow_emits(void)
         key.fValid = true;
         key.fCompressed = true;
         ok = ok && privkey_get_pubkey(&key, &pk);
-        ok = ok && wallet_sqlite_write_key(&ws, &pk, &key);
-#pragma GCC diagnostic pop
+        ok = ok && wallet_sqlite_write_key_r(&ws, &pk, &key).ok;
         {
             struct key_id kid = pubkey_get_id(&pk);
             memcpy(key_pkh, kid.id.data, 20);
