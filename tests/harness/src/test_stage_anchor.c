@@ -92,6 +92,249 @@ static bool sa_set_coins_applied(sqlite3 *db, int32_t height)
     return ok;
 }
 
+/* cursor_read_contract, part 1: a malformed stage_cursor schema must come
+ * back as an error, never as a missing row. Closes and unlinks the DB so
+ * part 2 can reopen a valid schema at the same path. Each helper carries
+ * its own local failure count, which test_stage_anchor sums. */
+static int sa_check_cursor_read_schema_error(const char *fixture_dir)
+{
+    int failures = 0;
+    char path[256];
+    (void)snprintf(path, sizeof(path), "%s/test_stage_cursor_read_contract.db", fixture_dir);
+    unlink(path);
+    sqlite3 *db = NULL;
+    SA_CHECK("cursor_read_contract: sqlite open",
+             sqlite3_open(path, &db) == SQLITE_OK);
+    SA_CHECK("cursor_read_contract: create malformed table",
+             sqlite3_exec(db,
+                "CREATE TABLE stage_cursor(name TEXT PRIMARY KEY,"
+                " bad INTEGER)",
+                NULL, NULL, NULL) == SQLITE_OK);
+
+    struct stage_cursor_read_result bad =
+        stage_cursor_read_persisted(db, "header_admit",
+                                    "test_stage_anchor");
+    SA_CHECK("cursor_read_contract: schema error is not ok",
+             !bad.ok && !bad.found && bad.cursor == 0);
+
+    sqlite3_close(db);
+    unlink(path);
+    return failures;
+}
+
+/* cursor_read_contract, part 2: on a valid schema a missing row reads as
+ * {ok, !found, 0} and a set row round-trips its cursor value. */
+static int sa_check_cursor_read_missing_and_found_rows(const char *fixture_dir)
+{
+    int failures = 0;
+    char path[256];
+    (void)snprintf(path, sizeof(path), "%s/test_stage_cursor_read_contract.db", fixture_dir);
+    sqlite3 *db = sa_open(path);
+    SA_CHECK("cursor_read_contract: reopen valid schema", db != NULL);
+
+    struct stage_cursor_read_result missing =
+        stage_cursor_read_persisted(db, "missing_stage",
+                                    "test_stage_anchor");
+    SA_CHECK("cursor_read_contract: missing row is ok zero",
+             missing.ok && !missing.found && missing.cursor == 0);
+
+    SA_CHECK("cursor_read_contract: set row",
+             stage_set_named_cursor_if_behind(db, "header_admit", 77));
+    struct stage_cursor_read_result found =
+        stage_cursor_read_persisted(db, "header_admit",
+                                    "test_stage_anchor");
+    SA_CHECK("cursor_read_contract: found row returns cursor",
+             found.ok && found.found && found.cursor == 77);
+
+    sqlite3_close(db);
+    unlink(path);
+    return failures;
+}
+
+/* ATOMIC advance: prime every upstream cursor below the target, anchor
+ * once, and require every one of them to land exactly on the target. */
+static int sa_check_anchor_atomic_advance(const char *fixture_dir)
+{
+    int failures = 0;
+    char path[256];
+    (void)snprintf(path, sizeof(path), "%s/test_stage_anchor_advance.db", fixture_dir);
+    sqlite3 *db = sa_open(path);
+    SA_CHECK("db open", db != NULL);
+
+    /* Prime cursors at staggered values, all strictly below 5000.
+     * Indices 0..6 → 100, 200, ..., 700. */
+    for (size_t i = 0; i < SA_N; i++) {
+        bool ok = stage_set_named_cursor_if_behind(
+            db, SA_UPSTREAM[i], (uint64_t)((i + 1) * 100));
+        SA_CHECK("prime behind cursor", ok);
+    }
+
+    bool ok = stage_anchor_upstream_cursors_to(db, 5000, "test",
+                                               "atomic-advance", false);
+    SA_CHECK("anchor advance returns true", ok);
+
+    bool all_at_target = true;
+    for (size_t i = 0; i < SA_N; i++)
+        if (sa_read(db, SA_UPSTREAM[i]) != 5000) all_at_target = false;
+    SA_CHECK("all behind cursors advanced to target", all_at_target);
+
+    sqlite3_close(db);
+    unlink(path);
+    return failures;
+}
+
+/* FORWARD-ONLY, part 1: prime script_validate above the target and every
+ * other cursor below it, anchor, then check the above-target cursor is
+ * untouched and each below-target cursor advanced exactly to the target. */
+static int sa_check_anchor_with_one_cursor_above_target(sqlite3 *db,
+                                                        uint64_t target,
+                                                        uint64_t high,
+                                                        uint64_t low)
+{
+    int failures = 0;
+    bool ok = stage_set_named_cursor_if_behind(db, "script_validate", high);
+    SA_CHECK("prime high cursor", ok);
+    for (size_t i = 0; i < SA_N; i++) {
+        if (i == 4 /* script_validate */) continue;
+        stage_set_named_cursor_if_behind(db, SA_UPSTREAM[i], low);
+    }
+
+    ok = stage_anchor_upstream_cursors_to(db, target, "test",
+                                          "forward-only", false);
+    SA_CHECK("anchor with one-above returns true", ok);
+
+    SA_CHECK("above-target cursor NOT rewound",
+             sa_read(db, "script_validate") == high);
+
+    bool others_advanced = true;
+    for (size_t i = 0; i < SA_N; i++) {
+        if (i == 4) continue;
+        if (sa_read(db, SA_UPSTREAM[i]) != target) others_advanced = false;
+    }
+    SA_CHECK("below-target cursors advanced to target", others_advanced);
+    return failures;
+}
+
+/* FORWARD-ONLY, part 2: runs after part 1 on the same DB. */
+static int sa_check_anchor_below_all_cursors_is_noop(sqlite3 *db,
+                                                     uint64_t target,
+                                                     uint64_t high)
+{
+    int failures = 0;
+    /* Anchor to a value BELOW every current cursor → pure no-op. */
+    bool ok = stage_anchor_upstream_cursors_to(db, 50, "test", "below-all", false);
+    SA_CHECK("anchor below-all returns true", ok);
+    SA_CHECK("high cursor still high after below-all anchor",
+             sa_read(db, "script_validate") == high);
+    bool none_rewound = true;
+    for (size_t i = 0; i < SA_N; i++) {
+        if (i == 4) continue;
+        if (sa_read(db, SA_UPSTREAM[i]) != target) none_rewound = false;
+    }
+    SA_CHECK("no cursor rewound by below-all anchor", none_rewound);
+    return failures;
+}
+
+/* IDEMPOTENT: anchor twice to the same target; the second call must leave
+ * every cursor unchanged. */
+static int sa_check_anchor_reanchor_is_idempotent(sqlite3 *db)
+{
+    int failures = 0;
+    bool ok = stage_anchor_upstream_cursors_to(db, 4242, "test",
+                                               "first-anchor", false);
+    SA_CHECK("first anchor returns true", ok);
+    bool first_at_target = true;
+    for (size_t i = 0; i < SA_N; i++)
+        if (sa_read(db, SA_UPSTREAM[i]) != 4242) first_at_target = false;
+    SA_CHECK("first anchor set all cursors", first_at_target);
+
+    ok = stage_anchor_upstream_cursors_to(db, 4242, "test",
+                                          "re-anchor", false);
+    SA_CHECK("re-anchor returns true", ok);
+    bool unchanged = true;
+    for (size_t i = 0; i < SA_N; i++)
+        if (sa_read(db, SA_UPSTREAM[i]) != 4242) unchanged = false;
+    SA_CHECK("re-anchor to same target left cursors unchanged",
+             unchanged);
+    return failures;
+}
+
+/* IDEMPOTENT, outer-transaction half: runs after
+ * sa_check_anchor_reanchor_is_idempotent on the same DB. */
+static int sa_check_reanchor_joins_outer_transaction(sqlite3 *db)
+{
+    int failures = 0;
+    /* A larger atomic cutover may already own the SQLite transaction. An
+     * idempotent re-anchor must remain a pure read/no-op and must not try to
+     * nest the standalone cursor writer's BEGIN. */
+    bool outer_open = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL,
+                                   NULL) == SQLITE_OK;
+    bool ok = outer_open && stage_anchor_upstream_cursors_to(
+        db, 4242, "test", "outer-transaction-noop", true);
+    bool outer_still_open = sqlite3_get_autocommit(db) == 0;
+    bool outer_rolled_back = sqlite3_exec(db, "ROLLBACK", NULL, NULL,
+                                          NULL) == SQLITE_OK;
+    SA_CHECK("same-target re-anchor joins outer transaction as no-op",
+             ok && outer_still_open && outer_rolled_back);
+    return failures;
+}
+
+/* P2 CAP setup: prime staggered cursors, stamp coins_applied_height=700,
+ * then anchor to 5000. */
+static int sa_check_coins_cap_prime_and_anchor(sqlite3 *db)
+{
+    int failures = 0;
+    bool ok = true;
+    for (size_t i = 0; i < SA_N; i++)
+        ok = ok && stage_set_named_cursor_if_behind(
+            db, SA_UPSTREAM[i], (uint64_t)((i + 1) * 100));
+    SA_CHECK("coins_cap: prime cursors", ok);
+    SA_CHECK("coins_cap: stamp coins_applied_height=700",
+             sa_set_coins_applied(db, 700));
+
+    ok = stage_anchor_upstream_cursors_to(db, 5000, "test",
+                                          "coins-cap", false);
+    SA_CHECK("coins_cap: anchor returns true", ok);
+    return failures;
+}
+
+/* P2 CAP verification: runs after sa_check_coins_cap_prime_and_anchor on
+ * the same DB. */
+static int sa_check_coins_cap_caps_dependent_cursors(sqlite3 *db)
+{
+    int failures = 0;
+    /* The coins-INDEPENDENT stages (header_admit/validate_headers/body_fetch)
+     * track the header/body frontier and advance to the requested target.
+     * The coins-DEPENDENT stages — body_persist (the created_outputs index
+     * builder), script_validate, proof_validate, utxo_apply — are capped at
+     * coins_applied_height (700): they consume each other's per-height
+     * outputs, so jumping any of them past the coins frontier without
+     * producing the intervening rows/index manufactures the upstream
+     * hole/prevout-gap that wedges the tip at the snapshot seed. */
+    const char *coin_dep[] = { "body_persist", "script_validate",
+                               "proof_validate", "utxo_apply" };
+    bool non_coin_stages_at_target = true;
+    for (size_t i = 0; i < SA_N; i++) {
+        bool is_coin_dep = false;
+        for (size_t j = 0; j < sizeof(coin_dep) / sizeof(coin_dep[0]); j++)
+            if (strcmp(SA_UPSTREAM[i], coin_dep[j]) == 0)
+                is_coin_dep = true;
+        if (is_coin_dep)
+            continue;
+        if (sa_read(db, SA_UPSTREAM[i]) != 5000)
+            non_coin_stages_at_target = false;
+    }
+    SA_CHECK("coins_cap: non-coin cursors advanced",
+             non_coin_stages_at_target);
+    bool coin_dep_capped = true;
+    for (size_t j = 0; j < sizeof(coin_dep) / sizeof(coin_dep[0]); j++)
+        if (sa_read(db, coin_dep[j]) != 700)
+            coin_dep_capped = false;
+    SA_CHECK("coins_cap: coins-dependent cursors capped at coins frontier",
+             coin_dep_capped);
+    return failures;
+}
+
 int test_stage_anchor(void)
 {
     printf("\n=== stage_anchor tests ===\n");
@@ -100,75 +343,11 @@ int test_stage_anchor(void)
     test_make_tmpdir(fixture_dir, sizeof(fixture_dir), "stage_anchor", "databases");
 
     /* ── Typed cursor reader distinguishes missing row from schema error ─ */
-    {
-        char path[256];
-        (void)snprintf(path, sizeof(path), "%s/test_stage_cursor_read_contract.db", fixture_dir);
-        unlink(path);
-        sqlite3 *db = NULL;
-        SA_CHECK("cursor_read_contract: sqlite open",
-                 sqlite3_open(path, &db) == SQLITE_OK);
-        SA_CHECK("cursor_read_contract: create malformed table",
-                 sqlite3_exec(db,
-                    "CREATE TABLE stage_cursor(name TEXT PRIMARY KEY,"
-                    " bad INTEGER)",
-                    NULL, NULL, NULL) == SQLITE_OK);
-
-        struct stage_cursor_read_result bad =
-            stage_cursor_read_persisted(db, "header_admit",
-                                        "test_stage_anchor");
-        SA_CHECK("cursor_read_contract: schema error is not ok",
-                 !bad.ok && !bad.found && bad.cursor == 0);
-
-        sqlite3_close(db);
-        unlink(path);
-        db = sa_open(path);
-        SA_CHECK("cursor_read_contract: reopen valid schema", db != NULL);
-
-        struct stage_cursor_read_result missing =
-            stage_cursor_read_persisted(db, "missing_stage",
-                                        "test_stage_anchor");
-        SA_CHECK("cursor_read_contract: missing row is ok zero",
-                 missing.ok && !missing.found && missing.cursor == 0);
-
-        SA_CHECK("cursor_read_contract: set row",
-                 stage_set_named_cursor_if_behind(db, "header_admit", 77));
-        struct stage_cursor_read_result found =
-            stage_cursor_read_persisted(db, "header_admit",
-                                        "test_stage_anchor");
-        SA_CHECK("cursor_read_contract: found row returns cursor",
-                 found.ok && found.found && found.cursor == 77);
-
-        sqlite3_close(db);
-        unlink(path);
-    }
+    failures += sa_check_cursor_read_schema_error(fixture_dir);
+    failures += sa_check_cursor_read_missing_and_found_rows(fixture_dir);
 
     /* ── ATOMIC advance of multiple behind cursors to the target ──── */
-    {
-        char path[256];
-        (void)snprintf(path, sizeof(path), "%s/test_stage_anchor_advance.db", fixture_dir);
-        sqlite3 *db = sa_open(path);
-        SA_CHECK("db open", db != NULL);
-
-        /* Prime cursors at staggered values, all strictly below 5000.
-         * Indices 0..6 → 100, 200, ..., 700. */
-        for (size_t i = 0; i < SA_N; i++) {
-            bool ok = stage_set_named_cursor_if_behind(
-                db, SA_UPSTREAM[i], (uint64_t)((i + 1) * 100));
-            SA_CHECK("prime behind cursor", ok);
-        }
-
-        bool ok = stage_anchor_upstream_cursors_to(db, 5000, "test",
-                                                   "atomic-advance", false);
-        SA_CHECK("anchor advance returns true", ok);
-
-        bool all_at_target = true;
-        for (size_t i = 0; i < SA_N; i++)
-            if (sa_read(db, SA_UPSTREAM[i]) != 5000) all_at_target = false;
-        SA_CHECK("all behind cursors advanced to target", all_at_target);
-
-        sqlite3_close(db);
-        unlink(path);
-    }
+    failures += sa_check_anchor_atomic_advance(fixture_dir);
 
     /* ── FORWARD-ONLY: a cursor at/above target is NEVER rewound ──── */
     {
@@ -181,38 +360,10 @@ int test_stage_anchor(void)
         const uint64_t high   = 9000;   /* above target → must not rewind */
         const uint64_t low    = 1000;   /* below target → advances        */
 
-        bool ok = stage_set_named_cursor_if_behind(db, "script_validate", high);
-        SA_CHECK("prime high cursor", ok);
-        for (size_t i = 0; i < SA_N; i++) {
-            if (i == 4 /* script_validate */) continue;
-            stage_set_named_cursor_if_behind(db, SA_UPSTREAM[i], low);
-        }
-
-        ok = stage_anchor_upstream_cursors_to(db, target, "test",
-                                              "forward-only", false);
-        SA_CHECK("anchor with one-above returns true", ok);
-
-        SA_CHECK("above-target cursor NOT rewound",
-                 sa_read(db, "script_validate") == high);
-
-        bool others_advanced = true;
-        for (size_t i = 0; i < SA_N; i++) {
-            if (i == 4) continue;
-            if (sa_read(db, SA_UPSTREAM[i]) != target) others_advanced = false;
-        }
-        SA_CHECK("below-target cursors advanced to target", others_advanced);
-
-        /* Anchor to a value BELOW every current cursor → pure no-op. */
-        ok = stage_anchor_upstream_cursors_to(db, 50, "test", "below-all", false);
-        SA_CHECK("anchor below-all returns true", ok);
-        SA_CHECK("high cursor still high after below-all anchor",
-                 sa_read(db, "script_validate") == high);
-        bool none_rewound = true;
-        for (size_t i = 0; i < SA_N; i++) {
-            if (i == 4) continue;
-            if (sa_read(db, SA_UPSTREAM[i]) != target) none_rewound = false;
-        }
-        SA_CHECK("no cursor rewound by below-all anchor", none_rewound);
+        failures += sa_check_anchor_with_one_cursor_above_target(db, target,
+                                                                high, low);
+        failures += sa_check_anchor_below_all_cursors_is_noop(db, target,
+                                                             high);
 
         sqlite3_close(db);
         unlink(path);
@@ -231,35 +382,8 @@ int test_stage_anchor(void)
         snprintf(path, sizeof(path), "%s/stage_anchor_idem.db", dir);
         sqlite3 *db = sa_open(path);
 
-        bool ok = stage_anchor_upstream_cursors_to(db, 4242, "test",
-                                                   "first-anchor", false);
-        SA_CHECK("first anchor returns true", ok);
-        bool first_at_target = true;
-        for (size_t i = 0; i < SA_N; i++)
-            if (sa_read(db, SA_UPSTREAM[i]) != 4242) first_at_target = false;
-        SA_CHECK("first anchor set all cursors", first_at_target);
-
-        ok = stage_anchor_upstream_cursors_to(db, 4242, "test",
-                                              "re-anchor", false);
-        SA_CHECK("re-anchor returns true", ok);
-        bool unchanged = true;
-        for (size_t i = 0; i < SA_N; i++)
-            if (sa_read(db, SA_UPSTREAM[i]) != 4242) unchanged = false;
-        SA_CHECK("re-anchor to same target left cursors unchanged",
-                 unchanged);
-
-        /* A larger atomic cutover may already own the SQLite transaction. An
-         * idempotent re-anchor must remain a pure read/no-op and must not try to
-         * nest the standalone cursor writer's BEGIN. */
-        bool outer_open = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL,
-                                       NULL) == SQLITE_OK;
-        ok = outer_open && stage_anchor_upstream_cursors_to(
-            db, 4242, "test", "outer-transaction-noop", true);
-        bool outer_still_open = sqlite3_get_autocommit(db) == 0;
-        bool outer_rolled_back = sqlite3_exec(db, "ROLLBACK", NULL, NULL,
-                                              NULL) == SQLITE_OK;
-        SA_CHECK("same-target re-anchor joins outer transaction as no-op",
-                 ok && outer_still_open && outer_rolled_back);
+        failures += sa_check_anchor_reanchor_is_idempotent(db);
+        failures += sa_check_reanchor_joins_outer_transaction(db);
 
         sqlite3_close(db);
         test_cleanup_tmpdir(dir);
@@ -272,47 +396,8 @@ int test_stage_anchor(void)
         sqlite3 *db = sa_open(path);
         SA_CHECK("coins_cap: db open", db != NULL);
 
-        bool ok = true;
-        for (size_t i = 0; i < SA_N; i++)
-            ok = ok && stage_set_named_cursor_if_behind(
-                db, SA_UPSTREAM[i], (uint64_t)((i + 1) * 100));
-        SA_CHECK("coins_cap: prime cursors", ok);
-        SA_CHECK("coins_cap: stamp coins_applied_height=700",
-                 sa_set_coins_applied(db, 700));
-
-        ok = stage_anchor_upstream_cursors_to(db, 5000, "test",
-                                              "coins-cap", false);
-        SA_CHECK("coins_cap: anchor returns true", ok);
-
-        /* The coins-INDEPENDENT stages (header_admit/validate_headers/body_fetch)
-         * track the header/body frontier and advance to the requested target.
-         * The coins-DEPENDENT stages — body_persist (the created_outputs index
-         * builder), script_validate, proof_validate, utxo_apply — are capped at
-         * coins_applied_height (700): they consume each other's per-height
-         * outputs, so jumping any of them past the coins frontier without
-         * producing the intervening rows/index manufactures the upstream
-         * hole/prevout-gap that wedges the tip at the snapshot seed. */
-        const char *coin_dep[] = { "body_persist", "script_validate",
-                                   "proof_validate", "utxo_apply" };
-        bool non_coin_stages_at_target = true;
-        for (size_t i = 0; i < SA_N; i++) {
-            bool is_coin_dep = false;
-            for (size_t j = 0; j < sizeof(coin_dep) / sizeof(coin_dep[0]); j++)
-                if (strcmp(SA_UPSTREAM[i], coin_dep[j]) == 0)
-                    is_coin_dep = true;
-            if (is_coin_dep)
-                continue;
-            if (sa_read(db, SA_UPSTREAM[i]) != 5000)
-                non_coin_stages_at_target = false;
-        }
-        SA_CHECK("coins_cap: non-coin cursors advanced",
-                 non_coin_stages_at_target);
-        bool coin_dep_capped = true;
-        for (size_t j = 0; j < sizeof(coin_dep) / sizeof(coin_dep[0]); j++)
-            if (sa_read(db, coin_dep[j]) != 700)
-                coin_dep_capped = false;
-        SA_CHECK("coins_cap: coins-dependent cursors capped at coins frontier",
-                 coin_dep_capped);
+        failures += sa_check_coins_cap_prime_and_anchor(db);
+        failures += sa_check_coins_cap_caps_dependent_cursors(db);
 
         sqlite3_close(db);
         unlink(path);
