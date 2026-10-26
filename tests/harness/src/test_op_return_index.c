@@ -81,106 +81,160 @@ static size_t build_opret(uint8_t *out, const uint8_t *tag, size_t tag_len,
 
 /* ── (1) Pure extract() ──────────────────────────────────────────── */
 
+static bool test_extract_pure_rejects_non_opreturn(void)
+{
+    uint8_t s[] = {0x76, 0x04, 'Z', 'N', 'A', 'M'};
+    struct op_return_index_row row;
+    bool ok = !op_return_index_extract(s, sizeof(s), &row);
+    return ok;
+}
+
+static bool test_extract_pure_rejects_null_empty(void)
+{
+    struct op_return_index_row row;
+    bool ok = !op_return_index_extract(NULL, 0, &row) &&
+              !op_return_index_extract((const uint8_t *)"", 0, &row);
+    return ok;
+}
+
+static bool test_extract_pure_znam_tag_text(void)
+{
+    uint8_t rest[] = {0x01, 0x01, 0x01, 'a'};
+    uint8_t script[64];
+    size_t len = build_opret(script, (const uint8_t *)"ZNAM", 4,
+                             rest, sizeof(rest));
+    struct op_return_index_row row;
+    bool ok = op_return_index_extract(script, len, &row) &&
+              row.tag_len == 4 && memcmp(row.tag, "ZNAM", 4) == 0 &&
+              strcmp(row.tag_text, "ZNAM") == 0 &&
+              row.payload_len == (uint32_t)(len - 1);
+    return ok;
+}
+
+static bool test_extract_pure_zslp_trims_nul(void)
+{
+    uint8_t lokad[4] = {'S', 'L', 'P', '\0'};
+    uint8_t script[64];
+    size_t len = build_opret(script, lokad, 4, NULL, 0);
+    struct op_return_index_row row;
+    bool ok = op_return_index_extract(script, len, &row) &&
+              row.tag_len == 4 && strcmp(row.tag_text, "SLP") == 0;
+    return ok;
+}
+
+static bool test_extract_pure_unknown_lokad_verbatim(void)
+{
+    uint8_t script[64];
+    size_t len = build_opret(script, (const uint8_t *)"WXYZ", 4, NULL, 0);
+    struct op_return_index_row row;
+    bool ok = op_return_index_extract(script, len, &row) &&
+              strcmp(row.tag_text, "WXYZ") == 0;
+    return ok;
+}
+
+static bool test_extract_pure_nonprintable_hex(struct op_return_index_row *row)
+{
+    uint8_t tag[4] = {0x01, 0x02, 0xFE, 0xFF};
+    uint8_t script[64];
+    size_t len = build_opret(script, tag, 4, NULL, 0);
+    bool ok = op_return_index_extract(script, len, row) &&
+              strcmp(row->tag_text, "0102feff") == 0;
+    return ok;
+}
+
+static bool test_extract_pure_empty_push(void)
+{
+    uint8_t script[2] = {0x6a, 0x00}; /* OP_RETURN OP_0 (canonical empty push) */
+    struct op_return_index_row row;
+    bool ok = op_return_index_extract(script, sizeof(script), &row) &&
+              row.tag_len == 0 && row.tag_text[0] == '\0' &&
+              row.payload_len == 1;
+    return ok;
+}
+
+static bool test_extract_pure_malformed_raw_tag(void)
+{
+    /* OP_PUSHDATA1 claims a 0xC8-byte push but the script has only 2
+     * bytes left; read_push fails. extract must still succeed via the
+     * raw-prefix fallback (still "unknown lokad" cataloged). */
+    uint8_t script[4] = {0x6a, 0x4c, 0xC8, 0xAB};
+    struct op_return_index_row row;
+    bool ok = op_return_index_extract(script, sizeof(script), &row) &&
+              row.tag_len == 3 && memcmp(row.tag, script + 1, 3) == 0;
+    return ok;
+}
+
+static bool test_extract_pure_payload_sha3(void)
+{
+    uint8_t rest[] = {0x01, 0x02, 'h', 'e', 'l', 'l', 'o'};
+    uint8_t script[64];
+    size_t len = build_opret(script, (const uint8_t *)"ZANC", 4,
+                             rest, sizeof(rest));
+    struct op_return_index_row row;
+    op_return_index_extract(script, len, &row);
+    uint8_t want[32];
+    zcl_sha3_256(script + 1, len - 1, want);
+    bool ok = memcmp(row.payload_sha3, want, 32) == 0 &&
+              row.payload_len == (uint32_t)(len - 1);
+    return ok;
+}
+
 static int test_extract_pure(void)
 {
     int failures = 0;
 
     printf("op_return_index_extract: rejects non-OP_RETURN script... ");
     {
-        uint8_t s[] = {0x76, 0x04, 'Z', 'N', 'A', 'M'};
-        struct op_return_index_row row;
-        bool ok = !op_return_index_extract(s, sizeof(s), &row);
+        bool ok = test_extract_pure_rejects_non_opreturn();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("op_return_index_extract: rejects NULL/empty... ");
     {
-        struct op_return_index_row row;
-        bool ok = !op_return_index_extract(NULL, 0, &row) &&
-                  !op_return_index_extract((const uint8_t *)"", 0, &row);
+        bool ok = test_extract_pure_rejects_null_empty();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("op_return_index_extract: ZNAM lokad -> tag_text==\"ZNAM\"... ");
     {
-        uint8_t rest[] = {0x01, 0x01, 0x01, 'a'};
-        uint8_t script[64];
-        size_t len = build_opret(script, (const uint8_t *)"ZNAM", 4,
-                                 rest, sizeof(rest));
-        struct op_return_index_row row;
-        bool ok = op_return_index_extract(script, len, &row) &&
-                  row.tag_len == 4 && memcmp(row.tag, "ZNAM", 4) == 0 &&
-                  strcmp(row.tag_text, "ZNAM") == 0 &&
-                  row.payload_len == (uint32_t)(len - 1);
+        bool ok = test_extract_pure_znam_tag_text();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("op_return_index_extract: ZSLP lokad \"SLP\\0\" trims to \"SLP\"... ");
     {
-        uint8_t lokad[4] = {'S', 'L', 'P', '\0'};
-        uint8_t script[64];
-        size_t len = build_opret(script, lokad, 4, NULL, 0);
-        struct op_return_index_row row;
-        bool ok = op_return_index_extract(script, len, &row) &&
-                  row.tag_len == 4 && strcmp(row.tag_text, "SLP") == 0;
+        bool ok = test_extract_pure_zslp_trims_nul();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("op_return_index_extract: unrecognized 4-byte lokad cataloged verbatim... ");
     {
-        uint8_t script[64];
-        size_t len = build_opret(script, (const uint8_t *)"WXYZ", 4, NULL, 0);
-        struct op_return_index_row row;
-        bool ok = op_return_index_extract(script, len, &row) &&
-                  strcmp(row.tag_text, "WXYZ") == 0;
+        bool ok = test_extract_pure_unknown_lokad_verbatim();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("op_return_index_extract: non-printable tag falls back to hex... ");
     {
-        uint8_t tag[4] = {0x01, 0x02, 0xFE, 0xFF};
-        uint8_t script[64];
-        size_t len = build_opret(script, tag, 4, NULL, 0);
         struct op_return_index_row row;
-        bool ok = op_return_index_extract(script, len, &row) &&
-                  strcmp(row.tag_text, "0102feff") == 0;
+        bool ok = test_extract_pure_nonprintable_hex(&row);
         if (ok) printf("OK\n"); else { printf("FAIL (%s)\n", row.tag_text); failures++; }
     }
 
     printf("op_return_index_extract: empty push -> tag_len=0, payload_len=1... ");
     {
-        uint8_t script[2] = {0x6a, 0x00}; /* OP_RETURN OP_0 (canonical empty push) */
-        struct op_return_index_row row;
-        bool ok = op_return_index_extract(script, sizeof(script), &row) &&
-                  row.tag_len == 0 && row.tag_text[0] == '\0' &&
-                  row.payload_len == 1;
+        bool ok = test_extract_pure_empty_push();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("op_return_index_extract: malformed push falls back to raw-byte tag... ");
     {
-        /* OP_PUSHDATA1 claims a 0xC8-byte push but the script has only 2
-         * bytes left; read_push fails. extract must still succeed via the
-         * raw-prefix fallback (still "unknown lokad" cataloged). */
-        uint8_t script[4] = {0x6a, 0x4c, 0xC8, 0xAB};
-        struct op_return_index_row row;
-        bool ok = op_return_index_extract(script, sizeof(script), &row) &&
-                  row.tag_len == 3 && memcmp(row.tag, script + 1, 3) == 0;
+        bool ok = test_extract_pure_malformed_raw_tag();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("op_return_index_extract: payload_sha3 matches independent SHA3-256... ");
     {
-        uint8_t rest[] = {0x01, 0x02, 'h', 'e', 'l', 'l', 'o'};
-        uint8_t script[64];
-        size_t len = build_opret(script, (const uint8_t *)"ZANC", 4,
-                                 rest, sizeof(rest));
-        struct op_return_index_row row;
-        op_return_index_extract(script, len, &row);
-        uint8_t want[32];
-        zcl_sha3_256(script + 1, len - 1, want);
-        bool ok = memcmp(row.payload_sha3, want, 32) == 0 &&
-                  row.payload_len == (uint32_t)(len - 1);
+        bool ok = test_extract_pure_payload_sha3();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -440,6 +494,81 @@ static int test_digest_pure(void)
 static int test_cursor_state_legacy_backoff(struct node_db *ndb);
 static int test_cursor_state_legacy_catalog_warn(struct node_db *ndb);
 
+static bool test_cursor_state_open_memory_db(struct node_db *ndb)
+{
+    bool ok = node_db_open(ndb, ":memory:") && ndb->open;
+    return ok;
+}
+
+static bool test_cursor_state_empty_default(struct node_db *ndb)
+{
+    struct op_return_index_cursor cur;
+    memset(&cur, 0xEE, sizeof(cur));
+    uint8_t zero[32] = {0};
+    bool ok = op_return_index_state_version(ndb) ==
+                  OP_RETURN_INDEX_STATE_EMPTY &&
+              op_return_index_get_cursor(ndb, &cur) &&
+              cur.base_height == 0 && cur.height == -1 &&
+              memcmp(cur.base_digest, zero, 32) == 0 &&
+              memcmp(cur.digest, zero, 32) == 0;
+    return ok;
+}
+
+static bool test_cursor_state_v2_round_trip(struct node_db *ndb)
+{
+    struct op_return_index_cursor set;
+    memset(&set, 0, sizeof(set));
+    set.base_height = 3196557;
+    for (int i = 0; i < 32; i++) set.base_digest[i] = (uint8_t)(0xA0 + i);
+    set.height = 3196600;
+    for (int i = 0; i < 32; i++) set.digest[i] = (uint8_t)(0x10 + i);
+
+    struct op_return_index_cursor got;
+    memset(&got, 0, sizeof(got));
+    bool ok = op_return_index_set_cursor(ndb, &set) &&
+              op_return_index_state_version(ndb) ==
+                  OP_RETURN_INDEX_STATE_V2 &&
+              op_return_index_get_cursor(ndb, &got) &&
+              got.base_height == set.base_height &&
+              got.height == set.height &&
+              memcmp(got.base_digest, set.base_digest, 32) == 0 &&
+              memcmp(got.digest, set.digest, 32) == 0;
+    return ok;
+}
+
+static bool test_cursor_state_bad_range_refused(struct node_db *ndb)
+{
+    struct op_return_index_cursor bad;
+    memset(&bad, 0, sizeof(bad));
+    bad.base_height = 100;
+    bad.height = 50;
+    bool ok = !op_return_index_set_cursor(ndb, &bad);
+    return ok;
+}
+
+static bool test_cursor_state_legacy_v1_refused(struct node_db *ndb)
+{
+    uint8_t legacy_digest[32];
+    memset(legacy_digest, 0x3C, 32);
+    bool wrote =
+        node_db_state_set_int(ndb, "op_return_index_cursor_height",
+                              1234) &&
+        node_db_state_set(ndb, "op_return_index_digest", legacy_digest,
+                          32);
+
+    struct op_return_index_cursor cur;
+    memset(&cur, 0, sizeof(cur));
+    cur.height = 999;
+    bool refused = !op_return_index_get_cursor(ndb, &cur);
+    bool named = op_return_index_state_version(ndb) ==
+                 OP_RETURN_INDEX_STATE_LEGACY_V1;
+    bool ok = wrote && refused && named &&
+              strcmp(op_return_index_state_version_name(
+                         OP_RETURN_INDEX_STATE_LEGACY_V1),
+                     "legacy_v1") == 0;
+    return ok;
+}
+
 static int test_cursor_state(void)
 {
     int failures = 0;
@@ -447,55 +576,27 @@ static int test_cursor_state(void)
     memset(&ndb, 0, sizeof(ndb));
 
     printf("cursor state: open in-memory node.db... ");
-    if (node_db_open(&ndb, ":memory:") && ndb.open) printf("OK\n");
+    if (test_cursor_state_open_memory_db(&ndb)) printf("OK\n");
     else { printf("FAIL\n"); return 1; }
 
     printf("cursor state: a fresh db reports EMPTY and the genesis-rooted "
           "default (base=0, height=-1)... ");
     {
-        struct op_return_index_cursor cur;
-        memset(&cur, 0xEE, sizeof(cur));
-        uint8_t zero[32] = {0};
-        bool ok = op_return_index_state_version(&ndb) ==
-                      OP_RETURN_INDEX_STATE_EMPTY &&
-                  op_return_index_get_cursor(&ndb, &cur) &&
-                  cur.base_height == 0 && cur.height == -1 &&
-                  memcmp(cur.base_digest, zero, 32) == 0 &&
-                  memcmp(cur.digest, zero, 32) == 0;
+        bool ok = test_cursor_state_empty_default(&ndb);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("cursor state: base_height/base_digest ROUND-TRIP through the "
           "persisted v2 record... ");
     {
-        struct op_return_index_cursor set;
-        memset(&set, 0, sizeof(set));
-        set.base_height = 3196557;
-        for (int i = 0; i < 32; i++) set.base_digest[i] = (uint8_t)(0xA0 + i);
-        set.height = 3196600;
-        for (int i = 0; i < 32; i++) set.digest[i] = (uint8_t)(0x10 + i);
-
-        struct op_return_index_cursor got;
-        memset(&got, 0, sizeof(got));
-        bool ok = op_return_index_set_cursor(&ndb, &set) &&
-                  op_return_index_state_version(&ndb) ==
-                      OP_RETURN_INDEX_STATE_V2 &&
-                  op_return_index_get_cursor(&ndb, &got) &&
-                  got.base_height == set.base_height &&
-                  got.height == set.height &&
-                  memcmp(got.base_digest, set.base_digest, 32) == 0 &&
-                  memcmp(got.digest, set.digest, 32) == 0;
+        bool ok = test_cursor_state_v2_round_trip(&ndb);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("cursor state: set_cursor REFUSES a cursor outside its declared "
           "range (height < base_height-1)... ");
     {
-        struct op_return_index_cursor bad;
-        memset(&bad, 0, sizeof(bad));
-        bad.base_height = 100;
-        bad.height = 50;
-        bool ok = !op_return_index_set_cursor(&ndb, &bad);
+        bool ok = test_cursor_state_bad_range_refused(&ndb);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -504,30 +605,13 @@ static int test_cursor_state(void)
     /* ── v1 refusal, on a db that only ever saw the legacy keys ───── */
     memset(&ndb, 0, sizeof(ndb));
     printf("cursor state: fresh db for the v1-refusal case... ");
-    if (node_db_open(&ndb, ":memory:") && ndb.open) printf("OK\n");
+    if (test_cursor_state_open_memory_db(&ndb)) printf("OK\n");
     else { printf("FAIL\n"); return failures + 1; }
 
     printf("cursor state: a LEGACY v1 record is classified legacy_v1 and "
           "get_cursor REFUSES it (never reinterpreted as a v2 chain)... ");
     {
-        uint8_t legacy_digest[32];
-        memset(legacy_digest, 0x3C, 32);
-        bool wrote =
-            node_db_state_set_int(&ndb, "op_return_index_cursor_height",
-                                  1234) &&
-            node_db_state_set(&ndb, "op_return_index_digest", legacy_digest,
-                              32);
-
-        struct op_return_index_cursor cur;
-        memset(&cur, 0, sizeof(cur));
-        cur.height = 999;
-        bool refused = !op_return_index_get_cursor(&ndb, &cur);
-        bool named = op_return_index_state_version(&ndb) ==
-                     OP_RETURN_INDEX_STATE_LEGACY_V1;
-        bool ok = wrote && refused && named &&
-                  strcmp(op_return_index_state_version_name(
-                             OP_RETURN_INDEX_STATE_LEGACY_V1),
-                         "legacy_v1") == 0;
+        bool ok = test_cursor_state_legacy_v1_refused(&ndb);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -740,6 +824,27 @@ static void e2e_fixture_free(struct e2e_fixture *f)
      TEST_DISCARD(system(cmd));
 }
 
+static bool e2e_cursor_at_h_star(const struct op_return_index_cursor *cur)
+{
+    bool ok = cur->height == OPRIDX_E2E_HEIGHTS - 1 && cur->base_height == 0;
+    return ok;
+}
+
+static bool e2e_truncate_resets(struct node_db *ndb)
+{
+    bool ok = op_return_index_truncate(ndb);
+    struct op_return_index_cursor after;
+    memset(&after, 0xEE, sizeof(after));
+    op_return_index_get_cursor(ndb, &after);
+    int rows_after = count_rows(ndb, "SELECT COUNT(*) FROM op_return_index");
+    uint8_t zero[32] = {0};
+    ok = ok && after.height == -1 && after.base_height == 0 &&
+         rows_after == 0 &&
+         memcmp(after.digest, zero, 32) == 0 &&
+         memcmp(after.base_digest, zero, 32) == 0;
+    return ok;
+}
+
 static int test_backfill_e2e(void)
 {
     int failures = 0;
@@ -767,7 +872,8 @@ static int test_backfill_e2e(void)
         struct op_return_index_cursor cur;
         memset(&cur, 0, sizeof(cur));
         op_return_index_get_cursor(&f.ndb, &cur);
-        if (cur.height == OPRIDX_E2E_HEIGHTS - 1 && cur.base_height == 0)
+        bool ok = e2e_cursor_at_h_star(&cur);
+        if (ok)
             printf("OK\n");
         else {
             printf("FAIL (cursor=%d base=%d)\n", cur.height, cur.base_height);
@@ -804,16 +910,7 @@ static int test_backfill_e2e(void)
 
     printf("backfill e2e: op_return_index_truncate resets cursor + rows... ");
     {
-        bool ok = op_return_index_truncate(&f.ndb);
-        struct op_return_index_cursor after;
-        memset(&after, 0xEE, sizeof(after));
-        op_return_index_get_cursor(&f.ndb, &after);
-        int rows_after = count_rows(&f.ndb, "SELECT COUNT(*) FROM op_return_index");
-        uint8_t zero[32] = {0};
-        ok = ok && after.height == -1 && after.base_height == 0 &&
-             rows_after == 0 &&
-             memcmp(after.digest, zero, 32) == 0 &&
-             memcmp(after.base_digest, zero, 32) == 0;
+        bool ok = e2e_truncate_resets(&f.ndb);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -1013,6 +1110,17 @@ static int test_backfill_unreadable_body_backoff(void)
     return failures;
 }
 
+static bool e2e_check_adopted_base(struct node_db *ndb,
+                                      struct op_return_index_cursor *cur)
+{
+    uint8_t zero[32] = {0};
+    bool got = op_return_index_get_cursor(ndb, cur);
+    /* "based, nothing folded yet" == base_height-1. */
+    bool ok = got && cur->base_height == 2 && cur->height == 1 &&
+              memcmp(cur->base_digest, zero, 32) != 0;
+    return ok;
+}
+
 /* On a snapshot-seeded datadir the bodies below reducer_trusted_base_height
  * were never downloaded. The fold must adopt the seed floor as its declared
  * base and fill forward, converting the coverage limit into a named standing
@@ -1044,11 +1152,7 @@ static int test_backfill_declared_partial_coverage(void)
         (void)op_return_backfill_run_once();
         struct op_return_index_cursor cur;
         memset(&cur, 0, sizeof(cur));
-        uint8_t zero[32] = {0};
-        bool got = op_return_index_get_cursor(&f.ndb, &cur);
-        /* "based, nothing folded yet" == base_height-1. */
-        bool ok = got && cur.base_height == 2 && cur.height == 1 &&
-                  memcmp(cur.base_digest, zero, 32) != 0;
+        bool ok = e2e_check_adopted_base(&f.ndb, &cur);
         if (ok) printf("OK\n");
         else {
             printf("FAIL (base=%d cursor=%d)\n", cur.base_height, cur.height);
