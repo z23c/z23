@@ -99,51 +99,43 @@ static void mb_subdir(char *out, size_t cap, const char *leaf)
     (void)mkdir(out, 0700);
 }
 
-static char *mb_money_rpc(const char *method, const char *params)
+static void mb_money_liquidity_reply(char *out, const char *params, bool dev,
+                                     const char *id)
 {
-    if (g_money_unavailable || strcmp(method, "agentsession") != 0)
-        return NULL;
-    const bool dev = params && strstr(params, "\"dev\"") != NULL;
-    const char *id = dev || g_money_duplicate
-        ? "11111111111111111111111111111111"
-        : "22222222222222222222222222222222";
-    const int64_t confirmed = dev ? 30000000 : 0;
-    const int64_t available = dev ? 5000000 : 0;
-    char *out = malloc(4096);
-    if (!out)
-        return NULL;
-    if (params && strstr(params, "\"liquidity\"") != NULL) {
-        g_liquidity_params_ok =
-            strstr(params, "\"recipient_value_zat\":1000") &&
-            strstr(params, "\"maximum_fee_zat\":10000") &&
-            strstr(params, "\"concurrency\":10");
-        (void)snprintf(out, 4096,
-            "{\"ok\":true,\"schema\":\"zcl.wallet_liquidity.v1\","
-            "\"wallet_scope\":\"%s\",\"wallet_instance_id\":\"%s\","
-            "\"network_genesis\":\"%064x\",\"money_status\":\"CURRENT\","
-            "\"money_reason\":\"fixture\",\"money_snapshot_root\":\"%064x\","
-            "\"observed_at\":%lld,\"status\":\"NEEDS_FANOUT\","
-            "\"reason\":\"fixture fanout\",\"amounts_known\":true,"
-            "\"requested_concurrency\":10,\"current_independent_slots\":1,"
-            "\"current_inputs_used\":1,\"recipient_value_zat\":1000,"
-            "\"maximum_fee_zat\":10000,\"required_per_slot_zat\":11000,"
-            "\"future_total_required_zat\":110000,"
-            "\"transparent_available_zat\":5000000,"
-            "\"agent_available_zat\":5000000,\"ready_now\":false,"
-            "\"fanout_recommended\":true,\"fanout_possible\":true,"
-            "\"advisory\":true,\"next_command\":\"vault.intent.fanout-plan\","
-            "\"fanout\":{\"automatic\":false,\"output_count\":10,"
-            "\"output_value_zat\":11000,\"outputs_total_zat\":110000,"
-            "\"maximum_fee_zat\":10000,\"maximum_slots_under_policy\":50,"
-            "\"prepare_command\":\"vault.intent.fanout-plan\","
-            "\"plan_command\":\"vault.intent.fanout-plan\","
-            "\"commit_command\":\"vault.intent.commit\","
-            "\"route\":\"transparent\",\"owner_commit_required\":true},"
-            "\"node_datadir\":\"/secret/leak\",\"address\":\"t1-secret\"}",
-            dev ? "dev" : "prod", id, 0x42, 0x77,
-            (long long)platform_time_wall_time_t());
-        return out;
-    }
+    g_liquidity_params_ok =
+        strstr(params, "\"recipient_value_zat\":1000") &&
+        strstr(params, "\"maximum_fee_zat\":10000") &&
+        strstr(params, "\"concurrency\":10");
+    (void)snprintf(out, 4096,
+        "{\"ok\":true,\"schema\":\"zcl.wallet_liquidity.v1\","
+        "\"wallet_scope\":\"%s\",\"wallet_instance_id\":\"%s\","
+        "\"network_genesis\":\"%064x\",\"money_status\":\"CURRENT\","
+        "\"money_reason\":\"fixture\",\"money_snapshot_root\":\"%064x\","
+        "\"observed_at\":%lld,\"status\":\"NEEDS_FANOUT\","
+        "\"reason\":\"fixture fanout\",\"amounts_known\":true,"
+        "\"requested_concurrency\":10,\"current_independent_slots\":1,"
+        "\"current_inputs_used\":1,\"recipient_value_zat\":1000,"
+        "\"maximum_fee_zat\":10000,\"required_per_slot_zat\":11000,"
+        "\"future_total_required_zat\":110000,"
+        "\"transparent_available_zat\":5000000,"
+        "\"agent_available_zat\":5000000,\"ready_now\":false,"
+        "\"fanout_recommended\":true,\"fanout_possible\":true,"
+        "\"advisory\":true,\"next_command\":\"vault.intent.fanout-plan\","
+        "\"fanout\":{\"automatic\":false,\"output_count\":10,"
+        "\"output_value_zat\":11000,\"outputs_total_zat\":110000,"
+        "\"maximum_fee_zat\":10000,\"maximum_slots_under_policy\":50,"
+        "\"prepare_command\":\"vault.intent.fanout-plan\","
+        "\"plan_command\":\"vault.intent.fanout-plan\","
+        "\"commit_command\":\"vault.intent.commit\","
+        "\"route\":\"transparent\",\"owner_commit_required\":true},"
+        "\"node_datadir\":\"/secret/leak\",\"address\":\"t1-secret\"}",
+        dev ? "dev" : "prod", id, 0x42, 0x77,
+        (long long)platform_time_wall_time_t());
+}
+
+static void mb_money_portfolio_reply(char *out, bool dev, const char *id,
+                                     int64_t confirmed, int64_t available)
+{
     (void)snprintf(out, 4096,
         "{\"snapshot\":{\"wallet_scope\":\"%s\","
         "\"wallet_instance_id\":\"%s\","
@@ -162,6 +154,26 @@ static char *mb_money_rpc(const char *method, const char *params)
         dev ? "0.05000000" : "0.00000000",
         (long long)confirmed, (long long)available, 0x55,
         (long long)platform_time_wall_time_t(), dev ? 0x61 : 0x62);
+}
+
+static char *mb_money_rpc(const char *method, const char *params)
+{
+    if (g_money_unavailable || strcmp(method, "agentsession") != 0)
+        return NULL;
+    const bool dev = params && strstr(params, "\"dev\"") != NULL;
+    const char *id = dev || g_money_duplicate
+        ? "11111111111111111111111111111111"
+        : "22222222222222222222222222222222";
+    const int64_t confirmed = dev ? 30000000 : 0;
+    const int64_t available = dev ? 5000000 : 0;
+    char *out = malloc(4096);
+    if (!out)
+        return NULL;
+    if (params && strstr(params, "\"liquidity\"") != NULL) {
+        mb_money_liquidity_reply(out, params, dev, id);
+        return out;
+    }
+    mb_money_portfolio_reply(out, dev, id, confirmed, available);
     return out;
 }
 
@@ -184,6 +196,54 @@ static char *mb_money_transport(const char *datadir, int rpc_port,
     char *reply = node_rpc_call_deadline(method, params, connect_ms, total_ms);
     (void)atomic_fetch_sub(&g_money_rpc_active, 1);
     return reply;
+}
+
+static bool mb_money_dev_prod_ok(bool ok, size_t n, const char *doc)
+{
+    return ok && n > 0 &&
+           strstr(doc, "\"portfolio_confirmed_zcl\":\"0.30000000\"") &&
+           strstr(doc, "\"wallet_scope\":\"dev\"") &&
+           strstr(doc, "\"confirmed_zcl\":\"0.30000000\"") &&
+           strstr(doc, "\"wallet_scope\":\"prod\"") &&
+           strstr(doc, "\"confirmed_zcl\":\"0.00000000\"") &&
+           !strstr(doc, "/secret/") && !strstr(doc, "rpc_port");
+}
+
+static bool mb_money_deadline_ok(void)
+{
+    return atomic_load(&g_money_connect_ms) == 500 &&
+           atomic_load(&g_money_total_ms) == 30000;
+}
+
+static bool mb_money_liquidity_plan_ok(bool ok, const char *doc)
+{
+    return ok && g_liquidity_params_ok &&
+           strstr(doc, "\"schema\":\"zcl.metaverse_agent_liquidity.v1\"") &&
+           strstr(doc, "\"status\":\"NEEDS_FANOUT\"") &&
+           strstr(doc, "\"current_independent_slots\":1") &&
+           strstr(doc, "\"output_count\":10") &&
+           strstr(doc, "\"automatic_rebalance\":false");
+}
+
+static bool mb_money_liquidity_stripped(const char *doc)
+{
+    return !strstr(doc, "/secret/") && !strstr(doc, "t1-secret") &&
+           !strstr(doc, "node_datadir") && !strstr(doc, "rpc_port") &&
+           !strstr(doc, "outpoint");
+}
+
+static bool mb_money_conflict_ok(bool ok, const char *doc, const char *field)
+{
+    return ok && strstr(doc, "CONFLICTED") &&
+           strstr(doc, "duplicate wallet_instance_id") &&
+           strstr(doc, field);
+}
+
+static bool mb_money_unknown_ok(bool ok, const char *doc, const char *reason,
+                                const char *zero)
+{
+    return ok && strstr(doc, "UNKNOWN") && strstr(doc, reason) &&
+           !strstr(doc, zero);
 }
 
 static int mb_money_portfolio(void)
@@ -216,16 +276,9 @@ static int mb_money_portfolio(void)
         absolute, mb_money_transport, doc, sizeof(doc), &n);
     atomic_store(&g_money_rpc_delay_ms, 0);
     MB_CHECK("dev 0.3 and prod zero remain identified, not conflated",
-             r.ok && n > 0 &&
-             strstr(doc, "\"portfolio_confirmed_zcl\":\"0.30000000\"") &&
-             strstr(doc, "\"wallet_scope\":\"dev\"") &&
-             strstr(doc, "\"confirmed_zcl\":\"0.30000000\"") &&
-             strstr(doc, "\"wallet_scope\":\"prod\"") &&
-             strstr(doc, "\"confirmed_zcl\":\"0.00000000\"") &&
-             !strstr(doc, "/secret/") && !strstr(doc, "rpc_port"));
+             mb_money_dev_prod_ok(r.ok, n, doc));
     MB_CHECK("custody reader keeps a bounded contention-tolerant deadline",
-             atomic_load(&g_money_connect_ms) == 500 &&
-             atomic_load(&g_money_total_ms) == 30000);
+             mb_money_deadline_ok());
     MB_CHECK("dev and prod custody authorities are read concurrently",
              atomic_load(&g_money_rpc_max_active) == 2);
 
@@ -233,46 +286,34 @@ static int mb_money_portfolio(void)
         absolute, "dev", 1000, 10000, 10, mb_money_transport,
         doc, sizeof(doc), &n);
     MB_CHECK("liquidity planner binds exact request and returns aggregate fanout",
-             r.ok && g_liquidity_params_ok &&
-             strstr(doc, "\"schema\":\"zcl.metaverse_agent_liquidity.v1\"") &&
-             strstr(doc, "\"status\":\"NEEDS_FANOUT\"") &&
-             strstr(doc, "\"current_independent_slots\":1") &&
-             strstr(doc, "\"output_count\":10") &&
-             strstr(doc, "\"automatic_rebalance\":false"));
+             mb_money_liquidity_plan_ok(r.ok, doc));
     MB_CHECK("liquidity output strips endpoint, datadir, address, and outpoint fields",
-             !strstr(doc, "/secret/") && !strstr(doc, "t1-secret") &&
-             !strstr(doc, "node_datadir") && !strstr(doc, "rpc_port") &&
-             !strstr(doc, "outpoint"));
+             mb_money_liquidity_stripped(doc));
 
     g_money_duplicate = true;
     r = metaverse_agent_service_money(
         absolute, mb_money_transport, doc, sizeof(doc), &n);
     MB_CHECK("a copied wallet id across endpoints is CONFLICTED, never zero",
-             r.ok && strstr(doc, "CONFLICTED") &&
-             strstr(doc, "duplicate wallet_instance_id") &&
-             strstr(doc, "\"portfolio_total_known\":false"));
+             mb_money_conflict_ok(r.ok, doc, "\"portfolio_total_known\":false"));
     r = metaverse_agent_service_liquidity(
         absolute, "dev", 1000, 10000, 10, mb_money_transport,
         doc, sizeof(doc), &n);
     MB_CHECK("liquidity also refuses duplicate active wallet identities",
-             r.ok && strstr(doc, "CONFLICTED") &&
-             strstr(doc, "duplicate wallet_instance_id") &&
-             strstr(doc, "\"amounts_known\":false"));
+             mb_money_conflict_ok(r.ok, doc, "\"amounts_known\":false"));
     g_money_duplicate = false;
     g_money_unavailable = true;
     r = metaverse_agent_service_money(
         absolute, mb_money_transport, doc, sizeof(doc), &n);
     MB_CHECK("unreachable wallet readers report UNKNOWN, never numeric zero",
-             r.ok && strstr(doc, "UNKNOWN") &&
-             strstr(doc, "bound wallet endpoint is unreachable") &&
-             !strstr(doc, "\"confirmed_zat\":0"));
+             mb_money_unknown_ok(r.ok, doc,
+                                 "bound wallet endpoint is unreachable",
+                                 "\"confirmed_zat\":0"));
     r = metaverse_agent_service_liquidity(
         absolute, "dev", 1000, 10000, 10, mb_money_transport,
         doc, sizeof(doc), &n);
     MB_CHECK("unreachable liquidity reader is UNKNOWN and never a zero plan",
-             r.ok && strstr(doc, "UNKNOWN") &&
-             strstr(doc, "\"amounts_known\":false") &&
-             !strstr(doc, "\"future_total_required_zat\":0"));
+             mb_money_unknown_ok(r.ok, doc, "\"amounts_known\":false",
+                                 "\"future_total_required_zat\":0"));
     g_money_unavailable = false;
     node_rpc_client_set_test_hook(NULL);
     return failures;
@@ -533,16 +574,9 @@ static bool mb_copy_file(const char *src, const char *dst)
     return ok;
 }
 
-static int mb_audit(void)
+static int mb_audit_append_rows(struct agent_audit_log *log)
 {
     int failures = 0;
-    char dir[320];
-    mb_subdir(dir, sizeof(dir), "audit-ok");
-
-    struct agent_audit_log log;
-    memset(&log, 0, sizeof(log));
-    MB_CHECK("audit log opens", agent_audit_open(&log, dir));
-
     for (uint32_t i = 0; i < 4; i++) {
         struct agent_receipt r;
         memset(&r, 0, sizeof(r));
@@ -557,24 +591,101 @@ static int mb_audit(void)
         snprintf(r.grant_id, sizeof(r.grant_id), "%s", MB_GRANT_ID);
         snprintf(r.detail, sizeof(r.detail), "receipt %u", i);
         agent_broker_fixture_property_id(0, r.property_id);
-        if (!agent_audit_append(&log, &r))
+        if (!agent_audit_append(log, &r))
             failures++;
     }
+    return failures;
+}
+
+static bool mb_audit_intact_ok(const char *dir, struct agent_audit_verdict *v)
+{
+    return agent_audit_verify_dir(dir, v) && v->ok && v->rows == 4 &&
+           v->chain_breaks == 0 && v->bad_signatures == 0 &&
+           v->malformed == 0;
+}
+
+static bool mb_audit_render_ok(size_t rendered_len, const char *rendered,
+                               const char *dir)
+{
+    return rendered_len > 0 &&
+           strstr(rendered, "\"receipt_version\":3") != NULL &&
+           strstr(rendered, "\"money_snapshot_status\":\"UNKNOWN\"") != NULL &&
+           strstr(rendered, "\"money_snapshot_root\":\"0000000000000000") !=
+               NULL &&
+           strstr(rendered, dir) == NULL;
+}
+
+static size_t mb_audit_read_rows(const char *path, char lines[8][2048])
+{
+    size_t n_lines = 0;
+    FILE *in = fopen(path, "re");
+    if (in) {
+        while (n_lines < 8 && fgets(lines[n_lines], sizeof(lines[0]), in))
+            n_lines++;
+        (void)fclose(in);
+    }
+    return n_lines;
+}
+
+static void mb_audit_write_tampered(FILE *o, const char *how,
+                                    char lines[8][2048], size_t n_lines)
+{
+    if (strcmp(how, "swap") == 0) {
+        /* Reorder rows 0 and 1: every id is still a genuine broker
+         * signature, but the chain links no longer follow. */
+        (void)fputs(lines[1], o);
+        (void)fputs(lines[0], o);
+        for (size_t i = 2; i < n_lines; i++)
+            (void)fputs(lines[i], o);
+    } else {
+        for (size_t i = 0; i < n_lines; i++) {
+            if (strcmp(how, "drop") == 0 && i == 1)
+                continue;              /* delete a row from the middle   */
+            if (strcmp(how, "edit") == 0 && i == 2) {
+                char *p = strstr(lines[i], "receipt 2");
+                if (p)
+                    p[8] = '9';        /* rewrite detail, keep the length */
+            }
+            (void)fputs(lines[i], o);
+        }
+        if (strcmp(how, "garbage") == 0)
+            (void)fputs("{not a receipt at all}\n", o);
+    }
+}
+
+static bool mb_audit_tamper_ok(const char *tdir, struct agent_audit_verdict *tv)
+{
+    return agent_audit_verify_dir(tdir, tv) && !tv->ok &&
+           (tv->chain_breaks > 0 || tv->bad_signatures > 0 ||
+            tv->malformed > 0);
+}
+
+static bool mb_audit_unverifiable_ok(const char *dir,
+                                     struct agent_audit_verdict *nv)
+{
+    return !agent_audit_verify_dir(dir, nv) && !nv->ok;
+}
+
+static int mb_audit(void)
+{
+    int failures = 0;
+    char dir[320];
+    mb_subdir(dir, sizeof(dir), "audit-ok");
+
+    struct agent_audit_log log;
+    memset(&log, 0, sizeof(log));
+    MB_CHECK("audit log opens", agent_audit_open(&log, dir));
+
+    failures += mb_audit_append_rows(&log);
 
     struct agent_audit_verdict v;
     memset(&v, 0, sizeof(v));
-    MB_CHECK("intact log verifies", agent_audit_verify_dir(dir, &v) && v.ok &&
-             v.rows == 4 && v.chain_breaks == 0 && v.bad_signatures == 0 &&
-             v.malformed == 0);
+    MB_CHECK("intact log verifies", mb_audit_intact_ok(dir, &v));
     char rendered[8192];
     size_t rendered_len = agent_audit_render_json(
         dir, 8, rendered, sizeof(rendered));
     MB_CHECK("every new receipt commits an explicit money status and root",
-             rendered_len > 0 &&
-             strstr(rendered, "\"receipt_version\":3") != NULL &&
-             strstr(rendered, "\"money_snapshot_status\":\"UNKNOWN\"") != NULL &&
-             strstr(rendered, "\"money_snapshot_root\":\"0000000000000000") != NULL &&
-             strstr(rendered, dir) == NULL);
+             mb_audit_render_ok(rendered_len, rendered, dir));
 
     /* A second broker must not fork the chain under a key it cannot sign for. */
     struct agent_audit_log again;
@@ -596,13 +707,7 @@ static int mb_audit(void)
         mb_subdir(tdir, sizeof(tdir), how[c]);
 
         char lines[8][2048];
-        size_t n_lines = 0;
-        FILE *in = fopen(src, "re");
-        if (in) {
-            while (n_lines < 8 && fgets(lines[n_lines], sizeof(lines[0]), in))
-                n_lines++;
-            (void)fclose(in);
-        }
+        size_t n_lines = mb_audit_read_rows(src, lines);
         char tpath[400];
         snprintf(tpath, sizeof(tpath), "%s/audit.log", tdir);
         FILE *o = fopen(tpath, "we");
@@ -612,27 +717,7 @@ static int mb_audit(void)
                 (void)fclose(o);
             continue;
         }
-        if (strcmp(how[c], "swap") == 0) {
-            /* Reorder rows 0 and 1: every id is still a genuine broker
-             * signature, but the chain links no longer follow. */
-            (void)fputs(lines[1], o);
-            (void)fputs(lines[0], o);
-            for (size_t i = 2; i < n_lines; i++)
-                (void)fputs(lines[i], o);
-        } else {
-            for (size_t i = 0; i < n_lines; i++) {
-                if (strcmp(how[c], "drop") == 0 && i == 1)
-                    continue;              /* delete a row from the middle   */
-                if (strcmp(how[c], "edit") == 0 && i == 2) {
-                    char *p = strstr(lines[i], "receipt 2");
-                    if (p)
-                        p[8] = '9';        /* rewrite detail, keep the length */
-                }
-                (void)fputs(lines[i], o);
-            }
-            if (strcmp(how[c], "garbage") == 0)
-                (void)fputs("{not a receipt at all}\n", o);
-        }
+        mb_audit_write_tampered(o, how[c], lines, n_lines);
         (void)fclose(o);
 
         /* The public key travels with the log; without it nothing verifies. */
@@ -646,9 +731,7 @@ static int mb_audit(void)
         char label[96];
         snprintf(label, sizeof(label), "tampered log (%s) fails verification",
                  how[c]);
-        MB_CHECK(label, agent_audit_verify_dir(tdir, &tv) && !tv.ok &&
-                 (tv.chain_breaks > 0 || tv.bad_signatures > 0 ||
-                  tv.malformed > 0));
+        MB_CHECK(label, mb_audit_tamper_ok(tdir, &tv));
     }
 
     /* A log with no key next to it is unverifiable, and says so rather than
@@ -662,7 +745,7 @@ static int mb_audit(void)
     struct agent_audit_verdict nv;
     memset(&nv, 0, sizeof(nv));
     MB_CHECK("a log with no public key beside it does not verify",
-             !agent_audit_verify_dir(nokey, &nv) && !nv.ok);
+             mb_audit_unverifiable_ok(nokey, &nv));
     return failures;
 }
 
@@ -1103,6 +1186,41 @@ struct mb_child_run {
     bool spawned;
 };
 
+static bool mb_run_child_spawn_ok(const struct agent_spawn_request *sreq,
+                                  struct agent_spawn_result *sres)
+{
+    return agent_broker_spawn_confined(sreq, sres) && sres->pid > 0;
+}
+
+static bool mb_run_child_peer_ok(const struct agent_broker_session *s,
+                                 pid_t pid)
+{
+    return s->peer.valid && s->peer.pid == pid && s->peer.uid == getuid();
+}
+
+static bool mb_run_child_replay_ok(const struct agent_broker_session *s)
+{
+    return s->requests_served == 4 && s->receipts_written == 1;
+}
+
+static bool mb_run_child_refusal_ok(const struct agent_broker_session *s)
+{
+    return s->requests_denied == 2 && s->requests_served == 2;
+}
+
+static bool mb_run_child_receipts_ok(const char *broker_dir,
+                                     struct agent_audit_verdict *v)
+{
+    return agent_audit_verify_dir(broker_dir, v) && v->ok;
+}
+
+static bool mb_run_child_status_ok(const char *broker_dir, char *doc,
+                                   size_t cap)
+{
+    return agent_broker_render_status_json(broker_dir, doc, cap) > 0 &&
+           strstr(doc, "\"broker_state_present\":true") != NULL;
+}
+
 /* Stand a whole boundary up under `<g_dir>/<leaf>`:
  *
  *   <leaf>/broker    the privileged side — audit key, receipts, and a file
@@ -1147,7 +1265,7 @@ static int mb_run_child(const char *self_exe, const char *leaf,
 
     struct agent_spawn_result sres;
     memset(&sres, 0, sizeof(sres));
-    if (!agent_broker_spawn_confined(&sreq, &sres) || sres.pid <= 0) {
+    if (!mb_run_child_spawn_ok(&sreq, &sres)) {
         printf("agent_broker: spawn failed for script '%s'\n", script);
         return 1;
     }
@@ -1200,7 +1318,7 @@ static int mb_run_child(const char *self_exe, const char *leaf,
     agent_broker_write_status(broker_dir, &s, sres.pid, NULL);
 
     MB_CHECK("the kernel named the exact process the broker forked",
-             s.peer.valid && s.peer.pid == sres.pid && s.peer.uid == getuid());
+             mb_run_child_peer_ok(&s, sres.pid));
 
     /* Fail-closed custody documents: a session that cannot attest what it
      * holds must RETIRE any bindings file left standing, not leave a prior
@@ -1228,26 +1346,24 @@ static int mb_run_child(const char *self_exe, const char *leaf,
                  s.requests_served >= 3);
         /* (i) four requests, three distinct ids, one mutation -> one receipt. */
         MB_CHECK("a replayed request_id mints no second receipt",
-                 s.requests_served == 4 && s.receipts_written == 1);
+                 mb_run_child_replay_ok(&s));
     }
     if (strcmp(script, "hostile") == 0) {
         /* (h) both asks crossed the wire fine; the BROKER is what refused. */
         MB_CHECK("the broker refused the hostile agent's asks",
-                 s.requests_denied == 2 && s.requests_served == 2);
+                 mb_run_child_refusal_ok(&s));
     }
 
     struct agent_audit_verdict v;
     memset(&v, 0, sizeof(v));
     char label[128];
     snprintf(label, sizeof(label), "the %s session's receipts verify", script);
-    MB_CHECK(label, agent_audit_verify_dir(broker_dir, &v) && v.ok);
+    MB_CHECK(label, mb_run_child_receipts_ok(broker_dir, &v));
 
     char doc[8192];
     snprintf(label, sizeof(label), "status renders for the %s broker directory",
              script);
-    MB_CHECK(label, agent_broker_render_status_json(broker_dir, doc,
-                                                    sizeof(doc)) > 0 &&
-             strstr(doc, "\"broker_state_present\":true") != NULL);
+    MB_CHECK(label, mb_run_child_status_ok(broker_dir, doc, sizeof(doc)));
     return failures;
 }
 
