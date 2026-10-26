@@ -1170,8 +1170,8 @@ static void lint_purge_stale_sandboxes(const char *real_root)
     closedir(d);
 }
 
-/* Resolve the real repo root, or print the historic SKIP. Returns 0 when the
- * caller should proceed and -1 when it should return 0 failures. */
+/* Resolve the required source root. A missing root cannot qualify any lane:
+ * return 0 to proceed and -1 when the registered entry must fail. */
 static int lint_resolve_real_root(char *out, size_t outsz)
 {
     struct stat st;
@@ -1180,16 +1180,16 @@ static int lint_resolve_real_root(char *out, size_t outsz)
     if (repo_path(fixture_src, sizeof(fixture_src), FIXTURE_SRC_REL) != 0 ||
         repo_path(makefile, sizeof(makefile), "Makefile") != 0 ||
         stat(fixture_src, &st) != 0 || stat(makefile, &st) != 0) {
-        printf("[lint-gate] SKIP: repo root not discoverable from test_zcl path\n");
+        fprintf(stderr, "[lint-gate] FAIL: required source root is unavailable\n");
         return -1;
     }
     const char *root = repo_root();
     if (!root) {
-        printf("[lint-gate] SKIP: repo root not discoverable from test_zcl path\n");
+        fprintf(stderr, "[lint-gate] FAIL: required source root is unavailable\n");
         return -1;
     }
     if (snprintf(out, outsz, "%s", root) >= (int)outsz) {
-        printf("[lint-gate] SKIP: repo root path too long\n");
+        fprintf(stderr, "[lint-gate] FAIL: required source root path is too long\n");
         return -1;
     }
     return 0;
@@ -1203,7 +1203,7 @@ static int lint_run_shard(int shard)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
-        return 0;
+        return 1;
 
     printf("\n=== make_lint_gates shard %d tests ===\n", shard);
 
@@ -1297,7 +1297,7 @@ int test_make_lint_gates_heavy_01(void)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
-        return 0;
+        return 1;
     printf("\n=== make_lint_gates heavy 1 tests ===\n");
     return lint_run_owned(LINT_OWNER_HEAVY_BASE + 0);
 }
@@ -1306,7 +1306,7 @@ int test_make_lint_gates_heavy_02(void)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
-        return 0;
+        return 1;
     printf("\n=== make_lint_gates heavy 2 tests ===\n");
     return lint_run_owned(LINT_OWNER_HEAVY_BASE + 1);
 }
@@ -1315,7 +1315,7 @@ int test_make_lint_gates_heavy_03(void)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
-        return 0;
+        return 1;
     printf("\n=== make_lint_gates heavy 3 tests ===\n");
     return lint_run_owned(LINT_OWNER_HEAVY_BASE + 2);
 }
@@ -1361,7 +1361,7 @@ int test_make_lint_gates(void)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
-        return 0;
+        return 1;
 
     printf("\n=== make_lint_gates tests ===\n");
 
@@ -1644,10 +1644,37 @@ static int t_purge_reaps_dead_owner_copies(void)
     return failures;
 }
 
+static int t_missing_root_refuses_every_lane(void)
+{
+    int failures = 0, accepted = 0;
+    int (*const entries[])(void) = {
+        test_make_lint_gates, test_make_lint_gates_realroot,
+        test_make_lint_gates_heavy_01, test_make_lint_gates_heavy_02,
+        test_make_lint_gates_heavy_03,
+#define LINT_MISSING_ROOT_ENTRY(tag, idx) test_make_lint_gates_shard_##tag,
+        LINT_SHARD_LIST(LINT_MISSING_ROOT_ENTRY)
+#undef LINT_MISSING_ROOT_ENTRY
+    };
+    char saved[PATH_MAX];
+    memcpy(saved, g_repo_root_override, sizeof saved);
+    int had_override = g_repo_root_override_set;
+    repo_root_set_override("");
+    printf("[lint-gate] exercising expected missing-root refusals\n");
+    for (size_t i = 0; i < sizeof entries / sizeof entries[0]; i++)
+        if (entries[i]() == 0) accepted++;
+    repo_root_set_override(had_override ? saved : NULL);
+    TEST("[lint-gate] every POSIX lane refuses a missing required source root") {
+        ASSERT(accepted == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_make_lint_gates_partition(void)
 {
     printf("\n=== make_lint_gates partition tests ===\n");
     int failures = 0;
+    failures += t_missing_root_refuses_every_lane();
     failures += t_partition_covers_every_check();
     failures += t_partition_shards_all_carry_work();
     failures += t_partition_only_base_group_is_exclusive();
