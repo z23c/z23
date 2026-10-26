@@ -131,6 +131,125 @@ static bool ms_commit_descriptor(const char *dd, uint8_t seed,
     return true;
 }
 
+/* ── predicates for the checks in t_routes_and_agreement ───────────── */
+/* One predicate per MS_CHECK below: each returns exactly the condition
+ * that check asserted, so the printed message and the tested truth stay
+ * side by side. */
+
+/* /metaverse: the mission text, the section links, the SIMULATION label. */
+static bool t_landing_page_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "nobody owns the world they build in") &&
+           strstr(r, "/metaverse/property") &&
+           strstr(r, "/metaverse/space") &&
+           strstr(r, "/metaverse/commons") &&
+           strstr(r, "SIMULATION");
+}
+
+/* /metaverse/property: the kind and settlement-class markers. */
+static bool t_property_page_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "Sovereign Property") &&
+           strstr(r, "zcode_package") && strstr(r, "znam_name") &&
+           strstr(r, "content_addressed") &&
+           strstr(r, "proof_of_work") &&
+           strstr(r, "local_declaration");
+}
+
+/* /metaverse/property?kind=: the filter named, the rest excluded. */
+static bool t_property_kind_filter_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "filtered to kind") &&
+           strstr(r, "not scanned: excluded by the kind filter");
+}
+
+/* /metaverse/space: one committed descriptor, no spaces over it. */
+static bool t_space_page_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "Published Spaces") &&
+           strstr(r, "1 service descriptor") &&
+           strstr(r, "No published spaces known locally");
+}
+
+/* /metaverse/commons: the label, an unknown status, an empty CAS. */
+static bool t_commons_page_ok(const char *r, size_t len)
+{
+    return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
+           strstr(r, "ZC23 Living Commons") &&
+           strstr(r, "SIMULATION") &&
+           strstr(r, "verification status</b><span class='val'>unknown") &&
+           strstr(r, "No epochs in the workspace CAS yet");
+}
+
+/* The property list kinds array carries the znam_name kind settled by
+ * proof_of_work — the fact the page must repeat. */
+static bool t_property_list_has_znam_pow(const struct json_value *kinds)
+{
+    bool found = false;
+    for (size_t i = 0; kinds && i < json_size(kinds); i++) {
+        const struct json_value *row = json_at(kinds, i);
+        const char *k = row ? json_get_str(json_get(row, "kind")) : NULL;
+        const char *s =
+            row ? json_get_str(json_get(row, "settlement")) : NULL;
+        if (k && s && strcmp(k, "znam_name") == 0 &&
+            strcmp(s, "proof_of_work") == 0)
+            found = true;
+    }
+    return found;
+}
+
+/* metaverse.property.list passed, scanned kinds, and the page repeats
+ * the znam_name/proof_of_work facts. */
+static bool t_property_list_agrees(const struct ms_cmd *c, bool znam_pow,
+                                   int64_t kinds_scanned, const char *r)
+{
+    return c->reply.status == ZCL_COMMAND_STATUS_PASSED && znam_pow &&
+           kinds_scanned > 0 &&
+           strstr(r, "znam_name") && strstr(r, "proof_of_work");
+}
+
+/* A missing status string renders as the page's "(none)" placeholder. */
+static const char *ms_status_or_default(const char *status)
+{
+    return status ? status : "(none)";
+}
+
+/* zcode.commons.status passed with the empty summary, and the page
+ * renders that exact status string. */
+static bool t_commons_status_agrees(const struct ms_cmd *c,
+                                    const char *cmd_status,
+                                    int64_t creations, int64_t epochs,
+                                    const char *r, const char *marker)
+{
+    return c->reply.status == ZCL_COMMAND_STATUS_PASSED && cmd_status &&
+           creations == 0 && epochs == 0 &&
+           strstr(r, marker) &&
+           strstr(r, "creation objects</b><span class='val'>0</span>");
+}
+
+/* metaverse.space.show passed and read back the committed descriptor:
+ * the seed 0x41 protocol root at local_content_hash grade. */
+static bool t_space_show_agrees(const struct ms_cmd *c,
+                                const char *protocol, const char *grade)
+{
+    return c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+           protocol && strlen(protocol) == 64 &&
+           grade && strcmp(grade, "local_content_hash") == 0 &&
+           strncmp(protocol, "4142434445464748494a4b4c4d4e4f50",
+                   32) == 0;
+}
+
+/* The landing page's descriptor counter agrees with the one commit. */
+static bool t_landing_counts_descriptor(const char *r, size_t len)
+{
+    return len > 0 &&
+           strstr(r, "service descriptors</b><span class='val'>1</span>");
+}
+
 /* ══ 1+2. route coverage + projection agreement ═══════════════════════ */
 
 static int t_routes_and_agreement(const char *dd)
@@ -146,43 +265,23 @@ static int t_routes_and_agreement(const char *dd)
     /* Route coverage. */
     const char *r = ms_get(dd, "/metaverse", &len);
     MS_CHECK("route /metaverse: 200 + mission + links + SIMULATION",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "nobody owns the world they build in") &&
-             strstr(r, "/metaverse/property") &&
-             strstr(r, "/metaverse/space") &&
-             strstr(r, "/metaverse/commons") &&
-             strstr(r, "SIMULATION"));
+             t_landing_page_ok(r, len));
 
     r = ms_get(dd, "/metaverse/property", &len);
     MS_CHECK("route /metaverse/property: 200 + kinds + settlement classes",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "Sovereign Property") &&
-             strstr(r, "zcode_package") && strstr(r, "znam_name") &&
-             strstr(r, "content_addressed") &&
-             strstr(r, "proof_of_work") &&
-             strstr(r, "local_declaration"));
+             t_property_page_ok(r, len));
 
     r = ms_get(dd, "/metaverse/property?kind=zcode_package", &len);
     MS_CHECK("route /metaverse/property?kind=zcode_package: 200 filtered",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "filtered to kind") &&
-             strstr(r, "not scanned: excluded by the kind filter"));
+             t_property_kind_filter_ok(r, len));
 
     r = ms_get(dd, "/metaverse/space", &len);
     MS_CHECK("route /metaverse/space: 200 + descriptor count + root",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "Published Spaces") &&
-             strstr(r, "1 service descriptor") &&
-             strstr(r, "No published spaces known locally"));
+             t_space_page_ok(r, len));
 
     r = ms_get(dd, "/metaverse/commons", &len);
     MS_CHECK("route /metaverse/commons: 200 + SIMULATION + empty summary",
-             len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-             strstr(r, "ZC23 Living Commons") &&
-             strstr(r, "SIMULATION") &&
-             strstr(r, "verification status</b><span class='val'>unknown")
-             &&
-             strstr(r, "No epochs in the workspace CAS yet"));
+             t_commons_page_ok(r, len));
 
     /* ── projection agreement: commands vs pages over the same datadir ── */
 
@@ -192,23 +291,12 @@ static int t_routes_and_agreement(const char *dd)
     (void)json_push_kv_str(&c.input, "datadir", dd);
     zcl_native_handle_metaverse_property_list(&c.request, &c.reply);
     const struct json_value *kinds = json_get(&c.reply.data, "kinds");
-    bool cmd_znam_pow = false;
-    for (size_t i = 0; kinds && i < json_size(kinds); i++) {
-        const struct json_value *row = json_at(kinds, i);
-        const char *k = row ? json_get_str(json_get(row, "kind")) : NULL;
-        const char *s =
-            row ? json_get_str(json_get(row, "settlement")) : NULL;
-        if (k && s && strcmp(k, "znam_name") == 0 &&
-            strcmp(s, "proof_of_work") == 0)
-            cmd_znam_pow = true;
-    }
+    bool cmd_znam_pow = t_property_list_has_znam_pow(kinds);
     int64_t cmd_kinds_scanned =
         json_get_int(json_get(&c.reply.data, "kinds_scanned"));
     r = ms_get(dd, "/metaverse/property", &len);
     MS_CHECK("agreement: property list kinds == property page",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED && cmd_znam_pow &&
-             cmd_kinds_scanned > 0 &&
-             strstr(r, "znam_name") && strstr(r, "proof_of_work"));
+             t_property_list_agrees(&c, cmd_znam_pow, cmd_kinds_scanned, r));
     ms_cmd_free(&c);
 
     /* zcode.commons.status ↔ /metaverse/commons (status + counts). */
@@ -227,12 +315,10 @@ static int t_routes_and_agreement(const char *dd)
     char marker[96];
     snprintf(marker, sizeof(marker),
              "verification status</b><span class='val'>%s",
-             cmd_status ? cmd_status : "(none)");
+             ms_status_or_default(cmd_status));
     MS_CHECK("agreement: commons status == commons page",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED && cmd_status &&
-             cmd_creations == 0 && cmd_epochs == 0 &&
-             strstr(r, marker) &&
-             strstr(r, "creation objects</b><span class='val'>0</span>"));
+             t_commons_status_agrees(&c, cmd_status, cmd_creations,
+                                     cmd_epochs, r, marker));
     ms_cmd_free(&c);
 
     /* metaverse.space.show ↔ the space record behind the page. */
@@ -245,18 +331,13 @@ static int t_routes_and_agreement(const char *dd)
     const char *cmd_grade =
         json_get_str(json_get(&c.reply.data, "evidence_grade"));
     MS_CHECK("agreement: space show == committed descriptor",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             cmd_protocol && strlen(cmd_protocol) == 64 &&
-             cmd_grade && strcmp(cmd_grade, "local_content_hash") == 0 &&
-             strncmp(cmd_protocol, "4142434445464748494a4b4c4d4e4f50",
-                     32) == 0);
+             t_space_show_agrees(&c, cmd_protocol, cmd_grade));
     ms_cmd_free(&c);
 
     /* The landing page's descriptor count agrees with the space page. */
     r = ms_get(dd, "/metaverse", &len);
     MS_CHECK("agreement: landing counts the fixture descriptor",
-             len > 0 &&
-             strstr(r, "service descriptors</b><span class='val'>1</span>"));
+             t_landing_counts_descriptor(r, len));
 
     return failures;
 }

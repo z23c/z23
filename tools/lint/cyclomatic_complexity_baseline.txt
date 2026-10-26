@@ -1629,7 +1629,6 @@ tests/harness/src/test_metaverse_agent_broker.c:mb_audit:36
 tests/harness/src/test_metaverse_agent_broker.c:mb_money_portfolio:33
 tests/harness/src/test_metaverse_agent_broker.c:mb_money_rpc:18
 tests/harness/src/test_metaverse_agent_broker.c:mb_run_child:20
-tests/harness/src/test_metaverse_site.c:t_routes_and_agreement:51
 tests/harness/src/test_metaverse_vocabulary.c:check_golden_v1_frames:22
 tests/harness/src/test_metaverse_vocabulary.c:check_no_bypass_of_the_evaluator:23
 tests/harness/src/test_metaverse_vocabulary.c:check_production_broker_has_no_fixture:21
