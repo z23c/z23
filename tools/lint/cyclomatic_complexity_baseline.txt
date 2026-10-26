@@ -2357,7 +2357,6 @@ tests/harness/src/test_validate_headers_stage.c:test_validate_headers_stage:59
 tests/harness/src/test_validate_script_hash_split_repair.c:test_validate_script_hash_split_repair:90
 tests/harness/src/test_validation.c:test_validation:249
 tests/harness/src/test_vault_dispatch.c:test_vault_dispatch:47
-tests/harness/src/test_vault_read.c:test_vault_read:59
 tests/harness/src/test_vcs_core.c:t_manifest_stat_cache_identity:45
 tests/harness/src/test_vcs_core.c:t_package_manifest:20
 tests/harness/src/test_vcs_core.c:t_package_swarm:18
