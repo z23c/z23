@@ -1485,7 +1485,6 @@ tests/harness/src/test_block_status_event_restart_proof.c:rp_one_cycle:43
 tests/harness/src/test_block_status_event_restart_proof.c:test_block_status_event_restart_proof_platform_arm:21
 tests/harness/src/test_blocker.c:test_blocker:67
 tests/harness/src/test_blocker_handoff.c:test_blocker_handoff:39
-tests/harness/src/test_blocker_history.c:test_blocker_history:37
 tests/harness/src/test_blog.c:test_blog:60
 tests/harness/src/test_blog.c:test_blog_publication_slice:24
 tests/harness/src/test_bls12_381_adversarial.c:test_bls12_381_adversarial:29
