@@ -884,56 +884,51 @@ static void mirror_log_pass_done(const char *op, int32_t start, int32_t end,
              ok ? "ok" : "failed");
 }
 
-int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
+static bool mirror_sync_ndb_unavailable(
+    const struct utxo_mirror_sync_service *svc)
 {
-    if (!svc || !svc->ndb || !svc->ndb->open)
-        LOG_RETURN(-1, "utxo_mirror", "run_once: node.db unavailable");
-    if (atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED)
-        return 0;
+    return !svc || !svc->ndb || !svc->ndb->open;
+}
 
+static bool mirror_sync_pass_suspended(
+    const struct utxo_mirror_sync_service *svc)
+{
+    if (atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED)
+        return true;
     /* During a from-genesis refold the coins_kv frontier climbs every pass, so
      * drift is true on every tick and this would DELETE+reinsert the ENTIRE
      * mirror (O(total_coins)) every 5s — quadratic against fold progress. The
      * mirror is a node.db read model (explorer/wallet), not consensus; skip it
      * while refolding and let the first post-refold pass rebuild it once.
      * See docs/work/refold-fold-rate-bottlenecks.md (#3). */
-    if (refold_in_progress())
-        return 0;
+    return refold_in_progress();
+}
 
-    int32_t frontier = -1;
-    int64_t coins_count = -1;
-    if (!read_coins_kv_state(&frontier, &coins_count)) {
-        /* No authoritative frontier yet (store closed / fresh datadir). Nothing
-         * to mirror — not an error. */
-        return 0;
-    }
-    atomic_store(&svc->last_frontier, (int64_t)frontier);
-
-    /* Defer the wholesale rebuild while still catching up. During IBD / P2P
-     * body fetch the coins_kv frontier climbs every tick, so drift is true on
-     * every 5s pass and this would DELETE+reinsert the ENTIRE ~1.3M-row mirror
-     * each time (quadratic against fold progress) — the same storm the refold
-     * guard above suppresses, but for non-refold catch-up. The mirror is a
-     * node.db read model (explorer/wallet/RPC) that nothing consumes mid-sync;
-     * the first within-N-of-tip pass rebuilds it once, and the count-mismatch
-     * self-heal below still runs near tip. Fail-open: header tip unknown (-1)
-     * leaves the original every-tick behavior. See
-     * docs/work/refold-fold-rate-bottlenecks.md (#3).
-     *
-     * header_tip MUST come from the in-process chain_state_repository
-     * (csr_header_height), not chain_projection_best_header_height(): that
-     * helper is native-CLIENT-layer — it requires node_rpc_client_datadir(),
-     * which is never set inside the node process, so from here it always
-     * failed with "native datadir is unset" (11k-16k log lines/day) AND
-     * silently returned -1, which defeated BOTH guards above on every tick
-     * (both require header_tip > 0) and reproduced exactly the rebuild
-     * storm they exist to prevent. */
+/* Defer the wholesale rebuild while still catching up. During IBD / P2P
+ * body fetch the coins_kv frontier climbs every tick, so drift is true on
+ * every 5s pass and this would DELETE+reinsert the ENTIRE ~1.3M-row mirror
+ * each time (quadratic against fold progress) — the same storm the refold
+ * guard above suppresses, but for non-refold catch-up. The mirror is a
+ * node.db read model (explorer/wallet/RPC) that nothing consumes mid-sync;
+ * the first within-N-of-tip pass rebuilds it once, and the count-mismatch
+ * self-heal below still runs near tip. Fail-open: header tip unknown (-1)
+ * leaves the original every-tick behavior. See
+ * docs/work/refold-fold-rate-bottlenecks.md (#3).
+ *
+ * header_tip MUST come from the in-process chain_state_repository
+ * (csr_header_height), not chain_projection_best_header_height(): that
+ * helper is native-CLIENT-layer — it requires node_rpc_client_datadir(),
+ * which is never set inside the node process, so from here it always
+ * failed with "native datadir is unset" (11k-16k log lines/day) AND
+ * silently returned -1, which defeated BOTH guards above on every tick
+ * (both require header_tip > 0) and reproduced exactly the rebuild
+ * storm they exist to prevent. */
+static bool mirror_sync_far_from_tip(int32_t frontier)
+{
     int64_t header_tip = csr_header_height(csr_instance());
     if (header_tip > 0 &&
-        (int64_t)frontier + UTXO_MIRROR_SYNC_NEAR_TIP_BLOCKS < header_tip) {
-        atomic_store(&svc->last_pass_unix, platform_time_wall_unix());
-        return 0;
-    }
+        (int64_t)frontier + UTXO_MIRROR_SYNC_NEAR_TIP_BLOCKS < header_tip)
+        return true;
     /* Symmetric guard: also defer when the header chain is BEHIND the coins
      * frontier. A snapshot-bundle seed jumps coins_kv to seed_h while P2P
      * headers are still climbing from genesis, so the header projection reports
@@ -952,7 +947,60 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
      * == tip on every tick): the mirror never completes and every downstream
      * read model (coins view → wallet_verify_utxos prune → vault spendable →
      * the overlay-intent fee reserve) starves on an otherwise healthy node. */
-    if (header_tip > 0 && (int64_t)frontier - 1 > header_tip) {
+    return header_tip > 0 && (int64_t)frontier - 1 > header_tip;
+}
+
+/* Run the rebuild/delta on the node.db write lane, bracketed by the update
+ * generation counters. Returns the lane's own verdict: true only when the
+ * lane ran and produced a non-negative row count. */
+static bool mirror_sync_run_rebuild_lane(struct utxo_mirror_sync_service *svc,
+                                         struct mirror_rebuild_ctx *rebuild)
+{
+    /* Bracket the complete node.db write lane. The generation changes at both
+     * edges so an auditor spanning even a fast rebuild detects the overlap;
+     * updates_active covers a sample taken while the transaction is open. */
+    atomic_fetch_add(&svc->updates_active, 1u);
+    atomic_fetch_add(&svc->update_generation, 1u);
+    bool lane_ok = mirror_run_db_lane(svc->ndb,
+                                      mirror_rebuild_and_advance_lane,
+                                      rebuild);
+    atomic_fetch_add(&svc->update_generation, 1u);
+    atomic_fetch_sub(&svc->updates_active, 1u);
+    return lane_ok && rebuild->written >= 0;
+}
+
+static void mirror_sync_account_pass(
+    struct utxo_mirror_sync_service *svc,
+    const struct mirror_rebuild_ctx *rebuild)
+{
+    if (rebuild->used_delta) {
+        atomic_fetch_add(&svc->delta_passes_run, 1);
+        atomic_fetch_add(&svc->delta_rows_changed, rebuild->written);
+    } else {
+        atomic_fetch_add(&svc->rebuilds_run, 1);
+    }
+    atomic_fetch_add(&svc->rows_written, rebuild->written);
+    atomic_store(&svc->last_mirror_height, (int64_t)rebuild->applied_through);
+    atomic_store(&svc->last_pass_unix, platform_time_wall_unix());
+}
+
+int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
+{
+    if (mirror_sync_ndb_unavailable(svc))
+        LOG_RETURN(-1, "utxo_mirror", "run_once: node.db unavailable");
+    if (mirror_sync_pass_suspended(svc))
+        return 0;
+
+    int32_t frontier = -1;
+    int64_t coins_count = -1;
+    if (!read_coins_kv_state(&frontier, &coins_count)) {
+        /* No authoritative frontier yet (store closed / fresh datadir). Nothing
+         * to mirror — not an error. */
+        return 0;
+    }
+    atomic_store(&svc->last_frontier, (int64_t)frontier);
+
+    if (mirror_sync_far_from_tip(frontier)) {
         atomic_store(&svc->last_pass_unix, platform_time_wall_unix());
         return 0;
     }
@@ -1009,17 +1057,7 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
         .used_delta = false,
     };
     int64_t t0_ms = platform_time_monotonic_ms();
-    /* Bracket the complete node.db write lane. The generation changes at both
-     * edges so an auditor spanning even a fast rebuild detects the overlap;
-     * updates_active covers a sample taken while the transaction is open. */
-    atomic_fetch_add(&svc->updates_active, 1u);
-    atomic_fetch_add(&svc->update_generation, 1u);
-    bool lane_ok = mirror_run_db_lane(svc->ndb,
-                                      mirror_rebuild_and_advance_lane,
-                                      &rebuild);
-    atomic_fetch_add(&svc->update_generation, 1u);
-    atomic_fetch_sub(&svc->updates_active, 1u);
-    if (!lane_ok || rebuild.written < 0) {
+    if (!mirror_sync_run_rebuild_lane(svc, &rebuild)) {
         atomic_store(&svc->last_error_unix, platform_time_wall_unix());
         mirror_log_pass_done("run_once", rebuild.cursor,
                              rebuild.applied_through, rebuild.written, t0_ms,
@@ -1027,15 +1065,7 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
         return -1;  // raw-return-ok:logged-in-mirror_rebuild_from_coins_kv
     }
 
-    if (rebuild.used_delta) {
-        atomic_fetch_add(&svc->delta_passes_run, 1);
-        atomic_fetch_add(&svc->delta_rows_changed, rebuild.written);
-    } else {
-        atomic_fetch_add(&svc->rebuilds_run, 1);
-    }
-    atomic_fetch_add(&svc->rows_written, rebuild.written);
-    atomic_store(&svc->last_mirror_height, (int64_t)rebuild.applied_through);
-    atomic_store(&svc->last_pass_unix, platform_time_wall_unix());
+    mirror_sync_account_pass(svc, &rebuild);
 
     LOG_INFO("utxo_mirror",
              "[utxo_mirror] %s mirror: %lld rows, synced to height %d",
