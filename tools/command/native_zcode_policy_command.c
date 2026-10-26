@@ -139,7 +139,7 @@ static bool zp_enum(const char *text, const char *const *names, size_t count,
   return false;
 }
 
-static bool zp_hex32(const char *text, uint8_t out[32]) {
+static bool zp_decode_hex32(const char *text, uint8_t out[32]) {
   return text && strlen(text) == 64 &&
          zcl_hex_decode_lower(text, out, 32);
 }
@@ -149,7 +149,7 @@ static bool zp_mutation_rule_value(int scope, const char *text,
   if (!text)
     return false;
   if (scope <= VCS_ZCODE_SOVEREIGNTY_PUBLISHER_ZID)
-    return zp_hex32(text, rule_value);
+    return zp_decode_hex32(text, rule_value);
   size_t n = strlen(text);
   if (!n || n > 31)
     return false;
@@ -187,7 +187,7 @@ static bool zp_mutation(const struct json_value *in,
     return false;
   out->operation = (enum policy_operation)value;
   if (out->operation == POLICY_REMOVE)
-    return zp_hex32(zp_str(in, "rule_id"), out->rule_id);
+    return zp_decode_hex32(zp_str(in, "rule_id"), out->rule_id);
   if (out->operation == POLICY_ADVISORY) {
     const struct json_value *enabled = json_get(in, "enabled");
     if (!enabled || enabled->type != JSON_BOOL)
@@ -345,7 +345,7 @@ void zcl_native_handle_zcode_network_policy_mutate(
   zp_token(genesis, digest, &mutation, token);
   if (strcmp(mode, "commit") == 0) {
     uint8_t supplied[32];
-    if (!zp_hex32(zp_str(request->input, "plan_token"), supplied)) {
+    if (!zp_decode_hex32(zp_str(request->input, "plan_token"), supplied)) {
       vcs_zcode_sovereignty_policy_free(policy);
       zp_fail(reply, "INVALID_PLAN_TOKEN", "commit requires canonical plan_token");
       return;
