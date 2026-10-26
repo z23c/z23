@@ -1311,8 +1311,6 @@ engine/modules/storage/src/nullifier_kv.c:nullifier_kv_initialize_history:19
 engine/modules/storage/src/nullifier_kv.c:shielded_history_begin_full_replay:21
 engine/modules/storage/src/nullifier_kv.c:shielded_history_publish_full_replay_complete:27
 engine/modules/storage/src/nullifier_kv.c:shielded_history_reset_to_boundary:17
-engine/modules/storage/src/progress_meta_store.c:progress_meta_get:16
-engine/modules/storage/src/progress_meta_store.c:progress_meta_get_blob_exact:23
 engine/modules/storage/src/progress_store.c:progress_store_open:35
 engine/modules/storage/src/projection_store.c:projection_clean_receipt_write:17
 engine/modules/storage/src/projection_store.c:projection_store_open:28

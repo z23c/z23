@@ -208,6 +208,51 @@ bool progress_meta_delete(sqlite3 *db, const char *key)
     return progress_meta_run_in_tx(db, progress_meta_delete_op, (void *)key);
 }
 
+/* Zero a read's out-params (and the caller's buffer, when one is given) up
+ * front, so an early return or a refused row never reports stale data. */
+static void progress_meta_reset_outputs(void *out_buf, size_t out_cap,
+                                        size_t *out_len, bool *out_found)
+{
+    if (out_found) *out_found = false;
+    if (out_len) *out_len = 0;
+    if (out_buf && out_cap > 0)
+        memset(out_buf, 0, out_cap);
+}
+
+/* Copy column 0 of a stepped row as a truncated prefix: report the full
+ * stored length via out_len and copy at most out_cap bytes into out_buf. */
+static void progress_meta_copy_row_prefix(sqlite3_stmt *stmt, void *out_buf,
+                                          size_t out_cap, size_t *out_len)
+{
+    int n = sqlite3_column_bytes(stmt, 0);
+    const void *blob = sqlite3_column_blob(stmt, 0);
+    if (out_len) *out_len = (size_t)n;
+    if (out_buf && out_cap > 0) {
+        size_t copy = (size_t)n < out_cap ? (size_t)n : out_cap;
+        if (blob && copy > 0) memcpy(out_buf, blob, copy);
+    }
+}
+
+/* Read column 0 of a stepped row with exact-BLOB semantics (fail closed on
+ * any coercible non-BLOB, negative-length, NULL-blob or over-capacity
+ * value): on success copy the exact bytes and report the length via
+ * out_len; on refusal return false and leave out_len untouched. */
+static bool progress_meta_row_read_exact(sqlite3_stmt *stmt, void *out_buf,
+                                         size_t out_cap, size_t *out_len)
+{
+    int type = sqlite3_column_type(stmt, 0);
+    if (type != SQLITE_BLOB)
+        return false;
+    int n = sqlite3_column_bytes(stmt, 0);
+    const void *blob = sqlite3_column_blob(stmt, 0);
+    if (n < 0 || (n > 0 && !blob) || (out_buf && (size_t)n > out_cap))
+        return false;
+    if (out_buf && n > 0)
+        memcpy(out_buf, blob, (size_t)n);
+    if (out_len) *out_len = (size_t)n;
+    return true;
+}
+
 bool progress_meta_get(sqlite3 *db, const char *key,
                        void *out_buf, size_t out_cap,
                        size_t *out_len, bool *out_found)
@@ -231,13 +276,7 @@ bool progress_meta_get(sqlite3 *db, const char *key,
     bool ok = true;
     if (rc == SQLITE_ROW) {
         if (out_found) *out_found = true;
-        int n = sqlite3_column_bytes(stmt, 0);
-        const void *blob = sqlite3_column_blob(stmt, 0);
-        if (out_len) *out_len = (size_t)n;
-        if (out_buf && out_cap > 0) {
-            size_t copy = (size_t)n < out_cap ? (size_t)n : out_cap;
-            if (blob && copy > 0) memcpy(out_buf, blob, copy);
-        }
+        progress_meta_copy_row_prefix(stmt, out_buf, out_cap, out_len);
     } else if (rc != SQLITE_DONE) {
         ok = false;
     }
@@ -250,10 +289,7 @@ bool progress_meta_get_blob_exact(sqlite3 *db, const char *key,
                                   void *out_buf, size_t out_cap,
                                   size_t *out_len, bool *out_found)
 {
-    if (out_found) *out_found = false;
-    if (out_len) *out_len = 0;
-    if (out_buf && out_cap > 0)
-        memset(out_buf, 0, out_cap);
+    progress_meta_reset_outputs(out_buf, out_cap, out_len, out_found);
     if (!db || !key || !key[0]) return false;
 
     progress_store_tx_lock();
@@ -275,19 +311,7 @@ bool progress_meta_get_blob_exact(sqlite3 *db, const char *key,
     bool ok = true;
     if (rc == SQLITE_ROW) {
         if (out_found) *out_found = true;
-        if (sqlite3_column_type(stmt, 0) != SQLITE_BLOB) {
-            ok = false;
-        } else {
-            int n = sqlite3_column_bytes(stmt, 0);
-            const void *blob = sqlite3_column_blob(stmt, 0);
-            if (n < 0 || (n > 0 && !blob) ||
-                (out_buf && (size_t)n > out_cap)) {
-                ok = false;
-            } else if (out_buf && n > 0) {
-                memcpy(out_buf, blob, (size_t)n);
-            }
-            if (ok && out_len) *out_len = (size_t)n;
-        }
+        ok = progress_meta_row_read_exact(stmt, out_buf, out_cap, out_len);
     } else if (rc != SQLITE_DONE) {
         ok = false;
     }
