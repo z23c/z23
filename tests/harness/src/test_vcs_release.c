@@ -126,16 +126,45 @@ static size_t vr_znam_flag_offset(const struct vcs_package_release *r)
            32u;
 }
 
-/* ── 1/2/3: KAT, round-trip, signature acceptance ─────────────────── */
-static int t_release_kat_roundtrip_verify(void)
+/* Round-trip equality: every field of a release parsed off the wire
+ * against the release it was serialized from. Counted rather than
+ * short-circuited — the check passes only when nothing differs. */
+static bool vr_parsed_matches_release(const struct vcs_package_release *parsed,
+                                      const struct vcs_package_release *orig)
+{
+    int mismatches = 0;
+    mismatches += parsed->schema_version != orig->schema_version;
+    mismatches += strcmp(parsed->name, orig->name) != 0;
+    mismatches += strcmp(parsed->semver, orig->semver) != 0;
+    mismatches += memcmp(parsed->package_root, orig->package_root, 32) != 0;
+    mismatches += parsed->has_parent != orig->has_parent;
+    mismatches += memcmp(parsed->parent_root, orig->parent_root, 32) != 0;
+    mismatches += memcmp(parsed->publisher_pubkey, orig->publisher_pubkey,
+                         VCS_PACKAGE_RELEASE_PUBKEY_BYTES) != 0;
+    mismatches += parsed->publisher_sequence != orig->publisher_sequence;
+    mismatches += strcmp(parsed->reward_address, orig->reward_address) != 0;
+    mismatches += strcmp(parsed->license, orig->license) != 0;
+    mismatches += memcmp(parsed->recipe_root, orig->recipe_root, 32) != 0;
+    mismatches += parsed->has_znam != orig->has_znam;
+    mismatches += strcmp(parsed->znam, orig->znam) != 0;
+    mismatches += strcmp(parsed->chain_id, orig->chain_id) != 0;
+    mismatches += memcmp(parsed->signature, orig->signature,
+                         VCS_PACKAGE_RELEASE_SIGNATURE_BYTES) != 0;
+    return mismatches == 0;
+}
+
+/* KAT section: signed fixture, frozen release-id KAT, envelope verify and
+ * the canonical wire, which is handed back for the caller to free. */
+static int t_release_check_kat_and_serialize(struct vcs_package_release *r,
+                                             uint8_t **wire_out,
+                                             size_t *wire_len_out)
 {
     int failures = 0;
-    struct vcs_package_release r;
-    VR_CHECK("release: fixture builds + signs", vr_fixture(&r, 0x11));
+    VR_CHECK("release: fixture builds + signs", vr_fixture(r, 0x11));
 
     uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
     VR_CHECK("release: id computes",
-             vcs_package_release_id(&r, id) == VCS_PACKAGE_RELEASE_OK);
+             vcs_package_release_id(r, id) == VCS_PACKAGE_RELEASE_OK);
     char id_hex[65];
     vr_hex32(id, id_hex);
     printf("  vcs_release: KAT release id = %s\n", id_hex);
@@ -145,38 +174,34 @@ static int t_release_kat_roundtrip_verify(void)
     VR_CHECK("release: release id KAT", strcmp(id_hex, want_id_hex) == 0);
 
     VR_CHECK("release: valid envelope verifies",
-             vcs_package_release_verify(&r) == VCS_PACKAGE_RELEASE_OK);
+             vcs_package_release_verify(r) == VCS_PACKAGE_RELEASE_OK);
 
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     VR_CHECK("release: canonical serialize",
-             vcs_package_release_serialize(&r, &wire, &wire_len) ==
+             vcs_package_release_serialize(r, &wire, &wire_len) ==
                  VCS_PACKAGE_RELEASE_OK);
     VR_CHECK("release: bounded wire produced",
              wire && wire_len <= VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES);
+    *wire_out = wire;
+    *wire_len_out = wire_len;
+    return failures;
+}
 
+/* Round-trip section: parse the canonical wire, compare every field with
+ * the original, reserialize to a fixed point and re-verify; the second
+ * wire is handed back for the caller to free. */
+static int t_release_check_parse_roundtrip(struct vcs_package_release *r,
+                                           uint8_t *wire, size_t wire_len,
+                                           uint8_t **wire2_out)
+{
+    int failures = 0;
     struct vcs_package_release parsed;
     VR_CHECK("release: canonical parse",
              vcs_package_release_parse(wire, wire_len, &parsed) ==
                  VCS_PACKAGE_RELEASE_OK);
     VR_CHECK("release: parsed fields round-trip",
-             parsed.schema_version == r.schema_version &&
-             strcmp(parsed.name, r.name) == 0 &&
-             strcmp(parsed.semver, r.semver) == 0 &&
-             memcmp(parsed.package_root, r.package_root, 32) == 0 &&
-             parsed.has_parent == r.has_parent &&
-             memcmp(parsed.parent_root, r.parent_root, 32) == 0 &&
-             memcmp(parsed.publisher_pubkey, r.publisher_pubkey,
-                    VCS_PACKAGE_RELEASE_PUBKEY_BYTES) == 0 &&
-             parsed.publisher_sequence == r.publisher_sequence &&
-             strcmp(parsed.reward_address, r.reward_address) == 0 &&
-             strcmp(parsed.license, r.license) == 0 &&
-             memcmp(parsed.recipe_root, r.recipe_root, 32) == 0 &&
-             parsed.has_znam == r.has_znam &&
-             strcmp(parsed.znam, r.znam) == 0 &&
-             strcmp(parsed.chain_id, r.chain_id) == 0 &&
-             memcmp(parsed.signature, r.signature,
-                    VCS_PACKAGE_RELEASE_SIGNATURE_BYTES) == 0);
+             vr_parsed_matches_release(&parsed, r));
 
     uint8_t *wire2 = NULL;
     size_t wire2_len = 0;
@@ -193,10 +218,19 @@ static int t_release_kat_roundtrip_verify(void)
     /* The signature the fixture produced is itself low-S canonical (the
      * top bit of s is clear whenever s <= n/2 < 2^255). */
     VR_CHECK("release: fixture signature is low-S",
-             (r.signature[32] & 0x80u) == 0);
+             (r->signature[32] & 0x80u) == 0);
+    *wire2_out = wire2;
+    return failures;
+}
 
+/* Absence section: no parent, no znam — re-sign, re-verify and round-trip
+ * on a shorter wire; frees its own root wire. */
+static int t_release_check_absent_optionals(struct vcs_package_release *r,
+                                            size_t wire_len)
+{
+    int failures = 0;
     /* Optional absence encoding: no parent, no znam. */
-    struct vcs_package_release root_release = r;
+    struct vcs_package_release root_release = *r;
     root_release.has_parent = false;
     memset(root_release.parent_root, 0, 32);
     root_release.has_znam = false;
@@ -225,6 +259,22 @@ static int t_release_kat_roundtrip_verify(void)
              root_wire_len < wire_len);
 
     free(root_wire);
+    return failures;
+}
+
+/* ── 1/2/3: KAT, round-trip, signature acceptance ─────────────────── */
+static int t_release_kat_roundtrip_verify(void)
+{
+    int failures = 0;
+    struct vcs_package_release r;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t *wire2 = NULL;
+
+    failures += t_release_check_kat_and_serialize(&r, &wire, &wire_len);
+    failures += t_release_check_parse_roundtrip(&r, wire, wire_len, &wire2);
+    failures += t_release_check_absent_optionals(&r, wire_len);
+
     free(wire2);
     free(wire);
     return failures;
