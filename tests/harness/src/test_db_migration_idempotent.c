@@ -153,9 +153,10 @@ static int db_mig_snapshot_dir_meta(const char *dir,
 static bool db_mig_entry_in_family(const char *name, const char *base,
                                    size_t base_len)
 {
-    int prefix = strncmp(name, base, base_len);
+    if (strncmp(name, base, base_len) != 0)
+        return false;
     char next = name[base_len];
-    return prefix == 0 && (next == '\0' || next == '-' || next == '.');
+    return next == '\0' || next == '-' || next == '.';
 }
 
 /* Stat and hash dir/name into f; returns 0, or -1 when the joined path does
