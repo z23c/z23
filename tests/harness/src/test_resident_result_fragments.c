@@ -109,6 +109,36 @@ static ssize_t rlf_recv(int fd, void *data, size_t size, int flags)
 #undef resident_result_read
 #undef resident_launch_close
 
+/* Piece sizes the recv wrapper releases on later empty reads, so one frame
+ * arrives as several drip-fed fragments. */
+static void rlf_fragment_feed_sizes(bool split_header, size_t first)
+{
+    rlf_sizes[0] = split_header ? sizeof(struct resident_result_header) - first : 2;
+    rlf_sizes[1] = split_header ? 2 : 3;
+    rlf_sizes[2] = split_header ? 3 : 0;
+}
+
+/* An accepted result is exactly the five-byte READY payload. */
+static bool rlf_payload_is_ready(const struct resident_result_header *out, const char *payload)
+{
+    return out->payload_len == 5 && memcmp(payload, "READY", 5) == 0;
+}
+
+/* A green fragment run: the read was accepted, no drip-feed send failed and the
+ * expected number of empty reads was observed. */
+static bool rlf_fragment_passed(bool ok, unsigned expected,
+    const struct resident_result_header *out, const char *payload)
+{
+    return ok && !rlf_send_failed && rlf_eagain == expected &&
+        rlf_payload_is_ready(out, payload);
+}
+
+/* Zero only when the run passed and both channel fds closed cleanly. */
+static int rlf_exit_code(bool passed, bool closed_read, bool closed_write)
+{
+    return passed && closed_read && closed_write ? 0 : 1;
+}
+
 static int rlf_case(bool split_header)
 {
     int peer[2];
@@ -126,9 +156,7 @@ static int rlf_case(bool split_header)
     bool queued = send(peer[1], frame, first, MSG_NOSIGNAL) == (ssize_t)first;
     rlf_target = peer[0]; rlf_writer = peer[1]; rlf_wire = frame;
     rlf_offset = first; rlf_piece = 0; rlf_eagain = 0; rlf_send_failed = false;
-    rlf_sizes[0] = split_header ? sizeof(wire) - first : 2;
-    rlf_sizes[1] = split_header ? 2 : 3;
-    rlf_sizes[2] = split_header ? 3 : 0;
+    rlf_fragment_feed_sizes(split_header, first);
     struct resident_launch launch = {.ipc_native = (uintptr_t)peer[0]};
     memcpy(launch.nonce, wire.nonce, sizeof(launch.nonce));
     struct resident_result_header out = {0};
@@ -136,16 +164,14 @@ static int rlf_case(bool split_header)
     bool ok = queued && rlf_result_read(&launch, &out, payload, sizeof(payload), 1000,
                                        error, sizeof(error));
     unsigned expected = split_header ? 3 : 2;
-    bool passed = ok && !rlf_send_failed && rlf_eagain == expected &&
-        out.payload_len == 5 && memcmp(payload, "READY", 5) == 0;
+    bool passed = rlf_fragment_passed(ok, expected, &out, payload);
     printf("resident_fragment %s: %s actual_empty_reads=%u expected=%u error=%s\n",
         split_header ? "header_and_payload" : "payload_only", passed ? "GREEN" : "RED",
         rlf_eagain, expected, error);
     rlf_target = rlf_writer = -1; rlf_wire = NULL;
     bool closed_read = close(peer[0]) == 0;
     bool closed_write = close(peer[1]) == 0;
-    if (!closed_read || !closed_write) passed = false;
-    return passed ? 0 : 1;
+    return rlf_exit_code(passed, closed_read, closed_write);
 }
 
 struct rlf_boundary {
@@ -156,6 +182,19 @@ struct rlf_boundary {
     int error_number;
     const char *error_text;
 };
+
+/* Judge one boundary run against its expectation: acceptance and payload when a
+ * result was required, errno and error text when refusal was required. */
+static bool rlf_boundary_matches(const struct rlf_boundary *test, bool setup, bool accepted,
+    const struct resident_result_header *out, const char *payload, int observed_errno,
+    const char *error)
+{
+    bool passed = setup && accepted == test->accepted;
+    if (accepted) passed = passed && rlf_payload_is_ready(out, payload);
+    else passed = passed && observed_errno == test->error_number &&
+        strstr(error, test->error_text) != NULL;
+    return passed;
+}
 
 static int rlf_boundary_case(const struct rlf_boundary *test)
 {
@@ -181,14 +220,12 @@ static int rlf_boundary_case(const struct rlf_boundary *test)
     bool accepted = setup && rlf_result_read(&launch, &out, payload, sizeof(payload),
                                             test->timeout, error, sizeof(error));
     int observed_errno = errno;
-    bool passed = setup && accepted == test->accepted;
-    if (accepted) passed = passed && out.payload_len == 5 && memcmp(payload, "READY", 5) == 0;
-    else passed = passed && observed_errno == test->error_number && strstr(error, test->error_text) != NULL;
+    bool passed = rlf_boundary_matches(test, setup, accepted, &out, payload, observed_errno, error);
     printf("resident_fragment %s: %s errno=%d error=%s\n", test->name, passed ? "GREEN" : "RED",
            observed_errno, error);
     bool closed_read = close(peer[0]) == 0;
     bool closed_write = close(peer[1]) == 0;
-    return passed && closed_read && closed_write ? 0 : 1;
+    return rlf_exit_code(passed, closed_read, closed_write);
 }
 
 static int rlf_boundaries(void)

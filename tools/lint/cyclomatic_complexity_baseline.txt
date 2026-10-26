@@ -2112,8 +2112,6 @@ tests/harness/src/test_resident_launch_contract.c:rlc_publish:30
 tests/harness/src/test_resident_launch_contract.c:rlc_stage_f_trap:59
 tests/harness/src/test_resident_launch_contract.c:rlc_stage_run:26
 tests/harness/src/test_resident_launch_contract.c:test_resident_launch_contract:23
-tests/harness/src/test_resident_result_fragments.c:rlf_boundary_case:18
-tests/harness/src/test_resident_result_fragments.c:rlf_case:19
 tests/harness/src/test_retrieval.c:case_gold_metrics:39
 tests/harness/src/test_retrieval.c:case_tokenizer:17
 tests/harness/src/test_retrieval_comparison.c:case_incomplete_and_guards:26
