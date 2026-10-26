@@ -115,6 +115,57 @@ bool coin_backfill_refusal_marker_read(struct sqlite3 *db, int height,
                                        bool *out_legacy_spent,
                                        bool *out_legacy_txindex_miss);
 
+/* ceiling = the forward-apply frontier. coins_applied_height is the
+ * NEXT-height cursor (applied-through B means value B+1), so it equals the
+ * blocked height directly; raise by the active chain height so a hole
+ * recorded by script_validate slightly ahead of the coins cursor is still
+ * inside the window. Both are read-only forward frontiers. */
+static int32_t torn_import_apply_frontier_ceiling(int32_t applied,
+                                                  bool applied_found,
+                                                  int active_h)
+{
+    int32_t ceiling = applied_found ? applied : 0;
+    if (active_h > ceiling)
+        ceiling = active_h;
+    return ceiling;
+}
+
+/* (3) require coin_backfill's durable refusal of THIS hole, keyed by
+ * the hole's own (height, block_hash) in the repair_marker table — the
+ * exact row the producer writes. A hole the helper could not hash-bind
+ * (hole_hash_found false) cannot be matched to a refusal marker, so it
+ * never fires. */
+static bool torn_import_hole_refusal_read(
+    struct sqlite3 *progress_db, int hole_h, const struct uint256 *hole_hash,
+    bool hole_found, bool hole_hash_found, bool *out_legacy_refusal)
+{
+    *out_legacy_refusal = false;
+    bool refused = false;
+    if (hole_found && hole_hash_found) {
+        bool legacy_spent = false;
+        bool legacy_txindex_miss = false;
+        (void)coin_backfill_refusal_marker_read(
+            progress_db, hole_h, hole_hash, &refused, &legacy_spent,
+            &legacy_txindex_miss);
+        *out_legacy_refusal = legacy_spent || legacy_txindex_miss;
+    }
+    return refused;
+}
+
+/* (2) status filter: ONLY a durable prevout_unresolved tear fires.
+ * 'internal_error' (transient) and 'block_decode_failed' (a FUTURE class
+ * coin_backfill never refuses — see the rationale comment) are excluded. */
+static bool torn_import_verdict_fires(bool hole_found,
+                                      const char hole_status[32],
+                                      bool backfill_refused, int hole_h,
+                                      int32_t checkpoint, int32_t ceiling)
+{
+    bool hole_is_tear =
+        hole_found && strcmp(hole_status, "prevout_unresolved") == 0;
+    return hole_is_tear && backfill_refused &&
+           hole_h > checkpoint && hole_h <= (int)ceiling;
+}
+
 /* PURE detect predicate: runs the EXACT three-condition durability
  * guard of the verdict below but with NO event/blocker side-effects, so the
  * boot from-anchor auto-arm can consult the SAME tear decision without paging
@@ -148,14 +199,8 @@ bool block_index_loader_torn_import_detect(struct main_state *ms,
         LOG_WARN("torn_gate", "coins_applied_height read failed — torn-import "
                  "ceiling falls back to active_h=%d (read error, not "
                  "absent-key)", active_h);
-    /* ceiling = the forward-apply frontier. coins_applied_height is the
-     * NEXT-height cursor (applied-through B means value B+1), so it equals the
-     * blocked height directly; raise by the active chain height so a hole
-     * recorded by script_validate slightly ahead of the coins cursor is still
-     * inside the window. Both are read-only forward frontiers. */
-    int32_t ceiling = applied_found ? applied : 0;
-    if (active_h > ceiling)
-        ceiling = active_h;
+    int32_t ceiling =
+        torn_import_apply_frontier_ceiling(applied, applied_found, active_h);
     if (ceiling > checkpoint) {
         /* find_lowest_..._unlocked selects ok=0 rows with height < cursor;
          * cursor = ceiling+1 admits a hole AT the ceiling (the live spending
@@ -168,35 +213,22 @@ bool block_index_loader_torn_import_detect(struct main_state *ms,
             progress_db, (int)ceiling + 1, "prevout_unresolved", &hole_h,
             hole_status, &hole_hash, &hole_hash_found);
         hole_found = (hole_h > 0);
-        /* (3) require coin_backfill's durable refusal of THIS hole, keyed by
-         * the hole's own (height, block_hash) in the repair_marker table — the
-         * exact row the producer writes. A hole the helper could not hash-bind
-         * (hole_hash_found false) cannot be matched to a refusal marker, so it
-         * never fires. */
-        if (hole_found && hole_hash_found) {
-            bool legacy_spent = false;
-            bool legacy_txindex_miss = false;
-            (void)coin_backfill_refusal_marker_read(
-                progress_db, hole_h, &hole_hash, &backfill_refused,
-                &legacy_spent, &legacy_txindex_miss);
-            if (legacy_spent || legacy_txindex_miss) {
-                LOG_WARN("torn_gate",
-                         "ignoring legacy coin_backfill refusal marker h=%d; "
-                         "runtime repair must re-prove it", hole_h);
-                backfill_refused = false;
-            }
+        bool legacy_refusal = false;
+        backfill_refused = torn_import_hole_refusal_read(
+            progress_db, hole_h, &hole_hash, hole_found, hole_hash_found,
+            &legacy_refusal);
+        if (legacy_refusal) {
+            LOG_WARN("torn_gate",
+                     "ignoring legacy coin_backfill refusal marker h=%d; "
+                     "runtime repair must re-prove it", hole_h);
+            backfill_refused = false;
         }
     }
     progress_store_tx_unlock();
 
-    /* (2) status filter: ONLY a durable prevout_unresolved tear fires.
-     * 'internal_error' (transient) and 'block_decode_failed' (a FUTURE class
-     * coin_backfill never refuses — see the rationale comment) are excluded. */
-    bool hole_is_tear =
-        hole_found && strcmp(hole_status, "prevout_unresolved") == 0;
-
-    bool fires = hole_is_tear && backfill_refused &&
-                 hole_h > checkpoint && hole_h <= (int)ceiling;
+    bool fires = torn_import_verdict_fires(hole_found, hole_status,
+                                           backfill_refused, hole_h,
+                                           checkpoint, ceiling);
     if (out_hole_h)  *out_hole_h  = fires ? hole_h : -1;
     if (out_ceiling) *out_ceiling = ceiling;
     return fires;
