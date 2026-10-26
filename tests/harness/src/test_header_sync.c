@@ -22,45 +22,9 @@ static struct p2p_node make_test_node(int starting_height, int64_t last_gh_time)
     return n;
 }
 
-/* Replayed full batches suppress the periodic re-kick: a loopback peer
- * answering every getheaders with known headers must not also be re-kicked
- * every 5 s, which would start a new request chain per interval. */
-static int header_sync_replay_suppresses_rekick(void)
-{
-    int failures = 0;
-    printf("header_sync: replayed batches suppress periodic re-kick... ");
-    {
-        int64_t W = (int64_t)platform_time_wall_time_t();
-        struct p2p_node n = make_test_node(10000, W - 100);
-        net_addr_set_ipv4(&n.addr.svc.addr,
-                          (const unsigned char[4]){127, 0, 0, 1});
-        int rekicks = 0;
-        for (int round = 0; round < 40; round++)
-            syncsvc_note_headers_received(&n, 0); /* known-header replay */
-        for (int64_t t = W; t <= W + 4; t++) {
-            if (syncsvc_should_request_headers(&n, 100, t)) {
-                rekicks++;
-                syncsvc_note_headers_requested(&n, t);
-            }
-        }
-        bool busy_bounded = (rekicks == 0);
-        /* Quiet peer: re-kicked once after the 5 s loopback interval. */
-        bool quiet_kick = syncsvc_should_request_headers(&n, 100, W + 6);
-        syncsvc_note_headers_requested(&n, W + 6);
-        bool no_double = !syncsvc_should_request_headers(&n, 100, W + 8);
-        /* Forcing via last_getheaders_time = 0 still re-kicks. */
-        atomic_store(&n.last_getheaders_time, 0);
-        bool forced = syncsvc_should_request_headers(&n, 100, W + 8);
-        /* Usefulness clock is untouched by replays. */
-        bool useful_untouched = (n.last_useful_headers_time == 0);
-        bool ok = busy_bounded && quiet_kick && no_double && forced &&
-                  useful_untouched;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-    return failures;
-}
-
-int test_header_sync(void)
+/* Checks 1-4: request interval per sync mode (IBD, catching up, at tip)
+ * and stale-count backoff growth. */
+static int header_sync_check_request_intervals(void)
 {
     int failures = 0;
 
@@ -104,6 +68,15 @@ int test_header_sync(void)
         bool ok = !at_400 && at_500;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Checks 5-9: backoff cap, stale-count bookkeeping on received
+ * batches, and peer eligibility for header requests. */
+static int header_sync_check_backoff_and_peer_gating(void)
+{
+    int failures = 0;
 
     /* ── 5. Backoff caps at 600s ──────────────────────────── */
     printf("header_sync: backoff caps at 600s... ");
@@ -154,6 +127,15 @@ int test_header_sync(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* Checks 10-13: periodic getheaders planning, header batch
+ * evaluation, and the IBD detection threshold. */
+static int header_sync_check_planning_and_batch_evaluation(void)
+{
+    int failures = 0;
+
     /* ── 10. plan_periodic_getheaders sets should_send ────── */
     printf("header_sync: plan periodic getheaders... ");
     {
@@ -201,6 +183,15 @@ int test_header_sync(void)
         bool ok = in_ibd && !not_ibd;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Checks 14-17: locator construction, request timestamping, the
+ * first IBD backoff step, and snapshot-anchor release. */
+static int header_sync_check_locator_timing_and_anchor_release(void)
+{
+    int failures = 0;
 
     /* ── 14. Locator builds from chain with dense tip ─────── */
     printf("header_sync: locator includes genesis hash... ");
@@ -257,6 +248,56 @@ int test_header_sync(void)
         bool ok = !too_early && at_finality;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Replayed full batches suppress the periodic re-kick: a loopback peer
+ * answering every getheaders with known headers must not also be re-kicked
+ * every 5 s, which would start a new request chain per interval. */
+static int header_sync_replay_suppresses_rekick(void)
+{
+    int failures = 0;
+    printf("header_sync: replayed batches suppress periodic re-kick... ");
+    {
+        int64_t W = (int64_t)platform_time_wall_time_t();
+        struct p2p_node n = make_test_node(10000, W - 100);
+        net_addr_set_ipv4(&n.addr.svc.addr,
+                          (const unsigned char[4]){127, 0, 0, 1});
+        int rekicks = 0;
+        for (int round = 0; round < 40; round++)
+            syncsvc_note_headers_received(&n, 0); /* known-header replay */
+        for (int64_t t = W; t <= W + 4; t++) {
+            if (syncsvc_should_request_headers(&n, 100, t)) {
+                rekicks++;
+                syncsvc_note_headers_requested(&n, t);
+            }
+        }
+        bool busy_bounded = (rekicks == 0);
+        /* Quiet peer: re-kicked once after the 5 s loopback interval. */
+        bool quiet_kick = syncsvc_should_request_headers(&n, 100, W + 6);
+        syncsvc_note_headers_requested(&n, W + 6);
+        bool no_double = !syncsvc_should_request_headers(&n, 100, W + 8);
+        /* Forcing via last_getheaders_time = 0 still re-kicks. */
+        atomic_store(&n.last_getheaders_time, 0);
+        bool forced = syncsvc_should_request_headers(&n, 100, W + 8);
+        /* Usefulness clock is untouched by replays. */
+        bool useful_untouched = (n.last_useful_headers_time == 0);
+        bool ok = busy_bounded && quiet_kick && no_double && forced &&
+                  useful_untouched;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+int test_header_sync(void)
+{
+    int failures = 0;
+
+    failures += header_sync_check_request_intervals();
+    failures += header_sync_check_backoff_and_peer_gating();
+    failures += header_sync_check_planning_and_batch_evaluation();
+    failures += header_sync_check_locator_timing_and_anchor_release();
 
     failures += header_sync_replay_suppresses_rekick();
 
