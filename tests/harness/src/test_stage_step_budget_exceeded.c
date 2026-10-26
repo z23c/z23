@@ -91,6 +91,124 @@ static void ssbe_cleanup(void)
     clock_reset_default();
 }
 
+/* State after condition_engine_tick() saw an injected breach: the condition
+ * is active, its blocker is raised, and the remedy fired exactly once. */
+static bool ssbe_breach_fires_remedy_once(void)
+{
+    bool ok = true;
+    ok = ok && stage_step_budget_exceeded_test_remedy_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && blocker_exists("stage_step_budget_exceeded");
+    return ok;
+}
+
+/* True when this condition's blocker snapshot reason names the given
+ * pipeline stage. */
+static bool ssbe_blocker_reason_names_stage(const char *stage_name)
+{
+    struct blocker_snapshot snaps[BLOCKER_CAP];
+    int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
+    bool found_reason = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].id, "stage_step_budget_exceeded") == 0 &&
+            strstr(snaps[i].reason, stage_name) != NULL) {
+            found_reason = true;
+            break;
+        }
+    }
+    return found_reason;
+}
+
+/* Finds this condition's object inside a dumped "conditions" array. */
+static const struct json_value *ssbe_find_condition_in_dump(
+    const struct json_value *conditions)
+{
+    const struct json_value *found = NULL;
+    for (size_t i = 0; conditions && i < json_size(conditions); i++) {
+        const struct json_value *c = json_at(conditions, i);
+        const struct json_value *nm = c ? json_get(c, "name") : NULL;
+        if (nm && strcmp(json_get_str(nm), "stage_step_budget_exceeded") == 0) {
+            found = c;
+            break;
+        }
+    }
+    return found;
+}
+
+/* Dumps engine state as JSON and checks the condition's detail names the
+ * stage, the observed EWMA and the forced budget. */
+static bool ssbe_dump_detail_matches_breach(void)
+{
+    struct json_value dump;
+    json_init(&dump);
+    json_set_object(&dump);
+    bool dumped = condition_engine_dump_state_json(&dump, NULL);
+    bool okd = dumped;
+    const struct json_value *conditions = json_get(&dump, "conditions");
+    okd = okd && conditions != NULL;
+    const struct json_value *found = ssbe_find_condition_in_dump(conditions);
+    okd = okd && found != NULL;
+    const struct json_value *detail = found ? json_get(found, "detail") : NULL;
+    okd = okd && detail != NULL;
+    okd = okd && json_get(detail, "stage") != NULL;
+    okd = okd &&
+          strcmp(json_get_str(json_get(detail, "stage")), "utxo_apply") == 0;
+    okd = okd && json_get_int(json_get(detail, "observed_ewma_us")) == 100000;
+    okd = okd && json_get_int(json_get(detail, "budget_us")) == 1000;
+    json_free(&dump);
+    return okd;
+}
+
+/* State after the offending stage's EWMA falls back under budget: the
+ * blocker is gone and the engine is idle. */
+static bool ssbe_recovery_cleared_blocker(void)
+{
+    bool ok = true;
+    ok = ok && !blocker_exists("stage_step_budget_exceeded");
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok;
+}
+
+/* Runs `ticks` engine ticks, each advancing the fake wall clock 20s past
+ * the previous one; the engine must stay idle after every tick. */
+static bool ssbe_poll_ticks_stay_idle(struct ssbe_fake_clock *fc, int64_t t0,
+                                      int ticks)
+{
+    bool ok = true;
+    for (int i = 0; i < ticks; i++) {
+        ssbe_fake_clock_set(fc, t0 + 20 * (i + 1));
+        condition_engine_tick();
+        ok = ok && condition_engine_get_active_count() == 0;
+    }
+    return ok;
+}
+
+/* Forces every stage's EWMA comfortably inside a forced budget, then ticks
+ * on from t0 + 200: nothing may trip and the remedy must never fire. */
+static bool ssbe_ewma_inside_budget_never_trips(struct ssbe_fake_clock *fc,
+                                                int64_t t0)
+{
+    for (int i = 0; i < 8; i++) {
+        stage_step_budget_exceeded_test_set_ewma_us(i, 1000);
+        stage_step_budget_exceeded_test_set_budget_us(i, 50000);
+    }
+    bool ok = ssbe_poll_ticks_stay_idle(fc, t0 + 200, 6);
+    ok = ok && stage_step_budget_exceeded_test_remedy_calls() == 0;
+    return ok;
+}
+
+/* State after a genuine multi-x regression on the locked baseline: the
+ * condition is active and its blocker reason names the regressed stage. */
+static bool ssbe_regression_on_locked_baseline_trips(void)
+{
+    bool ok = true;
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && blocker_exists("stage_step_budget_exceeded");
+    bool found_reason = ssbe_blocker_reason_names_stage("proof_validate");
+    ok = ok && found_reason;
+    return ok;
+}
+
 /* An overflowing operator override must be rejected rather than becoming an
  * effectively unreachable budget. The test deliberately uses the real
  * env-or-baseline path: a steady EWMA locks the baseline, then a genuine
@@ -145,49 +263,13 @@ int test_stage_step_budget_exceeded(void)
         stage_step_budget_exceeded_test_set_budget_us(IDX_UTXO_APPLY, 1000);
 
         condition_engine_tick();
-        bool ok = true;
-        ok = ok && stage_step_budget_exceeded_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && blocker_exists("stage_step_budget_exceeded");
+        bool ok = ssbe_breach_fires_remedy_once();
         SSBE_CHECK("EWMA over forced budget trips + fires remedy once", ok);
 
-        struct blocker_snapshot snaps[BLOCKER_CAP];
-        int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
-        bool found_reason = false;
-        for (int i = 0; i < n; i++) {
-            if (strcmp(snaps[i].id, "stage_step_budget_exceeded") == 0 &&
-                strstr(snaps[i].reason, "utxo_apply") != NULL) {
-                found_reason = true;
-                break;
-            }
-        }
+        bool found_reason = ssbe_blocker_reason_names_stage("utxo_apply");
         SSBE_CHECK("blocker reason names the offending stage", found_reason);
 
-        struct json_value dump;
-        json_init(&dump);
-        json_set_object(&dump);
-        bool dumped = condition_engine_dump_state_json(&dump, NULL);
-        bool okd = dumped;
-        const struct json_value *conditions = json_get(&dump, "conditions");
-        okd = okd && conditions != NULL;
-        const struct json_value *found = NULL;
-        for (size_t i = 0; conditions && i < json_size(conditions); i++) {
-            const struct json_value *c = json_at(conditions, i);
-            const struct json_value *nm = c ? json_get(c, "name") : NULL;
-            if (nm && strcmp(json_get_str(nm), "stage_step_budget_exceeded") == 0) {
-                found = c;
-                break;
-            }
-        }
-        okd = okd && found != NULL;
-        const struct json_value *detail = found ? json_get(found, "detail") : NULL;
-        okd = okd && detail != NULL;
-        okd = okd && json_get(detail, "stage") != NULL;
-        okd = okd &&
-              strcmp(json_get_str(json_get(detail, "stage")), "utxo_apply") == 0;
-        okd = okd && json_get_int(json_get(detail, "observed_ewma_us")) == 100000;
-        okd = okd && json_get_int(json_get(detail, "budget_us")) == 1000;
-        json_free(&dump);
+        bool okd = ssbe_dump_detail_matches_breach();
         SSBE_CHECK("detail names stage + observed_ewma_us + budget_us", okd);
 
         /* ---- (b) recovery clears the blocker ---- */
@@ -195,9 +277,7 @@ int test_stage_step_budget_exceeded(void)
         ssbe_fake_clock_set(&fc, t0 + 20);
         condition_engine_tick();
 
-        bool ok2 = true;
-        ok2 = ok2 && !blocker_exists("stage_step_budget_exceeded");
-        ok2 = ok2 && condition_engine_get_active_count() == 0;
+        bool ok2 = ssbe_recovery_cleared_blocker();
         SSBE_CHECK("EWMA falling back under budget clears the blocker", ok2);
     }
 
@@ -209,27 +289,12 @@ int test_stage_step_budget_exceeded(void)
         /* (c1) no forced ewma at all -- every real *_stage_step_us_ewma()
          * accessor reads 0 (no stage has run in this test process), so the
          * "never stepped" skip must hold for every one of the 8 stages. */
-        bool ok = true;
-        for (int i = 0; i < 8; i++) {
-            ssbe_fake_clock_set(&fc, t0 + 20 * (i + 1));
-            condition_engine_tick();
-            ok = ok && condition_engine_get_active_count() == 0;
-        }
+        bool ok = ssbe_poll_ticks_stay_idle(&fc, t0, 8);
         SSBE_CHECK("no forced EWMA anywhere never trips", ok);
 
         /* (c2) forced ewma comfortably inside a forced budget on every
          * stage -- must never trip regardless of how many ticks run. */
-        for (int i = 0; i < 8; i++) {
-            stage_step_budget_exceeded_test_set_ewma_us(i, 1000);
-            stage_step_budget_exceeded_test_set_budget_us(i, 50000);
-        }
-        bool ok2 = true;
-        for (int i = 0; i < 6; i++) {
-            ssbe_fake_clock_set(&fc, t0 + 200 + 20 * (i + 1));
-            condition_engine_tick();
-            ok2 = ok2 && condition_engine_get_active_count() == 0;
-        }
-        ok2 = ok2 && stage_step_budget_exceeded_test_remedy_calls() == 0;
+        bool ok2 = ssbe_ewma_inside_budget_never_trips(&fc, t0);
         SSBE_CHECK("EWMA well inside budget on every stage never trips", ok2);
     }
 
@@ -245,12 +310,7 @@ int test_stage_step_budget_exceeded(void)
          * depend on that exact constant. */
         const int64_t steady_us = 20000;
         stage_step_budget_exceeded_test_set_ewma_us(IDX_PROOF_VALIDATE, steady_us);
-        bool ok = true;
-        for (int i = 0; i < 10; i++) {
-            ssbe_fake_clock_set(&fc, t0 + 20 * (i + 1));
-            condition_engine_tick();
-            ok = ok && condition_engine_get_active_count() == 0;
-        }
+        bool ok = ssbe_poll_ticks_stay_idle(&fc, t0, 10);
         SSBE_CHECK("steady-state EWMA through warm-up never trips "
                   "(baseline == the value itself, not over budget)", ok);
 
@@ -261,20 +321,7 @@ int test_stage_step_budget_exceeded(void)
         ssbe_fake_clock_set(&fc, t0 + 20 * 12);
         condition_engine_tick();
 
-        bool ok2 = true;
-        ok2 = ok2 && condition_engine_get_active_count() == 1;
-        ok2 = ok2 && blocker_exists("stage_step_budget_exceeded");
-        struct blocker_snapshot snaps[BLOCKER_CAP];
-        int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
-        bool found_reason = false;
-        for (int i = 0; i < n; i++) {
-            if (strcmp(snaps[i].id, "stage_step_budget_exceeded") == 0 &&
-                strstr(snaps[i].reason, "proof_validate") != NULL) {
-                found_reason = true;
-                break;
-            }
-        }
-        ok2 = ok2 && found_reason;
+        bool ok2 = ssbe_regression_on_locked_baseline_trips();
         SSBE_CHECK("a real multi-x regression on the learned baseline trips it",
                   ok2);
     }
