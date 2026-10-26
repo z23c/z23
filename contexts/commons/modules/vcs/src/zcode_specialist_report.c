@@ -50,6 +50,40 @@ enum vcs_zcode_focus_error vcs_zcode_specialist_report_validate(
     return VCS_ZCODE_FOCUS_OK;
 }
 
+static bool report_write_header(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_specialist_report_v1 *report)
+{
+    return zcl_codec_write_bytes(writer, report_magic, 8) &&
+        zcl_codec_write_u16le(writer, report->schema_version) &&
+        zcl_codec_write_u8(writer, report->role) &&
+        zcl_codec_write_u8(writer, report->status) &&
+        zcl_codec_write_u16le(writer, report->flags) &&
+        zcl_codec_write_u16le(writer, report->reserved) &&
+        zcl_codec_write_u64le(writer, report->context_bytes) &&
+        zcl_codec_write_u64le(writer, report->latency_us);
+}
+
+static bool report_write_counters(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_specialist_report_v1 *report)
+{
+    return zcl_codec_write_u32le(writer, report->files_opened) &&
+        zcl_codec_write_u32le(writer, report->tool_calls) &&
+        zcl_codec_write_u32le(writer, report->duplicate_actions) &&
+        zcl_codec_write_u32le(writer, report->proof_reuse_count);
+}
+
+static bool report_write_roots(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_specialist_report_v1 *report)
+{
+    return zcl_codec_write_bytes(writer, report->focus_root, 32) &&
+        zcl_codec_write_bytes(writer, report->claim_root, 32) &&
+        zcl_codec_write_bytes(writer, report->specialist_root, 32) &&
+        zcl_codec_write_bytes(writer, report->evidence_root, 32) &&
+        zcl_codec_write_bytes(writer, report->result_root, 32) &&
+        zcl_codec_write_bytes(writer, report->next_experiment_root, 32) &&
+        zcl_codec_write_bytes(writer, report->evaluator_root, 32);
+}
+
 enum vcs_zcode_focus_error vcs_zcode_specialist_report_serialize(
     const struct vcs_zcode_specialist_report_v1 *report,
     uint8_t out[VCS_ZCODE_SPECIALIST_REPORT_WIRE_BYTES])
@@ -60,29 +94,47 @@ enum vcs_zcode_focus_error vcs_zcode_specialist_report_serialize(
     if (error != VCS_ZCODE_FOCUS_OK) return error;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_SPECIALIST_REPORT_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, report_magic, 8) &&
-        zcl_codec_write_u16le(&writer, report->schema_version) &&
-        zcl_codec_write_u8(&writer, report->role) &&
-        zcl_codec_write_u8(&writer, report->status) &&
-        zcl_codec_write_u16le(&writer, report->flags) &&
-        zcl_codec_write_u16le(&writer, report->reserved) &&
-        zcl_codec_write_u64le(&writer, report->context_bytes) &&
-        zcl_codec_write_u64le(&writer, report->latency_us) &&
-        zcl_codec_write_u32le(&writer, report->files_opened) &&
-        zcl_codec_write_u32le(&writer, report->tool_calls) &&
-        zcl_codec_write_u32le(&writer, report->duplicate_actions) &&
-        zcl_codec_write_u32le(&writer, report->proof_reuse_count) &&
-        zcl_codec_write_bytes(&writer, report->focus_root, 32) &&
-        zcl_codec_write_bytes(&writer, report->claim_root, 32) &&
-        zcl_codec_write_bytes(&writer, report->specialist_root, 32) &&
-        zcl_codec_write_bytes(&writer, report->evidence_root, 32) &&
-        zcl_codec_write_bytes(&writer, report->result_root, 32) &&
-        zcl_codec_write_bytes(&writer, report->next_experiment_root, 32) &&
-        zcl_codec_write_bytes(&writer, report->evaluator_root, 32);
+    bool ok = report_write_header(&writer, report) &&
+        report_write_counters(&writer, report) &&
+        report_write_roots(&writer, report);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == VCS_ZCODE_SPECIALIST_REPORT_WIRE_BYTES
         ? VCS_ZCODE_FOCUS_OK : VCS_ZCODE_FOCUS_SHAPE;
+}
+
+static bool report_read_header(struct zcl_codec_reader *reader,
+    uint8_t magic[8], struct vcs_zcode_specialist_report_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u8(reader, &out->role) &&
+        zcl_codec_read_u8(reader, &out->status) &&
+        zcl_codec_read_u16le(reader, &out->flags) &&
+        zcl_codec_read_u16le(reader, &out->reserved) &&
+        zcl_codec_read_u64le(reader, &out->context_bytes) &&
+        zcl_codec_read_u64le(reader, &out->latency_us);
+}
+
+static bool report_read_counters(struct zcl_codec_reader *reader,
+    struct vcs_zcode_specialist_report_v1 *out)
+{
+    return zcl_codec_read_u32le(reader, &out->files_opened) &&
+        zcl_codec_read_u32le(reader, &out->tool_calls) &&
+        zcl_codec_read_u32le(reader, &out->duplicate_actions) &&
+        zcl_codec_read_u32le(reader, &out->proof_reuse_count);
+}
+
+static bool report_read_roots(struct zcl_codec_reader *reader,
+    struct vcs_zcode_specialist_report_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->focus_root, 32) &&
+        zcl_codec_read_bytes(reader, out->claim_root, 32) &&
+        zcl_codec_read_bytes(reader, out->specialist_root, 32) &&
+        zcl_codec_read_bytes(reader, out->evidence_root, 32) &&
+        zcl_codec_read_bytes(reader, out->result_root, 32) &&
+        zcl_codec_read_bytes(reader, out->next_experiment_root, 32) &&
+        zcl_codec_read_bytes(reader, out->evaluator_root, 32);
 }
 
 enum vcs_zcode_focus_error vcs_zcode_specialist_report_parse(
@@ -96,25 +148,9 @@ enum vcs_zcode_focus_error vcs_zcode_specialist_report_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8];
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u8(&reader, &out->role) &&
-        zcl_codec_read_u8(&reader, &out->status) &&
-        zcl_codec_read_u16le(&reader, &out->flags) &&
-        zcl_codec_read_u16le(&reader, &out->reserved) &&
-        zcl_codec_read_u64le(&reader, &out->context_bytes) &&
-        zcl_codec_read_u64le(&reader, &out->latency_us) &&
-        zcl_codec_read_u32le(&reader, &out->files_opened) &&
-        zcl_codec_read_u32le(&reader, &out->tool_calls) &&
-        zcl_codec_read_u32le(&reader, &out->duplicate_actions) &&
-        zcl_codec_read_u32le(&reader, &out->proof_reuse_count) &&
-        zcl_codec_read_bytes(&reader, out->focus_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->claim_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->specialist_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->evidence_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->result_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->next_experiment_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->evaluator_root, 32) &&
+    bool ok = report_read_header(&reader, magic, out) &&
+        report_read_counters(&reader, out) &&
+        report_read_roots(&reader, out) &&
         zcl_codec_reader_finish(&reader) &&
         memcmp(magic, report_magic, 8) == 0;
     if (!ok) {
@@ -141,6 +177,107 @@ enum vcs_zcode_focus_error vcs_zcode_specialist_report_root(
     return VCS_ZCODE_FOCUS_OK;
 }
 
+static enum vcs_zcode_focus_error report_check_work_inputs(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct vcs_zcode_specialist_report_v1 *report)
+{
+    if (vcs_zcode_focus_validate(focus) != VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_specialist_report_validate(report) != VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_task_validate(task) != VCS_ZCODE_DEV_OK ||
+        !vcs_zcode_work_request_verify(request) ||
+        vcs_zcode_work_receipt_verify(
+            receipt, receipt->signer_pubkey) != VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_FOCUS_SHAPE;
+    return VCS_ZCODE_FOCUS_OK;
+}
+
+struct report_work_roots {
+    uint8_t focus_root[32];
+    uint8_t situation_root[32];
+    uint8_t claim_root[32];
+    uint8_t task_root[32];
+    uint8_t request_root[32];
+    uint8_t receipt_root[32];
+};
+
+static enum vcs_zcode_focus_error report_compute_work_roots(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    struct report_work_roots *roots)
+{
+    if (vcs_zcode_focus_root(focus, roots->focus_root) != VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_situation_root(focus, roots->situation_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_claim_root(claim, roots->claim_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_task_root(task, roots->task_root) != VCS_ZCODE_DEV_OK ||
+        !vcs_zcode_work_request_id(request, roots->request_root) ||
+        vcs_zcode_work_receipt_id(receipt, roots->receipt_root) !=
+            VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_FOCUS_SHAPE;
+    return VCS_ZCODE_FOCUS_OK;
+}
+
+static bool report_bound_claim(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct vcs_zcode_specialist_report_v1 *report,
+    const struct report_work_roots *roots)
+{
+    uint8_t expected_status = receipt->status == VCS_ZCODE_WORK_PASS
+        ? ZCL_ONTOLOGY_PROVED
+        : receipt->status == VCS_ZCODE_WORK_FAIL
+        ? ZCL_ONTOLOGY_DISPROVED : ZCL_ONTOLOGY_INCOMPLETE;
+    return report->status == expected_status &&
+        memcmp(focus->task_root, roots->task_root, 32) == 0 &&
+        memcmp(claim->situation_root, roots->situation_root, 32) == 0 &&
+        memcmp(claim->intent_root, roots->request_root, 32) == 0 &&
+        memcmp(claim->evidence_plan_root,
+               request->proof_policy_root, 32) == 0 &&
+        memcmp(request->task_root, roots->task_root, 32) == 0 &&
+        memcmp(request->proof_policy_root, task->proof_policy_root, 32) == 0 &&
+        memcmp(request->toolchain_capsule_root,
+               task->toolchain_capsule_root, 32) == 0;
+}
+
+static bool report_bound_receipt(
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_receipt_v1 *receipt)
+{
+    return memcmp(receipt->task_root, request->task_root, 32) == 0 &&
+        memcmp(receipt->candidate_root, request->candidate_root, 32) == 0 &&
+        memcmp(receipt->action_root, request->action_root, 32) == 0 &&
+        memcmp(receipt->input_root, request->input_root, 32) == 0 &&
+        receipt->work_kind == request->work_kind &&
+        memcmp(receipt->proof_policy_root,
+               request->proof_policy_root, 32) == 0 &&
+        memcmp(receipt->toolchain_capsule_root,
+               request->toolchain_capsule_root, 32) == 0 &&
+        memcmp(receipt->signer_pubkey, claim->claimant_root, 32) == 0;
+}
+
+static bool report_bound_result(
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct vcs_zcode_specialist_report_v1 *report,
+    const struct report_work_roots *roots)
+{
+    return memcmp(report->focus_root, roots->focus_root, 32) == 0 &&
+        memcmp(report->claim_root, roots->claim_root, 32) == 0 &&
+        memcmp(report->specialist_root, receipt->signer_pubkey, 32) == 0 &&
+        memcmp(report->evidence_root, roots->receipt_root, 32) == 0 &&
+        memcmp(report->result_root, receipt->output_root, 32) == 0;
+}
+
 enum vcs_zcode_focus_error vcs_zcode_specialist_report_validate_for_work(
     const struct vcs_zcode_focus_v1 *focus,
     const struct vcs_zcode_focus_claim_v1 *claim,
@@ -152,57 +289,20 @@ enum vcs_zcode_focus_error vcs_zcode_specialist_report_validate_for_work(
 {
     if (!focus || !claim || !task || !request || !receipt || !report)
         return VCS_ZCODE_FOCUS_NULL;
-    if (vcs_zcode_focus_validate(focus) != VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_specialist_report_validate(report) != VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_task_validate(task) != VCS_ZCODE_DEV_OK ||
-        !vcs_zcode_work_request_verify(request) ||
-        vcs_zcode_work_receipt_verify(
-            receipt, receipt->signer_pubkey) != VCS_ZCODE_DEV_OK)
-        return VCS_ZCODE_FOCUS_SHAPE;
+    enum vcs_zcode_focus_error error = report_check_work_inputs(
+        focus, task, request, receipt, report);
+    if (error != VCS_ZCODE_FOCUS_OK) return error;
     if (vcs_zcode_focus_claim_membership_status(
             focus, claim, claim_roots, claim_count) !=
             ZCL_ONTOLOGY_PROVED)
         return VCS_ZCODE_FOCUS_BINDING;
-    uint8_t focus_root[32], situation_root[32], claim_root[32];
-    uint8_t task_root[32], request_root[32], receipt_root[32];
-    if (vcs_zcode_focus_root(focus, focus_root) != VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_focus_situation_root(focus, situation_root) !=
-            VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_focus_claim_root(claim, claim_root) !=
-            VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
-        !vcs_zcode_work_request_id(request, request_root) ||
-        vcs_zcode_work_receipt_id(receipt, receipt_root) !=
-            VCS_ZCODE_DEV_OK)
-        return VCS_ZCODE_FOCUS_SHAPE;
-    uint8_t expected_status = receipt->status == VCS_ZCODE_WORK_PASS
-        ? ZCL_ONTOLOGY_PROVED
-        : receipt->status == VCS_ZCODE_WORK_FAIL
-        ? ZCL_ONTOLOGY_DISPROVED : ZCL_ONTOLOGY_INCOMPLETE;
-    bool bound = report->status == expected_status &&
-        memcmp(focus->task_root, task_root, 32) == 0 &&
-        memcmp(claim->situation_root, situation_root, 32) == 0 &&
-        memcmp(claim->intent_root, request_root, 32) == 0 &&
-        memcmp(claim->evidence_plan_root,
-               request->proof_policy_root, 32) == 0 &&
-        memcmp(request->task_root, task_root, 32) == 0 &&
-        memcmp(request->proof_policy_root, task->proof_policy_root, 32) == 0 &&
-        memcmp(request->toolchain_capsule_root,
-               task->toolchain_capsule_root, 32) == 0 &&
-        memcmp(receipt->task_root, request->task_root, 32) == 0 &&
-        memcmp(receipt->candidate_root, request->candidate_root, 32) == 0 &&
-        memcmp(receipt->action_root, request->action_root, 32) == 0 &&
-        memcmp(receipt->input_root, request->input_root, 32) == 0 &&
-        receipt->work_kind == request->work_kind &&
-        memcmp(receipt->proof_policy_root,
-               request->proof_policy_root, 32) == 0 &&
-        memcmp(receipt->toolchain_capsule_root,
-               request->toolchain_capsule_root, 32) == 0 &&
-        memcmp(receipt->signer_pubkey, claim->claimant_root, 32) == 0 &&
-        memcmp(report->focus_root, focus_root, 32) == 0 &&
-        memcmp(report->claim_root, claim_root, 32) == 0 &&
-        memcmp(report->specialist_root, receipt->signer_pubkey, 32) == 0 &&
-        memcmp(report->evidence_root, receipt_root, 32) == 0 &&
-        memcmp(report->result_root, receipt->output_root, 32) == 0;
+    struct report_work_roots roots;
+    error = report_compute_work_roots(focus, claim, task, request, receipt,
+        &roots);
+    if (error != VCS_ZCODE_FOCUS_OK) return error;
+    bool bound = report_bound_claim(focus, claim, task, request, receipt,
+            report, &roots) &&
+        report_bound_receipt(claim, request, receipt) &&
+        report_bound_result(receipt, report, &roots);
     return bound ? VCS_ZCODE_FOCUS_OK : VCS_ZCODE_FOCUS_BINDING;
 }
