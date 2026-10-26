@@ -39,6 +39,31 @@ struct bilr_candidate {
     uint32_t nStatus;
 };
 
+/* Mutable state shared by the two passes of the tip-directed height-map
+ * scan in bilr_load_height_map_for_tip. */
+struct bilr_tip_scan {
+    int max_height;
+    int64_t scanned;
+    int64_t usable;
+    int64_t duplicate_heights;
+    struct bilr_candidate *cands;
+    size_t cand_count;
+    int32_t *hash_table;
+    size_t hash_cap;
+    int32_t *height_seen;
+};
+
+/* Result codes for one tip-scan pass, and for one record within it. */
+enum bilr_tip_scan_status {
+    BILR_TIP_SCAN_OK = 0,
+    BILR_TIP_SCAN_STOP,         /* key left the 'b' keyspace: end pass */
+    BILR_TIP_SCAN_SKIP_RECORD,  /* record not usable: advance iterator */
+    BILR_TIP_SCAN_OVERFLOW,     /* pass 2 saw more usable records than pass 1 */
+    BILR_TIP_SCAN_DUP_HASH,     /* duplicate block hash in the index */
+    BILR_TIP_SCAN_EMPTY_INDEX,  /* pass 1 found no usable records */
+    BILR_TIP_SCAN_ALLOC_FAILED  /* height-map buffer allocation failed */
+};
+
 static int bilr_validity_level(uint32_t status)
 {
     return (int)(status & BLOCK_VALID_MASK);
@@ -183,6 +208,220 @@ static void bilr_report_height_map_continuity(
             (long long)parent_mismatch, first_parent_mismatch);
 }
 
+/* True when key k still sits in the blocks/index 'b' keyspace. */
+static bool bilr_key_is_block_entry(const char *k, size_t klen)
+{
+    return klen >= 1 && k[0] == 'b';
+}
+
+/* Decode one 'b'-record value into dbi. Returns 0 when the record is
+ * usable, non-zero when it must be skipped. */
+static int bilr_decode_candidate_value(const char *v, size_t vlen,
+                                       struct disk_block_index *dbi)
+{
+    if (!v || vlen == 0)
+        return 1;
+    disk_block_index_init(dbi);
+    struct byte_stream s;
+    stream_init_from_data(&s, (unsigned char *)v, vlen);
+
+    /* Only keep entries that are usable for body-pull:
+     * BLOCK_HAVE_DATA must be set (we need an nFile/nDataPos),
+     * and the entry must not be FAILED. */
+    bool usable = disk_block_index_deserialize(dbi, &s) &&
+                  (dbi->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                  (dbi->nStatus & BLOCK_FAILED_MASK) == 0 &&
+                  dbi->nHeight >= 0;
+    stream_free(&s);
+    return usable ? 0 : 1;
+}
+
+/* True when candidate idx should replace the current best candidate. */
+static bool bilr_candidate_beats_best(const struct bilr_candidate *cands,
+                                      int32_t best_idx, int32_t idx)
+{
+    if (best_idx < 0)
+        return true;
+    if (cands[idx].height > cands[best_idx].height)
+        return true;
+    return cands[idx].height == cands[best_idx].height &&
+           bilr_validity_level(cands[idx].nStatus) >
+           bilr_validity_level(cands[best_idx].nStatus);
+}
+
+/* Make room for one more fallback candidate; returns 0 on success, -1 on
+ * allocation failure (with *cands left unchanged). */
+static int bilr_grow_candidate_array(struct bilr_candidate **cands,
+                                     size_t *cap, size_t count)
+{
+    if (count != *cap)
+        return 0;
+    size_t next_cap = *cap ? *cap * 2 : 1024;
+    struct bilr_candidate *next =
+        zcl_realloc(*cands, next_cap * sizeof(*next),
+                    "bilr_fallback_candidates");
+    if (!next)
+        return -1;
+    *cands = next;
+    *cap = next_cap;
+    return 0;
+}
+
+/* Allocate and initialise the pass-2 buffers (height-map array, candidate
+ * store, hash table, height_seen); returns 0 on success, -1 on failure
+ * (with any partial allocations freed). */
+static int bilr_alloc_tip_scan_buffers(struct bilr_tip_scan *st,
+                                       struct legacy_block_loc **out_array,
+                                       size_t *out_count)
+{
+    size_t count = (size_t)st->max_height + 1;
+    struct legacy_block_loc *arr =
+        zcl_malloc(count * sizeof(*arr), "bilr_height_map");
+    if (!arr)
+        return -1;
+    st->cands = zcl_malloc((size_t)st->usable * sizeof(*st->cands),
+                           "bilr_candidates");
+    if (!st->cands) {
+        free(arr);
+        return -1;
+    }
+    st->hash_cap = bilr_hash_table_cap((size_t)st->usable);
+    st->hash_table = zcl_malloc(st->hash_cap * sizeof(*st->hash_table),
+                                "bilr_hash_table");
+    if (!st->hash_table) {
+        free(st->cands);
+        free(arr);
+        return -1;
+    }
+    st->height_seen = zcl_malloc(count * sizeof(*st->height_seen),
+                                 "bilr_height_seen");
+    if (!st->height_seen) {
+        free(st->hash_table);
+        free(st->cands);
+        free(arr);
+        return -1;
+    }
+    bilr_int32_fill(st->hash_table, st->hash_cap, -1);
+    bilr_int32_fill(st->height_seen, count, -1);
+    for (size_t i = 0; i < count; i++) {
+        uint256_set_null(&arr[i].hash);
+        uint256_set_null(&arr[i].hashPrev);
+        arr[i].height = -1;
+        arr[i].nFile = -1;
+        arr[i].nDataPos = 0;
+        arr[i].nUndoPos = 0;
+        arr[i].nStatus = 0;
+    }
+    *out_array = arr;
+    *out_count = count;
+    return 0;
+}
+
+/* Handle one blocks/index record for the pass in progress: count it
+ * (pass 0) or store it as a candidate (pass 1). Never advances the
+ * iterator; returns a bilr_tip_scan_status code. */
+static int bilr_process_tip_scan_record(int pass,
+                                        struct db_iterator *it,
+                                        struct bilr_tip_scan *st)
+{
+    size_t klen = 0;
+    const char *k = db_iter_key(it, &klen);
+    if (!bilr_key_is_block_entry(k, klen))
+        return BILR_TIP_SCAN_STOP;  /* end of 'b' keyspace */
+    if (klen != 33)
+        return BILR_TIP_SCAN_SKIP_RECORD;
+    if (pass == 0)
+        st->scanned++;
+
+    size_t vlen = 0;
+    const char *v = db_iter_value(it, &vlen);
+    struct disk_block_index dbi;
+    if (bilr_decode_candidate_value(v, vlen, &dbi) != 0)
+        return BILR_TIP_SCAN_SKIP_RECORD;
+
+    if (pass == 0) {
+        if (dbi.nHeight > st->max_height)
+            st->max_height = dbi.nHeight;
+        st->usable++;
+        return BILR_TIP_SCAN_OK;
+    }
+
+    if (st->cand_count >= (size_t)st->usable)
+        return BILR_TIP_SCAN_OVERFLOW;
+    if (st->height_seen[(size_t)dbi.nHeight] >= 0)
+        st->duplicate_heights++;
+    st->height_seen[(size_t)dbi.nHeight] = (int32_t)st->cand_count;
+    struct bilr_candidate *cand = &st->cands[st->cand_count];
+    cand->height   = dbi.nHeight;
+    cand->nFile    = dbi.nFile;
+    cand->nDataPos = dbi.nDataPos;
+    cand->nUndoPos = dbi.nUndoPos;
+    cand->nStatus  = dbi.nStatus;
+    cand->hashPrev = dbi.hashPrev;
+    /* Hash is encoded in the LevelDB key bytes 1..32 in
+     * native byte order; copy direct to avoid recomputing
+     * the double-SHA256 from the deserialized header. */
+    memcpy(cand->hash.data, k + 1, 32);
+    if (!bilr_hash_insert(st->hash_table, st->hash_cap, st->cands,
+                          (int32_t)st->cand_count))
+        return BILR_TIP_SCAN_DUP_HASH;
+    st->cand_count++;
+    return BILR_TIP_SCAN_OK;
+}
+
+/* Run one scan pass over the 'b' keyspace. Returns BILR_TIP_SCAN_OK, a
+ * pass-level failure code, or a record-level overflow/duplicate code
+ * (in which case the iterator has already been released). */
+static int bilr_run_tip_scan_pass(struct bilr *r, int pass,
+                                  struct bilr_tip_scan *st,
+                                  struct legacy_block_loc **out_array,
+                                  size_t *out_count)
+{
+    if (pass == 1) {
+        if (st->max_height < 0)
+            return BILR_TIP_SCAN_EMPTY_INDEX;
+        if (bilr_alloc_tip_scan_buffers(st, out_array, out_count) != 0)
+            return BILR_TIP_SCAN_ALLOC_FAILED;
+    }
+
+    struct db_iterator it;
+    db_iter_init(&it, &r->db);
+    const char seek_key = 'b';
+    db_iter_seek(&it, &seek_key, 1);
+
+    while (db_iter_valid(&it)) {
+        int rc = bilr_process_tip_scan_record(pass, &it, st);
+        if (rc == BILR_TIP_SCAN_STOP)
+            break;
+        if (rc == BILR_TIP_SCAN_SKIP_RECORD) {
+            db_iter_next(&it);
+            continue;
+        }
+        if (rc != BILR_TIP_SCAN_OK) {
+            db_iter_free(&it);
+            return rc;
+        }
+        db_iter_next(&it);
+    }
+
+    db_iter_free(&it);
+    return BILR_TIP_SCAN_OK;
+}
+
+/* Release the scan buffers and reset the caller's outputs after a
+ * failed tip-directed load. */
+static void bilr_discard_tip_scan_state(struct bilr_tip_scan *st,
+                                        struct legacy_block_loc **out_array,
+                                        size_t *out_count)
+{
+    free(st->height_seen);
+    free(st->hash_table);
+    free(st->cands);
+    free(*out_array);
+    *out_array = NULL;
+    *out_count = 0;
+}
+
 bool bilr_open(const char *blocks_index_dir, struct bilr **out)
 {
     if (!blocks_index_dir || !out)
@@ -234,200 +473,68 @@ bool bilr_load_height_map_for_tip(struct bilr *r,
      * In practice this doubles the LevelDB scan cost; if it becomes
      * a problem we can switch to a doubling-strategy single-pass. */
 
-    int max_height = -1;
-    int64_t scanned = 0;
-    int64_t usable  = 0;
-    int64_t duplicate_heights = 0;
-    struct bilr_candidate *cands = NULL;
-    size_t cand_count = 0;
-    int32_t *hash_table = NULL;
-    size_t hash_cap = 0;
-    int32_t *height_seen = NULL;
+    struct bilr_tip_scan st = {
+        .max_height = -1,
+        .scanned = 0,
+        .usable = 0,
+        .duplicate_heights = 0,
+        .cands = NULL,
+        .cand_count = 0,
+        .hash_table = NULL,
+        .hash_cap = 0,
+        .height_seen = NULL,
+    };
 
     for (int pass = 0; pass < 2; pass++) {
-        if (pass == 1) {
-            if (max_height < 0) {
+        int rc = bilr_run_tip_scan_pass(r, pass, &st, out_array, out_count);
+        if (rc != BILR_TIP_SCAN_OK) {
+            if (rc == BILR_TIP_SCAN_EMPTY_INDEX) {
                 fprintf(stderr,
                         "[bilr] no usable block-index records found\n");
                 return false;
             }
-            size_t count = (size_t)max_height + 1;
-            struct legacy_block_loc *arr =
-                zcl_malloc(count * sizeof(*arr), "bilr_height_map");
-            if (!arr)
+            if (rc == BILR_TIP_SCAN_ALLOC_FAILED)
                 return false;
-            cands = zcl_malloc((size_t)usable * sizeof(*cands),
-                               "bilr_candidates");
-            if (!cands) {
-                free(arr);
-                return false;
-            }
-            hash_cap = bilr_hash_table_cap((size_t)usable);
-            hash_table = zcl_malloc(hash_cap * sizeof(*hash_table),
-                                    "bilr_hash_table");
-            if (!hash_table) {
-                free(cands);
-                free(arr);
-                return false;
-            }
-            height_seen = zcl_malloc(count * sizeof(*height_seen),
-                                     "bilr_height_seen");
-            if (!height_seen) {
-                free(hash_table);
-                free(cands);
-                free(arr);
-                return false;
-            }
-            bilr_int32_fill(hash_table, hash_cap, -1);
-            bilr_int32_fill(height_seen, count, -1);
-            for (size_t i = 0; i < count; i++) {
-                uint256_set_null(&arr[i].hash);
-                uint256_set_null(&arr[i].hashPrev);
-                arr[i].height = -1;
-                arr[i].nFile = -1;
-                arr[i].nDataPos = 0;
-                arr[i].nUndoPos = 0;
-                arr[i].nStatus = 0;
-            }
-            *out_array = arr;
-            *out_count = count;
-        }
-
-        struct db_iterator it;
-        db_iter_init(&it, &r->db);
-        const char seek_key = 'b';
-        db_iter_seek(&it, &seek_key, 1);
-
-        while (db_iter_valid(&it)) {
-            size_t klen = 0;
-            const char *k = db_iter_key(&it, &klen);
-            if (klen < 1 || k[0] != 'b')
-                break;  /* end of 'b' keyspace */
-            if (klen != 33) {
-                db_iter_next(&it);
-                continue;
-            }
-            if (pass == 0) scanned++;
-
-            size_t vlen = 0;
-            const char *v = db_iter_value(&it, &vlen);
-            if (!v || vlen == 0) {
-                db_iter_next(&it);
-                continue;
-            }
-
-            struct disk_block_index dbi;
-            disk_block_index_init(&dbi);
-            struct byte_stream s;
-            stream_init_from_data(&s, (unsigned char *)v, vlen);
-
-            if (!disk_block_index_deserialize(&dbi, &s)) {
-                stream_free(&s);
-                db_iter_next(&it);
-                continue;
-            }
-            stream_free(&s);
-
-            /* Only keep entries that are usable for body-pull:
-             * BLOCK_HAVE_DATA must be set (we need an nFile/nDataPos),
-             * and the entry must not be FAILED. */
-            bool have_data = (dbi.nStatus & BLOCK_HAVE_DATA) != 0;
-            bool failed    = (dbi.nStatus & BLOCK_FAILED_MASK) != 0;
-            if (!have_data || failed || dbi.nHeight < 0) {
-                db_iter_next(&it);
-                continue;
-            }
-
-            if (pass == 0) {
-                if (dbi.nHeight > max_height)
-                    max_height = dbi.nHeight;
-                usable++;
+            bilr_discard_tip_scan_state(&st, out_array, out_count);
+            if (rc == BILR_TIP_SCAN_OVERFLOW) {
+                fprintf(stderr,
+                        "[bilr] candidate overflow while loading map\n");
             } else {
-                if (cand_count >= (size_t)usable) {
-                    db_iter_free(&it);
-                    free(height_seen);
-                    free(hash_table);
-                    free(cands);
-                    free(*out_array);
-                    *out_array = NULL;
-                    *out_count = 0;
-                    fprintf(stderr,
-                            "[bilr] candidate overflow while loading map\n");
-                    return false;
-                }
-                if (height_seen[(size_t)dbi.nHeight] >= 0)
-                    duplicate_heights++;
-                height_seen[(size_t)dbi.nHeight] = (int32_t)cand_count;
-                struct bilr_candidate *cand = &cands[cand_count];
-                cand->height   = dbi.nHeight;
-                cand->nFile    = dbi.nFile;
-                cand->nDataPos = dbi.nDataPos;
-                cand->nUndoPos = dbi.nUndoPos;
-                cand->nStatus  = dbi.nStatus;
-                cand->hashPrev = dbi.hashPrev;
-                /* Hash is encoded in the LevelDB key bytes 1..32 in
-                 * native byte order; copy direct to avoid recomputing
-                 * the double-SHA256 from the deserialized header. */
-                memcpy(cand->hash.data, k + 1, 32);
-                if (!bilr_hash_insert(hash_table, hash_cap, cands,
-                                      (int32_t)cand_count)) {
-                    db_iter_free(&it);
-                    free(height_seen);
-                    free(hash_table);
-                    free(cands);
-                    free(*out_array);
-                    *out_array = NULL;
-                    *out_count = 0;
-                    fprintf(stderr,
-                            "[bilr] duplicate block hash in legacy index\n");
-                    return false;
-                }
-                cand_count++;
+                fprintf(stderr,
+                        "[bilr] duplicate block hash in legacy index\n");
             }
-
-            db_iter_next(&it);
+            return false;
         }
-
-        db_iter_free(&it);
     }
 
     fprintf(stderr,
             "[bilr] scanned=%lld usable=%lld max_height=%d\n",
-            (long long)scanned, (long long)usable, max_height);
+            (long long)st.scanned, (long long)st.usable, st.max_height);
     fprintf(stderr, // obs-ok:legacy-map-diagnostic
             "[bilr] duplicate heights: seen=%lld\n",
-            (long long)duplicate_heights);
+            (long long)st.duplicate_heights);
 
-    int32_t tip_idx = bilr_hash_lookup(hash_table, hash_cap, cands, tip_hash);
+    int32_t tip_idx = bilr_hash_lookup(st.hash_table, st.hash_cap,
+                                       st.cands, tip_hash);
     if (tip_idx < 0) {
         fprintf(stderr, // obs-ok:legacy-map-diagnostic
                 "[bilr] chainstate best block not found in blocks/index\n");
-        free(height_seen);
-        free(hash_table);
-        free(cands);
-        free(*out_array);
-        *out_array = NULL;
-        *out_count = 0;
+        bilr_discard_tip_scan_state(&st, out_array, out_count);
         return false;
     }
-    if (!bilr_resolve_chain_from_tip(*out_array, *out_count, cands,
-                                     cand_count, hash_table, hash_cap,
-                                     tip_idx)) {
-        free(height_seen);
-        free(hash_table);
-        free(cands);
-        free(*out_array);
-        *out_array = NULL;
-        *out_count = 0;
+    if (!bilr_resolve_chain_from_tip(*out_array, *out_count, st.cands,
+                                     st.cand_count, st.hash_table,
+                                     st.hash_cap, tip_idx)) {
+        bilr_discard_tip_scan_state(&st, out_array, out_count);
         return false;
     }
     fprintf(stderr, // obs-ok:legacy-map-diagnostic
             "[bilr] selected chain anchored at h=%d\n",
-            cands[tip_idx].height);
+            st.cands[tip_idx].height);
     bilr_report_height_map_continuity(*out_array, *out_count);
-    free(height_seen);
-    free(hash_table);
-    free(cands);
+    free(st.height_seen);
+    free(st.hash_table);
+    free(st.cands);
     return true;
 }
 
@@ -453,7 +560,7 @@ bool bilr_load_height_map(struct bilr *r,
     while (db_iter_valid(&it)) {
         size_t klen = 0;
         const char *k = db_iter_key(&it, &klen);
-        if (klen < 1 || k[0] != 'b')
+        if (!bilr_key_is_block_entry(k, klen))
             break;
         if (klen != 33) {
             db_iter_next(&it);
@@ -461,38 +568,15 @@ bool bilr_load_height_map(struct bilr *r,
         }
         size_t vlen = 0;
         const char *v = db_iter_value(&it, &vlen);
-        if (!v || vlen == 0) {
-            db_iter_next(&it);
-            continue;
-        }
         struct disk_block_index dbi;
-        disk_block_index_init(&dbi);
-        struct byte_stream s;
-        stream_init_from_data(&s, (unsigned char *)v, vlen);
-        bool ok = disk_block_index_deserialize(&dbi, &s);
-        stream_free(&s);
-        if (!ok) {
+        if (bilr_decode_candidate_value(v, vlen, &dbi) != 0) {
             db_iter_next(&it);
             continue;
         }
-        bool have_data = (dbi.nStatus & BLOCK_HAVE_DATA) != 0;
-        bool failed    = (dbi.nStatus & BLOCK_FAILED_MASK) != 0;
-        if (!have_data || failed || dbi.nHeight < 0) {
-            db_iter_next(&it);
-            continue;
-        }
-        if (cand_count == cand_cap) {
-            size_t next_cap = cand_cap ? cand_cap * 2 : 1024;
-            struct bilr_candidate *next =
-                zcl_realloc(cands, next_cap * sizeof(*next),
-                            "bilr_fallback_candidates");
-            if (!next) {
-                free(cands);
-                db_iter_free(&it);
-                return false;
-            }
-            cands = next;
-            cand_cap = next_cap;
+        if (bilr_grow_candidate_array(&cands, &cand_cap, cand_count) != 0) {
+            free(cands);
+            db_iter_free(&it);
+            return false;
         }
         struct bilr_candidate *cand = &cands[cand_count];
         cand->height = dbi.nHeight;
@@ -504,11 +588,7 @@ bool bilr_load_height_map(struct bilr *r,
         memcpy(cand->hash.data, k + 1, 32);
         int32_t idx = (int32_t)cand_count;
         cand_count++;
-        if (best_idx < 0 ||
-            cand->height > cands[best_idx].height ||
-            (cand->height == cands[best_idx].height &&
-             bilr_validity_level(cand->nStatus) >
-             bilr_validity_level(cands[best_idx].nStatus)))
+        if (bilr_candidate_beats_best(cands, best_idx, idx))
             best_idx = idx;
         db_iter_next(&it);
     }
