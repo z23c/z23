@@ -4,7 +4,7 @@
 // mandates a bool return (false = couldn't populate), not struct zcl_result;
 // every other fallible surface in this file already returns zcl_result.
 
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Creiton - Apache License 2.0
  *
  * utxo_parity_service — see services/utxo_parity_service.h for rationale.
  *
@@ -415,55 +415,47 @@ static void parity_coarse_block_hash_tick(
 
 /* ── Supervised tick body ──────────────────────────────────────── */
 
-void utxo_parity_tick_once(void)
+/* One tick's config snapshot, read under g_parity.lock so the tick body can
+ * run without holding or re-acquiring it. */
+struct parity_tick_snapshot {
+    bool enabled;
+    const struct utxo_reference_source *ref;
+    int finality_depth;
+    int max_per_tick;
+    struct node_db *ndb;
+    struct utxo_parity_rpc_config rpc;
+    bool rpc_has_creds;
+};
+
+/* Read the parity service config for one tick into a snapshot. */
+static struct parity_tick_snapshot parity_take_tick_snapshot(void)
 {
+    struct parity_tick_snapshot s;
     pthread_mutex_lock(&g_parity.lock);
-    bool enabled = g_parity.initialized && g_parity.enabled;
-    const struct utxo_reference_source *ref = g_parity.ref;
-    int finality_depth = g_parity.finality_depth > 0
-                             ? g_parity.finality_depth
-                             : PARITY_DEFAULT_FINALITY_DEPTH;
-    int max_per_tick = g_parity.max_checks_per_tick > 0
-                           ? g_parity.max_checks_per_tick
-                           : PARITY_DEFAULT_MAX_PER_TICK;
-    struct node_db *ndb = g_parity.ndb ? g_parity.ndb : app_runtime_node_db();
+    s.enabled = g_parity.initialized && g_parity.enabled;
+    s.ref = g_parity.ref;
+    s.finality_depth = g_parity.finality_depth > 0
+                           ? g_parity.finality_depth
+                           : PARITY_DEFAULT_FINALITY_DEPTH;
+    s.max_per_tick = g_parity.max_checks_per_tick > 0
+                         ? g_parity.max_checks_per_tick
+                         : PARITY_DEFAULT_MAX_PER_TICK;
+    s.ndb = g_parity.ndb ? g_parity.ndb : app_runtime_node_db();
     /* Snapshot RPC config under the lock so the coarse block-hash check can
      * use it without re-acquiring the lock. */
-    struct utxo_parity_rpc_config rpc = g_parity.rpc;
-    bool rpc_has_creds = rpc.user[0] || g_parity.ref_hash_fn;
+    s.rpc = g_parity.rpc;
+    s.rpc_has_creds = s.rpc.user[0] || g_parity.ref_hash_fn;
     pthread_mutex_unlock(&g_parity.lock);
+    return s;
+}
 
-    /* Activation: `enabled` is the master gate. Either the coarse block-hash
-     * check (rpc_has_creds) or the UTXO SHA3 check (wired reference) must be
-     * ready; otherwise the tick is a quiet no-op. Boot turns `enabled` on only
-     * when a co-located zclassicd oracle resolves — an operator with no zclassicd
-     * sees neither check arm and no health impact. */
-    if (!enabled)
-        return;
-    if (!ref && !rpc_has_creds)
-        return; /* truly dormant — nothing to check */
-
-    /* Cross-check the volatile EV_CHAIN_TIP_COMMIT marker against the durable
-     * finalized height; take the max so neither a missed event nor a reorg
-     * regresses the frontier. */
-    int64_t durable = tip_finalize_stage_last_height();
-    if (durable > 0)
-        parity_frontier_raise((int32_t)durable);
-    int32_t frontier = atomic_load(&g_parity.finalized_frontier);
-    if (frontier <= 0)
-        return; /* tip not advancing — genuinely dormant */
-
-    /* ── Coarse block-hash check (fires at tip, advance-only) ─────
-     * Runs before the UTXO SHA3 check because it is cheap (one RPC call,
-     * no local SHA3 recompute) and fires even when applied > stable_ceiling
-     * (i.e. exactly when the UTXO check is stalled). Does NOT require a
-     * SHA3 reference — block-hash check is independent of the SHA3 path. */
-    if (rpc_has_creds)
-        parity_coarse_block_hash_tick(enabled, &rpc, frontier,
-                                      finality_depth, ndb);
-
-    /* ── UTXO SHA3 check (exact, only when applied is reorg-safe) ─
-     * Requires a wired reference source; skip entirely if none. */
+/* Run the exact UTXO SHA3 check at the live applied height: skips quietly
+ * when there is no wired reference, when the applied height is not yet
+ * reorg-safe below the frontier, or when it was already checked. */
+static void parity_utxo_sha3_tick(const struct utxo_reference_source *ref,
+                                  struct node_db *ndb, int32_t frontier,
+                                  int finality_depth, int max_per_tick)
+{
     if (!ref)
         return;
 
@@ -499,6 +491,45 @@ void utxo_parity_tick_once(void)
          * tick is the common case (the frontier advances slowly). */
         break;
     }
+}
+
+void utxo_parity_tick_once(void)
+{
+    struct parity_tick_snapshot snap = parity_take_tick_snapshot();
+
+    /* Activation: `enabled` is the master gate. Either the coarse block-hash
+     * check (rpc_has_creds) or the UTXO SHA3 check (wired reference) must be
+     * ready; otherwise the tick is a quiet no-op. Boot turns `enabled` on only
+     * when a co-located zclassicd oracle resolves — an operator with no zclassicd
+     * sees neither check arm and no health impact. */
+    if (!snap.enabled)
+        return;
+    if (!snap.ref && !snap.rpc_has_creds)
+        return; /* truly dormant — nothing to check */
+
+    /* Cross-check the volatile EV_CHAIN_TIP_COMMIT marker against the durable
+     * finalized height; take the max so neither a missed event nor a reorg
+     * regresses the frontier. */
+    int64_t durable = tip_finalize_stage_last_height();
+    if (durable > 0)
+        parity_frontier_raise((int32_t)durable);
+    int32_t frontier = atomic_load(&g_parity.finalized_frontier);
+    if (frontier <= 0)
+        return; /* tip not advancing — genuinely dormant */
+
+    /* ── Coarse block-hash check (fires at tip, advance-only) ─────
+     * Runs before the UTXO SHA3 check because it is cheap (one RPC call,
+     * no local SHA3 recompute) and fires even when applied > stable_ceiling
+     * (i.e. exactly when the UTXO check is stalled). Does NOT require a
+     * SHA3 reference — block-hash check is independent of the SHA3 path. */
+    if (snap.rpc_has_creds)
+        parity_coarse_block_hash_tick(snap.enabled, &snap.rpc, frontier,
+                                      snap.finality_depth, snap.ndb);
+
+    /* ── UTXO SHA3 check (exact, only when applied is reorg-safe) ─
+     * Requires a wired reference source; skip entirely if none. */
+    parity_utxo_sha3_tick(snap.ref, snap.ndb, frontier,
+                          snap.finality_depth, snap.max_per_tick);
 }
 
 /* ── init / wiring ─────────────────────────────────────────────── */
