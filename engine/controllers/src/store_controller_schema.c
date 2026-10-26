@@ -195,7 +195,7 @@ static int store_load_products_json_file(sqlite3 *db, const char *json_path)
 {
     FILE *f = fopen(json_path, "r");
     if (!f)
-        return -1;
+        LOG_ERR("store_schema", "cannot open products json: %s", json_path);
     /* Parse simple JSON array of products:
      * [{"name":"...","description":"...","price_zcl":0.01,
      *   "token_id":"...","tokens_per_purchase":1}, ...] */
