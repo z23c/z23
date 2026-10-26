@@ -189,7 +189,10 @@ static bool oti_payload_decode(const uint8_t *raw, size_t raw_len,
         stream_read_u8(&stream, &operation_len) && operation_len > 0 &&
         operation_len < sizeof(payload->operation) &&
         stream_read(&stream, payload->operation, operation_len);
-    payload->operation[operation_len] = '\0';
+    /* operation_len is checked above only when the reads before it pass; a
+     * rejected length must not index past operation[]. */
+    if (operation_len < sizeof(payload->operation))
+        payload->operation[operation_len] = '\0';
     ok = ok && stream_read_u16_le(&stream, &semantics_len) &&
         semantics_len > 0 && semantics_len <= sizeof(payload->semantics) &&
         stream_read(&stream, payload->semantics, semantics_len) &&
