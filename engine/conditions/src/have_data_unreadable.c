@@ -82,6 +82,42 @@ static struct block_index *unreadable_at(struct main_state *ms, int h,
     return p;
 }
 
+/* Candidate 2 pre-check: the utxo_apply select-idle record only qualifies
+ * while the stage reports a genuine read failure and its recorded height is
+ * a strictly earlier blocker than any candidate already in hand. Returns
+ * that height, or -1 when there is no qualifying candidate. */
+static int hdu_select_idle_candidate_height(
+    bool tip_recent, struct block_index *candidate, int cur_target)
+{
+    if (tip_recent || !g_select_idle_is_read_failure_fn())
+        return -1;
+    int64_t ua_h = g_select_idle_height_fn();
+    if (ua_h >= 0 && (candidate == NULL || ua_h < cur_target))
+        return (int)ua_h;
+    return -1;
+}
+
+/* Candidate 3 pre-check: snapshot the stage_repair body-read note and
+ * re-verify it against the live index. Returns the unreadable exact-match
+ * block when the note names a strictly earlier blocker than any candidate
+ * already in hand, NULL otherwise; *note receives the snapshot whenever one
+ * exists. */
+static struct block_index *hdu_frontier_note_candidate_index(
+    struct main_state *ms, const char *datadir, struct block_index *candidate,
+    int cur_target, struct reducer_frontier_body_read_note *note)
+{
+    if (!reducer_frontier_body_read_note_snapshot(note))
+        return NULL;
+    int rf_h = note->height;
+    if (rf_h >= 0 && (candidate == NULL || rf_h < cur_target)) {
+        struct block_index *rf_p = exact_target_index(
+            ms, rf_h, &note->block_hash, true);
+        if (rf_p && !block_index_have_data_readable(rf_p, datadir))
+            return rf_p;
+    }
+    return NULL;
+}
+
 static bool detect_have_data_unreadable(void)
 {
     int64_t tip_age = sync_monitor_tip_advance_age();
@@ -113,14 +149,12 @@ static bool detect_have_data_unreadable(void)
      * of the two candidates so the earliest blocker heals first; re-verified
      * against the live block_index (the atomic is a sticky "last observed"
      * value, not necessarily still pending). */
-    if (!tip_recent && g_select_idle_is_read_failure_fn()) {
-        int64_t ua_h = g_select_idle_height_fn();
-        if (ua_h >= 0 && (p == NULL || ua_h < target)) {
-            struct block_index *ua_p = unreadable_at(ms, (int)ua_h, datadir);
-            if (ua_p) {
-                target = (int)ua_h;
-                p = ua_p;
-            }
+    int ua_h = hdu_select_idle_candidate_height(tip_recent, p, target);
+    if (ua_h >= 0) {
+        struct block_index *ua_p = unreadable_at(ms, ua_h, datadir);
+        if (ua_p) {
+            target = ua_h;
+            p = ua_p;
         }
     }
 
@@ -132,17 +166,12 @@ static bool detect_have_data_unreadable(void)
      * the live index and prefer the lowest candidate, same as candidate 2. */
     struct reducer_frontier_body_read_note note;
     bool from_note = false;
-    if (reducer_frontier_body_read_note_snapshot(&note)) {
-        int rf_h = note.height;
-        if (rf_h >= 0 && (p == NULL || rf_h < target)) {
-            struct block_index *rf_p = exact_target_index(
-                ms, rf_h, &note.block_hash, true);
-            if (rf_p && !block_index_have_data_readable(rf_p, datadir)) {
-                target = rf_h;
-                p = rf_p;
-                from_note = true;
-            }
-        }
+    struct block_index *rf_p = hdu_frontier_note_candidate_index(
+        ms, datadir, p, target, &note);
+    if (rf_p) {
+        target = note.height;
+        p = rf_p;
+        from_note = true;
     }
 
     if (!p)
@@ -216,6 +245,34 @@ static enum condition_remedy_result remedy_have_data_unreadable(void)
     return COND_REMEDY_OK;
 }
 
+/* The detect-time target has healed when the stage_repair note has moved on
+ * or the block has left the index (or changed hash), and otherwise when its
+ * body is readable again — or, outside the note case, when the reducer
+ * stage's cursor has advanced past it. */
+static bool hdu_target_healed(struct block_index *p, int target,
+                              bool note_target, bool same_note)
+{
+    if (note_target && !same_note) {
+        return true;
+    }
+    if (!p || (note_target && (!p->phashBlock ||
+                               !uint256_eq(p->phashBlock, &g_target_hash)))) {
+        return true;
+    }
+    char datadir[2048];
+    GetDataDir(true, datadir, sizeof(datadir));
+    /* The reducer stage's own cursor advancing past target is the
+     * authoritative "re-derived through the repaired height" signal for the
+     * mid-chain (backfill/replay) case: there the active/finalized tip can
+     * already sit above an arbitrary rewound target even though nothing has
+     * actually been repaired yet, so tip-height alone is not a safe witness.
+     * Covers the tip+1 case too — once the block is re-fetched and applied,
+     * the cursor advances to target+1. */
+    return block_index_have_data_readable(p, datadir) ||
+           (!note_target &&
+            (int64_t)utxo_apply_stage_cursor() > (int64_t)target);
+}
+
 static bool witness_have_data_unreadable(int64_t target_at_detect)
 {
     (void)target_at_detect;
@@ -233,26 +290,7 @@ static bool witness_have_data_unreadable(int64_t target_at_detect)
     struct block_index *p = note_target
         ? active_chain_at(&ms->chain_active, target)
         : target_index(ms, target);
-    bool healed;
-    if (note_target && !same_note) {
-        healed = true;
-    } else if (!p || (note_target && (!p->phashBlock ||
-               !uint256_eq(p->phashBlock, &g_target_hash)))) {
-        healed = true;
-    } else {
-        char datadir[2048];
-        GetDataDir(true, datadir, sizeof(datadir));
-        /* The reducer stage's own cursor advancing past target is the
-         * authoritative "re-derived through the repaired height" signal for the
-         * mid-chain (backfill/replay) case: there the active/finalized tip can
-         * already sit above an arbitrary rewound target even though nothing has
-         * actually been repaired yet, so tip-height alone is not a safe witness.
-         * Covers the tip+1 case too — once the block is re-fetched and applied,
-         * the cursor advances to target+1. */
-        healed = block_index_have_data_readable(p, datadir) ||
-                 (!note_target &&
-                  (int64_t)utxo_apply_stage_cursor() > (int64_t)target);
-    }
+    bool healed = hdu_target_healed(p, target, note_target, same_note);
 
     /* When the torn body at `target` is readable/advanced again, retire the
      * stage_repair body-read note + its typed blocker so the
