@@ -234,17 +234,9 @@ bool fleet_enrol_name_valid(const char *name)
     return true;
 }
 
-bool fleet_enrol_onion_valid(const char *onion)
+static bool fe_onion_b32_valid(const char *onion)
 {
-    /* 56 base32 characters + ".onion". A v3 address is a public key in
-     * disguise, so this length is the whole grammar; anything shorter is a
-     * v2 address or a guess. */
-    enum { FE_ONION_B32 = 56, FE_ONION_HOST = FE_ONION_B32 + 6 };
-    size_t n = onion ? strlen(onion) : 0;
-    size_t digits = 0;
-    if (n == 0) return true; /* the box has none, which is not an error */
-    if (n < (size_t)FE_ONION_HOST || n > (size_t)FLEET_ENROL_ONION_MAX)
-        return false;
+    enum { FE_ONION_B32 = 56 };
     for (size_t i = 0; i < (size_t)FE_ONION_B32; ++i) {
         char c = onion[i];
         /* RFC 4648 base32, lowercase only: one spelling per address, so two
@@ -252,9 +244,13 @@ bool fleet_enrol_onion_valid(const char *onion)
         if (!((c >= 'a' && c <= 'z') || (c >= '2' && c <= '7')))
             return false;
     }
-    if (memcmp(onion + FE_ONION_B32, ".onion", 6) != 0) return false;
-    if (n == (size_t)FE_ONION_HOST) return true;
-    if (onion[FE_ONION_HOST] != ':') return false;
+    return true;
+}
+
+static bool fe_onion_port_digits_valid(const char *onion, size_t n)
+{
+    enum { FE_ONION_B32 = 56, FE_ONION_HOST = FE_ONION_B32 + 6 };
+    size_t digits = 0;
     for (size_t i = (size_t)FE_ONION_HOST + 1u; i < n; ++i) {
         if (onion[i] < '0' || onion[i] > '9') return false;
         if (++digits > 5u) return false;
@@ -262,17 +258,37 @@ bool fleet_enrol_onion_valid(const char *onion)
     return digits > 0;
 }
 
+bool fleet_enrol_onion_valid(const char *onion)
+{
+    /* 56 base32 characters + ".onion". A v3 address is a public key in
+     * disguise, so this length is the whole grammar; anything shorter is a
+     * v2 address or a guess. */
+    enum { FE_ONION_B32 = 56, FE_ONION_HOST = FE_ONION_B32 + 6 };
+    size_t n = onion ? strlen(onion) : 0;
+    if (n == 0) return true; /* the box has none, which is not an error */
+    if (n < (size_t)FE_ONION_HOST || n > (size_t)FLEET_ENROL_ONION_MAX)
+        return false;
+    bool b32_ok = fe_onion_b32_valid(onion);
+    if (!b32_ok) return false;
+    if (memcmp(onion + FE_ONION_B32, ".onion", 6) != 0) return false;
+    if (n == (size_t)FE_ONION_HOST) return true;
+    if (onion[FE_ONION_HOST] != ':') return false;
+    return fe_onion_port_digits_valid(onion, n);
+}
+
+static bool fe_relay_char_ok(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':' ||
+           c == '_' || c == '[' || c == ']';
+}
+
 static bool fe_relay_valid(const char *relay)
 {
     size_t n = relay ? strlen(relay) : 0;
     if (n > (size_t)FLEET_ENROL_RELAY_MAX) return false;
-    for (size_t i = 0; i < n; ++i) {
-        unsigned char c = (unsigned char)relay[i];
-        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':' ||
-                  c == '_' || c == '[' || c == ']';
-        if (!ok) return false;
-    }
+    for (size_t i = 0; i < n; ++i)
+        if (!fe_relay_char_ok((unsigned char)relay[i])) return false;
     return true;
 }
 
