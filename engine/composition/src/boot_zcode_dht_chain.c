@@ -143,23 +143,22 @@ bool boot_zcode_dht_chain_epoch_current(void) {
   return current;
 }
 
-bool boot_zcode_dht_chain_authorize(
-    struct boot_svc_ctx *svc,
+static bool delegation_matches_active_identity(
+    const struct boot_svc_ctx *svc,
     const struct vcs_zcode_dht_delegation *delegation) {
-  if (!svc || !svc->state || !svc->node_db || !delegation)
-    return false;
-  if (boot_zcode_dht_chain_cached(NULL, delegation))
-    return true;
-  uint64_t identity_generation = zid_identity_status_generation();
-  uint64_t header_generation = csr_header_generation(csr_instance());
   struct zid_identity identity;
-  bool ok = db_zid_identity_find(svc->node_db,
-                                 delegation->doc.master_pubkey, &identity) &&
-            strcmp(identity.status, ZID_IDENTITY_STATUS_ACTIVE) == 0 &&
-            identity.anchor_height >= 0 &&
-            identity.anchor_height <= INT32_MAX - ZCL_FINALITY_DEPTH &&
-            delegation->beacon_height ==
-                (uint32_t)(identity.anchor_height + ZCL_FINALITY_DEPTH);
+  return db_zid_identity_find(svc->node_db, delegation->doc.master_pubkey,
+                              &identity) &&
+         strcmp(identity.status, ZID_IDENTITY_STATUS_ACTIVE) == 0 &&
+         identity.anchor_height >= 0 &&
+         identity.anchor_height <= INT32_MAX - ZCL_FINALITY_DEPTH &&
+         delegation->beacon_height ==
+             (uint32_t)(identity.anchor_height + ZCL_FINALITY_DEPTH);
+}
+
+static bool delegation_ancestry_matches(
+    bool ok, const struct vcs_zcode_dht_delegation *delegation,
+    struct block_index **beacon_out, uint64_t *span_out) {
   const struct block_index *tip =
       ok ? csr_header_tip_snapshot(csr_instance()) : NULL;
   uint64_t span = 0;
@@ -175,6 +174,39 @@ bool boot_zcode_dht_chain_authorize(
     ok = beacon && beacon->phashBlock &&
          memcmp(beacon->phashBlock->data, delegation->beacon_hash, 32) == 0;
   }
+  *beacon_out = beacon;
+  *span_out = span;
+  return ok;
+}
+
+static void chain_cache_insert_locked(
+    bool ok, const struct vcs_zcode_dht_delegation *delegation) {
+  size_t at = 0;
+  if (ok && entry_index_locked(delegation, &at) < 0 &&
+      g_chain.count < VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS) {
+    memmove(&g_chain.entries[at + 1], &g_chain.entries[at],
+            (g_chain.count - at) * sizeof(g_chain.entries[0]));
+    struct chain_cache_entry *entry = &g_chain.entries[at];
+    memcpy(entry->master_pubkey, delegation->doc.master_pubkey, 32);
+    memcpy(entry->beacon_hash, delegation->beacon_hash, 32);
+    entry->beacon_height = delegation->beacon_height;
+    g_chain.count++;
+  }
+}
+
+bool boot_zcode_dht_chain_authorize(
+    struct boot_svc_ctx *svc,
+    const struct vcs_zcode_dht_delegation *delegation) {
+  if (!svc || !svc->state || !svc->node_db || !delegation)
+    return false;
+  if (boot_zcode_dht_chain_cached(NULL, delegation))
+    return true;
+  uint64_t identity_generation = zid_identity_status_generation();
+  uint64_t header_generation = csr_header_generation(csr_instance());
+  bool ok = delegation_matches_active_identity(svc, delegation);
+  struct block_index *beacon = NULL;
+  uint64_t span = 0;
+  ok = delegation_ancestry_matches(ok, delegation, &beacon, &span);
   bool current = epoch_current(identity_generation, header_generation);
   chain_lock();
   g_chain.external_checks++;
@@ -199,17 +231,7 @@ bool boot_zcode_dht_chain_authorize(
     g_chain.invalidations++;
     g_chain.cache_generation++;
   }
-  size_t at = 0;
-  if (ok && entry_index_locked(delegation, &at) < 0 &&
-      g_chain.count < VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS) {
-    memmove(&g_chain.entries[at + 1], &g_chain.entries[at],
-            (g_chain.count - at) * sizeof(g_chain.entries[0]));
-    struct chain_cache_entry *entry = &g_chain.entries[at];
-    memcpy(entry->master_pubkey, delegation->doc.master_pubkey, 32);
-    memcpy(entry->beacon_hash, delegation->beacon_hash, 32);
-    entry->beacon_height = delegation->beacon_height;
-    g_chain.count++;
-  }
+  chain_cache_insert_locked(ok, delegation);
   zcl_mutex_unlock(&g_chain_lock);
   return ok;
 }
