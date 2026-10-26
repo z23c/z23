@@ -1187,19 +1187,26 @@ static int mut_campaign_load(const struct zcl_mut_config *cfg,
                  out->source_digest_before);
     *total = zcl_mut_enumerate(*src, *src_len, NULL, 0);
     out->total_sites = *total;
-    if (*total == 0)
+    if (*total == 0) {
+        free(*src);
         return MUT_ST_NOSITE;
+    }
     *sites = zcl_calloc(*total, sizeof **sites, "mutation.sites");
-    if (!*sites)
+    if (!*sites) {
+        free(*src);
         return MUT_ST_SITES;
+    }
     (void)zcl_mut_enumerate(*src, *src_len, *sites, *total);
     c->cfg = cfg;
     c->plan = plan;
     char hex[65];
     zcl_mut_digest_hex(*src, *src_len, hex);
     (void)snprintf(c->src_digest, sizeof c->src_digest, "%s", hex);
-    if (!mut_prepare(c, out))
+    if (!mut_prepare(c, out)) {
+        free(*sites);
+        free(*src);
         return MUT_ST_PREPARE;
+    }
     return MUT_ST_OK;
 }
 
@@ -1368,8 +1375,11 @@ bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
     enum zcl_mut_outcome base = ZCL_MUT_OUTCOME_ERROR;
     int st = mut_campaign_load(cfg, plan, out, src_abs, sizeof src_abs, &src,
                                &src_len, &sites, &total, &c);
-    if (st == 0)
-        st = mut_campaign_baseline(&c, src, src_len, out, &base);
+    if (st != 0) {
+        mut_campaign_write_error(out, st, src_abs, cfg, base);
+        return false;
+    }
+    st = mut_campaign_baseline(&c, src, src_len, out, &base);
     if (st != 0) {
         mut_campaign_write_error(out, st, src_abs, cfg, base);
         free(c.baseline_obj);
