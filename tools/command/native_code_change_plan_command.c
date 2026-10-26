@@ -168,6 +168,120 @@ static void plan_paths_from_patch(const char *patch, struct plan_paths *edit)
     }
 }
 
+static const char *plan_input_kind(const char *patch, const char *symbol_query)
+{
+    return patch ? "patch" : symbol_query ? "symbol" : "intent";
+}
+
+static bool plan_symbol_query_is_stable_id(const char *symbol_query)
+{
+    return strncmp(symbol_query, "fn:", 3) == 0 ||
+           strncmp(symbol_query, "struct:", 7) == 0 ||
+           strncmp(symbol_query, "typedef:", 8) == 0 ||
+           strncmp(symbol_query, "enum:", 5) == 0 ||
+           strncmp(symbol_query, "macro:", 6) == 0 ||
+           strncmp(symbol_query, "data:", 5) == 0;
+}
+
+static const char *plan_resolve_symbol_query(struct codeindex *index,
+                                             const char *symbol_query,
+                                             struct ci_symbol *symbol,
+                                             bool *found)
+{
+    bool stable = plan_symbol_query_is_stable_id(symbol_query);
+    if (stable)
+        (void)codeindex_symbol_by_id(index, symbol_query, symbol, found);
+    else
+        (void)codeindex_symbol(index, symbol_query, symbol, found);
+    return *found ? (stable ? "exact_stable_id" : "legacy_name_primary")
+                  : "unresolved";
+}
+
+static void plan_collect_patch_paths(const char *patch,
+                                     struct plan_paths *read,
+                                     struct plan_paths *edit)
+{
+    plan_paths_from_patch(patch, edit);
+    for (size_t i = 0; i < edit->len; i++)
+        plan_add_path(read, edit->path[i], 0, "inspect changed file",
+                      "exact_patch_header");
+}
+
+static const char *plan_resolve_input(struct codeindex *index,
+                                      const char *symbol_query,
+                                      const char *intent, const char *patch,
+                                      struct ci_symbol *symbol, bool *found,
+                                      struct plan_paths *read,
+                                      struct plan_paths *edit)
+{
+    const char *resolution = patch ? "exact_patch_paths" : "unresolved";
+    if (patch) {
+        plan_collect_patch_paths(patch, read, edit);
+    } else if (symbol_query) {
+        resolution = plan_resolve_symbol_query(index, symbol_query, symbol,
+                                               found);
+    } else if (plan_resolve_intent(index, intent, symbol)) {
+        *found = true;
+        resolution = "heuristic_intent_symbol";
+    }
+    return resolution;
+}
+
+static void plan_add_symbol_paths(struct codeindex *index,
+                                  struct ci_symbol *symbol,
+                                  struct plan_paths *read,
+                                  struct plan_paths *edit)
+{
+    const char *def = symbol->def_path[0] ? symbol->def_path : symbol->decl_path;
+    int line = symbol->def_path[0] ? symbol->def_line : symbol->decl_line;
+    plan_add_path(read, def, line, "symbol definition",
+                  "exact_index_location");
+    plan_add_path(edit, def, line, "likely implementation site",
+                  "heuristic_change_site");
+    if (symbol->decl_path[0] && strcmp(symbol->decl_path, def) != 0) {
+        plan_add_path(read, symbol->decl_path, symbol->decl_line,
+                      "public declaration", "exact_index_location");
+        plan_add_path(edit, symbol->decl_path, symbol->decl_line,
+                      "only if the contract changes",
+                      "heuristic_change_site");
+    }
+    struct ci_ref callers[PLAN_PATH_CAP];
+    int count = codeindex_callers_for_symbol(index, symbol, callers,
+                                             PLAN_PATH_CAP);
+    for (int i = 0; i < count; i++)
+        plan_add_path(read, callers[i].ref_file, callers[i].ref_line,
+                      "direct caller", "exact_call_site");
+}
+
+static void plan_collect_test_groups(const struct zcl_command_request *request,
+                                     const struct plan_paths *edit,
+                                     char tests[][64], size_t *count,
+                                     bool *consensus_risk)
+{
+    for (size_t i = 0; i < edit->len; i++)
+        plan_add_tests_for_path(edit->path[i], tests, count, consensus_risk);
+    if (plan_is_package_workspace(zcl_native_source_root(request))) {
+        for (size_t i = 0; i < edit->len; i++) {
+            if (!plan_is_package_source(edit->path[i])) continue;
+            plan_add_test(tests, count, "zcode_package_registry");
+            plan_add_test(tests, count, "zcode_package_dev");
+            plan_add_test(tests, count, "make_lint_gates");
+            break;
+        }
+    }
+}
+
+static void plan_push_unknowns(struct json_value *unknowns, bool found,
+                               const char *patch, size_t read_len)
+{
+    if (!found && !patch)
+        plan_push_string(unknowns, "no indexed symbol was resolved; search before editing");
+    plan_push_string(unknowns,
+                     "field access, ownership, locks, database/events/blockers are not yet indexed");
+    if (read_len >= PLAN_PATH_CAP)
+        plan_push_string(unknowns, "read file list reached its bounded cap");
+}
+
 void zcl_native_handle_code_change_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -198,68 +312,18 @@ void zcl_native_handle_code_change_plan(
     struct plan_paths read = {0}, edit = {0};
     struct ci_symbol symbol = {0};
     bool found = false;
-    const char *input_kind = patch ? "patch" : symbol_query ? "symbol" : "intent";
-    const char *resolution = patch ? "exact_patch_paths" : "unresolved";
-    if (patch) {
-        plan_paths_from_patch(patch, &edit);
-        for (size_t i = 0; i < edit.len; i++)
-            plan_add_path(&read, edit.path[i], 0, "inspect changed file",
-                          "exact_patch_header");
-    } else if (symbol_query) {
-        bool stable = strncmp(symbol_query, "fn:", 3) == 0 ||
-                      strncmp(symbol_query, "struct:", 7) == 0 ||
-                      strncmp(symbol_query, "typedef:", 8) == 0 ||
-                      strncmp(symbol_query, "enum:", 5) == 0 ||
-                      strncmp(symbol_query, "macro:", 6) == 0 ||
-                      strncmp(symbol_query, "data:", 5) == 0;
-        if (stable)
-            (void)codeindex_symbol_by_id(index, symbol_query, &symbol, &found);
-        else
-            (void)codeindex_symbol(index, symbol_query, &symbol, &found);
-        resolution = found ? (stable ? "exact_stable_id" : "legacy_name_primary")
-                           : "unresolved";
-    } else if (plan_resolve_intent(index, intent, &symbol)) {
-        found = true;
-        resolution = "heuristic_intent_symbol";
-    }
-
-    if (found) {
-        const char *def = symbol.def_path[0] ? symbol.def_path : symbol.decl_path;
-        int line = symbol.def_path[0] ? symbol.def_line : symbol.decl_line;
-        plan_add_path(&read, def, line, "symbol definition",
-                      "exact_index_location");
-        plan_add_path(&edit, def, line, "likely implementation site",
-                      "heuristic_change_site");
-        if (symbol.decl_path[0] && strcmp(symbol.decl_path, def) != 0) {
-            plan_add_path(&read, symbol.decl_path, symbol.decl_line,
-                          "public declaration", "exact_index_location");
-            plan_add_path(&edit, symbol.decl_path, symbol.decl_line,
-                          "only if the contract changes",
-                          "heuristic_change_site");
-        }
-        struct ci_ref callers[PLAN_PATH_CAP];
-        int count = codeindex_callers_for_symbol(index, &symbol, callers,
-                                                  PLAN_PATH_CAP);
-        for (int i = 0; i < count; i++)
-            plan_add_path(&read, callers[i].ref_file, callers[i].ref_line,
-                          "direct caller", "exact_call_site");
-    }
+    const char *input_kind = plan_input_kind(patch, symbol_query);
+    const char *resolution = plan_resolve_input(index, symbol_query, intent,
+                                                patch, &symbol, &found, &read,
+                                                &edit);
+    if (found)
+        plan_add_symbol_paths(index, &symbol, &read, &edit);
 
     char tests[PLAN_TEST_CAP][64] = {{0}};
     size_t test_count = 0;
     bool consensus_risk = false;
-    for (size_t i = 0; i < edit.len; i++)
-        plan_add_tests_for_path(edit.path[i], tests, &test_count,
-                                &consensus_risk);
-    if (plan_is_package_workspace(zcl_native_source_root(request))) {
-        for (size_t i = 0; i < edit.len; i++) {
-            if (!plan_is_package_source(edit.path[i])) continue;
-            plan_add_test(tests, &test_count, "zcode_package_registry");
-            plan_add_test(tests, &test_count, "zcode_package_dev");
-            plan_add_test(tests, &test_count, "make_lint_gates");
-            break;
-        }
-    }
+    plan_collect_test_groups(request, &edit, tests, &test_count,
+                             &consensus_risk);
 
     (void)json_push_kv_str(&reply->data, "input_kind", input_kind);
     (void)json_push_kv_str(&reply->data, "resolution", resolution);
@@ -288,12 +352,7 @@ void zcl_native_handle_code_change_plan(
         plan_push_string(&test_commands, command);
     }
     plan_push_string(&test_commands, "make lint");
-    if (!found && !patch)
-        plan_push_string(&unknowns, "no indexed symbol was resolved; search before editing");
-    plan_push_string(&unknowns,
-                     "field access, ownership, locks, database/events/blockers are not yet indexed");
-    if (read.len >= PLAN_PATH_CAP)
-        plan_push_string(&unknowns, "read file list reached its bounded cap");
+    plan_push_unknowns(&unknowns, found, patch, read.len);
 
     (void)json_push_kv(&reply->data, "read", &read_json);
     (void)json_push_kv(&reply->data, "edit", &edit_json);

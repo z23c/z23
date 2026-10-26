@@ -2002,7 +2002,6 @@ tools/command/cli_render.c:render_yardsale_guide:17
 tools/command/cli_render.c:zcl_cli_render_brief:23
 tools/command/cli_render.c:zcl_cli_render_doc:40
 tools/command/cli_render.c:zcl_cli_render_resolve:20
-tools/command/native_code_change_plan_command.c:zcl_native_handle_code_change_plan:36
 tools/command/native_code_coverage_command.c:zcl_native_handle_code_coverage:16
 tools/command/native_dev_activation_command.c:dac_authority_available:17
 tools/command/native_dev_activation_command.c:dac_read_current:29
