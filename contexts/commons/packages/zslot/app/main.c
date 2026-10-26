@@ -20,10 +20,44 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <errno.h>
 
 #define MAX_CAP 256u
 
 static unsigned char store[8192];
+
+struct output_state { bool attempted, failed; };
+
+static void record_output(struct output_state *out, int result)
+{
+    out->attempted = true;
+    if (result < 0) out->failed = true;
+}
+
+static int finish_output(const struct output_state *out, int result)
+{
+    if (out->attempted && (out->failed || fflush(stdout) != 0 || ferror(stdout))) {
+        fprintf(stderr, "zslot: output write failed\n");
+        return 1;
+    }
+    return result;
+}
+
+static bool parse_unsigned(const char *text, int base, unsigned long long limit,
+                            unsigned long long *value, char **tail)
+{
+    const char *sign = text;
+    while (isspace((unsigned char)*sign)) sign++;
+    bool negative = *sign == '-';
+    errno = 0;
+    char *end;
+    unsigned long long n = strtoull(text, &end, base);
+    if (end == text || errno == ERANGE || n > limit || (negative && n != 0)) return false;
+    *value = n;
+    *tail = end;
+    return true;
+}
 
 static int selftest(void)
 {
@@ -59,10 +93,72 @@ static int selftest(void)
                 stale_miss, reused, live_ok);
         return 1;
     }
-    printf("ok: stale-miss live=%u reused-index=%u gen %u -> %u\n",
+    struct output_state out = {0};
+    record_output(&out, printf("ok: stale-miss live=%u reused-index=%u gen %u -> %u\n",
            zslot_live(&t), zslot_id_index(id), zslot_id_generation(ib),
-           zslot_id_generation(id));
-    return 0;
+           zslot_id_generation(id)));
+    return finish_output(&out, 0);
+}
+
+static int insert_line(zslot *t, const char *line, struct output_state *out)
+{
+    char *end;
+    unsigned long long value;
+    if (!parse_unsigned(line + 1, 10, UINT32_MAX, &value, &end) ||
+        (*end && *end != '\n')) {
+        fprintf(stderr, "zslot: bad insert '%s'", line);
+        return 2;
+    }
+    uint32_t n = (uint32_t)value;
+    zslot_id id = zslot_insert(t, &n);
+    if (!id) record_output(out, puts("i -> FULL"));
+    else record_output(out, printf("i %llu -> %016llx\n", value, (unsigned long long)id));
+    return out->failed ? 1 : 0;
+}
+
+static int id_line(zslot *t, const char *line, struct output_state *out)
+{
+    char *end;
+    unsigned long long value;
+    if (!parse_unsigned(line + 1, 16, UINT64_MAX, &value, &end) ||
+        (*end && *end != '\n')) {
+        fprintf(stderr, "zslot: bad id '%s'", line);
+        return 2;
+    }
+    zslot_id id = (zslot_id)value;
+    if (line[0] == 'g') {
+        uint32_t *p = zslot_get(t, id);
+        if (!p) record_output(out, printf("g %016llx -> MISS\n", value));
+        else record_output(out, printf("g %016llx -> %u\n", value, *p));
+    } else {
+        record_output(out, printf("r %016llx -> %s\n", value,
+                                 zslot_remove(t, id) ? "ok" : "rejected"));
+    }
+    return out->failed ? 1 : 0;
+}
+
+static int run_lines(zslot *t)
+{
+    char line[128];
+    struct output_state out = {0};
+    int result = 0;
+    while (result == 0 && fgets(line, sizeof line, stdin)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        if (line[0] == 'i') result = insert_line(t, line, &out);
+        else if (line[0] == 'g' || line[0] == 'r') result = id_line(t, line, &out);
+        else if (line[0] == 'n') {
+            record_output(&out, printf("n -> live %u/%u\n", zslot_live(t), zslot_cap(t)));
+            if (out.failed) result = 1;
+        } else {
+            fprintf(stderr, "zslot: unknown op '%s'", line);
+            result = 2;
+        }
+    }
+    if (ferror(stdin)) {
+        fprintf(stderr, "zslot: input read failed\n");
+        result = 1;
+    }
+    return finish_output(&out, result);
 }
 
 int main(int argc, char **argv)
@@ -74,8 +170,8 @@ int main(int argc, char **argv)
         return 2;
     }
     char *end = NULL;
-    unsigned long cap = strtoul(argv[1], &end, 10);
-    if (!end || *end || cap < 1 || cap > MAX_CAP) {
+    unsigned long long cap;
+    if (!parse_unsigned(argv[1], 10, MAX_CAP, &cap, &end) || *end || cap < 1) {
         fprintf(stderr, "zslot: CAP must be 1..%u\n", MAX_CAP);
         return 2;
     }
@@ -90,49 +186,5 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    char line[128];
-    int bad = 0;
-    while (fgets(line, sizeof(line), stdin)) {
-        if (line[0] == '#' || line[0] == '\n')
-            continue;
-        if (line[0] == 'i') {
-            unsigned long v = strtoul(line + 1, &end, 10);
-            if (!end || (*end && *end != '\n')) {
-                fprintf(stderr, "zslot: bad insert '%s'", line);
-                bad = 2;
-                break;
-            }
-            uint32_t n = (uint32_t)v;
-            zslot_id id = zslot_insert(&t, &n);
-            if (!id)
-                puts("i -> FULL");
-            else
-                printf("i %lu -> %016llx\n", v, (unsigned long long)id);
-        } else if (line[0] == 'g' || line[0] == 'r') {
-            unsigned long long idv = strtoull(line + 1, &end, 16);
-            if (!end || (*end && *end != '\n')) {
-                fprintf(stderr, "zslot: bad id '%s'", line);
-                bad = 2;
-                break;
-            }
-            zslot_id id = (zslot_id)idv;
-            if (line[0] == 'g') {
-                uint32_t *p = zslot_get(&t, id);
-                if (!p)
-                    printf("g %016llx -> MISS\n", idv);
-                else
-                    printf("g %016llx -> %u\n", idv, *p);
-            } else {
-                printf("r %016llx -> %s\n", idv,
-                       zslot_remove(&t, id) ? "ok" : "rejected");
-            }
-        } else if (line[0] == 'n') {
-            printf("n -> live %u/%u\n", zslot_live(&t), zslot_cap(&t));
-        } else {
-            fprintf(stderr, "zslot: unknown op '%s'", line);
-            bad = 2;
-            break;
-        }
-    }
-    return bad;
+    return run_lines(&t);
 }

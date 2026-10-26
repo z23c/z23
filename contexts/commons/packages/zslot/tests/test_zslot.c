@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <limits.h>
 
 static int failures;
 
@@ -160,8 +163,11 @@ static void test_independent_payloads(void)
     CHECK(memcmp(zslot_get(&t, iy), y, 8) == 0);
 }
 
+static void test_cli(void);
+
 int main(void)
 {
+    test_cli();
     test_init();
     test_insert_get_remove();
     test_stale_and_reuse();
@@ -175,4 +181,187 @@ int main(void)
     }
     puts("zslot: all tests passed");
     return 0;
+}
+
+static FILE *cli_source, *cli_sink, *cli_errors, *cli_failure_sink;
+static size_t cli_flushes, cli_writes, cli_fail_write;
+static bool cli_read_fault, cli_stale_errno;
+static FILE *real_stdin(void) { return stdin; }
+static FILE *real_stdout(void) { return stdout; }
+static FILE *real_stderr(void) { return stderr; }
+static FILE *cli_output(void) {
+    cli_writes++;
+    if (cli_fail_write && cli_writes >= cli_fail_write) cli_sink = cli_failure_sink;
+    return cli_sink;
+}
+[[maybe_unused]] static int cli_flush(FILE *stream) {
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+[[maybe_unused]] static int cli_error(FILE *stream) {
+    return (stream == cli_source && cli_read_fault) || ferror(stream);
+}
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin cli_source
+#define stdout cli_sink
+#define stderr cli_errors
+#define printf(...) fprintf(cli_output(), __VA_ARGS__)
+#define puts(text) fprintf(cli_output(), "%s\n", (text))
+#define fflush cli_flush
+#define ferror cli_error
+#define store embedded_store
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef store
+#undef ferror
+#undef fflush
+#undef puts
+#undef printf
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin real_stdin()
+#define stdout real_stdout()
+#define stderr real_stderr()
+
+static FILE *required_stream(FILE *stream) {
+    if (!stream) { fprintf(stderr, "zslot CLI fixture setup failed\n"); exit(2); }
+    return stream;
+}
+static FILE *cli_input(const char *text) {
+    FILE *source = required_stream(tmpfile());
+    if (fputs(text, source) < 0 || fflush(source) != 0) exit(2);
+    rewind(source);
+    return source;
+}
+static int cli_invoke(FILE *source, FILE *sink, FILE *errors, const char *arg) {
+    cli_source = source;
+    cli_sink = sink;
+    cli_errors = errors;
+    cli_writes = cli_flushes = 0;
+    char *args[] = {"zslot", (char *)arg, NULL};
+    if (cli_stale_errno) errno = ERANGE;
+    int rc = embedded_cli_main(arg ? 2 : 1, args);
+    cli_source = stdin;
+    cli_sink = stdout;
+    cli_errors = stderr;
+    return rc;
+}
+static void cli_bytes(FILE *stream, const char *want) {
+    char bytes[1024];
+    rewind(stream);
+    size_t n = fread(bytes, 1, sizeof bytes, stream);
+    if (n != strlen(want) || memcmp(bytes, want, n) != 0)
+        fprintf(stderr, "CLI bytes expected=%s actual=%.*s\n", want, (int)n, bytes);
+    CHECK(!ferror(stream) && n == strlen(want) && !memcmp(bytes, want, n));
+}
+static void cli_case(const char *cap, const char *ops, int status, const char *want) {
+    FILE *source = cli_input(ops), *sink = required_stream(tmpfile());
+    FILE *errors = required_stream(tmpfile());
+    CHECK(cli_invoke(source, sink, errors, cap) == status);
+    if (!*want) CHECK(cli_flushes == 0);
+    cli_bytes(sink, want);
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_bad_field(const char *text, char op) {
+    char ops[256];
+    int n = snprintf(ops, sizeof ops, "n\n%c %s\n", op, text);
+    if (n < 0 || (size_t)n >= sizeof ops) exit(2);
+    cli_case("2", ops, 2, "n -> live 0/2\n");
+}
+static void cli_numeric_errors(void) {
+    const char *bad[] = {"", " \t", "junk!", "1junk", "1 ", "-1",
+        "999999999999999999999999999999999999"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        cli_case(bad[i], "", 2, "");
+        cli_bad_field(bad[i], 'i');
+        cli_bad_field(bad[i], 'g');
+        cli_bad_field(bad[i], 'r');
+    }
+    char negative_ulong[64], negative_hex[64];
+    snprintf(negative_ulong, sizeof negative_ulong, "-%lu", ULONG_MAX);
+    snprintf(negative_hex, sizeof negative_hex, "-%llx", ULLONG_MAX);
+    cli_case(negative_ulong, "", 2, "");
+    cli_bad_field(negative_ulong, 'i');
+    cli_bad_field(negative_hex, 'g');
+    cli_bad_field(negative_hex, 'r');
+    cli_bad_field("4294967296", 'i');
+    cli_bad_field("10000000000000000", 'g');
+    cli_bad_field("10000000000000000", 'r');
+    cli_case("0", "", 2, "");
+    cli_case("257", "", 2, "");
+}
+static void cli_normal(void) {
+    cli_stale_errno = true;
+    cli_case(" \t+1", "i 4294967295\ng +0x100000000\nr 100000000\ng 100000000\ni -0\nn\n", 0,
+        "i 4294967295 -> 0000000100000000\ng 0000000100000000 -> 4294967295\nr 0000000100000000 -> ok\ng 0000000100000000 -> MISS\ni 0 -> 0000000300000000\nn -> live 1/1\n");
+    cli_stale_errno = false;
+    cli_case("1", "g -0\nr 0\ng ffffffffffffffff\n", 0,
+        "g 0000000000000000 -> MISS\nr 0000000000000000 -> rejected\ng ffffffffffffffff -> MISS\n");
+    cli_case("1", "", 0, "");
+    cli_case("1", "#comment\n\n", 0, "");
+    cli_case(NULL, "", 2, "");
+    cli_case("selftest", "", 0, "ok: stale-miss live=3 reused-index=1 gen 1 -> 3\n");
+}
+static void cli_read_errors(void) {
+    cli_read_fault = true;
+    cli_case("1", "n\n", 1, "n -> live 0/1\n");
+    cli_read_fault = false;
+#ifdef _WIN32
+    FILE *source = required_stream(fopen("NUL", "w"));
+#else
+    FILE *source = required_stream(fopen("/dev/null", "w"));
+#endif
+    FILE *sink = required_stream(tmpfile()), *errors = required_stream(tmpfile());
+    CHECK(cli_invoke(source, sink, errors, "1") == 1 && cli_flushes == 0 && ftell(sink) == 0);
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_sink_failure(const char *arg, const char *ops, size_t target, bool buffered) {
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *source = cli_input(ops), *sink = required_stream(tmpfile());
+    FILE *errors = required_stream(tmpfile());
+    FILE *bad = required_stream(fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r"));
+    char buffer[4096];
+    if (buffered && setvbuf(bad, buffer, _IOFBF, sizeof buffer) != 0) exit(2);
+    cli_failure_sink = bad;
+    cli_fail_write = target;
+    CHECK(cli_invoke(source, sink, errors, arg) == 1);
+    cli_fail_write = 0;
+    cli_failure_sink = NULL;
+    CHECK(ferror(bad));
+    char diagnostic[256];
+    rewind(errors);
+    size_t n = fread(diagnostic, 1, sizeof diagnostic - 1, errors);
+    diagnostic[n] = '\0';
+    CHECK(!ferror(errors) && strstr(diagnostic, "output write failed") != NULL);
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+    (void)fclose(bad);
+}
+static void cli_output_errors(void) {
+    const struct { const char *arg, *ops; size_t target; } rows[] = {
+        {"1", "i 7\n", 1}, {"1", "i 7\ni 8\n", 2},
+        {"1", "g 0\n", 1}, {"1", "i 7\ng 100000000\n", 2},
+        {"1", "r 0\n", 1}, {"1", "i 7\nr 100000000\n", 2},
+        {"1", "n\n", 1}, {"selftest", "", 1},
+        {"1", "n\ni junk\n", 1}
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        cli_sink_failure(rows[i].arg, rows[i].ops, rows[i].target, false);
+#ifdef __linux__
+        cli_sink_failure(rows[i].arg, rows[i].ops, rows[i].target, true);
+#endif
+    }
+}
+static void test_cli(void) {
+    cli_numeric_errors();
+    cli_normal();
+    cli_read_errors();
+    cli_output_errors();
 }
