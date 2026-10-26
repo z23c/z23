@@ -153,7 +153,8 @@ static bool canon_path(char *buf, size_t cap)
     return true;
 }
 
-static bool build_fixture(void)
+/* Write the pid-derived fixture paths into the path globals. */
+static void fixture_compose_paths(void)
 {
     long pid = (long)getpid();
     snprintf(g_datadir, sizeof(g_datadir), "/tmp/zcl_confine_dd_%ld", pid);
@@ -161,21 +162,37 @@ static bool build_fixture(void)
     snprintf(g_modroot, sizeof(g_modroot), "/tmp/zcl_confine_mod_%ld", pid);
     snprintf(g_tmp_modpath, sizeof(g_tmp_modpath),
              "/tmp/zcl_confine_tmpmod_%ld.so", pid);
+}
 
+/* mkdir() the fixture tree in dependency order, tolerating EEXIST;
+ * returns 0 on success, 1 on the first directory that cannot be made. */
+static int fixture_create_directories(void)
+{
     char build[200], hs[240];
     snprintf(build, sizeof(build), "%s/build", g_modroot);
     snprintf(hs, sizeof(hs), "%s/build/hotswap", g_modroot);
 
-    if (mkdir(g_datadir, 0700) != 0 && errno != EEXIST) return false;
-    if (mkdir(g_sibling, 0700) != 0 && errno != EEXIST) return false;
-    if (mkdir(g_modroot, 0700) != 0 && errno != EEXIST) return false;
-    if (mkdir(build, 0700) != 0 && errno != EEXIST) return false;
-    if (mkdir(hs, 0700) != 0 && errno != EEXIST) return false;
+    const char *dirs[] = { g_datadir, g_sibling, g_modroot, build, hs };
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+        if (mkdir(dirs[i], 0700) != 0 && errno != EEXIST) return 1;
+    return 0;
+}
 
-    if (!canon_path(g_datadir, sizeof(g_datadir)) ||
-        !canon_path(g_sibling, sizeof(g_sibling)) ||
-        !canon_path(g_modroot, sizeof(g_modroot)))
-        return false;
+/* Rewrite the three root globals to their canonical paths (the module
+ * paths are derived afterwards, from the canonical g_modroot); returns
+ * the combined canon_path() result. */
+static bool fixture_canonicalize_roots(void)
+{
+    return canon_path(g_datadir, sizeof(g_datadir)) &&
+           canon_path(g_sibling, sizeof(g_sibling)) &&
+           canon_path(g_modroot, sizeof(g_modroot));
+}
+
+static bool build_fixture(void)
+{
+    fixture_compose_paths();
+    if (fixture_create_directories() != 0) return false;
+    if (!fixture_canonicalize_roots()) return false;
 
     snprintf(g_modpath, sizeof(g_modpath), "%s/build/hotswap/mod.so", g_modroot);
     if (!touch_file(g_modpath) || !touch_file(g_tmp_modpath))
@@ -236,6 +253,43 @@ static int c_witness_records_grants(void)
     return 0;
 }
 
+/* Both "not confined" flags must be present and false; returns the first
+ * breach's code (38/39) or 0. */
+static int dumper_check_unconfined_flags(const struct json_value *doc)
+{
+    const struct json_value *unc = json_get(doc, "unconfined");
+    const struct json_value *rbu = json_get(doc, "requested_but_unconfined");
+    if (!unc || json_get_bool(unc)) return 38;
+    if (!rbu || json_get_bool(rbu)) return 39;
+    return 0;
+}
+
+/* The interface/abi/count/profile scalars; returns the first mismatch's
+ * code (32-35) or 0. */
+static int dumper_check_restriction_scalars(const struct json_value *doc)
+{
+    const struct json_value *iface = json_get(doc, "fs_restriction_interface");
+    const struct json_value *abi = json_get(doc, "fs_restriction_abi");
+    const struct json_value *cnt = json_get(doc, "fs_grant_count");
+    const struct json_value *req = json_get(doc, "requested_profile");
+    if (!iface || strcmp(json_get_str(iface), "landlock") != 0) return 32;
+    if (!abi || json_get_int(abi) < 1) return 33;
+    if (!cnt || json_get_int(cnt) != 1) return 34;
+    if (!req || strcmp(json_get_str(req), "node_steady_state") != 0) return 35;
+    return 0;
+}
+
+/* The one recorded grant must be the datadir itself; returns 36/37 or 0. */
+static int dumper_check_grant_entry(const struct json_value *doc)
+{
+    const struct json_value *grants = json_get(doc, "fs_grants");
+    if (!grants || json_size(grants) != 1) return 36;
+    const struct json_value *g0 = json_at(grants, 0);
+    const struct json_value *path = g0 ? json_get(g0, "path") : NULL;
+    if (!path || strcmp(json_get_str(path), g_datadir) != 0) return 37;
+    return 0;
+}
+
 /* The dumper, read from inside a live domain: it must report the grant set
  * and NOT claim to be unconfined. */
 static int c_dumper_inside_domain(void)
@@ -247,27 +301,10 @@ static int c_dumper_inside_domain(void)
     json_init(&v);
     if (!confinement_dump_state_json(&v, NULL)) { json_free(&v); return 31; }
 
-    int rc = 0;
-    const struct json_value *iface = json_get(&v, "fs_restriction_interface");
-    const struct json_value *abi = json_get(&v, "fs_restriction_abi");
-    const struct json_value *cnt = json_get(&v, "fs_grant_count");
-    const struct json_value *req = json_get(&v, "requested_profile");
-    const struct json_value *grants = json_get(&v, "fs_grants");
-    const struct json_value *unc = json_get(&v, "unconfined");
-    const struct json_value *rbu = json_get(&v, "requested_but_unconfined");
-
-    if (!unc || json_get_bool(unc))                             rc = 38;
-    else if (!rbu || json_get_bool(rbu))                        rc = 39;
-    else if (!iface || strcmp(json_get_str(iface), "landlock") != 0) rc = 32;
-    else if (!abi || json_get_int(abi) < 1)                     rc = 33;
-    else if (!cnt || json_get_int(cnt) != 1)                    rc = 34;
-    else if (!req || strcmp(json_get_str(req), "node_steady_state") != 0) rc = 35;
-    else if (!grants || json_size(grants) != 1)                 rc = 36;
-    else {
-        const struct json_value *g0 = json_at(grants, 0);
-        const struct json_value *path = g0 ? json_get(g0, "path") : NULL;
-        if (!path || strcmp(json_get_str(path), g_datadir) != 0) rc = 37;
-    }
+    /* Same checks, same order: the first failing one still wins. */
+    int rc = dumper_check_unconfined_flags(&v);
+    if (rc == 0) rc = dumper_check_restriction_scalars(&v);
+    if (rc == 0) rc = dumper_check_grant_entry(&v);
     json_free(&v);
     return rc;
 }
