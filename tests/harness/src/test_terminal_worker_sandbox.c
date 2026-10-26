@@ -468,6 +468,79 @@ static bool tw_deny_pin_ok(const int *tw, size_t n_tw)
     return pin_ok;
 }
 
+/* ── profile check helpers (verdicts for the non-forked pins) ────────── */
+
+/* The report word for an inline check, so every runner printf line spells
+ * the verdict the same way. */
+static const char *tw_verdict(bool ok)
+{
+    return ok ? "OK" : "FAIL";
+}
+
+/* The profile must carry the terminal_worker identity and every planned
+ * enforcement layer, bound to exactly the one grant rule passed in. */
+static bool tw_profile_shape_ok(const struct os_sandbox_profile *p,
+                                const struct os_sandbox_path_rule *rules)
+{
+    return p->name && strcmp(p->name, "terminal_worker") == 0 &&
+           p->no_new_privs && p->apply_rlimits && p->landlock &&
+           p->seccomp && p->seccomp_deny_exec_mmap &&
+           p->n_fs_rules == 1 && p->fs_rules == rules;
+}
+
+/* The worker budget must be exactly AS=256 MiB, CPU=300 s, NPROC=KEEP,
+ * FSIZE=1 MiB, NOFILE=64, CORE=0 — and the profile must embed that very
+ * struct. */
+static bool tw_rlimits_match_profile(const struct os_sandbox_profile *p,
+                                     const struct os_sandbox_rlimits *lim)
+{
+    return lim->as_bytes == (uint64_t)256 * 1024 * 1024 &&
+           lim->cpu_seconds == 300 &&
+           lim->nproc == OS_SANDBOX_RLIMIT_KEEP &&
+           lim->fsize_bytes == (uint64_t)1024 * 1024 &&
+           lim->nofile == 64 &&
+           lim->core_bytes == 0 &&
+           p->apply_rlimits &&
+           memcmp(&p->rlimits, lim, sizeof(*lim)) == 0;
+}
+
+/* The socket/debug/mount surface stays denied while the fork/exec spawn
+ * family stays reachable. */
+static bool tw_socket_denied_spawn_allowed(const int *tw, size_t n_tw)
+{
+    return denyset_contains(tw, n_tw, __NR_socket) &&
+           denyset_contains(tw, n_tw, __NR_connect) &&
+           denyset_contains(tw, n_tw, __NR_ptrace) &&
+           denyset_contains(tw, n_tw, __NR_mount) &&
+           denyset_contains(tw, n_tw, __NR_keyctl) &&
+           denyset_contains(tw, n_tw, __NR_open_by_handle_at) &&
+#ifdef __NR_execve
+           !denyset_contains(tw, n_tw, __NR_execve) &&
+#endif
+#ifdef __NR_clone
+           !denyset_contains(tw, n_tw, __NR_clone) &&
+#endif
+           true;
+}
+
+/* Evidence wording for the exec-refusal marker probe. */
+static const char *tw_marker_state(const char *marker)
+{
+    return access(marker, F_OK) == 0 ? "present" : "absent";
+}
+
+/* Suck the first bytes of a grant file into buf; a missing file leaves
+ * the caller's zeroed buffer untouched. */
+static void tw_read_grant_output(const char *path, char *buf, size_t cap)
+{
+    int f = open(path, O_RDONLY);
+    if (f >= 0) {
+        ssize_t rd = read(f, buf, cap - 1);
+        (void)rd;
+        close(f);
+    }
+}
+
 static int test_terminal_worker_sandbox_platform_arm(void)
 {
     printf("\n=== terminal worker sandbox attack tests ===\n");
@@ -484,51 +557,29 @@ static int test_terminal_worker_sandbox_platform_arm(void)
             os_sandbox_terminal_worker_profile(rules, rule_count);
 
         printf("terminal_worker_sandbox: profile shape... ");
-        bool shape_ok = p.name && strcmp(p.name, "terminal_worker") == 0 &&
-                        p.no_new_privs && p.apply_rlimits && p.landlock &&
-                        p.seccomp && p.seccomp_deny_exec_mmap &&
-                        p.n_fs_rules == 1 && p.fs_rules == rules;
-        printf("%s\n", shape_ok ? "OK" : "FAIL");
+        bool shape_ok = tw_profile_shape_ok(&p, rules);
+        printf("%s\n", tw_verdict(shape_ok));
         if (!shape_ok) failures++;
 
         struct os_sandbox_rlimits lim = os_sandbox_terminal_worker_rlimits();
         printf("terminal_worker_sandbox: rlimits (AS=256MiB CPU=300 "
                "NPROC=KEEP FSIZE=1MiB NOFILE=64 CORE=0)... ");
-        bool lim_ok =
-            lim.as_bytes == (uint64_t)256 * 1024 * 1024 &&
-            lim.cpu_seconds == 300 &&
-            lim.nproc == OS_SANDBOX_RLIMIT_KEEP &&
-            lim.fsize_bytes == (uint64_t)1024 * 1024 &&
-            lim.nofile == 64 &&
-            lim.core_bytes == 0 &&
-            p.apply_rlimits &&
-            memcmp(&p.rlimits, &lim, sizeof(lim)) == 0;
-        printf("%s\n", lim_ok ? "OK" : "FAIL");
+        bool lim_ok = tw_rlimits_match_profile(&p, &lim);
+        printf("%s\n", tw_verdict(lim_ok));
         if (!lim_ok) failures++;
 
         size_t n_tw = 0;
         const int *tw = os_sandbox_terminal_worker_denied_syscalls(&n_tw);
         bool pin_ok = tw_deny_pin_ok(tw, n_tw);
         printf("terminal_worker_sandbox: deny-set == session set minus "
-               "fork/exec family plus the declared additions... %s\n", pin_ok ? "OK" : "FAIL");
+               "fork/exec family plus the declared additions... %s\n",
+               tw_verdict(pin_ok));
         if (!pin_ok) failures++;
 
         printf("terminal_worker_sandbox: socket family denied, spawn family "
                "allowed... ");
-        bool family_ok = denyset_contains(tw, n_tw, __NR_socket) &&
-                         denyset_contains(tw, n_tw, __NR_connect) &&
-                         denyset_contains(tw, n_tw, __NR_ptrace) &&
-                         denyset_contains(tw, n_tw, __NR_mount) &&
-                         denyset_contains(tw, n_tw, __NR_keyctl) &&
-                         denyset_contains(tw, n_tw, __NR_open_by_handle_at) &&
-#ifdef __NR_execve
-                         !denyset_contains(tw, n_tw, __NR_execve) &&
-#endif
-#ifdef __NR_clone
-                         !denyset_contains(tw, n_tw, __NR_clone) &&
-#endif
-                         true;
-        printf("%s\n", family_ok ? "OK" : "FAIL");
+        bool family_ok = tw_socket_denied_spawn_allowed(tw, n_tw);
+        printf("%s\n", tw_verdict(family_ok));
         if (!family_ok) failures++;
     }
 
@@ -547,10 +598,9 @@ static int test_terminal_worker_sandbox_platform_arm(void)
         unlink(marker);
         int rc = tw_run_child(c_tw_exec_outside_refused);
         bool ok = rc == 42 && access(marker, F_OK) == 0;
-        printf("%s\n", ok ? "OK" : "FAIL");
+        printf("%s\n", tw_verdict(ok));
         if (!ok) {
-            printf("  rc=%d marker=%s\n", rc,
-                   access(marker, F_OK) == 0 ? "present" : "absent");
+            printf("  rc=%d marker=%s\n", rc, tw_marker_state(marker));
             failures++;
         }
         unlink(marker);
@@ -594,14 +644,9 @@ static int test_terminal_worker_sandbox_platform_arm(void)
             unlink(out);
             int rc = tw_run_child(c_tw_exec_granted_fbsh_runs);
             char got[64] = {0};
-            int f = open(out, O_RDONLY);
-            if (f >= 0) {
-                ssize_t rd = read(f, got, sizeof got - 1);
-                (void)rd;
-                close(f);
-            }
+            tw_read_grant_output(out, got, sizeof got);
             bool ok = rc == 7 && strcmp(got, "caged\n42\n") == 0;
-            printf("%s\n", ok ? "OK" : "FAIL");
+            printf("%s\n", tw_verdict(ok));
             if (!ok) {
                 printf("  rc=%d out=\"%.48s\"\n", rc, got);
                 failures++;
