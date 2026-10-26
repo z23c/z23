@@ -140,6 +140,26 @@ struct coins_kv_read_snapshot *coins_kv_read_snapshot_open(
     return snapshot;
 }
 
+static bool snapshot_row_columns_valid(int txid_type, const void *txid,
+                                       int txid_len, bool scalar_types,
+                                       int script_type, const void *script,
+                                       int script_len)
+{
+    return txid_type == SQLITE_BLOB && txid && txid_len == 32 && scalar_types &&
+           script_type == SQLITE_BLOB && script_len >= 0 &&
+           (script_len == 0 || script != NULL) &&
+           script_len <= MAX_SCRIPT_SIZE;
+}
+
+static bool snapshot_row_scalars_in_range(
+    const struct coins_kv_read_snapshot *snapshot, int64_t vout,
+    int64_t value, int64_t height, int64_t coinbase)
+{
+    return vout >= 0 && vout <= UINT32_MAX && MoneyRange(value) &&
+           height >= 0 && height < snapshot->applied_height &&
+           coinbase >= 0 && coinbase <= 1;
+}
+
 static bool snapshot_row_valid(struct coins_kv_read_snapshot *snapshot,
                                int64_t vout, int64_t value, int script_len,
                                int64_t height, int64_t coinbase)
@@ -153,20 +173,55 @@ static bool snapshot_row_valid(struct coins_kv_read_snapshot *snapshot,
                         sqlite3_column_type(snapshot->rows, 2) == SQLITE_INTEGER &&
                         sqlite3_column_type(snapshot->rows, 4) == SQLITE_INTEGER &&
                         sqlite3_column_type(snapshot->rows, 5) == SQLITE_INTEGER;
-    return txid_type == SQLITE_BLOB && txid && txid_len == 32 && scalar_types &&
-           vout >= 0 && vout <= UINT32_MAX && MoneyRange(value) &&
-           script_type == SQLITE_BLOB && script_len >= 0 &&
-           (script_len == 0 || script != NULL) &&
-           script_len <= MAX_SCRIPT_SIZE && height >= 0 &&
-           height < snapshot->applied_height &&
-           coinbase >= 0 && coinbase <= 1;
+    return snapshot_row_columns_valid(txid_type, txid, txid_len, scalar_types,
+                                      script_type, script, script_len) &&
+           snapshot_row_scalars_in_range(snapshot, vout, value, height,
+                                         coinbase);
+}
+
+static bool snapshot_next_state_invalid(
+    const struct coins_kv_read_snapshot *snapshot,
+    const struct coins_kv_read_snapshot_row *out_row)
+{
+    return !snapshot || !out_row || snapshot->failed || snapshot->exhausted;
+}
+
+static bool snapshot_row_key_not_increasing(
+    const struct coins_kv_read_snapshot *snapshot, const uint8_t *txid,
+    int64_t vout)
+{
+    int order = snapshot->have_last ? memcmp(txid, snapshot->last_txid, 32) : 1;
+    return snapshot->have_last &&
+           (order < 0 ||
+            (order == 0 && (uint32_t)vout <= snapshot->last_vout));
+}
+
+static void snapshot_row_publish(
+    struct coins_kv_read_snapshot *snapshot,
+    struct coins_kv_read_snapshot_row *out_row,
+    const uint8_t *txid, const void *script, int64_t vout, int64_t value,
+    int script_len, int64_t height, int64_t coinbase)
+{
+    if (script_len > 0)
+        memcpy(snapshot->script, script, (size_t)script_len);
+
+    memcpy(out_row->txid, txid, 32);
+    out_row->vout = (uint32_t)vout;
+    out_row->value = value;
+    out_row->script = script_len > 0 ? snapshot->script : NULL;
+    out_row->script_len = (size_t)script_len;
+    out_row->height = (int32_t)height;
+    out_row->is_coinbase = coinbase != 0;
+    memcpy(snapshot->last_txid, txid, 32);
+    snapshot->last_vout = (uint32_t)vout;
+    snapshot->have_last = true;
 }
 
 enum coins_kv_read_snapshot_step coins_kv_read_snapshot_next(
     struct coins_kv_read_snapshot *snapshot,
     struct coins_kv_read_snapshot_row *out_row)
 {
-    if (!snapshot || !out_row || snapshot->failed || snapshot->exhausted) {
+    if (snapshot_next_state_invalid(snapshot, out_row)) {
         LOG_WARN("coins_kv_read_snapshot", "next: invalid state");
         return COINS_KV_READ_SNAPSHOT_ERROR;
     }
@@ -195,9 +250,7 @@ enum coins_kv_read_snapshot_step coins_kv_read_snapshot_next(
     }
 
     const uint8_t *txid = sqlite3_column_blob(snapshot->rows, 0);
-    int order = snapshot->have_last ? memcmp(txid, snapshot->last_txid, 32) : 1;
-    if (snapshot->have_last &&
-        (order < 0 || (order == 0 && (uint32_t)vout <= snapshot->last_vout))) {
+    if (snapshot_row_key_not_increasing(snapshot, txid, vout)) {
         LOG_WARN("coins_kv_read_snapshot", "next: non-increasing coins key");
         snapshot->failed = true;
         return COINS_KV_READ_SNAPSHOT_ERROR;
@@ -213,19 +266,8 @@ enum coins_kv_read_snapshot_step coins_kv_read_snapshot_next(
         snapshot->script_cap = (size_t)script_len;
     }
     const void *script = sqlite3_column_blob(snapshot->rows, 3);
-    if (script_len > 0)
-        memcpy(snapshot->script, script, (size_t)script_len);
-
-    memcpy(out_row->txid, txid, 32);
-    out_row->vout = (uint32_t)vout;
-    out_row->value = value;
-    out_row->script = script_len > 0 ? snapshot->script : NULL;
-    out_row->script_len = (size_t)script_len;
-    out_row->height = (int32_t)height;
-    out_row->is_coinbase = coinbase != 0;
-    memcpy(snapshot->last_txid, txid, 32);
-    snapshot->last_vout = (uint32_t)vout;
-    snapshot->have_last = true;
+    snapshot_row_publish(snapshot, out_row, txid, script, vout, value,
+                         script_len, height, coinbase);
     return COINS_KV_READ_SNAPSHOT_ROW;
 }
 
