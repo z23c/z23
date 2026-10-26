@@ -99,19 +99,38 @@ static int fo_days_in_month(int y, int mo)
     return days[mo - 1];
 }
 
+/* Both scan helpers index s[0..19]: fo_parse_iso8601() has already checked
+ * strlen(s) == 20 by the time they run. */
+static bool fo_scan_iso8601_date(const char *s, int *y, int *mo, int *d)
+{
+    return digits(s, 4, y) && s[4] == '-' && digits(s + 5, 2, mo) &&
+           s[7] == '-' && digits(s + 8, 2, d);
+}
+
+static bool fo_scan_iso8601_time(const char *s, int *h, int *mi, int *se)
+{
+    return s[10] == 'T' && digits(s + 11, 2, h) && s[13] == ':' &&
+           digits(s + 14, 2, mi) && s[16] == ':' && digits(s + 17, 2, se) &&
+           s[19] == 'Z';
+}
+
+static bool fo_iso8601_fields_in_range(int y, int mo, int d, int h,
+                                       int mi, int se)
+{
+    return mo >= 1 && mo <= 12 && d >= 1 && d <= fo_days_in_month(y, mo) &&
+           h <= 23 && mi <= 59 && se <= 60;
+}
+
 bool fo_parse_iso8601(const char *s, int64_t *out)
 {
     int y, mo, d, h, mi, se;
 
     if (!s || !out || strlen(s) != 20)
         return false;
-    if (!digits(s, 4, &y) || s[4] != '-' || !digits(s + 5, 2, &mo) ||
-        s[7] != '-' || !digits(s + 8, 2, &d) || s[10] != 'T' ||
-        !digits(s + 11, 2, &h) || s[13] != ':' || !digits(s + 14, 2, &mi) ||
-        s[16] != ':' || !digits(s + 17, 2, &se) || s[19] != 'Z')
+    if (!fo_scan_iso8601_date(s, &y, &mo, &d) ||
+        !fo_scan_iso8601_time(s, &h, &mi, &se))
         return false;
-    if (mo < 1 || mo > 12 || d < 1 || d > fo_days_in_month(y, mo) ||
-        h > 23 || mi > 59 || se > 60)
+    if (!fo_iso8601_fields_in_range(y, mo, d, h, mi, se))
         return false;
     *out = days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + se;
     return true;
@@ -410,7 +429,7 @@ size_t fo_render_def(const struct fo_observation *obs, size_t obs_count,
         w = snprintf(out ? out + used : NULL, out ? out_cap - used : 0,     \
                      __VA_ARGS__);                                          \
         if (w > 0)                                                          \
-            used += (size_t)w;                                             \
+            used += (size_t)w;                                              \
     } while (0)
 
     FO_APPEND(

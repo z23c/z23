@@ -2013,7 +2013,6 @@ tools/dev/devloop_watch.c:watch_emit_proof_pending:20
 tools/dev/devloop_watch.c:watch_emit_superseded:20
 tools/dev/devloop_watch.c:zcl_devloop_watch_commit_preemption_selftest:20
 tools/dev/devloop_watch.c:zcl_devloop_watch_mode_until:17
-tools/dev/fleet_observe.c:fo_parse_iso8601:23
 tools/dev/mutation_run.c:mut_prepare:22
 tools/dev/mutation_run.c:zcl_mut_campaign_run:36
 tools/dev/mutation_run.c:zcl_mut_plan_from_dryrun:21
