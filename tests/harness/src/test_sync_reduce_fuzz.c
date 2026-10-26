@@ -20,68 +20,74 @@
 /* Legal successors of a phase — kept independent of the reducer source. */
 static bool legal_next(enum sync_phase from, enum sync_phase to)
 {
-    switch (from) {
-    case SYNC_PHASE_IDLE:
-        return to == SYNC_PHASE_IDLE || to == SYNC_PHASE_NEGOTIATING;
-    case SYNC_PHASE_NEGOTIATING:
-        return to == SYNC_PHASE_NEGOTIATING || to == SYNC_PHASE_RECEIVING ||
-               to == SYNC_PHASE_FAILED || to == SYNC_PHASE_IDLE;
-    case SYNC_PHASE_RECEIVING:
-        return to == SYNC_PHASE_RECEIVING || to == SYNC_PHASE_VERIFYING ||
-               to == SYNC_PHASE_FAILED || to == SYNC_PHASE_IDLE;
-    case SYNC_PHASE_VERIFYING:
-        return to == SYNC_PHASE_VERIFYING || to == SYNC_PHASE_STAGED ||
-               to == SYNC_PHASE_FAILED || to == SYNC_PHASE_IDLE;
-    case SYNC_PHASE_STAGED:
-        return to == SYNC_PHASE_STAGED ||
-               to == SYNC_PHASE_ACTIVATION_CONTAINED || to == SYNC_PHASE_IDLE;
-    case SYNC_PHASE_ACTIVATION_CONTAINED:
-        return to == SYNC_PHASE_ACTIVATION_CONTAINED || to == SYNC_PHASE_IDLE;
-    case SYNC_PHASE_FAILED:
-        return to == SYNC_PHASE_FAILED || to == SYNC_PHASE_IDLE;
-    case SYNC_PHASE_COUNT:
-        break;
-    }
+    /* One row per legal (from,to) edge, in the same order as the old cases;
+     * anything unlisted (including COUNT) is illegal. */
+    static const struct { enum sync_phase from, to; } legal_edges[] = {
+        { SYNC_PHASE_IDLE, SYNC_PHASE_IDLE },
+        { SYNC_PHASE_IDLE, SYNC_PHASE_NEGOTIATING },
+        { SYNC_PHASE_NEGOTIATING, SYNC_PHASE_NEGOTIATING },
+        { SYNC_PHASE_NEGOTIATING, SYNC_PHASE_RECEIVING },
+        { SYNC_PHASE_NEGOTIATING, SYNC_PHASE_FAILED },
+        { SYNC_PHASE_NEGOTIATING, SYNC_PHASE_IDLE },
+        { SYNC_PHASE_RECEIVING, SYNC_PHASE_RECEIVING },
+        { SYNC_PHASE_RECEIVING, SYNC_PHASE_VERIFYING },
+        { SYNC_PHASE_RECEIVING, SYNC_PHASE_FAILED },
+        { SYNC_PHASE_RECEIVING, SYNC_PHASE_IDLE },
+        { SYNC_PHASE_VERIFYING, SYNC_PHASE_VERIFYING },
+        { SYNC_PHASE_VERIFYING, SYNC_PHASE_STAGED },
+        { SYNC_PHASE_VERIFYING, SYNC_PHASE_FAILED },
+        { SYNC_PHASE_VERIFYING, SYNC_PHASE_IDLE },
+        { SYNC_PHASE_STAGED, SYNC_PHASE_STAGED },
+        { SYNC_PHASE_STAGED, SYNC_PHASE_ACTIVATION_CONTAINED },
+        { SYNC_PHASE_STAGED, SYNC_PHASE_IDLE },
+        { SYNC_PHASE_ACTIVATION_CONTAINED, SYNC_PHASE_ACTIVATION_CONTAINED },
+        { SYNC_PHASE_ACTIVATION_CONTAINED, SYNC_PHASE_IDLE },
+        { SYNC_PHASE_FAILED, SYNC_PHASE_FAILED },
+        { SYNC_PHASE_FAILED, SYNC_PHASE_IDLE },
+    };
+    for (size_t i = 0; i < sizeof(legal_edges) / sizeof(legal_edges[0]); i++)
+        if (legal_edges[i].from == from && legal_edges[i].to == to)
+            return true;
     return false;
 }
 
 static bool is_progress_event(enum sync_event_kind k)
 {
-    switch (k) {
-    case SYNC_EVENT_START:
-    case SYNC_EVENT_OFFER_RECEIVED:
-    case SYNC_EVENT_OFFER_ACCEPTED:
-    case SYNC_EVENT_CHUNK_RECEIVED:
-    case SYNC_EVENT_RECEIVE_COMPLETE:
-    case SYNC_EVENT_PROOF_VERIFIED:
-        return true;
-    case SYNC_EVENT_CHUNK_REJECTED:
-    case SYNC_EVENT_PROOF_FAILED:
-    case SYNC_EVENT_PEER_LOST:
-    case SYNC_EVENT_TIMEOUT:
-    case SYNC_EVENT_STOP_REQUESTED:
-    case SYNC_EVENT_MANIFEST_VALIDATED:
-    case SYNC_EVENT_ARTIFACT_VERIFIED:
-    case SYNC_EVENT_INSTALL_PREPARED:
-    case SYNC_EVENT_INSTALL_COMMITTED:
-    case SYNC_EVENT_TAIL_PIECE_VERIFIED:
-    case SYNC_EVENT_REDUCER_ADVANCED:
-    case SYNC_EVENT_READY_REACHED:
-    case SYNC_EVENT_SOVEREIGN_REACHED:
-        return false;
-    case SYNC_EVENT_COUNT:
-        break;
-    }
+    /* One row per event kind, in the same order as the old cases; anything
+     * unlisted (including COUNT) is not progress. */
+    static const struct {
+        enum sync_event_kind kind;
+        bool progress;
+    } progress_by_kind[] = {
+        { SYNC_EVENT_START, true },
+        { SYNC_EVENT_OFFER_RECEIVED, true },
+        { SYNC_EVENT_OFFER_ACCEPTED, true },
+        { SYNC_EVENT_CHUNK_RECEIVED, true },
+        { SYNC_EVENT_RECEIVE_COMPLETE, true },
+        { SYNC_EVENT_PROOF_VERIFIED, true },
+        { SYNC_EVENT_CHUNK_REJECTED, false },
+        { SYNC_EVENT_PROOF_FAILED, false },
+        { SYNC_EVENT_PEER_LOST, false },
+        { SYNC_EVENT_TIMEOUT, false },
+        { SYNC_EVENT_STOP_REQUESTED, false },
+        { SYNC_EVENT_MANIFEST_VALIDATED, false },
+        { SYNC_EVENT_ARTIFACT_VERIFIED, false },
+        { SYNC_EVENT_INSTALL_PREPARED, false },
+        { SYNC_EVENT_INSTALL_COMMITTED, false },
+        { SYNC_EVENT_TAIL_PIECE_VERIFIED, false },
+        { SYNC_EVENT_REDUCER_ADVANCED, false },
+        { SYNC_EVENT_READY_REACHED, false },
+        { SYNC_EVENT_SOVEREIGN_REACHED, false },
+    };
+    for (size_t i = 0; i < sizeof(progress_by_kind) / sizeof(progress_by_kind[0]); i++)
+        if (progress_by_kind[i].kind == k)
+            return progress_by_kind[i].progress;
     return false;
 }
 
-/* Check every invariant against one (state,event)→transition step. Returns NULL
- * on success, or a static reason string on the first violation. */
-static const char *check_step(struct sync_kernel_state s,
-                              struct sync_event e,
-                              struct sync_transition d)
+/* Range and layout checks on a transition's next phase and action slots. */
+static const char *transition_shape_reason(struct sync_transition d)
 {
-    /* 1. Well-formed transition. */
     if (d.next_state.phase < 0 || d.next_state.phase >= SYNC_PHASE_COUNT)
         return "next phase out of range";
     if (d.action_count < 0 || d.action_count > SYNC_TRANSITION_MAX_ACTIONS)
@@ -92,12 +98,59 @@ static const char *check_step(struct sync_kernel_state s,
     for (int i = d.action_count; i < SYNC_TRANSITION_MAX_ACTIONS; i++)
         if (d.actions[i] != SYNC_ACTION_NONE)
             return "non-NONE action past action_count";
+    return NULL;
+}
+
+/* has_blocker and the blocker code must agree. */
+static const char *blocker_consistency_reason(struct sync_transition d)
+{
     if (d.has_blocker) {
         if (d.blocker <= SYNC_BLOCKER_NONE || d.blocker >= SYNC_BLOCKER_COUNT)
             return "blocker out of range";
     } else if (d.blocker != SYNC_BLOCKER_NONE) {
         return "blocker set without has_blocker";
     }
+    return NULL;
+}
+
+/* STAGED-specific invariants: containment on progress, and the only legal
+ * door into STAGED. */
+static const char *staged_invariant_reason(struct sync_kernel_state s,
+                                           struct sync_event e,
+                                           struct sync_transition d)
+{
+    /* 5. STAGED + progress ⇒ contained, only RAISE_CONTAINMENT_BLOCKER. */
+    if (s.phase == SYNC_PHASE_STAGED && is_progress_event(e.kind)) {
+        if (d.next_state.phase != SYNC_PHASE_ACTIVATION_CONTAINED ||
+            !d.has_blocker || d.blocker != SYNC_BLOCKER_ACTIVATION_CONTAINED ||
+            d.action_count != 1 ||
+            d.actions[0] != SYNC_ACTION_RAISE_CONTAINMENT_BLOCKER)
+            return "STAGED+progress did not contain cleanly";
+    }
+
+    /* 6. STAGED is ENTERED (from another phase) ONLY via
+     * VERIFYING+PROOF_VERIFIED(proof_ok); a STAGED self-loop does not count. */
+    if (d.next_state.phase == SYNC_PHASE_STAGED && s.phase != SYNC_PHASE_STAGED) {
+        if (!(s.phase == SYNC_PHASE_VERIFYING &&
+              e.kind == SYNC_EVENT_PROOF_VERIFIED && e.proof_ok))
+            return "reached STAGED by an illegal door";
+    }
+    return NULL;
+}
+
+/* Check every invariant against one (state,event)→transition step. Returns NULL
+ * on success, or a static reason string on the first violation. */
+static const char *check_step(struct sync_kernel_state s,
+                              struct sync_event e,
+                              struct sync_transition d)
+{
+    /* 1. Well-formed transition. */
+    const char *reason = transition_shape_reason(d);
+    if (reason)
+        return reason;
+    reason = blocker_consistency_reason(d);
+    if (reason)
+        return reason;
 
     /* 2. Chunk counter can never exceed the offered total. */
     if (d.next_state.chunks_received.value > d.next_state.chunks_total.value)
@@ -118,22 +171,9 @@ static const char *check_step(struct sync_kernel_state s,
     if (!legal_next(s.phase, d.next_state.phase))
         return "illegal phase transition";
 
-    /* 5. STAGED + progress ⇒ contained, only RAISE_CONTAINMENT_BLOCKER. */
-    if (s.phase == SYNC_PHASE_STAGED && is_progress_event(e.kind)) {
-        if (d.next_state.phase != SYNC_PHASE_ACTIVATION_CONTAINED ||
-            !d.has_blocker || d.blocker != SYNC_BLOCKER_ACTIVATION_CONTAINED ||
-            d.action_count != 1 ||
-            d.actions[0] != SYNC_ACTION_RAISE_CONTAINMENT_BLOCKER)
-            return "STAGED+progress did not contain cleanly";
-    }
-
-    /* 6. STAGED is ENTERED (from another phase) ONLY via
-     * VERIFYING+PROOF_VERIFIED(proof_ok); a STAGED self-loop does not count. */
-    if (d.next_state.phase == SYNC_PHASE_STAGED && s.phase != SYNC_PHASE_STAGED) {
-        if (!(s.phase == SYNC_PHASE_VERIFYING &&
-              e.kind == SYNC_EVENT_PROOF_VERIFIED && e.proof_ok))
-            return "reached STAGED by an illegal door";
-    }
+    reason = staged_invariant_reason(s, e, d);
+    if (reason)
+        return reason;
 
     /* 7. No decision ever asks for a live-tip activation — the catalog has no
      * such action, so any emitted action is a real (non-activate) member. */
