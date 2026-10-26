@@ -479,10 +479,9 @@ static unsigned int coins_record_count_nonzero_mask_bytes(
 }
 
 static uint64_t coins_record_encode_code(const struct coins *cc,
-                                         unsigned int nmask_code)
+                                         unsigned int nmask_code,
+                                         bool vout0, bool vout1)
 {
-    bool vout0 = coins_record_vout_is_live(cc, 0);
-    bool vout1 = coins_record_vout_is_live(cc, 1);
     return 8u * (uint64_t)(nmask_code - ((vout0 || vout1) ? 0u : 1u)) +
            (cc->is_coinbase ? 1u : 0u) +
            (vout0 ? 2u : 0u) +
@@ -497,10 +496,14 @@ bool coins_record_encode(const struct coins *cc, struct byte_stream *s)
     bool ok = true;
     ok &= stream_write_varint(s, (uint64_t)cc->version);
 
+    bool vout0 = coins_record_vout_is_live(cc, 0);
+    bool vout1 = coins_record_vout_is_live(cc, 1);
+
     unsigned int nmask_size = coins_record_mask_byte_count(cc);
     unsigned int nmask_code =
         coins_record_count_nonzero_mask_bytes(cc, nmask_size);
-    ok &= stream_write_varint(s, coins_record_encode_code(cc, nmask_code));
+    uint64_t code = coins_record_encode_code(cc, nmask_code, vout0, vout1);
+    ok &= stream_write_varint(s, code);
 
     for (unsigned int mi = 0; mi < nmask_size; mi++) {
         ok &= stream_write_u8(s, coins_record_mask_byte(cc, mi));
