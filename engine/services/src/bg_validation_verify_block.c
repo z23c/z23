@@ -279,6 +279,141 @@ bool bg_validation_note_undo_skips(int64_t skips, bool verified_with_undo,
 
 /* ── Single block full validation (read-only) ────────────────── */
 
+/* Outcome of scanning a block's transactions for proof verification. The
+ * failure values name the check that failed so the caller can unwind its
+ * own batch/undo state; the caller owns the log channel. */
+enum bg_valid_tx_scan_status {
+    BG_VALID_TX_SCAN_OK = 0,
+    BG_VALID_TX_SCAN_SHIELDED_FAILED,
+    BG_VALID_TX_SCAN_SCRIPT_FLUSH_FAILED,
+};
+
+/* Contextual header check against the previous header; the genesis block
+ * has no previous header to check against. */
+static bool verify_block_contextual_header(const struct block *block,
+                                           const struct block_index *pindex,
+                                           const struct chain_params *params,
+                                           struct validation_state *state)
+{
+    if (!pindex->pprev)
+        return true;
+    return contextual_check_block_header(&block->header, state, params,
+                                         pindex->pprev, true);
+}
+
+/* Count transparent inputs and cap allocation */
+static size_t script_batch_alloc_size(const struct block *block,
+                                      size_t max_script_batch)
+{
+    size_t total_inputs = 0;
+    for (size_t i = 1; i < block->num_vtx; i++)
+        total_inputs += block->vtx[i].num_vin;
+
+    size_t alloc_size = total_inputs;
+    if (max_script_batch > 0 && alloc_size > max_script_batch)
+        alloc_size = max_script_batch;
+    return alloc_size;
+}
+
+/* Queue script-check items for one non-coinbase tx. A tx whose undo entry
+ * does not match its inputs cannot be script-verified: it is counted in
+ * *skips and yields no items. The batch is flushed whenever it hits the
+ * cap. */
+static enum bg_valid_tx_scan_status queue_tx_script_checks(
+    const struct transaction *tx,
+    size_t undo_idx,
+    bool have_undo,
+    const struct block_undo *blockundo,
+    struct script_check_item *check_items,
+    uint32_t branch_id,
+    uint32_t flags,
+    int num_workers,
+    size_t max_script_batch,
+    size_t *check_count,
+    int64_t *sigs,
+    int64_t *skips)
+{
+    bool have_tx_undo = have_undo && undo_idx < blockundo->num_txundo &&
+                        blockundo->vtxundo[undo_idx].num_prevout == tx->num_vin;
+    if (!have_tx_undo) {
+        /* No undo (rev file): cannot recover spent outputs, so this tx
+         * CANNOT be script-verified. Expected post-snapshot. Don't stall;
+         * record the gap so "verified" stays honest, not a silent skip. */
+        (*skips)++;
+        return BG_VALID_TX_SCAN_OK;
+    }
+
+    struct precomputed_tx_data txdata;
+    precompute_tx_data(tx, &txdata);
+
+    for (size_t j = 0; j < tx->num_vin; j++) {
+        /* Flush batch if at capacity */
+        if (max_script_batch > 0 && *check_count >= max_script_batch) {
+            if (!bg_validation_verify_scripts_parallel(check_items, *check_count,
+                                              num_workers))
+                return BG_VALID_TX_SCAN_SCRIPT_FLUSH_FAILED;
+            *check_count = 0;
+        }
+
+        const struct tx_out *prev_out =
+            &blockundo->vtxundo[undo_idx].vprevout[j].txout;
+        struct script_check_item *item = &check_items[(*check_count)++];
+        item->tx = tx;
+        item->input_index = (unsigned int)j;
+        item->amount = prev_out->value;
+        item->branch_id = branch_id;
+        item->txdata = txdata;
+        item->script_pub_key = prev_out->script_pub_key;
+        item->flags = flags;
+        (*sigs)++;
+    }
+    return BG_VALID_TX_SCAN_OK;
+}
+
+/* Walk every transaction: verify its shielded proofs (4a), then queue its
+ * transparent script checks from undo data (4b) — coinbase has none.
+ * Returns the first failing stage, or BG_VALID_TX_SCAN_OK when the whole
+ * block was scanned. */
+static enum bg_valid_tx_scan_status verify_block_tx_proofs(
+    const struct block *block,
+    const struct block_index *pindex,
+    uint32_t branch_id,
+    uint32_t flags,
+    const struct block_undo *blockundo,
+    bool have_undo,
+    struct script_check_item *check_items,
+    int num_workers,
+    size_t max_script_batch,
+    size_t *check_count,
+    int64_t *sigs,
+    int64_t *proofs,
+    int64_t *skips)
+{
+    for (size_t i = 0; i < block->num_vtx; i++) {
+        const struct transaction *tx = &block->vtx[i];
+
+        /* 4a. Shielded proof verification */
+        if (tx->num_joinsplit > 0 || tx->num_shielded_spend > 0 ||
+            tx->num_shielded_output > 0) {
+            if (!bg_validation_verify_shielded_proofs(tx, pindex->nHeight, i,
+                                        branch_id, proofs))
+                return BG_VALID_TX_SCAN_SHIELDED_FAILED;
+        }
+
+        /* 4b. Collect script verification items */
+        if (transaction_is_coinbase(tx))
+            continue;
+
+        size_t undo_idx = i - 1;
+        enum bg_valid_tx_scan_status st = queue_tx_script_checks(
+            tx, undo_idx, have_undo, blockundo, check_items, branch_id,
+            flags, num_workers, max_script_batch, check_count, sigs, skips);
+        if (st != BG_VALID_TX_SCAN_OK)
+            return st;
+    }
+    return BG_VALID_TX_SCAN_OK;
+}
+
 /* Validates all cryptographic proofs in a block WITHOUT modifying UTXO set.
  * Verifies: Equihash, Merkle root, all script sigs, all shielded proofs.
  * Uses undo data (revXXXXX.dat) to recover spent outputs for sig verification.
@@ -317,13 +452,10 @@ bool bg_validation_validate_block_proofs(const struct block *block,
     }
 
     /* 3. Contextual header: difficulty, median time, checkpoints */
-    if (pindex->pprev) {
-        if (!contextual_check_block_header(&block->header, &state, params,
-                                            pindex->pprev, true)) {
-            LOG_WARN("bg-valid", "[bg-valid] contextual_check_header FAILED h=%d: %s",
-                    pindex->nHeight, state.reject_reason);
-            goto out;
-        }
+    if (!verify_block_contextual_header(block, pindex, params, &state)) {
+        LOG_WARN("bg-valid", "[bg-valid] contextual_check_header FAILED h=%d: %s",
+                pindex->nHeight, state.reject_reason);
+        goto out;
     }
 
     /* 4. Transaction-level verification */
@@ -335,14 +467,7 @@ bool bg_validation_validate_block_proofs(const struct block *block,
         have_undo = read_undo_rev_or_delta(&blockundo, block, pindex,
                                            datadir);
 
-    /* Count transparent inputs and cap allocation */
-    size_t total_inputs = 0;
-    for (size_t i = 1; i < block->num_vtx; i++)
-        total_inputs += block->vtx[i].num_vin;
-
-    size_t alloc_size = total_inputs;
-    if (max_script_batch > 0 && alloc_size > max_script_batch)
-        alloc_size = max_script_batch;
+    size_t alloc_size = script_batch_alloc_size(block, max_script_batch);
 
     if (alloc_size > 0) {
         check_items = zcl_calloc(alloc_size, sizeof(struct script_check_item), "bg_valid script checks");
@@ -350,57 +475,11 @@ bool bg_validation_validate_block_proofs(const struct block *block,
             goto out;
     }
 
-    for (size_t i = 0; i < block->num_vtx; i++) {
-        const struct transaction *tx = &block->vtx[i];
-
-        /* 4a. Shielded proof verification */
-        if (tx->num_joinsplit > 0 || tx->num_shielded_spend > 0 ||
-            tx->num_shielded_output > 0) {
-            if (!bg_validation_verify_shielded_proofs(tx, pindex->nHeight, i,
-                                        branch_id, &proofs))
-                goto out;
-        }
-
-        /* 4b. Collect script verification items */
-        if (transaction_is_coinbase(tx))
-            continue;
-
-        size_t undo_idx = i - 1;
-        bool have_tx_undo = have_undo && undo_idx < blockundo.num_txundo &&
-                            blockundo.vtxundo[undo_idx].num_prevout == tx->num_vin;
-        if (!have_tx_undo) {
-            /* No undo (rev file): cannot recover spent outputs, so this tx
-             * CANNOT be script-verified. Expected post-snapshot. Don't stall;
-             * record the gap so "verified" stays honest, not a silent skip. */
-            skips++;
-            continue;
-        }
-
-        struct precomputed_tx_data txdata;
-        precompute_tx_data(tx, &txdata);
-
-        for (size_t j = 0; j < tx->num_vin; j++) {
-            /* Flush batch if at capacity */
-            if (max_script_batch > 0 && check_count >= max_script_batch) {
-                if (!bg_validation_verify_scripts_parallel(check_items, check_count,
-                                              num_workers))
-                    goto out;
-                check_count = 0;
-            }
-
-            const struct tx_out *prev_out =
-                &blockundo.vtxundo[undo_idx].vprevout[j].txout;
-            struct script_check_item *item = &check_items[check_count++];
-            item->tx = tx;
-            item->input_index = (unsigned int)j;
-            item->amount = prev_out->value;
-            item->branch_id = branch_id;
-            item->txdata = txdata;
-            item->script_pub_key = prev_out->script_pub_key;
-            item->flags = flags;
-            sigs++;
-        }
-    }
+    if (verify_block_tx_proofs(block, pindex, branch_id, flags, &blockundo,
+                               have_undo, check_items, num_workers,
+                               max_script_batch, &check_count, &sigs,
+                               &proofs, &skips) != BG_VALID_TX_SCAN_OK)
+        goto out;
 
     /* 5. Final script verification flush */
     if (!bg_validation_verify_scripts_parallel(check_items, check_count, num_workers)) {
