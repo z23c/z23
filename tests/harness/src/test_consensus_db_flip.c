@@ -108,6 +108,78 @@ static int64_t flip_named_cursor(sqlite3 *db, const char *name)
     return v;
 }
 
+/* Ensure every schema the flip expects on the source progress.kv handle. */
+static bool flip_ensure_source_schemas(sqlite3 *db)
+{
+    return coins_kv_ensure_schema(db) && anchor_kv_ensure_schema(db) &&
+           nullifier_kv_ensure_schema(db) && progress_meta_table_ensure(db) &&
+           stage_table_ensure(db);
+}
+
+/* Seed the three coins rows; stops at the first failed add, exactly as the
+ * original loop guard (ok && i < 3) did. */
+static bool flip_seed_source_coins(sqlite3 *db, bool ok)
+{
+    for (int i = 0; ok && i < 3; i++) {
+        uint8_t txid[32];
+        memset(txid, 0, 32);
+        txid[0] = (uint8_t)(0x40 + i);
+        txid[31] = 0xC0;
+        uint8_t script[4] = {0x76, 0xa9, 0x14, (uint8_t)i};
+        ok = coins_kv_add(db, txid, (uint32_t)i, 9000 + i, 200 + i, i == 0,
+                          script, sizeof(script));
+    }
+    return ok;
+}
+
+/* The kernel rows, Class B/D tables and Class C projections, in the original
+ * fixed order: each statement runs in turn and the loop stops at the first
+ * failure, so a later statement never runs after an earlier one failed. */
+static bool flip_exec_source_script(sqlite3 *db)
+{
+    static const char *const script[] = {
+        "INSERT INTO sprout_anchors(anchor,height,tree) "
+        "VALUES(x'dd01',201,x'01')",
+        "INSERT INTO sapling_anchors(anchor,height,tree) "
+        "VALUES(x'ee01',202,x'02')",
+        "INSERT INTO anchor_state(pool,activation_cursor) "
+        "VALUES(0,0)",
+        "INSERT INTO nullifiers(nf,pool,height) "
+        "VALUES(x'ff01',0,60)",
+        "INSERT INTO stage_cursor(name,cursor,updated_at) "
+        "VALUES('utxo_apply',200,1)",
+        "INSERT INTO progress_meta(key,value) "
+        "VALUES('coins_applied_height',x'c8')",
+        /* Class B — stage journals + delta */
+        "CREATE TABLE utxo_apply_log(height INTEGER PRIMARY KEY,"
+        "status TEXT NOT NULL)",
+        "INSERT INTO utxo_apply_log VALUES(200,'ok')",
+        "CREATE TABLE validate_headers_log(height INTEGER "
+        "PRIMARY KEY, ok INTEGER NOT NULL)",
+        "INSERT INTO validate_headers_log VALUES(200,1)",
+        "CREATE TABLE utxo_apply_delta(height INTEGER PRIMARY KEY,"
+        "delta BLOB NOT NULL)",
+        "INSERT INTO utxo_apply_delta VALUES(200,x'00')",
+        /* Class D — producer session */
+        "CREATE TABLE consensus_state_producer_session("
+        "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+        "epoch BLOB NOT NULL)",
+        "INSERT INTO consensus_state_producer_session "
+        "VALUES(1,x'abcd')",
+        /* Class C — projections that MUST stay in progress.kv */
+        "CREATE TABLE address_index(addr BLOB, height INTEGER)",
+        "INSERT INTO address_index VALUES(x'01',1)",
+        "CREATE TABLE txindex(txid BLOB PRIMARY KEY, off INTEGER)",
+        "INSERT INTO txindex VALUES(x'02',1)",
+        "CREATE TABLE created_outputs(txid BLOB, vout INTEGER)",
+        "INSERT INTO created_outputs VALUES(x'03',0)",
+    };
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(script) / sizeof(script[0]); i++)
+        ok = flip_exec(db, script[i]);
+    return ok;
+}
+
 /* Build a populated progress.kv: the 7 fingerprint kernel tables, a
  * representative Class B set (utxo_apply_log, validate_headers_log,
  * utxo_apply_delta), a Class D producer session, and Class C projections
@@ -121,68 +193,22 @@ static bool flip_build_source(const char *dir)
         if (db) sqlite3_close(db);
         return false;
     }
-    bool ok = coins_kv_ensure_schema(db) && anchor_kv_ensure_schema(db) &&
-              nullifier_kv_ensure_schema(db) && progress_meta_table_ensure(db) &&
-              stage_table_ensure(db);
+    bool ok = flip_ensure_source_schemas(db);
 
-    for (int i = 0; ok && i < 3; i++) {
-        uint8_t txid[32];
-        memset(txid, 0, 32);
-        txid[0] = (uint8_t)(0x40 + i);
-        txid[31] = 0xC0;
-        uint8_t script[4] = {0x76, 0xa9, 0x14, (uint8_t)i};
-        ok = coins_kv_add(db, txid, (uint32_t)i, 9000 + i, 200 + i, i == 0,
-                          script, sizeof(script));
-    }
+    ok = flip_seed_source_coins(db, ok);
 
-    ok = ok &&
-        flip_exec(db, "INSERT INTO sprout_anchors(anchor,height,tree) "
-                      "VALUES(x'dd01',201,x'01')") &&
-        flip_exec(db, "INSERT INTO sapling_anchors(anchor,height,tree) "
-                      "VALUES(x'ee01',202,x'02')") &&
-        flip_exec(db, "INSERT INTO anchor_state(pool,activation_cursor) "
-                      "VALUES(0,0)") &&
-        flip_exec(db, "INSERT INTO nullifiers(nf,pool,height) "
-                      "VALUES(x'ff01',0,60)") &&
-        flip_exec(db, "INSERT INTO stage_cursor(name,cursor,updated_at) "
-                      "VALUES('utxo_apply',200,1)") &&
-        flip_exec(db, "INSERT INTO progress_meta(key,value) "
-                      "VALUES('coins_applied_height',x'c8')") &&
-        /* Class B — stage journals + delta */
-        flip_exec(db, "CREATE TABLE utxo_apply_log(height INTEGER PRIMARY KEY,"
-                      "status TEXT NOT NULL)") &&
-        flip_exec(db, "INSERT INTO utxo_apply_log VALUES(200,'ok')") &&
-        flip_exec(db, "CREATE TABLE validate_headers_log(height INTEGER "
-                      "PRIMARY KEY, ok INTEGER NOT NULL)") &&
-        flip_exec(db, "INSERT INTO validate_headers_log VALUES(200,1)") &&
-        flip_exec(db, "CREATE TABLE utxo_apply_delta(height INTEGER PRIMARY KEY,"
-                      "delta BLOB NOT NULL)") &&
-        flip_exec(db, "INSERT INTO utxo_apply_delta VALUES(200,x'00')") &&
-        /* Class D — producer session */
-        flip_exec(db, "CREATE TABLE consensus_state_producer_session("
-                      "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
-                      "epoch BLOB NOT NULL)") &&
-        flip_exec(db, "INSERT INTO consensus_state_producer_session "
-                      "VALUES(1,x'abcd')") &&
-        /* Class C — projections that MUST stay in progress.kv */
-        flip_exec(db, "CREATE TABLE address_index(addr BLOB, height INTEGER)") &&
-        flip_exec(db, "INSERT INTO address_index VALUES(x'01',1)") &&
-        flip_exec(db, "CREATE TABLE txindex(txid BLOB PRIMARY KEY, off INTEGER)") &&
-        flip_exec(db, "INSERT INTO txindex VALUES(x'02',1)") &&
-        flip_exec(db, "CREATE TABLE created_outputs(txid BLOB, vout INTEGER)") &&
-        flip_exec(db, "INSERT INTO created_outputs VALUES(x'03',0)");
+    ok = ok && flip_exec_source_script(db);
 
     sqlite3_close(db);
     return ok;
 }
 
-static int test_consensus_db_flip_platform_arm(void);
-static int test_consensus_db_flip_platform_arm(void)
+/* ── 1. FRESH datadir: no progress.kv → clean no-op ───────────────── */
+static int flip_check_fresh_noop(void)
 {
     int failures = 0;
     char err[256];
 
-    /* ── 1. FRESH datadir: no progress.kv → clean no-op ───────────────── */
     {
         char fresh[256];
         test_make_tmpdir(fresh, sizeof(fresh), "consensus_db_flip", "fresh");
@@ -195,8 +221,15 @@ static int test_consensus_db_flip_platform_arm(void)
             consensus_db_drop_migrated_from_progress(fresh, err, sizeof(err)));
         test_cleanup_tmpdir(fresh);
     }
+    return failures;
+}
 
-    /* ── 2. POPULATED progress.kv: migrate + drop split ───────────────── */
+/* ── 2. POPULATED progress.kv: migrate + drop split ───────────────── */
+static int flip_check_populated_split(void)
+{
+    int failures = 0;
+    char err[256];
+
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "consensus_db_flip", "split");
@@ -295,8 +328,15 @@ static int test_consensus_db_flip_platform_arm(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── 4a. KILL-9 at migrate boundary (child migrates, _exit before drop) */
+/* ── 4a. KILL-9 at migrate boundary (child migrates, _exit before drop) */
+static int flip_check_crash_at_migrate(void)
+{
+    int failures = 0;
+    char err[256];
+
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "consensus_db_flip", "kill_migrate");
@@ -328,8 +368,15 @@ static int test_consensus_db_flip_platform_arm(void)
             flip_count(cpath, "coins") == 3);
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── 4b. KILL-9 at drop boundary (child migrates+drops, _exit) ─────── */
+/* ── 4b. KILL-9 at drop boundary (child migrates+drops, _exit) ─────── */
+static int flip_check_crash_at_drop(void)
+{
+    int failures = 0;
+    char err[256];
+
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "consensus_db_flip", "kill_drop");
@@ -361,8 +408,14 @@ static int test_consensus_db_flip_platform_arm(void)
             !flip_table_exists(ppath, "coins"));
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── kernel_store_path shim: consensus.db when present, else progress.kv */
+/* ── kernel_store_path shim: consensus.db when present, else progress.kv */
+static int flip_check_kernel_store_path_fallback(void)
+{
+    int failures = 0;
+
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "consensus_db_flip", "path");
@@ -381,12 +434,19 @@ static int test_consensus_db_flip_platform_arm(void)
             strstr(out, "consensus.db") != NULL);
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── STEADY-STATE finalize is cheap: no spurious txn/open on post-flip boots.
-     * (1) An already-drained drop (ndrop==0) opens progress.kv to enumerate but
-     *     takes NO BEGIN IMMEDIATE write transaction.
-     * (2) Once the schema marker is stamped, consensus_db_finalize_flip
-     *     short-circuits — it does not open progress.kv at all. */
+/* ── STEADY-STATE finalize is cheap: no spurious txn/open on post-flip boots.
+ * (1) An already-drained drop (ndrop==0) opens progress.kv to enumerate but
+ *     takes NO BEGIN IMMEDIATE write transaction.
+ * (2) Once the schema marker is stamped, consensus_db_finalize_flip
+ *     short-circuits — it does not open progress.kv at all. */
+static int flip_check_steady_state_finalize(void)
+{
+    int failures = 0;
+    char err[256];
+
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "consensus_db_flip", "steady");
@@ -432,16 +492,23 @@ static int test_consensus_db_flip_platform_arm(void)
         if (cdb) sqlite3_close(cdb);
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-    /* ── DOWNGRADE MARKER: a consensus.db schema marker NEWER than this
-     *    binary's CONSENSUS_DB_SCHEMA_VERSION must be a loud refusal, never a
-     *    silent re-flip. Silently treating a future marker as "not yet
-     *    flipped" would re-run drop_migrated_from_progress and overwrite the
-     *    newer marker with this (older) binary's version — exactly the
-     *    binary-downgrade-against-a-newer-datadir hazard. Prove: (1) the
-     *    predicate fires and names both versions, (2) finalize_flip refuses
-     *    (returns false) WITHOUT dropping progress.kv's still-present kernel
-     *    tables and WITHOUT overwriting the marker. */
+/* ── DOWNGRADE MARKER: a consensus.db schema marker NEWER than this
+ *    binary's CONSENSUS_DB_SCHEMA_VERSION must be a loud refusal, never a
+ *    silent re-flip. Silently treating a future marker as "not yet
+ *    flipped" would re-run drop_migrated_from_progress and overwrite the
+ *    newer marker with this (older) binary's version — exactly the
+ *    binary-downgrade-against-a-newer-datadir hazard. Prove: (1) the
+ *    predicate fires and names both versions, (2) finalize_flip refuses
+ *    (returns false) WITHOUT dropping progress.kv's still-present kernel
+ *    tables and WITHOUT overwriting the marker. */
+static int flip_check_downgrade_refusal(void)
+{
+    int failures = 0;
+    char err[256];
+
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "consensus_db_flip", "downgrade");
@@ -513,6 +580,21 @@ static int test_consensus_db_flip_platform_arm(void)
         if (cdb) sqlite3_close(cdb);
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
+
+static int test_consensus_db_flip_platform_arm(void);
+static int test_consensus_db_flip_platform_arm(void)
+{
+    int failures = 0;
+
+    failures += flip_check_fresh_noop();
+    failures += flip_check_populated_split();
+    failures += flip_check_crash_at_migrate();
+    failures += flip_check_crash_at_drop();
+    failures += flip_check_kernel_store_path_fallback();
+    failures += flip_check_steady_state_finalize();
+    failures += flip_check_downgrade_refusal();
 
     printf("consensus_db_flip: %d failures\n", failures);
     return failures;

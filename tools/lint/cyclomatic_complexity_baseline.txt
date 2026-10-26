@@ -1572,8 +1572,6 @@ tests/harness/src/test_command_input_bounds.c:t_fleet_ledger_numeric_keys:18
 tests/harness/src/test_command_input_bounds.c:t_frame_budget:19
 tests/harness/src/test_confine.c:c_confine_normal_ops:18
 tests/harness/src/test_confine.c:c_confine_serving_normal_ops:26
-tests/harness/src/test_consensus_db_flip.c:flip_build_source:29
-tests/harness/src/test_consensus_db_flip.c:test_consensus_db_flip_platform_arm:26
 tests/harness/src/test_consensus_parity.c:test_consensus_parity:18
 tests/harness/src/test_consensus_reject_index.c:test_consensus_reject_index:28
 tests/harness/src/test_consensus_state_chain_binding.c:test_consensus_state_chain_binding:37
