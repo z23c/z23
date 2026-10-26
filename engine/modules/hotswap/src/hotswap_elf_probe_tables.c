@@ -121,17 +121,12 @@ bool dynsym_count_from_hash(const struct img *im, uint64_t hash_off,
     return true;
 }
 
-bool dynsym_count_from_gnu_hash(const struct img *im, uint64_t gh_off,
-                                uint64_t *out_count)
+/* The DT_GNU_HASH header's shape caps, checked before any of its arrays are
+ * reached: nonzero bucket and maskword counts under their caps, a power-of-two
+ * maskword count, and a first hashed index under the symbol cap. */
+static bool gnu_hash_header_shape_ok(uint32_t nbuckets, uint32_t symndx,
+                                     uint32_t maskwords)
 {
-    const unsigned char *h = at(im, gh_off, 16);
-    if (!h)
-        return false;
-    uint32_t nbuckets  = rd32(h + 0);
-    uint32_t symndx    = rd32(h + 4);  /* index of the first HASHED symbol */
-    uint32_t maskwords = rd32(h + 8);
-    /* h + 12 is shift2, unused for sizing. */
-
     if (nbuckets == 0 || nbuckets > GNU_HASH_MAX_BUCKETS)
         return false;
     if (maskwords == 0 || maskwords > GNU_HASH_MAX_MASKWORDS)
@@ -140,15 +135,17 @@ bool dynsym_count_from_gnu_hash(const struct img *im, uint64_t gh_off,
         return false; /* the bloom filter's mask requires a power of two */
     if (symndx > ZCL_HOTSWAP_ELF_PROBE_MAX_DYNSYMS)
         return false;
+    return true;
+}
 
-    /* All of these are bounded by the caps above, so the arithmetic cannot
-     * overflow 64 bits: 16 + 2^16*8 + 2^20*4 is well under 2^24. */
-    uint64_t buckets_off = gh_off + 16 + (uint64_t)maskwords * 8u;
-    const unsigned char *buckets = at(im, buckets_off, (uint64_t)nbuckets * 4u);
-    if (!buckets)
-        return false;
-    uint64_t chain_off = buckets_off + (uint64_t)nbuckets * 4u;
-
+/* Scans the bucket array for the highest symbol index any bucket stores, so
+ * the chain walk can start at the longest reach. *out_any stays false when
+ * every bucket is empty; a head outside [symndx, the symbol cap] cannot occur
+ * in a well-formed table. */
+static bool gnu_hash_max_bucket_head(const unsigned char *buckets,
+                                     uint32_t nbuckets, uint32_t symndx,
+                                     uint32_t *out_last, bool *out_any)
+{
     uint32_t last = 0;
     bool any = false;
     for (uint32_t i = 0; i < nbuckets; i++) {
@@ -162,6 +159,54 @@ bool dynsym_count_from_gnu_hash(const struct img *im, uint64_t gh_off,
             any = true;
         }
     }
+    *out_last = last;
+    *out_any = any;
+    return true;
+}
+
+/* A chain walk step may only step on symbol indices from symndx up to the
+ * symbol cap. */
+static bool gnu_hash_chain_index_ok(uint32_t idx, uint32_t symndx)
+{
+    return idx >= symndx && idx <= ZCL_HOTSWAP_ELF_PROBE_MAX_DYNSYMS;
+}
+
+/* The terminator index + 1 is the table size, under the same symbol cap as
+ * every other symbol count here. */
+static bool gnu_hash_count_from_chain_end(uint32_t idx, uint64_t *out_count)
+{
+    if ((uint64_t)idx + 1u > ZCL_HOTSWAP_ELF_PROBE_MAX_DYNSYMS)
+        return false;
+    *out_count = (uint64_t)idx + 1u;
+    return true;
+}
+
+bool dynsym_count_from_gnu_hash(const struct img *im, uint64_t gh_off,
+                                uint64_t *out_count)
+{
+    const unsigned char *h = at(im, gh_off, 16);
+    if (!h)
+        return false;
+    uint32_t nbuckets  = rd32(h + 0);
+    uint32_t symndx    = rd32(h + 4);  /* index of the first HASHED symbol */
+    uint32_t maskwords = rd32(h + 8);
+    /* h + 12 is shift2, unused for sizing. */
+
+    if (!gnu_hash_header_shape_ok(nbuckets, symndx, maskwords))
+        return false;
+
+    /* All of these are bounded by the caps above, so the arithmetic cannot
+     * overflow 64 bits: 16 + 2^16*8 + 2^20*4 is well under 2^24. */
+    uint64_t buckets_off = gh_off + 16 + (uint64_t)maskwords * 8u;
+    const unsigned char *buckets = at(im, buckets_off, (uint64_t)nbuckets * 4u);
+    if (!buckets)
+        return false;
+    uint64_t chain_off = buckets_off + (uint64_t)nbuckets * 4u;
+
+    uint32_t last = 0;
+    bool any = false;
+    if (!gnu_hash_max_bucket_head(buckets, nbuckets, symndx, &last, &any))
+        return false;
     if (!any) {
         /* No hashed symbols at all: the table holds exactly the symndx
          * unhashed (local/undefined) entries and nothing more. */
@@ -174,7 +219,7 @@ bool dynsym_count_from_gnu_hash(const struct img *im, uint64_t gh_off,
     for (uint32_t steps = 0; ; steps++) {
         if (steps > ZCL_HOTSWAP_ELF_PROBE_MAX_DYNSYMS)
             return false;
-        if (idx < symndx || idx > ZCL_HOTSWAP_ELF_PROBE_MAX_DYNSYMS)
+        if (!gnu_hash_chain_index_ok(idx, symndx))
             return false;
         uint64_t coff = chain_off + (uint64_t)(idx - symndx) * 4u;
         const unsigned char *c = at(im, coff, 4);
@@ -187,10 +232,7 @@ bool dynsym_count_from_gnu_hash(const struct img *im, uint64_t gh_off,
             return false;
         idx++;
     }
-    if ((uint64_t)idx + 1u > ZCL_HOTSWAP_ELF_PROBE_MAX_DYNSYMS)
-        return false;
-    *out_count = (uint64_t)idx + 1u;
-    return true;
+    return gnu_hash_count_from_chain_end(idx, out_count);
 }
 
 #endif /* !_WIN32 */
