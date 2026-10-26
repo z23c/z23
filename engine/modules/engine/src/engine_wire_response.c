@@ -864,21 +864,28 @@ static bool cli_reply_root(const struct engine_vendor *vendor,
     return false;
 }
 
+/* Copy TEXT[0..LEN) into a fresh NUL-terminated buffer owned by OUT. */
+static bool cli_reply_store(const char *text, size_t len,
+                            struct engine_reply *out)
+{
+    char *copy = zcl_malloc(len + 1u, "engine_cli_reply_text");
+    if (!copy)
+        LOG_FAIL("engine", "cannot allocate %zu bytes of CLI reply text",
+                 len + 1u);
+    memcpy(copy, text, len);
+    copy[len] = '\0';
+    out->text = copy;
+    out->text_len = len;
+    return true;
+}
+
 /* The codex last-message file IS the reply: no envelope, no framing. */
 static bool cli_reply_verbatim(const char *body, size_t len,
                                struct engine_reply *out)
 {
     if (!body || len > ENGINE_MAX_TEXT_BYTES)
         LOG_FAIL("engine", "refusing a last message over the text cap");
-    char *copy = zcl_malloc(len + 1u, "engine_cli_reply_text");
-    if (!copy)
-        LOG_FAIL("engine", "cannot allocate %zu bytes of CLI reply text",
-                 len + 1u);
-    memcpy(copy, body, len);
-    copy[len] = '\0';
-    out->text = copy;
-    out->text_len = len;
-    return true;
+    return cli_reply_store(body, len, out);
 }
 
 static bool cli_reply_json_text(const struct engine_vendor *vendor,
@@ -912,17 +919,9 @@ static bool cli_reply_json_text(const struct engine_vendor *vendor,
         LOG_FAIL("engine", "refusing %zu bytes of CLI reply text: over the cap",
                  text_len);
     }
-    char *copy = zcl_malloc(text_len + 1u, "engine_cli_reply_text");
-    if (!copy) {
-        json_free(&root);
-        LOG_FAIL("engine", "cannot allocate %zu bytes of CLI reply text",
-                 text_len + 1u);
-    }
-    memcpy(copy, text, text_len + 1u);
+    const bool stored = cli_reply_store(text, text_len, out);
     json_free(&root);
-    out->text = copy;
-    out->text_len = text_len;
-    return true;
+    return stored;
 }
 
 bool engine_cli_reply_text(const struct engine_vendor *vendor,

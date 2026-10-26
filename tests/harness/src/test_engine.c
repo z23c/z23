@@ -2905,7 +2905,8 @@ static int case_engine_unit_codex_review_e2e(void)
                    getenv("PATH") ? getenv("PATH") : "");
     (void)snprintf(cmd, sizeof(cmd),
         "env PATH='%s' OPENAI_API_KEY=sk-must-not-leak "
-        "%s --engine gpt-sol --task %s --no-group --yes-dispatch "
+        "%s --engine gpt-sol --task %s --no-group --kind review "
+        "--yes-dispatch "
         "--worktree %s --state-dir %s --rounds 1 >%s/run.log 2>&1",
         path, ENGINE_UNIT_BIN, task, worktree, state, dir);
     TEST_DISCARD(system(cmd));
