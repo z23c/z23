@@ -335,6 +335,189 @@ static const char *sov_cap_reason(enum sync_trust_state st,
     return "denied";
 }
 
+/* ── v2 dump: one collected state, small emitters ──────────────────────
+ *
+ * sovereignty_dump_state_json collects every store read into one
+ * sov_state_scan so the lock-scoped collection and the JSON emission can
+ * each live in a helper below. The designated-initializer defaults are the
+ * honest not-open / not-locked answers the dump reports verbatim. */
+struct sov_state_scan {
+    bool applied_found;
+    bool applied_ok;
+    bool proven_authority;
+    bool self_folded;
+    bool hstar_ok;
+    bool coins_cover_hstar;
+    bool self_derived;
+    int32_t applied;
+    int32_t hstar;
+    int32_t served_floor;
+    char self_reason[128];
+    int64_t sprout_anchor_rows;
+    int64_t sapling_anchor_rows;
+    int64_t sprout_nullifier_rows;
+    int64_t sapling_nullifier_rows;
+    char provenance[320];
+    bool provenance_present;
+};
+
+/* One lock-scoped read pass: every predicate, per-pool row count and the
+ * importer provenance stamp the v2 dump reports. The caller holds the
+ * progress-store read lock (progress_store_tx_trylock in
+ * sovereignty_dump_state_json); this releases it exactly where the inline
+ * code released it, before any JSON is emitted. */
+static void sov_scan_locked_state(sqlite3 *pdb, struct sov_state_scan *scan)
+{
+    scan->applied_ok = coins_kv_get_applied_height(pdb, &scan->applied,
+                                                   &scan->applied_found);
+    scan->proven_authority = coins_kv_is_proven_authority(pdb, NULL);
+    scan->self_folded = coins_kv_contains_refold_marker(pdb);
+    scan->hstar_ok = reducer_frontier_compute_hstar(pdb, &scan->hstar,
+                                                    &scan->served_floor);
+    if (scan->hstar_ok) {
+        scan->coins_cover_hstar = scan->applied_ok && scan->applied_found &&
+            scan->applied >= scan->hstar + 1;
+        scan->self_derived = coins_kv_tip_is_self_derived(
+            pdb, scan->hstar, scan->self_reason, sizeof(scan->self_reason));
+        if (scan->self_derived)
+            snprintf(scan->self_reason, sizeof(scan->self_reason), "ok");
+    } else {
+        snprintf(scan->self_reason, sizeof(scan->self_reason),
+                 "hstar_unavailable");
+    }
+
+    /* Per-pool shielded-history row counts + the importer's provenance
+     * stamp (see the sov_* helpers above) — same lock scope as the reads
+     * above; progress_meta_get recursively acquires progress_store_tx_lock
+     * itself, matching the coins_kv_tip_is_self_derived precedent. */
+    scan->sprout_anchor_rows = sov_count_rows(pdb, "sprout_anchors", NULL);
+    scan->sapling_anchor_rows = sov_count_rows(pdb, "sapling_anchors", NULL);
+    scan->sprout_nullifier_rows = sov_count_rows(pdb, "nullifiers",
+                                                 " WHERE pool=0");
+    scan->sapling_nullifier_rows = sov_count_rows(pdb, "nullifiers",
+                                                  " WHERE pool=1");
+    size_t prov_len = 0;
+    bool prov_found = false;
+    bool prov_ok = progress_meta_get(pdb, SHIELDED_IMPORT_PROVENANCE_KEY,
+                                     scan->provenance,
+                                     sizeof(scan->provenance) - 1,
+                                     &prov_len, &prov_found);
+    if (prov_ok && prov_found) {
+        size_t copy = prov_len < sizeof(scan->provenance) - 1
+                          ? prov_len : sizeof(scan->provenance) - 1;
+        scan->provenance[copy] = '\0';
+        scan->provenance_present = true;
+    } else {
+        scan->provenance[0] = '\0';
+    }
+    progress_store_tx_unlock();
+}
+
+/* Pure label mapping for the "authority_posture" field — what the store
+ * provenance looks like, independent of hstar availability. */
+static const char *sov_authority_posture_name(bool progress_open,
+                                              bool proven_authority,
+                                              bool self_folded)
+{
+    return !progress_open ? "unknown_no_progress_store" :
+        !proven_authority ? "not_proven" :
+        self_folded ? "self_folded_marker_present" :
+        "proven_but_not_self_folded";
+}
+
+/* The busy (trylock-miss) answer: same schema, honestly-labelled
+ * stale-or-unknown values served from the last-known-good trust-tier
+ * cache above. */
+static void sov_emit_busy_cached(struct json_value *out)
+{
+    struct sov_trust_cache cached;
+    bool have_cache = sov_trust_cache_load(&cached);
+    json_push_kv_str(out, "schema", "zcl.sovereignty.v2");
+    json_push_kv_int(out, "schema_version", 2);
+    json_push_kv_bool(out, "progress_store_open", true);
+    json_push_kv_str(out, "durable_store_status",
+                     have_cache ? "busy_stale_cache"
+                                : "unknown_progress_store_busy");
+    json_push_kv_bool(out, "served_from_cache", have_cache);
+    json_push_kv_str(out, "trust_mode",
+                     have_cache ? cached.trust_mode : "unknown");
+    json_push_kv_str(out, "authority_posture",
+                     have_cache ? cached.authority_posture
+                                : "unknown_progress_store_busy");
+    json_push_kv_str(out, "trust_state",
+                     have_cache ? cached.trust_state : "unknown");
+}
+
+/* The identity + provenance-predicate fields of the fresh (non-busy)
+ * answer, emitted verbatim from one sov_state_scan. */
+static void sov_emit_core_state(struct json_value *out,
+                                const struct sov_state_scan *scan,
+                                bool progress_open,
+                                const char *authority_posture,
+                                const char *trust_mode)
+{
+    json_push_kv_str(out, "schema", "zcl.sovereignty.v2");
+    json_push_kv_int(out, "schema_version", 2);
+    json_push_kv_bool(out, "progress_store_open", progress_open);
+    json_push_kv_str(out, "durable_store_status",
+                     !progress_open ? "progress_store_unavailable"
+                                    : "available");
+    json_push_kv_bool(out, "coins_kv_proven_authority",
+                      scan->proven_authority);
+    json_push_kv_bool(out, "self_folded_marker", scan->self_folded);
+    json_push_kv_bool(out, "hstar_available", scan->hstar_ok);
+    json_push_kv_int(out, "hstar", scan->hstar_ok ? scan->hstar : -1);
+    json_push_kv_bool(out, "coins_applied_height_present",
+                      scan->applied_found);
+    json_push_kv_int(out, "coins_applied_height",
+                     scan->applied_found ? scan->applied : -1);
+    json_push_kv_bool(out, "coins_cover_hstar", scan->coins_cover_hstar);
+    json_push_kv_bool(out, "self_derived_tip_static_checks",
+                      scan->self_derived);
+    json_push_kv_str(out, "self_derived_reason", scan->self_reason);
+    json_push_kv_str(out, "authority_posture", authority_posture);
+    json_push_kv_str(out, "trust_mode", trust_mode);
+}
+
+/* What is gated at the CURRENT posture — probe the actual guard so this
+ * report can never drift from the enforcement it describes (one source
+ * of truth: sovereignty_guard_allow). */
+static void sov_emit_gated(struct json_value *out, bool progress_open,
+                           bool proven_authority, bool self_folded)
+{
+    char mint_reason[96] = {0};
+    char spend_reason[96] = {0};
+    bool mint_allowed = progress_open &&
+        sovereignty_guard_allow("mint", mint_reason, sizeof(mint_reason));
+    bool spend_allowed = progress_open &&
+        sovereignty_guard_allow("wallet_spend", spend_reason,
+                                sizeof(spend_reason));
+
+    /* Snapshot/bundle export requires BOTH proven_authority AND the
+     * self_folded marker (engine/composition/src/bundle_exporter.c bx_qualified: "coins
+     * not proven authority" / "coins lacks self-folded refold marker") — a
+     * stricter, non-disjunctive gate than G-SOV's `self_derived` above (which
+     * lets an un-migrated/bare store through on part 3's first disjunct, and
+     * needs hstar for part 2). Mirror bx_qualified's exact predicate here so
+     * this field never disagrees with the export gate it describes, and
+     * stays reportable even when hstar isn't (yet) computable. */
+    bool export_allowed = proven_authority && self_folded;
+
+    struct json_value gated = {0};
+    json_set_object(&gated);
+    json_push_kv_bool(&gated, "mint_mining_allowed", mint_allowed);
+    json_push_kv_bool(&gated, "wallet_spend_allowed", spend_allowed);
+    json_push_kv_bool(&gated, "snapshot_bundle_export_allowed",
+                      export_allowed);
+    json_push_kv_bool(&gated, "tip_following_allowed", true);
+    json_push_kv_str(&gated, "note",
+                     "tip-following (reducer fold / P2P relay / explorer / "
+                     "wallet viewing) is never gated; mint, wallet spend, "
+                     "and snapshot/bundle export require self_folded");
+    json_push_kv(out, "gated", &gated);
+    json_free(&gated);
+}
+
 bool sovereignty_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;
@@ -355,112 +538,25 @@ bool sovereignty_dump_state_json(struct json_value *out, const char *key)
      * it never inherits that block. */
     bool progress_locked = progress_open && progress_store_tx_trylock();
     if (progress_open && !progress_locked) {
-        struct sov_trust_cache cached;
-        bool have_cache = sov_trust_cache_load(&cached);
-        json_push_kv_str(out, "schema", "zcl.sovereignty.v2");
-        json_push_kv_int(out, "schema_version", 2);
-        json_push_kv_bool(out, "progress_store_open", true);
-        json_push_kv_str(out, "durable_store_status",
-                         have_cache ? "busy_stale_cache"
-                                    : "unknown_progress_store_busy");
-        json_push_kv_bool(out, "served_from_cache", have_cache);
-        json_push_kv_str(out, "trust_mode",
-                         have_cache ? cached.trust_mode : "unknown");
-        json_push_kv_str(out, "authority_posture",
-                         have_cache ? cached.authority_posture
-                                    : "unknown_progress_store_busy");
-        json_push_kv_str(out, "trust_state",
-                         have_cache ? cached.trust_state : "unknown");
+        sov_emit_busy_cached(out);
         return true;
     }
 
-    bool applied_found = false;
-    bool applied_ok = false;
-    bool proven_authority = false;
-    bool self_folded = false;
-    bool hstar_ok = false;
-    bool coins_cover_hstar = false;
-    bool self_derived = false;
-    int32_t applied = -1;
-    int32_t hstar = -1;
-    int32_t served_floor = -1;
-    char self_reason[128] = "progress_store_not_open";
-    int64_t sprout_anchor_rows = 0;
-    int64_t sapling_anchor_rows = 0;
-    int64_t sprout_nullifier_rows = 0;
-    int64_t sapling_nullifier_rows = 0;
-    char provenance[320] = {0};
-    bool provenance_present = false;
+    struct sov_state_scan scan = {
+        .applied = -1,
+        .hstar = -1,
+        .served_floor = -1,
+        .self_reason = "progress_store_not_open",
+    };
+    if (progress_locked)
+        sov_scan_locked_state(pdb, &scan);
 
-    if (progress_locked) {
-        applied_ok = coins_kv_get_applied_height(pdb, &applied,
-                                                 &applied_found);
-        proven_authority = coins_kv_is_proven_authority(pdb, NULL);
-        self_folded = coins_kv_contains_refold_marker(pdb);
-        hstar_ok = reducer_frontier_compute_hstar(pdb, &hstar, &served_floor);
-        if (hstar_ok) {
-            coins_cover_hstar = applied_ok && applied_found &&
-                applied >= hstar + 1;
-            self_derived = coins_kv_tip_is_self_derived(
-                pdb, hstar, self_reason, sizeof(self_reason));
-            if (self_derived)
-                snprintf(self_reason, sizeof(self_reason), "ok");
-        } else {
-            snprintf(self_reason, sizeof(self_reason), "hstar_unavailable");
-        }
-
-        /* Per-pool shielded-history row counts + the importer's provenance
-         * stamp (see the sov_* helpers above) — same lock scope as the reads
-         * above; progress_meta_get recursively acquires progress_store_tx_lock
-         * itself, matching the coins_kv_tip_is_self_derived precedent. */
-        sprout_anchor_rows = sov_count_rows(pdb, "sprout_anchors", NULL);
-        sapling_anchor_rows = sov_count_rows(pdb, "sapling_anchors", NULL);
-        sprout_nullifier_rows = sov_count_rows(pdb, "nullifiers",
-                                               " WHERE pool=0");
-        sapling_nullifier_rows = sov_count_rows(pdb, "nullifiers",
-                                                " WHERE pool=1");
-        size_t prov_len = 0;
-        bool prov_found = false;
-        bool prov_ok = progress_meta_get(pdb, SHIELDED_IMPORT_PROVENANCE_KEY,
-                                         provenance, sizeof(provenance) - 1,
-                                         &prov_len, &prov_found);
-        if (prov_ok && prov_found) {
-            size_t copy = prov_len < sizeof(provenance) - 1
-                              ? prov_len : sizeof(provenance) - 1;
-            provenance[copy] = '\0';
-            provenance_present = true;
-        } else {
-            provenance[0] = '\0';
-        }
-        progress_store_tx_unlock();
-    }
-
-    const char *authority_posture =
-        !progress_open ? "unknown_no_progress_store" :
-        !proven_authority ? "not_proven" :
-        self_folded ? "self_folded_marker_present" :
-        "proven_but_not_self_folded";
-    const char *trust_mode = sovereignty_trust_mode(proven_authority,
-                                                     self_folded);
-
-    json_push_kv_str(out, "schema", "zcl.sovereignty.v2");
-    json_push_kv_int(out, "schema_version", 2);
-    json_push_kv_bool(out, "progress_store_open", progress_open);
-    json_push_kv_str(out, "durable_store_status",
-                     !progress_open ? "progress_store_unavailable"
-                                    : "available");
-    json_push_kv_bool(out, "coins_kv_proven_authority", proven_authority);
-    json_push_kv_bool(out, "self_folded_marker", self_folded);
-    json_push_kv_bool(out, "hstar_available", hstar_ok);
-    json_push_kv_int(out, "hstar", hstar_ok ? hstar : -1);
-    json_push_kv_bool(out, "coins_applied_height_present", applied_found);
-    json_push_kv_int(out, "coins_applied_height",
-                     applied_found ? applied : -1);
-    json_push_kv_bool(out, "coins_cover_hstar", coins_cover_hstar);
-    json_push_kv_bool(out, "self_derived_tip_static_checks", self_derived);
-    json_push_kv_str(out, "self_derived_reason", self_reason);
-    json_push_kv_str(out, "authority_posture", authority_posture);
-    json_push_kv_str(out, "trust_mode", trust_mode);
+    const char *authority_posture = sov_authority_posture_name(
+        progress_open, scan.proven_authority, scan.self_folded);
+    const char *trust_mode = sovereignty_trust_mode(scan.proven_authority,
+                                                    scan.self_folded);
+    sov_emit_core_state(out, &scan, progress_open, authority_posture,
+                        trust_mode);
 
     /* ── v2: the central trust→capability table's view of this posture ──────
      * Derived from the SAME three provenance predicates the guard routes
@@ -469,7 +565,8 @@ bool sovereignty_dump_state_json(struct json_value *out, const char *key)
      * self_derived is only computed when hstar is available; when it is not,
      * it is false (the conservative floor), matching the guard's own fail. */
     enum sync_trust_state trust_st =
-        sync_trust_derive(proven_authority, self_folded, self_derived);
+        sync_trust_derive(scan.proven_authority, scan.self_folded,
+                          scan.self_derived);
     if (progress_open)
         sov_stamp_transitions(pdb, trust_st);
     uint32_t cap_mask = sync_trust_caps(trust_st);
@@ -523,10 +620,11 @@ bool sovereignty_dump_state_json(struct json_value *out, const char *key)
      * populated, while `self_folded` stays false until sovereign promotion. */
     struct json_value pools = {0};
     json_set_object(&pools);
-    json_push_kv_int(&pools, "sprout_anchors", sprout_anchor_rows);
-    json_push_kv_int(&pools, "sapling_anchors", sapling_anchor_rows);
-    json_push_kv_int(&pools, "sprout_nullifiers", sprout_nullifier_rows);
-    json_push_kv_int(&pools, "sapling_nullifiers", sapling_nullifier_rows);
+    json_push_kv_int(&pools, "sprout_anchors", scan.sprout_anchor_rows);
+    json_push_kv_int(&pools, "sapling_anchors", scan.sapling_anchor_rows);
+    json_push_kv_int(&pools, "sprout_nullifiers", scan.sprout_nullifier_rows);
+    json_push_kv_int(&pools, "sapling_nullifiers",
+                     scan.sapling_nullifier_rows);
     json_push_kv(out, "shielded_pool_counts", &pools);
     json_free(&pools);
 
@@ -537,43 +635,11 @@ bool sovereignty_dump_state_json(struct json_value *out, const char *key)
      * datadir); present and "self_folded=false" right after a successful
      * import, superseded wholesale by a later sovereign bundle install. */
     json_push_kv_bool(out, "shielded_import_provenance_present",
-                      provenance_present);
-    json_push_kv_str(out, "shielded_import_provenance", provenance);
+                      scan.provenance_present);
+    json_push_kv_str(out, "shielded_import_provenance", scan.provenance);
 
-    /* What is gated at the CURRENT posture — probe the actual guard so this
-     * report can never drift from the enforcement it describes (one source
-     * of truth: sovereignty_guard_allow). */
-    char mint_reason[96] = {0};
-    char spend_reason[96] = {0};
-    bool mint_allowed = progress_open &&
-        sovereignty_guard_allow("mint", mint_reason, sizeof(mint_reason));
-    bool spend_allowed = progress_open &&
-        sovereignty_guard_allow("wallet_spend", spend_reason,
-                                sizeof(spend_reason));
-
-    /* Snapshot/bundle export requires BOTH proven_authority AND the
-     * self_folded marker (engine/composition/src/bundle_exporter.c bx_qualified: "coins
-     * not proven authority" / "coins lacks self-folded refold marker") — a
-     * stricter, non-disjunctive gate than G-SOV's `self_derived` above (which
-     * lets an un-migrated/bare store through on part 3's first disjunct, and
-     * needs hstar for part 2). Mirror bx_qualified's exact predicate here so
-     * this field never disagrees with the export gate it describes, and
-     * stays reportable even when hstar isn't (yet) computable. */
-    bool export_allowed = proven_authority && self_folded;
-
-    struct json_value gated = {0};
-    json_set_object(&gated);
-    json_push_kv_bool(&gated, "mint_mining_allowed", mint_allowed);
-    json_push_kv_bool(&gated, "wallet_spend_allowed", spend_allowed);
-    json_push_kv_bool(&gated, "snapshot_bundle_export_allowed",
-                      export_allowed);
-    json_push_kv_bool(&gated, "tip_following_allowed", true);
-    json_push_kv_str(&gated, "note",
-                     "tip-following (reducer fold / P2P relay / explorer / "
-                     "wallet viewing) is never gated; mint, wallet spend, "
-                     "and snapshot/bundle export require self_folded");
-    json_push_kv(out, "gated", &gated);
-    json_free(&gated);
+    sov_emit_gated(out, progress_open, scan.proven_authority,
+                   scan.self_folded);
 
     return true;
 }
