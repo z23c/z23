@@ -450,562 +450,9 @@ static bool svhr_queue_has_exact(struct download_manager *dm, int height,
            uint256_eq(&dm->queue[0], hash);
 }
 
-int test_stale_validate_headers_repair_condition(void)
+static int svhr_case_hstar_next_child_queued(void)
 {
-    printf("\n=== stale_validate_headers_repair condition tests ===\n");
     int failures = 0;
-
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("downstream", dir, sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_poison_rows(db, 2, "NULL", 1);
-
-        condition_engine_tick();
-
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        /* W2: the witness is now H*-ONLY. The rewind deleted the downstream
-         * poison + rewound cursors but did NOT advance the reducer frontier,
-         * so the
-         * condition stays ACTIVE (was ==0 under the old poison-gone witness
-         * shortcut — this flip IS the regression proof). */
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && cursor_for(db, "validate_headers") == 5;
-        ok = ok && cursor_for(db, "body_fetch") == 2;
-        ok = ok && validate_ok_row_exists(db, 2);
-        ok = ok && !row_exists(db, "body_fetch_log", 2);
-        /* tip_finalize_log rows MUST survive a downstream rewind — doctrine
-         * forbids deleting them. The cursor is rewound; the (ok=0) row stays. */
-        ok = ok && row_exists(db, "tip_finalize_log", 2);
-        SVHR_CHECK("stale downstream poison rewinds downstream, preserves "
-                   "tip_finalize_log, stays active until H* advances", ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    /* validate_headers is allowed to run ahead of the executable body/fold
-     * frontier. A repairable row in that future region is not actionable yet:
-     * the P2P repair authority intentionally accepts at most H*+1. Before this
-     * guard repair_target_height selected the far-ahead scan anyway, so the
-     * remedy refused its own target as missing best-header authority, raised
-     * header_repair_no_source with healthy peers, and eventually paged while H*
-     * was still climbing. Hold the future row inert until H* reaches it. */
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("scan_above_hstar_next", dir,
-                                       sizeof(dir), &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 10, 1);
-        ok = ok && seed_poison_rows(
-            db, 5, "'no-header-solution-backfill-required'", 0);
-        stale_validate_headers_repair_test_set_hstar_override(1);
-
-        ok = ok && stale_validate_headers_repair_test_repair_target(db) == -1;
-        condition_engine_tick();
-
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && !blocker_exists("header_repair_no_source");
-        ok = ok && row_exists(db, "validate_headers_log", 5);
-        SVHR_CHECK("repairable scan above H*+1 stays inert until it becomes "
-                   "actionable (no false no-source episode or page)", ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    /* A successful validate_headers recheck resolves this condition's exact
-     * invariant even when a separate downstream stage still pins H*. Before
-     * this witness split, the condition kept retrying mode=NONE and paged an
-     * operator for the unrelated downstream stall. Merely caching the repair
-     * header is covered above and remains insufficient; this fixture flips the
-     * durable verdict to ok=1, as only the unchanged validator does in
-     * production. */
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("validated_recheck_clears", dir,
-                                       sizeof(dir), &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 5, 1);
-        ok = ok && exec_sql(db,
-            "INSERT OR REPLACE INTO validate_headers_log"
-            "(height,hash,ok,fail_reason,validated_at) "
-            "VALUES(2,zeroblob(32),0,"
-            "'no-header-solution-backfill-required',1)");
-
-        condition_engine_tick();
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-
-        ok = ok && exec_sql(db,
-            "UPDATE validate_headers_log SET ok=1, fail_reason=NULL "
-            "WHERE height=2");
-        ok = ok && stage_repair_header_solution_poison_mode(db, 2) ==
-                     STAGE_REPAIR_POISON_NONE;
-
-        stale_validate_headers_repair_test_clear_backoff();
-        condition_engine_tick();
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "stale_validate_headers_repair", &snap);
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        ok = ok && got && !snap.operator_needed_emitted;
-        SVHR_CHECK("independent validate recheck clears the header condition "
-                   "while downstream H* remains pinned (no false page)", ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("solutionless_no_header", dir, sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_poison_rows(
-            db, 2, "'no-header-solution-backfill-required'", 0);
-
-        condition_engine_tick();
-
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && cursor_for(db, "validate_headers") == 5;
-        ok = ok && cursor_for(db, "body_fetch") == 5;
-        ok = ok && row_exists(db, "validate_headers_log", 2);
-        ok = ok && row_exists(db, "body_fetch_log", 2);
-        SVHR_CHECK("solutionless poison without repair header stays active", ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("solutionless_probe_fail_refetch",
-                                       dir, sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        blocks[1].nStatus |= BLOCK_HAVE_DATA;
-        ok = ok && seed_cursors(db, 5, 5);
-        stale_validate_headers_repair_test_set_hstar_override(0);
-        ok = ok && seed_poison_rows(
-            db, 1, "'no-header-solution-backfill-required'", 0);
-
-        condition_engine_tick();
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "stale_validate_headers_repair", &snap);
-
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        ok = ok && got && snap.last_outcome == COND_REMEDY_SKIP;
-        ok = ok && (blocks[1].nStatus & BLOCK_HAVE_DATA) == 0;
-        ok = ok && condition_engine_get_active_count() == 1;
-        SVHR_CHECK("header-probe failure falls back to P2P refetch instead "
-                   "of failed remedy",
-                   ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("solutionless_with_header", dir,
-                                       sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_poison_rows(
-            db, 2, "'no-header-solution-backfill-required'", 0);
-        ok = ok && seed_repair_header(db, 2);
-
-        condition_engine_tick();
-
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        /* NON-DESTRUCTIVE defer: when the repair header is available, the remedy
-         * no longer poison_rewinds a SOLUTIONLESS frontier. validate_headers
-         * self-heals the ok=0 row forward via recheck_failed_rows (060a5cb4c),
-         * so the remedy returns SKIP and PRESERVES all forward progress: the
-         * validate_headers + downstream cursors are NOT rewound and the log rows
-         * survive. The condition stays ACTIVE because H* did NOT advance;
-         * the honest reducer-frontier
-         * witness governs the clear. A destructive rewind here would delete the
-         * forward validate work and re-starve the recheck — the churn that
-         * produced the 5x-unwitnessed → operator_needed loop. */
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && cursor_for(db, "validate_headers") == 5;
-        ok = ok && cursor_for(db, "body_fetch") == 5;
-        ok = ok && row_exists(db, "validate_headers_log", 2);
-        ok = ok && row_exists(db, "body_fetch_log", 2);
-        ok = ok && row_exists(db, "tip_finalize_log", 2);
-        SVHR_CHECK("solutionless poison WITH repair header defers to "
-                   "non-destructive recheck (no rewind, progress preserved, "
-                   "stays active until H* advances)",
-                   ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("hash_mismatch", dir, sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_poison_rows(
-            db, 2, "'header-source-hash-mismatch'", 0);
-
-        condition_engine_tick();
-
-        ok = ok && stage_repair_header_solution_poison_mode(
-                         db, 2) ==
-                     STAGE_REPAIR_POISON_VALIDATE_HASH_MISMATCH;
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && cursor_for(db, "validate_headers") == 5;
-        ok = ok && cursor_for(db, "body_fetch") == 5;
-        ok = ok && row_exists(db, "validate_headers_log", 2);
-        ok = ok && row_exists(db, "body_fetch_log", 2);
-        SVHR_CHECK("header-source hash mismatch activates validate-header "
-                   "repair without destructive rewind",
-                   ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[3];
-        struct uint256 hashes[3];
-        struct uint256 repair_hash = {0};
-        bool ok = setup_condition_case("hash_mismatch_correct_header_pinned",
-                                       dir, sizeof(dir), &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_poison_rows(
-            db, 2, "'header-source-hash-mismatch'", 0);
-        ok = ok && seed_repair_header_hash(db, 2, &repair_hash);
-
-        block_index_init(&blocks[2]);
-        hashes[2] = repair_hash;
-        blocks[2].phashBlock = &hashes[2];
-        blocks[2].nHeight = 2;
-        blocks[2].nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
-        blocks[2].pprev = &blocks[1];
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &blocks[2]);
-        ms.pindex_best_header = &blocks[2];
-
-        for (int i = 0; i < 5; i++) {
-            stale_validate_headers_repair_test_clear_backoff();
-            condition_engine_tick();
-        }
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "stale_validate_headers_repair", &snap);
-
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 5;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && condition_engine_get_unresolved_count() == 1;
-        ok = ok && got && snap.attempts >= 5;
-        ok = ok && got && snap.operator_needed_emitted;
-        ok = ok && row_exists(db, "validate_headers_log", 2);
-        SVHR_CHECK("correct repair header with pinned H* remains diagnosable "
-                   "and pages",
-                   ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("served_above_hstar", dir,
-                                       sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 9, 9);
-        ok = ok && seed_poison_rows(
-            db, 2, "'header-source-hash-mismatch'", 0);
-        ok = ok && seed_finalized_tip(db, 8);
-
-        condition_engine_tick();
-
-        ok = ok && active_chain_height(&ms.chain_active) == 8;
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && row_exists(db, "tip_finalize_log", 8);
-        ok = ok && row_exists(db, "tip_finalize_log", 2);
-        SVHR_CHECK("served tip above H* does not hide or witness-clear the "
-                   "repairable validate frontier",
-                   ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("scan_below_hstar", dir,
-                                       sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 10, 1);
-        ok = ok && seed_poison_rows(
-            db, 2, "'no-header-solution-backfill-required'", 0);
-        ok = ok && seed_repair_header(db, 2);
-        stale_validate_headers_repair_test_set_hstar_override(8);
-
-        ok = ok && stale_validate_headers_repair_test_repair_target(db) == 2;
-        condition_engine_tick();
-
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && cursor_for(db, "validate_headers") == 10;
-        ok = ok && cursor_for(db, "body_fetch") == 1;
-        ok = ok && row_exists(db, "validate_headers_log", 2);
-        ok = ok && row_exists(db, "body_fetch_log", 2);
-        SVHR_CHECK("repairable validate scan below H* is targeted before "
-                   "H*+1 and does not self-clear while poison remains",
-                   ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("invalid", dir, sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_poison_rows(db, 2, "'invalid-solution'", 0);
-
-        condition_engine_tick();
-
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 0;
-        ok = ok && cursor_for(db, "validate_headers") == 5;
-        ok = ok && cursor_for(db, "body_fetch") == 5;
-        ok = ok && row_exists(db, "body_fetch_log", 2);
-        SVHR_CHECK("consensus-invalid skip is not repaired", ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    /* ── W2 NEW1: a non-advancing remedy escalates to EV_OPERATOR_NEEDED ──
-     * Model a frontier that never advances: the pipeline keeps re-poisoning it
-     * (solutionless) and the remedy keeps running but H* never moves. Under
-     * the honest witness this accrues attempts to max_attempts=5
-     * and pages the operator (the Law-7 lie is ended) — REGARDLESS of whether
-     * the remedy was the (now non-destructive) SKIP-defer or a destructive
-     * rewind: every due remedy increments the attempt counter (condition.c),
-     * and a witness that never sees forward tip movement never clears it.
-     *
-     * We re-seed the solutionless poison + a repair header before each tick
-     * (the pipeline regenerates the poison live) and clear the wall-clock
-     * backoff between ticks (no injectable clock). The tip is held frozen at
-     * 1 (target=2), so the witness stays false the whole time. With canon
-     * unavailable here (height 2 is not on the seeded 2-block chain) detect
-     * does not deactivate, so the remedy runs each tick and accrues attempts. */
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("escalation", dir, sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 5, 5);
-
-        for (int i = 0; i < 5; i++) {
-            /* Pipeline re-poisons the frontier; repair header stays available
-             * so the remedy runs the rewind (no network probe). */
-            ok = ok && seed_poison_rows(
-                db, 2, "'no-header-solution-backfill-required'", 0);
-            ok = ok && seed_repair_header(db, 2);
-            stale_validate_headers_repair_test_clear_backoff();
-            condition_engine_tick();
-        }
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "stale_validate_headers_repair", &snap);
-
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 5;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && condition_engine_get_unresolved_count() == 1;
-        ok = ok && got && snap.attempts >= 5;
-        ok = ok && got && snap.operator_needed_emitted;
-        SVHR_CHECK("non-advancing remedy escalates to EV_OPERATOR_NEEDED "
-                   "(witness never lies cleared)", ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    /* ── W2 NEW2: a remedy that ADVANCES H* clears ───────────────────────
-     * The honest witness's sole success predicate is reducer-frontier
-     * movement. After the remedy, we publish a full success-checked reducer
-     * row at target; the next tick witnesses H* >= target, clears the
-     * condition, and does NOT re-run the remedy. */
-    {
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("happy_clear", dir, sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_poison_rows(
-            db, 2, "'no-header-solution-backfill-required'", 0);
-        ok = ok && seed_repair_header(db, 2);
-
-        /* Tick 1: remedy runs, H* frozen → witness false → still active. */
-        condition_engine_tick();
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-
-        /* Publish a real success-checked reducer row at target=2 → H* moves. */
-        ok = ok && seed_reducer_success(db, 2);
-
-        /* Tick 2: witness now true (H*>=target) → cleared,
-         * remedy NOT re-run. Clear backoff so a remedy WOULD run if the
-         * witness hadn't cleared — proving the clear, not the backoff. */
-        stale_validate_headers_repair_test_clear_backoff();
-        condition_engine_tick();
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
-        SVHR_CHECK("forward reducer frontier advance witnesses the clear "
-                   "(remedy not re-run)", ok);
-        teardown_condition_case(dir, &ms);
-    }
-
-    /* ── Lane B3: at ladder EXHAUSTION on a non-advancing validate poison whose
-     * durable `blocks` row is itself poisoned, the remedy escalates ONCE to the
-     * runtime row quarantine (purging the poisoned row); a SECOND exhaustion at
-     * the same height (reached via the first cooldown re-arm) does NOT re-fire —
-     * the once-per-height bookkeeping survives the re-arm and there is no delete
-     * loop. Faithful end-to-end: a real seeded node_db is injected so the helper
-     * genuinely deletes the poisoned row and bumps the runtime counter. ─────── */
-    {
-        chain_params_select(CHAIN_MAIN);  /* block_row_verify needs cp != NULL */
-
-        char dir[256];
-        struct main_state ms;
-        struct block_index blocks[2];
-        struct uint256 hashes[2];
-        bool ok = setup_condition_case("b3_row_quarantine", dir, sizeof(dir),
-                                       &ms, blocks, hashes);
-        sqlite3 *db = progress_store_db();
-
-        /* Extend to a 3-block chain so target=2 (H*+1) is ON the active chain
-         * and canon = active_chain_at(2) is non-NULL (the escalation needs a
-         * frontier hash to address). */
-        struct block_index block2;
-        struct uint256 hash2;
-        block_index_init(&block2);
-        memset(&hash2, 0, sizeof(hash2));
-        hash2.data[0] = 2;
-        hash2.data[1] = 0xA7;
-        block2.phashBlock = &hash2;
-        block2.nHeight = 2;
-        block2.nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
-        block2.pprev = &blocks[1];
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &block2);
-        ms.pindex_best_header = &block2;
-
-        /* Seed the durable poisoned `blocks` row keyed by canon (hash2) and
-         * inject the handle; force 0 peers so cure_request_peer_refetch takes
-         * the deterministic no-peers branch. */
-        struct node_db ndb;
-        ok = ok && seed_poisoned_node_db(&ndb, &hash2);
-        stale_validate_headers_repair_test_set_node_db(&ndb);
-        stale_validate_headers_repair_test_set_peer_count(0);
-
-        /* Solutionless poison at 2, NO repair header → the remedy falls through
-         * to the P2P fallback (where the escalation lives) every tick. */
-        ok = ok && seed_cursors(db, 5, 5);
-
-        int64_t rq_before = stage_repair_runtime_row_quarantined();
-
-        /* Ticks 1-5: climb to the first exhaustion → escalation fires ONCE. */
-        for (int i = 0; i < 5; i++) {
-            ok = ok && seed_poison_rows(
-                db, 2, "'no-header-solution-backfill-required'", 0);
-            stale_validate_headers_repair_test_clear_backoff();
-            condition_engine_tick();
-        }
-
-        int esc_after_first = stale_validate_headers_repair_test_quarantine_escalations();
-        int64_t rq_after_first = stage_repair_runtime_row_quarantined();
-        int rows_after_first = node_db_block_count(&ndb);
-
-        ok = ok && esc_after_first == 1;
-        ok = ok && (rq_after_first - rq_before) == 1;   /* poisoned row purged */
-        ok = ok && rows_after_first == 0;               /* gone from `blocks` */
-
-        /* Ticks 6-10: the first cooldown re-arm (last_cooldown==0) resets the
-         * ladder, so a SECOND exhaustion is reached at the SAME height. The
-         * once-per-height set (which SURVIVED the re-arm) blocks a re-fire: no
-         * new escalation, no second delete. */
-        for (int i = 0; i < 5; i++) {
-            ok = ok && seed_poison_rows(
-                db, 2, "'no-header-solution-backfill-required'", 0);
-            stale_validate_headers_repair_test_clear_backoff();
-            condition_engine_tick();
-        }
-
-        int esc_after_second = stale_validate_headers_repair_test_quarantine_escalations();
-        int64_t rq_after_second = stage_repair_runtime_row_quarantined();
-
-        ok = ok && esc_after_second == 1;               /* still exactly once */
-        ok = ok && (rq_after_second - rq_before) == 1;  /* no re-delete */
-
-        SVHR_CHECK("B3 exhaustion escalates to runtime row quarantine EXACTLY "
-                   "ONCE; second exhaustion at same height does not re-delete "
-                   "(bookkeeping survives cooldown re-arm)", ok);
-
-        stale_validate_headers_repair_test_set_node_db(NULL);
-        if (ndb.db) sqlite3_close(ndb.db);
-        teardown_condition_case(dir, &ms);
-    }
-
-    /* ── A refusal must name the cause that actually held ────────────────────
-     * cure_request_peer_refetch() returns -1 when the repair target has no
-     * best-header authority agreeing with the visible active chain: there is
-     * no exact block_index entry or hash to request, so the network was never
-     * asked. That
-     * -1 used to fall into the caller's `peers <= 0` test and be reported as
-     * "no connected peer can serve a P2P getdata re-fetch".
-     *
-     * Measured on a real wiped-datadir C3 run (2026-08-20, node.log line
-     * 126894): "no durable repair header h=3193025 via oracle AND no peers
-     * (peers=-1)" while the node was connected to 127.0.0.1:8033 and accepting
-     * headers from it for the next four minutes. The fold sat at H*=3,193,024
-     * and the blocker sent the recovery ladder looking for peers that were
-     * already there.
-     *
-     * The cases below hold peers at 5 and distinguish usable exact H*+1
-     * authority from absent or disagreeing authority. Refusal must NOT claim
-     * peer. ───────────────────────────────────────────────────────────────── */
     /* Exact C3 shape: H*+1 is absent from the active window but is a
      * nonfailed child of the visible tip on best-header ancestry. */
     {
@@ -1057,7 +504,12 @@ int test_stale_validate_headers_repair_condition(void)
         dl_free(&dm);
         teardown_condition_case(dir, &ms);
     }
+    return failures;
+}
 
+static int svhr_case_best_header_parent_disagrees(void)
+{
+    int failures = 0;
     /* A best-header block on a sibling of the visible active tip is not an
      * authority for H*+1. It must remain data-flagged and unqueued. */
     {
@@ -1114,7 +566,12 @@ int test_stale_validate_headers_repair_condition(void)
         blocker_clear("header_repair_no_source");
         teardown_condition_case(dir, &ms);
     }
+    return failures;
+}
 
+static int svhr_case_visible_parent_absent(void)
+{
+    int failures = 0;
     /* Missing visible-parent publication also refuses, even when best-header
      * ancestry itself is well-linked. */
     {
@@ -1162,7 +619,12 @@ int test_stale_validate_headers_repair_condition(void)
         blocker_clear("header_repair_no_source");
         teardown_condition_case(dir, &ms);
     }
+    return failures;
+}
 
+static int svhr_case_refusal_names_true_cause(void)
+{
+    int failures = 0;
     {
         char dir[256];
         struct main_state ms;
@@ -1201,6 +663,661 @@ int test_stale_validate_headers_repair_condition(void)
         blocker_clear("header_repair_no_source");
         teardown_condition_case(dir, &ms);
     }
+    return failures;
+}
+
+static bool svhr_reseed_solutionless_poison_five_ticks(sqlite3 *db, bool ok)
+{
+    for (int i = 0; i < 5; i++) {
+        ok = ok && seed_poison_rows(
+            db, 2, "'no-header-solution-backfill-required'", 0);
+        stale_validate_headers_repair_test_clear_backoff();
+        condition_engine_tick();
+    }
+    return ok;
+}
+
+static int svhr_case_non_advancing_escalates(void)
+{
+    int failures = 0;
+    /* ── W2 NEW1: a non-advancing remedy escalates to EV_OPERATOR_NEEDED ──
+     * Model a frontier that never advances: the pipeline keeps re-poisoning it
+     * (solutionless) and the remedy keeps running but H* never moves. Under
+     * the honest witness this accrues attempts to max_attempts=5
+     * and pages the operator (the Law-7 lie is ended) — REGARDLESS of whether
+     * the remedy was the (now non-destructive) SKIP-defer or a destructive
+     * rewind: every due remedy increments the attempt counter (condition.c),
+     * and a witness that never sees forward tip movement never clears it.
+     *
+     * We re-seed the solutionless poison + a repair header before each tick
+     * (the pipeline regenerates the poison live) and clear the wall-clock
+     * backoff between ticks (no injectable clock). The tip is held frozen at
+     * 1 (target=2), so the witness stays false the whole time. With canon
+     * unavailable here (height 2 is not on the seeded 2-block chain) detect
+     * does not deactivate, so the remedy runs each tick and accrues attempts. */
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("escalation", dir, sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 5);
+
+        for (int i = 0; i < 5; i++) {
+            /* Pipeline re-poisons the frontier; repair header stays available
+             * so the remedy runs the rewind (no network probe). */
+            ok = ok && seed_poison_rows(
+                db, 2, "'no-header-solution-backfill-required'", 0);
+            ok = ok && seed_repair_header(db, 2);
+            stale_validate_headers_repair_test_clear_backoff();
+            condition_engine_tick();
+        }
+
+        struct condition_runtime_snapshot snap;
+        bool got = condition_engine_get_registered_snapshot(
+            "stale_validate_headers_repair", &snap);
+
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 5;
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && condition_engine_get_unresolved_count() == 1;
+        ok = ok && got && snap.attempts >= 5;
+        ok = ok && got && snap.operator_needed_emitted;
+        SVHR_CHECK("non-advancing remedy escalates to EV_OPERATOR_NEEDED "
+                   "(witness never lies cleared)", ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_frontier_advance_clears(void)
+{
+    int failures = 0;
+    /* ── W2 NEW2: a remedy that ADVANCES H* clears ───────────────────────
+     * The honest witness's sole success predicate is reducer-frontier
+     * movement. After the remedy, we publish a full success-checked reducer
+     * row at target; the next tick witnesses H* >= target, clears the
+     * condition, and does NOT re-run the remedy. */
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("happy_clear", dir, sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 5);
+        ok = ok && seed_poison_rows(
+            db, 2, "'no-header-solution-backfill-required'", 0);
+        ok = ok && seed_repair_header(db, 2);
+
+        /* Tick 1: remedy runs, H* frozen → witness false → still active. */
+        condition_engine_tick();
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        ok = ok && condition_engine_get_active_count() == 1;
+
+        /* Publish a real success-checked reducer row at target=2 → H* moves. */
+        ok = ok && seed_reducer_success(db, 2);
+
+        /* Tick 2: witness now true (H*>=target) → cleared,
+         * remedy NOT re-run. Clear backoff so a remedy WOULD run if the
+         * witness hadn't cleared — proving the clear, not the backoff. */
+        stale_validate_headers_repair_test_clear_backoff();
+        condition_engine_tick();
+        ok = ok && condition_engine_get_active_count() == 0;
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        SVHR_CHECK("forward reducer frontier advance witnesses the clear "
+                   "(remedy not re-run)", ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_b3_quarantine_fires_once(void)
+{
+    int failures = 0;
+    /* ── Lane B3: at ladder EXHAUSTION on a non-advancing validate poison whose
+     * durable `blocks` row is itself poisoned, the remedy escalates ONCE to the
+     * runtime row quarantine (purging the poisoned row); a SECOND exhaustion at
+     * the same height (reached via the first cooldown re-arm) does NOT re-fire —
+     * the once-per-height bookkeeping survives the re-arm and there is no delete
+     * loop. Faithful end-to-end: a real seeded node_db is injected so the helper
+     * genuinely deletes the poisoned row and bumps the runtime counter. ─────── */
+    {
+        chain_params_select(CHAIN_MAIN);  /* block_row_verify needs cp != NULL */
+
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("b3_row_quarantine", dir, sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+
+        /* Extend to a 3-block chain so target=2 (H*+1) is ON the active chain
+         * and canon = active_chain_at(2) is non-NULL (the escalation needs a
+         * frontier hash to address). */
+        struct block_index block2;
+        struct uint256 hash2;
+        block_index_init(&block2);
+        memset(&hash2, 0, sizeof(hash2));
+        hash2.data[0] = 2;
+        hash2.data[1] = 0xA7;
+        block2.phashBlock = &hash2;
+        block2.nHeight = 2;
+        block2.nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
+        block2.pprev = &blocks[1];
+        ok = ok && active_chain_move_window_tip(&ms.chain_active, &block2);
+        ms.pindex_best_header = &block2;
+
+        /* Seed the durable poisoned `blocks` row keyed by canon (hash2) and
+         * inject the handle; force 0 peers so cure_request_peer_refetch takes
+         * the deterministic no-peers branch. */
+        struct node_db ndb;
+        ok = ok && seed_poisoned_node_db(&ndb, &hash2);
+        stale_validate_headers_repair_test_set_node_db(&ndb);
+        stale_validate_headers_repair_test_set_peer_count(0);
+
+        /* Solutionless poison at 2, NO repair header → the remedy falls through
+         * to the P2P fallback (where the escalation lives) every tick. */
+        ok = ok && seed_cursors(db, 5, 5);
+
+        int64_t rq_before = stage_repair_runtime_row_quarantined();
+
+        /* Ticks 1-5: climb to the first exhaustion → escalation fires ONCE. */
+        ok = svhr_reseed_solutionless_poison_five_ticks(db, ok);
+
+        int esc_after_first = stale_validate_headers_repair_test_quarantine_escalations();
+        int64_t rq_after_first = stage_repair_runtime_row_quarantined();
+        int rows_after_first = node_db_block_count(&ndb);
+
+        ok = ok && esc_after_first == 1;
+        ok = ok && (rq_after_first - rq_before) == 1;   /* poisoned row purged */
+        ok = ok && rows_after_first == 0;               /* gone from `blocks` */
+
+        /* Ticks 6-10: the first cooldown re-arm (last_cooldown==0) resets the
+         * ladder, so a SECOND exhaustion is reached at the SAME height. The
+         * once-per-height set (which SURVIVED the re-arm) blocks a re-fire: no
+         * new escalation, no second delete. */
+        ok = svhr_reseed_solutionless_poison_five_ticks(db, ok);
+
+        int esc_after_second = stale_validate_headers_repair_test_quarantine_escalations();
+        int64_t rq_after_second = stage_repair_runtime_row_quarantined();
+
+        ok = ok && esc_after_second == 1;               /* still exactly once */
+        ok = ok && (rq_after_second - rq_before) == 1;  /* no re-delete */
+
+        SVHR_CHECK("B3 exhaustion escalates to runtime row quarantine EXACTLY "
+                   "ONCE; second exhaustion at same height does not re-delete "
+                   "(bookkeeping survives cooldown re-arm)", ok);
+
+        stale_validate_headers_repair_test_set_node_db(NULL);
+        if (ndb.db) sqlite3_close(ndb.db);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static bool svhr_pinned_header_reached_operator_page(
+    sqlite3 *db, bool got, const struct condition_runtime_snapshot *snap)
+{
+    return stale_validate_headers_repair_test_remedy_calls() == 5
+        && condition_engine_get_active_count() == 1
+        && condition_engine_get_unresolved_count() == 1
+        && got && snap->attempts >= 5
+        && got && snap->operator_needed_emitted
+        && row_exists(db, "validate_headers_log", 2);
+}
+
+static int svhr_case_hash_mismatch_no_rewind(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("hash_mismatch", dir, sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 5);
+        ok = ok && seed_poison_rows(
+            db, 2, "'header-source-hash-mismatch'", 0);
+
+        condition_engine_tick();
+
+        ok = ok && stage_repair_header_solution_poison_mode(
+                         db, 2) ==
+                     STAGE_REPAIR_POISON_VALIDATE_HASH_MISMATCH;
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && cursor_for(db, "validate_headers") == 5;
+        ok = ok && cursor_for(db, "body_fetch") == 5;
+        ok = ok && row_exists(db, "validate_headers_log", 2);
+        ok = ok && row_exists(db, "body_fetch_log", 2);
+        SVHR_CHECK("header-source hash mismatch activates validate-header "
+                   "repair without destructive rewind",
+                   ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_pinned_header_pages(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[3];
+        struct uint256 hashes[3];
+        struct uint256 repair_hash = {0};
+        bool ok = setup_condition_case("hash_mismatch_correct_header_pinned",
+                                       dir, sizeof(dir), &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 5);
+        ok = ok && seed_poison_rows(
+            db, 2, "'header-source-hash-mismatch'", 0);
+        ok = ok && seed_repair_header_hash(db, 2, &repair_hash);
+
+        block_index_init(&blocks[2]);
+        hashes[2] = repair_hash;
+        blocks[2].phashBlock = &hashes[2];
+        blocks[2].nHeight = 2;
+        blocks[2].nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
+        blocks[2].pprev = &blocks[1];
+        ok = ok && active_chain_move_window_tip(&ms.chain_active, &blocks[2]);
+        ms.pindex_best_header = &blocks[2];
+
+        for (int i = 0; i < 5; i++) {
+            stale_validate_headers_repair_test_clear_backoff();
+            condition_engine_tick();
+        }
+
+        struct condition_runtime_snapshot snap;
+        bool got = condition_engine_get_registered_snapshot(
+            "stale_validate_headers_repair", &snap);
+
+        ok = ok && svhr_pinned_header_reached_operator_page(db, got, &snap);
+        SVHR_CHECK("correct repair header with pinned H* remains diagnosable "
+                   "and pages",
+                   ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_served_tip_hides_nothing(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("served_above_hstar", dir,
+                                       sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 9, 9);
+        ok = ok && seed_poison_rows(
+            db, 2, "'header-source-hash-mismatch'", 0);
+        ok = ok && seed_finalized_tip(db, 8);
+
+        condition_engine_tick();
+
+        ok = ok && active_chain_height(&ms.chain_active) == 8;
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && row_exists(db, "tip_finalize_log", 8);
+        ok = ok && row_exists(db, "tip_finalize_log", 2);
+        SVHR_CHECK("served tip above H* does not hide or witness-clear the "
+                   "repairable validate frontier",
+                   ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_scan_below_hstar_targeted(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("scan_below_hstar", dir,
+                                       sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 10, 1);
+        ok = ok && seed_poison_rows(
+            db, 2, "'no-header-solution-backfill-required'", 0);
+        ok = ok && seed_repair_header(db, 2);
+        stale_validate_headers_repair_test_set_hstar_override(8);
+
+        ok = ok && stale_validate_headers_repair_test_repair_target(db) == 2;
+        condition_engine_tick();
+
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && cursor_for(db, "validate_headers") == 10;
+        ok = ok && cursor_for(db, "body_fetch") == 1;
+        ok = ok && row_exists(db, "validate_headers_log", 2);
+        ok = ok && row_exists(db, "body_fetch_log", 2);
+        SVHR_CHECK("repairable validate scan below H* is targeted before "
+                   "H*+1 and does not self-clear while poison remains",
+                   ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_invalid_solution_skipped(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("invalid", dir, sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 5);
+        ok = ok && seed_poison_rows(db, 2, "'invalid-solution'", 0);
+
+        condition_engine_tick();
+
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 0;
+        ok = ok && cursor_for(db, "validate_headers") == 5;
+        ok = ok && cursor_for(db, "body_fetch") == 5;
+        ok = ok && row_exists(db, "body_fetch_log", 2);
+        SVHR_CHECK("consensus-invalid skip is not repaired", ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_validated_recheck_clears(void)
+{
+    int failures = 0;
+    /* A successful validate_headers recheck resolves this condition's exact
+     * invariant even when a separate downstream stage still pins H*. Before
+     * this witness split, the condition kept retrying mode=NONE and paged an
+     * operator for the unrelated downstream stall. Merely caching the repair
+     * header is covered above and remains insufficient; this fixture flips the
+     * durable verdict to ok=1, as only the unchanged validator does in
+     * production. */
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("validated_recheck_clears", dir,
+                                       sizeof(dir), &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 1);
+        ok = ok && exec_sql(db,
+            "INSERT OR REPLACE INTO validate_headers_log"
+            "(height,hash,ok,fail_reason,validated_at) "
+            "VALUES(2,zeroblob(32),0,"
+            "'no-header-solution-backfill-required',1)");
+
+        condition_engine_tick();
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+
+        ok = ok && exec_sql(db,
+            "UPDATE validate_headers_log SET ok=1, fail_reason=NULL "
+            "WHERE height=2");
+        ok = ok && stage_repair_header_solution_poison_mode(db, 2) ==
+                     STAGE_REPAIR_POISON_NONE;
+
+        stale_validate_headers_repair_test_clear_backoff();
+        condition_engine_tick();
+
+        struct condition_runtime_snapshot snap;
+        bool got = condition_engine_get_registered_snapshot(
+            "stale_validate_headers_repair", &snap);
+        ok = ok && condition_engine_get_active_count() == 0;
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        ok = ok && got && !snap.operator_needed_emitted;
+        SVHR_CHECK("independent validate recheck clears the header condition "
+                   "while downstream H* remains pinned (no false page)", ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_solutionless_without_header(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("solutionless_no_header", dir, sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 5);
+        ok = ok && seed_poison_rows(
+            db, 2, "'no-header-solution-backfill-required'", 0);
+
+        condition_engine_tick();
+
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && cursor_for(db, "validate_headers") == 5;
+        ok = ok && cursor_for(db, "body_fetch") == 5;
+        ok = ok && row_exists(db, "validate_headers_log", 2);
+        ok = ok && row_exists(db, "body_fetch_log", 2);
+        SVHR_CHECK("solutionless poison without repair header stays active", ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_probe_fail_refetch(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("solutionless_probe_fail_refetch",
+                                       dir, sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        blocks[1].nStatus |= BLOCK_HAVE_DATA;
+        ok = ok && seed_cursors(db, 5, 5);
+        stale_validate_headers_repair_test_set_hstar_override(0);
+        ok = ok && seed_poison_rows(
+            db, 1, "'no-header-solution-backfill-required'", 0);
+
+        condition_engine_tick();
+
+        struct condition_runtime_snapshot snap;
+        bool got = condition_engine_get_registered_snapshot(
+            "stale_validate_headers_repair", &snap);
+
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        ok = ok && got && snap.last_outcome == COND_REMEDY_SKIP;
+        ok = ok && (blocks[1].nStatus & BLOCK_HAVE_DATA) == 0;
+        ok = ok && condition_engine_get_active_count() == 1;
+        SVHR_CHECK("header-probe failure falls back to P2P refetch instead "
+                   "of failed remedy",
+                   ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_solutionless_header_defers(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("solutionless_with_header", dir,
+                                       sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 5);
+        ok = ok && seed_poison_rows(
+            db, 2, "'no-header-solution-backfill-required'", 0);
+        ok = ok && seed_repair_header(db, 2);
+
+        condition_engine_tick();
+
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        /* NON-DESTRUCTIVE defer: when the repair header is available, the remedy
+         * no longer poison_rewinds a SOLUTIONLESS frontier. validate_headers
+         * self-heals the ok=0 row forward via recheck_failed_rows (060a5cb4c),
+         * so the remedy returns SKIP and PRESERVES all forward progress: the
+         * validate_headers + downstream cursors are NOT rewound and the log rows
+         * survive. The condition stays ACTIVE because H* did NOT advance;
+         * the honest reducer-frontier
+         * witness governs the clear. A destructive rewind here would delete the
+         * forward validate work and re-starve the recheck — the churn that
+         * produced the 5x-unwitnessed → operator_needed loop. */
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && cursor_for(db, "validate_headers") == 5;
+        ok = ok && cursor_for(db, "body_fetch") == 5;
+        ok = ok && row_exists(db, "validate_headers_log", 2);
+        ok = ok && row_exists(db, "body_fetch_log", 2);
+        ok = ok && row_exists(db, "tip_finalize_log", 2);
+        SVHR_CHECK("solutionless poison WITH repair header defers to "
+                   "non-destructive recheck (no rewind, progress preserved, "
+                   "stays active until H* advances)",
+                   ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_scan_above_hstar_stays_inert(void)
+{
+    int failures = 0;
+    /* validate_headers is allowed to run ahead of the executable body/fold
+     * frontier. A repairable row in that future region is not actionable yet:
+     * the P2P repair authority intentionally accepts at most H*+1. Before this
+     * guard repair_target_height selected the far-ahead scan anyway, so the
+     * remedy refused its own target as missing best-header authority, raised
+     * header_repair_no_source with healthy peers, and eventually paged while H*
+     * was still climbing. Hold the future row inert until H* reaches it. */
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("scan_above_hstar_next", dir,
+                                       sizeof(dir), &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 10, 1);
+        ok = ok && seed_poison_rows(
+            db, 5, "'no-header-solution-backfill-required'", 0);
+        stale_validate_headers_repair_test_set_hstar_override(1);
+
+        ok = ok && stale_validate_headers_repair_test_repair_target(db) == -1;
+        condition_engine_tick();
+
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 0;
+        ok = ok && condition_engine_get_active_count() == 0;
+        ok = ok && !blocker_exists("header_repair_no_source");
+        ok = ok && row_exists(db, "validate_headers_log", 5);
+        SVHR_CHECK("repairable scan above H*+1 stays inert until it becomes "
+                   "actionable (no false no-source episode or page)", ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+static int svhr_case_downstream_poison_stays_active(void)
+{
+    int failures = 0;
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("downstream", dir, sizeof(dir),
+                                       &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 5);
+        ok = ok && seed_poison_rows(db, 2, "NULL", 1);
+
+        condition_engine_tick();
+
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        /* W2: the witness is now H*-ONLY. The rewind deleted the downstream
+         * poison + rewound cursors but did NOT advance the reducer frontier,
+         * so the
+         * condition stays ACTIVE (was ==0 under the old poison-gone witness
+         * shortcut — this flip IS the regression proof). */
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && cursor_for(db, "validate_headers") == 5;
+        ok = ok && cursor_for(db, "body_fetch") == 2;
+        ok = ok && validate_ok_row_exists(db, 2);
+        ok = ok && !row_exists(db, "body_fetch_log", 2);
+        /* tip_finalize_log rows MUST survive a downstream rewind — doctrine
+         * forbids deleting them. The cursor is rewound; the (ok=0) row stays. */
+        ok = ok && row_exists(db, "tip_finalize_log", 2);
+        SVHR_CHECK("stale downstream poison rewinds downstream, preserves "
+                   "tip_finalize_log, stays active until H* advances", ok);
+        teardown_condition_case(dir, &ms);
+    }
+    return failures;
+}
+
+int test_stale_validate_headers_repair_condition(void)
+{
+    printf("\n=== stale_validate_headers_repair condition tests ===\n");
+    int failures = 0;
+
+    failures += svhr_case_downstream_poison_stays_active();
+    failures += svhr_case_scan_above_hstar_stays_inert();
+    failures += svhr_case_validated_recheck_clears();
+    failures += svhr_case_solutionless_without_header();
+    failures += svhr_case_probe_fail_refetch();
+    failures += svhr_case_solutionless_header_defers();
+    failures += svhr_case_hash_mismatch_no_rewind();
+    failures += svhr_case_pinned_header_pages();
+    failures += svhr_case_served_tip_hides_nothing();
+    failures += svhr_case_scan_below_hstar_targeted();
+    failures += svhr_case_invalid_solution_skipped();
+    failures += svhr_case_non_advancing_escalates();
+    failures += svhr_case_frontier_advance_clears();
+    failures += svhr_case_b3_quarantine_fires_once();
+
+    /* ── A refusal must name the cause that actually held ────────────────────
+     * cure_request_peer_refetch() returns -1 when the repair target has no
+     * best-header authority agreeing with the visible active chain: there is
+     * no exact block_index entry or hash to request, so the network was never
+     * asked. That
+     * -1 used to fall into the caller's `peers <= 0` test and be reported as
+     * "no connected peer can serve a P2P getdata re-fetch".
+     *
+     * Measured on a real wiped-datadir C3 run (2026-08-20, node.log line
+     * 126894): "no durable repair header h=3193025 via oracle AND no peers
+     * (peers=-1)" while the node was connected to 127.0.0.1:8033 and accepting
+     * headers from it for the next four minutes. The fold sat at H*=3,193,024
+     * and the blocker sent the recovery ladder looking for peers that were
+     * already there.
+     *
+     * The cases below hold peers at 5 and distinguish usable exact H*+1
+     * authority from absent or disagreeing authority. Refusal must NOT claim
+     * peer. ───────────────────────────────────────────────────────────────── */
+    failures += svhr_case_hstar_next_child_queued();
+    failures += svhr_case_best_header_parent_disagrees();
+    failures += svhr_case_visible_parent_absent();
+    failures += svhr_case_refusal_names_true_cause();
 
     return failures;
 }
