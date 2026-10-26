@@ -76,6 +76,87 @@ static size_t game_roster_bytes(const struct mesh_game_roster *roster)
     return 35u + (size_t)roster->row_count * (33u + roster->asset_count);
 }
 
+/* One composer per frame kind, lifted from the switch arms of
+ * mesh_game_compose. Each cursor starts at 1, past the kind byte the
+ * composer writes first, and each helper returns what its arm returned:
+ * the bytes written, or 0 when the frame refuses its own bounds. */
+static size_t game_compose_hello(const struct mesh_game_frame *frame,
+                                 uint8_t *out, size_t cap)
+{
+    size_t used = 1;
+
+    if (cap < 65u)
+        return 0;
+    memcpy(out + used, frame->body.hello.zid, 32);
+    memcpy(out + used + 32u, frame->body.hello.roster_digest, 32);
+    return 65u;
+}
+
+static size_t game_compose_roster(const struct mesh_game_roster *r,
+                                  uint8_t *out, size_t cap)
+{
+    size_t used = 1;
+
+    if (r->row_count > MESH_GAME_ROSTER_ROWS_MAX ||
+        r->asset_count > MESH_GAME_ASSET_MAX || cap < game_roster_bytes(r))
+        return 0;
+    memcpy(out + used, r->zid, 32);
+    used += 32u;
+    out[used++] = r->asset_count;
+    out[used++] = r->row_count;
+    for (uint8_t i = 0; i < r->row_count; i++) {
+        memcpy(out + used, r->rows[i].noise_fingerprint, 32);
+        used += 32u;
+        out[used++] = r->rows[i].reachable ? 1u : 0u;
+        memcpy(out + used, r->rows[i].assets, r->asset_count);
+        used += r->asset_count;
+    }
+    return used;
+}
+
+static size_t game_compose_match_open(const struct mesh_game_frame *frame,
+                                      uint8_t *out, size_t cap)
+{
+    size_t used = 1;
+
+    if (cap < 10u || frame->body.match_open.airships > MESH_GAME_AIRSHIPS_MAX)
+        return 0;
+    zcl_write_u64_le(out + used, frame->body.match_open.seed);
+    out[used + 8u] = frame->body.match_open.airships;
+    return 10u;
+}
+
+static size_t game_compose_match_state(const struct mesh_game_match_state *s,
+                                       uint8_t *out, size_t cap)
+{
+    size_t used = 1;
+    size_t need = 6u + (size_t)s->airships * MESH_GAME_POSE_BYTES;
+
+    if (s->airships > MESH_GAME_AIRSHIPS_MAX || cap < need)
+        return 0;
+    zcl_write_u32_le(out + used, s->tick);
+    used += 4u;
+    out[used++] = s->airships;
+    for (uint8_t i = 0; i < s->airships; i++) {
+        memcpy(out + used, s->poses[i], MESH_GAME_POSE_BYTES);
+        used += MESH_GAME_POSE_BYTES;
+    }
+    return used;
+}
+
+static size_t game_compose_match_close(const struct mesh_game_frame *frame,
+                                       uint8_t *out, size_t cap)
+{
+    size_t used = 1;
+    uint8_t len = frame->body.match_close.reason_len;
+
+    if (len > MESH_GAME_REASON_MAX || cap < (size_t)len + 2u)
+        return 0;
+    out[used++] = len;
+    memcpy(out + used, frame->body.match_close.reason, len);
+    return used + len;
+}
+
 size_t mesh_game_compose(const struct mesh_game_frame *frame, uint8_t *out,
                          size_t cap)
 {
@@ -86,147 +167,140 @@ size_t mesh_game_compose(const struct mesh_game_frame *frame, uint8_t *out,
     out[used++] = (uint8_t)frame->kind;
     switch (frame->kind) {
     case MESH_GAME_KIND_HELLO:
-        if (cap < 65u)
-            return 0;
-        memcpy(out + used, frame->body.hello.zid, 32);
-        memcpy(out + used + 32u, frame->body.hello.roster_digest, 32);
-        return 65u;
-    case MESH_GAME_KIND_ROSTER: {
-        const struct mesh_game_roster *r = &frame->body.roster;
-
-        if (r->row_count > MESH_GAME_ROSTER_ROWS_MAX ||
-            r->asset_count > MESH_GAME_ASSET_MAX || cap < game_roster_bytes(r))
-            return 0;
-        memcpy(out + used, r->zid, 32);
-        used += 32u;
-        out[used++] = r->asset_count;
-        out[used++] = r->row_count;
-        for (uint8_t i = 0; i < r->row_count; i++) {
-            memcpy(out + used, r->rows[i].noise_fingerprint, 32);
-            used += 32u;
-            out[used++] = r->rows[i].reachable ? 1u : 0u;
-            memcpy(out + used, r->rows[i].assets, r->asset_count);
-            used += r->asset_count;
-        }
-        return used;
-    }
+        return game_compose_hello(frame, out, cap);
+    case MESH_GAME_KIND_ROSTER:
+        return game_compose_roster(&frame->body.roster, out, cap);
     case MESH_GAME_KIND_MATCH_OPEN:
-        if (cap < 10u || frame->body.match_open.airships > MESH_GAME_AIRSHIPS_MAX)
-            return 0;
-        zcl_write_u64_le(out + used, frame->body.match_open.seed);
-        out[used + 8u] = frame->body.match_open.airships;
-        return 10u;
-    case MESH_GAME_KIND_MATCH_STATE: {
-        const struct mesh_game_match_state *s = &frame->body.match_state;
-        size_t need = 6u + (size_t)s->airships * MESH_GAME_POSE_BYTES;
-
-        if (s->airships > MESH_GAME_AIRSHIPS_MAX || cap < need)
-            return 0;
-        zcl_write_u32_le(out + used, s->tick);
-        used += 4u;
-        out[used++] = s->airships;
-        for (uint8_t i = 0; i < s->airships; i++) {
-            memcpy(out + used, s->poses[i], MESH_GAME_POSE_BYTES);
-            used += MESH_GAME_POSE_BYTES;
-        }
-        return used;
-    }
-    case MESH_GAME_KIND_MATCH_CLOSE: {
-        uint8_t len = frame->body.match_close.reason_len;
-
-        if (len > MESH_GAME_REASON_MAX || cap < (size_t)len + 2u)
-            return 0;
-        out[used++] = len;
-        memcpy(out + used, frame->body.match_close.reason, len);
-        return used + len;
-    }
+        return game_compose_match_open(frame, out, cap);
+    case MESH_GAME_KIND_MATCH_STATE:
+        return game_compose_match_state(&frame->body.match_state, out, cap);
+    case MESH_GAME_KIND_MATCH_CLOSE:
+        return game_compose_match_close(frame, out, cap);
     }
     return 0;
+}
+
+/* One parser per frame kind, lifted from the switch arms of
+ * mesh_game_parse. Each cursor starts at 1, past the kind byte the parser
+ * switched on, and each helper returns the verdict its arm returned. */
+static enum mesh_game_refusal game_parse_hello(const uint8_t *in, size_t len,
+                                               struct mesh_game_frame *out)
+{
+    size_t at = 1;
+
+    if (len != 65u)
+        return MESH_GAME_MALFORMED;
+    out->kind = MESH_GAME_KIND_HELLO;
+    memcpy(out->body.hello.zid, in + at, 32);
+    memcpy(out->body.hello.roster_digest, in + at + 32u, 32);
+    return MESH_GAME_OK;
+}
+
+static enum mesh_game_refusal game_parse_roster(const uint8_t *in, size_t len,
+                                                struct mesh_game_frame *out)
+{
+    struct mesh_game_roster *r = &out->body.roster;
+    size_t at = 1;
+
+    if (len < 35u)
+        return MESH_GAME_MALFORMED;
+    out->kind = MESH_GAME_KIND_ROSTER;
+    memcpy(r->zid, in + at, 32);
+    at += 32u;
+    r->asset_count = in[at++];
+    r->row_count = in[at++];
+    if (r->asset_count != (uint8_t)MESH_GAME_LOCAL_ASSETS)
+        return MESH_GAME_ASSET_VOCABULARY;
+    if (r->row_count > MESH_GAME_ROSTER_ROWS_MAX)
+        return MESH_GAME_ROSTER_OVERFLOW;
+    if (len != game_roster_bytes(r))
+        return MESH_GAME_MALFORMED;
+    for (uint8_t i = 0; i < r->row_count; i++) {
+        memcpy(r->rows[i].noise_fingerprint, in + at, 32);
+        at += 32u;
+        r->rows[i].reachable = in[at++] != 0u;
+        memcpy(r->rows[i].assets, in + at, r->asset_count);
+        at += r->asset_count;
+    }
+    return MESH_GAME_OK;
+}
+
+static enum mesh_game_refusal game_parse_match_open(const uint8_t *in,
+                                                    size_t len,
+                                                    struct mesh_game_frame *out)
+{
+    size_t at = 1;
+
+    if (len != 10u)
+        return MESH_GAME_MALFORMED;
+    out->kind = MESH_GAME_KIND_MATCH_OPEN;
+    out->body.match_open.seed = zcl_read_u64_le(in + at);
+    out->body.match_open.airships = in[at + 8u];
+    if (out->body.match_open.airships > MESH_GAME_AIRSHIPS_MAX)
+        return MESH_GAME_STATE_OVERFLOW;
+    return MESH_GAME_OK;
+}
+
+static enum mesh_game_refusal game_parse_match_state(const uint8_t *in,
+                                                     size_t len,
+                                                     struct mesh_game_frame *out)
+{
+    struct mesh_game_match_state *s = &out->body.match_state;
+    size_t at = 1;
+
+    if (len < 6u)
+        return MESH_GAME_MALFORMED;
+    out->kind = MESH_GAME_KIND_MATCH_STATE;
+    s->tick = zcl_read_u32_le(in + at);
+    at += 4u;
+    s->airships = in[at++];
+    if (s->airships > MESH_GAME_AIRSHIPS_MAX)
+        return MESH_GAME_STATE_OVERFLOW;
+    if (len != 6u + (size_t)s->airships * MESH_GAME_POSE_BYTES)
+        return MESH_GAME_MALFORMED;
+    for (uint8_t i = 0; i < s->airships; i++) {
+        memcpy(s->poses[i], in + at, MESH_GAME_POSE_BYTES);
+        at += MESH_GAME_POSE_BYTES;
+    }
+    return MESH_GAME_OK;
+}
+
+static enum mesh_game_refusal game_parse_match_close(const uint8_t *in,
+                                                     size_t len,
+                                                     struct mesh_game_frame *out)
+{
+    struct mesh_game_match_close *c = &out->body.match_close;
+    size_t at = 1;
+
+    if (len < 2u)
+        return MESH_GAME_MALFORMED;
+    out->kind = MESH_GAME_KIND_MATCH_CLOSE;
+    c->reason_len = in[at++];
+    if (c->reason_len > MESH_GAME_REASON_MAX ||
+        len != (size_t)c->reason_len + 2u)
+        return MESH_GAME_MALFORMED;
+    memcpy(c->reason, in + at, c->reason_len);
+    c->reason[c->reason_len] = '\0';
+    return MESH_GAME_OK;
 }
 
 enum mesh_game_refusal mesh_game_parse(const uint8_t *in, size_t len,
                                        struct mesh_game_frame *out)
 {
-    size_t at = 1;
-
     if (!in || !out || len < 1u)
         return MESH_GAME_MALFORMED;
     memset(out, 0, sizeof(*out));
     switch (in[0]) {
     case MESH_GAME_KIND_HELLO:
-        if (len != 65u)
-            return MESH_GAME_MALFORMED;
-        out->kind = MESH_GAME_KIND_HELLO;
-        memcpy(out->body.hello.zid, in + at, 32);
-        memcpy(out->body.hello.roster_digest, in + at + 32u, 32);
-        return MESH_GAME_OK;
-    case MESH_GAME_KIND_ROSTER: {
-        struct mesh_game_roster *r = &out->body.roster;
-
-        if (len < 35u)
-            return MESH_GAME_MALFORMED;
-        out->kind = MESH_GAME_KIND_ROSTER;
-        memcpy(r->zid, in + at, 32);
-        at += 32u;
-        r->asset_count = in[at++];
-        r->row_count = in[at++];
-        if (r->asset_count != (uint8_t)MESH_GAME_LOCAL_ASSETS)
-            return MESH_GAME_ASSET_VOCABULARY;
-        if (r->row_count > MESH_GAME_ROSTER_ROWS_MAX)
-            return MESH_GAME_ROSTER_OVERFLOW;
-        if (len != game_roster_bytes(r))
-            return MESH_GAME_MALFORMED;
-        for (uint8_t i = 0; i < r->row_count; i++) {
-            memcpy(r->rows[i].noise_fingerprint, in + at, 32);
-            at += 32u;
-            r->rows[i].reachable = in[at++] != 0u;
-            memcpy(r->rows[i].assets, in + at, r->asset_count);
-            at += r->asset_count;
-        }
-        return MESH_GAME_OK;
-    }
+        return game_parse_hello(in, len, out);
+    case MESH_GAME_KIND_ROSTER:
+        return game_parse_roster(in, len, out);
     case MESH_GAME_KIND_MATCH_OPEN:
-        if (len != 10u)
-            return MESH_GAME_MALFORMED;
-        out->kind = MESH_GAME_KIND_MATCH_OPEN;
-        out->body.match_open.seed = zcl_read_u64_le(in + at);
-        out->body.match_open.airships = in[at + 8u];
-        if (out->body.match_open.airships > MESH_GAME_AIRSHIPS_MAX)
-            return MESH_GAME_STATE_OVERFLOW;
-        return MESH_GAME_OK;
-    case MESH_GAME_KIND_MATCH_STATE: {
-        struct mesh_game_match_state *s = &out->body.match_state;
-
-        if (len < 6u)
-            return MESH_GAME_MALFORMED;
-        out->kind = MESH_GAME_KIND_MATCH_STATE;
-        s->tick = zcl_read_u32_le(in + at);
-        at += 4u;
-        s->airships = in[at++];
-        if (s->airships > MESH_GAME_AIRSHIPS_MAX)
-            return MESH_GAME_STATE_OVERFLOW;
-        if (len != 6u + (size_t)s->airships * MESH_GAME_POSE_BYTES)
-            return MESH_GAME_MALFORMED;
-        for (uint8_t i = 0; i < s->airships; i++) {
-            memcpy(s->poses[i], in + at, MESH_GAME_POSE_BYTES);
-            at += MESH_GAME_POSE_BYTES;
-        }
-        return MESH_GAME_OK;
-    }
-    case MESH_GAME_KIND_MATCH_CLOSE: {
-        struct mesh_game_match_close *c = &out->body.match_close;
-
-        if (len < 2u)
-            return MESH_GAME_MALFORMED;
-        out->kind = MESH_GAME_KIND_MATCH_CLOSE;
-        c->reason_len = in[at++];
-        if (c->reason_len > MESH_GAME_REASON_MAX ||
-            len != (size_t)c->reason_len + 2u)
-            return MESH_GAME_MALFORMED;
-        memcpy(c->reason, in + at, c->reason_len);
-        c->reason[c->reason_len] = '\0';
-        return MESH_GAME_OK;
-    }
+        return game_parse_match_open(in, len, out);
+    case MESH_GAME_KIND_MATCH_STATE:
+        return game_parse_match_state(in, len, out);
+    case MESH_GAME_KIND_MATCH_CLOSE:
+        return game_parse_match_close(in, len, out);
     default:
         break;
     }
@@ -295,8 +369,8 @@ static enum mesh_stream_refusal game_service_open(struct mesh_stream *st,
                                                   size_t reply_cap,
                                                   size_t *reply_len, void *ctx)
 {
-    struct mesh_game_frame frame;
     struct mesh_game_session *s;
+    struct mesh_game_frame frame;
     uint8_t zid[32];
 
     (void)ctx;
