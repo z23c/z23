@@ -140,464 +140,601 @@ static bool ace_window_matches_ref(struct active_chain *c,
     return active_chain_at(c, tip_h + 1) == NULL;
 }
 
+/* Contiguous have-data skiplist run [h_first, h_last] on prev, branch
+ * `branch`. A failed insert clears *ok and is still the returned tip. */
+static struct block_index *ace_append_have_data_skip_span(
+    struct main_state *ms, struct block_index *prev,
+    int h_first, int h_last, int branch, bool *ok)
+{
+    struct block_index *tip = NULL;
+    for (int h = h_first; h <= h_last && *ok; h++) {
+        struct block_index *pi = ace_insert_skip(
+            ms, h, prev, branch, BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
+        *ok = *ok && pi != NULL;
+        prev = pi;
+        tip = pi;
+    }
+    return tip;
+}
+
+/* 1. Contiguous frontier: window at 3, bodies through 7 -> extend to 7. */
+static bool ace_contiguous_frontier_reaches_max(struct main_state *ms, int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 3);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == NULL; /* gap pre */
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index,
+                                         ms->pindex_best_header, 7);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == b[4];
+    ok = ok && active_chain_at(&ms->chain_active, 7) == b[7];
+    ok = ok && active_chain_at(&ms->chain_active, 3) == b[3]; /* tip intact */
+    return ok;
+}
+
+/* 2. Capped by max_height: extend only to 5 even though 6,7 are present. */
+static bool ace_max_height_caps_extension(struct main_state *ms, int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 3);
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index,
+                                         ms->pindex_best_header, 5);
+    ok = ok && active_chain_at(&ms->chain_active, 5) == b[5];
+    ok = ok && active_chain_at(&ms->chain_active, 6) == NULL; /* capped */
+    return ok;
+}
+
+/* 3. Fork at 5 (pprev points to 3, not 4) -> stop at 4, never expose 5. */
+static bool ace_fork_stops_at_contiguous_edge(struct main_state *ms, int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 3);
+    b[5]->pprev = b[3]; /* divergent: not a child of b[4] */
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index,
+                                         ms->pindex_best_header, 7);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == b[4];
+    ok = ok && active_chain_at(&ms->chain_active, 5) == NULL; /* refused */
+    return ok;
+}
+
+/* 4. Missing body at 5 -> stop at 4. */
+static bool ace_missing_body_stops_before_gap(struct main_state *ms, int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 3);
+    b[5]->nStatus = BLOCK_VALID_SCRIPTS; /* no BLOCK_HAVE_DATA */
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index,
+                                         ms->pindex_best_header, 7);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == b[4];
+    ok = ok && active_chain_at(&ms->chain_active, 5) == NULL;
+    return ok;
+}
+
+/* 5. Have-data but not yet script-validated at 5 -> still EXPOSED. The gate
+ * is BLOCK_HAVE_DATA, not BLOCK_VALID_SCRIPTS: body-dependent stages
+ * (body_fetch / body_persist / script_validate) must see a have-data block
+ * before it is script-validated. Heights 6,7 keep VALID_SCRIPTS, so the
+ * window extends to 7. */
+static bool ace_have_data_tree_only_is_exposed(struct main_state *ms, int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 3);
+    b[5]->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TREE; /* body, no scripts */
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index,
+                                         ms->pindex_best_header, 7);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == b[4];
+    ok = ok && active_chain_at(&ms->chain_active, 5) == b[5]; /* exposed */
+    ok = ok && active_chain_at(&ms->chain_active, 7) == b[7];
+    return ok;
+}
+
+/* 6. No gap (max_height <= window height) -> no-op, window unchanged. */
+static bool ace_no_gap_leaves_window_unchanged(struct main_state *ms, int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 7); /* window already at 7 */
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index,
+                                         ms->pindex_best_header, 7);
+    ok = ok && active_chain_at(&ms->chain_active, 7) == b[7];
+    ok = ok && active_chain_height(&ms->chain_active) == 7;
+    return ok;
+}
+
+/* First array grow retires `pre` and at least doubles capacity. *out_far
+ * receives the far-jump block (NULL when the insert fails). */
+static bool ace_first_grow_retires_prior_array(struct main_state *ms,
+                                              struct block_index **pre,
+                                              int pre_cap,
+                                              struct uint256 *far_hash,
+                                              struct block_index **out_far,
+                                              bool ok)
+{
+    ok = ok && pre != NULL && pre_cap > 0;
+
+    /* pprev = NULL: this far-jump block exists only to force an array
+     * grow; a non-NULL pprev with a non-adjacent height label would trip
+     * the label-splice check in active_chain_move_window_tip. */
+    struct block_index *far_blk = ace_insert(ms, far_hash, pre_cap + 100,
+                                             NULL,
+                                             BLOCK_HAVE_DATA |
+                                             BLOCK_VALID_SCRIPTS);
+    *out_far = far_blk;
+    ok = ok && far_blk &&
+         active_chain_move_window_tip(&ms->chain_active, far_blk);
+    ok = ok && ms->chain_active.chain != pre;          /* grew */
+    ok = ok && ms->chain_active.capacity >= 2 * pre_cap; /* geometric */
+    ok = ok && ms->chain_active.retired != NULL &&
+         ms->chain_active.retired->arr == pre;         /* retired, not freed */
+    return ok;
+}
+
+/* Second grow chains a second retired array; the first stays live. */
+static bool ace_second_grow_links_retired_chain(struct main_state *ms,
+                                                struct block_index **b,
+                                                struct block_index **pre,
+                                                struct block_index *far_blk,
+                                                struct uint256 *far_hash,
+                                                bool ok)
+{
+    struct block_index **mid = ms->chain_active.chain;
+    int mid_cap = ms->chain_active.capacity;
+    struct block_index *far2_blk = ace_insert(ms, far_hash,
+                                              mid_cap + 100,
+                                              NULL /* see above */,
+                                              BLOCK_HAVE_DATA |
+                                              BLOCK_VALID_SCRIPTS);
+    ok = ok && far2_blk &&
+         active_chain_move_window_tip(&ms->chain_active, far2_blk);
+    ok = ok && ms->chain_active.retired != NULL &&
+         ms->chain_active.retired->arr == mid &&
+         ms->chain_active.retired->next != NULL &&
+         ms->chain_active.retired->next->arr == pre;
+    ok = ok && pre[3] == b[3] && mid[far_blk->nHeight] == far_blk;
+    return ok;
+}
+
+/* 7. Window grow RETIRES (never frees) the superseded chain[] array: a
+ * lock-free reader holding the pre-grow pointer can still index it.
+ * Also pins geometric growth (capacity at least doubles) and that
+ * active_chain_free reclaims the retired arrays. */
+static bool ace_grow_retires_superseded_chain(struct main_state *ms, int n)
+{
+    static struct uint256 far_hashes[2];
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 3); /* capacity = 3 + 1024 */
+    struct block_index **pre = ms->chain_active.chain;
+    int pre_cap = ms->chain_active.capacity;
+    struct block_index *far_blk = NULL;
+    ok = ace_first_grow_retires_prior_array(ms, pre, pre_cap, &far_hashes[0],
+                                            &far_blk, ok);
+    ok = ok && pre[3] == b[3];      /* old array still live + intact */
+    ok = ok && active_chain_at(&ms->chain_active, far_blk->nHeight) == far_blk;
+    ok = ok && active_chain_at(&ms->chain_active, 3) == b[3];
+    return ace_second_grow_links_retired_chain(ms, b, pre, far_blk,
+                                              &far_hashes[1], ok);
+}
+
+/* 8. pindex_best_header points at a BODILESS orphan above the have-data
+ * frontier. Scanning up to the header tip (7) must still extend the window
+ * only to the contiguous have-data tip (5): the exclusion comes from the
+ * internal have-data gate, not a low scan bound. Bodies/scripts through 5;
+ * 6 and 7 are header-only. */
+static bool ace_bodiless_best_header_not_pinned(struct main_state *ms, int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 3);
+    /* Bodies + scripts only through 5; 6,7 are header-only (no body). */
+    b[6]->nStatus = BLOCK_VALID_TREE; /* header-only orphan, no HAVE_DATA */
+    b[7]->nStatus = BLOCK_VALID_TREE;
+    ms->pindex_best_header = b[7]; /* best HEADER sits above the body floor */
+
+    /* Scan all the way to the header tip (7). */
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index,
+                                         ms->pindex_best_header, 7);
+    ok = ok && active_chain_at(&ms->chain_active, 5) == b[5]; /* reached body */
+    ok = ok && active_chain_at(&ms->chain_active, 6) == NULL; /* NOT pinned */
+    ok = ok && active_chain_at(&ms->chain_active, 7) == NULL;
+    ok = ok && active_chain_height(&ms->chain_active) == 5;
+    return ok;
+}
+
+/* 9. Upstream-lookahead preservation: upstream stages
+ * (body_persist/script_validate/proof_validate) read
+ * active_chain_at(cursor + 1), so the window must not stop at
+ * utxo_apply's cursor. utxo_apply is finalized at the window tip (3);
+ * bodies+scripts are contiguous through 7; with the header-tip scan
+ * bound the window exposes heights 4..7 up to the have-data frontier. */
+static bool ace_upstream_lookahead_above_cursor(struct main_state *ms, int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    int utxo_apply_cursor = 3;            /* lowest stage; == window tip */
+    bool ok = ace_build(ms, b, n, utxo_apply_cursor);
+    ms->pindex_best_header = b[7];         /* header tip = body frontier here */
+
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index,
+                                         ms->pindex_best_header,
+                                         ms->pindex_best_header->nHeight);
+
+    /* Every height a leading upstream stage would consume (cursor+1 ..
+     * have-data tip) is exposed. */
+    for (int h = utxo_apply_cursor + 1; h <= 7; h++)
+        ok = ok && active_chain_at(&ms->chain_active, h) == b[h];
+    ok = ok && active_chain_height(&ms->chain_active) == 7;
+    return ok;
+}
+
+/* 10. POINTER-IDENTITY: the canonical successor's pprev is a duplicate
+ * block_index object with the same hash as the window tip but a different
+ * pointer (snapshot-seeded tip slot vs header-ingest pprev). Contiguity is
+ * by block hash, so the successor is admitted. Exercises the slow path
+ * (best_header NULL). */
+static bool ace_same_hash_duplicate_parent_admitted(struct main_state *ms,
+                                                   int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 3); /* window tip at b[3] */
+
+    /* A duplicate of height-3 (the tip): same hash, different pointer, not
+     * in the map; parent is the real b[2] so ancestry stays linked. */
+    struct block_index dup3;
+    memset(&dup3, 0, sizeof(dup3));
+    dup3.hashBlock  = b[3]->hashBlock;   /* SAME block hash as the tip */
+    dup3.phashBlock = &dup3.hashBlock;
+    dup3.nHeight    = 3;
+    dup3.nStatus    = b[3]->nStatus;
+    dup3.nChainWork = b[3]->nChainWork;
+    dup3.pprev      = b[2];
+
+    b[4]->pprev = &dup3; /* successor links to the duplicate parent */
+
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index,
+                                         NULL /* slow path: by-pprev hash */,
+                                         7);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == b[4]; /* admitted */
+    ok = ok && active_chain_at(&ms->chain_active, 7) == b[7]; /* extends on */
+    return ok;
+}
+
+/* 11. LARGE-INDEX BYTE-IDENTITY. The O(log n) skiplist FAST path and the
+ * O(map) pprev-walk SLOW path each assemble a window slot-for-slot
+ * identical to an independent reference walk over a multi-thousand-block
+ * index, so routing the refold through block_index_get_ancestor is
+ * verdict-preserving. */
+static bool ace_large_index_paths_match_reference(struct main_state *msf,
+                                                 struct main_state *mss)
+{
+    enum { BIG = 4000 };
+    static struct block_index *refbuf[BIG + 8];
+
+    /* FAST path: skiplist built + best_header set. */
+    main_state_init(msf);
+    chain_linkage_reset_for_testing();
+    bool ok = true;
+    struct block_index *ftip =
+        ace_append_have_data_skip_span(msf, NULL, 0, BIG - 1, 0, &ok);
+    ok = ok && ftip &&
+         active_chain_move_window_tip(&msf->chain_active,
+                                      block_index_get_ancestor(ftip, 1));
+    msf->pindex_best_header = ftip;
+    uint64_t f0 = active_chain_extend_window_have_data_fast_count();
+    active_chain_extend_window_have_data(&msf->chain_active,
+                                         &msf->map_block_index, ftip,
+                                         ftip->nHeight);
+    ok = ok && active_chain_extend_window_have_data_fast_count() > f0;
+    ace_reference_window(ftip, refbuf, BIG + 8);
+    ok = ok && ace_window_matches_ref(&msf->chain_active, refbuf, BIG - 1);
+
+    /* SLOW path: best_header NULL -> map scan + pprev-hash contiguity walk.
+     * Hashes are height-derived, so the SAME reference applies. */
+    main_state_init(mss);
+    struct block_index *stip =
+        ace_append_have_data_skip_span(mss, NULL, 0, BIG - 1, 0, &ok);
+    ok = ok && stip &&
+         active_chain_move_window_tip(&mss->chain_active,
+                                      block_index_get_ancestor(stip, 1));
+    uint64_t s0 = active_chain_extend_window_have_data_slow_count();
+    active_chain_extend_window_have_data(&mss->chain_active,
+                                         &mss->map_block_index, NULL,
+                                         stip->nHeight);
+    ok = ok && active_chain_extend_window_have_data_slow_count() > s0;
+    ok = ok && ace_window_matches_ref(&mss->chain_active, refbuf, BIG - 1);
+    return ok;
+}
+
+/* 12. INCREMENTAL GALLOP across the MAX_GAP (8192) bound. A chain longer
+ * than one extend's reach assembles, over several bounded extends of at
+ * most MAX_GAP heights each, a window byte-identical to the reference
+ * pprev walk. */
+static bool ace_gallop_past_max_gap_matches_reference(struct main_state *ms)
+{
+    enum { BIG2 = 9000 }; /* > ACTIVE_CHAIN_EXTEND_HAVE_DATA_MAX_GAP (8192) */
+    static struct block_index *refbuf2[BIG2 + 8];
+    main_state_init(ms);
+    chain_linkage_reset_for_testing();
+    bool ok = true;
+    struct block_index *tip =
+        ace_append_have_data_skip_span(ms, NULL, 0, BIG2 - 1, 0, &ok);
+    ok = ok && tip &&
+         active_chain_move_window_tip(&ms->chain_active,
+                                      block_index_get_ancestor(tip, 1));
+    ms->pindex_best_header = tip;
+    int iters = 0;
+    while (ok && active_chain_height(&ms->chain_active) < tip->nHeight &&
+           iters < 16) {
+        active_chain_extend_window_have_data(&ms->chain_active,
+                                             &ms->map_block_index, tip,
+                                             tip->nHeight);
+        iters++;
+    }
+    ok = ok && active_chain_height(&ms->chain_active) == tip->nHeight;
+    ok = ok && iters >= 2;                  /* took >1 bounded extend */
+    ok = ok && iters <= (BIG2 / 8192) + 2;  /* stayed O(chain/gap) bounded */
+    ace_reference_window(tip, refbuf2, BIG2 + 8);
+    ok = ok && ace_window_matches_ref(&ms->chain_active, refbuf2, BIG2 - 1);
+    return ok;
+}
+
+/* 13. REORG / WINDOW-SHRINK then re-extend. After retracting the window to
+ * a fork point and re-extending along a divergent branch, the window is
+ * byte-identical to the reference pprev walk of the new tip: lower slots
+ * preserved, upper slots replaced by the fork, no stale main-chain slot. */
+static bool ace_reorg_then_reextend_matches_reference(struct main_state *ms)
+{
+    enum { MAIN_N = 2000, FORK_FROM = 1000, FORK_TIP = 2499 };
+    static struct block_index *refbuf3[FORK_TIP + 8];
+    main_state_init(ms);
+    chain_linkage_reset_for_testing();
+    bool ok = true;
+    struct block_index *mtip =
+        ace_append_have_data_skip_span(ms, NULL, 0, MAIN_N - 1, 0, &ok);
+    ok = ok && mtip &&
+         active_chain_move_window_tip(&ms->chain_active,
+                                      block_index_get_ancestor(mtip, 1));
+    ms->pindex_best_header = mtip;
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index, mtip,
+                                         mtip->nHeight);
+    struct block_index *main1500 = active_chain_at(&ms->chain_active, 1500);
+    ok = ok && main1500 != NULL;
+
+    /* Fork branching off the shared block@FORK_FROM (distinct branch=1
+     * hashes -> two objects live at the overlapping heights 1001..1999). */
+    struct block_index *fprev = block_index_get_ancestor(mtip, FORK_FROM);
+    struct block_index *ftip = ace_append_have_data_skip_span(
+        ms, fprev, FORK_FROM + 1, FORK_TIP, 1, &ok);
+
+    /* SHRINK: retract the window to the fork point (reorg unwind). */
+    ok = ok &&
+         active_chain_move_window_tip(&ms->chain_active,
+                                      block_index_get_ancestor(mtip,
+                                                               FORK_FROM));
+    ok = ok && active_chain_height(&ms->chain_active) == FORK_FROM;
+
+    /* Re-extend along the fork. */
+    ms->pindex_best_header = ftip;
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index, ftip,
+                                         ftip->nHeight);
+    ace_reference_window(ftip, refbuf3, FORK_TIP + 8);
+    ok = ok && ace_window_matches_ref(&ms->chain_active, refbuf3, FORK_TIP);
+
+    /* The overlapping height now resolves to the FORK object, not main. */
+    struct block_index *fork1500 = active_chain_at(&ms->chain_active, 1500);
+    ok = ok && fork1500 != NULL && fork1500 != main1500 &&
+         memcmp(fork1500->hashBlock.data, refbuf3[1500]->hashBlock.data,
+                32) == 0;
+    return ok;
+}
+
+/* 14. FAST-PATH DUPLICATE-HAVE_DATA rescue. best_header's ancestry object
+ * at H+1 is a bodiless duplicate while body_persist set BLOCK_HAVE_DATA on
+ * the map's canonical same-hash object. have_data_by_hash merges the
+ * have-data truth across same-hash twins and fills the window with the
+ * body-bearing object; nothing unverified is admitted (same hash-linked
+ * block). Exercises the FAST path (best_header set, ancestry matches tip). */
+static bool ace_fast_path_dup_body_rescued(struct main_state *ms, int n)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, n, 3);          /* window tip at b[3] */
+
+    /* hdr4: best_header's ancestry object at height 4 — the same hash as
+     * the canonical b[4] (body-present) but a different, bodiless object.
+     * Its parent is the real b[3], so the fast-path guard passes. */
+    struct block_index hdr4;
+    memset(&hdr4, 0, sizeof(hdr4));
+    hdr4.hashBlock  = b[4]->hashBlock;   /* same hash as the canonical body */
+    hdr4.phashBlock = &hdr4.hashBlock;
+    hdr4.nHeight    = 4;
+    hdr4.nStatus    = BLOCK_VALID_TREE;  /* header-only: NO BLOCK_HAVE_DATA */
+    hdr4.nChainWork = b[4]->nChainWork;
+    hdr4.pprev      = b[3];
+
+    uint64_t fast0 = active_chain_extend_window_have_data_fast_count();
+    uint64_t dup0  = active_chain_extend_window_dup_data_rescued_count();
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index, &hdr4, 4);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == b[4];  /* body twin */
+    ok = ok && active_chain_at(&ms->chain_active, 4) != &hdr4; /* not bodiless */
+    ok = ok && active_chain_height(&ms->chain_active) == 4;    /* extended */
+    ok = ok && active_chain_extend_window_have_data_fast_count() > fast0;
+    ok = ok && active_chain_extend_window_dup_data_rescued_count() == dup0 + 1;
+    return ok;
+}
+
+/* 15. NEGATIVE / SAFETY: a pprev-less body at tip+1 (unverifiable parent)
+ * is never pulled into the window by either path: a NULL-pprev lookahead
+ * would make tip_finalize read a false fork. The have-data merge relaxes
+ * only the BLOCK_HAVE_DATA gate, never pprev/hash contiguity. Uses a
+ * 4-block chain (heights 0..3) so height 4 is free for the orphan. */
+static bool ace_pprevless_body_refused(struct main_state *ms)
+{
+    main_state_init(ms);
+    struct block_index *bb[4];
+    bool ok = ace_build(ms, bb, 4, 3);       /* window tip at bb[3] */
+
+    /* A body-present successor at height 4 whose parent link is SEVERED
+     * (pprev == NULL): in the map (eligible by have-data) but with no
+     * verifiable parent, so no path may admit it. */
+    struct uint256 orphan_hash;
+    struct block_index *orphan =
+        ace_insert(ms, &orphan_hash, 4, NULL,
+                   BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
+    ok = ok && orphan != NULL;
+
+    /* SLOW path (best_header NULL): the pprev-walk refuses a NULL-pprev
+     * child. */
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index, NULL, 4);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == NULL;
+    ok = ok && active_chain_height(&ms->chain_active) == 3;
+
+    /* FAST-guard path (best_header == the severed orphan): its ancestry
+     * cannot reach the finalized tip (pprev severed), so the guard fails and
+     * the slow pprev-walk again refuses it — never admitted. */
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index, orphan, 4);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == NULL;
+    ok = ok && active_chain_height(&ms->chain_active) == 3;
+    return ok;
+}
+
 int test_active_chain_extend(void)
 {
     printf("\n=== active_chain_extend_window_have_data tests ===\n");
     int failures = 0;
     const int N = 8;
 
-    /* 1. Contiguous frontier: window at 3, bodies through 7 -> extend to 7. */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 3);
-        ok = ok && active_chain_at(&ms.chain_active, 4) == NULL; /* gap pre */
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, ms.pindex_best_header, 7);
-        ok = ok && active_chain_at(&ms.chain_active, 4) == b[4];
-        ok = ok && active_chain_at(&ms.chain_active, 7) == b[7];
-        ok = ok && active_chain_at(&ms.chain_active, 3) == b[3]; /* tip intact */
-        ACE_CHECK("contiguous have-data frontier -> window extends to max", ok);
+        struct main_state ms;
+        ACE_CHECK("contiguous have-data frontier -> window extends to max",
+                  ace_contiguous_frontier_reaches_max(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 2. Capped by max_height: extend only to 5 even though 6,7 are present. */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 3);
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, ms.pindex_best_header, 5);
-        ok = ok && active_chain_at(&ms.chain_active, 5) == b[5];
-        ok = ok && active_chain_at(&ms.chain_active, 6) == NULL; /* capped */
-        ACE_CHECK("max_height caps the extension", ok);
+        struct main_state ms;
+        ACE_CHECK("max_height caps the extension",
+                  ace_max_height_caps_extension(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 3. Fork at 5 (pprev points to 3, not 4) -> stop at 4, never expose 5. */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 3);
-        b[5]->pprev = b[3]; /* divergent: not a child of b[4] */
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, ms.pindex_best_header, 7);
-        ok = ok && active_chain_at(&ms.chain_active, 4) == b[4];
-        ok = ok && active_chain_at(&ms.chain_active, 5) == NULL; /* refused */
+        struct main_state ms;
         ACE_CHECK("fork/divergent successor refused (stops at contiguous edge)",
-                  ok);
+                  ace_fork_stops_at_contiguous_edge(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 4. Missing body at 5 -> stop at 4. */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 3);
-        b[5]->nStatus = BLOCK_VALID_SCRIPTS; /* no BLOCK_HAVE_DATA */
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, ms.pindex_best_header, 7);
-        ok = ok && active_chain_at(&ms.chain_active, 4) == b[4];
-        ok = ok && active_chain_at(&ms.chain_active, 5) == NULL;
-        ACE_CHECK("missing-body successor refused", ok);
+        struct main_state ms;
+        ACE_CHECK("missing-body successor refused",
+                  ace_missing_body_stops_before_gap(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 5. Have-data but not yet script-validated at 5 -> still EXPOSED. The gate
-     * is BLOCK_HAVE_DATA, not BLOCK_VALID_SCRIPTS: body-dependent stages
-     * (body_fetch / body_persist / script_validate) must see a have-data block
-     * before it is script-validated. Heights 6,7 keep VALID_SCRIPTS, so the
-     * window extends to 7. */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 3);
-        b[5]->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TREE; /* body, no scripts */
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, ms.pindex_best_header, 7);
-        ok = ok && active_chain_at(&ms.chain_active, 4) == b[4];
-        ok = ok && active_chain_at(&ms.chain_active, 5) == b[5]; /* exposed */
-        ok = ok && active_chain_at(&ms.chain_active, 7) == b[7];
-        ACE_CHECK("have-data not-yet-script-validated successor IS exposed", ok);
+        struct main_state ms;
+        ACE_CHECK("have-data not-yet-script-validated successor IS exposed",
+                  ace_have_data_tree_only_is_exposed(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 6. No gap (max_height <= window height) -> no-op, window unchanged. */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 7); /* window already at 7 */
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, ms.pindex_best_header, 7);
-        ok = ok && active_chain_at(&ms.chain_active, 7) == b[7];
-        ok = ok && active_chain_height(&ms.chain_active) == 7;
-        ACE_CHECK("no gap -> no-op", ok);
+        struct main_state ms;
+        ACE_CHECK("no gap -> no-op",
+                  ace_no_gap_leaves_window_unchanged(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 7. Window grow RETIRES (never frees) the superseded chain[] array: a
-     * lock-free reader holding the pre-grow pointer can still index it.
-     * Also pins geometric growth (capacity at least doubles) and that
-     * active_chain_free reclaims the retired arrays. */
     {
-        static struct uint256 far_hashes[2];
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 3); /* capacity = 3 + 1024 */
-        struct block_index **pre = ms.chain_active.chain;
-        int pre_cap = ms.chain_active.capacity;
-        ok = ok && pre != NULL && pre_cap > 0;
-
-        /* pprev = NULL: this far-jump block exists only to force an array
-         * grow; a non-NULL pprev with a non-adjacent height label would trip
-         * the label-splice check in active_chain_move_window_tip. */
-        struct block_index *far_blk = ace_insert(&ms, &far_hashes[0], pre_cap + 100,
-                                             NULL,
-                                             BLOCK_HAVE_DATA |
-                                             BLOCK_VALID_SCRIPTS);
-        ok = ok && far_blk &&
-             active_chain_move_window_tip(&ms.chain_active, far_blk);
-        ok = ok && ms.chain_active.chain != pre;          /* grew */
-        ok = ok && ms.chain_active.capacity >= 2 * pre_cap; /* geometric */
-        ok = ok && ms.chain_active.retired != NULL &&
-             ms.chain_active.retired->arr == pre;         /* retired, not freed */
-        ok = ok && pre[3] == b[3];      /* old array still live + intact */
-        ok = ok && active_chain_at(&ms.chain_active, far_blk->nHeight) == far_blk;
-        ok = ok && active_chain_at(&ms.chain_active, 3) == b[3];
-
-        /* Second grow chains a second retired array; the first stays live. */
-        struct block_index **mid = ms.chain_active.chain;
-        int mid_cap = ms.chain_active.capacity;
-        struct block_index *far2_blk = ace_insert(&ms, &far_hashes[1],
-                                              mid_cap + 100, NULL /* see above */,
-                                              BLOCK_HAVE_DATA |
-                                              BLOCK_VALID_SCRIPTS);
-        ok = ok && far2_blk &&
-             active_chain_move_window_tip(&ms.chain_active, far2_blk);
-        ok = ok && ms.chain_active.retired != NULL &&
-             ms.chain_active.retired->arr == mid &&
-             ms.chain_active.retired->next != NULL &&
-             ms.chain_active.retired->next->arr == pre;
-        ok = ok && pre[3] == b[3] && mid[far_blk->nHeight] == far_blk;
+        struct main_state ms;
         ACE_CHECK("grow retires superseded chain[] (value-stable for readers)",
-                  ok);
+                  ace_grow_retires_superseded_chain(&ms, N));
         main_state_free(&ms); /* frees both retired arrays */
     }
 
-    /* 8. pindex_best_header points at a BODILESS orphan above the have-data
-     * frontier. Scanning up to the header tip (7) must still extend the window
-     * only to the contiguous have-data tip (5): the exclusion comes from the
-     * internal have-data gate, not a low scan bound. Bodies/scripts through 5;
-     * 6 and 7 are header-only. */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 3);
-        /* Bodies + scripts only through 5; 6,7 are header-only (no body). */
-        b[6]->nStatus = BLOCK_VALID_TREE; /* header-only orphan, no HAVE_DATA */
-        b[7]->nStatus = BLOCK_VALID_TREE;
-        ms.pindex_best_header = b[7]; /* best HEADER sits above the body floor */
-
-        /* Scan all the way to the header tip (7). */
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, ms.pindex_best_header, 7);
-        ok = ok && active_chain_at(&ms.chain_active, 5) == b[5]; /* reached body */
-        ok = ok && active_chain_at(&ms.chain_active, 6) == NULL; /* NOT pinned */
-        ok = ok && active_chain_at(&ms.chain_active, 7) == NULL;
-        ok = ok && active_chain_height(&ms.chain_active) == 5;
+        struct main_state ms;
         ACE_CHECK("bodiless best-header orphan NOT pinned even with header-tip "
-                  "scan bound", ok);
+                  "scan bound",
+                  ace_bodiless_best_header_not_pinned(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 9. Upstream-lookahead preservation: upstream stages
-     * (body_persist/script_validate/proof_validate) read
-     * active_chain_at(cursor + 1), so the window must not stop at
-     * utxo_apply's cursor. utxo_apply is finalized at the window tip (3);
-     * bodies+scripts are contiguous through 7; with the header-tip scan
-     * bound the window exposes heights 4..7 up to the have-data frontier. */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        int utxo_apply_cursor = 3;            /* lowest stage; == window tip */
-        bool ok = ace_build(&ms, b, N, utxo_apply_cursor);
-        ms.pindex_best_header = b[7];         /* header tip = body frontier here */
-
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index,
-                                             ms.pindex_best_header,
-                                             ms.pindex_best_header->nHeight);
-
-        /* Every height a leading upstream stage would consume (cursor+1 ..
-         * have-data tip) is exposed. */
-        for (int h = utxo_apply_cursor + 1; h <= 7; h++)
-            ok = ok && active_chain_at(&ms.chain_active, h) == b[h];
-        ok = ok && active_chain_height(&ms.chain_active) == 7;
+        struct main_state ms;
         ACE_CHECK("upstream lookahead preserved (successors above utxo_apply "
-                  "cursor exposed)", ok);
+                  "cursor exposed)",
+                  ace_upstream_lookahead_above_cursor(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 10. POINTER-IDENTITY: the canonical successor's pprev is a duplicate
-     * block_index object with the same hash as the window tip but a different
-     * pointer (snapshot-seeded tip slot vs header-ingest pprev). Contiguity is
-     * by block hash, so the successor is admitted. Exercises the slow path
-     * (best_header NULL). */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 3); /* window tip at b[3] */
-
-        /* A duplicate of height-3 (the tip): same hash, different pointer, not
-         * in the map; parent is the real b[2] so ancestry stays linked. */
-        struct block_index dup3;
-        memset(&dup3, 0, sizeof(dup3));
-        dup3.hashBlock  = b[3]->hashBlock;   /* SAME block hash as the tip */
-        dup3.phashBlock = &dup3.hashBlock;
-        dup3.nHeight    = 3;
-        dup3.nStatus    = b[3]->nStatus;
-        dup3.nChainWork = b[3]->nChainWork;
-        dup3.pprev      = b[2];
-
-        b[4]->pprev = &dup3; /* successor links to the duplicate parent */
-
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index,
-                                             NULL /* slow path: by-pprev hash */, 7);
-        ok = ok && active_chain_at(&ms.chain_active, 4) == b[4]; /* admitted */
-        ok = ok && active_chain_at(&ms.chain_active, 7) == b[7]; /* extends on */
+        struct main_state ms;
         ACE_CHECK("duplicate same-hash parent admitted by HASH not pointer "
-                  "(live 3162167 wedge)", ok);
+                  "(live 3162167 wedge)",
+                  ace_same_hash_duplicate_parent_admitted(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 11. LARGE-INDEX BYTE-IDENTITY. The O(log n) skiplist FAST path and the
-     * O(map) pprev-walk SLOW path each assemble a window slot-for-slot
-     * identical to an independent reference walk over a multi-thousand-block
-     * index, so routing the refold through block_index_get_ancestor is
-     * verdict-preserving. */
     {
-        enum { BIG = 4000 };
-        static struct block_index *refbuf[BIG + 8];
-
-        /* FAST path: skiplist built + best_header set. */
-        struct main_state msf; main_state_init(&msf);
-        chain_linkage_reset_for_testing();
-        struct block_index *ftip = NULL, *prev = NULL;
-        bool ok = true;
-        for (int h = 0; h < BIG && ok; h++) {
-            struct block_index *pi = ace_insert_skip(
-                &msf, h, prev, 0, BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
-            ok = ok && pi != NULL; prev = pi; ftip = pi;
-        }
-        ok = ok && ftip &&
-             active_chain_move_window_tip(&msf.chain_active,
-                                          block_index_get_ancestor(ftip, 1));
-        msf.pindex_best_header = ftip;
-        uint64_t f0 = active_chain_extend_window_have_data_fast_count();
-        active_chain_extend_window_have_data(&msf.chain_active,
-                                             &msf.map_block_index, ftip,
-                                             ftip->nHeight);
-        ok = ok && active_chain_extend_window_have_data_fast_count() > f0;
-        ace_reference_window(ftip, refbuf, BIG + 8);
-        ok = ok && ace_window_matches_ref(&msf.chain_active, refbuf, BIG - 1);
-
-        /* SLOW path: best_header NULL -> map scan + pprev-hash contiguity walk.
-         * Hashes are height-derived, so the SAME reference applies. */
-        struct main_state mss; main_state_init(&mss);
-        struct block_index *stip = NULL; prev = NULL;
-        for (int h = 0; h < BIG && ok; h++) {
-            struct block_index *pi = ace_insert_skip(
-                &mss, h, prev, 0, BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
-            ok = ok && pi != NULL; prev = pi; stip = pi;
-        }
-        ok = ok && stip &&
-             active_chain_move_window_tip(&mss.chain_active,
-                                          block_index_get_ancestor(stip, 1));
-        uint64_t s0 = active_chain_extend_window_have_data_slow_count();
-        active_chain_extend_window_have_data(&mss.chain_active,
-                                             &mss.map_block_index, NULL,
-                                             stip->nHeight);
-        ok = ok && active_chain_extend_window_have_data_slow_count() > s0;
-        ok = ok && ace_window_matches_ref(&mss.chain_active, refbuf, BIG - 1);
-
+        struct main_state msf;
+        struct main_state mss;
         ACE_CHECK("large index: skiplist-fast == pprev-slow == reference window "
-                  "(byte-identical)", ok);
+                  "(byte-identical)",
+                  ace_large_index_paths_match_reference(&msf, &mss));
         main_state_free(&msf);  /* refbuf pointers live until after mss compare */
         main_state_free(&mss);
     }
 
-    /* 12. INCREMENTAL GALLOP across the MAX_GAP (8192) bound. A chain longer
-     * than one extend's reach assembles, over several bounded extends of at
-     * most MAX_GAP heights each, a window byte-identical to the reference
-     * pprev walk. */
     {
-        enum { BIG2 = 9000 }; /* > ACTIVE_CHAIN_EXTEND_HAVE_DATA_MAX_GAP (8192) */
-        static struct block_index *refbuf2[BIG2 + 8];
-        struct main_state ms; main_state_init(&ms);
-        chain_linkage_reset_for_testing();
-        struct block_index *tip = NULL, *prev = NULL;
-        bool ok = true;
-        for (int h = 0; h < BIG2 && ok; h++) {
-            struct block_index *pi = ace_insert_skip(
-                &ms, h, prev, 0, BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
-            ok = ok && pi != NULL; prev = pi; tip = pi;
-        }
-        ok = ok && tip &&
-             active_chain_move_window_tip(&ms.chain_active,
-                                          block_index_get_ancestor(tip, 1));
-        ms.pindex_best_header = tip;
-        int iters = 0;
-        while (ok && active_chain_height(&ms.chain_active) < tip->nHeight &&
-               iters < 16) {
-            active_chain_extend_window_have_data(&ms.chain_active,
-                                                 &ms.map_block_index, tip,
-                                                 tip->nHeight);
-            iters++;
-        }
-        ok = ok && active_chain_height(&ms.chain_active) == tip->nHeight;
-        ok = ok && iters >= 2;                  /* took >1 bounded extend */
-        ok = ok && iters <= (BIG2 / 8192) + 2;  /* stayed O(chain/gap) bounded */
-        ace_reference_window(tip, refbuf2, BIG2 + 8);
-        ok = ok && ace_window_matches_ref(&ms.chain_active, refbuf2, BIG2 - 1);
+        struct main_state ms;
         ACE_CHECK("incremental gallop across MAX_GAP assembles reference window "
-                  "(bounded per-extend, exact)", ok);
+                  "(bounded per-extend, exact)",
+                  ace_gallop_past_max_gap_matches_reference(&ms));
         main_state_free(&ms);
     }
 
-    /* 13. REORG / WINDOW-SHRINK then re-extend. After retracting the window to
-     * a fork point and re-extending along a divergent branch, the window is
-     * byte-identical to the reference pprev walk of the new tip: lower slots
-     * preserved, upper slots replaced by the fork, no stale main-chain slot. */
     {
-        enum { MAIN_N = 2000, FORK_FROM = 1000, FORK_TIP = 2499 };
-        static struct block_index *refbuf3[FORK_TIP + 8];
-        struct main_state ms; main_state_init(&ms);
-        chain_linkage_reset_for_testing();
-        struct block_index *mtip = NULL, *prev = NULL;
-        bool ok = true;
-        for (int h = 0; h < MAIN_N && ok; h++) {
-            struct block_index *pi = ace_insert_skip(
-                &ms, h, prev, 0, BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
-            ok = ok && pi != NULL; prev = pi; mtip = pi;
-        }
-        ok = ok && mtip &&
-             active_chain_move_window_tip(&ms.chain_active,
-                                          block_index_get_ancestor(mtip, 1));
-        ms.pindex_best_header = mtip;
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, mtip,
-                                             mtip->nHeight);
-        struct block_index *main1500 = active_chain_at(&ms.chain_active, 1500);
-        ok = ok && main1500 != NULL;
-
-        /* Fork branching off the shared block@FORK_FROM (distinct branch=1
-         * hashes -> two objects live at the overlapping heights 1001..1999). */
-        struct block_index *fprev = block_index_get_ancestor(mtip, FORK_FROM);
-        struct block_index *ftip = NULL;
-        for (int h = FORK_FROM + 1; h <= FORK_TIP && ok; h++) {
-            struct block_index *pi = ace_insert_skip(
-                &ms, h, fprev, 1, BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
-            ok = ok && pi != NULL; fprev = pi; ftip = pi;
-        }
-
-        /* SHRINK: retract the window to the fork point (reorg unwind). */
-        ok = ok &&
-             active_chain_move_window_tip(&ms.chain_active,
-                                          block_index_get_ancestor(mtip, FORK_FROM));
-        ok = ok && active_chain_height(&ms.chain_active) == FORK_FROM;
-
-        /* Re-extend along the fork. */
-        ms.pindex_best_header = ftip;
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, ftip,
-                                             ftip->nHeight);
-        ace_reference_window(ftip, refbuf3, FORK_TIP + 8);
-        ok = ok && ace_window_matches_ref(&ms.chain_active, refbuf3, FORK_TIP);
-
-        /* The overlapping height now resolves to the FORK object, not main. */
-        struct block_index *fork1500 = active_chain_at(&ms.chain_active, 1500);
-        ok = ok && fork1500 != NULL && fork1500 != main1500 &&
-             memcmp(fork1500->hashBlock.data, refbuf3[1500]->hashBlock.data,
-                    32) == 0;
+        struct main_state ms;
         ACE_CHECK("reorg/window-shrink then re-extend == reference (fork "
-                  "resolved, lower window preserved)", ok);
+                  "resolved, lower window preserved)",
+                  ace_reorg_then_reextend_matches_reference(&ms));
         main_state_free(&ms);
     }
 
-    /* 14. FAST-PATH DUPLICATE-HAVE_DATA rescue. best_header's ancestry object
-     * at H+1 is a bodiless duplicate while body_persist set BLOCK_HAVE_DATA on
-     * the map's canonical same-hash object. have_data_by_hash merges the
-     * have-data truth across same-hash twins and fills the window with the
-     * body-bearing object; nothing unverified is admitted (same hash-linked
-     * block). Exercises the FAST path (best_header set, ancestry matches tip). */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *b[8];
-        bool ok = ace_build(&ms, b, N, 3);          /* window tip at b[3] */
-
-        /* hdr4: best_header's ancestry object at height 4 — the same hash as
-         * the canonical b[4] (body-present) but a different, bodiless object.
-         * Its parent is the real b[3], so the fast-path guard passes. */
-        struct block_index hdr4;
-        memset(&hdr4, 0, sizeof(hdr4));
-        hdr4.hashBlock  = b[4]->hashBlock;   /* same hash as the canonical body */
-        hdr4.phashBlock = &hdr4.hashBlock;
-        hdr4.nHeight    = 4;
-        hdr4.nStatus    = BLOCK_VALID_TREE;  /* header-only: NO BLOCK_HAVE_DATA */
-        hdr4.nChainWork = b[4]->nChainWork;
-        hdr4.pprev      = b[3];
-
-        uint64_t fast0 = active_chain_extend_window_have_data_fast_count();
-        uint64_t dup0  = active_chain_extend_window_dup_data_rescued_count();
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, &hdr4, 4);
-        ok = ok && active_chain_at(&ms.chain_active, 4) == b[4];  /* body twin */
-        ok = ok && active_chain_at(&ms.chain_active, 4) != &hdr4; /* not bodiless */
-        ok = ok && active_chain_height(&ms.chain_active) == 4;    /* extended */
-        ok = ok && active_chain_extend_window_have_data_fast_count() > fast0;
-        ok = ok && active_chain_extend_window_dup_data_rescued_count() == dup0 + 1;
+        struct main_state ms;
         ACE_CHECK("fast-path bodiless-ancestry duplicate rescued via same-hash "
-                  "body twin (live H+1 wedge; counter fires)", ok);
+                  "body twin (live H+1 wedge; counter fires)",
+                  ace_fast_path_dup_body_rescued(&ms, N));
         main_state_free(&ms);
     }
 
-    /* 15. NEGATIVE / SAFETY: a pprev-less body at tip+1 (unverifiable parent)
-     * is never pulled into the window by either path: a NULL-pprev lookahead
-     * would make tip_finalize read a false fork. The have-data merge relaxes
-     * only the BLOCK_HAVE_DATA gate, never pprev/hash contiguity. Uses a
-     * 4-block chain (heights 0..3) so height 4 is free for the orphan. */
     {
-        struct main_state ms; main_state_init(&ms);
-        struct block_index *bb[4];
-        bool ok = ace_build(&ms, bb, 4, 3);       /* window tip at bb[3] */
-
-        /* A body-present successor at height 4 whose parent link is SEVERED
-         * (pprev == NULL): in the map (eligible by have-data) but with no
-         * verifiable parent, so no path may admit it. */
-        struct uint256 orphan_hash;
-        struct block_index *orphan =
-            ace_insert(&ms, &orphan_hash, 4, NULL,
-                       BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
-        ok = ok && orphan != NULL;
-
-        /* SLOW path (best_header NULL): the pprev-walk refuses a NULL-pprev
-         * child. */
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, NULL, 4);
-        ok = ok && active_chain_at(&ms.chain_active, 4) == NULL;
-        ok = ok && active_chain_height(&ms.chain_active) == 3;
-
-        /* FAST-guard path (best_header == the severed orphan): its ancestry
-         * cannot reach the finalized tip (pprev severed), so the guard fails and
-         * the slow pprev-walk again refuses it — never admitted. */
-        active_chain_extend_window_have_data(&ms.chain_active,
-                                             &ms.map_block_index, orphan, 4);
-        ok = ok && active_chain_at(&ms.chain_active, 4) == NULL;
-        ok = ok && active_chain_height(&ms.chain_active) == 3;
-
+        struct main_state ms;
         ACE_CHECK("pprev-less body at tip+1 refused by all paths (no "
-                  "false-reorg fuel)", ok);
+                  "false-reorg fuel)",
+                  ace_pprevless_body_refused(&ms));
         main_state_free(&ms);
     }
 
