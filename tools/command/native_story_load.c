@@ -60,7 +60,7 @@ static void story_work_facts_base(
         .source_root = story_object_string(expert, "source_root"),
         .goal_root = story_object_string(expert, "goal_root"),
         .agent_context_root = story_object_string(expert,
-                                                   "agent_context_root"),
+                                                  "agent_context_root"),
         .agent_context_ambiguous = story_object_bool(
             expert, "agent_context_ambiguous"),
         .candidate_root = story_object_string(expert, "candidate_root"),
@@ -69,12 +69,12 @@ static void story_work_facts_base(
         .patch_root = story_object_string(expert, "patch_root"),
         .action_root = story_object_string(expert, "action_id"),
         .work_receipt_root = story_object_string(expert,
-                                                  "work_receipt_root"),
+                                                 "work_receipt_root"),
         .output_root = story_object_string(expert, "output_root"),
         .proof_action_root = story_object_string(expert,
-                                                  "proof_action_root"),
+                                                 "proof_action_root"),
         .build_output_root = story_object_string(expert,
-                                                  "build_output_root"),
+                                                 "build_output_root"),
     };
 }
 
@@ -104,11 +104,11 @@ static void story_work_facts_app_run(
     facts->app_run_finished_unix = story_object_int(
         expert, "app_run_finished_unix");
     facts->lane_receipt_root = story_object_string(expert,
-                                                    "lane_receipt_root");
+                                                   "lane_receipt_root");
     facts->accepted_work_root = story_object_string(
         expert, "accepted_work_root");
     facts->lane_created_unix = story_object_int(expert,
-                                                 "lane_created_unix");
+                                                "lane_created_unix");
     facts->proof_set_root = story_object_string(expert, "proof_set_root");
 }
 
@@ -146,6 +146,49 @@ static bool story_work_summary_copy(
     return ok;
 }
 
+static bool story_work_compose_input(struct json_value *input,
+                                     const char *workspace, const char *work,
+                                     const char *datadir)
+{
+    json_init(input);
+    json_set_object(input);
+    bool ok = json_push_kv_str(input, "workspace",
+                               workspace && workspace[0] ? workspace : ".") &&
+        json_push_kv_str(input, "work", work) &&
+        (!datadir || !datadir[0] ||
+         json_push_kv_str(input, "datadir", datadir)) &&
+        json_push_kv_bool(input, "details", true);
+    return ok;
+}
+
+static void story_load_source_failed(struct zcl_command_reply *reply,
+                                     const struct zcl_command_reply *nested)
+{
+    zcl_command_reply_fail(
+        reply, nested->status, nested->exit_code,
+        nested->error.code[0] ? nested->error.code : "STORY_SOURCE_FAILED",
+        nested->error.phase[0] ? nested->error.phase : "project",
+        nested->error.retryable, false,
+        nested->error.message[0] ? nested->error.message
+                                 : "canonical work status is unavailable",
+        nested->error.evidence[0] ? nested->error.evidence
+                                  : "zcode.work.status");
+}
+
+static bool story_work_project_reply(const struct zcl_command_reply *nested,
+                                     struct story_loaded_work *loaded)
+{
+    const struct json_value *expert = json_get(&nested->data, "expert");
+    struct zcl_story_work_facts_v1 facts;
+    story_work_facts_base(&nested->data, expert, &facts);
+    story_work_facts_app_run(expert, &facts);
+    bool copied = story_work_summary_copy(&nested->data, &facts, loaded);
+    bool ok = copied && zcl_story_graph_from_work_facts(
+                  &facts, loaded->events, &loaded->graph) &&
+              zcl_story_show_v1_build(&loaded->graph, &loaded->show);
+    return ok;
+}
+
 bool story_load_work(const struct zcl_command_request *request,
                      const char *workspace, const char *work,
                      const char *datadir, struct story_loaded_work *loaded,
@@ -160,15 +203,8 @@ bool story_load_work(const struct zcl_command_request *request,
         return false;
     }
     struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
-    bool input_ok = json_push_kv_str(
-                        &input, "workspace",
-                        workspace && workspace[0] ? workspace : ".") &&
-                    json_push_kv_str(&input, "work", work) &&
-                    (!datadir || !datadir[0] ||
-                     json_push_kv_str(&input, "datadir", datadir)) &&
-                    json_push_kv_bool(&input, "details", true);
+    bool input_ok = story_work_compose_input(&input, workspace, work,
+                                             datadir);
     if (!input_ok) {
         json_free(&input);
         story_load_fail(reply, "STORY_INPUT_FAILED", "compose",
@@ -184,26 +220,11 @@ bool story_load_work(const struct zcl_command_request *request,
     zcl_native_handle_zcode_work_status(&nested_request, &nested);
     json_free(&input);
     if (nested.status != ZCL_COMMAND_STATUS_PASSED) {
-        zcl_command_reply_fail(
-            reply, nested.status, nested.exit_code,
-            nested.error.code[0] ? nested.error.code : "STORY_SOURCE_FAILED",
-            nested.error.phase[0] ? nested.error.phase : "project",
-            nested.error.retryable, false,
-            nested.error.message[0] ? nested.error.message
-                                    : "canonical work status is unavailable",
-            nested.error.evidence[0] ? nested.error.evidence
-                                     : "zcode.work.status");
+        story_load_source_failed(reply, &nested);
         zcl_command_reply_free(&nested);
         return false;
     }
-    const struct json_value *expert = json_get(&nested.data, "expert");
-    struct zcl_story_work_facts_v1 facts;
-    story_work_facts_base(&nested.data, expert, &facts);
-    story_work_facts_app_run(expert, &facts);
-    bool copied = story_work_summary_copy(&nested.data, &facts, loaded);
-    bool ok = copied && zcl_story_graph_from_work_facts(
-                  &facts, loaded->events, &loaded->graph) &&
-              zcl_story_show_v1_build(&loaded->graph, &loaded->show);
+    bool ok = story_work_project_reply(&nested, loaded);
     zcl_command_reply_free(&nested);
     if (!ok)
         story_load_fail(
