@@ -46,25 +46,13 @@ static bool hex64_valid(const char *s)
     return true;
 }
 
-int test_rom_dump(void);
-int test_rom_dump(void)
+/* Section helpers each keep their own local `failures` (the ROM_CHECK macro
+ * increments that name) and return the count; the caller sums them. */
+static int rom_dump_check_checkpoint(const struct json_value *v,
+                                     const struct sha3_utxo_checkpoint *cp)
 {
-    printf("\n=== rom_dump tests ===\n");
     int failures = 0;
-
-    char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "rom_dump", "seg");
-    SetDataDir(dir);
-
-    struct json_value v;
-    json_init(&v);
-    bool ok = rom_dump_state_json(&v, NULL);
-    ROM_CHECK("returns true", ok);
-    ROM_CHECK("result is an object", v.type == JSON_OBJ);
-
-    /* ── checkpoint mirrors get_sha3_utxo_checkpoint() exactly ────────── */
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    const struct json_value *checkpoint = json_get(&v, "checkpoint");
+    const struct json_value *checkpoint = json_get(v, "checkpoint");
     ROM_CHECK("checkpoint object present",
              checkpoint && checkpoint->type == JSON_OBJ);
     if (checkpoint) {
@@ -87,9 +75,13 @@ int test_rom_dump(void)
                                              "total_supply_zatoshi")) ==
                            cp->total_supply);
     }
+    return failures;
+}
 
-    /* ── commitment enumeration: machine-readable trust-doctrine facts ── */
-    const struct json_value *commitments = json_get(&v, "commitments");
+static int rom_dump_check_commitments(const struct json_value *v)
+{
+    int failures = 0;
+    const struct json_value *commitments = json_get(v, "commitments");
     ROM_CHECK("commitments object present",
              commitments && commitments->type == JSON_OBJ);
     if (commitments) {
@@ -109,9 +101,14 @@ int test_rom_dump(void)
         ROM_CHECK("all six commitment fields present with doctrine values",
                  all_match);
     }
+    return failures;
+}
 
-    /* ── layer coverage: L0/L1/L2/L3 each a well-shaped sub-object ────── */
-    const struct json_value *layers = json_get(&v, "layers");
+static int rom_dump_check_layers(const struct json_value *v,
+                                 const struct sha3_utxo_checkpoint *cp)
+{
+    int failures = 0;
+    const struct json_value *layers = json_get(v, "layers");
     ROM_CHECK("layers object present", layers && layers->type == JSON_OBJ);
     if (layers) {
         const struct json_value *l0 = json_get(layers, "l0_rom");
@@ -133,9 +130,13 @@ int test_rom_dump(void)
                  l3 && json_get_bool(json_get(l3, "has_main_state")) == false &&
                  json_get_int(json_get(l3, "active_tip")) == -1);
     }
+    return failures;
+}
 
-    /* ── projection cursors: MMB + utxo_root_ladder ────────────────────── */
-    const struct json_value *projections = json_get(&v, "projections");
+static int rom_dump_check_projections(const struct json_value *v)
+{
+    int failures = 0;
+    const struct json_value *projections = json_get(v, "projections");
     ROM_CHECK("projections object present",
              projections && projections->type == JSON_OBJ);
     if (projections) {
@@ -156,6 +157,38 @@ int test_rom_dump(void)
                  ladder && json_get_int(json_get(ladder, "dense_height")) ==
                                (int64_t)g_utxo_root_ladder_dense_height);
     }
+    return failures;
+}
+
+int test_rom_dump(void);
+int test_rom_dump(void)
+{
+    printf("\n=== rom_dump tests ===\n");
+    int failures = 0;
+
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "rom_dump", "seg");
+    SetDataDir(dir);
+
+    struct json_value v;
+    json_init(&v);
+    bool ok = rom_dump_state_json(&v, NULL);
+    ROM_CHECK("returns true", ok);
+    ROM_CHECK("result is an object", v.type == JSON_OBJ);
+
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+
+    /* ── checkpoint mirrors get_sha3_utxo_checkpoint() exactly ────────── */
+    failures += rom_dump_check_checkpoint(&v, cp);
+
+    /* ── commitment enumeration: machine-readable trust-doctrine facts ── */
+    failures += rom_dump_check_commitments(&v);
+
+    /* ── layer coverage: L0/L1/L2/L3 each a well-shaped sub-object ────── */
+    failures += rom_dump_check_layers(&v, cp);
+
+    /* ── projection cursors: MMB + utxo_root_ladder ────────────────────── */
+    failures += rom_dump_check_projections(&v);
 
     /* ── serializes to valid, non-truncated JSON ───────────────────────── */
     char buf[8192];

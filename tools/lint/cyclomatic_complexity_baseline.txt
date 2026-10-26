@@ -1820,7 +1820,6 @@ tests/harness/src/test_retrieval_generation.c:case_aba_generation_join:25
 tests/harness/src/test_retrieval_generation.c:case_projection_binding:77
 tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
 tests/harness/src/test_robustness.c:test_robustness:104
-tests/harness/src/test_rom_dump.c:test_rom_dump:31
 tests/harness/src/test_rom_fetch.c:rf_lat_conn_thread:18
 tests/harness/src/test_rom_fetch_onion.c:test_rom_fetch_onion:46
 tests/harness/src/test_rpc_error_envelope.c:test_rpc_error_envelope:111
