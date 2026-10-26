@@ -276,17 +276,46 @@ static int64_t stig_coins_applied(sqlite3 *db)
     return v;
 }
 
-int test_seed_torn_import_gate(void)
+/* Seed the per-case fixture (script_validate_log + tip_finalize_log tables
+ * plus 8 live coins) and report the live coins_kv count (-1 with no store).
+ * Returns true when every fixture step succeeded. */
+static bool stig_case_seed_fixture(sqlite3 *pk, int64_t *live_ck)
 {
-    test_reset_shared_globals();   /* monolith isolation: see test_helpers.c */
-    printf("\n=== seed_torn_import_gate tests ===\n");
-    int failures = 0;
+    bool fixt = pk && stig_create_svl(pk) && stig_seed_coins(pk, 8);
+    *live_ck = pk ? coins_kv_count(pk) : -1;
+    return fixt;
+}
 
-    /* event_emit short-circuits until the ring is initialized; required so
-     * the EV_OPERATOR_NEEDED observer fires in an isolated ZCL_TEST_ONLY run
-     * (idempotent — the full suite already init'd it). */
-    event_log_init();
-    blocker_module_init();
+/* Insert the active-tip block at `height` and install it in the active
+ * chain slot (the wedged-boot shape). */
+static bool stig_install_active_tip(struct main_state *ms, int height)
+{
+    struct uint256 tip_hash;
+    stig_hash_for(height, &tip_hash);
+    struct block_index *tip = stig_insert_anchor(ms, &tip_hash, height);
+    return tip && active_chain_install_tip_slot(&ms->chain_active, tip);
+}
+
+/* Case 3 fixture tail: insert the forward ok=0 hole and seed coin_backfill's
+ * durable refusal of it; returns the failed-check count. */
+static int stig_fwd_seed_hole_and_refusal(sqlite3 *pk, int hole_h,
+                                          const struct uint256 *hole_hash)
+{
+    int failures = 0;
+    STIG_CHECK("fwd: ok=0 prevout_unresolved row above H inserted",
+               pk && stig_insert_hole(pk, hole_h, hole_hash));
+    /* coin_backfill DURABLY REFUSED this hole — the genuinely-unrecoverable
+     * tear the guard fires on. */
+    STIG_CHECK("fwd: coin_backfill.refused marker seeded",
+               pk && stig_seed_backfill_refused(pk, hole_h, hole_hash));
+    return failures;
+}
+
+/* Cases 1-2 (seed-range shape): the TORN refusal, then the CLEAN no-op.
+ * Returns the failed-check count. */
+static int stig_run_seed_range_cases(void)
+{
+    int failures = 0;
 
     /* ── Case 1: TORN, SEED-RANGE — ok=0 hole AT the apply frontier == H
      *           → REFUSE. The defensive seed-range shape: the hole sits at H
@@ -314,8 +343,8 @@ int test_seed_torn_import_gate(void)
         STIG_CHECK("torn: progress store opens", pk_ok);
         sqlite3 *pk = progress_store_db();
 
-        bool fixt = pk && stig_create_svl(pk) && stig_seed_coins(pk, 8);
-        int64_t live_ck = pk ? coins_kv_count(pk) : -1;
+        int64_t live_ck = -1;
+        bool fixt = stig_case_seed_fixture(pk, &live_ck);
         STIG_CHECK("torn: coins_kv seeded", fixt && live_ck == 8);
 
         /* The apply frontier sits at the blocked hole (== H here). Forward
@@ -398,8 +427,8 @@ int test_seed_torn_import_gate(void)
         STIG_CHECK("clean: progress store opens", pk_ok);
         sqlite3 *pk = progress_store_db();
 
-        bool fixt = pk && stig_create_svl(pk) && stig_seed_coins(pk, 8);
-        int64_t live_ck = pk ? coins_kv_count(pk) : -1;
+        int64_t live_ck = -1;
+        bool fixt = stig_case_seed_fixture(pk, &live_ck);
         STIG_CHECK("clean: coins_kv seeded (no ok=0 row)",
                    fixt && live_ck == 8);
         /* A completed clean seed stamps proven authority (applied frontier +
@@ -439,6 +468,15 @@ int test_seed_torn_import_gate(void)
         test_cleanup_tmpdir(dir);
     }
 
+    return failures;
+}
+
+/* Cases 3-4 (forward-region wedged-boot shape): the TORN refusal, then the
+ * CLEAN no-op. Returns the failed-check count. */
+static int stig_run_forward_region_cases(void)
+{
+    int failures = 0;
+
     /* ── Case 3: TORN, FORWARD-REGION (the LIVE/fixture wedge shape). ──
      *
      * THE DECISIVE shape the seed-range-only gate MISSES. Example:
@@ -474,8 +512,8 @@ int test_seed_torn_import_gate(void)
         STIG_CHECK("fwd: progress store opens", pk_ok);
         sqlite3 *pk = progress_store_db();
 
-        bool fixt = pk && stig_create_svl(pk) && stig_seed_coins(pk, 8);
-        int64_t live_ck = pk ? coins_kv_count(pk) : -1;
+        int64_t live_ck = -1;
+        bool fixt = stig_case_seed_fixture(pk, &live_ck);
         STIG_CHECK("fwd: coins_kv seeded", fixt && live_ck == 8);
 
         /* The forward-apply ceiling: utxo_apply BLOCKED at HOLE_H. */
@@ -486,13 +524,7 @@ int test_seed_torn_import_gate(void)
          * spending block, 138 blocks ABOVE the seed anchor H. */
         struct uint256 hole_hash;
         stig_hash_for(HOLE_H, &hole_hash);
-        STIG_CHECK("fwd: ok=0 prevout_unresolved row above H inserted",
-                   pk && stig_insert_hole(pk, HOLE_H, &hole_hash));
-
-        /* coin_backfill DURABLY REFUSED this hole — the genuinely-unrecoverable
-         * tear the guard fires on. */
-        STIG_CHECK("fwd: coin_backfill.refused marker seeded",
-                   pk && stig_seed_backfill_refused(pk, HOLE_H, &hole_hash));
+        failures += stig_fwd_seed_hole_and_refusal(pk, HOLE_H, &hole_hash);
 
         struct node_db ndb;
         STIG_CHECK("fwd: node_db opens", node_db_open(&ndb, ":memory:"));
@@ -509,11 +541,7 @@ int test_seed_torn_import_gate(void)
 
         /* Install the active tip ABOVE H — the wedged-boot precondition that
          * trips the loader's forward-only early-return (cur_h > H). */
-        struct uint256 tip_hash;
-        stig_hash_for(ACTIVE_T, &tip_hash);
-        struct block_index *tip = stig_insert_anchor(&ms, &tip_hash, ACTIVE_T);
-        bool tip_set = tip &&
-            active_chain_install_tip_slot(&ms.chain_active, tip);
+        bool tip_set = stig_install_active_tip(&ms, ACTIVE_T);
         STIG_CHECK("fwd: active tip installed ABOVE H (wedged-boot shape)",
                    tip_set && active_chain_height(&ms.chain_active) == ACTIVE_T);
 
@@ -571,8 +599,8 @@ int test_seed_torn_import_gate(void)
         STIG_CHECK("fwd-clean: progress store opens", pk_ok);
         sqlite3 *pk = progress_store_db();
 
-        bool fixt = pk && stig_create_svl(pk) && stig_seed_coins(pk, 8);
-        int64_t live_ck = pk ? coins_kv_count(pk) : -1;
+        int64_t live_ck = -1;
+        bool fixt = stig_case_seed_fixture(pk, &live_ck);
         STIG_CHECK("fwd-clean: coins_kv seeded (no ok=0 row)",
                    fixt && live_ck == 8);
         STIG_CHECK("fwd-clean: coins_applied_height stamped (forward frontier)",
@@ -591,11 +619,7 @@ int test_seed_torn_import_gate(void)
         struct block_index *anchor = stig_insert_anchor(&ms, &anchor_hash, H);
         STIG_CHECK("fwd-clean: anchor in index at H", anchor != NULL);
 
-        struct uint256 tip_hash;
-        stig_hash_for(ACTIVE_T, &tip_hash);
-        struct block_index *tip = stig_insert_anchor(&ms, &tip_hash, ACTIVE_T);
-        bool tip_set = tip &&
-            active_chain_install_tip_slot(&ms.chain_active, tip);
+        bool tip_set = stig_install_active_tip(&ms, ACTIVE_T);
         STIG_CHECK("fwd-clean: active tip installed ABOVE H",
                    tip_set && active_chain_height(&ms.chain_active) == ACTIVE_T);
 
@@ -613,6 +637,15 @@ int test_seed_torn_import_gate(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+
+    return failures;
+}
+
+/* Cases 5-6 (durability-guard no-fire): internal_error and not-yet-refused.
+ * Returns the failed-check count. */
+static int stig_run_no_fire_guard_cases(void)
+{
+    int failures = 0;
 
     /* ── Case 5: internal_error NO-FIRE (status-filter guard). ─────────
      *
@@ -647,8 +680,8 @@ int test_seed_torn_import_gate(void)
         STIG_CHECK("internal: progress store opens", pk_ok);
         sqlite3 *pk = progress_store_db();
 
-        bool fixt = pk && stig_create_svl(pk) && stig_seed_coins(pk, 8);
-        int64_t live_ck = pk ? coins_kv_count(pk) : -1;
+        int64_t live_ck = -1;
+        bool fixt = stig_case_seed_fixture(pk, &live_ck);
         STIG_CHECK("internal: coins_kv seeded", fixt && live_ck == 8);
         STIG_CHECK("internal: coins_applied_height stamped",
                    pk && stig_set_applied(pk, APPLIED));
@@ -673,11 +706,7 @@ int test_seed_torn_import_gate(void)
         struct block_index *anchor = stig_insert_anchor(&ms, &anchor_hash, H);
         STIG_CHECK("internal: anchor in index at H", anchor != NULL);
 
-        struct uint256 tip_hash;
-        stig_hash_for(ACTIVE_T, &tip_hash);
-        struct block_index *tip = stig_insert_anchor(&ms, &tip_hash, ACTIVE_T);
-        bool tip_set = tip &&
-            active_chain_install_tip_slot(&ms.chain_active, tip);
+        bool tip_set = stig_install_active_tip(&ms, ACTIVE_T);
         STIG_CHECK("internal: active tip installed ABOVE H",
                    tip_set && active_chain_height(&ms.chain_active) == ACTIVE_T);
 
@@ -726,8 +755,8 @@ int test_seed_torn_import_gate(void)
         STIG_CHECK("unrefused: progress store opens", pk_ok);
         sqlite3 *pk = progress_store_db();
 
-        bool fixt = pk && stig_create_svl(pk) && stig_seed_coins(pk, 8);
-        int64_t live_ck = pk ? coins_kv_count(pk) : -1;
+        int64_t live_ck = -1;
+        bool fixt = stig_case_seed_fixture(pk, &live_ck);
         STIG_CHECK("unrefused: coins_kv seeded", fixt && live_ck == 8);
         STIG_CHECK("unrefused: coins_applied_height stamped",
                    pk && stig_set_applied(pk, APPLIED));
@@ -751,11 +780,7 @@ int test_seed_torn_import_gate(void)
         struct block_index *anchor = stig_insert_anchor(&ms, &anchor_hash, H);
         STIG_CHECK("unrefused: anchor in index at H", anchor != NULL);
 
-        struct uint256 tip_hash;
-        stig_hash_for(ACTIVE_T, &tip_hash);
-        struct block_index *tip = stig_insert_anchor(&ms, &tip_hash, ACTIVE_T);
-        bool tip_set = tip &&
-            active_chain_install_tip_slot(&ms.chain_active, tip);
+        bool tip_set = stig_install_active_tip(&ms, ACTIVE_T);
         STIG_CHECK("unrefused: active tip installed ABOVE H",
                    tip_set && active_chain_height(&ms.chain_active) == ACTIVE_T);
 
@@ -773,6 +798,25 @@ int test_seed_torn_import_gate(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+
+    return failures;
+}
+
+int test_seed_torn_import_gate(void)
+{
+    test_reset_shared_globals();   /* monolith isolation: see test_helpers.c */
+    printf("\n=== seed_torn_import_gate tests ===\n");
+    int failures = 0;
+
+    /* event_emit short-circuits until the ring is initialized; required so
+     * the EV_OPERATOR_NEEDED observer fires in an isolated ZCL_TEST_ONLY run
+     * (idempotent — the full suite already init'd it). */
+    event_log_init();
+    blocker_module_init();
+
+    failures += stig_run_seed_range_cases();
+    failures += stig_run_forward_region_cases();
+    failures += stig_run_no_fire_guard_cases();
 
     blocker_reset_for_testing();
     return failures;
