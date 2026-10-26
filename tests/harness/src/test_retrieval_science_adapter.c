@@ -398,6 +398,126 @@ static bool rsa_reproduction_refused_unchanged(
         memcmp(&out, &before, sizeof(out)) == 0;
 }
 
+static bool rsa_result_composes_repeatedly(
+    bool ready, const struct zcode_retrieval_science_result_request *request,
+    struct zcode_retrieval_science_result_bundle *first,
+    struct zcode_retrieval_science_result_bundle *repeated)
+{
+    return ready &&
+        zcode_retrieval_science_result_compose(
+            request, first) == ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK &&
+        zcode_retrieval_science_result_compose(
+            request, repeated) == ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK;
+}
+
+static bool rsa_result_repetition_identical(
+    bool composed, const struct zcode_retrieval_science_result_bundle *first,
+    const struct zcode_retrieval_science_result_bundle *repeated)
+{
+    return composed &&
+        memcmp(first->result_wire, repeated->result_wire,
+               sizeof(first->result_wire)) == 0 &&
+        memcmp(first->observation_wire, repeated->observation_wire,
+               sizeof(first->observation_wire)) == 0 &&
+        memcmp(first->result_root, repeated->result_root, 32u) == 0 &&
+        memcmp(first->action_root, repeated->action_root, 32u) == 0;
+}
+
+static bool rsa_result_observation_reproots(
+    bool composed, const struct zcode_retrieval_science_result_bundle *bundle,
+    const struct rsa_fixture *fixture,
+    struct zcl_retrieval_pair_observation_v1 *parsed,
+    uint8_t observation_root[32])
+{
+    return composed &&
+        zcl_retrieval_pair_observation_parse(
+            bundle->observation_wire, sizeof(bundle->observation_wire),
+            parsed) == ZCL_RETRIEVAL_PAIR_OBSERVATION_OK &&
+        zcl_retrieval_pair_observation_verify(
+            parsed, &fixture->comparison_policy,
+            &bundle->measurement.parent_result,
+            &bundle->measurement.child_result) ==
+            ZCL_RETRIEVAL_PAIR_OBSERVATION_OK &&
+        zcl_retrieval_pair_observation_root(
+            parsed, observation_root) ==
+            ZCL_RETRIEVAL_PAIR_OBSERVATION_OK &&
+        memcmp(observation_root, bundle->observation_root, 32u) == 0;
+}
+
+static bool rsa_stale_observation_refused(
+    bool observation_exact,
+    const struct zcl_retrieval_pair_observation_v1 *stale,
+    const struct zcode_retrieval_science_result_bundle *bundle,
+    const struct rsa_fixture *fixture)
+{
+    return observation_exact &&
+        zcl_retrieval_pair_observation_verify(
+            stale, &fixture->comparison_policy,
+            &bundle->measurement.parent_result,
+            &bundle->measurement.child_result) ==
+            ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_BINDING;
+}
+
+static bool rsa_action_roots_rebuilt(
+    bool composed, struct zcode_retrieval_science_result_bundle *bundle,
+    uint8_t flags_root[32], uint8_t env_root[32], uint8_t action_root[32])
+{
+    return composed &&
+        vcs_build_action_v1_fixed_flags_root_for_kind(
+            VCS_BUILD_ACTION_KIND_BENCHMARK_V1, flags_root) &&
+        vcs_build_action_v1_fixed_environment_root_for_kind(
+            VCS_BUILD_ACTION_KIND_BENCHMARK_V1, env_root) &&
+        vcs_build_action_v1_root_for_kind(
+            VCS_BUILD_ACTION_KIND_BENCHMARK_V1, &bundle->action, action_root);
+}
+
+static bool rsa_action_fields_exact(
+    const struct zcode_retrieval_science_result_bundle *bundle,
+    const struct rsa_fixture *fixture, const uint8_t action_root[32],
+    const uint8_t flags_root[32], const uint8_t env_root[32])
+{
+    return memcmp(action_root, bundle->action_root, 32u) == 0 &&
+        memcmp(bundle->result.action_root, bundle->action_root, 32u) == 0 &&
+        memcmp(bundle->action.flags_sha3, flags_root, 32u) == 0 &&
+        memcmp(bundle->action.environment_sha3, env_root, 32u) == 0 &&
+        memcmp(bundle->action.source_cas_sha3,
+               fixture->candidate.candidate_source_root, 32u) == 0 &&
+        memcmp(bundle->action.input_root_sha3,
+               bundle->observation.evaluation_input_root, 32u) == 0 &&
+        memcmp(bundle->action.toolchain_capsule_sha3,
+               fixture->study.toolchain_capsule_root, 32u) == 0 &&
+        strcmp(bundle->action.profile, "science") == 0;
+}
+
+static bool rsa_observed_result_wired(
+    bool composed, const struct zcode_retrieval_science_result_bundle *bundle)
+{
+    return composed &&
+        bundle->result.status == VCS_ZCODE_BENCHMARK_OBSERVED &&
+        memcmp(bundle->result.raw_sample_root,
+               bundle->observation.evaluation_input_root, 32u) == 0 &&
+        memcmp(bundle->result.evidence_root,
+               bundle->observation_root, 32u) == 0;
+}
+
+static bool rsa_result_alias_refused_before_scan(
+    const struct zcode_retrieval_science_result_request *request,
+    const struct zcode_retrieval_profile_pair_measure_request *measurement)
+{
+    struct zcode_retrieval_science_result_bundle alias_out, alias_before;
+    memset(&alias_out, 0xa5, sizeof(alias_out));
+    alias_before = alias_out;
+    struct zcode_retrieval_profile_pair_measure_request alias_measure =
+        *measurement;
+    alias_measure.query = (const char *)alias_out.observation_wire;
+    struct zcode_retrieval_science_result_request alias_request = *request;
+    alias_request.measurement = &alias_measure;
+    return zcode_retrieval_science_result_compose(
+               &alias_request, &alias_out) ==
+               ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ALIAS &&
+        memcmp(&alias_out, &alias_before, sizeof(alias_out)) == 0;
+}
+
 static int rsa_case_result_compose(void)
 {
     int failures = 0;
@@ -409,86 +529,75 @@ static int rsa_case_result_compose(void)
     struct zcode_retrieval_science_result_request request =
         rsa_result_request(&fixture, &measurement, 1u, 0x71u);
     struct zcode_retrieval_science_result_bundle first, repeated;
-    bool composed = ready && zcode_retrieval_science_result_compose(
-            &request, &first) == ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK &&
-        zcode_retrieval_science_result_compose(
-            &request, &repeated) == ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK;
+    bool composed = rsa_result_composes_repeatedly(
+        ready, &request, &first, &repeated);
     RSA_CHECK("result composition is deterministic",
-              composed && memcmp(first.result_wire, repeated.result_wire,
-                                 sizeof(first.result_wire)) == 0 &&
-              memcmp(first.observation_wire, repeated.observation_wire,
-                     sizeof(first.observation_wire)) == 0 &&
-              memcmp(first.result_root, repeated.result_root, 32u) == 0 &&
-              memcmp(first.action_root, repeated.action_root, 32u) == 0);
+              rsa_result_repetition_identical(composed, &first, &repeated));
 
     uint8_t observation_root[32], action_root[32], flags_root[32], env_root[32];
     struct zcl_retrieval_pair_observation_v1 parsed = {0};
-    bool observation_exact = composed &&
-        zcl_retrieval_pair_observation_parse(
-            first.observation_wire, sizeof(first.observation_wire),
-            &parsed) == ZCL_RETRIEVAL_PAIR_OBSERVATION_OK &&
-        zcl_retrieval_pair_observation_verify(
-            &parsed, &fixture.comparison_policy,
-            &first.measurement.parent_result,
-            &first.measurement.child_result) ==
-            ZCL_RETRIEVAL_PAIR_OBSERVATION_OK &&
-        zcl_retrieval_pair_observation_root(
-            &parsed, observation_root) ==
-            ZCL_RETRIEVAL_PAIR_OBSERVATION_OK &&
-        memcmp(observation_root, first.observation_root, 32u) == 0;
+    bool observation_exact = rsa_result_observation_reproots(
+        composed, &first, &fixture, &parsed, observation_root);
     RSA_CHECK("observation wire verifies and re-roots exactly",
               observation_exact);
     struct zcl_retrieval_pair_observation_v1 stale_observation = parsed;
     stale_observation.snapshot_source_root[0] ^= 1u;
     RSA_CHECK("observation carrier refuses stale source generation",
-              observation_exact &&
-              zcl_retrieval_pair_observation_verify(
-                  &stale_observation, &fixture.comparison_policy,
-                  &first.measurement.parent_result,
-                  &first.measurement.child_result) ==
-                  ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_BINDING);
+              rsa_stale_observation_refused(
+                  observation_exact, &stale_observation, &first, &fixture));
 
-    bool action_exact = composed &&
-        vcs_build_action_v1_fixed_flags_root_for_kind(
-            VCS_BUILD_ACTION_KIND_BENCHMARK_V1, flags_root) &&
-        vcs_build_action_v1_fixed_environment_root_for_kind(
-            VCS_BUILD_ACTION_KIND_BENCHMARK_V1, env_root) &&
-        vcs_build_action_v1_root_for_kind(
-            VCS_BUILD_ACTION_KIND_BENCHMARK_V1, &first.action, action_root) &&
-        memcmp(action_root, first.action_root, 32u) == 0 &&
-        memcmp(first.result.action_root, first.action_root, 32u) == 0 &&
-        memcmp(first.action.flags_sha3, flags_root, 32u) == 0 &&
-        memcmp(first.action.environment_sha3, env_root, 32u) == 0 &&
-        memcmp(first.action.source_cas_sha3,
-               fixture.candidate.candidate_source_root, 32u) == 0 &&
-        memcmp(first.action.input_root_sha3,
-               first.observation.evaluation_input_root, 32u) == 0 &&
-        memcmp(first.action.toolchain_capsule_sha3,
-               fixture.study.toolchain_capsule_root, 32u) == 0 &&
-        strcmp(first.action.profile, "science") == 0;
+    bool action_roots_built = rsa_action_roots_rebuilt(
+        composed, &first, flags_root, env_root, action_root);
+    bool action_exact = action_roots_built &&
+        rsa_action_fields_exact(
+            &first, &fixture, action_root, flags_root, env_root);
     RSA_CHECK("fixed action is derived internally from exact inputs",
               action_exact);
     RSA_CHECK("satisfied comparison maps only to OBSERVED",
-              composed && first.result.status ==
-                  VCS_ZCODE_BENCHMARK_OBSERVED &&
-              memcmp(first.result.raw_sample_root,
-                     first.observation.evaluation_input_root, 32u) == 0 &&
-              memcmp(first.result.evidence_root,
-                     first.observation_root, 32u) == 0);
-    struct zcode_retrieval_science_result_bundle alias_out, alias_before;
-    memset(&alias_out, 0xa5, sizeof(alias_out));
-    alias_before = alias_out;
-    struct zcode_retrieval_profile_pair_measure_request alias_measure =
-        measurement;
-    alias_measure.query = (const char *)alias_out.observation_wire;
-    struct zcode_retrieval_science_result_request alias_request = request;
-    alias_request.measurement = &alias_measure;
+              rsa_observed_result_wired(composed, &first));
     RSA_CHECK("nested output string alias refuses before scanning",
-              zcode_retrieval_science_result_compose(
-                  &alias_request, &alias_out) ==
-                  ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ALIAS &&
-              memcmp(&alias_out, &alias_before, sizeof(alias_out)) == 0);
+              rsa_result_alias_refused_before_scan(&request, &measurement));
     return failures;
+}
+
+static bool rsa_result_refused_when_ready(
+    bool ready, const struct zcode_retrieval_science_result_request *request,
+    enum zcode_retrieval_science_adapter_error expected)
+{
+    return ready && rsa_result_refused_unchanged(request, expected);
+}
+
+static bool rsa_result_composes_ok(
+    bool ready, const struct zcode_retrieval_science_result_request *request,
+    struct zcode_retrieval_science_result_bundle *out)
+{
+    return ready &&
+        zcode_retrieval_science_result_compose(
+            request, out) == ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK;
+}
+
+static bool rsa_refresh_after_stale_snapshot(
+    bool ready, struct rsa_fixture *fixture)
+{
+    return ready && rsa_refresh_heuristics(fixture) &&
+        rsa_refresh_candidate(fixture);
+}
+
+static bool rsa_rekey_after_environment_mutation(struct rsa_fixture *bad)
+{
+    uint8_t changed_policy_root[32];
+    bool ready = vcs_zcode_environment_policy_v1_root(
+        &bad->environment_policy, changed_policy_root) ==
+        VCS_ZCODE_RECEIPT_OK;
+    memcpy(bad->study.environment_policy_root, changed_policy_root, 32u);
+    ready = ready &&
+        vcs_zcode_study_spec_root(&bad->study, bad->study_root) ==
+            VCS_ZCODE_SCIENCE_OK;
+    memcpy(bad->task.goal_root, bad->study_root, 32u);
+    ready = ready &&
+        vcs_zcode_task_root(&bad->task, bad->task_root) == VCS_ZCODE_DEV_OK;
+    memcpy(bad->candidate.task_root, bad->task_root, 32u);
+    return ready && rsa_refresh_heuristics(bad) && rsa_refresh_candidate(bad);
 }
 
 static int rsa_case_statuses_and_refusals(void)
@@ -515,19 +624,17 @@ static int rsa_case_statuses_and_refusals(void)
     struct zcode_retrieval_science_result_request legacy_request =
         rsa_result_request(&negative, &legacy_measure, 1u, 0x70u);
     RSA_CHECK("science adapter refuses cyclic workload v1",
-              negative_ready && rsa_result_refused_unchanged(
-                  &legacy_request,
+              rsa_result_refused_when_ready(
+                  negative_ready, &legacy_request,
                   ZCODE_RETRIEVAL_SCIENCE_ADAPTER_PARAMETER));
     RSA_CHECK("known failed policy maps to NEGATIVE",
-              negative_ready && zcode_retrieval_science_result_compose(
-                  &negative_request, &negative_out) ==
-                      ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK &&
+              rsa_result_composes_ok(
+                  negative_ready, &negative_request, &negative_out) &&
               negative_out.result.status ==
                   VCS_ZCODE_BENCHMARK_NEGATIVE_RESULT);
     RSA_CHECK("missing selected metric maps to NULL",
-              incomplete_ready && zcode_retrieval_science_result_compose(
-                  &incomplete_request, &incomplete_out) ==
-                      ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK &&
+              rsa_result_composes_ok(
+                  incomplete_ready, &incomplete_request, &incomplete_out) &&
               incomplete_out.result.status ==
                   VCS_ZCODE_BENCHMARK_NULL_RESULT);
 
@@ -535,15 +642,14 @@ static int rsa_case_statuses_and_refusals(void)
     bool stale_ready = rsa_fixture_init(
         &stale, ZCL_RETRIEVAL_COMPARISON_MRR_BP, 100u);
     rsa_root(stale.snapshot.source_root, 0x19u);
-    stale_ready = stale_ready && rsa_refresh_heuristics(&stale) &&
-        rsa_refresh_candidate(&stale);
+    stale_ready = rsa_refresh_after_stale_snapshot(stale_ready, &stale);
     struct zcode_retrieval_profile_pair_measure_request stale_measure =
         rsa_measurement(&stale);
     struct zcode_retrieval_science_result_request stale_request =
         rsa_result_request(&stale, &stale_measure, 1u, 0x74u);
     RSA_CHECK("stale snapshot source refuses atomically",
-              stale_ready && rsa_result_refused_unchanged(
-                  &stale_request,
+              rsa_result_refused_when_ready(
+                  stale_ready, &stale_request,
                   ZCODE_RETRIEVAL_SCIENCE_ADAPTER_BINDING));
 
     struct rsa_fixture policy_bad = negative;
@@ -559,35 +665,16 @@ static int rsa_case_statuses_and_refusals(void)
 
     struct rsa_fixture environment_bad = negative;
     environment_bad.environment_policy.min_logical_cores = 9u;
-    uint8_t changed_policy_root[32];
-    bool environment_ready = vcs_zcode_environment_policy_v1_root(
-        &environment_bad.environment_policy, changed_policy_root) ==
-        VCS_ZCODE_RECEIPT_OK;
-    memcpy(environment_bad.study.environment_policy_root,
-           changed_policy_root, 32u);
-    environment_ready = environment_ready &&
-        vcs_zcode_study_spec_root(
-            &environment_bad.study, environment_bad.study_root) ==
-            VCS_ZCODE_SCIENCE_OK;
-    memcpy(environment_bad.task.goal_root,
-           environment_bad.study_root, 32u);
-    environment_ready = environment_ready &&
-        vcs_zcode_task_root(
-            &environment_bad.task, environment_bad.task_root) ==
-            VCS_ZCODE_DEV_OK;
-    memcpy(environment_bad.candidate.task_root,
-           environment_bad.task_root, 32u);
-    environment_ready = environment_ready &&
-        rsa_refresh_heuristics(&environment_bad) &&
-        rsa_refresh_candidate(&environment_bad);
+    bool environment_ready =
+        rsa_rekey_after_environment_mutation(&environment_bad);
     struct zcode_retrieval_profile_pair_measure_request environment_measure =
         rsa_measurement(&environment_bad);
     struct zcode_retrieval_science_result_request environment_request =
         rsa_result_request(
             &environment_bad, &environment_measure, 1u, 0x76u);
     RSA_CHECK("environment policy rejection is atomic",
-              environment_ready && rsa_result_refused_unchanged(
-                  &environment_request,
+              rsa_result_refused_when_ready(
+                  environment_ready, &environment_request,
                   ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ENVIRONMENT));
 
     struct rsa_fixture binding_bad = negative;
@@ -600,8 +687,8 @@ static int rsa_case_statuses_and_refusals(void)
     struct zcode_retrieval_science_result_request binding_request =
         rsa_result_request(&binding_bad, &binding_measure, 1u, 0x78u);
     RSA_CHECK("candidate source boundary refuses atomically",
-              binding_ready && rsa_result_refused_unchanged(
-                  &binding_request,
+              rsa_result_refused_when_ready(
+                  binding_ready, &binding_request,
                   ZCODE_RETRIEVAL_SCIENCE_ADAPTER_BINDING));
 
     struct rsa_fixture unrelated = negative;
@@ -613,8 +700,8 @@ static int rsa_case_statuses_and_refusals(void)
     struct zcode_retrieval_science_result_request unrelated_request =
         rsa_result_request(&unrelated, &unrelated_measure, 1u, 0x79u);
     RSA_CHECK("unrelated candidate cannot claim measured child",
-              unrelated_ready && rsa_result_refused_unchanged(
-                  &unrelated_request,
+              rsa_result_refused_when_ready(
+                  unrelated_ready, &unrelated_request,
                   ZCODE_RETRIEVAL_SCIENCE_ADAPTER_BINDING));
     return failures;
 }
