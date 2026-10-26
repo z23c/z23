@@ -37,6 +37,40 @@ static bool build_large_ccoins_record(struct byte_stream *s, int outputs,
     return ok && !s->error;
 }
 
+static bool decoded_row_fields_match(const struct utxo_import_row *rows,
+                                     int outputs, uint32_t height)
+{
+    bool ok = rows[0].vout == 0;
+    ok = ok && rows[0].height == (int32_t)height;
+    ok = ok && rows[0].value == 1;
+    ok = ok && rows[0].script_len == 25;
+    ok = ok && rows[0].script_type == 1;
+    ok = ok && rows[0].has_address == 1;
+    ok = ok && rows[outputs - 1].vout == (uint32_t)(outputs - 1);
+    ok = ok && rows[outputs - 1].height == (int32_t)height;
+    ok = ok && rows[outputs - 1].value == 1;
+    return ok;
+}
+
+static bool oversized_value_import_refused(void)
+{
+    uint32_t out_len = 0;
+    struct zcl_result exact =
+        utxo_import_value_len_checked(UTXO_IMPORT_VALUE_MAX_BYTES,
+                                      &out_len);
+    struct zcl_result too_large =
+        utxo_import_value_len_checked(
+            (size_t)UTXO_IMPORT_VALUE_MAX_BYTES + 1u, &out_len);
+    struct zcl_result null_out =
+        utxo_import_value_len_checked(16, NULL);
+
+    bool ok = exact.ok;
+    ok = ok && out_len == UTXO_IMPORT_VALUE_MAX_BYTES;
+    ok = ok && !too_large.ok;
+    ok = ok && !null_out.ok;
+    return ok;
+}
+
 int test_utxo_import_pipeline(void)
 {
     int failures = 0;
@@ -66,17 +100,8 @@ int test_utxo_import_pipeline(void)
         int n = rows ? utxo_import_decode_entry(&raw, rows, outputs) : 0;
         ok = ok && record_len > 65535;
         ok = ok && n == outputs;
-        if (rows && n == outputs) {
-            ok = ok && rows[0].vout == 0;
-            ok = ok && rows[0].height == (int32_t)height;
-            ok = ok && rows[0].value == 1;
-            ok = ok && rows[0].script_len == 25;
-            ok = ok && rows[0].script_type == 1;
-            ok = ok && rows[0].has_address == 1;
-            ok = ok && rows[outputs - 1].vout == (uint32_t)(outputs - 1);
-            ok = ok && rows[outputs - 1].height == (int32_t)height;
-            ok = ok && rows[outputs - 1].value == 1;
-        }
+        if (rows && n == outputs)
+            ok = ok && decoded_row_fields_match(rows, outputs, height);
 
         free(rows);
         stream_free(&s);
@@ -86,19 +111,7 @@ int test_utxo_import_pipeline(void)
 
     printf("utxo_import_pipeline: oversized CCoins value refuses import... ");
     {
-        uint32_t out_len = 0;
-        struct zcl_result exact =
-            utxo_import_value_len_checked(UTXO_IMPORT_VALUE_MAX_BYTES,
-                                          &out_len);
-        struct zcl_result too_large =
-            utxo_import_value_len_checked(
-                (size_t)UTXO_IMPORT_VALUE_MAX_BYTES + 1u, &out_len);
-        struct zcl_result null_out =
-            utxo_import_value_len_checked(16, NULL);
-        bool ok = exact.ok &&
-                  out_len == UTXO_IMPORT_VALUE_MAX_BYTES &&
-                  !too_large.ok &&
-                  !null_out.ok;
+        bool ok = oversized_value_import_refused();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
