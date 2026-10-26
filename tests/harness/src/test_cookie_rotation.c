@@ -153,6 +153,257 @@ static void wait_rpc_ready(uint16_t port)
 
 /* ── tests ───────────────────────────────────────────────────── */
 
+static bool cookie_rotation_check_initial_written(
+    const struct rpc_table *table, const char *tmpdir)
+{
+    uint16_t port = reserve_test_port();
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, NULL, NULL, tmpdir);
+
+    char pass[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass, sizeof(pass));
+    ok = ok && (strlen(pass) == 32); /* 2x16 hex chars */
+
+    rpc_http_stop();
+    return ok;
+}
+
+static bool cookie_rotation_check_rotate_changes_password(
+    const struct rpc_table *table, const char *tmpdir)
+{
+    uint16_t port = reserve_test_port();
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, NULL, NULL, tmpdir);
+
+    char pass_before[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass_before, sizeof(pass_before));
+
+    rpc_http_cookie_rotate();
+
+    char pass_after[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass_after, sizeof(pass_after));
+    ok = ok && (strcmp(pass_before, pass_after) != 0);
+    ok = ok && (strlen(pass_after) == 32);
+
+    rpc_http_stop();
+    return ok;
+}
+
+static bool cookie_rotation_check_current_authenticates(
+    const struct rpc_table *table, const char *tmpdir, int *status_out)
+{
+    uint16_t port = reserve_test_port();
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, NULL, NULL, tmpdir);
+
+    char pass[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass, sizeof(pass));
+
+    /* Wait for the server to start accepting connections */
+    wait_rpc_ready(port);
+
+    int status = rpc_with_auth(port, "__cookie__", pass);
+    ok = ok && (status == 200);
+
+    rpc_http_stop();
+    *status_out = status;
+    return ok;
+}
+
+static bool cookie_rotation_check_previous_valid_after_rotate(
+    const struct rpc_table *table, const char *tmpdir, int *s1_out,
+    int *s2_out)
+{
+    uint16_t port = reserve_test_port();
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, NULL, NULL, tmpdir);
+
+    char pass_v1[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass_v1, sizeof(pass_v1));
+
+    rpc_http_cookie_rotate();
+
+    char pass_v2[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass_v2, sizeof(pass_v2));
+
+    wait_rpc_ready(port);
+
+    /* Both v1 (previous) and v2 (current) should authenticate */
+    int s2 = rpc_with_auth(port, "__cookie__", pass_v2);
+    int s1 = rpc_with_auth(port, "__cookie__", pass_v1);
+    ok = ok && (s2 == 200) && (s1 == 200);
+
+    rpc_http_stop();
+    *s1_out = s1;
+    *s2_out = s2;
+    return ok;
+}
+
+static bool cookie_rotation_check_v1_rejected_after_second_rotate(
+    const struct rpc_table *table, const char *tmpdir, int *s1_out,
+    int *s2_out, int *s3_out)
+{
+    uint16_t port = reserve_test_port();
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, NULL, NULL, tmpdir);
+
+    char pass_v1[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass_v1, sizeof(pass_v1));
+
+    rpc_http_cookie_rotate();
+    char pass_v2[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass_v2, sizeof(pass_v2));
+
+    rpc_http_cookie_rotate();
+    char pass_v3[128] = {0};
+    ok = ok && read_cookie_password(tmpdir, pass_v3, sizeof(pass_v3));
+
+    wait_rpc_ready(port);
+
+    /* v3 current, v2 previous — both work */
+    int s3 = rpc_with_auth(port, "__cookie__", pass_v3);
+    int s2 = rpc_with_auth(port, "__cookie__", pass_v2);
+    ok = ok && (s3 == 200) && (s2 == 200);
+
+    /* v1 should be rejected */
+    int s1 = rpc_with_auth(port, "__cookie__", pass_v1);
+    ok = ok && (s1 == 401);
+
+    rpc_http_stop();
+    *s1_out = s1;
+    *s2_out = s2;
+    *s3_out = s3;
+    return ok;
+}
+
+static bool cookie_rotation_check_wrong_password_rejected(
+    const struct rpc_table *table, const char *tmpdir, int *status_out)
+{
+    uint16_t port = reserve_test_port();
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, NULL, NULL, tmpdir);
+
+    wait_rpc_ready(port);
+    int s = rpc_with_auth(port, "__cookie__", "totallyWrongPassword123");
+    ok = ok && (s == 401);
+
+    rpc_http_stop();
+    *status_out = s;
+    return ok;
+}
+
+static bool cookie_rotation_check_explicit_auth_ignores_rotate(
+    const struct rpc_table *table)
+{
+    uint16_t port = reserve_test_port();
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, "testuser", "testpass", NULL);
+
+    wait_rpc_ready(port);
+    ok = ok && (rpc_with_auth(port, "testuser", "testpass") == 200);
+
+    /* rotate is a no-op in explicit auth mode */
+    rpc_http_cookie_rotate();
+    ok = ok && (rpc_with_auth(port, "testuser", "testpass") == 200);
+
+    rpc_http_stop();
+    return ok;
+}
+
+static bool cookie_rotation_owner_start_read_initial(
+    const struct rpc_table *table, const char *tmpdir, uint16_t *port_out,
+    char *initial, size_t initsz)
+{
+    setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "1", 1);
+    uint16_t port = reserve_test_port();
+    *port_out = port;
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, NULL, NULL, tmpdir);
+
+    if (ok) {
+        wait_rpc_ready(port);
+        ok = read_cookie_password(tmpdir, initial, initsz);
+    }
+    return ok;
+}
+
+static bool cookie_rotation_owner_poll_rotated(
+    uint16_t port, const char *tmpdir, const char *initial, char *current,
+    size_t currentsz, bool ok)
+{
+    bool rotated = false;
+    /* Authenticate continuously while the one-second owner thread
+     * rotates. The old cookie must remain valid across the handoff, and
+     * the new durable cookie must become usable before the bound ends. */
+    for (int attempt = 0; ok && !rotated && attempt < 200; attempt++) {
+        ok = rpc_with_auth(port, "__cookie__", initial) == 200;
+        if (read_cookie_password(tmpdir, current, currentsz) &&
+            strcmp(current, initial) != 0) {
+            rotated = true;
+            break;
+        }
+        usleep(20000); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+    }
+    ok = ok && rotated;
+    return ok;
+}
+
+static bool cookie_rotation_owner_check_handoff(
+    uint16_t port, const char *initial, const char *current, bool ok)
+{
+    if (ok) {
+        ok = rpc_with_auth(port, "__cookie__", initial) == 200;
+        ok = ok && rpc_with_auth(port, "__cookie__", current) == 200;
+    }
+    rpc_http_stop();
+    return ok;
+}
+
+static bool cookie_rotation_owner_check_restart(
+    const struct rpc_table *table, const char *tmpdir, char *current,
+    size_t currentsz, bool ok)
+{
+    /* A stopped rotation owner must leave no thread or liveness identity
+     * behind that can collide with a fresh server instance. */
+    uint16_t restart_port = reserve_test_port();
+    ok = ok && restart_port != 0;
+    if (ok)
+        ok = rpc_http_start(table, restart_port, NULL, NULL,
+                            tmpdir);
+    if (ok) {
+        wait_rpc_ready(restart_port);
+        ok = read_cookie_password(tmpdir, current, currentsz);
+        ok = ok && rpc_with_auth(restart_port, "__cookie__", current) == 200;
+    }
+    rpc_http_stop();
+    setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "0", 1);
+    return ok;
+}
+
+static bool cookie_rotation_check_env_configures_interval(
+    const struct rpc_table *table, const char *tmpdir)
+{
+    setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "3600", 1);
+    uint16_t port = reserve_test_port();
+    bool ok = (port != 0);
+    if (ok)
+        ok = rpc_http_start(table, port, NULL, NULL, tmpdir);
+
+    ok = ok && (rpc_http_cookie_rotate_sec() == 3600);
+
+    rpc_http_stop();
+    setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "0", 1);
+    return ok;
+}
+
 int test_cookie_rotation(void)
 {
     int failures = 0;
@@ -172,216 +423,78 @@ int test_cookie_rotation(void)
 
     printf("cookie_rotation: initial cookie written to disk... ");
     {
-        uint16_t port = reserve_test_port();
-        bool ok = (port != 0);
-        if (ok)
-            ok = rpc_http_start(&empty_table, port, NULL, NULL, tmpdir);
-
-        char pass[128] = {0};
-        ok = ok && read_cookie_password(tmpdir, pass, sizeof(pass));
-        ok = ok && (strlen(pass) == 32); /* 2x16 hex chars */
-
-        rpc_http_stop();
+        bool ok = cookie_rotation_check_initial_written(&empty_table, tmpdir);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("cookie_rotation: rotation changes password on disk... ");
     {
-        uint16_t port = reserve_test_port();
-        bool ok = (port != 0);
-        if (ok)
-            ok = rpc_http_start(&empty_table, port, NULL, NULL, tmpdir);
-
-        char pass_before[128] = {0};
-        ok = ok && read_cookie_password(tmpdir, pass_before, sizeof(pass_before));
-
-        rpc_http_cookie_rotate();
-
-        char pass_after[128] = {0};
-        ok = ok && read_cookie_password(tmpdir, pass_after, sizeof(pass_after));
-        ok = ok && (strcmp(pass_before, pass_after) != 0);
-        ok = ok && (strlen(pass_after) == 32);
-
-        rpc_http_stop();
+        bool ok = cookie_rotation_check_rotate_changes_password(
+            &empty_table, tmpdir);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("cookie_rotation: current password authenticates... ");
     {
-        uint16_t port = reserve_test_port();
-        bool ok = (port != 0);
-        if (ok)
-            ok = rpc_http_start(&empty_table, port, NULL, NULL, tmpdir);
-
-        char pass[128] = {0};
-        ok = ok && read_cookie_password(tmpdir, pass, sizeof(pass));
-
-        /* Wait for the server to start accepting connections */
-        wait_rpc_ready(port);
-
-        int status = rpc_with_auth(port, "__cookie__", pass);
-        ok = ok && (status == 200);
-
-        rpc_http_stop();
+        int status = 0;
+        bool ok = cookie_rotation_check_current_authenticates(
+            &empty_table, tmpdir, &status);
         if (ok) printf("OK\n"); else { printf("FAIL (status=%d)\n", status); failures++; }
     }
 
     printf("cookie_rotation: previous password valid after rotate... ");
     {
-        uint16_t port = reserve_test_port();
-        bool ok = (port != 0);
-        if (ok)
-            ok = rpc_http_start(&empty_table, port, NULL, NULL, tmpdir);
-
-        char pass_v1[128] = {0};
-        ok = ok && read_cookie_password(tmpdir, pass_v1, sizeof(pass_v1));
-
-        rpc_http_cookie_rotate();
-
-        char pass_v2[128] = {0};
-        ok = ok && read_cookie_password(tmpdir, pass_v2, sizeof(pass_v2));
-
-        wait_rpc_ready(port);
-
-        /* Both v1 (previous) and v2 (current) should authenticate */
-        int s2 = rpc_with_auth(port, "__cookie__", pass_v2);
-        int s1 = rpc_with_auth(port, "__cookie__", pass_v1);
-        ok = ok && (s2 == 200) && (s1 == 200);
-
-        rpc_http_stop();
+        int s1 = 0;
+        int s2 = 0;
+        bool ok = cookie_rotation_check_previous_valid_after_rotate(
+            &empty_table, tmpdir, &s1, &s2);
         if (ok) printf("OK\n"); else { printf("FAIL (s1=%d s2=%d)\n", s1, s2); failures++; }
     }
 
     printf("cookie_rotation: v1 rejected after second rotate... ");
     {
-        uint16_t port = reserve_test_port();
-        bool ok = (port != 0);
-        if (ok)
-            ok = rpc_http_start(&empty_table, port, NULL, NULL, tmpdir);
-
-        char pass_v1[128] = {0};
-        ok = ok && read_cookie_password(tmpdir, pass_v1, sizeof(pass_v1));
-
-        rpc_http_cookie_rotate();
-        char pass_v2[128] = {0};
-        ok = ok && read_cookie_password(tmpdir, pass_v2, sizeof(pass_v2));
-
-        rpc_http_cookie_rotate();
-        char pass_v3[128] = {0};
-        ok = ok && read_cookie_password(tmpdir, pass_v3, sizeof(pass_v3));
-
-        wait_rpc_ready(port);
-
-        /* v3 current, v2 previous — both work */
-        int s3 = rpc_with_auth(port, "__cookie__", pass_v3);
-        int s2 = rpc_with_auth(port, "__cookie__", pass_v2);
-        ok = ok && (s3 == 200) && (s2 == 200);
-
-        /* v1 should be rejected */
-        int s1 = rpc_with_auth(port, "__cookie__", pass_v1);
-        ok = ok && (s1 == 401);
-
-        rpc_http_stop();
+        int s1 = 0;
+        int s2 = 0;
+        int s3 = 0;
+        bool ok = cookie_rotation_check_v1_rejected_after_second_rotate(
+            &empty_table, tmpdir, &s1, &s2, &s3);
         if (ok) printf("OK\n"); else { printf("FAIL (s1=%d s2=%d s3=%d)\n", s1, s2, s3); failures++; }
     }
 
     printf("cookie_rotation: wrong password always rejected... ");
     {
-        uint16_t port = reserve_test_port();
-        bool ok = (port != 0);
-        if (ok)
-            ok = rpc_http_start(&empty_table, port, NULL, NULL, tmpdir);
-
-        wait_rpc_ready(port);
-        int s = rpc_with_auth(port, "__cookie__", "totallyWrongPassword123");
-        ok = ok && (s == 401);
-
-        rpc_http_stop();
+        int s = 0;
+        bool ok = cookie_rotation_check_wrong_password_rejected(
+            &empty_table, tmpdir, &s);
         if (ok) printf("OK\n"); else { printf("FAIL (status=%d)\n", s); failures++; }
     }
 
     printf("cookie_rotation: explicit user/pass ignores rotate... ");
     {
-        uint16_t port = reserve_test_port();
-        bool ok = (port != 0);
-        if (ok)
-            ok = rpc_http_start(&empty_table, port, "testuser", "testpass", NULL);
-
-        wait_rpc_ready(port);
-        ok = ok && (rpc_with_auth(port, "testuser", "testpass") == 200);
-
-        /* rotate is a no-op in explicit auth mode */
-        rpc_http_cookie_rotate();
-        ok = ok && (rpc_with_auth(port, "testuser", "testpass") == 200);
-
-        rpc_http_stop();
+        bool ok = cookie_rotation_check_explicit_auth_ignores_rotate(
+            &empty_table);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("cookie_rotation: background owner rotates during auth and restarts cleanly... ");
     {
-        setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "1", 1);
-        uint16_t port = reserve_test_port();
-        bool ok = (port != 0);
-        if (ok)
-            ok = rpc_http_start(&empty_table, port, NULL, NULL, tmpdir);
-
+        uint16_t port = 0;
         char initial[128] = {0};
         char current[128] = {0};
-        bool rotated = false;
-        if (ok) {
-            wait_rpc_ready(port);
-            ok = read_cookie_password(tmpdir, initial, sizeof(initial));
-        }
-
-        /* Authenticate continuously while the one-second owner thread
-         * rotates. The old cookie must remain valid across the handoff, and
-         * the new durable cookie must become usable before the bound ends. */
-        for (int attempt = 0; ok && !rotated && attempt < 200; attempt++) {
-            ok = rpc_with_auth(port, "__cookie__", initial) == 200;
-            if (read_cookie_password(tmpdir, current, sizeof(current)) &&
-                strcmp(current, initial) != 0) {
-                rotated = true;
-                break;
-            }
-            usleep(20000); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
-        }
-        ok = ok && rotated;
-        if (ok) {
-            ok = rpc_with_auth(port, "__cookie__", initial) == 200;
-            ok = ok && rpc_with_auth(port, "__cookie__", current) == 200;
-        }
-        rpc_http_stop();
-
-        /* A stopped rotation owner must leave no thread or liveness identity
-         * behind that can collide with a fresh server instance. */
-        uint16_t restart_port = reserve_test_port();
-        ok = ok && restart_port != 0;
-        if (ok)
-            ok = rpc_http_start(&empty_table, restart_port, NULL, NULL,
-                                tmpdir);
-        if (ok) {
-            wait_rpc_ready(restart_port);
-            ok = read_cookie_password(tmpdir, current, sizeof(current));
-            ok = ok && rpc_with_auth(restart_port, "__cookie__", current) == 200;
-        }
-        rpc_http_stop();
-        setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "0", 1);
+        bool ok = cookie_rotation_owner_start_read_initial(
+            &empty_table, tmpdir, &port, initial, sizeof(initial));
+        ok = cookie_rotation_owner_poll_rotated(
+            port, tmpdir, initial, current, sizeof(current), ok);
+        ok = cookie_rotation_owner_check_handoff(port, initial, current, ok);
+        ok = cookie_rotation_owner_check_restart(
+            &empty_table, tmpdir, current, sizeof(current), ok);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
     printf("cookie_rotation: env configures interval... ");
     {
-        setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "3600", 1);
-        uint16_t port = reserve_test_port();
-        bool ok = (port != 0);
-        if (ok)
-            ok = rpc_http_start(&empty_table, port, NULL, NULL, tmpdir);
-
-        ok = ok && (rpc_http_cookie_rotate_sec() == 3600);
-
-        rpc_http_stop();
-        setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "0", 1);
+        bool ok = cookie_rotation_check_env_configures_interval(
+            &empty_table, tmpdir);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 

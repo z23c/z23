@@ -1126,7 +1126,6 @@ tests/harness/src/test_consensus_state_snapshot_export.c:cse_run_rung_ladder_tes
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_receipt_version:23
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_source:24
 tests/harness/src/test_consensus_state_snapshot_export.c:test_consensus_state_snapshot_export_platform_arm:186
-tests/harness/src/test_cookie_rotation.c:test_cookie_rotation:55
 tests/harness/src/test_core.c:test_core:60
 tests/harness/src/test_core_seal_interop.c:csi_dialect_discriminates:23
 tests/harness/src/test_core_seal_interop.c:csi_real_sections:37
