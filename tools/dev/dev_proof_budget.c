@@ -623,8 +623,7 @@ bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step)
         return true;
     }
     int64_t now_us = platform_time_monotonic_us();
-    if (log_progress_mark(step->log_path, &step->seen_size,
-                          &step->seen_mtime))
+    if (log_progress_mark(step->log_path, &step->seen_size, &step->seen_mtime))
         step->last_progress_us = now_us;
     step->report.elapsed_ms = (now_us - step->started_us) / 1000;
     step->report.last_progress_age_ms =
