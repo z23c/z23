@@ -366,13 +366,6 @@ contexts/commons/services/src/zcode_lane_service.c:zcode_lane_advance:53
 contexts/explorer/controllers/src/explorer_controller.c:explorer_handle_request:46
 contexts/explorer/controllers/src/explorer_controller.c:rpc_call:22
 contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:31
-contexts/explorer/modules/presentation/src/presentation.c:present_clipboard_write_image:20
-contexts/explorer/modules/presentation/src/presentation.c:present_hover_draw:16
-contexts/explorer/modules/presentation/src/presentation.c:present_hover_validate:18
-contexts/explorer/modules/presentation/src/presentation.c:present_replace_surface:30
-contexts/explorer/modules/presentation/src/presentation.c:present_run_pages_actions:189
-contexts/explorer/modules/presentation/src/presentation.c:present_show_copy_feedback:17
-contexts/explorer/modules/presentation/src/presentation.c:zcl_present_window_validate_v1:25
 contexts/explorer/views/src/explorer_factoids_records.c:factoids_emit_section_5_records:19
 contexts/market/controllers/src/file_market_controller.c:market_purchase_code:18
 contexts/market/controllers/src/file_market_controller.c:rpc_zmarket_purchase_plan:28
