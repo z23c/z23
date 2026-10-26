@@ -277,7 +277,9 @@ enum snapshot_import_row_status {
  * skipped (short key, failed deserialize, off the selected chain, or
  * quarantined by verification) advance the iterator and return
  * ..._SKIPPED; the first non-'b' key returns ..._END without advancing;
- * a row that passes every check is filled into *db_blk and returned as
+ * a row that passes every check is filled into *db_blk (whose solution
+ * points into the caller-owned *dbi, which must outlive the save) and
+ * returned as
  * ..._READY — the caller saves it and advances the iterator itself. */
 static enum snapshot_import_row_status
 import_block_index_next_row(struct db_iterator *it,
@@ -286,6 +288,7 @@ import_block_index_next_row(struct db_iterator *it,
                             int64_t rom_checkpoint_height,
                             struct block_index_import_args *a,
                             int *max_height,
+                            struct disk_block_index *dbi,
                             struct db_block *db_blk)
 {
     size_t key_len;
@@ -306,19 +309,18 @@ import_block_index_next_row(struct db_iterator *it,
     size_t val_len;
     const char *val_data = db_iter_value(it, &val_len);
 
-    struct disk_block_index dbi;
-    disk_block_index_init(&dbi);
+    disk_block_index_init(dbi);
     struct byte_stream s;
     stream_init_from_data(&s, (unsigned char *)val_data, val_len);
 
-    if (!disk_block_index_deserialize(&dbi, &s)) {
+    if (!disk_block_index_deserialize(dbi, &s)) {
         stream_free(&s);
         db_iter_next(it);
         return SNAPSHOT_IMPORT_ROW_SKIPPED;
     }
     stream_free(&s);
 
-    if (!snapshot_selected_chain_contains(selected_chain, dbi.nHeight,
+    if (!snapshot_selected_chain_contains(selected_chain, dbi->nHeight,
                                           block_hash)) {
         db_iter_next(it);
         return SNAPSHOT_IMPORT_ROW_SKIPPED;
@@ -330,16 +332,16 @@ import_block_index_next_row(struct db_iterator *it,
      * counted, typed blocker) — the bulk import CONTINUES rather than
      * aborting on one bad legacy row. */
     char reason[64];
-    if (!snapshot_import_row_verify(&dbi, block_hash, cp,
+    if (!snapshot_import_row_verify(dbi, block_hash, cp,
                                     rom_checkpoint_height,
                                     reason, sizeof(reason))) {
-        import_row_quarantine(dbi.nHeight, block_hash, reason);
+        import_row_quarantine(dbi->nHeight, block_hash, reason);
         a->quarantined++;
         db_iter_next(it);
         return SNAPSHOT_IMPORT_ROW_SKIPPED;
     }
 
-    import_block_index_fill_row(db_blk, &dbi, block_hash,
+    import_block_index_fill_row(db_blk, dbi, block_hash,
                                 a->header_only, max_height);
     return SNAPSHOT_IMPORT_ROW_READY;
 }
@@ -519,10 +521,11 @@ static void *import_block_index_thread(void *arg)
             break;
         }
 
+        struct disk_block_index dbi;
         struct db_block db_blk;
         enum snapshot_import_row_status row = import_block_index_next_row(
             &it, &selected_chain, cp, rom_checkpoint_height, a,
-            &max_height, &db_blk);
+            &max_height, &dbi, &db_blk);
         if (row == SNAPSHOT_IMPORT_ROW_END)
             break;
         if (row == SNAPSHOT_IMPORT_ROW_SKIPPED)
