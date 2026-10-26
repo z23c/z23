@@ -36,19 +36,32 @@ static double fq_double(sqlite3 *db, const char *sql, double def)
     } while(0)
 
 /* Largest unspent transparent output: scans the live UTXO set, so it is
- * the largest coin still spendable today. */
-static size_t factoids_record_largest_unspent_output(char *r, size_t max,
-                                                     size_t off, sqlite3 *db)
+ * the largest coin still spendable today. `oldest` switches to the
+ * oldest-unspent-coin query, which returns height in v0 and value in v1. */
+static size_t factoids_record_unspent_extreme(char *r, size_t max,
+                                              size_t off, sqlite3 *db,
+                                              bool oldest)
 {
     struct sql_row_i64_3 row;
-    const char *sql = "SELECT u.value, u.height, b.time FROM utxos u "
-                      "JOIN blocks b ON u.height = b.height "
-                      "ORDER BY u.value DESC LIMIT 1";
+    const char *sql = oldest
+        ? "SELECT u.height, u.value, b.time FROM utxos u "
+          "JOIN blocks b ON u.height = b.height "
+          "ORDER BY u.height ASC LIMIT 1"
+        : "SELECT u.value, u.height, b.time FROM utxos u "
+          "JOIN blocks b ON u.height = b.height "
+          "ORDER BY u.value DESC LIMIT 1";
     if (sql_query_row_i64_3(db, sql, &row)) {
+        int64_t value = oldest ? row.v1 : row.v0;
+        int64_t height = oldest ? row.v0 : row.v1;
         char vstr[64];
-        fmt_zcl(vstr, sizeof(vstr), row.v0);
-        RECORD_ROW("Largest unspent transparent output",
-            "%s ZCL", vstr, row.v1, row.v2);
+        fmt_zcl(vstr, sizeof(vstr), value);
+        if (oldest) {
+            RECORD_ROW("Oldest coin still unspent",
+                "%s ZCL", vstr, height, row.v2);
+        } else {
+            RECORD_ROW("Largest unspent transparent output",
+                "%s ZCL", vstr, height, row.v2);
+        }
     }
     return off;
 }
@@ -87,30 +100,27 @@ static size_t factoids_record_most_tx_in_block(char *r, size_t max,
     return off;
 }
 
-static size_t factoids_record_most_joinsplits_in_block(char *r, size_t max,
-                                                       size_t off, sqlite3 *db)
+/* "Most in a block" count over a per-block table: `sapling` picks the
+ * sapling_outputs table, otherwise joinsplits. */
+static size_t factoids_record_most_in_block(char *r, size_t max,
+                                            size_t off, sqlite3 *db,
+                                            bool sapling)
 {
     struct sql_row_i64_2 row;
-    const char *sql = "SELECT block_height, count(*) as cnt FROM joinsplits "
-                      "GROUP BY block_height ORDER BY cnt DESC LIMIT 1";
+    const char *sql = sapling
+        ? "SELECT block_height, count(*) as cnt FROM sapling_outputs "
+          "GROUP BY block_height ORDER BY cnt DESC LIMIT 1"
+        : "SELECT block_height, count(*) as cnt FROM joinsplits "
+          "GROUP BY block_height ORDER BY cnt DESC LIMIT 1";
     if (sql_query_row_i64_2(db, sql, &row)) {
         int64_t t = get_block_time(db, row.v0);
-        RECORD_ROW("Most JoinSplits in a block",
-            "%" PRId64, row.v1, row.v0, t);
-    }
-    return off;
-}
-
-static size_t factoids_record_most_sapling_outputs_in_block(char *r, size_t max,
-                                                            size_t off, sqlite3 *db)
-{
-    struct sql_row_i64_2 row;
-    const char *sql = "SELECT block_height, count(*) as cnt FROM sapling_outputs "
-                      "GROUP BY block_height ORDER BY cnt DESC LIMIT 1";
-    if (sql_query_row_i64_2(db, sql, &row)) {
-        int64_t t = get_block_time(db, row.v0);
-        RECORD_ROW("Most Sapling outputs in a block",
-            "%" PRId64, row.v1, row.v0, t);
+        if (sapling) {
+            RECORD_ROW("Most Sapling outputs in a block",
+                "%" PRId64, row.v1, row.v0, t);
+        } else {
+            RECORD_ROW("Most JoinSplits in a block",
+                "%" PRId64, row.v1, row.v0, t);
+        }
     }
     return off;
 }
@@ -225,22 +235,6 @@ static size_t factoids_record_most_blocks_in_utc_day(char *r, size_t max,
     return off;
 }
 
-static size_t factoids_record_oldest_unspent_coin(char *r, size_t max,
-                                                  size_t off, sqlite3 *db)
-{
-    struct sql_row_i64_3 row;
-    const char *sql = "SELECT u.height, u.value, b.time FROM utxos u "
-                      "JOIN blocks b ON u.height = b.height "
-                      "ORDER BY u.height ASC LIMIT 1";
-    if (sql_query_row_i64_3(db, sql, &row)) {
-        char vstr[64];
-        fmt_zcl(vstr, sizeof(vstr), row.v1);
-        RECORD_ROW("Oldest coin still unspent",
-            "%s ZCL", vstr, row.v0, row.v2);
-    }
-    return off;
-}
-
 static size_t factoids_record_hodl_dormant_supply(char *r, size_t max,
                                                   size_t off, sqlite3 *db)
 {
@@ -294,18 +288,18 @@ size_t factoids_emit_section_5_records(uint8_t *buf, size_t cap, size_t off,
         "<table class='txlist'>"
         "<tr><th>Record</th><th>Value</th><th>Block</th><th>Time</th><th>SHA3</th></tr>");
 
-    off = factoids_record_largest_unspent_output(r, max, off, db);
+    off = factoids_record_unspent_extreme(r, max, off, db, /*oldest=*/false);
     off = factoids_record_largest_output_ever(r, max, off, db);
     off = factoids_record_most_tx_in_block(r, max, off, db);
-    off = factoids_record_most_joinsplits_in_block(r, max, off, db);
-    off = factoids_record_most_sapling_outputs_in_block(r, max, off, db);
+    off = factoids_record_most_in_block(r, max, off, db, /*sapling=*/false);
+    off = factoids_record_most_in_block(r, max, off, db, /*sapling=*/true);
     off = factoids_record_highest_difficulty(r, max, off, db);
     off = factoids_record_longest_block_gap(r, max, off, db);
     off = factoids_record_shortest_block_gap(r, max, off, db);
     off = factoids_record_largest_shielding_block(r, max, off, db);
     off = factoids_record_largest_unshielding_block(r, max, off, db);
     off = factoids_record_most_blocks_in_utc_day(r, max, off, db);
-    off = factoids_record_oldest_unspent_coin(r, max, off, db);
+    off = factoids_record_unspent_extreme(r, max, off, db, /*oldest=*/true);
     off = factoids_record_hodl_dormant_supply(r, max, off, db);
     off = factoids_record_pre_buttercup_coins(r, max, off, db);
 
