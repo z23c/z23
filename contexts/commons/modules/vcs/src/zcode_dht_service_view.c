@@ -13,23 +13,19 @@ static uint32_t active_query_count(const struct vcs_zcode_dht_service *s) {
   return n;
 }
 
-void vcs_zcode_dht_service_status(const struct vcs_zcode_dht_service *s,
-                                  struct vcs_zcode_dht_service_status *out) {
-  if (!out)
-    return;
-  memset(out, 0, sizeof(*out));
-  if (!s)
-    return;
+static void vcs_zcode_dht_service_status_identity(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_service_status *out) {
   out->enabled = s->enabled;
   memcpy(out->local_node_id, s->self_id, 32);
   (void)snprintf(out->disabled_reason, sizeof(out->disabled_reason), "%s",
                  s->disabled_reason);
   (void)snprintf(out->last_error, sizeof(out->last_error), "%s", s->last_error);
-  /* A missing transport or identity is an empty service, not a partially
-   * initialized routing table.  In particular, do not inspect table counts
-   * or discovery stores that were never admitted for use. */
-  if (!s->enabled)
-    return;
+}
+
+static void vcs_zcode_dht_service_status_routing(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_service_status *out) {
   out->contacts = vcs_zcode_dht_table_count(s->table);
   for (size_t i = 0; i < VCS_ZCODE_DHT_BUCKET_COUNT; i++)
     out->buckets_used += s->table->bucket_sizes[i] != 0;
@@ -39,6 +35,11 @@ void vcs_zcode_dht_service_status(const struct vcs_zcode_dht_service *s,
         s->table, (enum vcs_zcode_dht_probe_state)i);
   out->active_queries = active_query_count(s);
   out->outbound_queued = s->outbound_count;
+}
+
+static void vcs_zcode_dht_service_status_messages(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_service_status *out) {
   out->frames_accepted = s->frames_accepted;
   memcpy(out->frames_rejected, s->rejected, sizeof(out->frames_rejected));
   out->find_node_received = s->find_received;
@@ -53,12 +54,22 @@ void vcs_zcode_dht_service_status(const struct vcs_zcode_dht_service *s,
   out->records_sent = s->records_sent;
   out->store_record_sent = s->store_record_sent;
   out->store_result_sent = s->store_result_sent;
+}
+
+static void vcs_zcode_dht_service_status_records(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_service_status *out) {
   out->signed_records =
       (uint32_t)vcs_zcode_dht_record_store_count(s->record_store);
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS; i++)
     out->active_record_operations += s->record_operations[i].used;
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_RECORD_OPERATIONS; i++)
     out->active_record_operations += s->discoveries[i].used;
+}
+
+static void vcs_zcode_dht_service_status_publications(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_service_status *out) {
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++)
     if (s->publications[i].used) {
       out->publication_intents++;
@@ -71,6 +82,11 @@ void vcs_zcode_dht_service_status(const struct vcs_zcode_dht_service *s,
           s->publications[i].record.kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK &&
           !s->publications[i].possession_current;
     }
+}
+
+static void vcs_zcode_dht_service_status_maintenance(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_service_status *out) {
   out->unauthenticated_expired = s->unauthenticated_expired;
   out->duplicate_sessions_retired = s->duplicate_sessions_retired;
   out->possession_stall_releases = s->possession_stall_releases;
@@ -83,12 +99,22 @@ void vcs_zcode_dht_service_status(const struct vcs_zcode_dht_service *s,
   out->persistence_dirty = s->persistence_dirty;
   out->persistence_load_count = s->persistence_load_count;
   out->persistence_save_count = s->persistence_save_count;
+}
+
+static void vcs_zcode_dht_service_status_connected(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_service_status *out) {
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++)
     if (s->peers[i].used && s->peers[i].connected && s->peers[i].authenticated)
       out->connected_authenticated++;
   out->cold_contacts = out->contacts > out->connected_authenticated
                            ? out->contacts - out->connected_authenticated
                            : 0;
+}
+
+static void vcs_zcode_dht_service_status_lookups(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_service_status *out) {
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS; i++) {
     const struct service_lookup *l = &s->lookups[i];
     out->queued_lookups += l->used && !l->completed;
@@ -101,9 +127,69 @@ void vcs_zcode_dht_service_status(const struct vcs_zcode_dht_service *s,
   }
 }
 
+void vcs_zcode_dht_service_status(const struct vcs_zcode_dht_service *s,
+                                  struct vcs_zcode_dht_service_status *out) {
+  if (!out)
+    return;
+  memset(out, 0, sizeof(*out));
+  if (!s)
+    return;
+  vcs_zcode_dht_service_status_identity(s, out);
+  /* A missing transport or identity is an empty service, not a partially
+   * initialized routing table.  In particular, do not inspect table counts
+   * or discovery stores that were never admitted for use. */
+  if (!s->enabled)
+    return;
+  vcs_zcode_dht_service_status_routing(s, out);
+  vcs_zcode_dht_service_status_messages(s, out);
+  vcs_zcode_dht_service_status_records(s, out);
+  vcs_zcode_dht_service_status_publications(s, out);
+  vcs_zcode_dht_service_status_maintenance(s, out);
+  vcs_zcode_dht_service_status_connected(s, out);
+  vcs_zcode_dht_service_status_lookups(s, out);
+}
+
 uint64_t vcs_zcode_dht_service_outbound_enqueued(
     const struct vcs_zcode_dht_service *s) {
   return s ? s->outbound_enqueued : 0;
+}
+
+static void vcs_zcode_dht_service_peer_view_fill(
+    struct vcs_zcode_dht_peer_view *v, const struct vcs_zcode_dht_contact *c,
+    size_t b, uint64_t now) {
+  memset(v, 0, sizeof(*v));
+  memcpy(v->node_id, c->node_id, 32);
+  v->bucket = (int)b;
+  v->failures = c->consecutive_failures;
+  v->delegation_expiry = c->delegation_expiry;
+  v->beacon_height = c->beacon_height;
+  v->last_seen_age_s = now > (uint64_t)c->last_success_unix
+                           ? now - (uint64_t)c->last_success_unix
+                           : 0;
+  v->cold = true;
+}
+
+static void vcs_zcode_dht_service_peer_view_connection(
+    const struct vcs_zcode_dht_service *s,
+    const struct vcs_zcode_dht_contact *c, struct vcs_zcode_dht_peer_view *v) {
+  for (size_t p = 0; p < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; p++)
+    if (s->peers[p].used && s->peers[p].authenticated &&
+        memcmp(s->peers[p].node_id, c->node_id, 32) == 0) {
+      v->peer_id = s->peers[p].peer_id;
+      v->connected = s->peers[p].connected;
+      v->authenticated = true;
+      v->cold = !v->connected;
+      break;
+    }
+}
+
+static void vcs_zcode_dht_service_peer_view_probing(
+    const struct vcs_zcode_dht_service *s,
+    const struct vcs_zcode_dht_contact *c, struct vcs_zcode_dht_peer_view *v) {
+  for (size_t q = 0; q < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; q++)
+    if (s->queries[q].used && s->queries[q].kind == QUERY_PROBE &&
+        memcmp(s->queries[q].victim, c->node_id, 32) == 0)
+      v->probing = true;
 }
 
 size_t vcs_zcode_dht_service_peers(const struct vcs_zcode_dht_service *s,
@@ -123,31 +209,39 @@ size_t vcs_zcode_dht_service_peers(const struct vcs_zcode_dht_service *s,
       if (n == max)
         return n;
       struct vcs_zcode_dht_peer_view *v = &out[n++];
-      memset(v, 0, sizeof(*v));
-      memcpy(v->node_id, c->node_id, 32);
-      v->bucket = (int)b;
-      v->failures = c->consecutive_failures;
-      v->delegation_expiry = c->delegation_expiry;
-      v->beacon_height = c->beacon_height;
-      v->last_seen_age_s = now > (uint64_t)c->last_success_unix
-                               ? now - (uint64_t)c->last_success_unix
-                               : 0;
-      v->cold = true;
-      for (size_t p = 0; p < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; p++)
-        if (s->peers[p].used && s->peers[p].authenticated &&
-            memcmp(s->peers[p].node_id, c->node_id, 32) == 0) {
-          v->peer_id = s->peers[p].peer_id;
-          v->connected = s->peers[p].connected;
-          v->authenticated = true;
-          v->cold = !v->connected;
-          break;
-        }
-      for (size_t q = 0; q < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; q++)
-        if (s->queries[q].used && s->queries[q].kind == QUERY_PROBE &&
-            memcmp(s->queries[q].victim, c->node_id, 32) == 0)
-          v->probing = true;
+      vcs_zcode_dht_service_peer_view_fill(v, c, b, now);
+      vcs_zcode_dht_service_peer_view_connection(s, c, v);
+      vcs_zcode_dht_service_peer_view_probing(s, c, v);
     }
   return n;
+}
+
+static void vcs_zcode_dht_service_delegations_from_buckets(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_delegation *out, size_t max, size_t *count) {
+  for (size_t b = 0; b < VCS_ZCODE_DHT_BUCKET_COUNT && *count < max; b++)
+    for (size_t i = 0; i < s->table->bucket_sizes[b] && *count < max; i++) {
+      struct vcs_zcode_dht_delegation decoded;
+      if (vcs_zcode_dht_delegation_decode(
+              &decoded, s->table->buckets[b][i].delegation_wire,
+              VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES) ==
+          VCS_ZCODE_DHT_DELEGATION_OK)
+        out[(*count)++] = decoded;
+    }
+}
+
+static void vcs_zcode_dht_service_delegations_from_pending(
+    const struct vcs_zcode_dht_service *s,
+    struct vcs_zcode_dht_delegation *out, size_t max, size_t *count) {
+  for (size_t i = 0; i < VCS_ZCODE_DHT_MAX_PENDING && *count < max; i++) {
+    struct vcs_zcode_dht_delegation decoded;
+    if (s->table->pending[i].active &&
+        vcs_zcode_dht_delegation_decode(
+            &decoded, s->table->pending[i].candidate.delegation_wire,
+            VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES) ==
+            VCS_ZCODE_DHT_DELEGATION_OK)
+      out[(*count)++] = decoded;
+  }
 }
 
 size_t vcs_zcode_dht_service_delegations(
@@ -158,24 +252,8 @@ size_t vcs_zcode_dht_service_delegations(
   size_t count = 0;
   if (s->enabled && count < max)
     out[count++] = s->delegation;
-  for (size_t b = 0; b < VCS_ZCODE_DHT_BUCKET_COUNT && count < max; b++)
-    for (size_t i = 0; i < s->table->bucket_sizes[b] && count < max; i++) {
-      struct vcs_zcode_dht_delegation decoded;
-      if (vcs_zcode_dht_delegation_decode(
-              &decoded, s->table->buckets[b][i].delegation_wire,
-              VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES) ==
-          VCS_ZCODE_DHT_DELEGATION_OK)
-        out[count++] = decoded;
-    }
-  for (size_t i = 0; i < VCS_ZCODE_DHT_MAX_PENDING && count < max; i++) {
-    struct vcs_zcode_dht_delegation decoded;
-    if (s->table->pending[i].active &&
-        vcs_zcode_dht_delegation_decode(
-            &decoded, s->table->pending[i].candidate.delegation_wire,
-            VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES) ==
-            VCS_ZCODE_DHT_DELEGATION_OK)
-      out[count++] = decoded;
-  }
+  vcs_zcode_dht_service_delegations_from_buckets(s, out, max, &count);
+  vcs_zcode_dht_service_delegations_from_pending(s, out, max, &count);
   return count;
 }
 
@@ -226,26 +304,20 @@ void vcs_zcode_dht_service_set_verify_roles(
   s->authority_ctx = authority_ctx;
 }
 
-bool vcs_zcode_dht_service_revalidate(struct vcs_zcode_dht_service *s,
-                                      struct vcs_zcode_dht_time now) {
-  if (!s || !s->enabled)
-    return false;
-  if (vcs_zcode_dht_delegation_verify(&s->delegation, s->genesis,
-                                      s->local_noise_static, 0, NULL,
-                                      now.wall_unix) !=
-          VCS_ZCODE_DHT_DELEGATION_OK ||
-      (s->authority_verify &&
-       !s->authority_verify(s->authority_ctx, &s->delegation))) {
-    s->enabled = false;
-    (void)snprintf(s->disabled_reason, sizeof(s->disabled_reason),
-                   "LOCAL_IDENTITY_REVOKED_OR_STALE");
-    memset(s->queries, 0, sizeof(s->queries));
-    memset(s->lookups, 0, sizeof(s->lookups));
-    memset(s->outbound, 0, sizeof(s->outbound));
-    s->outbound_count = 0;
-    return true;
-  }
-  uint8_t remove[VCS_ZCODE_DHT_MAX_CONTACTS][32];
+static void vcs_zcode_dht_service_disable_revoked(
+    struct vcs_zcode_dht_service *s) {
+  s->enabled = false;
+  (void)snprintf(s->disabled_reason, sizeof(s->disabled_reason),
+                 "LOCAL_IDENTITY_REVOKED_OR_STALE");
+  memset(s->queries, 0, sizeof(s->queries));
+  memset(s->lookups, 0, sizeof(s->lookups));
+  memset(s->outbound, 0, sizeof(s->outbound));
+  s->outbound_count = 0;
+}
+
+static size_t vcs_zcode_dht_service_collect_stale_contacts(
+    struct vcs_zcode_dht_service *s, struct vcs_zcode_dht_time now,
+    uint8_t (*remove)[32]) {
   size_t n = 0;
   for (size_t b = 0; b < VCS_ZCODE_DHT_BUCKET_COUNT; b++)
     for (size_t i = 0; i < s->table->bucket_sizes[b]; i++) {
@@ -261,6 +333,11 @@ bool vcs_zcode_dht_service_revalidate(struct vcs_zcode_dht_service *s,
            !s->transport_verify(s->transport_ctx, &d)))
         memcpy(remove[n++], c->node_id, 32);
     }
+  return n;
+}
+
+static void vcs_zcode_dht_service_drop_stale_contacts(
+    struct vcs_zcode_dht_service *s, uint8_t (*remove)[32], size_t n) {
   for (size_t i = 0; i < n; i++)
     (void)vcs_zcode_dht_table_remove(s->table, remove[i]);
   for (size_t p = 0; p < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; p++)
@@ -268,6 +345,24 @@ bool vcs_zcode_dht_service_revalidate(struct vcs_zcode_dht_service *s,
       if (s->peers[p].authenticated &&
           memcmp(s->peers[p].node_id, remove[i], 32) == 0)
         s->peers[p].authenticated = false;
+}
+
+bool vcs_zcode_dht_service_revalidate(struct vcs_zcode_dht_service *s,
+                                      struct vcs_zcode_dht_time now) {
+  if (!s || !s->enabled)
+    return false;
+  if (vcs_zcode_dht_delegation_verify(&s->delegation, s->genesis,
+                                      s->local_noise_static, 0, NULL,
+                                      now.wall_unix) !=
+          VCS_ZCODE_DHT_DELEGATION_OK ||
+      (s->authority_verify &&
+       !s->authority_verify(s->authority_ctx, &s->delegation))) {
+    vcs_zcode_dht_service_disable_revoked(s);
+    return true;
+  }
+  uint8_t remove[VCS_ZCODE_DHT_MAX_CONTACTS][32];
+  size_t n = vcs_zcode_dht_service_collect_stale_contacts(s, now, remove);
+  vcs_zcode_dht_service_drop_stale_contacts(s, remove, n);
   if (n) {
     if (!s->persistence_dirty)
       s->dirty_since_mono = now.monotonic_s;
