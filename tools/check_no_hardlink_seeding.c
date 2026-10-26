@@ -185,126 +185,210 @@ static bool write_file(const char *path)
     return fclose(file) == 0 && wrote;
 }
 
-static int selftest(void)
+/* Fixture path buffers for the selftest below; zeroed so cleanup only
+ * touches paths that were actually joined. */
+struct selftest_fixtures {
+    char vendor[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char nested[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char source[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char peer[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char outside[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char outside_peer[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char outside_link[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char build[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char hotswap[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char external[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char external_hotswap[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char module[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char module_peer[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char hooks[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char a[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char b[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char linked[ZCL_DEPENDENCY_LINK_PATH_MAX];
+};
+
+/* Create the temporary root directory the selftest fixtures live in. */
+static bool selftest_make_base(char base[ZCL_DEPENDENCY_LINK_PATH_MAX])
 {
 #if defined(_WIN32)
-    char base[ZCL_DEPENDENCY_LINK_PATH_MAX];
     char temp[ZCL_DEPENDENCY_LINK_PATH_MAX];
     DWORD n = GetTempPathA((DWORD)sizeof(temp), temp);
-    if (!n || n >= sizeof(temp) || !GetTempFileNameA(temp, "zhl", 0, base) ||
-        !DeleteFileA(base) || !CreateDirectoryA(base, NULL))
-        return 1;
+    return n != 0 && n < sizeof(temp) &&
+        GetTempFileNameA(temp, "zhl", 0, base) && DeleteFileA(base) &&
+        CreateDirectoryA(base, NULL);
 #else
-    char base[] = "/tmp/z23-hardlink-seeding.XXXXXX";
-    if (!mkdtemp(base))
-        return 1;
+    return mkdtemp(base) != NULL;
 #endif
-    char vendor[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char nested[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char source[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char peer[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char outside[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char outside_peer[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char outside_link[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char build[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char hotswap[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char external[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char external_hotswap[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char module[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char module_peer[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    bool ok = path_join(vendor, base, "vendor")
-        && path_join(nested, vendor, "include")
-        && path_join(source, nested, "generated.h")
-        && path_join(peer, nested, "generated-copy.h")
-        && path_join(outside, base, "outside.a")
-        && path_join(outside_peer, base, "outside-peer.a")
-        && path_join(outside_link, vendor, "outside")
-        && path_join(build, base, "build")
-        && path_join(hotswap, build, "hotswap")
-        && path_join(external, base, "external-build")
-        && path_join(external_hotswap, external, "hotswap")
-        && path_join(module, hotswap, "fixture.so")
-        && path_join(module_peer, base, "fixture-peer.so")
-        && platform_directory_ensure(vendor, 0700)
-        && platform_directory_ensure(nested, 0700)
-        && platform_directory_ensure(build, 0700)
-        && platform_directory_ensure(hotswap, 0700)
-        && write_file(source) && write_file(outside)
+}
+
+/* Join the fixture paths for the vendor, build and external trees and the
+ * out-of-scope hardlink pair. */
+static bool selftest_join_fixture_paths(struct selftest_fixtures *fx,
+                                        const char *base)
+{
+    return path_join(fx->vendor, base, "vendor")
+        && path_join(fx->nested, fx->vendor, "include")
+        && path_join(fx->source, fx->nested, "generated.h")
+        && path_join(fx->peer, fx->nested, "generated-copy.h")
+        && path_join(fx->outside, base, "outside.a")
+        && path_join(fx->outside_peer, base, "outside-peer.a")
+        && path_join(fx->outside_link, fx->vendor, "outside")
+        && path_join(fx->build, base, "build")
+        && path_join(fx->hotswap, fx->build, "hotswap")
+        && path_join(fx->external, base, "external-build")
+        && path_join(fx->external_hotswap, fx->external, "hotswap");
+}
+
+/* Create the fixture directories and their independent files, hardlink the
+ * out-of-scope pair, then require the clean-tree scan to pass. */
+static bool selftest_seed_baseline_tree(const struct selftest_fixtures *fx,
+                                        const char *base)
+{
+    return platform_directory_ensure(fx->vendor, 0700)
+        && platform_directory_ensure(fx->nested, 0700)
+        && platform_directory_ensure(fx->build, 0700)
+        && platform_directory_ensure(fx->hotswap, 0700)
+        && write_file(fx->source) && write_file(fx->outside)
 #if defined(_WIN32)
-        && CreateHardLinkA(outside_peer, outside, NULL)
+        && CreateHardLinkA(fx->outside_peer, fx->outside, NULL)
 #else
-        && link(outside, outside_peer) == 0
-        && symlink(base, outside_link) == 0
+        && link(fx->outside, fx->outside_peer) == 0
+        && symlink(base, fx->outside_link) == 0
 #endif
         && check_root(base);
-    char hooks[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char a[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char b[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    char linked[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
-    if (ok)
-        ok = path_join(hooks, build, "githooks")
-            && path_join(a, hooks, "pre-push")
-            && path_join(b, hooks, "post-merge")
-            && path_join(linked, hooks, "pre-push-linked")
-            && platform_directory_ensure(hooks, 0700)
-            && write_file(a) && write_file(b) && check_root(base);
+}
+
+/* Create build/githooks holding two independent hook files. */
+static bool selftest_seed_githooks(struct selftest_fixtures *fx,
+                                   const char *build)
+{
+    return path_join(fx->hooks, build, "githooks")
+        && path_join(fx->a, fx->hooks, "pre-push")
+        && path_join(fx->b, fx->hooks, "post-merge")
+        && path_join(fx->linked, fx->hooks, "pre-push-linked")
+        && platform_directory_ensure(fx->hooks, 0700)
+        && write_file(fx->a) && write_file(fx->b);
+}
+
+/* Hardlink pre-push-linked to pre-push so the scan must fail, then remove
+ * the githooks fixture whether or not that step ran. */
+static bool selftest_githooks_pair(const struct selftest_fixtures *fx,
+                                   bool ok, const char *base)
+{
 #if defined(_WIN32)
-    if (ok) ok = CreateHardLinkA(linked, a, NULL) && !check_root(base);
+    if (ok) ok = CreateHardLinkA(fx->linked, fx->a, NULL) && !check_root(base);
 #else
-    if (ok) ok = link(a, linked) == 0 && !check_root(base);
+    if (ok) ok = link(fx->a, fx->linked) == 0 && !check_root(base);
 #endif
-    if (linked[0]) (void)unlink(linked);
-    if (a[0]) (void)unlink(a);
-    if (b[0]) (void)unlink(b);
-    if (hooks[0]) (void)rmdir(hooks);
+    if (fx->linked[0]) (void)unlink(fx->linked);
+    if (fx->a[0]) (void)unlink(fx->a);
+    if (fx->b[0]) (void)unlink(fx->b);
+    if (fx->hooks[0]) (void)rmdir(fx->hooks);
+    return ok;
+}
+
+/* Under ZCL_TESTING, probe the entries cap from both sides; then hardlink
+ * generated.h to generated-copy.h so the scan must fail. Both files are
+ * removed afterwards either way. */
+static bool selftest_vendor_pair_stage(const struct selftest_fixtures *fx,
+                                       bool ok, const char *base)
+{
 #if defined(ZCL_TESTING)
     if (ok) {
         struct zcl_dependency_link_stats edge, over;
         char why[128];
         ok = zcl_dependency_links_scan_directory_for_testing(
-                 nested, ZCL_DEPENDENCY_LINK_ENTRIES_MAX - 1u, &edge, why,
+                 fx->nested, ZCL_DEPENDENCY_LINK_ENTRIES_MAX - 1u, &edge, why,
                  sizeof(why))
             && edge.entries == ZCL_DEPENDENCY_LINK_ENTRIES_MAX
             && !zcl_dependency_links_scan_directory_for_testing(
-                nested, ZCL_DEPENDENCY_LINK_ENTRIES_MAX, &over, why,
+                fx->nested, ZCL_DEPENDENCY_LINK_ENTRIES_MAX, &over, why,
                 sizeof(why));
     }
 #endif
     if (ok) {
 #if defined(_WIN32)
-        ok = CreateHardLinkA(peer, source, NULL) && !check_root(base);
+        ok = CreateHardLinkA(fx->peer, fx->source, NULL) &&
+            !check_root(base);
 #else
-        ok = link(source, peer) == 0 && !check_root(base);
+        ok = link(fx->source, fx->peer) == 0 && !check_root(base);
 #endif
     }
-    if (peer[0]) (void)unlink(peer);
-    if (source[0]) (void)unlink(source);
+    if (fx->peer[0]) (void)unlink(fx->peer);
+    if (fx->source[0]) (void)unlink(fx->source);
+    return ok;
+}
+
+/* Write build/hotswap/fixture.so and hardlink it at the root as
+ * fixture-peer.so so the scan must fail; the module files and the hotswap
+ * and build directories are removed either way. */
+static bool selftest_hotswap_module_stage(const struct selftest_fixtures *fx,
+                                          bool ok, const char *base)
+{
     if (ok)
-        ok = write_file(module)
+        ok = write_file(fx->module)
 #if defined(_WIN32)
-            && CreateHardLinkA(module_peer, module, NULL)
+            && CreateHardLinkA(fx->module_peer, fx->module, NULL)
 #else
-            && link(module, module_peer) == 0
+            && link(fx->module, fx->module_peer) == 0
 #endif
             && !check_root(base);
-    if (module_peer[0]) (void)unlink(module_peer);
-    if (module[0]) (void)unlink(module);
-    if (hotswap[0]) (void)rmdir(hotswap);
-    if (build[0]) (void)rmdir(build);
+    if (fx->module_peer[0]) (void)unlink(fx->module_peer);
+    if (fx->module[0]) (void)unlink(fx->module);
+    if (fx->hotswap[0]) (void)rmdir(fx->hotswap);
+    if (fx->build[0]) (void)rmdir(fx->build);
+    return ok;
+}
+
+/* Point build/ at an external tree with its own hotswap/ (the symlink is
+ * POSIX-only) and require the scan to fail; build/ and the external tree
+ * are removed either way. */
+static bool selftest_symlinked_build_stage(const struct selftest_fixtures *fx,
+                                           bool ok, const char *base)
+{
 #if !defined(_WIN32)
     if (ok)
-        ok = platform_directory_ensure(external, 0700)
-            && platform_directory_ensure(external_hotswap, 0700)
-            && symlink(external, build) == 0 && !check_root(base);
+        ok = platform_directory_ensure(fx->external, 0700)
+            && platform_directory_ensure(fx->external_hotswap, 0700)
+            && symlink(fx->external, fx->build) == 0 && !check_root(base);
+#else
+    (void)base;
 #endif
-    if (build[0]) (void)unlink(build);
-    if (external_hotswap[0]) (void)rmdir(external_hotswap);
-    if (external[0]) (void)rmdir(external);
-    if (outside_link[0]) (void)unlink(outside_link);
-    if (outside_peer[0]) (void)unlink(outside_peer);
-    if (outside[0]) (void)unlink(outside);
-    if (nested[0]) (void)rmdir(nested);
-    if (vendor[0]) (void)rmdir(vendor);
+    if (fx->build[0]) (void)unlink(fx->build);
+    if (fx->external_hotswap[0]) (void)rmdir(fx->external_hotswap);
+    if (fx->external[0]) (void)rmdir(fx->external);
+    return ok;
+}
+
+/* Remove the out-of-scope hardlink pair, its symlink, and the vendor tree;
+ * empty paths were never joined and are skipped. */
+static void selftest_remove_scan_roots(const struct selftest_fixtures *fx)
+{
+    if (fx->outside_link[0]) (void)unlink(fx->outside_link);
+    if (fx->outside_peer[0]) (void)unlink(fx->outside_peer);
+    if (fx->outside[0]) (void)unlink(fx->outside);
+    if (fx->nested[0]) (void)rmdir(fx->nested);
+    if (fx->vendor[0]) (void)rmdir(fx->vendor);
+}
+
+static int selftest(void)
+{
+    char base[ZCL_DEPENDENCY_LINK_PATH_MAX] =
+        "/tmp/z23-hardlink-seeding.XXXXXX";
+    if (!selftest_make_base(base))
+        return 1;
+    struct selftest_fixtures fx = {0};
+    bool ok = selftest_join_fixture_paths(&fx, base)
+        && path_join(fx.module, fx.hotswap, "fixture.so")
+        && path_join(fx.module_peer, base, "fixture-peer.so")
+        && selftest_seed_baseline_tree(&fx, base);
+    if (ok)
+        ok = selftest_seed_githooks(&fx, fx.build) && check_root(base);
+    ok = selftest_githooks_pair(&fx, ok, base);
+    ok = selftest_vendor_pair_stage(&fx, ok, base);
+    ok = selftest_hotswap_module_stage(&fx, ok, base);
+    ok = selftest_symlinked_build_stage(&fx, ok, base);
+    selftest_remove_scan_roots(&fx);
     (void)rmdir(base);
     if (!ok) {
         fprintf(stderr, "hardlink-seeding: selftest FAIL\n");
