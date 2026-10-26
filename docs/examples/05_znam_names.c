@@ -169,62 +169,75 @@ static bool index_one_tx_block(struct node_db *ndb, struct transaction *tx,
     return ok;
 }
 
-int main(void)
+/* Boot the deterministic simulator and open the in-memory node database —
+ * the shared state every step of the story below runs on. Returns 0 on
+ * success, 1 on failure (main's exit codes).
+ * Post-condition: *db is zeroed before the first failure return. */
+static int open_simnet_and_node_db(struct simnet *sim, struct node_db *db)
 {
-    printf("=== 05_znam_names: REGISTER -> UPDATE -> SET_TEXT, then a "
-          "non-owner UPDATE that the projection discards ===\n\n");
-
+    memset(db, 0, sizeof(*db));
     /* Select a chain network before any chain/consensus code runs —
      * connect_block and the coinbase subsidy schedule read their parameters
      * through chain_params_get(), which asserts one was chosen. */
     chain_params_select(CHAIN_MAIN);
 
-    struct simnet sim;
-    if (!simnet_init(&sim)) { fprintf(stderr, "simnet_init failed\n"); return 1; }
+    if (!simnet_init(sim)) { fprintf(stderr, "simnet_init failed\n"); return 1; }
 
-    struct node_db db;
-    memset(&db, 0, sizeof(db));
-    if (!node_db_open(&db, ":memory:")) {
+    if (!node_db_open(db, ":memory:")) {
         fprintf(stderr, "node_db_open failed\n"); return 1;
     }
+    return 0;
+}
 
+/* Step [1/4]: mature a coinbase, then split it into the two owner-distinct
+ * P2PKH starting coins ("alice" and "mallory") and fold that block into the
+ * projection. `fund_txid` returns the funding tx's hash for later spends.
+ * Post-condition: *fund_tx_proj is transaction_init()'d before the first
+ * failure return, so transaction_free() is safe on every exit path. */
+static int fund_alice_and_mallory_wallets(struct simnet *sim, struct node_db *db,
+                                          struct transaction *fund_tx,
+                                          struct transaction *fund_tx_proj,
+                                          struct uint256 *fund_txid)
+{
+    transaction_init(fund_tx_proj);
     printf("[1/4] minting a coinbase and 100 blocks to reach coinbase "
           "maturity, then funding alice + mallory from it...\n");
     struct uint256 cb_txid;
-    if (!simnet_mint_coinbase(&sim, &cb_txid)) {
+    if (!simnet_mint_coinbase(sim, &cb_txid)) {
         fprintf(stderr, "mint coinbase failed\n"); return 1;
     }
-    if (!simnet_mint_to_height(&sim, 200)) {
+    if (!simnet_mint_to_height(sim, 200)) {
         fprintf(stderr, "mint to maturity height failed\n"); return 1;
     }
-    /* simnet_mint_txs() MOVES each tx's vin/vout arrays into the block it
-     * mints (see engine/modules/sim/src/simnet.c: `block_txs[i+1] = txs[i];` followed
-     * by `transaction_init(&txs[i])`) and resets the caller's copy to an
-     * empty transaction — the same "the caller no longer owns this"
-     * contract tests/harness/src/test_simnet.c follows via `transaction_copy()`
-     * before minting. So every tx below gets a `_proj` copy, taken BEFORE
-     * its mint call, for anything read AFTER minting (index_one_tx_block()
-     * and the forged-tx znam_parse() re-check) — reading the post-mint tx
-     * directly would deref an emptied (NULL vin/vout) transaction. */
-    struct transaction fund_tx, fund_tx_proj;
-    transaction_init(&fund_tx_proj);
-    if (!build_fund_tx(&fund_tx, &cb_txid, 0, 400000, 400000)) {
+    if (!build_fund_tx(fund_tx, &cb_txid, 0, 400000, 400000)) {
         fprintf(stderr, "build fund tx failed\n"); return 1;
     }
-    struct uint256 fund_txid = fund_tx.hash;
-    if (!transaction_copy(&fund_tx_proj, &fund_tx)) {
+    *fund_txid = fund_tx->hash;
+    if (!transaction_copy(fund_tx_proj, fund_tx)) {
         fprintf(stderr, "copy fund tx for projection failed\n"); return 1;
     }
-    if (!simnet_mint_txs(&sim, &fund_tx, 1)) {
+    if (!simnet_mint_txs(sim, fund_tx, 1)) {
         fprintf(stderr, "mint fund tx rejected by connect_block\n"); return 1;
     }
-    int fund_height = simnet_tip_height(&sim);
-    if (!index_one_tx_block(&db, &fund_tx_proj, fund_height, 0xF1)) {
+    int fund_height = simnet_tip_height(sim);
+    if (!index_one_tx_block(db, fund_tx_proj, fund_height, 0xF1)) {
         fprintf(stderr, "index fund tx failed\n"); return 1;
     }
     printf("      block accepted at height %d; alice vout=0 (400000 zats), "
           "mallory vout=1 (400000 zats)\n", fund_height);
+    return 0;
+}
 
+/* Step [2/4]: alice's REGISTER claims "alice-home" -> "t1exampletarget";
+ * `register_txid` returns the register tx's hash and `alice_owner` (64
+ * bytes) the owner address the projection recorded, for later comparisons. */
+static int register_alice_home_name(struct simnet *sim, struct node_db *db,
+                                    const struct uint256 *fund_txid,
+                                    struct transaction *register_tx,
+                                    struct transaction *register_tx_proj,
+                                    struct uint256 *register_txid,
+                                    char alice_owner[64])
+{
     printf("\n[2/4] REGISTER \"alice-home\" -> t1exampletarget, owned by "
           "whoever funds the tx (alice)...\n");
     uint8_t register_script[512];
@@ -234,27 +247,26 @@ int main(void)
                                               "t1exampletarget");
     assert(register_len > 0 && "znam_build_register must encode a valid payload");
 
-    struct transaction register_tx, register_tx_proj;
-    transaction_init(&register_tx_proj);
-    if (!build_znam_tx(&register_tx, &fund_txid, 0, register_script,
+    transaction_init(register_tx_proj);
+    if (!build_znam_tx(register_tx, fund_txid, 0, register_script,
                        register_len, 350000, 0xC0)) {
         fprintf(stderr, "build register tx failed\n"); return 1;
     }
-    struct uint256 register_txid = register_tx.hash;
-    if (!transaction_copy(&register_tx_proj, &register_tx)) {
+    *register_txid = register_tx->hash;
+    if (!transaction_copy(register_tx_proj, register_tx)) {
         fprintf(stderr, "copy register tx for projection failed\n"); return 1;
     }
-    if (!simnet_mint_txs(&sim, &register_tx, 1)) {
+    if (!simnet_mint_txs(sim, register_tx, 1)) {
         fprintf(stderr, "mint register tx rejected by connect_block\n"); return 1;
     }
-    int register_height = simnet_tip_height(&sim);
-    if (!index_one_tx_block(&db, &register_tx_proj, register_height, 0xF2)) {
+    int register_height = simnet_tip_height(sim);
+    if (!index_one_tx_block(db, register_tx_proj, register_height, 0xF2)) {
         fprintf(stderr, "index register tx failed\n"); return 1;
     }
 
     struct znam_entry after_register;
     memset(&after_register, 0, sizeof(after_register));
-    if (!db_znam_find(&db, "alice-home", &after_register)) {
+    if (!db_znam_find(db, "alice-home", &after_register)) {
         fprintf(stderr, "projection does not see \"alice-home\" after REGISTER\n");
         return 1;
     }
@@ -262,9 +274,20 @@ int main(void)
           register_height, after_register.owner_address,
           after_register.target_value);
     assert(strcmp(after_register.target_value, "t1exampletarget") == 0);
-    char alice_owner[64];
-    snprintf(alice_owner, sizeof(alice_owner), "%s", after_register.owner_address);
+    snprintf(alice_owner, 64, "%s", after_register.owner_address);
+    return 0;
+}
 
+/* Step [3/4], first half: the true owner (alice) UPDATEs the name target;
+ * the projection must repoint the name and keep her as the owner.
+ * `update_txid` returns the update tx's hash for the SET_TEXT spend. */
+static int update_name_target_as_owner(struct simnet *sim, struct node_db *db,
+                                       const struct uint256 *register_txid,
+                                       const char *alice_owner,
+                                       struct transaction *update_tx,
+                                       struct transaction *update_tx_proj,
+                                       struct uint256 *update_txid)
+{
     printf("\n[3/4] owner UPDATE (alice) repoints the name, then SET_TEXT "
           "attaches an email record...\n");
     uint8_t update_script[512];
@@ -273,65 +296,85 @@ int main(void)
                                           "t1updatedtarget");
     assert(update_len > 0 && "znam_build_update must encode a valid payload");
 
-    struct transaction update_tx, update_tx_proj;
-    transaction_init(&update_tx_proj);
-    if (!build_znam_tx(&update_tx, &register_txid, 1, update_script,
+    transaction_init(update_tx_proj);
+    if (!build_znam_tx(update_tx, register_txid, 1, update_script,
                        update_len, 300000, 0xC0)) {
         fprintf(stderr, "build update tx failed\n"); return 1;
     }
-    struct uint256 update_txid = update_tx.hash;
-    if (!transaction_copy(&update_tx_proj, &update_tx)) {
+    *update_txid = update_tx->hash;
+    if (!transaction_copy(update_tx_proj, update_tx)) {
         fprintf(stderr, "copy update tx for projection failed\n"); return 1;
     }
-    if (!simnet_mint_txs(&sim, &update_tx, 1)) {
+    if (!simnet_mint_txs(sim, update_tx, 1)) {
         fprintf(stderr, "mint owner UPDATE rejected by connect_block\n"); return 1;
     }
-    int update_height = simnet_tip_height(&sim);
-    if (!index_one_tx_block(&db, &update_tx_proj, update_height, 0xF3)) {
+    int update_height = simnet_tip_height(sim);
+    if (!index_one_tx_block(db, update_tx_proj, update_height, 0xF3)) {
         fprintf(stderr, "index owner UPDATE failed\n"); return 1;
     }
     struct znam_entry after_update;
     memset(&after_update, 0, sizeof(after_update));
-    if (!db_znam_find(&db, "alice-home", &after_update)) {
+    if (!db_znam_find(db, "alice-home", &after_update)) {
         fprintf(stderr, "projection lost \"alice-home\" after UPDATE\n"); return 1;
     }
     assert(strcmp(after_update.target_value, "t1updatedtarget") == 0);
     assert(strcmp(after_update.owner_address, alice_owner) == 0);
     printf("      block accepted at height %d; target now %s (owner unchanged)\n",
           update_height, after_update.target_value);
+    return 0;
+}
 
+/* Step [3/4], second half: alice's SET_TEXT attaches the "email" text
+ * record (ENS TextResolver equivalent) and the projection must read it
+ * back. */
+static int attach_email_text_record(struct simnet *sim, struct node_db *db,
+                                    const struct uint256 *update_txid,
+                                    struct transaction *text_tx,
+                                    struct transaction *text_tx_proj)
+{
     uint8_t text_script[512];
     size_t text_len = znam_build_set_text(text_script, sizeof(text_script),
                                           "alice-home", "email",
                                           "alice@example.test");
     assert(text_len > 0 && "znam_build_set_text must encode a valid payload");
 
-    struct transaction text_tx, text_tx_proj;
-    transaction_init(&text_tx_proj);
-    if (!build_znam_tx(&text_tx, &update_txid, 1, text_script, text_len,
+    transaction_init(text_tx_proj);
+    if (!build_znam_tx(text_tx, update_txid, 1, text_script, text_len,
                        250000, 0xC0)) {
         fprintf(stderr, "build SET_TEXT tx failed\n"); return 1;
     }
-    if (!transaction_copy(&text_tx_proj, &text_tx)) {
+    if (!transaction_copy(text_tx_proj, text_tx)) {
         fprintf(stderr, "copy SET_TEXT tx for projection failed\n"); return 1;
     }
-    if (!simnet_mint_txs(&sim, &text_tx, 1)) {
+    if (!simnet_mint_txs(sim, text_tx, 1)) {
         fprintf(stderr, "mint SET_TEXT rejected by connect_block\n"); return 1;
     }
-    int text_height = simnet_tip_height(&sim);
-    if (!index_one_tx_block(&db, &text_tx_proj, text_height, 0xF4)) {
+    int text_height = simnet_tip_height(sim);
+    if (!index_one_tx_block(db, text_tx_proj, text_height, 0xF4)) {
         fprintf(stderr, "index SET_TEXT failed\n"); return 1;
     }
     char email_out[ZNAM_TEXT_VAL_MAX + 1];
     memset(email_out, 0, sizeof(email_out));
-    if (!db_znam_text_get(&db, "alice-home", "email", email_out, sizeof(email_out))) {
+    if (!db_znam_text_get(db, "alice-home", "email", email_out, sizeof(email_out))) {
         fprintf(stderr, "projection did not record the email text record\n");
         return 1;
     }
     assert(strcmp(email_out, "alice@example.test") == 0);
     printf("      block accepted at height %d; text[email]=%s\n",
           text_height, email_out);
+    return 0;
+}
 
+/* Step [4/4], NEGATIVE: mallory spends HER OWN coin to post a well-formed
+ * UPDATE for "alice-home" — the wire bytes must parse, and the projection's
+ * owner-address check must leave the stored name untouched. */
+static int confirm_non_owner_update_is_discarded(struct simnet *sim,
+                                                 struct node_db *db,
+                                                 const struct uint256 *fund_txid,
+                                                 const char *alice_owner,
+                                                 struct transaction *forged_tx,
+                                                 struct transaction *forged_tx_proj)
+{
     printf("\n[4/4] NEGATIVE: mallory (never the owner) posts a well-formed "
           "UPDATE for \"alice-home\", funded by HER OWN coin...\n");
     uint8_t forged_script[512];
@@ -340,17 +383,16 @@ int main(void)
                                          "t1stolentarget");
     assert(forged_len > 0 && "the forged message is itself well-formed ZNAM");
 
-    struct transaction forged_tx, forged_tx_proj;
-    transaction_init(&forged_tx_proj);
+    transaction_init(forged_tx_proj);
     /* Spends fund_txid:1 — mallory's coin from step 1, NOT alice's chain. */
-    if (!build_znam_tx(&forged_tx, &fund_txid, 1, forged_script, forged_len,
+    if (!build_znam_tx(forged_tx, fund_txid, 1, forged_script, forged_len,
                        350000, 0xE1)) {
         fprintf(stderr, "build forged UPDATE tx failed\n"); return 1;
     }
-    if (!transaction_copy(&forged_tx_proj, &forged_tx)) {
+    if (!transaction_copy(forged_tx_proj, forged_tx)) {
         fprintf(stderr, "copy forged tx for projection failed\n"); return 1;
     }
-    if (!simnet_mint_txs(&sim, &forged_tx, 1)) {
+    if (!simnet_mint_txs(sim, forged_tx, 1)) {
         /* Consensus does not know or care about ZNAM ownership — an ordinary
          * P2PKH-funded OP_RETURN tx is structurally valid and connect_block
          * accepts it regardless. If this ever fails, the rejection would be
@@ -360,10 +402,10 @@ int main(void)
                         "not a consensus rule)\n");
         return 1;
     }
-    int forged_height = simnet_tip_height(&sim);
+    int forged_height = simnet_tip_height(sim);
     struct znam_message parsed_forgery;
-    bool forgery_parses = znam_parse(forged_tx_proj.vout[0].script_pub_key.data,
-                                     forged_tx_proj.vout[0].script_pub_key.size,
+    bool forgery_parses = znam_parse(forged_tx_proj->vout[0].script_pub_key.data,
+                                     forged_tx_proj->vout[0].script_pub_key.size,
                                      &parsed_forgery);
     assert(forgery_parses && parsed_forgery.command == ZNAM_CMD_UPDATE &&
           "the wire bytes decode as a perfectly valid UPDATE message");
@@ -371,12 +413,12 @@ int main(void)
           "valid UPDATE(\"%s\" -> %s) — the wire format has no owner field\n",
           forged_height, parsed_forgery.name, parsed_forgery.target_value);
 
-    if (!index_one_tx_block(&db, &forged_tx_proj, forged_height, 0xF5)) {
+    if (!index_one_tx_block(db, forged_tx_proj, forged_height, 0xF5)) {
         fprintf(stderr, "index forged UPDATE failed\n"); return 1;
     }
     struct znam_entry after_forgery;
     memset(&after_forgery, 0, sizeof(after_forgery));
-    if (!db_znam_find(&db, "alice-home", &after_forgery)) {
+    if (!db_znam_find(db, "alice-home", &after_forgery)) {
         fprintf(stderr, "projection lost \"alice-home\" after the forged block\n");
         return 1;
     }
@@ -398,6 +440,63 @@ int main(void)
           "block parsed but was NOT applied (owner-address mismatch at the "
           "authorization layer)\n",
           after_forgery.target_value, after_forgery.owner_address);
+    return 0;
+}
+
+int main(void)
+{
+    printf("=== 05_znam_names: REGISTER -> UPDATE -> SET_TEXT, then a "
+          "non-owner UPDATE that the projection discards ===\n\n");
+
+    struct simnet sim;
+    struct node_db db;
+    if (open_simnet_and_node_db(&sim, &db) != 0) { return 1; }
+
+    /* simnet_mint_txs() MOVES each tx's vin/vout arrays into the block it
+     * mints (see engine/modules/sim/src/simnet.c: `block_txs[i+1] = txs[i];` followed
+     * by `transaction_init(&txs[i])`) and resets the caller's copy to an
+     * empty transaction — the same "the caller no longer owns this"
+     * contract tests/harness/src/test_simnet.c follows via `transaction_copy()`
+     * before minting. So every tx below gets a `_proj` copy, taken BEFORE
+     * its mint call, for anything read AFTER minting (index_one_tx_block()
+     * and the forged-tx znam_parse() re-check) — reading the post-mint tx
+     * directly would deref an emptied (NULL vin/vout) transaction. */
+    struct transaction fund_tx, fund_tx_proj;
+    struct uint256 fund_txid;
+    if (fund_alice_and_mallory_wallets(&sim, &db, &fund_tx, &fund_tx_proj,
+                                       &fund_txid) != 0) {
+        return 1;
+    }
+
+    struct transaction register_tx, register_tx_proj;
+    struct uint256 register_txid;
+    char alice_owner[64];
+    if (register_alice_home_name(&sim, &db, &fund_txid, &register_tx,
+                                 &register_tx_proj, &register_txid,
+                                 alice_owner) != 0) {
+        return 1;
+    }
+
+    struct transaction update_tx, update_tx_proj;
+    struct uint256 update_txid;
+    if (update_name_target_as_owner(&sim, &db, &register_txid, alice_owner,
+                                    &update_tx, &update_tx_proj,
+                                    &update_txid) != 0) {
+        return 1;
+    }
+
+    struct transaction text_tx, text_tx_proj;
+    if (attach_email_text_record(&sim, &db, &update_txid, &text_tx,
+                                 &text_tx_proj) != 0) {
+        return 1;
+    }
+
+    struct transaction forged_tx, forged_tx_proj;
+    if (confirm_non_owner_update_is_discarded(&sim, &db, &fund_txid,
+                                              alice_owner, &forged_tx,
+                                              &forged_tx_proj) != 0) {
+        return 1;
+    }
 
     /* fund_tx/register_tx/update_tx/text_tx/forged_tx are already empty
      * (simnet_mint_txs moved their contents into the mined block and reset
