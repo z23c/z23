@@ -163,48 +163,137 @@ static int cbe_check_single_tx_block(void)
     return failures;
 }
 
-/* Check the merkle-root verdict for an n-leaf list (coinbase first,
- * then n-1 distinct non-coinbase txs, markers base..base+n-1). When
- * dup_final_pair is true the last leaf is overwritten with an explicit
- * duplicate of its neighbour, which must be rejected as CVE-2012-2459
- * malleability; when false the distinct leaves (legitimate odd-tree
- * padding included) must pass clean. Returns the number of failed
- * checks. */
-static int cbe_check_merkle_txid_list(size_t n, uint8_t base,
-                                      bool dup_final_pair,
-                                      const char *desc)
+/* Fill the leaf list of an n-leaf merkle case: tx[0] is the coinbase and
+ * tx[1..n-1] are distinct non-coinbase txs, markers base..base+n-1. */
+static void cbe_fill_merkle_leaves(struct transaction *txs, size_t n,
+                                   uint8_t base)
+{
+    cbe_coinbase_tx(&txs[0], base);
+    for (size_t i = 1; i < n; i++)
+        cbe_noncoinbase_tx(&txs[i], (uint8_t)(base + i));
+}
+
+/* 4 leaves, final pair an explicit duplicate: [A,B,C,C]. The merkle
+ * code pads the last (even-positioned) pair with an identical leaf
+ * at the base level of a 2-level tree, which the mutation detector
+ * flags. Coinbase first, rest non-coinbase; tx[3].hash == tx[2].hash. */
+static int cbe_check_dup_4_leaf(void)
 {
     int failures = 0;
     char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
     int  dos;
-    struct transaction txs[6];   /* largest list used below: 6 leaves */
-
-    cbe_coinbase_tx(&txs[0], base);
-    for (size_t i = 1; i < n; i++)
-        cbe_noncoinbase_tx(&txs[i], (uint8_t)(base + i));
-    if (dup_final_pair) {
-        /* C,C as the final base-level pair */
-        /* E,E as the final base-level pair */
-        txs[n - 1].hash = txs[n - 2].hash;
-    }
+    struct transaction txs[4];
+    cbe_fill_merkle_leaves(txs, 4, 0x10);
+    txs[3].hash = txs[2].hash;   /* C,C as the final base-level pair */
     struct block b;
-    cbe_build_block(&b, txs, n);
+    cbe_build_block(&b, txs, 4);
 
     reason[0] = '\xff'; dos = -1;
     struct zcl_result r =
         domain_consensus_check_block_merkle_root(
             &b, reason, sizeof(reason), &dos);
-    if (dup_final_pair) {
-        CBE_CHECK(desc,
-                  !r.ok &&
-                  r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_TXNS_DUP &&
-                  strcmp(reason, "bad-txns-duplicate") == 0 &&
-                  dos == 100);
-    } else {
-        CBE_CHECK(desc, r.ok && reason[0] == '\0' && dos == 0);
-    }
+    CBE_CHECK("4-leaf [A,B,C,C] -> bad-txns-duplicate dos=100",
+              !r.ok &&
+              r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_TXNS_DUP &&
+              strcmp(reason, "bad-txns-duplicate") == 0 &&
+              dos == 100);
 
-    for (size_t i = 0; i < n; i++) transaction_free(&txs[i]);
+    for (size_t i = 0; i < 4; i++) transaction_free(&txs[i]);
+    return failures;
+}
+
+/* 6 leaves, final pair an explicit duplicate: [A,B,C,D,E,E]. Three
+ * base-level pairs; the duplication is at the last. */
+static int cbe_check_dup_6_leaf(void)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
+    struct transaction txs[6];
+    cbe_fill_merkle_leaves(txs, 6, 0x20);
+    txs[5].hash = txs[4].hash;   /* E,E as the final base-level pair */
+    struct block b;
+    cbe_build_block(&b, txs, 6);
+
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result r =
+        domain_consensus_check_block_merkle_root(
+            &b, reason, sizeof(reason), &dos);
+    CBE_CHECK("6-leaf [A,B,C,D,E,E] -> bad-txns-duplicate dos=100",
+              !r.ok &&
+              r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_TXNS_DUP &&
+              strcmp(reason, "bad-txns-duplicate") == 0 &&
+              dos == 100);
+
+    for (size_t i = 0; i < 6; i++) transaction_free(&txs[i]);
+    return failures;
+}
+
+/* 3 leaves [A,B,C]: normal odd padding (the genuine last leaf C is
+ * duplicated by the tree-walk, which is NOT a malleability flag). */
+static int cbe_check_distinct_3_leaf(void)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
+    struct transaction txs[3];
+    cbe_fill_merkle_leaves(txs, 3, 0x30);
+    struct block b;
+    cbe_build_block(&b, txs, 3);
+
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result r =
+        domain_consensus_check_block_merkle_root(
+            &b, reason, sizeof(reason), &dos);
+    CBE_CHECK("3-leaf [A,B,C] distinct -> merkle OK (no false dup)",
+              r.ok && reason[0] == '\0' && dos == 0);
+
+    for (size_t i = 0; i < 3; i++) transaction_free(&txs[i]);
+    return failures;
+}
+
+/* 5 leaves [A,B,C,D,E] all distinct -> OK. */
+static int cbe_check_distinct_5_leaf(void)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
+    struct transaction txs[5];
+    cbe_fill_merkle_leaves(txs, 5, 0x40);
+    struct block b;
+    cbe_build_block(&b, txs, 5);
+
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result r =
+        domain_consensus_check_block_merkle_root(
+            &b, reason, sizeof(reason), &dos);
+    CBE_CHECK("5-leaf [A,B,C,D,E] distinct -> merkle OK (no false dup)",
+              r.ok && reason[0] == '\0' && dos == 0);
+
+    for (size_t i = 0; i < 5; i++) transaction_free(&txs[i]);
+    return failures;
+}
+
+/* 6 leaves [A,B,C,D,E,F] all distinct -> OK (the even-count sibling
+ * of the [A,B,C,D,E,E] positive case above). */
+static int cbe_check_distinct_6_leaf(void)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
+    struct transaction txs[6];
+    cbe_fill_merkle_leaves(txs, 6, 0x50);
+    struct block b;
+    cbe_build_block(&b, txs, 6);
+
+    reason[0] = '\xff'; dos = -1;
+    struct zcl_result r =
+        domain_consensus_check_block_merkle_root(
+            &b, reason, sizeof(reason), &dos);
+    CBE_CHECK("6-leaf [A,B,C,D,E,F] distinct -> merkle OK (no false dup)",
+              r.ok && reason[0] == '\0' && dos == 0);
+
+    for (size_t i = 0; i < 6; i++) transaction_free(&txs[i]);
     return failures;
 }
 
@@ -276,17 +365,8 @@ int test_check_block_edge(void)
      * 2. CVE-2012-2459 at deeper tree levels.
      * ================================================================ */
 
-    /* 4 leaves, final pair an explicit duplicate: [A,B,C,C]. The merkle
-     * code pads the last (even-positioned) pair with an identical leaf
-     * at the base level of a 2-level tree, which the mutation detector
-     * flags. Coinbase first, rest non-coinbase; tx[3].hash == tx[2].hash. */
-    failures += cbe_check_merkle_txid_list(
-        4, 0x10, true, "4-leaf [A,B,C,C] -> bad-txns-duplicate dos=100");
-
-    /* 6 leaves, final pair an explicit duplicate: [A,B,C,D,E,E]. Three
-     * base-level pairs; the duplication is at the last. */
-    failures += cbe_check_merkle_txid_list(
-        6, 0x20, true, "6-leaf [A,B,C,D,E,E] -> bad-txns-duplicate dos=100");
+    failures += cbe_check_dup_4_leaf();
+    failures += cbe_check_dup_6_leaf();
 
     /* ================================================================
      * 3. CVE negative controls — legitimate odd-tree padding MUST NOT
@@ -294,21 +374,9 @@ int test_check_block_edge(void)
      *    would fork the chain by rejecting valid blocks.
      * ================================================================ */
 
-    /* 3 leaves [A,B,C]: normal odd padding (the genuine last leaf C is
-     * duplicated by the tree-walk, which is NOT a malleability flag). */
-    failures += cbe_check_merkle_txid_list(
-        3, 0x30, false, "3-leaf [A,B,C] distinct -> merkle OK (no false dup)");
-
-    /* 5 leaves [A,B,C,D,E] all distinct -> OK. */
-    failures += cbe_check_merkle_txid_list(
-        5, 0x40, false,
-        "5-leaf [A,B,C,D,E] distinct -> merkle OK (no false dup)");
-
-    /* 6 leaves [A,B,C,D,E,F] all distinct -> OK (the even-count sibling
-     * of the [A,B,C,D,E,E] positive case above). */
-    failures += cbe_check_merkle_txid_list(
-        6, 0x50, false,
-        "6-leaf [A,B,C,D,E,F] distinct -> merkle OK (no false dup)");
+    failures += cbe_check_distinct_3_leaf();
+    failures += cbe_check_distinct_5_leaf();
+    failures += cbe_check_distinct_6_leaf();
 
     /* ================================================================
      * 4. Aggregate sigops boundary: MAX_BLOCK_SIGOPS == 20000.
