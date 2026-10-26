@@ -598,6 +598,99 @@ static int rs_check_parse_amount_guards(void)
     return failures;
 }
 
+/* listunspent decodes a heap script per DB row; rows it filters out (here by
+ * minconf) must release it too.  Leak witness: glibc live-heap bytes across
+ * repeated calls over rows that are all filtered.  The eligible call then
+ * proves the output is unchanged. */
+#if defined(__GLIBC__) && !defined(__SANITIZE_ADDRESS__)
+#include <malloc.h>
+enum { LU_ROWS = 64, LU_SCRIPT = 2048, LU_CALLS = 100 };
+
+static bool lu_seed_rows(struct node_db *ndb)
+{
+    uint8_t *script = zcl_calloc(1, LU_SCRIPT, "rpc-safety-script");
+    bool ok = script != NULL;
+    for (int i = 0; ok && i < LU_ROWS; i++) {
+        struct db_wallet_utxo u;
+        memset(&u, 0, sizeof(u));
+        memset(u.txid, 0x40 + (i & 0x3f), 32);
+        u.txid[0] = (uint8_t)i;
+        u.vout = (uint32_t)i;
+        u.value = 1000 + i;
+        u.script = script;
+        u.script_len = LU_SCRIPT;
+        u.height = 5;
+        ok = db_wallet_utxo_save(ndb, &u);
+    }
+    free(script);
+    return ok;
+}
+
+/* One listunspent call; minconf 0 means "no argument" (all rows eligible). */
+static bool lu_call(struct rpc_table *tbl, int minconf, size_t want_rows)
+{
+    struct json_value params, arg, result;
+    json_init(&params); json_set_array(&params);
+    json_init(&arg);
+    json_init(&result);
+    if (minconf > 0) {
+        json_set_int(&arg, minconf);
+        (void)json_push_back(&params, &arg);
+    }
+    bool ok = rpc_table_execute(tbl, "listunspent", &params, &result) &&
+              json_size(&result) == want_rows;
+    json_free(&params); json_free(&arg); json_free(&result);
+    return ok;
+}
+
+static bool lu_measure_leak(struct rpc_table *tbl, size_t *leaked)
+{
+    size_t before = 0;
+    bool ok = true;
+    for (int c = 0; ok && c < LU_CALLS + 1; c++) {
+        ok = lu_call(tbl, 1000, 0);
+        if (c == 0) before = mallinfo2().uordblks; /* after warm-up call */
+    }
+    size_t after = mallinfo2().uordblks;
+    *leaked = after > before ? after - before : 0;
+    return ok;
+}
+
+static int t_listunspent_frees_filtered_rows(void)
+{
+    printf("rpc_safety: listunspent frees rows it filters out... ");
+    ensure_rpc_warmup_finished_once();
+    struct wallet *wallet = zcl_calloc(1, sizeof(*wallet), "rpc-safety-wallet");
+    if (!wallet) { printf("FAIL (wallet allocation)\n"); return 1; }
+    wallet_init(wallet);
+    struct main_state ms;
+    build_unresolved_tip_state(&ms, 10);
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, ":memory:") && lu_seed_rows(&ndb);
+    struct rpc_table tbl;
+    rpc_table_init(&tbl);
+    wallet_rpc_context_set_base(wallet, &ms, "/tmp", NULL, NULL, NULL);
+    wallet_rpc_context_set_node_db(&ndb);
+    wallet_rpc_context_set_coins_tip(NULL);
+    register_wallet_rpc_commands(&tbl);
+    size_t leaked = 0;
+    ok = ok && lu_measure_leak(&tbl, &leaked);
+    /* A leak is CALLS*ROWS*SCRIPT = 13 MB; allow 256 KB of allocator noise. */
+    bool no_leak = leaked < 256 * 1024;
+    ok = ok && lu_call(&tbl, 0, LU_ROWS); /* eligible output unchanged */
+    if (!no_leak || !ok)
+        printf("(ok=%d leaked=%zu bytes) ", (int)ok, leaked);
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    wallet_rpc_context_set_node_db(NULL);
+    node_db_close(&ndb);
+    main_state_free(&ms); wallet_free(wallet); free(wallet);
+    if (ok && no_leak) { printf("OK\n"); return 0; }
+    printf("FAIL\n");
+    return 1;
+}
+#else
+#endif
+
 int test_rpc_safety(void);
 int test_rpc_safety(void)
 {
@@ -1881,6 +1974,9 @@ int test_rpc_safety(void)
     /* parse_amount arithmetic guards: see rs_check_parse_amount_guards. */
     failures += rs_check_parse_amount_guards();
     failures += rs_unlock_timeout_width();
+#if defined(__GLIBC__) && !defined(__SANITIZE_ADDRESS__)
+    failures += t_listunspent_frees_filtered_rows();
+#endif
 
     return failures;
 }

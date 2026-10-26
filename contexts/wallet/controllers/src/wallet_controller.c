@@ -356,8 +356,10 @@ static void listunspent_push_db_utxos(struct wallet_rpc_context *ctx,
         int h = listunspent_db_utxo_height(ctx->node_db, &utxos[i]);
         int confs = (h > 0) ? tip - h + 1 : 0;
         if (!listunspent_db_utxo_eligible(&utxos[i], confs, min_conf,
-                                          max_conf))
+                                          max_conf)) {
+            db_wallet_utxo_free(&utxos[i]);
             continue;
+        }
 
         struct json_value entry = {0};
         json_init(&entry);
