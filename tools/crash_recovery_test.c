@@ -1198,6 +1198,258 @@ static bool datadir_exists(const char *path)
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+/* Invariant counters printed by the run summary. */
+struct cr_tally {
+    int passes;
+    int height_fails;
+    int utxo_fails;
+    int commit_fails;
+    int overshoot_fails;
+    int harness_errors;
+};
+
+/* State the kill half of one iteration hands to the recovery half. */
+struct cr_iteration {
+    struct cr_snapshot before;  /* baseline snapshot taken before the kill */
+    struct cr_stamp    kill_at; /* when the node was killed */
+    int                exit_rc; /* process status when the loop must stop */
+};
+
+/* What one iteration half asks the loop to do next. */
+enum cr_iter_status {
+    CR_ITER_RUN,  /* continue with the next phase, or loop finished */
+    CR_ITER_NEXT, /* skip to the next iteration */
+    CR_ITER_STOP, /* stop the loop; iter->exit_rc holds the process status */
+};
+
+/* Count one failed verdict in the summary tally. */
+static void cr_tally_failure(struct cr_tally *tally, enum cr_verdict v)
+{
+    switch (v) {
+    case CR_HEIGHT_REGRESSED: tally->height_fails++; break;
+    case CR_UTXOS_DECREASED:  tally->utxo_fails++; break;
+    case CR_UTXO_ABOVE_TIP:   tally->overshoot_fails++; break;
+    default:                  tally->commit_fails++; break;
+    }
+}
+
+/* Process exit status from the summary counters: 1 on any invariant
+ * violation, 2 when nothing passed and a harness error occurred, else 0. */
+static int cr_exit_code(const struct cr_tally *tally)
+{
+    if (tally->height_fails || tally->utxo_fails || tally->commit_fails ||
+        tally->overshoot_fails)
+        return 1;
+    if (tally->harness_errors > 0 && tally->passes == 0) return 2;
+    return 0;
+}
+
+/* Bring a bootstrap run to a mined seed: create the datadir when missing,
+ * spawn the node, wait for its RPC, and mine the seed blocks. Returns 0
+ * with *seed_pid left running for the caller to kill, or the process exit
+ * status with the FAIL receipt row already written. */
+static int cr_bootstrap_start(const struct cr_config *cfg, struct cr_run *run,
+                              pid_t *seed_pid)
+{
+    *seed_pid = -1;
+    if (!datadir_exists(cfg->datadir)) {
+        if (mkdir(cfg->datadir, 0700) != 0 && errno != EEXIST) {
+            fprintf(stderr, "crash_recovery_test: cannot create bootstrap "
+                            "datadir %s: %s\n",
+                    cfg->datadir, strerror(errno));
+            return cr_receipt_exit(cfg, run, "datadir_create_failed", 2);
+        }
+    }
+    printf("crash_recovery_test: bootstrap — seeding %d regtest "
+           "block(s)...\n", cfg->seed_blocks);
+    *seed_pid = cr_spawn_node(cfg);
+    if (*seed_pid < 0 || !cr_wait_for_rpc_ready(cfg, 60000)) {
+        fprintf(stderr, "crash_recovery_test: bootstrap node never came "
+                        "up — harness error\n");
+        if (*seed_pid > 0) cr_kill_node(*seed_pid);
+        return cr_receipt_exit(cfg, run, "node_never_up", 2);
+    }
+    if (!cr_generate(cfg, cfg->seed_blocks)) {
+        fprintf(stderr, "crash_recovery_test: bootstrap `generate %d` "
+                        "failed — harness error\n", cfg->seed_blocks);
+        cr_kill_node(*seed_pid);
+        return cr_receipt_exit(cfg, run, "generate_failed", 2);
+    }
+    return 0;
+}
+
+/* Run one iteration up to the kill: spawn the node, wait for RPC, read the
+ * baseline snapshot, enforce the seeded-height teeth floor, mine the
+ * optional pre-kill block, sleep the random delay, then kill the node. */
+static enum cr_iter_status cr_start_iteration(struct cr_config *cfg,
+                                              struct cr_run *run,
+                                              struct cr_tally *tally,
+                                              uint64_t *rng, int it,
+                                              struct cr_iteration *iter)
+{
+    pid_t pid = cr_spawn_node(cfg);
+    if (pid < 0) {
+        fprintf(stderr, "iter %d: fork failed: %s\n", it, strerror(errno));
+        tally->harness_errors++;
+        return CR_ITER_NEXT;
+    }
+
+    /* Wait for RPC to come up — give it up to 30s after SIGKILL
+     * since bg validation can replay a slow WAL. */
+    if (!cr_wait_for_rpc_ready(cfg, 30000)) {
+        fprintf(stderr, "iter %d: RPC never came up — harness error\n", it);
+        cr_kill_node(pid);
+        tally->harness_errors++;
+        return CR_ITER_NEXT;
+    }
+
+    struct cr_snapshot before;
+    bool have_before = cr_read_snapshot(cfg, &before);
+    if (!have_before) {
+        fprintf(stderr, "iter %d: baseline snapshot failed\n", it);
+        cr_kill_node(pid);
+        tally->harness_errors++;
+        return CR_ITER_NEXT;
+    }
+
+    /* WS-C teeth: the recovery comparison only proves something if the node
+     * holds a REAL, positive tip. Two ways it can be vacuous:
+     *   (a) pre-seeded mode with a non-positive seed (seeded_height <= 0);
+     *   (b) bootstrap mode where the seed mined a real height but the
+     *       RESTARTED node boots uninitialized (before.block_count <= 0) —
+     *       the owner-gated regtest reducer boot-init (MVP.md #7): the node
+     *       comes back at h=-1 across a restart. cfg.seeded_height is
+     *       already the seed (e.g. 30) here, so a seeded_height<=0 check
+     *       ALONE misses this case and cr_compare would (wrongly) score the
+     *       h=-1 restart CR_HEIGHT_REGRESSED and RED the shared job.
+     * Either is a KNOWN owner-gated blocker, NOT a durability regression of
+     * this harness. Teeth still bite for a POSITIVE-but-below-floor recovery
+     * (before>0 && after<seeded_height) via cr_compare. Honest middle: never
+     * a vacuous green (we stop), but exit 0 by default so we do NOT RED the
+     * shared push/PR mvp-spawn job for a known issue; ZCL_CRASH_REQUIRE_TEETH
+     * =1 promotes it to a HARD FAIL for the dedicated opt-in teeth job. When
+     * the boot-init is fixed (before>0), this guard stops firing and the
+     * real teeth engage automatically. */
+    if (cfg->seeded_height == 0)
+        cfg->seeded_height = before.block_count;
+    if (cfg->seeded_height <= 0 || before.block_count <= 0) {
+        fprintf(stderr,
+            "iter %d: KNOWN BLOCKED (owner-gated reducer boot-init, MVP.md "
+            "#7) — restarted node baseline tip is %" PRId64 " (seed floor "
+            "%" PRId64 "); the regtest node boots h=-1 / mined blocks are "
+            "not durable across restart, so the kill/restart recovery teeth "
+            "cannot be exercised. Refusing a toothless loop. This is NOT a "
+            "vacuous green and NOT a regression in this harness. "
+            "(ZCL_CRASH_REQUIRE_TEETH=1 -> HARD FAIL in the opt-in teeth "
+            "job.)\n",
+            it, before.block_count, cfg->seeded_height);
+        cr_kill_node(pid);
+        /* teeth job (ZCL_CRASH_REQUIRE_TEETH=1) FAILs; the shared job stays a SKIP witness */
+        iter->exit_rc = cr_receipt_exit(cfg, run, "owner-gated reducer boot-init (docs/quality/MVP.md #7): restarted node baseline tip is not positive", cr_teeth_rc());
+        return CR_ITER_STOP;
+    }
+
+    /* Mine before the kill to exercise recovery of an advanced durable
+     * tip. This synchronous RPC completes before the delay; it does not
+     * establish that SIGKILL interrupted a block transaction. */
+    if (cfg->regtest)
+        (void)cr_generate(cfg, 1);
+
+    int delay = rand_range(rng, cfg->min_delay_ms, cfg->max_delay_ms);
+    sleep_ms(delay);
+    iter->kill_at = cr_stamp_now();
+
+    cr_kill_node(pid);
+    if (cfg->verbose)
+        printf("iter %d: killed after %d ms (before: h=%" PRId64
+               " u=%" PRId64 ")\n",
+               it, delay, before.block_count, before.utxo_count);
+    iter->before = before;
+    return CR_ITER_RUN;
+}
+
+/* Run the recovery half of one iteration: restart the node, read the
+ * post-restart snapshot, compare it with the baseline, probe the canonical
+ * coins, and record the verdict in the tally and the run. */
+static enum cr_iter_status cr_check_recovered(struct cr_config *cfg,
+                                              struct cr_run *run,
+                                              struct cr_tally *tally,
+                                              int it,
+                                              const struct cr_iteration *iter)
+{
+    /* Restart and re-check. */
+    pid_t pid = cr_spawn_node(cfg);
+    if (pid < 0 || !cr_wait_for_rpc_ready(cfg, 60000)) {
+        fprintf(stderr, "iter %d: restart failed — harness error\n", it);
+        if (pid > 0) cr_kill_node(pid);
+        tally->harness_errors++;
+        return CR_ITER_NEXT;
+    }
+
+    struct cr_snapshot after;
+    if (!cr_read_snapshot(cfg, &after)) {
+        fprintf(stderr, "iter %d: post-restart snapshot failed\n", it);
+        cr_kill_node(pid);
+        tally->harness_errors++;
+        return CR_ITER_NEXT;
+    }
+
+    enum cr_verdict v = cr_compare(&iter->before, &after, cfg->seeded_height);
+
+    int over = cr_count_utxos_above_tip(cfg, &after);
+    if (over < 0) {
+        fprintf(stderr, "iter %d: canonical coins observation unavailable or inconsistent\n", it);
+        cr_kill_node(pid);
+        tally->harness_errors++;
+        return CR_ITER_NEXT;
+    }
+    if (over > 0 && v == CR_OK)
+        v = CR_UTXO_ABOVE_TIP;
+
+    if (v == CR_OK) {
+        tally->passes++;
+        cr_run_note(run, iter->kill_at, cr_stamp_now());
+        if (cfg->verbose)
+            printf("iter %d: OK (after: h=%" PRId64 " u=%" PRId64
+                   " over=%d)\n",
+                   it, after.block_count, after.utxo_count, over);
+    } else {
+        cr_tally_failure(tally, v);
+        fprintf(stderr,
+                "iter %d: FAIL %s\n"
+                "  before: h=%" PRId64 " u=%" PRId64 " c=%s\n"
+                "  after:  h=%" PRId64 " u=%" PRId64 " c=%s over=%d\n",
+                it, cr_verdict_name(v),
+                iter->before.block_count, iter->before.utxo_count, iter->before.commitment,
+                after.block_count, after.utxo_count, after.commitment, over);
+    }
+
+    cr_kill_node(pid);
+    return CR_ITER_RUN;
+}
+
+/* Run every kill/restart iteration. Returns CR_ITER_STOP with *exit_rc set
+ * when an iteration ends the run, CR_ITER_RUN when the loop completed. */
+static enum cr_iter_status cr_kill_restart_loop(struct cr_config *cfg,
+                                                struct cr_run *run,
+                                                struct cr_tally *tally,
+                                                int *exit_rc)
+{
+    uint64_t rng = cfg->seed ? cfg->seed : 0x9E3779B97F4A7C15ULL;
+    for (int it = 1; it <= cfg->iterations; it++) {
+        struct cr_iteration iter = {0};
+        enum cr_iter_status s = cr_start_iteration(cfg, run, tally, &rng, it,
+                                                   &iter);
+        if (s == CR_ITER_RUN)
+            s = cr_check_recovered(cfg, run, tally, it, &iter);
+        if (s == CR_ITER_STOP) {
+            *exit_rc = iter.exit_rc;
+            return CR_ITER_STOP;
+        }
+    }
+    return CR_ITER_RUN;
+}
+
 int main(int argc, char **argv)
 {
     if (cr_selftest_requested(argc, argv)) return cr_selftest_run(argc, argv);
@@ -1227,29 +1479,9 @@ int main(int argc, char **argv)
          * node once, mine seed_blocks so the chainstate has a non-empty
          * UTXO set to crash during, then kill cleanly and fall through
          * into the standard loop below. */
-        if (!datadir_exists(cfg.datadir)) {
-            if (mkdir(cfg.datadir, 0700) != 0 && errno != EEXIST) {
-                fprintf(stderr, "crash_recovery_test: cannot create bootstrap "
-                                "datadir %s: %s\n",
-                        cfg.datadir, strerror(errno));
-                return cr_receipt_exit(&cfg, &run, "datadir_create_failed", 2);
-            }
-        }
-        printf("crash_recovery_test: bootstrap — seeding %d regtest "
-               "block(s)...\n", cfg.seed_blocks);
-        pid_t seed_pid = cr_spawn_node(&cfg);
-        if (seed_pid < 0 || !cr_wait_for_rpc_ready(&cfg, 60000)) {
-            fprintf(stderr, "crash_recovery_test: bootstrap node never came "
-                            "up — harness error\n");
-            if (seed_pid > 0) cr_kill_node(seed_pid);
-            return cr_receipt_exit(&cfg, &run, "node_never_up", 2);
-        }
-        if (!cr_generate(&cfg, cfg.seed_blocks)) {
-            fprintf(stderr, "crash_recovery_test: bootstrap `generate %d` "
-                            "failed — harness error\n", cfg.seed_blocks);
-            cr_kill_node(seed_pid);
-            return cr_receipt_exit(&cfg, &run, "generate_failed", 2);
-        }
+        pid_t seed_pid;
+        int bsrc = cr_bootstrap_start(&cfg, &run, &seed_pid);
+        if (bsrc != 0) return bsrc;
         /* Verify the seed actually advanced the tip to a REAL, durable height
          * before we trust the kill/restart loop. On a build where the
          * `generate` RPC cannot durably seed (regtest reducer boots h=-1 /
@@ -1311,155 +1543,20 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    uint64_t rng = cfg.seed ? cfg.seed : 0x9E3779B97F4A7C15ULL;
-    int passes = 0, height_fails = 0, utxo_fails = 0, commit_fails = 0;
-    int overshoot_fails = 0, harness_errors = 0;
-
-    for (int it = 1; it <= cfg.iterations; it++) {
-        pid_t pid = cr_spawn_node(&cfg);
-        if (pid < 0) {
-            fprintf(stderr, "iter %d: fork failed: %s\n", it, strerror(errno));
-            harness_errors++;
-            continue;
-        }
-
-        /* Wait for RPC to come up — give it up to 30s after SIGKILL
-         * since bg validation can replay a slow WAL. */
-        if (!cr_wait_for_rpc_ready(&cfg, 30000)) {
-            fprintf(stderr, "iter %d: RPC never came up — harness error\n", it);
-            cr_kill_node(pid);
-            harness_errors++;
-            continue;
-        }
-
-        struct cr_snapshot before;
-        bool have_before = cr_read_snapshot(&cfg, &before);
-        if (!have_before) {
-            fprintf(stderr, "iter %d: baseline snapshot failed\n", it);
-            cr_kill_node(pid);
-            harness_errors++;
-            continue;
-        }
-
-        /* WS-C teeth: the recovery comparison only proves something if the node
-         * holds a REAL, positive tip. Two ways it can be vacuous:
-         *   (a) pre-seeded mode with a non-positive seed (seeded_height <= 0);
-         *   (b) bootstrap mode where the seed mined a real height but the
-         *       RESTARTED node boots uninitialized (before.block_count <= 0) —
-         *       the owner-gated regtest reducer boot-init (MVP.md #7): the node
-         *       comes back at h=-1 across a restart. cfg.seeded_height is
-         *       already the seed (e.g. 30) here, so a seeded_height<=0 check
-         *       ALONE misses this case and cr_compare would (wrongly) score the
-         *       h=-1 restart CR_HEIGHT_REGRESSED and RED the shared job.
-         * Either is a KNOWN owner-gated blocker, NOT a durability regression of
-         * this harness. Teeth still bite for a POSITIVE-but-below-floor recovery
-         * (before>0 && after<seeded_height) via cr_compare. Honest middle: never
-         * a vacuous green (we stop), but exit 0 by default so we do NOT RED the
-         * shared push/PR mvp-spawn job for a known issue; ZCL_CRASH_REQUIRE_TEETH
-         * =1 promotes it to a HARD FAIL for the dedicated opt-in teeth job. When
-         * the boot-init is fixed (before>0), this guard stops firing and the
-         * real teeth engage automatically. */
-        if (cfg.seeded_height == 0)
-            cfg.seeded_height = before.block_count;
-        if (cfg.seeded_height <= 0 || before.block_count <= 0) {
-            fprintf(stderr,
-                "iter %d: KNOWN BLOCKED (owner-gated reducer boot-init, MVP.md "
-                "#7) — restarted node baseline tip is %" PRId64 " (seed floor "
-                "%" PRId64 "); the regtest node boots h=-1 / mined blocks are "
-                "not durable across restart, so the kill/restart recovery teeth "
-                "cannot be exercised. Refusing a toothless loop. This is NOT a "
-                "vacuous green and NOT a regression in this harness. "
-                "(ZCL_CRASH_REQUIRE_TEETH=1 -> HARD FAIL in the opt-in teeth "
-                "job.)\n",
-                it, before.block_count, cfg.seeded_height);
-            cr_kill_node(pid);
-            /* teeth job (ZCL_CRASH_REQUIRE_TEETH=1) FAILs; the shared job stays a SKIP witness */
-            return cr_receipt_exit(&cfg, &run, "owner-gated reducer boot-init (docs/quality/MVP.md #7): restarted node baseline tip is not positive", cr_teeth_rc());
-        }
-
-        /* Mine before the kill to exercise recovery of an advanced durable
-         * tip. This synchronous RPC completes before the delay; it does not
-         * establish that SIGKILL interrupted a block transaction. */
-        if (cfg.regtest)
-            (void)cr_generate(&cfg, 1);
-
-        int delay = rand_range(&rng, cfg.min_delay_ms, cfg.max_delay_ms);
-        sleep_ms(delay);
-        struct cr_stamp kill_at = cr_stamp_now();
-
-        cr_kill_node(pid);
-        if (cfg.verbose)
-            printf("iter %d: killed after %d ms (before: h=%" PRId64
-                   " u=%" PRId64 ")\n",
-                   it, delay, before.block_count, before.utxo_count);
-
-        /* Restart and re-check. */
-        pid = cr_spawn_node(&cfg);
-        if (pid < 0 || !cr_wait_for_rpc_ready(&cfg, 60000)) {
-            fprintf(stderr, "iter %d: restart failed — harness error\n", it);
-            if (pid > 0) cr_kill_node(pid);
-            harness_errors++;
-            continue;
-        }
-
-        struct cr_snapshot after;
-        if (!cr_read_snapshot(&cfg, &after)) {
-            fprintf(stderr, "iter %d: post-restart snapshot failed\n", it);
-            cr_kill_node(pid);
-            harness_errors++;
-            continue;
-        }
-
-        enum cr_verdict v = cr_compare(&before, &after, cfg.seeded_height);
-
-        int over = cr_count_utxos_above_tip(&cfg, &after);
-        if (over < 0) {
-            fprintf(stderr, "iter %d: canonical coins observation unavailable or inconsistent\n", it);
-            cr_kill_node(pid);
-            harness_errors++;
-            continue;
-        }
-        if (over > 0 && v == CR_OK)
-            v = CR_UTXO_ABOVE_TIP;
-
-        if (v == CR_OK) {
-            passes++;
-            cr_run_note(&run, kill_at, cr_stamp_now());
-            if (cfg.verbose)
-                printf("iter %d: OK (after: h=%" PRId64 " u=%" PRId64
-                       " over=%d)\n",
-                       it, after.block_count, after.utxo_count, over);
-        } else {
-            switch (v) {
-            case CR_HEIGHT_REGRESSED: height_fails++; break;
-            case CR_UTXOS_DECREASED:  utxo_fails++; break;
-            case CR_UTXO_ABOVE_TIP:   overshoot_fails++; break;
-            default:                  commit_fails++; break;
-            }
-            fprintf(stderr,
-                    "iter %d: FAIL %s\n"
-                    "  before: h=%" PRId64 " u=%" PRId64 " c=%s\n"
-                    "  after:  h=%" PRId64 " u=%" PRId64 " c=%s over=%d\n",
-                    it, cr_verdict_name(v),
-                    before.block_count, before.utxo_count, before.commitment,
-                    after.block_count, after.utxo_count, after.commitment, over);
-        }
-
-        cr_kill_node(pid);
-    }
+    struct cr_tally tally = {0};
+    int loop_rc = 0;
+    if (cr_kill_restart_loop(&cfg, &run, &tally, &loop_rc) == CR_ITER_STOP)
+        return loop_rc;
 
     printf("\n=== crash_recovery_test summary ===\n");
     printf("  iterations:       %d\n", cfg.iterations);
-    printf("  passes:           %d\n", passes);
-    printf("  height_regress:   %d\n", height_fails);
-    printf("  utxo_decrease:    %d\n", utxo_fails);
-    printf("  commitment_drift: %d\n", commit_fails);
-    printf("  utxo_above_tip:   %d\n", overshoot_fails);
-    printf("  harness_errors:   %d\n", harness_errors);
+    printf("  passes:           %d\n", tally.passes);
+    printf("  height_regress:   %d\n", tally.height_fails);
+    printf("  utxo_decrease:    %d\n", tally.utxo_fails);
+    printf("  commitment_drift: %d\n", tally.commit_fails);
+    printf("  utxo_above_tip:   %d\n", tally.overshoot_fails);
+    printf("  harness_errors:   %d\n", tally.harness_errors);
 
     cr_receipt_emit(&cfg, &run);
-    if (height_fails || utxo_fails || commit_fails || overshoot_fails)
-        return 1;
-    if (harness_errors > 0 && passes == 0) return 2;
-    return 0;
+    return cr_exit_code(&tally);
 }

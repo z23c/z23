@@ -1913,7 +1913,6 @@ tools/core_seal.c:path_reject_reason:19
 tools/core_seal.c:read_and_hash:27
 tools/core_seal.c:read_manifest:27
 tools/core_seal.c:verify_sections:20
-tools/crash_recovery_test.c:main:45
 tools/dev/dev_activation.c:dev_activation_canon:27
 tools/dev/dev_activation.c:dev_activation_link_generation:19
 tools/dev/dev_activation.c:dev_activation_sha256_file:16
