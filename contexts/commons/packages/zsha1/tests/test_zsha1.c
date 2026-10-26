@@ -12,6 +12,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+static FILE *cli_source, *cli_sink;
+#undef stdin
+#undef stdout
+#define stdin cli_source
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define main zsha1_cli_main
+#include "../app/main.c"
+#undef main
+#undef printf
+#undef stdout
+#undef stdin
+
 static int failures = 0;
 
 #define CHECK(cond)                                                     \
@@ -161,8 +174,89 @@ static void test_context_reuse_after_final(void)
     CHECK(strcmp(g1, "a9993e364706816aba3e25717850c26c9cd0d89d") == 0);
 }
 
+static int cli_case(FILE *source, FILE *output, int count, char **args,
+                    int status, const char *want)
+{
+    cli_source = source;
+    cli_sink = output;
+    if (zsha1_cli_main(count, args) != status) return 1;
+    if (!want) return 0;
+    rewind(output);
+    char got[256] = {0};
+    size_t n = fread(got, 1, sizeof got, output);
+    return ferror(output) || n != strlen(want) || memcmp(got, want, n) != 0;
+}
+
+static int cli_cleanup(FILE *source, FILE *output, int bad)
+{
+    if (source && fclose(source) != 0) bad = 1;
+    if (output) (void)fclose(output);
+    return bad;
+}
+
+static int cli_output_case(int count, char **args, const char *want)
+{
+    FILE *source = tmpfile(), *output = tmpfile();
+    int bad = 1;
+    if (!source || !output) goto cleanup;
+    if (fputs("abc", source) < 0 || fflush(source) != 0) goto cleanup;
+    rewind(source);
+    if (cli_case(source, output, count, args, 0, want)) goto cleanup;
+    if (fclose(output) != 0) { output = NULL; goto cleanup; }
+#if defined(_WIN32)
+    output = fopen("NUL", "r");
+#else
+    output = fopen("/dev/null", "r");
+#endif
+    if (!output) goto cleanup;
+    rewind(source);
+    if (cli_case(source, output, count, args, 1, NULL)) goto cleanup;
+    if (fclose(output) != 0) { output = NULL; goto cleanup; }
+    output = NULL;
+#if defined(__linux__)
+    output = fopen("/dev/full", "w");
+    if (!output) goto cleanup;
+    char buffer[4096];
+    if (setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+    rewind(source);
+    if (cli_case(source, output, count, args, 1, NULL)) goto cleanup;
+    (void)fclose(output);
+    output = NULL;
+#endif
+    bad = 0;
+cleanup:
+    return cli_cleanup(source, output, bad);
+}
+
+static void test_cli_output(void)
+{
+    char *stdin_args[] = {"zsha1", NULL};
+    CHECK(cli_output_case(1, stdin_args,
+          "a9993e364706816aba3e25717850c26c9cd0d89d\n") == 0);
+#if defined(_WIN32)
+    char *path = "NUL";
+#else
+    char *path = "/dev/null";
+#endif
+    char *args[] = {"zsha1", path, path, NULL};
+    char line[100], want[200];
+    snprintf(line, sizeof line, "%s  %s\n",
+             "da39a3ee5e6b4b0d3255bfef95601890afd80709", path);
+    CHECK(cli_output_case(2, args, line) == 0);
+    snprintf(want, sizeof want, "%s%s", line, line);
+    CHECK(cli_output_case(3, args, want) == 0);
+    FILE *source = fopen(path, "w"), *output = tmpfile();
+    if (source && output) {
+        CHECK(cli_case(source, output, 1, stdin_args, 1, "") == 0);
+        CHECK(ferror(source) != 0);
+    } else CHECK(false);
+    if (source) CHECK(fclose(source) == 0);
+    if (output) CHECK(fclose(output) == 0);
+}
+
 int main(void)
 {
+    test_cli_output();
     test_rfc3174_suite();
     test_million_a();
     test_streaming_equals_oneshot();

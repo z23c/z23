@@ -9,7 +9,7 @@
   "dependencies": [
     {
       "name": "zsha1/zsha1",
-      "root": "50b75f37b3b6e0e9d5077d3290001dac75bc8754523c147e3d24510712b568e3",
+      "root": "ac2439ce46505d82616c16db7a3a2690f249d4fd5a379ea0ebf57d4b4ec2792b",
       "semver": "0.1.0"
     }
   ],
