@@ -5,7 +5,25 @@
 #include "core/serialize.h"
 #include "util/safe_alloc.h"
 
-int test_primitives(void)
+static bool primitives_tx_alloc_zero_both_unset(bool ok, const struct transaction *tx)
+{
+    return ok && tx->vin == NULL && tx->vout == NULL &&
+           tx->num_vin == 0 && tx->num_vout == 0;
+}
+
+static bool primitives_tx_alloc_zero_vout_only(bool ok, const struct transaction *tx)
+{
+    return ok && tx->vin == NULL && tx->vout != NULL &&
+           tx->num_vin == 0 && tx->num_vout == 2;
+}
+
+static bool primitives_tx_alloc_zero_vin_only(bool ok, const struct transaction *tx)
+{
+    return ok && tx->vin != NULL && tx->vout == NULL &&
+           tx->num_vin == 3 && tx->num_vout == 0;
+}
+
+static int primitives_transaction_init_zeroes(void)
 {
     int failures = 0;
 
@@ -26,6 +44,11 @@ int test_primitives(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int primitives_transaction_free_zeroed_twice(void)
+{
     printf("transaction_free is safe on zeroed tx... ");
     {
         struct transaction tx;
@@ -34,6 +57,13 @@ int test_primitives(void)
         transaction_free(&tx);
         printf("OK\n");
     }
+
+    return 0;
+}
+
+static int primitives_transaction_alloc_vin_vout(void)
+{
+    int failures = 0;
 
     printf("transaction_alloc allocates vin/vout... ");
     {
@@ -52,6 +82,13 @@ int test_primitives(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int primitives_transaction_alloc_zero_size(void)
+{
+    int failures = 0;
+
     printf("transaction_alloc zero-size leaves pointers NULL (no calloc(0) stub leak)... ");
     {
         /* transaction_alloc(_, _, 0) must not leave a calloc(0,_) 1-byte
@@ -59,20 +96,17 @@ int test_primitives(void)
         struct transaction a;
         transaction_init(&a);
         bool ok_a = transaction_alloc(&a, 0, 0);
-        bool clean_a = ok_a && a.vin == NULL && a.vout == NULL &&
-                       a.num_vin == 0 && a.num_vout == 0;
+        bool clean_a = primitives_tx_alloc_zero_both_unset(ok_a, &a);
 
         struct transaction b;
         transaction_init(&b);
         bool ok_b = transaction_alloc(&b, 0, 2);
-        bool clean_b = ok_b && b.vin == NULL && b.vout != NULL &&
-                       b.num_vin == 0 && b.num_vout == 2;
+        bool clean_b = primitives_tx_alloc_zero_vout_only(ok_b, &b);
 
         struct transaction c;
         transaction_init(&c);
         bool ok_c = transaction_alloc(&c, 3, 0);
-        bool clean_c = ok_c && c.vin != NULL && c.vout == NULL &&
-                       c.num_vin == 3 && c.num_vout == 0;
+        bool clean_c = primitives_tx_alloc_zero_vin_only(ok_c, &c);
 
         /* Simulate the deserializer overwrite: a NULL→new assignment is
          * allocation-neutral. */
@@ -89,6 +123,13 @@ int test_primitives(void)
         transaction_free(&b);
         transaction_free(&c);
     }
+
+    return failures;
+}
+
+static int primitives_coinbase_true_for_coinbase(void)
+{
+    int failures = 0;
 
     printf("transaction_is_coinbase true for coinbase tx... ");
     {
@@ -108,6 +149,13 @@ int test_primitives(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int primitives_coinbase_false_for_regular(void)
+{
+    int failures = 0;
+
     printf("transaction_is_coinbase false for regular tx... ");
     {
         struct transaction tx;
@@ -125,6 +173,13 @@ int test_primitives(void)
         }
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int primitives_coinbase_false_for_multi_input(void)
+{
+    int failures = 0;
 
     printf("transaction_is_coinbase false for multi-input tx... ");
     {
@@ -144,6 +199,13 @@ int test_primitives(void)
         }
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int primitives_transaction_serialize_roundtrip(void)
+{
+    int failures = 0;
 
     printf("transaction_serialize + deserialize roundtrip... ");
     {
@@ -198,6 +260,13 @@ int test_primitives(void)
         stream_free(&s);
     }
 
+    return failures;
+}
+
+static int primitives_transaction_compute_hash_nonzero(void)
+{
+    int failures = 0;
+
     printf("transaction_compute_hash produces non-zero hash... ");
     {
         struct transaction tx;
@@ -222,6 +291,13 @@ int test_primitives(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int primitives_transaction_value_out_sums(void)
+{
+    int failures = 0;
+
     printf("transaction_get_value_out sums outputs... ");
     {
         struct transaction tx;
@@ -240,6 +316,13 @@ int test_primitives(void)
         }
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int primitives_block_header_init_and_null(void)
+{
+    int failures = 0;
 
     printf("block_header_init sets defaults... ");
     {
@@ -269,6 +352,13 @@ int test_primitives(void)
         }
     }
 
+    return failures;
+}
+
+static int primitives_block_header_get_hash_nonzero(void)
+{
+    int failures = 0;
+
     printf("block_header_get_hash produces non-zero hash... ");
     {
         struct block_header h;
@@ -289,6 +379,13 @@ int test_primitives(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int primitives_block_header_serialize_roundtrip(void)
+{
+    int failures = 0;
 
     printf("block_header_serialize + deserialize roundtrip... ");
     {
@@ -330,6 +427,13 @@ int test_primitives(void)
         stream_free(&s);
     }
 
+    return failures;
+}
+
+static int primitives_block_locator_init_zeroes(void)
+{
+    int failures = 0;
+
     printf("block_locator_init zeroes state... ");
     {
         struct block_locator loc;
@@ -342,6 +446,13 @@ int test_primitives(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int primitives_block_locator_roundtrip_and_empty_free(void)
+{
+    int failures = 0;
 
     printf("block_locator_serialize + deserialize roundtrip... ");
     {
@@ -390,6 +501,13 @@ int test_primitives(void)
         printf("OK\n");
     }
 
+    return failures;
+}
+
+static int primitives_outpoint_null(void)
+{
+    int failures = 0;
+
     printf("outpoint_set_null + outpoint_is_null... ");
     {
         struct outpoint op;
@@ -402,6 +520,13 @@ int test_primitives(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int primitives_outpoint_non_null(void)
+{
+    int failures = 0;
 
     printf("outpoint_is_null false for non-null... ");
     {
@@ -416,6 +541,13 @@ int test_primitives(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int primitives_outpoint_cmp_orders(void)
+{
+    int failures = 0;
 
     printf("outpoint_cmp ordering... ");
     {
@@ -437,6 +569,13 @@ int test_primitives(void)
         }
     }
 
+    return failures;
+}
+
+static int primitives_tx_out_null(void)
+{
+    int failures = 0;
+
     printf("tx_out_set_null + tx_out_is_null... ");
     {
         struct tx_out out;
@@ -449,6 +588,13 @@ int test_primitives(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int primitives_transaction_copy_independent(void)
+{
+    int failures = 0;
 
     printf("transaction_copy produces independent copy... ");
     {
@@ -475,6 +621,34 @@ int test_primitives(void)
         transaction_free(&src);
         transaction_free(&dst);
     }
+
+    return failures;
+}
+
+int test_primitives(void)
+{
+    int failures = 0;
+
+    failures += primitives_transaction_init_zeroes();
+    failures += primitives_transaction_free_zeroed_twice();
+    failures += primitives_transaction_alloc_vin_vout();
+    failures += primitives_transaction_alloc_zero_size();
+    failures += primitives_coinbase_true_for_coinbase();
+    failures += primitives_coinbase_false_for_regular();
+    failures += primitives_coinbase_false_for_multi_input();
+    failures += primitives_transaction_serialize_roundtrip();
+    failures += primitives_transaction_compute_hash_nonzero();
+    failures += primitives_transaction_value_out_sums();
+    failures += primitives_block_header_init_and_null();
+    failures += primitives_block_header_get_hash_nonzero();
+    failures += primitives_block_header_serialize_roundtrip();
+    failures += primitives_block_locator_init_zeroes();
+    failures += primitives_block_locator_roundtrip_and_empty_free();
+    failures += primitives_outpoint_null();
+    failures += primitives_outpoint_non_null();
+    failures += primitives_outpoint_cmp_orders();
+    failures += primitives_tx_out_null();
+    failures += primitives_transaction_copy_independent();
 
     return failures;
 }
