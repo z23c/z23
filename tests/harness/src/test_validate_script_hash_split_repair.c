@@ -492,6 +492,188 @@ static struct block_index *vsh_prod_insert(struct main_state *ms,
     return bi;
 }
 
+/* One stage_cursor write. Rows run in table order; a null db or a failed
+ * write skips the rest, matching a `db && set && set` chain. */
+struct vsh_cursor_spec {
+    const char *name;
+    int64_t at;
+};
+
+static const struct vsh_cursor_spec vsh_anchor_cursors[] = {
+    { "validate_headers", TOP_H + 1 },
+    { "script_validate", TOP_H + 1 },
+    { "body_persist", TOP_H + 1 },
+    { "proof_validate", TOP_H + 1 },
+    { "utxo_apply", TOP_H + 1 },
+    { "tip_finalize", TOP_H },
+};
+
+static const struct vsh_cursor_spec vsh_prod_cursors[] = {
+    { "validate_headers", TOP_H + 1 },
+    { "body_fetch", TOP_H + 1 },
+    { "body_persist", TOP_H + 1 },
+    { "script_validate", TOP_H + 1 },
+    { "proof_validate", TOP_H + 1 },
+    { "utxo_apply", TOP_H + 1 },
+    { "tip_finalize", TOP_H },
+};
+
+static const struct vsh_cursor_spec vsh_reseed_cursors[] = {
+    { "script_validate", TOP_H + 1 },
+    { "proof_validate", TOP_H + 1 },
+    { "tip_finalize", TOP_H },
+};
+
+static bool vsh_apply_cursors(sqlite3 *db, const struct vsh_cursor_spec *rows,
+                              int n)
+{
+    bool ok = db != NULL;
+    for (int i = 0; i < n; i++)
+        ok = ok && vsh_set_cursor(db, rows[i].name, rows[i].at);
+    return ok;
+}
+
+static bool vsh_schema_with_coin_authority(sqlite3 *db,
+                                           bool (*build)(sqlite3 *))
+{
+    return db && build(db) && coins_kv_ensure_schema(db);
+}
+
+/* One height of the six ok=1 logs. Script block_hash is corrupt at the split. */
+static bool vsh_put_height_logs(sqlite3 *db, int32_t h)
+{
+    return vsh_put_vh(db, h)                 /* canonical header */
+        && vsh_put_sv(db, h, h == SPLIT_H)   /* corrupt block_hash @ A+3 */
+                                             /* divergent @ A+3   */
+        && vsh_put_bp(db, h)
+        && vsh_put_pv(db, h)
+        && vsh_put_ua(db, h)
+        && vsh_put_chain_binding(db, h)
+        && vsh_put_tf(db, h);
+}
+
+/* A+1..A+5. prod_rows also writes body_fetch and header_admit, per height,
+ * after the six logs — the production fixture's extra rows. */
+static bool vsh_seed_contiguous_logs(sqlite3 *db, bool prod_rows)
+{
+    bool seeded = db != NULL;
+    for (int32_t h = A + 1; h <= TOP_H; h++) {
+        seeded = seeded && vsh_put_height_logs(db, h);
+        if (prod_rows)
+            seeded = seeded
+                && vsh_prod_put_bf(db, h)
+                && vsh_prod_put_ha(db, h);
+    }
+    return seeded;
+}
+
+static bool vsh_stamp_proven_coin(sqlite3 *db, uint8_t b0, uint8_t b1,
+                                  uint8_t b31, int64_t value)
+{
+    uint8_t txid[32] = {0};
+    txid[0] = b0; txid[1] = b1; txid[31] = b31;
+    uint8_t cscript[1] = {0x51};  /* OP_TRUE */
+    return db
+        && coins_kv_add(db, txid, 0, value, A + 1, false, cscript,
+                        sizeof(cscript))
+        && vsh_set_applied(db, TOP_H);
+}
+
+static const char *vsh_json_cstr(const struct json_value *v)
+{
+    return v ? json_get_str(v) : NULL;
+}
+
+static bool vsh_cstr_eq(const char *got, const char *want)
+{
+    return got && strcmp(got, want) == 0;
+}
+
+static bool vsh_compute_hstar_ok(sqlite3 *db, int32_t *hstar)
+{
+    return db && vsh_hstar(db, hstar);
+}
+
+static bool vsh_reseed_canonical_from_split(sqlite3 *db)
+{
+    bool reseed = db != NULL;
+    for (int32_t h = SPLIT_H; h <= TOP_H; h++) {
+        reseed = reseed
+            && vsh_put_sv(db, h, false)   /* canonical block_hash now */
+            && vsh_put_pv(db, h);
+    }
+    return reseed && vsh_apply_cursors(
+        db, vsh_reseed_cursors,
+        (int)(sizeof vsh_reseed_cursors / sizeof vsh_reseed_cursors[0]));
+}
+
+static bool vsh_install_canonical_chain(struct main_state *ms,
+                                        struct uint256 *phash,
+                                        struct block_index **pidx)
+{
+    bool chain_ok = true;
+    struct block_index *prev = NULL;
+    for (int32_t h = A + 1; h <= TOP_H; h++) {
+        int i = (int)(h - (A + 1));
+        pidx[i] = vsh_prod_insert(ms, &phash[i], h, prev);
+        chain_ok = chain_ok && pidx[i] != NULL;
+        prev = pidx[i];
+    }
+    return chain_ok;
+}
+
+static bool vsh_write_header_and_script(sqlite3 *db, int32_t h,
+                                        bool corrupt_header,
+                                        bool corrupt_script)
+{
+    bool header_ok = corrupt_header ? vsh_put_vh_corrupt(db, h)
+                                    : vsh_put_vh(db, h);
+    return header_ok && vsh_put_sv(db, h, corrupt_script);
+}
+
+static bool vsh_split_side_is(enum rf_hash_split_side side,
+                              enum rf_hash_split_side want, bool err)
+{
+    return side == want && !err;
+}
+
+static bool vsh_dry_routed_to_script_replay(
+    const struct stage_reducer_frontier_reconcile_result *dry)
+{
+    return dry->repaired
+        && dry->stale_script_repair_height == SPLIT_H
+        && dry->lowest_script_validate_hash_split == SPLIT_H
+        && dry->lowest_validate_headers_hash_split == -1
+        && dry->hstar == A + 2;
+}
+
+static bool vsh_dry_kept_noncanonical(
+    const struct stage_reducer_frontier_reconcile_result *dry)
+{
+    return dry->noncanonical_found >= 1
+        && dry->noncanonical_purged == 0
+        && dry->lowest_noncanonical == SPLIT_H;
+}
+
+static bool vsh_apply_left_split_unrepaired(
+    const struct stage_reducer_frontier_reconcile_result *rr)
+{
+    return !rr->stale_script_repaired
+        && rr->lowest_script_validate_hash_split == SPLIT_H
+        && rr->lowest_validate_headers_hash_split == -1
+        && !rr->clamped_validate_headers
+        && !rr->repaired
+        && rr->hstar == A + 2;
+}
+
+static bool vsh_commit_canonical_replay(sqlite3 *db)
+{
+    return vsh_put_sv(db, SPLIT_H, false)
+        && vsh_apply_cursors(
+            db, vsh_prod_cursors,
+            (int)(sizeof vsh_prod_cursors / sizeof vsh_prod_cursors[0]));
+}
+
 int test_validate_script_hash_split_repair(void);
 int test_validate_script_hash_split_repair(void)
 {
@@ -511,46 +693,28 @@ int test_validate_script_hash_split_repair(void)
     sqlite3 *pk = progress_store_db();
     VSH_CHECK("progress db handle", pk != NULL);
 
-    bool schema_ok = pk && vsh_build_schema(pk) && coins_kv_ensure_schema(pk);
+    bool schema_ok = vsh_schema_with_coin_authority(pk, vsh_build_schema);
     VSH_CHECK("schema built", schema_ok);
 
     /* ── fixture: six logs ok=1 contiguous A+1..A+5; split at A+3 ──────────── */
-    bool seeded = pk != NULL;
-    for (int32_t h = A + 1; h <= TOP_H; h++) {
-        seeded = seeded
-            && vsh_put_vh(pk, h)
-            && vsh_put_sv(pk, h, h == SPLIT_H)   /* corrupt block_hash @ A+3 */
-            && vsh_put_bp(pk, h)
-            && vsh_put_pv(pk, h)
-            && vsh_put_ua(pk, h)
-            && vsh_put_chain_binding(pk, h)
-            && vsh_put_tf(pk, h);
-    }
+    bool seeded = vsh_seed_contiguous_logs(pk, false);
     VSH_CHECK("six logs seeded A+1..A+5 (script hash corrupt @ A+3)", seeded);
 
     /* Cursors: non-served logs at TOP_H+1; tip_finalize served-tip at TOP_H. */
-    bool cursors = pk
-        && vsh_set_cursor(pk, "validate_headers", TOP_H + 1)
-        && vsh_set_cursor(pk, "script_validate", TOP_H + 1)
-        && vsh_set_cursor(pk, "body_persist", TOP_H + 1)
-        && vsh_set_cursor(pk, "proof_validate", TOP_H + 1)
-        && vsh_set_cursor(pk, "utxo_apply", TOP_H + 1)
-        && vsh_set_cursor(pk, "tip_finalize", TOP_H);
+    bool cursors = vsh_apply_cursors(
+        pk, vsh_anchor_cursors,
+        (int)(sizeof vsh_anchor_cursors / sizeof vsh_anchor_cursors[0]));
     VSH_CHECK("cursors set", cursors);
 
     /* Proven authority so compute_hstar keeps the anchor floor (= A). */
-    uint8_t txid[32] = {0};
-    txid[0] = 0xDE; txid[1] = 0xAD; txid[31] = 0x5e;
-    uint8_t cscript[1] = {0x51};  /* OP_TRUE */
-    bool coins = pk
-        && coins_kv_add(pk, txid, 0, 1000, A + 1, false, cscript, sizeof(cscript))
-        && vsh_set_applied(pk, TOP_H);
+    bool coins = vsh_stamp_proven_coin(pk, 0xDE, 0xAD, 0x5e, 1000);
     VSH_CHECK("coins proven authority stamped", coins);
 
     /* ── PHASE A: the wedge is real and now NAMED ──────────────────────────── */
     {
         int32_t hstar = -1;
-        VSH_CHECK("A: compute_hstar returns true", pk && vsh_hstar(pk, &hstar));
+        VSH_CHECK("A: compute_hstar returns true",
+                  vsh_compute_hstar_ok(pk, &hstar));
         VSH_CHECK("A: H* capped at A+2 (split caps the frontier)",
                   hstar == A + 2);
 
@@ -571,18 +735,16 @@ int test_validate_script_hash_split_repair(void)
             json_get(&dump, "first_hstar_blocker_reason");
         const struct json_value *owner =
             json_get(&dump, "first_hstar_blocker_repair_owner");
-        const char *kind_s = kind ? json_get_str(kind) : NULL;
-        const char *reason_s = reason ? json_get_str(reason) : NULL;
-        const char *owner_s = owner ? json_get_str(owner) : NULL;
+        const char *kind_s = vsh_json_cstr(kind);
+        const char *reason_s = vsh_json_cstr(reason);
+        const char *owner_s = vsh_json_cstr(owner);
         VSH_CHECK("A: dump kind == hash_split",
-                  kind_s && strcmp(kind_s, "hash_split") == 0);
+                  vsh_cstr_eq(kind_s, "hash_split"));
         VSH_CHECK("A: dump reason == validate-script-hash-mismatch",
-                  reason_s &&
-                  strcmp(reason_s, "validate-script-hash-mismatch") == 0);
+                  vsh_cstr_eq(reason_s, "validate-script-hash-mismatch"));
         VSH_CHECK("A: dump NAMES repair_owner reducer_frontier_reconcile_light "
                   "(was empty before the fix)",
-                  owner_s &&
-                  strcmp(owner_s, "reducer_frontier_reconcile_light") == 0);
+                  vsh_cstr_eq(owner_s, "reducer_frontier_reconcile_light"));
         json_free(&dump);
     }
 
@@ -616,20 +778,12 @@ int test_validate_script_hash_split_repair(void)
         /* The real script/proof stages, replaying from the rewound cursor,
          * re-derive the verdict against the CANONICAL body — recording the
          * canonical block hash. Simulate that here, then restore the cursors. */
-        bool reseed = pk != NULL;
-        for (int32_t h = SPLIT_H; h <= TOP_H; h++) {
-            reseed = reseed
-                && vsh_put_sv(pk, h, false)   /* canonical block_hash now */
-                && vsh_put_pv(pk, h);
-        }
-        reseed = reseed
-            && vsh_set_cursor(pk, "script_validate", TOP_H + 1)
-            && vsh_set_cursor(pk, "proof_validate", TOP_H + 1)
-            && vsh_set_cursor(pk, "tip_finalize", TOP_H);
+        bool reseed = vsh_reseed_canonical_from_split(pk);
         VSH_CHECK("C: re-derived script/proof rows + cursors restored", reseed);
 
         int32_t hstar = -1;
-        VSH_CHECK("C: compute_hstar returns true", pk && vsh_hstar(pk, &hstar));
+        VSH_CHECK("C: compute_hstar returns true",
+                  vsh_compute_hstar_ok(pk, &hstar));
         VSH_CHECK("C: H* CLIMBED past the split to A+5", hstar == TOP_H);
     }
 
@@ -670,7 +824,7 @@ int test_validate_script_hash_split_repair(void)
         VSH_CHECK("D: production store opens", p_open);
         sqlite3 *pd = progress_store_db();
         VSH_CHECK("D: production db handle", pd != NULL);
-        bool p_schema = pd && vsh_prod_schema(pd) && coins_kv_ensure_schema(pd);
+        bool p_schema = vsh_schema_with_coin_authority(pd, vsh_prod_schema);
         VSH_CHECK("D: production schema built", p_schema);
         /* fresh store: drop any cached dry-run detect memo */
         stage_reducer_frontier_reset_detect_memo_for_testing();
@@ -680,14 +834,7 @@ int test_validate_script_hash_split_repair(void)
         main_state_init(&ms);
         struct uint256 phash[TOP_H - A + 1];
         struct block_index *pidx[TOP_H - A + 1];
-        bool chain_ok = true;
-        struct block_index *prev = NULL;
-        for (int32_t h = A + 1; h <= TOP_H; h++) {
-            int i = (int)(h - (A + 1));
-            pidx[i] = vsh_prod_insert(&ms, &phash[i], h, prev);
-            chain_ok = chain_ok && pidx[i] != NULL;
-            prev = pidx[i];
-        }
+        bool chain_ok = vsh_install_canonical_chain(&ms, phash, pidx);
         VSH_CHECK("D: active chain [A+1..A+5] installs", chain_ok);
         VSH_CHECK("D: active-chain window moves to A+5",
                   chain_ok &&
@@ -696,38 +843,16 @@ int test_validate_script_hash_split_repair(void)
 
         /* Six logs ok=1 contiguous A+1..A+5; script hash corrupt @ A+3.
          * validate_headers hash == canonical == active-chain phashBlock. */
-        bool p_seeded = pd != NULL;
-        for (int32_t h = A + 1; h <= TOP_H; h++) {
-            p_seeded = p_seeded
-                && vsh_put_vh(pd, h)                  /* canonical header */
-                && vsh_put_sv(pd, h, h == SPLIT_H)    /* divergent @ A+3   */
-                && vsh_put_bp(pd, h)
-                && vsh_put_pv(pd, h)
-                && vsh_put_ua(pd, h)
-                && vsh_put_chain_binding(pd, h)
-                && vsh_put_tf(pd, h)
-                && vsh_prod_put_bf(pd, h)
-                && vsh_prod_put_ha(pd, h);
-        }
+        bool p_seeded = vsh_seed_contiguous_logs(pd, true);
         VSH_CHECK("D: production logs seeded (script corrupt @ A+3)", p_seeded);
 
-        bool p_cursors = pd
-            && vsh_set_cursor(pd, "validate_headers", TOP_H + 1)
-            && vsh_set_cursor(pd, "body_fetch", TOP_H + 1)
-            && vsh_set_cursor(pd, "body_persist", TOP_H + 1)
-            && vsh_set_cursor(pd, "script_validate", TOP_H + 1)
-            && vsh_set_cursor(pd, "proof_validate", TOP_H + 1)
-            && vsh_set_cursor(pd, "utxo_apply", TOP_H + 1)
-            && vsh_set_cursor(pd, "tip_finalize", TOP_H);
+        bool p_cursors = vsh_apply_cursors(
+            pd, vsh_prod_cursors,
+            (int)(sizeof vsh_prod_cursors / sizeof vsh_prod_cursors[0]));
         VSH_CHECK("D: production cursors set", p_cursors);
 
         /* coins proven authority applied through A+5 — WELL above the A+2 H*. */
-        uint8_t ptxid[32] = {0};
-        ptxid[0] = 0xC0; ptxid[1] = 0x1d; ptxid[31] = 0xab;
-        uint8_t pcs[1] = {0x51};
-        bool p_coins = pd
-            && coins_kv_add(pd, ptxid, 0, 2000, A + 1, false, pcs, sizeof(pcs))
-            && vsh_set_applied(pd, TOP_H);
+        bool p_coins = vsh_stamp_proven_coin(pd, 0xC0, 0x1d, 0xab, 2000);
         VSH_CHECK("D: coins proven authority applied @ A+5 (above H*=A+2)",
                   p_coins);
 
@@ -735,7 +860,7 @@ int test_validate_script_hash_split_repair(void)
         {
             int32_t hstar = -1;
             VSH_CHECK("D1: compute_hstar returns true",
-                      pd && vsh_hstar(pd, &hstar));
+                      vsh_compute_hstar_ok(pd, &hstar));
             VSH_CHECK("D1: H* capped at A+2 by the script-side split",
                       hstar == A + 2);
         }
@@ -751,7 +876,7 @@ int test_validate_script_hash_split_repair(void)
                 stage_repair_classify_hash_split(&ms, pd, SPLIT_H, &cerr);
             VSH_CHECK("D2: classify routes the live split SCRIPT-side "
                       "(no body-readability gate)",
-                      side == RF_SPLIT_SCRIPT_SIDE && !cerr);
+                      vsh_split_side_is(side, RF_SPLIT_SCRIPT_SIDE, cerr));
         }
 
         /* D2b — direction non-regression: a GENUINE stale header (validate
@@ -765,7 +890,8 @@ int test_validate_script_hash_split_repair(void)
             enum rf_hash_split_side side =
                 stage_repair_classify_hash_split(&ms, pd, A + 4, &cerr);
             VSH_CHECK("D2b: classify routes a genuine stale header "
-                      "VALIDATE-side", side == RF_SPLIT_VALIDATE_SIDE && !cerr);
+                      "VALIDATE-side",
+                      vsh_split_side_is(side, RF_SPLIT_VALIDATE_SIDE, cerr));
             VSH_CHECK("D2b: revert A+4 to canonical", vsh_put_vh(pd, A + 4));
         }
 
@@ -775,15 +901,13 @@ int test_validate_script_hash_split_repair(void)
         {
             bool cerr = true;
             VSH_CHECK("D2c: seed both-stale hash shape @ A+4",
-                      vsh_put_vh_corrupt(pd, A + 4) &&
-                      vsh_put_sv(pd, A + 4, true));
+                      vsh_write_header_and_script(pd, A + 4, true, true));
             enum rf_hash_split_side side =
                 stage_repair_classify_hash_split(&ms, pd, A + 4, &cerr);
             VSH_CHECK("D2c: classify both-stale hashes SCRIPT-side",
-                      side == RF_SPLIT_SCRIPT_SIDE && !cerr);
+                      vsh_split_side_is(side, RF_SPLIT_SCRIPT_SIDE, cerr));
             VSH_CHECK("D2c: revert A+4 to canonical",
-                      vsh_put_vh(pd, A + 4) &&
-                      vsh_put_sv(pd, A + 4, false));
+                      vsh_write_header_and_script(pd, A + 4, false, false));
         }
 
         /* D3 + E(dry) — drive the production orchestrator dry-run. It must
@@ -798,15 +922,9 @@ int test_validate_script_hash_split_repair(void)
                       stage_reducer_frontier_reconcile_light_needed(
                           pd, &ms, &dry));
             VSH_CHECK("D3: dry-run routes the split to the dual replay",
-                      dry.repaired &&
-                      dry.stale_script_repair_height == SPLIT_H &&
-                      dry.lowest_script_validate_hash_split == SPLIT_H &&
-                      dry.lowest_validate_headers_hash_split == -1 &&
-                      dry.hstar == A + 2);
+                      vsh_dry_routed_to_script_replay(&dry));
             VSH_CHECK("E: noncanonical evidence preserved, not blind-purged",
-                      dry.noncanonical_found >= 1 &&
-                      dry.noncanonical_purged == 0 &&
-                      dry.lowest_noncanonical == SPLIT_H);
+                      vsh_dry_kept_noncanonical(&dry));
         }
 
         /* Apply — the canonical body is absent (nFile=-1), so the replay
@@ -819,12 +937,7 @@ int test_validate_script_hash_split_repair(void)
             VSH_CHECK("F: orchestrator apply succeeds",
                       stage_reducer_frontier_reconcile_light(pd, &ms, &rr));
             VSH_CHECK("F: false-clear guard — split unresolved, NOT cleared",
-                      !rr.stale_script_repaired &&
-                      rr.lowest_script_validate_hash_split == SPLIT_H &&
-                      rr.lowest_validate_headers_hash_split == -1 &&
-                      !rr.clamped_validate_headers &&
-                      !rr.repaired &&
-                      rr.hstar == A + 2);
+                      vsh_apply_left_split_unrepaired(&rr));
             VSH_CHECK("F: below-frontier split rows survive the purge",
                       vsh_vh_row_present(pd, SPLIT_H) &&
                       vsh_sv_row_present(pd, SPLIT_H));
@@ -840,16 +953,9 @@ int test_validate_script_hash_split_repair(void)
         {
             int32_t hstar = -1;
             VSH_CHECK("F2: re-derive verdict + advance cursors (replay commit)",
-                      vsh_put_sv(pd, SPLIT_H, false)
-                      && vsh_set_cursor(pd, "validate_headers", TOP_H + 1)
-                      && vsh_set_cursor(pd, "body_fetch", TOP_H + 1)
-                      && vsh_set_cursor(pd, "body_persist", TOP_H + 1)
-                      && vsh_set_cursor(pd, "script_validate", TOP_H + 1)
-                      && vsh_set_cursor(pd, "proof_validate", TOP_H + 1)
-                      && vsh_set_cursor(pd, "utxo_apply", TOP_H + 1)
-                      && vsh_set_cursor(pd, "tip_finalize", TOP_H));
+                      vsh_commit_canonical_replay(pd));
             VSH_CHECK("F2: compute_hstar returns true after re-derivation",
-                      pd && vsh_hstar(pd, &hstar));
+                      vsh_compute_hstar_ok(pd, &hstar));
             VSH_CHECK("F2: H* CLIMBED past the split to A+5", hstar == TOP_H);
         }
 

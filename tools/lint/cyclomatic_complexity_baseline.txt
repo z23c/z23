@@ -1738,7 +1738,6 @@ tests/harness/src/test_utxo_root_ladder.c:test_utxo_root_ladder:17
 tests/harness/src/test_utxo_root_ladder_tripwire.c:test_utxo_root_ladder_tripwire:44
 tests/harness/src/test_utxo_root_ladder_tripwire.c:tw_run_cap_sections:42
 tests/harness/src/test_validate_headers_stage.c:test_validate_headers_stage:59
-tests/harness/src/test_validate_script_hash_split_repair.c:test_validate_script_hash_split_repair:90
 tests/harness/src/test_validation.c:test_validation:249
 tests/harness/src/test_vault_dispatch.c:test_vault_dispatch:47
 tests/harness/src/test_vcs_core.c:t_manifest_stat_cache_identity:45
