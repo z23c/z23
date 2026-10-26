@@ -85,6 +85,90 @@ static bool reindex_epilogue_seed_coins(sqlite3 *pdb, const char *node_db_path,
     return true;
 }
 
+/* Arg gate for the authority derivation: an open node_db with a usable handle,
+ * a non-empty path, a non-negative tip and a tip hash. The caller pages+logs. */
+static bool authority_derivation_args_valid(const struct node_db *ndb,
+                                            const char *node_db_path,
+                                            int tip_h,
+                                            const uint8_t tip_hash[32])
+{
+    return ndb && ndb->open && ndb->db && node_db_path && node_db_path[0] &&
+           tip_h >= 0 && tip_hash;
+}
+
+/* Logs/events need a non-empty source label; treat NULL/"" as unknown. */
+static const char *source_or_unknown(const char *source)
+{
+    return (source && source[0]) ? source : "unknown";
+}
+
+/* coins_applied_height := tip_h+1 in ONE transaction; ROLLBACK on any failure. */
+static bool coins_applied_height_raise_in_tx(sqlite3 *pdb, int tip_h)
+{
+    bool set_ok = true;
+    char *err = NULL;
+    if (sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK)
+        set_ok = false;
+    if (set_ok && !utxo_apply_frontier_set_in_tx(pdb, tip_h + 1))
+        set_ok = false;
+    if (set_ok && sqlite3_exec(pdb, "COMMIT", NULL, NULL, &err) != SQLITE_OK)
+        set_ok = false;
+    if (!set_ok)
+        sqlite3_exec(pdb, "ROLLBACK", NULL, NULL, NULL);
+    if (err) sqlite3_free(err);
+    return set_ok;
+}
+
+/* Clamp coins_applied_height up to tip_h+1 (never down) under the
+ * progress-store lock; a false return (read or write failed) is the caller's
+ * to page+log. */
+static bool coins_applied_height_clamp_to_tip(sqlite3 *pdb, int tip_h)
+{
+    progress_store_tx_lock();
+    int32_t cur = 0;
+    bool found = false;
+    bool ck_ok = coins_kv_get_applied_height(pdb, &cur, &found);
+    bool need_raise = ck_ok && (!found || cur < tip_h + 1);
+    bool set_ok = true;
+    if (need_raise)
+        set_ok = coins_applied_height_raise_in_tx(pdb, tip_h);
+    progress_store_tx_unlock();
+    return ck_ok && set_ok;
+}
+
+/* Idempotently ensure the four reducer log schemas compute_hstar reads, under
+ * the progress-store lock; the caller pages+logs on failure. */
+static bool reducer_log_schemas_ensure(sqlite3 *pdb)
+{
+    progress_store_tx_lock();
+    bool ok = validate_headers_log_ensure_schema(pdb)
+              && script_validate_log_ensure_schema(pdb)
+              && body_persist_log_ensure_schema(pdb)
+              && proof_validate_log_ensure_schema(pdb);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+/* L0 H* self-check probe: compute under the progress-store lock and report
+ * whether H* climbed exactly to the replayed tip. */
+static bool hstar_climbed_to_replayed_tip(sqlite3 *pdb, int tip_h,
+                                          int32_t *hstar, int32_t *served)
+{
+    progress_store_tx_lock();
+    bool hs_ok = reducer_frontier_compute_hstar(pdb, hstar, served);
+    progress_store_tx_unlock();
+    return hs_ok && *hstar == tip_h;
+}
+
+/* Full-replay shielded completion markers apply to the reindex source only;
+ * snapshot import keeps its state incomplete. */
+static bool shielded_completion_publish_if_reindex(const char *source,
+                                                   sqlite3 *pdb, int tip_h)
+{
+    return strcmp(source, "reindex") != 0 ||
+           shielded_history_publish_full_replay_complete(pdb, tip_h);
+}
+
 static bool derive_authority_from_node_db_utxos(struct node_db *ndb,
                                                 const char *node_db_path,
                                                 int tip_h,
@@ -93,16 +177,14 @@ static bool derive_authority_from_node_db_utxos(struct node_db *ndb,
                                                 bool reset_required,
                                                 const uint64_t *expected_generation)
 {
-    if (!ndb || !ndb->open || !ndb->db || !node_db_path ||
-        !node_db_path[0] || tip_h < 0 || !tip_hash) {
+    if (!authority_derivation_args_valid(ndb, node_db_path, tip_h, tip_hash)) {
         reindex_epi_page(-1, "null_or_closed_arg");
         LOG_RETURN(false, "reindex_epi",
                    "NULL/closed authority args ndb=%p path=%p h=%d hash=%p",
                    (void *)ndb, (const void *)node_db_path, tip_h,
                    (const void *)tip_hash);
     }
-    if (!source || !source[0])
-        source = "unknown";
+    source = source_or_unknown(source);
 
     sqlite3 *pdb = progress_store_db();
     if (!pdb) {
@@ -158,31 +240,10 @@ static bool derive_authority_from_node_db_utxos(struct node_db *ndb,
      * proved. coins_kv_seed_from_node_db just re-stamped the migration key, so
      * the applied-height row was cleared by the reset above and is now ABSENT;
      * set it directly to tip_h+1. */
-    {
-        progress_store_tx_lock();
-        int32_t cur = 0;
-        bool found = false;
-        bool ck_ok = coins_kv_get_applied_height(pdb, &cur, &found);
-        bool need_raise = ck_ok && (!found || cur < tip_h + 1);
-        bool set_ok = true;
-        if (need_raise) {
-            char *err = NULL;
-            if (sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK)
-                set_ok = false;
-            if (set_ok && !utxo_apply_frontier_set_in_tx(pdb, tip_h + 1))
-                set_ok = false;
-            if (set_ok && sqlite3_exec(pdb, "COMMIT", NULL, NULL, &err) != SQLITE_OK)
-                set_ok = false;
-            if (!set_ok)
-                sqlite3_exec(pdb, "ROLLBACK", NULL, NULL, NULL);
-            if (err) sqlite3_free(err);
-        }
-        progress_store_tx_unlock();
-        if (!ck_ok || !set_ok) {
-            reindex_epi_page(tip_h, "coins_applied_clamp_failed");
-            LOG_RETURN(false, "reindex_epi",
-                       "coins_applied_height clamp to %d failed", tip_h + 1);
-        }
+    if (!coins_applied_height_clamp_to_tip(pdb, tip_h)) {
+        reindex_epi_page(tip_h, "coins_applied_clamp_failed");
+        LOG_RETURN(false, "reindex_epi",
+                   "coins_applied_height clamp to %d failed", tip_h + 1);
     }
 
     /* trusted_seed=true: reindex is a from-genesis full replay through the
@@ -200,18 +261,10 @@ static bool derive_authority_from_node_db_utxos(struct node_db *ndb,
     /* Ensure the reducer log schemas the self-check reads exist (idempotent;
      * reindex runs before the stages init, so a never-stage-run datadir would
      * otherwise hit "no such table" and spuriously fail the check below). */
-    {
-        progress_store_tx_lock();
-        bool sch_ok = validate_headers_log_ensure_schema(pdb)
-                      && script_validate_log_ensure_schema(pdb)
-                      && body_persist_log_ensure_schema(pdb)
-                      && proof_validate_log_ensure_schema(pdb);
-        progress_store_tx_unlock();
-        if (!sch_ok) {
-            reindex_epi_page(tip_h, "reducer_log_schema_ensure_failed");
-            LOG_RETURN(false, "reindex_epi",
-                       "reducer log schema ensure failed h=%d", tip_h);
-        }
+    if (!reducer_log_schemas_ensure(pdb)) {
+        reindex_epi_page(tip_h, "reducer_log_schema_ensure_failed");
+        LOG_RETURN(false, "reindex_epi",
+                   "reducer log schema ensure failed h=%d", tip_h);
     }
 
     /* ── (4) Self-check: H* must have climbed to the replayed tip. If not, the
@@ -222,11 +275,8 @@ static bool derive_authority_from_node_db_utxos(struct node_db *ndb,
      * checkpoint is a floor only when this datadir's coin authority covers it;
      * it must never manufacture H* above the replayed state. */
     int32_t hstar = 0, served = 0;
-    progress_store_tx_lock();
-    bool hs_ok = reducer_frontier_compute_hstar(pdb, &hstar, &served);
-    progress_store_tx_unlock();
     int32_t expect_hstar = tip_h;
-    if (!hs_ok || hstar != expect_hstar) {
+    if (!hstar_climbed_to_replayed_tip(pdb, tip_h, &hstar, &served)) {
         reindex_epi_page(tip_h, "hstar_below_tip");
         LOG_RETURN(false, "reindex_epi",
                    "post-epilogue H*=%d != expected=%d (replayed tip=%d "
@@ -239,8 +289,7 @@ static bool derive_authority_from_node_db_utxos(struct node_db *ndb,
      * shielded replay writer. Keep snapshot-import state incomplete. For a
      * reindex, all three marker-zero writes plus replay-session retirement are
      * ONE final transaction after every other epilogue check succeeded. */
-    if (strcmp(source, "reindex") == 0 &&
-        !shielded_history_publish_full_replay_complete(pdb, tip_h)) {
+    if (!shielded_completion_publish_if_reindex(source, pdb, tip_h)) {
         reindex_epi_page(tip_h, "shielded_completion_publish_failed");
         LOG_RETURN(false, "reindex_epi",
                    "shielded completion publish failed h=%d", tip_h);
