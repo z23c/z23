@@ -305,34 +305,35 @@ static SSL_CTX *tls_init(const char *cert_path, const char *key_path)
 
 /* ── Server start/stop ──────────────────────────────────────────── */
 
-bool rpc_http_start(const struct rpc_table *table, uint16_t port,
-                     const char *rpc_user, const char *rpc_password,
-                     const char *datadir)
+/* True when a previous rpc_http_start() is still live in whole or in
+ * part, so a second start must refuse without touching anything. */
+static bool rpc_http_already_started(void)
 {
-    if (g_running || g_listen_thread_started || g_workers_started > 0)
-        return false;
+    return g_running || g_listen_thread_started || g_workers_started > 0;
+}
 
-    int queue_wait_ms = RPC_HTTP_QUEUE_WAIT_MS_DEFAULT;
-    {
-        const char *queue_wait_env = getenv("ZCL_RPC_QUEUE_WAIT_MS");
-        if (queue_wait_env && *queue_wait_env) {
-            int value = atoi(queue_wait_env);
-            if (value >= 0)
-                queue_wait_ms = value;
-        }
+/* ZCL_RPC_QUEUE_WAIT_MS: how long a connection may wait in the
+ * admission queue. A missing, empty or negative value keeps the
+ * default residency deadline. */
+static int rpc_queue_wait_ms_from_env(const char *env)
+{
+    if (env && *env) {
+        int value = atoi(env);
+        if (value >= 0)
+            return value;
     }
-    rpc_http_queue_start(queue_wait_ms);
-    g_request_context = (struct rpc_http_request_context) {
-        .table = table,
-        .middleware = NULL,
-        .timeout = NULL,
-        .metrics_http_enable = false,
-    };
-    rpc_http_auth_configure(rpc_user, rpc_password, datadir, port);
+    return RPC_HTTP_QUEUE_WAIT_MS_DEFAULT;
+}
+
+/* Opens the 127.0.0.1 listener socket and puts it into listen state.
+ * Reports the failing step with perror() exactly as before and
+ * returns false; cleanup on failure belongs to rpc_http_stop(). */
+static bool rpc_loopback_listener_open(uint16_t port)
+{
     g_listen_fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
     if (g_listen_fd == PLATFORM_SOCKET_INVALID) {
         perror("socket");
-        goto fail;
+        return false;
     }
 
     int opt = 1;
@@ -347,14 +348,20 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     if (platform_socket_bind(g_listen_fd, (struct sockaddr *)&addr,
                              sizeof(addr)) < 0) {
         perror("bind");
-        goto fail;
+        return false;
     }
 
     if (platform_socket_listen(g_listen_fd, 8) < 0) {
         perror("listen");
-        goto fail;
+        return false;
     }
 
+    return true;
+}
+
+/* Brings the HTTP middleware up on first start and publishes it. */
+static void rpc_http_configure_middleware(void)
+{
     /* Rate limit + per-IP bucket + IP ban for the HTTP RPC surface.
      * Init once on first start; load env config so operators can tune
      * via ZCL_RPC_RPS / ZCL_RPC_PER_IP_RPS / ZCL_RPC_BAN_* without a
@@ -368,7 +375,13 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
      * the live config and stats without reaching into httpserver.c. */
     rpc_http_middleware_set_global(&g_middleware);
     g_request_context.middleware = &g_middleware;
+}
 
+/* Brings the per-request timeout manager up on first start and
+ * publishes it. The watchdog thread itself is started by the caller
+ * so its failure is reported from rpc_http_start(). */
+static void rpc_http_init_rpc_timeout(void)
+{
     /* Per-request timeout watchdog. ZCL_RPC_TIMEOUT_MS=0 disables
      * entirely so operators can opt out. Watchdog thread is dormant
      * in that case. */
@@ -378,6 +391,138 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
         g_rpc_timeout_active = true;
     }
     rpc_timeout_set_global(&g_rpc_timeout);
+}
+
+/* Truthy spellings for ZCL_METRICS_HTTP_ENABLE: "1", "true", "yes"
+ * or "on" (case-insensitive); NULL, empty and anything else leave
+ * the endpoint off. */
+static bool rpc_metrics_env_flag_enabled(const char *value)
+{
+    return value != NULL && *value != '\0' &&
+           (strcmp(value, "1") == 0 ||
+            strcasecmp(value, "true") == 0 ||
+            strcasecmp(value, "yes")  == 0 ||
+            strcasecmp(value, "on")   == 0);
+}
+
+/* The TLS listener needs both halves of the keypair configured. */
+static bool rpc_tls_env_configured(const char *cert, const char *key)
+{
+    return cert != NULL && cert[0] != '\0' &&
+           key != NULL && key[0] != '\0';
+}
+
+/* TLS listen port: rpcport+1 unless ZCL_RPC_TLS_PORT names a valid
+ * port number. */
+static uint16_t rpc_tls_port_from_env(const char *env, uint16_t fallback)
+{
+    if (env == NULL || *env == '\0')
+        return fallback;
+    int v = atoi(env);
+    if (v <= 0 || v >= 65536)
+        return fallback;
+    return (uint16_t)v;
+}
+
+/* Creates the TLS listen socket on all interfaces and puts it into
+ * listen state. On open, bind or listen failure the socket is closed
+ * and g_tls_listen_fd is left invalid so the caller can drop TLS and
+ * keep the plain-text listener. */
+static void rpc_tls_listen_socket_setup(void)
+{
+    /* Create TLS listen socket on all interfaces */
+    g_tls_listen_fd = platform_socket_open(
+        AF_INET, SOCK_STREAM, 0, true, false);
+    if (g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
+        char terr[32]; /* Winsock errors have no strerror() */
+        (void)platform_socket_set_reuse_address(g_tls_listen_fd, true);
+
+        struct sockaddr_in taddr;
+        memset(&taddr, 0, sizeof(taddr));
+        taddr.sin_family = AF_INET;
+        taddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        taddr.sin_port = htons(g_tls_port);
+
+        if (platform_socket_bind(g_tls_listen_fd,
+                (struct sockaddr *)&taddr, sizeof(taddr)) < 0) {
+            fprintf(stderr, "RPC TLS: bind port %u failed: %s\n",  // obs-ok:helper-context-logged
+                    g_tls_port, platform_socket_error_string(
+                        platform_socket_last_error(), terr, sizeof(terr)));
+            platform_socket_close(g_tls_listen_fd);
+            g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
+        } else if (platform_socket_listen(g_tls_listen_fd, 8) < 0) {
+            fprintf(stderr, "RPC TLS: listen failed: %s\n",  // obs-ok:helper-context-logged
+                    platform_socket_error_string(
+                        platform_socket_last_error(), terr, sizeof(terr)));
+            platform_socket_close(g_tls_listen_fd);
+            g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
+        }
+    }
+}
+
+/* Spawns the worker pool. g_workers_started records how far a partial
+ * run got so rpc_http_stop() joins exactly what exists. */
+static bool rpc_http_spawn_workers(void)
+{
+    for (size_t i = 0; i < RPC_HTTP_WORKERS; i++) {
+        if (thread_registry_spawn("zcl_rpc_worker", rpc_worker_thread_fn,
+                                      NULL, &g_worker_threads[i]) != 0) {
+            perror("thread_registry_spawn");
+            return false;
+        }
+        g_workers_started = i + 1;
+        if (i == 0)
+            thread_liveness_register(&g_rpc_worker_liveness, "zcl_rpc_worker", 0, 0);
+    }
+    return true;
+}
+
+/* Starts the TLS listener thread when TLS came up. On spawn failure
+ * tears the TLS listener back down; the plain listener keeps serving. */
+static void rpc_tls_spawn_listener(void)
+{
+    /* Start TLS listener thread if configured */
+    if (g_tls_ctx && g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
+        if (thread_registry_spawn("zcl_rpc_tls", tls_listen_thread_fn,
+                                      NULL, &g_tls_listen_thread) == 0) {
+            g_tls_listen_thread_started = true;
+            thread_liveness_register(&g_rpc_tls_liveness, "zcl_rpc_tls", 0, 0);
+        } else {
+            fprintf(stderr, "RPC TLS: listener thread start failed\n");  // obs-ok:helper-context-logged
+            platform_socket_close(g_tls_listen_fd);
+            g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
+            SSL_CTX_free(g_tls_ctx);
+            g_tls_ctx = NULL;
+        }
+    }
+}
+
+bool rpc_http_start(const struct rpc_table *table, uint16_t port,
+                     const char *rpc_user, const char *rpc_password,
+                     const char *datadir)
+{
+    if (rpc_http_already_started())
+        return false;
+
+    int queue_wait_ms = RPC_HTTP_QUEUE_WAIT_MS_DEFAULT;
+    {
+        const char *queue_wait_env = getenv("ZCL_RPC_QUEUE_WAIT_MS");
+        queue_wait_ms = rpc_queue_wait_ms_from_env(queue_wait_env);
+    }
+    rpc_http_queue_start(queue_wait_ms);
+    g_request_context = (struct rpc_http_request_context) {
+        .table = table,
+        .middleware = NULL,
+        .timeout = NULL,
+        .metrics_http_enable = false,
+    };
+    rpc_http_auth_configure(rpc_user, rpc_password, datadir, port);
+    if (!rpc_loopback_listener_open(port))
+        goto fail;
+
+    rpc_http_configure_middleware();
+
+    rpc_http_init_rpc_timeout();
     if (!rpc_timeout_start_watchdog(&g_rpc_timeout)) {
         fprintf(stderr, "RPC server: rpc_timeout watchdog start failed\n");  // obs-ok:helper-context-logged
     }
@@ -387,14 +532,9 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
      * "yes", "on" as truthy; anything else leaves it off. */
     g_request_context.metrics_http_enable = false;
     const char *mx = getenv("ZCL_METRICS_HTTP_ENABLE");
-    if (mx && *mx) {
-        if (strcmp(mx, "1") == 0 ||
-            strcasecmp(mx, "true") == 0 ||
-            strcasecmp(mx, "yes")  == 0 ||
-            strcasecmp(mx, "on")   == 0) {
-            g_request_context.metrics_http_enable = true;
-            printf("RPC server: GET /metrics Prometheus endpoint enabled\n");
-        }
+    if (rpc_metrics_env_flag_enabled(mx)) {
+        g_request_context.metrics_http_enable = true;
+        printf("RPC server: GET /metrics Prometheus endpoint enabled\n");
     }
 
     /* Optional TLS listener for non-loopback RPC. Set ZCL_RPC_TLS_CERT
@@ -408,46 +548,15 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     {
         const char *cert = getenv("ZCL_RPC_TLS_CERT");
         const char *key  = getenv("ZCL_RPC_TLS_KEY");
-        if (cert && cert[0] && key && key[0]) {
+        if (rpc_tls_env_configured(cert, key)) {
             g_tls_ctx = tls_init(cert, key);
             if (g_tls_ctx) {
                 /* Determine TLS port */
                 g_tls_port = port + 1;
                 const char *tp = getenv("ZCL_RPC_TLS_PORT");
-                if (tp && *tp) {
-                    int v = atoi(tp);
-                    if (v > 0 && v < 65536)
-                        g_tls_port = (uint16_t)v;
-                }
+                g_tls_port = rpc_tls_port_from_env(tp, g_tls_port);
 
-                /* Create TLS listen socket on all interfaces */
-                g_tls_listen_fd = platform_socket_open(
-                    AF_INET, SOCK_STREAM, 0, true, false);
-                if (g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
-                    char terr[32]; /* Winsock errors have no strerror() */
-                    (void)platform_socket_set_reuse_address(g_tls_listen_fd, true);
-
-                    struct sockaddr_in taddr;
-                    memset(&taddr, 0, sizeof(taddr));
-                    taddr.sin_family = AF_INET;
-                    taddr.sin_addr.s_addr = htonl(INADDR_ANY);
-                    taddr.sin_port = htons(g_tls_port);
-
-                    if (platform_socket_bind(g_tls_listen_fd,
-                            (struct sockaddr *)&taddr, sizeof(taddr)) < 0) {
-                        fprintf(stderr, "RPC TLS: bind port %u failed: %s\n",  // obs-ok:helper-context-logged
-                                g_tls_port, platform_socket_error_string(
-                                    platform_socket_last_error(), terr, sizeof(terr)));
-                        platform_socket_close(g_tls_listen_fd);
-                        g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
-                    } else if (platform_socket_listen(g_tls_listen_fd, 8) < 0) {
-                        fprintf(stderr, "RPC TLS: listen failed: %s\n",  // obs-ok:helper-context-logged
-                                platform_socket_error_string(
-                                    platform_socket_last_error(), terr, sizeof(terr)));
-                        platform_socket_close(g_tls_listen_fd);
-                        g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
-                    }
-                }
+                rpc_tls_listen_socket_setup();
 
                 if (g_tls_listen_fd == PLATFORM_SOCKET_INVALID) {
                     /* TLS socket failed — clean up ctx but continue
@@ -465,16 +574,8 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     if (g_tls_ctx)
         printf("RPC TLS server listening on 0.0.0.0:%u\n", g_tls_port);
 
-    for (size_t i = 0; i < RPC_HTTP_WORKERS; i++) {
-        if (thread_registry_spawn("zcl_rpc_worker", rpc_worker_thread_fn,
-                                      NULL, &g_worker_threads[i]) != 0) {
-            perror("thread_registry_spawn");
-            goto fail;
-        }
-        g_workers_started = i + 1;
-        if (i == 0)
-            thread_liveness_register(&g_rpc_worker_liveness, "zcl_rpc_worker", 0, 0);
-    }
+    if (!rpc_http_spawn_workers())
+        goto fail;
 
     if (thread_registry_spawn("zcl_rpc_listen", listen_thread_fn, NULL,
                                   &g_listen_thread) != 0) {
@@ -484,20 +585,7 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     g_listen_thread_started = true;
     thread_liveness_register(&g_rpc_listen_liveness, "zcl_rpc_listen", 0, 0);
 
-    /* Start TLS listener thread if configured */
-    if (g_tls_ctx && g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
-        if (thread_registry_spawn("zcl_rpc_tls", tls_listen_thread_fn,
-                                      NULL, &g_tls_listen_thread) == 0) {
-            g_tls_listen_thread_started = true;
-            thread_liveness_register(&g_rpc_tls_liveness, "zcl_rpc_tls", 0, 0);
-        } else {
-            fprintf(stderr, "RPC TLS: listener thread start failed\n");  // obs-ok:helper-context-logged
-            platform_socket_close(g_tls_listen_fd);
-            g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
-            SSL_CTX_free(g_tls_ctx);
-            g_tls_ctx = NULL;
-        }
-    }
+    rpc_tls_spawn_listener();
 
     rpc_http_auth_start_rotation();
     return true;
@@ -575,3 +663,4 @@ bool rpc_http_tls_active(void)
 {
     return g_tls_ctx != NULL && g_running;
 }
+
