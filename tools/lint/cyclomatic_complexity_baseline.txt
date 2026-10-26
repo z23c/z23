@@ -1345,9 +1345,6 @@ tests/harness/src/test_zcode_package_dev_focus.c:zpd_real_focus_preedit_acceptan
 tests/harness/src/test_zcode_package_dev_focus.c:zpf_exec_clean_agent_acceptance:16
 tests/harness/src/test_zcode_package_dev_focus.c:zpf_process_reload_focus:36
 tests/harness/src/test_zcode_package_dev_focus.c:zpf_spawn_exec_agent:20
-tests/harness/src/test_zcode_package_registry.c:registry_dogfood_consumer:53
-tests/harness/src/test_zcode_package_registry.c:registry_independent_reproduction:34
-tests/harness/src/test_zcode_package_registry.c:registry_stranger_build:33
 tests/harness/src/test_zcode_public_shape.c:t_ps_dependency_closure:27
 tests/harness/src/test_zcode_rank.c:t_commands:58
 tests/harness/src/test_zcode_rank.c:t_period_boundaries:29

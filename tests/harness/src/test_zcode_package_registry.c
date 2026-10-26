@@ -193,6 +193,99 @@ static const struct registry_expected *registry_named(const char *name)
     return NULL;
 }
 
+struct registry_stranger_paths {
+    char checkout[1024], source[1024], binary[1024];
+    char app_include[1024], base_include[1024], codec_include[1024];
+    char json_include[1024], app_archive[1024], base_archive[1024];
+    char codec_archive[1024], json_archive[1024];
+    char app_i[1100], base_i[1100], codec_i[1100], json_i[1100];
+};
+
+static bool registry_stranger_checkout(
+    const char *datadir, const struct registry_expected *app,
+    struct registry_stranger_paths *paths)
+{
+    struct vcs_package_store *store = vcs_package_store_open(
+        datadir, UINT64_C(256) * 1024u * 1024u);
+    uint8_t app_root[32];
+    if (!store || !zcl_hex_decode_lower(app->content_root, app_root,
+                                         sizeof(app_root))) {
+        vcs_package_store_close(store);
+        return false;
+    }
+    int n = snprintf(paths->checkout, sizeof(paths->checkout),
+                     "%s/stranger-source", datadir);
+    struct vcs_package_checkout_metrics metrics;
+    enum vcs_package_checkout_result checked = n > 0 &&
+            (size_t)n < sizeof(paths->checkout)
+        ? vcs_package_checkout(store, app_root, paths->checkout, &metrics)
+        : VCS_PACKAGE_CHECKOUT_DESTINATION;
+    bool refused_existing = checked == VCS_PACKAGE_CHECKOUT_OK &&
+        vcs_package_checkout(store, app_root, paths->checkout, NULL) ==
+            VCS_PACKAGE_CHECKOUT_DESTINATION;
+    vcs_package_store_close(store);
+    if (checked != VCS_PACKAGE_CHECKOUT_OK || !refused_existing ||
+        metrics.files != 6u || metrics.chunks != 6u || metrics.bytes == 0)
+        return false;
+    return true;
+}
+
+static bool registry_stranger_resolve_paths(
+    const char *datadir, const struct registry_expected *app,
+    const struct registry_expected *base,
+    const struct registry_expected *codec,
+    const struct registry_expected *json,
+    struct registry_stranger_paths *paths)
+{
+    if (snprintf(paths->source, sizeof(paths->source), "%s/app/main.c",
+                 paths->checkout) <= 0 ||
+        snprintf(paths->binary, sizeof(paths->binary), "%s/commons-demo",
+                 datadir) <= 0 ||
+        snprintf(paths->app_include, sizeof(paths->app_include),
+                 "%s/zcode/installed/%s/include", datadir,
+                 app->content_root) <= 0 ||
+        snprintf(paths->base_include, sizeof(paths->base_include),
+                 "%s/zcode/installed/%s/include", datadir,
+                 base->content_root) <= 0 ||
+        snprintf(paths->codec_include, sizeof(paths->codec_include),
+                 "%s/zcode/installed/%s/include", datadir,
+                 codec->content_root) <= 0 ||
+        snprintf(paths->json_include, sizeof(paths->json_include),
+                 "%s/zcode/installed/%s/include", datadir,
+                 json->content_root) <= 0 ||
+        snprintf(paths->app_archive, sizeof(paths->app_archive),
+                 "%s/zcode/installed/%s/lib/libcommons-demo.a", datadir,
+                 app->content_root) <= 0 ||
+        snprintf(paths->base_archive, sizeof(paths->base_archive),
+                 "%s/zcode/installed/%s/lib/libbase.a", datadir,
+                 base->content_root) <= 0 ||
+        snprintf(paths->codec_archive, sizeof(paths->codec_archive),
+                 "%s/zcode/installed/%s/lib/libcodec.a", datadir,
+                 codec->content_root) <= 0 ||
+        snprintf(paths->json_archive, sizeof(paths->json_archive),
+                 "%s/zcode/installed/%s/lib/libjson.a", datadir,
+                 json->content_root) <= 0)
+        return false;
+    if (access(paths->binary, F_OK) == 0)
+        return false;
+    return true;
+}
+
+static bool registry_stranger_include_flags(
+    struct registry_stranger_paths *paths)
+{
+    if (snprintf(paths->app_i, sizeof(paths->app_i), "-I%s",
+                 paths->app_include) <= 0 ||
+        snprintf(paths->base_i, sizeof(paths->base_i), "-I%s",
+                 paths->base_include) <= 0 ||
+        snprintf(paths->codec_i, sizeof(paths->codec_i), "-I%s",
+                 paths->codec_include) <= 0 ||
+        snprintf(paths->json_i, sizeof(paths->json_i), "-I%s",
+                 paths->json_include) <= 0)
+        return false;
+    return true;
+}
+
 static bool registry_stranger_build(const char *datadir)
 {
     const struct registry_expected *app =
@@ -204,92 +297,40 @@ static bool registry_stranger_build(const char *datadir)
     if (!app || !base || !codec || !json)
         return false;
 
-    struct vcs_package_store *store = vcs_package_store_open(
-        datadir, UINT64_C(256) * 1024u * 1024u);
-    uint8_t app_root[32];
-    if (!store || !zcl_hex_decode_lower(app->content_root, app_root,
-                                         sizeof(app_root))) {
-        vcs_package_store_close(store);
-        return false;
-    }
-    char checkout[1024];
-    int n = snprintf(checkout, sizeof(checkout), "%s/stranger-source",
-                     datadir);
-    struct vcs_package_checkout_metrics metrics;
-    enum vcs_package_checkout_result checked = n > 0 &&
-            (size_t)n < sizeof(checkout)
-        ? vcs_package_checkout(store, app_root, checkout, &metrics)
-        : VCS_PACKAGE_CHECKOUT_DESTINATION;
-    bool refused_existing = checked == VCS_PACKAGE_CHECKOUT_OK &&
-        vcs_package_checkout(store, app_root, checkout, NULL) ==
-            VCS_PACKAGE_CHECKOUT_DESTINATION;
-    vcs_package_store_close(store);
-    if (checked != VCS_PACKAGE_CHECKOUT_OK || !refused_existing ||
-        metrics.files != 6u || metrics.chunks != 6u || metrics.bytes == 0)
-        return false;
-
-    char source[1024], binary[1024];
-    char app_include[1024], base_include[1024], codec_include[1024];
-    char json_include[1024], app_archive[1024], base_archive[1024];
-    char codec_archive[1024], json_archive[1024];
-    if (snprintf(source, sizeof(source), "%s/app/main.c", checkout) <= 0 ||
-        snprintf(binary, sizeof(binary), "%s/commons-demo", datadir) <= 0 ||
-        snprintf(app_include, sizeof(app_include),
-                 "%s/zcode/installed/%s/include", datadir,
-                 app->content_root) <= 0 ||
-        snprintf(base_include, sizeof(base_include),
-                 "%s/zcode/installed/%s/include", datadir,
-                 base->content_root) <= 0 ||
-        snprintf(codec_include, sizeof(codec_include),
-                 "%s/zcode/installed/%s/include", datadir,
-                 codec->content_root) <= 0 ||
-        snprintf(json_include, sizeof(json_include),
-                 "%s/zcode/installed/%s/include", datadir,
-                 json->content_root) <= 0 ||
-        snprintf(app_archive, sizeof(app_archive),
-                 "%s/zcode/installed/%s/lib/libcommons-demo.a", datadir,
-                 app->content_root) <= 0 ||
-        snprintf(base_archive, sizeof(base_archive),
-                 "%s/zcode/installed/%s/lib/libbase.a", datadir,
-                 base->content_root) <= 0 ||
-        snprintf(codec_archive, sizeof(codec_archive),
-                 "%s/zcode/installed/%s/lib/libcodec.a", datadir,
-                 codec->content_root) <= 0 ||
-        snprintf(json_archive, sizeof(json_archive),
-                 "%s/zcode/installed/%s/lib/libjson.a", datadir,
-                 json->content_root) <= 0)
-        return false;
-    if (access(binary, F_OK) == 0)
-        return false;
-
-    char app_i[1100], base_i[1100], codec_i[1100], json_i[1100];
-    if (snprintf(app_i, sizeof(app_i), "-I%s", app_include) <= 0 ||
-        snprintf(base_i, sizeof(base_i), "-I%s", base_include) <= 0 ||
-        snprintf(codec_i, sizeof(codec_i), "-I%s", codec_include) <= 0 ||
-        snprintf(json_i, sizeof(json_i), "-I%s", json_include) <= 0)
-        return false;
-    const char *compile_argv[] = {
-        "cc", "-std=c23", "-O1", "-D_POSIX_C_SOURCE=200809L",
-        app_i, base_i, codec_i, json_i, source, app_archive, json_archive,
-        codec_archive, base_archive, "-o", binary, NULL,
-    };
+    struct registry_stranger_paths paths;
+    bool ok = registry_stranger_checkout(datadir, app, &paths);
+    if (ok)
+        ok = registry_stranger_resolve_paths(datadir, app, base, codec, json,
+                                             &paths);
+    if (ok)
+        ok = registry_stranger_include_flags(&paths);
     char output[1024];
-    int compile_rc = zcl_spawn_capture(compile_argv, output, sizeof(output),
-                                       30000);
-    if (compile_rc != 0) {
-        printf("  zcode_package_registry: stranger compile failed rc=%d %s\n",
-               compile_rc, output);
-        return false;
+    if (ok) {
+        const char *compile_argv[] = {
+            "cc", "-std=c23", "-O1", "-D_POSIX_C_SOURCE=200809L",
+            paths.app_i, paths.base_i, paths.codec_i, paths.json_i,
+            paths.source, paths.app_archive, paths.json_archive,
+            paths.codec_archive, paths.base_archive, "-o", paths.binary, NULL,
+        };
+        int compile_rc = zcl_spawn_capture(compile_argv, output,
+                                           sizeof(output), 30000);
+        if (compile_rc != 0) {
+            printf("  zcode_package_registry: stranger compile failed rc=%d %s\n",
+                   compile_rc, output);
+            ok = false;
+        }
     }
-    const char *run_argv[] = {binary, NULL};
-    int run_rc = zcl_spawn_capture(run_argv, output, sizeof(output), 3000);
-    if (run_rc != 0 ||
-        strcmp(output, "commons|3|030000000700636f6d6d6f6e73\n") != 0) {
-        printf("  zcode_package_registry: stranger run failed rc=%d %s\n",
-               run_rc, output);
-        return false;
+    if (ok) {
+        const char *run_argv[] = {paths.binary, NULL};
+        int run_rc = zcl_spawn_capture(run_argv, output, sizeof(output), 3000);
+        if (run_rc != 0 ||
+            strcmp(output, "commons|3|030000000700636f6d6d6f6e73\n") != 0) {
+            printf("  zcode_package_registry: stranger run failed rc=%d %s\n",
+                   run_rc, output);
+            ok = false;
+        }
     }
-    return true;
+    return ok;
 }
 
 static bool registry_archive_root(
@@ -312,6 +353,160 @@ static bool registry_archive_root(
     return true;
 }
 
+struct registry_dogfood_run {
+    char source_abs[PATH_MAX], recipe_path[PATH_MAX], emit_dir[PATH_MAX];
+    char source_arg[PATH_MAX + 64u], recipe_arg[PATH_MAX + 64u];
+    char name_arg[VCS_PACKAGE_RELEASE_NAME_MAX + 64u];
+    char profile_arg[80], cpu_arg[64], emit_arg[PATH_MAX + 32u];
+    char lock_arg[96];
+    char dep_args[REGISTRY_DOGFOOD_MAX_DEPS][PATH_MAX + 96u];
+    const char *argv[REGISTRY_DOGFOOD_MAX_DEPS + 13u];
+    size_t argc;
+};
+
+static bool registry_dogfood_receipt_matches(
+    const char *datadir, const struct registry_expected *expected,
+    const struct vcs_package_prepared *prepared,
+    struct vcs_package_build_receipt *decentralized)
+{
+    bool ok = prepared->lock.count > 0 &&
+        prepared->lock.count - 1u <= REGISTRY_DOGFOOD_MAX_DEPS &&
+        memcmp(prepared->lock.nodes[prepared->lock.count - 1u].root,
+               prepared->package_root, 32) == 0;
+    if (ok)
+        ok = registry_read_receipt(datadir, expected->content_root,
+                                   decentralized) &&
+             decentralized->dep_count == prepared->lock.count - 1u;
+    for (size_t i = 0; ok && i < decentralized->dep_count; i++)
+        ok = memcmp(decentralized->dep_roots[i],
+                    prepared->lock.nodes[i].root, 32) == 0;
+    return ok;
+}
+
+static bool registry_dogfood_prepare_paths(
+    bool ok, const char *scratch, const struct registry_expected *expected,
+    const struct vcs_package_prepared *prepared,
+    struct registry_dogfood_run *run)
+{
+    char scratch_abs[PATH_MAX];
+    if (ok)
+        ok = platform_directory_canonical_real(
+                 scratch, scratch_abs, sizeof(scratch_abs)) &&
+             platform_directory_canonical_real(
+                 expected->dir, run->source_abs, sizeof(run->source_abs));
+    if (ok) {
+        int rn = snprintf(run->recipe_path, sizeof(run->recipe_path),
+                          "%s/recipe.wire", scratch_abs);
+        int en = snprintf(run->emit_dir, sizeof(run->emit_dir), "%s/emit",
+                          scratch_abs);
+        ok = rn > 0 && (size_t)rn < sizeof(run->recipe_path) &&
+             en > 0 && (size_t)en < sizeof(run->emit_dir) &&
+             registry_write_bytes(run->recipe_path, prepared->recipe_wire,
+                                  prepared->recipe_wire_len);
+    }
+    return ok;
+}
+
+static bool registry_dogfood_arg_strings(
+    const struct vcs_package_build_receipt *decentralized,
+    const struct registry_expected *expected,
+    struct registry_dogfood_run *run)
+{
+    char lock_hex[65];
+    /* The installed receipt carries the lifecycle's fully resolved DAG
+     * lock. prepare() deliberately has only the package-local direct
+     * declarations available, so its projection lock is not the build
+     * closure when a dependency itself has dependencies. */
+    zcl_hex_encode(decentralized->lock_root, 32, lock_hex);
+    int sn = snprintf(run->source_arg, sizeof(run->source_arg),
+                      "--zbuild-package-source=%s", run->source_abs);
+    int rn = snprintf(run->recipe_arg, sizeof(run->recipe_arg),
+                      "--zbuild-package-recipe=%s", run->recipe_path);
+    int nn = snprintf(run->name_arg, sizeof(run->name_arg),
+                      "--zbuild-package-name=%s", expected->name);
+    int pn = snprintf(run->profile_arg, sizeof(run->profile_arg),
+                      "--zbuild-package-profile=quick");
+    int cn = snprintf(run->cpu_arg, sizeof(run->cpu_arg),
+                      "--zbuild-package-max-cpu-seconds=600");
+    int en = snprintf(run->emit_arg, sizeof(run->emit_arg), "--emit=%s",
+                      run->emit_dir);
+    int ln = snprintf(run->lock_arg, sizeof(run->lock_arg),
+                      "--lock-root=%s", lock_hex);
+    return sn > 0 && (size_t)sn < sizeof(run->source_arg) &&
+           rn > 0 && (size_t)rn < sizeof(run->recipe_arg) &&
+           nn > 0 && (size_t)nn < sizeof(run->name_arg) &&
+           pn > 0 && (size_t)pn < sizeof(run->profile_arg) &&
+           cn > 0 && (size_t)cn < sizeof(run->cpu_arg) &&
+           en > 0 && (size_t)en < sizeof(run->emit_arg) &&
+           ln > 0 && (size_t)ln < sizeof(run->lock_arg);
+}
+
+static bool registry_dogfood_build_argv(
+    struct registry_dogfood_run *run, const char *datadir,
+    const struct registry_expected *expected,
+    const struct vcs_package_prepared *prepared)
+{
+    bool ok = true;
+    run->argv[run->argc++] = REGISTRY_PACKAGE_VERIFIER;
+    run->argv[run->argc++] = expected->content_root;
+    run->argv[run->argc++] = run->source_arg;
+    run->argv[run->argc++] = run->recipe_arg;
+    run->argv[run->argc++] = run->name_arg;
+    run->argv[run->argc++] = run->profile_arg;
+    run->argv[run->argc++] = run->cpu_arg;
+    run->argv[run->argc++] = run->emit_arg;
+    run->argv[run->argc++] = run->lock_arg;
+    for (size_t i = 0; ok && i + 1u < prepared->lock.count; i++) {
+        char dep_hex[65], installed[PATH_MAX];
+        zcl_hex_encode(prepared->lock.nodes[i].root, 32, dep_hex);
+        int in = snprintf(installed, sizeof(installed),
+                          "%s/zcode/installed/%s", datadir, dep_hex);
+        int dn = in > 0 && (size_t)in < sizeof(installed)
+            ? snprintf(run->dep_args[i], sizeof(run->dep_args[i]),
+                       "--dep=%s,%s", dep_hex, installed) : -1;
+        ok = dn > 0 && (size_t)dn < sizeof(run->dep_args[i]);
+        if (ok)
+            run->argv[run->argc++] = run->dep_args[i];
+    }
+    /* Landlock is Linux-only; on macOS the decentralized build already
+     * runs degraded, so requiring full isolation here would make the
+     * dogfood comparison impossible.  Degraded-to-degraded is still an
+     * apples-to-apples check of the same recipe, lock and compiler. */
+    if (os_sandbox_landlock_abi() >= 1)
+        run->argv[run->argc++] = "--require-full-isolation";
+    run->argv[run->argc] = NULL;
+    return ok;
+}
+
+static bool registry_dogfood_repository_receipt(
+    const struct registry_dogfood_run *run,
+    struct vcs_package_build_receipt *repository)
+{
+    char candidate_report[PATH_MAX];
+    int cn = snprintf(candidate_report, sizeof(candidate_report),
+                      "%s/build-report", run->emit_dir);
+    return cn > 0 && (size_t)cn < sizeof(candidate_report) &&
+           registry_read_receipt_path(candidate_report, repository);
+}
+
+static bool registry_dogfood_compare_reproduction(
+    struct vcs_package_build_receipt *repository,
+    struct vcs_package_build_receipt *decentralized, char artifact_root[65],
+    struct vcs_reproduce_verdict *verdict)
+{
+    vcs_package_reproduce_compare(repository, decentralized, verdict);
+    return verdict->reproduced &&
+           strcmp(repository->compiler_id, decentralized->compiler_id) == 0 &&
+           strcmp(repository->compiler_version,
+                  decentralized->compiler_version) == 0 &&
+           strcmp(repository->flags, decentralized->flags) == 0 &&
+           strcmp(repository->flags,
+                  ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2) == 0 &&
+           repository->isolation == decentralized->isolation &&
+           repository->test_ran && decentralized->test_ran &&
+           registry_archive_root(repository, artifact_root);
+}
+
 /* Build one real monolith-owned module straight from its ordinary repository
  * source root, then compare that result with the independently materialized
  * decentralized package build. Both consume the same canonical recipe,
@@ -323,130 +518,35 @@ static bool registry_dogfood_consumer(
     struct vcs_package_prepared prepared;
     if (!registry_prepare(expected, &prepared))
         return false;
-    bool ok = prepared.lock.count > 0 &&
-        prepared.lock.count - 1u <= REGISTRY_DOGFOOD_MAX_DEPS &&
-        memcmp(prepared.lock.nodes[prepared.lock.count - 1u].root,
-               prepared.package_root, 32) == 0;
     struct vcs_package_build_receipt decentralized;
-    if (ok)
-        ok = registry_read_receipt(datadir, expected->content_root,
-                                   &decentralized) &&
-             decentralized.dep_count == prepared.lock.count - 1u;
-    for (size_t i = 0; ok && i < decentralized.dep_count; i++)
-        ok = memcmp(decentralized.dep_roots[i], prepared.lock.nodes[i].root,
-                    32) == 0;
+    bool ok = registry_dogfood_receipt_matches(datadir, expected, &prepared,
+                                               &decentralized);
 
-    char scratch[256], scratch_abs[PATH_MAX], source_abs[PATH_MAX];
+    char scratch[256];
+    struct registry_dogfood_run run = {0};
     test_make_tmpdir(scratch, sizeof(scratch), "zcode_registry", "dogfood");
+    ok = registry_dogfood_prepare_paths(ok, scratch, expected, &prepared,
+                                        &run);
     if (ok)
-        ok = platform_directory_canonical_real(
-                 scratch, scratch_abs, sizeof(scratch_abs)) &&
-             platform_directory_canonical_real(
-                 expected->dir, source_abs, sizeof(source_abs));
-    char recipe_path[PATH_MAX] = {0}, emit_dir[PATH_MAX] = {0};
-    if (ok) {
-        int rn = snprintf(recipe_path, sizeof(recipe_path), "%s/recipe.wire",
-                          scratch_abs);
-        int en = snprintf(emit_dir, sizeof(emit_dir), "%s/emit", scratch_abs);
-        ok = rn > 0 && (size_t)rn < sizeof(recipe_path) &&
-             en > 0 && (size_t)en < sizeof(emit_dir) &&
-             registry_write_bytes(recipe_path, prepared.recipe_wire,
-                                  prepared.recipe_wire_len);
-    }
-
-    char source_arg[PATH_MAX + 64u], recipe_arg[PATH_MAX + 64u];
-    char name_arg[VCS_PACKAGE_RELEASE_NAME_MAX + 64u];
-    char profile_arg[80], cpu_arg[64], emit_arg[PATH_MAX + 32u], lock_arg[96];
-    char dep_args[REGISTRY_DOGFOOD_MAX_DEPS][PATH_MAX + 96u];
-    const char *argv[REGISTRY_DOGFOOD_MAX_DEPS + 13u];
-    size_t argc = 0;
-    if (ok) {
-        char lock_hex[65];
-        /* The installed receipt carries the lifecycle's fully resolved DAG
-         * lock. prepare() deliberately has only the package-local direct
-         * declarations available, so its projection lock is not the build
-         * closure when a dependency itself has dependencies. */
-        zcl_hex_encode(decentralized.lock_root, 32, lock_hex);
-        int sn = snprintf(source_arg, sizeof(source_arg),
-                          "--zbuild-package-source=%s", source_abs);
-        int rn = snprintf(recipe_arg, sizeof(recipe_arg),
-                          "--zbuild-package-recipe=%s", recipe_path);
-        int nn = snprintf(name_arg, sizeof(name_arg),
-                          "--zbuild-package-name=%s", expected->name);
-        int pn = snprintf(profile_arg, sizeof(profile_arg),
-                          "--zbuild-package-profile=quick");
-        int cn = snprintf(cpu_arg, sizeof(cpu_arg),
-                          "--zbuild-package-max-cpu-seconds=600");
-        int en = snprintf(emit_arg, sizeof(emit_arg), "--emit=%s", emit_dir);
-        int ln = snprintf(lock_arg, sizeof(lock_arg),
-                          "--lock-root=%s", lock_hex);
-        ok = sn > 0 && (size_t)sn < sizeof(source_arg) &&
-             rn > 0 && (size_t)rn < sizeof(recipe_arg) &&
-             nn > 0 && (size_t)nn < sizeof(name_arg) &&
-             pn > 0 && (size_t)pn < sizeof(profile_arg) &&
-             cn > 0 && (size_t)cn < sizeof(cpu_arg) &&
-             en > 0 && (size_t)en < sizeof(emit_arg) &&
-             ln > 0 && (size_t)ln < sizeof(lock_arg);
-    }
-    if (ok) {
-        argv[argc++] = REGISTRY_PACKAGE_VERIFIER;
-        argv[argc++] = expected->content_root;
-        argv[argc++] = source_arg;
-        argv[argc++] = recipe_arg;
-        argv[argc++] = name_arg;
-        argv[argc++] = profile_arg;
-        argv[argc++] = cpu_arg;
-        argv[argc++] = emit_arg;
-        argv[argc++] = lock_arg;
-        for (size_t i = 0; ok && i + 1u < prepared.lock.count; i++) {
-            char dep_hex[65], installed[PATH_MAX];
-            zcl_hex_encode(prepared.lock.nodes[i].root, 32, dep_hex);
-            int in = snprintf(installed, sizeof(installed),
-                              "%s/zcode/installed/%s", datadir, dep_hex);
-            int dn = in > 0 && (size_t)in < sizeof(installed)
-                ? snprintf(dep_args[i], sizeof(dep_args[i]),
-                           "--dep=%s,%s", dep_hex, installed) : -1;
-            ok = dn > 0 && (size_t)dn < sizeof(dep_args[i]);
-            if (ok)
-                argv[argc++] = dep_args[i];
-        }
-        /* Landlock is Linux-only; on macOS the decentralized build already
-         * runs degraded, so requiring full isolation here would make the
-         * dogfood comparison impossible.  Degraded-to-degraded is still an
-         * apples-to-apples check of the same recipe, lock and compiler. */
-        if (os_sandbox_landlock_abi() >= 1)
-            argv[argc++] = "--require-full-isolation";
-        argv[argc] = NULL;
-    }
+        ok = registry_dogfood_arg_strings(&decentralized, expected, &run);
+    if (ok)
+        ok = registry_dogfood_build_argv(&run, datadir, expected, &prepared);
 
     char output[4096];
     int run_rc = ok ? zcl_spawn_capture(
-        argv, output, sizeof(output), 300000) : -1;
+        run.argv, output, sizeof(output), 300000) : -1;
     if (run_rc != 0) {
         printf("  zcode_package_registry: repo-source build %s failed "
                "rc=%d %s\n", expected->name, run_rc, ok ? output : "shape");
         ok = false;
     }
     struct vcs_package_build_receipt repository;
-    char candidate_report[PATH_MAX];
-    int cn = snprintf(candidate_report, sizeof(candidate_report),
-                      "%s/build-report", emit_dir);
     if (ok)
-        ok = cn > 0 && (size_t)cn < sizeof(candidate_report) &&
-             registry_read_receipt_path(candidate_report, &repository);
+        ok = registry_dogfood_repository_receipt(&run, &repository);
     struct vcs_reproduce_verdict verdict;
     if (ok) {
-        vcs_package_reproduce_compare(&repository, &decentralized, &verdict);
-        ok = verdict.reproduced &&
-             strcmp(repository.compiler_id, decentralized.compiler_id) == 0 &&
-             strcmp(repository.compiler_version,
-                    decentralized.compiler_version) == 0 &&
-             strcmp(repository.flags, decentralized.flags) == 0 &&
-             strcmp(repository.flags,
-                    ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2) == 0 &&
-             repository.isolation == decentralized.isolation &&
-             repository.test_ran && decentralized.test_ran &&
-             registry_archive_root(&repository, artifact_root);
+        ok = registry_dogfood_compare_reproduction(&repository, &decentralized,
+                                                   artifact_root, &verdict);
         if (!ok) {
             char repo_lock[65], decentralized_lock[65], prepared_lock[65];
             zcl_hex_encode(repository.lock_root, 32, repo_lock);
@@ -531,6 +631,77 @@ static bool registry_graph_shape(const char *datadir,
     return *levels_out >= 3u;
 }
 
+static bool registry_open_builder_stores(
+    const char *builder_a, const char *builder_b,
+    struct vcs_package_store **store_a, struct vcs_package_store **store_b)
+{
+    *store_a = vcs_package_store_open(
+        builder_a, UINT64_C(256) * 1024u * 1024u);
+    *store_b = vcs_package_store_open(
+        builder_b, UINT64_C(256) * 1024u * 1024u);
+    return *store_a && *store_b;
+}
+
+static bool registry_publish_pair(
+    struct vcs_package_store *store_a, struct vcs_package_store *store_b,
+    const struct vcs_package_prepared *prepared, const char *source_dir,
+    bool *published_a, bool *published_b)
+{
+    *published_a = registry_publish_store(store_a, prepared, source_dir);
+    *published_b = registry_publish_store(store_b, prepared, source_dir);
+    return *published_a && *published_b;
+}
+
+static void registry_close_builder_stores(struct vcs_package_store *store_a,
+                                          struct vcs_package_store *store_b)
+{
+    if (store_a)
+        vcs_package_store_close(store_a);
+    if (store_b)
+        vcs_package_store_close(store_b);
+}
+
+static bool registry_graph_shape_checked(bool ok, const char *builder,
+                                         size_t *levels_out,
+                                         size_t *closure_out)
+{
+    return ok && registry_graph_shape(builder, levels_out, closure_out);
+}
+
+static bool registry_build_and_read_receipts(
+    const char *builder_a, const char *builder_b, const char *content_root,
+    int64_t now, struct vcs_package_build_receipt *a,
+    struct vcs_package_build_receipt *b)
+{
+    return registry_build_one(builder_a, content_root, now) &&
+           registry_build_one(builder_b, content_root, now) &&
+           registry_read_receipt(builder_a, content_root, a) &&
+           registry_read_receipt(builder_b, content_root, b);
+}
+
+static bool registry_verify_builder_pair(
+    struct vcs_package_build_receipt *a, struct vcs_package_build_receipt *b,
+    struct vcs_reproduce_verdict *verdict, size_t *reproduced_out)
+{
+    vcs_package_reproduce_compare(a, b, verdict);
+    bool ok = verdict->reproduced && a->output_count > 0 &&
+        b->output_count == a->output_count &&
+        strcmp(a->flags, ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2) == 0 &&
+        strcmp(b->flags, ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2) == 0 &&
+        a->test_ran && b->test_ran &&
+        a->result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS &&
+        b->result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS;
+    if (ok)
+        (*reproduced_out)++;
+    return ok;
+}
+
+static bool registry_consumer_checks(bool ok, const char *builder)
+{
+    return ok && registry_dogfood(builder) &&
+           registry_stranger_build(builder);
+}
+
 static bool registry_independent_reproduction(size_t *reproduced_out)
 {
     *reproduced_out = 0;
@@ -539,11 +710,9 @@ static bool registry_independent_reproduction(size_t *reproduced_out)
                      "builder_a");
     test_make_tmpdir(builder_b, sizeof(builder_b), "zcode_registry",
                      "builder_b");
-    struct vcs_package_store *store_a = vcs_package_store_open(
-        builder_a, UINT64_C(256) * 1024u * 1024u);
-    struct vcs_package_store *store_b = vcs_package_store_open(
-        builder_b, UINT64_C(256) * 1024u * 1024u);
-    bool ok = store_a && store_b;
+    struct vcs_package_store *store_a = NULL, *store_b = NULL;
+    bool ok = registry_open_builder_stores(builder_a, builder_b, &store_a,
+                                           &store_b);
     if (!ok)
         printf("  zcode_package_registry: builder store open failed a=%s "
                "b=%s\n", store_a ? "open" : "failed",
@@ -554,11 +723,10 @@ static bool registry_independent_reproduction(size_t *reproduced_out)
         struct vcs_package_prepared prepared;
         ok = registry_prepare(&registry_packages[i], &prepared);
         if (ok) {
-            bool published_a = registry_publish_store(
-                store_a, &prepared, registry_packages[i].dir);
-            bool published_b = registry_publish_store(
-                store_b, &prepared, registry_packages[i].dir);
-            ok = published_a && published_b;
+            bool published_a, published_b;
+            ok = registry_publish_pair(store_a, store_b, &prepared,
+                                       registry_packages[i].dir,
+                                       &published_a, &published_b);
             if (!ok)
                 printf("  zcode_package_registry: publish %s failed "
                        "builder_a=%s builder_b=%s\n",
@@ -571,15 +739,11 @@ static bool registry_independent_reproduction(size_t *reproduced_out)
                    registry_packages[i].name);
         }
     }
-    if (store_a)
-        vcs_package_store_close(store_a);
-    if (store_b)
-        vcs_package_store_close(store_b);
+    registry_close_builder_stores(store_a, store_b);
 
     size_t dependency_levels = 0, app_closure = 0;
-    if (ok)
-        ok = registry_graph_shape(builder_a, &dependency_levels,
-                                  &app_closure);
+    ok = registry_graph_shape_checked(ok, builder_a, &dependency_levels,
+                                      &app_closure);
     if (ok)
         printf("{\"schema\":\"zcl.c23_commons_graph.v1\","
                "\"package_count\":%zu,\"dependency_levels\":%zu,"
@@ -594,26 +758,14 @@ static bool registry_independent_reproduction(size_t *reproduced_out)
          i++) {
         const struct registry_expected *expected = &registry_packages[i];
         int64_t now = INT64_C(1700001000) + (int64_t)i * 4;
-        ok = registry_build_one(builder_a, expected->content_root, now) &&
-             registry_build_one(builder_b, expected->content_root, now);
         struct vcs_package_build_receipt a, b;
-        if (ok)
-            ok = registry_read_receipt(builder_a, expected->content_root,
-                                       &a) &&
-                 registry_read_receipt(builder_b, expected->content_root,
-                                       &b);
+        ok = registry_build_and_read_receipts(builder_a, builder_b,
+                                              expected->content_root, now,
+                                              &a, &b);
         struct vcs_reproduce_verdict verdict;
         if (ok) {
-            vcs_package_reproduce_compare(&a, &b, &verdict);
-            ok = verdict.reproduced && a.output_count > 0 &&
-                 b.output_count == a.output_count &&
-                 strcmp(a.flags,
-                        ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2) == 0 &&
-                 strcmp(b.flags,
-                        ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2) == 0 &&
-                 a.test_ran && b.test_ran &&
-                 a.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS &&
-                 b.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS;
+            ok = registry_verify_builder_pair(&a, &b, &verdict,
+                                              reproduced_out);
             if (!ok)
                 printf("  zcode_package_registry: reproduction %s failed "
                        "rule=%s detail=%s\n", expected->name,
@@ -621,13 +773,8 @@ static bool registry_independent_reproduction(size_t *reproduced_out)
                            (enum vcs_reproduce_rule)verdict.rule),
                        verdict.detail);
         }
-        if (ok)
-            (*reproduced_out)++;
     }
-    if (ok)
-        ok = registry_dogfood(builder_b);
-    if (ok)
-        ok = registry_stranger_build(builder_b);
+    ok = registry_consumer_checks(ok, builder_b);
     test_rm_rf(builder_a);
     test_rm_rf(builder_b);
     return ok;
