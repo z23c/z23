@@ -1010,9 +1010,6 @@ engine/controllers/src/diagnostics_block_index.c:diag_header_band_dump_state_jso
 engine/controllers/src/diagnostics_block_index.c:find_block_index_by_key:18
 engine/controllers/src/diagnostics_mvp.c:mvp_build_status_json:31
 engine/controllers/src/event_healthcheck_controller.c:rpc_healthcheck_full:47
-engine/controllers/src/explain_native_handlers.c:explain_build:26
-engine/controllers/src/explain_native_handlers.c:explain_compose_health:26
-engine/controllers/src/explain_native_handlers.c:explain_compose_sync:57
 engine/controllers/src/file_controller.c:file_manifest_build:20
 engine/controllers/src/file_controller.c:file_manifest_load:23
 engine/controllers/src/health_controller.c:rpc_getservicehealth:30

@@ -38,89 +38,141 @@ static void tline(char *buf, size_t cap, size_t *len, const char *fmt, ...)
 
 /* ── sync ──────────────────────────────────────────────────────────── */
 
-void explain_compose_sync(const struct explain_inputs *in,
-                          struct json_value *out)
-{
-    json_set_object(out);
-    /* Sized so the restored stage-cursor section + its trust note cannot push
-     * the "next action" line past the accumulator's cap. */
-    char t[2048];
-    size_t len = 0;
+struct explain_sync_heights {
+    int64_t hstar;
+    int64_t served_floor;
+    int64_t header_h;
+    int64_t served_tip;
+    int64_t target;
+    int64_t gap;
+    bool synced;
+};
 
-    int64_t hstar = in->frontier
+static void explain_sync_read_heights(const struct explain_inputs *in,
+                                      struct explain_sync_heights *h)
+{
+    h->hstar = in->frontier
         ? status_json_int(in->frontier, "hstar", -1) : -1;
-    int64_t served_floor = in->frontier
+    h->served_floor = in->frontier
         ? status_json_int(in->frontier, "served_floor", -1) : -1;
-    int64_t header_h = in->chain
+    h->header_h = in->chain
         ? status_json_int(in->chain, "best_header_height", -1) : -1;
-    int64_t served_tip = in->block_height_known ? in->block_height : hstar;
+    h->served_tip = in->block_height_known ? in->block_height : h->hstar;
 
     /* Gap: prefer the validated header frontier; peer height is only a hint. */
-    int64_t target = header_h >= 0 ? header_h
+    h->target = h->header_h >= 0 ? h->header_h
         : (in->peer_best_known ? in->peer_best : -1);
-    int64_t gap = (target >= 0 && served_tip >= 0 && target > served_tip)
-        ? target - served_tip : 0;
-    bool synced = (target >= 0 && gap <= 0);
+    h->gap = (h->target >= 0 && h->served_tip >= 0 && h->target > h->served_tip)
+        ? h->target - h->served_tip : 0;
+    h->synced = (h->target >= 0 && h->gap <= 0);
+}
 
-    const struct json_value *dom = in->blockers
+struct explain_sync_blocker {
+    const struct json_value *dom;
+    const char *dom_id;
+    const char *dom_class;
+    const char *dom_reason;
+    const char *nh_stage;
+    const char *nh_kind;
+    const char *nh_reason;
+};
+
+static void explain_sync_read_blocker(const struct explain_inputs *in,
+                                      struct explain_sync_blocker *b)
+{
+    b->dom = in->blockers
         ? status_dominant_blocker(in->blockers) : NULL;
-    const char *dom_id = dom ? status_json_str(dom, "id", "") : "";
-    const char *dom_class = dom ? status_json_str(dom, "class", "") : "";
-    const char *dom_reason = dom ? status_json_str(dom, "reason", "") : "";
+    b->dom_id = b->dom ? status_json_str(b->dom, "id", "") : "";
+    b->dom_class = b->dom ? status_json_str(b->dom, "class", "") : "";
+    b->dom_reason = b->dom ? status_json_str(b->dom, "reason", "") : "";
 
-    const char *nh_stage = in->frontier
+    b->nh_stage = in->frontier
         ? status_json_str(in->frontier, "hstar_next_primary_stage",
                           status_json_str(in->frontier,
                                           "first_hstar_blocker_stage", ""))
         : "";
-    const char *nh_kind = in->frontier
+    b->nh_kind = in->frontier
         ? status_json_str(in->frontier, "hstar_next_primary_kind",
                           status_json_str(in->frontier,
                                           "first_hstar_blocker_kind", ""))
         : "";
-    const char *nh_reason = in->frontier
+    b->nh_reason = in->frontier
         ? status_json_str(in->frontier, "hstar_next_primary_detail",
                           status_json_str(in->frontier,
                                           "first_hstar_blocker_reason", ""))
         : "";
+}
 
-    tline(t, sizeof(t), &len, "explain sync\n");
-    if (target < 0)
-        tline(t, sizeof(t), &len,
+static void explain_sync_write_state(char *t, size_t cap, size_t *len,
+                                     const struct explain_inputs *in,
+                                     const struct explain_sync_heights *h)
+{
+    tline(t, cap, len, "explain sync\n");
+    if (h->target < 0)
+        tline(t, cap, len,
               "  state: UNKNOWN (no validated header target yet)\n");
-    else if (synced)
-        tline(t, sizeof(t), &len, "  state: SYNCED at H*=%lld\n",
-              (long long)hstar);
+    else if (h->synced)
+        tline(t, cap, len, "  state: SYNCED at H*=%lld\n",
+              (long long)h->hstar);
     else
-        tline(t, sizeof(t), &len, "  state: BEHIND by %lld blocks\n",
-              (long long)gap);
-    tline(t, sizeof(t), &len,
+        tline(t, cap, len, "  state: BEHIND by %lld blocks\n",
+              (long long)h->gap);
+    tline(t, cap, len,
           "  provable tip H*=%lld  header tip=%lld  served tip=%lld  gap=%lld\n",
-          (long long)hstar, (long long)header_h, (long long)served_tip,
-          (long long)gap);
-    tline(t, sizeof(t), &len, "  served floor=%lld  peer best=%s\n",
-          (long long)served_floor,
+          (long long)h->hstar, (long long)h->header_h, (long long)h->served_tip,
+          (long long)h->gap);
+    tline(t, cap, len, "  served floor=%lld  peer best=%s\n",
+          (long long)h->served_floor,
           in->peer_best_known ? "" : "unknown");
     if (in->peer_best_known)
-        tline(t, sizeof(t), &len, "  peer best height=%lld (untrusted hint)\n",
+        tline(t, cap, len, "  peer best height=%lld (untrusted hint)\n",
               (long long)in->peer_best);
+}
 
-    if (dom && dom_id[0])
-        tline(t, sizeof(t), &len,
-              "  dominant blocker: %s [%s] — %s\n", dom_id, dom_class,
-              dom_reason);
+static void explain_sync_write_blockers(char *t, size_t cap, size_t *len,
+                                        const struct explain_sync_blocker *b)
+{
+    if (b->dom && b->dom_id[0])
+        tline(t, cap, len,
+              "  dominant blocker: %s [%s] — %s\n", b->dom_id, b->dom_class,
+              b->dom_reason);
     else
-        tline(t, sizeof(t), &len, "  dominant blocker: none\n");
+        tline(t, cap, len, "  dominant blocker: none\n");
 
-    if (nh_stage[0] || nh_kind[0])
-        tline(t, sizeof(t), &len,
+    if (b->nh_stage[0] || b->nh_kind[0])
+        tline(t, cap, len,
               "  next-height blocker: %s/%s — %s\n",
-              nh_stage[0] ? nh_stage : "?", nh_kind[0] ? nh_kind : "?",
-              nh_reason[0] ? nh_reason : "");
+              b->nh_stage[0] ? b->nh_stage : "?",
+              b->nh_kind[0] ? b->nh_kind : "?",
+              b->nh_reason[0] ? b->nh_reason : "");
     else
-        tline(t, sizeof(t), &len,
+        tline(t, cap, len,
               "  next-height blocker: none (frontier advancing)\n");
+}
 
+static void explain_sync_note_cursor(char *t, size_t cap, size_t *len,
+                                     const struct json_value *c,
+                                     int *nabove, int64_t *deepest,
+                                     bool *marked)
+{
+    const struct json_value *depth =
+        json_get(c, "heights_above_hstar");
+    if (!depth)
+        *marked = false;
+    int64_t lead = json_get_int(depth);
+    if (lead > 0) {
+        (*nabove)++;
+        if (lead > *deepest) *deepest = lead;
+    }
+    tline(t, cap, len, " %s=%lld%s",
+          json_get_str(json_get(c, "stage")),
+          (long long)json_get_int(json_get(c, "cursor")),
+          lead > 0 ? "*" : "");
+}
+
+static void explain_sync_write_cursors(char *t, size_t cap, size_t *len,
+                                       const struct explain_inputs *in)
+{
     /* Per-stage cursors from the frontier snapshot. reducer_frontier emits an
      * ARRAY of {stage, cursor, heights_above_hstar, ...} objects; this block
      * tested for JSON_OBJ and so printed nothing at all — the plain-language
@@ -137,45 +189,36 @@ void explain_compose_sync(const struct explain_inputs *in,
          * no depth field at all, and reporting that absence as "nothing is
          * above H*" would be a false all-clear — say "unavailable" instead. */
         bool marked = true;
-        tline(t, sizeof(t), &len,
+        tline(t, cap, len,
               "  stage cursors (next height each stage will consume):");
-        for (size_t i = 0; i < cursors->num_children && i < 10; i++) {
-            const struct json_value *c = &cursors->children[i];
-            const struct json_value *depth =
-                json_get(c, "heights_above_hstar");
-            if (!depth)
-                marked = false;
-            int64_t lead = json_get_int(depth);
-            if (lead > 0) {
-                nabove++;
-                if (lead > deepest) deepest = lead;
-            }
-            tline(t, sizeof(t), &len, " %s=%lld%s",
-                  json_get_str(json_get(c, "stage")),
-                  (long long)json_get_int(json_get(c, "cursor")),
-                  lead > 0 ? "*" : "");
-        }
-        tline(t, sizeof(t), &len, "\n");
+        for (size_t i = 0; i < cursors->num_children && i < 10; i++)
+            explain_sync_note_cursor(t, cap, len, &cursors->children[i],
+                                     &nabove, &deepest, &marked);
+        tline(t, cap, len, "\n");
         if (!marked)
-            tline(t, sizeof(t), &len,
+            tline(t, cap, len,
                   "  run-ahead marking: UNAVAILABLE from this node — these "
                   "cursors cannot be told apart from proven heights here; "
                   "H* above is the only proven height\n");
         else if (nabove > 0)
-            tline(t, sizeof(t), &len,
+            tline(t, cap, len,
                   "  * = has consumed heights ABOVE H* (%d cursor(s), up to "
                   "%lld height(s)): unproven work that can sit on a losing "
                   "fork and be clamped back — never read such a cursor as a "
                   "better height than H*\n",
                   nabove, (long long)deepest);
         else
-            tline(t, sizeof(t), &len,
+            tline(t, cap, len,
                   "  no cursor is above H* — every stage is within the "
                   "verified height\n");
-        tline(t, sizeof(t), &len,
+        tline(t, cap, len,
               "  (per-stage step-EWMA rates: run `z23 ops profile`)\n");
     }
+}
 
+static int explain_sync_write_conditions(char *t, size_t cap, size_t *len,
+                                         const struct explain_inputs *in)
+{
     /* Active self-heal conditions. */
     char active[256];
     size_t alen = 0;
@@ -195,19 +238,40 @@ void explain_compose_sync(const struct explain_inputs *in,
             nactive++;
         }
     }
-    tline(t, sizeof(t), &len, "  active conditions: %s\n",
+    tline(t, cap, len, "  active conditions: %s\n",
           nactive ? active : "none");
+    return nactive;
+}
+
+void explain_compose_sync(const struct explain_inputs *in,
+                          struct json_value *out)
+{
+    json_set_object(out);
+    /* Sized so the restored stage-cursor section + its trust note cannot push
+     * the "next action" line past the accumulator's cap. */
+    char t[2048];
+    size_t len = 0;
+
+    struct explain_sync_heights h = {0};
+    explain_sync_read_heights(in, &h);
+    struct explain_sync_blocker b = {0};
+    explain_sync_read_blocker(in, &b);
+
+    explain_sync_write_state(t, sizeof(t), &len, in, &h);
+    explain_sync_write_blockers(t, sizeof(t), &len, &b);
+    explain_sync_write_cursors(t, sizeof(t), &len, in);
+    int nactive = explain_sync_write_conditions(t, sizeof(t), &len, in);
 
     /* THE next action. */
     const char *action;
-    if (target < 0)
+    if (h.target < 0)
         action = "wait for headers to validate a sync target, then re-run";
-    else if (synced)
+    else if (h.synced)
         action = "none — node is at the validated tip";
-    else if (dom && dom_id[0])
+    else if (b.dom && b.dom_id[0])
         action = "clear the dominant blocker above (see `ops state "
                  "subsystem=blocker`)";
-    else if (nh_stage[0])
+    else if (b.nh_stage[0])
         action = "inspect the next-height blocker's stage "
                  "(`ops state subsystem=<stage>`)";
     else
@@ -216,12 +280,13 @@ void explain_compose_sync(const struct explain_inputs *in,
 
     json_push_kv_str(out, "topic", "sync");
     json_push_kv_str(out, "text", t);
-    status_push_int_if_known(out, "hstar", hstar >= 0, hstar);
-    status_push_int_if_known(out, "header_height", header_h >= 0, header_h);
-    status_push_int_if_known(out, "served_tip", served_tip >= 0, served_tip);
-    json_push_kv_int(out, "gap", gap);
-    json_push_kv_bool(out, "synced", synced);
-    json_push_kv_str(out, "dominant_blocker", dom_id[0] ? dom_id : "none");
+    status_push_int_if_known(out, "hstar", h.hstar >= 0, h.hstar);
+    status_push_int_if_known(out, "header_height", h.header_h >= 0, h.header_h);
+    status_push_int_if_known(out, "served_tip", h.served_tip >= 0, h.served_tip);
+    json_push_kv_int(out, "gap", h.gap);
+    json_push_kv_bool(out, "synced", h.synced);
+    json_push_kv_str(out, "dominant_blocker",
+                     b.dom_id[0] ? b.dom_id : "none");
     json_push_kv_int(out, "active_conditions", nactive);
 }
 
@@ -275,30 +340,41 @@ void explain_compose_blockers(const struct explain_inputs *in,
 
 /* ── health ────────────────────────────────────────────────────────── */
 
-void explain_compose_health(const struct explain_inputs *in,
-                            struct json_value *out)
+struct explain_health_facts {
+    bool healthy;
+    bool serving;
+    int64_t rss;
+    int64_t uptime;
+    const struct json_value *checks;
+    int64_t tage;
+};
+
+static void explain_health_read(const struct explain_inputs *in,
+                                struct explain_health_facts *f)
 {
-    json_set_object(out);
-    char t[1600];
-    size_t len = 0;
-
-    bool healthy = in->health && status_json_bool(in->health, "healthy", false);
-    bool serving = in->health && status_json_bool(in->health, "serving", false);
-    int64_t rss = in->health
+    f->healthy = in->health && status_json_bool(in->health, "healthy", false);
+    f->serving = in->health && status_json_bool(in->health, "serving", false);
+    f->rss = in->health
         ? status_json_int(in->health, "memory_rss_mb", -1) : -1;
-    int64_t uptime = in->health
+    f->uptime = in->health
         ? status_json_int(in->health, "uptime_seconds", -1) : -1;
-    const struct json_value *checks = in->health
+    f->checks = in->health
         ? json_get(in->health, "checks") : NULL;
-    int64_t tage = checks
-        ? status_json_int(checks, "tip_advance_age_seconds", -1) : -1;
+    f->tage = f->checks
+        ? status_json_int(f->checks, "tip_advance_age_seconds", -1) : -1;
+}
 
-    tline(t, sizeof(t), &len, "explain health\n");
-    tline(t, sizeof(t), &len, "  healthy: %s  serving: %s\n",
-          healthy ? "yes" : "no", serving ? "yes" : "no");
-    tline(t, sizeof(t), &len, "  rss=%lldMB  uptime=%llds  tip_advance_age=%llds\n",
-          (long long)rss, (long long)uptime, (long long)tage);
+static bool explain_health_check_failed(const struct json_value *c)
+{
+    const struct json_value *ok = NULL;
+    if (c->type == JSON_OBJ)
+        ok = json_get(c, "ok");
+    return ok && ok->type == JSON_BOOL && !ok->val.b;
+}
 
+static int explain_health_write_failing(char *t, size_t cap, size_t *len,
+                                        const struct json_value *checks)
+{
     /* Surface any unhealthy checks by name. */
     int unhealthy = 0;
     char names[256];
@@ -307,9 +383,7 @@ void explain_compose_health(const struct explain_inputs *in,
     if (checks && checks->type == JSON_OBJ) {
         for (size_t i = 0; i < checks->num_children; i++) {
             const struct json_value *c = &checks->children[i];
-            if (c->type != JSON_OBJ) continue;
-            const struct json_value *ok = json_get(c, "ok");
-            if (ok && ok->type == JSON_BOOL && !ok->val.b) {
+            if (explain_health_check_failed(c)) {
                 int n = snprintf(names + nlen, sizeof(names) - nlen, "%s%s",
                                  unhealthy ? ", " : "", checks->keys[i]);
                 if (n > 0 && (size_t)n < sizeof(names) - nlen)
@@ -318,25 +392,52 @@ void explain_compose_health(const struct explain_inputs *in,
             }
         }
     }
-    tline(t, sizeof(t), &len, "  failing checks: %s\n",
+    tline(t, cap, len, "  failing checks: %s\n",
           unhealthy ? names : "none");
+    return unhealthy;
+}
 
+static void explain_health_write_blocker_action(char *t, size_t cap, size_t *len,
+                                                const struct explain_inputs *in,
+                                                bool healthy, int unhealthy)
+{
     const struct json_value *dom = in->blockers
         ? status_dominant_blocker(in->blockers) : NULL;
     const char *dom_id = dom ? status_json_str(dom, "id", "") : "";
     if (dom && dom_id[0])
-        tline(t, sizeof(t), &len, "  dominant blocker: %s — %s\n", dom_id,
+        tline(t, cap, len, "  dominant blocker: %s — %s\n", dom_id,
               status_json_str(dom, "reason", ""));
 
-    tline(t, sizeof(t), &len, "  next action: %s",
+    tline(t, cap, len, "  next action: %s",
           healthy ? "none — node is healthy"
                   : (unhealthy ? "inspect the failing checks above"
                                : "check `ops state subsystem=blocker`"));
+}
+
+void explain_compose_health(const struct explain_inputs *in,
+                            struct json_value *out)
+{
+    json_set_object(out);
+    char t[1600];
+    size_t len = 0;
+
+    struct explain_health_facts f = {0};
+    explain_health_read(in, &f);
+
+    tline(t, sizeof(t), &len, "explain health\n");
+    tline(t, sizeof(t), &len, "  healthy: %s  serving: %s\n",
+          f.healthy ? "yes" : "no", f.serving ? "yes" : "no");
+    tline(t, sizeof(t), &len, "  rss=%lldMB  uptime=%llds  tip_advance_age=%llds\n",
+          (long long)f.rss, (long long)f.uptime, (long long)f.tage);
+
+    int unhealthy = explain_health_write_failing(t, sizeof(t), &len, f.checks);
+    explain_health_write_blocker_action(t, sizeof(t), &len, in, f.healthy,
+                                        unhealthy);
 
     json_push_kv_str(out, "topic", "health");
     json_push_kv_str(out, "text", t);
-    json_push_kv_bool(out, "healthy", healthy);
-    json_push_kv_bool(out, "serving", serving);
+    json_push_kv_bool(out, "healthy", f.healthy);
+    json_push_kv_bool(out, "serving", f.serving);
     json_push_kv_int(out, "unhealthy_checks", unhealthy);
 }
 
@@ -400,6 +501,65 @@ static bool fetch_dumpstate_state(const char *sub, struct json_value *dst)
     return ok;
 }
 
+static void explain_build_fill_inputs(struct explain_inputs *in,
+                                      bool have_frontier,
+                                      const struct json_value *frontier,
+                                      bool have_blocker,
+                                      const struct json_value *blocker_state,
+                                      bool have_conditions,
+                                      const struct json_value *conditions,
+                                      bool have_health,
+                                      const struct json_value *health,
+                                      bool have_sync,
+                                      const struct json_value *sync,
+                                      bool have_chain,
+                                      const struct json_value *chain,
+                                      bool have_count,
+                                      const struct json_value *count_j,
+                                      bool have_peers,
+                                      const struct peer_survey *survey)
+{
+    *in = (struct explain_inputs){
+        .frontier = have_frontier ? frontier : NULL,
+        .blockers = have_blocker ? json_get(blocker_state, "blockers") : NULL,
+        .conditions = have_conditions ? conditions : NULL,
+        .health = have_health ? health : NULL,
+        .sync = have_sync ? sync : NULL,
+        .chain = have_chain ? chain : NULL,
+        .block_height = have_count ? count_j->val.i : 0,
+        .block_height_known = have_count,
+        .peer_best = have_peers ? survey->max_height : 0,
+        .peer_best_known = have_peers && survey->max_height_known,
+    };
+}
+
+static void explain_build_release(bool have_frontier,
+                                  struct json_value *frontier,
+                                  bool have_blocker,
+                                  struct json_value *blocker_state,
+                                  bool have_conditions,
+                                  struct json_value *conditions,
+                                  bool have_health, struct json_value *health,
+                                  bool have_sync, struct json_value *sync,
+                                  bool have_chain, struct json_value *chain,
+                                  bool have_count, struct json_value *count_j,
+                                  bool have_peers, struct json_value *peers,
+                                  char *health_raw, char *sync_raw,
+                                  char *chain_raw, char *count_raw,
+                                  char *peers_raw)
+{
+    if (have_frontier) json_free(frontier);
+    if (have_blocker) json_free(blocker_state);
+    if (have_conditions) json_free(conditions);
+    if (have_health) json_free(health);
+    if (have_sync) json_free(sync);
+    if (have_chain) json_free(chain);
+    if (have_count) json_free(count_j);
+    if (have_peers) json_free(peers);
+    free(health_raw); free(sync_raw); free(chain_raw);
+    free(count_raw); free(peers_raw);
+}
+
 bool explain_build(const char *topic, struct json_value *out)
 {
     json_set_object(out);
@@ -444,32 +604,22 @@ bool explain_build(const char *topic, struct json_value *out)
     struct peer_survey survey = {0};
     if (have_peers) status_peer_survey(&peers, &survey);
 
-    struct explain_inputs in = {
-        .frontier = have_frontier ? &frontier : NULL,
-        .blockers = have_blocker ? json_get(&blocker_state, "blockers") : NULL,
-        .conditions = have_conditions ? &conditions : NULL,
-        .health = have_health ? &health : NULL,
-        .sync = have_sync ? &sync : NULL,
-        .chain = have_chain ? &chain : NULL,
-        .block_height = have_count ? count_j.val.i : 0,
-        .block_height_known = have_count,
-        .peer_best = have_peers ? survey.max_height : 0,
-        .peer_best_known = have_peers && survey.max_height_known,
-    };
+    struct explain_inputs in;
+    explain_build_fill_inputs(&in, have_frontier, &frontier, have_blocker,
+                              &blocker_state, have_conditions, &conditions,
+                              have_health, &health, have_sync, &sync,
+                              have_chain, &chain, have_count, &count_j,
+                              have_peers, &survey);
 
     if (sel)
         sel->compose(&in, out);
 
-    if (have_frontier) json_free(&frontier);
-    if (have_blocker) json_free(&blocker_state);
-    if (have_conditions) json_free(&conditions);
-    if (have_health) json_free(&health);
-    if (have_sync) json_free(&sync);
-    if (have_chain) json_free(&chain);
-    if (have_count) json_free(&count_j);
-    if (have_peers) json_free(&peers);
-    free(health_raw); free(sync_raw); free(chain_raw);
-    free(count_raw); free(peers_raw);
+    explain_build_release(have_frontier, &frontier, have_blocker,
+                          &blocker_state, have_conditions, &conditions,
+                          have_health, &health, have_sync, &sync, have_chain,
+                          &chain, have_count, &count_j, have_peers, &peers,
+                          health_raw, sync_raw, chain_raw, count_raw,
+                          peers_raw);
 
     return sel != NULL;
 }
