@@ -1609,7 +1609,6 @@ tests/harness/src/test_native_api_contract.c:wallet_stub_rpc:17
 tests/harness/src/test_net_bootstrap.c:test_net_bootstrap:42
 tests/harness/src/test_net_msg_dos.c:test_net_msg_dos:76
 tests/harness/src/test_network_crawler.c:test_network_crawler:46
-tests/harness/src/test_node_character.c:test_node_character:46
 tests/harness/src/test_node_character_wire.c:ncw_sheet_same:27
 tests/harness/src/test_node_character_wire.c:test_node_character_wire:83
 tests/harness/src/test_node_health_service.c:test_node_health_service:304
