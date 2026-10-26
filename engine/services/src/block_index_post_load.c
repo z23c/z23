@@ -61,6 +61,59 @@ void block_index_forward_pass(struct block_index **sorted,
     }
 }
 
+/* Work-then-height ranking used by every best-header choice below: compare
+ * nChainWork when both entries carry chainwork, otherwise compare heights.
+ * Pure comparison — no side effects, no logging. */
+static bool header_ranks_above(struct block_index *cand,
+                               struct block_index *ref)
+{
+    bool have_work = !arith_uint256_is_zero(&cand->nChainWork) &&
+                     !arith_uint256_is_zero(&ref->nChainWork);
+    return have_work
+        ? arith_uint256_compare(&cand->nChainWork, &ref->nChainWork) > 0
+        : cand->nHeight > ref->nHeight;
+}
+
+/* Scan a height-sorted block_index array for the strongest header eligible
+ * to be published as the frontier: non-NULL with a block hash and not under
+ * BLOCK_FAILED_MASK, ranked by header_ranks_above. Returns NULL when no
+ * entry qualifies. */
+static struct block_index *find_best_header_candidate(
+    struct block_index **sorted, size_t count)
+{
+    struct block_index *best = NULL;
+    for (size_t i = 0; i < count; i++) {
+        struct block_index *pi = sorted[i];
+        if (!pi || !pi->phashBlock)
+            continue;
+        if (pi->nStatus & BLOCK_FAILED_MASK)
+            continue;
+        if (!best) {
+            best = pi;
+            continue;
+        }
+        if (header_ranks_above(pi, best))
+            best = pi;
+    }
+    return best;
+}
+
+#ifdef ZCL_TESTING
+/* Test-only CSR-less promotion mirroring header_admit_stage's fallback:
+ * advance pindex_best_header to `best` only when no frontier is set yet or
+ * `best` ranks above the current one. Never downgrades. */
+static void promote_best_header_without_csr(struct main_state *ms,
+                                            struct block_index *best)
+{
+    struct block_index *current = ms->pindex_best_header;
+    bool advance = current == NULL;
+    if (current && current != best)
+        advance = header_ranks_above(best, current);
+    if (advance)
+        ms->pindex_best_header = best;
+}
+#endif
+
 /* After the map is loaded and the forward pass has recomputed nChainWork,
  * make the header frontier REAL: publish the max-chainwork header into
  * pindex_best_header and seat it in the active_chain[] window.
@@ -89,25 +142,7 @@ void promote_best_header_after_load(struct main_state *ms,
     if (!ms || !sorted || count == 0)
         return;
 
-    struct block_index *best = NULL;
-    for (size_t i = 0; i < count; i++) {
-        struct block_index *pi = sorted[i];
-        if (!pi || !pi->phashBlock)
-            continue;
-        if (pi->nStatus & BLOCK_FAILED_MASK)
-            continue;
-        if (!best) {
-            best = pi;
-            continue;
-        }
-        bool have_work = !arith_uint256_is_zero(&pi->nChainWork) &&
-                         !arith_uint256_is_zero(&best->nChainWork);
-        bool better = have_work
-            ? arith_uint256_compare(&pi->nChainWork, &best->nChainWork) > 0
-            : pi->nHeight > best->nHeight;
-        if (better)
-            best = pi;
-    }
+    struct block_index *best = find_best_header_candidate(sorted, count);
     if (!best)
         return;
 
@@ -124,19 +159,7 @@ void promote_best_header_after_load(struct main_state *ms,
          * header_admit_stage's test-only fallback so the frontier is still
          * published. */
         if (prc == CSR_REJECTED_NOT_INITIALIZED) {
-            struct block_index *current = ms->pindex_best_header;
-            bool advance = current == NULL;
-            if (current && current != best) {
-                bool have_work =
-                    !arith_uint256_is_zero(&best->nChainWork) &&
-                    !arith_uint256_is_zero(&current->nChainWork);
-                advance = have_work
-                    ? arith_uint256_compare(&best->nChainWork,
-                                            &current->nChainWork) > 0
-                    : best->nHeight > current->nHeight;
-            }
-            if (advance)
-                ms->pindex_best_header = best;
+            promote_best_header_without_csr(ms, best);
         } else
 #endif
         LOG_WARN("block_index",

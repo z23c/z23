@@ -1357,7 +1357,6 @@ engine/services/src/block_index_loader_rebuild.c:load_block_index_from_projectio
 engine/services/src/block_index_loader_topup.c:block_index_node_db_topup_with:28
 engine/services/src/block_index_loader_topup.c:block_index_projection_topup_with:33
 engine/services/src/block_index_loader_topup.c:topup_row_cb:20
-engine/services/src/block_index_post_load.c:promote_best_header_after_load:23
 engine/services/src/block_index_sidecar_integrity.c:bii_verify:37
 engine/services/src/block_index_sqlite_cache.c:load_block_index_sqlite:33
 engine/services/src/block_index_sqlite_cache.c:save_block_index_recent:34
